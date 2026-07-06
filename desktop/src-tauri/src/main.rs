@@ -1473,6 +1473,21 @@ fn save_desktop_config(config_path: &Path, config: &DesktopConfig) -> tauri::Res
 fn restart_desktop_after_update(app: AppHandle) -> Result<(), String> {
     let exe = std::env::current_exe()
         .map_err(|error| format!("failed to resolve current desktop executable: {error}"))?;
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(app_bundle) = macos_app_bundle_from_exe_path(&exe) {
+            Command::new("open")
+                .arg("-n")
+                .arg(app_bundle)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|error| format!("failed to relaunch desktop app: {error}"))?;
+            app.exit(0);
+            return Ok(());
+        }
+    }
     Command::new(&exe)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1481,6 +1496,14 @@ fn restart_desktop_after_update(app: AppHandle) -> Result<(), String> {
         .map_err(|error| format!("failed to relaunch desktop app: {error}"))?;
     app.exit(0);
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_app_bundle_from_exe_path(exe_path: &Path) -> Option<PathBuf> {
+    exe_path
+        .ancestors()
+        .find(|path| path.file_name().and_then(|name| name.to_str()) == Some("Bifrost.app"))
+        .map(Path::to_path_buf)
 }
 
 #[tauri::command]

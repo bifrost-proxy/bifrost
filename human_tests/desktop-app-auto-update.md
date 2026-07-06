@@ -129,7 +129,62 @@
 - 当已安装桌面端版本已经等于目标版本时，`bifrost app upgrade` 不下载 release，不覆盖安装，不重启桌面端。
 - 该判断只在能明确读到已安装桌面端版本时生效；版本读不到时仍继续原升级流程，避免漏装。
 
-### TC-DAU-04D Windows 普通用户静默 MSI 安装回归
+### TC-DAU-04D 桌面更新后仍是旧版本时必须失败
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh
+   ```
+2. 在 macOS 上，脚本创建一个 `CFBundleShortVersionString=0.0.140` 的临时 `Bifrost.app`，但以目标版本 `0.0.141` 执行：
+   ```bash
+   "$BIFROST_BIN" app upgrade --package "<stale.app>" --app-dir "<tmp>" --source desktop --no-cli --version 0.0.141 -y
+   ```
+3. 检查命令返回非 0，输出包含 `reports version v0.0.140 instead of target v0.0.141`。
+4. 检查临时 `BIFROST_DATA_DIR/upgrade-progress.json` 中 `phase=failed`。
+
+预期结果：
+
+- 如果安装动作结束后目标 app 仍报告旧版本，更新流程必须失败，不允许写入 `completed`。
+- UI 应展示明确失败，用户重启后不应被误导为“已完成更新”。
+
+### TC-DAU-04E desktop source 从当前运行的 .app 位置安装并重启
+
+操作步骤：
+
+1. 从非默认目录启动 Bifrost Desktop，例如 `~/Applications/Bifrost.app`。
+2. 触发桌面端更新，或在同等环境下执行：
+   ```bash
+   "$BIFROST_BIN" app upgrade --source desktop --version <目标版本> -y
+   ```
+3. 检查更新目标路径为当前运行的 `Bifrost.app` 所在目录，而不是无条件使用 `/Applications/Bifrost.app`。
+4. 更新完成后，桌面壳通过 LaunchServices 重新打开当前 `Bifrost.app` bundle。
+
+预期结果：
+
+- 从 `~/Applications`、下载目录或自定义目录运行的桌面 app，会更新当前实际运行的 bundle。
+- 重启后版本显示为目标版本，不再继续弹出同一个更新提示。
+
+### TC-DAU-04F Finder 启动时也能发现常见独立 CLI 安装路径
+
+操作步骤：
+
+1. 在 macOS 上从 Finder 启动 Bifrost Desktop，确保进程 PATH 不依赖交互 shell。
+2. 准备独立 CLI 位于 `~/.local/bin/bifrost`、`~/.bifrost/bin/bifrost` 或 `~/.cargo/bin/bifrost` 之一。
+3. 触发 desktop channel 更新。
+4. 更新结束后执行：
+   ```bash
+   which -a bifrost
+   bifrost --version
+   ```
+
+预期结果：
+
+- 桌面更新会检查常见 CLI 安装位置，即使 Finder 启动时 PATH 缺少用户 shell 路径。
+- 终端中的独立 CLI 更新到目标版本，或日志明确说明未发现独立 CLI。
+
+### TC-DAU-04G Windows 普通用户静默 MSI 安装回归
 
 操作步骤：
 
@@ -322,3 +377,4 @@ bifrost app uninstall
 | 2026-07-06 | TC-DAU-09 | Parallels Windows 11 ARM64 VM：先复现桌面快捷方式启动后额外出现 shell 窗口；修复后构建 `target-desktop-verify/debug/bifrost-desktop.exe`，以 `BIFROST_DESKTOP_BIN=desktop/src-tauri/resources/bin/bifrost.exe` 启动并截图 `/tmp/bifrost-windows-custom-chrome-final.png` | PASS：桌面 UI 启动后 sidecar 由桌面壳隐藏控制台启动，截图中没有独立 shell 窗口遮挡；启动验证用 `cmd start` 包装进程已清理，不属于桌面壳子进程 |
 | 2026-07-06 | TC-DAU-10 | Parallels Windows 11 ARM64 VM：`CARGO_TARGET_DIR=target-desktop-verify cargo build --manifest-path desktop/src-tauri/Cargo.toml`，启动当前构建并截图 `/tmp/bifrost-windows-custom-chrome-final.png` | PASS：窗口顶部不再显示 Windows 原生标题栏，也没有 `Bifrost / File / Edit / View / Window` 原生菜单栏；Web UI 自定义右上角最小化/最大化/关闭按钮可见，底部状态栏完整可见 |
 | 2026-07-06 | TC-DAU-10B | Parallels Windows 11 ARM64 VM：将当前 diff 应用到 `C:\Users\eden_studio\work\github\bifrost`，执行 `CARGO_TARGET_DIR=target-desktop-chrome-verify cargo build --manifest-path desktop/src-tauri/Cargo.toml`；通过交互计划任务启动 `target-desktop-chrome-verify\debug\bifrost-desktop.exe`，`desktop-bootstrap.log` 显示 `embedded webview page load event Finished`、`desktop backend bootstrap finished`；截图 `/Users/eden_studio/Downloads/bifrost-windows-chrome-hidden-20260706.png` 与 `/Users/eden_studio/Downloads/bifrost-windows-chrome-resized-20260706.png` | PASS：frontend ready handoff 后仍未出现 Windows 原生标题栏和 `Bifrost / File / Edit / View / Window` 菜单栏，Web UI 未被系统 chrome 向下挤压；当前 VM 可视区高度不足以在同一张截图里完整纳入底部状态栏，但回归根因的 Windows handoff decorations 路径已由单测和真实启动截图共同覆盖 |
+| 2026-07-06 | TC-DAU-01 / 02 / 03 / 04 / 04B / 04C / 04D / 06B | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh` | PASS：33/33 通过。覆盖 dry-run、App -> CLI 临时安装、临时 app 真实安装/升级/卸载、同版本跳过下载、desktop source progress 为 completed，以及目标 0.0.141 但安装后仍报告 0.0.140 时非零退出并写 `phase=failed` |

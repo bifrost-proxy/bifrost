@@ -4,8 +4,10 @@ use std::ffi::OsString;
 use std::fs;
 #[cfg(target_os = "windows")]
 use std::io::{self, Cursor};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use bifrost_core::upgrade_progress::{write_progress, UpgradePhase, UpgradeProgress};
 use bifrost_core::version_check::make_release_tag;
@@ -16,7 +18,7 @@ use colored::Colorize;
 use crate::cli::AppCommands;
 
 use super::update_check::get_latest_version_fresh_with_diagnostics;
-use super::upgrade::handle_upgrade;
+use super::upgrade::{download_progress_line, handle_upgrade};
 
 #[cfg(any(target_os = "windows", test))]
 const WINDOWS_APP_NAME: &str = "Bifrost";
@@ -138,7 +140,7 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
     } = request;
     let progress_source = source.unwrap_or_else(|| "cli".to_string());
     let target_version = resolve_target_version(version)?;
-    let install_dir = resolve_app_dir(app_dir)?;
+    let install_dir = resolve_app_dir_for_source(app_dir, &progress_source)?;
     let install_path = resolve_app_path(&install_dir);
 
     println!(
@@ -189,7 +191,10 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
     );
 
     if include_cli {
-        upgrade_cli_if_present(&progress_source)?;
+        upgrade_cli_if_present(&progress_source).map_err(|error| {
+            write_app_failed_progress(&target_version, &progress_source, &error);
+            error
+        })?;
     }
 
     if operation == AppOperation::Upgrade
@@ -218,7 +223,10 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
 
     let package_path = match package {
         Some(path) => path,
-        None => download_desktop_package(&target_version, &progress_source)?,
+        None => download_desktop_package(&target_version, &progress_source).map_err(|error| {
+            write_app_failed_progress(&target_version, &progress_source, &error);
+            error
+        })?,
     };
 
     write_app_progress(
@@ -229,7 +237,14 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
         None,
         None,
     );
-    install_desktop_package(&package_path, &install_dir, &install_path)?;
+    install_desktop_package(&package_path, &install_dir, &install_path).map_err(|error| {
+        write_app_failed_progress(&target_version, &progress_source, &error);
+        error
+    })?;
+    verify_installed_desktop_target_version(&install_path, &target_version).map_err(|error| {
+        write_app_failed_progress(&target_version, &progress_source, &error);
+        error
+    })?;
 
     write_app_progress(
         UpgradePhase::Restarting,
@@ -244,7 +259,10 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
         None,
     );
     if progress_source != "desktop" && !skip_desktop_restart() {
-        restart_desktop_app(&install_path)?;
+        restart_desktop_app(&install_path).map_err(|error| {
+            write_app_failed_progress(&target_version, &progress_source, &error);
+            error
+        })?;
     }
 
     write_app_progress(
@@ -257,6 +275,17 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
     );
     println!("{}", "✓ Desktop app is up to date.".bright_green().bold());
     Ok(())
+}
+
+fn write_app_failed_progress(target_version: &str, progress_source: &str, error: &BifrostError) {
+    write_app_progress(
+        UpgradePhase::Failed,
+        "Desktop app update failed",
+        Some(target_version.to_string()),
+        progress_source,
+        None,
+        Some(error.to_string()),
+    );
 }
 
 fn upgrade_cli_if_present(progress_source: &str) -> Result<(), BifrostError> {
@@ -322,6 +351,7 @@ fn find_standalone_cli_install() -> Option<PathBuf> {
             let home = PathBuf::from(home);
             candidates.push(home.join(".local/bin/bifrost"));
             candidates.push(home.join(".bifrost/bin/bifrost"));
+            candidates.push(home.join(".cargo/bin/bifrost"));
         }
         candidates.push(PathBuf::from("/opt/homebrew/bin/bifrost"));
         candidates.push(PathBuf::from("/usr/local/bin/bifrost"));
@@ -459,6 +489,30 @@ fn resolve_app_dir(app_dir: Option<PathBuf>) -> Result<PathBuf, BifrostError> {
     }
 }
 
+fn resolve_app_dir_for_source(
+    app_dir: Option<PathBuf>,
+    progress_source: &str,
+) -> Result<PathBuf, BifrostError> {
+    if app_dir.is_some() || progress_source != "desktop" {
+        return resolve_app_dir(app_dir);
+    }
+
+    if let Ok(current_exe) = env::current_exe() {
+        if let Some(app_dir) = macos_app_dir_from_exe_path(&current_exe) {
+            return Ok(app_dir);
+        }
+    }
+
+    resolve_app_dir(None)
+}
+
+fn macos_app_dir_from_exe_path(exe_path: &Path) -> Option<PathBuf> {
+    let app_bundle = exe_path
+        .ancestors()
+        .find(|path| path.file_name().and_then(|name| name.to_str()) == Some(MACOS_APP_BUNDLE))?;
+    app_bundle.parent().map(Path::to_path_buf)
+}
+
 fn resolve_app_path(app_dir: &Path) -> PathBuf {
     #[cfg(target_os = "macos")]
     {
@@ -478,6 +532,24 @@ fn installed_desktop_app_is_target_version(install_path: &Path, target_version: 
     installed_desktop_app_version(install_path)
         .map(|installed| versions_equal(&installed, target_version))
         .unwrap_or(false)
+}
+
+fn verify_installed_desktop_target_version(
+    install_path: &Path,
+    target_version: &str,
+) -> Result<(), BifrostError> {
+    let Some(installed) = installed_desktop_app_version(install_path) else {
+        return Ok(());
+    };
+    if versions_equal(&installed, target_version) {
+        return Ok(());
+    }
+    Err(BifrostError::Config(format!(
+        "desktop app install completed but {} reports version v{} instead of target v{}",
+        install_path.display(),
+        normalize_version(&installed),
+        normalize_version(target_version)
+    )))
 }
 
 fn versions_equal(installed: &str, target: &str) -> bool {
@@ -606,7 +678,7 @@ fn download_desktop_package(version: &str, progress_source: &str) -> Result<Path
         Some(0.0),
         None,
     );
-    let response = bifrost_core::github_blocking_reqwest_client_builder()
+    let mut response = bifrost_core::github_blocking_reqwest_client_builder()
         .build()
         .map_err(|error| BifrostError::Network(format!("failed to build HTTP client: {error}")))?
         .get(&url)
@@ -618,10 +690,44 @@ fn download_desktop_package(version: &str, progress_source: &str) -> Result<Path
             response.status()
         )));
     }
-    let bytes = response
-        .bytes()
-        .map_err(|error| BifrostError::Network(format!("failed to read download body: {error}")))?;
-    fs::write(&package_path, &bytes)?;
+    let total = response.content_length();
+    let mut file = fs::File::create(&package_path)?;
+    let mut downloaded = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut last_report = Instant::now() - Duration::from_secs(1);
+    let started = Instant::now();
+
+    loop {
+        let read = response.read(&mut buffer).map_err(BifrostError::Io)?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buffer[..read]).map_err(BifrostError::Io)?;
+        downloaded += read as u64;
+
+        if last_report.elapsed() >= Duration::from_millis(250) {
+            let percent = total
+                .filter(|total| *total > 0)
+                .map(|total| ((downloaded as f64 / total as f64) * 100.0).clamp(0.0, 100.0));
+            write_app_progress(
+                UpgradePhase::Downloading,
+                download_progress_line(downloaded, total, started),
+                Some(version.to_string()),
+                progress_source,
+                percent,
+                None,
+            );
+            last_report = Instant::now();
+        }
+    }
+    file.flush().map_err(BifrostError::Io)?;
+
+    if downloaded == 0 {
+        return Err(BifrostError::Network(format!(
+            "failed to download {url}: empty response"
+        )));
+    }
+
     write_app_progress(
         UpgradePhase::Downloading,
         "Desktop app downloaded",
@@ -1246,10 +1352,46 @@ HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7A327F4B
     }
 
     #[test]
+    fn macos_app_dir_from_exe_path_finds_running_bundle_parent() {
+        let exe =
+            PathBuf::from("/Users/eden/Applications/Bifrost.app/Contents/Resources/bin/bifrost");
+        assert_eq!(
+            macos_app_dir_from_exe_path(&exe),
+            Some(PathBuf::from("/Users/eden/Applications"))
+        );
+    }
+
+    #[test]
     fn versions_equal_accepts_optional_v_prefix() {
         assert!(versions_equal("0.0.139", "v0.0.139"));
         assert!(versions_equal(" v0.0.139 ", "0.0.139"));
         assert!(!versions_equal("0.0.138", "0.0.139"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_post_install_version_verification_rejects_stale_bundle() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app = temp.path().join(MACOS_APP_BUNDLE);
+        let contents = app.join("Contents");
+        fs::create_dir_all(&contents).expect("create Contents");
+        fs::write(
+            contents.join("Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleShortVersionString</key><string>0.0.140</string>
+  <key>CFBundleVersion</key><string>140</string>
+</dict>
+</plist>
+"#,
+        )
+        .expect("write plist");
+
+        let error = verify_installed_desktop_target_version(&app, "0.0.141")
+            .expect_err("stale app bundle should be rejected");
+        assert!(error.to_string().contains("reports version v0.0.140"));
     }
 
     #[cfg(target_os = "macos")]
