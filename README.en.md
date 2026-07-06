@@ -107,7 +107,16 @@ This sets `core.hooksPath=.githooks` for the repository. The default pre-commit 
 
 ## Prefer the Desktop App?
 
-Download the desktop package for your platform from [GitHub Releases](https://github.com/bifrost-proxy/bifrost/releases).
+Use the desktop app when you want traffic capture, rule editing, replay, and updates without memorizing CLI commands:
+
+1. Open [GitHub Releases](https://github.com/bifrost-proxy/bifrost/releases).
+2. Choose the latest release and expand `Assets`.
+3. On macOS, download the `.dmg` that matches your chip: `aarch64-apple-darwin` for Apple Silicon or `x86_64-apple-darwin` for Intel.
+4. On Windows, download the `.msi`: `x86_64-pc-windows-msvc` for most PCs or `aarch64-pc-windows-msvc` for ARM devices.
+5. On macOS, open the `.dmg` and drag `Bifrost.app` to `Applications`. On Windows, double-click the `.msi` and follow the installer.
+6. Launch Bifrost and wait for the bundled proxy backend to start. The first launch checks and installs the Bifrost CA asynchronously.
+
+To make the CLI available from a desktop-first install, open Settings in the desktop app and click `Install CLI & Skills` in `Desktop Proxy Core`. See [`docs-en/desktop.md`](docs-en/desktop.md) for the full guide.
 
 ## Common Commands
 

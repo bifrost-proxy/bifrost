@@ -8,6 +8,23 @@ export interface DesktopRuntimeInfo {
 }
 
 export const DESKTOP_HANDOFF_COMPLETE_EVENT = "desktop://handoff-complete";
+export const DESKTOP_OPEN_REQUEST_EVENT = "desktop://open-request";
+
+export type DesktopOpenSource = "deepLink" | "fileAssociation";
+
+export type DesktopOpenRequest =
+  | {
+      kind: "route";
+      route: string;
+      source: DesktopOpenSource;
+    }
+  | {
+      kind: "bifrostFile";
+      path: string;
+      filename: string;
+      content: string;
+      source: DesktopOpenSource;
+    };
 
 type TauriInvoke = <T>(
   cmd: string,
@@ -98,8 +115,16 @@ export async function notifyMainWindowReady(): Promise<void> {
   await invokeDesktop<void>("notify_main_window_ready");
 }
 
+export async function getPendingDesktopOpenRequests(): Promise<DesktopOpenRequest[]> {
+  return invokeDesktop<DesktopOpenRequest[]>("get_pending_desktop_open_requests");
+}
+
 export async function restartDesktopAfterUpdate(): Promise<void> {
   await invokeDesktop<void>("restart_desktop_after_update");
+}
+
+export async function openExternalUrl(url: string): Promise<void> {
+  await invokeDesktop<void>("open_external_url", { url });
 }
 
 export async function setDesktopDocumentEdited(edited: boolean): Promise<void> {

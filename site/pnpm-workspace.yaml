@@ -4,3 +4,6 @@ overrides:
 onlyBuiltDependencies:
   - esbuild
   - sharp
+
+allowBuilds:
+  esbuild: true

@@ -46,6 +46,7 @@
     <title>Bifrost - AI Proxy for Coding Agents, Traffic Capture, Rewrite and Replay</title>
     <link rel="icon" type="image/png" href="%BASE_PATH%favicon.png" />
     <link rel="stylesheet" href="%HOME_CSS%" />
+    <script type="application/json" id="desktop-downloads-data">%DESKTOP_DOWNLOADS_JSON%</script>
     <script src="%HOME_JS%" defer></script>
     <script type="application/ld+json">
       {
@@ -157,6 +158,9 @@
             <button type="button" role="tab" aria-selected="true" aria-controls="panel-cli" id="tab-cli">
               CLI
             </button>
+            <button type="button" role="tab" aria-selected="false" aria-controls="panel-apps" id="tab-apps">
+              Apps
+            </button>
             <button type="button" role="tab" aria-selected="false" aria-controls="panel-web" id="tab-web">
               With AI
             </button>
@@ -205,6 +209,66 @@
             </div>
           </div>
 
+          <div class="preview-panel" id="panel-apps" role="tabpanel" aria-labelledby="tab-apps" hidden>
+            <div class="apps-window" aria-label="Bifrost desktop app downloads">
+              <div class="apps-heading">
+                <strong data-i18n="appsTitle">Download desktop apps</strong>
+                <span data-i18n="appsSubtitle">Current release, direct download.</span>
+              </div>
+              <div class="apps-grid" data-download-status="loading">
+                <a class="app-download-card" href="#" aria-disabled="true" data-download-target="mac-arm">
+                  <img
+                    src="https://p1-hera.feishucdn.com/tos-cn-i-jbbdkfciu3/e20a102ae0da492baf4d3b81a9a03c22.png~tplv-jbbdkfciu3-png:0:0.png"
+                    alt=""
+                    width="52"
+                    height="52"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                  <strong data-i18n="macArmTitle">macOS Apple Silicon</strong>
+                  <small data-i18n="macArmText">M1 / M2 / M3 / M4</small>
+                </a>
+                <a class="app-download-card" href="#" aria-disabled="true" data-download-target="mac-intel">
+                  <img
+                    src="https://p1-hera.feishucdn.com/tos-cn-i-jbbdkfciu3/e20a102ae0da492baf4d3b81a9a03c22.png~tplv-jbbdkfciu3-png:0:0.png"
+                    alt=""
+                    width="52"
+                    height="52"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                  <strong data-i18n="macIntelTitle">macOS Intel</strong>
+                  <small data-i18n="macIntelText">Intel Mac</small>
+                </a>
+                <a class="app-download-card" href="#" aria-disabled="true" data-download-target="win-x64">
+                  <img
+                    src="https://p1-hera.feishucdn.com/tos-cn-i-jbbdkfciu3/62baaf31cd8147699516852865782600.png~tplv-jbbdkfciu3-png:0:0.png"
+                    alt=""
+                    width="52"
+                    height="52"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                  <strong data-i18n="windowsTitle">Windows</strong>
+                  <small data-i18n="windowsText">x64 installer</small>
+                </a>
+                <a class="app-download-card" href="#" aria-disabled="true" data-download-target="win-arm">
+                  <img
+                    src="https://p1-hera.feishucdn.com/tos-cn-i-jbbdkfciu3/62baaf31cd8147699516852865782600.png~tplv-jbbdkfciu3-png:0:0.png"
+                    alt=""
+                    width="52"
+                    height="52"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                  <strong data-i18n="windowsArmTitle">Windows ARM64</strong>
+                  <small data-i18n="windowsArmText">ARM installer</small>
+                </a>
+              </div>
+              <p class="apps-status" data-download-message data-i18n="appsLoading">Preparing current release links...</p>
+            </div>
+          </div>
+
           <div class="preview-panel" id="panel-rules" role="tabpanel" aria-labelledby="tab-rules" hidden>
             <pre class="rules-window"><code>api.example.com reqHeaders://x-debug=1
 api.example.com resDelay://350
@@ -221,6 +285,37 @@ api.example.com replay://last-success
         <span>Rewrite</span>
         <span>Replay</span>
         <span>Skills</span>
+      </section>
+
+      <section class="install-section" aria-labelledby="install-title">
+        <div class="section-heading">
+          <p class="eyebrow" data-i18n="installEyebrow">Install</p>
+          <h2 id="install-title" data-i18n="installTitle">Choose CLI precision or desktop comfort.</h2>
+        </div>
+        <div class="install-grid">
+          <article class="install-card">
+            <div>
+              <span class="install-label" data-i18n="cliInstallLabel">Terminal workflow</span>
+              <h3 data-i18n="cliInstallTitle">Install the CLI</h3>
+              <p data-i18n="cliInstallText">
+                Best for scripts, CI, terminals, and Coding Agents that need reproducible traffic evidence.
+              </p>
+            </div>
+            <code>curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash</code>
+            <a href="%BASE_PATH%getting-started/installation" data-i18n="cliInstallLink">CLI install guide</a>
+          </article>
+          <article class="install-card">
+            <div>
+              <span class="install-label" data-i18n="desktopInstallLabel">Visual workflow</span>
+              <h3 data-i18n="desktopInstallTitle">Install the desktop app</h3>
+              <p data-i18n="desktopInstallText">
+                Download the macOS DMG or Windows MSI, launch Bifrost, then inspect traffic and update from the app.
+              </p>
+            </div>
+            <code>GitHub Releases -> Assets -> .dmg / .msi</code>
+            <a href="%BASE_PATH%getting-started/desktop" data-i18n="desktopInstallLink">Desktop install guide</a>
+          </article>
+        </div>
       </section>
 
       <section class="workflow-section" aria-labelledby="workflow-title">
@@ -266,7 +361,7 @@ api.example.com replay://last-success
         <div class="steps-grid">
           <a href="%BASE_PATH%getting-started/installation">
             <strong>01</strong>
-            <span data-i18n="stepOne">Install the CLI</span>
+            <span data-i18n="stepOne">Install CLI or Desktop</span>
           </a>
           <a href="%BASE_PATH%getting-started/cli-quick-start">
             <strong>02</strong>

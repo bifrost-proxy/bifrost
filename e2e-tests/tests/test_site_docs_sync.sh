@@ -14,6 +14,8 @@ EN_INDEX_DIST="$SITE_DIR/dist/en/reference/index.html"
 EN_INSTALL_DIST="$SITE_DIR/dist/en/getting-started/installation.html"
 EN_RULE_DIST="$SITE_DIR/dist/en/reference/rules/routing.html"
 LEGACY_CLI_DIST="$SITE_DIR/dist/reference/getting-started/cli-quick-start/index.html"
+DESKTOP_DOWNLOAD_VERSION=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).version)' "$SITE_DIR/desktop-downloads.json")
+DESKTOP_DOWNLOAD_TAG="v${DESKTOP_DOWNLOAD_VERSION}"
 
 cleanup() {
   local cleanup_status=0
@@ -37,6 +39,18 @@ ensure_site_dependencies() {
 
   echo "Installing site dependencies for docs sync E2E..."
   pnpm --dir "$SITE_DIR" install --frozen-lockfile
+}
+
+dist_asset_js_contains() {
+  local pattern="$1"
+  local name_glob="${2:-*.js}"
+  local file
+  while IFS= read -r -d '' file; do
+    if grep -q "$pattern" "$file"; then
+      return 0
+    fi
+  done < <(find "$SITE_DIR/dist/assets" -type f -name "$name_glob" -print0)
+  return 1
 }
 
 if [[ -e "$TEMP_DOC" ]]; then
@@ -114,9 +128,36 @@ grep -q 'Future English Docs Probe' "$TEMP_EN_DIST"
 test -f "$EN_INDEX_DIST"
 test -f "$EN_INSTALL_DIST"
 test -f "$EN_RULE_DIST"
+grep -q 'data-vp-download-target="mac-arm"' "$SITE_DIR/dist/getting-started/installation.html"
+grep -q 'data-vp-download-target="mac-intel"' "$SITE_DIR/dist/getting-started/installation.html"
+grep -q 'data-vp-download-target="win-x64"' "$SITE_DIR/dist/getting-started/installation.html"
+grep -q 'data-vp-download-target="win-arm"' "$SITE_DIR/dist/getting-started/installation.html"
+grep -q 'data-vp-download-target="mac-arm"' "$EN_INSTALL_DIST"
+if grep -q '桌面版安装与构建' "$SITE_DIR/dist/getting-started/installation.html"; then
+  echo "Desktop install page must not be listed as a separate Getting Started sidebar item" >&2
+  exit 1
+fi
+if grep -q 'Desktop Installation and Build' "$EN_INSTALL_DIST"; then
+  echo "Desktop install page must not be listed as a separate English Getting Started sidebar item" >&2
+  exit 1
+fi
+grep -q 'id="desktop-downloads-data"' "$SITE_DIR/dist/index.html"
+grep -q "bifrost-desktop-${DESKTOP_DOWNLOAD_TAG}-aarch64-apple-darwin.dmg" "$SITE_DIR/dist/index.html"
+grep -q "bifrost-desktop-${DESKTOP_DOWNLOAD_TAG}-x86_64-pc-windows-msvc.msi" "$SITE_DIR/dist/index.html"
+if grep -q 'api.github.com/repos/bifrost-proxy/bifrost/releases/latest' "$SITE_DIR/dist/index.html" || dist_asset_js_contains 'api.github.com/repos/bifrost-proxy/bifrost/releases/latest'; then
+  echo "Site must not call GitHub Releases API at runtime for desktop downloads" >&2
+  exit 1
+fi
 grep -q 'A one-stop proxy solution for the AI era' "$SITE_DIR/dist/index.html"
 grep -q 'With AI' "$SITE_DIR/dist/index.html"
 grep -q 'bifrost install-skill' "$SITE_DIR/dist/index.html"
+grep -q 'Desktop install guide' "$SITE_DIR/dist/index.html"
+grep -q 'href="/bifrost/getting-started/desktop"' "$SITE_DIR/dist/index.html"
+grep -q 'aria-controls="panel-apps"' "$SITE_DIR/dist/index.html"
+grep -q 'data-download-target="mac-arm"' "$SITE_DIR/dist/index.html"
+grep -q 'data-download-target="mac-intel"' "$SITE_DIR/dist/index.html"
+grep -q 'data-download-target="win-x64"' "$SITE_DIR/dist/index.html"
+grep -q 'data-download-target="win-arm"' "$SITE_DIR/dist/index.html"
 grep -q 'bifrost start -d' "$SITE_DIR/dist/index.html"
 grep -q 'href="/bifrost/docs/"' "$SITE_DIR/dist/index.html"
 grep -q 'role="tablist"' "$SITE_DIR/dist/index.html"

@@ -15,9 +15,9 @@ import {
   Popconfirm,
   Descriptions,
   message,
-  Divider,
   Spin,
   Pagination,
+  theme,
 } from "antd";
 import {
   ArrowLeftOutlined,
@@ -36,6 +36,7 @@ import { useSyncStore } from "../../stores/useSyncStore";
 import type { GroupUserLevel, GroupVisibility, UserInfo } from "../../api/group";
 import { searchUsers, updateGroupSetting, updateGroup as apiUpdateGroup } from "../../api/group";
 import { normalizeApiErrorMessage } from "../../api/client";
+import { isMacDesktopShell } from "../../runtime";
 
 const { Title, Text } = Typography;
 
@@ -74,6 +75,7 @@ function getAvatarColor(name: string): string {
 export default function GroupDetail() {
   const { id = "" } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { token } = theme.useToken();
 
   const {
     currentGroup,
@@ -307,209 +309,238 @@ export default function GroupDetail() {
   const avatarColor = getAvatarColor(currentGroup.name);
 
   return (
-    <div style={{ padding: 24, maxWidth: 960, margin: "0 auto", height: "100%", overflow: "auto" }}>
-      <Button
-        type="text"
-        icon={<ArrowLeftOutlined />}
-        onClick={() => navigate("/groups")}
-        style={{ marginBottom: 16 }}
-      >
-        Back
-      </Button>
+    <div
+      style={{
+        width: "100%",
+        height: "100%",
+        overflow: "auto",
+        backgroundColor: isMacDesktopShell() ? "transparent" : token.colorBgLayout,
+        padding: "0 24px 24px",
+      }}
+    >
+      <div style={{ maxWidth: 1200, margin: "0 auto" }}>
+        <Button
+          type="text"
+          icon={<ArrowLeftOutlined />}
+          onClick={() => navigate("/groups")}
+          style={{ marginBottom: 16 }}
+        >
+          Back
+        </Button>
 
-      <Card>
-        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-          <Avatar
-            size={64}
-            style={{ backgroundColor: avatarColor, fontSize: 28, flexShrink: 0 }}
+        <Card styles={{ body: { padding: 24 } }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              justifyContent: "space-between",
+              gap: 24,
+              flexWrap: "wrap",
+            }}
           >
-            {currentGroup.name[0]?.toUpperCase()}
-          </Avatar>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <Space align="center" size={8}>
-              <Title level={4} style={{ margin: 0 }}>
-                {currentGroup.name}
-              </Title>
-              <Tag color={currentGroup.visibility === "public" ? "green" : "orange"}>
-                {currentGroup.visibility === "public" ? "Public" : "Private"}
-              </Tag>
-              {myLevel != null && (
-                <Tag color={LEVEL_LABEL[myLevel]?.color ?? "default"}>
-                  {LEVEL_LABEL[myLevel]?.text ?? "Member"}
-                </Tag>
+            <div style={{ display: "flex", alignItems: "center", gap: 16, flex: "1 1 520px", minWidth: 0 }}>
+              <Avatar
+                size={64}
+                style={{ backgroundColor: avatarColor, fontSize: 28, flexShrink: 0 }}
+              >
+                {currentGroup.name[0]?.toUpperCase()}
+              </Avatar>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <Space align="center" size={8} wrap>
+                  <Title level={4} style={{ margin: 0 }}>
+                    {currentGroup.name}
+                  </Title>
+                  <Tag color={currentGroup.visibility === "public" ? "green" : "orange"}>
+                    {currentGroup.visibility === "public" ? "Public" : "Private"}
+                  </Tag>
+                  {myLevel != null && (
+                    <Tag color={LEVEL_LABEL[myLevel]?.color ?? "default"}>
+                      {LEVEL_LABEL[myLevel]?.text ?? "Member"}
+                    </Tag>
+                  )}
+                </Space>
+                <div style={{ marginTop: 4 }}>
+                  <Text type="secondary">
+                    {currentGroup.description || "No description"}
+                  </Text>
+                </div>
+              </div>
+            </div>
+            <Space wrap>
+              {isMasterOrOwner && (
+                <Button icon={<EditOutlined />} onClick={handleEdit}>
+                  Edit
+                </Button>
+              )}
+              {isOwner && (
+                <Popconfirm
+                  title="Delete Group"
+                  description="Are you sure to delete this group?"
+                  onConfirm={handleDelete}
+                  okText="Delete"
+                  okType="danger"
+                >
+                  <Button danger icon={<DeleteOutlined />}>
+                    Delete
+                  </Button>
+                </Popconfirm>
               )}
             </Space>
-            <div>
-              <Text type="secondary">
-                {currentGroup.description || "No description"}
-              </Text>
-            </div>
           </div>
-          <Space>
-            {isMasterOrOwner && (
-              <Button icon={<EditOutlined />} onClick={handleEdit}>
-                Edit
-              </Button>
-            )}
-            {isOwner && (
-              <Popconfirm
-                title="Delete Group"
-                description="Are you sure to delete this group?"
-                onConfirm={handleDelete}
-                okText="Delete"
-                okType="danger"
-              >
-                <Button danger icon={<DeleteOutlined />}>
-                  Delete
+
+          <Descriptions column={{ xs: 1, sm: 2 }} style={{ marginTop: 20 }} size="small">
+            <Descriptions.Item label="Created">
+              {formatTime(currentGroup.create_time)}
+            </Descriptions.Item>
+            <Descriptions.Item label="Updated">
+              {formatTime(currentGroup.update_time)}
+            </Descriptions.Item>
+          </Descriptions>
+        </Card>
+
+        <Card style={{ marginTop: 20 }} styles={{ body: { padding: 24 } }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: 16,
+              flexWrap: "wrap",
+              marginBottom: 16,
+            }}
+          >
+            <Title level={5} style={{ margin: 0 }}>
+              Members{membersTotal ? ` (${membersTotal})` : ""}
+            </Title>
+            <Space wrap>
+              {isMasterOrOwner && (
+                <Button
+                  type="primary"
+                  icon={<UserAddOutlined />}
+                  onClick={() => {
+                    inviteForm.resetFields();
+                    setUserOptions([]);
+                    setInviteModalOpen(true);
+                  }}
+                >
+                  Add Members
                 </Button>
-              </Popconfirm>
-            )}
-          </Space>
-        </div>
+              )}
+              {myLevel != null && !isOwner && (
+                <Popconfirm
+                  title="Leave Group"
+                  description="Are you sure to leave this group?"
+                  onConfirm={handleLeave}
+                  okText="Leave"
+                  okType="danger"
+                >
+                  <Button icon={<LogoutOutlined />}>Leave</Button>
+                </Popconfirm>
+              )}
+            </Space>
+          </div>
 
-        <Descriptions column={2} style={{ marginTop: 16 }} size="small">
-          <Descriptions.Item label="Created">
-            {formatTime(currentGroup.create_time)}
-          </Descriptions.Item>
-          <Descriptions.Item label="Updated">
-            {formatTime(currentGroup.update_time)}
-          </Descriptions.Item>
-        </Descriptions>
-      </Card>
+          <div style={{ marginBottom: 12 }}>
+            <Input
+              placeholder="Search members..."
+              prefix={<SearchOutlined style={{ color: "#999" }} />}
+              value={memberSearch}
+              onChange={(e) => handleMemberSearch(e.target.value)}
+              allowClear
+              style={{ width: 360, maxWidth: "100%" }}
+            />
+          </div>
 
-      <Divider />
-
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <Title level={5} style={{ margin: 0 }}>
-          Members{membersTotal ? ` (${membersTotal})` : ""}
-        </Title>
-        <Space>
-          {isMasterOrOwner && (
-            <Button
-              type="primary"
-              icon={<UserAddOutlined />}
-              onClick={() => {
-                inviteForm.resetFields();
-                setUserOptions([]);
-                setInviteModalOpen(true);
-              }}
-            >
-              Add Members
-            </Button>
-          )}
-          {myLevel != null && !isOwner && (
-            <Popconfirm
-              title="Leave Group"
-              description="Are you sure to leave this group?"
-              onConfirm={handleLeave}
-              okText="Leave"
-              okType="danger"
-            >
-              <Button icon={<LogoutOutlined />}>Leave</Button>
-            </Popconfirm>
-          )}
-        </Space>
-      </div>
-
-      <div style={{ marginBottom: 12 }}>
-        <Input
-          placeholder="Search members..."
-          prefix={<SearchOutlined style={{ color: "#999" }} />}
-          value={memberSearch}
-          onChange={(e) => handleMemberSearch(e.target.value)}
-          allowClear
-          style={{ maxWidth: 300 }}
-        />
-      </div>
-
-      <List
-        dataSource={sortedMembers}
-        loading={membersLoading}
-        locale={{ emptyText: membersKeyword ? "No matching members" : "No members" }}
-        renderItem={(member) => {
-          const levelInfo = LEVEL_LABEL[member.level] || LEVEL_LABEL[0];
-          const memberAvatarColor = getAvatarColor(member.nickname || member.user_id);
-          const isAdmin = member.level > 0;
-          const isSelf = member.user_id === currentUserId;
-          return (
-            <List.Item
-              actions={
-                isMasterOrOwner && !isSelf
-                  ? [
-                      <Button
-                        key="toggle-admin"
-                        type="text"
-                        size="small"
-                        onClick={() =>
-                          handleUpdateLevel(
-                            member.user_id,
-                            isAdmin ? (0 as GroupUserLevel) : (1 as GroupUserLevel),
-                          )
-                        }
+          <List
+            dataSource={sortedMembers}
+            loading={membersLoading}
+            locale={{ emptyText: membersKeyword ? "No matching members" : "No members" }}
+            renderItem={(member) => {
+              const levelInfo = LEVEL_LABEL[member.level] || LEVEL_LABEL[0];
+              const memberAvatarColor = getAvatarColor(member.nickname || member.user_id);
+              const isAdmin = member.level > 0;
+              const isSelf = member.user_id === currentUserId;
+              return (
+                <List.Item
+                  actions={
+                    isMasterOrOwner && !isSelf
+                      ? [
+                          <Button
+                            key="toggle-admin"
+                            type="text"
+                            size="small"
+                            onClick={() =>
+                              handleUpdateLevel(
+                                member.user_id,
+                                isAdmin ? (0 as GroupUserLevel) : (1 as GroupUserLevel),
+                              )
+                            }
+                          >
+                            {isAdmin ? "Remove admin" : "Set admin"}
+                          </Button>,
+                          <Popconfirm
+                            key="remove"
+                            title="Remove Member"
+                            description="Are you sure to remove this member?"
+                            onConfirm={() => handleRemoveMember(member.user_id)}
+                            okText="Remove"
+                            okType="danger"
+                          >
+                            <Button
+                              type="text"
+                              danger
+                              size="small"
+                              icon={<UserDeleteOutlined />}
+                            >
+                              Delete
+                            </Button>
+                          </Popconfirm>,
+                        ]
+                      : []
+                  }
+                >
+                  <List.Item.Meta
+                    avatar={
+                      <Avatar
+                        src={member.avatar || undefined}
+                        style={{ backgroundColor: memberAvatarColor }}
                       >
-                        {isAdmin ? "Remove admin" : "Set admin"}
-                      </Button>,
-                      <Popconfirm
-                        key="remove"
-                        title="Remove Member"
-                        description="Are you sure to remove this member?"
-                        onConfirm={() => handleRemoveMember(member.user_id)}
-                        okText="Remove"
-                        okType="danger"
-                      >
-                        <Button
-                          type="text"
-                          danger
-                          size="small"
-                          icon={<UserDeleteOutlined />}
-                        >
-                          Delete
-                        </Button>
-                      </Popconfirm>,
-                    ]
-                  : []
-              }
-            >
-              <List.Item.Meta
-                avatar={
-                  <Avatar
-                    src={member.avatar || undefined}
-                    style={{ backgroundColor: memberAvatarColor }}
-                  >
-                    {(member.nickname || member.user_id)[0]?.toUpperCase()}
-                  </Avatar>
-                }
-                title={
-                  <Space>
-                    <span>{member.nickname || member.user_id}</span>
-                    {member.nickname && member.nickname !== member.user_id && (
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                        {member.user_id}
-                      </Typography.Text>
-                    )}
-                    {isAdmin && <Tag color={levelInfo.color}>{levelInfo.text}</Tag>}
-                    {isSelf && <Tag>You</Tag>}
-                  </Space>
-                }
-                description={`Joined: ${formatTime(member.create_time)}`}
-              />
-            </List.Item>
-          );
-        }}
-      />
-      {membersTotal > MEMBERS_PAGE_SIZE && (
-        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
-          <Pagination
-            current={membersPage}
-            pageSize={MEMBERS_PAGE_SIZE}
-            total={membersTotal}
-            onChange={handlePageChange}
-            showQuickJumper
-            showSizeChanger={false}
-            size="small"
+                        {(member.nickname || member.user_id)[0]?.toUpperCase()}
+                      </Avatar>
+                    }
+                    title={
+                      <Space wrap>
+                        <span>{member.nickname || member.user_id}</span>
+                        {member.nickname && member.nickname !== member.user_id && (
+                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                            {member.user_id}
+                          </Typography.Text>
+                        )}
+                        {isAdmin && <Tag color={levelInfo.color}>{levelInfo.text}</Tag>}
+                        {isSelf && <Tag>You</Tag>}
+                      </Space>
+                    }
+                    description={`Joined: ${formatTime(member.create_time)}`}
+                  />
+                </List.Item>
+              );
+            }}
           />
-        </div>
-      )}
+          {membersTotal > MEMBERS_PAGE_SIZE && (
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+              <Pagination
+                current={membersPage}
+                pageSize={MEMBERS_PAGE_SIZE}
+                total={membersTotal}
+                onChange={handlePageChange}
+                showQuickJumper
+                showSizeChanger={false}
+                size="small"
+              />
+            </div>
+          )}
+        </Card>
+      </div>
 
       <Modal
         title="Edit Group"

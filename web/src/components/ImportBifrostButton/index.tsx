@@ -4,14 +4,15 @@ import { ImportOutlined } from '@ant-design/icons';
 import type { UploadProps, ButtonProps } from 'antd';
 import type { RcFile } from 'antd/es/upload';
 import {
-  detectType,
   formatBifrostFileError,
   formatImportSuccessMessage,
   getImportedItemCount,
   importFile,
+  previewFile,
 } from '../../api/bifrost-file';
 import type { BifrostFileType, ImportResponse } from '../../api/bifrost-file';
 import { useTrafficStore } from '../../stores/useTrafficStore';
+import { confirmBifrostFileImport } from '../BifrostFilePreview';
 
 interface ImportBifrostButtonProps {
   expectedType?: BifrostFileType;
@@ -41,15 +42,18 @@ export const ImportBifrostButton: React.FC<ImportBifrostButtonProps> = ({
 
       try {
         const content = await file.text();
+        const preview = await previewFile(content);
 
-        if (expectedType) {
-          const detected = await detectType(content);
-          if (detected.file_type !== expectedType) {
-            message.error(
-              `File type mismatch: expected ${expectedType}, got ${detected.file_type}`
-            );
-            return Upload.LIST_IGNORE;
-          }
+        if (expectedType && preview.file_type !== expectedType) {
+          message.error(
+            `File type mismatch: expected ${expectedType}, got ${preview.file_type}`
+          );
+          return Upload.LIST_IGNORE;
+        }
+
+        const confirmed = await confirmBifrostFileImport(file.name, preview);
+        if (!confirmed) {
+          return Upload.LIST_IGNORE;
         }
 
         const result = await importFile(content);

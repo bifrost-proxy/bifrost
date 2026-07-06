@@ -3673,6 +3673,19 @@ fn execute_action(
                 tracing::error!(url = %url, error = %e, "failed to open URL");
             }
         }
+        MenuItemAction::OpenAppRoute {
+            route,
+            fallback_url,
+        } => {
+            if let Err(error) = open_app_route_or_web_ui(route, fallback_url) {
+                tracing::error!(
+                    route = %route,
+                    fallback_url = %fallback_url,
+                    error = %error,
+                    "failed to open desktop app route and Web UI fallback"
+                );
+            }
+        }
         MenuItemAction::CopyText(text) => {
             if let Ok(mut clipboard) = arboard::Clipboard::new() {
                 if let Err(e) = clipboard.set_text(text) {
@@ -4135,6 +4148,31 @@ fn rule_toggle_url(admin_url: &str, target: &RuleTarget, enabled: bool) -> Strin
             urlencoding::encode(name),
             action
         ),
+    }
+}
+
+fn app_deep_link_for_route(route: &str) -> String {
+    let normalized = route.trim_start_matches('/');
+    format!("bifrost://open/{normalized}")
+}
+
+fn open_app_route_or_web_ui(route: &str, fallback_url: &str) -> Result<(), String> {
+    let app_url = app_deep_link_for_route(route);
+    match open_tray_target(&app_url) {
+        Ok(()) => {
+            tracing::info!(url = %app_url, "opened desktop app route");
+            Ok(())
+        }
+        Err(app_error) => {
+            tracing::info!(
+                url = %app_url,
+                fallback_url = %fallback_url,
+                error = %app_error,
+                "desktop app route unavailable; opening Web UI fallback"
+            );
+            open_tray_target(fallback_url)
+                .map_err(|fallback_error| format!("{app_error}; fallback failed: {fallback_error}"))
+        }
     }
 }
 

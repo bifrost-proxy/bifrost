@@ -10,6 +10,7 @@ export const siteRoot = path.resolve(scriptDir, "..");
 export const repoRoot = path.resolve(siteRoot, "..");
 export const defaultHomeRoot = path.join(siteRoot, "home");
 export const defaultDistRoot = path.join(siteRoot, "dist");
+export const defaultDesktopDownloadsPath = path.join(siteRoot, "desktop-downloads.json");
 
 const budgets = {
   htmlGzip: 28 * 1024,
@@ -61,6 +62,7 @@ async function writeHashedAsset({ sourcePath, distRoot, basePath }) {
 export async function buildHome({
   homeRoot = defaultHomeRoot,
   distRoot = defaultDistRoot,
+  desktopDownloadsPath = defaultDesktopDownloadsPath,
   basePath = defaultBasePath(),
   siteUrl = defaultSiteUrl(),
 } = {}) {
@@ -71,18 +73,21 @@ export async function buildHome({
   const cssPath = path.join(homeRoot, "styles.css");
   const jsPath = path.join(homeRoot, "home.js");
 
-  const [cssUrl, jsUrl, htmlSource] = await Promise.all([
+  const [cssUrl, jsUrl, htmlSource, desktopDownloadsSource] = await Promise.all([
     writeHashedAsset({ sourcePath: cssPath, distRoot, basePath: normalizedBasePath }),
     writeHashedAsset({ sourcePath: jsPath, distRoot, basePath: normalizedBasePath }),
     fsp.readFile(htmlPath, "utf8"),
+    fsp.readFile(desktopDownloadsPath, "utf8"),
   ]);
+  const desktopDownloadsJson = JSON.stringify(JSON.parse(desktopDownloadsSource)).replaceAll("<", "\\u003c");
 
   const html = htmlSource
     .replaceAll("%BASE_PATH%", normalizedBasePath)
     .replaceAll("%SITE_URL%", normalizedSiteUrl)
     .replaceAll("%OG_IMAGE%", ogImageUrl)
     .replaceAll("%HOME_CSS%", cssUrl)
-    .replaceAll("%HOME_JS%", jsUrl);
+    .replaceAll("%HOME_JS%", jsUrl)
+    .replaceAll("%DESKTOP_DOWNLOADS_JSON%", desktopDownloadsJson);
 
   await fsp.mkdir(distRoot, { recursive: true });
   await fsp.writeFile(path.join(distRoot, "index.html"), html, "utf8");
@@ -151,8 +156,10 @@ export async function collectHomeErrors({
     "%OG_IMAGE%",
     "%HOME_CSS%",
     "%HOME_JS%",
+    "%DESKTOP_DOWNLOADS_JSON%",
     "astro-island",
     "/_astro/",
+    "api.github.com",
     "@vite/client",
     "vitepress-theme-appearance",
     "VPNav",
@@ -165,6 +172,9 @@ export async function collectHomeErrors({
 
   if (!html.includes(`href="${normalizedBasePath}docs/"`)) {
     errors.push("Home page is missing the docs link.");
+  }
+  if (!html.includes(`href="${normalizedBasePath}getting-started/desktop"`)) {
+    errors.push("Home page is missing the desktop install guide link.");
   }
   if (!html.includes('rel="canonical"')) {
     errors.push("Home page is missing the canonical link.");
@@ -207,6 +217,12 @@ export async function collectHomeErrors({
   }
   if (!html.includes('role="tablist"') || !html.includes('aria-selected="true"')) {
     errors.push("Home page preview tabs are missing accessible tab markup.");
+  }
+  if (!html.includes('aria-controls="panel-apps"') || !html.includes('data-download-target="mac-arm"')) {
+    errors.push("Home page is missing the Apps direct-download panel.");
+  }
+  if (!html.includes('id="desktop-downloads-data"')) {
+    errors.push("Home page is missing static desktop download metadata.");
   }
   if (!html.includes('data-lang="zh"') || !html.includes('data-lang="en"')) {
     errors.push("Home page is missing the English/Chinese language switch.");

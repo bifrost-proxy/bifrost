@@ -14,7 +14,23 @@ async function withFixture(callback) {
     await fsp.mkdir(homeRoot, { recursive: true });
     await fsp.mkdir(distRoot, { recursive: true });
     await fsp.writeFile(path.join(distRoot, "favicon.png"), "fake-png", "utf8");
-    await callback({ homeRoot, distRoot });
+    const desktopDownloadsPath = path.join(root, "desktop-downloads.json");
+    await fsp.writeFile(
+      desktopDownloadsPath,
+      JSON.stringify({
+        version: "0.0.141",
+        tag: "v0.0.141",
+        baseUrl: "https://github.com/bifrost-proxy/bifrost/releases/download/v0.0.141/",
+        assets: {
+          "mac-arm": "bifrost-desktop-v0.0.141-aarch64-apple-darwin.dmg",
+          "mac-intel": "bifrost-desktop-v0.0.141-x86_64-apple-darwin.dmg",
+          "win-x64": "bifrost-desktop-v0.0.141-x86_64-pc-windows-msvc.msi",
+          "win-arm": "bifrost-desktop-v0.0.141-aarch64-pc-windows-msvc.msi",
+        },
+      }),
+      "utf8",
+    );
+    await callback({ homeRoot, distRoot, desktopDownloadsPath });
   } finally {
     await fsp.rm(root, { recursive: true, force: true });
   }
@@ -35,6 +51,7 @@ const html = `<!doctype html>
     <meta name="twitter:description" content="Traffic capture, rewrite, replay, and Coding Agent workflows." />
     <meta name="twitter:image" content="%OG_IMAGE%" />
     <link rel="stylesheet" href="%HOME_CSS%" />
+    <script type="application/json" id="desktop-downloads-data">%DESKTOP_DOWNLOADS_JSON%</script>
     <script src="%HOME_JS%" defer></script>
     <script type="application/ld+json">
       {
@@ -50,22 +67,25 @@ const html = `<!doctype html>
   </head>
   <body>
     <a href="%BASE_PATH%docs/">Docs</a>
+    <a href="%BASE_PATH%getting-started/desktop">Desktop</a>
     <a href="https://github.com/bifrost-proxy/bifrost">GitHub</a>
     <img src="%BASE_PATH%favicon.png" alt="" width="32" height="32" />
     <button data-lang="en" aria-pressed="true">EN</button>
     <button data-lang="zh" aria-pressed="false">中文</button>
     <div role="tablist"><button role="tab" aria-selected="true">CLI</button></div>
+    <button aria-controls="panel-apps">Apps</button>
+    <a data-download-target="mac-arm" href="#">macOS</a>
     <code>bifrost start -d</code>
   </body>
 </html>`;
 
 test("buildHome writes hashed assets and replaces the GitHub Pages base path", async () => {
-  await withFixture(async ({ homeRoot, distRoot }) => {
+  await withFixture(async ({ homeRoot, distRoot, desktopDownloadsPath }) => {
     await fsp.writeFile(path.join(homeRoot, "index.html"), html, "utf8");
     await fsp.writeFile(path.join(homeRoot, "styles.css"), "body{color:#111}", "utf8");
     await fsp.writeFile(path.join(homeRoot, "home.js"), "document.body.dataset.ready='1';", "utf8");
 
-    const result = await buildHome({ homeRoot, distRoot, basePath: "/bifrost" });
+    const result = await buildHome({ homeRoot, distRoot, desktopDownloadsPath, basePath: "/bifrost" });
     const output = await fsp.readFile(result.htmlPath, "utf8");
 
     assert.match(output, /href="\/bifrost\/docs\/"/);
@@ -73,6 +93,7 @@ test("buildHome writes hashed assets and replaces the GitHub Pages base path", a
     assert.match(output, /content="https:\/\/bifrost-proxy\.github\.io\/bifrost\/og-image\.png"/);
     assert.match(output, /href="\/bifrost\/assets\/styles\.[a-f0-9]{10}\.css"/);
     assert.match(output, /src="\/bifrost\/assets\/home\.[a-f0-9]{10}\.js"/);
+    assert.match(output, /"bifrost-desktop-v0\.0\.141-aarch64-apple-darwin\.dmg"/);
     assert.deepEqual(await collectHomeErrors({ distRoot, basePath: "/bifrost" }), []);
   });
 });
@@ -121,10 +142,13 @@ test("collectHomeErrors rejects the removed top text navigation", async () => {
           }
         </script>
         <a href="https://github.com/bifrost-proxy/bifrost">GitHub</a>
+        <a href="/getting-started/desktop">Desktop</a>
         <img src="/favicon.png" alt="" width="32" height="32" />
         <button data-lang="en" aria-pressed="true">EN</button>
         <button data-lang="zh" aria-pressed="false">中文</button>
         <div role="tablist"><button role="tab" aria-selected="true">CLI</button></div>
+        <button aria-controls="panel-apps">Apps</button>
+        <a data-download-target="mac-arm" href="#">macOS</a>
         <code>bifrost start -d</code>
       </body></html>`,
       "utf8",

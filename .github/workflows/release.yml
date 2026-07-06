@@ -132,6 +132,7 @@ jobs:
           sed -i "s/^version = \".*\"/version = \"${VERSION}\"/" desktop/src-tauri/Cargo.toml
 
           node scripts/sync-tauri-version.mjs
+          node scripts/sync-site-downloads.mjs
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

@@ -1,8 +1,10 @@
 mod native_launcher;
+mod open_requests;
 
 use bifrost_core::{cleanup_bifrost_log_dir, direct_blocking_reqwest_client_builder};
 use bifrost_storage::data_dir as shared_bifrost_data_dir;
 use bifrost_tls::{ensure_valid_ca, generate_root_ca, save_root_ca, CertInstaller, CertStatus};
+use open_requests::{parse_open_url, DesktopOpenRequest, OpenRequestParseError};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::fs::OpenOptions;
@@ -31,6 +33,7 @@ use tauri::{
     window::{Effect, EffectsBuilder},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Size, State, WebviewUrl,
 };
+use tauri_plugin_deep_link::DeepLinkExt;
 
 const BACKEND_BIND_HOST: &str = "0.0.0.0";
 const BACKEND_ADMIN_HOST: &str = "127.0.0.1";
@@ -51,6 +54,7 @@ const BACKEND_WATCHDOG_FAILURE_THRESHOLD: u8 = 2;
 const WEBVIEW_PARK_OFFSET: f64 = 2000.0;
 const WEBVIEW_REVEAL_SETTLE_DELAY: Duration = Duration::from_millis(90);
 const HANDOFF_COMPLETE_EVENT: &str = "desktop://handoff-complete";
+const OPEN_REQUEST_EVENT: &str = "desktop://open-request";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DesktopConfig {
@@ -115,6 +119,7 @@ struct BackendState {
     handoff_started: AtomicBool,
     handoff_completed: AtomicBool,
     launcher_overlay: Mutex<Option<usize>>,
+    pending_open_requests: Mutex<Vec<DesktopOpenRequest>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,13 +235,21 @@ fn main() {
         });
 
     builder
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_single_instance::init(
+            |app, args, cwd| {
+                handle_cli_file_open_arguments(app, args.into_iter().skip(1), Some(PathBuf::from(cwd)));
+            },
+        ))
         .invoke_handler(tauri::generate_handler![
             get_desktop_runtime,
             start_desktop_core,
             update_desktop_proxy_port,
             restart_desktop_after_update,
             notify_main_window_ready,
+            get_pending_desktop_open_requests,
             set_document_edited,
+            open_external_url,
             write_clipboard
         ])
         .setup(|app| {
@@ -288,7 +301,10 @@ fn main() {
                 handoff_started: AtomicBool::new(false),
                 handoff_completed: AtomicBool::new(false),
                 launcher_overlay: Mutex::new(None),
+                pending_open_requests: Mutex::new(Vec::new()),
             });
+
+            install_open_request_handlers(app.handle());
 
             if supports_native_launcher() {
                 if let Some(state) = app.try_state::<BackendState>() {
@@ -1486,6 +1502,125 @@ fn restore_host_window(app: &AppHandle) {
     reveal_host_window(&window);
 }
 
+fn install_open_request_handlers(app: &AppHandle) {
+    register_desktop_deep_links(app);
+
+    let app_handle = app.clone();
+    app.deep_link().on_open_url(move |event| {
+        handle_open_urls(&app_handle, event.urls());
+    });
+
+    match app.deep_link().get_current() {
+        Ok(Some(urls)) => handle_open_urls(app, urls),
+        Ok(None) => {}
+        Err(error) => {
+            if let Some(state) = app.try_state::<BackendState>() {
+                append_desktop_bootstrap_log(
+                    &state.data_dir,
+                    format!("failed to read current desktop deep link: {error}"),
+                );
+            }
+        }
+    }
+
+    handle_initial_cli_open_arguments(app);
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn register_desktop_deep_links(app: &AppHandle) {
+    if let Err(error) = app.deep_link().register_all() {
+        if let Some(state) = app.try_state::<BackendState>() {
+            append_desktop_bootstrap_log(
+                &state.data_dir,
+                format!("failed to register desktop deep links: {error}"),
+            );
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn register_desktop_deep_links(_app: &AppHandle) {}
+
+fn handle_initial_cli_open_arguments(app: &AppHandle) {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    handle_cli_file_open_arguments(app, args, None);
+}
+
+fn handle_cli_file_open_arguments<I>(app: &AppHandle, args: I, cwd: Option<PathBuf>)
+where
+    I: IntoIterator<Item = String>,
+{
+    let urls = args
+        .into_iter()
+        .filter_map(|arg| cli_arg_to_bifrost_file_url(&arg, cwd.as_deref()))
+        .collect::<Vec<_>>();
+
+    if !urls.is_empty() {
+        handle_open_urls(app, urls);
+    }
+}
+
+fn cli_arg_to_bifrost_file_url(arg: &str, cwd: Option<&Path>) -> Option<tauri::Url> {
+    let path = PathBuf::from(arg);
+    let is_bifrost_file = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("bifrost"));
+    if !is_bifrost_file {
+        return None;
+    }
+
+    let path = if path.is_absolute() {
+        path
+    } else if let Some(cwd) = cwd {
+        cwd.join(path)
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&path))
+            .unwrap_or(path)
+    };
+
+    tauri::Url::from_file_path(path).ok()
+}
+
+fn handle_open_urls(app: &AppHandle, urls: Vec<tauri::Url>) {
+    for url in urls {
+        match parse_open_url(&url) {
+            Ok(Some(request)) => dispatch_open_request(app, request),
+            Ok(None) => {}
+            Err(error) => log_open_request_error(app, &url, error),
+        }
+    }
+}
+
+fn dispatch_open_request(app: &AppHandle, request: DesktopOpenRequest) {
+    restore_host_window(app);
+
+    if let Some(state) = app.try_state::<BackendState>() {
+        append_desktop_bootstrap_log(
+            &state.data_dir,
+            format!("desktop open request received: {request:?}"),
+        );
+
+        if let Ok(mut pending) = state.pending_open_requests.lock() {
+            pending.push(request.clone());
+        }
+    }
+
+    if app.get_webview(MAIN_WINDOW_LABEL).is_some() {
+        let _ = app.emit_to(MAIN_WINDOW_LABEL, OPEN_REQUEST_EVENT, &request);
+    }
+}
+
+fn log_open_request_error(app: &AppHandle, url: &tauri::Url, error: OpenRequestParseError) {
+    if let Some(state) = app.try_state::<BackendState>() {
+        append_desktop_bootstrap_log(
+            &state.data_dir,
+            format!("ignored desktop open URL {url}: {error}"),
+        );
+    }
+}
+
 fn reveal_host_window(window: &Window) {
     let _ = window.show();
     let _ = window.unminimize();
@@ -1715,6 +1850,17 @@ fn notify_main_window_ready(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn get_pending_desktop_open_requests(
+    state: State<'_, BackendState>,
+) -> Result<Vec<DesktopOpenRequest>, String> {
+    let mut pending = state
+        .pending_open_requests
+        .lock()
+        .map_err(|_| "failed to read pending desktop open requests".to_string())?;
+    Ok(pending.drain(..).collect())
+}
+
+#[tauri::command]
 fn set_document_edited(app: AppHandle, edited: bool) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -1738,6 +1884,17 @@ fn set_document_edited(app: AppHandle, edited: bool) -> Result<(), String> {
         let _ = edited;
         Ok(())
     }
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let parsed = tauri::Url::parse(&url).map_err(|error| format!("invalid URL: {error}"))?;
+    match parsed.scheme() {
+        "http" | "https" | "mailto" | "bifrost" | "macappstore" => {}
+        scheme => return Err(format!("unsupported URL scheme: {scheme}")),
+    }
+
+    open::that(parsed.as_str()).map_err(|error| format!("failed to open URL: {error}"))
 }
 
 #[tauri::command]
@@ -2105,6 +2262,7 @@ mod tests {
             handoff_started: AtomicBool::new(false),
             handoff_completed: AtomicBool::new(false),
             launcher_overlay: Mutex::new(None),
+            pending_open_requests: Mutex::new(Vec::new()),
         };
 
         let guard = begin_backend_recovery(&state).expect("first recovery guard");
@@ -2143,6 +2301,7 @@ mod tests {
             handoff_started: AtomicBool::new(false),
             handoff_completed: AtomicBool::new(false),
             launcher_overlay: Mutex::new(None),
+            pending_open_requests: Mutex::new(Vec::new()),
         };
 
         mark_backend_unavailable_for_manual_start(
@@ -2195,6 +2354,7 @@ mod tests {
             handoff_started: AtomicBool::new(false),
             handoff_completed: AtomicBool::new(false),
             launcher_overlay: Mutex::new(None),
+            pending_open_requests: Mutex::new(Vec::new()),
         };
 
         {

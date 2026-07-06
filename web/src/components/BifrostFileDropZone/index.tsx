@@ -7,8 +7,10 @@ import {
   formatImportSuccessMessage,
   getImportedItemCount,
   importFile,
+  previewFile,
 } from "../../api/bifrost-file";
 import type { BifrostFileType } from "../../api/bifrost-file";
+import { confirmBifrostFileImport } from "../BifrostFilePreview";
 import { useValuesStore } from "../../stores/useValuesStore";
 import { useScriptsStore } from "../../stores/useScriptsStore";
 import { useReplayStore } from "../../stores/useReplayStore";
@@ -21,7 +23,7 @@ interface DropZoneProps {
   onImportSuccess?: (fileType: BifrostFileType) => void;
 }
 
-const fileTypeRoutes: Record<BifrostFileType, string> = {
+export const fileTypeRoutes: Record<BifrostFileType, string> = {
   rules: "/rules",
   network: "/traffic",
   script: "/scripts",
@@ -29,7 +31,7 @@ const fileTypeRoutes: Record<BifrostFileType, string> = {
   template: "/replay",
 };
 
-const refreshStoreByType = async (fileType: BifrostFileType) => {
+export const refreshStoreByType = async (fileType: BifrostFileType) => {
   switch (fileType) {
     case "values":
       await useValuesStore.getState().fetchValues();
@@ -55,6 +57,49 @@ const refreshStoreByType = async (fileType: BifrostFileType) => {
       break;
     default:
       break;
+  }
+};
+
+export const importBifrostFileContent = async (
+  content: string,
+  filename: string,
+  navigate: (route: string) => void,
+  onImportSuccess?: (fileType: BifrostFileType) => void,
+  setImporting?: (importing: boolean) => void,
+) => {
+  const preview = await previewFile(content);
+  const confirmed = await confirmBifrostFileImport(filename, preview);
+  if (!confirmed) {
+    return;
+  }
+
+  setImporting?.(true);
+  try {
+    const result = await importFile(content);
+    const importedCount = getImportedItemCount(result);
+
+    if (importedCount === 0) {
+      message.warning(formatImportSuccessMessage(result, filename));
+      return;
+    }
+
+    if (result.warnings && result.warnings.length > 0) {
+      message.warning(
+        `Imported ${filename} with ${result.warnings.length} warning(s)`,
+      );
+    } else {
+      message.success(formatImportSuccessMessage(result, filename));
+    }
+
+    await refreshStoreByType(result.file_type);
+    onImportSuccess?.(result.file_type);
+
+    const route = fileTypeRoutes[result.file_type];
+    if (route) {
+      navigate(route);
+    }
+  } finally {
+    setImporting?.(false);
   }
 };
 
@@ -105,37 +150,19 @@ export const BifrostFileDropZone: React.FC<DropZoneProps> = ({
         return;
       }
 
-      setIsImporting(true);
-
       try {
         for (const file of bifrostFiles) {
           const content = await file.text();
-          const result = await importFile(content);
-          const importedCount = getImportedItemCount(result);
-
-          if (importedCount === 0) {
-            message.warning(formatImportSuccessMessage(result, file.name));
-            continue;
-          } else if (result.warnings && result.warnings.length > 0) {
-            message.warning(
-              `Imported ${file.name} with ${result.warnings.length} warning(s)`,
-            );
-          } else {
-            message.success(formatImportSuccessMessage(result, file.name));
-          }
-
-          await refreshStoreByType(result.file_type);
-          onImportSuccess?.(result.file_type);
-
-          const route = fileTypeRoutes[result.file_type];
-          if (route) {
-            navigate(route);
-          }
+          await importBifrostFileContent(
+            content,
+            file.name,
+            navigate,
+            onImportSuccess,
+            setIsImporting,
+          );
         }
       } catch (error) {
         message.error(`Import failed: ${formatBifrostFileError(error)}`);
-      } finally {
-        setIsImporting(false);
       }
     },
     [navigate, onImportSuccess],

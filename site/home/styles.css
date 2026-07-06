@@ -210,6 +210,7 @@ h1 {
 .terminal-window,
 .ui-window,
 .ai-window,
+.apps-window,
 .rules-window {
   height: 352px;
   margin: 0;
@@ -305,6 +306,96 @@ h1 {
   line-height: 1.5;
 }
 
+.apps-window {
+  height: auto;
+  min-height: 352px;
+  overflow: visible;
+  padding: 20px;
+  display: grid;
+  gap: 16px;
+  align-content: start;
+}
+
+.apps-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.apps-heading strong {
+  font-size: 20px;
+}
+
+.apps-heading span,
+.apps-status {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.apps-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.app-download-card {
+  min-height: 118px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  grid-template-rows: 1fr 1fr;
+  column-gap: 14px;
+  align-items: center;
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.app-download-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--teal);
+  box-shadow: 0 12px 28px rgba(18, 34, 30, 0.1);
+}
+
+.app-download-card[aria-disabled="true"] {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.app-download-card img {
+  grid-row: 1 / span 2;
+  width: 52px;
+  height: 52px;
+  object-fit: contain;
+}
+
+.app-download-card strong,
+.app-download-card small {
+  min-width: 0;
+}
+
+.app-download-card strong {
+  align-self: end;
+  font-size: 15px;
+}
+
+.app-download-card small {
+  align-self: start;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 740;
+}
+
+.apps-status {
+  margin: 0;
+}
+
 .traffic-list,
 .detail-card {
   display: grid;
@@ -353,6 +444,7 @@ h1 {
 }
 
 .signal-strip,
+.install-section,
 .workflow-section,
 .start-section {
   width: min(var(--max), calc(100% - 40px));
@@ -375,6 +467,7 @@ h1 {
   font-weight: 800;
 }
 
+.install-section,
 .workflow-section,
 .start-section {
   padding: 74px 0;
@@ -393,13 +486,23 @@ h2 {
 }
 
 .workflow-grid,
+.install-grid,
 .steps-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
 }
 
+.workflow-grid,
+.steps-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.install-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .workflow-grid article,
+.install-card,
 .steps-grid a {
   min-height: 190px;
   padding: 22px;
@@ -408,14 +511,60 @@ h2 {
   background: #fff;
 }
 
+.install-card {
+  min-height: 260px;
+  display: grid;
+  align-content: space-between;
+  gap: 22px;
+}
+
+.install-label {
+  display: inline-block;
+  margin-bottom: 12px;
+  color: var(--teal);
+  font-size: 12px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
 .workflow-grid h3 {
   font-size: 20px;
   margin-bottom: 12px;
 }
 
+.install-card h3 {
+  margin-bottom: 12px;
+  font-size: 24px;
+}
+
 .workflow-grid p {
   color: var(--muted);
   line-height: 1.6;
+}
+
+.install-card p {
+  max-width: 490px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.install-card code {
+  display: block;
+  min-height: 58px;
+  padding: 14px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-overflow: ellipsis;
+}
+
+.install-card a {
+  width: fit-content;
+  color: var(--blue);
+  font-weight: 850;
 }
 
 .steps-grid a {
@@ -461,6 +610,8 @@ h2 {
   .language-switch,
   .preview-tabs,
   .signal-strip span,
+  .install-card,
+  .app-download-card,
   .workflow-grid article,
   .steps-grid a,
   .traffic-list,
@@ -477,9 +628,11 @@ h2 {
   .terminal-window,
   .ui-window,
   .ai-window,
+  .apps-window,
   .ai-step,
   .agent-case,
-  .ai-result {
+  .ai-result,
+  .install-card code {
     color: var(--ink);
     background: rgba(13, 18, 17, 0.86);
   }
@@ -521,12 +674,14 @@ h2 {
   .terminal-window,
   .ui-window,
   .ai-window,
+  .apps-window,
   .rules-window {
     min-height: 300px;
     height: auto;
   }
 
   .workflow-grid,
+  .install-grid,
   .steps-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -536,6 +691,7 @@ h2 {
   .site-header,
   .hero,
   .signal-strip,
+  .install-section,
   .workflow-section,
   .start-section {
     width: min(100% - 28px, var(--max));
@@ -564,11 +720,19 @@ h2 {
     padding-inline: 8px;
   }
 
+  .apps-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .workflow-grid,
+  .install-grid,
+  .apps-grid,
   .steps-grid {
     grid-template-columns: 1fr;
   }
 
+  .install-section,
   .workflow-section,
   .start-section {
     padding: 52px 0;

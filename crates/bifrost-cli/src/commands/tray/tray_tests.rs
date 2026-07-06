@@ -42,6 +42,12 @@
     }
 
     #[test]
+    fn test_app_deep_link_for_route_uses_open_namespace() {
+        assert_eq!(app_deep_link_for_route("/traffic"), "bifrost://open/traffic");
+        assert_eq!(app_deep_link_for_route("rules"), "bifrost://open/rules");
+    }
+
+    #[test]
     fn test_load_system_proxy_state_treats_other_owner_as_unchecked() {
         let (admin_url, seen, handle) = spawn_test_http_server(vec![(
             "HTTP/1.1 200 OK",

@@ -35,14 +35,20 @@ function pageLink(target) {
   return `/${normalized}`;
 }
 
+const sidebarExcludedTargets = new Set([
+  "getting-started/desktop.md",
+  "en/getting-started/desktop.md",
+]);
+
 function sectionItems({ locale = "zh", prefix, excludePrefix }) {
   return pages
     .filter((page) => {
       const target = normalizePath(page.target);
       const matchesPrefix = target.startsWith(prefix);
       const notExcluded = !excludePrefix || !target.startsWith(excludePrefix);
+      const notSidebarExcluded = !sidebarExcludedTargets.has(target);
       const matchesLocale = locale === "en" ? target.startsWith("en/") : !target.startsWith("en/");
-      return matchesPrefix && notExcluded && matchesLocale;
+      return matchesPrefix && notExcluded && notSidebarExcluded && matchesLocale;
     })
     .map((page) => ({
       text: page.title,

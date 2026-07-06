@@ -2,6 +2,14 @@
 
 本文档汇总 Bifrost 的安装、启动、管理端入口与卸载方式。
 
+## 选择安装方式
+
+| 场景 | 推荐方式 | 说明 |
+| --- | --- | --- |
+| 想最快开始抓包、查看流量和编辑规则 | 桌面端 App | 从 Releases 下载 `.dmg` 或 `.msi`，启动后内置代理后端和 Web UI 一起工作 |
+| 想在终端、脚本或 CI 中使用 | CLI | 使用一键安装脚本、Homebrew 或 npm |
+| 想本地调试 Bifrost 源码 | 从源码构建 | 使用 `./install.sh` 或手动构建 Rust/Web/Tauri 产物 |
+
 ## 安装 CLI
 
 ### 一键安装
@@ -69,6 +77,61 @@ cargo build --release
 ### 手动下载
 
 可直接从 [Releases](https://github.com/bifrost-proxy/bifrost/releases) 下载预编译二进制。
+
+## 安装桌面端 App
+
+桌面端基于 Tauri 构建，安装包内包含 Web UI 和 `bifrost` 代理后端。适合不想先使用终端命令、但需要本机流量调试、规则编辑、Replay 和自动更新的用户。
+
+### 直接下载最新版
+
+点击与你设备匹配的安装包，页面会使用当前发布版本的命名规则生成直链并直接开始下载。
+
+<div class="desktop-download-grid" data-vp-download-status="loading">
+  <a class="desktop-download-card" href="#" aria-disabled="true" data-vp-download-target="mac-arm">
+    <img src="https://p1-hera.feishucdn.com/tos-cn-i-jbbdkfciu3/e20a102ae0da492baf4d3b81a9a03c22.png~tplv-jbbdkfciu3-png:0:0.png" alt="" width="52" height="52" loading="lazy" decoding="async" />
+    <strong>macOS Apple Silicon</strong>
+    <span>M1 / M2 / M3 / M4</span>
+  </a>
+  <a class="desktop-download-card" href="#" aria-disabled="true" data-vp-download-target="mac-intel">
+    <img src="https://p1-hera.feishucdn.com/tos-cn-i-jbbdkfciu3/e20a102ae0da492baf4d3b81a9a03c22.png~tplv-jbbdkfciu3-png:0:0.png" alt="" width="52" height="52" loading="lazy" decoding="async" />
+    <strong>macOS Intel</strong>
+    <span>Intel Mac</span>
+  </a>
+  <a class="desktop-download-card" href="#" aria-disabled="true" data-vp-download-target="win-x64">
+    <img src="https://p1-hera.feishucdn.com/tos-cn-i-jbbdkfciu3/62baaf31cd8147699516852865782600.png~tplv-jbbdkfciu3-png:0:0.png" alt="" width="52" height="52" loading="lazy" decoding="async" />
+    <strong>Windows</strong>
+    <span>x64 安装包</span>
+  </a>
+  <a class="desktop-download-card" href="#" aria-disabled="true" data-vp-download-target="win-arm">
+    <img src="https://p1-hera.feishucdn.com/tos-cn-i-jbbdkfciu3/62baaf31cd8147699516852865782600.png~tplv-jbbdkfciu3-png:0:0.png" alt="" width="52" height="52" loading="lazy" decoding="async" />
+    <strong>Windows ARM64</strong>
+    <span>ARM 安装包</span>
+  </a>
+</div>
+
+<p class="desktop-download-status" data-vp-download-message>正在准备当前版本下载链接...</p>
+
+### macOS 安装
+
+1. 双击打开下载的 `.dmg`。
+2. 将 `Bifrost.app` 拖入 `Applications`。
+3. 从 `Applications` 或 Launchpad 打开 Bifrost。
+4. 如果系统提示来自互联网下载，确认打开；如果 Gatekeeper 拦截未签名版本，在 `System Settings -> Privacy & Security` 中允许打开。
+
+### Windows 安装
+
+1. 双击下载的 `.msi`。
+2. 按安装向导完成安装。
+3. 从 Start Menu 打开 `Bifrost`。
+4. 如果 Windows SmartScreen 提示未知发布者，确认来源是 `bifrost-proxy/bifrost` 的 GitHub Releases 后再选择继续。
+
+### 首次启动后检查
+
+桌面端启动后会在应用内部启动打包的 `bifrost` 后端，并打开本机管理界面。首次启动会异步检查并安装 Bifrost CA；需要 HTTPS 抓包时，确认系统已信任该 CA。默认数据目录仍为 `~/.bifrost`。
+
+如果后续需要在终端或 AI 工具中使用 Bifrost，打开桌面端 Settings，在 `Desktop Proxy Core` 卡片点击 `Install CLI & Skills`。这会安装命令行 `bifrost` 和 Bifrost AI skills。
+
+更完整的桌面端安装、更新、卸载和源码构建说明见 [`desktop.md`](./desktop.md)。
 
 ## 检查安装
 

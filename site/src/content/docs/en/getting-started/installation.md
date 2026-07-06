@@ -11,6 +11,14 @@ editLink: false
 
 This guide summarizes installation, startup, Admin UI access, environment variables, and uninstallation.
 
+## Choose an Installation Path
+
+| Scenario | Recommended path | Notes |
+| --- | --- | --- |
+| Start capturing traffic, inspecting requests, and editing rules quickly | Desktop app | Download the `.dmg` or `.msi` from Releases. The bundled proxy backend and Web UI run together. |
+| Use Bifrost from terminals, scripts, or CI | CLI | Use the one-line installer, Homebrew, or npm. |
+| Hack on Bifrost itself | Build from source | Use `./install.sh` or manually build the Rust/Web/Tauri artifacts. |
+
 ## Install the CLI
 
 ### One-line Install
@@ -64,6 +72,61 @@ cargo build --release
 ### Manual Download
 
 Download prebuilt binaries from [GitHub Releases](https://github.com/bifrost-proxy/bifrost/releases).
+
+## Install the Desktop App
+
+The desktop app is built with Tauri. The installer bundles the Web UI and the `bifrost` proxy backend, so it is the easiest path for users who want local traffic debugging, rule editing, replay, and updates without starting from CLI commands.
+
+### Download the Latest Package Directly
+
+Click the installer that matches your device. The page uses the current release naming rules to generate a direct download link.
+
+<div class="desktop-download-grid" data-vp-download-status="loading">
+  <a class="desktop-download-card" href="#" aria-disabled="true" data-vp-download-target="mac-arm">
+    <img src="https://p1-hera.feishucdn.com/tos-cn-i-jbbdkfciu3/e20a102ae0da492baf4d3b81a9a03c22.png~tplv-jbbdkfciu3-png:0:0.png" alt="" width="52" height="52" loading="lazy" decoding="async" />
+    <strong>macOS Apple Silicon</strong>
+    <span>M1 / M2 / M3 / M4</span>
+  </a>
+  <a class="desktop-download-card" href="#" aria-disabled="true" data-vp-download-target="mac-intel">
+    <img src="https://p1-hera.feishucdn.com/tos-cn-i-jbbdkfciu3/e20a102ae0da492baf4d3b81a9a03c22.png~tplv-jbbdkfciu3-png:0:0.png" alt="" width="52" height="52" loading="lazy" decoding="async" />
+    <strong>macOS Intel</strong>
+    <span>Intel Mac</span>
+  </a>
+  <a class="desktop-download-card" href="#" aria-disabled="true" data-vp-download-target="win-x64">
+    <img src="https://p1-hera.feishucdn.com/tos-cn-i-jbbdkfciu3/62baaf31cd8147699516852865782600.png~tplv-jbbdkfciu3-png:0:0.png" alt="" width="52" height="52" loading="lazy" decoding="async" />
+    <strong>Windows</strong>
+    <span>x64 installer</span>
+  </a>
+  <a class="desktop-download-card" href="#" aria-disabled="true" data-vp-download-target="win-arm">
+    <img src="https://p1-hera.feishucdn.com/tos-cn-i-jbbdkfciu3/62baaf31cd8147699516852865782600.png~tplv-jbbdkfciu3-png:0:0.png" alt="" width="52" height="52" loading="lazy" decoding="async" />
+    <strong>Windows ARM64</strong>
+    <span>ARM installer</span>
+  </a>
+</div>
+
+<p class="desktop-download-status" data-vp-download-message>Preparing current release links...</p>
+
+### macOS Install
+
+1. Open the downloaded `.dmg`.
+2. Drag `Bifrost.app` to `Applications`.
+3. Launch Bifrost from `Applications` or Launchpad.
+4. If macOS warns that the app was downloaded from the internet, confirm that you want to open it. If Gatekeeper blocks an unsigned build, allow it from `System Settings -> Privacy & Security`.
+
+### Windows Install
+
+1. Double-click the downloaded `.msi`.
+2. Follow the installer.
+3. Launch `Bifrost` from the Start menu.
+4. If Windows SmartScreen warns about an unknown publisher, continue only after confirming the file came from the official `bifrost-proxy/bifrost` GitHub Releases page.
+
+### First Launch Checklist
+
+The desktop app starts the bundled `bifrost` backend inside the app and opens the local management interface. On first launch it checks and installs the Bifrost CA asynchronously; for HTTPS inspection, confirm that the CA is trusted by the system. The default data directory remains `~/.bifrost`.
+
+To make Bifrost available from terminals and AI coding tools after a desktop-first install, open Settings in the desktop app and click `Install CLI & Skills` in `Desktop Proxy Core`.
+
+For the full desktop installation, update, uninstall, and source build guide, see [`desktop.md`](./desktop).
 
 ## Verify Installation
 

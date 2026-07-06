@@ -119,7 +119,16 @@ make setup
 
 ## 用不习惯 CLI？想要使用桌面端 APP？
 
-请直接到[releases](https://github.com/bifrost-proxy/bifrost/releases)中下载对应平台的桌面端程序
+桌面端适合日常抓包、查看流量、编辑规则和更新 Bifrost，不需要先记住 CLI 命令：
+
+1. 打开 [GitHub Releases](https://github.com/bifrost-proxy/bifrost/releases)。
+2. 选择最新版本的 `Assets`。
+3. macOS 下载与你芯片匹配的 `.dmg`，Apple Silicon 选择 `aarch64-apple-darwin`，Intel Mac 选择 `x86_64-apple-darwin`。
+4. Windows 下载 `.msi`，普通 x64 电脑选择 `x86_64-pc-windows-msvc`，ARM 设备选择 `aarch64-pc-windows-msvc`。
+5. macOS 打开 `.dmg` 后把 `Bifrost.app` 拖到 `Applications`，Windows 双击 `.msi` 按向导安装。
+6. 启动 Bifrost 后等待桌面端完成内置代理后端启动；首次启动会异步检查并安装 Bifrost CA。
+
+如果你希望桌面端也安装命令行能力，打开桌面端 Settings，在 `Desktop Proxy Core` 中点击 `Install CLI & Skills`。详细教程见 [`docs/desktop.md`](docs/desktop.md)。
 
 
 ## 基本用法摘要
