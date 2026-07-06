@@ -121,7 +121,6 @@ make setup
 
 请直接到[releases](https://github.com/bifrost-proxy/bifrost/releases)中下载对应平台的桌面端程序
 
-如果 `bifrost version-check`、`bifrost upgrade`、`bifrost install-skill`、Sync/登录、AI/Agent provider、ASR/语音模型下载、脚本 `net.fetch` 或规则远程 URL 在企业网络、Linux 沙箱或 CI 中访问 HTTPS 时报 `UnknownIssuer`、`invalid peer certificate`、`certificate verify failed` 等 TLS 证书错误，优先把企业/沙箱根证书安装进系统 trust store。系统 CA 不可控时，GitHub/升级链路可设置 `BIFROST_GITHUB_CA_BUNDLE=/path/to/ca.pem` 或 `BIFROST_UPGRADE_CA_BUNDLE=/path/to/ca.pem`；通用外部 HTTPS 链路可设置 `BIFROST_CA_BUNDLE=/path/to/ca.pem` 或 `BIFROST_CA_DIR=/path/to/certs`。同时兼容 `SSL_CERT_FILE`、`SSL_CERT_DIR`、`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`NODE_EXTRA_CA_CERTS`、`GIT_SSL_CAINFO`、`AWS_CA_BUNDLE`、`PIP_CERT`、`NPM_CONFIG_CAFILE`、`GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` 等常见 CA 环境变量。只有在受控临时环境且无法注入 CA 时，才使用 `BIFROST_UPGRADE_UNSAFE_SSL=1`、`BIFROST_GITHUB_UNSAFE_SSL=1` 或 `BIFROST_UNSAFE_SSL=1` 跳过相应外部 HTTPS 链路的证书校验。
 
 ## 基本用法摘要
 
