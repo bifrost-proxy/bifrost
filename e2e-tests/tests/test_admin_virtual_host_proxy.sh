@@ -126,6 +126,92 @@ assert_admin_html_via_proxy() {
     log_info "Admin virtual host returned Bifrost HTML for $url"
 }
 
+assert_virtual_host_resource() {
+    local resource_path="$1"
+    local label="$2"
+    local expected_type="$3"
+    local headers_file="$DATA_DIR/${label}.headers"
+    local body_file="$DATA_DIR/${label}.body"
+    local content_type
+    local body_size
+
+    if ! env NO_PROXY="" no_proxy="" curl -fsS -k --compressed --connect-timeout 2 --max-time 10 \
+        -D "$headers_file" \
+        -o "$body_file" \
+        -x "http://${PROXY_HOST}:${PROXY_PORT}" \
+        "http://bifrost.local${resource_path}"; then
+        log_fail "Admin virtual host resource request failed for $resource_path"
+        tail -120 "$DATA_DIR/proxy.log" || true
+        return 1
+    fi
+
+    content_type="$(tr -d '\r' < "$headers_file" | awk -F': ' 'tolower($1) == "content-type" {print tolower($2); exit}')"
+    case "$expected_type" in
+        js)
+            [[ "$content_type" == text/javascript* || "$content_type" == application/javascript* ]] || {
+                log_fail "Expected JS content-type for $resource_path, got: $content_type"
+                cat "$headers_file" || true
+                return 1
+            }
+            ;;
+        css)
+            [[ "$content_type" == text/css* ]] || {
+                log_fail "Expected CSS content-type for $resource_path, got: $content_type"
+                cat "$headers_file" || true
+                return 1
+            }
+            ;;
+        png)
+            [[ "$content_type" == image/png* ]] || {
+                log_fail "Expected PNG content-type for $resource_path, got: $content_type"
+                cat "$headers_file" || true
+                return 1
+            }
+            ;;
+        *)
+            log_fail "Unknown expected resource type: $expected_type"
+            return 1
+            ;;
+    esac
+
+    body_size="$(wc -c < "$body_file" | tr -d ' ')"
+    if [[ "$body_size" -le 0 ]]; then
+        log_fail "Expected non-empty body for $resource_path"
+        cat "$headers_file" || true
+        return 1
+    fi
+    log_info "Admin virtual host resource loaded: $resource_path ($content_type, ${body_size} bytes)"
+}
+
+assert_admin_static_assets_via_proxy() {
+    local body
+    local js_path
+    local css_path
+    local favicon_path
+
+    if ! body="$(env NO_PROXY="" no_proxy="" curl -fsS -k --compressed --connect-timeout 2 --max-time 10 \
+        -x "http://${PROXY_HOST}:${PROXY_PORT}" \
+        "http://bifrost.local/")"; then
+        log_fail "Failed to load admin virtual host HTML for asset discovery"
+        tail -120 "$DATA_DIR/proxy.log" || true
+        return 1
+    fi
+
+    js_path="$(printf '%s\n' "$body" | grep -oE '/_bifrost/assets/[^"'"'"']+\.js' | head -n 1 || true)"
+    css_path="$(printf '%s\n' "$body" | grep -oE '/_bifrost/assets/[^"'"'"']+\.css' | head -n 1 || true)"
+    favicon_path="$(printf '%s\n' "$body" | grep -oE '/_bifrost/favicon\.png' | head -n 1 || true)"
+
+    if [[ -z "$js_path" || -z "$css_path" || -z "$favicon_path" ]]; then
+        log_fail "Failed to discover admin static assets from virtual host HTML"
+        printf '%s\n' "$body" | head -40
+        return 1
+    fi
+
+    assert_virtual_host_resource "$js_path" "admin-virtual-host-js" js
+    assert_virtual_host_resource "$css_path" "admin-virtual-host-css" css
+    assert_virtual_host_resource "$favicon_path" "admin-virtual-host-favicon" png
+}
+
 assert_direct_host_header_admin_html() {
     local body
     if ! body="$(curl -fsS --noproxy '*' --compressed --connect-timeout 2 --max-time 10 \
@@ -188,6 +274,7 @@ main() {
     assert_admin_html_via_proxy "http://bifrost.local/"
     assert_admin_html_via_proxy "https://bifrost.local/"
     assert_admin_html_via_proxy "http://bifrost.local:${PROXY_PORT}/"
+    assert_admin_static_assets_via_proxy
     assert_direct_host_header_admin_html
     assert_default_system_proxy_bypass_keeps_virtual_host_routable
     assert_ordinary_proxy_target_still_works
