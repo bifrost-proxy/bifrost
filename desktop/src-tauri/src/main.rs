@@ -39,14 +39,10 @@ const MAX_PORT_INCREMENT_ATTEMPTS: u16 = 64;
 const HOST_WINDOW_LABEL: &str = "host";
 const MAIN_WINDOW_LABEL: &str = "main";
 const DESKTOP_LOG_RETENTION_DAYS: u32 = bifrost_core::DEFAULT_LOG_RETENTION_DAYS;
-const INITIAL_WINDOW_WIDTH: f64 = 360.0;
-const INITIAL_WINDOW_HEIGHT: f64 = 260.0;
 const TARGET_WINDOW_WIDTH: f64 = 1440.0;
 const TARGET_WINDOW_HEIGHT: f64 = 920.0;
 const TARGET_WINDOW_MIN_WIDTH: f64 = 1180.0;
 const TARGET_WINDOW_MIN_HEIGHT: f64 = 760.0;
-const WINDOW_EXPAND_STEPS: u16 = 10;
-const WINDOW_EXPAND_STEP_DELAY: Duration = Duration::from_millis(16);
 const OVERLAY_FADE_STEPS: u16 = 8;
 const OVERLAY_FADE_STEP_DELAY: Duration = Duration::from_millis(14);
 const BACKEND_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -296,6 +292,7 @@ fn main() {
                 if let Some(state) = app.try_state::<BackendState>() {
                     if let Some(overlay_ptr) = native_launcher::install(&host_window)? {
                         native_launcher::start_animation(&host_window, overlay_ptr)?;
+                        reveal_host_window(&host_window);
                         if let Ok(mut overlay_guard) = state.launcher_overlay.lock() {
                             *overlay_guard = Some(overlay_ptr);
                         }
@@ -463,8 +460,8 @@ fn create_host_window(app: &AppHandle) -> tauri::Result<Window> {
 
     if supports_native_launcher() {
         builder = builder
-            .inner_size(INITIAL_WINDOW_WIDTH, INITIAL_WINDOW_HEIGHT)
-            .min_inner_size(INITIAL_WINDOW_WIDTH, INITIAL_WINDOW_HEIGHT)
+            .inner_size(TARGET_WINDOW_WIDTH, TARGET_WINDOW_HEIGHT)
+            .min_inner_size(TARGET_WINDOW_MIN_WIDTH, TARGET_WINDOW_MIN_HEIGHT)
             .resizable(true)
             .maximizable(true)
             .visible(true)
@@ -543,18 +540,7 @@ fn create_main_webview(window: &Window) -> tauri::Result<()> {
                 },
                 0.0,
             )),
-            Size::Logical(LogicalSize::new(
-                if supports_native_launcher() {
-                    INITIAL_WINDOW_WIDTH
-                } else {
-                    TARGET_WINDOW_WIDTH
-                },
-                if supports_native_launcher() {
-                    INITIAL_WINDOW_HEIGHT
-                } else {
-                    TARGET_WINDOW_HEIGHT
-                },
-            )),
+            Size::Logical(LogicalSize::new(TARGET_WINDOW_WIDTH, TARGET_WINDOW_HEIGHT)),
         )
         .map_err(|error| anyhow(format!("failed to create embedded webview: {error}")))?;
     let _ = webview.set_background_color(Some(Color(8, 17, 23, 255)));
@@ -1410,28 +1396,6 @@ fn animate_host_window_to_main_size(
     window: &Window,
     overlay_ptr: Option<usize>,
 ) -> tauri::Result<()> {
-    let scale_factor = window.scale_factor()?;
-    let start_size = window.outer_size()?.to_logical::<f64>(scale_factor);
-    let start_position = window.outer_position()?.to_logical::<f64>(scale_factor);
-    let center_x = start_position.x + start_size.width * 0.5;
-    let center_y = start_position.y + start_size.height * 0.5;
-
-    for step in 1..=WINDOW_EXPAND_STEPS {
-        let progress = f64::from(step) / f64::from(WINDOW_EXPAND_STEPS);
-        let eased = 1.0 - (1.0 - progress) * (1.0 - progress);
-        let width = lerp(start_size.width, TARGET_WINDOW_WIDTH, eased);
-        let height = lerp(start_size.height, TARGET_WINDOW_HEIGHT, eased);
-        let x = center_x - width * 0.5;
-        let y = center_y - height * 0.5;
-
-        let _ = window.set_size(LogicalSize::new(width, height));
-        let _ = window.set_position(LogicalPosition::new(x, y));
-        if let Some(overlay_ptr) = overlay_ptr {
-            let _ = native_launcher::set_overlay_progress(window, overlay_ptr, eased);
-        }
-        std::thread::sleep(WINDOW_EXPAND_STEP_DELAY);
-    }
-
     let _ = window.set_size(LogicalSize::new(TARGET_WINDOW_WIDTH, TARGET_WINDOW_HEIGHT));
     if let Some(overlay_ptr) = overlay_ptr {
         let _ = native_launcher::set_overlay_progress(window, overlay_ptr, 1.0);
@@ -1483,10 +1447,6 @@ fn fade_out_launcher_overlay(app: &AppHandle, overlay_ptr: usize) {
             let _ = native_launcher::remove_overlay(&window, overlay_ptr);
         }
     });
-}
-
-fn lerp(start: f64, end: f64, progress: f64) -> f64 {
-    start + (end - start) * progress
 }
 
 fn load_desktop_config(config_path: &Path) -> tauri::Result<DesktopConfig> {

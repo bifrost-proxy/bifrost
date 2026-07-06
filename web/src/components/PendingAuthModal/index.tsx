@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Badge,
@@ -39,9 +39,31 @@ export default function PendingAuthModal() {
   const approvePending = usePendingAuthStore((s) => s.approvePending);
   const rejectPending = usePendingAuthStore((s) => s.rejectPending);
   const clearPending = usePendingAuthStore((s) => s.clearPending);
+  const pendingIdentityKey = useMemo(
+    () => pendingList.map((item) => item.ip).sort().join("|"),
+    [pendingList],
+  );
+  const [dismissedIdentityKey, setDismissedIdentityKey] = useState<string | null>(null);
+  const modalOpen =
+    pendingCount > 0 &&
+    pendingIdentityKey.length > 0 &&
+    dismissedIdentityKey !== pendingIdentityKey;
+
+  useEffect(() => {
+    if (pendingCount === 0) {
+      setDismissedIdentityKey(null);
+    }
+  }, [pendingCount]);
+
+  const dismissCurrentPending = useCallback(() => {
+    if (pendingIdentityKey.length > 0) {
+      setDismissedIdentityKey(pendingIdentityKey);
+    }
+  }, [pendingIdentityKey]);
 
   const handleApprove = useCallback(
     async (ip: string) => {
+      dismissCurrentPending();
       const ok = await approvePending(ip);
       if (ok) {
         message.success(`Approved ${ip}`);
@@ -49,11 +71,12 @@ export default function PendingAuthModal() {
         message.error(`Failed to approve ${ip}`);
       }
     },
-    [approvePending],
+    [approvePending, dismissCurrentPending],
   );
 
   const handleReject = useCallback(
     async (ip: string) => {
+      dismissCurrentPending();
       const ok = await rejectPending(ip);
       if (ok) {
         message.success(`Rejected ${ip}`);
@@ -61,25 +84,27 @@ export default function PendingAuthModal() {
         message.error(`Failed to reject ${ip}`);
       }
     },
-    [rejectPending],
+    [rejectPending, dismissCurrentPending],
   );
 
   const handleClearAll = useCallback(async () => {
+    dismissCurrentPending();
     const ok = await clearPending();
     if (ok) {
       message.success("Cleared all pending authorizations");
     } else {
       message.error("Failed to clear pending authorizations");
     }
-  }, [clearPending]);
+  }, [clearPending, dismissCurrentPending]);
 
   const handleOpenAccessControl = useCallback(() => {
+    dismissCurrentPending();
     navigate("/settings?tab=access");
-  }, [navigate]);
+  }, [dismissCurrentPending, navigate]);
 
   return (
     <Modal
-      open={pendingCount > 0}
+      open={modalOpen}
       title={
         <Space>
           <WarningOutlined style={{ color: token.colorWarning }} />
@@ -117,7 +142,8 @@ export default function PendingAuthModal() {
           )}
         </Space>
       }
-      closable={false}
+      onCancel={dismissCurrentPending}
+      closable
       maskClosable={false}
       keyboard={false}
       centered

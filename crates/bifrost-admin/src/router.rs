@@ -490,7 +490,16 @@ impl AdminRouter {
         if matches!(
             header_value(headers, "sec-fetch-site").as_deref(),
             Some("cross-site")
-        ) {
+        ) && !header_value(headers, "origin")
+            .as_deref()
+            .map(|origin| {
+                crate::cors::is_allowed_admin_origin_for_host(
+                    origin,
+                    &header_value(headers, "host").unwrap_or_default(),
+                )
+            })
+            .unwrap_or(false)
+        {
             return Some(error_response(
                 StatusCode::FORBIDDEN,
                 "Cross-site admin write request rejected",
@@ -499,9 +508,7 @@ impl AdminRouter {
 
         if let Some(origin) = header_value(headers, "origin") {
             let host = header_value(headers, "host").unwrap_or_default();
-            if !crate::cors::is_allowed_origin(&origin)
-                && !crate::cors::origin_matches_host(&origin, &host)
-            {
+            if !crate::cors::is_allowed_admin_origin_for_host(&origin, &host) {
                 return Some(error_response(
                     StatusCode::FORBIDDEN,
                     "Cross-origin admin write request rejected",
@@ -957,6 +964,45 @@ mod tests {
             AdminRouter::check_browser_write_guard(&req, &state, "/api/rules/demo/enable")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn test_browser_write_guard_accepts_trusted_desktop_origin_when_sec_fetch_is_cross_site() {
+        let harness = crate::test_support::TestAdminState::builder()
+            .port(9900)
+            .build();
+        let state = harness.state();
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/_bifrost/api/rules/demo")
+            .header(hyper::header::HOST, "127.0.0.1:9900")
+            .header("Origin", "tauri://localhost")
+            .header("Sec-Fetch-Site", "cross-site")
+            .header("X-Bifrost-CSRF", state.csrf_token())
+            .body(())
+            .unwrap();
+
+        assert!(AdminRouter::check_browser_write_guard(&req, &state, "/api/rules/demo").is_none());
+    }
+
+    #[test]
+    fn test_browser_write_guard_still_requires_csrf_for_trusted_cross_site_desktop_origin() {
+        let harness = crate::test_support::TestAdminState::builder()
+            .port(9900)
+            .build();
+        let state = harness.state();
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/_bifrost/api/rules/demo")
+            .header(hyper::header::HOST, "127.0.0.1:9900")
+            .header("Origin", "tauri://localhost")
+            .header("Sec-Fetch-Site", "cross-site")
+            .body(())
+            .unwrap();
+
+        let resp = AdminRouter::check_browser_write_guard(&req, &state, "/api/rules/demo")
+            .expect("trusted desktop-origin writes still require CSRF");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[test]
