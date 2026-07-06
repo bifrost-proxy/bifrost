@@ -28,11 +28,13 @@
 4. 检查 `AGENTS.md` 是否给出根站构建命令：`SITE_URL=https://bifrost-proxy.github.io/ BASE_PATH=/ pnpm run site:build`。
 5. 检查 `AGENTS.md` 是否给出产物同步方式：从本仓库 `site/dist/` 同步到 `bifrost-proxy.github.io` checkout，并保留 `.git/`、`.github/`、`README.md`。
 6. 检查 `AGENTS.md` 是否要求推送部署仓库后跟进 `Pages` 与 `pages-build-deployment` runs，并线上验证 `https://bifrost-proxy.github.io/`。
+7. 执行 `rg -n "Build legacy project Pages redirect|Upload legacy project Pages redirect|Deploy legacy project Pages redirect|project-pages-redirect-dist" .github/workflows/site.yml site/scripts/build-project-pages-redirect.mjs`，确认主仓库 Site workflow 在非 PR 事件只部署项目站 tombstone。
 
 预期结果：
 
 - 后续涉及主站或文档站更新时，Agent 能从开发手册直接判断：先改本仓库源站，再构建并同步产物到 `bifrost-proxy.github.io`，不能在部署仓库维护第二套页面。
 - 手册包含具体命令、部署仓库、入口 URL、验证路径和 CI/Pages 看护要求。
+- 主仓库不会继续通过 GitHub Pages 项目站发布第二套完整站点；`/bifrost/` 只会作为 noindex redirect 指向根站，避免它与根站入口分叉。
 
 执行结果：
 
@@ -52,6 +54,29 @@
 - 四类目标清单均存在。
 - 首页纯 HTML 和非框架生成约束明确。
 - 文档区切到 VitePress、自动同步源文档、AI 首页和 With AI tab 均有明确描述。
+
+执行结果：
+
+- 已执行，通过。
+
+### TC-DSR-01B 根站部署覆盖历史 `/bifrost/` 入口
+
+操作步骤：
+
+1. 执行 `SITE_URL=https://bifrost-proxy.github.io/ BASE_PATH=/ pnpm run site:build`。
+2. 执行 `test -f site/dist/index.html && test -f site/dist/bifrost/index.html`。
+3. 执行 `grep -q '<meta name="robots" content="noindex">' site/dist/bifrost/index.html`。
+4. 执行 `grep -q 'url=/' site/dist/bifrost/index.html`。
+5. 执行 `grep -q '<link rel="canonical" href="/">' site/dist/bifrost/index.html`。
+6. 执行 `! grep -q 'A one-stop proxy solution for the AI era' site/dist/bifrost/index.html`。
+7. 执行 `! grep -q '/bifrost/assets/' site/dist/bifrost/index.html`。
+8. 部署到 `bifrost-proxy.github.io` 后，执行 `curl -L -sS -D /tmp/bifrost-legacy.headers https://bifrost-proxy.github.io/bifrost/ -o /tmp/bifrost-legacy.html`，检查返回内容包含 redirect 到 `/`，不再是旧首页。
+
+预期结果：
+
+- 根站构建会主动生成 `site/dist/bifrost/index.html`，覆盖历史 GitHub Pages `/bifrost/` 旧入口。
+- `/bifrost/` 只作为 noindex redirect 指向 `/`，不会再保留第二套首页、旧 canonical、旧资源路径或旧文档入口。
+- 子路径部署仍保留 `/bifrost/` 作为真实首页，不被根站专用 redirect 逻辑影响。
 
 执行结果：
 
