@@ -191,9 +191,8 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
     );
 
     if include_cli {
-        upgrade_cli_if_present(&progress_source).map_err(|error| {
-            write_app_failed_progress(&target_version, &progress_source, &error);
-            error
+        upgrade_cli_if_present(&progress_source).inspect_err(|error| {
+            write_app_failed_progress(&target_version, &progress_source, error);
         })?;
     }
 
@@ -223,10 +222,11 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
 
     let package_path = match package {
         Some(path) => path,
-        None => download_desktop_package(&target_version, &progress_source).map_err(|error| {
-            write_app_failed_progress(&target_version, &progress_source, &error);
-            error
-        })?,
+        None => {
+            download_desktop_package(&target_version, &progress_source).inspect_err(|error| {
+                write_app_failed_progress(&target_version, &progress_source, error);
+            })?
+        }
     };
 
     write_app_progress(
@@ -237,14 +237,14 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
         None,
         None,
     );
-    install_desktop_package(&package_path, &install_dir, &install_path).map_err(|error| {
-        write_app_failed_progress(&target_version, &progress_source, &error);
-        error
+    install_desktop_package(&package_path, &install_dir, &install_path).inspect_err(|error| {
+        write_app_failed_progress(&target_version, &progress_source, error);
     })?;
-    verify_installed_desktop_target_version(&install_path, &target_version).map_err(|error| {
-        write_app_failed_progress(&target_version, &progress_source, &error);
-        error
-    })?;
+    verify_installed_desktop_target_version(&install_path, &target_version).inspect_err(
+        |error| {
+            write_app_failed_progress(&target_version, &progress_source, error);
+        },
+    )?;
 
     write_app_progress(
         UpgradePhase::Restarting,
@@ -259,9 +259,8 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
         None,
     );
     if progress_source != "desktop" && !skip_desktop_restart() {
-        restart_desktop_app(&install_path).map_err(|error| {
-            write_app_failed_progress(&target_version, &progress_source, &error);
-            error
+        restart_desktop_app(&install_path).inspect_err(|error| {
+            write_app_failed_progress(&target_version, &progress_source, error);
         })?;
     }
 

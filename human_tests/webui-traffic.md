@@ -452,6 +452,23 @@ Bifrost Web UI 的 Traffic 页面是核心功能页面，用于实时展示和�
 
 ---
 
+### TC-WTR-23D：Network 顶部快捷筛选器紧凑间距
+
+**操作步骤**：
+1. 打开 Traffic/Network 页面：
+   ```text
+   http://127.0.0.1:$MAIN_PORT/_bifrost/traffic
+   ```
+2. 观察顶部快捷筛选器区域的 `Hit Rule`、`HTTP`、`HTTPS`、`WS`、`WSS`、`H3`、`JSON`、`Form`、`XML`、`JS`、`CSS`、`Font`、`Doc`、`Media`、`SSE`、状态码和 `Imported` 标签。
+3. 点击任意快捷筛选标签，再次点击取消选中。
+
+**预期结果**：
+- 每个快捷筛选标签的左右内边距收紧，标签之间的视觉间隔比默认 Ant Design tag 更紧凑。
+- 分组分隔线和标签文本不重叠，长标签 `Hit Rule`、`Imported` 仍完整可读。
+- 点击标签仍能正常选中/取消选中，不改变原有筛选行为。
+
+---
+
 ### TC-WTR-24：右键上下文菜单 - Copy URL
 
 **操作步骤**：
@@ -1155,3 +1172,11 @@ rm -f /tmp/bifrost-mock-test.json
 - CPU 采样：平均 `46.2%`，P95 `54.7%`，最大瞬时 `78.5%`；未观察到持续超过 `70%`。
 - appinfo 完整性：受 `traffic.max_records=5000` 保留策略影响，DB 保留最新 `4800` 条记录；保留记录中 `client_app` 空值 `0`，`node` 命中 `4800`，其中 CONNECT `1600`、GET `3200`。
 - 结论：`TC-WTR-47` appinfo 补充执行通过；短 HTTP/CONNECT 高并发下，最终保留记录没有出现大量 unknown app，管理端接口可持续响应，CPU P95 低于 `70%` 目标。
+
+2026-07-06 Network 顶部快捷筛选器紧凑间距执行记录：
+
+- 已执行用例：`TC-WTR-23D`
+- 已执行命令：`source ~/.zshrc; pnpm --dir web run build:desktop`
+- 实际结果：TypeScript 编译和 Vite desktop 构建通过，`web/src/components/Toolbar/index.tsx` 中快捷筛选 `CheckableTag` 使用 `paddingInline: 4`、分组内 `Space size={2}`、分组右间距 `4px`，构建产物生成成功。
+- 行为边界：本次只调整 tag 内边距和分组间距，未修改 `handleTagClick` 或 `filters` 状态更新逻辑；筛选选中/取消选中的行为保持不变。
+- 结论：`TC-WTR-23D` 通过；Network 顶部快捷筛选器间距已收紧，构建验证无阻塞。
