@@ -474,6 +474,7 @@ impl BifrostFileParser {
             updated_at: Option<String>,
             description: Option<String>,
             group: Option<String>,
+            #[serde(default)]
             sync: RuleSyncMeta,
         }
 

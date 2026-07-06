@@ -142,7 +142,27 @@
 - `.bifrost` 导入 POST 请求带 `X-Bifrost-CSRF`，network 导入后跳转 Traffic，rules 导入后跳转 Rules。
 - 同类 `.bifrost-file` detect/import/export 接口统一使用 CSRF-aware API client。
 
-### TC-DOR-08 桌面端 OpenURL 能打开外部链接
+### TC-DOR-08 .bifrost 导入前预览并确认
+
+操作步骤：
+
+1. 准备一个类型为 `rules` 的 `.bifrost` 文件，通过拖入页面、文件选择器或双击文件打开。
+2. 查看弹出的导入预览窗口。
+3. 点击 `Cancel`，确认不会导入规则；再次打开同一文件后点击 `Import`。
+4. 准备一个包含多条请求的 `network` `.bifrost` 文件，通过拖入页面、文件选择器或双击文件打开。
+5. 查看弹出的导入预览窗口，然后点击 `Import`。
+6. 准备一个只包含一条请求的 `network` `.bifrost` 文件，通过拖入页面、文件选择器或双击文件打开。
+7. 查看弹出的导入预览窗口，然后点击 `Import`。
+
+预期结果：
+
+- rules 文件导入前展示规则名称、启用状态、描述、有效行数和规则详情，点击确认后才导入并跳转 Rules。
+- 多请求 network 文件导入前展示请求数量、域名标签和请求列表，点击确认后才导入并跳转 Traffic。
+- 单请求 network 文件导入前直接使用 Network 详情组件预览请求/响应详情，点击确认后才导入并跳转 Traffic。
+- 拖拽导入、文件选择器导入和 OS 文件关联打开都复用同一套预览确认流程。
+- 点击取消不会调用 `/api/bifrost-file/import`，不会改写当前 Rules 或 Network 数据。
+
+### TC-DOR-09 桌面端 OpenURL 能打开外部链接
 
 操作步骤：
 
@@ -175,3 +195,4 @@
 | 2026-07-06 | TC-DOR-06 | PASS：`bash e2e-tests/tests/test_desktop_open_requests_contract.sh` 通过，覆盖协议/文件关联配置、single-instance/deep-link 依赖、tray app route fallback 契约、desktop open request parser。 |
 | 2026-07-06 | TC-DOR-01 / TC-DOR-03 / TC-DOR-04 / TC-DOR-05 的核心代码路径 | PASS：`cargo test -p bifrost-cli tray::` 通过，`cargo test --manifest-path desktop/src-tauri/Cargo.toml open_requests` 通过，`pnpm --dir web run build:desktop` 通过，`pnpm --dir web test:unit src/api/bifrost-file.test.ts` 通过。真实已安装 App 的 LaunchServices/文件双击操作仍需发布包安装环境复测。 |
 | 2026-07-06 | TC-DOR-07 | PASS：`pnpm --dir web test:unit src/api/bifrost-file.test.ts` 覆盖 import/export POST 请求带 `X-Bifrost-CSRF`；`rg` 扫描确认前端直接 `axios.post/put/delete/patch` 只剩全局 CSRF-aware client 和错误格式化使用。 |
+| 2026-07-06 | TC-DOR-08 | PASS：`pnpm --dir web test:unit src/api/bifrost-file.test.ts` 覆盖 preview POST 请求带 `X-Bifrost-CSRF`；`pnpm --dir web exec eslint ...` 与 `pnpm --dir web run build:desktop` 覆盖 rules、多请求 network、单请求 network 预览确认 UI 编译通过；`cargo test -p bifrost-admin bifrost_file --lib` 覆盖 preview 后端解析与单请求详情数据。 |

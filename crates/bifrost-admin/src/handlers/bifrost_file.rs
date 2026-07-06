@@ -1690,6 +1690,85 @@ mod tests {
     }
 
     #[test]
+    fn preview_rules_includes_rule_details() {
+        let content = r#"01 rules
+
+[meta]
+name = "preview-rules"
+enabled = false
+description = "preview before import"
+
+---
+example.com proxy://127.0.0.1:8080
+"#;
+
+        let preview = build_preview(content).expect("rules preview");
+
+        assert_eq!(preview.file_type, BifrostFileType::Rules);
+        assert_eq!(preview.item_count, Some(1));
+        let rules = preview.rules.expect("rules preview payload");
+        assert_eq!(rules.name, "preview-rules");
+        assert!(!rules.enabled);
+        assert_eq!(rules.description.as_deref(), Some("preview before import"));
+        assert_eq!(rules.line_count, 1);
+        assert_eq!(rules.content.trim(), "example.com proxy://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn preview_single_network_record_includes_detail_payload() {
+        let records = vec![NetworkRecord {
+            id: "REQ-preview".to_string(),
+            method: "POST".to_string(),
+            url: "https://api.example.test/v1/items?limit=1".to_string(),
+            status: 201,
+            host: Some("api.example.test".to_string()),
+            path: Some("/v1/items?limit=1".to_string()),
+            protocol: Some("https".to_string()),
+            actual_url: None,
+            actual_host: None,
+            listener_port: Some(9900),
+            has_rule_hit: Some(false),
+            error_message: None,
+            client_app: Some("Preview Client".to_string()),
+            client_path: None,
+            request_headers: Some(vec![(
+                "content-type".to_string(),
+                "application/json".to_string(),
+            )]),
+            response_headers: Some(vec![(
+                "content-type".to_string(),
+                "application/json".to_string(),
+            )]),
+            request_body: Some(r#"{"name":"preview"}"#.to_string()),
+            response_body: Some(r#"{"ok":true}"#.to_string()),
+            duration_ms: 42,
+            timestamp: 1779283635053,
+            matched_rules: None,
+            active_rules: None,
+        }];
+        let content = BifrostFileWriter::write_network("preview-network", None, &records)
+            .expect("network package");
+
+        let preview = build_preview(&content).expect("network preview");
+
+        assert_eq!(preview.file_type, BifrostFileType::Network);
+        assert_eq!(preview.item_count, Some(1));
+        let network = preview.network.expect("network preview payload");
+        assert_eq!(network.record_count, 1);
+        assert_eq!(network.hosts, vec!["api.example.test".to_string()]);
+        assert_eq!(network.records.len(), 1);
+        assert_eq!(network.records[0].method, "POST");
+        let detail = network.single_record.expect("single record detail");
+        assert_eq!(detail.record.id, "OUT-REQ-preview");
+        assert_eq!(detail.record.host, "api.example.test");
+        assert_eq!(
+            detail.request_body.as_deref(),
+            Some(r#"{"name":"preview"}"#)
+        );
+        assert_eq!(detail.response_body.as_deref(), Some(r#"{"ok":true}"#));
+    }
+
+    #[test]
     fn network_export_rejects_empty_selection() {
         let err = validate_network_export_records(&[], &[], 0).unwrap_err();
         assert!(err.contains("Select at least one Network record"));

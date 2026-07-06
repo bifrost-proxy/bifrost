@@ -11,6 +11,7 @@ Required behavior:
 - The desktop app is strictly single-instance. A second launch forwards deep links and `.bifrost` files to the already running instance instead of starting another UI/backend.
 - The desktop bundle registers the `bifrost://` protocol and `.bifrost` file association.
 - `.bifrost` files opened through the OS should import through the same parser as drag-and-drop. Network/capture files route to Traffic; rules files route to Rules.
+- `.bifrost` imports must preview before writing: rules show rule name, status, details, and content; multi-request network packages show request count, domains, and representative requests; single-request network packages reuse the Network detail view for review. Import only starts after confirmation.
 
 ## Contract
 
@@ -38,7 +39,7 @@ Unknown protocol routes are ignored and logged. Non-`.bifrost` file arguments ar
 - `tauri-plugin-deep-link` handles `bifrost://` events. On Windows/Linux the runtime registers schemes dynamically; on macOS the bundle metadata is the source of truth.
 - Desktop open events are queued in `BackendState.pending_open_requests` before emitting `desktop://open-request`. This avoids losing a request when the WebView has not mounted its listener yet.
 - Web consumes pending requests through `get_pending_desktop_open_requests` and listens for `desktop://open-request`.
-- `.bifrost` import reuses `importFile` from `BifrostFileDropZone`, so drag-and-drop and OS file-open share type detection, store refresh, toast behavior, and target route mapping.
+- `.bifrost` import reuses `previewFile` and `importFile` from the shared Web import helpers, so drag-and-drop, file picker, and OS file-open share preview, confirmation, store refresh, toast behavior, and target route mapping.
 
 ## Validation Plan
 
@@ -46,7 +47,7 @@ Unknown protocol routes are ignored and logged. Non-`.bifrost` file arguments ar
   - `cargo test -p bifrost-cli tray::` verifies tray menu actions and app link formatting.
   - `cargo test --manifest-path desktop/src-tauri/Cargo.toml open_requests` verifies deep-link parsing, route allowlist, and `.bifrost` file URL parsing.
 - Web:
-  - `pnpm --dir web test:unit src/api/bifrost-file.test.ts` verifies existing `.bifrost` parser coverage.
+  - `pnpm --dir web test:unit src/api/bifrost-file.test.ts` verifies `.bifrost` preview/import/export API calls use the CSRF-aware client.
   - `pnpm --dir web run build:desktop` verifies the Tauri WebView bridge compiles.
 - E2E contract:
   - `bash e2e-tests/tests/test_desktop_open_requests_contract.sh` checks the config/dependency contract and runs the focused Rust guards.

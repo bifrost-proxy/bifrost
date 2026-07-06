@@ -8,6 +8,11 @@ TAURI_CONFIG="desktop/src-tauri/tauri.conf.json"
 DESKTOP_CARGO="desktop/src-tauri/Cargo.toml"
 TRAY_MENU="crates/bifrost-cli/src/commands/tray/menu.rs"
 TRAY_RUNTIME="crates/bifrost-cli/src/commands/tray/tray.rs"
+WEB_DROP_ZONE="web/src/components/BifrostFileDropZone/index.tsx"
+WEB_IMPORT_BUTTON="web/src/components/ImportBifrostButton/index.tsx"
+WEB_PREVIEW="web/src/components/BifrostFilePreview/index.tsx"
+WEB_API="web/src/api/bifrost-file.ts"
+ADMIN_BIFROST_FILE="crates/bifrost-admin/src/handlers/bifrost_file.rs"
 
 python3 - "$TAURI_CONFIG" <<'PY'
 import json
@@ -38,6 +43,11 @@ grep -q 'tauri-plugin-single-instance' "$DESKTOP_CARGO"
 grep -q 'OpenAppRoute' "$TRAY_MENU"
 grep -q 'bifrost://open/' "$TRAY_RUNTIME"
 grep -q 'fallback_url' "$TRAY_RUNTIME"
+grep -q '"/preview"' "$ADMIN_BIFROST_FILE"
+grep -q 'previewFile' "$WEB_API"
+grep -q 'confirmBifrostFileImport' "$WEB_DROP_ZONE"
+grep -q 'confirmBifrostFileImport' "$WEB_IMPORT_BUTTON"
+grep -q 'TrafficDetail' "$WEB_PREVIEW"
 
 cargo test -p bifrost-cli tray::
 cargo test --manifest-path desktop/src-tauri/Cargo.toml open_requests
