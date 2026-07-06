@@ -85,11 +85,19 @@
 
 .statValue {
   margin-top: 24px;
-  font-size: clamp(26px, 3vw, 38px);
+  max-width: 100%;
+  overflow: hidden;
+  font-size: clamp(22px, 2.25vw, 32px);
   line-height: 1;
   font-weight: 850;
   letter-spacing: 0;
+  text-overflow: ellipsis;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.statValueCompact {
+  font-size: clamp(20px, 1.9vw, 28px);
 }
 
 .statCaption {

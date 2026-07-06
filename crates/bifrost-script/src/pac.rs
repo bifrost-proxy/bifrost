@@ -81,9 +81,13 @@ impl PacEngine {
         let raw = context.with(|js_ctx| {
             install_pac_helpers(&js_ctx)?;
             remove_dangerous_globals(&js_ctx);
-            js_ctx
-                .eval::<(), _>(script)
-                .map_err(|e| ScriptError::ExecutionFailed(format_js_error(&js_ctx, e)))?;
+            js_ctx.eval::<(), _>(script).map_err(|e| {
+                if Instant::now() >= *deadline {
+                    ScriptError::Timeout(self.config.timeout_ms)
+                } else {
+                    ScriptError::ExecutionFailed(format_js_error(&js_ctx, e))
+                }
+            })?;
             if Instant::now() >= *deadline {
                 return Err(ScriptError::Timeout(self.config.timeout_ms));
             }
@@ -93,7 +97,13 @@ impl PacEngine {
             })?;
             let result: String = finder
                 .call((url.to_string(), host.to_string()))
-                .map_err(|e| ScriptError::ExecutionFailed(format_js_error(&js_ctx, e)))?;
+                .map_err(|e| {
+                    if Instant::now() >= *deadline {
+                        ScriptError::Timeout(self.config.timeout_ms)
+                    } else {
+                        ScriptError::ExecutionFailed(format_js_error(&js_ctx, e))
+                    }
+                })?;
             Ok::<String, ScriptError>(result)
         })?;
 
@@ -552,10 +562,9 @@ function FindProxyForURL(url, host) {
                 "https://example.com/",
                 "example.com",
             )
-            .unwrap_err()
-            .to_string();
+            .unwrap_err();
 
-        assert!(err.contains("timed out") || err.contains("interrupted"));
+        assert!(matches!(err, ScriptError::Timeout(_)));
     }
 
     #[test]

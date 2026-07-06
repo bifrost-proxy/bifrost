@@ -1,4 +1,5 @@
 import { Tag, Switch, Button, Space, theme, Tooltip, Popover } from "antd";
+import type { CSSProperties } from "react";
 import {
   DeleteOutlined,
   ExportOutlined,
@@ -37,6 +38,12 @@ const filterGroups = {
   imported: ["Imported"],
 };
 
+const quickFilterTagStyle: CSSProperties = {
+  marginInlineEnd: 0,
+  paddingInline: 4,
+  fontSize: 12,
+};
+
 export default function Toolbar({
   filters,
   onClearAll,
@@ -65,13 +72,13 @@ export default function Toolbar({
   };
 
   const renderFilterGroup = (group: keyof ToolbarFilters, tags: string[]) => (
-    <Space size={4} wrap style={{ marginRight: 8 }}>
+    <Space size={2} wrap style={{ marginRight: 4 }}>
       {tags.map((tag) => (
         <Tag.CheckableTag
           key={tag}
           checked={filters[group].includes(tag)}
           onChange={() => handleTagClick(group, tag)}
-          style={{ marginInlineEnd: 0, fontSize: 12 }}
+          style={quickFilterTagStyle}
         >
           {tag}
         </Tag.CheckableTag>

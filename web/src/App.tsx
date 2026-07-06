@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, type CSSProperties } from "react";
 import { BrowserRouter, HashRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
-import { ConfigProvider, Modal, Steps, App as AntApp, message, theme, Typography } from "antd";
+import { ConfigProvider, Modal, Steps, App as AntApp, message, theme, Typography, Button, Space } from "antd";
 import AppLayout from "./components/Layout";
 import BifrostFileDropZone from "./components/BifrostFileDropZone";
 import PendingAuthModal from "./components/PendingAuthModal";
@@ -25,7 +25,10 @@ import {
   DESKTOP_HANDOFF_COMPLETE_EVENT,
   getDesktopRuntime,
   listenDesktopEvent,
+  startDesktopCore,
+  type DesktopRuntimeInfo,
 } from "./desktop/tauri";
+import { getCliInstallStatus, installCliFromDesktop, type CliInstallStatus } from "./api/system";
 import { useThemeStore, initThemeListener } from "./stores/useThemeStore";
 import { useGlobalDataSync } from "./hooks/useGlobalDataSync";
 import { useEditorCompletion } from "./hooks/useEditorCompletion";
@@ -38,7 +41,10 @@ import {
   getAdminPrefix,
   initializeDesktopRuntime,
   isDesktopShell,
+  setDesktopProxyPort,
 } from "./runtime";
+
+const CLI_DOCS_URL = "https://bifrost-proxy.github.io/getting-started/desktop";
 
 export default function App() {
   const [desktopPlatform, setDesktopPlatform] = useState(getDesktopPlatform());
@@ -169,10 +175,13 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
       }}
     >
       <AntApp>
-      {isDesktopShell() && desktopPlatform === "macos" ? (
-        <DesktopTransitionMask resolvedTheme={resolvedTheme} />
-      ) : null}
-      <Modal
+        {isDesktopShell() ? (
+          <DesktopStartupGate resolvedTheme={resolvedTheme} />
+        ) : null}
+        {isDesktopShell() && desktopPlatform === "macos" ? (
+          <DesktopTransitionMask resolvedTheme={resolvedTheme} />
+        ) : null}
+        <Modal
         open={desktopCoreVisible}
         title={
           desktopCorePhase === "error"
@@ -344,6 +353,228 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
       )}
       </AntApp>
     </ConfigProvider>
+  );
+}
+
+type CliGatePhase = "checking" | "missing" | "installing" | "installed" | "dismissed" | "error";
+
+function DesktopStartupGate({ resolvedTheme }: { resolvedTheme: "light" | "dark" }) {
+  const [runtime, setRuntime] = useState<DesktopRuntimeInfo | null>(null);
+  const [runtimeError, setRuntimeError] = useState<string | null>(null);
+  const [startingCore, setStartingCore] = useState(false);
+  const [cliStatus, setCliStatus] = useState<CliInstallStatus | null>(null);
+  const [cliPhase, setCliPhase] = useState<CliGatePhase>("checking");
+  const [cliError, setCliError] = useState<string | null>(null);
+
+  const refreshRuntime = useCallback(async () => {
+    try {
+      const next = await getDesktopRuntime();
+      setRuntime(next);
+      setRuntimeError(null);
+      if (next.startupReady) {
+        setDesktopProxyPort(next.proxyPort);
+      }
+      return next;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to read desktop runtime";
+      setRuntimeError(message);
+      return null;
+    }
+  }, []);
+
+  const refreshCliStatus = useCallback(async () => {
+    try {
+      const status = await getCliInstallStatus();
+      setCliStatus(status);
+      setCliError(null);
+      setCliPhase(status.installed ? "dismissed" : "missing");
+    } catch (error) {
+      setCliError(error instanceof Error ? error.message : "Failed to check CLI install");
+      setCliPhase("error");
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      const next = await refreshRuntime();
+      if (cancelled) {
+        return;
+      }
+      if (next?.startupReady && cliPhase === "checking") {
+        await refreshCliStatus();
+      }
+    };
+    void tick();
+    const timer = window.setInterval(() => {
+      void tick();
+    }, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [cliPhase, refreshCliStatus, refreshRuntime]);
+
+  const handleStartCore = useCallback(async () => {
+    setStartingCore(true);
+    try {
+      const next = await startDesktopCore();
+      setRuntime(next);
+      setRuntimeError(null);
+      setDesktopProxyPort(next.proxyPort);
+      if (next.startupReady) {
+        message.success("Bifrost service started");
+        if (cliPhase === "checking") {
+          await refreshCliStatus();
+        }
+      }
+    } catch (error) {
+      setRuntimeError(error instanceof Error ? error.message : "Failed to start Bifrost service");
+    } finally {
+      setStartingCore(false);
+    }
+  }, [cliPhase, refreshCliStatus]);
+
+  const handleInstallCli = useCallback(async () => {
+    setCliPhase("installing");
+    setCliError(null);
+    try {
+      const status = await installCliFromDesktop({ install_skills: true });
+      setCliStatus(status);
+      if (status.installed) {
+        setCliPhase("installed");
+        message.success("CLI installed");
+      } else {
+        setCliPhase("missing");
+      }
+    } catch (error) {
+      setCliError(error instanceof Error ? error.message : "Failed to install CLI");
+      setCliPhase("error");
+    }
+  }, []);
+
+  const openCliDocs = useCallback(() => {
+    window.open(CLI_DOCS_URL, "_blank", "noopener,noreferrer");
+  }, []);
+
+  const coreNeedsAttention = Boolean(runtime?.startupError) || Boolean(runtimeError);
+  if (coreNeedsAttention) {
+    return (
+      <DesktopBlockingOverlay
+        resolvedTheme={resolvedTheme}
+        title="Start Bifrost Service"
+        description="Bifrost Desktop needs the local core service before the interface can connect."
+        detail={runtime?.startupError || runtimeError || "The service is not running."}
+        actions={
+          <Button type="primary" size="large" loading={startingCore} onClick={handleStartCore}>
+            Start Bifrost Service
+          </Button>
+        }
+      />
+    );
+  }
+
+  if (cliPhase === "missing" || cliPhase === "installing" || cliPhase === "installed" || cliPhase === "error") {
+    return (
+      <DesktopBlockingOverlay
+        resolvedTheme={resolvedTheme}
+        title={cliPhase === "installed" ? "CLI Installed" : "Install Bifrost CLI"}
+        description={
+          cliPhase === "installed"
+            ? "Bifrost CLI is ready for Terminal and AI coding tools."
+            : "Install the CLI so Terminal, Codex, Claude Code, Trae, and Cursor can call Bifrost."
+        }
+        detail={
+          cliPhase === "error"
+            ? cliError || "CLI install failed"
+            : cliPhase === "installed"
+              ? cliStatus?.skills_message || "Installation completed successfully."
+              : cliStatus?.path_hint || "The CLI is not installed in your user command path yet."
+        }
+        actions={
+          cliPhase === "installed" ? (
+            <Space>
+              <Button size="large" onClick={openCliDocs}>
+                Open Docs
+              </Button>
+              <Button type="primary" size="large" onClick={() => setCliPhase("dismissed")}>
+                Done
+              </Button>
+            </Space>
+          ) : (
+            <Space>
+              <Button size="large" onClick={() => setCliPhase("dismissed")}>
+                Later
+              </Button>
+              <Button
+                type="primary"
+                size="large"
+                loading={cliPhase === "installing"}
+                onClick={handleInstallCli}
+              >
+                Install CLI
+              </Button>
+            </Space>
+          )
+        }
+      />
+    );
+  }
+
+  return null;
+}
+
+function DesktopBlockingOverlay({
+  resolvedTheme,
+  title,
+  description,
+  detail,
+  actions,
+}: {
+  resolvedTheme: "light" | "dark";
+  title: string;
+  description: string;
+  detail?: string | null;
+  actions: React.ReactNode;
+}) {
+  const dark = resolvedTheme === "dark";
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 1400,
+        display: "grid",
+        placeItems: "center",
+        padding: 24,
+        background: dark ? "rgba(5, 10, 18, 0.86)" : "rgba(244, 248, 252, 0.88)",
+        backdropFilter: "blur(18px) saturate(1.08)",
+      }}
+    >
+      <div
+        style={{
+          width: "min(560px, 100%)",
+          padding: 28,
+          borderRadius: 8,
+          background: dark ? "rgba(15, 23, 42, 0.92)" : "rgba(255, 255, 255, 0.94)",
+          border: dark ? "1px solid rgba(148, 163, 184, 0.18)" : "1px solid rgba(15, 23, 42, 0.08)",
+          boxShadow: dark ? "0 32px 96px rgba(0, 0, 0, 0.52)" : "0 28px 88px rgba(15, 23, 42, 0.16)",
+        }}
+      >
+        <Typography.Title level={3} style={{ marginTop: 0 }}>
+          {title}
+        </Typography.Title>
+        <Typography.Paragraph style={{ fontSize: 15 }}>
+          {description}
+        </Typography.Paragraph>
+        {detail ? (
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 24 }}>
+            {detail}
+          </Typography.Paragraph>
+        ) : null}
+        {actions}
+      </div>
+    </div>
   );
 }
 

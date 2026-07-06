@@ -22,7 +22,7 @@
 | [cli-start-advanced.md](./cli-start-advanced.md) | CLI Start 高级参数 | 33 | 顶层 help 短链化、按场景组织的 CLI 快速开始、同一 Bifrost 服务服务多个应用/开发任务、Agent 协作开发业务 Skill 场景、完整 CLI 详细文档入口、全局 Values 推荐边界、TLS 拦截域名/应用排除与白名单、系统代理（默认启用、--no-system-proxy 禁用、异步收敛轮询、互斥校验）、CLI 代理环境变量、访问控制模式、Badge 注入、证书检查跳过、日志配置 |
 | [cli-rule-management.md](./cli-rule-management.md) | CLI 规则管理 | 51 | rule 子命令全覆盖：list/add/show/get/update/enable/disable/delete/rename/reorder/active/sync，含过滤器、lineProps、legacy filter 控制标记兼容，以及保存前语法检查 JSON 报告、失败不落盘和 allow-invalid 草稿保存、redirect URL 不被误解析为远程内容 |
 | [pac-proxy-auto-config-design.md](./pac-proxy-auto-config-design.md) | PAC Proxy Auto-Config 方案 | 7 | 设计阶段验证 PAC 规则语法、内嵌/Values/本地文件/远程 URL、filters、Final URL、`enable://proxyHost`、系统代理不变量、安全限制、测试计划与分阶段落地 |
-| [pac-proxy-auto-config.md](./pac-proxy-auto-config.md) | PAC Proxy Auto-Config | 4 | 实现阶段验证 PAC engine/规则解析、Values/本地/远程 PAC、PAC + 转发规则 Mock Server、PAC + 双 Bifrost 上游代理链路、系统代理不变量和文档同步 |
+| [pac-proxy-auto-config.md](./pac-proxy-auto-config.md) | PAC Proxy Auto-Config | 5 | 实现阶段验证 PAC engine/规则解析、Values/本地/远程 PAC、PAC + 转发规则 Mock Server、PAC + 双 Bifrost 上游代理链路、系统代理不变量、PAC CPU 超时错误归一化和文档同步 |
 | [default-global-rule.md](./default-global-rule.md) | 全局 Default 规则 | 7 | Default 规则自动初始化、置顶、不可删除/停用/重命名/重排、内容可编辑，深链进入后可切换其它规则，且在主端口和所有临时端口自动生效 |
 | [rule-share-query.md](./rule-share-query.md) | Rule Share Query | 10 | CLI/Web UI/Admin API 生成分享链接、裸域名目标 URL 默认补 HTTP 并经代理真实导入、HTTPS TLS 解包路径导入含 `@规则引用` 的分享链接、代理 GET 导入后重定向 clean URL、确认页防嵌入、同源 CSRF 与无需填写 hash 的 Apply Rule 浏览器回归、Chrome 临时 profile 清理竞态不误报、`share/` 命名空间复用、同名不同内容后缀创建并独占启用个人规则 |
 | [share-env-exit.md](./share-env-exit.md) | Share 环境快速退出 | 5 | Share 环境页面胶囊红点与呼吸光晕、hover panel Exit 入口、原地 JSON body 退出、成功后刷新当前页面、注入页不暴露进入 Share 前的规则名、退出后恢复进入 Share 前启用的 My Rules 快照、连续 Share 链接不覆盖原始恢复快照，以及进入前空 enabled / 多 enabled 的恢复边界 |
@@ -74,7 +74,7 @@
 | [remote-access-web-ui.md](./remote-access-web-ui.md) | 远程访问管理 Web UI | 17 | 远程访问配置、登录、会话管理、登录记录展示 |
 | [remote-access-brute-force-protection.md](./remote-access-brute-force-protection.md) | 远程访问暴力破解防护 | 13 | 登录失败计数、自动锁定、密码强度校验、本机恢复、前端锁定提示 |
 | [videos-tool.md](./videos-tool.md) | Videos Tool | 4 | AI/TOOLS 下 YouTube 下载入口、默认 Downloads/YouTube、自定义目录、下载进度展示、非 YouTube URL 拒绝 |
-| [webui-traffic.md](./webui-traffic.md) | Web UI Traffic 页面 | 51 | 流量表格、详情面板、Tab 切换、Body 视图、筛选过滤（含主筛选器按代理端口过滤与临时停用单条条件）、右键菜单、CONNECT Response 空状态按 Client IP 开启 TLS 解包和访问白名单、Network .bifrost 导入导出空包防误报、WebSocket/SSE、搜索、高并发 CONNECT 压力 |
+| [webui-traffic.md](./webui-traffic.md) | Web UI Traffic 页面 | 52 | 流量表格、详情面板、Tab 切换、Body 视图、筛选过滤（含主筛选器按代理端口过滤、临时停用单条条件与 Network 顶部快捷筛选器紧凑间距）、右键菜单、CONNECT Response 空状态按 Client IP 开启 TLS 解包和访问白名单、Network .bifrost 导入导出空包防误报、WebSocket/SSE、搜索、高并发 CONNECT 压力 |
 | [network-export.md](./network-export.md) | Network 导出生效规则快照 | 4 | 默认端口与自定义端口 Network `.bifrost` 导出携带对应端口生效规则快照，保持空选择防护和旧文件导入兼容 |
 | [webui-rules.md](./webui-rules.md) | Web UI Rules 页面 | 47 | 规则列表、创建/编辑/删除、排序方式 UI 配置持久化、语法高亮、自动补全、树形视图、`@规则名称` 与 `@组名称/规则名称` 引用解析、候选检索、模糊补全、编辑器原位展开、缺失引用标红和 hover 错误提示、保存时后端语法错误反馈且不落盘、`commented-*` 规则名与注释内 `@` 边界、全局 Dynamic Island、Merged Rules 一键复制、Group active summary 与代理运行时本地 fallback、远端失败和快速本地变更稳定性、Group name 深链不返回 502、退出/重新登录后 Group ID 跳转保持、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点、编辑器内容恢复原文后 Save 按钮禁用回归 |
 | [webui-scripts.md](./webui-scripts.md) | Web UI Scripts 页面 | 25 | 脚本创建（Req/Res/Dec/Parser）、顶部 + 创建菜单、... 更多操作菜单、真实 Import 文件选择器、编辑、保存、测试运行、日志查看、名称校验、树形目录、Parser/Decode 运行时上下文字段补全、桌面端编辑器快捷键回归、Undo 后保存清理黄点 |
@@ -90,7 +90,7 @@
 | [webui-layout-navigation.md](./webui-layout-navigation.md) | Web UI 布局与导航 | 17 | 侧边栏导航、侧边栏小窗口滚动、分割面板、状态栏、状态栏 Sync 快速跳转 Settings Sync、Toolbar、主题切换、版本检查、升级命令复制、拖拽导入 |
 | [tls-interception-status-indicators.md](./tls-interception-status-indicators.md) | HTTPS Interception 状态提示 | 5 | 全局 HTTPS Interception 启用后，Web UI 底部状态栏显示 `TLS: Full On` 动画警示、亮色/暗色主题可读，tray 顶部不展示 TLS 角标，tray 在 System Proxy 下方独立展示 TLS 状态并可直接操作 |
 | [tray-webui-auto-update.md](./tray-webui-auto-update.md) | Tray 与 WebView 后台升级 | 6 | 后台升级 download/install/restart、磁盘二进制已更新但旧 daemon 未重启回归、WebView active→idle 不再卡住 Working、后台子进程诊断日志与退出回收、Tray helper 自主低频后台检查更新与当前版本展示 |
-| [desktop-app-auto-update.md](./desktop-app-auto-update.md) | 桌面端自动更新与 app 命令 | 15 | 桌面端 6 小时检查更新、右下角通知与自动弹窗、desktop/cli channel 分离、`bifrost app install/uninstall/upgrade` dry-run、同版本桌面端跳过重装、Windows 普通用户 MSI 安装回归、Windows 桌面快捷方式不弹 shell 窗口、Windows 桌面壳无原生标题栏/菜单栏、Windows handoff 后保持无边框自定义 chrome、桌面安装后重启，以及独立 CLI 联动更新边界 |
+| [desktop-app-auto-update.md](./desktop-app-auto-update.md) | 桌面端自动更新与 app 命令 | 20 | 桌面端 6 小时检查更新、右下角通知与自动弹窗、desktop/cli channel 分离、`bifrost app install/uninstall/upgrade` dry-run、同版本桌面端跳过重装、旧版本假成功失败门禁、当前运行 app bundle 更新、Finder 启动下常见 CLI 路径发现、桌面 app 感知外部 CLI 停止后全屏提示并手动启动内置 core、未安装 CLI 时提示安装、Windows 普通用户 MSI 安装回归、Windows 桌面快捷方式不弹 shell 窗口、Windows 桌面壳无原生标题栏/菜单栏、Windows handoff 后保持无边框自定义 chrome、桌面安装后重启，以及独立 CLI 联动更新边界 |
 | [desktop-launcher-startup.md](./desktop-launcher-startup.md) | macOS 桌面端启动页 | 4 | 单窗口全尺寸启动页、虚拟水平进度条节奏、暗色/亮色背景风格匹配、fade-only handoff 与主界面稳定显现 |
 | [macos-desktop-titlebar.md](./macos-desktop-titlebar.md) | macOS 桌面端标题栏融合 | 4 | Tauri 桌面端标题栏与 UI 融合、左侧菜单区域拖拽移动窗口、暗色/亮色主题截图，以及 CLI Web UI 隔离 |
 | [webui-ai-skill-assistant.md](./webui-ai-skill-assistant.md) | WebUI AI Skill Assistant | 6 | 底部状态栏版本号旁边的 Skill 引导入口、点击后在入口上方弹出安装浮层、移除旧右下角悬浮气泡、安装命令复制、仓库 SKILL.md 链接、亮色/暗色主题验证 |
@@ -217,7 +217,7 @@
 | [docs-site-redesign.md](./docs-site-redesign.md) | Docs Site Redesign | 12 | 文档站重构实现验证：首页纯 HTML 源、AI 时代代理定位、With AI skill 工作流、部署期 docs/docs-en 自动同步、VitePress 文档区、绿色主题、中英文、明暗模式、主站部署边界、文档区 Logo 回主页路由、E2E 与本地 preview 截图体验 |
 | [utf8-safe-preview.md](./utf8-safe-preview.md) | UTF-8 安全 Preview 截断 | 3 | Agent compaction tool arguments、IM Gateway 任务输出、CLI/API/E2E 错误 preview 在中文/emoji 多字节边界截断时不触发 char boundary panic |
 | [web-lint-cleanup.md](./web-lint-cleanup.md) | Web ESLint 清理 | 2 | web 全量 ESLint 零错误零警告与 TypeScript/Vite build 未退化 |
-| [admin-activity-tab.md](./admin-activity-tab.md) | Admin Activity Tab | 6 | WebUI Activity 一级 tab 默认入口、活动概览卡片 hover、系统代理状态、生效规则解析、Merged Rules 选区/全文复制、撑满高度、临时端口规则详情、按应用流量分布 hover、亮暗主题真实场景验证 |
+| [admin-activity-tab.md](./admin-activity-tab.md) | Admin Activity Tab | 7 | WebUI Activity 一级 tab 默认入口、活动概览卡片 hover、系统代理状态、顶部指标长数值不溢出、生效规则解析、Merged Rules 选区/全文复制、撑满高度、临时端口规则详情、按应用流量分布 hover、亮暗主题真实场景验证 |
 | [storage-e2e-safety.md](./storage-e2e-safety.md) | Storage and E2E Safety | 3 | temp-env 作用域编译回归、core size guard 单元回归、storage rules size guard 编译回归 |
 | [agent-development-review-loop.md](./agent-development-review-loop.md) | Agent Development Review Loop | 9 | Agent 开发任务至少两轮目标复核、代码 review、修复问题、测试运行、结果复盘闭环，持续改进引导语、任务模式判定、任务启动工作区检查、并行开发优先 worktree 隔离、证据台账、完成定义、用户目标验证清单、git diff/status 复核、测试失败归因、默认提交/MR/CI 看护、最终交付验证矩阵、AGENTS/design/human_tests 索引同步，以及 `human_tests/readme.md` 禁止全局总计数字 |
 | [agent-codex-alignment.md](./agent-codex-alignment.md) | Agent Codex Alignment | 8 | 默认 prompt 不泄露兼容实现说明、MCP resource canonical 工具名、shell_command/local_shell 历史 alias 已移除、真实 Bifrost 服务 `/agent/chat` 覆盖 MCP resource / update_plan / set_title / tool_search / 并发工具批、turn events、FuturesOrdered 并发工具批与 history 顺序回填、CI 预构建 release binary 回归、P1 工具链回归 |

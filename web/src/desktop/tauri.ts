@@ -82,6 +82,10 @@ export async function getDesktopRuntime(): Promise<DesktopRuntimeInfo> {
   return invokeDesktop<DesktopRuntimeInfo>("get_desktop_runtime");
 }
 
+export async function startDesktopCore(): Promise<DesktopRuntimeInfo> {
+  return invokeDesktop<DesktopRuntimeInfo>("start_desktop_core");
+}
+
 export async function updateDesktopProxyPort(
   port: number,
 ): Promise<DesktopRuntimeInfo> {

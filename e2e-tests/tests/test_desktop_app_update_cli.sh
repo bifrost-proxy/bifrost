@@ -217,7 +217,7 @@ exit 0
 SH
     chmod +x "$FAKE_APP/Contents/MacOS/Bifrost"
 
-    install_real_output="$(BIFROST_APP_SKIP_RESTART=1 "$BIFROST_BIN" app install --package "$FAKE_APP" --app-dir "$APP_DIR" -y 2>&1)"
+    install_real_output="$(BIFROST_APP_SKIP_RESTART=1 "$BIFROST_BIN" app install --package "$FAKE_APP" --app-dir "$APP_DIR" --version "$VERSION" -y 2>&1)"
     assert_contains_text "$install_real_output" "Desktop app install target:" "real install prints target path"
     if [[ -x "$APP_DIR/Bifrost.app/Contents/MacOS/Bifrost" ]]; then
         _log_pass "real install copies app bundle into target app dir"
@@ -251,6 +251,46 @@ SH
         && _log_pass "real desktop upgrade writes desktop progress source" \
         || { _log_fail "real desktop upgrade writes desktop progress source" "desktop" "$progress_source"; exit 1; }
 
+    STALE_APP="${TEST_ROOT}/fixtures-stale/Bifrost.app"
+    mkdir -p "$STALE_APP/Contents/MacOS"
+    cat >"$STALE_APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key><string>Bifrost</string>
+  <key>CFBundleIdentifier</key><string>dev.bifrost.test</string>
+  <key>CFBundleName</key><string>Bifrost</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.0.140</string>
+  <key>CFBundleVersion</key><string>140</string>
+</dict>
+</plist>
+PLIST
+    cat >"$STALE_APP/Contents/MacOS/Bifrost" <<'SH'
+#!/bin/sh
+exit 0
+SH
+    chmod +x "$STALE_APP/Contents/MacOS/Bifrost"
+    rm -rf "$DATA_DIR"
+    mkdir -p "$DATA_DIR"
+    set +e
+    stale_upgrade_output="$(BIFROST_APP_SKIP_RESTART=1 "$BIFROST_BIN" app upgrade --package "$STALE_APP" --app-dir "$APP_DIR" --source desktop --no-cli --version 0.0.141 -y 2>&1)"
+    stale_upgrade_status=$?
+    set -e
+    if [[ "$stale_upgrade_status" -ne 0 ]]; then
+        _log_pass "desktop upgrade rejects stale installed app version"
+    else
+        _log_fail "desktop upgrade rejects stale installed app version" "non-zero exit" "exit 0: $stale_upgrade_output"
+        exit 1
+    fi
+    assert_contains_text "$stale_upgrade_output" "reports version v0.0.140 instead of target v0.0.141" "stale desktop version error is actionable"
+    progress_file="$DATA_DIR/upgrade-progress.json"
+    progress_phase="$(read_progress_field "$progress_file" phase)"
+    [[ "$progress_phase" == "failed" ]] \
+        && _log_pass "stale desktop upgrade writes failed progress" \
+        || { _log_fail "stale desktop upgrade writes failed progress" "failed" "$progress_phase"; exit 1; }
+
     uninstall_real_output="$("$BIFROST_BIN" app uninstall --app-dir "$APP_DIR" -y 2>&1)"
     assert_contains_text "$uninstall_real_output" "Desktop app path:" "real uninstall prints target path"
     if [[ ! -e "$APP_DIR/Bifrost.app" ]]; then
@@ -274,7 +314,7 @@ elif [[ "$HOST_OS" == MINGW* || "$HOST_OS" == MSYS* || "$HOST_OS" == CYGWIN* ]];
     fi
 
     if [[ -n "$FAKE_WIN_ZIP" && -f "$FAKE_WIN_ZIP" ]]; then
-        install_real_output="$(BIFROST_APP_SKIP_RESTART=1 "$BIFROST_BIN" app install --package "$FAKE_WIN_ZIP" --app-dir "$APP_DIR" -y 2>&1)"
+        install_real_output="$(BIFROST_APP_SKIP_RESTART=1 "$BIFROST_BIN" app install --package "$FAKE_WIN_ZIP" --app-dir "$APP_DIR" --version "$VERSION" -y 2>&1)"
         assert_contains_text "$install_real_output" "Desktop app install target:" "real Windows zip install prints target path"
         if [[ -f "$APP_DIR/bifrost-desktop.exe" ]]; then
             _log_pass "real Windows zip install copies bifrost-desktop.exe into target app dir"
