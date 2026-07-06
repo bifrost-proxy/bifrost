@@ -160,7 +160,7 @@ node scripts/verify-site-links.mjs
 - `pnpm --dir site run build`
 - `pnpm run site:build`（根站变体）
 
-`.github/workflows/site.yml` 在 PR 和 main push 上完整构建校验 `site/dist`。非 PR 事件仍会使用 GitHub Pages 权限发布主仓库项目站，但上传的 artifact 只包含 `site/project-pages-redirect-dist/index.html` 这个 noindex redirect，目标是 `https://bifrost-proxy.github.io/`。公开入口统一由 `bifrost-proxy/bifrost-proxy.github.io` 仓库承载，主仓库项目站只作为历史 `/bifrost/` tombstone，避免继续与根站分叉。
+`.github/workflows/site.yml` 在 PR 和 main push 上只负责完整构建校验 `site/dist`，不再配置或部署主仓库 GitHub Pages 项目站。公开入口与线上文档统一由 `bifrost-proxy/bifrost-proxy.github.io` 仓库承载，并通过根站构建命令从同一份 `site/` 源码同步。`https://bifrost-proxy.github.io/bifrost/` 项目站应在 GitHub Pages 设置中下线，避免它继续与稳定入口站分叉。
 
 ## Sync / 导入导出边界
 
