@@ -4,10 +4,11 @@
 
 Bifrost 当前 Sync 体系把远端同步服务建模为一个全局 `remote_base_url`。这个模型能覆盖官方或自建 Bifrost Sync Server, 但无法表达以下新目标:
 
-- 同时启用多个同步目标, 例如 ByteDance 内网服务 + GitHub Gist 个人备份。
-- 区分 provider 能力: 有的只支持个人规则配置同步, 有的支持小组规则, 有的还能承担 Remote Invoke relay。
+- 同时启用多个同步目标, 例如 ByteDance Internal + Bifrost Cloud + GitHub Gist; 三者独立连接, 不互斥。
+- 区分 provider 能力: 有的只支持规则同步和基础配置同步, 有的支持小组规则, 有的还能承担 Remote Invoke relay。
 - 把 GitHub Gist 这类公开可信开发者服务纳入个人规则同步, 同时保留现有 Bifrost Sync Server 协议。
 - 在 ByteDance 内网自动检测可用 provider, 检测通过后自动推荐或配置 `https://bifrost.bytedance.net`。
+- 当用户完全没有登录任何同步服务时, Web UI 首次进入 Sync 页面应主动弹出登录选择窗口。
 - 让未来 Gitee, WebDAV, OneDrive, Google Drive 等 provider 可以按同一扩展点接入。
 
 因此本方案把 Sync 从 "one remote URL" 升级为 "provider registry + provider instances + capability routing + sync lanes"。
@@ -18,12 +19,15 @@ Bifrost 当前 Sync 体系把远端同步服务建模为一个全局 `remote_bas
 
 - 引入 `Provider Type`: 一类同步服务实现, 例如 `bifrost-server`, `github-gist`, `webdav`。
 - 引入 `Provider Instance`: 用户实际启用的一个账号或端点, 例如 `byte-work`, `github-personal`。
-- 引入 `Capability`: provider 能力声明, 区分个人规则、小组规则、Remote Invoke relay、SSO、OAuth、端到端加密等。
-- 引入 `Sync Lane`: 按数据/能力维度配置路由, 至少包含 `personal_rules`, `group_rules`, `remote_invoke`。
+- 引入 `Capability`: provider 能力声明, 区分规则同步、基础配置同步、小组规则、Remote Invoke relay、SSO、OAuth、端到端加密等。
+- 引入 `Sync Lane`: 按数据/能力维度配置路由, 至少包含 `personal_rules`, `basic_config`, `group_rules`, `remote_invoke`。
 - 支持多个 provider instance 同时 enabled, 但每条 lane 独立声明读写目标和优先级。
-- GitHub Gist provider 只承担个人规则配置同步, 不出现在小组规则和 Remote Invoke relay 路由中。
-- Bifrost Server provider 继续兼容现有 Sync Server 协议, 并可声明小组规则和 Remote Invoke relay 能力。
+- 产品首屏支持三种内置同步服务卡片: ByteDance Internal, Bifrost Cloud, GitHub Gist。三者都可以独立连接, 可同时处于已登录状态。
+- GitHub Gist provider 承担个人规则同步和基础配置同步, 不出现在小组规则和 Remote Invoke relay 路由中。
+- Bifrost Cloud provider 继续兼容现有 Sync Server 协议, 并可声明小组规则和 Remote Invoke relay 能力。技术类型仍为 `bifrost-server`。
 - ByteDance 内网 provider 通过探测自动发现, 检测成功后作为 managed provider 推荐启用。
+- Remote Invoke 注册只允许 ByteDance Internal 或 Bifrost Cloud 这两类带 `remote_invoke_relay` capability 的 provider; 如果两者都已登录且启用, 本机服务要同时向两个 provider 注册。
+- 基础配置同步只覆盖用户明确要求的 Settings 基础网络配置: 应用白名单、域名白名单、黑名单/排除列表; 其他配置暂不同步。
 - 旧 `sync.remote_base_url` 迁移为默认 `bifrost-server` provider instance 的配置字段。
 
 ### Must not break
@@ -32,6 +36,7 @@ Bifrost 当前 Sync 体系把远端同步服务建模为一个全局 `remote_bas
 - 现有 Admin API `/sync/status`, `/sync/config`, `/sync/login`, `/sync/run` 在兼容期继续返回旧字段。
 - Remote Invoke relay 不再无条件读取规则同步 provider URL; 只有带 `remote_invoke_relay` capability 的 provider 才能被 lane 选中。
 - Group Rules 不从 GitHub Gist/WebDAV 这类个人文件型 provider 读取。
+- 基础配置同步不包含证书、密码、代理认证、Remote Invoke grant、IM provider secret、Agent 模型密钥或其它敏感配置。
 - Provider token, OAuth access token, Gist token 不写入公开配置文件。
 
 ### Out of scope for first implementation
@@ -49,10 +54,10 @@ Provider Type 是代码层扩展点, 每个 type 实现相同 trait, 并声明�
 
 | Type | Description | First class use |
 | --- | --- | --- |
-| `bifrost-server` | 现有 Bifrost Sync Server 协议, 覆盖官方、内网、自建部署 | 规则、小组、Remote Invoke |
-| `github-gist` | GitHub OAuth + secret gist 文件 | 个人规则配置同步 |
-| `webdav` | WebDAV 文件存储 | 个人规则配置同步或备份 |
-| `gitee-repo` | Gitee/GitCode 私有仓库文件 | 个人规则配置同步 |
+| `bifrost-server` | 现有 Bifrost Sync Server 协议, 覆盖 ByteDance Internal、Bifrost Cloud、自建部署 | 规则、基础配置、小组、Remote Invoke |
+| `github-gist` | GitHub OAuth + secret gist 文件 | 个人规则和基础配置同步 |
+| `webdav` | WebDAV 文件存储 | 个人规则和基础配置同步或备份 |
+| `gitee-repo` | Gitee/GitCode 私有仓库文件 | 个人规则和基础配置同步 |
 
 ### Provider Instance
 
@@ -85,7 +90,8 @@ Provider Instance 是用户配置或自动发现的实际目标。
 
 | Capability | Meaning |
 | --- | --- |
-| `personal_rules_config_sync` | 个人规则配置快照读写 |
+| `rules_sync` | 个人规则列表和规则内容快照读写 |
+| `config_sync` | 基础配置快照读写, 仅覆盖当前允许同步的 Settings 子集 |
 | `group_rules` | 小组列表和小组规则读写 |
 | `remote_invoke_relay` | Remote Invoke relay / pairing / grants / calls |
 | `identity_profile` | 可提供用户身份信息 |
@@ -106,9 +112,15 @@ Lane 是能力路由表, 决定每类数据从哪些 provider 读、写到哪些
     "personal_rules": {
       "enabled": true,
       "read_from": ["byte-work"],
-      "write_to": ["byte-work", "github-personal"],
+      "write_to": ["byte-work", "bifrost-cloud", "github-personal"],
       "conflict_policy": "ask",
       "mirror_policy": "best_effort"
+    },
+    "basic_config": {
+      "enabled": true,
+      "read_from": ["byte-work"],
+      "write_to": ["byte-work", "bifrost-cloud", "github-personal"],
+      "scope": ["app_allowlist", "domain_allowlist", "blacklist"]
     },
     "group_rules": {
       "enabled": true,
@@ -117,7 +129,8 @@ Lane 是能力路由表, 决定每类数据从哪些 provider 读、写到哪些
     },
     "remote_invoke": {
       "enabled": true,
-      "providers": ["byte-work"],
+      "providers": ["byte-work", "bifrost-cloud"],
+      "registration": "all_eligible",
       "selection": "priority"
     }
   }
@@ -130,21 +143,23 @@ Default product rule:
 - 多 provider 同时启用时, 第二个及之后默认作为 mirror, 防止多写冲突。
 - 只有高级设置允许 multi-read / multi-write。
 
-## Capability Matrix
+## Product Provider Matrix
 
-| Provider | Personal rules | Group rules | Remote Invoke | Identity | Notes |
-| --- | --- | --- | --- | --- | --- |
-| ByteDance Internal | Yes | Yes | Yes | Byte SSO | 自动检测, managed, 默认推荐 |
-| Bifrost Server | Yes | Optional | Optional | Bifrost token / OAuth2 | 官方或自建, 能力由 server `/v4/capabilities` 返回 |
-| GitHub Gist | Yes | No | No | GitHub OAuth | secret gist + 客户端加密; 只同步个人规则 |
-| WebDAV | Yes | No | No | Basic/app password | 国内和自部署 fallback |
-| Gitee Repo | Yes | No | No | OAuth/PAT | 国内 Git provider 后续接入 |
+| Product provider | Type | Rules sync | Config sync | Remote Invoke | Group rules | Identity | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| ByteDance Internal | `bifrost-server` managed | Yes | Yes | Yes | Yes | Byte SSO | 自动检测, 内网推荐, 可与其它 provider 同时连接 |
+| Bifrost Cloud | `bifrost-server` custom URL | Yes | Yes | Yes | Optional | Bifrost token / OAuth2 | 官方云或自建同步服务, 能力由 server `/v4/capabilities` 返回 |
+| GitHub Gist | `github-gist` | Yes | Yes | No | No | GitHub OAuth | secret gist + 客户端加密; 只同步个人规则和基础配置 |
+| WebDAV | `webdav` | Yes | Yes | No | No | Basic/app password | 后续国内和自部署 fallback |
+| Gitee Repo | `gitee-repo` | Yes | Yes | No | No | OAuth/PAT | 国内 Git provider 后续接入 |
 
 UI 和 CLI 必须以此矩阵裁剪动作:
 
 - 不支持 `remote_invoke_relay` 的 provider 不显示 Remote Invoke 入口。
 - 不支持 `group_rules` 的 provider 不显示小组开关。
-- 文件型 provider 默认显示 "Rules only"。
+- 所有 provider 卡片都显示三类核心能力: `Remote Invoke`, `Rules Sync`, `Config Sync`。
+- GitHub Gist 显示 `Rules Sync` 和 `Config Sync`, `Remote Invoke` 显示为不支持。
+- 文件型 provider 默认显示 "Rules + Config only"。
 
 ## Storage And Config
 
@@ -167,6 +182,15 @@ managed = true
 [sync.providers.byte-work.config]
 remote_base_url = "https://bifrost.bytedance.net"
 
+[sync.providers.bifrost-cloud]
+type = "bifrost-server"
+enabled = true
+display_name = "Bifrost Cloud"
+mode = "primary"
+
+[sync.providers.bifrost-cloud.config]
+remote_base_url = "https://sync.example.com"
+
 [sync.providers.github-personal]
 type = "github-gist"
 enabled = true
@@ -180,8 +204,14 @@ filename = "bifrost-sync.json"
 [sync.lanes.personal_rules]
 enabled = true
 read_from = ["byte-work"]
-write_to = ["byte-work", "github-personal"]
+write_to = ["byte-work", "bifrost-cloud", "github-personal"]
 conflict_policy = "ask"
+
+[sync.lanes.basic_config]
+enabled = true
+read_from = ["byte-work"]
+write_to = ["byte-work", "bifrost-cloud", "github-personal"]
+scope = ["app_allowlist", "domain_allowlist", "blacklist"]
 
 [sync.lanes.group_rules]
 enabled = true
@@ -190,7 +220,8 @@ write_to = ["byte-work"]
 
 [sync.lanes.remote_invoke]
 enabled = true
-providers = ["byte-work"]
+providers = ["byte-work", "bifrost-cloud"]
+registration = "all_eligible"
 selection = "priority"
 ```
 
@@ -251,6 +282,15 @@ pub trait SyncProvider: Send + Sync {
         snapshot: SyncEnvelope,
         precondition: WritePrecondition,
     ) -> Result<WriteResult>;
+
+    async fn read_basic_config(&self, instance: &ProviderInstance, session: &ProviderSession) -> Result<RemoteSnapshot>;
+    async fn write_basic_config(
+        &self,
+        instance: &ProviderInstance,
+        session: &ProviderSession,
+        snapshot: SyncEnvelope,
+        precondition: WritePrecondition,
+    ) -> Result<WriteResult>;
 }
 ```
 
@@ -286,6 +326,16 @@ Flow:
 6. Write resulting canonical snapshot to all `write_to` providers.
 7. If mirror write fails, mark provider degraded but do not fail primary sync unless lane policy says strict.
 
+### Basic config lane
+
+Basic config sync reuses the same provider fan-out model as personal rules, but the snapshot scope is intentionally narrow:
+
+- Application allowlist/blocklist fields used by Settings.
+- Domain allowlist/blocklist fields used by Settings.
+- Blacklist/exclude lists that affect the same proxy rule and TLS selection surface.
+
+The lane must not sync secrets, certificates, admin passwords, proxy credentials, model/API keys, Remote Invoke grants, IM provider secrets, traffic history, or any local machine identity. Adding a new config key to this lane requires an explicit allowlist entry and a human_tests case.
+
 ### Group rules lane
 
 Only providers with `group_rules` capability may participate. For v1, use one primary group provider. Multi-provider group sync is deferred because membership and ACL semantics are provider-specific.
@@ -294,7 +344,14 @@ Only providers with `group_rules` capability may participate. For v1, use one pr
 
 Remote Invoke is not a file sync operation. It routes live relay traffic to providers with `remote_invoke_relay`.
 
-Selection:
+Registration:
+
+- `registration = all_eligible`: if ByteDance Internal and Bifrost Cloud are both connected and enabled, Bifrost registers this local instance with both relay providers.
+- Registration failures are tracked per provider. A failure on one relay provider must not unregister the other.
+- GitHub Gist, WebDAV, and other file providers are never eligible for Remote Invoke registration.
+- The Settings page should show registration state per eligible provider: Registered, Needs sign in, Failed, Disabled.
+
+Selection for new outbound Remote Invoke operations:
 
 - `priority`: first healthy provider wins.
 - `manual`: user explicitly selects one provider.
@@ -306,12 +363,12 @@ Remote Invoke must not silently fall back to GitHub Gist, WebDAV, or any file pr
 
 ### Product positioning
 
-GitHub Gist is for developer-trusted personal rule sync and optional backup. It is not a team collaboration or Remote Invoke provider.
+GitHub Gist is for developer-trusted personal rule sync, basic config sync, and optional backup. It is not a team collaboration or Remote Invoke provider.
 
 UI copy:
 
 - Title: `GitHub Gist`
-- Capability badge: `Rules only`
+- Capability badges: `Rules Sync`, `Config Sync`
 - Security badge: `Encrypted snapshot`
 - Warning: `Secret gists are not end-to-end private by themselves. Bifrost encrypts rule data before upload.`
 
@@ -331,7 +388,9 @@ Default gist:
 
 - Description: `Bifrost Sync (encrypted)`
 - Public: `false`
-- File: `bifrost-sync.json`
+- Files:
+  - `bifrost-rules-sync.json`
+  - `bifrost-config-sync.json`
 
 Payload:
 
@@ -364,7 +423,7 @@ Gist provider requires client-side encryption:
 - First device creates a sync recovery key.
 - Additional devices log in to GitHub and import recovery key.
 - Recovery key export is a deliberate action in UI/CLI.
-- No raw rule content is uploaded to GitHub.
+- No raw rule or config content is uploaded to GitHub.
 
 ### Conflict handling
 
@@ -399,12 +458,25 @@ Behavior:
 
 ByteDance provider should request server capabilities from `/v4/capabilities` when available. Fallback capability set:
 
-- `personal_rules_config_sync`
+- `rules_sync`
+- `config_sync`
 - `group_rules`
 - `remote_invoke_relay`
 - `identity_profile`
 - `sso_browser_flow`
 - `auto_detected`
+
+## Bifrost Cloud Provider
+
+`Bifrost Cloud` is the product-facing name for a user-configured `bifrost-server` provider. It may point to an official cloud endpoint, a private deployment, or a custom self-hosted Sync Server URL.
+
+Product behavior:
+
+- It is independent from ByteDance Internal. Users can connect both.
+- It supports `Rules Sync`, `Config Sync`, and, when server capability says so, `Remote Invoke`.
+- If it supports `remote_invoke_relay` and is signed in, local Bifrost registers Remote Invoke service with it.
+- If both ByteDance Internal and Bifrost Cloud are signed in, both get Remote Invoke registration.
+- Server `/v4/capabilities` decides whether group rules and remote invoke are available; UI must not assume every custom URL supports them.
 
 ## Admin API
 
@@ -422,8 +494,11 @@ New endpoints should be additive. Existing endpoints stay compatible.
 | `POST /api/sync/providers/{id}/logout` | Clear provider session |
 | `GET /api/sync/lanes` | Get lane routing |
 | `PATCH /api/sync/lanes/{lane}` | Update lane routing |
+| `GET /api/sync/registrations/remote-invoke` | Per-provider Remote Invoke registration state |
+| `POST /api/sync/registrations/remote-invoke/refresh` | Register with all eligible Remote Invoke providers now |
 | `POST /api/sync/run` | Run all enabled lanes |
 | `POST /api/sync/run?lane=personal_rules` | Run one lane |
+| `POST /api/sync/run?lane=basic_config` | Run basic config lane |
 
 Compat:
 
@@ -439,21 +514,31 @@ Provider commands:
 bifrost sync provider catalog
 bifrost sync provider detect
 bifrost sync provider list
+bifrost sync provider add
+bifrost sync provider login
 bifrost sync provider add github-gist --name personal-gist
-bifrost sync provider add bifrost-server --name self-hosted --url https://sync.example.com
+bifrost sync provider add bifrost-server --name bifrost-cloud --url https://sync.example.com
 bifrost sync provider enable personal-gist
 bifrost sync provider disable personal-gist
 bifrost sync provider remove personal-gist
 bifrost sync provider status personal-gist
 ```
 
+`bifrost sync provider add` and `bifrost sync provider login` without arguments start an interactive picker:
+
+1. Choose `ByteDance Internal`, `Bifrost Cloud`, or `GitHub Gist`.
+2. Show capability preview before login: Remote Invoke, Rules Sync, Config Sync.
+3. Start the matching auth flow.
+4. Offer to enable lanes after login.
+
 Lane commands:
 
 ```bash
 bifrost sync lane list
-bifrost sync lane set personal-rules --read byte-work --write byte-work,github-personal
+bifrost sync lane set personal-rules --read byte-work --write byte-work,bifrost-cloud,github-personal
+bifrost sync lane set basic-config --read byte-work --write byte-work,bifrost-cloud,github-personal
 bifrost sync lane set group-rules --read byte-work --write byte-work
-bifrost sync lane set remote-invoke --providers byte-work
+bifrost sync lane set remote-invoke --providers byte-work,bifrost-cloud --registration all-eligible
 ```
 
 Auth and run:
@@ -463,8 +548,11 @@ bifrost sync login --provider github-personal
 bifrost sync login --provider byte-work
 bifrost sync login --token "$TOKEN" --url https://sync.example.com
 bifrost sync status --providers
+bifrost sync status --providers --json
 bifrost sync run
 bifrost sync run --lane personal-rules
+bifrost sync run --lane basic-config
+bifrost sync remote-invoke register
 bifrost sync logout --provider github-personal
 ```
 
@@ -477,7 +565,7 @@ bifrost sync encryption import-recovery-key --provider github-personal
 
 ## Web UI
 
-Settings Sync should become provider-first.
+Settings Sync should become provider-first. The page also serves as the sign-in hub for all sync services.
 
 ### Section 1: Overview
 
@@ -485,21 +573,36 @@ Settings Sync should become provider-first.
 - Auto sync switch.
 - Aggregate status: Ready, Degraded, Needs sign in, Conflict, Disabled.
 - Last sync time and last lane result.
+- Connected services summary: ByteDance Internal, Bifrost Cloud, GitHub Gist, each showing signed-in user and last sync/registration state.
+
+### First-run sign-in modal
+
+When the user opens Settings Sync and no sync provider has a valid session:
+
+1. Show a modal instead of silently leaving the page in local-only state.
+2. Explain that logging in can sync the rule list and the allowed basic settings across devices.
+3. Offer three choices as equal cards:
+   - `ByteDance Internal`: Remote Invoke, Rules Sync, Config Sync.
+   - `Bifrost Cloud`: Remote Invoke if supported by server, Rules Sync, Config Sync.
+   - `GitHub Gist`: Rules Sync, Config Sync.
+4. Let the user dismiss the modal and continue local-only; do not block Bifrost local proxy usage.
+5. Do not auto-login GitHub or Bifrost Cloud. ByteDance auto-detection may auto-open the existing internal SSO prompt only when internal provider is reachable and no user choice exists.
 
 ### Section 2: Sync Targets
 
 List enabled provider instances with compact capability badges:
 
-- `ByteDance Sync`: Rules, Groups, Remote Invoke.
-- `GitHub Gist`: Rules only, Encrypted.
-- `Bifrost Server`: Rules, optional Groups, optional Remote Invoke.
+- `ByteDance Internal`: Remote Invoke, Rules Sync, Config Sync, Groups.
+- `Bifrost Cloud`: Remote Invoke when server supports it, Rules Sync, Config Sync, optional Groups.
+- `GitHub Gist`: Rules Sync, Config Sync, Encrypted.
 - `WebDAV`: Rules backup.
 
 Each row/card:
 
 - Display name, provider type, account/user.
 - Health: Reachable, Unauthorized, Degraded, Not configured.
-- Capability badges.
+- Capability badges: Remote Invoke, Rules Sync, Config Sync, Groups, Encrypted.
+- Remote Invoke registration state where supported.
 - Actions: Sign in, Sign out, Sync now, Configure, Remove.
 
 ### Section 3: Capability Routing
@@ -507,8 +610,9 @@ Each row/card:
 Rows by lane:
 
 - Personal Rules: read/write provider chips, conflict policy.
+- Basic Config: read/write provider chips and explicit synced fields.
 - Group Rules: server provider only.
-- Remote Invoke: relay provider priority.
+- Remote Invoke: eligible relay providers and registration policy.
 
 Invalid provider choices are disabled with explanation text, not silently hidden in advanced routing dialogs.
 
@@ -516,8 +620,8 @@ Invalid provider choices are disabled with explanation text, not silently hidden
 
 Add provider cards:
 
-- ByteDance Sync: detected/recommended state.
-- Bifrost Sync Server: URL input + login.
+- ByteDance Internal: detected/recommended state.
+- Bifrost Cloud: URL input + login.
 - GitHub Gist: Sign in with GitHub.
 - WebDAV: URL + username + app password.
 
@@ -528,7 +632,7 @@ Steps:
 1. Sign in with GitHub.
 2. Choose `Create new secret gist` or `Use existing gist ID`.
 3. Create or import encryption recovery key.
-4. Preview capability: `Personal rules only`.
+4. Preview capability: `Rules Sync + Config Sync`, no Remote Invoke.
 5. Enable as primary or mirror.
 
 ## Product Defaults
@@ -537,14 +641,16 @@ Steps:
 
 - Auto-detect ByteDance provider.
 - Show it as recommended.
-- Route personal rules, group rules, and remote invoke to ByteDance.
+- If no provider has a valid session, open the Sync sign-in modal with ByteDance Internal highlighted.
+- Route personal rules, basic config, group rules, and remote invoke to ByteDance after login.
 - GitHub Gist remains optional mirror.
+- Bifrost Cloud remains independently connectable; connecting it does not disconnect ByteDance.
 
 ### First run outside ByteDance network
 
-- Show Bifrost Server and GitHub Gist as top options.
-- GitHub Gist can be primary for personal rules only.
-- Group Rules and Remote Invoke remain unavailable until a Bifrost Server provider is configured.
+- If no provider has a valid session, open the Sync sign-in modal with Bifrost Cloud and GitHub Gist as top options.
+- GitHub Gist can be primary for personal rules and basic config only.
+- Group Rules and Remote Invoke remain unavailable until ByteDance Internal or Bifrost Cloud is configured and signed in.
 
 ### Multiple providers enabled
 
@@ -552,6 +658,23 @@ Steps:
 - Additional file providers are mirrors.
 - Multi-read/multi-write is an advanced setting.
 - Conflicts require explicit user action.
+- Remote Invoke registration is not primary/mirror. It fans out to every enabled, signed-in provider with `remote_invoke_relay`.
+
+### Basic config sync scope
+
+V1 syncs only the settings users explicitly expect to follow their rule setup:
+
+- Application allowlist.
+- Domain allowlist.
+- Blacklist or exclude list fields that affect rule/TLS matching.
+
+V1 does not sync:
+
+- CA certificates or trust state.
+- Admin auth, proxy auth, passwords, tokens, API keys, OAuth secrets.
+- System proxy enablement, local port, host binding, data dir, traffic history.
+- Remote Invoke grants, pairing state, shell/file policies.
+- IM provider credentials, Agent model provider secrets, local runner settings.
 
 ## Implementation Phases
 
@@ -568,11 +691,13 @@ Steps:
 - Add catalog/detect APIs.
 - Route personal/group/remote invoke lanes through selected provider.
 - Split Remote Invoke relay URL from generic Sync URL.
+- Add first-run sign-in modal trigger when no provider session exists.
 
 ### Phase 3: UI and CLI provider management
 
 - Add provider catalog UI and lane routing UI.
-- Add CLI provider/lane commands.
+- Add connected-services display to Settings Sync.
+- Add CLI provider/lane commands, including interactive `provider add` and `provider login`.
 - Keep old commands as aliases.
 
 ### Phase 4: GitHub Gist provider
@@ -581,8 +706,15 @@ Steps:
 - Implement gist discovery/create/update.
 - Implement encrypted snapshot format and recovery key UX.
 - Add conflict detection and user conflict resolution.
+- Support both rules snapshot and basic config snapshot.
 
-### Phase 5: Additional providers
+### Phase 5: Remote Invoke multi-registration
+
+- Register local Remote Invoke service with every enabled signed-in provider that has `remote_invoke_relay`.
+- Show registration status per provider in Settings Sync and CLI status.
+- Keep outbound Remote Invoke provider selection explicit or priority-based.
+
+### Phase 6: Additional providers
 
 - Add WebDAV or Gitee as new provider type without modifying Sync Engine.
 - Extend provider catalog metadata and tests.
@@ -593,7 +725,9 @@ Steps:
 
 - Config migration from `remote_base_url` to default provider instance.
 - Capability validation rejects invalid lane routing.
-- GitHub provider payload encryption never serializes raw rule content.
+- Capability validation rejects Remote Invoke lanes that include GitHub Gist or file providers.
+- Basic config allowlist rejects unknown or sensitive config keys.
+- GitHub provider payload encryption never serializes raw rule or config content.
 - Gist conflict detection when remote revision changes.
 - ByteDance detection handles 200, 401, timeout, TLS failure, DNS failure.
 
@@ -601,8 +735,13 @@ Steps:
 
 - Existing Bifrost Server sync behavior unchanged.
 - ByteDance detected provider configures lanes only when no user-selected provider exists.
-- GitHub Gist sync writes encrypted personal rules snapshot and never exposes group/remote invoke actions.
+- First Settings Sync visit with zero provider sessions opens the sign-in modal and offers ByteDance Internal, Bifrost Cloud, and GitHub Gist.
+- Settings Sync shows all connected services and each card's Remote Invoke, Rules Sync, and Config Sync capabilities.
+- GitHub Gist sync writes encrypted personal rules and basic config snapshots and never exposes group/remote invoke actions.
+- ByteDance Internal and Bifrost Cloud can both be connected; Remote Invoke registration is attempted for both.
 - Remote Invoke fails with clear message when no `remote_invoke_relay` provider is configured.
+- CLI interactive `bifrost sync provider add` and `bifrost sync provider login` can add/login each provider type.
+- CLI `bifrost sync status --providers` lists all provider session, sync, and Remote Invoke registration states.
 
 ### human_tests
 
@@ -612,15 +751,16 @@ Steps:
 
 ### Round 1
 
-- Re-read user goals: multi-provider enabled, capability distinction, GitHub Gist, ByteDance auto-detection, extensibility, UI and CLI.
+- Re-read user goals: multi-provider enabled, capability distinction, GitHub Gist, ByteDance auto-detection, Bifrost Cloud, basic config sync, Remote Invoke registration fan-out, first-run sign-in modal, extensibility, UI and CLI.
 - Review config migration and capability routing for accidental single-provider assumptions.
 - Verify design doc contains concrete API, CLI, UI, and phase plan.
 
 ### Round 2
 
-- Re-check GitHub Gist boundaries: personal rules only, encrypted, no group or remote invoke.
+- Re-check GitHub Gist boundaries: personal rules and basic config only, encrypted, no group or remote invoke.
 - Re-check Remote Invoke uses only `remote_invoke_relay` providers.
 - Re-check human_tests index and acceptance cases match this design.
+- Re-check config sync scope only includes allowlisted Settings basics and excludes secrets/local machine state.
 
 ## Risks
 

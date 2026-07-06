@@ -35,13 +35,13 @@
 
 1. 执行:
    ```bash
-   rg -n "GitHub Gist|Rules only|encrypted|Group rules|Remote Invoke|secret gist" design/sync-provider-architecture.md
+   rg -n "GitHub Gist|Rules Sync|Config Sync|encrypted|Group rules|Remote Invoke|secret gist" design/sync-provider-architecture.md
    ```
 2. 阅读 GitHub Gist provider 章节和 capability matrix。
 
 **预期结果**:
 
-- GitHub Gist 只支持个人规则配置同步。
+- GitHub Gist 支持个人规则同步和基础配置同步。
 - GitHub Gist 不支持小组规则。
 - GitHub Gist 不支持 Remote Invoke relay。
 - 文档要求 GitHub Gist payload 默认客户端加密。
@@ -81,6 +81,73 @@
 - 文档包含 UI 的 Sync Targets, Capability Routing, Provider Catalog。
 - 文档包含分阶段落地计划。
 
+### TC-SPA-05: 三种产品同步服务独立连接与能力卡片
+
+**操作步骤**:
+
+1. 执行:
+   ```bash
+   rg -n "ByteDance Internal|Bifrost Cloud|GitHub Gist|Remote Invoke|Rules Sync|Config Sync|Connected services|independent|同时连接" design/sync-provider-architecture.md
+   ```
+2. 阅读 Product Provider Matrix 和 Web UI 章节。
+
+**预期结果**:
+
+- 文档明确 ByteDance Internal、Bifrost Cloud、GitHub Gist 三种产品同步服务都可独立连接。
+- 文档明确三者互不冲突, 可同时处于已登录状态。
+- Web UI provider 卡片展示 Remote Invoke、Rules Sync、Config Sync 三类能力。
+- GitHub Gist 卡片显示 Rules Sync + Config Sync, Remote Invoke 不支持。
+
+### TC-SPA-06: 首次无登录时弹出同步登录选择
+
+**操作步骤**:
+
+1. 执行:
+   ```bash
+   rg -n "First-run sign-in modal|no sync provider|zero provider sessions|local-only|ByteDance Internal|Bifrost Cloud|GitHub Gist" design/sync-provider-architecture.md
+   ```
+2. 阅读 First-run sign-in modal 和 Product Defaults 章节。
+
+**预期结果**:
+
+- 文档要求 Settings Sync 首次打开且没有任何 provider session 时弹出登录选择窗口。
+- 登录窗口提供 ByteDance Internal、Bifrost Cloud、GitHub Gist 三种选择。
+- 用户可关闭窗口继续本地使用, 不阻断本地代理能力。
+- ByteDance 内网可达时只推荐/高亮, 不覆盖用户已选择的其它 provider。
+
+### TC-SPA-07: Remote Invoke 只向合格 provider 注册且支持双注册
+
+**操作步骤**:
+
+1. 执行:
+   ```bash
+   rg -n "registration = all_eligible|Remote Invoke registration|byte-work|bifrost-cloud|both|get Remote Invoke registration|remote_invoke_relay" design/sync-provider-architecture.md
+   ```
+2. 阅读 Remote Invoke lane、Bifrost Cloud Provider 和 Web UI 章节。
+
+**预期结果**:
+
+- 文档要求 Remote Invoke 只使用带 `remote_invoke_relay` capability 的 provider。
+- ByteDance Internal 和 Bifrost Cloud 都已连接时, 本机服务向两者都注册。
+- GitHub Gist、WebDAV、文件型 provider 永不参与 Remote Invoke 注册。
+- UI/CLI 需要展示每个合格 provider 的注册状态。
+
+### TC-SPA-08: 基础配置同步范围受控
+
+**操作步骤**:
+
+1. 执行:
+   ```bash
+   rg -n "Basic config|basic_config|app_allowlist|domain_allowlist|blacklist|does not sync|secrets|Remote Invoke grants" design/sync-provider-architecture.md
+   ```
+2. 阅读 Basic config lane 和 Product Defaults 中的 Basic config sync scope。
+
+**预期结果**:
+
+- 文档要求基础配置同步只覆盖应用白名单、域名白名单、黑名单/排除列表。
+- 文档明确其它 Settings 配置暂不同步。
+- 文档明确密码、证书、token、API key、Remote Invoke grant、本机端口和流量历史等敏感/本机状态不参与同步。
+
 ## 清理步骤
 
 本用例只读文档, 无需清理临时服务或数据目录。
@@ -88,3 +155,4 @@
 ## 执行记录
 
 - 2026-07-06: PASS - 在 `codex/sync-provider-design` worktree 中执行 TC-SPA-01 至 TC-SPA-04 的 `rg` 静态审查命令, 均能命中对应章节; 人工复核确认设计覆盖多 provider 同启、capability 区分、GitHub Gist rules-only、ByteDance 自动检测、UI/CLI/API 和分阶段落地。
+- 2026-07-07: PASS - 执行 TC-SPA-05 至 TC-SPA-08 的 `rg` 静态审查命令, 均能命中对应章节; 人工复核确认设计新增三种产品同步服务独立连接、首次无登录弹窗、Remote Invoke 双 provider 注册、基础配置同步范围与 CLI/UI 管理入口。
