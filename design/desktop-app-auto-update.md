@@ -173,6 +173,36 @@ Tauri 官方 updater plugin 支持静态 JSON endpoint、签名和 install mode�
 - `bash e2e-tests/tests/test_desktop_app_update_cli.sh` 覆盖临时 app 真实安装/更新/卸载、同版本跳过下载，以及“目标 0.0.141 但安装后仍报告 0.0.140”时非零退出并写 failed 进度。
 - `human_tests/desktop-app-auto-update.md` 增加 TC-DAU-04D/04E/04F，覆盖旧版本假成功、非默认运行路径和 Finder 启动 CLI 路径发现。
 
+## 2026-07-06 桌面 core 启动门禁
+
+### 问题
+
+桌面 app 与 CLI 共用同一个本机 core。用户启动桌面 app 时有两类状态需要明确区分：
+
+- 没有任何 Bifrost core 在运行：桌面 app 应自动启动内置 sidecar，避免打开后空白或停留在离线状态。
+- 桌面 app 启动时复用了外部 CLI core，但该 CLI 之后被用户停止：桌面 app 应感知到 core 不可用，显示全屏阻塞浮层，提示用户启动 Bifrost 服务；用户点击按钮后再由桌面 app 启动内置 sidecar，成功后关闭浮层并刷新页面状态。
+
+同时，如果桌面 app 已经能连接 core，但用户命令路径中没有安装独立 CLI，app 启动后应提示安装 CLI。安装成功后提示完成，并提供文档入口。
+
+### 修复方案
+
+- Tauri 新增 `start_desktop_core` command，前端按钮可显式请求桌面壳启动内置 sidecar，并返回最新 `DesktopRuntimeInfo`。
+- 启动阶段复用 `start_desktop_backend_now("startup")`，仍然自动拉起内置 core；如果发现同 data dir 的外部 CLI 已经健康运行，则复用该实例。
+- Watchdog 对托管 sidecar 和外部 CLI 做区分：
+  - 托管 sidecar 异常退出或连续健康探针失败时，仍由 watchdog 自动恢复。
+  - 外部 CLI 健康探针连续失败时，不自动恢复，而是设置 `startup_ready=false` 和可展示错误，交给前端全屏浮层提示用户手动启动。
+  - 启动/恢复进行中跳过 watchdog 处理，避免 sidecar 正在启动时被一次探针失败误判；健康探针需要连续失败才进入恢复或手动启动状态。
+- React 新增 `DesktopStartupGate`：
+  - 周期读取 `getDesktopRuntime()` 并同步 `setDesktopProxyPort()`，保证 app 状态和实际 core 端口刷新。
+  - core 不可用时显示全屏 `Start Bifrost Service` 浮层，按钮调用 `startDesktopCore()`，成功后关闭浮层。
+  - core 可用后检查 `GET /api/system/cli-install`；未安装 CLI 时显示 `Install Bifrost CLI` 浮层，按钮后台调用 `POST /api/system/cli-install`，成功后显示文档入口。
+
+### 回归覆盖
+
+- Rust 单测覆盖外部 core 掉线时 `startup_ready=false`、保留手动启动错误且不创建托管 child。
+- macOS 真实链路验证：临时 `BIFROST_DATA_DIR` + 端口 `19900` 启动 CLI，启动当前源码构建的桌面 app 复用外部 CLI；停止 CLI 后，app 显示全屏 `Start Bifrost Service` 浮层；点击按钮后桌面 app 拉起内置 sidecar，页面恢复运行态并显示 `http://127.0.0.1:19900`。
+- 真实链路中确认未安装 CLI 时进入 `Install Bifrost CLI` 浮层；不在人工验证中点击真实安装按钮，避免写入用户命令路径，安装机制由临时目录 API/E2E 覆盖。
+
 ## 测试方案
 
 ### 单元测试

@@ -47,6 +47,7 @@ const OVERLAY_FADE_STEPS: u16 = 8;
 const OVERLAY_FADE_STEP_DELAY: Duration = Duration::from_millis(14);
 const BACKEND_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const BACKEND_WATCHDOG_RECOVERY_RETRY_DELAY: Duration = Duration::from_secs(3);
+const BACKEND_WATCHDOG_FAILURE_THRESHOLD: u8 = 2;
 const WEBVIEW_PARK_OFFSET: f64 = 2000.0;
 const WEBVIEW_REVEAL_SETTLE_DELAY: Duration = Duration::from_millis(90);
 const HANDOFF_COMPLETE_EVENT: &str = "desktop://handoff-complete";
@@ -231,6 +232,7 @@ fn main() {
     builder
         .invoke_handler(tauri::generate_handler![
             get_desktop_runtime,
+            start_desktop_core,
             update_desktop_proxy_port,
             restart_desktop_after_update,
             notify_main_window_ready,
@@ -817,44 +819,7 @@ fn bootstrap_desktop_backend(app: &AppHandle) {
         "desktop backend bootstrap started asynchronously",
     );
 
-    let preferred_port = match state.expected_port.lock() {
-        Ok(port) => *port,
-        Err(_) => {
-            record_startup_error(
-                &state,
-                "failed to read desktop expected proxy port during startup".to_string(),
-            );
-            return;
-        }
-    };
-
-    match ensure_backend_running(&state.binary_path, &state.data_dir, preferred_port) {
-        Ok((child, port)) => {
-            if let Ok(mut child_guard) = state.child.lock() {
-                *child_guard = child;
-            }
-
-            if let Ok(mut current_port) = state.port.lock() {
-                *current_port = port;
-            }
-
-            if let Ok(mut startup_error) = state.startup_error.lock() {
-                *startup_error = None;
-            }
-
-            state.startup_ready.store(true, Ordering::SeqCst);
-            append_desktop_bootstrap_log(
-                &state.data_dir,
-                format!("desktop backend bootstrap finished; active_port={port}"),
-            );
-            try_start_native_handoff(app, "backend ready");
-            schedule_desktop_cert_ready(&state.data_dir);
-        }
-        Err(error) => {
-            record_startup_error(&state, error.to_string());
-            request_desktop_shutdown(app);
-        }
-    }
+    let _ = start_desktop_backend_now(app, "startup");
 }
 
 struct BackendRecoveryGuard<'a> {
@@ -887,6 +852,7 @@ fn monitor_desktop_backend(app: &AppHandle) {
 
     append_desktop_bootstrap_log(&state.data_dir, "desktop backend watchdog started");
 
+    let mut consecutive_health_failures = 0u8;
     loop {
         std::thread::sleep(BACKEND_WATCHDOG_POLL_INTERVAL);
 
@@ -903,7 +869,13 @@ fn monitor_desktop_backend(app: &AppHandle) {
             return;
         }
 
+        if state.backend_recovery_in_progress.load(Ordering::SeqCst) {
+            consecutive_health_failures = 0;
+            continue;
+        }
+
         if let Some(reason) = poll_managed_backend_exit(&state) {
+            consecutive_health_failures = 0;
             attempt_backend_recovery(app, &reason);
             continue;
         }
@@ -914,13 +886,32 @@ fn monitor_desktop_backend(app: &AppHandle) {
         };
 
         if current_port == 0 || probe_backend_health(current_port) {
+            consecutive_health_failures = 0;
             continue;
         }
 
-        attempt_backend_recovery(
-            app,
-            &format!("backend health probe failed on port {current_port}"),
-        );
+        consecutive_health_failures = consecutive_health_failures.saturating_add(1);
+        if consecutive_health_failures < BACKEND_WATCHDOG_FAILURE_THRESHOLD {
+            append_desktop_bootstrap_log(
+                &state.data_dir,
+                format!(
+                    "desktop backend health probe failed on port {current_port}; waiting for confirmation ({consecutive_health_failures}/{BACKEND_WATCHDOG_FAILURE_THRESHOLD})"
+                ),
+            );
+            continue;
+        }
+        consecutive_health_failures = 0;
+        let managed_backend = state
+            .child
+            .lock()
+            .map(|child| child.is_some())
+            .unwrap_or(false);
+        let reason = format!("backend health probe failed on port {current_port}");
+        if managed_backend {
+            attempt_backend_recovery(app, &reason);
+        } else {
+            mark_backend_unavailable_for_manual_start(&state, &reason);
+        }
     }
 }
 
@@ -1049,6 +1040,115 @@ fn record_startup_error(state: &BackendState, error: String) {
 
     if let Ok(mut startup_error) = state.startup_error.lock() {
         *startup_error = Some(error);
+    }
+}
+
+fn mark_backend_unavailable_for_manual_start(state: &BackendState, reason: &str) {
+    let was_ready = state.startup_ready.swap(false, Ordering::SeqCst);
+    let mut should_log = was_ready;
+    if let Ok(mut startup_error) = state.startup_error.lock() {
+        if startup_error.is_none() {
+            should_log = true;
+        }
+        *startup_error = Some(
+            "Bifrost service is not running. Start the service from Bifrost Desktop to continue."
+                .to_string(),
+        );
+    }
+
+    if should_log {
+        append_desktop_bootstrap_log(
+            &state.data_dir,
+            format!("desktop backend requires manual start; reason={reason}"),
+        );
+    }
+}
+
+fn desktop_runtime_snapshot(state: &BackendState) -> Result<DesktopRuntimeInfo, String> {
+    let expected_port = *state
+        .expected_port
+        .lock()
+        .map_err(|_| "failed to read desktop expected proxy port".to_string())?;
+    let port = *state
+        .port
+        .lock()
+        .map_err(|_| "failed to read desktop proxy port".to_string())?;
+    let startup_error = state
+        .startup_error
+        .lock()
+        .map_err(|_| "failed to read desktop startup error".to_string())?
+        .clone();
+
+    Ok(DesktopRuntimeInfo {
+        expected_proxy_port: expected_port,
+        proxy_port: port,
+        platform: std::env::consts::OS,
+        startup_ready: state.startup_ready.load(Ordering::SeqCst),
+        startup_error,
+        handoff_completed: state.handoff_completed.load(Ordering::SeqCst),
+    })
+}
+
+fn start_desktop_backend_now(app: &AppHandle, reason: &str) -> Result<DesktopRuntimeInfo, String> {
+    let Some(state) = app.try_state::<BackendState>() else {
+        return Err("desktop backend state is not available".to_string());
+    };
+
+    let _recovery_guard = begin_backend_recovery(&state)
+        .ok_or_else(|| "desktop backend start is already in progress".to_string())?;
+
+    append_desktop_bootstrap_log(
+        &state.data_dir,
+        format!("desktop backend start requested; reason={reason}"),
+    );
+
+    state.startup_ready.store(false, Ordering::SeqCst);
+    if let Ok(mut startup_error) = state.startup_error.lock() {
+        *startup_error = None;
+    }
+
+    if let Ok(mut child_guard) = state.child.lock() {
+        if let Some(child) = child_guard.take() {
+            if let Err(error) = terminate_child(child) {
+                append_desktop_bootstrap_log(
+                    &state.data_dir,
+                    format!("failed to terminate managed backend before manual start: {error}"),
+                );
+            }
+        }
+    }
+
+    let preferred_port = *state
+        .expected_port
+        .lock()
+        .map_err(|_| "failed to read desktop expected proxy port".to_string())?;
+
+    match ensure_backend_running(&state.binary_path, &state.data_dir, preferred_port) {
+        Ok((child, port)) => {
+            if let Ok(mut child_guard) = state.child.lock() {
+                *child_guard = child;
+            }
+            if let Ok(mut current_port) = state.port.lock() {
+                *current_port = port;
+            }
+            if let Ok(mut startup_error) = state.startup_error.lock() {
+                *startup_error = None;
+            }
+
+            state.startup_ready.store(true, Ordering::SeqCst);
+            append_desktop_bootstrap_log(
+                &state.data_dir,
+                format!("desktop backend start succeeded; active_port={port} reason={reason}"),
+            );
+            try_start_native_handoff(app, "backend ready");
+            schedule_desktop_cert_ready(&state.data_dir);
+            desktop_runtime_snapshot(&state)
+        }
+        Err(error) => {
+            let message = error.to_string();
+            record_startup_error(&state, message.clone());
+            Err(message)
+        }
     }
 }
 
@@ -1508,28 +1608,12 @@ fn macos_app_bundle_from_exe_path(exe_path: &Path) -> Option<PathBuf> {
 
 #[tauri::command]
 fn get_desktop_runtime(state: State<'_, BackendState>) -> Result<DesktopRuntimeInfo, String> {
-    let expected_port = *state
-        .expected_port
-        .lock()
-        .map_err(|_| "failed to read desktop expected proxy port".to_string())?;
-    let port = *state
-        .port
-        .lock()
-        .map_err(|_| "failed to read desktop proxy port".to_string())?;
-    let startup_error = state
-        .startup_error
-        .lock()
-        .map_err(|_| "failed to read desktop startup error".to_string())?
-        .clone();
+    desktop_runtime_snapshot(&state)
+}
 
-    Ok(DesktopRuntimeInfo {
-        expected_proxy_port: expected_port,
-        proxy_port: port,
-        platform: std::env::consts::OS,
-        startup_ready: state.startup_ready.load(Ordering::SeqCst),
-        startup_error,
-        handoff_completed: state.handoff_completed.load(Ordering::SeqCst),
-    })
+#[tauri::command]
+fn start_desktop_core(app: AppHandle) -> Result<DesktopRuntimeInfo, String> {
+    start_desktop_backend_now(&app, "frontend request")
 }
 
 #[tauri::command]
@@ -1903,12 +1987,13 @@ fn is_server_config_response(response_body: &str) -> bool {
 mod tests {
     use super::{
         begin_backend_recovery, host_window_close_behavior_for_platform, is_server_config_response,
-        main_interface_decorations_for_platform, parse_port_update_response,
-        poll_managed_backend_exit, resolve_bifrost_binary_from_env, resolve_desktop_config_path,
-        resolve_desktop_data_dir, uses_borderless_desktop_chrome_for_platform, BackendState,
-        HostWindowCloseBehavior,
+        main_interface_decorations_for_platform, mark_backend_unavailable_for_manual_start,
+        parse_port_update_response, poll_managed_backend_exit, resolve_bifrost_binary_from_env,
+        resolve_desktop_config_path, resolve_desktop_data_dir,
+        uses_borderless_desktop_chrome_for_platform, BackendState, HostWindowCloseBehavior,
     };
     use bifrost_storage::data_dir as shared_bifrost_data_dir;
+    use std::fs;
     use std::path::PathBuf;
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -2032,6 +2117,49 @@ mod tests {
             begin_backend_recovery(&state).is_some(),
             "recovery flag should be released after guard drop"
         );
+    }
+
+    #[test]
+    fn external_backend_health_failure_requires_manual_start() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("bifrost-desktop-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let state = BackendState {
+            binary_path: PathBuf::new(),
+            data_dir: temp_dir.clone(),
+            config_path: temp_dir.join("desktop-config.json"),
+            launcher_only: false,
+            expected_port: Mutex::new(19900),
+            port: Mutex::new(19900),
+            child: Mutex::new(None),
+            shutdown_started: AtomicBool::new(false),
+            force_exit: AtomicBool::new(false),
+            backend_recovery_in_progress: AtomicBool::new(false),
+            startup_ready: AtomicBool::new(true),
+            startup_error: Mutex::new(None),
+            main_webview_loaded: AtomicBool::new(false),
+            main_window_ready: AtomicBool::new(false),
+            handoff_started: AtomicBool::new(false),
+            handoff_completed: AtomicBool::new(false),
+            launcher_overlay: Mutex::new(None),
+        };
+
+        mark_backend_unavailable_for_manual_start(
+            &state,
+            "backend health probe failed on port 19900",
+        );
+
+        assert!(!state.startup_ready.load(Ordering::SeqCst));
+        assert!(state
+            .startup_error
+            .lock()
+            .expect("startup error lock")
+            .as_deref()
+            .expect("startup error")
+            .contains("Start the service from Bifrost Desktop"));
+        assert!(state.child.lock().expect("child lock").is_none());
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

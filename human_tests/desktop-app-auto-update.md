@@ -300,6 +300,65 @@
 - 桌面 app 安装完成后自动重新打开。
 - 若存在独立 CLI 安装，CLI 版本也更新到最新；若不存在，日志明确跳过独立 CLI。
 
+### TC-DAU-08B 桌面 app 感知外部 CLI 停止并手动启动内置 core
+
+操作步骤：
+
+1. 构建当前源码的 CLI 与桌面壳，并准备临时数据目录：
+   ```bash
+   pnpm --dir web run build:desktop
+   SKIP_FRONTEND_BUILD=1 RUSTC_WRAPPER= cargo build -p bifrost-cli
+   node scripts/prepare-tauri-sidecar.mjs debug
+   SKIP_FRONTEND_BUILD=1 RUSTC_WRAPPER= CARGO_TARGET_DIR=target/desktop-formal CARGO_BUILD_JOBS=1 cargo build --manifest-path desktop/src-tauri/Cargo.toml
+   TEST_DIR=/tmp/bifrost-desktop-formal-19900
+   rm -rf "$TEST_DIR"
+   mkdir -p "$TEST_DIR"
+   printf '{"proxy_port":19900}\n' > "$TEST_DIR/desktop-config.json"
+   ```
+2. 先启动外部 CLI core：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DIR" ./target/debug/bifrost start --host 127.0.0.1 --port 19900 --skip-cert-check --no-system-proxy --no-tray
+   ```
+3. 用同一个 `BIFROST_DATA_DIR` 启动当前源码构建的桌面 app：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DIR" \
+   BIFROST_DESKTOP_SKIP_CERT_PREFLIGHT=1 \
+   BIFROST_DESKTOP_NO_SYSTEM_PROXY=1 \
+   ./target/desktop-formal/debug/bifrost-desktop
+   ```
+4. 确认桌面 app 正常打开，状态栏或 System Proxy 卡片显示 `http://127.0.0.1:19900`。
+5. 停止步骤 2 的 CLI core，例如在前台进程按 `Ctrl+C`。
+6. 等待 watchdog 轮询，观察桌面 app 出现全屏 `Start Bifrost Service` 浮层，中央只有启动服务入口。
+7. 点击 `Start Bifrost Service`。
+8. 观察浮层关闭，页面回到 Activity，底部状态栏显示 `Proxy: Running`，System Proxy 卡片继续显示 `http://127.0.0.1:19900`。
+9. 检查进程与日志：
+   ```bash
+   ps -axo pid,ppid,stat,comm,args | rg 'target/debug/bifrost start|target/desktop-formal|19900'
+   tail -80 "$TEST_DIR/logs/desktop-bootstrap.log"
+   ```
+
+预期结果：
+
+- 启动阶段桌面 app 复用外部 CLI core，不额外启动第二个内置 sidecar。
+- 外部 CLI 停止后，桌面 app 不静默自动恢复，而是显示全屏浮层提示启动 Bifrost 服务。
+- 用户点击按钮后，桌面 app 启动内置 sidecar，日志包含 `desktop backend start requested; reason=frontend request` 和 `desktop backend start succeeded; active_port=19900 reason=frontend request`。
+- 页面恢复运行态并持续刷新 core 状态；watchdog 不因单次瞬时健康探针失败反复重启 core。
+
+### TC-DAU-08C 桌面 app 未检测到 CLI 时提示安装 CLI
+
+操作步骤：
+
+1. 使用临时 `PATH` 或未安装 CLI 的 macOS 用户会话启动桌面 app，确保 core 已经 ready。
+2. 观察桌面 app 启动后的全屏浮层。
+3. 如果执行真实安装，点击 `Install CLI`；如果避免污染用户命令路径，则只验证浮层展示，并用 TC-DAU-06B 的临时目录 API 覆盖安装动作。
+4. 真实安装成功后点击文档按钮，确认浏览器打开 CLI/桌面文档页。
+
+预期结果：
+
+- core ready 后，如果 `GET /api/system/cli-install` 返回 `installed=false`，桌面 app 显示 `Install Bifrost CLI` 浮层。
+- 浮层包含安装按钮；安装中按钮显示 loading；安装成功后显示成功状态和文档入口。
+- 安装按钮不修改系统代理、不安装 CA，只安装 CLI 与 AI skills。
+
 ### TC-DAU-09 Windows 桌面快捷方式不弹出 shell 窗口
 
 操作步骤：
@@ -378,3 +437,4 @@ bifrost app uninstall
 | 2026-07-06 | TC-DAU-10 | Parallels Windows 11 ARM64 VM：`CARGO_TARGET_DIR=target-desktop-verify cargo build --manifest-path desktop/src-tauri/Cargo.toml`，启动当前构建并截图 `/tmp/bifrost-windows-custom-chrome-final.png` | PASS：窗口顶部不再显示 Windows 原生标题栏，也没有 `Bifrost / File / Edit / View / Window` 原生菜单栏；Web UI 自定义右上角最小化/最大化/关闭按钮可见，底部状态栏完整可见 |
 | 2026-07-06 | TC-DAU-10B | Parallels Windows 11 ARM64 VM：将当前 diff 应用到 `C:\Users\eden_studio\work\github\bifrost`，执行 `CARGO_TARGET_DIR=target-desktop-chrome-verify cargo build --manifest-path desktop/src-tauri/Cargo.toml`；通过交互计划任务启动 `target-desktop-chrome-verify\debug\bifrost-desktop.exe`，`desktop-bootstrap.log` 显示 `embedded webview page load event Finished`、`desktop backend bootstrap finished`；截图 `/Users/eden_studio/Downloads/bifrost-windows-chrome-hidden-20260706.png` 与 `/Users/eden_studio/Downloads/bifrost-windows-chrome-resized-20260706.png` | PASS：frontend ready handoff 后仍未出现 Windows 原生标题栏和 `Bifrost / File / Edit / View / Window` 菜单栏，Web UI 未被系统 chrome 向下挤压；当前 VM 可视区高度不足以在同一张截图里完整纳入底部状态栏，但回归根因的 Windows handoff decorations 路径已由单测和真实启动截图共同覆盖 |
 | 2026-07-06 | TC-DAU-01 / 02 / 03 / 04 / 04B / 04C / 04D / 06B | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh` | PASS：33/33 通过。覆盖 dry-run、App -> CLI 临时安装、临时 app 真实安装/升级/卸载、同版本跳过下载、desktop source progress 为 completed，以及目标 0.0.141 但安装后仍报告 0.0.140 时非零退出并写 `phase=failed` |
+| 2026-07-06 | TC-DAU-08B / 08C | macOS 真实桌面会话：`BIFROST_DATA_DIR=/tmp/bifrost-desktop-formal-19900 ./target/debug/bifrost start --host 127.0.0.1 --port 19900 --skip-cert-check --no-system-proxy --no-tray`，随后以同 data dir 启动 `./target/desktop-formal/debug/bifrost-desktop`；停止外部 CLI 后观察 UI；通过 AX 点击 `Start Bifrost Service`；查看 `/tmp/bifrost-desktop-formal-19900/logs/desktop-bootstrap.log`、`curl http://127.0.0.1:19900/_bifrost/api/proxy/system/support` 与进程表 | PASS：桌面 app 启动时复用外部 CLI core；停止 CLI 后显示全屏 `Start Bifrost Service` 浮层；点击按钮后拉起内置 sidecar，进程表出现 `target/debug/bifrost start --host 0.0.0.0 --port 19900 --skip-cert-check --no-system-proxy`，页面恢复 Activity 并显示 `http://127.0.0.1:19900`，健康接口返回 `{"supported":true,"platform":"macOS"}`；显式禁用系统代理时状态栏显示 `Proxy: Not Applied` 属预期；10 秒稳定观察未再出现 watchdog 误恢复。随后出现 `Install Bifrost CLI` 浮层。未点击真实 `Install CLI`，避免写入用户命令路径；安装动作由 TC-DAU-06B 临时目录 API 覆盖 |
