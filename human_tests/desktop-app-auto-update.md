@@ -383,6 +383,28 @@
 - 浮层包含安装按钮；安装中按钮显示 loading；安装成功后显示成功状态和文档入口。
 - 安装按钮不修改系统代理、不安装 CA，只安装 CLI 与 AI skills。
 
+### TC-DAU-08D CLI/core 升级重启恢复后自动关闭 Start Service 浮层
+
+操作步骤：
+
+1. 执行 Rust 回归测试，模拟桌面 runtime 已进入手动启动错误态后，同一端口的外部 core 恢复健康：
+   ```bash
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml healthy_external_backend_clears_manual_start_gate
+   ```
+2. 执行负向回归测试，模拟端口仍不健康时错误态不能被误清除：
+   ```bash
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml unhealthy_external_backend_keeps_manual_start_gate
+   ```
+3. 代码 review `desktop/src-tauri/src/main.rs`，确认 `monitor_desktop_backend` 的 healthy 分支会调用 `clear_backend_unavailable_if_healthy(...)`，并且 `desktop_runtime_snapshot(...)` 在返回给前端前也执行同一健康恢复对账。
+4. 代码 review `web/src/App.tsx`，确认 `DesktopStartupGate` 每 3 秒轮询 `getDesktopRuntime()`，当 `startupError=null` 且 `startupReady=true` 后 `coreNeedsAttention=false`，全屏 `Start Bifrost Service` 浮层不再渲染。
+
+预期结果：
+
+- CLI 升级或外部 core 自行重启导致的短暂连接断开可以临时展示 `Start Bifrost Service`。
+- core 在同一端口恢复健康后，下一轮 watchdog 或 `get_desktop_runtime` 轮询会清空 `startup_error`、置 `startup_ready=true`。
+- 前端无需用户点击按钮即可自动关闭 `Start Bifrost Service` 浮层，恢复原页面。
+- 端口仍不健康时不会误关浮层，用户仍可手动点击 `Start Bifrost Service`。
+
 ### TC-DAU-09 Windows 桌面快捷方式不弹出 shell 窗口
 
 操作步骤：
@@ -463,3 +485,4 @@ bifrost app uninstall
 | 2026-07-06 | TC-DAU-01 / 02 / 03 / 04 / 04B / 04C / 04D / 06B | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh` | PASS：33/33 通过。覆盖 dry-run、App -> CLI 临时安装、临时 app 真实安装/升级/卸载、同版本跳过下载、desktop source progress 为 completed，以及目标 0.0.141 但安装后仍报告 0.0.140 时非零退出并写 `phase=failed` |
 | 2026-07-06 | TC-DAU-08B / 08C | macOS 真实桌面会话：`BIFROST_DATA_DIR=/tmp/bifrost-desktop-formal-19900 ./target/debug/bifrost start --host 127.0.0.1 --port 19900 --skip-cert-check --no-system-proxy --no-tray`，随后以同 data dir 启动 `./target/desktop-formal/debug/bifrost-desktop`；停止外部 CLI 后观察 UI；通过 AX 点击 `Start Bifrost Service`；查看 `/tmp/bifrost-desktop-formal-19900/logs/desktop-bootstrap.log`、`curl http://127.0.0.1:19900/_bifrost/api/proxy/system/support` 与进程表 | PASS：桌面 app 启动时复用外部 CLI core；停止 CLI 后显示全屏 `Start Bifrost Service` 浮层；点击按钮后拉起内置 sidecar，进程表出现 `target/debug/bifrost start --host 0.0.0.0 --port 19900 --skip-cert-check --no-system-proxy`，页面恢复 Activity 并显示 `http://127.0.0.1:19900`，健康接口返回 `{"supported":true,"platform":"macOS"}`；显式禁用系统代理时状态栏显示 `Proxy: Not Applied` 属预期；10 秒稳定观察未再出现 watchdog 误恢复。随后出现 `Install Bifrost CLI` 浮层。未点击真实 `Install CLI`，避免写入用户命令路径；安装动作由 TC-DAU-06B 临时目录 API 覆盖 |
 | 2026-07-07 | TC-DAU-01 / 02 / 03 / 04 / 04B / 04C / 04D / 06B / 06C | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh` | PASS：36/36 通过。新增覆盖 App 弹窗默认 `install_skills=true` 路径，请求设置 30 秒上限，后端使用 embedded desktop bundle，响应 `skills_installed=true`，并在隔离 `BIFROST_INSTALL_SKILL_DIR` 写入 `bifrost/SKILL.md` 与 `bifrost-remote/SKILL.md` |
+| 2026-07-07 | TC-DAU-08D | `cargo test --manifest-path desktop/src-tauri/Cargo.toml healthy_external_backend_clears_manual_start_gate`; `cargo test --manifest-path desktop/src-tauri/Cargo.toml unhealthy_external_backend_keeps_manual_start_gate`; 代码 review `desktop/src-tauri/src/main.rs` 与 `web/src/App.tsx` | PASS：恢复健康的一次性 mock backend 会让 `clear_backend_unavailable_if_healthy` 置 `startup_ready=true` 并清空 `startup_error`；端口仍不健康时返回 false 且保留错误态；代码确认 watchdog healthy 分支和 runtime snapshot 都会对账，前端 3 秒轮询后 `coreNeedsAttention=false` 自动关闭 Start Service 浮层 |

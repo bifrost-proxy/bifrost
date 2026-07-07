@@ -16,6 +16,7 @@ Bifrost 桌面端以“Tauri 壳 + 内嵌 CLI sidecar”方式运行。上线后
 
 - 桌面端启动完成后自动 spawn `monitor_desktop_backend` watchdog 线程，按 `BACKEND_WATCHDOG_POLL_INTERVAL`（2s）周期巡检。
 - watchdog 每轮：`poll_managed_backend_exit()` 检测 child 是否退出；`probe_backend_health(port)` 检测健康端点是否 200。
+- watchdog 若曾因外部 core 健康失败进入“Start Bifrost Service”手动启动状态，后续在同一端口重新探测到 healthy backend 时必须自动清空 `startup_error` 并置 `startup_ready=true`，让桌面 UI 自动关闭启动遮罩。
 - 检测到异常时进入 `attempt_backend_recovery()`：
   - 用 `begin_backend_recovery()` 获取 `BackendRecoveryGuard`（基于 `BackendState.backend_recovery_in_progress` 原子位），避免并发。
   - 标记 `startup_ready=false`。
@@ -34,6 +35,7 @@ Bifrost 桌面端以“Tauri 壳 + 内嵌 CLI sidecar”方式运行。上线后
 ### 必须不破坏
 
 - 正常运行时 watchdog 无副作用，不影响启动、handoff、native menu。
+- CLI 升级或外部 `bifrost` 进程自行重启时，短暂断连可以触发手动启动遮罩，但 core 恢复健康后不要求用户再点击 Start。
 - app icon 提取锁串行化只作用在“真正提取”前；命中缓存路径无锁竞争。
 - BodyStore/WsPayloadStore 的已有磁盘上限、retention、cleanup 逻辑不变。
 - Admin API 兼容旧客户端：新字段可选，未升级前端仍可解析响应。
@@ -41,6 +43,7 @@ Bifrost 桌面端以“Tauri 壳 + 内嵌 CLI sidecar”方式运行。上线后
 ### 必须真实验证
 
 - 手动 `kill -9 <sidecar pid>` 后，2~5 秒内 watchdog 恢复；`ps aux | grep bifrost` 出现新 pid；`curl 127.0.0.1:<port>/_bifrost/health` 返回 200。
+- 模拟 CLI 升级重启：先让桌面 runtime 进入 `startup_error=Some(...)`、`startup_ready=false`，再在同一端口恢复 healthy backend；`get_desktop_runtime` 下一次返回 `startupReady=true` 且 `startupError=null`，前端 Start Bifrost Service 遮罩自动关闭。
 - 构造 backend 健康探针失败（例如手工停响应）后，日志出现 `desktop backend watchdog triggering recovery; reason=...`。
 - 压测 traffic 列表快速滚动 100+ 个不同应用，fd 消耗趋于稳定不飙升。
 - 构造 200 路 SSE 长连接，`BodyStore.active_stream_writers` 到达上限，后续新流拒开、日志出现 `active writers 200/200 rejected new`。
@@ -51,6 +54,8 @@ Bifrost 桌面端以“Tauri 壳 + 内嵌 CLI sidecar”方式运行。上线后
 ### 运行期保活是桌面壳层的兜底职责
 
 Watchdog 与端口切换重启共用同一 recovery guard，语义是“同一时刻只有一个恢复流程”。这保证用户手动 `Restart` 按钮 + 后台 sidecar crash 并发时不出现两次 spawn。
+
+当 core 不是当前桌面壳层持有的 managed child（例如 CLI 升级自己停止并重启了 daemon），watchdog 不能只把首次健康失败固化成“必须手动启动”。一旦当前 `state.port` 的健康探测恢复，桌面壳层需要把这个外部健康 core 视为可接管 runtime：清空 `startup_error`、置 `startup_ready=true`，并写入 `desktop-bootstrap.log`。前端已有 `get_desktop_runtime` 轮询，所以 runtime snapshot 也执行同样的健康恢复对账，避免 watchdog 轮询窗口内 UI 卡在旧错误状态。
 
 ### 资源保护是分层的
 
@@ -90,6 +95,34 @@ fn monitor_desktop_backend(app: &AppHandle) {
     }
 }
 ```
+
+外部 core 恢复对账：
+
+```rust
+fn clear_backend_unavailable_if_healthy(state: &BackendState, reason: &str) -> bool {
+    let current_port = *state.port.lock()?;
+    if current_port == 0 || !probe_backend_health(current_port) {
+        return false;
+    }
+    clear_backend_unavailable_after_healthy_probe(state, current_port, reason)
+}
+
+fn clear_backend_unavailable_after_healthy_probe(
+    state: &BackendState,
+    current_port: u16,
+    reason: &str,
+) -> bool {
+    state.startup_ready.store(true, Ordering::SeqCst);
+    *state.startup_error.lock()? = None;
+    append_desktop_bootstrap_log(...);
+    true
+}
+```
+
+调用点：
+
+- `monitor_desktop_backend` 的 healthy 分支：持续巡检发现 core 恢复后立即解除手动启动状态，并复用已经成功的健康探测结果。
+- `desktop_runtime_snapshot`：前端轮询 `get_desktop_runtime` 时主动健康探测并再次对账，保证 UI 不依赖下一轮 watchdog 才关闭遮罩。
 
 `attempt_backend_recovery`：
 

@@ -903,7 +903,17 @@ fn monitor_desktop_backend(app: &AppHandle) {
             Err(_) => continue,
         };
 
-        if current_port == 0 || probe_backend_health(current_port) {
+        if current_port == 0 {
+            consecutive_health_failures = 0;
+            continue;
+        }
+
+        if probe_backend_health(current_port) {
+            clear_backend_unavailable_after_healthy_probe(
+                &state,
+                current_port,
+                "desktop backend watchdog observed healthy backend",
+            );
             consecutive_health_failures = 0;
             continue;
         }
@@ -1082,7 +1092,56 @@ fn mark_backend_unavailable_for_manual_start(state: &BackendState, reason: &str)
     }
 }
 
+fn clear_backend_unavailable_if_healthy(state: &BackendState, reason: &str) -> bool {
+    let Ok(current_port) = state.port.lock().map(|port| *port) else {
+        return false;
+    };
+
+    if current_port == 0 || !probe_backend_health(current_port) {
+        return false;
+    }
+
+    clear_backend_unavailable_after_healthy_probe(state, current_port, reason)
+}
+
+fn clear_backend_unavailable_after_healthy_probe(
+    state: &BackendState,
+    current_port: u16,
+    reason: &str,
+) -> bool {
+    let was_ready = state.startup_ready.swap(true, Ordering::SeqCst);
+    let mut should_log = !was_ready;
+    if let Ok(mut startup_error) = state.startup_error.lock() {
+        if startup_error.is_some() {
+            should_log = true;
+        }
+        *startup_error = None;
+    }
+
+    if should_log {
+        append_desktop_bootstrap_log(
+            &state.data_dir,
+            format!("desktop backend recovered from manual-start state; reason={reason}; active_port={current_port}"),
+        );
+    }
+
+    true
+}
+
 fn desktop_runtime_snapshot(state: &BackendState) -> Result<DesktopRuntimeInfo, String> {
+    if !state.startup_ready.load(Ordering::SeqCst)
+        || state
+            .startup_error
+            .lock()
+            .map_err(|_| "failed to read desktop startup error".to_string())?
+            .is_some()
+    {
+        clear_backend_unavailable_if_healthy(
+            state,
+            "desktop runtime snapshot observed healthy backend",
+        );
+    }
+
     let expected_port = *state
         .expected_port
         .lock()
@@ -2150,7 +2209,8 @@ fn is_server_config_response(response_body: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        begin_backend_recovery, host_window_close_behavior_for_platform, is_server_config_response,
+        begin_backend_recovery, clear_backend_unavailable_if_healthy,
+        host_window_close_behavior_for_platform, is_server_config_response,
         main_interface_decorations_for_platform, mark_backend_unavailable_for_manual_start,
         parse_port_update_response, poll_managed_backend_exit, resolve_bifrost_binary_from_env,
         resolve_desktop_config_path, resolve_desktop_data_dir, save_desktop_config,
@@ -2159,12 +2219,58 @@ mod tests {
     };
     use bifrost_storage::data_dir as shared_bifrost_data_dir;
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::path::PathBuf;
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
+    use std::thread;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn test_backend_state(
+        data_dir: PathBuf,
+        port: u16,
+        startup_ready: bool,
+        startup_error: Option<String>,
+    ) -> BackendState {
+        BackendState {
+            binary_path: PathBuf::new(),
+            data_dir: data_dir.clone(),
+            config_path: data_dir.join("desktop-config.json"),
+            launcher_only: false,
+            expected_port: Mutex::new(port),
+            port: Mutex::new(port),
+            child: Mutex::new(None),
+            shutdown_started: AtomicBool::new(false),
+            force_exit: AtomicBool::new(false),
+            backend_recovery_in_progress: AtomicBool::new(false),
+            startup_ready: AtomicBool::new(startup_ready),
+            startup_error: Mutex::new(startup_error),
+            main_webview_loaded: AtomicBool::new(false),
+            main_window_ready: AtomicBool::new(false),
+            handoff_started: AtomicBool::new(false),
+            handoff_completed: AtomicBool::new(false),
+            launcher_overlay: Mutex::new(None),
+            pending_open_requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn spawn_one_shot_health_server() -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind health server");
+        let port = listener.local_addr().expect("health server addr").port();
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0_u8; 1024];
+                let _ = stream.read(&mut buffer);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",
+                );
+            }
+        });
+        port
+    }
 
     #[test]
     fn desktop_config_uses_shared_data_dir() {
@@ -2268,24 +2374,8 @@ mod tests {
     fn backend_recovery_guard_prevents_parallel_recovery() {
         let flag = AtomicBool::new(false);
         let state = BackendState {
-            binary_path: PathBuf::new(),
-            data_dir: PathBuf::new(),
-            config_path: PathBuf::new(),
-            launcher_only: false,
-            expected_port: Mutex::new(0),
-            port: Mutex::new(0),
-            child: Mutex::new(None),
-            shutdown_started: AtomicBool::new(false),
-            force_exit: AtomicBool::new(false),
             backend_recovery_in_progress: flag,
-            startup_ready: AtomicBool::new(false),
-            startup_error: Mutex::new(None),
-            main_webview_loaded: AtomicBool::new(false),
-            main_window_ready: AtomicBool::new(false),
-            handoff_started: AtomicBool::new(false),
-            handoff_completed: AtomicBool::new(false),
-            launcher_overlay: Mutex::new(None),
-            pending_open_requests: Mutex::new(Vec::new()),
+            ..test_backend_state(PathBuf::new(), 0, false, None)
         };
 
         let guard = begin_backend_recovery(&state).expect("first recovery guard");
@@ -2306,26 +2396,7 @@ mod tests {
             std::env::temp_dir().join(format!("bifrost-desktop-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(&temp_dir).expect("create temp dir");
-        let state = BackendState {
-            binary_path: PathBuf::new(),
-            data_dir: temp_dir.clone(),
-            config_path: temp_dir.join("desktop-config.json"),
-            launcher_only: false,
-            expected_port: Mutex::new(19900),
-            port: Mutex::new(19900),
-            child: Mutex::new(None),
-            shutdown_started: AtomicBool::new(false),
-            force_exit: AtomicBool::new(false),
-            backend_recovery_in_progress: AtomicBool::new(false),
-            startup_ready: AtomicBool::new(true),
-            startup_error: Mutex::new(None),
-            main_webview_loaded: AtomicBool::new(false),
-            main_window_ready: AtomicBool::new(false),
-            handoff_started: AtomicBool::new(false),
-            handoff_completed: AtomicBool::new(false),
-            launcher_overlay: Mutex::new(None),
-            pending_open_requests: Mutex::new(Vec::new()),
-        };
+        let state = test_backend_state(temp_dir.clone(), 19900, true, None);
 
         mark_backend_unavailable_for_manual_start(
             &state,
@@ -2342,6 +2413,60 @@ mod tests {
             .contains("Start the service from Bifrost Desktop"));
         assert!(state.child.lock().expect("child lock").is_none());
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn healthy_external_backend_clears_manual_start_gate() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let port = spawn_one_shot_health_server();
+        let state = test_backend_state(
+            temp_dir.path().to_path_buf(),
+            port,
+            false,
+            Some(
+                "Bifrost service is not running. Start the service from Bifrost Desktop to continue."
+                    .to_string(),
+            ),
+        );
+
+        assert!(clear_backend_unavailable_if_healthy(
+            &state,
+            "test observed recovered backend",
+        ));
+        assert!(state.startup_ready.load(Ordering::SeqCst));
+        assert!(state
+            .startup_error
+            .lock()
+            .expect("startup error lock")
+            .is_none());
+    }
+
+    #[test]
+    fn unhealthy_external_backend_keeps_manual_start_gate() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("reserve port");
+        let port = listener.local_addr().expect("reserved addr").port();
+        drop(listener);
+        let state = test_backend_state(
+            temp_dir.path().to_path_buf(),
+            port,
+            false,
+            Some("Bifrost service is not running.".to_string()),
+        );
+
+        assert!(!clear_backend_unavailable_if_healthy(
+            &state,
+            "test observed missing backend",
+        ));
+        assert!(!state.startup_ready.load(Ordering::SeqCst));
+        assert_eq!(
+            state
+                .startup_error
+                .lock()
+                .expect("startup error lock")
+                .as_deref(),
+            Some("Bifrost service is not running.")
+        );
     }
 
     #[test]
