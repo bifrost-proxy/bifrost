@@ -389,6 +389,8 @@ export default function FilterItem({
 
   return (
     <div
+      data-testid={`filter-item-${type}`}
+      data-filter-value={value}
       style={{
         ...styles.container,
         ...(isHovering ? styles.containerHover : {}),

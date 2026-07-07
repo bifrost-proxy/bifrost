@@ -3,6 +3,7 @@ import { createStorage, type IStorage } from './dao';
 import { handleSso } from './routes/sso';
 import { handleOAuth2 } from './routes/oauth2';
 import { handleEnv } from './routes/env';
+import { handleConfig } from './routes/config';
 import { handleGroup } from './routes/group';
 import { handleUser } from './routes/user';
 import { handleRemoteInvoke } from './routes/remote-invoke';
@@ -11,8 +12,8 @@ import { RateLimiter, AccountLockManager, getClientIp } from './security';
 import type { SyncServerConfig } from './types';
 
 export type { SyncServerConfig, MysqlConfig, OAuth2Config, AuthConfig, StorageConfig, ServerConfig } from './types';
-export type { Env, User, CreateEnvReq, UpdateEnvReq, SearchEnvQuery, ApiResponse, Group, GroupMember, GroupSetting, CreateGroupReq, UpdateGroupReq, SearchGroupQuery, InviteGroupReq, UpdateGroupSettingReq } from './types';
-export type { IStorage, IUserDao, IEnvDao, IGroupDao, IGroupMemberDao, IGroupSettingDao } from './dao';
+export type { Env, User, CreateEnvReq, UpdateEnvReq, SearchEnvQuery, BasicConfig, BasicConfigKey, UpsertBasicConfigReq, ApiResponse, Group, GroupMember, GroupSetting, CreateGroupReq, UpdateGroupReq, SearchGroupQuery, InviteGroupReq, UpdateGroupSettingReq } from './types';
+export type { IStorage, IUserDao, IEnvDao, IBasicConfigDao, IGroupDao, IGroupMemberDao, IGroupSettingDao } from './dao';
 export { createStorage } from './dao';
 export { SqliteStorage } from './dao/sqlite';
 export { MysqlStorage } from './dao/mysql';
@@ -129,6 +130,7 @@ export function createSyncServer(config: SyncServerConfig): SyncServerInstance {
 
       if (await handleSso(ctx, storage, accountLock)) return;
       if (await handleUser(ctx, storage)) return;
+      if (await handleConfig(ctx, storage, config.remote_invoke)) return;
       if (await handleEnv(ctx, storage)) return;
       if (await handleGroup(ctx, storage)) return;
       if (await handleRemoteInvoke(ctx, storage, config.remote_invoke)) return;

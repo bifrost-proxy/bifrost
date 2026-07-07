@@ -182,6 +182,23 @@
 - 内部 `#/traffic/detail`、`#certificate-*`、`/#/...` 等桌面壳路由不被误当成外部 URL。
 - `bifrost://open/settings` 仍复用单实例并跳转 Settings。
 
+### TC-DOR-10 macOS CI 冷缓存下 desktop open request 契约测试不被 shell 超时误杀
+
+操作步骤：
+
+1. 在 macOS GitHub Actions shell shard 中运行：
+   ```bash
+   bash scripts/ci/run-e2e-shell.sh
+   ```
+2. 确认 shard 选择到 `test_desktop_open_requests_contract.sh`。
+3. 观察该脚本在冷缓存或依赖重编译场景下的耗时与退出结果。
+
+预期结果：
+
+- macOS shell job 设置 `BIFROST_E2E_SHELL_TEST_TIMEOUT=1260`，单个 shell 脚本最多可运行 21 分钟。
+- `test_desktop_open_requests_contract.sh` 即使需要重新编译 desktop Tauri 依赖，也不会在 900 秒边界被 shell runner 误杀。
+- 若 desktop `open_requests` Rust tests 全部通过，runner 不应因为冷缓存编译时间略长而把该 suite 标记失败。
+
 ## 清理步骤
 
 - 关闭桌面端 App。
@@ -199,3 +216,4 @@
 | 2026-07-06 | TC-DOR-08 | PASS：`pnpm --dir web test:unit src/api/bifrost-file.test.ts` 覆盖 preview POST 请求带 `X-Bifrost-CSRF`；`pnpm --dir web exec eslint ...` 与 `pnpm --dir web run build:desktop` 覆盖 rules、多请求 network、单请求 network 预览确认 UI 编译通过；`cargo test -p bifrost-admin bifrost_file --lib` 覆盖 preview 后端解析与单请求详情数据。 |
 | 2026-07-06 | TC-DOR-09 | PASS：`pnpm --dir web test:unit src/desktop/openTarget.test.ts` 通过，覆盖同源 hash 与 `/#/...` 不外跳、后端相对路径转桌面后端 URL、`https`/`mailto`/`macappstore`/`bifrost` 外部 scheme 原生打开，以及 custom protocol 下 `mailto`/`bifrost` 不被 `origin=null` 误拦截。 |
 | 2026-07-06 | TC-DOR-06 CI 依赖、frontendDist 与 sidecar 边界回归 | PASS：`bash e2e-tests/tests/test_desktop_open_requests_contract.sh` 在 macOS 本机执行完整 desktop `open_requests` Rust test；脚本在运行 desktop crate test 前先构建 `web/dist-desktop`、构建 debug CLI 并准备 Tauri sidecar，避免干净 CI checkout 因 `frontendDist` 或 `resources/bin/*` 缺失失败；Linux 且缺少 `gobject-2.0` 时只跳过该 Tauri desktop test，避免 E2E Shell runner 因系统 GUI 开发依赖缺失误失败。 |
+| 2026-07-07 | TC-DOR-10 | PASS：GitHub Actions run `28872034841` 的 macOS shard 1 artifact 显示 `test_desktop_open_requests_contract.sh` 内部 `open_requests` Rust tests 为 `4 passed; 0 failed`，但 suite 用时 `902s`，被默认 `BIFROST_E2E_SHELL_TEST_TIMEOUT=900` 误判失败。修复后在 `.github/workflows/ci.yml` 的 macOS shell job 设置 `BIFROST_E2E_SHELL_TEST_TIMEOUT=1260`；执行 `bash -n scripts/run_all_e2e.sh e2e-tests/tests/test_desktop_open_requests_contract.sh` 与 `git diff --check` 通过，等待远端 CI 复跑验证。 |

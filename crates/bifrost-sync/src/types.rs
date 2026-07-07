@@ -52,6 +52,56 @@ pub struct RemoteEnv {
     pub update_time: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RemoteBasicConfig {
+    #[serde(default, deserialize_with = "string_or_number")]
+    pub id: String,
+    pub user_id: String,
+    pub config_key: String,
+    #[serde(default, deserialize_with = "nullable_string")]
+    pub value_json: String,
+    #[serde(default, deserialize_with = "nullable_string")]
+    pub hash: String,
+    #[serde(default, deserialize_with = "nullable_string")]
+    pub create_time: String,
+    #[serde(default, deserialize_with = "nullable_string")]
+    pub update_time: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RemoteSyncResultItem {
+    #[serde(default)]
+    pub r#type: i32,
+    #[serde(default)]
+    pub status: i32,
+    #[serde(default)]
+    pub msg: Option<String>,
+    #[serde(default, deserialize_with = "nullable_string")]
+    pub user_id: String,
+    #[serde(default, deserialize_with = "nullable_string")]
+    pub id: String,
+    #[serde(default, deserialize_with = "nullable_string")]
+    pub config_key: String,
+    #[serde(default, deserialize_with = "nullable_string")]
+    pub value_json: String,
+    #[serde(default, deserialize_with = "nullable_string")]
+    pub hash: String,
+    #[serde(default, deserialize_with = "nullable_string")]
+    pub create_time: String,
+    #[serde(default, deserialize_with = "nullable_string")]
+    pub update_time: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RemoteBasicConfigSyncData {
+    #[serde(default)]
+    pub local_update_list: Vec<RemoteBasicConfig>,
+    #[serde(default)]
+    pub local_delete_list: Vec<String>,
+    #[serde(default)]
+    pub result_list: Vec<RemoteSyncResultItem>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncReason {

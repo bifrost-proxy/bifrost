@@ -669,6 +669,10 @@ pub struct SyncStatusResponse {
     pub last_sync_action: Option<String>,
     pub last_error: Option<String>,
     pub user: Option<SyncUserInfo>,
+    #[serde(default)]
+    pub providers: Vec<SyncProviderStatusResponse>,
+    #[serde(default)]
+    pub first_run_prompt_required: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -677,6 +681,28 @@ pub struct SyncUserInfo {
     pub nickname: String,
     pub avatar: String,
     pub email: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncProviderCapabilitiesResponse {
+    pub rules_sync: bool,
+    pub config_sync: bool,
+    pub remote_invoke: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncProviderStatusResponse {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub remote_base_url: Option<String>,
+    pub connected: bool,
+    pub enabled: bool,
+    pub reachable: bool,
+    pub authorized: bool,
+    pub user: Option<SyncUserInfo>,
+    pub capabilities: SyncProviderCapabilitiesResponse,
+    pub remote_invoke_registered: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -844,6 +870,8 @@ mod tests {
                 avatar: "avatar.png".into(),
                 email: "a@example.com".into(),
             }),
+            providers: Vec::new(),
+            first_run_prompt_required: false,
         };
 
         let json = serde_json::to_string(&status).unwrap();

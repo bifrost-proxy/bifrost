@@ -209,10 +209,15 @@ export class RemoteInvokeService {
       }
     }
 
-    const token = generateRelayToken();
     const now = new Date().toISOString();
-    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
     const pubkeyHash = computeStoredPubkeyHash(pubkeyDer);
+    const existingTokenStillValid = !!existing?.client_auth_token
+      && !!existing.token_expires_at
+      && new Date(existing.token_expires_at) > new Date();
+    const token = existingTokenStillValid ? existing!.client_auth_token : generateRelayToken();
+    const expiresAt = existingTokenStillValid
+      ? existing!.token_expires_at
+      : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
 
     const record: RemoteInvokeClientRecord = {
       client_instance_id: req.client_instance_id,
@@ -259,8 +264,10 @@ export class RemoteInvokeService {
     );
   }
 
-  async closeDiscoverySession(clientInstanceId: string, _discoverySessionId: string): Promise<void> {
-    clearClientDiscovery(clientInstanceId);
+  async closeDiscoverySession(clientInstanceId: string, discoverySessionId: string): Promise<void> {
+    if (clearClientDiscovery(clientInstanceId, discoverySessionId)) {
+      await this.cancelPendingPairings(clientInstanceId);
+    }
   }
 
   private isPendingPairingExpired(pairing: RemoteInvokePairing, nowMs = Date.now()): boolean {
@@ -1225,6 +1232,26 @@ export class RemoteInvokeService {
         expires_at: claimExpiresAt,
         create_time: now,
         claimed_at: '',
+      });
+
+      pushToClient(clientInstanceId, 'grant_created', {
+        grant_id: result.grant_id,
+        caller_fingerprint: effectiveCallerFingerprint,
+        caller_display_name: callerDisplayName,
+        caller_info: {
+          ...(result.caller_info ?? {}),
+          fingerprint: effectiveCallerFingerprint,
+          caller_pubkey: callerPubkey,
+        },
+        grant_mode: grantMode,
+        grant_scope: normalizeGrantScope(req.grant_scope),
+        file_access: normalizeFileAccess(req.file_access),
+        caller_ephemeral_pub: req.caller_ephemeral_pub ?? '',
+        client_ephemeral_pub: req.client_ephemeral_pub ?? '',
+        auth_method: 'ssh_publickey',
+        ssh_key_fingerprint: result.ssh_key_fingerprint,
+        max_calls: maxCalls,
+        remaining_calls: maxCalls,
       });
     }
     pushToCallerStream(result.connect_id, 'ssh_connect_result', {

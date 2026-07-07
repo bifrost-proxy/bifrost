@@ -58,6 +58,34 @@ fn show_status(client: &ConfigApiClient) -> bifrost_core::Result<()> {
         println!("  Email: {}", user.email);
     }
 
+    if !status.providers.is_empty() {
+        println!();
+        println!("Providers:");
+        for provider in &status.providers {
+            println!(
+                "  - {} [{}]",
+                provider.name,
+                if provider.connected {
+                    "connected"
+                } else {
+                    "not connected"
+                }
+            );
+            if let Some(url) = &provider.remote_base_url {
+                println!("    URL: {}", url);
+            }
+            println!(
+                "    Capabilities: rules={}, config={}, remote-invoke={}",
+                provider.capabilities.rules_sync,
+                provider.capabilities.config_sync,
+                provider.capabilities.remote_invoke
+            );
+            if let Some(user) = &provider.user {
+                println!("    User: {}", user.user_id);
+            }
+        }
+    }
+
     Ok(())
 }
 

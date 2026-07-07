@@ -30,6 +30,18 @@ CREATE TABLE IF NOT EXISTS bifrost_envs (
   KEY idx_bifrost_envs_user_id (user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS bifrost_basic_configs (
+  id          VARCHAR(192) NOT NULL PRIMARY KEY,
+  user_id     VARCHAR(128) NOT NULL,
+  config_key  VARCHAR(64)  NOT NULL,
+  value_json  LONGTEXT     NOT NULL,
+  hash        VARCHAR(128) NOT NULL DEFAULT '',
+  create_time VARCHAR(32)  NOT NULL,
+  update_time VARCHAR(32)  NOT NULL,
+  UNIQUE KEY uk_bifrost_basic_config (user_id, config_key),
+  KEY idx_bifrost_basic_configs_user_id (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS bifrost_groups (
   id          VARCHAR(32)  NOT NULL PRIMARY KEY,
   name        VARCHAR(255) NOT NULL,

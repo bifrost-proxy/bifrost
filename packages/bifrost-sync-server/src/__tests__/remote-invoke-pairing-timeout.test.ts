@@ -294,6 +294,171 @@ describe('remote invoke pairing timeout cleanup', () => {
     stream.close();
   });
 
+  it('releases pending pairing slot when discovery session closes', async () => {
+    const token = await registerUser(`pairing-close-owner-${Date.now()}`, 'password123');
+    const clientInstanceId = `pairing-close-client-${Date.now()}`;
+    const clientKeys = generateClientKeypair();
+    const clientPubkey = clientKeys.publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+    const clientAuthToken = await registerClient(clientInstanceId, clientPubkey, clientKeys.privateKey, token);
+
+    const stream = await openSse(
+      `/v4/remote-invoke/client/stream?client_instance_id=${encodeURIComponent(clientInstanceId)}&stream_id=pairing-close-stream`,
+      { Authorization: `Bearer ${clientAuthToken}` },
+    );
+    expect(stream.status).toBe(200);
+
+    const firstPairCode = '761234';
+    await publishPairCode(clientInstanceId, clientAuthToken, firstPairCode, Date.now() + 60_000);
+
+    const firstCallerKey = makeCallerKeypair();
+    const firstStartResponse = await req('POST', '/v5/remote-invoke/pairings/start', {
+      pair_code: firstPairCode,
+      caller_info: {
+        fingerprint: 'caller-before-close',
+        display_name: 'caller-before-close',
+      },
+      caller_pubkey: firstCallerKey.caller_pubkey,
+      caller_ephemeral_pub: base64X25519Pub('caller-before-close'),
+      caller_ephemeral_sig: 'sig-before-close',
+    });
+    expect(firstStartResponse.status).toBe(200);
+    expect(firstStartResponse.data.code).toBe(0);
+    const firstPairingId = firstStartResponse.data.data.pairing_id as string;
+
+    const pendingBeforeClose = await req(
+      'GET',
+      `/v4/remote-invoke/client/pending-pairings?client_instance_id=${encodeURIComponent(clientInstanceId)}`,
+      undefined,
+      { Authorization: `Bearer ${clientAuthToken}` },
+    );
+    expect(pendingBeforeClose.status).toBe(200);
+    expect(pendingBeforeClose.data.data).toHaveLength(1);
+    expect(pendingBeforeClose.data.data[0].pairing_id).toBe(firstPairingId);
+
+    const closeResponse = await req(
+      'DELETE',
+      `/v4/remote-invoke/client/discovery-session/${encodeURIComponent(`session-${firstPairCode}`)}?client_instance_id=${encodeURIComponent(clientInstanceId)}`,
+      undefined,
+      { Authorization: `Bearer ${clientAuthToken}` },
+    );
+    expect(closeResponse.status).toBe(200);
+    expect(closeResponse.data.code).toBe(0);
+
+    const pendingAfterClose = await req(
+      'GET',
+      `/v4/remote-invoke/client/pending-pairings?client_instance_id=${encodeURIComponent(clientInstanceId)}`,
+      undefined,
+      { Authorization: `Bearer ${clientAuthToken}` },
+    );
+    expect(pendingAfterClose.status).toBe(200);
+    expect(pendingAfterClose.data.data).toHaveLength(0);
+
+    const closedPairing = await server.storage.remoteInvoke.getPairing(firstPairingId);
+    expect(closedPairing?.status).toBe('rejected');
+
+    const secondPairCode = '762345';
+    await publishPairCode(clientInstanceId, clientAuthToken, secondPairCode, Date.now() + 60_000);
+    const secondCallerKey = makeCallerKeypair();
+    const secondStartResponse = await req('POST', '/v5/remote-invoke/pairings/start', {
+      pair_code: secondPairCode,
+      caller_info: {
+        fingerprint: 'caller-after-close',
+        display_name: 'caller-after-close',
+      },
+      caller_pubkey: secondCallerKey.caller_pubkey,
+      caller_ephemeral_pub: base64X25519Pub('caller-after-close'),
+      caller_ephemeral_sig: 'sig-after-close',
+    });
+    expect(secondStartResponse.status).toBe(200);
+    expect(secondStartResponse.data.code).toBe(0);
+
+    stream.close();
+  });
+
+  it('ignores stale discovery close for a newer pair code session', async () => {
+    const token = await registerUser(`pairing-stale-close-owner-${Date.now()}`, 'password123');
+    const clientInstanceId = `pairing-stale-close-client-${Date.now()}`;
+    const clientKeys = generateClientKeypair();
+    const clientPubkey = clientKeys.publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+    const clientAuthToken = await registerClient(clientInstanceId, clientPubkey, clientKeys.privateKey, token);
+
+    const stream = await openSse(
+      `/v4/remote-invoke/client/stream?client_instance_id=${encodeURIComponent(clientInstanceId)}&stream_id=pairing-stale-close-stream`,
+      { Authorization: `Bearer ${clientAuthToken}` },
+    );
+    expect(stream.status).toBe(200);
+
+    const oldPairCode = '771234';
+    const newPairCode = '772345';
+    await publishPairCode(clientInstanceId, clientAuthToken, oldPairCode, Date.now() + 60_000);
+    await publishPairCode(clientInstanceId, clientAuthToken, newPairCode, Date.now() + 60_000);
+
+    const staleCloseResponse = await req(
+      'DELETE',
+      `/v4/remote-invoke/client/discovery-session/${encodeURIComponent(`session-${oldPairCode}`)}?client_instance_id=${encodeURIComponent(clientInstanceId)}`,
+      undefined,
+      { Authorization: `Bearer ${clientAuthToken}` },
+    );
+    expect(staleCloseResponse.status).toBe(200);
+    expect(staleCloseResponse.data.code).toBe(0);
+
+    const callerKey = makeCallerKeypair();
+    const startResponse = await req('POST', '/v5/remote-invoke/pairings/start', {
+      pair_code: newPairCode,
+      caller_info: {
+        fingerprint: 'caller-after-stale-close',
+        display_name: 'caller-after-stale-close',
+      },
+      caller_pubkey: callerKey.caller_pubkey,
+      caller_ephemeral_pub: base64X25519Pub('caller-after-stale-close'),
+      caller_ephemeral_sig: 'sig-after-stale-close',
+    });
+    expect(startResponse.status).toBe(200);
+    expect(startResponse.data.code).toBe(0);
+
+    stream.close();
+  });
+
+  it('preserves active pair code when client SSE stream reconnects', async () => {
+    const token = await registerUser(`pairing-reconnect-owner-${Date.now()}`, 'password123');
+    const clientInstanceId = `pairing-reconnect-client-${Date.now()}`;
+    const clientKeys = generateClientKeypair();
+    const clientPubkey = clientKeys.publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+    const clientAuthToken = await registerClient(clientInstanceId, clientPubkey, clientKeys.privateKey, token);
+
+    const firstStream = await openSse(
+      `/v4/remote-invoke/client/stream?client_instance_id=${encodeURIComponent(clientInstanceId)}&stream_id=pairing-reconnect-stream-1`,
+      { Authorization: `Bearer ${clientAuthToken}` },
+    );
+    expect(firstStream.status).toBe(200);
+
+    const pairCode = '773456';
+    await publishPairCode(clientInstanceId, clientAuthToken, pairCode, Date.now() + 60_000);
+
+    const secondStream = await openSse(
+      `/v4/remote-invoke/client/stream?client_instance_id=${encodeURIComponent(clientInstanceId)}&stream_id=pairing-reconnect-stream-2`,
+      { Authorization: `Bearer ${clientAuthToken}` },
+    );
+    expect(secondStream.status).toBe(200);
+
+    const callerKey = makeCallerKeypair();
+    const startResponse = await req('POST', '/v5/remote-invoke/pairings/start', {
+      pair_code: pairCode,
+      caller_info: {
+        fingerprint: 'caller-after-stream-reconnect',
+        display_name: 'caller-after-stream-reconnect',
+      },
+      caller_pubkey: callerKey.caller_pubkey,
+      caller_ephemeral_pub: base64X25519Pub('caller-after-stream-reconnect'),
+      caller_ephemeral_sig: 'sig-after-stream-reconnect',
+    });
+    expect(startResponse.status).toBe(200);
+    expect(startResponse.data.code).toBe(0);
+
+    firstStream.close();
+    secondStream.close();
+  });
+
   it('returns 410 for expired pairing decisions and persists expired status', async () => {
     const token = await registerUser(`pairing-decision-owner-${Date.now()}`, 'password123');
     const clientInstanceId = `pairing-decision-client-${Date.now()}`;

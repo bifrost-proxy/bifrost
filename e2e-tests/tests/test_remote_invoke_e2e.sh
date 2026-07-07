@@ -1103,6 +1103,8 @@ if [[ "$PAIRING_FOUND_2" -eq 1 ]]; then
     fi
 else
     _log_fail "TC-RI-05: 第二次配对请求未到达" "pending>0" "0"
+    log "Reject pairing caller log:"
+    cat "$REJECT_LOG" 2>/dev/null || true
     kill "$REJECT_PID" 2>/dev/null || true
     wait "$REJECT_PID" 2>/dev/null || true
 fi

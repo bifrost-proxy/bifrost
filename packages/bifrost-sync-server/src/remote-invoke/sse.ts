@@ -55,6 +55,10 @@ export function stopKeepalive() {
 export function registerClientStream(state: ClientStreamState): void {
   const existing = clientStreams.get(state.clientInstanceId);
   if (existing && existing.streamId !== state.streamId) {
+    state.discoverable = existing.discoverable;
+    state.discoverySessionId = existing.discoverySessionId;
+    state.pairCode = existing.pairCode;
+    state.pairCodeExpiresAt = existing.pairCodeExpiresAt;
     try {
       writeSseEvent(existing.res, 'replaced', { new_stream_id: state.streamId });
       closeSse(existing.res);
@@ -226,14 +230,23 @@ export function updateClientDiscovery(
   return true;
 }
 
-export function clearClientDiscovery(clientInstanceId: string): void {
+export function clearClientDiscovery(clientInstanceId: string, discoverySessionId?: string): boolean {
   const state = clientStreams.get(clientInstanceId);
-  if (state) {
-    state.discoverable = false;
-    state.pairCode = undefined;
-    state.pairCodeExpiresAt = undefined;
-    state.discoverySessionId = undefined;
+  if (!state) {
+    return false;
   }
+  if (
+    discoverySessionId
+    && state.discoverySessionId
+    && state.discoverySessionId !== discoverySessionId
+  ) {
+    return false;
+  }
+  state.discoverable = false;
+  state.pairCode = undefined;
+  state.pairCodeExpiresAt = undefined;
+  state.discoverySessionId = undefined;
+  return true;
 }
 
 export function consumeClientDiscovery(clientInstanceId: string): void {

@@ -33,8 +33,39 @@ export interface SyncStatus {
   reason: SyncReason;
   last_sync_at?: string | null;
   last_sync_action?: SyncAction | null;
+  last_changed_sync_at?: string | null;
+  last_changed_sync_action?: SyncAction | null;
   last_error?: string | null;
   user?: SyncUser | null;
+  providers?: SyncProviderStatus[];
+  first_run_prompt_required?: boolean;
+}
+
+export interface SyncProviderCapabilities {
+  rules_sync: boolean;
+  config_sync: boolean;
+  remote_invoke: boolean;
+}
+
+export interface SyncProviderStatus {
+  id: string;
+  name: string;
+  description: string;
+  remote_base_url?: string | null;
+  connected: boolean;
+  enabled: boolean;
+  reachable: boolean;
+  authorized: boolean;
+  reason: SyncReason;
+  last_error?: string | null;
+  last_sync_at?: string | null;
+  last_sync_action?: SyncAction | null;
+  last_changed_sync_at?: string | null;
+  last_changed_sync_action?: SyncAction | null;
+  check_interval_secs?: number | null;
+  user?: SyncUser | null;
+  capabilities: SyncProviderCapabilities;
+  remote_invoke_registered: boolean;
 }
 
 export interface UpdateSyncConfigRequest {
@@ -43,6 +74,12 @@ export interface UpdateSyncConfigRequest {
   remote_base_url?: string;
   probe_interval_secs?: number;
   connect_timeout_ms?: number;
+}
+
+export interface SyncLoginRequest {
+  token?: string;
+  provider_id?: string;
+  remote_base_url?: string;
 }
 
 export async function getSyncStatus(): Promise<SyncStatus> {
@@ -62,8 +99,8 @@ export async function getSyncLoginUrl(callbackUrl: string): Promise<string> {
   return response.login_url;
 }
 
-export async function openSyncLogin(): Promise<SyncStatus> {
-  return post<SyncStatus>("/sync/login");
+export async function openSyncLogin(request?: SyncLoginRequest): Promise<SyncStatus> {
+  return post<SyncStatus>("/sync/login", request);
 }
 
 export async function saveSyncSession(token: string): Promise<SyncStatus> {
@@ -72,6 +109,10 @@ export async function saveSyncSession(token: string): Promise<SyncStatus> {
 
 export async function logoutSyncSession(): Promise<SyncStatus> {
   return post<SyncStatus>("/sync/logout");
+}
+
+export async function logoutSyncProvider(providerId: string): Promise<SyncStatus> {
+  return post<SyncStatus>(`/sync/providers/${encodeURIComponent(providerId)}/logout`);
 }
 
 export async function runSyncNow(): Promise<SyncStatus> {

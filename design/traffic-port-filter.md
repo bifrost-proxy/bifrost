@@ -15,7 +15,7 @@ Bifrost 支持多个代理入口端口：主代理端口 + 若干临时端口（
 > - `crates/bifrost-cli/tests/cli_help.rs:184-209` 覆盖 `traffic search help lists --listener-port / --proxy-port`。
 > - `crates/bifrost-admin/src/search/engine.rs:490,660` 将 `listener_port equals` 下推到 SQL 并在 compact 层校验 `lp` 字段。
 > - `e2e-tests/tests/test_temporary_port_bindings.sh:494,501` 用 `bifrost traffic list/search --listener-port` 覆盖临时端口筛选。
-> - Web `web/src/components/FilterBar/index.tsx` 已支持 `Port` 主筛选（`listener_port`），Traffic 详情 `Overview` 展示 `Proxy Port`，Playwright `web/tests/ui/traffic.spec.ts:369-529` 覆盖端口筛选与详情展示。
+> - Web `web/src/components/FilterBar/index.tsx` 已支持 `Port` 主筛选（`listener_port`），Traffic 详情 `Overview` 展示 `Proxy Port`，左侧 Filter Panel 在多入口端口数据集中展示 `Proxy port` 快捷筛选，Playwright `web/tests/ui/traffic.spec.ts` 覆盖端口筛选、详情展示、URL 同步与刷新恢复。
 
 ## 用户目标验证清单
 
@@ -23,6 +23,9 @@ Bifrost 支持多个代理入口端口：主代理端口 + 若干临时端口（
 
 - WebUI `FilterBar` 主筛选器提供 `Port` 字段，内部字段名为 `listener_port`。
 - 选择 `Port` 默认 `Equals` 操作符，展示端口输入框。
+- WebUI 左侧 Filter Panel 在当前 traffic 数据集存在两个或以上不同 `listener_port` 时，在 `Client IP` 下方展示 `Proxy port` 板块。
+- 点击 Filter Panel 的代理端口项后只展示对应 `listener_port` 的记录，并把选中端口写入 URL `panel.proxyPorts`。
+- Filter Panel 任一筛选生效时，顶部摘要和清除筛选按钮使用蓝色强调，避免用户误以为列表为空是数据缺失。
 - 前端本地过滤把 `record.listener_port` 转字符串参与 `contains / equals / regex / not_contains / is_empty / is_not_empty`。
 - Admin API `/traffic` 查询支持 `?listener_port=<port>`，用于刷新、API 校验、服务端查询路径。
 - Fuzzy Search `filters.conditions` 支持 `listener_port`，`equals` 下推到 SQL，其它操作符走 compact 层用 `lp` 字段校验。
@@ -40,6 +43,8 @@ Bifrost 支持多个代理入口端口：主代理端口 + 若干临时端口（
 ### 必须真实验证
 
 - Playwright：主筛选器出现 `Port`，选中后默认 `Equals`，输入端口后列表只展示匹配记录。
+- Playwright：左侧 Filter Panel 只有一个端口时不展示 `Proxy port`；多个端口时展示，点击端口后过滤，URL 同步并可刷新恢复。
+- Playwright：Filter Panel 筛选生效后展示蓝色选中摘要与清除按钮。
 - Admin API：`/traffic?listener_port=<port>` 只返回目标端口流量。
 - Fuzzy Search：`filters.conditions` 含 `listener_port equals <port>` 只返回目标端口流量。
 - Shell E2E：`bifrost traffic list --listener-port` 与 `bifrost traffic search --listener-port` 只返回目标端口记录（`test_temporary_port_bindings.sh` 覆盖）。
@@ -179,6 +184,7 @@ bifrost remote traffic search "" --listener-port 18888
 ### Web
 
 - FilterBar → `+ Add Filter` → 选择 `Port` → 输入端口 → 列表只展示匹配记录。
+- 左侧 Filter Panel → `Proxy port` → 选择端口 → 列表只展示该代理入口端口记录；若当前数据只有一个端口，不显示该板块。
 - Fuzzy Search 里在显式条件面板中添加 `listener_port equals 18888`。
 - Traffic 详情：Overview 展示 `Proxy Port`。
 
@@ -215,6 +221,7 @@ bifrost remote traffic search "" --listener-port 18888
 ## Phase 4：Web + human_tests
 
 - FilterBar `Port` 主筛选器 + Traffic 详情 `Proxy Port`。
+- Filter Panel `Proxy port` 快捷筛选，复用 `listener_port` 计数，选中状态进入 URL `panel.proxyPorts`。
 - `web/tests/ui/traffic.spec.ts` 端口筛选与详情展示。
 - `human_tests/webui-traffic.md` 与 `human_tests/readme.md` 补端口筛选用例。
 - `e2e-tests/tests/test_temporary_port_bindings.sh` 追加 `traffic list/search --listener-port` 断言。
@@ -252,6 +259,7 @@ bifrost remote traffic search "" --listener-port 18888
 ### 人工验证 human_tests
 
 - `human_tests/webui-traffic.md`：TC-TPF-01 端口主筛选、TC-TPF-02 端口详情展示。
+- `human_tests/webui-traffic.md`：TC-WTR-23E 左侧 Filter Panel `Proxy port` 快捷筛选。
 - `human_tests/readme.md`：追加索引。
 - `human_tests/temporary-port-rule-bindings.md`：交叉引用 `--listener-port` 用例。
 

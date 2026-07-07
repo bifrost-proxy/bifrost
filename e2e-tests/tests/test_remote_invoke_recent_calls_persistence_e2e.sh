@@ -114,6 +114,33 @@ http_post_json() {
     http_request "$1" "POST" "$2" "${3:-}"
 }
 
+approve_pairing_with_retry() {
+    local pairing_id="$1"
+    local payload='{"grant_mode":"permanent","grant_scope":"remote_shell_exec","file_access":"read_write"}'
+    local last_status=""
+    local last_body=""
+    local last_error=""
+
+    for _ in $(seq 1 10); do
+        http_post_json "${CLIENT_ADMIN_URL}/api/remote-invoke/pairings/${pairing_id}/approve" "$payload"
+        last_status="$HTTP_STATUS"
+        last_body="$HTTP_BODY"
+        last_error="$CURL_ERROR"
+        if [[ "$HTTP_STATUS" == "200" ]]; then
+            return 0
+        fi
+        sleep 0.5
+    done
+
+    _log_fail "批准配对应返回 200" "200" "status=${last_status}; body=${last_body:-${last_error:-<empty>}}"
+    echo "[remote-invoke-calls-persistence-e2e] pending pairings:" >&2
+    http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/pairings/pending" >&2 || true
+    echo "${HTTP_BODY:-<empty>}" >&2
+    echo "[remote-invoke-calls-persistence-e2e] caller connect log:" >&2
+    cat "$CALLER_CONNECT_LOG" >&2 || true
+    return 1
+}
+
 RELAY_PORT="$(pick_free_port)"
 ADMIN_PORT="$(pick_free_port)"
 RELAY_URL="http://127.0.0.1:${RELAY_PORT}"
@@ -244,8 +271,8 @@ for _ in $(seq 1 30); do
 done
 assert_not_empty "$PAIRING_ID" "pairing_id 不应为空"
 
-http_post_json "${CLIENT_ADMIN_URL}/api/remote-invoke/pairings/${PAIRING_ID}/approve" '{"grant_mode":"permanent","grant_scope":"remote_shell_exec","file_access":"read_write"}'
-assert_status "200" "$HTTP_STATUS" "批准配对应返回 200"
+approve_pairing_with_retry "$PAIRING_ID" || exit 1
+_log_pass "批准配对应返回 200"
 
 CONNECT_OK=0
 for _ in $(seq 1 30); do

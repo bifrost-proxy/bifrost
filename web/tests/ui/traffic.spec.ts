@@ -23,6 +23,12 @@ const apiBase =
   process.env.ADMIN_API_BASE || `${proxyUrl.replace(/\/$/, "")}/_bifrost/api`;
 const currentFilePath = fileURLToPath(import.meta.url);
 
+const decodeQueryJson = <T,>(value: string): T => {
+  const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);
+  return JSON.parse(Buffer.from(padded, "base64").toString("utf8")) as T;
+};
+
 const startMockServer = async () => {
   const server = createServer((req, res) => {
     res.statusCode = 200;
@@ -848,6 +854,69 @@ test("主筛选器支持按代理端口过滤 Traffic", async ({ page }) => {
     ).toBeVisible();
     await expect(
       page.getByTestId("traffic-row").filter({ hasText: otherPortPath }),
+    ).toHaveCount(0);
+  } finally {
+    await backend.close();
+    await server.close();
+  }
+});
+
+test("左侧筛选器仅在多代理端口时展示 Proxy port 并同步到 URL", async ({ page }) => {
+  const server = await startMockServer();
+  const backend = await startIsolatedBackend();
+  const token = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const mainPortPath = `/panel-port-main-${token}`;
+  const otherPortPath = `/panel-port-other-${token}`;
+  const otherPort = backend.port + 1;
+
+  try {
+    await sendProxyRequest(`http://127.0.0.1:${server.port}${mainPortPath}`, backend.proxyUrl);
+    const mainRecord = await waitForTrafficRecordByApi(backend.baseApi, mainPortPath);
+
+    await page.goto(`${backend.baseUrl}/_bifrost/traffic`);
+    await expect(page.getByTestId("traffic-table")).toBeVisible();
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: mainPortPath }).first(),
+    ).toBeVisible();
+    await expect(page.getByTestId("filter-section-proxy-port")).toHaveCount(0);
+    expect(mainRecord.lp).toBe(backend.port);
+
+    await sendProxyRequest(`http://127.0.0.1:${server.port}${otherPortPath}`, backend.proxyUrl);
+    const otherRecord = await waitForTrafficRecordByApi(backend.baseApi, otherPortPath);
+    await updateTrafficListenerPort(backend.dataDir, otherRecord.id, otherPort);
+
+    await page.reload();
+    await expect(page.getByTestId("filter-section-proxy-port")).toBeVisible();
+    await expect(
+      page.getByTestId("filter-section-proxy-port").getByTestId("filter-item-proxy_port"),
+    ).toHaveCount(2);
+
+    await page
+      .getByTestId("filter-section-proxy-port")
+      .locator(`[data-filter-value="${otherPort}"]`)
+      .click();
+
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: otherPortPath }).first(),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: mainPortPath }),
+    ).toHaveCount(0);
+    await expect(page.getByTestId("filter-selection-summary")).toContainText("Port 1");
+    await expect(page.getByTestId("filter-clear-active")).toBeVisible();
+
+    const panelParam = new URL(page.url()).searchParams.get("panel");
+    expect(panelParam).toBeTruthy();
+    expect(decodeQueryJson<{ proxyPorts?: string[] }>(panelParam || "").proxyPorts).toEqual([
+      String(otherPort),
+    ]);
+
+    await page.reload();
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: otherPortPath }).first(),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("traffic-row").filter({ hasText: mainPortPath }),
     ).toHaveCount(0);
   } finally {
     await backend.close();

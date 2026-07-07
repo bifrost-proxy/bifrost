@@ -5803,7 +5803,9 @@ impl CallerRelayClient {
                 .finalize(client_ephemeral_pub)?
         };
         let grant = GrantInfo {
-            grant_id: String::new(),
+            grant_id: saved_connection
+                .map(|conn| conn.grant_id.clone())
+                .unwrap_or_default(),
             status: "active".to_string(),
             grant_session_token: session.grant_session_token,
             expires_at: session.expires_at,
@@ -10763,6 +10765,7 @@ mod coverage_boost {
             grant.grant_session_token.as_deref(),
             Some("session-refreshed")
         );
+        assert_eq!(grant.grant_id, saved_conn.grant_id);
         assert_eq!(
             grant.caller_ephemeral_pub.as_deref(),
             saved_conn.caller_ephemeral_pub.as_deref()

@@ -284,6 +284,14 @@ relay_post_json() {
         "${RELAY_URL}${path}" -d "$body"
 }
 
+admin_post_json_status() {
+    local path="$1"
+    local body="$2"
+    local output_path="$3"
+    env NO_PROXY="*" no_proxy="*" curl -s -o "$output_path" -w '%{http_code}' \
+        -X POST -H "Content-Type: application/json" "${ADMIN_BASE_URL}${path}" -d "$body"
+}
+
 bootstrap_remote_invoke() {
     header "Bootstrap relay auth and worker registration"
     SYNC_USER_ID="remote_query_e2e_${RANDOM}"
@@ -342,7 +350,37 @@ pair_caller() {
         exit 1
     }
 
-    admin_post_json "/remote-invoke/pairings/${pairing_id}/approve" '{"grant_mode":"permanent","grant_scope":"remote_shell_exec","file_access":"read_write"}' >/dev/null
+    local approve_status approve_body
+    approve_body="$(mktemp)"
+    for _ in $(seq 1 10); do
+        approve_status="$(admin_post_json_status \
+            "/remote-invoke/pairings/${pairing_id}/approve" \
+            '{"grant_mode":"permanent","grant_scope":"remote_shell_exec","file_access":"read_write"}' \
+            "$approve_body" || true)"
+        if [[ "$approve_status" == "200" ]]; then
+            break
+        fi
+        sleep 0.5
+    done
+
+    if [[ "$approve_status" != "200" ]]; then
+        echo "approve pairing failed with status ${approve_status:-<empty>}" >&2
+        echo "approve response:" >&2
+        cat "$approve_body" >&2 || true
+        echo "pending pairings:" >&2
+        admin_get "/remote-invoke/pairings/pending" >&2 || true
+        echo "remote invoke status:" >&2
+        admin_get "/remote-invoke/status" >&2 || true
+        echo "caller connect log:" >&2
+        cat "$CALLER_CONNECT_LOG" >&2 || true
+        echo "target log tail:" >&2
+        tail -n 120 "$TARGET_LOG_FILE" >&2 || true
+        echo "relay log tail:" >&2
+        tail -n 120 "$RELAY_LOG_FILE" >&2 || true
+        rm -f "$approve_body"
+        exit 1
+    fi
+    rm -f "$approve_body"
 
     wait "$CALLER_CONNECT_PID" || connect_exit=$?
     connect_exit="${connect_exit:-0}"

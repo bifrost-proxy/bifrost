@@ -23,6 +23,7 @@ export default function FilterSection({
   children,
 }: FilterSectionProps) {
   const { token } = theme.useToken();
+  const testId = `filter-section-${title.toLowerCase().replace(/\s+/g, "-")}`;
 
   const styles = useMemo<Record<string, CSSProperties>>(
     () => ({
@@ -67,7 +68,7 @@ export default function FilterSection({
   );
 
   return (
-    <div style={styles.container}>
+    <div style={styles.container} data-testid={testId}>
       <div
         style={styles.header}
         onClick={onToggle}

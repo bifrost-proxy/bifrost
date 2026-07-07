@@ -43,13 +43,14 @@ import {
 } from "../../api/config";
 import {
   getSyncStatus,
+  logoutSyncProvider,
   logoutSyncSession,
   openSyncLogin,
-  runSyncNow,
   updateSyncConfig,
+  type SyncProviderStatus,
   type SyncStatus,
 } from "../../api/sync";
-import { isConnectionIssueError } from "../../api/client";
+import { isConnectionIssueError, normalizeApiErrorMessage } from "../../api/client";
 import { copyToClipboard } from "../../utils/clipboard";
 import { useSyncStore } from "../../stores/useSyncStore";
 import {
@@ -192,8 +193,6 @@ export default function Settings() {
   const [desktopPortSaving, setDesktopPortSaving] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [syncLoading, setSyncLoading] = useState(false);
-  const [syncRemoteBaseUrlDraft, setSyncRemoteBaseUrlDraft] = useState("");
-  const syncRemoteBaseUrlDirtyRef = useRef(false);
   const beginDesktopCoreRestart = useDesktopCoreStore(
     (state) => state.beginRestart,
   );
@@ -211,24 +210,9 @@ export default function Settings() {
     desktopCorePhase !== "idle" &&
     desktopCorePhase !== "error";
 
-  const applySyncStatus = useCallback(
-    (status: SyncStatus, options?: { syncRemoteBaseUrlDraft?: boolean }) => {
-      setSyncStatus(status);
-      if (
-        options?.syncRemoteBaseUrlDraft ||
-        !syncRemoteBaseUrlDirtyRef.current
-      ) {
-        syncRemoteBaseUrlDirtyRef.current = false;
-        setSyncRemoteBaseUrlDraft(status.remote_base_url);
-      }
-      useSyncStore.getState().setSyncStatus(status);
-    },
-    [],
-  );
-
-  const handleSyncRemoteBaseUrlDraftChange = useCallback((value: string) => {
-    syncRemoteBaseUrlDirtyRef.current = true;
-    setSyncRemoteBaseUrlDraft(value);
+  const applySyncStatus = useCallback((status: SyncStatus) => {
+    setSyncStatus(status);
+    useSyncStore.getState().setSyncStatus(status);
   }, []);
 
   const fetchProxySettings = useCallback(async () => {
@@ -902,49 +886,63 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     message.success("Proxy config copied to clipboard");
   };
 
-  const handleSyncToggle = useCallback(async (enabled: boolean) => {
-    setSyncLoading(true);
-    try {
-      const status = await updateSyncConfig({ enabled });
-      applySyncStatus(status);
-      message.success(enabled ? "Remote sync enabled" : "Remote sync disabled");
-    } catch {
-      message.error("Failed to update sync setting");
-    } finally {
-      setSyncLoading(false);
+  const normalizeBifrostCloudUrl = useCallback((value?: string | null) => {
+    const trimmed = value?.trim() ?? "";
+    if (!trimmed) {
+      return {
+        ok: false as const,
+        message: "Please enter your self-hosted Bifrost Sync Server URL",
+      };
     }
-  }, [applySyncStatus]);
-
-  const handleSyncAutoToggle = useCallback(async (autoSync: boolean) => {
-    setSyncLoading(true);
+    let parsed: URL;
     try {
-      const status = await updateSyncConfig({ auto_sync: autoSync });
-      applySyncStatus(status);
-      message.success(autoSync ? "Auto sync enabled" : "Auto sync disabled");
+      parsed = new URL(trimmed);
     } catch {
-      message.error("Failed to update auto sync");
-    } finally {
-      setSyncLoading(false);
+      return {
+        ok: false as const,
+        message: "Please enter a valid HTTPS URL",
+      };
     }
-  }, [applySyncStatus]);
+    if (parsed.protocol !== "https:") {
+      return {
+        ok: false as const,
+        message: "Bifrost Cloud URL must start with https://",
+      };
+    }
+    if (!parsed.hostname) {
+      return {
+        ok: false as const,
+        message: "Please enter a URL with a hostname",
+      };
+    }
+    parsed.hash = "";
+    parsed.search = "";
+    return {
+      ok: true as const,
+      value: parsed.toString().replace(/\/$/, ""),
+    };
+  }, []);
 
-  const handleSyncRemoteBaseUrlSave = useCallback(async () => {
-    const remoteBaseUrl = syncRemoteBaseUrlDraft.trim();
-    if (!remoteBaseUrl) {
-      message.warning("Please enter the remote Bifrost URL");
+  const handleSyncProviderRemoteBaseUrlSave = useCallback(async (
+    provider: SyncProviderStatus,
+    remoteBaseUrlValue: string,
+  ) => {
+    const normalized = normalizeBifrostCloudUrl(remoteBaseUrlValue);
+    if (!normalized.ok) {
+      message.warning(normalized.message);
       return;
     }
     setSyncLoading(true);
     try {
-      const status = await updateSyncConfig({ remote_base_url: remoteBaseUrl });
-      applySyncStatus(status, { syncRemoteBaseUrlDraft: true });
-      message.success("Remote sync URL updated");
+      const status = await updateSyncConfig({ remote_base_url: normalized.value });
+      applySyncStatus(status);
+      message.success(`${provider.name} URL updated`);
     } catch {
-      message.error("Failed to update remote sync URL");
+      message.error(`Failed to update ${provider.name} URL`);
     } finally {
       setSyncLoading(false);
     }
-  }, [applySyncStatus, syncRemoteBaseUrlDraft]);
+  }, [applySyncStatus, normalizeBifrostCloudUrl]);
 
   const handleSyncSignIn = useCallback(async () => {
     try {
@@ -955,6 +953,62 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
       message.error("Failed to open remote sign-in page");
     }
   }, [applySyncStatus]);
+
+  const handleSyncProviderSignIn = useCallback(
+    async (provider: SyncProviderStatus, options?: { token?: string }) => {
+      if (provider.id === "github_gist") {
+        if (!options?.token?.trim()) {
+          message.warning("Please enter a GitHub token with the gist scope");
+          return;
+        }
+        setSyncLoading(true);
+        try {
+          const status = await openSyncLogin({
+            provider_id: "github_gist",
+            token: options.token.trim(),
+          });
+          applySyncStatus(status);
+          message.success("GitHub Gist connected");
+        } catch (error) {
+          message.error(
+            normalizeApiErrorMessage(error, "Failed to connect GitHub Gist"),
+          );
+        } finally {
+          setSyncLoading(false);
+        }
+        return;
+      }
+      setSyncLoading(true);
+      try {
+        if (provider.id === "bifrost_cloud") {
+          const normalized = normalizeBifrostCloudUrl(provider.remote_base_url);
+          if (!normalized.ok) {
+            message.warning(normalized.message);
+            return;
+          }
+          const status = await updateSyncConfig({
+            enabled: true,
+            remote_base_url: normalized.value,
+          });
+          applySyncStatus(status);
+        } else if (provider.remote_base_url) {
+          const status = await updateSyncConfig({
+            enabled: true,
+            remote_base_url: provider.remote_base_url,
+          });
+          applySyncStatus(status);
+        }
+        const status = await openSyncLogin();
+        applySyncStatus(status);
+        message.success(`${provider.name} sign-in window opened`);
+      } catch {
+        message.error(`Failed to open ${provider.name} sign-in page`);
+      } finally {
+        setSyncLoading(false);
+      }
+    },
+    [applySyncStatus, normalizeBifrostCloudUrl],
+  );
 
   const handleSyncSignOut = useCallback(async () => {
     setSyncLoading(true);
@@ -969,18 +1023,21 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     }
   }, [applySyncStatus]);
 
-  const handleSyncRunNow = useCallback(async () => {
-    setSyncLoading(true);
-    try {
-      const status = await runSyncNow();
-      applySyncStatus(status);
-      message.success("Sync requested");
-    } catch {
-      message.error("Failed to trigger sync");
-    } finally {
-      setSyncLoading(false);
-    }
-  }, [applySyncStatus]);
+  const handleSyncProviderSignOut = useCallback(
+    async (provider: SyncProviderStatus) => {
+      setSyncLoading(true);
+      try {
+        const status = await logoutSyncProvider(provider.id);
+        applySyncStatus(status);
+        message.success(`${provider.name} signed out`);
+      } catch {
+        message.error(`Failed to sign out from ${provider.name}`);
+      } finally {
+        setSyncLoading(false);
+      }
+    },
+    [applySyncStatus],
+  );
 
   const handleDesktopProxyPortApply = useCallback(async () => {
     if (!isDesktopShell()) {
@@ -1336,14 +1393,11 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
         <SyncTab
           syncStatus={syncStatus}
           syncLoading={syncLoading}
-          remoteBaseUrlDraft={syncRemoteBaseUrlDraft}
-          setRemoteBaseUrlDraft={handleSyncRemoteBaseUrlDraftChange}
-          onToggleEnabled={handleSyncToggle}
-          onToggleAutoSync={handleSyncAutoToggle}
-          onSaveRemoteBaseUrl={handleSyncRemoteBaseUrlSave}
           onSignIn={handleSyncSignIn}
+          onProviderSignIn={handleSyncProviderSignIn}
+          onProviderRemoteBaseUrlSave={handleSyncProviderRemoteBaseUrlSave}
+          onProviderSignOut={handleSyncProviderSignOut}
           onSignOut={handleSyncSignOut}
-          onRunSync={handleSyncRunNow}
         />
       ),
     },

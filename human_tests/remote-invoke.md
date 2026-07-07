@@ -68,6 +68,28 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ## 测试用例
 
+### TC-RI-00：Sync Provider Remote Invoke 单通道与双通道注册
+
+**操作步骤**：
+1. 构造只有 ByteDance Internal session 的 sync-state，执行 `cargo test -p bifrost-sync remote_invoke_registration_targets_cover_single_and_dual_channels -- --nocapture`
+2. 构造只有 Bifrost Cloud session 的 sync-state，确认 `session_token_for_remote("https://sync.example.test/")` 返回 Bifrost Cloud token
+3. 构造 ByteDance Internal + Bifrost Cloud 同时登录的 sync-state，确认 `remote_invoke_registration_targets()` 返回两个 target
+4. 构造运行时登录/退出场景，确认 AdminState 保留一个 Remote Invoke worker 兼容旧 API，同时维护每个 eligible relay URL 对应的 worker 列表
+5. 打开 Settings Sync 页面或执行 UI 回归，确认 ByteDance Internal 和 Bifrost Cloud 两张卡都显示 Remote Invoke `Registered`，GitHub Gist 显示 `Not supported`
+
+**预期结果**：
+- ByteDance Internal 单独登录时，Remote Invoke registration target 只包含 `bytedance_internal`
+- Bifrost Cloud 单独登录时，Remote Invoke registration target 只包含 `bifrost_cloud`
+- 两者同时登录时，Remote Invoke registration targets 同时包含 `bytedance_internal` 和 `bifrost_cloud`，等价于双通道
+- 两者同时登录时，运行时存在两个 Remote Invoke worker；退出同步服务或移除 provider session 后，对应 worker 被停止并从列表移除
+- Worker 注册 token 按 relay URL 查对应 provider session，不会把 ByteDance token 错用到 Bifrost Cloud，反之亦然
+- GitHub Gist 不进入 Remote Invoke target 列表
+
+**执行记录**：
+- 2026-07-07：PASS。执行 `cargo test -p bifrost-sync remote_invoke -- --nocapture`，2/2 PASS，覆盖 ByteDance-only、Bifrost Cloud token lookup、ByteDance+Bifrost Cloud dual-channel target 列表和 provider card `remote_invoke_registered` 状态。执行 `cargo test -p bifrost-sync logout_clears_provider_sessions -- --nocapture`，1/1 PASS，确认退出登录会清理 provider sessions。执行 `cargo test -p bifrost-admin remote_invoke_workers_track_single_and_dual_channel_relays -- --nocapture`，1/1 PASS，确认 AdminState 同时维护 ByteDance Internal 和 Bifrost Cloud 两个 Remote Invoke worker，并在 provider 移除后停掉对应 worker。执行 `cargo test -p bifrost-admin session_token -- --nocapture`，4/4 PASS，确认 RemoteInvokeWorker 缺 token 时仍 fail closed，注册 token 归一化逻辑不回退到错误 provider。执行 `pnpm --dir web run test:ui tests/ui/admin-settings.spec.ts --grep "Settings Sync"`，7/7 PASS，确认 Settings Sync 的 ByteDance Internal 与 Bifrost Cloud 同时显示 Remote Invoke `Registered`，GitHub Gist 仍显示 `Not supported`。
+
+---
+
 ### TC-RI-01：Remote Invoke Tab 初始状态
 
 **操作步骤**：
@@ -5291,6 +5313,92 @@ rm -rf /tmp/bifrost-remote-overload.*
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
 | TC-RI-回归-153 | ✅ PASS | 2026-07-02 先执行 PPE full remote 矩阵复现问题：target 在 `remote file read` 阶段退出，`/tmp/bifrost-relay-full.evfjfw/target/logs/bifrost.err` 与 `/tmp/bifrost-relay-full.pOnDK3/target/logs/bifrost.err` 均显示 `thread 'tokio-rt-worker' ... has overflowed its stack` / `fatal runtime error: stack overflow, aborting`；修复 `bifrost start` runtime 使用 8 MiB tokio worker stack，并补充 `execute_file_read_with_absolute_temp_path_returns_json` 多线程 tokio 回归后，重新执行上述 PPE 命令通过。最终 SUMMARY 显示 `relay mode=PPE relay_url=https://bifrost.bytedance.net headers=x-tt-env=ppe_ticket_system,x-use-ppe=1`、target `port=53130`、`client_id=b2b3297e-c240-4553-83d1-ef8babe65fa1`、code grant `5ee9afe97fb5c001`、power grant `19b7057e2a1bcb36`；`code remote conn status`、`code remote traffic list`、`code remote traffic get/search`、`code remote file all subcommands`、`code remote exec/run/job`、`code-power remote keep-awake all subcommands`、`ssh-key authorization connected via relay`、`ssh remote traffic get/search`、`ssh remote file all subcommands`、`ssh remote exec/run/job`、`ssh remote keep-awake all subcommands` 和 `remote conn down cleanup` 全部 PASS。脚本退出码 0，保留临时目录 `/tmp/bifrost-relay-full.lavFJX`，二进制 `target/debug/bifrost` SHA256 为 `20b182e8e2d3a47a10ad67e859cb9864a557d78b7669dc2a6d7ebc4601195736`。 |
+
+## TC-RI-回归-154：Remote Invoke shell E2E 不能在同一 shard 内并行互相撤销授权
+
+**背景**：PR `codex/sync-provider-design` 的 GitHub Actions run `28840969358` 中，macOS aarch64 shell shard 2 在并行执行 remote-invoke 相关 shell 测试时出现 `approve pairing should return 200` 实际 500、`Authorization ... expired or revoked on the relay`、`pair_slot_occupied` 等失败。复现确认 `test_remote_invoke_e2e.sh`、`test_remote_file_relay_e2e.sh`、`test_remote_invoke_ssh_e2e.sh` 分别串行运行均可通过，但并行运行时会共享 relay grant 状态、caller connection cache 或 pair slot，导致 sibling 测试互相撤销授权。后续 run `28843962643` 进一步证明 shard 1 中 `test_remote_invoke_v5_session_refresh_e2e.sh` 也会被同一 shard 内其它 remote pairing 脚本干扰，修复要求 CI shell runner 将所有会启动 relay、进入 discovery、pending pairing 或通过 `--relay-url` 建立连接的 remote pairing 家族纳入串行隔离列表。
+
+### 操作步骤
+
+1. 在当前分支确认 `scripts/run_all_e2e.sh` 的 `ISOLATED_AFTER_TESTS` 包含以下 remote pairing 家族脚本：
+   `test_remote_invoke_e2e.sh`、`test_remote_file_relay_e2e.sh`、`test_remote_invoke_recent_calls_args_preview_e2e.sh`、`test_remote_invoke_recent_calls_persistence_e2e.sh`、`test_remote_invoke_ssh_e2e.sh`、`test_remote_invoke_v5_session_refresh_e2e.sh`、`test_remote_relay_tls_trust_e2e.sh`、`test_remote_relay_url_fallback_e2e.sh`、`test_remote_search_traffic_cli_isomorphic_e2e.sh`。
+2. 验证 shard 1 shell 测试列表中的 remote pairing 脚本被选择但会进入串行队列：
+   `BIFROST_E2E_SHARD_INDEX=1 BIFROST_E2E_SHARD_TOTAL=2 bash scripts/run_all_e2e.sh --ci --skip-rules --skip-runner --skip-ui --list-shell-tests | rg 'test_remote_(invoke_v5_session_refresh|invoke_recent_calls|relay_url_fallback|search_traffic)'`。
+3. 验证 shard 2 shell 测试列表仍包含 remote-invoke 相关脚本：
+   `BIFROST_E2E_SHARD_INDEX=2 BIFROST_E2E_SHARD_TOTAL=2 bash scripts/run_all_e2e.sh --ci --skip-rules --skip-runner --skip-ui --list-shell-tests | rg 'test_remote_(invoke_e2e|file_relay|invoke_ssh)'`。
+4. 验证全量 shell 测试列表包含 SSH 用例：
+   `bash scripts/run_all_e2e.sh --ci --skip-rules --skip-runner --skip-ui --list-shell-tests | rg 'test_remote_invoke_ssh_e2e'`。
+5. 串行执行 Remote File Relay E2E：
+   `SKIP_BUILD=true BIFROST_E2E_HTTP_RETRIES=2 TIMEOUT=90 e2e-tests/tests/test_remote_file_relay_e2e.sh`。
+6. 串行执行 SSH Remote Invoke E2E：
+   `SKIP_BUILD=true BIFROST_E2E_HTTP_RETRIES=2 TIMEOUT=90 e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`。
+7. 串行执行主 Remote Invoke E2E：
+   `SKIP_BUILD=true BIFROST_E2E_HTTP_RETRIES=2 TIMEOUT=90 e2e-tests/tests/test_remote_invoke_e2e.sh`。
+
+### 预期结果
+
+- Runner 将 remote pairing 家族 shell 测试从 parallel batch 移入 serial batch。
+- 三条脚本串行运行时均使用随机端口和隔离 `BIFROST_DATA_DIR`，不使用 9900，不修改系统代理。
+- `test_remote_file_relay_e2e.sh` 完整通过 file read/list/stat/hash/write/edit/patch/transfer/readonly 等链路。
+- `test_remote_invoke_ssh_e2e.sh` 完整通过 SSH key challenge、grant、remote exec/file/traffic/search、revoke 等链路。
+- `test_remote_invoke_e2e.sh` 完整通过 pair-code、grant、remote status、traffic list/get/search、reject、stale reconnect、disconnect 与 grants 清理链路。
+
+### 实际执行结果
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-154 | ✅ PASS | 2026-07-07 先复现并行干扰：同时运行 `test_remote_invoke_e2e.sh`、`test_remote_file_relay_e2e.sh`、`test_remote_invoke_ssh_e2e.sh` 时，本地出现与 CI 一致的 `approve pairing should return 200` 实际 500、SSH grant 被 relay 判定 expired/revoked。补充最小探针确认单独 target/relay/caller approve 返回 200。随后修改 `scripts/run_all_e2e.sh` 将三条 remote-invoke 类脚本加入 `ISOLATED_AFTER_TESTS`。执行 shard 2 list 命令确认 `test_remote_invoke_e2e.sh` 与 `test_remote_file_relay_e2e.sh` 在当前 shard；执行全量 list 命令确认 `test_remote_invoke_ssh_e2e.sh` 仍被选择。串行复测 `test_remote_file_relay_e2e.sh` 通过，最终 `Total: 107 / Passed: 107 / Failed: 0`；串行复测 `test_remote_invoke_ssh_e2e.sh` 通过，输出 `All SSH remote invoke E2E checks passed`；串行复测 `test_remote_invoke_e2e.sh` 通过，最终 `All assertions: total=91 passed=91 failed=0`。run `28843962643` 又在 shard 1 的 `test_remote_invoke_v5_session_refresh_e2e.sh` 复现同类 approve 500，因此继续把 `test_remote_invoke_recent_calls_args_preview_e2e.sh`、`test_remote_invoke_recent_calls_persistence_e2e.sh`、`test_remote_invoke_v5_session_refresh_e2e.sh`、`test_remote_relay_tls_trust_e2e.sh`、`test_remote_relay_url_fallback_e2e.sh`、`test_remote_search_traffic_cli_isomorphic_e2e.sh` 纳入同一串行隔离家族，并用 shard 1/shard 2 list 命令验证这些用例仍被选择。run `28846487072` 进一步发现 `test_remote_search_traffic_cli_isomorphic_e2e.sh` 已串行但在 CI 高负载下 approve 阶段 7 秒内失败且缺少响应体诊断，因此为该脚本的 pairing approve 增加最多 10 次、每次 0.5 秒的 200 状态重试，并在最终失败时打印 approve 响应、pending pairings、remote invoke status、caller log、target log 与 relay log。全流程使用随机端口和隔离数据目录，未使用 9900，未修改系统代理。 |
+- 2026-07-07: PASS - CI run `28855958270` 在 macOS shard 1 中确认 `test_remote_invoke_recent_calls_persistence_e2e.sh` 与 `test_remote_invoke_v5_session_refresh_e2e.sh` 已进入串行队列但仍可能在 approve 阶段遇到瞬态 500。为两条脚本增加最多 10 次、每次 0.5 秒的 pairing approve 重试，并在最终失败时打印 status/body、pending pairings 与 caller connect log。执行 `bash -n e2e-tests/tests/test_remote_invoke_recent_calls_persistence_e2e.sh e2e-tests/tests/test_remote_invoke_v5_session_refresh_e2e.sh` 通过。
+- 2026-07-07: PASS - 本地继续复现 `test_remote_invoke_v5_session_refresh_e2e.sh`，approve 通过后发现三个真实竞态：一是 v5 caller 通过 saved connection 刷新 session 时 lookup 响应不暴露 `grant_id`，CLI 需要沿用本地 saved `grant_id`；二是 target worker SSE 重连时，如果本地 crypto 尚未落盘就看到 relay active grant，不能直接删除 relay grant；三是 target worker SSE 重连会反复重新注册 client，sync server 旋转 `client_auth_token` 后会让执行中的 call frame/exit 上报 401。修复后执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli find_reusable_grant_reuses_saved_transport_for_session_refresh --lib`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin handle_grant_created_inserts_grant_when_crypto_available --lib`、`pnpm --dir packages/bifrost-sync-server exec vitest run src/__tests__/remote-invoke-security.test.ts -t "reuses a valid client auth token"` 均通过；重新构建 release 后执行 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/release/bifrost BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_remote_invoke_v5_session_refresh_e2e.sh` 通过，最终 `Total: 17 / Passed: 17 / Failed: 0`；执行 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/release/bifrost BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_remote_invoke_recent_calls_persistence_e2e.sh` 通过，输出 `Recent Calls persistence E2E passed`。
+
+## TC-RI-回归-155：Discovery close 与 pending pairing 查询不能丢失后续配对
+
+**背景**：PR `codex/sync-provider-design` 的 GitHub Actions run `28861869357` 中，macOS aarch64 shell shard 2 在 `test_remote_invoke_e2e.sh` 的 TC-RI-05 拒绝配对流程出现 `第二次配对请求未到达`，caller 日志曾出现 `pair_slot_occupied`。本地复现进一步发现两类竞态：旧 discovery close 如果晚于新 discovery publish 到达 relay，会因为 relay 只按 `client_instance_id` 清理而误删新 pair code，caller 得到 `invalid_pair_code`；另一次复现中 caller 已 `Waiting for approval`，说明 relay 已创建 pairing，但 target 端 pending API 只读本地 SSE 缓存，SSE 推送遗漏时 30 秒内仍看不到 pending。修复要求 relay close 必须按 `discovery_session_id` 条件清理，并且 target pending API 查询前主动从 relay 补拉 pending pairings。
+
+### 操作步骤
+
+1. 执行 sync-server Remote Invoke pairing cleanup 回归：
+   `pnpm --dir packages/bifrost-sync-server test -- remote-invoke-pairing-timeout`。
+2. 重新构建本地二进制：
+   `cargo build --bin bifrost`。
+3. 用最新 debug 二进制运行主 Remote Invoke shell E2E：
+   `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_remote_invoke_e2e.sh`。
+
+### 预期结果
+
+- relay `DELETE /v4/remote-invoke/client/discovery-session/:session_id` 只清理当前匹配的 discovery session；旧 session close 不能误删新 pair code。
+- close 当前 discovery session 时，当前 target 的 pending pairing slot 会被拒绝清理，后续 pair code 可以立即重新配对。
+- target 管理端 `/_bifrost/api/remote-invoke/pairings/pending` 查询前会主动从 relay 补拉 pending pairing，SSE 推送遗漏时仍能显示待审批请求。
+- `test_remote_invoke_e2e.sh` 的 TC-RI-05 拒绝配对、TC-RI-07B fresh reconnect、TC-RI-08 disconnect 全部通过；脚本退出码为 0。
+
+### 实际执行结果
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-155 | ✅ PASS | 2026-07-07 本地先复现 `test_remote_invoke_e2e.sh` 的 TC-RI-05 失败：一次 caller 日志为 `start_pairing failed ... invalid_pair_code`，另一次 caller 已输出 `Waiting for approval on the remote device...` 但 target pending API 30 秒内未显示 pairing。修复后执行 `pnpm --dir packages/bifrost-sync-server test -- remote-invoke-pairing-timeout` 通过，输出 `Test Files 16 passed`、`Tests 204 passed`；执行 `cargo fmt --all -- --check` 通过；执行 `cargo build --bin bifrost` 通过；最终用最新 `target/debug/bifrost` 执行 `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_remote_invoke_e2e.sh` 通过，输出 `All assertions: total=90 passed=90 failed=0` 和 `All tests passed!`。本流程使用随机端口和隔离数据目录，未使用 9900，未修改系统代理。 |
+
+## TC-RI-回归-156：publish pair code 后 SSE 重连不能让授权码失效
+
+**背景**：PR `codex/sync-provider-design` 的 GitHub Actions run `28867774487` 中，macOS aarch64 shell shard 2 的 `test_remote_invoke_e2e.sh` 已不再出现 `pair_slot_occupied`，但 TC-RI-05 仍偶发 `第二次配对请求未到达`，caller 日志为 `start_pairing failed ... invalid_pair_code`。该失败发生在 target 已通过 `discovery/enter` 发布新 pair code 后、caller 使用该 code 发起配对前。根因是 relay 把 active pair code 存在当前 SSE stream 内存状态中；同一 client 在 publish 后发生 SSE 重连时，新 stream 替换旧 stream 且默认 `discoverable=false`，导致刚发布的 pair code 丢失。
+
+### 操作步骤
+
+1. 执行 sync-server Remote Invoke pairing cleanup 回归：
+   `pnpm --dir packages/bifrost-sync-server test -- remote-invoke-pairing-timeout`。
+2. 用最新 debug 二进制运行主 Remote Invoke shell E2E：
+   `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_remote_invoke_e2e.sh`。
+
+### 预期结果
+
+- 同一 client SSE stream 被新 stream 替换时，relay 会继承旧 stream 上仍有效的 `discoverable`、`discovery_session_id`、`pair_code` 和 `pairCodeExpiresAt`。
+- publish 后发生 SSE 重连，caller 继续使用刚发布的 pair code 时，`/v5/remote-invoke/pairings/start` 仍返回成功，不再报 `invalid_pair_code`。
+- `test_remote_invoke_e2e.sh` 的 TC-RI-05 拒绝配对流程能看到 pending pairing，拒绝后 caller 非 0 退出；TC-RI-08 disconnect 回归继续通过。
+
+### 实际执行结果
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-156 | ✅ PASS | 2026-07-07 先通过 GitHub Actions run `28867774487` 的 artifact 确认旧 `pair_slot_occupied` 已消失，但 `test_remote_invoke_e2e.sh` 的 TC-RI-05 仍失败为 `start_pairing failed ... invalid_pair_code`，且发生在 `discovery/enter` 返回新 pair code 后。修复 relay SSE replacement 继承 active discovery 状态后，执行 `pnpm --dir packages/bifrost-sync-server test -- remote-invoke-pairing-timeout` 通过，输出 `Test Files 16 passed`、`Tests 205 passed`；执行 `BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_remote_invoke_e2e.sh` 通过，TC-RI-05 拒绝配对、TC-RI-08 disconnect 均 PASS，最终 `All assertions: total=90 passed=90 failed=0` 和 `All tests passed!`。本流程使用随机端口和隔离数据目录，未使用 9900，未修改系统代理。 |
 
 > 说明：核心可测逻辑（行数推导 `visible_table_rows`、列宽预算 `adaptive_column_widths`）已抽成纯函数，
 > 由 `crates/bifrost-cli/src/commands/status_tui.rs` 的单元测试覆盖；TUI 实时渲染部分已在

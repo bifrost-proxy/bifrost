@@ -7,10 +7,11 @@ import { customAlphabet } from 'nanoid';
 const nanoid = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_', 21);
 import type {
   Env, User, CreateEnvReq, UpdateEnvReq, SearchEnvQuery,
+  BasicConfig, BasicConfigKey, UpsertBasicConfigReq,
   Group, GroupMember, GroupSetting, UpdateGroupReq, SearchGroupQuery, UpdateGroupSettingReq,
   RemoteInvokePairing, RemoteInvokeGrant, RemoteInvokeCall, RemoteInvokeEvent, RemoteInvokeClientRecord, RemoteInvokeSshClaim,
 } from '../types';
-import type { IUserDao, IEnvDao, IGroupDao, IGroupMemberDao, IGroupSettingDao, IRemoteInvokeDao, IStorage } from './types';
+import type { IUserDao, IEnvDao, IBasicConfigDao, IGroupDao, IGroupMemberDao, IGroupSettingDao, IRemoteInvokeDao, IStorage } from './types';
 
 export class SqliteUserDao implements IUserDao {
   constructor(private db: Database.Database) { }
@@ -148,6 +149,43 @@ export class SqliteEnvDao implements IEnvDao {
       .all(...params, limit, offset) as Env[];
 
     return { list, total: countRow.total };
+  }
+}
+
+export class SqliteBasicConfigDao implements IBasicConfigDao {
+  constructor(private db: Database.Database) { }
+
+  async find(userId: string, configKey: BasicConfigKey): Promise<BasicConfig | undefined> {
+    return this.db
+      .prepare('SELECT * FROM bifrost_basic_configs WHERE user_id = ? AND config_key = ?')
+      .get(userId, configKey) as BasicConfig | undefined;
+  }
+
+  async upsert(req: UpsertBasicConfigReq): Promise<BasicConfig> {
+    const now = new Date().toISOString();
+    const id = `${req.user_id}:${req.config_key}`;
+    this.db
+      .prepare(
+        `INSERT INTO bifrost_basic_configs (id, user_id, config_key, value_json, hash, create_time, update_time)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(user_id, config_key)
+         DO UPDATE SET value_json = excluded.value_json, hash = excluded.hash, update_time = excluded.update_time`,
+      )
+      .run(id, req.user_id, req.config_key, req.value_json, req.hash ?? '', now, now);
+    return (await this.find(req.user_id, req.config_key))!;
+  }
+
+  async delete(userId: string, configKey: BasicConfigKey): Promise<boolean> {
+    const result = this.db
+      .prepare('DELETE FROM bifrost_basic_configs WHERE user_id = ? AND config_key = ?')
+      .run(userId, configKey);
+    return result.changes > 0;
+  }
+
+  async listByUser(userId: string): Promise<BasicConfig[]> {
+    return this.db
+      .prepare('SELECT * FROM bifrost_basic_configs WHERE user_id = ? ORDER BY config_key ASC')
+      .all(userId) as BasicConfig[];
   }
 }
 
@@ -812,6 +850,7 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
 export class SqliteStorage implements IStorage {
   public user: SqliteUserDao;
   public env: SqliteEnvDao;
+  public basicConfig: SqliteBasicConfigDao;
   public group: SqliteGroupDao;
   public groupMember: SqliteGroupMemberDao;
   public groupSetting: SqliteGroupSettingDao;
@@ -827,6 +866,7 @@ export class SqliteStorage implements IStorage {
     this.migrate();
     this.user = new SqliteUserDao(this.db);
     this.env = new SqliteEnvDao(this.db);
+    this.basicConfig = new SqliteBasicConfigDao(this.db);
     this.group = new SqliteGroupDao(this.db);
     this.groupMember = new SqliteGroupMemberDao(this.db);
     this.groupSetting = new SqliteGroupSettingDao(this.db);
@@ -858,6 +898,17 @@ export class SqliteStorage implements IStorage {
       );
       CREATE INDEX IF NOT EXISTS idx_bifrost_envs_user_id ON bifrost_envs(user_id);
       CREATE INDEX IF NOT EXISTS idx_bifrost_users_token  ON bifrost_users(token);
+      CREATE TABLE IF NOT EXISTS bifrost_basic_configs (
+        id          TEXT PRIMARY KEY,
+        user_id     TEXT NOT NULL,
+        config_key  TEXT NOT NULL,
+        value_json  TEXT NOT NULL DEFAULT '{}',
+        hash        TEXT NOT NULL DEFAULT '',
+        create_time TEXT NOT NULL,
+        update_time TEXT NOT NULL,
+        UNIQUE(user_id, config_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_bifrost_basic_configs_user_id ON bifrost_basic_configs(user_id);
       CREATE TABLE IF NOT EXISTS bifrost_groups (
         id          TEXT PRIMARY KEY,
         name        TEXT NOT NULL,

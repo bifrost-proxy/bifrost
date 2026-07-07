@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bifrost_storage::{RemoteShellSet, RemoteShellStore};
 use http_body_util::BodyExt;
@@ -42,7 +43,7 @@ pub async fn handle_remote_invoke(
         return handle_discovery_refresh(req, &worker).await;
     }
     if sub == "/pairings/pending" || sub == "/pairings/pending/" {
-        return handle_pairings_pending(&req, &worker);
+        return handle_pairings_pending(&req, &worker).await;
     }
     if let Some(rest) = sub.strip_prefix("/pairings/") {
         if let Some(pairing_id) = rest.strip_suffix("/approve") {
@@ -200,7 +201,7 @@ async fn handle_discovery_refresh(
     }
 }
 
-fn handle_pairings_pending(
+async fn handle_pairings_pending(
     req: &Request<Incoming>,
     worker: &RemoteInvokeWorker,
 ) -> Response<BoxBody> {
@@ -208,6 +209,11 @@ fn handle_pairings_pending(
         return method_not_allowed();
     }
 
+    let _ = tokio::time::timeout(
+        Duration::from_secs(2),
+        worker.poll_pending_pairings_from_relay(),
+    )
+    .await;
     let pairings = worker.pending_pairings();
     json_response(&serde_json::json!({
         "pairings": pairings,

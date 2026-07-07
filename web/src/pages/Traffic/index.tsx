@@ -117,9 +117,11 @@ export default function Traffic() {
     useShallow((state) => ({
       apps: state.availableClientApps,
       ips: state.availableClientIps,
+      proxyPorts: state.availableProxyPorts,
       domains: state.availableDomains,
       appCounts: state.clientAppCounts,
       ipCounts: state.clientIpCounts,
+      proxyPortCounts: state.proxyPortCounts,
       domainCounts: state.domainCounts,
     })),
   );
@@ -195,12 +197,18 @@ export default function Traffic() {
   const selectedClientIps = useFilterPanelStore(
     (state) => state.selectedClientIps,
   );
+  const selectedProxyPorts = useFilterPanelStore(
+    (state) => state.selectedProxyPorts,
+  );
   const selectedClientApps = useFilterPanelStore(
     (state) => state.selectedClientApps,
   );
   const selectedDomains = useFilterPanelStore((state) => state.selectedDomains);
   const setSelectedClientIps = useFilterPanelStore(
     (state) => state.setSelectedClientIps,
+  );
+  const setSelectedProxyPorts = useFilterPanelStore(
+    (state) => state.setSelectedProxyPorts,
   );
   const setSelectedClientApps = useFilterPanelStore(
     (state) => state.setSelectedClientApps,
@@ -240,15 +248,17 @@ export default function Traffic() {
   const serializePanel = useCallback(() => {
     const hasAny =
       selectedClientIps.length > 0 ||
+      selectedProxyPorts.length > 0 ||
       selectedClientApps.length > 0 ||
       selectedDomains.length > 0;
     if (!hasAny) return "";
     return encodeJsonForQueryParam({
       clientIps: selectedClientIps,
+      proxyPorts: selectedProxyPorts,
       clientApps: selectedClientApps,
       domains: selectedDomains,
     });
-  }, [selectedClientApps, selectedClientIps, selectedDomains]);
+  }, [selectedClientApps, selectedClientIps, selectedDomains, selectedProxyPorts]);
 
   const deserializePanel = useCallback((str: string) => {
     const toStringArray = (input: unknown): string[] =>
@@ -259,11 +269,12 @@ export default function Traffic() {
         : [];
     const value = decodeJsonFromQueryParam<unknown>(str || "");
     if (!value || typeof value !== "object") {
-      return { clientIps: [], clientApps: [], domains: [] };
+      return { clientIps: [], proxyPorts: [], clientApps: [], domains: [] };
     }
     const v = value as Record<string, unknown>;
     return {
       clientIps: toStringArray(v.clientIps),
+      proxyPorts: toStringArray(v.proxyPorts),
       clientApps: toStringArray(v.clientApps),
       domains: toStringArray(v.domains),
     };
@@ -353,6 +364,7 @@ export default function Traffic() {
 
     const panelFromUrl = deserializePanel(panelParam);
     setSelectedClientIps(panelFromUrl.clientIps);
+    setSelectedProxyPorts(panelFromUrl.proxyPorts);
     setSelectedClientApps(panelFromUrl.clientApps);
     setSelectedDomains(panelFromUrl.domains);
 
@@ -385,6 +397,7 @@ export default function Traffic() {
     setSearchScope,
     setSelectedClientApps,
     setSelectedClientIps,
+    setSelectedProxyPorts,
     setSelectedDomains,
   ]);
 
@@ -451,6 +464,7 @@ export default function Traffic() {
     searchScope,
     selectedClientApps,
     selectedClientIps,
+    selectedProxyPorts,
     selectedDomains,
     serializePanel,
     serializeSearch,
@@ -613,10 +627,11 @@ export default function Traffic() {
   const panelFilters = useMemo<PanelFilters>(
     () => ({
       clientIps: selectedClientIps,
+      proxyPorts: selectedProxyPorts,
       clientApps: selectedClientApps,
       domains: selectedDomains,
     }),
-    [selectedClientIps, selectedClientApps, selectedDomains],
+    [selectedClientIps, selectedProxyPorts, selectedClientApps, selectedDomains],
   );
 
   const deferredToolbarFilters = useDeferredValue(toolbarFilters);
@@ -774,9 +789,11 @@ export default function Traffic() {
   const renderFilterPanel = () => (
     <FilterPanel
       availableClientIps={clientInfo.ips}
+      availableProxyPorts={clientInfo.proxyPorts}
       availableClientApps={clientInfo.apps}
       availableDomains={clientInfo.domains}
       clientIpCounts={clientInfo.ipCounts}
+      proxyPortCounts={clientInfo.proxyPortCounts}
       clientAppCounts={clientInfo.appCounts}
       domainCounts={clientInfo.domainCounts}
     />

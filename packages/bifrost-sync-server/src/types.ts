@@ -8,6 +8,25 @@ export interface Env {
   update_time: string;
 }
 
+export type BasicConfigKey = 'app_allowlist' | 'domain_allowlist' | 'blacklist';
+
+export interface BasicConfig {
+  id: string;
+  user_id: string;
+  config_key: BasicConfigKey;
+  value_json: string;
+  hash: string;
+  create_time: string;
+  update_time: string;
+}
+
+export interface UpsertBasicConfigReq {
+  user_id: string;
+  config_key: BasicConfigKey;
+  value_json: string;
+  hash?: string;
+}
+
 export interface User {
   id: string;
   user_id: string;

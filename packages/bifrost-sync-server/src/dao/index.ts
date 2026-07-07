@@ -1,4 +1,4 @@
-export type { IUserDao, IEnvDao, IGroupDao, IGroupMemberDao, IGroupSettingDao, IRemoteInvokeDao, IStorage } from './types';
+export type { IUserDao, IEnvDao, IBasicConfigDao, IGroupDao, IGroupMemberDao, IGroupSettingDao, IRemoteInvokeDao, IStorage } from './types';
 export { SqliteStorage } from './sqlite';
 export { MysqlStorage } from './mysql';
 

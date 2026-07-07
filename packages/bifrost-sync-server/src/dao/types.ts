@@ -1,4 +1,4 @@
-import type { Env, User, CreateEnvReq, UpdateEnvReq, SearchEnvQuery } from '../types';
+import type { Env, User, CreateEnvReq, UpdateEnvReq, SearchEnvQuery, BasicConfig, BasicConfigKey, UpsertBasicConfigReq } from '../types';
 
 export interface IUserDao {
   findByToken(token: string): Promise<User | undefined>;
@@ -21,6 +21,13 @@ export interface IEnvDao {
   delete(id: string): Promise<boolean>;
   deleteByUserId(userId: string): Promise<number>;
   search(query: SearchEnvQuery): Promise<{ list: Env[]; total: number }>;
+}
+
+export interface IBasicConfigDao {
+  find(userId: string, configKey: BasicConfigKey): Promise<BasicConfig | undefined>;
+  upsert(req: UpsertBasicConfigReq): Promise<BasicConfig>;
+  delete(userId: string, configKey: BasicConfigKey): Promise<boolean>;
+  listByUser(userId: string): Promise<BasicConfig[]>;
 }
 
 export interface IGroupDao {
@@ -103,6 +110,7 @@ export interface IRemoteInvokeDao {
 export interface IStorage {
   user: IUserDao;
   env: IEnvDao;
+  basicConfig: IBasicConfigDao;
   group: IGroupDao;
   groupMember: IGroupMemberDao;
   groupSetting: IGroupSettingDao;

@@ -146,7 +146,7 @@ assert_text_contains() {
     local text="$1"
     local needle="$2"
     local message="$3"
-    if printf '%s' "$text" | grep -q -- "$needle"; then
+    if grep -q -- "$needle" <<<"$text"; then
         pass "$message"
     else
         fail "$message"

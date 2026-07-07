@@ -4,7 +4,7 @@ use bifrost_core::{text::truncate_chars_with_suffix, BifrostError, Result};
 use bifrost_storage::SyncConfig;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::types::{RemoteEnv, RemoteUser};
+use crate::types::{RemoteBasicConfigSyncData, RemoteEnv, RemoteUser};
 
 fn truncate_for_log(s: &str, max_len: usize) -> String {
     let suffix = format!("...(truncated, total {} bytes)", s.len());
@@ -49,6 +49,31 @@ struct UpdateEnvRequest<'a> {
     user_id: &'a str,
     name: &'a str,
     rule: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SyncBasicConfigCheckItem {
+    pub id: String,
+    pub user_id: String,
+    pub config_key: String,
+    pub update_time: String,
+    pub hash: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SyncBasicConfigUpdateItem {
+    pub user_id: String,
+    pub config_key: String,
+    pub value_json: String,
+    pub hash: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SyncBasicConfigRequest {
+    user_ids: Vec<String>,
+    check_list: Vec<SyncBasicConfigCheckItem>,
+    update_list: Vec<SyncBasicConfigUpdateItem>,
+    delete_list: Vec<serde_json::Value>,
 }
 
 #[derive(Clone)]
@@ -281,6 +306,37 @@ impl SyncHttpClient {
             ))
         })?;
         Ok(())
+    }
+
+    pub async fn sync_basic_configs(
+        &self,
+        config: &SyncConfig,
+        token: &str,
+        user_id: &str,
+        check_list: Vec<SyncBasicConfigCheckItem>,
+        update_list: Vec<SyncBasicConfigUpdateItem>,
+    ) -> Result<RemoteBasicConfigSyncData> {
+        let url = format!(
+            "{}/v4/config/sync",
+            config.remote_base_url.trim_end_matches('/')
+        );
+        let response: ApiEnvelope<RemoteBasicConfigSyncData> = self
+            .request_json(
+                reqwest::Method::POST,
+                &url,
+                token,
+                None::<&()>,
+                Some(&SyncBasicConfigRequest {
+                    user_ids: vec![user_id.to_string()],
+                    check_list,
+                    update_list,
+                    delete_list: Vec::new(),
+                }),
+            )
+            .await?;
+        response.data.ok_or_else(|| {
+            BifrostError::Network("sync basic config returned empty data".to_string())
+        })
     }
 
     pub async fn proxy_forward(

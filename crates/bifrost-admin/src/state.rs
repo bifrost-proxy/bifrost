@@ -422,6 +422,10 @@ pub struct AdminState {
     pub keepawake_manager: Option<bifrost_power::SharedKeepAwakeManager>,
     remote_invoke_worker:
         parking_lot::RwLock<Option<crate::handlers::remote_invoke::SharedRemoteInvokeWorker>>,
+    remote_invoke_workers: parking_lot::RwLock<
+        HashMap<String, crate::handlers::remote_invoke::SharedRemoteInvokeWorker>,
+    >,
+    remote_invoke_admin_endpoint: parking_lot::RwLock<Option<(String, u16)>>,
     im_gateway_service:
         parking_lot::RwLock<Option<crate::handlers::im_gateway::SharedImGatewayService>>,
     group_name_cache: parking_lot::Mutex<HashMap<String, String>>,
@@ -485,6 +489,8 @@ impl AdminState {
             temporary_port_manager: parking_lot::RwLock::new(None),
             keepawake_manager: None,
             remote_invoke_worker: parking_lot::RwLock::new(None),
+            remote_invoke_workers: parking_lot::RwLock::new(HashMap::new()),
+            remote_invoke_admin_endpoint: parking_lot::RwLock::new(None),
             im_gateway_service: parking_lot::RwLock::new(None),
             group_name_cache: parking_lot::Mutex::new(HashMap::new()),
             group_cache_resolved: AtomicBool::new(false),
@@ -1247,13 +1253,90 @@ impl AdminState {
         &self,
         worker: crate::handlers::remote_invoke::SharedRemoteInvokeWorker,
     ) {
+        let relay_url = worker.relay_client().base_url();
+        let mut workers = self.remote_invoke_workers.write();
+        workers.clear();
+        workers.insert(relay_url, worker.clone());
         *self.remote_invoke_worker.write() = Some(worker);
+    }
+
+    pub fn set_remote_invoke_workers(
+        &self,
+        workers: Vec<crate::handlers::remote_invoke::SharedRemoteInvokeWorker>,
+    ) {
+        let mut by_url = self.remote_invoke_workers.write();
+        by_url.clear();
+        for worker in &workers {
+            by_url.insert(worker.relay_client().base_url(), worker.clone());
+        }
+        *self.remote_invoke_worker.write() = workers.first().cloned();
+    }
+
+    pub fn upsert_remote_invoke_worker(
+        &self,
+        worker: crate::handlers::remote_invoke::SharedRemoteInvokeWorker,
+    ) {
+        let relay_url = worker.relay_client().base_url();
+        let mut workers = self.remote_invoke_workers.write();
+        workers.insert(relay_url, worker.clone());
+        let mut primary = self.remote_invoke_worker.write();
+        if primary.is_none() {
+            *primary = Some(worker);
+        }
+    }
+
+    pub fn remote_invoke_workers(
+        &self,
+    ) -> Vec<crate::handlers::remote_invoke::SharedRemoteInvokeWorker> {
+        self.remote_invoke_workers
+            .read()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub fn remote_invoke_worker_for_relay_url(
+        &self,
+        relay_url: &str,
+    ) -> Option<crate::handlers::remote_invoke::SharedRemoteInvokeWorker> {
+        self.remote_invoke_workers
+            .read()
+            .get(relay_url.trim_end_matches('/'))
+            .cloned()
+    }
+
+    pub fn stop_remote_invoke_workers_except(&self, relay_urls: &[String]) {
+        let desired: std::collections::HashSet<&str> =
+            relay_urls.iter().map(|url| url.as_str()).collect();
+        let mut workers = self.remote_invoke_workers.write();
+        let mut removed = Vec::new();
+        workers.retain(|relay_url, worker| {
+            let keep = desired.contains(relay_url.as_str());
+            if !keep {
+                removed.push(worker.clone());
+            }
+            keep
+        });
+        drop(workers);
+        for worker in removed {
+            worker.stop();
+        }
+        let next_primary = self.remote_invoke_workers.read().values().next().cloned();
+        *self.remote_invoke_worker.write() = next_primary;
     }
 
     pub fn remote_invoke_worker(
         &self,
     ) -> Option<crate::handlers::remote_invoke::SharedRemoteInvokeWorker> {
         self.remote_invoke_worker.read().clone()
+    }
+
+    pub fn set_remote_invoke_admin_endpoint(&self, host: String, port: u16) {
+        *self.remote_invoke_admin_endpoint.write() = Some((host, port));
+    }
+
+    pub fn remote_invoke_admin_endpoint(&self) -> Option<(String, u16)> {
+        self.remote_invoke_admin_endpoint.read().clone()
     }
 
     pub fn with_im_gateway_service(
@@ -1677,6 +1760,62 @@ mod tests {
             9900,
             RulesStorage::with_dir(dir.join("rules")).expect("test rules storage"),
         )
+    }
+
+    fn make_remote_invoke_worker(
+        harness: &crate::test_support::TestAdminState,
+        relay_url: &str,
+    ) -> crate::handlers::remote_invoke::SharedRemoteInvokeWorker {
+        let identity =
+            crate::remote_invoke::Identity::load_or_create(harness.data_dir()).expect("identity");
+        crate::remote_invoke::RemoteInvokeWorker::new(
+            crate::remote_invoke::RemoteInvokeConfig {
+                relay_url: relay_url.to_string(),
+                ..Default::default()
+            },
+            identity,
+            None,
+            harness.state(),
+            "127.0.0.1",
+            0,
+        )
+    }
+
+    #[test]
+    fn remote_invoke_workers_track_single_and_dual_channel_relays() {
+        let harness = crate::test_support::TestAdminState::builder().build();
+        let state = harness.state();
+        let bytedance = make_remote_invoke_worker(&harness, "https://bifrost.bytedance.net");
+        let cloud = make_remote_invoke_worker(&harness, "https://sync.example.test");
+
+        state.set_remote_invoke_workers(vec![bytedance.clone(), cloud.clone()]);
+
+        assert_eq!(state.remote_invoke_workers().len(), 2);
+        assert!(Arc::ptr_eq(
+            &state.remote_invoke_worker().expect("primary worker"),
+            &bytedance
+        ));
+        assert!(state
+            .remote_invoke_worker_for_relay_url("https://sync.example.test/")
+            .is_some());
+
+        state.stop_remote_invoke_workers_except(&["https://bifrost.bytedance.net".to_string()]);
+
+        assert_eq!(state.remote_invoke_workers().len(), 1);
+        assert!(state
+            .remote_invoke_worker_for_relay_url("https://sync.example.test")
+            .is_none());
+        assert!(state
+            .remote_invoke_worker_for_relay_url("https://bifrost.bytedance.net")
+            .is_some());
+
+        state.upsert_remote_invoke_worker(cloud.clone());
+
+        assert_eq!(state.remote_invoke_workers().len(), 2);
+        assert!(Arc::ptr_eq(
+            &state.remote_invoke_worker().expect("primary worker"),
+            &bytedance
+        ));
     }
 
     #[test]
