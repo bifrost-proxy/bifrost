@@ -6,28 +6,33 @@ Bifrost 桌面端基于 Tauri，同一份前端资源需要在 macOS、Windows�
 
 本文档描述当前生效方案、能力清单、后续升级路径以及验证方式，避免后续开发者在多个入口重复处理平台差异，或误以为旧“platform-config split + custom titlebar”方案已落地。
 
+2026-07 Windows 回归中确认：桌面端 Windows 主界面已经采用无原生标题栏的自绘 chrome。拖拽区域必须只放在非交互空白区域，不能覆盖左侧 tab、底部主题切换、OpenAPI 按钮或右上角窗口按钮；窗口最小化、最大化、关闭必须走 Tauri 官方 `window.getCurrentWindow()` API，并在 capability 中显式授权对应 `core:window:*` 权限。桌面壳启动 core server 之前必须能写入 `desktop-config.json`，配置写入函数需要自行创建父目录，不能只依赖 setup 调用方提前创建。
+
 ## 用户目标验证清单
 
 ### 必须实现
 
 - macOS 启动阶段展示原生 launcher overlay：小尺寸、无边框、透明背景、无投影的 `host` 窗口。
 - macOS 从 launcher overlay 交接到主界面时，把窗口装饰恢复为原生 traffic light + titlebar，同时把窗口尺寸动画到 `TARGET_WINDOW_WIDTH × TARGET_WINDOW_HEIGHT`。
-- 非 macOS 平台直接以标准装饰、正常尺寸和不透明背景启动，不走 launcher overlay handoff。
-- Windows 平台在装饰启用后叠加 `Effect::Mica`，其它平台不施加。
+- Windows 平台直接以正常尺寸和不透明背景启动，不走 launcher overlay handoff；主窗口使用无原生标题栏的自绘 chrome，右上角窗口按钮由前端调用 Tauri 官方 window API。
+- Linux 平台直接以标准装饰、正常尺寸和不透明背景启动，不走 launcher overlay handoff。
+- Windows 平台在可用时叠加 `Effect::Mica`，其它平台不施加。
 - 所有窗口装饰切换必须集中在单一入口：`desktop/src-tauri/src/main.rs`，禁止分散到前端或多份 tauri 配置。
 - 平台判定统一通过 `supports_native_launcher()` 语义（当前等价于 `cfg!(target_os = "macos")`），不允许其他模块自行判定 target_os。
 
 ### 必须不破坏
 
 - Web 管理端在浏览器中不受影响，不能因为桌面 chrome 策略引入前端自绘标题栏或客户端路由差异。
-- `startDragging()` / `toggleMaximize()` 等 runtime bridge 类型定义保留，但目前不作为主路径使用；如后续启用自绘标题栏可以复用。
+- Windows 自绘 chrome 只能把 `data-tauri-drag-region` 放在顶部空白拖拽条和非交互 spacer 上，禁止放在交互控件或其父容器上。
+- `startDragging()` / `toggleMaximize()` / `minimize()` / `close()` 等 runtime bridge 必须优先使用 Tauri 官方 `window.getCurrentWindow()` 命名空间；`webviewWindow.getCurrentWebviewWindow()` 只作为兼容 fallback。
 - 不改变 `INITIAL_WINDOW_WIDTH/HEIGHT`、`TARGET_WINDOW_WIDTH/HEIGHT`、`TARGET_WINDOW_MIN_WIDTH/HEIGHT` 常量语义。
 - 启动阶段 native launcher overlay 与 handoff 动画时序不能改成阻塞主线程或阻塞前端首帧。
 
 ### 必须真实验证
 
 - macOS 真实桌面观察：从 launcher overlay 到主窗口的尺寸动画、装饰切换、traffic light 出现与否。
-- Windows 真实桌面观察：启动即为标准装饰，Mica 背景效果生效。
+- Windows 真实桌面观察：启动即为无原生标题栏的自绘 chrome，右上角窗口按钮可点击，左侧 tab、OpenAPI、底部主题切换可点击，顶部空白区域可拖拽/双击最大化。
+- Windows 真实进程/API 验证：桌面壳启动后自动拉起 core server，`/_bifrost/api/proxy/address` 可返回实际代理地址；启动过程不弹 PowerShell 或 console 黑框。
 - Linux 真实桌面观察：启动即为标准装饰，无 Mica，无异常透明背景。
 - 前端观察 `web/src/desktop/tauri.ts` 中的 window control 桥接接口在没有自绘标题栏时不会误触发。
 
@@ -60,18 +65,50 @@ fn supports_native_launcher() -> bool {
 - 通过 `animate_host_window_to_main_size` 逐帧插值动画到 `TARGET_WINDOW_WIDTH × TARGET_WINDOW_HEIGHT`。
 - 动画结束固定 `set_size(LogicalSize::new(TARGET_WINDOW_WIDTH, TARGET_WINDOW_HEIGHT))` 兜底，避免舍入误差。
 
-### 非 macOS：直启动标准窗口
+### Windows：直启动自绘 chrome
 
 `supports_native_launcher()` 为 false 时：
 
 - 尺寸直接 `TARGET_WINDOW_WIDTH × TARGET_WINDOW_HEIGHT`，最小尺寸 `TARGET_WINDOW_MIN_*`。
+- Windows 通过 `uses_borderless_desktop_chrome()` 返回 true，主窗口 `decorations(false)`，前端渲染右上角窗口按钮。
+- 顶部拖拽条高度由 `DESKTOP_TOP_DRAG_HEIGHT` 控制，右侧保留 `WINDOWS_WINDOW_CONTROLS_HIT_TEST_INSET`，避免拖拽区域覆盖窗口按钮。
+- `data-tauri-drag-region` 只允许由 `getDesktopDragRegionAttributes(enabled)` 写入非交互区域；交互控件必须使用 `interactive: true` 或不设置 drag region。
+- `core:window:allow-minimize`、`core:window:allow-toggle-maximize`、`core:window:allow-close`、`core:window:allow-start-dragging` 必须存在于 desktop capability 中。
+- 跳过 launcher overlay 与 handoff 期间的装饰切换。
+- Windows 通过 `apply_window_effects` 施加 `Effect::Mica`，不可用时降级为普通背景但不能阻塞启动。
+
+### Linux：直启动标准窗口
+
+`supports_native_launcher()` 为 false 且 `uses_borderless_desktop_chrome()` 为 false 时：
+
+- 尺寸直接 `TARGET_WINDOW_WIDTH × TARGET_WINDOW_HEIGHT`，最小尺寸 `TARGET_WINDOW_MIN_*`。
 - `decorations(true)`、`transparent(false)`、正常背景。
 - 跳过 launcher overlay 与 handoff 期间的装饰切换。
-- Windows 通过 `apply_window_effects` 施加 `Effect::Mica`，Linux 无额外效果。
+- Linux 无额外 Mica 效果。
 
-### 前端标题栏当前不启用
+### Windows 前端标题栏约束
 
-`web/src/desktop/tauri.ts` 中保留 `startDragging()` / `toggleMaximize()` 桥接类型定义，但当前仓库没有对应的前端 titlebar 组件启用为主路径。任何“接管标题栏”的实现必须重新立项，明确覆盖 macOS traffic light、Windows caption buttons、Linux WM 差异。
+`web/src/desktop/tauri.ts` 中的 window control 桥接是 Windows 自绘 chrome 主路径。调用顺序必须优先选择 `window.__TAURI__.window.getCurrentWindow()`，因为这是 Tauri v2 官方 window API；`webviewWindow.getCurrentWebviewWindow()` 只用于兼容旧注入形态。
+
+任何新增拖拽区域都必须先确认其内部没有按钮、tab、开关、输入框或链接。若需要让某一块既能拖拽又包含交互元素，必须把拖拽层与交互层分开，而不是把 `data-tauri-drag-region` 放到父容器。
+
+### Desktop config 与 core server 启动
+
+桌面壳在 setup 阶段按顺序解析 sidecar binary、共享数据目录和 `desktop-config.json`，随后启动托管 core server。首次启动或数据目录缺失时：
+
+- `resolve_desktop_data_dir()` 使用 CLI 共享数据目录，支持 `BIFROST_DATA_DIR` 覆盖。
+- `resolve_desktop_config_path(data_dir)` 固定返回 `data_dir/desktop-config.json`。
+- `save_desktop_config()` 必须在写入前创建 `config_path.parent()`，避免 setup 在首次启动、临时数据目录或目录被清理后因为 `os error 3` 中断。
+- core server 没有启动时要先看 setup panic 和 bootstrap log，不能只看端口监听。
+
+### Install CLI 与 AI skills
+
+桌面浮层和 Settings 的 `Install CLI` / `Install CLI & Skills` 入口都调用 `POST /api/system/cli-install`。该入口的产品语义是“先保证 CLI 可用，再尽力完成 AI skills”：
+
+- CLI 复制成功后必须返回 `installed=true`；AI skills 失败、超时或被用户环境拦截时，只能通过 `skills_installed=false` 与 `skills_message` 告知用户重试，不能让整个请求 500。
+- 桌面触发的 skills 安装必须使用随二进制编译进来的 embedded bundle，即传递 `BIFROST_INSTALL_SKILL_SOURCE=embedded`，避免 GitHub raw 429、DNS 慢或离线环境把弹窗请求拖过前端 30 秒超时。
+- skills 子进程必须有显式超时；超时后杀掉子进程并保留已安装 CLI。
+- Windows 上如果当前运行的 `bifrost.exe` 已经是目标安装路径，复制步骤应视为 no-op，避免对正在运行的 exe 做自覆盖而触发文件锁错误。
 
 ## 技术细节
 
@@ -108,8 +145,9 @@ const TARGET_WINDOW_MIN_HEIGHT: f64 = 760.0;
 
 ### 前端交互约束
 
-- 前端不使用自绘 titlebar，也不需要 `data-tauri-drag-region`。
-- `web/src/desktop/tauri.ts` 中的 window control API 保持导出便于未来切换，但业务代码不应主动调用。
+- Windows 前端使用自绘 titlebar，且只能在顶部非交互区域使用 `data-tauri-drag-region`。
+- 浏览器 Web 管理端不使用自绘 titlebar，不应设置 `data-tauri-drag-region`。
+- `web/src/desktop/tauri.ts` 中的 window control API 是桌面 shell 专用路径，浏览器环境只能保持不可用 fallback。
 
 ## Tauri 配置
 
@@ -140,12 +178,14 @@ const TARGET_WINDOW_MIN_HEIGHT: f64 = 760.0;
 
 - Handoff 由前端 ready 或超时兜底触发。
 - `animate_host_window_to_main_size` 提供平滑动画。
-- 装饰恢复顺序：先 `set_decorations(true)` 再 `apply_window_effects`，避免 Mica 在无 caption 情况下渲染失败。
+- macOS/Linux 装饰恢复顺序：先 `set_decorations(true)` 再 `apply_window_effects`。
+- Windows handoff 后继续保持 `decorations(false)`，避免原生 caption 与自绘 chrome 同时出现。
 
-### Phase 3：可选前端 titlebar（未启用）
+### Phase 3：Windows 自绘 chrome 稳定化
 
-- 若产品决定接管标题栏，需要立项：明确 macOS traffic light 保留策略、Windows caption 按钮实现、Linux WM 覆盖策略。
-- 需要重新评估 `startDragging` / `toggleMaximize` bridge 是否成为主路径。
+- Windows caption 按钮实现必须继续使用 Tauri 官方 window API 与 capability 授权。
+- 任何布局改动都必须复查 drag region 与交互控件的 hit-test 边界。
+- macOS traffic light 与 Linux WM 装饰保持原生，不复用 Windows 自绘 chrome。
 
 ### Phase 4：跨平台观察与遥测
 
@@ -161,8 +201,8 @@ const TARGET_WINDOW_MIN_HEIGHT: f64 = 760.0;
 
 ### E2E 测试
 
-- 桌面窗口 chrome 无独立 headless E2E；主要依赖 human_tests 真实桌面观察。
-- 若未来接入 Playwright/自研 desktop harness，需要覆盖：macOS launcher overlay → 主窗口 handoff、Windows Mica 生效、Linux 直启动。
+- 桌面窗口 chrome 主要依赖 human_tests 真实桌面观察，辅以前端单测覆盖 drag region 属性和 Tauri window bridge 选择。
+- 若未来接入 Playwright/自研 desktop harness，需要覆盖：macOS launcher overlay → 主窗口 handoff、Windows 自绘 chrome hit-test、Windows core server 自动启动、Linux 直启动。
 
 ### 真实场景测试 human_tests
 
@@ -170,11 +210,13 @@ const TARGET_WINDOW_MIN_HEIGHT: f64 = 760.0;
 
 - TC-DWC-01：macOS 启动展示 launcher overlay（透明、无投影、小尺寸）。
 - TC-DWC-02：macOS handoff 恢复 traffic light 与装饰，动画平滑到 1440×920。
-- TC-DWC-03：Windows 启动直接为标准装饰 + Mica 背景。
-- TC-DWC-04：Linux 启动直接为标准装饰，无 Mica，无异常透明。
-- TC-DWC-05：`INITIAL_WINDOW_*` / `TARGET_WINDOW_*` 常量与真实窗口尺寸一致。
+- TC-DWC-03：Windows 启动直接为无原生标题栏的自绘 chrome，右上角窗口按钮可点击且无 console 黑框。
+- TC-DWC-04：Windows 左侧 tab、OpenAPI、底部主题切换可点击，顶部空白区域可拖拽。
+- TC-DWC-05：Windows 桌面壳自动启动 core server，Admin API 可返回代理地址。
+- TC-DWC-06：Linux 启动直接为标准装饰，无 Mica，无异常透明。
+- TC-DWC-07：`INITIAL_WINDOW_*` / `TARGET_WINDOW_*` 常量与真实窗口尺寸一致。
 
-同步更新 `human_tests/readme.md` 用例总数与索引。
+同步更新 `human_tests/readme.md` 对应索引行。
 
 ### 覆盖率与项目校验
 
@@ -192,7 +234,7 @@ const TARGET_WINDOW_MIN_HEIGHT: f64 = 760.0;
 - 本方案不覆盖多窗口管理（当前 Bifrost 桌面端只有单主窗口 + 系统托盘；托盘由独立模块处理）。
 - 本方案不覆盖 macOS Full Screen 模式的特殊行为；进入/退出 full screen 由系统与 Tauri 默认处理，本方案只保证退出后装饰恢复正常。
 - 本方案不覆盖 Windows 上的 Fluent Design Acrylic；仅使用 Mica 作为背景效果。
-- 本方案不引入前端自绘 titlebar；如后续需要，见 Phase 3。
+- 本方案仅在 Windows 引入前端自绘 chrome；macOS 与 Linux 不引入自绘 titlebar。
 - 本方案不处理隐藏窗口/关闭到托盘的关闭行为（详见 `desktop-macos-close-behavior.md`）。
 
 ## CLI / Admin API / Sync 边界（补充）
@@ -212,9 +254,11 @@ const TARGET_WINDOW_MIN_HEIGHT: f64 = 760.0;
 
 - **macOS handoff 后主窗口尺寸不到 1440×920**：检查 `animate_host_window_to_main_size` 是否在动画结束前被取消（例如用户手动 resize），以及末尾 `set_size` 兜底是否被 skip。日志 `frontend ready handshake` 或 `startup timeout fallback` 有助定位入口。
 - **launcher overlay 在多显示器上偏移**：确认窗口 `center` 调用是否在正确的 monitor scope 内，必要时改用 `Monitor::from_point` 显式选定主 monitor。
-- **Windows Mica 未生效**：`apply_window_effects` 会在不支持 Mica 的驱动上返回错误，进程会记录日志并降级；用户看到的应是普通装饰窗口而非启动失败。
+- **Windows Mica 未生效**：`apply_window_effects` 会在不支持 Mica 的驱动上返回错误，进程会记录日志并降级；用户看到的应是自绘 chrome 普通背景窗口而非启动失败。
+- **Windows 按钮 hover 但点击无效，双击却最大化**：优先检查交互控件或其父容器是否带有 `data-tauri-drag-region`，以及顶部拖拽条是否给右上角窗口按钮预留 hit-test inset。
+- **Windows 只有 UI 没有 core server**：先前台启动桌面 exe 观察 setup panic，再检查 `desktop-config.json` 父目录和 `save_desktop_config()`；如果 setup 已经 panic，sidecar 日志和端口监听都可能不存在。
 - **Linux 上 titlebar 显示异常**：确认 `decorations(true)` 由 WM 处理；如某些 GTK/Wayland 组合下渲染异常，方案不做 client-side decoration workaround，需要用户切换 WM 或反馈。
-- **`startDragging` 报错**：说明前端误启用了自绘 titlebar 代码路径；在当前方案下应保持 dead-code，任何启用都要走 Phase 3 立项。
+- **`startDragging` 报错**：说明前端在浏览器或非 Tauri 注入环境误触发了桌面路径；需要回到 `isDesktopShell()` 和 window bridge 注入状态排查。
 
 ## 测试用例矩阵（补充）
 
@@ -222,7 +266,7 @@ const TARGET_WINDOW_MIN_HEIGHT: f64 = 760.0;
 | -------- | --------------------------- | -------------------- | ----------------- | ---------------------- |
 | macOS    | launcher overlay            | 无装饰、透明、无投影 | 透明              | 360×260                |
 | macOS    | handoff 后                  | 原生 traffic light   | 系统背景          | 1440×920               |
-| Windows  | 直启动                      | 原生 caption buttons | Mica              | 1440×920               |
+| Windows  | 直启动                      | 自绘 chrome          | Mica/降级背景     | 1440×920               |
 | Linux    | 直启动                      | WM 装饰              | 系统默认          | 1440×920               |
 
 ## Review/Fix/Test 闭环方案

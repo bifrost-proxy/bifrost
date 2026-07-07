@@ -33,6 +33,11 @@ import { useThemeStore } from "../../stores/useThemeStore";
 import { useSyncStore } from "../../stores/useSyncStore";
 import RulesDynamicIsland from "../../pages/Rules/RulesDynamicIsland";
 import { getCurrentDesktopWindow } from "../../desktop/tauri";
+import {
+  DESKTOP_TOP_DRAG_HEIGHT,
+  getDesktopDragRegionAttributes,
+  getDesktopTopDragRightInset,
+} from "./desktopChrome";
 
 interface MenuItem {
   key: string;
@@ -40,8 +45,6 @@ interface MenuItem {
   label: string;
   hidden?: boolean;
 }
-
-const MAC_TOP_DRAG_HEIGHT = 35;
 
 export default function AppLayout() {
   const navigate = useNavigate();
@@ -239,12 +242,12 @@ export default function AppLayout() {
       pointerEvents: "none",
       zIndex: 1,
     },
-    macTopDragRegion: {
+    desktopTopDragRegion: {
       position: "absolute",
       top: 0,
       left: 50,
       right: 0,
-      height: MAC_TOP_DRAG_HEIGHT,
+      height: DESKTOP_TOP_DRAG_HEIGHT,
       zIndex: 4,
       cursor: "default",
       userSelect: "none",
@@ -362,7 +365,7 @@ export default function AppLayout() {
       flexDirection: "column",
       overflow: "auto",
       boxSizing: "border-box",
-      paddingTop: desktopCustomChrome ? MAC_TOP_DRAG_HEIGHT : undefined,
+      paddingTop: desktopCustomChrome ? DESKTOP_TOP_DRAG_HEIGHT : undefined,
       background:
         desktopEnabled
           ? desktopPlatform === "macos"
@@ -391,6 +394,8 @@ export default function AppLayout() {
     },
     [navigate],
   );
+  const desktopDragRegionAttributes =
+    getDesktopDragRegionAttributes(desktopCustomChrome);
 
   const isActive = (key: string) => {
     if (key === "/activity" && location.pathname === "/") return true;
@@ -431,14 +436,21 @@ export default function AppLayout() {
       {desktopCustomChrome ? (
         <div
           data-testid="desktop-top-drag-region"
-          data-tauri-drag-region=""
-          style={styles.macTopDragRegion}
+          {...desktopDragRegionAttributes}
+          style={{
+            ...styles.desktopTopDragRegion,
+            right: getDesktopTopDragRightInset(desktopPlatform),
+          }}
         />
       ) : null}
       {showWindowsControls ? (
-        <div style={styles.windowsWindowControls}>
+        <div
+          data-testid="desktop-windows-window-controls"
+          style={styles.windowsWindowControls}
+        >
           <button
             type="button"
+            data-testid="desktop-window-minimize"
             aria-label="Minimize window"
             title="Minimize"
             style={styles.windowsWindowControlButton}
@@ -448,6 +460,7 @@ export default function AppLayout() {
           </button>
           <button
             type="button"
+            data-testid="desktop-window-maximize"
             aria-label="Maximize window"
             title="Maximize"
             style={styles.windowsWindowControlButton}
@@ -457,6 +470,7 @@ export default function AppLayout() {
           </button>
           <button
             type="button"
+            data-testid="desktop-window-close"
             aria-label="Close window"
             title="Close"
             style={{
@@ -474,19 +488,16 @@ export default function AppLayout() {
         <AvailabilityCheckNotificationCenter />
         <RulesDynamicIsland
           onNavigateRule={handleNavigateRuleFromIsland}
-          defaultTop={desktopCustomChrome ? MAC_TOP_DRAG_HEIGHT + 10 : undefined}
+          defaultTop={desktopCustomChrome ? DESKTOP_TOP_DRAG_HEIGHT + 10 : undefined}
         />
         <div
           style={styles.sidebar}
           data-testid="desktop-sidebar-window-drag-region"
-          data-desktop-window-drag-region={desktopCustomChrome ? "true" : undefined}
-          data-tauri-drag-region={desktopCustomChrome ? "" : undefined}
         >
           {desktopCustomChrome ? (
             <div
               data-testid="desktop-window-control-spacer"
-              data-desktop-window-drag-region="true"
-              data-tauri-drag-region=""
+              {...desktopDragRegionAttributes}
               style={styles.macWindowControlSpacer}
             />
           ) : null}
@@ -499,8 +510,6 @@ export default function AppLayout() {
                   data-testid="app-sidebar-nav-item"
                   data-nav-label={item.label}
                   data-nav-key={item.key}
-                  data-desktop-window-drag-region={desktopCustomChrome ? "true" : undefined}
-                  data-tauri-drag-region={desktopCustomChrome ? "" : undefined}
                   style={{
                     ...styles.menuItem,
                     ...(active ? styles.menuItemActive : {}),
@@ -516,8 +525,6 @@ export default function AppLayout() {
           </div>
           <div
             data-testid="app-sidebar-openapi"
-            data-desktop-window-drag-region={desktopCustomChrome ? "true" : undefined}
-            data-tauri-drag-region={desktopCustomChrome ? "" : undefined}
             style={styles.openApiLink}
             onClick={handleOpenApiClick}
             title="Open OpenAPI documentation"
@@ -526,8 +533,6 @@ export default function AppLayout() {
           </div>
           <div
             data-testid="theme-toggle"
-            data-desktop-window-drag-region={desktopCustomChrome ? "true" : undefined}
-            data-tauri-drag-region={desktopCustomChrome ? "" : undefined}
             style={{
               flexShrink: 0,
               marginBottom: 8,

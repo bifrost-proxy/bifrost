@@ -61,6 +61,9 @@ declare global {
         invoke: TauriInvoke;
       };
       event?: TauriEventApi;
+      window?: {
+        getCurrentWindow(): TauriWindowHandle;
+      };
       webviewWindow?: {
         getCurrentWebviewWindow(): TauriWindowHandle;
       };
@@ -153,7 +156,9 @@ export async function listenDesktopEvent(
 }
 
 export function getCurrentDesktopWindow() {
-  const currentWindow = window.__TAURI__?.webviewWindow?.getCurrentWebviewWindow();
+  const currentWindow =
+    window.__TAURI__?.window?.getCurrentWindow() ??
+    window.__TAURI__?.webviewWindow?.getCurrentWebviewWindow();
   if (currentWindow) {
     cachedWindowHandle = currentWindow;
     return currentWindow;

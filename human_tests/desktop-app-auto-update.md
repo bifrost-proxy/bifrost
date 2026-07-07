@@ -267,6 +267,30 @@
 - 测试可跳过 AI skills 以避免污染真实工具目录；真实 UI 默认 `install_skills=true`。
 - 返回中包含 PATH 提示，用户知道是否需要重启 shell 或手工加入 PATH。
 
+### TC-DAU-06C App 弹窗默认安装 CLI 与 AI skills 不应超过前端超时
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh
+   ```
+2. 脚本启动临时 Bifrost 服务，并通过 `BIFROST_INSTALL_SKILL_DIR=<mktemp>/api-skills/bifrost` 隔离 AI skill 目标目录。
+3. 脚本调用与桌面弹窗一致的安装路径：
+   ```bash
+   POST /_bifrost/api/system/cli-install
+   {"install_dir":"<mktemp>/api-cli-bin","install_skills":true}
+   ```
+   该请求必须使用 30 秒上限执行。
+4. 检查响应 `installed=true`、`skills_installed=true`，`skills_message` 包含 `embedded desktop bundle`。
+5. 检查 `<mktemp>/api-skills/bifrost/SKILL.md` 与 `<mktemp>/api-skills/bifrost-remote/SKILL.md` 均已写入。
+
+预期结果：
+
+- 桌面 App 弹窗点击 `Install CLI` 时，不再先访问 GitHub raw 下载 skill 后才回退，避免前端 30 秒超时。
+- 后端使用随桌面包内置的 Bifrost skills 安装，网络 429、DNS 慢或离线时不影响 CLI 安装。
+- 即使 AI skills 后续失败，CLI 复制成功也应返回 `installed=true`，并通过 `skills_installed=false` 与 `skills_message` 提示用户手动重试。
+
 ### TC-DAU-07 桌面通知和自动弹窗
 
 操作步骤：
@@ -438,3 +462,4 @@ bifrost app uninstall
 | 2026-07-06 | TC-DAU-10B | Parallels Windows 11 ARM64 VM：将当前 diff 应用到 `C:\Users\eden_studio\work\github\bifrost`，执行 `CARGO_TARGET_DIR=target-desktop-chrome-verify cargo build --manifest-path desktop/src-tauri/Cargo.toml`；通过交互计划任务启动 `target-desktop-chrome-verify\debug\bifrost-desktop.exe`，`desktop-bootstrap.log` 显示 `embedded webview page load event Finished`、`desktop backend bootstrap finished`；截图 `/Users/eden_studio/Downloads/bifrost-windows-chrome-hidden-20260706.png` 与 `/Users/eden_studio/Downloads/bifrost-windows-chrome-resized-20260706.png` | PASS：frontend ready handoff 后仍未出现 Windows 原生标题栏和 `Bifrost / File / Edit / View / Window` 菜单栏，Web UI 未被系统 chrome 向下挤压；当前 VM 可视区高度不足以在同一张截图里完整纳入底部状态栏，但回归根因的 Windows handoff decorations 路径已由单测和真实启动截图共同覆盖 |
 | 2026-07-06 | TC-DAU-01 / 02 / 03 / 04 / 04B / 04C / 04D / 06B | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh` | PASS：33/33 通过。覆盖 dry-run、App -> CLI 临时安装、临时 app 真实安装/升级/卸载、同版本跳过下载、desktop source progress 为 completed，以及目标 0.0.141 但安装后仍报告 0.0.140 时非零退出并写 `phase=failed` |
 | 2026-07-06 | TC-DAU-08B / 08C | macOS 真实桌面会话：`BIFROST_DATA_DIR=/tmp/bifrost-desktop-formal-19900 ./target/debug/bifrost start --host 127.0.0.1 --port 19900 --skip-cert-check --no-system-proxy --no-tray`，随后以同 data dir 启动 `./target/desktop-formal/debug/bifrost-desktop`；停止外部 CLI 后观察 UI；通过 AX 点击 `Start Bifrost Service`；查看 `/tmp/bifrost-desktop-formal-19900/logs/desktop-bootstrap.log`、`curl http://127.0.0.1:19900/_bifrost/api/proxy/system/support` 与进程表 | PASS：桌面 app 启动时复用外部 CLI core；停止 CLI 后显示全屏 `Start Bifrost Service` 浮层；点击按钮后拉起内置 sidecar，进程表出现 `target/debug/bifrost start --host 0.0.0.0 --port 19900 --skip-cert-check --no-system-proxy`，页面恢复 Activity 并显示 `http://127.0.0.1:19900`，健康接口返回 `{"supported":true,"platform":"macOS"}`；显式禁用系统代理时状态栏显示 `Proxy: Not Applied` 属预期；10 秒稳定观察未再出现 watchdog 误恢复。随后出现 `Install Bifrost CLI` 浮层。未点击真实 `Install CLI`，避免写入用户命令路径；安装动作由 TC-DAU-06B 临时目录 API 覆盖 |
+| 2026-07-07 | TC-DAU-01 / 02 / 03 / 04 / 04B / 04C / 04D / 06B / 06C | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh` | PASS：36/36 通过。新增覆盖 App 弹窗默认 `install_skills=true` 路径，请求设置 30 秒上限，后端使用 embedded desktop bundle，响应 `skills_installed=true`，并在隔离 `BIFROST_INSTALL_SKILL_DIR` 写入 `bifrost/SKILL.md` 与 `bifrost-remote/SKILL.md` |
