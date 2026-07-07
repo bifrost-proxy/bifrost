@@ -166,16 +166,14 @@
 }
 
 .rulesLayout {
-  display: grid;
+  display: flex;
   flex: 1;
-  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
-  gap: 22px;
   min-height: 0;
 }
 
-.activeRulesColumn,
 .mergedColumn {
   display: flex;
+  width: 100%;
   min-height: 0;
   flex-direction: column;
 }
@@ -190,48 +188,58 @@
 }
 
 .ruleList {
-  display: grid;
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 86px;
+  margin: -2px 0 10px;
   overflow: auto;
-  gap: 8px;
-  padding: 2px 4px 2px 0;
+  padding: 2px 4px 4px 0;
 }
 
 .rulePill {
-  border: 0;
-  border-radius: 7px;
-  width: 100%;
-  padding: 12px 14px;
-  text-align: left;
+  display: inline-flex;
+  max-width: min(260px, 100%);
+  align-items: baseline;
+  gap: 5px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 6px;
+  padding: 4px 7px;
+  text-align: center;
   cursor: pointer;
   color: inherit;
-  background: rgba(241, 245, 249, 0.82);
+  background: rgba(241, 245, 249, 0.76);
   transition:
     transform 160ms ease,
     background 160ms ease,
+    border-color 160ms ease,
     box-shadow 160ms ease;
 }
 
-.rulePill:hover,
-.rulePillActive {
-  transform: translateX(4px);
+.rulePill:hover {
+  transform: translateY(-1px);
+  border-color: rgba(23, 139, 255, 0.38);
   background: rgba(232, 240, 250, 0.96);
-  box-shadow: inset 3px 0 0 #178bff;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
 }
 
 .rulePillName {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  font-size: 14px;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
   font-weight: 800;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .rulePillMeta {
-  margin-top: 3px;
-  padding-left: 20px;
   color: #7b818d;
-  font-size: 13px;
+  font-size: 10px;
   font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 .mergedHeader {
@@ -288,7 +296,8 @@
   background: linear-gradient(180deg, rgba(241, 245, 249, 0.92), rgba(248, 250, 252, 0.92));
   color: #4b5563;
   font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  white-space: pre-wrap;
+  white-space: normal;
+  overflow-x: hidden;
 }
 
 .distributionHeader {
@@ -304,8 +313,8 @@
 }
 
 .temporaryPortGrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  display: flex;
+  flex-direction: column;
   gap: 14px;
 }
 
@@ -406,16 +415,17 @@
 }
 
 .tempMergedCode {
-  max-height: 180px;
+  max-height: none;
   min-height: 96px;
   margin: 0;
-  overflow: auto;
+  overflow: visible;
   border-radius: 7px;
   padding: 14px;
   background: rgba(241, 245, 249, 0.82);
   color: #4b5563;
   font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  white-space: pre-wrap;
+  white-space: normal;
+  overflow-x: hidden;
 }
 
 .distributionMode {
@@ -509,11 +519,12 @@
 }
 
 :global(html[data-theme="dark"]) .rulePill {
+  border-color: rgba(148, 163, 184, 0.18);
   background: rgba(30, 41, 59, 0.72);
 }
 
-:global(html[data-theme="dark"]) .rulePill:hover,
-:global(html[data-theme="dark"]) .rulePillActive {
+:global(html[data-theme="dark"]) .rulePill:hover {
+  border-color: rgba(96, 165, 250, 0.36);
   background: rgba(37, 54, 76, 0.86);
 }
 
@@ -583,7 +594,6 @@
   }
 
   .rulesLayout {
-    grid-template-columns: 1fr;
     min-height: 620px;
   }
 

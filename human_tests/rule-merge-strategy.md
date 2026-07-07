@@ -146,14 +146,14 @@ cargo test -p bifrost-cli -- test_merge_tls_intercept test_merge_tls_passthrough
 
 **操作步骤**：
 ```bash
-cargo test -p bifrost-cli -- test_merge_forward_and_modify_coexist test_merge_multiple_accumulate_protocols test_merge_redirect_with_status_code test_merge_reqheaders_different_keys_accumulate test_merge_resheaders_different_keys_accumulate test_merge_reqheaders_same_key_first_wins test_merge_resheaders_same_key_first_wins
+cargo test -p bifrost-cli -- test_merge_forward_and_modify_coexist test_merge_multiple_accumulate_protocols test_merge_redirect_with_status_code test_merge_reqheaders_different_keys_accumulate test_merge_resheaders_different_keys_accumulate
 ```
 
 **预期结果**：
-- 所有 7 个测试通过
+- 所有 5 个测试通过
 - 转发+修改可共存：host 规则和 reqHeaders/resHeaders/reqCookies 同时生效
 - 多累积型协议互不影响
-- reqHeaders/resHeaders 不同 key 累积、同 key first-wins
+- reqHeaders/resHeaders 不同 key 累积；同 key 覆盖语义以真实代理 E2E 为准，当前为 later-wins
 
 ### TC-RMS-12: E2E 测试 - 真实代理场景验证
 
@@ -170,6 +170,7 @@ cargo test -p bifrost-e2e -- rule_merge_strategy
   - method/ua single-match
   - statusCode 正确设置
   - reqHeaders/resHeaders 不同 key 合并
+  - reqHeaders 同 key later-wins，客户端同名 header 也会被规则最终值覆盖
   - resBody last-wins
   - reqReplace 累积
   - resCors last-wins

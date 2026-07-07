@@ -1,0 +1,112 @@
+.ruleEffectivenessCode {
+  --rule-effect-active-bg: rgba(82, 196, 26, 0.12);
+  --rule-effect-active-border: #52c41a;
+  --rule-effect-active-text: #237804;
+  --rule-effect-partial-bg: rgba(250, 173, 20, 0.14);
+  --rule-effect-partial-border: #faad14;
+  --rule-effect-partial-text: #ad6800;
+  --rule-effect-shadowed-bg: rgba(148, 163, 184, 0.14);
+  --rule-effect-shadowed-border: #94a3b8;
+  --rule-effect-shadowed-text: #64748b;
+  --rule-effect-line-hover: rgba(22, 119, 255, 0.08);
+  box-sizing: border-box;
+  max-width: 100%;
+  white-space: normal;
+  overflow-x: hidden;
+}
+
+.ruleLine {
+  position: relative;
+  display: grid;
+  grid-template-columns: 4ch minmax(0, 1fr) 14px;
+  column-gap: 8px;
+  align-items: start;
+  min-height: 1.45em;
+  margin: 0 -4px;
+  border-left: 3px solid transparent;
+  border-radius: 4px;
+  padding: 0 8px 0 6px;
+  min-width: 0;
+}
+
+.ruleLine[data-status="active"] {
+  border-left-color: var(--rule-effect-active-border);
+  background: var(--rule-effect-active-bg);
+}
+
+.ruleLine[data-status="partial"] {
+  border-left-color: var(--rule-effect-partial-border);
+  background: var(--rule-effect-partial-bg);
+}
+
+.ruleLine[data-status="shadowed"] {
+  border-left-color: var(--rule-effect-shadowed-border);
+  background: var(--rule-effect-shadowed-bg);
+  color: var(--rule-effect-shadowed-text);
+}
+
+.ruleLine[data-status="neutral"] {
+  grid-template-columns: 4ch minmax(0, 1fr) 0;
+  padding-right: 8px;
+}
+
+.ruleLine:hover {
+  background: var(--rule-effect-line-hover);
+}
+
+.lineNumber {
+  color: var(--rule-effect-shadowed-text);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.66;
+  text-align: right;
+  user-select: none;
+}
+
+.ruleText {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.statusDot {
+  margin-top: 0.48em;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 16%, transparent);
+}
+
+.ruleLine[data-status="active"] .statusDot {
+  color: var(--rule-effect-active-border);
+  background: var(--rule-effect-active-border);
+}
+
+.ruleLine[data-status="partial"] .statusDot {
+  color: var(--rule-effect-partial-border);
+  background: var(--rule-effect-partial-border);
+}
+
+.ruleLine[data-status="shadowed"] .statusDot {
+  color: var(--rule-effect-shadowed-border);
+  background: var(--rule-effect-shadowed-border);
+}
+
+.tooltip {
+  box-sizing: border-box;
+  max-width: min(680px, calc(100vw - 64px));
+  max-height: min(60vh, 560px);
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+.tooltipTitle {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.tooltipMeta {
+  margin-top: 4px;
+  font-size: 11px;
+  opacity: 0.86;
+}

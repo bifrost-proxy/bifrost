@@ -907,6 +907,48 @@
 **执行结果（2026-07-02，本地纯前端 smoke）**：
 - ✅ PASS：执行 `WEB_PORT=3107 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' pnpm --dir web exec playwright test tests/ui/rules-dynamic-island-global.spec.ts --config=playwright.frontend.config.ts`。测试使用 Vite 纯前端服务和 mock Admin API，不启动 Rust 后端；验证 Traffic 页面出现 `2 active` 全局胶囊、拖拽后位置变化、刷新后回到默认位置、点击展开详情、点击 `global-active-rule` 后跳转到 `/_bifrost/rules?rule=global-active-rule`，并在 Rules 编辑器中显示目标规则。
 
+### TC-WRU-48：Dynamic Island Merged Rules 智能高亮生效与覆盖规则
+
+**前置条件**：
+1. 至少启用两段同 matcher 的规则，内容包含：
+   ```text
+   https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_old","x-use-ppe":"1"}
+   https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://
+   https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_new","x-use-ppe":"1"}
+   https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://
+   https://partial.example.test/api/internal/ reqHeaders://{"x-env":"narrow"}
+   https://partial.example.test/api/ reqHeaders://{"x-env":"broad","x-stable":"keep"}
+   ```
+2. 打开任意 WebUI 页面，例如 `http://127.0.0.1:8800/_bifrost/traffic`。
+
+**操作步骤**：
+1. 点击顶部 Rules 状态胶囊展开详情。
+2. 点击 `Show Merged Rules`。
+3. 观察规则的行级高亮。
+4. 鼠标悬浮重复同 matcher 的第二条 `reqHeaders` 规则。
+5. 鼠标悬浮宽前缀 `https://partial.example.test/api/` 的 `reqHeaders` 规则。
+6. 鼠标悬浮第二条 `passthrough://` 规则。
+7. 将第一条 `reqHeaders` 的 JSON header 值扩展为长字符串，确认弹层宽度不被撑开。
+
+**预期结果**：
+- 第一条旧 `reqHeaders` 行标记为 covered，因为同 matcher 下同优先级的后续 `reqHeaders` 覆盖同名 header。
+- 第一条 `passthrough://` 行标记为 effective，因为同 matcher / same protocol 下 resolver 首条获胜。
+- 第二条同 matcher `reqHeaders` 行标记为 effective，因为它提供最终同名 header 值。
+- 宽前缀 `https://partial.example.test/api/` 的 `reqHeaders` 行标记为 partial，因为更窄 `https://partial.example.test/api/internal/` matcher 接管了部分路径上的同名 header，但宽前缀在其它路径仍然生效。
+- 第二条 `passthrough://` 行标记为 covered，hover 提示它被前面的同 matcher `passthrough://` 覆盖。
+- hover covered `reqHeaders` 行时提示包含 `reqHeaders fields are replaced by line` 和 header 名称。
+- hover partial `reqHeaders` 行时提示包含 `outside that narrower scope`。
+- hover covered `passthrough://` 行时提示包含覆盖来源行号。
+- hover tips 框宽度足够展示多行解释，不出现过窄长竖条；解释过长时在 tips 框内滚动。
+- 每条规则左侧展示可见行号，hover 文案中的 `line N` 可以直接对照定位。
+- 长 URL / 长 JSON header 在胶囊弹层内自动换行，不产生横向滚动或把弹层撑出视口。
+- 复制 Merged Rules 时复制出的文本不包含高亮状态文案或 hover 解释。
+
+**回归目的**：覆盖用户要求的“基于规则解析特性智能判断真正生效规则”，防止 Dynamic Island 只展示纯文本、无法解释重复规则和覆盖关系。
+
+**执行结果（2026-07-07，本地纯前端 smoke）**：
+- ✅ PASS：执行 `WEB_PORT=3107 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' pnpm --dir web exec playwright test tests/ui/rules-dynamic-island-global.spec.ts --config=playwright.frontend.config.ts`。测试使用 Vite 纯前端服务和 mock Admin API；验证 Rules 胶囊全局可见、拖拽后刷新回默认位置、详情跳转保持，并在 Merged Rules 中断言 active / partial / covered 行，hover covered `reqHeaders` 行出现被后续同优先级规则覆盖的解释，hover partial `reqHeaders` 行出现范围外仍生效解释，断言可见行号和长 header 不产生横向溢出。
+
 ---
 
 ## 清理

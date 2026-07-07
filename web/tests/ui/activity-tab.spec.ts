@@ -47,7 +47,35 @@ function trafficRecord(id: string, seq: number, app: string, responseSize: numbe
   };
 }
 
+function activityMetricsSnapshot() {
+  return {
+    timestamp: Date.now(),
+    memory_used: 1,
+    memory_total: 1,
+    cpu_usage: 1,
+    total_requests: 1777,
+    active_connections: 18,
+    bytes_sent: 952107008,
+    bytes_received: 33344717,
+    bytes_sent_rate: 113,
+    bytes_received_rate: 57,
+    qps: 0,
+    max_qps: 0,
+    max_bytes_sent_rate: 0,
+    max_bytes_received_rate: 0,
+    http: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
+    https: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
+    tunnel: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
+    ws: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
+    wss: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
+    h3: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
+    h3s: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
+    socks5: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
+  };
+}
+
 async function mockActivityApi(page: Page) {
+  const longHeaderValue = "ppe_old_" + "x".repeat(160);
   await page.route("**/_bifrost/api/**", async (route) => {
     const url = new URL(route.request().url());
     const apiPath = url.pathname.replace(/^\/_bifrost\/api/, "");
@@ -94,6 +122,10 @@ async function mockActivityApi(page: Page) {
       });
       return;
     }
+    if (apiPath === "/metrics") {
+      await fulfillJson(route, activityMetricsSnapshot());
+      return;
+    }
     if (apiPath === "/system/overview") {
       await fulfillJson(route, {
         system: {
@@ -107,30 +139,7 @@ async function mockActivityApi(page: Page) {
           uptime_secs: 1,
           pid: 123,
         },
-        metrics: {
-          timestamp: Date.now(),
-          memory_used: 1,
-          memory_total: 1,
-          cpu_usage: 1,
-          total_requests: 1777,
-          active_connections: 18,
-          bytes_sent: 952107008,
-          bytes_received: 33344717,
-          bytes_sent_rate: 113,
-          bytes_received_rate: 57,
-          qps: 0,
-          max_qps: 0,
-          max_bytes_sent_rate: 0,
-          max_bytes_received_rate: 0,
-          http: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
-          https: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
-          tunnel: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
-          ws: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
-          wss: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
-          h3: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
-          h3s: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
-          socks5: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
-        },
+        metrics: activityMetricsSnapshot(),
         rules: { total: 30, enabled: 1 },
         traffic: { recorded: 1777 },
         server: { port: 9900, admin_url: "http://127.0.0.1:9900/_bifrost/" },
@@ -186,8 +195,18 @@ async function mockActivityApi(page: Page) {
           },
         ],
         variable_conflicts: [],
-        merged_content:
-          "# Global default rules.\n# These rules are always enabled and apply to every proxy listener.\n\n# abc\na.com status://200",
+        merged_content: [
+          "# Global default rules.",
+          "# These rules are always enabled and apply to every proxy listener.",
+          "",
+          `https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"${longHeaderValue}","x-use-ppe":"1"}`,
+          "https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://",
+          'https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_new","x-use-ppe":"1"}',
+          "https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://",
+          'https://partial.example.test/api/internal/ reqHeaders://{"x-env":"narrow"}',
+          'https://partial.example.test/api/ reqHeaders://{"x-env":"broad","x-stable":"keep"}',
+          "a.com status://200",
+        ].join("\n"),
       });
       return;
     }
@@ -199,6 +218,16 @@ async function mockActivityApi(page: Page) {
           name: "Activity temporary port",
           status: "running",
           rule_refs: [{ type: "local_rule", name: "activity-temp-rule" }],
+          missing_refs: [],
+          created_at: Date.now(),
+          updated_at: Date.now(),
+        },
+        {
+          port: 18889,
+          host: "127.0.0.1",
+          name: "Second temporary port",
+          status: "running",
+          rule_refs: [{ type: "local_rule", name: "activity-temp-rule-two" }],
           missing_refs: [],
           created_at: Date.now(),
           updated_at: Date.now(),
@@ -215,6 +244,22 @@ async function mockActivityApi(page: Page) {
           { name: "activity-temp-rule", rule_count: 1, group_id: null, group_name: null },
         ],
         merged_content: "# Default\nactivity-temp.test status://219 resBody://(activity-temp-rule)",
+      });
+      return;
+    }
+    if (apiPath === "/ports/18889/active-summary") {
+      await fulfillJson(route, {
+        port: 18889,
+        total: 2,
+        rules: [
+          { name: "Default", rule_count: 1, group_id: null, group_name: null },
+          { name: "activity-temp-rule-two", rule_count: 1, group_id: null, group_name: null },
+        ],
+        merged_content: [
+          "# Default",
+          "activity-temp-two.test status://220 resBody://(activity-temp-rule-two)",
+          'activity-temp-two.test reqHeaders://{"x-extra-long-header":"temporary-port-layout-' + "x".repeat(120) + '"}',
+        ].join("\n"),
       });
       return;
     }
@@ -309,12 +354,54 @@ test("Activity tab is first, default, data-rich, and animated on hover", async (
   await expect(page.getByTestId("activity-stat-card").filter({ hasText: "System Proxy" })).toContainText("Disabled");
   await expect(page.getByTestId("activity-stat-card").filter({ hasText: "System Proxy" })).toContainText("http://127.0.0.1:9900");
   await expect(page.getByTestId("activity-rule-pill").filter({ hasText: "Default" })).toContainText("1 entries");
-  await expect(page.getByTestId("activity-merged-rules")).toContainText("a.com status://200");
+  const mergedRules = page.getByTestId("activity-merged-rules");
+  await expect(mergedRules).toContainText("a.com status://200");
+  await expect(mergedRules.locator('[data-effect-status="active"]')).toHaveCount(4);
+  await expect(mergedRules.locator('[data-effect-status="partial"]')).toHaveCount(1);
+  await expect(mergedRules.locator('[data-effect-status="shadowed"]')).toHaveCount(2);
+  await expect(mergedRules.locator('[data-line-number="1"] > [data-line-gutter="true"]')).toHaveText("1");
+  await expect(mergedRules.locator('[data-line-number="3"] > [data-line-gutter="true"]')).toHaveText("3");
+  const wrapMetrics = await mergedRules.evaluate((element) => ({
+    scrollWidth: element.scrollWidth,
+    clientWidth: element.clientWidth,
+  }));
+  expect(wrapMetrics.scrollWidth).toBeLessThanOrEqual(wrapMetrics.clientWidth + 1);
+  await mergedRules
+    .locator('[data-effect-status="shadowed"]')
+    .filter({ hasText: "ppe_old_" })
+    .hover();
+  await expect(page.getByText(/reqHeaders fields are replaced by line/)).toBeVisible();
+  await mergedRules
+    .locator('[data-effect-status="partial"]')
+    .filter({ hasText: "x-stable" })
+    .hover();
+  await expect(page.getByText(/outside that narrower scope/)).toBeVisible();
   await expect(page.getByTestId("activity-temporary-ports-panel")).toContainText("Temporary Ports");
   await expect(page.getByTestId("activity-temporary-port-card-18888")).toContainText("127.0.0.1:18888");
   await expect(page.getByTestId("activity-temporary-port-card-18888")).toContainText("activity-temp-rule");
   await expect(page.getByTestId("activity-temporary-port-merged-18888")).toContainText("resBody://(activity-temp-rule)");
-  await expect(page.getByTestId("activity-app-row").filter({ hasText: "codex" })).toContainText("2");
+  await expect(page.getByTestId("activity-temporary-port-card-18889")).toContainText("127.0.0.1:18889");
+  await expect(page.getByTestId("activity-temporary-port-card-18889")).toContainText("activity-temp-rule-two");
+  const temporaryPortLayout = await page
+    .locator('[data-testid^="activity-temporary-port-card-"]')
+    .evaluateAll((cards) => cards.map((card) => {
+      const rect = card.getBoundingClientRect();
+      return { top: rect.top, left: rect.left, width: rect.width };
+    }));
+  expect(temporaryPortLayout).toHaveLength(2);
+  expect(temporaryPortLayout[1].top).toBeGreaterThan(temporaryPortLayout[0].top + 8);
+  expect(Math.abs(temporaryPortLayout[1].left - temporaryPortLayout[0].left)).toBeLessThan(2);
+  const temporaryMergedMetrics = await page
+    .getByTestId("activity-temporary-port-merged-18889")
+    .evaluate((element) => ({
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+    }));
+  expect(temporaryMergedMetrics.scrollHeight).toBeLessThanOrEqual(temporaryMergedMetrics.clientHeight + 1);
+  expect(temporaryMergedMetrics.scrollWidth).toBeLessThanOrEqual(temporaryMergedMetrics.clientWidth + 1);
+  await expect(page.getByTestId("activity-app-row").filter({ hasText: "codex" }).first()).toContainText(/codex/i);
 
   const mergedMetrics = await page.getByTestId("activity-merged-rules").evaluate((element) => {
     const parent = element.parentElement;
@@ -324,11 +411,18 @@ test("Activity tab is first, default, data-rich, and animated on hover", async (
     };
   });
   expect(mergedMetrics.codeHeight).toBeGreaterThan(250);
-  expect(mergedMetrics.parentHeight - mergedMetrics.codeHeight).toBeLessThan(60);
+  expect(mergedMetrics.parentHeight - mergedMetrics.codeHeight).toBeLessThan(110);
 
   await page.evaluate(() => navigator.clipboard.writeText(""));
   await page.getByTestId("activity-merged-rules").evaluate((element) => {
-    const textNode = element.firstChild;
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    let textNode: Node | null = null;
+    while (walker.nextNode()) {
+      if (walker.currentNode.textContent?.includes("a.com status://200")) {
+        textNode = walker.currentNode;
+        break;
+      }
+    }
     if (!textNode) return;
     const text = textNode.textContent || "";
     const start = text.indexOf("a.com");
@@ -364,7 +458,7 @@ test("Activity tab is first, default, data-rich, and animated on hover", async (
   );
   expect(cardTransformAfter).not.toBe(cardTransformBefore);
 
-  const codexRow = page.getByTestId("activity-app-row").filter({ hasText: "codex" });
+  const codexRow = page.getByTestId("activity-app-row").filter({ hasText: "codex" }).first();
   const fill = codexRow.locator('[class*="barFill"]');
   const fillFilterBefore = await fill.evaluate((element) => window.getComputedStyle(element).filter);
   await codexRow.hover();
@@ -381,6 +475,9 @@ test("Activity tab is first, default, data-rich, and animated on hover", async (
     .getByTestId("activity-rules-panel")
     .evaluate((element) => window.getComputedStyle(element).backgroundColor);
   expect(darkPanelBackground).not.toBe("rgba(255, 255, 255, 0.86)");
+
+  await page.locator('[data-testid="activity-rule-pill"][data-rule-name="Default"]').click();
+  await expect(page).toHaveURL(/\/_bifrost\/rules\?rule=Default$/);
 });
 
 test("Activity shows temporary port details from a running temporary listener", async ({
