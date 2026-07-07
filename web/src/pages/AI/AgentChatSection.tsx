@@ -1590,7 +1590,10 @@ export default function AgentChatSection({
 
   const handleOpenThread = useCallback(
     (thread: AgentThreadSummary) => {
-      if (isSelectedThread(thread, sessionKey, historyPath, queryView)) {
+      if (
+        queryView !== "settings" &&
+        isSelectedThread(thread, sessionKey, historyPath, queryView)
+      ) {
         return;
       }
       // Abort any in-flight stream from the previous session to prevent cross-contamination

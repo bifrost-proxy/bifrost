@@ -3997,6 +3997,104 @@ test("AI Agent Chat clicking the selected thread keeps loaded messages", async (
   );
 });
 
+test("AI page lets the selected thread leave Settings", async ({ page }) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "settings-selected-thread",
+            status: "ended",
+            title: "Settings selected thread",
+            source: "web",
+            start_time: 120,
+            last_active_time: 180,
+            duration_secs: 60,
+          },
+        ],
+      }),
+    });
+  });
+  await page.route(
+    "**/_bifrost/api/im-gateway/agent/sessions/settings-selected-thread",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          session_key: "settings-selected-thread",
+          title: "Settings selected thread",
+          source: "web",
+          messages: [
+            { role: "user", content: "Open the selected thread from Settings" },
+            { role: "assistant", content: "Settings should yield to chat routing" },
+          ],
+        }),
+      });
+    },
+  );
+
+  await openPage(
+    page,
+    "ai?aiSection=agent-chat&agentSection=chat&session=settings-selected-thread&view=active",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Settings should yield to chat routing",
+  );
+  const selectedRow = page.locator(
+    '[data-testid="agent-chat-thread-item"][data-selected="true"]',
+  );
+  await expect(selectedRow).toHaveCount(1);
+
+  await page.getByTestId("ai-nav-settings").click();
+  await expect(page.getByTestId("ai-settings-content")).toBeVisible();
+  await expect(selectedRow).toHaveCount(1);
+
+  await selectedRow.click();
+  await expect(page.getByTestId("ai-settings-content")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Settings should yield to chat routing",
+  );
+  await expect(page).toHaveURL(/view=chat/);
+});
+
+test("AI page lets a previously selected top nav item leave Settings", async ({
+  page,
+}) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ sessions: [] }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: { bifrost_agent: { enabled: true, adapter: "builtin" } },
+        channels: {},
+      }),
+    });
+  });
+
+  await openPage(page, "ai?view=im");
+  await expect(page.getByTestId("ai-im-content")).toBeVisible();
+
+  await page.getByTestId("ai-nav-settings").click();
+  await expect(page.getByTestId("ai-settings-content")).toBeVisible();
+
+  await page.getByTestId("ai-nav-im").click();
+  await expect(page.getByTestId("ai-settings-content")).toHaveCount(0);
+  await expect(page.getByTestId("ai-im-content")).toBeVisible();
+  await expect(page).toHaveURL(/view=im/);
+});
+
 test("AI Agent Chat uses detail runner metadata instead of source for selected row", async ({
   page,
 }) => {

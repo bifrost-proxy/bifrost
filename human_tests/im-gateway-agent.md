@@ -2969,3 +2969,25 @@ rm -rf ./.bifrost-test
 - **清理步骤**:
   - 删除临时 HOME 和 Bifrost 数据目录。
 - **执行记录（2026-06-29）**: PASS — 创建用例后立即执行 `SKIP_BUILD=true BIFROST_BIN=/Users/bytedance/project/bifrost-claude-code-runner-task/target/debug/bifrost PATH=/Users/bytedance/.cargo/bin:$PATH bash e2e-tests/tests/test_im_online_notification_runner_context.sh`。脚本使用临时 `CLAUDE_CONFIG_DIR` 写入 `settings.json`（含 `model:"opus"`、`effortLevel:"low"`）。真实 Feishu provider connect 后上线通知显示 `Runner Type: claude_code`、`Runner ID: Claude-Code`、`Model: opus（claude settings）`、`Reasoning Effort: low`、`Reasoning Summary: N/A`。
+
+### TC-IMA-155: AI Settings 返回已选中线程与顶部菜单
+
+- **前置条件**:
+  - 使用当前源码或 Playwright 管理端测试环境。
+  - AI 左侧线程列表中存在一条可打开的 Agent Chat 线程。
+  - AI 顶部/左侧主菜单存在 IM、Videos、ASR 或 New Chat 等入口。
+- **操作步骤**:
+  1. 打开 AI Agent Chat，并选中一条线程 A。
+  2. 点击左侧底部 `Settings`，确认中间内容切到 AI Settings。
+  3. 在 Settings 页面保持打开时，点击左侧线程列表中仍处于选中态的线程 A。
+  4. 再打开 IM 页面，随后点击 `Settings`，确认中间内容切到 AI Settings。
+  5. 在 Settings 页面保持打开时，点击左侧主菜单中之前已选中过的 `IM`。
+- **预期结果**:
+  - 第 3 步点击线程 A 后，路由必须被覆盖为 `view=chat`，中间内容回到 Agent Chat 线程详情，不需要先点另一个线程。
+  - Settings 内容区域消失，线程 A 的消息仍正常展示。
+  - 第 5 步点击 `IM` 后，路由必须被覆盖为 `view=im`，中间内容回到 IM 管理页面，不需要先点其他主菜单。
+  - 左侧选中态可以保留用于视觉提示，但不能阻止点击事件刷新主路由。
+- **清理步骤**:
+  - 关闭测试浏览器页面。
+  - 清理 Playwright 测试生成物。
+- **执行记录（2026-07-08）**: PASS — 创建用例后立即执行 `pnpm --dir web exec playwright test agent-chat.spec.ts -g "selected thread leave Settings|top nav item leave Settings"`。两个 Playwright mock 回归均通过：`AI page lets the selected thread leave Settings` 验证 Settings 下点击已选中线程会回到 `view=chat` 并展示原消息；`AI page lets a previously selected top nav item leave Settings` 验证 Settings 下点击已选中过的 IM 会回到 `view=im`。
