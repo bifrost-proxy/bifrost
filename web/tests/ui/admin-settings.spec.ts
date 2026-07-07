@@ -1270,9 +1270,16 @@ test("Settings Sync GitHub Gist 支持 token 登录", async ({ page }) => {
   });
 
   await openPage(page, "settings?tab=sync");
+  await expect(page.getByTestId("settings-sync-provider-github-gist-token-link")).toHaveAttribute(
+    "href",
+    /github\.com\/settings\/tokens\/new.*scopes=gist/,
+  );
   await page.getByTestId("settings-sync-provider-login-github_gist").click();
   const modal = page.getByRole("dialog", { name: "Sign in to GitHub Gist" });
   await expect(modal).toBeVisible();
+  await expect(
+    page.getByTestId("settings-sync-provider-github-gist-modal-token-link"),
+  ).toHaveAttribute("href", /github\.com\/settings\/tokens\/new.*scopes=gist/);
   await page.getByTestId("settings-sync-provider-github-gist-token-input").fill("ghp_test_token");
   await modal.getByRole("button", { name: "Sign In" }).click();
 

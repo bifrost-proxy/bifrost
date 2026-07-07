@@ -558,19 +558,59 @@ Settings 页面是 Bifrost 管理端的系统设置中心，包含多个功能 T
 
 **操作步骤**：
 1. 打开 `Settings -> Sync`。
-2. 点击 `GitHub Gist` 卡片中的 `Sign In`。
-3. 在 `Sign in to GitHub Gist` 弹窗中输入 GitHub token。
-4. 点击弹窗 `Sign In`。
+2. 确认 `GitHub Gist` 卡片展示生成 token 的引导，并提供 `Generate Token` 链接。
+3. 点击 `Generate Token`，确认跳转 GitHub token 生成页，URL 预填 `scopes=gist`。
+4. 回到 Bifrost，点击 `GitHub Gist` 卡片中的 `Sign In`。
+5. 在 `Sign in to GitHub Gist` 弹窗中确认也有 `Generate Token` 链接，然后输入 GitHub token。
+6. 点击弹窗 `Sign In`。
 
 **预期结果**：
 - `GitHub Gist` 登录按钮可点击，不再是 disabled。
+- 卡片和弹窗都展示 `Generate Token` 链接，目标为 `https://github.com/settings/tokens/new?description=Bifrost%20Sync&scopes=gist`。
+- 弹窗只展示 GitHub token 登录，不展示本机 callback、OAuth device flow、`Continue with GitHub` 或其它需要 Bifrost 维护 GitHub App 的入口。
 - 弹窗提示 token 需要 `gist` scope。
+- GitHub 不支持让第三方页面自动读取 token 生成结果，因此发布版本不要求自动回填；用户复制 token 后粘贴到 Bifrost。
 - 前端向 `POST /_bifrost/api/sync/login` 发送 `provider_id=github_gist` 和 token。
 - 后端验证 token 成功后，`GitHub Gist` 卡片显示 `Connected` 和 GitHub 用户。
 - `GitHub Gist` 仍显示 `Remote Invoke: Not supported`，不会进入 Remote Invoke 双通道注册。
 
 **执行记录**：
-- 2026-07-07：PASS。执行 `cargo test -p bifrost-sync github_gist -- --nocapture`，1/1 PASS，确认 `github_gist` provider session 会让卡片进入 Connected 且 Remote Invoke 保持不支持。执行 `pnpm --dir web run test:ui tests/ui/admin-settings.spec.ts --grep "GitHub Gist"`，1/1 PASS，真实 Chromium 验证 GitHub Gist 登录按钮可点击、token 弹窗展示、提交 `/sync/login` payload 为 `provider_id=github_gist` + token、成功后卡片显示 Connected 和 GitHub 用户。
+- 2026-07-07：PASS。执行 `cargo test -p bifrost-sync github_gist -- --nocapture`，确认 `github_gist` provider session 会让卡片进入 Connected 且 Remote Invoke 保持不支持。执行 `pnpm --dir web run test:ui tests/ui/admin-settings.spec.ts --grep "GitHub Gist"`，真实 Chromium 验证 GitHub Gist 登录按钮可点击、卡片和弹窗都有 `scopes=gist` 的 GitHub token 生成链接、token 弹窗展示、提交 `/sync/login` payload 为 `provider_id=github_gist` + token、成功后卡片显示 Connected 和 GitHub 用户。
+
+#### TC-WST-41：GitHub Gist Provider 真实同步规则新增、编辑、删除和基础配置更新
+
+**前置条件**：
+1. 使用临时数据目录启动 Bifrost，并禁用 ByteDance Internal 自动登录，避免内网 session 污染 GitHub-only 场景：
+   ```bash
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   BIFROST_DATA_DIR="$(mktemp -d)" \
+   target/debug/bifrost start --port 9914 --host 127.0.0.1 --daemon --skip-cert-check --no-system-proxy --access-mode local_only --no-tray
+   ```
+2. 准备一个只用于测试的 GitHub token，scope 仅选择 `gist`。
+
+**操作步骤**：
+1. 调用 `POST /_bifrost/api/sync/login`，payload 包含 `provider_id=github_gist` 和测试 token。
+2. 调用 `GET /_bifrost/api/sync/status`，确认 `GitHub Gist` provider 为 `connected=true`，`remote_invoke_registered=false`。
+3. 通过 Rules Admin API 新增一条个人规则，例如 `codex-gist-sync-<timestamp>`，内容为 `example.com host://127.0.0.1:3000`。
+4. 更新 Settings 基础配置中的三类允许同步字段：
+   - `domain_allowlist`: `["gist-sync.example.com"]`
+   - `app_allowlist`: `["BifrostTestApp"]`
+   - `blacklist`: `["skip.gist-sync.example.com"]`
+5. 触发一次 sync，读取 GitHub Gist API，确认创建或更新 `Bifrost Sync Snapshot` private gist，文件名为 `bifrost-sync-snapshot.json`。
+6. 编辑同一条规则为 `example.com host://127.0.0.1:3001`，并把三类基础配置改为 `gist-sync-updated.example.com`、`BifrostTestAppUpdated`、`skip-updated.gist-sync.example.com`。
+7. 再次触发 sync，确认 Gist snapshot 内规则内容和三类基础配置均更新。
+8. 删除该规则并再次触发 sync，确认 Gist snapshot 内不再包含这条规则，但基础配置保留最新值。
+9. 删除测试期间创建的 GitHub Gist，停止 Bifrost，并删除临时数据目录。
+
+**预期结果**：
+- GitHub Gist 连接只影响 `github_gist` provider，不会注册 Remote Invoke。
+- 首次同步会创建 private gist，后续同步复用并 PATCH 同一个 snapshot gist。
+- 规则新增、编辑、删除都会同步到 `bifrost-sync-snapshot.json`。
+- 基础配置只同步 `app_allowlist`、`domain_allowlist`、`blacklist`，不包含 token、证书、Remote Invoke 授权、本地端口、流量历史或本机标识。
+- 清理步骤删除测试 gist 后，测试 GitHub 账号不会残留 Bifrost 测试数据。
+
+**执行记录**：
+- 2026-07-07：PASS。使用用户提供的临时 GitHub token 在独立 `BIFROST_DATA_DIR`、禁用 ByteDance 自动登录的 9914 端口环境完成真实 GitHub API 验证。`/sync/status` 返回 `github_gist` connected，用户标识为 GitHub 账号；新增规则后 snapshot 包含该规则和三类基础配置；编辑规则和配置后 snapshot 更新为 `host://127.0.0.1:3001`、`gist-sync-updated.example.com`、`BifrostTestAppUpdated`、`skip-updated.gist-sync.example.com`；删除规则后 snapshot 规则列表为空且基础配置保持最新值。测试结束已删除临时测试 gist、停止 9914 端口服务并清理临时数据目录。
 
 ---
 

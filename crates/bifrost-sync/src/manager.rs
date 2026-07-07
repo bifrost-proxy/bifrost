@@ -19,6 +19,9 @@ use tokio::sync::{broadcast, Mutex as AsyncMutex, Notify, RwLock};
 
 use crate::client::SyncHttpClient;
 use crate::client::{SyncBasicConfigCheckItem, SyncBasicConfigUpdateItem};
+use crate::github_gist::{
+    GitHubGistBasicConfig, GitHubGistClient, GitHubGistRule, GitHubGistSnapshot,
+};
 use crate::normalize::normalize_remote_rule;
 use crate::types::{RemoteBasicConfig, RemoteEnv, RemoteUser, SyncReason};
 
@@ -335,6 +338,75 @@ fn build_provider_statuses(
     ]
 }
 
+fn github_fallback_user() -> RemoteUser {
+    RemoteUser {
+        user_id: "github".to_string(),
+        nickname: "GitHub".to_string(),
+        avatar: String::new(),
+        email: String::new(),
+    }
+}
+
+fn gist_remote_id_for_rule(rule: &RuleFile) -> String {
+    rule.sync
+        .remote_id
+        .clone()
+        .filter(|remote_id| remote_id.starts_with("gist:"))
+        .unwrap_or_else(|| format!("gist:{}", rule.sync.rule_id))
+}
+
+fn gist_rule_to_remote_env(rule: GitHubGistRule) -> RemoteEnv {
+    RemoteEnv {
+        id: rule.id,
+        user_id: rule.user_id,
+        name: rule.name,
+        rule: rule.rule,
+        create_time: rule.create_time,
+        update_time: rule.update_time,
+    }
+}
+
+fn gist_config_to_remote(config: &GitHubGistBasicConfig) -> RemoteBasicConfig {
+    RemoteBasicConfig {
+        id: config.id.clone(),
+        user_id: config.user_id.clone(),
+        config_key: config.config_key.clone(),
+        value_json: config.value_json.clone(),
+        hash: config.hash.clone(),
+        create_time: config.create_time.clone(),
+        update_time: config.update_time.clone(),
+    }
+}
+
+fn upsert_gist_rule(
+    snapshot: &mut GitHubGistSnapshot,
+    local_rule: &RuleFile,
+    remote_env: Option<&RemoteEnv>,
+    user: &RemoteUser,
+    now: &str,
+) {
+    let remote_id = remote_env
+        .map(|env| env.id.clone())
+        .unwrap_or_else(|| gist_remote_id_for_rule(local_rule));
+    let create_time = remote_env
+        .map(|env| env.create_time.clone())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| now.to_string());
+    let item = GitHubGistRule {
+        id: remote_id.clone(),
+        user_id: user.user_id.clone(),
+        name: local_rule.name.clone(),
+        rule: local_rule.content.clone(),
+        create_time,
+        update_time: now.to_string(),
+    };
+    if let Some(existing) = snapshot.rules.iter_mut().find(|rule| rule.id == remote_id) {
+        *existing = item;
+    } else {
+        snapshot.rules.push(item);
+    }
+}
+
 #[derive(Clone)]
 pub struct SyncManagerHandle {
     inner: SharedSyncManager,
@@ -462,22 +534,27 @@ impl SyncManager {
         let config = self.config_manager.config().await;
         let runtime = self.runtime.read().await.clone();
         let state = self.state.lock().clone();
-        let has_session = state
+        let server_has_session = state
             .token
             .as_deref()
             .is_some_and(|token| !token.trim().is_empty());
+        let has_any_session = server_has_session
+            || state
+                .provider_sessions
+                .values()
+                .any(|session| !session.token.trim().is_empty());
         let providers = build_provider_statuses(
             &config.sync,
             &runtime,
             &state.user,
-            has_session,
+            server_has_session,
             &state.provider_sessions,
         );
         SyncStatus {
             enabled: config.sync.enabled,
             auto_sync: config.sync.auto_sync,
             remote_base_url: config.sync.remote_base_url,
-            has_session,
+            has_session: has_any_session,
             reachable: runtime.reachable,
             authorized: runtime.authorized,
             syncing: runtime.syncing,
@@ -646,6 +723,376 @@ impl SyncManager {
         }
         self.wake.notify_one();
         Ok(())
+    }
+
+    fn github_gist_session(&self) -> Option<SyncProviderSession> {
+        self.state
+            .lock()
+            .provider_sessions
+            .get("github_gist")
+            .cloned()
+            .filter(|session| !session.token.trim().is_empty())
+    }
+
+    async fn sync_github_gist_once(
+        &self,
+        token: &str,
+        cached_user: Option<RemoteUser>,
+    ) -> Result<SyncOnceResult> {
+        let user = match cached_user {
+            Some(user) if !user.user_id.trim().is_empty() => user,
+            _ => self.github_user_for_token(token).await?,
+        };
+        {
+            let mut state = self.state.lock();
+            if let Some(session) = state.provider_sessions.get_mut("github_gist") {
+                session.user = Some(user.clone());
+            }
+            self.persist_state(&state)?;
+        }
+
+        let rules_storage = self.config_manager.rules_storage().await;
+        let local_count = rules_storage
+            .load_all()?
+            .into_iter()
+            .filter(|rule| !RulesStorage::is_default_rule_name(&rule.name))
+            .count();
+        let result = self.sync_github_gist_provider(token, &user).await;
+        let state = self.state.lock().clone();
+        let synced_count = rules_storage
+            .load_all()?
+            .iter()
+            .filter(|rule| !RulesStorage::is_default_rule_name(&rule.name))
+            .filter(|rule| {
+                rule.sync
+                    .remote_id
+                    .as_deref()
+                    .is_some_and(|remote_id| remote_id.starts_with("gist:"))
+            })
+            .count();
+
+        match result {
+            Ok(()) => Ok(SyncOnceResult {
+                success: true,
+                message: "GitHub Gist sync completed successfully".to_string(),
+                action: state.last_sync_action,
+                user: Some(user),
+                local_rules: local_count,
+                remote_rules: synced_count,
+            }),
+            Err(error) => Ok(SyncOnceResult {
+                success: false,
+                message: format!("GitHub Gist sync failed: {error}"),
+                action: None,
+                user: Some(user),
+                local_rules: local_count,
+                remote_rules: 0,
+            }),
+        }
+    }
+
+    async fn sync_github_gist_provider(&self, token: &str, user: &RemoteUser) -> Result<()> {
+        let client = GitHubGistClient::new()?;
+        let mut remote = client.load_snapshot(token).await?;
+        let now = Utc::now().to_rfc3339();
+        remote.snapshot.version = 1;
+        remote.snapshot.user_id = user.user_id.clone();
+
+        let mut outcome = self
+            .sync_github_gist_rules(&mut remote.snapshot, user, &now)
+            .await?;
+        let config_outcome = self
+            .sync_github_gist_basic_configs(&mut remote.snapshot, user, &now)
+            .await?;
+        outcome.0 |= config_outcome.0;
+        outcome.1 |= config_outcome.1;
+        if outcome.0 {
+            remote.snapshot.updated_at = now.clone();
+            let gist_id = client.save_snapshot(token, &remote).await?;
+            if remote.gist_id.as_deref() != Some(gist_id.as_str()) {
+                tracing::info!(
+                    target: "bifrost_sync::manager",
+                    gist_id = %gist_id,
+                    "GitHub Gist sync snapshot created"
+                );
+            }
+        }
+
+        {
+            let mut state = self.state.lock();
+            state.last_sync_at = Some(Utc::now().to_rfc3339());
+            state.last_sync_action = Some(match outcome {
+                (true, true) => SyncAction::Bidirectional,
+                (true, false) => SyncAction::LocalPushed,
+                (false, true) => SyncAction::RemotePulled,
+                (false, false) => SyncAction::NoChange,
+            });
+            self.persist_state(&state)?;
+        }
+        Ok(())
+    }
+
+    async fn sync_github_gist_rules(
+        &self,
+        snapshot: &mut GitHubGistSnapshot,
+        user: &RemoteUser,
+        now: &str,
+    ) -> Result<(bool, bool)> {
+        let rules_storage = self.config_manager.rules_storage().await;
+        let local_rules = rules_storage
+            .load_all()?
+            .into_iter()
+            .filter(|rule| !RulesStorage::is_default_rule_name(&rule.name))
+            .collect::<Vec<_>>();
+        let remote_rules = snapshot
+            .rules
+            .iter()
+            .cloned()
+            .map(gist_rule_to_remote_env)
+            .collect::<Vec<_>>();
+        let remote_by_id: HashMap<&str, &RemoteEnv> = remote_rules
+            .iter()
+            .map(|env| (env.id.as_str(), env))
+            .collect();
+        let remote_name_counts: HashMap<&str, usize> =
+            remote_rules.iter().fold(HashMap::new(), |mut counts, env| {
+                *counts.entry(env.name.as_str()).or_default() += 1;
+                counts
+            });
+        let remote_by_unique_name: HashMap<&str, &RemoteEnv> = remote_rules
+            .iter()
+            .filter(|env| remote_name_counts.get(env.name.as_str()) == Some(&1))
+            .map(|env| (env.name.as_str(), env))
+            .collect();
+
+        let state_snapshot = self.state.lock().clone();
+        let mut pushed = false;
+        let mut pulled = false;
+        let mut local_storage_changed = false;
+        let mut consumed_remote_ids = HashSet::new();
+
+        for tombstone in state_snapshot.deleted_rules.values() {
+            if rules_storage.exists(&tombstone.rule_name) {
+                rules_storage.delete(&tombstone.rule_name)?;
+                local_storage_changed = true;
+                pulled = true;
+            }
+            let before = snapshot.rules.len();
+            snapshot
+                .rules
+                .retain(|rule| rule.id != tombstone.remote_id && rule.name != tombstone.rule_name);
+            if snapshot.rules.len() != before {
+                pushed = true;
+            }
+        }
+
+        for local_rule in &local_rules {
+            let remote_env = local_rule
+                .sync
+                .remote_id
+                .as_deref()
+                .and_then(|remote_id| remote_by_id.get(remote_id).copied())
+                .or_else(|| {
+                    if local_rule
+                        .sync
+                        .remote_id
+                        .as_deref()
+                        .is_some_and(|remote_id| remote_id.starts_with("gist:"))
+                    {
+                        None
+                    } else {
+                        remote_by_unique_name.get(local_rule.name.as_str()).copied()
+                    }
+                });
+
+            if let Some(remote_env) = remote_env {
+                consumed_remote_ids.insert(remote_env.id.clone());
+                match local_rule.sync.status {
+                    RuleSyncStatus::Modified | RuleSyncStatus::LocalOnly => {
+                        upsert_gist_rule(snapshot, local_rule, Some(remote_env), user, now);
+                        let mut synced_rule = local_rule.clone();
+                        synced_rule.mark_synced(
+                            remote_env.id.clone(),
+                            user.user_id.clone(),
+                            remote_env.create_time.clone(),
+                            now.to_string(),
+                        );
+                        rules_storage.save(&synced_rule)?;
+                        pushed = true;
+                        local_storage_changed = true;
+                    }
+                    RuleSyncStatus::Synced => {
+                        let remote_hash = content_hash(&remote_env.rule);
+                        let remote_changed = local_rule.sync.remote_updated_at.as_deref()
+                            != Some(remote_env.update_time.as_str())
+                            || local_rule.sync.last_synced_content_hash.as_deref()
+                                != Some(remote_hash.as_str());
+                        if remote_changed {
+                            let mut updated = local_rule.clone();
+                            updated.content = remote_env.rule.clone();
+                            updated.updated_at = remote_env.update_time.clone();
+                            updated.mark_synced(
+                                remote_env.id.clone(),
+                                remote_env.user_id.clone(),
+                                remote_env.create_time.clone(),
+                                remote_env.update_time.clone(),
+                            );
+                            rules_storage.save(&updated)?;
+                            pulled = true;
+                            local_storage_changed = true;
+                        }
+                    }
+                }
+            } else if local_rule
+                .sync
+                .remote_id
+                .as_deref()
+                .is_some_and(|remote_id| remote_id.starts_with("gist:"))
+                && local_rule.sync.status == RuleSyncStatus::Synced
+            {
+                rules_storage.delete(&local_rule.name)?;
+                pulled = true;
+                local_storage_changed = true;
+            } else {
+                let remote_id = gist_remote_id_for_rule(local_rule);
+                upsert_gist_rule(snapshot, local_rule, None, user, now);
+                let mut synced_rule = local_rule.clone();
+                synced_rule.mark_synced(
+                    remote_id,
+                    user.user_id.clone(),
+                    now.to_string(),
+                    now.to_string(),
+                );
+                rules_storage.save(&synced_rule)?;
+                pushed = true;
+                local_storage_changed = true;
+            }
+        }
+
+        for remote_env in &remote_rules {
+            if consumed_remote_ids.contains(&remote_env.id) {
+                continue;
+            }
+            if state_snapshot.deleted_rules.values().any(|tombstone| {
+                tombstone.remote_id == remote_env.id || tombstone.rule_name == remote_env.name
+            }) {
+                continue;
+            }
+            let mut remote_rule = RuleFile::new(&remote_env.name, &remote_env.rule);
+            remote_rule.enabled = false;
+            remote_rule.description = Some("Synced from GitHub Gist".to_string());
+            remote_rule.created_at = remote_env.create_time.clone();
+            remote_rule.updated_at = remote_env.update_time.clone();
+            remote_rule.mark_synced(
+                remote_env.id.clone(),
+                remote_env.user_id.clone(),
+                remote_env.create_time.clone(),
+                remote_env.update_time.clone(),
+            );
+            rules_storage.save(&remote_rule)?;
+            pulled = true;
+            local_storage_changed = true;
+        }
+
+        if local_storage_changed {
+            let _ = self.config_manager.notify(ConfigChangeEvent::rules_changed(
+                RulesChangeOrigin::RemoteSync,
+            ));
+        }
+        Ok((pushed, pulled))
+    }
+
+    async fn sync_github_gist_basic_configs(
+        &self,
+        snapshot: &mut GitHubGistSnapshot,
+        user: &RemoteUser,
+        now: &str,
+    ) -> Result<(bool, bool)> {
+        let unified = self.config_manager.config().await;
+        let snapshots = [
+            (
+                "app_allowlist",
+                serde_json::to_string(&unified.tls.app_intercept_include)
+                    .map_err(|e| BifrostError::Config(format!("encode app allowlist: {e}")))?,
+            ),
+            (
+                "domain_allowlist",
+                serde_json::to_string(&unified.tls.intercept_include)
+                    .map_err(|e| BifrostError::Config(format!("encode domain allowlist: {e}")))?,
+            ),
+            (
+                "blacklist",
+                serde_json::to_string(&unified.tls.intercept_exclude)
+                    .map_err(|e| BifrostError::Config(format!("encode blacklist: {e}")))?,
+            ),
+        ];
+
+        let state_snapshot = self.state.lock().clone();
+        let mut pushed = false;
+        let mut pulled = false;
+        let mut meta_updates = Vec::new();
+        for (key, value_json) in snapshots {
+            let hash = content_hash(&value_json);
+            let local_changed = state_snapshot
+                .basic_configs
+                .get(key)
+                .and_then(|meta| meta.hash.as_deref())
+                != Some(hash.as_str());
+            if local_changed {
+                snapshot.basic_configs.insert(
+                    key.to_string(),
+                    GitHubGistBasicConfig {
+                        id: key.to_string(),
+                        user_id: user.user_id.clone(),
+                        config_key: key.to_string(),
+                        value_json,
+                        hash: hash.clone(),
+                        create_time: snapshot
+                            .basic_configs
+                            .get(key)
+                            .map(|item| item.create_time.clone())
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or_else(|| now.to_string()),
+                        update_time: now.to_string(),
+                    },
+                );
+                meta_updates.push((
+                    key.to_string(),
+                    BasicConfigSyncMeta {
+                        remote_updated_at: Some(now.to_string()),
+                        hash: Some(hash),
+                    },
+                ));
+                pushed = true;
+            } else if let Some(remote) = snapshot.basic_configs.get(key) {
+                let known_hash = state_snapshot
+                    .basic_configs
+                    .get(key)
+                    .and_then(|meta| meta.hash.as_deref());
+                if known_hash != Some(remote.hash.as_str())
+                    && self
+                        .apply_remote_basic_config(&gist_config_to_remote(remote))
+                        .await?
+                {
+                    meta_updates.push((
+                        key.to_string(),
+                        BasicConfigSyncMeta {
+                            remote_updated_at: Some(remote.update_time.clone()),
+                            hash: Some(remote.hash.clone()),
+                        },
+                    ));
+                    pulled = true;
+                }
+            }
+        }
+        if !meta_updates.is_empty() {
+            let mut state = self.state.lock();
+            for (key, meta) in meta_updates {
+                state.basic_configs.insert(key, meta);
+            }
+            self.persist_state(&state)?;
+        }
+        Ok((pushed, pulled))
     }
 
     async fn github_user_for_token(&self, token: &str) -> Result<RemoteUser> {
@@ -822,6 +1269,12 @@ impl SyncManager {
             });
         }
 
+        if let Some(session) = self.github_gist_session() {
+            return self
+                .sync_github_gist_once(&session.token, session.user.clone())
+                .await;
+        }
+
         let client = SyncHttpClient::new(&config.sync)?;
         let reachable = client.probe_reachable(&config.sync).await;
         if !reachable {
@@ -959,6 +1412,41 @@ impl SyncManager {
 
         let token = { self.state.lock().token.clone() };
         if token.as_deref().unwrap_or("").is_empty() {
+            if let Some(session) = self.github_gist_session() {
+                let user = session.user.clone().unwrap_or_else(github_fallback_user);
+                {
+                    let mut runtime = self.runtime.write().await;
+                    runtime.reachable = true;
+                    runtime.authorized = true;
+                    runtime.syncing = config.sync.auto_sync;
+                    runtime.reason = if config.sync.auto_sync {
+                        SyncReason::Syncing
+                    } else {
+                        SyncReason::Ready
+                    };
+                    runtime.last_error = None;
+                }
+                if !config.sync.auto_sync {
+                    return Ok(());
+                }
+                let result = self.sync_github_gist_provider(&session.token, &user).await;
+                let mut runtime = self.runtime.write().await;
+                runtime.reachable = true;
+                runtime.authorized = true;
+                runtime.syncing = false;
+                return match result {
+                    Ok(()) => {
+                        runtime.reason = SyncReason::Ready;
+                        runtime.last_error = None;
+                        Ok(())
+                    }
+                    Err(error) => {
+                        runtime.reason = SyncReason::Error;
+                        runtime.last_error = Some(error.to_string());
+                        Err(error)
+                    }
+                };
+            }
             let mut runtime = self.runtime.write().await;
             runtime.authorized = false;
             runtime.syncing = false;
@@ -2157,6 +2645,121 @@ mod tests {
             Some("github:12345")
         );
         assert!(!status.first_run_prompt_required);
+    }
+
+    #[tokio::test]
+    async fn github_gist_snapshot_syncs_rule_create_update_and_delete() {
+        let (_temp_dir, config_manager, manager) =
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+        let user = test_user("github:12345");
+        let rules_storage = config_manager.rules_storage().await;
+        rules_storage
+            .save(&RuleFile::new(
+                "gist-rule",
+                "example.com host://127.0.0.1:3000",
+            ))
+            .unwrap();
+        let mut snapshot = GitHubGistSnapshot::default();
+
+        let outcome = manager
+            .sync_github_gist_rules(&mut snapshot, &user, "2026-07-07T00:00:00Z")
+            .await
+            .unwrap();
+        assert_eq!(outcome, (true, false));
+        assert_eq!(snapshot.rules.len(), 1);
+        assert_eq!(snapshot.rules[0].name, "gist-rule");
+        assert_eq!(snapshot.rules[0].rule, "example.com host://127.0.0.1:3000");
+        let mut local = rules_storage.load("gist-rule").unwrap();
+        assert_eq!(local.sync.status, RuleSyncStatus::Synced);
+        assert!(local
+            .sync
+            .remote_id
+            .as_deref()
+            .is_some_and(|remote_id| remote_id.starts_with("gist:")));
+
+        local.content = "example.com host://127.0.0.1:3001".to_string();
+        local.touch_local_change();
+        rules_storage.save(&local).unwrap();
+        let outcome = manager
+            .sync_github_gist_rules(&mut snapshot, &user, "2026-07-07T00:01:00Z")
+            .await
+            .unwrap();
+        assert_eq!(outcome, (true, false));
+        assert_eq!(snapshot.rules[0].rule, "example.com host://127.0.0.1:3001");
+
+        let synced = rules_storage.load("gist-rule").unwrap();
+        manager.record_deleted_rule(&synced).await.unwrap();
+        rules_storage.delete("gist-rule").unwrap();
+        let outcome = manager
+            .sync_github_gist_rules(&mut snapshot, &user, "2026-07-07T00:02:00Z")
+            .await
+            .unwrap();
+        assert_eq!(outcome, (true, false));
+        assert!(snapshot.rules.is_empty());
+    }
+
+    #[tokio::test]
+    async fn github_gist_snapshot_syncs_basic_config_updates() {
+        let (_temp_dir, config_manager, manager) =
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+        let user = test_user("github:12345");
+        config_manager
+            .update_tls_config(TlsConfigUpdate {
+                app_intercept_include: Some(vec!["com.example.App".to_string()]),
+                intercept_include: Some(vec!["example.com".to_string()]),
+                intercept_exclude: Some(vec!["skip.example.com".to_string()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut snapshot = GitHubGistSnapshot::default();
+
+        let outcome = manager
+            .sync_github_gist_basic_configs(&mut snapshot, &user, "2026-07-07T00:00:00Z")
+            .await
+            .unwrap();
+        assert_eq!(outcome, (true, false));
+        assert_eq!(
+            snapshot
+                .basic_configs
+                .get("app_allowlist")
+                .map(|item| item.value_json.as_str()),
+            Some("[\"com.example.App\"]")
+        );
+        assert_eq!(
+            snapshot
+                .basic_configs
+                .get("domain_allowlist")
+                .map(|item| item.value_json.as_str()),
+            Some("[\"example.com\"]")
+        );
+        assert_eq!(
+            snapshot
+                .basic_configs
+                .get("blacklist")
+                .map(|item| item.value_json.as_str()),
+            Some("[\"skip.example.com\"]")
+        );
+
+        config_manager
+            .update_tls_config(TlsConfigUpdate {
+                intercept_include: Some(vec!["changed.example.com".to_string()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let outcome = manager
+            .sync_github_gist_basic_configs(&mut snapshot, &user, "2026-07-07T00:01:00Z")
+            .await
+            .unwrap();
+        assert_eq!(outcome, (true, false));
+        assert_eq!(
+            snapshot
+                .basic_configs
+                .get("domain_allowlist")
+                .map(|item| item.value_json.as_str()),
+            Some("[\"changed.example.com\"]")
+        );
     }
 
     #[tokio::test]

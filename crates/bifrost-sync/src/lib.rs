@@ -1,4 +1,5 @@
 mod client;
+mod github_gist;
 mod manager;
 mod normalize;
 mod types;

@@ -55,7 +55,7 @@ Provider Type 是代码层扩展点, 每个 type 实现相同 trait, 并声明�
 | Type | Description | First class use |
 | --- | --- | --- |
 | `bifrost-server` | 现有 Bifrost Sync Server 协议, 覆盖 ByteDance Internal、Bifrost Cloud、自建部署 | 规则、基础配置、小组、Remote Invoke |
-| `github-gist` | GitHub OAuth + secret gist 文件 | 个人规则和基础配置同步 |
+| `github-gist` | GitHub Personal Access Token + secret gist 文件 | 个人规则和基础配置同步 |
 | `webdav` | WebDAV 文件存储 | 个人规则和基础配置同步或备份 |
 | `gitee-repo` | Gitee/GitCode 私有仓库文件 | 个人规则和基础配置同步 |
 
@@ -149,7 +149,7 @@ Default product rule:
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | ByteDance Internal | `bifrost-server` managed | Yes | Yes | Yes | Yes | Byte SSO | 自动检测, 内网推荐, 可与其它 provider 同时连接 |
 | Bifrost Cloud | `bifrost-server` custom URL | Yes | Yes | Yes | Optional | Bifrost token / OAuth2 | 官方云或自建同步服务, 能力由 server `/v4/capabilities` 返回 |
-| GitHub Gist | `github-gist` | Yes | Yes | No | No | GitHub OAuth | secret gist + 客户端加密; 只同步个人规则和基础配置 |
+| GitHub Gist | `github-gist` | Yes | Yes | No | No | GitHub token | private gist snapshot; 只同步个人规则和基础配置; E2E encryption/recovery key is a later hardening item |
 | WebDAV | `webdav` | Yes | Yes | No | No | Basic/app password | 后续国内和自部署 fallback |
 | Gitee Repo | `gitee-repo` | Yes | Yes | No | No | OAuth/PAT | 国内 Git provider 后续接入 |
 
@@ -369,56 +369,71 @@ UI copy:
 
 - Title: `GitHub Gist`
 - Capability badges: `Rules Sync`, `Config Sync`
-- Security badge: `Encrypted snapshot`
-- Warning: `Secret gists are not end-to-end private by themselves. Bifrost encrypts rule data before upload.`
+- Storage note: `Private Gist snapshot`
+- Warning: `Secret gists are not end-to-end private by themselves. Do not sync secrets until the encryption/recovery-key phase lands.`
 
 ### Auth
 
-Use GitHub OAuth device flow for CLI and desktop-friendly login.
+Use a user-provided GitHub token with `gist` scope. This is the only GitHub Gist
+auth path in the release plan because it does not require Bifrost to operate a
+server-side OAuth token exchange or own a registered GitHub OAuth App.
 
 State:
 
-- `device_code`, `user_code`, `verification_uri`, `expires_at`, `interval`.
-- Access token stored in secret storage.
-- User identity fetched and stored as provider profile.
+- Token stored as the `github_gist` provider session.
+- User identity fetched from GitHub `/user` and stored as provider profile.
+- The card and sign-in modal link to `https://github.com/settings/tokens/new?description=Bifrost%20Sync&scopes=gist` so users can create the required token with the `gist` scope selected.
+- Bifrost does not attempt to auto-fill the generated token from GitHub. GitHub shows personal access token values only on GitHub, and a third-party local Web UI cannot safely read that page. The release flow is therefore explicit copy and paste.
+- Local callback OAuth and device-flow OAuth are intentionally not exposed until
+  Bifrost owns a production GitHub App/OAuth App that can be operated and
+  monitored as part of the release.
 
 ### Remote layout
 
 Default gist:
 
-- Description: `Bifrost Sync (encrypted)`
+- Description: `Bifrost Sync Snapshot`
 - Public: `false`
 - Files:
-  - `bifrost-rules-sync.json`
-  - `bifrost-config-sync.json`
+  - `bifrost-sync-snapshot.json`
 
 Payload:
 
 ```json
 {
-  "schema_version": 1,
-  "format": "bifrost.sync.snapshot.v1",
-  "provider_type": "github-gist",
-  "collection_id": "uuid",
-  "revision": "logical-revision",
+  "version": 1,
   "updated_at": "2026-07-06T12:00:00Z",
-  "device": {
-    "id": "device-id",
-    "name": "MacBook Pro"
-  },
-  "encryption": {
-    "mode": "xchacha20-poly1305",
-    "kdf": "argon2id",
-    "salt": "base64"
-  },
-  "ciphertext": "base64",
-  "checksum": "sha256"
+  "user_id": "github:123",
+  "rules": [
+    {
+      "id": "gist:<local-rule-id>",
+      "user_id": "github:123",
+      "name": "My Rule",
+      "rule": "example.com host://127.0.0.1:3000",
+      "create_time": "2026-07-06T12:00:00Z",
+      "update_time": "2026-07-06T12:00:00Z"
+    }
+  ],
+  "basic_configs": {
+    "domain_allowlist": {
+      "id": "domain_allowlist",
+      "user_id": "github:123",
+      "config_key": "domain_allowlist",
+      "value_json": "[\"example.com\"]",
+      "hash": "sha256:...",
+      "create_time": "2026-07-06T12:00:00Z",
+      "update_time": "2026-07-06T12:00:00Z"
+    }
+  }
 }
 ```
 
 ### Encryption
 
-Gist provider requires client-side encryption:
+The current release-supportable GitHub Gist path does not claim end-to-end
+encryption. It relies on GitHub private gists plus the user's token permission
+boundary, and the UI must warn users not to sync secrets. A later hardening
+phase may add client-side encryption:
 
 - First device creates a sync recovery key.
 - Additional devices log in to GitHub and import recovery key.
@@ -817,7 +832,7 @@ Modal interaction state machine:
 3. Provider card click: selects exactly one provider card and updates the footer summary to show what will happen next.
 4. `Start` with `ByteDance Internal`: starts the internal SSO/login flow or opens the existing ByteDance login prompt. If internal detection is unavailable, show an inline unavailable state and keep the modal open.
 5. `Start` with `Bifrost Cloud`: advances to the Bifrost Cloud setup wizard, starting with server URL entry or saved endpoint selection, then capability probe and login.
-6. `Start` with `GitHub Gist`: starts the GitHub auth/setup wizard, including gist create/import and recovery-key setup.
+6. `Start` with `GitHub Gist`: opens the token setup modal, links to GitHub token creation with the `gist` scope preselected, and asks the user to paste the token.
 7. Failed auth or cancelled setup returns to the same modal/provider card state, with an inline error and no provider marked connected.
 8. Successful login closes the modal, marks that provider card connected in Settings Sync, and runs the first eligible Rules Sync and Config Sync probe according to capability.
 
@@ -827,13 +842,13 @@ Show the supported provider card grid with compact capability badges:
 
 - `ByteDance Internal`: Remote Invoke, Rules Sync, Config Sync, Groups.
 - `Bifrost Cloud`: Remote Invoke when server supports it, Rules Sync, Config Sync, optional Groups.
-- `GitHub Gist`: Rules Sync, Config Sync, Encrypted.
+- `GitHub Gist`: Rules Sync, Config Sync.
 
 Each row/card:
 
 - Display name, provider type, account/user.
 - Health: Reachable, Unauthorized, Degraded, Not configured.
-- Capability badges: Remote Invoke, Rules Sync, Config Sync, Groups, Encrypted.
+- Capability badges: Remote Invoke, Rules Sync, Config Sync, Groups.
 - Remote Invoke registration state where supported.
 - Actions: Sign in, Sign out, Sync now, Configure, Remove.
 
@@ -853,7 +868,7 @@ Provider card content requirements:
 
 - ByteDance Internal card: detection status, signed-in user, Remote Invoke registration badge, `Re-detect` action.
 - Bifrost Cloud card: editable server URL, capability probe result, signed-in user, Remote Invoke registration badge if supported.
-- GitHub Gist card: GitHub user, gist id, encryption/recovery-key status, Rules Sync and Config Sync badges, no Remote Invoke controls.
+- GitHub Gist card: GitHub user, private gist snapshot status when available, Rules Sync and Config Sync badges, no Remote Invoke controls, and a token-generation link.
 - Future providers inherit the same card shell and declare capabilities through catalog metadata.
 
 ### Capability Routing
@@ -883,7 +898,7 @@ Add provider cards:
 
 - ByteDance Internal: detected/recommended state.
 - Bifrost Cloud: URL input + login.
-- GitHub Gist: Sign in with GitHub.
+- GitHub Gist: Generate GitHub token and paste token.
 
 V1 should not show WebDAV, Dropbox, Google Drive, or custom file-provider cards in the default product UI. They may be introduced later through the provider catalog without changing the card shell.
 
@@ -891,11 +906,12 @@ V1 should not show WebDAV, Dropbox, Google Drive, or custom file-provider cards 
 
 Steps:
 
-1. Sign in with GitHub.
-2. Choose `Create new secret gist` or `Use existing gist ID`.
-3. Create or import encryption recovery key.
-4. Preview capability: `Rules Sync + Config Sync`, no Remote Invoke.
-5. Enable as primary or mirror.
+1. Open GitHub token creation with `scopes=gist` preselected.
+2. User copies the generated token from GitHub and pastes it into Bifrost.
+3. Bifrost validates the token through GitHub `/user`.
+4. Bifrost discovers an existing `Bifrost Sync Snapshot` private gist or creates one on first sync.
+5. Preview capability: `Rules Sync + Config Sync`, no Remote Invoke.
+6. Enable as primary or mirror.
 
 ### Bifrost Cloud setup wizard
 
@@ -1038,9 +1054,10 @@ V1 does not sync:
 
 ### Phase 5: GitHub Gist provider
 
-- Implement OAuth device flow.
+- Implement token-based sign-in with a user-provided GitHub token.
 - Implement gist discovery/create/update.
-- Implement encrypted snapshot format and recovery key UX.
+- Implement private gist snapshot discovery/create/update for `bifrost-sync-snapshot.json`.
+- Keep encrypted snapshot format and recovery key UX as a later hardening phase, not a release claim.
 - Add conflict detection and user conflict resolution.
 - Support both rules snapshot and basic config snapshot.
 
@@ -1057,7 +1074,7 @@ V1 does not sync:
 - Merge and deploy ByteDance Internal config sync support.
 - Land Bifrost client/admin changes with capability gating.
 - Enable `Config Sync` by default only for ByteDance Internal and Bifrost Cloud once their deployed `/v4/capabilities` returns `config_sync`.
-- Keep GitHub Gist config sync independent because it stores encrypted snapshots in the user's gist.
+- Keep GitHub Gist config sync independent because it stores private snapshots in the user's gist.
 
 ### Phase 8: Additional providers
 
@@ -1072,7 +1089,7 @@ V1 does not sync:
 - Capability validation rejects invalid lane routing.
 - Capability validation rejects Remote Invoke lanes that include GitHub Gist or file providers.
 - Basic config allowlist rejects unknown or sensitive config keys.
-- GitHub provider payload encryption never serializes raw rule or config content.
+- GitHub provider snapshot serializes only personal rules and the allowlisted basic config keys; it never serializes secrets, tokens, certificates, traffic history, local machine IDs, or Remote Invoke grants.
 - Gist conflict detection when remote revision changes.
 - ByteDance detection handles 200, 401, timeout, TLS failure, DNS failure.
 - Bifrost Cloud `/v4/config/sync` rejects unknown keys, rejects sensitive values, syncs create/update/delete/check lists, and isolates users.
@@ -1086,7 +1103,7 @@ V1 does not sync:
 - First Settings Sync visit with zero provider sessions opens the sign-in modal and offers ByteDance Internal, Bifrost Cloud, and GitHub Gist.
 - Settings Sync shows all connected services and each card's Remote Invoke, Rules Sync, and Config Sync capabilities.
 - ByteDance Internal and Bifrost Cloud run authenticated Basic Config Sync for app allowlist, domain allowlist, and blacklist without syncing secrets or local machine state.
-- GitHub Gist sync writes encrypted personal rules and basic config snapshots and never exposes group/remote invoke actions.
+- GitHub Gist sync writes personal rules and basic config to a private gist snapshot and never exposes group/remote invoke actions.
 - ByteDance Internal and Bifrost Cloud can both be connected; Remote Invoke registration is attempted for both.
 - Remote Invoke fails with clear message when no `remote_invoke_relay` provider is configured.
 - CLI interactive `bifrost sync provider add` and `bifrost sync provider login` can add/login each provider type.
@@ -1105,7 +1122,7 @@ Add focused Playwright coverage in `web/tests/ui/admin-settings.spec.ts` or a de
 | Capability routing | Personal rules and basic config write to all three; Remote Invoke providers are ByteDance + Bifrost Cloud | Routing rows show correct provider chips; GitHub Gist chip is disabled for Remote Invoke with explanatory tooltip |
 | Remote Invoke partial registration | ByteDance registered, Bifrost Cloud failed | UI shows partial registration, retry action targets Bifrost Cloud, ByteDance remains registered |
 | Bifrost Cloud setup | Capabilities probe returns Rules Sync + Config Sync + Remote Invoke | Wizard shows capability preview before login and offers immediate Remote Invoke registration |
-| GitHub Gist setup | GitHub auth succeeds and gist id is returned | Wizard shows encrypted snapshot status, recovery key step, Rules Sync + Config Sync preview, no Remote Invoke controls |
+| GitHub Gist setup | Token validation succeeds and first sync creates/updates the private gist snapshot | Wizard/card shows token setup, Rules Sync + Config Sync preview, no Remote Invoke controls, and no OAuth callback/device-flow path |
 | Basic config scope | Routing drawer opens Basic Config lane | Drawer lists app allowlist, domain allowlist, blacklist/exclude list; no secrets, certificates, tokens, local port, or Remote Invoke grant fields appear |
 | Degraded/conflict states | Provider status includes conflict and last_error | Card-level error and conflict modal show lane/provider/object metadata and Pull/Push/Save copy actions |
 | Dark theme | `bifrost-theme=dark` before page load | Provider cards, modal, disabled chips, warning panels, and routing drawer use dark tokens and text remains readable |
@@ -1141,7 +1158,7 @@ Manual human_tests:
 
 ### Round 2
 
-- Re-check GitHub Gist boundaries: personal rules and basic config only, encrypted, no group or remote invoke.
+- Re-check GitHub Gist boundaries: personal rules and basic config only, no secrets, no group or remote invoke, no unsupported OAuth/device-flow path.
 - Re-check Remote Invoke uses only `remote_invoke_relay` providers.
 - Re-check human_tests index and acceptance cases match this design.
 - Re-check config sync scope only includes allowlisted Settings basics and excludes secrets/local machine state.
@@ -1149,8 +1166,8 @@ Manual human_tests:
 ## Risks
 
 - Multi-provider fan-out can create hard-to-debug conflict loops. Default product mode should be primary + mirrors, not arbitrary multi-write.
-- GitHub Gist OAuth `gist` permission is broad for all user gists. UI must explain scope, and data must be encrypted.
-- Secret gist is not access control for sensitive rule content; encryption is mandatory.
+- GitHub Gist `gist` permission is broad for all user gists. UI must explain the scope and recommend a narrowly dedicated token.
+- Secret/private gist is not end-to-end encryption for sensitive rule content. V1 must not claim E2E privacy; encryption/recovery-key remains a release-blocking requirement only if the product decides to support secret-bearing rule/config content.
 - Splitting Sync provider URL and Remote Invoke relay URL touches existing mental model and docs. Migration must keep old fields working during transition.
 - Group Rules ACL semantics are server-specific. Do not attempt file-provider group sync in v1.
 
@@ -1174,10 +1191,12 @@ This implementation pass lands the release foundation for provider-aware sync:
 - Settings Sync now renders a provider card grid for ByteDance Internal, Bifrost Cloud, and GitHub Gist, capped at three cards per row by layout width and responsive down to one column. Cards use a wider desktop column so provider metadata and the Bifrost Cloud URL editor remain readable.
 - Settings Sync first-run modal is dismissible. Selecting ByteDance Internal or Bifrost Cloud and pressing `Start` saves the provider URL and opens the existing login flow.
 - ByteDance Internal and Bifrost Cloud sessions are persisted as independent provider sessions in `sync-state.json`, so both cards can stay connected at the same time.
-- GitHub Gist token sign-in is implemented as the first usable login path. Users provide a GitHub token with `gist` scope; Bifrost validates it against GitHub `/user` and stores an independent `github_gist` provider session.
+- GitHub Gist supports only user-provided GitHub token sign-in in this release. Bifrost validates the token against GitHub `/user` and stores an independent `github_gist` provider session. OAuth callback and device-flow login are intentionally not exposed because they require a production GitHub App/OAuth App ownership story that this release does not have.
+- GitHub Gist now discovers or creates a private `Bifrost Sync Snapshot` gist and stores one `bifrost-sync-snapshot.json` file. The snapshot covers personal rules plus the allowed basic config keys `app_allowlist`, `domain_allowlist`, and `blacklist`.
+- Real GitHub validation with a temporary PAT covered: provider login, rule create sync, rule edit sync, rule delete sync, basic config create/update sync, and cleanup by deleting the temporary test gist.
 - Remote Invoke registration targets are resolved from all eligible connected providers. ByteDance-only, Bifrost Cloud-only, and ByteDance+Bifrost Cloud dual-channel startup/runtime login all register with the matching relay URL and provider session token. The runtime keeps one worker per eligible relay URL and stops workers whose provider session was removed.
 - CLI `bifrost sync status` now lists provider status and capability flags.
 
 Known remaining implementation gaps before claiming the full original product target:
 
-- GitHub Gist OAuth/device flow, encrypted gist storage, conflict handling, and recovery key UX are not yet implemented. OAuth device flow can be layered onto the token session path once a Bifrost GitHub OAuth App client id is configured.
+- GitHub Gist E2E encryption/recovery-key UX and explicit conflict resolution UI are not yet implemented.

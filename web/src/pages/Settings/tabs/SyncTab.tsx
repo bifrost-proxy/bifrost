@@ -21,6 +21,8 @@ import {
 import type { SyncProviderStatus, SyncStatus } from "../../../api/sync";
 
 const { Text } = Typography;
+const GITHUB_GIST_TOKEN_URL =
+  "https://github.com/settings/tokens/new?description=Bifrost%20Sync&scopes=gist";
 
 interface SyncTabProps {
   syncStatus: SyncStatus | null;
@@ -226,6 +228,26 @@ export default function SyncTab({
           >
             <Space direction="vertical" size={12} style={{ width: "100%" }}>
               <Text type="secondary">{provider.description}</Text>
+              {provider.id === "github_gist" ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  message="Generate a GitHub token with the gist scope, then paste it into Bifrost."
+                  description="Rules and basic settings are stored in a private Gist snapshot. Do not sync secrets here."
+                  action={
+                    <Button
+                      size="small"
+                      href={GITHUB_GIST_TOKEN_URL}
+                      target="_blank"
+                      rel="noreferrer"
+                      icon={<GithubOutlined />}
+                      data-testid="settings-sync-provider-github-gist-token-link"
+                    >
+                      Generate Token
+                    </Button>
+                  }
+                />
+              ) : null}
               {capabilityTags(provider)}
               <Descriptions
                 size="small"
@@ -317,9 +339,27 @@ export default function SyncTab({
         }}
       >
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Alert
+            type="info"
+            showIcon
+            message="Create a GitHub token with only the gist scope selected."
+            action={
+              <Button
+                size="small"
+                href={GITHUB_GIST_TOKEN_URL}
+                target="_blank"
+                rel="noreferrer"
+                icon={<GithubOutlined />}
+                data-testid="settings-sync-provider-github-gist-modal-token-link"
+              >
+                Generate Token
+              </Button>
+            }
+          />
           <Text type="secondary">
             Enter a GitHub token with the gist scope. The token is stored locally and
-            used only for your Gist-backed sync provider.
+            used only for your Gist-backed sync provider. Bifrost stores rules and
+            basic settings in a private Gist snapshot, so avoid syncing secrets.
           </Text>
           <Input.Password
             value={githubTokenDraft}
