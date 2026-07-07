@@ -1229,27 +1229,27 @@
    all="$(mktemp)"
    s1="$(mktemp)"
    s2="$(mktemp)"
-   bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | sort > "$all"
-   bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --shard 1/2 --list-shell-tests | sort > "$s1"
-   bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --shard 2/2 --list-shell-tests | sort > "$s2"
+   BIFROST_E2E_SHELL_JOBS=2 bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | sort > "$all"
+   BIFROST_E2E_SHELL_JOBS=2 bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --shard 1/2 --list-shell-tests | sort > "$s1"
+   BIFROST_E2E_SHELL_JOBS=2 bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --shard 2/2 --list-shell-tests | sort > "$s2"
    comm -12 "$s1" "$s2"
    cat "$s1" "$s2" | sort > "$all.sharded"
    diff -u "$all" "$all.sharded"
    rm -f "$all" "$s1" "$s2" "$all.sharded"
    ```
-3. 执行 20% 权重误差门禁：
+3. 执行 20% 预计墙钟误差门禁：
    ```bash
-   bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --shard 1/2 --check-shell-shard-balance
+   BIFROST_E2E_SHELL_JOBS=2 bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --shard 1/2 --check-shell-shard-balance
    ```
 4. 检查实测长尾脚本已有非默认权重：
    ```bash
-   rg -n 'test_desktop_open_requests_contract\.sh\) echo 705|test_long_term_memory_remember_recall\.sh\) echo 399|test_chatgpt_web_behavior_artifacts\.sh\) echo 381|test_skill_creator_flow\.sh\) echo 350|test_im_gateway_long_reply_delivery_regression\.sh\) echo 192' scripts/run_all_e2e.sh
+   rg -n 'test_long_term_memory_remember_recall\.sh\) echo 529|test_desktop_open_requests_contract\.sh\) echo 486|test_chatgpt_web_behavior_artifacts\.sh\) echo 243|test_im_gateway_long_reply_delivery_regression\.sh\) echo 142|test_skill_creator_flow\.sh\) echo 102' scripts/run_all_e2e.sh
    ```
 
 **预期结果**：
 - 第 1 步语法检查通过。
 - 第 2 步 `comm -12` 无输出，说明两个 shard 没有重复执行同一个 shell 脚本；`diff -u` 无输出，说明 shard 1/2 + shard 2/2 完整覆盖 CI full-shell 列表。
-- 第 3 步输出两个 shard 的预计权重和测试数量，`pct_of_avg` 小于等于 `20.0%`，命令退出码为 0；当前期望为 `shard 1/2 weight=2321 tests=79`、`shard 2/2 weight=2321 tests=81`、`pct_of_avg=0.0%`。
+- 第 3 步输出两个 shard 的 `estimated_wall`、串行耗时、并发 lane 耗时和测试数量，`pct_of_avg` 小于等于 `20.0%`，命令退出码为 0；当前期望为 `shard 1/2 estimated_wall=1398s serial=941s parallel_lanes=457,456 tests=76`、`shard 2/2 estimated_wall=1397s serial=526s parallel_lanes=871,866 tests=84`、`pct_of_avg=0.1%`。
 - 第 4 步能定位到近期 GitHub Actions 实测长尾脚本的非默认权重，避免它们继续按默认 8 秒分配到同一个慢 shard。
 - 该回归只列出和静态校验 shell 测试，不启动 Bifrost、不使用 9900、不修改系统代理。
 
@@ -1298,7 +1298,7 @@
 | TC-CS-46 | 通过 | 2026-07-01 本轮执行：`bash -n scripts/run_all_e2e.sh` 通过；`bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg '^(test_asr_admin_csrf|test_chatgpt_web_shared_profile)\\.sh$'` 无输出且退出码为 1，确认默认 PR CI shell shard 不再收集两个重型低频脚本；随后分别确认 `bash scripts/run_all_e2e.sh --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg -q '^test_asr_admin_csrf\\.sh$'` 和同命令匹配 `test_chatgpt_web_shared_profile.sh` 均通过，说明本地 full-shell 专项入口仍保留；`bash scripts/ci/check-e2e-shell-ci-coverage.sh` 输出 selected/skipped 统计并以 `OK: every test_*.sh shell E2E script is selected by CI or explicitly skipped.` 结束。全部命令只列测试或做静态校验，未启动 Bifrost，未使用 9900，未修改系统代理。 |
 | TC-CS-47 | 通过 | 2026-07-01 本轮执行：`bash -n scripts/run_all_e2e.sh` 通过；`bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg '^test_security_hardening\\.sh$'` 无输出且退出码为 1，确认默认 PR CI shell shard 不再收集安全聚合 wrapper；`bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg -q '^test_security_hardening_functional\\.sh$'` 通过，确认安全功能子路径仍在默认 CI shell 覆盖中；`bash scripts/run_all_e2e.sh --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg -q '^test_security_hardening\\.sh$'` 通过，确认本地 full-shell / release-gate 仍保留聚合入口；`bash scripts/ci/check-e2e-shell-ci-coverage.sh` 输出 selected/skipped 统计并以 `OK: every test_*.sh shell E2E script is selected by CI or explicitly skipped.` 结束。全部命令只列测试或做静态校验，未启动 Bifrost，未使用 9900，未修改系统代理。 |
 | TC-CS-48 | 通过 | 2026-07-06 新增回归：先用 GitHub Actions run `28751216421` artifact 确认原失败为 `test_stop_restart_shutdown_marker.sh` 14/14 业务断言通过后 cleanup `rm: ... Directory not empty`；本轮修复 cleanup retry/best-effort 后执行 `bash -n e2e-tests/tests/test_stop_restart_shutdown_marker.sh` 通过，并执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_stop_restart_shutdown_marker.sh`，输出 `Total: 14 / Passed: 14 / Failed: 0`，退出码 0；全程使用随机端口和临时数据目录，未使用 9900，未修改真实系统代理。 |
-| TC-CS-49 | 通过 | 2026-07-07 本轮执行：`bash -n scripts/run_all_e2e.sh scripts/ci/run-e2e-shell.sh` 通过；CI full-shell 全量列表与 `--shard 1/2`、`--shard 2/2` 合并列表 `diff -u` 无输出，两个 shard 交集 `overlap_count=0`；`bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --shard 1/2 --check-shell-shard-balance` 输出 `shard 1/2 weight=2321 tests=79`、`shard 2/2 weight=2321 tests=81`、`pct_of_avg=0.0%`；`rg` 定位到 `test_desktop_open_requests_contract.sh`、`test_long_term_memory_remember_recall.sh`、`test_chatgpt_web_behavior_artifacts.sh`、`test_skill_creator_flow.sh`、`test_im_gateway_long_reply_delivery_regression.sh` 的实测非默认权重。全部命令只列出或静态校验 shell 测试，未启动 Bifrost，未使用 9900，未修改系统代理。 |
+| TC-CS-49 | 通过 | 2026-07-08 本轮执行：`bash -n scripts/run_all_e2e.sh scripts/ci/run-e2e-shell.sh` 通过；`BIFROST_E2E_SHELL_JOBS=2` 下 CI full-shell 全量列表与 `--shard 1/2`、`--shard 2/2` 合并列表 `diff -u` 无输出，输出 `all=160 shard1=76 shard2=84 overlap=0`；`BIFROST_E2E_SHELL_JOBS=2 bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --shard 1/2 --check-shell-shard-balance` 输出 `shard 1/2 estimated_wall=1398s serial=941s parallel_lanes=457,456 tests=76`、`shard 2/2 estimated_wall=1397s serial=526s parallel_lanes=871,866 tests=84`、`pct_of_avg=0.1%`；`rg` 定位到 `test_long_term_memory_remember_recall.sh`、`test_desktop_open_requests_contract.sh`、`test_chatgpt_web_behavior_artifacts.sh`、`test_skill_creator_flow.sh`、`test_im_gateway_long_reply_delivery_regression.sh` 的实测非默认权重。GitHub Actions `CI` run `28881027276` attempt 2 已全绿，调优前实测 macOS shell shard 为 1168s / 1847s，验证了继续按 estimated wall clock 优化的必要性。全部本地命令只列出或静态校验 shell 测试，未启动 Bifrost，未使用 9900，未修改系统代理。 |
 
 ## 清理步骤
 

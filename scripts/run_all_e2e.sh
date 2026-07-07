@@ -640,15 +640,15 @@ is_skipped_in_ci() {
 shell_test_weight() {
   case "$1" in
     test_agent_send_msg_default_channel.sh) echo 30 ;;
-    test_desktop_open_requests_contract.sh) echo 705 ;;
-    test_long_term_memory_remember_recall.sh) echo 399 ;;
-    test_chatgpt_web_behavior_artifacts.sh) echo 381 ;;
-    test_skill_creator_flow.sh) echo 350 ;;
-    test_im_gateway_long_reply_delivery_regression.sh) echo 192 ;;
+    test_long_term_memory_remember_recall.sh) echo 529 ;;
+    test_desktop_open_requests_contract.sh) echo 486 ;;
+    test_chatgpt_web_behavior_artifacts.sh) echo 243 ;;
     test_tls_intercept_e2e.sh) echo 170 ;;
+    test_im_gateway_long_reply_delivery_regression.sh) echo 142 ;;
     test_remote_file_relay_e2e.sh) echo 128 ;;
     test_http3_e2e.sh) echo 120 ;;
     test_client_process_transport_attribution.sh) echo 103 ;;
+    test_skill_creator_flow.sh) echo 102 ;;
     test_security_hardening_functional.sh) echo 69 ;;
     test_agent_builtin_status_runtime.sh) echo 64 ;;
     test_upgrade_admin_api_restart_e2e.sh) echo 61 ;;
@@ -685,6 +685,143 @@ shell_test_weight() {
   esac
 }
 
+shell_test_runs_serial_in_parallel_shell_job() {
+  case "$1" in
+    test_memory_pressure_e2e.sh|\
+    test_large_body_protection.sh|\
+    test_remote_connect_overload_retry_e2e.sh|\
+    test_client_process_transport_attribution.sh|\
+    test_remote_job_real_e2e.sh|\
+    test_remote_invoke_v5_session_refresh_e2e.sh|\
+    test_remote_shell_exec_streaming_e2e.sh|\
+    test_traffic_db_e2e.sh|\
+    test_openai_like_sse_search_e2e.sh|\
+    test_agent_send_msg_default_channel.sh|\
+    test_agent_builtin_status_runtime.sh|\
+    test_agent_codex_parity_contracts.sh|\
+    test_agent_loop_runtime_limits.sh|\
+    test_asr_model_autonomy.sh|\
+    test_asr_task_pause_resume.sh|\
+    test_chatgpt_web_behavior_artifacts.sh|\
+    test_http3_e2e.sh|\
+    test_im_agent_markdown_image_reply.sh|\
+    test_im_agent_streaming_progress_card.sh|\
+    test_im_gateway_long_reply_delivery_regression.sh|\
+    test_long_term_memory_remember_recall.sh|\
+    test_qwen3_asr_local_server.sh|\
+    test_qwen3_asr_runtime_guards.sh|\
+    test_skill_creator_flow.sh|\
+    test_sync_login_direct_e2e.sh|\
+    test_utf8_safe_preview_e2e.sh|\
+    test_voice_input_runtime.sh)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+shell_parallel_job_count() {
+  local jobs="${BIFROST_E2E_SHELL_JOBS:-2}"
+  if [[ ! "$jobs" =~ ^[0-9]+$ || "$jobs" -lt 1 ]]; then
+    jobs=1
+  fi
+  echo "$jobs"
+}
+
+collect_shell_shard_assignments() {
+  local all_tests=()
+  local name
+  while IFS= read -r name; do
+    [[ -n "$name" ]] && all_tests+=("$name")
+  done < <(collect_all_shell_tests)
+
+  local parallel_jobs
+  parallel_jobs="$(shell_parallel_job_count)"
+
+  local shard_serial_load=()
+  local shard_count=()
+  local shard_lane_load=()
+  local s lane
+  for ((s = 0; s < SHARD_TOTAL; s++)); do
+    shard_serial_load[s]=0
+    shard_count[s]=0
+    for ((lane = 0; lane < parallel_jobs; lane++)); do
+      shard_lane_load[$((s * parallel_jobs + lane))]=0
+    done
+  done
+
+  local weighted=()
+  local phase weight
+  for name in "${all_tests[@]}"; do
+    weight="$(shell_test_weight "$name")"
+    if shell_test_runs_serial_in_parallel_shell_job "$name"; then
+      phase="serial"
+    else
+      phase="parallel"
+    fi
+    weighted+=("$(printf '%08d\t%s\t%s' "$weight" "$phase" "$name")")
+  done
+
+  local w
+  while IFS=$'\t' read -r w phase name; do
+    [[ -z "$name" ]] && continue
+    local weight_num=$((10#$w))
+    local best_shard=0
+    local best_lane=0
+    local best_projected=-1
+    local best_current=-1
+    local best_count=-1
+
+    for ((s = 0; s < SHARD_TOTAL; s++)); do
+      local max_lane_load=0
+      local min_lane=0
+      local min_lane_load="${shard_lane_load[$((s * parallel_jobs))]}"
+      for ((lane = 0; lane < parallel_jobs; lane++)); do
+        local lane_load="${shard_lane_load[$((s * parallel_jobs + lane))]}"
+        (( lane_load > max_lane_load )) && max_lane_load="$lane_load"
+        if [[ "$lane_load" -lt "$min_lane_load" ]]; then
+          min_lane_load="$lane_load"
+          min_lane="$lane"
+        fi
+      done
+
+      local current_wall=$(( shard_serial_load[s] + max_lane_load ))
+      local projected_wall
+      local candidate_lane=0
+      if [[ "$phase" == "serial" ]]; then
+        projected_wall=$(( shard_serial_load[s] + weight_num + max_lane_load ))
+      else
+        local projected_lane_load=$(( min_lane_load + weight_num ))
+        local projected_max_lane="$max_lane_load"
+        (( projected_lane_load > projected_max_lane )) && projected_max_lane="$projected_lane_load"
+        projected_wall=$(( shard_serial_load[s] + projected_max_lane ))
+        candidate_lane="$min_lane"
+      fi
+
+      if [[ "$best_projected" -lt 0 || \
+            "$projected_wall" -lt "$best_projected" || \
+            ( "$projected_wall" -eq "$best_projected" && "$current_wall" -lt "$best_current" ) || \
+            ( "$projected_wall" -eq "$best_projected" && "$current_wall" -eq "$best_current" && "${shard_count[s]}" -lt "$best_count" ) ]]; then
+        best_projected="$projected_wall"
+        best_current="$current_wall"
+        best_count="${shard_count[s]}"
+        best_shard="$s"
+        best_lane="$candidate_lane"
+      fi
+    done
+
+    if [[ "$phase" == "serial" ]]; then
+      shard_serial_load[best_shard]=$(( shard_serial_load[best_shard] + weight_num ))
+    else
+      shard_lane_load[$((best_shard * parallel_jobs + best_lane))]=$(( shard_lane_load[$((best_shard * parallel_jobs + best_lane))] + weight_num ))
+    fi
+    shard_count[best_shard]=$(( shard_count[best_shard] + 1 ))
+    printf '%s\t%s\t%s\t%s\t%s\n' "$((best_shard + 1))" "$best_lane" "$phase" "$weight_num" "$name"
+  done < <(printf '%s\n' "${weighted[@]}" | sort -t$'\t' -k1,1nr -k3,3)
+}
+
 collect_all_shell_tests() {
   local all_tests=()
   if [[ "$SHELL_MODE" == "full" ]]; then
@@ -710,39 +847,17 @@ collect_shell_tests() {
   done < <(collect_all_shell_tests)
 
   # Apply sharding if configured (duration-aware greedy partition).
-  # Previously this was a duration-blind round-robin by sorted index, which
-  # clustered the heavy tests into one shard (observed: shard 1 ~1582s of real
-  # work vs shard 2 ~661s). We now assign tests longest-first to whichever
-  # shard currently has the least accumulated weight (LPT scheduling), which
-  # balances wall time while preserving disjoint full coverage across shards.
+  # CI shell jobs run safe tests in a bounded parallel batch and then run
+  # lock-sensitive/cargo-heavy tests serially. Balance the estimated wall clock
+  # for that execution model instead of raw total test weight.
   if [[ "$SHARD_TOTAL" -gt 0 && "$SHARD_INDEX" -gt 0 ]]; then
-    local weighted=()
-    for name in "${all_tests[@]}"; do
-      weighted+=("$(printf '%08d\t%s' "$(shell_test_weight "$name")" "$name")")
-    done
-
-    local shard_load=()
-    local s
-    for ((s = 0; s < SHARD_TOTAL; s++)); do
-      shard_load[s]=0
-    done
-
-    local w
-    while IFS=$'\t' read -r w name; do
+    local assignment_shard _assignment_lane _assignment_phase _assignment_weight
+    while IFS=$'\t' read -r assignment_shard _assignment_lane _assignment_phase _assignment_weight name; do
       [[ -z "$name" ]] && continue
-      local min_idx=0
-      local min_load="${shard_load[0]}"
-      for ((s = 1; s < SHARD_TOTAL; s++)); do
-        if [[ "${shard_load[s]}" -lt "$min_load" ]]; then
-          min_load="${shard_load[s]}"
-          min_idx="$s"
-        fi
-      done
-      shard_load[min_idx]=$(( min_load + 10#$w ))
-      if [[ $(( min_idx + 1 )) -eq "$SHARD_INDEX" ]]; then
+      if [[ "$assignment_shard" -eq "$SHARD_INDEX" ]]; then
         printf '%s\n' "$name"
       fi
-    done < <(printf '%s\n' "${weighted[@]}" | sort -t$'\t' -k1,1nr -k2,2)
+    done < <(collect_shell_shard_assignments)
   else
     printf '%s\n' "${all_tests[@]}"
   fi
@@ -761,48 +876,56 @@ check_shell_shard_balance() {
     [[ -n "$name" ]] && all_tests+=("$name")
   done < <(collect_all_shell_tests)
 
-  local weighted=()
-  for name in "${all_tests[@]}"; do
-    weighted+=("$(printf '%08d\t%s' "$(shell_test_weight "$name")" "$name")")
-  done
-
-  local shard_load=()
+  local parallel_jobs
+  parallel_jobs="$(shell_parallel_job_count)"
+  local shard_serial_load=()
   local shard_count=()
+  local shard_lane_load=()
   local s
   for ((s = 0; s < SHARD_TOTAL; s++)); do
-    shard_load[s]=0
+    shard_serial_load[s]=0
     shard_count[s]=0
+    local lane
+    for ((lane = 0; lane < parallel_jobs; lane++)); do
+      shard_lane_load[$((s * parallel_jobs + lane))]=0
+    done
   done
 
-  local w
-  while IFS=$'\t' read -r w name; do
+  local assignment_shard assignment_lane assignment_phase assignment_weight
+  while IFS=$'\t' read -r assignment_shard assignment_lane assignment_phase assignment_weight name; do
     [[ -z "$name" ]] && continue
-    local min_idx=0
-    local min_load="${shard_load[0]}"
-    for ((s = 1; s < SHARD_TOTAL; s++)); do
-      if [[ "${shard_load[s]}" -lt "$min_load" ]]; then
-        min_load="${shard_load[s]}"
-        min_idx="$s"
-      fi
-    done
-    shard_load[min_idx]=$(( min_load + 10#$w ))
-    shard_count[min_idx]=$(( shard_count[min_idx] + 1 ))
-  done < <(printf '%s\n' "${weighted[@]}" | sort -t$'\t' -k1,1nr -k2,2)
+    local shard_index=$(( assignment_shard - 1 ))
+    if [[ "$assignment_phase" == "serial" ]]; then
+      shard_serial_load[shard_index]=$(( shard_serial_load[shard_index] + assignment_weight ))
+    else
+      shard_lane_load[$((shard_index * parallel_jobs + assignment_lane))]=$(( shard_lane_load[$((shard_index * parallel_jobs + assignment_lane))] + assignment_weight ))
+    fi
+    shard_count[shard_index]=$(( shard_count[shard_index] + 1 ))
+  done < <(collect_shell_shard_assignments)
 
-  local min="${shard_load[0]}"
-  local max="${shard_load[0]}"
+  local shard_wall=()
+  local min=-1
+  local max=0
   local total=0
   for ((s = 0; s < SHARD_TOTAL; s++)); do
-    (( shard_load[s] < min )) && min="${shard_load[s]}"
-    (( shard_load[s] > max )) && max="${shard_load[s]}"
-    total=$(( total + shard_load[s] ))
-    echo "shard $((s + 1))/$SHARD_TOTAL weight=${shard_load[s]} tests=${shard_count[s]}"
+    local max_lane_load=0
+    local lane_loads=()
+    for ((lane = 0; lane < parallel_jobs; lane++)); do
+      local lane_load="${shard_lane_load[$((s * parallel_jobs + lane))]}"
+      lane_loads+=("$lane_load")
+      (( lane_load > max_lane_load )) && max_lane_load="$lane_load"
+    done
+    shard_wall[s]=$(( shard_serial_load[s] + max_lane_load ))
+    [[ "$min" -lt 0 || "${shard_wall[s]}" -lt "$min" ]] && min="${shard_wall[s]}"
+    (( shard_wall[s] > max )) && max="${shard_wall[s]}"
+    total=$(( total + shard_wall[s] ))
+    echo "shard $((s + 1))/$SHARD_TOTAL estimated_wall=${shard_wall[s]}s serial=${shard_serial_load[s]}s parallel_lanes=$(IFS=,; echo "${lane_loads[*]}") tests=${shard_count[s]}"
   done
 
   local diff=$(( max - min ))
   local pct
   pct="$(awk -v diff="$diff" -v total="$total" -v count="$SHARD_TOTAL" 'BEGIN { avg = total / count; if (avg > 0) { printf "%.1f", diff / avg * 100 } else { printf "0.0" } }')"
-  echo "shell shard balance: diff=${diff}s pct_of_avg=${pct}% threshold=${threshold}%"
+  echo "shell shard balance: estimated_wall_diff=${diff}s pct_of_avg=${pct}% threshold=${threshold}% parallel_jobs=${parallel_jobs}"
 
   awk -v pct="$pct" -v threshold="$threshold" 'BEGIN { exit (pct <= threshold ? 0 : 1) }'
 }
