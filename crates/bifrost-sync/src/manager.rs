@@ -3025,6 +3025,74 @@ mod tests {
         let remote_config = gist_config_to_remote(&gist_config);
         assert_eq!(remote_config.id, "domain_allowlist");
         assert_eq!(remote_config.hash, "hash");
+
+        assert!(is_github_gist_error("GitHub Gist sync failed"));
+        assert!(is_github_gist_error("GitHub token is missing"));
+        assert!(!is_github_gist_error("Bifrost Cloud sync failed"));
+        assert!(is_github_gist_auth_error(
+            "GitHub token is invalid or missing the gist scope"
+        ));
+        assert!(is_github_gist_auth_error(
+            "GitHub Gist request failed with status 403"
+        ));
+        assert!(!is_github_gist_auth_error(
+            "GitHub Gist sync failed: rate limit"
+        ));
+        assert!(!is_github_gist_auth_error("Bifrost Cloud unauthorized"));
+    }
+
+    #[test]
+    fn provider_sync_meta_records_success_error_and_session_user() {
+        let mut state = SyncStateFile::default();
+
+        record_provider_sync_error(
+            &mut state,
+            GITHUB_GIST_PROVIDER_ID,
+            "GitHub Gist sync failed: rate limit".to_string(),
+        );
+        assert_eq!(
+            state
+                .provider_sync
+                .get(GITHUB_GIST_PROVIDER_ID)
+                .and_then(|meta| meta.last_error.as_deref()),
+            Some("GitHub Gist sync failed: rate limit")
+        );
+
+        record_provider_sync_success(
+            &mut state,
+            GITHUB_GIST_PROVIDER_ID,
+            "2026-07-07T00:00:00Z".to_string(),
+            Some(SyncAction::NoChange),
+        );
+        let meta = state.provider_sync.get(GITHUB_GIST_PROVIDER_ID).unwrap();
+        assert_eq!(meta.last_sync_at.as_deref(), Some("2026-07-07T00:00:00Z"));
+        assert_eq!(meta.last_sync_action, Some(SyncAction::NoChange));
+        assert!(meta.last_error.is_none());
+
+        state.provider_sessions.insert(
+            "bifrost_cloud".to_string(),
+            SyncProviderSession {
+                token: "cloud-token".to_string(),
+                remote_base_url: "https://sync.example.test".to_string(),
+                user: None,
+            },
+        );
+        update_provider_session_user(
+            &SyncConfig {
+                remote_base_url: "https://sync.example.test".to_string(),
+                ..Default::default()
+            },
+            &mut state,
+            &test_user("cloud-user"),
+        );
+        assert_eq!(
+            state
+                .provider_sessions
+                .get("bifrost_cloud")
+                .and_then(|session| session.user.as_ref())
+                .map(|user| user.user_id.as_str()),
+            Some("cloud-user")
+        );
     }
 
     #[tokio::test]
@@ -3179,6 +3247,61 @@ mod tests {
         assert_eq!(
             gist.last_error.as_deref(),
             Some("GitHub token is invalid or missing the gist scope")
+        );
+        assert!(!status.first_run_prompt_required);
+    }
+
+    #[tokio::test]
+    async fn status_keeps_github_gist_errors_out_of_selected_server_provider() {
+        let (_temp_dir, _config_manager, manager) =
+            sync_manager_for_remote("https://sync.example.test").await;
+        {
+            let mut state = manager.state.lock();
+            state.token = Some("cloud-token".to_string());
+            state.user = Some(test_user("cloud-user"));
+            state.provider_sync.insert(
+                "bifrost_cloud".to_string(),
+                ProviderSyncMeta {
+                    last_error: Some("previous cloud error".to_string()),
+                    ..Default::default()
+                },
+            );
+            state.provider_sync.insert(
+                GITHUB_GIST_PROVIDER_ID.to_string(),
+                ProviderSyncMeta {
+                    last_error: Some("GitHub Gist sync failed: status 500".to_string()),
+                    ..Default::default()
+                },
+            );
+            manager.persist_state(&state).unwrap();
+        }
+        {
+            let mut runtime = manager.runtime.write().await;
+            runtime.reachable = true;
+            runtime.authorized = true;
+            runtime.reason = SyncReason::Ready;
+            runtime.last_error = Some("GitHub Gist sync failed: status 500".to_string());
+        }
+
+        let status = manager.status().await;
+        let cloud = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == "bifrost_cloud")
+            .expect("cloud provider");
+        let gist = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == GITHUB_GIST_PROVIDER_ID)
+            .expect("github gist provider");
+        assert!(cloud.connected);
+        assert_eq!(cloud.reason, SyncReason::Ready);
+        assert_eq!(cloud.last_error.as_deref(), Some("previous cloud error"));
+        assert!(!gist.connected);
+        assert_eq!(gist.reason, SyncReason::Error);
+        assert_eq!(
+            gist.last_error.as_deref(),
+            Some("GitHub Gist sync failed: status 500")
         );
         assert!(!status.first_run_prompt_required);
     }
