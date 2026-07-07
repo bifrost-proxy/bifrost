@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type CSSProperties, type KeyboardEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Button, Card, Col, Empty, Grid, Input, Modal, Row, Segmented, Select, Space, Tag, Typography, message as antdMessage, theme } from "antd";
 import { BulbOutlined, DeleteOutlined, DownOutlined, FolderOpenOutlined, BorderOutlined, LeftOutlined, PlusOutlined, RobotOutlined, SendOutlined, SettingOutlined } from "@ant-design/icons";
@@ -12,7 +12,6 @@ import {
   dedupeThreads,
   eventToProcessStep,
   formatCurrentStateTag,
-  formatRunnerOptionLabel,
   formatRunnerTag,
   formatThreadSource,
   isRecord,
@@ -56,6 +55,7 @@ import {
 import { SelectedRunnerPill, SlashRunnerPanel, useRunnerCallHandler, useSlashRunnerSelection, type SlashCommandOption } from "./AgentChatSection.runnerCall";
 import { createAgentChatStyles } from "./AgentChatSection.styles";
 import { AgentChatTokenHud } from "./AgentChatSection.tokenHud";
+import { buildRunnerOptions, selectDefaultRunner } from "./aiLayout";
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -76,6 +76,30 @@ type AgentSessionEventPayload = {
   endIndex?: number;
   end_index?: number;
   reason?: string;
+};
+
+export type AgentChatSectionHandle = {
+  openNewChat: () => void;
+  startNewChat: (message: string, runnerId?: string) => Promise<void>;
+};
+
+export type AgentChatSidebarState = {
+  threads: AgentThreadSummary[];
+  sessionKey: string;
+  historyPath?: string;
+  view?: string;
+  nowSeconds: number;
+  styles: Record<string, CSSProperties>;
+  onOpenThread: (thread: AgentThreadSummary) => void;
+  onDeleteThread: (thread: AgentThreadSummary) => void;
+};
+
+type AgentChatSectionProps = {
+  embeddedSidebar?: boolean;
+  forceNewChat?: boolean;
+  onNewChatStateChange?: (active: boolean) => void;
+  onSidebarStateChange?: (state: AgentChatSidebarState) => void;
+  onControlsReady?: (handle: AgentChatSectionHandle) => void;
 };
 
 function parseAgentPlanSlash(content: string): {
@@ -273,7 +297,13 @@ function imageFilesFromClipboard(event: ClipboardEvent<HTMLTextAreaElement>) {
   );
 }
 
-export default function AgentChatSection() {
+export default function AgentChatSection({
+  embeddedSidebar = false,
+  forceNewChat = false,
+  onNewChatStateChange,
+  onSidebarStateChange,
+  onControlsReady,
+}: AgentChatSectionProps = {}) {
   const [searchParams, setSearchParams] = useSearchParams();
   const { token } = theme.useToken();
   const screens = useBreakpoint();
@@ -661,6 +691,17 @@ export default function AgentChatSection() {
     telemetry.plan.length === 0 &&
     telemetry.tools.length === 0 &&
     telemetry.errors.length === 0;
+  const newChatActive =
+    forceNewChat ||
+    (!querySessionKey &&
+      !queryHistoryPath &&
+      !historyPath &&
+      !selectedThread &&
+      !hasRealMessages &&
+      telemetry.phase === "idle" &&
+      telemetry.plan.length === 0 &&
+      telemetry.tools.length === 0 &&
+      telemetry.errors.length === 0);
   const currentSourceTag = selectedThread
     ? formatThreadSource(selectedThread)
     : formatThreadSource({
@@ -792,10 +833,11 @@ export default function AgentChatSection() {
   const setSearchParamsForActiveSession = useCallback(() => {
     setSearchParams(
       (prev) => {
-        prev.set("aiSection", "agent-chat");
-        prev.set("agentSection", "chat");
+        prev.set("view", "chat");
         prev.set("session", sessionKey);
-        prev.set("view", "active");
+        prev.delete("mode");
+        prev.delete("aiSection");
+        prev.delete("agentSection");
         prev.delete("historyPath");
         return prev;
       },
@@ -852,25 +894,16 @@ export default function AgentChatSection() {
         if (cancelled || !payload) {
           return;
         }
-        const custom = Object.entries(payload.runners || {}).map(([id, settings]) => ({
-          label: formatRunnerOptionLabel(id, settings.adapter),
-          value: id,
-          adapter: settings.adapter,
-        }));
-        setRunnerOptions([
-          { label: "Bifrost Agent", value: "bifrost_agent", adapter: "bifrost_agent" },
-          ...custom.sort((a, b) => a.label.localeCompare(b.label)),
-        ]);
-        const defaultRunner = payload.defaultRunnerId || payload.default_runner_id;
-        if (defaultRunner) {
-          setDefaultRunnerId(defaultRunner);
-          setRunnerId((current) =>
-            current === "bifrost_agent" ? defaultRunner : current,
-          );
-          setNewChatRunnerId((current) =>
-            current === "bifrost_agent" ? defaultRunner : current,
-          );
-        }
+        const options = buildRunnerOptions(payload);
+        const defaultRunner = selectDefaultRunner(options).value;
+        setRunnerOptions(options);
+        setDefaultRunnerId(defaultRunner);
+        setRunnerId((current) =>
+          current === "bifrost_agent" ? defaultRunner : current,
+        );
+        setNewChatRunnerId((current) =>
+          current === "bifrost_agent" ? defaultRunner : current,
+        );
       })
       .catch(() => {
         // Keep runner selection usable with the built-in runner fallback.
@@ -956,11 +989,12 @@ export default function AgentChatSection() {
             setHistoryPath(fallbackHistoryThread.history_path);
             setSearchParams(
               (prev) => {
-                prev.set("aiSection", "agent-chat");
-                prev.set("agentSection", "chat");
                 prev.set("session", nextSessionKey);
-                prev.set("view", "history");
+                prev.set("view", "chat");
                 prev.set("historyPath", fallbackHistoryThread.history_path!);
+                prev.delete("mode");
+                prev.delete("aiSection");
+                prev.delete("agentSection");
                 return prev;
               },
               { replace: true },
@@ -1379,13 +1413,7 @@ export default function AgentChatSection() {
   useEffect(() => {
     const requestedSessionKey = searchParams.get("session") || undefined;
     const requestedHistoryPath = searchParams.get("historyPath") || undefined;
-    const requestedView = searchParams.get("view") || undefined;
-    if (
-      !requestedSessionKey ||
-      requestedHistoryPath ||
-      requestedView === "active" ||
-      threads.length === 0
-    ) {
+    if (!requestedSessionKey || requestedHistoryPath || threads.length === 0) {
       return;
     }
     const historyThread = threads.find(
@@ -1400,11 +1428,12 @@ export default function AgentChatSection() {
     setHistoryPath(historyThread.history_path);
     setSearchParams(
       (prev) => {
-        prev.set("aiSection", "agent-chat");
-        prev.set("agentSection", "chat");
         prev.set("session", requestedSessionKey);
-        prev.set("view", "history");
+        prev.set("view", "chat");
         prev.set("historyPath", historyThread.history_path!);
+        prev.delete("mode");
+        prev.delete("aiSection");
+        prev.delete("agentSection");
         return prev;
       },
       { replace: true },
@@ -1446,11 +1475,12 @@ export default function AgentChatSection() {
     refreshThreads();
     setSearchParams(
       (prev) => {
-        prev.set("aiSection", "agent-chat");
-        prev.set("agentSection", "chat");
+        prev.set("view", "chat");
+        prev.set("mode", "new");
         prev.delete("session");
-        prev.delete("view");
         prev.delete("historyPath");
+        prev.delete("aiSection");
+        prev.delete("agentSection");
         return prev;
       },
       { replace: false },
@@ -1463,6 +1493,45 @@ export default function AgentChatSection() {
     refreshThreads,
     setSearchParams,
   ]);
+
+  const resetToNewChat = useCallback(() => {
+    const nextSessionKey = `admin-chat-${Date.now()}`;
+    streamAbortRef.current?.abort();
+    streamAbortRef.current = null;
+    setSessionKey(nextSessionKey);
+    setHistoryPath(undefined);
+    resetHistoryEventWindow();
+    loadedConversationKeyRef.current = "draft";
+    selectedHistoryPathRef.current = undefined;
+    selectedSessionKeyRef.current = nextSessionKey;
+    activeDetailMessagesRef.current = [];
+    pendingInstantScrollRef.current = true;
+    setMessages(STARTER_MESSAGES);
+    setDraft("");
+    setPendingImages([]);
+    setTelemetry(EMPTY_TELEMETRY);
+    setQueuedInputs([]);
+    setRunning(false);
+    setSupplementSubmitting(false);
+    setSlashRunner(undefined);
+    setComposerMode(undefined);
+    setActiveCollaborationMode(undefined);
+    setWorkDir(defaultWorkDir);
+    setRunnerId(defaultRunnerId);
+    setNewChatRunnerId(defaultRunnerId);
+    setSearchParams(
+      (prev) => {
+        prev.set("view", "chat");
+        prev.set("mode", "new");
+        prev.delete("aiSection");
+        prev.delete("agentSection");
+        prev.delete("session");
+        prev.delete("historyPath");
+        return prev;
+      },
+      { replace: false },
+    );
+  }, [defaultRunnerId, defaultWorkDir, resetHistoryEventWindow, setSearchParams]);
 
   const handleOpenThread = useCallback(
     (thread: AgentThreadSummary) => {
@@ -1490,14 +1559,16 @@ export default function AgentChatSection() {
       }
       setSearchParams(
         (prev) => {
-          prev.set("aiSection", "agent-chat");
-          prev.set("agentSection", "chat");
+          prev.set("view", "chat");
           prev.set("session", thread.session_key);
+          prev.delete("mode");
+          prev.delete("aiSection");
+          prev.delete("agentSection");
           if (thread.history_path) {
-            prev.set("view", "history");
+            prev.set("view", "chat");
             prev.set("historyPath", thread.history_path);
           } else {
-            prev.set("view", "active");
+            prev.set("view", "chat");
             prev.delete("historyPath");
           }
           return prev;
@@ -1510,6 +1581,7 @@ export default function AgentChatSection() {
 
   useEffect(() => {
     if (
+      embeddedSidebar ||
       initialThreadAutoSelectRef.current ||
       querySessionKey ||
       queryHistoryPath ||
@@ -1519,7 +1591,7 @@ export default function AgentChatSection() {
     }
     initialThreadAutoSelectRef.current = true;
     handleOpenThread(threads[0]);
-  }, [handleOpenThread, queryHistoryPath, querySessionKey, threads]);
+  }, [embeddedSidebar, handleOpenThread, queryHistoryPath, querySessionKey, threads]);
 
   const handleDeleteThread = useCallback(
     async (thread: AgentThreadSummary) => {
@@ -1551,11 +1623,12 @@ export default function AgentChatSection() {
           pendingInstantScrollRef.current = true;
           setSearchParams(
             (prev) => {
-              prev.set("aiSection", "agent-chat");
-              prev.set("agentSection", "chat");
+              prev.set("view", "chat");
+              prev.set("mode", "new");
               prev.delete("session");
-              prev.delete("view");
               prev.delete("historyPath");
+              prev.delete("aiSection");
+              prev.delete("agentSection");
               return prev;
             },
             { replace: false },
@@ -1579,6 +1652,33 @@ export default function AgentChatSection() {
     () => createAgentChatStyles(isCompact, isNarrow, threadRailCollapsed, token),
     [isCompact, isNarrow, threadRailCollapsed, token],
   );
+
+  useEffect(() => {
+    onNewChatStateChange?.(newChatActive);
+  }, [newChatActive, onNewChatStateChange]);
+
+  useEffect(() => {
+    onSidebarStateChange?.({
+      threads,
+      sessionKey,
+      historyPath,
+      view: queryView,
+      nowSeconds,
+      styles,
+      onOpenThread: handleOpenThread,
+      onDeleteThread: handleDeleteThread,
+    });
+  }, [
+    handleDeleteThread,
+    handleOpenThread,
+    historyPath,
+    nowSeconds,
+    onSidebarStateChange,
+    queryView,
+    sessionKey,
+    styles,
+    threads,
+  ]);
 
   const applyQueueEvent = (event: Record<string, unknown>) => {
     const items = queueItemsFromEvent(event);
@@ -1759,7 +1859,11 @@ export default function AgentChatSection() {
     addImageFiles(files);
   };
 
-  const handleSend = async (options?: { contentOverride?: string; silentCommand?: boolean }) => {
+  const handleSend = async (options?: {
+    contentOverride?: string;
+    runnerIdOverride?: string;
+    silentCommand?: boolean;
+  }) => {
     const rawContent = (options?.contentOverride ?? draft).trim();
     const imagesForSend = options?.contentOverride ? [] : pendingImages;
     if ((!rawContent && imagesForSend.length === 0) || supplementSubmitting) {
@@ -1778,10 +1882,11 @@ export default function AgentChatSection() {
         : undefined;
     const content = parsedPlanSlash.message.trim();
     const compactCommand = builtInAgentCommandsSupported && rawContent === "/compact";
-    const activeRunnerId =
+    const telemetryRunnerId =
       telemetry.status?.runner_id && telemetry.status.runner_id !== "bifrost_agent"
         ? telemetry.status.runner_id
-        : runnerId;
+        : undefined;
+    const activeRunnerId = options?.runnerIdOverride || telemetryRunnerId || runnerId;
     const activeRunnerAdapter = selectedRunnerAdapter(runnerOptions, activeRunnerId);
     const runnerModelCommand = isRunnerModelSlashCommand(rawContent, activeRunnerAdapter);
     const controlCommand =
@@ -2417,6 +2522,47 @@ export default function AgentChatSection() {
     }
   };
 
+  const handleSendRef = useRef(handleSend);
+
+  useEffect(() => {
+    handleSendRef.current = handleSend;
+  });
+
+  const startNewChat = useCallback(
+    async (message: string, nextRunnerId?: string) => {
+      const trimmedMessage = message.trim();
+      if (!trimmedMessage) {
+        return;
+      }
+      if (nextRunnerId) {
+        setRunnerId(nextRunnerId);
+        setNewChatRunnerId(nextRunnerId);
+      }
+      setDraft(trimmedMessage);
+      await handleSendRef.current({
+        contentOverride: trimmedMessage,
+        runnerIdOverride: nextRunnerId,
+      });
+    },
+    [],
+  );
+
+  const resetToNewChatRef = useRef(resetToNewChat);
+  const startNewChatRef = useRef(startNewChat);
+
+  useEffect(() => {
+    resetToNewChatRef.current = resetToNewChat;
+    startNewChatRef.current = startNewChat;
+  }, [resetToNewChat, startNewChat]);
+
+  useEffect(() => {
+    onControlsReady?.({
+      openNewChat: () => resetToNewChatRef.current(),
+      startNewChat: (message, runnerId) => startNewChatRef.current(message, runnerId),
+    });
+  }, [onControlsReady]);
+
+
   const handleSlashCommand = (option: SlashCommandOption) => {
     setSlashRunner(undefined);
     const focusComposerAtEnd = (value?: string) => {
@@ -2919,7 +3065,7 @@ export default function AgentChatSection() {
           </div>
         </Card>
 
-        {threadRailCollapsed ? (
+        {!embeddedSidebar && threadRailCollapsed ? (
           <Button
             shape="circle"
             icon={<LeftOutlined />}
@@ -2929,7 +3075,7 @@ export default function AgentChatSection() {
             style={styles.threadRailExpandButton}
             onClick={() => setThreadRailCollapsed(false)}
           />
-        ) : (
+        ) : !embeddedSidebar ? (
           <div style={styles.sideRail}>
             <AgentThreadListCard
               threads={threads}
@@ -2943,7 +3089,7 @@ export default function AgentChatSection() {
               onCollapse={() => setThreadRailCollapsed(true)}
             />
           </div>
-        )}
+        ) : null}
 
         <AgentChatSettingsModal
           open={settingsOpen}

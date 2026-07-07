@@ -60,6 +60,7 @@ type AgentThreadListCardProps = {
   view?: string;
   nowSeconds: number;
   styles: Record<string, CSSProperties>;
+  compact?: boolean;
   onOpenThread: (thread: AgentThreadSummary) => void;
   onDeleteThread: (thread: AgentThreadSummary) => void;
   onCollapse?: () => void;
@@ -134,6 +135,7 @@ export function AgentThreadListCard({
   view,
   nowSeconds,
   styles,
+  compact = false,
   onOpenThread,
   onDeleteThread,
   onCollapse,
@@ -206,7 +208,7 @@ export function AgentThreadListCard({
   const threadVirtualizer = useVirtualizer({
     count: visibleThreads.length,
     getScrollElement: () => threadScrollRef.current,
-    estimateSize: () => THREAD_ROW_ESTIMATE_SIZE,
+    estimateSize: () => (compact ? 34 : THREAD_ROW_ESTIMATE_SIZE),
     overscan: 6,
     getItemKey: (index) => {
       const thread = visibleThreads[index];
@@ -225,7 +227,7 @@ export function AgentThreadListCard({
       size="small"
       style={styles.threadCard}
       bodyStyle={styles.threadCardBody}
-      title={
+      title={onCollapse ? (
         <div style={styles.threadCardTitle}>
           <span style={styles.threadCardTitleMain}>
             <HistoryOutlined />
@@ -244,7 +246,7 @@ export function AgentThreadListCard({
             />
           ) : null}
         </div>
-      }
+      ) : undefined}
     >
       <div
         ref={threadScrollRef}
@@ -355,30 +357,46 @@ export function AgentThreadListCard({
                         aria-current={selected ? "true" : undefined}
                         style={{
                           ...styles.threadItem,
+                          ...(compact
+                            ? {
+                                gap: 6,
+                                minHeight: 32,
+                                padding: "7px 8px",
+                                borderRadius: 7,
+                              }
+                            : {}),
                           ...(selected ? styles.threadItemSelected : {}),
+                          ...(compact && selected
+                            ? {
+                                background: token.colorFillSecondary,
+                                color: token.colorText,
+                              }
+                            : {}),
                         }}
                       >
-                        <Popover
-                          trigger="hover"
-                          placement="left"
-                          content={threadDetails(thread)}
-                          mouseEnterDelay={0.5}
-                        >
-                          <span
-                            data-testid="agent-chat-thread-runner-mark"
-                            style={{
-                              ...styles.threadRunnerMark,
-                              ...(selected
-                                ? {
-                                    background: token.colorPrimaryBgHover,
-                                    color: token.colorPrimary,
-                                  }
-                                : {}),
-                            }}
+                        {compact ? null : (
+                          <Popover
+                            trigger="hover"
+                            placement="left"
+                            content={threadDetails(thread)}
+                            mouseEnterDelay={0.5}
                           >
-                            {formatThreadRunnerMark(thread)}
-                          </span>
-                        </Popover>
+                            <span
+                              data-testid="agent-chat-thread-runner-mark"
+                              style={{
+                                ...styles.threadRunnerMark,
+                                ...(selected
+                                  ? {
+                                      background: token.colorPrimaryBgHover,
+                                      color: token.colorPrimary,
+                                    }
+                                  : {}),
+                              }}
+                            >
+                              {formatThreadRunnerMark(thread)}
+                            </span>
+                          </Popover>
+                        )}
                         <span style={{ flex: "1 1 auto", minWidth: 0 }}>
                           <span
                             style={{
@@ -386,24 +404,28 @@ export function AgentThreadListCard({
                               overflow: "hidden",
                               textOverflow: "ellipsis",
                               whiteSpace: "nowrap",
+                              fontSize: compact ? 12 : undefined,
+                              lineHeight: compact ? "18px" : undefined,
                               fontWeight: selected ? 600 : 500,
                             }}
                           >
                             {thread.title || thread.session_key}
                           </span>
-                          <span
-                            style={{
-                              display: "block",
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap",
-                              color: selected ? token.colorPrimaryText : token.colorTextSecondary,
-                              fontSize: 12,
-                              marginTop: 2,
-                            }}
-                          >
-                            {threadMeta(thread)}
-                          </span>
+                          {compact ? null : (
+                            <span
+                              style={{
+                                display: "block",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                                color: selected ? token.colorPrimaryText : token.colorTextSecondary,
+                                fontSize: 12,
+                                marginTop: 2,
+                              }}
+                            >
+                              {threadMeta(thread)}
+                            </span>
+                          )}
                         </span>
                         {isRunningThread(thread) ? (
                           <span aria-label="running" title="Running" style={styles.runningDot} />
