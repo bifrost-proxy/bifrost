@@ -842,8 +842,14 @@ run_shell_tests_parallel() {
   # SSE worker; traffic DB and OpenAI-like SSE search own bifrost processes
   # plus mock traffic generators. Linux CI has observed these tests stall when
   # they run inside the parallel shell batch under shard load.
+  # Remote invoke pairing/file/SSH suites also share relay grant state and
+  # caller connection caches; running them together can revoke grants or occupy
+  # pair slots across sibling tests.
   local ISOLATED_AFTER_TESTS=(
     "test_remote_connect_overload_retry_e2e.sh"
+    "test_remote_invoke_e2e.sh"
+    "test_remote_file_relay_e2e.sh"
+    "test_remote_invoke_ssh_e2e.sh"
     "test_client_process_transport_attribution.sh"
     "test_remote_job_real_e2e.sh"
     "test_remote_invoke_v5_session_refresh_e2e.sh"

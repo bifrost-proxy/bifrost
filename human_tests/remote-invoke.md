@@ -5314,6 +5314,39 @@ rm -rf /tmp/bifrost-remote-overload.*
 |---------|------|---------|
 | TC-RI-回归-153 | ✅ PASS | 2026-07-02 先执行 PPE full remote 矩阵复现问题：target 在 `remote file read` 阶段退出，`/tmp/bifrost-relay-full.evfjfw/target/logs/bifrost.err` 与 `/tmp/bifrost-relay-full.pOnDK3/target/logs/bifrost.err` 均显示 `thread 'tokio-rt-worker' ... has overflowed its stack` / `fatal runtime error: stack overflow, aborting`；修复 `bifrost start` runtime 使用 8 MiB tokio worker stack，并补充 `execute_file_read_with_absolute_temp_path_returns_json` 多线程 tokio 回归后，重新执行上述 PPE 命令通过。最终 SUMMARY 显示 `relay mode=PPE relay_url=https://bifrost.bytedance.net headers=x-tt-env=ppe_ticket_system,x-use-ppe=1`、target `port=53130`、`client_id=b2b3297e-c240-4553-83d1-ef8babe65fa1`、code grant `5ee9afe97fb5c001`、power grant `19b7057e2a1bcb36`；`code remote conn status`、`code remote traffic list`、`code remote traffic get/search`、`code remote file all subcommands`、`code remote exec/run/job`、`code-power remote keep-awake all subcommands`、`ssh-key authorization connected via relay`、`ssh remote traffic get/search`、`ssh remote file all subcommands`、`ssh remote exec/run/job`、`ssh remote keep-awake all subcommands` 和 `remote conn down cleanup` 全部 PASS。脚本退出码 0，保留临时目录 `/tmp/bifrost-relay-full.lavFJX`，二进制 `target/debug/bifrost` SHA256 为 `20b182e8e2d3a47a10ad67e859cb9864a557d78b7669dc2a6d7ebc4601195736`。 |
 
+## TC-RI-回归-154：Remote Invoke shell E2E 不能在同一 shard 内并行互相撤销授权
+
+**背景**：PR `codex/sync-provider-design` 的 GitHub Actions run `28840969358` 中，macOS aarch64 shell shard 2 在并行执行 remote-invoke 相关 shell 测试时出现 `approve pairing should return 200` 实际 500、`Authorization ... expired or revoked on the relay`、`pair_slot_occupied` 等失败。复现确认 `test_remote_invoke_e2e.sh`、`test_remote_file_relay_e2e.sh`、`test_remote_invoke_ssh_e2e.sh` 分别串行运行均可通过，但并行运行时会共享 relay grant 状态、caller connection cache 或 pair slot，导致 sibling 测试互相撤销授权。修复要求 CI shell runner 将这三类测试纳入已有串行隔离列表。
+
+### 操作步骤
+
+1. 在当前分支确认 `scripts/run_all_e2e.sh` 的 `ISOLATED_AFTER_TESTS` 包含：
+   `test_remote_invoke_e2e.sh`、`test_remote_file_relay_e2e.sh`、`test_remote_invoke_ssh_e2e.sh`。
+2. 验证 shard 2 shell 测试列表仍包含 remote-invoke 相关脚本：
+   `BIFROST_E2E_SHARD_INDEX=2 BIFROST_E2E_SHARD_TOTAL=2 bash scripts/run_all_e2e.sh --ci --skip-rules --skip-runner --skip-ui --list-shell-tests | rg 'test_remote_(invoke_e2e|file_relay|invoke_ssh)'`。
+3. 验证全量 shell 测试列表包含 SSH 用例：
+   `bash scripts/run_all_e2e.sh --ci --skip-rules --skip-runner --skip-ui --list-shell-tests | rg 'test_remote_invoke_ssh_e2e'`。
+4. 串行执行 Remote File Relay E2E：
+   `SKIP_BUILD=true BIFROST_E2E_HTTP_RETRIES=2 TIMEOUT=90 e2e-tests/tests/test_remote_file_relay_e2e.sh`。
+5. 串行执行 SSH Remote Invoke E2E：
+   `SKIP_BUILD=true BIFROST_E2E_HTTP_RETRIES=2 TIMEOUT=90 e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`。
+6. 串行执行主 Remote Invoke E2E：
+   `SKIP_BUILD=true BIFROST_E2E_HTTP_RETRIES=2 TIMEOUT=90 e2e-tests/tests/test_remote_invoke_e2e.sh`。
+
+### 预期结果
+
+- Runner 将这三条 remote-invoke 类 shell 测试从 parallel batch 移入 serial batch。
+- 三条脚本串行运行时均使用随机端口和隔离 `BIFROST_DATA_DIR`，不使用 9900，不修改系统代理。
+- `test_remote_file_relay_e2e.sh` 完整通过 file read/list/stat/hash/write/edit/patch/transfer/readonly 等链路。
+- `test_remote_invoke_ssh_e2e.sh` 完整通过 SSH key challenge、grant、remote exec/file/traffic/search、revoke 等链路。
+- `test_remote_invoke_e2e.sh` 完整通过 pair-code、grant、remote status、traffic list/get/search、reject、stale reconnect、disconnect 与 grants 清理链路。
+
+### 实际执行结果
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-154 | ✅ PASS | 2026-07-07 先复现并行干扰：同时运行 `test_remote_invoke_e2e.sh`、`test_remote_file_relay_e2e.sh`、`test_remote_invoke_ssh_e2e.sh` 时，本地出现与 CI 一致的 `approve pairing should return 200` 实际 500、SSH grant 被 relay 判定 expired/revoked。补充最小探针确认单独 target/relay/caller approve 返回 200。随后修改 `scripts/run_all_e2e.sh` 将三条 remote-invoke 类脚本加入 `ISOLATED_AFTER_TESTS`。执行 shard 2 list 命令确认 `test_remote_invoke_e2e.sh` 与 `test_remote_file_relay_e2e.sh` 在当前 shard；执行全量 list 命令确认 `test_remote_invoke_ssh_e2e.sh` 仍被选择。串行复测 `test_remote_file_relay_e2e.sh` 通过，最终 `Total: 107 / Passed: 107 / Failed: 0`；串行复测 `test_remote_invoke_ssh_e2e.sh` 通过，输出 `All SSH remote invoke E2E checks passed`；串行复测 `test_remote_invoke_e2e.sh` 通过，最终 `All assertions: total=91 passed=91 failed=0`。全流程使用随机端口和隔离数据目录，未使用 9900，未修改系统代理。 |
+
 > 说明：核心可测逻辑（行数推导 `visible_table_rows`、列宽预算 `adaptive_column_widths`）已抽成纯函数，
 > 由 `crates/bifrost-cli/src/commands/status_tui.rs` 的单元测试覆盖；TUI 实时渲染部分已在
 > macOS PTY 与临时 Bifrost E2E 中按上述用例核对。
