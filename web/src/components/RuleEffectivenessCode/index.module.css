@@ -9,16 +9,24 @@
   --rule-effect-shadowed-border: #94a3b8;
   --rule-effect-shadowed-text: #64748b;
   --rule-effect-line-hover: rgba(22, 119, 255, 0.08);
+  box-sizing: border-box;
+  max-width: 100%;
+  white-space: normal;
+  overflow-x: hidden;
 }
 
 .ruleLine {
   position: relative;
-  display: block;
+  display: grid;
+  grid-template-columns: 4ch minmax(0, 1fr) 14px;
+  column-gap: 8px;
+  align-items: start;
   min-height: 1.45em;
   margin: 0 -4px;
   border-left: 3px solid transparent;
   border-radius: 4px;
-  padding: 0 28px 0 7px;
+  padding: 0 8px 0 6px;
+  min-width: 0;
 }
 
 .ruleLine[data-status="active"] {
@@ -38,21 +46,31 @@
 }
 
 .ruleLine[data-status="neutral"] {
-  padding-right: 7px;
+  grid-template-columns: 4ch minmax(0, 1fr) 0;
+  padding-right: 8px;
 }
 
 .ruleLine:hover {
   background: var(--rule-effect-line-hover);
 }
 
+.lineNumber {
+  color: var(--rule-effect-shadowed-text);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.66;
+  text-align: right;
+  user-select: none;
+}
+
 .ruleText {
-  white-space: inherit;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .statusDot {
-  position: absolute;
-  top: 0.45em;
-  right: 9px;
+  margin-top: 0.48em;
   width: 7px;
   height: 7px;
   border-radius: 999px;
@@ -75,7 +93,8 @@
 }
 
 .tooltip {
-  max-width: 360px;
+  max-width: min(420px, calc(100vw - 32px));
+  overflow-wrap: anywhere;
 }
 
 .tooltipTitle {

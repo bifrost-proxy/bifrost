@@ -22,6 +22,7 @@ async function fulfillJson(route: Route, body: unknown) {
 }
 
 async function mockAdminApi(page: Page) {
+  const longHeaderValue = "ppe_old_" + "x".repeat(160);
   await page.route("**/_bifrost/api/**", async (route) => {
     const url = new URL(route.request().url());
     const apiPath = url.pathname.replace(/^\/_bifrost\/api/, "");
@@ -125,7 +126,7 @@ async function mockAdminApi(page: Page) {
         ],
         variable_conflicts: [],
         merged_content: [
-          'https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_old","x-use-ppe":"1"}',
+          `https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"${longHeaderValue}","x-use-ppe":"1"}`,
           "https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://",
           'https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_new","x-use-ppe":"1"}',
           "https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://",
@@ -284,9 +285,16 @@ test("Rules 状态胶囊在全局页面可见、可拖拽，并能跳转到 Rule
   await expect(mergedPanel).toBeVisible();
   await expect(mergedPanel.locator('[data-effect-status="active"]')).toHaveCount(2);
   await expect(mergedPanel.locator('[data-effect-status="shadowed"]')).toHaveCount(2);
+  await expect(mergedPanel.locator('[data-line-number="1"] > [data-line-gutter="true"]')).toHaveText("1");
+  await expect(mergedPanel.locator('[data-line-number="4"] > [data-line-gutter="true"]')).toHaveText("4");
+  const wrapMetrics = await mergedPanel.evaluate((element) => ({
+    scrollWidth: element.scrollWidth,
+    clientWidth: element.clientWidth,
+  }));
+  expect(wrapMetrics.scrollWidth).toBeLessThanOrEqual(wrapMetrics.clientWidth + 1);
   const coveredReqHeaders = mergedPanel
     .locator('[data-effect-status="shadowed"]')
-    .filter({ hasText: "ppe_old" });
+    .filter({ hasText: "ppe_old_" });
   await coveredReqHeaders.hover();
   await expect(page.getByText(/Request headers are replaced by line/)).toBeVisible();
 

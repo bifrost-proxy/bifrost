@@ -498,8 +498,8 @@ export default function RulesDynamicIsland({ onNavigateRule, defaultTop = 14 }: 
                       lineHeight: 1.5,
                       fontFamily: "monospace",
                       color: token.colorText,
-                      whiteSpace: "pre",
-                      overflowX: "auto",
+                      whiteSpace: "normal",
+                      overflowX: "hidden",
                     }}
                   />
                 </div>

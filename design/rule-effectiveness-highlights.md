@@ -39,7 +39,11 @@
 - 生效行：左侧绿色边线与柔和背景，hover 显示 resolver 选择原因。
 - 部分生效行：左侧 amber 边线，hover 显示哪些操作被后续替换。
 - 被覆盖行：左侧灰色边线和弱化文字，hover 显示覆盖来源行号。
+- 所有规则行展示稳定行号 gutter；hover 中提到 `line N` 时，用户可以在同一代码面板内直接定位。
+- 长 URL、长 JSON header 和其他不可分隔 token 必须在面板宽度内自动换行，禁止撑出 Activity 面板或 Dynamic Island 弹层。
 - 所有标注使用 Ant Design token 注入 CSS 变量，保持亮暗主题一致。
+- Activity 中的 active rule sets 展示在 Merged Rules 标题下方，以小字号标签从左到右、从上到下平铺。标签不使用额外圆点，单击直接跳转到对应 Rules 详情页。
+- Activity 的 Temporary Ports 按端口拆成独立全宽卡片，从上到下排列。每张卡片内的 Merged Rules 随内容自然撑高，不在小框内二次滚动。
 
 ## 测试方案
 

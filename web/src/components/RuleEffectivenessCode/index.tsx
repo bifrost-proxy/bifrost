@@ -91,6 +91,9 @@ function RuleLine({ effect }: { effect: RuleLineEffect }) {
         data-covered-by-line={effect.coveredByLine ?? ""}
         data-status={effect.status}
       >
+        <span className={styles.lineNumber} data-line-gutter="true" aria-hidden="true">
+          {effect.lineNumber}
+        </span>
         <span className={styles.ruleText}>{effect.text || " "}</span>
         {hasEffect ? <span className={styles.statusDot} aria-hidden="true" /> : null}
       </span>

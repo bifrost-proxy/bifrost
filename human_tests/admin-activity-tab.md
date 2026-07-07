@@ -137,22 +137,31 @@
    https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://
    ```
 2. 打开 Activity 页面。
-3. 在 `Active Rule Analysis` 的 `Merged Rules` 代码区观察行级高亮。
-4. 鼠标悬浮旧 `reqHeaders` 行、最终 `reqHeaders` 行和后一个 `passthrough://` 行。
-5. 选中代码区中的部分文本并点击复制；再清除选区后点击复制。
+3. 在 `Active Rule Analysis` 的 `Merged Rules` 顶部观察 active rule sets 标签区。
+4. 点击任意 active rule set 标签。
+5. 返回 Activity，在 `Merged Rules` 代码区观察行级高亮。
+6. 鼠标悬浮旧 `reqHeaders` 行、最终 `reqHeaders` 行和后一个 `passthrough://` 行。
+7. 选中代码区中的部分文本并点击复制；再清除选区后点击复制。
+8. 将旧 `reqHeaders` 行扩展为较长 JSON header 值，观察代码区是否仍在面板宽度内自动换行。
 
 预期结果：
 
+- Active rule sets 以小字号标签展示在 Merged Rules 顶部，从左到右、从上到下平铺，不再占用左侧大卡片列，也不显示额外蓝色圆点。
+- 单击 active rule set 标签会跳转到对应 Rules 详情页。
+- Temporary Ports 中每个临时端口都是独立全宽卡片，多个端口从上到下排列，不在一行显示多个端口卡片。
+- 临时端口卡片内的 Merged Rules 随规则内容自然撑高，不出现内部小滚动框；长规则仍在卡片宽度内换行。
 - 旧 `reqHeaders` 行被标记为 covered，hover 解释同 matcher 下请求头被后续规则替换。
 - 最终 `reqHeaders` 行被标记为 effective，hover 解释它是最终请求头写入。
 - 第一条 `passthrough://` 行为 effective，后一个同 matcher `passthrough://` 行为 covered。
 - hover 文案包含覆盖来源行号，不需要用户手动推理规则优先级。
+- 每条规则左侧展示可见行号，hover 文案中的 `line N` 可以直接对照定位。
+- 长 URL / 长 JSON header 在代码区内自动换行，不出现横向撑出 Activity 面板或遮挡右侧内容。
 - 复制选区/全文时只复制原始 merged rules 文本，不复制状态点、覆盖解释或其他 UI 文案。
 - 暗色主题下 active / covered / partial 的背景、边线和文本都清晰可读。
 
 执行记录（2026-07-07，本地纯前端 smoke）：
 
-- ✅ PASS：执行 `WEB_PORT=3108 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' pnpm --dir web exec playwright test tests/ui/activity-tab.spec.ts --config=playwright.frontend.config.ts -g "Activity tab is first"`。测试使用 Vite 纯前端服务和 mock Admin API；验证 Activity Merged Rules 展示 nextoncall 重复规则样例，断言 3 行 active / 2 行 covered，hover 旧 `reqHeaders` 行出现 `Request headers are replaced by line`，并复测选区复制、全文复制、卡片 hover、流量行 hover 和暗色主题基础可见性。
+- ✅ PASS：执行 `WEB_PORT=3108 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' pnpm --dir web exec playwright test tests/ui/activity-tab.spec.ts --config=playwright.frontend.config.ts -g "Activity tab is first"`。测试使用 Vite 纯前端服务和 mock Admin API；验证 Activity Merged Rules 顶部 active rule set 标签、单击标签跳转 Rules 详情、nextoncall 重复规则样例、Temporary Ports 两个端口纵向独立卡片和临时端口 Merged Rules 无内部滚动，断言 3 行 active / 2 行 covered，hover 旧 `reqHeaders` 行出现 `Request headers are replaced by line`，断言可见行号和长 header 不产生横向溢出，并复测选区复制、全文复制、卡片 hover、流量行 hover 和暗色主题基础可见性。
 
 ## 清理步骤
 

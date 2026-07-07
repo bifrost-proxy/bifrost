@@ -42,9 +42,6 @@ const countLines = (content: string): number => {
   return content.split(/\r?\n/).length;
 };
 
-const ruleLabel = (rule: ActiveRuleItem): string =>
-  rule.group_name ? `${rule.group_name} / ${rule.name}` : rule.name;
-
 const formatRuleRef = (ref: TemporaryPortRuleSetRef): string => {
   switch (ref.type) {
     case "local_rule":
@@ -66,7 +63,6 @@ export default function Activity() {
   const mergedCodeRef = useRef<HTMLPreElement>(null);
   const [activeRules, setActiveRules] = useState<ActiveRuleItem[]>([]);
   const [mergedContent, setMergedContent] = useState("");
-  const [selectedRule, setSelectedRule] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [temporaryPorts, setTemporaryPorts] = useState<TemporaryPortBinding[]>([]);
   const [temporaryPortSummaries, setTemporaryPortSummaries] = useState<
@@ -94,20 +90,23 @@ export default function Activity() {
         if (requestId !== requestIdRef.current) return;
         setActiveRules(summary.rules ?? []);
         setMergedContent(summary.merged_content ?? "");
-        setSelectedRule((current) => {
-          if (current && summary.rules.some((rule) => ruleLabel(rule) === current)) {
-            return current;
-          }
-          return summary.rules[0] ? ruleLabel(summary.rules[0]) : null;
-        });
       })
       .catch(() => {
         if (requestId !== requestIdRef.current) return;
         setActiveRules([]);
         setMergedContent("");
-        setSelectedRule(null);
       });
   }, []);
+
+  const navigateToRule = useCallback(
+    (rule: ActiveRuleItem) => {
+      const params = new URLSearchParams();
+      if (rule.group_id) params.set("group", rule.group_id);
+      params.set("rule", rule.name);
+      navigate({ pathname: "/rules", search: `?${params.toString()}` });
+    },
+    [navigate],
+  );
 
   const refreshTemporaryPorts = useCallback(() => {
     getTemporaryPorts()
@@ -282,44 +281,6 @@ export default function Activity() {
           </div>
 
           <div className={styles.rulesLayout}>
-            <div>
-              <div className={styles.sectionLabel}>Active Rules</div>
-              {activeRules.length > 0 ? (
-                <div className={styles.ruleList}>
-                  {activeRules.map((rule) => {
-                    const label = ruleLabel(rule);
-                    const selected = selectedRule === label;
-                    return (
-                      <button
-                        type="button"
-                        key={`${rule.group_id ?? "local"}:${rule.name}`}
-                        className={`${styles.rulePill} ${selected ? styles.rulePillActive : ""}`}
-                        onClick={() => setSelectedRule(label)}
-                        onDoubleClick={() => {
-                          const params = new URLSearchParams();
-                          if (rule.group_id) params.set("group", rule.group_id);
-                          params.set("rule", rule.name);
-                          navigate({ pathname: "/rules", search: `?${params.toString()}` });
-                        }}
-                        data-testid="activity-rule-pill"
-                      >
-                        <div className={styles.rulePillName}>
-                          <span className={styles.statDot} style={{ color: "#168cff", backgroundColor: "#168cff" }} />
-                          <span>{rule.name}</span>
-                        </div>
-                        <div className={styles.rulePillMeta}>
-                          {rule.rule_count.toLocaleString()} entries
-                          {rule.group_name ? ` · ${rule.group_name}` : ""}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className={styles.emptyState}>No active rules</div>
-              )}
-            </div>
-
             <div className={styles.mergedColumn}>
               <div className={styles.mergedHeader}>
                 <div className={styles.sectionLabel}>Merged Rules</div>
@@ -337,6 +298,29 @@ export default function Activity() {
                   <div className={styles.lineCount}>{countLines(mergedContent).toLocaleString()} lines</div>
                 </div>
               </div>
+              {activeRules.length > 0 ? (
+                <div className={styles.ruleList} aria-label="Active rules used by merged rules">
+                  {activeRules.map((rule) => (
+                    <button
+                      type="button"
+                      key={`${rule.group_id ?? "local"}:${rule.name}`}
+                      className={styles.rulePill}
+                      onClick={() => navigateToRule(rule)}
+                      data-testid="activity-rule-pill"
+                      data-rule-name={rule.name}
+                      title={rule.group_name ? `${rule.group_name} / ${rule.name}` : rule.name}
+                    >
+                      <span className={styles.rulePillName}>{rule.name}</span>
+                      <span className={styles.rulePillMeta}>
+                        {rule.rule_count.toLocaleString()} entries
+                        {rule.group_name ? ` · ${rule.group_name}` : ""}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className={styles.emptyState}>No active rules</div>
+              )}
               <RuleEffectivenessCode
                 ref={mergedCodeRef}
                 className={styles.mergedCode}
