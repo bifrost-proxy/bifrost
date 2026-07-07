@@ -7,7 +7,7 @@
 同时验证两种安装路径：
 
 - 先安装 CLI：用户可通过 `bifrost app install / upgrade / uninstall` 管理桌面 App。
-- 先安装 App：桌面 Settings 提供 `Install CLI & Skills` 按钮，把内置 CLI 安装到用户命令行路径，并安装 Bifrost AI skills。
+- 先安装 App：桌面 Settings 在 CLI 缺失时提供 `Install CLI` 按钮；CLI 已存在后才展示独立的 `Install AI Skills` / `Reinstall AI Skills` 按钮。
 
 本用例中的 CLI dry-run 不修改系统 app、不下载 release、不启动系统代理。临时真实安装用例只写入 `mktemp` 目录，并用 `BIFROST_APP_SKIP_RESTART=1` 避免打开假 app；发布包级验证仍需要 macOS/Windows 桌面环境和真实 `.dmg/.msi`。Windows MSI 默认安装路径应与 Tauri 产物一致：`%LOCALAPPDATA%\Bifrost\bifrost-desktop.exe`。
 
@@ -26,7 +26,7 @@
   ```
 - 除明确验证系统代理的用例外，启动 Bifrost 必须加 `--no-system-proxy`。
 - 真实桌面安装验证需要在 macOS 或 Windows 桌面会话中执行；无法访问桌面 GUI 时记录为环境阻塞。
-- 浏览器打开的 CLI Web UI 必须按 `isDesktopShell() === false` 处理，不展示 `Install CLI & Skills`，不使用 desktop channel。
+- 浏览器打开的 CLI Web UI 必须按 `isDesktopShell() === false` 处理，不展示桌面 CLI / AI Skills 安装按钮，不使用 desktop channel。
 
 ## 测试用例列表
 
@@ -237,13 +237,13 @@
    ```
 2. 检查测试通过，并确认 CLI mode 仍调用 `checkVersion(true, "cli")`。
 3. 代码 review `web/src/stores/useVersionStore.ts`，确认 `isDesktopShell()` 为真时 `checkVersion` 与 `startUpgrade` 使用 `desktop` channel，且桌面缓存窗口为 `6 * 60 * 60 * 1000`。
-4. 代码 review `web/src/pages/Settings/tabs/ProxyTab.tsx`，确认 `Install CLI & Skills` 位于 `desktopMode ? (...) : null` 分支内。
+4. 代码 review `web/src/pages/Settings/tabs/ProxyTab.tsx`，确认 CLI / AI Skills 安装按钮位于 `desktopMode ? (...) : null` 分支内。
 
 预期结果：
 
 - 普通 Web UI 不误触发桌面更新。
 - 桌面 shell 会把 version-check/start-upgrade 请求标记为 desktop channel。
-- 浏览器打开的 CLI Web UI 不展示 App -> CLI 按钮。
+- 浏览器打开的 CLI Web UI 不展示 App -> CLI / AI Skills 按钮。
 
 ### TC-DAU-06B App 一键安装 CLI 与 AI skills
 
@@ -383,6 +383,59 @@
 - 浮层包含安装按钮；安装中按钮显示 loading；安装成功后显示成功状态和文档入口。
 - 安装按钮不修改系统代理、不安装 CA，只安装 CLI 与 AI skills。
 
+### TC-DAU-08D CLI/core 升级重启恢复后自动关闭 Start Service 浮层
+
+操作步骤：
+
+1. 执行 Rust 回归测试，模拟桌面 runtime 已进入手动启动错误态后，同一端口的外部 core 恢复健康：
+   ```bash
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml healthy_external_backend_clears_manual_start_gate
+   ```
+2. 执行负向回归测试，模拟端口仍不健康时错误态不能被误清除：
+   ```bash
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml unhealthy_external_backend_keeps_manual_start_gate
+   ```
+3. 代码 review `desktop/src-tauri/src/main.rs`，确认 `monitor_desktop_backend` 的 healthy 分支会调用 `clear_backend_unavailable_if_healthy(...)`，并且 `desktop_runtime_snapshot(...)` 在返回给前端前也执行同一健康恢复对账。
+4. 代码 review `web/src/App.tsx`，确认 `DesktopStartupGate` 每 3 秒轮询 `getDesktopRuntime()`，当 `startupError=null` 且 `startupReady=true` 后 `coreNeedsAttention=false`，全屏 `Start Bifrost Service` 浮层不再渲染。
+
+预期结果：
+
+- CLI 升级或外部 core 自行重启导致的短暂连接断开可以临时展示 `Start Bifrost Service`。
+- core 在同一端口恢复健康后，下一轮 watchdog 或 `get_desktop_runtime` 轮询会清空 `startup_error`、置 `startup_ready=true`。
+- 前端无需用户点击按钮即可自动关闭 `Start Bifrost Service` 浮层，恢复原页面。
+- 端口仍不健康时不会误关浮层，用户仍可手动点击 `Start Bifrost Service`。
+
+### TC-DAU-08E Settings 中 CLI 与 AI Skills 安装按钮分离
+
+操作步骤：
+
+1. 执行前端单测，覆盖 `GET /api/system/cli-install` 返回 `installed=false`、`installed=true, skills_installed=false`、`installed=true, skills_installed=true` 三类状态：
+   ```bash
+   pnpm --dir web run test:unit -- src/pages/Settings/tabs/ProxyTab.test.ts
+   ```
+2. 代码 review `web/src/pages/Settings/tabs/ProxyTab.tsx`，确认 CLI 缺失时 `Install CLI` 调用 `installCliFromDesktop({ install_skills: false })`。
+3. 代码 review 同一文件，确认 CLI 已安装时不渲染 `settings-install-cli`，只渲染 `settings-install-skills`；Skills 已安装时按钮文案为 `Reinstall AI Skills`。
+
+预期结果：
+
+- CLI 未安装或状态未知时，只展示 CLI 安装按钮，不展示 AI Skills 安装按钮。
+- CLI 已安装后，不再展示 `Install CLI` 或 `Install CLI & Skills`。
+- AI Skills 安装按钮仅在 CLI 已安装后出现，且执行时只表达 Skills 安装/修复语义。
+
+### TC-DAU-08F Settings Desktop Proxy Core 端口按钮与输入框底边对齐
+
+操作步骤：
+
+1. 代码 review `web/src/pages/Settings/tabs/ProxyTab.tsx`，确认端口输入行使用 `Row align="bottom"`，并保留输入框与 `Apply & Restart` 按钮在同一 `settings-desktop-port-row` 内。
+2. 检查 `settings-desktop-port-input` 和 `settings-desktop-port-apply` 的 DOM test id 存在，便于后续桌面 UI 像素/坐标回归。
+3. 对照截图中的 Settings -> Proxy -> Desktop Proxy Core 区域，确认按钮底边应与输入框底边对齐，而不是相对包含 label 的整组垂直居中。
+
+预期结果：
+
+- `Apply & Restart` 按钮底边与 Proxy Port 输入框底边对齐。
+- Proxy Port label 仍位于输入框上方，状态文案仍独立位于控件行下方。
+- 调整仅影响 Desktop Proxy Core 端口行，不改变 Command Line & AI Tools 行和其它 Settings 卡片布局。
+
 ### TC-DAU-09 Windows 桌面快捷方式不弹出 shell 窗口
 
 操作步骤：
@@ -454,7 +507,7 @@ bifrost app uninstall
 | --- | --- | --- | --- |
 | 2026-07-05 | TC-DAU-01 / 02 / 03 / 04 / 04B / 04C / 06B | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh` | 待复测：本轮新增 04C，验证已安装桌面端等于目标版本时跳过下载和重装 |
 | 2026-07-05 | TC-DAU-05 | `cargo test -p bifrost-admin handlers::system::tests --lib` | PASS：7/7 通过，覆盖 desktop alias、spawn args、CLI install 临时目录与 skip skills |
-| 2026-07-05 | TC-DAU-06 | `pnpm --dir web run test:unit -- src/stores/useVersionStore.test.ts` + 代码 review | PASS：Vitest 22 files / 93 tests 通过；新增 desktop shell 单测确认 `checkVersion/startUpgrade` 使用 `desktop` channel，代码确认桌面缓存窗口为 6 小时，非桌面仍使用 `cli` channel；`Install CLI & Skills` 位于 `desktopMode` 分支 |
+| 2026-07-05 | TC-DAU-06 | `pnpm --dir web run test:unit -- src/stores/useVersionStore.test.ts` + 代码 review | PASS：Vitest 22 files / 93 tests 通过；新增 desktop shell 单测确认 `checkVersion/startUpgrade` 使用 `desktop` channel，代码确认桌面缓存窗口为 6 小时，非桌面仍使用 `cli` channel；桌面安装按钮位于 `desktopMode` 分支 |
 | 2026-07-05 | TC-DAU-07 / 08 | 需要真实 macOS/Windows 桌面安装包与 GUI 会话 | 未执行：当前本机未进行真实桌面包安装/GUI 通知验证；需在发布包或本地 `.dmg/.msi` 准备后补跑 |
 | 2026-07-06 | TC-DAU-04C | Parallels Windows 11 ARM64 VM：先用 v0.0.139 MSI 复现 `msiexec /i <msi> /qn /norestart`，再用 `ALLUSERS=2 MSIINSTALLPERUSER=1` 验证普通用户安装 | PASS：原命令稳定复现 1603，日志显示 `Error 1925`；加 per-user MSI 属性后同一 MSI 安装成功并写入 `%LOCALAPPDATA%\Bifrost` |
 | 2026-07-06 | TC-DAU-09 | Parallels Windows 11 ARM64 VM：先复现桌面快捷方式启动后额外出现 shell 窗口；修复后构建 `target-desktop-verify/debug/bifrost-desktop.exe`，以 `BIFROST_DESKTOP_BIN=desktop/src-tauri/resources/bin/bifrost.exe` 启动并截图 `/tmp/bifrost-windows-custom-chrome-final.png` | PASS：桌面 UI 启动后 sidecar 由桌面壳隐藏控制台启动，截图中没有独立 shell 窗口遮挡；启动验证用 `cmd start` 包装进程已清理，不属于桌面壳子进程 |
@@ -463,3 +516,5 @@ bifrost app uninstall
 | 2026-07-06 | TC-DAU-01 / 02 / 03 / 04 / 04B / 04C / 04D / 06B | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh` | PASS：33/33 通过。覆盖 dry-run、App -> CLI 临时安装、临时 app 真实安装/升级/卸载、同版本跳过下载、desktop source progress 为 completed，以及目标 0.0.141 但安装后仍报告 0.0.140 时非零退出并写 `phase=failed` |
 | 2026-07-06 | TC-DAU-08B / 08C | macOS 真实桌面会话：`BIFROST_DATA_DIR=/tmp/bifrost-desktop-formal-19900 ./target/debug/bifrost start --host 127.0.0.1 --port 19900 --skip-cert-check --no-system-proxy --no-tray`，随后以同 data dir 启动 `./target/desktop-formal/debug/bifrost-desktop`；停止外部 CLI 后观察 UI；通过 AX 点击 `Start Bifrost Service`；查看 `/tmp/bifrost-desktop-formal-19900/logs/desktop-bootstrap.log`、`curl http://127.0.0.1:19900/_bifrost/api/proxy/system/support` 与进程表 | PASS：桌面 app 启动时复用外部 CLI core；停止 CLI 后显示全屏 `Start Bifrost Service` 浮层；点击按钮后拉起内置 sidecar，进程表出现 `target/debug/bifrost start --host 0.0.0.0 --port 19900 --skip-cert-check --no-system-proxy`，页面恢复 Activity 并显示 `http://127.0.0.1:19900`，健康接口返回 `{"supported":true,"platform":"macOS"}`；显式禁用系统代理时状态栏显示 `Proxy: Not Applied` 属预期；10 秒稳定观察未再出现 watchdog 误恢复。随后出现 `Install Bifrost CLI` 浮层。未点击真实 `Install CLI`，避免写入用户命令路径；安装动作由 TC-DAU-06B 临时目录 API 覆盖 |
 | 2026-07-07 | TC-DAU-01 / 02 / 03 / 04 / 04B / 04C / 04D / 06B / 06C | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh` | PASS：36/36 通过。新增覆盖 App 弹窗默认 `install_skills=true` 路径，请求设置 30 秒上限，后端使用 embedded desktop bundle，响应 `skills_installed=true`，并在隔离 `BIFROST_INSTALL_SKILL_DIR` 写入 `bifrost/SKILL.md` 与 `bifrost-remote/SKILL.md` |
+| 2026-07-07 | TC-DAU-08D | `cargo test --manifest-path desktop/src-tauri/Cargo.toml healthy_external_backend_clears_manual_start_gate`; `cargo test --manifest-path desktop/src-tauri/Cargo.toml unhealthy_external_backend_keeps_manual_start_gate`; 代码 review `desktop/src-tauri/src/main.rs` 与 `web/src/App.tsx` | PASS：恢复健康的一次性 mock backend 会让 `clear_backend_unavailable_if_healthy` 置 `startup_ready=true` 并清空 `startup_error`；端口仍不健康时返回 false 且保留错误态；代码确认 watchdog healthy 分支和 runtime snapshot 都会对账，前端 3 秒轮询后 `coreNeedsAttention=false` 自动关闭 Start Service 浮层 |
+| 2026-07-07 | TC-DAU-08E / 08F | `pnpm --dir web run test:unit -- src/pages/Settings/tabs/ProxyTab.test.ts`; `pnpm --dir web run lint`; `pnpm --dir web run build`; 代码 review `web/src/pages/Settings/tabs/ProxyTab.tsx` | PASS：CLI 缺失时只展示 `Install CLI` 且请求 `install_skills=false`；CLI 已安装后隐藏 CLI 安装按钮并展示独立 AI Skills 按钮；Skills 已安装时文案为 `Reinstall AI Skills`。端口行改为 `Row align="bottom"`，输入框与 `Apply & Restart` 位于同一 test id 行，便于后续像素/坐标回归 |
