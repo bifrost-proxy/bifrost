@@ -59,6 +59,24 @@ import SystemProxySection from "./SystemProxySection";
 
 const { Text } = Typography;
 
+export interface CliInstallActionState {
+  showInstallCli: boolean;
+  showInstallSkills: boolean;
+  skillsButtonLabel: string;
+}
+
+export function getCliInstallActionState(
+  status: CliInstallStatus | null,
+): CliInstallActionState {
+  const cliInstalled = status?.installed === true;
+  return {
+    showInstallCli: !cliInstalled,
+    showInstallSkills: cliInstalled,
+    skillsButtonLabel:
+      status?.skills_installed === true ? "Reinstall AI Skills" : "Install AI Skills",
+  };
+}
+
 function formatRuleRef(ref: TemporaryPortRuleSetRef): string {
   switch (ref.type) {
     case "local_rule":
@@ -1018,18 +1036,33 @@ export default function ProxyTab({
     void refreshCliInstallStatus();
   }, [refreshCliInstallStatus]);
 
+  const cliInstallActions = getCliInstallActionState(cliInstallStatus);
+
   const handleInstallCli = useCallback(async () => {
+    setCliInstallLoading(true);
+    try {
+      const status = await installCliFromDesktop({ install_skills: false });
+      setCliInstallStatus(status);
+      message.success("CLI installed");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "Failed to install CLI");
+    } finally {
+      setCliInstallLoading(false);
+    }
+  }, []);
+
+  const handleInstallSkills = useCallback(async () => {
     setCliInstallLoading(true);
     try {
       const status = await installCliFromDesktop({ install_skills: true });
       setCliInstallStatus(status);
       if (status.skills_installed === false) {
-        message.warning(status.skills_message || "CLI installed, but AI skill setup needs a retry");
+        message.warning(status.skills_message || "AI skill setup needs a retry");
       } else {
-        message.success("CLI and AI skills installed");
+        message.success("AI skills installed");
       }
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "Failed to install CLI");
+      message.error(error instanceof Error ? error.message : "Failed to install AI skills");
     } finally {
       setCliInstallLoading(false);
     }
@@ -1060,11 +1093,12 @@ export default function ProxyTab({
                       : "The desktop shell updates the local proxy listener in place and then restores the live desktop connection."
                   }
                 />
-                <Row gutter={16} align="middle">
+                <Row gutter={16} align="bottom" data-testid="settings-desktop-port-row">
                   <Col flex="220px">
                     <Space direction="vertical" style={{ width: "100%" }} size={4}>
                       <Text>Proxy Port</Text>
                       <InputNumber
+                        data-testid="settings-desktop-port-input"
                         min={1}
                         max={65535}
                         precision={0}
@@ -1098,6 +1132,7 @@ export default function ProxyTab({
                         desktopPortDraft === desktopExpectedProxyPort
                       }
                       onClick={onApplyDesktopProxyPort}
+                      data-testid="settings-desktop-port-apply"
                     >
                       Apply & Restart
                     </Button>
@@ -1167,14 +1202,28 @@ export default function ProxyTab({
                       >
                         Refresh
                       </Button>
-                      <Button
-                        type="primary"
-                        icon={<DownloadOutlined />}
-                        loading={cliInstallLoading}
-                        onClick={handleInstallCli}
-                      >
-                        Install CLI & Skills
-                      </Button>
+                      {cliInstallActions.showInstallCli ? (
+                        <Button
+                          type="primary"
+                          icon={<DownloadOutlined />}
+                          loading={cliInstallLoading}
+                          onClick={handleInstallCli}
+                          data-testid="settings-install-cli"
+                        >
+                          Install CLI
+                        </Button>
+                      ) : null}
+                      {cliInstallActions.showInstallSkills ? (
+                        <Button
+                          type="primary"
+                          icon={<DownloadOutlined />}
+                          loading={cliInstallLoading}
+                          onClick={handleInstallSkills}
+                          data-testid="settings-install-skills"
+                        >
+                          {cliInstallActions.skillsButtonLabel}
+                        </Button>
+                      ) : null}
                     </Space>
                   </Col>
                 </Row>
