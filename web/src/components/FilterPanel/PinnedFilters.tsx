@@ -6,12 +6,14 @@ import AppIcon from "../AppIcon";
 
 interface PinnedFiltersProps {
   clientIpCounts: Map<string, number>;
+  proxyPortCounts: Map<string, number>;
   clientAppCounts: Map<string, number>;
   domainCounts: Map<string, number>;
 }
 
 export default function PinnedFilters({
   clientIpCounts,
+  proxyPortCounts,
   clientAppCounts,
   domainCounts,
 }: PinnedFiltersProps) {
@@ -53,6 +55,8 @@ export default function PinnedFilters({
             count={
               filter.type === "client_ip"
                 ? (clientIpCounts.get(filter.value) ?? 0)
+                : filter.type === "proxy_port"
+                  ? (proxyPortCounts.get(filter.value) ?? 0)
                 : filter.type === "client_app"
                   ? (clientAppCounts.get(filter.value) ?? 0)
                   : (domainCounts.get(filter.value) ?? 0)
@@ -156,6 +160,8 @@ function PinnedFilterItem({
     switch (filterType) {
       case "client_ip":
         return "IP";
+      case "proxy_port":
+        return "Port";
       case "client_app":
         return "App";
       case "domain":

@@ -11,18 +11,22 @@ import { isMacDesktopShell } from "../../runtime";
 
 interface FilterPanelProps {
   availableClientIps: string[];
+  availableProxyPorts: string[];
   availableClientApps: string[];
   availableDomains: string[];
   clientIpCounts: Map<string, number>;
+  proxyPortCounts: Map<string, number>;
   clientAppCounts: Map<string, number>;
   domainCounts: Map<string, number>;
 }
 
 export default function FilterPanel({
   availableClientIps,
+  availableProxyPorts,
   availableClientApps,
   availableDomains,
   clientIpCounts,
+  proxyPortCounts,
   clientAppCounts,
   domainCounts,
 }: FilterPanelProps) {
@@ -38,11 +42,13 @@ export default function FilterPanel({
   const {
     pinnedFilters,
     selectedClientIps,
+    selectedProxyPorts,
     selectedClientApps,
     selectedDomains,
     collapsedSections,
     searchKeyword,
     toggleClientIp,
+    toggleProxyPort,
     toggleClientApp,
     toggleDomain,
     addPinnedFilter,
@@ -53,6 +59,7 @@ export default function FilterPanel({
 
   const hasSelections =
     selectedClientIps.length > 0 ||
+    selectedProxyPorts.length > 0 ||
     selectedClientApps.length > 0 ||
     selectedDomains.length > 0;
 
@@ -67,8 +74,16 @@ export default function FilterPanel({
     if (selectedClientIps.length > 0) {
       parts.push(`IP ${selectedClientIps.length}`);
     }
+    if (selectedProxyPorts.length > 0) {
+      parts.push(`Port ${selectedProxyPorts.length}`);
+    }
     return parts.join(" · ");
-  }, [selectedClientApps.length, selectedClientIps.length, selectedDomains.length]);
+  }, [
+    selectedClientApps.length,
+    selectedClientIps.length,
+    selectedDomains.length,
+    selectedProxyPorts.length,
+  ]);
 
   const styles = useMemo<Record<string, CSSProperties>>(
     () => ({
@@ -85,8 +100,10 @@ export default function FilterPanel({
         alignItems: "center",
         justifyContent: "space-between",
         padding: "8px 12px",
-        borderBottom: `1px solid ${token.colorBorderSecondary}`,
-        backgroundColor: headerBackground,
+        borderBottom: `1px solid ${
+          hasSelections ? token.colorPrimaryBorder : token.colorBorderSecondary
+        }`,
+        backgroundColor: hasSelections ? token.colorPrimaryBg : headerBackground,
         flexShrink: 0,
         gap: 8,
       },
@@ -111,10 +128,18 @@ export default function FilterPanel({
       },
       summary: {
         fontSize: 11,
-        color: token.colorTextSecondary,
+        color: hasSelections ? token.colorPrimary : token.colorTextSecondary,
+        fontWeight: hasSelections ? 600 : 400,
         whiteSpace: "nowrap",
         overflow: "hidden",
         textOverflow: "ellipsis",
+      },
+      clearButton: {
+        visibility: hasSelections ? "visible" : "hidden",
+        color: token.colorPrimary,
+        backgroundColor: token.colorPrimaryBgHover,
+        border: `1px solid ${token.colorPrimaryBorder}`,
+        boxShadow: hasSelections ? `0 0 0 1px ${token.colorPrimaryBg}` : "none",
       },
       content: {
         flex: 1,
@@ -129,7 +154,7 @@ export default function FilterPanel({
         padding: "8px 12px",
       },
     }),
-    [headerBackground, panelBackground, token]
+    [hasSelections, headerBackground, panelBackground, token]
   );
 
   const sortedClientIps = useMemo(() => {
@@ -145,6 +170,10 @@ export default function FilterPanel({
   const sortedClientApps = useMemo(() => {
     return [...availableClientApps].sort((a, b) => a.localeCompare(b));
   }, [availableClientApps]);
+
+  const sortedProxyPorts = useMemo(() => {
+    return [...availableProxyPorts].sort((a, b) => Number(a) - Number(b));
+  }, [availableProxyPorts]);
 
   const sortedDomains = useMemo(() => {
     return [...availableDomains].sort((a, b) => a.localeCompare(b));
@@ -167,13 +196,24 @@ export default function FilterPanel({
     return sortedClientApps.filter((app) => app.toLowerCase().includes(keyword));
   }, [sortedClientApps, searchKeyword]);
 
+  const filteredProxyPorts = useMemo(() => {
+    if (!searchKeyword.trim()) return sortedProxyPorts;
+    const keyword = searchKeyword.toLowerCase();
+    return sortedProxyPorts.filter((port) => `Proxy port ${port}`.toLowerCase().includes(keyword));
+  }, [sortedProxyPorts, searchKeyword]);
+
   const filteredDomains = useMemo(() => {
     if (!searchKeyword.trim()) return sortedDomains;
     const keyword = searchKeyword.toLowerCase();
     return sortedDomains.filter((domain) => domain.toLowerCase().includes(keyword));
   }, [sortedDomains, searchKeyword]);
 
-  const hasSearchResults = filteredClientIps.length > 0 || filteredClientApps.length > 0 || filteredDomains.length > 0;
+  const showProxyPortSection = sortedProxyPorts.length > 1;
+  const hasSearchResults =
+    filteredClientIps.length > 0 ||
+    (showProxyPortSection && filteredProxyPorts.length > 0) ||
+    filteredClientApps.length > 0 ||
+    filteredDomains.length > 0;
   const isSearching = searchKeyword.trim().length > 0;
 
   return (
@@ -181,17 +221,20 @@ export default function FilterPanel({
       <div style={styles.header}>
         <div style={styles.titleGroup}>
           <span style={styles.title}>Filters</span>
-          {selectionSummary && <span style={styles.summary}>{selectionSummary}</span>}
+          {selectionSummary && (
+            <span data-testid="filter-selection-summary" style={styles.summary}>
+              {selectionSummary}
+            </span>
+          )}
         </div>
-        <Tooltip title="Clear all selections">
+        <Tooltip title="Clear active filters">
           <Button
             type="text"
             size="small"
             icon={<ClearOutlined />}
             onClick={clearAllSelections}
-            style={{
-              visibility: hasSelections ? "visible" : "hidden",
-            }}
+            style={styles.clearButton}
+            data-testid="filter-clear-active"
           />
         </Tooltip>
       </div>
@@ -224,6 +267,7 @@ export default function FilterPanel({
           >
             <PinnedFilters
               clientIpCounts={clientIpCounts}
+              proxyPortCounts={proxyPortCounts}
               clientAppCounts={clientAppCounts}
               domainCounts={domainCounts}
             />
@@ -272,6 +316,37 @@ export default function FilterPanel({
                 />
               ))
             )}
+          </FilterSection>
+        )}
+
+        {showProxyPortSection && (!isSearching || filteredProxyPorts.length > 0) && (
+          <FilterSection
+            title="Proxy port"
+            collapsed={isSearching ? false : collapsedSections.proxyPort ?? false}
+            onToggle={() =>
+              setCollapsedSection("proxyPort", !(collapsedSections.proxyPort ?? false))
+            }
+            count={isSearching ? filteredProxyPorts.length : sortedProxyPorts.length}
+          >
+            {filteredProxyPorts.map((port) => (
+              <FilterItem
+                key={port}
+                label={port}
+                value={port}
+                type="proxy_port"
+                selected={selectedProxyPorts.includes(port)}
+                onSelect={() => toggleProxyPort(port)}
+                onPin={() =>
+                  addPinnedFilter({
+                    type: "proxy_port",
+                    value: port,
+                    label: port,
+                  })
+                }
+                count={proxyPortCounts.get(port) ?? 0}
+                searchKeyword={searchKeyword}
+              />
+            ))}
           </FilterSection>
         )}
 

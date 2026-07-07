@@ -21,7 +21,11 @@ const toolbar: ToolbarFilters = {
   imported: [],
 };
 
-const makeRecord = (id: string, path: string): TrafficSummary => ({
+const makeRecord = (
+  id: string,
+  path: string,
+  overrides: Partial<TrafficSummary> = {},
+): TrafficSummary => ({
   id,
   sequence: Number(id),
   timestamp: 1,
@@ -41,6 +45,7 @@ const makeRecord = (id: string, path: string): TrafficSummary => ({
   matched_protocols: [],
   start_time: "2026-05-09T00:00:00Z",
   end_time: "2026-05-09T00:00:00Z",
+  ...overrides,
 });
 
 describe("Traffic filter condition enabled state", () => {
@@ -73,5 +78,22 @@ describe("Traffic filter condition enabled state", () => {
 
     expect(filterRecords(records, toolbar, conditions)).toEqual([records[0]]);
     expect(isFilterConditionApplicable(conditions[0])).toBe(true);
+  });
+
+  it("filters records by selected proxy port panel filters", () => {
+    const records = [
+      makeRecord("1", "/main", { listener_port: 9900 }),
+      makeRecord("2", "/temp", { listener_port: 58344 }),
+      makeRecord("3", "/other-temp", { listener_port: 58345 }),
+    ];
+
+    expect(
+      filterRecords(records, toolbar, [], {
+        clientIps: [],
+        proxyPorts: ["58344"],
+        clientApps: [],
+        domains: [],
+      }),
+    ).toEqual([records[1]]);
   });
 });

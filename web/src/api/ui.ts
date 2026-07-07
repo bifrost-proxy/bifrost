@@ -1,6 +1,6 @@
 import client from "./client";
 
-export type FilterType = "client_ip" | "client_app" | "domain";
+export type FilterType = "client_ip" | "proxy_port" | "client_app" | "domain";
 
 export interface PinnedFilter {
   id: string;
@@ -12,6 +12,7 @@ export interface PinnedFilter {
 export interface CollapsedSections {
   pinned: boolean;
   clientIp: boolean;
+  proxyPort?: boolean;
   clientApp: boolean;
   domain: boolean;
 }

@@ -426,6 +426,25 @@ Bifrost Web UI 的 Traffic 页面是核心功能页面，用于实时展示和�
 
 ---
 
+### TC-WTR-23E：左侧 Filter Panel 按 Proxy port 快速筛选
+
+**操作步骤**：
+1. 使用隔离数据目录启动 Bifrost，端口为 `$MAIN_PORT`，启动参数必须包含 `--no-system-proxy`。
+2. 通过 `$MAIN_PORT` 代理发起请求 `/panel-port-main`，打开 Traffic/Network 页面并确认左侧 Filter Panel 不显示 `Proxy port` 板块。
+3. 再准备另一条 `listener_port=$OTHER_PORT` 的 traffic 记录 `/panel-port-other`，刷新 Traffic/Network 页面。
+4. 在左侧 Filter Panel 的 `Client IP` 下方确认出现 `Proxy port` 板块，并点击 `$OTHER_PORT`。
+5. 检查当前 URL 的 `panel` 查询参数，然后刷新页面。
+
+**预期结果**：
+- 只有一个代理入口端口时，左侧 Filter Panel 不显示 `Proxy port` 板块。
+- 当当前 traffic 数据集中存在两个或以上不同 `listener_port` 时，`Proxy port` 板块展示在 `Client IP` 下方。
+- 点击 `$OTHER_PORT` 后，表格只展示 `listener_port=$OTHER_PORT` 的记录，隐藏 `$MAIN_PORT` 记录。
+- Filter Panel 顶部选中摘要显示 `Port 1` 并使用蓝色强调，右侧清除筛选按钮显示蓝色强调状态。
+- URL 的 `panel` 参数包含 `proxyPorts: ["$OTHER_PORT"]`。
+- 刷新后仍保持同一个 Proxy port 筛选结果。
+
+---
+
 ### TC-WTR-23C：主筛选器临时停用单条筛选条件
 
 **操作步骤**：
@@ -1180,3 +1199,11 @@ rm -f /tmp/bifrost-mock-test.json
 - 实际结果：TypeScript 编译和 Vite desktop 构建通过，`web/src/components/Toolbar/index.tsx` 中快捷筛选 `CheckableTag` 使用 `paddingInline: 4`、分组内 `Space size={2}`、分组右间距 `4px`，构建产物生成成功。
 - 行为边界：本次只调整 tag 内边距和分组间距，未修改 `handleTagClick` 或 `filters` 状态更新逻辑；筛选选中/取消选中的行为保持不变。
 - 结论：`TC-WTR-23D` 通过；Network 顶部快捷筛选器间距已收紧，构建验证无阻塞。
+
+2026-07-07 左侧 Filter Panel Proxy port 快速筛选执行记录：
+
+- 已执行用例：`TC-WTR-23E`
+- 已执行命令：`source ~/.zshrc && pnpm --dir web test:ui traffic.spec.ts -g "左侧筛选器仅在多代理端口时展示 Proxy port 并同步到 URL"`
+- 使用隔离数据目录：Playwright 用例内 `startIsolatedBackend()` 自动分配独立 `BIFROST_DATA_DIR`，启动 Bifrost 时包含 `--no-system-proxy`。
+- 实际结果：单一 `listener_port` 时左侧 Filter Panel 不显示 `Proxy port`；准备第二个 `listener_port` 后板块展示在 `Client IP` 下方；点击目标端口后列表只保留对应端口记录；顶部摘要显示蓝色 `Port 1`，清除按钮处于蓝色强调状态；URL `panel` 参数包含 `proxyPorts`；刷新后筛选仍生效。
+- 结论：`TC-WTR-23E` 通过；本次只扩展左侧 Filter Panel，未改变顶部主筛选器、API 或 CLI 端口筛选语义。
