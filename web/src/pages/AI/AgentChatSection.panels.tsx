@@ -204,11 +204,10 @@ export function AgentThreadListCard({
   );
   const hasMoreThreads = visibleThreads.length < threads.length;
 
-  // eslint-disable-next-line react-hooks/incompatible-library
   const threadVirtualizer = useVirtualizer({
     count: visibleThreads.length,
     getScrollElement: () => threadScrollRef.current,
-    estimateSize: () => (compact ? 34 : THREAD_ROW_ESTIMATE_SIZE),
+    estimateSize: () => (compact ? 38 : THREAD_ROW_ESTIMATE_SIZE),
     overscan: 6,
     getItemKey: (index) => {
       const thread = visibleThreads[index];
@@ -360,8 +359,9 @@ export function AgentThreadListCard({
                           ...(compact
                             ? {
                                 gap: 6,
-                                minHeight: 32,
-                                padding: "7px 8px",
+                                height: 36,
+                                minHeight: 36,
+                                padding: "0 8px",
                                 borderRadius: 7,
                               }
                             : {}),
@@ -406,7 +406,7 @@ export function AgentThreadListCard({
                               whiteSpace: "nowrap",
                               fontSize: compact ? 12 : undefined,
                               lineHeight: compact ? "18px" : undefined,
-                              fontWeight: selected ? 600 : 500,
+                              fontWeight: compact ? 500 : selected ? 600 : 500,
                             }}
                           >
                             {thread.title || thread.session_key}

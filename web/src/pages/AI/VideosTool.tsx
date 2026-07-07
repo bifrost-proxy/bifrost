@@ -48,7 +48,7 @@ const statusColor: Record<VideoDownloadStatus, string> = {
   failed: "error",
 };
 
-export default function VideosTool() {
+export default function VideosTool({ embedded = false }: { embedded?: boolean }) {
   const [form] = Form.useForm<VideoFormValues>();
   const { token } = theme.useToken();
   const [defaultDir, setDefaultDir] = useState("");
@@ -282,11 +282,11 @@ export default function VideosTool() {
     <div
       data-testid="videos-tool-page"
       style={{
-        height: "100%",
+        height: embedded ? undefined : "100%",
         minHeight: 0,
-        overflow: "auto",
+        overflow: embedded ? "visible" : "auto",
         background: token.colorBgLayout,
-        padding: 16,
+        padding: embedded ? 0 : 16,
       }}
     >
       <section

@@ -47,6 +47,42 @@ describe("resolveAiRouteState", () => {
     });
   });
 
+  it("keeps chat out of settings routes", () => {
+    expect(
+      resolveAiRouteState(params("settings=agent&agentSection=chat&session=admin-chat-1")),
+    ).toMatchObject({
+      view: "settings",
+      settings: "agent",
+      agentSection: "general",
+    });
+    expect(
+      resolveAiRouteState(params("settings=chat&session=admin-chat-1")),
+    ).toMatchObject({
+      view: "settings",
+      settings: "agent",
+      agentSection: "general",
+    });
+  });
+
+  it("lets explicit main views override stale settings params", () => {
+    expect(
+      resolveAiRouteState(params("view=asr&settings=agent&agentSection=model")),
+    ).toMatchObject({
+      view: "asr",
+    });
+    expect(
+      resolveAiRouteState(params("view=videos&settings=im&imGatewaySection=routes")),
+    ).toMatchObject({
+      view: "videos",
+    });
+    expect(
+      resolveAiRouteState(params("view=chat&settings=agent&agentSection=runners&mode=new")),
+    ).toMatchObject({
+      view: "chat",
+      chatMode: "new",
+    });
+  });
+
   it("maps legacy ASR, Videos, and IM sections", () => {
     expect(resolveAiRouteState(params("aiSection=tools-asr")).view).toBe("asr");
     expect(resolveAiRouteState(params("aiSection=tools-videos")).view).toBe("videos");

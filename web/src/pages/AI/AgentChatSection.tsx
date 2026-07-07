@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type CSSProperties, type KeyboardEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Button, Card, Col, Empty, Grid, Input, Modal, Row, Segmented, Select, Space, Tag, Typography, message as antdMessage, theme } from "antd";
-import { BulbOutlined, DeleteOutlined, DownOutlined, FolderOpenOutlined, BorderOutlined, LeftOutlined, PlusOutlined, RobotOutlined, SendOutlined, SettingOutlined } from "@ant-design/icons";
+import { BulbOutlined, DeleteOutlined, DownOutlined, FolderOpenOutlined, BorderOutlined, LeftOutlined, RobotOutlined, SendOutlined, SettingOutlined } from "@ant-design/icons";
 import { apiFetch } from "../../api/apiFetch";
 import { buildApiUrl } from "../../runtime";
 import { getClientId } from "../../services/clientId";
@@ -837,7 +837,9 @@ export default function AgentChatSection({
         prev.set("session", sessionKey);
         prev.delete("mode");
         prev.delete("aiSection");
+        prev.delete("settings");
         prev.delete("agentSection");
+        prev.delete("imGatewaySection");
         prev.delete("historyPath");
         return prev;
       },
@@ -994,7 +996,9 @@ export default function AgentChatSection({
                 prev.set("historyPath", fallbackHistoryThread.history_path!);
                 prev.delete("mode");
                 prev.delete("aiSection");
+                prev.delete("settings");
                 prev.delete("agentSection");
+                prev.delete("imGatewaySection");
                 return prev;
               },
               { replace: true },
@@ -1433,18 +1437,14 @@ export default function AgentChatSection({
         prev.set("historyPath", historyThread.history_path!);
         prev.delete("mode");
         prev.delete("aiSection");
+        prev.delete("settings");
         prev.delete("agentSection");
+        prev.delete("imGatewaySection");
         return prev;
       },
       { replace: true },
     );
   }, [searchParams, setSearchParams, threads]);
-
-  const handleOpenNewChat = useCallback(() => {
-    setNewChatWorkDir(workDir || defaultWorkDir);
-    setNewChatRunnerId(isUninitializedDraftSession ? defaultRunnerId : runnerId);
-    setNewChatOpen(true);
-  }, [defaultRunnerId, defaultWorkDir, isUninitializedDraftSession, runnerId, workDir]);
 
   const handleCreateNewChat = useCallback(() => {
     const selectedWorkDir = newChatWorkDir.trim() || defaultWorkDir;
@@ -1480,7 +1480,9 @@ export default function AgentChatSection({
         prev.delete("session");
         prev.delete("historyPath");
         prev.delete("aiSection");
+        prev.delete("settings");
         prev.delete("agentSection");
+        prev.delete("imGatewaySection");
         return prev;
       },
       { replace: false },
@@ -1524,7 +1526,9 @@ export default function AgentChatSection({
         prev.set("view", "chat");
         prev.set("mode", "new");
         prev.delete("aiSection");
+        prev.delete("settings");
         prev.delete("agentSection");
+        prev.delete("imGatewaySection");
         prev.delete("session");
         prev.delete("historyPath");
         return prev;
@@ -1563,7 +1567,9 @@ export default function AgentChatSection({
           prev.set("session", thread.session_key);
           prev.delete("mode");
           prev.delete("aiSection");
+          prev.delete("settings");
           prev.delete("agentSection");
+          prev.delete("imGatewaySection");
           if (thread.history_path) {
             prev.set("view", "chat");
             prev.set("historyPath", thread.history_path);
@@ -1628,7 +1634,9 @@ export default function AgentChatSection({
               prev.delete("session");
               prev.delete("historyPath");
               prev.delete("aiSection");
+              prev.delete("settings");
               prev.delete("agentSection");
+              prev.delete("imGatewaySection");
               return prev;
             },
             { replace: false },
@@ -1649,8 +1657,8 @@ export default function AgentChatSection({
   );
 
   const styles = useMemo(
-    () => createAgentChatStyles(isCompact, isNarrow, threadRailCollapsed, token),
-    [isCompact, isNarrow, threadRailCollapsed, token],
+    () => createAgentChatStyles(isCompact, isNarrow, threadRailCollapsed, token, embeddedSidebar),
+    [embeddedSidebar, isCompact, isNarrow, threadRailCollapsed, token],
   );
 
   useEffect(() => {
@@ -2785,15 +2793,6 @@ export default function AgentChatSection({
                 onClick={() => setSettingsOpen(true)}
               >
                 Status
-              </Button>
-              <Button
-                size="small"
-                type="primary"
-                icon={<PlusOutlined />}
-                data-testid="agent-chat-new"
-                onClick={handleOpenNewChat}
-              >
-                New Chat
               </Button>
             </Space>
           }

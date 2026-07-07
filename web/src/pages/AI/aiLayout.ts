@@ -48,10 +48,18 @@ export function resolveAiRouteState(params: URLSearchParams): AiRouteState {
   if (agentSection && !settings && legacyAiSection?.startsWith("agent-") && legacyAiSection !== "agent-chat") {
     settings = "agent";
   }
-  if (settings) {
+  if (settings === "chat") {
+    settings = "agent";
+    agentSection = "general";
+  }
+  if (settings === "agent" && agentSection === "chat") {
+    agentSection = "general";
+  }
+  const settingsOwnsRoute = !explicitView || explicitView === "settings";
+  if (settings && settingsOwnsRoute) {
     view = "settings";
   }
-  if (imGatewaySection && settings === "im") {
+  if (imGatewaySection && settings === "im" && settingsOwnsRoute) {
     view = "settings";
   }
 

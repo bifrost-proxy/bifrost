@@ -19,11 +19,12 @@
 
 - `/ai` 默认展示新建对话面板，左侧 `New Chat` 处于选中态，不默认打开配置页。
 - 新建对话面板在右侧主内容区垂直居中展示输入框，用户输入消息并发送后才创建新线程。
-- 新建对话输入框下方展示 Runner 下拉选择，默认使用 Codex Runner。
+- 新建对话输入面板底部工具栏展示 Runner 下拉选择，位置对应截图中“高级”操作区，默认使用 Codex Runner。
 - Runner 下拉必须包含后端已启用的 runner，至少能展示 Codex、Bifrost Agent、Claude Code、Trae X 这几类可用 runner。
 - 左侧顶部区域包含 `New Chat`、`ASR`、`Videos`、`IM` 四个工作入口。
 - 左侧中间区域展示所有 Agent threads，支持选中、运行状态、加载更多、右键删除或等效删除入口。
-- 左侧底部只有一个 Settings 入口，点击后在Settings 内容页中操作 Agent、Runner、Model、Runtime、Memories、Skills、MCP Servers 与 IM Gateway 详细配置。
+- 左侧底部只有一个 Settings 入口，点击后在 Settings 内容页中操作原 AI 左侧菜单里的配置项。Settings 顶部只保留 `Agent`、`Runner`、`IM` 三个分组 tab；每个 tab 内把归属该分组的配置项以卡片方式向下平铺。
+- Settings 不承载某个对话的状态信息；`Back`、`Session Detail`、`Messages`、workspace、runner、context、diagnostics 等会话级信息只能出现在具体对话的头部操作或弹窗中。
 - 右侧主内容根据左侧入口切换：
   - `New Chat` / thread：Agent Chat 对话区。
   - `ASR`：现有 ASR 工作台。
@@ -44,6 +45,8 @@
   - `aiSection=im-gateway-*` 进入 IM 或 Settings 中对应 IM section。
   - `agentSection=*` 在 Settings 二级内容页中仍定位到对应 Agent 配置 section。
 - 小屏幕布局不能出现文字溢出、按钮重叠、线程列表挤压输入框或 Settings 二级内容页不可滚动/不可切回主入口。
+- 桌面左侧栏必须给线程标题留出足够宽度，目标宽度约 216px；线程选中态不能改变行高、字体基线或虚拟列表估算高度，避免点击时列表抖动。
+- 外置线程列表后，右侧 Chat conversation 不能继续保留旧内部 thread rail 的空列；嵌入 AI Shell 时消息区和 composer 应使用右侧主内容宽度，仅保留合理的阅读宽度上限和边距。
 
 ### 必须真实验证
 
@@ -81,7 +84,7 @@ AI Shell
     └── Settings Content
 ```
 
-一级左栏不再展示 Agent General、Model、Runtime、History、Memories、Skills、Runners、Memory Records、MCP Servers、IM Gateway Connections 等配置型 section。这些入口全部收敛到 Settings 二级内容页。
+一级左栏不再展示 Agent General、Model、Runtime、History、Memories、Skills、Runners、Memory Records、MCP Servers、IM Gateway Connections 等配置型 section。这些入口全部收敛到 Settings 二级内容页。Settings 顶部只展示 `Agent`、`Runner`、`IM` 三个分组 tab，内容区只挂载当前分组，并把该分组内的配置 section 作为卡片纵向平铺；不能把所有分组同时挂在隐藏 tabpane 中，避免重复表单和路由状态串扰。
 
 ## 路由与状态
 
@@ -96,8 +99,9 @@ AI Shell
 | `/ai?view=asr&asrTab=scheduled` | 打开 ASR 工作台 |
 | `/ai?view=im&imGatewaySection=connections` | 打开 IM 工作台 |
 | `/ai?view=videos` | 打开 Videos Tool 兼容入口 |
-| `/ai?settings=agent&agentSection=model` | 打开 Settings 二级内容页并定位 Agent Model |
-| `/ai?settings=im&imGatewaySection=routes` | 打开 Settings 二级内容页并定位 IM Routes |
+| `/ai?settings=agent&agentSection=model` | 打开 Settings 二级内容页的 Agent 分组，Agent 配置卡片平铺展示并包含 Model |
+| `/ai?settings=agent&agentSection=runners` | 打开 Settings 二级内容页的 Runner 分组 |
+| `/ai?settings=im&imGatewaySection=routes` | 打开 Settings 二级内容页的 IM 分组，IM 配置卡片平铺展示并包含 Routes |
 
 兼容旧参数时只做映射，不把旧左侧 section nav 继续作为 UI 展示：
 
@@ -114,7 +118,7 @@ AI Shell
 1. 左侧 `New Chat` 选中。
 2. 左侧 threads 加载并展示，但没有历史 thread 被选中。
 3. 右侧展示新建对话面板，输入区垂直居中。
-4. 输入框下方展示 Runner 下拉。
+4. 输入面板底部工具栏展示 Runner 下拉，位置与附加/高级操作同一排，不单独漂在面板外。
 5. 默认 Runner 为 Codex Runner。
 6. 如果后端没有启用 Codex Runner，前端必须选择第一个可用 runner，并在下拉中显示真实选中值；不能显示 Codex 但实际使用其它 runner。
 
@@ -136,7 +140,7 @@ AI Shell
 
 ## Runner 选择
 
-Runner 下拉只影响新建对话，不影响已有历史线程。
+Runner 下拉只影响新建对话，不影响已有历史线程。新建态中 Runner 控件必须位于输入面板底部工具栏，和附加、语音、发送操作形成一条稳定基线；输入文本区域独立占据面板上半部分，避免 textarea、Runner 和发送按钮互相挤压。
 
 Runner 展示名建议：
 
@@ -166,7 +170,7 @@ Runner 下拉必须展示不可用状态：
 
 ## 左侧线程列表
 
-线程列表使用现有 `/api/im-gateway/agent/sessions/all?limit=80` 数据源。第一版应复用现有 `AgentThreadListCard` 的虚拟列表、状态计算、runner mark、load more 与 delete 行为，但视觉上改成左栏原生列表，而不是右侧 Card。
+线程列表使用现有 `/api/im-gateway/agent/sessions/all?limit=80` 数据源。第一版应复用现有 `AgentThreadListCard` 的虚拟列表、状态计算、runner mark、load more 与 delete 行为，但视觉上改成左栏原生列表，而不是右侧 Card。桌面左栏宽度约 216px，compact thread item 使用固定高度；选中态只改变背景和文字颜色，不通过加粗或额外 padding 改变行高。
 
 线程选中规则：
 
@@ -209,19 +213,25 @@ Videos Tool 作为左侧主入口之一保留，避免用户认为能力消失�
 
 ## Settings 二级内容页
 
-左侧底部 Settings 入口切换到右侧 Settings 内容页。Settings 内容页以 tabs 或 segmented nav 承载：
+左侧底部 Settings 入口切换到右侧 Settings 内容页。Settings 内容页以顶部 tabs 或 segmented nav 承载三个配置分组，顶层只能出现 `Agent`、`Runner`、`IM`：
 
-- Chat Status：当前会话 workspace、runner、context、status、diagnostics。
-- Agent：General、Model、Runtime、History、Memories、Skills、Runners、Memory Records、MCP Servers、Sessions。
-- IM Gateway：Connections、Targets、Routes、Schedules、History。
+- Agent：General、Model、Runtime、History、Memories、Skills、Memory Records、MCP Servers、Sessions。
+- Runner：Runners。
+- IM：Connections、Targets、Routes、Schedules、History。
 - Speech / ASR Resources：仅当现有 Settings Speech 初始化入口需要与 AI 入口打通时纳入；否则 ASR 资源仍保留现有 Settings Speech。
+
+每个分组内部直接展示该组的配置卡片，按稳定顺序从上到下排列，不再把 General、Model、Runtime、Runners、IM Routes 等作为 Settings 顶层 tab。Settings 内容不应撑满整个右侧主内容区；应使用和嵌入式 Chat message/composer track 一致的阅读宽度上限（约 1120px）并整体居中。这样用户在 Settings 中先按对象类型选择 `Agent` / `Runner` / `IM`，再在当前页纵向扫配置卡片。
+
+Chat 或历史会话不属于 Settings 配置项。打开 Settings 时必须清理 `mode`、`session`、`historyPath` 等会话路由状态；如果旧链接传入 `settings=agent&agentSection=chat`，必须归一化到 Agent General。会话详情、消息列表、返回按钮和诊断状态应由具体对话页右上角操作触发弹窗查看，不应出现在 Settings 页面。
 
 Settings URL 语义：
 
-- 打开 Settings 时设置 `view=settings&settings=agent|im`。
+- 打开 Settings 时设置 `view=settings&settings=agent|im`；Runner 分组使用 `settings=agent&agentSection=runners` 兼容既有 Agent runners 路由。
 - 离开 Settings 时切换到对应主入口，保留可兼容的 section 参数。
-- Settings 内部切换 Agent section 时更新 `agentSection`。
-- Settings 内部切换 IM section 时更新 `imGatewaySection`。
+- Settings 顶部切到 `Agent` 时更新为 `settings=agent`，并把非法或会话型 `agentSection` 归一化到 `general`。
+- Settings 顶部切到 `Runner` 时更新为 `settings=agent&agentSection=runners`。
+- Settings 顶部切到 `IM` 时更新为 `settings=im&imGatewaySection=connections`，并在 IM 分组内平铺 IM 配置卡片。
+- Settings 内部不能保留 `session`、`historyPath`、`mode=new` 或 `agentSection=chat`。
 
 ## 组件拆分建议
 
@@ -239,6 +249,7 @@ Settings URL 语义：
   - 保留现有测试 id，降低测试迁移成本。
 - `web/src/pages/AI/AISettingsContent.tsx`
   - 新增 Settings 内容页，复用 `AgentTab hideSectionNav` 和 `ImGatewayTab hideSectionNav`。
+  - 顶层只暴露 `Agent`、`Runner`、`IM` 三个 tab，并通过 `visibleSections` 控制每个分组内部的卡片集合。
 - `web/src/pages/AI/NewChatCompose.tsx`
   - 新增默认新建对话面板，包含居中输入框、pending images、Runner 下拉、workspace 可选入口和 Send。
 
@@ -266,10 +277,10 @@ Settings URL 语义：
 
 ### Phase 4：Settings 二级内容页
 
-- 迁移 Agent 配置 section。
-- 迁移 IM Gateway 配置 section。
-- 迁移 Chat Status。
-- 旧 `agentSection` / `imGatewaySection` 深链打开 Settings 中对应 section。
+- 迁移 Agent 配置 section 到 `Agent` 分组卡片列表。
+- 迁移 Runner 配置 section 到 `Runner` 分组卡片列表。
+- 迁移 IM Gateway 配置 section 到 `IM` 分组卡片列表。
+- 旧 `agentSection` / `imGatewaySection` 深链打开 Settings 中对应分组。
 
 ### Phase 5：测试与清理
 
@@ -285,6 +296,7 @@ Settings URL 语义：
 - `resolveAiRouteState_defaults_to_new_chat`：空 query 映射到 `{ view: "chat", mode: "new" }`。
 - `resolveAiRouteState_maps_legacy_agent_chat`：`aiSection=agent-chat&agentSection=chat` 映射到 Chat conversation。
 - `resolveAiRouteState_maps_legacy_agent_config_to_settings`：`aiSection=agent-model` 打开 Settings Agent Model。
+- `resolveAiRouteState_keeps_chat_out_of_settings_routes`：`settings=agent&agentSection=chat&session=<id>` 归一化到 Settings Agent General，且不把会话状态当作 Settings 内容。
 - `resolveAiRouteState_maps_legacy_asr`：`aiSection=tools-asr` 映射到 ASR。
 - `buildRunnerOptions_prefers_codex_then_builtin_then_claude_then_traex`：Runner 排序符合产品语义。
 - `selectDefaultRunner_falls_back_when_codex_unavailable`：Codex 不可用时选择第一个可用 runner，并返回 fallback reason。
@@ -308,11 +320,14 @@ Settings URL 语义：
   - mock 两条历史 thread。
   - 点击历史 thread。
   - 断言退出 new mode，右侧展示历史消息。
+  - 断言左侧 thread item 选中前后高度一致，Chat conversation 的 composer 使用右侧主内容宽度，不再保留旧 thread rail 空列。
   - 再点击 `New Chat`，断言回到居中输入态。
 - `ai-layout-tools-settings.spec.ts`
   - 点击 ASR，断言 ASR 工作台渲染并保留 `asrTab`。
   - 点击 IM，断言 IM 工作台渲染并保留 `imGatewaySection`。
-  - 点击 Settings，断言右侧 Settings 内容页打开；切换 Agent Model、IM Routes；切回其它主入口后对应主内容恢复。
+  - 点击 Settings，断言右侧 Settings 内容页打开；顶部只显示 `Agent`、`Runner`、`IM`；Agent 分组平铺 General、Model、Runtime、MCP Servers 等卡片，Runner 分组只展示 runners 卡片，IM 分组平铺 Connections、Targets、Routes 等卡片；切回其它主入口后对应主内容恢复。
+  - 断言 Settings 内容轨道宽度不超过约 1120px，并在右侧主内容区内水平居中，不把配置卡片撑满全宽。
+  - 打开带 `session` 和 `agentSection=chat` 的 Settings 脏链接，断言 URL 清理会话参数，Settings 顶部只显示 `Agent`、`Runner`、`IM`，不显示 Chat、Back、Session Detail 或 Messages。
 - `ai-layout-videos-compat.spec.ts`
   - 打开旧 `aiSection=tools-videos` 链接。
   - 断言 Videos Tool 仍可访问。
@@ -344,7 +359,7 @@ Settings URL 语义：
 - 首条消息创建线程。
 - 历史线程切换。
 - ASR / IM 入口切换。
-- Settings 二级内容页配置入口。
+- Settings 二级内容页的 `Agent` / `Runner` / `IM` 分组和配置卡片平铺。
 - 旧深链兼容。
 - 窄屏布局。
 
@@ -353,7 +368,11 @@ Settings URL 语义：
 - 用户进入 `/ai` 可以不进入任何配置页，直接输入任务并启动新对话。
 - 默认 Runner 是 Codex Runner；不可用时 UI 明确展示实际 fallback runner。
 - 左侧导航只表达工作路径：New Chat、ASR、Videos、IM、Threads、Settings。
+- 左侧线程列表宽度和选中态稳定，不因点击选中产生列表抖动；右侧对话区域没有未使用的内部 thread rail 空白。
 - 配置项不再占据 AI 页面一级导航。
+- Settings 只展示原配置项，且保留所有原 AI 配置功能入口；顶层只合并为 `Agent`、`Runner`、`IM` 三个 tab，配置项在对应 tab 内以卡片向下平铺；Chat 和会话状态信息不进入 Settings。
+- IM 工作入口与 Settings 的 IM 分组使用响应式卡片网格展示连接通道，桌面下自动多列，窄屏下收敛为单列；表格型配置保留表格，但整体仍在同一内容轨道内。
+- ASR、IM、Videos、历史消息线程和 Settings 各分组共享 AI 右侧内容轨道，桌面最大宽度约 1120px 并水平居中；顶部留白统一为约 24px，避免内容吸顶。
 - 旧深链不失效。
 - Playwright、human_tests 和必要单元测试全部通过。
 

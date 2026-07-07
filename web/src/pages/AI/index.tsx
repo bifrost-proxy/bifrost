@@ -6,7 +6,6 @@ import {
   CloudOutlined,
   HistoryOutlined,
   PlusOutlined,
-  RobotOutlined,
   SendOutlined,
   SettingOutlined,
   SoundOutlined,
@@ -31,10 +30,35 @@ import {
 } from "./aiLayout";
 import { apiFetch } from "../../api/apiFetch";
 import type { RunnerConfigPayload, RunnerOption } from "./AgentChatSection.helpers";
+import {
+  type AgentSectionId,
+  type ImGatewaySectionId,
+} from "../Settings/tabs/aiSections";
 
 const { Text } = Typography;
 const { TextArea } = Input;
 const { useBreakpoint } = Grid;
+
+const AI_SETTINGS_AGENT_SECTIONS: AgentSectionId[] = [
+  "general",
+  "model",
+  "runtime",
+  "history",
+  "memories",
+  "skills",
+  "memory-records",
+  "mcp-servers",
+  "sessions",
+];
+const AI_SETTINGS_RUNNER_SECTIONS: AgentSectionId[] = ["runners"];
+const AI_SETTINGS_IM_SECTIONS: ImGatewaySectionId[] = [
+  "connections",
+  "targets",
+  "routes",
+  "schedules",
+  "history",
+];
+const AI_CONTENT_MAX_WIDTH = 1120;
 
 export default function AI() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -103,17 +127,15 @@ export default function AI() {
         (prev) => {
           prev.set("view", view);
           prev.delete("aiSection");
+          prev.delete("settings");
+          prev.delete("agentSection");
           if (view === "chat") {
             prev.set("mode", "new");
             prev.delete("session");
             prev.delete("historyPath");
-            prev.delete("agentSection");
           }
-          if (view !== "im" && view !== "settings") {
+          if (view !== "im") {
             prev.delete("imGatewaySection");
-          }
-          if (view !== "settings") {
-            prev.delete("settings");
           }
           return prev;
         },
@@ -135,6 +157,17 @@ export default function AI() {
           prev.set("view", "settings");
           prev.set("settings", target);
           prev.delete("aiSection");
+          prev.delete("mode");
+          prev.delete("session");
+          prev.delete("historyPath");
+          if (target === "agent" && (!prev.get("agentSection") || prev.get("agentSection") === "chat")) {
+            prev.set("agentSection", "general");
+            prev.delete("imGatewaySection");
+          }
+          if (target === "im" && !prev.get("imGatewaySection")) {
+            prev.set("imGatewaySection", "connections");
+            prev.delete("agentSection");
+          }
           return prev;
         },
         { replace: false },
@@ -225,13 +258,115 @@ export default function AI() {
         ...sidebarState.styles.threadLoadMoreBar,
         padding: "6px 2px 2px",
       },
+      threadVirtualRow: {
+        ...sidebarState.styles.threadVirtualRow,
+        paddingBottom: 2,
+      },
     };
   }, [sidebarState]);
 
   const settingsOpen = routeState.view === "settings";
-  const settingsActiveKey = routeState.settings || "agent";
+  const settingsActiveKey =
+    routeState.settings === "im"
+      ? "im"
+      : routeState.agentSection === "runners"
+      ? "runner"
+      : "agent";
   const showNewChatLanding =
     routeState.view === "chat" && routeState.chatMode === "new" && newChatActive;
+  const contentPadding = screens.md ? 24 : 16;
+  const contentTrackStyle: CSSProperties = {
+    height: "100%",
+    minHeight: 0,
+    overflow: "auto",
+    padding: `${contentPadding}px ${contentPadding}px ${screens.md ? 24 : 16}px`,
+    boxSizing: "border-box",
+  };
+  const contentTrackInnerStyle: CSSProperties = {
+    width: "100%",
+    maxWidth: AI_CONTENT_MAX_WIDTH,
+    margin: "0 auto",
+  };
+
+  useEffect(() => {
+    if (routeState.view !== "settings") {
+      return;
+    }
+    const hasConversationState =
+      searchParams.has("mode") ||
+      searchParams.has("session") ||
+      searchParams.has("historyPath") ||
+      searchParams.get("agentSection") === "chat" ||
+      searchParams.get("settings") === "chat" ||
+      searchParams.has("aiSection");
+    if (!hasConversationState) {
+      return;
+    }
+    setSearchParams(
+      (prev) => {
+        prev.set("view", "settings");
+        prev.delete("mode");
+        prev.delete("session");
+        prev.delete("historyPath");
+        prev.delete("aiSection");
+        if (prev.get("settings") === "chat") {
+          prev.set("settings", "agent");
+        }
+        if (!prev.get("settings")) {
+          prev.set("settings", routeState.settings === "im" ? "im" : "agent");
+        }
+        if (prev.get("settings") === "agent" && (!prev.get("agentSection") || prev.get("agentSection") === "chat")) {
+          prev.set("agentSection", "general");
+        }
+        if (prev.get("settings") === "im" && !prev.get("imGatewaySection")) {
+          prev.set("imGatewaySection", "connections");
+        }
+        return prev;
+      },
+      { replace: true },
+    );
+  }, [routeState.settings, routeState.view, searchParams, setSearchParams]);
+
+  const handleSettingsTabChange = useCallback(
+    (key: string) => {
+      setSearchParams(
+        (prev) => {
+          prev.set("view", "settings");
+          prev.delete("aiSection");
+          prev.delete("mode");
+          prev.delete("session");
+          prev.delete("historyPath");
+          if (key === "im") {
+            prev.set("settings", "im");
+            prev.set("imGatewaySection", prev.get("imGatewaySection") || "connections");
+            prev.delete("agentSection");
+          } else if (key === "runner") {
+            prev.set("settings", "agent");
+            prev.set("agentSection", "runners");
+            prev.delete("imGatewaySection");
+          } else {
+            prev.set("settings", "agent");
+            if (!prev.get("agentSection") || prev.get("agentSection") === "chat" || prev.get("agentSection") === "runners") {
+              prev.set("agentSection", "general");
+            }
+            prev.delete("imGatewaySection");
+          }
+          return prev;
+        },
+        { replace: false },
+      );
+    },
+    [setSearchParams],
+  );
+
+  const settingsTabItems = useMemo(
+    () => [
+      { key: "agent", label: "Agent" },
+      { key: "runner", label: "Runner" },
+      { key: "im", label: "IM" },
+    ],
+    [],
+  );
 
   return (
     <div
@@ -247,7 +382,7 @@ export default function AI() {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: isCompactNav ? "1fr" : "176px minmax(0, 1fr)",
+          gridTemplateColumns: isCompactNav ? "1fr" : "216px minmax(0, 1fr)",
           gridTemplateRows: isCompactNav ? "auto minmax(0, 1fr)" : undefined,
           gap: 0,
           height: "100%",
@@ -267,7 +402,7 @@ export default function AI() {
             alignItems: isCompactNav ? "center" : "stretch",
             overflowX: isCompactNav ? "auto" : undefined,
             overflowY: isCompactNav ? "hidden" : "auto",
-            padding: isCompactNav ? "8px" : "12px 8px",
+            padding: isCompactNav ? "8px" : "12px 10px",
             minHeight: 0,
             maxHeight: "100%",
             background: token.colorFillQuaternary,
@@ -435,96 +570,130 @@ export default function AI() {
                   data-testid="agent-chat-new-input-pill"
                   style={{
                     width: "100%",
-                    minHeight: 48,
+                    minHeight: 118,
                     display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    padding: "0 10px",
-                    borderRadius: 999,
+                    flexDirection: "column",
+                    gap: 8,
+                    padding: "12px 12px 10px",
+                    borderRadius: 18,
                     border: `1px solid ${token.colorBorderSecondary}`,
                     background: token.colorBgElevated,
                     boxShadow: "0 18px 48px rgba(17, 24, 22, 0.10)",
                     boxSizing: "border-box",
                   }}
                 >
-                  <Button
-                    type="text"
-                    icon={<PlusOutlined />}
-                    aria-label="Attach context"
-                    title="Attach context"
-                    style={{
-                      width: 28,
-                      height: 28,
-                      minWidth: 28,
-                      padding: 0,
-                      borderRadius: "50%",
-                      color: token.colorTextSecondary,
-                    }}
-                  />
                   <TextArea
                     data-testid="agent-chat-input"
                     value={newChatDraft}
                     onChange={(event) => setNewChatDraft(event.target.value)}
                     onKeyDown={handleNewChatKeyDown}
                     placeholder="Describe a task for the Agent..."
-                    autoSize={{ minRows: 1, maxRows: 4 }}
+                    autoSize={{ minRows: 2, maxRows: 5 }}
                     style={{
-                      flex: 1,
-                      minHeight: 34,
-                      padding: "7px 4px",
+                      width: "100%",
+                      minHeight: 52,
+                      padding: "2px 4px",
                       border: "none",
                       boxShadow: "none",
                       outline: "none",
                       background: "transparent",
                       resize: "none",
-                      lineHeight: "20px",
+                      lineHeight: "22px",
                     }}
                   />
-                  <Button
-                    type="text"
-                    shape="circle"
-                    icon={<AudioOutlined />}
-                    aria-label="Voice input"
-                    title="Voice input"
+                  <div
+                    data-testid="agent-chat-new-toolbar"
                     style={{
-                      width: 28,
-                      height: 28,
-                      minWidth: 28,
-                      color: token.colorTextSecondary,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 8,
+                      minHeight: 32,
                     }}
-                  />
-                  <Button
-                    shape="circle"
-                    type="primary"
-                    icon={<SendOutlined />}
-                    aria-label="Send"
-                    title="Send"
-                    loading={newChatSubmitting}
-                    disabled={!newChatDraft.trim() || !chatControls}
-                    data-testid="agent-chat-send"
-                    onClick={() => void submitNewChat()}
-                  />
+                  >
+                    <Space size={6} align="center" style={{ minWidth: 0 }}>
+                      <Button
+                        type="text"
+                        icon={<PlusOutlined />}
+                        aria-label="Attach context"
+                        title="Attach context"
+                        style={{
+                          width: 30,
+                          height: 30,
+                          minWidth: 30,
+                          padding: 0,
+                          borderRadius: "50%",
+                          color: token.colorTextSecondary,
+                        }}
+                      />
+                      <div
+                        data-testid="agent-chat-new-runner-row"
+                        style={{
+                          height: 30,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          borderRadius: 999,
+                          background: token.colorFillSecondary,
+                          padding: "0 6px 0 10px",
+                          maxWidth: screens.md ? 240 : 176,
+                        }}
+                      >
+                        <Text
+                          type="secondary"
+                          style={{
+                            flex: "0 0 auto",
+                            fontSize: 12,
+                            lineHeight: "18px",
+                            marginRight: 2,
+                          }}
+                        >
+                          Runner
+                        </Text>
+                        <Select
+                          size="small"
+                          value={selectedRunnerId}
+                          onChange={setSelectedRunnerId}
+                          options={runnerOptions}
+                          variant="borderless"
+                          style={{ minWidth: 0, maxWidth: screens.md ? 160 : 104 }}
+                          popupMatchSelectWidth={false}
+                          data-testid="agent-chat-inline-runner"
+                        />
+                      </div>
+                    </Space>
+                    <Space size={6} align="center">
+                      <Button
+                        type="text"
+                        shape="circle"
+                        icon={<AudioOutlined />}
+                        aria-label="Voice input"
+                        title="Voice input"
+                        style={{
+                          width: 30,
+                          height: 30,
+                          minWidth: 30,
+                          color: token.colorTextSecondary,
+                        }}
+                      />
+                      <Button
+                        shape="circle"
+                        type="primary"
+                        icon={<SendOutlined />}
+                        aria-label="Send"
+                        title="Send"
+                        loading={newChatSubmitting}
+                        disabled={!newChatDraft.trim() || !chatControls}
+                        data-testid="agent-chat-send"
+                        onClick={() => void submitNewChat()}
+                        style={{
+                          width: 30,
+                          height: 30,
+                          minWidth: 30,
+                        }}
+                      />
+                    </Space>
+                  </div>
                 </div>
-                <Space
-                  align="center"
-                  size={8}
-                  wrap
-                  style={{ justifyContent: "center", width: "100%", marginTop: 10 }}
-                  data-testid="agent-chat-new-runner-row"
-                >
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    Runner
-                  </Text>
-                  <Select
-                    size="small"
-                    value={selectedRunnerId}
-                    onChange={setSelectedRunnerId}
-                    options={runnerOptions}
-                    variant="borderless"
-                    style={{ minWidth: 160 }}
-                    data-testid="agent-chat-inline-runner"
-                  />
-                </Space>
               </div>
             </div>
           ) : null}
@@ -542,46 +711,52 @@ export default function AI() {
               onControlsReady={setChatControls}
             />
           </div>
-          {routeState.view === "asr" ? <ASR /> : null}
-          {routeState.view === "im" ? <ImGatewayTab hideSectionNav /> : null}
-          {routeState.view === "videos" ? <VideosTool /> : null}
+          {routeState.view === "asr" ? (
+            <div data-testid="ai-asr-content" style={contentTrackStyle}>
+              <div data-testid="ai-asr-track" style={contentTrackInnerStyle}>
+                <ASR />
+              </div>
+            </div>
+          ) : null}
+          {routeState.view === "im" ? (
+            <div data-testid="ai-im-content" style={contentTrackStyle}>
+              <div data-testid="ai-im-track" style={contentTrackInnerStyle}>
+                <ImGatewayTab hideSectionNav cardGrid />
+              </div>
+            </div>
+          ) : null}
+          {routeState.view === "videos" ? (
+            <div data-testid="ai-videos-content" style={contentTrackStyle}>
+              <div data-testid="ai-videos-track" style={contentTrackInnerStyle}>
+                <VideosTool embedded />
+              </div>
+            </div>
+          ) : null}
           {routeState.view === "settings" ? (
             <div
               data-testid="ai-settings-content"
-              style={{
-                height: "100%",
-                minHeight: 0,
-                overflow: "auto",
-                padding: screens.md ? 16 : 8,
-                boxSizing: "border-box",
-              }}
+              style={contentTrackStyle}
             >
-              <Tabs
-                activeKey={settingsActiveKey}
-                onChange={(key) => openSettings(key as Exclude<AiSettingsTarget, null>)}
-                items={[
-                  {
-                    key: "agent",
-                    label: (
-                      <Space size={6}>
-                        <RobotOutlined />
-                        <span>Agent</span>
-                      </Space>
-                    ),
-                    children: <AgentTab hideSectionNav />,
-                  },
-                  {
-                    key: "im",
-                    label: (
-                      <Space size={6}>
-                        <CloudOutlined />
-                        <span>IM Gateway</span>
-                      </Space>
-                    ),
-                    children: <ImGatewayTab hideSectionNav />,
-                  },
-                ]}
-              />
+              <div
+                data-testid="ai-settings-track"
+                style={contentTrackInnerStyle}
+              >
+                <Tabs
+                  activeKey={settingsActiveKey}
+                  onChange={handleSettingsTabChange}
+                  items={settingsTabItems}
+                  tabBarGutter={10}
+                />
+                <div data-testid="ai-settings-active-panel">
+                  {routeState.settings === "im" ? (
+                    <ImGatewayTab hideSectionNav visibleSections={AI_SETTINGS_IM_SECTIONS} cardGrid />
+                  ) : settingsActiveKey === "runner" ? (
+                    <AgentTab hideSectionNav visibleSections={AI_SETTINGS_RUNNER_SECTIONS} />
+                  ) : (
+                    <AgentTab hideSectionNav visibleSections={AI_SETTINGS_AGENT_SECTIONS} />
+                  )}
+                </div>
+              </div>
             </div>
           ) : null}
         </div>
