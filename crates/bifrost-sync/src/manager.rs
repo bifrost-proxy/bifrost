@@ -2699,6 +2699,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn provider_and_github_gist_helpers_cover_routing_edges() {
+        assert_eq!(provider_id_for_remote("   "), None);
+        assert_eq!(
+            provider_id_for_remote("https://bifrost.bytedance.net/"),
+            Some("bytedance_internal")
+        );
+        assert_eq!(
+            provider_id_for_remote("https://sync.example.test/"),
+            Some("bifrost_cloud")
+        );
+
+        let fallback = github_fallback_user();
+        assert_eq!(fallback.user_id, "github");
+        assert_eq!(fallback.nickname, "GitHub");
+
+        let local_rule = RuleFile::new("local", "a.example.com host://127.0.0.1:3000");
+        assert!(gist_remote_id_for_rule(&local_rule).starts_with("gist:"));
+        assert!(server_remote_id_for_rule(&local_rule).is_none());
+
+        let mut gist_rule = local_rule.clone();
+        gist_rule.sync.remote_id = Some("gist:existing".to_string());
+        assert_eq!(gist_remote_id_for_rule(&gist_rule), "gist:existing");
+        assert!(server_remote_id_for_rule(&gist_rule).is_none());
+
+        let mut server_rule = local_rule;
+        server_rule.sync.remote_id = Some("server-env".to_string());
+        assert_eq!(server_remote_id_for_rule(&server_rule), Some("server-env"));
+
+        let gist_config = GitHubGistBasicConfig {
+            id: "domain_allowlist".to_string(),
+            user_id: "github:1".to_string(),
+            config_key: "domain_allowlist".to_string(),
+            value_json: "[\"example.com\"]".to_string(),
+            hash: "hash".to_string(),
+            create_time: "2026-07-07T00:00:00Z".to_string(),
+            update_time: "2026-07-07T00:01:00Z".to_string(),
+        };
+        let remote_config = gist_config_to_remote(&gist_config);
+        assert_eq!(remote_config.id, "domain_allowlist");
+        assert_eq!(remote_config.hash, "hash");
+    }
+
     #[tokio::test]
     async fn status_marks_remote_invoke_registered_for_bytedance_and_cloud_sessions() {
         let (_temp_dir, _config_manager, manager) =
@@ -2792,6 +2835,38 @@ mod tests {
             Some("github:12345")
         );
         assert!(!status.first_run_prompt_required);
+    }
+
+    #[tokio::test]
+    async fn status_keeps_blank_provider_session_disconnected() {
+        let (_temp_dir, _config_manager, manager) =
+            sync_manager_for_remote("https://sync.example.test").await;
+        {
+            let mut state = manager.state.lock();
+            state.provider_sessions.insert(
+                "bifrost_cloud".to_string(),
+                SyncProviderSession {
+                    token: "   ".to_string(),
+                    remote_base_url: "https://sync.example.test".to_string(),
+                    user: Some(test_user("cloud-user")),
+                },
+            );
+            manager.persist_state(&state).unwrap();
+        }
+
+        let status = manager.status().await;
+        let cloud = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == "bifrost_cloud")
+            .expect("cloud provider");
+        assert!(!cloud.connected);
+        assert!(!cloud.remote_invoke_registered);
+        assert_eq!(
+            cloud.remote_base_url.as_deref(),
+            Some("https://sync.example.test")
+        );
+        assert!(status.first_run_prompt_required);
     }
 
     #[tokio::test]
@@ -2945,6 +3020,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn github_gist_mirror_replaces_snapshot_and_preserves_remote_create_time() {
+        let (_temp_dir, config_manager, manager) =
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+        let user = test_user("github:12345");
+        let rules_storage = config_manager.rules_storage().await;
+        rules_storage
+            .save(&RuleFile::new(
+                "beta",
+                "beta.example.com host://127.0.0.1:3000",
+            ))
+            .unwrap();
+        rules_storage
+            .save(&RuleFile::new(
+                "alpha",
+                "alpha.example.com host://127.0.0.1:3000",
+            ))
+            .unwrap();
+        let mut snapshot = GitHubGistSnapshot {
+            rules: vec![
+                GitHubGistRule {
+                    id: "gist:old-beta".to_string(),
+                    user_id: "github:old".to_string(),
+                    name: "beta".to_string(),
+                    rule: "old.example.com host://127.0.0.1:3000".to_string(),
+                    create_time: "2026-01-01T00:00:00Z".to_string(),
+                    update_time: "2026-01-01T00:00:00Z".to_string(),
+                },
+                GitHubGistRule {
+                    id: "gist:remote-only".to_string(),
+                    user_id: "github:old".to_string(),
+                    name: "remote-only".to_string(),
+                    rule: "remote.example.com host://127.0.0.1:3000".to_string(),
+                    create_time: "2026-01-01T00:00:00Z".to_string(),
+                    update_time: "2026-01-01T00:00:00Z".to_string(),
+                },
+            ],
+            ..GitHubGistSnapshot::default()
+        };
+
+        let changed = manager
+            .mirror_github_gist_rules(&mut snapshot, &user, "2026-07-07T00:01:00Z")
+            .await
+            .unwrap();
+        assert!(changed);
+        assert_eq!(
+            snapshot
+                .rules
+                .iter()
+                .map(|rule| rule.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta"]
+        );
+        let beta = snapshot
+            .rules
+            .iter()
+            .find(|rule| rule.name == "beta")
+            .expect("beta rule");
+        assert_eq!(beta.id, "gist:old-beta");
+        assert_eq!(beta.create_time, "2026-01-01T00:00:00Z");
+
+        let changed_again = manager
+            .mirror_github_gist_rules(&mut snapshot, &user, "2026-07-07T00:01:00Z")
+            .await
+            .unwrap();
+        assert!(!changed_again);
+    }
+
+    #[tokio::test]
+    async fn github_gist_mirror_basic_configs_preserves_create_time_and_becomes_idle() {
+        let (_temp_dir, config_manager, manager) =
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+        let user = test_user("github:12345");
+        config_manager
+            .update_tls_config(TlsConfigUpdate {
+                intercept_include: Some(vec!["example.com".to_string()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut snapshot = GitHubGistSnapshot::default();
+        snapshot.basic_configs.insert(
+            "domain_allowlist".to_string(),
+            GitHubGistBasicConfig {
+                id: "domain_allowlist".to_string(),
+                user_id: "github:old".to_string(),
+                config_key: "domain_allowlist".to_string(),
+                value_json: "[]".to_string(),
+                hash: "old".to_string(),
+                create_time: "2026-01-01T00:00:00Z".to_string(),
+                update_time: "2026-01-01T00:00:00Z".to_string(),
+            },
+        );
+
+        let changed = manager
+            .mirror_github_gist_basic_configs(&mut snapshot, &user, "2026-07-07T00:01:00Z")
+            .await
+            .unwrap();
+        assert!(changed);
+        let domain_config = snapshot
+            .basic_configs
+            .get("domain_allowlist")
+            .expect("domain config");
+        assert_eq!(domain_config.value_json, "[\"example.com\"]");
+        assert_eq!(domain_config.create_time, "2026-01-01T00:00:00Z");
+        assert_eq!(domain_config.update_time, "2026-07-07T00:01:00Z");
+
+        let changed_again = manager
+            .mirror_github_gist_basic_configs(&mut snapshot, &user, "2026-07-07T00:02:00Z")
+            .await
+            .unwrap();
+        assert!(!changed_again);
+    }
+
+    #[tokio::test]
     async fn server_sync_ignores_github_gist_remote_metadata() {
         let server = MockServer::start().await;
         let (_temp_dir, config_manager, manager) = sync_manager_for_remote(&server.uri()).await;
@@ -3047,6 +3236,29 @@ mod tests {
                 .session_token_for_remote("https://sync.example.test/")
                 .as_deref(),
             Some("cloud-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_invoke_registration_targets_fall_back_to_legacy_token() {
+        let (_temp_dir, _config_manager, manager) =
+            sync_manager_for_remote("https://sync.example.test/").await;
+        {
+            let mut state = manager.state.lock();
+            state.token = Some("legacy-cloud-token".to_string());
+            manager.persist_state(&state).unwrap();
+        }
+
+        let targets = manager.remote_invoke_registration_targets().await;
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].provider_id, "bifrost_cloud");
+        assert_eq!(targets[0].remote_base_url, "https://sync.example.test");
+        assert_eq!(targets[0].session_token, "legacy-cloud-token");
+        assert_eq!(
+            manager
+                .session_token_for_remote("https://sync.example.test")
+                .as_deref(),
+            Some("legacy-cloud-token")
         );
     }
 
@@ -3250,6 +3462,12 @@ mod tests {
             .save_login_session("token".to_string(), "relay.test".to_string())
             .await
             .is_err());
+        assert!(manager
+            .save_login_session("token".to_string(), "   ".to_string())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("remote_base_url"));
         assert!(manager
             .save_login_session("token".to_string(), "http://relay.test".to_string())
             .await

@@ -260,7 +260,7 @@ fn write_request(content: &str) -> GitHubGistWriteRequest<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
@@ -325,6 +325,70 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
             .mount(&server)
             .await;
+
+        let loaded = client.load_snapshot("token").await.unwrap();
+        assert!(loaded.gist_id.is_none());
+        assert!(loaded.snapshot.rules.is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_snapshot_returns_default_when_snapshot_file_is_empty() {
+        let server = MockServer::start().await;
+        let client = GitHubGistClient::new_with_base_url(&server.uri()).unwrap();
+        Mock::given(method("GET"))
+            .and(path("/gists"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": "gist-empty",
+                    "description": GITHUB_GIST_DESCRIPTION,
+                    "files": {
+                        GITHUB_GIST_SNAPSHOT_FILE: {}
+                    }
+                }
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gists/gist-empty"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "gist-empty",
+                "description": GITHUB_GIST_DESCRIPTION,
+                "files": {
+                    GITHUB_GIST_SNAPSHOT_FILE: {
+                        "content": "   "
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let loaded = client.load_snapshot("token").await.unwrap();
+        assert_eq!(loaded.gist_id.as_deref(), Some("gist-empty"));
+        assert!(loaded.snapshot.rules.is_empty());
+        assert!(loaded.snapshot.basic_configs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_snapshot_searches_up_to_five_pages_before_defaulting() {
+        let server = MockServer::start().await;
+        let client = GitHubGistClient::new_with_base_url(&server.uri()).unwrap();
+        for page in 1..=5 {
+            Mock::given(method("GET"))
+                .and(path("/gists"))
+                .and(query_param("page", page.to_string()))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {
+                        "id": format!("other-{page}"),
+                        "description": "unrelated",
+                        "files": {
+                            "notes.md": {}
+                        }
+                    }
+                ])))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
 
         let loaded = client.load_snapshot("token").await.unwrap();
         assert!(loaded.gist_id.is_none());
@@ -411,5 +475,21 @@ mod tests {
         assert!(parse_error
             .to_string()
             .contains("invalid GitHub Gist response"));
+    }
+
+    #[tokio::test]
+    async fn request_json_reports_non_success_with_body_preview() {
+        let server = MockServer::start().await;
+        let client = GitHubGistClient::new_with_base_url(&server.uri()).unwrap();
+        Mock::given(method("GET"))
+            .and(path("/gists"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("server exploded"))
+            .mount(&server)
+            .await;
+
+        let error = client.load_snapshot("token").await.unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("status 500"));
+        assert!(message.contains("server exploded"));
     }
 }
