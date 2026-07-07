@@ -33,6 +33,8 @@ export interface SyncStatus {
   reason: SyncReason;
   last_sync_at?: string | null;
   last_sync_action?: SyncAction | null;
+  last_changed_sync_at?: string | null;
+  last_changed_sync_action?: SyncAction | null;
   last_error?: string | null;
   user?: SyncUser | null;
   providers?: SyncProviderStatus[];
@@ -58,6 +60,9 @@ export interface SyncProviderStatus {
   last_error?: string | null;
   last_sync_at?: string | null;
   last_sync_action?: SyncAction | null;
+  last_changed_sync_at?: string | null;
+  last_changed_sync_action?: SyncAction | null;
+  check_interval_secs?: number | null;
   user?: SyncUser | null;
   capabilities: SyncProviderCapabilities;
   remote_invoke_registered: boolean;

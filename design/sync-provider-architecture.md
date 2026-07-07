@@ -1278,6 +1278,21 @@ This implementation pass lands the release foundation for provider-aware sync:
   `last_sync_at`, and `last_sync_action`. Server sync success is no longer
   failed by a GitHub Gist mirror error; that error remains attached to the
   GitHub Gist provider card, while the connected server provider stays usable.
+- Provider sync status now separates last check from last content change.
+  `last_sync_at` / `last_sync_action` mean the last successful sync check or
+  attempt, including `no_change`; `last_changed_sync_at` /
+  `last_changed_sync_action` move only when real rule or basic-config content is
+  pushed or pulled. Settings Sync renders both timestamps plus the provider
+  check interval.
+- Server-backed providers no longer use the low-level reachability probe
+  interval as their full sync cadence. Background ByteDance Internal and
+  Bifrost Cloud sync checks are throttled to a provider-level 5-minute interval
+  after success, with a short error backoff; manual sync and local rule/config
+  change wakeups still bypass the throttle so real edits sync promptly.
+- Server-backed basic-config sync returns a semantic action and merges it with
+  rules sync. Remote metadata-only responses update sync metadata but do not
+  count as content changes, preventing no-op checks from looking like real
+  synchronization.
 
 Known remaining implementation gaps before claiming the full original product target:
 

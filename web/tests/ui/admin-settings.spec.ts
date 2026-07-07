@@ -1461,6 +1461,9 @@ test("Settings Sync GitHub Gist token 失效时显示卡片级重连提示", asy
             last_error: "GitHub token is invalid or missing the gist scope",
             last_sync_at: "2026-07-07T07:30:00Z",
             last_sync_action: "remote_pulled",
+            last_changed_sync_at: "2026-07-07T07:20:00Z",
+            last_changed_sync_action: "local_pushed",
+            check_interval_secs: 300,
             user: {
               user_id: "github:12345",
               nickname: "octocat",
@@ -1481,8 +1484,12 @@ test("Settings Sync GitHub Gist token 失效时显示卡片级重连提示", asy
   await expect(page.getByTestId("settings-sync-provider-overview-alert")).toHaveCount(0);
   await expect(gistCard).toContainText("Reconnect required");
   await expect(gistCard).toContainText("GitHub token is invalid or missing the gist scope");
-  await expect(gistCard).toContainText("Last sync");
+  await expect(gistCard).toContainText("Last change");
+  await expect(gistCard).toContainText("Last check");
+  await expect(gistCard).toContainText("Check interval");
+  await expect(gistCard).toContainText("local pushed");
   await expect(gistCard).toContainText("remote pulled");
+  await expect(gistCard).toContainText("Every 5 min");
   await expect(page.getByTestId("settings-sync-provider-error-github_gist")).toBeVisible();
   await expect(page.getByTestId("settings-sync-provider-github-gist-token-link")).toContainText(
     "New Token",

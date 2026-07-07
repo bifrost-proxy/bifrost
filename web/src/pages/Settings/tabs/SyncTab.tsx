@@ -77,15 +77,43 @@ export function shouldShowSyncProviderOverviewAlert(providers: SyncProviderStatu
   return !providers.some((provider) => provider.connected);
 }
 
-function formatProviderLastSync(provider: SyncProviderStatus) {
-  if (!provider.last_sync_at) {
+function formatSyncMoment(
+  syncAt?: string | null,
+  syncAction?: SyncProviderStatus["last_sync_action"],
+) {
+  if (!syncAt) {
     return "Never";
   }
-  const date = new Date(provider.last_sync_at);
-  const action = provider.last_sync_action
-    ? provider.last_sync_action.replace(/_/g, " ")
-    : "completed";
+  const date = new Date(syncAt);
+  const action = syncAction ? syncAction.replace(/_/g, " ") : "completed";
   return `${date.toLocaleString()} (${action})`;
+}
+
+function formatProviderLastChange(provider: SyncProviderStatus) {
+  return formatSyncMoment(
+    provider.last_changed_sync_at,
+    provider.last_changed_sync_action,
+  );
+}
+
+function formatProviderLastCheck(provider: SyncProviderStatus) {
+  return formatSyncMoment(provider.last_sync_at, provider.last_sync_action);
+}
+
+function formatProviderCheckInterval(provider: SyncProviderStatus) {
+  const seconds = provider.check_interval_secs;
+  if (!seconds || seconds <= 0) {
+    return "Manual";
+  }
+  if (seconds % 3600 === 0) {
+    const hours = seconds / 3600;
+    return `Every ${hours} ${hours === 1 ? "hour" : "hours"}`;
+  }
+  if (seconds % 60 === 0) {
+    const minutes = seconds / 60;
+    return `Every ${minutes} min`;
+  }
+  return `Every ${seconds} sec`;
 }
 
 function providerStatusTag(provider: SyncProviderStatus) {
@@ -107,6 +135,9 @@ const fallbackProviders: SyncProviderStatus[] = [
     last_error: null,
     last_sync_at: null,
     last_sync_action: null,
+    last_changed_sync_at: null,
+    last_changed_sync_action: null,
+    check_interval_secs: 300,
     user: null,
     capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
     remote_invoke_registered: false,
@@ -124,6 +155,9 @@ const fallbackProviders: SyncProviderStatus[] = [
     last_error: null,
     last_sync_at: null,
     last_sync_action: null,
+    last_changed_sync_at: null,
+    last_changed_sync_action: null,
+    check_interval_secs: 300,
     user: null,
     capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
     remote_invoke_registered: false,
@@ -141,6 +175,9 @@ const fallbackProviders: SyncProviderStatus[] = [
     last_error: null,
     last_sync_at: null,
     last_sync_action: null,
+    last_changed_sync_at: null,
+    last_changed_sync_action: null,
+    check_interval_secs: 300,
     user: null,
     capabilities: { remote_invoke: false, rules_sync: true, config_sync: true },
     remote_invoke_registered: false,
@@ -368,9 +405,19 @@ export default function SyncTab({
                       : "Not supported",
                   },
                   {
-                    key: "lastSync",
-                    label: "Last sync",
-                    children: formatProviderLastSync(provider),
+                    key: "lastChange",
+                    label: "Last change",
+                    children: formatProviderLastChange(provider),
+                  },
+                  {
+                    key: "lastCheck",
+                    label: "Last check",
+                    children: formatProviderLastCheck(provider),
+                  },
+                  {
+                    key: "checkInterval",
+                    label: "Check interval",
+                    children: formatProviderCheckInterval(provider),
                   },
                 ]}
               />

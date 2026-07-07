@@ -38,6 +38,8 @@ const GITHUB_GIST_REMOTE_BASE_URL: &str = "https://api.github.com/gists";
 const GITHUB_GIST_PROVIDER_ID: &str = "github_gist";
 const GITHUB_GIST_AUTO_SYNC_MIN_INTERVAL_SECS: i64 = 5 * 60;
 const GITHUB_GIST_AUTO_SYNC_ERROR_BACKOFF_SECS: i64 = 15 * 60;
+const SERVER_AUTO_SYNC_MIN_INTERVAL_SECS: i64 = 5 * 60;
+const SERVER_AUTO_SYNC_ERROR_BACKOFF_SECS: i64 = 60;
 
 pub type SharedSyncManager = Arc<SyncManager>;
 
@@ -68,6 +70,8 @@ struct BasicConfigSyncMeta {
 struct ProviderSyncMeta {
     last_sync_at: Option<String>,
     last_sync_action: Option<SyncAction>,
+    last_changed_sync_at: Option<String>,
+    last_changed_sync_action: Option<SyncAction>,
     last_error: Option<String>,
 }
 
@@ -81,6 +85,8 @@ struct SyncStateFile {
     provider_sync: HashMap<String, ProviderSyncMeta>,
     last_sync_at: Option<String>,
     last_sync_action: Option<SyncAction>,
+    last_changed_sync_at: Option<String>,
+    last_changed_sync_action: Option<SyncAction>,
     startup_login_prompt: Option<StartupLoginPromptFile>,
     deleted_rules: HashMap<String, DeletedRuleTombstone>,
     basic_configs: HashMap<String, BasicConfigSyncMeta>,
@@ -148,6 +154,8 @@ pub struct SyncStatus {
     pub reason: SyncReason,
     pub last_sync_at: Option<String>,
     pub last_sync_action: Option<SyncAction>,
+    pub last_changed_sync_at: Option<String>,
+    pub last_changed_sync_action: Option<SyncAction>,
     pub last_error: Option<String>,
     pub user: Option<RemoteUser>,
     pub providers: Vec<SyncProviderStatus>,
@@ -175,6 +183,9 @@ pub struct SyncProviderStatus {
     pub last_error: Option<String>,
     pub last_sync_at: Option<String>,
     pub last_sync_action: Option<SyncAction>,
+    pub last_changed_sync_at: Option<String>,
+    pub last_changed_sync_action: Option<SyncAction>,
+    pub check_interval_secs: Option<i64>,
     pub user: Option<RemoteUser>,
     pub capabilities: SyncProviderCapabilities,
     pub remote_invoke_registered: bool,
@@ -286,8 +297,12 @@ fn record_provider_sync_success(
         .provider_sync
         .entry(provider_id.to_string())
         .or_default();
-    meta.last_sync_at = Some(at);
+    meta.last_sync_at = Some(at.clone());
     meta.last_sync_action = action;
+    if sync_action_has_changes(action) {
+        meta.last_changed_sync_at = Some(at);
+        meta.last_changed_sync_action = action;
+    }
     meta.last_error = None;
 }
 
@@ -297,6 +312,37 @@ fn record_provider_sync_error(state: &mut SyncStateFile, provider_id: &str, erro
         .entry(provider_id.to_string())
         .or_default();
     meta.last_error = Some(error);
+}
+
+fn sync_action_has_changes(action: Option<SyncAction>) -> bool {
+    matches!(
+        action,
+        Some(SyncAction::LocalPushed | SyncAction::RemotePulled | SyncAction::Bidirectional)
+    )
+}
+
+fn sync_action_flags(action: SyncAction) -> (bool, bool) {
+    match action {
+        SyncAction::LocalPushed => (true, false),
+        SyncAction::RemotePulled => (false, true),
+        SyncAction::Bidirectional => (true, true),
+        SyncAction::NoChange => (false, false),
+    }
+}
+
+fn sync_action_from_flags(pushed_local: bool, pulled_remote: bool) -> SyncAction {
+    match (pushed_local, pulled_remote) {
+        (true, true) => SyncAction::Bidirectional,
+        (true, false) => SyncAction::LocalPushed,
+        (false, true) => SyncAction::RemotePulled,
+        (false, false) => SyncAction::NoChange,
+    }
+}
+
+fn combine_sync_actions(first: SyncAction, second: SyncAction) -> SyncAction {
+    let (first_push, first_pull) = sync_action_flags(first);
+    let (second_push, second_pull) = sync_action_flags(second);
+    sync_action_from_flags(first_push || second_push, first_pull || second_pull)
 }
 
 fn update_provider_session_user(
@@ -377,6 +423,9 @@ fn build_provider_statuses(
             .or_else(|| bytedance_meta.and_then(|meta| meta.last_error.clone())),
             last_sync_at: bytedance_meta.and_then(|meta| meta.last_sync_at.clone()),
             last_sync_action: bytedance_meta.and_then(|meta| meta.last_sync_action),
+            last_changed_sync_at: bytedance_meta.and_then(|meta| meta.last_changed_sync_at.clone()),
+            last_changed_sync_action: bytedance_meta.and_then(|meta| meta.last_changed_sync_action),
+            check_interval_secs: Some(SERVER_AUTO_SYNC_MIN_INTERVAL_SECS),
             user: bytedance_session
                 .and_then(|session| session.user.clone())
                 .or_else(|| {
@@ -421,6 +470,9 @@ fn build_provider_statuses(
             .or_else(|| cloud_meta.and_then(|meta| meta.last_error.clone())),
             last_sync_at: cloud_meta.and_then(|meta| meta.last_sync_at.clone()),
             last_sync_action: cloud_meta.and_then(|meta| meta.last_sync_action),
+            last_changed_sync_at: cloud_meta.and_then(|meta| meta.last_changed_sync_at.clone()),
+            last_changed_sync_action: cloud_meta.and_then(|meta| meta.last_changed_sync_action),
+            check_interval_secs: Some(SERVER_AUTO_SYNC_MIN_INTERVAL_SECS),
             user: cloud_session
                 .and_then(|session| session.user.clone())
                 .or_else(|| {
@@ -454,6 +506,11 @@ fn build_provider_statuses(
             last_error: github_gist_last_error,
             last_sync_at: github_gist_meta.and_then(|meta| meta.last_sync_at.clone()),
             last_sync_action: github_gist_meta.and_then(|meta| meta.last_sync_action),
+            last_changed_sync_at: github_gist_meta
+                .and_then(|meta| meta.last_changed_sync_at.clone()),
+            last_changed_sync_action: github_gist_meta
+                .and_then(|meta| meta.last_changed_sync_action),
+            check_interval_secs: Some(GITHUB_GIST_AUTO_SYNC_MIN_INTERVAL_SECS),
             user: github_gist_session.and_then(|session| session.user.clone()),
             capabilities: SyncProviderCapabilities {
                 rules_sync: true,
@@ -659,6 +716,7 @@ pub struct SyncManager {
     state_file: PathBuf,
     state: Mutex<SyncStateFile>,
     sync_lock: AsyncMutex<()>,
+    server_next_auto_sync_at: Mutex<HashMap<String, DateTime<Utc>>>,
     github_gist_next_auto_sync_at: Mutex<Option<DateTime<Utc>>>,
     login_prompt: Mutex<LoginPromptState>,
     runtime: RwLock<SyncRuntimeState>,
@@ -689,6 +747,7 @@ impl SyncManager {
             state_file,
             state: Mutex::new(state),
             sync_lock: AsyncMutex::new(()),
+            server_next_auto_sync_at: Mutex::new(HashMap::new()),
             github_gist_next_auto_sync_at: Mutex::new(None),
             login_prompt: Mutex::new(LoginPromptState::default()),
             runtime: RwLock::new(SyncRuntimeState::default()),
@@ -741,6 +800,18 @@ impl SyncManager {
                 .find(|provider| provider.last_sync_at.as_ref() == Some(last_at))
                 .and_then(|provider| provider.last_sync_action)
         });
+        let provider_last_changed_sync_at = providers
+            .iter()
+            .filter(|provider| provider.connected)
+            .filter_map(|provider| provider.last_changed_sync_at.clone())
+            .max();
+        let provider_last_changed_sync_action =
+            provider_last_changed_sync_at.as_ref().and_then(|last_at| {
+                providers
+                    .iter()
+                    .find(|provider| provider.last_changed_sync_at.as_ref() == Some(last_at))
+                    .and_then(|provider| provider.last_changed_sync_action)
+            });
         SyncStatus {
             enabled: config.sync.enabled,
             auto_sync: config.sync.auto_sync,
@@ -760,6 +831,9 @@ impl SyncManager {
             },
             last_sync_at: provider_last_sync_at.or(state.last_sync_at),
             last_sync_action: provider_last_sync_action.or(state.last_sync_action),
+            last_changed_sync_at: provider_last_changed_sync_at.or(state.last_changed_sync_at),
+            last_changed_sync_action: provider_last_changed_sync_action
+                .or(state.last_changed_sync_action),
             last_error: runtime.last_error,
             user: state.user,
             first_run_prompt_required: !providers.iter().any(|provider| provider.connected),
@@ -939,7 +1013,10 @@ impl SyncManager {
             .filter(|session| !session.token.trim().is_empty())
     }
 
-    fn should_run_github_gist_auto_sync(&self) -> bool {
+    fn should_run_github_gist_auto_sync(&self, force: bool) -> bool {
+        if force {
+            return true;
+        }
         let now = Utc::now();
         let next_allowed_at = self.github_gist_next_auto_sync_at.lock().as_ref().cloned();
         if let Some(next_allowed_at) = next_allowed_at {
@@ -964,6 +1041,73 @@ impl SyncManager {
         };
         let next_allowed_at = Utc::now() + ChronoDuration::seconds(delay_secs);
         *self.github_gist_next_auto_sync_at.lock() = Some(next_allowed_at);
+    }
+
+    fn should_run_server_auto_sync(&self, provider_id: &str, force: bool) -> bool {
+        if force {
+            return true;
+        }
+        let now = Utc::now();
+        let next_allowed_at = self
+            .server_next_auto_sync_at
+            .lock()
+            .get(provider_id)
+            .cloned();
+        if let Some(next_allowed_at) = next_allowed_at {
+            if now >= next_allowed_at {
+                return true;
+            }
+            tracing::debug!(
+                target: "bifrost_sync::manager",
+                provider_id,
+                next_allowed_at = ?next_allowed_at,
+                "server auto sync skipped by provider cooldown"
+            );
+            return false;
+        }
+        true
+    }
+
+    fn finish_server_auto_sync_attempt(&self, provider_id: &str, success: bool) {
+        let delay_secs = if success {
+            SERVER_AUTO_SYNC_MIN_INTERVAL_SECS
+        } else {
+            SERVER_AUTO_SYNC_ERROR_BACKOFF_SECS
+        };
+        let next_allowed_at = Utc::now() + ChronoDuration::seconds(delay_secs);
+        self.server_next_auto_sync_at
+            .lock()
+            .insert(provider_id.to_string(), next_allowed_at);
+    }
+
+    fn record_server_config_sync_action(
+        &self,
+        sync_config: &SyncConfig,
+        config_action: SyncAction,
+    ) -> Result<()> {
+        if config_action == SyncAction::NoChange {
+            return Ok(());
+        }
+        let Some(provider_id) = provider_id_for_remote(&sync_config.remote_base_url) else {
+            return Ok(());
+        };
+        let mut state = self.state.lock();
+        let current_action = state
+            .provider_sync
+            .get(provider_id)
+            .and_then(|meta| meta.last_sync_action)
+            .or(state.last_sync_action)
+            .unwrap_or(SyncAction::NoChange);
+        let combined_action = combine_sync_actions(current_action, config_action);
+        let sync_at = Utc::now().to_rfc3339();
+        state.last_sync_at = Some(sync_at.clone());
+        state.last_sync_action = Some(combined_action);
+        if sync_action_has_changes(Some(combined_action)) {
+            state.last_changed_sync_at = Some(sync_at.clone());
+            state.last_changed_sync_action = Some(combined_action);
+        }
+        record_provider_sync_success(&mut state, provider_id, sync_at, Some(combined_action));
+        self.persist_state(&state)
     }
 
     async fn sync_github_gist_once(
@@ -1104,12 +1248,18 @@ impl SyncManager {
         }
         let mut state = self.state.lock();
         let sync_at = Utc::now().to_rfc3339();
+        let sync_action = if rules_changed || configs_changed {
+            SyncAction::LocalPushed
+        } else {
+            SyncAction::NoChange
+        };
         state.last_sync_at = Some(sync_at.clone());
+        state.last_sync_action = Some(sync_action);
         record_provider_sync_success(
             &mut state,
             GITHUB_GIST_PROVIDER_ID,
             sync_at,
-            Some(SyncAction::NoChange),
+            Some(sync_action),
         );
         self.persist_state(&state)?;
         Ok(())
@@ -1844,10 +1994,15 @@ impl SyncManager {
                 .count();
 
             let result = match self.sync_rules(&client, &sync_config, &token, &user).await {
-                Ok(()) => {
-                    self.sync_basic_configs(&client, &sync_config, &token, &user)
-                        .await
-                }
+                Ok(()) => match self
+                    .sync_basic_configs(&client, &sync_config, &token, &user)
+                    .await
+                {
+                    Ok(config_action) => {
+                        self.record_server_config_sync_action(&sync_config, config_action)
+                    }
+                    Err(error) => Err(error),
+                },
                 Err(error) => Err(error),
             };
             if result.is_ok() {
@@ -1926,21 +2081,30 @@ impl SyncManager {
         loop {
             let config = self.config_manager.config().await;
             let interval = Duration::from_secs(config.sync.probe_interval_secs.max(2));
+            let mut force_sync = false;
             tokio::select! {
                 _ = tokio::time::sleep(interval) => {}
-                _ = self.wake.notified() => {}
+                _ = self.wake.notified() => {
+                    force_sync = true;
+                }
                 event = receiver.recv() => {
                     match event {
                         Ok(ConfigChangeEvent::RulesChanged(origin))
-                            if origin.should_wake_sync() => {}
-                        Ok(ConfigChangeEvent::SyncConfigChanged) => {}
+                            if origin.should_wake_sync() => {
+                                force_sync = true;
+                            }
+                        Ok(ConfigChangeEvent::SyncConfigChanged) => {
+                            force_sync = true;
+                        }
                         Ok(_) => continue,
-                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            force_sync = true;
+                        }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
             }
-            if let Err(error) = self.tick().await {
+            if let Err(error) = self.tick_with_force(force_sync).await {
                 let mut runtime = self.runtime.write().await;
                 runtime.syncing = false;
                 runtime.reason = SyncReason::Error;
@@ -1949,7 +2113,12 @@ impl SyncManager {
         }
     }
 
+    #[cfg(test)]
     async fn tick(&self) -> Result<()> {
+        self.tick_with_force(false).await
+    }
+
+    async fn tick_with_force(&self, force_sync: bool) -> Result<()> {
         let _sync_guard = self.sync_lock.lock().await;
         let config = self.config_manager.config().await;
         if !config.sync.enabled {
@@ -1981,7 +2150,7 @@ impl SyncManager {
                 if !config.sync.auto_sync {
                     return Ok(());
                 }
-                if !self.should_run_github_gist_auto_sync() {
+                if !self.should_run_github_gist_auto_sync(force_sync) {
                     let mut runtime = self.runtime.write().await;
                     runtime.reachable = true;
                     runtime.authorized = true;
@@ -2037,7 +2206,7 @@ impl SyncManager {
         if !reachable {
             if let Some(session) = self.github_gist_session() {
                 let user = session.user.clone().unwrap_or_else(github_fallback_user);
-                if config.sync.auto_sync && self.should_run_github_gist_auto_sync() {
+                if config.sync.auto_sync && self.should_run_github_gist_auto_sync(force_sync) {
                     let result = self.sync_github_gist_provider(&session.token, &user).await;
                     self.finish_github_gist_auto_sync_attempt(result.is_ok());
                     if let Err(error) = result {
@@ -2089,7 +2258,7 @@ impl SyncManager {
             }
             if let Some(session) = self.github_gist_session() {
                 let user = session.user.clone().unwrap_or_else(github_fallback_user);
-                if config.sync.auto_sync && self.should_run_github_gist_auto_sync() {
+                if config.sync.auto_sync && self.should_run_github_gist_auto_sync(force_sync) {
                     let result = self.sync_github_gist_provider(&session.token, &user).await;
                     self.finish_github_gist_auto_sync_attempt(result.is_ok());
                     if let Err(error) = result {
@@ -2146,6 +2315,19 @@ impl SyncManager {
             return Ok(());
         }
 
+        let provider_id = provider_id_for_remote(&config.sync.remote_base_url);
+        if let Some(provider_id) = provider_id {
+            if !self.should_run_server_auto_sync(provider_id, force_sync) {
+                let mut runtime = self.runtime.write().await;
+                runtime.reachable = true;
+                runtime.authorized = true;
+                runtime.syncing = false;
+                runtime.reason = SyncReason::Ready;
+                runtime.last_error = None;
+                return Ok(());
+            }
+        }
+
         {
             let mut runtime = self.runtime.write().await;
             runtime.reachable = true;
@@ -2156,16 +2338,24 @@ impl SyncManager {
         }
 
         let result = match self.sync_rules(&client, &config.sync, &token, &user).await {
-            Ok(()) => {
-                self.sync_basic_configs(&client, &config.sync, &token, &user)
-                    .await
-            }
+            Ok(()) => match self
+                .sync_basic_configs(&client, &config.sync, &token, &user)
+                .await
+            {
+                Ok(config_action) => {
+                    self.record_server_config_sync_action(&config.sync, config_action)
+                }
+                Err(error) => Err(error),
+            },
             Err(error) => Err(error),
         };
+        if let Some(provider_id) = provider_id {
+            self.finish_server_auto_sync_attempt(provider_id, result.is_ok());
+        }
         if result.is_ok() {
             if let Some(session) = self.github_gist_session() {
                 let gist_user = session.user.unwrap_or_else(|| user.clone());
-                if self.should_run_github_gist_auto_sync() {
+                if self.should_run_github_gist_auto_sync(force_sync) {
                     let result = self
                         .mirror_github_gist_provider(&session.token, &gist_user)
                         .await;
@@ -2790,7 +2980,7 @@ impl SyncManager {
         config: &SyncConfig,
         token: &str,
         user: &RemoteUser,
-    ) -> Result<()> {
+    ) -> Result<SyncAction> {
         let unified = self.config_manager.config().await;
         let snapshots = [
             (
@@ -2833,6 +3023,7 @@ impl SyncManager {
                 }),
             }
         }
+        let pushed_local = !update_list.is_empty();
 
         let data = match client
             .sync_basic_configs(config, token, &user.user_id, check_list, update_list)
@@ -2850,7 +3041,7 @@ impl SyncManager {
                     error = %error,
                     "remote sync provider does not expose basic config sync; skipping"
                 );
-                return Ok(());
+                return Ok(SyncAction::NoChange);
             }
             Err(error) => return Err(error),
         };
@@ -2914,7 +3105,7 @@ impl SyncManager {
             );
         }
 
-        Ok(())
+        Ok(sync_action_from_flags(pushed_local, remote_applied))
     }
 
     async fn apply_remote_basic_config(&self, remote: &RemoteBasicConfig) -> Result<bool> {
@@ -3210,14 +3401,15 @@ mod tests {
         let (_temp, _config_manager, manager) =
             sync_manager_for_remote(GITHUB_GIST_REMOTE_BASE_URL).await;
 
-        assert!(manager.should_run_github_gist_auto_sync());
+        assert!(manager.should_run_github_gist_auto_sync(false));
 
         manager.finish_github_gist_auto_sync_attempt(true);
-        assert!(!manager.should_run_github_gist_auto_sync());
+        assert!(!manager.should_run_github_gist_auto_sync(false));
+        assert!(manager.should_run_github_gist_auto_sync(true));
 
         *manager.github_gist_next_auto_sync_at.lock() =
             Some(Utc::now() - ChronoDuration::seconds(1));
-        assert!(manager.should_run_github_gist_auto_sync());
+        assert!(manager.should_run_github_gist_auto_sync(false));
     }
 
     #[tokio::test]
@@ -3235,6 +3427,72 @@ mod tests {
             .unwrap();
         let remaining = next_allowed_at - Utc::now();
         assert!(remaining.num_seconds() >= GITHUB_GIST_AUTO_SYNC_ERROR_BACKOFF_SECS - 5);
+    }
+
+    #[tokio::test]
+    async fn server_auto_sync_cooldown_skips_probe_ticks_but_allows_forced_changes() {
+        let (_temp, _config_manager, manager) =
+            sync_manager_for_remote("https://bifrost.bytedance.net").await;
+
+        assert!(manager.should_run_server_auto_sync("bytedance_internal", false));
+
+        manager.finish_server_auto_sync_attempt("bytedance_internal", true);
+        assert!(!manager.should_run_server_auto_sync("bytedance_internal", false));
+        assert!(manager.should_run_server_auto_sync("bytedance_internal", true));
+
+        *manager
+            .server_next_auto_sync_at
+            .lock()
+            .get_mut("bytedance_internal")
+            .unwrap() = Utc::now() - ChronoDuration::seconds(1);
+        assert!(manager.should_run_server_auto_sync("bytedance_internal", false));
+    }
+
+    #[tokio::test]
+    async fn server_config_sync_action_updates_last_changed_only_for_content_changes() {
+        let (_temp, _config_manager, manager) =
+            sync_manager_for_remote("https://bifrost.bytedance.net").await;
+        let sync_config = SyncConfig {
+            remote_base_url: "https://bifrost.bytedance.net".to_string(),
+            ..Default::default()
+        };
+
+        manager
+            .record_server_config_sync_action(&sync_config, SyncAction::NoChange)
+            .unwrap();
+        {
+            let state = manager.state.lock();
+            assert!(state.last_sync_at.is_none());
+            assert!(state.last_changed_sync_at.is_none());
+            assert!(!state.provider_sync.contains_key("bytedance_internal"));
+        }
+
+        {
+            let mut state = manager.state.lock();
+            record_provider_sync_success(
+                &mut state,
+                "bytedance_internal",
+                "2026-07-07T00:00:00Z".to_string(),
+                Some(SyncAction::RemotePulled),
+            );
+        }
+
+        manager
+            .record_server_config_sync_action(&sync_config, SyncAction::LocalPushed)
+            .unwrap();
+        let state = manager.state.lock();
+        let meta = state.provider_sync.get("bytedance_internal").unwrap();
+        assert_eq!(state.last_sync_action, Some(SyncAction::Bidirectional));
+        assert_eq!(
+            state.last_changed_sync_action,
+            Some(SyncAction::Bidirectional)
+        );
+        assert_eq!(meta.last_sync_action, Some(SyncAction::Bidirectional));
+        assert_eq!(
+            meta.last_changed_sync_action,
+            Some(SyncAction::Bidirectional)
+        );
+        assert_eq!(state.last_changed_sync_at, meta.last_changed_sync_at);
     }
 
     #[test]
@@ -3320,7 +3578,24 @@ mod tests {
         let meta = state.provider_sync.get(GITHUB_GIST_PROVIDER_ID).unwrap();
         assert_eq!(meta.last_sync_at.as_deref(), Some("2026-07-07T00:00:00Z"));
         assert_eq!(meta.last_sync_action, Some(SyncAction::NoChange));
+        assert!(meta.last_changed_sync_at.is_none());
+        assert_eq!(meta.last_changed_sync_action, None);
         assert!(meta.last_error.is_none());
+
+        record_provider_sync_success(
+            &mut state,
+            GITHUB_GIST_PROVIDER_ID,
+            "2026-07-07T00:05:00Z".to_string(),
+            Some(SyncAction::LocalPushed),
+        );
+        let meta = state.provider_sync.get(GITHUB_GIST_PROVIDER_ID).unwrap();
+        assert_eq!(meta.last_sync_at.as_deref(), Some("2026-07-07T00:05:00Z"));
+        assert_eq!(meta.last_sync_action, Some(SyncAction::LocalPushed));
+        assert_eq!(
+            meta.last_changed_sync_at.as_deref(),
+            Some("2026-07-07T00:05:00Z")
+        );
+        assert_eq!(meta.last_changed_sync_action, Some(SyncAction::LocalPushed));
 
         state.provider_sessions.insert(
             "bifrost_cloud".to_string(),
@@ -4200,6 +4475,8 @@ mod tests {
                 ProviderSyncMeta {
                     last_sync_at: Some("2026-07-07T09:00:00Z".to_string()),
                     last_sync_action: Some(SyncAction::NoChange),
+                    last_changed_sync_at: None,
+                    last_changed_sync_action: None,
                     last_error: Some("stale cloud error".to_string()),
                 },
             );
@@ -5421,6 +5698,16 @@ mod tests {
             });
             state.last_sync_at = Some("2026-06-12T00:00:00Z".to_string());
             state.last_sync_action = Some(SyncAction::RemotePulled);
+            state.provider_sync.insert(
+                "bifrost_cloud".to_string(),
+                ProviderSyncMeta {
+                    last_sync_at: Some("2026-06-12T00:05:00Z".to_string()),
+                    last_sync_action: Some(SyncAction::NoChange),
+                    last_changed_sync_at: Some("2026-06-12T00:01:00Z".to_string()),
+                    last_changed_sync_action: Some(SyncAction::LocalPushed),
+                    last_error: None,
+                },
+            );
         }
 
         {
@@ -5441,10 +5728,32 @@ mod tests {
         assert!(status.authorized);
         assert!(!status.syncing);
         assert_eq!(status.reason, SyncReason::Ready);
-        assert_eq!(status.last_sync_at.as_deref(), Some("2026-06-12T00:00:00Z"));
-        assert_eq!(status.last_sync_action, Some(SyncAction::RemotePulled));
+        assert_eq!(status.last_sync_at.as_deref(), Some("2026-06-12T00:05:00Z"));
+        assert_eq!(status.last_sync_action, Some(SyncAction::NoChange));
+        assert_eq!(
+            status.last_changed_sync_at.as_deref(),
+            Some("2026-06-12T00:01:00Z")
+        );
+        assert_eq!(
+            status.last_changed_sync_action,
+            Some(SyncAction::LocalPushed)
+        );
         assert_eq!(status.last_error.as_deref(), Some("previous error"));
         assert_eq!(status.user.unwrap().user_id, "user-42");
+        let cloud = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == "bifrost_cloud")
+            .unwrap();
+        assert_eq!(cloud.last_sync_action, Some(SyncAction::NoChange));
+        assert_eq!(
+            cloud.last_changed_sync_action,
+            Some(SyncAction::LocalPushed)
+        );
+        assert_eq!(
+            cloud.check_interval_secs,
+            Some(SERVER_AUTO_SYNC_MIN_INTERVAL_SECS)
+        );
     }
 
     #[tokio::test]
