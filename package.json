@@ -6,6 +6,10 @@
     "cli:build": "cargo build -p bifrost-cli --release",
     "e2e:all": "bash scripts/run_all_e2e.sh",
     "e2e:ci": "bash scripts/run_all_e2e.sh --ci",
+    "design:lint": "designmd lint DESIGN.md",
+    "design:spec": "node scripts/design-md-spec.mjs",
+    "design:export:tailwind": "designmd export --format json-tailwind DESIGN.md",
+    "design:export:css": "designmd export --format css-tailwind DESIGN.md",
     "site:dev": "pnpm --dir site dev",
     "site:build": "pnpm --dir site build",
     "site:preview": "pnpm --dir site preview",
@@ -18,6 +22,7 @@
     "release:all": "pnpm run cli:build && pnpm run desktop:build"
   },
   "devDependencies": {
+    "@google/design.md": "^0.3.0",
     "@tauri-apps/cli": "^2.0.0"
   }
 }
