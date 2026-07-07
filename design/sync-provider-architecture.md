@@ -892,6 +892,37 @@ Routing editor interaction:
 - Editing opens a drawer, not a nested card. The drawer includes provider checkboxes, capability warnings, and a dry-run summary.
 - Saving invalid routing is blocked client-side and server-side.
 
+### Multi-provider write safety
+
+V1 must avoid multi-master data sync. Multiple providers may be connected at
+the same time, but every lane has exactly one active writer role:
+
+- `Remote Invoke`: fan-out registration is safe because each eligible provider
+  owns an independent relay URL and session token. ByteDance Internal and
+  Bifrost Cloud can both be active as dual channels.
+- `Rules Sync` and `Config Sync`: the active `bifrost-server` provider is the
+  authoritative read/write provider when any ByteDance Internal or Bifrost
+  Cloud server session is active.
+- `GitHub Gist`: when it is the only data provider, it can perform bidirectional
+  personal rules/basic config sync. When a `bifrost-server` provider is active,
+  GitHub Gist becomes a mirror snapshot only: Bifrost writes the current local
+  rules/basic config snapshot to the private gist, but does not pull Gist data
+  back into local storage.
+
+Implementation guardrails:
+
+- Gist rule ids use the `gist:` prefix. Bifrost Server sync must ignore `gist:`
+  `remote_id` values and Gist tombstones, so it never treats a Gist object id as
+  a server env id and never deletes/updates the wrong remote object.
+- Gist-only basic config metadata is namespaced in `sync-state.json`, for
+  example `github_gist:domain_allowlist`, so it does not reuse the same
+  basic-config hash slot as ByteDance Internal or Bifrost Cloud.
+- Manual `Sync Now` and background `tick()` use the same provider order: server
+  sync first when a server session exists, then Gist mirror; otherwise Gist
+  bidirectional sync if Gist is the only connected data provider.
+- Mirror mode must not call `RuleFile::mark_synced` and must not overwrite the
+  rule's server `remote_id`, `remote_user_id`, `remote_updated_at`, or status.
+
 ### Add Sync Service
 
 Add provider cards:
@@ -1194,6 +1225,7 @@ This implementation pass lands the release foundation for provider-aware sync:
 - GitHub Gist supports only user-provided GitHub token sign-in in this release. Bifrost validates the token against GitHub `/user` and stores an independent `github_gist` provider session. OAuth callback and device-flow login are intentionally not exposed because they require a production GitHub App/OAuth App ownership story that this release does not have.
 - GitHub Gist now discovers or creates a private `Bifrost Sync Snapshot` gist and stores one `bifrost-sync-snapshot.json` file. The snapshot covers personal rules plus the allowed basic config keys `app_allowlist`, `domain_allowlist`, and `blacklist`.
 - Real GitHub validation with a temporary PAT covered: provider login, rule create sync, rule edit sync, rule delete sync, basic config create/update sync, and cleanup by deleting the temporary test gist.
+- Multi-provider data safety is enforced in code: ByteDance Internal/Bifrost Cloud server sync remains the authoritative data lane when a server session exists, GitHub Gist switches to mirror-only mode in that case, `gist:` ids are ignored by server sync, and Gist basic-config metadata is namespaced to avoid hash-slot collisions.
 - Remote Invoke registration targets are resolved from all eligible connected providers. ByteDance-only, Bifrost Cloud-only, and ByteDance+Bifrost Cloud dual-channel startup/runtime login all register with the matching relay URL and provider session token. The runtime keeps one worker per eligible relay URL and stops workers whose provider session was removed.
 - CLI `bifrost sync status` now lists provider status and capability flags.
 

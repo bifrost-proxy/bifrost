@@ -612,6 +612,27 @@ Settings 页面是 Bifrost 管理端的系统设置中心，包含多个功能 T
 **执行记录**：
 - 2026-07-07：PASS。使用用户提供的临时 GitHub token 在独立 `BIFROST_DATA_DIR`、禁用 ByteDance 自动登录的 9914 端口环境完成真实 GitHub API 验证。`/sync/status` 返回 `github_gist` connected，用户标识为 GitHub 账号；新增规则后 snapshot 包含该规则和三类基础配置；编辑规则和配置后 snapshot 更新为 `host://127.0.0.1:3001`、`gist-sync-updated.example.com`、`BifrostTestAppUpdated`、`skip-updated.gist-sync.example.com`；删除规则后 snapshot 规则列表为空且基础配置保持最新值。测试结束已删除临时测试 gist、停止 9914 端口服务并清理临时数据目录。
 
+#### TC-WST-42：多同步服务同时连接时不互相覆盖或震荡
+
+**操作步骤**：
+1. 准备一个同时存在 Bifrost Server provider session 和 GitHub Gist provider session 的临时 `sync-state.json`。
+2. 创建一条已有 server 同步元数据的规则，`remote_id=server-env-1`。
+3. 执行一次 GitHub Gist mirror 同步。
+4. 检查本地规则同步元数据。
+5. 创建一条只带 `gist:` remote id 的规则，然后执行 Bifrost Server sync。
+6. 检查 server sync 行为和本地规则同步元数据。
+7. 检查基础配置 sync metadata。
+
+**预期结果**：
+- GitHub Gist mirror 只更新 private gist snapshot，不调用本地规则 `mark_synced`，不覆盖 `server-env-1`、`remote_user_id`、`remote_updated_at` 或规则 sync status。
+- Bifrost Server sync 忽略 `gist:` remote id 和 Gist tombstone，不会把 `gist:` id 当作 `/v4/env/{id}` 去 PATCH/DELETE。
+- 当 server 远端没有该规则时，Bifrost Server sync 会创建自己的 server env，并把本地规则切换到 server remote id。
+- GitHub Gist 的基础配置 meta key 使用 `github_gist:<config_key>`，不会覆盖 server provider 使用的 `<config_key>` hash 槽位。
+- 手动同步和后台自动同步的 provider 顺序一致：server sync first，GitHub Gist mirror second；没有 server session 时才允许 GitHub Gist 双向同步。
+
+**执行记录**：
+- 2026-07-07：PASS。执行 `cargo test -p bifrost-sync -- --nocapture`，其中 `github_gist_mirror_does_not_overwrite_server_rule_metadata` 验证 Gist mirror 不改 server rule metadata，`server_sync_ignores_github_gist_remote_metadata` 验证 server sync 忽略 `gist:` id 并创建自己的 server remote，`github_gist_snapshot_syncs_basic_config_updates` 验证 Gist basic-config metadata 使用 `github_gist:` 命名空间。
+
 ---
 
 ## 清理

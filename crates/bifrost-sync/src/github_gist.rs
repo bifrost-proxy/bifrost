@@ -61,6 +61,7 @@ pub(crate) struct GitHubGistRemoteSnapshot {
 #[derive(Clone)]
 pub(crate) struct GitHubGistClient {
     http: reqwest::Client,
+    api_base_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,12 +93,19 @@ struct GitHubGistWriteFile<'a> {
 
 impl GitHubGistClient {
     pub(crate) fn new() -> Result<Self> {
+        Self::new_with_base_url(GITHUB_API_BASE_URL)
+    }
+
+    pub(crate) fn new_with_base_url(api_base_url: &str) -> Result<Self> {
         let http = bifrost_core::outbound_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::limited(10))
             .build()
             .map_err(|e| BifrostError::Network(format!("failed to build GitHub client: {e}")))?;
-        Ok(Self { http })
+        Ok(Self {
+            http,
+            api_base_url: api_base_url.trim_end_matches('/').to_string(),
+        })
     }
 
     pub(crate) async fn load_snapshot(&self, token: &str) -> Result<GitHubGistRemoteSnapshot> {
@@ -137,7 +145,7 @@ impl GitHubGistClient {
             .map_err(|e| BifrostError::Config(format!("encode GitHub Gist snapshot: {e}")))?;
         let body = write_request(&content);
         if let Some(gist_id) = &remote.gist_id {
-            let url = format!("{GITHUB_API_BASE_URL}/gists/{gist_id}");
+            let url = format!("{}/gists/{gist_id}", self.api_base_url);
             let gist = self
                 .request_json::<_, GitHubGistSummary>(
                     reqwest::Method::PATCH,
@@ -148,7 +156,7 @@ impl GitHubGistClient {
                 .await?;
             return Ok(gist.id);
         }
-        let url = format!("{GITHUB_API_BASE_URL}/gists");
+        let url = format!("{}/gists", self.api_base_url);
         let gist = self
             .request_json::<_, GitHubGistSummary>(reqwest::Method::POST, &url, token, Some(&body))
             .await?;
@@ -157,7 +165,7 @@ impl GitHubGistClient {
 
     async fn find_snapshot_gist(&self, token: &str) -> Result<Option<String>> {
         for page in 1..=5 {
-            let url = format!("{GITHUB_API_BASE_URL}/gists?per_page=100&page={page}");
+            let url = format!("{}/gists?per_page=100&page={page}", self.api_base_url);
             let gists = self
                 .request_json::<(), Vec<GitHubGistSummary>>(reqwest::Method::GET, &url, token, None)
                 .await?;
@@ -175,7 +183,7 @@ impl GitHubGistClient {
     }
 
     async fn get_gist(&self, token: &str, gist_id: &str) -> Result<GitHubGistSummary> {
-        let url = format!("{GITHUB_API_BASE_URL}/gists/{gist_id}");
+        let url = format!("{}/gists/{gist_id}", self.api_base_url);
         self.request_json::<(), GitHubGistSummary>(reqwest::Method::GET, &url, token, None)
             .await
     }
@@ -246,5 +254,162 @@ fn write_request(content: &str) -> GitHubGistWriteRequest<'_> {
         description: GITHUB_GIST_DESCRIPTION,
         public: false,
         files,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn load_snapshot_discovers_and_reads_existing_gist() {
+        let server = MockServer::start().await;
+        let client = GitHubGistClient::new_with_base_url(&server.uri()).unwrap();
+        let snapshot = GitHubGistSnapshot {
+            version: 1,
+            updated_at: "2026-07-07T00:00:00Z".to_string(),
+            user_id: "github:1".to_string(),
+            rules: vec![GitHubGistRule {
+                id: "gist:rule-1".to_string(),
+                user_id: "github:1".to_string(),
+                name: "rule-1".to_string(),
+                rule: "example.com host://127.0.0.1:3000".to_string(),
+                create_time: "2026-07-07T00:00:00Z".to_string(),
+                update_time: "2026-07-07T00:00:00Z".to_string(),
+            }],
+            basic_configs: HashMap::new(),
+        };
+        let snapshot_content = serde_json::to_string(&snapshot).unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/gists"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": "gist-1",
+                    "description": GITHUB_GIST_DESCRIPTION,
+                    "files": {
+                        GITHUB_GIST_SNAPSHOT_FILE: {}
+                    }
+                }
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gists/gist-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "gist-1",
+                "description": GITHUB_GIST_DESCRIPTION,
+                "files": {
+                    GITHUB_GIST_SNAPSHOT_FILE: {
+                        "content": snapshot_content
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let loaded = client.load_snapshot("token").await.unwrap();
+        assert_eq!(loaded.gist_id.as_deref(), Some("gist-1"));
+        assert_eq!(loaded.snapshot.user_id, "github:1");
+        assert_eq!(loaded.snapshot.rules[0].name, "rule-1");
+    }
+
+    #[tokio::test]
+    async fn load_snapshot_returns_default_when_not_found() {
+        let server = MockServer::start().await;
+        let client = GitHubGistClient::new_with_base_url(&server.uri()).unwrap();
+        Mock::given(method("GET"))
+            .and(path("/gists"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        let loaded = client.load_snapshot("token").await.unwrap();
+        assert!(loaded.gist_id.is_none());
+        assert!(loaded.snapshot.rules.is_empty());
+    }
+
+    #[tokio::test]
+    async fn save_snapshot_creates_or_updates_secret_gist() {
+        let server = MockServer::start().await;
+        let client = GitHubGistClient::new_with_base_url(&server.uri()).unwrap();
+        let snapshot = GitHubGistSnapshot {
+            version: 1,
+            updated_at: "2026-07-07T00:00:00Z".to_string(),
+            user_id: "github:1".to_string(),
+            rules: Vec::new(),
+            basic_configs: HashMap::new(),
+        };
+
+        Mock::given(method("POST"))
+            .and(path("/gists"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "created-gist",
+                "description": GITHUB_GIST_DESCRIPTION,
+                "files": {}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/gists/existing-gist"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "existing-gist",
+                "description": GITHUB_GIST_DESCRIPTION,
+                "files": {}
+            })))
+            .mount(&server)
+            .await;
+
+        let created = client
+            .save_snapshot(
+                "token",
+                &GitHubGistRemoteSnapshot {
+                    gist_id: None,
+                    snapshot: snapshot.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(created, "created-gist");
+
+        let updated = client
+            .save_snapshot(
+                "token",
+                &GitHubGistRemoteSnapshot {
+                    gist_id: Some("existing-gist".to_string()),
+                    snapshot,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated, "existing-gist");
+    }
+
+    #[tokio::test]
+    async fn request_json_reports_auth_and_parse_errors() {
+        let server = MockServer::start().await;
+        let client = GitHubGistClient::new_with_base_url(&server.uri()).unwrap();
+        Mock::given(method("GET"))
+            .and(path("/gists"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+
+        let auth_error = client.load_snapshot("token").await.unwrap_err();
+        assert!(auth_error.to_string().contains("missing the gist scope"));
+
+        let server = MockServer::start().await;
+        let client = GitHubGistClient::new_with_base_url(&server.uri()).unwrap();
+        Mock::given(method("GET"))
+            .and(path("/gists"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&server)
+            .await;
+        let parse_error = client.load_snapshot("token").await.unwrap_err();
+        assert!(parse_error
+            .to_string()
+            .contains("invalid GitHub Gist response"));
     }
 }
