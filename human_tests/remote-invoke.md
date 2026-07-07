@@ -5316,26 +5316,28 @@ rm -rf /tmp/bifrost-remote-overload.*
 
 ## TC-RI-回归-154：Remote Invoke shell E2E 不能在同一 shard 内并行互相撤销授权
 
-**背景**：PR `codex/sync-provider-design` 的 GitHub Actions run `28840969358` 中，macOS aarch64 shell shard 2 在并行执行 remote-invoke 相关 shell 测试时出现 `approve pairing should return 200` 实际 500、`Authorization ... expired or revoked on the relay`、`pair_slot_occupied` 等失败。复现确认 `test_remote_invoke_e2e.sh`、`test_remote_file_relay_e2e.sh`、`test_remote_invoke_ssh_e2e.sh` 分别串行运行均可通过，但并行运行时会共享 relay grant 状态、caller connection cache 或 pair slot，导致 sibling 测试互相撤销授权。修复要求 CI shell runner 将这三类测试纳入已有串行隔离列表。
+**背景**：PR `codex/sync-provider-design` 的 GitHub Actions run `28840969358` 中，macOS aarch64 shell shard 2 在并行执行 remote-invoke 相关 shell 测试时出现 `approve pairing should return 200` 实际 500、`Authorization ... expired or revoked on the relay`、`pair_slot_occupied` 等失败。复现确认 `test_remote_invoke_e2e.sh`、`test_remote_file_relay_e2e.sh`、`test_remote_invoke_ssh_e2e.sh` 分别串行运行均可通过，但并行运行时会共享 relay grant 状态、caller connection cache 或 pair slot，导致 sibling 测试互相撤销授权。后续 run `28843962643` 进一步证明 shard 1 中 `test_remote_invoke_v5_session_refresh_e2e.sh` 也会被同一 shard 内其它 remote pairing 脚本干扰，修复要求 CI shell runner 将所有会启动 relay、进入 discovery、pending pairing 或通过 `--relay-url` 建立连接的 remote pairing 家族纳入串行隔离列表。
 
 ### 操作步骤
 
-1. 在当前分支确认 `scripts/run_all_e2e.sh` 的 `ISOLATED_AFTER_TESTS` 包含：
-   `test_remote_invoke_e2e.sh`、`test_remote_file_relay_e2e.sh`、`test_remote_invoke_ssh_e2e.sh`。
-2. 验证 shard 2 shell 测试列表仍包含 remote-invoke 相关脚本：
+1. 在当前分支确认 `scripts/run_all_e2e.sh` 的 `ISOLATED_AFTER_TESTS` 包含以下 remote pairing 家族脚本：
+   `test_remote_invoke_e2e.sh`、`test_remote_file_relay_e2e.sh`、`test_remote_invoke_recent_calls_args_preview_e2e.sh`、`test_remote_invoke_recent_calls_persistence_e2e.sh`、`test_remote_invoke_ssh_e2e.sh`、`test_remote_invoke_v5_session_refresh_e2e.sh`、`test_remote_relay_tls_trust_e2e.sh`、`test_remote_relay_url_fallback_e2e.sh`、`test_remote_search_traffic_cli_isomorphic_e2e.sh`。
+2. 验证 shard 1 shell 测试列表中的 remote pairing 脚本被选择但会进入串行队列：
+   `BIFROST_E2E_SHARD_INDEX=1 BIFROST_E2E_SHARD_TOTAL=2 bash scripts/run_all_e2e.sh --ci --skip-rules --skip-runner --skip-ui --list-shell-tests | rg 'test_remote_(invoke_v5_session_refresh|invoke_recent_calls|relay_url_fallback|search_traffic)'`。
+3. 验证 shard 2 shell 测试列表仍包含 remote-invoke 相关脚本：
    `BIFROST_E2E_SHARD_INDEX=2 BIFROST_E2E_SHARD_TOTAL=2 bash scripts/run_all_e2e.sh --ci --skip-rules --skip-runner --skip-ui --list-shell-tests | rg 'test_remote_(invoke_e2e|file_relay|invoke_ssh)'`。
-3. 验证全量 shell 测试列表包含 SSH 用例：
+4. 验证全量 shell 测试列表包含 SSH 用例：
    `bash scripts/run_all_e2e.sh --ci --skip-rules --skip-runner --skip-ui --list-shell-tests | rg 'test_remote_invoke_ssh_e2e'`。
-4. 串行执行 Remote File Relay E2E：
+5. 串行执行 Remote File Relay E2E：
    `SKIP_BUILD=true BIFROST_E2E_HTTP_RETRIES=2 TIMEOUT=90 e2e-tests/tests/test_remote_file_relay_e2e.sh`。
-5. 串行执行 SSH Remote Invoke E2E：
+6. 串行执行 SSH Remote Invoke E2E：
    `SKIP_BUILD=true BIFROST_E2E_HTTP_RETRIES=2 TIMEOUT=90 e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`。
-6. 串行执行主 Remote Invoke E2E：
+7. 串行执行主 Remote Invoke E2E：
    `SKIP_BUILD=true BIFROST_E2E_HTTP_RETRIES=2 TIMEOUT=90 e2e-tests/tests/test_remote_invoke_e2e.sh`。
 
 ### 预期结果
 
-- Runner 将这三条 remote-invoke 类 shell 测试从 parallel batch 移入 serial batch。
+- Runner 将 remote pairing 家族 shell 测试从 parallel batch 移入 serial batch。
 - 三条脚本串行运行时均使用随机端口和隔离 `BIFROST_DATA_DIR`，不使用 9900，不修改系统代理。
 - `test_remote_file_relay_e2e.sh` 完整通过 file read/list/stat/hash/write/edit/patch/transfer/readonly 等链路。
 - `test_remote_invoke_ssh_e2e.sh` 完整通过 SSH key challenge、grant、remote exec/file/traffic/search、revoke 等链路。
@@ -5345,7 +5347,7 @@ rm -rf /tmp/bifrost-remote-overload.*
 
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
-| TC-RI-回归-154 | ✅ PASS | 2026-07-07 先复现并行干扰：同时运行 `test_remote_invoke_e2e.sh`、`test_remote_file_relay_e2e.sh`、`test_remote_invoke_ssh_e2e.sh` 时，本地出现与 CI 一致的 `approve pairing should return 200` 实际 500、SSH grant 被 relay 判定 expired/revoked。补充最小探针确认单独 target/relay/caller approve 返回 200。随后修改 `scripts/run_all_e2e.sh` 将三条 remote-invoke 类脚本加入 `ISOLATED_AFTER_TESTS`。执行 shard 2 list 命令确认 `test_remote_invoke_e2e.sh` 与 `test_remote_file_relay_e2e.sh` 在当前 shard；执行全量 list 命令确认 `test_remote_invoke_ssh_e2e.sh` 仍被选择。串行复测 `test_remote_file_relay_e2e.sh` 通过，最终 `Total: 107 / Passed: 107 / Failed: 0`；串行复测 `test_remote_invoke_ssh_e2e.sh` 通过，输出 `All SSH remote invoke E2E checks passed`；串行复测 `test_remote_invoke_e2e.sh` 通过，最终 `All assertions: total=91 passed=91 failed=0`。全流程使用随机端口和隔离数据目录，未使用 9900，未修改系统代理。 |
+| TC-RI-回归-154 | ✅ PASS | 2026-07-07 先复现并行干扰：同时运行 `test_remote_invoke_e2e.sh`、`test_remote_file_relay_e2e.sh`、`test_remote_invoke_ssh_e2e.sh` 时，本地出现与 CI 一致的 `approve pairing should return 200` 实际 500、SSH grant 被 relay 判定 expired/revoked。补充最小探针确认单独 target/relay/caller approve 返回 200。随后修改 `scripts/run_all_e2e.sh` 将三条 remote-invoke 类脚本加入 `ISOLATED_AFTER_TESTS`。执行 shard 2 list 命令确认 `test_remote_invoke_e2e.sh` 与 `test_remote_file_relay_e2e.sh` 在当前 shard；执行全量 list 命令确认 `test_remote_invoke_ssh_e2e.sh` 仍被选择。串行复测 `test_remote_file_relay_e2e.sh` 通过，最终 `Total: 107 / Passed: 107 / Failed: 0`；串行复测 `test_remote_invoke_ssh_e2e.sh` 通过，输出 `All SSH remote invoke E2E checks passed`；串行复测 `test_remote_invoke_e2e.sh` 通过，最终 `All assertions: total=91 passed=91 failed=0`。run `28843962643` 又在 shard 1 的 `test_remote_invoke_v5_session_refresh_e2e.sh` 复现同类 approve 500，因此继续把 `test_remote_invoke_recent_calls_args_preview_e2e.sh`、`test_remote_invoke_recent_calls_persistence_e2e.sh`、`test_remote_invoke_v5_session_refresh_e2e.sh`、`test_remote_relay_tls_trust_e2e.sh`、`test_remote_relay_url_fallback_e2e.sh`、`test_remote_search_traffic_cli_isomorphic_e2e.sh` 纳入同一串行隔离家族，并用 shard 1/shard 2 list 命令验证这些用例仍被选择。全流程使用随机端口和隔离数据目录，未使用 9900，未修改系统代理。 |
 
 > 说明：核心可测逻辑（行数推导 `visible_table_rows`、列宽预算 `adaptive_column_widths`）已抽成纯函数，
 > 由 `crates/bifrost-cli/src/commands/status_tui.rs` 的单元测试覆盖；TUI 实时渲染部分已在
