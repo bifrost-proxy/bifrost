@@ -243,6 +243,24 @@
 - 文档明确失败或取消登录会回到弹窗/选中 provider 状态, 不把 provider 标记为 connected。
 - 文档明确 Web UI validation 有对应 Playwright 用例覆盖 dismiss 和 start flow。
 
+### TC-SPA-14: GitHub Gist token 失效时卡片提示重新连接
+
+**操作步骤**:
+
+1. 执行:
+   ```bash
+   rg -n "GitHub Gist token expiration|GitHub Gist token expired|Reconnect required|New Token|last_error|authorized=false" design/sync-provider-architecture.md
+   ```
+2. 启动带有失效 `github_gist` session 的 Bifrost 管理端, 或使用单元/E2E 注入同等 `/api/sync/status` 响应。
+3. 打开 Settings Sync 页面, 查看 GitHub Gist provider 卡片。
+
+**预期结果**:
+
+- `/api/sync/status` 中 GitHub Gist provider 保留 `connected=true`, 但返回 `authorized=false`, `reason=error`, `last_error` 包含 GitHub token 失效或 gist scope 错误。
+- GitHub Gist 卡片不再显示健康 `Connected`; 状态标签显示 `Reconnect required`。
+- 卡片内显示 inline error, 文案包含后端 GitHub token 错误。
+- 卡片仍显示 `New Token`/token 生成入口、`Reconnect` 和 `Sign Out`, 方便用户换 token 或退出。
+
 ## 清理步骤
 
 本用例只读文档, 无需清理临时服务或数据目录。
@@ -255,6 +273,7 @@
 - 2026-07-07: PASS - 执行 TC-SPA-11 的 `rg` 静态审查命令, 命中三 provider 卡片网格、稳定顺序、最多三列、窄屏一列、V1 不展示 WebDAV/custom placeholder 和 Playwright/DOM 断言要求。
 - 2026-07-07: PASS - 执行 TC-SPA-12 的 `rg` 静态审查命令, 命中 ByteDance Internal 与 Bifrost Cloud 两个服务端路径、现有代码入口、`/v4/config/sync`、`/v4/capabilities`、新增表、capability gating 和三 PR 协同发布要求。
 - 2026-07-07: PASS - 执行 TC-SPA-13 的 `rg` 静态审查命令, 命中首次无登录弹窗状态机、关闭不触发登录、选择 provider 后点击 Start 才进入 ByteDance/Bifrost Cloud/GitHub Gist 对应登录或 setup 流程、失败/取消回到弹窗状态和 Playwright 覆盖要求。
+- 2026-07-07: PASS - 执行 TC-SPA-14 的 `rg` 静态审查命令, 命中 GitHub Gist token 失效卡片级提示、`Reconnect required`、`New Token`、provider `authorized=false` 和 `last_error` 要求。实现阶段执行 `cargo test -p bifrost-sync status_marks_github_gist_session_unauthorized_after_token_error`、`pnpm --dir web test:unit src/pages/Settings/tabs/SyncTab.test.ts`、`e2e-tests/tests/test_sync_github_gist_expired_status_e2e.sh`、`BIFROST_UI_TEST_TARGET_DIR=/Users/eden/work/github/bifrost/target pnpm --dir web test:ui web/tests/ui/admin-settings.spec.ts -g "GitHub Gist token 失效"` 均通过, 确认失效 Gist session 在 API 中保留 `connected=true` 以显示 Reconnect/Sign Out, 同时返回 `authorized=false`, `reason=error`, `last_error`, UI 卡片显示 `Reconnect required` 和 inline GitHub token 错误。
 - 2026-07-07: PASS - 实现阶段在主仓库执行 `cargo check -p bifrost-sync -p bifrost-admin -p bifrost-cli`, `pnpm --dir packages/bifrost-sync-server lint`, `pnpm --dir packages/bifrost-sync-server test`, `pnpm --dir web run build`, `pnpm --dir web test:ui web/tests/ui/admin-settings.spec.ts -g "Provider 卡片"`; 均通过。人工复核确认 Settings Sync 三 provider 卡片、首登弹窗可关闭、Start 触发 ByteDance/Bifrost Cloud 既有登录链路、Bifrost Cloud 配置同步服务端校验和存储测试均覆盖。
 - 2026-07-07: PASS - Review/Fix/Test 第 1 轮执行 `cargo test -p bifrost-sync` 发现旧 mock/旧服务未实现 `/v4/config/sync` 时规则同步会被配置同步拖失败; 已修复为旧服务端点缺失或旧格式空 data 时跳过基础配置同步、不影响规则同步。复跑 `cargo test -p bifrost-sync` 通过 121/121, 复跑 `cargo test -p bifrost-cli sync_cmd` 通过。
 - 2026-07-07: PASS - Review/Fix/Test 第 2 轮执行 `git diff --check` 覆盖主仓库和 `/Users/eden_studio/work/github/bifrost-server-v4`, 均无 whitespace error; 静态检索确认无残留 `block_on`, Provider 卡片与 `basic_configs` 状态路径均在预期文件中。

@@ -54,6 +54,8 @@ export interface SyncProviderStatus {
   enabled: boolean;
   reachable: boolean;
   authorized: boolean;
+  reason: SyncReason;
+  last_error?: string | null;
   user?: SyncUser | null;
   capabilities: SyncProviderCapabilities;
   remote_invoke_registered: boolean;

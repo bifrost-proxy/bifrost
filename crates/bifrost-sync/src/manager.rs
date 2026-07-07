@@ -160,6 +160,8 @@ pub struct SyncProviderStatus {
     pub enabled: bool,
     pub reachable: bool,
     pub authorized: bool,
+    pub reason: SyncReason,
+    pub last_error: Option<String>,
     pub user: Option<RemoteUser>,
     pub capabilities: SyncProviderCapabilities,
     pub remote_invoke_registered: bool,
@@ -220,6 +222,24 @@ fn provider_id_for_remote(remote_base_url: &str) -> Option<&'static str> {
     }
 }
 
+fn is_github_gist_error(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("github gist") || normalized.contains("github token")
+}
+
+fn is_github_gist_auth_error(message: &str) -> bool {
+    if !is_github_gist_error(message) {
+        return false;
+    }
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("invalid")
+        || normalized.contains("missing the gist scope")
+        || normalized.contains("does not have access")
+        || normalized.contains("unauthorized")
+        || normalized.contains("status 401")
+        || normalized.contains("status 403")
+}
+
 fn session_for_provider<'a>(
     provider_sessions: &'a HashMap<String, SyncProviderSession>,
     provider_id: &str,
@@ -258,9 +278,19 @@ fn build_provider_statuses(
     let bytedance_session = session_for_provider(provider_sessions, "bytedance_internal");
     let cloud_session = session_for_provider(provider_sessions, "bifrost_cloud");
     let github_gist_session = session_for_provider(provider_sessions, "github_gist");
+    let github_gist_last_error = runtime
+        .last_error
+        .as_ref()
+        .filter(|error| is_github_gist_error(error))
+        .cloned();
+    let github_gist_auth_error = github_gist_last_error
+        .as_deref()
+        .is_some_and(is_github_gist_auth_error);
     let bytedance_connected =
         bytedance_session.is_some() || (bytedance_selected && current_connected);
     let cloud_connected = cloud_session.is_some() || (cloud_selected && current_connected);
+    let github_gist_connected = github_gist_session.is_some();
+    let github_gist_authorized = github_gist_connected && !github_gist_auth_error;
 
     vec![
         SyncProviderStatus {
@@ -272,6 +302,20 @@ fn build_provider_statuses(
             enabled: sync_config.enabled && (bytedance_selected || bytedance_session.is_some()),
             reachable: bytedance_session.is_some() || (bytedance_selected && runtime.reachable),
             authorized: bytedance_session.is_some() || (bytedance_selected && runtime.authorized),
+            reason: if bytedance_selected {
+                runtime.reason.clone()
+            } else if bytedance_session.is_some() {
+                SyncReason::Ready
+            } else {
+                SyncReason::Unauthorized
+            },
+            last_error: (bytedance_selected
+                && !runtime
+                    .last_error
+                    .as_deref()
+                    .is_some_and(is_github_gist_error))
+            .then(|| runtime.last_error.clone())
+            .flatten(),
             user: bytedance_session
                 .and_then(|session| session.user.clone())
                 .or_else(|| {
@@ -305,6 +349,20 @@ fn build_provider_statuses(
             enabled: sync_config.enabled && (cloud_selected || cloud_session.is_some()),
             reachable: cloud_session.is_some() || (cloud_selected && runtime.reachable),
             authorized: cloud_session.is_some() || (cloud_selected && runtime.authorized),
+            reason: if cloud_selected {
+                runtime.reason.clone()
+            } else if cloud_session.is_some() {
+                SyncReason::Ready
+            } else {
+                SyncReason::Unauthorized
+            },
+            last_error: (cloud_selected
+                && !runtime
+                    .last_error
+                    .as_deref()
+                    .is_some_and(is_github_gist_error))
+            .then(|| runtime.last_error.clone())
+            .flatten(),
             user: cloud_session
                 .and_then(|session| session.user.clone())
                 .or_else(|| {
@@ -324,10 +382,18 @@ fn build_provider_statuses(
             name: "GitHub Gist".to_string(),
             description: "Public GitHub Gist-backed portable sync provider.".to_string(),
             remote_base_url: Some(GITHUB_GIST_REMOTE_BASE_URL.to_string()),
-            connected: github_gist_session.is_some(),
-            enabled: sync_config.enabled && github_gist_session.is_some(),
-            reachable: github_gist_session.is_some(),
-            authorized: github_gist_session.is_some(),
+            connected: github_gist_connected,
+            enabled: sync_config.enabled && github_gist_connected,
+            reachable: github_gist_connected,
+            authorized: github_gist_authorized,
+            reason: if github_gist_last_error.is_some() {
+                SyncReason::Error
+            } else if github_gist_connected {
+                SyncReason::Ready
+            } else {
+                SyncReason::Unauthorized
+            },
+            last_error: github_gist_last_error,
             user: github_gist_session.and_then(|session| session.user.clone()),
             capabilities: SyncProviderCapabilities {
                 rules_sync: true,
@@ -2822,6 +2888,8 @@ mod tests {
             .expect("github gist provider");
         assert!(gist.connected);
         assert!(gist.authorized);
+        assert_eq!(gist.reason, SyncReason::Ready);
+        assert!(gist.last_error.is_none());
         assert!(gist.capabilities.rules_sync);
         assert!(gist.capabilities.config_sync);
         assert!(!gist.capabilities.remote_invoke);
@@ -2833,6 +2901,50 @@ mod tests {
         assert_eq!(
             gist.user.as_ref().map(|user| user.user_id.as_str()),
             Some("github:12345")
+        );
+        assert!(!status.first_run_prompt_required);
+    }
+
+    #[tokio::test]
+    async fn status_marks_github_gist_session_unauthorized_after_token_error() {
+        let (_temp_dir, _config_manager, manager) =
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+        {
+            let mut state = manager.state.lock();
+            state.provider_sessions.insert(
+                "github_gist".to_string(),
+                SyncProviderSession {
+                    token: "expired-ghp-token".to_string(),
+                    remote_base_url: GITHUB_GIST_REMOTE_BASE_URL.to_string(),
+                    user: Some(test_user("github:12345")),
+                },
+            );
+            manager.persist_state(&state).unwrap();
+        }
+        {
+            let mut runtime = manager.runtime.write().await;
+            runtime.reachable = true;
+            runtime.authorized = true;
+            runtime.reason = SyncReason::Error;
+            runtime.last_error =
+                Some("GitHub token is invalid or missing the gist scope".to_string());
+        }
+
+        let status = manager.status().await;
+        let gist = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == "github_gist")
+            .expect("github gist provider");
+        assert!(
+            gist.connected,
+            "saved session should keep reconnect/sign-out actions visible"
+        );
+        assert!(!gist.authorized);
+        assert_eq!(gist.reason, SyncReason::Error);
+        assert_eq!(
+            gist.last_error.as_deref(),
+            Some("GitHub token is invalid or missing the gist scope")
         );
         assert!(!status.first_run_prompt_required);
     }

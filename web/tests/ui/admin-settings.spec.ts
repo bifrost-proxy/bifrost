@@ -1296,6 +1296,96 @@ test("Settings Sync GitHub Gist 支持 token 登录", async ({ page }) => {
   );
 });
 
+test("Settings Sync GitHub Gist token 失效时显示卡片级重连提示", async ({ page }) => {
+  await page.route("**/_bifrost/api/sync/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        enabled: true,
+        auto_sync: true,
+        remote_base_url: "https://bifrost.bytedance.net",
+        has_session: true,
+        reachable: true,
+        authorized: false,
+        syncing: false,
+        reason: "error",
+        last_sync_at: null,
+        last_sync_action: null,
+        last_error: "GitHub token is invalid or missing the gist scope",
+        user: null,
+        first_run_prompt_required: false,
+        providers: [
+          {
+            id: "bytedance_internal",
+            name: "ByteDance Internal",
+            description: "Internal trusted sync and Remote Invoke provider.",
+            remote_base_url: "https://bifrost.bytedance.net",
+            connected: false,
+            enabled: true,
+            reachable: true,
+            authorized: false,
+            reason: "unauthorized",
+            last_error: null,
+            user: null,
+            capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+            remote_invoke_registered: false,
+          },
+          {
+            id: "bifrost_cloud",
+            name: "Bifrost Cloud",
+            description: "Custom Bifrost sync service for teams and self-hosting.",
+            remote_base_url: "https://sync.example.test",
+            connected: false,
+            enabled: false,
+            reachable: false,
+            authorized: false,
+            reason: "unauthorized",
+            last_error: null,
+            user: null,
+            capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+            remote_invoke_registered: false,
+          },
+          {
+            id: "github_gist",
+            name: "GitHub Gist",
+            description: "Public GitHub Gist-backed portable sync provider.",
+            remote_base_url: "https://api.github.com/gists",
+            connected: true,
+            enabled: true,
+            reachable: true,
+            authorized: false,
+            reason: "error",
+            last_error: "GitHub token is invalid or missing the gist scope",
+            user: {
+              user_id: "github:12345",
+              nickname: "octocat",
+              avatar: "",
+              email: "",
+            },
+            capabilities: { remote_invoke: false, rules_sync: true, config_sync: true },
+            remote_invoke_registered: false,
+          },
+        ],
+      }),
+    });
+  });
+
+  await openPage(page, "settings?tab=sync");
+
+  const gistCard = page.getByTestId("settings-sync-provider-card-github_gist");
+  await expect(gistCard).toContainText("Reconnect required");
+  await expect(gistCard).toContainText("GitHub token is invalid or missing the gist scope");
+  await expect(page.getByTestId("settings-sync-provider-error-github_gist")).toBeVisible();
+  await expect(page.getByTestId("settings-sync-provider-github-gist-token-link")).toContainText(
+    "New Token",
+  );
+  await expect(page.getByTestId("settings-sync-provider-login-github_gist")).toContainText(
+    "Reconnect",
+  );
+  await expect(page.getByTestId("settings-sync-provider-logout-github_gist")).toBeVisible();
+});
+
 test("Settings Sync Remote Invoke 支持 ByteDance、Bifrost Cloud 与双通道状态", async ({
   page,
 }) => {

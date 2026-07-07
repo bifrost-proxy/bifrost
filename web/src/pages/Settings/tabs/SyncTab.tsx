@@ -55,17 +55,25 @@ function capabilityTags(provider: SyncProviderStatus) {
   );
 }
 
-function providerStatusTag(provider: SyncProviderStatus) {
+export function syncProviderStatusBadge(provider: SyncProviderStatus) {
+  if (provider.last_error || (provider.connected && !provider.authorized)) {
+    return { color: "red", label: "Reconnect required" };
+  }
   if (provider.connected) {
-    return <Tag color="green">Connected</Tag>;
+    return { color: "green", label: "Connected" };
   }
   if (provider.enabled && provider.reachable) {
-    return <Tag color="gold">Sign in required</Tag>;
+    return { color: "gold", label: "Sign in required" };
   }
   if (provider.enabled && !provider.reachable) {
-    return <Tag color="orange">Offline</Tag>;
+    return { color: "orange", label: "Offline" };
   }
-  return <Tag>Not connected</Tag>;
+  return { color: undefined, label: "Not connected" };
+}
+
+function providerStatusTag(provider: SyncProviderStatus) {
+  const badge = syncProviderStatusBadge(provider);
+  return <Tag color={badge.color}>{badge.label}</Tag>;
 }
 
 const fallbackProviders: SyncProviderStatus[] = [
@@ -78,6 +86,8 @@ const fallbackProviders: SyncProviderStatus[] = [
     enabled: false,
     reachable: false,
     authorized: false,
+    reason: "unauthorized",
+    last_error: null,
     user: null,
     capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
     remote_invoke_registered: false,
@@ -91,6 +101,8 @@ const fallbackProviders: SyncProviderStatus[] = [
     enabled: false,
     reachable: false,
     authorized: false,
+    reason: "unauthorized",
+    last_error: null,
     user: null,
     capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
     remote_invoke_registered: false,
@@ -104,6 +116,8 @@ const fallbackProviders: SyncProviderStatus[] = [
     enabled: false,
     reachable: false,
     authorized: false,
+    reason: "unauthorized",
+    last_error: null,
     user: null,
     capabilities: { remote_invoke: false, rules_sync: true, config_sync: true },
     remote_invoke_registered: false,
@@ -230,10 +244,17 @@ export default function SyncTab({
               <Text type="secondary">{provider.description}</Text>
               {provider.id === "github_gist" ? (
                 <Alert
-                  type="info"
+                  type={provider.last_error ? "error" : "info"}
                   showIcon
-                  message="Generate a GitHub token with the gist scope, then paste it into Bifrost."
-                  description="Rules and basic settings are stored in a private Gist snapshot. Do not sync secrets here."
+                  message={
+                    provider.last_error
+                      ? "GitHub Gist token needs attention"
+                      : "Generate a GitHub token with the gist scope, then paste it into Bifrost."
+                  }
+                  description={
+                    provider.last_error ||
+                    "Rules and basic settings are stored in a private Gist snapshot. Do not sync secrets here."
+                  }
                   action={
                     <Button
                       size="small"
@@ -243,9 +264,23 @@ export default function SyncTab({
                       icon={<GithubOutlined />}
                       data-testid="settings-sync-provider-github-gist-token-link"
                     >
-                      Generate Token
+                      {provider.last_error ? "New Token" : "Generate Token"}
                     </Button>
                   }
+                  data-testid={
+                    provider.last_error
+                      ? "settings-sync-provider-error-github_gist"
+                      : "settings-sync-provider-github-gist-info"
+                  }
+                />
+              ) : null}
+              {provider.id !== "github_gist" && provider.last_error ? (
+                <Alert
+                  type="error"
+                  showIcon
+                  message={`${provider.name} needs attention`}
+                  description={provider.last_error}
+                  data-testid={`settings-sync-provider-error-${provider.id}`}
                 />
               ) : null}
               {capabilityTags(provider)}

@@ -49,7 +49,7 @@ import {
   type SyncProviderStatus,
   type SyncStatus,
 } from "../../api/sync";
-import { isConnectionIssueError } from "../../api/client";
+import { isConnectionIssueError, normalizeApiErrorMessage } from "../../api/client";
 import { copyToClipboard } from "../../utils/clipboard";
 import { useSyncStore } from "../../stores/useSyncStore";
 import {
@@ -931,8 +931,10 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
           });
           applySyncStatus(status);
           message.success("GitHub Gist connected");
-        } catch {
-          message.error("Failed to connect GitHub Gist");
+        } catch (error) {
+          message.error(
+            normalizeApiErrorMessage(error, "Failed to connect GitHub Gist"),
+          );
         } finally {
           setSyncLoading(false);
         }

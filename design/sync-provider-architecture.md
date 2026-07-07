@@ -969,6 +969,10 @@ Steps:
 Settings Sync should have three levels of error presentation:
 
 - Card-level inline error for provider-specific failures.
+- GitHub Gist token expiration or missing `gist` scope must be surfaced on the
+  GitHub Gist card itself: the card keeps reconnect/sign-out actions visible,
+  shows `Reconnect required`, and renders the GitHub error text inline with a
+  new-token action.
 - Lane-level warning for routing or conflict problems.
 - Modal/drawer for conflicts that need user choice.
 
@@ -1154,6 +1158,7 @@ Add focused Playwright coverage in `web/tests/ui/admin-settings.spec.ts` or a de
 | Remote Invoke partial registration | ByteDance registered, Bifrost Cloud failed | UI shows partial registration, retry action targets Bifrost Cloud, ByteDance remains registered |
 | Bifrost Cloud setup | Capabilities probe returns Rules Sync + Config Sync + Remote Invoke | Wizard shows capability preview before login and offers immediate Remote Invoke registration |
 | GitHub Gist setup | Token validation succeeds and first sync creates/updates the private gist snapshot | Wizard/card shows token setup, Rules Sync + Config Sync preview, no Remote Invoke controls, and no OAuth callback/device-flow path |
+| GitHub Gist token expired | Saved `github_gist` session receives 401/403 from GitHub | GitHub Gist card shows `Reconnect required`, inline error text, `New Token`, `Reconnect`, and `Sign Out`; it must not continue to show a healthy `Connected` state |
 | Basic config scope | Routing drawer opens Basic Config lane | Drawer lists app allowlist, domain allowlist, blacklist/exclude list; no secrets, certificates, tokens, local port, or Remote Invoke grant fields appear |
 | Degraded/conflict states | Provider status includes conflict and last_error | Card-level error and conflict modal show lane/provider/object metadata and Pull/Push/Save copy actions |
 | Dark theme | `bifrost-theme=dark` before page load | Provider cards, modal, disabled chips, warning panels, and routing drawer use dark tokens and text remains readable |
@@ -1228,6 +1233,10 @@ This implementation pass lands the release foundation for provider-aware sync:
 - Multi-provider data safety is enforced in code: ByteDance Internal/Bifrost Cloud server sync remains the authoritative data lane when a server session exists, GitHub Gist switches to mirror-only mode in that case, `gist:` ids are ignored by server sync, and Gist basic-config metadata is namespaced to avoid hash-slot collisions.
 - Remote Invoke registration targets are resolved from all eligible connected providers. ByteDance-only, Bifrost Cloud-only, and ByteDance+Bifrost Cloud dual-channel startup/runtime login all register with the matching relay URL and provider session token. The runtime keeps one worker per eligible relay URL and stops workers whose provider session was removed.
 - CLI `bifrost sync status` now lists provider status and capability flags.
+- GitHub Gist token auth failures now propagate into provider-level status
+  (`authorized=false`, `reason=error`, `last_error=...`) so Settings Sync can
+  show an inline reconnect prompt instead of a misleading healthy Connected
+  badge.
 
 Known remaining implementation gaps before claiming the full original product target:
 
