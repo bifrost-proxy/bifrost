@@ -18,6 +18,7 @@ RUN_RUNNER=1
 RUN_UI=1
 SKIP_RELEASE_BUILD=0
 LIST_SHELL_TESTS=0
+CHECK_SHELL_SHARD_BALANCE=0
 PLATFORM="$(uname -s)"
 REPORT_DIR=""
 SHARD_INDEX="${BIFROST_E2E_SHARD_INDEX:-0}"
@@ -156,6 +157,9 @@ Options:
   --skip-build        Skip release binary compilation (use pre-built binary)
   --shard N/M         Run only shard N of M (1-indexed). E.g. --shard 1/3
   --list-shell-tests  Print the shell tests selected by the current mode/shard and exit
+  --check-shell-shard-balance
+                      Print weighted shell shard loads and fail if max/min drift
+                      exceeds BIFROST_E2E_SHARD_BALANCE_MAX_DIFF_PCT (default: 20)
   -h, --help          Show this help
 
 Environment variables:
@@ -197,6 +201,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --list-shell-tests)
       LIST_SHELL_TESTS=1
+      shift
+      ;;
+    --check-shell-shard-balance)
+      CHECK_SHELL_SHARD_BALANCE=1
       shift
       ;;
     --extract-failure-reason)
@@ -632,40 +640,52 @@ is_skipped_in_ci() {
 shell_test_weight() {
   case "$1" in
     test_agent_send_msg_default_channel.sh) echo 30 ;;
-    test_breakpoint_performance_guard.sh) echo 363 ;;
-    test_tls_intercept_e2e.sh) echo 165 ;;
-    test_chatgpt_web_behavior_artifacts.sh) echo 144 ;;
-    test_long_term_memory_remember_recall.sh) echo 123 ;;
-    test_http3_e2e.sh) echo 119 ;;
-    test_im_gateway_long_reply_delivery_regression.sh) echo 118 ;;
-    test_client_process_transport_attribution.sh) echo 104 ;;
-    test_devtools_page_bridge_api.sh) echo 53 ;;
-    test_remote_invoke_e2e.sh) echo 52 ;;
-    test_remote_job_real_e2e.sh) echo 64 ;;
-    test_group_sync_e2e.sh) echo 43 ;;
-    test_group_sync_no_logstorm_e2e.sh) echo 45 ;;
-    test_agent_builtin_status_runtime.sh) echo 43 ;;
+    test_desktop_open_requests_contract.sh) echo 705 ;;
+    test_long_term_memory_remember_recall.sh) echo 399 ;;
+    test_chatgpt_web_behavior_artifacts.sh) echo 381 ;;
+    test_skill_creator_flow.sh) echo 350 ;;
+    test_im_gateway_long_reply_delivery_regression.sh) echo 192 ;;
+    test_tls_intercept_e2e.sh) echo 170 ;;
+    test_remote_file_relay_e2e.sh) echo 128 ;;
+    test_http3_e2e.sh) echo 120 ;;
+    test_client_process_transport_attribution.sh) echo 103 ;;
+    test_security_hardening_functional.sh) echo 69 ;;
+    test_agent_builtin_status_runtime.sh) echo 64 ;;
+    test_upgrade_admin_api_restart_e2e.sh) echo 61 ;;
+    test_cli_online_commands_e2e.sh) echo 60 ;;
+    test_remote_invoke_e2e.sh) echo 59 ;;
+    test_remote_invoke_ssh_e2e.sh) echo 59 ;;
+    test_devtools_page_bridge_api.sh) echo 54 ;;
+    test_group_sync_e2e.sh) echo 49 ;;
     test_replay_websocket_frames.sh) echo 42 ;;
-    test_traffic_persistence_e2e.sh) echo 40 ;;
-    test_sse_frames.sh) echo 39 ;;
-    test_cli_online_commands_e2e.sh) echo 36 ;;
-    test_body_cache_sync_cleanup_admin_api.sh) echo 32 ;;
-    test_traffic_push_e2e.sh) echo 31 ;;
-    test_total_size_cleanup_admin_api.sh) echo 31 ;;
-    test_remote_file_relay_e2e.sh) echo 29 ;;
-    test_traffic_db_e2e.sh) echo 27 ;;
-    test_upgrade_tls_trust_e2e.sh) echo 26 ;;
+    test_traffic_persistence_e2e.sh) echo 41 ;;
+    test_group_sync_no_logstorm_e2e.sh) echo 39 ;;
+    test_sse_frames.sh) echo 38 ;;
+    test_body_cache_sync_cleanup_admin_api.sh) echo 33 ;;
+    test_traffic_push_e2e.sh) echo 33 ;;
+    test_total_size_cleanup_admin_api.sh) echo 32 ;;
+    test_frames_admin_api.sh) echo 29 ;;
     test_req_res_script_e2e.sh) echo 27 ;;
-    test_large_body_protection.sh) echo 24 ;;
-    test_socks5_tls_rules.sh) echo 23 ;;
+    test_traffic_db_e2e.sh) echo 27 ;;
+    test_large_body_protection.sh) echo 25 ;;
+    test_breakpoint_performance_guard.sh) echo 24 ;;
+    test_remote_search_traffic_cli_isomorphic_e2e.sh) echo 24 ;;
+    test_socks5_tls_rules.sh) echo 24 ;;
+    test_search_traffic_cli_isomorphic_e2e.sh) echo 23 ;;
+    test_im_gateway_traex_model_slash.sh) echo 22 ;;
+    test_remote_shell_exec_streaming_e2e.sh) echo 22 ;;
     test_temporary_port_bindings.sh) echo 22 ;;
-    test_search_traffic_cli_isomorphic_e2e.sh) echo 22 ;;
-    test_replay_rules.sh) echo 20 ;;
+    test_upgrade_restart_e2e.sh) echo 22 ;;
+    test_replay_rules.sh) echo 22 ;;
+    test_site_docs_sync.sh) echo 21 ;;
+    test_remote_job_real_e2e.sh) echo 20 ;;
+    test_websocket_frames.sh) echo 17 ;;
+    test_upgrade_tls_trust_e2e.sh) echo 16 ;;
     *) echo 8 ;;
   esac
 }
 
-collect_shell_tests() {
+collect_all_shell_tests() {
   local all_tests=()
   if [[ "$SHELL_MODE" == "full" ]]; then
     while IFS= read -r script_path; do
@@ -679,6 +699,15 @@ collect_shell_tests() {
   else
     all_tests=("${STABLE_SHELL_TESTS[@]}")
   fi
+
+  printf '%s\n' "${all_tests[@]}"
+}
+
+collect_shell_tests() {
+  local all_tests=()
+  while IFS= read -r name; do
+    [[ -n "$name" ]] && all_tests+=("$name")
+  done < <(collect_all_shell_tests)
 
   # Apply sharding if configured (duration-aware greedy partition).
   # Previously this was a duration-blind round-robin by sorted index, which
@@ -719,9 +748,73 @@ collect_shell_tests() {
   fi
 }
 
+check_shell_shard_balance() {
+  if [[ "$SHARD_TOTAL" -le 1 ]]; then
+    echo "Error: --check-shell-shard-balance requires --shard N/M with M > 1 or BIFROST_E2E_SHARD_TOTAL > 1" >&2
+    return 1
+  fi
+
+  local threshold="${BIFROST_E2E_SHARD_BALANCE_MAX_DIFF_PCT:-20}"
+  local all_tests=()
+  local name
+  while IFS= read -r name; do
+    [[ -n "$name" ]] && all_tests+=("$name")
+  done < <(collect_all_shell_tests)
+
+  local weighted=()
+  for name in "${all_tests[@]}"; do
+    weighted+=("$(printf '%08d\t%s' "$(shell_test_weight "$name")" "$name")")
+  done
+
+  local shard_load=()
+  local shard_count=()
+  local s
+  for ((s = 0; s < SHARD_TOTAL; s++)); do
+    shard_load[s]=0
+    shard_count[s]=0
+  done
+
+  local w
+  while IFS=$'\t' read -r w name; do
+    [[ -z "$name" ]] && continue
+    local min_idx=0
+    local min_load="${shard_load[0]}"
+    for ((s = 1; s < SHARD_TOTAL; s++)); do
+      if [[ "${shard_load[s]}" -lt "$min_load" ]]; then
+        min_load="${shard_load[s]}"
+        min_idx="$s"
+      fi
+    done
+    shard_load[min_idx]=$(( min_load + 10#$w ))
+    shard_count[min_idx]=$(( shard_count[min_idx] + 1 ))
+  done < <(printf '%s\n' "${weighted[@]}" | sort -t$'\t' -k1,1nr -k2,2)
+
+  local min="${shard_load[0]}"
+  local max="${shard_load[0]}"
+  local total=0
+  for ((s = 0; s < SHARD_TOTAL; s++)); do
+    (( shard_load[s] < min )) && min="${shard_load[s]}"
+    (( shard_load[s] > max )) && max="${shard_load[s]}"
+    total=$(( total + shard_load[s] ))
+    echo "shard $((s + 1))/$SHARD_TOTAL weight=${shard_load[s]} tests=${shard_count[s]}"
+  done
+
+  local diff=$(( max - min ))
+  local pct
+  pct="$(awk -v diff="$diff" -v total="$total" -v count="$SHARD_TOTAL" 'BEGIN { avg = total / count; if (avg > 0) { printf "%.1f", diff / avg * 100 } else { printf "0.0" } }')"
+  echo "shell shard balance: diff=${diff}s pct_of_avg=${pct}% threshold=${threshold}%"
+
+  awk -v pct="$pct" -v threshold="$threshold" 'BEGIN { exit (pct <= threshold ? 0 : 1) }'
+}
+
 if [[ "$LIST_SHELL_TESTS" -eq 1 ]]; then
   collect_shell_tests
   exit 0
+fi
+
+if [[ "$CHECK_SHELL_SHARD_BALANCE" -eq 1 ]]; then
+  check_shell_shard_balance
+  exit $?
 fi
 
 skip_suite() {
