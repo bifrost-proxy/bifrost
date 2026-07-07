@@ -227,7 +227,8 @@ export ADMIN_PORT="$(pick_free_port)"
 export BIFROST_DATA_DIR="${TEST_ROOT}/bifrost-default-data"
 admin_start_bifrost || exit 1
 LOGIN_DEFAULT_OUTPUT="$(CI=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" sync login --token ci-token-default 2>&1)"
-assert_body_contains "Login token saved" "$LOGIN_DEFAULT_OUTPUT" "CLI token-only login should save token" || exit 1
-assert_body_contains "Remote URL: https://bifrost.bytedance.net" "$LOGIN_DEFAULT_OUTPUT" "CLI token-only login should report built-in default URL" || exit 1
+assert_body_contains "Login successful" "$LOGIN_DEFAULT_OUTPUT" "CLI token-only login should save token" || exit 1
+DEFAULT_STATUS="$(admin_get "/api/sync/status")"
+assert_body_contains '"remote_base_url":"https://bifrost.bytedance.net"' "$DEFAULT_STATUS" "CLI token-only login should keep built-in default URL" || exit 1
 
 log "PASS"
