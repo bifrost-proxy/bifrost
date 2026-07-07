@@ -923,6 +923,15 @@ Implementation guardrails:
   bidirectional sync if Gist is the only connected data provider.
 - Mirror mode must not call `RuleFile::mark_synced` and must not overwrite the
   rule's server `remote_id`, `remote_user_id`, `remote_updated_at`, or status.
+- GitHub Gist change detection is semantic. The sync engine compares rule
+  content and basic-config canonical content hashes, not provider metadata such
+  as `create_time`, `update_time`, object ordering, JSON key ordering, or
+  allowlist item ordering. Metadata-only refreshes must not create a new Gist
+  revision.
+- GitHub Gist automatic background sync must be rate-aware. It must not run at
+  the same cadence as the server reachability probe; normal background attempts
+  are cooled down, and failures back off before retrying. Manual reconnect/sign
+  in remains immediate.
 
 ### Add Sync Service
 
@@ -981,6 +990,9 @@ Settings Sync should have three levels of error presentation:
   warning for the whole sync feature.
 - Each provider card shows that provider's last successful sync time and action.
   Provider-specific errors update only that provider's card-level status.
+- Provider login and sign-out are provider-scoped operations. Signing out from
+  Bifrost Cloud must remove only the Bifrost Cloud session; ByteDance Internal
+  and GitHub Gist sessions, status, and last sync metadata must remain intact.
 - Lane-level warning for routing or conflict problems.
 - Modal/drawer for conflicts that need user choice.
 
@@ -1133,6 +1145,8 @@ V1 does not sync:
 - Capability validation rejects Remote Invoke lanes that include GitHub Gist or file providers.
 - Basic config allowlist rejects unknown or sensitive config keys.
 - GitHub provider snapshot serializes only personal rules and the allowlisted basic config keys; it never serializes secrets, tokens, certificates, traffic history, local machine IDs, or Remote Invoke grants.
+- GitHub provider snapshot output is stable and semantic: rule order, basic-config object order, JSON key order, provider timestamps, and allowlist item order do not trigger a write when the actual rule/config content hash is unchanged.
+- GitHub provider automatic background sync uses a provider-level cooldown/backoff so GitHub API calls cannot repeat at the server probe interval.
 - Gist conflict detection when remote revision changes.
 - ByteDance detection handles 200, 401, timeout, TLS failure, DNS failure.
 - Bifrost Cloud `/v4/config/sync` rejects unknown keys, rejects sensitive values, syncs create/update/delete/check lists, and isolates users.
@@ -1168,7 +1182,10 @@ Add focused Playwright coverage in `web/tests/ui/admin-settings.spec.ts` or a de
 | GitHub Gist setup | Token validation succeeds and first sync creates/updates the private gist snapshot | Wizard/card shows token setup, Rules Sync + Config Sync preview, no Remote Invoke controls, and no OAuth callback/device-flow path |
 | GitHub Gist token expired | Saved `github_gist` session receives 401/403 from GitHub | GitHub Gist card shows `Reconnect required`, inline error text, `New Token`, `Reconnect`, and `Sign Out`; it must not continue to show a healthy `Connected` state |
 | Provider isolation | One provider is connected while another provider is disconnected, unreachable, or token-expired | Connected provider remains usable; global status does not show local-only/pluggable-sync warning; failed provider shows only its own card error |
+| Provider scoped sign-out | ByteDance Internal, Bifrost Cloud, and GitHub Gist are all signed in | Clicking `Sign Out` on one card calls that provider's logout endpoint only; the other two cards remain signed in and keep their last sync state |
 | Provider last sync | Provider completes sync or mirror successfully | The matching provider card shows its own last successful sync time/action; other provider cards are not overwritten with that timestamp |
+| GitHub Gist semantic no-change | Snapshot differs only by provider timestamps, object order, JSON key order, or allowlist item order | Sync reports no change and does not PATCH/POST the Gist snapshot |
+| GitHub Gist rate guard | Background tick runs repeatedly while GitHub Gist is connected | Gist auto sync is skipped until the provider cooldown expires; failures use a longer backoff and manual reconnect remains immediate |
 | Basic config scope | Routing drawer opens Basic Config lane | Drawer lists app allowlist, domain allowlist, blacklist/exclude list; no secrets, certificates, tokens, local port, or Remote Invoke grant fields appear |
 | Degraded/conflict states | Provider status includes conflict and last_error | Card-level error and conflict modal show lane/provider/object metadata and Pull/Push/Save copy actions |
 | Dark theme | `bifrost-theme=dark` before page load | Provider cards, modal, disabled chips, warning panels, and routing drawer use dark tokens and text remains readable |
@@ -1241,6 +1258,16 @@ This implementation pass lands the release foundation for provider-aware sync:
 - GitHub Gist now discovers or creates a private `Bifrost Sync Snapshot` gist and stores one `bifrost-sync-snapshot.json` file. The snapshot covers personal rules plus the allowed basic config keys `app_allowlist`, `domain_allowlist`, and `blacklist`.
 - Real GitHub validation with a temporary PAT covered: provider login, rule create sync, rule edit sync, rule delete sync, basic config create/update sync, and cleanup by deleting the temporary test gist.
 - Multi-provider data safety is enforced in code: ByteDance Internal/Bifrost Cloud server sync remains the authoritative data lane when a server session exists, GitHub Gist switches to mirror-only mode in that case, `gist:` ids are ignored by server sync, and Gist basic-config metadata is namespaced to avoid hash-slot collisions.
+- Provider session operations are scoped by provider id. Provider-specific
+  logout removes only the selected provider session and clears only that
+  provider's last error; other provider sessions and last sync metadata remain
+  untouched.
+- GitHub Gist no-change detection now ignores volatile provider metadata and
+  ordering. Rules compare by semantic rule content, basic config compares by
+  canonical JSON content hash, and saved snapshots use stable ordering.
+- GitHub Gist background sync now has a provider-level cooldown/backoff so a
+  5-second server probe interval cannot repeatedly PATCH/GET GitHub when there
+  is no semantic change or when GitHub is returning errors/rate limits.
 - Remote Invoke registration targets are resolved from all eligible connected providers. ByteDance-only, Bifrost Cloud-only, and ByteDance+Bifrost Cloud dual-channel startup/runtime login all register with the matching relay URL and provider session token. The runtime keeps one worker per eligible relay URL and stops workers whose provider session was removed.
 - CLI `bifrost sync status` now lists provider status and capability flags.
 - GitHub Gist token auth failures now propagate into provider-level status

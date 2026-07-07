@@ -12,7 +12,7 @@ use bifrost_storage::{
     content_hash, ConfigChangeEvent, ConfigManager, RuleFile, RuleSyncStatus, RulesChangeOrigin,
     RulesStorage, SyncConfig, SyncConfigUpdate, TlsConfigUpdate, DEFAULT_REMOTE_BASE_URL,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex as AsyncMutex, Notify, RwLock};
@@ -36,6 +36,8 @@ const LOGIN_BROWSER_DRY_RUN_FILE_ENV: &str = "BIFROST_SYNC_LOGIN_BROWSER_DRY_RUN
 const GITHUB_API_BASE_URL: &str = "https://api.github.com";
 const GITHUB_GIST_REMOTE_BASE_URL: &str = "https://api.github.com/gists";
 const GITHUB_GIST_PROVIDER_ID: &str = "github_gist";
+const GITHUB_GIST_AUTO_SYNC_MIN_INTERVAL_SECS: i64 = 5 * 60;
+const GITHUB_GIST_AUTO_SYNC_ERROR_BACKOFF_SECS: i64 = 15 * 60;
 
 pub type SharedSyncManager = Arc<SyncManager>;
 
@@ -233,6 +235,13 @@ fn provider_id_for_remote(remote_base_url: &str) -> Option<&'static str> {
     }
 }
 
+fn is_known_sync_provider_id(provider_id: &str) -> bool {
+    matches!(
+        provider_id,
+        "bytedance_internal" | "bifrost_cloud" | GITHUB_GIST_PROVIDER_ID
+    )
+}
+
 fn is_github_gist_error(message: &str) -> bool {
     let normalized = message.to_ascii_lowercase();
     normalized.contains("github gist") || normalized.contains("github token")
@@ -316,7 +325,8 @@ fn build_provider_statuses(
         .to_string();
     let bytedance_selected = is_bytedance_remote(&current_url);
     let cloud_selected = !bytedance_selected && !current_url.is_empty();
-    let current_connected = has_session && runtime.authorized;
+    let legacy_current_connected =
+        provider_sessions.is_empty() && has_session && runtime.authorized;
     let bytedance_session = session_for_provider(provider_sessions, "bytedance_internal");
     let cloud_session = session_for_provider(provider_sessions, "bifrost_cloud");
     let github_gist_session = session_for_provider(provider_sessions, "github_gist");
@@ -333,8 +343,8 @@ fn build_provider_statuses(
         .as_deref()
         .is_some_and(is_github_gist_auth_error);
     let bytedance_connected =
-        bytedance_session.is_some() || (bytedance_selected && current_connected);
-    let cloud_connected = cloud_session.is_some() || (cloud_selected && current_connected);
+        bytedance_session.is_some() || (bytedance_selected && legacy_current_connected);
+    let cloud_connected = cloud_session.is_some() || (cloud_selected && legacy_current_connected);
     let github_gist_connected = github_gist_session.is_some();
     let github_gist_authorized = github_gist_connected && !github_gist_auth_error;
 
@@ -346,8 +356,10 @@ fn build_provider_statuses(
             remote_base_url: Some(DEFAULT_REMOTE_BASE_URL.to_string()),
             connected: bytedance_connected,
             enabled: sync_config.enabled && (bytedance_selected || bytedance_session.is_some()),
-            reachable: bytedance_session.is_some() || (bytedance_selected && runtime.reachable),
-            authorized: bytedance_session.is_some() || (bytedance_selected && runtime.authorized),
+            reachable: bytedance_session.is_some()
+                || (bytedance_selected && provider_sessions.is_empty() && runtime.reachable),
+            authorized: bytedance_session.is_some()
+                || (bytedance_selected && provider_sessions.is_empty() && runtime.authorized),
             reason: if bytedance_selected {
                 runtime.reason.clone()
             } else if bytedance_session.is_some() {
@@ -368,7 +380,7 @@ fn build_provider_statuses(
             user: bytedance_session
                 .and_then(|session| session.user.clone())
                 .or_else(|| {
-                    (bytedance_selected && has_session)
+                    (bytedance_selected && provider_sessions.is_empty() && has_session)
                         .then(|| user.clone())
                         .flatten()
                 }),
@@ -388,8 +400,10 @@ fn build_provider_statuses(
                 .or_else(|| cloud_selected.then(|| current_url.clone())),
             connected: cloud_connected,
             enabled: sync_config.enabled && (cloud_selected || cloud_session.is_some()),
-            reachable: cloud_session.is_some() || (cloud_selected && runtime.reachable),
-            authorized: cloud_session.is_some() || (cloud_selected && runtime.authorized),
+            reachable: cloud_session.is_some()
+                || (cloud_selected && provider_sessions.is_empty() && runtime.reachable),
+            authorized: cloud_session.is_some()
+                || (cloud_selected && provider_sessions.is_empty() && runtime.authorized),
             reason: if cloud_selected {
                 runtime.reason.clone()
             } else if cloud_session.is_some() {
@@ -410,7 +424,7 @@ fn build_provider_statuses(
             user: cloud_session
                 .and_then(|session| session.user.clone())
                 .or_else(|| {
-                    (cloud_selected && has_session)
+                    (cloud_selected && provider_sessions.is_empty() && has_session)
                         .then(|| user.clone())
                         .flatten()
                 }),
@@ -481,6 +495,33 @@ fn server_remote_id_for_rule(rule: &RuleFile) -> Option<&str> {
 
 fn github_gist_basic_config_meta_key(key: &str) -> String {
     format!("{GITHUB_GIST_PROVIDER_ID}:{key}")
+}
+
+fn canonicalize_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                canonicalize_json_value(item);
+            }
+            items.sort_by_key(|item| item.to_string());
+        }
+        serde_json::Value::Object(map) => {
+            for value in map.values_mut() {
+                canonicalize_json_value(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn basic_config_content_hash(value_json: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(value_json)
+        .ok()
+        .map(|mut value| {
+            canonicalize_json_value(&mut value);
+            content_hash(&value.to_string())
+        })
+        .unwrap_or_else(|| content_hash(value_json))
 }
 
 fn gist_rule_to_remote_env(rule: GitHubGistRule) -> RemoteEnv {
@@ -564,6 +605,11 @@ impl SyncManagerHandle {
         Ok(self.inner.status().await)
     }
 
+    pub async fn logout_provider(&self, provider_id: &str) -> Result<SyncStatus> {
+        self.inner.logout_provider(provider_id).await?;
+        Ok(self.inner.status().await)
+    }
+
     pub fn trigger_sync(&self) {
         self.inner.trigger_sync();
     }
@@ -613,6 +659,7 @@ pub struct SyncManager {
     state_file: PathBuf,
     state: Mutex<SyncStateFile>,
     sync_lock: AsyncMutex<()>,
+    github_gist_next_auto_sync_at: Mutex<Option<DateTime<Utc>>>,
     login_prompt: Mutex<LoginPromptState>,
     runtime: RwLock<SyncRuntimeState>,
     wake: Notify,
@@ -642,6 +689,7 @@ impl SyncManager {
             state_file,
             state: Mutex::new(state),
             sync_lock: AsyncMutex::new(()),
+            github_gist_next_auto_sync_at: Mutex::new(None),
             login_prompt: Mutex::new(LoginPromptState::default()),
             runtime: RwLock::new(SyncRuntimeState::default()),
             wake: Notify::new(),
@@ -870,8 +918,14 @@ impl SyncManager {
                     user: Some(user),
                 },
             );
+            state
+                .provider_sync
+                .entry(GITHUB_GIST_PROVIDER_ID.to_string())
+                .or_default()
+                .last_error = None;
             self.persist_state(&state)?;
         }
+        *self.github_gist_next_auto_sync_at.lock() = None;
         self.wake.notify_one();
         Ok(())
     }
@@ -883,6 +937,33 @@ impl SyncManager {
             .get(GITHUB_GIST_PROVIDER_ID)
             .cloned()
             .filter(|session| !session.token.trim().is_empty())
+    }
+
+    fn should_run_github_gist_auto_sync(&self) -> bool {
+        let now = Utc::now();
+        let next_allowed_at = self.github_gist_next_auto_sync_at.lock().as_ref().cloned();
+        if let Some(next_allowed_at) = next_allowed_at {
+            if now >= next_allowed_at {
+                return true;
+            }
+            tracing::debug!(
+                target: "bifrost_sync::manager",
+                next_allowed_at = ?next_allowed_at,
+                "GitHub Gist auto sync skipped by provider cooldown"
+            );
+            return false;
+        }
+        true
+    }
+
+    fn finish_github_gist_auto_sync_attempt(&self, success: bool) {
+        let delay_secs = if success {
+            GITHUB_GIST_AUTO_SYNC_MIN_INTERVAL_SECS
+        } else {
+            GITHUB_GIST_AUTO_SYNC_ERROR_BACKOFF_SECS
+        };
+        let next_allowed_at = Utc::now() + ChronoDuration::seconds(delay_secs);
+        *self.github_gist_next_auto_sync_at.lock() = Some(next_allowed_at);
     }
 
     async fn sync_github_gist_once(
@@ -923,19 +1004,23 @@ impl SyncManager {
             .count();
 
         match result {
-            Ok(()) => Ok(SyncOnceResult {
-                success: true,
-                message: "GitHub Gist sync completed successfully".to_string(),
-                action: state
-                    .provider_sync
-                    .get(GITHUB_GIST_PROVIDER_ID)
-                    .and_then(|meta| meta.last_sync_action)
-                    .or(state.last_sync_action),
-                user: Some(user),
-                local_rules: local_count,
-                remote_rules: synced_count,
-            }),
+            Ok(()) => {
+                self.finish_github_gist_auto_sync_attempt(true);
+                Ok(SyncOnceResult {
+                    success: true,
+                    message: "GitHub Gist sync completed successfully".to_string(),
+                    action: state
+                        .provider_sync
+                        .get(GITHUB_GIST_PROVIDER_ID)
+                        .and_then(|meta| meta.last_sync_action)
+                        .or(state.last_sync_action),
+                    user: Some(user),
+                    local_rules: local_count,
+                    remote_rules: synced_count,
+                })
+            }
             Err(error) => {
+                self.finish_github_gist_auto_sync_attempt(false);
                 let mut state = self.state.lock();
                 record_provider_sync_error(&mut state, GITHUB_GIST_PROVIDER_ID, error.to_string());
                 self.persist_state(&state)?;
@@ -1050,6 +1135,7 @@ impl SyncManager {
         let mut next_rules = Vec::new();
         for local_rule in local_rules {
             let existing = existing_by_name.get(local_rule.name.as_str()).copied();
+            let content_changed = existing.is_none_or(|rule| rule.rule != local_rule.content);
             let id = existing
                 .map(|rule| rule.id.clone())
                 .unwrap_or_else(|| format!("gist:{}", local_rule.sync.rule_id));
@@ -1057,23 +1143,39 @@ impl SyncManager {
                 .map(|rule| rule.create_time.clone())
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| now.to_string());
+            let user_id = if content_changed {
+                user.user_id.clone()
+            } else {
+                existing
+                    .map(|rule| rule.user_id.clone())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| user.user_id.clone())
+            };
+            let update_time = if content_changed {
+                now.to_string()
+            } else {
+                existing
+                    .map(|rule| rule.update_time.clone())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| now.to_string())
+            };
             next_rules.push(GitHubGistRule {
                 id,
-                user_id: user.user_id.clone(),
+                user_id,
                 name: local_rule.name,
                 rule: local_rule.content,
                 create_time,
-                update_time: now.to_string(),
+                update_time,
             });
         }
         next_rules.sort_by(|left, right| left.name.cmp(&right.name));
-        let changed = serde_json::to_value(&snapshot.rules)
-            .ok()
-            .zip(serde_json::to_value(&next_rules).ok())
-            .is_none_or(|(current, next)| current != next);
-        if changed {
-            snapshot.rules = next_rules;
-        }
+        let changed = snapshot.rules.len() != next_rules.len()
+            || next_rules.iter().any(|next| {
+                existing_by_name
+                    .get(next.name.as_str())
+                    .is_none_or(|current| current.rule != next.rule)
+            });
+        snapshot.rules = next_rules;
         Ok(changed)
     }
 
@@ -1086,10 +1188,14 @@ impl SyncManager {
         let configs = self.current_basic_config_payloads().await?;
         let mut changed = false;
         for (key, value_json, hash) in configs {
-            let should_update = snapshot
-                .basic_configs
-                .get(key)
-                .is_none_or(|remote| remote.hash != hash || remote.value_json != value_json);
+            let should_update = snapshot.basic_configs.get(key).is_none_or(|remote| {
+                let remote_hash = if remote.hash.trim().is_empty() {
+                    basic_config_content_hash(&remote.value_json)
+                } else {
+                    remote.hash.clone()
+                };
+                remote_hash != hash
+            });
             if should_update {
                 snapshot.basic_configs.insert(
                     key.to_string(),
@@ -1191,24 +1297,30 @@ impl SyncManager {
                 consumed_remote_ids.insert(remote_env.id.clone());
                 match local_rule.sync.status {
                     RuleSyncStatus::Modified | RuleSyncStatus::LocalOnly => {
-                        upsert_gist_rule(snapshot, local_rule, Some(remote_env), user, now);
+                        let content_changed =
+                            content_hash(&local_rule.content) != content_hash(&remote_env.rule);
+                        if content_changed {
+                            upsert_gist_rule(snapshot, local_rule, Some(remote_env), user, now);
+                            pushed = true;
+                        }
                         let mut synced_rule = local_rule.clone();
                         synced_rule.mark_synced(
                             remote_env.id.clone(),
                             user.user_id.clone(),
                             remote_env.create_time.clone(),
-                            now.to_string(),
+                            if content_changed {
+                                now.to_string()
+                            } else {
+                                remote_env.update_time.clone()
+                            },
                         );
                         rules_storage.save(&synced_rule)?;
-                        pushed = true;
                         local_storage_changed = true;
                     }
                     RuleSyncStatus::Synced => {
                         let remote_hash = content_hash(&remote_env.rule);
-                        let remote_changed = local_rule.sync.remote_updated_at.as_deref()
-                            != Some(remote_env.update_time.as_str())
-                            || local_rule.sync.last_synced_content_hash.as_deref()
-                                != Some(remote_hash.as_str());
+                        let remote_changed = local_rule.sync.last_synced_content_hash.as_deref()
+                            != Some(remote_hash.as_str());
                         if remote_changed {
                             let mut updated = local_rule.clone();
                             updated.content = remote_env.rule.clone();
@@ -1297,44 +1409,65 @@ impl SyncManager {
         let mut meta_updates = Vec::new();
         for (key, value_json, hash) in snapshots {
             let meta_key = github_gist_basic_config_meta_key(key);
+            let remote = snapshot.basic_configs.get(key).cloned();
+            let remote_hash = remote.as_ref().map(|remote| {
+                if remote.hash.trim().is_empty() {
+                    basic_config_content_hash(&remote.value_json)
+                } else {
+                    remote.hash.clone()
+                }
+            });
             let local_changed = state_snapshot
                 .basic_configs
                 .get(&meta_key)
                 .and_then(|meta| meta.hash.as_deref())
                 != Some(hash.as_str());
             if local_changed {
-                snapshot.basic_configs.insert(
-                    key.to_string(),
-                    GitHubGistBasicConfig {
-                        id: key.to_string(),
-                        user_id: user.user_id.clone(),
-                        config_key: key.to_string(),
-                        value_json,
-                        hash: hash.clone(),
-                        create_time: snapshot
-                            .basic_configs
-                            .get(key)
-                            .map(|item| item.create_time.clone())
-                            .filter(|value| !value.is_empty())
-                            .unwrap_or_else(|| now.to_string()),
-                        update_time: now.to_string(),
-                    },
-                );
+                if remote_hash.as_deref() != Some(hash.as_str()) {
+                    snapshot.basic_configs.insert(
+                        key.to_string(),
+                        GitHubGistBasicConfig {
+                            id: key.to_string(),
+                            user_id: user.user_id.clone(),
+                            config_key: key.to_string(),
+                            value_json,
+                            hash: hash.clone(),
+                            create_time: remote
+                                .as_ref()
+                                .map(|item| item.create_time.clone())
+                                .filter(|value| !value.is_empty())
+                                .unwrap_or_else(|| now.to_string()),
+                            update_time: now.to_string(),
+                        },
+                    );
+                    pushed = true;
+                }
                 meta_updates.push((
                     meta_key,
                     BasicConfigSyncMeta {
-                        remote_updated_at: Some(now.to_string()),
+                        remote_updated_at: Some(
+                            remote
+                                .as_ref()
+                                .map(|remote| remote.update_time.clone())
+                                .filter(|value| !value.is_empty())
+                                .unwrap_or_else(|| now.to_string()),
+                        ),
                         hash: Some(hash),
                     },
                 ));
-                pushed = true;
-            } else if let Some(remote) = snapshot.basic_configs.get(key) {
-                let meta_key = github_gist_basic_config_meta_key(key);
+            } else if let Some(remote) = remote.as_ref() {
                 let known_hash = state_snapshot
                     .basic_configs
                     .get(&meta_key)
                     .and_then(|meta| meta.hash.as_deref());
-                if known_hash != Some(remote.hash.as_str())
+                let remote_hash = remote_hash.unwrap_or_else(|| {
+                    if remote.hash.trim().is_empty() {
+                        basic_config_content_hash(&remote.value_json)
+                    } else {
+                        remote.hash.clone()
+                    }
+                });
+                if known_hash != Some(remote_hash.as_str())
                     && self
                         .apply_remote_basic_config(&gist_config_to_remote(remote))
                         .await?
@@ -1343,7 +1476,7 @@ impl SyncManager {
                         meta_key,
                         BasicConfigSyncMeta {
                             remote_updated_at: Some(remote.update_time.clone()),
-                            hash: Some(remote.hash.clone()),
+                            hash: Some(remote_hash),
                         },
                     ));
                     pulled = true;
@@ -1372,14 +1505,18 @@ impl SyncManager {
             (
                 "app_allowlist",
                 app_allowlist.clone(),
-                content_hash(&app_allowlist),
+                basic_config_content_hash(&app_allowlist),
             ),
             (
                 "domain_allowlist",
                 domain_allowlist.clone(),
-                content_hash(&domain_allowlist),
+                basic_config_content_hash(&domain_allowlist),
             ),
-            ("blacklist", blacklist.clone(), content_hash(&blacklist)),
+            (
+                "blacklist",
+                blacklist.clone(),
+                basic_config_content_hash(&blacklist),
+            ),
         ])
     }
 
@@ -1540,6 +1677,76 @@ impl SyncManager {
             runtime.reason = SyncReason::Unauthorized;
             runtime.last_error = None;
         }
+        Ok(())
+    }
+
+    pub async fn logout_provider(&self, provider_id: &str) -> Result<()> {
+        if !is_known_sync_provider_id(provider_id) {
+            return Err(BifrostError::Config(format!(
+                "unknown sync provider: {provider_id}"
+            )));
+        }
+
+        let config = self.config_manager.config().await;
+        let current_provider_id = provider_id_for_remote(&config.sync.remote_base_url);
+        let mut remote_logout: Option<(SyncConfig, String)> = None;
+        let has_any_session = {
+            let mut state = self.state.lock();
+            let removed_session = state.provider_sessions.remove(provider_id);
+            if let Some(meta) = state.provider_sync.get_mut(provider_id) {
+                meta.last_error = None;
+            }
+
+            if provider_id != GITHUB_GIST_PROVIDER_ID {
+                let session_token = removed_session
+                    .as_ref()
+                    .map(|session| session.token.clone())
+                    .or_else(|| {
+                        (current_provider_id == Some(provider_id))
+                            .then(|| state.token.clone())
+                            .flatten()
+                    });
+                if let Some(token) = session_token.filter(|token| !token.trim().is_empty()) {
+                    let mut logout_config = config.sync.clone();
+                    logout_config.remote_base_url = removed_session
+                        .as_ref()
+                        .map(|session| normalize_remote_base_url(&session.remote_base_url))
+                        .filter(|remote| !remote.is_empty())
+                        .unwrap_or_else(|| normalize_remote_base_url(&config.sync.remote_base_url));
+                    remote_logout = Some((logout_config, token));
+                }
+            }
+
+            if current_provider_id == Some(provider_id) {
+                state.token = None;
+                state.user = None;
+            }
+
+            self.persist_state(&state)?;
+            state
+                .token
+                .as_deref()
+                .is_some_and(|token| !token.trim().is_empty())
+                || state
+                    .provider_sessions
+                    .values()
+                    .any(|session| !session.token.trim().is_empty())
+        };
+
+        if let Some((logout_config, token)) = remote_logout {
+            let client = SyncHttpClient::new(&logout_config)?;
+            let _ = client.logout(&logout_config, &token).await;
+        }
+
+        if current_provider_id == Some(provider_id) || !has_any_session {
+            self.login_prompt.lock().last_opened_at = None;
+            let mut runtime = self.runtime.write().await;
+            runtime.authorized = false;
+            runtime.syncing = false;
+            runtime.reason = SyncReason::Unauthorized;
+            runtime.last_error = None;
+        }
+        self.wake.notify_one();
         Ok(())
     }
 
@@ -1774,7 +1981,16 @@ impl SyncManager {
                 if !config.sync.auto_sync {
                     return Ok(());
                 }
+                if !self.should_run_github_gist_auto_sync() {
+                    let mut runtime = self.runtime.write().await;
+                    runtime.reachable = true;
+                    runtime.authorized = true;
+                    runtime.syncing = false;
+                    runtime.reason = SyncReason::Ready;
+                    return Ok(());
+                }
                 let result = self.sync_github_gist_provider(&session.token, &user).await;
+                self.finish_github_gist_auto_sync_attempt(result.is_ok());
                 let mut runtime = self.runtime.write().await;
                 runtime.reachable = true;
                 runtime.authorized = true;
@@ -1821,9 +2037,10 @@ impl SyncManager {
         if !reachable {
             if let Some(session) = self.github_gist_session() {
                 let user = session.user.clone().unwrap_or_else(github_fallback_user);
-                if config.sync.auto_sync {
-                    if let Err(error) = self.sync_github_gist_provider(&session.token, &user).await
-                    {
+                if config.sync.auto_sync && self.should_run_github_gist_auto_sync() {
+                    let result = self.sync_github_gist_provider(&session.token, &user).await;
+                    self.finish_github_gist_auto_sync_attempt(result.is_ok());
+                    if let Err(error) = result {
                         let mut state = self.state.lock();
                         record_provider_sync_error(
                             &mut state,
@@ -1872,9 +2089,10 @@ impl SyncManager {
             }
             if let Some(session) = self.github_gist_session() {
                 let user = session.user.clone().unwrap_or_else(github_fallback_user);
-                if config.sync.auto_sync {
-                    if let Err(error) = self.sync_github_gist_provider(&session.token, &user).await
-                    {
+                if config.sync.auto_sync && self.should_run_github_gist_auto_sync() {
+                    let result = self.sync_github_gist_provider(&session.token, &user).await;
+                    self.finish_github_gist_auto_sync_attempt(result.is_ok());
+                    if let Err(error) = result {
                         let mut state = self.state.lock();
                         record_provider_sync_error(
                             &mut state,
@@ -1947,17 +2165,20 @@ impl SyncManager {
         if result.is_ok() {
             if let Some(session) = self.github_gist_session() {
                 let gist_user = session.user.unwrap_or_else(|| user.clone());
-                if let Err(error) = self
-                    .mirror_github_gist_provider(&session.token, &gist_user)
-                    .await
-                {
-                    let mut state = self.state.lock();
-                    record_provider_sync_error(
-                        &mut state,
-                        GITHUB_GIST_PROVIDER_ID,
-                        error.to_string(),
-                    );
-                    self.persist_state(&state)?;
+                if self.should_run_github_gist_auto_sync() {
+                    let result = self
+                        .mirror_github_gist_provider(&session.token, &gist_user)
+                        .await;
+                    self.finish_github_gist_auto_sync_attempt(result.is_ok());
+                    if let Err(error) = result {
+                        let mut state = self.state.lock();
+                        record_provider_sync_error(
+                            &mut state,
+                            GITHUB_GIST_PROVIDER_ID,
+                            error.to_string(),
+                        );
+                        self.persist_state(&state)?;
+                    }
                 }
             }
         }
@@ -2984,6 +3205,38 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn github_gist_auto_sync_cooldown_skips_until_elapsed() {
+        let (_temp, _config_manager, manager) =
+            sync_manager_for_remote(GITHUB_GIST_REMOTE_BASE_URL).await;
+
+        assert!(manager.should_run_github_gist_auto_sync());
+
+        manager.finish_github_gist_auto_sync_attempt(true);
+        assert!(!manager.should_run_github_gist_auto_sync());
+
+        *manager.github_gist_next_auto_sync_at.lock() =
+            Some(Utc::now() - ChronoDuration::seconds(1));
+        assert!(manager.should_run_github_gist_auto_sync());
+    }
+
+    #[tokio::test]
+    async fn github_gist_auto_sync_error_uses_longer_backoff() {
+        let (_temp, _config_manager, manager) =
+            sync_manager_for_remote(GITHUB_GIST_REMOTE_BASE_URL).await;
+
+        manager.finish_github_gist_auto_sync_attempt(false);
+
+        let next_allowed_at = manager
+            .github_gist_next_auto_sync_at
+            .lock()
+            .as_ref()
+            .cloned()
+            .unwrap();
+        let remaining = next_allowed_at - Utc::now();
+        assert!(remaining.num_seconds() >= GITHUB_GIST_AUTO_SYNC_ERROR_BACKOFF_SECS - 5);
+    }
+
     #[test]
     fn provider_and_github_gist_helpers_cover_routing_edges() {
         assert_eq!(provider_id_for_remote("   "), None);
@@ -3252,6 +3505,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_marks_github_gist_session_authorized_after_error_clears() {
+        let (_temp_dir, _config_manager, manager) =
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+        {
+            let mut state = manager.state.lock();
+            state.provider_sessions.insert(
+                GITHUB_GIST_PROVIDER_ID.to_string(),
+                SyncProviderSession {
+                    token: "new-ghp-token".to_string(),
+                    remote_base_url: GITHUB_GIST_REMOTE_BASE_URL.to_string(),
+                    user: Some(test_user("github:12345")),
+                },
+            );
+            state
+                .provider_sync
+                .entry(GITHUB_GIST_PROVIDER_ID.to_string())
+                .or_default()
+                .last_error = None;
+            manager.persist_state(&state).unwrap();
+        }
+
+        let status = manager.status().await;
+        let gist = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == GITHUB_GIST_PROVIDER_ID)
+            .expect("github gist provider");
+        assert!(gist.connected);
+        assert!(gist.authorized);
+        assert_eq!(gist.reason, SyncReason::Ready);
+        assert!(gist.last_error.is_none());
+    }
+
+    #[tokio::test]
     async fn status_keeps_github_gist_errors_out_of_selected_server_provider() {
         let (_temp_dir, _config_manager, manager) =
             sync_manager_for_remote("https://sync.example.test").await;
@@ -3390,6 +3677,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn github_gist_rule_sync_ignores_remote_metadata_only_changes() {
+        let (_temp_dir, config_manager, manager) =
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+        let user = test_user("github:12345");
+        let rules_storage = config_manager.rules_storage().await;
+        let mut rule = RuleFile::new("stable-rule", "stable.example.com host://127.0.0.1:3000");
+        rule.mark_synced(
+            "gist:stable-rule",
+            "github:12345",
+            "2026-07-07T00:00:00Z",
+            "2026-07-07T00:00:00Z",
+        );
+        rules_storage.save(&rule).unwrap();
+        let mut snapshot = GitHubGistSnapshot {
+            rules: vec![GitHubGistRule {
+                id: "gist:stable-rule".to_string(),
+                user_id: "github:12345".to_string(),
+                name: "stable-rule".to_string(),
+                rule: "stable.example.com host://127.0.0.1:3000".to_string(),
+                create_time: "2026-07-07T00:00:00Z".to_string(),
+                update_time: "2026-07-07T00:05:00Z".to_string(),
+            }],
+            ..GitHubGistSnapshot::default()
+        };
+
+        let outcome = manager
+            .sync_github_gist_rules(&mut snapshot, &user, "2026-07-07T00:10:00Z")
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, (false, false));
+        assert_eq!(snapshot.rules[0].update_time, "2026-07-07T00:05:00Z");
+        let local = rules_storage.load("stable-rule").unwrap();
+        assert_eq!(
+            local.sync.remote_updated_at.as_deref(),
+            Some("2026-07-07T00:00:00Z")
+        );
+    }
+
+    #[tokio::test]
     async fn github_gist_snapshot_syncs_basic_config_updates() {
         let (_temp_dir, config_manager, manager) =
             sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
@@ -3456,6 +3783,71 @@ mod tests {
             .basic_configs
             .contains_key("github_gist:domain_allowlist"));
         assert!(!state.basic_configs.contains_key("domain_allowlist"));
+    }
+
+    #[tokio::test]
+    async fn github_gist_basic_config_sync_ignores_json_array_order() {
+        let (_temp_dir, config_manager, manager) =
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+        let user = test_user("github:12345");
+        config_manager
+            .update_tls_config(TlsConfigUpdate {
+                app_intercept_include: Some(vec![]),
+                intercept_include: Some(vec![
+                    "a.example.com".to_string(),
+                    "b.example.com".to_string(),
+                ]),
+                intercept_exclude: Some(vec![]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut snapshot = GitHubGistSnapshot::default();
+        for (key, value_json, hash) in [
+            ("app_allowlist", "[]", basic_config_content_hash("[]")),
+            (
+                "domain_allowlist",
+                "[\"b.example.com\",\"a.example.com\"]",
+                String::new(),
+            ),
+            ("blacklist", "[]", basic_config_content_hash("[]")),
+        ] {
+            snapshot.basic_configs.insert(
+                key.to_string(),
+                GitHubGistBasicConfig {
+                    id: key.to_string(),
+                    user_id: "github:12345".to_string(),
+                    config_key: key.to_string(),
+                    value_json: value_json.to_string(),
+                    hash,
+                    create_time: "2026-07-07T00:00:00Z".to_string(),
+                    update_time: "2026-07-07T00:00:00Z".to_string(),
+                },
+            );
+        }
+
+        let outcome = manager
+            .sync_github_gist_basic_configs(&mut snapshot, &user, "2026-07-07T00:01:00Z")
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, (false, false));
+        assert_eq!(
+            snapshot
+                .basic_configs
+                .get("domain_allowlist")
+                .map(|item| item.value_json.as_str()),
+            Some("[\"b.example.com\",\"a.example.com\"]")
+        );
+        let state = manager.state.lock();
+        let expected_hash = basic_config_content_hash("[\"a.example.com\",\"b.example.com\"]");
+        assert_eq!(
+            state
+                .basic_configs
+                .get("github_gist:domain_allowlist")
+                .and_then(|meta| meta.hash.as_deref()),
+            Some(expected_hash.as_str())
+        );
     }
 
     #[tokio::test]
@@ -3549,11 +3941,18 @@ mod tests {
         assert_eq!(beta.id, "gist:old-beta");
         assert_eq!(beta.create_time, "2026-01-01T00:00:00Z");
 
+        let beta_update_time = beta.update_time.clone();
         let changed_again = manager
             .mirror_github_gist_rules(&mut snapshot, &user, "2026-07-07T00:01:00Z")
             .await
             .unwrap();
         assert!(!changed_again);
+        let beta = snapshot
+            .rules
+            .iter()
+            .find(|rule| rule.name == "beta")
+            .expect("beta rule");
+        assert_eq!(beta.update_time, beta_update_time);
     }
 
     #[tokio::test]
@@ -3762,6 +4161,140 @@ mod tests {
         let state = manager.state.lock();
         assert!(state.token.is_none());
         assert!(state.provider_sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn logout_provider_clears_only_requested_provider_session() {
+        let (_temp_dir, _config_manager, manager) =
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+        {
+            let mut state = manager.state.lock();
+            state.token = Some("byte-token".to_string());
+            state.user = Some(test_user("byte-user"));
+            state.provider_sessions.insert(
+                "bytedance_internal".to_string(),
+                SyncProviderSession {
+                    token: "byte-token".to_string(),
+                    remote_base_url: DEFAULT_REMOTE_BASE_URL.to_string(),
+                    user: Some(test_user("byte-user")),
+                },
+            );
+            state.provider_sessions.insert(
+                "bifrost_cloud".to_string(),
+                SyncProviderSession {
+                    token: "cloud-token".to_string(),
+                    remote_base_url: "https://sync.example.test".to_string(),
+                    user: Some(test_user("cloud-user")),
+                },
+            );
+            state.provider_sessions.insert(
+                GITHUB_GIST_PROVIDER_ID.to_string(),
+                SyncProviderSession {
+                    token: "ghp_test".to_string(),
+                    remote_base_url: GITHUB_GIST_REMOTE_BASE_URL.to_string(),
+                    user: Some(test_user("github:12345")),
+                },
+            );
+            state.provider_sync.insert(
+                "bifrost_cloud".to_string(),
+                ProviderSyncMeta {
+                    last_sync_at: Some("2026-07-07T09:00:00Z".to_string()),
+                    last_sync_action: Some(SyncAction::NoChange),
+                    last_error: Some("stale cloud error".to_string()),
+                },
+            );
+            manager.persist_state(&state).unwrap();
+        }
+
+        manager.logout_provider("bifrost_cloud").await.unwrap();
+
+        let status = manager.status().await;
+        let bytedance = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == "bytedance_internal")
+            .expect("bytedance provider");
+        let cloud = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == "bifrost_cloud")
+            .expect("cloud provider");
+        let gist = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == GITHUB_GIST_PROVIDER_ID)
+            .expect("github gist provider");
+
+        assert!(bytedance.connected);
+        assert!(!cloud.connected);
+        assert!(cloud.last_error.is_none());
+        assert_eq!(cloud.last_sync_at.as_deref(), Some("2026-07-07T09:00:00Z"));
+        assert!(gist.connected);
+        assert!(status.has_session);
+        assert!(!status.first_run_prompt_required);
+
+        let state = manager.state.lock();
+        assert_eq!(state.token.as_deref(), Some("byte-token"));
+        assert!(state.provider_sessions.contains_key("bytedance_internal"));
+        assert!(!state.provider_sessions.contains_key("bifrost_cloud"));
+        assert!(state
+            .provider_sessions
+            .contains_key(GITHUB_GIST_PROVIDER_ID));
+    }
+
+    #[tokio::test]
+    async fn logout_provider_clears_matching_legacy_token_without_touching_other_sessions() {
+        let (_temp_dir, _config_manager, manager) =
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+        {
+            let mut state = manager.state.lock();
+            state.token = Some("byte-token".to_string());
+            state.user = Some(test_user("byte-user"));
+            state.provider_sessions.insert(
+                "bytedance_internal".to_string(),
+                SyncProviderSession {
+                    token: "byte-token".to_string(),
+                    remote_base_url: DEFAULT_REMOTE_BASE_URL.to_string(),
+                    user: Some(test_user("byte-user")),
+                },
+            );
+            state.provider_sessions.insert(
+                GITHUB_GIST_PROVIDER_ID.to_string(),
+                SyncProviderSession {
+                    token: "ghp_test".to_string(),
+                    remote_base_url: GITHUB_GIST_REMOTE_BASE_URL.to_string(),
+                    user: Some(test_user("github:12345")),
+                },
+            );
+            manager.persist_state(&state).unwrap();
+        }
+
+        manager.logout_provider("bytedance_internal").await.unwrap();
+
+        let status = manager.status().await;
+        let bytedance = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == "bytedance_internal")
+            .expect("bytedance provider");
+        let gist = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == GITHUB_GIST_PROVIDER_ID)
+            .expect("github gist provider");
+        assert!(!bytedance.connected);
+        assert!(gist.connected);
+        assert!(status.reachable);
+        assert!(status.authorized);
+        assert_eq!(status.reason, SyncReason::Ready);
+
+        let state = manager.state.lock();
+        assert!(state.token.is_none());
+        assert!(state.user.is_none());
+        assert!(!state.provider_sessions.contains_key("bytedance_internal"));
+        assert!(state
+            .provider_sessions
+            .contains_key(GITHUB_GIST_PROVIDER_ID));
     }
 
     fn read_dry_run_urls(path: &std::path::Path) -> Vec<String> {

@@ -307,9 +307,62 @@
 - 非 HTTPS URL 会提示必须使用 `https://`, 且不会调用 `/api/sync/config` 或 `/api/sync/login`。
 - 合法 HTTPS URL 通过基础校验后才保存并进入登录流程。
 
+### TC-SPA-18: Provider 登录/退出状态互不影响
+
+**操作步骤**:
+
+1. 构造 `/api/sync/status`: ByteDance Internal、Bifrost Cloud、GitHub Gist 三个 provider 都返回 `connected=true`。
+2. 打开 Settings Sync 页面。
+3. 点击 Bifrost Cloud 卡片的 `Sign Out`。
+4. 观察实际请求和三张卡片状态。
+
+**预期结果**:
+
+- UI 调用 `/api/sync/providers/bifrost_cloud/logout`, 不调用全局 `/api/sync/logout`。
+- Bifrost Cloud 卡片变为未连接或需要登录。
+- ByteDance Internal 和 GitHub Gist 卡片仍保持 `Connected`, 账号信息和 `Last sync` 不被清空。
+- 任意单张 provider 卡片的登录、重新连接、退出登录都只影响自身 session。
+
+### TC-SPA-19: GitHub Gist 只因语义内容变化才写入
+
+**操作步骤**:
+
+1. 准备 GitHub Gist snapshot: 只改变规则/基础配置的 `create_time`、`update_time`、对象顺序、JSON key 顺序或 allowlist 数组顺序, 保持规则内容和基础配置有效值不变。
+2. 触发 GitHub Gist sync 或执行对应单元测试。
+3. 观察 sync action 和是否调用 Gist save/PATCH。
+
+**预期结果**:
+
+- 只发生 metadata/order 变化时, GitHub Gist sync action 为 `no_change`。
+- 不调用 Gist save/PATCH, 不产生新的 Gist revision。
+- 规则比较只关注规则的实际内容 hash。
+- 基础配置比较只关注 canonical JSON 内容 hash; `app_allowlist`、`domain_allowlist`、`blacklist` 的数组顺序不影响 hash。
+
+### TC-SPA-20: GitHub Gist 自动同步有冷却和失败退避
+
+**操作步骤**:
+
+1. 在本机确认 `9900` 端口 Bifrost 服务运行:
+   ```bash
+   lsof -nP -iTCP:9900 -sTCP:LISTEN
+   ```
+2. 查询 GitHub API rate limit:
+   ```bash
+   curl -sS -D - https://api.github.com/rate_limit -o /tmp/bifrost-github-rate-limit.json
+   ```
+3. 连续触发后台 sync tick 或执行 GitHub Gist auto sync cooldown 单元测试。
+4. 查看 GitHub Gist provider 状态和日志。
+
+**预期结果**:
+
+- 现场 rate limit 若为 `remaining: 0`, UI 可以显示 provider 级错误, 但不能让其它 provider 变为不可用。
+- 后台 GitHub Gist sync 不跟随 `probe_interval_secs=5` 每 5 秒请求 GitHub。
+- 成功或 no-change 后有 provider 级冷却; 失败后使用更长退避。
+- 手动 `Reconnect` 或新 token 登录仍可立即尝试, 不被旧冷却永久阻塞。
+
 ## 清理步骤
 
-本用例只读文档, 无需清理临时服务或数据目录。
+本用例以静态审查、mock UI 和本机 9900 只读诊断为主, 不修改系统代理和真实远端数据。若手动创建了临时 GitHub Gist 或测试 token, 需要删除对应 Gist 并撤销 token。
 
 ## 执行记录
 
@@ -322,6 +375,9 @@
 - 2026-07-07: PASS - 执行 TC-SPA-14 的 `rg` 静态审查命令, 命中 GitHub Gist token 失效卡片级提示、`Reconnect required`、`New Token`、provider `authorized=false` 和 `last_error` 要求。实现阶段执行 `cargo test -p bifrost-sync status_marks_github_gist_session_unauthorized_after_token_error`、`pnpm --dir web test:unit src/pages/Settings/tabs/SyncTab.test.ts`、`e2e-tests/tests/test_sync_github_gist_expired_status_e2e.sh`、`BIFROST_UI_TEST_TARGET_DIR=/Users/eden/work/github/bifrost/target pnpm --dir web test:ui web/tests/ui/admin-settings.spec.ts -g "GitHub Gist token 失效"` 均通过, 确认失效 Gist session 在 API 中保留 `connected=true` 以显示 Reconnect/Sign Out, 同时返回 `authorized=false`, `reason=error`, `last_error`, UI 卡片显示 `Reconnect required` 和 inline GitHub token 错误。
 - 2026-07-07: PASS - 执行 TC-SPA-15/TC-SPA-16 的实现验证: `pnpm --dir web test:unit src/pages/Settings/tabs/SyncTab.test.ts` 通过 4/4, 覆盖有任一 provider connected 时隐藏全局 pluggable-sync 提示; `pnpm --dir web run build` 通过, 覆盖 provider `last_sync_at` / `last_sync_action` 类型接入与 Settings/StatusBar 编译; `cargo test -p bifrost-sync` 通过 142/142, 覆盖 provider 级同步状态序列化和既有 sync_once 行为不回退。
 - 2026-07-07: PASS - 执行 TC-SPA-17 的实现验证: 后端新增 `status_leaves_unconfigured_bifrost_cloud_url_empty`; UI 新增 `Settings Sync Bifrost Cloud URL 必须先通过基础校验再连接`, 覆盖 Bifrost Cloud 未配置时输入框为空、空 URL/HTTP URL 不调用 config/login、HTTPS URL 才进入保存/登录。
+- 2026-07-07: PASS - 执行 TC-SPA-18 的实现验证: 后端新增 provider-scoped `/api/sync/providers/{provider_id}/logout`, `cargo test -p bifrost-sync logout_provider` 通过; Web UI logout 改为卡片级 provider id 调用, `pnpm --dir web test:unit src/pages/Settings/tabs/SyncTab.test.ts` 通过; Playwright mock 用例覆盖点击 Bifrost Cloud `Sign Out` 只请求 `/sync/providers/bifrost_cloud/logout`, ByteDance Internal 和 GitHub Gist 仍保持 connected。
+- 2026-07-07: PASS - 执行 TC-SPA-19 的实现验证: `cargo test -p bifrost-sync` 通过 152/152, 覆盖 `github_gist_rule_sync_ignores_remote_metadata_only_changes`, `github_gist_basic_config_sync_ignores_json_array_order`, `encode_snapshot_content_sorts_rules_and_basic_configs_stably`; 人工复核确认规则比较忽略 provider metadata/order, 基础配置使用 canonical JSON hash, Gist snapshot 输出稳定排序。
+- 2026-07-07: PASS - 执行 TC-SPA-20 的现场诊断和实现验证: `lsof -nP -iTCP:9900 -sTCP:LISTEN` 确认 PID 59612 的 `bifrost` 正在监听 9900; `curl https://api.github.com/rate_limit` 返回 `x-ratelimit-limit: 60`, `x-ratelimit-remaining: 0`, reset 为 `2026-07-07 17:43:43 CST`; `/api/sync/status` 显示 ByteDance Internal 仍 `authorized=true` 且 last sync `no_change`, GitHub Gist 独立显示 `authorized=false` 和 token/gist scope 错误; 新增 `github_gist_auto_sync_cooldown_skips_until_elapsed` 和 `github_gist_auto_sync_error_uses_longer_backoff` 单元测试并通过。
 - 2026-07-07: PASS - 实现阶段在主仓库执行 `cargo check -p bifrost-sync -p bifrost-admin -p bifrost-cli`, `pnpm --dir packages/bifrost-sync-server lint`, `pnpm --dir packages/bifrost-sync-server test`, `pnpm --dir web run build`, `pnpm --dir web test:ui web/tests/ui/admin-settings.spec.ts -g "Provider 卡片"`; 均通过。人工复核确认 Settings Sync 三 provider 卡片、首登弹窗可关闭、Start 触发 ByteDance/Bifrost Cloud 既有登录链路、Bifrost Cloud 配置同步服务端校验和存储测试均覆盖。
 - 2026-07-07: PASS - Review/Fix/Test 第 1 轮执行 `cargo test -p bifrost-sync` 发现旧 mock/旧服务未实现 `/v4/config/sync` 时规则同步会被配置同步拖失败; 已修复为旧服务端点缺失或旧格式空 data 时跳过基础配置同步、不影响规则同步。复跑 `cargo test -p bifrost-sync` 通过 121/121, 复跑 `cargo test -p bifrost-cli sync_cmd` 通过。
 - 2026-07-07: PASS - Review/Fix/Test 第 2 轮执行 `git diff --check` 覆盖主仓库和 `/Users/eden_studio/work/github/bifrost-server-v4`, 均无 whitespace error; 静态检索确认无残留 `block_on`, Provider 卡片与 `basic_configs` 状态路径均在预期文件中。

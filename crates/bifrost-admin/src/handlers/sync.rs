@@ -106,6 +106,23 @@ pub async fn handle_sync(
         };
     }
 
+    if let Some(provider_id) = provider_logout_id(path) {
+        return match req.method() {
+            &Method::POST => match sync_manager.logout_provider(provider_id).await {
+                Ok(status) => {
+                    reconcile_remote_invoke_workers(&state).await;
+                    super::rules::notify_rules_changed_pub(&state);
+                    json_response(&status)
+                }
+                Err(error) => error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Failed to clear sync provider session: {error}"),
+                ),
+            },
+            _ => method_not_allowed(),
+        };
+    }
+
     if path == "/api/sync/logout" || path == "/api/sync/logout/" {
         return match req.method() {
             &Method::POST => match sync_manager.logout().await {
@@ -139,6 +156,13 @@ pub async fn handle_sync(
     }
 
     error_response(StatusCode::NOT_FOUND, "Not Found")
+}
+
+fn provider_logout_id(path: &str) -> Option<&str> {
+    let path = path.trim_end_matches('/');
+    let rest = path.strip_prefix("/api/sync/providers/")?;
+    let provider_id = rest.strip_suffix("/logout")?;
+    (!provider_id.is_empty()).then_some(provider_id)
 }
 
 pub async fn handle_sync_public(

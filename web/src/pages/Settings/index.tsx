@@ -43,6 +43,7 @@ import {
 } from "../../api/config";
 import {
   getSyncStatus,
+  logoutSyncProvider,
   logoutSyncSession,
   openSyncLogin,
   updateSyncConfig,
@@ -1022,6 +1023,22 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     }
   }, [applySyncStatus]);
 
+  const handleSyncProviderSignOut = useCallback(
+    async (provider: SyncProviderStatus) => {
+      setSyncLoading(true);
+      try {
+        const status = await logoutSyncProvider(provider.id);
+        applySyncStatus(status);
+        message.success(`${provider.name} signed out`);
+      } catch {
+        message.error(`Failed to sign out from ${provider.name}`);
+      } finally {
+        setSyncLoading(false);
+      }
+    },
+    [applySyncStatus],
+  );
+
   const handleDesktopProxyPortApply = useCallback(async () => {
     if (!isDesktopShell()) {
       return;
@@ -1379,6 +1396,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
           onSignIn={handleSyncSignIn}
           onProviderSignIn={handleSyncProviderSignIn}
           onProviderRemoteBaseUrlSave={handleSyncProviderRemoteBaseUrlSave}
+          onProviderSignOut={handleSyncProviderSignOut}
           onSignOut={handleSyncSignOut}
         />
       ),

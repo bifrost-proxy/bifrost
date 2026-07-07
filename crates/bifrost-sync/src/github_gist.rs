@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use bifrost_core::{text::truncate_chars_with_suffix, BifrostError, Result};
@@ -16,7 +16,7 @@ pub(crate) struct GitHubGistSnapshot {
     #[serde(default)]
     pub rules: Vec<GitHubGistRule>,
     #[serde(default)]
-    pub basic_configs: HashMap<String, GitHubGistBasicConfig>,
+    pub basic_configs: BTreeMap<String, GitHubGistBasicConfig>,
 }
 
 impl Default for GitHubGistSnapshot {
@@ -26,7 +26,7 @@ impl Default for GitHubGistSnapshot {
             updated_at: String::new(),
             user_id: String::new(),
             rules: Vec::new(),
-            basic_configs: HashMap::new(),
+            basic_configs: BTreeMap::new(),
         }
     }
 }
@@ -141,8 +141,7 @@ impl GitHubGistClient {
         token: &str,
         remote: &GitHubGistRemoteSnapshot,
     ) -> Result<String> {
-        let content = serde_json::to_string_pretty(&remote.snapshot)
-            .map_err(|e| BifrostError::Config(format!("encode GitHub Gist snapshot: {e}")))?;
+        let content = encode_snapshot_content(&remote.snapshot)?;
         let body = write_request(&content);
         if let Some(gist_id) = &remote.gist_id {
             let url = format!("{}/gists/{gist_id}", self.api_base_url);
@@ -247,6 +246,15 @@ impl GitHubGistClient {
     }
 }
 
+fn encode_snapshot_content(snapshot: &GitHubGistSnapshot) -> Result<String> {
+    let mut snapshot = snapshot.clone();
+    snapshot
+        .rules
+        .sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
+    serde_json::to_string_pretty(&snapshot)
+        .map_err(|e| BifrostError::Config(format!("encode GitHub Gist snapshot: {e}")))
+}
+
 fn write_request(content: &str) -> GitHubGistWriteRequest<'_> {
     let mut files = HashMap::new();
     files.insert(GITHUB_GIST_SNAPSHOT_FILE, GitHubGistWriteFile { content });
@@ -279,7 +287,7 @@ mod tests {
                 create_time: "2026-07-07T00:00:00Z".to_string(),
                 update_time: "2026-07-07T00:00:00Z".to_string(),
             }],
-            basic_configs: HashMap::new(),
+            basic_configs: BTreeMap::new(),
         };
         let snapshot_content = serde_json::to_string(&snapshot).unwrap();
 
@@ -404,7 +412,7 @@ mod tests {
             updated_at: "2026-07-07T00:00:00Z".to_string(),
             user_id: "github:1".to_string(),
             rules: Vec::new(),
-            basic_configs: HashMap::new(),
+            basic_configs: BTreeMap::new(),
         };
 
         Mock::given(method("POST"))
@@ -449,6 +457,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(updated, "existing-gist");
+    }
+
+    #[test]
+    fn encode_snapshot_content_sorts_rules_and_basic_configs_stably() {
+        let mut basic_configs = BTreeMap::new();
+        basic_configs.insert(
+            "domain_allowlist".to_string(),
+            GitHubGistBasicConfig {
+                id: "domain_allowlist".to_string(),
+                config_key: "domain_allowlist".to_string(),
+                value_json: "[\"b.example.com\",\"a.example.com\"]".to_string(),
+                ..GitHubGistBasicConfig::default()
+            },
+        );
+        basic_configs.insert(
+            "app_allowlist".to_string(),
+            GitHubGistBasicConfig {
+                id: "app_allowlist".to_string(),
+                config_key: "app_allowlist".to_string(),
+                value_json: "[\"com.example.App\"]".to_string(),
+                ..GitHubGistBasicConfig::default()
+            },
+        );
+        let snapshot = GitHubGistSnapshot {
+            version: 1,
+            updated_at: "2026-07-07T00:00:00Z".to_string(),
+            user_id: "github:1".to_string(),
+            rules: vec![
+                GitHubGistRule {
+                    id: "gist:z".to_string(),
+                    name: "zeta".to_string(),
+                    rule: "z.example.com host://127.0.0.1:3000".to_string(),
+                    ..GitHubGistRule::default()
+                },
+                GitHubGistRule {
+                    id: "gist:a".to_string(),
+                    name: "alpha".to_string(),
+                    rule: "a.example.com host://127.0.0.1:3000".to_string(),
+                    ..GitHubGistRule::default()
+                },
+            ],
+            basic_configs,
+        };
+
+        let content = encode_snapshot_content(&snapshot).unwrap();
+        assert!(content.find(r#""name": "alpha""#) < content.find(r#""name": "zeta""#));
+        assert!(
+            content.find(r#""app_allowlist""#) < content.find(r#""domain_allowlist""#),
+            "{content}"
+        );
     }
 
     #[tokio::test]

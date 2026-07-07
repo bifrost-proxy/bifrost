@@ -106,6 +106,10 @@ export async function logoutSyncSession(): Promise<SyncStatus> {
   return post<SyncStatus>("/sync/logout");
 }
 
+export async function logoutSyncProvider(providerId: string): Promise<SyncStatus> {
+  return post<SyncStatus>(`/sync/providers/${encodeURIComponent(providerId)}/logout`);
+}
+
 export async function runSyncNow(): Promise<SyncStatus> {
   return post<SyncStatus>("/sync/run");
 }

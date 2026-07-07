@@ -37,7 +37,8 @@ interface SyncTabProps {
     provider: SyncProviderStatus,
     remoteBaseUrl: string,
   ) => void;
-  onSignOut: () => void;
+  onProviderSignOut?: (provider: SyncProviderStatus) => void;
+  onSignOut?: () => void;
 }
 
 function capabilityTags(provider: SyncProviderStatus) {
@@ -152,6 +153,7 @@ export default function SyncTab({
   onSignIn,
   onProviderSignIn,
   onProviderRemoteBaseUrlSave,
+  onProviderSignOut,
   onSignOut,
 }: SyncTabProps) {
   const providers = syncStatus?.providers?.length
@@ -227,6 +229,14 @@ export default function SyncTab({
   const handleBifrostCloudUrlSave = (provider: SyncProviderStatus) => {
     onProviderRemoteBaseUrlSave?.(provider, bifrostCloudUrlDraft);
     setBifrostCloudUrlDirty(false);
+  };
+
+  const handleProviderSignOut = (provider: SyncProviderStatus) => {
+    if (onProviderSignOut) {
+      onProviderSignOut(provider);
+      return;
+    }
+    onSignOut?.();
   };
 
   return (
@@ -378,7 +388,7 @@ export default function SyncTab({
                 {provider.connected ? (
                   <Button
                     icon={<LogoutOutlined />}
-                    onClick={onSignOut}
+                    onClick={() => handleProviderSignOut(provider)}
                     loading={syncLoading}
                     data-testid={`settings-sync-provider-logout-${provider.id}`}
                   >

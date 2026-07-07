@@ -1493,6 +1493,148 @@ test("Settings Sync GitHub Gist token 失效时显示卡片级重连提示", asy
   await expect(page.getByTestId("settings-sync-provider-logout-github_gist")).toBeVisible();
 });
 
+test("Settings Sync provider 退出登录只影响当前卡片", async ({ page }) => {
+  let scopedLogoutCount = 0;
+  let globalLogoutCount = 0;
+  const providers = [
+    {
+      id: "bytedance_internal",
+      name: "ByteDance Internal",
+      description: "Internal trusted sync and Remote Invoke provider.",
+      remote_base_url: "https://bifrost.bytedance.net",
+      connected: true,
+      enabled: true,
+      reachable: true,
+      authorized: true,
+      reason: "ready",
+      last_error: null,
+      last_sync_at: "2026-07-07T07:10:00Z",
+      last_sync_action: "no_change",
+      user: {
+        user_id: "byte-user",
+        nickname: "Byte User",
+        avatar: "",
+        email: "byte-user@example.test",
+      },
+      capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+      remote_invoke_registered: true,
+    },
+    {
+      id: "bifrost_cloud",
+      name: "Bifrost Cloud",
+      description: "Custom Bifrost sync service for teams and self-hosting.",
+      remote_base_url: "https://sync.example.test",
+      connected: true,
+      enabled: true,
+      reachable: true,
+      authorized: true,
+      reason: "ready",
+      last_error: null,
+      last_sync_at: "2026-07-07T07:20:00Z",
+      last_sync_action: "no_change",
+      user: {
+        user_id: "cloud-user",
+        nickname: "Cloud User",
+        avatar: "",
+        email: "cloud-user@example.test",
+      },
+      capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+      remote_invoke_registered: true,
+    },
+    {
+      id: "github_gist",
+      name: "GitHub Gist",
+      description: "Public GitHub Gist-backed portable sync provider.",
+      remote_base_url: "https://api.github.com/gists",
+      connected: true,
+      enabled: true,
+      reachable: true,
+      authorized: true,
+      reason: "ready",
+      last_error: null,
+      last_sync_at: "2026-07-07T07:30:00Z",
+      last_sync_action: "no_change",
+      user: {
+        user_id: "github:12345",
+        nickname: "octocat",
+        avatar: "",
+        email: "",
+      },
+      capabilities: { remote_invoke: false, rules_sync: true, config_sync: true },
+      remote_invoke_registered: false,
+    },
+  ];
+  const statusBody = () => ({
+    enabled: true,
+    auto_sync: true,
+    remote_base_url: "https://bifrost.bytedance.net",
+    has_session: providers.some((provider) => provider.connected),
+    reachable: true,
+    authorized: providers.some((provider) => provider.connected),
+    syncing: false,
+    reason: "ready",
+    last_sync_at: "2026-07-07T07:30:00Z",
+    last_sync_action: "no_change",
+    last_error: null,
+    user: null,
+    first_run_prompt_required: false,
+    providers,
+  });
+
+  await page.route("**/_bifrost/api/sync/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(statusBody()),
+    });
+  });
+  await page.route("**/_bifrost/api/sync/providers/bifrost_cloud/logout", async (route) => {
+    scopedLogoutCount += 1;
+    const cloud = providers.find((provider) => provider.id === "bifrost_cloud");
+    if (cloud) {
+      cloud.connected = false;
+      cloud.authorized = false;
+      cloud.reachable = false;
+      cloud.reason = "unauthorized";
+      cloud.user = null;
+      cloud.remote_invoke_registered = false;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(statusBody()),
+    });
+  });
+  await page.route("**/_bifrost/api/sync/logout", async (route) => {
+    globalLogoutCount += 1;
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "global logout should not be called" }),
+    });
+  });
+
+  await openPage(page, "settings?tab=sync");
+  await page.getByTestId("settings-sync-provider-logout-bifrost_cloud").click();
+
+  await expect.poll(() => Promise.resolve(scopedLogoutCount)).toBe(1);
+  expect(globalLogoutCount).toBe(0);
+  await waitForToast(page, "Bifrost Cloud signed out");
+  await expect(page.getByTestId("settings-sync-provider-card-bifrost_cloud")).toContainText(
+    "Offline",
+  );
+  await expect(page.getByTestId("settings-sync-provider-card-bifrost_cloud")).toContainText(
+    "Sign In",
+  );
+  await expect(page.getByTestId("settings-sync-provider-card-bytedance_internal")).toContainText(
+    "Connected",
+  );
+  await expect(page.getByTestId("settings-sync-provider-card-github_gist")).toContainText(
+    "Connected",
+  );
+  await expect(page.getByTestId("settings-sync-provider-overview-alert")).toHaveCount(0);
+});
+
 test("Settings Sync Remote Invoke 支持 ByteDance、Bifrost Cloud 与双通道状态", async ({
   page,
 }) => {
