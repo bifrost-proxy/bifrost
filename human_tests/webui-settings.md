@@ -534,20 +534,43 @@ Settings 页面是 Bifrost 管理端的系统设置中心，包含多个功能 T
 
 ---
 
-#### TC-WST-39：Remote URL 编辑时不被 Sync 状态轮询回滚
+#### TC-WST-39：Bifrost Cloud URL 在 Provider 卡片内可编辑且旧 Remote Sync 面板不再显示
 
 **操作步骤**：
 1. 打开 `http://127.0.0.1:8800/_bifrost/settings?tab=sync`
-2. 等待 Remote Sync 卡片显示当前状态和 Remote URL 输入框
-3. 在 Remote URL 输入框中输入 `http://127.0.0.1:61580/custom/`
-4. 停留至少 3 秒，等待页面完成一次 Sync 状态轮询刷新
-5. 点击 Remote URL 输入框右侧的 "Save" 按钮
+2. 等待 Sync 页面显示三张 Provider 卡片：ByteDance Internal、Bifrost Cloud、GitHub Gist
+3. 确认页面底部不再显示旧的 `Remote Sync` 卡片或旧的全局 Remote URL 输入框
+4. 在 Bifrost Cloud 卡片的 Remote 输入框中输入 `http://127.0.0.1:61580/custom/`
+5. 停留至少 3 秒，等待页面完成一次 Sync 状态轮询刷新
+6. 点击 Bifrost Cloud Remote 输入框右侧的 "Save" 按钮
 
 **预期结果**：
-- 等待轮询刷新期间，输入框内容保持为 `http://127.0.0.1:61580/custom/`，不会回滚到旧的默认地址
-- 状态、Session、Last Sync 等只读信息仍可随轮询刷新
+- Sync 页面只有 Provider 卡片作为主要管理入口，不出现旧 `Remote Sync` 面板
+- Bifrost Cloud 的 Remote 输入框是可输入状态，ByteDance Internal 和 GitHub Gist 仍按各自能力展示只读 Remote 信息
+- 等待轮询刷新期间，Bifrost Cloud 输入框内容保持为 `http://127.0.0.1:61580/custom/`，不会回滚到旧的默认地址
 - 点击 Save 后，提交的是当前输入框内容
-- 保存成功后输入框显示后端返回的 Remote URL，且仍与刚提交的当前输入保持一致
+- 保存成功后 Bifrost Cloud 输入框显示后端返回的 Remote URL，且仍与刚提交的当前输入保持一致
+
+**执行记录**：
+- 2026-07-07：PASS。执行 `pnpm --dir web run test:ui tests/ui/admin-settings.spec.ts --grep "Settings Sync"`，真实 Chromium 打开 Settings Sync 页面，7/7 PASS。断言旧 `Remote Sync` 面板不存在，Bifrost Cloud 卡片内 Remote URL 输入框可编辑，状态轮询不会覆盖输入，点击 Save 后提交当前 URL 并保持后端返回值。随后在 2048px 视口用 Playwright 量测三张 provider 卡片，三张同排且单卡宽度均为 469px，满足宽屏下更宽卡片且最多一排三张。
+
+#### TC-WST-40：GitHub Gist Provider 支持 token 登录
+
+**操作步骤**：
+1. 打开 `Settings -> Sync`。
+2. 点击 `GitHub Gist` 卡片中的 `Sign In`。
+3. 在 `Sign in to GitHub Gist` 弹窗中输入 GitHub token。
+4. 点击弹窗 `Sign In`。
+
+**预期结果**：
+- `GitHub Gist` 登录按钮可点击，不再是 disabled。
+- 弹窗提示 token 需要 `gist` scope。
+- 前端向 `POST /_bifrost/api/sync/login` 发送 `provider_id=github_gist` 和 token。
+- 后端验证 token 成功后，`GitHub Gist` 卡片显示 `Connected` 和 GitHub 用户。
+- `GitHub Gist` 仍显示 `Remote Invoke: Not supported`，不会进入 Remote Invoke 双通道注册。
+
+**执行记录**：
+- 2026-07-07：PASS。执行 `cargo test -p bifrost-sync github_gist -- --nocapture`，1/1 PASS，确认 `github_gist` provider session 会让卡片进入 Connected 且 Remote Invoke 保持不支持。执行 `pnpm --dir web run test:ui tests/ui/admin-settings.spec.ts --grep "GitHub Gist"`，1/1 PASS，真实 Chromium 验证 GitHub Gist 登录按钮可点击、token 弹窗展示、提交 `/sync/login` payload 为 `provider_id=github_gist` + token、成功后卡片显示 Connected 和 GitHub 用户。
 
 ---
 

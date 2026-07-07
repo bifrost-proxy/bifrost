@@ -68,6 +68,28 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ## 测试用例
 
+### TC-RI-00：Sync Provider Remote Invoke 单通道与双通道注册
+
+**操作步骤**：
+1. 构造只有 ByteDance Internal session 的 sync-state，执行 `cargo test -p bifrost-sync remote_invoke_registration_targets_cover_single_and_dual_channels -- --nocapture`
+2. 构造只有 Bifrost Cloud session 的 sync-state，确认 `session_token_for_remote("https://sync.example.test/")` 返回 Bifrost Cloud token
+3. 构造 ByteDance Internal + Bifrost Cloud 同时登录的 sync-state，确认 `remote_invoke_registration_targets()` 返回两个 target
+4. 构造运行时登录/退出场景，确认 AdminState 保留一个 Remote Invoke worker 兼容旧 API，同时维护每个 eligible relay URL 对应的 worker 列表
+5. 打开 Settings Sync 页面或执行 UI 回归，确认 ByteDance Internal 和 Bifrost Cloud 两张卡都显示 Remote Invoke `Registered`，GitHub Gist 显示 `Not supported`
+
+**预期结果**：
+- ByteDance Internal 单独登录时，Remote Invoke registration target 只包含 `bytedance_internal`
+- Bifrost Cloud 单独登录时，Remote Invoke registration target 只包含 `bifrost_cloud`
+- 两者同时登录时，Remote Invoke registration targets 同时包含 `bytedance_internal` 和 `bifrost_cloud`，等价于双通道
+- 两者同时登录时，运行时存在两个 Remote Invoke worker；退出同步服务或移除 provider session 后，对应 worker 被停止并从列表移除
+- Worker 注册 token 按 relay URL 查对应 provider session，不会把 ByteDance token 错用到 Bifrost Cloud，反之亦然
+- GitHub Gist 不进入 Remote Invoke target 列表
+
+**执行记录**：
+- 2026-07-07：PASS。执行 `cargo test -p bifrost-sync remote_invoke -- --nocapture`，2/2 PASS，覆盖 ByteDance-only、Bifrost Cloud token lookup、ByteDance+Bifrost Cloud dual-channel target 列表和 provider card `remote_invoke_registered` 状态。执行 `cargo test -p bifrost-sync logout_clears_provider_sessions -- --nocapture`，1/1 PASS，确认退出登录会清理 provider sessions。执行 `cargo test -p bifrost-admin remote_invoke_workers_track_single_and_dual_channel_relays -- --nocapture`，1/1 PASS，确认 AdminState 同时维护 ByteDance Internal 和 Bifrost Cloud 两个 Remote Invoke worker，并在 provider 移除后停掉对应 worker。执行 `cargo test -p bifrost-admin session_token -- --nocapture`，4/4 PASS，确认 RemoteInvokeWorker 缺 token 时仍 fail closed，注册 token 归一化逻辑不回退到错误 provider。执行 `pnpm --dir web run test:ui tests/ui/admin-settings.spec.ts --grep "Settings Sync"`，7/7 PASS，确认 Settings Sync 的 ByteDance Internal 与 Bifrost Cloud 同时显示 Remote Invoke `Registered`，GitHub Gist 仍显示 `Not supported`。
+
+---
+
 ### TC-RI-01：Remote Invoke Tab 初始状态
 
 **操作步骤**：

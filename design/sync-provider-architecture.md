@@ -760,6 +760,9 @@ Card grid requirements:
 - A provider that is not configured still remains visible with capability chips and a primary `Sign in` or `Configure` action.
 - Provider order is stable: ByteDance Internal, Bifrost Cloud, GitHub Gist.
 - Future provider types can be added through provider catalog metadata, but V1 acceptance tests should assert that only these three cards are rendered by default.
+- The legacy bottom `Remote Sync` card must not render once the provider card grid is available. Sign-in, sign-out, endpoint configuration, and provider capability status live on the provider cards.
+- `Bifrost Cloud` owns a user-editable Remote URL input inside its card. Typing into this field must not be reset by status polling; saving the field updates the configured Bifrost Sync Server URL used for Bifrost Cloud login/sync.
+- `ByteDance Internal` keeps the managed internal endpoint read-only. `GitHub Gist` keeps its non-URL remote identity read-only and does not expose Remote Invoke actions.
 
 Suggested CSS contract:
 
@@ -849,7 +852,7 @@ Provider card states:
 Provider card content requirements:
 
 - ByteDance Internal card: detection status, signed-in user, Remote Invoke registration badge, `Re-detect` action.
-- Bifrost Cloud card: server URL, capability probe result, signed-in user, Remote Invoke registration badge if supported.
+- Bifrost Cloud card: editable server URL, capability probe result, signed-in user, Remote Invoke registration badge if supported.
 - GitHub Gist card: GitHub user, gist id, encryption/recovery-key status, Rules Sync and Config Sync badges, no Remote Invoke controls.
 - Future providers inherit the same card shell and declare capabilities through catalog metadata.
 
@@ -1044,6 +1047,7 @@ V1 does not sync:
 ### Phase 6: Remote Invoke multi-registration
 
 - Register local Remote Invoke service with every enabled signed-in provider that has `remote_invoke_relay`.
+- Reconcile Remote Invoke workers after provider login, provider logout, and provider URL changes, so runtime state matches the connected provider set without requiring a process restart.
 - Show registration status per provider in Settings Sync and CLI status.
 - Keep outbound Remote Invoke provider selection explicit or priority-based.
 
@@ -1167,12 +1171,13 @@ This implementation pass lands the release foundation for provider-aware sync:
 - Bifrost Cloud rejects unsupported config keys and JSON payloads containing sensitive key names such as token/password/secret/credential.
 - ByteDance Internal service has the matching IDL/controller/service/model/DDL plan and implementation in `/Users/eden_studio/work/github/bifrost-server-v4`.
 - The Bifrost client sync manager now tracks basic config sync metadata in `sync-state.json` and syncs the three allowed basic config keys after a successful rule sync.
-- Settings Sync now renders a provider card grid for ByteDance Internal, Bifrost Cloud, and GitHub Gist, capped at three cards per row by layout width and responsive down to one column.
+- Settings Sync now renders a provider card grid for ByteDance Internal, Bifrost Cloud, and GitHub Gist, capped at three cards per row by layout width and responsive down to one column. Cards use a wider desktop column so provider metadata and the Bifrost Cloud URL editor remain readable.
 - Settings Sync first-run modal is dismissible. Selecting ByteDance Internal or Bifrost Cloud and pressing `Start` saves the provider URL and opens the existing login flow.
+- ByteDance Internal and Bifrost Cloud sessions are persisted as independent provider sessions in `sync-state.json`, so both cards can stay connected at the same time.
+- GitHub Gist token sign-in is implemented as the first usable login path. Users provide a GitHub token with `gist` scope; Bifrost validates it against GitHub `/user` and stores an independent `github_gist` provider session.
+- Remote Invoke registration targets are resolved from all eligible connected providers. ByteDance-only, Bifrost Cloud-only, and ByteDance+Bifrost Cloud dual-channel startup/runtime login all register with the matching relay URL and provider session token. The runtime keeps one worker per eligible relay URL and stops workers whose provider session was removed.
 - CLI `bifrost sync status` now lists provider status and capability flags.
 
 Known remaining implementation gaps before claiming the full original product target:
 
-- GitHub Gist currently renders as a provider card with Rules Sync and Config Sync capability metadata, but the actual GitHub OAuth/device flow, encrypted gist storage, conflict handling, and recovery key UX are not yet implemented.
-- True concurrent sessions for ByteDance Internal plus Bifrost Cloud are not yet persisted as independent provider sessions; the current implementation keeps the existing single active Bifrost-server session and derives provider card state from that session.
-- Remote Invoke registration fan-out to both ByteDance Internal and Bifrost Cloud is not yet implemented; current status derives registration from the active Bifrost-server session.
+- GitHub Gist OAuth/device flow, encrypted gist storage, conflict handling, and recovery key UX are not yet implemented. OAuth device flow can be layered onto the token session path once a Bifrost GitHub OAuth App client id is configured.

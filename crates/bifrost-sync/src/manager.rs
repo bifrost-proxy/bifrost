@@ -30,6 +30,8 @@ const STARTUP_LOGIN_PREFLIGHT_RETRY_DELAY_MS_ENV: &str =
     "BIFROST_SYNC_STARTUP_LOGIN_PREFLIGHT_RETRY_DELAY_MS";
 const DISABLE_AUTO_LOGIN_PROMPT_ENV: &str = "BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT";
 const LOGIN_BROWSER_DRY_RUN_FILE_ENV: &str = "BIFROST_SYNC_LOGIN_BROWSER_DRY_RUN_FILE";
+const GITHUB_API_BASE_URL: &str = "https://api.github.com";
+const GITHUB_GIST_REMOTE_BASE_URL: &str = "https://api.github.com/gists";
 
 pub type SharedSyncManager = Arc<SyncManager>;
 
@@ -60,11 +62,33 @@ struct BasicConfigSyncMeta {
 struct SyncStateFile {
     token: Option<String>,
     user: Option<RemoteUser>,
+    #[serde(default)]
+    provider_sessions: HashMap<String, SyncProviderSession>,
     last_sync_at: Option<String>,
     last_sync_action: Option<SyncAction>,
     startup_login_prompt: Option<StartupLoginPromptFile>,
     deleted_rules: HashMap<String, DeletedRuleTombstone>,
     basic_configs: HashMap<String, BasicConfigSyncMeta>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct SyncProviderSession {
+    token: String,
+    remote_base_url: String,
+    user: Option<RemoteUser>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubUser {
+    login: String,
+    #[serde(default)]
+    id: u64,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    avatar_url: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +161,13 @@ pub struct SyncProviderStatus {
     pub remote_invoke_registered: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteInvokeProviderTarget {
+    pub provider_id: String,
+    pub remote_base_url: String,
+    pub session_token: String,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncAction {
@@ -169,11 +200,49 @@ fn is_bytedance_remote(remote_base_url: &str) -> bool {
     remote_base_url.contains("bytedance.net")
 }
 
+fn normalize_remote_base_url(remote_base_url: &str) -> String {
+    remote_base_url.trim().trim_end_matches('/').to_string()
+}
+
+fn provider_id_for_remote(remote_base_url: &str) -> Option<&'static str> {
+    let normalized = normalize_remote_base_url(remote_base_url);
+    if normalized.is_empty() {
+        return None;
+    }
+    if is_bytedance_remote(&normalized) {
+        Some("bytedance_internal")
+    } else {
+        Some("bifrost_cloud")
+    }
+}
+
+fn session_for_provider<'a>(
+    provider_sessions: &'a HashMap<String, SyncProviderSession>,
+    provider_id: &str,
+) -> Option<&'a SyncProviderSession> {
+    provider_sessions
+        .get(provider_id)
+        .filter(|session| !session.token.trim().is_empty())
+}
+
+fn update_provider_session_user(
+    sync_config: &SyncConfig,
+    state: &mut SyncStateFile,
+    user: &RemoteUser,
+) {
+    if let Some(provider_id) = provider_id_for_remote(&sync_config.remote_base_url) {
+        if let Some(session) = state.provider_sessions.get_mut(provider_id) {
+            session.user = Some(user.clone());
+        }
+    }
+}
+
 fn build_provider_statuses(
     sync_config: &SyncConfig,
     runtime: &SyncRuntimeState,
     user: &Option<RemoteUser>,
     has_session: bool,
+    provider_sessions: &HashMap<String, SyncProviderSession>,
 ) -> Vec<SyncProviderStatus> {
     let current_url = sync_config
         .remote_base_url
@@ -182,6 +251,12 @@ fn build_provider_statuses(
     let bytedance_selected = is_bytedance_remote(&current_url);
     let cloud_selected = !bytedance_selected && !current_url.is_empty();
     let current_connected = has_session && runtime.authorized;
+    let bytedance_session = session_for_provider(provider_sessions, "bytedance_internal");
+    let cloud_session = session_for_provider(provider_sessions, "bifrost_cloud");
+    let github_gist_session = session_for_provider(provider_sessions, "github_gist");
+    let bytedance_connected =
+        bytedance_session.is_some() || (bytedance_selected && current_connected);
+    let cloud_connected = cloud_session.is_some() || (cloud_selected && current_connected);
 
     vec![
         SyncProviderStatus {
@@ -189,53 +264,67 @@ fn build_provider_statuses(
             name: "ByteDance Internal".to_string(),
             description: "Internal trusted sync and Remote Invoke provider.".to_string(),
             remote_base_url: Some(DEFAULT_REMOTE_BASE_URL.to_string()),
-            connected: bytedance_selected && current_connected,
-            enabled: sync_config.enabled && bytedance_selected,
-            reachable: bytedance_selected && runtime.reachable,
-            authorized: bytedance_selected && runtime.authorized,
-            user: (bytedance_selected && has_session)
-                .then(|| user.clone())
-                .flatten(),
+            connected: bytedance_connected,
+            enabled: sync_config.enabled && (bytedance_selected || bytedance_session.is_some()),
+            reachable: bytedance_session.is_some() || (bytedance_selected && runtime.reachable),
+            authorized: bytedance_session.is_some() || (bytedance_selected && runtime.authorized),
+            user: bytedance_session
+                .and_then(|session| session.user.clone())
+                .or_else(|| {
+                    (bytedance_selected && has_session)
+                        .then(|| user.clone())
+                        .flatten()
+                }),
             capabilities: SyncProviderCapabilities {
                 rules_sync: true,
                 config_sync: true,
                 remote_invoke: true,
             },
-            remote_invoke_registered: bytedance_selected && runtime.authorized,
+            remote_invoke_registered: bytedance_connected,
         },
         SyncProviderStatus {
             id: "bifrost_cloud".to_string(),
             name: "Bifrost Cloud".to_string(),
             description: "Custom Bifrost sync service for teams and self-hosting.".to_string(),
-            remote_base_url: Some(if cloud_selected {
-                current_url.clone()
-            } else {
-                "https://sync.bifrostproxy.dev".to_string()
-            }),
-            connected: cloud_selected && current_connected,
-            enabled: sync_config.enabled && cloud_selected,
-            reachable: cloud_selected && runtime.reachable,
-            authorized: cloud_selected && runtime.authorized,
-            user: (cloud_selected && has_session)
-                .then(|| user.clone())
-                .flatten(),
+            remote_base_url: Some(
+                cloud_session
+                    .map(|session| session.remote_base_url.clone())
+                    .unwrap_or_else(|| {
+                        if cloud_selected {
+                            current_url.clone()
+                        } else {
+                            "https://sync.bifrostproxy.dev".to_string()
+                        }
+                    }),
+            ),
+            connected: cloud_connected,
+            enabled: sync_config.enabled && (cloud_selected || cloud_session.is_some()),
+            reachable: cloud_session.is_some() || (cloud_selected && runtime.reachable),
+            authorized: cloud_session.is_some() || (cloud_selected && runtime.authorized),
+            user: cloud_session
+                .and_then(|session| session.user.clone())
+                .or_else(|| {
+                    (cloud_selected && has_session)
+                        .then(|| user.clone())
+                        .flatten()
+                }),
             capabilities: SyncProviderCapabilities {
                 rules_sync: true,
                 config_sync: true,
                 remote_invoke: true,
             },
-            remote_invoke_registered: cloud_selected && runtime.authorized,
+            remote_invoke_registered: cloud_connected,
         },
         SyncProviderStatus {
             id: "github_gist".to_string(),
             name: "GitHub Gist".to_string(),
             description: "Public GitHub Gist-backed portable sync provider.".to_string(),
-            remote_base_url: None,
-            connected: false,
-            enabled: false,
-            reachable: false,
-            authorized: false,
-            user: None,
+            remote_base_url: Some(GITHUB_GIST_REMOTE_BASE_URL.to_string()),
+            connected: github_gist_session.is_some(),
+            enabled: sync_config.enabled && github_gist_session.is_some(),
+            reachable: github_gist_session.is_some(),
+            authorized: github_gist_session.is_some(),
+            user: github_gist_session.and_then(|session| session.user.clone()),
             capabilities: SyncProviderCapabilities {
                 rules_sync: true,
                 config_sync: true,
@@ -265,6 +354,11 @@ impl SyncManagerHandle {
         Ok(self.inner.status().await)
     }
 
+    pub async fn save_github_gist_session(&self, token: String) -> Result<SyncStatus> {
+        self.inner.save_github_gist_session(token).await?;
+        Ok(self.inner.status().await)
+    }
+
     pub async fn logout(&self) -> Result<SyncStatus> {
         self.inner.logout().await?;
         Ok(self.inner.status().await)
@@ -284,6 +378,14 @@ impl SyncManagerHandle {
 
     pub fn session_token(&self) -> Option<String> {
         self.inner.session_token()
+    }
+
+    pub fn session_token_for_remote(&self, remote_base_url: &str) -> Option<String> {
+        self.inner.session_token_for_remote(remote_base_url)
+    }
+
+    pub async fn remote_invoke_registration_targets(&self) -> Vec<RemoteInvokeProviderTarget> {
+        self.inner.remote_invoke_registration_targets().await
     }
 
     pub async fn record_deleted_rule(&self, rule: &RuleFile) -> Result<()> {
@@ -364,7 +466,13 @@ impl SyncManager {
             .token
             .as_deref()
             .is_some_and(|token| !token.trim().is_empty());
-        let providers = build_provider_statuses(&config.sync, &runtime, &state.user, has_session);
+        let providers = build_provider_statuses(
+            &config.sync,
+            &runtime,
+            &state.user,
+            has_session,
+            &state.provider_sessions,
+        );
         SyncStatus {
             enabled: config.sync.enabled,
             auto_sync: config.sync.auto_sync,
@@ -397,6 +505,51 @@ impl SyncManager {
         self.state.lock().token.clone()
     }
 
+    pub fn session_token_for_remote(&self, remote_base_url: &str) -> Option<String> {
+        let normalized = normalize_remote_base_url(remote_base_url);
+        let state = self.state.lock();
+        state
+            .provider_sessions
+            .values()
+            .find(|session| normalize_remote_base_url(&session.remote_base_url) == normalized)
+            .map(|session| session.token.clone())
+            .filter(|token| !token.trim().is_empty())
+            .or_else(|| {
+                self.config_manager.try_config().and_then(|config| {
+                    (normalize_remote_base_url(&config.sync.remote_base_url) == normalized)
+                        .then(|| state.token.clone())
+                        .flatten()
+                })
+            })
+    }
+
+    pub async fn remote_invoke_registration_targets(&self) -> Vec<RemoteInvokeProviderTarget> {
+        let config = self.config_manager.config().await;
+        let state = self.state.lock().clone();
+        let mut targets = Vec::new();
+        for provider_id in ["bytedance_internal", "bifrost_cloud"] {
+            if let Some(session) = session_for_provider(&state.provider_sessions, provider_id) {
+                targets.push(RemoteInvokeProviderTarget {
+                    provider_id: provider_id.to_string(),
+                    remote_base_url: session.remote_base_url.clone(),
+                    session_token: session.token.clone(),
+                });
+            }
+        }
+        if targets.is_empty() {
+            if let Some(provider_id) = provider_id_for_remote(&config.sync.remote_base_url) {
+                if let Some(token) = state.token.clone().filter(|token| !token.trim().is_empty()) {
+                    targets.push(RemoteInvokeProviderTarget {
+                        provider_id: provider_id.to_string(),
+                        remote_base_url: normalize_remote_base_url(&config.sync.remote_base_url),
+                        session_token: token,
+                    });
+                }
+            }
+        }
+        targets
+    }
+
     pub async fn login_url(&self, callback_url: &str) -> Result<String> {
         let config = self.config_manager.config().await;
         let client = SyncHttpClient::new(&config.sync)?;
@@ -410,6 +563,7 @@ impl SyncManager {
     }
 
     pub async fn save_token(&self, token: String) -> Result<()> {
+        let config = self.config_manager.config().await;
         self.config_manager
             .update_sync_config(SyncConfigUpdate {
                 auto_sync: Some(true),
@@ -418,7 +572,19 @@ impl SyncManager {
             .await?;
         {
             let mut state = self.state.lock();
-            state.token = Some(token);
+            let token = token.trim().to_string();
+            let user = state.user.clone();
+            state.token = Some(token.clone());
+            if let Some(provider_id) = provider_id_for_remote(&config.sync.remote_base_url) {
+                state.provider_sessions.insert(
+                    provider_id.to_string(),
+                    SyncProviderSession {
+                        token,
+                        remote_base_url: normalize_remote_base_url(&config.sync.remote_base_url),
+                        user,
+                    },
+                );
+            }
             self.persist_state(&state)?;
         }
         self.wake.notify_one();
@@ -451,6 +617,78 @@ impl SyncManager {
             })
             .await?;
         self.save_token(token).await
+    }
+
+    pub async fn save_github_gist_session(&self, token: String) -> Result<()> {
+        let token = token.trim().to_string();
+        if token.is_empty() {
+            return Err(BifrostError::Config("GitHub token is required".to_string()));
+        }
+        let user = self.github_user_for_token(&token).await?;
+        self.config_manager
+            .update_sync_config(SyncConfigUpdate {
+                enabled: Some(true),
+                auto_sync: Some(true),
+                ..Default::default()
+            })
+            .await?;
+        {
+            let mut state = self.state.lock();
+            state.provider_sessions.insert(
+                "github_gist".to_string(),
+                SyncProviderSession {
+                    token,
+                    remote_base_url: GITHUB_GIST_REMOTE_BASE_URL.to_string(),
+                    user: Some(user),
+                },
+            );
+            self.persist_state(&state)?;
+        }
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    async fn github_user_for_token(&self, token: &str) -> Result<RemoteUser> {
+        let client = bifrost_core::outbound_reqwest_client_builder()
+            .connect_timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+            .map_err(|e| BifrostError::Network(format!("failed to build GitHub client: {e}")))?;
+        let response = client
+            .get(format!("{GITHUB_API_BASE_URL}/user"))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "bifrost-sync")
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| BifrostError::Network(format!("GitHub user request failed: {e}")))?;
+
+        if response.status().as_u16() == 401 || response.status().as_u16() == 403 {
+            return Err(BifrostError::Config(
+                "GitHub token is invalid or does not have access".to_string(),
+            ));
+        }
+        if !response.status().is_success() {
+            return Err(BifrostError::Network(format!(
+                "GitHub user request returned HTTP {}",
+                response.status()
+            )));
+        }
+        let user = response
+            .json::<GitHubUser>()
+            .await
+            .map_err(|e| BifrostError::Network(format!("invalid GitHub user response: {e}")))?;
+        Ok(RemoteUser {
+            user_id: if user.id == 0 {
+                user.login.clone()
+            } else {
+                format!("github:{}", user.id)
+            },
+            nickname: user.name.unwrap_or_else(|| user.login.clone()),
+            avatar: user.avatar_url.unwrap_or_default(),
+            email: user.email.unwrap_or_default(),
+        })
     }
 
     pub async fn remote_sample(&self, limit: usize) -> Result<Vec<RemoteEnv>> {
@@ -557,6 +795,7 @@ impl SyncManager {
             let mut state = self.state.lock();
             state.token = None;
             state.user = None;
+            state.provider_sessions.clear();
             self.persist_state(&state)?;
         }
         self.login_prompt.lock().last_opened_at = None;
@@ -624,6 +863,7 @@ impl SyncManager {
         {
             let mut state = self.state.lock();
             state.user = Some(user.clone());
+            update_provider_session_user(&config.sync, &mut state, &user);
             self.persist_state(&state)?;
         }
 
@@ -783,6 +1023,7 @@ impl SyncManager {
         {
             let mut state = self.state.lock();
             state.user = Some(user.clone());
+            update_provider_session_user(&config.sync, &mut state, &user);
             self.persist_state(&state)?;
         }
 
@@ -1812,6 +2053,191 @@ mod tests {
             .unwrap();
         let manager = SyncManager::new(config_manager.clone(), 9900).unwrap();
         (temp_dir, config_manager, manager)
+    }
+
+    fn test_user(user_id: &str) -> RemoteUser {
+        RemoteUser {
+            user_id: user_id.to_string(),
+            nickname: user_id.to_string(),
+            avatar: String::new(),
+            email: format!("{user_id}@example.test"),
+        }
+    }
+
+    #[tokio::test]
+    async fn status_marks_remote_invoke_registered_for_bytedance_and_cloud_sessions() {
+        let (_temp_dir, _config_manager, manager) =
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+        {
+            let mut state = manager.state.lock();
+            state.provider_sessions.insert(
+                "bytedance_internal".to_string(),
+                SyncProviderSession {
+                    token: "byte-token".to_string(),
+                    remote_base_url: DEFAULT_REMOTE_BASE_URL.to_string(),
+                    user: Some(test_user("byte-user")),
+                },
+            );
+            state.provider_sessions.insert(
+                "bifrost_cloud".to_string(),
+                SyncProviderSession {
+                    token: "cloud-token".to_string(),
+                    remote_base_url: "https://sync.example.test".to_string(),
+                    user: Some(test_user("cloud-user")),
+                },
+            );
+            manager.persist_state(&state).unwrap();
+        }
+
+        let status = manager.status().await;
+        let bytedance = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == "bytedance_internal")
+            .expect("bytedance provider");
+        let cloud = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == "bifrost_cloud")
+            .expect("cloud provider");
+        assert!(bytedance.connected);
+        assert!(bytedance.remote_invoke_registered);
+        assert_eq!(
+            bytedance.user.as_ref().map(|user| user.user_id.as_str()),
+            Some("byte-user")
+        );
+        assert!(cloud.connected);
+        assert!(cloud.remote_invoke_registered);
+        assert_eq!(
+            cloud.user.as_ref().map(|user| user.user_id.as_str()),
+            Some("cloud-user")
+        );
+        assert_eq!(
+            cloud.remote_base_url.as_deref(),
+            Some("https://sync.example.test")
+        );
+        assert!(!status.first_run_prompt_required);
+    }
+
+    #[tokio::test]
+    async fn status_marks_github_gist_connected_from_provider_session() {
+        let (_temp_dir, _config_manager, manager) =
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+        {
+            let mut state = manager.state.lock();
+            state.provider_sessions.insert(
+                "github_gist".to_string(),
+                SyncProviderSession {
+                    token: "ghp_test".to_string(),
+                    remote_base_url: GITHUB_GIST_REMOTE_BASE_URL.to_string(),
+                    user: Some(test_user("github:12345")),
+                },
+            );
+            manager.persist_state(&state).unwrap();
+        }
+
+        let status = manager.status().await;
+        let gist = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == "github_gist")
+            .expect("github gist provider");
+        assert!(gist.connected);
+        assert!(gist.authorized);
+        assert!(gist.capabilities.rules_sync);
+        assert!(gist.capabilities.config_sync);
+        assert!(!gist.capabilities.remote_invoke);
+        assert!(!gist.remote_invoke_registered);
+        assert_eq!(
+            gist.remote_base_url.as_deref(),
+            Some(GITHUB_GIST_REMOTE_BASE_URL)
+        );
+        assert_eq!(
+            gist.user.as_ref().map(|user| user.user_id.as_str()),
+            Some("github:12345")
+        );
+        assert!(!status.first_run_prompt_required);
+    }
+
+    #[tokio::test]
+    async fn remote_invoke_registration_targets_cover_single_and_dual_channels() {
+        let (_temp_dir, _config_manager, manager) =
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+        manager.save_token("byte-token".to_string()).await.unwrap();
+        let targets = manager.remote_invoke_registration_targets().await;
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].provider_id, "bytedance_internal");
+        assert_eq!(targets[0].session_token, "byte-token");
+        assert_eq!(
+            manager
+                .session_token_for_remote(DEFAULT_REMOTE_BASE_URL)
+                .as_deref(),
+            Some("byte-token")
+        );
+
+        {
+            let mut state = manager.state.lock();
+            state.provider_sessions.insert(
+                "bifrost_cloud".to_string(),
+                SyncProviderSession {
+                    token: "cloud-token".to_string(),
+                    remote_base_url: "https://sync.example.test".to_string(),
+                    user: Some(test_user("cloud-user")),
+                },
+            );
+            manager.persist_state(&state).unwrap();
+        }
+
+        let targets = manager.remote_invoke_registration_targets().await;
+        assert_eq!(
+            targets
+                .iter()
+                .map(|target| (target.provider_id.as_str(), target.session_token.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("bytedance_internal", "byte-token"),
+                ("bifrost_cloud", "cloud-token")
+            ]
+        );
+        assert_eq!(
+            manager
+                .session_token_for_remote("https://sync.example.test/")
+                .as_deref(),
+            Some("cloud-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_clears_provider_sessions() {
+        let (_temp_dir, _config_manager, manager) =
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+        {
+            let mut state = manager.state.lock();
+            state.token = Some("legacy-token".to_string());
+            state.provider_sessions.insert(
+                "bytedance_internal".to_string(),
+                SyncProviderSession {
+                    token: "byte-token".to_string(),
+                    remote_base_url: DEFAULT_REMOTE_BASE_URL.to_string(),
+                    user: Some(test_user("byte-user")),
+                },
+            );
+            state.provider_sessions.insert(
+                "bifrost_cloud".to_string(),
+                SyncProviderSession {
+                    token: "cloud-token".to_string(),
+                    remote_base_url: "https://sync.example.test".to_string(),
+                    user: Some(test_user("cloud-user")),
+                },
+            );
+            manager.persist_state(&state).unwrap();
+        }
+
+        manager.logout().await.unwrap();
+
+        let state = manager.state.lock();
+        assert!(state.token.is_none());
+        assert!(state.provider_sessions.is_empty());
     }
 
     fn read_dry_run_urls(path: &std::path::Path) -> Vec<String> {

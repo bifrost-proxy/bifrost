@@ -143,39 +143,57 @@ fn spawn_remote_invoke_worker_startup_task(
     );
     tokio::spawn(async move {
         let started_at = Instant::now();
-        let relay_url = shared_config_manager
+        let default_relay_url = shared_config_manager
             .try_config()
             .map(|c| c.sync.remote_base_url.clone())
             .unwrap_or_else(|| DEFAULT_REMOTE_BASE_URL.to_string());
+        let registration_targets = bifrost_sync::SyncManagerHandle::new(sync_manager.clone())
+            .remote_invoke_registration_targets()
+            .await;
+        let relay_urls: Vec<String> = if registration_targets.is_empty() {
+            vec![default_relay_url]
+        } else {
+            registration_targets
+                .into_iter()
+                .map(|target| target.remote_base_url)
+                .collect()
+        };
         let data_dir_path = shared_config_manager.data_dir().to_path_buf();
         let admin_state_for_worker = admin_state.clone();
         let sync_manager_for_worker = sync_manager.clone();
         let worker_result = tokio::task::spawn_blocking(move || {
             let identity = bifrost_admin::RemoteInvokeIdentity::load_or_create(&data_dir_path)
                 .map_err(|e| e.to_string())?;
-            let ri_config = bifrost_admin::RemoteInvokeConfig {
-                relay_url,
-                ..Default::default()
-            };
-            Ok::<_, String>(bifrost_admin::RemoteInvokeWorker::new(
-                ri_config,
-                identity,
-                Some(bifrost_sync::SyncManagerHandle::new(
-                    sync_manager_for_worker,
-                )),
-                admin_state_for_worker,
-                &admin_host,
-                admin_port,
-            ))
+            let mut workers = Vec::new();
+            for relay_url in relay_urls {
+                let ri_config = bifrost_admin::RemoteInvokeConfig {
+                    relay_url,
+                    ..Default::default()
+                };
+                workers.push(bifrost_admin::RemoteInvokeWorker::new(
+                    ri_config,
+                    identity.clone(),
+                    Some(bifrost_sync::SyncManagerHandle::new(
+                        sync_manager_for_worker.clone(),
+                    )),
+                    admin_state_for_worker.clone(),
+                    &admin_host,
+                    admin_port,
+                ));
+            }
+            Ok::<_, String>(workers)
         })
         .await;
 
         match worker_result {
-            Ok(Ok(worker)) => {
-                admin_state.set_remote_invoke_worker(worker.clone());
-                worker.start();
+            Ok(Ok(workers)) => {
+                admin_state.set_remote_invoke_workers(workers.clone());
+                for worker in &workers {
+                    worker.start();
+                }
                 tracing::info!(
                     target: "bifrost_cli::startup",
+                    workers = workers.len(),
                     elapsed_ms = started_at.elapsed().as_millis() as u64,
                     "remote invoke worker initialized asynchronously"
                 );
@@ -2111,6 +2129,8 @@ pub fn run_foreground(
             } else {
                 config.host.clone()
             };
+            admin_state
+                .set_remote_invoke_admin_endpoint(remote_invoke_admin_host.clone(), config.port);
             spawn_remote_invoke_worker_startup_task(
                 shared_config_manager.clone(),
                 sync_manager.clone(),

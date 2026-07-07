@@ -8,16 +8,15 @@ import {
   Modal,
   Radio,
   Space,
-  Switch,
   Tag,
   Typography,
 } from "antd";
 import {
   CloudOutlined,
+  GithubOutlined,
   LinkOutlined,
   LoginOutlined,
   LogoutOutlined,
-  ReloadOutlined,
 } from "@ant-design/icons";
 import type { SyncProviderStatus, SyncStatus } from "../../../api/sync";
 
@@ -26,50 +25,16 @@ const { Text } = Typography;
 interface SyncTabProps {
   syncStatus: SyncStatus | null;
   syncLoading: boolean;
-  remoteBaseUrlDraft: string;
-  setRemoteBaseUrlDraft: (value: string) => void;
-  onToggleEnabled: (enabled: boolean) => void;
-  onToggleAutoSync: (enabled: boolean) => void;
-  onSaveRemoteBaseUrl: () => void;
   onSignIn: () => void;
-  onProviderSignIn?: (provider: SyncProviderStatus) => void;
+  onProviderSignIn?: (
+    provider: SyncProviderStatus,
+    options?: { token?: string },
+  ) => void;
+  onProviderRemoteBaseUrlSave?: (
+    provider: SyncProviderStatus,
+    remoteBaseUrl: string,
+  ) => void;
   onSignOut: () => void;
-  onRunSync: () => void;
-}
-
-function renderStatusTag(syncStatus: SyncStatus | null) {
-  if (!syncStatus) {
-    return <Tag>Unknown</Tag>;
-  }
-  switch (syncStatus.reason) {
-    case "ready":
-      return <Tag color="green">Ready</Tag>;
-    case "syncing":
-      return <Tag color="processing">Syncing</Tag>;
-    case "unreachable":
-      return <Tag color="orange">Offline</Tag>;
-    case "unauthorized":
-      return <Tag color="gold">Sign in required</Tag>;
-    case "error":
-      return <Tag color="red">Error</Tag>;
-    default:
-      return <Tag>{syncStatus.reason}</Tag>;
-  }
-}
-
-function renderLastAction(syncStatus: SyncStatus | null) {
-  switch (syncStatus?.last_sync_action) {
-    case "local_pushed":
-      return "Local changes pushed to remote";
-    case "remote_pulled":
-      return "Newer remote changes pulled into local";
-    case "bidirectional":
-      return "Local and remote changes exchanged";
-    case "no_change":
-      return "No changes detected";
-    default:
-      return "No sync result yet";
-  }
 }
 
 function capabilityTags(provider: SyncProviderStatus) {
@@ -146,21 +111,25 @@ const fallbackProviders: SyncProviderStatus[] = [
 export default function SyncTab({
   syncStatus,
   syncLoading,
-  remoteBaseUrlDraft,
-  setRemoteBaseUrlDraft,
-  onToggleEnabled,
-  onToggleAutoSync,
-  onSaveRemoteBaseUrl,
   onSignIn,
   onProviderSignIn,
+  onProviderRemoteBaseUrlSave,
   onSignOut,
-  onRunSync,
 }: SyncTabProps) {
   const providers = syncStatus?.providers?.length
     ? syncStatus.providers
     : fallbackProviders;
   const [firstRunOpen, setFirstRunOpen] = useState(false);
   const [selectedProviderId, setSelectedProviderId] = useState(providers[0]?.id);
+  const bifrostCloudProvider = providers.find(
+    (provider) => provider.id === "bifrost_cloud",
+  );
+  const [bifrostCloudUrlDraft, setBifrostCloudUrlDraft] = useState(
+    bifrostCloudProvider?.remote_base_url || "https://sync.bifrostproxy.dev",
+  );
+  const [bifrostCloudUrlDirty, setBifrostCloudUrlDirty] = useState(false);
+  const [githubTokenModalOpen, setGithubTokenModalOpen] = useState(false);
+  const [githubTokenDraft, setGithubTokenDraft] = useState("");
   const selectedProvider = useMemo(
     () => providers.find((provider) => provider.id === selectedProviderId) || providers[0],
     [providers, selectedProviderId],
@@ -178,14 +147,49 @@ export default function SyncTab({
     }
   }, [providers, selectedProviderId]);
 
-  const handleProviderSignIn = (provider: SyncProviderStatus) => {
-    if (provider.remote_base_url) {
-      setRemoteBaseUrlDraft(provider.remote_base_url);
+  useEffect(() => {
+    if (bifrostCloudUrlDirty) {
+      return;
     }
-    onProviderSignIn?.(provider);
+    setBifrostCloudUrlDraft(
+      bifrostCloudProvider?.remote_base_url || "https://sync.bifrostproxy.dev",
+    );
+  }, [bifrostCloudProvider?.remote_base_url, bifrostCloudUrlDirty]);
+
+  const providerWithDraftUrl = (provider: SyncProviderStatus) => {
+    if (provider.id !== "bifrost_cloud") {
+      return provider;
+    }
+    return {
+      ...provider,
+      remote_base_url: bifrostCloudUrlDraft.trim() || provider.remote_base_url,
+    };
+  };
+
+  const handleProviderSignIn = (provider: SyncProviderStatus) => {
+    if (provider.id === "github_gist") {
+      setGithubTokenModalOpen(true);
+      return;
+    }
+    onProviderSignIn?.(providerWithDraftUrl(provider));
     if (!onProviderSignIn) {
       onSignIn();
     }
+  };
+
+  const handleGithubGistSignIn = () => {
+    const githubProvider = providers.find((provider) => provider.id === "github_gist");
+    if (!githubProvider || !githubTokenDraft.trim()) {
+      return;
+    }
+    onProviderSignIn?.(githubProvider, { token: githubTokenDraft.trim() });
+    setGithubTokenDraft("");
+    setGithubTokenModalOpen(false);
+  };
+
+  const handleBifrostCloudUrlSave = (provider: SyncProviderStatus) => {
+    onProviderRemoteBaseUrlSave?.(provider, bifrostCloudUrlDraft);
+    setBifrostCloudUrlDirty(false);
   };
 
   return (
@@ -202,8 +206,8 @@ export default function SyncTab({
         style={{
           display: "grid",
           gap: 16,
-          gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
-          maxWidth: 1080,
+          gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 380px), 1fr))",
+          maxWidth: 1440,
           width: "100%",
         }}
       >
@@ -237,7 +241,31 @@ export default function SyncTab({
                   {
                     key: "remote",
                     label: "Remote",
-                    children: provider.remote_base_url || "GitHub Gist",
+                    children:
+                      provider.id === "bifrost_cloud" ? (
+                        <Space.Compact style={{ width: "100%" }}>
+                          <Input
+                            value={bifrostCloudUrlDraft}
+                            onChange={(event) => {
+                              setBifrostCloudUrlDirty(true);
+                              setBifrostCloudUrlDraft(event.target.value);
+                            }}
+                            placeholder="https://sync.bifrostproxy.dev"
+                            prefix={<LinkOutlined />}
+                            data-testid="settings-sync-provider-bifrost-cloud-url-input"
+                          />
+                          <Button
+                            type="primary"
+                            onClick={() => handleBifrostCloudUrlSave(provider)}
+                            loading={syncLoading}
+                            data-testid="settings-sync-provider-bifrost-cloud-url-save"
+                          >
+                            Save
+                          </Button>
+                        </Space.Compact>
+                      ) : (
+                        provider.remote_base_url || "GitHub Gist"
+                      ),
                   },
                   {
                     key: "invoke",
@@ -253,9 +281,9 @@ export default function SyncTab({
               <Space wrap>
                 <Button
                   type={provider.connected ? "default" : "primary"}
-                  icon={<LoginOutlined />}
+                  icon={provider.id === "github_gist" ? <GithubOutlined /> : <LoginOutlined />}
                   onClick={() => handleProviderSignIn(provider)}
-                  disabled={provider.id === "github_gist" || syncLoading}
+                  disabled={syncLoading}
                   loading={syncLoading}
                   data-testid={`settings-sync-provider-login-${provider.id}`}
                 >
@@ -277,123 +305,32 @@ export default function SyncTab({
         ))}
       </div>
 
-      <Card title="Remote Sync" size="small">
-        <Space direction="vertical" size={16} style={{ width: "100%" }}>
-          <Descriptions
-            size="small"
-            column={1}
-            items={[
-              {
-                key: "status",
-                label: "Status",
-                children: renderStatusTag(syncStatus),
-              },
-              {
-                key: "last-sync",
-                label: "Last Sync",
-                children: syncStatus?.last_sync_at || "Never",
-              },
-              {
-                key: "session",
-                label: "Session",
-                children: (
-                  <span data-testid="settings-sync-session">
-                    {syncStatus?.user?.user_id || "Not signed in"}
-                  </span>
-                ),
-              },
-              {
-                key: "last-sync-action",
-                label: "Last Result",
-                children: (
-                  <span data-testid="settings-sync-last-action">
-                    {renderLastAction(syncStatus)}
-                  </span>
-                ),
-              },
-            ]}
+      <Modal
+        title="Sign in to GitHub Gist"
+        open={githubTokenModalOpen}
+        onCancel={() => setGithubTokenModalOpen(false)}
+        onOk={handleGithubGistSignIn}
+        okText="Sign In"
+        okButtonProps={{
+          disabled: !githubTokenDraft.trim(),
+          loading: syncLoading,
+        }}
+      >
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Text type="secondary">
+            Enter a GitHub token with the gist scope. The token is stored locally and
+            used only for your Gist-backed sync provider.
+          </Text>
+          <Input.Password
+            value={githubTokenDraft}
+            onChange={(event) => setGithubTokenDraft(event.target.value)}
+            placeholder="ghp_..."
+            prefix={<GithubOutlined />}
+            autoComplete="off"
+            data-testid="settings-sync-provider-github-gist-token-input"
           />
-
-          {syncStatus?.last_error ? (
-            <Alert
-              showIcon
-              type="error"
-              message="Last sync error"
-              description={syncStatus.last_error}
-            />
-          ) : null}
-
-          <Space align="center">
-            <Text strong>Enable sync</Text>
-            <Switch
-              checked={syncStatus?.enabled ?? false}
-              loading={syncLoading}
-              onChange={onToggleEnabled}
-              data-testid="settings-sync-enable-switch"
-            />
-          </Space>
-
-          <Space align="center">
-            <Text strong>Auto sync</Text>
-            <Switch
-              checked={syncStatus?.auto_sync ?? false}
-              loading={syncLoading}
-              onChange={onToggleAutoSync}
-              disabled={!(syncStatus?.enabled ?? false)}
-              data-testid="settings-sync-auto-switch"
-            />
-          </Space>
-
-          <Space.Compact style={{ width: "100%" }}>
-            <Input
-              value={remoteBaseUrlDraft}
-              onChange={(event) => setRemoteBaseUrlDraft(event.target.value)}
-              placeholder="https://bifrost.bytedance.net"
-              prefix={<LinkOutlined />}
-              data-testid="settings-sync-remote-url-input"
-            />
-            <Button
-              type="primary"
-              onClick={onSaveRemoteBaseUrl}
-              loading={syncLoading}
-              data-testid="settings-sync-remote-url-save"
-            >
-              Save
-            </Button>
-          </Space.Compact>
-
-          <Space wrap>
-            <Button
-              type="primary"
-              icon={<LoginOutlined />}
-              onClick={onSignIn}
-              disabled={!(syncStatus?.enabled ?? false)}
-              loading={syncLoading}
-              data-testid="settings-sync-sign-in"
-            >
-              Sign In
-            </Button>
-            <Button
-              icon={<LogoutOutlined />}
-              onClick={onSignOut}
-              disabled={!syncStatus?.has_session}
-              loading={syncLoading}
-              data-testid="settings-sync-sign-out"
-            >
-              Sign Out
-            </Button>
-            <Button
-              icon={<ReloadOutlined />}
-              onClick={onRunSync}
-              disabled={!syncStatus?.authorized}
-              loading={syncLoading || syncStatus?.syncing}
-              data-testid="settings-sync-run-now"
-            >
-              Sync Now
-            </Button>
-          </Space>
         </Space>
-      </Card>
+      </Modal>
 
       <Modal
         title="Choose a sync service"
@@ -407,7 +344,7 @@ export default function SyncTab({
             key="start"
             type="primary"
             icon={<LoginOutlined />}
-            disabled={!selectedProvider || selectedProvider.id === "github_gist"}
+            disabled={!selectedProvider}
             loading={syncLoading}
             onClick={() => {
               if (selectedProvider) {

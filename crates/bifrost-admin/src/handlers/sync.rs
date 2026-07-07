@@ -2,11 +2,13 @@ use bifrost_storage::{SyncConfigUpdate, DEFAULT_REMOTE_BASE_URL};
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
 
 use super::{
     empty_body, error_response, full_body, json_response, method_not_allowed,
     public_response_builder, BoxBody,
 };
+use crate::remote_invoke::{Identity, RemoteInvokeConfig, RemoteInvokeWorker};
 use crate::state::SharedAdminState;
 
 #[derive(Debug, Serialize)]
@@ -31,6 +33,7 @@ struct SaveSessionRequest {
 #[derive(Debug, Deserialize, Default)]
 struct LoginRequest {
     token: Option<String>,
+    provider_id: Option<String>,
     remote_base_url: Option<String>,
 }
 
@@ -112,6 +115,7 @@ pub async fn handle_sync(
                     // logout so Badge and Rules deep links can still target the real
                     // group id after a logout/login cycle.
                     state.clear_group_cache_resolved();
+                    reconcile_remote_invoke_workers(&state).await;
                     super::rules::notify_rules_changed_pub(&state);
                     json_response(&status)
                 }
@@ -158,6 +162,7 @@ pub async fn handle_sync_public(
                 match sync_manager.save_token(token).await {
                     Ok(()) => {
                         notify_sync_session_saved(&state);
+                        reconcile_remote_invoke_workers(&state).await;
                         let status = sync_manager.status().await;
                         render_sync_login_result_html(
                             true,
@@ -209,6 +214,7 @@ pub async fn handle_sync_login_callback(
         match sync_manager.save_token(token).await {
             Ok(()) => {
                 notify_sync_session_saved(&state);
+                reconcile_remote_invoke_workers(&state).await;
                 let status = sync_manager.status().await;
                 render_sync_login_result_html(
                     true,
@@ -267,8 +273,6 @@ async fn update_sync_config(req: Request<Incoming>, state: SharedAdminState) -> 
         }
     }
 
-    let new_relay_url = request.remote_base_url.clone();
-
     match config_manager
         .update_sync_config(SyncConfigUpdate {
             enabled: request.enabled,
@@ -280,11 +284,7 @@ async fn update_sync_config(req: Request<Incoming>, state: SharedAdminState) -> 
         .await
     {
         Ok(_) => {
-            if let Some(new_url) = new_relay_url {
-                if let Some(worker) = state.remote_invoke_worker() {
-                    worker.update_relay_url(&new_url);
-                }
-            }
+            reconcile_remote_invoke_workers(&state).await;
 
             if let Some(sync_manager) = state.sync_manager.clone() {
                 sync_manager.trigger_sync();
@@ -349,6 +349,7 @@ async fn save_session(
     match sync_manager.save_token(request.token).await {
         Ok(status) => {
             notify_sync_session_saved(&state);
+            reconcile_remote_invoke_workers(&state).await;
             json_response(&status)
         }
         Err(error) => error_response(
@@ -385,6 +386,18 @@ async fn login(
 
     match (request.token, request.remote_base_url) {
         (Some(token), remote_base_url) => {
+            if request.provider_id.as_deref() == Some("github_gist") {
+                return match sync_manager.save_github_gist_session(token).await {
+                    Ok(()) => {
+                        notify_sync_session_saved(&state);
+                        json_response(&sync_manager.status().await)
+                    }
+                    Err(error) => error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Failed to save GitHub Gist session: {error}"),
+                    ),
+                };
+            }
             let remote_base_url = match remote_base_url {
                 Some(remote_base_url) => remote_base_url,
                 None => {
@@ -402,6 +415,7 @@ async fn login(
             {
                 Ok(()) => {
                     notify_sync_session_saved(&state);
+                    reconcile_remote_invoke_workers(&state).await;
                     json_response(&sync_manager.status().await)
                 }
                 Err(error) => error_response(
@@ -424,6 +438,69 @@ async fn login(
 fn notify_sync_session_saved(state: &SharedAdminState) {
     state.clear_group_cache_resolved();
     super::rules::notify_rules_changed_pub(state);
+}
+
+async fn reconcile_remote_invoke_workers(state: &SharedAdminState) {
+    let Some(sync_manager) = state.sync_manager.clone() else {
+        return;
+    };
+    let targets = bifrost_sync::SyncManagerHandle::new(sync_manager.clone())
+        .remote_invoke_registration_targets()
+        .await;
+    let desired_urls: Vec<String> = targets
+        .iter()
+        .map(|target| target.remote_base_url.trim_end_matches('/').to_string())
+        .collect();
+
+    state.stop_remote_invoke_workers_except(&desired_urls);
+    if desired_urls.is_empty() {
+        info!("remote invoke workers stopped because no provider session supports registration");
+        return;
+    }
+
+    let Some((admin_host, admin_port)) = state.remote_invoke_admin_endpoint() else {
+        warn!("remote invoke admin endpoint missing; skip provider worker reconcile");
+        return;
+    };
+    let Some(config_manager) = state.config_manager.clone() else {
+        warn!("config manager missing; skip provider worker reconcile");
+        return;
+    };
+    let identity = match Identity::load_or_create(config_manager.data_dir()) {
+        Ok(identity) => identity,
+        Err(error) => {
+            warn!(error = %error, "remote invoke identity init failed during provider reconcile");
+            return;
+        }
+    };
+
+    for target in targets {
+        let relay_url = target.remote_base_url.trim_end_matches('/').to_string();
+        if state
+            .remote_invoke_worker_for_relay_url(&relay_url)
+            .is_some()
+        {
+            continue;
+        }
+        let worker = RemoteInvokeWorker::new(
+            RemoteInvokeConfig {
+                relay_url: relay_url.clone(),
+                ..Default::default()
+            },
+            identity.clone(),
+            Some(bifrost_sync::SyncManagerHandle::new(sync_manager.clone())),
+            state.clone(),
+            &admin_host,
+            admin_port,
+        );
+        state.upsert_remote_invoke_worker(worker.clone());
+        worker.start();
+        info!(
+            provider_id = %target.provider_id,
+            relay_url = %relay_url,
+            "remote invoke provider worker started"
+        );
+    }
 }
 
 async fn get_remote_sample(

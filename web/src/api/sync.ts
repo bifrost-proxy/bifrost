@@ -67,6 +67,12 @@ export interface UpdateSyncConfigRequest {
   connect_timeout_ms?: number;
 }
 
+export interface SyncLoginRequest {
+  token?: string;
+  provider_id?: string;
+  remote_base_url?: string;
+}
+
 export async function getSyncStatus(): Promise<SyncStatus> {
   return get<SyncStatus>("/sync/status");
 }
@@ -84,8 +90,8 @@ export async function getSyncLoginUrl(callbackUrl: string): Promise<string> {
   return response.login_url;
 }
 
-export async function openSyncLogin(): Promise<SyncStatus> {
-  return post<SyncStatus>("/sync/login");
+export async function openSyncLogin(request?: SyncLoginRequest): Promise<SyncStatus> {
+  return post<SyncStatus>("/sync/login", request);
 }
 
 export async function saveSyncSession(token: string): Promise<SyncStatus> {

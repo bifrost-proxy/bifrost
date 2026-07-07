@@ -1260,9 +1260,9 @@ impl RemoteInvokeWorker {
 
     fn registration_session_token(&self) -> Option<String> {
         normalize_registration_session_token(
-            self.sync_manager
-                .as_ref()
-                .and_then(|manager| manager.session_token()),
+            self.sync_manager.as_ref().and_then(|manager| {
+                manager.session_token_for_remote(&self.relay_client.base_url())
+            }),
         )
     }
 

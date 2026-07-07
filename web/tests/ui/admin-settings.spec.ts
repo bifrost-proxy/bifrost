@@ -762,7 +762,8 @@ test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", asy
         return value === "unauthorized" || value === "unreachable";
       })
       .toBe(true);
-    await expect(page.getByTestId("settings-sync-last-action")).toHaveText("No sync result yet");
+    await expect(page.getByTestId("settings-sync-provider-grid")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Remote Sync" })).toHaveCount(0);
 
     const loginUrlResponse = await request.get(
       `${apiBase}/sync/login-url?callback_url=${encodeURIComponent(
@@ -832,6 +833,54 @@ test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", asy
 
 test("Settings Sync 打开时会轮询刷新页面与底部状态栏", async ({ page }) => {
   let signedIn = false;
+  const providerStatus = () => [
+    {
+      id: "bytedance_internal",
+      name: "ByteDance Internal",
+      description: "Internal trusted sync and Remote Invoke provider.",
+      remote_base_url: "https://sync-poll.example.test",
+      connected: signedIn,
+      enabled: true,
+      reachable: true,
+      authorized: signedIn,
+      user: signedIn
+        ? {
+            user_id: "poll-user",
+            nickname: "Poll User",
+            avatar: "",
+            email: "poll-user@example.test",
+          }
+        : null,
+      capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+      remote_invoke_registered: signedIn,
+    },
+    {
+      id: "bifrost_cloud",
+      name: "Bifrost Cloud",
+      description: "Custom Bifrost sync service for teams and self-hosting.",
+      remote_base_url: "https://sync.bifrostproxy.dev",
+      connected: false,
+      enabled: false,
+      reachable: false,
+      authorized: false,
+      user: null,
+      capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+      remote_invoke_registered: false,
+    },
+    {
+      id: "github_gist",
+      name: "GitHub Gist",
+      description: "Public GitHub Gist-backed portable sync provider.",
+      remote_base_url: null,
+      connected: false,
+      enabled: false,
+      reachable: false,
+      authorized: false,
+      user: null,
+      capabilities: { remote_invoke: false, rules_sync: true, config_sync: true },
+      remote_invoke_registered: false,
+    },
+  ];
   await page.route("**/_bifrost/api/sync/status", async (route) => {
     await route.fulfill({
       status: 200,
@@ -856,6 +905,7 @@ test("Settings Sync 打开时会轮询刷新页面与底部状态栏", async ({ 
               email: "poll-user@example.test",
             }
           : null,
+        providers: providerStatus(),
       }),
     });
   });
@@ -866,30 +916,80 @@ test("Settings Sync 打开时会轮询刷新页面与底部状态栏", async ({ 
     "true",
   );
   await expect(page.getByText("Sign in required")).toBeVisible();
-  await expect(page.getByTestId("settings-sync-session")).toHaveText("Not signed in");
-  await expect(page.getByTestId("settings-sync-run-now")).toBeDisabled();
+  await expect(page.getByRole("heading", { name: "Remote Sync" })).toHaveCount(0);
+  await expect(page.getByTestId("settings-sync-provider-card-bytedance_internal")).toContainText(
+    "Not signed in",
+  );
   await expect(page.getByTestId("statusbar-sync")).toHaveAttribute(
     "data-sync-state",
     "unauthorized",
   );
 
   signedIn = true;
-  await expect(page.getByTestId("settings-sync-session")).toHaveText("poll-user", {
+  await expect(
+    page.getByTestId("settings-sync-provider-card-bytedance_internal"),
+  ).toContainText("poll-user", {
     timeout: 5_000,
   });
-  await expect(page.getByText("Ready")).toBeVisible();
-  await expect(page.getByTestId("settings-sync-last-action")).toHaveText(
-    "No changes detected",
+  await expect(page.getByTestId("settings-sync-provider-card-bytedance_internal")).toContainText(
+    "Connected",
   );
-  await expect(page.getByTestId("settings-sync-run-now")).toBeEnabled();
   await expect
     .poll(async () => page.getByTestId("statusbar-sync").getAttribute("data-sync-state"))
     .toBe("ready");
 });
 
-test("Settings Sync 轮询刷新不会覆盖正在编辑的 Remote URL", async ({ page }) => {
+test("Settings Sync 轮询刷新不会覆盖正在编辑的 Bifrost Cloud URL", async ({ page }) => {
   let signedIn = false;
   let savedRemoteBaseUrl = "";
+  const providers = (cloudUrl: string) => [
+    {
+      id: "bytedance_internal",
+      name: "ByteDance Internal",
+      description: "Internal trusted sync and Remote Invoke provider.",
+      remote_base_url: "https://bifrost.bytedance.net",
+      connected: signedIn,
+      enabled: true,
+      reachable: true,
+      authorized: signedIn,
+      user: signedIn
+        ? {
+            user_id: "poll-user",
+            nickname: "Poll User",
+            avatar: "",
+            email: "poll-user@example.test",
+          }
+        : null,
+      capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+      remote_invoke_registered: signedIn,
+    },
+    {
+      id: "bifrost_cloud",
+      name: "Bifrost Cloud",
+      description: "Custom Bifrost sync service for teams and self-hosting.",
+      remote_base_url: cloudUrl,
+      connected: false,
+      enabled: false,
+      reachable: false,
+      authorized: false,
+      user: null,
+      capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+      remote_invoke_registered: false,
+    },
+    {
+      id: "github_gist",
+      name: "GitHub Gist",
+      description: "Public GitHub Gist-backed portable sync provider.",
+      remote_base_url: null,
+      connected: false,
+      enabled: false,
+      reachable: false,
+      authorized: false,
+      user: null,
+      capabilities: { remote_invoke: false, rules_sync: true, config_sync: true },
+      remote_invoke_registered: false,
+    },
+  ];
   await page.route("**/_bifrost/api/sync/status", async (route) => {
     await route.fulfill({
       status: 200,
@@ -914,6 +1014,7 @@ test("Settings Sync 轮询刷新不会覆盖正在编辑的 Remote URL", async (
               email: "poll-user@example.test",
             }
           : null,
+        providers: providers("https://sync-poll.example.test"),
       }),
     });
   });
@@ -941,24 +1042,27 @@ test("Settings Sync 轮询刷新不会覆盖正在编辑的 Remote URL", async (
           avatar: "",
           email: "poll-user@example.test",
         },
+        providers: providers(savedRemoteBaseUrl),
       }),
     });
   });
 
   await openPage(page, "settings?tab=sync");
-  const remoteUrlInput = page.getByTestId("settings-sync-remote-url-input");
+  await expect(page.getByRole("heading", { name: "Remote Sync" })).toHaveCount(0);
+  const remoteUrlInput = page.getByTestId("settings-sync-provider-bifrost-cloud-url-input");
   await expect(remoteUrlInput).toHaveValue("https://sync-poll.example.test");
 
   await remoteUrlInput.fill("http://127.0.0.1:61580/custom/");
   signedIn = true;
-  await expect(page.getByText("Ready")).toBeVisible({ timeout: 5_000 });
-  await expect(page.getByTestId("settings-sync-last-action")).toHaveText(
-    "No changes detected",
-  );
+  await expect
+    .poll(async () => page.getByTestId("statusbar-sync").getAttribute("data-sync-state"), {
+      timeout: 5_000,
+    })
+    .toBe("ready");
   await expect(remoteUrlInput).toHaveValue("http://127.0.0.1:61580/custom/");
 
-  await page.getByTestId("settings-sync-remote-url-save").click();
-  await waitForToast(page, "Remote sync URL updated");
+  await page.getByTestId("settings-sync-provider-bifrost-cloud-url-save").click();
+  await waitForToast(page, "Bifrost Cloud URL updated");
   expect(savedRemoteBaseUrl).toBe("http://127.0.0.1:61580/custom/");
   await expect(remoteUrlInput).toHaveValue("http://127.0.0.1:61580/custom/");
 });
@@ -1056,7 +1160,7 @@ test("Settings Sync 展示三类 Provider 卡片并支持首登弹窗关闭与�
   await expect(page.getByTestId("settings-sync-provider-card-github_gist")).toContainText(
     "Not supported",
   );
-  await expect(page.getByTestId("settings-sync-provider-login-github_gist")).toBeDisabled();
+  await expect(page.getByTestId("settings-sync-provider-login-github_gist")).toBeEnabled();
 
   const modal = page.getByRole("dialog", { name: "Choose a sync service" });
   await expect(modal).toBeVisible();
@@ -1068,6 +1172,214 @@ test("Settings Sync 展示三类 Provider 卡片并支持首登弹窗关闭与�
   await page.getByTestId("settings-sync-first-run-start").click();
   await expect.poll(() => Promise.resolve(configUpdated)).toBe(true);
   await expect.poll(() => Promise.resolve(loginOpened)).toBe(true);
+});
+
+test("Settings Sync GitHub Gist 支持 token 登录", async ({ page }) => {
+  let loginPayload: { provider_id?: string; token?: string } | null = null;
+  const baseStatus = {
+    enabled: true,
+    auto_sync: true,
+    remote_base_url: "https://bifrost.bytedance.net",
+    has_session: false,
+    reachable: true,
+    authorized: false,
+    syncing: false,
+    reason: "unauthorized",
+    last_sync_at: null,
+    last_sync_action: null,
+    last_error: null,
+    user: null,
+    first_run_prompt_required: false,
+    providers: [
+      {
+        id: "bytedance_internal",
+        name: "ByteDance Internal",
+        description: "Internal trusted sync and Remote Invoke provider.",
+        remote_base_url: "https://bifrost.bytedance.net",
+        connected: false,
+        enabled: true,
+        reachable: true,
+        authorized: false,
+        user: null,
+        capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+        remote_invoke_registered: false,
+      },
+      {
+        id: "bifrost_cloud",
+        name: "Bifrost Cloud",
+        description: "Custom Bifrost sync service for teams and self-hosting.",
+        remote_base_url: "https://sync.example.test",
+        connected: false,
+        enabled: false,
+        reachable: false,
+        authorized: false,
+        user: null,
+        capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+        remote_invoke_registered: false,
+      },
+      {
+        id: "github_gist",
+        name: "GitHub Gist",
+        description: "Public GitHub Gist-backed portable sync provider.",
+        remote_base_url: "https://api.github.com/gists",
+        connected: false,
+        enabled: false,
+        reachable: false,
+        authorized: false,
+        user: null,
+        capabilities: { remote_invoke: false, rules_sync: true, config_sync: true },
+        remote_invoke_registered: false,
+      },
+    ],
+  };
+  const connectedStatus = {
+    ...baseStatus,
+    providers: baseStatus.providers.map((provider) =>
+      provider.id === "github_gist"
+        ? {
+            ...provider,
+            connected: true,
+            enabled: true,
+            reachable: true,
+            authorized: true,
+            user: {
+              user_id: "github:12345",
+              nickname: "octocat",
+              avatar: "",
+              email: "",
+            },
+          }
+        : provider,
+    ),
+  };
+
+  await page.route("**/_bifrost/api/sync/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(loginPayload ? connectedStatus : baseStatus),
+    });
+  });
+  await page.route("**/_bifrost/api/sync/login", async (route) => {
+    loginPayload = route.request().postDataJSON() as typeof loginPayload;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(connectedStatus),
+    });
+  });
+
+  await openPage(page, "settings?tab=sync");
+  await page.getByTestId("settings-sync-provider-login-github_gist").click();
+  const modal = page.getByRole("dialog", { name: "Sign in to GitHub Gist" });
+  await expect(modal).toBeVisible();
+  await page.getByTestId("settings-sync-provider-github-gist-token-input").fill("ghp_test_token");
+  await modal.getByRole("button", { name: "Sign In" }).click();
+
+  await expect.poll(() => Promise.resolve(loginPayload)).toEqual({
+    provider_id: "github_gist",
+    token: "ghp_test_token",
+  });
+  await waitForToast(page, "GitHub Gist connected");
+  await expect(page.getByTestId("settings-sync-provider-card-github_gist")).toContainText(
+    "Connected",
+  );
+  await expect(page.getByTestId("settings-sync-provider-card-github_gist")).toContainText(
+    "github:12345",
+  );
+});
+
+test("Settings Sync Remote Invoke 支持 ByteDance、Bifrost Cloud 与双通道状态", async ({
+  page,
+}) => {
+  await page.route("**/_bifrost/api/sync/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        enabled: true,
+        auto_sync: true,
+        remote_base_url: "https://bifrost.bytedance.net",
+        has_session: true,
+        reachable: true,
+        authorized: true,
+        syncing: false,
+        reason: "ready",
+        last_sync_at: "2026-07-07T00:00:00Z",
+        last_sync_action: "no_change",
+        last_error: null,
+        user: {
+          user_id: "byte-user",
+          nickname: "Byte User",
+          avatar: "",
+          email: "byte-user@example.test",
+        },
+        first_run_prompt_required: false,
+        providers: [
+          {
+            id: "bytedance_internal",
+            name: "ByteDance Internal",
+            description: "Internal trusted sync and Remote Invoke provider.",
+            remote_base_url: "https://bifrost.bytedance.net",
+            connected: true,
+            enabled: true,
+            reachable: true,
+            authorized: true,
+            user: {
+              user_id: "byte-user",
+              nickname: "Byte User",
+              avatar: "",
+              email: "byte-user@example.test",
+            },
+            capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+            remote_invoke_registered: true,
+          },
+          {
+            id: "bifrost_cloud",
+            name: "Bifrost Cloud",
+            description: "Custom Bifrost sync service for teams and self-hosting.",
+            remote_base_url: "https://sync.example.test",
+            connected: true,
+            enabled: true,
+            reachable: true,
+            authorized: true,
+            user: {
+              user_id: "cloud-user",
+              nickname: "Cloud User",
+              avatar: "",
+              email: "cloud-user@example.test",
+            },
+            capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+            remote_invoke_registered: true,
+          },
+          {
+            id: "github_gist",
+            name: "GitHub Gist",
+            description: "Public GitHub Gist-backed portable sync provider.",
+            remote_base_url: null,
+            connected: false,
+            enabled: false,
+            reachable: false,
+            authorized: false,
+            user: null,
+            capabilities: { remote_invoke: false, rules_sync: true, config_sync: true },
+            remote_invoke_registered: false,
+          },
+        ],
+      }),
+    });
+  });
+
+  await openPage(page, "settings?tab=sync");
+  await expect(page.getByTestId("settings-sync-provider-card-bytedance_internal")).toContainText(
+    "Registered",
+  );
+  await expect(page.getByTestId("settings-sync-provider-card-bifrost_cloud")).toContainText(
+    "Registered",
+  );
+  await expect(page.getByTestId("settings-sync-provider-card-github_gist")).toContainText(
+    "Not supported",
+  );
 });
 
 test("Settings Agent 三层 instructions 使用大窗口编辑", async ({ page }) => {
@@ -2745,12 +3057,13 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
       })
       .toBe(false);
 
-    const remoteOverwriteTime = new Date(Date.now() + 1000).toISOString();
+    const remoteOverwriteTime = new Date(Date.now() + 60_000).toISOString();
     remoteServer.upsertEnv({
       ...existingRemote!,
       rule: "local.example.com host://127.0.0.1:3150",
       update_time: remoteOverwriteTime,
     });
+    await request.post(`${apiBase}/sync/run`);
 
     await expect
       .poll(async () => {
