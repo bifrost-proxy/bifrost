@@ -305,6 +305,8 @@ test("Rules 状态胶囊在全局页面可见、可拖拽，并能跳转到 Rule
     .filter({ hasText: "x-stable" })
     .hover();
   await expect(page.getByText(/outside that narrower scope/)).toBeVisible();
+  const tooltipBox = await page.locator(".ant-tooltip").last().boundingBox();
+  expect(tooltipBox?.width ?? 0).toBeGreaterThan(420);
 
   const activeRuleRow = page
     .getByTestId("rules-dynamic-island-rule-row")
