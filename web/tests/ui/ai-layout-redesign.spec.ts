@@ -159,17 +159,31 @@ async function expectCenteredTrack(
   contentTestId: string,
   trackTestId: string,
   expectedTopGap = 24,
+  expectedMaxWidth = 1120,
 ) {
   const contentBox = await page.getByTestId(contentTestId).boundingBox();
   const trackBox = await page.getByTestId(trackTestId).boundingBox();
   expect(contentBox).not.toBeNull();
   expect(trackBox).not.toBeNull();
-  expect(trackBox!.width).toBeLessThanOrEqual(1121);
+  expect(trackBox!.width).toBeLessThanOrEqual(expectedMaxWidth + 1);
   expect(trackBox!.width).toBeLessThanOrEqual(contentBox!.width);
   expect(Math.round(trackBox!.y - contentBox!.y)).toBe(expectedTopGap);
   const leftGap = trackBox!.x - contentBox!.x;
   const rightGap = contentBox!.x + contentBox!.width - (trackBox!.x + trackBox!.width);
   expect(Math.abs(leftGap - rightGap)).toBeLessThanOrEqual(2);
+}
+
+async function expectWorkbenchTrack(
+  page: Page,
+  contentTestId: string,
+  trackTestId: string,
+) {
+  const contentBox = await page.getByTestId(contentTestId).boundingBox();
+  const trackBox = await page.getByTestId(trackTestId).boundingBox();
+  expect(contentBox).not.toBeNull();
+  expect(trackBox).not.toBeNull();
+  await expectCenteredTrack(page, contentTestId, trackTestId, 24, 920);
+  expect(trackBox!.width).toBeLessThan(contentBox!.width - 40);
 }
 
 test.beforeEach(async ({ page }) => {
@@ -260,12 +274,12 @@ test("AI left rail switches ASR, IM, Settings, and history threads", async ({ pa
   await page.getByTestId("ai-nav-tools-asr").click();
   await expect(page).toHaveURL(/view=asr/);
   await expect(page.getByTestId("ai-nav-tools-asr")).toHaveAttribute("aria-current", "true");
-  await expectCenteredTrack(page, "ai-asr-content", "ai-asr-track");
+  await expectWorkbenchTrack(page, "ai-asr-content", "ai-asr-track");
 
   await page.getByTestId("ai-nav-im").click();
   await expect(page).toHaveURL(/view=im/);
   await expect(page.getByTestId("ai-nav-im")).toHaveAttribute("aria-current", "true");
-  await expectCenteredTrack(page, "ai-im-content", "ai-im-track");
+  await expectWorkbenchTrack(page, "ai-im-content", "ai-im-track");
   await expect(page.getByTestId("settings-im-card-grid")).toBeVisible();
   await expect(page.getByTestId("settings-im-provider-card-feishu-main")).toBeVisible();
   await expect(page.getByTestId("settings-im-provider-card-weixin-main")).toBeVisible();
@@ -277,7 +291,7 @@ test("AI left rail switches ASR, IM, Settings, and history threads", async ({ pa
   await page.getByTestId("ai-nav-tools-videos").click();
   await expect(page).toHaveURL(/view=videos/);
   await expect(page.getByTestId("ai-nav-tools-videos")).toHaveAttribute("aria-current", "true");
-  await expectCenteredTrack(page, "ai-videos-content", "ai-videos-track");
+  await expectWorkbenchTrack(page, "ai-videos-content", "ai-videos-track");
 
   await page.getByTestId("ai-nav-settings").click();
   await expect(page).toHaveURL(/view=settings/);

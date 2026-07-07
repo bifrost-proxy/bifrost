@@ -130,7 +130,7 @@
 - URL 包含 `view=im` 或等价状态。
 - `imGatewaySection=connections|targets|routes|schedules|history` 深链继续生效。
 - IM Connections 以响应式卡片网格展示 Provider，不再是过窄单列；桌面下至少可以多列排布，窄屏下收敛为单列。
-- IM 内容区宽度不超过约 1120px，并在 AI 右侧主内容区水平居中。
+- IM 内容区使用比 Settings 更窄的工作台阅读轨道，桌面宽屏下宽度上限约 920px，并在 AI 右侧主内容区水平居中，不能铺满右侧区域。
 - IM 内容顶部与 ASR、Videos、历史消息线程、Settings 保持一致留白，不能贴住 AI 右侧顶部。
 - 刷新后仍停留在对应 IM section。
 - 左侧线程列表仍保留，不被 IM 内容挤出或覆盖。
@@ -238,7 +238,7 @@
 
 - 历史消息线程顶部不贴住 AI 右侧顶部，conversation header 从统一留白后开始。
 - ASR、IM、Videos、Settings 内容轨道顶部留白一致，桌面下约 24px。
-- ASR、IM、Videos、Settings 内容轨道最大宽度约 1120px，并在右侧主内容区水平居中。
+- ASR、IM、Videos 使用工作台阅读轨道，桌面宽屏下最大宽度约 920px；Settings 配置页保留较宽配置轨道，最大宽度约 1120px；这些轨道都必须在右侧主内容区水平居中。
 - IM 工作入口和 Settings 的 IM Connections Provider 区域使用 CSS grid 布局；桌面宽度下多个 Provider 可以并排展示，窄屏下自动变为单列。
 - Videos 工具不再额外叠加一圈导致顶部或左右间距明显大于其它页面。
 
@@ -280,6 +280,7 @@
 - 2026-07-08：根据用户反馈限制 Settings 内容宽度，新增居中的 `ai-settings-track`，宽度上限与嵌入式对话 message/composer track 对齐为约 1120px，避免配置卡片撑满右侧主内容区。复测命令 `WEB_PORT=4177 pnpm --dir web exec playwright test tests/ui/ai-layout-redesign.spec.ts --config=playwright.frontend.config.ts --reporter=line`，结果 `7 passed (19.5s)`。
 - 2026-07-08：根据用户反馈统一 AI 子页面顶部留白和内容宽度，ASR、IM、Videos、Settings 都通过同一个右侧内容轨道展示，桌面顶部留白约 `24px`、最大宽度约 `1120px` 并居中；历史消息线程嵌入态也从统一顶部留白后开始。IM 工作入口和 Settings IM Connections 改为响应式 Provider 卡片网格，Videos 去掉嵌入 AI Shell 时自身额外 padding。首次复测发现 embedded Chat 左右 padding 压缩 composer 宽度，已修复为只保留顶部 padding；复测命令 `WEB_PORT=4177 pnpm --dir web exec playwright test tests/ui/ai-layout-redesign.spec.ts --config=playwright.frontend.config.ts --reporter=line`，结果 `7 passed (19.5s)`。
 - 2026-07-08：根据用户反馈压缩运行中对话的 Queued 区域。输入框上方队列列表最多显示两条消息高度，更多消息在列表内部滚动；队列行改为文本列 + 固定操作列，长文本单行省略，删除按钮不换行。补充 Playwright 几何断言验证 4 条队列消息时 `agent-chat-queue-list` 内部滚动、删除按钮位于第一行右侧且不换行。
+- 2026-07-08：根据用户反馈收窄左侧 ASR、IM、Videos 三个主入口对应的右侧工作台内容区。三页从 Settings 的 1120px 配置轨道拆出为约 `920px` 工作台阅读轨道，继续保持顶部 `24px` 留白和水平居中，避免右侧内容在宽屏下被拉满；Settings 仍保留约 `1120px` 配置轨道。首次执行 `pnpm --dir web exec playwright test tests/ui/ai-layout-redesign.spec.ts --config=playwright.frontend.config.ts --reporter=line` 因动态端口 Vite 未保持监听导致 7 条用例均 `ERR_CONNECTION_REFUSED`，未进入产品断言；随后按既有固定端口方式复跑 `WEB_PORT=4177 pnpm --dir web exec playwright test tests/ui/ai-layout-redesign.spec.ts --config=playwright.frontend.config.ts --reporter=line`，结果 `7 passed (18.7s)`。
 
 执行明细：
 
@@ -290,10 +291,10 @@
 | TC-AILR-03 | 通过。在新建态输入 `Summarize current workspace status` 并发送，请求命中 `/api/im-gateway/chat/stream`，body 中 `runnerId=claude_runner`；NDJSON `run_finished` 返回后右侧显示 `Summary complete`，URL 更新为包含 `session=admin-chat-...` 且不再包含 `mode=new`。 |
 | TC-AILR-04 | 通过。左侧点击 `Existing thread` 后 `New Chat` 取消选中，右侧显示历史消息 `Existing answer`；右上角保留 `Status`，不再显示内部 `agent-chat-new` 按钮；Playwright 断言线程行选中前后高度一致，composer 宽度充分使用右侧主内容区，不再保留旧内部 thread rail 空列；再次点击左侧 `New Chat` 回到新建对话输入态。 |
 | TC-AILR-05 | 通过。ASR capability mock 为可用，左侧展示 `ASR`；点击后 URL 包含 `view=asr`，右侧渲染 ASR 工作台，不打开 Settings 二级内容页。 |
-| TC-AILR-06 | 通过。点击 `IM` 后 URL 包含 `view=im`，右侧渲染 IM Gateway 工作台；旧 `imGatewaySection=routes` 深链可直接显示 Routes section；Connections Provider 使用 CSS grid 响应式卡片网格，mock 的 `feishu-main` 与 `weixin-main` Provider 卡片可见；内容轨道最大宽度不超过约 1120px、水平居中且顶部留白与 ASR 一致。 |
+| TC-AILR-06 | 通过。点击 `IM` 后 URL 包含 `view=im`，右侧渲染 IM Gateway 工作台；旧 `imGatewaySection=routes` 深链可直接显示 Routes section；Connections Provider 使用 CSS grid 响应式卡片网格，mock 的 `feishu-main` 与 `weixin-main` Provider 卡片可见；工作台内容轨道最大宽度不超过约 920px、水平居中且顶部留白与 ASR 一致。 |
 | TC-AILR-07 | 通过。点击底部 Settings 后 URL 包含 `view=settings`，右侧显示 `ai-settings-content`；顶部配置 tabs 只有 `Agent`、`Runner`、`IM` 三个入口。默认 Agent 分组可见并平铺 General、Model、Runtime、MCP Servers 等配置卡片；Settings 内容轨道宽度不超过约 1120px、在右侧主内容区居中且顶部留白一致；Runner 分组仅展示 Runners 配置卡片且不再显示 Agent General；IM 分组平铺 Connections、Targets、Routes 等配置卡片，Connections Provider 使用响应式卡片网格。Chat tab 不存在，`Back`、`Session Detail`、`Messages` 不存在。从历史对话点击 Settings 后 URL 清理 `session=history-thread-1`；切换 Runner 后 URL 包含 `settings=agent&agentSection=runners`，切换 IM 后 URL 包含 `settings=im&imGatewaySection=connections`。 |
 | TC-AILR-08 | 通过。旧 `agent-chat`、`agent-model`、`tools-asr`、`im-gateway-routes` 链接均进入新 AI Shell 对应视图或 Settings 二级内容页，无空白页和无限跳转；旧 Agent Model 链接进入 Agent 分组并展示 Model 配置卡片；`settings=agent&agentSection=chat&session=...` 被归一化为 Settings Agent General，不展示 Chat 或会话详情。 |
 | TC-AILR-09 | 通过。分别在 `768x900` 与 `390x844` viewport 打开 `/ai`，New Chat、Runner 下拉和 Settings 二级内容页均可操作；`document.documentElement.scrollWidth <= window.innerWidth + 1`，未发现非预期横向滚动。 |
 | TC-AILR-10 | 通过。从 `view=settings&settings=agent&agentSection=model` 进入 Settings 后，依次点击左侧 ASR、IM、Videos、New Chat 和历史线程，Playwright 断言 URL 分别切到 `view=asr`、`view=im`、`view=videos`、`view=chat&mode=new`、`view=chat&session=history-thread-1`，均删除 `settings` 参数，不再显示 `ai-settings-content`，并展示对应主内容。 |
-| TC-AILR-11 | 通过。Playwright 断言 ASR、IM、Videos、Settings 的内容轨道顶部距离为约 `24px`，宽度不超过约 `1120px` 并在 AI 右侧主内容区内水平居中；历史消息线程顶部不吸顶，Chat header 和消息区从统一留白后开始；IM 工作入口和 Settings IM Connections 均使用 `settings-im-card-grid` CSS grid；Videos 嵌入 AI Shell 时不再叠加自身额外 padding。 |
+| TC-AILR-11 | 通过。Playwright 断言 ASR、IM、Videos 的工作台内容轨道顶部距离为约 `24px`、宽度不超过约 `920px` 且明显窄于右侧主内容区；Settings 配置轨道宽度不超过约 `1120px`；所有轨道都在 AI 右侧主内容区内水平居中。历史消息线程顶部不吸顶，Chat header 和消息区从统一留白后开始；IM 工作入口和 Settings IM Connections 均使用 `settings-im-card-grid` CSS grid；Videos 嵌入 AI Shell 时不再叠加自身额外 padding。 |
 | TC-AILR-12 | 通过。Playwright 在运行中对话里 mock 4 条队列消息，断言 `agent-chat-queue-list` 高度不超过两条消息空间、`scrollHeight > clientHeight` 且 `overflowY=auto`；第一条长消息右侧删除按钮位于同一队列行内并在文本之后，没有换行；删除第一条后按钮消失，其余队列消息仍保留在紧凑滚动区域。 |

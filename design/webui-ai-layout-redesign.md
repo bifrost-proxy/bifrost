@@ -373,7 +373,7 @@ Settings URL 语义：
 - 配置项不再占据 AI 页面一级导航。
 - Settings 只展示原配置项，且保留所有原 AI 配置功能入口；顶层只合并为 `Agent`、`Runner`、`IM` 三个 tab，配置项在对应 tab 内以卡片向下平铺；Chat 和会话状态信息不进入 Settings。
 - IM 工作入口与 Settings 的 IM 分组使用响应式卡片网格展示连接通道，桌面下自动多列，窄屏下收敛为单列；表格型配置保留表格，但整体仍在同一内容轨道内。
-- ASR、IM、Videos、历史消息线程和 Settings 各分组共享 AI 右侧内容轨道，桌面最大宽度约 1120px 并水平居中；顶部留白统一为约 24px，避免内容吸顶。
+- ASR、IM、Videos、历史消息线程和 Settings 各分组共享 AI 右侧内容区的居中规则；ASR/IM/Videos 工作台页桌面最大宽度约 920px，Settings 配置页最大宽度约 1120px，顶部留白统一为约 24px，避免内容吸顶。
 - 旧深链不失效。
 - Playwright、human_tests 和必要单元测试全部通过。
 

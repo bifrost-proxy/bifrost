@@ -59,6 +59,7 @@ const AI_SETTINGS_IM_SECTIONS: ImGatewaySectionId[] = [
   "history",
 ];
 const AI_CONTENT_MAX_WIDTH = 1120;
+const AI_WORKBENCH_CONTENT_MAX_WIDTH = 920;
 
 export default function AI() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -286,6 +287,10 @@ export default function AI() {
     width: "100%",
     maxWidth: AI_CONTENT_MAX_WIDTH,
     margin: "0 auto",
+  };
+  const workbenchTrackInnerStyle: CSSProperties = {
+    ...contentTrackInnerStyle,
+    maxWidth: AI_WORKBENCH_CONTENT_MAX_WIDTH,
   };
 
   useEffect(() => {
@@ -713,21 +718,21 @@ export default function AI() {
           </div>
           {routeState.view === "asr" ? (
             <div data-testid="ai-asr-content" style={contentTrackStyle}>
-              <div data-testid="ai-asr-track" style={contentTrackInnerStyle}>
+              <div data-testid="ai-asr-track" style={workbenchTrackInnerStyle}>
                 <ASR />
               </div>
             </div>
           ) : null}
           {routeState.view === "im" ? (
             <div data-testid="ai-im-content" style={contentTrackStyle}>
-              <div data-testid="ai-im-track" style={contentTrackInnerStyle}>
+              <div data-testid="ai-im-track" style={workbenchTrackInnerStyle}>
                 <ImGatewayTab hideSectionNav cardGrid />
               </div>
             </div>
           ) : null}
           {routeState.view === "videos" ? (
             <div data-testid="ai-videos-content" style={contentTrackStyle}>
-              <div data-testid="ai-videos-track" style={contentTrackInnerStyle}>
+              <div data-testid="ai-videos-track" style={workbenchTrackInnerStyle}>
                 <VideosTool embedded />
               </div>
             </div>
