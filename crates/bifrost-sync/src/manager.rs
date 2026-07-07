@@ -3496,6 +3496,212 @@ mod tests {
     }
 
     #[test]
+    fn sync_action_helpers_track_push_pull_and_change_state() {
+        assert!(!sync_action_has_changes(None));
+        assert!(!sync_action_has_changes(Some(SyncAction::NoChange)));
+        assert!(sync_action_has_changes(Some(SyncAction::LocalPushed)));
+        assert!(sync_action_has_changes(Some(SyncAction::RemotePulled)));
+        assert!(sync_action_has_changes(Some(SyncAction::Bidirectional)));
+
+        assert_eq!(sync_action_flags(SyncAction::NoChange), (false, false));
+        assert_eq!(sync_action_flags(SyncAction::LocalPushed), (true, false));
+        assert_eq!(sync_action_flags(SyncAction::RemotePulled), (false, true));
+        assert_eq!(sync_action_flags(SyncAction::Bidirectional), (true, true));
+
+        assert_eq!(sync_action_from_flags(false, false), SyncAction::NoChange);
+        assert_eq!(sync_action_from_flags(true, false), SyncAction::LocalPushed);
+        assert_eq!(
+            sync_action_from_flags(false, true),
+            SyncAction::RemotePulled
+        );
+        assert_eq!(
+            sync_action_from_flags(true, true),
+            SyncAction::Bidirectional
+        );
+
+        assert_eq!(
+            combine_sync_actions(SyncAction::NoChange, SyncAction::LocalPushed),
+            SyncAction::LocalPushed
+        );
+        assert_eq!(
+            combine_sync_actions(SyncAction::RemotePulled, SyncAction::LocalPushed),
+            SyncAction::Bidirectional
+        );
+        assert_eq!(
+            combine_sync_actions(SyncAction::Bidirectional, SyncAction::NoChange),
+            SyncAction::Bidirectional
+        );
+    }
+
+    #[test]
+    fn provider_sync_success_updates_changed_timestamp_only_for_changes() {
+        let mut state = SyncStateFile::default();
+
+        record_provider_sync_success(
+            &mut state,
+            "bytedance_internal",
+            "2026-07-07T09:00:00Z".to_string(),
+            Some(SyncAction::NoChange),
+        );
+        let meta = state.provider_sync.get("bytedance_internal").unwrap();
+        assert_eq!(meta.last_sync_at.as_deref(), Some("2026-07-07T09:00:00Z"));
+        assert_eq!(meta.last_sync_action, Some(SyncAction::NoChange));
+        assert!(meta.last_changed_sync_at.is_none());
+        assert!(meta.last_changed_sync_action.is_none());
+
+        record_provider_sync_success(
+            &mut state,
+            "bytedance_internal",
+            "2026-07-07T09:05:00Z".to_string(),
+            Some(SyncAction::RemotePulled),
+        );
+        let meta = state.provider_sync.get("bytedance_internal").unwrap();
+        assert_eq!(meta.last_sync_at.as_deref(), Some("2026-07-07T09:05:00Z"));
+        assert_eq!(meta.last_sync_action, Some(SyncAction::RemotePulled));
+        assert_eq!(
+            meta.last_changed_sync_at.as_deref(),
+            Some("2026-07-07T09:05:00Z")
+        );
+        assert_eq!(
+            meta.last_changed_sync_action,
+            Some(SyncAction::RemotePulled)
+        );
+    }
+
+    #[tokio::test]
+    async fn status_aggregates_latest_changed_sync_metadata_from_connected_providers() {
+        let (_temp_dir, _config_manager, manager) =
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+        {
+            let mut state = manager.state.lock();
+            state.provider_sessions.insert(
+                "bytedance_internal".to_string(),
+                SyncProviderSession {
+                    token: "byte-token".to_string(),
+                    remote_base_url: DEFAULT_REMOTE_BASE_URL.to_string(),
+                    user: Some(test_user("byte-user")),
+                },
+            );
+            state.provider_sessions.insert(
+                "bifrost_cloud".to_string(),
+                SyncProviderSession {
+                    token: "cloud-token".to_string(),
+                    remote_base_url: "https://sync.example.test".to_string(),
+                    user: Some(test_user("cloud-user")),
+                },
+            );
+            state.provider_sync.insert(
+                "bytedance_internal".to_string(),
+                ProviderSyncMeta {
+                    last_sync_at: Some("2026-07-07T09:10:00Z".to_string()),
+                    last_sync_action: Some(SyncAction::NoChange),
+                    last_changed_sync_at: Some("2026-07-07T09:00:00Z".to_string()),
+                    last_changed_sync_action: Some(SyncAction::LocalPushed),
+                    last_error: None,
+                },
+            );
+            state.provider_sync.insert(
+                "bifrost_cloud".to_string(),
+                ProviderSyncMeta {
+                    last_sync_at: Some("2026-07-07T09:20:00Z".to_string()),
+                    last_sync_action: Some(SyncAction::NoChange),
+                    last_changed_sync_at: Some("2026-07-07T09:15:00Z".to_string()),
+                    last_changed_sync_action: Some(SyncAction::RemotePulled),
+                    last_error: None,
+                },
+            );
+            state.last_changed_sync_at = Some("2026-07-07T08:00:00Z".to_string());
+            state.last_changed_sync_action = Some(SyncAction::LocalPushed);
+            manager.persist_state(&state).unwrap();
+        }
+
+        let status = manager.status().await;
+        assert_eq!(
+            status.last_changed_sync_at.as_deref(),
+            Some("2026-07-07T09:15:00Z")
+        );
+        assert_eq!(
+            status.last_changed_sync_action,
+            Some(SyncAction::RemotePulled)
+        );
+
+        let cloud = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == "bifrost_cloud")
+            .expect("cloud provider");
+        assert_eq!(
+            cloud.last_changed_sync_at.as_deref(),
+            Some("2026-07-07T09:15:00Z")
+        );
+        assert_eq!(
+            cloud.last_changed_sync_action,
+            Some(SyncAction::RemotePulled)
+        );
+        assert_eq!(
+            cloud.check_interval_secs,
+            Some(SERVER_AUTO_SYNC_MIN_INTERVAL_SECS)
+        );
+
+        let gist = status
+            .providers
+            .iter()
+            .find(|provider| provider.id == GITHUB_GIST_PROVIDER_ID)
+            .expect("github gist provider");
+        assert_eq!(
+            gist.check_interval_secs,
+            Some(GITHUB_GIST_AUTO_SYNC_MIN_INTERVAL_SECS)
+        );
+    }
+
+    #[tokio::test]
+    async fn server_config_sync_action_combines_with_existing_rule_action() {
+        let (_temp_dir, config_manager, manager) =
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+        let sync_config = config_manager.config().await.sync.clone();
+        {
+            let mut state = manager.state.lock();
+            record_provider_sync_success(
+                &mut state,
+                "bytedance_internal",
+                "2026-07-07T09:00:00Z".to_string(),
+                Some(SyncAction::LocalPushed),
+            );
+            manager.persist_state(&state).unwrap();
+        }
+
+        manager
+            .record_server_config_sync_action(&sync_config, SyncAction::RemotePulled)
+            .unwrap();
+
+        let changed_snapshot = {
+            let state = manager.state.lock();
+            assert_eq!(state.last_sync_action, Some(SyncAction::Bidirectional));
+            assert_eq!(
+                state.last_changed_sync_action,
+                Some(SyncAction::Bidirectional)
+            );
+            let meta = state.provider_sync.get("bytedance_internal").unwrap();
+            assert_eq!(meta.last_sync_action, Some(SyncAction::Bidirectional));
+            assert_eq!(
+                meta.last_changed_sync_action,
+                Some(SyncAction::Bidirectional)
+            );
+            state.last_changed_sync_at.clone()
+        };
+
+        manager
+            .record_server_config_sync_action(&sync_config, SyncAction::NoChange)
+            .unwrap();
+        let state = manager.state.lock();
+        assert_eq!(state.last_changed_sync_at, changed_snapshot);
+        assert_eq!(
+            state.last_changed_sync_action,
+            Some(SyncAction::Bidirectional)
+        );
+    }
+
+    #[test]
     fn provider_and_github_gist_helpers_cover_routing_edges() {
         assert_eq!(provider_id_for_remote("   "), None);
         assert_eq!(
