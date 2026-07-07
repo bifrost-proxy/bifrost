@@ -218,6 +218,38 @@ describe("historyEventsToTelemetry", () => {
     expect(telemetryFromThread(thread).status?.state).toBe("idle");
   });
 
+  it("lets explicit terminal run_state override stale running true", () => {
+    const thread: AgentThreadSummary = {
+      session_key: "admin-chat",
+      status: "active",
+      running: true,
+      run_state: "completed",
+      state: "completed",
+    };
+
+    expect(isThreadActive(thread)).toBe(false);
+  });
+
+  it("treats detailed in-progress run_state values as active", () => {
+    const activeStates = [
+      "waiting_on_session",
+      "model_response",
+      "tool_running",
+      "compacting",
+      "stopping",
+    ];
+
+    for (const state of activeStates) {
+      expect(
+        isThreadActive({
+          session_key: `admin-chat-${state}`,
+          status: "active",
+          run_state: state,
+        }),
+      ).toBe(true);
+    }
+  });
+
   it("keeps active detail status newer than stale history events when thread summary is missing", () => {
     const fallback: RunTelemetry = {
       phase: "running",

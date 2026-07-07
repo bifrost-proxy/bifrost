@@ -3538,6 +3538,107 @@ test("AI Agent Chat lets active detail idle run_state override stale running his
   );
 });
 
+test("AI Agent Chat keeps thread and message running state stable when summary fields disagree", async ({
+  page,
+}) => {
+  const historyPath = "/tmp/active-completed-stale-running.jsonl";
+  const startedAt = Math.floor(Date.now() / 1000) - 20;
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: { bifrost_agent: { enabled: true, adapter: "builtin" } },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "active-completed-stale-running",
+            status: "active",
+            running: true,
+            state: "completed",
+            run_state: "completed",
+            title: "Completed summary wins",
+            history_path: historyPath,
+            has_timeline: true,
+            source: "web",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route(
+    `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}**`,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          events: [
+            {
+              timestamp: startedAt,
+              event_type: "run_state_changed",
+              session_key: "active-completed-stale-running",
+              content: { state: "running", agent_kind: "builtin", source_channel: "web" },
+            },
+            {
+              timestamp: startedAt + 1,
+              event_type: "user_message",
+              session_key: "active-completed-stale-running",
+              content: { message: "Summarize the finished task" },
+            },
+            {
+              timestamp: startedAt + 2,
+              event_type: "assistant_message",
+              session_key: "active-completed-stale-running",
+              content: { message: "The task is complete." },
+            },
+            {
+              timestamp: startedAt + 3,
+              event_type: "run_state_changed",
+              session_key: "active-completed-stale-running",
+              content: { state: "completed", agent_kind: "builtin", source_channel: "web" },
+            },
+          ],
+          start_index: 0,
+          end_index: 4,
+          has_more: false,
+        }),
+      });
+    },
+  );
+
+  await openPage(
+    page,
+    `ai?aiSection=agent-chat&agentSection=chat&session=active-completed-stale-running&view=history&historyPath=${encodeURIComponent(historyPath)}`,
+  );
+
+  await expect(page.getByTestId("agent-chat-state-tag")).toContainText("Ready");
+  await expect(page.getByTestId("agent-chat-turn-running-group")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-turn-collapse-toggle")).toContainText("已处理");
+  await expect(page.locator('[aria-label="running"]')).toHaveCount(0);
+  await page.waitForTimeout(1200);
+  await expect(page.getByTestId("agent-chat-state-tag")).toContainText("Ready");
+  await expect(page.getByTestId("agent-chat-turn-running-group")).toHaveCount(0);
+  await expect(page.locator('[aria-label="running"]')).toHaveCount(0);
+});
+
 test("AI Agent Chat can start a new chat while the selected thread is running", async ({
   page,
 }) => {
@@ -3615,14 +3716,12 @@ test("AI Agent Chat can start a new chat while the selected thread is running", 
     `ai?aiSection=agent-chat&agentSection=chat&session=running-thread&view=history&historyPath=${encodeURIComponent(historyPath)}`,
   );
   await expect(page.getByTestId("agent-chat-state-tag")).toContainText("Running");
-  await expect(page.getByTestId("agent-chat-new")).toBeEnabled();
+  await expect(page.getByTestId("ai-nav-new-chat")).toBeEnabled();
 
-  await page.getByTestId("agent-chat-new").click();
-  await expect(page.getByTestId("agent-chat-new-modal")).toBeVisible();
-  await page.getByRole("button", { name: "Create" }).click();
-  await expect(page.getByTestId("agent-chat-new-modal")).toHaveCount(0);
-  await expect(page.getByTestId("agent-chat-state-tag")).toContainText("New");
-  await expect(page.getByTestId("agent-chat-input")).toBeEnabled();
+  await page.getByTestId("ai-nav-new-chat").click();
+  const newChatLanding = page.getByTestId("ai-new-chat-landing");
+  await expect(newChatLanding).toBeVisible();
+  await expect(newChatLanding.getByTestId("agent-chat-input")).toBeEnabled();
 });
 
 test("AI Agent Chat thread list scrolls and selects only the active duplicate", async ({

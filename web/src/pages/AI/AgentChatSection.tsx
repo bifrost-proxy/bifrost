@@ -43,7 +43,11 @@ import {
   mergeDetailMessagesWithTimeline,
   sliceRecentChatTurns,
 } from "./AgentChatSection.timeline";
-import { isRunStateActive, isThreadActive } from "./AgentChatSection.timelinePolling";
+import {
+  isRunStateActive,
+  isRunStateIdle,
+  isThreadActive,
+} from "./AgentChatSection.timelinePolling";
 import { AgentChatMessageList } from "./AgentChatSection.messages";
 import { AgentChatPlan, AgentChatPromptChips } from "./AgentChatSection.composerExtras";
 import { AgentChatSettingsModal, AgentThreadListCard } from "./AgentChatSection.panels";
@@ -207,6 +211,29 @@ function runnerModelSlashSystemDisplayContent(command: string, response: string)
     }
   }
   return response;
+}
+
+function resolveRunningState({
+  fallbackRunning = false,
+  phase,
+  state,
+  thread,
+}: {
+  fallbackRunning?: boolean;
+  phase?: RunTelemetry["phase"];
+  state?: string;
+  thread?: AgentThreadSummary;
+}) {
+  if (isRunStateIdle(state)) {
+    return false;
+  }
+  if (isRunStateActive(state)) {
+    return true;
+  }
+  if (phase === "finished" || phase === "failed") {
+    return false;
+  }
+  return fallbackRunning || phase === "running" || isThreadActive(thread);
 }
 
 type HistoryPagePayload = {
@@ -494,7 +521,11 @@ export default function AgentChatSection({
   const timelineMessagesFromCurrentEvents = useCallback(
     (thread?: AgentThreadSummary) => {
       const terminalTimeline = telemetryPhaseRef.current === "finished" || telemetryPhaseRef.current === "failed";
-      const timelineRunning = telemetryPhaseRef.current === "running" && isThreadActive(thread);
+      const timelineRunning = resolveRunningState({
+        phase: telemetryPhaseRef.current,
+        state: thread?.run_state || thread?.state,
+        thread,
+      });
       return historyEventsToMessages(historyEventsRef.current, {
         ensureRunningAssistant:
           timelineRunning || (!terminalTimeline && isThreadActive(thread)),
@@ -538,8 +569,11 @@ export default function AgentChatSection({
       );
       const terminalTimeline =
         nextTelemetry.phase === "finished" || nextTelemetry.phase === "failed";
-      const timelineRunning =
-        nextTelemetry.phase === "running" && isThreadActive(matchedThread);
+      const timelineRunning = resolveRunningState({
+        phase: nextTelemetry.phase,
+        state: matchedThread?.run_state || matchedThread?.state,
+        thread: matchedThread,
+      });
       const restored = historyEventsToMessages(events, {
         ensureRunningAssistant:
           timelineRunning || (!terminalTimeline && isThreadActive(matchedThread)),
@@ -716,7 +750,12 @@ export default function AgentChatSection({
       });
   const currentRunnerTag = formatRunnerTag(telemetry.status, selectedThread, runnerId);
   const terminalTimeline = telemetry.phase === "finished" || telemetry.phase === "failed";
-  const displayRunning = running || (!terminalTimeline && isThreadActive(selectedThread));
+  const displayRunning = resolveRunningState({
+    fallbackRunning: running || (!terminalTimeline && isThreadActive(selectedThread)),
+    phase: telemetry.phase,
+    state: selectedThread?.run_state || selectedThread?.state || telemetry.status?.state,
+    thread: selectedThread,
+  });
   const currentStateTag = formatCurrentStateTag(telemetry, selectedThread, displayRunning);
   const activeDetailHasOlder =
     activeDetailMessagesRef.current.length > 0
@@ -1049,10 +1088,17 @@ export default function AgentChatSection({
                   ? payload.next_cursor
                   : historyEventStartIndexRef.current;
               activeTimelineHasOlderRef.current = Boolean(payload.has_more);
+              const timelineRunning = resolveRunningState({
+                fallbackRunning: detail.running === true,
+                state:
+                  detail.run_state ||
+                  detail.state ||
+                  timelineThread?.run_state ||
+                  timelineThread?.state,
+                thread: timelineThread,
+              });
               timelineMessages = historyEventsToMessages(timelineEvents, {
-                ensureRunningAssistant:
-                  isThreadActive(timelineThread) ||
-                  isRunStateActive(detail.run_state || detail.state),
+                ensureRunningAssistant: timelineRunning,
                 runningState:
                   detail.run_state ||
                   detail.state ||
@@ -1093,6 +1139,7 @@ export default function AgentChatSection({
                 timeline_event_count:
                   detail.timeline_event_count ?? thread.timeline_event_count,
                 run_state: detail.run_state || thread.run_state,
+                ...(detail.running !== undefined ? { running: detail.running } : {}),
               };
               if (
                 updated.title !== thread.title ||
@@ -1104,7 +1151,8 @@ export default function AgentChatSection({
                 updated.history_path !== thread.history_path ||
                 updated.has_timeline !== thread.has_timeline ||
                 updated.timeline_event_count !== thread.timeline_event_count ||
-                updated.run_state !== thread.run_state
+                updated.run_state !== thread.run_state ||
+                updated.running !== thread.running
               ) {
                 changed = true;
                 return updated;
@@ -1138,10 +1186,12 @@ export default function AgentChatSection({
             : detailTelemetry;
           setTelemetry(nextTelemetry);
           setRunning(
-            detail.running === false
-              ? false
-              : nextTelemetry.phase === "running" ||
-                  isRunStateActive(detail.run_state || detail.state),
+            resolveRunningState({
+              fallbackRunning: detail.running === true,
+              phase: nextTelemetry.phase,
+              state: detail.run_state || detail.state || nextTelemetry.status?.state,
+              thread: matchedThread,
+            }),
           );
           setWorkDir(detail.work_dir || matchedThread?.work_dir || defaultWorkDir);
           setRunnerId(detail.runner_id || matchedThread?.runner_id || "bifrost_agent");
@@ -1346,10 +1396,11 @@ export default function AgentChatSection({
         currentThread,
       );
       if (nextTelemetry) {
-        const terminal =
-          nextTelemetry.phase === "finished" || nextTelemetry.phase === "failed";
-        const stillRunning =
-          !terminal && (nextTelemetry.phase === "running" || isThreadActive(currentThread));
+        const stillRunning = resolveRunningState({
+          phase: nextTelemetry.phase,
+          state: currentThread?.run_state || currentThread?.state || nextTelemetry.status?.state,
+          thread: currentThread,
+        });
         setRunning(stillRunning);
         if (!stillRunning && nextTelemetry.phase === "running") {
           setTelemetry((prev) =>

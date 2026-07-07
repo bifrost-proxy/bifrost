@@ -36,6 +36,7 @@ import {
   type AgentThreadSummary,
   type RunTelemetry,
 } from "./AgentChatSection.helpers";
+import { isThreadActive } from "./AgentChatSection.timelinePolling";
 
 const { Text, Paragraph } = Typography;
 
@@ -145,8 +146,7 @@ export function AgentThreadListCard({
   const [contextThreadKey, setContextThreadKey] = useState<string | null>(null);
   const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
   const [visibleLimit, setVisibleLimit] = useState(INITIAL_THREAD_LOAD_COUNT);
-  const isRunningThread = (thread: AgentThreadSummary) =>
-    thread.status === "active" && thread.running !== false;
+  const isRunningThread = isThreadActive;
   const threadDuration = (thread: AgentThreadSummary) => {
     if (isRunningThread(thread) && thread.start_time) {
       return Math.max(0, nowSeconds - thread.start_time);
