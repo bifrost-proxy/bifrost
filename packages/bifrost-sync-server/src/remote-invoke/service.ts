@@ -209,10 +209,15 @@ export class RemoteInvokeService {
       }
     }
 
-    const token = generateRelayToken();
     const now = new Date().toISOString();
-    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
     const pubkeyHash = computeStoredPubkeyHash(pubkeyDer);
+    const existingTokenStillValid = !!existing?.client_auth_token
+      && !!existing.token_expires_at
+      && new Date(existing.token_expires_at) > new Date();
+    const token = existingTokenStillValid ? existing!.client_auth_token : generateRelayToken();
+    const expiresAt = existingTokenStillValid
+      ? existing!.token_expires_at
+      : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
 
     const record: RemoteInvokeClientRecord = {
       client_instance_id: req.client_instance_id,

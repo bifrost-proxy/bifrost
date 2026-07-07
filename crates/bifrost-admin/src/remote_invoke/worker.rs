@@ -1118,8 +1118,8 @@ impl RemoteInvokeWorker {
                 use_count: 0,
                 ssh_key_id: None,
                 ssh_key_fingerprint: None,
-                caller_ephemeral_pub: None,
-                client_ephemeral_pub: None,
+                caller_ephemeral_pub: Some(crypto_material.caller_ephemeral_pub.clone()),
+                client_ephemeral_pub: Some(crypto_material.client_ephemeral_pub.clone()),
                 policy_binding: shell_grant.policy_binding.clone(),
                 shell_policy_set_version_snapshot: shell_grant.shell_policy_set_version_snapshot,
                 interactive_allowed: shell_grant.interactive_allowed,
@@ -1349,7 +1349,6 @@ impl RemoteInvokeWorker {
                 let mut count = 0u32;
                 let synced_transport = self.grant_crypto.read().clone();
                 let synced_policy = self.grant_policy.read().clone();
-                let mut stale_grant_ids = Vec::new();
                 let mut relay_active_ids = HashSet::new();
                 for item in &grants_data {
                     if let Some(gi) =
@@ -1375,9 +1374,8 @@ impl RemoteInvokeWorker {
                             }
                             warn!(
                                 grant_id = %gid,
-                                "active relay grant is missing usable encrypted transport context locally; deleting stale grant"
+                                "active relay grant is missing usable encrypted transport context locally; keeping relay grant"
                             );
-                            stale_grant_ids.push(gid);
                             continue;
                         }
                         self.persist_grant_info(&gid, &gi);
@@ -1419,29 +1417,6 @@ impl RemoteInvokeWorker {
                         count = count,
                         "synced active grants from relay on SSE connect"
                     );
-                }
-                for grant_id in stale_grant_ids {
-                    // Re-check after brief wait: approve_pairing may be storing crypto concurrently
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    if self.grant_crypto.read().contains_key(&grant_id) {
-                        info!(grant_id = %grant_id, "grant crypto arrived during stale check; keeping grant");
-                        continue;
-                    }
-                    self.local_grants.write().remove(&grant_id);
-                    self.remove_grant_crypto(&grant_id);
-                    self.remove_grant_policy(&grant_id);
-                    self.remove_grant_info(&grant_id);
-                    match self.relay_client.delete_grant(&grant_id).await {
-                        Ok(_) => info!(
-                            grant_id = %grant_id,
-                            "deleted stale relay grant without local encrypted transport context"
-                        ),
-                        Err(error) => warn!(
-                            error = %error,
-                            grant_id = %grant_id,
-                            "failed to delete stale relay grant without local encrypted transport context"
-                        ),
-                    }
                 }
             }
             Err(e) => {
@@ -2201,20 +2176,21 @@ impl RemoteInvokeWorker {
             preserve_existing_grant_runtime_state(&mut grant_info, existing);
         }
         if !has_usable_grant_crypto(&self.grant_crypto.read(), &grant_info) {
-            // Race condition: The relay sends the SSE grant_created event before the HTTP
-            // response to submit_grant_decision. If approve_pairing hasn't stored the crypto
-            // yet, we might mistakenly consider this grant stale. Wait briefly and retry.
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            if let Some(existing) = self.local_grants.read().get(&grant_id) {
-                preserve_existing_grant_runtime_state(&mut grant_info, existing);
-            }
-            if has_usable_grant_crypto(&self.grant_crypto.read(), &grant_info) {
-                info!(grant_id = %grant_id, "grant crypto arrived after brief wait; accepting grant");
-                self.persist_grant_info(&grant_id, &grant_info);
-                self.local_grants
-                    .write()
-                    .insert(grant_id.clone(), grant_info);
-                return;
+            // Race condition: the relay may send grant_created before
+            // submit_grant_decision returns and approve_pairing stores local crypto.
+            for _ in 0..10 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if let Some(existing) = self.local_grants.read().get(&grant_id) {
+                    preserve_existing_grant_runtime_state(&mut grant_info, existing);
+                }
+                if has_usable_grant_crypto(&self.grant_crypto.read(), &grant_info) {
+                    info!(grant_id = %grant_id, "grant crypto arrived after bounded wait; accepting grant");
+                    self.persist_grant_info(&grant_id, &grant_info);
+                    self.local_grants
+                        .write()
+                        .insert(grant_id.clone(), grant_info);
+                    return;
+                }
             }
             if grant_info.auth_method == AuthMethod::SshPublickey {
                 warn!(
@@ -2225,23 +2201,8 @@ impl RemoteInvokeWorker {
             }
             warn!(
                 grant_id = %grant_id,
-                "grant_created is missing usable encrypted transport context locally; deleting stale grant"
+                "grant_created is missing usable encrypted transport context locally; keeping relay grant"
             );
-            self.local_grants.write().remove(&grant_id);
-            self.remove_grant_crypto(&grant_id);
-            self.remove_grant_policy(&grant_id);
-            self.remove_grant_info(&grant_id);
-            match self.relay_client.delete_grant(&grant_id).await {
-                Ok(_) => info!(
-                    grant_id = %grant_id,
-                    "deleted stale grant from relay after grant_created without local encrypted transport context"
-                ),
-                Err(error) => warn!(
-                    error = %error,
-                    grant_id = %grant_id,
-                    "failed to delete stale grant from relay after grant_created without local encrypted transport context"
-                ),
-            }
             return;
         }
         self.persist_grant_info(&grant_id, &grant_info);

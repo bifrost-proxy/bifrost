@@ -82,6 +82,31 @@ http_post_json() {
     http_request "$1" "POST" "$2"
 }
 
+approve_pairing_with_retry() {
+    local pairing_id="$1"
+    local payload='{"grant_mode":"permanent","grant_scope":"remote_shell_exec","file_access":"read_write"}'
+    local last_status=""
+    local last_body=""
+
+    for _ in $(seq 1 10); do
+        http_post_json "${CLIENT_ADMIN_URL}/api/remote-invoke/pairings/${pairing_id}/approve" "$payload"
+        last_status="$HTTP_STATUS"
+        last_body="$HTTP_BODY"
+        if [[ "$HTTP_STATUS" == "200" ]]; then
+            return 0
+        fi
+        sleep 0.5
+    done
+
+    _log_fail "approve pairing should return 200" "200" "status=${last_status}; body=${last_body:-<empty>}"
+    echo "[remote-v5-session-refresh-e2e] pending pairings:" >&2
+    http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/pairings/pending" >&2 || true
+    echo "${HTTP_BODY:-<empty>}" >&2
+    echo "[remote-v5-session-refresh-e2e] caller connect log:" >&2
+    cat "$CALLER_CONNECT_LOG" >&2 || true
+    return 1
+}
+
 prepare_bifrost_bin() {
     BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/release/bifrost}"
     if [[ "$BIFROST_BIN" == "$REPO_DIR/target/release/bifrost" && "${SKIP_BUILD:-}" != "true" ]]; then
@@ -229,9 +254,8 @@ pair_and_approve() {
     done
     assert_not_empty "$pairing_id" "pending pairing should arrive on target" || return 1
 
-    http_post_json "${CLIENT_ADMIN_URL}/api/remote-invoke/pairings/${pairing_id}/approve" \
-        '{"grant_mode":"permanent","grant_scope":"remote_shell_exec","file_access":"read_write"}'
-    assert_status "200" "$HTTP_STATUS" "approve pairing should return 200" || return 1
+    approve_pairing_with_retry "$pairing_id" || return 1
+    _log_pass "approve pairing should return 200"
 
     local connect_ok=0
     for _ in $(seq 1 30); do

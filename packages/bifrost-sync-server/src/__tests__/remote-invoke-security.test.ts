@@ -576,6 +576,34 @@ describe('Remote Invoke security', () => {
     expect(invalidSignature.data.message).toBe('invalid_registration_signature');
   });
 
+  it('reuses a valid client auth token on repeated registration for the same client key', async () => {
+    const token = await registerUser('ri_repeat_registration_user', 'password123');
+    const { publicKey, privateKey } = generateClientKeypair();
+    const publicKeyDerBase64 = publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+    const clientInstanceId = 'ri-repeat-registration-client';
+
+    const first = await registerClient(clientInstanceId, publicKeyDerBase64, privateKey, token);
+    expect(first.status, JSON.stringify(first.data)).toBe(200);
+    const firstClientToken = first.data.data.client_auth_token as string;
+
+    const second = await registerClient(clientInstanceId, publicKeyDerBase64, privateKey, token);
+    expect(second.status, JSON.stringify(second.data)).toBe(200);
+    expect(second.data.data.client_auth_token).toBe(firstClientToken);
+
+    const heartbeat = await req(
+      'POST',
+      '/v4/remote-invoke/client/heartbeat',
+      {
+        client_instance_id: clientInstanceId,
+        stream_id: 'repeat-registration-stream',
+        active_call_ids: [],
+      },
+      { Authorization: `Bearer ${firstClientToken}` },
+    );
+    expect(heartbeat.status, JSON.stringify(heartbeat.data)).toBe(200);
+    expect(heartbeat.data.code).toBe(0);
+  });
+
   it('scopes client call detail lookups to the authenticated client', async () => {
     const token = await registerUser('ri_scope_user', 'password123');
 
