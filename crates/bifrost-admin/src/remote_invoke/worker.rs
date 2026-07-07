@@ -63,6 +63,7 @@ const PAIR_CODE_DIGITS: u32 = 6;
 const PAIR_CODE_REFRESH_CHECK_SECS: u64 = 5;
 const GRANT_CLEANUP_INTERVAL_SECS: u64 = 60;
 const STALE_GRANT_RETENTION_MS: u64 = 2 * 24 * 60 * 60 * 1000;
+const RECENT_SSH_GRANT_RECONCILE_GRACE_MS: u64 = 2 * 60 * 1000;
 const PENDING_PAIRING_POLL_SECS: u64 = 5;
 const ACTIVE_CALL_RECONCILE_INTERVAL_MS: u64 = 1000;
 
@@ -1387,9 +1388,12 @@ impl RemoteInvokeWorker {
                 let local_orphans: Vec<String> = {
                     let grants = self.local_grants.read();
                     grants
-                        .keys()
-                        .filter(|id| !relay_active_ids.contains(id.as_str()))
-                        .cloned()
+                        .iter()
+                        .filter(|(id, info)| {
+                            !relay_active_ids.contains(id.as_str())
+                                && should_purge_relay_orphan_grant(info, now)
+                        })
+                        .map(|(id, _)| id.clone())
                         .collect()
                 };
                 if !local_orphans.is_empty() {
@@ -1582,7 +1586,7 @@ impl RemoteInvokeWorker {
         }
     }
 
-    async fn poll_pending_pairings_from_relay(&self) {
+    pub async fn poll_pending_pairings_from_relay(&self) {
         if self.discovery_session.read().is_none() {
             return;
         }
@@ -1751,6 +1755,7 @@ impl RemoteInvokeWorker {
     }
 
     pub fn list_grants_and_cleanup(&self) -> Vec<serde_json::Value> {
+        self.restore_persisted_grants_for_current_relay();
         let now = now_millis();
         let mut grants = self.local_grants.write();
         let mut dead_ids = Vec::new();
@@ -1797,6 +1802,62 @@ impl RemoteInvokeWorker {
         }
 
         live
+    }
+
+    fn restore_persisted_grants_for_current_relay(&self) {
+        let relay_url = self.relay_client.base_url();
+        let restored_crypto = match self.grant_crypto_store.load_for_relay(&relay_url) {
+            Ok(restored) => restored,
+            Err(error) => {
+                warn!(error = %error, "reload persisted grant crypto failed before grant list");
+                return;
+            }
+        };
+        let mut usable_grant_ids = HashSet::new();
+        {
+            let mut local_crypto = self.grant_crypto.write();
+            for (grant_id, material) in restored_crypto {
+                usable_grant_ids.insert(grant_id.clone());
+                local_crypto
+                    .entry(grant_id)
+                    .or_insert_with(|| GrantCryptoMaterial {
+                        shared_secret: material.shared_secret,
+                        caller_ephemeral_pub: material.caller_ephemeral_pub,
+                        client_ephemeral_pub: material.client_ephemeral_pub,
+                        caller_long_term_fp: String::new(),
+                        client_long_term_fp: String::new(),
+                    });
+            }
+        }
+
+        let restored_info = match self.grant_info_store.load_for_relay(&relay_url) {
+            Ok(restored) => restored,
+            Err(error) => {
+                warn!(error = %error, "reload persisted grant info failed before grant list");
+                return;
+            }
+        };
+        if restored_info.is_empty() {
+            return;
+        }
+
+        let stored_policy = self.grant_policy.read().clone();
+        let mut restored_count = 0u32;
+        let mut grants = self.local_grants.write();
+        for (grant_id, mut info) in restored_info {
+            if grants.contains_key(&grant_id) || !usable_grant_ids.contains(&grant_id) {
+                continue;
+            }
+            info = apply_stored_grant_policy(info, stored_policy.get(&grant_id));
+            grants.insert(grant_id, info);
+            restored_count += 1;
+        }
+        if restored_count > 0 {
+            debug!(
+                count = restored_count,
+                "restored missing local grants from persisted store before grant list"
+            );
+        }
     }
 
     fn periodic_grant_cleanup(&self) {
@@ -2172,6 +2233,15 @@ impl RemoteInvokeWorker {
             let stored = self.grant_policy.read();
             apply_stored_grant_policy(grant_info, stored.get(&grant_id))
         };
+        if grant_info.auth_method == AuthMethod::SshPublickey && grant_info.ssh_key_id.is_none() {
+            if let Ok(Some(active_key)) = self.get_active_ssh_key() {
+                if grant_info.ssh_key_fingerprint.as_deref()
+                    == Some(active_key.ssh_key_fingerprint.as_str())
+                {
+                    grant_info.ssh_key_id = Some(active_key.id);
+                }
+            }
+        }
         if let Some(existing) = self.local_grants.read().get(&grant_id) {
             preserve_existing_grant_runtime_state(&mut grant_info, existing);
         }
@@ -2439,6 +2509,9 @@ impl RemoteInvokeWorker {
         self.local_grants
             .write()
             .insert(grant_id.clone(), grant_info);
+        if let Some(inserted) = self.local_grants.read().get(&grant_id).cloned() {
+            self.persist_grant_info(&grant_id, &inserted);
+        }
         self.persist_grant_policy(
             &grant_id,
             &StoredGrantPolicy {
@@ -3829,6 +3902,16 @@ fn grant_activity_at(info: &GrantInfo) -> u64 {
 
 fn is_grant_info_stale(info: &GrantInfo, now_ms: u64) -> bool {
     now_ms.saturating_sub(grant_activity_at(info)) > STALE_GRANT_RETENTION_MS
+}
+
+fn should_purge_relay_orphan_grant(info: &GrantInfo, now_ms: u64) -> bool {
+    if info.auth_method == AuthMethod::SshPublickey
+        && info.status == GrantStatus::Active
+        && now_ms.saturating_sub(info.first_authorized_at) <= RECENT_SSH_GRANT_RECONCILE_GRACE_MS
+    {
+        return false;
+    }
+    true
 }
 
 fn validate_grant_for_call(
@@ -7422,6 +7505,56 @@ mod coverage_boost {
     }
 
     #[test]
+    fn list_grants_and_cleanup_restores_persisted_grants() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let now = now_millis();
+        let mut grant = grant_fixture("persisted-only", now);
+        grant.auth_method = AuthMethod::SshPublickey;
+        grant.ssh_key_id = Some("ssh-key-1".to_string());
+        grant.ssh_key_fingerprint = Some("ssh-fp".to_string());
+        grant.caller_ephemeral_pub = Some("caller-eph".to_string());
+        grant.client_ephemeral_pub = Some("client-eph".to_string());
+        worker.persist_grant_info(&grant.grant_id, &grant);
+        worker.persist_grant_crypto(
+            &grant.grant_id,
+            &GrantCryptoMaterial {
+                shared_secret: vec![1, 2, 3],
+                caller_ephemeral_pub: "caller-eph".to_string(),
+                client_ephemeral_pub: "client-eph".to_string(),
+                caller_long_term_fp: String::new(),
+                client_long_term_fp: String::new(),
+            },
+        );
+        assert!(worker.local_grants.read().is_empty());
+
+        let live_values = worker.list_grants_and_cleanup();
+
+        assert_eq!(live_values.len(), 1);
+        assert_eq!(live_values[0]["grant_id"], "persisted-only");
+        assert!(worker.local_grants.read().get("persisted-only").is_some());
+        assert!(worker.grant_crypto.read().get("persisted-only").is_some());
+    }
+
+    #[test]
+    fn relay_orphan_reconcile_keeps_recent_ssh_grant_temporarily() {
+        let now = now_millis();
+        let mut recent_ssh = grant_fixture("recent-ssh", now);
+        recent_ssh.auth_method = AuthMethod::SshPublickey;
+        recent_ssh.ssh_key_id = Some("ssh-key-1".to_string());
+        recent_ssh.ssh_key_fingerprint = Some("ssh-fp".to_string());
+
+        assert!(!should_purge_relay_orphan_grant(&recent_ssh, now));
+
+        let mut old_ssh = recent_ssh.clone();
+        old_ssh.first_authorized_at = now.saturating_sub(RECENT_SSH_GRANT_RECONCILE_GRACE_MS + 1);
+        assert!(should_purge_relay_orphan_grant(&old_ssh, now));
+
+        let mut pair_code = recent_ssh;
+        pair_code.auth_method = AuthMethod::PairCode;
+        assert!(should_purge_relay_orphan_grant(&pair_code, now));
+    }
+
+    #[test]
     fn revoke_local_ssh_grants_revokes_ssh_grants_without_filter() {
         let (_harness, worker) = make_ssh_test_worker();
 
@@ -8363,6 +8496,49 @@ mod coverage_boost {
         let info = grants.get(grant_id).expect("grant should be inserted");
         assert_eq!(info.grant_id, grant_id);
         assert_eq!(info.caller_fingerprint, "fp-created");
+    }
+
+    #[tokio::test]
+    async fn handle_grant_created_fills_active_ssh_key_id() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let material = worker
+            .ssh_key_store
+            .create_or_replace_key("label".to_string(), GrantMode::Permanent)
+            .expect("create ssh key");
+        let grant_id = "ssh-grant-created";
+        worker.grant_crypto.write().insert(
+            grant_id.to_string(),
+            GrantCryptoMaterial {
+                shared_secret: vec![1],
+                caller_ephemeral_pub: "caller-eph".to_string(),
+                client_ephemeral_pub: "client-eph".to_string(),
+                caller_long_term_fp: String::new(),
+                client_long_term_fp: String::new(),
+            },
+        );
+        let payload = json!({
+            "grant_id": grant_id,
+            "auth_method": "ssh_publickey",
+            "grant_mode": "permanent",
+            "grant_scope": "remote_shell_interactive",
+            "file_access": "read_write",
+            "caller_fingerprint": "caller-fp",
+            "ssh_key_fingerprint": material.record.ssh_key_fingerprint,
+        });
+
+        worker.handle_grant_created(payload).await;
+
+        let grants = worker.local_grants.read();
+        let info = grants.get(grant_id).expect("grant should be inserted");
+        assert_eq!(info.auth_method, AuthMethod::SshPublickey);
+        assert_eq!(
+            info.ssh_key_id.as_deref(),
+            Some(material.record.id.as_str())
+        );
+        assert_eq!(
+            info.ssh_key_fingerprint.as_deref(),
+            Some(material.record.ssh_key_fingerprint.as_str())
+        );
     }
 
     #[test]

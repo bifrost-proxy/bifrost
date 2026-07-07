@@ -5351,6 +5351,55 @@ rm -rf /tmp/bifrost-remote-overload.*
 - 2026-07-07: PASS - CI run `28855958270` 在 macOS shard 1 中确认 `test_remote_invoke_recent_calls_persistence_e2e.sh` 与 `test_remote_invoke_v5_session_refresh_e2e.sh` 已进入串行队列但仍可能在 approve 阶段遇到瞬态 500。为两条脚本增加最多 10 次、每次 0.5 秒的 pairing approve 重试，并在最终失败时打印 status/body、pending pairings 与 caller connect log。执行 `bash -n e2e-tests/tests/test_remote_invoke_recent_calls_persistence_e2e.sh e2e-tests/tests/test_remote_invoke_v5_session_refresh_e2e.sh` 通过。
 - 2026-07-07: PASS - 本地继续复现 `test_remote_invoke_v5_session_refresh_e2e.sh`，approve 通过后发现三个真实竞态：一是 v5 caller 通过 saved connection 刷新 session 时 lookup 响应不暴露 `grant_id`，CLI 需要沿用本地 saved `grant_id`；二是 target worker SSE 重连时，如果本地 crypto 尚未落盘就看到 relay active grant，不能直接删除 relay grant；三是 target worker SSE 重连会反复重新注册 client，sync server 旋转 `client_auth_token` 后会让执行中的 call frame/exit 上报 401。修复后执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli find_reusable_grant_reuses_saved_transport_for_session_refresh --lib`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin handle_grant_created_inserts_grant_when_crypto_available --lib`、`pnpm --dir packages/bifrost-sync-server exec vitest run src/__tests__/remote-invoke-security.test.ts -t "reuses a valid client auth token"` 均通过；重新构建 release 后执行 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/release/bifrost BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_remote_invoke_v5_session_refresh_e2e.sh` 通过，最终 `Total: 17 / Passed: 17 / Failed: 0`；执行 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/release/bifrost BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_remote_invoke_recent_calls_persistence_e2e.sh` 通过，输出 `Recent Calls persistence E2E passed`。
 
+## TC-RI-回归-155：Discovery close 与 pending pairing 查询不能丢失后续配对
+
+**背景**：PR `codex/sync-provider-design` 的 GitHub Actions run `28861869357` 中，macOS aarch64 shell shard 2 在 `test_remote_invoke_e2e.sh` 的 TC-RI-05 拒绝配对流程出现 `第二次配对请求未到达`，caller 日志曾出现 `pair_slot_occupied`。本地复现进一步发现两类竞态：旧 discovery close 如果晚于新 discovery publish 到达 relay，会因为 relay 只按 `client_instance_id` 清理而误删新 pair code，caller 得到 `invalid_pair_code`；另一次复现中 caller 已 `Waiting for approval`，说明 relay 已创建 pairing，但 target 端 pending API 只读本地 SSE 缓存，SSE 推送遗漏时 30 秒内仍看不到 pending。修复要求 relay close 必须按 `discovery_session_id` 条件清理，并且 target pending API 查询前主动从 relay 补拉 pending pairings。
+
+### 操作步骤
+
+1. 执行 sync-server Remote Invoke pairing cleanup 回归：
+   `pnpm --dir packages/bifrost-sync-server test -- remote-invoke-pairing-timeout`。
+2. 重新构建本地二进制：
+   `cargo build --bin bifrost`。
+3. 用最新 debug 二进制运行主 Remote Invoke shell E2E：
+   `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_remote_invoke_e2e.sh`。
+
+### 预期结果
+
+- relay `DELETE /v4/remote-invoke/client/discovery-session/:session_id` 只清理当前匹配的 discovery session；旧 session close 不能误删新 pair code。
+- close 当前 discovery session 时，当前 target 的 pending pairing slot 会被拒绝清理，后续 pair code 可以立即重新配对。
+- target 管理端 `/_bifrost/api/remote-invoke/pairings/pending` 查询前会主动从 relay 补拉 pending pairing，SSE 推送遗漏时仍能显示待审批请求。
+- `test_remote_invoke_e2e.sh` 的 TC-RI-05 拒绝配对、TC-RI-07B fresh reconnect、TC-RI-08 disconnect 全部通过；脚本退出码为 0。
+
+### 实际执行结果
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-155 | ✅ PASS | 2026-07-07 本地先复现 `test_remote_invoke_e2e.sh` 的 TC-RI-05 失败：一次 caller 日志为 `start_pairing failed ... invalid_pair_code`，另一次 caller 已输出 `Waiting for approval on the remote device...` 但 target pending API 30 秒内未显示 pairing。修复后执行 `pnpm --dir packages/bifrost-sync-server test -- remote-invoke-pairing-timeout` 通过，输出 `Test Files 16 passed`、`Tests 204 passed`；执行 `cargo fmt --all -- --check` 通过；执行 `cargo build --bin bifrost` 通过；最终用最新 `target/debug/bifrost` 执行 `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_remote_invoke_e2e.sh` 通过，输出 `All assertions: total=90 passed=90 failed=0` 和 `All tests passed!`。本流程使用随机端口和隔离数据目录，未使用 9900，未修改系统代理。 |
+
+## TC-RI-回归-156：publish pair code 后 SSE 重连不能让授权码失效
+
+**背景**：PR `codex/sync-provider-design` 的 GitHub Actions run `28867774487` 中，macOS aarch64 shell shard 2 的 `test_remote_invoke_e2e.sh` 已不再出现 `pair_slot_occupied`，但 TC-RI-05 仍偶发 `第二次配对请求未到达`，caller 日志为 `start_pairing failed ... invalid_pair_code`。该失败发生在 target 已通过 `discovery/enter` 发布新 pair code 后、caller 使用该 code 发起配对前。根因是 relay 把 active pair code 存在当前 SSE stream 内存状态中；同一 client 在 publish 后发生 SSE 重连时，新 stream 替换旧 stream 且默认 `discoverable=false`，导致刚发布的 pair code 丢失。
+
+### 操作步骤
+
+1. 执行 sync-server Remote Invoke pairing cleanup 回归：
+   `pnpm --dir packages/bifrost-sync-server test -- remote-invoke-pairing-timeout`。
+2. 用最新 debug 二进制运行主 Remote Invoke shell E2E：
+   `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_remote_invoke_e2e.sh`。
+
+### 预期结果
+
+- 同一 client SSE stream 被新 stream 替换时，relay 会继承旧 stream 上仍有效的 `discoverable`、`discovery_session_id`、`pair_code` 和 `pairCodeExpiresAt`。
+- publish 后发生 SSE 重连，caller 继续使用刚发布的 pair code 时，`/v5/remote-invoke/pairings/start` 仍返回成功，不再报 `invalid_pair_code`。
+- `test_remote_invoke_e2e.sh` 的 TC-RI-05 拒绝配对流程能看到 pending pairing，拒绝后 caller 非 0 退出；TC-RI-08 disconnect 回归继续通过。
+
+### 实际执行结果
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-156 | ✅ PASS | 2026-07-07 先通过 GitHub Actions run `28867774487` 的 artifact 确认旧 `pair_slot_occupied` 已消失，但 `test_remote_invoke_e2e.sh` 的 TC-RI-05 仍失败为 `start_pairing failed ... invalid_pair_code`，且发生在 `discovery/enter` 返回新 pair code 后。修复 relay SSE replacement 继承 active discovery 状态后，执行 `pnpm --dir packages/bifrost-sync-server test -- remote-invoke-pairing-timeout` 通过，输出 `Test Files 16 passed`、`Tests 205 passed`；执行 `BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_remote_invoke_e2e.sh` 通过，TC-RI-05 拒绝配对、TC-RI-08 disconnect 均 PASS，最终 `All assertions: total=90 passed=90 failed=0` 和 `All tests passed!`。本流程使用随机端口和隔离数据目录，未使用 9900，未修改系统代理。 |
+
 > 说明：核心可测逻辑（行数推导 `visible_table_rows`、列宽预算 `adaptive_column_widths`）已抽成纯函数，
 > 由 `crates/bifrost-cli/src/commands/status_tui.rs` 的单元测试覆盖；TUI 实时渲染部分已在
 > macOS PTY 与临时 Bifrost E2E 中按上述用例核对。

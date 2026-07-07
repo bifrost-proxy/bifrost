@@ -148,6 +148,36 @@
 - 权限级别在 `shell` / `files` / `query` / `full` 之间切换后，原 saved connection 不需要重新授权即可继续按当前权限执行允许的操作。
 - 脚本最终输出 `All SSH remote invoke E2E checks passed`。
 
+### TC-RISK-05：SSH 双 caller grant 列表从持久化 store 自愈
+
+**操作步骤**
+
+1. 先构建当前分支二进制：
+   ```bash
+   cargo build --bin bifrost
+   ```
+2. 连续执行 Remote Invoke pair-code 与 SSH key 两条相关 shell E2E：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   BIFROST_DISABLE_TRAY=1 \
+   bash e2e-tests/tests/test_remote_invoke_e2e.sh && \
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   BIFROST_DISABLE_TRAY=1 \
+   bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh
+   ```
+3. 观察 `Use same SSH key from another caller sandbox and verify caller identity isolation` 阶段。
+4. 如果断言失败，检查脚本自动输出的 caller-2 `remote-connections.json`、target `remote_invoke_grant_info.json` 和 `remote_invoke_grant_crypto.json`。
+
+**预期结果**
+
+- 第二个 caller 使用同一个 SSH key 连接后会得到新的 `grant_id` 和新的 `caller_fingerprint`。
+- target 持久化的 `remote_invoke_grant_info.json` 与 `remote_invoke_grant_crypto.json` 中均包含两个 SSH grant。
+- target Admin API `/_bifrost/api/remote-invoke/grants` 在返回前会从持久化 grant info + crypto store 恢复缺失的本地 grants，列表中可见两个 `auth_method=ssh_publickey` grants。
+- 两个 SSH grant 的 `caller_fingerprint` 分别匹配两个 caller 沙箱，不会被同一个 SSH key fingerprint 合并或覆盖。
+- 后续 target-local `traffic get --ids`、`auth-status`、`export`、`replay --refresh-auth` 和 revoke 流程继续通过，脚本最终输出 `All SSH remote invoke E2E checks passed`。
+
 ## 清理步骤
 
 - 脚本退出时会清理 key 生成、relay、target、caller、mock server 临时目录和进程。
@@ -184,3 +214,9 @@
 | 用例 | 结果 | 证据 |
 | --- | --- | --- |
 | TC-RISK-04 | PASS | 2026-06-29 将 `origin/main` 合入 `feat/remote-invoke-v5-pop` 并解决 `site/src/content/docs/reference/rule-engine.md` 冲突后，重新执行 `NODE_BIN="$HOME/.local/share/mise/installs/node/22.22.0/bin/node" PATH="$HOME/.local/share/mise/installs/node/22.22.0/bin:$PATH" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 BIFROST_BIN="$PWD/target/release/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 通过。脚本完成 SSH key grant 创建、默认 Full Trust 文件读写与命令执行、shell/files/query/full 权限切换、第二 caller 隔离、`remote conn status`、`remote search`、`remote traffic get`、target-local `traffic get --ids` / `auth-status` / `export` / `replay --refresh-auth` 和 revoke，最终输出 `All SSH remote invoke E2E checks passed`。 |
+
+### 2026-07-07 SSH 双 caller grant 列表自愈回归
+
+| 用例 | 结果 | 证据 |
+| --- | --- | --- |
+| TC-RISK-05 | PASS | 2026-07-07 本地先复现到 caller-2 `remote-connections.json` 中已有新 `grant_id` 和 `caller_fingerprint`，且 target `remote_invoke_grant_info.json` / `remote_invoke_grant_crypto.json` 已持久化两条 SSH grant，但 target Admin grants API 只返回第一条内存 grant。修复后执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin remote_invoke::worker::coverage_boost --lib` 通过 83 个 worker 单测；执行 `BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_remote_invoke_e2e.sh && BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 通过，前者输出 `All assertions: total=73 passed=73 failed=0`，后者输出 `All SSH remote invoke E2E checks passed`。 |

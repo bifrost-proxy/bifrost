@@ -227,6 +227,10 @@ dump_grant_diagnostics() {
         echo "[remote-invoke-ssh-e2e] caller remote-connections.json:" >&2
         cat "$CALLER_CONNECTIONS_JSON" >&2
     fi
+    if [[ -n "${CALLER_CONNECTIONS_JSON_2:-}" && -f "$CALLER_CONNECTIONS_JSON_2" ]]; then
+        echo "[remote-invoke-ssh-e2e] caller-2 remote-connections.json:" >&2
+        cat "$CALLER_CONNECTIONS_JSON_2" >&2
+    fi
     if [[ -n "${ADMIN_BASE_URL:-}" ]]; then
         echo "[remote-invoke-ssh-e2e] target grants:" >&2
         curl -s "${ADMIN_BASE_URL}/api/remote-invoke/grants" >&2 || true
@@ -234,6 +238,17 @@ dump_grant_diagnostics() {
         echo "[remote-invoke-ssh-e2e] target calls:" >&2
         curl -s "${ADMIN_BASE_URL}/api/remote-invoke/calls" >&2 || true
         echo >&2
+    fi
+    if [[ -n "${BIFROST_DATA_DIR:-}" ]]; then
+        for store in \
+            "$BIFROST_DATA_DIR/admin/remote_invoke_grant_info.json" \
+            "$BIFROST_DATA_DIR/admin/remote_invoke_grant_crypto.json"; do
+            if [[ -f "$store" ]]; then
+                echo "[remote-invoke-ssh-e2e] target store $(basename "$store"):" >&2
+                cat "$store" >&2 || true
+                echo >&2
+            fi
+        done
     fi
     if [[ -n "${ADMIN_CLIENT_BIFROST_LOG_FILE:-}" && -f "$ADMIN_CLIENT_BIFROST_LOG_FILE" ]]; then
         echo "[remote-invoke-ssh-e2e] Bifrost log tail:" >&2
