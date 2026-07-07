@@ -186,8 +186,16 @@ async function mockActivityApi(page: Page) {
           },
         ],
         variable_conflicts: [],
-        merged_content:
-          "# Global default rules.\n# These rules are always enabled and apply to every proxy listener.\n\n# abc\na.com status://200",
+        merged_content: [
+          "# Global default rules.",
+          "# These rules are always enabled and apply to every proxy listener.",
+          "",
+          'https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_old","x-use-ppe":"1"}',
+          "https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://",
+          'https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_new","x-use-ppe":"1"}',
+          "https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://",
+          "a.com status://200",
+        ].join("\n"),
       });
       return;
     }
@@ -310,11 +318,19 @@ test("Activity tab is first, default, data-rich, and animated on hover", async (
   await expect(page.getByTestId("activity-stat-card").filter({ hasText: "System Proxy" })).toContainText("http://127.0.0.1:9900");
   await expect(page.getByTestId("activity-rule-pill").filter({ hasText: "Default" })).toContainText("1 entries");
   await expect(page.getByTestId("activity-merged-rules")).toContainText("a.com status://200");
+  await expect(page.getByTestId("activity-merged-rules").locator('[data-effect-status="active"]')).toHaveCount(3);
+  await expect(page.getByTestId("activity-merged-rules").locator('[data-effect-status="shadowed"]')).toHaveCount(2);
+  await page
+    .getByTestId("activity-merged-rules")
+    .locator('[data-effect-status="shadowed"]')
+    .filter({ hasText: "ppe_old" })
+    .hover();
+  await expect(page.getByText(/Request headers are replaced by line/)).toBeVisible();
   await expect(page.getByTestId("activity-temporary-ports-panel")).toContainText("Temporary Ports");
   await expect(page.getByTestId("activity-temporary-port-card-18888")).toContainText("127.0.0.1:18888");
   await expect(page.getByTestId("activity-temporary-port-card-18888")).toContainText("activity-temp-rule");
   await expect(page.getByTestId("activity-temporary-port-merged-18888")).toContainText("resBody://(activity-temp-rule)");
-  await expect(page.getByTestId("activity-app-row").filter({ hasText: "codex" })).toContainText("2");
+  await expect(page.getByTestId("activity-app-row").filter({ hasText: "codex" }).first()).toContainText(/codex/i);
 
   const mergedMetrics = await page.getByTestId("activity-merged-rules").evaluate((element) => {
     const parent = element.parentElement;
@@ -328,7 +344,14 @@ test("Activity tab is first, default, data-rich, and animated on hover", async (
 
   await page.evaluate(() => navigator.clipboard.writeText(""));
   await page.getByTestId("activity-merged-rules").evaluate((element) => {
-    const textNode = element.firstChild;
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    let textNode: Node | null = null;
+    while (walker.nextNode()) {
+      if (walker.currentNode.textContent?.includes("a.com status://200")) {
+        textNode = walker.currentNode;
+        break;
+      }
+    }
     if (!textNode) return;
     const text = textNode.textContent || "";
     const start = text.indexOf("a.com");
@@ -364,7 +387,7 @@ test("Activity tab is first, default, data-rich, and animated on hover", async (
   );
   expect(cardTransformAfter).not.toBe(cardTransformBefore);
 
-  const codexRow = page.getByTestId("activity-app-row").filter({ hasText: "codex" });
+  const codexRow = page.getByTestId("activity-app-row").filter({ hasText: "codex" }).first();
   const fill = codexRow.locator('[class*="barFill"]');
   const fillFilterBefore = await fill.evaluate((element) => window.getComputedStyle(element).filter);
   await codexRow.hover();

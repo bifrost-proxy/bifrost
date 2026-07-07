@@ -17,6 +17,7 @@ import {
 } from "../../stores/useProxyStore";
 import { useTrafficStore } from "../../stores/useTrafficStore";
 import { copyToClipboard } from "../../utils/clipboard";
+import RuleEffectivenessCode from "../../components/RuleEffectivenessCode";
 import styles from "./index.module.css";
 
 interface ActivityStat {
@@ -336,9 +337,12 @@ export default function Activity() {
                   <div className={styles.lineCount}>{countLines(mergedContent).toLocaleString()} lines</div>
                 </div>
               </div>
-              <pre ref={mergedCodeRef} className={styles.mergedCode} data-testid="activity-merged-rules">
-                {mergedContent.trim() || "# No active rules"}
-              </pre>
+              <RuleEffectivenessCode
+                ref={mergedCodeRef}
+                className={styles.mergedCode}
+                content={mergedContent}
+                data-testid="activity-merged-rules"
+              />
             </div>
           </div>
         </section>
@@ -420,9 +424,11 @@ export default function Activity() {
                         {countLines(summary?.merged_content ?? "").toLocaleString()} lines
                       </div>
                     </div>
-                    <pre className={styles.tempMergedCode} data-testid={`activity-temporary-port-merged-${port.port}`}>
-                      {summary?.merged_content?.trim() || "# No active rules"}
-                    </pre>
+                    <RuleEffectivenessCode
+                      className={styles.tempMergedCode}
+                      content={summary?.merged_content ?? ""}
+                      data-testid={`activity-temporary-port-merged-${port.port}`}
+                    />
                   </article>
                 );
               })}

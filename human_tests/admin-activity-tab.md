@@ -125,6 +125,35 @@
 - 鼠标悬停主数值可通过浏览器 title 查看完整值。
 - 卡片标题、状态圆点和 caption 不与主数值重叠。
 
+### TC-ACT-08 Merged Rules 智能高亮生效与覆盖规则
+
+操作步骤：
+
+1. 启用包含以下内容的规则组合：
+   ```text
+   https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_old","x-use-ppe":"1"}
+   https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://
+   https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_new","x-use-ppe":"1"}
+   https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://
+   ```
+2. 打开 Activity 页面。
+3. 在 `Active Rule Analysis` 的 `Merged Rules` 代码区观察行级高亮。
+4. 鼠标悬浮旧 `reqHeaders` 行、最终 `reqHeaders` 行和后一个 `passthrough://` 行。
+5. 选中代码区中的部分文本并点击复制；再清除选区后点击复制。
+
+预期结果：
+
+- 旧 `reqHeaders` 行被标记为 covered，hover 解释同 matcher 下请求头被后续规则替换。
+- 最终 `reqHeaders` 行被标记为 effective，hover 解释它是最终请求头写入。
+- 第一条 `passthrough://` 行为 effective，后一个同 matcher `passthrough://` 行为 covered。
+- hover 文案包含覆盖来源行号，不需要用户手动推理规则优先级。
+- 复制选区/全文时只复制原始 merged rules 文本，不复制状态点、覆盖解释或其他 UI 文案。
+- 暗色主题下 active / covered / partial 的背景、边线和文本都清晰可读。
+
+执行记录（2026-07-07，本地纯前端 smoke）：
+
+- ✅ PASS：执行 `WEB_PORT=3108 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' pnpm --dir web exec playwright test tests/ui/activity-tab.spec.ts --config=playwright.frontend.config.ts -g "Activity tab is first"`。测试使用 Vite 纯前端服务和 mock Admin API；验证 Activity Merged Rules 展示 nextoncall 重复规则样例，断言 3 行 active / 2 行 covered，hover 旧 `reqHeaders` 行出现 `Request headers are replaced by line`，并复测选区复制、全文复制、卡片 hover、流量行 hover 和暗色主题基础可见性。
+
 ## 清理步骤
 
 1. 停止测试 Bifrost 进程。

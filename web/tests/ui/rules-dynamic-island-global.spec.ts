@@ -124,7 +124,12 @@ async function mockAdminApi(page: Page) {
           },
         ],
         variable_conflicts: [],
-        merged_content: "example.test statusCode://204",
+        merged_content: [
+          'https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_old","x-use-ppe":"1"}',
+          "https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://",
+          'https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_new","x-use-ppe":"1"}',
+          "https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://",
+        ].join("\n"),
       });
       return;
     }
@@ -274,6 +279,17 @@ test("Rules 状态胶囊在全局页面可见、可拖拽，并能跳转到 Rule
 
   await trigger.click();
   await expect(page.getByTestId("rules-dynamic-island-panel")).toBeVisible();
+  await page.getByTestId("rules-dynamic-island-merged-toggle").click();
+  const mergedPanel = page.getByTestId("rules-dynamic-island-merged-content");
+  await expect(mergedPanel).toBeVisible();
+  await expect(mergedPanel.locator('[data-effect-status="active"]')).toHaveCount(2);
+  await expect(mergedPanel.locator('[data-effect-status="shadowed"]')).toHaveCount(2);
+  const coveredReqHeaders = mergedPanel
+    .locator('[data-effect-status="shadowed"]')
+    .filter({ hasText: "ppe_old" });
+  await coveredReqHeaders.hover();
+  await expect(page.getByText(/Request headers are replaced by line/)).toBeVisible();
+
   const activeRuleRow = page
     .getByTestId("rules-dynamic-island-rule-row")
     .filter({ hasText: activeRuleName });

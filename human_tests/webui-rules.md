@@ -907,6 +907,39 @@
 **执行结果（2026-07-02，本地纯前端 smoke）**：
 - ✅ PASS：执行 `WEB_PORT=3107 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' pnpm --dir web exec playwright test tests/ui/rules-dynamic-island-global.spec.ts --config=playwright.frontend.config.ts`。测试使用 Vite 纯前端服务和 mock Admin API，不启动 Rust 后端；验证 Traffic 页面出现 `2 active` 全局胶囊、拖拽后位置变化、刷新后回到默认位置、点击展开详情、点击 `global-active-rule` 后跳转到 `/_bifrost/rules?rule=global-active-rule`，并在 Rules 编辑器中显示目标规则。
 
+### TC-WRU-48：Dynamic Island Merged Rules 智能高亮生效与覆盖规则
+
+**前置条件**：
+1. 至少启用两段同 matcher 的规则，内容包含：
+   ```text
+   https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_old","x-use-ppe":"1"}
+   https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://
+   https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_new","x-use-ppe":"1"}
+   https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://
+   ```
+2. 打开任意 WebUI 页面，例如 `http://127.0.0.1:8800/_bifrost/traffic`。
+
+**操作步骤**：
+1. 点击顶部 Rules 状态胶囊展开详情。
+2. 点击 `Show Merged Rules`。
+3. 观察四行规则的行级高亮。
+4. 鼠标悬浮第一条 `reqHeaders` 规则。
+5. 鼠标悬浮第二条 `passthrough://` 规则。
+
+**预期结果**：
+- 第一条旧 `reqHeaders` 行标记为 covered，因为同 matcher 下 `x-tt-env` / `x-use-ppe` 被后续 selected `reqHeaders` 写入。
+- 第一条 `passthrough://` 行标记为 effective，因为同 matcher / same protocol 下 resolver 首条获胜。
+- 第二条 `reqHeaders` 行标记为 effective，因为它提供最终请求头值。
+- 第二条 `passthrough://` 行标记为 covered，hover 提示它被前面的同 matcher `passthrough://` 覆盖。
+- hover 旧 `reqHeaders` 行时提示包含 `Request headers are replaced by line` 和 header 名称。
+- hover covered `passthrough://` 行时提示包含覆盖来源行号。
+- 复制 Merged Rules 时复制出的文本不包含高亮状态文案或 hover 解释。
+
+**回归目的**：覆盖用户要求的“基于规则解析特性智能判断真正生效规则”，防止 Dynamic Island 只展示纯文本、无法解释重复规则和覆盖关系。
+
+**执行结果（2026-07-07，本地纯前端 smoke）**：
+- ✅ PASS：执行 `WEB_PORT=3107 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' pnpm --dir web exec playwright test tests/ui/rules-dynamic-island-global.spec.ts --config=playwright.frontend.config.ts`。测试使用 Vite 纯前端服务和 mock Admin API；验证 Rules 胶囊全局可见、拖拽后刷新回默认位置、详情跳转保持，并在 Merged Rules 中断言 2 行 active / 2 行 covered，hover 旧 `reqHeaders` 行出现 `Request headers are replaced by line` 解释。
+
 ---
 
 ## 清理

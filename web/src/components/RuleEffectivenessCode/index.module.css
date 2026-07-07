@@ -1,0 +1,90 @@
+.ruleEffectivenessCode {
+  --rule-effect-active-bg: rgba(82, 196, 26, 0.12);
+  --rule-effect-active-border: #52c41a;
+  --rule-effect-active-text: #237804;
+  --rule-effect-partial-bg: rgba(250, 173, 20, 0.14);
+  --rule-effect-partial-border: #faad14;
+  --rule-effect-partial-text: #ad6800;
+  --rule-effect-shadowed-bg: rgba(148, 163, 184, 0.14);
+  --rule-effect-shadowed-border: #94a3b8;
+  --rule-effect-shadowed-text: #64748b;
+  --rule-effect-line-hover: rgba(22, 119, 255, 0.08);
+}
+
+.ruleLine {
+  position: relative;
+  display: block;
+  min-height: 1.45em;
+  margin: 0 -4px;
+  border-left: 3px solid transparent;
+  border-radius: 4px;
+  padding: 0 28px 0 7px;
+}
+
+.ruleLine[data-status="active"] {
+  border-left-color: var(--rule-effect-active-border);
+  background: var(--rule-effect-active-bg);
+}
+
+.ruleLine[data-status="partial"] {
+  border-left-color: var(--rule-effect-partial-border);
+  background: var(--rule-effect-partial-bg);
+}
+
+.ruleLine[data-status="shadowed"] {
+  border-left-color: var(--rule-effect-shadowed-border);
+  background: var(--rule-effect-shadowed-bg);
+  color: var(--rule-effect-shadowed-text);
+}
+
+.ruleLine[data-status="neutral"] {
+  padding-right: 7px;
+}
+
+.ruleLine:hover {
+  background: var(--rule-effect-line-hover);
+}
+
+.ruleText {
+  white-space: inherit;
+}
+
+.statusDot {
+  position: absolute;
+  top: 0.45em;
+  right: 9px;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 16%, transparent);
+}
+
+.ruleLine[data-status="active"] .statusDot {
+  color: var(--rule-effect-active-border);
+  background: var(--rule-effect-active-border);
+}
+
+.ruleLine[data-status="partial"] .statusDot {
+  color: var(--rule-effect-partial-border);
+  background: var(--rule-effect-partial-border);
+}
+
+.ruleLine[data-status="shadowed"] .statusDot {
+  color: var(--rule-effect-shadowed-border);
+  background: var(--rule-effect-shadowed-border);
+}
+
+.tooltip {
+  max-width: 360px;
+}
+
+.tooltipTitle {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.tooltipMeta {
+  margin-top: 4px;
+  font-size: 11px;
+  opacity: 0.86;
+}

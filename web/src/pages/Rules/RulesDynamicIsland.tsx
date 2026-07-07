@@ -9,6 +9,7 @@ import {
   CheckOutlined,
 } from "@ant-design/icons";
 import { getActiveSummary, type ActiveRuleItem, type VariableConflict } from "../../api/rules";
+import RuleEffectivenessCode from "../../components/RuleEffectivenessCode";
 import { useRulesStore } from "../../stores/useRulesStore";
 import { copyToClipboard } from "../../utils/clipboard";
 
@@ -484,8 +485,9 @@ export default function RulesDynamicIsland({ onNavigateRule, defaultTop = 14 }: 
                       }}
                     />
                   </Tooltip>
-                  <pre
+                  <RuleEffectivenessCode
                     data-testid="rules-dynamic-island-merged-content"
+                    content={mergedContent}
                     style={{
                       margin: 0,
                       padding: "8px 42px 8px 10px",
@@ -499,9 +501,7 @@ export default function RulesDynamicIsland({ onNavigateRule, defaultTop = 14 }: 
                       whiteSpace: "pre",
                       overflowX: "auto",
                     }}
-                  >
-                    {mergedContent.trim()}
-                  </pre>
+                  />
                 </div>
               )}
             </div>
