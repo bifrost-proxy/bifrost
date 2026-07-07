@@ -885,18 +885,55 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     message.success("Proxy config copied to clipboard");
   };
 
+  const normalizeBifrostCloudUrl = useCallback((value?: string | null) => {
+    const trimmed = value?.trim() ?? "";
+    if (!trimmed) {
+      return {
+        ok: false as const,
+        message: "Please enter your self-hosted Bifrost Sync Server URL",
+      };
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(trimmed);
+    } catch {
+      return {
+        ok: false as const,
+        message: "Please enter a valid HTTPS URL",
+      };
+    }
+    if (parsed.protocol !== "https:") {
+      return {
+        ok: false as const,
+        message: "Bifrost Cloud URL must start with https://",
+      };
+    }
+    if (!parsed.hostname) {
+      return {
+        ok: false as const,
+        message: "Please enter a URL with a hostname",
+      };
+    }
+    parsed.hash = "";
+    parsed.search = "";
+    return {
+      ok: true as const,
+      value: parsed.toString().replace(/\/$/, ""),
+    };
+  }, []);
+
   const handleSyncProviderRemoteBaseUrlSave = useCallback(async (
     provider: SyncProviderStatus,
     remoteBaseUrlValue: string,
   ) => {
-    const remoteBaseUrl = remoteBaseUrlValue.trim();
-    if (!remoteBaseUrl) {
-      message.warning("Please enter the remote Bifrost URL");
+    const normalized = normalizeBifrostCloudUrl(remoteBaseUrlValue);
+    if (!normalized.ok) {
+      message.warning(normalized.message);
       return;
     }
     setSyncLoading(true);
     try {
-      const status = await updateSyncConfig({ remote_base_url: remoteBaseUrl });
+      const status = await updateSyncConfig({ remote_base_url: normalized.value });
       applySyncStatus(status);
       message.success(`${provider.name} URL updated`);
     } catch {
@@ -904,7 +941,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     } finally {
       setSyncLoading(false);
     }
-  }, [applySyncStatus]);
+  }, [applySyncStatus, normalizeBifrostCloudUrl]);
 
   const handleSyncSignIn = useCallback(async () => {
     try {
@@ -942,7 +979,18 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
       }
       setSyncLoading(true);
       try {
-        if (provider.remote_base_url) {
+        if (provider.id === "bifrost_cloud") {
+          const normalized = normalizeBifrostCloudUrl(provider.remote_base_url);
+          if (!normalized.ok) {
+            message.warning(normalized.message);
+            return;
+          }
+          const status = await updateSyncConfig({
+            enabled: true,
+            remote_base_url: normalized.value,
+          });
+          applySyncStatus(status);
+        } else if (provider.remote_base_url) {
           const status = await updateSyncConfig({
             enabled: true,
             remote_base_url: provider.remote_base_url,
@@ -958,7 +1006,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
         setSyncLoading(false);
       }
     },
-    [applySyncStatus],
+    [applySyncStatus, normalizeBifrostCloudUrl],
   );
 
   const handleSyncSignOut = useCallback(async () => {

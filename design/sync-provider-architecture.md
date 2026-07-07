@@ -148,7 +148,7 @@ Default product rule:
 | Product provider | Type | Rules sync | Config sync | Remote Invoke | Group rules | Identity | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | ByteDance Internal | `bifrost-server` managed | Yes | Yes | Yes | Yes | Byte SSO | 自动检测, 内网推荐, 可与其它 provider 同时连接 |
-| Bifrost Cloud | `bifrost-server` custom URL | Yes | Yes | Yes | Optional | Bifrost token / OAuth2 | 官方云或自建同步服务, 能力由 server `/v4/capabilities` 返回 |
+| Bifrost Cloud | `bifrost-server` custom URL | Yes | Yes | Yes | Optional | Bifrost token / OAuth2 | User-provided self-hosted or private sync service; this release does not ship an official public cloud endpoint. Capabilities are returned by server `/v4/capabilities` |
 | GitHub Gist | `github-gist` | Yes | Yes | No | No | GitHub token | private gist snapshot; 只同步个人规则和基础配置; E2E encryption/recovery key is a later hardening item |
 | WebDAV | `webdav` | Yes | Yes | No | No | Basic/app password | 后续国内和自部署 fallback |
 | Gitee Repo | `gitee-repo` | Yes | Yes | No | No | OAuth/PAT | 国内 Git provider 后续接入 |
@@ -483,7 +483,7 @@ ByteDance provider should request server capabilities from `/v4/capabilities` wh
 
 ## Bifrost Cloud Provider
 
-`Bifrost Cloud` is the product-facing name for a user-configured `bifrost-server` provider. It may point to an official cloud endpoint, a private deployment, or a custom self-hosted Sync Server URL.
+`Bifrost Cloud` is the product-facing name for a user-configured `bifrost-server` provider. It points to a private deployment or custom self-hosted Sync Server URL. This release does not provide an official public Bifrost Cloud endpoint, so the UI must not prefill a default cloud URL.
 
 Product behavior:
 
@@ -868,6 +868,7 @@ Provider card content requirements:
 
 - ByteDance Internal card: detection status, signed-in user, Remote Invoke registration badge, `Re-detect` action.
 - Bifrost Cloud card: editable server URL, capability probe result, signed-in user, Remote Invoke registration badge if supported.
+- Bifrost Cloud must start empty until the user enters a self-hosted Sync Server URL. Before saving or opening login, the UI performs basic validation: non-empty, syntactically valid URL, `https://` protocol, and a hostname. Invalid input must not call config update or login endpoints.
 - GitHub Gist card: GitHub user, private gist snapshot status when available, Rules Sync and Config Sync badges, no Remote Invoke controls, and a token-generation link.
 - Future providers inherit the same card shell and declare capabilities through catalog metadata.
 
@@ -973,6 +974,13 @@ Settings Sync should have three levels of error presentation:
   GitHub Gist card itself: the card keeps reconnect/sign-out actions visible,
   shows `Reconnect required`, and renders the GitHub error text inline with a
   new-token action.
+- Provider health is isolated. A disconnected, unreachable, or expired provider
+  must not block sync for another connected provider. Global status and chrome
+  hints are derived from the provider set: if any provider is connected and
+  authorized, the UI must not show the broad "local only" or pluggable-sync
+  warning for the whole sync feature.
+- Each provider card shows that provider's last successful sync time and action.
+  Provider-specific errors update only that provider's card-level status.
 - Lane-level warning for routing or conflict problems.
 - Modal/drawer for conflicts that need user choice.
 
@@ -1159,6 +1167,8 @@ Add focused Playwright coverage in `web/tests/ui/admin-settings.spec.ts` or a de
 | Bifrost Cloud setup | Capabilities probe returns Rules Sync + Config Sync + Remote Invoke | Wizard shows capability preview before login and offers immediate Remote Invoke registration |
 | GitHub Gist setup | Token validation succeeds and first sync creates/updates the private gist snapshot | Wizard/card shows token setup, Rules Sync + Config Sync preview, no Remote Invoke controls, and no OAuth callback/device-flow path |
 | GitHub Gist token expired | Saved `github_gist` session receives 401/403 from GitHub | GitHub Gist card shows `Reconnect required`, inline error text, `New Token`, `Reconnect`, and `Sign Out`; it must not continue to show a healthy `Connected` state |
+| Provider isolation | One provider is connected while another provider is disconnected, unreachable, or token-expired | Connected provider remains usable; global status does not show local-only/pluggable-sync warning; failed provider shows only its own card error |
+| Provider last sync | Provider completes sync or mirror successfully | The matching provider card shows its own last successful sync time/action; other provider cards are not overwritten with that timestamp |
 | Basic config scope | Routing drawer opens Basic Config lane | Drawer lists app allowlist, domain allowlist, blacklist/exclude list; no secrets, certificates, tokens, local port, or Remote Invoke grant fields appear |
 | Degraded/conflict states | Provider status includes conflict and last_error | Card-level error and conflict modal show lane/provider/object metadata and Pull/Push/Save copy actions |
 | Dark theme | `bifrost-theme=dark` before page load | Provider cards, modal, disabled chips, warning panels, and routing drawer use dark tokens and text remains readable |
@@ -1237,6 +1247,10 @@ This implementation pass lands the release foundation for provider-aware sync:
   (`authorized=false`, `reason=error`, `last_error=...`) so Settings Sync can
   show an inline reconnect prompt instead of a misleading healthy Connected
   badge.
+- Provider runtime state now records provider-level `last_error`,
+  `last_sync_at`, and `last_sync_action`. Server sync success is no longer
+  failed by a GitHub Gist mirror error; that error remains attached to the
+  GitHub Gist provider card, while the connected server provider stays usable.
 
 Known remaining implementation gaps before claiming the full original product target:
 

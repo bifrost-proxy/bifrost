@@ -261,6 +261,52 @@
 - 卡片内显示 inline error, 文案包含后端 GitHub token 错误。
 - 卡片仍显示 `New Token`/token 生成入口、`Reconnect` 和 `Sign Out`, 方便用户换 token 或退出。
 
+### TC-SPA-15: 已连接 provider 不被其他未连接 provider 阻塞
+
+**操作步骤**:
+
+1. 构造 `/api/sync/status`: 至少一个 provider 返回 `connected=true`, `authorized=true`; 另一个 provider 返回 `connected=false` 或 `reason=unreachable/error`。
+2. 打开 Settings Sync 页面。
+3. 查看顶部全局提示、底部 Sync 状态和各 provider 卡片。
+
+**预期结果**:
+
+- Settings Sync 不显示 `Remote sync is a pluggable capability` 全局提示。
+- 底部 Sync 状态不显示 `Local` / `Remote service unreachable, using local rules only`。
+- 已连接 provider 卡片仍显示 `Connected` 或 `Synced`, 登录/重连按钮可用。
+- 未连接或失败 provider 只在自己的卡片上显示 `Offline`、`Not connected` 或 card-level error, 不影响其他 provider 同步。
+
+### TC-SPA-16: 每个 provider 卡片展示最近成功同步时间
+
+**操作步骤**:
+
+1. 构造 `/api/sync/status`: provider 列表中给不同 provider 设置各自的 `last_sync_at` 和 `last_sync_action`。
+2. 打开 Settings Sync 页面。
+3. 查看每个 provider 卡片的 `Last sync` 行。
+
+**预期结果**:
+
+- 每个 provider 卡片显示自己的最近成功同步时间和 action。
+- 没有成功同步记录的 provider 显示 `Never`。
+- 一个 provider 的同步时间不会覆盖到另一个 provider 卡片。
+
+### TC-SPA-17: Bifrost Cloud 无默认 URL 且连接前校验
+
+**操作步骤**:
+
+1. 打开 Settings Sync 页面, 保持 Bifrost Cloud 未配置、未连接。
+2. 查看 Bifrost Cloud URL 输入框。
+3. 不填写 URL 直接点击 Bifrost Cloud `Sign In`。
+4. 填写 `http://custom-sync.example.test`, 再点击 `Sign In`。
+5. 填写合法 `https://custom-sync.example.test`, 点击 `Save` 或 `Sign In`。
+
+**预期结果**:
+
+- Bifrost Cloud URL 输入框为空, 只显示示例 placeholder, 不预填官方或默认云服务地址。
+- 空 URL 会提示输入自部署 Bifrost Sync Server URL, 且不会调用 `/api/sync/config` 或 `/api/sync/login`。
+- 非 HTTPS URL 会提示必须使用 `https://`, 且不会调用 `/api/sync/config` 或 `/api/sync/login`。
+- 合法 HTTPS URL 通过基础校验后才保存并进入登录流程。
+
 ## 清理步骤
 
 本用例只读文档, 无需清理临时服务或数据目录。
@@ -274,6 +320,8 @@
 - 2026-07-07: PASS - 执行 TC-SPA-12 的 `rg` 静态审查命令, 命中 ByteDance Internal 与 Bifrost Cloud 两个服务端路径、现有代码入口、`/v4/config/sync`、`/v4/capabilities`、新增表、capability gating 和三 PR 协同发布要求。
 - 2026-07-07: PASS - 执行 TC-SPA-13 的 `rg` 静态审查命令, 命中首次无登录弹窗状态机、关闭不触发登录、选择 provider 后点击 Start 才进入 ByteDance/Bifrost Cloud/GitHub Gist 对应登录或 setup 流程、失败/取消回到弹窗状态和 Playwright 覆盖要求。
 - 2026-07-07: PASS - 执行 TC-SPA-14 的 `rg` 静态审查命令, 命中 GitHub Gist token 失效卡片级提示、`Reconnect required`、`New Token`、provider `authorized=false` 和 `last_error` 要求。实现阶段执行 `cargo test -p bifrost-sync status_marks_github_gist_session_unauthorized_after_token_error`、`pnpm --dir web test:unit src/pages/Settings/tabs/SyncTab.test.ts`、`e2e-tests/tests/test_sync_github_gist_expired_status_e2e.sh`、`BIFROST_UI_TEST_TARGET_DIR=/Users/eden/work/github/bifrost/target pnpm --dir web test:ui web/tests/ui/admin-settings.spec.ts -g "GitHub Gist token 失效"` 均通过, 确认失效 Gist session 在 API 中保留 `connected=true` 以显示 Reconnect/Sign Out, 同时返回 `authorized=false`, `reason=error`, `last_error`, UI 卡片显示 `Reconnect required` 和 inline GitHub token 错误。
+- 2026-07-07: PASS - 执行 TC-SPA-15/TC-SPA-16 的实现验证: `pnpm --dir web test:unit src/pages/Settings/tabs/SyncTab.test.ts` 通过 4/4, 覆盖有任一 provider connected 时隐藏全局 pluggable-sync 提示; `pnpm --dir web run build` 通过, 覆盖 provider `last_sync_at` / `last_sync_action` 类型接入与 Settings/StatusBar 编译; `cargo test -p bifrost-sync` 通过 142/142, 覆盖 provider 级同步状态序列化和既有 sync_once 行为不回退。
+- 2026-07-07: PASS - 执行 TC-SPA-17 的实现验证: 后端新增 `status_leaves_unconfigured_bifrost_cloud_url_empty`; UI 新增 `Settings Sync Bifrost Cloud URL 必须先通过基础校验再连接`, 覆盖 Bifrost Cloud 未配置时输入框为空、空 URL/HTTP URL 不调用 config/login、HTTPS URL 才进入保存/登录。
 - 2026-07-07: PASS - 实现阶段在主仓库执行 `cargo check -p bifrost-sync -p bifrost-admin -p bifrost-cli`, `pnpm --dir packages/bifrost-sync-server lint`, `pnpm --dir packages/bifrost-sync-server test`, `pnpm --dir web run build`, `pnpm --dir web test:ui web/tests/ui/admin-settings.spec.ts -g "Provider 卡片"`; 均通过。人工复核确认 Settings Sync 三 provider 卡片、首登弹窗可关闭、Start 触发 ByteDance/Bifrost Cloud 既有登录链路、Bifrost Cloud 配置同步服务端校验和存储测试均覆盖。
 - 2026-07-07: PASS - Review/Fix/Test 第 1 轮执行 `cargo test -p bifrost-sync` 发现旧 mock/旧服务未实现 `/v4/config/sync` 时规则同步会被配置同步拖失败; 已修复为旧服务端点缺失或旧格式空 data 时跳过基础配置同步、不影响规则同步。复跑 `cargo test -p bifrost-sync` 通过 121/121, 复跑 `cargo test -p bifrost-cli sync_cmd` 通过。
 - 2026-07-07: PASS - Review/Fix/Test 第 2 轮执行 `git diff --check` 覆盖主仓库和 `/Users/eden_studio/work/github/bifrost-server-v4`, 均无 whitespace error; 静态检索确认无残留 `block_on`, Provider 卡片与 `basic_configs` 状态路径均在预期文件中。

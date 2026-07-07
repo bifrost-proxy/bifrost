@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { SyncProviderStatus } from "../../../api/sync";
-import { syncProviderStatusBadge } from "./SyncTab";
+import {
+  shouldShowSyncProviderOverviewAlert,
+  syncProviderStatusBadge,
+} from "./SyncTab";
 
 function provider(overrides: Partial<SyncProviderStatus> = {}): SyncProviderStatus {
   return {
@@ -14,6 +17,8 @@ function provider(overrides: Partial<SyncProviderStatus> = {}): SyncProviderStat
     authorized: true,
     reason: "ready",
     last_error: null,
+    last_sync_at: null,
+    last_sync_action: null,
     user: null,
     capabilities: {
       rules_sync: true,
@@ -43,5 +48,39 @@ describe("syncProviderStatusBadge", () => {
       color: "green",
       label: "Connected",
     });
+  });
+});
+
+describe("shouldShowSyncProviderOverviewAlert", () => {
+  it("hides the global pluggable-sync hint when any provider is connected", () => {
+    expect(
+      shouldShowSyncProviderOverviewAlert([
+        provider({ id: "bytedance_internal", name: "ByteDance Internal" }),
+        provider({
+          id: "bifrost_cloud",
+          name: "Bifrost Cloud",
+          connected: false,
+          authorized: false,
+          reachable: false,
+          reason: "unreachable",
+        }),
+      ]),
+    ).toBe(false);
+  });
+
+  it("shows the global pluggable-sync hint only when no provider is connected", () => {
+    expect(
+      shouldShowSyncProviderOverviewAlert([
+        provider({ connected: false, authorized: false, reason: "unauthorized" }),
+        provider({
+          id: "bifrost_cloud",
+          name: "Bifrost Cloud",
+          connected: false,
+          authorized: false,
+          reachable: false,
+          reason: "unreachable",
+        }),
+      ]),
+    ).toBe(true);
   });
 });

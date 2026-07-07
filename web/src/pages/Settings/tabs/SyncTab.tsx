@@ -23,6 +23,7 @@ import type { SyncProviderStatus, SyncStatus } from "../../../api/sync";
 const { Text } = Typography;
 const GITHUB_GIST_TOKEN_URL =
   "https://github.com/settings/tokens/new?description=Bifrost%20Sync&scopes=gist";
+const BIFROST_CLOUD_URL_PLACEHOLDER = "https://your-sync.example.com";
 
 interface SyncTabProps {
   syncStatus: SyncStatus | null;
@@ -71,6 +72,21 @@ export function syncProviderStatusBadge(provider: SyncProviderStatus) {
   return { color: undefined, label: "Not connected" };
 }
 
+export function shouldShowSyncProviderOverviewAlert(providers: SyncProviderStatus[]) {
+  return !providers.some((provider) => provider.connected);
+}
+
+function formatProviderLastSync(provider: SyncProviderStatus) {
+  if (!provider.last_sync_at) {
+    return "Never";
+  }
+  const date = new Date(provider.last_sync_at);
+  const action = provider.last_sync_action
+    ? provider.last_sync_action.replace(/_/g, " ")
+    : "completed";
+  return `${date.toLocaleString()} (${action})`;
+}
+
 function providerStatusTag(provider: SyncProviderStatus) {
   const badge = syncProviderStatusBadge(provider);
   return <Tag color={badge.color}>{badge.label}</Tag>;
@@ -88,6 +104,8 @@ const fallbackProviders: SyncProviderStatus[] = [
     authorized: false,
     reason: "unauthorized",
     last_error: null,
+    last_sync_at: null,
+    last_sync_action: null,
     user: null,
     capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
     remote_invoke_registered: false,
@@ -96,13 +114,15 @@ const fallbackProviders: SyncProviderStatus[] = [
     id: "bifrost_cloud",
     name: "Bifrost Cloud",
     description: "Custom Bifrost sync service for teams and self-hosting.",
-    remote_base_url: "https://sync.bifrostproxy.dev",
+    remote_base_url: null,
     connected: false,
     enabled: false,
     reachable: false,
     authorized: false,
     reason: "unauthorized",
     last_error: null,
+    last_sync_at: null,
+    last_sync_action: null,
     user: null,
     capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
     remote_invoke_registered: false,
@@ -118,6 +138,8 @@ const fallbackProviders: SyncProviderStatus[] = [
     authorized: false,
     reason: "unauthorized",
     last_error: null,
+    last_sync_at: null,
+    last_sync_action: null,
     user: null,
     capabilities: { remote_invoke: false, rules_sync: true, config_sync: true },
     remote_invoke_registered: false,
@@ -141,7 +163,7 @@ export default function SyncTab({
     (provider) => provider.id === "bifrost_cloud",
   );
   const [bifrostCloudUrlDraft, setBifrostCloudUrlDraft] = useState(
-    bifrostCloudProvider?.remote_base_url || "https://sync.bifrostproxy.dev",
+    bifrostCloudProvider?.remote_base_url || "",
   );
   const [bifrostCloudUrlDirty, setBifrostCloudUrlDirty] = useState(false);
   const [githubTokenModalOpen, setGithubTokenModalOpen] = useState(false);
@@ -150,6 +172,7 @@ export default function SyncTab({
     () => providers.find((provider) => provider.id === selectedProviderId) || providers[0],
     [providers, selectedProviderId],
   );
+  const showOverviewAlert = shouldShowSyncProviderOverviewAlert(providers);
 
   useEffect(() => {
     if (syncStatus?.first_run_prompt_required) {
@@ -167,9 +190,7 @@ export default function SyncTab({
     if (bifrostCloudUrlDirty) {
       return;
     }
-    setBifrostCloudUrlDraft(
-      bifrostCloudProvider?.remote_base_url || "https://sync.bifrostproxy.dev",
-    );
+    setBifrostCloudUrlDraft(bifrostCloudProvider?.remote_base_url || "");
   }, [bifrostCloudProvider?.remote_base_url, bifrostCloudUrlDirty]);
 
   const providerWithDraftUrl = (provider: SyncProviderStatus) => {
@@ -178,7 +199,7 @@ export default function SyncTab({
     }
     return {
       ...provider,
-      remote_base_url: bifrostCloudUrlDraft.trim() || provider.remote_base_url,
+      remote_base_url: bifrostCloudUrlDraft.trim() || provider.remote_base_url || null,
     };
   };
 
@@ -210,12 +231,15 @@ export default function SyncTab({
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
-      <Alert
-        showIcon
-        type={syncStatus?.reachable ? "info" : "warning"}
-        message="Remote sync is a pluggable capability"
-        description="Rules continue to work locally at all times. Sync only activates when the configured Bifrost service is reachable and a valid login session exists."
-      />
+      {showOverviewAlert ? (
+        <Alert
+          showIcon
+          type={syncStatus?.reachable ? "info" : "warning"}
+          message="Remote sync is a pluggable capability"
+          description="Rules continue to work locally at all times. Sync only activates when the configured Bifrost service is reachable and a valid login session exists."
+          data-testid="settings-sync-provider-overview-alert"
+        />
+      ) : null}
 
       <div
         data-testid="settings-sync-provider-grid"
@@ -307,7 +331,7 @@ export default function SyncTab({
                               setBifrostCloudUrlDirty(true);
                               setBifrostCloudUrlDraft(event.target.value);
                             }}
-                            placeholder="https://sync.bifrostproxy.dev"
+                            placeholder={BIFROST_CLOUD_URL_PLACEHOLDER}
                             prefix={<LinkOutlined />}
                             data-testid="settings-sync-provider-bifrost-cloud-url-input"
                           />
@@ -332,6 +356,11 @@ export default function SyncTab({
                         ? "Registered"
                         : "Supported"
                       : "Not supported",
+                  },
+                  {
+                    key: "lastSync",
+                    label: "Last sync",
+                    children: formatProviderLastSync(provider),
                   },
                 ]}
               />

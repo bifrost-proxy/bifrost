@@ -323,6 +323,14 @@ const StatusBar = memo(function StatusBar() {
       };
     }
 
+    const readyProvider = syncStatus.providers?.find(
+      (provider) => provider.connected && provider.reachable && provider.authorized,
+    );
+    const effectiveLastSyncAt =
+      readyProvider?.last_sync_at ?? syncStatus.last_sync_at ?? null;
+    const effectiveLastSyncAction =
+      readyProvider?.last_sync_action ?? syncStatus.last_sync_action ?? null;
+
     if (syncStatus.syncing) {
       return {
         text: "Syncing",
@@ -333,7 +341,7 @@ const StatusBar = memo(function StatusBar() {
       };
     }
 
-    if (!syncStatus.reachable) {
+    if (!readyProvider && !syncStatus.reachable) {
       return {
         text: "Local",
         detail: "Remote service unreachable, using local rules only",
@@ -343,7 +351,7 @@ const StatusBar = memo(function StatusBar() {
       };
     }
 
-    if (!syncStatus.authorized) {
+    if (!readyProvider && !syncStatus.authorized) {
       return {
         text: "Sign in",
         detail: "Remote reachable but login required",
@@ -354,13 +362,15 @@ const StatusBar = memo(function StatusBar() {
     }
 
     return {
-      text: syncStatus.last_sync_at ? "Synced" : "Connected",
-      detail: syncStatus.last_sync_at
-        ? `${formatSyncAction(syncStatus.last_sync_action) ?? "Last sync completed"} at ${new Date(syncStatus.last_sync_at).toLocaleString()}`
-        : "Connected to remote service",
+      text: effectiveLastSyncAt ? "Synced" : "Connected",
+      detail: effectiveLastSyncAt
+        ? `${formatSyncAction(effectiveLastSyncAction) ?? "Last sync completed"} at ${new Date(effectiveLastSyncAt).toLocaleString()}`
+        : readyProvider
+          ? `Connected to ${readyProvider.name}`
+          : "Connected to remote service",
       color: token.colorSuccess,
       pulse: false,
-      state: syncStatus.last_sync_at ? "ready" : "connected",
+      state: effectiveLastSyncAt ? "ready" : "connected",
     };
   }, [syncStatus, token.colorInfo, token.colorSuccess, token.colorTextQuaternary, token.colorWarning]);
 
