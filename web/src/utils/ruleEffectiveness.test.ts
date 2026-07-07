@@ -50,7 +50,7 @@ describe("analyzeRuleEffectiveness", () => {
     expect(laterPassthrough?.summary).toContain("Covered by line");
   });
 
-  test("marks earlier request headers as replaced when a later selected rule writes the same headers", () => {
+  test("marks earlier same matcher request headers as covered by later equal-priority duplicates", () => {
     const effects = analyzeRuleEffectiveness(nextOncallSample);
 
     const firstHeaders = effects.find((effect) =>
@@ -80,7 +80,7 @@ describe("analyzeRuleEffectiveness", () => {
     expect(effects[1]).toMatchObject({ status: "active" });
   });
 
-  test("marks a request header line as partial when only some headers are replaced later", () => {
+  test("marks a request header line as partial when only some headers are already written", () => {
     const effects = analyzeRuleEffectiveness(
       [
         `https://example.test/api/ reqHeaders://{"x-env":"one","x-stable":"keep"}`,
@@ -89,7 +89,46 @@ describe("analyzeRuleEffectiveness", () => {
     );
 
     expect(effects[0]).toMatchObject({ status: "partial", coveredByLine: 2 });
-    expect(effects[0].summary).toContain("Some request headers are replaced");
+    expect(effects[1]).toMatchObject({ status: "active" });
+  });
+
+  test("marks broader path request headers as partial when a narrower matcher wins one header", () => {
+    const effects = analyzeRuleEffectiveness(
+      [
+        `https://example.test/api/internal/ reqHeaders://{"x-env":"narrow"}`,
+        `https://example.test/api/ reqHeaders://{"x-env":"broad","x-stable":"keep"}`,
+      ].join("\n"),
+    );
+
+    expect(effects[0]).toMatchObject({ status: "active" });
+    expect(effects[1]).toMatchObject({ status: "partial", coveredByLine: 1 });
+    expect(effects[1].summary).toContain("partially covered");
+    expect(effects[1].details.join("\n")).toContain("narrower part");
+    expect(effects[1].details.join("\n")).toContain("outside that narrower scope");
+  });
+
+  test("detects wildcard host partial coverage for concrete host request headers", () => {
+    const effects = analyzeRuleEffectiveness(
+      [
+        `https://api.example.test/private/ reqHeaders://{"x-env":"api-private"}`,
+        `https://*.example.test/private/ reqHeaders://{"x-env":"all-private"}`,
+      ].join("\n"),
+    );
+
+    expect(effects[0]).toMatchObject({ status: "active" });
+    expect(effects[1]).toMatchObject({ status: "partial", coveredByLine: 1 });
+    expect(effects[1].details.join("\n")).toContain("overlapping matcher traffic");
+  });
+
+  test("marks global request headers as partial when a concrete matcher wins a subset", () => {
+    const effects = analyzeRuleEffectiveness(
+      [
+        `* reqHeaders://{"x-env":"global"}`,
+        `https://example.test/api/ reqHeaders://{"x-env":"api"}`,
+      ].join("\n"),
+    );
+
+    expect(effects[0]).toMatchObject({ status: "partial", coveredByLine: 2 });
     expect(effects[1]).toMatchObject({ status: "active" });
   });
 
@@ -103,5 +142,29 @@ describe("analyzeRuleEffectiveness", () => {
 
     expect(effects[0]).toMatchObject({ status: "active" });
     expect(effects[1]).toMatchObject({ status: "shadowed", coveredByLine: 1 });
+  });
+
+  test("marks equal-priority urlParams with the same key as later-wins", () => {
+    const effects = analyzeRuleEffectiveness(
+      [
+        "https://example.test/api/ urlParams://(trace:first,stable:one)",
+        "https://example.test/api/ urlParams://(trace:second)",
+      ].join("\n"),
+    );
+
+    expect(effects[0]).toMatchObject({ status: "partial", coveredByLine: 2 });
+    expect(effects[1]).toMatchObject({ status: "active" });
+  });
+
+  test("marks equal-priority last-value body operations as later-wins", () => {
+    const effects = analyzeRuleEffectiveness(
+      [
+        "https://example.test/api/ resBody://(first)",
+        "https://example.test/api/ resBody://(second)",
+      ].join("\n"),
+    );
+
+    expect(effects[0]).toMatchObject({ status: "shadowed", coveredByLine: 2 });
+    expect(effects[1]).toMatchObject({ status: "active" });
   });
 });

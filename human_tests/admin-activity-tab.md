@@ -135,12 +135,14 @@
    https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://
    https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_new","x-use-ppe":"1"}
    https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://
+   https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_narrow"}
+   https://nextoncall.bytedance.net/api/v1/ reqHeaders://{"x-tt-env":"ppe_broad","x-use-ppe":"1"}
    ```
 2. 打开 Activity 页面。
 3. 在 `Active Rule Analysis` 的 `Merged Rules` 顶部观察 active rule sets 标签区。
 4. 点击任意 active rule set 标签。
 5. 返回 Activity，在 `Merged Rules` 代码区观察行级高亮。
-6. 鼠标悬浮旧 `reqHeaders` 行、最终 `reqHeaders` 行和后一个 `passthrough://` 行。
+6. 鼠标悬浮重复同 matcher `reqHeaders` 行、宽前缀 `reqHeaders` 行、最终生效的 `reqHeaders` 行和后一个 `passthrough://` 行。
 7. 选中代码区中的部分文本并点击复制；再清除选区后点击复制。
 8. 将旧 `reqHeaders` 行扩展为较长 JSON header 值，观察代码区是否仍在面板宽度内自动换行。
 
@@ -150,10 +152,12 @@
 - 单击 active rule set 标签会跳转到对应 Rules 详情页。
 - Temporary Ports 中每个临时端口都是独立全宽卡片，多个端口从上到下排列，不在一行显示多个端口卡片。
 - 临时端口卡片内的 Merged Rules 随规则内容自然撑高，不出现内部小滚动框；长规则仍在卡片宽度内换行。
-- 旧 `reqHeaders` 行被标记为 covered，hover 解释同 matcher 下请求头被后续规则替换。
-- 最终 `reqHeaders` 行被标记为 effective，hover 解释它是最终请求头写入。
+- 重复同 matcher 的旧 `reqHeaders` 行被标记为 covered，hover 解释同名请求头被后面同优先级规则覆盖。
+- 宽前缀 `reqHeaders` 行被标记为 partial，hover 解释它在更窄 matcher 覆盖范围内被接管，但在范围外仍然生效。
+- 最终生效的 `reqHeaders` 行被标记为 effective，hover 解释它是当前 matcher 的最终请求头写入。
 - 第一条 `passthrough://` 行为 effective，后一个同 matcher `passthrough://` 行为 covered。
 - hover 文案包含覆盖来源行号，不需要用户手动推理规则优先级。
+- hover tips 框宽度足够容纳规则解释，不出现很窄的长竖条；内容较长时在 tips 框内滚动。
 - 每条规则左侧展示可见行号，hover 文案中的 `line N` 可以直接对照定位。
 - 长 URL / 长 JSON header 在代码区内自动换行，不出现横向撑出 Activity 面板或遮挡右侧内容。
 - 复制选区/全文时只复制原始 merged rules 文本，不复制状态点、覆盖解释或其他 UI 文案。
@@ -161,7 +165,7 @@
 
 执行记录（2026-07-07，本地纯前端 smoke）：
 
-- ✅ PASS：执行 `WEB_PORT=3108 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' pnpm --dir web exec playwright test tests/ui/activity-tab.spec.ts --config=playwright.frontend.config.ts -g "Activity tab is first"`。测试使用 Vite 纯前端服务和 mock Admin API；验证 Activity Merged Rules 顶部 active rule set 标签、单击标签跳转 Rules 详情、nextoncall 重复规则样例、Temporary Ports 两个端口纵向独立卡片和临时端口 Merged Rules 无内部滚动，断言 3 行 active / 2 行 covered，hover 旧 `reqHeaders` 行出现 `Request headers are replaced by line`，断言可见行号和长 header 不产生横向溢出，并复测选区复制、全文复制、卡片 hover、流量行 hover 和暗色主题基础可见性。
+- ✅ PASS：执行 `WEB_PORT=3108 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' pnpm --dir web exec playwright test tests/ui/activity-tab.spec.ts --config=playwright.frontend.config.ts -g "Activity tab is first"`。测试使用 Vite 纯前端服务和 mock Admin API；验证 Activity Merged Rules 顶部 active rule set 标签、单击标签跳转 Rules 详情、nextoncall 重复规则样例、Temporary Ports 两个端口纵向独立卡片和临时端口 Merged Rules 无内部滚动，断言 active / partial / covered 行，hover covered `reqHeaders` 行出现被后续同优先级规则覆盖的解释，hover partial `reqHeaders` 行出现范围外仍生效解释，断言可见行号和长 header 不产生横向溢出，并复测选区复制、全文复制、卡片 hover、流量行 hover 和暗色主题基础可见性。
 
 ## 清理步骤
 

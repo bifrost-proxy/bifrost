@@ -203,6 +203,8 @@ async function mockActivityApi(page: Page) {
           "https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://",
           'https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_new","x-use-ppe":"1"}',
           "https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://",
+          'https://partial.example.test/api/internal/ reqHeaders://{"x-env":"narrow"}',
+          'https://partial.example.test/api/ reqHeaders://{"x-env":"broad","x-stable":"keep"}',
           "a.com status://200",
         ].join("\n"),
       });
@@ -354,7 +356,8 @@ test("Activity tab is first, default, data-rich, and animated on hover", async (
   await expect(page.getByTestId("activity-rule-pill").filter({ hasText: "Default" })).toContainText("1 entries");
   const mergedRules = page.getByTestId("activity-merged-rules");
   await expect(mergedRules).toContainText("a.com status://200");
-  await expect(mergedRules.locator('[data-effect-status="active"]')).toHaveCount(3);
+  await expect(mergedRules.locator('[data-effect-status="active"]')).toHaveCount(4);
+  await expect(mergedRules.locator('[data-effect-status="partial"]')).toHaveCount(1);
   await expect(mergedRules.locator('[data-effect-status="shadowed"]')).toHaveCount(2);
   await expect(mergedRules.locator('[data-line-number="1"] > [data-line-gutter="true"]')).toHaveText("1");
   await expect(mergedRules.locator('[data-line-number="3"] > [data-line-gutter="true"]')).toHaveText("3");
@@ -367,7 +370,12 @@ test("Activity tab is first, default, data-rich, and animated on hover", async (
     .locator('[data-effect-status="shadowed"]')
     .filter({ hasText: "ppe_old_" })
     .hover();
-  await expect(page.getByText(/Request headers are replaced by line/)).toBeVisible();
+  await expect(page.getByText(/reqHeaders fields are replaced by line/)).toBeVisible();
+  await mergedRules
+    .locator('[data-effect-status="partial"]')
+    .filter({ hasText: "x-stable" })
+    .hover();
+  await expect(page.getByText(/outside that narrower scope/)).toBeVisible();
   await expect(page.getByTestId("activity-temporary-ports-panel")).toContainText("Temporary Ports");
   await expect(page.getByTestId("activity-temporary-port-card-18888")).toContainText("127.0.0.1:18888");
   await expect(page.getByTestId("activity-temporary-port-card-18888")).toContainText("activity-temp-rule");

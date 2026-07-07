@@ -83,7 +83,18 @@ function RuleLine({ effect }: { effect: RuleLineEffect }) {
   );
 
   return (
-    <Tooltip title={tooltip} mouseEnterDelay={0.25} placement="topLeft">
+    <Tooltip
+      title={tooltip}
+      mouseEnterDelay={0.25}
+      placement="topLeft"
+      overlayStyle={{
+        maxWidth: "min(720px, calc(100vw - 48px))",
+        width: "max-content",
+      }}
+      overlayInnerStyle={{
+        maxWidth: "min(720px, calc(100vw - 48px))",
+      }}
+    >
       <span
         className={styles.ruleLine}
         data-effect-status={effect.status}

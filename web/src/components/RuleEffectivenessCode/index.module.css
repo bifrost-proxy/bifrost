@@ -93,7 +93,10 @@
 }
 
 .tooltip {
-  max-width: min(420px, calc(100vw - 32px));
+  box-sizing: border-box;
+  max-width: min(680px, calc(100vw - 64px));
+  max-height: min(60vh, 560px);
+  overflow-y: auto;
   overflow-wrap: anywhere;
 }
 

@@ -7,7 +7,7 @@
 - 在 Activity 的 Merged Rules 详情中自动标注真正生效、部分生效和被覆盖的规则行。
 - 在全局 Rules 胶囊的 Merged Rules 详情中复用同一套标注逻辑。
 - 鼠标悬浮生效规则时解释为什么生效；悬浮不生效规则时解释被哪一行覆盖或替换。
-- 判断逻辑必须贴近 Bifrost 当前规则解析特性：matcher priority、非 multi-match 协议首条获胜、multi-match 协议并存、`reqHeaders` 后写同名 header 覆盖前写 header。
+- 判断逻辑必须贴近 Bifrost 当前规则解析特性：matcher priority、路由类与非 multi-match 协议首条获胜、修改类同 key 或整值在同优先级下后者覆盖。
 
 ### 必须不破坏
 
@@ -18,7 +18,7 @@
 
 ### 必须真实验证
 
-- 用单元测试覆盖同 matcher / 同协议覆盖、`reqHeaders` 同名 header 后写覆盖、不同协议共存、注释/空行中立。
+- 用单元测试覆盖同 matcher / 同协议覆盖、`reqHeaders` / `urlParams` 同 key 后写覆盖、`resBody` last wins、不同协议共存、注释/空行中立。
 - 用纯前端 Playwright smoke 覆盖胶囊 Merged Rules 展开、行级高亮和 hover 解释。
 - 更新并执行 `human_tests/webui-rules.md` 与 `human_tests/admin-activity-tab.md` 中对应真实场景用例。
 
@@ -30,14 +30,15 @@
 
 - 对同 matcher、同 protocol 的非 multi-match 规则，按估算 matcher priority 和解析顺序选出获胜行，后续同类行标记为 covered。
 - 对 multi-match 协议默认保留为 effective，因为 resolver 会允许它们并存。
-- 对 `reqHeaders` 追加 field-level 判断：同 matcher 下相同 header name 后续再次写入时，前面的 header 变为部分生效或 covered。
+- 对 key-value 修改类协议追加 field-level 判断：`reqHeaders`、`resHeaders`、`reqCookies`、`resCookies`、`urlParams`、`params`、`trailers` 同 key 时按 matcher priority 优先，同优先级下后面的 merged rule 覆盖前面的同 key；完全被覆盖的 matcher 标为 covered，只被更窄 path、通配域名、全局 `*`、协议/端口/host 交集等静态可证明重叠覆盖的 matcher 标为 partial。
+- 对整值修改类 multi-match 协议追加 last-value 判断：`reqBody`、`resBody`、`reqPrepend`、`resPrepend`、`reqAppend`、`resAppend`、`resMerge`、`reqCors`、`resCors`、HTML/JS/CSS body/prepend/append 等同 matcher 重复时由更高优先级或后面的 merged rule 接管。
 - 对 forwarding 决策类协议（`http` / `https` / `ws` / `wss` / `host` / `xhost` / `passthrough`），同 matcher 下第一个已选中的 forwarding 决策获胜，后续 forwarding 决策标记为 covered。
 - 注释、空行、value block 和暂不识别的复杂语法保持 neutral，避免过度宣称。
 
 ## UI 方案
 
 - 生效行：左侧绿色边线与柔和背景，hover 显示 resolver 选择原因。
-- 部分生效行：左侧 amber 边线，hover 显示哪些操作被后续替换。
+- 部分生效行：左侧 amber 边线，hover 显示哪些 header 在部分 matcher 范围内被更高优先级规则接管，以及该规则仍在哪些范围外继续生效。
 - 被覆盖行：左侧灰色边线和弱化文字，hover 显示覆盖来源行号。
 - 所有规则行展示稳定行号 gutter；hover 中提到 `line N` 时，用户可以在同一代码面板内直接定位。
 - 长 URL、长 JSON header 和其他不可分隔 token 必须在面板宽度内自动换行，禁止撑出 Activity 面板或 Dynamic Island 弹层。
@@ -50,13 +51,15 @@
 - `web/src/utils/ruleEffectiveness.test.ts`
   - 注释/空行 neutral。
   - nextoncall 样例中后续同 matcher `passthrough://` 被首条 passthrough 覆盖。
-  - nextoncall 样例中旧 `x-tt-env` 被后续同 matcher `reqHeaders` 替换。
+  - nextoncall 样例中同 matcher `reqHeaders` 后续同名 header 覆盖旧值。
+  - 宽 path / 窄 path、通配域名 / 具体域名、全局 `*` / 具体 URL 的修改类同 key 重叠会产生 partial。
+  - `urlParams` 同 key 后者覆盖、`resBody` 整值后者覆盖。
   - 同 matcher 不同协议可共存。
   - 同 matcher `statusCode` duplicate 由首条获胜。
 - `web/tests/ui/rules-dynamic-island-global.spec.ts`
   - 胶囊保持全局可见、拖拽、刷新回原位、跳转契约。
-  - 展开 Merged Rules 后可看到 active / covered 行。
-  - hover covered `reqHeaders` 行出现替换解释。
+  - 展开 Merged Rules 后可看到 active / partial / covered 行。
+  - hover covered 与 partial `reqHeaders` 行出现覆盖来源和剩余生效范围解释。
 
 ## 边界
 
