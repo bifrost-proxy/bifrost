@@ -242,6 +242,23 @@
 - IM 工作入口和 Settings 的 IM Connections Provider 区域使用 CSS grid 布局；桌面宽度下多个 Provider 可以并排展示，窄屏下自动变为单列。
 - Videos 工具不再额外叠加一圈导致顶部或左右间距明显大于其它页面。
 
+### TC-AILR-12 运行中队列消息紧凑展示
+
+操作步骤：
+
+1. 打开 `/ai?aiSection=agent-chat&agentSection=chat`。
+2. 启动一个未结束的 Agent Chat 任务。
+3. 在任务运行中切换到 Queue 模式，连续提交 4 条 follow-up 消息，其中至少一条为长文本。
+4. 查看输入框上方的 Queued 区域。
+5. 点击第一条排队消息右侧删除按钮。
+
+预期结果：
+
+- Queued 区域最多占用两条排队消息的高度；超过两条时只在该区域内部纵向滚动，不继续向上挤压消息列表。
+- 每条排队消息单行展示，长文本以省略号截断。
+- 每条排队消息右侧始终预留操作区，删除按钮不能换行，也不能被长文本挤出可视区域。
+- 删除第一条后，该条从队列中移除，其余排队消息继续在同一紧凑滚动区域展示。
+
 ## 清理步骤
 
 - 关闭 Playwright 浏览器。
@@ -262,6 +279,7 @@
 - 2026-07-08：根据用户反馈删除已有对话右上角内部 `New Chat` 按钮，避免和左侧主入口重复；保留 `Status` 会话状态入口，并补充已有对话页面不显示 `agent-chat-new` 的回归断言。复测命令 `WEB_PORT=4177 pnpm --dir web exec playwright test tests/ui/ai-layout-redesign.spec.ts --config=playwright.frontend.config.ts --reporter=line`，结果 `7 passed (21.0s)`。
 - 2026-07-08：根据用户反馈限制 Settings 内容宽度，新增居中的 `ai-settings-track`，宽度上限与嵌入式对话 message/composer track 对齐为约 1120px，避免配置卡片撑满右侧主内容区。复测命令 `WEB_PORT=4177 pnpm --dir web exec playwright test tests/ui/ai-layout-redesign.spec.ts --config=playwright.frontend.config.ts --reporter=line`，结果 `7 passed (19.5s)`。
 - 2026-07-08：根据用户反馈统一 AI 子页面顶部留白和内容宽度，ASR、IM、Videos、Settings 都通过同一个右侧内容轨道展示，桌面顶部留白约 `24px`、最大宽度约 `1120px` 并居中；历史消息线程嵌入态也从统一顶部留白后开始。IM 工作入口和 Settings IM Connections 改为响应式 Provider 卡片网格，Videos 去掉嵌入 AI Shell 时自身额外 padding。首次复测发现 embedded Chat 左右 padding 压缩 composer 宽度，已修复为只保留顶部 padding；复测命令 `WEB_PORT=4177 pnpm --dir web exec playwright test tests/ui/ai-layout-redesign.spec.ts --config=playwright.frontend.config.ts --reporter=line`，结果 `7 passed (19.5s)`。
+- 2026-07-08：根据用户反馈压缩运行中对话的 Queued 区域。输入框上方队列列表最多显示两条消息高度，更多消息在列表内部滚动；队列行改为文本列 + 固定操作列，长文本单行省略，删除按钮不换行。补充 Playwright 几何断言验证 4 条队列消息时 `agent-chat-queue-list` 内部滚动、删除按钮位于第一行右侧且不换行。
 
 执行明细：
 
@@ -278,3 +296,4 @@
 | TC-AILR-09 | 通过。分别在 `768x900` 与 `390x844` viewport 打开 `/ai`，New Chat、Runner 下拉和 Settings 二级内容页均可操作；`document.documentElement.scrollWidth <= window.innerWidth + 1`，未发现非预期横向滚动。 |
 | TC-AILR-10 | 通过。从 `view=settings&settings=agent&agentSection=model` 进入 Settings 后，依次点击左侧 ASR、IM、Videos、New Chat 和历史线程，Playwright 断言 URL 分别切到 `view=asr`、`view=im`、`view=videos`、`view=chat&mode=new`、`view=chat&session=history-thread-1`，均删除 `settings` 参数，不再显示 `ai-settings-content`，并展示对应主内容。 |
 | TC-AILR-11 | 通过。Playwright 断言 ASR、IM、Videos、Settings 的内容轨道顶部距离为约 `24px`，宽度不超过约 `1120px` 并在 AI 右侧主内容区内水平居中；历史消息线程顶部不吸顶，Chat header 和消息区从统一留白后开始；IM 工作入口和 Settings IM Connections 均使用 `settings-im-card-grid` CSS grid；Videos 嵌入 AI Shell 时不再叠加自身额外 padding。 |
+| TC-AILR-12 | 通过。Playwright 在运行中对话里 mock 4 条队列消息，断言 `agent-chat-queue-list` 高度不超过两条消息空间、`scrollHeight > clientHeight` 且 `overflowY=auto`；第一条长消息右侧删除按钮位于同一队列行内并在文本之后，没有换行；删除第一条后按钮消失，其余队列消息仍保留在紧凑滚动区域。 |

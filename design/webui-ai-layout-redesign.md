@@ -369,6 +369,7 @@ Settings URL 语义：
 - 默认 Runner 是 Codex Runner；不可用时 UI 明确展示实际 fallback runner。
 - 左侧导航只表达工作路径：New Chat、ASR、Videos、IM、Threads、Settings。
 - 左侧线程列表宽度和选中态稳定，不因点击选中产生列表抖动；右侧对话区域没有未使用的内部 thread rail 空白。
+- 运行中对话的排队消息区域应保持紧凑：输入框上方最多展示两行队列消息高度，更多消息在该区域内部滚动；每条消息右侧必须预留操作按钮空间，删除按钮不能被长文本挤到下一行。
 - 配置项不再占据 AI 页面一级导航。
 - Settings 只展示原配置项，且保留所有原 AI 配置功能入口；顶层只合并为 `Agent`、`Runner`、`IM` 三个 tab，配置项在对应 tab 内以卡片向下平铺；Chat 和会话状态信息不进入 Settings。
 - IM 工作入口与 Settings 的 IM 分组使用响应式卡片网格展示连接通道，桌面下自动多列，窄屏下收敛为单列；表格型配置保留表格，但整体仍在同一内容轨道内。

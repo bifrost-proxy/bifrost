@@ -4497,12 +4497,36 @@ test("AI Agent Chat supports running stop, guide, queue, and queue removal", asy
   page,
 }) => {
   const messages: string[] = [];
-  let releaseFirst: (() => void) | undefined;
-  const firstRequestCanFinish = new Promise<void>((resolve) => {
-    releaseFirst = resolve;
-  });
   await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ sessions: [] }) });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "running-queue-layout",
+            status: "active",
+            run_state: "running",
+            title: "Running queue layout",
+            source: "admin-api",
+            runner_type: "bifrost_agent",
+            queueItems: [
+              {
+                seq: 1,
+                message:
+                  "queued follow up with a very long body that should stay on one line and leave room for actions",
+              },
+              {
+                seq: 2,
+                message: "second queued follow up with enough text to trigger truncation",
+              },
+              { seq: 3, message: "third queued follow up" },
+              { seq: 4, message: "fourth queued follow up" },
+            ],
+          },
+        ],
+      }),
+    });
   });
   await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
     await route.fulfill({
@@ -4519,35 +4543,49 @@ test("AI Agent Chat supports running stop, guide, queue, and queue removal", asy
   await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }) });
   });
+  await page.route(
+    "**/_bifrost/api/im-gateway/agent/sessions/running-queue-layout",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          session_key: "running-queue-layout",
+          status: "active",
+          run_state: "running",
+          title: "Running queue layout",
+          source: "admin-api",
+          runner_type: "bifrost_agent",
+          messages: [
+            { role: "user", content: "Start long task" },
+            { role: "assistant", content: "Agent is running..." },
+          ],
+          queueItems: [
+            {
+              seq: 1,
+              message:
+                "queued follow up with a very long body that should stay on one line and leave room for actions",
+            },
+            {
+              seq: 2,
+              message: "second queued follow up with enough text to trigger truncation",
+            },
+            { seq: 3, message: "third queued follow up" },
+            { seq: 4, message: "fourth queued follow up" },
+          ],
+        }),
+      });
+    },
+  );
   await page.route("**/_bifrost/api/agent/chat/stream", async (route) => {
     const payload = route.request().postDataJSON();
     messages.push(payload.message);
-    if (payload.message === "Start long task") {
-      await firstRequestCanFinish;
-      await route.fulfill({
-        status: 200,
-        contentType: "text/event-stream",
-        body:
-          'event: run_started\ndata: {"eventType":"run_started"}\n\n' +
-          'event: run_finished\ndata: {"eventType":"run_finished","response":"Long task done"}\n\n',
-      });
-      return;
-    }
-    if (payload.message === "/q queued follow up") {
-      await route.fulfill({
-        status: 200,
-        contentType: "text/event-stream",
-        body:
-          'event: run_finished\ndata: {"eventType":"run_finished","response":"✅ 消息已收到，将在当前任务完成后处理（排队 1 条）","queued":true,"queueItems":[{"seq":1,"message":"queued follow up"}]}\n\n',
-      });
-      return;
-    }
     if (payload.message === "/rq 1") {
       await route.fulfill({
         status: 200,
         contentType: "text/event-stream",
         body:
-          'event: run_finished\ndata: {"eventType":"run_finished","response":"removed","queued":true,"queueItems":[]}\n\n',
+          'event: run_finished\ndata: {"eventType":"run_finished","response":"removed","queued":true,"queueItems":[{"seq":2,"message":"second queued follow up with enough text to trigger truncation"},{"seq":3,"message":"third queued follow up"},{"seq":4,"message":"fourth queued follow up"}]}\n\n',
       });
       return;
     }
@@ -4568,22 +4606,43 @@ test("AI Agent Chat supports running stop, guide, queue, and queue removal", asy
     });
   });
 
-  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
-  await page.getByTestId("agent-chat-input").fill("Start long task");
-  await page.getByTestId("agent-chat-send").click();
+  await openPage(
+    page,
+    "ai?aiSection=agent-chat&agentSection=chat&session=running-queue-layout&view=active",
+  );
+  const composer = page.getByTestId("agent-chat-composer-track");
+  const composerInput = composer.getByTestId("agent-chat-input");
+  const composerSend = composer.getByTestId("agent-chat-send");
+  await expect(composerSend).toHaveAttribute("aria-label", "Stop");
 
-  await expect(page.getByTestId("agent-chat-send")).toHaveAttribute("aria-label", "Stop");
-
-  await page.getByTestId("agent-chat-input").fill("guide now");
+  await composerInput.fill("guide now");
   await expect(page.getByText("Running input")).toBeVisible();
-  await page.getByTestId("agent-chat-send").click();
+  await composerSend.click();
   await expect(page.getByTestId("agent-chat-messages")).toContainText("guide accepted");
 
-  await page.getByTestId("agent-chat-input").fill("queued follow up");
-  await page.locator(".ant-segmented-item").filter({ hasText: /^Queue$/ }).click();
-  await page.getByTestId("agent-chat-send").click();
   await expect(page.getByTestId("agent-chat-queue-panel")).toContainText(
     "queued follow up",
+  );
+  await expect(page.getByTestId("agent-chat-queue-item")).toHaveCount(4);
+  const queueListMetrics = await page.getByTestId("agent-chat-queue-list").evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    overflowY: window.getComputedStyle(element).overflowY,
+  }));
+  expect(queueListMetrics.clientHeight).toBeLessThanOrEqual(74);
+  expect(queueListMetrics.scrollHeight).toBeGreaterThan(queueListMetrics.clientHeight);
+  expect(queueListMetrics.overflowY).toBe("auto");
+  const firstQueueItem = page.getByTestId("agent-chat-queue-item").first();
+  const firstItemBox = await firstQueueItem.boundingBox();
+  const firstTextBox = await firstQueueItem.locator(".ant-typography").boundingBox();
+  const firstRemoveBox = await page.getByLabel("Remove queued message 1").boundingBox();
+  expect(firstItemBox).not.toBeNull();
+  expect(firstTextBox).not.toBeNull();
+  expect(firstRemoveBox).not.toBeNull();
+  expect(firstRemoveBox!.x).toBeGreaterThan(firstTextBox!.x + firstTextBox!.width);
+  expect(firstRemoveBox!.y).toBeGreaterThanOrEqual(firstItemBox!.y - 1);
+  expect(firstRemoveBox!.y + firstRemoveBox!.height).toBeLessThanOrEqual(
+    firstItemBox!.y + firstItemBox!.height + 1,
   );
   const messageBubbles = page.locator('[data-testid^="agent-chat-message-bubble-"]');
   await expect
@@ -4594,18 +4653,18 @@ test("AI Agent Chat supports running stop, guide, queue, and queue removal", asy
     .not.toContain("消息已收到");
 
   await page.getByLabel("Remove queued message 1").click();
-  await expect(page.getByTestId("agent-chat-queue-panel")).toBeHidden();
+  await expect(page.getByLabel("Remove queued message 1")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-queue-panel")).toContainText("second queued follow up");
   await expect
     .poll(async () => (await messageBubbles.allTextContents()).join("\n"))
     .not.toContain("removed");
 
-  await page.getByTestId("agent-chat-send").click();
+  await composerSend.click();
   await expect(page.getByTestId("agent-chat-messages")).toContainText("stopped");
 
-  releaseFirst?.();
   await expect
     .poll(() => messages.join("|"))
-    .toBe("Start long task|guide now|/q queued follow up|/rq 1|/stop");
+    .toBe("guide now|/rq 1|/stop");
 });
 
 test("AI Agent Chat surfaces run errors in the telemetry panel", async ({ page }) => {

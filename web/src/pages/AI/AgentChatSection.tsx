@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type CSSProperties, type KeyboardEvent } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Button, Card, Col, Empty, Grid, Input, Modal, Row, Segmented, Select, Space, Tag, Typography, message as antdMessage, theme } from "antd";
+import { Button, Card, Empty, Grid, Input, Modal, Segmented, Select, Space, Tag, Typography, message as antdMessage, theme } from "antd";
 import { BulbOutlined, DeleteOutlined, DownOutlined, FolderOpenOutlined, BorderOutlined, LeftOutlined, RobotOutlined, SendOutlined, SettingOutlined } from "@ant-design/icons";
 import { apiFetch } from "../../api/apiFetch";
 import { buildApiUrl } from "../../runtime";
@@ -2885,20 +2885,21 @@ export default function AgentChatSection({
                         <Text type="secondary" style={{ fontSize: 12 }}>
                           Queued
                         </Text>
-                        {queuedInputs.map((item) => (
-                          <Row
-                            key={item.seq}
-                            align="middle"
-                            justify="space-between"
-                            gutter={8}
-                          >
-                            <Col flex="auto">
-                              <Text ellipsis>
+                        <div style={styles.queueList} data-testid="agent-chat-queue-list">
+                          {queuedInputs.map((item) => (
+                            <div
+                              key={item.seq}
+                              style={styles.queueItem}
+                              data-testid="agent-chat-queue-item"
+                            >
+                              <Text
+                                ellipsis
+                                style={styles.queueItemText}
+                                title={`#${item.seq} ${item.message}`}
+                              >
                                 #{item.seq} {item.message}
                               </Text>
-                            </Col>
-                            <Col>
-                              <Space size={4}>
+                              <span style={styles.queueItemActions}>
                                 {guideSupported ? (
                                   <Button
                                     size="small"
@@ -2914,10 +2915,10 @@ export default function AgentChatSection({
                                   aria-label={`Remove queued message ${item.seq}`}
                                   onClick={() => handleRemoveQueued(item.seq)}
                                 />
-                              </Space>
-                            </Col>
-                          </Row>
-                        ))}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
                       </Space>
                     </div>
                   ) : null}
