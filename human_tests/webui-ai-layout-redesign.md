@@ -296,7 +296,7 @@
 - 默认折叠状态只展示 user message、处理耗时和最终 assistant answer；中间 assistant delta 和 tool 细节不直接铺满消息列表。
 - 展开该轮后，过程文本按时间顺序显示，最终 assistant answer 仍然稳定显示在该轮最后。
 - thinking/status 过程文本使用普通正文样式展示，长文本可展开更多。
-- 相邻命令合并为一条命令组摘要，例如 `已运行 1 条命令 · 1s`，不会把每条命令默认散开成大块日志。
+- 相邻命令合并为一条轻量命令组摘要，例如 `已运行 1 条命令`，不会把每条命令默认散开成大块日志。
 - 点击命令组后可以看到具体命令名、Input 和 Output。
 - 再次点击单条命令可以折叠或展开该命令详情。
 
@@ -324,6 +324,7 @@
 - 2026-07-08：根据用户反馈收窄左侧 ASR、IM、Videos 三个主入口对应的右侧工作台内容区。三页从 Settings 的 1120px 配置轨道拆出为约 `920px` 工作台阅读轨道，继续保持顶部 `24px` 留白和水平居中，避免右侧内容在宽屏下被拉满；Settings 仍保留约 `1120px` 配置轨道。首次执行 `pnpm --dir web exec playwright test tests/ui/ai-layout-redesign.spec.ts --config=playwright.frontend.config.ts --reporter=line` 因动态端口 Vite 未保持监听导致 7 条用例均 `ERR_CONNECTION_REFUSED`，未进入产品断言；随后按既有固定端口方式复跑 `WEB_PORT=4177 pnpm --dir web exec playwright test tests/ui/ai-layout-redesign.spec.ts --config=playwright.frontend.config.ts --reporter=line`，结果 `7 passed (18.7s)`。
 - 2026-07-08：根据用户反馈移除 Settings > IM 中重复的 Connections Provider 卡片和连接配置入口。左侧主入口 `IM` 继续承载 Connections、Targets、Routes、Schedules、History 全量 IM 配置能力；Settings > IM 只保留 Targets、Routes、Schedules、History，默认切入 `imGatewaySection=targets`，旧 `settings=im&imGatewaySection=connections` 会归一化到 Targets。第一轮 review 发现直接打开旧 Settings IM Connections 深链时还未触发归一化，已补充清理逻辑和 Playwright 断言；复测命令 `WEB_PORT=4177 pnpm --dir web exec playwright test tests/ui/ai-layout-redesign.spec.ts --config=playwright.frontend.config.ts --reporter=line`，结果 `7 passed (20.4s)`。
 - 2026-07-08：根据用户反馈修复历史线程加载不稳定问题。打开带 `historyPath` 的线程时改为一次性请求完整 history，不再默认使用 `tail=true&limit=300` 或前端最近轮次切片；实时 `timeline_changed` 正常走 `since=end_index` 增量追加，lag/reconnect/不连续时回退完整 history 恢复并去重，避免旧消息被最后一页覆盖。同步修正每轮执行过程展示：完成轮次默认只显示最终回答和处理耗时，展开后文本过程直接展示，相邻命令折叠为命令组摘要，命令组展开后可查看命令 Input/Output。复测命令 `pnpm --dir web exec vitest run src/pages/AI/AgentChatSection.timeline.test.ts src/pages/AI/AgentChatSection.helpers.test.ts`，结果 `2 passed / 26 tests passed`；复测命令 `WEB_PORT=4177 pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --config=playwright.frontend.config.ts --grep "loads full history|updates running history timeline|restores active timeline process steps|restores JSONL history|continues external runner history" --reporter=line`，结果 `5 passed (8.1s)`。
+- 2026-07-08：根据用户反馈继续收敛每轮 process step 的真实展示样式。通过当前分支 3000 端口真实运行 UI 打开 `Runner: 继续` 历史线程，确认 Vite 进程来自 `/Users/eden_studio/work/github/bifrost-ai-tab-layout-plan/web`，真实 history 返回 `508` 条事件且 `has_more=false`；修复前运行中 process block 顶部额外显示全局摘要 `正在运行 146 条命令 · 1 条执行中 ...`，与目标截图不一致。修复后 3000 端口复查确认 process block 直接展示过程正文，相邻命令以轻量单行 `已运行 4 条命令`、`失败 6 条命令 · 5s` 插在正文之间，外层 `Expand execution process` 不存在，命令组默认 `aria-expanded=false` 且不展开 Input/Output；最终 DOM 复查确认 `hasRunningCommandSummary=false`、`visibleBadText=false`，截图记录 `/tmp/bifrost-ai-process-3000-lightweight.png`。
 
 执行明细：
 
@@ -342,4 +343,4 @@
 | TC-AILR-11 | 通过。Playwright 断言 ASR、IM、Videos 的工作台内容轨道顶部距离为约 `24px`、宽度不超过约 `920px` 且明显窄于右侧主内容区；Settings 配置轨道宽度不超过约 `1120px`；所有轨道都在 AI 右侧主内容区内水平居中。历史消息线程顶部不吸顶，Chat header 和消息区从统一留白后开始；IM 工作入口 Connections 使用 `settings-im-card-grid` CSS grid，Settings IM 不再重复展示 Connections；Videos 嵌入 AI Shell 时不再叠加自身额外 padding。 |
 | TC-AILR-12 | 通过。Playwright 在运行中对话里 mock 4 条队列消息，断言 `agent-chat-queue-list` 高度不超过两条消息空间、`scrollHeight > clientHeight` 且 `overflowY=auto`；第一条长消息右侧删除按钮位于同一队列行内并在文本之后，没有换行；删除第一条后按钮消失，其余队列消息仍保留在紧凑滚动区域。 |
 | TC-AILR-13 | 通过。Playwright mock `/agent/sessions/history/<path>` 完整返回 old/middle/latest 事件，断言首次请求不包含 `tail`、`cursor`、`limit`，页面立即展示 `Oldest question`、`Middle answer`、`Newest answer`，且 `agent-chat-load-older` 不出现；运行中 timeline 回归同时断言增量追加后 `Previous question`、`Previous answer` 仍保留。 |
-| TC-AILR-14 | 通过。Playwright mock 包含 assistant delta、tool_call、tool_result、final assistant message 的 timeline，断言完成轮次折叠时显示 `IM timeline answer` 且不显示中间过程；展开后过程文本按顺序出现，命令组摘要显示 `已运行 1 条命令`，展开命令组后可见 `exec_command`、`pnpm test` 和 `ok`。 |
+| TC-AILR-14 | 通过。Playwright mock 包含 assistant delta、tool_call、tool_result、final assistant message 的 timeline，断言完成轮次折叠时显示 `IM timeline answer` 且不显示中间过程；展开后过程文本按顺序出现，process block 不再显示额外的外层全局执行摘要或 `Expand execution process`，命令组摘要直接以 `已运行 1 条命令` 的轻量单行展示；展开命令组后可见 `exec_command`、`pnpm test` 和 `ok`。3000 端口真实线程复查同样确认运行中长过程按正文 + 命令摘要穿插展示，页面内不再出现 `条执行中`。 |

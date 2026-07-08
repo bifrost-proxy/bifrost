@@ -32,7 +32,7 @@ describe("process log grouping", () => {
         ],
         13,
       ),
-    ).toBe("正在运行 2 条命令 · 1 条执行中 · 4s");
+    ).toBe("已运行 2 条命令");
 
     expect(
       formatCommandGroupSummary(
@@ -40,5 +40,12 @@ describe("process log grouping", () => {
         13,
       ),
     ).toBe("失败 1 条命令 · 1s");
+
+    expect(
+      formatCommandGroupSummary(
+        [{ type: "tool", summary: "cargo test", status: "success" }],
+        13,
+      ),
+    ).toBe("已运行 1 条命令");
   });
 });

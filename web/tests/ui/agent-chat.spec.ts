@@ -323,16 +323,12 @@ test("AI Agent Chat deep link renders local chat preview and composer flow", asy
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("agent-chat-settings-modal")).toHaveCount(0);
 
-  // Process steps block (collapsible thinking process) should be visible
+  // Process steps render inline once the turn is expanded.
   const processBlock = page.getByTestId("agent-chat-process-block");
   await expect(processBlock).toBeVisible();
-  // Collapsed by default - shows summary line only
   await expect(processBlock).toContainText("已运行 1 条命令");
-  await expect(processBlock).toContainText("1s");
   await expect(processBlock).not.toContainText("pnpm test");
-  // Click to expand
   await processBlock.getByText("已运行 1 条命令").click();
-  // After expanding, shows individual step summaries
   await expect(processBlock).toContainText("shell");
   await expect(processBlock).not.toContainText("active");
   await expect(processBlock).not.toContainText("Run state: Running");
@@ -2597,7 +2593,6 @@ test("AI Agent Chat restores active timeline process steps from history path", a
   const processBlock = page.getByTestId("agent-chat-process-block");
   await expect(processBlock).toBeVisible();
   await expect(processBlock).toContainText("已运行 1 条命令");
-  await expect(processBlock).toContainText("1s");
   await expect(processBlock).not.toContainText("pnpm test");
   await expect
     .poll(async () =>
@@ -2627,7 +2622,9 @@ test("AI Agent Chat restores active timeline process steps from history path", a
       }),
     )
     .toBe(true);
-  await processBlock.getByRole("button", { name: "Expand execution process" }).click();
+  await expect(
+    processBlock.getByRole("button", { name: "Expand execution process" }),
+  ).toHaveCount(0);
   await expect(processBlock).not.toContainText("Run state: Running");
   await expect(processBlock.getByTestId("agent-chat-process-command-summary")).toContainText(
     "已运行 1 条命令",
@@ -2835,7 +2832,9 @@ test("AI Agent Chat updates running history timeline from SSE without cross-thre
       }),
     )
     .toBe(true);
-  await processBlock.getByRole("button", { name: "Expand execution process" }).click();
+  await expect(
+    processBlock.getByRole("button", { name: "Expand execution process" }),
+  ).toHaveCount(0);
   await expect(processBlock).not.toContainText("Run state: Running");
   await expect(processBlock.getByTestId("agent-chat-process-command-summary")).toContainText(
     "已运行 1 条命令",
@@ -4923,15 +4922,18 @@ test("AI Agent Chat streams long task output previews into tool output", async (
 
   await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
 
-  await page.getByTestId("agent-chat-input").fill("Watch the long command");
-  await page.getByTestId("agent-chat-send").click();
+  const newChatLanding = page.getByTestId("ai-new-chat-landing");
+  await newChatLanding.getByTestId("agent-chat-input").fill("Watch the long command");
+  await newChatLanding.getByTestId("agent-chat-send").click();
 
   await page.getByTestId("agent-chat-turn-collapse-toggle").click();
   const processBlock = page.getByTestId("agent-chat-process-block");
   await expect(processBlock).toBeVisible();
   await expect(processBlock).toContainText("已运行 1 条命令");
   await expect(processBlock).not.toContainText("streamed stdout chunk");
-  await processBlock.getByRole("button", { name: "Expand execution process" }).click();
+  await expect(
+    processBlock.getByRole("button", { name: "Expand execution process" }),
+  ).toHaveCount(0);
   await expect(processBlock.getByTestId("agent-chat-process-command-summary")).toContainText(
     "已运行 1 条命令",
   );

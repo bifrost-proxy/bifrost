@@ -1816,19 +1816,10 @@ export function formatCommandGroupSummary(
   nowSeconds: number,
 ) {
   const failedCount = steps.filter((step) => step.status === "failed").length;
-  const runningCount = steps.filter((step) => step.status === "running").length;
-  const prefix =
-    failedCount > 0 && runningCount === 0
-      ? "失败"
-      : runningCount > 0
-        ? "正在运行"
-        : "已运行";
+  const prefix = failedCount > 0 ? "失败" : "已运行";
   const durationLabel = formatProcessStepsDuration(steps, nowSeconds);
   const parts = [`${prefix} ${steps.length} 条命令`];
-  if (runningCount > 0) {
-    parts.push(`${runningCount} 条执行中`);
-  }
-  if (durationLabel) {
+  if (failedCount > 0 && durationLabel) {
     parts.push(durationLabel);
   }
   return parts.join(" · ");
@@ -1886,7 +1877,6 @@ export function ProcessStepsBlock({
   running: boolean;
 }) {
   const { token } = theme.useToken();
-  const [expanded, setExpanded] = useState(() => isRunning);
   const [expandedTools, setExpandedTools] = useState<Set<number>>(new Set());
   const [nowSeconds, setNowSeconds] = useState(() => Date.now() / 1000);
   const visibleSteps = isRunning
@@ -1901,35 +1891,15 @@ export function ProcessStepsBlock({
     if (!isRunning) {
       return;
     }
-    setExpanded(true);
     const timer = window.setInterval(() => {
       setNowSeconds(Date.now() / 1000);
     }, 1000);
     return () => window.clearInterval(timer);
   }, [isRunning]);
 
-  useEffect(() => {
-    if (!isRunning) {
-      setExpanded(false);
-    }
-  }, [isRunning]);
-
   if (visibleSteps.length === 0) return null;
   const mutedColor = token.colorTextQuaternary;
   const textColor = token.colorTextTertiary;
-
-  const runningCount = isRunning
-    ? visibleSteps.filter((s) => s.status === "running").length
-    : 0;
-  const failedCount = visibleSteps.filter((step) => step.status === "failed").length;
-  const commandCount = visibleSteps.filter((step) => step.type === "tool").length;
-  const summaryCount = commandCount || visibleSteps.length;
-  const durationLabel = formatProcessStepsDuration(visibleSteps, nowSeconds);
-  const summaryPrefix =
-    failedCount > 0 && !isRunning ? "失败" : isRunning ? "正在运行" : "已运行";
-  const summaryText = `${summaryPrefix} ${summaryCount} 条命令${
-    runningCount > 0 ? ` · ${runningCount} 条执行中` : ""
-  }${durationLabel ? ` · ${durationLabel}` : ""}`;
   const processLogItems = buildProcessLogItems(visibleSteps);
 
   const toggleToolExpand = (index: number) => {
@@ -1945,70 +1915,29 @@ export function ProcessStepsBlock({
     <div
       data-testid="agent-chat-process-block"
       style={{
-        margin: "2px 0 4px",
+        display: "grid",
+        gap: 8,
+        margin: "2px 0 8px",
         padding: 0,
         fontSize: 12,
         color: textColor,
       }}
     >
-      <button
-        type="button"
-        aria-expanded={expanded}
-        aria-label={expanded ? "Collapse execution process" : "Expand execution process"}
-        onClick={() => setExpanded(!expanded)}
-        style={{
-          appearance: "none",
-          background: "transparent",
-          border: 0,
-          borderRadius: 6,
-          padding: "1px 2px",
-          cursor: "pointer",
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-          userSelect: "none",
-          width: "fit-content",
-          color: "inherit",
-          font: "inherit",
-        }}
-      >
-        {isRunning ? (
-          <LoadingOutlined style={{ fontSize: 12, color: mutedColor }} />
-        ) : expanded ? (
-          <DownOutlined style={{ fontSize: 10, color: mutedColor }} />
+      {processLogItems.map((item) =>
+        item.type === "text" ? (
+          <ProcessTextStepItem key={`text-${item.index}`} step={item.step} />
         ) : (
-          <RightOutlined style={{ fontSize: 10, color: mutedColor }} />
-        )}
-        <Text type="secondary" style={{ fontSize: 12, color: textColor }}>
-          {summaryText}
-        </Text>
-      </button>
-      {expanded && (
-        <div
-          style={{
-            display: "grid",
-            gap: 10,
-            marginTop: 10,
-            paddingLeft: 0,
-          }}
-        >
-          {processLogItems.map((item) =>
-            item.type === "text" ? (
-              <ProcessTextStepItem key={`text-${item.index}`} step={item.step} />
-            ) : (
-              <ProcessCommandGroupItem
-                key={`commands-${item.startIndex}`}
-                steps={item.steps}
-                startIndex={item.startIndex}
-                expandedTools={expandedTools}
-                mutedColor={mutedColor}
-                nowSeconds={nowSeconds}
-                textColor={textColor}
-                toggleToolExpand={toggleToolExpand}
-              />
-            ),
-          )}
-        </div>
+          <ProcessCommandGroupItem
+            key={`commands-${item.startIndex}`}
+            steps={item.steps}
+            startIndex={item.startIndex}
+            expandedTools={expandedTools}
+            mutedColor={mutedColor}
+            nowSeconds={nowSeconds}
+            textColor={textColor}
+            toggleToolExpand={toggleToolExpand}
+          />
+        ),
       )}
     </div>
   );

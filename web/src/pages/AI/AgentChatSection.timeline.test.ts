@@ -805,7 +805,7 @@ describe("process log display helpers", () => {
         ],
         10,
       ),
-    ).toBe("已运行 2 条命令 · 3s");
+    ).toBe("已运行 2 条命令");
     expect(
       formatCommandGroupSummary(
         [
@@ -821,6 +821,6 @@ describe("process log display helpers", () => {
         ],
         10,
       ),
-    ).toBe("正在运行 1 条命令 · 1 条执行中 · 6s");
+    ).toBe("已运行 1 条命令");
   });
 });
