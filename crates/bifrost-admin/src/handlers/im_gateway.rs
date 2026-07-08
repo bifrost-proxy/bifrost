@@ -19,8 +19,9 @@ use crate::im_gateway::event_router::ImEventRouter;
 use crate::im_gateway::progress_card::ImAgentProgressRegistry;
 use crate::im_gateway::provider::ImProvider;
 use crate::im_gateway::types::{
-    ImEvent, ImImageAttachment, ImMessageLog, ImProviderAgentConfig, ImProviderConfig,
-    ImProviderType, ImRoute, ImRouteAction, ImSchedule, ImTarget, MessageDirection, MessageStatus,
+    normalize_provider_base_url, ImEvent, ImImageAttachment, ImMessageLog, ImProviderAgentConfig,
+    ImProviderConfig, ImProviderType, ImRoute, ImRouteAction, ImSchedule, ImTarget,
+    MessageDirection, MessageStatus,
 };
 use crate::im_gateway::weixin::WeixinProvider;
 use crate::im_gateway::{

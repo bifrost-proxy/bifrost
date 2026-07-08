@@ -140,8 +140,7 @@ fn parse_provider_add_args(name: &str, args: &[String]) -> Result<Value> {
             }
             "--base-url" => {
                 return Err(bifrost_core::BifrostError::Config(
-                    "base_url is managed by system and cannot be set via CLI"
-                        .to_string(),
+                    "base_url is managed by system and cannot be set via CLI".to_string(),
                 ));
             }
             "--display-name" => {
@@ -202,8 +201,7 @@ fn parse_provider_update_args(args: &[String]) -> Result<Value> {
             }
             "--base-url" => {
                 return Err(bifrost_core::BifrostError::Config(
-                    "base_url is managed by system and cannot be set via CLI"
-                        .to_string(),
+                    "base_url is managed by system and cannot be set via CLI".to_string(),
                 ));
             }
             _ => {}

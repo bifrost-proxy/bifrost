@@ -85,7 +85,7 @@ pub(super) fn provider_create_payload_defaults_missing_display_name_to_id() {
 }
 
 #[test]
-pub(super) fn provider_create_payload_normalizes_feishu_base_url() {
+pub(super) fn provider_create_payload_forces_feishu_base_url() {
     let provider = parse_provider_create_payload(serde_json::json!({
         "id": "feishu-main",
         "provider_type": "feishu",
@@ -93,7 +93,7 @@ pub(super) fn provider_create_payload_normalizes_feishu_base_url() {
         "enabled": true,
         "app_id": "cli_xxx",
         "app_secret": "sk_test_secret",
-        "base_url": "https://open.feishu.cn",
+        "base_url": "https://evil.example/open-apis",
         "event_connection_enabled": true,
         "event_types": []
     }))
@@ -106,7 +106,28 @@ pub(super) fn provider_create_payload_normalizes_feishu_base_url() {
 }
 
 #[test]
-pub(super) fn provider_patch_normalizes_feishu_base_url() {
+pub(super) fn provider_create_payload_preserves_lark_fixed_base_url() {
+    let provider = parse_provider_create_payload(serde_json::json!({
+        "id": "lark-main",
+        "provider_type": "feishu",
+        "display_name": "Lark Main",
+        "enabled": true,
+        "app_id": "cli_xxx",
+        "app_secret": "sk_test_secret",
+        "base_url": "https://open.larksuite.com",
+        "event_connection_enabled": true,
+        "event_types": []
+    }))
+    .expect("provider create payload should parse");
+
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some("https://open.larksuite.com/open-apis")
+    );
+}
+
+#[test]
+pub(super) fn provider_patch_forces_feishu_base_url() {
     let mut provider = parse_provider_create_payload(serde_json::json!({
         "id": "feishu-main",
         "provider_type": "feishu",
@@ -123,13 +144,58 @@ pub(super) fn provider_patch_normalizes_feishu_base_url() {
     apply_provider_patch(
         &mut provider,
         &serde_json::json!({
-            "base_url": "https://open.feishu.cn"
+            "base_url": "https://evil.example/open-apis"
         }),
     );
 
     assert_eq!(
         provider.base_url.as_deref(),
         Some("https://open.feishu.cn/open-apis")
+    );
+}
+
+#[test]
+pub(super) fn provider_store_normalizes_legacy_feishu_base_url_on_read() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let store = Arc::new(ImProviderStore::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "legacy-feishu-provider".to_string();
+    provider.base_url = Some("https://evil.example/open-apis".to_string());
+    store.add(provider).expect("add provider");
+
+    let loaded = store.get("legacy-feishu-provider").expect("provider");
+
+    assert_eq!(
+        loaded.base_url.as_deref(),
+        Some("https://open.feishu.cn/open-apis")
+    );
+    let raw = std::fs::read_to_string(
+        temp_dir
+            .path()
+            .join("admin")
+            .join("im_gateway_providers.json"),
+    )
+    .expect("read provider store");
+    assert!(!raw.contains("https://evil.example/open-apis"));
+    assert!(raw.contains("https://open.feishu.cn/open-apis"));
+}
+
+#[test]
+pub(super) fn provider_create_payload_forces_weixin_base_url() {
+    let provider = parse_provider_create_payload(serde_json::json!({
+        "id": "weixin-main",
+        "provider_type": "weixin",
+        "display_name": "Weixin Main",
+        "enabled": true,
+        "base_url": "https://evil.example",
+        "event_connection_enabled": true,
+        "event_types": []
+    }))
+    .expect("provider create payload should parse");
+
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some("https://ilinkai.weixin.qq.com")
     );
 }
 

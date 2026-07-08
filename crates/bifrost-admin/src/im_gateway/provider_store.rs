@@ -2,14 +2,10 @@ use std::path::{Path, PathBuf};
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use url::Url;
 
 use bifrost_core::{BifrostError, Result};
 
-use super::types::{ImProviderConfig, ImProviderType};
-
-const FEISHU_API_ROOT_HOSTS: &[&str] = &["open.feishu.cn", "open.larksuite.com"];
-const FEISHU_API_PATH: &str = "/open-apis";
+use super::types::{normalize_provider_base_url, ImProviderConfig};
 
 const STORE_VERSION: u32 = 1;
 const STORE_FILENAME: &str = "im_gateway_providers.json";
@@ -45,7 +41,7 @@ impl ImProviderStore {
             .providers
             .iter()
             .cloned()
-            .map(mutate_feishu_base_url)
+            .map(normalized_provider)
             .collect()
     }
 
@@ -56,10 +52,11 @@ impl ImProviderStore {
             .iter()
             .find(|p| p.id == id)
             .cloned()
-            .map(mutate_feishu_base_url)
+            .map(normalized_provider)
     }
 
     pub fn add(&self, provider: ImProviderConfig) -> Result<()> {
+        let provider = normalized_provider(provider);
         let mut data = self.data.write();
         if data.providers.iter().any(|p| p.id == provider.id) {
             return Err(BifrostError::Config(format!(
@@ -71,49 +68,8 @@ impl ImProviderStore {
         self.save_locked(&data)
     }
 
-fn mutate_feishu_base_url(mut provider: ImProviderConfig) -> ImProviderConfig {
-    if provider.provider_type != ImProviderType::Feishu {
-        return provider;
-    }
-
-    let Some(base_url) = provider.base_url.as_deref() else {
-        return provider;
-    };
-    let normalized = normalize_feishu_base_url(base_url);
-    let normalized = normalized.trim_end_matches('/').to_string();
-    if normalized.is_empty() {
-        provider.base_url = None;
-    } else {
-        provider.base_url = Some(normalized);
-    }
-    provider
-}
-
-fn normalize_feishu_base_url(base_url: &str) -> String {
-    let base_url = base_url.trim();
-    if base_url.is_empty() {
-        return String::new();
-    }
-
-    let Ok(mut parsed) = Url::parse(base_url) else {
-        return base_url.to_string();
-    };
-    let Some(host) = parsed.host_str() else {
-        return base_url.to_string();
-    };
-    if !FEISHU_API_ROOT_HOSTS.contains(&host) {
-        return base_url.to_string();
-    }
-
-    if matches!(parsed.path(), "" | "/") {
-        parsed.set_path(FEISHU_API_PATH);
-        parsed.to_string()
-    } else {
-        base_url.to_string()
-    }
-}
-
     pub fn update(&self, provider: ImProviderConfig) -> Result<()> {
+        let provider = normalized_provider(provider);
         let mut data = self.data.write();
         if let Some(existing) = data.providers.iter_mut().find(|p| p.id == provider.id) {
             *existing = provider;
@@ -174,4 +130,9 @@ fn normalize_feishu_base_url(base_url: &str) -> String {
             }
         }
     }
+}
+
+fn normalized_provider(mut provider: ImProviderConfig) -> ImProviderConfig {
+    normalize_provider_base_url(&mut provider);
+    provider
 }
