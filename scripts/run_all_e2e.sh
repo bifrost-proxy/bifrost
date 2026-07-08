@@ -641,14 +641,14 @@ shell_test_weight() {
   case "$1" in
     test_agent_send_msg_default_channel.sh) echo 30 ;;
     test_long_term_memory_remember_recall.sh) echo 529 ;;
-    test_desktop_open_requests_contract.sh) echo 486 ;;
-    test_chatgpt_web_behavior_artifacts.sh) echo 243 ;;
+    test_desktop_open_requests_contract.sh) echo 620 ;;
+    test_chatgpt_web_behavior_artifacts.sh) echo 540 ;;
     test_tls_intercept_e2e.sh) echo 170 ;;
     test_im_gateway_long_reply_delivery_regression.sh) echo 142 ;;
     test_remote_file_relay_e2e.sh) echo 128 ;;
     test_http3_e2e.sh) echo 120 ;;
     test_client_process_transport_attribution.sh) echo 103 ;;
-    test_skill_creator_flow.sh) echo 102 ;;
+    test_skill_creator_flow.sh) echo 180 ;;
     test_security_hardening_functional.sh) echo 69 ;;
     test_agent_builtin_status_runtime.sh) echo 64 ;;
     test_upgrade_admin_api_restart_e2e.sh) echo 61 ;;
