@@ -117,9 +117,8 @@ fn parse_provider_add_args_uses_feishu_setup_without_credentials() {
         .expect("parse provider add args");
 
     assert!(args.should_use_feishu_setup());
-    assert_eq!(args.setup_runner(), "traex");
 
-    let body = build_feishu_setup_provider_body(&args);
+    let body = build_setup_provider_body(&args, "feishu", "traex");
     assert_eq!(body["id"], "feishu-main");
     assert_eq!(body["provider_type"], "feishu");
     assert_eq!(body["enabled"], true);
@@ -144,9 +143,8 @@ fn parse_provider_add_args_allows_feishu_setup_runner_override() {
     .expect("parse provider add args");
 
     assert!(args.should_use_feishu_setup());
-    assert_eq!(args.setup_runner(), "codex");
 
-    let body = build_feishu_setup_provider_body(&args);
+    let body = build_setup_provider_body(&args, "feishu", "codex");
     assert_eq!(body["display_name"], "Main Feishu");
     assert_eq!(body["agent_config"]["runner"], "codex");
 }
@@ -175,6 +173,69 @@ fn parse_provider_add_args_with_credentials_uses_direct_create_body() {
     assert_eq!(body["app_id"], "cli_xxx");
     assert_eq!(body["app_secret"], "secret");
     assert_eq!(body["agent_config"]["runner"], "claude-code");
+}
+
+#[test]
+fn parse_provider_add_args_uses_weixin_setup_without_credentials() {
+    let args = parse_provider_add_args("weixin-main", &["--type".into(), "weixin".into()])
+        .expect("parse provider add args");
+
+    assert!(args.should_use_weixin_setup());
+    assert!(args.should_require_runner());
+
+    let body = build_setup_provider_body(&args, "weixin", "Claude Code");
+    assert_eq!(body["id"], "weixin-main");
+    assert_eq!(body["provider_type"], "weixin");
+    assert_eq!(body["agent_config"]["runner"], "Claude Code");
+}
+
+#[test]
+fn resolve_runner_choice_accepts_aliases_and_enabled_runners() {
+    let runners = vec![
+        RunnerChoice {
+            id: "Claude Code".into(),
+            adapter: "claude_code".into(),
+            enabled: true,
+        },
+        RunnerChoice {
+            id: "codex".into(),
+            adapter: "codex".into(),
+            enabled: true,
+        },
+        RunnerChoice {
+            id: "traex".into(),
+            adapter: "traex".into(),
+            enabled: true,
+        },
+    ];
+
+    assert_eq!(
+        resolve_runner_choice(Some("claude-code"), &runners).unwrap(),
+        "Claude Code"
+    );
+    assert_eq!(
+        resolve_runner_choice(Some("trae"), &runners).unwrap(),
+        "traex"
+    );
+    assert_eq!(
+        resolve_runner_choice(Some("codex"), &runners).unwrap(),
+        "codex"
+    );
+}
+
+#[test]
+fn resolve_runner_choice_rejects_missing_runner_with_available_list() {
+    let runners = vec![RunnerChoice {
+        id: "traex".into(),
+        adapter: "traex".into(),
+        enabled: true,
+    }];
+
+    let error =
+        resolve_runner_choice(Some("missing"), &runners).expect_err("missing runner should fail");
+
+    assert!(error.to_string().contains("Available runners: traex"));
+    assert!(error.to_string().contains("codex, traex, Claude Code"));
 }
 
 #[test]
