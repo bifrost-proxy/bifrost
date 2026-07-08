@@ -2147,6 +2147,7 @@ pub fn run_foreground(
             if let Some(im_service) = admin_state.im_gateway_service() {
                 im_service.start_scheduler();
                 im_service.spawn_chatgpt_web_startup_auth_check();
+                im_service.spawn_feishu_setup_supervisor();
                 let im_service_clone = im_service.clone();
                 tokio::spawn(async move {
                     im_service_clone.auto_connect_providers().await;
@@ -3314,6 +3315,7 @@ pub fn run_daemon(
                     if let Some(im_service) = admin_state.im_gateway_service() {
                         im_service.start_scheduler();
                         im_service.spawn_chatgpt_web_startup_auth_check();
+                        im_service.spawn_feishu_setup_supervisor();
                         let im_service_clone = im_service.clone();
                         tokio::spawn(async move {
                             im_service_clone.auto_connect_providers().await;

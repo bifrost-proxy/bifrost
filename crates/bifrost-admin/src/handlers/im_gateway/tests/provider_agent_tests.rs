@@ -119,6 +119,19 @@ pub(super) fn feishu_setup_pending_sessions_survive_service_restart() {
             app_secret: Some("secret".to_string()),
             owner_open_id: Some("ou_owner".to_string()),
             brand: FeishuSetupBrand::Feishu,
+            provider_payload: Some(serde_json::json!({
+                "id": "feishu-main",
+                "provider_type": "feishu",
+                "display_name": "Feishu Main",
+                "enabled": true,
+                "event_connection_enabled": true,
+                "event_types": ["message.receive"],
+                "agent_config": {
+                    "runner": "traex"
+                }
+            })),
+            created_provider_id: None,
+            auto_connect: false,
         },
     );
     save_pending_feishu_setups(&service);
@@ -136,6 +149,74 @@ pub(super) fn feishu_setup_pending_sessions_survive_service_restart() {
     assert_eq!(pending.app_secret.as_deref(), Some("secret"));
     assert_eq!(pending.owner_open_id.as_deref(), Some("ou_owner"));
     assert_eq!(pending.brand, FeishuSetupBrand::Feishu);
+    assert!(pending.provider_payload.is_some());
+    assert!(pending.created_provider_id.is_none());
+}
+
+#[tokio::test]
+pub(super) async fn feishu_setup_confirmed_session_creates_provider_from_draft() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let service = ImGatewayService::new(temp_dir.path());
+    service.feishu_setup_pending.write().insert(
+        "fas_confirmed".to_string(),
+        PendingFeishuSetup {
+            device_code: "device-code".to_string(),
+            interval_seconds: 5,
+            expires_at_ms: now_ms() + 60_000,
+            app_id: Some("cli_confirmed".to_string()),
+            app_secret: Some("secret".to_string()),
+            owner_open_id: Some("ou_owner".to_string()),
+            brand: FeishuSetupBrand::Feishu,
+            provider_payload: Some(serde_json::json!({
+                "id": "feishu-main",
+                "provider_type": "feishu",
+                "display_name": "Feishu Main",
+                "enabled": false,
+                "base_url": "https://evil.example/open-apis",
+                "event_connection_enabled": false,
+                "event_types": [],
+                "agent_config": {
+                    "runner": "traex"
+                }
+            })),
+            created_provider_id: None,
+            auto_connect: false,
+        },
+    );
+
+    poll_and_complete_feishu_setup_session(&service, "fas_confirmed")
+        .await
+        .expect("confirmed setup should create provider from draft");
+
+    let provider = service
+        .provider_store
+        .get("feishu-main")
+        .expect("provider should be created");
+    assert_eq!(provider.app_id.as_deref(), Some("cli_confirmed"));
+    assert_eq!(provider.secret_ref.as_deref(), Some("secret"));
+    assert_eq!(provider.owner_open_id.as_deref(), Some("ou_owner"));
+    assert!(provider.enabled);
+    assert!(provider.event_connection_enabled);
+    assert_eq!(provider.event_types, vec!["message.receive"]);
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some("https://open.feishu.cn/open-apis")
+    );
+    assert_eq!(
+        provider
+            .agent_config
+            .as_ref()
+            .and_then(|config| config.runner.as_ref()),
+        Some(&bifrost_agent::AgentRunnerMode::Custom("traex".to_string()))
+    );
+
+    let pending = service
+        .feishu_setup_pending
+        .read()
+        .get("fas_confirmed")
+        .cloned()
+        .expect("pending setup remains available for CLI status");
+    assert_eq!(pending.created_provider_id.as_deref(), Some("feishu-main"));
 }
 
 #[test]

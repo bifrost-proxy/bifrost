@@ -24,6 +24,12 @@ pub(super) struct PendingFeishuSetup {
     pub(super) app_secret: Option<String>,
     pub(super) owner_open_id: Option<String>,
     pub(super) brand: FeishuSetupBrand,
+    #[serde(default)]
+    pub(super) provider_payload: Option<serde_json::Value>,
+    #[serde(default)]
+    pub(super) created_provider_id: Option<String>,
+    #[serde(default)]
+    pub(super) auto_connect: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -384,6 +390,40 @@ impl ImGatewayService {
                 }
             }
         }
+    }
+
+    pub fn spawn_feishu_setup_supervisor(self: &Arc<Self>) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            const SUPERVISOR_INTERVAL_SECS: u64 = 5;
+            let mut ticker =
+                tokio::time::interval(std::time::Duration::from_secs(SUPERVISOR_INTERVAL_SECS));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                let session_ids: Vec<String> = service
+                    .feishu_setup_pending
+                    .read()
+                    .iter()
+                    .filter(|(_, pending)| {
+                        pending.provider_payload.is_some() && pending.created_provider_id.is_none()
+                    })
+                    .map(|(session_id, _)| session_id.clone())
+                    .collect();
+                for session_id in session_ids {
+                    match poll_and_complete_feishu_setup_session(&service, &session_id).await {
+                        Ok(()) => {}
+                        Err(error) => {
+                            debug!(
+                                session_id = %session_id,
+                                error = %error,
+                                "Feishu setup supervisor poll did not complete"
+                            );
+                        }
+                    }
+                }
+            }
+        });
     }
 
     /// Auto-connect all configured providers that have a secret.

@@ -314,8 +314,10 @@ fn handle_feishu_provider_setup(host: &str, port: u16, args: &ProviderAddArgs) -
         args.id.bright_white().bold()
     );
 
+    let provider_body = build_setup_provider_body(args, "feishu", &runner_id);
     let start_body = json!({
         "brand": args.brand.as_deref().unwrap_or("feishu"),
+        "provider": provider_body,
     });
     let start_url = api_url(host, port, "/providers/feishu-setup/start");
     let start = http_post(&start_url, &start_body)?;
@@ -381,17 +383,21 @@ fn handle_feishu_provider_setup(host: &str, port: u16, args: &ProviderAddArgs) -
         app_id.bright_white()
     );
 
-    let provider_body = build_setup_provider_body(args, "feishu", &runner_id);
-    let create_url = api_url(
-        host,
-        port,
-        &format!("/providers/feishu-setup/{}/provider", session_id),
-    );
-    let resp = http_post(&create_url, &provider_body)?;
-    let provider_id = resp["provider"]["id"]
-        .as_str()
-        .or_else(|| resp["id"].as_str())
-        .unwrap_or(&args.id);
+    let provider_id = if let Some(provider_id) = confirmed["provider_id"].as_str() {
+        provider_id.to_string()
+    } else {
+        let create_url = api_url(
+            host,
+            port,
+            &format!("/providers/feishu-setup/{}/provider", session_id),
+        );
+        let resp = http_post(&create_url, &provider_body)?;
+        resp["provider"]["id"]
+            .as_str()
+            .or_else(|| resp["id"].as_str())
+            .unwrap_or(&args.id)
+            .to_string()
+    };
 
     let connect_url = api_url(host, port, &format!("/providers/{}/connect", provider_id));
     http_post(&connect_url, &json!({}))?;
