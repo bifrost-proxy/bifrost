@@ -2,10 +2,14 @@ use std::path::{Path, PathBuf};
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 use bifrost_core::{BifrostError, Result};
 
-use super::types::ImProviderConfig;
+use super::types::{ImProviderConfig, ImProviderType};
+
+const FEISHU_API_ROOT_HOSTS: &[&str] = &["open.feishu.cn", "open.larksuite.com"];
+const FEISHU_API_PATH: &str = "/open-apis";
 
 const STORE_VERSION: u32 = 1;
 const STORE_FILENAME: &str = "im_gateway_providers.json";
@@ -36,7 +40,13 @@ impl ImProviderStore {
     }
 
     pub fn list(&self) -> Vec<ImProviderConfig> {
-        self.data.read().providers.clone()
+        self.data
+            .read()
+            .providers
+            .iter()
+            .cloned()
+            .map(mutate_feishu_base_url)
+            .collect()
     }
 
     pub fn get(&self, id: &str) -> Option<ImProviderConfig> {
@@ -46,6 +56,7 @@ impl ImProviderStore {
             .iter()
             .find(|p| p.id == id)
             .cloned()
+            .map(mutate_feishu_base_url)
     }
 
     pub fn add(&self, provider: ImProviderConfig) -> Result<()> {
@@ -59,6 +70,48 @@ impl ImProviderStore {
         data.providers.push(provider);
         self.save_locked(&data)
     }
+
+fn mutate_feishu_base_url(mut provider: ImProviderConfig) -> ImProviderConfig {
+    if provider.provider_type != ImProviderType::Feishu {
+        return provider;
+    }
+
+    let Some(base_url) = provider.base_url.as_deref() else {
+        return provider;
+    };
+    let normalized = normalize_feishu_base_url(base_url);
+    let normalized = normalized.trim_end_matches('/').to_string();
+    if normalized.is_empty() {
+        provider.base_url = None;
+    } else {
+        provider.base_url = Some(normalized);
+    }
+    provider
+}
+
+fn normalize_feishu_base_url(base_url: &str) -> String {
+    let base_url = base_url.trim();
+    if base_url.is_empty() {
+        return String::new();
+    }
+
+    let Ok(mut parsed) = Url::parse(base_url) else {
+        return base_url.to_string();
+    };
+    let Some(host) = parsed.host_str() else {
+        return base_url.to_string();
+    };
+    if !FEISHU_API_ROOT_HOSTS.contains(&host) {
+        return base_url.to_string();
+    }
+
+    if matches!(parsed.path(), "" | "/") {
+        parsed.set_path(FEISHU_API_PATH);
+        parsed.to_string()
+    } else {
+        base_url.to_string()
+    }
+}
 
     pub fn update(&self, provider: ImProviderConfig) -> Result<()> {
         let mut data = self.data.write();

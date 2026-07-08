@@ -379,8 +379,6 @@ fn parse_provider_add_args_parses_common_flags() {
             "cli_xxx".into(),
             "--secret".into(),
             "plain-secret".into(),
-            "--base-url".into(),
-            "https://open.feishu.cn".into(),
             "--display-name".into(),
             "Main".into(),
             "--enabled".into(),
@@ -397,11 +395,31 @@ fn parse_provider_add_args_parses_common_flags() {
     assert_eq!(body["provider_type"], "feishu");
     assert_eq!(body["app_id"], "cli_xxx");
     assert_eq!(body["app_secret"], "plain-secret");
-    assert_eq!(body["base_url"], "https://open.feishu.cn");
     assert_eq!(body["display_name"], "Main");
     assert_eq!(body["enabled"], false); // parsed from explicit flag
     assert_eq!(body["owner_open_id"], "ou_xxx");
     assert_eq!(body["event_connection_enabled"], true);
+}
+
+#[test]
+fn parse_provider_add_args_rejects_base_url() {
+    let err = parse_provider_add_args(
+        "feishu-main",
+        &[
+            "--type".into(),
+            "feishu".into(),
+            "--base-url".into(),
+            "https://open.feishu.cn".into(),
+        ],
+    )
+    .expect_err("base_url should be rejected");
+
+    match err {
+        bifrost_core::BifrostError::Config(msg) => {
+            assert!(msg.contains("base_url is managed by system and cannot be set via CLI"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 }
 
 #[test]
@@ -413,15 +431,25 @@ fn parse_provider_update_args_parses_flags() {
         "true".into(),
         "--enabled".into(),
         "false".into(),
-        "--base-url".into(),
-        "https://example.com".into(),
     ])
     .expect("parse provider update args");
 
     assert_eq!(body["display_name"], "New Name");
     assert_eq!(body["event_connection_enabled"], true);
     assert_eq!(body["enabled"], false);
-    assert_eq!(body["base_url"], "https://example.com");
+}
+
+#[test]
+fn parse_provider_update_args_rejects_base_url() {
+    let err = parse_provider_update_args(&["--base-url".into(), "https://example.com".into()])
+        .expect_err("base_url should be rejected");
+
+    match err {
+        bifrost_core::BifrostError::Config(msg) => {
+            assert!(msg.contains("base_url is managed by system and cannot be set via CLI"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 }
 
 #[test]

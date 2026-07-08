@@ -139,10 +139,10 @@ fn parse_provider_add_args(name: &str, args: &[String]) -> Result<Value> {
                 }
             }
             "--base-url" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    body["base_url"] = json!(v);
-                }
+                return Err(bifrost_core::BifrostError::Config(
+                    "base_url is managed by system and cannot be set via CLI"
+                        .to_string(),
+                ));
             }
             "--display-name" => {
                 i += 1;
@@ -201,10 +201,10 @@ fn parse_provider_update_args(args: &[String]) -> Result<Value> {
                 }
             }
             "--base-url" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    body["base_url"] = json!(v);
-                }
+                return Err(bifrost_core::BifrostError::Config(
+                    "base_url is managed by system and cannot be set via CLI"
+                        .to_string(),
+                ));
             }
             _ => {}
         }
