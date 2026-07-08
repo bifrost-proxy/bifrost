@@ -52,7 +52,6 @@ const AI_SETTINGS_AGENT_SECTIONS: AgentSectionId[] = [
 ];
 const AI_SETTINGS_RUNNER_SECTIONS: AgentSectionId[] = ["runners"];
 const AI_SETTINGS_IM_SECTIONS: ImGatewaySectionId[] = [
-  "connections",
   "targets",
   "routes",
   "schedules",
@@ -165,8 +164,8 @@ export default function AI() {
             prev.set("agentSection", "general");
             prev.delete("imGatewaySection");
           }
-          if (target === "im" && !prev.get("imGatewaySection")) {
-            prev.set("imGatewaySection", "connections");
+          if (target === "im" && (!prev.get("imGatewaySection") || prev.get("imGatewaySection") === "connections")) {
+            prev.set("imGatewaySection", "targets");
             prev.delete("agentSection");
           }
           return prev;
@@ -304,7 +303,9 @@ export default function AI() {
       searchParams.get("agentSection") === "chat" ||
       searchParams.get("settings") === "chat" ||
       searchParams.has("aiSection");
-    if (!hasConversationState) {
+    const hasDeprecatedSettingsImConnections =
+      searchParams.get("settings") === "im" && searchParams.get("imGatewaySection") === "connections";
+    if (!hasConversationState && !hasDeprecatedSettingsImConnections) {
       return;
     }
     setSearchParams(
@@ -323,8 +324,11 @@ export default function AI() {
         if (prev.get("settings") === "agent" && (!prev.get("agentSection") || prev.get("agentSection") === "chat")) {
           prev.set("agentSection", "general");
         }
-        if (prev.get("settings") === "im" && !prev.get("imGatewaySection")) {
-          prev.set("imGatewaySection", "connections");
+        if (
+          prev.get("settings") === "im" &&
+          (!prev.get("imGatewaySection") || prev.get("imGatewaySection") === "connections")
+        ) {
+          prev.set("imGatewaySection", "targets");
         }
         return prev;
       },
@@ -343,7 +347,12 @@ export default function AI() {
           prev.delete("historyPath");
           if (key === "im") {
             prev.set("settings", "im");
-            prev.set("imGatewaySection", prev.get("imGatewaySection") || "connections");
+            prev.set(
+              "imGatewaySection",
+              !prev.get("imGatewaySection") || prev.get("imGatewaySection") === "connections"
+                ? "targets"
+                : prev.get("imGatewaySection")!,
+            );
             prev.delete("agentSection");
           } else if (key === "runner") {
             prev.set("settings", "agent");

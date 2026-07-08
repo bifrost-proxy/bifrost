@@ -34,6 +34,8 @@
 ### 必须不破坏
 
 - 现有 Agent Chat SSE 流、队列输入、停止、图片粘贴、slash command、Plan Mode、历史加载和 token HUD 行为保持可用。
+- 打开已有 Agent Chat 线程时必须一次性加载该线程完整历史，不再用前端“最近几轮”窗口或 `tail=true&limit=...` 作为默认展示数据源；实时推送只能追加合并和去重，不能用最后一页覆盖当前完整消息列表。
+- 对话中每一轮执行过程需要接近 Codex 风格：文本推理/状态作为普通过程文本展示，相邻命令折叠成一条命令组摘要，展开后可查看每条命令及 Input/Output，默认完成轮次只展示最终回答和简洁处理耗时。
 - 已有线程深链仍可打开对应对话，例如 `session` / `historyPath` / `view` 参数不丢失。
 - ASR 内部深链参数继续工作，例如 `asrTab`、`asrTask`、`asrTaskTab`、`asrDay`。
 - IM Gateway 内部 section 深链继续工作，例如 `imGatewaySection=connections|targets|routes|schedules|history`。
@@ -54,6 +56,8 @@
 - WebUI 自动化测试覆盖默认 Codex Runner 选择、Runner 下拉可切换到 Bifrost Agent / Claude Code / Trae X。
 - WebUI 自动化测试覆盖发送首条消息后创建 session，URL 和左侧线程选中态同步。
 - WebUI 自动化测试覆盖点击历史 thread 后退出新建态并打开旧对话。
+- WebUI 自动化测试覆盖打开历史 thread 时全量展示旧消息、中间消息和最新消息，不出现无必要的 `Load more`；运行中 timeline 推送追加后历史消息仍保留。
+- WebUI 自动化测试覆盖执行过程样式：完成轮次折叠后只显示最终回答，展开后过程文本、命令组和命令详情按预期展示。
 - WebUI 自动化测试覆盖 ASR / IM 工作入口切换和 Settings 二级内容页配置入口。
 - human_tests 覆盖真实浏览器中的默认态、Runner 选择、线程切换、ASR/IM/Settings、深链兼容、窄屏布局。
 
@@ -84,7 +88,7 @@ AI Shell
     └── Settings Content
 ```
 
-一级左栏不再展示 Agent General、Model、Runtime、History、Memories、Skills、Runners、Memory Records、MCP Servers、IM Gateway Connections 等配置型 section。这些入口全部收敛到 Settings 二级内容页。Settings 顶部只展示 `Agent`、`Runner`、`IM` 三个分组 tab，内容区只挂载当前分组，并把该分组内的配置 section 作为卡片纵向平铺；不能把所有分组同时挂在隐藏 tabpane 中，避免重复表单和路由状态串扰。
+一级左栏不再展示 Agent General、Model、Runtime、History、Memories、Skills、Runners、Memory Records、MCP Servers 等配置型 section。Settings 顶部只展示 `Agent`、`Runner`、`IM` 三个分组 tab，内容区只挂载当前分组，并把该分组内的配置 section 作为卡片纵向平铺；IM Provider Connections 由左侧主入口 `IM` 工作台承载，不在 Settings > IM 中重复展示；不能把所有分组同时挂在隐藏 tabpane 中，避免重复表单和路由状态串扰。
 
 ## 路由与状态
 
@@ -101,7 +105,7 @@ AI Shell
 | `/ai?view=videos` | 打开 Videos Tool 兼容入口 |
 | `/ai?settings=agent&agentSection=model` | 打开 Settings 二级内容页的 Agent 分组，Agent 配置卡片平铺展示并包含 Model |
 | `/ai?settings=agent&agentSection=runners` | 打开 Settings 二级内容页的 Runner 分组 |
-| `/ai?settings=im&imGatewaySection=routes` | 打开 Settings 二级内容页的 IM 分组，IM 配置卡片平铺展示并包含 Routes |
+| `/ai?settings=im&imGatewaySection=targets` | 打开 Settings 二级内容页的 IM 分组，IM 配置卡片平铺展示并从 Targets 开始 |
 
 兼容旧参数时只做映射，不把旧左侧 section nav 继续作为 UI 展示：
 
@@ -109,7 +113,7 @@ AI Shell
 - `aiSection=agent-general|agent-model|...` -> `view=settings&settings=agent&agentSection=<section>`。
 - `aiSection=tools-asr` -> `view=asr`。
 - `aiSection=tools-videos` -> `view=videos`。
-- `aiSection=im-gateway-routes` -> `view=im&imGatewaySection=routes`；IM 配置也可通过 `view=settings&settings=im` 进入。
+- `aiSection=im-gateway-routes` -> `view=im&imGatewaySection=routes`；IM Provider Connections 只通过主入口 `view=im` 展示，Settings 的 IM 分组从 Targets 开始。
 
 ## 默认新建对话交互
 
@@ -187,6 +191,34 @@ Runner 下拉必须展示不可用状态：
 - Chat SSE run started / finished / failed 后刷新。
 - 每个 active running thread 保持轮询或 SSE 事件触发刷新。
 
+## Chat 历史加载与实时合并
+
+选中历史 thread 或通过 `historyPath` 深链打开会话时，前端必须优先请求完整 timeline history：
+
+- 初始请求调用 `/api/im-gateway/agent/sessions/history/<path>` 时不带 `tail`、`limit`、`cursor` 或 `since`。
+- 后端未分页返回时，`has_more=false`，右侧不展示 `Load more`。
+- 如果 session detail 和 timeline 同时存在，前端将两者合并去重；当两边消息都有时间戳时按时间稳定排序，缺失时间戳时保持原合并顺序，避免 mock、旧数据或部分数据源乱序。
+- 不再对已选中的 active/detail 消息调用最近 N 轮切片；用户打开线程即看到完整上下文。
+- 只有后端明确返回 `has_more=true` 时才展示 `Load more`，该按钮只用于真实分页历史，不用于前端 recent-window 扩展。
+
+实时推送策略：
+
+- 普通 `timeline_changed` 且本地已有 `end_index` 时，使用 `since=<currentEndIndex>` 拉增量事件。
+- 如果收到 lagged/reconnect、缺失 `end_index`，或增量返回的 `start_index` 与本地 `end_index` 不连续，则改拉完整未分页 history 做恢复。
+- 增量事件追加到本地事件窗口后重新生成消息；消息合并按 role + normalized content 去重，避免 detail、timeline 和 SSE 三个来源重复显示同一轮。
+- 恢复路径禁止使用 tail page 覆盖当前消息列表，避免用户看到“只剩最后一条人类输入和 Agent 回复”的不稳定状态。
+
+## Chat 执行过程展示
+
+每一轮对话的执行过程遵循“最终回答优先、过程可展开”的模型：
+
+- 完成轮次默认折叠，只展示 user message、处理耗时和最终 assistant answer；中间 delta、tool call、status 不直接占据主消息流。
+- 展开完成轮次后，按时间顺序展示过程文本、命令组和最终回答；最终回答必须稳定保留在该轮最后。
+- thinking/status 文本作为普通可读过程文本展示，长文本允许“展开更多”，不使用大块灰底日志卡片。
+- 相邻 tool steps 合并为一条命令组摘要，例如 `已运行 2 条命令 · 3s`、`正在运行 1 条命令 · 1 条执行中 · 6s`。
+- 点击命令组后展示具体命令行；命令详情默认随命令组展开可见，用户可以继续点击单条命令折叠或展开 Input/Output。
+- 运行中轮次默认展开过程摘要和 thinking tail；完成后自动回到折叠状态，减少纵向占用。
+
 ## ASR 入口
 
 左侧 `ASR` 是工作入口，不是 Settings。
@@ -205,7 +237,7 @@ Runner 下拉必须展示不可用状态：
 - 高频：连接状态、通道健康、最近消息、手动发送测试、目标 channel 选择。
 - 低频：Provider、Targets、Routes、Schedules、History 详细配置。
 
-如果第一版直接复用 `ImGatewayTab`，仍必须在 Settings 二级内容页中保留 IM 配置入口，以便后续拆分。
+第一版主入口 `IM` 直接复用 `ImGatewayTab`，并承载 Connections、Targets、Routes、Schedules、History 全量 IM 配置能力。Settings 二级内容页中的 `IM` 分组只保留 Targets、Routes、Schedules、History，避免 Provider Connections 在两个入口重复出现。
 
 ## Videos Tool
 
@@ -217,7 +249,7 @@ Videos Tool 作为左侧主入口之一保留，避免用户认为能力消失�
 
 - Agent：General、Model、Runtime、History、Memories、Skills、Memory Records、MCP Servers、Sessions。
 - Runner：Runners。
-- IM：Connections、Targets、Routes、Schedules、History。
+- IM：Targets、Routes、Schedules、History。Connections Provider 配置由左侧主入口 `IM` 工作台承载。
 - Speech / ASR Resources：仅当现有 Settings Speech 初始化入口需要与 AI 入口打通时纳入；否则 ASR 资源仍保留现有 Settings Speech。
 
 每个分组内部直接展示该组的配置卡片，按稳定顺序从上到下排列，不再把 General、Model、Runtime、Runners、IM Routes 等作为 Settings 顶层 tab。Settings 内容不应撑满整个右侧主内容区；应使用和嵌入式 Chat message/composer track 一致的阅读宽度上限（约 1120px）并整体居中。这样用户在 Settings 中先按对象类型选择 `Agent` / `Runner` / `IM`，再在当前页纵向扫配置卡片。
@@ -230,7 +262,7 @@ Settings URL 语义：
 - 离开 Settings 时切换到对应主入口，保留可兼容的 section 参数。
 - Settings 顶部切到 `Agent` 时更新为 `settings=agent`，并把非法或会话型 `agentSection` 归一化到 `general`。
 - Settings 顶部切到 `Runner` 时更新为 `settings=agent&agentSection=runners`。
-- Settings 顶部切到 `IM` 时更新为 `settings=im&imGatewaySection=connections`，并在 IM 分组内平铺 IM 配置卡片。
+- Settings 顶部切到 `IM` 时更新为 `settings=im&imGatewaySection=targets`，并在 IM 分组内平铺 Targets、Routes、Schedules、History 配置卡片；旧 `settings=im&imGatewaySection=connections` 归一化到 Targets。
 - Settings 内部不能保留 `session`、`historyPath`、`mode=new` 或 `agentSection=chat`。
 
 ## 组件拆分建议
@@ -322,10 +354,20 @@ Settings URL 语义：
   - 断言退出 new mode，右侧展示历史消息。
   - 断言左侧 thread item 选中前后高度一致，Chat conversation 的 composer 使用右侧主内容宽度，不再保留旧 thread rail 空列。
   - 再点击 `New Chat`，断言回到居中输入态。
+- `agent-chat-full-history.spec.ts`
+  - mock history endpoint 返回完整 old/middle/latest 消息。
+  - 打开 historyPath 深链。
+  - 断言第一次 history 请求不带 `tail`、`limit`、`cursor`。
+  - 断言 old/middle/latest 消息立即展示，`Load more` 不出现。
+  - mock `timeline_changed` 增量事件后，断言新增过程消息追加展示，旧消息仍保留。
+- `agent-chat-process-log.spec.ts`
+  - mock 一轮包含 assistant delta、tool_call、tool_result 和 final assistant message 的 timeline。
+  - 断言完成轮次折叠时只展示最终回答和处理耗时。
+  - 展开轮次后断言过程文本按顺序显示，命令组摘要折叠展示，展开命令组后可见命令名、Input 和 Output。
 - `ai-layout-tools-settings.spec.ts`
   - 点击 ASR，断言 ASR 工作台渲染并保留 `asrTab`。
   - 点击 IM，断言 IM 工作台渲染并保留 `imGatewaySection`。
-  - 点击 Settings，断言右侧 Settings 内容页打开；顶部只显示 `Agent`、`Runner`、`IM`；Agent 分组平铺 General、Model、Runtime、MCP Servers 等卡片，Runner 分组只展示 runners 卡片，IM 分组平铺 Connections、Targets、Routes 等卡片；切回其它主入口后对应主内容恢复。
+  - 点击 Settings，断言右侧 Settings 内容页打开；顶部只显示 `Agent`、`Runner`、`IM`；Agent 分组平铺 General、Model、Runtime、MCP Servers 等卡片，Runner 分组只展示 runners 卡片，IM 分组平铺 Targets、Routes、Schedules、History 等卡片且不展示 Connections；切回其它主入口后对应主内容恢复。
   - 断言 Settings 内容轨道宽度不超过约 1120px，并在右侧主内容区内水平居中，不把配置卡片撑满全宽。
   - 打开带 `session` 和 `agentSection=chat` 的 Settings 脏链接，断言 URL 清理会话参数，Settings 顶部只显示 `Agent`、`Runner`、`IM`，不显示 Chat、Back、Session Detail 或 Messages。
 - `ai-layout-videos-compat.spec.ts`
@@ -370,9 +412,11 @@ Settings URL 语义：
 - 左侧导航只表达工作路径：New Chat、ASR、Videos、IM、Threads、Settings。
 - 左侧线程列表宽度和选中态稳定，不因点击选中产生列表抖动；右侧对话区域没有未使用的内部 thread rail 空白。
 - 运行中对话的排队消息区域应保持紧凑：输入框上方最多展示两行队列消息高度，更多消息在该区域内部滚动；每条消息右侧必须预留操作按钮空间，删除按钮不能被长文本挤到下一行。
+- 打开历史线程时完整历史必须立即展示；默认请求不带 `tail` / `limit`，实时推送使用增量追加和全量恢复去重，不能再用最后一页覆盖当前消息。
+- 每一轮执行过程采用可读过程文本 + 命令组摘要样式；完成轮次默认只展示最终回答，展开后可查看中间过程和命令 Input/Output。
 - 配置项不再占据 AI 页面一级导航。
-- Settings 只展示原配置项，且保留所有原 AI 配置功能入口；顶层只合并为 `Agent`、`Runner`、`IM` 三个 tab，配置项在对应 tab 内以卡片向下平铺；Chat 和会话状态信息不进入 Settings。
-- IM 工作入口与 Settings 的 IM 分组使用响应式卡片网格展示连接通道，桌面下自动多列，窄屏下收敛为单列；表格型配置保留表格，但整体仍在同一内容轨道内。
+- Settings 只展示配置项，且顶层只合并为 `Agent`、`Runner`、`IM` 三个 tab，配置项在对应 tab 内以卡片向下平铺；Chat 和会话状态信息不进入 Settings；Connections Provider 配置不在 Settings > IM 中重复展示。
+- IM 工作入口使用响应式卡片网格展示连接通道，桌面下自动多列，窄屏下收敛为单列；Settings > IM 保留 Targets、Routes、Schedules、History 等表格型配置，整体仍在同一内容轨道内。
 - ASR、IM、Videos、历史消息线程和 Settings 各分组共享 AI 右侧内容区的居中规则；ASR/IM/Videos 工作台页桌面最大宽度约 920px，Settings 配置页最大宽度约 1120px，顶部留白统一为约 24px，避免内容吸顶。
 - 旧深链不失效。
 - Playwright、human_tests 和必要单元测试全部通过。

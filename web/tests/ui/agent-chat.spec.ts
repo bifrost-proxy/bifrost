@@ -1854,71 +1854,17 @@ test("AI Agent Chat restores JSONL history and continues with history path", asy
   );
 });
 
-test("AI Agent Chat loads history detail progressively", async ({ page }) => {
-  const historyPath = "/tmp/progressive-history.jsonl";
+test("AI Agent Chat loads full history detail without progressive truncation", async ({ page }) => {
+  const historyPath = "/tmp/full-history.jsonl";
   const historyUrls: string[] = [];
-  let unexpectedFullHistoryRequest = false;
   await page.route(
     `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}**`,
     async (route) => {
       historyUrls.push(route.request().url());
       const url = new URL(route.request().url());
-      if (url.searchParams.get("tail") === "true") {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            events: [
-              {
-                timestamp: 4,
-                event_type: "user_message",
-                session_key: "progressive-history",
-                content: { message: "Newest question" },
-              },
-              {
-                timestamp: 5,
-                event_type: "assistant_message",
-                session_key: "progressive-history",
-                content: { message: "Newest answer" },
-              },
-            ],
-            count: 2,
-            total_count: 5,
-            start_index: 3,
-            end_index: 5,
-            next_cursor: 3,
-            has_more: true,
-          }),
-        });
-        return;
-      }
-      if (url.searchParams.get("cursor") === "3") {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            events: [
-              {
-                timestamp: 3,
-                event_type: "assistant_message",
-                session_key: "progressive-history",
-                content: { message: "Middle answer" },
-              },
-            ],
-            count: 1,
-            total_count: 5,
-            start_index: 2,
-            end_index: 3,
-            next_cursor: 2,
-            has_more: true,
-          }),
-        });
-        return;
-      }
-      if (url.searchParams.get("cursor") !== "2") {
-        unexpectedFullHistoryRequest = true;
-      }
-      expect(url.searchParams.get("cursor")).toBe("2");
+      expect(url.searchParams.has("tail")).toBe(false);
+      expect(url.searchParams.has("cursor")).toBe(false);
+      expect(url.searchParams.has("limit")).toBe(false);
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1927,21 +1873,39 @@ test("AI Agent Chat loads history detail progressively", async ({ page }) => {
             {
               timestamp: 1,
               event_type: "user_message",
-              session_key: "progressive-history",
+              session_key: "full-history",
               content: { message: "Oldest question" },
             },
             {
               timestamp: 2,
               event_type: "assistant_message",
-              session_key: "progressive-history",
+              session_key: "full-history",
               content: { message: "Oldest answer" },
             },
+            {
+              timestamp: 3,
+              event_type: "assistant_message",
+              session_key: "full-history",
+              content: { message: "Middle answer" },
+            },
+            {
+              timestamp: 4,
+              event_type: "user_message",
+              session_key: "full-history",
+              content: { message: "Newest question" },
+            },
+            {
+              timestamp: 5,
+              event_type: "assistant_message",
+              session_key: "full-history",
+              content: { message: "Newest answer" },
+            },
           ],
-          count: 2,
+          count: 5,
           total_count: 5,
           start_index: 0,
-          end_index: 2,
-          next_cursor: 0,
+          end_index: 5,
+          next_cursor: null,
           has_more: false,
         }),
       });
@@ -1950,35 +1914,22 @@ test("AI Agent Chat loads history detail progressively", async ({ page }) => {
 
   await openPage(
     page,
-    `ai?aiSection=agent-chat&agentSection=chat&session=progressive-history&view=history&historyPath=${encodeURIComponent(historyPath)}`,
+    `ai?aiSection=agent-chat&agentSection=chat&session=full-history&view=history&historyPath=${encodeURIComponent(historyPath)}`,
   );
 
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
-    "Newest answer",
-  );
-  await expect(page.getByTestId("agent-chat-messages")).not.toContainText(
     "Oldest question",
   );
-  expect(new URL(historyUrls[0]).searchParams.get("tail")).toBe("true");
-  expect(new URL(historyUrls[0]).searchParams.has("cursor")).toBe(false);
-  await page.getByTestId("agent-chat-load-older").click();
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Middle answer",
   );
-  await page.getByTestId("agent-chat-load-older").click();
-  await expect(page.getByTestId("agent-chat-messages")).toContainText(
-    "Oldest question",
-  );
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Newest answer",
   );
-  expect(
-    historyUrls.some((url) => new URL(url).searchParams.get("cursor") === "3"),
-  ).toBe(true);
-  expect(
-    historyUrls.some((url) => new URL(url).searchParams.get("cursor") === "2"),
-  ).toBe(true);
-  expect(unexpectedFullHistoryRequest).toBe(false);
+  await expect(page.getByTestId("agent-chat-load-older")).toHaveCount(0);
+  expect(new URL(historyUrls[0]).searchParams.has("tail")).toBe(false);
+  expect(new URL(historyUrls[0]).searchParams.has("cursor")).toBe(false);
+  expect(new URL(historyUrls[0]).searchParams.has("limit")).toBe(false);
 });
 
 test("AI Agent Chat keeps running history token HUD synced with live status", async ({
@@ -2239,7 +2190,8 @@ test("AI Agent Chat continues external runner history with canonical history pat
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Earlier GPT Web answer",
   );
-  expect(new URL(historyUrls[0]).searchParams.get("tail")).toBe("true");
+  expect(new URL(historyUrls[0]).searchParams.has("tail")).toBe(false);
+  expect(new URL(historyUrls[0]).searchParams.has("limit")).toBe(false);
   await expect(page.getByTestId("agent-chat-runner-tag")).toContainText("web");
   await page.getByTestId("agent-chat-input").fill("Continue via GPT Web");
   await page.getByTestId("agent-chat-send").click();
@@ -2675,10 +2627,13 @@ test("AI Agent Chat restores active timeline process steps from history path", a
       }),
     )
     .toBe(true);
-  await processBlock.getByRole("button").click();
+  await processBlock.getByRole("button", { name: "Expand execution process" }).click();
   await expect(processBlock).not.toContainText("Run state: Running");
+  await expect(processBlock.getByTestId("agent-chat-process-command-summary")).toContainText(
+    "已运行 1 条命令",
+  );
+  await processBlock.getByTestId("agent-chat-process-command-summary").click();
   await expect(processBlock).toContainText("exec_command");
-  await processBlock.getByText("exec_command").click();
   await expect(processBlock).toContainText("pnpm test");
   await expect(processBlock).toContainText("ok");
 });
@@ -2830,6 +2785,12 @@ test("AI Agent Chat updates running history timeline from SSE without cross-thre
   );
 
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Previous question",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Previous answer",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Question before refresh",
   );
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
@@ -2874,10 +2835,13 @@ test("AI Agent Chat updates running history timeline from SSE without cross-thre
       }),
     )
     .toBe(true);
-  await processBlock.getByRole("button").click();
+  await processBlock.getByRole("button", { name: "Expand execution process" }).click();
   await expect(processBlock).not.toContainText("Run state: Running");
+  await expect(processBlock.getByTestId("agent-chat-process-command-summary")).toContainText(
+    "已运行 1 条命令",
+  );
+  await processBlock.getByTestId("agent-chat-process-command-summary").click();
   await expect(processBlock).toContainText("exec_command");
-  await processBlock.getByText("exec_command").click();
   await expect(processBlock).toContainText("cargo test");
   await expect(processBlock).toContainText("still running output");
   expect(historyCalls).toBeGreaterThan(0);
@@ -4967,9 +4931,12 @@ test("AI Agent Chat streams long task output previews into tool output", async (
   await expect(processBlock).toBeVisible();
   await expect(processBlock).toContainText("已运行 1 条命令");
   await expect(processBlock).not.toContainText("streamed stdout chunk");
-  await processBlock.getByRole("button").click();
+  await processBlock.getByRole("button", { name: "Expand execution process" }).click();
+  await expect(processBlock.getByTestId("agent-chat-process-command-summary")).toContainText(
+    "已运行 1 条命令",
+  );
+  await processBlock.getByTestId("agent-chat-process-command-summary").click();
   await expect(processBlock).toContainText("exec_command");
-  await processBlock.getByText("exec_command").click();
   await expect(processBlock).toContainText("Input");
   await expect(processBlock).toContainText("Output");
   await expect(processBlock).toContainText("running test shard 42");

@@ -55,6 +55,9 @@ export function resolveAiRouteState(params: URLSearchParams): AiRouteState {
   if (settings === "agent" && agentSection === "chat") {
     agentSection = "general";
   }
+  if (settings === "im" && (!imGatewaySection || imGatewaySection === "connections")) {
+    imGatewaySection = "targets";
+  }
   const settingsOwnsRoute = !explicitView || explicitView === "settings";
   if (settings && settingsOwnsRoute) {
     view = "settings";

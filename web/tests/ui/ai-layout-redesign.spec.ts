@@ -318,10 +318,13 @@ test("AI left rail switches ASR, IM, Settings, and history threads", async ({ pa
   await expect(page.getByTestId("agent-settings-section-general")).toHaveCount(0);
 
   await page.getByRole("tab", { name: "IM" }).click();
-  await expect(page.getByTestId("im-gateway-section-connections")).toBeVisible();
-  await expect(page.getByTestId("settings-im-card-grid")).toBeVisible();
+  await expect(page).toHaveURL(/imGatewaySection=targets/);
+  await expect(page.getByTestId("im-gateway-section-connections")).toHaveCount(0);
+  await expect(page.getByTestId("settings-im-card-grid")).toHaveCount(0);
   await expect(page.getByTestId("im-gateway-section-targets")).toBeVisible();
   await expect(page.getByTestId("im-gateway-section-routes")).toBeVisible();
+  await expect(page.getByTestId("im-gateway-section-schedules")).toBeVisible();
+  await expect(page.getByTestId("im-gateway-section-history")).toBeVisible();
 });
 
 test("AI layout maps legacy links into the new shell", async ({ page }) => {
@@ -341,6 +344,12 @@ test("AI layout maps legacy links into the new shell", async ({ page }) => {
   await openPage(page, "ai?aiSection=im-gateway-routes&imGatewaySection=routes");
   await expect(page.getByTestId("ai-nav-im")).toHaveAttribute("aria-current", "true");
   await expect(page.getByTestId("im-gateway-section-routes")).toBeVisible();
+
+  await openPage(page, "ai?view=settings&settings=im&imGatewaySection=connections");
+  await expect(page.getByTestId("ai-settings-content")).toBeVisible();
+  await expect(page).toHaveURL(/imGatewaySection=targets/);
+  await expect(page.getByTestId("im-gateway-section-connections")).toHaveCount(0);
+  await expect(page.getByTestId("im-gateway-section-targets")).toBeVisible();
 });
 
 test("AI Settings clears conversation route state and only shows configuration tabs", async ({ page }) => {
@@ -382,8 +391,8 @@ test("AI Settings clears conversation route state and only shows configuration t
 
   await page.getByRole("tab", { name: "IM" }).click();
   await expect(page).toHaveURL(/settings=im/);
-  await expect(page).toHaveURL(/imGatewaySection=connections/);
-  await expect(page.getByTestId("im-gateway-section-connections")).toBeVisible();
+  await expect(page).toHaveURL(/imGatewaySection=targets/);
+  await expect(page.getByTestId("im-gateway-section-connections")).toHaveCount(0);
   await expect(page.getByTestId("im-gateway-section-routes")).toBeVisible();
 });
 

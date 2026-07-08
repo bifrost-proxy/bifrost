@@ -93,6 +93,21 @@ describe("resolveAiRouteState", () => {
       imGatewaySection: "routes",
     });
   });
+
+  it("normalizes settings IM away from the deprecated Connections entry", () => {
+    expect(resolveAiRouteState(params("settings=im"))).toMatchObject({
+      view: "settings",
+      settings: "im",
+      imGatewaySection: "targets",
+    });
+    expect(
+      resolveAiRouteState(params("view=settings&settings=im&imGatewaySection=connections")),
+    ).toMatchObject({
+      view: "settings",
+      settings: "im",
+      imGatewaySection: "targets",
+    });
+  });
 });
 
 describe("thread selection", () => {

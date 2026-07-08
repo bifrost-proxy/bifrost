@@ -1766,6 +1766,74 @@ function formatProcessStepSummary(step: ProcessStep) {
   return `${step.summary}: ${argumentSummary}`;
 }
 
+export type ProcessLogItem =
+  | {
+      type: "text";
+      step: ProcessStep;
+      index: number;
+    }
+  | {
+      type: "commands";
+      steps: ProcessStep[];
+      startIndex: number;
+    };
+
+export function buildProcessLogItems(steps: ProcessStep[]): ProcessLogItem[] {
+  const items: ProcessLogItem[] = [];
+  let currentCommands: ProcessStep[] = [];
+  let commandStartIndex = 0;
+
+  const flushCommands = () => {
+    if (currentCommands.length === 0) {
+      return;
+    }
+    items.push({
+      type: "commands",
+      steps: currentCommands,
+      startIndex: commandStartIndex,
+    });
+    currentCommands = [];
+  };
+
+  steps.forEach((step, index) => {
+    if (step.type === "tool") {
+      if (currentCommands.length === 0) {
+        commandStartIndex = index;
+      }
+      currentCommands.push(step);
+      return;
+    }
+    flushCommands();
+    items.push({ type: "text", step, index });
+  });
+  flushCommands();
+
+  return items;
+}
+
+export function formatCommandGroupSummary(
+  steps: ProcessStep[],
+  nowSeconds: number,
+) {
+  const failedCount = steps.filter((step) => step.status === "failed").length;
+  const runningCount = steps.filter((step) => step.status === "running").length;
+  const prefix =
+    failedCount > 0 && runningCount === 0
+      ? "失败"
+      : runningCount > 0
+        ? "正在运行"
+        : "已运行";
+  const durationLabel = formatProcessStepsDuration(steps, nowSeconds);
+  const parts = [`${prefix} ${steps.length} 条命令`];
+  if (runningCount > 0) {
+    parts.push(`${runningCount} 条执行中`);
+  }
+  if (durationLabel) {
+    parts.push(durationLabel);
+  }
+  return parts.join(" · ");
+}
+
 function summarizeToolArguments(value?: string) {
   if (!value) {
     return "";
@@ -1862,6 +1930,7 @@ export function ProcessStepsBlock({
   const summaryText = `${summaryPrefix} ${summaryCount} 条命令${
     runningCount > 0 ? ` · ${runningCount} 条执行中` : ""
   }${durationLabel ? ` · ${durationLabel}` : ""}`;
+  const processLogItems = buildProcessLogItems(visibleSteps);
 
   const toggleToolExpand = (index: number) => {
     setExpandedTools((prev) => {
@@ -1876,7 +1945,7 @@ export function ProcessStepsBlock({
     <div
       data-testid="agent-chat-process-block"
       style={{
-        margin: "0 0 2px",
+        margin: "2px 0 4px",
         padding: 0,
         fontSize: 12,
         color: textColor,
@@ -1891,9 +1960,10 @@ export function ProcessStepsBlock({
           appearance: "none",
           background: "transparent",
           border: 0,
-          padding: 0,
+          borderRadius: 6,
+          padding: "1px 2px",
           cursor: "pointer",
-          display: "flex",
+          display: "inline-flex",
           alignItems: "center",
           gap: 6,
           userSelect: "none",
@@ -1914,32 +1984,161 @@ export function ProcessStepsBlock({
         </Text>
       </button>
       {expanded && (
-        <div style={{ marginTop: 6, paddingLeft: 18 }}>
-          {visibleSteps.map((step, index) => {
-            const displayStatus =
-              !isRunning && step.status === "running" ? "success" : step.status;
-            if (step.type === "thinking") {
-              // Thinking step: show as italic/gray text block
-              const { display, isTruncated } = truncateText(step.summary);
-              return (
-                <ThinkingStepItem key={`thinking-${index}`} text={step.summary} display={display} isTruncated={isTruncated} />
-              );
+        <div
+          style={{
+            display: "grid",
+            gap: 10,
+            marginTop: 10,
+            paddingLeft: 0,
+          }}
+        >
+          {processLogItems.map((item) =>
+            item.type === "text" ? (
+              <ProcessTextStepItem key={`text-${item.index}`} step={item.step} />
+            ) : (
+              <ProcessCommandGroupItem
+                key={`commands-${item.startIndex}`}
+                steps={item.steps}
+                startIndex={item.startIndex}
+                expandedTools={expandedTools}
+                mutedColor={mutedColor}
+                nowSeconds={nowSeconds}
+                textColor={textColor}
+                toggleToolExpand={toggleToolExpand}
+              />
+            ),
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ProcessTextStepItem({ step }: { step: ProcessStep }) {
+  const { token } = theme.useToken();
+  const { display, isTruncated } = truncateText(step.summary);
+  const [showFull, setShowFull] = useState(false);
+  const text = showFull ? step.summary : display;
+  return (
+    <div
+      data-testid="agent-chat-process-text"
+      style={{
+        color: token.colorText,
+        fontSize: 13,
+        lineHeight: "22px",
+        minWidth: 0,
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+      }}
+    >
+      {text}
+      {isTruncated ? (
+        <Text
+          type="secondary"
+          style={{
+            display: "inline-flex",
+            marginLeft: 6,
+            fontSize: 12,
+            color: token.colorTextTertiary,
+            cursor: "pointer",
+          }}
+          onClick={() => setShowFull((value) => !value)}
+        >
+          {showFull ? "收起" : "展开更多"}
+        </Text>
+      ) : null}
+    </div>
+  );
+}
+
+function ProcessCommandGroupItem({
+  expandedTools,
+  mutedColor,
+  nowSeconds,
+  startIndex,
+  steps,
+  textColor,
+  toggleToolExpand,
+}: {
+  expandedTools: Set<number>;
+  mutedColor: string;
+  nowSeconds: number;
+  startIndex: number;
+  steps: ProcessStep[];
+  textColor: string;
+  toggleToolExpand: (index: number) => void;
+}) {
+  const { token } = theme.useToken();
+  const expanded = steps.some((_, offset) => expandedTools.has(startIndex + offset));
+  const summary = formatCommandGroupSummary(steps, nowSeconds);
+  return (
+    <div data-testid="agent-chat-process-command-group" style={{ minWidth: 0 }}>
+      <button
+        type="button"
+        data-testid="agent-chat-process-command-summary"
+        aria-expanded={expanded}
+        onClick={() => {
+          const shouldExpand = !expanded;
+          steps.forEach((_, offset) => {
+            const index = startIndex + offset;
+            if (expandedTools.has(index) !== shouldExpand) {
+              toggleToolExpand(index);
             }
-            // Tool or other step
-            const isToolExpanded = expandedTools.has(index);
+          });
+        }}
+        style={{
+          appearance: "none",
+          background: "transparent",
+          border: 0,
+          borderRadius: 6,
+          color: textColor,
+          cursor: "pointer",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          font: "inherit",
+          fontSize: 12,
+          lineHeight: "20px",
+          maxWidth: "100%",
+          padding: "1px 2px",
+          textAlign: "left",
+        }}
+      >
+        {expanded ? (
+          <DownOutlined style={{ fontSize: 9, color: mutedColor }} />
+        ) : (
+          <RightOutlined style={{ fontSize: 9, color: mutedColor }} />
+        )}
+        <span
+          style={{
+            color: token.colorTextTertiary,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {summary}
+        </span>
+      </button>
+      {expanded ? (
+        <div style={{ display: "grid", gap: 6, marginTop: 6, marginLeft: 18 }}>
+          {steps.map((step, offset) => {
+            const index = startIndex + offset;
             const stepSummary = formatProcessStepSummary(step);
+            const displayStatus = step.status;
             return (
-              <div key={`${index}-${step.summary}`} style={{ marginBottom: 5 }}>
+              <div key={`${index}-${step.summary}`} style={{ minWidth: 0 }}>
                 <div
                   style={{
-                    display: "flex",
+                    display: "inline-flex",
                     alignItems: "center",
                     gap: 6,
+                    maxWidth: "100%",
+                    minWidth: 0,
                     lineHeight: "18px",
-                    cursor: step.type === "tool" ? "pointer" : "default",
-                    width: "fit-content",
+                    cursor: "pointer",
                   }}
-                  onClick={() => step.type === "tool" && toggleToolExpand(index)}
+                  onClick={() => toggleToolExpand(index)}
                 >
                   {displayStatus === "running" ? (
                     <LoadingOutlined style={{ fontSize: 11, color: mutedColor }} />
@@ -1948,35 +2147,35 @@ export function ProcessStepsBlock({
                   ) : (
                     <CheckCircleOutlined style={{ fontSize: 11, color: mutedColor }} />
                   )}
-                  {step.type === "tool" && (
-                    isToolExpanded
-                      ? <DownOutlined style={{ fontSize: 8, color: mutedColor }} />
-                      : <RightOutlined style={{ fontSize: 8, color: mutedColor }} />
-                  )}
                   <Text
                     type="secondary"
-                    style={{ fontSize: 11, color: textColor }}
+                    style={{
+                      color: textColor,
+                      fontSize: 11,
+                      minWidth: 0,
+                      maxWidth: "100%",
+                    }}
                     ellipsis={{ tooltip: stepSummary }}
                   >
                     {stepSummary}
                   </Text>
                 </div>
-                {step.type === "tool" && isToolExpanded && (
-                  <div style={{ marginLeft: 30, marginTop: 4, opacity: 0.78 }}>
+                {expandedTools.has(index) ? (
+                  <div style={{ marginTop: 4, opacity: 0.78 }}>
                     {step.args && <ExpandableText text={step.args} label="Input" />}
                     {step.result && <ExpandableText text={step.result} label="Output" />}
-                    {!step.args && !step.result && (
+                    {!step.args && !step.result ? (
                       <Text type="secondary" style={{ fontSize: 10, marginLeft: 16 }}>
                         No details available
                       </Text>
-                    )}
+                    ) : null}
                   </div>
-                )}
+                ) : null}
               </div>
             );
           })}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

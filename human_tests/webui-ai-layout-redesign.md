@@ -145,7 +145,7 @@
 4. 在 Settings 内容页中查看 Agent 分组下的配置卡片。
 5. 在 Settings 内容页中切换到 Runner 分组。
 6. 在 Settings 内容页中切换到 IM 分组。
-7. 检查 IM 分组下 Connections、Targets、Routes 等配置卡片。
+7. 检查 IM 分组下 Targets、Routes、Schedules、History 等配置卡片，并确认 Connections 不在 Settings 中重复出现。
 8. 从 `/_bifrost/ai?view=chat&session=history-thread-1` 进入历史对话后再次点击 Settings。
 9. 点击左侧 `New Chat` 或其它主入口离开 Settings 二级内容页。
 
@@ -155,8 +155,8 @@
 - Settings 顶部 tabs 只有 `Agent`、`Runner`、`IM` 三个入口，不能继续平铺 General、Model、Runtime、Runners、IM Connections、IM Routes 等细分 tab。
 - `Agent` tab 下以卡片方式纵向平铺 General、Model、Runtime、History、Memories、Skills、Memory Records、MCP Servers、Sessions 等 Agent 配置。
 - `Runner` tab 下以卡片方式展示 Runners 配置。
-- `IM` tab 下以卡片方式纵向平铺 Connections、Targets、Routes、Schedules、History 等 IM Gateway 配置。
-- `IM` tab 下 Connections 使用与 IM 工作入口一致的响应式卡片网格展示 Provider。
+- `IM` tab 下以卡片方式纵向平铺 Targets、Routes、Schedules、History 等 IM Gateway 配置。
+- `IM` tab 下不展示 Connections Provider 卡片网格；Provider 连接配置统一由左侧主入口 `IM` 工作台承载。
 - Settings 内容轨道不应撑满整个右侧主内容区；桌面宽屏下宽度上限约 1120px，并在右侧主内容区水平居中。
 - Settings 顶部留白与 ASR、IM、Videos、历史消息线程一致，不能贴住 AI 右侧顶部。
 - Settings 顶部不能显示 Chat tab。
@@ -239,7 +239,7 @@
 - 历史消息线程顶部不贴住 AI 右侧顶部，conversation header 从统一留白后开始。
 - ASR、IM、Videos、Settings 内容轨道顶部留白一致，桌面下约 24px。
 - ASR、IM、Videos 使用工作台阅读轨道，桌面宽屏下最大宽度约 920px；Settings 配置页保留较宽配置轨道，最大宽度约 1120px；这些轨道都必须在右侧主内容区水平居中。
-- IM 工作入口和 Settings 的 IM Connections Provider 区域使用 CSS grid 布局；桌面宽度下多个 Provider 可以并排展示，窄屏下自动变为单列。
+- IM 工作入口的 Connections Provider 区域使用 CSS grid 布局；桌面宽度下多个 Provider 可以并排展示，窄屏下自动变为单列。Settings 的 IM 分组不再重复展示 Connections Provider 卡片。
 - Videos 工具不再额外叠加一圈导致顶部或左右间距明显大于其它页面。
 
 ### TC-AILR-12 运行中队列消息紧凑展示
@@ -258,6 +258,47 @@
 - 每条排队消息单行展示，长文本以省略号截断。
 - 每条排队消息右侧始终预留操作区，删除按钮不能换行，也不能被长文本挤出可视区域。
 - 删除第一条后，该条从队列中移除，其余排队消息继续在同一紧凑滚动区域展示。
+
+### TC-AILR-13 历史线程打开后完整加载且实时追加不覆盖
+
+操作步骤：
+
+1. 准备一个带 `historyPath` 的 Agent Chat 历史线程，历史中至少包含三轮消息：最早一轮、中间一轮、最新一轮。
+2. 打开深链：`/_bifrost/ai?view=chat&session=<session_key>&historyPath=<encoded_history_path>`。
+3. 观察首次 history 请求参数。
+4. 查看右侧消息列表。
+5. 模拟或等待该线程收到一条 `timeline_changed` 实时事件，事件只包含新增过程或新增回答。
+6. 再次查看右侧消息列表。
+
+预期结果：
+
+- 首次 history 请求不携带 `tail=true`、`limit`、`cursor` 或 `since` 参数。
+- 最早一轮、中间一轮、最新一轮消息在首次打开后立即展示，不需要点击 `Load more`。
+- 后端未返回真实分页时，`Load more` 按钮不出现。
+- 收到实时事件后，新事件追加或合并到当前消息列表，旧的最早一轮和中间一轮消息仍然保留。
+- 如果实时增量不连续，前端可以重新拉取完整 history 做恢复，但不能退回只显示最后一页。
+- detail、timeline 和实时事件中相同 role + 内容的消息不会重复显示。
+
+### TC-AILR-14 每轮执行过程按 Codex 风格展示
+
+操作步骤：
+
+1. 准备一个历史线程，其中一轮包含 user message、assistant delta 过程文本、tool call、tool result、final assistant message。
+2. 打开该线程。
+3. 查看该轮完成后的默认折叠状态。
+4. 点击该轮的 `已处理` 折叠按钮。
+5. 查看展开后的过程文本和命令组摘要。
+6. 点击命令组摘要。
+7. 查看命令详情。
+
+预期结果：
+
+- 默认折叠状态只展示 user message、处理耗时和最终 assistant answer；中间 assistant delta 和 tool 细节不直接铺满消息列表。
+- 展开该轮后，过程文本按时间顺序显示，最终 assistant answer 仍然稳定显示在该轮最后。
+- thinking/status 过程文本使用普通正文样式展示，长文本可展开更多。
+- 相邻命令合并为一条命令组摘要，例如 `已运行 1 条命令 · 1s`，不会把每条命令默认散开成大块日志。
+- 点击命令组后可以看到具体命令名、Input 和 Output。
+- 再次点击单条命令可以折叠或展开该命令详情。
 
 ## 清理步骤
 
@@ -281,6 +322,8 @@
 - 2026-07-08：根据用户反馈统一 AI 子页面顶部留白和内容宽度，ASR、IM、Videos、Settings 都通过同一个右侧内容轨道展示，桌面顶部留白约 `24px`、最大宽度约 `1120px` 并居中；历史消息线程嵌入态也从统一顶部留白后开始。IM 工作入口和 Settings IM Connections 改为响应式 Provider 卡片网格，Videos 去掉嵌入 AI Shell 时自身额外 padding。首次复测发现 embedded Chat 左右 padding 压缩 composer 宽度，已修复为只保留顶部 padding；复测命令 `WEB_PORT=4177 pnpm --dir web exec playwright test tests/ui/ai-layout-redesign.spec.ts --config=playwright.frontend.config.ts --reporter=line`，结果 `7 passed (19.5s)`。
 - 2026-07-08：根据用户反馈压缩运行中对话的 Queued 区域。输入框上方队列列表最多显示两条消息高度，更多消息在列表内部滚动；队列行改为文本列 + 固定操作列，长文本单行省略，删除按钮不换行。补充 Playwright 几何断言验证 4 条队列消息时 `agent-chat-queue-list` 内部滚动、删除按钮位于第一行右侧且不换行。
 - 2026-07-08：根据用户反馈收窄左侧 ASR、IM、Videos 三个主入口对应的右侧工作台内容区。三页从 Settings 的 1120px 配置轨道拆出为约 `920px` 工作台阅读轨道，继续保持顶部 `24px` 留白和水平居中，避免右侧内容在宽屏下被拉满；Settings 仍保留约 `1120px` 配置轨道。首次执行 `pnpm --dir web exec playwright test tests/ui/ai-layout-redesign.spec.ts --config=playwright.frontend.config.ts --reporter=line` 因动态端口 Vite 未保持监听导致 7 条用例均 `ERR_CONNECTION_REFUSED`，未进入产品断言；随后按既有固定端口方式复跑 `WEB_PORT=4177 pnpm --dir web exec playwright test tests/ui/ai-layout-redesign.spec.ts --config=playwright.frontend.config.ts --reporter=line`，结果 `7 passed (18.7s)`。
+- 2026-07-08：根据用户反馈移除 Settings > IM 中重复的 Connections Provider 卡片和连接配置入口。左侧主入口 `IM` 继续承载 Connections、Targets、Routes、Schedules、History 全量 IM 配置能力；Settings > IM 只保留 Targets、Routes、Schedules、History，默认切入 `imGatewaySection=targets`，旧 `settings=im&imGatewaySection=connections` 会归一化到 Targets。第一轮 review 发现直接打开旧 Settings IM Connections 深链时还未触发归一化，已补充清理逻辑和 Playwright 断言；复测命令 `WEB_PORT=4177 pnpm --dir web exec playwright test tests/ui/ai-layout-redesign.spec.ts --config=playwright.frontend.config.ts --reporter=line`，结果 `7 passed (20.4s)`。
+- 2026-07-08：根据用户反馈修复历史线程加载不稳定问题。打开带 `historyPath` 的线程时改为一次性请求完整 history，不再默认使用 `tail=true&limit=300` 或前端最近轮次切片；实时 `timeline_changed` 正常走 `since=end_index` 增量追加，lag/reconnect/不连续时回退完整 history 恢复并去重，避免旧消息被最后一页覆盖。同步修正每轮执行过程展示：完成轮次默认只显示最终回答和处理耗时，展开后文本过程直接展示，相邻命令折叠为命令组摘要，命令组展开后可查看命令 Input/Output。复测命令 `pnpm --dir web exec vitest run src/pages/AI/AgentChatSection.timeline.test.ts src/pages/AI/AgentChatSection.helpers.test.ts`，结果 `2 passed / 26 tests passed`；复测命令 `WEB_PORT=4177 pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --config=playwright.frontend.config.ts --grep "loads full history|updates running history timeline|restores active timeline process steps|restores JSONL history|continues external runner history" --reporter=line`，结果 `5 passed (8.1s)`。
 
 执行明细：
 
@@ -292,9 +335,11 @@
 | TC-AILR-04 | 通过。左侧点击 `Existing thread` 后 `New Chat` 取消选中，右侧显示历史消息 `Existing answer`；右上角保留 `Status`，不再显示内部 `agent-chat-new` 按钮；Playwright 断言线程行选中前后高度一致，composer 宽度充分使用右侧主内容区，不再保留旧内部 thread rail 空列；再次点击左侧 `New Chat` 回到新建对话输入态。 |
 | TC-AILR-05 | 通过。ASR capability mock 为可用，左侧展示 `ASR`；点击后 URL 包含 `view=asr`，右侧渲染 ASR 工作台，不打开 Settings 二级内容页。 |
 | TC-AILR-06 | 通过。点击 `IM` 后 URL 包含 `view=im`，右侧渲染 IM Gateway 工作台；旧 `imGatewaySection=routes` 深链可直接显示 Routes section；Connections Provider 使用 CSS grid 响应式卡片网格，mock 的 `feishu-main` 与 `weixin-main` Provider 卡片可见；工作台内容轨道最大宽度不超过约 920px、水平居中且顶部留白与 ASR 一致。 |
-| TC-AILR-07 | 通过。点击底部 Settings 后 URL 包含 `view=settings`，右侧显示 `ai-settings-content`；顶部配置 tabs 只有 `Agent`、`Runner`、`IM` 三个入口。默认 Agent 分组可见并平铺 General、Model、Runtime、MCP Servers 等配置卡片；Settings 内容轨道宽度不超过约 1120px、在右侧主内容区居中且顶部留白一致；Runner 分组仅展示 Runners 配置卡片且不再显示 Agent General；IM 分组平铺 Connections、Targets、Routes 等配置卡片，Connections Provider 使用响应式卡片网格。Chat tab 不存在，`Back`、`Session Detail`、`Messages` 不存在。从历史对话点击 Settings 后 URL 清理 `session=history-thread-1`；切换 Runner 后 URL 包含 `settings=agent&agentSection=runners`，切换 IM 后 URL 包含 `settings=im&imGatewaySection=connections`。 |
+| TC-AILR-07 | 通过。点击底部 Settings 后 URL 包含 `view=settings`，右侧显示 `ai-settings-content`；顶部配置 tabs 只有 `Agent`、`Runner`、`IM` 三个入口。默认 Agent 分组可见并平铺 General、Model、Runtime、MCP Servers 等配置卡片；Settings 内容轨道宽度不超过约 1120px、在右侧主内容区居中且顶部留白一致；Runner 分组仅展示 Runners 配置卡片且不再显示 Agent General；IM 分组平铺 Targets、Routes、Schedules、History 等配置卡片，不再展示 Connections Provider 卡片网格，Provider 连接配置由左侧主入口 IM 工作台承载。Chat tab 不存在，`Back`、`Session Detail`、`Messages` 不存在。从历史对话点击 Settings 后 URL 清理 `session=history-thread-1`；切换 Runner 后 URL 包含 `settings=agent&agentSection=runners`，切换 IM 后 URL 包含 `settings=im&imGatewaySection=targets`。 |
 | TC-AILR-08 | 通过。旧 `agent-chat`、`agent-model`、`tools-asr`、`im-gateway-routes` 链接均进入新 AI Shell 对应视图或 Settings 二级内容页，无空白页和无限跳转；旧 Agent Model 链接进入 Agent 分组并展示 Model 配置卡片；`settings=agent&agentSection=chat&session=...` 被归一化为 Settings Agent General，不展示 Chat 或会话详情。 |
 | TC-AILR-09 | 通过。分别在 `768x900` 与 `390x844` viewport 打开 `/ai`，New Chat、Runner 下拉和 Settings 二级内容页均可操作；`document.documentElement.scrollWidth <= window.innerWidth + 1`，未发现非预期横向滚动。 |
 | TC-AILR-10 | 通过。从 `view=settings&settings=agent&agentSection=model` 进入 Settings 后，依次点击左侧 ASR、IM、Videos、New Chat 和历史线程，Playwright 断言 URL 分别切到 `view=asr`、`view=im`、`view=videos`、`view=chat&mode=new`、`view=chat&session=history-thread-1`，均删除 `settings` 参数，不再显示 `ai-settings-content`，并展示对应主内容。 |
-| TC-AILR-11 | 通过。Playwright 断言 ASR、IM、Videos 的工作台内容轨道顶部距离为约 `24px`、宽度不超过约 `920px` 且明显窄于右侧主内容区；Settings 配置轨道宽度不超过约 `1120px`；所有轨道都在 AI 右侧主内容区内水平居中。历史消息线程顶部不吸顶，Chat header 和消息区从统一留白后开始；IM 工作入口和 Settings IM Connections 均使用 `settings-im-card-grid` CSS grid；Videos 嵌入 AI Shell 时不再叠加自身额外 padding。 |
+| TC-AILR-11 | 通过。Playwright 断言 ASR、IM、Videos 的工作台内容轨道顶部距离为约 `24px`、宽度不超过约 `920px` 且明显窄于右侧主内容区；Settings 配置轨道宽度不超过约 `1120px`；所有轨道都在 AI 右侧主内容区内水平居中。历史消息线程顶部不吸顶，Chat header 和消息区从统一留白后开始；IM 工作入口 Connections 使用 `settings-im-card-grid` CSS grid，Settings IM 不再重复展示 Connections；Videos 嵌入 AI Shell 时不再叠加自身额外 padding。 |
 | TC-AILR-12 | 通过。Playwright 在运行中对话里 mock 4 条队列消息，断言 `agent-chat-queue-list` 高度不超过两条消息空间、`scrollHeight > clientHeight` 且 `overflowY=auto`；第一条长消息右侧删除按钮位于同一队列行内并在文本之后，没有换行；删除第一条后按钮消失，其余队列消息仍保留在紧凑滚动区域。 |
+| TC-AILR-13 | 通过。Playwright mock `/agent/sessions/history/<path>` 完整返回 old/middle/latest 事件，断言首次请求不包含 `tail`、`cursor`、`limit`，页面立即展示 `Oldest question`、`Middle answer`、`Newest answer`，且 `agent-chat-load-older` 不出现；运行中 timeline 回归同时断言增量追加后 `Previous question`、`Previous answer` 仍保留。 |
+| TC-AILR-14 | 通过。Playwright mock 包含 assistant delta、tool_call、tool_result、final assistant message 的 timeline，断言完成轮次折叠时显示 `IM timeline answer` 且不显示中间过程；展开后过程文本按顺序出现，命令组摘要显示 `已运行 1 条命令`，展开命令组后可见 `exec_command`、`pnpm test` 和 `ok`。 |
