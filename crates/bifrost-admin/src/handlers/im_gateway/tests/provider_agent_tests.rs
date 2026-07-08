@@ -106,6 +106,39 @@ pub(super) fn provider_create_payload_forces_feishu_base_url() {
 }
 
 #[test]
+pub(super) fn feishu_setup_pending_sessions_survive_service_restart() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let service = ImGatewayService::new(temp_dir.path());
+    service.feishu_setup_pending.write().insert(
+        "fas_restore".to_string(),
+        PendingFeishuSetup {
+            device_code: "device-code".to_string(),
+            interval_seconds: 5,
+            expires_at_ms: now_ms() + 60_000,
+            app_id: Some("cli_restored".to_string()),
+            app_secret: Some("secret".to_string()),
+            owner_open_id: Some("ou_owner".to_string()),
+            brand: FeishuSetupBrand::Feishu,
+        },
+    );
+    save_pending_feishu_setups(&service);
+
+    let restored = ImGatewayService::new(temp_dir.path());
+    let pending = restored
+        .feishu_setup_pending
+        .read()
+        .get("fas_restore")
+        .cloned()
+        .expect("pending setup should be restored");
+
+    assert_eq!(pending.device_code, "device-code");
+    assert_eq!(pending.app_id.as_deref(), Some("cli_restored"));
+    assert_eq!(pending.app_secret.as_deref(), Some("secret"));
+    assert_eq!(pending.owner_open_id.as_deref(), Some("ou_owner"));
+    assert_eq!(pending.brand, FeishuSetupBrand::Feishu);
+}
+
+#[test]
 pub(super) fn provider_create_payload_preserves_lark_fixed_base_url() {
     let provider = parse_provider_create_payload(serde_json::json!({
         "id": "lark-main",

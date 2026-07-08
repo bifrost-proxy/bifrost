@@ -474,6 +474,7 @@ pub(super) async fn handle_provider_feishu_setup_start(
                     brand,
                 },
             );
+            save_pending_feishu_setups(service);
             json_response(&serde_json::json!({
                 "success": true,
                 "session_id": session_id,
@@ -515,6 +516,7 @@ pub(super) async fn handle_provider_feishu_setup_status(
     }
     if now_ms() >= pending.expires_at_ms {
         service.feishu_setup_pending.write().remove(session_id);
+        save_pending_feishu_setups(service);
         return json_response(&serde_json::json!({
             "success": true,
             "status": "expired",
@@ -555,6 +557,7 @@ pub(super) async fn handle_provider_feishu_setup_status(
                     Ok(FeishuAppRegistrationPoll::Pending) => {}
                     Ok(FeishuAppRegistrationPoll::Expired) => {
                         service.feishu_setup_pending.write().remove(session_id);
+                        save_pending_feishu_setups(service);
                         return json_response(&serde_json::json!({
                             "success": true,
                             "status": "expired",
@@ -574,6 +577,7 @@ pub(super) async fn handle_provider_feishu_setup_status(
         }
         Ok(FeishuAppRegistrationPoll::Expired) => {
             service.feishu_setup_pending.write().remove(session_id);
+            save_pending_feishu_setups(service);
             json_response(&serde_json::json!({
                 "success": true,
                 "status": "expired",
@@ -608,6 +612,7 @@ fn persist_and_respond_feishu_setup(
         .feishu_setup_pending
         .write()
         .insert(session_id.to_string(), pending);
+    save_pending_feishu_setups(service);
     json_response(&serde_json::json!({
         "success": true,
         "status": "confirmed",
@@ -678,6 +683,7 @@ pub(super) async fn handle_provider_feishu_setup_create_provider(
     match service.provider_store.add(config.clone()) {
         Ok(()) => {
             service.feishu_setup_pending.write().remove(session_id);
+            save_pending_feishu_setups(service);
             json_response(&serde_json::json!({
                 "success": true,
                 "provider": sanitize_provider(&config),

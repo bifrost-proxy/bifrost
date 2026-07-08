@@ -15,7 +15,7 @@ pub(super) struct PendingWeixinLogin {
     pub(super) created_at_ms: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct PendingFeishuSetup {
     pub(super) device_code: String,
     pub(super) interval_seconds: u64,
@@ -26,7 +26,7 @@ pub(super) struct PendingFeishuSetup {
     pub(super) brand: FeishuSetupBrand,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum FeishuSetupBrand {
     Feishu,
     Lark,
@@ -204,6 +204,7 @@ impl ImProviderClient {
 // ---------------------------------------------------------------------------
 
 pub struct ImGatewayService {
+    pub(super) data_dir: PathBuf,
     pub provider_store: Arc<ImProviderStore>,
     pub target_store: Arc<ImTargetStore>,
     pub route_store: Arc<ImRouteStore>,
@@ -262,6 +263,7 @@ impl ImGatewayService {
             .map(|port| ImAgentClient::new_with_bifrost_proxy_and_ca(port, Some(&ca_cert_path)))
             .unwrap_or_default();
         Self {
+            data_dir: data_dir.to_path_buf(),
             provider_store: Arc::new(ImProviderStore::new(data_dir)),
             target_store,
             route_store: Arc::new(ImRouteStore::new(data_dir)),
@@ -284,7 +286,7 @@ impl ImGatewayService {
             progress_registry: Arc::new(ImAgentProgressRegistry::new()),
             mock_event_sinks: Arc::new(RwLock::new(HashMap::new())),
             weixin_login_pending: Arc::new(RwLock::new(HashMap::new())),
-            feishu_setup_pending: Arc::new(RwLock::new(HashMap::new())),
+            feishu_setup_pending: Arc::new(RwLock::new(load_pending_feishu_setups(data_dir))),
         }
     }
 
@@ -695,6 +697,67 @@ impl ImGatewayService {
 }
 
 pub type SharedImGatewayService = Arc<ImGatewayService>;
+
+const FEISHU_SETUP_STORE_FILENAME: &str = "im_gateway_feishu_setup_sessions.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PendingFeishuSetupStore {
+    version: u32,
+    sessions: HashMap<String, PendingFeishuSetup>,
+}
+
+fn pending_feishu_setup_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("admin").join(FEISHU_SETUP_STORE_FILENAME)
+}
+
+fn load_pending_feishu_setups(data_dir: &Path) -> HashMap<String, PendingFeishuSetup> {
+    let path = pending_feishu_setup_path(data_dir);
+    if !path.exists() {
+        return HashMap::new();
+    }
+    const MAX_STORE_FILE_BYTES: u64 = 16 * 1024 * 1024;
+    if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > MAX_STORE_FILE_BYTES {
+        let _ = std::fs::remove_file(&path);
+        return HashMap::new();
+    }
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+    match serde_json::from_str::<PendingFeishuSetupStore>(&content) {
+        Ok(store) if store.version == 1 => store.sessions,
+        _ => {
+            let _ = std::fs::remove_file(&path);
+            HashMap::new()
+        }
+    }
+}
+
+pub(super) fn save_pending_feishu_setups(service: &ImGatewayService) {
+    let path = pending_feishu_setup_path(&service.data_dir);
+    let store = PendingFeishuSetupStore {
+        version: 1,
+        sessions: service.feishu_setup_pending.read().clone(),
+    };
+    if let Err(error) = write_pending_feishu_setup_store(&path, &store) {
+        warn!(
+            path = %path.display(),
+            error = %error,
+            "failed to persist Feishu setup sessions"
+        );
+    }
+}
+
+fn write_pending_feishu_setup_store(
+    path: &Path,
+    store: &PendingFeishuSetupStore,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    let content =
+        serde_json::to_string_pretty(store).map_err(|e| format!("serialize store: {e}"))?;
+    std::fs::write(path, content).map_err(|e| format!("write {}: {e}", path.display()))
+}
 
 pub(super) fn should_run_provider_event_connection(provider: &ImProviderConfig) -> bool {
     provider.enabled
