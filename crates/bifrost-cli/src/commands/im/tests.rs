@@ -432,6 +432,22 @@ fn resolve_runner_choice_rejects_missing_runner_with_available_list() {
 }
 
 #[test]
+fn resolve_runner_choice_requires_runner_when_stdin_is_not_interactive() {
+    let runners = vec![RunnerChoice {
+        id: "traex".into(),
+        adapter: "traex".into(),
+        enabled: true,
+    }];
+
+    let error = resolve_runner_choice(None, &runners)
+        .expect_err("non-interactive provider setup must require --runner");
+
+    assert!(error.to_string().contains("--runner is required"));
+    assert!(error.to_string().contains("Available runners: traex"));
+    assert!(error.to_string().contains("codex, traex, Claude Code"));
+}
+
+#[test]
 fn enabled_provider_choices_only_returns_enabled_providers() {
     let providers = enabled_provider_choices(&json!([
         {"id":"disabled","display_name":"Disabled","enabled":false},

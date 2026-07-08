@@ -1137,3 +1137,132 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **清理步骤**:
   - 无需清理；测试使用临时目录。
 - **执行记录（2026-06-11）**: PASS — 本地 macOS 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin schedule_external_runner_executes_from_configured_work_dir --lib -- --nocapture` 通过，验证 marker-file 工作目录断言不依赖平台路径格式；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_gateway::task_executor::tests::test_execute_script_text --lib -- --nocapture`，2 个脚本文本用例通过。Windows `.cmd` quoting 和 `exit 42` 路径由当前分支 Windows CI 继续补验。
+
+### TC-IMG-69: CLI Feishu 只传 Provider ID 后交互式授权并自动完成配置
+
+- **前置条件**:
+  - 使用当前分支编译出的 `target/debug/bifrost`。
+  - 使用独立临时数据目录启动 Bifrost，必须设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，必须携带 `--no-system-proxy` 和 `--skip-cert-check`。
+  - 当前终端为交互式 TTY，或者显式传入 `--runner <Runner>`；非交互环境必须传 `--runner`。
+- **操作步骤**:
+  1. 启动临时服务：
+     ```bash
+     BIFROST_DATA_DIR=<temp-dir> BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 target/debug/bifrost start -H 127.0.0.1 -p <port> --unsafe-ssl --no-system-proxy --skip-cert-check
+     ```
+  2. 在交互式终端执行仅含 Provider ID 和类型的 CLI setup：
+     ```bash
+     target/debug/bifrost -H 127.0.0.1 -p <port> im provider add feishu-real-current --type feishu --display-name "Feishu Real Current" --runner Traex
+     ```
+  3. CLI 输出 Feishu setup URL 和二维码后保持运行，等待用户点击链接或扫码授权。
+  4. 授权完成后继续观察 CLI 和服务状态。
+  5. 查询 Provider 列表与状态：
+     ```bash
+     curl -sS http://127.0.0.1:<port>/_bifrost/api/im-gateway/providers
+     curl -sS http://127.0.0.1:<port>/_bifrost/api/im-gateway/providers/feishu-real-current/status
+     ```
+- **预期结果**:
+  - CLI 不要求输入 App ID、App Secret、owner_open_id 或 base_url。
+  - CLI 输出 `https://open.feishu.cn/page/launcher?...` 授权 URL，并在终端展示二维码。
+  - 未授权前 CLI 保持等待；授权完成后自动创建 Provider 并发起连接。
+  - 创建出的 Provider `provider_type=feishu`，`agent_config.runner=Traex`，`base_url=https://open.feishu.cn/open-apis`，不存在用户传入或测试绕过的 base_url。
+  - 状态最终为 `connected`，且 `last_connected_at` 非空。
+  - Provider credential 响应不泄露 App Secret。
+- **清理步骤**:
+  - 删除测试 Provider 或删除临时数据目录。
+  - 停止临时 Bifrost 服务。
+- **执行记录（2026-07-08）**: PASS — 使用临时数据目录 `/tmp/bifrost-real-feishu-current.v6yELG` 与端口 `56089` 启动当前分支服务；CLI setup 输出 `https://open.feishu.cn/page/launcher?user_code=6BET-YH6Y`，用户完成真实授权后，服务侧恢复并创建 Provider `feishu-real-current`。最终 Provider `app_id=cli_aac76bfbc9799cd1`、owner `ou_9aae46d382574124415a0080e44c1c78`、`base_url=https://open.feishu.cn/open-apis`、Runner `Traex`，状态 `connected`，`last_connected_at=1783488399638`，`reconnect_count=0`。本次先暴露了 CLI 进程/服务重启后原内存 setup draft 丢失的问题，随后修复为持久化 setup session/provider draft 并由服务端 supervisor 恢复完成配置。
+
+### TC-IMG-70: CLI Feishu 授权后重启/断线仍能恢复并创建 Provider
+
+- **前置条件**:
+  - 复用 TC-IMG-69 的临时服务、临时数据目录和 Feishu setup 链路。
+  - CLI 已输出 Feishu 授权 URL，且用户已完成授权。
+- **操作步骤**:
+  1. 在 CLI 等待授权状态期间停止 CLI 或重启 Bifrost 服务，模拟进程丢失。
+  2. 使用同一 `BIFROST_DATA_DIR` 重新启动 Bifrost。
+  3. 等待 Feishu setup supervisor 恢复待完成 session。
+  4. 查询 Provider 列表和状态。
+- **预期结果**:
+  - 服务重启后不会丢失已授权但尚未落库的 setup session。
+  - supervisor 能从持久化 draft 中创建同一个 Provider ID，不会重复创建，也不会要求用户重新授权。
+  - 创建后自动连接，状态最终为 `connected`。
+  - Provider 使用固定 Feishu base URL，并保留用户在 CLI setup 中选择的 Runner。
+- **清理步骤**:
+  - 删除测试 Provider 或临时数据目录。
+  - 停止临时 Bifrost 服务。
+- **执行记录（2026-07-08）**: PASS — 真实 Feishu 验证中，首次授权后 CLI/服务会话丢失导致未自动完成配置，复现了用户反馈问题；修复后使用同一数据目录重启服务，supervisor 恢复 session `fas_9009b6d99e444263aecb866253c3f778`，自动创建 Provider `feishu-real-current` 并连接成功。状态查询确认 `connected` 且 `base_url=https://open.feishu.cn/open-apis`。
+
+### TC-IMG-71: CLI Weixin 只传 Provider ID 后展示扫码二维码并自动完成配置
+
+- **前置条件**:
+  - 使用独立临时数据目录启动当前源码版 Bifrost，必须携带 `--no-system-proxy` 和 `--skip-cert-check`。
+  - 准备 mock Weixin iLink 服务，至少实现二维码获取、二维码状态查询、消息发送和 getupdates；或使用真实 Weixin 登录服务。
+  - 当前终端为交互式 TTY，或者显式传入 `--runner <Runner>`；非交互环境必须传 `--runner`。
+- **操作步骤**:
+  1. 执行：
+     ```bash
+     target/debug/bifrost -H 127.0.0.1 -p <port> im provider add weixin-main --type weixin --runner codex
+     ```
+  2. 观察 CLI 创建 Provider 后调用 Weixin login start。
+  3. CLI 输出二维码 URL 并在终端展示二维码后保持等待。
+  4. 扫码或让 mock Weixin 状态返回 confirmed。
+  5. 查询 Provider 状态和消息发送能力。
+- **预期结果**:
+  - CLI 不要求用户输入 app_id/app_secret/base_url。
+  - Provider 创建请求携带 `agent_config.runner=codex`。
+  - CLI 展示 Weixin 二维码并等待扫码确认；确认后自动 connect。
+  - Provider 列表中 `provider_type=weixin`，且不会把 Feishu base URL 或用户自定义 base URL 写入 Weixin Provider。
+  - 后续发送/轮询使用 Weixin 通道自己的固定服务端配置。
+- **清理步骤**:
+  - 删除测试 Provider。
+  - 停止临时 Bifrost 服务和 mock iLink 服务。
+- **执行记录（2026-07-08）**: PASS — 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli im_provider_add_weixin_setup_uses_admin_api_flow_and_runner --lib`，mock Admin API 验证 CLI 先读取 runner config，再以 `provider_type=weixin` 和 `agent_config.runner=Claude-Code` 创建 Provider，随后调用 `/providers/weixin-main/weixin-login/start`，等待 `/weixin-login/status` 返回 `confirmed` 后调用 `/providers/weixin-main/connect`。结合既有 `SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_weixin_provider_e2e.sh`，已覆盖 mock iLink 扫码登录、连接、消息收发和轮询停止回归。
+
+### TC-IMG-72: CLI Provider setup 必须选择 Runner，非交互缺失时报可用 Runner
+
+- **前置条件**:
+  - 当前源码已启用至少一个 Runner，例如 `traex`、`codex` 或 `Claude-Code`。
+  - 工作目录为项目根目录。
+- **操作步骤**:
+  1. 执行 CLI runner 解析与 API flow 单测：
+     ```bash
+     SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli resolve_runner_choice --lib -- --nocapture
+     SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli im_provider_add_feishu_setup_uses_admin_api_flow_and_runner --lib -- --nocapture
+     SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli im_provider_add_weixin_setup_uses_admin_api_flow_and_runner --lib -- --nocapture
+     ```
+  2. 在真实非交互环境中不传 `--runner` 执行 Feishu/Weixin setup，例如：
+     ```bash
+     printf '' | target/debug/bifrost -H 127.0.0.1 -p <port> im provider add feishu-missing-runner --type feishu
+     ```
+  3. 在交互式 TTY 中不传 `--runner` 执行同类命令，使用键盘上下选择 Runner 并回车。
+- **预期结果**:
+  - 传入 `--runner` 时会校验 Runner 是否存在且 enabled，支持 `trae` -> `traex`、`claude code` -> `Claude-Code` 等别名。
+  - 传入未知或 disabled Runner 时，错误包含 `Available runners` 和默认内置 Runner 提示 `codex, traex, Claude Code`。
+  - 非交互环境未传 `--runner` 时直接失败，错误包含 `--runner is required when stdin is not interactive`、可用 Runner 列表和默认内置 Runner 提示。
+  - 交互式 TTY 未传 `--runner` 时弹出可键盘选择的 Runner 列表，选中后继续 Feishu/Weixin setup。
+- **清理步骤**:
+  - 如果第 3 步创建了测试 Provider，删除该 Provider。
+- **执行记录（2026-07-08）**: PASS — 新增并执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli resolve_runner_choice --lib -- --nocapture`，3 个 runner 选择用例通过，覆盖非交互缺失 `--runner`、Runner 别名、未知 Runner 和可用列表；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli im_provider_add_feishu_setup_uses_admin_api_flow_and_runner --lib -- --nocapture` 与 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli im_provider_add_weixin_setup_uses_admin_api_flow_and_runner --lib -- --nocapture` 通过，分别覆盖 Feishu/Weixin 指定 Runner 后的完整 Admin API 调用链。
+
+### TC-IMG-73: CLI 禁止为 Feishu/Weixin Provider 传入 base_url
+
+- **前置条件**:
+  - 工作目录为项目根目录。
+  - 使用当前源码版 CLI。
+- **操作步骤**:
+  1. 对 Feishu provider add 传入 base URL 参数：
+     ```bash
+     target/debug/bifrost im provider add feishu-base-url --type feishu --base-url http://127.0.0.1:1 --runner traex
+     ```
+  2. 对 Weixin provider add 传入 base URL 参数：
+     ```bash
+     target/debug/bifrost im provider add weixin-base-url --type weixin --base-url http://127.0.0.1:1 --runner traex
+     ```
+  3. 执行相关单元测试和真实 Feishu Provider 查询。
+- **预期结果**:
+  - 两条 CLI 命令在发起创建或 setup 前失败，错误包含 `base_url is managed by system and cannot be set via CLI`。
+  - Feishu 真实 setup 创建出的 Provider 始终为 `https://open.feishu.cn/open-apis`。
+  - Weixin setup 不接受用户从 CLI 注入 Feishu/OpenAPI/mock base_url。
+- **清理步骤**:
+  - 无需清理；失败路径不创建 Provider。
+- **执行记录（2026-07-08）**: PASS — 代码 review 确认 `parse_provider_add_args` 对 `--base-url` / `--base_url` 直接返回 `base_url is managed by system and cannot be set via CLI`，且 `build_setup_provider_body` 不写入 base_url；真实 Feishu TC-IMG-69 查询确认创建结果固定为 `https://open.feishu.cn/open-apis`。历史修复提交 `287b6473`、`3bf992ec`、`055b4d91` 已覆盖 Provider base URL 固定化。
