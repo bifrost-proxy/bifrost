@@ -1540,11 +1540,18 @@ async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
     let runs_root = temp_dir.path().join("runs");
     let runtime = ExternalCliRuntime::new(&runs_root);
     let request = ExternalCliRunRequest {
-        images: vec![ExternalCliImageInput {
-            mime_type: "image/png".to_string(),
-            data: "aGVsbG8=".to_string(),
-            name: Some("pasted.png".to_string()),
-        }],
+        images: vec![
+            ExternalCliImageInput {
+                mime_type: "image/png".to_string(),
+                data: "aGVsbG8=".to_string(),
+                name: Some("pasted.png".to_string()),
+            },
+            ExternalCliImageInput {
+                mime_type: "image/jpeg".to_string(),
+                data: "dHdv".to_string(),
+                name: Some("second.jpg".to_string()),
+            },
+        ],
         message: String::new(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -1582,6 +1589,7 @@ async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
         .unwrap();
     assert!(prompt.contains("## Attached Images"));
     assert!(prompt.contains("image-1.png"));
+    assert!(prompt.contains("image-2.jpg"));
     let images: Vec<ExternalCliSavedImageAttachment> = serde_json::from_str(
         result
             .metadata
@@ -1589,9 +1597,11 @@ async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
             .expect("attachments metadata"),
     )
     .unwrap();
-    assert_eq!(images.len(), 1);
+    assert_eq!(images.len(), 2);
     assert_eq!(images[0].mime_type, "image/png");
+    assert_eq!(images[1].mime_type, "image/jpeg");
     let first_image_path = std::path::PathBuf::from(&images[0].path);
+    let second_saved_image_path = std::path::PathBuf::from(&images[1].path);
     assert_eq!(
         first_image_path.parent(),
         Some(
@@ -1602,7 +1612,16 @@ async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
                 .as_path()
         )
     );
+    assert_eq!(
+        first_image_path.file_name().and_then(|v| v.to_str()),
+        Some("image-1.png")
+    );
+    assert_eq!(
+        second_saved_image_path.file_name().and_then(|v| v.to_str()),
+        Some("image-2.jpg")
+    );
     assert_eq!(tokio::fs::read(&images[0].path).await.unwrap(), b"hello");
+    assert_eq!(tokio::fs::read(&images[1].path).await.unwrap(), b"two");
 
     let second_result = runtime.run(second_request).await.unwrap();
     let second_images: Vec<ExternalCliSavedImageAttachment> = serde_json::from_str(

@@ -16,6 +16,8 @@ use bifrost_agent::session::{GuideChannel, GuideMessageChannel};
 pub struct QueueItem {
     pub seq: u64,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<bifrost_agent::ChatImageInput>,
 }
 
 /// Per-session queue state.
@@ -153,6 +155,17 @@ impl SessionQueueManager {
         session_key: &str,
         msg: String,
     ) -> Result<Vec<QueueItem>, &'static str> {
+        self.push_queue_with_images(session_key, msg, Vec::new())
+    }
+
+    /// Push a message and its image attachments into the queue.
+    /// Returns the current queue snapshot. Returns `Err` if the queue is full.
+    pub fn push_queue_with_images(
+        &self,
+        session_key: &str,
+        msg: String,
+        images: Vec<bifrost_agent::ChatImageInput>,
+    ) -> Result<Vec<QueueItem>, &'static str> {
         let mut entry = self.queues.entry(session_key.to_string()).or_default();
         let queue = entry.value_mut();
 
@@ -162,7 +175,11 @@ impl SessionQueueManager {
 
         let seq = queue.next_seq;
         queue.next_seq += 1;
-        queue.items.push_back(QueueItem { seq, message: msg });
+        queue.items.push_back(QueueItem {
+            seq,
+            message: msg,
+            images,
+        });
 
         Ok(queue.items.iter().cloned().collect())
     }
@@ -181,8 +198,13 @@ impl SessionQueueManager {
 
     /// Pop the next queued message (FIFO).
     pub fn pop_queue(&self, session_key: &str) -> Option<String> {
+        self.pop_queue_item(session_key).map(|item| item.message)
+    }
+
+    /// Pop the next queued message with attachments (FIFO).
+    pub fn pop_queue_item(&self, session_key: &str) -> Option<QueueItem> {
         if let Some(mut entry) = self.queues.get_mut(session_key) {
-            return entry.value_mut().items.pop_front().map(|item| item.message);
+            return entry.value_mut().items.pop_front();
         }
         None
     }
@@ -304,6 +326,26 @@ mod tests {
         assert_eq!(mgr.pop_queue("s1").as_deref(), Some("a"));
         assert_eq!(mgr.pop_queue("s1").as_deref(), Some("b"));
         assert!(mgr.pop_queue("s1").is_none());
+    }
+
+    #[test]
+    fn test_queue_preserves_image_attachments() {
+        let mgr = SessionQueueManager::new();
+        mgr.push_queue_with_images(
+            "s1",
+            "look at this".into(),
+            vec![bifrost_agent::ChatImageInput {
+                mime_type: "image/png".to_string(),
+                data: "aGVsbG8=".to_string(),
+            }],
+        )
+        .unwrap();
+
+        let item = mgr.pop_queue_item("s1").expect("queued item");
+        assert_eq!(item.message, "look at this");
+        assert_eq!(item.images.len(), 1);
+        assert_eq!(item.images[0].mime_type, "image/png");
+        assert_eq!(item.images[0].data, "aGVsbG8=");
     }
 
     #[test]

@@ -726,7 +726,11 @@ pub(super) async fn run_event_loop_with_options(
                 ..
             } => {
                 let raw_message_text = route_match.message_text.as_deref().unwrap_or("");
-                if raw_message_text.trim().is_empty() {
+                let has_images = event
+                    .message
+                    .as_ref()
+                    .is_some_and(|message| !message.images.is_empty());
+                if raw_message_text.trim().is_empty() && !has_images {
                     continue;
                 }
                 let message_text = event
@@ -1066,9 +1070,10 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                     let _ = ctx.queue_manager.push_queue(&input.session_key, unconsumed);
                 }
             }
-            match ctx.queue_manager.pop_queue(&input.session_key) {
-                Some(next_message) => {
-                    current_message = next_message;
+            match ctx.queue_manager.pop_queue_item(&input.session_key) {
+                Some(next_item) => {
+                    current_message = next_item.message;
+                    current_images = external_cli_images_from_chat_images(next_item.images);
                     continue;
                 }
                 None => break,
@@ -1514,8 +1519,8 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                 let _ = ctx.queue_manager.push_queue(&input.session_key, unconsumed);
             }
         }
-        match ctx.queue_manager.pop_queue(&input.session_key) {
-            Some(next_message) => {
+        match ctx.queue_manager.pop_queue_item(&input.session_key) {
+            Some(next_item) => {
                 if matches!(
                     delivery_mode,
                     crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard
@@ -1530,7 +1535,8 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                     )
                     .await;
                 }
-                current_message = next_message;
+                current_message = next_item.message;
+                current_images = external_cli_images_from_chat_images(next_item.images);
             }
             None => break,
         };
@@ -2076,15 +2082,24 @@ mod tests {
 
     #[test]
     fn external_cli_images_from_chat_images_preserves_payloads() {
-        let images = external_cli_images_from_chat_images(vec![bifrost_agent::ChatImageInput {
-            mime_type: "image/png".to_string(),
-            data: "aGVsbG8=".to_string(),
-        }]);
+        let images = external_cli_images_from_chat_images(vec![
+            bifrost_agent::ChatImageInput {
+                mime_type: "image/png".to_string(),
+                data: "aGVsbG8=".to_string(),
+            },
+            bifrost_agent::ChatImageInput {
+                mime_type: "image/jpeg".to_string(),
+                data: "dHdv".to_string(),
+            },
+        ]);
 
-        assert_eq!(images.len(), 1);
+        assert_eq!(images.len(), 2);
         assert_eq!(images[0].mime_type, "image/png");
         assert_eq!(images[0].data, "aGVsbG8=");
         assert!(images[0].name.is_none());
+        assert_eq!(images[1].mime_type, "image/jpeg");
+        assert_eq!(images[1].data, "dHdv");
+        assert!(images[1].name.is_none());
     }
 
     #[test]

@@ -1191,7 +1191,13 @@ pub(super) async fn handle_busy_message(
             .await;
             return;
         }
-        match queue_manager.push_queue(session_key, queue_text.to_string()) {
+        let images = match event.message.as_ref() {
+            Some(event_message) if !event_message.images.is_empty() => {
+                resolve_event_images(client, provider, event, &event_message.images).await
+            }
+            _ => Vec::new(),
+        };
+        match queue_manager.push_queue_with_images(session_key, queue_text.to_string(), images) {
             Ok(items) => {
                 let guide_pending = !queue_manager.guide_status(session_key).is_empty();
                 let updated = progress_registry
