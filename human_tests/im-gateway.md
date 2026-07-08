@@ -1266,3 +1266,26 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **清理步骤**:
   - 无需清理；失败路径不创建 Provider。
 - **执行记录（2026-07-08）**: PASS — 代码 review 确认 `parse_provider_add_args` 对 `--base-url` / `--base_url` 直接返回 `base_url is managed by system and cannot be set via CLI`，且 `build_setup_provider_body` 不写入 base_url；真实 Feishu TC-IMG-69 查询确认创建结果固定为 `https://open.feishu.cn/open-apis`。历史修复提交 `287b6473`、`3bf992ec`、`055b4d91` 已覆盖 Provider base URL 固定化。
+
+### TC-IMG-74: CLI Feishu/Weixin 终端二维码保持接近正方形
+
+- **前置条件**:
+  - 工作目录为项目根目录。
+  - 使用当前源码版 CLI。
+- **操作步骤**:
+  1. 执行二维码渲染单元测试：
+     ```bash
+     SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli terminal_qr_code_renders_with_square_terminal_ratio --lib -- --nocapture
+     ```
+  2. 在交互式终端执行 Feishu 或 Weixin provider setup，观察终端二维码：
+     ```bash
+     target/debug/bifrost -H 127.0.0.1 -p <port> im provider add feishu-qr-ratio --type feishu --runner traex
+     target/debug/bifrost -H 127.0.0.1 -p <port> im provider add weixin-qr-ratio --type weixin --runner codex
+     ```
+- **预期结果**:
+  - 渲染函数使用等宽模块输出，终端二维码视觉上接近正方形，不再被横向拉成长方形。
+  - 单元测试会按 `Dense1x2` 每行承载两行 QR 模块的终端渲染模型，检查最大字符宽度与估算视觉高度接近，防止 `module_dimensions(2, 1)` 一类配置再次把二维码拉宽。
+  - Feishu 授权 URL 和 Weixin 扫码 URL 仍能正常生成二维码。
+- **清理步骤**:
+  - 如果第 2 步创建了测试 Provider，删除该 Provider。
+- **执行记录（2026-07-08）**: PASS — 修复 `render_terminal_qr_code` 使用 `Dense1x2` + `module_dimensions(1, 1)`，避免原先 `module_dimensions(2, 1)` 导致终端二维码宽度翻倍；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli terminal_qr_code_renders_with_square_terminal_ratio --lib -- --nocapture` 通过。

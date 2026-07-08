@@ -448,6 +448,31 @@ fn resolve_runner_choice_requires_runner_when_stdin_is_not_interactive() {
 }
 
 #[test]
+fn terminal_qr_code_renders_with_square_terminal_ratio() {
+    let image = render_terminal_qr_code("https://open.feishu.cn/page/launcher?user_code=TEST")
+        .expect("qr renders");
+    let lines: Vec<_> = image
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let height = lines.len();
+    let width = lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .expect("qr has width");
+
+    assert!(height > 0);
+    assert!(width > 0);
+    let estimated_visual_height = height * 2;
+    let visual_ratio = width as f64 / estimated_visual_height as f64;
+    assert!(
+        (0.75..=1.35).contains(&visual_ratio),
+        "terminal QR should be close to square: width={width}, height={height}, visual_ratio={visual_ratio:.2}"
+    );
+}
+
+#[test]
 fn enabled_provider_choices_only_returns_enabled_providers() {
     let providers = enabled_provider_choices(&json!([
         {"id":"disabled","display_name":"Disabled","enabled":false},

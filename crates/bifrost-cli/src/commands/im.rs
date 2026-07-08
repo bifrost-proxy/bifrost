@@ -641,13 +641,8 @@ fn setup_poll_interval_seconds(value: Option<u64>, default: u64) -> u64 {
 }
 
 fn print_terminal_qr_code(value: &str) {
-    match QrCode::new(value.as_bytes()) {
-        Ok(code) => {
-            let image = code
-                .render::<unicode::Dense1x2>()
-                .quiet_zone(true)
-                .module_dimensions(2, 1)
-                .build();
+    match render_terminal_qr_code(value) {
+        Ok(image) => {
             println!();
             println!("{image}");
         }
@@ -659,6 +654,15 @@ fn print_terminal_qr_code(value: &str) {
             );
         }
     }
+}
+
+fn render_terminal_qr_code(value: &str) -> std::result::Result<String, qrcode::types::QrError> {
+    let code = QrCode::new(value.as_bytes())?;
+    Ok(code
+        .render::<unicode::Dense1x2>()
+        .quiet_zone(true)
+        .module_dimensions(1, 1)
+        .build())
 }
 
 fn required_string<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
