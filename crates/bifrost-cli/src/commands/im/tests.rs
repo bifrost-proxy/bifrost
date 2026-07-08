@@ -112,6 +112,72 @@ fn im_send_builds_rich_card_payload() {
 }
 
 #[test]
+fn parse_provider_add_args_uses_feishu_setup_without_credentials() {
+    let args = parse_provider_add_args("feishu-main", &["--type".into(), "feishu".into()])
+        .expect("parse provider add args");
+
+    assert!(args.should_use_feishu_setup());
+    assert_eq!(args.setup_runner(), "traex");
+
+    let body = build_feishu_setup_provider_body(&args);
+    assert_eq!(body["id"], "feishu-main");
+    assert_eq!(body["provider_type"], "feishu");
+    assert_eq!(body["enabled"], true);
+    assert_eq!(body["event_connection_enabled"], true);
+    assert_eq!(body["event_types"][0], "message.receive");
+    assert_eq!(body["agent_config"]["runner"], "traex");
+}
+
+#[test]
+fn parse_provider_add_args_allows_feishu_setup_runner_override() {
+    let args = parse_provider_add_args(
+        "feishu-main",
+        &[
+            "--type".into(),
+            "feishu".into(),
+            "--display-name".into(),
+            "Main Feishu".into(),
+            "--runner".into(),
+            "codex".into(),
+        ],
+    )
+    .expect("parse provider add args");
+
+    assert!(args.should_use_feishu_setup());
+    assert_eq!(args.setup_runner(), "codex");
+
+    let body = build_feishu_setup_provider_body(&args);
+    assert_eq!(body["display_name"], "Main Feishu");
+    assert_eq!(body["agent_config"]["runner"], "codex");
+}
+
+#[test]
+fn parse_provider_add_args_with_credentials_uses_direct_create_body() {
+    let args = parse_provider_add_args(
+        "feishu-main",
+        &[
+            "--type".into(),
+            "feishu".into(),
+            "--app-id".into(),
+            "cli_xxx".into(),
+            "--secret".into(),
+            "secret".into(),
+            "--runner".into(),
+            "claude-code".into(),
+        ],
+    )
+    .expect("parse provider add args");
+
+    assert!(!args.should_use_feishu_setup());
+    let body = args.into_create_body();
+    assert_eq!(body["id"], "feishu-main");
+    assert_eq!(body["provider_type"], "feishu");
+    assert_eq!(body["app_id"], "cli_xxx");
+    assert_eq!(body["app_secret"], "secret");
+    assert_eq!(body["agent_config"]["runner"], "claude-code");
+}
+
+#[test]
 fn enabled_provider_choices_only_returns_enabled_providers() {
     let providers = enabled_provider_choices(&json!([
         {"id":"disabled","display_name":"Disabled","enabled":false},
@@ -370,7 +436,7 @@ fn ensure_provider_value_sets_when_missing() {
 
 #[test]
 fn parse_provider_add_args_parses_common_flags() {
-    let body = parse_provider_add_args(
+    let args = parse_provider_add_args(
         "feishu-main",
         &[
             "--type".into(),
@@ -390,6 +456,7 @@ fn parse_provider_add_args_parses_common_flags() {
         ],
     )
     .expect("parse provider add args");
+    let body = args.into_create_body();
 
     assert_eq!(body["id"], "feishu-main");
     assert_eq!(body["provider_type"], "feishu");

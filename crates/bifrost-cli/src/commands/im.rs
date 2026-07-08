@@ -1,9 +1,12 @@
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
+use std::thread;
+use std::time::Duration;
 
 use base64::Engine as _;
 use colored::Colorize;
+use qrcode::{render::unicode, QrCode};
 use serde_json::{json, Value};
 use tracing::debug;
 
@@ -15,6 +18,7 @@ use bifrost_core::{text::truncate_chars_with_suffix, Result};
 
 const IM_GATEWAY_API_PREFIX: &str = "/_bifrost/api/im-gateway";
 const DEFAULT_IM_PROVIDER_ID: &str = "feishu-main";
+const DEFAULT_FEISHU_SETUP_RUNNER: &str = "traex";
 
 pub fn handle_im_command(host: &str, port: u16, args: &[String]) -> Result<()> {
     if args.is_empty() {
@@ -61,7 +65,11 @@ fn handle_im_provider(host: &str, port: u16, args: &[String]) -> Result<()> {
             let name = args.get(1).ok_or_else(|| {
                 bifrost_core::BifrostError::Config("provider name required".to_string())
             })?;
-            let body = parse_provider_add_args(name, &args[2..])?;
+            let add_args = parse_provider_add_args(name, &args[2..])?;
+            if add_args.should_use_feishu_setup() {
+                return handle_feishu_provider_setup(host, port, &add_args);
+            }
+            let body = add_args.into_create_body();
             let url = api_url(host, port, "/providers");
             let resp = http_post(&url, &body)?;
             println!(
@@ -110,32 +118,100 @@ fn handle_im_provider(host: &str, port: u16, args: &[String]) -> Result<()> {
     }
 }
 
-fn parse_provider_add_args(name: &str, args: &[String]) -> Result<Value> {
-    let mut body = json!({
-        "id": name,
-    });
+#[derive(Debug, Clone)]
+struct ProviderAddArgs {
+    id: String,
+    provider_type: Option<String>,
+    app_id: Option<String>,
+    app_secret: Option<String>,
+    display_name: Option<String>,
+    enabled: Option<bool>,
+    owner_open_id: Option<String>,
+    event_connection_enabled: Option<bool>,
+    runner: Option<String>,
+    brand: Option<String>,
+}
+
+impl ProviderAddArgs {
+    fn should_use_feishu_setup(&self) -> bool {
+        self.provider_type.as_deref() == Some("feishu")
+            && self.app_id.as_deref().is_none_or(str::is_empty)
+            && self.app_secret.as_deref().is_none_or(str::is_empty)
+    }
+
+    fn setup_runner(&self) -> &str {
+        self.runner
+            .as_deref()
+            .unwrap_or(DEFAULT_FEISHU_SETUP_RUNNER)
+    }
+
+    fn into_create_body(self) -> Value {
+        let mut body = json!({
+            "id": self.id,
+        });
+
+        if let Some(value) = self.provider_type {
+            body["provider_type"] = json!(value);
+        }
+        if let Some(value) = self.app_id {
+            body["app_id"] = json!(value);
+        }
+        if let Some(value) = self.app_secret {
+            body["app_secret"] = json!(value);
+        }
+        if let Some(value) = self.display_name {
+            body["display_name"] = json!(value);
+        }
+        if let Some(value) = self.enabled {
+            body["enabled"] = json!(value);
+        }
+        if let Some(value) = self.owner_open_id {
+            body["owner_open_id"] = json!(value);
+        }
+        if let Some(value) = self.event_connection_enabled {
+            body["event_connection_enabled"] = json!(value);
+        }
+        if let Some(value) = self.runner {
+            body["agent_config"] = json!({
+                "runner": value,
+            });
+        }
+
+        body
+    }
+}
+
+fn parse_provider_add_args(name: &str, args: &[String]) -> Result<ProviderAddArgs> {
+    let mut parsed = ProviderAddArgs {
+        id: name.to_string(),
+        provider_type: None,
+        app_id: None,
+        app_secret: None,
+        display_name: None,
+        enabled: None,
+        owner_open_id: None,
+        event_connection_enabled: None,
+        runner: None,
+        brand: None,
+    };
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--type" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    body["provider_type"] = json!(v);
-                }
+                parsed.provider_type = args.get(i).cloned();
             }
             "--app-id" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    body["app_id"] = json!(v);
-                }
+                parsed.app_id = args.get(i).cloned();
             }
             "--secret" => {
                 i += 1;
                 if let Some(v) = args.get(i) {
                     let resolved = resolve_secret(v)
                         .map_err(|error| bifrost_core::BifrostError::Config(error.to_string()))?;
-                    body["app_secret"] = json!(resolved);
+                    parsed.app_secret = Some(resolved);
                 }
             }
             "--base-url" => {
@@ -145,34 +221,194 @@ fn parse_provider_add_args(name: &str, args: &[String]) -> Result<Value> {
             }
             "--display-name" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    body["display_name"] = json!(v);
-                }
+                parsed.display_name = args.get(i).cloned();
             }
             "--enabled" => {
                 i += 1;
                 if let Some(v) = args.get(i) {
-                    body["enabled"] = json!(v.parse::<bool>().unwrap_or(true));
+                    parsed.enabled = Some(v.parse::<bool>().unwrap_or(true));
                 }
             }
             "--owner-open-id" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    body["owner_open_id"] = json!(v);
-                }
+                parsed.owner_open_id = args.get(i).cloned();
             }
             "--enable-long-connection" => {
                 i += 1;
                 if let Some(v) = args.get(i) {
-                    body["event_connection_enabled"] = json!(v.parse::<bool>().unwrap_or(false));
+                    parsed.event_connection_enabled = Some(v.parse::<bool>().unwrap_or(false));
                 }
+            }
+            "--runner" | "--agent-runner" | "--agent-runner-id" => {
+                i += 1;
+                parsed.runner = args.get(i).cloned();
+            }
+            "--brand" => {
+                i += 1;
+                parsed.brand = args.get(i).cloned();
             }
             _ => {}
         }
         i += 1;
     }
 
-    Ok(body)
+    Ok(parsed)
+}
+
+fn build_feishu_setup_provider_body(args: &ProviderAddArgs) -> Value {
+    let mut body = json!({
+        "id": args.id,
+        "provider_type": "feishu",
+        "enabled": args.enabled.unwrap_or(true),
+        "event_connection_enabled": args.event_connection_enabled.unwrap_or(true),
+        "event_types": ["message.receive"],
+        "agent_config": {
+            "runner": args.setup_runner(),
+        },
+    });
+
+    if let Some(display_name) = args.display_name.as_deref() {
+        body["display_name"] = json!(display_name);
+    }
+    if let Some(owner_open_id) = args.owner_open_id.as_deref() {
+        body["owner_open_id"] = json!(owner_open_id);
+    }
+
+    body
+}
+
+fn handle_feishu_provider_setup(host: &str, port: u16, args: &ProviderAddArgs) -> Result<()> {
+    println!(
+        "{} Starting Feishu provider setup for '{}'.",
+        "●".bright_cyan(),
+        args.id.bright_white().bold()
+    );
+
+    let start_body = json!({
+        "brand": args.brand.as_deref().unwrap_or("feishu"),
+    });
+    let start_url = api_url(host, port, "/providers/feishu-setup/start");
+    let start = http_post(&start_url, &start_body)?;
+    let session_id = required_string(&start, "session_id")?.to_string();
+    let verification_url = required_string(&start, "verification_url")?.to_string();
+    let mut interval_seconds = start["interval_seconds"].as_u64().unwrap_or(5).max(1);
+    let expires_at = start["expires_at"].as_i64().unwrap_or_default();
+
+    println!("{} Open this URL to continue:", "→".bright_cyan());
+    println!("  {}", verification_url.bright_white().bold());
+    print_terminal_qr_code(&verification_url);
+    println!(
+        "{} Waiting for Feishu setup confirmation. Press Ctrl+C to stop waiting.",
+        "…".bright_yellow()
+    );
+
+    let confirmed = loop {
+        thread::sleep(Duration::from_secs(interval_seconds));
+        let status_url = api_url(
+            host,
+            port,
+            &format!("/providers/feishu-setup/{}/status", session_id),
+        );
+        let status = http_get(&status_url)?;
+        match status["status"].as_str().unwrap_or("pending") {
+            "confirmed" => break status,
+            "expired" => {
+                return Err(bifrost_core::BifrostError::Config(
+                    "Feishu setup session expired before confirmation".to_string(),
+                ));
+            }
+            "pending" => {
+                interval_seconds = status["interval_seconds"]
+                    .as_u64()
+                    .unwrap_or(interval_seconds)
+                    .max(1);
+                let remaining = setup_remaining_seconds(&status, expires_at);
+                if let Some(remaining) = remaining {
+                    println!(
+                        "{} Still waiting for setup confirmation ({}s remaining).",
+                        "…".bright_yellow(),
+                        remaining
+                    );
+                } else {
+                    println!(
+                        "{}",
+                        "… Still waiting for setup confirmation.".bright_yellow()
+                    );
+                }
+            }
+            other => {
+                return Err(bifrost_core::BifrostError::Config(format!(
+                    "unexpected Feishu setup status: {other}"
+                )));
+            }
+        }
+    };
+
+    let app_id = confirmed["app_id"].as_str().unwrap_or("-");
+    println!(
+        "{} Feishu setup confirmed for app {}.",
+        "✓".bright_green(),
+        app_id.bright_white()
+    );
+
+    let provider_body = build_feishu_setup_provider_body(args);
+    let create_url = api_url(
+        host,
+        port,
+        &format!("/providers/feishu-setup/{}/provider", session_id),
+    );
+    let resp = http_post(&create_url, &provider_body)?;
+    let provider_id = resp["provider"]["id"]
+        .as_str()
+        .or_else(|| resp["id"].as_str())
+        .unwrap_or(&args.id);
+
+    let connect_url = api_url(host, port, &format!("/providers/{}/connect", provider_id));
+    http_post(&connect_url, &json!({}))?;
+    println!(
+        "{} Provider '{}' created and connected with runner '{}'.",
+        "✓".bright_green(),
+        provider_id,
+        args.setup_runner()
+    );
+
+    Ok(())
+}
+
+fn setup_remaining_seconds(status: &Value, fallback_expires_at: i64) -> Option<i64> {
+    let expires_at = status["expires_at"].as_i64().unwrap_or(fallback_expires_at);
+    if expires_at <= 0 {
+        return None;
+    }
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    Some((expires_at - now_ms).max(0) / 1000)
+}
+
+fn print_terminal_qr_code(value: &str) {
+    match QrCode::new(value.as_bytes()) {
+        Ok(code) => {
+            let image = code
+                .render::<unicode::Dense1x2>()
+                .quiet_zone(true)
+                .module_dimensions(2, 1)
+                .build();
+            println!();
+            println!("{image}");
+        }
+        Err(error) => {
+            println!(
+                "{} Failed to render QR code: {}",
+                "!".bright_yellow(),
+                error
+            );
+        }
+    }
+}
+
+fn required_string<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
+    value[field]
+        .as_str()
+        .ok_or_else(|| bifrost_core::BifrostError::Parse(format!("response missing '{field}'")))
 }
 
 fn parse_provider_update_args(args: &[String]) -> Result<Value> {
