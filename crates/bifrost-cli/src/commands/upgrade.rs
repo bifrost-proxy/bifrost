@@ -521,16 +521,18 @@ fn desktop_app_install_candidates() -> Vec<PathBuf> {
         return vec![resolve_desktop_app_path(&PathBuf::from(dir))];
     }
 
-    let mut candidates = Vec::new();
     #[cfg(target_os = "macos")]
     {
+        let mut candidates = Vec::new();
         candidates.push(PathBuf::from("/Applications/Bifrost.app"));
         if let Some(home) = env::var_os("HOME") {
             candidates.push(PathBuf::from(home).join("Applications").join("Bifrost.app"));
         }
+        candidates
     }
     #[cfg(target_os = "windows")]
     {
+        let mut candidates = Vec::new();
         if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
             candidates.push(
                 PathBuf::from(local_app_data)
@@ -538,8 +540,13 @@ fn desktop_app_install_candidates() -> Vec<PathBuf> {
                     .join("bifrost-desktop.exe"),
             );
         }
+        candidates
     }
-    candidates
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Vec::new()
+    }
 }
 
 fn resolve_desktop_app_path(app_dir: &Path) -> PathBuf {
