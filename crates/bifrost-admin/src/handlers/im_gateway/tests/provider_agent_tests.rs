@@ -85,6 +85,55 @@ pub(super) fn provider_create_payload_defaults_missing_display_name_to_id() {
 }
 
 #[test]
+pub(super) fn provider_create_payload_normalizes_feishu_base_url() {
+    let provider = parse_provider_create_payload(serde_json::json!({
+        "id": "feishu-main",
+        "provider_type": "feishu",
+        "display_name": "Feishu Main",
+        "enabled": true,
+        "app_id": "cli_xxx",
+        "app_secret": "sk_test_secret",
+        "base_url": "https://open.feishu.cn",
+        "event_connection_enabled": true,
+        "event_types": []
+    }))
+    .expect("provider create payload should parse");
+
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some("https://open.feishu.cn/open-apis")
+    );
+}
+
+#[test]
+pub(super) fn provider_patch_normalizes_feishu_base_url() {
+    let mut provider = parse_provider_create_payload(serde_json::json!({
+        "id": "feishu-main",
+        "provider_type": "feishu",
+        "display_name": "Feishu Main",
+        "enabled": true,
+        "app_id": "cli_xxx",
+        "app_secret": "sk_test_secret",
+        "base_url": "https://open.feishu.cn/open-apis",
+        "event_connection_enabled": true,
+        "event_types": []
+    }))
+    .expect("provider create payload should parse");
+
+    apply_provider_patch(
+        &mut provider,
+        &serde_json::json!({
+            "base_url": "https://open.feishu.cn"
+        }),
+    );
+
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some("https://open.feishu.cn/open-apis")
+    );
+}
+
+#[test]
 pub(super) fn feishu_setup_brand_selects_expected_domains() {
     assert_eq!(parse_feishu_setup_brand(None), FeishuSetupBrand::Feishu);
     assert_eq!(

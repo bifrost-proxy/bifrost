@@ -1,4 +1,8 @@
 use super::*;
+use url::Url;
+
+const FEISHU_API_ROOT_HOSTS: &[&str] = &["open.feishu.cn", "open.larksuite.com"];
+const FEISHU_API_PATH: &str = "/open-apis";
 
 // ---------------------------------------------------------------------------
 
@@ -813,7 +817,9 @@ pub(super) fn parse_provider_create_payload(
     if let Some(obj) = payload.as_object_mut() {
         obj.remove("app_secret");
     }
-    serde_json::from_value(payload)
+    let mut config = serde_json::from_value(payload)?;
+    normalize_provider_base_url(&mut config);
+    Ok(config)
 }
 
 pub(super) fn apply_provider_patch(provider: &mut ImProviderConfig, patch: &serde_json::Value) {
@@ -897,8 +903,51 @@ pub(super) fn apply_provider_patch(provider: &mut ImProviderConfig, patch: &serd
             }
         }
     }
+    normalize_provider_base_url(provider);
     normalize_provider_agent_config(provider);
     provider.updated_at = now_ms();
+}
+
+fn normalize_provider_base_url(provider: &mut ImProviderConfig) {
+    if provider.provider_type != ImProviderType::Feishu {
+        return;
+    }
+
+    let Some(base_url) = provider.base_url.as_deref() else {
+        return;
+    };
+    let normalized = normalize_feishu_base_url(base_url);
+    let normalized = normalized.trim_end_matches('/').to_string();
+    if normalized.is_empty() {
+        provider.base_url = None;
+    } else {
+        provider.base_url = Some(normalized);
+    }
+}
+
+fn normalize_feishu_base_url(base_url: &str) -> String {
+    let base_url = base_url.trim();
+    if base_url.is_empty() {
+        return String::new();
+    }
+
+    let Ok(mut parsed) = Url::parse(base_url) else {
+        return base_url.to_string();
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return base_url.to_string();
+    };
+    if !FEISHU_API_ROOT_HOSTS.contains(&host) {
+        return base_url.to_string();
+    }
+    match parsed.path() {
+        "" | "/" => {
+            parsed.set_path(FEISHU_API_PATH);
+            parsed.to_string()
+        }
+        _ => base_url.to_string(),
+    }
 }
 
 pub(super) fn persist_provider_agent_work_dir(
