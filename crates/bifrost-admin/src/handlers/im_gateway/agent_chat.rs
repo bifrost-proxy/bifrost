@@ -69,6 +69,24 @@ pub(super) async fn handle_idle_im_command(
     ctx: IdleImCommandContext<'_>,
 ) -> bool {
     let trimmed = msg_text.trim();
+    if trimmed == "/help" {
+        let config = ctx.external_cli_config_store.load();
+        let response = build_im_help_text_for_agent_config(
+            agent_config,
+            &config,
+            Some(ctx.provider.id.as_str()),
+        );
+        send_agent_reply(
+            ctx.client,
+            ctx.provider,
+            ctx.event,
+            &response,
+            ctx.message_log_store,
+        )
+        .await;
+        return true;
+    }
+
     if trimmed == "/status" {
         let detail = ctx.agent_session_manager.get_session_detail(session_key);
         let status_context = status_context_from_agent_config(agent_config);
@@ -179,11 +197,6 @@ pub(super) async fn handle_idle_im_command(
     if let Some(response) =
         bifrost_agent::handle_session_free_command(session_key, msg_text, agent_config)
     {
-        let response = if trimmed == "/help" {
-            append_im_channel_help(response)
-        } else {
-            response
-        };
         send_agent_reply(
             ctx.client,
             ctx.provider,
@@ -199,18 +212,138 @@ pub(super) async fn handle_idle_im_command(
 }
 
 pub(super) fn append_im_channel_help(mut help_text: String) -> String {
-    help_text.push_str(
-        "\n\nIM 通道命令:\n\
+    help_text.push_str("\n\n");
+    help_text.push_str(&build_im_channel_help_sections(&ImHelpRunnerKind::Builtin));
+    help_text
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ImHelpRunnerKind {
+    Builtin,
+    External { adapter: String },
+}
+
+impl ImHelpRunnerKind {
+    pub(super) fn from_runner_type(runner_type: &str) -> Self {
+        let runner_type = runner_type.trim();
+        if runner_type.is_empty() || runner_type == "bifrost_agent" {
+            Self::Builtin
+        } else {
+            Self::External {
+                adapter: runner_type.to_string(),
+            }
+        }
+    }
+}
+
+pub(super) fn im_help_runner_kind_for_agent_config(
+    agent_config: &crate::im_gateway::agent::ImAgentConfig,
+    external_cli_config: &crate::im_gateway::external_cli::ExternalCliGatewayConfig,
+    provider_id: Option<&str>,
+) -> ImHelpRunnerKind {
+    let Some(runner_id) = agent_config
+        .runner
+        .as_ref()
+        .and_then(|runner| runner.custom_runner_id())
+    else {
+        return ImHelpRunnerKind::Builtin;
+    };
+    let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
+        external_cli_config,
+        provider_id,
+        Some(runner_id),
+    );
+    ImHelpRunnerKind::External {
+        adapter: effective.settings.adapter,
+    }
+}
+
+pub(super) fn build_im_help_text_for_agent_config(
+    agent_config: &crate::im_gateway::agent::ImAgentConfig,
+    external_cli_config: &crate::im_gateway::external_cli::ExternalCliGatewayConfig,
+    provider_id: Option<&str>,
+) -> String {
+    let runner_kind =
+        im_help_runner_kind_for_agent_config(agent_config, external_cli_config, provider_id);
+    match runner_kind {
+        ImHelpRunnerKind::Builtin => {
+            let builtin_help =
+                bifrost_agent::handle_session_free_command("", "/help", agent_config)
+                    .unwrap_or_else(|| {
+                        "可用命令:\n\n内置命令:\n  /help           显示此帮助信息".to_string()
+                    });
+            append_im_channel_help(builtin_help)
+        }
+        ImHelpRunnerKind::External { .. } => {
+            format!(
+                "可用命令:\n\n{}",
+                build_im_channel_help_sections(&runner_kind)
+            )
+        }
+    }
+}
+
+pub(super) fn build_im_startup_help_for_runner(runner_kind: &ImHelpRunnerKind) -> String {
+    format!(
+        "可用命令:\n\n{}",
+        build_im_channel_help_sections(runner_kind)
+    )
+}
+
+pub(super) fn build_im_channel_help_sections(runner_kind: &ImHelpRunnerKind) -> String {
+    let mut sections = vec![
+        "IM 通道命令（所有 Runner）:\n\
+         /help           显示此帮助信息\n\
+         /status         查看当前 IM 会话状态、Runner、模型和排队情况\n\
          /cwd <绝对路径>  切换当前 IM 通道绑定的工作目录；路径必须存在且是目录，运行中会排队到当前任务结束后执行\n\
          /runner [Runner]  查看或切换当前 IM 通道绑定的 Runner\n\
-         /models       查看当前 Codex/Traex/Claude Code Runner 可选模型\n\
-         /model [模型]  查看或切换当前 Codex/Traex/Claude Code Runner 的 session 模型；/model clear 清除\n\
-         /effort [级别] 查看或切换当前 Codex/Traex/Claude Code Runner 的 Reasoning Effort；/effort clear 清除\n\
+         /clear          重置当前 IM 会话上下文\n\
+         /reset          重置当前 IM 会话上下文\n\
          /q <消息>       将消息加入队列，当前任务结束后自动继续处理\n\
          /rq <序号>      取消一条排队消息\n\
-         /g <引导内容>   给正在运行的内置 Agent 注入引导；外部 Runner 会按队列处理",
-    );
-    help_text
+         /stop           停止当前正在执行的任务"
+            .to_string(),
+    ];
+
+    match runner_kind {
+        ImHelpRunnerKind::Builtin => sections.push(
+            "Bifrost Agent 命令:\n\
+             /remember <text>  保存一条长期记忆\n\
+             /memories        列出当前可见的长期记忆\n\
+             /forget <id|last> 删除一条长期记忆\n\
+             /compact         压缩当前会话上下文\n\
+             /goal [命令]      查看或管理当前目标\n\
+             /g <引导内容>     给正在运行的内置 Agent 注入引导"
+                .to_string(),
+        ),
+        ImHelpRunnerKind::External { adapter } => {
+            let mut runner_lines = Vec::new();
+            if crate::im_gateway::external_cli::supports_external_cli_model_slash(adapter) {
+                runner_lines
+                    .push("/models        查看当前 Codex/Traex/Claude Code Runner 可选模型");
+                runner_lines.push(
+                    "/model [模型]   查看或切换当前 Codex/Traex/Claude Code Runner 的 session 模型；/model clear 清除",
+                );
+            }
+            if !crate::im_gateway::external_cli::external_cli_effort_options(adapter).is_empty() {
+                runner_lines.push(
+                    "/efforts       查看当前 Codex/Traex/Claude Code Runner 可选 Reasoning Effort",
+                );
+                runner_lines.push(
+                    "/effort [级别]  查看或切换当前 Codex/Traex/Claude Code Runner 的 Reasoning Effort；/effort clear 清除",
+                );
+            }
+            if !runner_lines.is_empty() {
+                let label =
+                    crate::im_gateway::external_cli::external_cli_model_adapter_label(adapter);
+                let mut section = format!("{label} Runner 命令:\n");
+                section.push_str(&runner_lines.join("\n"));
+                sections.push(section);
+            }
+        }
+    }
+
+    sections.join("\n\n")
 }
 
 pub(super) fn parse_im_cwd_command(message: &str) -> Option<Result<PathBuf, String>> {
@@ -1719,14 +1852,19 @@ pub(super) async fn handle_concurrent_event_during_chat(
         // Session-free commands are still instant
         let agent_config =
             effective_agent_config_for_provider(&agent_config_store.load(), &provider);
+        if msg_text.trim() == "/help" {
+            let config = external_cli_config_store.load();
+            let response = build_im_help_text_for_agent_config(
+                &agent_config,
+                &config,
+                Some(provider.id.as_str()),
+            );
+            send_agent_reply(client, &provider, event, &response, message_log_store).await;
+            return;
+        }
         if let Some(response) =
             bifrost_agent::handle_session_free_command(&session_key, &msg_text, &agent_config)
         {
-            let response = if msg_text.trim() == "/help" {
-                append_im_channel_help(response)
-            } else {
-                response
-            };
             send_agent_reply(client, &provider, event, &response, message_log_store).await;
             return;
         }

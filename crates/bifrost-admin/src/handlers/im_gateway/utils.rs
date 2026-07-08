@@ -361,10 +361,16 @@ pub(super) fn build_online_notification_message_with_context(
         .map(|context| context.user_turn_count)
         .unwrap_or(0);
 
-    format!(
+    let mut message = format!(
         "**Bifrost is online**\n\n- **Provider**: {} (`{}`)\n- **Device**: {device_name}\n- **Workspace**: `{work_dir}`\n- **Runner Type**: `{runner_type}`\n- **Runner ID**: `{runner_id}`\n- **Model**: `{model_text}`\n- **Reasoning Effort**: `{reasoning_effort_text}`\n- **Reasoning Summary**: `{reasoning_summary_text}`\n- **Bound Session**: `{session_key}`\n- **Completed User Turns**: {user_turn_count}\n- **Status**: Ready",
         provider.display_name, provider.id
-    )
+    );
+    let runner_kind = agent_context
+        .map(|context| ImHelpRunnerKind::from_runner_type(&context.runner_type))
+        .unwrap_or(ImHelpRunnerKind::Builtin);
+    message.push_str("\n\n");
+    message.push_str(&build_im_startup_help_for_runner(&runner_kind));
+    message
 }
 
 pub(super) fn outbound_log_msg_type(

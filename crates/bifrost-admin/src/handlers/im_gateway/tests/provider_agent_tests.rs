@@ -370,13 +370,60 @@ pub(super) fn im_help_includes_im_only_commands_without_dropping_builtins() {
 
     assert!(help.contains("内置命令:"));
     assert!(help.contains("/help"));
-    assert!(help.contains("IM 通道命令:"));
+    assert!(help.contains("IM 通道命令（所有 Runner）:"));
     assert!(help.contains("/cwd <绝对路径>"));
     assert!(help.contains("/runner [Runner]"));
     assert!(help.contains("/q <消息>"));
     assert!(help.contains("/rq <序号>"));
     assert!(help.contains("/g <引导内容>"));
+    assert!(help.contains("/remember <text>"));
+    assert!(help.contains("/goal [命令]"));
     assert!(help.contains("运行中会排队"));
+}
+
+#[test]
+pub(super) fn im_help_for_external_cli_runner_only_lists_supported_commands() {
+    let help = build_im_startup_help_for_runner(&ImHelpRunnerKind::External {
+        adapter: crate::im_gateway::external_cli::TRAEX_ADAPTER.to_string(),
+    });
+
+    assert!(help.contains("IM 通道命令（所有 Runner）:"));
+    assert!(help.contains("/help"));
+    assert!(help.contains("/status"));
+    assert!(help.contains("/cwd <绝对路径>"));
+    assert!(help.contains("/runner [Runner]"));
+    assert!(help.contains("/clear"));
+    assert!(help.contains("/reset"));
+    assert!(help.contains("/q <消息>"));
+    assert!(help.contains("/rq <序号>"));
+    assert!(help.contains("/stop"));
+    assert!(help.contains("Traex Runner 命令:"));
+    assert!(help.contains("/models"));
+    assert!(help.contains("/model [模型]"));
+    assert!(help.contains("/efforts"));
+    assert!(help.contains("/effort [级别]"));
+    assert!(!help.contains("/remember"));
+    assert!(!help.contains("/memories"));
+    assert!(!help.contains("/forget"));
+    assert!(!help.contains("/goal"));
+    assert!(!help.contains("/compact"));
+    assert!(!help.contains("/g <引导内容>"));
+}
+
+#[test]
+pub(super) fn im_help_for_unsupported_external_runner_omits_model_and_builtin_commands() {
+    let help = build_im_startup_help_for_runner(&ImHelpRunnerKind::External {
+        adapter: "chatgpt_web".to_string(),
+    });
+
+    assert!(help.contains("IM 通道命令（所有 Runner）:"));
+    assert!(!help.contains("/models"));
+    assert!(!help.contains("/model [模型]"));
+    assert!(!help.contains("/efforts"));
+    assert!(!help.contains("/effort [级别]"));
+    assert!(!help.contains("/remember"));
+    assert!(!help.contains("/goal"));
+    assert!(!help.contains("/g <引导内容>"));
 }
 
 #[test]

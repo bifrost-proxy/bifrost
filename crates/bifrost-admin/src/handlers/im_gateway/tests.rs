@@ -226,6 +226,11 @@ pub(super) fn online_notification_message_uses_provider_work_dir_override() {
     assert!(message.contains("- **Bound Session**: `N/A`"));
     assert!(message.contains("- **Completed User Turns**: 0"));
     assert!(message.contains("- **Status**: Ready"));
+    assert!(message.contains("可用命令:"));
+    assert!(message.contains("IM 通道命令（所有 Runner）:"));
+    assert!(message.contains("Bifrost Agent 命令:"));
+    assert!(message.contains("/remember <text>"));
+    assert!(message.contains("/g <引导内容>"));
 }
 
 #[test]
@@ -269,6 +274,10 @@ pub(super) fn online_notification_message_includes_runner_context_and_turns() {
     assert!(message.contains("- **Reasoning Summary**: `auto`"));
     assert!(message.contains("- **Bound Session**: `feishu-main:ou_owner`"));
     assert!(message.contains("- **Completed User Turns**: 7"));
+    assert!(message.contains("IM 通道命令（所有 Runner）:"));
+    assert!(!message.contains("/remember"));
+    assert!(!message.contains("/goal"));
+    assert!(!message.contains("/g <引导内容>"));
 }
 
 #[test]
@@ -399,6 +408,10 @@ pub(super) fn online_notification_context_resolves_claude_code_settings_effort()
     assert_eq!(context.model_reasoning_effort.as_deref(), Some("low"));
     assert!(message.contains("- **Model**: `opus（claude settings）`"));
     assert!(message.contains("- **Reasoning Effort**: `low`"));
+    assert!(message.contains("Claude Code Runner 命令:"));
+    assert!(message.contains("/models"));
+    assert!(message.contains("/efforts"));
+    assert!(!message.contains("/remember"));
 }
 
 #[test]
