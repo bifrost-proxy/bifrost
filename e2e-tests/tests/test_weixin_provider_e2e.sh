@@ -14,19 +14,10 @@ TEST_DIR="$(mktemp -d)"
 BIFROST_LOG="$TEST_DIR/bifrost.log"
 BIFROST_BIN="${BIFROST_BIN:-}"
 
-stop_bifrost() {
+cleanup() {
   if [[ -n "${BIFROST_PID:-}" ]]; then
     kill "$BIFROST_PID" >/dev/null 2>&1 || true
     wait "$BIFROST_PID" >/dev/null 2>&1 || true
-    unset BIFROST_PID
-  fi
-}
-
-cleanup() {
-  stop_bifrost
-  if [[ -n "${MOCK_PID:-}" ]]; then
-    kill "$MOCK_PID" >/dev/null 2>&1 || true
-    wait "$MOCK_PID" >/dev/null 2>&1 || true
   fi
   rm -rf "$TEST_DIR"
 }
@@ -42,23 +33,8 @@ wait_http() {
     sleep 0.25
   done
   echo "[weixin-provider] $label did not become ready" >&2
-  if [[ -f "$BIFROST_LOG" ]]; then
-    tail -100 "$BIFROST_LOG" >&2 || true
-  fi
+  [[ -f "$BIFROST_LOG" ]] && tail -100 "$BIFROST_LOG" >&2 || true
   return 1
-}
-
-start_bifrost() {
-  echo "[weixin-provider] starting bifrost on $BIFROST_PORT with data dir $TEST_DIR"
-  BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
-    --host 127.0.0.1 \
-    -p "$BIFROST_PORT" \
-    --unsafe-ssl \
-    --skip-cert-check \
-    --no-system-proxy \
-    >"$BIFROST_LOG" 2>&1 &
-  BIFROST_PID=$!
-  wait_http "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/proxy/address" "bifrost"
 }
 
 if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
@@ -70,304 +46,139 @@ else
   SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
 fi
 
-MOCK_SERVER="$TEST_DIR/weixin_mock.py"
-MOCK_PORT_FILE="$TEST_DIR/weixin_mock_port"
-MOCK_SEND_LOG="$TEST_DIR/weixin_mock_send.log"
-MOCK_UPDATE_LOG="$TEST_DIR/weixin_mock_updates.log"
-cat >"$MOCK_SERVER" <<'PY'
-import json
-import sys
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-port_file = sys.argv[1]
-send_log = sys.argv[2]
-update_log = sys.argv[3]
-
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args):
-        return
-
-    def _json(self, status, payload):
-        body = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_GET(self):
-        host = self.headers.get("host")
-        if self.path.startswith("/ilink/bot/get_bot_qrcode"):
-            self._json(200, {
-                "ret": 0,
-                "qrcode": "mock-qr-key",
-                "qrcode_img_content": f"http://{host}/scan/mock-qr-key?bot_type=3",
-            })
-            return
-        if self.path.startswith("/ilink/bot/get_qrcode_status"):
-            self._json(200, {
-                "ret": 0,
-                "status": "confirmed",
-                "bot_token": "mock-token",
-                "ilink_bot_id": "mock-bot@im.bot",
-                "ilink_user_id": "mock-user@im.wechat",
-                "baseurl": f"http://{host}",
-            })
-            return
-        if self.path.startswith("/cdn/image.png"):
-            body = b"\x89PNG\r\n\x1a\nmock-image"
-            self.send_response(200)
-            self.send_header("content-type", "image/png")
-            self.send_header("content-length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        self._json(404, {"error": "not found"})
-
-    def do_POST(self):
-        length = int(self.headers.get("content-length") or 0)
-        body = self.rfile.read(length) if length else b"{}"
-        if self.path.startswith("/ilink/bot/getupdates"):
-            with open(update_log, "a", encoding="utf-8") as f:
-                f.write((self.headers.get("Authorization") or "") + "\n")
-            if self.headers.get("AuthorizationType") != "ilink_bot_token":
-                self._json(401, {"error": "missing AuthorizationType"})
-                return
-            if self.headers.get("Authorization") != "Bearer mock-token":
-                self._json(401, {"error": "missing Authorization"})
-                return
-            try:
-                request_payload = json.loads(body.decode("utf-8") or "{}")
-            except Exception:
-                request_payload = {}
-            if not request_payload.get("get_updates_buf"):
-                self._json(200, {
-                    "sync_buf": "next-buf",
-                    "msgs": [{
-                        "message_id": 7459890488013826184,
-                        "from_user_id": "mock-user@im.wechat",
-                        "message_type": 1,
-                        "item_list": [{
-                            "type": 1,
-                            "text_item": {"text": "hello from weixin provider"},
-                        }],
-                        "context_token": "ctx-1",
-                    }, {
-                        "message_id": 7459890488013826185,
-                        "from_user_id": "mock-user@im.wechat",
-                        "message_type": 1,
-                        "item_list": [{
-                            "type": 2,
-                            "msg_id": "mock-image-1",
-                            "image_item": {
-                                "media": {
-                                    "full_url": f"http://{self.headers.get('host')}/cdn/image.png"
-                                },
-                                "thumb_width": 16,
-                                "thumb_height": 16
-                            },
-                        }],
-                    }],
-                })
-            else:
-                self._json(200, {"sync_buf": "next-buf", "msgs": []})
-            return
-        if self.path.startswith("/ilink/bot/sendmessage"):
-            if self.headers.get("AuthorizationType") != "ilink_bot_token":
-                self._json(401, {"error": "missing AuthorizationType"})
-                return
-            if self.headers.get("Authorization") != "Bearer mock-token":
-                self._json(401, {"error": "missing Authorization"})
-                return
-            with open(send_log, "ab") as f:
-                f.write(body + b"\n")
-            self._json(200, {"message_id": "sent-mock-1", "request_id": "req-mock-1"})
-            return
-        self._json(404, {"error": "not found"})
-
-server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-with open(port_file, "w", encoding="utf-8") as f:
-    f.write(str(server.server_address[1]))
-server.serve_forever()
-PY
-python3 "$MOCK_SERVER" "$MOCK_PORT_FILE" "$MOCK_SEND_LOG" "$MOCK_UPDATE_LOG" &
-MOCK_PID=$!
-MOCK_READY=0
-for _ in $(seq 1 200); do
-  if [[ -s "$MOCK_PORT_FILE" ]]; then
-    MOCK_READY=1
-    break
-  fi
-  if ! kill -0 "$MOCK_PID" >/dev/null 2>&1; then
-    echo "[weixin-provider] mock server exited before writing port file" >&2
-    wait "$MOCK_PID" >/dev/null 2>&1 || true
-    exit 1
-  fi
-  sleep 0.1
-done
-if [[ "$MOCK_READY" != "1" ]]; then
-  echo "[weixin-provider] mock server did not write port file: $MOCK_PORT_FILE" >&2
+if [[ ! -x "$BIFROST_BIN" ]]; then
+  echo "[weixin-provider] bifrost binary is not executable: $BIFROST_BIN" >&2
   exit 1
 fi
-MOCK_PORT="$(cat "$MOCK_PORT_FILE")"
-MOCK_BASE_URL="http://127.0.0.1:$MOCK_PORT"
 
-count_update_token() {
-  local token="$1"
-  if [[ ! -f "$MOCK_UPDATE_LOG" ]]; then
-    echo 0
-    return
-  fi
-  grep -c -F "$token" "$MOCK_UPDATE_LOG" || true
-}
-
-start_bifrost
+echo "[weixin-provider] starting bifrost on $BIFROST_PORT with data dir $TEST_DIR"
+BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
+  --host 127.0.0.1 \
+  -p "$BIFROST_PORT" \
+  --unsafe-ssl \
+  --skip-cert-check \
+  --no-system-proxy \
+  >"$BIFROST_LOG" 2>&1 &
+BIFROST_PID=$!
+wait_http "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/proxy/address" "bifrost"
 
 IM_BASE="http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway"
-curl -fsS --noproxy '*' -X POST "$IM_BASE/providers" \
-  -H 'Content-Type: application/json' \
-  -d "{\"id\":\"weixin-mock\",\"provider_type\":\"weixin\",\"display_name\":\"Weixin Mock\",\"enabled\":true,\"base_url\":\"$MOCK_BASE_URL\",\"event_connection_enabled\":true,\"event_types\":[\"message.receive\"]}" >/dev/null
 
-LOGIN_START="$(curl -fsS --noproxy '*' -X POST "$IM_BASE/providers/weixin-mock/weixin-login/start" -H 'Content-Type: application/json' -d '{}')"
-python3 - "$LOGIN_START" <<'PY'
+BASE_URL_ERR="$("$BIFROST_BIN" -p "$BIFROST_PORT" im provider add weixin-bad \
+  --type weixin \
+  --base-url http://127.0.0.1:9 \
+  --runner traex 2>&1 || true)"
+grep -q "base_url is managed by system and cannot be set via CLI" <<<"$BASE_URL_ERR"
+
+RUNNER_ERR="$("$BIFROST_BIN" -p "$BIFROST_PORT" im provider add weixin-no-runner \
+  --type weixin \
+  --app-id mock-bot \
+  --secret mock-token 2>&1 || true)"
+grep -q -- "--runner is required when stdin is not interactive" <<<"$RUNNER_ERR"
+grep -q "Default built-in runners include" <<<"$RUNNER_ERR"
+
+"$BIFROST_BIN" -p "$BIFROST_PORT" im provider add weixin-cli \
+  --type weixin \
+  --app-id mock-bot@im.bot \
+  --secret mock-token \
+  --owner-open-id owner@im.wechat \
+  --enable-long-connection false \
+  --runner claude-code >/dev/null
+
+PROVIDER_JSON="$(curl -fsS --noproxy '*' "$IM_BASE/providers/weixin-cli")"
+python3 - "$PROVIDER_JSON" <<'PY'
 import json
 import sys
 
-payload = json.loads(sys.argv[1])
-if not payload.get("success"):
-    raise SystemExit("weixin login start failed")
-if not payload.get("scan_url", "").startswith("http://127.0.0.1:"):
-    raise SystemExit(f"expected scan url, got {payload}")
-if "mock-qr-key" in payload:
-    raise SystemExit("poll key must not be exposed by provider API")
+provider = json.loads(sys.argv[1])
+assert provider["provider_type"] == "weixin", provider
+assert provider["base_url"] == "https://ilinkai.weixin.qq.com", provider
+assert provider["app_id"] == "mock-bot@im.bot", provider
+assert provider["owner_open_id"] == "owner@im.wechat", provider
+assert provider["secret_configured"] is True, provider
+assert "secret_ref" not in provider, provider
+assert provider["event_connection_enabled"] is False, provider
+assert provider["agent_config"]["runner"] == "Claude-Code", provider
 PY
-
-LOGIN_STATUS="$(curl -fsS --noproxy '*' "$IM_BASE/providers/weixin-mock/weixin-login/status")"
-python3 - "$LOGIN_STATUS" <<'PY'
-import json
-import sys
-
-payload = json.loads(sys.argv[1])
-if payload.get("status") not in {"confirmed", "authorized"}:
-    raise SystemExit(f"login status did not auto-check QR state: {payload}")
-if "provider" in payload and "secret_ref" in payload["provider"]:
-    raise SystemExit("status response leaked secret_ref")
-PY
-
-python3 - "$LOGIN_STATUS" <<'PY'
-import json
-import sys
-
-payload = json.loads(sys.argv[1])
-provider = payload.get("provider", {})
-if provider.get("provider_type") != "weixin":
-    raise SystemExit(f"unexpected provider type: {provider}")
-if provider.get("app_id") != "mock-bot@im.bot":
-    raise SystemExit(f"unexpected app_id: {provider}")
-if provider.get("owner_open_id") != "mock-user@im.wechat":
-    raise SystemExit(f"unexpected owner: {provider}")
-if not provider.get("secret_configured"):
-    raise SystemExit("provider token was not configured")
-if "secret_ref" in provider:
-    raise SystemExit("provider response leaked secret_ref")
-PY
-
-curl -fsS --noproxy '*' -X POST "$IM_BASE/providers/weixin-mock/connect" >/dev/null
-EVENTS=""
-for _ in $(seq 1 40); do
-  EVENTS="$(curl -fsS --noproxy '*' "$IM_BASE/history/events")"
-  if python3 - "$EVENTS" <<'PY'
-import json
-import sys
-events = json.loads(sys.argv[1])
-raise SystemExit(0 if any(e.get("provider_id") == "weixin-mock" and e.get("event_id") == "7459890488013826185" for e in events) else 1)
-PY
-  then
-    break
-  fi
-  sleep 0.25
-done
-
-python3 - "$EVENTS" <<'PY'
-import json
-import sys
-events = json.loads(sys.argv[1])
-text_matches = [e for e in events if e.get("provider_id") == "weixin-mock" and e.get("event_id") == "7459890488013826184"]
-if len(text_matches) != 1:
-    raise SystemExit(f"expected one weixin provider text event, got {len(text_matches)}")
-event = text_matches[0]
-if event.get("provider_type") != "weixin":
-    raise SystemExit(f"unexpected provider type: {event}")
-if event.get("message", {}).get("text") != "hello from weixin provider":
-    raise SystemExit(f"unexpected event text: {event}")
-image_matches = [e for e in events if e.get("provider_id") == "weixin-mock" and e.get("event_id") == "7459890488013826185"]
-if len(image_matches) != 1:
-    raise SystemExit(f"expected one weixin image event, got {len(image_matches)}")
-image_event = image_matches[0]
-images = image_event.get("message", {}).get("images") or []
-if len(images) != 1:
-    raise SystemExit(f"expected one image attachment, got {image_event}")
-if images[0].get("file_key") != "mock-image-1":
-    raise SystemExit(f"unexpected image file key: {images}")
-if not images[0].get("download_url", "").endswith("/cdn/image.png"):
-    raise SystemExit(f"unexpected image download url: {images}")
-PY
-
-curl -fsS --noproxy '*' -X POST "$IM_BASE/messages/send" \
-  -H 'Content-Type: application/json' \
-  -d '{"provider_id":"weixin-mock","target_id":"__owner__","msg_type":"text","text":"provider send ok"}' >/dev/null
-python3 - "$MOCK_SEND_LOG" <<'PY'
-import json
-import pathlib
-import sys
-
-lines = [line for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.strip()]
-if not lines:
-    raise SystemExit("mock sendmessage was not called")
-payloads = [json.loads(line) for line in lines]
-msgs = [payload.get("msg", {}) for payload in payloads]
-if not any(msg.get("to_user_id") == "mock-user@im.wechat" for msg in msgs):
-    raise SystemExit(f"sendmessage did not target mock owner: {payloads}")
-if not any(
-    (msg.get("item_list") or [{}])[0].get("text_item", {}).get("text") == "provider send ok"
-    for msg in msgs
-):
-    raise SystemExit(f"manual provider send text missing: {payloads}")
-if not any(msg.get("context_token") == "ctx-1" for msg in msgs):
-    raise SystemExit(f"sendmessage did not include stored context_token: {payloads}")
-if not all(msg.get("message_type") == 2 and msg.get("message_state") == 2 for msg in msgs):
-    raise SystemExit(f"sendmessage did not use BOT/FINISH message shape: {payloads}")
-if not all(payload.get("base_info", {}).get("channel_version") == "1.0.3" for payload in payloads):
-    raise SystemExit(f"sendmessage missing base_info channel_version: {payloads}")
-PY
-
-UPDATES_BEFORE_DELETE="$(count_update_token "Bearer mock-token")"
-curl -fsS --noproxy '*' -X DELETE "$IM_BASE/providers/weixin-mock" >/dev/null
-sleep 7.2
-UPDATES_AFTER_DELETE="$(count_update_token "Bearer mock-token")"
-if (( UPDATES_AFTER_DELETE > UPDATES_BEFORE_DELETE + 1 )); then
-  echo "[weixin-provider] getupdates continued after provider delete: before=$UPDATES_BEFORE_DELETE after=$UPDATES_AFTER_DELETE" >&2
-  echo "[weixin-provider] update log:" >&2
-  cat "$MOCK_UPDATE_LOG" >&2 || true
-  exit 1
-fi
-if curl -fsS --noproxy '*' "$IM_BASE/providers/weixin-mock" >/dev/null 2>&1; then
-  echo "[weixin-provider] deleted provider is still returned by API" >&2
-  exit 1
-fi
 
 curl -fsS --noproxy '*' -X POST "$IM_BASE/providers" \
   -H 'Content-Type: application/json' \
-  -d "{\"id\":\"weixin-disabled\",\"provider_type\":\"weixin\",\"display_name\":\"Weixin Disabled\",\"enabled\":true,\"base_url\":\"$MOCK_BASE_URL\",\"app_secret\":\"disabled-token\",\"event_connection_enabled\":false,\"event_types\":[\"message.receive\"]}" >/dev/null
-stop_bifrost
-start_bifrost
-sleep 4.2
-DISABLED_UPDATES="$(count_update_token "Bearer disabled-token")"
-if (( DISABLED_UPDATES != 0 )); then
-  echo "[weixin-provider] disabled long-connection provider was auto-polled after restart" >&2
-  echo "[weixin-provider] update log:" >&2
-  cat "$MOCK_UPDATE_LOG" >&2 || true
+  -d '{
+    "id": "weixin-admin",
+    "provider_type": "weixin",
+    "display_name": "Weixin Admin",
+    "enabled": true,
+    "base_url": "http://127.0.0.1:12345",
+    "app_secret": "admin-token",
+    "event_connection_enabled": false,
+    "agent_config": {"runner": "traex"}
+  }' >/dev/null
+
+curl -fsS --noproxy '*' -X PATCH "$IM_BASE/providers/weixin-admin" \
+  -H 'Content-Type: application/json' \
+  -d '{"base_url":"https://evil.example","event_connection_enabled":false}' >/dev/null
+
+ADMIN_PROVIDER_JSON="$(curl -fsS --noproxy '*' "$IM_BASE/providers/weixin-admin")"
+python3 - "$ADMIN_PROVIDER_JSON" <<'PY'
+import json
+import sys
+
+provider = json.loads(sys.argv[1])
+assert provider["base_url"] == "https://ilinkai.weixin.qq.com", provider
+assert provider["secret_configured"] is True, provider
+assert "secret_ref" not in provider, provider
+assert provider["event_connection_enabled"] is False, provider
+PY
+
+curl -fsS --noproxy '*' -X POST "$IM_BASE/providers" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "id": "weixin-unconfigured",
+    "provider_type": "weixin",
+    "display_name": "Weixin Unconfigured",
+    "enabled": true,
+    "base_url": "https://evil.example",
+    "event_connection_enabled": true,
+    "agent_config": {"runner": "traex"}
+  }' >/dev/null
+
+UNCONFIGURED_JSON="$(curl -fsS --noproxy '*' "$IM_BASE/providers/weixin-unconfigured")"
+python3 - "$UNCONFIGURED_JSON" <<'PY'
+import json
+import sys
+
+provider = json.loads(sys.argv[1])
+assert provider["base_url"] == "https://ilinkai.weixin.qq.com", provider
+assert provider["secret_configured"] is False, provider
+assert "secret_ref" not in provider, provider
+PY
+
+CONNECT_BODY="$(curl -sS --noproxy '*' -w '\n%{http_code}' -X POST "$IM_BASE/providers/weixin-unconfigured/connect" || true)"
+CONNECT_CODE="$(tail -n 1 <<<"$CONNECT_BODY")"
+CONNECT_JSON="$(sed '$d' <<<"$CONNECT_BODY")"
+if [[ "$CONNECT_CODE" == "200" ]]; then
+  echo "[weixin-provider] connect unexpectedly succeeded without completed QR login" >&2
   exit 1
 fi
+python3 - "$CONNECT_JSON" <<'PY'
+import json
+import sys
 
-echo "[weixin-provider] passed"
+payload = json.loads(sys.argv[1])
+message = payload.get("error") or payload.get("message") or ""
+assert "QR login" in message or "bot token" in message or "secret configured" in message, payload
+PY
+
+STATUS_JSON="$(curl -fsS --noproxy '*' "$IM_BASE/providers/weixin-unconfigured/status")"
+python3 - "$STATUS_JSON" <<'PY'
+import json
+import sys
+
+status = json.loads(sys.argv[1])
+assert status.get("state") in {"failed", "disconnected"}, status
+if status.get("state") == "failed":
+    last_error = status.get("last_error") or ""
+    assert "QR login" in last_error or "bot token" in last_error or "secret configured" in last_error, status
+PY
+
+echo "[weixin-provider] PASS"

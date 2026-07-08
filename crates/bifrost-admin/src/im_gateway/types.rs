@@ -34,6 +34,52 @@ pub enum ImProviderType {
     Webhook,
 }
 
+pub const FEISHU_BASE_URL: &str = "https://open.feishu.cn/open-apis";
+pub const LARK_BASE_URL: &str = "https://open.larksuite.com/open-apis";
+pub const WEIXIN_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
+
+pub fn fixed_provider_base_url(provider_type: ImProviderType) -> Option<&'static str> {
+    match provider_type {
+        ImProviderType::Feishu => Some(FEISHU_BASE_URL),
+        ImProviderType::Weixin | ImProviderType::WeChat => Some(WEIXIN_BASE_URL),
+        ImProviderType::Webhook => None,
+    }
+}
+
+pub fn normalize_provider_base_url(provider: &mut ImProviderConfig) {
+    match provider.provider_type {
+        ImProviderType::Feishu => {
+            provider.base_url = Some(normalize_feishu_base_url(provider.base_url.as_deref()));
+        }
+        ImProviderType::Weixin | ImProviderType::WeChat => {
+            provider.base_url = Some(normalize_weixin_base_url(provider.base_url.as_deref()));
+        }
+        ImProviderType::Webhook => {}
+    }
+}
+
+fn normalize_feishu_base_url(base_url: Option<&str>) -> String {
+    let Some(base_url) = base_url.map(str::trim).filter(|value| !value.is_empty()) else {
+        return FEISHU_BASE_URL.to_string();
+    };
+
+    if is_feishu_base_url(base_url, "open.larksuite.com") {
+        return LARK_BASE_URL.to_string();
+    }
+    FEISHU_BASE_URL.to_string()
+}
+
+fn is_feishu_base_url(base_url: &str, expected_host: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(base_url) else {
+        return false;
+    };
+    parsed.host_str() == Some(expected_host)
+}
+
+fn normalize_weixin_base_url(_base_url: Option<&str>) -> String {
+    WEIXIN_BASE_URL.to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImProviderAgentConfig {
     /// Provider-specific IM runner override. Empty inherits the global Agent runner.

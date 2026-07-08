@@ -913,6 +913,21 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
     // reset only clears the current adapter/runner rather than every agent that
     // happens to share the same IM session key.
     let trimmed_msg = input.message_text.trim();
+    if trimmed_msg == "/help" {
+        let response = build_im_startup_help_for_runner(&ImHelpRunnerKind::External {
+            adapter: settings.adapter.clone(),
+        });
+        send_agent_reply(
+            ctx.client,
+            ctx.provider,
+            ctx.event,
+            &response,
+            ctx.message_log_store,
+        )
+        .await;
+        return;
+    }
+
     if trimmed_msg == "/clear" || trimmed_msg == "/reset" {
         let _ = request_agent_stop(ctx.agent_session_manager, &input.session_key).await;
         if let Some(mut session) = ctx

@@ -1,5 +1,36 @@
 use super::schedule::{parse_schedule_add_args, parse_schedule_update_args};
 use super::*;
+use wiremock::matchers::{body_partial_json, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+fn mock_server_host_port(server: &MockServer) -> (String, u16) {
+    let url = server.uri();
+    let rest = url.strip_prefix("http://").expect("wiremock uses http URL");
+    let (host, port) = rest.split_once(':').expect("host:port");
+    (
+        host.to_string(),
+        port.parse::<u16>().expect("mock server port"),
+    )
+}
+
+fn chat_config_response() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "runners": {
+            "Codex": {
+                "adapter": "codex",
+                "enabled": true
+            },
+            "Traex": {
+                "adapter": "traex",
+                "enabled": true
+            },
+            "Claude-Code": {
+                "adapter": "claude_code",
+                "enabled": true
+            }
+        }
+    }))
+}
 
 #[test]
 fn resolve_secret_missing_env_returns_error() {
@@ -109,6 +140,336 @@ fn im_send_builds_rich_card_payload() {
     assert_eq!(body["rich_card"]["title"], "Deploy report");
     assert_eq!(body["rich_card"]["text"], "**Done**");
     assert_eq!(body["rich_card"]["image_key"], "img_v3_chart");
+}
+
+#[test]
+fn parse_provider_add_args_uses_feishu_setup_without_credentials() {
+    let args = parse_provider_add_args("feishu-main", &["--type".into(), "feishu".into()])
+        .expect("parse provider add args");
+
+    assert!(args.should_use_feishu_setup());
+
+    let body = build_setup_provider_body(&args, "feishu", "traex");
+    assert_eq!(body["id"], "feishu-main");
+    assert_eq!(body["provider_type"], "feishu");
+    assert_eq!(body["enabled"], true);
+    assert_eq!(body["event_connection_enabled"], true);
+    assert_eq!(body["event_types"][0], "message.receive");
+    assert_eq!(body["agent_config"]["runner"], "traex");
+}
+
+#[test]
+fn parse_provider_add_args_allows_feishu_setup_runner_override() {
+    let args = parse_provider_add_args(
+        "feishu-main",
+        &[
+            "--type".into(),
+            "feishu".into(),
+            "--display-name".into(),
+            "Main Feishu".into(),
+            "--runner".into(),
+            "codex".into(),
+        ],
+    )
+    .expect("parse provider add args");
+
+    assert!(args.should_use_feishu_setup());
+
+    let body = build_setup_provider_body(&args, "feishu", "codex");
+    assert_eq!(body["display_name"], "Main Feishu");
+    assert_eq!(body["agent_config"]["runner"], "codex");
+}
+
+#[test]
+fn parse_provider_add_args_with_credentials_uses_direct_create_body() {
+    let args = parse_provider_add_args(
+        "feishu-main",
+        &[
+            "--type".into(),
+            "feishu".into(),
+            "--app-id".into(),
+            "cli_xxx".into(),
+            "--secret".into(),
+            "secret".into(),
+            "--runner".into(),
+            "claude-code".into(),
+        ],
+    )
+    .expect("parse provider add args");
+
+    assert!(!args.should_use_feishu_setup());
+    let body = args.into_create_body();
+    assert_eq!(body["id"], "feishu-main");
+    assert_eq!(body["provider_type"], "feishu");
+    assert_eq!(body["app_id"], "cli_xxx");
+    assert_eq!(body["app_secret"], "secret");
+    assert_eq!(body["agent_config"]["runner"], "claude-code");
+}
+
+#[test]
+fn parse_provider_add_args_uses_weixin_setup_without_credentials() {
+    let args = parse_provider_add_args("weixin-main", &["--type".into(), "weixin".into()])
+        .expect("parse provider add args");
+
+    assert!(args.should_use_weixin_setup());
+    assert!(args.should_require_runner());
+
+    let body = build_setup_provider_body(&args, "weixin", "Claude Code");
+    assert_eq!(body["id"], "weixin-main");
+    assert_eq!(body["provider_type"], "weixin");
+    assert_eq!(body["agent_config"]["runner"], "Claude Code");
+}
+
+#[tokio::test]
+async fn im_provider_add_feishu_setup_uses_admin_api_flow_and_runner() {
+    let server = MockServer::start().await;
+    let (host, port) = mock_server_host_port(&server);
+
+    Mock::given(method("GET"))
+        .and(path("/_bifrost/api/im-gateway/chat/config"))
+        .respond_with(chat_config_response())
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/_bifrost/api/im-gateway/providers/feishu-setup/start",
+        ))
+        .and(body_partial_json(serde_json::json!({
+            "brand": "feishu"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "session_id": "setup-session",
+            "verification_url": "https://open.feishu.cn/setup/mock",
+            "interval_seconds": 0,
+            "expires_at": chrono::Utc::now().timestamp_millis() + 60_000
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/_bifrost/api/im-gateway/providers/feishu-setup/setup-session/status",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": "confirmed",
+            "app_id": "cli_mock_app"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/_bifrost/api/im-gateway/providers/feishu-setup/setup-session/provider",
+        ))
+        .and(body_partial_json(serde_json::json!({
+            "id": "feishu-main",
+            "provider_type": "feishu",
+            "display_name": "Main Feishu",
+            "agent_config": {
+                "runner": "Traex"
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "provider": {
+                "id": "feishu-main"
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/_bifrost/api/im-gateway/providers/feishu-main/connect",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    handle_im_command(
+        &host,
+        port,
+        &[
+            "provider".into(),
+            "add".into(),
+            "feishu-main".into(),
+            "--type".into(),
+            "feishu".into(),
+            "--display-name".into(),
+            "Main Feishu".into(),
+            "--runner".into(),
+            "trae".into(),
+        ],
+    )
+    .expect("feishu setup flow should complete");
+}
+
+#[tokio::test]
+async fn im_provider_add_weixin_setup_uses_admin_api_flow_and_runner() {
+    let server = MockServer::start().await;
+    let (host, port) = mock_server_host_port(&server);
+
+    Mock::given(method("GET"))
+        .and(path("/_bifrost/api/im-gateway/chat/config"))
+        .respond_with(chat_config_response())
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/_bifrost/api/im-gateway/providers"))
+        .and(body_partial_json(serde_json::json!({
+            "id": "weixin-main",
+            "provider_type": "weixin",
+            "agent_config": {
+                "runner": "Claude-Code"
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "weixin-main"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/_bifrost/api/im-gateway/providers/weixin-main/weixin-login/start",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "scan_url": "https://ilinkai.weixin.qq.com/qrcode/mock",
+            "interval_seconds": 0,
+            "expires_in_seconds": 60
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/_bifrost/api/im-gateway/providers/weixin-main/weixin-login/status",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": "confirmed"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/_bifrost/api/im-gateway/providers/weixin-main/connect",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    handle_im_command(
+        &host,
+        port,
+        &[
+            "provider".into(),
+            "add".into(),
+            "weixin-main".into(),
+            "--type".into(),
+            "weixin".into(),
+            "--runner".into(),
+            "claude-code".into(),
+        ],
+    )
+    .expect("weixin setup flow should complete");
+}
+
+#[test]
+fn resolve_runner_choice_accepts_aliases_and_enabled_runners() {
+    let runners = vec![
+        RunnerChoice {
+            id: "Claude-Code".into(),
+            adapter: "claude_code".into(),
+            enabled: true,
+        },
+        RunnerChoice {
+            id: "codex".into(),
+            adapter: "codex".into(),
+            enabled: true,
+        },
+        RunnerChoice {
+            id: "traex".into(),
+            adapter: "traex".into(),
+            enabled: true,
+        },
+    ];
+
+    assert_eq!(
+        resolve_runner_choice(Some("claude-code"), &runners).unwrap(),
+        "Claude-Code"
+    );
+    assert_eq!(
+        resolve_runner_choice(Some("claude code"), &runners).unwrap(),
+        "Claude-Code"
+    );
+    assert_eq!(
+        resolve_runner_choice(Some("trae"), &runners).unwrap(),
+        "traex"
+    );
+    assert_eq!(
+        resolve_runner_choice(Some("codex"), &runners).unwrap(),
+        "codex"
+    );
+}
+
+#[test]
+fn resolve_runner_choice_rejects_missing_runner_with_available_list() {
+    let runners = vec![RunnerChoice {
+        id: "traex".into(),
+        adapter: "traex".into(),
+        enabled: true,
+    }];
+
+    let error =
+        resolve_runner_choice(Some("missing"), &runners).expect_err("missing runner should fail");
+
+    assert!(error.to_string().contains("Available runners: traex"));
+    assert!(error.to_string().contains("codex, traex, Claude Code"));
+}
+
+#[test]
+fn resolve_runner_choice_requires_runner_when_stdin_is_not_interactive() {
+    let runners = vec![RunnerChoice {
+        id: "traex".into(),
+        adapter: "traex".into(),
+        enabled: true,
+    }];
+
+    let error = resolve_runner_choice(None, &runners)
+        .expect_err("non-interactive provider setup must require --runner");
+
+    assert!(error.to_string().contains("--runner is required"));
+    assert!(error.to_string().contains("Available runners: traex"));
+    assert!(error.to_string().contains("codex, traex, Claude Code"));
+}
+
+#[test]
+fn terminal_qr_code_renders_with_square_terminal_ratio() {
+    let image = render_terminal_qr_code("https://open.feishu.cn/page/launcher?user_code=TEST")
+        .expect("qr renders");
+    let lines: Vec<_> = image
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let height = lines.len();
+    let width = lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .expect("qr has width");
+
+    assert!(height > 0);
+    assert!(width > 0);
+    let estimated_visual_height = height * 2;
+    let visual_ratio = width as f64 / estimated_visual_height as f64;
+    assert!(
+        (0.75..=1.35).contains(&visual_ratio),
+        "terminal QR should be close to square: width={width}, height={height}, visual_ratio={visual_ratio:.2}"
+    );
 }
 
 #[test]
@@ -370,7 +731,7 @@ fn ensure_provider_value_sets_when_missing() {
 
 #[test]
 fn parse_provider_add_args_parses_common_flags() {
-    let body = parse_provider_add_args(
+    let args = parse_provider_add_args(
         "feishu-main",
         &[
             "--type".into(),
@@ -379,8 +740,6 @@ fn parse_provider_add_args_parses_common_flags() {
             "cli_xxx".into(),
             "--secret".into(),
             "plain-secret".into(),
-            "--base-url".into(),
-            "https://open.feishu.cn".into(),
             "--display-name".into(),
             "Main".into(),
             "--enabled".into(),
@@ -392,16 +751,37 @@ fn parse_provider_add_args_parses_common_flags() {
         ],
     )
     .expect("parse provider add args");
+    let body = args.into_create_body();
 
     assert_eq!(body["id"], "feishu-main");
     assert_eq!(body["provider_type"], "feishu");
     assert_eq!(body["app_id"], "cli_xxx");
     assert_eq!(body["app_secret"], "plain-secret");
-    assert_eq!(body["base_url"], "https://open.feishu.cn");
     assert_eq!(body["display_name"], "Main");
     assert_eq!(body["enabled"], false); // parsed from explicit flag
     assert_eq!(body["owner_open_id"], "ou_xxx");
     assert_eq!(body["event_connection_enabled"], true);
+}
+
+#[test]
+fn parse_provider_add_args_rejects_base_url() {
+    let err = parse_provider_add_args(
+        "feishu-main",
+        &[
+            "--type".into(),
+            "feishu".into(),
+            "--base-url".into(),
+            "https://open.feishu.cn".into(),
+        ],
+    )
+    .expect_err("base_url should be rejected");
+
+    match err {
+        bifrost_core::BifrostError::Config(msg) => {
+            assert!(msg.contains("base_url is managed by system and cannot be set via CLI"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 }
 
 #[test]
@@ -413,15 +793,25 @@ fn parse_provider_update_args_parses_flags() {
         "true".into(),
         "--enabled".into(),
         "false".into(),
-        "--base-url".into(),
-        "https://example.com".into(),
     ])
     .expect("parse provider update args");
 
     assert_eq!(body["display_name"], "New Name");
     assert_eq!(body["event_connection_enabled"], true);
     assert_eq!(body["enabled"], false);
-    assert_eq!(body["base_url"], "https://example.com");
+}
+
+#[test]
+fn parse_provider_update_args_rejects_base_url() {
+    let err = parse_provider_update_args(&["--base-url".into(), "https://example.com".into()])
+        .expect_err("base_url should be rejected");
+
+    match err {
+        bifrost_core::BifrostError::Config(msg) => {
+            assert!(msg.contains("base_url is managed by system and cannot be set via CLI"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 }
 
 #[test]

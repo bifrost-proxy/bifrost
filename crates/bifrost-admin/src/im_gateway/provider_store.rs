@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use bifrost_core::{BifrostError, Result};
 
-use super::types::ImProviderConfig;
+use super::types::{normalize_provider_base_url, ImProviderConfig};
 
 const STORE_VERSION: u32 = 1;
 const STORE_FILENAME: &str = "im_gateway_providers.json";
@@ -36,7 +36,13 @@ impl ImProviderStore {
     }
 
     pub fn list(&self) -> Vec<ImProviderConfig> {
-        self.data.read().providers.clone()
+        self.data
+            .read()
+            .providers
+            .iter()
+            .cloned()
+            .map(normalized_provider)
+            .collect()
     }
 
     pub fn get(&self, id: &str) -> Option<ImProviderConfig> {
@@ -46,9 +52,11 @@ impl ImProviderStore {
             .iter()
             .find(|p| p.id == id)
             .cloned()
+            .map(normalized_provider)
     }
 
     pub fn add(&self, provider: ImProviderConfig) -> Result<()> {
+        let provider = normalized_provider(provider);
         let mut data = self.data.write();
         if data.providers.iter().any(|p| p.id == provider.id) {
             return Err(BifrostError::Config(format!(
@@ -61,6 +69,7 @@ impl ImProviderStore {
     }
 
     pub fn update(&self, provider: ImProviderConfig) -> Result<()> {
+        let provider = normalized_provider(provider);
         let mut data = self.data.write();
         if let Some(existing) = data.providers.iter_mut().find(|p| p.id == provider.id) {
             *existing = provider;
@@ -121,4 +130,9 @@ impl ImProviderStore {
             }
         }
     }
+}
+
+fn normalized_provider(mut provider: ImProviderConfig) -> ImProviderConfig {
+    normalize_provider_base_url(&mut provider);
+    provider
 }

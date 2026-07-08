@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ClipboardEvent, type CSSProperties, type KeyboardEvent, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Button, Empty, Grid, Input, Select, Space, Tabs, theme, Typography } from "antd";
+import { Button, Empty, Grid, Input, Select, Space, Tabs, theme, Typography, message as antdMessage } from "antd";
 import {
-  AudioOutlined,
   CloudOutlined,
   HistoryOutlined,
   PlusOutlined,
@@ -29,7 +28,13 @@ import {
   type AiSettingsTarget,
 } from "./aiLayout";
 import { apiFetch } from "../../api/apiFetch";
-import type { RunnerConfigPayload, RunnerOption } from "./AgentChatSection.helpers";
+import type { PendingChatImage, RunnerConfigPayload, RunnerOption } from "./AgentChatSection.helpers";
+import {
+  AgentChatImagePreviewStrip,
+  MAX_PASTED_IMAGES,
+  imageFilesFromClipboard,
+  pendingImageFromFile,
+} from "./AgentChatSection.images";
 import {
   type AgentSectionId,
   type ImGatewaySectionId,
@@ -70,6 +75,7 @@ export default function AI() {
   const [chatControls, setChatControls] = useState<AgentChatSectionHandle | null>(null);
   const [newChatActive, setNewChatActive] = useState(true);
   const [newChatDraft, setNewChatDraft] = useState("");
+  const [newChatImages, setNewChatImages] = useState<PendingChatImage[]>([]);
   const [newChatSubmitting, setNewChatSubmitting] = useState(false);
   const [runnerOptions, setRunnerOptions] = useState<RunnerOption[]>([
     { label: "Bifrost Agent", value: "bifrost_agent", adapter: "bifrost_agent" },
@@ -147,6 +153,8 @@ export default function AI() {
 
   const openNewChat = useCallback(() => {
     chatControls?.openNewChat();
+    setNewChatDraft("");
+    setNewChatImages([]);
     setMainView("chat");
   }, [chatControls, setMainView]);
 
@@ -176,19 +184,65 @@ export default function AI() {
     [setSearchParams],
   );
 
+  const addNewChatImageFiles = useCallback(
+    (files: File[]) => {
+      const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+      if (imageFiles.length === 0) {
+        return;
+      }
+      const remaining = MAX_PASTED_IMAGES - newChatImages.length;
+      if (remaining <= 0) {
+        antdMessage.warning(`You can attach up to ${MAX_PASTED_IMAGES} images.`);
+        return;
+      }
+      const accepted = imageFiles.slice(0, remaining);
+      if (accepted.length < imageFiles.length) {
+        antdMessage.warning(`Only the first ${MAX_PASTED_IMAGES} images are kept.`);
+      }
+      accepted.forEach((file) => {
+        void pendingImageFromFile(file).then((image) => {
+          if (!image) {
+            return;
+          }
+          setNewChatImages((prev) => {
+            if (prev.length >= MAX_PASTED_IMAGES) {
+              return prev;
+            }
+            return [...prev, image];
+          });
+        });
+      });
+    },
+    [newChatImages.length],
+  );
+
+  const handleNewChatPasteImages = useCallback(
+    (event: ClipboardEvent<HTMLTextAreaElement>) => {
+      const files = imageFilesFromClipboard(event);
+      if (files.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      addNewChatImageFiles(files);
+    },
+    [addNewChatImageFiles],
+  );
+
   const submitNewChat = useCallback(async () => {
     const message = newChatDraft.trim();
-    if (!message || !chatControls) {
+    const imagesForSend = newChatImages;
+    if ((!message && imagesForSend.length === 0) || !chatControls) {
       return;
     }
     setNewChatSubmitting(true);
     try {
-      await chatControls.startNewChat(message, selectedRunnerId);
+      await chatControls.startNewChat(message, selectedRunnerId, imagesForSend);
       setNewChatDraft("");
+      setNewChatImages([]);
     } finally {
       setNewChatSubmitting(false);
     }
-  }, [chatControls, newChatDraft, selectedRunnerId]);
+  }, [chatControls, newChatDraft, newChatImages, selectedRunnerId]);
 
   const handleNewChatKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -291,6 +345,65 @@ export default function AI() {
     ...contentTrackInnerStyle,
     maxWidth: AI_WORKBENCH_CONTENT_MAX_WIDTH,
   };
+  const newChatImagePreviewStyles = useMemo(
+    () => ({
+      imagePreviewStrip: {
+        display: "flex",
+        flexWrap: "wrap",
+        gap: 8,
+        padding: "0 4px 2px",
+      },
+      imagePreviewItem: {
+        position: "relative",
+        width: 72,
+        height: 72,
+        borderRadius: 10,
+        border: `1px solid ${token.colorBorderSecondary}`,
+        overflow: "hidden",
+        background: token.colorFillQuaternary,
+      },
+      imagePreviewThumb: {
+        width: "100%",
+        height: "100%",
+        objectFit: "cover",
+        display: "block",
+      },
+      imagePreviewRemove: {
+        position: "absolute",
+        top: 4,
+        right: 4,
+        width: 22,
+        height: 22,
+        minWidth: 22,
+        padding: 0,
+        borderRadius: "50%",
+        background: token.colorBgElevated,
+        color: token.colorText,
+        boxShadow: token.boxShadowTertiary,
+      },
+      imagePreviewMeta: {
+        position: "absolute",
+        left: 0,
+        right: 0,
+        bottom: 0,
+        padding: "2px 5px",
+        fontSize: 10,
+        color: token.colorTextLightSolid,
+        background: "rgba(0,0,0,0.55)",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+      },
+    } satisfies Record<string, CSSProperties>),
+    [
+      token.colorBgElevated,
+      token.colorBorderSecondary,
+      token.colorFillQuaternary,
+      token.colorText,
+      token.colorTextLightSolid,
+      token.boxShadowTertiary,
+    ],
+  );
 
   useEffect(() => {
     if (routeState.view !== "settings") {
@@ -600,6 +713,7 @@ export default function AI() {
                     data-testid="agent-chat-input"
                     value={newChatDraft}
                     onChange={(event) => setNewChatDraft(event.target.value)}
+                    onPaste={handleNewChatPasteImages}
                     onKeyDown={handleNewChatKeyDown}
                     placeholder="Describe a task for the Agent..."
                     autoSize={{ minRows: 2, maxRows: 5 }}
@@ -615,6 +729,13 @@ export default function AI() {
                       lineHeight: "22px",
                     }}
                   />
+                  <AgentChatImagePreviewStrip
+                    images={newChatImages}
+                    styles={newChatImagePreviewStyles}
+                    onRemove={(imageId) =>
+                      setNewChatImages((prev) => prev.filter((image) => image.id !== imageId))
+                    }
+                  />
                   <div
                     data-testid="agent-chat-new-toolbar"
                     style={{
@@ -626,20 +747,6 @@ export default function AI() {
                     }}
                   >
                     <Space size={6} align="center" style={{ minWidth: 0 }}>
-                      <Button
-                        type="text"
-                        icon={<PlusOutlined />}
-                        aria-label="Attach context"
-                        title="Attach context"
-                        style={{
-                          width: 30,
-                          height: 30,
-                          minWidth: 30,
-                          padding: 0,
-                          borderRadius: "50%",
-                          color: token.colorTextSecondary,
-                        }}
-                      />
                       <div
                         data-testid="agent-chat-new-runner-row"
                         style={{
@@ -677,26 +784,13 @@ export default function AI() {
                     </Space>
                     <Space size={6} align="center">
                       <Button
-                        type="text"
-                        shape="circle"
-                        icon={<AudioOutlined />}
-                        aria-label="Voice input"
-                        title="Voice input"
-                        style={{
-                          width: 30,
-                          height: 30,
-                          minWidth: 30,
-                          color: token.colorTextSecondary,
-                        }}
-                      />
-                      <Button
                         shape="circle"
                         type="primary"
                         icon={<SendOutlined />}
                         aria-label="Send"
                         title="Send"
                         loading={newChatSubmitting}
-                        disabled={!newChatDraft.trim() || !chatControls}
+                        disabled={(!newChatDraft.trim() && newChatImages.length === 0) || !chatControls}
                         data-testid="agent-chat-send"
                         onClick={() => void submitNewChat()}
                         style={{

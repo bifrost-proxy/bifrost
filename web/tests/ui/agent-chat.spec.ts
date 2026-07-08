@@ -47,7 +47,7 @@ async function dismissConnectedDeviceModal(page: Page, timeoutMs = 3000) {
 }
 
 async function pasteImageFiles(page: Page, testId: string, files: Array<{ name: string; type: string; content: string }>) {
-  await page.getByTestId(testId).evaluate((element, pastedFiles) => {
+  await page.locator(`[data-testid="${testId}"]:visible`).first().evaluate((element, pastedFiles) => {
     const data = new DataTransfer();
     pastedFiles.forEach((file) => {
       data.items.add(new File([file.content], file.name, { type: file.type }));
@@ -4428,10 +4428,24 @@ test("AI Agent Chat supports pasted image previews and pure image send", async (
         'event: run_finished\ndata: {"eventType":"run_finished","response":"Image received"}\n\n',
     });
   });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/image-paste-session", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session_key: "image-paste-session",
+        source: "admin-api",
+        runner_type: "bifrost_agent",
+        runner_id: "bifrost_agent",
+        work_dir: "/tmp/workspace",
+        messages: [],
+      }),
+    });
+  });
 
-  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
+  await openPage(page, "ai?view=chat&session=image-paste-session");
 
-  const input = page.getByTestId("agent-chat-input");
+  const input = page.locator('[data-testid="agent-chat-input"]:visible').first();
   await input.focus();
   await pasteImageFiles(
     page,
@@ -4449,10 +4463,10 @@ test("AI Agent Chat supports pasted image previews and pure image send", async (
   await expect(page.getByTestId("agent-chat-image-preview")).toHaveCount(6);
   await page.getByLabel("Remove pasted image 1").click();
   await expect(page.getByTestId("agent-chat-image-preview")).toHaveCount(5);
-  await expect(page.getByTestId("agent-chat-send")).toBeEnabled();
-  await page.getByTestId("agent-chat-send").click();
+  await expect(page.locator('[data-testid="agent-chat-send"]:visible').first()).toBeEnabled();
+  await page.locator('[data-testid="agent-chat-send"]:visible').first().click();
 
-  await expect(page.getByTestId("agent-chat-input")).toHaveValue("");
+  await expect(page.locator('[data-testid="agent-chat-input"]:visible').first()).toHaveValue("");
   await expect(page.getByTestId("agent-chat-image-preview")).toHaveCount(0);
   await expect(page.getByTestId("agent-chat-messages")).toContainText("Attached 5 images");
   await expect(page.getByTestId("agent-chat-message-images")).toBeVisible();
@@ -4464,6 +4478,122 @@ test("AI Agent Chat supports pasted image previews and pure image send", async (
   expect(requests[0].images).toEqual(
     expect.arrayContaining([expect.objectContaining({ mime_type: "image/png" })]),
   );
+});
+
+test("AI new chat landing sends pasted images without unused tool buttons", async ({
+  page,
+}) => {
+  let requestPayload: Record<string, unknown> | undefined;
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ sessions: [] }),
+    });
+  });
+  await page.route("**/_bifrost/api/asr/capabilities", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        platform: "macos",
+        arch: "aarch64",
+        supported_target: "macos-aarch64",
+        qwen3_asr: { enabled: false, hidden: true, platform_supported: true },
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: {},
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/admin-chat-*", async (route) => {
+    const image = (requestPayload?.images as Array<{ data?: string; mime_type?: string }> | undefined)?.[0];
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session_key: route.request().url().split("/").pop(),
+        source: "admin-api",
+        runner_type: "bifrost_agent",
+        runner_id: "bifrost_agent",
+        work_dir: "/tmp/workspace",
+        running: false,
+        messages: [
+          {
+            role: "user",
+            content: "Describe the pasted screenshot",
+            content_parts: [
+              { type: "text", text: "Describe the pasted screenshot" },
+              {
+                type: "image_url",
+                image_url: {
+                  url: `data:${image?.mime_type || "image/png"};base64,${image?.data || ""}`,
+                  detail: "auto",
+                },
+              },
+            ],
+          },
+          { role: "assistant", content: "Landing image received" },
+        ],
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/agent/chat/stream", async (route) => {
+    requestPayload = route.request().postDataJSON();
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body:
+        'event: run_started\ndata: {"eventType":"run_started"}\n\n' +
+        'event: run_finished\ndata: {"eventType":"run_finished","response":"Landing image received"}\n\n',
+    });
+  });
+
+  await openPage(page, "ai");
+
+  const landing = page.getByTestId("ai-new-chat-landing");
+  await expect(landing).toBeVisible();
+  await expect(landing.getByLabel("Attach context")).toHaveCount(0);
+  await expect(landing.getByLabel("Voice input")).toHaveCount(0);
+  await expect(landing.getByTestId("agent-chat-send")).toBeDisabled();
+
+  await landing.getByTestId("agent-chat-input").fill("Describe the pasted screenshot");
+  await pasteImageFiles(page, "agent-chat-input", [
+    { name: "landing.png", type: "image/png", content: "landing-image" },
+  ]);
+
+  await expect(landing.getByTestId("agent-chat-image-preview")).toHaveCount(1);
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(landing.getByTestId("agent-chat-image-preview")).toHaveCount(1);
+  await expect(landing.getByTestId("agent-chat-send")).toBeEnabled();
+  await landing.getByTestId("agent-chat-send").click();
+
+  await expect(page.getByTestId("agent-chat-messages")).toContainText("Describe the pasted screenshot");
+  await expect(page.getByTestId("agent-chat-message-images").locator("img")).toHaveCount(1);
+  await expect(page.getByTestId("agent-chat-messages")).toContainText("Landing image received");
+  expect(requestPayload).toMatchObject({
+    message: "Describe the pasted screenshot",
+  });
+  expect(requestPayload?.images).toEqual([
+    expect.objectContaining({ mime_type: "image/png", data: expect.any(String) }),
+  ]);
 });
 
 test("AI Agent Chat sends pasted images to external runner stream", async ({
@@ -4488,6 +4618,20 @@ test("AI Agent Chat sends pasted images to external runner stream", async ({
   await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }) });
   });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/external-image-session", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session_key: "external-image-session",
+        source: "admin-api",
+        runner_type: "codex",
+        runner_id: "codex",
+        work_dir: "/tmp/workspace",
+        messages: [],
+      }),
+    });
+  });
   await page.route("**/_bifrost/api/im-gateway/chat/stream", async (route) => {
     requestPayload = route.request().postDataJSON();
     await route.fulfill({
@@ -4497,13 +4641,13 @@ test("AI Agent Chat sends pasted images to external runner stream", async ({
     });
   });
 
-  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
-  await page.getByTestId("agent-chat-input").fill("Describe this image");
+  await openPage(page, "ai?view=chat&session=external-image-session");
+  await page.locator('[data-testid="agent-chat-input"]:visible').first().fill("Describe this image");
   await pasteImageFiles(page, "agent-chat-input", [
     { name: "external.png", type: "image/png", content: "external" },
   ]);
   await expect(page.getByTestId("agent-chat-image-preview")).toHaveCount(1);
-  await page.getByTestId("agent-chat-send").click();
+  await page.locator('[data-testid="agent-chat-send"]:visible').first().click();
 
   await expect(page.getByTestId("agent-chat-messages")).toContainText("Codex saw image");
   expect(requestPayload).toMatchObject({

@@ -22,6 +22,7 @@ editLink: false
 | 局域网或多人访问 | `--access-mode` / `whitelist` | 不要直接用 `allow_all` 暴露未授权代理 |
 | 操作另一台机器的 Bifrost | `bifrost remote ...` | `setting` 总是本机；远端配置要通过 `remote exec` 在远端执行 |
 | 备份、迁移或同步规则 | `import` / `export` / `sync` | `.bifrost` 文件用于离线迁移，`sync` 用于远端同步服务 |
+| 添加飞书或微信 IM 通道 | `im provider add` | 终端展示授权链接或二维码，扫码后自动创建并连接 provider |
 | 和 Agent 协作开发业务 Skill | `install-skill` + `traffic list/get/search` | 先抓完整或应用专属流量，再让 Agent 基于真实请求和响应沉淀 skill |
 
 ## 场景 1：使用主服务和多端口安全调试
@@ -396,9 +397,29 @@ Shell 补全：
 bifrost completions zsh
 ```
 
+## 场景 12：添加飞书或微信 IM 通道
+
+IM Gateway 适合把飞书或微信变成 Bifrost 的 Agent 会话入口。首次添加 provider 时先确认 Bifrost 服务已启动，再用 `im provider add` 进入交互式配置：
+
+```bash
+bifrost start -d
+bifrost im provider add feishu-main --type feishu --runner traex
+bifrost im provider add weixin-main --type weixin --runner codex
+```
+
+Feishu 会在终端显示授权 URL 和二维码；Weixin 会显示登录二维码。CLI 会保持等待，直到用户完成授权或扫码确认，然后自动创建并连接 provider。`--runner` 用于绑定这个 IM 通道默认使用的 Agent Runner；交互式终端里可以省略后通过上下键选择，脚本或管道环境必须显式传入。Runner 写错时错误信息会列出当前可用 Runner。Feishu / Weixin 的 `base_url` 由 provider 类型固定，CLI 不接受 `--base-url`。
+
+如果你已经有 App ID 和 Secret，可以继续走手动凭据方式，并用 `env:NAME` 避免把 secret 写进 shell history：
+
+```bash
+bifrost im provider add feishu-main --type feishu --app-id cli_xxx --secret env:FEISHU_APP_SECRET --owner-open-id ou_xxx --runner "Claude Code"
+```
+
+IM 通道连接成功后会收到上线通知和可用命令帮助。帮助会按 Runner 类型过滤：所有 Runner 都有 `/help`、`/status`、`/cwd`、`/runner`、`/q`、`/rq`、`/stop`；内置 Bifrost Agent 才显示 memory / goal / compact / guidance 类命令；Codex、Traex、Claude Code 等外部 Runner 只显示其支持的模型和 reasoning effort 命令。
+
 Agent skill 的完整协作流程见下一节。
 
-## 场景 12：和 Agent 协作开发业务 Skill
+## 场景 13：和 Agent 协作开发业务 Skill
 
 这个场景适合把一个真实系统、内部平台或桌面应用的网络协议沉淀成专属 Agent skill。核心思路是：先让 Bifrost 记录可复现的真实请求和响应，再让 Agent 读取这些证据，总结认证方式、接口顺序、字段含义和错误格式，最后写成可复用的 skill。
 

@@ -166,7 +166,9 @@ fn disables_provider_connection(patch: &serde_json::Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::disables_provider_connection;
+    use super::{apply_weixin_login_account_to_provider, disables_provider_connection};
+    use crate::im_gateway::types::{ImProviderConfig, ImProviderType};
+    use crate::im_gateway::weixin::WeixinLoginAccount;
 
     #[test]
     fn provider_patch_detects_connection_disabling_changes() {
@@ -183,6 +185,44 @@ mod tests {
         assert!(!disables_provider_connection(&serde_json::json!({
             "display_name": "Renamed"
         })));
+    }
+
+    #[test]
+    fn weixin_login_completion_keeps_fixed_provider_base_url() {
+        let mut provider = ImProviderConfig {
+            id: "weixin-main".to_string(),
+            provider_type: ImProviderType::Weixin,
+            display_name: "Weixin Main".to_string(),
+            enabled: false,
+            base_url: Some("https://evil.example".to_string()),
+            app_id: None,
+            secret_ref: None,
+            owner_open_id: None,
+            event_connection_enabled: false,
+            event_types: Vec::new(),
+            agent_config: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let account = WeixinLoginAccount {
+            account_id: "bot@im.bot".to_string(),
+            user_id: "owner@im.wechat".to_string(),
+            base_url: "http://127.0.0.1:12345".to_string(),
+            bot_token: "token".to_string(),
+        };
+
+        apply_weixin_login_account_to_provider(&mut provider, account);
+
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://ilinkai.weixin.qq.com")
+        );
+        assert_eq!(provider.app_id.as_deref(), Some("bot@im.bot"));
+        assert_eq!(provider.owner_open_id.as_deref(), Some("owner@im.wechat"));
+        assert_eq!(provider.secret_ref.as_deref(), Some("token"));
+        assert!(provider.enabled);
+        assert!(provider.event_connection_enabled);
+        assert_eq!(provider.event_types, vec!["message.receive"]);
     }
 }
 
@@ -205,6 +245,24 @@ pub(super) fn handle_provider_status(
             }
         }
     }
+}
+
+fn apply_weixin_login_account_to_provider(
+    provider: &mut crate::im_gateway::types::ImProviderConfig,
+    account: crate::im_gateway::weixin::WeixinLoginAccount,
+) {
+    provider.app_id = Some(account.account_id);
+    provider.owner_open_id = Some(account.user_id);
+    provider.base_url = None;
+    provider.secret_ref = Some(account.bot_token);
+    provider.enabled = true;
+    provider.event_connection_enabled = true;
+    if provider.event_types.is_empty() {
+        provider.event_types = vec!["message.receive".to_string()];
+    }
+    provider.updated_at = now_ms();
+    normalize_provider_base_url(provider);
+    normalize_provider_agent_config(provider);
 }
 
 pub(super) async fn handle_provider_weixin_login_start(
@@ -291,17 +349,9 @@ pub(super) async fn handle_provider_weixin_login_status(
         .await
     {
         Ok(account) => {
-            provider.app_id = Some(account.account_id.clone());
-            provider.owner_open_id = Some(account.user_id.clone());
-            provider.base_url = Some(account.base_url.clone());
-            provider.secret_ref = Some(account.bot_token);
-            provider.enabled = true;
-            provider.event_connection_enabled = true;
-            if provider.event_types.is_empty() {
-                provider.event_types = vec!["message.receive".to_string()];
-            }
-            provider.updated_at = now_ms();
-            normalize_provider_agent_config(&mut provider);
+            let account_id = account.account_id.clone();
+            let user_id = account.user_id.clone();
+            apply_weixin_login_account_to_provider(&mut provider, account);
             if let Err(e) = service.provider_store.update(provider.clone()) {
                 return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
             }
@@ -311,9 +361,8 @@ pub(super) async fn handle_provider_weixin_login_status(
                 "status": "confirmed",
                 "provider": sanitize_provider(&provider),
                 "account": {
-                    "account_id": account.account_id,
-                    "user_id": account.user_id,
-                    "base_url": account.base_url,
+                    "account_id": account_id,
+                    "user_id": user_id,
                 }
             }))
         }
@@ -368,17 +417,9 @@ pub(super) async fn handle_provider_weixin_login_complete(
         .await
     {
         Ok(account) => {
-            provider.app_id = Some(account.account_id.clone());
-            provider.owner_open_id = Some(account.user_id.clone());
-            provider.base_url = Some(account.base_url.clone());
-            provider.secret_ref = Some(account.bot_token);
-            provider.enabled = true;
-            provider.event_connection_enabled = true;
-            if provider.event_types.is_empty() {
-                provider.event_types = vec!["message.receive".to_string()];
-            }
-            provider.updated_at = now_ms();
-            normalize_provider_agent_config(&mut provider);
+            let account_id = account.account_id.clone();
+            let user_id = account.user_id.clone();
+            apply_weixin_login_account_to_provider(&mut provider, account);
             if let Err(e) = service.provider_store.update(provider.clone()) {
                 return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
             }
@@ -387,9 +428,8 @@ pub(super) async fn handle_provider_weixin_login_complete(
                 "success": true,
                 "provider": sanitize_provider(&provider),
                 "account": {
-                    "account_id": account.account_id,
-                    "user_id": account.user_id,
-                    "base_url": account.base_url,
+                    "account_id": account_id,
+                    "user_id": user_id,
                 }
             }))
         }
@@ -404,6 +444,8 @@ pub(super) async fn handle_provider_weixin_login_complete(
 struct FeishuSetupStartRequest {
     #[serde(default)]
     brand: Option<String>,
+    #[serde(default)]
+    provider: Option<serde_json::Value>,
 }
 
 pub(super) async fn handle_provider_feishu_setup_start(
@@ -432,8 +474,12 @@ pub(super) async fn handle_provider_feishu_setup_start(
                     app_secret: None,
                     owner_open_id: None,
                     brand,
+                    provider_payload: body.provider,
+                    created_provider_id: None,
+                    auto_connect: true,
                 },
             );
+            save_pending_feishu_setups(service);
             json_response(&serde_json::json!({
                 "success": true,
                 "session_id": session_id,
@@ -463,6 +509,9 @@ pub(super) async fn handle_provider_feishu_setup_status(
         return error_response(StatusCode::NOT_FOUND, "Feishu setup session not found");
     };
     if let Some(app_id) = pending.app_id.as_deref() {
+        if pending.created_provider_id.is_some() {
+            return json_response(&confirmed_feishu_setup_response(&pending, service));
+        }
         return json_response(&serde_json::json!({
             "success": true,
             "status": "confirmed",
@@ -475,6 +524,7 @@ pub(super) async fn handle_provider_feishu_setup_status(
     }
     if now_ms() >= pending.expires_at_ms {
         service.feishu_setup_pending.write().remove(session_id);
+        save_pending_feishu_setups(service);
         return json_response(&serde_json::json!({
             "success": true,
             "status": "expired",
@@ -510,11 +560,13 @@ pub(super) async fn handle_provider_feishu_setup_status(
                             pending,
                             final_brand,
                             lark_result,
-                        );
+                        )
+                        .await;
                     }
                     Ok(FeishuAppRegistrationPoll::Pending) => {}
                     Ok(FeishuAppRegistrationPoll::Expired) => {
                         service.feishu_setup_pending.write().remove(session_id);
+                        save_pending_feishu_setups(service);
                         return json_response(&serde_json::json!({
                             "success": true,
                             "status": "expired",
@@ -531,9 +583,11 @@ pub(super) async fn handle_provider_feishu_setup_status(
                 }
             }
             persist_and_respond_feishu_setup(service, session_id, pending, final_brand, result)
+                .await
         }
         Ok(FeishuAppRegistrationPoll::Expired) => {
             service.feishu_setup_pending.write().remove(session_id);
+            save_pending_feishu_setups(service);
             json_response(&serde_json::json!({
                 "success": true,
                 "status": "expired",
@@ -547,36 +601,201 @@ pub(super) async fn handle_provider_feishu_setup_status(
     }
 }
 
-fn persist_and_respond_feishu_setup(
+async fn persist_and_respond_feishu_setup(
+    service: &ImGatewayService,
+    session_id: &str,
+    pending: PendingFeishuSetup,
+    brand: FeishuSetupBrand,
+    result: FeishuAppRegistrationResult,
+) -> Response<BoxBody> {
+    match persist_confirmed_feishu_setup(service, session_id, pending, brand, result).await {
+        Ok(pending) => json_response(&confirmed_feishu_setup_response(&pending, service)),
+        Err(error) => error_response(StatusCode::BAD_GATEWAY, &error),
+    }
+}
+
+async fn persist_confirmed_feishu_setup(
     service: &ImGatewayService,
     session_id: &str,
     mut pending: PendingFeishuSetup,
     brand: FeishuSetupBrand,
     result: FeishuAppRegistrationResult,
-) -> Response<BoxBody> {
+) -> Result<PendingFeishuSetup, String> {
     if result.app_id.is_empty() || result.app_secret.is_empty() {
-        return error_response(
-            StatusCode::BAD_GATEWAY,
-            "Feishu setup completed but app credentials were incomplete",
+        return Err("Feishu setup completed but app credentials were incomplete".to_string());
+    }
+    pending.app_id = Some(result.app_id);
+    pending.app_secret = Some(result.app_secret);
+    pending.owner_open_id = result.owner_open_id;
+    pending.brand = brand;
+    if let Err(error) = maybe_create_pending_feishu_setup_provider(service, &mut pending).await {
+        warn!(
+            session_id,
+            error = %error,
+            "failed to create Feishu provider from persisted setup draft"
         );
     }
-    pending.app_id = Some(result.app_id.clone());
-    pending.app_secret = Some(result.app_secret);
-    pending.owner_open_id = result.owner_open_id.clone();
-    pending.brand = brand;
     service
         .feishu_setup_pending
         .write()
-        .insert(session_id.to_string(), pending);
-    json_response(&serde_json::json!({
+        .insert(session_id.to_string(), pending.clone());
+    save_pending_feishu_setups(service);
+    Ok(pending)
+}
+
+fn confirmed_feishu_setup_response(
+    pending: &PendingFeishuSetup,
+    service: &ImGatewayService,
+) -> serde_json::Value {
+    let mut response = serde_json::json!({
         "success": true,
         "status": "confirmed",
-        "app_id": result.app_id,
-        "secret_configured": true,
-        "owner_open_id": result.owner_open_id,
-        "brand": feishu_setup_brand_label(brand),
-        "base_url": brand.provider_base_url(),
-    }))
+        "app_id": pending.app_id,
+        "secret_configured": pending.app_secret.as_deref().is_some_and(|s| !s.is_empty()),
+        "owner_open_id": pending.owner_open_id,
+        "brand": feishu_setup_brand_label(pending.brand),
+        "base_url": pending.brand.provider_base_url(),
+    });
+    if let Some(provider_id) = pending.created_provider_id.as_deref() {
+        response["provider_id"] = serde_json::Value::String(provider_id.to_string());
+        if let Some(provider) = service.provider_store.get(provider_id) {
+            response["provider"] = sanitize_provider(&provider);
+        }
+    }
+    response
+}
+
+async fn maybe_create_pending_feishu_setup_provider(
+    service: &ImGatewayService,
+    pending: &mut PendingFeishuSetup,
+) -> Result<Option<String>, String> {
+    if let Some(provider_id) = pending.created_provider_id.as_deref() {
+        if service.provider_store.get(provider_id).is_some() {
+            return Ok(Some(provider_id.to_string()));
+        }
+    }
+    let Some(mut payload) = pending.provider_payload.clone() else {
+        return Ok(None);
+    };
+    let Some(app_id) = pending.app_id.clone() else {
+        return Ok(None);
+    };
+    let Some(app_secret) = pending.app_secret.clone() else {
+        return Ok(None);
+    };
+    payload["provider_type"] = serde_json::Value::String("feishu".to_string());
+    payload["app_id"] = serde_json::Value::String(app_id);
+    payload["app_secret"] = serde_json::Value::String(app_secret);
+    payload["base_url"] = serde_json::Value::String(pending.brand.provider_base_url().to_string());
+    if payload
+        .get("owner_open_id")
+        .and_then(|value| value.as_str())
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        if let Some(owner) = pending.owner_open_id.as_deref() {
+            payload["owner_open_id"] = serde_json::Value::String(owner.to_string());
+        }
+    }
+    let config = parse_feishu_setup_provider_payload(payload)?;
+    let provider_id = config.id.clone();
+    if service.provider_store.get(&provider_id).is_some() {
+        return Err(format!("provider with id '{}' already exists", provider_id));
+    }
+    service
+        .provider_store
+        .add(config.clone())
+        .map_err(|error| error.to_string())?;
+    pending.created_provider_id = Some(config.id.clone());
+    if pending.auto_connect {
+        if let Err(error) = start_provider_event_connection(service, &config.id).await {
+            warn!(
+                provider_id = %config.id,
+                error = %error,
+                "failed to auto-connect Feishu provider created from setup draft"
+            );
+        }
+    }
+    Ok(Some(config.id))
+}
+
+fn parse_feishu_setup_provider_payload(
+    payload: serde_json::Value,
+) -> Result<ImProviderConfig, String> {
+    let mut config = parse_provider_create_payload(payload)
+        .map_err(|error| format!("Invalid request body: {error}"))?;
+    config.enabled = true;
+    config.event_connection_enabled = true;
+    if config.event_types.is_empty() {
+        config.event_types = vec!["message.receive".to_string()];
+    }
+    let now = now_ms();
+    if config.created_at == 0 {
+        config.created_at = now;
+    }
+    config.updated_at = now;
+    normalize_provider_agent_config(&mut config);
+    Ok(config)
+}
+
+pub(super) async fn poll_and_complete_feishu_setup_session(
+    service: &ImGatewayService,
+    session_id: &str,
+) -> Result<(), String> {
+    let Some(pending) = service.feishu_setup_pending.read().get(session_id).cloned() else {
+        return Err("Feishu setup session not found".to_string());
+    };
+    if pending.created_provider_id.is_some() {
+        return Ok(());
+    }
+    if pending.app_id.is_some() {
+        let mut pending = pending;
+        maybe_create_pending_feishu_setup_provider(service, &mut pending).await?;
+        service
+            .feishu_setup_pending
+            .write()
+            .insert(session_id.to_string(), pending);
+        save_pending_feishu_setups(service);
+        return Ok(());
+    }
+    if now_ms() >= pending.expires_at_ms {
+        service.feishu_setup_pending.write().remove(session_id);
+        save_pending_feishu_setups(service);
+        return Err("Feishu setup session expired before confirmation".to_string());
+    }
+    let mut result =
+        match poll_feishu_app_registration_once(pending.brand, &pending.device_code).await? {
+            FeishuAppRegistrationPoll::Pending => return Err("authorization pending".to_string()),
+            FeishuAppRegistrationPoll::Expired => {
+                service.feishu_setup_pending.write().remove(session_id);
+                save_pending_feishu_setups(service);
+                return Err("Feishu setup session expired before confirmation".to_string());
+            }
+            FeishuAppRegistrationPoll::Confirmed(result) => result,
+        };
+    let brand = if result.app_secret.is_empty()
+        && result
+            .tenant_brand
+            .as_deref()
+            .is_some_and(|tenant| tenant == "lark")
+    {
+        match poll_feishu_app_registration_once(FeishuSetupBrand::Lark, &pending.device_code).await
+        {
+            Ok(FeishuAppRegistrationPoll::Confirmed(lark_result)) => {
+                result = lark_result;
+                FeishuSetupBrand::Lark
+            }
+            Ok(FeishuAppRegistrationPoll::Expired) => {
+                service.feishu_setup_pending.write().remove(session_id);
+                save_pending_feishu_setups(service);
+                return Err("Feishu setup session expired before confirmation".to_string());
+            }
+            Ok(FeishuAppRegistrationPoll::Pending) | Err(_) => pending.brand,
+        }
+    } else {
+        pending.brand
+    };
+    persist_confirmed_feishu_setup(service, session_id, pending, brand, result).await?;
+    Ok(())
 }
 
 pub(super) async fn handle_provider_feishu_setup_create_provider(
@@ -594,6 +813,20 @@ pub(super) async fn handle_provider_feishu_setup_create_provider(
     let Some(pending) = service.feishu_setup_pending.read().get(session_id).cloned() else {
         return error_response(StatusCode::NOT_FOUND, "Feishu setup session not found");
     };
+    if let Some(provider_id) = pending.created_provider_id.as_deref() {
+        let Some(provider) = service.provider_store.get(provider_id) else {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "Feishu setup provider was created but is no longer configured",
+            );
+        };
+        service.feishu_setup_pending.write().remove(session_id);
+        save_pending_feishu_setups(service);
+        return json_response(&serde_json::json!({
+            "success": true,
+            "provider": sanitize_provider(&provider),
+        }));
+    }
     let (Some(app_id), Some(app_secret)) = (pending.app_id.clone(), pending.app_secret.clone())
     else {
         return error_response(
@@ -638,6 +871,7 @@ pub(super) async fn handle_provider_feishu_setup_create_provider(
     match service.provider_store.add(config.clone()) {
         Ok(()) => {
             service.feishu_setup_pending.write().remove(session_id);
+            save_pending_feishu_setups(service);
             json_response(&serde_json::json!({
                 "success": true,
                 "provider": sanitize_provider(&config),
@@ -660,13 +894,28 @@ pub(super) async fn handle_provider_connect(
         return method_not_allowed();
     }
 
+    match start_provider_event_connection(service, id).await {
+        Ok(()) => {
+            json_response(&serde_json::json!({"success": true, "message": "Connection started"}))
+        }
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to start connection: {error}"),
+        ),
+    }
+}
+
+async fn start_provider_event_connection(
+    service: &ImGatewayService,
+    id: &str,
+) -> Result<(), String> {
     let Some(mut provider) = service.provider_store.get(id) else {
-        return error_response(StatusCode::NOT_FOUND, "Provider not found");
+        return Err("Provider not found".to_string());
     };
 
     let app_secret = match provider.secret_ref.as_deref() {
         Some(s) if !s.is_empty() => s.to_string(),
-        _ => return error_response(StatusCode::BAD_REQUEST, "Provider has no secret configured"),
+        _ => return Err("Provider has no secret configured".to_string()),
     };
 
     // Auto-detect owner_open_id if not set for Feishu. Weixin gets owner from QR login.
@@ -754,14 +1003,11 @@ pub(super) async fn handle_provider_connect(
     {
         Ok(()) => {
             info!(provider_id = id, "provider event connection started");
-            json_response(&serde_json::json!({"success": true, "message": "Connection started"}))
+            Ok(())
         }
         Err(e) => {
             service.connection_manager.mark_failed(id, e.to_string());
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Failed to start connection: {e}"),
-            )
+            Err(e.to_string())
         }
     }
 }
@@ -938,10 +1184,7 @@ async fn request_feishu_app_registration(
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(feishu_setup_reqwest_error)?;
-    let endpoint = format!(
-        "{}/oauth/v1/app/registration",
-        FeishuSetupBrand::Feishu.accounts_base()
-    );
+    let endpoint = format!("{}/oauth/v1/app/registration", brand.accounts_base());
     let response = client
         .post(endpoint)
         .form(&[

@@ -43,6 +43,17 @@ Bifrost 的 shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_a
 - `scripts/run_all_e2e.sh` 定义 `CARGO_HEAVY_TESTS`，包含 `test_agent_codex_parity_contracts.sh`、`test_chatgpt_web_behavior_artifacts.sh`、`test_im_agent_streaming_progress_card.sh`、`test_asr_task_pause_resume.sh`、`test_voice_input_runtime.sh` 等触发 `cargo check/test/run` 的用例。
 - `run_shell_tests_parallel` 把 `is_cargo_heavy` 用例加入 `serial_tests`，串行执行，避免 Cargo artifact lock 竞争让业务已通过但被 900s per-test timeout 杀掉。
 
+**macOS 双分片负载均衡**
+
+- macOS `E2E Shell (aarch64-apple-darwin, shard N/2)` 使用 `shell_test_weight` 的实测秒级权重分片。权重来自近期 GitHub Actions job 日志里的 `[PASS] shell:<script> (<seconds>s)` 记录，而不是脚本数量。
+- shard 内执行模型必须纳入分片计算：safe shell tests 先按 `BIFROST_E2E_SHELL_JOBS=2` 并发执行，lock-sensitive / cargo-heavy tests 再串行执行。分片算法按“串行预计耗时 + 并发 lane 最长预计耗时”估算墙钟，避免一个大的并发脚本抵消另一个 shard 的串行长尾。
+- 2026-07-07 复核的异常样本包含 `CI` run `28803571034`（shard 1: 19.85 min，shard 2: 37.70 min）和 `28778932181`（shard 1: 22.85 min，shard 2: 32.18 min）。主要长尾来自 `test_chatgpt_web_behavior_artifacts.sh`、`test_long_term_memory_remember_recall.sh`、`test_im_gateway_long_reply_delivery_regression.sh`，以及此前按默认 8s 估计但实际可达数百秒的 `test_desktop_open_requests_contract.sh`、`test_skill_creator_flow.sh`。
+- `CI` run `28881027276` 通过后，实测 shard 1 为 1168s、shard 2 为 1847s；该结果证明单纯平衡总权重仍会被串行段拖长。后续权重与验收口径改为 estimated wall clock。
+- `scripts/run_all_e2e.sh --check-shell-shard-balance` 会打印每个 shard 的 `estimated_wall`、串行耗时、并发 lane 耗时和测试数量，并在最大/最小预计墙钟差超过平均预计墙钟的 `BIFROST_E2E_SHARD_BALANCE_MAX_DIFF_PCT` 时返回非 0。默认门槛为 20%，对应用户目标的“两边耗时误差不超过 20%”。
+- 调整权重后必须运行：
+  `BIFROST_E2E_SHELL_JOBS=2 bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --shard 1/2 --check-shell-shard-balance`。
+  当前期望输出为两个 shard `estimated_wall` 差距低于 20%，且不减少任一 shell 测试覆盖。
+
 **外部依赖本地化**
 
 - Shell E2E 不依赖公网 `httpbin.org` / `echo.websocket.events`。`test_http3_e2e.sh` 把 `bifrost-httpbin.test`、`h3-forward-test.local`、`h3-body-test.local`、`h3-websocket-test.local` 转发到 `e2e-tests/mock_servers/http_echo_server.py` 分配的本地端口；`test_replay_body_decode.sh` 直接 replay 本地 `/gzip`。

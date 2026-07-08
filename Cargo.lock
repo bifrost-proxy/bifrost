@@ -527,6 +527,7 @@ dependencies = [
  "open",
  "parking_lot",
  "plist",
+ "qrcode",
  "ratatui",
  "regex",
  "reqwest",

@@ -97,6 +97,7 @@ bifrost install-skill -y
 - `bifrost` 不带子命令时，等价于 `bifrost start`
 - `config`、`traffic`、`search`、`group`、多数 `status` 相关能力依赖"已有运行中的代理"
 - `rule`、`value`、`script`、`ca` 主要操作本地数据目录，不一定要求代理正在运行
+- `im` 通过当前运行中的 Bifrost Admin API 管理 IM Gateway provider、target、route、schedule 和消息；配置飞书/微信通道时优先走 CLI 交互式授权/扫码流程，不要直接改 provider 配置文件
 - `system-proxy` 会修改操作系统代理设置；除非用户明确要求，不要主动启用
 
 ## 命令能力映射
@@ -704,7 +705,30 @@ bifrost completions zsh                        # 生成 zsh 补全脚本
 bifrost completions fish                       # 生成 fish 补全脚本
 ```
 
-### 21. 安装 Skill 到 AI 工具
+### 21. IM Gateway provider 与 Agent 通道
+
+当用户要求配置飞书、Lark、微信、Weixin、IM Gateway、IM 通道、通过聊天工具运行 Agent、扫码添加通道或排查 IM 通道命令时，使用本地 `bifrost im` 命令。先确认 Bifrost 服务已启动；未启动时使用 `bifrost start -d`。
+
+```bash
+bifrost im provider list
+bifrost im provider add feishu-main --type feishu --runner traex
+bifrost im provider add weixin-main --type weixin --runner codex
+bifrost im provider add feishu-main --type feishu --app-id cli_xxx --secret env:FEISHU_APP_SECRET --owner-open-id ou_xxx --runner "Claude Code"
+bifrost im target add oncall --receive-id-type chat_id --receive-id oc_xxx
+bifrost im send --provider feishu-main --text "hello owner"
+bifrost im messages list --provider feishu-main --direction inbound
+```
+
+使用规则：
+
+- Feishu / Weixin 首次配置优先交互式 setup：只传 provider ID、`--type` 和 `--runner`。Feishu 会打印授权 URL 和终端二维码；Weixin 会打印扫码二维码；CLI 会保持等待，直到用户授权/扫码后自动创建并连接 provider。
+- Runner 不能静默默认。交互式终端未传 `--runner` 时允许让用户用上下键选择；stdin 非交互时必须显式传 `--runner`。Runner 不存在或未启用时，错误会列出当前可用 Runner 和默认内置 Runner 类型。
+- 支持常见 Runner 别名：`codex`、`traex` / `trae`、`Claude Code`。如果用户给了具体 runner，先让 CLI 校验，不要自己猜配置文件。
+- Feishu / Weixin / WeChat provider 的 `base_url` 由 provider 类型固定管理。不要建议传 `--base-url`；CLI 会拒绝该参数。
+- 已有 App ID / Secret 时可以手动配置，但 secret 应使用 `env:NAME`，避免写入 shell history 或最终报告。
+- IM 通道上线通知会自动附带 runner-aware 帮助。所有 Runner 支持 `/help`、`/status`、`/cwd`、`/runner`、`/q`、`/rq`、`/stop`；只有内置 Bifrost Agent 支持 `/remember`、`/memories`、`/forget`、`/compact`、`/goal`、`/g`；Codex / Traex / Claude Code 等外部 Runner 只在适配器支持时展示 `/models`、`/model`、`/efforts`、`/effort`。
+
+### 22. 安装 Skill 到 AI 工具
 
 bifrost 支持将自身的 `SKILL.md` 文档安装到各种 AI 编码辅助工具中（如 Claude Code、Codex、Trae、Cursor、GitHub Copilot 等），也兼容更多遵循通用 Agent Skills 目录规范的运行时。
 
@@ -716,7 +740,9 @@ bifrost install-skill -t universal             # 仅安装到通用 .agents/skil
 bifrost install-skill -t all -y                # 自动安装到所有支持的工具
 ```
 
-### 22. 远程调用 (Remote)
+通用 `bifrost` skill 覆盖本机代理、规则、流量、IM Gateway CLI 配置和 Agent 采证工作流；专用 `bifrost-remote` skill 覆盖连接另一台机器、远程查流量、远程文件、远程脚本和授权 shell 边界。
+
+### 23. 远程调用 (Remote)
 
 `bifrost install-skill` 会同时安装通用 `bifrost` skill 和专用 `bifrost-remote` skill。用户明确要连接另一台机器、使用 SSH key / pair code、远程查询流量或通过 `shell.exec` 操作目标设备时，应优先使用 `bifrost-remote` skill 中的完整流程。
 

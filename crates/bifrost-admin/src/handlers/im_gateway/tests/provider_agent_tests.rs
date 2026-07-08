@@ -85,6 +85,235 @@ pub(super) fn provider_create_payload_defaults_missing_display_name_to_id() {
 }
 
 #[test]
+pub(super) fn provider_create_payload_forces_feishu_base_url() {
+    let provider = parse_provider_create_payload(serde_json::json!({
+        "id": "feishu-main",
+        "provider_type": "feishu",
+        "display_name": "Feishu Main",
+        "enabled": true,
+        "app_id": "cli_xxx",
+        "app_secret": "sk_test_secret",
+        "base_url": "https://evil.example/open-apis",
+        "event_connection_enabled": true,
+        "event_types": []
+    }))
+    .expect("provider create payload should parse");
+
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some("https://open.feishu.cn/open-apis")
+    );
+}
+
+#[test]
+pub(super) fn feishu_setup_pending_sessions_survive_service_restart() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let service = ImGatewayService::new(temp_dir.path());
+    service.feishu_setup_pending.write().insert(
+        "fas_restore".to_string(),
+        PendingFeishuSetup {
+            device_code: "device-code".to_string(),
+            interval_seconds: 5,
+            expires_at_ms: now_ms() + 60_000,
+            app_id: Some("cli_restored".to_string()),
+            app_secret: Some("secret".to_string()),
+            owner_open_id: Some("ou_owner".to_string()),
+            brand: FeishuSetupBrand::Feishu,
+            provider_payload: Some(serde_json::json!({
+                "id": "feishu-main",
+                "provider_type": "feishu",
+                "display_name": "Feishu Main",
+                "enabled": true,
+                "event_connection_enabled": true,
+                "event_types": ["message.receive"],
+                "agent_config": {
+                    "runner": "traex"
+                }
+            })),
+            created_provider_id: None,
+            auto_connect: false,
+        },
+    );
+    save_pending_feishu_setups(&service);
+
+    let restored = ImGatewayService::new(temp_dir.path());
+    let pending = restored
+        .feishu_setup_pending
+        .read()
+        .get("fas_restore")
+        .cloned()
+        .expect("pending setup should be restored");
+
+    assert_eq!(pending.device_code, "device-code");
+    assert_eq!(pending.app_id.as_deref(), Some("cli_restored"));
+    assert_eq!(pending.app_secret.as_deref(), Some("secret"));
+    assert_eq!(pending.owner_open_id.as_deref(), Some("ou_owner"));
+    assert_eq!(pending.brand, FeishuSetupBrand::Feishu);
+    assert!(pending.provider_payload.is_some());
+    assert!(pending.created_provider_id.is_none());
+}
+
+#[tokio::test]
+pub(super) async fn feishu_setup_confirmed_session_creates_provider_from_draft() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let service = ImGatewayService::new(temp_dir.path());
+    service.feishu_setup_pending.write().insert(
+        "fas_confirmed".to_string(),
+        PendingFeishuSetup {
+            device_code: "device-code".to_string(),
+            interval_seconds: 5,
+            expires_at_ms: now_ms() + 60_000,
+            app_id: Some("cli_confirmed".to_string()),
+            app_secret: Some("secret".to_string()),
+            owner_open_id: Some("ou_owner".to_string()),
+            brand: FeishuSetupBrand::Feishu,
+            provider_payload: Some(serde_json::json!({
+                "id": "feishu-main",
+                "provider_type": "feishu",
+                "display_name": "Feishu Main",
+                "enabled": false,
+                "base_url": "https://evil.example/open-apis",
+                "event_connection_enabled": false,
+                "event_types": [],
+                "agent_config": {
+                    "runner": "traex"
+                }
+            })),
+            created_provider_id: None,
+            auto_connect: false,
+        },
+    );
+
+    poll_and_complete_feishu_setup_session(&service, "fas_confirmed")
+        .await
+        .expect("confirmed setup should create provider from draft");
+
+    let provider = service
+        .provider_store
+        .get("feishu-main")
+        .expect("provider should be created");
+    assert_eq!(provider.app_id.as_deref(), Some("cli_confirmed"));
+    assert_eq!(provider.secret_ref.as_deref(), Some("secret"));
+    assert_eq!(provider.owner_open_id.as_deref(), Some("ou_owner"));
+    assert!(provider.enabled);
+    assert!(provider.event_connection_enabled);
+    assert_eq!(provider.event_types, vec!["message.receive"]);
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some("https://open.feishu.cn/open-apis")
+    );
+    assert_eq!(
+        provider
+            .agent_config
+            .as_ref()
+            .and_then(|config| config.runner.as_ref()),
+        Some(&bifrost_agent::AgentRunnerMode::Custom("traex".to_string()))
+    );
+
+    let pending = service
+        .feishu_setup_pending
+        .read()
+        .get("fas_confirmed")
+        .cloned()
+        .expect("pending setup remains available for CLI status");
+    assert_eq!(pending.created_provider_id.as_deref(), Some("feishu-main"));
+}
+
+#[test]
+pub(super) fn provider_create_payload_preserves_lark_fixed_base_url() {
+    let provider = parse_provider_create_payload(serde_json::json!({
+        "id": "lark-main",
+        "provider_type": "feishu",
+        "display_name": "Lark Main",
+        "enabled": true,
+        "app_id": "cli_xxx",
+        "app_secret": "sk_test_secret",
+        "base_url": "https://open.larksuite.com",
+        "event_connection_enabled": true,
+        "event_types": []
+    }))
+    .expect("provider create payload should parse");
+
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some("https://open.larksuite.com/open-apis")
+    );
+}
+
+#[test]
+pub(super) fn provider_patch_forces_feishu_base_url() {
+    let mut provider = parse_provider_create_payload(serde_json::json!({
+        "id": "feishu-main",
+        "provider_type": "feishu",
+        "display_name": "Feishu Main",
+        "enabled": true,
+        "app_id": "cli_xxx",
+        "app_secret": "sk_test_secret",
+        "base_url": "https://open.feishu.cn/open-apis",
+        "event_connection_enabled": true,
+        "event_types": []
+    }))
+    .expect("provider create payload should parse");
+
+    apply_provider_patch(
+        &mut provider,
+        &serde_json::json!({
+            "base_url": "https://evil.example/open-apis"
+        }),
+    );
+
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some("https://open.feishu.cn/open-apis")
+    );
+}
+
+#[test]
+pub(super) fn provider_store_normalizes_legacy_feishu_base_url_on_read() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let store = Arc::new(ImProviderStore::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "legacy-feishu-provider".to_string();
+    provider.base_url = Some("https://evil.example/open-apis".to_string());
+    store.add(provider).expect("add provider");
+
+    let loaded = store.get("legacy-feishu-provider").expect("provider");
+
+    assert_eq!(
+        loaded.base_url.as_deref(),
+        Some("https://open.feishu.cn/open-apis")
+    );
+    let raw = std::fs::read_to_string(
+        temp_dir
+            .path()
+            .join("admin")
+            .join("im_gateway_providers.json"),
+    )
+    .expect("read provider store");
+    assert!(!raw.contains("https://evil.example/open-apis"));
+    assert!(raw.contains("https://open.feishu.cn/open-apis"));
+}
+
+#[test]
+pub(super) fn provider_create_payload_forces_weixin_base_url() {
+    let provider = parse_provider_create_payload(serde_json::json!({
+        "id": "weixin-main",
+        "provider_type": "weixin",
+        "display_name": "Weixin Main",
+        "enabled": true,
+        "base_url": "https://evil.example",
+        "event_connection_enabled": true,
+        "event_types": []
+    }))
+    .expect("provider create payload should parse");
+
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some("https://ilinkai.weixin.qq.com")
+    );
+}
+
+#[test]
 pub(super) fn feishu_setup_brand_selects_expected_domains() {
     assert_eq!(parse_feishu_setup_brand(None), FeishuSetupBrand::Feishu);
     assert_eq!(
@@ -255,13 +484,60 @@ pub(super) fn im_help_includes_im_only_commands_without_dropping_builtins() {
 
     assert!(help.contains("内置命令:"));
     assert!(help.contains("/help"));
-    assert!(help.contains("IM 通道命令:"));
+    assert!(help.contains("IM 通道命令（所有 Runner）:"));
     assert!(help.contains("/cwd <绝对路径>"));
     assert!(help.contains("/runner [Runner]"));
     assert!(help.contains("/q <消息>"));
     assert!(help.contains("/rq <序号>"));
     assert!(help.contains("/g <引导内容>"));
+    assert!(help.contains("/remember <text>"));
+    assert!(help.contains("/goal [命令]"));
     assert!(help.contains("运行中会排队"));
+}
+
+#[test]
+pub(super) fn im_help_for_external_cli_runner_only_lists_supported_commands() {
+    let help = build_im_startup_help_for_runner(&ImHelpRunnerKind::External {
+        adapter: crate::im_gateway::external_cli::TRAEX_ADAPTER.to_string(),
+    });
+
+    assert!(help.contains("IM 通道命令（所有 Runner）:"));
+    assert!(help.contains("/help"));
+    assert!(help.contains("/status"));
+    assert!(help.contains("/cwd <绝对路径>"));
+    assert!(help.contains("/runner [Runner]"));
+    assert!(help.contains("/clear"));
+    assert!(help.contains("/reset"));
+    assert!(help.contains("/q <消息>"));
+    assert!(help.contains("/rq <序号>"));
+    assert!(help.contains("/stop"));
+    assert!(help.contains("Traex Runner 命令:"));
+    assert!(help.contains("/models"));
+    assert!(help.contains("/model [模型]"));
+    assert!(help.contains("/efforts"));
+    assert!(help.contains("/effort [级别]"));
+    assert!(!help.contains("/remember"));
+    assert!(!help.contains("/memories"));
+    assert!(!help.contains("/forget"));
+    assert!(!help.contains("/goal"));
+    assert!(!help.contains("/compact"));
+    assert!(!help.contains("/g <引导内容>"));
+}
+
+#[test]
+pub(super) fn im_help_for_unsupported_external_runner_omits_model_and_builtin_commands() {
+    let help = build_im_startup_help_for_runner(&ImHelpRunnerKind::External {
+        adapter: "chatgpt_web".to_string(),
+    });
+
+    assert!(help.contains("IM 通道命令（所有 Runner）:"));
+    assert!(!help.contains("/models"));
+    assert!(!help.contains("/model [模型]"));
+    assert!(!help.contains("/efforts"));
+    assert!(!help.contains("/effort [级别]"));
+    assert!(!help.contains("/remember"));
+    assert!(!help.contains("/goal"));
+    assert!(!help.contains("/g <引导内容>"));
 }
 
 #[test]

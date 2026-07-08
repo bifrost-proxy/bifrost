@@ -1,9 +1,13 @@
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::Path;
+use std::thread;
+use std::time::Duration;
 
 use base64::Engine as _;
 use colored::Colorize;
+use dialoguer::{theme::ColorfulTheme, Select};
+use qrcode::{render::unicode, QrCode};
 use serde_json::{json, Value};
 use tracing::debug;
 
@@ -15,6 +19,7 @@ use bifrost_core::{text::truncate_chars_with_suffix, Result};
 
 const IM_GATEWAY_API_PREFIX: &str = "/_bifrost/api/im-gateway";
 const DEFAULT_IM_PROVIDER_ID: &str = "feishu-main";
+const DEFAULT_BUILTIN_RUNNERS_HINT: &str = "codex, traex, Claude Code";
 
 pub fn handle_im_command(host: &str, port: u16, args: &[String]) -> Result<()> {
     if args.is_empty() {
@@ -61,7 +66,19 @@ fn handle_im_provider(host: &str, port: u16, args: &[String]) -> Result<()> {
             let name = args.get(1).ok_or_else(|| {
                 bifrost_core::BifrostError::Config("provider name required".to_string())
             })?;
-            let body = parse_provider_add_args(name, &args[2..])?;
+            let mut add_args = parse_provider_add_args(name, &args[2..])?;
+            if add_args.should_use_feishu_setup() {
+                return handle_feishu_provider_setup(host, port, &add_args);
+            }
+            if add_args.should_use_weixin_setup() {
+                return handle_weixin_provider_setup(host, port, &add_args);
+            }
+            if add_args.should_require_runner() {
+                let runner_id =
+                    resolve_provider_setup_runner(host, port, add_args.runner.as_deref())?;
+                add_args.runner = Some(runner_id);
+            }
+            let body = add_args.into_create_body();
             let url = api_url(host, port, "/providers");
             let resp = http_post(&url, &body)?;
             println!(
@@ -110,70 +127,548 @@ fn handle_im_provider(host: &str, port: u16, args: &[String]) -> Result<()> {
     }
 }
 
-fn parse_provider_add_args(name: &str, args: &[String]) -> Result<Value> {
-    let mut body = json!({
-        "id": name,
-    });
+#[derive(Debug, Clone)]
+struct ProviderAddArgs {
+    id: String,
+    provider_type: Option<String>,
+    app_id: Option<String>,
+    app_secret: Option<String>,
+    display_name: Option<String>,
+    enabled: Option<bool>,
+    owner_open_id: Option<String>,
+    event_connection_enabled: Option<bool>,
+    runner: Option<String>,
+    brand: Option<String>,
+}
+
+impl ProviderAddArgs {
+    fn should_use_feishu_setup(&self) -> bool {
+        self.provider_type.as_deref() == Some("feishu")
+            && self.app_id.as_deref().is_none_or(str::is_empty)
+            && self.app_secret.as_deref().is_none_or(str::is_empty)
+    }
+
+    fn should_use_weixin_setup(&self) -> bool {
+        matches!(
+            self.provider_type.as_deref(),
+            Some("weixin") | Some("wechat")
+        ) && self.app_id.as_deref().is_none_or(str::is_empty)
+            && self.app_secret.as_deref().is_none_or(str::is_empty)
+    }
+
+    fn should_require_runner(&self) -> bool {
+        matches!(
+            self.provider_type.as_deref(),
+            Some("feishu") | Some("weixin") | Some("wechat")
+        )
+    }
+
+    fn into_create_body(self) -> Value {
+        let mut body = json!({
+            "id": self.id,
+        });
+
+        if let Some(value) = self.provider_type {
+            body["provider_type"] = json!(value);
+        }
+        if let Some(value) = self.app_id {
+            body["app_id"] = json!(value);
+        }
+        if let Some(value) = self.app_secret {
+            body["app_secret"] = json!(value);
+        }
+        if let Some(value) = self.display_name {
+            body["display_name"] = json!(value);
+        }
+        if let Some(value) = self.enabled {
+            body["enabled"] = json!(value);
+        }
+        if let Some(value) = self.owner_open_id {
+            body["owner_open_id"] = json!(value);
+        }
+        if let Some(value) = self.event_connection_enabled {
+            body["event_connection_enabled"] = json!(value);
+        }
+        if let Some(value) = self.runner {
+            body["agent_config"] = json!({
+                "runner": value,
+            });
+        }
+
+        body
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunnerChoice {
+    id: String,
+    adapter: String,
+    enabled: bool,
+}
+
+fn parse_provider_add_args(name: &str, args: &[String]) -> Result<ProviderAddArgs> {
+    let mut parsed = ProviderAddArgs {
+        id: name.to_string(),
+        provider_type: None,
+        app_id: None,
+        app_secret: None,
+        display_name: None,
+        enabled: None,
+        owner_open_id: None,
+        event_connection_enabled: None,
+        runner: None,
+        brand: None,
+    };
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--type" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    body["provider_type"] = json!(v);
-                }
+                parsed.provider_type = args.get(i).cloned();
             }
             "--app-id" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    body["app_id"] = json!(v);
-                }
+                parsed.app_id = args.get(i).cloned();
             }
             "--secret" => {
                 i += 1;
                 if let Some(v) = args.get(i) {
                     let resolved = resolve_secret(v)
                         .map_err(|error| bifrost_core::BifrostError::Config(error.to_string()))?;
-                    body["app_secret"] = json!(resolved);
+                    parsed.app_secret = Some(resolved);
                 }
             }
             "--base-url" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    body["base_url"] = json!(v);
-                }
+                return Err(bifrost_core::BifrostError::Config(
+                    "base_url is managed by system and cannot be set via CLI".to_string(),
+                ));
             }
             "--display-name" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    body["display_name"] = json!(v);
-                }
+                parsed.display_name = args.get(i).cloned();
             }
             "--enabled" => {
                 i += 1;
                 if let Some(v) = args.get(i) {
-                    body["enabled"] = json!(v.parse::<bool>().unwrap_or(true));
+                    parsed.enabled = Some(v.parse::<bool>().unwrap_or(true));
                 }
             }
             "--owner-open-id" => {
                 i += 1;
-                if let Some(v) = args.get(i) {
-                    body["owner_open_id"] = json!(v);
-                }
+                parsed.owner_open_id = args.get(i).cloned();
             }
             "--enable-long-connection" => {
                 i += 1;
                 if let Some(v) = args.get(i) {
-                    body["event_connection_enabled"] = json!(v.parse::<bool>().unwrap_or(false));
+                    parsed.event_connection_enabled = Some(v.parse::<bool>().unwrap_or(false));
                 }
+            }
+            "--runner" | "--agent-runner" | "--agent-runner-id" => {
+                i += 1;
+                parsed.runner = args.get(i).cloned();
+            }
+            "--brand" => {
+                i += 1;
+                parsed.brand = args.get(i).cloned();
             }
             _ => {}
         }
         i += 1;
     }
 
-    Ok(body)
+    Ok(parsed)
+}
+
+fn build_setup_provider_body(
+    args: &ProviderAddArgs,
+    provider_type: &str,
+    runner_id: &str,
+) -> Value {
+    let mut body = json!({
+        "id": args.id,
+        "provider_type": provider_type,
+        "enabled": args.enabled.unwrap_or(true),
+        "event_connection_enabled": args.event_connection_enabled.unwrap_or(true),
+        "event_types": ["message.receive"],
+        "agent_config": {
+            "runner": runner_id,
+        },
+    });
+
+    if let Some(display_name) = args.display_name.as_deref() {
+        body["display_name"] = json!(display_name);
+    }
+    if let Some(owner_open_id) = args.owner_open_id.as_deref() {
+        body["owner_open_id"] = json!(owner_open_id);
+    }
+
+    body
+}
+
+fn handle_feishu_provider_setup(host: &str, port: u16, args: &ProviderAddArgs) -> Result<()> {
+    let runner_id = resolve_provider_setup_runner(host, port, args.runner.as_deref())?;
+    println!(
+        "{} Starting Feishu provider setup for '{}'.",
+        "●".bright_cyan(),
+        args.id.bright_white().bold()
+    );
+
+    let provider_body = build_setup_provider_body(args, "feishu", &runner_id);
+    let start_body = json!({
+        "brand": args.brand.as_deref().unwrap_or("feishu"),
+        "provider": provider_body,
+    });
+    let start_url = api_url(host, port, "/providers/feishu-setup/start");
+    let start = http_post(&start_url, &start_body)?;
+    let session_id = required_string(&start, "session_id")?.to_string();
+    let verification_url = required_string(&start, "verification_url")?.to_string();
+    let mut interval_seconds = setup_poll_interval_seconds(start["interval_seconds"].as_u64(), 5);
+    let expires_at = start["expires_at"].as_i64().unwrap_or_default();
+
+    println!("{} Open this URL to continue:", "→".bright_cyan());
+    println!("  {}", verification_url.bright_white().bold());
+    print_terminal_qr_code(&verification_url);
+    println!(
+        "{} Waiting for Feishu setup confirmation. Press Ctrl+C to stop waiting.",
+        "…".bright_yellow()
+    );
+
+    let confirmed = loop {
+        thread::sleep(Duration::from_secs(interval_seconds));
+        let status_url = api_url(
+            host,
+            port,
+            &format!("/providers/feishu-setup/{}/status", session_id),
+        );
+        let status = http_get(&status_url)?;
+        match status["status"].as_str().unwrap_or("pending") {
+            "confirmed" => break status,
+            "expired" => {
+                return Err(bifrost_core::BifrostError::Config(
+                    "Feishu setup session expired before confirmation".to_string(),
+                ));
+            }
+            "pending" => {
+                interval_seconds = setup_poll_interval_seconds(
+                    status["interval_seconds"].as_u64(),
+                    interval_seconds,
+                );
+                let remaining = setup_remaining_seconds(&status, expires_at);
+                if let Some(remaining) = remaining {
+                    println!(
+                        "{} Still waiting for setup confirmation ({}s remaining).",
+                        "…".bright_yellow(),
+                        remaining
+                    );
+                } else {
+                    println!(
+                        "{}",
+                        "… Still waiting for setup confirmation.".bright_yellow()
+                    );
+                }
+            }
+            other => {
+                return Err(bifrost_core::BifrostError::Config(format!(
+                    "unexpected Feishu setup status: {other}"
+                )));
+            }
+        }
+    };
+
+    let app_id = confirmed["app_id"].as_str().unwrap_or("-");
+    println!(
+        "{} Feishu setup confirmed for app {}.",
+        "✓".bright_green(),
+        app_id.bright_white()
+    );
+
+    let provider_id = if let Some(provider_id) = confirmed["provider_id"].as_str() {
+        provider_id.to_string()
+    } else {
+        let create_url = api_url(
+            host,
+            port,
+            &format!("/providers/feishu-setup/{}/provider", session_id),
+        );
+        let resp = http_post(&create_url, &provider_body)?;
+        resp["provider"]["id"]
+            .as_str()
+            .or_else(|| resp["id"].as_str())
+            .unwrap_or(&args.id)
+            .to_string()
+    };
+
+    let connect_url = api_url(host, port, &format!("/providers/{}/connect", provider_id));
+    http_post(&connect_url, &json!({}))?;
+    println!(
+        "{} Provider '{}' created and connected with runner '{}'.",
+        "✓".bright_green(),
+        provider_id,
+        runner_id
+    );
+
+    Ok(())
+}
+
+fn handle_weixin_provider_setup(host: &str, port: u16, args: &ProviderAddArgs) -> Result<()> {
+    let runner_id = resolve_provider_setup_runner(host, port, args.runner.as_deref())?;
+    println!(
+        "{} Starting Weixin provider setup for '{}'.",
+        "●".bright_cyan(),
+        args.id.bright_white().bold()
+    );
+
+    let provider_body = build_setup_provider_body(args, "weixin", &runner_id);
+    let create_url = api_url(host, port, "/providers");
+    let resp = http_post(&create_url, &provider_body)?;
+    let provider_id = resp["id"].as_str().unwrap_or(&args.id).to_string();
+
+    let start_url = api_url(
+        host,
+        port,
+        &format!("/providers/{}/weixin-login/start", provider_id),
+    );
+    let start = http_post(&start_url, &json!({}))?;
+    let scan_url = required_string(&start, "scan_url")?.to_string();
+    let expires_in_seconds = start["expires_in_seconds"].as_u64().unwrap_or(120);
+    let mut interval_seconds = setup_poll_interval_seconds(start["interval_seconds"].as_u64(), 2);
+    let expires_at =
+        chrono::Utc::now().timestamp_millis() + (expires_in_seconds as i64).saturating_mul(1000);
+
+    println!("{} Scan this QR code to continue:", "→".bright_cyan());
+    print_terminal_qr_code(&scan_url);
+    println!(
+        "{} Waiting for Weixin QR login confirmation. Press Ctrl+C to stop waiting.",
+        "…".bright_yellow()
+    );
+
+    loop {
+        thread::sleep(Duration::from_secs(interval_seconds));
+        let status_url = api_url(
+            host,
+            port,
+            &format!("/providers/{}/weixin-login/status", provider_id),
+        );
+        let status = http_get(&status_url)?;
+        match status["status"].as_str().unwrap_or("pending") {
+            "confirmed" | "authorized" => break,
+            "expired" => {
+                return Err(bifrost_core::BifrostError::Config(
+                    "Weixin QR login expired before confirmation".to_string(),
+                ));
+            }
+            "pending" | "idle" => {
+                interval_seconds = setup_poll_interval_seconds(
+                    status["interval_seconds"].as_u64(),
+                    interval_seconds,
+                );
+                if let Some(remaining) = setup_remaining_seconds(&status, expires_at) {
+                    println!(
+                        "{} Still waiting for QR login confirmation ({}s remaining).",
+                        "…".bright_yellow(),
+                        remaining
+                    );
+                } else {
+                    println!(
+                        "{}",
+                        "… Still waiting for QR login confirmation.".bright_yellow()
+                    );
+                }
+            }
+            other => {
+                return Err(bifrost_core::BifrostError::Config(format!(
+                    "unexpected Weixin login status: {other}"
+                )));
+            }
+        }
+    }
+
+    let connect_url = api_url(host, port, &format!("/providers/{}/connect", provider_id));
+    http_post(&connect_url, &json!({}))?;
+    println!(
+        "{} Provider '{}' created and connected with runner '{}'.",
+        "✓".bright_green(),
+        provider_id,
+        runner_id
+    );
+
+    Ok(())
+}
+
+fn resolve_provider_setup_runner(
+    host: &str,
+    port: u16,
+    requested_runner: Option<&str>,
+) -> Result<String> {
+    let runners = load_runner_choices(host, port)?;
+    resolve_runner_choice(requested_runner, &runners)
+}
+
+fn load_runner_choices(host: &str, port: u16) -> Result<Vec<RunnerChoice>> {
+    let url = api_url(host, port, "/chat/config");
+    let config = http_get(&url)?;
+    Ok(runner_choices_from_config(&config))
+}
+
+fn runner_choices_from_config(config: &Value) -> Vec<RunnerChoice> {
+    let mut runners: Vec<_> = config
+        .get("runners")
+        .and_then(|value| value.as_object())
+        .into_iter()
+        .flat_map(|runners| runners.iter())
+        .map(|(id, settings)| RunnerChoice {
+            id: id.to_string(),
+            adapter: settings["adapter"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string(),
+            enabled: settings["enabled"].as_bool().unwrap_or(false),
+        })
+        .collect();
+    runners.sort_by(|a, b| a.id.cmp(&b.id));
+    runners
+}
+
+fn resolve_runner_choice(
+    requested_runner: Option<&str>,
+    runners: &[RunnerChoice],
+) -> Result<String> {
+    let enabled: Vec<_> = runners.iter().filter(|runner| runner.enabled).collect();
+    if enabled.is_empty() {
+        return Err(bifrost_core::BifrostError::Config(format!(
+            "no enabled runners found. Default built-in runners include: {DEFAULT_BUILTIN_RUNNERS_HINT}"
+        )));
+    }
+
+    if let Some(requested_runner) = requested_runner
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if let Some(runner) = find_runner_choice(requested_runner, &enabled) {
+            return Ok(runner.id.clone());
+        }
+        return Err(bifrost_core::BifrostError::Config(format!(
+            "unknown or disabled runner '{}'. Available runners: {}. Default built-in runners include: {}",
+            requested_runner,
+            format_runner_choices(&enabled),
+            DEFAULT_BUILTIN_RUNNERS_HINT
+        )));
+    }
+
+    if !io::stdin().is_terminal() {
+        return Err(bifrost_core::BifrostError::Config(format!(
+            "--runner is required when stdin is not interactive. Available runners: {}. Default built-in runners include: {}",
+            format_runner_choices(&enabled),
+            DEFAULT_BUILTIN_RUNNERS_HINT
+        )));
+    }
+
+    let labels: Vec<_> = enabled
+        .iter()
+        .map(|runner| format!("{} ({})", runner.id, runner.adapter))
+        .collect();
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select runner")
+        .items(&labels)
+        .default(0)
+        .interact()
+        .map_err(|error| {
+            bifrost_core::BifrostError::Config(format!(
+                "unable to select runner interactively: {error}"
+            ))
+        })?;
+    Ok(enabled[selection].id.clone())
+}
+
+fn find_runner_choice<'a>(
+    requested_runner: &str,
+    runners: &'a [&'a RunnerChoice],
+) -> Option<&'a RunnerChoice> {
+    runners
+        .iter()
+        .copied()
+        .find(|runner| runner.id == requested_runner)
+        .or_else(|| {
+            runners
+                .iter()
+                .copied()
+                .find(|runner| runner.id.eq_ignore_ascii_case(requested_runner))
+        })
+        .or_else(|| match requested_runner.to_ascii_lowercase().as_str() {
+            "codex" => runners
+                .iter()
+                .copied()
+                .find(|runner| runner.id.eq_ignore_ascii_case("codex")),
+            "traex" | "trae" => runners
+                .iter()
+                .copied()
+                .find(|runner| runner.id.eq_ignore_ascii_case("traex")),
+            "claude_code" | "claude-code" | "claude" | "claude code" => {
+                runners.iter().copied().find(|runner| {
+                    runner.id.eq_ignore_ascii_case("Claude-Code")
+                        || runner.id.eq_ignore_ascii_case("Claude Code")
+                })
+            }
+            _ => None,
+        })
+}
+
+fn format_runner_choices(runners: &[&RunnerChoice]) -> String {
+    runners
+        .iter()
+        .map(|runner| format!("{} ({})", runner.id, runner.adapter))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn setup_remaining_seconds(status: &Value, fallback_expires_at: i64) -> Option<i64> {
+    let expires_at = status["expires_at"].as_i64().unwrap_or(fallback_expires_at);
+    if expires_at <= 0 {
+        return None;
+    }
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    Some((expires_at - now_ms).max(0) / 1000)
+}
+
+fn setup_poll_interval_seconds(value: Option<u64>, default: u64) -> u64 {
+    let value = value.unwrap_or(default).min(60);
+    if cfg!(test) {
+        value
+    } else {
+        value.max(1)
+    }
+}
+
+fn print_terminal_qr_code(value: &str) {
+    match render_terminal_qr_code(value) {
+        Ok(image) => {
+            println!();
+            println!("{image}");
+        }
+        Err(error) => {
+            println!(
+                "{} Failed to render QR code: {}",
+                "!".bright_yellow(),
+                error
+            );
+        }
+    }
+}
+
+fn render_terminal_qr_code(value: &str) -> std::result::Result<String, qrcode::types::QrError> {
+    let code = QrCode::new(value.as_bytes())?;
+    Ok(code
+        .render::<unicode::Dense1x2>()
+        .quiet_zone(true)
+        .module_dimensions(1, 1)
+        .build())
+}
+
+fn required_string<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
+    value[field]
+        .as_str()
+        .ok_or_else(|| bifrost_core::BifrostError::Parse(format!("response missing '{field}'")))
 }
 
 fn parse_provider_update_args(args: &[String]) -> Result<Value> {
@@ -201,10 +696,9 @@ fn parse_provider_update_args(args: &[String]) -> Result<Value> {
                 }
             }
             "--base-url" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    body["base_url"] = json!(v);
-                }
+                return Err(bifrost_core::BifrostError::Config(
+                    "base_url is managed by system and cannot be set via CLI".to_string(),
+                ));
             }
             _ => {}
         }
@@ -1406,7 +1900,9 @@ fn print_im_help() {
     println!();
     println!("{}", "EXAMPLES:".bright_yellow());
     println!("    bifrost im provider list");
-    println!("    bifrost im provider add feishu-main --type feishu --app-id cli_xxx --secret env:FEISHU_APP_SECRET --owner-open-id ou_xxx");
+    println!("    bifrost im provider add feishu-main --type feishu --runner traex");
+    println!("    bifrost im provider add weixin-main --type weixin --runner codex");
+    println!("    bifrost im provider add feishu-main --type feishu --app-id cli_xxx --secret env:FEISHU_APP_SECRET --owner-open-id ou_xxx --runner 'Claude Code'");
     println!("    bifrost im target add oncall --receive-id-type chat_id --receive-id oc_xxx");
     println!("    bifrost im send --provider feishu-main --text 'hello owner'");
     println!("    bifrost im send --provider feishu-main --image-file ./alert.png");

@@ -789,6 +789,8 @@ bifrost keep-awake mode get
 ```bash
 bifrost im
 bifrost im provider list
+bifrost im provider add feishu-main --type feishu --runner traex
+bifrost im provider add weixin-main --type weixin --runner codex
 bifrost im provider add feishu-main --type feishu --app-id cli_xxx --secret env:FEISHU_APP_SECRET --owner-open-id ou_xxx --enabled true
 bifrost im target add oncall --receive-id-type chat_id --receive-id oc_xxx
 bifrost im send --text "hello owner"
@@ -801,7 +803,16 @@ bifrost im schedule add agent-daily --target oncall --cron '0 9 * * *' --agent-p
 bifrost im messages list --direction inbound
 ```
 
+`provider add` 支持两种配置方式：
+
+- 交互式配置：Feishu / Weixin provider 只传 provider ID、`--type` 和 Runner 即可，例如 `bifrost im provider add feishu-main --type feishu --runner traex` 或 `bifrost im provider add weixin-main --type weixin --runner codex`。Feishu 会在终端打印授权 URL 和二维码，CLI 保持等待，用户完成授权后自动创建并连接 provider；Weixin 会在终端打印登录二维码，扫码确认后自动完成创建和连接。
+- 手动凭据配置：已持有 App ID / Secret 时继续传 `--app-id`、`--secret env:NAME`、`--owner-open-id` 等字段。Feishu / Weixin / WeChat provider 仍必须绑定 Runner。
+
+Runner 选择规则：交互式终端中未传 `--runner` 时会展示启用 Runner 列表，使用上下键和回车选择；stdin 非交互时必须显式传 `--runner`，否则命令会报错并列出可用 Runner。`--runner` 会校验是否存在且启用，支持常见别名如 `codex`、`traex` / `trae`、`Claude Code`；错误信息会同时提示当前可用 Runner 和内置默认 Runner 类型。Feishu / Weixin provider 的 `base_url` 由 provider 类型固定管理，CLI 不接受 `--base-url`，避免把不同平台的 OpenAPI 入口写错到 provider 配置中。
+
 需要 provider 的 IM 命令都支持 `--provider <id>` 显式指定。未提供 `--provider` 时，CLI 会复用统一选择逻辑：只有一个 enabled provider 时自动选择；多个 enabled provider 且处于交互式终端时展示列表让用户选择；多个 provider 且 stdin 非交互时会要求显式传 `--provider`。`bifrost im send` 未传 `--target` 时默认发送给所选 provider 的 owner，因此 provider 需要配置 `owner_open_id`（可在创建时用 `--owner-open-id`，或由后端连接飞书后自动检测）。
+
+IM 通道建立后，Bifrost 会先推送上线通知和可用命令帮助。帮助内容会按当前绑定 Runner 过滤：所有 Runner 都显示 `/help`、`/status`、`/cwd`、`/runner`、`/q`、`/rq`、`/stop` 等 IM 通道命令；内置 Bifrost Agent 才显示 `/remember`、`/memories`、`/forget`、`/compact`、`/goal`、`/g` 等内置 Agent 命令；Codex / Traex / Claude Code 等外部 Runner 只在适配器支持时显示 `/models`、`/model`、`/efforts`、`/effort`。
 
 Agent 配置支持 `default_message_channel`，用于给 turn 级 `send_msg` 工具和 Agent 创建的 schedule 提供默认 IM 发送目标。手动创建 schedule 时仍应显式绑定目标（例如 `--target oncall`，或 API 的 `message_channel`），避免任务执行时把通知发到最近一次对话；通过 IM 消息触发的 Agent 创建 schedule 时会自动继承当前来源通道，通过 `/agent/chat` 创建时会回退到 `default_message_channel`。
 

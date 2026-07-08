@@ -300,6 +300,30 @@
 - 点击命令组后可以看到具体命令名、Input 和 Output。
 - 再次点击单条命令可以折叠或展开该命令详情。
 
+### TC-AILR-15 新建对话输入框图片粘贴回归
+
+操作步骤：
+
+1. 打开 WebUI AI 页面：`http://127.0.0.1:<web_port>/_bifrost/ai`。
+2. 确认右侧显示新建对话输入面板。
+3. 检查新建对话输入面板底部工具栏。
+4. 在输入框输入 `Describe the pasted screenshot`。
+5. 向该输入框粘贴一张 PNG 图片。
+6. 切换到暗色主题并再次查看图片预览。
+7. 点击发送按钮。
+8. 查看发送后的普通对话页面、用户消息图片缩略图和请求 payload。
+
+预期结果：
+
+- 新建对话输入面板底部工具栏不再显示无功能的左侧加号按钮。
+- 新建对话输入面板底部工具栏不再显示无功能的右侧语音输入按钮。
+- 粘贴图片后，输入框下方展示与已有对话 composer 一致的图片预览条、缩略图、删除按钮和大小标签。
+- 亮色和暗色主题下图片预览条、删除按钮和大小标签都清晰可见。
+- 发送按钮在文本或图片至少一项存在时可点击；文本和图片都为空时保持禁用。
+- 发送后用户消息在普通对话页面展示文本和图片缩略图。
+- 请求 payload 中包含用户文本和图片数据；内置 Bifrost Agent 请求使用 `mime_type=image/png`，外部 Runner 请求继续使用 `mimeType=image/png`。
+- 已有对话 composer 的粘贴图片预览、最多 6 张上限、纯图片发送和外部 Runner 图片桥接能力保持不变。
+
 ## 清理步骤
 
 - 关闭 Playwright 浏览器。
@@ -325,6 +349,7 @@
 - 2026-07-08：根据用户反馈移除 Settings > IM 中重复的 Connections Provider 卡片和连接配置入口。左侧主入口 `IM` 继续承载 Connections、Targets、Routes、Schedules、History 全量 IM 配置能力；Settings > IM 只保留 Targets、Routes、Schedules、History，默认切入 `imGatewaySection=targets`，旧 `settings=im&imGatewaySection=connections` 会归一化到 Targets。第一轮 review 发现直接打开旧 Settings IM Connections 深链时还未触发归一化，已补充清理逻辑和 Playwright 断言；复测命令 `WEB_PORT=4177 pnpm --dir web exec playwright test tests/ui/ai-layout-redesign.spec.ts --config=playwright.frontend.config.ts --reporter=line`，结果 `7 passed (20.4s)`。
 - 2026-07-08：根据用户反馈修复历史线程加载不稳定问题。打开带 `historyPath` 的线程时改为一次性请求完整 history，不再默认使用 `tail=true&limit=300` 或前端最近轮次切片；实时 `timeline_changed` 正常走 `since=end_index` 增量追加，lag/reconnect/不连续时回退完整 history 恢复并去重，避免旧消息被最后一页覆盖。同步修正每轮执行过程展示：完成轮次默认只显示最终回答和处理耗时，展开后文本过程直接展示，相邻命令折叠为命令组摘要，命令组展开后可查看命令 Input/Output。复测命令 `pnpm --dir web exec vitest run src/pages/AI/AgentChatSection.timeline.test.ts src/pages/AI/AgentChatSection.helpers.test.ts`，结果 `2 passed / 26 tests passed`；复测命令 `WEB_PORT=4177 pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --config=playwright.frontend.config.ts --grep "loads full history|updates running history timeline|restores active timeline process steps|restores JSONL history|continues external runner history" --reporter=line`，结果 `5 passed (8.1s)`。
 - 2026-07-08：根据用户反馈继续收敛每轮 process step 的真实展示样式。通过当前分支 3000 端口真实运行 UI 打开 `Runner: 继续` 历史线程，确认 Vite 进程来自 `/Users/eden_studio/work/github/bifrost-ai-tab-layout-plan/web`，真实 history 返回 `508` 条事件且 `has_more=false`；修复前运行中 process block 顶部额外显示全局摘要 `正在运行 146 条命令 · 1 条执行中 ...`，与目标截图不一致。修复后 3000 端口复查确认 process block 直接展示过程正文，相邻命令以轻量单行 `已运行 4 条命令`、`失败 6 条命令 · 5s` 插在正文之间，外层 `Expand execution process` 不存在，命令组默认 `aria-expanded=false` 且不展开 Input/Output；最终 DOM 复查确认 `hasRunningCommandSummary=false`、`visibleBadText=false`，截图记录 `/tmp/bifrost-ai-process-3000-lightweight.png`。
+- 2026-07-08：根据用户反馈修复新建对话输入框图片粘贴回归。新建态输入面板移除无功能的左侧加号和右侧语音输入按钮；图片粘贴复用已有对话 composer 的预览条、删除按钮、大小标签和最多 6 张限制；修复外层 `startNewChat` controls 未转发 `images` 导致空态发送丢图的问题。复测命令 `pnpm --dir web exec vitest run src/pages/AI/AgentChatSection.images.test.tsx src/pages/AI/AgentChatSection.helpers.test.ts`，结果 `2 passed / 6 tests passed`；复测命令 `WEB_PORT=4177 pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --config=playwright.frontend.config.ts --grep "pasted image|new chat landing sends pasted images" --reporter=line`，结果 `3 passed (9.5s)`，覆盖已有对话纯图片发送、空态输入框粘贴图片发送和外部 Runner 图片桥接。
 
 执行明细：
 
@@ -344,3 +369,4 @@
 | TC-AILR-12 | 通过。Playwright 在运行中对话里 mock 4 条队列消息，断言 `agent-chat-queue-list` 高度不超过两条消息空间、`scrollHeight > clientHeight` 且 `overflowY=auto`；第一条长消息右侧删除按钮位于同一队列行内并在文本之后，没有换行；删除第一条后按钮消失，其余队列消息仍保留在紧凑滚动区域。 |
 | TC-AILR-13 | 通过。Playwright mock `/agent/sessions/history/<path>` 完整返回 old/middle/latest 事件，断言首次请求不包含 `tail`、`cursor`、`limit`，页面立即展示 `Oldest question`、`Middle answer`、`Newest answer`，且 `agent-chat-load-older` 不出现；运行中 timeline 回归同时断言增量追加后 `Previous question`、`Previous answer` 仍保留。 |
 | TC-AILR-14 | 通过。Playwright mock 包含 assistant delta、tool_call、tool_result、final assistant message 的 timeline，断言完成轮次折叠时显示 `IM timeline answer` 且不显示中间过程；展开后过程文本按顺序出现，process block 不再显示额外的外层全局执行摘要或 `Expand execution process`，命令组摘要直接以 `已运行 1 条命令` 的轻量单行展示；展开命令组后可见 `exec_command`、`pnpm test` 和 `ok`。3000 端口真实线程复查同样确认运行中长过程按正文 + 命令摘要穿插展示，页面内不再出现 `条执行中`。 |
+| TC-AILR-15 | 通过。Playwright 打开 `/ai` 新建对话输入态后，断言输入面板内 `Attach context` 和 `Voice input` 均不存在；粘贴 PNG 后同一输入面板显示 `agent-chat-image-preview`，切换暗色主题后预览仍存在；发送后普通对话页面显示用户文本、图片缩略图和 `Landing image received`，请求 payload 含 `message="Describe the pasted screenshot"` 以及 `images[0].mime_type=image/png`。同一命令还回归已有对话 composer 的最多 6 张图片、纯图片发送和外部 Runner `mimeType=image/png` 图片桥接。 |

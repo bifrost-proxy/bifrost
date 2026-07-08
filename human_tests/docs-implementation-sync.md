@@ -148,6 +148,23 @@
 - Skill 安装文档覆盖 `github-copilot`、`universal`、`all` 目标，说明双 skill 安装和安全边界。
 - 站点文档由同步脚本生成后与 `docs/`、`docs-en/` 源文档保持一致。
 
+### TC-DIS-10 IM CLI 交互式配置说明同步到用户文档与 Skill 文档
+
+操作步骤：
+
+1. 执行 `rg -n "feishu-main --type feishu --runner traex|weixin-main --type weixin --runner codex|授权 URL|登录二维码|base_url.*固定|runner-aware|Runner Type|/runner|/models|/effort" docs/cli.md docs/cli-quick-start.md docs/agent-skill.md SKILL.md`。
+2. 执行 `rg -n "feishu-main --type feishu --runner traex|weixin-main --type weixin --runner codex|authorization URL|login QR code|base URLs are fixed|runner-aware|/runner|/models|/effort" docs-en/cli.md docs-en/cli-quick-start.md docs-en/agent-skill.md`。
+3. 执行 `pnpm --dir site docs:sync` 后，再执行 `rg -n "feishu-main --type feishu --runner traex|weixin-main --type weixin --runner codex|授权 URL|authorization URL|base_url|base URLs are fixed|runner-aware" site/src/content/docs/reference/cli.md site/src/content/docs/getting-started/cli-quick-start.md site/src/content/docs/reference/agent-skill.md site/src/content/docs/en/reference/cli.md site/src/content/docs/en/getting-started/cli-quick-start.md site/src/content/docs/en/reference/agent-skill.md`。
+4. 打开 `docs/cli.md` 与 `docs-en/cli.md`，确认 IM Gateway 章节说明 Feishu / Weixin 可只传 provider ID、`--type`、`--runner` 进入交互式配置，Feishu 输出授权 URL + 二维码，Weixin 输出扫码二维码，CLI 会等待授权/扫码完成后创建并连接 provider。
+5. 打开 `docs/agent-skill.md`、`docs-en/agent-skill.md` 与 `SKILL.md`，确认安装后的通用 `bifrost` skill 明确覆盖 IM Gateway CLI 配置，并要求 Agent 使用 `bifrost im` 而不是直接改 provider 文件。
+
+预期结果：
+
+- 中文用户文档覆盖 Feishu / Weixin 交互式配置、手动凭据配置、Runner 显式选择、非交互必须传 `--runner`、错误列出可用 Runner、provider base URL 固定且 CLI 拒绝 `--base-url`。
+- 英文用户文档覆盖相同能力和约束。
+- Skill 安装文档和实际 `SKILL.md` 告诉 Agent 如何使用 `bifrost im provider add ...` 配置 IM 通道，并说明 IM 上线帮助会按 Runner 类型过滤。
+- 站点文档由同步脚本生成后与 `docs/`、`docs-en/` 源文档保持一致。
+
 ## 本次执行记录
 
 执行日期：2026-05-09。
@@ -163,6 +180,14 @@
 | TC-DIS-07 | 通过。`traffic list --help`、`search --help`、`remote file --help` 与文档中的参数/子命令一致；失效示例扫描无命中。 |
 | TC-DIS-08 | 通过。源码、README、规则语法、operation 总表、规则协议手册、routing 专页、E2E 规则和 human_tests 均包含 `upstreamUnsafeSsl`；文档明确它是按规则跳过上游 HTTPS 证书校验，并记录失败响应中的修复建议。 |
 | TC-DIS-09 | 通过。`docs/cli.md`、`docs/cli-quick-start.md`、中英文 Agent Skill 安装文档、`SKILL.md` 和站点同步产物均已覆盖 `capture wait`、`traffic get --ids`、`auth-status`、`traffic export/replay`、JSONPath / include、本期不做脱敏且输出按捕获原文处理、`bifrost-remote` 双 skill 安装说明，以及 `remote run/job/file` 新能力；当前沙箱无 `~/.zshrc`，实际执行时跳过 source 前置并直接运行等价 `rg` 扫描。 |
+
+## 补充执行记录
+
+执行日期：2026-07-08。
+
+| 用例 | 实际结果 |
+| --- | --- |
+| TC-DIS-10 | PASS — 已执行文档静态扫描，确认 `docs/cli.md`、`docs/cli-quick-start.md`、`docs/agent-skill.md`、`docs-en/cli.md`、`docs-en/cli-quick-start.md`、`docs-en/agent-skill.md`、`SKILL.md` 和站点同步产物均覆盖 Feishu / Weixin 交互式 provider 配置、显式 Runner 选择、非交互 `--runner` 要求、固定 base URL、runner-aware 上线帮助与通用 bifrost skill 的 IM Gateway CLI 使用说明。 |
 
 ## 清理步骤
 
