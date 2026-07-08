@@ -10,7 +10,7 @@ Bifrost 提供 `SKILL.md` 技能文件，可以让 AI 编程助手（Claude Code
 bifrost install-skill -y
 ```
 
-每次执行都会从 GitHub 主干（main 分支）下载最新的 skill 文档，覆盖式安装到目标目录。安装内容包含通用 `bifrost` skill 和专用 `bifrost-remote` skill：本机代理、规则、流量分析使用通用 skill；连接另一台机器、使用 pair code / SSH key、远程查流量、上传脚本执行或授权 shell 操作目标设备时使用 `bifrost-remote`。
+每次执行都会从 GitHub 主干（main 分支）下载最新的 skill 文档，覆盖式安装到目标目录。安装内容包含通用 `bifrost` skill 和专用 `bifrost-remote` skill：本机代理、规则、流量分析和 IM Gateway CLI 配置使用通用 skill；连接另一台机器、使用 pair code / SSH key、远程查流量、上传脚本执行或授权 shell 操作目标设备时使用 `bifrost-remote`。
 
 ### 安装到指定工具
 
@@ -58,6 +58,20 @@ bifrost install-skill -d /custom/path -y
 安装的文件始终是从远端下载的原始 skill 内容（含标准 YAML frontmatter），不做任何额外包装或修改。源文件自带 `name` 和 `description` frontmatter 字段，兼容所有工具的 skill 自动发现机制。通用 skill 覆盖本机代理、规则、流量和 Agent 采证工作流；remote skill 覆盖授权连接、remote traffic、remote file、remote run/job 和 shell access 边界。
 
 > **安全提示**：`install-skill` 只写入说明文档，不启动代理、不修改系统代理、不导入规则、不会创建远端授权，也不会授予 shell 权限。远端连接必须由用户通过 pair code 或 SSH key 显式授权。
+
+### 安装后使用 IM Gateway CLI
+
+安装通用 `bifrost` skill 后，Agent 在用户要求配置飞书或微信 IM 通道时，应优先使用当前机器上的 `bifrost im` CLI，而不是直接改配置文件。常见流程如下：
+
+```bash
+bifrost start -d
+bifrost im provider add feishu-main --type feishu --runner traex
+bifrost im provider add weixin-main --type weixin --runner codex
+```
+
+Feishu 交互式配置会在终端输出授权 URL 和二维码；Weixin 交互式配置会输出扫码二维码。CLI 会保持等待，直到用户完成授权或扫码确认，然后自动创建并连接 provider。非交互环境必须显式传 `--runner`；交互式终端可以让用户用键盘选择 Runner。Runner 不存在或未启用时，CLI 会列出当前支持的 Runner。Feishu / Weixin provider 的 `base_url` 由系统按 provider 类型固定管理，不要向用户建议传 `--base-url`。
+
+IM 通道上线后，Bifrost 会自动推送上线通知和 runner-aware 帮助。Agent 应按实际 Runner 区分命令范围：内置 Bifrost Agent 支持 memory、goal、compact、guidance 等命令；Codex / Traex / Claude Code 等外部 Runner 只应展示其适配器支持的模型和 reasoning effort 命令。
 
 ### 参数说明
 
