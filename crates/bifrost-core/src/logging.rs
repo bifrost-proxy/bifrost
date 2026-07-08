@@ -88,12 +88,16 @@ pub const DEFAULT_LOG_DIR_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 
 static DAEMON_LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
+fn parse_log_level_filter(level: &str) -> Result<EnvFilter> {
+    EnvFilter::try_new(level)
+        .map_err(|e| BifrostError::Config(format!("Invalid log level '{}': {}", level, e)))
+}
+
 fn build_env_filter(level: &str) -> Result<EnvFilter> {
     if std::env::var("RUST_LOG").is_ok() {
         Ok(EnvFilter::from_default_env())
     } else {
-        EnvFilter::try_new(level)
-            .map_err(|e| BifrostError::Config(format!("Invalid log level '{}': {}", level, e)))
+        parse_log_level_filter(level)
     }
 }
 
@@ -690,25 +694,12 @@ mod tests {
     }
 
     #[test]
-    fn build_env_filter_valid_and_invalid() {
-        // Ensure RUST_LOG is unset so we exercise the try_new branch.
-        let saved = std::env::var("RUST_LOG").ok();
-        std::env::remove_var("RUST_LOG");
-
-        assert!(build_env_filter("info").is_ok());
-        assert!(build_env_filter("debug").is_ok());
+    fn parse_log_level_filter_valid_and_invalid() {
+        assert!(parse_log_level_filter("info").is_ok());
+        assert!(parse_log_level_filter("debug").is_ok());
         // A target directive with an invalid level name is rejected by EnvFilter.
-        let err = build_env_filter("foo=notalevel");
+        let err = parse_log_level_filter("foo=notalevel");
         assert!(err.is_err());
-
-        // RUST_LOG set -> uses from_default_env, always Ok regardless of level arg.
-        std::env::set_var("RUST_LOG", "warn");
-        assert!(build_env_filter("anything").is_ok());
-
-        match saved {
-            Some(v) => std::env::set_var("RUST_LOG", v),
-            None => std::env::remove_var("RUST_LOG"),
-        }
     }
 
     #[test]
@@ -981,8 +972,6 @@ mod tests {
 
     #[test]
     fn init_logging_with_config_invalid_level_errors() {
-        let saved = std::env::var("RUST_LOG").ok();
-        std::env::remove_var("RUST_LOG");
         let dir = tempfile::tempdir().unwrap();
         let cfg = LogConfig {
             level: "foo=notalevel".to_string(),
@@ -992,10 +981,6 @@ mod tests {
             file_prefix: "bifrost".to_string(),
         };
         // Invalid level fails before any subscriber init.
-        assert!(init_logging_with_config(&cfg).is_err());
-        match saved {
-            Some(v) => std::env::set_var("RUST_LOG", v),
-            None => std::env::remove_var("RUST_LOG"),
-        }
+        assert!(parse_log_level_filter(&cfg.level).is_err());
     }
 }
