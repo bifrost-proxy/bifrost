@@ -869,7 +869,7 @@ check_shell_shard_balance() {
     return 1
   fi
 
-  local threshold="${BIFROST_E2E_SHARD_BALANCE_MAX_DIFF_PCT:-20}"
+  local threshold="${BIFROST_E2E_SHARD_BALANCE_MAX_DIFF_PCT:-10}"
   local all_tests=()
   local name
   while IFS= read -r name; do
