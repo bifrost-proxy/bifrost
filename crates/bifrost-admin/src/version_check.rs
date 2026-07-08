@@ -36,8 +36,15 @@ impl VersionChecker {
     }
 
     pub async fn check(&self, force_refresh: bool) -> VersionCheckResponse {
-        let current_version = env!("CARGO_PKG_VERSION").to_string();
+        self.check_with_current_version(force_refresh, env!("CARGO_PKG_VERSION").to_string())
+            .await
+    }
 
+    pub async fn check_with_current_version(
+        &self,
+        force_refresh: bool,
+        current_version: String,
+    ) -> VersionCheckResponse {
         if !force_refresh {
             let cache = self.cache.read().await;
             if let Some(ref c) = *cache {
@@ -137,9 +144,11 @@ fn is_cache_valid(cache: &VersionCache) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use bifrost_core::version_check::{
         compare_versions, is_newer_version, parse_release_highlights,
     };
+    use chrono::Utc;
 
     #[test]
     fn test_compare_versions() {
@@ -157,6 +166,23 @@ mod tests {
         assert!(is_newer_version("0.0.1-alpha", "0.0.1"));
         assert!(!is_newer_version("1.0.0", "0.0.1"));
         assert!(!is_newer_version("1.0.0", "1.0.0"));
+    }
+
+    #[test]
+    fn build_response_marks_desktop_app_version_older_than_latest() {
+        let checker = VersionChecker::new();
+        let response = checker.build_response(
+            "0.0.144",
+            Some(VersionCache {
+                latest_version: "0.0.145".to_string(),
+                release_highlights: vec![],
+                checked_at: Utc::now(),
+            }),
+        );
+
+        assert!(response.has_update);
+        assert_eq!(response.current_version, "0.0.144");
+        assert_eq!(response.latest_version.as_deref(), Some("0.0.145"));
     }
 
     #[test]

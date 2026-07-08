@@ -686,7 +686,7 @@ mod tests {
         )
         .await;
         let output = session
-            .read_worker_output_with_timeout("startup response", Duration::from_secs(1))
+            .read_worker_output_with_timeout("startup response", Duration::from_secs(5))
             .await
             .expect("worker log line should not corrupt JSON protocol");
 

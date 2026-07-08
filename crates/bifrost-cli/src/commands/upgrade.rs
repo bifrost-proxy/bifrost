@@ -2,7 +2,7 @@ use bifrost_core::BifrostError;
 use colored::Colorize;
 use std::env;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -36,6 +36,7 @@ const UPGRADE_RESTART_PORT_RELEASE_TIMEOUT_SECS: u64 = 30;
 const BINARY_VERIFY_TIMEOUT_SECS: u64 = 15;
 const POST_UPGRADE_SKILL_INSTALL_TIMEOUT_SECS: u64 = 120;
 const POST_UPGRADE_SKILL_INSTALL_ARGS: &[&str] = &["install-skill", "--tool", "all", "-y"];
+const POST_UPGRADE_APP_UPDATE_TIMEOUT_SECS: u64 = 600;
 static DEFERRED_INSTALL_SCHEDULED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +50,13 @@ enum TimedCommandStatus {
 struct RestartSystemProxyConfig {
     enabled: bool,
     bypass: String,
+}
+
+#[derive(Debug)]
+struct TimedCommandOutput {
+    status: TimedCommandStatus,
+    stdout: String,
+    stderr: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -388,6 +396,68 @@ fn command_status_with_timeout(
     }
 }
 
+fn command_output_with_timeout(
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+) -> Result<TimedCommandOutput, BifrostError> {
+    let mut stdout_file =
+        tempfile::tempfile().map_err(|e| BifrostError::Io(std::io::Error::other(e)))?;
+    let mut stderr_file =
+        tempfile::tempfile().map_err(|e| BifrostError::Io(std::io::Error::other(e)))?;
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(
+            stdout_file
+                .try_clone()
+                .map_err(|e| BifrostError::Io(std::io::Error::other(e)))?,
+        ))
+        .stderr(Stdio::from(
+            stderr_file
+                .try_clone()
+                .map_err(|e| BifrostError::Io(std::io::Error::other(e)))?,
+        ))
+        .spawn()
+        .map_err(BifrostError::Io)?;
+    let deadline = Instant::now() + timeout;
+    let status;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(exit_status)) => {
+                status = if exit_status.success() {
+                    TimedCommandStatus::Success
+                } else {
+                    TimedCommandStatus::Failure
+                };
+                break;
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                status = TimedCommandStatus::TimedOut;
+                break;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(25)),
+            Err(error) => return Err(BifrostError::Io(error)),
+        }
+    }
+
+    Ok(TimedCommandOutput {
+        status,
+        stdout: read_temp_output(&mut stdout_file),
+        stderr: read_temp_output(&mut stderr_file),
+    })
+}
+
+fn read_temp_output(file: &mut fs::File) -> String {
+    let mut output = String::new();
+    let _ = file.seek(SeekFrom::Start(0));
+    let _ = file.read_to_string(&mut output);
+    output
+}
+
 fn verify_binary(path: &Path) -> bool {
     matches!(
         command_status_with_timeout(
@@ -437,6 +507,152 @@ fn install_skills_after_upgrade_best_effort(executable: &Path) {
                 "  Retry manually with: bifrost install-skill --tool all -y".dimmed()
             );
         }
+    }
+}
+
+fn installed_desktop_app_path() -> Option<PathBuf> {
+    desktop_app_install_candidates()
+        .into_iter()
+        .find(|path| path.exists())
+}
+
+fn desktop_app_install_candidates() -> Vec<PathBuf> {
+    if let Some(dir) = env::var_os("BIFROST_APP_INSTALL_DIR") {
+        return vec![resolve_desktop_app_path(&PathBuf::from(dir))];
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut candidates = Vec::new();
+        candidates.push(PathBuf::from("/Applications/Bifrost.app"));
+        if let Some(home) = env::var_os("HOME") {
+            candidates.push(PathBuf::from(home).join("Applications").join("Bifrost.app"));
+        }
+        candidates
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let mut candidates = Vec::new();
+        if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+            candidates.push(
+                PathBuf::from(local_app_data)
+                    .join("Bifrost")
+                    .join("bifrost-desktop.exe"),
+            );
+        }
+        candidates
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Vec::new()
+    }
+}
+
+fn resolve_desktop_app_path(app_dir: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        app_dir.join("Bifrost.app")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        app_dir.join("bifrost-desktop.exe")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        app_dir.join("Bifrost")
+    }
+}
+
+fn post_upgrade_desktop_app_args(target_version: &str) -> Vec<String> {
+    vec![
+        "app".to_string(),
+        "upgrade".to_string(),
+        "--no-cli".to_string(),
+        "--source".to_string(),
+        "cli-upgrade".to_string(),
+        "--version".to_string(),
+        target_version.to_string(),
+        "-y".to_string(),
+    ]
+}
+
+fn update_desktop_app_after_upgrade_best_effort(executable: &Path, target_version: &str) {
+    let Some(app_path) = installed_desktop_app_path() else {
+        return;
+    };
+
+    println!();
+    println!(
+        "{} {}",
+        "Detected installed Bifrost desktop app:".bright_cyan(),
+        app_path.display()
+    );
+    println!("{}", "Updating Bifrost desktop app...".bright_cyan());
+
+    let args = post_upgrade_desktop_app_args(target_version);
+    match command_output_with_timeout(
+        executable,
+        &args,
+        Duration::from_secs(POST_UPGRADE_APP_UPDATE_TIMEOUT_SECS),
+    ) {
+        Ok(output) if output.status == TimedCommandStatus::Success => {
+            println!(
+                "{}",
+                "✓ Bifrost desktop app updated successfully.".bright_green()
+            );
+        }
+        Ok(output) => {
+            let reason = summarize_command_output(&output);
+            eprintln!(
+                "{} {}",
+                "⚠ Bifrost desktop app update failed; continuing CLI upgrade.".bright_yellow(),
+                reason.dimmed()
+            );
+            eprintln!(
+                "{}",
+                "  Retry manually with: bifrost app upgrade --no-cli -y".dimmed()
+            );
+        }
+        Err(error) => {
+            eprintln!(
+                "{} {}",
+                "⚠ Could not run Bifrost desktop app update; continuing CLI upgrade:"
+                    .bright_yellow(),
+                error.to_string().dimmed()
+            );
+            eprintln!(
+                "{}",
+                "  Retry manually with: bifrost app upgrade --no-cli -y".dimmed()
+            );
+        }
+    }
+}
+
+fn summarize_command_output(output: &TimedCommandOutput) -> String {
+    let reason = if output.status == TimedCommandStatus::TimedOut {
+        "command timed out".to_string()
+    } else {
+        let stderr = output.stderr.trim();
+        let stdout = output.stdout.trim();
+        if !stderr.is_empty() {
+            stderr.to_string()
+        } else if !stdout.is_empty() {
+            stdout.to_string()
+        } else {
+            "command exited with a non-zero status".to_string()
+        }
+    };
+    truncate_reason(&reason, 600)
+}
+
+fn truncate_reason(reason: &str, max_chars: usize) -> String {
+    let mut chars = reason.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{}...", truncated)
+    } else {
+        truncated
     }
 }
 
@@ -1475,12 +1691,24 @@ fn handle_upgrade_inner(restart_if_already_latest: bool) -> Result<(), BifrostEr
         if should_restart_when_already_latest(restart_if_already_latest) {
             let install_method = detect_install_method();
             let restart_executable = restart_executable_for_install_method(&install_method)?;
+            update_desktop_app_after_upgrade_best_effort(
+                &restart_executable,
+                &cache.latest_version,
+            );
             println!(
                 "{}",
                 "  On-disk binary is current; restarting any running proxy so it adopts this version."
                     .bright_cyan()
             );
             maybe_restart_running_proxy(&restart_executable)?;
+        } else {
+            let install_method = detect_install_method();
+            if let Ok(restart_executable) = restart_executable_for_install_method(&install_method) {
+                update_desktop_app_after_upgrade_best_effort(
+                    &restart_executable,
+                    &cache.latest_version,
+                );
+            }
         }
         return Ok(());
     }
@@ -1527,6 +1755,10 @@ fn handle_upgrade_inner(restart_if_already_latest: bool) -> Result<(), BifrostEr
     match upgrade_outcome {
         UpgradeInstallOutcome::Installed => {
             install_skills_after_upgrade_best_effort(&restart_executable);
+            update_desktop_app_after_upgrade_best_effort(
+                &restart_executable,
+                &cache.latest_version,
+            );
             maybe_restart_running_proxy(&restart_executable)?
         }
         #[cfg(windows)]
@@ -2562,6 +2794,57 @@ mod tests {
             POST_UPGRADE_SKILL_INSTALL_ARGS,
             &["install-skill", "--tool", "all", "-y"]
         );
+    }
+
+    #[test]
+    fn upgrade_post_install_desktop_app_args_disable_cli_recursion() {
+        assert_eq!(
+            post_upgrade_desktop_app_args("0.0.145"),
+            vec![
+                "app",
+                "upgrade",
+                "--no-cli",
+                "--source",
+                "cli-upgrade",
+                "--version",
+                "0.0.145",
+                "-y"
+            ]
+        );
+    }
+
+    #[test]
+    fn upgrade_desktop_app_install_path_uses_override_dir() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let previous = std::env::var_os("BIFROST_APP_INSTALL_DIR");
+        std::env::set_var("BIFROST_APP_INSTALL_DIR", temp.path());
+        let path = desktop_app_install_candidates()
+            .into_iter()
+            .next()
+            .expect("app path");
+        match previous {
+            Some(value) => std::env::set_var("BIFROST_APP_INSTALL_DIR", value),
+            None => std::env::remove_var("BIFROST_APP_INSTALL_DIR"),
+        }
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(path, temp.path().join("Bifrost.app"));
+        #[cfg(target_os = "windows")]
+        assert_eq!(path, temp.path().join("bifrost-desktop.exe"));
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        assert_eq!(path, temp.path().join("Bifrost"));
+    }
+
+    #[test]
+    fn upgrade_desktop_app_failure_reason_prefers_stderr() {
+        let output = TimedCommandOutput {
+            status: TimedCommandStatus::Failure,
+            stdout: "stdout detail".to_string(),
+            stderr: "stderr detail".to_string(),
+        };
+
+        assert_eq!(summarize_command_output(&output), "stderr detail");
     }
 
     #[test]

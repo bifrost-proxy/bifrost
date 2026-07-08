@@ -3,6 +3,7 @@ mod unix_tests {
     use nix::sys::signal::{kill, Signal};
     use nix::unistd::Pid;
     use std::net::TcpListener;
+    use std::path::Path;
     use std::process::Command;
     use std::thread::sleep;
     use std::time::Duration;
@@ -20,6 +21,56 @@ mod unix_tests {
         command
     }
 
+    fn free_loopback_port() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    }
+
+    fn start_daemon(data_dir: &Path, log_dir: &Path) -> u16 {
+        for _ in 0..10 {
+            let port = free_loopback_port();
+            let output = bifrost_command()
+                .env("BIFROST_DATA_DIR", data_dir)
+                .arg("--log-dir")
+                .arg(log_dir)
+                .arg("start")
+                .arg("-p")
+                .arg(port.to_string())
+                .arg("-H")
+                .arg("127.0.0.1")
+                .arg("--daemon")
+                .arg("--skip-cert-check")
+                .arg("--no-system-proxy")
+                .arg("--no-intercept")
+                .output()
+                .unwrap();
+
+            if output.status.success() {
+                return port;
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = format!("{stdout}\n{stderr}");
+            if combined.contains("already in use") {
+                continue;
+            }
+
+            panic!(
+                "start failed with status: {}; stdout: {}; stderr: {}; logs: {}",
+                output.status,
+                stdout,
+                stderr,
+                log_dir.display()
+            );
+        }
+
+        panic!(
+            "start failed after retrying free loopback ports; logs: {}",
+            log_dir.display()
+        );
+    }
+
     #[test]
     fn stop_triggers_graceful_shutdown_in_daemon_mode() {
         let tmp = tempfile::tempdir().unwrap();
@@ -28,31 +79,7 @@ mod unix_tests {
         std::fs::create_dir_all(&data_dir).unwrap();
         std::fs::create_dir_all(&log_dir).unwrap();
 
-        let port = {
-            let l = TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap().port()
-        };
-
-        let status = bifrost_command()
-            .env("BIFROST_DATA_DIR", &data_dir)
-            .arg("--log-dir")
-            .arg(&log_dir)
-            .arg("start")
-            .arg("-p")
-            .arg(port.to_string())
-            .arg("-H")
-            .arg("127.0.0.1")
-            .arg("--daemon")
-            .arg("--skip-cert-check")
-            .arg("--no-system-proxy")
-            .arg("--no-intercept")
-            .status()
-            .unwrap();
-        assert!(
-            status.success(),
-            "start failed with status: {status}; logs: {}",
-            log_dir.display()
-        );
+        start_daemon(&data_dir, &log_dir);
 
         let runtime_file = data_dir.join("runtime.json");
         for _ in 0..200 {
@@ -144,31 +171,7 @@ mod unix_tests {
         std::fs::create_dir_all(data_dir.join("rules")).unwrap();
         std::fs::create_dir_all(&log_dir).unwrap();
 
-        let port = {
-            let l = TcpListener::bind("127.0.0.1:0").unwrap();
-            l.local_addr().unwrap().port()
-        };
-
-        let status = bifrost_command()
-            .env("BIFROST_DATA_DIR", &data_dir)
-            .arg("--log-dir")
-            .arg(&log_dir)
-            .arg("start")
-            .arg("-p")
-            .arg(port.to_string())
-            .arg("-H")
-            .arg("127.0.0.1")
-            .arg("--daemon")
-            .arg("--skip-cert-check")
-            .arg("--no-system-proxy")
-            .arg("--no-intercept")
-            .status()
-            .unwrap();
-        assert!(
-            status.success(),
-            "start failed with status: {status}; logs: {}",
-            log_dir.display()
-        );
+        start_daemon(&data_dir, &log_dir);
 
         let runtime_file = data_dir.join("runtime.json");
         for _ in 0..200 {

@@ -211,6 +211,76 @@
 - CLI 调用 MSI 时使用 per-user 安装属性，并在失败时输出 MSI 日志路径。
 - CLI 显示、重启和卸载使用真实 Tauri MSI 目标路径，不再指向 `%LOCALAPPDATA%\Programs\Bifrost\Bifrost.exe`。
 
+### TC-DAU-04H 普通 bifrost upgrade 自动联动已安装桌面 App
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_upgrade_cli.sh
+   ```
+2. 在 macOS 上，脚本创建临时 `Bifrost.app`，并设置 `BIFROST_APP_INSTALL_DIR=<mktemp>/app-dir`。
+3. 脚本设置 `BIFROST_UPGRADE_TEST_LATEST_VERSION` 为当前 CLI 版本，模拟 CLI 已经是最新版本。
+4. 脚本执行：
+   ```bash
+   "$BIFROST_BIN" upgrade
+   ```
+5. 检查输出包含 `Detected installed Bifrost desktop app` 和 `Bifrost desktop app updated successfully`。
+
+预期结果：
+
+- 即使 CLI 已经是最新版本，只要检测到已安装桌面 App，`bifrost upgrade` 仍会触发桌面 App 后置更新检查。
+- 后置命令使用 `app upgrade --no-cli`，不会递归执行 CLI upgrade。
+- 测试只使用临时 app 目录，不触碰真实 `/Applications/Bifrost.app`。
+
+### TC-DAU-04I 普通 bifrost upgrade 中桌面 App 更新失败不阻断主流程
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_upgrade_cli.sh
+   ```
+2. 在 macOS 上，脚本创建临时已安装 `Bifrost.app`，版本为 `0.0.1`。
+3. 脚本通过 `BIFROST_APP_UPGRADE_TEST_PACKAGE` 注入同样是 `0.0.1` 的 stale app 包，并设置目标版本为当前 CLI 版本。
+4. 脚本执行：
+   ```bash
+   "$BIFROST_BIN" upgrade
+   ```
+5. 检查命令退出码为 0，输出包含 `Bifrost desktop app update failed; continuing CLI upgrade` 和 `reports version v0.0.1 instead of target`。
+
+预期结果：
+
+- 桌面 App 更新失败时，`bifrost upgrade` 只打印 warning 和失败原因。
+- CLI upgrade 主流程不因 App 更新失败变成失败退出。
+- 输出中包含可操作的手动重试提示 `bifrost app upgrade --no-cli -y`。
+
+### TC-DAU-04J 旧桌面 App 复用新 CLI 时仍提示桌面更新
+
+操作步骤：
+
+1. 确认现场或临时环境中桌面 App 版本低于最新 release，例如：
+   ```bash
+   /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/Bifrost.app/Contents/Info.plist
+   ```
+2. 确认运行中的 core/CLI 已是最新版本，例如：
+   ```bash
+   bifrost --version
+   curl -fsS 'http://127.0.0.1:9900/_bifrost/api/system/version-check?refresh=true' | python3 -m json.tool
+   ```
+3. 调用 desktop channel：
+   ```bash
+   curl -fsS 'http://127.0.0.1:9900/_bifrost/api/system/version-check?refresh=true&channel=desktop' | python3 -m json.tool
+   ```
+4. 检查 desktop channel 返回的 `current_version` 等于桌面 App bundle 版本，而不是 CLI/core 版本。
+5. 如果 latest release 高于桌面 App bundle 版本，检查返回 `has_update=true`。
+
+预期结果：
+
+- 旧 App 复用新 CLI/core 时，桌面端版本检查仍以已安装 App bundle 版本作为当前版本。
+- 桌面状态栏的启动检查能看到桌面 App 更新，不会因为 CLI/core 已经最新而静默。
+- 如果无法读取 App bundle 版本，接口才回退到 CLI/core 版本并保持原有兼容行为。
+
 ### TC-DAU-05 Admin API 桌面 channel 与 CLI channel 分离
 
 操作步骤：

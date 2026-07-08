@@ -303,6 +303,116 @@ EOF
     fi
 }
 
+create_fake_macos_app() {
+    local app_path="$1"
+    local version="$2"
+    mkdir -p "$app_path/Contents/MacOS"
+    cat > "$app_path/Contents/Info.plist" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key><string>Bifrost</string>
+  <key>CFBundleIdentifier</key><string>dev.bifrost.test</string>
+  <key>CFBundleName</key><string>Bifrost</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>${version}</string>
+  <key>CFBundleVersion</key><string>${version}</string>
+</dict>
+</plist>
+EOF
+    cat > "$app_path/Contents/MacOS/Bifrost" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    chmod +x "$app_path/Contents/MacOS/Bifrost"
+}
+
+test_upgrade_updates_installed_desktop_app_best_effort() {
+    header "测试 upgrade 已是最新 CLI 时仍 best-effort 更新已安装桌面 App"
+
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+        skip "桌面 App 自动更新 best-effort 回归当前仅在 macOS 临时 .app 上执行"
+        return
+    fi
+
+    local current_version
+    current_version=$("$BIFROST_BIN" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?' | head -1 || echo "0.0.1")
+
+    local root app_dir
+    root=$(mktemp -d)
+    app_dir="$root/app-dir"
+    create_fake_macos_app "$app_dir/Bifrost.app" "$current_version"
+
+    local result status
+    set +e
+    result=$(BIFROST_APP_INSTALL_DIR="$app_dir" \
+        BIFROST_APP_SKIP_RESTART=1 \
+        BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES=1 \
+        BIFROST_UPGRADE_TEST_LATEST_VERSION="$current_version" \
+        "$BIFROST_BIN" upgrade 2>&1)
+    status=$?
+    set +e
+
+    rm -rf "$root"
+
+    if [[ $status -ne 0 ]]; then
+        fail "upgrade 已最新 CLI 时不应因桌面 App 后置更新失败退出: $result"
+        return
+    fi
+
+    if echo "$result" | grep -q "Detected installed Bifrost desktop app" \
+        && echo "$result" | grep -q "Bifrost desktop app updated successfully"; then
+        pass "upgrade 已最新 CLI 时会发现并处理已安装桌面 App"
+    else
+        fail "upgrade 未发现或未更新已安装桌面 App: $result"
+    fi
+}
+
+test_upgrade_desktop_app_failure_does_not_fail_cli_flow() {
+    header "测试桌面 App 更新失败不阻断 upgrade 主流程"
+
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+        skip "桌面 App 更新失败 best-effort 回归当前仅在 macOS 临时 .app 上执行"
+        return
+    fi
+
+    local current_version
+    current_version=$("$BIFROST_BIN" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?' | head -1 || echo "0.0.1")
+
+    local root app_dir stale_app
+    root=$(mktemp -d)
+    app_dir="$root/app-dir"
+    stale_app="$root/stale/Bifrost.app"
+    create_fake_macos_app "$app_dir/Bifrost.app" "0.0.1"
+    create_fake_macos_app "$stale_app" "0.0.1"
+
+    local result status
+    set +e
+    result=$(BIFROST_APP_INSTALL_DIR="$app_dir" \
+        BIFROST_APP_UPGRADE_TEST_PACKAGE="$stale_app" \
+        BIFROST_APP_SKIP_RESTART=1 \
+        BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES=1 \
+        BIFROST_UPGRADE_TEST_LATEST_VERSION="$current_version" \
+        "$BIFROST_BIN" upgrade 2>&1)
+    status=$?
+    set +e
+
+    rm -rf "$root"
+
+    if [[ $status -ne 0 ]]; then
+        fail "桌面 App 更新失败不应导致 upgrade 退出失败: $result"
+        return
+    fi
+
+    if echo "$result" | grep -q "Bifrost desktop app update failed; continuing CLI upgrade" \
+        && echo "$result" | grep -q "reports version v0.0.1 instead of target"; then
+        pass "桌面 App 更新失败时输出原因且继续主流程"
+    else
+        fail "桌面 App 更新失败 warning 不完整: $result"
+    fi
+}
+
 print_summary() {
     header "测试总结"
 
@@ -390,6 +500,8 @@ main() {
     test_version_cache_content
     test_new_version_notice
     test_no_notice_when_current
+    test_upgrade_updates_installed_desktop_app_best_effort
+    test_upgrade_desktop_app_failure_does_not_fail_cli_flow
 
     print_summary
 }

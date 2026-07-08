@@ -230,8 +230,9 @@ async fn check_version(state: SharedAdminState, query: Option<&str>) -> Response
     let force_refresh = query
         .map(|q| q.contains("refresh=true") || q.contains("refresh=1"))
         .unwrap_or(false);
+    let channel = parse_upgrade_channel(query);
 
-    let response = state.version_checker.check(force_refresh).await;
+    let response = check_version_for_channel(state, force_refresh, channel).await;
     json_response(&response)
 }
 
@@ -258,7 +259,7 @@ async fn start_upgrade(state: SharedAdminState, query: Option<&str>) -> Response
     }
 
     // Confirm there is actually a newer version to upgrade to.
-    let version = state.version_checker.check(false).await;
+    let version = check_version_for_channel(state, false, channel).await;
     if !version.has_update {
         return error_response(StatusCode::CONFLICT, "No update available");
     }
@@ -640,6 +641,129 @@ impl UpgradeChannel {
     }
 }
 
+async fn check_version_for_channel(
+    state: SharedAdminState,
+    force_refresh: bool,
+    channel: UpgradeChannel,
+) -> crate::VersionCheckResponse {
+    if channel == UpgradeChannel::Desktop {
+        if let Some(app_version) = desktop_app_version_for_version_check() {
+            return state
+                .version_checker
+                .check_with_current_version(force_refresh, app_version)
+                .await;
+        }
+    }
+    state.version_checker.check(force_refresh).await
+}
+
+fn desktop_app_version_for_version_check() -> Option<String> {
+    desktop_app_install_candidates()
+        .into_iter()
+        .find_map(|path| installed_desktop_app_version(&path))
+}
+
+fn desktop_app_install_candidates() -> Vec<PathBuf> {
+    if let Some(dir) = std::env::var_os("BIFROST_APP_INSTALL_DIR") {
+        return vec![resolve_desktop_app_path(&PathBuf::from(dir))];
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut candidates = Vec::new();
+        candidates.push(PathBuf::from("/Applications/Bifrost.app"));
+        if let Some(home) = std::env::var_os("HOME") {
+            candidates.push(PathBuf::from(home).join("Applications").join("Bifrost.app"));
+        }
+        candidates
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let mut candidates = Vec::new();
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            candidates.push(
+                PathBuf::from(local_app_data)
+                    .join("Bifrost")
+                    .join("bifrost-desktop.exe"),
+            );
+        }
+        candidates
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Vec::new()
+    }
+}
+
+fn resolve_desktop_app_path(app_dir: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        app_dir.join("Bifrost.app")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        app_dir.join("bifrost-desktop.exe")
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        app_dir.join("Bifrost")
+    }
+}
+
+fn installed_desktop_app_version(install_path: &Path) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let plist_path = install_path.join("Contents").join("Info.plist");
+        let plist = plist::Value::from_file(plist_path).ok()?;
+        let dict = plist.as_dictionary()?;
+        ["CFBundleShortVersionString", "CFBundleVersion"]
+            .into_iter()
+            .find_map(|key| dict.get(key).and_then(|value| value.as_string()))
+            .map(str::to_string)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if !install_path.is_file() {
+            return None;
+        }
+        let script = r#"
+param([string]$Path)
+$info = (Get-Item -LiteralPath $Path).VersionInfo
+if ($info.ProductVersion) { $info.ProductVersion } elseif ($info.FileVersion) { $info.FileVersion }
+"#;
+        let powershell = if Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", "$PSVersionTable.PSVersion"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+        {
+            "powershell.exe"
+        } else {
+            "pwsh"
+        };
+        let output = Command::new(powershell)
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg(script)
+            .arg(install_path)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        (!version.is_empty()).then_some(version)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = install_path;
+        None
+    }
+}
+
 fn parse_upgrade_channel(query: Option<&str>) -> UpgradeChannel {
     if query.unwrap_or_default().split('&').any(|part| {
         matches!(
@@ -826,6 +950,40 @@ mod tests {
                 "-y"
             ]
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn desktop_version_check_reads_installed_app_version_from_override_dir() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app = temp.path().join("Bifrost.app");
+        let contents = app.join("Contents");
+        std::fs::create_dir_all(&contents).expect("create Contents");
+        std::fs::write(
+            contents.join("Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleShortVersionString</key><string>0.0.144</string>
+  <key>CFBundleVersion</key><string>144</string>
+</dict>
+</plist>
+"#,
+        )
+        .expect("write plist");
+
+        let previous = std::env::var_os("BIFROST_APP_INSTALL_DIR");
+        std::env::set_var("BIFROST_APP_INSTALL_DIR", temp.path());
+        let version = super::desktop_app_version_for_version_check();
+        match previous {
+            Some(value) => std::env::set_var("BIFROST_APP_INSTALL_DIR", value),
+            None => std::env::remove_var("BIFROST_APP_INSTALL_DIR"),
+        }
+
+        assert_eq!(version.as_deref(), Some("0.0.144"));
     }
 
     #[test]

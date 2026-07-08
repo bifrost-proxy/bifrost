@@ -203,6 +203,48 @@ Tauri 官方 updater plugin 支持静态 JSON endpoint、签名和 install mode�
 - macOS 真实链路验证：临时 `BIFROST_DATA_DIR` + 端口 `19900` 启动 CLI，启动当前源码构建的桌面 app 复用外部 CLI；停止 CLI 后，app 显示全屏 `Start Bifrost Service` 浮层；点击按钮后桌面 app 拉起内置 sidecar，页面恢复运行态并显示 `http://127.0.0.1:19900`。
 - 真实链路中确认未安装 CLI 时进入 `Install Bifrost CLI` 浮层；不在人工验证中点击真实安装按钮，避免写入用户命令路径，安装机制由临时目录 API/E2E 覆盖。
 
+## 2026-07-08 CLI upgrade 联动桌面 App 与版本检查修复
+
+### 问题
+
+用户现场状态为：
+
+- `/Applications/Bifrost.app` 的 `CFBundleShortVersionString` 为 `0.0.144`。
+- 正在运行的 core 是 `/Users/eden/.local/bin/bifrost 0.0.145`。
+- `GET /_bifrost/api/system/version-check?refresh=true&channel=desktop` 返回 `current_version=0.0.145`、`latest_version=0.0.145`、`has_update=false`。
+
+这说明旧桌面 App 复用了已更新的独立 CLI/core 后，desktop channel 的版本检查仍然按 core 版本比较，而不是按已安装 App bundle 版本比较，因此不会弹出新版桌面 App 更新提示。
+
+同时，普通终端执行 `bifrost upgrade` 只更新 CLI、安装 skills 并重启 proxy；即使机器上已经安装了桌面 App，也不会顺带更新 App。
+
+### 修复方案
+
+- `GET /api/system/version-check?channel=desktop` 在能读取已安装桌面 App 版本时，使用 App 版本作为 `current_version` 与 latest release 比较；读取不到时才回退 CLI/core 版本。
+- `POST /api/system/upgrade?channel=desktop` 复用同一 desktop version-check 结果，避免旧 App + 新 core 时被误判为 `No update available`。
+- `bifrost upgrade` 在 CLI 已升级成功或 CLI 已经是最新版本时，如果检测到本机已安装桌面 App，则执行：
+
+  ```bash
+  bifrost app upgrade --no-cli --source cli-upgrade --version <latest> -y
+  ```
+
+- `--no-cli` 防止 `bifrost app upgrade` 反过来递归执行 CLI upgrade。
+- 桌面 App 联动更新是 best-effort：失败、超时或无法启动子命令时只输出 warning 和原因，并提示用户手动执行 `bifrost app upgrade --no-cli -y`；不得让 App 更新失败导致 CLI upgrade、skills 安装、proxy restart 等主流程失败。
+
+### 回归覆盖
+
+- `cargo test -p bifrost-cli upgrade::tests --lib`
+  - `bifrost upgrade` 后置 App 更新参数必须包含 `--no-cli`、`--source cli-upgrade` 和目标版本。
+  - `BIFROST_APP_INSTALL_DIR` 可隔离检测已安装 App 路径。
+  - App 更新失败原因优先使用 stderr/stdout 摘要。
+- `cargo test -p bifrost-admin version_check::tests handlers::system::tests --lib`
+  - desktop version-check 可使用已安装 App bundle 版本判断更新。
+  - 旧 App 版本低于 latest 时 `has_update=true`。
+- `bash e2e-tests/tests/test_upgrade_cli.sh`
+  - macOS 临时 `Bifrost.app` 已是目标版本时，`bifrost upgrade` 仍会发现并处理已安装 App，且不触碰真实 `/Applications`。
+  - macOS 临时 `Bifrost.app` 更新失败时，`bifrost upgrade` 退出码仍为 0，并输出失败原因。
+- `human_tests/desktop-app-auto-update.md`
+  - 增加 CLI upgrade 联动 App 更新、App 更新失败不阻断、旧 App + 新 CLI 仍提示 desktop update 的真实场景用例。
+
 ## 测试方案
 
 ### 单元测试
@@ -210,9 +252,13 @@ Tauri 官方 updater plugin 支持静态 JSON endpoint、签名和 install mode�
 - `cargo test -p bifrost-cli app::tests --lib`
   - release 资产名区分 macOS `.dmg` 与 Windows `.msi`。
   - macOS app path 为 `/Applications/Bifrost.app`。
+- `cargo test -p bifrost-cli upgrade::tests --lib`
+  - 普通 `bifrost upgrade` 后置桌面 App 更新使用 `app upgrade --no-cli --source cli-upgrade --version <latest> -y`。
+  - 桌面 App 更新失败只输出 warning，不阻断主升级流程。
 - `cargo test -p bifrost-admin handlers::system::tests --lib`
   - `channel=desktop` / `target=desktop` / `source=desktop` 解析为桌面 channel。
   - desktop channel 构造 `app upgrade --version <v> --source desktop -y`，CLI channel 构造 `self-update --target <v> --source admin`。
+  - desktop version-check 在可读取已安装 App 版本时使用 App 版本，而不是 CLI/core 版本。
   - CLI install status 使用覆盖目录、返回 PATH hint。
   - CLI install 可把当前 executable 复制到临时目录，且可跳过 AI skill 安装。
   - stale progress 归一化保持原有行为。
