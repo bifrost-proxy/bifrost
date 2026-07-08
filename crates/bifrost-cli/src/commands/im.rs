@@ -321,7 +321,7 @@ fn handle_feishu_provider_setup(host: &str, port: u16, args: &ProviderAddArgs) -
     let start = http_post(&start_url, &start_body)?;
     let session_id = required_string(&start, "session_id")?.to_string();
     let verification_url = required_string(&start, "verification_url")?.to_string();
-    let mut interval_seconds = start["interval_seconds"].as_u64().unwrap_or(5).max(1);
+    let mut interval_seconds = setup_poll_interval_seconds(start["interval_seconds"].as_u64(), 5);
     let expires_at = start["expires_at"].as_i64().unwrap_or_default();
 
     println!("{} Open this URL to continue:", "→".bright_cyan());
@@ -348,10 +348,10 @@ fn handle_feishu_provider_setup(host: &str, port: u16, args: &ProviderAddArgs) -
                 ));
             }
             "pending" => {
-                interval_seconds = status["interval_seconds"]
-                    .as_u64()
-                    .unwrap_or(interval_seconds)
-                    .max(1);
+                interval_seconds = setup_poll_interval_seconds(
+                    status["interval_seconds"].as_u64(),
+                    interval_seconds,
+                );
                 let remaining = setup_remaining_seconds(&status, expires_at);
                 if let Some(remaining) = remaining {
                     println!(
@@ -426,6 +426,7 @@ fn handle_weixin_provider_setup(host: &str, port: u16, args: &ProviderAddArgs) -
     let start = http_post(&start_url, &json!({}))?;
     let scan_url = required_string(&start, "scan_url")?.to_string();
     let expires_in_seconds = start["expires_in_seconds"].as_u64().unwrap_or(120);
+    let mut interval_seconds = setup_poll_interval_seconds(start["interval_seconds"].as_u64(), 2);
     let expires_at =
         chrono::Utc::now().timestamp_millis() + (expires_in_seconds as i64).saturating_mul(1000);
 
@@ -437,7 +438,7 @@ fn handle_weixin_provider_setup(host: &str, port: u16, args: &ProviderAddArgs) -
     );
 
     loop {
-        thread::sleep(Duration::from_secs(2));
+        thread::sleep(Duration::from_secs(interval_seconds));
         let status_url = api_url(
             host,
             port,
@@ -452,6 +453,10 @@ fn handle_weixin_provider_setup(host: &str, port: u16, args: &ProviderAddArgs) -
                 ));
             }
             "pending" | "idle" => {
+                interval_seconds = setup_poll_interval_seconds(
+                    status["interval_seconds"].as_u64(),
+                    interval_seconds,
+                );
                 if let Some(remaining) = setup_remaining_seconds(&status, expires_at) {
                     println!(
                         "{} Still waiting for QR login confirmation ({}s remaining).",
@@ -593,10 +598,12 @@ fn find_runner_choice<'a>(
                 .iter()
                 .copied()
                 .find(|runner| runner.id.eq_ignore_ascii_case("traex")),
-            "claude_code" | "claude-code" | "claude" | "claude code" => runners
-                .iter()
-                .copied()
-                .find(|runner| runner.id.eq_ignore_ascii_case("Claude Code")),
+            "claude_code" | "claude-code" | "claude" | "claude code" => {
+                runners.iter().copied().find(|runner| {
+                    runner.id.eq_ignore_ascii_case("Claude-Code")
+                        || runner.id.eq_ignore_ascii_case("Claude Code")
+                })
+            }
             _ => None,
         })
 }
@@ -616,6 +623,15 @@ fn setup_remaining_seconds(status: &Value, fallback_expires_at: i64) -> Option<i
     }
     let now_ms = chrono::Utc::now().timestamp_millis();
     Some((expires_at - now_ms).max(0) / 1000)
+}
+
+fn setup_poll_interval_seconds(value: Option<u64>, default: u64) -> u64 {
+    let value = value.unwrap_or(default).min(60);
+    if cfg!(test) {
+        value
+    } else {
+        value.max(1)
+    }
 }
 
 fn print_terminal_qr_code(value: &str) {

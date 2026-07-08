@@ -1,5 +1,36 @@
 use super::schedule::{parse_schedule_add_args, parse_schedule_update_args};
 use super::*;
+use wiremock::matchers::{body_partial_json, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+fn mock_server_host_port(server: &MockServer) -> (String, u16) {
+    let url = server.uri();
+    let rest = url.strip_prefix("http://").expect("wiremock uses http URL");
+    let (host, port) = rest.split_once(':').expect("host:port");
+    (
+        host.to_string(),
+        port.parse::<u16>().expect("mock server port"),
+    )
+}
+
+fn chat_config_response() -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "runners": {
+            "Codex": {
+                "adapter": "codex",
+                "enabled": true
+            },
+            "Traex": {
+                "adapter": "traex",
+                "enabled": true
+            },
+            "Claude-Code": {
+                "adapter": "claude_code",
+                "enabled": true
+            }
+        }
+    }))
+}
 
 #[test]
 fn resolve_secret_missing_env_returns_error() {
@@ -189,11 +220,169 @@ fn parse_provider_add_args_uses_weixin_setup_without_credentials() {
     assert_eq!(body["agent_config"]["runner"], "Claude Code");
 }
 
+#[tokio::test]
+async fn im_provider_add_feishu_setup_uses_admin_api_flow_and_runner() {
+    let server = MockServer::start().await;
+    let (host, port) = mock_server_host_port(&server);
+
+    Mock::given(method("GET"))
+        .and(path("/_bifrost/api/im-gateway/chat/config"))
+        .respond_with(chat_config_response())
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/_bifrost/api/im-gateway/providers/feishu-setup/start",
+        ))
+        .and(body_partial_json(serde_json::json!({
+            "brand": "feishu"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "session_id": "setup-session",
+            "verification_url": "https://open.feishu.cn/setup/mock",
+            "interval_seconds": 0,
+            "expires_at": chrono::Utc::now().timestamp_millis() + 60_000
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/_bifrost/api/im-gateway/providers/feishu-setup/setup-session/status",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": "confirmed",
+            "app_id": "cli_mock_app"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/_bifrost/api/im-gateway/providers/feishu-setup/setup-session/provider",
+        ))
+        .and(body_partial_json(serde_json::json!({
+            "id": "feishu-main",
+            "provider_type": "feishu",
+            "display_name": "Main Feishu",
+            "agent_config": {
+                "runner": "Traex"
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "provider": {
+                "id": "feishu-main"
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/_bifrost/api/im-gateway/providers/feishu-main/connect",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    handle_im_command(
+        &host,
+        port,
+        &[
+            "provider".into(),
+            "add".into(),
+            "feishu-main".into(),
+            "--type".into(),
+            "feishu".into(),
+            "--display-name".into(),
+            "Main Feishu".into(),
+            "--runner".into(),
+            "trae".into(),
+        ],
+    )
+    .expect("feishu setup flow should complete");
+}
+
+#[tokio::test]
+async fn im_provider_add_weixin_setup_uses_admin_api_flow_and_runner() {
+    let server = MockServer::start().await;
+    let (host, port) = mock_server_host_port(&server);
+
+    Mock::given(method("GET"))
+        .and(path("/_bifrost/api/im-gateway/chat/config"))
+        .respond_with(chat_config_response())
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/_bifrost/api/im-gateway/providers"))
+        .and(body_partial_json(serde_json::json!({
+            "id": "weixin-main",
+            "provider_type": "weixin",
+            "agent_config": {
+                "runner": "Claude-Code"
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "weixin-main"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/_bifrost/api/im-gateway/providers/weixin-main/weixin-login/start",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "scan_url": "https://ilinkai.weixin.qq.com/qrcode/mock",
+            "interval_seconds": 0,
+            "expires_in_seconds": 60
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/_bifrost/api/im-gateway/providers/weixin-main/weixin-login/status",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": "confirmed"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/_bifrost/api/im-gateway/providers/weixin-main/connect",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    handle_im_command(
+        &host,
+        port,
+        &[
+            "provider".into(),
+            "add".into(),
+            "weixin-main".into(),
+            "--type".into(),
+            "weixin".into(),
+            "--runner".into(),
+            "claude-code".into(),
+        ],
+    )
+    .expect("weixin setup flow should complete");
+}
+
 #[test]
 fn resolve_runner_choice_accepts_aliases_and_enabled_runners() {
     let runners = vec![
         RunnerChoice {
-            id: "Claude Code".into(),
+            id: "Claude-Code".into(),
             adapter: "claude_code".into(),
             enabled: true,
         },
@@ -211,7 +400,11 @@ fn resolve_runner_choice_accepts_aliases_and_enabled_runners() {
 
     assert_eq!(
         resolve_runner_choice(Some("claude-code"), &runners).unwrap(),
-        "Claude Code"
+        "Claude-Code"
+    );
+    assert_eq!(
+        resolve_runner_choice(Some("claude code"), &runners).unwrap(),
+        "Claude-Code"
     );
     assert_eq!(
         resolve_runner_choice(Some("trae"), &runners).unwrap(),

@@ -166,7 +166,9 @@ fn disables_provider_connection(patch: &serde_json::Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::disables_provider_connection;
+    use super::{apply_weixin_login_account_to_provider, disables_provider_connection};
+    use crate::im_gateway::types::{ImProviderConfig, ImProviderType};
+    use crate::im_gateway::weixin::WeixinLoginAccount;
 
     #[test]
     fn provider_patch_detects_connection_disabling_changes() {
@@ -183,6 +185,44 @@ mod tests {
         assert!(!disables_provider_connection(&serde_json::json!({
             "display_name": "Renamed"
         })));
+    }
+
+    #[test]
+    fn weixin_login_completion_keeps_fixed_provider_base_url() {
+        let mut provider = ImProviderConfig {
+            id: "weixin-main".to_string(),
+            provider_type: ImProviderType::Weixin,
+            display_name: "Weixin Main".to_string(),
+            enabled: false,
+            base_url: Some("https://evil.example".to_string()),
+            app_id: None,
+            secret_ref: None,
+            owner_open_id: None,
+            event_connection_enabled: false,
+            event_types: Vec::new(),
+            agent_config: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let account = WeixinLoginAccount {
+            account_id: "bot@im.bot".to_string(),
+            user_id: "owner@im.wechat".to_string(),
+            base_url: "http://127.0.0.1:12345".to_string(),
+            bot_token: "token".to_string(),
+        };
+
+        apply_weixin_login_account_to_provider(&mut provider, account);
+
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://ilinkai.weixin.qq.com")
+        );
+        assert_eq!(provider.app_id.as_deref(), Some("bot@im.bot"));
+        assert_eq!(provider.owner_open_id.as_deref(), Some("owner@im.wechat"));
+        assert_eq!(provider.secret_ref.as_deref(), Some("token"));
+        assert!(provider.enabled);
+        assert!(provider.event_connection_enabled);
+        assert_eq!(provider.event_types, vec!["message.receive"]);
     }
 }
 
@@ -205,6 +245,24 @@ pub(super) fn handle_provider_status(
             }
         }
     }
+}
+
+fn apply_weixin_login_account_to_provider(
+    provider: &mut crate::im_gateway::types::ImProviderConfig,
+    account: crate::im_gateway::weixin::WeixinLoginAccount,
+) {
+    provider.app_id = Some(account.account_id);
+    provider.owner_open_id = Some(account.user_id);
+    provider.base_url = None;
+    provider.secret_ref = Some(account.bot_token);
+    provider.enabled = true;
+    provider.event_connection_enabled = true;
+    if provider.event_types.is_empty() {
+        provider.event_types = vec!["message.receive".to_string()];
+    }
+    provider.updated_at = now_ms();
+    normalize_provider_base_url(provider);
+    normalize_provider_agent_config(provider);
 }
 
 pub(super) async fn handle_provider_weixin_login_start(
@@ -291,17 +349,9 @@ pub(super) async fn handle_provider_weixin_login_status(
         .await
     {
         Ok(account) => {
-            provider.app_id = Some(account.account_id.clone());
-            provider.owner_open_id = Some(account.user_id.clone());
-            provider.base_url = Some(account.base_url.clone());
-            provider.secret_ref = Some(account.bot_token);
-            provider.enabled = true;
-            provider.event_connection_enabled = true;
-            if provider.event_types.is_empty() {
-                provider.event_types = vec!["message.receive".to_string()];
-            }
-            provider.updated_at = now_ms();
-            normalize_provider_agent_config(&mut provider);
+            let account_id = account.account_id.clone();
+            let user_id = account.user_id.clone();
+            apply_weixin_login_account_to_provider(&mut provider, account);
             if let Err(e) = service.provider_store.update(provider.clone()) {
                 return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
             }
@@ -311,9 +361,8 @@ pub(super) async fn handle_provider_weixin_login_status(
                 "status": "confirmed",
                 "provider": sanitize_provider(&provider),
                 "account": {
-                    "account_id": account.account_id,
-                    "user_id": account.user_id,
-                    "base_url": account.base_url,
+                    "account_id": account_id,
+                    "user_id": user_id,
                 }
             }))
         }
@@ -368,17 +417,9 @@ pub(super) async fn handle_provider_weixin_login_complete(
         .await
     {
         Ok(account) => {
-            provider.app_id = Some(account.account_id.clone());
-            provider.owner_open_id = Some(account.user_id.clone());
-            provider.base_url = Some(account.base_url.clone());
-            provider.secret_ref = Some(account.bot_token);
-            provider.enabled = true;
-            provider.event_connection_enabled = true;
-            if provider.event_types.is_empty() {
-                provider.event_types = vec!["message.receive".to_string()];
-            }
-            provider.updated_at = now_ms();
-            normalize_provider_agent_config(&mut provider);
+            let account_id = account.account_id.clone();
+            let user_id = account.user_id.clone();
+            apply_weixin_login_account_to_provider(&mut provider, account);
             if let Err(e) = service.provider_store.update(provider.clone()) {
                 return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
             }
@@ -387,9 +428,8 @@ pub(super) async fn handle_provider_weixin_login_complete(
                 "success": true,
                 "provider": sanitize_provider(&provider),
                 "account": {
-                    "account_id": account.account_id,
-                    "user_id": account.user_id,
-                    "base_url": account.base_url,
+                    "account_id": account_id,
+                    "user_id": user_id,
                 }
             }))
         }

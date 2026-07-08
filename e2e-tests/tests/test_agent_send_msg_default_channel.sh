@@ -127,16 +127,14 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
-        if self.path.startswith("/ilink/bot/sendmessage"):
-            if self.headers.get("AuthorizationType") != "ilink_bot_token":
-                self._json(401, {"error": "missing AuthorizationType"})
-                return
-            if self.headers.get("Authorization") != "Bearer mock-token":
-                self._json(401, {"error": "missing Authorization"})
-                return
+        if self.path.endswith("/auth/v3/tenant_access_token/internal"):
+            self._json(200, {"code": 0, "tenant_access_token": "tenant-token", "expire": 7200})
+            return
+
+        if self.path.startswith("/im/v1/messages"):
             with open(send_log, "ab") as fh:
                 fh.write(body + b"\n")
-            self._json(200, {"message_id": "sent-agent-msg-1", "request_id": "req-agent-msg-1"})
+            self._json(200, {"code": 0, "data": {"message_id": "sent-agent-msg-1"}})
             return
 
         self._json(404, {"error": "not found"})
@@ -170,14 +168,14 @@ IM_BASE="http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway"
 curl -fsS --noproxy '*' -X POST "$IM_BASE/providers" \
   -H 'Content-Type: application/json' \
   -d "{
-    \"id\":\"weixin-mock\",
-    \"provider_type\":\"weixin\",
-    \"display_name\":\"Weixin Mock\",
+    \"id\":\"webhook-mock\",
+    \"provider_type\":\"webhook\",
+    \"display_name\":\"Webhook Mock\",
     \"enabled\":true,
     \"base_url\":\"http://127.0.0.1:$MOCK_PORT\",
-    \"app_id\":\"mock-bot@im.bot\",
-    \"secret_ref\":\"mock-token\",
-    \"owner_open_id\":\"mock-user@im.wechat\"
+    \"app_id\":\"cli_app\",
+    \"secret_ref\":\"cli_secret\",
+    \"owner_open_id\":\"owner-open-id\"
   }" >/dev/null
 
 AGENT_BASE="$IM_BASE/agent"
@@ -194,8 +192,8 @@ curl -fsS --noproxy '*' -X PATCH "$AGENT_BASE" \
     \"history\": {\"persistence\": \"none\"},
     \"memories\": {\"use_memories\": false, \"generate_memories\": false},
     \"default_message_channel\": {
-      \"provider_id\": \"weixin-mock\",
-      \"target_id\": \"mock-user@im.wechat\",
+      \"provider_id\": \"webhook-mock\",
+      \"target_id\": \"owner-open-id\",
       \"target_mode\": \"owner\"
     }
   }" >/dev/null
@@ -219,23 +217,22 @@ assert "send_msg" in names, names
 assert "schedule_create" in names, names
 
 send_lines = [line for line in pathlib.Path(sys.argv[2]).read_text().splitlines() if line.strip()]
-assert send_lines, "send_msg did not call weixin sendmessage"
+assert send_lines, "send_msg did not call webhook message endpoint"
 send_payloads = [json.loads(line) for line in send_lines]
-msgs = [payload.get("msg", {}) for payload in send_payloads]
-assert any(msg.get("to_user_id") == "mock-user@im.wechat" for msg in msgs), send_payloads
-assert any(
-    (msg.get("item_list") or [{}])[0].get("text_item", {}).get("text") == "hello via send_msg"
-    for msg in msgs
-), send_payloads
+assert any(payload.get("receive_id") == "owner-open-id" for payload in send_payloads), send_payloads
+card_payload = next(payload for payload in send_payloads if payload.get("receive_id") == "owner-open-id")
+assert card_payload.get("msg_type") == "interactive", card_payload
+card = json.loads(card_payload["content"])
+assert card["body"]["elements"][0]["content"] == "hello via send_msg", card
 
 with urllib.request.urlopen(sys.argv[3] + "/schedules") as resp:
     schedules = json.loads(resp.read().decode("utf-8"))
 schedule = next((item for item in schedules if item.get("id") == "default-bound-schedule"), None)
 assert schedule is not None, schedules
 channel = schedule.get("message_channel") or {}
-assert channel.get("provider_id") == "weixin-mock", schedule
+assert channel.get("provider_id") == "webhook-mock", schedule
 assert channel.get("target_mode") == "owner", schedule
-assert channel.get("target_id") == "mock-user@im.wechat", schedule
+assert channel.get("target_id") == "owner-open-id", schedule
 PY
 
 echo "[agent-send-msg-default-channel] PASS"
