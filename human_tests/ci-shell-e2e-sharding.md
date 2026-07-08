@@ -1253,6 +1253,17 @@
 - 第 4 步能定位到近期 GitHub Actions 实测长尾脚本的非默认权重，避免它们继续按默认 8 秒分配到同一个慢 shard。
 - 该回归只列出和静态校验 shell 测试，不启动 Bifrost、不使用 9900、不修改系统代理。
 
+### TC-CS-51: Windows unit external runner stdin timeout 回归
+
+**操作步骤**：
+1. 运行 `cargo test -p bifrost-admin schedule_agent_adapter_config_overrides_runner_without_dropping_command -- --nocapture`。
+2. 推送修复分支后查看 GitHub Actions `CI` 的 `Windows Unit Tests (x86_64)` job。
+
+**预期结果**：
+- 第 1 步通过，`schedule_agent_adapter_config_overrides_runner_without_dropping_command` 返回 `TaskRunStatus::Success`，`agent_final_response` 为 `OVERRIDE_OK`，不会触发 schedule 外层 10s timeout。
+- 第 2 步 Windows 单测 job 通过，不再出现 `timeout after 10000ms` 或该测试的 panic。
+- 该回归不启动 Bifrost，不使用 9900，不修改系统代理。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -1300,6 +1311,7 @@
 | TC-CS-48 | 通过 | 2026-07-06 新增回归：先用 GitHub Actions run `28751216421` artifact 确认原失败为 `test_stop_restart_shutdown_marker.sh` 14/14 业务断言通过后 cleanup `rm: ... Directory not empty`；本轮修复 cleanup retry/best-effort 后执行 `bash -n e2e-tests/tests/test_stop_restart_shutdown_marker.sh` 通过，并执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_stop_restart_shutdown_marker.sh`，输出 `Total: 14 / Passed: 14 / Failed: 0`，退出码 0；全程使用随机端口和临时数据目录，未使用 9900，未修改真实系统代理。 |
 | TC-CS-49 | 通过 | 2026-07-08 本轮执行：`bash -n scripts/run_all_e2e.sh scripts/ci/run-e2e-shell.sh` 通过；`BIFROST_E2E_SHELL_JOBS=2` 下 CI full-shell 全量列表与 `--shard 1/2`、`--shard 2/2` 合并列表 `diff -u` 无输出，输出 `all=160 shard1=76 shard2=84 overlap=0`；`BIFROST_E2E_SHELL_JOBS=2 bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --shard 1/2 --check-shell-shard-balance` 输出 `shard 1/2 estimated_wall=1398s serial=941s parallel_lanes=457,456 tests=76`、`shard 2/2 estimated_wall=1397s serial=526s parallel_lanes=871,866 tests=84`、`pct_of_avg=0.1%`；`rg` 定位到 `test_long_term_memory_remember_recall.sh`、`test_desktop_open_requests_contract.sh`、`test_chatgpt_web_behavior_artifacts.sh`、`test_skill_creator_flow.sh`、`test_im_gateway_long_reply_delivery_regression.sh` 的实测非默认权重。GitHub Actions `CI` run `28881027276` attempt 2 已全绿，调优前实测 macOS shell shard 为 1168s / 1847s，验证了继续按 estimated wall clock 优化的必要性。全部本地命令只列出或静态校验 shell 测试，未启动 Bifrost，未使用 9900，未修改系统代理。 |
 | TC-CS-50 | 通过 | 2026-07-08 本轮执行：GitHub Actions `CI` run `28925523375` 的 `E2E Shell (Linux)` 失败套件为 `shell:test_cli_offline_commands_e2e.sh`，失败原因为 `CLI 快速开始缺少场景化说明: 场景 12：和 Agent 协作开发业务 Skill`。复核 `docs/cli-quick-start.md` 后确认新增 IM Gateway 快速开始后，`场景 12` 已变为 `添加飞书或微信 IM 通道`，Agent Skill 场景顺延为 `场景 13`，因此修复为同步 E2E 文档断言，并新增 IM provider 关键文案断言。执行 `bash -n e2e-tests/tests/test_cli_offline_commands_e2e.sh` 通过；执行 `rg -n '场景 12：添加飞书或微信 IM 通道|场景 13：和 Agent 协作开发业务 Skill|bifrost im provider add feishu-main --type feishu --runner traex|Feishu 会在终端显示授权 URL 和二维码' e2e-tests/tests/test_cli_offline_commands_e2e.sh docs/cli-quick-start.md` 均命中；随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_cli_offline_commands_e2e.sh`，确认 CLI offline help 与 quick-start 文档同步回归通过。该回归不启动 Bifrost，不使用 9900，不修改系统代理。 |
+| TC-CS-51 | 通过 | 2026-07-08 本轮执行：GitHub Actions main push `CI` run `28931733950` 的 `Windows Unit Tests (x86_64)` 失败，失败测试为 `schedule_agent_adapter_config_overrides_runner_without_dropping_command`，日志显示 `timeout after 10000ms`，`TaskRunStatus` 实际为 `Timeout`。第一版修复后 PR `CI` run `28933280470` 确认 timeout 消失，但 Windows `cmd.exe echo` 输出转义 JSON，导致 `agent_final_response` 为原始 JSON 字符串而不是 `OVERRIDE_OK`。第二版修复改为 PowerShell 不读取 stdin，直接用 `[char]34` 拼接合法 JSON 行。本机执行 `cargo test -p bifrost-admin schedule_agent_adapter_config_overrides_runner_without_dropping_command -- --nocapture` 多次通过，测试输出 `1 passed; 0 failed`。Windows 真实 job 由推送后的 GitHub Actions `CI` run 继续验证。该本地回归不启动 Bifrost，不使用 9900，不修改系统代理。 |
 
 ## 清理步骤
 

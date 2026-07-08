@@ -104,7 +104,7 @@ pub(super) fn fake_external_runner_override_command() -> (String, Vec<String>) {
                 "-NoProfile".to_string(),
                 "-NonInteractive".to_string(),
                 "-Command".to_string(),
-                "[Console]::In.ReadToEnd() | Out-Null; if ($env:MODEL_OVERRIDE -eq 'gpt-schedule' -and $env:BASE_ENV -eq 'runner') { [Console]::Out.WriteLine('{\"type\":\"assistant_final\",\"content\":\"OVERRIDE_OK\"}') } else { [Console]::Out.WriteLine('{\"type\":\"assistant_final\",\"content\":\"OVERRIDE_MISSING\"}') }".to_string(),
+                "$q=[char]34; $content=if ($env:MODEL_OVERRIDE -eq 'gpt-schedule' -and $env:BASE_ENV -eq 'runner') { 'OVERRIDE_OK' } else { 'OVERRIDE_MISSING' }; [Console]::Out.WriteLine('{' + $q + 'type' + $q + ':' + $q + 'assistant_final' + $q + ',' + $q + 'content' + $q + ':' + $q + $content + $q + '}')".to_string(),
             ],
         )
     } else {
