@@ -1595,6 +1595,193 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
 }
 
 #[tokio::test(flavor = "current_thread")]
+pub(super) async fn im_event_loop_external_cli_route_processes_image_only_message() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = ImGatewayService::new(temp_dir.path());
+
+    let mut base_config = service.agent_config_store.load();
+    base_config.enabled = true;
+    service
+        .agent_config_store
+        .save(&base_config)
+        .expect("save base agent config");
+
+    #[cfg(windows)]
+    let mock_runner = temp_dir.path().join("mock-image-runner.cmd");
+    #[cfg(not(windows))]
+    let mock_runner = temp_dir.path().join("mock-image-runner");
+    #[cfg(unix)]
+    {
+        std::fs::write(
+            &mock_runner,
+            "#!/usr/bin/env sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"assistant_final\",\"content\":\"IMAGE_ROUTE_OK\"}'\n",
+        )
+        .expect("write mock runner");
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&mock_runner)
+            .expect("mock metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&mock_runner, permissions).expect("chmod mock runner");
+    }
+    #[cfg(windows)]
+    {
+        std::fs::write(
+            &mock_runner,
+            "@echo off\r\nmore >nul\r\necho {\"type\":\"assistant_final\",\"content\":\"IMAGE_ROUTE_OK\"}\r\n",
+        )
+        .expect("write mock runner");
+    }
+
+    let mut external_cli_config =
+        crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    let runner = external_cli_config
+        .runners
+        .get_mut(crate::im_gateway::external_cli::DEFAULT_CODEX_RUNNER_ID)
+        .expect("default runner");
+    runner.enabled = true;
+    runner.adapter = "mock".to_string();
+    runner.inject_bifrost_tools = false;
+    runner.delivery_mode = crate::im_gateway::external_cli::ExternalCliDeliveryMode::NoIm;
+    runner.adapter_config = crate::im_gateway::external_cli::ExternalCliAdapterConfig {
+        executable: Some(mock_runner.display().to_string()),
+        timeout_secs: Some(10),
+        ..Default::default()
+    };
+    service
+        .external_cli_config_store
+        .save(external_cli_config)
+        .expect("save external cli config");
+
+    let mut provider = test_provider();
+    provider.id = "external-route-image-provider".to_string();
+    provider.owner_open_id = Some("owner-open-id".to_string());
+    provider.base_url = Some("http://127.0.0.1:9".to_string());
+    service
+        .provider_store
+        .add(provider.clone())
+        .expect("add provider");
+    service
+        .route_store
+        .add(crate::im_gateway::types::ImRoute {
+            id: "external-route-image".to_string(),
+            provider_id: provider.id.clone(),
+            name: "External route image".to_string(),
+            enabled: true,
+            event_type: crate::im_gateway::types::ImEventType::MessageReceive,
+            matcher: crate::im_gateway::types::ImEventMatcher {
+                chat_ids: Vec::new(),
+                user_ids: vec!["owner-open-id".to_string()],
+                keyword: None,
+                regex: None,
+            },
+            action: crate::im_gateway::types::ImRouteAction::ExternalCliAgentChat {
+                adapter: None,
+                instructions: None,
+                reply_target: crate::im_gateway::types::ReplyTarget::OriginalChat,
+                delivery_mode: Some(crate::im_gateway::external_cli::ExternalCliDeliveryMode::NoIm),
+            },
+            timeout_ms: 30_000,
+            max_output_bytes: 1_048_576,
+            created_at: now_ms(),
+            updated_at: now_ms(),
+        })
+        .expect("add external route");
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let handle = tokio::spawn(run_event_loop(
+        rx,
+        ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider())),
+        provider.clone(),
+        Arc::clone(&service.event_store),
+        Arc::clone(&service.message_log_store),
+        Arc::clone(&service.route_store),
+        Arc::clone(&service.provider_store),
+        Arc::clone(&service.agent_config_store),
+        Arc::clone(&service.agent_client),
+        Arc::clone(&service.agent_tools),
+        Arc::clone(&service.schedule_store),
+        Arc::clone(&service.scheduler),
+        Arc::clone(&service.target_store),
+        Arc::clone(&service.connection_manager),
+        Arc::clone(&service.agent_session_manager),
+        Arc::clone(&service.external_cli_config_store),
+        Arc::clone(&service.queue_manager),
+        Arc::clone(&service.progress_registry),
+    ));
+
+    tx.send(ImEvent {
+        event_id: "evt-external-route-image".to_string(),
+        provider_id: provider.id.clone(),
+        provider_type: ImProviderType::Feishu,
+        event_type: "message.receive".to_string(),
+        source: crate::im_gateway::types::ImEventSource {
+            chat_id: Some("chat-id".to_string()),
+            user_id: Some("owner-open-id".to_string()),
+            message_id: Some("om-route-image".to_string()),
+        },
+        message: Some(crate::im_gateway::types::ImEventMessage {
+            text: String::new(),
+            mentions: Vec::new(),
+            images: vec![
+                crate::im_gateway::types::ImImageAttachment {
+                    file_key: "img-route-1".to_string(),
+                    source: crate::im_gateway::types::ImImageSource::MessageResource,
+                    mime_type: Some("image/png".to_string()),
+                    data_base64: Some("b25l".to_string()),
+                    download_url: None,
+                    encrypted_query_param: None,
+                    aes_key: None,
+                },
+                crate::im_gateway::types::ImImageAttachment {
+                    file_key: "img-route-2".to_string(),
+                    source: crate::im_gateway::types::ImImageSource::MessageResource,
+                    mime_type: Some("image/jpeg".to_string()),
+                    data_base64: Some("dHdv".to_string()),
+                    download_url: None,
+                    encrypted_query_param: None,
+                    aes_key: None,
+                },
+            ],
+            raw_type: Some("image".to_string()),
+        }),
+        received_at: now_ms(),
+        raw_digest: None,
+    })
+    .expect("send IM image event");
+    drop(tx);
+
+    tokio::time::timeout(std::time::Duration::from_secs(60), handle)
+        .await
+        .expect("event loop timed out")
+        .expect("event loop task panicked");
+
+    let runs_root = crate::im_gateway::external_cli::default_runs_root();
+    let mut attachments = None;
+    for entry in std::fs::read_dir(runs_root).expect("runs dir") {
+        let run_dir = entry.expect("run dir").path();
+        let result_path = run_dir.join("result.json");
+        if !result_path.exists() {
+            continue;
+        }
+        let result = std::fs::read_to_string(result_path).expect("result json");
+        if result.contains("IMAGE_ROUTE_OK") {
+            let result: crate::im_gateway::external_cli::ExternalCliRunResult =
+                serde_json::from_str(&result).expect("result value");
+            attachments = result.metadata.get("attachments.images").cloned();
+            break;
+        }
+    }
+    let attachments: Vec<crate::im_gateway::external_cli::ExternalCliSavedImageAttachment> =
+        serde_json::from_str(&attachments.expect("attachments metadata"))
+            .expect("attachments metadata json");
+    assert_eq!(attachments.len(), 2);
+    assert_eq!(attachments[0].mime_type, "image/png");
+    assert_eq!(attachments[1].mime_type, "image/jpeg");
+}
+
+#[tokio::test(flavor = "current_thread")]
 pub(super) async fn im_event_loop_external_cli_session_records_runner_failure() {
     let temp_dir = tempfile::tempdir().expect("temp data dir");
     let _env_guard = EnvGuard::set_data_dir(temp_dir.path());

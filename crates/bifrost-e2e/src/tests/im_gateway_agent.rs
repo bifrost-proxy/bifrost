@@ -1227,6 +1227,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     vec![QueueItem {
                         seq: 1,
                         message: "next queued message".to_string(),
+                        images: Vec::new(),
                     }],
                     true,
                     Some("已收到引导：check latest logs".to_string()),

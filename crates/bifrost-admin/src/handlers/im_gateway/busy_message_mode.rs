@@ -165,6 +165,70 @@ pub(super) async fn handle_busy_default_message(
     session_key: &str,
     ctx: &BusyMessageContext<'_>,
 ) {
+    let message = message.trim();
+    if message.is_empty() {
+        send_agent_reply(
+            ctx.client,
+            ctx.provider,
+            ctx.event,
+            "排队失败: 消息内容不能为空",
+            ctx.message_log_store,
+        )
+        .await;
+        return;
+    }
+    if ctx.default_mode == BusyMessageDefaultMode::Queue {
+        let images = match ctx.event.message.as_ref() {
+            Some(event_message) if !event_message.images.is_empty() => {
+                resolve_event_images(ctx.client, ctx.provider, ctx.event, &event_message.images)
+                    .await
+            }
+            _ => Vec::new(),
+        };
+        match ctx
+            .queue_manager
+            .push_queue_with_images(session_key, message.to_string(), images)
+        {
+            Ok(items) => {
+                let guide_pending = !ctx.queue_manager.guide_status(session_key).is_empty();
+                let updated = ctx
+                    .progress_registry
+                    .update_queue_state(
+                        session_key,
+                        items.clone(),
+                        guide_pending,
+                        Some(format!("消息已排队：{}", truncate_str(message, 48))),
+                    )
+                    .await;
+                if !updated {
+                    let reply = format!(
+                        "✅ 消息已收到，将在当前任务完成后处理（排队 {} 条）",
+                        items.len()
+                    );
+                    send_agent_reply(
+                        ctx.client,
+                        ctx.provider,
+                        ctx.event,
+                        &reply,
+                        ctx.message_log_store,
+                    )
+                    .await;
+                }
+            }
+            Err(err) => {
+                send_agent_reply(
+                    ctx.client,
+                    ctx.provider,
+                    ctx.event,
+                    &format!("排队失败: {err}"),
+                    ctx.message_log_store,
+                )
+                .await;
+            }
+        }
+        return;
+    }
+
     match apply_busy_message_default(ctx.queue_manager, session_key, message, ctx.default_mode) {
         Ok(BusyMessageDefaultResult::Guide { pending_count }) => {
             let reply = if pending_count > 1 {

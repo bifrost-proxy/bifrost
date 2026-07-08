@@ -119,7 +119,7 @@ IM built-in Agent 必须主进程短路，不进入 worker turn loop。清理内
 3. Agent runtime 使用 OpenAI content parts：`{"type":"text","text":"..."}` + `{"type":"image_url","image_url":{"url":"data:image/png;base64,...","detail":"auto"}}`。
 4. JSONL `user_message.content.images` 保存 `{mime_type,data}`；`load_conversation()` 恢复多模态 `ChatMessage`；`/sessions/{key}` 返回 `messages[].content_parts` 供 Web 缩略图。
 5. WebUI 粘贴走 `AgentChatSection.pendingImages`：`onPaste` 从 `clipboardData.items/files` 筛选 `image/*`，data URL → `{id,mimeType,data,previewUrl,name,size}`；最多 6 张；发送按钮启用条件 `draft.trim().length>0 || pendingImages.length>0 || running`；纯图片消息 title fallback `Attached N image(s)`。
-6. 外部 Runner：`ExternalCliRuntime::run()` 在 run 目录创建 `attachments/images/`，写为 `image-1.png` 等稳定文件名；`build_prompt()` 追加 `## Attached Images` 段列出 path、mime、size 与使用指令；`ExternalCliRunResult.metadata.attachments.images` 记录路径。队列续跑不继承上一轮图片。
+6. 外部 Runner：`ExternalCliRuntime::run()` 在 run 目录创建 `attachments/images/`，写为 `image-1.png` 等稳定文件名；`build_prompt()` 追加 `## Attached Images` 段列出 path、mime、size 与使用指令；`ExternalCliRunResult.metadata.attachments.images` 记录路径。队列续跑不继承上一轮图片，但外部 Runner 忙碌时新进入队列的图片必须随对应 `QueueItem` 保存并在该队列项执行时恢复，不能只保留 `[图片消息]` 文本占位。`ExternalCliAgentChat` route 也必须允许纯图片消息进入 Runner，不能因为 route message text 为空跳过图片事件。
 
 ### `send_msg` 工具注入
 
@@ -193,6 +193,7 @@ Agent Chat 页右侧只承载 Threads 列表；Workspace/Status/Context/Errors/R
 - `session::tests::test_stop_request_cancels_in_flight_model_request`；`session::tests::test_active_turn_status`。
 - `bifrost_agent::types::tests::user_with_images_serializes_openai_content_parts`；`im_gateway::feishu::tests::test_normalize_feishu_image_message_extracts_resource_key`；`handlers::im_gateway::tests::im_event_loop_forwards_image_attachment_to_agent_chat`。
 - `external_cli::tests::external_cli_run_writes_image_attachments_and_injects_prompt_paths`；`session_state::tests::session_state_persists_message_content_parts`。
+- `im_gateway::queue_manager::tests::test_queue_preserves_image_attachments`；`handlers::im_gateway::tests::im_event_loop_external_cli_route_processes_image_only_message`。
 - `agent_api_status_detail_applies_work_dir_for_fresh_status_session`、`agent_api_status_detail_overrides_existing_idle_session_work_dir`、`agent_api_status_detail_keeps_new_session_text_when_no_work_dir_requested`。
 
 ### E2E 测试

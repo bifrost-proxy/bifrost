@@ -1132,8 +1132,46 @@
 5. 模型切换系统行是轻量提示样式：文字和时间同一行、字体与时间一致、无边框、无背景，不展示成正式消息气泡。
 6. `/model` 命令运行期间不插入 `content` 为空的 system message；DOM 中 `agent-chat-message-system` 的文本内容不能为空。
 
+### TC-IEC-56: 飞书 External CLI Runner 多图输入不丢失
+
+操作步骤：
+1. 执行 Feishu 富文本多图解析单元测试：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin test_normalize_feishu_post_extracts_text_and_images --lib -- --nocapture
+   ```
+2. 执行外部 Runner 多图附件写入单元测试：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin external_cli_run_writes_image_attachments_and_injects_prompt_paths --lib -- --nocapture
+   ```
+3. 执行 IM event loop route 纯图片回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_event_loop_external_cli_route_processes_image_only_message --lib -- --nocapture
+   ```
+4. 执行忙碌外部 Runner 队列图片保留回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin test_queue_preserves_image_attachments --lib -- --nocapture
+   ```
+5. 执行队列图片出队后转 External CLI 输入的多图转换回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin external_cli_images_from_chat_images_preserves_payloads --lib -- --nocapture
+   ```
+6. 执行真实临时服务 E2E，覆盖 Web Chat external runner 首轮两张图片、后续单图、Traex 兼容 runner 和 runner-call 图片输入：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_im_gateway_external_runner_image_input.sh
+   ```
+
+预期结果：
+1. Feishu `post` 内容中两张 `image_key` 都进入 `ImEventMessage.images`。
+2. External CLI runtime 在 prompt 中注入 `## Attached Images`，并同时列出 `image-1.png` 与 `image-2.jpg`。
+3. `result.metadata["attachments.images"]` 包含两张图片，MIME 分别为 `image/png` 和 `image/jpeg`。
+4. `ExternalCliAgentChat` route 对纯图片消息不跳过，真实创建 mock runner run。
+5. 外部 Runner 忙碌时排队的图片保存在 `QueueItem.images`，后续出队执行时不会只剩 `[图片消息]` 文本占位。
+6. `ChatImageInput` 转 `ExternalCliImageInput` 时保留多图顺序、MIME 和 base64 数据。
+7. E2E 首轮 run 的 `attachments.images` 同时包含 `hello.png` 与 `hello-two.jpg`，后续 run 不覆盖首轮图片文件。
+
 ## 最近执行记录
 
+- 2026-07-08：新增并执行 TC-IEC-56 的本地回归。执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin test_normalize_feishu_post_extracts_text_and_images --lib -- --nocapture`、`external_cli_run_writes_image_attachments_and_injects_prompt_paths`、`im_event_loop_external_cli_route_processes_image_only_message`、`test_queue_preserves_image_attachments`、`external_cli_images_from_chat_images_preserves_payloads` 均通过；执行 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_im_gateway_external_runner_image_input.sh` 通过，临时服务端口 `65211`，首轮 run `1783470749961-9783d1b6-20b8-4561-bd6e-fe7a486cec7b` 同时写入 `image-1.png` 与 `image-2.jpg`，后续单图 run `1783470750022-a7838ec2-5729-4fc0-8770-27c13c784918` 未覆盖首轮图片，Traex 兼容 run `1783470750145-e362365a-a1b6-4a44-bd8d-ea7b8f49f7ea` 与 runner-call run `1783470750275-68429b1e-41eb-45d4-b830-5b6b02623dcd` 均保留图片附件。
 - 2026-06-26：追加执行 TC-IEC-55 的真实 Web UI 即时切模型回归。修复前在未刷新页面直接发送 `/model` 会先插入 `content:""` 的 system 占位，DOM 中出现空白系统胶囊，并且系统提示是有边框/背景的大号气泡。修复后执行 `pnpm --dir web run build`、`pnpm --dir web run test:unit -- AgentChatSection --run`、`cargo build --bin bifrost` 均通过；覆盖重启 `9900`，PID `87418`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。真实浏览器打开 `admin-chat-direct-system-check-1782409300`，先刷新确认新 bundle 生效，再发送 `/model GPT-5.5`：DOM 返回 `emptySystemCount=0`，最后一条 system 文本为 `切换模型为 GPT-5.5`，`agent-chat-message-bubble-system` 样式为 `borderWidth:0px`、`borderStyle:none`、`backgroundColor:rgba(0, 0, 0, 0)`、`fontSize:11px`、`lineHeight:18px`、`flexDirection:row`、`gap:8px`。刷新后再次确认 `emptySystemCount=0`、`hasLatestSwitch=true`、普通对话文本仍存在，HUD 显示 `Model GPT-5.5 (trae)`。
 - 2026-06-26：执行 TC-IEC-55 的真实 9900 回归。先确认问题根因：`session_state.json` 中 `admin-chat-direct-system-check-1782409300::traex::Traex` 已持久化多条 `role:"system"` 模型切换消息，但 session detail 主路径先从 canonical JSONL 读到 user/assistant timeline 后，只合并 external runner metadata，没有把 external state 的 system display messages 合并回 `messages`，导致刷新后系统提示丢失。修复后执行 `cargo test -p bifrost-admin handlers::im_gateway::agent_api::tests::session_detail_metadata_merge_preserves_external_system_display_messages -- --nocapture` 通过；执行 `cargo build --bin bifrost` 后覆盖重启 `9900`，PID `46889`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。API 验证 `/_bifrost/api/im-gateway/agent/sessions/admin-chat-direct-system-check-1782409300` 返回 `message_count=11`，包含 5 条 `role:"system"` 的 `切换模型为 ...` 消息，同时保留 `你好`、`你是谁` 等 user/assistant 对话。真实 Edge/Playwright 打开同一 URL 并刷新，DOM 中 `agent-chat-message-system` 数量为 5，页面文本同时包含 `切换模型为 Kimi-K2.6`、`切换模型为 GPT-5.5`、`你好`、`你是谁`，HUD 显示 `Model Kimi-K2.6 (trae)`。
 - 2026-06-26：追加执行 TC-IEC-50 的真实 9900 slash 键盘回归。先发现 `/model` 后按 Tab 会错误选中 `/models` 并提交，输入框被清空且后端返回 `runner 'codex' is not enabled`；修复后重新执行 `pnpm --dir web build` 与 `cargo build --bin bifrost`，覆盖重启 9900，PID `83008`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。Playwright 打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=codex-ui-slash-smoke-1782430796490&view=active`：输入 `/mo` 后按 Enter，页面发送 `/models` 并收到后端响应；再次输入 `/model` 后按 Tab，输入框值保持为 `/model `，焦点仍在 `agent-chat-input`，未发送请求。截图保存为 `/tmp/bifrost-9900-slash-smoke-fixed.png`。同时通过真实 `/chat/stream` API 验证 Traex `/models` 返回 Traex 模型列表、Traex 非法 `/model definitely-not-a-real-model-for-smoke` 返回“未切换模型”、Traex `/model Kimi-K2.6` 在 session detail 中写入 `messages[0].role="system"`、`content="切换模型为 Kimi-K2.6"` 与 `metadata.modelOverride="Kimi-K2.6"`；Codex `/models` 返回 Codex 模型列表，Codex 非法 `/model definitely-not-a-real-codex-model-for-smoke` 返回“未切换模型”。

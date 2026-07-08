@@ -195,7 +195,7 @@ def final_event(events, event_type):
     return event
 
 
-def assert_run_image(run_id, expected_name, expected_bytes):
+def assert_run_images(run_id, expected_images):
     run_dir = test_path / "agent" / "im_gateway" / "chat_runs" / run_id
     prompt = (run_dir / "prompt.md").read_text(encoding="utf-8")
     assert "## Attached Images" in prompt, prompt
@@ -203,21 +203,28 @@ def assert_run_image(run_id, expected_name, expected_bytes):
 
     result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
     attachments = json.loads(result["metadata"]["attachments.images"])
-    assert len(attachments) == 1, attachments
-    image = attachments[0]
-    assert image["name"] == expected_name, image
-    assert image["mimeType"] == "image/png", image
-    assert image["sizeBytes"] == len(expected_bytes), image
-    image_path = pathlib.Path(image["path"])
-    assert image_path.is_absolute(), image
-    assert image_path.exists(), image_path
-    assert b"/attachments/session-" in str(image_path).encode("utf-8"), image_path
-    assert image_path.read_bytes() == expected_bytes, image_path
-    assert str(image_path) in prompt, prompt
-    return image_path
+    assert len(attachments) == len(expected_images), attachments
+    paths = []
+    for image, expected in zip(attachments, expected_images):
+        expected_name, expected_mime, expected_bytes = expected
+        assert image["name"] == expected_name, image
+        assert image["mimeType"] == expected_mime, image
+        assert image["sizeBytes"] == len(expected_bytes), image
+        image_path = pathlib.Path(image["path"])
+        assert image_path.is_absolute(), image
+        assert image_path.exists(), image_path
+        assert b"/attachments/session-" in str(image_path).encode("utf-8"), image_path
+        assert image_path.read_bytes() == expected_bytes, image_path
+        assert str(image_path) in prompt, prompt
+        paths.append(image_path)
+    return paths
 
 
-def assert_runner_metadata(run_id, expected_adapter):
+def assert_run_image(run_id, expected_name, expected_bytes):
+    return assert_run_images(run_id, [(expected_name, "image/png", expected_bytes)])[0]
+
+
+def assert_runner_metadata(run_id, expected_adapter, expected_attachment_count=1):
     run_dir = test_path / "agent" / "im_gateway" / "chat_runs" / run_id
     result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
     metadata = result["metadata"]
@@ -242,7 +249,7 @@ def assert_runner_metadata(run_id, expected_adapter):
     for key in required_keys:
         assert key in metadata, (key, metadata)
     assert metadata["runner.adapter"] == expected_adapter, metadata
-    assert metadata["attachments.count"] == "1", metadata
+    assert metadata["attachments.count"] == str(expected_attachment_count), metadata
     assert metadata["tools.count"] == "1", metadata
     assert int(metadata["prompt.estimatedTokens"]) > 0, metadata
     assert int(metadata["io.stdoutBytes"]) > 0, metadata
@@ -288,14 +295,27 @@ chat_events = stream(
                 "mimeType": "image/png",
                 "data": base64.b64encode(b"hello-image").decode("ascii"),
                 "name": "hello.png",
+            },
+            {
+                "mimeType": "image/jpeg",
+                "data": base64.b64encode(b"hello-image-two").decode("ascii"),
+                "name": "hello-two.jpg",
             }
         ],
     },
 )
 chat_finished = final_event(chat_events, "run_finished")
-chat_path = assert_run_image(chat_finished["runId"], "hello.png", b"hello-image")
+chat_paths = assert_run_images(
+    chat_finished["runId"],
+    [
+        ("hello.png", "image/png", b"hello-image"),
+        ("hello-two.jpg", "image/jpeg", b"hello-image-two"),
+    ],
+)
+chat_path = chat_paths[0]
+second_initial_chat_path = chat_paths[1]
 assert not evil_attachment_dir.exists(), evil_attachment_dir
-assert_runner_metadata(chat_finished["runId"], "codex")
+assert_runner_metadata(chat_finished["runId"], "codex", expected_attachment_count=2)
 
 second_chat_events = stream(
     "/stream",
@@ -322,7 +342,9 @@ second_chat_path = assert_run_image(
 second_metadata = assert_runner_metadata(second_chat_finished["runId"], "codex")
 assert_session_detail_metadata(chat_session_key, second_metadata)
 assert chat_path != second_chat_path, (chat_path, second_chat_path)
+assert second_initial_chat_path != second_chat_path, (second_initial_chat_path, second_chat_path)
 assert chat_path.read_bytes() == b"hello-image", chat_path
+assert second_initial_chat_path.read_bytes() == b"hello-image-two", second_initial_chat_path
 
 traex_events = stream(
     "/stream",
@@ -373,12 +395,13 @@ assert chat_path != traex_path, (chat_path, traex_path)
 capture = prompt_capture.read_text(encoding="utf-8")
 assert capture.count("## Attached Images") >= 4, capture
 assert str(chat_path) in capture, capture
+assert str(second_initial_chat_path) in capture, capture
 assert str(second_chat_path) in capture, capture
 assert str(traex_path) in capture, capture
 assert str(runner_path) in capture, capture
 
 print("[im-gateway-external-runner-image-input] PASS")
-print(f"chat_run={chat_finished['runId']} chat_image={chat_path}")
+print(f"chat_run={chat_finished['runId']} chat_images={chat_path},{second_initial_chat_path}")
 print(f"second_chat_run={second_chat_finished['runId']} second_chat_image={second_chat_path}")
 print(f"traex_run={traex_finished['runId']} traex_image={traex_path}")
 print(f"runner_call_run={runner_finished['runId']} runner_image={runner_path}")

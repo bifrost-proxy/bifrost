@@ -2333,7 +2333,8 @@ mod tests {
                         "title": "标题",
                         "content": [[
                             {"tag": "text", "text": "请看这张图"},
-                            {"tag": "img", "image_key": "img_v3_post"}
+                            {"tag": "img", "image_key": "img_v3_post"},
+                            {"tag": "img", "image_key": "img_v3_post_2"}
                         ]]
                     }).to_string()
                 },
@@ -2349,8 +2350,9 @@ mod tests {
         let msg = event.message.unwrap();
         assert_eq!(msg.raw_type.as_deref(), Some("post"));
         assert_eq!(msg.text, "请看这张图");
-        assert_eq!(msg.images.len(), 1);
+        assert_eq!(msg.images.len(), 2);
         assert_eq!(msg.images[0].file_key, "img_v3_post");
+        assert_eq!(msg.images[1].file_key, "img_v3_post_2");
     }
 
     #[test]
