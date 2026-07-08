@@ -274,6 +274,22 @@ function ProviderFieldList({
   );
 }
 
+function ResponsiveCardGrid({ children }: { children: ReactNode }) {
+  return (
+    <div
+      data-testid="settings-im-card-grid"
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 340px), 1fr))",
+        gap: 12,
+        width: "100%",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
 function PanelHeader({
   description,
   children,
@@ -360,10 +376,12 @@ function ConnectionsPanel({
   providers,
   loading,
   onRefresh,
+  cardGrid = false,
 }: {
   providers: ImProviderConfig[];
   loading: boolean;
   onRefresh: () => void;
+  cardGrid?: boolean;
 }) {
   const { token } = theme.useToken();
   const [statusMap, setStatusMap] = useState<
@@ -1108,196 +1126,345 @@ function ConnectionsPanel({
       ) : providers.length === 0 ? (
         <Empty description="No IM providers configured" />
       ) : (
-        <div
-          data-testid="settings-im-provider-list"
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 12,
-            maxWidth: 750,
-            width: "100%",
-            margin: "0 auto",
-          }}
-        >
-          {providers.map((p) => {
-            const status = statusMap[p.id];
-            return (
-              <Card
-                key={p.id}
-                size="small"
-                data-testid={`settings-im-provider-card-${p.id}`}
-                style={{
-                  borderColor: token.colorBorderSecondary,
-                }}
-                title={
-                  <Space wrap size={[8, 6]} style={{ minWidth: 0 }}>
-                    <ApiOutlined style={{ color: token.colorTextSecondary }} />
-                    <Text strong style={{ maxWidth: 280 }} ellipsis>
-                      {p.display_name || p.id}
-                    </Text>
-                    <Tag>{p.provider_type}</Tag>
-                    {getStateBadge(status?.state)}
-                    <Tag color={p.enabled ? "green" : undefined}>
-                      {p.enabled ? "Enabled" : "Disabled"}
-                    </Tag>
-                    <Tag>
-                      {p.event_connection_enabled ? "Long Connection" : "Webhook"}
-                    </Tag>
-                  </Space>
-                }
-                extra={
-                  <Space wrap size={8}>
-                    {status?.state === "connected" ||
-                    status?.state === "connecting" ||
-                    status?.state === "reconnecting" ? (
-                      <Tooltip title="Disconnect provider">
-                        <Button
-                          size="small"
-                          icon={<PauseCircleOutlined />}
-                          onClick={() => handleDisconnect(p.id)}
-                          data-testid={`settings-im-provider-disconnect-${p.id}`}
-                        />
-                      </Tooltip>
-                    ) : (
-                      <Tooltip title="Connect provider">
-                        <Button
-                          size="small"
-                          icon={<PlayCircleOutlined />}
-                          onClick={() => handleConnect(p.id)}
-                          disabled={!p.secret_configured}
-                          data-testid={`settings-im-provider-connect-${p.id}`}
-                        />
-                      </Tooltip>
-                    )}
-                    {p.provider_type === "weixin" && (
-                      <Tooltip title="Scan Weixin QR">
-                        <Button
-                          size="small"
-                          icon={<CloudOutlined />}
-                          onClick={() => handleStartWeixinLogin(p)}
-                          loading={weixinLoginLoading && weixinLogin?.providerId === p.id}
-                          data-testid={`settings-im-provider-weixin-login-${p.id}`}
-                        />
-                      </Tooltip>
-                    )}
-                    <Tooltip title="Edit">
-                      <Button
-                        size="small"
-                        icon={<EditOutlined />}
-                        onClick={() => openEditModal(p)}
-                        data-testid={`settings-im-provider-edit-${p.id}`}
-                      />
-                    </Tooltip>
-                    <Popconfirm
-                      title="Delete this provider?"
-                      onConfirm={() => handleDelete(p.id)}
-                    >
-                      <Button
-                        size="small"
-                        danger
-                        icon={<DeleteOutlined />}
-                      />
-                    </Popconfirm>
-                  </Space>
-                }
-              >
-                <ProviderFieldList
-                  items={[
-                    {
-                      label: "App ID",
-                      value: (
-                        <CopyableOverflowText
-                          value={p.app_id}
-                          displayValue={p.app_id ? `${p.app_id.slice(0, 8)}***` : "-"}
-                          code
-                          testId={`settings-im-provider-${p.id}-app-id`}
-                        />
-                      ),
-                    },
-                    {
-                      label: "Secret",
-                      value: p.secret_configured ? (
-                        <Tag color="green">Configured</Tag>
-                      ) : (
-                        <Tag color="red">Not Set</Tag>
-                      ),
-                    },
-                    {
-                      label: "Owner ID",
-                      value: p.owner_open_id ? (
-                        <CopyableOverflowText
-                          value={p.owner_open_id}
-                          code
-                          testId={`settings-im-provider-${p.id}-owner-id`}
-                        />
-                      ) : (
-                        <SecondaryInline>Auto-detect on connect</SecondaryInline>
-                      ),
-                    },
-                    {
-                      label: "Agent Runner",
-                      value: displayRunnerLabel(p) ? (
+        <div data-testid="settings-im-provider-list">
+          {cardGrid ? (
+            <ResponsiveCardGrid>
+              {providers.map((p) => {
+                const status = statusMap[p.id];
+                return (
+                  <Card
+                    key={p.id}
+                    size="small"
+                    data-testid={`settings-im-provider-card-${p.id}`}
+                    style={{
+                      borderColor: token.colorBorderSecondary,
+                      height: "100%",
+                    }}
+                    title={
+                      <Space wrap size={[8, 6]} style={{ minWidth: 0 }}>
+                        <ApiOutlined style={{ color: token.colorTextSecondary }} />
+                        <Text strong style={{ maxWidth: 180 }} ellipsis>
+                          {p.display_name || p.id}
+                        </Text>
+                        <Tag>{p.provider_type}</Tag>
+                        {getStateBadge(status?.state)}
+                      </Space>
+                    }
+                    extra={
+                      <Space wrap size={8}>
+                        {status?.state === "connected" ||
+                        status?.state === "connecting" ||
+                        status?.state === "reconnecting" ? (
+                          <Tooltip title="Disconnect provider">
+                            <Button
+                              size="small"
+                              icon={<PauseCircleOutlined />}
+                              onClick={() => handleDisconnect(p.id)}
+                              data-testid={`settings-im-provider-disconnect-${p.id}`}
+                            />
+                          </Tooltip>
+                        ) : (
+                          <Tooltip title="Connect provider">
+                            <Button
+                              size="small"
+                              icon={<PlayCircleOutlined />}
+                              onClick={() => handleConnect(p.id)}
+                              disabled={!p.secret_configured}
+                              data-testid={`settings-im-provider-connect-${p.id}`}
+                            />
+                          </Tooltip>
+                        )}
+                        {p.provider_type === "weixin" && (
+                          <Tooltip title="Scan Weixin QR">
+                            <Button
+                              size="small"
+                              icon={<CloudOutlined />}
+                              onClick={() => handleStartWeixinLogin(p)}
+                              loading={weixinLoginLoading && weixinLogin?.providerId === p.id}
+                              data-testid={`settings-im-provider-weixin-login-${p.id}`}
+                            />
+                          </Tooltip>
+                        )}
+                        <Tooltip title="Edit">
+                          <Button
+                            size="small"
+                            icon={<EditOutlined />}
+                            onClick={() => openEditModal(p)}
+                            data-testid={`settings-im-provider-edit-${p.id}`}
+                          />
+                        </Tooltip>
+                        <Popconfirm
+                          title="Delete this provider?"
+                          onConfirm={() => handleDelete(p.id)}
+                        >
+                          <Button
+                            size="small"
+                            danger
+                            icon={<DeleteOutlined />}
+                          />
+                        </Popconfirm>
+                      </Space>
+                    }
+                  >
+                    <Space wrap size={[4, 6]} style={{ marginBottom: 12 }}>
+                      <Tag color={p.enabled ? "green" : undefined}>
+                        {p.enabled ? "Enabled" : "Disabled"}
+                      </Tag>
+                      <Tag>
+                        {p.event_connection_enabled ? "Long Connection" : "Webhook"}
+                      </Tag>
+                      {displayRunnerLabel(p) ? (
                         <Tag color={p.agent_config?.runner === "bifrost_agent" ? "green" : "geekblue"}>
                           {displayRunnerLabel(p)}
                         </Tag>
-                      ) : (
-                        <SecondaryInline>Global default</SecondaryInline>
-                      ),
-                    },
-                    {
-                      label: "Agent Work Dir",
-                      value: p.agent_config?.work_dir ? (
-                        <CopyableOverflowText
-                          value={p.agent_config.work_dir}
-                          code
-                          testId={`settings-im-provider-${p.id}-work-dir`}
-                        />
-                      ) : (
-                        <CopyableOverflowText
-                          value={inheritedWorkDir}
-                          code
-                          testId={`settings-im-provider-${p.id}-work-dir`}
-                        />
-                      ),
-                    },
-                    {
-                      label: "Agent Base Prompt",
-                      value: p.agent_config?.base_instructions ? (
-                        <Tag color="blue">Configured</Tag>
-                      ) : (
-                        <SecondaryInline>Global default</SecondaryInline>
-                      ),
-                    },
-                    {
-                      label: "Agent Developer/User",
-                      value:
-                        p.agent_config?.developer_instructions ||
-                        p.agent_config?.user_instructions ? (
-                          <Tag color="purple">Configured</Tag>
+                      ) : null}
+                    </Space>
+                    <ProviderFieldList
+                      items={[
+                        {
+                          label: "App ID",
+                          value: (
+                            <CopyableOverflowText
+                              value={p.app_id}
+                              displayValue={p.app_id ? `${p.app_id.slice(0, 8)}***` : "-"}
+                              code
+                              width="100%"
+                              testId={`settings-im-provider-${p.id}-app-id`}
+                            />
+                          ),
+                        },
+                        {
+                          label: "Secret",
+                          value: p.secret_configured ? (
+                            <Tag color="green">Configured</Tag>
+                          ) : (
+                            <Tag color="red">Not Set</Tag>
+                          ),
+                        },
+                        {
+                          label: "Owner ID",
+                          value: p.owner_open_id ? (
+                            <CopyableOverflowText
+                              value={p.owner_open_id}
+                              code
+                              width="100%"
+                              testId={`settings-im-provider-${p.id}-owner-id`}
+                            />
+                          ) : (
+                            <SecondaryInline>Auto-detect</SecondaryInline>
+                          ),
+                        },
+                        {
+                          label: "Work Dir",
+                          value: (
+                            <CopyableOverflowText
+                              value={p.agent_config?.work_dir || inheritedWorkDir}
+                              code
+                              width="100%"
+                              testId={`settings-im-provider-${p.id}-work-dir`}
+                            />
+                          ),
+                        },
+                      ]}
+                    />
+                  </Card>
+                );
+              })}
+            </ResponsiveCardGrid>
+          ) : (
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 12,
+                maxWidth: 750,
+                width: "100%",
+                margin: "0 auto",
+              }}
+            >
+              {providers.map((p) => {
+                const status = statusMap[p.id];
+                return (
+                  <Card
+                    key={p.id}
+                    size="small"
+                    data-testid={`settings-im-provider-card-${p.id}`}
+                    style={{
+                      borderColor: token.colorBorderSecondary,
+                    }}
+                    title={
+                      <Space wrap size={[8, 6]} style={{ minWidth: 0 }}>
+                        <ApiOutlined style={{ color: token.colorTextSecondary }} />
+                        <Text strong style={{ maxWidth: 280 }} ellipsis>
+                          {p.display_name || p.id}
+                        </Text>
+                        <Tag>{p.provider_type}</Tag>
+                        {getStateBadge(status?.state)}
+                        <Tag color={p.enabled ? "green" : undefined}>
+                          {p.enabled ? "Enabled" : "Disabled"}
+                        </Tag>
+                        <Tag>
+                          {p.event_connection_enabled ? "Long Connection" : "Webhook"}
+                        </Tag>
+                      </Space>
+                    }
+                    extra={
+                      <Space wrap size={8}>
+                        {status?.state === "connected" ||
+                        status?.state === "connecting" ||
+                        status?.state === "reconnecting" ? (
+                          <Tooltip title="Disconnect provider">
+                            <Button
+                              size="small"
+                              icon={<PauseCircleOutlined />}
+                              onClick={() => handleDisconnect(p.id)}
+                              data-testid={`settings-im-provider-disconnect-${p.id}`}
+                            />
+                          </Tooltip>
                         ) : (
-                          <SecondaryInline>Global default</SecondaryInline>
-                        ),
-                    },
-                    ...(status?.reconnect_count != null && status.reconnect_count > 0
-                      ? [{ label: "Reconnects", value: status.reconnect_count }]
-                      : []),
-                    ...(status?.last_error
-                      ? [
-                          {
-                            label: "Last Error",
-                            value: (
-                              <Text type="danger" ellipsis style={{ maxWidth: 300 }}>
-                                {status.last_error}
-                              </Text>
+                          <Tooltip title="Connect provider">
+                            <Button
+                              size="small"
+                              icon={<PlayCircleOutlined />}
+                              onClick={() => handleConnect(p.id)}
+                              disabled={!p.secret_configured}
+                              data-testid={`settings-im-provider-connect-${p.id}`}
+                            />
+                          </Tooltip>
+                        )}
+                        {p.provider_type === "weixin" && (
+                          <Tooltip title="Scan Weixin QR">
+                            <Button
+                              size="small"
+                              icon={<CloudOutlined />}
+                              onClick={() => handleStartWeixinLogin(p)}
+                              loading={weixinLoginLoading && weixinLogin?.providerId === p.id}
+                              data-testid={`settings-im-provider-weixin-login-${p.id}`}
+                            />
+                          </Tooltip>
+                        )}
+                        <Tooltip title="Edit">
+                          <Button
+                            size="small"
+                            icon={<EditOutlined />}
+                            onClick={() => openEditModal(p)}
+                            data-testid={`settings-im-provider-edit-${p.id}`}
+                          />
+                        </Tooltip>
+                        <Popconfirm
+                          title="Delete this provider?"
+                          onConfirm={() => handleDelete(p.id)}
+                        >
+                          <Button size="small" danger icon={<DeleteOutlined />} />
+                        </Popconfirm>
+                      </Space>
+                    }
+                  >
+                    <ProviderFieldList
+                      items={[
+                        {
+                          label: "App ID",
+                          value: (
+                            <CopyableOverflowText
+                              value={p.app_id}
+                              displayValue={p.app_id ? `${p.app_id.slice(0, 8)}***` : "-"}
+                              code
+                              testId={`settings-im-provider-${p.id}-app-id`}
+                            />
+                          ),
+                        },
+                        {
+                          label: "Secret",
+                          value: p.secret_configured ? (
+                            <Tag color="green">Configured</Tag>
+                          ) : (
+                            <Tag color="red">Not Set</Tag>
+                          ),
+                        },
+                        {
+                          label: "Owner ID",
+                          value: p.owner_open_id ? (
+                            <CopyableOverflowText
+                              value={p.owner_open_id}
+                              code
+                              testId={`settings-im-provider-${p.id}-owner-id`}
+                            />
+                          ) : (
+                            <SecondaryInline>Auto-detect on connect</SecondaryInline>
+                          ),
+                        },
+                        {
+                          label: "Agent Runner",
+                          value: displayRunnerLabel(p) ? (
+                            <Tag
+                              color={
+                                p.agent_config?.runner === "bifrost_agent"
+                                  ? "green"
+                                  : "geekblue"
+                              }
+                            >
+                              {displayRunnerLabel(p)}
+                            </Tag>
+                          ) : (
+                            <SecondaryInline>Global default</SecondaryInline>
+                          ),
+                        },
+                        {
+                          label: "Agent Work Dir",
+                          value: p.agent_config?.work_dir ? (
+                            <CopyableOverflowText
+                              value={p.agent_config.work_dir}
+                              code
+                              testId={`settings-im-provider-${p.id}-work-dir`}
+                            />
+                          ) : (
+                            <CopyableOverflowText
+                              value={inheritedWorkDir}
+                              code
+                              testId={`settings-im-provider-${p.id}-work-dir`}
+                            />
+                          ),
+                        },
+                        {
+                          label: "Agent Base Prompt",
+                          value: p.agent_config?.base_instructions ? (
+                            <Tag color="blue">Configured</Tag>
+                          ) : (
+                            <SecondaryInline>Global default</SecondaryInline>
+                          ),
+                        },
+                        {
+                          label: "Agent Developer/User",
+                          value:
+                            p.agent_config?.developer_instructions ||
+                            p.agent_config?.user_instructions ? (
+                              <Tag color="purple">Configured</Tag>
+                            ) : (
+                              <SecondaryInline>Global default</SecondaryInline>
                             ),
-                          },
-                        ]
-                      : []),
-                  ]}
-                />
-              </Card>
-            );
-          })}
+                        },
+                        ...(status?.reconnect_count != null && status.reconnect_count > 0
+                          ? [{ label: "Reconnects", value: status.reconnect_count }]
+                          : []),
+                        ...(status?.last_error
+                          ? [
+                              {
+                                label: "Last Error",
+                                value: (
+                                  <Text type="danger" ellipsis style={{ maxWidth: 300 }}>
+                                    {status.last_error}
+                                  </Text>
+                                ),
+                              },
+                            ]
+                          : []),
+                      ]}
+                    />
+                  </Card>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -2992,14 +3159,24 @@ function HistoryPanel({
 
 interface ImGatewayTabProps {
   hideSectionNav?: boolean;
+  visibleSections?: ImGatewaySectionId[];
+  cardGrid?: boolean;
 }
 
-export default function ImGatewayTab({ hideSectionNav = false }: ImGatewayTabProps) {
+export default function ImGatewayTab({
+  hideSectionNav = false,
+  visibleSections,
+  cardGrid = false,
+}: ImGatewayTabProps) {
   const [searchParams, setSearchParams] = useSearchParams();
   const sectionFromUrl = searchParams.get("imGatewaySection");
   const activeSection =
     IM_GATEWAY_SECTION_NAV.find((section) => section.id === sectionFromUrl)?.id ??
     "connections";
+  const renderedSections = useMemo(
+    () => visibleSections ?? [activeSection],
+    [activeSection, visibleSections],
+  );
   const { token } = theme.useToken();
   const screens = useBreakpoint();
   const isCompactNav = !screens.lg;
@@ -3015,6 +3192,53 @@ export default function ImGatewayTab({ hideSectionNav = false }: ImGatewayTabPro
   const [loading, setLoading] = useState(false);
 
   const fetchData = useCallback(async () => {
+    setLoading(true);
+    try {
+      const needs = new Set(renderedSections);
+      const needsProviders =
+        needs.has("connections") || needs.has("targets") || needs.has("schedules");
+      const tasks: Array<Promise<void>> = [];
+      if (needsProviders) {
+        tasks.push(imGatewayApi.listProviders().then(setProviders));
+      }
+      if (needs.has("targets")) {
+        tasks.push(imGatewayApi.listTargets().then(setTargets));
+      }
+      if (needs.has("routes")) {
+        tasks.push(imGatewayApi.listRoutes().then(setRoutes));
+      }
+      if (needs.has("schedules")) {
+        tasks.push(
+          Promise.all([
+            imGatewayApi.listSchedules(),
+            imGatewayApi.getExternalCliConfig().catch(() => null),
+          ]).then(([schedulesData, externalConfig]) => {
+            setSchedules(schedulesData);
+            setExternalCliConfig(externalConfig);
+          }),
+        );
+      }
+      if (needs.has("history")) {
+        tasks.push(
+          Promise.all([
+            imGatewayApi.listHistoryEvents(),
+            imGatewayApi.listHistoryRuns(),
+          ]).then(([eventsData, runsData]) => {
+            setEvents(eventsData);
+            setRuns(runsData);
+          }),
+        );
+      }
+      await Promise.all(tasks);
+    } catch (err) {
+      console.error("Failed to fetch IM Gateway data:", err);
+      message.error(err instanceof Error ? err.message : "Failed to fetch IM Gateway data");
+    } finally {
+      setLoading(false);
+    }
+  }, [renderedSections]);
+
+  const fetchActiveSectionData = useCallback(async () => {
     setLoading(true);
     try {
       switch (activeSection) {
@@ -3063,8 +3287,12 @@ export default function ImGatewayTab({ hideSectionNav = false }: ImGatewayTabPro
   }, [activeSection]);
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    if (visibleSections) {
+      fetchData();
+      return;
+    }
+    fetchActiveSectionData();
+  }, [fetchActiveSectionData, fetchData, visibleSections]);
 
   const handleSelectSection = useCallback(
     (section: ImGatewaySectionId) => {
@@ -3134,8 +3362,8 @@ export default function ImGatewayTab({ hideSectionNav = false }: ImGatewayTabPro
     </nav>
   );
 
-  const content = (() => {
-    switch (activeSection) {
+  const renderSectionContent = (section: ImGatewaySectionId) => {
+    switch (section) {
       case "connections":
         return (
           <div data-testid="im-gateway-section-connections">
@@ -3143,6 +3371,7 @@ export default function ImGatewayTab({ hideSectionNav = false }: ImGatewayTabPro
           providers={providers}
           loading={loading}
           onRefresh={fetchData}
+          cardGrid={cardGrid}
         />
           </div>
         );
@@ -3187,12 +3416,26 @@ export default function ImGatewayTab({ hideSectionNav = false }: ImGatewayTabPro
           </div>
         );
     }
-  })();
+  };
+
+  const content = visibleSections ? (
+    <Space direction="vertical" size={16} style={{ width: "100%" }}>
+      {renderedSections.map((section) => (
+        <div key={section}>{renderSectionContent(section)}</div>
+      ))}
+    </Space>
+  ) : (
+    renderSectionContent(activeSection)
+  );
 
   return (
     <div
       data-testid="im-gateway-layout"
-      style={{ height: "100%", minHeight: 0, overflow: "hidden" }}
+      style={{
+        height: hideSectionNav ? undefined : "100%",
+        minHeight: 0,
+        overflow: hideSectionNav ? "visible" : "hidden",
+      }}
     >
       <div
         style={{
@@ -3202,9 +3445,9 @@ export default function ImGatewayTab({ hideSectionNav = false }: ImGatewayTabPro
           gridTemplateRows:
             !hideSectionNav && isCompactNav ? "auto minmax(0, 1fr)" : undefined,
           gap: 16,
-          height: "100%",
+          height: hideSectionNav ? undefined : "100%",
           minHeight: 0,
-          overflow: "hidden",
+          overflow: hideSectionNav ? "visible" : "hidden",
         }}
       >
         {!hideSectionNav && (
@@ -3215,9 +3458,9 @@ export default function ImGatewayTab({ hideSectionNav = false }: ImGatewayTabPro
         <div
           data-testid="im-gateway-section-content"
           style={{
-            height: "100%",
+            height: hideSectionNav ? undefined : "100%",
             minHeight: 0,
-            overflowY: "auto",
+            overflowY: hideSectionNav ? "visible" : "auto",
             overflowX: "auto",
             paddingRight: isCompactNav ? 0 : 4,
           }}

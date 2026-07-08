@@ -41,7 +41,7 @@ export function mergeDetailMessagesWithTimeline(
       searchStart = merged.length;
     }
   });
-  return merged;
+  return sortMessagesByTimestamp(merged);
 }
 
 export function sliceRecentChatTurns(
@@ -385,6 +385,23 @@ function findMergeMessageIndex(
 
 function hasEquivalentMessage(messages: ChatMessage[], target: ChatMessage) {
   return messages.some((message) => isSameConversationMessage(message, target));
+}
+
+function sortMessagesByTimestamp(messages: ChatMessage[]) {
+  if (!messages.every((message) => typeof message.timestamp === "number")) {
+    return messages;
+  }
+  return messages
+    .map((message, index) => ({ message, index }))
+    .sort((left, right) => {
+      const leftTimestamp = left.message.timestamp as number;
+      const rightTimestamp = right.message.timestamp as number;
+      if (leftTimestamp === rightTimestamp) {
+        return left.index - right.index;
+      }
+      return leftTimestamp - rightTimestamp;
+    })
+    .map(({ message }) => message);
 }
 
 function isSameConversationMessage(left: ChatMessage, right: ChatMessage) {

@@ -330,6 +330,26 @@
 
 **执行记录（2026-06-02）**：PASS — 在默认数据目录的真实会话 `feishu-main:ou_82c9bc36c12abfaed40c2c52ef4b7fea` 上复现 `/sessions/all` 返回 `running:false`、`state:"idle"` 但 `run_state:"running"`，同时 `/stop` 返回“当前没有正在执行的 Agent loop”。修复后执行 `source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin sessions_all_idle_active_session_does_not_inherit_running_history_state -- --nocapture` 和 `source ~/.zshrc && pnpm --dir web exec vitest run src/pages/AI/AgentChatSection.timeline.test.ts`，分别验证后端 active session run_state 投影与前端 history telemetry 覆盖逻辑，结果 PASS。
 
+### TC-ASP-21：Agent Chat 摘要字段不一致时运行态展示稳定
+
+**操作步骤**：
+1. 使用 Playwright mock 或真实数据准备一条 Agent Chat session summary，字段同时包含 `status:"active"`、`running:true`、`state:"completed"`、`run_state:"completed"`，并绑定一条 canonical timeline。
+2. timeline 中包含 `run_state_changed: running`、`user_message`、`assistant_message`、`run_state_changed: completed`，模拟刷新后 summary 与 timeline 轮询存在短暂字段不一致。
+3. 在浏览器中打开：
+   ```text
+   http://localhost:$MAIN_PORT/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=active-completed-stale-running&view=history&historyPath=<url-encoded-path>
+   ```
+4. 查看右上角状态 Tag、消息区最后一轮展示形态、左侧线程列表 running 点。
+5. 停留至少 1 秒，等待一次 UI timer / poll 窗口后再次观察同样区域。
+
+**预期结果**：
+- 右上角状态保持 `Ready`，不会因 `status:"active"` 或陈旧 `running:true` 切回 `Running`。
+- 消息区最后一轮展示为完成态 `已处理 <duration>` 折叠摘要，不出现 `agent-chat-turn-running-group` 或 `Agent is running...` 占位。
+- 左侧线程列表不展示 `aria-label="running"` 的运行点。
+- 等待后上述状态保持稳定，不出现 running/ready、运行态/完成态之间的抖动。
+
+**执行记录（2026-07-08）**：PASS — 执行 `source ~/.zshrc && pnpm --dir web exec playwright test agent-chat.spec.ts -g "summary fields disagree"`，Playwright mock 复现 `status:"active" + running:true + run_state:"completed"` 的不一致摘要；断言右上角保持 `Ready`、消息区只显示完成态 `已处理` 摘要、没有 `agent-chat-turn-running-group`，左侧没有 running 点，并等待 1.2 秒后状态仍稳定。
+
 ## 清理步骤
 
 1. 停止 Bifrost 服务

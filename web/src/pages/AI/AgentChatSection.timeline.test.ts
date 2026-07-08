@@ -7,6 +7,8 @@ import {
 } from "./AgentChatSection.timeline";
 import { isThreadActive } from "./AgentChatSection.timelinePolling";
 import {
+  buildProcessLogItems,
+  formatCommandGroupSummary,
   formatContextWindow,
   formatModelRef,
   formatReasoningRef,
@@ -218,6 +220,38 @@ describe("historyEventsToTelemetry", () => {
     expect(telemetryFromThread(thread).status?.state).toBe("idle");
   });
 
+  it("lets explicit terminal run_state override stale running true", () => {
+    const thread: AgentThreadSummary = {
+      session_key: "admin-chat",
+      status: "active",
+      running: true,
+      run_state: "completed",
+      state: "completed",
+    };
+
+    expect(isThreadActive(thread)).toBe(false);
+  });
+
+  it("treats detailed in-progress run_state values as active", () => {
+    const activeStates = [
+      "waiting_on_session",
+      "model_response",
+      "tool_running",
+      "compacting",
+      "stopping",
+    ];
+
+    for (const state of activeStates) {
+      expect(
+        isThreadActive({
+          session_key: `admin-chat-${state}`,
+          status: "active",
+          run_state: state,
+        }),
+      ).toBe(true);
+    }
+  });
+
   it("keeps active detail status newer than stale history events when thread summary is missing", () => {
     const fallback: RunTelemetry = {
       phase: "running",
@@ -413,6 +447,42 @@ describe("historyEventsToMessages", () => {
       "latest answer",
     ]);
     expect(visible.messages[3].processSteps).toHaveLength(1);
+  });
+
+  it("keeps merged detail and timeline messages available without forced recent-turn truncation", () => {
+    const detailMessages = [
+      { id: "d1", role: "user" as const, content: "first question", meta: "You" },
+      { id: "d2", role: "assistant" as const, content: "first answer", meta: "Agent" },
+      { id: "d3", role: "user" as const, content: "second question", meta: "You" },
+      { id: "d4", role: "assistant" as const, content: "second answer", meta: "Agent" },
+      { id: "d5", role: "user" as const, content: "latest question", meta: "You" },
+      { id: "d6", role: "assistant" as const, content: "latest answer", meta: "Agent" },
+    ];
+    const timelineMessages = historyEventsToMessages([
+      {
+        timestamp: 11,
+        event_type: "user_message",
+        session_key: "full-merge",
+        content: { message: "latest question" },
+      },
+      {
+        timestamp: 12,
+        event_type: "assistant_message",
+        session_key: "full-merge",
+        content: { message: "latest answer" },
+      },
+    ]);
+
+    const merged = mergeDetailMessagesWithTimeline(detailMessages, timelineMessages);
+
+    expect(merged.map((message) => message.content)).toEqual([
+      "first question",
+      "first answer",
+      "second question",
+      "second answer",
+      "latest question",
+      "latest answer",
+    ]);
   });
 
   it("renders persisted Plan Mode proposed plans as assistant results", () => {
@@ -697,5 +767,60 @@ describe("agent token metric formatting", () => {
     ).toBe("high / auto");
     expect(formatModelRef({})).toBe("-");
     expect(formatReasoningRef({})).toBe("-");
+  });
+});
+
+describe("process log display helpers", () => {
+  it("groups adjacent tool steps into compact command rows", () => {
+    const items = buildProcessLogItems([
+      { type: "thinking", summary: "I will inspect the route.", status: "success" },
+      {
+        type: "tool",
+        summary: "exec_command",
+        status: "success",
+        durationMs: 1000,
+      },
+      {
+        type: "tool",
+        summary: "exec_command",
+        status: "failed",
+        durationMs: 2000,
+      },
+      { type: "thinking", summary: "Now I will patch it.", status: "success" },
+    ]);
+
+    expect(items).toHaveLength(3);
+    expect(items[0]).toMatchObject({ type: "text", index: 0 });
+    expect(items[1]).toMatchObject({ type: "commands", startIndex: 1 });
+    expect(items[1].type === "commands" ? items[1].steps : []).toHaveLength(2);
+    expect(items[2]).toMatchObject({ type: "text", index: 3 });
+  });
+
+  it("formats command group status from the grouped command states", () => {
+    expect(
+      formatCommandGroupSummary(
+        [
+          { type: "tool", summary: "exec_command", status: "success", durationMs: 1000 },
+          { type: "tool", summary: "exec_command", status: "success", durationMs: 2000 },
+        ],
+        10,
+      ),
+    ).toBe("已运行 2 条命令");
+    expect(
+      formatCommandGroupSummary(
+        [
+          { type: "tool", summary: "exec_command", status: "failed", durationMs: 2000 },
+        ],
+        10,
+      ),
+    ).toBe("失败 1 条命令 · 2s");
+    expect(
+      formatCommandGroupSummary(
+        [
+          { type: "tool", summary: "exec_command", status: "running", startedAt: 4 },
+        ],
+        10,
+      ),
+    ).toBe("已运行 1 条命令");
   });
 });

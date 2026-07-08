@@ -8,8 +8,11 @@ export function createAgentChatStyles(
   isNarrow: boolean,
   threadRailCollapsed: boolean,
   token: ThemeToken,
+  embeddedSidebar = false,
 ): Record<string, CSSProperties> {
-  const horizontalPadding = isNarrow ? 12 : isCompact ? 16 : 24;
+  const horizontalPadding = embeddedSidebar || isNarrow ? 12 : isCompact ? 16 : 24;
+  const conversationTopPadding = embeddedSidebar ? 12 : 28;
+  const trackMaxWidth = embeddedSidebar ? 1120 : 750;
   return {
     shell: {
       height: "100%",
@@ -18,6 +21,8 @@ export function createAgentChatStyles(
       display: "flex",
       flexDirection: "column",
       overflow: "hidden",
+      padding: embeddedSidebar ? "24px 0 0" : undefined,
+      boxSizing: embeddedSidebar ? "border-box" : undefined,
     },
     body: {
       position: "relative",
@@ -25,7 +30,7 @@ export function createAgentChatStyles(
       minHeight: 0,
       display: "grid",
       minWidth: 0,
-      gridTemplateColumns: isNarrow || threadRailCollapsed
+      gridTemplateColumns: embeddedSidebar || isNarrow || threadRailCollapsed
         ? "minmax(0, 1fr)"
         : isCompact
         ? "minmax(0, 1fr) minmax(180px, 240px)"
@@ -111,9 +116,9 @@ export function createAgentChatStyles(
       minHeight: 0,
       overflowY: "auto",
       overflowX: "hidden",
-      padding: `28px ${horizontalPadding}px 0`,
+      padding: `${conversationTopPadding}px ${horizontalPadding}px 0`,
       boxSizing: "border-box",
-      scrollPaddingTop: 28,
+      scrollPaddingTop: conversationTopPadding,
       scrollbarGutter: "stable",
       display: "flex",
       flexDirection: "column",
@@ -122,7 +127,7 @@ export function createAgentChatStyles(
     conversationTrack: {
       width: "100%",
       minWidth: 0,
-      maxWidth: 750,
+      maxWidth: trackMaxWidth,
       flex: "1 0 auto",
       paddingBottom: 72,
       boxSizing: "border-box",
@@ -248,7 +253,7 @@ export function createAgentChatStyles(
       bottom: 0,
       zIndex: 3,
       marginTop: "auto",
-      padding: isNarrow ? "12px 0 8px" : "12px 16px 8px",
+      padding: embeddedSidebar ? "12px 12px 8px" : isNarrow ? "12px 0 8px" : "12px 16px 8px",
       background: `linear-gradient(to top, ${token.colorBgContainer} 0%, ${token.colorBgContainer} 88%, transparent 100%)`,
       width: "100%",
       minWidth: 0,
@@ -281,7 +286,7 @@ export function createAgentChatStyles(
       position: "relative",
       width: "100%",
       minWidth: 0,
-      maxWidth: 750,
+      maxWidth: trackMaxWidth,
       margin: "0 auto",
       padding: 12,
       boxSizing: "border-box",
@@ -466,6 +471,35 @@ export function createAgentChatStyles(
       borderRadius: 8,
       padding: "8px 10px",
       background: token.colorFillQuaternary,
+    },
+    queueList: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6,
+      maxHeight: 68,
+      overflowY: "auto",
+      paddingRight: 2,
+      scrollbarGutter: "stable",
+    },
+    queueItem: {
+      display: "grid",
+      gridTemplateColumns: "minmax(0, 1fr) auto",
+      alignItems: "center",
+      gap: 8,
+      minHeight: 31,
+    },
+    queueItemText: {
+      minWidth: 0,
+      overflow: "hidden",
+      whiteSpace: "nowrap",
+      textOverflow: "ellipsis",
+    },
+    queueItemActions: {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 4,
+      flexShrink: 0,
+      whiteSpace: "nowrap",
     },
     slashRunnerPanel: {
       border: `1px solid ${token.colorBorderSecondary}`,

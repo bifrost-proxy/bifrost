@@ -323,16 +323,12 @@ test("AI Agent Chat deep link renders local chat preview and composer flow", asy
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("agent-chat-settings-modal")).toHaveCount(0);
 
-  // Process steps block (collapsible thinking process) should be visible
+  // Process steps render inline once the turn is expanded.
   const processBlock = page.getByTestId("agent-chat-process-block");
   await expect(processBlock).toBeVisible();
-  // Collapsed by default - shows summary line only
   await expect(processBlock).toContainText("已运行 1 条命令");
-  await expect(processBlock).toContainText("1s");
   await expect(processBlock).not.toContainText("pnpm test");
-  // Click to expand
   await processBlock.getByText("已运行 1 条命令").click();
-  // After expanding, shows individual step summaries
   await expect(processBlock).toContainText("shell");
   await expect(processBlock).not.toContainText("active");
   await expect(processBlock).not.toContainText("Run state: Running");
@@ -1854,71 +1850,17 @@ test("AI Agent Chat restores JSONL history and continues with history path", asy
   );
 });
 
-test("AI Agent Chat loads history detail progressively", async ({ page }) => {
-  const historyPath = "/tmp/progressive-history.jsonl";
+test("AI Agent Chat loads full history detail without progressive truncation", async ({ page }) => {
+  const historyPath = "/tmp/full-history.jsonl";
   const historyUrls: string[] = [];
-  let unexpectedFullHistoryRequest = false;
   await page.route(
     `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}**`,
     async (route) => {
       historyUrls.push(route.request().url());
       const url = new URL(route.request().url());
-      if (url.searchParams.get("tail") === "true") {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            events: [
-              {
-                timestamp: 4,
-                event_type: "user_message",
-                session_key: "progressive-history",
-                content: { message: "Newest question" },
-              },
-              {
-                timestamp: 5,
-                event_type: "assistant_message",
-                session_key: "progressive-history",
-                content: { message: "Newest answer" },
-              },
-            ],
-            count: 2,
-            total_count: 5,
-            start_index: 3,
-            end_index: 5,
-            next_cursor: 3,
-            has_more: true,
-          }),
-        });
-        return;
-      }
-      if (url.searchParams.get("cursor") === "3") {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            events: [
-              {
-                timestamp: 3,
-                event_type: "assistant_message",
-                session_key: "progressive-history",
-                content: { message: "Middle answer" },
-              },
-            ],
-            count: 1,
-            total_count: 5,
-            start_index: 2,
-            end_index: 3,
-            next_cursor: 2,
-            has_more: true,
-          }),
-        });
-        return;
-      }
-      if (url.searchParams.get("cursor") !== "2") {
-        unexpectedFullHistoryRequest = true;
-      }
-      expect(url.searchParams.get("cursor")).toBe("2");
+      expect(url.searchParams.has("tail")).toBe(false);
+      expect(url.searchParams.has("cursor")).toBe(false);
+      expect(url.searchParams.has("limit")).toBe(false);
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1927,21 +1869,39 @@ test("AI Agent Chat loads history detail progressively", async ({ page }) => {
             {
               timestamp: 1,
               event_type: "user_message",
-              session_key: "progressive-history",
+              session_key: "full-history",
               content: { message: "Oldest question" },
             },
             {
               timestamp: 2,
               event_type: "assistant_message",
-              session_key: "progressive-history",
+              session_key: "full-history",
               content: { message: "Oldest answer" },
             },
+            {
+              timestamp: 3,
+              event_type: "assistant_message",
+              session_key: "full-history",
+              content: { message: "Middle answer" },
+            },
+            {
+              timestamp: 4,
+              event_type: "user_message",
+              session_key: "full-history",
+              content: { message: "Newest question" },
+            },
+            {
+              timestamp: 5,
+              event_type: "assistant_message",
+              session_key: "full-history",
+              content: { message: "Newest answer" },
+            },
           ],
-          count: 2,
+          count: 5,
           total_count: 5,
           start_index: 0,
-          end_index: 2,
-          next_cursor: 0,
+          end_index: 5,
+          next_cursor: null,
           has_more: false,
         }),
       });
@@ -1950,35 +1910,22 @@ test("AI Agent Chat loads history detail progressively", async ({ page }) => {
 
   await openPage(
     page,
-    `ai?aiSection=agent-chat&agentSection=chat&session=progressive-history&view=history&historyPath=${encodeURIComponent(historyPath)}`,
+    `ai?aiSection=agent-chat&agentSection=chat&session=full-history&view=history&historyPath=${encodeURIComponent(historyPath)}`,
   );
 
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
-    "Newest answer",
-  );
-  await expect(page.getByTestId("agent-chat-messages")).not.toContainText(
     "Oldest question",
   );
-  expect(new URL(historyUrls[0]).searchParams.get("tail")).toBe("true");
-  expect(new URL(historyUrls[0]).searchParams.has("cursor")).toBe(false);
-  await page.getByTestId("agent-chat-load-older").click();
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Middle answer",
   );
-  await page.getByTestId("agent-chat-load-older").click();
-  await expect(page.getByTestId("agent-chat-messages")).toContainText(
-    "Oldest question",
-  );
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Newest answer",
   );
-  expect(
-    historyUrls.some((url) => new URL(url).searchParams.get("cursor") === "3"),
-  ).toBe(true);
-  expect(
-    historyUrls.some((url) => new URL(url).searchParams.get("cursor") === "2"),
-  ).toBe(true);
-  expect(unexpectedFullHistoryRequest).toBe(false);
+  await expect(page.getByTestId("agent-chat-load-older")).toHaveCount(0);
+  expect(new URL(historyUrls[0]).searchParams.has("tail")).toBe(false);
+  expect(new URL(historyUrls[0]).searchParams.has("cursor")).toBe(false);
+  expect(new URL(historyUrls[0]).searchParams.has("limit")).toBe(false);
 });
 
 test("AI Agent Chat keeps running history token HUD synced with live status", async ({
@@ -2239,7 +2186,8 @@ test("AI Agent Chat continues external runner history with canonical history pat
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Earlier GPT Web answer",
   );
-  expect(new URL(historyUrls[0]).searchParams.get("tail")).toBe("true");
+  expect(new URL(historyUrls[0]).searchParams.has("tail")).toBe(false);
+  expect(new URL(historyUrls[0]).searchParams.has("limit")).toBe(false);
   await expect(page.getByTestId("agent-chat-runner-tag")).toContainText("web");
   await page.getByTestId("agent-chat-input").fill("Continue via GPT Web");
   await page.getByTestId("agent-chat-send").click();
@@ -2645,7 +2593,6 @@ test("AI Agent Chat restores active timeline process steps from history path", a
   const processBlock = page.getByTestId("agent-chat-process-block");
   await expect(processBlock).toBeVisible();
   await expect(processBlock).toContainText("已运行 1 条命令");
-  await expect(processBlock).toContainText("1s");
   await expect(processBlock).not.toContainText("pnpm test");
   await expect
     .poll(async () =>
@@ -2675,10 +2622,15 @@ test("AI Agent Chat restores active timeline process steps from history path", a
       }),
     )
     .toBe(true);
-  await processBlock.getByRole("button").click();
+  await expect(
+    processBlock.getByRole("button", { name: "Expand execution process" }),
+  ).toHaveCount(0);
   await expect(processBlock).not.toContainText("Run state: Running");
+  await expect(processBlock.getByTestId("agent-chat-process-command-summary")).toContainText(
+    "已运行 1 条命令",
+  );
+  await processBlock.getByTestId("agent-chat-process-command-summary").click();
   await expect(processBlock).toContainText("exec_command");
-  await processBlock.getByText("exec_command").click();
   await expect(processBlock).toContainText("pnpm test");
   await expect(processBlock).toContainText("ok");
 });
@@ -2830,6 +2782,12 @@ test("AI Agent Chat updates running history timeline from SSE without cross-thre
   );
 
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Previous question",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Previous answer",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Question before refresh",
   );
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
@@ -2874,10 +2832,15 @@ test("AI Agent Chat updates running history timeline from SSE without cross-thre
       }),
     )
     .toBe(true);
-  await processBlock.getByRole("button").click();
+  await expect(
+    processBlock.getByRole("button", { name: "Expand execution process" }),
+  ).toHaveCount(0);
   await expect(processBlock).not.toContainText("Run state: Running");
+  await expect(processBlock.getByTestId("agent-chat-process-command-summary")).toContainText(
+    "已运行 1 条命令",
+  );
+  await processBlock.getByTestId("agent-chat-process-command-summary").click();
   await expect(processBlock).toContainText("exec_command");
-  await processBlock.getByText("exec_command").click();
   await expect(processBlock).toContainText("cargo test");
   await expect(processBlock).toContainText("still running output");
   expect(historyCalls).toBeGreaterThan(0);
@@ -3538,6 +3501,107 @@ test("AI Agent Chat lets active detail idle run_state override stale running his
   );
 });
 
+test("AI Agent Chat keeps thread and message running state stable when summary fields disagree", async ({
+  page,
+}) => {
+  const historyPath = "/tmp/active-completed-stale-running.jsonl";
+  const startedAt = Math.floor(Date.now() / 1000) - 20;
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: { bifrost_agent: { enabled: true, adapter: "builtin" } },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "active-completed-stale-running",
+            status: "active",
+            running: true,
+            state: "completed",
+            run_state: "completed",
+            title: "Completed summary wins",
+            history_path: historyPath,
+            has_timeline: true,
+            source: "web",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route(
+    `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}**`,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          events: [
+            {
+              timestamp: startedAt,
+              event_type: "run_state_changed",
+              session_key: "active-completed-stale-running",
+              content: { state: "running", agent_kind: "builtin", source_channel: "web" },
+            },
+            {
+              timestamp: startedAt + 1,
+              event_type: "user_message",
+              session_key: "active-completed-stale-running",
+              content: { message: "Summarize the finished task" },
+            },
+            {
+              timestamp: startedAt + 2,
+              event_type: "assistant_message",
+              session_key: "active-completed-stale-running",
+              content: { message: "The task is complete." },
+            },
+            {
+              timestamp: startedAt + 3,
+              event_type: "run_state_changed",
+              session_key: "active-completed-stale-running",
+              content: { state: "completed", agent_kind: "builtin", source_channel: "web" },
+            },
+          ],
+          start_index: 0,
+          end_index: 4,
+          has_more: false,
+        }),
+      });
+    },
+  );
+
+  await openPage(
+    page,
+    `ai?aiSection=agent-chat&agentSection=chat&session=active-completed-stale-running&view=history&historyPath=${encodeURIComponent(historyPath)}`,
+  );
+
+  await expect(page.getByTestId("agent-chat-state-tag")).toContainText("Ready");
+  await expect(page.getByTestId("agent-chat-turn-running-group")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-turn-collapse-toggle")).toContainText("已处理");
+  await expect(page.locator('[aria-label="running"]')).toHaveCount(0);
+  await page.waitForTimeout(1200);
+  await expect(page.getByTestId("agent-chat-state-tag")).toContainText("Ready");
+  await expect(page.getByTestId("agent-chat-turn-running-group")).toHaveCount(0);
+  await expect(page.locator('[aria-label="running"]')).toHaveCount(0);
+});
+
 test("AI Agent Chat can start a new chat while the selected thread is running", async ({
   page,
 }) => {
@@ -3615,14 +3679,12 @@ test("AI Agent Chat can start a new chat while the selected thread is running", 
     `ai?aiSection=agent-chat&agentSection=chat&session=running-thread&view=history&historyPath=${encodeURIComponent(historyPath)}`,
   );
   await expect(page.getByTestId("agent-chat-state-tag")).toContainText("Running");
-  await expect(page.getByTestId("agent-chat-new")).toBeEnabled();
+  await expect(page.getByTestId("ai-nav-new-chat")).toBeEnabled();
 
-  await page.getByTestId("agent-chat-new").click();
-  await expect(page.getByTestId("agent-chat-new-modal")).toBeVisible();
-  await page.getByRole("button", { name: "Create" }).click();
-  await expect(page.getByTestId("agent-chat-new-modal")).toHaveCount(0);
-  await expect(page.getByTestId("agent-chat-state-tag")).toContainText("New");
-  await expect(page.getByTestId("agent-chat-input")).toBeEnabled();
+  await page.getByTestId("ai-nav-new-chat").click();
+  const newChatLanding = page.getByTestId("ai-new-chat-landing");
+  await expect(newChatLanding).toBeVisible();
+  await expect(newChatLanding.getByTestId("agent-chat-input")).toBeEnabled();
 });
 
 test("AI Agent Chat thread list scrolls and selects only the active duplicate", async ({
@@ -3896,6 +3958,104 @@ test("AI Agent Chat clicking the selected thread keeps loaded messages", async (
   await expect(page.getByTestId("agent-chat-messages")).not.toContainText(
     "Preview workspace",
   );
+});
+
+test("AI page lets the selected thread leave Settings", async ({ page }) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "settings-selected-thread",
+            status: "ended",
+            title: "Settings selected thread",
+            source: "web",
+            start_time: 120,
+            last_active_time: 180,
+            duration_secs: 60,
+          },
+        ],
+      }),
+    });
+  });
+  await page.route(
+    "**/_bifrost/api/im-gateway/agent/sessions/settings-selected-thread",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          session_key: "settings-selected-thread",
+          title: "Settings selected thread",
+          source: "web",
+          messages: [
+            { role: "user", content: "Open the selected thread from Settings" },
+            { role: "assistant", content: "Settings should yield to chat routing" },
+          ],
+        }),
+      });
+    },
+  );
+
+  await openPage(
+    page,
+    "ai?aiSection=agent-chat&agentSection=chat&session=settings-selected-thread&view=active",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Settings should yield to chat routing",
+  );
+  const selectedRow = page.locator(
+    '[data-testid="agent-chat-thread-item"][data-selected="true"]',
+  );
+  await expect(selectedRow).toHaveCount(1);
+
+  await page.getByTestId("ai-nav-settings").click();
+  await expect(page.getByTestId("ai-settings-content")).toBeVisible();
+  await expect(selectedRow).toHaveCount(1);
+
+  await selectedRow.click();
+  await expect(page.getByTestId("ai-settings-content")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Settings should yield to chat routing",
+  );
+  await expect(page).toHaveURL(/view=chat/);
+});
+
+test("AI page lets a previously selected top nav item leave Settings", async ({
+  page,
+}) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ sessions: [] }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: { bifrost_agent: { enabled: true, adapter: "builtin" } },
+        channels: {},
+      }),
+    });
+  });
+
+  await openPage(page, "ai?view=im");
+  await expect(page.getByTestId("ai-im-content")).toBeVisible();
+
+  await page.getByTestId("ai-nav-settings").click();
+  await expect(page.getByTestId("ai-settings-content")).toBeVisible();
+
+  await page.getByTestId("ai-nav-im").click();
+  await expect(page.getByTestId("ai-settings-content")).toHaveCount(0);
+  await expect(page.getByTestId("ai-im-content")).toBeVisible();
+  await expect(page).toHaveURL(/view=im/);
 });
 
 test("AI Agent Chat uses detail runner metadata instead of source for selected row", async ({
@@ -4497,12 +4657,36 @@ test("AI Agent Chat supports running stop, guide, queue, and queue removal", asy
   page,
 }) => {
   const messages: string[] = [];
-  let releaseFirst: (() => void) | undefined;
-  const firstRequestCanFinish = new Promise<void>((resolve) => {
-    releaseFirst = resolve;
-  });
   await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ sessions: [] }) });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "running-queue-layout",
+            status: "active",
+            run_state: "running",
+            title: "Running queue layout",
+            source: "admin-api",
+            runner_type: "bifrost_agent",
+            queueItems: [
+              {
+                seq: 1,
+                message:
+                  "queued follow up with a very long body that should stay on one line and leave room for actions",
+              },
+              {
+                seq: 2,
+                message: "second queued follow up with enough text to trigger truncation",
+              },
+              { seq: 3, message: "third queued follow up" },
+              { seq: 4, message: "fourth queued follow up" },
+            ],
+          },
+        ],
+      }),
+    });
   });
   await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
     await route.fulfill({
@@ -4519,35 +4703,49 @@ test("AI Agent Chat supports running stop, guide, queue, and queue removal", asy
   await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }) });
   });
+  await page.route(
+    "**/_bifrost/api/im-gateway/agent/sessions/running-queue-layout",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          session_key: "running-queue-layout",
+          status: "active",
+          run_state: "running",
+          title: "Running queue layout",
+          source: "admin-api",
+          runner_type: "bifrost_agent",
+          messages: [
+            { role: "user", content: "Start long task" },
+            { role: "assistant", content: "Agent is running..." },
+          ],
+          queueItems: [
+            {
+              seq: 1,
+              message:
+                "queued follow up with a very long body that should stay on one line and leave room for actions",
+            },
+            {
+              seq: 2,
+              message: "second queued follow up with enough text to trigger truncation",
+            },
+            { seq: 3, message: "third queued follow up" },
+            { seq: 4, message: "fourth queued follow up" },
+          ],
+        }),
+      });
+    },
+  );
   await page.route("**/_bifrost/api/agent/chat/stream", async (route) => {
     const payload = route.request().postDataJSON();
     messages.push(payload.message);
-    if (payload.message === "Start long task") {
-      await firstRequestCanFinish;
-      await route.fulfill({
-        status: 200,
-        contentType: "text/event-stream",
-        body:
-          'event: run_started\ndata: {"eventType":"run_started"}\n\n' +
-          'event: run_finished\ndata: {"eventType":"run_finished","response":"Long task done"}\n\n',
-      });
-      return;
-    }
-    if (payload.message === "/q queued follow up") {
-      await route.fulfill({
-        status: 200,
-        contentType: "text/event-stream",
-        body:
-          'event: run_finished\ndata: {"eventType":"run_finished","response":"✅ 消息已收到，将在当前任务完成后处理（排队 1 条）","queued":true,"queueItems":[{"seq":1,"message":"queued follow up"}]}\n\n',
-      });
-      return;
-    }
     if (payload.message === "/rq 1") {
       await route.fulfill({
         status: 200,
         contentType: "text/event-stream",
         body:
-          'event: run_finished\ndata: {"eventType":"run_finished","response":"removed","queued":true,"queueItems":[]}\n\n',
+          'event: run_finished\ndata: {"eventType":"run_finished","response":"removed","queued":true,"queueItems":[{"seq":2,"message":"second queued follow up with enough text to trigger truncation"},{"seq":3,"message":"third queued follow up"},{"seq":4,"message":"fourth queued follow up"}]}\n\n',
       });
       return;
     }
@@ -4568,22 +4766,43 @@ test("AI Agent Chat supports running stop, guide, queue, and queue removal", asy
     });
   });
 
-  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
-  await page.getByTestId("agent-chat-input").fill("Start long task");
-  await page.getByTestId("agent-chat-send").click();
+  await openPage(
+    page,
+    "ai?aiSection=agent-chat&agentSection=chat&session=running-queue-layout&view=active",
+  );
+  const composer = page.getByTestId("agent-chat-composer-track");
+  const composerInput = composer.getByTestId("agent-chat-input");
+  const composerSend = composer.getByTestId("agent-chat-send");
+  await expect(composerSend).toHaveAttribute("aria-label", "Stop");
 
-  await expect(page.getByTestId("agent-chat-send")).toHaveAttribute("aria-label", "Stop");
-
-  await page.getByTestId("agent-chat-input").fill("guide now");
+  await composerInput.fill("guide now");
   await expect(page.getByText("Running input")).toBeVisible();
-  await page.getByTestId("agent-chat-send").click();
+  await composerSend.click();
   await expect(page.getByTestId("agent-chat-messages")).toContainText("guide accepted");
 
-  await page.getByTestId("agent-chat-input").fill("queued follow up");
-  await page.locator(".ant-segmented-item").filter({ hasText: /^Queue$/ }).click();
-  await page.getByTestId("agent-chat-send").click();
   await expect(page.getByTestId("agent-chat-queue-panel")).toContainText(
     "queued follow up",
+  );
+  await expect(page.getByTestId("agent-chat-queue-item")).toHaveCount(4);
+  const queueListMetrics = await page.getByTestId("agent-chat-queue-list").evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    overflowY: window.getComputedStyle(element).overflowY,
+  }));
+  expect(queueListMetrics.clientHeight).toBeLessThanOrEqual(74);
+  expect(queueListMetrics.scrollHeight).toBeGreaterThan(queueListMetrics.clientHeight);
+  expect(queueListMetrics.overflowY).toBe("auto");
+  const firstQueueItem = page.getByTestId("agent-chat-queue-item").first();
+  const firstItemBox = await firstQueueItem.boundingBox();
+  const firstTextBox = await firstQueueItem.locator(".ant-typography").boundingBox();
+  const firstRemoveBox = await page.getByLabel("Remove queued message 1").boundingBox();
+  expect(firstItemBox).not.toBeNull();
+  expect(firstTextBox).not.toBeNull();
+  expect(firstRemoveBox).not.toBeNull();
+  expect(firstRemoveBox!.x).toBeGreaterThan(firstTextBox!.x + firstTextBox!.width);
+  expect(firstRemoveBox!.y).toBeGreaterThanOrEqual(firstItemBox!.y - 1);
+  expect(firstRemoveBox!.y + firstRemoveBox!.height).toBeLessThanOrEqual(
+    firstItemBox!.y + firstItemBox!.height + 1,
   );
   const messageBubbles = page.locator('[data-testid^="agent-chat-message-bubble-"]');
   await expect
@@ -4594,18 +4813,18 @@ test("AI Agent Chat supports running stop, guide, queue, and queue removal", asy
     .not.toContain("消息已收到");
 
   await page.getByLabel("Remove queued message 1").click();
-  await expect(page.getByTestId("agent-chat-queue-panel")).toBeHidden();
+  await expect(page.getByLabel("Remove queued message 1")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-queue-panel")).toContainText("second queued follow up");
   await expect
     .poll(async () => (await messageBubbles.allTextContents()).join("\n"))
     .not.toContain("removed");
 
-  await page.getByTestId("agent-chat-send").click();
+  await composerSend.click();
   await expect(page.getByTestId("agent-chat-messages")).toContainText("stopped");
 
-  releaseFirst?.();
   await expect
     .poll(() => messages.join("|"))
-    .toBe("Start long task|guide now|/q queued follow up|/rq 1|/stop");
+    .toBe("guide now|/rq 1|/stop");
 });
 
 test("AI Agent Chat surfaces run errors in the telemetry panel", async ({ page }) => {
@@ -4703,17 +4922,23 @@ test("AI Agent Chat streams long task output previews into tool output", async (
 
   await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
 
-  await page.getByTestId("agent-chat-input").fill("Watch the long command");
-  await page.getByTestId("agent-chat-send").click();
+  const newChatLanding = page.getByTestId("ai-new-chat-landing");
+  await newChatLanding.getByTestId("agent-chat-input").fill("Watch the long command");
+  await newChatLanding.getByTestId("agent-chat-send").click();
 
   await page.getByTestId("agent-chat-turn-collapse-toggle").click();
   const processBlock = page.getByTestId("agent-chat-process-block");
   await expect(processBlock).toBeVisible();
   await expect(processBlock).toContainText("已运行 1 条命令");
   await expect(processBlock).not.toContainText("streamed stdout chunk");
-  await processBlock.getByRole("button").click();
+  await expect(
+    processBlock.getByRole("button", { name: "Expand execution process" }),
+  ).toHaveCount(0);
+  await expect(processBlock.getByTestId("agent-chat-process-command-summary")).toContainText(
+    "已运行 1 条命令",
+  );
+  await processBlock.getByTestId("agent-chat-process-command-summary").click();
   await expect(processBlock).toContainText("exec_command");
-  await processBlock.getByText("exec_command").click();
   await expect(processBlock).toContainText("Input");
   await expect(processBlock).toContainText("Output");
   await expect(processBlock).toContainText("running test shard 42");

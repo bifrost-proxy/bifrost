@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type CSSProperties, type KeyboardEvent } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Button, Card, Col, Empty, Grid, Input, Modal, Row, Segmented, Select, Space, Tag, Typography, message as antdMessage, theme } from "antd";
-import { BulbOutlined, DeleteOutlined, DownOutlined, FolderOpenOutlined, BorderOutlined, LeftOutlined, PlusOutlined, RobotOutlined, SendOutlined, SettingOutlined } from "@ant-design/icons";
+import { Button, Card, Empty, Grid, Input, Modal, Segmented, Select, Space, Tag, Typography, message as antdMessage, theme } from "antd";
+import { BulbOutlined, DeleteOutlined, DownOutlined, FolderOpenOutlined, BorderOutlined, LeftOutlined, RobotOutlined, SendOutlined, SettingOutlined } from "@ant-design/icons";
 import { apiFetch } from "../../api/apiFetch";
 import { buildApiUrl } from "../../runtime";
 import { getClientId } from "../../services/clientId";
@@ -12,7 +12,6 @@ import {
   dedupeThreads,
   eventToProcessStep,
   formatCurrentStateTag,
-  formatRunnerOptionLabel,
   formatRunnerTag,
   formatThreadSource,
   isRecord,
@@ -42,9 +41,12 @@ import {
   historyEventsToMessages,
   historyEventsToTelemetry,
   mergeDetailMessagesWithTimeline,
-  sliceRecentChatTurns,
 } from "./AgentChatSection.timeline";
-import { isRunStateActive, isThreadActive } from "./AgentChatSection.timelinePolling";
+import {
+  isRunStateActive,
+  isRunStateIdle,
+  isThreadActive,
+} from "./AgentChatSection.timelinePolling";
 import { AgentChatMessageList } from "./AgentChatSection.messages";
 import { AgentChatPlan, AgentChatPromptChips } from "./AgentChatSection.composerExtras";
 import { AgentChatSettingsModal, AgentThreadListCard } from "./AgentChatSection.panels";
@@ -56,13 +58,13 @@ import {
 import { SelectedRunnerPill, SlashRunnerPanel, useRunnerCallHandler, useSlashRunnerSelection, type SlashCommandOption } from "./AgentChatSection.runnerCall";
 import { createAgentChatStyles } from "./AgentChatSection.styles";
 import { AgentChatTokenHud } from "./AgentChatSection.tokenHud";
+import { buildRunnerOptions, selectDefaultRunner } from "./aiLayout";
 
 const { Text } = Typography;
 const { TextArea } = Input;
 const { useBreakpoint } = Grid;
 const MAX_PASTED_IMAGES = 6;
 const HISTORY_EVENT_PAGE_SIZE = 300;
-const ACTIVE_CHAT_TURN_PAGE_SIZE = 20;
 const THREAD_RAIL_COLLAPSED_STORAGE_KEY = "bifrost.agentChat.threadRailCollapsed";
 type AgentCollaborationMode = "plan";
 
@@ -76,6 +78,30 @@ type AgentSessionEventPayload = {
   endIndex?: number;
   end_index?: number;
   reason?: string;
+};
+
+export type AgentChatSectionHandle = {
+  openNewChat: () => void;
+  startNewChat: (message: string, runnerId?: string) => Promise<void>;
+};
+
+export type AgentChatSidebarState = {
+  threads: AgentThreadSummary[];
+  sessionKey: string;
+  historyPath?: string;
+  view?: string;
+  nowSeconds: number;
+  styles: Record<string, CSSProperties>;
+  onOpenThread: (thread: AgentThreadSummary) => void;
+  onDeleteThread: (thread: AgentThreadSummary) => void;
+};
+
+type AgentChatSectionProps = {
+  embeddedSidebar?: boolean;
+  forceNewChat?: boolean;
+  onNewChatStateChange?: (active: boolean) => void;
+  onSidebarStateChange?: (state: AgentChatSidebarState) => void;
+  onControlsReady?: (handle: AgentChatSectionHandle) => void;
 };
 
 function parseAgentPlanSlash(content: string): {
@@ -185,6 +211,29 @@ function runnerModelSlashSystemDisplayContent(command: string, response: string)
   return response;
 }
 
+function resolveRunningState({
+  fallbackRunning = false,
+  phase,
+  state,
+  thread,
+}: {
+  fallbackRunning?: boolean;
+  phase?: RunTelemetry["phase"];
+  state?: string;
+  thread?: AgentThreadSummary;
+}) {
+  if (isRunStateIdle(state)) {
+    return false;
+  }
+  if (isRunStateActive(state)) {
+    return true;
+  }
+  if (phase === "finished" || phase === "failed") {
+    return false;
+  }
+  return fallbackRunning || phase === "running" || isThreadActive(thread);
+}
+
 type HistoryPagePayload = {
   events?: HistoryEvent[];
   count?: number;
@@ -273,7 +322,13 @@ function imageFilesFromClipboard(event: ClipboardEvent<HTMLTextAreaElement>) {
   );
 }
 
-export default function AgentChatSection() {
+export default function AgentChatSection({
+  embeddedSidebar = false,
+  forceNewChat = false,
+  onNewChatStateChange,
+  onSidebarStateChange,
+  onControlsReady,
+}: AgentChatSectionProps = {}) {
   const [searchParams, setSearchParams] = useSearchParams();
   const { token } = theme.useToken();
   const screens = useBreakpoint();
@@ -332,7 +387,6 @@ export default function AgentChatSection() {
   const historyOlderCursorRef = useRef<number | undefined>(undefined);
   const historyLoadingOlderRef = useRef(false);
   const activeDetailMessagesRef = useRef<ChatMessage[]>([]);
-  const activeVisibleTurnCountRef = useRef(ACTIVE_CHAT_TURN_PAGE_SIZE);
   const activeTimelineHasOlderRef = useRef(false);
   const loadOlderHistoryPageRef = useRef<() => void>(() => {});
   const initialThreadAutoSelectRef = useRef(false);
@@ -458,21 +512,8 @@ export default function AgentChatSection() {
       return { messages: timelineMessages, hasOlder: false };
     }
     const merged = mergeDetailMessagesWithTimeline(detailMessages, timelineMessages);
-    return sliceRecentChatTurns(merged, activeVisibleTurnCountRef.current);
+    return { messages: merged, hasOlder: false };
   }, []);
-
-  const timelineMessagesFromCurrentEvents = useCallback(
-    (thread?: AgentThreadSummary) => {
-      const terminalTimeline = telemetryPhaseRef.current === "finished" || telemetryPhaseRef.current === "failed";
-      const timelineRunning = telemetryPhaseRef.current === "running" && isThreadActive(thread);
-      return historyEventsToMessages(historyEventsRef.current, {
-        ensureRunningAssistant:
-          timelineRunning || (!terminalTimeline && isThreadActive(thread)),
-        runningState: thread?.run_state || thread?.state,
-      });
-    },
-    [],
-  );
 
   const resetHistoryEventWindow = useCallback(() => {
     historyEventsRef.current = [];
@@ -480,7 +521,6 @@ export default function AgentChatSection() {
     historyEventEndIndexRef.current = undefined;
     historyOlderCursorRef.current = undefined;
     activeDetailMessagesRef.current = [];
-    activeVisibleTurnCountRef.current = ACTIVE_CHAT_TURN_PAGE_SIZE;
     activeTimelineHasOlderRef.current = false;
     setHistoryHasOlder(false);
   }, []);
@@ -508,15 +548,18 @@ export default function AgentChatSection() {
       );
       const terminalTimeline =
         nextTelemetry.phase === "finished" || nextTelemetry.phase === "failed";
-      const timelineRunning =
-        nextTelemetry.phase === "running" && isThreadActive(matchedThread);
+      const timelineRunning = resolveRunningState({
+        phase: nextTelemetry.phase,
+        state: matchedThread?.run_state || matchedThread?.state,
+        thread: matchedThread,
+      });
       const restored = historyEventsToMessages(events, {
         ensureRunningAssistant:
           timelineRunning || (!terminalTimeline && isThreadActive(matchedThread)),
         runningState: matchedThread?.run_state || matchedThread?.state,
       });
       const visible = visibleActiveMessagesFromTimeline(restored);
-      setHistoryHasOlder(activeTimelineHasOlderRef.current || visible.hasOlder);
+      setHistoryHasOlder(activeTimelineHasOlderRef.current);
       replaceLoadedMessages(visible.messages, shouldStickToBottom);
       setTelemetry(nextTelemetry);
       setRunning(timelineRunning || (!terminalTimeline && isThreadActive(matchedThread)));
@@ -552,33 +595,6 @@ export default function AgentChatSection() {
 
   const loadOlderHistoryPage = useCallback(async () => {
     const timelineHistoryPath = historyPath || selectedThread?.history_path;
-    if (
-      !historyPath &&
-      activeDetailMessagesRef.current.length > 0 &&
-      !historyLoadingOlderRef.current &&
-      !historyLoadingOlder
-    ) {
-      const currentTimelineMessages = timelineMessagesFromCurrentEvents(selectedThread);
-      const currentWindow = visibleActiveMessagesFromTimeline(currentTimelineMessages);
-      if (currentWindow.hasOlder) {
-        const element = messagesScrollRef.current;
-        const previousScrollHeight = element?.scrollHeight ?? 0;
-        const previousScrollTop = element?.scrollTop ?? 0;
-        activeVisibleTurnCountRef.current += ACTIVE_CHAT_TURN_PAGE_SIZE;
-        const expandedWindow = visibleActiveMessagesFromTimeline(currentTimelineMessages);
-        replaceLoadedMessages(expandedWindow.messages, false);
-        setHistoryHasOlder(activeTimelineHasOlderRef.current || expandedWindow.hasOlder);
-        requestAnimationFrame(() => {
-          const nextElement = messagesScrollRef.current;
-          if (!nextElement) {
-            return;
-          }
-          const addedHeight = nextElement.scrollHeight - previousScrollHeight;
-          nextElement.scrollTop = previousScrollTop + addedHeight;
-        });
-        return;
-      }
-    }
     const cursor = historyOlderCursorRef.current;
     if (
       !timelineHistoryPath ||
@@ -632,10 +648,7 @@ export default function AgentChatSection() {
     historyHasOlder,
     historyLoadingOlder,
     historyPath,
-    replaceLoadedMessages,
     selectedThread,
-    timelineMessagesFromCurrentEvents,
-    visibleActiveMessagesFromTimeline,
   ]);
 
   useEffect(() => {
@@ -661,6 +674,17 @@ export default function AgentChatSection() {
     telemetry.plan.length === 0 &&
     telemetry.tools.length === 0 &&
     telemetry.errors.length === 0;
+  const newChatActive =
+    forceNewChat ||
+    (!querySessionKey &&
+      !queryHistoryPath &&
+      !historyPath &&
+      !selectedThread &&
+      !hasRealMessages &&
+      telemetry.phase === "idle" &&
+      telemetry.plan.length === 0 &&
+      telemetry.tools.length === 0 &&
+      telemetry.errors.length === 0);
   const currentSourceTag = selectedThread
     ? formatThreadSource(selectedThread)
     : formatThreadSource({
@@ -675,16 +699,14 @@ export default function AgentChatSection() {
       });
   const currentRunnerTag = formatRunnerTag(telemetry.status, selectedThread, runnerId);
   const terminalTimeline = telemetry.phase === "finished" || telemetry.phase === "failed";
-  const displayRunning = running || (!terminalTimeline && isThreadActive(selectedThread));
+  const displayRunning = resolveRunningState({
+    fallbackRunning: running || (!terminalTimeline && isThreadActive(selectedThread)),
+    phase: telemetry.phase,
+    state: selectedThread?.run_state || selectedThread?.state || telemetry.status?.state,
+    thread: selectedThread,
+  });
   const currentStateTag = formatCurrentStateTag(telemetry, selectedThread, displayRunning);
-  const activeDetailHasOlder =
-    activeDetailMessagesRef.current.length > 0
-      ? sliceRecentChatTurns(
-          activeDetailMessagesRef.current,
-          activeVisibleTurnCountRef.current,
-        ).hasOlder
-      : false;
-  const showLoadOlder = historyHasOlder || activeDetailHasOlder;
+  const showLoadOlder = historyHasOlder;
   const builtInAgentCommandsSupported = supportsBuiltInAgentCommands({
     runnerId,
     runnerOptions,
@@ -792,10 +814,13 @@ export default function AgentChatSection() {
   const setSearchParamsForActiveSession = useCallback(() => {
     setSearchParams(
       (prev) => {
-        prev.set("aiSection", "agent-chat");
-        prev.set("agentSection", "chat");
+        prev.set("view", "chat");
         prev.set("session", sessionKey);
-        prev.set("view", "active");
+        prev.delete("mode");
+        prev.delete("aiSection");
+        prev.delete("settings");
+        prev.delete("agentSection");
+        prev.delete("imGatewaySection");
         prev.delete("historyPath");
         return prev;
       },
@@ -852,25 +877,16 @@ export default function AgentChatSection() {
         if (cancelled || !payload) {
           return;
         }
-        const custom = Object.entries(payload.runners || {}).map(([id, settings]) => ({
-          label: formatRunnerOptionLabel(id, settings.adapter),
-          value: id,
-          adapter: settings.adapter,
-        }));
-        setRunnerOptions([
-          { label: "Bifrost Agent", value: "bifrost_agent", adapter: "bifrost_agent" },
-          ...custom.sort((a, b) => a.label.localeCompare(b.label)),
-        ]);
-        const defaultRunner = payload.defaultRunnerId || payload.default_runner_id;
-        if (defaultRunner) {
-          setDefaultRunnerId(defaultRunner);
-          setRunnerId((current) =>
-            current === "bifrost_agent" ? defaultRunner : current,
-          );
-          setNewChatRunnerId((current) =>
-            current === "bifrost_agent" ? defaultRunner : current,
-          );
-        }
+        const options = buildRunnerOptions(payload);
+        const defaultRunner = selectDefaultRunner(options).value;
+        setRunnerOptions(options);
+        setDefaultRunnerId(defaultRunner);
+        setRunnerId((current) =>
+          current === "bifrost_agent" ? defaultRunner : current,
+        );
+        setNewChatRunnerId((current) =>
+          current === "bifrost_agent" ? defaultRunner : current,
+        );
       })
       .catch(() => {
         // Keep runner selection usable with the built-in runner fallback.
@@ -956,11 +972,14 @@ export default function AgentChatSection() {
             setHistoryPath(fallbackHistoryThread.history_path);
             setSearchParams(
               (prev) => {
-                prev.set("aiSection", "agent-chat");
-                prev.set("agentSection", "chat");
                 prev.set("session", nextSessionKey);
-                prev.set("view", "history");
+                prev.set("view", "chat");
                 prev.set("historyPath", fallbackHistoryThread.history_path!);
+                prev.delete("mode");
+                prev.delete("aiSection");
+                prev.delete("settings");
+                prev.delete("agentSection");
+                prev.delete("imGatewaySection");
                 return prev;
               },
               { replace: true },
@@ -980,10 +999,7 @@ export default function AgentChatSection() {
           let timelineEvents: HistoryEvent[] | undefined;
           if (timelineHistoryPath) {
             try {
-              const payload = await fetchHistoryPage(timelineHistoryPath, {
-                tail: true,
-                limit: HISTORY_EVENT_PAGE_SIZE,
-              });
+              const payload = await fetchHistoryPage(timelineHistoryPath);
               if (
                 selectedSessionKeyRef.current !== nextSessionKey ||
                 (selectedHistoryPathRef.current &&
@@ -1011,10 +1027,17 @@ export default function AgentChatSection() {
                   ? payload.next_cursor
                   : historyEventStartIndexRef.current;
               activeTimelineHasOlderRef.current = Boolean(payload.has_more);
+              const timelineRunning = resolveRunningState({
+                fallbackRunning: detail.running === true,
+                state:
+                  detail.run_state ||
+                  detail.state ||
+                  timelineThread?.run_state ||
+                  timelineThread?.state,
+                thread: timelineThread,
+              });
               timelineMessages = historyEventsToMessages(timelineEvents, {
-                ensureRunningAssistant:
-                  isThreadActive(timelineThread) ||
-                  isRunStateActive(detail.run_state || detail.state),
+                ensureRunningAssistant: timelineRunning,
                 runningState:
                   detail.run_state ||
                   detail.state ||
@@ -1028,9 +1051,9 @@ export default function AgentChatSection() {
           const loadedWindow =
             timelineMessages && timelineMessages.length > 0
               ? visibleActiveMessagesFromTimeline(timelineMessages)
-              : sliceRecentChatTurns(restored, activeVisibleTurnCountRef.current);
+              : { messages: restored, hasOlder: false };
           const loadedMessages = loadedWindow.messages;
-          setHistoryHasOlder(activeTimelineHasOlderRef.current || loadedWindow.hasOlder);
+          setHistoryHasOlder(activeTimelineHasOlderRef.current);
           if (loadedMessages.length > 0) {
             replaceLoadedMessages(loadedMessages, shouldStickToBottom);
           }
@@ -1055,6 +1078,7 @@ export default function AgentChatSection() {
                 timeline_event_count:
                   detail.timeline_event_count ?? thread.timeline_event_count,
                 run_state: detail.run_state || thread.run_state,
+                ...(detail.running !== undefined ? { running: detail.running } : {}),
               };
               if (
                 updated.title !== thread.title ||
@@ -1066,7 +1090,8 @@ export default function AgentChatSection() {
                 updated.history_path !== thread.history_path ||
                 updated.has_timeline !== thread.has_timeline ||
                 updated.timeline_event_count !== thread.timeline_event_count ||
-                updated.run_state !== thread.run_state
+                updated.run_state !== thread.run_state ||
+                updated.running !== thread.running
               ) {
                 changed = true;
                 return updated;
@@ -1100,10 +1125,12 @@ export default function AgentChatSection() {
             : detailTelemetry;
           setTelemetry(nextTelemetry);
           setRunning(
-            detail.running === false
-              ? false
-              : nextTelemetry.phase === "running" ||
-                  isRunStateActive(detail.run_state || detail.state),
+            resolveRunningState({
+              fallbackRunning: detail.running === true,
+              phase: nextTelemetry.phase,
+              state: detail.run_state || detail.state || nextTelemetry.status?.state,
+              thread: matchedThread,
+            }),
           );
           setWorkDir(detail.work_dir || matchedThread?.work_dir || defaultWorkDir);
           setRunnerId(detail.runner_id || matchedThread?.runner_id || "bifrost_agent");
@@ -1120,10 +1147,7 @@ export default function AgentChatSection() {
 
     let cancelled = false;
     setHistoryLoading(true);
-    fetchHistoryPage(nextHistoryPath, {
-      tail: true,
-      limit: HISTORY_EVENT_PAGE_SIZE,
-    })
+    fetchHistoryPage(nextHistoryPath)
       .then((payload) => {
         if (cancelled || selectedHistoryPathRef.current !== nextHistoryPath) {
           return;
@@ -1238,7 +1262,7 @@ export default function AgentChatSection() {
   const catchUpTimelineFromEvent = useCallback(
     async (
       eventPayload?: AgentSessionEventPayload,
-      options: { forceTail?: boolean } = {},
+      options: { forceFull?: boolean } = {},
     ) => {
       const currentSessionKey = querySessionKey || sessionKey;
       const eventSessionKey = eventPayload?.sessionKey || eventPayload?.session_key;
@@ -1261,18 +1285,18 @@ export default function AgentChatSection() {
       const endIndex = eventPayload?.endIndex ?? eventPayload?.end_index;
       const currentEndIndex = historyEventEndIndexRef.current;
       if (
-        !options.forceTail &&
+        !options.forceFull &&
         endIndex !== undefined &&
         currentEndIndex !== undefined &&
         endIndex <= currentEndIndex
       ) {
         return true;
       }
-      const fetchTail = options.forceTail || currentEndIndex === undefined;
+      const fetchFull = options.forceFull || currentEndIndex === undefined;
       let page = await fetchHistoryPage(
         currentHistoryPath,
-        fetchTail
-          ? { tail: true, limit: HISTORY_EVENT_PAGE_SIZE }
+        fetchFull
+          ? {}
           : { since: currentEndIndex },
       );
       if (
@@ -1283,16 +1307,13 @@ export default function AgentChatSection() {
         return false;
       }
       if (
-        !fetchTail &&
+        !fetchFull &&
         currentEndIndex !== undefined &&
         page.start_index !== undefined &&
         page.start_index !== currentEndIndex
       ) {
         await refreshThreads();
-        page = await fetchHistoryPage(currentHistoryPath, {
-          tail: true,
-          limit: HISTORY_EVENT_PAGE_SIZE,
-        });
+        page = await fetchHistoryPage(currentHistoryPath);
         if (
           selectedSessionKeyRef.current !== currentSessionKey ||
           (selectedHistoryPathRef.current &&
@@ -1308,10 +1329,11 @@ export default function AgentChatSection() {
         currentThread,
       );
       if (nextTelemetry) {
-        const terminal =
-          nextTelemetry.phase === "finished" || nextTelemetry.phase === "failed";
-        const stillRunning =
-          !terminal && (nextTelemetry.phase === "running" || isThreadActive(currentThread));
+        const stillRunning = resolveRunningState({
+          phase: nextTelemetry.phase,
+          state: currentThread?.run_state || currentThread?.state || nextTelemetry.status?.state,
+          thread: currentThread,
+        });
         setRunning(stillRunning);
         if (!stillRunning && nextTelemetry.phase === "running") {
           setTelemetry((prev) =>
@@ -1345,7 +1367,7 @@ export default function AgentChatSection() {
         void refreshThreads();
       }
       if (payload?.reason === "lagged") {
-        void catchUpTimelineFromEvent(undefined, { forceTail: true });
+        void catchUpTimelineFromEvent(undefined, { forceFull: true });
       }
     };
     const refreshTimeline = (event: MessageEvent<string>) => {
@@ -1357,7 +1379,7 @@ export default function AgentChatSection() {
         telemetryPhaseRef.current === "running" ||
         isThreadActive(selectedThreadRef.current)
       ) {
-        void catchUpTimelineFromEvent(undefined, { forceTail: true });
+        void catchUpTimelineFromEvent(undefined, { forceFull: true });
       }
     };
     const eventsUrl = `${buildApiUrl("/im-gateway/agent/sessions/events")}?x_client_id=${encodeURIComponent(getClientId())}`;
@@ -1379,13 +1401,7 @@ export default function AgentChatSection() {
   useEffect(() => {
     const requestedSessionKey = searchParams.get("session") || undefined;
     const requestedHistoryPath = searchParams.get("historyPath") || undefined;
-    const requestedView = searchParams.get("view") || undefined;
-    if (
-      !requestedSessionKey ||
-      requestedHistoryPath ||
-      requestedView === "active" ||
-      threads.length === 0
-    ) {
+    if (!requestedSessionKey || requestedHistoryPath || threads.length === 0) {
       return;
     }
     const historyThread = threads.find(
@@ -1400,22 +1416,19 @@ export default function AgentChatSection() {
     setHistoryPath(historyThread.history_path);
     setSearchParams(
       (prev) => {
-        prev.set("aiSection", "agent-chat");
-        prev.set("agentSection", "chat");
         prev.set("session", requestedSessionKey);
-        prev.set("view", "history");
+        prev.set("view", "chat");
         prev.set("historyPath", historyThread.history_path!);
+        prev.delete("mode");
+        prev.delete("aiSection");
+        prev.delete("settings");
+        prev.delete("agentSection");
+        prev.delete("imGatewaySection");
         return prev;
       },
       { replace: true },
     );
   }, [searchParams, setSearchParams, threads]);
-
-  const handleOpenNewChat = useCallback(() => {
-    setNewChatWorkDir(workDir || defaultWorkDir);
-    setNewChatRunnerId(isUninitializedDraftSession ? defaultRunnerId : runnerId);
-    setNewChatOpen(true);
-  }, [defaultRunnerId, defaultWorkDir, isUninitializedDraftSession, runnerId, workDir]);
 
   const handleCreateNewChat = useCallback(() => {
     const selectedWorkDir = newChatWorkDir.trim() || defaultWorkDir;
@@ -1446,11 +1459,14 @@ export default function AgentChatSection() {
     refreshThreads();
     setSearchParams(
       (prev) => {
-        prev.set("aiSection", "agent-chat");
-        prev.set("agentSection", "chat");
+        prev.set("view", "chat");
+        prev.set("mode", "new");
         prev.delete("session");
-        prev.delete("view");
         prev.delete("historyPath");
+        prev.delete("aiSection");
+        prev.delete("settings");
+        prev.delete("agentSection");
+        prev.delete("imGatewaySection");
         return prev;
       },
       { replace: false },
@@ -1464,9 +1480,53 @@ export default function AgentChatSection() {
     setSearchParams,
   ]);
 
+  const resetToNewChat = useCallback(() => {
+    const nextSessionKey = `admin-chat-${Date.now()}`;
+    streamAbortRef.current?.abort();
+    streamAbortRef.current = null;
+    setSessionKey(nextSessionKey);
+    setHistoryPath(undefined);
+    resetHistoryEventWindow();
+    loadedConversationKeyRef.current = "draft";
+    selectedHistoryPathRef.current = undefined;
+    selectedSessionKeyRef.current = nextSessionKey;
+    activeDetailMessagesRef.current = [];
+    pendingInstantScrollRef.current = true;
+    setMessages(STARTER_MESSAGES);
+    setDraft("");
+    setPendingImages([]);
+    setTelemetry(EMPTY_TELEMETRY);
+    setQueuedInputs([]);
+    setRunning(false);
+    setSupplementSubmitting(false);
+    setSlashRunner(undefined);
+    setComposerMode(undefined);
+    setActiveCollaborationMode(undefined);
+    setWorkDir(defaultWorkDir);
+    setRunnerId(defaultRunnerId);
+    setNewChatRunnerId(defaultRunnerId);
+    setSearchParams(
+      (prev) => {
+        prev.set("view", "chat");
+        prev.set("mode", "new");
+        prev.delete("aiSection");
+        prev.delete("settings");
+        prev.delete("agentSection");
+        prev.delete("imGatewaySection");
+        prev.delete("session");
+        prev.delete("historyPath");
+        return prev;
+      },
+      { replace: false },
+    );
+  }, [defaultRunnerId, defaultWorkDir, resetHistoryEventWindow, setSearchParams]);
+
   const handleOpenThread = useCallback(
     (thread: AgentThreadSummary) => {
-      if (isSelectedThread(thread, sessionKey, historyPath, queryView)) {
+      if (
+        queryView !== "settings" &&
+        isSelectedThread(thread, sessionKey, historyPath, queryView)
+      ) {
         return;
       }
       // Abort any in-flight stream from the previous session to prevent cross-contamination
@@ -1490,14 +1550,18 @@ export default function AgentChatSection() {
       }
       setSearchParams(
         (prev) => {
-          prev.set("aiSection", "agent-chat");
-          prev.set("agentSection", "chat");
+          prev.set("view", "chat");
           prev.set("session", thread.session_key);
+          prev.delete("mode");
+          prev.delete("aiSection");
+          prev.delete("settings");
+          prev.delete("agentSection");
+          prev.delete("imGatewaySection");
           if (thread.history_path) {
-            prev.set("view", "history");
+            prev.set("view", "chat");
             prev.set("historyPath", thread.history_path);
           } else {
-            prev.set("view", "active");
+            prev.set("view", "chat");
             prev.delete("historyPath");
           }
           return prev;
@@ -1510,6 +1574,7 @@ export default function AgentChatSection() {
 
   useEffect(() => {
     if (
+      embeddedSidebar ||
       initialThreadAutoSelectRef.current ||
       querySessionKey ||
       queryHistoryPath ||
@@ -1519,7 +1584,7 @@ export default function AgentChatSection() {
     }
     initialThreadAutoSelectRef.current = true;
     handleOpenThread(threads[0]);
-  }, [handleOpenThread, queryHistoryPath, querySessionKey, threads]);
+  }, [embeddedSidebar, handleOpenThread, queryHistoryPath, querySessionKey, threads]);
 
   const handleDeleteThread = useCallback(
     async (thread: AgentThreadSummary) => {
@@ -1551,11 +1616,14 @@ export default function AgentChatSection() {
           pendingInstantScrollRef.current = true;
           setSearchParams(
             (prev) => {
-              prev.set("aiSection", "agent-chat");
-              prev.set("agentSection", "chat");
+              prev.set("view", "chat");
+              prev.set("mode", "new");
               prev.delete("session");
-              prev.delete("view");
               prev.delete("historyPath");
+              prev.delete("aiSection");
+              prev.delete("settings");
+              prev.delete("agentSection");
+              prev.delete("imGatewaySection");
               return prev;
             },
             { replace: false },
@@ -1576,9 +1644,36 @@ export default function AgentChatSection() {
   );
 
   const styles = useMemo(
-    () => createAgentChatStyles(isCompact, isNarrow, threadRailCollapsed, token),
-    [isCompact, isNarrow, threadRailCollapsed, token],
+    () => createAgentChatStyles(isCompact, isNarrow, threadRailCollapsed, token, embeddedSidebar),
+    [embeddedSidebar, isCompact, isNarrow, threadRailCollapsed, token],
   );
+
+  useEffect(() => {
+    onNewChatStateChange?.(newChatActive);
+  }, [newChatActive, onNewChatStateChange]);
+
+  useEffect(() => {
+    onSidebarStateChange?.({
+      threads,
+      sessionKey,
+      historyPath,
+      view: queryView,
+      nowSeconds,
+      styles,
+      onOpenThread: handleOpenThread,
+      onDeleteThread: handleDeleteThread,
+    });
+  }, [
+    handleDeleteThread,
+    handleOpenThread,
+    historyPath,
+    nowSeconds,
+    onSidebarStateChange,
+    queryView,
+    sessionKey,
+    styles,
+    threads,
+  ]);
 
   const applyQueueEvent = (event: Record<string, unknown>) => {
     const items = queueItemsFromEvent(event);
@@ -1759,7 +1854,11 @@ export default function AgentChatSection() {
     addImageFiles(files);
   };
 
-  const handleSend = async (options?: { contentOverride?: string; silentCommand?: boolean }) => {
+  const handleSend = async (options?: {
+    contentOverride?: string;
+    runnerIdOverride?: string;
+    silentCommand?: boolean;
+  }) => {
     const rawContent = (options?.contentOverride ?? draft).trim();
     const imagesForSend = options?.contentOverride ? [] : pendingImages;
     if ((!rawContent && imagesForSend.length === 0) || supplementSubmitting) {
@@ -1778,10 +1877,11 @@ export default function AgentChatSection() {
         : undefined;
     const content = parsedPlanSlash.message.trim();
     const compactCommand = builtInAgentCommandsSupported && rawContent === "/compact";
-    const activeRunnerId =
+    const telemetryRunnerId =
       telemetry.status?.runner_id && telemetry.status.runner_id !== "bifrost_agent"
         ? telemetry.status.runner_id
-        : runnerId;
+        : undefined;
+    const activeRunnerId = options?.runnerIdOverride || telemetryRunnerId || runnerId;
     const activeRunnerAdapter = selectedRunnerAdapter(runnerOptions, activeRunnerId);
     const runnerModelCommand = isRunnerModelSlashCommand(rawContent, activeRunnerAdapter);
     const controlCommand =
@@ -2417,6 +2517,47 @@ export default function AgentChatSection() {
     }
   };
 
+  const handleSendRef = useRef(handleSend);
+
+  useEffect(() => {
+    handleSendRef.current = handleSend;
+  });
+
+  const startNewChat = useCallback(
+    async (message: string, nextRunnerId?: string) => {
+      const trimmedMessage = message.trim();
+      if (!trimmedMessage) {
+        return;
+      }
+      if (nextRunnerId) {
+        setRunnerId(nextRunnerId);
+        setNewChatRunnerId(nextRunnerId);
+      }
+      setDraft(trimmedMessage);
+      await handleSendRef.current({
+        contentOverride: trimmedMessage,
+        runnerIdOverride: nextRunnerId,
+      });
+    },
+    [],
+  );
+
+  const resetToNewChatRef = useRef(resetToNewChat);
+  const startNewChatRef = useRef(startNewChat);
+
+  useEffect(() => {
+    resetToNewChatRef.current = resetToNewChat;
+    startNewChatRef.current = startNewChat;
+  }, [resetToNewChat, startNewChat]);
+
+  useEffect(() => {
+    onControlsReady?.({
+      openNewChat: () => resetToNewChatRef.current(),
+      startNewChat: (message, runnerId) => startNewChatRef.current(message, runnerId),
+    });
+  }, [onControlsReady]);
+
+
   const handleSlashCommand = (option: SlashCommandOption) => {
     setSlashRunner(undefined);
     const focusComposerAtEnd = (value?: string) => {
@@ -2640,15 +2781,6 @@ export default function AgentChatSection() {
               >
                 Status
               </Button>
-              <Button
-                size="small"
-                type="primary"
-                icon={<PlusOutlined />}
-                data-testid="agent-chat-new"
-                onClick={handleOpenNewChat}
-              >
-                New Chat
-              </Button>
             </Space>
           }
           style={styles.conversationCard}
@@ -2740,20 +2872,21 @@ export default function AgentChatSection() {
                         <Text type="secondary" style={{ fontSize: 12 }}>
                           Queued
                         </Text>
-                        {queuedInputs.map((item) => (
-                          <Row
-                            key={item.seq}
-                            align="middle"
-                            justify="space-between"
-                            gutter={8}
-                          >
-                            <Col flex="auto">
-                              <Text ellipsis>
+                        <div style={styles.queueList} data-testid="agent-chat-queue-list">
+                          {queuedInputs.map((item) => (
+                            <div
+                              key={item.seq}
+                              style={styles.queueItem}
+                              data-testid="agent-chat-queue-item"
+                            >
+                              <Text
+                                ellipsis
+                                style={styles.queueItemText}
+                                title={`#${item.seq} ${item.message}`}
+                              >
                                 #{item.seq} {item.message}
                               </Text>
-                            </Col>
-                            <Col>
-                              <Space size={4}>
+                              <span style={styles.queueItemActions}>
                                 {guideSupported ? (
                                   <Button
                                     size="small"
@@ -2769,10 +2902,10 @@ export default function AgentChatSection() {
                                   aria-label={`Remove queued message ${item.seq}`}
                                   onClick={() => handleRemoveQueued(item.seq)}
                                 />
-                              </Space>
-                            </Col>
-                          </Row>
-                        ))}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
                       </Space>
                     </div>
                   ) : null}
@@ -2919,7 +3052,7 @@ export default function AgentChatSection() {
           </div>
         </Card>
 
-        {threadRailCollapsed ? (
+        {!embeddedSidebar && threadRailCollapsed ? (
           <Button
             shape="circle"
             icon={<LeftOutlined />}
@@ -2929,7 +3062,7 @@ export default function AgentChatSection() {
             style={styles.threadRailExpandButton}
             onClick={() => setThreadRailCollapsed(false)}
           />
-        ) : (
+        ) : !embeddedSidebar ? (
           <div style={styles.sideRail}>
             <AgentThreadListCard
               threads={threads}
@@ -2943,7 +3076,7 @@ export default function AgentChatSection() {
               onCollapse={() => setThreadRailCollapsed(true)}
             />
           </div>
-        )}
+        ) : null}
 
         <AgentChatSettingsModal
           open={settingsOpen}

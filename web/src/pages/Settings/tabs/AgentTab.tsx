@@ -86,9 +86,10 @@ const RUNTIME_DEFAULTS = {
 
 interface AgentTabProps {
   hideSectionNav?: boolean;
+  visibleSections?: AgentSectionId[];
 }
 
-export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
+export default function AgentTab({ hideSectionNav = false, visibleSections }: AgentTabProps) {
   const [config, setConfig] = useState<AgentConfig | null>(null);
   const [loading, setLoading] = useState(false);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
@@ -302,8 +303,8 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
     const nextSection = AGENT_SECTION_NAV.find(
       (section) => section.id === sectionFromUrl,
     )?.id;
-    setActiveSection(nextSection ?? "general");
-  }, [sectionFromUrl]);
+    setActiveSection(hideSectionNav && nextSection === "chat" ? "general" : nextSection ?? "general");
+  }, [hideSectionNav, sectionFromUrl]);
 
   const handleSelectSection = useCallback(
     (section: AgentSectionId) => {
@@ -358,7 +359,7 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
     return <Empty description="Unable to load agent configuration" />;
   }
 
-  if (selectedSession) {
+  if (selectedSession && !hideSectionNav) {
     return (
       <SessionDetailPage
         sessionKey={selectedSession}
@@ -368,6 +369,9 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
       />
     );
   }
+
+  const isSectionVisible = (section: AgentSectionId) =>
+    visibleSections ? visibleSections.includes(section) : activeSection === section;
 
   const nav = (
     <nav
@@ -455,7 +459,7 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
           >
             <Row gutter={[16, 16]}>
         {/* Chat */}
-        {activeSection === "chat" && (
+        {isSectionVisible("chat") && (
         <Col
           xs={24}
           id="agent-settings-chat"
@@ -467,7 +471,7 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
         )}
 
         {/* General Settings */}
-        {activeSection === "general" && (
+        {isSectionVisible("general") && (
         <Col
           xs={24}
           id="agent-settings-general"
@@ -593,7 +597,7 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
         )}
 
         {/* Model Configuration */}
-        {activeSection === "model" && (
+        {isSectionVisible("model") && (
         <Col
           xs={24}
           id="agent-settings-model"
@@ -928,7 +932,7 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
         )}
 
         {/* Runtime Settings */}
-        {activeSection === "runtime" && (
+        {isSectionVisible("runtime") && (
         <Col
           xs={24}
           id="agent-settings-runtime"
@@ -1074,7 +1078,7 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
         )}
 
         {/* History & Session */}
-        {activeSection === "history" && (
+        {isSectionVisible("history") && (
         <Col
           xs={24}
           id="agent-settings-history"
@@ -1176,7 +1180,7 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
         )}
 
         {/* Memories */}
-        {activeSection === "memories" && (
+        {isSectionVisible("memories") && (
         <Col
           xs={24}
           id="agent-settings-memories"
@@ -1421,7 +1425,7 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
         )}
 
         {/* Skills */}
-        {activeSection === "skills" && (
+        {isSectionVisible("skills") && (
         <Col
           xs={24}
           id="agent-settings-skills"
@@ -1443,7 +1447,7 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
         )}
 
         {/* Runners */}
-        {activeSection === "runners" && (
+        {isSectionVisible("runners") && (
         <Col
           xs={24}
           id="agent-settings-runners"
@@ -1459,7 +1463,7 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
         )}
 
         {/* Memory Records */}
-        {activeSection === "memory-records" && (
+        {isSectionVisible("memory-records") && (
         <Col
           xs={24}
           id="agent-settings-memory-records"
@@ -1481,7 +1485,7 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
         )}
 
         {/* MCP Servers */}
-        {activeSection === "mcp-servers" && (
+        {isSectionVisible("mcp-servers") && (
         <Col
           xs={24}
           id="agent-settings-mcp-servers"
@@ -1507,7 +1511,7 @@ export default function AgentTab({ hideSectionNav = false }: AgentTabProps) {
         )}
 
         {/* Sessions (Unified — Active + History) */}
-        {activeSection === "sessions" && (
+        {isSectionVisible("sessions") && (
         <Col
           xs={24}
           id="agent-settings-sessions"

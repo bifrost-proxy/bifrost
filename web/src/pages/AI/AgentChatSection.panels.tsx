@@ -36,6 +36,7 @@ import {
   type AgentThreadSummary,
   type RunTelemetry,
 } from "./AgentChatSection.helpers";
+import { isThreadActive } from "./AgentChatSection.timelinePolling";
 
 const { Text, Paragraph } = Typography;
 
@@ -60,6 +61,7 @@ type AgentThreadListCardProps = {
   view?: string;
   nowSeconds: number;
   styles: Record<string, CSSProperties>;
+  compact?: boolean;
   onOpenThread: (thread: AgentThreadSummary) => void;
   onDeleteThread: (thread: AgentThreadSummary) => void;
   onCollapse?: () => void;
@@ -134,6 +136,7 @@ export function AgentThreadListCard({
   view,
   nowSeconds,
   styles,
+  compact = false,
   onOpenThread,
   onDeleteThread,
   onCollapse,
@@ -143,8 +146,7 @@ export function AgentThreadListCard({
   const [contextThreadKey, setContextThreadKey] = useState<string | null>(null);
   const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
   const [visibleLimit, setVisibleLimit] = useState(INITIAL_THREAD_LOAD_COUNT);
-  const isRunningThread = (thread: AgentThreadSummary) =>
-    thread.status === "active" && thread.running !== false;
+  const isRunningThread = isThreadActive;
   const threadDuration = (thread: AgentThreadSummary) => {
     if (isRunningThread(thread) && thread.start_time) {
       return Math.max(0, nowSeconds - thread.start_time);
@@ -202,11 +204,10 @@ export function AgentThreadListCard({
   );
   const hasMoreThreads = visibleThreads.length < threads.length;
 
-  // eslint-disable-next-line react-hooks/incompatible-library
   const threadVirtualizer = useVirtualizer({
     count: visibleThreads.length,
     getScrollElement: () => threadScrollRef.current,
-    estimateSize: () => THREAD_ROW_ESTIMATE_SIZE,
+    estimateSize: () => (compact ? 38 : THREAD_ROW_ESTIMATE_SIZE),
     overscan: 6,
     getItemKey: (index) => {
       const thread = visibleThreads[index];
@@ -225,7 +226,7 @@ export function AgentThreadListCard({
       size="small"
       style={styles.threadCard}
       bodyStyle={styles.threadCardBody}
-      title={
+      title={onCollapse ? (
         <div style={styles.threadCardTitle}>
           <span style={styles.threadCardTitleMain}>
             <HistoryOutlined />
@@ -244,7 +245,7 @@ export function AgentThreadListCard({
             />
           ) : null}
         </div>
-      }
+      ) : undefined}
     >
       <div
         ref={threadScrollRef}
@@ -355,30 +356,47 @@ export function AgentThreadListCard({
                         aria-current={selected ? "true" : undefined}
                         style={{
                           ...styles.threadItem,
+                          ...(compact
+                            ? {
+                                gap: 6,
+                                height: 36,
+                                minHeight: 36,
+                                padding: "0 8px",
+                                borderRadius: 7,
+                              }
+                            : {}),
                           ...(selected ? styles.threadItemSelected : {}),
+                          ...(compact && selected
+                            ? {
+                                background: token.colorFillSecondary,
+                                color: token.colorText,
+                              }
+                            : {}),
                         }}
                       >
-                        <Popover
-                          trigger="hover"
-                          placement="left"
-                          content={threadDetails(thread)}
-                          mouseEnterDelay={0.5}
-                        >
-                          <span
-                            data-testid="agent-chat-thread-runner-mark"
-                            style={{
-                              ...styles.threadRunnerMark,
-                              ...(selected
-                                ? {
-                                    background: token.colorPrimaryBgHover,
-                                    color: token.colorPrimary,
-                                  }
-                                : {}),
-                            }}
+                        {compact ? null : (
+                          <Popover
+                            trigger="hover"
+                            placement="left"
+                            content={threadDetails(thread)}
+                            mouseEnterDelay={0.5}
                           >
-                            {formatThreadRunnerMark(thread)}
-                          </span>
-                        </Popover>
+                            <span
+                              data-testid="agent-chat-thread-runner-mark"
+                              style={{
+                                ...styles.threadRunnerMark,
+                                ...(selected
+                                  ? {
+                                      background: token.colorPrimaryBgHover,
+                                      color: token.colorPrimary,
+                                    }
+                                  : {}),
+                              }}
+                            >
+                              {formatThreadRunnerMark(thread)}
+                            </span>
+                          </Popover>
+                        )}
                         <span style={{ flex: "1 1 auto", minWidth: 0 }}>
                           <span
                             style={{
@@ -386,24 +404,28 @@ export function AgentThreadListCard({
                               overflow: "hidden",
                               textOverflow: "ellipsis",
                               whiteSpace: "nowrap",
-                              fontWeight: selected ? 600 : 500,
+                              fontSize: compact ? 12 : undefined,
+                              lineHeight: compact ? "18px" : undefined,
+                              fontWeight: compact ? 500 : selected ? 600 : 500,
                             }}
                           >
                             {thread.title || thread.session_key}
                           </span>
-                          <span
-                            style={{
-                              display: "block",
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap",
-                              color: selected ? token.colorPrimaryText : token.colorTextSecondary,
-                              fontSize: 12,
-                              marginTop: 2,
-                            }}
-                          >
-                            {threadMeta(thread)}
-                          </span>
+                          {compact ? null : (
+                            <span
+                              style={{
+                                display: "block",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                                color: selected ? token.colorPrimaryText : token.colorTextSecondary,
+                                fontSize: 12,
+                                marginTop: 2,
+                              }}
+                            >
+                              {threadMeta(thread)}
+                            </span>
+                          )}
                         </span>
                         {isRunningThread(thread) ? (
                           <span aria-label="running" title="Running" style={styles.runningDot} />
