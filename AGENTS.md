@@ -71,13 +71,13 @@ Bifrost 的公开入口站点与文档站涉及两个仓库。任何首页、文
 
 ## ⛔ 绝对禁令：单元 + E2E 代码覆盖率 90% 门禁
 
-**所有会改动业务代码的开发任务，最终必须运行 `make coverage`（即 `bash scripts/ci/coverage-all.sh --json --gate`），并通过 `scripts/ci/coverage-thresholds.toml` 中各 crate 的覆盖率下限（棘轮门禁，目标 90%）与工作区聚合下限校验，否则任务不能视为完成。** 详细机制见 `design/coverage-90.md`。
+**所有会改动业务代码的开发任务，最终必须通过 CI 中的 `bash scripts/ci/coverage-all.sh --json --gate` 覆盖率门禁，并通过 `scripts/ci/coverage-thresholds.toml` 中各 crate 的覆盖率下限（棘轮门禁，目标 90%）与工作区聚合下限校验，否则任务不能视为完成。默认情况下不要在本机运行 `make coverage` / `coverage-all.sh --gate`，因为本地全量覆盖率成本很高且 CI 已有明确阈值；只有用户明确要求、本地专项排查覆盖率失败、或需要提前确认某个高风险覆盖率缺口时，才在本机执行覆盖率命令。** 详细机制见 `design/coverage-90.md`。
 
 强制规则：
 
-1. 任务规划阶段（TodoWrite）必须出现“coverage 90% 门禁”项；缺失视为规划不合格。
-2. 开发过程中迭代时使用 `bash scripts/ci/coverage-all.sh -p <changed-crate> --json --gaps` 取得快速反馈，缺口报告会指出该 crate 距目标 90% 最远的文件。
-3. 收尾时必须运行 `make coverage`；若 E2E 环境不可用（无网络 / 无 macOS / 无 Tauri），允许退化为 `make coverage-unit`，但必须在交付报告中写明 E2E 已跳过的原因。
+1. 任务规划阶段（TodoWrite）必须出现“coverage 90% CI 门禁”项；缺失视为规划不合格。
+2. 开发过程中默认依赖远端 CI 覆盖率门禁；若用户明确要求或正在排查 coverage 失败，可按需使用 `bash scripts/ci/coverage-all.sh -p <changed-crate> --json --gaps` 取得快速反馈，缺口报告会指出该 crate 距目标 90% 最远的文件。
+3. 收尾时默认不在本机运行 `make coverage`；必须在交付报告中写明覆盖率由远端 CI 门禁兜底，或写明本地覆盖率命令的用户要求/专项排查原因、命令和结果。
 4. 当某个 crate 因为外部依赖（硬件、桌面 API、平台特定能力等）天然无法达到 90%，必须在 `design/coverage-90.md` 「不适用清单」中写明原因并维护例外冻结值，禁止悄悄绕过门禁。
 5. CI 必须把 `bash scripts/ci/coverage-all.sh --json --gate` 作为必跑步骤，任一 crate 跌破其在 `coverage-thresholds.toml` 中的棘轮下限、或工作区聚合低于下限，直接阻断合入；需要合并 E2E 覆盖率时显式追加 `--with-e2e`。
 

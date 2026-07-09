@@ -22,7 +22,7 @@ Bifrost 早期覆盖率工具链分散：
 - 提供 `scripts/ci/coverage-gate.py`：解析 `coverage.json`，按棘轮下限 + 工作区聚合下限校验，支持 `--gaps` 输出最需要补测的文件列表。
 - 提供 `scripts/ci/coverage-thresholds.toml`：per-crate 棘轮下限、工作区聚合下限、`default` 目标 90%、`enforce_ratchet_up` 与 `ratchet_slack` 配置。
 - Makefile 增加 `coverage`（= `coverage-gate`）、`coverage-unit`、`coverage-e2e`、`coverage-html`、`coverage-json`、`coverage-crate CRATE=<name>`、`coverage-gate` 六个入口。
-- AGENTS.md 增加 90% 门禁执行心法：“任何改业务代码的任务必须跑 `make coverage` 并通过”。
+- AGENTS.md 增加 90% 门禁执行心法：任何改业务代码的任务必须通过 CI 覆盖率门禁；本地默认不跑全量 coverage，除非用户明确要求或专项排查覆盖率失败。
 - `human_tests/coverage-mechanism.md` 覆盖机制本身的真实场景验证用例。
 
 ### 必须不破坏
@@ -65,9 +65,10 @@ Bifrost 早期覆盖率工具链分散：
 
 写入 AGENTS.md：
 
-- 任何改业务代码的任务，最终必须 `make coverage` 通过，否则任务不能视为完成。
+- 任何改业务代码的任务，最终必须通过 CI 中的 `coverage-all.sh --json --gate` 门禁，否则任务不能视为完成。
+- 默认情况下不要在本机运行 `make coverage` / `coverage-all.sh --gate`，因为全量覆盖率成本很高且 CI 已有明确阈值；只有用户明确要求、本地专项排查 coverage 失败、或需要提前确认某个高风险覆盖率缺口时才运行。
 - 某个 crate 因为客观原因（macOS API、桌面 API、依赖硬件、依赖网络）达不到 90%，必须在本文档的 **不适用清单** 里写明理由，并在 `coverage-thresholds.toml` 维护对应 crate 的 min 例外。
-- E2E 无法在当前环境跑通（无网络 / 无 Tauri / 无 macOS keychain）时，允许退化为 `make coverage-unit` + 90% 门禁，但必须在交付报告里说明 E2E 跳过原因。
+- 本地专项排查时如 E2E 无法在当前环境跑通（无网络 / 无 Tauri / 无 macOS keychain），允许退化为 `make coverage-unit` 或单 crate coverage，但必须在交付报告里说明 E2E 跳过原因。
 
 ## 技术细节
 
@@ -175,13 +176,15 @@ design/
 ### 本地开发
 
 - 迭代：`make coverage-crate CRATE=<changed-crate>` 快速看单 crate。
-- 提交前：`make coverage`（= `coverage-gate`）确认棘轮不破。
+- 提交前默认不跑全量 `make coverage`；覆盖率棘轮由远端 CI `coverage-all.sh --json --gate` 兜底。
+- 用户明确要求或专项排查 coverage 失败时：`make coverage`（= `coverage-gate`）确认棘轮不破。
 - 需要浏览：`make coverage-html` 生成 `target/coverage/html/index.html`。
 - 需要给 CI 上报：`make coverage-json`。
 
 ### CI（GitHub Actions / local-ci.sh）
 
-- 在 `local-ci.sh` 与 workflow 里加 `bash scripts/ci/coverage-all.sh --json --gate` 作为必跑步骤。
+- GitHub Actions workflow 必须运行 `bash scripts/ci/coverage-all.sh --json --gate` 并作为合入门禁。
+- `local-ci.sh` 默认不运行全量 coverage；仅在用户明确要求或专项排查 coverage 失败时提供显式 coverage 入口，避免本机默认校验成本过高。
 - 需要合并 E2E 覆盖率时显式追加 `--with-e2e`。
 - 失败时 GitHub Actions 会在 job log 里打印违规 crate 与 gap 分析。
 
@@ -201,7 +204,8 @@ design/
 
 ### Phase 2：CI 集成
 
-- `scripts/ci/local-ci.sh` 与 GitHub Actions workflow 增加 `coverage-all.sh --json --gate` 步骤。
+- GitHub Actions workflow 增加 `coverage-all.sh --json --gate` 步骤，并作为 PR / main 合入门禁。
+- `scripts/ci/local-ci.sh` 保留显式 coverage 入口，但不把全量 coverage 放进默认本地校验路径。
 - 覆盖率结果作为 artifact 上传（`coverage.json` / html 目录）。
 - 失败时在 PR 上留链接。
 
@@ -244,7 +248,8 @@ design/
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- `bash scripts/ci/coverage-all.sh --json --gate`
+- 远端 CI：`bash scripts/ci/coverage-all.sh --json --gate`
+- 本地专项排查（非默认）：按需运行 `bash scripts/ci/coverage-all.sh --json --gate` 或单 crate coverage
 - `bash scripts/ci/local-ci.sh --skip-e2e`（本地无 e2e 环境时）
 - `rust-project-validate`
 
