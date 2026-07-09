@@ -559,6 +559,59 @@
 - 左侧侧栏和顶部 35px 区域均可作为拖拽起点，窗口移动跟随鼠标，不触发文本选择。
 - 暗色和亮色主题下顶部空白区、左侧侧栏和右上角自定义窗口按钮风格一致。
 
+### TC-DAU-11 App 更新重启 handoff 禁止复用旧 core
+
+操作步骤：
+
+1. 执行桌面 handoff contract 测试：
+   ```bash
+   bash e2e-tests/tests/test_desktop_upgrade_handoff_contract.sh
+   ```
+2. 检查测试覆盖 `upgrade_relaunch_marker_activity_requires_fresh_supported_marker`、`upgrade_relaunch_marker_round_trips_and_stale_marker_is_removed`、`active_upgrade_relaunch_marker_disables_existing_backend_reuse`。
+3. 代码复核 `desktop/src-tauri/src/main.rs` 中 `restart_desktop_after_update` 会写入 `desktop-upgrade-relaunch.json` 并启动 helper。
+4. 代码复核 `ensure_backend_running` 在 active marker 存在时不会调用 `find_existing_backend_port` 复用旧 core，而是等待旧端口释放后再执行 stale marker cleanup 与新 sidecar 启动。
+
+预期结果：
+
+- App 更新完成后，新 App 不会复用旧 App shutdown helper 即将停止的 core。
+- fresh marker 可被读取并触发 handoff；stale/unsupported marker 会被删除，避免长期阻塞普通启动。
+- 新 sidecar 启动成功后 marker 被清理。
+- Linux runner 如未安装 Tauri GTK/glib 系统依赖，或任一 runner 未准备 `desktop/src-tauri/resources/bin/*` sidecar 资源，脚本应明确输出 `SKIP` 并返回成功；该跳过只代表 runner 不具备桌面 crate 编译前置条件，不代表 handoff 合约失败。
+
+### TC-DAU-12 App 更新重启日志可追踪 handoff 生命周期
+
+操作步骤：
+
+1. 在 macOS 桌面会话中触发桌面端更新，或在本地构建中调用 `restart_desktop_after_update` 对应前端路径。
+2. 查看共享数据目录中的 `logs/desktop-bootstrap.log`。
+3. 检查日志按顺序包含：
+   - `desktop upgrade relaunch marker written`
+   - `desktop upgrade relaunch helper started`
+   - `desktop upgrade handoff is active; skipping existing backend reuse`
+   - `desktop upgrade relaunch marker cleared after managed backend start`
+4. 检查 `desktop-upgrade-relaunch.json` 在新 core ready 后不存在。
+5. 检查 App 不再显示 `Start Bifrost Service` 浮层；如 CLI 缺失，进入 `Install Bifrost CLI` 流程。
+
+预期结果：
+
+- 更新重启生命周期可以通过日志完整追踪，便于现场诊断。
+- 新 App ready 后 core 由新 App 管理，不再出现旧 stop helper 事后杀掉新 core 的竞态。
+
+### TC-DAU-13 CLI install 遇到 core 重连时自动复查状态
+
+操作步骤：
+
+1. 打开桌面端 App，在 CLI 缺失或临时隔离数据目录下进入 `Install Bifrost CLI` 浮层。
+2. 点击 `Install CLI` 后，在请求过程中模拟 core 短暂重启或网络连接中断。
+3. 等待桌面前端 3 秒轮询刷新 runtime 与 CLI status。
+4. 如果 CLI 已复制到安装目录，检查浮层切换为 `CLI Installed` 或关闭 CLI 缺失提示。
+5. 如果 core 仍未 ready，检查 UI 回到 `Start Bifrost Service`，而不是固定显示不可恢复的 network error。
+
+预期结果：
+
+- CLI 安装请求期间发生 transient network error 时，前端不会直接把一次连接中断判定为最终安装失败。
+- core ready 后前端会重新读取 CLI install status；若已安装成功，用户看到成功态。
+
 ## 清理步骤
 
 ```bash
@@ -588,3 +641,5 @@ bifrost app uninstall
 | 2026-07-07 | TC-DAU-01 / 02 / 03 / 04 / 04B / 04C / 04D / 06B / 06C | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh` | PASS：36/36 通过。新增覆盖 App 弹窗默认 `install_skills=true` 路径，请求设置 30 秒上限，后端使用 embedded desktop bundle，响应 `skills_installed=true`，并在隔离 `BIFROST_INSTALL_SKILL_DIR` 写入 `bifrost/SKILL.md` 与 `bifrost-remote/SKILL.md` |
 | 2026-07-07 | TC-DAU-08D | `cargo test --manifest-path desktop/src-tauri/Cargo.toml healthy_external_backend_clears_manual_start_gate`; `cargo test --manifest-path desktop/src-tauri/Cargo.toml unhealthy_external_backend_keeps_manual_start_gate`; 代码 review `desktop/src-tauri/src/main.rs` 与 `web/src/App.tsx` | PASS：恢复健康的一次性 mock backend 会让 `clear_backend_unavailable_if_healthy` 置 `startup_ready=true` 并清空 `startup_error`；端口仍不健康时返回 false 且保留错误态；代码确认 watchdog healthy 分支和 runtime snapshot 都会对账，前端 3 秒轮询后 `coreNeedsAttention=false` 自动关闭 Start Service 浮层 |
 | 2026-07-07 | TC-DAU-08E / 08F | `pnpm --dir web run test:unit -- src/pages/Settings/tabs/ProxyTab.test.ts`; `pnpm --dir web run lint`; `pnpm --dir web run build`; 代码 review `web/src/pages/Settings/tabs/ProxyTab.tsx` | PASS：CLI 缺失时只展示 `Install CLI` 且请求 `install_skills=false`；CLI 已安装后隐藏 CLI 安装按钮并展示独立 AI Skills 按钮；Skills 已安装时文案为 `Reinstall AI Skills`。端口行改为 `Row align="bottom"`，输入框与 `Apply & Restart` 位于同一 test id 行，便于后续像素/坐标回归 |
+| 2026-07-10 | TC-DAU-11 | `bash e2e-tests/tests/test_desktop_upgrade_handoff_contract.sh` | PASS：macOS 本地 3/3 通过，覆盖 fresh/stale/unsupported marker 判定、stale marker 自动删除、active upgrade marker 禁止复用既有 backend；Linux CI runner 缺 `glib-2.0.pc` 或通用 shell shard 缺 `desktop/src-tauri/resources/bin/*` 时预期输出 SKIP，避免桌面编译前置条件缺失误伤 shell E2E |
+| 2026-07-10 | TC-DAU-12 / 13 | 代码 review `desktop/src-tauri/src/main.rs`、`web/src/App.tsx`，真实 App 更新 GUI 路径需发布包/桌面会话补跑 | 待复测：本轮新增日志可追踪 handoff 生命周期与 CLI install transient reconnect 后自动复查状态 |

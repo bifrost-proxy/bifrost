@@ -94,16 +94,12 @@ impl ImEventRouter {
             if !pattern.is_empty() {
                 match Regex::new(pattern) {
                     Ok(re) => {
-                        if let Some(caps) = re.captures(&message_text) {
-                            // Extract named captures
-                            for name in re.capture_names().flatten() {
-                                if let Some(m) = caps.name(name) {
-                                    named_captures.insert(name.to_string(), m.as_str().to_string());
-                                }
+                        let caps = re.captures(&message_text)?;
+                        // Extract named captures
+                        for name in re.capture_names().flatten() {
+                            if let Some(m) = caps.name(name) {
+                                named_captures.insert(name.to_string(), m.as_str().to_string());
                             }
-                        } else {
-                            // Regex didn't match
-                            return None;
                         }
                     }
                     Err(e) => {

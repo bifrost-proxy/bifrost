@@ -806,7 +806,7 @@ impl ConnectionMonitor {
             ..Default::default()
         };
 
-        for (_id, store) in connections.iter() {
+        for store in connections.values() {
             if store.status.is_open {
                 stats.open_connection_count += 1;
             } else {

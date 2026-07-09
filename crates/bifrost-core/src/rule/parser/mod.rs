@@ -1012,20 +1012,16 @@ fn validate_host_port(
     // Determine the port segment while avoiding false positives on IPv6 hosts.
     let port_str = if let Some(rest) = value.strip_prefix('[') {
         // Bracketed IPv6, optionally followed by `:port`, e.g. `[::1]:8080`.
-        match rest.find("]:") {
-            Some(pos) => &rest[pos + 2..],
-            // `[::1]` (no port) or malformed bracket: leave host parsing lenient.
-            None => return None,
-        }
+        // `[::1]` (no port) or malformed bracket: leave host parsing lenient.
+        let pos = rest.find("]:")?;
+        &rest[pos + 2..]
     } else if value.matches(':').count() > 1 {
         // Unbracketed value with multiple colons looks like a bare IPv6 host
         // without a port; stay lenient to avoid misreading a hextet as a port.
         return None;
-    } else if let Some(colon_pos) = value.rfind(':') {
-        &value[colon_pos + 1..]
     } else {
-        // No colon at all means host only, which is valid here.
-        return None;
+        let colon_pos = value.rfind(':')?;
+        &value[colon_pos + 1..]
     };
 
     let invalid = |message: String| {
@@ -1082,18 +1078,14 @@ fn check_host_port_remainder(value: &str) -> Option<String> {
     }
 
     let port_str = if let Some(rest) = host_port.strip_prefix('[') {
-        match rest.find("]:") {
-            Some(pos) => &rest[pos + 2..],
-            None => return None,
-        }
+        let pos = rest.find("]:")?;
+        &rest[pos + 2..]
     } else if host_port.matches(':').count() > 1 {
         // Looks like a bare IPv6 host without a port.
         return None;
-    } else if let Some(colon_pos) = host_port.rfind(':') {
-        &host_port[colon_pos + 1..]
     } else {
-        // Host only, no port.
-        return None;
+        let colon_pos = host_port.rfind(':')?;
+        &host_port[colon_pos + 1..]
     };
 
     if port_str.is_empty() {
