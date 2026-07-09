@@ -186,7 +186,7 @@ return Redirect(parts.clean_url)                   # admin 不可用时只清除
 ### E2E 测试
 
 - `e2e-tests/tests/test_rule_share_query.sh`：真实启动 Bifrost + curl 代理，覆盖裸域名经 HTTP 代理导入、HTTPS TLS 解包路径导入、带 `@规则引用` 的内容、重复访问不创建副本、同名不同内容创建递增 `share/<name> 2`、对其它 My Rules 独占启用。
-- `e2e-tests/tests/test_rule_share_confirm_browser.sh`：真实 Chrome/DevTools 打开确认页，无需填写 hash 点击 Apply Rule，跳回 clean URL；测试结束时 Chrome profile 临时目录被 helper 短暂占用不能把已通过业务断言误报为 E2E 失败。
+- `e2e-tests/tests/test_rule_share_confirm_browser.sh`：真实 Chromium-family DevTools 打开确认页，无需填写 hash 点击 Apply Rule，跳回 clean URL；脚本优先使用 `CHROME_BIN`，否则使用 Playwright `@playwright/test` 的 Chromium executable，CI 仅安装 `chromium-headless-shell` 时从 Playwright browser cache 中查找 headless shell，再 fallback 到系统 Chrome/Edge/Chromium；测试结束时 Chrome profile 临时目录被 helper 短暂占用不能把已通过业务断言误报为 E2E 失败。
 
 Rust `crates/bifrost-e2e/src/tests/rule_share_query.rs` 未落地（planned as of 2026-07-02），当前由上述 shell 脚本覆盖等价语义。
 

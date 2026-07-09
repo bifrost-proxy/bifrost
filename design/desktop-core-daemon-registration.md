@@ -83,6 +83,13 @@ BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1
 - `bash e2e-tests/tests/test_desktop_sidecar_launchd_env_contract.sh`
 - `human_tests/desktop-core-daemon-registration.md`
 
+CI note: `test_desktop_sidecar_launchd_env_contract.sh` prepares `web/dist-desktop`,
+the debug CLI sidecar, and `desktop/src-tauri/resources/bin/*` before invoking
+the desktop crate on macOS or other desktop-capable runners. Linux shell CI may
+lack GTK/GObject development packages, so the script skips only the Tauri
+desktop crate portion when `pkg-config --exists gobject-2.0` fails and still
+runs the CLI ownership focused tests.
+
 ## Review/Fix/Test Notes
 
 Round 1 should verify that the guard is applied to every Desktop sidecar spawn path, including initial startup and restart after port rebind fallback.
