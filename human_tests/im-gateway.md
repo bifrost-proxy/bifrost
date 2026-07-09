@@ -1289,3 +1289,23 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **清理步骤**:
   - 如果第 2 步创建了测试 Provider，删除该 Provider。
 - **执行记录（2026-07-08）**: PASS — 修复 `render_terminal_qr_code` 使用 `Dense1x2` + `module_dimensions(1, 1)`，避免原先 `module_dimensions(2, 1)` 导致终端二维码宽度翻倍；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli terminal_qr_code_renders_with_square_terminal_ratio --lib -- --nocapture` 通过。
+
+### TC-IMG-75: Agent send_msg 默认通道 E2E mock server 动态端口
+
+- **前置条件**:
+  - 工作目录为项目根目录。
+  - 已构建可用的 `target/debug/bifrost`，或允许脚本自行构建。
+- **操作步骤**:
+  1. 执行默认通道真实 E2E：
+     ```bash
+     BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_agent_send_msg_default_channel.sh
+     ```
+  2. 在 CI shell 并发环境中观察 `E2E Shell (Linux)` 不再因 `test_agent_send_msg_default_channel.sh` 的 mock server 固定端口占用失败。
+- **预期结果**:
+  - 脚本的内嵌 Python `ThreadingHTTPServer` 默认绑定 `127.0.0.1:0`，并把实际端口写回临时文件。
+  - Bifrost provider 和 Agent model `base_url` 使用写回后的真实 mock 端口。
+  - `send_msg` 通过默认 message channel 发送到 owner，`schedule_create` 继承相同默认通道。
+  - 端口占用不会导致 `mock server did not become ready` 或 `OSError: [Errno 98] Address already in use`。
+- **清理步骤**:
+  - 脚本退出时清理临时 Bifrost 进程、mock server 进程和临时目录。
+- **执行记录（2026-07-09）**: PASS — PR 361 run `29009025995` 的 `E2E Shell (Linux)` 暴露 `test_agent_send_msg_default_channel.sh` 固定 mock port `18942` 偶发被占用，日志显示 `OSError: [Errno 98] Address already in use` 和 `mock server did not become ready`。修复后 mock server 默认使用 OS 动态端口并写回 shell；本地执行 `BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_agent_send_msg_default_channel.sh` 通过，输出 `[agent-send-msg-default-channel] PASS`。
