@@ -147,7 +147,7 @@ BackendState {
   - `start_animation(window, ptr)`：启动 overlay 内部动画时钟。
   - `set_overlay_progress(window, ptr, progress)`
   - `set_overlay_alpha(window, ptr, alpha)`
-  - `remove_overlay(window, ptr)`：从视图树摘除并释放引用。
+  - `remove_overlay(window, ptr)`：停止动画线程继续排队，从视图树摘除 overlay；保留 native handle 到进程退出，避免已经排队的主线程 tick 触达已释放的 Objective-C 对象。
   - 非 macOS 提供同名占位实现，返回 `Ok(None)`。
 - `web/src/desktop/tauri.ts`
   - `DESKTOP_HANDOFF_COMPLETE_EVENT = "desktop://handoff-complete"`。
@@ -183,7 +183,8 @@ const HANDOFF_COMPLETE_EVENT: &str = "desktop://handoff-complete";
   - `main_webview_loaded` 保持 false，`try_start_native_handoff` 不会触发。
   - 需要依赖前端的 `notify_main_window_ready` 兜底：前端在 window `load` / React root ready 时主动握手；即使 `main_webview_loaded == false`，`notify_main_window_ready` 会直接调 `start_main_window_handoff`，避免 overlay 卡死。
 - Overlay 淡出失败（例如 objc2 崩溃）：
-  - `fade_out_launcher_overlay` 内部所有调用 `let _ =`，不会 panic；overlay 引用最后仍会调 `remove_overlay`。
+  - `fade_out_launcher_overlay` 内部所有调用 `let _ =`，不会 panic；overlay 最后仍会调 `remove_overlay`。
+  - `remove_overlay` 不在主线程 `join()` 动画线程，也不释放 `LauncherOverlayHandle`。动画线程可能已经通过 `run_on_main_thread` 排队了 tick 回调；如果移除时释放 handle，晚到的 tick 会解引用悬空指针并在 macOS runloop observer 中触发 Rust foreign exception / `SIGABRT`。保留 handle 的泄漏量为一次启动一个 overlay，随桌面进程退出回收。
 - `BIFROST_DESKTOP_LAUNCHER_ONLY=1`：
   - `create_main_webview` 与 `bootstrap_desktop_backend` 都不执行；overlay 会一直显示，用户按 Cmd+Q 退出会走 `request_desktop_shutdown` 的 launcher-only 分支直接 `app.exit(0)`。
 

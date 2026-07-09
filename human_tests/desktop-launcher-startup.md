@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 macOS Tauri 桌面端启动阶段使用单个最终尺寸 host window，并展示全尺寸毛玻璃 launcher overlay、居中虚拟水平进度条和稳定的 fade-only handoff。启动页应匹配 macOS 玻璃质感，桌面背景在启动页后方若隐若现。启动过程中主 Web UI 必须保持不可见，避免响应式布局在窗口放大或中间尺寸下露出。
+验证 macOS Tauri 桌面端启动阶段使用单个最终尺寸 host window，并展示全尺寸毛玻璃 launcher overlay、居中虚拟水平进度条和稳定的 fade-only handoff。启动页应匹配 macOS 玻璃质感，桌面背景在启动页后方若隐若现。启动过程中主 Web UI 必须保持不可见，避免响应式布局在窗口放大或中间尺寸下露出。启动页淡出后，桌面进程必须继续存活，不能因为 native overlay 动画 tick 与移除时序竞争触发启动闪退。
 
 非 macOS 平台不展示 native launcher overlay，仍直接进入完整 host window。
 
@@ -87,6 +87,22 @@
 - 主 Web UI 在启动页淡出前保持不可见；启动页淡出后正式页面从同一尺寸下显现。
 - Handoff 完成后窗口仍为最终主窗口尺寸，主 UI 布局稳定，无中间尺寸重排痕迹。
 
+### TC-DLS-05 启动 handoff 后不闪退回归
+
+操作步骤：
+
+1. 执行前置构建命令。
+2. 使用临时环境启动 `desktop/src-tauri/target/debug/bifrost-desktop`，环境变量必须包含 `BIFROST_DESKTOP_NO_SYSTEM_PROXY=1`、`BIFROST_DESKTOP_SKIP_CERT_PREFLIGHT=1`、`BIFROST_DISABLE_TRAY=1` 和独立 `BIFROST_DATA_DIR`。
+3. 启动后等待至少 8 秒，覆盖 native launcher overlay 动画、WebView load、backend ready、handoff、overlay fade/remove 以及晚到动画 tick 的时间窗。
+4. 检查桌面进程仍然存活；如已退出，读取 stdout/stderr 与 `desktop-bootstrap.log` 判断是否出现 Rust panic、foreign exception、`SIGABRT` 或启动期崩溃。
+
+预期结果：
+
+- `bifrost-desktop` 在 8 秒启动观察窗口内保持运行。
+- `desktop-bootstrap.log` 至少包含 `desktop setup started`、`embedded webview page load event`、`starting embedded webview handoff` 和 `embedded webview handoff completed`。
+- 不产生 macOS crash report；进程不因 native overlay 移除、动画线程 tick 或 Objective-C 对象生命周期触发 `EXC_CRASH (SIGABRT)`。
+- 测试使用临时 `BIFROST_DATA_DIR`，不修改系统代理，不弹出证书信任或 LaunchDaemon 授权窗口。
+
 ## 清理步骤
 
 ```bash
@@ -103,3 +119,4 @@ rm -rf "$BIFROST_DATA_DIR"
 | 2026-07-06 | TC-DLS-02 | `SKIP_FRONTEND_BUILD=1 cargo test --manifest-path desktop/src-tauri/Cargo.toml`，新增用例 `virtual_progress_matches_startup_milestones` 和 `handoff_progress_uses_only_final_one_percent`；截图 `/tmp/bifrost-launcher-direct-timed-20260706090421/t000.png`、`t100.png`、`t155.png`。 | 通过：单测精确断言 0s=21%、1s=80%、1.5s=99%、之后保持 99%，handoff 只补最后 1%；真实截图无百分比数字或跳闪。 |
 | 2026-07-06 | TC-DLS-03 | 当前系统外观为亮色（`defaults read -g AppleInterfaceStyle` 无输出）；新版截图 `/tmp/bifrost-launcher-direct-timed-20260706090421/t000.png` 验证启动页背景和前景对比。 | 通过：亮色环境下启动页呈柔和浅灰毛玻璃，标题和进度条使用深灰中性色，可读且不过度抢眼，未出现固定深黑或纯白闪屏；暗色外观未通过全局系统切换实测，代码路径按 `window.theme()` 选择暗色 palette 并依赖系统 `UnderWindowBackground` 材质适配。 |
 | 2026-07-06 | TC-DLS-04 | `pnpm exec tauri dev --config desktop/src-tauri/tauri.conf.json`，临时目录 `/tmp/bifrost-launcher-handoff-20260706085524`；截图 `initial.png`、`after.png`；窗口记录 `window-initial.txt` 与 `window-after.txt` 均为 `560,230 1440x920`。 | 通过：handoff 前后窗口位置和尺寸保持一致，启动页淡出后主界面在同一尺寸下显现，未见小窗放大或中间尺寸重排。 |
+| 2026-07-09 | TC-DLS-05 | `source ~/.zshrc && e2e-tests/tests/test_desktop_launcher_startup_no_crash.sh`；脚本构建 `web/dist-desktop`、`bifrost-cli` sidecar 与 `desktop/src-tauri/target/debug/bifrost-desktop`，使用临时 `BIFROST_DATA_DIR`、禁用系统代理/托盘/证书预检，启动后等待 8 秒，并断言 `desktop-bootstrap.log` 包含 setup、page load、handoff start、handoff completed。补充复跑：`source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_desktop_launcher_startup_no_crash.sh`。 | 通过：两次均输出 `PASS: bifrost-desktop stayed alive through launcher handoff startup window`，验证 handoff 后进程保持存活且日志到达完整 handoff，未出现启动期 `SIGABRT`/foreign exception 闪退。 |

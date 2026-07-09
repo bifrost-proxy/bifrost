@@ -183,13 +183,14 @@ mod imp {
     }
 
     pub fn remove_overlay(window: &Window, overlay_ptr: usize) -> tauri::Result<()> {
-        let handle = unsafe { Box::from_raw(overlay_ptr as *mut LauncherOverlayHandle) };
-        let _ = sync_overlay_frame(window, &handle);
+        let handle = unsafe { &*(overlay_ptr as *mut LauncherOverlayHandle) };
+        let _ = sync_overlay_frame(window, handle);
         handle.animation_running.store(false, Ordering::Relaxed);
         if let Ok(mut animation_thread) = handle.animation_thread.lock() {
-            if let Some(join_handle) = animation_thread.take() {
-                let _ = join_handle.join();
-            }
+            // The animation thread may already have queued a main-thread tick with
+            // this raw pointer. Detach it and keep the handle alive for the app
+            // lifetime so late ticks cannot touch freed Objective-C objects.
+            let _ = animation_thread.take();
         }
         handle.overlay.removeFromSuperview();
         Ok(())
