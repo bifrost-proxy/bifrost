@@ -21,8 +21,12 @@ if [[ "${SKIP_BUILD:-}" != "true" ]]; then
   cargo build --manifest-path desktop/src-tauri/Cargo.toml
 fi
 
-APP_BIN="desktop/src-tauri/target/debug/bifrost-desktop"
+APP_BIN="${BIFROST_DESKTOP_APP_BIN:-desktop/src-tauri/target/debug/bifrost-desktop}"
 if [[ ! -x "$APP_BIN" ]]; then
+  if [[ "${SKIP_BUILD:-}" == "true" ]]; then
+    echo "SKIP: missing desktop binary at $APP_BIN and SKIP_BUILD=true"
+    exit 0
+  fi
   echo "FAIL: missing desktop binary at $APP_BIN"
   exit 1
 fi
