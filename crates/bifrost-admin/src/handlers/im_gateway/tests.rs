@@ -99,12 +99,11 @@ pub(super) fn fake_external_runner_workdir_command() -> (String, Vec<String>) {
 pub(super) fn fake_external_runner_override_command() -> (String, Vec<String>) {
     if cfg!(windows) {
         (
-            "powershell.exe".to_string(),
+            "cmd.exe".to_string(),
             vec![
-                "-NoProfile".to_string(),
-                "-NonInteractive".to_string(),
-                "-Command".to_string(),
-                "$q=[char]34; $content=if ($env:MODEL_OVERRIDE -eq 'gpt-schedule' -and $env:BASE_ENV -eq 'runner') { 'OVERRIDE_OK' } else { 'OVERRIDE_MISSING' }; [Console]::Out.WriteLine('{' + $q + 'type' + $q + ':' + $q + 'assistant_final' + $q + ',' + $q + 'content' + $q + ':' + $q + $content + $q + '}')".to_string(),
+                "/D".to_string(),
+                "/C".to_string(),
+                "if \"%MODEL_OVERRIDE%\"==\"gpt-schedule\" (if \"%BASE_ENV%\"==\"runner\" (echo OVERRIDE_OK) else (echo OVERRIDE_MISSING)) else (echo OVERRIDE_MISSING)".to_string(),
             ],
         )
     } else {

@@ -8,13 +8,119 @@ export BIFROST_DISABLE_TRAY
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIFROST_BIN="${BIFROST_BIN:-$ROOT_DIR/target/debug/bifrost}"
-CHROME_BIN="${CHROME_BIN:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
 
 if [[ ! -x "$BIFROST_BIN" ]]; then
   echo "BIFROST_BIN is not executable: $BIFROST_BIN" >&2
   echo "Build it first with: cargo build --bin bifrost" >&2
   exit 1
 fi
+
+resolve_chrome_bin() {
+  if [[ -n "${CHROME_BIN:-}" ]]; then
+    printf '%s\n' "$CHROME_BIN"
+    return 0
+  fi
+
+  local playwright_bin=""
+  if [[ -d "$ROOT_DIR/web/node_modules/@playwright/test" ]] && command -v node >/dev/null 2>&1; then
+    playwright_bin="$(
+      cd "$ROOT_DIR" &&
+        node <<'NODE' 2>/dev/null || true
+const fs = require("fs");
+const path = require("path");
+
+function cacheRootFromExecutable(executablePath) {
+  let current = path.dirname(executablePath);
+  while (current && current !== path.dirname(current)) {
+    if (/^chromium[-_]/.test(path.basename(current))) {
+      return path.dirname(current);
+    }
+    current = path.dirname(current);
+  }
+  return "";
+}
+
+function findHeadlessShell(cacheRoot) {
+  if (!cacheRoot || !fs.existsSync(cacheRoot)) return "";
+  const entries = fs.readdirSync(cacheRoot)
+    .filter(name => /^chromium[-_]headless[-_]shell-/.test(name))
+    .sort()
+    .reverse();
+  const executableNames = new Set([
+    "chrome",
+    "chrome-headless-shell",
+    "chromium-headless-shell",
+    "headless_shell",
+    "Google Chrome for Testing",
+  ]);
+  for (const entry of entries) {
+    const root = path.join(cacheRoot, entry);
+    const stack = [root];
+    while (stack.length > 0) {
+      const dir = stack.pop();
+      for (const child of fs.readdirSync(dir, { withFileTypes: true })) {
+        const childPath = path.join(dir, child.name);
+        if (child.isDirectory()) {
+          stack.push(childPath);
+        } else if (executableNames.has(child.name)) {
+          try {
+            fs.accessSync(childPath, fs.constants.X_OK);
+            process.stdout.write(childPath);
+            return;
+          } catch (_) {
+            // Keep scanning.
+          }
+        }
+      }
+    }
+  }
+}
+
+try {
+  const { chromium } = require("./web/node_modules/@playwright/test");
+  const chromiumPath = chromium.executablePath();
+  if (chromiumPath && fs.existsSync(chromiumPath)) {
+    process.stdout.write(chromiumPath);
+  } else {
+    findHeadlessShell(cacheRootFromExecutable(chromiumPath || ""));
+  }
+} catch (_) {
+  process.exit(0);
+}
+NODE
+    )"
+    if [[ -n "$playwright_bin" && -x "$playwright_bin" ]]; then
+      printf '%s\n' "$playwright_bin"
+      return 0
+    fi
+  fi
+
+  case "$(uname -s)" in
+    Darwin)
+      for candidate in \
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" \
+        "/Applications/Chromium.app/Contents/MacOS/Chromium"; do
+        if [[ -x "$candidate" ]]; then
+          printf '%s\n' "$candidate"
+          return 0
+        fi
+      done
+      printf '%s\n' ""
+      ;;
+    *)
+      for candidate in chromium-headless-shell google-chrome-stable google-chrome chromium chromium-browser; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+          command -v "$candidate"
+          return 0
+        fi
+      done
+      printf '%s\n' ""
+      ;;
+  esac
+}
+
+CHROME_BIN="$(resolve_chrome_bin)"
 
 if [[ ! -x "$CHROME_BIN" ]]; then
   echo "Chrome is not available, skipping browser rule share confirmation E2E"
@@ -172,6 +278,8 @@ CONFIRM_URL="$(header_location /tmp/bifrost-rule-share-browser.headers)"
 "$CHROME_BIN" \
   --headless=new \
   --disable-gpu \
+  --no-sandbox \
+  --disable-dev-shm-usage \
   --no-first-run \
   --no-default-browser-check \
   --disable-background-networking \
@@ -185,9 +293,19 @@ for _ in {1..80}; do
   if curl -fsS "http://127.0.0.1:${DEBUG_PORT}/json/version" >/dev/null 2>&1; then
     break
   fi
+  if [[ -n "$CHROME_PID" ]] && ! kill -0 "$CHROME_PID" 2>/dev/null; then
+    echo "Chrome exited before DevTools became ready" >&2
+    tail -80 /tmp/bifrost-rule-share-browser-chrome.log >&2 || true
+    wait "$CHROME_PID" 2>/dev/null || true
+    exit 1
+  fi
   sleep 0.25
 done
-curl -fsS "http://127.0.0.1:${DEBUG_PORT}/json/version" >/dev/null
+if ! curl -fsS "http://127.0.0.1:${DEBUG_PORT}/json/version" >/dev/null; then
+  echo "Chrome DevTools endpoint did not become ready on port ${DEBUG_PORT}" >&2
+  tail -80 /tmp/bifrost-rule-share-browser-chrome.log >&2 || true
+  exit 1
+fi
 
 node - "$DEBUG_PORT" "$CONFIRM_URL" "$TARGET_URL" <<'NODE'
 const debugPort = process.argv[2];

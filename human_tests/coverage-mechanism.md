@@ -27,7 +27,7 @@
 | TC-COV-04 | `bash scripts/ci/coverage-all.sh --text --fail-under 9999` 因门禁失败而退出非 0 | gate |
 | TC-COV-05 | `make coverage-html` 生成 HTML 报告并可在浏览器查看 | smoke |
 | TC-COV-06 | `coverage-e2e.sh` 在禁用网络下跳过失败用例但仍产出 profraw | resilience |
-| TC-COV-07 | AGENTS.md 已注明 90% 门禁规则 | doc |
+| TC-COV-07 | AGENTS.md 已注明 90% CI 门禁且本地 coverage 默认不跑 | doc |
 | TC-COV-08 | 设计文档 `design/coverage-90.md` 列出 mechanism + 不适用清单 | doc |
 
 ## 用例细节
@@ -118,16 +118,21 @@ bash scripts/ci/coverage-e2e.sh --json
 - 即使部分 E2E 套件失败，也能在 `target/coverage-e2e` 下产出 `.profraw`
 - 输出末尾包含 `"covered"` 字段
 
-### TC-COV-07 AGENTS.md 强制规则
+### TC-COV-07 AGENTS.md 覆盖率默认执行边界
 
 **步骤**：
 
 ```bash
-grep -n "coverage" AGENTS.md
-grep -n "90%" AGENTS.md
+grep -n "coverage 90% CI 门禁" AGENTS.md
+grep -n "默认情况下不要在本机运行" AGENTS.md
+grep -n "coverage-all.sh --json --gate" AGENTS.md
 ```
 
-**预期**：能命中 90% 门禁段落
+**预期**：
+
+- 能命中 90% 覆盖率门禁段落。
+- AGENTS.md 明确覆盖率默认由远端 CI 门禁兜底。
+- AGENTS.md 明确默认不在本机运行 `make coverage` / `coverage-all.sh --gate`，除非用户明确要求、专项排查覆盖率失败或需要提前确认高风险覆盖率缺口。
 
 ### TC-COV-08 设计文档对齐
 
@@ -150,5 +155,9 @@ grep -n "不适用清单" design/coverage-90.md
 | TC-COV-04 | Codex | ✅ | 受磁盘限制改跑 `coverage-all.sh -p bifrost-command --text --fail-under 9999`；返回 rc=1，证明门禁失败路径生效 |
 | TC-COV-05 | Codex | ✅ | 受磁盘限制改跑 `coverage-all.sh -p bifrost-command --html --fail-under 0 --output-dir target/coverage-command-html`；`target/coverage-command-html/html/index.html` 已生成 |
 | TC-COV-06 | Codex | ⚠️ | 未跑全量 E2E coverage；本机磁盘不足已阻塞 workspace coverage，继续跑 E2E coverage 风险同类失败 |
-| TC-COV-07 | Codex | ✅ | AGENTS.md 已加入 90% 门禁段落 |
+| TC-COV-07 | Codex | ✅ | AGENTS.md 已加入 90% CI 门禁段落，并明确本地默认不跑全量 coverage |
 | TC-COV-08 | Codex | ✅ | design/coverage-90.md 已落地 |
+
+2026-07-09 执行补充：
+
+- TC-COV-07：PASS。执行 `grep -n "coverage 90% CI 门禁" AGENTS.md`、`grep -n "默认情况下不要在本机运行" AGENTS.md`、`grep -n "coverage-all.sh --json --gate" AGENTS.md` 均命中；执行固定字符串检索确认“收尾/提交前必须在本机跑 make coverage”这类旧强制本地 coverage 表述不再存在于 AGENTS.md / design/coverage-90.md / human_tests/coverage-mechanism.md。

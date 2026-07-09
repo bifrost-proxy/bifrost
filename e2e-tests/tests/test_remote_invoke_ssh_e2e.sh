@@ -259,12 +259,33 @@ dump_grant_diagnostics() {
 expect_remote_exec_success() {
     local marker="$1"
     local output_file="$TMPDIR/remote_exec_${marker}.out"
+    local status=1
+    local attempt
+    local max_attempts="${BIFROST_E2E_GRANT_PROPAGATION_ATTEMPTS:-20}"
     log "  expect remote exec success: ${marker}"
-    set +e
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --shell-text "printf ${marker}" \
-        >"$output_file" 2>&1
-    local status=$?
-    set -e
+
+    for attempt in $(seq 1 "$max_attempts"); do
+        set +e
+        BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --shell-text "printf ${marker}" \
+            >"$output_file" 2>&1
+        status=$?
+        set -e
+
+        if [[ "$status" -eq 0 ]] && grep -q "$marker" "$output_file"; then
+            return 0
+        fi
+
+        if grep -Eiq "grant scope .*does not allow command kind ShellExec|grant_scope_mismatch" "$output_file"; then
+            if [[ "$attempt" -lt "$max_attempts" ]]; then
+                log "  grant scope update not visible to remote exec yet (${attempt}/${max_attempts}); retrying ${marker}"
+                sleep 0.5
+                continue
+            fi
+        fi
+
+        break
+    done
+
     if [[ "$status" -ne 0 ]] || ! grep -q "$marker" "$output_file"; then
         echo "remote exec success assertion failed for ${marker} (status=${status})" >&2
         cat "$output_file" >&2

@@ -263,3 +263,17 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 
 结果：
 - TC-RSQ-10：通过。浏览器确认脚本改为等待确认页 URL、`Apply Shared Bifrost Rule` 标题和 `#apply` 按钮同时就绪后再断言，避免 CI 上 Chrome DevTools `/json/new` 返回后仍停留在初始空文档导致误报；本机真实 Chromium-family E2E 输出 `browser apply succeeded without hash` 和 `rule share browser confirmation E2E passed`，规则列表包含 `share/rsq-browser [enabled]`。
+
+执行时间：2026-07-09
+
+测试环境：
+- 本地真实 Playwright Chromium/Chromium-family headless，由 `@playwright/test` 的 Chromium executable 自动解析；若 CI 仅安装 `chromium-headless-shell`，脚本从 Playwright browser cache 查找 headless shell。
+- CI 失败样本：GitHub Actions PR #361 run `28995925917` / job `86052744074`，`test_rule_share_confirm_browser.sh` 失败为 `curl: (7) Failed to connect to 127.0.0.1 port 59683 after 0 ms: Couldn't connect to server`。
+
+执行命令：
+- `bash -n e2e-tests/tests/test_rule_share_confirm_browser.sh`
+- `bash scripts/ci/check-e2e-shell-ci-coverage.sh`
+- `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_rule_share_confirm_browser.sh`
+
+结果：
+- TC-RSQ-10：通过。脚本不再只依赖 macOS Google Chrome 默认路径；优先使用 `CHROME_BIN`，否则解析 Playwright Chromium executable，完整 Chromium 不存在时 fallback 到 Playwright headless shell cache，再 fallback 到系统 Chrome/Edge/Chromium。真实浏览器执行输出 `browser apply succeeded without hash`、规则列表包含 `share/rsq-browser [enabled]`、最终输出 `rule share browser confirmation E2E passed`；DevTools 端口未 ready 或浏览器提前退出时会打印 Chrome 日志并失败，避免无诊断的 curl 连接失败。

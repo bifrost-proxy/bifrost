@@ -96,6 +96,7 @@ const SYSTEM_PROXY_WAKE_GAP_THRESHOLD: Duration = Duration::from_secs(10);
 #[cfg(target_os = "macos")]
 const SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV: &str =
     "BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL";
+const DESKTOP_CORE_ENV: &str = "BIFROST_DESKTOP_CORE";
 pub(crate) const DETACHED_DAEMON_CHILD_ENV: &str = "BIFROST_DETACHED_DAEMON_CHILD";
 const RULES_FILESYSTEM_FALLBACK_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 const RULES_FILESYSTEM_DEBOUNCE_DELAY: Duration = Duration::from_millis(150);
@@ -120,9 +121,15 @@ pub fn is_detached_daemon_child_process() -> bool {
     env_flag_enabled(std::env::var_os(DETACHED_DAEMON_CHILD_ENV))
 }
 
+fn is_desktop_core_process() -> bool {
+    env_flag_enabled(std::env::var_os(DESKTOP_CORE_ENV))
+}
+
 fn foreground_runtime_start_mode() -> RuntimeStartMode {
     if is_detached_daemon_child_process() {
         RuntimeStartMode::Daemon
+    } else if is_desktop_core_process() {
+        RuntimeStartMode::Desktop
     } else {
         RuntimeStartMode::Foreground
     }
@@ -250,6 +257,29 @@ fn prompt_restart_if_running(pid: u32) -> bifrost_core::Result<bool> {
     }
 
     Ok(false)
+}
+
+fn live_desktop_runtime_for_pid(pid: u32) -> Option<RuntimeInfo> {
+    let runtime = read_runtime_info()?;
+    (runtime.pid == pid && runtime.start_mode == RuntimeStartMode::Desktop).then_some(runtime)
+}
+
+fn handle_live_desktop_runtime_before_start(
+    runtime: &RuntimeInfo,
+    requested_port: u16,
+) -> bifrost_core::Result<()> {
+    if runtime.port == requested_port {
+        println!(
+            "Bifrost Desktop core is already running (PID: {}, port {}). Reusing the app-bound core; CLI start will not stop it.",
+            runtime.pid, runtime.port
+        );
+        return Ok(());
+    }
+
+    Err(bifrost_core::BifrostError::Config(format!(
+        "Bifrost Desktop core is already running (PID: {}, port {}). CLI start will not stop the app-bound core to satisfy requested port {}. Quit Bifrost Desktop first, or use a separate BIFROST_DATA_DIR for another service.",
+        runtime.pid, runtime.port, requested_port
+    )))
 }
 
 fn check_and_resolve_port_conflict(host: &str, port: u16, yes: bool) -> bifrost_core::Result<()> {
@@ -1354,6 +1384,10 @@ pub fn run_start(
 
     if let Some(pid) = read_pid() {
         if is_process_running(pid) {
+            if let Some(runtime) = live_desktop_runtime_for_pid(pid) {
+                return handle_live_desktop_runtime_before_start(&runtime, port);
+            }
+
             let should_restart = if yes {
                 true
             } else {
@@ -4225,6 +4259,22 @@ mod tests {
             .expect("data dir test lock poisoned")
     }
 
+    struct ScopedDataDir {
+        previous: PathBuf,
+    }
+
+    impl Drop for ScopedDataDir {
+        fn drop(&mut self) {
+            set_data_dir(self.previous.clone());
+        }
+    }
+
+    fn scoped_data_dir(temp_dir: &tempfile::TempDir) -> ScopedDataDir {
+        let previous = bifrost_storage::data_dir();
+        set_data_dir(temp_dir.path().to_path_buf());
+        ScopedDataDir { previous }
+    }
+
     fn allocate_loopback_port() -> u16 {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         listener.local_addr().unwrap().port()
@@ -4249,7 +4299,7 @@ mod tests {
     fn restart_handoff_recovery_is_not_deferred_when_system_proxy_is_not_requested() {
         let _guard = data_dir_test_lock();
         let temp_dir = tempfile::tempdir().unwrap();
-        set_data_dir(temp_dir.path().to_path_buf());
+        let _data_dir = scoped_data_dir(&temp_dir);
         bifrost_core::write_system_proxy_shutdown_mode(
             temp_dir.path(),
             bifrost_core::SystemProxyShutdownMode::PreserveForRestart,
@@ -4266,7 +4316,7 @@ mod tests {
     fn restart_handoff_recovery_is_not_deferred_without_runtime_info() {
         let _guard = data_dir_test_lock();
         let temp_dir = tempfile::tempdir().unwrap();
-        set_data_dir(temp_dir.path().to_path_buf());
+        let _data_dir = scoped_data_dir(&temp_dir);
         bifrost_core::write_system_proxy_shutdown_mode(
             temp_dir.path(),
             bifrost_core::SystemProxyShutdownMode::PreserveForRestart,
@@ -4283,7 +4333,7 @@ mod tests {
     fn restart_handoff_recovery_is_deferred_with_marker_and_runtime_info() {
         let _guard = data_dir_test_lock();
         let temp_dir = tempfile::tempdir().unwrap();
-        set_data_dir(temp_dir.path().to_path_buf());
+        let _data_dir = scoped_data_dir(&temp_dir);
         bifrost_core::write_system_proxy_shutdown_mode(
             temp_dir.path(),
             bifrost_core::SystemProxyShutdownMode::PreserveForRestart,
@@ -4308,7 +4358,7 @@ mod tests {
     fn system_proxy_reconcile_startup_recovery_is_skipped_for_restart_handoff() {
         let _guard = data_dir_test_lock();
         let temp_dir = tempfile::tempdir().unwrap();
-        set_data_dir(temp_dir.path().to_path_buf());
+        let _data_dir = scoped_data_dir(&temp_dir);
         bifrost_core::write_system_proxy_shutdown_mode(
             temp_dir.path(),
             bifrost_core::SystemProxyShutdownMode::PreserveForRestart,
@@ -4333,7 +4383,7 @@ mod tests {
     fn system_proxy_reconcile_uses_captured_restart_handoff_after_marker_consumed() {
         let _guard = data_dir_test_lock();
         let temp_dir = tempfile::tempdir().unwrap();
-        set_data_dir(temp_dir.path().to_path_buf());
+        let _data_dir = scoped_data_dir(&temp_dir);
         bifrost_core::write_system_proxy_shutdown_mode(
             temp_dir.path(),
             bifrost_core::SystemProxyShutdownMode::PreserveForRestart,
@@ -4368,7 +4418,7 @@ mod tests {
     fn system_proxy_reconcile_startup_recovery_runs_without_system_proxy_request() {
         let _guard = data_dir_test_lock();
         let temp_dir = tempfile::tempdir().unwrap();
-        set_data_dir(temp_dir.path().to_path_buf());
+        let _data_dir = scoped_data_dir(&temp_dir);
         bifrost_core::write_system_proxy_shutdown_mode(
             temp_dir.path(),
             bifrost_core::SystemProxyShutdownMode::PreserveForRestart,
@@ -4427,6 +4477,114 @@ mod tests {
         assert!(should_spawn_daemon_parent_process(true, false));
         assert!(!should_spawn_daemon_parent_process(true, true));
         assert!(!should_spawn_daemon_parent_process(false, false));
+    }
+
+    #[test]
+    fn desktop_core_env_marks_foreground_runtime_as_desktop() {
+        let _guard = data_dir_test_lock();
+        let previous_desktop = std::env::var_os(DESKTOP_CORE_ENV);
+        let previous_detached = std::env::var_os(DETACHED_DAEMON_CHILD_ENV);
+        std::env::set_var(DESKTOP_CORE_ENV, "1");
+        std::env::remove_var(DETACHED_DAEMON_CHILD_ENV);
+
+        assert_eq!(foreground_runtime_start_mode(), RuntimeStartMode::Desktop);
+
+        match previous_desktop {
+            Some(value) => std::env::set_var(DESKTOP_CORE_ENV, value),
+            None => std::env::remove_var(DESKTOP_CORE_ENV),
+        }
+        match previous_detached {
+            Some(value) => std::env::set_var(DETACHED_DAEMON_CHILD_ENV, value),
+            None => std::env::remove_var(DETACHED_DAEMON_CHILD_ENV),
+        }
+    }
+
+    #[test]
+    fn detached_daemon_child_takes_precedence_over_desktop_core_env() {
+        let _guard = data_dir_test_lock();
+        let previous_desktop = std::env::var_os(DESKTOP_CORE_ENV);
+        let previous_detached = std::env::var_os(DETACHED_DAEMON_CHILD_ENV);
+        std::env::set_var(DESKTOP_CORE_ENV, "1");
+        std::env::set_var(DETACHED_DAEMON_CHILD_ENV, "1");
+
+        assert_eq!(foreground_runtime_start_mode(), RuntimeStartMode::Daemon);
+
+        match previous_desktop {
+            Some(value) => std::env::set_var(DESKTOP_CORE_ENV, value),
+            None => std::env::remove_var(DESKTOP_CORE_ENV),
+        }
+        match previous_detached {
+            Some(value) => std::env::set_var(DETACHED_DAEMON_CHILD_ENV, value),
+            None => std::env::remove_var(DETACHED_DAEMON_CHILD_ENV),
+        }
+    }
+
+    #[test]
+    fn live_desktop_runtime_is_reused_for_matching_cli_start_port() {
+        let runtime = RuntimeInfo::new(
+            12345,
+            19090,
+            None,
+            Some("0.0.0.0".to_string()),
+            RuntimeStartMode::Desktop,
+        );
+
+        assert!(handle_live_desktop_runtime_before_start(&runtime, 19090).is_ok());
+    }
+
+    #[test]
+    fn live_desktop_runtime_rejects_mismatched_cli_start_port_without_stop() {
+        let runtime = RuntimeInfo::new(
+            12345,
+            19090,
+            None,
+            Some("0.0.0.0".to_string()),
+            RuntimeStartMode::Desktop,
+        );
+
+        let error = handle_live_desktop_runtime_before_start(&runtime, 19091)
+            .expect_err("mismatched desktop core port should be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("will not stop the app-bound core"));
+    }
+
+    #[test]
+    fn live_desktop_runtime_for_pid_ignores_cli_daemon_runtime() {
+        let _guard = data_dir_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _data_dir = scoped_data_dir(&temp_dir);
+        write_runtime_info(&RuntimeInfo::new(
+            12345,
+            18080,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Daemon,
+        ))
+        .expect("write runtime info");
+
+        assert!(live_desktop_runtime_for_pid(12345).is_none());
+    }
+
+    #[test]
+    fn live_desktop_runtime_for_pid_matches_desktop_runtime() {
+        let _guard = data_dir_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _data_dir = scoped_data_dir(&temp_dir);
+        write_runtime_info(&RuntimeInfo::new(
+            12345,
+            18080,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Desktop,
+        ))
+        .expect("write runtime info");
+
+        let runtime = live_desktop_runtime_for_pid(12345).expect("desktop runtime");
+
+        assert_eq!(runtime.start_mode, RuntimeStartMode::Desktop);
+        assert_eq!(runtime.port, 18080);
     }
 
     #[test]

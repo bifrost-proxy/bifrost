@@ -57,6 +57,9 @@ const WEBVIEW_PARK_OFFSET: f64 = 2000.0;
 const WEBVIEW_REVEAL_SETTLE_DELAY: Duration = Duration::from_millis(90);
 const HANDOFF_COMPLETE_EVENT: &str = "desktop://handoff-complete";
 const OPEN_REQUEST_EVENT: &str = "desktop://open-request";
+const DESKTOP_CORE_ENV: &str = "BIFROST_DESKTOP_CORE";
+const SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV: &str =
+    "BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DesktopConfig {
@@ -703,7 +706,6 @@ fn prepare_desktop_certificates(data_dir: &Path) -> Result<CertStatus, String> {
 }
 
 fn start_backend(binary_path: &Path, data_dir: &Path, port: u16) -> tauri::Result<Child> {
-    let port = port.to_string();
     let stdout_log = open_sidecar_log_file(data_dir, "desktop-sidecar.out.log")?;
     let stderr_log = open_sidecar_log_file(data_dir, "desktop-sidecar.err.log")?;
 
@@ -719,28 +721,39 @@ fn start_backend(binary_path: &Path, data_dir: &Path, port: u16) -> tauri::Resul
         ),
     );
 
-    let mut args = vec![
-        "start",
-        "--host",
-        BACKEND_BIND_HOST,
-        "--port",
-        &port,
-        "--skip-cert-check",
-    ];
-    if desktop_no_system_proxy_requested() {
-        args.push("--no-system-proxy");
-    }
-
     let mut command = Command::new(binary_path);
     command
-        .args(args)
-        .env("BIFROST_DATA_DIR", data_dir)
+        .args(desktop_backend_start_args(port))
+        .envs(desktop_backend_env(data_dir))
         .stdout(Stdio::from(stdout_log))
         .stderr(Stdio::from(stderr_log));
     hide_windows_child_console(&mut command);
     command
         .spawn()
         .map_err(|error| anyhow(format!("failed to start backend: {error}")))
+}
+
+fn desktop_backend_start_args(port: u16) -> Vec<String> {
+    let mut args = vec![
+        "start".to_string(),
+        "--host".to_string(),
+        BACKEND_BIND_HOST.to_string(),
+        "--port".to_string(),
+        port.to_string(),
+        "--skip-cert-check".to_string(),
+    ];
+    if desktop_no_system_proxy_requested() {
+        args.push("--no-system-proxy".to_string());
+    }
+    args
+}
+
+fn desktop_backend_env(data_dir: &Path) -> Vec<(&'static str, String)> {
+    vec![
+        ("BIFROST_DATA_DIR", data_dir.to_string_lossy().into_owned()),
+        (DESKTOP_CORE_ENV, "1".to_string()),
+        (SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV, "1".to_string()),
+    ]
 }
 
 fn desktop_no_system_proxy_requested() -> bool {
@@ -2209,13 +2222,13 @@ fn is_server_config_response(response_body: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        begin_backend_recovery, clear_backend_unavailable_if_healthy,
-        host_window_close_behavior_for_platform, is_server_config_response,
-        main_interface_decorations_for_platform, mark_backend_unavailable_for_manual_start,
-        parse_port_update_response, poll_managed_backend_exit, resolve_bifrost_binary_from_env,
-        resolve_desktop_config_path, resolve_desktop_data_dir, save_desktop_config,
-        uses_borderless_desktop_chrome_for_platform, BackendState, DesktopConfig,
-        HostWindowCloseBehavior,
+        begin_backend_recovery, clear_backend_unavailable_if_healthy, desktop_backend_env,
+        desktop_backend_start_args, host_window_close_behavior_for_platform,
+        is_server_config_response, main_interface_decorations_for_platform,
+        mark_backend_unavailable_for_manual_start, parse_port_update_response,
+        poll_managed_backend_exit, resolve_bifrost_binary_from_env, resolve_desktop_config_path,
+        resolve_desktop_data_dir, save_desktop_config, uses_borderless_desktop_chrome_for_platform,
+        BackendState, DesktopConfig, HostWindowCloseBehavior,
     };
     use bifrost_storage::data_dir as shared_bifrost_data_dir;
     use std::fs;
@@ -2367,6 +2380,51 @@ mod tests {
         match previous {
             Some(value) => std::env::set_var("BIFROST_DESKTOP_BIN", value),
             None => std::env::remove_var("BIFROST_DESKTOP_BIN"),
+        }
+    }
+
+    #[test]
+    fn desktop_sidecar_disables_launchd_cleanup_registration() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let env = desktop_backend_env(temp_dir.path());
+        let expected_data_dir = temp_dir.path().to_string_lossy().into_owned();
+
+        assert!(env.iter().any(|(key, value)| {
+            *key == "BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL" && value == "1"
+        }));
+        assert!(env
+            .iter()
+            .any(|(key, value)| *key == "BIFROST_DESKTOP_CORE" && value == "1"));
+        assert!(env
+            .iter()
+            .any(|(key, value)| { *key == "BIFROST_DATA_DIR" && value == &expected_data_dir }));
+    }
+
+    #[test]
+    fn desktop_sidecar_start_args_keep_system_proxy_policy_separate_from_launchd_registration() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let previous = std::env::var_os("BIFROST_DESKTOP_NO_SYSTEM_PROXY");
+        std::env::remove_var("BIFROST_DESKTOP_NO_SYSTEM_PROXY");
+        assert_eq!(
+            desktop_backend_start_args(19990),
+            vec![
+                "start".to_string(),
+                "--host".to_string(),
+                "0.0.0.0".to_string(),
+                "--port".to_string(),
+                "19990".to_string(),
+                "--skip-cert-check".to_string(),
+            ]
+        );
+
+        std::env::set_var("BIFROST_DESKTOP_NO_SYSTEM_PROXY", "1");
+        assert!(desktop_backend_start_args(19990)
+            .iter()
+            .any(|arg| arg == "--no-system-proxy"));
+
+        match previous {
+            Some(value) => std::env::set_var("BIFROST_DESKTOP_NO_SYSTEM_PROXY", value),
+            None => std::env::remove_var("BIFROST_DESKTOP_NO_SYSTEM_PROXY"),
         }
     }
 

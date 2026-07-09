@@ -10,10 +10,11 @@ REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_DIR"
 
 BIFROST_PORT="${BIFROST_PORT:-${ADMIN_PORT:-18941}}"
-MOCK_PORT="${MOCK_PORT:-18942}"
+MOCK_PORT="${MOCK_PORT:-0}"
 TEST_DIR="$(mktemp -d)"
 MOCK_LOG="$TEST_DIR/mock-model.jsonl"
 SEND_LOG="$TEST_DIR/mock-send.jsonl"
+MOCK_PORT_FILE="$TEST_DIR/mock-port"
 BIFROST_LOG="$TEST_DIR/bifrost.log"
 BIFROST_BIN="${BIFROST_BIN:-}"
 
@@ -44,7 +45,7 @@ wait_http() {
   return 1
 }
 
-python3 - "$MOCK_PORT" "$MOCK_LOG" "$SEND_LOG" <<'PY' &
+python3 - "$MOCK_PORT" "$MOCK_LOG" "$SEND_LOG" "$MOCK_PORT_FILE" <<'PY' &
 import json
 import sys
 import threading
@@ -53,6 +54,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 port = int(sys.argv[1])
 model_log = sys.argv[2]
 send_log = sys.argv[3]
+port_file = sys.argv[4]
 stage = {"value": 0}
 lock = threading.Lock()
 
@@ -139,9 +141,29 @@ class Handler(BaseHTTPRequestHandler):
 
         self._json(404, {"error": "not found"})
 
-ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+with open(port_file, "w", encoding="utf-8") as fh:
+    fh.write(str(server.server_address[1]))
+    fh.write("\n")
+server.serve_forever()
 PY
 MOCK_PID=$!
+for _ in $(seq 1 120); do
+  if [[ -s "$MOCK_PORT_FILE" ]]; then
+    MOCK_PORT="$(cat "$MOCK_PORT_FILE")"
+    break
+  fi
+  if ! kill -0 "$MOCK_PID" >/dev/null 2>&1; then
+    echo "[agent-send-msg-default-channel] mock server exited before publishing its port" >&2
+    wait "$MOCK_PID" >/dev/null 2>&1 || true
+    exit 1
+  fi
+  sleep 0.25
+done
+if [[ ! -s "$MOCK_PORT_FILE" ]]; then
+  echo "[agent-send-msg-default-channel] mock server did not publish its port" >&2
+  exit 1
+fi
 wait_http "http://127.0.0.1:$MOCK_PORT/health" "mock server"
 
 if [[ "${SKIP_BUILD:-false}" == "true" ]]; then

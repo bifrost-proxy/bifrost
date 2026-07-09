@@ -16,7 +16,7 @@ pub enum RuntimeStartMode {
 
 impl RuntimeStartMode {
     pub fn is_restartable(self) -> bool {
-        matches!(self, Self::Daemon | Self::Desktop)
+        matches!(self, Self::Daemon)
     }
 }
 
@@ -579,5 +579,23 @@ mod tests {
         let json = serde_json::to_value(&info).expect("runtime info serializes");
         assert_eq!(json["runtime_start_mode"], "daemon");
         assert!(json.get("start_mode").is_none());
+    }
+
+    #[test]
+    fn runtime_info_new_desktop_is_app_bound_not_cli_restartable() {
+        let info = RuntimeInfo::new(
+            42,
+            9900,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Desktop,
+        );
+
+        assert!(!info.restartable_runtime);
+        assert!(!info.restartable_daemon());
+        assert_eq!(info.start_mode, RuntimeStartMode::Desktop);
+
+        let json = serde_json::to_value(&info).expect("runtime info serializes");
+        assert_eq!(json["runtime_start_mode"], "desktop");
     }
 }
