@@ -58,6 +58,33 @@ E2E 脚本失败时必须能定位「哪一层出问题」：
 
 ## 技术细节
 
+### 0. Streaming stdin 首帧竞态
+
+`remote exec --interactive` 的 caller-to-client stdin 通过 encrypted `call_frame`
+到达 target。CI 曾暴露一个竞态：relay 先把 stdin 首帧推给 target，而
+target 的 `call_open` 还没完成 active call 登记时，worker 会把 frame 当作
+inactive call 丢弃，导致远端子进程已经输出 `READY` 但读不到
+`EARLY_STDIN_OK`。
+
+当前修复采用两层约束：
+
+- target worker 仅对已解析且方向为 `CallerToClient` 的早到 encrypted
+  `call_frame` 建立短期缓冲，TTL 为 10 秒，并限制每个 call 16 帧、全局
+  128 个 call，防止 relay 抖动变成无界内存增长。
+- `call_open` 创建 active call 并准备 stdin channel 后立即 flush 早到帧；
+  回放仍走原有 grant crypto、counter nonce、解密、replay window 与
+  stdin sender 路径，不绕过安全校验。
+- streaming executor 在 `stdin_mode=stream` 时必须打开 child stdin pipe，
+  并把 mpsc stdin stream 写入子进程；无 stdin 时继续使用 `Stdio::null()`。
+
+回归验证：
+
+```bash
+cargo test -p bifrost-admin stdin -- --nocapture
+cargo test -p bifrost-admin handle_call_frame -- --nocapture
+bash e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh
+```
+
 ### 1. pair-code mock relay 补 `client_ephemeral_pub`
 
 - 位置：`e2e-tests/tests/test_remote_connect_overload_retry_e2e.sh`、`e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh` 中的 approve mock 响应体。

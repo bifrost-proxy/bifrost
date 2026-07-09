@@ -66,6 +66,9 @@ const STALE_GRANT_RETENTION_MS: u64 = 2 * 24 * 60 * 60 * 1000;
 const RECENT_SSH_GRANT_RECONCILE_GRACE_MS: u64 = 2 * 60 * 1000;
 const PENDING_PAIRING_POLL_SECS: u64 = 5;
 const ACTIVE_CALL_RECONCILE_INTERVAL_MS: u64 = 1000;
+const EARLY_CALL_FRAME_TTL_MS: u64 = 10_000;
+const MAX_EARLY_CALL_FRAMES_PER_CALL: usize = 16;
+const MAX_EARLY_CALL_FRAME_CALLS: usize = 128;
 
 fn normalize_registration_session_token(token: Option<String>) -> Option<String> {
     token
@@ -145,6 +148,11 @@ struct ActiveCallControl {
     stdin_tx: Mutex<Option<tokio::sync::mpsc::Sender<Vec<u8>>>>,
     // P1-B: per-call inbound (caller->client) anti-replay window.
     inbound_replay: Mutex<ReplayWindow>,
+}
+
+struct PendingCallFrame {
+    envelope: EncryptedEnvelope,
+    received_at: u64,
 }
 
 impl ActiveCallControl {
@@ -329,6 +337,7 @@ pub struct RemoteInvokeWorker {
     state: Arc<RwLock<WorkerState>>,
     pending_pairings: Arc<RwLock<HashMap<String, TimestampedPairing>>>,
     active_calls: Arc<RwLock<HashMap<String, Arc<ActiveCallControl>>>>,
+    early_call_frames: Arc<RwLock<HashMap<String, Vec<PendingCallFrame>>>>,
     call_history_store: Arc<CallHistoryStore>,
     local_grants: Arc<RwLock<HashMap<String, GrantInfo>>>,
     grant_crypto: Arc<RwLock<HashMap<String, GrantCryptoMaterial>>>,
@@ -440,6 +449,7 @@ impl RemoteInvokeWorker {
             state: Arc::new(RwLock::new(WorkerState::Disconnected)),
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_calls: Arc::new(RwLock::new(HashMap::new())),
+            early_call_frames: Arc::new(RwLock::new(HashMap::new())),
             call_history_store,
             local_grants: Arc::new(RwLock::new(restored_grant_info)),
             grant_crypto: Arc::new(RwLock::new(restored_grant_crypto)),
@@ -2996,6 +3006,7 @@ impl RemoteInvokeWorker {
         self.active_calls
             .write()
             .insert(call_id.clone(), Arc::clone(&active_call));
+        self.flush_early_call_frames(&call_id, &active_call).await;
 
         let mut call_info = CallInfo {
             call_id: call_id.clone(),
@@ -3425,10 +3436,73 @@ impl RemoteInvokeWorker {
         }
 
         let Some(active_call) = self.active_calls.read().get(&call_id).cloned() else {
-            warn!(call_id = %call_id, "call_frame received for inactive call");
+            self.buffer_early_call_frame(call_id, envelope);
             return;
         };
 
+        self.forward_call_frame_to_active_call(&call_id, &active_call, envelope)
+            .await;
+    }
+
+    fn buffer_early_call_frame(&self, call_id: String, envelope: EncryptedEnvelope) {
+        let now = now_millis();
+        let mut frames_by_call = self.early_call_frames.write();
+        frames_by_call.retain(|_, frames| {
+            frames.retain(|frame| now.saturating_sub(frame.received_at) <= EARLY_CALL_FRAME_TTL_MS);
+            !frames.is_empty()
+        });
+        if !frames_by_call.contains_key(&call_id)
+            && frames_by_call.len() >= MAX_EARLY_CALL_FRAME_CALLS
+        {
+            warn!(
+                call_id = %call_id,
+                "dropping early call_frame because pending call buffer is full"
+            );
+            return;
+        }
+        let frames = frames_by_call.entry(call_id.clone()).or_default();
+        if frames.len() >= MAX_EARLY_CALL_FRAMES_PER_CALL {
+            warn!(
+                call_id = %call_id,
+                pending_frames = frames.len(),
+                "dropping early call_frame because per-call buffer is full"
+            );
+            return;
+        }
+        frames.push(PendingCallFrame {
+            envelope,
+            received_at: now,
+        });
+        debug!(
+            call_id = %call_id,
+            pending_frames = frames.len(),
+            "buffered early call_frame until call_open creates active call"
+        );
+    }
+
+    async fn flush_early_call_frames(&self, call_id: &str, active_call: &Arc<ActiveCallControl>) {
+        let now = now_millis();
+        let frames = self
+            .early_call_frames
+            .write()
+            .remove(call_id)
+            .unwrap_or_default();
+        for pending in frames {
+            if now.saturating_sub(pending.received_at) > EARLY_CALL_FRAME_TTL_MS {
+                warn!(call_id = %call_id, "dropping expired early call_frame");
+                continue;
+            }
+            self.forward_call_frame_to_active_call(call_id, active_call, pending.envelope)
+                .await;
+        }
+    }
+
+    async fn forward_call_frame_to_active_call(
+        &self,
+        call_id: &str,
+        active_call: &Arc<ActiveCallControl>,
+        envelope: EncryptedEnvelope,
+    ) {
         let Some(grant_crypto) = self.get_grant_crypto(&active_call.grant_id) else {
             warn!(call_id = %call_id, grant_id = %active_call.grant_id, "missing grant crypto for call_frame");
             return;
@@ -3436,7 +3510,7 @@ impl RemoteInvokeWorker {
 
         let session_key = match derive_call_session_key(
             &grant_crypto.shared_secret,
-            &call_id,
+            call_id,
             Some(&grant_crypto.caller_ephemeral_pub),
             Some(&grant_crypto.client_ephemeral_pub),
             // P0-A channel binding kept INERT on the wire: the caller (bifrost-cli)
@@ -6466,6 +6540,7 @@ mod coverage_boost {
             state: Arc::new(RwLock::new(WorkerState::Disconnected)),
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_calls: Arc::new(RwLock::new(HashMap::new())),
+            early_call_frames: Arc::new(RwLock::new(HashMap::new())),
             call_history_store,
             local_grants: Arc::new(RwLock::new(HashMap::new())),
             grant_crypto: Arc::new(RwLock::new(HashMap::new())),
@@ -7823,6 +7898,63 @@ mod coverage_boost {
 
         let received = rx.recv().await.expect("stdin bytes should arrive");
         assert_eq!(received, b"hello-stdin".to_vec());
+    }
+
+    #[tokio::test]
+    async fn handle_call_frame_buffers_until_active_call_accepts_stdin() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let grant_id = "grant-frame-early-stdin";
+        let call_id = "call-frame-early-stdin";
+        let kind = CommandKind::ShellExec;
+        let (material, _open_key, stream_key) = build_test_grant_crypto(grant_id, call_id, kind);
+
+        worker
+            .grant_crypto
+            .write()
+            .insert(grant_id.to_string(), material.clone());
+
+        let frame_json = json!({ "data": "early-stdin" });
+        let payload = encrypt_encrypted_payload_counter(
+            &frame_json,
+            &stream_key,
+            2,
+            FrameDirection::CallerToClient,
+            1,
+        )
+        .expect("encrypt frame payload");
+        let envelope = EncryptedEnvelope {
+            version: payload.version,
+            call_id: call_id.to_string(),
+            seq: 1,
+            direction: FrameDirection::CallerToClient,
+            nonce: payload.nonce,
+            ciphertext: payload.ciphertext,
+            tag: payload.tag,
+            aad: payload.aad,
+        };
+        let data = json!({
+            "call_id": call_id,
+            "envelope_json": serde_json::to_string(&envelope).unwrap(),
+        });
+
+        worker.handle_call_frame(data).await;
+        assert_eq!(
+            worker.early_call_frames.read().get(call_id).map(Vec::len),
+            Some(1)
+        );
+
+        let active_call = Arc::new(ActiveCallControl::new(grant_id.to_string(), now_millis()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        active_call.set_stdin_sender(tx);
+        worker
+            .active_calls
+            .write()
+            .insert(call_id.to_string(), Arc::clone(&active_call));
+        worker.flush_early_call_frames(call_id, &active_call).await;
+
+        let received = rx.recv().await.expect("early stdin bytes should replay");
+        assert_eq!(received, b"early-stdin".to_vec());
+        assert!(!worker.early_call_frames.read().contains_key(call_id));
     }
 
     #[tokio::test]

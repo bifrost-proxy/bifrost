@@ -400,6 +400,28 @@ pnpm --dir packages/bifrost-sync-server exec tsx src/cli.ts -p "$RELAY_PORT" -d 
 - `remote status` 不再报 `saved connection transport no longer matches relay reusable authorization`
 - `disconnect --all` 会把该 caller 在该设备上的全部 reusable grants 清空，而不是只删除最后一条本地已知 grant
 
+### TC-RSE-33：streaming stdin 首帧早于 target active call 登记时不丢失
+
+步骤：
+1. 执行 target worker 早到 frame 回归：
+   ```bash
+   cargo test -p bifrost-admin handle_call_frame_buffers_until_active_call_accepts_stdin -- --nocapture
+   ```
+2. 执行 target executor streaming stdin 回归：
+   ```bash
+   cargo test -p bifrost-admin test_execute_shell_exec_streaming_forwards_stdin_stream -- --nocapture
+   ```
+3. 执行真实 remote shell streaming E2E：
+   ```bash
+   bash e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh
+   ```
+
+预期：
+- 如果 relay 先把 caller-to-client `call_frame` 推到 target，而 `call_open` 还没完成 active call 登记，target worker 会把已解析且方向合法的 encrypted frame 放入有 TTL 和容量上限的短期缓冲。
+- `call_open` 创建 active call 并准备 stdin channel 后，会立即回放早到 frame；回放仍走原有 grant crypto、counter nonce、replay window 和 stdin 解密路径，不绕过安全校验。
+- streaming executor 在 `stdin_mode=stream` 时打开 child stdin pipe，并把 mpsc stdin stream 写入子进程。
+- 真实 E2E 的 `stdin first-frame regression` 中，远端 Python 先输出 `READY`，随后读到 caller 管道输入 `EARLY_STDIN_OK`，命令 exit code 为 0；Recent Calls 最新 `shell.exec` 记录 `policy_id=stream-shell`、`exec_mode=shell_text`、`exit_code=0`、`stdout_digest` 有效。
+
 ## 清理步骤
 
 ```bash
@@ -443,3 +465,4 @@ rm -rf "$TARGET_DATA_DIR" "$CALLER_DATA_DIR" "$CALLER_2_DATA_DIR" "$RELAY_DATA_D
 | TC-RSE-30 | ✅ PASS | 2026-06-16 本地验证。修复 `--login` 此前为 no-op 的缺陷：`build_shell_text_argv` 现按 `login` 选择 `-c`（默认，非 login，不 source rc）/`-lc`（opt-in），默认路径不再泄漏 iTerm2/VS Code 的 `ESC]1337;`/`ESC]133;` OSC 噪声；shell-exec 降噪 env（`TERM=dumb`/`BIFROST_REMOTE=1`/`ITERM_ENABLE_SHELL_INTEGRATION_WITH_TMUX=NO`）改为无条件注入（defense-in-depth），并以 `or_insert_with` 保留 policy/用户 `--env` 优先级。执行 `cargo test -p bifrost-admin remote_invoke::executor::tests::test_build_shell_text_argv_non_login_uses_dash_c --lib`、`cargo test -p bifrost-admin remote_invoke::executor::tests::test_build_shell_text_argv_login_uses_dash_lc --lib`，以及 `cargo test -p bifrost-admin remote_invoke` 全量 308 passed/0 failed，`cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings` 与 `cargo fmt -p bifrost-admin -- --check` 通过。 |
 | TC-RSE-31 | ✅ PASS | 2026-06-17 本地验证。`remote exec --detach` 现在把 `call_id -> relay_token` 加密写入 caller 本地 `remote-jobs.json`，`remote job list` 可列出本地已知 detached jobs，`remote job status/logs/watch <call_id>` 不再要求也不再接受用户手工填写 `--relay-token`。执行 `cargo test -p bifrost-cli remote::coverage_boost --lib` 通过，覆盖 token 加密持久化、call_id 解析、缺失 cache 报错与状态写回。 |
 | TC-RSE-32 | ✅ PASS | 2026-06-17 本地真实 relay 链路验证。新增 `e2e-tests/tests/test_remote_job_real_e2e.sh`，隔离启动本地 `bifrost-sync-server --enable-remote-invoke` relay、target Bifrost（临时 `BIFROST_DATA_DIR`，`--no-system-proxy`，禁用 Sync 自动登录弹窗和 Tray）以及 caller CLI 数据目录，通过 pair-code 建立 relay 连接并升级 grant 到 `remote_shell_exec`；同时将脚本接入 `scripts/run_all_e2e.sh --ci --full-shell` 的 shell E2E 框架，加入 shard 权重与串行隔离/后清理名单，确保 GitHub Actions `e2e-shell` / `e2e-macos-shell` 路径会覆盖该关键链路。真实执行 3 个 detached shell job：成功 logs job 覆盖 `remote exec --detach`、`remote job list`、`remote job status <call_id>`、`remote job logs <call_id> --output-file`、本地 `remote-jobs.json` 加密 token 与 relay URL 映射、用户输出不暴露 relay token；成功 watch job 覆盖 `remote job watch <call_id> --no-verify-digest --output-file` 与 cache 状态写回；失败 job 覆盖 `remote job watch` 返回真实远端 exit code 7、`status` 显示 `exit_code=7`、target Recent Calls 记录 0/7 终态。回归验证还覆盖 `remote job status --help` 不出现 `--relay-token`、旧 `--relay-token` 参数被 clap 拒绝、fresh caller 数据目录没有本地 job cache 时给出 `no local remote job cache` 与 `bifrost remote job list` 提示。本轮真实验证先暴露 `remote job status` 订阅 `/events` 会 flush 掉 logs/watch 所需 stream buffer，修复为 caller `GET /v4/remote-invoke/calls/:id/status` 非破坏性轮询；随后暴露 streaming 终态缺少 `Done` frame 导致 digest mismatch，修复为 target worker 在 legacy `exit` 前发送包含 full SHA-256 的 terminal `stream_frame Done`。执行 `cargo test -p bifrost-cli job_terminal_status_from_call_payload --lib`、`cargo test -p bifrost-admin remote_invoke::stream_emit::tests::done_frame_has_correct_shape --lib`、`cargo fmt -p bifrost-admin -p bifrost-cli -- --check`、`bash e2e-tests/tests/test_remote_job_real_e2e.sh`、`bash scripts/ci/check-e2e-shell-ci-coverage.sh`，并用 `bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests` 确认 `test_remote_job_real_e2e.sh` 被 CI selector 收集；真实 E2E 64/64 PASS，shell CI coverage guard PASS。 |
+| TC-RSE-33 | ✅ PASS | 2026-07-09 本地验证。main CI run `28938397092` 的 macOS `remote-shell-stream-e2e` 暴露 `stdin first-frame regression` 偶发失败：远端命令已输出 `READY`，但 caller 管道输入未到达 target 子进程，最终被 `stream-shell` policy 的 10000ms wall-clock cap 杀掉。修复后 target worker 对 `call_open` 完成 active call 登记前到达的 caller-to-client encrypted `call_frame` 做 10 秒短期缓冲并限制每 call / 全局容量，active call 准备 stdin channel 后立即按原解密、counter nonce、replay window 路径回放；同时补齐 streaming executor 在 `stdin_mode=stream` 时打开 child stdin pipe 的行为。执行 `cargo test -p bifrost-admin stdin -- --nocapture` 通过 11 个 stdin 相关测试，包含 `test_execute_shell_exec_streaming_forwards_stdin_stream`、`test_execute_shell_exec_forwards_stdin_stream`、`active_call_accepts_stdin_before_executor_start`、`handle_call_frame_buffers_until_active_call_accepts_stdin`；执行 `cargo test -p bifrost-admin handle_call_frame -- --nocapture` 通过 12 个 call_frame 测试，确认早到 frame 回放、普通 stdin 转发、replay/方向/解密错误路径均保持约束。随后执行 `bash e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh`，真实隔离 relay / target / caller 链路 51/51 PASS；其中 `stdin first-frame regression` 输出包含 `READY` 和 `EARLY_STDIN_OK`，命令 exit code 为 0，Recent Calls 记录 `policy_id=stream-shell`、`exec_mode=shell_text`、`exit_code=0`、`stdout_digest` 有效。 |
