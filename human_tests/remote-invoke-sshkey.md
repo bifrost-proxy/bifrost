@@ -220,3 +220,9 @@
 | 用例 | 结果 | 证据 |
 | --- | --- | --- |
 | TC-RISK-05 | PASS | 2026-07-07 本地先复现到 caller-2 `remote-connections.json` 中已有新 `grant_id` 和 `caller_fingerprint`，且 target `remote_invoke_grant_info.json` / `remote_invoke_grant_crypto.json` 已持久化两条 SSH grant，但 target Admin grants API 只返回第一条内存 grant。修复后执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin remote_invoke::worker::coverage_boost --lib` 通过 83 个 worker 单测；执行 `BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_remote_invoke_e2e.sh && BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 通过，前者输出 `All assertions: total=73 passed=73 failed=0`，后者输出 `All SSH remote invoke E2E checks passed`。 |
+
+### 2026-07-09 SSH grant 权限恢复传播回归
+
+| 用例 | 结果 | 证据 |
+| --- | --- | --- |
+| TC-RISK-06 | PASS | GitHub Actions PR 361 run `29000407368` 的 `E2E Shell (aarch64-apple-darwin, shard 1/2)` 在 `test_remote_invoke_ssh_e2e.sh` 中执行 `setting grant update --level query` 后再恢复 `--level full`，随后的 `remote exec --shell-text "printf ssh-full-restored-ok"` 偶发收到 `grant scope RemoteQuery / file_access None does not allow command kind ShellExec`。脚本已更新为只对该权限传播型错误做短暂重试；真实拒绝、输出缺失或其它错误仍立即失败并打印 grant diagnostics。2026-07-09 执行 `BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 通过；本地复现到 `grant scope update not visible to remote exec yet (1/20); retrying ssh-full-restored-ok`，随后完成第二 caller 隔离、remote traffic/search、target-local traffic replay 和 revoke，最终输出 `All SSH remote invoke E2E checks passed`。 |
