@@ -744,10 +744,12 @@ dependencies = [
 name = "bifrost-storage"
 version = "0.0.147"
 dependencies = [
+ "base64 0.22.1",
  "bifrost-core",
  "chrono",
  "dirs 5.0.1",
  "futures",
+ "ring",
  "serde",
  "serde_json",
  "sha2",

@@ -234,9 +234,71 @@ curl -s -o /dev/null -w "%{http_code}" -x http://127.0.0.1:8800 http://httpbin.o
 **预期结果：**
 - 单元测试通过，验证不同 IP 的失败计数互不影响
 
+### TC-PAB-11: Account CLI 多账号管理、真实代理流量与加密落盘
+
+**操作步骤：**
+1. 使用隔离数据目录执行 userpass loopback E2E：
+   ```bash
+   BIFROST_DATA_DIR="$(mktemp -d)" BIFROST_DISABLE_TRAY=1 \
+     BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_userpass_loopback_e2e.sh
+   ```
+2. 观察脚本中的 `Account CLI multi-account CRUD, real proxy traffic, and encrypted config` 场景。
+3. 场景内部会执行：
+   ```bash
+   printf 'alpha-secret-123\n' | bifrost -p <PORT> account add alice --password-stdin --enable-auth
+   printf 'beta-secret-123\n' | bifrost -p <PORT> account add bob --password-stdin
+   printf 'disabled-secret-123\n' | bifrost -p <PORT> account add disabled-user --password-stdin --disabled
+   bifrost -p <PORT> account list --json
+   bifrost -p <PORT> account set-loopback-auth true
+   printf 'beta-secret-456\n' | bifrost -p <PORT> account update bob --password-stdin
+   bifrost -p <PORT> account update bob --disable
+   bifrost -p <PORT> account update bob --enable
+   bifrost -p <PORT> account remove alice
+   ```
+4. 场景会通过 Bifrost HTTP 代理访问本地临时 upstream，验证无凭证、正确凭证、错误密码、禁用账号、删除账号的真实代理行为。
+5. 场景会检查 `BIFROST_DATA_DIR/config.toml` 中不包含 `alpha-secret-123`、`beta-secret-123`、`beta-secret-456` 或 `disabled-secret-123` 明文，并包含 `bifrost-local-secret:` envelope。
+
+**预期结果：**
+- `account add --enable-auth` 后 Admin API `.userpass.enabled` 为 `true`，三个账号均可见且 `has_password=true`。
+- `account set-loopback-auth true` 后本机无凭证代理请求返回 407，使用 `alice:alpha-secret-123` 和 `bob:beta-secret-123` 可通过本地 upstream 真实代理请求。
+- 错误密码、禁用账号、删除账号均返回 407。
+- `account update bob --password-stdin` 后旧密码返回 407，新密码返回 200。
+- `account update bob --disable/--enable` 后代理认证行为随账号状态变化。
+- `config.toml` 只保存 `bifrost-local-secret:` 加密 envelope，不保存明文账号密码。
+
+### TC-PAB-12: HTTP 代理真实流量防暴力破解与成功重置
+
+**操作步骤：**
+1. 使用隔离数据目录执行 userpass loopback E2E：
+   ```bash
+   BIFROST_DATA_DIR="$(mktemp -d)" BIFROST_DISABLE_TRAY=1 \
+     BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_userpass_loopback_e2e.sh
+   ```
+2. 观察脚本中的 `HTTP Proxy brute-force limit and success reset` 场景。
+3. 场景内部会先用正确凭证重置计数，连续 5 次错误密码后再用正确凭证确认可通过。
+4. 场景随后连续 9 次错误密码并再次用正确凭证确认未触发封禁。
+5. 场景最后连续 10 次错误密码，再用正确凭证请求，确认被封禁。
+
+**预期结果：**
+- 错误密码在阈值前返回 407。
+- 成功认证会重置失败计数。
+- 达到阈值后的下一次请求返回 `429 Too Many Requests`。
+- 429 响应包含 `Retry-After: 300` 和 `Too many failed authentication attempts`。
+
 ## 清理步骤
 
 ```bash
 # 停止 Bifrost 服务（Ctrl+C）
 rm -rf ./.bifrost-test
 ```
+
+## 执行记录
+
+### 2026-07-10 Account CLI 与加密落盘回归
+
+| 用例 | 结果 | 证据 |
+| --- | --- | --- |
+| TC-PAB-11 | PASS | 执行 `BIFROST_DATA_DIR="$(mktemp -d)" BIFROST_DISABLE_TRAY=1 BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_userpass_loopback_e2e.sh`，输出 `Tests Run: 12`、`Tests Passed: 12`、`Tests Failed: 0`。其中 `Account CLI multi-account CRUD, real proxy traffic, and encrypted config` PASS，验证 `account add/list/update/remove/set-loopback-auth` 多账号管理、正确账号真实 HTTP 代理请求返回 200、错误密码/禁用账号/删除账号返回 407，并确认 `config.toml` 不包含账号密码明文且包含 `bifrost-local-secret:` envelope。 |
+| TC-PAB-12 | PASS | 同一次 E2E 中 `HTTP Proxy brute-force limit and success reset` PASS，验证 5 次错误后正确凭证重置计数、9 次错误后正确凭证仍通过、10 次错误后的下一次请求返回 `429 Too Many Requests`，且响应包含 `Retry-After: 300` 与 `Too many failed authentication attempts`。 |

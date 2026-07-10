@@ -5,6 +5,7 @@ use bifrost_core::{BifrostError, Result};
 use tokio::sync::{broadcast, RwLock};
 use tracing::info;
 
+use crate::local_secrets::{is_encrypted_local_secret, LocalSecretKey};
 use crate::rules::{RuleFile, RulesStorage};
 use crate::state::StateManager;
 use crate::unified_config::{
@@ -80,6 +81,7 @@ impl ConfigManager {
         let original_max_db_size_bytes = config.traffic.max_db_size_bytes;
         let normalized_system_proxy_bypass = config.system_proxy.normalize_legacy_default_bypass();
         config.traffic.normalize();
+        Self::decrypt_userpass_secrets(&data_dir, &mut config)?;
         if config.traffic.max_records != original_max_records
             || config.traffic.max_db_size_bytes != original_max_db_size_bytes
             || normalized_system_proxy_bypass
@@ -798,13 +800,52 @@ impl ConfigManager {
 
     fn save_config(&self, config: &UnifiedConfig) -> Result<()> {
         let config_path = self.data_dir.join("config.toml");
-        Self::save_config_to_file(&config_path, config)
+        Self::save_config_to_file_for_data_dir(&config_path, config, &self.data_dir)
     }
 
     fn save_config_to_file(path: &Path, config: &UnifiedConfig) -> Result<()> {
+        let data_dir = path.parent().unwrap_or_else(|| Path::new("."));
+        Self::save_config_to_file_for_data_dir(path, config, data_dir)
+    }
+
+    fn save_config_to_file_for_data_dir(
+        path: &Path,
+        config: &UnifiedConfig,
+        data_dir: &Path,
+    ) -> Result<()> {
+        let mut config = config.clone();
+        Self::encrypt_userpass_secrets(data_dir, &mut config)?;
         let content =
-            toml::to_string_pretty(config).map_err(|e| BifrostError::Config(e.to_string()))?;
+            toml::to_string_pretty(&config).map_err(|e| BifrostError::Config(e.to_string()))?;
         std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    fn encrypt_userpass_secrets(data_dir: &Path, config: &mut UnifiedConfig) -> Result<()> {
+        let Some(userpass) = config.access.userpass.as_mut() else {
+            return Ok(());
+        };
+        let key = LocalSecretKey::for_data_dir(data_dir);
+        for account in &mut userpass.accounts {
+            if let Some(password) = account.password.as_mut() {
+                if !is_encrypted_local_secret(password) {
+                    *password = key.encrypt_string(password)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn decrypt_userpass_secrets(data_dir: &Path, config: &mut UnifiedConfig) -> Result<()> {
+        let Some(userpass) = config.access.userpass.as_mut() else {
+            return Ok(());
+        };
+        let key = LocalSecretKey::for_data_dir(data_dir);
+        for account in &mut userpass.accounts {
+            if let Some(password) = account.password.as_mut() {
+                *password = key.decrypt_string(password)?;
+            }
+        }
         Ok(())
     }
 }
@@ -1112,6 +1153,53 @@ mod tests {
         assert!(config.access.allow_lan);
         let event = receiver.try_recv().unwrap();
         assert!(matches!(event, ConfigChangeEvent::AccessConfigChanged));
+    }
+
+    #[tokio::test]
+    async fn test_userpass_passwords_are_encrypted_at_rest_and_decrypted_on_load() {
+        let temp_dir = TempDir::new().unwrap();
+        let password = "plain-config-password";
+
+        {
+            let manager = ConfigManager::new(temp_dir.path().to_path_buf()).unwrap();
+            manager
+                .update_access_config(AccessConfigUpdate {
+                    userpass: Some(Some(bifrost_core::UserPassAuthConfig {
+                        enabled: true,
+                        accounts: vec![bifrost_core::UserPassAccountConfig {
+                            username: "alice".to_string(),
+                            password: Some(password.to_string()),
+                            enabled: true,
+                        }],
+                        loopback_requires_auth: true,
+                    })),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+
+            let config = manager.config().await;
+            let stored_password = config.access.userpass.unwrap().accounts[0]
+                .password
+                .as_deref()
+                .unwrap()
+                .to_string();
+            assert_eq!(stored_password, password);
+        }
+
+        let raw_config = std::fs::read_to_string(temp_dir.path().join("config.toml")).unwrap();
+        assert!(!raw_config.contains(password));
+        assert!(raw_config.contains("bifrost-local-secret:"));
+
+        {
+            let manager = ConfigManager::new(temp_dir.path().to_path_buf()).unwrap();
+            let config = manager.config().await;
+            let userpass = config.access.userpass.expect("userpass config");
+            assert!(userpass.enabled);
+            assert!(userpass.loopback_requires_auth);
+            assert_eq!(userpass.accounts[0].username, "alice");
+            assert_eq!(userpass.accounts[0].password.as_deref(), Some(password));
+        }
     }
 
     #[tokio::test]

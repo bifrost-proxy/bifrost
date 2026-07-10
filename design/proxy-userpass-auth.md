@@ -4,7 +4,7 @@
 
 Bifrost 原始访问控制是纯 IP 维度的 `ClientAccessControl`，只有 `allow_all` / `local_only` / `whitelist` / `interactive` 四种模式；SOCKS5 内部虽然实现了 RFC1929 用户名密码握手，但没有和 access control 联动，也不覆盖 HTTP 代理。多个真实场景下用户既想保留白名单/交互式审批，又想让远端可信客户端通过用户名密码继续接入，因此需要一套“IP 授权 + `user:password` 授权”的叠加式补充能力，同时不改变未配置该能力时的既有行为。
 
-真实实现状态（截至 2026-06-16）：核心配置模型、HTTP 407 鉴权、SOCKS5 IP + userpass 组合、运行时 `last_connected_at`、admin API、Web 设置页、CLI `start --proxy-user` 与 `config access.userpass` 均已落地；剩余 README/docs 更新等少量项标注为 “planned”。
+真实实现状态（截至 2026-07-10）：核心配置模型、HTTP 407 鉴权、SOCKS5 IP + userpass 组合、运行时 `last_connected_at`、admin API、Web 设置页、CLI `start --proxy-user`、低层 `config access.userpass.*` 与账号级 `account` 子命令均已落地；持久化配置中的账号密码会以本机设备指纹派生密钥加密落盘，运行时仍解密为现有 `UserPassAccountConfig.password` 供鉴权逻辑使用。
 
 ## 用户目标验证清单
 
@@ -18,6 +18,8 @@ Bifrost 原始访问控制是纯 IP 维度的 `ClientAccessControl`，只有 `al
 - 记录每个账号最近一次成功鉴权时间 `last_connected_at`，管理端可见。
 - 未配置该能力时，行为与旧版本完全一致。
 - `loopback_requires_auth=false`（默认）时本机免密；`=true` 时本机也需要鉴权。
+- CLI 提供账号级管理入口：`bifrost account list/add/update/remove/enable/disable/set-loopback-auth`，避免用户手写 `access.userpass.accounts` JSON。
+- `config.toml` 不保存明文账号密码；读取配置时自动解密，保存配置时自动加密或迁移旧明文。
 
 ### 必须不破坏
 
@@ -27,6 +29,7 @@ Bifrost 原始访问控制是纯 IP 维度的 `ClientAccessControl`，只有 `al
 - 管理端只回显 `has_password`，永远不回显明文 password。
 - 更新配置后新请求立即按新配置校验；已有 CONNECT/SOCKS 通道不强制中断。
 - Interactive 模式下带正确凭证直接放行，不进入 pending。
+- 账号加密只用于本机静态文件防护，不承诺抵御同用户权限下可执行代码读取进程内存或调用本机 API。
 
 ### 必须真实验证
 
@@ -73,7 +76,7 @@ loopback_requires_auth = false
 
 [[access.userpass.accounts]]
 username = "demo"
-password = "secret"
+password = "bifrost-local-secret:{\"version\":1,\"nonce\":\"...\",\"ciphertext\":\"...\"}"
 enabled = true
 
 [[access.userpass.accounts]]
@@ -105,7 +108,17 @@ pub struct AccessControlConfig {
 }
 ```
 
-约束：`username` 唯一（大小写敏感）、`password` 只写不读、账号可禁用但保留、对外接口只返回 `enabled/username/has_password/last_connected_at`。
+约束：`username` 唯一（大小写敏感）、`password` 只写不读、账号可禁用但保留、对外接口只返回 `enabled/username/has_password/last_connected_at`。旧版明文 `password = "secret"` 仍能被读取；下一次 `ConfigManager` 保存配置时会改写为 `bifrost-local-secret:` envelope。
+
+### 本机加密落盘（shipped）
+
+`crates/bifrost-storage/src/local_secrets.rs` 使用 AES-256-GCM envelope 加密本机配置 secret：
+
+- key 派生材料：固定 domain separator、`BIFROST_DATA_DIR` 对应 data dir、hostname、用户环境变量、常见 machine-id 文件内容。
+- 稳定性：同一用户、同一 data dir、同一设备指纹材料不变时可稳定解密；更换设备或迁移 data dir 后需要重新设置账号密码。
+- 格式：`bifrost-local-secret:{"version":1,"nonce":"base64","ciphertext":"base64"}`。
+- 边界：这是防止其他程序“只读配置文件即可拿走明文密码”的静态防护；不替代 OS Keychain，不防同权限进程主动调用 Bifrost API 或读取运行中进程内存。
+- 接入点：`ConfigManager::save_config` 写文件前加密副本，`ConfigManager::new` 加载配置后解密到内存；Admin API、WebUI、`bifrost account`、`bifrost config access.userpass.*` 都共享这一边界。
 
 ### Accept 阶段 deferred decision（shipped）
 
@@ -204,9 +217,15 @@ API：
 ### CLI（shipped）
 
 - `bifrost start --proxy-user USER:PASS`（可重复）：临时启用一批账号。
+- `bifrost account list [--json]`
+- `bifrost account add USER --password-stdin [--enable-auth]`
+- `bifrost account update USER [--password-stdin] [--enable|--disable]`
+- `bifrost account remove USER`
+- `bifrost account enable` / `bifrost account disable`
+- `bifrost account set-loopback-auth true|false`
 - `bifrost config access.userpass.enabled true|false`
 - `bifrost config access.userpass.loopback-requires-auth true|false`
-- `bifrost config access.userpass.accounts add|remove|enable|disable ...`
+- `bifrost config set access.userpass.accounts '[{"username":"demo","password":"secret","enabled":true}]'`（低层 JSON 入口，推荐脚本外使用 `bifrost account`）
 - `bifrost config get/export/show`：仅回显 `enabled/accounts[]/username/enabled/has_password/last_connected_at`。
 
 ## Sync 边界

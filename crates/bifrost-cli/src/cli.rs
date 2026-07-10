@@ -382,6 +382,14 @@ pub enum Commands {
         action: WhitelistCommands,
     },
     #[command(
+        visible_alias = "accounts",
+        about = "Manage proxy username/password accounts"
+    )]
+    Account {
+        #[command(subcommand)]
+        action: AccountCommands,
+    },
+    #[command(
         visible_alias = "sp",
         about = "Toggle system proxy (enable/disable/status)"
     )]
@@ -2225,6 +2233,58 @@ pub enum WhitelistCommands {
     RemoveTemporary {
         #[arg(help = "IP address to remove from temporary list")]
         ip: String,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AccountCommands {
+    #[command(about = "List proxy username/password accounts")]
+    List {
+        #[arg(long, help = "Output in JSON format")]
+        json: bool,
+    },
+    #[command(about = "Add a proxy username/password account")]
+    Add {
+        #[arg(help = "Account username")]
+        username: String,
+        #[arg(long, help = "Password value; prefer --password-stdin in scripts")]
+        password: Option<String>,
+        #[arg(long, help = "Read password from stdin")]
+        password_stdin: bool,
+        #[arg(long, help = "Create account as disabled")]
+        disabled: bool,
+        #[arg(
+            long,
+            help = "Enable proxy username/password auth after adding the account"
+        )]
+        enable_auth: bool,
+    },
+    #[command(about = "Update a proxy account password and/or enabled state")]
+    Update {
+        #[arg(help = "Account username")]
+        username: String,
+        #[arg(long, help = "New password value; prefer --password-stdin in scripts")]
+        password: Option<String>,
+        #[arg(long, help = "Read new password from stdin")]
+        password_stdin: bool,
+        #[arg(long, conflicts_with = "disable", help = "Enable the account")]
+        enable: bool,
+        #[arg(long, conflicts_with = "enable", help = "Disable the account")]
+        disable: bool,
+    },
+    #[command(about = "Remove a proxy account")]
+    Remove {
+        #[arg(help = "Account username")]
+        username: String,
+    },
+    #[command(about = "Enable proxy username/password auth globally")]
+    Enable,
+    #[command(about = "Disable proxy username/password auth globally")]
+    Disable,
+    #[command(about = "Require or skip username/password auth for loopback clients")]
+    SetLoopbackAuth {
+        #[arg(value_parser = ["true", "false"], help = "Whether loopback clients must authenticate")]
+        required: String,
     },
 }
 

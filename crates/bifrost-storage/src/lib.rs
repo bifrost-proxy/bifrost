@@ -1,6 +1,7 @@
 mod config;
 mod config_manager;
 mod data_dir;
+mod local_secrets;
 mod remote_shell;
 mod rules;
 mod state;

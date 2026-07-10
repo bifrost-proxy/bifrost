@@ -120,6 +120,45 @@ exec(snippet, namespace)
 PY
 }
 
+assert_local_secret_envelope() {
+    local encoded="$1"
+    python3 - "$encoded" <<'PY'
+import base64
+import json
+import sys
+
+envelope = json.loads(sys.argv[1])
+assert envelope.get("version") == 1
+nonce = base64.b64decode(envelope["nonce"])
+ciphertext = base64.b64decode(envelope["ciphertext"])
+assert len(nonce) == 12
+assert len(ciphertext) > 16
+PY
+}
+
+assert_saved_connection_secrets_encrypted() {
+    local connections_json="$1"
+    python3 - "$connections_json" <<'PY'
+import base64
+import json
+import sys
+
+obj = json.load(open(sys.argv[1]))
+assert obj["connections"], "saved connection should exist"
+conn = obj["connections"][0]
+for field in ("grant_session_token", "shared_secret_encrypted"):
+    raw = conn.get(field)
+    assert raw, f"{field} should be persisted"
+    envelope = json.loads(raw)
+    assert envelope.get("version") == 1
+    assert len(base64.b64decode(envelope["nonce"])) == 12
+    assert len(base64.b64decode(envelope["ciphertext"])) > 16
+    assert "session-token" not in raw
+    assert "grant_session_token" not in raw
+    assert "shared_secret" not in raw
+PY
+}
+
 run_remote_exec_target_bifrost_cli_checks() {
     local status_output local_search_output local_batch_get_output auth_status_output export_output replay_output replay_help_output
     local capture_output capture_stderr capture_exit
@@ -275,7 +314,7 @@ expect_remote_exec_success() {
             return 0
         fi
 
-        if grep -Eiq "grant scope .*does not allow command kind ShellExec|grant_scope_mismatch" "$output_file"; then
+        if grep -Eiq "grant scope .*does not allow command kind ShellExec|grant_scope_mismatch|does not allow command kind|does not allow shell.exec|not.*allow.*shell" "$output_file"; then
             if [[ "$attempt" -lt "$max_attempts" ]]; then
                 log "  grant scope update not visible to remote exec yet (${attempt}/${max_attempts}); retrying ${marker}"
                 sleep 0.5
@@ -572,6 +611,7 @@ assert conn["auth_method"] == "ssh_publickey"
 assert conn.get("grant_session_token")
 assert conn.get("shared_secret_encrypted")
 '
+assert_saved_connection_secrets_encrypted "$CALLER_CONNECTIONS_JSON"
 CALLER_FINGERPRINT_1="$(jq -r '.connections[0].caller_fingerprint' "$CALLER_CONNECTIONS_JSON")"
 
 log "Wait for ssh_publickey grant created by CLI"
@@ -658,6 +698,38 @@ log "Switch SSH grant back to Full Trust and verify command access is restored"
 update_grant_level_and_assert "full" "remote_shell_interactive" "read_write"
 expect_remote_exec_success "ssh-full-restored-ok"
 
+log "Verify detached remote job relay token is encrypted at rest"
+DETACH_OUTPUT="$TMPDIR/remote_exec_detach.out"
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --detach --shell-text "printf ssh-detached-secret-ok" \
+    >"$DETACH_OUTPUT" 2>&1
+DETACHED_CALL_ID="$(python3 - "$DETACH_OUTPUT" <<'PY'
+import re
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+match = re.search(r"call_id=([A-Za-z0-9_.:-]+)", text)
+assert match, text
+print(match.group(1))
+PY
+)"
+REMOTE_JOBS_JSON="$CALLER_DATA_DIR/remote-jobs.json"
+assert_python "$REMOTE_JOBS_JSON" '
+jobs = obj.get("jobs", [])
+assert jobs, "remote-jobs.json should contain detached job"
+job = next((item for item in jobs if item.get("call_id") == "'"$DETACHED_CALL_ID"'"), None)
+assert job is not None, "detached job should be remembered"
+assert job.get("relay_token_encrypted"), "relay token should be encrypted"
+assert "ssh-detached-secret-ok" not in job.get("relay_token_encrypted", "")
+assert "relay_token" not in job.get("relay_token_encrypted", "")
+'
+DETACHED_TOKEN_ENVELOPE="$(jq -r --arg call_id "$DETACHED_CALL_ID" '.jobs[] | select(.call_id == $call_id) | .relay_token_encrypted' "$REMOTE_JOBS_JSON")"
+assert_local_secret_envelope "$DETACHED_TOKEN_ENVELOPE"
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote job watch "$DETACHED_CALL_ID" --relay-url "$RELAY_URL" \
+    >"$TMPDIR/remote_job_watch.out" 2>&1 || {
+        cat "$TMPDIR/remote_job_watch.out" >&2
+        exit 1
+    }
+grep -q "ssh-detached-secret-ok" "$TMPDIR/remote_job_watch.out"
+
 log "Use same SSH key from another caller sandbox and verify caller identity isolation"
 CALLER_DATA_DIR_2="$(mktemp -d)"
 CLI_CONNECT_OUTPUT_2="$TMPDIR/cli_connect_2.out"
@@ -670,6 +742,7 @@ assert_python "$CALLER_CONNECTIONS_JSON_2" '
 conn = obj["connections"][0]
 assert conn["ssh_key_source"] == "env:BIFROST_REMOTE_SSH_KEY"
 '
+assert_saved_connection_secrets_encrypted "$CALLER_CONNECTIONS_JSON_2"
 CALLER_FINGERPRINT_2="$(jq -r '.connections[0].caller_fingerprint' "$CALLER_CONNECTIONS_JSON_2")"
 assert_not_empty "$CALLER_FINGERPRINT_2" "第二个 caller fingerprint 不应为空"
 if [[ "$CALLER_FINGERPRINT_1" == "$CALLER_FINGERPRINT_2" ]]; then
