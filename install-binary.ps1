@@ -5,11 +5,13 @@
 .SYNOPSIS
     Bifrost installation script for Windows
 .DESCRIPTION
-    Downloads and installs the Bifrost proxy server binary
+    Downloads and installs the Bifrost CLI and desktop app
 .PARAMETER Version
     Specific version to install (e.g., v0.1.0). If not specified, installs the latest version.
 .PARAMETER InstallDir
     Installation directory. Defaults to $env:LOCALAPPDATA\bifrost\bin
+.PARAMETER NoDesktop
+    Skip automatic installation of the Bifrost desktop app
 .EXAMPLE
     irm https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.ps1 | iex
 .EXAMPLE
@@ -20,7 +22,8 @@
 
 param(
     [string]$Version = "",
-    [string]$InstallDir = ""
+    [string]$InstallDir = "",
+    [switch]$NoDesktop
 )
 
 $ErrorActionPreference = "Stop"
@@ -75,6 +78,64 @@ function Write-Error {
     param([string]$Message)
     Write-Host "[X] " -ForegroundColor Red -NoNewline
     Write-Host $Message
+}
+
+function Test-BifrostEnabled {
+    param(
+        [string]$Value,
+        [bool]$Default = $true
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $Default
+    }
+
+    return @("0", "false", "no", "off") -notcontains $Value.Trim().ToLowerInvariant()
+}
+
+function Install-BifrostDesktop {
+    param(
+        [string]$BinaryPath,
+        [string]$TargetVersion
+    )
+
+    $autoDesktop = Test-BifrostEnabled -Value $env:BIFROST_INSTALL_AUTO_DESKTOP
+    if ($NoDesktop -or -not $autoDesktop) {
+        Write-Warning "Desktop app installation skipped"
+        return
+    }
+
+    Write-Step "Installing desktop app..."
+    $commandText = "$BinaryPath app install --version $TargetVersion --yes"
+    if (Test-BifrostEnabled -Value $env:BIFROST_INSTALL_DESKTOP_DRY_RUN -Default $false) {
+        Write-Host "  [dry-run] BIFROST_APP_SKIP_RESTART=1 $commandText"
+        Write-Success "Desktop app installation planned"
+        return
+    }
+
+    $previousSkipRestart = $env:BIFROST_APP_SKIP_RESTART
+    try {
+        $env:BIFROST_APP_SKIP_RESTART = "1"
+        & $BinaryPath app install --version $TargetVersion --yes
+        if ($LASTEXITCODE -ne 0) {
+            throw "desktop installer exited with code $LASTEXITCODE"
+        }
+        Write-Success "Desktop app installed"
+    }
+    catch {
+        Write-Warning "Desktop app installation failed; the CLI is still installed"
+        Write-Warning "You can retry manually with:"
+        Write-Host "  $commandText"
+        Write-Warning $_.Exception.Message
+    }
+    finally {
+        if ($null -eq $previousSkipRestart) {
+            Remove-Item Env:BIFROST_APP_SKIP_RESTART -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:BIFROST_APP_SKIP_RESTART = $previousSkipRestart
+        }
+    }
 }
 
 function Install-BinaryAtomically {
@@ -726,12 +787,6 @@ function Install-Bifrost {
 
         Write-Success "CLI installed: $destPath"
 
-        Write-Host ""
-        Write-Host "------------------------------------------------------------"
-        Write-Success "Installation completed!"
-        Write-Host "------------------------------------------------------------"
-        Write-Host ""
-
         $pathResult = Add-BifrostToUserPath -Directory $InstallDir
         if ($pathResult -eq "added") {
             Write-Success "Added to Windows User PATH: $InstallDir"
@@ -746,6 +801,14 @@ function Install-Bifrost {
                 Write-Warning "Restart PowerShell/CMD to use bifrost from PATH"
             }
         }
+
+        Install-BifrostDesktop -BinaryPath $destPath -TargetVersion $Version
+
+        Write-Host ""
+        Write-Host "------------------------------------------------------------"
+        Write-Success "Installation completed!"
+        Write-Host "------------------------------------------------------------"
+        Write-Host ""
 
         Write-Host ""
         Write-Host "Getting started:"

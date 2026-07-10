@@ -706,6 +706,40 @@
 - 手动 upgrade 在磁盘二进制已最新时不会无意义重启；后台 self-update 仍可在磁盘已最新但运行中 daemon 版本滞后时触发重启。
 - 真实本地归档链路必须禁用 Tray、禁用 Sync 自动登录弹窗、使用临时安装目录/数据目录并保留 `--no-system-proxy`，不得修改用户正式数据或系统代理。
 
+### TC-IBOC-25 一键脚本在支持平台默认安装 CLI 与同版本桌面 App
+
+操作步骤：
+
+1. 执行离线安装编排回归：
+   ```bash
+   source ~/.zshrc
+   bash e2e-tests/tests/test_install_binary_post_install.sh
+   ```
+2. 检查 Bash 安装帮助中的 CLI-only opt-out：
+   ```bash
+   source ~/.zshrc
+   bash install-binary.sh --help | rg -- '--no-desktop|BIFROST_INSTALL_AUTO_DESKTOP|BIFROST_INSTALL_DESKTOP_TIMEOUT'
+   ```
+3. 检查 PowerShell 安装脚本默认调用同版本桌面安装、支持 `-NoDesktop` / 环境变量跳过，并禁止安装完成后自动拉起 App：
+   ```bash
+   source ~/.zshrc
+   rg -n 'NoDesktop|BIFROST_INSTALL_AUTO_DESKTOP|BIFROST_APP_SKIP_RESTART|app install --version' install-binary.ps1
+   ```
+4. 检查中英文用户文档与发布说明都明确脚本的 CLI + App 平台边界和 CLI-only 方式：
+   ```bash
+   source ~/.zshrc
+   rg -n 'CLI.*App|--no-desktop|BIFROST_INSTALL_AUTO_DESKTOP' README.md docs/getting-started.md design/install-binary-one-click.md .github/workflows/release.yml
+   rg -n 'CLI.*desktop|--no-desktop|BIFROST_INSTALL_AUTO_DESKTOP' README.en.md docs-en/getting-started.md
+   ```
+
+预期结果：
+
+- macOS 与 Windows Git Bash 规划 `bifrost app install --version <CLI 版本> --yes`，并设置 `BIFROST_APP_SKIP_RESTART=1`，确保脚本只安装 App、不在初始化完成前自动拉起 App。
+- Linux 等无桌面 release 资产的平台明确输出 CLI-only 提示，不执行 `app install`。
+- `--no-desktop`、PowerShell `-NoDesktop` 和 `BIFROST_INSTALL_AUTO_DESKTOP=0` 都能只跳过桌面 App；`--no-post-install` 仍只控制 CA、skills 和 daemon 初始化。
+- 桌面安装失败只 warning，已安装且校验通过的 CLI 保留，并给出手动重试命令。
+- README、安装指南、设计文档、站点同步产物和 Release quick install 文案对平台边界的表述一致。
+
 ## 清理步骤
 
 - 本用例只 source shell 函数、执行 dry-run 或使用 `mktemp -d` 临时数据目录，不产生持久化测试数据。
@@ -760,3 +794,4 @@
 | 2026-06-20 | TC-IBOC-21 | Parallels `Windows 11` VM：`bash e2e-tests/tests/test_install_binary_windows_path.sh`、`powershell.exe -NoProfile -ExecutionPolicy Bypass -File e2e-tests\tests\test_install_binary_windows_adaptive_download.ps1`、`bash install-binary.sh --version v0.0.110 --no-post-install`、新 PowerShell/CMD/Git Bash 分别执行 `bifrost --version` | PASS：离线 Bash PATH 回归 7/7 通过；Windows PowerShell 5.1 回归 20/20 通过；真实 Bash 安装输出 `Added to Windows User PATH: C:\Users\eden_studio\.local\bin` 且跳过 post-install；新 PowerShell 的 User `Path` 包含 `C:\Users\eden_studio\.local\bin`，`Get-Command bifrost` 指向该目录并输出 `bifrost 0.0.110`；CMD `where bifrost` 指向同一路径并输出 `bifrost 0.0.110`；Git Bash `command -v bifrost` 输出 `/c/Users/eden_studio/.local/bin/bifrost` 并输出 `bifrost 0.0.110`。 |
 | 2026-06-20 | TC-IBOC-22 | 按 TC-IBOC-22 的三条 `rg` 文档断言执行 | PASS：中文/英文 README 的脚本安装段落均包含 Bash 与 Windows PowerShell 入口，指定版本示例覆盖 PowerShell `-Version`，并说明 Windows installer 会写入 Windows User `Path` 以支持新 PowerShell/CMD 直接执行 `bifrost`。 |
 | 2026-06-20 | TC-IBOC-23 | Parallels `Windows 11` VM：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File e2e-tests\tests\test_install_binary_windows_adaptive_download.ps1`；`install-binary.ps1 -Version v0.0.110`；raw branch `Invoke-RestMethod https://raw.githubusercontent.com/bifrost-proxy/bifrost/codex/windows-installer-path/install-binary.ps1` 后以 `eden_studio` 当前用户执行 `-Version v0.0.110`；验证 `%LOCALAPPDATA%\bifrost\bin\bifrost.exe --version`、`(Get-Command bifrost).Source`、`bifrost --version` | PASS：Windows PowerShell 5.1 回归 31/31 通过；真实安装输出 `Architecture: aarch64`、`Target: aarch64-pc-windows-msvc`，成功下载 release zip 与 checksums、完成 checksum verified、extracting、installation completed；raw branch 当前用户验证输出 `edenstudio175f\eden_studio`，安装目录 `C:\Users\eden_studio\AppData\Local\bifrost\bin\bifrost.exe` 输出 `bifrost 0.0.110`；当前 PowerShell 会话 `Get-Command bifrost` 指向同一安装目录并输出 `bifrost 0.0.110`。 |
+| 2026-07-10 | TC-IBOC-25 | `bash e2e-tests/tests/test_install_binary_post_install.sh`；`bash install-binary.sh --help | rg ...`；PowerShell 源码门禁与中英文文档 `rg` 断言 | PASS：安装编排回归 33/33 通过，覆盖 macOS / Windows Git Bash 默认同版本 App 安装、`BIFROST_APP_SKIP_RESTART=1`、既有 post-install dry-run 不产生桌面变更、桌面安装失败保留 CLI 并输出重试命令、Linux CLI-only、参数与环境变量 opt-out；Bash help、PowerShell `-NoDesktop`/环境变量/不自动拉起 App 源码门禁，以及中英文 README、安装指南、设计文档和 Release quick-install 文案断言全部命中。当前 Mac 无 `pwsh`，PowerShell 5.1 脚本执行由 Windows E2E Shell CI 补充验证。 |

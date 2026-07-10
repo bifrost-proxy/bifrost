@@ -6,11 +6,11 @@
 
 | 场景 | 推荐方式 | 说明 |
 | --- | --- | --- |
-| 想最快开始抓包、查看流量和编辑规则 | 桌面端 App | 从 Releases 下载 `.dmg` 或 `.msi`，启动后内置代理后端和 Web UI 一起工作 |
-| 想在终端、脚本或 CI 中使用 | CLI | 使用一键安装脚本、Homebrew 或 npm |
+| 想一次装好 CLI 与桌面端 | 一键安装脚本 | macOS / Windows 自动安装 CLI + App；Linux 等平台安装 CLI |
+| 只想在终端、脚本或 CI 中使用 | CLI-only | 一键脚本加 `--no-desktop`，或使用 Homebrew / npm |
 | 想本地调试 Bifrost 源码 | 从源码构建 | 使用 `./install.sh` 或手动构建 Rust/Web/Tauri 产物 |
 
-## 安装 CLI
+## 用脚本安装 CLI + 桌面 App
 
 ### 一键安装
 
@@ -18,7 +18,7 @@
 curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash
 ```
 
-默认安装完成后，脚本会自动完成一键体验初始化：
+脚本始终安装 CLI；macOS 与 Windows 还会自动调用新安装的 CLI 安装同版本桌面 App，Linux 等未发布桌面资产的平台保持 CLI-only。随后脚本会自动完成一键体验初始化：
 
 - 安装并信任 Bifrost CA 证书。
 - 安装所有支持 AI 工具的 Bifrost skills。
@@ -35,9 +35,14 @@ curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-
 # 安装指定版本
 curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash -s -- --version v0.2.0
 
-# 仅安装二进制，不自动安装证书、skills 或启动服务
+# 只安装 CLI，不安装桌面 App
+curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash -s -- --no-desktop
+
+# 保留 CLI + App 安装，但不自动安装证书、skills 或启动服务
 curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash -s -- --no-post-install
 ```
+
+Windows PowerShell 可在运行脚本前设置 `$env:BIFROST_INSTALL_AUTO_DESKTOP = "0"` 只安装 CLI；直接执行本地脚本时也可使用 `-NoDesktop`。
 
 ### Homebrew（macOS）
 

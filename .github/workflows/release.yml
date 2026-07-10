@@ -610,6 +610,8 @@ jobs:
             curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install-binary.sh | bash
             ```
 
+            On macOS and Windows, the quick installer installs both the CLI and the matching desktop app. Use `--no-desktop` for a CLI-only install; platforms without desktop assets install the CLI only.
+
             ### npm
             ```bash
             npm install -g @bifrost-proxy/bifrost

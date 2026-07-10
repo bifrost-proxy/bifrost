@@ -19,7 +19,7 @@ Bifrost is a high-performance, AI-friendly proxy server written in Rust and insp
 
 ## Quick Start
 
-Install the CLI with the script:
+Install the CLI and, on macOS and Windows, the desktop app with the same script:
 
 macOS / Linux / Git Bash:
 
@@ -33,7 +33,7 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.ps1 | iex
 ```
 
-The installer can also install and trust the CA certificate, install Bifrost AI skills, and start Bifrost as a background service. Bash and PowerShell installers probe GitHub and built-in mirrors, then use the fastest available release source. Use `BIFROST_GITHUB_MIRROR` when your network needs a preferred mirror. On Windows, the PowerShell installer adds the install directory to both the current session and the Windows User `Path`; the Git Bash installer also updates the Windows User `Path`, so newly opened PowerShell/CMD windows can run `bifrost` directly.
+The installer always installs the CLI and automatically installs the matching desktop app on macOS and Windows; platforms without a desktop release, such as Linux, remain CLI-only. Use `--no-desktop` in Bash/Git Bash or set `BIFROST_INSTALL_AUTO_DESKTOP=0` in Bash/PowerShell for a CLI-only install. The installer can also install and trust the CA certificate, install Bifrost AI skills, and start Bifrost as a background service. Bash and PowerShell installers probe GitHub and built-in mirrors, then use the fastest available release source. Use `BIFROST_GITHUB_MIRROR` when your network needs a preferred mirror. On Windows, the PowerShell installer adds the install directory to both the current session and the Windows User `Path`; the Git Bash installer also updates the Windows User `Path`, so newly opened PowerShell/CMD windows can run `bifrost` directly.
 
 Install a specific version:
 

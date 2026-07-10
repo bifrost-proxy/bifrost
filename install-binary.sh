@@ -1412,6 +1412,7 @@ show_help() {
     echo "  --target <TRIPLE>     Override target triple (e.g., x86_64-unknown-linux-musl)"
     echo "  --libc <gnu|musl>     Override libc variant on Linux (auto-detected by default)"
     echo "  --no-modify-path      Skip automatic PATH configuration in shell profile"
+    echo "  --no-desktop          Skip desktop app installation on macOS and Windows"
     echo "  --no-post-install     Skip automatic CA trust, skill install, and service start"
     echo "  --no-install-cert     Skip automatic CA certificate installation/trust"
     echo "  --no-install-skills   Skip automatic Bifrost skill installation"
@@ -1420,6 +1421,8 @@ show_help() {
     echo ""
     echo "Environment variables:"
     echo "  BIFROST_INSTALL_DIR   Custom installation directory"
+    echo "  BIFROST_INSTALL_AUTO_DESKTOP  Set to 0/false to skip desktop app installation"
+    echo "  BIFROST_INSTALL_DESKTOP_TIMEOUT  Desktop app installation timeout in seconds"
     echo "  BIFROST_DOWNLOADER    Preferred downloader: auto|aria2c|axel|wget|curl"
     echo "  BIFROST_GITHUB_MIRROR Preferred mirror base URL (explicit opt-in)"
     echo "  BIFROST_DOWNLOAD_CONNECT_TIMEOUT  Connection timeout in seconds"
@@ -1439,6 +1442,7 @@ show_help() {
     echo "  curl -fsSL ... | bash -s -- --libc musl"
     echo "  curl -fsSL ... | bash -s -- --target x86_64-unknown-linux-musl"
     echo "  curl -fsSL ... | bash -s -- --no-modify-path"
+    echo "  curl -fsSL ... | bash -s -- --no-desktop"
     echo "  curl -fsSL ... | bash -s -- --no-post-install"
     echo ""
     echo "If raw.githubusercontent.com is unreachable, explicitly opt in to a mirror you trust:"
@@ -1450,6 +1454,7 @@ VERSION=""
 FORCE_TARGET=""
 FORCE_LIBC=""
 NO_MODIFY_PATH=0
+NO_DESKTOP=0
 NO_POST_INSTALL=0
 NO_INSTALL_CERT=0
 NO_INSTALL_SKILLS=0
@@ -1495,6 +1500,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-modify-path)
             NO_MODIFY_PATH=1
+            shift
+            ;;
+        --no-desktop)
+            NO_DESKTOP=1
             shift
             ;;
         --no-post-install)
@@ -1590,6 +1599,52 @@ run_bifrost_post_install_step() {
     print_warning "You can retry manually with:"
     echo "  $*"
     return 1
+}
+
+run_desktop_install() {
+    local os="$1"
+    local bifrost_bin="$2"
+    local version="$3"
+
+    if [[ "$NO_DESKTOP" == "1" ]] || ! is_enabled "${BIFROST_INSTALL_AUTO_DESKTOP:-1}"; then
+        print_warning "Desktop app installation skipped"
+        return 0
+    fi
+
+    case "$os" in
+        darwin|windows) ;;
+        *)
+            print_warning "Desktop app is not available for $os; CLI-only installation completed"
+            return 0
+            ;;
+    esac
+
+    print_step "Installing desktop app..."
+    if is_enabled "${BIFROST_INSTALL_DESKTOP_DRY_RUN:-${BIFROST_INSTALL_POST_INSTALL_DRY_RUN:-0}}"; then
+        echo "  [dry-run] BIFROST_APP_SKIP_RESTART=1 $bifrost_bin app install --version $version --yes"
+        print_success "Desktop app installation planned"
+        return 0
+    fi
+
+    local previous_timeout="${BIFROST_INSTALL_POST_INSTALL_TIMEOUT:-}"
+    BIFROST_INSTALL_POST_INSTALL_TIMEOUT="${BIFROST_INSTALL_DESKTOP_TIMEOUT:-600}"
+    export BIFROST_INSTALL_POST_INSTALL_TIMEOUT
+    if BIFROST_APP_SKIP_RESTART=1 run_bifrost_post_install_command \
+        "$bifrost_bin" app install --version "$version" --yes; then
+        print_success "Desktop app installed"
+    else
+        print_warning "Desktop app installation failed; the CLI is still installed"
+        print_warning "You can retry manually with:"
+        echo "  $bifrost_bin app install --version $version --yes"
+    fi
+
+    if [[ -n "$previous_timeout" ]]; then
+        BIFROST_INSTALL_POST_INSTALL_TIMEOUT="$previous_timeout"
+        export BIFROST_INSTALL_POST_INSTALL_TIMEOUT
+    else
+        unset BIFROST_INSTALL_POST_INSTALL_TIMEOUT
+    fi
+    return 0
 }
 
 run_post_install() {
@@ -1822,15 +1877,17 @@ main() {
 
     print_success "CLI installed: $INSTALL_DIR/$binary_name ($target)"
 
+    configure_install_path "$os" "$INSTALL_DIR"
+
+    run_desktop_install "$os" "$INSTALL_DIR/$binary_name" "$VERSION"
+
+    run_post_install "$INSTALL_DIR/$binary_name"
+
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     print_success "Installation completed!"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
-
-    configure_install_path "$os" "$INSTALL_DIR"
-
-    run_post_install "$INSTALL_DIR/$binary_name"
 
     echo ""
     echo "Getting started:"

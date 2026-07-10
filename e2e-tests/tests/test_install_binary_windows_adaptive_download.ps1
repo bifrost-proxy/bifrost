@@ -34,6 +34,30 @@ function Assert-Eq {
     Pass $Message
 }
 
+function Assert-Contains {
+    param(
+        [string]$Actual,
+        [string]$Expected,
+        [string]$Message
+    )
+    if (-not $Actual.Contains($Expected)) {
+        Fail $Message "missing '$Expected' in '$Actual'"
+    }
+    Pass $Message
+}
+
+function Assert-NotContains {
+    param(
+        [string]$Actual,
+        [string]$Expected,
+        [string]$Message
+    )
+    if ($Actual.Contains($Expected)) {
+        Fail $Message "unexpected '$Expected' in '$Actual'"
+    }
+    Pass $Message
+}
+
 function Run-Case {
     param(
         [string]$Message,
@@ -192,6 +216,34 @@ Run-Case "architecture helper falls back to Windows environment variables" {
     Assert-Eq (Resolve-BifrostArchitecture -RuntimeArchitecture "unknown" -NativeArchitecture "ARM64" -ProcessArchitecture "x86" -Is64BitOperatingSystem $true) "aarch64" "PROCESSOR_ARCHITEW6432 ARM64 wins for 32-bit PowerShell on ARM64 Windows"
     Assert-Eq (Resolve-BifrostArchitecture -RuntimeArchitecture $null -NativeArchitecture "" -ProcessArchitecture "AMD64" -Is64BitOperatingSystem $true) "x86_64" "PROCESSOR_ARCHITECTURE AMD64 maps to x86_64"
     Assert-Eq (Resolve-BifrostArchitecture -RuntimeArchitecture $null -NativeArchitecture "" -ProcessArchitecture "" -Is64BitOperatingSystem $true) "x86_64" "64-bit OS fallback maps to x86_64"
+}
+
+Run-Case "desktop app is installed by default" {
+    $env:BIFROST_INSTALL_DESKTOP_DRY_RUN = "1"
+    $output = (Install-BifrostDesktop -BinaryPath "C:\Temp\bifrost.exe" -TargetVersion "v1.2.3" | Out-String)
+    Assert-Contains $output "C:\Temp\bifrost.exe app install --version v1.2.3 --yes" "PowerShell installer invokes matching desktop version"
+    Assert-Contains $output "BIFROST_APP_SKIP_RESTART=1" "PowerShell installer does not launch desktop before setup completes"
+    Remove-Item Env:BIFROST_INSTALL_DESKTOP_DRY_RUN -ErrorAction SilentlyContinue
+}
+
+Run-Case "desktop app can be skipped with environment variable" {
+    $env:BIFROST_INSTALL_DESKTOP_DRY_RUN = "1"
+    $env:BIFROST_INSTALL_AUTO_DESKTOP = "0"
+    $output = (Install-BifrostDesktop -BinaryPath "C:\Temp\bifrost.exe" -TargetVersion "v1.2.3" | Out-String)
+    Assert-Contains $output "Desktop app installation skipped" "PowerShell environment opt-out is reported"
+    Assert-NotContains $output "C:\Temp\bifrost.exe app install" "PowerShell environment opt-out does not invoke app install"
+    Remove-Item Env:BIFROST_INSTALL_DESKTOP_DRY_RUN -ErrorAction SilentlyContinue
+    Remove-Item Env:BIFROST_INSTALL_AUTO_DESKTOP -ErrorAction SilentlyContinue
+}
+
+Run-Case "desktop app can be skipped with NoDesktop switch" {
+    $env:BIFROST_INSTALL_DESKTOP_DRY_RUN = "1"
+    $script:NoDesktop = $true
+    $output = (Install-BifrostDesktop -BinaryPath "C:\Temp\bifrost.exe" -TargetVersion "v1.2.3" | Out-String)
+    Assert-Contains $output "Desktop app installation skipped" "PowerShell -NoDesktop opt-out is reported"
+    Assert-NotContains $output "C:\Temp\bifrost.exe app install" "PowerShell -NoDesktop does not invoke app install"
+    $script:NoDesktop = $false
+    Remove-Item Env:BIFROST_INSTALL_DESKTOP_DRY_RUN -ErrorAction SilentlyContinue
 }
 
 Remove-Item Env:BIFROST_INSTALL_BINARY_SKIP_MAIN -ErrorAction SilentlyContinue

@@ -19,7 +19,7 @@ Bifrost 是一个用 Rust 编写的高性能，AI 友好的代理服务器，灵
 
 ## 快速开始
 
-安装 CLI：
+安装 CLI；在 macOS 和 Windows 上同时自动安装桌面 App：
 
 方法一：使用脚本安装
 
@@ -35,7 +35,7 @@ Windows PowerShell：
 irm https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.ps1 | iex
 ```
 
-该脚本默认会继续安装并信任 CA 证书、安装所有 Bifrost AI skills，并以后台服务启动 Bifrost；安装完成后可直接访问管理端。
+该脚本始终安装 CLI，并在 macOS / Windows 上自动安装同版本桌面 App；Linux 等暂未提供桌面安装包的平台保持 CLI-only。若只需要 CLI，可用 `--no-desktop`（Bash / Git Bash）或 `BIFROST_INSTALL_AUTO_DESKTOP=0`（Bash / PowerShell）跳过桌面端。脚本随后还会安装并信任 CA 证书、安装所有 Bifrost AI skills，并以后台服务启动 Bifrost；安装完成后可直接访问管理端。
 Bash 与 PowerShell 安装脚本都会自动探测 GitHub 直连和内置镜像源，优先使用最快可用的 release 下载地址；受限网络中也可通过 `BIFROST_GITHUB_MIRROR` 指定优先镜像。Windows PowerShell 脚本会把安装目录加入当前会话和 Windows 用户 `Path`；Git Bash 脚本在 Windows 下也会同步写入 Windows 用户 `Path`，新打开的 PowerShell/CMD 可直接执行 `bifrost`。
 
 安装指定版本
