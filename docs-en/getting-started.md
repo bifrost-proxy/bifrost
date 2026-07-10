@@ -8,11 +8,11 @@ This guide summarizes installation, startup, Admin UI access, environment variab
 
 | Scenario | Recommended path | Notes |
 | --- | --- | --- |
-| Start capturing traffic, inspecting requests, and editing rules quickly | Desktop app | Download the `.dmg` or `.msi` from Releases. The bundled proxy backend and Web UI run together. |
-| Use Bifrost from terminals, scripts, or CI | CLI | Use the one-line installer, Homebrew, or npm. |
+| Install both CLI and desktop in one step | One-line installer | macOS and Windows get CLI + App; platforms such as Linux get the CLI. |
+| Use Bifrost only from terminals, scripts, or CI | CLI-only | Add `--no-desktop` to the installer, or use Homebrew/npm. |
 | Hack on Bifrost itself | Build from source | Use `./install.sh` or manually build the Rust/Web/Tauri artifacts. |
 
-## Install the CLI
+## Install the CLI + Desktop App with One Script
 
 ### One-line Install
 
@@ -20,7 +20,7 @@ This guide summarizes installation, startup, Admin UI access, environment variab
 curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash
 ```
 
-The script installs the `bifrost` binary and, by default, also performs first-run setup: it installs and trusts the Bifrost CA certificate, installs supported Bifrost AI skills, and starts Bifrost as a background service. Bash and PowerShell installers probe GitHub direct access and built-in mirrors, then use the fastest available release source. In restricted networks, set `BIFROST_GITHUB_MIRROR` or tune `BIFROST_MIRROR_PROBE_TIMEOUT`.
+The script always installs the `bifrost` CLI. On macOS and Windows it then uses that CLI to install the matching desktop app version; platforms without desktop release assets, such as Linux, remain CLI-only. It also performs first-run setup: it installs and trusts the Bifrost CA certificate, installs supported Bifrost AI skills, and starts Bifrost as a background service. Bash and PowerShell installers probe GitHub direct access and built-in mirrors, then use the fastest available release source. In restricted networks, set `BIFROST_GITHUB_MIRROR` or tune `BIFROST_MIRROR_PROBE_TIMEOUT`.
 
 Common options:
 
@@ -31,9 +31,14 @@ curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-
 # Install a specific version
 curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash -s -- --version v0.2.0
 
-# Install only the binary; skip CA, skills, and service startup
+# Install the CLI only; skip the desktop app
+curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash -s -- --no-desktop
+
+# Keep CLI + App installation, but skip CA, skills, and service startup
 curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash -s -- --no-post-install
 ```
+
+In Windows PowerShell, set `$env:BIFROST_INSTALL_AUTO_DESKTOP = "0"` before invoking the remote script for a CLI-only install. When running the script from a local file, `-NoDesktop` is also available.
 
 ### Homebrew on macOS
 

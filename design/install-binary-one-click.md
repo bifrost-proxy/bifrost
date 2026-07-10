@@ -16,7 +16,8 @@
 
 ### 必须实现
 
-- Bash / PowerShell installer 下载完二进制后**自动**执行 CA 安装、`install-skill --tool all -y`、`start --daemon --yes`；每步失败只 warn，不回滚已装好的 CLI。
+- Bash / PowerShell installer 始终安装 CLI；macOS / Windows 下载完 CLI 后通过新二进制执行 `bifrost app install --version <同版本> --yes` 自动安装桌面 App，Linux 等无桌面资产的平台保持 CLI-only；桌面安装失败只 warn，不回滚已装好的 CLI。
+- 桌面安装后自动执行 CA 安装、`install-skill --tool all -y`、`start --daemon --yes`；每步失败只 warn，不回滚已装好的 CLI / App。
 - 下载源自适应：先并发探测 GitHub 直连与内置镜像（`ghfast.top` 等），选择最快返回的源；被选源完整下载失败后回退到全镜像竞速。
 - 下载进度默认可见：`curl --progress-bar`、`wget --force-progress`、`aria2c --summary-interval=1`、`axel` 默认；并发竞速候选通过 `BIFROST_DOWNLOAD_PROGRESS=0` 静音。
 - `bifrost upgrade` 复用同一套镜像探测和进度输出；替换二进制前先落地临时文件，再原子替换目标路径；旧二进制 backup 保留到新二进制 `--version` 校验和 musl fallback 全部收敛。
@@ -32,6 +33,7 @@
 ### 必须不破坏
 
 - CI / 自动化可用 `--no-post-install` / `BIFROST_INSTALL_POST_INSTALL=0` 完全跳过 post-install。
+- CLI-only 环境可用 Bash / Git Bash 的 `--no-desktop`、PowerShell 本地脚本的 `-NoDesktop`，或跨入口通用的 `BIFROST_INSTALL_AUTO_DESKTOP=0` 跳过桌面 App；`--no-post-install` 只控制 CA / skills / daemon，不隐式跳过 App。
 - 单步跳过：`--no-install-cert` / `BIFROST_INSTALL_AUTO_CERT=0`、`--no-install-skills` / `BIFROST_INSTALL_AUTO_SKILLS=0`、`--no-start` / `BIFROST_INSTALL_AUTO_START=0`。
 - 用户显式设置的 `BIFROST_GITHUB_MIRROR` 仍作为最优先候选源。
 - `BIFROST_DOWNLOAD_CONNECT_TIMEOUT` / `BIFROST_DOWNLOAD_TIMEOUT` / `BIFROST_DOWNLOAD_TRIES` / `BIFROST_MIRROR_PROBE_TIMEOUT` 环境变量继续控制下载。
@@ -45,14 +47,15 @@
 
 ## 产品语义
 
-一键体验分为「安装二进制 -> post-install 一键初始化 -> 升级/重启」三个阶段：
+一键体验分为「安装 CLI -> 支持平台安装同版本桌面 App -> post-install 一键初始化 -> 升级/重启」四个阶段：
 
 1. **安装二进制**：`install-binary.sh` / `install-binary.ps1` 下载 latest 或指定版本的 release 资产，解压到 `$INSTALL_DIR`（默认平台惯例目录），执行 checksum 校验。
-2. **post-install 初始化**（默认顺序，不可换序）：
+2. **安装桌面 App**：macOS / Windows 用刚安装的 CLI 执行 `app install --version <CLI 版本> --yes`，复用 Rust CLI 中现有的目标平台判断、release 资产命名、DMG / MSI 安装和安装后版本校验；不支持的平台明确提示 CLI-only。
+3. **post-install 初始化**（默认顺序，不可换序）：
    1. `bifrost ca install`
    2. `bifrost install-skill --tool all -y`
    3. `bifrost start --daemon --yes`
-3. **`bifrost upgrade`**：复用镜像探测 / 进度 / 原子替换 / musl fallback；替换完成后按 runtime.json 精确重启 daemon，并在 macOS / Windows 上走 exec-child daemon 路径。
+4. **`bifrost upgrade`**：复用镜像探测 / 进度 / 原子替换 / musl fallback；替换完成后按 runtime.json 精确重启 daemon，并在 macOS / Windows 上走 exec-child daemon 路径。
 
 ## 技术细节
 
@@ -94,7 +97,11 @@ CLI：
 curl -fsSL https://install.bifrost.dev/install-binary.sh | bash
 irm https://install.bifrost.dev/install-binary.ps1 | iex
 
-# 关闭全部 post-install
+# 只装 CLI
+curl ... | bash -s -- --no-desktop
+export BIFROST_INSTALL_AUTO_DESKTOP=0 && curl ... | bash
+
+# 关闭全部 post-install（不影响默认桌面安装）
 curl ... | bash -s -- --no-post-install
 BIFROST_INSTALL_POST_INSTALL=0 curl ... | bash
 

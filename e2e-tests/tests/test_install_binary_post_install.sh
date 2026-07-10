@@ -84,6 +84,81 @@ assert_order "$output" "ca install" "install-skill --tool all -y" \
 assert_order "$output" "install-skill --tool all -y" "start --daemon --yes" \
     "skill install runs before service start"
 
+desktop_output=$(
+    BIFROST_INSTALL_DESKTOP_DRY_RUN=1 \
+        run_desktop_install "darwin" "/tmp/bifrost-test-bin" "v1.2.3" 2>&1
+)
+assert_contains "$desktop_output" \
+    "[dry-run] BIFROST_APP_SKIP_RESTART=1 /tmp/bifrost-test-bin app install --version v1.2.3 --yes" \
+    "macOS installer installs the matching desktop app by default"
+
+windows_desktop_output=$(
+    BIFROST_INSTALL_DESKTOP_DRY_RUN=1 \
+        run_desktop_install "windows" "/tmp/bifrost-test-bin.exe" "v1.2.3" 2>&1
+)
+assert_contains "$windows_desktop_output" \
+    "[dry-run] BIFROST_APP_SKIP_RESTART=1 /tmp/bifrost-test-bin.exe app install --version v1.2.3 --yes" \
+    "Windows Git Bash installer installs the matching desktop app by default"
+
+shared_dry_run_output=$(
+    BIFROST_INSTALL_POST_INSTALL_DRY_RUN=1 \
+        run_desktop_install "darwin" "/tmp/bifrost-test-bin" "v1.2.3" 2>&1
+)
+assert_contains "$shared_dry_run_output" \
+    "[dry-run] BIFROST_APP_SKIP_RESTART=1 /tmp/bifrost-test-bin app install --version v1.2.3 --yes" \
+    "existing post-install dry-run also prevents desktop mutation"
+
+linux_desktop_output=$(
+    BIFROST_INSTALL_DESKTOP_DRY_RUN=1 \
+        run_desktop_install "linux" "/tmp/bifrost-test-bin" "v1.2.3" 2>&1
+)
+assert_contains "$linux_desktop_output" \
+    "Desktop app is not available for linux; CLI-only installation completed" \
+    "Linux remains a supported CLI-only installation"
+assert_not_contains "$linux_desktop_output" "app install" \
+    "unsupported platforms do not invoke desktop installation"
+
+NO_DESKTOP=1
+no_desktop_output=$(
+    BIFROST_INSTALL_DESKTOP_DRY_RUN=1 \
+        run_desktop_install "darwin" "/tmp/bifrost-test-bin" "v1.2.3" 2>&1
+)
+NO_DESKTOP=0
+assert_contains "$no_desktop_output" "Desktop app installation skipped" \
+    "--no-desktop skips desktop installation"
+assert_not_contains "$no_desktop_output" "/tmp/bifrost-test-bin app install" \
+    "--no-desktop does not invoke the app installer"
+
+desktop_env_skip_output=$(
+    BIFROST_INSTALL_DESKTOP_DRY_RUN=1 \
+    BIFROST_INSTALL_AUTO_DESKTOP=0 \
+        run_desktop_install "darwin" "/tmp/bifrost-test-bin" "v1.2.3" 2>&1
+)
+assert_contains "$desktop_env_skip_output" "Desktop app installation skipped" \
+    "BIFROST_INSTALL_AUTO_DESKTOP=0 skips desktop installation"
+assert_not_contains "$desktop_env_skip_output" "/tmp/bifrost-test-bin app install" \
+    "BIFROST_INSTALL_AUTO_DESKTOP=0 does not invoke the app installer"
+
+failing_desktop_dir="$(mktemp -d)"
+printf '#!/bin/sh\nexit 23\n' >"$failing_desktop_dir/bifrost"
+chmod +x "$failing_desktop_dir/bifrost"
+set +e
+desktop_failure_output=$(
+    run_desktop_install "darwin" "$failing_desktop_dir/bifrost" "v1.2.3" 2>&1
+)
+desktop_failure_rc=$?
+set -e
+rm -rf "$failing_desktop_dir"
+if [[ "$desktop_failure_rc" -ne 0 ]]; then
+    fail "desktop installation failure preserves CLI install" "got exit code $desktop_failure_rc"
+fi
+assert_contains "$desktop_failure_output" \
+    "Desktop app installation failed; the CLI is still installed" \
+    "desktop installation failure preserves CLI install"
+assert_contains "$desktop_failure_output" \
+    "You can retry manually with:" \
+    "desktop installation failure prints a retry command"
+
 skip_output=$(
     BIFROST_INSTALL_POST_INSTALL_DRY_RUN=1 \
     BIFROST_INSTALL_POST_INSTALL=0 \
@@ -123,6 +198,10 @@ assert_not_contains "$partial_output" "[dry-run] /tmp/bifrost-test-bin start --d
 help_output=$(bash "$PROJECT_DIR/install-binary.sh" --help)
 assert_contains "$help_output" "--no-post-install" \
     "help documents --no-post-install"
+assert_contains "$help_output" "--no-desktop" \
+    "help documents --no-desktop"
+assert_contains "$help_output" "BIFROST_INSTALL_AUTO_DESKTOP" \
+    "help documents desktop installation environment variable"
 assert_contains "$help_output" "BIFROST_INSTALL_AUTO_START" \
     "help documents post-install environment variables"
 assert_contains "$help_output" "BIFROST_INSTALL_POST_INSTALL_TIMEOUT" \
