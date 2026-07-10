@@ -58,7 +58,7 @@ interface VirtualTrafficTableProps {
 
 const ROW_HEIGHT = 36;
 const SCROLL_THRESHOLD = 50;
-const TABLE_MIN_WIDTH = 1510;
+const TABLE_MIN_WIDTH = 1610;
 
 const DEFAULT_STATUS_DOT_COLOR = "#d9d9d9";
 
@@ -213,6 +213,23 @@ const columns: ColumnDef[] = [
         </span>
       </div>
     ),
+  },
+  {
+    key: "account_name",
+    title: "Account",
+    width: 100,
+    render: (record, textSecondary) =>
+      record.account_name ? (
+        <Tag
+          color="blue"
+          style={{ margin: 0, fontSize: 11, maxWidth: "100%" }}
+          title={record.account_name}
+        >
+          <span style={ellipsisStyle}>{record.account_name}</span>
+        </Tag>
+      ) : (
+        <span style={{ color: textSecondary }}>-</span>
+      ),
   },
   {
     key: "listener_port",
@@ -430,6 +447,7 @@ export const areTrafficRowPropsEqual = (
   if (prevRecord.status !== nextRecord.status) return false;
   if (prevRecord.client_ip !== nextRecord.client_ip) return false;
   if (prevRecord.client_app !== nextRecord.client_app) return false;
+  if (prevRecord.account_name !== nextRecord.account_name) return false;
   if (prevRecord.host !== nextRecord.host) return false;
   if (prevRecord.path !== nextRecord.path) return false;
   if (prevRecord.request_size !== nextRecord.request_size) return false;

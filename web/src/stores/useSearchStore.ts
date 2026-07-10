@@ -124,6 +124,7 @@ function hasSearchFilters(filters: SearchFilters): boolean {
     filters.conditions.length > 0 ||
     filters.client_ips.length > 0 ||
     filters.client_apps.length > 0 ||
+    filters.account_names.length > 0 ||
     filters.domains.length > 0 ||
     filters.has_rule_hit !== undefined
   );
@@ -489,6 +490,7 @@ export const compactToSummary = (c: TrafficSummaryCompact): TrafficSummary => {
     client_ip: c.cip,
     client_app: c.capp || undefined,
     client_pid: c.cpid || undefined,
+    account_name: c.acct || undefined,
     is_tunnel: (c.flags & TrafficFlags.IS_TUNNEL) !== 0,
     is_websocket: (c.flags & TrafficFlags.IS_WEBSOCKET) !== 0,
     is_sse: (c.flags & TrafficFlags.IS_SSE) !== 0,

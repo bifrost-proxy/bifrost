@@ -102,6 +102,7 @@ fn apply_request_context(record: &mut TrafficRecord, ctx: &RequestContext) {
     record.client_app = ctx.client_app.clone();
     record.client_pid = ctx.client_pid;
     record.client_path = ctx.client_path.clone();
+    record.account_name = ctx.account_name.clone();
 }
 
 pub(in crate::proxy::http) fn apply_websocket_request_header_rules(

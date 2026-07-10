@@ -52,6 +52,8 @@ pub struct TrafficSummaryCompact {
     pub capp: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acct: Option<String>,
     pub flags: u32,
     pub fc: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -115,6 +117,7 @@ impl TrafficSummaryCompact {
             cip: record.client_ip.clone(),
             capp: record.client_app.clone(),
             cpid: record.client_pid,
+            acct: record.account_name.clone(),
             flags,
             fc: record.frame_count,
             ss: record.socket_status.clone(),

@@ -141,6 +141,23 @@ export default function TrafficTable({
       },
     },
     {
+      title: "Account",
+      dataIndex: "account_name",
+      key: "account_name",
+      width: 100,
+      ellipsis: true,
+      render: (accountName: string | undefined) =>
+        accountName ? (
+          <Tooltip title={accountName}>
+            <Tag color="blue" style={{ margin: 0, fontSize: 11 }}>
+              {accountName}
+            </Tag>
+          </Tooltip>
+        ) : (
+          <Text type="secondary">-</Text>
+        ),
+    },
+    {
       title: "Rules",
       dataIndex: "has_rule_hit",
       key: "rules",

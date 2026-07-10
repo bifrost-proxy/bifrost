@@ -2057,6 +2057,7 @@ mod tests {
             cip: "127.0.0.1".to_string(),
             capp: None,
             cpid: None,
+            acct: None,
             flags: 0,
             fc: 0,
             ss: None,

@@ -1649,7 +1649,7 @@ async fn handle_request(
     };
 
     if !is_loopback || has_userpass {
-        if let Some(response) = authorize_proxy_request(
+        match authorize_proxy_request(
             &req,
             peer_addr,
             &access_control,
@@ -1659,7 +1659,12 @@ async fn handle_request(
         )
         .await
         {
-            return Ok(response);
+            Ok(account_name) => {
+                if account_name.is_some() {
+                    ctx = ctx.with_account_name(account_name);
+                }
+            }
+            Err(response) => return Ok(response),
         }
     }
     if has_userpass || !is_loopback {
@@ -1809,7 +1814,7 @@ fn error_response(status: u16, message: &str) -> Response<BoxBody> {
 }
 
 enum ProxyAuthResult {
-    Authorized,
+    Authorized(Option<String>),
     Unauthorized,
 }
 
@@ -1820,7 +1825,7 @@ async fn authorize_proxy_request(
     admin_state: Option<&Arc<AdminState>>,
     ctx: &RequestContext,
     rate_limiter: &Arc<ProxyAuthRateLimiter>,
-) -> Option<Response<BoxBody>> {
+) -> std::result::Result<Option<String>, Response<BoxBody>> {
     let (decision, has_userpass, loopback_requires_auth) = {
         let access_control = access_control.read().await;
         let decision = access_control.check_access(&peer_addr.ip());
@@ -1830,7 +1835,7 @@ async fn authorize_proxy_request(
     };
 
     if matches!(decision, AccessDecision::Allow) && !loopback_requires_auth {
-        return None;
+        return Ok(None);
     }
 
     if has_userpass {
@@ -1840,14 +1845,14 @@ async fn authorize_proxy_request(
                 ctx.id_str(),
                 peer_addr.ip()
             );
-            return Some(proxy_auth_banned_response());
+            return Err(proxy_auth_banned_response());
         }
 
         match authenticate_proxy_credentials(req.headers(), access_control, admin_state, ctx).await
         {
-            ProxyAuthResult::Authorized => {
+            ProxyAuthResult::Authorized(account_name) => {
                 rate_limiter.record_success(&peer_addr.ip());
-                return None;
+                return Ok(account_name);
             }
             ProxyAuthResult::Unauthorized => {
                 let failures = rate_limiter.record_failure(peer_addr.ip());
@@ -1857,13 +1862,13 @@ async fn authorize_proxy_request(
                     peer_addr.ip(),
                     failures
                 );
-                return Some(proxy_auth_required_response());
+                return Err(proxy_auth_required_response());
             }
         }
     }
 
     if matches!(decision, AccessDecision::Allow) {
-        return None;
+        return Ok(None);
     }
 
     if matches!(decision, AccessDecision::Prompt(_)) {
@@ -1871,7 +1876,7 @@ async fn authorize_proxy_request(
         access_control.add_pending_authorization(peer_addr.ip());
     }
 
-    Some(proxy_auth_required_response())
+    Err(proxy_auth_required_response())
 }
 
 async fn authenticate_proxy_credentials(
@@ -1933,7 +1938,7 @@ async fn authenticate_proxy_credentials(
         }
     }
 
-    ProxyAuthResult::Authorized
+    ProxyAuthResult::Authorized(Some(matched_username))
 }
 
 fn parse_proxy_basic_auth_header(header: &str) -> Option<&str> {

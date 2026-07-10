@@ -13,10 +13,12 @@ interface FilterPanelProps {
   availableClientIps: string[];
   availableProxyPorts: string[];
   availableClientApps: string[];
+  availableAccountNames: string[];
   availableDomains: string[];
   clientIpCounts: Map<string, number>;
   proxyPortCounts: Map<string, number>;
   clientAppCounts: Map<string, number>;
+  accountNameCounts: Map<string, number>;
   domainCounts: Map<string, number>;
 }
 
@@ -24,10 +26,12 @@ export default function FilterPanel({
   availableClientIps,
   availableProxyPorts,
   availableClientApps,
+  availableAccountNames,
   availableDomains,
   clientIpCounts,
   proxyPortCounts,
   clientAppCounts,
+  accountNameCounts,
   domainCounts,
 }: FilterPanelProps) {
   const { token } = theme.useToken();
@@ -44,12 +48,14 @@ export default function FilterPanel({
     selectedClientIps,
     selectedProxyPorts,
     selectedClientApps,
+    selectedAccountNames,
     selectedDomains,
     collapsedSections,
     searchKeyword,
     toggleClientIp,
     toggleProxyPort,
     toggleClientApp,
+    toggleAccountName,
     toggleDomain,
     addPinnedFilter,
     setCollapsedSection,
@@ -61,12 +67,16 @@ export default function FilterPanel({
     selectedClientIps.length > 0 ||
     selectedProxyPorts.length > 0 ||
     selectedClientApps.length > 0 ||
+    selectedAccountNames.length > 0 ||
     selectedDomains.length > 0;
 
   const selectionSummary = useMemo(() => {
     const parts: string[] = [];
     if (selectedClientApps.length > 0) {
       parts.push(`App ${selectedClientApps.length}`);
+    }
+    if (selectedAccountNames.length > 0) {
+      parts.push(`Account ${selectedAccountNames.length}`);
     }
     if (selectedDomains.length > 0) {
       parts.push(`Domain ${selectedDomains.length}`);
@@ -80,6 +90,7 @@ export default function FilterPanel({
     return parts.join(" · ");
   }, [
     selectedClientApps.length,
+    selectedAccountNames.length,
     selectedClientIps.length,
     selectedDomains.length,
     selectedProxyPorts.length,
@@ -171,6 +182,10 @@ export default function FilterPanel({
     return [...availableClientApps].sort((a, b) => a.localeCompare(b));
   }, [availableClientApps]);
 
+  const sortedAccountNames = useMemo(() => {
+    return [...availableAccountNames].sort((a, b) => a.localeCompare(b));
+  }, [availableAccountNames]);
+
   const sortedProxyPorts = useMemo(() => {
     return [...availableProxyPorts].sort((a, b) => Number(a) - Number(b));
   }, [availableProxyPorts]);
@@ -196,6 +211,12 @@ export default function FilterPanel({
     return sortedClientApps.filter((app) => app.toLowerCase().includes(keyword));
   }, [sortedClientApps, searchKeyword]);
 
+  const filteredAccountNames = useMemo(() => {
+    if (!searchKeyword.trim()) return sortedAccountNames;
+    const keyword = searchKeyword.toLowerCase();
+    return sortedAccountNames.filter((account) => account.toLowerCase().includes(keyword));
+  }, [sortedAccountNames, searchKeyword]);
+
   const filteredProxyPorts = useMemo(() => {
     if (!searchKeyword.trim()) return sortedProxyPorts;
     const keyword = searchKeyword.toLowerCase();
@@ -209,10 +230,12 @@ export default function FilterPanel({
   }, [sortedDomains, searchKeyword]);
 
   const showProxyPortSection = sortedProxyPorts.length > 1;
+  const showAccountSection = sortedAccountNames.length > 0;
   const hasSearchResults =
     filteredClientIps.length > 0 ||
     (showProxyPortSection && filteredProxyPorts.length > 0) ||
     filteredClientApps.length > 0 ||
+    (showAccountSection && filteredAccountNames.length > 0) ||
     filteredDomains.length > 0;
   const isSearching = searchKeyword.trim().length > 0;
 
@@ -269,6 +292,7 @@ export default function FilterPanel({
               clientIpCounts={clientIpCounts}
               proxyPortCounts={proxyPortCounts}
               clientAppCounts={clientAppCounts}
+              accountNameCounts={accountNameCounts}
               domainCounts={domainCounts}
             />
           </FilterSection>
@@ -385,6 +409,37 @@ export default function FilterPanel({
                 />
               ))
             )}
+          </FilterSection>
+        )}
+
+        {showAccountSection && (!isSearching || filteredAccountNames.length > 0) && (
+          <FilterSection
+            title="Accounts"
+            collapsed={isSearching ? false : collapsedSections.accountName ?? false}
+            onToggle={() =>
+              setCollapsedSection("accountName", !(collapsedSections.accountName ?? false))
+            }
+            count={isSearching ? filteredAccountNames.length : sortedAccountNames.length}
+          >
+            {filteredAccountNames.map((account) => (
+              <FilterItem
+                key={account}
+                label={account}
+                value={account}
+                type="account_name"
+                selected={selectedAccountNames.includes(account)}
+                onSelect={() => toggleAccountName(account)}
+                onPin={() =>
+                  addPinnedFilter({
+                    type: "account_name",
+                    value: account,
+                    label: account,
+                  })
+                }
+                count={accountNameCounts.get(account) ?? 0}
+                searchKeyword={searchKeyword}
+              />
+            ))}
           </FilterSection>
         )}
 

@@ -8,6 +8,7 @@ interface PinnedFiltersProps {
   clientIpCounts: Map<string, number>;
   proxyPortCounts: Map<string, number>;
   clientAppCounts: Map<string, number>;
+  accountNameCounts: Map<string, number>;
   domainCounts: Map<string, number>;
 }
 
@@ -15,6 +16,7 @@ export default function PinnedFilters({
   clientIpCounts,
   proxyPortCounts,
   clientAppCounts,
+  accountNameCounts,
   domainCounts,
 }: PinnedFiltersProps) {
   const {
@@ -59,6 +61,8 @@ export default function PinnedFilters({
                   ? (proxyPortCounts.get(filter.value) ?? 0)
                 : filter.type === "client_app"
                   ? (clientAppCounts.get(filter.value) ?? 0)
+                : filter.type === "account_name"
+                  ? (accountNameCounts.get(filter.value) ?? 0)
                   : (domainCounts.get(filter.value) ?? 0)
             }
           />
@@ -164,6 +168,8 @@ function PinnedFilterItem({
         return "Port";
       case "client_app":
         return "App";
+      case "account_name":
+        return "Account";
       case "domain":
         return "Host";
       default:

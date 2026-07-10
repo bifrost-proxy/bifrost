@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: u32 = 13;
+pub const SCHEMA_VERSION: u32 = 14;
 
 #[derive(Debug)]
 pub enum InitError {
@@ -134,11 +134,20 @@ fn run_migrations(conn: &Connection) -> Result<(), InitError> {
              SET upload_bytes = CASE WHEN upload_bytes = 0 THEN request_size ELSE upload_bytes END, \
                  download_bytes = CASE WHEN download_bytes = 0 THEN response_size ELSE download_bytes END",
         )?;
-        conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', ?)",
-            [SCHEMA_VERSION.to_string()],
+    }
+
+    if current_version < 14 {
+        add_column_if_missing(conn, "traffic_records", "account_name", "TEXT")?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_account_name \
+             ON traffic_records(account_name) WHERE account_name IS NOT NULL;",
         )?;
     }
+
+    conn.execute(
+        "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', ?)",
+        [SCHEMA_VERSION.to_string()],
+    )?;
 
     Ok(())
 }
@@ -165,6 +174,7 @@ CREATE TABLE IF NOT EXISTS traffic_records (
     client_app TEXT,
     client_pid INTEGER,
     client_path TEXT,
+    account_name TEXT,
     flags INTEGER NOT NULL DEFAULT 0,
     frame_count INTEGER NOT NULL DEFAULT 0,
     last_frame_id INTEGER NOT NULL DEFAULT 0,
@@ -185,6 +195,7 @@ CREATE INDEX IF NOT EXISTS idx_host ON traffic_records(host);
 CREATE INDEX IF NOT EXISTS idx_status ON traffic_records(status) WHERE status > 0;
 CREATE INDEX IF NOT EXISTS idx_method ON traffic_records(method);
 CREATE INDEX IF NOT EXISTS idx_client_app ON traffic_records(client_app) WHERE client_app IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_account_name ON traffic_records(account_name) WHERE account_name IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_seq_desc ON traffic_records(sequence DESC);
 CREATE INDEX IF NOT EXISTS idx_host_seq ON traffic_records(host, sequence DESC);
 CREATE INDEX IF NOT EXISTS idx_status_seq ON traffic_records(status, sequence DESC);
@@ -226,7 +237,7 @@ pub fn get_insert_sql() -> &'static str {
         sequence, id, timestamp, host, method, status, protocol,
         url, path, content_type, request_content_type,
         request_size, response_size, upload_bytes, download_bytes, duration_ms,
-        listener_port, client_ip, client_app, client_pid, client_path,
+        listener_port, client_ip, client_app, client_pid, client_path, account_name,
         flags, frame_count, last_frame_id,
         socket_is_open, socket_send_count, socket_receive_count,
         socket_send_bytes, socket_receive_bytes, socket_frame_count,
@@ -235,10 +246,10 @@ pub fn get_insert_sql() -> &'static str {
         ?1, ?2, ?3, ?4, ?5, ?6, ?7,
         ?8, ?9, ?10, ?11,
         ?12, ?13, ?14, ?15, ?16,
-        ?17, ?18, ?19, ?20, ?21,
-        ?22, ?23, ?24,
-        ?25, ?26, ?27, ?28, ?29, ?30,
-        ?31, ?32, ?33
+        ?17, ?18, ?19, ?20, ?21, ?22,
+        ?23, ?24, ?25,
+        ?26, ?27, ?28, ?29, ?30, ?31,
+        ?32, ?33, ?34
     )
     "#
 }
@@ -280,19 +291,20 @@ pub fn get_update_sql() -> &'static str {
         client_app = ?10,
         client_pid = ?11,
         client_path = ?12,
-        flags = ?13,
-        frame_count = ?14,
-        last_frame_id = ?15,
-        socket_is_open = ?16,
-        socket_send_count = ?17,
-        socket_receive_count = ?18,
-        socket_send_bytes = ?19,
-        socket_receive_bytes = ?20,
-        socket_frame_count = ?21,
-        rule_count = ?22,
-        rule_protocols = ?23,
-        devtools_client_req_id = ?24
-    WHERE id = ?25
+        account_name = ?13,
+        flags = ?14,
+        frame_count = ?15,
+        last_frame_id = ?16,
+        socket_is_open = ?17,
+        socket_send_count = ?18,
+        socket_receive_count = ?19,
+        socket_send_bytes = ?20,
+        socket_receive_bytes = ?21,
+        socket_frame_count = ?22,
+        rule_count = ?23,
+        rule_protocols = ?24,
+        devtools_client_req_id = ?25
+    WHERE id = ?26
     "#
 }
 

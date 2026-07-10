@@ -43,6 +43,10 @@ pub struct QueryParams {
     #[serde(default)]
     pub client_app_match: TextMatchMode,
     pub client_app_empty: Option<bool>,
+    pub account_name: Option<String>,
+    #[serde(default)]
+    pub account_name_match: TextMatchMode,
+    pub account_name_empty: Option<bool>,
     pub client_ip: Option<String>,
     #[serde(default)]
     pub client_ip_match: TextMatchMode,
@@ -73,6 +77,8 @@ impl QueryParams {
             || self.path_contains.is_some()
             || self.client_app.is_some()
             || self.client_app_empty.is_some()
+            || self.account_name.is_some()
+            || self.account_name_empty.is_some()
             || self.client_ip.is_some()
             || self.client_ip_empty.is_some()
             || self.listener_port.is_some()
@@ -180,6 +186,25 @@ impl QueryParams {
             }
         }
 
+        if let Some(is_empty) = self.account_name_empty {
+            conditions.push(if is_empty {
+                "COALESCE(account_name, '') = ''".to_string()
+            } else {
+                "COALESCE(account_name, '') != ''".to_string()
+            });
+        } else if let Some(ref account_name) = self.account_name {
+            match self.account_name_match {
+                TextMatchMode::Contains => {
+                    conditions.push("account_name LIKE ?".to_string());
+                    params.push(QueryValue::Text(format!("%{}%", account_name)));
+                }
+                TextMatchMode::Equals => {
+                    conditions.push("account_name = ?".to_string());
+                    params.push(QueryValue::Text(account_name.clone()));
+                }
+            }
+        }
+
         if let Some(is_empty) = self.client_ip_empty {
             conditions.push(if is_empty {
                 "COALESCE(client_ip, '') = ''".to_string()
@@ -244,7 +269,7 @@ impl QueryParams {
              listener_port, client_ip, client_app, client_pid, flags, frame_count, \
              socket_is_open, socket_send_count, socket_receive_count, \
              socket_send_bytes, socket_receive_bytes, socket_frame_count, \
-             rule_count, rule_protocols, request_content_type \
+             rule_count, rule_protocols, request_content_type, account_name \
              FROM traffic_records{} {} LIMIT {}",
             where_clause, order, limit
         );
@@ -311,6 +336,19 @@ mod tests {
         let (where_clause, values) = params.build_where_clause();
         assert!(where_clause.contains("client_app = ?"));
         assert!(matches!(values.first(), Some(QueryValue::Text(v)) if v == "Safari"));
+    }
+
+    #[test]
+    fn build_where_clause_supports_exact_account_name_filter() {
+        let params = QueryParams {
+            account_name: Some("alice".to_string()),
+            account_name_match: TextMatchMode::Equals,
+            ..Default::default()
+        };
+
+        let (where_clause, values) = params.build_where_clause();
+        assert!(where_clause.contains("account_name = ?"));
+        assert!(matches!(values.first(), Some(QueryValue::Text(v)) if v == "alice"));
     }
 
     #[test]

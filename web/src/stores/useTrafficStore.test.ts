@@ -92,6 +92,25 @@ describe("Traffic filter condition enabled state", () => {
         clientIps: [],
         proxyPorts: ["58344"],
         clientApps: [],
+        accountNames: [],
+        domains: [],
+      }),
+    ).toEqual([records[1]]);
+  });
+
+  it("filters records by selected account name panel filters", () => {
+    const records = [
+      makeRecord("1", "/main", { account_name: "alice" }),
+      makeRecord("2", "/temp", { account_name: "bob" }),
+      makeRecord("3", "/other-temp"),
+    ];
+
+    expect(
+      filterRecords(records, toolbar, [], {
+        clientIps: [],
+        proxyPorts: [],
+        clientApps: [],
+        accountNames: ["bob"],
         domains: [],
       }),
     ).toEqual([records[1]]);
