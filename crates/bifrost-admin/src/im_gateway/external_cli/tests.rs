@@ -1822,6 +1822,25 @@ async fn external_cli_runtime_stops_active_run_by_session_key() {
 }
 
 #[test]
+fn stale_run_session_cleanup_preserves_replacement_owner() {
+    let session_key = format!("replacement-session-{}", uuid::Uuid::new_v4());
+    let old_run_id = format!("old-run-{}", uuid::Uuid::new_v4());
+    let new_run_id = format!("new-run-{}", uuid::Uuid::new_v4());
+    ACTIVE_SESSIONS.insert(session_key.clone(), new_run_id.clone());
+
+    assert!(!remove_active_session_if_owned(&session_key, &old_run_id));
+    assert_eq!(
+        ACTIVE_SESSIONS
+            .get(&session_key)
+            .map(|entry| entry.value().clone()),
+        Some(new_run_id.clone())
+    );
+
+    assert!(remove_active_session_if_owned(&session_key, &new_run_id));
+    assert!(!ACTIVE_SESSIONS.contains_key(&session_key));
+}
+
+#[test]
 fn terminate_process_rejects_pid_zero() {
     let error = terminate_process(0).unwrap_err();
 

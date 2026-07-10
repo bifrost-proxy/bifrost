@@ -411,19 +411,16 @@ async fn handle_set_userpass(
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)),
     };
 
-    let existing_userpass = {
-        let ac = access_control.read().await;
-        ac.userpass_config()
-    };
+    // Serialize the read/validate/persist/apply sequence so concurrent CLI and
+    // WebUI updates cannot both derive from the same stale account snapshot.
+    // Persist before switching the runtime policy: a disk failure must not
+    // leave the current process using credentials that disappear on restart.
+    let ac = access_control.write().await;
+    let existing_userpass = ac.userpass_config();
     let userpass = match validate_userpass_request(request, existing_userpass.as_ref()) {
         Ok(userpass) => userpass,
         Err(message) => return error_response(StatusCode::BAD_REQUEST, &message),
     };
-
-    {
-        let ac = access_control.read().await;
-        ac.set_userpass_config(Some(userpass.clone()));
-    }
 
     if let Some(ref cm) = config_manager {
         let update = AccessConfigUpdate {
@@ -439,6 +436,12 @@ async fn handle_set_userpass(
                 "Failed to persist userpass config",
             );
         }
+    }
+
+    ac.set_userpass_config(Some(userpass.clone()));
+    drop(ac);
+
+    if let Some(ref cm) = config_manager {
         let valid_usernames = userpass
             .accounts
             .iter()

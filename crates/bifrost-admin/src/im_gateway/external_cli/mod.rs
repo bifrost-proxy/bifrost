@@ -3775,8 +3775,14 @@ fn remove_active_sessions_for_run(run_id: &str) {
         })
         .collect();
     for session_key in session_keys {
-        ACTIVE_SESSIONS.remove(&session_key);
+        remove_active_session_if_owned(&session_key, run_id);
     }
+}
+
+fn remove_active_session_if_owned(session_key: &str, run_id: &str) -> bool {
+    ACTIVE_SESSIONS
+        .remove_if(session_key, |_, owner| owner == run_id)
+        .is_some()
 }
 
 fn spawn_external_cli_worker_process(executable: &Path) -> Result<tokio::process::Child, String> {

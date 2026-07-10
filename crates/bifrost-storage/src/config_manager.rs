@@ -187,21 +187,23 @@ impl ConfigManager {
 
     pub async fn update_access_config(&self, update: AccessConfigUpdate) -> Result<()> {
         let mut config = self.config.write().await;
+        let mut next_config = config.clone();
 
         if let Some(mode) = update.mode {
-            config.access.mode = mode;
+            next_config.access.mode = mode;
         }
         if let Some(whitelist) = update.whitelist {
-            config.access.whitelist = whitelist;
+            next_config.access.whitelist = whitelist;
         }
         if let Some(allow_lan) = update.allow_lan {
-            config.access.allow_lan = allow_lan;
+            next_config.access.allow_lan = allow_lan;
         }
         if let Some(userpass) = update.userpass {
-            config.access.userpass = userpass;
+            next_config.access.userpass = userpass;
         }
 
-        self.save_config(&config)?;
+        self.save_config(&next_config)?;
+        *config = next_config;
         let _ = self
             .change_notifier
             .send(ConfigChangeEvent::AccessConfigChanged);
@@ -1151,6 +1153,44 @@ mod tests {
         assert!(config.access.allow_lan);
         let event = receiver.try_recv().unwrap();
         assert!(matches!(event, ConfigChangeEvent::AccessConfigChanged));
+    }
+
+    #[tokio::test]
+    async fn test_update_access_config_write_failure_preserves_in_memory_config() {
+        let (temp_dir, manager) = setup();
+        let mut receiver = manager.subscribe();
+        let original = manager.config().await.access;
+        let config_path = temp_dir.path().join("config.toml");
+        std::fs::remove_file(&config_path).unwrap();
+        std::fs::create_dir(&config_path).unwrap();
+
+        let result = manager
+            .update_access_config(AccessConfigUpdate {
+                mode: Some(bifrost_core::AccessMode::AllowAll),
+                whitelist: Some(vec!["10.0.0.0/8".to_string()]),
+                allow_lan: Some(true),
+                userpass: Some(Some(bifrost_core::UserPassAuthConfig {
+                    enabled: true,
+                    accounts: vec![bifrost_core::UserPassAccountConfig {
+                        username: "alice".to_string(),
+                        password: Some("secret".to_string()),
+                        enabled: true,
+                    }],
+                    loopback_requires_auth: true,
+                })),
+            })
+            .await;
+
+        assert!(result.is_err());
+        let current = manager.config().await.access;
+        assert_eq!(current.mode, original.mode);
+        assert_eq!(current.whitelist, original.whitelist);
+        assert_eq!(current.allow_lan, original.allow_lan);
+        assert!(current.userpass.is_none());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[tokio::test]

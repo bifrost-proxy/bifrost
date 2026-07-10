@@ -6,6 +6,7 @@ const HANDSHAKE_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Clone)]
 struct ActiveAppServerHandle {
+    run_id: String,
     thread_id: String,
     turn_id: String,
     guide_tx: mpsc::UnboundedSender<AppServerGuideCommand>,
@@ -40,7 +41,7 @@ impl Drop for AppServerRunCleanup {
             return;
         }
         if let Some(session_key) = self.session_key.as_deref() {
-            ACTIVE_APP_SERVER_SESSIONS.remove(session_key);
+            remove_active_app_server_session(session_key, &self.run_id);
         }
         if self.pid != 0 {
             let _ = terminate_process(self.pid);
@@ -133,7 +134,13 @@ pub(super) async fn request_session_guide(
             .get(session_key)
             .map(|entry| entry.clone())
         {
-            break Some(handle);
+            let owns_session = ACTIVE_SESSIONS
+                .get(session_key)
+                .is_some_and(|entry| entry.value() == &handle.run_id);
+            if owns_session {
+                break Some(handle);
+            }
+            remove_active_app_server_session(session_key, &handle.run_id);
         }
         if tokio::time::Instant::now() >= deadline {
             break None;
@@ -180,6 +187,33 @@ pub(super) async fn request_session_guide(
             "app-server guide acknowledgement timed out".to_string(),
         ),
     }
+}
+
+fn register_active_app_server_session(
+    session_key: &str,
+    run_id: &str,
+    handle: ActiveAppServerHandle,
+) -> bool {
+    let owns_session = active_session_is_owned_by(session_key, run_id);
+    if !owns_session {
+        return false;
+    }
+    ACTIVE_APP_SERVER_SESSIONS.insert(session_key.to_string(), handle);
+    let still_owns_session = active_session_is_owned_by(session_key, run_id);
+    if !still_owns_session {
+        remove_active_app_server_session(session_key, run_id);
+    }
+    still_owns_session
+}
+
+fn active_session_is_owned_by(session_key: &str, run_id: &str) -> bool {
+    ACTIVE_SESSIONS
+        .get(session_key)
+        .is_some_and(|entry| entry.value() == run_id)
+}
+
+fn remove_active_app_server_session(session_key: &str, run_id: &str) {
+    ACTIVE_APP_SERVER_SESSIONS.remove_if(session_key, |_, handle| handle.run_id == run_id);
 }
 
 fn rejected_guide(
@@ -324,12 +358,14 @@ pub(super) async fn run_command(
 
     let (guide_tx, mut guide_rx) = mpsc::unbounded_channel::<AppServerGuideCommand>();
     if let Some(session_key) = session_key {
-        ACTIVE_APP_SERVER_SESSIONS.insert(
-            session_key.to_string(),
+        register_active_app_server_session(
+            session_key,
+            run_id,
             ActiveAppServerHandle {
+                run_id: run_id.to_string(),
                 thread_id: thread_id.clone(),
                 turn_id: turn_id.clone(),
-                guide_tx,
+                guide_tx: guide_tx.clone(),
             },
         );
     }
@@ -405,6 +441,17 @@ pub(super) async fn run_command(
             }
             command = guide_rx.recv() => {
                 let Some(command) = command else { continue; };
+                if session_key.is_some_and(|session_key| {
+                    !active_session_is_owned_by(session_key, run_id)
+                }) {
+                    let _ = command.ack_tx.send(rejected_guide(
+                        command.guide_id,
+                        Some(thread_id.clone()),
+                        Some(turn_id.clone()),
+                        "active session was replaced before guide delivery".to_string(),
+                    ));
+                    continue;
+                }
                 next_request_id = next_request_id.saturating_add(1);
                 let request_id = next_request_id;
                 let params = build_turn_steer_request(
@@ -451,7 +498,7 @@ pub(super) async fn run_command(
     }
 
     if let Some(session_key) = session_key {
-        ACTIVE_APP_SERVER_SESSIONS.remove(session_key);
+        remove_active_app_server_session(session_key, run_id);
     }
     for (_, command) in pending_guides {
         let _ = command.ack_tx.send(rejected_guide(
@@ -1263,6 +1310,74 @@ mod tests {
         );
         assert!(!rejected.accepted);
         assert_eq!(rejected.reason.as_deref(), Some("no active turn to steer"));
+    }
+
+    #[test]
+    fn stale_app_server_cleanup_preserves_replacement_session_owner() {
+        let session_key = format!("session-replacement-{}", uuid::Uuid::new_v4());
+        let old_run_id = format!("run-old-{}", uuid::Uuid::new_v4());
+        let new_run_id = format!("run-new-{}", uuid::Uuid::new_v4());
+        let (old_guide_tx, _old_guide_rx) = mpsc::unbounded_channel();
+        let (new_guide_tx, _new_guide_rx) = mpsc::unbounded_channel();
+
+        ACTIVE_SESSIONS.insert(session_key.clone(), old_run_id.clone());
+        assert!(register_active_app_server_session(
+            &session_key,
+            &old_run_id,
+            ActiveAppServerHandle {
+                run_id: old_run_id.clone(),
+                thread_id: "thread-old".to_string(),
+                turn_id: "turn-old".to_string(),
+                guide_tx: old_guide_tx,
+            },
+        ));
+
+        ACTIVE_SESSIONS.insert(session_key.clone(), new_run_id.clone());
+        assert!(register_active_app_server_session(
+            &session_key,
+            &new_run_id,
+            ActiveAppServerHandle {
+                run_id: new_run_id.clone(),
+                thread_id: "thread-new".to_string(),
+                turn_id: "turn-new".to_string(),
+                guide_tx: new_guide_tx,
+            },
+        ));
+
+        remove_active_app_server_session(&session_key, &old_run_id);
+        let active = ACTIVE_APP_SERVER_SESSIONS
+            .get(&session_key)
+            .map(|entry| entry.clone())
+            .expect("replacement app-server handle must remain registered");
+        assert_eq!(active.run_id, new_run_id);
+        assert_eq!(active.thread_id, "thread-new");
+        assert_eq!(active.turn_id, "turn-new");
+
+        remove_active_app_server_session(&session_key, &active.run_id);
+        ACTIVE_SESSIONS.remove(&session_key);
+    }
+
+    #[test]
+    fn app_server_registration_rejects_stale_run_ownership() {
+        let session_key = format!("session-stale-{}", uuid::Uuid::new_v4());
+        let current_run_id = format!("run-current-{}", uuid::Uuid::new_v4());
+        let stale_run_id = format!("run-stale-{}", uuid::Uuid::new_v4());
+        let (guide_tx, _guide_rx) = mpsc::unbounded_channel();
+        ACTIVE_SESSIONS.insert(session_key.clone(), current_run_id);
+
+        assert!(!register_active_app_server_session(
+            &session_key,
+            &stale_run_id,
+            ActiveAppServerHandle {
+                run_id: stale_run_id.clone(),
+                thread_id: "thread-stale".to_string(),
+                turn_id: "turn-stale".to_string(),
+                guide_tx,
+            },
+        ));
+        assert!(!ACTIVE_APP_SERVER_SESSIONS.contains_key(&session_key));
+
+        ACTIVE_SESSIONS.remove(&session_key);
     }
 
     #[cfg(unix)]
