@@ -4195,7 +4195,7 @@ pub fn external_progress_to_agent_turn_event(
                 log: bifrost_agent::ToolCallLog {
                     tool_name: event_title_or_default(event, "runner"),
                     arguments: external_progress_arguments_text(event),
-                    result: event.content.clone(),
+                    result: external_progress_result_text(event),
                     success: event
                         .raw
                         .get("success")
@@ -4259,6 +4259,22 @@ fn external_progress_arguments_text(event: &ExternalCliProgressEvent) -> String 
         .unwrap_or_default()
 }
 
+fn external_progress_result_text(event: &ExternalCliProgressEvent) -> String {
+    if !event.content.trim().is_empty() {
+        return event.content.clone();
+    }
+    external_progress_structured_detail(event).unwrap_or_default()
+}
+
+fn external_progress_structured_detail(event: &ExternalCliProgressEvent) -> Option<String> {
+    let item = event.raw.get("item").unwrap_or(&event.raw);
+    if external_progress_is_file_change(event, item) {
+        return file_change_detail_from_value(item)
+            .or_else(|| serde_json::to_string_pretty(item).ok());
+    }
+    None
+}
+
 fn event_title_or_default(event: &ExternalCliProgressEvent, default: &str) -> String {
     event
         .title
@@ -4276,6 +4292,160 @@ fn event_title_or_default(event: &ExternalCliProgressEvent, default: &str) -> St
         })
         .unwrap_or(default)
         .to_string()
+}
+
+fn is_file_change_item_type(item_type: &str) -> bool {
+    matches!(
+        item_type,
+        "file_change" | "file_changes" | "file_diff" | "file_edit" | "file_edits" | "patch"
+    )
+}
+
+fn external_progress_is_file_change(
+    event: &ExternalCliProgressEvent,
+    item: &serde_json::Value,
+) -> bool {
+    event.title.as_deref().is_some_and(is_file_change_item_type)
+        || value_text_path(item, &["type"])
+            .is_some_and(|item_type| is_file_change_item_type(&item_type))
+        || value_text_path(&event.raw, &["tool_name"])
+            .is_some_and(|tool_name| is_file_change_item_type(&tool_name))
+}
+
+fn codex_file_change_event(raw: &serde_json::Value, item_type: &str) -> ExternalCliProgressEvent {
+    let content = raw
+        .get("item")
+        .and_then(file_change_detail_from_value)
+        .unwrap_or_else(|| {
+            raw.get("item")
+                .and_then(|item| serde_json::to_string_pretty(item).ok())
+                .unwrap_or_default()
+        });
+    let mut enriched_raw = raw.clone();
+    if let Some(object) = enriched_raw.as_object_mut() {
+        object
+            .entry("tool_name".to_string())
+            .or_insert_with(|| serde_json::json!("file_change"));
+        object
+            .entry("success".to_string())
+            .or_insert_with(|| serde_json::json!(true));
+    }
+    ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::ToolFinished,
+        content,
+        title: Some(if item_type == "patch" {
+            "file_change".to_string()
+        } else {
+            item_type.to_string()
+        }),
+        raw: enriched_raw,
+    }
+}
+
+fn file_change_detail_from_value(value: &serde_json::Value) -> Option<String> {
+    let mut lines = Vec::new();
+    for key in ["text", "message", "summary", "content", "description"] {
+        if let Some(text) = value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            lines.push(text.to_string());
+        }
+    }
+    for key in ["file", "path", "file_path", "filePath", "filename", "name"] {
+        if let Some(path) = value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            lines.push(match file_change_action_label(value) {
+                Some(action) => format!("file: {path} ({action})"),
+                None => format!("file: {path}"),
+            });
+            break;
+        }
+    }
+    for key in ["files", "changes", "edits"] {
+        if let Some(items) = value.get(key).and_then(serde_json::Value::as_array) {
+            append_file_change_items(&mut lines, key, items);
+        }
+    }
+    for key in ["diff", "patch"] {
+        if let Some(text) = value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            lines.push(format!("{key}:\n{text}"));
+        }
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+fn append_file_change_items(lines: &mut Vec<String>, label: &str, items: &[serde_json::Value]) {
+    if items.is_empty() {
+        return;
+    }
+    lines.push(format!("{label}:"));
+    for item in items {
+        if let Some(path) = item.as_str().map(str::trim).filter(|path| !path.is_empty()) {
+            lines.push(format!("- {path}"));
+            continue;
+        }
+        if let Some(object) = item.as_object() {
+            let path = ["path", "file_path", "filePath", "filename", "name"]
+                .iter()
+                .find_map(|key| {
+                    object
+                        .get(*key)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                })
+                .unwrap_or("[unknown file]");
+            lines.push(match file_change_action_label(item) {
+                Some(action) => format!("- {path} ({action})"),
+                None => format!("- {path}"),
+            });
+            if let Some(summary) = ["summary", "message", "description"]
+                .iter()
+                .find_map(|key| {
+                    object
+                        .get(*key)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                })
+            {
+                lines.push(format!("  {summary}"));
+            }
+            if let Some(diff) = ["diff", "patch"].iter().find_map(|key| {
+                object
+                    .get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            }) {
+                lines.push(format!("  {diff}"));
+            }
+        }
+    }
+}
+
+fn file_change_action_label(value: &serde_json::Value) -> Option<&str> {
+    ["action", "status", "operation", "kind"]
+        .iter()
+        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn is_codex_like_adapter(adapter: &str) -> bool {
@@ -4355,6 +4525,9 @@ fn parse_codex_cli_event(
                     ExternalCliProgressEventType::ToolFinished,
                 ));
             }
+            if is_file_change_item_type(&item_type) {
+                return Some(codex_file_change_event(raw, &item_type));
+            }
             let content = value_text_path(raw, &["item", "text"])
                 .or_else(|| value_text_path(raw, &["item", "message"]))
                 .or_else(|| value_text_path(raw, &["item", "summary"]))
@@ -4378,8 +4551,42 @@ fn parse_codex_cli_event(
                 raw: raw.clone(),
             })
         }
+        _ if codex_event_is_token_usage_refresh(event_type, raw) => {
+            Some(ExternalCliProgressEvent {
+                event_type: ExternalCliProgressEventType::Status,
+                content: "token usage updated".to_string(),
+                title: Some("token usage".to_string()),
+                raw: raw.clone(),
+            })
+        }
         _ => None,
     }
+}
+
+fn codex_event_is_token_usage_refresh(event_type: &str, raw: &serde_json::Value) -> bool {
+    if raw
+        .get("usage")
+        .or_else(|| raw.get("message").and_then(|message| message.get("usage")))
+        .is_none()
+    {
+        return false;
+    }
+    let normalized = event_type
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['-', '.', ' '], "_")
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    matches!(
+        normalized.as_str(),
+        "token_usage"
+            | "token_usage_update"
+            | "token_usage_updated"
+            | "usage_update"
+            | "usage_updated"
+    )
 }
 
 fn codex_todo_list_event(raw: &serde_json::Value) -> Option<ExternalCliProgressEvent> {
