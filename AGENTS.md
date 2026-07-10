@@ -377,6 +377,9 @@ BIFROST_DATA_DIR=./.bifrost-test BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 cargo 
 3. **禁止并发起多个完整实例**：除非测试目标就是多实例并发，否则不得在同一脚本里并行拉起多个完整 `bifrost` 进程；并发场景必须用独立端口 + 独立数据目录，并设置实例数上限。
 4. **收尾必须清理派生进程**：脚本退出（含失败路径，用 `trap` 兜底）必须杀掉本次派生的 `bifrost`、托盘 helper 与 mock server 进程，并释放占用端口，禁止残留进程污染后续运行。
 5. **提交前自检（不入 CI）**：`scripts/ci/check-e2e-launch-guard.sh` 会扫描所有启动 `bifrost start|run` 的脚本是否携带护栏。为节省 CI 资源，该校验**不作为独立 CI job**，而是要求人/Agent 在新增或修改测试脚本后、提交前本地执行一次（`bash scripts/ci/check-e2e-launch-guard.sh`，退出码非 0 即不合规）。新增不合规脚本必须先修复护栏再提交。
+6. **禁止占用或清理正式端口**：自动化测试默认保护 `9900`。不得把它作为测试实例端口，也不得调用按端口清理 helper 终止其监听进程；测试必须使用动态端口或明确的非正式端口。
+7. **禁止全机进程名清理**：测试和 runner 禁止使用 `pkill -f bifrost`、`killall bifrost`、`taskkill /IM bifrost.exe`。残留进程只能按本次测试记录的 PID、进程组、端口或带 `.bifrost-e2e-owned` 标记的数据目录回收。
+8. **真实数据只读复用**：确需真实账号/IM 数据的 human test 必须优先复用已经运行的正式服务，通过 API/CLI 验证；禁止为了“真实”而用当前 checkout 二进制和 `--yes` 重启 `~/.bifrost`。若验证目标本身是正式服务升级/重启，必须在用例中明确列为破坏性步骤并先备份配置。
 
 ## 工作区测试要求
 

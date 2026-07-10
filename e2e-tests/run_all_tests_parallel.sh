@@ -1020,6 +1020,8 @@ main() {
     fi
     rm -rf "$RESULTS_DIR" 2>/dev/null || true
     mkdir -p "$RESULTS_DIR"
+    mark_e2e_data_root "$RESULTS_DIR"
+    export BIFROST_E2E_SANDBOX_DIR="$RESULTS_DIR"
 
     trap cleanup EXIT
 

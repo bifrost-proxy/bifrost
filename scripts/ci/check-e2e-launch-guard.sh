@@ -35,14 +35,20 @@ SCAN_DIRS=(e2e-tests scripts tests)
 # `stop`, etc. since those do not spawn desktop UI.
 LAUNCH_RE='(\bbifrost|\$\{?BIFROST_BIN\}?|/bifrost)"? +(start|run)([ "]|$)'
 
-# Guard tokens that make a script safe.
-GUARD_RE='BIFROST_DISABLE_TRAY|BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT|test_utils/process\.sh|run_all_e2e\.sh'
+# Shared helpers provide all three mandatory isolation controls. Scripts that
+# do not source one must carry each control explicitly.
+SHARED_GUARD_RE='test_utils/process\.sh|test_utils/admin_client\.sh|run_all_e2e\.sh'
+DATA_DIR_GUARD_RE='BIFROST_DATA_DIR|test_utils/process\.sh|test_utils/admin_client\.sh|run_all_e2e\.sh'
+BROAD_KILL_RE='pkill[[:space:]]+-f[[:space:]]+bifrost([[:space:];]|$)|pkill[[:space:]]+-f[[:space:]]+"bifrost"|killall[[:space:]]+bifrost|taskkill(\.exe)?[[:space:]]+/F[[:space:]]+/IM[[:space:]]+bifrost\.exe'
 
 # Allowlist: scripts that legitimately exercise tray/login behaviour and
 # therefore manage the env themselves on a per-launch basis. They must STILL
 # set the guard somewhere; this list only documents intentional exceptions if
 # ever needed. Keep empty by default.
-ALLOWLIST=()
+ALLOWLIST=(
+  "e2e-tests/tests/test_site_docs_sync.sh"
+  "e2e-tests/tests/test_sync_startup_login_preflight_e2e.sh"
+)
 
 is_allowlisted() {
   local f="$1"
@@ -53,9 +59,10 @@ is_allowlisted() {
   return 1
 }
 
-mapfile -t candidates < <(
-  grep -rlnE "$LAUNCH_RE" --include='*.sh' "${SCAN_DIRS[@]}" 2>/dev/null | sort -u
-)
+candidates=()
+while IFS= read -r candidate; do
+  [[ -n "$candidate" ]] && candidates+=("$candidate")
+done < <(grep -rlnE "$LAUNCH_RE" --include='*.sh' "${SCAN_DIRS[@]}" 2>/dev/null | sort -u)
 
 violations=()
 checked=0
@@ -63,14 +70,24 @@ for f in "${candidates[@]}"; do
   [[ -z "$f" ]] && continue
   is_allowlisted "$f" && continue
   checked=$((checked + 1))
-  if ! grep -qE "$GUARD_RE" "$f"; then
+  if grep -qE "$SHARED_GUARD_RE" "$f"; then
+    continue
+  fi
+  if ! grep -q 'BIFROST_DISABLE_TRAY' "$f" \
+    || ! grep -q 'BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT' "$f" \
+    || ! grep -qE "$DATA_DIR_GUARD_RE" "$f"; then
     violations+=("$f")
   fi
 done
 
+broad_kill_violations=()
+while IFS= read -r violation; do
+  [[ -n "$violation" ]] && broad_kill_violations+=("$violation")
+done < <(grep -rlnE "$BROAD_KILL_RE" --include='*.sh' "${SCAN_DIRS[@]}" 2>/dev/null | sort -u)
+
 echo "e2e launch guard lint: scanned ${checked} script(s) that launch 'bifrost start|run'"
 
-if [[ ${#violations[@]} -gt 0 ]]; then
+if [[ ${#violations[@]} -gt 0 || ${#broad_kill_violations[@]} -gt 0 ]]; then
   echo
   echo "ERROR: the following scripts launch the full bifrost binary but do NOT"
   echo "carry the tray/login guard. Running them outside scripts/run_all_e2e.sh"
@@ -79,17 +96,25 @@ if [[ ${#violations[@]} -gt 0 ]]; then
   for v in "${violations[@]}"; do
     echo "  - $v"
   done
+  if [[ ${#broad_kill_violations[@]} -gt 0 ]]; then
+    echo
+    echo "ERROR: host-wide Bifrost process cleanup is forbidden:"
+    for v in "${broad_kill_violations[@]}"; do
+      echo "  - $v"
+    done
+  fi
   echo
   echo "Fix: add ONE of the following to the script before launching bifrost:"
   echo "  1. source the shared helper:"
   echo "       source \"\$(dirname \"\${BASH_SOURCE[0]}\")/../test_utils/process.sh\""
-  echo "  2. or export the guards explicitly:"
+  echo "  2. or export all guards explicitly:"
   echo "       export BIFROST_DISABLE_TRAY=1"
   echo "       export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1"
+  echo "       export BIFROST_DATA_DIR=\"\$(mktemp -d)\""
   echo
   echo "See AGENTS.md > '测试启动红线' for the full rule."
   exit 1
 fi
 
-echo "OK: all launching scripts carry the tray/login guard."
+echo "OK: all launching scripts carry tray/login/data isolation and no broad process kill exists."
 exit 0

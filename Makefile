@@ -2,6 +2,14 @@
         coverage coverage-unit coverage-e2e coverage-html coverage-json coverage-crate \
         coverage-gate
 
+# Development servers must never adopt the installed service's ~/.bifrost
+# runtime/PID files or its production-like 9900 listener. Override these only
+# when intentionally operating a disposable development instance.
+BIFROST_DEV_DATA_DIR ?= $(CURDIR)/.bifrost-dev
+BIFROST_DEV_PORT ?= 8800
+BIFROST_DEV_ENV = BIFROST_DATA_DIR="$(BIFROST_DEV_DATA_DIR)" BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
+BIFROST_DEV_START_ARGS = -p $(BIFROST_DEV_PORT) --no-system-proxy --skip-cert-check
+
 # Default target
 all: build
 
@@ -27,18 +35,18 @@ build-frontend:
 
 # Run the proxy server in debug mode
 run:
-	cargo run -p bifrost-cli -- start
+	$(BIFROST_DEV_ENV) cargo run -p bifrost-cli -- start $(BIFROST_DEV_START_ARGS)
 
 # Run the proxy server in release mode
 run-release:
-	cargo run -p bifrost-cli --release -- start
+	$(BIFROST_DEV_ENV) cargo run -p bifrost-cli --release -- start $(BIFROST_DEV_START_ARGS)
 
 # Development mode with hot reload for frontend
 dev:
 	@echo "Starting frontend dev server..."
 	cd web && npm run dev &
 	@echo "Starting backend..."
-	SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-cli -- start --verbose
+	$(BIFROST_DEV_ENV) SKIP_FRONTEND_BUILD=1 cargo run -p bifrost-cli -- start $(BIFROST_DEV_START_ARGS) --verbose
 
 # Clean all build artifacts
 clean:

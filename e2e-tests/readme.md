@@ -324,7 +324,7 @@ Echo 服务器返回 JSON 格式的请求详情，便于验证代理行为：
   - SYSTEM_PROXY_BYPASS=localhost,127.0.0.1,::1,\*.local 设置绕过列表（对应 CLI `--proxy-bypass`）
   - 例如：
     - `ENABLE_SYSTEM_PROXY=true SYSTEM_PROXY_BYPASS="localhost,127.0.0.1,::1,*.local" ./test_rules.sh rules/forwarding/http_to_http.txt`
-    - `ENABLE_SYSTEM_PROXY=true PROXY_PORT=9900 ./test_pattern.sh`
+    - `ENABLE_SYSTEM_PROXY=true PROXY_PORT=19900 ./test_pattern.sh`
 
 ## 断言库
 
@@ -497,24 +497,18 @@ EOF
 
 ### 遗留进程清理
 
-测试运行后可能会有 mock server 或代理进程未正确清理，导致后续测试失败或端口占用。运行新测试前建议先清理遗留进程：
+测试运行后可能会有 mock server 或代理进程未正确清理，导致后续测试失败或端口占用。只能按本次测试记录的 PID、进程组、端口或带有 `.bifrost-e2e-owned` 标记的数据目录定向清理。
 
 ```bash
-# 清理所有 mock server 和代理进程
-pkill -f "http_echo_server.py" 2>/dev/null
-pkill -f "https_echo_server.py" 2>/dev/null
-pkill -f "ws_echo_server.py" 2>/dev/null
-pkill -f "sse_echo_server.py" 2>/dev/null
-pkill -f "bifrost" 2>/dev/null
-
-# 或者使用一行命令
-pkill -f "echo_server.py"; pkill -f "bifrost"
+# 推荐：让测试 trap 调用共享 helper，只回收测试沙箱内 PID 文件指向的进程
+source e2e-tests/test_utils/process.sh
+kill_bifrost_in_data_root "$BIFROST_E2E_SANDBOX_DIR"
 
 # 检查进程是否清理干净
 ps aux | grep -E "(echo_server|bifrost)" | grep -v grep
 ```
 
-**提示**: 如果测试脚本因异常退出（如 Ctrl+C 中断），mock server 进程可能会残留。建议在每次运行测试前执行上述清理命令。
+**禁止**：不得使用 `pkill -f bifrost`、`killall bifrost` 或 Windows 全映像名 `taskkill /IM bifrost.exe`。这些命令会停止开发者正在使用的正式 9900 服务及其他 worktree 实例。
 
 ### 代理启动失败
 
