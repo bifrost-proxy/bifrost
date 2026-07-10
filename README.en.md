@@ -13,7 +13,7 @@
 
 > Language: **English** | [中文](README.md)
 >
-> [English documentation](docs-en/README.md) · [Chinese docs](docs/README.md) · [Documentation site](https://bifrost-proxy.github.io/bifrost/)
+> · [Documentation site](https://bifrost-proxy.github.io/bifrost/)
 
 Bifrost is a high-performance, AI-friendly proxy server written in Rust and inspired by [Whistle](https://github.com/avwo/whistle). It provides request interception, rule-based modification, TLS MITM, script extensions, traffic inspection, request replay, and Web UI management.
 
