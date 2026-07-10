@@ -522,7 +522,7 @@ fn append_codex_legacy_search_config(args: &mut Vec<String>, config: &ExternalCl
     args.push("web_search".to_string());
 }
 
-fn codex_thread_id_from_params(request: &ExternalCliRunRequest) -> Option<String> {
+pub(super) fn codex_thread_id_from_params(request: &ExternalCliRunRequest) -> Option<String> {
     request
         .params
         .get("threadId")

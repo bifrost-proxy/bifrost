@@ -148,11 +148,11 @@ async fn stale_external_worker_entry_does_not_kill_pid_when_stop_receiver_is_gon
         .spawn()
         .expect("spawn protected external worker process");
     let pid = child.id();
-    let (stop_tx, stop_rx) = tokio::sync::mpsc::unbounded_channel();
-    drop(stop_rx);
+    let (control_tx, control_rx) = tokio::sync::mpsc::channel(1);
+    drop(control_rx);
     ACTIVE_WORKER_SESSIONS.insert(
         "stale-external-worker".to_string(),
-        ExternalCliWorkerStopHandle { pid, stop_tx },
+        ExternalCliWorkerControlHandle { pid, control_tx },
     );
 
     assert!(!request_worker_session_stop("stale-external-worker").await);
@@ -183,14 +183,14 @@ async fn acknowledged_external_worker_stop_does_not_kill_pid() {
         .spawn()
         .expect("spawn protected external worker process");
     let pid = child.id();
-    let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(1);
     ACTIVE_WORKER_SESSIONS.insert(
         "acked-external-worker".to_string(),
-        ExternalCliWorkerStopHandle { pid, stop_tx },
+        ExternalCliWorkerControlHandle { pid, control_tx },
     );
     let ack_task = tokio::spawn(async move {
-        if let Some(stop_request) = stop_rx.recv().await {
-            stop_request.ack();
+        if let Some(ExternalCliWorkerControlRequest::Stop { ack_tx }) = control_rx.recv().await {
+            let _ = ack_tx.send(());
         }
     });
 
@@ -1819,6 +1819,52 @@ async fn external_cli_runtime_stops_active_run_by_session_key() {
     assert_eq!(result.run_id, run_id);
     assert_eq!(result.status, ExternalCliRunStatus::Stopped);
     assert_eq!(result.response, "External CLI run was stopped by request.");
+}
+
+#[tokio::test]
+async fn worker_guide_rejects_saturated_control_channel_without_waiting() {
+    let session_key = format!("saturated-guide-session-{}", uuid::Uuid::new_v4());
+    let (control_tx, _control_rx) = tokio::sync::mpsc::channel(1);
+    let (stop_ack_tx, _stop_ack_rx) = oneshot::channel();
+    control_tx
+        .try_send(ExternalCliWorkerControlRequest::Stop {
+            ack_tx: stop_ack_tx,
+        })
+        .expect("fill control channel");
+    ACTIVE_WORKER_SESSIONS.insert(
+        session_key.clone(),
+        ExternalCliWorkerControlHandle { pid: 1, control_tx },
+    );
+
+    let error = request_worker_session_guide(
+        &session_key,
+        "guide-over-capacity".to_string(),
+        "do not wait for a saturated worker".to_string(),
+    )
+    .await
+    .expect_err("saturated guide should fail fast");
+
+    assert!(error.contains("too many pending guide requests"));
+    ACTIVE_WORKER_SESSIONS.remove(&session_key);
+}
+
+#[test]
+fn stale_run_session_cleanup_preserves_replacement_owner() {
+    let session_key = format!("replacement-session-{}", uuid::Uuid::new_v4());
+    let old_run_id = format!("old-run-{}", uuid::Uuid::new_v4());
+    let new_run_id = format!("new-run-{}", uuid::Uuid::new_v4());
+    ACTIVE_SESSIONS.insert(session_key.clone(), new_run_id.clone());
+
+    assert!(!remove_active_session_if_owned(&session_key, &old_run_id));
+    assert_eq!(
+        ACTIVE_SESSIONS
+            .get(&session_key)
+            .map(|entry| entry.value().clone()),
+        Some(new_run_id.clone())
+    );
+
+    assert!(remove_active_session_if_owned(&session_key, &new_run_id));
+    assert!(!ACTIVE_SESSIONS.contains_key(&session_key));
 }
 
 #[test]

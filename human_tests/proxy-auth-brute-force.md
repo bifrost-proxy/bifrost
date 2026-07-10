@@ -290,6 +290,55 @@ curl -s -o /dev/null -w "%{http_code}" -x http://127.0.0.1:8800 http://httpbin.o
 - 达到阈值后的下一次请求返回 `429 Too Many Requests`。
 - 429 响应包含 `Retry-After: 300` 和 `Too many failed authentication attempts`。
 
+### TC-PAB-13: Access Control 直达加载与全局开关禁用后账号持久化回归
+
+**操作步骤：**
+1. 执行真实 Chromium UI 回归：
+   ```bash
+   pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts \
+     --grep '重新挂载和保存后保留 CLI 账号与认证开关'
+   ```
+2. 用例先通过 Admin API 模拟 CLI 已创建一个启用账号，并设置全局认证和 localhost 认证为启用。
+3. 浏览器直接打开 `http://127.0.0.1:<UI_PORT>/_bifrost/settings?tab=access`，不点击其他 Settings tab，检查账号和两个开关；在 light/dark theme 下各检查一次。
+4. 离开 Settings 后从侧边栏返回 Access Control，关闭全局认证并保存；通过 API 检查账号、`has_password` 和 localhost 策略。
+5. 刷新直达 URL，重新检查账号和两个开关；再次启用全局认证并保存。
+6. 执行隔离数据目录的 CLI 与重启回归：
+   ```bash
+   BIFROST_DATA_DIR="$(mktemp -d)" BIFROST_DISABLE_TRAY=1 \
+     BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_userpass_loopback_e2e.sh
+   ```
+7. 观察 `Account CLI multi-account CRUD, real proxy traffic, and encrypted config` 场景中的 `account disable`、`account list --json`、`account enable` 和同一 data dir 重启断言。
+
+**预期结果：**
+- 直达 `?tab=access` 后无需切换 tab，已保存账号、全局开关和 localhost 开关立即显示正确。
+- light/dark theme 切换不会丢失或隐藏账号数据。
+- 全局认证关闭并保存后，API 与刷新后的 WebUI 仍保留账号、`has_password=true`、账号自身 enabled 状态和 localhost 策略。
+- 再次启用全局认证时无需重输密码，原账号继续存在。
+- CLI `account disable` 只改变 `.enabled=false`；`account list --json` 仍返回全部账号，随后 `account enable` 和服务重启后账号及加密密码仍可用。
+
+### TC-PAB-14: Access 账号配置写盘失败不切换运行时或内存快照
+
+**操作步骤：**
+1. 执行 ConfigManager 写盘失败回归：
+   ```bash
+   cargo test -p bifrost-storage \
+     config_manager::tests::test_update_access_config_write_failure_preserves_in_memory_config \
+     -- --nocapture
+   ```
+2. 用例先将 `config.toml` 替换为同名目录，强制后续持久化失败，再尝试同时修改 access mode、whitelist、LAN 开关和 userpass 账号。
+3. 复跑隔离数据目录的 userpass 真实 E2E：
+   ```bash
+   BIFROST_DATA_DIR="$(mktemp -d)" BIFROST_DISABLE_TRAY=1 \
+     BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_userpass_loopback_e2e.sh
+   ```
+
+**预期结果：**
+- 写盘失败返回错误，ConfigManager 的内存 access 快照保持原值，不广播一个未落盘的新状态。
+- Admin userpass 保存路径只有在持久化成功后才切换运行时认证策略；失败响应不会出现“当前进程已生效、重启后消失”的分叉。
+- 正常 CLI/Web 保存、全局 disable/enable、真实代理认证及重启恢复链路继续通过。
+
 ## 清理步骤
 
 ```bash
@@ -305,3 +354,5 @@ rm -rf ./.bifrost-test
 | --- | --- | --- |
 | TC-PAB-11 | PASS | 2026-07-10 修复 review 问题后执行 `BIFROST_DATA_DIR="$(mktemp -d)" BIFROST_DISABLE_TRAY=1 BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_userpass_loopback_e2e.sh`，输出 `Tests Run: 12`、`Tests Passed: 12`、`Tests Failed: 0`。除多账号 CRUD 与真实 HTTP 代理 200/407 外，新增 `prefix-user` 密码 `bifrost-local-secret:not-json`，确认 `config.toml` 不含该明文、`local_config_secret.key` 已生成；随后停止 target、移除 USER 系列变量后用同一 data dir 重启，prefix-user 仍真实认证返回 200。 |
 | TC-PAB-12 | PASS | 同一次 E2E 中 `HTTP Proxy brute-force limit and success reset` PASS，验证 5 次错误后正确凭证重置计数、9 次错误后正确凭证仍通过、10 次错误后的下一次请求返回 `429 Too Many Requests`，且响应包含 `Retry-After: 300` 与 `Too many failed authentication attempts`。 |
+| TC-PAB-13 | PASS | 2026-07-10 执行真实 Chromium Playwright 用例，初次 human test 输出 `1 passed (20.1s)`，第 1 轮修复后复跑输出 `1 passed (1.6m)`；直达 `?tab=access` 无需切 tab 即显示已有账号和两个开关，light/dark、离开再返回、global disable 保存、reload、再次 enable 全部通过。随后以隔离 data dir 重跑 userpass shell E2E，输出 `Tests Run: 12`、`Tests Passed: 12`、`Tests Failed: 0`，确认 CLI disable/list/enable 和重启均保留四个账号及加密密码。 |
+| TC-PAB-14 | PASS | 2026-07-10 第 3 轮全面 review 新增后立即执行写盘失败回归，`test_update_access_config_write_failure_preserves_in_memory_config` 输出 `1 passed`；用当前源码重新构建二进制后复跑隔离 userpass E2E，输出 `Tests Run: 12`、`Tests Passed: 12`、`Tests Failed: 0`，正常保存、CLI 多账号、global disable/enable、真实代理认证和重启恢复均通过。 |

@@ -810,6 +810,15 @@ pub enum AgentCommands {
         #[arg(long, help = "Output raw JSON instead of formatted Markdown")]
         json: bool,
     },
+    #[command(about = "Guide an active Codex or Traex runner turn")]
+    Guide {
+        #[arg(help = "Guidance message to append to the active turn")]
+        message: String,
+        #[arg(long, help = "Active session key returned or selected by agent run")]
+        session: String,
+        #[arg(long, help = "Output raw JSON")]
+        json: bool,
+    },
     #[command(hide = true, about = "Run isolated built-in agent worker over stdio")]
     Worker,
     #[command(hide = true, about = "Run isolated external runner worker over stdio")]

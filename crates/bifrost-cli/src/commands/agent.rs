@@ -37,6 +37,11 @@ pub fn handle_agent_command(
                 raw_json: json,
             },
         ),
+        AgentCommands::Guide {
+            message,
+            session,
+            json,
+        } => handle_agent_guide(host, port, &session, &message, json),
         AgentCommands::Worker => bifrost_admin::im_gateway::agent_worker::run_worker_stdio()
             .map_err(bifrost_core::BifrostError::Config),
         AgentCommands::ExternalRunnerWorker => {
@@ -44,6 +49,87 @@ pub fn handle_agent_command(
                 .map_err(bifrost_core::BifrostError::Config)
         }
     }
+}
+
+fn handle_agent_guide(
+    host: &str,
+    port: u16,
+    session: &str,
+    message: &str,
+    raw_json: bool,
+) -> Result<()> {
+    let session = session.trim();
+    let message = message.trim();
+    if session.is_empty() {
+        return Err(bifrost_core::BifrostError::Config(
+            "session cannot be empty".to_string(),
+        ));
+    }
+    if message.is_empty() {
+        return Err(bifrost_core::BifrostError::Config(
+            "guide message cannot be empty".to_string(),
+        ));
+    }
+    let url = format!(
+        "http://{}:{}{}/sessions/{}/guide",
+        host,
+        port,
+        CHAT_GATEWAY_API,
+        urlencoding::encode(session),
+    );
+    let response = bifrost_core::direct_ureq_agent()
+        .post(&url)
+        .send_json(json!({"message": message}))
+        .map_err(|error| {
+            bifrost_core::BifrostError::Network(format!(
+                "failed to guide active agent session '{session}': {error}"
+            ))
+        })?;
+    let value: Value = response.into_json().map_err(|error| {
+        bifrost_core::BifrostError::Parse(format!("failed to parse guide response: {error}"))
+    })?;
+    if raw_json {
+        println!(
+            "{}",
+            serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
+        );
+        return Ok(());
+    }
+    let delivery = value
+        .get("delivery")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    match delivery {
+        "steered" => {
+            let turn_id = value
+                .get("turnId")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            println!(
+                "{} Guided active turn {} (session={})",
+                "✓".bright_green(),
+                turn_id.bright_cyan(),
+                session,
+            );
+        }
+        "queued" => {
+            let reason = value
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("active turn could not accept guidance");
+            println!(
+                "{} Active turn could not be steered; queued for the next turn ({})",
+                "→".bright_yellow(),
+                reason,
+            );
+        }
+        _ => {
+            return Err(bifrost_core::BifrostError::Config(format!(
+                "unexpected guide delivery response: {value}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 struct AgentRunOptions<'a> {
@@ -479,6 +565,49 @@ mod tests {
         (port, handle)
     }
 
+    fn spawn_recording_http_server(body: &'static str) -> (u16, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut received = Vec::new();
+            let mut buf = [0u8; 1024];
+            let header_end = loop {
+                let n = stream.read(&mut buf).unwrap();
+                assert_ne!(n, 0, "request ended before headers");
+                received.extend_from_slice(&buf[..n]);
+                if let Some(pos) = received.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    break pos + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&received[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or_default();
+            while received.len().saturating_sub(header_end) < content_length {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                received.extend_from_slice(&buf[..n]);
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body,
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            String::from_utf8(received).unwrap()
+        });
+        (port, handle)
+    }
+
     #[test]
     fn handle_agent_run_rejects_empty_message() {
         let opts = AgentRunOptions {
@@ -494,6 +623,26 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("message cannot be empty"));
+    }
+
+    #[test]
+    fn handle_agent_guide_posts_encoded_session_and_message() {
+        let (port, handle) = spawn_recording_http_server(
+            r#"{"delivery":"steered","turnId":"turn-1","sessionKey":"team/a"}"#,
+        );
+
+        handle_agent_guide("127.0.0.1", port, "team/a", "focus on tests", true).unwrap();
+        let request = handle.join().unwrap();
+
+        assert!(request
+            .starts_with("POST /_bifrost/api/im-gateway/chat/sessions/team%2Fa/guide HTTP/1.1"));
+        assert!(request.contains(r#"{"message":"focus on tests"}"#));
+    }
+
+    #[test]
+    fn handle_agent_guide_rejects_empty_inputs_before_network() {
+        assert!(handle_agent_guide("127.0.0.1", 0, " ", "guide", true).is_err());
+        assert!(handle_agent_guide("127.0.0.1", 0, "session", " ", true).is_err());
     }
 
     #[test]

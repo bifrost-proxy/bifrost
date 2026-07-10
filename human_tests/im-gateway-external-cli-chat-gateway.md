@@ -698,21 +698,20 @@
 5. 连续多个工具调用默认合并为“已运行 N 条命令”的一级折叠组；展开该组后，单条工具仍保持折叠，用户可继续展开查看输入/输出。
 6. 模型公开 content 直接按时间顺序展示，不额外添加 `1.`、`2.`、`3.` 这类编号前缀。
 
-### TC-IEC-35: 外部 Runner 运行中消息默认排队并续接原生 thread
+### TC-IEC-35: 外部 Runner 运行中默认 Guide，显式 Queue 续接原生 thread
 
 操作步骤：
 1. 启动一个长时间运行的 Codex 或 Trae external runner session，确保同一 `sessionKey` 处于 active 状态。
-2. 在该 session 运行期间，从同一 IM 会话或 Web Chat session 再发送一条普通用户消息，不使用 `/stop`。
-3. 读取即时响应或 progress card 队列状态。
-4. 当前 run 完成后，读取下一轮 run 的 `runtime_snapshot.json`。
+2. 在该 session 运行期间，从同一 IM 会话发送一条普通用户消息，并从 Web Chat Guide 模式发送一条消息。
+3. 确认 app-server 收到当前 `threadId` / `turnId` 对应的 `turn/steer`；再发送 `/q <消息>` 或在 WebUI 选择 Queue。
+4. 读取即时响应或 progress card 队列状态；当前 run 完成后，读取显式排队消息下一轮 run 的 `runtime_snapshot.json`。
 5. 分别对 Codex 和 Trae runner 执行上述检查。
 
 预期结果：
-1. Codex 和 Trae 这类 external/custom runner 运行中不做 guide 注入；普通新消息默认进入排队队列。
+1. Codex 和 Trae 这类 app-server runner 的普通 busy 文本默认注入当前 turn；只有 `/q` 或 WebUI Queue 明确进入排队队列。
 2. `/stop` 仍作为控制命令立即尝试停止当前外部 runner，不作为普通排队消息。
-3. 当前 run 完成后自动处理下一条排队消息。
-4. Codex 下一轮使用已保存的 `threadId` 构造 `codex exec resume ... <threadId> -`。
-5. Trae 下一轮使用已保存的 `threadId` 构造 `traex exec resume ... <threadId> -`，不能退化为新建 `traex exec --json ... -`。
+3. 当前 run 完成后只自动处理显式排队或 Guide 失败降级的消息，成功注入的 Guide 不得重复执行下一轮。
+4. Codex/Traex 排队下一轮复用已保存的 `threadId`；app-server transport 使用 `thread/resume` 后再 `turn/start`，不能退化为新建 thread。
 
 ### TC-IEC-36: Agent Chat 外部 Runner 运行中交互与 Threads 面板回归
 
@@ -725,9 +724,9 @@
 6. 准备一个缺少 `runner_id` 但 `source` 或 `title` 包含 Trae/Traex 的 thread 摘要。
 
 预期结果：
-1. 运行中 external runner 不展示 `Guide` 切换或按钮，只展示 Queue 状态。
-2. 追加消息通过 `/q <message>` 进入队列，不以 guide 方式发送。
-3. 内置 Bifrost Agent 仍保留 Guide/Queue 切换和 guide 注入能力。
+1. 除 ChatGPT Web 外，运行中 external runner 展示 Guide/Queue，默认选中 Guide；ChatGPT Web 只展示 Queue。
+2. Guide 通过 `/g <message>` 请求注入当前 turn；切换 Queue 后通过 `/q <message>` 进入下一轮队列。
+3. 内置 Bifrost Agent 仍保留 Guide/Queue 切换和 guide 注入能力；控制响应不会错误结束主 turn。
 4. Threads 面板标题右侧按钮向右收起；收起后面板消失，只显示右上悬浮向左展开按钮。
 5. 折叠状态写入 `localStorage`，刷新页面后仍保持；展开后写回未折叠状态。
 6. Trae/Traex thread 的 runner 标记显示 Trae 短标（`Tr`），不误显示 `Bf`；明确 runner metadata 为 Bifrost Agent 的历史 thread 仍显示 `Bf`。
@@ -1169,8 +1168,130 @@
 6. `ChatImageInput` 转 `ExternalCliImageInput` 时保留多图顺序、MIME 和 base64 数据。
 7. E2E 首轮 run 的 `attachments.images` 同时包含 `hello.png` 与 `hello-two.jpg`，后续 run 不覆盖首轮图片文件。
 
+### TC-IEC-57: Codex/Traex 运行中向当前 turn 注入引导消息
+
+前置条件：
+
+1. 当前 worktree 已编译 `target/debug/bifrost`。
+2. Python 3 与 curl 可用；测试不依赖真实模型账号，使用实现完整 JSON-RPC 握手、`turn/steer` 与 token usage 通知的临时 app-server。
+
+操作步骤：
+
+1. 执行真实临时服务 E2E：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost \
+     e2e-tests/tests/test_external_runner_live_guide.sh
+   ```
+2. 脚本分别启动 Codex 与 Traex session，并在各自 `turn/start` 后执行：
+   ```bash
+   bifrost agent guide --session <session-key> --json "focus-<runner>"
+   ```
+3. 脚本读取 mock app-server 收到的 `turn/steer`、Chat stream 的 `run_finished`、run detail 的 snapshot/metadata，并对不存在的 session 调用 guide API。
+
+预期结果：
+
+1. Codex 和 Traex 默认或显式 `transport=app_server` 均通过独立 `bifrost-runner` worker 启动 stdio app-server；Codex 使用 `app-server --stdio`，Traex 使用其版本支持的 `app-server --listen stdio://`。
+2. CLI 返回 `delivery=steered`，`threadId`、`turnId` 与当前 app-server turn 一致。
+3. app-server 收到 `turn/steer`，包含当前 `threadId`、`expectedTurnId`、唯一 `clientUserMessageId` 和引导文本；引导不会启动第二个 CLI 进程或新 turn。
+4. 原 stream 在同一 turn 内返回引导后的最终答案，run 状态为 `succeeded`。
+5. run detail 的 snapshot 为对应 CLI 的 stdio app-server 参数，metadata 持久化 `threadId` 和 input/output/total token usage。
+6. 非活动 session 返回 HTTP 409 和 `delivery=rejected`，不会静默创建任务。
+7. 脚本退出时停止临时 Bifrost 并删除临时数据目录、mock executable 和日志。
+
+### TC-IEC-58: IM 与 WebUI 统一运行中 Guide/Queue 语义
+
+前置条件：
+
+1. 当前 worktree 已编译 `target/debug/bifrost`。
+2. Python 3、curl、pnpm 与 Playwright 浏览器可用；真实服务 E2E 使用隔离数据目录和 mock app-server，不修改本机 `9900` 服务。
+
+操作步骤：
+
+1. 执行 busy mode、IM help 和 Guide 失败降级不丢消息的 Rust 回归：
+   ```bash
+   cargo test -p bifrost-admin busy_message_mode --lib
+   cargo test -p bifrost-admin im_help_for_ --lib
+   cargo test -p bifrost-admin guide_stream_falls_back_to_queue_without_losing_message --lib
+   ```
+2. 执行真实临时服务 E2E：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost \
+     e2e-tests/tests/test_external_runner_live_guide.sh
+   ```
+3. 执行 WebUI 运行中输入回归：
+   ```bash
+   pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts \
+     -g "(defaults external runners to Guide|keeps ChatGPT Web running input|supports running stop, guide)"
+   ```
+
+预期结果：
+
+1. 飞书 IM 的 Codex、Traex、Claude Code 与其他非 ChatGPT Web runner 在 session 忙碌时，普通消息默认按 Guide 处理；只有 `/q <消息>` 明确加入下一轮队列。
+2. Codex/Traex app-server 收到 `turn/steer`，引导文本只进入当前 turn，不会因等待 steer ACK 阻塞 runner 控制循环，也不会在成功 steer 后再次作为下一轮执行。
+3. `/q queue-explicit` 不进入 `turn/steer`；当前 turn 结束后只执行一次排队消息，文本和顺序保持不变。
+4. runner 拒绝 Guide、控制通道失败或不支持 live guide 时，原消息明确降级排队，队列中仍保留完整文本。
+5. Agent Chat WebUI 在 Codex/Traex/Claude Code 与自定义 runner 运行中默认选中 Guide，发送 `/g <消息>`；切换 Queue 后发送 `/q <消息>`，控制回执不会错误结束主 turn 或被陈旧 thread summary 覆盖。
+6. ChatGPT Web 运行中不显示 Guide，只显示 Queue，并发送 `/q <消息>`；内置 Bifrost Agent 原有 Guide/Queue/Stop/移除队列行为不回归。
+
+### TC-IEC-59: 同一 session 替代运行不会被旧 run 清理引导通道
+
+操作步骤：
+
+1. 执行 app-server 会话所有权回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     'im_gateway::external_cli::app_server::tests::stale_app_server_cleanup_preserves_replacement_session_owner' \
+     --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     'im_gateway::external_cli::app_server::tests::app_server_registration_rejects_stale_run_ownership' \
+     --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     'im_gateway::external_cli::tests::stale_run_session_cleanup_preserves_replacement_owner' \
+     --lib -- --nocapture
+   ```
+2. 复跑真实临时服务 live-guide E2E：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost \
+     e2e-tests/tests/test_external_runner_live_guide.sh
+   ```
+
+预期结果：
+
+1. 同一 session 的新 run 注册后，旧 run 的 cleanup 只能按自身 `run_id` 条件删除，不能移除新 run 的 app-server handle。
+2. 已失去 session 所有权的旧 run 不能晚到注册 handle。
+3. `ACTIVE_SESSIONS` 的旧 owner 清理不能删除同 session 的替代 owner。
+4. Codex/Traex 当前 turn 的真实 guide、拒绝和 exec queue fallback 链路继续通过。
+
+### TC-IEC-60: Guide 控制通道饱和时有界降级
+
+操作步骤：
+
+1. 执行 worker control channel 饱和回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     worker_guide_rejects_saturated_control_channel_without_waiting \
+     --lib -- --nocapture
+   ```
+2. 复跑 Guide 失败降级不丢消息回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     guide_stream_falls_back_to_queue_without_losing_message \
+     --lib -- --nocapture
+   ```
+
+预期结果：
+
+1. worker control channel 最多缓存 32 条控制请求，单 run 最多保留 32 条未确认 Guide。
+2. 通道已满时新 Guide 立即返回 `too many pending guide requests`，不等待 20 秒 ACK timeout，也不继续增长内存。
+3. 上层收到该错误后把完整原消息降级到 FIFO Queue；Stop 在饱和 channel 上仍有直接终止 worker 的兜底。
+
 ## 最近执行记录
 
+- 2026-07-10：第 4 轮性能 review 新增并立即执行 TC-IEC-60。`worker_guide_rejects_saturated_control_channel_without_waiting` 与 `guide_stream_falls_back_to_queue_without_losing_message` 均输出 `1 passed`；同时复跑 `external_worker_`，陈旧 channel 不误杀 PID 与已 ACK Stop 不追加 kill 两项均通过。确认控制通道饱和时 Guide 快速返回上限错误，上层仍保留完整消息进入 Queue，且 Stop 的 PID reuse 安全边界未被有界通道改造破坏。
+- 2026-07-10：第 3 轮全面 review 新增并立即执行 TC-IEC-59。`stale_app_server_cleanup_preserves_replacement_session_owner`、`app_server_registration_rejects_stale_run_ownership` 与 `stale_run_session_cleanup_preserves_replacement_owner` 均通过，app-server 模块合计 `9 passed`；确认旧 run cleanup 按 `run_id` 条件删除、失去所有权的 run 不能晚到注册，且 `ACTIVE_SESSIONS` 的旧 owner 不能删除替代 owner。随后用当前源码重新构建 `target/debug/bifrost`，执行 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_external_runner_live_guide.sh` 输出 `[external-runner-live-guide] PASS`。
+- 2026-07-10：新增并立即执行 TC-IEC-58。三个 focused Rust 命令分别通过 `10/10`、`2/2`、`1/1`；`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_external_runner_live_guide.sh` 通过，真实临时服务验证 Codex/Traex Web steer、飞书 IM 普通消息默认 steer、`/q queue-explicit` 只在当前 turn 完成后执行一次、`/g release-queue` 注入当前 turn、拒绝/exec transport 明确降级队列且原消息不丢失；Playwright 三组运行中输入用例 `3/3` 通过，覆盖非 ChatGPT Web runner 默认 Guide、显式 Queue、ChatGPT Web 仅 Queue，以及内置 Runner Stop/Guide/Queue/移除队列回归。定位并修复了 IM handler 等待 Guide ACK 时暂停 runner control future 导致 20 秒自锁、成功 steer 后又错误排队重复执行的问题。
+- 2026-07-10：第 2 轮 review 后执行真实本机 CLI 兼容验证。`RUN_REAL_CODEX_E2E=1 SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost BIFROST_CODEX_BIN=$(command -v codex) e2e-tests/tests/test_im_gateway_codex_runner_streaming.sh` 通过，run `1783652710170-bb55ada8-78f5-42a3-9c21-8f695aa8dbfc` 使用 Codex stdio app-server 并持久化真实 thread/token usage；`RUN_REAL_TRAEX_E2E=1 SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost BIFROST_TRAEX_BIN=$(command -v traex) e2e-tests/tests/test_im_gateway_traex_runner_streaming.sh` 通过，run `1783652721440-28607fc3-acd3-46a4-b79e-a67aed22ef06` 验证当前 Traex 需要 `app-server --listen stdio://` 且真实返回最终答案、thread/token usage。Codex 真实模型本轮没有执行提示要求的 `pwd` 工具，因此真实脚本只在模型实际产生 tool event 时断言 started/finished 成对与顺序；无条件工具事件映射由 deterministic mock app-server E2E 断言。
+- 2026-07-10：新增并立即执行 TC-IEC-57；第 2 轮 review 扩展拒绝与 exec 回退后再次执行。命令 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_external_runner_live_guide.sh` 通过；脚本用隔离数据目录启动真实 Bifrost 服务与 mock JSON-RPC/exec 进程，Codex/Traex 的 `bifrost agent guide` 都返回 `delivery=steered`，mock 收到带正确 `expectedTurnId`、唯一 `clientUserMessageId` 和 guide text 的 `turn/steer`，原 stream 在同一 turn 返回 `GUIDED_codex` / `GUIDED_traex`。run detail 断言 Codex snapshot 为 `app-server --stdio`、Traex 为 `app-server --listen stdio://`，metadata 持久化 thread id 与 `11/7/18` input/output/total token；app-server 明确拒绝 steer 和显式 `transport=exec` 两种场景都返回 `delivery=queued` 并在首轮后执行第二轮；不存在的 session 返回 HTTP 409 `delivery=rejected`，脚本清理临时服务和数据。
 - 2026-07-08：新增并执行 TC-IEC-56 的本地回归。执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin test_normalize_feishu_post_extracts_text_and_images --lib -- --nocapture`、`external_cli_run_writes_image_attachments_and_injects_prompt_paths`、`im_event_loop_external_cli_route_processes_image_only_message`、`test_queue_preserves_image_attachments`、`external_cli_images_from_chat_images_preserves_payloads` 均通过；执行 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_im_gateway_external_runner_image_input.sh` 通过，临时服务端口 `65211`，首轮 run `1783470749961-9783d1b6-20b8-4561-bd6e-fe7a486cec7b` 同时写入 `image-1.png` 与 `image-2.jpg`，后续单图 run `1783470750022-a7838ec2-5729-4fc0-8770-27c13c784918` 未覆盖首轮图片，Traex 兼容 run `1783470750145-e362365a-a1b6-4a44-bd8d-ea7b8f49f7ea` 与 runner-call run `1783470750275-68429b1e-41eb-45d4-b830-5b6b02623dcd` 均保留图片附件。
 - 2026-06-26：追加执行 TC-IEC-55 的真实 Web UI 即时切模型回归。修复前在未刷新页面直接发送 `/model` 会先插入 `content:""` 的 system 占位，DOM 中出现空白系统胶囊，并且系统提示是有边框/背景的大号气泡。修复后执行 `pnpm --dir web run build`、`pnpm --dir web run test:unit -- AgentChatSection --run`、`cargo build --bin bifrost` 均通过；覆盖重启 `9900`，PID `87418`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。真实浏览器打开 `admin-chat-direct-system-check-1782409300`，先刷新确认新 bundle 生效，再发送 `/model GPT-5.5`：DOM 返回 `emptySystemCount=0`，最后一条 system 文本为 `切换模型为 GPT-5.5`，`agent-chat-message-bubble-system` 样式为 `borderWidth:0px`、`borderStyle:none`、`backgroundColor:rgba(0, 0, 0, 0)`、`fontSize:11px`、`lineHeight:18px`、`flexDirection:row`、`gap:8px`。刷新后再次确认 `emptySystemCount=0`、`hasLatestSwitch=true`、普通对话文本仍存在，HUD 显示 `Model GPT-5.5 (trae)`。
 - 2026-06-26：执行 TC-IEC-55 的真实 9900 回归。先确认问题根因：`session_state.json` 中 `admin-chat-direct-system-check-1782409300::traex::Traex` 已持久化多条 `role:"system"` 模型切换消息，但 session detail 主路径先从 canonical JSONL 读到 user/assistant timeline 后，只合并 external runner metadata，没有把 external state 的 system display messages 合并回 `messages`，导致刷新后系统提示丢失。修复后执行 `cargo test -p bifrost-admin handlers::im_gateway::agent_api::tests::session_detail_metadata_merge_preserves_external_system_display_messages -- --nocapture` 通过；执行 `cargo build --bin bifrost` 后覆盖重启 `9900`，PID `46889`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。API 验证 `/_bifrost/api/im-gateway/agent/sessions/admin-chat-direct-system-check-1782409300` 返回 `message_count=11`，包含 5 条 `role:"system"` 的 `切换模型为 ...` 消息，同时保留 `你好`、`你是谁` 等 user/assistant 对话。真实 Edge/Playwright 打开同一 URL 并刷新，DOM 中 `agent-chat-message-system` 数量为 5，页面文本同时包含 `切换模型为 Kimi-K2.6`、`切换模型为 GPT-5.5`、`你好`、`你是谁`，HUD 显示 `Model Kimi-K2.6 (trae)`。

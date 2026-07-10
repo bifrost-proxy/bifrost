@@ -390,4 +390,19 @@ mod tests {
 
         assert!(format!("{err}").contains("already exists"));
     }
+
+    #[test]
+    fn global_disable_preserves_accounts_password_markers_and_loopback_policy() {
+        let mut current = sample_userpass();
+        current.loopback_requires_auth = true;
+
+        let req = set_userpass_enabled(current, false);
+
+        assert!(!req.enabled);
+        assert!(req.loopback_requires_auth);
+        assert_eq!(req.accounts.len(), 1);
+        assert_eq!(req.accounts[0].username, "alice");
+        assert_eq!(req.accounts[0].password, None);
+        assert!(req.accounts[0].enabled);
+    }
 }

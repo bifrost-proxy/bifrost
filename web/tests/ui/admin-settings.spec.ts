@@ -198,6 +198,137 @@ test("Settings 访问控制支持模式切换、白名单、临时白名单和 L
   await expect(page.getByTestId("settings-temp-whitelist-table")).toContainText("10.0.0.2");
 });
 
+test("Settings 访问控制重新挂载和保存后保留 CLI 账号与认证开关", async ({
+  page,
+  request,
+}) => {
+  const username = uniqueName("ui-persist-account");
+  const saved = await request.put(`${apiBase}/whitelist/userpass`, {
+    data: {
+      enabled: true,
+      accounts: [
+        {
+          username,
+          password: "ui-persist-secret",
+          enabled: true,
+        },
+      ],
+      loopback_requires_auth: true,
+    },
+  });
+  expect(saved.ok()).toBe(true);
+
+  await openPage(page, "settings?tab=access");
+  await expect(page.getByRole("tab", { name: /Access Control/, exact: false })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(
+    page.getByTestId(`settings-access-userpass-username-${username}`),
+  ).toHaveValue(username);
+  await expect(page.getByTestId("settings-access-userpass-enabled")).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await expect(page.getByTestId("settings-access-loopback-requires-auth")).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(
+    page.getByTestId(`settings-access-userpass-username-${username}`),
+  ).toHaveValue(username);
+
+  await page.locator('[data-testid="app-sidebar-nav-item"][data-nav-label="Activity"]').click();
+  await page.locator('[data-testid="app-sidebar-nav-item"][data-nav-label="Settings"]').click();
+  await page.getByRole("tab", { name: /Access Control/ }).click();
+
+  await expect(
+    page.getByTestId(`settings-access-userpass-username-${username}`),
+  ).toHaveValue(username);
+  await expect(page.getByTestId("settings-access-userpass-enabled")).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await expect(page.getByTestId("settings-access-loopback-requires-auth")).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+
+  await page.getByTestId("settings-access-userpass-enabled").click();
+  await expect(page.getByTestId("settings-access-userpass-enabled")).toHaveAttribute(
+    "aria-checked",
+    "false",
+  );
+  await page.getByTestId("settings-access-userpass-save-button").click();
+  await waitForToast(page, "Updated user/password proxy authentication");
+  await expect
+    .poll(async () => {
+      const response = await request.get(`${apiBase}/whitelist`);
+      const status = (await response.json()) as {
+        userpass: {
+          enabled: boolean;
+          loopback_requires_auth: boolean;
+          accounts: Array<{ username: string; has_password: boolean }>;
+        };
+      };
+      return {
+        enabled: status.userpass.enabled,
+        loopbackRequiresAuth: status.userpass.loopback_requires_auth,
+        accounts: status.userpass.accounts.map((account) => ({
+          username: account.username,
+          hasPassword: account.has_password,
+        })),
+      };
+    })
+    .toEqual({
+      enabled: false,
+      loopbackRequiresAuth: true,
+      accounts: [{ username, hasPassword: true }],
+    });
+
+  await page.reload();
+  await expect(page).toHaveURL(/settings\?tab=access/);
+  await expect(
+    page.getByTestId(`settings-access-userpass-username-${username}`),
+  ).toHaveValue(username);
+  await expect(page.getByTestId("settings-access-userpass-enabled")).toHaveAttribute(
+    "aria-checked",
+    "false",
+  );
+  await expect(page.getByTestId("settings-access-loopback-requires-auth")).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+
+  await page.getByTestId("settings-access-userpass-enabled").click();
+  await page.getByTestId("settings-access-userpass-save-button").click();
+  await waitForToast(page, "Updated user/password proxy authentication");
+  await expect
+    .poll(async () => {
+      const response = await request.get(`${apiBase}/whitelist`);
+      const status = (await response.json()) as {
+        userpass: {
+          enabled: boolean;
+          accounts: Array<{ username: string; has_password: boolean }>;
+        };
+      };
+      return {
+        enabled: status.userpass.enabled,
+        accounts: status.userpass.accounts.map((account) => ({
+          username: account.username,
+          hasPassword: account.has_password,
+        })),
+      };
+    })
+    .toEqual({
+      enabled: true,
+      accounts: [{ username, hasPassword: true }],
+    });
+});
+
 test("Settings 性能配置在第二个页面主动刷新后可见", async ({
   page,
   context,

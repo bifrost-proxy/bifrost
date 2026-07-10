@@ -5,9 +5,9 @@
 IM Gateway 消息处理的两种模式，用于处理 Agent 正在处理中（session busy）时用户发来的新消息：
 
 - **引导模式（内置 Bifrost Agent 默认）**：用户直接发送消息，消息被注入到 guide channel 中，在当前工具调用批次结束后追加到对话历史，进入下一个模型循环。多条尚未进入 loop 的引导消息会按到达顺序保留，并在消费时合并成一条 user message。
-- **排队模式**（`/q <消息>` 或自定义 Runner 默认）：消息加入 FIFO 队列，每个 turn/run 完成后按顺序处理队列消息。最多排队 10 条。ChatGPT Web、Codex 和其他自定义 Runner 在 busy 时默认走排队，因为运行中没有内置 Agent 的 guide checkpoint；这些 Runner 收到 `/g <消息>` 时也会明确降级为排队消息。
+- **排队模式**（`/q <消息>` 或 ChatGPT Web 默认）：消息加入 FIFO 队列，每个 turn/run 完成后按顺序处理队列消息。最多排队 10 条。Codex/Traex app-server 与其他非 ChatGPT Web Runner 在 busy 时默认先尝试 live guide；不支持、拒绝或超时才明确降级排队并保留原消息和附件。
 - **删除排队**（`/rq <序号>`）：通过序号删除指定的排队消息。
-- **Codex Runner 接续**：当前 Codex CLI 支持 `codex exec resume <thread_id> [PROMPT]` 做下一轮接续，但不支持运行中追加 guide；因此 busy 期间仍排队，队列 drain 时复用上一轮 `threadId` 接续同一个 Codex session。
+- **Codex Runner 接续**：Codex app-server 使用 `turn/steer` 追加当前 turn 引导；显式 `/q` 或 Guide 降级后的消息在 queue drain 时复用上一轮 `threadId` 接续同一个 Codex session。
 
 核心组件：
 - `SessionQueueManager`：管理引导通道和排队队列
@@ -91,7 +91,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
   1. `/q <text>` — 调用 `queue_manager.push_queue()` 并回复队列状态
   2. `/rq <N>` — 调用 `queue_manager.remove_queue()` 并回复更新后的队列状态
   3. 内置 Bifrost Agent 默认 — 调用 `queue_manager.inject_guide()` 注入引导消息
-  4. ChatGPT Web / Codex / 自定义 Runner 默认 — 调用 `queue_manager.push_queue()` 排队等待当前 run 结束
+  4. 非 ChatGPT Web Runner 默认 — 请求 active worker Guide，失败后调用 `queue_manager.push_queue()`；ChatGPT Web 直接排队等待当前 run 结束
 
 ### TC-GQ-06: run_agent_chat_with_interleave 使用 tokio::select! 交错处理
 
@@ -220,21 +220,20 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
 - **回归执行记录（2026-06-02）**: PASS — CI run `26798673764` 的 macOS aarch64 shell shard 暴露隔离 worker handoff 后 `/status` 返回 `pending_guide_messages: []`。修复后执行 `source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_gateway::queue_manager::tests::test_guide_status_includes_worker_handoff_snapshot` 通过，验证 handed-off guide 快照清理边界；执行 `source ~/.zshrc && SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_E2E_HTTP_RETRIES=2 bash e2e-tests/tests/test_im_guide_queue_human_api.sh` 通过，验证真实 Bifrost + mock inbound 链路中默认 IM 消息仍作为 pending guide 展示并被 worker 消费。
 - **回归执行记录（2026-06-02）**: PASS — CI run `26813811064` 的 macOS aarch64 shell shard 3 暴露内置 IM Agent active turn 阻塞在隔离 worker/mock model 时，主进程只等待 worker event，没有监听 guide channel notification，导致 busy 普通 IM 消息已经进入 pending guide 但未及时转发给 worker，脚本失败于 `default IM inbound guide was not consumed by the active loop`。修复后 `process_agent_chat()` 在 worker wait loop 中同时监听 guide notification，收到 guide 后立即 drain、记录 handed-off snapshot 并发送 worker `Guide` 命令；执行 `source ~/.zshrc && SKIP_FRONTEND_BUILD=1 BIFROST_E2E_HTTP_RETRIES=2 bash e2e-tests/tests/test_im_guide_queue_human_api.sh` 通过，验证真实 Bifrost + mock inbound 链路中默认 IM 消息会被及时转发并被 active loop 消费。
 
-### TC-GQ-16: 自定义 Runner busy 普通 IM 消息默认进入 queue，Codex 用 resume 接续
+### TC-GQ-16: 外部 Runner busy 默认 Guide，ChatGPT Web 与失败路径进入 queue
 
 - **操作步骤**:
   ```bash
-  cargo test -p bifrost-admin busy_default_mode_is_queue_for_custom_runner --lib
+  cargo test -p bifrost-admin busy_default_mode_guides_external_runners_except_chatgpt_web --lib
   cargo test -p bifrost-admin apply_busy_message_default_queues_custom_runner_messages --lib
   cargo test -p bifrost-admin codex_runner_metadata_resumes_queued_messages_after_current_run --lib
   cargo test -p bifrost-admin codex_runner_metadata_does_not_override_explicit_thread --lib
-  codex exec --help | sed -n '1,120p'
-  codex exec resume --help | sed -n '1,120p'
+  SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_external_runner_live_guide.sh
   ```
 - **预期结果**:
-  - `runner = "codex"`、`runner = "chatgpt-web"` 或其他自定义 runner 时 busy 默认策略为 queue。
-  - 普通消息进入 FIFO queue，不进入 guide；`/g <消息>` 不会伪装成运行中 guide，而是明确作为 queue 处理。
-  - Codex CLI help 只展示 `exec`/`resume` 的 prompt/stdin 接续能力，没有运行中追加 guide 的命令。
+  - `runner = "codex"`、`"traex"`、`"claude_code"` 或其他非 ChatGPT Web runner 时 busy 默认策略为 ExternalGuide；ChatGPT Web 为 Queue。
+  - 普通消息与 `/g <消息>` 尝试注入 active worker；不支持、拒绝或超时则完整进入 FIFO queue，`/q` 始终直接排队。
+  - Codex/Traex app-server 接收 `turn/steer`，并在等待 ACK 时保持 runner control future 持续运行。
   - 上一轮 Codex result metadata 中的 `threadId` 会注入下一条排队消息的 request params；显式传入的 `threadId` 不会被覆盖。
 - **执行记录（2026-05-21）**: PASS — 执行 `cargo test -p bifrost-admin busy_default_mode --lib`、`cargo test -p bifrost-admin apply_busy_message_default --lib`、`cargo test -p bifrost-admin codex_runner_metadata --lib`、`codex exec --help` 和 `codex exec resume --help`。本机 Codex CLI `0.132.0` 显示 `exec` 只接收初始 prompt/stdin，`resume` 支持按 session/thread 接续下一轮；未发现运行中追加 guide 的 CLI 命令。
 

@@ -50,6 +50,16 @@ fn root_help_is_short_and_links_to_docs() {
 }
 
 #[test]
+fn agent_guide_help_exposes_live_turn_arguments() {
+    let help = run_help(&["agent", "guide"]);
+
+    assert!(help.contains("Guide an active Codex or Traex runner turn"));
+    assert!(help.contains("--session"));
+    assert!(help.contains("Guidance message to append to the active turn"));
+    assert!(help.contains("--json"));
+}
+
+#[test]
 fn port_help_explains_multi_port_model() {
     let help = run_help(&["port"]);
     for snippet in &[

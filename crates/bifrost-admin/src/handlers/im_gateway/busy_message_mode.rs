@@ -19,6 +19,7 @@ pub(super) struct BusyMessageContext<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum BusyMessageDefaultMode {
     Guide,
+    ExternalGuide,
     Queue,
 }
 
@@ -34,16 +35,29 @@ pub(super) enum BusyMessageDefaultResult {
 
 pub(super) fn busy_default_mode_for_agent_config(
     agent_config: &crate::im_gateway::agent::ImAgentConfig,
+    external_cli_config: &crate::im_gateway::external_cli::ExternalCliGatewayConfig,
+    provider_id: Option<&str>,
 ) -> BusyMessageDefaultMode {
-    if agent_config
+    let Some(runner_id) = agent_config
         .runner
         .as_ref()
         .and_then(|runner| runner.custom_runner_id())
-        .is_some()
-    {
+    else {
+        return BusyMessageDefaultMode::Guide;
+    };
+    let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
+        external_cli_config,
+        provider_id,
+        Some(runner_id),
+    );
+    busy_default_mode_for_external_adapter(&effective.settings.adapter)
+}
+
+pub(super) fn busy_default_mode_for_external_adapter(adapter: &str) -> BusyMessageDefaultMode {
+    if adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
         BusyMessageDefaultMode::Queue
     } else {
-        BusyMessageDefaultMode::Guide
+        BusyMessageDefaultMode::ExternalGuide
     }
 }
 
@@ -63,7 +77,7 @@ pub(super) fn apply_busy_message_default(
             let pending_count = queue_manager.inject_guide(session_key, message.to_string());
             Ok(BusyMessageDefaultResult::Guide { pending_count })
         }
-        BusyMessageDefaultMode::Queue => queue_manager
+        BusyMessageDefaultMode::ExternalGuide | BusyMessageDefaultMode::Queue => queue_manager
             .push_queue(session_key, message.to_string())
             .map(|items| BusyMessageDefaultResult::Queue { items }),
     }
@@ -74,6 +88,61 @@ pub(super) async fn handle_busy_guide_command(
     session_key: &str,
     ctx: &BusyMessageContext<'_>,
 ) {
+    if ctx.default_mode == BusyMessageDefaultMode::ExternalGuide {
+        let guide_id = format!("guide-{}", uuid::Uuid::new_v4());
+        match crate::im_gateway::external_cli::request_worker_session_guide(
+            session_key,
+            guide_id,
+            guide_text.to_string(),
+        )
+        .await
+        {
+            Ok(result) if result.accepted => {
+                info!(
+                    session_key = %session_key,
+                    thread_id = ?result.thread_id,
+                    turn_id = ?result.turn_id,
+                    guide_msg_len = guide_text.len(),
+                    "guide message steered into active external runner turn"
+                );
+                let reply = "🔀 已注入当前 Runner turn，将在当前工具调用完成后生效";
+                let updated = ctx
+                    .progress_registry
+                    .update_queue_state(
+                        session_key,
+                        ctx.queue_manager.queue_status(session_key),
+                        false,
+                        Some(format!("已收到引导：{}", truncate_str(guide_text, 48))),
+                    )
+                    .await;
+                if !updated {
+                    send_agent_reply(
+                        ctx.client,
+                        ctx.provider,
+                        ctx.event,
+                        reply,
+                        ctx.message_log_store,
+                    )
+                    .await;
+                }
+                return;
+            }
+            Ok(result) => {
+                warn!(
+                    session_key = %session_key,
+                    reason = ?result.reason,
+                    "active external runner rejected guide; falling back to queue"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    session_key = %session_key,
+                    error = %error,
+                    "active external runner guide request failed; falling back to queue"
+                );
+            }
+        }
+    }
     match apply_busy_message_default(ctx.queue_manager, session_key, guide_text, ctx.default_mode) {
         Ok(BusyMessageDefaultResult::Guide {
             pending_count: pending_guide_count,
@@ -177,7 +246,20 @@ pub(super) async fn handle_busy_default_message(
         .await;
         return;
     }
-    if ctx.default_mode == BusyMessageDefaultMode::Queue {
+    if ctx.default_mode == BusyMessageDefaultMode::ExternalGuide
+        && ctx
+            .event
+            .message
+            .as_ref()
+            .is_none_or(|event_message| event_message.images.is_empty())
+    {
+        handle_busy_guide_command(message, session_key, ctx).await;
+        return;
+    }
+    if matches!(
+        ctx.default_mode,
+        BusyMessageDefaultMode::ExternalGuide | BusyMessageDefaultMode::Queue
+    ) {
         let images = match ctx.event.message.as_ref() {
             Some(event_message) if !event_message.images.is_empty() => {
                 resolve_event_images(ctx.client, ctx.provider, ctx.event, &event_message.images)
@@ -191,20 +273,35 @@ pub(super) async fn handle_busy_default_message(
         {
             Ok(items) => {
                 let guide_pending = !ctx.queue_manager.guide_status(session_key).is_empty();
+                let status_message = if ctx.default_mode == BusyMessageDefaultMode::ExternalGuide {
+                    format!(
+                        "运行中引导暂不支持图片，已保留附件并排队：{}",
+                        truncate_str(message, 48)
+                    )
+                } else {
+                    format!("消息已排队：{}", truncate_str(message, 48))
+                };
                 let updated = ctx
                     .progress_registry
                     .update_queue_state(
                         session_key,
                         items.clone(),
                         guide_pending,
-                        Some(format!("消息已排队：{}", truncate_str(message, 48))),
+                        Some(status_message),
                     )
                     .await;
                 if !updated {
-                    let reply = format!(
-                        "✅ 消息已收到，将在当前任务完成后处理（排队 {} 条）",
-                        items.len()
-                    );
+                    let reply = if ctx.default_mode == BusyMessageDefaultMode::ExternalGuide {
+                        format!(
+                            "⚠️ 运行中引导暂不支持图片，已保留附件并排队（排队 {} 条）",
+                            items.len()
+                        )
+                    } else {
+                        format!(
+                            "✅ 消息已收到，将在当前任务完成后处理（排队 {} 条）",
+                            items.len()
+                        )
+                    };
                     send_agent_reply(
                         ctx.client,
                         ctx.provider,

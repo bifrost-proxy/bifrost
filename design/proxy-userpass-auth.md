@@ -20,6 +20,8 @@ Bifrost 原始访问控制是纯 IP 维度的 `ClientAccessControl`，只有 `al
 - `loopback_requires_auth=false`（默认）时本机免密；`=true` 时本机也需要鉴权。
 - CLI 提供账号级管理入口：`bifrost account list/add/update/remove/enable/disable/set-loopback-auth`，避免用户手写 `access.userpass.accounts` JSON。
 - `config.toml` 不保存明文账号密码；读取配置时自动解密，保存配置时自动加密或迁移旧明文。
+- 全局 `enabled` 只控制鉴权策略，不控制账号数据生命周期；WebUI 或 CLI 关闭全局认证时必须保留账号、密码 envelope、账号自身 enabled 状态和 loopback 策略，只有显式删除账号才移除持久数据。
+- Web Access Control 在 server status 已先于 tab 挂载到达时，必须直接用该 status 初始化草稿；离开页面再返回、刷新、保存或收到无关 settings push 都不能用默认空草稿覆盖已保存账号。
 
 ### 必须不破坏
 
@@ -214,6 +216,8 @@ API：
 - Store：`web/src/stores/useWhitelistStore.ts`。
 - 展示：enabled 开关、loopback toggle、账号列表（username/password/enabled/last_connected_at）。
 - 密码只写不显；`has_password=true` 显示为 `••••••`。
+- userpass 草稿首次挂载直接从现有 server status 初始化；后续仅在 userpass 服务端快照实际变化时同步，避免无关 whitelist/pending push 覆盖尚未保存的表单。
+- 关闭 “Enable User/Password Auth” 后仍展示并保存账号列表；重新启用时复用原账号密码，不要求重新录入。
 
 ### CLI（shipped）
 
@@ -291,11 +295,14 @@ Rust E2E `crates/bifrost-e2e/src/tests/userpass_auth.rs`：
 Shell E2E `e2e-tests/tests/test_userpass_loopback_e2e.sh`：
 
 - `test_userpass_config_api`
+- `test_account_cli_multi_account_traffic_and_encrypted_config` 覆盖 `account disable/enable` 全局切换不删除账号或密码。
 - `test_loopback_no_auth_default`
 - `test_loopback_with_auth_also_works`
 - `test_loopback_requires_auth_on_returns_407_without_creds`
 
 真人回归 `human_tests/proxy-auth-brute-force.md` 覆盖失败限流场景；`human_tests/api-whitelist.md` 覆盖 admin API + Web 配置。
+
+Playwright `web/tests/ui/admin-settings.spec.ts` 覆盖 API/CLI 账号已存在时 Access Control tab 的首次挂载、离开后重新挂载、全局 disable 保存、页面 reload 和再次 enable，确保账号与 `has_password` 始终保留。
 
 ## Review/Fix/Test 闭环
 
@@ -317,6 +324,8 @@ Shell E2E `e2e-tests/tests/test_userpass_loopback_e2e.sh`：
 - **下游凭证泄露**：统一转发前清洗；单元测试锁死 `proxy-authorization` 不在 upstream 出现。
 - **明文密码回显**：所有读接口只返回 `has_password`；push、CLI show/export、Web 都不返回密码。
 - **多账号重名**：写入强制 username 唯一；运行时状态以 username 为键，避免额外内部 id。
+- **全局 disable 误删账号**：`enabled=false` 与 `accounts` 正交；CLI/WebUI 切换全局策略必须回传并保留现有账号，E2E 锁定 disable → list/reload → enable 往返。
+- **Web 空草稿覆盖**：组件可能在 Zustand 已收到 status 后才挂载；初始 state 必须来自当前 userpass snapshot，且同步依据 userpass 内容签名而不是整个 status 对象身份。
 - **`last_connected_at` 写盘频率**：仅在鉴权成功时写，去抖同一秒重复成功只写一次；使用 `state.json` 而非 `config.json`，避免主配置被高频改写。
 - **`server.socks5_auth` 冲突**：优先 `access.userpass`；若两者同时存在，日志 warn 并以 `access.userpass` 为准。
 

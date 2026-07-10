@@ -4,7 +4,7 @@
 
 当用户通过 IM（飞书消息）发送 `/help` 命令时，Agent 应返回所有可用命令的帮助信息，而非"未知命令"。帮助信息需要区分内置 Agent 命令和 IM 通道专属控制命令，避免 `/cwd`、`/runner`、排队和引导能力只存在于代码里但用户不可发现。
 
-Provider 上线通知也必须在原有在线提示后追加同一套帮助命令，并按当前通道绑定的 Runner 类型裁剪命令范围。所有 Runner 都支持 IM 通道控制命令；只有内置 Bifrost Agent 支持 memory/goal/context/skill 等内置 Agent 命令；Codex、Traex、Claude Code 等外部 Runner 只展示它们实际支持的模型/effort/停止/排队等控制命令，不能把不支持的内置 Agent memory 管理命令推给用户。
+Provider 上线通知也必须在原有在线提示后追加同一套帮助命令，并按当前通道绑定的 Runner 类型裁剪命令范围。所有 Runner 都支持 IM 通道控制命令；只有内置 Bifrost Agent 支持 memory/goal/context/skill 等内置 Agent 命令；Codex、Traex、Claude Code 等非 ChatGPT Web Runner 还展示 Guide 与模型/effort/停止/排队控制，不能把不支持的内置 Agent memory 管理命令推给用户。
 
 ## 前置条件
 
@@ -101,7 +101,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 **预期结果**：
 - 帮助区包含 `IM 通道命令（所有 Runner）:`，展示 `/cwd`、`/runner`、`/q`、`/rq`。
 - 帮助区不展示 `/remember`、`/memories`、`/forget`、`/goal`、`/skill`、`/compact` 等仅内置 Agent 支持的命令。
-- 外部 Runner 帮助不展示 `/g <引导内容>`，因为外部 Runner 会按队列处理，不支持内置 Agent 运行中引导注入。
+- Codex/Traex/Claude Code 等非 ChatGPT Web Runner 展示 `/g <引导内容>`，并提示普通后续消息默认按 Guide 处理、使用 `/q` 才排队；ChatGPT Web 不展示 `/g`。
 - Codex/Traex/Claude Code 这类 Runner 展示它们支持的 `/models`、`/model`、`/effort` 或对应 runner-specific 控制命令。
 
 ### TC-IH-08: Runner-aware `/help` 与上线帮助保持一致
