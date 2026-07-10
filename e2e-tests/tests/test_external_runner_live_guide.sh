@@ -28,7 +28,11 @@ cleanup() {
     kill "$BIFROST_PID" >/dev/null 2>&1 || true
     wait "$BIFROST_PID" >/dev/null 2>&1 || true
   fi
-  rm -rf "$TEST_DIR"
+  if [[ "${KEEP_TEST_DIR:-false}" == "true" ]]; then
+    echo "[external-runner-live-guide] keeping test dir: $TEST_DIR" >&2
+  else
+    rm -rf "$TEST_DIR"
+  fi
 }
 trap cleanup EXIT
 
@@ -79,6 +83,9 @@ for line in sys.stdin:
         record({"event":"turn_started","runner":runner,"params":frame["params"]})
         send({"jsonrpc":"2.0","id":request_id,"result":{"turn":{"id":turn_id}}})
         prompt = frame["params"]["input"][0]["text"]
+        if "queue-explicit" in prompt:
+            send({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":thread_id,"turnId":turn_id,"item":{"id":"message-queued-explicit","type":"agentMessage","text":f"QUEUED_EXPLICIT_{runner}"}}})
+            send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":thread_id,"turn":{"id":turn_id,"status":"completed"}}})
         if mode == "reject" and "queue-after-reject" in prompt:
             send({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":thread_id,"turnId":turn_id,"item":{"id":"message-queued","type":"agentMessage","text":f"QUEUED_{runner}"}}})
             send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":thread_id,"turn":{"id":turn_id,"status":"completed"}}})
@@ -151,6 +158,10 @@ configured = {}
 for runner_name, adapter, mode, transport in (
     ("codex", "codex", "accept", "app_server"),
     ("traex", "traex", "accept", "app_server"),
+    ("codex-web", "codex", "accept", "app_server"),
+    ("traex-web", "traex", "accept", "app_server"),
+    ("codex-im", "codex", "accept", "app_server"),
+    ("codex-im-queue", "codex", "accept", "app_server"),
     ("codex-reject", "codex", "reject", "app_server"),
     ("codex-exec", "codex", "accept", "exec"),
 ):
@@ -247,6 +258,133 @@ PY
 
 run_case codex
 run_case traex
+
+run_web_guide_case() {
+  local runner="$1"
+  local session="web-guide-$runner"
+  local stream_log="$TEST_DIR/$runner-web-stream.ndjson"
+  local guide_log="$TEST_DIR/$runner-web-guide.ndjson"
+
+  curl -sS -N --noproxy '*' \
+    -H 'content-type: application/json' \
+    -d "{\"message\":\"wait for web guidance\",\"runnerId\":\"$runner\",\"sessionKey\":\"$session\",\"runtime\":\"external_cli\"}" \
+    "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/chat/stream" \
+    >"$stream_log" &
+  local stream_pid=$!
+
+  for _ in $(seq 1 200); do
+    if grep -q "\"event\":\"turn_started\",\"runner\":\"$runner\"" "$MOCK_LOG" 2>/dev/null; then
+      break
+    fi
+    kill -0 "$stream_pid" >/dev/null 2>&1 || return 1
+    sleep 0.05
+  done
+
+  curl -fsS --noproxy '*' \
+    -H 'content-type: application/json' \
+    -d "{\"message\":\"/g focus-$runner\",\"runnerId\":\"$runner\",\"sessionKey\":\"$session\",\"runtime\":\"external_cli\"}" \
+    "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/chat/stream" \
+    >"$guide_log"
+  wait "$stream_pid"
+
+  python3 - "$runner" "$guide_log" "$stream_log" <<'PY'
+import json
+import sys
+
+runner, guide_path, stream_path = sys.argv[1:4]
+guide = [json.loads(line) for line in open(guide_path, encoding="utf-8") if line.strip()]
+assert len(guide) == 1, guide
+assert guide[0]["delivery"] == "steered", guide
+assert guide[0]["guide"] is True, guide
+events = [json.loads(line) for line in open(stream_path, encoding="utf-8") if line.strip()]
+finished = [event for event in events if event.get("eventType") == "run_finished"]
+assert len(finished) == 1, events
+assert finished[0]["response"] == f"GUIDED_{runner}", finished
+PY
+}
+
+run_web_guide_case codex-web
+run_web_guide_case traex-web
+
+create_im_provider() {
+  local provider_id="$1"
+  local owner_id="$2"
+  local runner="$3"
+  curl -fsS --noproxy '*' -X POST \
+    "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/providers" \
+    -H 'content-type: application/json' \
+    -d "{\"id\":\"$provider_id\",\"provider_type\":\"feishu\",\"display_name\":\"Guide E2E\",\"enabled\":true,\"app_id\":\"cli_guide_e2e\",\"owner_open_id\":\"$owner_id\",\"event_connection_enabled\":false,\"agent_config\":{\"runner\":\"$runner\"}}" \
+    >/dev/null
+}
+
+send_im_inbound() {
+  local provider_id="$1"
+  local owner_id="$2"
+  local text="$3"
+  curl -fsS --noproxy '*' -X POST \
+    "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/debug/mock-inbound" \
+    -H 'content-type: application/json' \
+    -d "{\"providerId\":\"$provider_id\",\"userId\":\"$owner_id\",\"chatId\":\"chat-$provider_id\",\"text\":\"$text\"}" \
+    >/dev/null
+}
+
+wait_for_mock_record() {
+  local pattern="$1"
+  for _ in $(seq 1 240); do
+    if grep -q "$pattern" "$MOCK_LOG" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  echo "[external-runner-live-guide] missing mock record: $pattern" >&2
+  tail -120 "$BIFROST_LOG" >&2 || true
+  tail -80 "$MOCK_LOG" >&2 || true
+  return 1
+}
+
+create_im_provider "im-guide-provider" "im-guide-owner" "codex-im"
+send_im_inbound "im-guide-provider" "im-guide-owner" "wait for default IM guide"
+wait_for_mock_record '"event":"turn_started","runner":"codex-im"'
+send_im_inbound "im-guide-provider" "im-guide-owner" "default-im-guide"
+wait_for_mock_record 'default-im-guide'
+
+create_im_provider "im-queue-provider" "im-queue-owner" "codex-im-queue"
+send_im_inbound "im-queue-provider" "im-queue-owner" "wait for explicit IM queue"
+wait_for_mock_record '"event":"turn_started","runner":"codex-im-queue"'
+send_im_inbound "im-queue-provider" "im-queue-owner" "/q queue-explicit"
+send_im_inbound "im-queue-provider" "im-queue-owner" "/g release-queue"
+wait_for_mock_record 'queue-explicit'
+
+python3 - "$MOCK_LOG" <<'PY'
+import json
+import sys
+
+records = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+default_steers = [
+    record for record in records
+    if record.get("event") == "turn_steered" and record.get("runner") == "codex-im"
+]
+assert len(default_steers) == 1, default_steers
+assert default_steers[0]["params"]["input"][0]["text"] == "default-im-guide", default_steers
+
+queue_steers = [
+    record for record in records
+    if record.get("event") == "turn_steered" and record.get("runner") == "codex-im-queue"
+]
+assert len(queue_steers) == 1, queue_steers
+assert queue_steers[0]["params"]["input"][0]["text"] == "release-queue", queue_steers
+assert all(
+    record["params"]["input"][0]["text"] != "queue-explicit"
+    for record in queue_steers
+), queue_steers
+queued_turns = [
+    record for record in records
+    if record.get("event") == "turn_started"
+    and record.get("runner") == "codex-im-queue"
+    and "queue-explicit" in record.get("params", {}).get("input", [{}])[0].get("text", "")
+]
+assert len(queued_turns) == 1, queued_turns
+PY
 
 run_queue_fallback_case() {
   local runner="$1"

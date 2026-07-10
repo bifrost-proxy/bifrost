@@ -516,12 +516,13 @@ pub(super) fn im_help_for_external_cli_runner_only_lists_supported_commands() {
     assert!(help.contains("/model [模型]"));
     assert!(help.contains("/efforts"));
     assert!(help.contains("/effort [级别]"));
+    assert!(help.contains("/g <引导内容>"));
+    assert!(help.contains("使用 /q 才排队"));
     assert!(!help.contains("/remember"));
     assert!(!help.contains("/memories"));
     assert!(!help.contains("/forget"));
     assert!(!help.contains("/goal"));
     assert!(!help.contains("/compact"));
-    assert!(!help.contains("/g <引导内容>"));
 }
 
 #[test]

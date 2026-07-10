@@ -393,8 +393,11 @@ pub(super) async fn run_event_loop_with_options(
                         let agent_message = agent_message_text(msg);
                         let effective_agent_config =
                             effective_agent_config_for_provider(&agent_config, &provider);
-                        let busy_default_mode =
-                            busy_default_mode_for_agent_config(&effective_agent_config);
+                        let busy_default_mode = busy_default_mode_for_agent_config(
+                            &effective_agent_config,
+                            &external_cli_config_store.load(),
+                            Some(provider.id.as_str()),
+                        );
 
                         // ── Guide/Queue mode: check if session is busy ──
                         if agent_session_manager.is_session_active(&session_key) {
@@ -572,7 +575,11 @@ pub(super) async fn run_event_loop_with_options(
                     build_session_key(&event.provider_id, event.source.user_id.as_deref());
                 let agent_config =
                     effective_agent_config_for_provider(&agent_config_store.load(), &provider);
-                let busy_default_mode = busy_default_mode_for_agent_config(&agent_config);
+                let busy_default_mode = busy_default_mode_for_agent_config(
+                    &agent_config,
+                    &external_cli_config_store.load(),
+                    Some(provider.id.as_str()),
+                );
 
                 // ── Guide/Queue mode: check if session is busy ──
                 if agent_session_manager.is_session_active(&session_key) {
@@ -833,6 +840,14 @@ struct ExternalCliChatInput {
     runner_selected: bool,
 }
 
+struct AbortTaskOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortTaskOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 fn external_cli_images_from_chat_images(
     images: Vec<bifrost_agent::ChatImageInput>,
 ) -> Vec<crate::im_gateway::external_cli::ExternalCliImageInput> {
@@ -1018,7 +1033,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                 agent_session_manager: ctx.agent_session_manager,
                 progress_registry: ctx.progress_registry,
                 external_cli_config_store: ctx.external_cli_config_store,
-                default_mode: BusyMessageDefaultMode::Queue,
+                default_mode: busy_default_mode_for_external_adapter(&settings.adapter),
                 status_context,
                 default_work_dir: Some(
                     provider_agent_config
@@ -1234,11 +1249,22 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
         let (external_progress_tx, mut external_progress_rx) =
             tokio::sync::mpsc::unbounded_channel();
         let request_for_progress = request.clone();
-        let run_future = runtime.run_with_progress(request.clone(), Some(external_progress_tx));
-        tokio::pin!(run_future);
+        // Keep the runner control loop independently polled while this task
+        // handles an inbound /g (or the default Guide message). Awaiting the
+        // guide acknowledgement inline otherwise stalls `run_with_progress`,
+        // which is also responsible for forwarding that guide to the worker.
+        let request_for_run = request.clone();
+        let mut run_task = tokio::spawn(async move {
+            runtime
+                .run_with_progress(request_for_run, Some(external_progress_tx))
+                .await
+        });
+        let _run_task_guard = AbortTaskOnDrop(run_task.abort_handle());
         let result = loop {
             tokio::select! {
-                result = &mut run_future => break result,
+                result = &mut run_task => break result
+                    .map_err(|error| format!("external runner task failed: {error}"))
+                    .and_then(|result| result),
                 Some(progress_event) = external_progress_rx.recv() => {
                     if let Some(recorder) = recorder.as_mut() {
                         if let Some(end_index) = super::chat_gateway::record_external_cli_progress_event_to_timeline(
@@ -1296,7 +1322,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                         ctx.provider_store,
                         ctx.event_store,
                         ctx.external_cli_config_store,
-                        BusyMessageDefaultMode::Queue,
+                        busy_default_mode_for_external_adapter(&settings.adapter),
                     ).await;
                 }
             }
@@ -2077,6 +2103,17 @@ async fn maybe_stop_external_cli_for_event(event: &ImEvent, active_session_key: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn abort_task_on_drop_cancels_spawned_runner_task() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        let guard = AbortTaskOnDrop(task.abort_handle());
+
+        drop(guard);
+
+        let error = task.await.expect_err("task should be cancelled by guard");
+        assert!(error.is_cancelled());
+    }
 
     #[test]
     fn event_dedup_evict_expired_handles_large_ttl() {

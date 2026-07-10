@@ -313,11 +313,16 @@ pub(super) fn build_im_channel_help_sections(runner_kind: &ImHelpRunnerKind) -> 
              /forget <id|last> 删除一条长期记忆\n\
              /compact         压缩当前会话上下文\n\
              /goal [命令]      查看或管理当前目标\n\
-             /g <引导内容>     给正在运行的内置 Agent 注入引导"
+             /g <引导内容>     给正在运行的内置 Agent 注入引导；普通后续消息默认同样按引导处理"
                 .to_string(),
         ),
         ImHelpRunnerKind::External { adapter } => {
             let mut runner_lines = Vec::new();
+            if adapter != crate::im_gateway::chatgpt_web::ADAPTER_ID {
+                runner_lines.push(
+                    "/g <引导内容> 给正在运行的 Runner 注入引导；普通后续消息默认按引导处理，使用 /q 才排队",
+                );
+            }
             if crate::im_gateway::external_cli::supports_external_cli_model_slash(adapter) {
                 runner_lines
                     .push("/models        查看当前 Codex/Traex/Claude Code Runner 可选模型");
@@ -1441,13 +1446,23 @@ pub(super) async fn handle_busy_message(
             .await;
             return;
         }
+        if ctx.default_mode != BusyMessageDefaultMode::Guide
+            && ctx
+                .event
+                .message
+                .as_ref()
+                .is_some_and(|message| !message.images.is_empty())
+        {
+            handle_busy_default_message(guide_text, session_key, &ctx).await;
+            return;
+        }
         handle_busy_guide_command(guide_text, session_key, &ctx).await;
         return;
     }
 
     // Default behavior depends on the active runtime:
     // - built-in Bifrost Agent supports mid-turn guide injection
-    // - external runners (ChatGPT Web / CLI runners) must queue until the run finishes
+    // - external runners try live guide except ChatGPT Web, which keeps queue semantics
     handle_busy_default_message(trimmed, session_key, &ctx).await;
 }
 
@@ -1846,7 +1861,6 @@ pub(super) async fn handle_concurrent_event_during_chat(
     let msg_text = agent_message_text(message);
 
     let session_key = build_session_key(&event.provider_id, event.source.user_id.as_deref());
-
     // Check if this event is for the currently active session
     if session_key == active_session_key {
         // Session-free commands are still instant
@@ -1892,6 +1906,11 @@ pub(super) async fn handle_concurrent_event_during_chat(
         if agent_session_manager.is_session_active(&session_key) {
             let agent_config =
                 effective_agent_config_for_provider(&agent_config_store.load(), &provider);
+            let busy_default_mode = busy_default_mode_for_agent_config(
+                &agent_config,
+                &external_cli_config_store.load(),
+                Some(provider.id.as_str()),
+            );
             handle_busy_message(
                 &msg_text,
                 &session_key,
@@ -1904,7 +1923,7 @@ pub(super) async fn handle_concurrent_event_during_chat(
                     agent_session_manager,
                     progress_registry,
                     external_cli_config_store,
-                    default_mode: busy_default_mode_for_agent_config(&agent_config),
+                    default_mode: busy_default_mode,
                     status_context: status_context_from_agent_config(&agent_config),
                     default_work_dir: Some(agent_config.resolve_work_dir().display().to_string()),
                 },

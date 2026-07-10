@@ -2230,7 +2230,7 @@ rm -rf ./.bifrost-test
   3. 对包含 `title_updated` 的 history session 调用同一详情接口，检查显式 title 优先。
   4. 在 WebUI 发起一个内置 Agent 长任务；无输入时检查输入框内右下角按钮显示 Stop。
   5. 长任务运行中输入一条消息，检查可切换 Guide / Queue；选择 Queue 后消息只显示在输入框上方队列面板，不进入 MessageList，可继续追加多条并删除。
-  6. 对支持 guide 的内置 Agent，点击队列项上的 Guide，检查该消息可转为立即引导；对 Codex/ChatGPT Web 只显示默认 Queue，不展示 Guide。
+  6. 对内置 Agent 与 Codex/Traex/Claude Code 等非 ChatGPT Web runner，检查运行中默认 Guide 且可切换 Queue；对 ChatGPT Web 只显示 Queue，不展示 Guide。
   7. 打开长历史会话，手动向上滚动消息区，等待 2 秒后检查页面不会自动弹回底部。
   8. 在线程列表中切换多个线程，检查选中态和标题/副标题不闪烁；左侧小标识表示 Runner 类型（Bifrost/Codex/WebGPT），第二行渠道表示 Web/WeChat/Feishu/ASR Task/Scheduled。
   9. 检查每条消息气泡下方都展示时间戳；鼠标悬浮时间戳时可看到完整发送/存储时间，时间戳不占用气泡正文区域。
@@ -2239,7 +2239,7 @@ rm -rf ./.bifrost-test
 - **预期结果**:
   - 服务端列表与详情都遵循同一 title 规则：`title_updated` > 第一条 user message > session_key，不依赖前端点击后临时计算。
   - 线程行不会在选中后从 session id 抖动为第一条消息。
-  - 运行中输入框仍可输入：内置 Agent 支持 guide/queue，外部 Runner 默认 queue。
+  - 运行中输入框仍可输入：内置 Agent 与非 ChatGPT Web runner 默认 Guide 并支持切换 Queue；ChatGPT Web 默认 queue。
   - Queue 列表显示在输入框上方，支持多条、删除、内置 Agent 一键转 guide；排队确认与删除确认不作为消息流卡片展示。
   - 输入区在同一个消息滚动容器内以悬浮卡片贴近容器底部展示，没有与消息列表割裂的顶部硬分割线。
   - 历史阅读时手动滚动不会被自动贴底逻辑抢回底部。

@@ -334,6 +334,22 @@ pub(super) async fn handle_chat_gateway(
                             Some(effective.runner_id.clone()),
                         )
                     {
+                        if request.adapter != crate::im_gateway::chatgpt_web::ADAPTER_ID {
+                            if let Some(guide_message) = request
+                                .message
+                                .trim()
+                                .strip_prefix("/g ")
+                                .map(str::trim)
+                                .filter(|message| !message.is_empty())
+                            {
+                                return guide_external_cli_stream_response(
+                                    _service,
+                                    session_key,
+                                    guide_message,
+                                )
+                                .await;
+                            }
+                        }
                         return queue_external_cli_stream_response(
                             _service,
                             session_key,
@@ -1984,6 +2000,77 @@ fn queue_external_cli_stream_response(
                 "sessionKey": session_key,
                 "error": format!("排队失败: {error}"),
             }),
+        }
+    };
+    let stream = tokio_stream::once(Ok::<_, hyper::Error>(hyper::body::Frame::data(
+        bytes::Bytes::from(format!("{payload}\n")),
+    )));
+    let body = http_body_util::StreamBody::new(stream);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/x-ndjson")
+        .body(http_body_util::BodyExt::boxed(body))
+        .unwrap()
+}
+
+async fn guide_external_cli_stream_response(
+    service: &ImGatewayService,
+    session_key: &str,
+    message: &str,
+) -> Response<BoxBody> {
+    let guide_id = format!("guide-{}", uuid::Uuid::new_v4());
+    let outcome = crate::im_gateway::external_cli::request_worker_session_guide(
+        session_key,
+        guide_id.clone(),
+        message.to_string(),
+    )
+    .await;
+    let payload = match outcome {
+        Ok(result) if result.accepted => serde_json::json!({
+            "eventType": "run_finished",
+            "sessionKey": session_key,
+            "response": "🔀 已注入当前 Runner turn，将在当前工具调用完成后生效",
+            "guide": true,
+            "guideId": result.guide_id,
+            "delivery": "steered",
+            "threadId": result.thread_id,
+            "turnId": result.turn_id,
+        }),
+        outcome => {
+            let reason = match outcome {
+                Ok(result) => result
+                    .reason
+                    .unwrap_or_else(|| "active turn rejected guide input".to_string()),
+                Err(error) => error,
+            };
+            match service
+                .queue_manager
+                .push_queue(session_key, message.to_string())
+            {
+                Ok(items) => serde_json::json!({
+                    "eventType": "run_finished",
+                    "sessionKey": session_key,
+                    "response": format!(
+                        "⚠️ 当前 Runner 无法实时接收引导，已作为排队消息处理（排队 {} 条）",
+                        items.len()
+                    ),
+                    "guide": true,
+                    "queued": true,
+                    "guideId": guide_id,
+                    "delivery": "queued",
+                    "queueLength": items.len(),
+                    "queueItems": items,
+                    "reason": reason,
+                }),
+                Err(error) => serde_json::json!({
+                    "eventType": "run_failed",
+                    "sessionKey": session_key,
+                    "guideId": guide_id,
+                    "delivery": "rejected",
+                    "error": format!("guide was not accepted and queue fallback failed: {error}"),
+                    "reason": reason,
+                }),
+            }
         }
     };
     let stream = tokio_stream::once(Ok::<_, hyper::Error>(hyper::body::Frame::data(
@@ -5400,6 +5487,39 @@ mod coverage_boost {
         let items = payload["queueItems"].as_array().expect("items");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["message"], "plain queued message");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn guide_stream_falls_back_to_queue_without_losing_message() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let service = ImGatewayService::new(temp_dir.path());
+
+        let response = guide_external_cli_stream_response(
+            &service,
+            "session-guide-fallback",
+            "inspect the failing test",
+        )
+        .await;
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect guide fallback")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json payload");
+
+        assert_eq!(payload["eventType"], "run_finished");
+        assert_eq!(payload["delivery"], "queued");
+        assert_eq!(payload["guide"], true);
+        assert_eq!(payload["queued"], true);
+        assert_eq!(payload["queueLength"], 1);
+        assert_eq!(
+            payload["queueItems"][0]["message"],
+            "inspect the failing test"
+        );
+        assert!(payload["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("no active external runner")));
     }
 
     #[test]

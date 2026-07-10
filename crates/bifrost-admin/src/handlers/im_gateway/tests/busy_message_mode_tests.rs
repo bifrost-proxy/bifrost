@@ -1,33 +1,84 @@
 use super::*;
 
+fn runner_config(
+    runner_id: &str,
+    adapter: &str,
+) -> crate::im_gateway::external_cli::ExternalCliGatewayConfig {
+    let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    config.runners.insert(
+        runner_id.to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            enabled: true,
+            adapter: adapter.to_string(),
+            ..Default::default()
+        },
+    );
+    config
+}
+
 #[test]
 fn busy_default_mode_is_guide_for_builtin_bifrost_agent() {
     assert_eq!(
-        busy_default_mode_for_agent_config(&bifrost_agent::AgentConfig {
-            runner: None,
-            ..Default::default()
-        }),
+        busy_default_mode_for_agent_config(
+            &bifrost_agent::AgentConfig {
+                runner: None,
+                ..Default::default()
+            },
+            &Default::default(),
+            None,
+        ),
         BusyMessageDefaultMode::Guide
     );
 
     assert_eq!(
-        busy_default_mode_for_agent_config(&bifrost_agent::AgentConfig {
-            runner: Some(bifrost_agent::AgentRunnerMode::BifrostAgent),
-            ..Default::default()
-        }),
+        busy_default_mode_for_agent_config(
+            &bifrost_agent::AgentConfig {
+                runner: Some(bifrost_agent::AgentRunnerMode::BifrostAgent),
+                ..Default::default()
+            },
+            &Default::default(),
+            None,
+        ),
         BusyMessageDefaultMode::Guide
     );
 }
 
 #[test]
-fn busy_default_mode_is_queue_for_custom_runner() {
+fn busy_default_mode_guides_external_runners_except_chatgpt_web() {
+    for (runner_id, adapter) in [
+        ("codex-main", "codex"),
+        ("traex-main", "traex"),
+        ("claude-main", "claude_code"),
+    ] {
+        let config = runner_config(runner_id, adapter);
+        assert_eq!(
+            busy_default_mode_for_agent_config(
+                &bifrost_agent::AgentConfig {
+                    runner: Some(bifrost_agent::AgentRunnerMode::Custom(
+                        runner_id.to_string(),
+                    )),
+                    ..Default::default()
+                },
+                &config,
+                Some("feishu-main"),
+            ),
+            BusyMessageDefaultMode::ExternalGuide,
+            "adapter {adapter} should default to external guide",
+        );
+    }
+
+    let config = runner_config("chatgpt-web", crate::im_gateway::chatgpt_web::ADAPTER_ID);
     assert_eq!(
-        busy_default_mode_for_agent_config(&bifrost_agent::AgentConfig {
-            runner: Some(bifrost_agent::AgentRunnerMode::Custom(
-                "chatgpt-web".to_string(),
-            )),
-            ..Default::default()
-        }),
+        busy_default_mode_for_agent_config(
+            &bifrost_agent::AgentConfig {
+                runner: Some(bifrost_agent::AgentRunnerMode::Custom(
+                    "chatgpt-web".to_string(),
+                )),
+                ..Default::default()
+            },
+            &config,
+            Some("feishu-main"),
+        ),
         BusyMessageDefaultMode::Queue
     );
 }

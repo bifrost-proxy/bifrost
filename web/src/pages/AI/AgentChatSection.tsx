@@ -179,6 +179,24 @@ function supportsBuiltInAgentCommands({
   return runnerId === "bifrost_agent" || selectedRunnerAdapter(runnerOptions, runnerId) === "bifrost_agent";
 }
 
+export function supportsRunningGuide({
+  runnerId,
+  runnerOptions,
+  selectedThread,
+  status,
+}: {
+  runnerId: string;
+  runnerOptions: RunnerOption[];
+  selectedThread?: AgentThreadSummary;
+  status?: RunTelemetry["status"];
+}) {
+  const explicit = explicitRunnerIdentity(status, selectedThread);
+  if (/\b(chatgpt|webgpt|chatgpt_web)\b/.test(explicit)) {
+    return false;
+  }
+  return selectedRunnerAdapter(runnerOptions, runnerId) !== "chatgpt_web";
+}
+
 function proposedPlanMessageContent(content: string) {
   return `**Plan Mode result**\n\n${content.trim()}`;
 }
@@ -682,7 +700,12 @@ export default function AgentChatSection({
   });
   const currentRunnerAdapter = selectedRunnerAdapter(runnerOptions, runnerId);
   const modelCommandsSupported = supportsRunnerModelSlashCommand(currentRunnerAdapter);
-  const guideSupported = builtInAgentCommandsSupported;
+  const guideSupported = supportsRunningGuide({
+    runnerId,
+    runnerOptions,
+    selectedThread,
+    status: telemetry.status,
+  });
   const {
     slashRunner,
     setSlashRunner,
@@ -1656,12 +1679,11 @@ export default function AgentChatSection({
     const effectiveMode = mode === "guide" && !guideSupported ? "queue" : mode;
     const queuesRunningInput = effectiveMode === "queue";
     const rendersMessage = effectiveMode === "guide" || effectiveMode === "stop";
-    const message =
-      queuesRunningInput && !content.startsWith("/q ")
-        ? `/q ${content}`
-        : effectiveMode === "remove"
-          ? content
-          : content;
+    const message = queuesRunningInput && !content.startsWith("/q ")
+      ? `/q ${content}`
+      : effectiveMode === "guide" && !content.startsWith("/g ")
+        ? `/g ${content}`
+        : content;
     const userMessage: ChatMessage = {
       id: `user-${Date.now()}`,
       role: "user",
@@ -1705,7 +1727,9 @@ export default function AgentChatSection({
         signal: streamAbortRef.current?.signal,
         onEvent: (event) => {
           if (selectedSessionKeyRef.current !== submitSessionKey) return;
-          setTelemetry((prev) => reduceTelemetry(prev, event));
+          if (effectiveMode === "stop") {
+            setTelemetry((prev) => reduceTelemetry(prev, event));
+          }
           applyQueueEvent(event);
         },
         onDelta: () => {},
@@ -1722,7 +1746,10 @@ export default function AgentChatSection({
           }
         },
       });
-      if (selectedSessionKeyRef.current === submitSessionKey) {
+      if (
+        selectedSessionKeyRef.current === submitSessionKey &&
+        effectiveMode === "stop"
+      ) {
         refreshThreads();
       }
     } catch (error) {

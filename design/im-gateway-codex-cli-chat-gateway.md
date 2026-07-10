@@ -193,7 +193,7 @@ $BIFROST_DATA_DIR/im_gateway/chat_runs/<run_id>/
 
 ### 会话状态持久化与默认续接
 
-`session_state.json` 按 `sessionKey + adapter + runnerId` scope 保存 threadId 与 modelOverride，用于跨轮 resume。Codex 使用 `codex exec resume <thread_id>`；Claude Code 通过 metadata 里的 `threadId` 关联。busy 期间自定义 runner 默认走 queue；`/g` 明确降级为 queue；`/stop` 映射到 active runner 进程并终止其独立进程组。
+`session_state.json` 按 `sessionKey + adapter + runnerId` scope 保存 threadId 与 modelOverride，用于跨轮 resume。Codex/Traex app-server 运行中通过 `turn/steer` 接收 Guide；Claude Code 与自定义/exec transport 先请求 active worker capability，无法注入时完整降级 queue。只有 `/q` 始终显式排队，ChatGPT Web 保持默认 queue；`/stop` 映射到 active runner 进程并终止其独立进程组。
 
 ## CLI + Web + Admin API
 
@@ -290,7 +290,7 @@ $BIFROST_DATA_DIR/im_gateway/chat_runs/<run_id>/
 
 - **admin token vs. provider owner 身份**：Chat Gateway 默认只允许 admin token；`reply_mode=real_im` 需显式 provider/target + send permission。
 - **流式协议 NDJSON vs. SSE**：当前 `/chat/stream` 采用 NDJSON，贴近 CLI JSONL 输出；WebUI 内部亦复用 NDJSON。
-- **外部 CLI session 复用**：Codex 通过 `codex exec resume <thread_id>` 支持下一轮接续，busy 期间仍走 queue；Claude Code 通过 metadata `threadId`。
+- **外部 CLI session 复用**：Codex/Traex app-server 的 Guide 留在当前 turn；显式 `/q` 或 Guide 失败降级后的下一轮复用 `threadId`，Claude Code 通过 metadata `threadId` 关联。
 - **`/chat/stream` 实时性**：当前为 run 级 NDJSON，尚未做 stdout 行级实时转发；作为下一步增强。
 - **Bifrost 工具集合形态**：V1 通过 skill + CLI；V2 补 `bifrost mcp-server`。
 - **能力边界诚实**：Codex/Trae CLI 未稳定输出的 context window、剩余 context、自动压缩节省 token 等字段不得伪造，缺失显示 N/A；只展示 CLI 明确输出的 reasoning summary/status/tool/final。

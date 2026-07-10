@@ -4706,17 +4706,51 @@ test("AI Agent Chat persists collapsed thread rail", async ({ page }) => {
     .toBe("false");
 });
 
-test("AI Agent Chat queues running input for external runners", async ({
+test("AI Agent Chat defaults external runners to Guide and keeps Queue explicit", async ({
   page,
 }) => {
   const messages: string[] = [];
-  let releaseFirst: (() => void) | undefined;
-  const firstRequestCanFinish = new Promise<void>((resolve) => {
-    releaseFirst = resolve;
-  });
   await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ sessions: [] }) });
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [{
+          session_key: "running-traex-guide",
+          status: "active",
+          run_state: "running",
+          title: "Running TraeX guide",
+          source: "admin-api",
+          runner_id: "traex",
+          runner_type: "traex",
+          queueItems: [],
+        }],
+      }),
+    });
   });
+  await page.route(
+    "**/_bifrost/api/im-gateway/agent/sessions/running-traex-guide",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          session_key: "running-traex-guide",
+          status: "active",
+          run_state: "running",
+          title: "Running TraeX guide",
+          source: "admin-api",
+          runner_id: "traex",
+          runner_type: "traex",
+          messages: [
+            { role: "user", content: "Start external long task" },
+            { role: "assistant", content: "Runner is working" },
+          ],
+          queueItems: [],
+        }),
+      });
+    },
+  );
   await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
     await route.fulfill({
       status: 200,
@@ -4739,23 +4773,21 @@ test("AI Agent Chat queues running input for external runners", async ({
       runnerId: "traex",
       adapter: "traex",
     });
-    if (payload.message === "Start external long task") {
-      await firstRequestCanFinish;
+    if (payload.message === "/g guide while running") {
       await route.fulfill({
         status: 200,
         contentType: "application/x-ndjson",
         body:
-          '{"eventType":"run_started","status":{"runner_id":"traex","runner_type":"traex"}}\n' +
-          '{"eventType":"run_finished","status":"succeeded","response":"External long task done"}\n',
+          '{"eventType":"run_finished","response":"guide accepted","guide":true}\n',
       });
       return;
     }
-    if (payload.message === "/q follow up while running") {
+    if (payload.message === "/q queue while running") {
       await route.fulfill({
         status: 200,
         contentType: "application/x-ndjson",
         body:
-          '{"eventType":"run_finished","response":"queued","queued":true,"queueItems":[{"seq":1,"message":"follow up while running"}]}\n',
+          '{"eventType":"run_finished","response":"queued","queued":true,"queueItems":[{"seq":1,"message":"queue while running"}]}\n',
       });
       return;
     }
@@ -4775,26 +4807,141 @@ test("AI Agent Chat queues running input for external runners", async ({
     });
   });
 
-  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
-  await page.getByTestId("agent-chat-input").fill("Start external long task");
-  await page.getByTestId("agent-chat-send").click();
-  await expect(page.getByTestId("agent-chat-send")).toHaveAttribute("aria-label", "Stop");
+  await openPage(
+    page,
+    "ai?aiSection=agent-chat&agentSection=chat&session=running-traex-guide&view=active",
+  );
+  await expect(page.getByTestId("agent-chat-runner-tag")).toContainText("traex");
+  const composer = page.getByTestId("agent-chat-composer-track");
+  const composerInput = composer.getByTestId("agent-chat-input");
+  const composerSend = composer.getByTestId("agent-chat-send");
+  await expect(composerSend).toHaveAttribute("aria-label", "Stop");
 
-  await page.getByTestId("agent-chat-input").fill("follow up while running");
-  await expect(page.getByText("This runner queues follow-up messages")).toBeVisible();
+  await composerInput.fill("guide while running");
+  await expect(page.getByText("Running input")).toBeVisible();
+  await expect(page.getByText("Guide", { exact: true })).toBeVisible();
   await expect(page.getByText("Queue", { exact: true })).toBeVisible();
-  await expect(page.getByText("Guide")).toHaveCount(0);
-  await page.getByTestId("agent-chat-send").click();
+  await composerSend.click();
+  await expect(page.getByTestId("agent-chat-messages")).toContainText("guide accepted");
+
+  await composerInput.fill("queue while running");
+  await page.getByText("Queue", { exact: true }).click();
+  await expect(page.locator(".ant-segmented-item-selected")).toContainText("Queue");
+  await composerSend.click();
   await expect(page.getByTestId("agent-chat-queue-panel")).toContainText(
-    "follow up while running",
+    "queue while running",
   );
 
-  await page.getByTestId("agent-chat-send").click();
+  await composerSend.click();
   await expect(page.getByTestId("agent-chat-messages")).toContainText("stopped");
-  releaseFirst?.();
   await expect
     .poll(() => messages.join("|"))
-    .toBe("Start external long task|/q follow up while running|/stop");
+    .toBe("/g guide while running|/q queue while running|/stop");
+});
+
+test("AI Agent Chat keeps ChatGPT Web running input in Queue mode", async ({ page }) => {
+  const messages: string[] = [];
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [{
+          session_key: "running-chatgpt-web",
+          status: "active",
+          run_state: "running",
+          title: "Running ChatGPT Web",
+          source: "admin-api",
+          runner_id: "web",
+          runner_type: "chatgpt_web",
+          queueItems: [],
+        }],
+      }),
+    });
+  });
+  await page.route(
+    "**/_bifrost/api/im-gateway/agent/sessions/running-chatgpt-web",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          session_key: "running-chatgpt-web",
+          status: "active",
+          run_state: "running",
+          title: "Running ChatGPT Web",
+          source: "admin-api",
+          runner_id: "web",
+          runner_type: "chatgpt_web",
+          messages: [
+            { role: "user", content: "Start ChatGPT task" },
+            { role: "assistant", content: "ChatGPT is working" },
+          ],
+          queueItems: [],
+        }),
+      });
+    },
+  );
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "web",
+        runners: { web: { enabled: true, adapter: "chatgpt_web" } },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/stream", async (route) => {
+    const payload = route.request().postDataJSON();
+    messages.push(payload.message);
+    if (payload.message === "/q follow up") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/x-ndjson",
+        body:
+          '{"eventType":"run_finished","response":"queued","queued":true,"queueItems":[{"seq":1,"message":"follow up"}]}\n',
+      });
+      return;
+    }
+    if (payload.message === "/stop") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/x-ndjson",
+        body: '{"eventType":"run_finished","response":"stopped","stopped":true}\n',
+      });
+      return;
+    }
+    await route.fulfill({ status: 500, body: `unexpected message: ${String(payload.message)}` });
+  });
+
+  await openPage(
+    page,
+    "ai?aiSection=agent-chat&agentSection=chat&session=running-chatgpt-web&view=active",
+  );
+  await expect(page.getByTestId("agent-chat-runner-tag")).toContainText("web");
+  const composer = page.getByTestId("agent-chat-composer-track");
+  const composerInput = composer.getByTestId("agent-chat-input");
+  const composerSend = composer.getByTestId("agent-chat-send");
+  await expect(composerSend).toHaveAttribute("aria-label", "Stop");
+
+  await composerInput.fill("follow up");
+  await expect(page.getByText("This runner queues follow-up messages")).toBeVisible();
+  await expect(page.getByText("Guide", { exact: true })).toHaveCount(0);
+  await composerSend.click();
+  await expect(page.getByTestId("agent-chat-queue-panel")).toContainText("follow up");
+
+  await composerSend.click();
+  await expect.poll(() => messages.join("|")).toBe("/q follow up|/stop");
 });
 
 test("AI Agent Chat supports running stop, guide, queue, and queue removal", async ({
@@ -4957,6 +5104,7 @@ test("AI Agent Chat supports running stop, guide, queue, and queue removal", asy
     .not.toContain("消息已收到");
 
   await page.getByLabel("Remove queued message 1").click();
+  await expect.poll(() => messages.includes("/rq 1")).toBe(true);
   await expect(page.getByLabel("Remove queued message 1")).toHaveCount(0);
   await expect(page.getByTestId("agent-chat-queue-panel")).toContainText("second queued follow up");
   await expect
@@ -4968,7 +5116,7 @@ test("AI Agent Chat supports running stop, guide, queue, and queue removal", asy
 
   await expect
     .poll(() => messages.join("|"))
-    .toBe("guide now|/rq 1|/stop");
+    .toBe("/g guide now|/rq 1|/stop");
 });
 
 test("AI Agent Chat surfaces run errors in the telemetry panel", async ({ page }) => {
