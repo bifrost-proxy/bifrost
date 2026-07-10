@@ -4,6 +4,8 @@
 
 验证本机 CLI 可以快速生成 Remote Invoke SSH key 文件，并验证 `bifrost remote conn up --ssh-key` 在多个 caller 沙箱中复用同一 SSH key 时，caller 身份使用本地随机持久 ID，而不是主机名、用户名或 SSH key fingerprint 派生值。目标是让 target 机器无需打开 WebUI 就能输出可分发的 key，同时让 caller 可通过文件路径或固定环境变量 `BIFROST_REMOTE_SSH_KEY` 使用 key，避免多个 caller 竞争同一个 grant。
 
+本模块也验证 Remote Invoke 权限目标复用 Settings 中已有的 Access Control / Remote Invoke Grants 能力，不新增独立 tab；CLI 必须提供与 UI 对等的 `setting grant`、`setting ssh-key`、`remote conn`、`remote exec`、`remote file` 和 `remote job` 操作；本地保存的 grant session、shared secret 与 detached job relay token 必须加密落盘。
+
 ## 前置条件
 
 - 在仓库根目录 `<REPO_ROOT>` 执行。
@@ -178,6 +180,38 @@
 - 两个 SSH grant 的 `caller_fingerprint` 分别匹配两个 caller 沙箱，不会被同一个 SSH key fingerprint 合并或覆盖。
 - 后续 target-local `traffic get --ids`、`auth-status`、`export`、`replay --refresh-auth` 和 revoke 流程继续通过，脚本最终输出 `All SSH remote invoke E2E checks passed`。
 
+### TC-RISK-06：Access Control 复用、CLI 权限完备与本地敏感数据加密落盘
+
+**操作步骤**
+
+1. 确认 Settings 页面已有 Access Control 与 Remote Invoke Grants 入口，而不是新增单独 tab：
+   ```bash
+   rg -n "Access Control|settings-remote-invoke-grants-card|Edit Grant Access|File Access" web/src/pages/Settings web/src/pages/Settings/tabs/RemoteInvokeTab.tsx
+   ```
+2. 确认 CLI 权限能力覆盖 SSH key、grant level、低层 file access、remote exec/file/job：
+   ```bash
+   rg -n "setting ssh-key|setting grant|--level|--file-access|remote exec|remote job" crates/bifrost-cli/src/cli/remote.rs crates/bifrost-cli/src/commands/remote_grant.rs crates/bifrost-cli/src/commands/remote.rs
+   ```
+3. 执行 SSH key E2E：
+   ```bash
+   BIFROST_DATA_DIR="$(mktemp -d)" bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh
+   ```
+4. 观察脚本中以下阶段：
+   - `Use CLI remote conn up --ssh-key`
+   - `Switch SSH grant to Run commands & read/write files and verify capabilities`
+   - `Switch SSH grant to Files only and verify command denial plus file access`
+   - `Switch SSH grant to Read-only watch and verify command/file denial plus status access`
+   - `Verify detached remote job relay token is encrypted at rest`
+5. 如需人工复核临时数据，可在脚本失败诊断中检查 caller 沙箱里的 `remote-connections.json` 和 `remote-jobs.json`。
+
+**预期结果**
+
+- Settings 中已有 `Access Control` tab；Remote Invoke 的 active grant 管理在现有 Grants 卡片内完成，行级提供 `Edit Access` 与 `File Access`，不需要新增 tab。
+- CLI 覆盖 `bifrost setting ssh-key create/status/export/revoke`、`bifrost setting grant list/update/revoke`、`bifrost setting grant update --level full|shell|files|query`、`--file-access none|read|read_write`、`bifrost remote exec`、`bifrost remote file read/write`、`bifrost remote job watch`。
+- E2E 中 `setting grant update --level` 四档权限切换均成功，且权限效果与 UI 预设一致：Full trust、Run commands & read/write files、Files only、Read-only watch。
+- caller `remote-connections.json` 中 `grant_session_token` 与 `shared_secret_encrypted` 都是 `{"version":1,"nonce":...,"ciphertext":...}` envelope，不包含明文 session token、shared secret 或可复用 grant token。
+- `remote exec --detach` 后 caller `remote-jobs.json` 中只保存 `relay_token_encrypted` envelope；`remote job watch <call_id>` 能用加密缓存恢复 token 并看到远端输出。
+
 ## 清理步骤
 
 - 脚本退出时会清理 key 生成、relay、target、caller、mock server 临时目录和进程。
@@ -226,3 +260,9 @@
 | 用例 | 结果 | 证据 |
 | --- | --- | --- |
 | TC-RISK-06 | PASS | GitHub Actions PR 361 run `29000407368` 的 `E2E Shell (aarch64-apple-darwin, shard 1/2)` 在 `test_remote_invoke_ssh_e2e.sh` 中执行 `setting grant update --level query` 后再恢复 `--level full`，随后的 `remote exec --shell-text "printf ssh-full-restored-ok"` 偶发收到 `grant scope RemoteQuery / file_access None does not allow command kind ShellExec`。脚本已更新为只对该权限传播型错误做短暂重试；真实拒绝、输出缺失或其它错误仍立即失败并打印 grant diagnostics。2026-07-09 执行 `BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 通过；本地复现到 `grant scope update not visible to remote exec yet (1/20); retrying ssh-full-restored-ok`，随后完成第二 caller 隔离、remote traffic/search、target-local traffic replay 和 revoke，最终输出 `All SSH remote invoke E2E checks passed`。 |
+
+### 2026-07-10 Access Control 复用、CLI 权限与加密落盘回归
+
+| 用例 | 结果 | 证据 |
+| --- | --- | --- |
+| TC-RISK-07 | PASS | 2026-07-10 执行 `BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 通过，最终输出 `All SSH remote invoke E2E checks passed`。真实链路覆盖 existing Access Control/Remote Invoke Grants 入口、CLI SSH key 创建、full/shell/files/query/full 权限切换、saved connection secret envelope、detached job relay token envelope、第二 caller 隔离、remote traffic/search/get/replay 与 revoke；权限恢复阶段仅出现预期的传播重试 `grant scope update not visible ... (1/20)` 后成功。 |

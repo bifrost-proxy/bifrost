@@ -1,3 +1,4 @@
+mod account;
 mod admin;
 pub mod agent;
 mod app;
@@ -44,6 +45,7 @@ use colored::Colorize;
 use serde_json::Value;
 use tracing::debug;
 
+pub use account::handle_account_command;
 pub use admin::*;
 pub use app::handle_app_command;
 pub use asr::handle_ai_command;

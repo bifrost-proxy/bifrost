@@ -1,7 +1,7 @@
 #[cfg(test)]
 use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -66,6 +66,12 @@ const STALE_GRANT_RETENTION_MS: u64 = 2 * 24 * 60 * 60 * 1000;
 const RECENT_SSH_GRANT_RECONCILE_GRACE_MS: u64 = 2 * 60 * 1000;
 const PENDING_PAIRING_POLL_SECS: u64 = 5;
 const ACTIVE_CALL_RECONCILE_INTERVAL_MS: u64 = 1000;
+const EARLY_CALL_FRAME_TTL_MS: u64 = 10_000;
+const EARLY_CALL_FRAME_REJECTION_TTL_MS: u64 = 30_000;
+const MAX_EARLY_CALL_FRAME_CALLS: usize = 128;
+const MAX_EARLY_CALL_FRAMES_PER_CALL: usize = 64;
+const MAX_EARLY_CALL_FRAME_BYTES_PER_CALL: usize = 256 * 1024;
+const MAX_EARLY_CALL_FRAME_BYTES_GLOBAL: usize = 8 * 1024 * 1024;
 
 fn normalize_registration_session_token(token: Option<String>) -> Option<String> {
     token
@@ -145,6 +151,19 @@ struct ActiveCallControl {
     stdin_tx: Mutex<Option<tokio::sync::mpsc::Sender<Vec<u8>>>>,
     // P1-B: per-call inbound (caller->client) anti-replay window.
     inbound_replay: Mutex<ReplayWindow>,
+}
+
+struct PendingCallFrame {
+    envelope: EncryptedEnvelope,
+    received_at: u64,
+}
+
+#[derive(Default)]
+struct PendingCallFrames {
+    frames: Vec<PendingCallFrame>,
+    buffered_bytes: usize,
+    rejected_reason: Option<String>,
+    last_updated_at: u64,
 }
 
 impl ActiveCallControl {
@@ -329,6 +348,8 @@ pub struct RemoteInvokeWorker {
     state: Arc<RwLock<WorkerState>>,
     pending_pairings: Arc<RwLock<HashMap<String, TimestampedPairing>>>,
     active_calls: Arc<RwLock<HashMap<String, Arc<ActiveCallControl>>>>,
+    early_call_frames: Arc<RwLock<HashMap<String, PendingCallFrames>>>,
+    early_call_frame_saturated_until: Arc<AtomicU64>,
     call_history_store: Arc<CallHistoryStore>,
     local_grants: Arc<RwLock<HashMap<String, GrantInfo>>>,
     grant_crypto: Arc<RwLock<HashMap<String, GrantCryptoMaterial>>>,
@@ -440,6 +461,8 @@ impl RemoteInvokeWorker {
             state: Arc::new(RwLock::new(WorkerState::Disconnected)),
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_calls: Arc::new(RwLock::new(HashMap::new())),
+            early_call_frames: Arc::new(RwLock::new(HashMap::new())),
+            early_call_frame_saturated_until: Arc::new(AtomicU64::new(0)),
             call_history_store,
             local_grants: Arc::new(RwLock::new(restored_grant_info)),
             grant_crypto: Arc::new(RwLock::new(restored_grant_crypto)),
@@ -2992,10 +3015,38 @@ impl RemoteInvokeWorker {
 
         let call_started_at = now_millis();
         let active_call = Arc::new(ActiveCallControl::new(grant_id.clone(), call_started_at));
-        let stdin_rx = command_accepts_stdin(&command).then(|| active_call.prepare_stdin_channel());
+        let accepts_stdin = command_accepts_stdin(&command);
+        let has_early_stdin = self.early_call_frames.read().contains_key(&call_id);
+        if has_early_stdin && !accepts_stdin {
+            self.early_call_frames.write().remove(&call_id);
+            self.send_call_exit(
+                &call_id,
+                -2,
+                Some(
+                    "[remote.stdin_not_allowed] caller sent stdin for a command that does not accept stdin"
+                        .to_string(),
+                ),
+                None,
+                None,
+                0,
+            )
+            .await;
+            return;
+        }
+        let stdin_rx = accepts_stdin.then(|| active_call.prepare_stdin_channel());
         self.active_calls
             .write()
             .insert(call_id.clone(), Arc::clone(&active_call));
+        if accepts_stdin {
+            if let Err(error) = self.flush_early_call_frames(&call_id, &active_call).await {
+                self.active_calls.write().remove(&call_id);
+                let message = format!("[remote.stdin_early_buffer_rejected] {error}");
+                warn!(call_id = %call_id, error = %error, "rejecting call_open after early stdin buffering failed");
+                self.send_call_exit(&call_id, -2, Some(message), None, None, 0)
+                    .await;
+                return;
+            }
+        }
 
         let mut call_info = CallInfo {
             call_id: call_id.clone(),
@@ -3425,10 +3476,149 @@ impl RemoteInvokeWorker {
         }
 
         let Some(active_call) = self.active_calls.read().get(&call_id).cloned() else {
-            warn!(call_id = %call_id, "call_frame received for inactive call");
+            self.buffer_early_call_frame(call_id, envelope);
             return;
         };
 
+        self.forward_call_frame_to_active_call(&call_id, &active_call, envelope)
+            .await;
+    }
+
+    fn buffer_early_call_frame(&self, call_id: String, envelope: EncryptedEnvelope) {
+        let now = now_millis();
+        let buffered_bytes = serde_json::to_vec(&envelope)
+            .map(|encoded| encoded.len())
+            .unwrap_or(usize::MAX);
+        let mut frames_by_call = self.early_call_frames.write();
+        for pending in frames_by_call.values_mut() {
+            if pending.rejected_reason.is_none()
+                && pending.frames.first().is_some_and(|frame| {
+                    now.saturating_sub(frame.received_at) > EARLY_CALL_FRAME_TTL_MS
+                })
+            {
+                pending.frames.clear();
+                pending.buffered_bytes = 0;
+                pending.rejected_reason =
+                    Some("early stdin frames expired before call_open registration".to_string());
+                pending.last_updated_at = now;
+            }
+        }
+        frames_by_call.retain(|_, pending| {
+            now.saturating_sub(pending.last_updated_at) <= EARLY_CALL_FRAME_REJECTION_TTL_MS
+        });
+        let global_buffered_bytes = frames_by_call
+            .values()
+            .map(|pending| pending.buffered_bytes)
+            .sum::<usize>();
+        if self.early_call_frame_saturated_until.load(Ordering::SeqCst) >= now {
+            if let Some(pending) = frames_by_call.get_mut(&call_id) {
+                pending.frames.clear();
+                pending.buffered_bytes = 0;
+                pending.rejected_reason =
+                    Some("global early stdin buffer was saturated; retry the call".to_string());
+                pending.last_updated_at = now;
+            }
+            warn!(call_id = %call_id, "rejecting early call_frame while global buffer circuit breaker is active");
+            return;
+        }
+        if !frames_by_call.contains_key(&call_id)
+            && frames_by_call.len() >= MAX_EARLY_CALL_FRAME_CALLS
+        {
+            self.early_call_frame_saturated_until.store(
+                now.saturating_add(EARLY_CALL_FRAME_REJECTION_TTL_MS),
+                Ordering::SeqCst,
+            );
+            warn!(
+                call_id = %call_id,
+                "activating early call_frame circuit breaker because pending call map is full"
+            );
+            return;
+        }
+        let pending = frames_by_call.entry(call_id.clone()).or_default();
+        pending.last_updated_at = now;
+        if pending.rejected_reason.is_some() {
+            return;
+        }
+        if pending.frames.len() >= MAX_EARLY_CALL_FRAMES_PER_CALL
+            || buffered_bytes > MAX_EARLY_CALL_FRAME_BYTES_PER_CALL
+            || pending.buffered_bytes.saturating_add(buffered_bytes)
+                > MAX_EARLY_CALL_FRAME_BYTES_PER_CALL
+        {
+            pending.frames.clear();
+            pending.buffered_bytes = 0;
+            pending.rejected_reason = Some(format!(
+                "early stdin exceeded per-call limit ({MAX_EARLY_CALL_FRAMES_PER_CALL} frames / {MAX_EARLY_CALL_FRAME_BYTES_PER_CALL} bytes)"
+            ));
+            warn!(
+                call_id = %call_id,
+                "rejecting early call_frame sequence because per-call byte limit was exceeded"
+            );
+            return;
+        }
+        if global_buffered_bytes.saturating_add(buffered_bytes) > MAX_EARLY_CALL_FRAME_BYTES_GLOBAL
+        {
+            pending.frames.clear();
+            pending.buffered_bytes = 0;
+            pending.rejected_reason = Some(format!(
+                "early stdin exceeded global byte limit ({MAX_EARLY_CALL_FRAME_BYTES_GLOBAL} bytes)"
+            ));
+            self.early_call_frame_saturated_until.store(
+                now.saturating_add(EARLY_CALL_FRAME_REJECTION_TTL_MS),
+                Ordering::SeqCst,
+            );
+            warn!(call_id = %call_id, "activating early call_frame circuit breaker because global byte limit was exceeded");
+            return;
+        }
+        pending.frames.push(PendingCallFrame {
+            envelope,
+            received_at: now,
+        });
+        pending.buffered_bytes = pending.buffered_bytes.saturating_add(buffered_bytes);
+        debug!(
+            call_id = %call_id,
+            pending_frames = pending.frames.len(),
+            pending_bytes = pending.buffered_bytes,
+            "buffered early call_frame until call_open creates active call"
+        );
+    }
+
+    async fn flush_early_call_frames(
+        &self,
+        call_id: &str,
+        active_call: &Arc<ActiveCallControl>,
+    ) -> Result<()> {
+        let now = now_millis();
+        let pending = self.early_call_frames.write().remove(call_id);
+        if pending.is_none() && self.early_call_frame_saturated_until.load(Ordering::SeqCst) >= now
+        {
+            return Err(BifrostError::Config(
+                "global early stdin buffer was saturated; retry the call".to_string(),
+            ));
+        }
+        let Some(pending) = pending else {
+            return Ok(());
+        };
+        if let Some(reason) = pending.rejected_reason {
+            return Err(BifrostError::Config(reason));
+        }
+        for frame in pending.frames {
+            if now.saturating_sub(frame.received_at) > EARLY_CALL_FRAME_TTL_MS {
+                return Err(BifrostError::Config(
+                    "early stdin frames expired before call_open registration".to_string(),
+                ));
+            }
+            self.forward_call_frame_to_active_call(call_id, active_call, frame.envelope)
+                .await;
+        }
+        Ok(())
+    }
+
+    async fn forward_call_frame_to_active_call(
+        &self,
+        call_id: &str,
+        active_call: &Arc<ActiveCallControl>,
+        envelope: EncryptedEnvelope,
+    ) {
         let Some(grant_crypto) = self.get_grant_crypto(&active_call.grant_id) else {
             warn!(call_id = %call_id, grant_id = %active_call.grant_id, "missing grant crypto for call_frame");
             return;
@@ -3436,7 +3626,7 @@ impl RemoteInvokeWorker {
 
         let session_key = match derive_call_session_key(
             &grant_crypto.shared_secret,
-            &call_id,
+            call_id,
             Some(&grant_crypto.caller_ephemeral_pub),
             Some(&grant_crypto.client_ephemeral_pub),
             // P0-A channel binding kept INERT on the wire: the caller (bifrost-cli)
@@ -6466,6 +6656,8 @@ mod coverage_boost {
             state: Arc::new(RwLock::new(WorkerState::Disconnected)),
             pending_pairings: Arc::new(RwLock::new(HashMap::new())),
             active_calls: Arc::new(RwLock::new(HashMap::new())),
+            early_call_frames: Arc::new(RwLock::new(HashMap::new())),
+            early_call_frame_saturated_until: Arc::new(AtomicU64::new(0)),
             call_history_store,
             local_grants: Arc::new(RwLock::new(HashMap::new())),
             grant_crypto: Arc::new(RwLock::new(HashMap::new())),
@@ -7823,6 +8015,279 @@ mod coverage_boost {
 
         let received = rx.recv().await.expect("stdin bytes should arrive");
         assert_eq!(received, b"hello-stdin".to_vec());
+    }
+
+    #[tokio::test]
+    async fn handle_call_frame_buffers_until_active_call_accepts_stdin() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let grant_id = "grant-frame-early-stdin";
+        let call_id = "call-frame-early-stdin";
+        let kind = CommandKind::ShellExec;
+        let (material, _open_key, stream_key) = build_test_grant_crypto(grant_id, call_id, kind);
+
+        worker
+            .grant_crypto
+            .write()
+            .insert(grant_id.to_string(), material.clone());
+
+        let frame_json = json!({ "data": "early-stdin" });
+        let payload = encrypt_encrypted_payload_counter(
+            &frame_json,
+            &stream_key,
+            2,
+            FrameDirection::CallerToClient,
+            1,
+        )
+        .expect("encrypt frame payload");
+        let envelope = EncryptedEnvelope {
+            version: payload.version,
+            call_id: call_id.to_string(),
+            seq: 1,
+            direction: FrameDirection::CallerToClient,
+            nonce: payload.nonce,
+            ciphertext: payload.ciphertext,
+            tag: payload.tag,
+            aad: payload.aad,
+        };
+        let data = json!({
+            "call_id": call_id,
+            "envelope_json": serde_json::to_string(&envelope).unwrap(),
+        });
+
+        worker.handle_call_frame(data).await;
+        assert_eq!(
+            worker
+                .early_call_frames
+                .read()
+                .get(call_id)
+                .map(|pending| pending.frames.len()),
+            Some(1)
+        );
+
+        let active_call = Arc::new(ActiveCallControl::new(grant_id.to_string(), now_millis()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        active_call.set_stdin_sender(tx);
+        worker
+            .active_calls
+            .write()
+            .insert(call_id.to_string(), Arc::clone(&active_call));
+        worker
+            .flush_early_call_frames(call_id, &active_call)
+            .await
+            .expect("flush early stdin");
+
+        let received = rx.recv().await.expect("early stdin bytes should replay");
+        assert_eq!(received, b"early-stdin".to_vec());
+        assert!(!worker.early_call_frames.read().contains_key(call_id));
+    }
+
+    #[tokio::test]
+    async fn early_call_frame_buffer_preserves_more_than_legacy_sixteen_frames() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let grant_id = "grant-frame-early-many";
+        let call_id = "call-frame-early-many";
+        let kind = CommandKind::ShellExec;
+        let (material, _open_key, stream_key) = build_test_grant_crypto(grant_id, call_id, kind);
+        worker
+            .grant_crypto
+            .write()
+            .insert(grant_id.to_string(), material);
+
+        for seq in 1..=20_u64 {
+            let frame_json = json!({ "data": format!("frame-{seq}\n") });
+            let payload = encrypt_encrypted_payload_counter(
+                &frame_json,
+                &stream_key,
+                2,
+                FrameDirection::CallerToClient,
+                seq,
+            )
+            .expect("encrypt frame payload");
+            worker
+                .handle_call_frame(json!({
+                    "call_id": call_id,
+                    "envelope_json": serde_json::to_string(&EncryptedEnvelope {
+                        version: payload.version,
+                        call_id: call_id.to_string(),
+                        seq,
+                        direction: FrameDirection::CallerToClient,
+                        nonce: payload.nonce,
+                        ciphertext: payload.ciphertext,
+                        tag: payload.tag,
+                        aad: payload.aad,
+                    })
+                    .unwrap(),
+                }))
+                .await;
+        }
+
+        let active_call = Arc::new(ActiveCallControl::new(grant_id.to_string(), now_millis()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        active_call.set_stdin_sender(tx);
+        worker
+            .flush_early_call_frames(call_id, &active_call)
+            .await
+            .expect("flush all early frames");
+
+        for seq in 1..=20_u64 {
+            assert_eq!(
+                rx.recv().await.expect("replayed frame"),
+                format!("frame-{seq}\n").into_bytes()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn early_call_frame_byte_overflow_rejects_instead_of_truncating() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let call_id = "call-frame-early-overflow";
+        worker.buffer_early_call_frame(
+            call_id.to_string(),
+            EncryptedEnvelope {
+                version: 2,
+                call_id: call_id.to_string(),
+                seq: 1,
+                direction: FrameDirection::CallerToClient,
+                nonce: String::new(),
+                ciphertext: "x".repeat(MAX_EARLY_CALL_FRAME_BYTES_PER_CALL + 1),
+                tag: String::new(),
+                aad: None,
+            },
+        );
+
+        let active_call = Arc::new(ActiveCallControl::new("grant".to_string(), now_millis()));
+        let error = worker
+            .flush_early_call_frames(call_id, &active_call)
+            .await
+            .expect_err("overflow must reject the call");
+
+        assert!(error.to_string().contains("per-call limit"));
+        assert!(!worker.early_call_frames.read().contains_key(call_id));
+    }
+
+    #[tokio::test]
+    async fn early_call_frame_count_overflow_rejects_before_stdin_channel_can_deadlock() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let call_id = "call-frame-early-count-overflow";
+        for seq in 1..=(MAX_EARLY_CALL_FRAMES_PER_CALL as u64 + 1) {
+            worker.buffer_early_call_frame(
+                call_id.to_string(),
+                EncryptedEnvelope {
+                    version: 2,
+                    call_id: call_id.to_string(),
+                    seq,
+                    direction: FrameDirection::CallerToClient,
+                    nonce: String::new(),
+                    ciphertext: "x".to_string(),
+                    tag: String::new(),
+                    aad: None,
+                },
+            );
+        }
+
+        let active_call = Arc::new(ActiveCallControl::new("grant".to_string(), now_millis()));
+        let error = worker
+            .flush_early_call_frames(call_id, &active_call)
+            .await
+            .expect_err("frame count overflow must reject the call");
+
+        assert!(error.to_string().contains("64 frames"));
+    }
+
+    #[tokio::test]
+    async fn expired_early_call_frames_reject_instead_of_running_without_stdin() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let call_id = "call-frame-early-expired";
+        worker.buffer_early_call_frame(
+            call_id.to_string(),
+            EncryptedEnvelope {
+                version: 2,
+                call_id: call_id.to_string(),
+                seq: 1,
+                direction: FrameDirection::CallerToClient,
+                nonce: String::new(),
+                ciphertext: "ciphertext".to_string(),
+                tag: String::new(),
+                aad: None,
+            },
+        );
+        worker
+            .early_call_frames
+            .write()
+            .get_mut(call_id)
+            .unwrap()
+            .frames[0]
+            .received_at = now_millis().saturating_sub(EARLY_CALL_FRAME_TTL_MS + 1);
+
+        let active_call = Arc::new(ActiveCallControl::new("grant".to_string(), now_millis()));
+        let error = worker
+            .flush_early_call_frames(call_id, &active_call)
+            .await
+            .expect_err("expired stdin must reject the call");
+
+        assert!(error.to_string().contains("expired"));
+    }
+
+    #[tokio::test]
+    async fn saturated_early_call_map_rejects_untracked_call_instead_of_dropping_stdin() {
+        let (_harness, worker) = make_ssh_test_worker();
+        for index in 0..MAX_EARLY_CALL_FRAME_CALLS {
+            let call_id = format!("call-frame-saturation-{index}");
+            worker.buffer_early_call_frame(
+                call_id.clone(),
+                EncryptedEnvelope {
+                    version: 2,
+                    call_id,
+                    seq: 1,
+                    direction: FrameDirection::CallerToClient,
+                    nonce: String::new(),
+                    ciphertext: "ciphertext".to_string(),
+                    tag: String::new(),
+                    aad: None,
+                },
+            );
+        }
+        worker.buffer_early_call_frame(
+            "call-frame-saturation-overflow".to_string(),
+            EncryptedEnvelope {
+                version: 2,
+                call_id: "call-frame-saturation-overflow".to_string(),
+                seq: 1,
+                direction: FrameDirection::CallerToClient,
+                nonce: String::new(),
+                ciphertext: "ciphertext".to_string(),
+                tag: String::new(),
+                aad: None,
+            },
+        );
+
+        let active_call = Arc::new(ActiveCallControl::new("grant".to_string(), now_millis()));
+        let error = worker
+            .flush_early_call_frames("call-frame-saturation-overflow", &active_call)
+            .await
+            .expect_err("saturated buffer must reject untracked call");
+
+        assert!(error.to_string().contains("saturated"));
+
+        let existing_call_id = "call-frame-saturation-0";
+        worker.buffer_early_call_frame(
+            existing_call_id.to_string(),
+            EncryptedEnvelope {
+                version: 2,
+                call_id: existing_call_id.to_string(),
+                seq: 2,
+                direction: FrameDirection::CallerToClient,
+                nonce: String::new(),
+                ciphertext: "later-ciphertext".to_string(),
+                tag: String::new(),
+                aad: None,
+            },
+        );
+        let error = worker
+            .flush_early_call_frames(existing_call_id, &active_call)
+            .await
+            .expect_err("saturated buffer must reject existing call receiving later input");
+        assert!(error.to_string().contains("saturated"));
     }
 
     #[tokio::test]

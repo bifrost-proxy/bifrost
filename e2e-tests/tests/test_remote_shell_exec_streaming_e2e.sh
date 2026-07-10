@@ -525,7 +525,7 @@ run_argv_streaming_case() {
 }
 
 run_stdin_first_frame_case() {
-    local prev_started_at stdin_log stdin_exit stdin_output
+    local prev_started_at stdin_log stdin_exit stdin_output large_stdin_log large_stdin_exit large_stdin_output expected_sha
 
     log "Running stdin first-frame regression..."
     prev_started_at="$(latest_shell_exec_started_at)"
@@ -554,6 +554,34 @@ run_stdin_first_frame_case() {
     assert_recent_call_metadata "$prev_started_at" "stream-shell" "shell_text" "stdin-first-frame" || return 1
 
     rm -f "$stdin_log"
+
+    log "Running stdin early-buffer >16 frame regression..."
+    prev_started_at="$(latest_shell_exec_started_at)"
+    large_stdin_log="$(mktemp)"
+    expected_sha="$($PYTHON_BIN -c 'import hashlib; print(hashlib.sha256(b"A" * 81920).hexdigest())')"
+    if $PYTHON_BIN -c 'import sys; sys.stdout.buffer.write(b"A" * 81920)' | \
+        BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec \
+            --relay-url "$RELAY_URL" \
+            --client-id "$CLIENT_INSTANCE_SHORT" \
+            --stdin \
+            --shell-text "$PYTHON_BIN -u -c 'import hashlib,sys; data=sys.stdin.buffer.read(81920); print(len(data), flush=True); print(hashlib.sha256(data).hexdigest(), flush=True)'" \
+            >"$large_stdin_log" 2>&1; then
+        large_stdin_exit=0
+    else
+        large_stdin_exit=$?
+    fi
+    large_stdin_output="$(cat "$large_stdin_log")"
+
+    if [[ "$large_stdin_exit" -eq 0 ]]; then
+        _log_pass "large early stdin command should exit successfully"
+    else
+        _log_fail "large early stdin command should exit successfully" "0" "exit=${large_stdin_exit} output=${large_stdin_output}"
+        return 1
+    fi
+    assert_body_contains "81920" "$large_stdin_output" "large early stdin should arrive without truncation" || return 1
+    assert_body_contains "$expected_sha" "$large_stdin_output" "large early stdin digest should match exactly" || return 1
+    assert_recent_call_metadata "$prev_started_at" "stream-shell" "shell_text" "stdin-large-early-buffer" || return 1
+    rm -f "$large_stdin_log"
 }
 
 run_shell_text_context_case() {

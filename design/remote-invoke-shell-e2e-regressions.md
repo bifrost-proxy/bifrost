@@ -58,6 +58,49 @@ E2E 脚本失败时必须能定位「哪一层出问题」：
 
 ## 技术细节
 
+### 0. Streaming stdin 首帧竞态
+
+`remote exec --interactive` 的 caller-to-client stdin 通过 encrypted `call_frame`
+到达 target。CI 曾暴露一个竞态：relay 先把 stdin 首帧推给 target，而
+target 的 `call_open` 还没完成 active call 登记时，worker 会把 frame 当作
+inactive call 丢弃，导致远端子进程已经输出 `READY` 但读不到
+`EARLY_STDIN_OK`。
+
+当前修复采用三层约束：
+
+- relay 对 caller-to-client `call_frame` 采用 30 秒短期重放缓冲。缓冲只用于
+  带加密序列号、能被 target replay window 安全去重的事件；每 client 最多
+  64 帧 / 512 KiB、全局最多 128 个 client。即使 target SSE 在 relay 返回
+  caller 200 之后发生短暂替换，重连也会在 `client_hello_ack` 后重放近期 stdin，
+  避免“caller 认为成功、target 永久丢帧”。call 终止时立即清理对应重放项；
+  target 不在线且缓冲无法容纳完整新帧时返回 `target_stream_unavailable`，不把
+  无法重放的输入伪装成成功。
+
+- target worker 仅对已解析且方向为 `CallerToClient` 的早到 encrypted
+  `call_frame` 建立短期缓冲，TTL 为 10 秒；每 call 最多 64 帧 / 256 KiB、
+  全局最多 8 MiB、同时最多 128 个 call，防止 relay 抖动变成无界内存增长，
+  同时保证 flush 不会在 executor 启动前填满 64-slot stdin channel。
+- 超过每 call/global 字节预算、超过 call 数量或等待超过 TTL 时，worker
+  必须拒绝整个 call 并返回 `remote.stdin_early_buffer_rejected`，禁止丢掉部分
+  stdin 后继续执行命令。全局饱和会短暂打开 circuit breaker，使未建档的
+  stdin call 显式失败而不是无提示截断；不接受 stdin 且没有 pending frame
+  的 query/file/shell call 不受该 circuit breaker 影响。
+- `call_open` 创建 active call 并准备 stdin channel 后立即 flush 早到帧；
+  回放仍走原有 grant crypto、counter nonce、解密、replay window 与
+  stdin sender 路径，不绕过安全校验。
+- 生产执行路径 `execute_with_stdout_sink -> execute_shell_exec` 在
+  `stdin_mode=stream` 时打开 child stdin pipe 并消费 mpsc stdin；测试不得以
+  当前未接 worker 的 `execute_shell_exec_streaming` 代替生产路径验证。
+
+回归验证：
+
+```bash
+cargo test -p bifrost-admin stdin -- --nocapture
+cargo test -p bifrost-admin handle_call_frame -- --nocapture
+pnpm -C packages/bifrost-sync-server test -- remote-invoke-sse.test.ts
+bash e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh
+```
+
 ### 1. pair-code mock relay 补 `client_ephemeral_pub`
 
 - 位置：`e2e-tests/tests/test_remote_connect_overload_retry_e2e.sh`、`e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh` 中的 approve mock 响应体。
