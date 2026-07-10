@@ -552,6 +552,7 @@ fn network_record_to_traffic_record(record: &NetworkRecord) -> TrafficRecord {
             .or_else(|| Some("Bifrost Import".to_string())),
         client_pid: None,
         client_path: record.client_path.clone(),
+        account_name: None,
         host: record.host.clone().unwrap_or(fallback_host),
         path: record.path.clone().unwrap_or(fallback_path),
         protocol: record.protocol.clone().unwrap_or(fallback_protocol),

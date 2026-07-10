@@ -1491,6 +1491,7 @@ async fn update_tls_config(req: Request<Incoming>, state: SharedAdminState) -> R
 pub enum UiPinnedFilterType {
     ClientIp,
     ClientApp,
+    AccountName,
     Domain,
 }
 
@@ -1499,6 +1500,7 @@ impl From<PinnedFilterType> for UiPinnedFilterType {
         match t {
             PinnedFilterType::ClientIp => Self::ClientIp,
             PinnedFilterType::ClientApp => Self::ClientApp,
+            PinnedFilterType::AccountName => Self::AccountName,
             PinnedFilterType::Domain => Self::Domain,
         }
     }
@@ -1509,6 +1511,7 @@ impl From<UiPinnedFilterType> for PinnedFilterType {
         match t {
             UiPinnedFilterType::ClientIp => Self::ClientIp,
             UiPinnedFilterType::ClientApp => Self::ClientApp,
+            UiPinnedFilterType::AccountName => Self::AccountName,
             UiPinnedFilterType::Domain => Self::Domain,
         }
     }
@@ -1552,6 +1555,8 @@ pub struct UiCollapsedSections {
     pub client_ip: bool,
     #[serde(rename = "clientApp")]
     pub client_app: bool,
+    #[serde(rename = "accountName", default)]
+    pub account_name: bool,
     pub domain: bool,
 }
 
@@ -1561,6 +1566,7 @@ impl From<CollapsedSections> for UiCollapsedSections {
             pinned: s.pinned,
             client_ip: s.client_ip,
             client_app: s.client_app,
+            account_name: s.account_name,
             domain: s.domain,
         }
     }
@@ -1572,6 +1578,7 @@ impl From<UiCollapsedSections> for CollapsedSections {
             pinned: s.pinned,
             client_ip: s.client_ip,
             client_app: s.client_app,
+            account_name: s.account_name,
             domain: s.domain,
         }
     }
@@ -2001,6 +2008,7 @@ mod tests {
         for storage_ty in [
             PinnedFilterType::ClientIp,
             PinnedFilterType::ClientApp,
+            PinnedFilterType::AccountName,
             PinnedFilterType::Domain,
         ] {
             match storage_ty {
@@ -2015,6 +2023,12 @@ mod tests {
                     assert!(matches!(ui, UiPinnedFilterType::ClientApp));
                     let back: PinnedFilterType = ui.into();
                     assert!(matches!(back, PinnedFilterType::ClientApp));
+                }
+                PinnedFilterType::AccountName => {
+                    let ui: UiPinnedFilterType = storage_ty.into();
+                    assert!(matches!(ui, UiPinnedFilterType::AccountName));
+                    let back: PinnedFilterType = ui.into();
+                    assert!(matches!(back, PinnedFilterType::AccountName));
                 }
                 PinnedFilterType::Domain => {
                     let ui: UiPinnedFilterType = storage_ty.into();
@@ -2050,6 +2064,7 @@ mod tests {
             pinned: true,
             client_ip: false,
             client_app: true,
+            account_name: true,
             domain: false,
         };
 
@@ -2059,6 +2074,7 @@ mod tests {
         assert_eq!(back.pinned, ui.pinned);
         assert_eq!(back.client_ip, ui.client_ip);
         assert_eq!(back.client_app, ui.client_app);
+        assert_eq!(back.account_name, ui.account_name);
         assert_eq!(back.domain, ui.domain);
     }
 
@@ -2071,6 +2087,7 @@ mod tests {
                 pinned: false,
                 client_ip: true,
                 client_app: false,
+                account_name: true,
                 domain: true,
             },
         };
@@ -2088,6 +2105,10 @@ mod tests {
         assert_eq!(
             back.collapsed_sections.client_app,
             ui.collapsed_sections.client_app
+        );
+        assert_eq!(
+            back.collapsed_sections.account_name,
+            ui.collapsed_sections.account_name
         );
         assert_eq!(back.collapsed_sections.domain, ui.collapsed_sections.domain);
     }
@@ -2108,6 +2129,7 @@ mod tests {
                     pinned: true,
                     client_ip: false,
                     client_app: false,
+                    account_name: true,
                     domain: true,
                 },
             },
@@ -2131,6 +2153,7 @@ mod tests {
         assert_eq!(collapsed_sections["pinned"], true);
         assert_eq!(collapsed_sections["clientIp"], false);
         assert_eq!(collapsed_sections["clientApp"], false);
+        assert_eq!(collapsed_sections["accountName"], true);
         assert_eq!(collapsed_sections["domain"], true);
     }
 

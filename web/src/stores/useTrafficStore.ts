@@ -51,10 +51,12 @@ interface TrafficState {
   historyLoading: boolean;
   catchingUp: boolean;
   availableClientApps: string[];
+  availableAccountNames: string[];
   availableClientIps: string[];
   availableProxyPorts: string[];
   availableDomains: string[];
   clientAppCounts: Map<string, number>;
+  accountNameCounts: Map<string, number>;
   clientIpCounts: Map<string, number>;
   proxyPortCounts: Map<string, number>;
   domainCounts: Map<string, number>;
@@ -216,6 +218,7 @@ const shouldReplaceRecord = (
   return (
     existing.client_app !== next.client_app ||
     existing.client_pid !== next.client_pid ||
+    existing.account_name !== next.account_name ||
     existing.has_rule_hit !== next.has_rule_hit ||
     existing.matched_rule_count !== next.matched_rule_count ||
     existing.matched_protocols.join('|') !== next.matched_protocols.join('|') ||
@@ -252,6 +255,7 @@ const mergeIncrementalRecord = (
     client_ip: next.client_ip || existing.client_ip,
     client_app: next.client_app ?? existing.client_app,
     client_pid: next.client_pid ?? existing.client_pid,
+    account_name: next.account_name ?? existing.account_name,
   };
 
   return preprocessRecord(merged);
@@ -488,9 +492,11 @@ const buildClientCatalog = (records: TrafficSummary[]) => {
   const clientIpCounts = new Map<string, number>();
   const proxyPortCounts = new Map<string, number>();
   const domainCounts = new Map<string, number>();
+  const accountNameCounts = new Map<string, number>();
 
   for (const record of records) {
     incrementCount(clientAppCounts, record.client_app || null);
+    incrementCount(accountNameCounts, record.account_name || null);
     incrementCount(clientIpCounts, record.client_ip || null);
     incrementCount(proxyPortCounts, record.listener_port ? String(record.listener_port) : null);
     incrementCount(domainCounts, record.host || null);
@@ -501,7 +507,9 @@ const buildClientCatalog = (records: TrafficSummary[]) => {
     clientIpCounts,
     proxyPortCounts,
     domainCounts,
+    accountNameCounts,
     availableClientApps: buildSortedKeys(clientAppCounts),
+    availableAccountNames: buildSortedKeys(accountNameCounts),
     availableClientIps: buildSortedKeys(clientIpCounts),
     availableProxyPorts: buildSortedKeys(proxyPortCounts),
     availableDomains: buildSortedKeys(domainCounts),
@@ -511,10 +519,11 @@ const buildClientCatalog = (records: TrafficSummary[]) => {
 const cloneClientCatalog = (
   state: Pick<
     TrafficState,
-    'clientAppCounts' | 'clientIpCounts' | 'proxyPortCounts' | 'domainCounts'
+    'clientAppCounts' | 'accountNameCounts' | 'clientIpCounts' | 'proxyPortCounts' | 'domainCounts'
   >,
 ) => ({
   clientAppCounts: new Map(state.clientAppCounts),
+  accountNameCounts: new Map(state.accountNameCounts),
   clientIpCounts: new Map(state.clientIpCounts),
   proxyPortCounts: new Map(state.proxyPortCounts),
   domainCounts: new Map(state.domainCounts),
@@ -524,10 +533,12 @@ const snapshotClientCatalog = (
   catalog: ReturnType<typeof cloneClientCatalog>,
 ) => ({
   clientAppCounts: catalog.clientAppCounts,
+  accountNameCounts: catalog.accountNameCounts,
   clientIpCounts: catalog.clientIpCounts,
   proxyPortCounts: catalog.proxyPortCounts,
   domainCounts: catalog.domainCounts,
   availableClientApps: buildSortedKeys(catalog.clientAppCounts),
+  availableAccountNames: buildSortedKeys(catalog.accountNameCounts),
   availableClientIps: buildSortedKeys(catalog.clientIpCounts),
   availableProxyPorts: buildSortedKeys(catalog.proxyPortCounts),
   availableDomains: buildSortedKeys(catalog.domainCounts),
@@ -538,6 +549,7 @@ const addRecordToClientCatalog = (
   record: TrafficSummary,
 ) => {
   incrementCount(catalog.clientAppCounts, record.client_app || null);
+  incrementCount(catalog.accountNameCounts, record.account_name || null);
   incrementCount(catalog.clientIpCounts, record.client_ip || null);
   incrementCount(catalog.proxyPortCounts, record.listener_port ? String(record.listener_port) : null);
   incrementCount(catalog.domainCounts, record.host || null);
@@ -548,6 +560,7 @@ const removeRecordFromClientCatalog = (
   record: TrafficSummary,
 ) => {
   decrementCount(catalog.clientAppCounts, record.client_app || null);
+  decrementCount(catalog.accountNameCounts, record.account_name || null);
   decrementCount(catalog.clientIpCounts, record.client_ip || null);
   decrementCount(catalog.proxyPortCounts, record.listener_port ? String(record.listener_port) : null);
   decrementCount(catalog.domainCounts, record.host || null);
@@ -689,6 +702,9 @@ const matchRecord = (
       case 'client_app':
         fieldValue = record.client_app || '';
         break;
+      case 'account_name':
+        fieldValue = record.account_name || '';
+        break;
       case 'client_ip':
         fieldValue = record.client_ip || '';
         break;
@@ -736,6 +752,7 @@ export interface PanelFilters {
   clientIps: string[];
   proxyPorts: string[];
   clientApps: string[];
+  accountNames: string[];
   domains: string[];
 }
 
@@ -744,6 +761,7 @@ const hasPanelFilters = (panel: PanelFilters): boolean => {
     panel.clientIps.length > 0 ||
     panel.proxyPorts.length > 0 ||
     panel.clientApps.length > 0 ||
+    panel.accountNames.length > 0 ||
     panel.domains.length > 0
   );
 };
@@ -758,17 +776,20 @@ const matchPanelFilters = (record: TrafficSummary, panel: PanelFilters): boolean
   const clientAppMatch = panel.clientApps.length === 0
     || panel.clientApps.includes(record.client_app || '');
 
+  const accountNameMatch = panel.accountNames.length === 0
+    || panel.accountNames.includes(record.account_name || '');
+
   const domainMatch = panel.domains.length === 0
     || panel.domains.some(domain => (record.host || '').includes(domain));
 
-  return clientIpMatch && proxyPortMatch && clientAppMatch && domainMatch;
+  return clientIpMatch && proxyPortMatch && clientAppMatch && accountNameMatch && domainMatch;
 };
 
 export const matchesTrafficFilters = (
   record: TrafficSummary,
   toolbar: ToolbarFilters,
   conditions: FilterCondition[],
-  panel: PanelFilters = { clientIps: [], proxyPorts: [], clientApps: [], domains: [] },
+  panel: PanelFilters = { clientIps: [], proxyPorts: [], clientApps: [], accountNames: [], domains: [] },
 ): boolean => {
   const hasToolbarOrConditions = hasActiveFilters(toolbar, conditions);
   const hasPanelActive = hasPanelFilters(panel);
@@ -792,7 +813,7 @@ export const filterRecords = (
   records: TrafficSummary[],
   toolbar: ToolbarFilters,
   conditions: FilterCondition[],
-  panel: PanelFilters = { clientIps: [], proxyPorts: [], clientApps: [], domains: [] }
+  panel: PanelFilters = { clientIps: [], proxyPorts: [], clientApps: [], accountNames: [], domains: [] }
 ): TrafficSummary[] => {
   const hasToolbarOrConditions = hasActiveFilters(toolbar, conditions);
   const hasPanelActive = hasPanelFilters(panel);
@@ -823,7 +844,7 @@ export const applyTrafficRecordsMutationToFilteredRecords = (
   mutation: TrafficRecordsMutation,
   toolbar: ToolbarFilters,
   conditions: FilterCondition[],
-  panel: PanelFilters = { clientIps: [], proxyPorts: [], clientApps: [], domains: [] },
+  panel: PanelFilters = { clientIps: [], proxyPorts: [], clientApps: [], accountNames: [], domains: [] },
 ): TrafficSummary[] => {
   if (mutation.reset) {
     return current;
@@ -899,6 +920,7 @@ const compactToSummary = (c: TrafficSummaryCompact): TrafficSummary => {
     client_ip: c.cip,
     client_app: c.capp || undefined,
     client_pid: c.cpid || undefined,
+    account_name: c.acct || undefined,
     is_tunnel: (c.flags & FLAGS.IS_TUNNEL) !== 0,
     is_websocket: (c.flags & FLAGS.IS_WEBSOCKET) !== 0,
     is_sse: (c.flags & FLAGS.IS_SSE) !== 0,
@@ -954,10 +976,12 @@ export const useTrafficStore = create<TrafficState>()(
       historyLoading: false,
       catchingUp: false,
       availableClientApps: [],
+      availableAccountNames: [],
       availableClientIps: [],
       availableProxyPorts: [],
       availableDomains: [],
       clientAppCounts: new Map(),
+      accountNameCounts: new Map(),
       clientIpCounts: new Map(),
       proxyPortCounts: new Map(),
       domainCounts: new Map(),
@@ -2053,10 +2077,12 @@ export const useTrafficStore = create<TrafficState>()(
           historyLoading: false,
           catchingUp: false,
           availableClientApps: [],
+          availableAccountNames: [],
           availableClientIps: [],
           availableProxyPorts: [],
           availableDomains: [],
           clientAppCounts: new Map(),
+          accountNameCounts: new Map(),
           clientIpCounts: new Map(),
           proxyPortCounts: new Map(),
           domainCounts: new Map(),

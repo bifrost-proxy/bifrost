@@ -108,12 +108,14 @@ fn apply_listener_context(
     client_app: &Option<String>,
     client_pid: Option<u32>,
     client_path: &Option<String>,
+    account_name: &Option<String>,
 ) {
     record.listener_port = listener_port;
     record.client_ip = client_ip.to_string();
     record.client_app = client_app.clone();
     record.client_pid = client_pid;
     record.client_path = client_path.clone();
+    record.account_name = account_name.clone();
 }
 
 async fn get_values_from_state(admin_state: &Option<Arc<AdminState>>) -> HashMap<String, String> {
@@ -973,6 +975,7 @@ pub async fn handle_connect(
     let client_app = ctx.client_app.clone();
     let client_pid = ctx.client_pid;
     let client_path = ctx.client_path.clone();
+    let account_name = ctx.account_name.clone();
     let listener_port = ctx.port;
 
     // cancel_rx 用于在配置变更时优雅关闭 tunnel。
@@ -1017,6 +1020,7 @@ pub async fn handle_connect(
             &client_app,
             client_pid,
             &client_path,
+            &account_name,
         );
         record.has_rule_hit = has_rules;
         record.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
@@ -1130,6 +1134,7 @@ async fn handle_tls_interception(
     let client_app = ctx.client_app.clone();
     let client_pid = ctx.client_pid;
     let client_path = ctx.client_path.clone();
+    let account_name = ctx.account_name.clone();
     let listener_port = ctx.port;
 
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
@@ -1188,6 +1193,7 @@ async fn handle_tls_interception(
             client_app,
             client_pid,
             client_path,
+            account_name,
             listener_port,
             push_manager,
         )
@@ -1243,6 +1249,7 @@ async fn tls_intercept_tunnel(
     client_app: Option<String>,
     client_pid: Option<u32>,
     client_path: Option<String>,
+    account_name: Option<String>,
     listener_port: u16,
     push_manager: Option<SharedPushManager>,
 ) -> Result<()> {
@@ -1288,6 +1295,7 @@ async fn tls_intercept_tunnel(
     let client_ip_clone = client_ip.clone();
     let client_app_clone = client_app.clone();
     let client_path_clone = client_path.clone();
+    let account_name_clone = account_name.clone();
     let push_manager_clone = push_manager.clone();
 
     let service = service_fn(move |req: Request<Incoming>| {
@@ -1300,6 +1308,7 @@ async fn tls_intercept_tunnel(
         let client_app = client_app_clone.clone();
         let client_pid = client_pid;
         let client_path = client_path_clone.clone();
+        let account_name = account_name_clone.clone();
         let push_manager = push_manager_clone.clone();
         async move {
             handle_intercepted_request_with_protocol(
@@ -1317,6 +1326,7 @@ async fn tls_intercept_tunnel(
                 client_app,
                 client_pid,
                 client_path,
+                account_name,
                 listener_port,
                 push_manager,
                 inject_bifrost_badge,
@@ -1372,6 +1382,7 @@ async fn tls_intercept_tunnel_with_cancel(
     client_app: Option<String>,
     client_pid: Option<u32>,
     client_path: Option<String>,
+    account_name: Option<String>,
     listener_port: u16,
     push_manager: Option<SharedPushManager>,
 ) -> Result<bool> {
@@ -1448,6 +1459,7 @@ async fn tls_intercept_tunnel_with_cancel(
     let client_ip_clone = client_ip.clone();
     let client_app_clone = client_app.clone();
     let client_path_clone2 = client_path.clone();
+    let account_name_clone = account_name.clone();
     let push_manager_clone = push_manager.clone();
 
     let service = service_fn(move |req: Request<Incoming>| {
@@ -1460,6 +1472,7 @@ async fn tls_intercept_tunnel_with_cancel(
         let client_app = client_app_clone.clone();
         let client_pid = client_pid;
         let client_path = client_path_clone2.clone();
+        let account_name = account_name_clone.clone();
         let push_manager = push_manager_clone.clone();
         async move {
             handle_intercepted_request_with_protocol(
@@ -1477,6 +1490,7 @@ async fn tls_intercept_tunnel_with_cancel(
                 client_app,
                 client_pid,
                 client_path,
+                account_name,
                 listener_port,
                 push_manager,
                 inject_bifrost_badge,
@@ -1894,6 +1908,7 @@ async fn handle_intercepted_request_with_protocol(
     client_app: Option<String>,
     client_pid: Option<u32>,
     client_path: Option<String>,
+    account_name: Option<String>,
     listener_port: u16,
     push_manager: Option<SharedPushManager>,
     inject_bifrost_badge_default: bool,
@@ -1941,6 +1956,7 @@ async fn handle_intercepted_request_with_protocol(
             client_app,
             client_pid,
             client_path,
+            account_name,
             listener_port,
             push_manager,
         )
@@ -2170,6 +2186,7 @@ async fn handle_intercepted_request_with_protocol(
                 client_app.as_deref(),
                 client_pid,
                 client_path.as_deref(),
+                account_name.as_deref(),
                 listener_port,
                 &devtools_client_req_id,
             );
@@ -2199,6 +2216,7 @@ async fn handle_intercepted_request_with_protocol(
                 client_app.as_deref(),
                 client_pid,
                 client_path.as_deref(),
+                account_name.as_deref(),
                 listener_port,
                 &devtools_client_req_id,
             );
@@ -2240,6 +2258,7 @@ async fn handle_intercepted_request_with_protocol(
                 client_app.as_deref(),
                 client_pid,
                 client_path.as_deref(),
+                account_name.as_deref(),
                 listener_port,
                 &devtools_client_req_id,
             );
@@ -2272,6 +2291,7 @@ async fn handle_intercepted_request_with_protocol(
                 client_app.as_deref(),
                 client_pid,
                 client_path.as_deref(),
+                account_name.as_deref(),
                 listener_port,
                 &devtools_client_req_id,
             );
@@ -2648,6 +2668,7 @@ async fn handle_intercepted_request_with_protocol(
                 &client_app,
                 client_pid,
                 &client_path,
+                &account_name,
             );
             pending.has_rule_hit = has_rules;
             pending.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
@@ -2858,6 +2879,7 @@ async fn handle_intercepted_request_with_protocol(
                     &client_app,
                     client_pid,
                     &client_path,
+                    &account_name,
                     listener_port,
                     &devtools_client_req_id,
                 );
@@ -3031,6 +3053,7 @@ async fn handle_intercepted_request_with_protocol(
                     &client_app,
                     client_pid,
                     &client_path,
+                    &account_name,
                 );
                 record.timing = Some(RequestTiming {
                     dns_ms,
@@ -3595,7 +3618,8 @@ async fn handle_intercepted_request_with_protocol(
         .with_cookies(incoming_cookies.clone())
         .with_query_params(query_params.clone())
         .with_port(listener_port)
-        .with_client_process(client_app.clone(), client_pid, client_path.clone());
+        .with_client_process(client_app.clone(), client_pid, client_path.clone())
+        .with_account_name(account_name.clone());
     let request_origin = incoming_headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("origin"))
@@ -3936,6 +3960,7 @@ async fn handle_intercepted_request_with_protocol(
                     &client_app,
                     client_pid,
                     &client_path,
+                    &account_name,
                 );
 
                 if is_websocket {
@@ -4181,6 +4206,7 @@ async fn handle_intercepted_request_with_protocol(
                             &client_app,
                             client_pid,
                             &client_path,
+                            &account_name,
                         );
                         record.has_rule_hit = has_rules;
                         record.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
@@ -4364,6 +4390,7 @@ async fn handle_intercepted_request_with_protocol(
             &client_app,
             client_pid,
             &client_path,
+            &account_name,
         );
 
         if is_websocket {
@@ -4960,6 +4987,7 @@ async fn handle_intercepted_websocket(
     client_app: Option<String>,
     client_pid: Option<u32>,
     client_path: Option<String>,
+    account_name: Option<String>,
     listener_port: u16,
     push_manager: Option<SharedPushManager>,
 ) -> std::result::Result<Response<BoxBody>, hyper::Error> {
@@ -5372,6 +5400,7 @@ async fn handle_intercepted_websocket(
             &client_app,
             client_pid,
             &client_path,
+            &account_name,
         );
         record.set_websocket();
 
@@ -5932,6 +5961,7 @@ fn record_mock_traffic(
     client_app: Option<&str>,
     client_pid: Option<u32>,
     client_path: Option<&str>,
+    account_name: Option<&str>,
     listener_port: u16,
     devtools_client_req_id: &Option<String>,
 ) {
@@ -5972,6 +6002,7 @@ fn record_mock_traffic(
     record.client_app = client_app.map(|s| s.to_string());
     record.client_pid = client_pid;
     record.client_path = client_path.map(|s| s.to_string());
+    record.account_name = account_name.map(|s| s.to_string());
     record.listener_port = listener_port;
     record.response_size = calculate_response_size(
         mock_status,
@@ -6005,6 +6036,7 @@ fn record_direct_status_traffic(
     client_app: &Option<String>,
     client_pid: Option<u32>,
     client_path: &Option<String>,
+    account_name: &Option<String>,
     listener_port: u16,
     devtools_client_req_id: &Option<String>,
 ) {
@@ -6078,6 +6110,7 @@ fn record_direct_status_traffic(
         client_app,
         client_pid,
         client_path,
+        account_name,
     );
     if !req_script_results.is_empty() {
         record.req_script_results = Some(req_script_results.to_vec());
@@ -7620,6 +7653,7 @@ mod coverage_boost {
         );
         let client_app = Some("UnitTestApp".to_string());
         let client_path = Some("/tmp/app".to_string());
+        let account_name = Some("alice".to_string());
         apply_listener_context(
             &mut record,
             8080,
@@ -7627,12 +7661,14 @@ mod coverage_boost {
             &client_app,
             Some(1234),
             &client_path,
+            &account_name,
         );
         assert_eq!(record.listener_port, 8080);
         assert_eq!(record.client_ip, "127.0.0.1");
         assert_eq!(record.client_app, client_app);
         assert_eq!(record.client_pid, Some(1234));
         assert_eq!(record.client_path, client_path);
+        assert_eq!(record.account_name, account_name);
     }
 
     #[test]

@@ -1166,6 +1166,7 @@ impl ReplayExecutor {
             client_app: Some("Bifrost Replay".to_string()),
             client_pid: None,
             client_path: None,
+            account_name: None,
             is_tunnel: false,
             is_websocket: false,
             is_sse: false,

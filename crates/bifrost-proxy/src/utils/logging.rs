@@ -39,6 +39,7 @@ pub struct RequestContext {
     pub client_app: Option<String>,
     pub client_pid: Option<u32>,
     pub client_path: Option<String>,
+    pub account_name: Option<String>,
     pub port: u16,
     /// Upstream response status, populated only for response-phase rule processing.
     pub res_status: Option<u16>,
@@ -67,6 +68,7 @@ impl RequestContext {
             client_app: None,
             client_pid: None,
             client_path: None,
+            account_name: None,
             port: 0,
             res_status: None,
             res_headers: HashMap::new(),
@@ -108,6 +110,11 @@ impl RequestContext {
         self.client_app = app;
         self.client_pid = pid;
         self.client_path = path;
+        self
+    }
+
+    pub fn with_account_name(mut self, account_name: Option<String>) -> Self {
+        self.account_name = account_name;
         self
     }
 

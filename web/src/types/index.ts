@@ -90,6 +90,7 @@ export interface TrafficSummary {
   client_ip: string;
   client_app?: string;
   client_pid?: number;
+  account_name?: string;
   has_rule_hit: boolean;
   matched_rule_count: number;
   matched_protocols: string[];
@@ -226,6 +227,7 @@ export interface TrafficSummaryCompact {
   cip: string;
   capp?: string | null;
   cpid?: number | null;
+  acct?: string | null;
   flags: number;
   fc: number;
   ss?: SocketStatus | null;
@@ -414,6 +416,7 @@ export interface TrafficQueryRequest {
   url_contains?: string;
   path_contains?: string;
   client_app?: string;
+  account_name?: string;
   client_ip?: string;
   listener_port?: number;
   content_type?: string;
@@ -452,6 +455,7 @@ export interface TrafficFilter {
   header_contains?: string;
   client_ip?: string;
   client_app?: string;
+  account_name?: string;
   listener_port?: number;
   is_h3?: boolean;
   is_websocket?: boolean;
@@ -761,6 +765,7 @@ export interface SearchFilters {
   conditions: SearchFilterCondition[];
   client_ips: string[];
   client_apps: string[];
+  account_names: string[];
   domains: string[];
 }
 

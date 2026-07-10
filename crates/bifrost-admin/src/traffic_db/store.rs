@@ -518,6 +518,7 @@ impl TrafficDbStore {
                 &record.client_app,
                 record.client_pid.map(|p| p as i32),
                 &record.client_path,
+                &record.account_name,
                 flags as i32,
                 record.frame_count as i64,
                 record.last_frame_id as i64,
@@ -746,6 +747,7 @@ impl TrafficDbStore {
                     &record.client_app,
                     record.client_pid.map(|p| p as i32),
                     &record.client_path,
+                    &record.account_name,
                     flags as i32,
                     record.frame_count as i64,
                     record.last_frame_id as i64,
@@ -881,6 +883,7 @@ impl TrafficDbStore {
                     cip: row.get(16)?,
                     capp: row.get(17)?,
                     cpid: row.get::<_, Option<i32>>(18)?.map(|v| v as u32),
+                    acct: row.get(30)?,
                     flags: row.get::<_, i32>(19)? as u32,
                     fc: row.get::<_, i64>(20)? as usize,
                     ss: socket_status,
@@ -1146,7 +1149,7 @@ impl TrafficDbStore {
             .query_row(
                 "SELECT sequence, id, timestamp, host, method, status, protocol, url, path, \
                  content_type, request_content_type, request_size, response_size, upload_bytes, download_bytes, duration_ms, \
-                 listener_port, client_ip, client_app, client_pid, client_path, flags, frame_count, \
+                 listener_port, client_ip, client_app, client_pid, client_path, account_name, flags, frame_count, \
                  last_frame_id, socket_is_open, socket_send_count, socket_receive_count, \
                  socket_send_bytes, socket_receive_bytes, socket_frame_count, \
                  devtools_client_req_id \
@@ -1176,7 +1179,7 @@ impl TrafficDbStore {
              listener_port, client_ip, client_app, client_pid, flags, frame_count, \
              socket_is_open, socket_send_count, socket_receive_count, \
              socket_send_bytes, socket_receive_bytes, socket_frame_count, \
-             rule_count, rule_protocols, request_content_type \
+             rule_count, rule_protocols, request_content_type, account_name \
              FROM traffic_records WHERE id IN ({}) ORDER BY sequence DESC",
             placeholders.join(",")
         );
@@ -1225,6 +1228,7 @@ impl TrafficDbStore {
                 cip: row.get(16)?,
                 capp: row.get(17)?,
                 cpid: row.get::<_, Option<i32>>(18)?.map(|v| v as u32),
+                acct: row.get(30)?,
                 flags: row.get::<_, i32>(19)? as u32,
                 fc: row.get::<_, i64>(20)? as usize,
                 ss: socket_status,
@@ -1271,6 +1275,7 @@ impl TrafficDbStore {
             client_app: row.get("client_app")?,
             client_pid: row.get::<_, Option<i32>>("client_pid")?.map(|v| v as u32),
             client_path: row.get("client_path")?,
+            account_name: row.get("account_name")?,
             is_tunnel: flags & 1 != 0,
             is_websocket: flags & 2 != 0,
             is_sse: flags & 4 != 0,

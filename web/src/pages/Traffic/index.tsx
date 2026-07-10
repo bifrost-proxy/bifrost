@@ -116,10 +116,12 @@ export default function Traffic() {
   const clientInfo = useTrafficStore(
     useShallow((state) => ({
       apps: state.availableClientApps,
+      accounts: state.availableAccountNames,
       ips: state.availableClientIps,
       proxyPorts: state.availableProxyPorts,
       domains: state.availableDomains,
       appCounts: state.clientAppCounts,
+      accountCounts: state.accountNameCounts,
       ipCounts: state.clientIpCounts,
       proxyPortCounts: state.proxyPortCounts,
       domainCounts: state.domainCounts,
@@ -203,6 +205,9 @@ export default function Traffic() {
   const selectedClientApps = useFilterPanelStore(
     (state) => state.selectedClientApps,
   );
+  const selectedAccountNames = useFilterPanelStore(
+    (state) => state.selectedAccountNames,
+  );
   const selectedDomains = useFilterPanelStore((state) => state.selectedDomains);
   const setSelectedClientIps = useFilterPanelStore(
     (state) => state.setSelectedClientIps,
@@ -212,6 +217,9 @@ export default function Traffic() {
   );
   const setSelectedClientApps = useFilterPanelStore(
     (state) => state.setSelectedClientApps,
+  );
+  const setSelectedAccountNames = useFilterPanelStore(
+    (state) => state.setSelectedAccountNames,
   );
   const setSelectedDomains = useFilterPanelStore(
     (state) => state.setSelectedDomains,
@@ -250,15 +258,17 @@ export default function Traffic() {
       selectedClientIps.length > 0 ||
       selectedProxyPorts.length > 0 ||
       selectedClientApps.length > 0 ||
+      selectedAccountNames.length > 0 ||
       selectedDomains.length > 0;
     if (!hasAny) return "";
     return encodeJsonForQueryParam({
       clientIps: selectedClientIps,
       proxyPorts: selectedProxyPorts,
       clientApps: selectedClientApps,
+      accountNames: selectedAccountNames,
       domains: selectedDomains,
     });
-  }, [selectedClientApps, selectedClientIps, selectedDomains, selectedProxyPorts]);
+  }, [selectedAccountNames, selectedClientApps, selectedClientIps, selectedDomains, selectedProxyPorts]);
 
   const deserializePanel = useCallback((str: string) => {
     const toStringArray = (input: unknown): string[] =>
@@ -269,13 +279,14 @@ export default function Traffic() {
         : [];
     const value = decodeJsonFromQueryParam<unknown>(str || "");
     if (!value || typeof value !== "object") {
-      return { clientIps: [], proxyPorts: [], clientApps: [], domains: [] };
+      return { clientIps: [], proxyPorts: [], clientApps: [], accountNames: [], domains: [] };
     }
     const v = value as Record<string, unknown>;
     return {
       clientIps: toStringArray(v.clientIps),
       proxyPorts: toStringArray(v.proxyPorts),
       clientApps: toStringArray(v.clientApps),
+      accountNames: toStringArray(v.accountNames),
       domains: toStringArray(v.domains),
     };
   }, []);
@@ -366,6 +377,7 @@ export default function Traffic() {
     setSelectedClientIps(panelFromUrl.clientIps);
     setSelectedProxyPorts(panelFromUrl.proxyPorts);
     setSelectedClientApps(panelFromUrl.clientApps);
+    setSelectedAccountNames(panelFromUrl.accountNames);
     setSelectedDomains(panelFromUrl.domains);
 
     const searchFromUrl = deserializeSearch(searchParam);
@@ -396,6 +408,7 @@ export default function Traffic() {
     setSearchMode,
     setSearchScope,
     setSelectedClientApps,
+    setSelectedAccountNames,
     setSelectedClientIps,
     setSelectedProxyPorts,
     setSelectedDomains,
@@ -463,6 +476,7 @@ export default function Traffic() {
     searchMode,
     searchScope,
     selectedClientApps,
+    selectedAccountNames,
     selectedClientIps,
     selectedProxyPorts,
     selectedDomains,
@@ -629,9 +643,10 @@ export default function Traffic() {
       clientIps: selectedClientIps,
       proxyPorts: selectedProxyPorts,
       clientApps: selectedClientApps,
+      accountNames: selectedAccountNames,
       domains: selectedDomains,
     }),
-    [selectedClientIps, selectedProxyPorts, selectedClientApps, selectedDomains],
+    [selectedClientIps, selectedProxyPorts, selectedClientApps, selectedAccountNames, selectedDomains],
   );
 
   const deferredToolbarFilters = useDeferredValue(toolbarFilters);
@@ -791,10 +806,12 @@ export default function Traffic() {
       availableClientIps={clientInfo.ips}
       availableProxyPorts={clientInfo.proxyPorts}
       availableClientApps={clientInfo.apps}
+      availableAccountNames={clientInfo.accounts}
       availableDomains={clientInfo.domains}
       clientIpCounts={clientInfo.ipCounts}
       proxyPortCounts={clientInfo.proxyPortCounts}
       clientAppCounts={clientInfo.appCounts}
+      accountNameCounts={clientInfo.accountCounts}
       domainCounts={clientInfo.domainCounts}
     />
   );

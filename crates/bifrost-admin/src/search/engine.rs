@@ -955,6 +955,13 @@ impl SearchEngine {
             }
         }
 
+        if !filters.account_names.is_empty() {
+            match &compact.acct {
+                Some(account_name) if filters.account_names.contains(account_name) => {}
+                _ => return false,
+            }
+        }
+
         if !filters.domains.is_empty() {
             let host = &compact.h;
             if !filters.domains.iter().any(|d| host.contains(d)) {

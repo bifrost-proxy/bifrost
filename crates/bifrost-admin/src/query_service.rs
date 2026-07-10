@@ -474,6 +474,7 @@ pub fn search_request_from_command(args: &CommandSearchArgs) -> SearchRequest {
                 .collect(),
             client_ips: args.filters.client_ips.clone(),
             client_apps: args.filters.client_apps.clone(),
+            account_names: Vec::new(),
             domains: args.filters.domains.clone(),
         },
         cursor: args.cursor,

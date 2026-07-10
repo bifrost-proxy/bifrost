@@ -530,6 +530,7 @@ pub struct TrafficConfigUpdate {
 pub enum PinnedFilterType {
     ClientIp,
     ClientApp,
+    AccountName,
     #[default]
     Domain,
 }
@@ -556,6 +557,7 @@ pub struct CollapsedSections {
     pub pinned: bool,
     pub client_ip: bool,
     pub client_app: bool,
+    pub account_name: bool,
     pub domain: bool,
 }
 

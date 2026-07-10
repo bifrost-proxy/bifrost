@@ -181,6 +181,7 @@
 |------|---------|-----------|------|
 | [cgn-address-support.md](./cgn-address-support.md) | CGN 地址段支持与同子网局域网判定 | 9 | RFC 6598 CGN 100.64.0.0/10 地址段识别、同子网判定、allow_lan 联动、IP 列表展示、边界值验证 |
 | [network-refresh.md](./network-refresh.md) | 网络变化自动刷新子网信息 | 8 | VPN 连接/断开后子网自动刷新、WiFi 切换 IP 更新、访问控制策略实时同步、WebUI 实时推送 |
+| [network-account-filter.md](./network-account-filter.md) | Network 账号名称记录与筛选 | 4 | 代理认证账号名写入 traffic record、Network 列表/详情/API 过滤、左侧账号筛选数据源、账号管理卡片紧凑布局 |
 
 ### 注入功能测试
 

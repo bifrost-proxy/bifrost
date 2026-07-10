@@ -1132,6 +1132,15 @@ fn parse_query_params_from_query_string(query: &str) -> QueryParams {
                     };
                 }
                 "client_app_empty" => params.client_app_empty = value.parse().ok(),
+                "account_name" => params.account_name = Some(value),
+                "account_name_match" => {
+                    params.account_name_match = if value.eq_ignore_ascii_case("equals") {
+                        crate::traffic_db::TextMatchMode::Equals
+                    } else {
+                        crate::traffic_db::TextMatchMode::Contains
+                    };
+                }
+                "account_name_empty" => params.account_name_empty = value.parse().ok(),
                 "client_ip" => params.client_ip = Some(value),
                 "client_ip_match" => {
                     params.client_ip_match = if value.eq_ignore_ascii_case("equals") {

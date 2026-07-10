@@ -17,6 +17,7 @@ interface FilterPanelState {
   selectedClientIps: string[];
   selectedProxyPorts: string[];
   selectedClientApps: string[];
+  selectedAccountNames: string[];
   selectedDomains: string[];
   panelCollapsed: boolean;
   panelWidth: number;
@@ -32,10 +33,12 @@ interface FilterPanelState {
   setSelectedClientIps: (ips: string[]) => void;
   setSelectedProxyPorts: (ports: string[]) => void;
   setSelectedClientApps: (apps: string[]) => void;
+  setSelectedAccountNames: (accounts: string[]) => void;
   setSelectedDomains: (domains: string[]) => void;
   toggleClientIp: (ip: string) => void;
   toggleProxyPort: (port: string) => void;
   toggleClientApp: (app: string) => void;
+  toggleAccountName: (account: string) => void;
   toggleDomain: (domain: string) => void;
   clearAllSelections: () => void;
   setPanelCollapsed: (collapsed: boolean) => void;
@@ -58,6 +61,7 @@ const defaultCollapsedSections: CollapsedSections = {
   clientIp: false,
   proxyPort: false,
   clientApp: false,
+  accountName: false,
   domain: false,
 };
 
@@ -68,6 +72,7 @@ export const useFilterPanelStore = create<FilterPanelState>()(
       selectedClientIps: [],
       selectedProxyPorts: [],
       selectedClientApps: [],
+      selectedAccountNames: [],
       selectedDomains: [],
       panelCollapsed: false,
       panelWidth: 220,
@@ -125,6 +130,9 @@ export const useFilterPanelStore = create<FilterPanelState>()(
           case "client_app":
             get().toggleClientApp(filter.value);
             break;
+          case "account_name":
+            get().toggleAccountName(filter.value);
+            break;
           case "domain":
             get().toggleDomain(filter.value);
             break;
@@ -134,6 +142,7 @@ export const useFilterPanelStore = create<FilterPanelState>()(
       setSelectedClientIps: (ips) => set({ selectedClientIps: ips }),
       setSelectedProxyPorts: (ports) => set({ selectedProxyPorts: ports }),
       setSelectedClientApps: (apps) => set({ selectedClientApps: apps }),
+      setSelectedAccountNames: (accounts) => set({ selectedAccountNames: accounts }),
       setSelectedDomains: (domains) => set({ selectedDomains: domains }),
 
       toggleClientIp: (ip) => {
@@ -160,6 +169,14 @@ export const useFilterPanelStore = create<FilterPanelState>()(
         set({ selectedClientApps: apps });
       },
 
+      toggleAccountName: (account) => {
+        const state = get();
+        const accounts = state.selectedAccountNames.includes(account)
+          ? state.selectedAccountNames.filter((a) => a !== account)
+          : [...state.selectedAccountNames, account];
+        set({ selectedAccountNames: accounts });
+      },
+
       toggleDomain: (domain) => {
         const state = get();
         const domains = state.selectedDomains.includes(domain)
@@ -173,6 +190,7 @@ export const useFilterPanelStore = create<FilterPanelState>()(
           selectedClientIps: [],
           selectedProxyPorts: [],
           selectedClientApps: [],
+          selectedAccountNames: [],
           selectedDomains: [],
         });
       },
@@ -258,6 +276,7 @@ export const useFilterPanelStore = create<FilterPanelState>()(
         selectedClientIps: state.selectedClientIps,
         selectedProxyPorts: state.selectedProxyPorts,
         selectedClientApps: state.selectedClientApps,
+        selectedAccountNames: state.selectedAccountNames,
         selectedDomains: state.selectedDomains,
         searchKeyword: state.searchKeyword,
       }),
@@ -278,6 +297,8 @@ export const isFilterSelected = (
       return state.selectedProxyPorts.includes(value);
     case "client_app":
       return state.selectedClientApps.includes(value);
+    case "account_name":
+      return state.selectedAccountNames.includes(value);
     case "domain":
       return state.selectedDomains.includes(value);
     default:

@@ -555,18 +555,44 @@ export default function AccessControlTab() {
                   <Space direction="vertical" style={{ width: "100%" }} size="middle">
                     {userPassAccounts.map((account) => (
                       <Card key={account.key} size="small">
-                        <Space direction="vertical" style={{ width: "100%" }}>
-                          <Space wrap style={{ width: "100%", justifyContent: "space-between" }}>
+                        <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "flex-start",
+                              justifyContent: "space-between",
+                              gap: 12,
+                            }}
+                          >
                             <Text strong>Account</Text>
-                            <Button
-                              type="text"
-                              danger
-                              icon={<DeleteOutlined />}
-                              onClick={() => handleRemoveUserPassAccount(account.key)}
-                            >
-                              Remove
-                            </Button>
-                          </Space>
+                            <Space size={10} align="start" style={{ flexShrink: 0 }}>
+                              <Space direction="vertical" size={2} align="end">
+                                <Space size={6}>
+                                  <Text type="secondary" style={{ fontSize: 12 }}>
+                                    Enabled
+                                  </Text>
+                                  <Switch
+                                    size="small"
+                                    checked={account.enabled}
+                                    onChange={(checked) =>
+                                      handleUpdateUserPassAccount(account.key, "enabled", checked)
+                                    }
+                                  />
+                                </Space>
+                                <Text type="secondary" style={{ fontSize: 12 }}>
+                                  Last Connected: {account.lastConnectedAt ?? "-"}
+                                </Text>
+                              </Space>
+                              <Button
+                                type="text"
+                                danger
+                                size="small"
+                                icon={<DeleteOutlined />}
+                                onClick={() => handleRemoveUserPassAccount(account.key)}
+                                aria-label="Remove account"
+                              />
+                            </Space>
+                          </div>
                           <Input
                             placeholder="Username"
                             value={account.username}
@@ -583,18 +609,6 @@ export default function AccessControlTab() {
                             }
                             data-testid={`settings-access-userpass-password-${account.key}`}
                           />
-                          <Space>
-                            <Switch
-                              checked={account.enabled}
-                              onChange={(checked) =>
-                                handleUpdateUserPassAccount(account.key, "enabled", checked)
-                              }
-                            />
-                            <Text>Account Enabled</Text>
-                          </Space>
-                          <Text type="secondary" style={{ fontSize: 12 }}>
-                            Last Connected: {account.lastConnectedAt ?? "-"}
-                          </Text>
                         </Space>
                       </Card>
                     ))}

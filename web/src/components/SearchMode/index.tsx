@@ -68,6 +68,9 @@ export default function SearchMode({
   const selectedClientApps = useFilterPanelStore(
     (state) => state.selectedClientApps,
   );
+  const selectedAccountNames = useFilterPanelStore(
+    (state) => state.selectedAccountNames,
+  );
   const selectedDomains = useFilterPanelStore((state) => state.selectedDomains);
 
   const buildFilters = useCallback((): SearchFilters => {
@@ -91,6 +94,7 @@ export default function SearchMode({
         })),
       client_ips: selectedClientIps,
       client_apps: allClientApps,
+      account_names: selectedAccountNames,
       domains: selectedDomains,
     };
   }, [
@@ -98,6 +102,7 @@ export default function SearchMode({
     toolbarFilters,
     selectedClientIps,
     selectedClientApps,
+    selectedAccountNames,
     selectedDomains,
   ]);
 
@@ -107,6 +112,7 @@ export default function SearchMode({
       filterConditions.some(isFilterConditionApplicable) ||
       selectedClientIps.length > 0 ||
       selectedClientApps.length > 0 ||
+      selectedAccountNames.length > 0 ||
       selectedDomains.length > 0 ||
       toolbarFilters.protocol.length > 0 ||
       toolbarFilters.status.length > 0 ||
@@ -121,6 +127,7 @@ export default function SearchMode({
     filterConditions,
     selectedClientIps,
     selectedClientApps,
+    selectedAccountNames,
     selectedDomains,
     toolbarFilters,
     search,
@@ -132,6 +139,7 @@ export default function SearchMode({
     filterConditions.some(isFilterConditionApplicable) ||
     selectedClientIps.length > 0 ||
     selectedClientApps.length > 0 ||
+    selectedAccountNames.length > 0 ||
     selectedDomains.length > 0 ||
     toolbarFilters.protocol.length > 0 ||
     toolbarFilters.status.length > 0 ||

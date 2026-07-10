@@ -633,6 +633,7 @@ pub struct SocksHandler {
     unsafe_ssl: bool,
     inject_bifrost_badge: bool,
     proxy_auth_rate_limiter: Option<Arc<ProxyAuthRateLimiter>>,
+    authenticated_account_name: Option<String>,
 }
 
 impl SocksHandler {
@@ -665,6 +666,7 @@ impl SocksHandler {
             unsafe_ssl: false,
             inject_bifrost_badge: true,
             proxy_auth_rate_limiter: None,
+            authenticated_account_name: None,
         }
     }
 
@@ -891,6 +893,7 @@ impl SocksHandler {
             limiter.record_success(&self.peer_addr.ip());
         }
 
+        self.authenticated_account_name = matched_username;
         debug!("SOCKS5: User '{}' authenticated successfully", username);
         Ok(())
     }
@@ -1463,6 +1466,7 @@ impl SocksHandler {
             record.client_app = client_app;
             record.client_pid = client_pid;
             record.client_path = client_path;
+            record.account_name = self.authenticated_account_name.clone();
             record.listener_port = self.local_addr.port();
             record.has_rule_hit = !resolved_rules.rules.is_empty()
                 || resolved_rules.host.is_some()
@@ -1722,6 +1726,7 @@ impl SocksHandler {
         };
         let local_addr = self.local_addr;
         let inject_bifrost_badge = self.inject_bifrost_badge;
+        let account_name = self.authenticated_account_name.clone();
 
         let service = service_fn(move |req: Request<Incoming>| {
             let target_host = target_host.clone();
@@ -1729,6 +1734,7 @@ impl SocksHandler {
             let rules = rules.clone();
             let admin_state = admin_state_for_service.clone();
             let dns_resolver = dns_resolver.clone();
+            let account_name = account_name.clone();
             async move {
                 handle_socks5_intercepted_request(
                     req,
@@ -1745,6 +1751,7 @@ impl SocksHandler {
                     unsafe_ssl,
                     peer_addr,
                     local_addr,
+                    account_name,
                 )
                 .await
             }
@@ -1889,6 +1896,7 @@ impl SocksHandler {
             record.client_app = client_app;
             record.client_pid = client_pid;
             record.client_path = client_path;
+            record.account_name = self.authenticated_account_name.clone();
             record.listener_port = self.local_addr.port();
 
             let body_start = request_str
@@ -2078,6 +2086,7 @@ async fn handle_socks5_intercepted_request(
     unsafe_ssl: bool,
     peer_addr: SocketAddr,
     local_addr: SocketAddr,
+    account_name: Option<String>,
 ) -> std::result::Result<Response<BoxBody>, hyper::Error> {
     let method = req.method().to_string();
     let original_uri = req.uri().clone();
@@ -2161,6 +2170,7 @@ async fn handle_socks5_intercepted_request(
     let ctx = RequestContext::new()
         .with_client_ip(peer_addr.ip().to_string())
         .with_client_process(client_app, client_pid, client_path)
+        .with_account_name(account_name)
         .with_port(local_addr.port())
         .with_request_info(
             full_url.clone(),

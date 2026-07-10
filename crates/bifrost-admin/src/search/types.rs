@@ -154,6 +154,8 @@ pub struct SearchFilters {
     #[serde(default)]
     pub client_apps: Vec<String>,
     #[serde(default)]
+    pub account_names: Vec<String>,
+    #[serde(default)]
     pub domains: Vec<String>,
 }
 
@@ -166,6 +168,7 @@ impl SearchFilters {
             || !self.conditions.is_empty()
             || !self.client_ips.is_empty()
             || !self.client_apps.is_empty()
+            || !self.account_names.is_empty()
             || !self.domains.is_empty()
     }
 }
