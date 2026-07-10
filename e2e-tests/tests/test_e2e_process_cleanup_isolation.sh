@@ -67,7 +67,7 @@ start_instance() {
     BIFROST_DISABLE_TRAY=1 \
     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
         "$BIFROST_BIN" -H 127.0.0.1 -p "$port" start \
-        --yes --skip-cert-check --unsafe-ssl --no-system-proxy --no-tray \
+        --yes --skip-cert-check --unsafe-ssl --no-system-proxy \
         >"$log_file" 2>&1 &
     echo $!
 }
