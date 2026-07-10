@@ -36,6 +36,7 @@ import { SshAuthService } from './ssh-auth';
 import { ed25519FingerprintFromBase64 } from './pop';
 import {
   pushToClient,
+  pushReplaySafeToClient,
   getClientStream,
   updateClientDiscovery,
   clearClientDiscovery,
@@ -44,6 +45,7 @@ import {
   pushToPairingWatcher,
   pushToCallerStream,
   clearCallerEventBuffer,
+  clearReplaySafeClientEvents,
 } from './sse';
 
 const nanoid = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_', 21);
@@ -949,6 +951,7 @@ export class RemoteInvokeService {
     this.callTokens.delete(callId);
     this.callRuntimeMeta.delete(callId);
     clearCallerEventBuffer(callId);
+    clearReplaySafeClientEvents(callId);
   }
 
   async postCallerInput(callId: string, envelopeJson: string): Promise<void> {
@@ -962,10 +965,13 @@ export class RemoteInvokeService {
       await this.storage.remoteInvoke.updateCall(callId, { status: 'streaming' });
     }
 
-    pushToClient(call.client_instance_id, 'call_frame', {
+    const accepted = pushReplaySafeToClient(call.client_instance_id, callId, 'call_frame', {
       call_id: callId,
       envelope_json: envelopeJson,
     });
+    if (!accepted) {
+      throw new Error('target_stream_unavailable');
+    }
 
     await this.storage.remoteInvoke.appendEvent({
       id: nanoid(),
@@ -1061,6 +1067,7 @@ export class RemoteInvokeService {
       stderr_digest: req.stderr_digest,
       exit_encrypted: req.exit_encrypted,
     });
+    clearReplaySafeClientEvents(req.call_id);
 
     const grant = await this.storage.remoteInvoke.getGrant(call.grant_id);
     if (grant && grant.grant_mode === 'once' && grant.remaining_calls <= 0) {
@@ -1092,6 +1099,7 @@ export class RemoteInvokeService {
 
     pushToClient(call.client_instance_id, 'call_cancel', { call_id: callId });
     pushToCallerStream(callId, 'status', { call_id: callId, status: 'cancelled' });
+    clearReplaySafeClientEvents(callId);
 
     await this.storage.remoteInvoke.appendEvent({
       id: nanoid(),
@@ -1371,6 +1379,7 @@ export class RemoteInvokeService {
     this.callTokens.delete(callId);
     this.callRuntimeMeta.delete(callId);
     clearCallerEventBuffer(callId);
+    clearReplaySafeClientEvents(callId);
   }
 
   private cleanupExpiredRegistrationChallenges(): void {

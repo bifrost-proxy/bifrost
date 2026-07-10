@@ -5,10 +5,23 @@ import type { ClientStreamState } from './types';
 const clientStreams = new Map<string, ClientStreamState>();
 const callerStreams = new Map<string, { res: ServerResponse; callId: string }>();
 const callerEventBuffers = new Map<string, Array<{ event: string; data: unknown; id?: string }>>();
+type ReplaySafeClientEvent = {
+  scopeKey: string;
+  event: string;
+  data: unknown;
+  id?: string;
+  bufferedAt: number;
+  encodedBytes: number;
+};
+const replaySafeClientEventBuffers = new Map<string, ReplaySafeClientEvent[]>();
 type WatcherEntry = { res: ServerResponse; pairingId: string; watchTokenHash?: string };
 const pairingWatchers = new Map<string, Set<WatcherEntry>>();
 const pairingEventBuffers = new Map<string, Array<{ event: string; data: unknown }>>();
 const MAX_BUFFERED_CALLER_EVENTS = 256;
+const MAX_REPLAY_SAFE_CLIENTS = 128;
+const MAX_REPLAY_SAFE_CLIENT_EVENTS = 64;
+const MAX_REPLAY_SAFE_CLIENT_BYTES = 512 * 1024;
+const REPLAY_SAFE_CLIENT_EVENT_TTL_MS = 30_000;
 
 let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -94,6 +107,116 @@ export function pushToClient(clientInstanceId: string, event: string, data: unkn
   } catch (e) {
     clientStreams.delete(clientInstanceId);
     return false;
+  }
+}
+
+function pruneReplaySafeClientEvents(clientInstanceId: string, now: number): ReplaySafeClientEvent[] {
+  const retained = (replaySafeClientEventBuffers.get(clientInstanceId) ?? []).filter(
+    (entry) => now - entry.bufferedAt <= REPLAY_SAFE_CLIENT_EVENT_TTL_MS,
+  );
+  if (retained.length > 0) {
+    replaySafeClientEventBuffers.set(clientInstanceId, retained);
+  } else {
+    replaySafeClientEventBuffers.delete(clientInstanceId);
+  }
+  return retained;
+}
+
+function bufferReplaySafeClientEvent(
+  clientInstanceId: string,
+  scopeKey: string,
+  event: string,
+  data: unknown,
+  allowEviction: boolean,
+  id?: string,
+): boolean {
+  const now = Date.now();
+  let encodedBytes: number;
+  try {
+    encodedBytes = Buffer.byteLength(JSON.stringify(data), 'utf8')
+      + Buffer.byteLength(scopeKey, 'utf8')
+      + Buffer.byteLength(event, 'utf8')
+      + Buffer.byteLength(id ?? '', 'utf8');
+  } catch {
+    return false;
+  }
+  if (encodedBytes > MAX_REPLAY_SAFE_CLIENT_BYTES) {
+    return false;
+  }
+
+  if (!replaySafeClientEventBuffers.has(clientInstanceId)
+    && replaySafeClientEventBuffers.size >= MAX_REPLAY_SAFE_CLIENTS) {
+    if (!allowEviction) return false;
+    const oldestClient = replaySafeClientEventBuffers.keys().next().value;
+    if (oldestClient) replaySafeClientEventBuffers.delete(oldestClient);
+  }
+
+  const buffered = pruneReplaySafeClientEvents(clientInstanceId, now);
+  let bufferedBytes = buffered.reduce((total, entry) => total + entry.encodedBytes, 0);
+  if (!allowEviction
+    && (buffered.length >= MAX_REPLAY_SAFE_CLIENT_EVENTS
+      || bufferedBytes + encodedBytes > MAX_REPLAY_SAFE_CLIENT_BYTES)) {
+    return false;
+  }
+  while (buffered.length >= MAX_REPLAY_SAFE_CLIENT_EVENTS
+    || bufferedBytes + encodedBytes > MAX_REPLAY_SAFE_CLIENT_BYTES) {
+    const removed = buffered.shift();
+    if (!removed) break;
+    bufferedBytes -= removed.encodedBytes;
+  }
+  buffered.push({ scopeKey, event, data, id, bufferedAt: now, encodedBytes });
+  replaySafeClientEventBuffers.set(clientInstanceId, buffered);
+  return true;
+}
+
+/**
+ * Send an event whose receiver can safely reject duplicate delivery, while
+ * retaining it briefly for replay after a target SSE reconnect. Caller stdin
+ * frames satisfy that contract because their encrypted sequence number is
+ * checked by the target replay window.
+ */
+export function pushReplaySafeToClient(
+  clientInstanceId: string,
+  scopeKey: string,
+  event: string,
+  data: unknown,
+  id?: string,
+): boolean {
+  const delivered = pushToClient(clientInstanceId, event, data, id);
+  const buffered = bufferReplaySafeClientEvent(
+    clientInstanceId,
+    scopeKey,
+    event,
+    data,
+    delivered,
+    id,
+  );
+  return delivered || buffered;
+}
+
+export function flushReplaySafeClientEvents(clientInstanceId: string): boolean {
+  const state = clientStreams.get(clientInstanceId);
+  if (!state) return false;
+  const buffered = pruneReplaySafeClientEvents(clientInstanceId, Date.now());
+  try {
+    for (const entry of buffered) {
+      writeSseEvent(state.res, entry.event, entry.data, entry.id);
+    }
+    return true;
+  } catch {
+    clientStreams.delete(clientInstanceId);
+    return false;
+  }
+}
+
+export function clearReplaySafeClientEvents(scopeKey: string): void {
+  for (const [clientInstanceId, buffered] of replaySafeClientEventBuffers) {
+    const retained = buffered.filter((entry) => entry.scopeKey !== scopeKey);
+    if (retained.length > 0) {
+      replaySafeClientEventBuffers.set(clientInstanceId, retained);
+    } else {
+      replaySafeClientEventBuffers.delete(clientInstanceId);
+    }
   }
 }
 

@@ -66,7 +66,15 @@ target 的 `call_open` 还没完成 active call 登记时，worker 会把 frame 
 inactive call 丢弃，导致远端子进程已经输出 `READY` 但读不到
 `EARLY_STDIN_OK`。
 
-当前修复采用两层约束：
+当前修复采用三层约束：
+
+- relay 对 caller-to-client `call_frame` 采用 30 秒短期重放缓冲。缓冲只用于
+  带加密序列号、能被 target replay window 安全去重的事件；每 client 最多
+  64 帧 / 512 KiB、全局最多 128 个 client。即使 target SSE 在 relay 返回
+  caller 200 之后发生短暂替换，重连也会在 `client_hello_ack` 后重放近期 stdin，
+  避免“caller 认为成功、target 永久丢帧”。call 终止时立即清理对应重放项；
+  target 不在线且缓冲无法容纳完整新帧时返回 `target_stream_unavailable`，不把
+  无法重放的输入伪装成成功。
 
 - target worker 仅对已解析且方向为 `CallerToClient` 的早到 encrypted
   `call_frame` 建立短期缓冲，TTL 为 10 秒；每 call 最多 64 帧 / 256 KiB、
@@ -89,6 +97,7 @@ inactive call 丢弃，导致远端子进程已经输出 `READY` 但读不到
 ```bash
 cargo test -p bifrost-admin stdin -- --nocapture
 cargo test -p bifrost-admin handle_call_frame -- --nocapture
+pnpm -C packages/bifrost-sync-server test -- remote-invoke-sse.test.ts
 bash e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh
 ```
 

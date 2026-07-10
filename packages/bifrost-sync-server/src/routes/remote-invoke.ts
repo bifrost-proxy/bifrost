@@ -16,6 +16,7 @@ import { RemoteInvokeService } from '../remote-invoke/service';
 import { RateLimiter } from '../security';
 import {
   registerClientStream,
+  flushReplaySafeClientEvents,
   unregisterClientStream,
   registerPairingWatcher,
   unregisterPairingWatcher,
@@ -560,6 +561,7 @@ function handleClientStream(
     stream_id: streamId,
     server_time: new Date().toISOString(),
   });
+  flushReplaySafeClientEvents(clientId);
 
   ctx.req.on('close', () => {
     unregisterClientStream(clientId, streamId);

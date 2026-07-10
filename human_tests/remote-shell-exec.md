@@ -416,18 +416,42 @@ pnpm --dir packages/bifrost-sync-server exec tsx src/cli.ts -p "$RELAY_PORT" -d 
    cargo test -p bifrost-admin early_call_frame -- --nocapture
    cargo test -p bifrost-admin saturated_early_call_map -- --nocapture
    ```
-4. 执行真实 remote shell streaming E2E：
+4. 执行 relay target SSE 重连重放回归：
+   ```bash
+   pnpm -C packages/bifrost-sync-server test -- remote-invoke-sse.test.ts
+   ```
+5. 执行真实 remote shell streaming E2E：
    ```bash
    bash e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh
    ```
 
 预期：
 - 如果 relay 先把 caller-to-client `call_frame` 推到 target，而 `call_open` 还没完成 active call 登记，target worker 会把已解析且方向合法的 encrypted frame 放入有 TTL 和容量上限的短期缓冲。
+- 如果 relay 已接受 caller stdin、但 target SSE 在投递窗口内断开或被替换，relay 会在 30 秒内保留可安全去重的 `call_frame`，并在新 target stream 的 `client_hello_ack` 后重放；每 client 最多 64 帧 / 512 KiB、全局最多 128 个 client，call 终止后清理。
 - `call_open` 创建 active call 并准备 stdin channel 后，会立即回放早到 frame；回放仍走原有 grant crypto、counter nonce、replay window 和 stdin 解密路径，不绕过安全校验。
 - 生产 executor 在 `stdin_mode=stream` 时打开 child stdin pipe，并把 mpsc stdin stream 写入子进程；未接 worker 的备用 streaming 方法不作为验收依据。
 - 早到 stdin 每 call 最多 64 帧 / 256 KiB、全局最多 8 MiB；超预算、过期或全局饱和时整个 call 显式失败，不会丢弃部分输入后继续执行，也不会在 executor 启动前填满 64-slot stdin channel。
 - 真实 E2E 的 `stdin first-frame regression` 中，远端 Python 先输出 `READY`，随后读到 caller 管道输入 `EARLY_STDIN_OK`，命令 exit code 为 0；Recent Calls 最新 `shell.exec` 记录 `policy_id=stream-shell`、`exec_mode=shell_text`、`exit_code=0`、`stdout_digest` 有效。
 - 真实 E2E 继续发送 81920 字节（超过旧 16 x 4096-byte 窗口），远端必须输出长度 `81920` 和完全一致的 SHA-256。
+
+### TC-RSE-34：relay 接受 stdin 后 target SSE 重连不丢帧
+
+步骤：
+1. 执行 sync-server target SSE 重连缓冲测试：
+   ```bash
+   pnpm -C packages/bifrost-sync-server test -- remote-invoke-sse.test.ts
+   pnpm -C packages/bifrost-sync-server lint
+   ```
+2. 执行真实 remote shell streaming E2E：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh
+   ```
+
+预期：
+- target SSE 未连接时，caller stdin 不会在 relay 返回成功后永久丢失；注册新 stream 并 flush 后可收到 `call_frame`。
+- target SSE 已收到 frame 后发生替换，新 stream 会在 30 秒窗口内收到同一 encrypted frame；target 的 inbound replay window 会拒绝重复 seq，不会把 stdin 写入两次。
+- call 终止后对应重放项被清理；单 client 缓冲限制为 64 帧 / 512 KiB，全局最多 128 clients。
+- 真实 E2E 59/59 PASS，首帧输出同时包含 `READY` 与 `EARLY_STDIN_OK`。
 
 ## 清理步骤
 
@@ -440,6 +464,7 @@ rm -rf "$TARGET_DATA_DIR" "$CALLER_DATA_DIR" "$CALLER_2_DATA_DIR" "$RELAY_DATA_D
 
 | 用例 | 结果 | 实际结果 |
 | --- | --- | --- |
+| TC-RSE-34 | ✅ PASS | 2026-07-10 远端 CI run `29065515999` 的 macOS arm64 shard 2/2 暴露 relay target SSE 短暂断流时 `postCallerInput` 仍返回成功、首帧却未投递的第二层竞态：远端只输出 `READY` 后命中 10 秒 timeout。修复后 relay 仅对带加密 seq、可由 target replay window 安全去重的 caller stdin 保留 30 秒有界重放项（每 client 64 帧 / 512 KiB、全局 128 clients），新 stream 在 `client_hello_ack` 后重放，call 终止时清理；target 不在线且缓冲无法容纳时显式返回 `target_stream_unavailable`。执行 sync-server 全量 208 tests、TypeScript lint/build 通过；随后执行真实 relay / target / caller E2E 59/59 PASS。 |
 | TC-RSE-01 | ✅ PASS | `remote command exec --help` 已不再展示 `--policy`，仍保留 `--cwd`、`--env`、`--timeout-ms`、`--shell-text`。 |
 | TC-RSE-02 | ✅ PASS | 在已有 saved connection 仅具备 `remote_query` scope 的真实场景下执行 shell.exec，caller 收到明确升级提示，不再硬打到 target。 |
 | TC-RSE-03 | ✅ PASS | 真实隔离环境下，caller 执行 `remote command exec -- /bin/pwd` 成功，target 自动命中 `pwd-argv`，Recent Calls 记录 `policy_id=pwd-argv`。 |
