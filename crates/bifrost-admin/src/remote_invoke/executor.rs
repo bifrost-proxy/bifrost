@@ -1531,7 +1531,6 @@ impl RemoteInvokeExecutor {
     pub async fn execute_shell_exec_streaming(
         &self,
         command: &RemoteCommand,
-        stdin_rx: Option<tokio::sync::mpsc::Receiver<Vec<u8>>>,
         frame_tx: tokio::sync::mpsc::Sender<crate::remote_invoke::types::StreamFrame>,
     ) -> Result<()> {
         use crate::remote_invoke::types::StreamFrame;
@@ -1605,11 +1604,7 @@ impl RemoteInvokeExecutor {
         };
         process.stdout(Stdio::piped());
         process.stderr(Stdio::piped());
-        if stdin_rx.is_some() {
-            process.stdin(Stdio::piped());
-        } else {
-            process.stdin(Stdio::null());
-        }
+        process.stdin(Stdio::null());
         process.kill_on_drop(true);
 
         let mut child = match process.spawn() {
@@ -1624,20 +1619,6 @@ impl RemoteInvokeExecutor {
                 return Ok(());
             }
         };
-        if let Some(mut stdin_rx) = stdin_rx {
-            if let Some(mut child_stdin) = child.stdin.take() {
-                tokio::spawn(async move {
-                    while let Some(bytes) = stdin_rx.recv().await {
-                        if child_stdin.write_all(&bytes).await.is_err() {
-                            break;
-                        }
-                        if child_stdin.flush().await.is_err() {
-                            break;
-                        }
-                    }
-                });
-            }
-        }
         let mut stdout_reader = match child.stdout.take() {
             Some(r) => r,
             None => {
@@ -4231,104 +4212,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_execute_shell_exec_streaming_forwards_stdin_stream() {
-        use crate::remote_invoke::types::StreamFrame;
-
-        let _guard = crate::remote_invoke::remote_shell_test_guard();
-        let dir = TempDir::new().expect("tempdir");
-        let data_dir = dir.path().join("bifrost-data");
-        std::fs::create_dir_all(&data_dir).expect("create data dir");
-        bifrost_storage::set_data_dir(data_dir);
-        let mut metadata = serde_json::json!({
-            "exec_mode": "shell_text",
-            "allowed_shell_patterns": ["^(?s:.*)$"],
-            "stdin_allowed": true,
-            "max_timeout_ms": 5000
-        });
-        if let Some(shell) = simple_shell_program() {
-            metadata["shell"] = serde_json::json!(shell);
-        }
-        RemoteShellStore::new()
-            .expect("store")
-            .save(&RemoteShellSet {
-                schema_version: 1,
-                version: 1,
-                policies: vec![RemoteShellPolicy {
-                    id: "stdin-streaming-shell".to_string(),
-                    name: "stdin-streaming-shell".to_string(),
-                    description: None,
-                    enabled: true,
-                    profile_id: None,
-                    metadata,
-                }],
-                profiles: vec![],
-            })
-            .expect("save");
-
-        let executor = RemoteInvokeExecutor::new("127.0.0.1", 8800);
-        let cmd = RemoteCommand {
-            kind: super::super::types::CommandKind::ShellExec,
-            policy_id: Some("stdin-streaming-shell".to_string()),
-            exec_mode: Some(ShellExecMode::ShellText),
-            command_text: Some(stdin_shell_command().to_string()),
-            stdin_mode: Some(super::super::types::StdinMode::Stream),
-            ..Default::default()
-        };
-        let (stdin_tx, stdin_rx) = tokio::sync::mpsc::channel(4);
-        let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<StreamFrame>(8);
-        let runtime = tokio::runtime::Runtime::new().expect("runtime");
-        let frames = runtime.block_on(async move {
-            let exec_task = tokio::spawn(async move {
-                executor
-                    .execute_shell_exec_streaming(&cmd, Some(stdin_rx), frame_tx)
-                    .await
-            });
-            stdin_tx
-                .send(b"hello streaming stdin\n".to_vec())
-                .await
-                .expect("send stdin");
-            drop(stdin_tx);
-
-            let mut frames = Vec::new();
-            while let Some(frame) = frame_rx.recv().await {
-                frames.push(frame);
-            }
-            exec_task.await.expect("join").expect("streaming exec");
-            frames
-        });
-
-        let mut stdout = Vec::new();
-        let mut exit_code = None;
-        for frame in frames {
-            match frame {
-                StreamFrame::Stdout { data_b64, .. } => {
-                    let bytes = base64::Engine::decode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &data_b64,
-                    )
-                    .expect("b64");
-                    stdout.extend_from_slice(&bytes);
-                }
-                StreamFrame::Done {
-                    exit_code: code, ..
-                } => {
-                    exit_code = Some(code);
-                }
-                StreamFrame::Error { code, message } => {
-                    panic!("unexpected streaming error frame: {code} {message}");
-                }
-                _ => {}
-            }
-        }
-
-        assert_eq!(exit_code, Some(0));
-        assert_eq!(
-            String::from_utf8_lossy(&stdout).replace("\r\n", "\n"),
-            "hello streaming stdin\n"
-        );
-    }
-
     #[cfg(unix)]
     #[test]
     fn test_execute_shell_exec_pty_reports_isatty_true() {
@@ -5305,7 +5188,7 @@ mod tests {
         let cmd_clone = std::sync::Arc::clone(&cmd_arc);
         runtime.spawn(async move {
             exec_clone
-                .execute_shell_exec_streaming(&cmd_clone, None, tx)
+                .execute_shell_exec_streaming(&cmd_clone, tx)
                 .await
                 .expect("streaming ok");
         });
@@ -5422,7 +5305,7 @@ mod tests {
         let cmd_clone = std::sync::Arc::clone(&cmd);
         let join = runtime.spawn(async move {
             exec_clone
-                .execute_shell_exec_streaming(&cmd_clone, None, tx)
+                .execute_shell_exec_streaming(&cmd_clone, tx)
                 .await
         });
 
@@ -5492,7 +5375,7 @@ mod tests {
         let cmd_clone = std::sync::Arc::clone(&cmd_arc);
         runtime.spawn(async move {
             exec_clone
-                .execute_shell_exec_streaming(&cmd_clone, None, tx)
+                .execute_shell_exec_streaming(&cmd_clone, tx)
                 .await
                 .expect("streaming ok");
         });

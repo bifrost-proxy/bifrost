@@ -150,6 +150,27 @@ bifrost_cli() {
         "$bifrost_bin" -p "$(admin_port)" "$@"
 }
 
+restart_bifrost_without_user_env() {
+    local saved_user="${USER-}"
+    local saved_username="${USERNAME-}"
+    local saved_userprofile="${USERPROFILE-}"
+
+    if [[ -n "$ADMIN_CLIENT_BIFROST_PID" ]] && kill -0 "$ADMIN_CLIENT_BIFROST_PID" 2>/dev/null; then
+        safe_cleanup_proxy "$ADMIN_CLIENT_BIFROST_PID"
+    fi
+    [[ -n "$ADMIN_CLIENT_BIFROST_LOG_FILE" ]] && rm -f "$ADMIN_CLIENT_BIFROST_LOG_FILE" 2>/dev/null || true
+    ADMIN_CLIENT_BIFROST_PID=""
+    ADMIN_CLIENT_BIFROST_LOG_FILE=""
+
+    unset USER USERNAME USERPROFILE
+    local rc=0
+    admin_start_bifrost || rc=$?
+    [[ -n "$saved_user" ]] && export USER="$saved_user"
+    [[ -n "$saved_username" ]] && export USERNAME="$saved_username"
+    [[ -n "$saved_userprofile" ]] && export USERPROFILE="$saved_userprofile"
+    return "$rc"
+}
+
 proxy_http_status() {
     local proxy_user_arg=""
     if [[ -n "${1:-}" ]]; then
@@ -263,6 +284,11 @@ test_account_cli_multi_account_traffic_and_encrypted_config() {
         log_fail "account add disabled-user failed"
         return 1
     }
+    printf 'bifrost-local-secret:not-json\n' | bifrost_cli account add prefix-user --password-stdin >"$out_dir/add-prefix.out" 2>&1 || {
+        cat "$out_dir/add-prefix.out"
+        log_fail "account add prefix-user failed"
+        return 1
+    }
 
     local response
     response=$(admin_get "/api/whitelist")
@@ -270,8 +296,8 @@ test_account_cli_multi_account_traffic_and_encrypted_config() {
         log_fail "account add --enable-auth should enable userpass"
         return 1
     fi
-    if [[ "$(echo "$response" | jq -r '[.userpass.accounts[] | select(.username=="alice" or .username=="bob" or .username=="disabled-user")] | length')" != "3" ]]; then
-        log_fail "all three CLI accounts should be visible"
+    if [[ "$(echo "$response" | jq -r '[.userpass.accounts[] | select(.username=="alice" or .username=="bob" or .username=="disabled-user" or .username=="prefix-user")] | length')" != "4" ]]; then
+        log_fail "all four CLI accounts should be visible"
         return 1
     fi
     if [[ "$(echo "$response" | jq -r '.userpass.accounts[] | select(.username=="disabled-user") | .enabled')" != "false" ]]; then
@@ -284,18 +310,38 @@ test_account_cli_multi_account_traffic_and_encrypted_config() {
         log_fail "account list --json failed"
         return 1
     }
-    if [[ "$(jq -r '[.accounts[] | select(.has_password == true)] | length' "$out_dir/list.json")" -lt "3" ]]; then
+    if [[ "$(jq -r '[.accounts[] | select(.has_password == true)] | length' "$out_dir/list.json")" -lt "4" ]]; then
         log_fail "account list --json should expose has_password for all accounts"
         return 1
     fi
 
     local raw_config="$BIFROST_DATA_DIR/config.toml"
-    if grep -Eq 'alpha-secret-123|beta-secret-123|disabled-secret-123' "$raw_config"; then
+    if grep -Eq 'alpha-secret-123|beta-secret-123|disabled-secret-123|bifrost-local-secret:not-json' "$raw_config"; then
         log_fail "config.toml should not contain plaintext account password"
         return 1
     fi
     if ! grep -q 'bifrost-local-secret:' "$raw_config"; then
         log_fail "config.toml should contain encrypted local secret envelope"
+        return 1
+    fi
+    if [[ ! -f "$BIFROST_DATA_DIR/local_config_secret.key" ]]; then
+        log_fail "local config secret key should be persisted beside config.toml"
+        return 1
+    fi
+
+    if ! restart_bifrost_without_user_env; then
+        log_fail "Bifrost should restart with the same data dir when USER-style env vars are absent"
+        return 1
+    fi
+    bifrost_cli account set-loopback-auth true >"$out_dir/restart-loopback.out" 2>&1 || {
+        cat "$out_dir/restart-loopback.out"
+        log_fail "account config should remain readable after changed-env restart"
+        return 1
+    }
+    local prefix_status
+    prefix_status=$(proxy_http_status "prefix-user:bifrost-local-secret:not-json")
+    if [[ "$prefix_status" != "200" ]]; then
+        log_fail "reserved-prefix password should authenticate after restart (got $prefix_status)"
         return 1
     fi
 

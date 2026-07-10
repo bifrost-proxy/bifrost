@@ -4,7 +4,7 @@
 
 Bifrost 原始访问控制是纯 IP 维度的 `ClientAccessControl`，只有 `allow_all` / `local_only` / `whitelist` / `interactive` 四种模式；SOCKS5 内部虽然实现了 RFC1929 用户名密码握手，但没有和 access control 联动，也不覆盖 HTTP 代理。多个真实场景下用户既想保留白名单/交互式审批，又想让远端可信客户端通过用户名密码继续接入，因此需要一套“IP 授权 + `user:password` 授权”的叠加式补充能力，同时不改变未配置该能力时的既有行为。
 
-真实实现状态（截至 2026-07-10）：核心配置模型、HTTP 407 鉴权、SOCKS5 IP + userpass 组合、运行时 `last_connected_at`、admin API、Web 设置页、CLI `start --proxy-user`、低层 `config access.userpass.*` 与账号级 `account` 子命令均已落地；持久化配置中的账号密码会以本机设备指纹派生密钥加密落盘，运行时仍解密为现有 `UserPassAccountConfig.password` 供鉴权逻辑使用。
+真实实现状态（截至 2026-07-10）：核心配置模型、HTTP 407 鉴权、SOCKS5 IP + userpass 组合、运行时 `last_connected_at`、admin API、Web 设置页、CLI `start --proxy-user`、低层 `config access.userpass.*` 与账号级 `account` 子命令均已落地；持久化配置中的账号密码会使用本地随机持久密钥加密落盘，运行时仍解密为现有 `UserPassAccountConfig.password` 供鉴权逻辑使用。
 
 ## 用户目标验证清单
 
@@ -114,9 +114,10 @@ pub struct AccessControlConfig {
 
 `crates/bifrost-storage/src/local_secrets.rs` 使用 AES-256-GCM envelope 加密本机配置 secret：
 
-- key 派生材料：固定 domain separator、`BIFROST_DATA_DIR` 对应 data dir、hostname、用户环境变量、常见 machine-id 文件内容。
-- 稳定性：同一用户、同一 data dir、同一设备指纹材料不变时可稳定解密；更换设备或迁移 data dir 后需要重新设置账号密码。
+- key 材料：首次保存账号密码时使用系统 CSPRNG 生成 32-byte 随机 key，保存到 data dir 下的 `local_config_secret.key`；Unix 权限固定为 `0600`。
+- 稳定性：key 不依赖 `USER`、`HOME`、hostname 或 machine-id，因此 CLI、launchd、桌面 App 等不同启动环境可以读取同一 data dir；迁移时必须同时复制 `config.toml` 与 key 文件。
 - 格式：`bifrost-local-secret:{"version":1,"nonce":"base64","ciphertext":"base64"}`。
+- 兼容：PR #362 早期版本写入的设备指纹 envelope 保留只读 fallback，成功读取后在下一次配置保存时自动改用随机 key；明文密码即使以 `bifrost-local-secret:` 开头也不会被误判，保存时始终加密内存中的明文值。
 - 边界：这是防止其他程序“只读配置文件即可拿走明文密码”的静态防护；不替代 OS Keychain，不防同权限进程主动调用 Bifrost API 或读取运行中进程内存。
 - 接入点：`ConfigManager::save_config` 写文件前加密副本，`ConfigManager::new` 加载配置后解密到内存；Admin API、WebUI、`bifrost account`、`bifrost config access.userpass.*` 都共享这一边界。
 

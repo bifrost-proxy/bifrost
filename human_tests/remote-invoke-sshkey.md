@@ -265,4 +265,4 @@
 
 | 用例 | 结果 | 证据 |
 | --- | --- | --- |
-| TC-RISK-07 | PENDING | 本轮已在 `e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 补充 saved connection secret envelope 与 detached job relay token envelope 断言；执行结果待本轮验证后回填。 |
+| TC-RISK-07 | PASS | 2026-07-10 执行 `BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 通过，最终输出 `All SSH remote invoke E2E checks passed`。真实链路覆盖 existing Access Control/Remote Invoke Grants 入口、CLI SSH key 创建、full/shell/files/query/full 权限切换、saved connection secret envelope、detached job relay token envelope、第二 caller 隔离、remote traffic/search/get/replay 与 revoke；权限恢复阶段仅出现预期的传播重试 `grant scope update not visible ... (1/20)` 后成功。 |

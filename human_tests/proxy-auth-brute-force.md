@@ -249,6 +249,7 @@ curl -s -o /dev/null -w "%{http_code}" -x http://127.0.0.1:8800 http://httpbin.o
    printf 'alpha-secret-123\n' | bifrost -p <PORT> account add alice --password-stdin --enable-auth
    printf 'beta-secret-123\n' | bifrost -p <PORT> account add bob --password-stdin
    printf 'disabled-secret-123\n' | bifrost -p <PORT> account add disabled-user --password-stdin --disabled
+   printf 'bifrost-local-secret:not-json\n' | bifrost -p <PORT> account add prefix-user --password-stdin
    bifrost -p <PORT> account list --json
    bifrost -p <PORT> account set-loopback-auth true
    printf 'beta-secret-456\n' | bifrost -p <PORT> account update bob --password-stdin
@@ -257,15 +258,17 @@ curl -s -o /dev/null -w "%{http_code}" -x http://127.0.0.1:8800 http://httpbin.o
    bifrost -p <PORT> account remove alice
    ```
 4. 场景会通过 Bifrost HTTP 代理访问本地临时 upstream，验证无凭证、正确凭证、错误密码、禁用账号、删除账号的真实代理行为。
-5. 场景会检查 `BIFROST_DATA_DIR/config.toml` 中不包含 `alpha-secret-123`、`beta-secret-123`、`beta-secret-456` 或 `disabled-secret-123` 明文，并包含 `bifrost-local-secret:` envelope。
+5. 场景会检查 `BIFROST_DATA_DIR/config.toml` 中不包含任何账号密码明文，包含 `bifrost-local-secret:` envelope，并生成 Unix `0600` 的 `local_config_secret.key`。
+6. 场景会停止 target、移除 `USER` / `USERNAME` / `USERPROFILE` 后用同一 data dir 重启，再验证 `prefix-user:bifrost-local-secret:not-json` 仍能通过真实代理请求。
 
 **预期结果：**
-- `account add --enable-auth` 后 Admin API `.userpass.enabled` 为 `true`，三个账号均可见且 `has_password=true`。
+- `account add --enable-auth` 后 Admin API `.userpass.enabled` 为 `true`，四个账号均可见且 `has_password=true`。
 - `account set-loopback-auth true` 后本机无凭证代理请求返回 407，使用 `alice:alpha-secret-123` 和 `bob:beta-secret-123` 可通过本地 upstream 真实代理请求。
 - 错误密码、禁用账号、删除账号均返回 407。
 - `account update bob --password-stdin` 后旧密码返回 407，新密码返回 200。
 - `account update bob --disable/--enable` 后代理认证行为随账号状态变化。
 - `config.toml` 只保存 `bifrost-local-secret:` 加密 envelope，不保存明文账号密码。
+- 同一 data dir 在缺少 USER 系列环境变量的启动上下文中仍能解密；以 `bifrost-local-secret:` 开头的合法密码重启后不被误解析为 envelope。
 
 ### TC-PAB-12: HTTP 代理真实流量防暴力破解与成功重置
 
@@ -300,5 +303,5 @@ rm -rf ./.bifrost-test
 
 | 用例 | 结果 | 证据 |
 | --- | --- | --- |
-| TC-PAB-11 | PASS | 执行 `BIFROST_DATA_DIR="$(mktemp -d)" BIFROST_DISABLE_TRAY=1 BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_userpass_loopback_e2e.sh`，输出 `Tests Run: 12`、`Tests Passed: 12`、`Tests Failed: 0`。其中 `Account CLI multi-account CRUD, real proxy traffic, and encrypted config` PASS，验证 `account add/list/update/remove/set-loopback-auth` 多账号管理、正确账号真实 HTTP 代理请求返回 200、错误密码/禁用账号/删除账号返回 407，并确认 `config.toml` 不包含账号密码明文且包含 `bifrost-local-secret:` envelope。 |
+| TC-PAB-11 | PASS | 2026-07-10 修复 review 问题后执行 `BIFROST_DATA_DIR="$(mktemp -d)" BIFROST_DISABLE_TRAY=1 BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_userpass_loopback_e2e.sh`，输出 `Tests Run: 12`、`Tests Passed: 12`、`Tests Failed: 0`。除多账号 CRUD 与真实 HTTP 代理 200/407 外，新增 `prefix-user` 密码 `bifrost-local-secret:not-json`，确认 `config.toml` 不含该明文、`local_config_secret.key` 已生成；随后停止 target、移除 USER 系列变量后用同一 data dir 重启，prefix-user 仍真实认证返回 200。 |
 | TC-PAB-12 | PASS | 同一次 E2E 中 `HTTP Proxy brute-force limit and success reset` PASS，验证 5 次错误后正确凭证重置计数、9 次错误后正确凭证仍通过、10 次错误后的下一次请求返回 `429 Too Many Requests`，且响应包含 `Retry-After: 300` 与 `Too many failed authentication attempts`。 |

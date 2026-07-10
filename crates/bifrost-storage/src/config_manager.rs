@@ -5,7 +5,7 @@ use bifrost_core::{BifrostError, Result};
 use tokio::sync::{broadcast, RwLock};
 use tracing::info;
 
-use crate::local_secrets::{is_encrypted_local_secret, LocalSecretKey};
+use crate::local_secrets::LocalSecretKey;
 use crate::rules::{RuleFile, RulesStorage};
 use crate::state::StateManager;
 use crate::unified_config::{
@@ -825,12 +825,10 @@ impl ConfigManager {
         let Some(userpass) = config.access.userpass.as_mut() else {
             return Ok(());
         };
-        let key = LocalSecretKey::for_data_dir(data_dir);
+        let key = LocalSecretKey::for_data_dir(data_dir)?;
         for account in &mut userpass.accounts {
             if let Some(password) = account.password.as_mut() {
-                if !is_encrypted_local_secret(password) {
-                    *password = key.encrypt_string(password)?;
-                }
+                *password = key.encrypt_string(password)?;
             }
         }
         Ok(())
@@ -840,7 +838,7 @@ impl ConfigManager {
         let Some(userpass) = config.access.userpass.as_mut() else {
             return Ok(());
         };
-        let key = LocalSecretKey::for_data_dir(data_dir);
+        let key = LocalSecretKey::for_data_dir(data_dir)?;
         for account in &mut userpass.accounts {
             if let Some(password) = account.password.as_mut() {
                 *password = key.decrypt_string(password)?;
@@ -1158,7 +1156,7 @@ mod tests {
     #[tokio::test]
     async fn test_userpass_passwords_are_encrypted_at_rest_and_decrypted_on_load() {
         let temp_dir = TempDir::new().unwrap();
-        let password = "plain-config-password";
+        let password = "bifrost-local-secret:not-json";
 
         {
             let manager = ConfigManager::new(temp_dir.path().to_path_buf()).unwrap();
@@ -1190,6 +1188,7 @@ mod tests {
         let raw_config = std::fs::read_to_string(temp_dir.path().join("config.toml")).unwrap();
         assert!(!raw_config.contains(password));
         assert!(raw_config.contains("bifrost-local-secret:"));
+        assert!(temp_dir.path().join("local_config_secret.key").is_file());
 
         {
             let manager = ConfigManager::new(temp_dir.path().to_path_buf()).unwrap();

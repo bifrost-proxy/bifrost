@@ -69,13 +69,20 @@ inactive call 丢弃，导致远端子进程已经输出 `READY` 但读不到
 当前修复采用两层约束：
 
 - target worker 仅对已解析且方向为 `CallerToClient` 的早到 encrypted
-  `call_frame` 建立短期缓冲，TTL 为 10 秒，并限制每个 call 16 帧、全局
-  128 个 call，防止 relay 抖动变成无界内存增长。
+  `call_frame` 建立短期缓冲，TTL 为 10 秒；每 call 最多 64 帧 / 256 KiB、
+  全局最多 8 MiB、同时最多 128 个 call，防止 relay 抖动变成无界内存增长，
+  同时保证 flush 不会在 executor 启动前填满 64-slot stdin channel。
+- 超过每 call/global 字节预算、超过 call 数量或等待超过 TTL 时，worker
+  必须拒绝整个 call 并返回 `remote.stdin_early_buffer_rejected`，禁止丢掉部分
+  stdin 后继续执行命令。全局饱和会短暂打开 circuit breaker，使未建档的
+  stdin call 显式失败而不是无提示截断；不接受 stdin 且没有 pending frame
+  的 query/file/shell call 不受该 circuit breaker 影响。
 - `call_open` 创建 active call 并准备 stdin channel 后立即 flush 早到帧；
   回放仍走原有 grant crypto、counter nonce、解密、replay window 与
   stdin sender 路径，不绕过安全校验。
-- streaming executor 在 `stdin_mode=stream` 时必须打开 child stdin pipe，
-  并把 mpsc stdin stream 写入子进程；无 stdin 时继续使用 `Stdio::null()`。
+- 生产执行路径 `execute_with_stdout_sink -> execute_shell_exec` 在
+  `stdin_mode=stream` 时打开 child stdin pipe 并消费 mpsc stdin；测试不得以
+  当前未接 worker 的 `execute_shell_exec_streaming` 代替生产路径验证。
 
 回归验证：
 
