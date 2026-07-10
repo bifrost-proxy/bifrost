@@ -8,6 +8,57 @@
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 export BIFROST_DISABLE_TRAY
 
+E2E_OWNERSHIP_MARKER=".bifrost-e2e-owned"
+
+is_production_bifrost_path() {
+    local path="${1%/}"
+    [[ -n "${HOME:-}" ]] || return 1
+    local production_root="${HOME:-}/.bifrost"
+    production_root="${production_root%/}"
+    [[ -n "$path" && -n "$production_root" \
+        && ( "$path" == "$production_root" || "$path" == "$production_root/"* ) ]]
+}
+
+mark_e2e_data_root() {
+    local root="$1"
+    [[ -n "$root" ]] || return 1
+    if is_production_bifrost_path "$root" \
+        && [[ "${BIFROST_E2E_ALLOW_PRODUCTION_DATA_DIR:-0}" != "1" ]]; then
+        echo "REFUSING: E2E ownership marker cannot be created under the production data root: $root" >&2
+        return 1
+    fi
+    mkdir -p "$root"
+    : >"$root/$E2E_OWNERSHIP_MARKER"
+}
+
+is_e2e_data_root() {
+    local root="$1"
+    [[ -n "$root" && -f "$root/$E2E_OWNERSHIP_MARKER" ]]
+}
+
+# Directly executed E2E scripts used to fall back to ~/.bifrost unless the
+# umbrella runner happened to inject BIFROST_DATA_DIR. A parent Bifrost/IM
+# process may also export that production directory into the agent shell, so
+# merely checking "is the variable set" is insufficient. Refuse the production
+# default unless a destructive test explicitly opts in.
+_bifrost_data_dir_is_production=0
+if is_production_bifrost_path "${BIFROST_DATA_DIR:-}"; then
+    _bifrost_data_dir_is_production=1
+fi
+if [[ -z "${BIFROST_DATA_DIR:-}" \
+    || ( "$_bifrost_data_dir_is_production" == "1" \
+        && "${BIFROST_E2E_ALLOW_PRODUCTION_DATA_DIR:-0}" != "1" ) ]]; then
+    _bifrost_e2e_root="${BIFROST_E2E_SANDBOX_DIR:-${PWD}/.bifrost-e2e-runs/direct}"
+    if ! mark_e2e_data_root "$_bifrost_e2e_root"; then
+        unset _bifrost_e2e_root _bifrost_data_dir_is_production
+        return 1 2>/dev/null || exit 1
+    fi
+    BIFROST_DATA_DIR="$(mktemp -d "$_bifrost_e2e_root/data-XXXXXX")"
+    export BIFROST_DATA_DIR
+    unset _bifrost_e2e_root
+fi
+unset _bifrost_data_dir_is_production
+
 is_windows() {
     local uname_out
     uname_out="$(uname -s 2>/dev/null)"
@@ -76,6 +127,11 @@ kill_bifrost_on_port() {
     local port=$1
     if [ -z "$port" ]; then
         return 0
+    fi
+    local protected_ports=",${BIFROST_E2E_PROTECTED_PORTS:-9900},"
+    if [[ "$protected_ports" == *",${port},"* ]]; then
+        echo "REFUSING: E2E cleanup cannot kill protected port ${port}" >&2
+        return 1
     fi
     if is_windows; then
         local win_pid
@@ -172,13 +228,80 @@ win_find_pid_on_port() {
     _win_find_pid_on_port "$@"
 }
 
-kill_all_bifrost() {
+is_bifrost_process() {
+    local pid="$1"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
     if is_windows; then
-        taskkill.exe /F /IM bifrost.exe >/dev/null 2>&1 || true
-        sleep 2
-    else
-        pkill -f bifrost 2>/dev/null || killall bifrost 2>/dev/null || true
+        tasklist.exe /FI "PID eq $pid" /FO CSV /NH 2>/dev/null \
+            | tr -d '\r' \
+            | grep -Eqi '^"?bifrost\.exe"?,'
+        return $?
     fi
+
+    local command_name
+    command_name="$(ps -p "$pid" -o comm= 2>/dev/null | awk '{$1=$1; print}' || true)"
+    command_name="${command_name##*/}"
+    [[ "$command_name" == "bifrost" || "$command_name" == "bifrost.exe" ]]
+}
+
+pid_from_runtime_file() {
+    local path="$1"
+    sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$path" 2>/dev/null | head -n 1
+}
+
+kill_bifrost_in_data_root() {
+    local root="$1"
+    if is_production_bifrost_path "$root" \
+        && [[ "${BIFROST_E2E_ALLOW_PRODUCTION_DATA_DIR:-0}" != "1" ]]; then
+        echo "REFUSING: E2E cleanup cannot scan the production data root: ${root:-<empty>}" >&2
+        return 1
+    fi
+    if ! is_e2e_data_root "$root"; then
+        echo "REFUSING: E2E cleanup root is not owned by this test run: ${root:-<empty>}" >&2
+        return 1
+    fi
+
+    local seen=" "
+    while IFS= read -r pid_file; do
+        local pid=""
+        case "${pid_file##*/}" in
+            runtime.json) pid="$(pid_from_runtime_file "$pid_file")" ;;
+            *) pid="$(cat "$pid_file" 2>/dev/null | tr -cd '0-9' || true)" ;;
+        esac
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        [[ "$seen" != *" $pid "* ]] || continue
+        seen+="$pid "
+        if is_bifrost_process "$pid"; then
+            kill_pid "$pid"
+        fi
+    done < <(find "$root" -type f \( -name runtime.json -o -name bifrost.pid -o -name tray.pid \) -print 2>/dev/null)
+
+    local waited=0
+    while [[ $waited -lt 50 ]]; do
+        local alive=0
+        local pid
+        for pid in $seen; do
+            if [[ "$pid" =~ ^[0-9]+$ ]] && is_bifrost_process "$pid"; then
+                alive=1
+                break
+            fi
+        done
+        [[ "$alive" -eq 0 ]] && return 0
+        sleep 0.2
+        waited=$((waited + 1))
+    done
+
+    local pid
+    for pid in $seen; do
+        if [[ "$pid" =~ ^[0-9]+$ ]] && is_bifrost_process "$pid"; then
+            kill_pid_force "$pid"
+        fi
+    done
+}
+
+kill_all_bifrost() {
+    local root="${BIFROST_E2E_SANDBOX_DIR:-${BIFROST_DATA_DIR:-}}"
+    kill_bifrost_in_data_root "$root"
 }
 
 wait_pid() {
