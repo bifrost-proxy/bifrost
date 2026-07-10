@@ -201,11 +201,12 @@ assert not (
     "--permission-mode" in args
     and "--dangerously-bypass-approvals-and-sandbox" in args
 ), args
-assert "--cd" in args and "exec" in args and "--json" in args and "--output-last-message" in args, args
+assert args[:3] == ["app-server", "--listen", "stdio://"], args
 assert detail.get("events"), detail
 metadata = detail.get("metadata") or {}
-assert metadata.get("modelSource") == "trae default", metadata
-assert metadata.get("modelLabel") == "Trae default model (not explicitly configured)", metadata
+assert metadata.get("modelSource") in ("trae default", "trae config"), metadata
+assert metadata.get("modelLabel"), metadata
+assert metadata.get("threadId"), metadata
 for key in ("usageInputTokens", "usageOutputTokens", "usageTotalTokens"):
     value = metadata.get(key)
     assert value and int(value) > 0, metadata

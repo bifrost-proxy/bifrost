@@ -1,4 +1,5 @@
 use super::*;
+use crate::handlers::json_response_with_status;
 use std::path::{Path, PathBuf};
 
 fn message_image_content_parts(
@@ -136,6 +137,50 @@ pub(super) async fn handle_chat_gateway(
                     Ok(()) => json_response(&_service.external_cli_config_store.load()),
                     Err(error) => error_response(StatusCode::BAD_REQUEST, &error),
                 }
+            }
+            _ => method_not_allowed(),
+        };
+    }
+
+    if let Some(encoded_session_key) = rest
+        .strip_prefix("/sessions/")
+        .and_then(|value| value.strip_suffix("/guide"))
+    {
+        return match *req.method() {
+            Method::POST => {
+                let session_key = match urlencoding::decode(encoded_session_key) {
+                    Ok(value) if !value.trim().is_empty() => value.into_owned(),
+                    _ => {
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            "session key is missing or invalid",
+                        )
+                    }
+                };
+                let payload: serde_json::Value = match read_body_json(req).await {
+                    Ok(value) => value,
+                    Err(response) => return response,
+                };
+                let message = payload
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default();
+                if message.is_empty() {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        "guide message cannot be empty",
+                    );
+                }
+                let guide_id = payload
+                    .get("guideId")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("guide-{}", uuid::Uuid::new_v4()));
+                guide_external_cli_session(_service, &session_key, guide_id, message.to_string())
+                    .await
             }
             _ => method_not_allowed(),
         };
@@ -619,6 +664,64 @@ pub(super) async fn handle_chat_gateway(
     }
 
     error_response(StatusCode::NOT_FOUND, "Chat Gateway endpoint not found")
+}
+
+async fn guide_external_cli_session(
+    service: &ImGatewayService,
+    session_key: &str,
+    guide_id: String,
+    message: String,
+) -> Response<BoxBody> {
+    match crate::im_gateway::external_cli::request_worker_session_guide(
+        session_key,
+        guide_id.clone(),
+        message.clone(),
+    )
+    .await
+    {
+        Ok(result) if result.accepted => json_response(&serde_json::json!({
+            "guideId": result.guide_id,
+            "sessionKey": session_key,
+            "delivery": "steered",
+            "threadId": result.thread_id,
+            "turnId": result.turn_id,
+        })),
+        outcome => {
+            let reason = match outcome {
+                Ok(result) => result
+                    .reason
+                    .unwrap_or_else(|| "active turn rejected guide input".to_string()),
+                Err(error) => error,
+            };
+            if !service.agent_session_manager.is_session_active(session_key) {
+                return json_response_with_status(
+                    StatusCode::CONFLICT,
+                    &serde_json::json!({
+                        "guideId": guide_id,
+                        "sessionKey": session_key,
+                        "delivery": "rejected",
+                        "reason": reason,
+                    }),
+                );
+            }
+            match service
+                .queue_manager
+                .push_queue(session_key, message.to_string())
+            {
+                Ok(items) => json_response(&serde_json::json!({
+                    "guideId": guide_id,
+                    "sessionKey": session_key,
+                    "delivery": "queued",
+                    "queueLength": items.len(),
+                    "reason": reason,
+                })),
+                Err(error) => error_response(
+                    StatusCode::CONFLICT,
+                    &format!("guide was not accepted and queue fallback failed: {error}"),
+                ),
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]

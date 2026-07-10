@@ -74,6 +74,47 @@ pub(super) async fn handle_busy_guide_command(
     session_key: &str,
     ctx: &BusyMessageContext<'_>,
 ) {
+    if ctx.default_mode == BusyMessageDefaultMode::Queue {
+        let guide_id = format!("guide-{}", uuid::Uuid::new_v4());
+        if let Ok(result) = crate::im_gateway::external_cli::request_worker_session_guide(
+            session_key,
+            guide_id,
+            guide_text.to_string(),
+        )
+        .await
+        {
+            if result.accepted {
+                info!(
+                    session_key = %session_key,
+                    thread_id = ?result.thread_id,
+                    turn_id = ?result.turn_id,
+                    guide_msg_len = guide_text.len(),
+                    "guide message steered into active external runner turn"
+                );
+                let reply = "🔀 已注入当前 Runner turn，将在当前工具调用完成后生效";
+                let updated = ctx
+                    .progress_registry
+                    .update_queue_state(
+                        session_key,
+                        ctx.queue_manager.queue_status(session_key),
+                        false,
+                        Some(format!("已收到引导：{}", truncate_str(guide_text, 48))),
+                    )
+                    .await;
+                if !updated {
+                    send_agent_reply(
+                        ctx.client,
+                        ctx.provider,
+                        ctx.event,
+                        reply,
+                        ctx.message_log_store,
+                    )
+                    .await;
+                }
+                return;
+            }
+        }
+    }
     match apply_busy_message_default(ctx.queue_manager, session_key, guide_text, ctx.default_mode) {
         Ok(BusyMessageDefaultResult::Guide {
             pending_count: pending_guide_count,

@@ -148,11 +148,11 @@ async fn stale_external_worker_entry_does_not_kill_pid_when_stop_receiver_is_gon
         .spawn()
         .expect("spawn protected external worker process");
     let pid = child.id();
-    let (stop_tx, stop_rx) = tokio::sync::mpsc::unbounded_channel();
-    drop(stop_rx);
+    let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
+    drop(control_rx);
     ACTIVE_WORKER_SESSIONS.insert(
         "stale-external-worker".to_string(),
-        ExternalCliWorkerStopHandle { pid, stop_tx },
+        ExternalCliWorkerControlHandle { pid, control_tx },
     );
 
     assert!(!request_worker_session_stop("stale-external-worker").await);
@@ -183,14 +183,14 @@ async fn acknowledged_external_worker_stop_does_not_kill_pid() {
         .spawn()
         .expect("spawn protected external worker process");
     let pid = child.id();
-    let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
     ACTIVE_WORKER_SESSIONS.insert(
         "acked-external-worker".to_string(),
-        ExternalCliWorkerStopHandle { pid, stop_tx },
+        ExternalCliWorkerControlHandle { pid, control_tx },
     );
     let ack_task = tokio::spawn(async move {
-        if let Some(stop_request) = stop_rx.recv().await {
-            stop_request.ack();
+        if let Some(ExternalCliWorkerControlRequest::Stop { ack_tx }) = control_rx.recv().await {
+            let _ = ack_tx.send(());
         }
     });
 

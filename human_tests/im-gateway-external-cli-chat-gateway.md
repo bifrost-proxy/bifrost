@@ -1169,8 +1169,40 @@
 6. `ChatImageInput` 转 `ExternalCliImageInput` 时保留多图顺序、MIME 和 base64 数据。
 7. E2E 首轮 run 的 `attachments.images` 同时包含 `hello.png` 与 `hello-two.jpg`，后续 run 不覆盖首轮图片文件。
 
+### TC-IEC-57: Codex/Traex 运行中向当前 turn 注入引导消息
+
+前置条件：
+
+1. 当前 worktree 已编译 `target/debug/bifrost`。
+2. Python 3 与 curl 可用；测试不依赖真实模型账号，使用实现完整 JSON-RPC 握手、`turn/steer` 与 token usage 通知的临时 app-server。
+
+操作步骤：
+
+1. 执行真实临时服务 E2E：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost \
+     e2e-tests/tests/test_external_runner_live_guide.sh
+   ```
+2. 脚本分别启动 Codex 与 Traex session，并在各自 `turn/start` 后执行：
+   ```bash
+   bifrost agent guide --session <session-key> --json "focus-<runner>"
+   ```
+3. 脚本读取 mock app-server 收到的 `turn/steer`、Chat stream 的 `run_finished`、run detail 的 snapshot/metadata，并对不存在的 session 调用 guide API。
+
+预期结果：
+
+1. Codex 和 Traex 默认或显式 `transport=app_server` 均通过独立 `bifrost-runner` worker 启动 stdio app-server；Codex 使用 `app-server --stdio`，Traex 使用其版本支持的 `app-server --listen stdio://`。
+2. CLI 返回 `delivery=steered`，`threadId`、`turnId` 与当前 app-server turn 一致。
+3. app-server 收到 `turn/steer`，包含当前 `threadId`、`expectedTurnId`、唯一 `clientUserMessageId` 和引导文本；引导不会启动第二个 CLI 进程或新 turn。
+4. 原 stream 在同一 turn 内返回引导后的最终答案，run 状态为 `succeeded`。
+5. run detail 的 snapshot 为对应 CLI 的 stdio app-server 参数，metadata 持久化 `threadId` 和 input/output/total token usage。
+6. 非活动 session 返回 HTTP 409 和 `delivery=rejected`，不会静默创建任务。
+7. 脚本退出时停止临时 Bifrost 并删除临时数据目录、mock executable 和日志。
+
 ## 最近执行记录
 
+- 2026-07-10：第 2 轮 review 后执行真实本机 CLI 兼容验证。`RUN_REAL_CODEX_E2E=1 SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost BIFROST_CODEX_BIN=$(command -v codex) e2e-tests/tests/test_im_gateway_codex_runner_streaming.sh` 通过，run `1783652710170-bb55ada8-78f5-42a3-9c21-8f695aa8dbfc` 使用 Codex stdio app-server 并持久化真实 thread/token usage；`RUN_REAL_TRAEX_E2E=1 SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost BIFROST_TRAEX_BIN=$(command -v traex) e2e-tests/tests/test_im_gateway_traex_runner_streaming.sh` 通过，run `1783652721440-28607fc3-acd3-46a4-b79e-a67aed22ef06` 验证当前 Traex 需要 `app-server --listen stdio://` 且真实返回最终答案、thread/token usage。Codex 真实模型本轮没有执行提示要求的 `pwd` 工具，因此真实脚本只在模型实际产生 tool event 时断言 started/finished 成对与顺序；无条件工具事件映射由 deterministic mock app-server E2E 断言。
+- 2026-07-10：新增并立即执行 TC-IEC-57；第 2 轮 review 扩展拒绝与 exec 回退后再次执行。命令 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_external_runner_live_guide.sh` 通过；脚本用隔离数据目录启动真实 Bifrost 服务与 mock JSON-RPC/exec 进程，Codex/Traex 的 `bifrost agent guide` 都返回 `delivery=steered`，mock 收到带正确 `expectedTurnId`、唯一 `clientUserMessageId` 和 guide text 的 `turn/steer`，原 stream 在同一 turn 返回 `GUIDED_codex` / `GUIDED_traex`。run detail 断言 Codex snapshot 为 `app-server --stdio`、Traex 为 `app-server --listen stdio://`，metadata 持久化 thread id 与 `11/7/18` input/output/total token；app-server 明确拒绝 steer 和显式 `transport=exec` 两种场景都返回 `delivery=queued` 并在首轮后执行第二轮；不存在的 session 返回 HTTP 409 `delivery=rejected`，脚本清理临时服务和数据。
 - 2026-07-08：新增并执行 TC-IEC-56 的本地回归。执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin test_normalize_feishu_post_extracts_text_and_images --lib -- --nocapture`、`external_cli_run_writes_image_attachments_and_injects_prompt_paths`、`im_event_loop_external_cli_route_processes_image_only_message`、`test_queue_preserves_image_attachments`、`external_cli_images_from_chat_images_preserves_payloads` 均通过；执行 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_im_gateway_external_runner_image_input.sh` 通过，临时服务端口 `65211`，首轮 run `1783470749961-9783d1b6-20b8-4561-bd6e-fe7a486cec7b` 同时写入 `image-1.png` 与 `image-2.jpg`，后续单图 run `1783470750022-a7838ec2-5729-4fc0-8770-27c13c784918` 未覆盖首轮图片，Traex 兼容 run `1783470750145-e362365a-a1b6-4a44-bd8d-ea7b8f49f7ea` 与 runner-call run `1783470750275-68429b1e-41eb-45d4-b830-5b6b02623dcd` 均保留图片附件。
 - 2026-06-26：追加执行 TC-IEC-55 的真实 Web UI 即时切模型回归。修复前在未刷新页面直接发送 `/model` 会先插入 `content:""` 的 system 占位，DOM 中出现空白系统胶囊，并且系统提示是有边框/背景的大号气泡。修复后执行 `pnpm --dir web run build`、`pnpm --dir web run test:unit -- AgentChatSection --run`、`cargo build --bin bifrost` 均通过；覆盖重启 `9900`，PID `87418`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。真实浏览器打开 `admin-chat-direct-system-check-1782409300`，先刷新确认新 bundle 生效，再发送 `/model GPT-5.5`：DOM 返回 `emptySystemCount=0`，最后一条 system 文本为 `切换模型为 GPT-5.5`，`agent-chat-message-bubble-system` 样式为 `borderWidth:0px`、`borderStyle:none`、`backgroundColor:rgba(0, 0, 0, 0)`、`fontSize:11px`、`lineHeight:18px`、`flexDirection:row`、`gap:8px`。刷新后再次确认 `emptySystemCount=0`、`hasLatestSwitch=true`、普通对话文本仍存在，HUD 显示 `Model GPT-5.5 (trae)`。
 - 2026-06-26：执行 TC-IEC-55 的真实 9900 回归。先确认问题根因：`session_state.json` 中 `admin-chat-direct-system-check-1782409300::traex::Traex` 已持久化多条 `role:"system"` 模型切换消息，但 session detail 主路径先从 canonical JSONL 读到 user/assistant timeline 后，只合并 external runner metadata，没有把 external state 的 system display messages 合并回 `messages`，导致刷新后系统提示丢失。修复后执行 `cargo test -p bifrost-admin handlers::im_gateway::agent_api::tests::session_detail_metadata_merge_preserves_external_system_display_messages -- --nocapture` 通过；执行 `cargo build --bin bifrost` 后覆盖重启 `9900`，PID `46889`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。API 验证 `/_bifrost/api/im-gateway/agent/sessions/admin-chat-direct-system-check-1782409300` 返回 `message_count=11`，包含 5 条 `role:"system"` 的 `切换模型为 ...` 消息，同时保留 `你好`、`你是谁` 等 user/assistant 对话。真实 Edge/Playwright 打开同一 URL 并刷新，DOM 中 `agent-chat-message-system` 数量为 5，页面文本同时包含 `切换模型为 Kimi-K2.6`、`切换模型为 GPT-5.5`、`你好`、`你是谁`，HUD 显示 `Model Kimi-K2.6 (trae)`。

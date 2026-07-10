@@ -36,23 +36,37 @@ static ACTIVE_RUNS: once_cell::sync::Lazy<dashmap::DashMap<String, u32>> =
 static ACTIVE_SESSIONS: once_cell::sync::Lazy<dashmap::DashMap<String, String>> =
     once_cell::sync::Lazy::new(dashmap::DashMap::new);
 static ACTIVE_WORKER_SESSIONS: once_cell::sync::Lazy<
-    dashmap::DashMap<String, ExternalCliWorkerStopHandle>,
+    dashmap::DashMap<String, ExternalCliWorkerControlHandle>,
 > = once_cell::sync::Lazy::new(dashmap::DashMap::new);
 
 #[derive(Clone)]
-struct ExternalCliWorkerStopHandle {
+struct ExternalCliWorkerControlHandle {
     pid: u32,
-    stop_tx: tokio::sync::mpsc::UnboundedSender<ExternalCliWorkerStopRequest>,
+    control_tx: tokio::sync::mpsc::UnboundedSender<ExternalCliWorkerControlRequest>,
 }
 
-struct ExternalCliWorkerStopRequest {
-    ack_tx: oneshot::Sender<()>,
+enum ExternalCliWorkerControlRequest {
+    Stop {
+        ack_tx: oneshot::Sender<()>,
+    },
+    Guide {
+        guide_id: String,
+        message: String,
+        ack_tx: oneshot::Sender<ExternalCliGuideResult>,
+    },
 }
 
-impl ExternalCliWorkerStopRequest {
-    fn ack(self) {
-        let _ = self.ack_tx.send(());
-    }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalCliGuideResult {
+    pub guide_id: String,
+    pub accepted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 pub(crate) fn terminate_process_group(pid: u32) -> Result<(), String> {
@@ -69,8 +83,8 @@ pub async fn request_worker_session_stop(session_key: &str) -> bool {
     };
     let (ack_tx, mut ack_rx) = oneshot::channel();
     if handle
-        .stop_tx
-        .send(ExternalCliWorkerStopRequest { ack_tx })
+        .control_tx
+        .send(ExternalCliWorkerControlRequest::Stop { ack_tx })
         .is_err()
     {
         tracing::warn!(
@@ -86,6 +100,39 @@ pub async fn request_worker_session_stop(session_key: &str) -> bool {
     }
     let _ = terminate_process(handle.pid);
     true
+}
+
+pub async fn request_worker_session_guide(
+    session_key: &str,
+    guide_id: String,
+    message: String,
+) -> Result<ExternalCliGuideResult, String> {
+    let session_key = session_key.trim();
+    if session_key.is_empty() {
+        return Err("session_key cannot be empty".to_string());
+    }
+    if message.trim().is_empty() {
+        return Err("guide message cannot be empty".to_string());
+    }
+    let handle = ACTIVE_WORKER_SESSIONS
+        .get(session_key)
+        .map(|entry| entry.clone())
+        .ok_or_else(|| format!("no active external runner for session '{session_key}'"))?;
+    let (ack_tx, ack_rx) = oneshot::channel();
+    handle
+        .control_tx
+        .send(ExternalCliWorkerControlRequest::Guide {
+            guide_id,
+            message,
+            ack_tx,
+        })
+        .map_err(|_| {
+            format!("external runner control channel closed for session '{session_key}'")
+        })?;
+    timeout(Duration::from_secs(20), ack_rx)
+        .await
+        .map_err(|_| format!("external runner guide timed out for session '{session_key}'"))?
+        .map_err(|_| format!("external runner guide response closed for session '{session_key}'"))
 }
 
 pub fn run_worker_stdio() -> Result<(), String> {
@@ -117,15 +164,15 @@ async fn run_worker_stdio_async() -> Result<(), String> {
             request.protocol_version
         ));
     }
-    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let (command_tx, mut command_rx) =
+        tokio::sync::mpsc::unbounded_channel::<ExternalCliWorkerCommand>();
     std::thread::spawn(move || {
         while let Some(Ok(line)) = stdin.next() {
-            if matches!(
-                serde_json::from_str::<ExternalCliWorkerCommand>(&line),
-                Ok(ExternalCliWorkerCommand::Stop)
-            ) {
-                let _ = stop_tx.send(());
-                break;
+            if let Ok(command) = serde_json::from_str::<ExternalCliWorkerCommand>(&line) {
+                let should_stop = matches!(command, ExternalCliWorkerCommand::Stop);
+                if command_tx.send(command).is_err() || should_stop {
+                    break;
+                }
             }
         }
     });
@@ -134,6 +181,11 @@ async fn run_worker_stdio_async() -> Result<(), String> {
         pid: std::process::id(),
     })?;
     let request = *request;
+    let session_key = request.request.session_key.clone().unwrap_or_default();
+    let supports_live_guide = matches!(
+        app_server::resolved_transport(&request.request),
+        Ok(ExternalCliTransport::AppServer)
+    );
     let runtime = ExternalCliRuntime::new(PathBuf::from(&request.runs_root));
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
     let progress_task = tokio::spawn(async move {
@@ -146,29 +198,62 @@ async fn run_worker_stdio_async() -> Result<(), String> {
             .run_in_current_process_with_progress(request.request, Some(progress_tx))
             .await
     });
-    tokio::pin!(stop_rx);
     tokio::pin!(run);
-    tokio::select! {
-        _ = &mut stop_rx => {
-            kill_all_active_runs();
-            run.abort();
-            send_external_cli_worker_event(&ExternalCliWorkerEvent::Stopped)?;
-        }
-        result = &mut run => {
-            match result {
-                Ok(Ok(result)) => {
-                    let _ = progress_task.await;
-                    send_external_cli_worker_event(&ExternalCliWorkerEvent::Finished { result: Box::new(result) })?
-                },
-                Ok(Err(error)) => send_external_cli_worker_event(&ExternalCliWorkerEvent::Failed { error })?,
-                Err(error) if error.is_cancelled() => send_external_cli_worker_event(&ExternalCliWorkerEvent::Stopped)?,
-                Err(error) => send_external_cli_worker_event(&ExternalCliWorkerEvent::Failed { error: format!("external runner worker task failed: {error}") })?,
+    loop {
+        tokio::select! {
+            command = command_rx.recv() => {
+                match command {
+                    Some(ExternalCliWorkerCommand::Stop) | None => {
+                        kill_all_active_runs();
+                        run.abort();
+                        send_external_cli_worker_event(&ExternalCliWorkerEvent::Stopped)?;
+                        break;
+                    }
+                    Some(ExternalCliWorkerCommand::Guide { guide_id, message }) => {
+                        let result = if supports_live_guide {
+                            app_server::request_session_guide(
+                                &session_key,
+                                guide_id,
+                                message,
+                            )
+                            .await
+                        } else {
+                            ExternalCliGuideResult {
+                                guide_id,
+                                accepted: false,
+                                thread_id: None,
+                                turn_id: None,
+                                reason: Some(
+                                    "active runner uses exec transport and cannot steer the current turn"
+                                        .to_string(),
+                                ),
+                            }
+                        };
+                        send_external_cli_worker_event(&ExternalCliWorkerEvent::GuideResult {
+                            result,
+                        })?;
+                    }
+                    Some(ExternalCliWorkerCommand::Run { .. }) => {}
+                }
+            }
+            result = &mut run => {
+                match result {
+                    Ok(Ok(result)) => {
+                        let _ = progress_task.await;
+                        send_external_cli_worker_event(&ExternalCliWorkerEvent::Finished { result: Box::new(result) })?
+                    },
+                    Ok(Err(error)) => send_external_cli_worker_event(&ExternalCliWorkerEvent::Failed { error })?,
+                    Err(error) if error.is_cancelled() => send_external_cli_worker_event(&ExternalCliWorkerEvent::Stopped)?,
+                    Err(error) => send_external_cli_worker_event(&ExternalCliWorkerEvent::Failed { error: format!("external runner worker task failed: {error}") })?,
+                }
+                break;
             }
         }
     }
     Ok(())
 }
 
+mod app_server;
 mod command_spec;
 use command_spec::build_command_spec;
 
@@ -237,6 +322,8 @@ pub struct ExternalCliAdapterConfig {
     pub executable: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<ExternalCliTransport>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
@@ -302,6 +389,13 @@ pub struct ExternalCliAdapterConfig {
     pub timeout_secs: Option<u64>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalCliTransport {
+    Exec,
+    AppServer,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -757,6 +851,10 @@ enum ExternalCliWorkerCommand {
     Run {
         request: Box<ExternalCliWorkerRunRequest>,
     },
+    Guide {
+        guide_id: String,
+        message: String,
+    },
     Stop,
 }
 
@@ -775,6 +873,9 @@ enum ExternalCliWorkerEvent {
     },
     Failed {
         error: String,
+    },
+    GuideResult {
+        result: ExternalCliGuideResult,
     },
     Stopped,
 }
@@ -855,6 +956,14 @@ impl ExternalCliWorkerRun {
         write_external_cli_worker_command(&mut self.stdin, &ExternalCliWorkerCommand::Stop).await
     }
 
+    async fn request_guide(&mut self, guide_id: String, message: String) -> Result<(), String> {
+        write_external_cli_worker_command(
+            &mut self.stdin,
+            &ExternalCliWorkerCommand::Guide { guide_id, message },
+        )
+        .await
+    }
+
     async fn terminate(mut self) -> Result<(), String> {
         let _ = self.request_stop().await;
         match tokio::time::timeout(
@@ -875,44 +984,25 @@ impl ExternalCliWorkerRun {
         }
     }
 
-    async fn wait_final(
-        &mut self,
-        progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
-    ) -> Result<ExternalCliRunResult, String> {
-        loop {
-            let Some(line) =
-                self.events.next_line().await.map_err(|error| {
-                    format!("read external runner worker event failed: {error}")
-                })?
-            else {
-                let status = self
-                    .child
-                    .wait()
-                    .await
-                    .map_err(|error| format!("wait external runner worker failed: {error}"))?;
-                return Err(format!(
-                    "external runner worker exited before final event: {status}"
-                ));
-            };
-            match serde_json::from_str::<ExternalCliWorkerEvent>(&line).map_err(|error| {
-                format!("parse external runner worker event failed: {error}; line={line}")
-            })? {
-                ExternalCliWorkerEvent::Started { .. } => {}
-                ExternalCliWorkerEvent::Progress { event } => {
-                    if let Some(progress_tx) = progress_tx.as_ref() {
-                        let _ = progress_tx.send(event);
-                    }
-                }
-                ExternalCliWorkerEvent::Finished { result } => return Ok(*result),
-                ExternalCliWorkerEvent::Failed { error } => return Err(error),
-                ExternalCliWorkerEvent::Stopped => {
-                    return Ok(ExternalCliRunResult::stopped(
-                        None,
-                        DEFAULT_ADAPTER.to_string(),
-                    ))
-                }
-            }
-        }
+    async fn next_event(&mut self) -> Result<ExternalCliWorkerEvent, String> {
+        let Some(line) = self
+            .events
+            .next_line()
+            .await
+            .map_err(|error| format!("read external runner worker event failed: {error}"))?
+        else {
+            let status = self
+                .child
+                .wait()
+                .await
+                .map_err(|error| format!("wait external runner worker failed: {error}"))?;
+            return Err(format!(
+                "external runner worker exited before final event: {status}"
+            ));
+        };
+        serde_json::from_str::<ExternalCliWorkerEvent>(&line).map_err(|error| {
+            format!("parse external runner worker event failed: {error}; line={line}")
+        })
     }
 }
 
@@ -950,30 +1040,99 @@ impl ExternalCliRuntime {
         let mut worker = worker_client
             .spawn(self.runs_root.clone(), request.clone())
             .await?;
-        let (stop_tx, mut stop_rx) =
-            tokio::sync::mpsc::unbounded_channel::<ExternalCliWorkerStopRequest>();
-        if let (Some(session_key), Some(pid)) = (request.session_key.as_deref(), worker.child_id())
-        {
+        let worker_pid = worker.child_id();
+        let (control_tx, mut control_rx) =
+            tokio::sync::mpsc::unbounded_channel::<ExternalCliWorkerControlRequest>();
+        if let (Some(session_key), Some(pid)) = (request.session_key.as_deref(), worker_pid) {
             ACTIVE_WORKER_SESSIONS.insert(
                 session_key.to_string(),
-                ExternalCliWorkerStopHandle { pid, stop_tx },
+                ExternalCliWorkerControlHandle { pid, control_tx },
             );
         }
         let session_key = request.session_key.clone();
-        let mut stop_ack = None;
-        let result = tokio::select! {
-            maybe_stop = stop_rx.recv() => {
-                let _ = worker.terminate().await;
-                stop_ack = maybe_stop;
-                Ok(ExternalCliRunResult::stopped(request.session_key.clone(), request.adapter.clone()))
+        let mut pending_guides = HashMap::<String, oneshot::Sender<ExternalCliGuideResult>>::new();
+        let mut control_open = true;
+        let result = loop {
+            tokio::select! {
+                control = control_rx.recv(), if control_open => {
+                    match control {
+                        Some(ExternalCliWorkerControlRequest::Stop { ack_tx }) => {
+                            let _ = worker.terminate().await;
+                            let _ = ack_tx.send(());
+                            break Ok(ExternalCliRunResult::stopped(
+                                request.session_key.clone(),
+                                request.adapter.clone(),
+                            ));
+                        }
+                        Some(ExternalCliWorkerControlRequest::Guide {
+                            guide_id,
+                            message,
+                            ack_tx,
+                        }) => {
+                            if pending_guides.contains_key(&guide_id) {
+                                let _ = ack_tx.send(ExternalCliGuideResult {
+                                    guide_id,
+                                    accepted: false,
+                                    thread_id: None,
+                                    turn_id: None,
+                                    reason: Some("duplicate guide id is already pending".to_string()),
+                                });
+                                continue;
+                            }
+                            if let Err(error) = worker.request_guide(guide_id.clone(), message).await {
+                                let _ = ack_tx.send(ExternalCliGuideResult {
+                                    guide_id,
+                                    accepted: false,
+                                    thread_id: None,
+                                    turn_id: None,
+                                    reason: Some(error),
+                                });
+                            } else {
+                                pending_guides.insert(guide_id, ack_tx);
+                            }
+                        }
+                        None => control_open = false,
+                    }
+                }
+                event = worker.next_event() => {
+                    match event {
+                        Err(error) => break Err(error),
+                        Ok(ExternalCliWorkerEvent::Started { .. }) => {}
+                        Ok(ExternalCliWorkerEvent::Progress { event }) => {
+                            if let Some(progress_tx) = progress_tx.as_ref() {
+                                let _ = progress_tx.send(event);
+                            }
+                        }
+                        Ok(ExternalCliWorkerEvent::GuideResult { result }) => {
+                            if let Some(ack_tx) = pending_guides.remove(&result.guide_id) {
+                                let _ = ack_tx.send(result);
+                            }
+                        }
+                        Ok(ExternalCliWorkerEvent::Finished { result }) => break Ok(*result),
+                        Ok(ExternalCliWorkerEvent::Failed { error }) => break Err(error),
+                        Ok(ExternalCliWorkerEvent::Stopped) => {
+                            break Ok(ExternalCliRunResult::stopped(
+                                request.session_key.clone(),
+                                request.adapter.clone(),
+                            ));
+                        }
+                    }
+                }
             }
-            result = worker.wait_final(progress_tx) => result,
         };
-        if let Some(session_key) = session_key.as_deref() {
-            ACTIVE_WORKER_SESSIONS.remove(session_key);
+        for (guide_id, ack_tx) in pending_guides {
+            let _ = ack_tx.send(ExternalCliGuideResult {
+                guide_id,
+                accepted: false,
+                thread_id: None,
+                turn_id: None,
+                reason: Some("external runner finished before guide acknowledgement".to_string()),
+            });
         }
-        if let Some(stop_request) = stop_ack {
-            stop_request.ack();
+        if let Some(session_key) = session_key.as_deref() {
+            if let Some(pid) = worker_pid {
+                ACTIVE_WORKER_SESSIONS.remove_if(session_key, |_, handle| handle.pid == pid);
+            }
         }
         result
     }
@@ -1006,7 +1165,17 @@ impl ExternalCliRuntime {
             .await
             .map_err(|error| format!("write prompt failed: {error}"))?;
 
-        let spec = build_command_spec(&request, &last_message_path)?;
+        let external_cli_transport =
+            if request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
+                None
+            } else {
+                Some(app_server::resolved_transport(&request)?)
+            };
+        let spec = if external_cli_transport == Some(ExternalCliTransport::AppServer) {
+            app_server::build_command_spec(&request)
+        } else {
+            build_command_spec(&request, &last_message_path)?
+        };
         let cli_version = detect_cli_version(&request.adapter, &spec).await;
         let snapshot = command_snapshot(&request, &spec);
         write_json_pretty(&snapshot_path, &snapshot).await?;
@@ -1105,15 +1274,32 @@ impl ExternalCliRuntime {
         } else {
             let session_key_for_stop = request.session_key.clone();
             command_started_at = Some(now_ms());
-            let command_output = run_command(
-                &run_id,
-                session_key_for_stop.as_deref(),
-                spec.clone(),
-                prompt.clone(),
-                stop_marker_path.clone(),
-                progress_tx,
-            )
-            .await?;
+            let command_output = match external_cli_transport
+                .expect("non-chatgpt external CLI transport must be resolved")
+            {
+                ExternalCliTransport::AppServer => {
+                    app_server::run_command(
+                        &run_id,
+                        session_key_for_stop.as_deref(),
+                        &request,
+                        prompt.clone(),
+                        stop_marker_path.clone(),
+                        progress_tx,
+                    )
+                    .await?
+                }
+                ExternalCliTransport::Exec => {
+                    run_command(
+                        &run_id,
+                        session_key_for_stop.as_deref(),
+                        spec.clone(),
+                        prompt.clone(),
+                        stop_marker_path.clone(),
+                        progress_tx,
+                    )
+                    .await?
+                }
+            };
             command_finished_at = Some(now_ms());
             remove_active_sessions_for_run(&run_id);
             let was_stopped = tokio::fs::try_exists(&stop_marker_path)
