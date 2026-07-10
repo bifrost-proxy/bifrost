@@ -81,6 +81,13 @@ export async function clearReplay(request: APIRequestContext): Promise<void> {
 export async function resetAccessControl(request: APIRequestContext): Promise<void> {
   await request.put(`${apiBase}/whitelist/mode`, { data: { mode: "allow_all" } });
   await request.put(`${apiBase}/whitelist/allow-lan`, { data: { allow_lan: false } });
+  await request.put(`${apiBase}/whitelist/userpass`, {
+    data: {
+      enabled: false,
+      accounts: [],
+      loopback_requires_auth: false,
+    },
+  });
   const statusRes = await request.get(`${apiBase}/whitelist`);
   const status = (await readJson(statusRes)) as {
     whitelist?: string[];

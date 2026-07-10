@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -30,7 +30,7 @@ import {
   StopOutlined,
 } from "@ant-design/icons";
 import { useWhitelistStore } from "../../../stores/useWhitelistStore";
-import type { AccessMode } from "../../../types";
+import type { AccessMode, UserPassStatus } from "../../../types";
 import { notifyApiBusinessError } from "../../../api/client";
 
 const { Text } = Typography;
@@ -101,6 +101,70 @@ interface UserPassAccountDraft {
   lastConnectedAt: string | null;
 }
 
+interface UserPassDraftState {
+  enabled: boolean;
+  loopbackRequiresAuth: boolean;
+  accounts: UserPassAccountDraft[];
+}
+
+export const createUserPassDraft = (
+  userpass: UserPassStatus | null | undefined,
+): UserPassDraftState => ({
+  enabled: userpass?.enabled ?? false,
+  loopbackRequiresAuth: userpass?.loopback_requires_auth ?? false,
+  accounts:
+    userpass?.accounts.map((account) => ({
+      key: account.username,
+      username: account.username,
+      password: "",
+      enabled: account.enabled,
+      hasPassword: account.has_password,
+      lastConnectedAt: account.last_connected_at,
+    })) ?? [],
+});
+
+export const userPassConfigSignature = (
+  userpass: UserPassStatus | null | undefined,
+): string | null => {
+  if (!userpass) {
+    return null;
+  }
+
+  return JSON.stringify({
+    enabled: userpass.enabled,
+    loopbackRequiresAuth: userpass.loopback_requires_auth ?? false,
+    accounts: userpass.accounts.map((account) => ({
+      username: account.username,
+      enabled: account.enabled,
+      hasPassword: account.has_password,
+    })),
+  });
+};
+
+export const mergeUserPassRuntimeState = (
+  accounts: UserPassAccountDraft[],
+  userpass: UserPassStatus | null | undefined,
+): UserPassAccountDraft[] => {
+  if (!userpass) {
+    return accounts;
+  }
+
+  const lastConnectedAtByUsername = new Map(
+    userpass.accounts.map((account) => [account.username, account.last_connected_at]),
+  );
+  let changed = false;
+  const merged = accounts.map((account) => {
+    const lastConnectedAt = lastConnectedAtByUsername.get(account.username);
+    if (lastConnectedAt === undefined || lastConnectedAt === account.lastConnectedAt) {
+      return account;
+    }
+    changed = true;
+    return { ...account, lastConnectedAt };
+  });
+
+  return changed ? merged : accounts;
+};
+
 export default function AccessControlTab() {
   const {
     status,
@@ -129,35 +193,45 @@ export default function AccessControlTab() {
     }
   }, [error, clearError]);
 
-  const derivedUserPass = useMemo(() => {
-    if (!status) {
-      return null;
+  const derivedUserPass = useMemo(
+    () => createUserPassDraft(status?.userpass),
+    [status?.userpass],
+  );
+  const userPassSignature = useMemo(
+    () => userPassConfigSignature(status?.userpass),
+    [status?.userpass],
+  );
+
+  const [userPassEnabled, setUserPassEnabled] = useState(
+    () => derivedUserPass.enabled,
+  );
+  const [loopbackRequiresAuth, setLoopbackRequiresAuth] = useState(
+    () => derivedUserPass.loopbackRequiresAuth,
+  );
+  const [userPassAccounts, setUserPassAccounts] = useState<UserPassAccountDraft[]>(
+    () => derivedUserPass.accounts,
+  );
+  const lastSyncedUserPassSignature = useRef(userPassSignature);
+
+  useEffect(() => {
+    if (
+      userPassSignature === null ||
+      userPassSignature === lastSyncedUserPassSignature.current
+    ) {
+      return;
     }
-    return {
-      enabled: status.userpass.enabled,
-      loopbackRequiresAuth: status.userpass.loopback_requires_auth ?? false,
-      accounts: status.userpass.accounts.map((account) => ({
-        key: account.username,
-        username: account.username,
-        password: "",
-        enabled: account.enabled,
-        hasPassword: account.has_password,
-        lastConnectedAt: account.last_connected_at,
-      })),
-    };
-  }, [status]);
 
-  const [userPassEnabled, setUserPassEnabled] = useState(false);
-  const [loopbackRequiresAuth, setLoopbackRequiresAuth] = useState(false);
-  const [userPassAccounts, setUserPassAccounts] = useState<UserPassAccountDraft[]>([]);
-  const [lastSyncedStatus, setLastSyncedStatus] = useState(status);
-
-  if (derivedUserPass && status !== lastSyncedStatus) {
-    setLastSyncedStatus(status);
+    lastSyncedUserPassSignature.current = userPassSignature;
     setUserPassEnabled(derivedUserPass.enabled);
     setLoopbackRequiresAuth(derivedUserPass.loopbackRequiresAuth);
     setUserPassAccounts(derivedUserPass.accounts);
-  }
+  }, [derivedUserPass, userPassSignature]);
+
+  useEffect(() => {
+    setUserPassAccounts((current) =>
+      mergeUserPassRuntimeState(current, status?.userpass),
+    );
+  }, [status?.userpass]);
 
   const handleAdd = async () => {
     if (!newIpOrCidr.trim()) {
@@ -274,6 +348,13 @@ export default function AccessControlTab() {
       loopbackRequiresAuth,
     );
     if (success) {
+      setUserPassAccounts((current) =>
+        current.map((account) => ({
+          ...account,
+          password: "",
+          hasPassword: true,
+        })),
+      );
       message.success("Updated user/password proxy authentication");
     }
   };

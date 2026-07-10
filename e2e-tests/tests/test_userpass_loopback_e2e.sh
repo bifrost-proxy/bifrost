@@ -315,6 +315,44 @@ test_account_cli_multi_account_traffic_and_encrypted_config() {
         return 1
     fi
 
+    bifrost_cli account disable >"$out_dir/disable-auth.out" 2>&1 || {
+        cat "$out_dir/disable-auth.out"
+        log_fail "account disable failed"
+        return 1
+    }
+    response=$(admin_get "/api/whitelist")
+    if [[ "$(echo "$response" | jq -r '.userpass.enabled')" != "false" ]]; then
+        log_fail "account disable should disable global userpass auth"
+        return 1
+    fi
+    if [[ "$(echo "$response" | jq -r '.userpass.accounts | length')" != "4" ]]; then
+        log_fail "account disable must preserve all configured accounts"
+        return 1
+    fi
+    if [[ "$(echo "$response" | jq -r '[.userpass.accounts[] | select(.has_password == true)] | length')" != "4" ]]; then
+        log_fail "account disable must preserve every stored password"
+        return 1
+    fi
+    bifrost_cli account list --json >"$out_dir/list-disabled.json" 2>&1 || {
+        cat "$out_dir/list-disabled.json"
+        log_fail "account list after global disable failed"
+        return 1
+    }
+    if [[ "$(jq -r '.enabled' "$out_dir/list-disabled.json")" != "false" || "$(jq -r '.accounts | length' "$out_dir/list-disabled.json")" != "4" ]]; then
+        log_fail "account list should report disabled auth without dropping accounts"
+        return 1
+    fi
+    bifrost_cli account enable >"$out_dir/enable-auth.out" 2>&1 || {
+        cat "$out_dir/enable-auth.out"
+        log_fail "account enable failed"
+        return 1
+    }
+    response=$(admin_get "/api/whitelist")
+    if [[ "$(echo "$response" | jq -r '.userpass.enabled')" != "true" || "$(echo "$response" | jq -r '.userpass.accounts | length')" != "4" ]]; then
+        log_fail "account enable should restore global auth with all accounts intact"
+        return 1
+    fi
+
     local raw_config="$BIFROST_DATA_DIR/config.toml"
     if grep -Eq 'alpha-secret-123|beta-secret-123|disabled-secret-123|bifrost-local-secret:not-json' "$raw_config"; then
         log_fail "config.toml should not contain plaintext account password"
