@@ -54,6 +54,29 @@ STABLE_SHELL_TESTS=(
   "test_remote_invoke_v5_session_refresh_e2e.sh"
 )
 
+# These tests spawn long-lived children that can escape the per-test subshell
+# trap. They must run outside the parallel batch and receive a sandbox-scoped
+# cleanup after execution, regardless of the configured shell job count.
+ISOLATED_AFTER_TESTS=(
+  "test_remote_connect_overload_retry_e2e.sh"
+  "test_remote_invoke_e2e.sh"
+  "test_remote_file_relay_e2e.sh"
+  "test_remote_invoke_recent_calls_args_preview_e2e.sh"
+  "test_remote_invoke_recent_calls_persistence_e2e.sh"
+  "test_remote_invoke_ssh_e2e.sh"
+  "test_remote_relay_tls_trust_e2e.sh"
+  "test_remote_relay_url_fallback_e2e.sh"
+  "test_remote_search_traffic_cli_isomorphic_e2e.sh"
+  "test_client_process_transport_attribution.sh"
+  "test_remote_job_real_e2e.sh"
+  "test_remote_invoke_v5_session_refresh_e2e.sh"
+  "test_remote_shell_exec_streaming_e2e.sh"
+  "test_traffic_db_e2e.sh"
+  "test_openai_like_sse_search_e2e.sh"
+  "test_agent_send_msg_default_channel.sh"
+  "test_e2e_process_cleanup_isolation.sh"
+)
+
 header() {
   echo
   echo "==> $1"
@@ -1063,26 +1086,6 @@ run_shell_tests_parallel() {
   # remote pairing family out of the parallel batch; otherwise one sibling can
   # revoke grants, occupy pair slots, or race a local relay callback while
   # another sibling is approving a pairing.
-  local ISOLATED_AFTER_TESTS=(
-    "test_remote_connect_overload_retry_e2e.sh"
-    "test_remote_invoke_e2e.sh"
-    "test_remote_file_relay_e2e.sh"
-    "test_remote_invoke_recent_calls_args_preview_e2e.sh"
-    "test_remote_invoke_recent_calls_persistence_e2e.sh"
-    "test_remote_invoke_ssh_e2e.sh"
-    "test_remote_relay_tls_trust_e2e.sh"
-    "test_remote_relay_url_fallback_e2e.sh"
-    "test_remote_search_traffic_cli_isomorphic_e2e.sh"
-    "test_client_process_transport_attribution.sh"
-    "test_remote_job_real_e2e.sh"
-    "test_remote_invoke_v5_session_refresh_e2e.sh"
-    "test_remote_shell_exec_streaming_e2e.sh"
-    "test_traffic_db_e2e.sh"
-    "test_openai_like_sse_search_e2e.sh"
-    "test_agent_send_msg_default_channel.sh"
-    "test_e2e_process_cleanup_isolation.sh"
-  )
-
   # Some shell tests run cargo check/test/run internally. If they run inside the
   # parallel batch, they can spend most of the per-test timeout blocked on
   # Cargo's shared target artifact lock while sibling tests compile. Keep them
@@ -1171,16 +1174,6 @@ run_shell_tests_parallel() {
     for script_name in "${serial_tests[@]}"; do
       log_info "Queue serial shell test: $script_name"
       run_shell_test_isolated "$script_name"
-      # PR-G-CI-FIX: isolated-after tests - clean up only sandbox-owned
-      # Bifrost processes. The previous host-wide pkill/killall stopped the
-      # developer's production-like 9900 service.
-      for it in "${ISOLATED_AFTER_TESTS[@]}"; do
-        if [[ "$script_name" == "$it" ]]; then
-          echo "[CLEANUP] post ${script_name}: killing sandbox-owned bifrost processes"
-          kill_bifrost_in_data_root "$shell_data_dir" 2>/dev/null || true
-          break
-        fi
-      done
     done
   fi
 
@@ -1189,6 +1182,14 @@ run_shell_tests_parallel() {
 
 run_shell_test_isolated() {
   local script_name="$1"
+  local cleanup_after=0
+  local isolated_test
+  for isolated_test in "${ISOLATED_AFTER_TESTS[@]}"; do
+    if [[ "$script_name" == "$isolated_test" ]]; then
+      cleanup_after=1
+      break
+    fi
+  done
 
   # Allocate a small contiguous span and derive service ports from it.
   local base
@@ -1212,6 +1213,7 @@ run_shell_test_isolated() {
   local socks5_port="$((shell_port + 6))"
   local echo_proxy="$((shell_port + 7))"
 
+  local test_status=0
   run_and_capture "shell:${script_name}" \
     env \
       BIFROST_BIN="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}" \
@@ -1239,7 +1241,16 @@ run_shell_test_isolated() {
       SERVER_LOG_DIR="$shell_data_dir/mock-logs" \
       BIFROST_DATA_DIR="$shell_data_dir" \
       SKIP_BUILD=true \
-    bash "$E2E_DIR/tests/$script_name"
+    bash "$E2E_DIR/tests/$script_name" || test_status=$?
+
+  if [[ "$cleanup_after" -eq 1 ]]; then
+    # The directory and its ownership marker are local to this function, so
+    # cleanup cannot accidentally target another checkout or the live service.
+    echo "[CLEANUP] post ${script_name}: killing sandbox-owned bifrost processes"
+    kill_bifrost_in_data_root "$shell_data_dir" 2>/dev/null || true
+  fi
+
+  return "$test_status"
 }
 
 run_shell_batch_parallel() {

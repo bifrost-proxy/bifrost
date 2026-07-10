@@ -78,6 +78,7 @@ Bifrost 的正式本机服务通常监听 `9900`，数据目录为 `~/.bifrost`�
 
 1. 第 1 轮重点检查 shell 跨平台、PID 复用、ownership marker、9900 保护、原子写错误路径；运行 provider store 单测、launch guard 和隔离 E2E。
 2. 第 2 轮复查修复后的 diff、文档/human_tests 索引和真实 9900 不变量；复跑定向测试后再执行 `rust-project-validate` 与 workspace all-features。
+3. CI 闭环复查 Shell E2E 的串行 cleanup 作用域；cleanup 必须在 `run_shell_test_isolated` 内使用函数自身的 `shell_data_dir`，不得在调用层引用已离开作用域的局部变量。
 
 ## 校验要求
 

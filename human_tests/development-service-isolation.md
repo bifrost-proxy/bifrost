@@ -59,6 +59,20 @@
 - 无有效备份时不删除主文件或备份，原始坏字节保持可恢复。
 - 主文件和备份都不可恢复时，`add/update/delete` 进入只读保护，不会用空内存状态覆盖坏文件。
 
+### TC-DTSI-04：Shell E2E 串行清理使用函数内的沙箱目录
+
+操作步骤：
+
+1. 执行 `bash -n scripts/run_all_e2e.sh`。
+2. 以 `set -u` 方式调用 `run_shell_test_isolated test_agent_send_msg_default_channel.sh`，使用临时 E2E sandbox 和当前 release 二进制。
+3. 观察测试后的 `[CLEANUP]` 输出；再由 Linux CI 执行完整 Shell E2E suite。
+
+预期结果：
+
+- cleanup 在 `run_shell_test_isolated` 内使用该函数拥有的 `shell_data_dir`，不出现 `unbound variable`。
+- cleanup 仅扫描带 ownership marker 的当次串行测试目录。
+- 聚焦用例及 Linux CI Shell E2E 全部通过，正式 9900 服务 PID 与 IM 配置哈希不变。
+
 ## 清理步骤
 
 1. E2E 脚本通过 trap 停止两个随机端口实例并删除临时数据。
@@ -75,3 +89,4 @@
 | TC-DTSI-01 | PASS | 隔离 E2E 10/10 通过，包含正式目录子路径自动改道和正式根目录清理拒绝。正式服务前后 PID 均为 `23609`，版本均为 `0.0.148`，端口均为 `9900`，数据目录均为 `/Users/eden_studio/.bifrost`；`lsof` 仍显示 PID `23609` 监听 `*:9900`。provider ID 前后均为 `feishu-main`，配置 SHA-256 前后均为 `d70cc3bea8186981759f94be48c6d8764d9b94426d17a372b4068b55b2e82fea`；正式目录无 `should-never-be-used` 或 `process-cleanup-isolation` 残留。 |
 | TC-DTSI-02 | PASS | `make -n run run-release dev` 均展开为 `.bifrost-dev:8800`，包含 `--no-system-proxy --skip-cert-check`、Tray 和 Sync 登录护栏；`bash -n scripts/dev-run.sh` 通过且同样包含隔离变量。 |
 | TC-DTSI-03 | PASS | `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_gateway::provider_store::tests --lib` 5/5 通过；截断恢复成功，无备份、双损坏和不兼容版本场景均保留原文件。 |
+| TC-DTSI-04 | PASS | `BIFROST_E2E_SHELL_JOBS=2 bash scripts/run_all_e2e.sh --ci --skip-build --skip-rules --skip-runner --skip-ui --shard 25/40` 在 `set -u` 下通过 2/2；两个隔离测试后均输出 sandbox-scoped `[CLEANUP]`，未出现 `unbound variable`。正式服务前后 PID 均为 `23609`，IM 配置 SHA-256 前后均为 `d70cc3bea8186981759f94be48c6d8764d9b94426d17a372b4068b55b2e82fea`。完整 Linux Shell E2E 由远端 CI 复核。 |
