@@ -15,7 +15,8 @@ pub fn parse_res_cookies_value(value: &str) -> Vec<(String, bifrost_proxy::ResCo
                         bifrost_proxy::ResCookieValue::simple(
                             val.as_str().unwrap_or("").to_string(),
                         )
-                    } else if let Some(obj) = val.as_object() {
+                    } else {
+                        let obj = val.as_object()?;
                         bifrost_proxy::ResCookieValue {
                             value: obj
                                 .get("value")
@@ -41,8 +42,6 @@ pub fn parse_res_cookies_value(value: &str) -> Vec<(String, bifrost_proxy::ResCo
                                 .and_then(|v| v.as_str())
                                 .map(String::from),
                         }
-                    } else {
-                        return None;
                     };
                     Some((name.clone(), cookie_value))
                 })

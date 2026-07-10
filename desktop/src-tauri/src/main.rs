@@ -18,7 +18,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Mutex, OnceLock,
 };
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(target_os = "macos")]
 use objc2_app_kit::NSWindow;
@@ -58,6 +58,14 @@ const WEBVIEW_REVEAL_SETTLE_DELAY: Duration = Duration::from_millis(90);
 const HANDOFF_COMPLETE_EVENT: &str = "desktop://handoff-complete";
 const OPEN_REQUEST_EVENT: &str = "desktop://open-request";
 const DESKTOP_CORE_ENV: &str = "BIFROST_DESKTOP_CORE";
+const DESKTOP_UPGRADE_RELAUNCH_HELPER_ENV: &str = "BIFROST_DESKTOP_UPGRADE_RELAUNCH_HELPER";
+const DESKTOP_UPGRADE_RELAUNCH_MARKER_ENV: &str = "BIFROST_DESKTOP_UPGRADE_RELAUNCH_MARKER";
+const DESKTOP_UPGRADE_RELAUNCH_TARGET_ENV: &str = "BIFROST_DESKTOP_UPGRADE_RELAUNCH_TARGET";
+const DESKTOP_UPGRADE_RELAUNCH_MARKER_FILE: &str = "desktop-upgrade-relaunch.json";
+const DESKTOP_UPGRADE_RELAUNCH_SCHEMA_VERSION: u8 = 1;
+const DESKTOP_UPGRADE_RELAUNCH_STALE_AFTER_MS: u64 = 10 * 60 * 1000;
+const DESKTOP_UPGRADE_RELAUNCH_PROCESS_WAIT: Duration = Duration::from_secs(30);
+const DESKTOP_UPGRADE_RELAUNCH_PORT_WAIT: Duration = Duration::from_secs(30);
 const SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV: &str =
     "BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL";
 
@@ -125,6 +133,7 @@ struct BackendState {
     handoff_completed: AtomicBool,
     launcher_overlay: Mutex<Option<usize>>,
     pending_open_requests: Mutex<Vec<DesktopOpenRequest>>,
+    upgrade_relaunch: Mutex<Option<DesktopUpgradeRelaunchMarker>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,7 +142,21 @@ enum HostWindowCloseBehavior {
     ShutdownApp,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DesktopUpgradeRelaunchMarker {
+    schema_version: u8,
+    created_at_ms: u64,
+    old_app_pid: u32,
+    old_core_pid: Option<u32>,
+    proxy_port: u16,
+    app_target: String,
+}
+
 fn main() {
+    if run_desktop_upgrade_relaunch_helper_from_env() {
+        return;
+    }
+
     let builder = tauri::Builder::default();
 
     #[cfg(target_os = "macos")]
@@ -287,6 +310,19 @@ fn main() {
             );
             let config = load_desktop_config(&config_path)?;
             let launcher_only = is_launcher_only_mode();
+            let upgrade_relaunch = read_active_upgrade_relaunch_marker(&app_data_dir);
+            if let Some(marker) = upgrade_relaunch.as_ref() {
+                append_desktop_bootstrap_log(
+                    &app_data_dir,
+                    format!(
+                        "desktop upgrade relaunch marker accepted; old_app_pid={} old_core_pid={:?} proxy_port={} target={}",
+                        marker.old_app_pid,
+                        marker.old_core_pid,
+                        marker.proxy_port,
+                        marker.app_target
+                    ),
+                );
+            }
 
             app.manage(BackendState {
                 binary_path,
@@ -307,6 +343,7 @@ fn main() {
                 handoff_completed: AtomicBool::new(false),
                 launcher_overlay: Mutex::new(None),
                 pending_open_requests: Mutex::new(Vec::new()),
+                upgrade_relaunch: Mutex::new(upgrade_relaunch),
             });
 
             install_open_request_handlers(app.handle());
@@ -770,10 +807,268 @@ fn env_flag_enabled(key: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn desktop_upgrade_relaunch_marker_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(DESKTOP_UPGRADE_RELAUNCH_MARKER_FILE)
+}
+
+fn current_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+fn is_upgrade_relaunch_marker_active(marker: &DesktopUpgradeRelaunchMarker, now_ms: u64) -> bool {
+    if marker.schema_version != DESKTOP_UPGRADE_RELAUNCH_SCHEMA_VERSION || marker.proxy_port == 0 {
+        return false;
+    }
+
+    now_ms
+        .checked_sub(marker.created_at_ms)
+        .map(|age_ms| age_ms <= DESKTOP_UPGRADE_RELAUNCH_STALE_AFTER_MS)
+        .unwrap_or(true)
+}
+
+fn write_upgrade_relaunch_marker(
+    data_dir: &Path,
+    marker: &DesktopUpgradeRelaunchMarker,
+) -> tauri::Result<PathBuf> {
+    fs::create_dir_all(data_dir)
+        .map_err(|error| anyhow(format!("failed to create desktop data dir: {error}")))?;
+    let marker_path = desktop_upgrade_relaunch_marker_path(data_dir);
+    let content = serde_json::to_string_pretty(marker)
+        .map_err(|error| anyhow(format!("failed to encode upgrade relaunch marker: {error}")))?;
+    fs::write(&marker_path, format!("{content}\n"))
+        .map_err(|error| anyhow(format!("failed to write upgrade relaunch marker: {error}")))?;
+    Ok(marker_path)
+}
+
+fn read_active_upgrade_relaunch_marker(data_dir: &Path) -> Option<DesktopUpgradeRelaunchMarker> {
+    let marker_path = desktop_upgrade_relaunch_marker_path(data_dir);
+    let content = match fs::read_to_string(&marker_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            append_desktop_bootstrap_log(
+                data_dir,
+                format!("failed to read desktop upgrade relaunch marker: {error}"),
+            );
+            return None;
+        }
+    };
+
+    let marker = match serde_json::from_str::<DesktopUpgradeRelaunchMarker>(&content) {
+        Ok(marker) => marker,
+        Err(error) => {
+            append_desktop_bootstrap_log(
+                data_dir,
+                format!("discarding invalid desktop upgrade relaunch marker: {error}"),
+            );
+            let _ = fs::remove_file(&marker_path);
+            return None;
+        }
+    };
+
+    if is_upgrade_relaunch_marker_active(&marker, current_time_millis()) {
+        Some(marker)
+    } else {
+        append_desktop_bootstrap_log(data_dir, "discarding stale desktop upgrade relaunch marker");
+        let _ = fs::remove_file(&marker_path);
+        None
+    }
+}
+
+fn clear_upgrade_relaunch_marker(data_dir: &Path) {
+    let marker_path = desktop_upgrade_relaunch_marker_path(data_dir);
+    if let Err(error) = fs::remove_file(&marker_path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            append_desktop_bootstrap_log(
+                data_dir,
+                format!("failed to clear desktop upgrade relaunch marker: {error}"),
+            );
+        }
+    }
+}
+
+fn may_reuse_existing_backend(upgrade_relaunch: Option<&DesktopUpgradeRelaunchMarker>) -> bool {
+    upgrade_relaunch.is_none()
+}
+
+fn wait_for_upgrade_handoff_release(data_dir: &Path, marker: &DesktopUpgradeRelaunchMarker) {
+    append_desktop_bootstrap_log(
+        data_dir,
+        format!(
+            "waiting for desktop upgrade handoff release; old_app_pid={} old_core_pid={:?} proxy_port={}",
+            marker.old_app_pid, marker.old_core_pid, marker.proxy_port
+        ),
+    );
+    let app_exited =
+        wait_for_process_exit(marker.old_app_pid, DESKTOP_UPGRADE_RELAUNCH_PROCESS_WAIT);
+    if let Some(old_core_pid) = marker.old_core_pid {
+        let core_exited =
+            wait_for_process_exit(old_core_pid, DESKTOP_UPGRADE_RELAUNCH_PROCESS_WAIT);
+        append_desktop_bootstrap_log(
+            data_dir,
+            format!(
+                "desktop upgrade process wait complete; app_exited={} core_exited={}",
+                app_exited, core_exited
+            ),
+        );
+    } else {
+        append_desktop_bootstrap_log(
+            data_dir,
+            format!(
+                "desktop upgrade process wait complete; app_exited={} core_exited=unknown",
+                app_exited
+            ),
+        );
+    }
+    let port_released =
+        wait_for_backend_shutdown(marker.proxy_port, DESKTOP_UPGRADE_RELAUNCH_PORT_WAIT);
+    append_desktop_bootstrap_log(
+        data_dir,
+        format!(
+            "desktop upgrade port wait complete; proxy_port={} released={}",
+            marker.proxy_port, port_released
+        ),
+    );
+}
+
+fn run_desktop_upgrade_relaunch_helper_from_env() -> bool {
+    if !env_flag_enabled(DESKTOP_UPGRADE_RELAUNCH_HELPER_ENV) {
+        return false;
+    }
+
+    let marker_path = match std::env::var_os(DESKTOP_UPGRADE_RELAUNCH_MARKER_ENV) {
+        Some(path) => PathBuf::from(path),
+        None => return true,
+    };
+    let target = match std::env::var_os(DESKTOP_UPGRADE_RELAUNCH_TARGET_ENV) {
+        Some(target) => PathBuf::from(target),
+        None => return true,
+    };
+    let data_dir = marker_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let marker = match fs::read_to_string(&marker_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<DesktopUpgradeRelaunchMarker>(&content).ok())
+    {
+        Some(marker) => marker,
+        None => return true,
+    };
+
+    append_desktop_bootstrap_log(
+        &data_dir,
+        format!(
+            "desktop upgrade relaunch helper started; old_app_pid={} old_core_pid={:?} proxy_port={} target={}",
+            marker.old_app_pid,
+            marker.old_core_pid,
+            marker.proxy_port,
+            target.display()
+        ),
+    );
+    wait_for_upgrade_handoff_release(&data_dir, &marker);
+
+    let mut command = relaunch_command_for_target(&target);
+    hide_windows_child_console(&mut command);
+    match command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => append_desktop_bootstrap_log(
+            &data_dir,
+            format!(
+                "desktop upgrade relaunch helper opened target; pid={}",
+                child.id()
+            ),
+        ),
+        Err(error) => append_desktop_bootstrap_log(
+            &data_dir,
+            format!("desktop upgrade relaunch helper failed to open target: {error}"),
+        ),
+    }
+
+    true
+}
+
+fn relaunch_command_for_target(target: &Path) -> Command {
+    #[cfg(target_os = "macos")]
+    {
+        if target.extension().and_then(|extension| extension.to_str()) == Some("app") {
+            let mut command = Command::new("open");
+            command.arg("-n").arg(target);
+            return command;
+        }
+    }
+
+    Command::new(target)
+}
+
+fn wait_for_process_exit(pid: u32, timeout: Duration) -> bool {
+    if pid == 0 {
+        return true;
+    }
+
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !process_is_running(pid) {
+            return true;
+        }
+
+        std::thread::sleep(Duration::from_millis(150));
+    }
+
+    !process_is_running(pid)
+}
+
+fn process_is_running(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(windows)]
+    {
+        let filter = format!("PID eq {pid}");
+        Command::new("tasklist")
+            .args(["/FI", &filter, "/NH"])
+            .stdin(Stdio::null())
+            .output()
+            .map(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
+            })
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        false
+    }
+}
+
 fn ensure_backend_running(
     binary_path: &Path,
     data_dir: &Path,
     preferred_port: u16,
+    upgrade_relaunch: Option<&DesktopUpgradeRelaunchMarker>,
 ) -> tauri::Result<(Option<Child>, u16)> {
     append_desktop_bootstrap_log(
         data_dir,
@@ -784,12 +1079,23 @@ fn ensure_backend_running(
         ),
     );
 
-    if let Some(port) = find_existing_backend_port(data_dir, preferred_port) {
+    if may_reuse_existing_backend(upgrade_relaunch) {
+        if let Some(port) = find_existing_backend_port(data_dir, preferred_port) {
+            append_desktop_bootstrap_log(
+                data_dir,
+                format!("reusing existing backend instance already serving on port {port}"),
+            );
+            return Ok((None, port));
+        }
+    } else if let Some(marker) = upgrade_relaunch {
         append_desktop_bootstrap_log(
             data_dir,
-            format!("reusing existing backend instance already serving on port {port}"),
+            format!(
+                "desktop upgrade handoff is active; skipping existing backend reuse on port {}",
+                marker.proxy_port
+            ),
         );
-        return Ok((None, port));
+        wait_for_upgrade_handoff_release(data_dir, marker);
     }
 
     cleanup_existing_backend(binary_path, data_dir);
@@ -1024,7 +1330,7 @@ fn attempt_backend_recovery(app: &AppHandle, reason: &str) {
         }
     };
 
-    match ensure_backend_running(&state.binary_path, &state.data_dir, preferred_port) {
+    match ensure_backend_running(&state.binary_path, &state.data_dir, preferred_port, None) {
         Ok((child, port)) => {
             if let Ok(mut child_guard) = state.child.lock() {
                 *child_guard = child;
@@ -1213,7 +1519,18 @@ fn start_desktop_backend_now(app: &AppHandle, reason: &str) -> Result<DesktopRun
         .lock()
         .map_err(|_| "failed to read desktop expected proxy port".to_string())?;
 
-    match ensure_backend_running(&state.binary_path, &state.data_dir, preferred_port) {
+    let upgrade_relaunch = state
+        .upgrade_relaunch
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone());
+
+    match ensure_backend_running(
+        &state.binary_path,
+        &state.data_dir,
+        preferred_port,
+        upgrade_relaunch.as_ref(),
+    ) {
         Ok((child, port)) => {
             if let Ok(mut child_guard) = state.child.lock() {
                 *child_guard = child;
@@ -1230,6 +1547,16 @@ fn start_desktop_backend_now(app: &AppHandle, reason: &str) -> Result<DesktopRun
                 &state.data_dir,
                 format!("desktop backend start succeeded; active_port={port} reason={reason}"),
             );
+            if upgrade_relaunch.is_some() {
+                clear_upgrade_relaunch_marker(&state.data_dir);
+                if let Ok(mut marker_guard) = state.upgrade_relaunch.lock() {
+                    *marker_guard = None;
+                }
+                append_desktop_bootstrap_log(
+                    &state.data_dir,
+                    "desktop upgrade relaunch marker cleared after managed backend start",
+                );
+            }
             try_start_native_handoff(app, "backend ready");
             schedule_desktop_cert_ready(&state.data_dir);
             desktop_runtime_snapshot(&state)
@@ -1295,15 +1622,17 @@ fn probe_backend_health(port: u16) -> bool {
     response.status().is_success()
 }
 
-fn wait_for_backend_shutdown(port: u16, timeout: Duration) {
+fn wait_for_backend_shutdown(port: u16, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if !probe_backend_health(port) {
-            return;
+            return true;
         }
 
         std::thread::sleep(Duration::from_millis(150));
     }
+
+    !probe_backend_health(port)
 }
 
 fn is_port_available(port: u16) -> bool {
@@ -1787,29 +2116,83 @@ fn save_desktop_config(config_path: &Path, config: &DesktopConfig) -> tauri::Res
 fn restart_desktop_after_update(app: AppHandle) -> Result<(), String> {
     let exe = std::env::current_exe()
         .map_err(|error| format!("failed to resolve current desktop executable: {error}"))?;
+    let state = app
+        .try_state::<BackendState>()
+        .ok_or_else(|| "desktop backend state is not available".to_string())?;
+
+    let old_core_pid = state
+        .child
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|child| child.id()));
+    let proxy_port = state
+        .port
+        .lock()
+        .map(|guard| *guard)
+        .unwrap_or(DEFAULT_BACKEND_PORT);
+    let app_target = desktop_relaunch_target(&exe);
+    let marker = DesktopUpgradeRelaunchMarker {
+        schema_version: DESKTOP_UPGRADE_RELAUNCH_SCHEMA_VERSION,
+        created_at_ms: current_time_millis(),
+        old_app_pid: std::process::id(),
+        old_core_pid,
+        proxy_port,
+        app_target: app_target.to_string_lossy().into_owned(),
+    };
+    let marker_path = write_upgrade_relaunch_marker(&state.data_dir, &marker)
+        .map_err(|error| format!("failed to prepare desktop upgrade relaunch: {error}"))?;
+    append_desktop_bootstrap_log(
+        &state.data_dir,
+        format!(
+            "desktop upgrade relaunch marker written; old_app_pid={} old_core_pid={:?} proxy_port={} target={}",
+            marker.old_app_pid,
+            marker.old_core_pid,
+            marker.proxy_port,
+            marker.app_target
+        ),
+    );
+    let helper = spawn_desktop_upgrade_relaunch_helper(&exe, &marker_path, &app_target)
+        .map_err(|error| format!("failed to spawn desktop upgrade relaunch helper: {error}"))?;
+    append_desktop_bootstrap_log(
+        &state.data_dir,
+        format!(
+            "desktop upgrade relaunch helper spawned; pid={} target={}",
+            helper.id(),
+            marker.app_target
+        ),
+    );
+    app.exit(0);
+    Ok(())
+}
+
+fn desktop_relaunch_target(exe: &Path) -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         if let Some(app_bundle) = macos_app_bundle_from_exe_path(&exe) {
-            Command::new("open")
-                .arg("-n")
-                .arg(app_bundle)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .map_err(|error| format!("failed to relaunch desktop app: {error}"))?;
-            app.exit(0);
-            return Ok(());
+            return app_bundle;
         }
     }
-    Command::new(&exe)
+
+    exe.to_path_buf()
+}
+
+fn spawn_desktop_upgrade_relaunch_helper(
+    exe: &Path,
+    marker_path: &Path,
+    target: &Path,
+) -> tauri::Result<Child> {
+    let mut command = Command::new(exe);
+    command
+        .env(DESKTOP_UPGRADE_RELAUNCH_HELPER_ENV, "1")
+        .env(DESKTOP_UPGRADE_RELAUNCH_MARKER_ENV, marker_path)
+        .env(DESKTOP_UPGRADE_RELAUNCH_TARGET_ENV, target)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    hide_windows_child_console(&mut command);
+    command
         .spawn()
-        .map_err(|error| format!("failed to relaunch desktop app: {error}"))?;
-    app.exit(0);
-    Ok(())
+        .map_err(|error| anyhow(format!("failed to spawn relaunch helper: {error}")))
 }
 
 #[cfg(target_os = "macos")]
@@ -2223,12 +2606,15 @@ fn is_server_config_response(response_body: &str) -> bool {
 mod tests {
     use super::{
         begin_backend_recovery, clear_backend_unavailable_if_healthy, desktop_backend_env,
-        desktop_backend_start_args, host_window_close_behavior_for_platform,
-        is_server_config_response, main_interface_decorations_for_platform,
-        mark_backend_unavailable_for_manual_start, parse_port_update_response,
-        poll_managed_backend_exit, resolve_bifrost_binary_from_env, resolve_desktop_config_path,
-        resolve_desktop_data_dir, save_desktop_config, uses_borderless_desktop_chrome_for_platform,
-        BackendState, DesktopConfig, HostWindowCloseBehavior,
+        desktop_backend_start_args, desktop_upgrade_relaunch_marker_path,
+        host_window_close_behavior_for_platform, is_server_config_response,
+        is_upgrade_relaunch_marker_active, main_interface_decorations_for_platform,
+        mark_backend_unavailable_for_manual_start, may_reuse_existing_backend,
+        parse_port_update_response, poll_managed_backend_exit, read_active_upgrade_relaunch_marker,
+        resolve_bifrost_binary_from_env, resolve_desktop_config_path, resolve_desktop_data_dir,
+        save_desktop_config, uses_borderless_desktop_chrome_for_platform,
+        write_upgrade_relaunch_marker, BackendState, DesktopConfig, DesktopUpgradeRelaunchMarker,
+        HostWindowCloseBehavior,
     };
     use bifrost_storage::data_dir as shared_bifrost_data_dir;
     use std::fs;
@@ -2267,6 +2653,7 @@ mod tests {
             handoff_completed: AtomicBool::new(false),
             launcher_overlay: Mutex::new(None),
             pending_open_requests: Mutex::new(Vec::new()),
+            upgrade_relaunch: Mutex::new(None),
         }
     }
 
@@ -2429,6 +2816,99 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_relaunch_marker_activity_requires_fresh_supported_marker() {
+        let fresh = DesktopUpgradeRelaunchMarker {
+            schema_version: 1,
+            created_at_ms: 10_000,
+            old_app_pid: 42,
+            old_core_pid: Some(43),
+            proxy_port: 9900,
+            app_target: "/Applications/Bifrost.app".to_string(),
+        };
+        assert!(is_upgrade_relaunch_marker_active(&fresh, 10_001));
+
+        let stale = DesktopUpgradeRelaunchMarker {
+            created_at_ms: 1,
+            ..fresh.clone()
+        };
+        assert!(!is_upgrade_relaunch_marker_active(
+            &stale,
+            1 + super::DESKTOP_UPGRADE_RELAUNCH_STALE_AFTER_MS + 1
+        ));
+
+        let unsupported = DesktopUpgradeRelaunchMarker {
+            schema_version: 99,
+            ..fresh.clone()
+        };
+        assert!(!is_upgrade_relaunch_marker_active(&unsupported, 10_001));
+
+        let missing_port = DesktopUpgradeRelaunchMarker {
+            proxy_port: 0,
+            ..fresh
+        };
+        assert!(!is_upgrade_relaunch_marker_active(&missing_port, 10_001));
+    }
+
+    #[test]
+    fn upgrade_relaunch_marker_round_trips_and_stale_marker_is_removed() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let marker = DesktopUpgradeRelaunchMarker {
+            schema_version: 1,
+            created_at_ms: super::current_time_millis(),
+            old_app_pid: 123,
+            old_core_pid: None,
+            proxy_port: 9900,
+            app_target: "/tmp/Bifrost.app".to_string(),
+        };
+
+        let marker_path =
+            write_upgrade_relaunch_marker(temp_dir.path(), &marker).expect("write marker");
+        assert_eq!(
+            marker_path,
+            desktop_upgrade_relaunch_marker_path(temp_dir.path())
+        );
+        assert_eq!(
+            read_active_upgrade_relaunch_marker(temp_dir.path()),
+            Some(marker)
+        );
+
+        let stale_marker = DesktopUpgradeRelaunchMarker {
+            schema_version: 1,
+            created_at_ms: 1,
+            old_app_pid: 123,
+            old_core_pid: None,
+            proxy_port: 9900,
+            app_target: "/tmp/Bifrost.app".to_string(),
+        };
+        fs::write(
+            desktop_upgrade_relaunch_marker_path(temp_dir.path()),
+            serde_json::to_string(&stale_marker).expect("encode stale marker"),
+        )
+        .expect("write stale marker");
+
+        assert_eq!(read_active_upgrade_relaunch_marker(temp_dir.path()), None);
+        assert!(
+            !desktop_upgrade_relaunch_marker_path(temp_dir.path()).exists(),
+            "stale marker should be removed so normal startup is not blocked"
+        );
+    }
+
+    #[test]
+    fn active_upgrade_relaunch_marker_disables_existing_backend_reuse() {
+        let marker = DesktopUpgradeRelaunchMarker {
+            schema_version: 1,
+            created_at_ms: super::current_time_millis(),
+            old_app_pid: 123,
+            old_core_pid: Some(124),
+            proxy_port: 9900,
+            app_target: "/tmp/Bifrost.app".to_string(),
+        };
+
+        assert!(may_reuse_existing_backend(None));
+        assert!(!may_reuse_existing_backend(Some(&marker)));
+    }
+
+    #[test]
     fn backend_recovery_guard_prevents_parallel_recovery() {
         let flag = AtomicBool::new(false);
         let state = BackendState {
@@ -2561,6 +3041,7 @@ mod tests {
             handoff_completed: AtomicBool::new(false),
             launcher_overlay: Mutex::new(None),
             pending_open_requests: Mutex::new(Vec::new()),
+            upgrade_relaunch: Mutex::new(None),
         };
 
         {

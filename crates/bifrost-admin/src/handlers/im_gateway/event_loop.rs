@@ -554,11 +554,7 @@ pub(super) async fn run_event_loop_with_options(
                 // Script execution (existing logic, kept as-is for this route type)
                 info!(route_id = %route_match.route.id, "RunScriptAndReply action matched (execution handled by task executor)");
             }
-            ImRouteAction::AgentChat {
-                system_prompt,
-                reply_target: _,
-                ..
-            } => {
+            ImRouteAction::AgentChat { system_prompt, .. } => {
                 let raw_message_text = route_match.message_text.as_deref().unwrap_or("");
                 let has_images = event
                     .message

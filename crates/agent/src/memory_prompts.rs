@@ -865,7 +865,7 @@ pub fn truncate_to_token_limit(text: &str, max_tokens: usize) -> String {
     let approx_remaining_tokens = (text.len() - cut).div_ceil(APPROX_BYTES_PER_TOKEN);
     format!(
         "{}\n\n[…truncated — approximately {} more tokens not shown…]",
-        &text[..cut].trim_end(),
+        text[..cut].trim_end(),
         approx_remaining_tokens
     )
 }

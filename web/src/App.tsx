@@ -57,6 +57,7 @@ import {
   isDesktopShell,
   setDesktopProxyPort,
 } from "./runtime";
+import { isConnectionIssueError } from "./api/client";
 
 const CLI_DOCS_URL = "https://bifrost-proxy.github.io/getting-started/desktop";
 
@@ -470,10 +471,19 @@ function DesktopStartupGate({ resolvedTheme }: { resolvedTheme: "light" | "dark"
         setCliPhase("missing");
       }
     } catch (error) {
+      if (isConnectionIssueError(error)) {
+        setCliError("Bifrost core restarted while installing CLI. Rechecking install status...");
+        setCliPhase("checking");
+        const nextRuntime = await refreshRuntime();
+        if (nextRuntime?.startupReady) {
+          await refreshCliStatus();
+        }
+        return;
+      }
       setCliError(error instanceof Error ? error.message : "Failed to install CLI");
       setCliPhase("error");
     }
-  }, []);
+  }, [refreshCliStatus, refreshRuntime]);
 
   const openCliDocs = useCallback(() => {
     window.open(CLI_DOCS_URL, "_blank", "noopener,noreferrer");

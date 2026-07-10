@@ -261,7 +261,7 @@ fn spawn_orphan_and_return(opts: &RestartOptions) -> BifrostResult<u32> {
                     // cleaned stdio. Use libc::write (async-signal-safe)
                     // instead of going through nix::unistd::write, which
                     // borrows an OwnedFd we'd rather not construct here.
-                    let sync_byte: [u8; 1] = [b'K'];
+                    let sync_byte: [u8; 1] = *b"K";
                     unsafe {
                         libc::write(wr_raw, sync_byte.as_ptr() as *const _, 1);
                         libc::close(wr_raw);
@@ -661,7 +661,7 @@ mod tests {
         let rd = fds[0];
         let wr = fds[1];
         let rd_fd: OwnedFd = unsafe { OwnedFd::from_raw_fd(rd) };
-        let buf = [b'K'];
+        let buf = *b"K";
         unsafe {
             libc::write(wr, buf.as_ptr() as *const _, 1);
             libc::close(wr);
