@@ -25,6 +25,9 @@ const MAX_DERIVED_OPENAI_LIKE_SSE_BODY_BYTES: usize = MAX_OPENAI_LIKE_SSE_ASSEMB
 const DEFAULT_BODY_STORE_BACKGROUND_CONCURRENCY: usize = 1;
 
 fn record_first_downstream_byte(state: &AdminState, record_id: &str) {
+    if state.get_super_performance_mode() {
+        return;
+    }
     state.update_traffic_by_id(record_id, move |record| {
         let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
         let first_byte_ms = now_ms.saturating_sub(record.timestamp);
@@ -98,6 +101,9 @@ fn store_response_body_or_schedule(
     content_encoding: Option<String>,
     max_decompress_output_bytes: usize,
 ) -> Option<BodyRef> {
+    if state.get_super_performance_mode() {
+        return None;
+    }
     let decompressed = decompress_body_with_limit(
         &body,
         content_encoding.as_deref(),
@@ -124,6 +130,9 @@ fn start_body_stream(
 }
 
 fn persist_socket_summary(state: &AdminState, record_id: &str, total_bytes: usize) {
+    if state.get_super_performance_mode() {
+        return;
+    }
     let status = state.sse_hub.get_socket_status(record_id).map(|mut s| {
         s.is_open = false;
         s
@@ -150,6 +159,9 @@ fn derive_openai_like_sse_body_ref(
     record_id: &str,
     response_body_ref: &Option<BodyRef>,
 ) -> Option<BodyRef> {
+    if state.get_super_performance_mode() {
+        return None;
+    }
     let body_ref = response_body_ref.as_ref()?;
     if body_ref.size() > MAX_DERIVED_OPENAI_LIKE_SSE_BODY_BYTES {
         tracing::debug!(
@@ -233,6 +245,10 @@ impl TeeBodyDropGuard {
     fn store_body_and_update_record(&mut self) {
         self.flush_pending_traffic();
         if let Some(ref state) = self.admin_state {
+            if state.get_super_performance_mode() {
+                self.finished = true;
+                return;
+            }
             let response_body_ref = if let Some(writer) = self.file_writer.take() {
                 Some(writer.finish())
             } else if !self.buffer.is_empty() {
@@ -440,6 +456,14 @@ pub fn create_tee_body_with_store(
     record_id: String,
     options: TeeBodyCaptureOptions,
 ) -> BoxBody {
+    if admin_state
+        .as_ref()
+        .map(|state| state.get_super_performance_mode())
+        .unwrap_or(false)
+    {
+        return create_metrics_body(body, admin_state, options.traffic_type);
+    }
+
     TeeBody::new(body, admin_state, record_id, options).boxed()
 }
 
@@ -655,6 +679,14 @@ pub fn create_request_tee_body(
     let capture = BodyCaptureHandle {
         body_ref: Arc::new(Mutex::new(None)),
     };
+    if admin_state
+        .as_ref()
+        .map(|state| state.get_super_performance_mode())
+        .unwrap_or(false)
+    {
+        return (BodyExt::boxed(body), capture);
+    }
+
     let guard = RequestTeeBodyDropGuard {
         admin_state,
         record_id,
@@ -957,6 +989,9 @@ pub fn store_request_body(
     }
 
     if let Some(ref state) = admin_state {
+        if state.get_super_performance_mode() {
+            return None;
+        }
         if let Some(ref body_store) = state.body_store {
             let max_decompress_output_bytes = state
                 .config_manager
@@ -985,6 +1020,9 @@ pub fn store_response_body(
     }
 
     if let Some(ref state) = admin_state {
+        if state.get_super_performance_mode() {
+            return None;
+        }
         if let Some(ref body_store) = state.body_store {
             return store_body_sync(body_store, record_id, "res", body_data);
         }
@@ -1095,5 +1133,86 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(dir);
         panic!("background body storage did not finish");
+    }
+
+    #[test]
+    fn super_performance_mode_skips_request_and_response_body_storage() {
+        let dir = std::env::temp_dir().join(format!(
+            "bifrost-tee-super-performance-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let body_store = Arc::new(RwLock::new(BodyStore::new(
+            dir.clone(),
+            1024 * 1024,
+            1,
+            64 * 1024,
+            Duration::from_secs(1),
+        )));
+        let state = Arc::new(
+            AdminState::new(0)
+                .with_body_store(body_store)
+                .with_super_performance_mode(true),
+        );
+        let admin_state = Some(state);
+
+        let req_ref = store_request_body(&admin_state, "super-mode-body", b"request", None);
+        let res_ref = store_response_body(&admin_state, "super-mode-body", b"response");
+
+        assert!(req_ref.is_none());
+        assert!(res_ref.is_none());
+        assert!(!dir.join("super-mode-body_req").exists());
+        assert!(!dir.join("super-mode-body_res").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn super_performance_mode_skips_streaming_body_tee_storage() {
+        let dir = std::env::temp_dir().join(format!(
+            "bifrost-tee-super-performance-streaming-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let body_store = Arc::new(RwLock::new(BodyStore::new(
+            dir.clone(),
+            1024 * 1024,
+            1,
+            64 * 1024,
+            Duration::from_secs(1),
+        )));
+        let state = Arc::new(
+            AdminState::new(0)
+                .with_body_store(body_store)
+                .with_super_performance_mode(true),
+        );
+
+        let (request_body, capture) = create_request_tee_body(
+            crate::server::full_body(Bytes::from_static(b"streaming-request")),
+            Some(Arc::clone(&state)),
+            "super-mode-stream".to_string(),
+        );
+        let request_bytes = request_body.collect().await.unwrap().to_bytes();
+
+        let response_body = create_tee_body_with_store(
+            crate::server::full_body(Bytes::from_static(b"streaming-response")),
+            Some(state),
+            "super-mode-stream".to_string(),
+            TeeBodyCaptureOptions {
+                max_body_size: Some(4),
+                content_encoding: None,
+                traffic_type: None,
+                monitor_connection: false,
+                response_headers_size: 0,
+            },
+        );
+        let response_bytes = response_body.collect().await.unwrap().to_bytes();
+
+        assert_eq!(request_bytes, Bytes::from_static(b"streaming-request"));
+        assert_eq!(response_bytes, Bytes::from_static(b"streaming-response"));
+        assert!(capture.clone_ref().is_none());
+        assert!(capture.take().is_none());
+        assert!(!dir.join("super-mode-stream_req").exists());
+        assert!(!dir.join("super-mode-stream_res").exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

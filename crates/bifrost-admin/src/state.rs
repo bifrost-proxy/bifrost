@@ -405,6 +405,7 @@ pub struct AdminState {
     system_proxy_enabled_flag: Option<SharedSystemProxyRuntimeFlag>,
     pub max_body_buffer_size: AtomicUsize,
     pub max_body_probe_size: AtomicUsize,
+    pub super_performance_mode: AtomicBool,
     pub binary_traffic_performance_mode: AtomicBool,
     pub app_icon_cache: Option<SharedAppIconCache>,
     pub version_checker: SharedVersionChecker,
@@ -474,6 +475,7 @@ impl AdminState {
             system_proxy_enabled_flag: None,
             max_body_buffer_size: AtomicUsize::new(DEFAULT_MAX_BODY_BUFFER_SIZE),
             max_body_probe_size: AtomicUsize::new(DEFAULT_MAX_BODY_PROBE_SIZE),
+            super_performance_mode: AtomicBool::new(false),
             binary_traffic_performance_mode: AtomicBool::new(true),
             app_icon_cache: None,
             version_checker: Arc::new(VersionChecker::new()),
@@ -532,6 +534,10 @@ impl AdminState {
         self.binary_traffic_performance_mode.load(Ordering::Relaxed)
     }
 
+    pub fn get_super_performance_mode(&self) -> bool {
+        self.super_performance_mode.load(Ordering::Relaxed)
+    }
+
     pub fn set_max_body_buffer_size(&self, size: usize) {
         let old = self.max_body_buffer_size.swap(size, Ordering::SeqCst);
         if old != size {
@@ -567,8 +573,26 @@ impl AdminState {
         }
     }
 
+    pub fn set_super_performance_mode(&self, enabled: bool) {
+        let old = self.super_performance_mode.swap(enabled, Ordering::SeqCst);
+        if old != enabled {
+            tracing::info!(
+                "AdminState config updated: super_performance_mode {} -> {}",
+                old,
+                enabled
+            );
+        }
+    }
+
     #[inline]
     pub fn record_traffic(&self, record: crate::traffic::TrafficRecord) {
+        if self.get_super_performance_mode() {
+            tracing::trace!(
+                record_id = %record.id,
+                "super performance mode enabled; dropping traffic record"
+            );
+            return;
+        }
         if let Some(ref writer) = self.async_traffic_writer {
             writer.record(record);
         } else if let Some(ref db_store) = self.traffic_db_store {
@@ -583,6 +607,13 @@ impl AdminState {
     where
         F: Fn(&mut crate::traffic::TrafficRecord) + Send + Sync + Clone + 'static,
     {
+        if self.get_super_performance_mode() {
+            tracing::trace!(
+                record_id = %id,
+                "super performance mode enabled; dropping traffic update"
+            );
+            return;
+        }
         if let Some(ref writer) = self.async_traffic_writer {
             writer.update_by_id(id, updater);
         } else if let Some(ref db_store) = self.traffic_db_store {
@@ -1167,6 +1198,11 @@ impl AdminState {
 
     pub fn with_max_body_probe_size(self, size: usize) -> Self {
         self.max_body_probe_size.store(size, Ordering::SeqCst);
+        self
+    }
+
+    pub fn with_super_performance_mode(self, enabled: bool) -> Self {
+        self.super_performance_mode.store(enabled, Ordering::SeqCst);
         self
     }
 
@@ -1840,6 +1876,34 @@ mod tests {
 
         drop(state);
         drop(state_without_callback);
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn super_performance_mode_skips_traffic_record_and_update_persistence() {
+        let dir = create_test_dir();
+        let store = TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap();
+        let state = isolated_test_state(&dir)
+            .with_traffic_db_store(store)
+            .with_super_performance_mode(true);
+        let db_store = state
+            .traffic_db_store
+            .as_ref()
+            .expect("traffic db store")
+            .clone();
+
+        let mut record = TrafficRecord::new(
+            "super-mode-record".to_string(),
+            "GET".to_string(),
+            "http://example.test/super".to_string(),
+        );
+        record.status = 200;
+        state.record_traffic(record);
+        state.update_traffic_by_id("super-mode-record", |record| {
+            record.status = 201;
+        });
+
+        assert!(db_store.get_by_id("super-mode-record").is_none());
         cleanup_test_dir(&dir);
     }
 

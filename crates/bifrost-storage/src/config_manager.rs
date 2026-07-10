@@ -329,6 +329,9 @@ impl ConfigManager {
         if let Some(max_body_probe_size) = update.max_body_probe_size {
             config.traffic.max_body_probe_size = max_body_probe_size;
         }
+        if let Some(super_performance_mode) = update.super_performance_mode {
+            config.traffic.super_performance_mode = super_performance_mode;
+        }
         if let Some(binary_traffic_performance_mode) = update.binary_traffic_performance_mode {
             config.traffic.binary_traffic_performance_mode = binary_traffic_performance_mode;
         }
@@ -783,6 +786,7 @@ impl ConfigManager {
                 max_body_memory_size: legacy.traffic.max_body_memory_size,
                 max_body_buffer_size: legacy.traffic.max_body_buffer_size,
                 max_body_probe_size: 64 * 1024,
+                super_performance_mode: legacy.traffic.super_performance_mode,
                 binary_traffic_performance_mode: true,
                 file_retention_days: legacy.traffic.file_retention_days,
                 sse_stream_flush_bytes: legacy.traffic.sse_stream_flush_bytes,
@@ -1288,6 +1292,7 @@ mod tests {
                 max_body_memory_size: Some(1234),
                 max_body_buffer_size: Some(5678),
                 max_body_probe_size: Some(910),
+                super_performance_mode: Some(true),
                 binary_traffic_performance_mode: Some(false),
                 inject_bifrost_badge: Some(false),
                 file_retention_days: Some(15),
@@ -1305,6 +1310,7 @@ mod tests {
         assert_eq!(result.max_body_memory_size, 1234);
         assert_eq!(result.max_body_buffer_size, 5678);
         assert_eq!(result.max_body_probe_size, 910);
+        assert!(result.super_performance_mode);
         assert!(!result.binary_traffic_performance_mode);
         assert!(!result.inject_bifrost_badge);
         assert_eq!(result.file_retention_days, 15);

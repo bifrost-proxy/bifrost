@@ -83,6 +83,7 @@ import pushService from "../../services/pushService";
 import { showTlsWhitelistChangeSuccess } from "../../utils/tlsInterceptionNotice";
 
 const TAB_PARAM = "tab";
+const HIGHLIGHT_PARAM = "highlight";
 const DEFAULT_TAB = "proxy";
 const VALID_TABS = [
   "proxy",
@@ -133,6 +134,7 @@ export default function Settings() {
   const [searchParams, setSearchParams] = useSearchParams();
 
   const tabFromUrl = searchParams.get(TAB_PARAM);
+  const highlightFromUrl = searchParams.get(HIGHLIGHT_PARAM);
   const activeTab =
     tabFromUrl && VALID_TABS.includes(tabFromUrl) ? tabFromUrl : DEFAULT_TAB;
 
@@ -720,6 +722,18 @@ export default function Settings() {
       { max_body_probe_size: value },
       "Max body probe size updated",
       "Failed to update max body probe size",
+    );
+  };
+
+  const handleSuperPerformanceModeChange = (enabled: boolean) => {
+    updatePerfDraft({ super_performance_mode: enabled });
+    schedulePerformanceUpdate(
+      "super_performance_mode",
+      { super_performance_mode: enabled },
+      enabled
+        ? "Super performance mode enabled"
+        : "Super performance mode disabled",
+      "Failed to update super performance mode",
     );
   };
 
@@ -1352,6 +1366,11 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
           maxBodyProbeMarks={maxBodyProbeMarks}
           fileRetentionMarks={fileRetentionMarks}
           breakpointTimeoutMarks={breakpointTimeoutMarks}
+          highlightSuperPerformanceMode={
+            activeTab === "performance" &&
+            highlightFromUrl === "super-performance-mode"
+          }
+          handleSuperPerformanceModeChange={handleSuperPerformanceModeChange}
           handleMaxRecordsChange={handleMaxRecordsChange}
           handleMaxDbSizeChange={handleMaxDbSizeChange}
           handleMaxBodyMemorySizeChange={handleMaxBodyMemorySizeChange}

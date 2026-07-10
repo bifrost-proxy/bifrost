@@ -487,6 +487,12 @@ fn get_config_value(client: &ConfigApiClient, key: &str, json: bool) -> Result<(
                 .map_err(BifrostError::Config)?;
             serde_json::Value::Number(perf.traffic.max_body_buffer_size.into())
         }
+        ConfigKey::TrafficSuperPerformanceMode => {
+            let perf = client
+                .get_performance_config()
+                .map_err(BifrostError::Config)?;
+            serde_json::Value::Bool(perf.traffic.super_performance_mode)
+        }
         ConfigKey::TrafficRetentionDays => {
             let perf = client
                 .get_performance_config()
@@ -780,6 +786,17 @@ fn set_config_value(client: &ConfigApiClient, key: &str, value: &str) -> Result<
                 .update_performance_config(&req)
                 .map_err(BifrostError::Config)?;
             println!("✓ max-buffer-size set to {}", format_size(size));
+        }
+        ConfigKey::TrafficSuperPerformanceMode => {
+            let enabled = parse_bool(value).map_err(BifrostError::Config)?;
+            let req = UpdatePerformanceConfigRequest {
+                super_performance_mode: Some(enabled),
+                ..Default::default()
+            };
+            client
+                .update_performance_config(&req)
+                .map_err(BifrostError::Config)?;
+            println!("✓ super-performance-mode set to {}", enabled);
         }
         ConfigKey::TrafficRetentionDays => {
             let days = value
@@ -1122,6 +1139,7 @@ fn reset_config(client: &ConfigApiClient, key: &str, yes: bool) -> Result<()> {
             ws_payload_flush_bytes: Some(512 * 1024),
             ws_payload_flush_interval_ms: Some(1000),
             ws_payload_max_open_files: Some(128),
+            super_performance_mode: Some(false),
         };
         client
             .update_performance_config(&perf_req)
@@ -1326,6 +1344,16 @@ fn reset_config(client: &ConfigApiClient, key: &str, yes: bool) -> Result<()> {
                 .update_performance_config(&req)
                 .map_err(BifrostError::Config)?;
             println!("✓ traffic.max-buffer-size reset to 10 MB");
+        }
+        ConfigKey::TrafficSuperPerformanceMode => {
+            let req = UpdatePerformanceConfigRequest {
+                super_performance_mode: Some(false),
+                ..Default::default()
+            };
+            client
+                .update_performance_config(&req)
+                .map_err(BifrostError::Config)?;
+            println!("✓ traffic.super-performance-mode reset to false");
         }
         ConfigKey::TrafficRetentionDays => {
             let req = UpdatePerformanceConfigRequest {
@@ -1536,6 +1564,7 @@ fn export_as_json(
             "max_db_size_bytes": perf.traffic.max_db_size_bytes,
             "max_body_size": perf.traffic.max_body_memory_size,
             "max_buffer_size": perf.traffic.max_body_buffer_size,
+            "super_performance_mode": perf.traffic.super_performance_mode,
             "retention_days": perf.traffic.file_retention_days,
         },
         "access": {
@@ -1621,6 +1650,10 @@ fn export_as_toml(
         perf.traffic.max_body_buffer_size
     ));
     output.push_str(&format!(
+        "super_performance_mode = {}\n",
+        perf.traffic.super_performance_mode
+    ));
+    output.push_str(&format!(
         "file_retention_days = {}\n",
         perf.traffic.file_retention_days
     ));
@@ -1672,6 +1705,7 @@ mod tests {
             max_body_memory_size: 512 * 1024,
             max_body_buffer_size: 10 * 1024 * 1024,
             max_body_probe_size: 64 * 1024,
+            super_performance_mode: false,
             binary_traffic_performance_mode: true,
             file_retention_days: 7,
             sse_stream_flush_bytes: 256 * 1024,
@@ -1873,6 +1907,7 @@ mod coverage_boost {
                 "max_body_memory_size": 512 * 1024usize,
                 "max_body_buffer_size": 10 * 1024 * 1024usize,
                 "max_body_probe_size": 64 * 1024usize,
+                "super_performance_mode": false,
                 "binary_traffic_performance_mode": true,
                 "file_retention_days": 7u64,
                 "sse_stream_flush_bytes": 256 * 1024usize,
@@ -2126,6 +2161,16 @@ mod coverage_boost {
         .unwrap();
 
         handle_config_command(
+            Some(ConfigCommands::Set {
+                key: "traffic.super-performance-mode".to_string(),
+                value: "true".to_string(),
+            }),
+            &host,
+            port,
+        )
+        .unwrap();
+
+        handle_config_command(
             Some(ConfigCommands::Add {
                 key: "tls.exclude".to_string(),
                 value: "extra.com".to_string(),
@@ -2204,6 +2249,7 @@ mod coverage_boost {
         assert!(contents.contains("[server]"));
         assert!(contents.contains("[tls]"));
         assert!(contents.contains("[traffic]"));
+        assert!(contents.contains("super_performance_mode = false"));
         assert!(contents.contains("[access]"));
     }
 
@@ -2446,6 +2492,7 @@ mod coverage_boost_v2 {
                 "max_body_memory_size": 512 * 1024usize,
                 "max_body_buffer_size": 10 * 1024 * 1024usize,
                 "max_body_probe_size": 64 * 1024usize,
+                "super_performance_mode": false,
                 "binary_traffic_performance_mode": true,
                 "file_retention_days": 7u64,
                 "sse_stream_flush_bytes": 256 * 1024usize,

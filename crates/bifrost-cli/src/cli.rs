@@ -238,6 +238,11 @@ pub enum Commands {
         unsafe_ssl: bool,
         #[arg(
             long,
+            help = "Enable super performance mode: process rules but do not record traffic, bodies, frames, or traffic DB updates"
+        )]
+        super_performance_mode: bool,
+        #[arg(
+            long,
             conflicts_with = "disable_badge_injection",
             help = "Enable injecting Bifrost badge into HTML pages"
         )]

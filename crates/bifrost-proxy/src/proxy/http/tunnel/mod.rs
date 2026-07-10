@@ -3097,7 +3097,9 @@ async fn handle_intercepted_request_with_protocol(
                 } else {
                     build_error_body(502, &error_info)
                 };
-                record.response_body_ref = if let Some(ref body_store) = state.body_store {
+                record.response_body_ref = if state.get_super_performance_mode() {
+                    None
+                } else if let Some(ref body_store) = state.body_store {
                     let store = body_store.read();
                     store.store(req_id, "res", response_body.as_ref())
                 } else {
@@ -3991,7 +3993,7 @@ async fn handle_intercepted_request_with_protocol(
                     None
                 };
 
-                if is_sse {
+                if is_sse && !state.get_super_performance_mode() {
                     if let Some(ref body_store) = state.body_store {
                         match body_store.read().start_stream(&record_id, "sse_raw") {
                             Ok(writer) => {
@@ -4075,11 +4077,17 @@ async fn handle_intercepted_request_with_protocol(
                             .get(hyper::header::CONTENT_TYPE)
                             .and_then(|v| v.to_str().ok())
                             .map(|s| s.to_string());
-                        let pause_body_ref = state.body_store.as_ref().and_then(|body_store| {
-                            let store = body_store.read();
-                            store.store(req_id, "sse_raw", final_body.as_ref())
-                        });
-                        let pause_derived_body_ref =
+                        let pause_body_ref = if state.get_super_performance_mode() {
+                            None
+                        } else {
+                            state.body_store.as_ref().and_then(|body_store| {
+                                let store = body_store.read();
+                                store.store(req_id, "sse_raw", final_body.as_ref())
+                            })
+                        };
+                        let pause_derived_body_ref = if state.get_super_performance_mode() {
+                            None
+                        } else {
                             state.body_store.as_ref().and_then(|body_store| {
                                 bifrost_admin::assemble_openai_like_response_body_from_text(
                                     std::str::from_utf8(&final_body).ok()?,
@@ -4091,7 +4099,8 @@ async fn handle_intercepted_request_with_protocol(
                                         assembled.as_bytes(),
                                     )
                                 })
-                            });
+                            })
+                        };
                         let pause_response_size = final_body.len();
                         let pause_total_ms = total_ms;
 
@@ -4185,18 +4194,20 @@ async fn handle_intercepted_request_with_protocol(
                         } else {
                             None
                         };
-                        if let Some(ref body_store) = state.body_store {
-                            let store = body_store.read();
-                            record.response_body_ref =
-                                store.store(req_id, "sse_raw", final_body.as_ref());
-                            if let Ok(body_text) = std::str::from_utf8(&final_body) {
-                                record.derived_response_body_ref =
+                        if !state.get_super_performance_mode() {
+                            if let Some(ref body_store) = state.body_store {
+                                let store = body_store.read();
+                                record.response_body_ref =
+                                    store.store(req_id, "sse_raw", final_body.as_ref());
+                                if let Ok(body_text) = std::str::from_utf8(&final_body) {
+                                    record.derived_response_body_ref =
                                     bifrost_admin::assemble_openai_like_response_body_from_text(
                                         body_text,
                                     )
                                     .and_then(|assembled| {
                                         store.store(req_id, "res_openai_like", assembled.as_bytes())
                                     });
+                                }
                             }
                         }
                         apply_listener_context(
@@ -4421,20 +4432,23 @@ async fn handle_intercepted_request_with_protocol(
             None
         };
 
-        if let Some(ref body_store) = state.body_store {
-            let max_decompress_output_bytes = if let Some(cm) = state.config_manager.as_ref() {
-                cm.config().await.sandbox.limits.max_decompress_output_bytes
-            } else {
-                10 * 1024 * 1024
-            };
+        if !state.get_super_performance_mode() {
+            if let Some(ref body_store) = state.body_store {
+                let max_decompress_output_bytes = if let Some(cm) = state.config_manager.as_ref() {
+                    cm.config().await.sandbox.limits.max_decompress_output_bytes
+                } else {
+                    10 * 1024 * 1024
+                };
 
-            let store = body_store.read();
-            let decompressed_res_body = crate::transform::decompress_body_with_limit(
-                &res_body_bytes,
-                res_content_encoding.as_deref(),
-                max_decompress_output_bytes,
-            );
-            record.response_body_ref = store.store(req_id, "res", decompressed_res_body.as_ref());
+                let store = body_store.read();
+                let decompressed_res_body = crate::transform::decompress_body_with_limit(
+                    &res_body_bytes,
+                    res_content_encoding.as_deref(),
+                    max_decompress_output_bytes,
+                );
+                record.response_body_ref =
+                    store.store(req_id, "res", decompressed_res_body.as_ref());
+            }
         }
 
         state.record_traffic(record);
@@ -4722,21 +4736,25 @@ async fn handle_intercepted_request_with_protocol(
                 calculate_response_size(final_status, &final_res_headers, final_body.len());
             let pause_total_ms = start_time.elapsed().as_millis() as u64;
             let original_res_headers_for_pause = original_res_headers.clone();
-            let pause_body_ref = state.body_store.as_ref().and_then(|body_store| {
-                let max_decompress_output_bytes = state
-                    .config_manager
-                    .as_ref()
-                    .and_then(|cm| cm.try_config())
-                    .map(|cfg| cfg.sandbox.limits.max_decompress_output_bytes)
-                    .unwrap_or(10 * 1024 * 1024);
-                let store = body_store.read();
-                let decompressed_res = crate::transform::decompress_body_with_limit(
-                    &final_body,
-                    response_content_encoding(&res_parts).as_deref(),
-                    max_decompress_output_bytes,
-                );
-                store.store(req_id, "res", decompressed_res.as_ref())
-            });
+            let pause_body_ref = if state.get_super_performance_mode() {
+                None
+            } else {
+                state.body_store.as_ref().and_then(|body_store| {
+                    let max_decompress_output_bytes = state
+                        .config_manager
+                        .as_ref()
+                        .and_then(|cm| cm.try_config())
+                        .map(|cfg| cfg.sandbox.limits.max_decompress_output_bytes)
+                        .unwrap_or(10 * 1024 * 1024);
+                    let store = body_store.read();
+                    let decompressed_res = crate::transform::decompress_body_with_limit(
+                        &final_body,
+                        response_content_encoding(&res_parts).as_deref(),
+                        max_decompress_output_bytes,
+                    );
+                    store.store(req_id, "res", decompressed_res.as_ref())
+                })
+            };
 
             let pause_download_bytes = final_body.len();
             state.update_traffic_by_id(req_id, move |record| {
@@ -4827,128 +4845,130 @@ async fn handle_intercepted_request_with_protocol(
     }
 
     if let Some(ref state) = admin_state {
-        if let Some(ref body_store) = state.body_store {
-            let max_decompress_output_bytes = if let Some(cm) = state.config_manager.as_ref() {
-                cm.config().await.sandbox.limits.max_decompress_output_bytes
-            } else {
-                10 * 1024 * 1024
-            };
+        if !state.get_super_performance_mode() {
+            if let Some(ref body_store) = state.body_store {
+                let max_decompress_output_bytes = if let Some(cm) = state.config_manager.as_ref() {
+                    cm.config().await.sandbox.limits.max_decompress_output_bytes
+                } else {
+                    10 * 1024 * 1024
+                };
 
-            let final_req_content_encoding = get_content_encoding(&final_req_headers);
-            let decompressed_req = crate::transform::decompress_body_with_limit(
-                &Bytes::from(body_bytes.clone()),
-                final_req_content_encoding.as_deref(),
-                max_decompress_output_bytes,
-            );
-            let raw_req_body = decompressed_req.clone();
-            let req_headers_hashmap = header_pairs_to_hashmap(&final_req_headers);
-            let (req_host, req_path, req_proto) = parse_url_parts(&original_uri);
-            let request_data = RequestData {
-                url: original_uri.clone(),
-                method: actual_method.to_string(),
-                host: req_host,
-                path: req_path,
-                protocol: req_proto,
-                client_ip: client_ip.clone(),
-                client_app: client_app.clone(),
-                headers: req_headers_hashmap,
-                body: None,
-            };
+                let final_req_content_encoding = get_content_encoding(&final_req_headers);
+                let decompressed_req = crate::transform::decompress_body_with_limit(
+                    &Bytes::from(body_bytes.clone()),
+                    final_req_content_encoding.as_deref(),
+                    max_decompress_output_bytes,
+                );
+                let raw_req_body = decompressed_req.clone();
+                let req_headers_hashmap = header_pairs_to_hashmap(&final_req_headers);
+                let (req_host, req_path, req_proto) = parse_url_parts(&original_uri);
+                let request_data = RequestData {
+                    url: original_uri.clone(),
+                    method: actual_method.to_string(),
+                    host: req_host,
+                    path: req_path,
+                    protocol: req_proto,
+                    client_ip: client_ip.clone(),
+                    client_app: client_app.clone(),
+                    headers: req_headers_hashmap,
+                    body: None,
+                };
 
-            let final_res_content_encoding = response_content_encoding(&res_parts);
-            let decompressed_res = crate::transform::decompress_body_with_limit(
-                &final_body,
-                final_res_content_encoding.as_deref(),
-                max_decompress_output_bytes,
-            );
-            let raw_res_body = decompressed_res.clone();
-            let final_res_headers: Vec<(String, String)> = res_parts
-                .headers
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                .collect();
-            let response_data = ResponseData {
-                status: res_parts.status.as_u16(),
-                status_text: res_parts
-                    .status
-                    .canonical_reason()
-                    .unwrap_or("OK")
-                    .to_string(),
-                headers: header_pairs_to_hashmap(&final_res_headers),
-                body: None,
-                request: request_data.clone(),
-            };
+                let final_res_content_encoding = response_content_encoding(&res_parts);
+                let decompressed_res = crate::transform::decompress_body_with_limit(
+                    &final_body,
+                    final_res_content_encoding.as_deref(),
+                    max_decompress_output_bytes,
+                );
+                let raw_res_body = decompressed_res.clone();
+                let final_res_headers: Vec<(String, String)> = res_parts
+                    .headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                    .collect();
+                let response_data = ResponseData {
+                    status: res_parts.status.as_u16(),
+                    status_text: res_parts
+                        .status
+                        .canonical_reason()
+                        .unwrap_or("OK")
+                        .to_string(),
+                    headers: header_pairs_to_hashmap(&final_res_headers),
+                    body: None,
+                    request: request_data.clone(),
+                };
 
-            let decoded_req_body = apply_decode_scripts_for_storage(
-                &admin_state,
-                &resolved_rules.decode_scripts,
-                "request",
-                &ctx,
-                &resolved_rules,
-                &request_data,
-                &response_data,
-                &values,
-                decompressed_req,
-            )
-            .await;
-            let DecodeForStorageResult {
-                output: decoded_req_output,
-                results: decoded_req_results,
-            } = decoded_req_body;
+                let decoded_req_body = apply_decode_scripts_for_storage(
+                    &admin_state,
+                    &resolved_rules.decode_scripts,
+                    "request",
+                    &ctx,
+                    &resolved_rules,
+                    &request_data,
+                    &response_data,
+                    &values,
+                    decompressed_req,
+                )
+                .await;
+                let DecodeForStorageResult {
+                    output: decoded_req_output,
+                    results: decoded_req_results,
+                } = decoded_req_body;
 
-            let decoded_res_body = apply_decode_scripts_for_storage(
-                &admin_state,
-                &resolved_rules.decode_scripts,
-                "response",
-                &ctx,
-                &resolved_rules,
-                &request_data,
-                &response_data,
-                &values,
-                decompressed_res,
-            )
-            .await;
-            let DecodeForStorageResult {
-                output: decoded_res_output,
-                results: decoded_res_results,
-            } = decoded_res_body;
+                let decoded_res_body = apply_decode_scripts_for_storage(
+                    &admin_state,
+                    &resolved_rules.decode_scripts,
+                    "response",
+                    &ctx,
+                    &resolved_rules,
+                    &request_data,
+                    &response_data,
+                    &values,
+                    decompressed_res,
+                )
+                .await;
+                let DecodeForStorageResult {
+                    output: decoded_res_output,
+                    results: decoded_res_results,
+                } = decoded_res_body;
 
-            let store = body_store.read();
-            let raw_request_body_ref = if has_decode_scripts && !raw_req_body.is_empty() {
-                store.store(req_id, "req_raw", raw_req_body.as_ref())
-            } else {
-                None
-            };
-            let raw_response_body_ref = if has_decode_scripts && !raw_res_body.is_empty() {
-                store.store(req_id, "res_raw", raw_res_body.as_ref())
-            } else {
-                None
-            };
-            let request_body_ref = if !decoded_req_output.is_empty() {
-                store.store(req_id, "req", decoded_req_output.as_ref())
-            } else {
-                None
-            };
-            let response_body_ref = store.store(req_id, "res", decoded_res_output.as_ref());
-            let has_decode_scripts_for_update = has_decode_scripts;
-            state.update_traffic_by_id(req_id, move |record| {
-                if let Some(body_ref) = request_body_ref.clone() {
-                    record.request_body_ref = Some(body_ref);
-                }
-                if let Some(body_ref) = response_body_ref.clone() {
-                    record.response_body_ref = Some(body_ref);
-                }
-                if has_decode_scripts_for_update {
-                    record.raw_request_body_ref = raw_request_body_ref.clone();
-                    record.raw_response_body_ref = raw_response_body_ref.clone();
-                    if !decoded_req_results.is_empty() {
-                        record.decode_req_script_results = Some(decoded_req_results.clone());
+                let store = body_store.read();
+                let raw_request_body_ref = if has_decode_scripts && !raw_req_body.is_empty() {
+                    store.store(req_id, "req_raw", raw_req_body.as_ref())
+                } else {
+                    None
+                };
+                let raw_response_body_ref = if has_decode_scripts && !raw_res_body.is_empty() {
+                    store.store(req_id, "res_raw", raw_res_body.as_ref())
+                } else {
+                    None
+                };
+                let request_body_ref = if !decoded_req_output.is_empty() {
+                    store.store(req_id, "req", decoded_req_output.as_ref())
+                } else {
+                    None
+                };
+                let response_body_ref = store.store(req_id, "res", decoded_res_output.as_ref());
+                let has_decode_scripts_for_update = has_decode_scripts;
+                state.update_traffic_by_id(req_id, move |record| {
+                    if let Some(body_ref) = request_body_ref.clone() {
+                        record.request_body_ref = Some(body_ref);
                     }
-                    if !decoded_res_results.is_empty() {
-                        record.decode_res_script_results = Some(decoded_res_results.clone());
+                    if let Some(body_ref) = response_body_ref.clone() {
+                        record.response_body_ref = Some(body_ref);
                     }
-                }
-            });
+                    if has_decode_scripts_for_update {
+                        record.raw_request_body_ref = raw_request_body_ref.clone();
+                        record.raw_response_body_ref = raw_response_body_ref.clone();
+                        if !decoded_req_results.is_empty() {
+                            record.decode_req_script_results = Some(decoded_req_results.clone());
+                        }
+                        if !decoded_res_results.is_empty() {
+                            record.decode_res_script_results = Some(decoded_res_results.clone());
+                        }
+                    }
+                });
+            }
         }
     }
 

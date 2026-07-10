@@ -408,6 +408,7 @@ pub struct TrafficConfig {
     pub max_body_memory_size: usize,
     pub max_body_buffer_size: usize,
     pub max_body_probe_size: usize,
+    pub super_performance_mode: bool,
     pub binary_traffic_performance_mode: bool,
     pub inject_bifrost_badge: bool,
     pub file_retention_days: u64,
@@ -427,6 +428,7 @@ impl Default for TrafficConfig {
             max_body_memory_size: 512 * 1024,
             max_body_buffer_size: 10 * 1024 * 1024,
             max_body_probe_size: 64 * 1024,
+            super_performance_mode: false,
             binary_traffic_performance_mode: true,
             inject_bifrost_badge: true,
             file_retention_days: 7,
@@ -514,6 +516,7 @@ pub struct TrafficConfigUpdate {
     pub max_body_memory_size: Option<usize>,
     pub max_body_buffer_size: Option<usize>,
     pub max_body_probe_size: Option<usize>,
+    pub super_performance_mode: Option<bool>,
     pub binary_traffic_performance_mode: Option<bool>,
     pub inject_bifrost_badge: Option<bool>,
     pub file_retention_days: Option<u64>,
@@ -612,6 +615,7 @@ mod tests {
         assert!(config.tray.system_stats_items.upload);
         assert!(config.tray.system_stats_items.download);
         assert!(config.sync.enabled);
+        assert!(!config.traffic.super_performance_mode);
         assert_eq!(config.sync.remote_base_url, DEFAULT_REMOTE_BASE_URL);
         assert_eq!(config.ui.rules_sort_mode, "manual");
         assert!(!config.sandbox.net.allow_private_network);

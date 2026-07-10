@@ -1362,6 +1362,7 @@ pub fn run_start(
     app_intercept_exclude: Option<String>,
     app_intercept_include: Option<String>,
     unsafe_ssl: bool,
+    super_performance_mode: bool,
     enable_badge_injection: bool,
     disable_badge_injection: bool,
     no_disconnect_on_config_change: bool,
@@ -1516,9 +1517,13 @@ pub fn run_start(
         stored_config.traffic.inject_bifrost_badge
     };
 
-    if enable_badge_injection || disable_badge_injection {
+    let effective_super_performance_mode =
+        super_performance_mode || stored_config.traffic.super_performance_mode;
+
+    if enable_badge_injection || disable_badge_injection || super_performance_mode {
         futures::executor::block_on(config_manager.update_traffic_config(TrafficConfigUpdate {
             inject_bifrost_badge: Some(inject_bifrost_badge),
+            super_performance_mode: super_performance_mode.then_some(true),
             ..Default::default()
         }))?;
     }
@@ -1544,6 +1549,7 @@ pub fn run_start(
         verbose_logging,
         max_body_buffer_size: stored_config.traffic.max_body_buffer_size,
         max_body_probe_size: stored_config.traffic.max_body_probe_size,
+        super_performance_mode: effective_super_performance_mode,
         binary_traffic_performance_mode: stored_config.traffic.binary_traffic_performance_mode,
         inject_bifrost_badge,
         timeout_secs: stored_config.server.timeout_secs,
@@ -1582,6 +1588,11 @@ pub fn run_start(
     }
     if unsafe_ssl_final {
         println!("⚠️  WARNING: Upstream TLS certificate verification is DISABLED (--unsafe-ssl)");
+    }
+    if effective_super_performance_mode {
+        println!(
+            "Super performance mode: enabled (traffic records and body/frame storage disabled)"
+        );
     }
 
     let early_values = futures::executor::block_on(config_manager.values_as_hashmap());
@@ -2125,6 +2136,7 @@ pub fn run_foreground(
                 .ensure_keepawake_manager_installed()
                 .with_max_body_buffer_size(stored_config.traffic.max_body_buffer_size)
                 .with_max_body_probe_size(stored_config.traffic.max_body_probe_size)
+                .with_super_performance_mode(config.super_performance_mode)
                 .with_binary_traffic_performance_mode(
                     stored_config.traffic.binary_traffic_performance_mode,
                 )
@@ -3311,6 +3323,7 @@ pub fn run_daemon(
                         .ensure_keepawake_manager_installed()
                         .with_max_body_buffer_size(stored_config.traffic.max_body_buffer_size)
                         .with_max_body_probe_size(stored_config.traffic.max_body_probe_size)
+                        .with_super_performance_mode(config.super_performance_mode)
                         .with_binary_traffic_performance_mode(
                             stored_config.traffic.binary_traffic_performance_mode,
                         )

@@ -528,6 +528,7 @@ pub struct TrafficConfig {
     pub max_body_memory_size: usize,
     pub max_body_buffer_size: usize,
     pub max_body_probe_size: usize,
+    pub super_performance_mode: bool,
     pub binary_traffic_performance_mode: bool,
     pub file_retention_days: u64,
     pub sse_stream_flush_bytes: usize,
@@ -574,6 +575,8 @@ pub struct UpdatePerformanceConfigRequest {
     pub max_body_buffer_size: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_body_probe_size: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub super_performance_mode: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary_traffic_performance_mode: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -800,12 +803,14 @@ mod tests {
             max_records: Some(1000),
             max_db_size_bytes: None,
             max_body_memory_size: Some(512 * 1024),
+            super_performance_mode: Some(true),
             ..Default::default()
         };
 
         let value = serde_json::to_value(&req).unwrap();
         assert_eq!(value["max_records"], json!(1000));
         assert_eq!(value["max_body_memory_size"], json!(512 * 1024));
+        assert_eq!(value["super_performance_mode"], json!(true));
         assert!(value.get("max_db_size_bytes").is_none());
     }
 

@@ -129,31 +129,39 @@ where
                         FrameType::Text | FrameType::Close | FrameType::Sse
                     );
 
-                state.connection_monitor.record_frame(
-                    &record_id_owned,
-                    FrameDirection::Send,
-                    frame_type,
-                    decoded
-                        .as_deref()
-                        .unwrap_or_else(|| payload_for_record.as_ref()),
-                    payload_is_text,
-                    decoded.as_ref().map(|_| payload_for_record.as_ref()),
-                    frame.mask.is_some(),
-                    frame.fin,
-                    state.body_store.as_ref(),
-                    state.ws_payload_store.as_ref(),
-                    state.frame_store.as_ref(),
-                );
+                if !state.get_super_performance_mode() {
+                    state.connection_monitor.record_frame(
+                        &record_id_owned,
+                        FrameDirection::Send,
+                        frame_type,
+                        decoded
+                            .as_deref()
+                            .unwrap_or_else(|| payload_for_record.as_ref()),
+                        payload_is_text,
+                        decoded.as_ref().map(|_| payload_for_record.as_ref()),
+                        frame.mask.is_some(),
+                        frame.fin,
+                        state.body_store.as_ref(),
+                        state.ws_payload_store.as_ref(),
+                        state.frame_store.as_ref(),
+                    );
+                }
 
                 if frame.opcode == crate::protocol::Opcode::Close {
                     let close_code = frame.close_code();
                     let close_reason = frame.close_reason().map(str::to_string);
+                    let frame_store = (!state.get_super_performance_mode())
+                        .then_some(state.frame_store.as_ref())
+                        .flatten();
+                    let ws_payload_store = (!state.get_super_performance_mode())
+                        .then_some(state.ws_payload_store.as_ref())
+                        .flatten();
                     state.connection_monitor.set_connection_closed(
                         &record_id_owned,
                         close_code,
                         close_reason,
-                        state.frame_store.as_ref(),
-                        state.ws_payload_store.as_ref(),
+                        frame_store,
+                        ws_payload_store,
                     );
                     super::persist_socket_summary(state, &record_id_owned);
                 }
@@ -242,31 +250,39 @@ where
                         FrameType::Text | FrameType::Close | FrameType::Sse
                     );
 
-                state.connection_monitor.record_frame(
-                    &record_id_owned2,
-                    FrameDirection::Receive,
-                    frame_type,
-                    decoded
-                        .as_deref()
-                        .unwrap_or_else(|| payload_for_record.as_ref()),
-                    payload_is_text,
-                    decoded.as_ref().map(|_| payload_for_record.as_ref()),
-                    frame.mask.is_some(),
-                    frame.fin,
-                    state.body_store.as_ref(),
-                    state.ws_payload_store.as_ref(),
-                    state.frame_store.as_ref(),
-                );
+                if !state.get_super_performance_mode() {
+                    state.connection_monitor.record_frame(
+                        &record_id_owned2,
+                        FrameDirection::Receive,
+                        frame_type,
+                        decoded
+                            .as_deref()
+                            .unwrap_or_else(|| payload_for_record.as_ref()),
+                        payload_is_text,
+                        decoded.as_ref().map(|_| payload_for_record.as_ref()),
+                        frame.mask.is_some(),
+                        frame.fin,
+                        state.body_store.as_ref(),
+                        state.ws_payload_store.as_ref(),
+                        state.frame_store.as_ref(),
+                    );
+                }
 
                 if frame.opcode == crate::protocol::Opcode::Close {
                     let close_code = frame.close_code();
                     let close_reason = frame.close_reason().map(str::to_string);
+                    let frame_store = (!state.get_super_performance_mode())
+                        .then_some(state.frame_store.as_ref())
+                        .flatten();
+                    let ws_payload_store = (!state.get_super_performance_mode())
+                        .then_some(state.ws_payload_store.as_ref())
+                        .flatten();
                     state.connection_monitor.set_connection_closed(
                         &record_id_owned2,
                         close_code,
                         close_reason,
-                        state.frame_store.as_ref(),
-                        state.ws_payload_store.as_ref(),
+                        frame_store,
+                        ws_payload_store,
                     );
                     super::persist_socket_summary(state, &record_id_owned2);
                 }
@@ -290,12 +306,18 @@ where
             .map(|s| s.is_open)
             .unwrap_or(false);
         if should_close {
+            let frame_store = (!state.get_super_performance_mode())
+                .then_some(state.frame_store.as_ref())
+                .flatten();
+            let ws_payload_store = (!state.get_super_performance_mode())
+                .then_some(state.ws_payload_store.as_ref())
+                .flatten();
             state.connection_monitor.set_connection_closed(
                 record_id,
                 None,
                 None,
-                state.frame_store.as_ref(),
-                state.ws_payload_store.as_ref(),
+                frame_store,
+                ws_payload_store,
             );
         }
         super::persist_socket_summary(state, record_id);
