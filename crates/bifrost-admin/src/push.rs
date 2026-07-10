@@ -1122,6 +1122,7 @@ impl PushManager {
                         "max_body_memory_size": config.traffic.max_body_memory_size,
                         "max_body_buffer_size": config.traffic.max_body_buffer_size,
                         "max_body_probe_size": config.traffic.max_body_probe_size,
+                        "super_performance_mode": config.traffic.super_performance_mode,
                         "binary_traffic_performance_mode": config.traffic.binary_traffic_performance_mode,
                         "file_retention_days": config.traffic.file_retention_days,
                         "sse_stream_flush_bytes": config.traffic.sse_stream_flush_bytes,

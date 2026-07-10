@@ -1774,7 +1774,9 @@ pub async fn handle_http_request(
             if !res_script_results.is_empty() {
                 record.res_script_results = Some(res_script_results.clone());
             }
-            record.response_body_ref = if let Some(ref body_store) = state.body_store {
+            record.response_body_ref = if state.get_super_performance_mode() {
+                None
+            } else if let Some(ref body_store) = state.body_store {
                 let store = body_store.read();
                 store.store(ctx.id_str(), "res", mock_res_body.as_ref())
             } else {
@@ -2405,6 +2407,8 @@ pub async fn handle_http_request(
                     )
                 } else if let Some(ref capture) = req_body_capture {
                     capture.clone_ref().or_else(|| capture.take())
+                } else if state.get_super_performance_mode() {
+                    None
                 } else if let Some(ref body_store) = state.body_store {
                     let store = body_store.read();
                     let decompressed_req_body = decompress_body_with_limit(
@@ -2431,7 +2435,9 @@ pub async fn handle_http_request(
                 } else {
                     build_error_body(502, &error_info)
                 };
-                record.response_body_ref = if let Some(ref body_store) = state.body_store {
+                record.response_body_ref = if state.get_super_performance_mode() {
+                    None
+                } else if let Some(ref body_store) = state.body_store {
                     let store = body_store.read();
                     store.store(ctx.id_str(), "res", response_body.as_ref())
                 } else {
@@ -3333,7 +3339,7 @@ pub async fn handle_http_request(
                     record.req_script_results = Some(req_script_results.clone());
                 }
 
-                if is_sse {
+                if is_sse && !state.get_super_performance_mode() {
                     if let Some(ref body_store) = state.body_store {
                         match body_store.read().start_stream(record_id, "sse_raw") {
                             Ok(writer) => {
@@ -3734,32 +3740,40 @@ pub async fn handle_http_request(
             let pause_response_size =
                 calculate_response_size(pause_status, &pause_res_headers, final_res_body.len());
             let pause_is_sse = is_sse_response(&res_parts);
-            let pause_body_ref = state.body_store.as_ref().and_then(|body_store| {
-                let store = body_store.read();
-                if pause_is_sse {
-                    store.store(ctx.id_str(), "sse_raw", final_res_body.as_ref())
-                } else {
-                    let decompressed = decompress_body_with_limit(
-                        &final_res_body,
-                        res_content_encoding.as_deref(),
-                        max_decompress_output_bytes,
-                    );
-                    store.store(ctx.id_str(), "res", decompressed.as_ref())
-                }
-            });
-            let pause_derived_body_ref = if pause_is_sse {
+            let pause_body_ref = if state.get_super_performance_mode() {
+                None
+            } else {
                 state.body_store.as_ref().and_then(|body_store| {
-                    bifrost_admin::assemble_openai_like_response_body_from_text(
-                        std::str::from_utf8(&final_res_body).ok()?,
-                    )
-                    .and_then(|assembled| {
-                        body_store.read().store(
-                            ctx.id_str(),
-                            "res_openai_like",
-                            assembled.as_bytes(),
-                        )
-                    })
+                    let store = body_store.read();
+                    if pause_is_sse {
+                        store.store(ctx.id_str(), "sse_raw", final_res_body.as_ref())
+                    } else {
+                        let decompressed = decompress_body_with_limit(
+                            &final_res_body,
+                            res_content_encoding.as_deref(),
+                            max_decompress_output_bytes,
+                        );
+                        store.store(ctx.id_str(), "res", decompressed.as_ref())
+                    }
                 })
+            };
+            let pause_derived_body_ref = if pause_is_sse {
+                if state.get_super_performance_mode() {
+                    None
+                } else {
+                    state.body_store.as_ref().and_then(|body_store| {
+                        bifrost_admin::assemble_openai_like_response_body_from_text(
+                            std::str::from_utf8(&final_res_body).ok()?,
+                        )
+                        .and_then(|assembled| {
+                            body_store.read().store(
+                                ctx.id_str(),
+                                "res_openai_like",
+                                assembled.as_bytes(),
+                            )
+                        })
+                    })
+                }
             } else {
                 None
             };
@@ -3896,114 +3910,121 @@ pub async fn handle_http_request(
             record.set_sse();
         }
 
-        if let Some(ref body_store) = state.body_store {
-            // decode://script：在落库前进行解码（请求/响应两阶段）
-            let (req_host, req_path, req_proto) = parse_url_parts(&record_url);
-            let request_data = RequestData {
-                url: record_url.clone(),
-                method: method.clone(),
-                host: req_host,
-                path: req_path,
-                protocol: req_proto,
-                client_ip: ctx.client_ip.clone(),
-                client_app: ctx.client_app.clone(),
-                headers: cloned_headers_hashmap(&mut req_headers_hashmap_cache, &req_headers),
-                body: None,
-            };
+        if !state.get_super_performance_mode() {
+            if let Some(ref body_store) = state.body_store {
+                // decode://script：在落库前进行解码（请求/响应两阶段）
+                let (req_host, req_path, req_proto) = parse_url_parts(&record_url);
+                let request_data = RequestData {
+                    url: record_url.clone(),
+                    method: method.clone(),
+                    host: req_host,
+                    path: req_path,
+                    protocol: req_proto,
+                    client_ip: ctx.client_ip.clone(),
+                    client_app: ctx.client_app.clone(),
+                    headers: cloned_headers_hashmap(&mut req_headers_hashmap_cache, &req_headers),
+                    body: None,
+                };
 
-            let decompressed_req_body = decompress_body_with_limit(
-                &final_body,
-                req_content_encoding.as_deref(),
-                max_decompress_output_bytes,
-            );
-            let raw_req_body = decompressed_req_body.clone();
-            let decoded_req_body = apply_decode_scripts_for_storage(
-                &admin_state,
-                &resolved_rules.decode_scripts,
-                "request",
-                ctx,
-                &resolved_rules,
-                &request_data,
-                &ResponseData {
-                    request: request_data.clone(),
-                    ..Default::default()
-                },
-                &values,
-                decompressed_req_body,
-            )
-            .await;
-            let DecodeForStorageResult {
-                output: decoded_req_output,
-                results: decoded_req_results,
-                ..
-            } = decoded_req_body;
+                let decompressed_req_body = decompress_body_with_limit(
+                    &final_body,
+                    req_content_encoding.as_deref(),
+                    max_decompress_output_bytes,
+                );
+                let raw_req_body = decompressed_req_body.clone();
+                let decoded_req_body = apply_decode_scripts_for_storage(
+                    &admin_state,
+                    &resolved_rules.decode_scripts,
+                    "request",
+                    ctx,
+                    &resolved_rules,
+                    &request_data,
+                    &ResponseData {
+                        request: request_data.clone(),
+                        ..Default::default()
+                    },
+                    &values,
+                    decompressed_req_body,
+                )
+                .await;
+                let DecodeForStorageResult {
+                    output: decoded_req_output,
+                    results: decoded_req_results,
+                    ..
+                } = decoded_req_body;
 
-            let decompressed_res_body = decompress_body_with_limit(
-                &final_res_body,
-                res_content_encoding.as_deref(),
-                max_decompress_output_bytes,
-            );
-            let raw_res_body = decompressed_res_body.clone();
-            let res_headers_hashmap = headers_to_hashmap(&res_headers);
-            let response_data = ResponseData {
-                status: res_parts.status.as_u16(),
-                status_text: res_parts
-                    .status
-                    .canonical_reason()
-                    .unwrap_or("OK")
-                    .to_string(),
-                headers: res_headers_hashmap,
-                body: None,
-                request: request_data,
-            };
-            let decoded_res_body = apply_decode_scripts_for_storage(
-                &admin_state,
-                &resolved_rules.decode_scripts,
-                "response",
-                ctx,
-                &resolved_rules,
-                &response_data.request,
-                &response_data,
-                &values,
-                decompressed_res_body,
-            )
-            .await;
-            let DecodeForStorageResult {
-                output: decoded_res_output,
-                results: decoded_res_results,
-                ..
-            } = decoded_res_body;
+                let decompressed_res_body = decompress_body_with_limit(
+                    &final_res_body,
+                    res_content_encoding.as_deref(),
+                    max_decompress_output_bytes,
+                );
+                let raw_res_body = decompressed_res_body.clone();
+                let res_headers_hashmap = headers_to_hashmap(&res_headers);
+                let response_data = ResponseData {
+                    status: res_parts.status.as_u16(),
+                    status_text: res_parts
+                        .status
+                        .canonical_reason()
+                        .unwrap_or("OK")
+                        .to_string(),
+                    headers: res_headers_hashmap,
+                    body: None,
+                    request: request_data,
+                };
+                let decoded_res_body = apply_decode_scripts_for_storage(
+                    &admin_state,
+                    &resolved_rules.decode_scripts,
+                    "response",
+                    ctx,
+                    &resolved_rules,
+                    &response_data.request,
+                    &response_data,
+                    &values,
+                    decompressed_res_body,
+                )
+                .await;
+                let DecodeForStorageResult {
+                    output: decoded_res_output,
+                    results: decoded_res_results,
+                    ..
+                } = decoded_res_body;
 
-            let store = body_store.read();
+                let store = body_store.read();
 
-            if !resolved_rules.decode_scripts.is_empty() {
-                record.raw_request_body_ref =
-                    store.store(ctx.id_str(), "req_raw", raw_req_body.as_ref());
-                record.raw_response_body_ref =
-                    store.store(ctx.id_str(), "res_raw", raw_res_body.as_ref());
+                if !resolved_rules.decode_scripts.is_empty() {
+                    record.raw_request_body_ref =
+                        store.store(ctx.id_str(), "req_raw", raw_req_body.as_ref());
+                    record.raw_response_body_ref =
+                        store.store(ctx.id_str(), "res_raw", raw_res_body.as_ref());
 
-                if !decoded_req_results.is_empty() {
-                    record.decode_req_script_results = Some(decoded_req_results.clone());
+                    if !decoded_req_results.is_empty() {
+                        record.decode_req_script_results = Some(decoded_req_results.clone());
+                    }
+                    if !decoded_res_results.is_empty() {
+                        record.decode_res_script_results = Some(decoded_res_results.clone());
+                    }
                 }
-                if !decoded_res_results.is_empty() {
-                    record.decode_res_script_results = Some(decoded_res_results.clone());
-                }
-            }
 
-            record.request_body_ref = store.store(ctx.id_str(), "req", decoded_req_output.as_ref());
-            if is_sse {
-                record.response_body_ref =
-                    store.store(ctx.id_str(), "sse_raw", final_res_body.as_ref());
-                if let Ok(body_text) = std::str::from_utf8(&final_res_body) {
-                    record.derived_response_body_ref =
-                        bifrost_admin::assemble_openai_like_response_body_from_text(body_text)
-                            .and_then(|assembled| {
-                                store.store(ctx.id_str(), "res_openai_like", assembled.as_bytes())
-                            });
+                record.request_body_ref =
+                    store.store(ctx.id_str(), "req", decoded_req_output.as_ref());
+                if is_sse {
+                    record.response_body_ref =
+                        store.store(ctx.id_str(), "sse_raw", final_res_body.as_ref());
+                    if let Ok(body_text) = std::str::from_utf8(&final_res_body) {
+                        record.derived_response_body_ref =
+                            bifrost_admin::assemble_openai_like_response_body_from_text(body_text)
+                                .and_then(|assembled| {
+                                    store.store(
+                                        ctx.id_str(),
+                                        "res_openai_like",
+                                        assembled.as_bytes(),
+                                    )
+                                });
+                    }
+                } else {
+                    record.response_body_ref =
+                        store.store(ctx.id_str(), "res", decoded_res_output.as_ref());
                 }
-            } else {
-                record.response_body_ref =
-                    store.store(ctx.id_str(), "res", decoded_res_output.as_ref());
             }
         }
 

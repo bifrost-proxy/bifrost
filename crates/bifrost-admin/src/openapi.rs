@@ -80,6 +80,7 @@ fn generate_components() -> serde_json::Value {
                     "max_body_memory_size": {"type": "integer"},
                     "max_body_buffer_size": {"type": "integer"},
                     "max_body_probe_size": {"type": "integer"},
+                    "super_performance_mode": {"type": "boolean", "description": "When true, proxy rules still run but traffic records, bodies, frames, WebSocket payloads, and traffic database updates are not persisted."},
                     "binary_traffic_performance_mode": {"type": "boolean"},
                     "inject_bifrost_badge": {"type": "boolean"},
                     "file_retention_days": {"type": "integer"},
@@ -110,6 +111,7 @@ fn generate_components() -> serde_json::Value {
                     "max_body_memory_size": {"type": "integer"},
                     "max_body_buffer_size": {"type": "integer"},
                     "max_body_probe_size": {"type": "integer"},
+                    "super_performance_mode": {"type": "boolean", "description": "Enable or disable Super Performance Mode."},
                     "binary_traffic_performance_mode": {"type": "boolean"},
                     "inject_bifrost_badge": {"type": "boolean"},
                     "file_retention_days": {"type": "integer"},
@@ -1420,6 +1422,12 @@ mod tests {
         assert!(performance.get("timeout_ms").is_some());
         assert!(performance.get("timeout_min_ms").is_some());
         assert!(performance.get("timeout_max_ms").is_some());
+
+        let traffic = &schema(&spec, "PerformanceTrafficConfig")["properties"];
+        assert!(traffic.get("super_performance_mode").is_some());
+
+        let performance_update = &schema(&spec, "UpdatePerformanceConfigRequest")["properties"];
+        assert!(performance_update.get("super_performance_mode").is_some());
 
         let tray = &schema(&spec, "TrayConfig")["properties"];
         assert!(tray.get("enabled").is_some());

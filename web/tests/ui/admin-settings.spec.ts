@@ -376,6 +376,51 @@ test("Settings 性能配置在第二个页面主动刷新后可见", async ({
   }
 });
 
+test("Network 超级性能模式浮层可跳转并高亮 Performance 开关", async ({
+  page,
+  request,
+}) => {
+  const perfRes = await request.get(`${apiBase}/config/performance`);
+  const perf = (await perfRes.json()) as {
+    traffic: { super_performance_mode: boolean };
+  };
+  const original = perf.traffic.super_performance_mode;
+
+  try {
+    await request.put(`${apiBase}/config/performance`, {
+      data: { super_performance_mode: true },
+    });
+
+    await openPage(page, "traffic");
+    const overlay = page.getByTestId("traffic-super-performance-overlay");
+    await expect(overlay).toBeVisible();
+    await expect(overlay).toContainText("Super performance mode is enabled");
+
+    await page.getByTestId("traffic-super-performance-disable-button").click();
+    await expect(page).toHaveURL(
+      /\/_bifrost\/settings\?tab=performance&highlight=super-performance-mode/,
+    );
+    await expect(page.getByTestId("settings-performance-tab")).toContainText(
+      "Super Performance Mode",
+    );
+    await expect(page.getByTestId("settings-performance-super-mode")).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await expect
+      .poll(async () =>
+        page
+          .getByTestId("settings-performance-super-mode-highlight")
+          .evaluate((element) => window.getComputedStyle(element).boxShadow),
+      )
+      .not.toBe("none");
+  } finally {
+    await request.put(`${apiBase}/config/performance`, {
+      data: { super_performance_mode: original },
+    });
+  }
+});
+
 test("Settings TLS 与证书页支持开关、模式和只读展示", async ({
   page,
   request,

@@ -146,6 +146,7 @@ pub struct TrafficConfig {
     pub max_body_memory_size: usize,
     pub max_body_buffer_size: usize,
     pub max_body_probe_size: usize,
+    pub super_performance_mode: bool,
     pub binary_traffic_performance_mode: bool,
     pub inject_bifrost_badge: bool,
     pub file_retention_days: u64,
@@ -180,6 +181,7 @@ pub struct UpdateTrafficConfigRequest {
     pub max_body_memory_size: Option<usize>,
     pub max_body_buffer_size: Option<usize>,
     pub max_body_probe_size: Option<usize>,
+    pub super_performance_mode: Option<bool>,
     pub binary_traffic_performance_mode: Option<bool>,
     pub inject_bifrost_badge: Option<bool>,
     pub file_retention_days: Option<u64>,
@@ -986,6 +988,7 @@ async fn get_performance_config(state: SharedAdminState) -> Response<BoxBody> {
             max_body_memory_size: config.traffic.max_body_memory_size,
             max_body_buffer_size: config.traffic.max_body_buffer_size,
             max_body_probe_size: config.traffic.max_body_probe_size,
+            super_performance_mode: config.traffic.super_performance_mode,
             binary_traffic_performance_mode: config.traffic.binary_traffic_performance_mode,
             inject_bifrost_badge: config.traffic.inject_bifrost_badge,
             file_retention_days: config.traffic.file_retention_days,
@@ -1002,6 +1005,7 @@ async fn get_performance_config(state: SharedAdminState) -> Response<BoxBody> {
             max_body_memory_size: 512 * 1024,
             max_body_buffer_size: 10 * 1024 * 1024,
             max_body_probe_size: 64 * 1024,
+            super_performance_mode: state.get_super_performance_mode(),
             binary_traffic_performance_mode: true,
             inject_bifrost_badge: true,
             file_retention_days: 7,
@@ -1096,6 +1100,7 @@ async fn update_performance_config(
             max_body_memory_size: request.max_body_memory_size,
             max_body_buffer_size: request.max_body_buffer_size,
             max_body_probe_size: request.max_body_probe_size,
+            super_performance_mode: request.super_performance_mode,
             binary_traffic_performance_mode: request.binary_traffic_performance_mode,
             inject_bifrost_badge: request.inject_bifrost_badge,
             file_retention_days: request.file_retention_days,
@@ -1160,6 +1165,10 @@ async fn update_performance_config(
 
     if let Some(max_body_probe_size) = request.max_body_probe_size {
         state.set_max_body_probe_size(max_body_probe_size);
+    }
+
+    if let Some(super_performance_mode) = request.super_performance_mode {
+        state.set_super_performance_mode(super_performance_mode);
     }
 
     if let Some(binary_traffic_performance_mode) = request.binary_traffic_performance_mode {

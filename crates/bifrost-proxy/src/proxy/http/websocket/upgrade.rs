@@ -212,12 +212,18 @@ pub async fn handle_websocket_upgrade(
                 }
 
                 if let Some(ref state) = admin_state {
+                    let frame_store = (!state.get_super_performance_mode())
+                        .then_some(state.frame_store.as_ref())
+                        .flatten();
+                    let ws_payload_store = (!state.get_super_performance_mode())
+                        .then_some(state.ws_payload_store.as_ref())
+                        .flatten();
                     state.connection_monitor.set_connection_closed(
                         &record_id_clone,
                         None,
                         None,
-                        state.frame_store.as_ref(),
-                        state.ws_payload_store.as_ref(),
+                        frame_store,
+                        ws_payload_store,
                     );
                 }
             }

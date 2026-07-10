@@ -7,8 +7,8 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import { useSearchParams } from "react-router-dom";
-import { message, theme } from "antd";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { Alert, Button, message, theme } from "antd";
 import { useShallow } from "zustand/react/shallow";
 import {
   useTrafficStore,
@@ -36,6 +36,8 @@ import {
   encodeJsonForQueryParam,
 } from "../../utils/urlState";
 import { buildAppRouteUrl, isMacDesktopShell } from "../../runtime";
+import { getPerformanceConfig } from "../../api/config";
+import pushService from "../../services/pushService";
 import type {
   TrafficSummary,
   FilterCondition,
@@ -100,8 +102,10 @@ const deserializeToolbar = (str: string): ToolbarFilters | null => {
 
 export default function Traffic() {
   const { token } = theme.useToken();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [superPerformanceMode, setSuperPerformanceMode] = useState(false);
   const detachedPopupRef = useRef<Window | null>(null);
 
   const records = useTrafficStore((state) => state.records);
@@ -178,6 +182,48 @@ export default function Traffic() {
   useEffect(() => {
     useBreakpointStore.getState().connectPush();
     useBreakpointStore.getState().fetchSettings();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refreshPerformanceMode = async () => {
+      try {
+        const config = await getPerformanceConfig();
+        if (!cancelled) {
+          setSuperPerformanceMode(config.traffic.super_performance_mode);
+        }
+      } catch {
+        if (!cancelled) {
+          setSuperPerformanceMode(false);
+        }
+      }
+    };
+
+    void refreshPerformanceMode();
+    pushService.connect({
+      ...pushService.getSubscription(),
+      settings_scopes: Array.from(
+        new Set([
+          ...(pushService.getSubscription().settings_scopes ?? []),
+          "performance_config" as const,
+        ]),
+      ),
+    });
+    const unsubscribe = pushService.onSettingsUpdate((data) => {
+      if (data.scope === "performance_config") {
+        const maybeConfig = data.data as { traffic?: { super_performance_mode?: boolean } };
+        if (typeof maybeConfig.traffic?.super_performance_mode === "boolean") {
+          setSuperPerformanceMode(maybeConfig.traffic.super_performance_mode);
+        } else {
+          void refreshPerformanceMode();
+        }
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
   }, []);
 
   const filterPanelCollapsed = useFilterPanelStore(
@@ -638,6 +684,10 @@ export default function Traffic() {
     setSearchMode(searchMode === "search" ? "normal" : "search");
   }, [searchMode, setSearchMode]);
 
+  const handleOpenPerformanceSettings = useCallback(() => {
+    navigate("/settings?tab=performance&highlight=super-performance-mode");
+  }, [navigate]);
+
   const panelFilters = useMemo<PanelFilters>(
     () => ({
       clientIps: selectedClientIps,
@@ -730,7 +780,24 @@ export default function Traffic() {
         tableWrapper: {
           flex: 1,
           minHeight: 0,
+          position: "relative",
           backgroundColor: token.colorBgContainer,
+        },
+        superPerformanceOverlay: {
+          position: "absolute",
+          inset: 0,
+          zIndex: 5,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: 24,
+          background: `${token.colorBgContainer}cc`,
+          backdropFilter: "blur(12px) saturate(1.2)",
+          WebkitBackdropFilter: "blur(12px) saturate(1.2)",
+        },
+        superPerformanceAlert: {
+          maxWidth: 620,
+          boxShadow: token.boxShadowSecondary,
         },
         detailWrapper: {
           height: "100%",
@@ -780,6 +847,29 @@ export default function Traffic() {
             initialScrollTop={scrollTop}
             onScrollTopChange={handleScrollTopChange}
           />
+        )}
+        {superPerformanceMode && (
+          <div
+            data-testid="traffic-super-performance-overlay"
+            style={styles.superPerformanceOverlay}
+          >
+            <Alert
+              type="warning"
+              showIcon
+              message="Super performance mode is enabled"
+              description="Bifrost is processing proxy rules without storing traffic records, bodies, WebSocket frames, or traffic database updates. Turn it off to use Network recording and traffic inspection again."
+              style={styles.superPerformanceAlert}
+              action={
+                <Button
+                  type="primary"
+                  onClick={handleOpenPerformanceSettings}
+                  data-testid="traffic-super-performance-disable-button"
+                >
+                  Open Performance Settings
+                </Button>
+              }
+            />
+          </div>
         )}
       </div>
     </div>

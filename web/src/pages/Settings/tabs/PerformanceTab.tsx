@@ -76,6 +76,8 @@ export interface PerformanceTabProps {
   maxBodyProbeMarks: Record<number, string>;
   fileRetentionMarks: Record<number, string>;
   breakpointTimeoutMarks: Record<number, string>;
+  highlightSuperPerformanceMode?: boolean;
+  handleSuperPerformanceModeChange: (checked: boolean) => void;
   handleMaxRecordsChange: (value: number | null) => void;
   handleMaxDbSizeChange: (value: number) => void;
   handleMaxBodyMemorySizeChange: (value: number) => void;
@@ -103,6 +105,8 @@ export default function PerformanceTab({
   maxBodyProbeMarks,
   fileRetentionMarks,
   breakpointTimeoutMarks,
+  highlightSuperPerformanceMode = false,
+  handleSuperPerformanceModeChange,
   handleMaxRecordsChange,
   handleMaxDbSizeChange,
   handleMaxBodyMemorySizeChange,
@@ -152,6 +156,33 @@ export default function PerformanceTab({
                   }
                 />
               )}
+
+              <div
+                data-testid="settings-performance-super-mode-highlight"
+                style={{
+                  borderRadius: token.borderRadiusLG,
+                  boxShadow: highlightSuperPerformanceMode
+                    ? `0 0 0 3px ${token.colorWarningBorder}, 0 0 0 8px ${token.colorWarningBg}`
+                    : undefined,
+                  transition: "box-shadow 180ms ease",
+                }}
+              >
+                <Alert
+                  type={trafficDraft?.super_performance_mode ? "warning" : "info"}
+                  showIcon
+                  message="Super Performance Mode"
+                  description="When enabled, Bifrost still processes proxy rules but records no traffic entries, request or response bodies, WebSocket frames, or traffic database updates. Network will show no traffic history while this mode is on."
+                  action={
+                    <Switch
+                      checked={trafficDraft?.super_performance_mode ?? false}
+                      onChange={handleSuperPerformanceModeChange}
+                      data-testid="settings-performance-super-mode"
+                    />
+                  }
+                />
+              </div>
+
+              <Divider style={{ margin: "12px 0" }} />
 
               <Row justify="space-between" align="middle">
                 <Col flex="1" style={{ marginRight: 16 }}>

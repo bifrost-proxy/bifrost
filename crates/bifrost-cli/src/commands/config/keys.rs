@@ -21,6 +21,7 @@ pub enum ConfigKey {
     TrafficMaxDbSize,
     TrafficMaxBodySize,
     TrafficMaxBufferSize,
+    TrafficSuperPerformanceMode,
     TrafficRetentionDays,
     TrafficSseStreamFlushBytes,
     TrafficSseStreamFlushIntervalMs,
@@ -82,6 +83,7 @@ impl ConfigKey {
             "traffic.max-db-size",
             "traffic.max-body-size",
             "traffic.max-buffer-size",
+            "traffic.super-performance-mode",
             "traffic.retention-days",
             "traffic.sse-stream-flush-bytes",
             "traffic.sse-stream-flush-interval-ms",
@@ -121,6 +123,7 @@ impl FromStr for ConfigKey {
             "traffic.max-db-size" => Ok(Self::TrafficMaxDbSize),
             "traffic.max-body-size" => Ok(Self::TrafficMaxBodySize),
             "traffic.max-buffer-size" => Ok(Self::TrafficMaxBufferSize),
+            "traffic.super-performance-mode" => Ok(Self::TrafficSuperPerformanceMode),
             "traffic.retention-days" => Ok(Self::TrafficRetentionDays),
             "traffic.sse-stream-flush-bytes" => Ok(Self::TrafficSseStreamFlushBytes),
             "traffic.sse-stream-flush-interval-ms" => Ok(Self::TrafficSseStreamFlushIntervalMs),
@@ -169,6 +172,7 @@ impl std::fmt::Display for ConfigKey {
             Self::TrafficMaxDbSize => "traffic.max-db-size",
             Self::TrafficMaxBodySize => "traffic.max-body-size",
             Self::TrafficMaxBufferSize => "traffic.max-buffer-size",
+            Self::TrafficSuperPerformanceMode => "traffic.super-performance-mode",
             Self::TrafficRetentionDays => "traffic.retention-days",
             Self::TrafficSseStreamFlushBytes => "traffic.sse-stream-flush-bytes",
             Self::TrafficSseStreamFlushIntervalMs => "traffic.sse-stream-flush-interval-ms",
@@ -345,6 +349,10 @@ mod tests {
             ConfigKey::from_str("traffic.max_db_size").unwrap(),
             ConfigKey::TrafficMaxDbSize
         );
+        assert_eq!(
+            ConfigKey::from_str("traffic.super_performance_mode").unwrap(),
+            ConfigKey::TrafficSuperPerformanceMode
+        );
     }
 
     #[test]
@@ -377,6 +385,7 @@ mod tests {
             ServerTimeoutSecs,
             TlsEnabled,
             TrafficMaxRecords,
+            TrafficSuperPerformanceMode,
             AccessMode,
             AccessAllowLan,
         ];
@@ -409,6 +418,7 @@ mod tests {
             ServerTimeoutSecs,
             TrafficMaxRecords,
             TrafficRetentionDays,
+            TrafficSuperPerformanceMode,
             AccessMode,
         ];
 

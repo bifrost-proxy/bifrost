@@ -100,6 +100,10 @@ pub fn print_traffic_config(perf: &PerformanceConfigResponse) {
         format_size(perf.traffic.max_body_buffer_size)
     );
     println!(
+        "  Super Performance:    {}",
+        perf.traffic.super_performance_mode
+    );
+    println!(
         "  Retention Days:       {}",
         perf.traffic.file_retention_days
     );
@@ -262,6 +266,7 @@ mod tests {
             max_body_memory_size: 512 * 1024,
             max_body_buffer_size: 10 * 1024 * 1024,
             max_body_probe_size: 64 * 1024,
+            super_performance_mode: false,
             binary_traffic_performance_mode: true,
             file_retention_days: 3,
             sse_stream_flush_bytes: 256 * 1024,

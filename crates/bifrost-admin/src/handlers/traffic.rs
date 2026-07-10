@@ -14,6 +14,17 @@ use crate::query_service::AdminQueryService;
 use crate::state::{AdminState, SharedAdminState};
 use crate::traffic_db::{QueryParams, TrafficSummaryCompact};
 
+fn empty_query_result() -> crate::traffic_db::QueryResult {
+    crate::traffic_db::QueryResult {
+        records: Vec::new(),
+        next_cursor: None,
+        prev_cursor: None,
+        has_more: false,
+        total: 0,
+        server_sequence: 0,
+    }
+}
+
 async fn join_clear_task<T>(
     task: tokio::task::JoinHandle<std::result::Result<T, String>>,
     label: &str,
@@ -921,6 +932,10 @@ mod sse_stream_tests {
 }
 
 async fn query_traffic(req: Request<Incoming>, state: SharedAdminState) -> Response<BoxBody> {
+    if state.get_super_performance_mode() {
+        return json_response(&empty_query_result());
+    }
+
     let body_bytes = match req.collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(e) => {
@@ -952,6 +967,9 @@ async fn query_traffic(req: Request<Incoming>, state: SharedAdminState) -> Respo
 }
 
 async fn list_traffic(req: Request<Incoming>, state: SharedAdminState) -> Response<BoxBody> {
+    if state.get_super_performance_mode() {
+        return json_response(&empty_query_result());
+    }
     let query = req.uri().query().unwrap_or("");
     let params = parse_query_params_from_query_string(query);
     let service = AdminQueryService::new(state);
@@ -968,6 +986,16 @@ async fn list_traffic(req: Request<Incoming>, state: SharedAdminState) -> Respon
 }
 
 async fn get_traffic_updates(req: Request<Incoming>, state: SharedAdminState) -> Response<BoxBody> {
+    if state.get_super_performance_mode() {
+        let response = serde_json::json!({
+            "new_records": [],
+            "updated_records": [],
+            "has_more": false,
+            "server_total": 0,
+            "server_sequence": 0
+        });
+        return json_response(&response);
+    }
     let query = req.uri().query().unwrap_or("");
     let params = parse_updates_params(query);
 
