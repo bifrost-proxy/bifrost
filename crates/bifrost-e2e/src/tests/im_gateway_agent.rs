@@ -1200,8 +1200,18 @@ pub fn get_all_tests() -> Vec<TestCase> {
 
                 let mut snapshot =
                     ImAgentProgressSnapshot::new("provider:owner", "run streaming card e2e");
+                let mut status = bifrost_agent::ActiveTurnStatus::new("provider:owner");
+                status.state = "running".to_string();
+                status.started_at = 1_800_000_000;
+                status.updated_at = 1_800_000_125;
+                snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::Status(Box::new(
+                    status,
+                )));
                 snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::AssistantDelta {
                     content: "checking progress card sections".to_string(),
+                });
+                snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::AssistantDelta {
+                    content: "启动\n检查\n发现\n当前\n工作\n区\n已有\n一处\n用户\n改动\n:\n`e2e-tests/tests/test_rule_share\n_confirm_browser.sh`".to_string(),
                 });
                 snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::ToolStarted {
                     tool_name: "list_directory".to_string(),
@@ -1250,8 +1260,6 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     "agent_plan",
                     "agent_process_panel",
                     "agent_process_log",
-                    "ap_t_1",
-                    "ap_td_1",
                     "agent_status_panel",
                     "agent_footer",
                     "list_directory",
@@ -1261,11 +1269,21 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     "已收到引导：check latest logs",
                     "任务计划：Render latest status card",
                     "执行过程",
+                    "耗时：2 分 05 秒",
                     "已完成：list_directory",
                     "checking progress card sections",
+                    "启动检查发现当前工作区已有一处用户改动",
+                    "test_rule_share_confirm_browser.sh",
                 ] {
                     if !body.contains(needle) {
                         return Err(format!("streaming card body missing {needle}: {body}"));
+                    }
+                }
+                for fragmented in ["启动\\n检查", "工作\\n区", "test_rule_share\\n_confirm"] {
+                    if body.contains(fragmented) {
+                        return Err(format!(
+                            "streaming card body should collapse fragmented progress prose {fragmented}: {body}"
+                        ));
                     }
                 }
                 for legacy_id in [
@@ -1305,9 +1323,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 let tool_element = process_element["elements"]
                     .as_array()
                     .and_then(|elements| {
-                        elements
-                            .iter()
-                            .find(|element| element["element_id"] == "ap_t_1")
+                        elements.iter().find(|element| {
+                            element["element_id"]
+                                .as_str()
+                                .is_some_and(|id| id.starts_with("ap_t_"))
+                                && element.to_string().contains("list_directory")
+                        })
                     })
                     .ok_or_else(|| "streaming card missing process tool element".to_string())?;
                 if tool_element["tag"] != "collapsible_panel" {

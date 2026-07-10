@@ -267,6 +267,9 @@ fn noisy_runner_statuses_are_hidden_from_process_timeline() {
     assert!(!is_human_readable_progress_status("model_request"));
     assert!(!is_human_readable_progress_status("model_response"));
     assert!(!is_human_readable_progress_status("custom_machine_state"));
+    assert!(!is_human_readable_progress_status("token_usage_updated"));
+    assert!(!is_human_readable_progress_status("token usage updated"));
+    assert!(!is_human_readable_progress_status("token-usage-update"));
     assert!(!is_human_readable_progress_status(
         "model rerouted: Test-O-New-Thinking -> claude_46_opus"
     ));
@@ -282,6 +285,8 @@ fn machine_status_events_do_not_flood_process_card() {
         "model_request",
         "model_response",
         "custom_machine_state",
+        "token_usage_updated",
+        "token usage updated",
     ] {
         let mut status = active_status(0);
         status.state = state.to_string();
@@ -308,6 +313,102 @@ fn machine_status_events_do_not_flood_process_card() {
     assert!(!serialized.contains("状态：model_request"));
     assert!(!serialized.contains("状态：model_response"));
     assert!(!serialized.contains("custom_machine_state"));
+    assert!(!serialized.contains("token_usage_updated"));
+}
+
+#[test]
+fn progress_prose_linebreak_normalizer_collapses_stream_token_lines() {
+    let input = "启动\n检查\n发现\n当前\n工作\n区\n已有\n一处\n用户\n改动\n:\n`e2e-tests/tests/test_rule_share\n_confirm_browser.sh`\n\n- 保留列表\n- 第二项\n\n    indented\n    code\n\n```text\n保留\n代码块\n```";
+    let normalized = normalize_progress_prose_linebreaks(input);
+
+    assert!(normalized.contains(
+        "启动检查发现当前工作区已有一处用户改动:`e2e-tests/tests/test_rule_share_confirm_browser.sh`"
+    ));
+    assert!(normalized.contains("\n- 保留列表\n- 第二项\n"));
+    assert!(normalized.contains("\n    indented\n    code\n"));
+    assert!(normalized.contains("```text\n保留\n代码块\n```"));
+    assert!(!normalized.contains("启动\n检查"));
+    assert!(!normalized.contains("工作\n区"));
+}
+
+#[test]
+fn progress_prose_linebreak_normalizer_keeps_ascii_words_readable() {
+    let normalized =
+        normalize_progress_prose_linebreaks("I will inspect\ncurrent workspace\nbefore editing.");
+
+    assert_eq!(
+        normalized,
+        "I will inspect current workspace before editing."
+    );
+}
+
+#[test]
+fn feishu_progress_card_collapses_fragmented_thinking_lines() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "run task");
+    snapshot.apply_event(AgentTurnProgressEvent::Status(Box::new(active_status(0))));
+    snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {
+        content: "启动\n检查\n发现\n当前\n工作\n区\n已有\n一处\n用户\n改动\n:\n`e2e-tests/tests/test_rule_share\n_confirm_browser.sh`".to_string(),
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::ToolStarted {
+        tool_name: "exec_command".to_string(),
+        arguments: "git status --short --branch".to_string(),
+    });
+
+    let card = build_feishu_progress_card(&snapshot, true);
+    let process_element = card["body"]["elements"]
+        .as_array()
+        .and_then(|elements| {
+            elements
+                .iter()
+                .find(|element| element["element_id"] == PROCESS_PANEL_ELEMENT_ID)
+        })
+        .expect("process element");
+    let process_content = process_element["elements"][0]["content"].as_str().unwrap();
+
+    assert!(
+        process_content.contains(
+            "启动检查发现当前工作区已有一处用户改动:`e2e-tests/tests/test_rule_share_confirm_browser.sh`"
+        ),
+        "fragmented thinking should be rendered as a readable sentence: {process_content}"
+    );
+    assert!(!process_content.contains("启动\n检查"));
+    assert!(!process_content.contains("工作\n区"));
+    assert!(!process_content.contains("test_rule_share\n_confirm"));
+}
+
+#[test]
+fn feishu_progress_card_file_change_tool_expands_with_detail() {
+    let event = crate::im_gateway::external_cli::parse_progress_events(
+        r#"{"type":"item.completed","item":{"id":"item_file_1","type":"file_change","status":"completed","files":[{"path":"src/main.rs","action":"modified","summary":"updated startup text","diff":"-old\n+new"}]}}"#,
+    )
+    .pop()
+    .expect("file change event");
+    let agent_event = crate::im_gateway::external_cli::external_progress_to_agent_turn_event(
+        "s1",
+        "codex",
+        crate::im_gateway::external_cli::ExternalCliProgressStatusContext::new(
+            Some("Codex"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+        &event,
+    )
+    .expect("tool event");
+
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "edit task");
+    snapshot.apply_event(agent_event);
+    let card = build_feishu_progress_card(&snapshot, true);
+    let serialized = serde_json::to_string(&card).unwrap();
+
+    assert!(serialized.contains("file_change"));
+    assert!(serialized.contains("src/main.rs"));
+    assert!(serialized.contains("updated startup text"));
+    assert!(serialized.contains("-old"));
+    assert!(serialized.contains("+new"));
+    assert!(!serialized.contains("暂无工具详情"));
 }
 
 #[test]
@@ -583,6 +684,97 @@ fn external_runner_footer_hides_machine_status_line() {
     let footer = format_footer_markdown(&snapshot);
     assert!(footer.contains("Runner：`codex` · Adapter：`codex`"));
     assert!(!footer.contains("当前状态：model_request"));
+}
+
+#[test]
+fn progress_footer_formats_elapsed_duration_without_milliseconds() {
+    assert_eq!(format_progress_elapsed_duration(0), "0 秒");
+    assert_eq!(format_progress_elapsed_duration(12), "12 秒");
+    assert_eq!(format_progress_elapsed_duration(65), "1 分 05 秒");
+    assert_eq!(format_progress_elapsed_duration(3_600), "1 小时");
+    assert_eq!(format_progress_elapsed_duration(3_780), "1 小时 03 分");
+    assert_eq!(format_progress_elapsed_duration(90_000), "1 天 1 小时");
+}
+
+#[test]
+fn token_usage_status_refresh_updates_footer_elapsed_without_process_noise() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "codex task");
+    snapshot.runner = Some(ProgressRunnerSummary {
+        runner_id: "codex".to_string(),
+        adapter: "codex".to_string(),
+        model: None,
+        model_source: None,
+        reasoning_effort: None,
+        reasoning_summary: None,
+        reasoning_source: None,
+        token_usage: Some(ProgressRunnerTokenUsage {
+            input_tokens: Some(1_000),
+            cached_input_tokens: None,
+            output_tokens: Some(50),
+            reasoning_output_tokens: None,
+            total_tokens: Some(1_050),
+        }),
+        work_dir: Some("/tmp/bifrost-codex".to_string()),
+        external_thread_id: Some("thread-123".to_string()),
+        external_conversation_id: None,
+    });
+    let mut started = active_status(0);
+    started.state = "running".to_string();
+    started.started_at = 1_800_000_000;
+    started.updated_at = 1_800_000_000;
+    started.runner_type = Some("codex".to_string());
+    started.runner_id = Some("codex".to_string());
+    snapshot.apply_event(AgentTurnProgressEvent::Status(Box::new(started)));
+    assert!(format_footer_markdown(&snapshot).contains("耗时：0 秒"));
+
+    let mut usage_update = active_status(0);
+    usage_update.state = "token usage updated".to_string();
+    usage_update.started_at = 1_800_000_065;
+    usage_update.updated_at = 1_800_000_065;
+    usage_update.runner_type = Some("codex".to_string());
+    usage_update.runner_id = Some("codex".to_string());
+    snapshot.apply_event(AgentTurnProgressEvent::Status(Box::new(usage_update)));
+
+    let footer = format_footer_markdown(&snapshot);
+    assert!(footer.contains("耗时：1 分 05 秒"));
+    assert!(footer.contains("Token：总计 1.1K · 输入 1K · 输出 50"));
+    assert!(!footer.contains("ms"));
+    let card = build_feishu_progress_card(&snapshot, true);
+    let serialized = serde_json::to_string(&card).unwrap();
+    assert!(!serialized.contains("状态：token usage updated"));
+    assert!(!serialized.contains("当前状态：token usage updated"));
+}
+
+#[test]
+fn codex_usage_progress_event_refreshes_status_without_timeline_noise() {
+    let event = crate::im_gateway::external_cli::parse_progress_events(
+        r#"{"type":"token_usage.updated","usage":{"input_tokens":1200,"output_tokens":80,"total_tokens":1280}}"#,
+    )
+    .pop()
+    .expect("usage progress event");
+    let agent_event = crate::im_gateway::external_cli::external_progress_to_agent_turn_event(
+        "s1",
+        "codex",
+        crate::im_gateway::external_cli::ExternalCliProgressStatusContext::new(
+            Some("codex"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+        &event,
+    )
+    .expect("status event");
+
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "codex task");
+    snapshot.apply_event(agent_event);
+
+    assert!(snapshot.timeline.is_empty());
+    assert!(snapshot.status.is_some());
+    let serialized = serde_json::to_string(&build_feishu_progress_card(&snapshot, true)).unwrap();
+    assert!(!serialized.contains("token_usage"));
+    assert!(!serialized.contains("token usage updated"));
 }
 
 fn active_status(compaction_count: u32) -> ActiveTurnStatus {

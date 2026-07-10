@@ -67,6 +67,8 @@ pub struct ImAgentProgressSnapshot {
     pub guide_pending: bool,
     pub activity_notice: Option<String>,
     pub phase: ImProgressPhase,
+    pub turn_started_at: Option<u64>,
+    pub turn_updated_at: Option<u64>,
 }
 
 impl ImAgentProgressSnapshot {
@@ -88,12 +90,15 @@ impl ImAgentProgressSnapshot {
             guide_pending: false,
             activity_notice: None,
             phase: ImProgressPhase::Running,
+            turn_started_at: None,
+            turn_updated_at: None,
         }
     }
 
     pub fn apply_event(&mut self, event: AgentTurnProgressEvent) {
         match event {
             AgentTurnProgressEvent::Status(status) => {
+                self.update_turn_timing(status.started_at, status.updated_at);
                 let state = status.state.trim();
                 if is_human_readable_progress_status(state) {
                     self.push_timeline(ProgressTimelineItem::status(state.to_string()));
@@ -211,6 +216,7 @@ impl ImAgentProgressSnapshot {
                     self.remove_terminal_output_from_timeline(&content);
                     self.output = content;
                 }
+                self.finish_turn_timing();
             }
             AgentTurnProgressEvent::TurnFailed { error } => {
                 self.phase = ImProgressPhase::Failed;
@@ -219,7 +225,39 @@ impl ImAgentProgressSnapshot {
                     truncate_one_line(&error, 120)
                 )));
                 self.output = format!("Agent 执行失败：{}", truncate_str(&error, 300));
+                self.finish_turn_timing();
             }
+        }
+    }
+
+    fn update_turn_timing(&mut self, started_at: u64, updated_at: u64) {
+        if started_at == 0 && updated_at == 0 {
+            return;
+        }
+        if started_at > 0 {
+            self.turn_started_at = Some(
+                self.turn_started_at
+                    .map(|current| current.min(started_at))
+                    .unwrap_or(started_at),
+            );
+        }
+        let effective_updated_at = updated_at.max(started_at);
+        if effective_updated_at > 0 {
+            self.turn_updated_at = Some(
+                self.turn_updated_at
+                    .map(|current| current.max(effective_updated_at))
+                    .unwrap_or(effective_updated_at),
+            );
+        }
+    }
+
+    fn finish_turn_timing(&mut self) {
+        if let Some((started_at, updated_at)) = self
+            .status
+            .as_ref()
+            .map(|status| (status.started_at, status.updated_at))
+        {
+            self.update_turn_timing(started_at, updated_at);
         }
     }
 
@@ -345,10 +383,32 @@ fn is_human_readable_progress_status(status: &str) -> bool {
     if is_machine_state_label(status) {
         return false;
     }
+    if is_token_usage_machine_status(status) {
+        return false;
+    }
     if looks_like_uuid(status) {
         return false;
     }
     true
+}
+
+fn is_token_usage_machine_status(value: &str) -> bool {
+    let normalized = value
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['_', '-'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    matches!(
+        normalized.as_str(),
+        "token usage"
+            | "token usage update"
+            | "token usage updated"
+            | "tokens usage"
+            | "usage update"
+            | "usage updated"
+    )
 }
 
 fn is_machine_state_label(value: &str) -> bool {
@@ -1493,9 +1553,7 @@ fn format_compact_output_markdown(snapshot: &ImAgentProgressSnapshot) -> String 
     {
         return format!(
             "**最新进展**\n\n{}",
-            crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&truncate_str(
-                thought, 600
-            ))
+            convert_progress_prose_to_feishu_markdown(thought, Some(600))
         );
     }
     "处理中...".to_string()
@@ -1874,14 +1932,11 @@ fn process_tool_count(snapshot: &ImAgentProgressSnapshot) -> usize {
 fn format_process_timeline_line(item: &ProgressTimelineItem) -> String {
     match item.kind {
         ProgressTimelineKind::Thinking => {
-            crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&truncate_str(
-                &item.detail,
-                600,
-            ))
+            convert_progress_prose_to_feishu_markdown(&item.detail, Some(600))
         }
         ProgressTimelineKind::Status => format!(
             "状态：{}",
-            crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&item.summary)
+            convert_progress_prose_to_feishu_markdown(&item.summary, None)
         ),
         ProgressTimelineKind::Tool => {
             let status = match item.success {
@@ -2002,7 +2057,7 @@ fn format_thinking_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
     snapshot
         .last_thought
         .as_deref()
-        .map(crate::im_gateway::markdown_converter::convert_to_feishu_markdown)
+        .map(|thought| convert_progress_prose_to_feishu_markdown(thought, None))
         .unwrap_or_else(|| "暂无思考过程".to_string())
 }
 
@@ -2272,6 +2327,54 @@ fn external_runner_context_usage_line(snapshot: &ImAgentProgressSnapshot) -> Opt
     ))
 }
 
+fn progress_elapsed_line(snapshot: &ImAgentProgressSnapshot) -> Option<String> {
+    let elapsed = progress_elapsed_seconds(snapshot)?;
+    Some(format!(
+        "耗时：{}",
+        format_progress_elapsed_duration(elapsed)
+    ))
+}
+
+fn progress_elapsed_seconds(snapshot: &ImAgentProgressSnapshot) -> Option<u64> {
+    let started_at = snapshot
+        .turn_started_at
+        .or_else(|| snapshot.status.as_ref().map(|status| status.started_at))?;
+    let updated_at = snapshot
+        .turn_updated_at
+        .or_else(|| snapshot.status.as_ref().map(|status| status.updated_at))
+        .unwrap_or(started_at);
+    Some(updated_at.saturating_sub(started_at))
+}
+
+fn format_progress_elapsed_duration(seconds: u64) -> String {
+    if seconds < 60 {
+        return format!("{seconds} 秒");
+    }
+    let minutes = seconds / 60;
+    let remaining_seconds = seconds % 60;
+    if minutes < 60 {
+        if remaining_seconds == 0 {
+            return format!("{minutes} 分");
+        }
+        return format!("{minutes} 分 {remaining_seconds:02} 秒");
+    }
+    let hours = minutes / 60;
+    let remaining_minutes = minutes % 60;
+    if hours < 24 {
+        if remaining_minutes == 0 {
+            return format!("{hours} 小时");
+        }
+        return format!("{hours} 小时 {remaining_minutes:02} 分");
+    }
+    let days = hours / 24;
+    let remaining_hours = hours % 24;
+    if remaining_hours == 0 {
+        format!("{days} 天")
+    } else {
+        format!("{days} 天 {remaining_hours} 小时")
+    }
+}
+
 fn external_runner_state_line(snapshot: &ImAgentProgressSnapshot) -> Option<String> {
     let state = snapshot
         .status
@@ -2415,11 +2518,15 @@ fn format_footer_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
         let state_line = external_runner_state_line(snapshot)
             .map(|line| format!("\n{line}"))
             .unwrap_or_default();
+        let elapsed_line = progress_elapsed_line(snapshot)
+            .map(|line| format!("\n{line}"))
+            .unwrap_or_default();
         return format!(
-            "{}状态：{}{}\nRunner：`{}` · Adapter：`{}`\n模型：{}{}{}{}\n外部会话：{}\n队列：{} · 引导：{}\n工作路径：`{}`{}",
+            "{}状态：{}{}{}\nRunner：`{}` · Adapter：`{}`\n模型：{}{}{}{}\n外部会话：{}\n队列：{} · 引导：{}\n工作路径：`{}`{}",
             prefix,
             phase,
             state_line,
+            elapsed_line,
             external_runner_id(snapshot),
             external_runner_adapter(snapshot),
             external_runner_model_label(snapshot),
@@ -2461,8 +2568,11 @@ fn format_footer_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
             let model_line = internal_runner_model_label(status)
                 .map(|model| format!("\n模型：{model}"))
                 .unwrap_or_default();
+            let elapsed_line = progress_elapsed_line(snapshot)
+                .map(|line| format!("\n{line}"))
+                .unwrap_or_default();
             format!(
-                "{}状态：{} · Loop {}/{}（已完成 {}）{}\nContext：{}\nToken：累计 {}，最近 {}\n压缩：{} 次 · 队列：{} · 引导：{}\n工作路径：`{}`",
+                "{}状态：{} · Loop {}/{}（已完成 {}）{}{}\nContext：{}\nToken：累计 {}，最近 {}\n压缩：{} 次 · 队列：{} · 引导：{}\n工作路径：`{}`",
                 snapshot
                     .activity_notice
                     .as_deref()
@@ -2473,6 +2583,7 @@ fn format_footer_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
                 status.max_loop_iterations,
                 status.completed_loop_iterations,
                 model_line,
+                elapsed_line,
                 context_text,
                 token_text,
                 last_token_text,
@@ -2547,6 +2658,125 @@ fn truncate_str(input: &str, max_chars: usize) -> String {
 fn truncate_one_line(input: &str, max_chars: usize) -> String {
     let compact = input.split_whitespace().collect::<Vec<_>>().join(" ");
     truncate_str(&compact, max_chars)
+}
+
+fn convert_progress_prose_to_feishu_markdown(input: &str, max_chars: Option<usize>) -> String {
+    let normalized = normalize_progress_prose_linebreaks(input);
+    let content = match max_chars {
+        Some(max_chars) => truncate_str(&normalized, max_chars),
+        None => normalized,
+    };
+    crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&content)
+}
+
+fn normalize_progress_prose_linebreaks(input: &str) -> String {
+    let mut output = String::new();
+    let mut paragraph = Vec::<String>::new();
+    let mut in_code_fence = false;
+
+    for raw_line in input.lines() {
+        let trimmed = raw_line.trim();
+        let is_fence = is_markdown_code_fence(trimmed);
+        if in_code_fence {
+            flush_progress_prose_paragraph(&mut output, &mut paragraph);
+            push_preserved_progress_line(&mut output, raw_line);
+            if is_fence {
+                in_code_fence = false;
+            }
+            continue;
+        }
+        if is_fence {
+            flush_progress_prose_paragraph(&mut output, &mut paragraph);
+            push_preserved_progress_line(&mut output, raw_line);
+            in_code_fence = true;
+            continue;
+        }
+        if trimmed.is_empty() {
+            flush_progress_prose_paragraph(&mut output, &mut paragraph);
+            push_preserved_progress_line(&mut output, "");
+            continue;
+        }
+        if is_markdown_structural_line(raw_line) {
+            flush_progress_prose_paragraph(&mut output, &mut paragraph);
+            push_preserved_progress_line(&mut output, raw_line);
+            continue;
+        }
+        paragraph.push(trimmed.to_string());
+    }
+
+    flush_progress_prose_paragraph(&mut output, &mut paragraph);
+    output
+}
+
+fn flush_progress_prose_paragraph(output: &mut String, paragraph: &mut Vec<String>) {
+    if paragraph.is_empty() {
+        return;
+    }
+    let joined = join_progress_prose_lines(paragraph);
+    push_preserved_progress_line(output, &joined);
+    paragraph.clear();
+}
+
+fn push_preserved_progress_line(output: &mut String, line: &str) {
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output.push_str(line);
+}
+
+fn join_progress_prose_lines(lines: &[String]) -> String {
+    let mut joined = String::new();
+    for line in lines
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+    {
+        if joined.is_empty() {
+            joined.push_str(line);
+            continue;
+        }
+        if needs_progress_prose_join_space(&joined, line) {
+            joined.push(' ');
+        }
+        joined.push_str(line);
+    }
+    joined
+}
+
+fn needs_progress_prose_join_space(previous: &str, next: &str) -> bool {
+    let Some(prev) = previous.chars().rev().find(|ch| !ch.is_whitespace()) else {
+        return false;
+    };
+    let Some(next) = next.chars().find(|ch| !ch.is_whitespace()) else {
+        return false;
+    };
+    prev.is_ascii_alphanumeric() && next.is_ascii_alphanumeric()
+}
+
+fn is_markdown_code_fence(line: &str) -> bool {
+    line.starts_with("```") || line.starts_with("~~~")
+}
+
+fn is_markdown_structural_line(line: &str) -> bool {
+    if line.starts_with("    ") || line.starts_with('\t') {
+        return true;
+    }
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('#') || trimmed.starts_with('>') || trimmed.starts_with('|') {
+        return true;
+    }
+    if trimmed.starts_with("- ")
+        || trimmed.starts_with("* ")
+        || trimmed.starts_with("+ ")
+        || trimmed.starts_with("- [")
+        || trimmed.starts_with("* [")
+    {
+        return true;
+    }
+    let Some((prefix, rest)) = trimmed.split_once(". ") else {
+        return false;
+    };
+    !prefix.is_empty() && prefix.chars().all(|ch| ch.is_ascii_digit()) && !rest.trim().is_empty()
 }
 
 #[cfg(test)]
