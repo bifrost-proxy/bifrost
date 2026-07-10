@@ -148,7 +148,7 @@ async fn stale_external_worker_entry_does_not_kill_pid_when_stop_receiver_is_gon
         .spawn()
         .expect("spawn protected external worker process");
     let pid = child.id();
-    let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (control_tx, control_rx) = tokio::sync::mpsc::channel(1);
     drop(control_rx);
     ACTIVE_WORKER_SESSIONS.insert(
         "stale-external-worker".to_string(),
@@ -183,7 +183,7 @@ async fn acknowledged_external_worker_stop_does_not_kill_pid() {
         .spawn()
         .expect("spawn protected external worker process");
     let pid = child.id();
-    let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(1);
     ACTIVE_WORKER_SESSIONS.insert(
         "acked-external-worker".to_string(),
         ExternalCliWorkerControlHandle { pid, control_tx },
@@ -1819,6 +1819,33 @@ async fn external_cli_runtime_stops_active_run_by_session_key() {
     assert_eq!(result.run_id, run_id);
     assert_eq!(result.status, ExternalCliRunStatus::Stopped);
     assert_eq!(result.response, "External CLI run was stopped by request.");
+}
+
+#[tokio::test]
+async fn worker_guide_rejects_saturated_control_channel_without_waiting() {
+    let session_key = format!("saturated-guide-session-{}", uuid::Uuid::new_v4());
+    let (control_tx, _control_rx) = tokio::sync::mpsc::channel(1);
+    let (stop_ack_tx, _stop_ack_rx) = oneshot::channel();
+    control_tx
+        .try_send(ExternalCliWorkerControlRequest::Stop {
+            ack_tx: stop_ack_tx,
+        })
+        .expect("fill control channel");
+    ACTIVE_WORKER_SESSIONS.insert(
+        session_key.clone(),
+        ExternalCliWorkerControlHandle { pid: 1, control_tx },
+    );
+
+    let error = request_worker_session_guide(
+        &session_key,
+        "guide-over-capacity".to_string(),
+        "do not wait for a saturated worker".to_string(),
+    )
+    .await
+    .expect_err("saturated guide should fail fast");
+
+    assert!(error.contains("too many pending guide requests"));
+    ACTIVE_WORKER_SESSIONS.remove(&session_key);
 }
 
 #[test]

@@ -27,6 +27,7 @@ const LEGACY_TRAEX_RUNNER_ALIAS: &str = concat!("tre", "ex");
 const CONFIG_FILENAME: &str = "im_gateway_external_cli_agent.json";
 const CONFIG_VERSION: u32 = 1;
 const MAX_EXTERNAL_RUNNER_IMAGES_PER_MESSAGE: usize = 6;
+const MAX_PENDING_EXTERNAL_GUIDES: usize = 32;
 const WORKER_STOP_GRACE_MS: u64 = 1500;
 #[cfg(unix)]
 const PROCESS_KILL_GRACE_MS: u64 = 250;
@@ -42,7 +43,7 @@ static ACTIVE_WORKER_SESSIONS: once_cell::sync::Lazy<
 #[derive(Clone)]
 struct ExternalCliWorkerControlHandle {
     pid: u32,
-    control_tx: tokio::sync::mpsc::UnboundedSender<ExternalCliWorkerControlRequest>,
+    control_tx: tokio::sync::mpsc::Sender<ExternalCliWorkerControlRequest>,
 }
 
 enum ExternalCliWorkerControlRequest {
@@ -82,17 +83,28 @@ pub async fn request_worker_session_stop(session_key: &str) -> bool {
         return false;
     };
     let (ack_tx, mut ack_rx) = oneshot::channel();
-    if handle
+    match handle
         .control_tx
-        .send(ExternalCliWorkerControlRequest::Stop { ack_tx })
-        .is_err()
+        .try_send(ExternalCliWorkerControlRequest::Stop { ack_tx })
     {
-        tracing::warn!(
-            session_key,
-            pid = handle.pid,
-            "external_cli worker: stop receiver is gone; skipping pid termination for stale worker entry"
-        );
-        return false;
+        Ok(()) => {}
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            tracing::warn!(
+                session_key,
+                pid = handle.pid,
+                "external_cli worker: control channel is saturated; terminating worker directly"
+            );
+            let _ = terminate_process(handle.pid);
+            return true;
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            tracing::warn!(
+                session_key,
+                pid = handle.pid,
+                "external_cli worker: stop receiver is gone; skipping pid termination for stale worker entry"
+            );
+            return false;
+        }
     }
     match tokio::time::timeout(Duration::from_millis(WORKER_STOP_GRACE_MS), &mut ack_rx).await {
         Ok(Ok(())) | Ok(Err(_)) => return true,
@@ -121,13 +133,18 @@ pub async fn request_worker_session_guide(
     let (ack_tx, ack_rx) = oneshot::channel();
     handle
         .control_tx
-        .send(ExternalCliWorkerControlRequest::Guide {
+        .try_send(ExternalCliWorkerControlRequest::Guide {
             guide_id,
             message,
             ack_tx,
         })
-        .map_err(|_| {
-            format!("external runner control channel closed for session '{session_key}'")
+        .map_err(|error| match error {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => format!(
+                "external runner has too many pending guide requests for session '{session_key}'"
+            ),
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                format!("external runner control channel closed for session '{session_key}'")
+            }
         })?;
     timeout(Duration::from_secs(20), ack_rx)
         .await
@@ -1041,8 +1058,9 @@ impl ExternalCliRuntime {
             .spawn(self.runs_root.clone(), request.clone())
             .await?;
         let worker_pid = worker.child_id();
-        let (control_tx, mut control_rx) =
-            tokio::sync::mpsc::unbounded_channel::<ExternalCliWorkerControlRequest>();
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::channel::<
+            ExternalCliWorkerControlRequest,
+        >(MAX_PENDING_EXTERNAL_GUIDES);
         if let (Some(session_key), Some(pid)) = (request.session_key.as_deref(), worker_pid) {
             ACTIVE_WORKER_SESSIONS.insert(
                 session_key.to_string(),
@@ -1069,6 +1087,18 @@ impl ExternalCliRuntime {
                             message,
                             ack_tx,
                         }) => {
+                            if pending_guides.len() >= MAX_PENDING_EXTERNAL_GUIDES {
+                                let _ = ack_tx.send(ExternalCliGuideResult {
+                                    guide_id,
+                                    accepted: false,
+                                    thread_id: None,
+                                    turn_id: None,
+                                    reason: Some(format!(
+                                        "too many pending guide requests (limit {MAX_PENDING_EXTERNAL_GUIDES})"
+                                    )),
+                                });
+                                continue;
+                            }
                             if pending_guides.contains_key(&guide_id) {
                                 let _ = ack_tx.send(ExternalCliGuideResult {
                                     guide_id,

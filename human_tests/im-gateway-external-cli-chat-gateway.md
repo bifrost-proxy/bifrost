@@ -1262,8 +1262,32 @@
 3. `ACTIVE_SESSIONS` 的旧 owner 清理不能删除同 session 的替代 owner。
 4. Codex/Traex 当前 turn 的真实 guide、拒绝和 exec queue fallback 链路继续通过。
 
+### TC-IEC-60: Guide 控制通道饱和时有界降级
+
+操作步骤：
+
+1. 执行 worker control channel 饱和回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     worker_guide_rejects_saturated_control_channel_without_waiting \
+     --lib -- --nocapture
+   ```
+2. 复跑 Guide 失败降级不丢消息回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     guide_stream_falls_back_to_queue_without_losing_message \
+     --lib -- --nocapture
+   ```
+
+预期结果：
+
+1. worker control channel 最多缓存 32 条控制请求，单 run 最多保留 32 条未确认 Guide。
+2. 通道已满时新 Guide 立即返回 `too many pending guide requests`，不等待 20 秒 ACK timeout，也不继续增长内存。
+3. 上层收到该错误后把完整原消息降级到 FIFO Queue；Stop 在饱和 channel 上仍有直接终止 worker 的兜底。
+
 ## 最近执行记录
 
+- 2026-07-10：第 4 轮性能 review 新增并立即执行 TC-IEC-60。`worker_guide_rejects_saturated_control_channel_without_waiting` 与 `guide_stream_falls_back_to_queue_without_losing_message` 均输出 `1 passed`；同时复跑 `external_worker_`，陈旧 channel 不误杀 PID 与已 ACK Stop 不追加 kill 两项均通过。确认控制通道饱和时 Guide 快速返回上限错误，上层仍保留完整消息进入 Queue，且 Stop 的 PID reuse 安全边界未被有界通道改造破坏。
 - 2026-07-10：第 3 轮全面 review 新增并立即执行 TC-IEC-59。`stale_app_server_cleanup_preserves_replacement_session_owner`、`app_server_registration_rejects_stale_run_ownership` 与 `stale_run_session_cleanup_preserves_replacement_owner` 均通过，app-server 模块合计 `9 passed`；确认旧 run cleanup 按 `run_id` 条件删除、失去所有权的 run 不能晚到注册，且 `ACTIVE_SESSIONS` 的旧 owner 不能删除替代 owner。随后用当前源码重新构建 `target/debug/bifrost`，执行 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_external_runner_live_guide.sh` 输出 `[external-runner-live-guide] PASS`。
 - 2026-07-10：新增并立即执行 TC-IEC-58。三个 focused Rust 命令分别通过 `10/10`、`2/2`、`1/1`；`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_external_runner_live_guide.sh` 通过，真实临时服务验证 Codex/Traex Web steer、飞书 IM 普通消息默认 steer、`/q queue-explicit` 只在当前 turn 完成后执行一次、`/g release-queue` 注入当前 turn、拒绝/exec transport 明确降级队列且原消息不丢失；Playwright 三组运行中输入用例 `3/3` 通过，覆盖非 ChatGPT Web runner 默认 Guide、显式 Queue、ChatGPT Web 仅 Queue，以及内置 Runner Stop/Guide/Queue/移除队列回归。定位并修复了 IM handler 等待 Guide ACK 时暂停 runner control future 导致 20 秒自锁、成功 steer 后又错误排队重复执行的问题。
 - 2026-07-10：第 2 轮 review 后执行真实本机 CLI 兼容验证。`RUN_REAL_CODEX_E2E=1 SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost BIFROST_CODEX_BIN=$(command -v codex) e2e-tests/tests/test_im_gateway_codex_runner_streaming.sh` 通过，run `1783652710170-bb55ada8-78f5-42a3-9c21-8f695aa8dbfc` 使用 Codex stdio app-server 并持久化真实 thread/token usage；`RUN_REAL_TRAEX_E2E=1 SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost BIFROST_TRAEX_BIN=$(command -v traex) e2e-tests/tests/test_im_gateway_traex_runner_streaming.sh` 通过，run `1783652721440-28607fc3-acd3-46a4-b79e-a67aed22ef06` 验证当前 Traex 需要 `app-server --listen stdio://` 且真实返回最终答案、thread/token usage。Codex 真实模型本轮没有执行提示要求的 `pwd` 工具，因此真实脚本只在模型实际产生 tool event 时断言 started/finished 成对与顺序；无条件工具事件映射由 deterministic mock app-server E2E 断言。

@@ -120,6 +120,7 @@ other adapter                          -> existing transport
 ```
 
 主进程 registry 的 ack 只有在收到 `guide_result` 后完成。worker 退出时所有 pending guide 返回 rejected，调用方随后进入 queue fallback。
+主进程 worker control channel 与单 run 的 pending guide map 都限制为 32 条；饱和时新 Guide 必须快速返回明确错误并走现有 FIFO queue fallback，不能继续无界占用内存。Stop 在 control channel 饱和时直接终止已确认归属该 session 的 worker，关闭/陈旧 channel 则保留 PID reuse 防护，不盲目 kill。
 
 ### Admin API 与 CLI
 
@@ -155,7 +156,7 @@ bifrost agent guide --session cli-Codex "先检查失败日志"
 - transport selection：Codex/Traex default、explicit exec、custom args、unsupported adapter。
 - app-server request：initialize/initialized、thread start/resume、turn start、turn steer 字段完整。
 - notification normalization：agent message、command execution、reasoning、plan、turn completed/failed。
-- worker protocol：Guide serialize/parse、ack correlation、worker exit rejects pending。
+- worker protocol：Guide serialize/parse、ack correlation、worker exit rejects pending、control channel 饱和快速拒绝与 32 条 pending 上限。
 - guide result：accepted、no active、mismatch、non-steerable、timeout -> queue fallback。
 - CLI：Guide 参数、URL encoding、JSON/人类输出、空 message/session 拒绝。
 
