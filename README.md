@@ -13,7 +13,7 @@
 
 > Language: **中文** | [English](README.en.md)
 >
-> · [Documentation site](https://bifrost-proxy.github.io/bifrost/)
+> · [Documentation site](https://bifrost-proxy.github.io/)
 
 Bifrost 是一个用 Rust 编写的高性能，AI 友好的代理服务器，灵感来源于 Whistle。它提供请求拦截、规则修改、TLS 拦截、脚本扩展、流量查看、请求重放以及 Web UI 管理能力。
 
