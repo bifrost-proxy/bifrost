@@ -182,7 +182,8 @@ Options:
   --list-shell-tests  Print the shell tests selected by the current mode/shard and exit
   --check-shell-shard-balance
                       Print weighted shell shard loads and fail if max/min drift
-                      exceeds BIFROST_E2E_SHARD_BALANCE_MAX_DIFF_PCT (default: 20)
+                      exceeds BIFROST_E2E_SHARD_BALANCE_MAX_DIFF_PCT
+                      (default: 10; capability shards: 15)
   -h, --help          Show this help
 
 Environment variables:
@@ -258,6 +259,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "${BIFROST_E2E_CAPABILITY_SHARDS:-0}" == "1" && "$SHARD_TOTAL" -ne 3 ]]; then
+  echo "Error: capability shell sharding requires exactly 3 shards" >&2
+  exit 1
+fi
 
 run_shell_test() {
   local script_name="$1"
@@ -746,6 +752,95 @@ shell_test_runs_serial_in_parallel_shell_job() {
   esac
 }
 
+# Stable macOS capability shards. Tests stay with the product surface they
+# exercise, while the existing per-test weights still balance serial and
+# parallel lanes inside each capability job.
+#
+# 1: proxy-core   - proxy protocols, rules, traffic, TLS, admin/runtime safety
+# 2: remote       - remote invoke/file/SSH/relay plus sync/install/desktop
+# 3: agent-extensions - Agent, IM, skills, upgrade/UI and remaining extensions
+shell_test_capability_group() {
+  case "$1" in
+    test_remote_*|\
+    test_setting_ssh_key_cli.sh|\
+    test_ssh_key_*|\
+    test_status_tui_remote_invoke_panel.sh|\
+    test_sync_*|\
+    test_long_term_memory_remember_recall.sh|\
+    test_e2e_scripts_disable_sync_login_prompt.sh|\
+    test_install_*|\
+    test_desktop_*|\
+    test_windows_*)
+      echo 2
+      ;;
+    test_admin_*|\
+    test_badge_*|\
+    test_bifrost_file_syntax_admin_api.sh|\
+    test_body_*|\
+    test_bp_*|\
+    test_breakpoint_*|\
+    test_cert_*|\
+    test_cli_foreground_*|\
+    test_cli_offline_*|\
+    test_cli_online_*|\
+    test_cli_proxy_*|\
+    test_cli_start_*|\
+    test_client_process_*|\
+    test_daemon_*|\
+    test_frames_*|\
+    test_header_*|\
+    test_host_*|\
+    test_http*|\
+    test_im_gateway_long_reply_delivery_regression.sh|\
+    test_group_sync_*|\
+    test_large_body_*|\
+    test_metrics_*|\
+    test_multiline_rule_*|\
+    test_network_account_*|\
+    test_no_rule_*|\
+    test_openai_like_sse_*|\
+    test_pac_*|\
+    test_performance_*|\
+    test_port_*|\
+    test_proxy_*|\
+    test_replay_*|\
+    test_req_res_*|\
+    test_res_body_*|\
+    test_rule_*|\
+    test_rules_*|\
+    test_script_*|\
+    test_scripts_*|\
+    test_search_traffic_*|\
+    test_security_*|\
+    test_server_config_*|\
+    test_socks5_*|\
+    test_sse_*|\
+    test_startup_listener_*|\
+    test_stop_restart_*|\
+    test_super_performance_*|\
+    test_system_admin_*|\
+    test_temporary_port_*|\
+    test_tls_*|\
+    test_total_size_*|\
+    test_traffic_*|\
+    test_trustworthy_traffic_*|\
+    test_unsafe_ssl_*|\
+    test_userpass_*|\
+    test_values_*|\
+    test_websocket_*|\
+    test_whitelist_*)
+      echo 1
+      ;;
+    *)
+      echo 3
+      ;;
+  esac
+}
+
+use_capability_shell_shards() {
+  [[ "${BIFROST_E2E_CAPABILITY_SHARDS:-0}" == "1" && "$SHARD_TOTAL" -eq 3 ]]
+}
+
 shell_parallel_job_count() {
   local jobs="${BIFROST_E2E_SHELL_JOBS:-2}"
   if [[ ! "$jobs" =~ ^[0-9]+$ || "$jobs" -lt 1 ]]; then
@@ -797,8 +892,17 @@ collect_shell_shard_assignments() {
     local best_projected=-1
     local best_current=-1
     local best_count=-1
+    local shard_start=0
+    local shard_end="$SHARD_TOTAL"
 
-    for ((s = 0; s < SHARD_TOTAL; s++)); do
+    if use_capability_shell_shards; then
+      local capability_group
+      capability_group="$(shell_test_capability_group "$name")"
+      shard_start=$((capability_group - 1))
+      shard_end="$capability_group"
+    fi
+
+    for ((s = shard_start; s < shard_end; s++)); do
       local max_lane_load=0
       local min_lane=0
       local min_lane_load="${shard_lane_load[$((s * parallel_jobs))]}"
@@ -893,7 +997,11 @@ check_shell_shard_balance() {
     return 1
   fi
 
-  local threshold="${BIFROST_E2E_SHARD_BALANCE_MAX_DIFF_PCT:-10}"
+  local default_threshold=10
+  if use_capability_shell_shards; then
+    default_threshold=15
+  fi
+  local threshold="${BIFROST_E2E_SHARD_BALANCE_MAX_DIFF_PCT:-$default_threshold}"
   local all_tests=()
   local name
   while IFS= read -r name; do

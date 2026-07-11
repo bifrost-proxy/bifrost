@@ -52,6 +52,13 @@ jobs:
       - name: E2E shell CI coverage guard
         shell: bash
         run: bash scripts/ci/check-e2e-shell-ci-coverage.sh
+      - name: macOS Shell capability shard balance guard
+        shell: bash
+        run: >-
+          BIFROST_E2E_CAPABILITY_SHARDS=1
+          bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules
+          --skip-runner --skip-ui --skip-build --shard 1/3
+          --check-shell-shard-balance
       - name: Shell syntax guard
         shell: bash
         run: bash scripts/ci/check-shell-syntax.sh
@@ -707,23 +714,27 @@ jobs:
           include-hidden-files: true
 
   e2e-macos-shell:
-    name: E2E Shell (aarch64-apple-darwin, shard ${{ matrix.shard }}/2)
+    name: E2E Shell (aarch64-apple-darwin, ${{ matrix.capability }})
     needs: [build-cli-macos-aarch64]
     runs-on: macos-15
-    # Shard 1 continuously made progress for ~58 minutes before the 60-minute
-    # job budget cancelled its final serial fixture. Keep per-test timeouts and
-    # assertions unchanged, but leave enough budget for cleanup and log upload.
-    timeout-minutes: 75
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        include:
+          - shard: 1
+            capability: proxy-core
+          - shard: 2
+            capability: remote
+          - shard: 3
+            capability: agent-extensions
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
       BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
       BIFROST_E2E_SHELL_JOBS: "2"
       BIFROST_E2E_SHARD_INDEX: ${{ matrix.shard }}
-      BIFROST_E2E_SHARD_TOTAL: "2"
+      BIFROST_E2E_SHARD_TOTAL: "3"
+      BIFROST_E2E_CAPABILITY_SHARDS: "1"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "2"
       BIFROST_E2E_SHELL_TEST_TIMEOUT: "1260"
@@ -788,7 +799,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-shell-logs-aarch64-apple-darwin-shard-${{ matrix.shard }}
+          name: e2e-shell-logs-aarch64-apple-darwin-${{ matrix.capability }}
           path: |
             ${{ github.workspace }}/.e2e-reports/
             ${{ github.workspace }}/.bifrost-e2e-ci/

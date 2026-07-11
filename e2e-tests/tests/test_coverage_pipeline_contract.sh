@@ -48,7 +48,33 @@ grep -Fq 'REFUSING: coverage E2E data directory is under production data' "$cove
 grep -Fq 'BIFROST_E2E_PROTECTED_PORTS' "$coverage_e2e"
 grep -Fq 'export HOME="$ORIGINAL_HOME"' "$coverage_e2e"
 grep -Fq 'Instrumented E2E suite failed' "$coverage_e2e"
-grep -A8 -F 'e2e-macos-shell:' "$ci_workflow" | grep -Fq 'timeout-minutes: 75'
+grep -Fq 'shell_test_capability_group()' "$runner"
+grep -Fq 'use_capability_shell_shards()' "$runner"
+grep -Fq 'capability: proxy-core' "$ci_workflow"
+grep -Fq 'capability: remote' "$ci_workflow"
+grep -Fq 'capability: agent-extensions' "$ci_workflow"
+grep -Fq 'BIFROST_E2E_SHARD_TOTAL: "3"' "$ci_workflow"
+grep -Fq 'BIFROST_E2E_CAPABILITY_SHARDS: "1"' "$ci_workflow"
+BIFROST_E2E_CAPABILITY_SHARDS=1 bash "$runner" \
+  --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build \
+  --shard 1/3 --check-shell-shard-balance
+
+partition_dir="$(mktemp -d)"
+trap 'rm -rf "$partition_dir"' EXIT
+BIFROST_E2E_CAPABILITY_SHARDS=0 BIFROST_E2E_SHARD_INDEX=0 BIFROST_E2E_SHARD_TOTAL=0 \
+  bash "$runner" --ci --full-shell --skip-rules --skip-runner --skip-ui \
+  --skip-build --list-shell-tests | sort > "$partition_dir/all.txt"
+for shard in 1 2 3; do
+  BIFROST_E2E_CAPABILITY_SHARDS=1 bash "$runner" \
+    --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build \
+    --shard "$shard/3" --list-shell-tests | sort > "$partition_dir/shard-$shard.txt"
+done
+sort "$partition_dir"/shard-*.txt > "$partition_dir/combined.txt"
+cmp -s "$partition_dir/all.txt" "$partition_dir/combined.txt"
+[[ "$(uniq -d "$partition_dir/combined.txt" | wc -l | tr -d ' ')" -eq 0 ]]
+grep -Fxq 'test_http3_e2e.sh' "$partition_dir/shard-1.txt"
+grep -Fxq 'test_remote_invoke_e2e.sh' "$partition_dir/shard-2.txt"
+grep -Fxq 'test_agent_builtin_status_runtime.sh' "$partition_dir/shard-3.txt"
 
 if grep -Fq 'Some E2E suites had failures, but coverage data was still collected' "$coverage_e2e"; then
   echo "coverage-e2e still masks E2E failures" >&2

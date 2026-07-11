@@ -224,6 +224,9 @@ design/
 - 产出 `unit-integration.json`、`e2e.json`、`coverage.json` 三层证据。
 - 新增全仓 Shell `bash -n` 门禁与覆盖管线契约 E2E。
 - 增加生产数据目录拒绝、隔离 HOME/XDG 与 9900 protected-port 断言。
+- macOS Shell E2E 按 `proxy-core`、`remote`、`agent-extensions` 三个稳定能力域分组；
+  组内继续使用历史耗时权重平衡串行/并行 lane，CI 对三组估算 wall time 执行 15%
+  最大偏差门禁，防止后续新增用例把某一能力 job 再次推到总超时边缘。
 
 ### Phase 1：机制脚本落地
 
