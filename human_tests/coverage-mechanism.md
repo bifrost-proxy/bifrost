@@ -236,3 +236,7 @@ macOS Shell 按 `proxy-core`、`remote`、`agent-extensions` 三个能力 job �
 - TC-COV-10（环境继承回归）：PASS。CI run `29151557395` 暴露 Linux Shell 外层
   `BIFROST_E2E_SHELL_JOBS=4` 会污染契约中的 macOS 平衡估算；契约现显式固定 macOS
   的 2 lanes，并在外层 `BIFROST_E2E_SHELL_JOBS=4` 环境中复跑通过。
+- TC-COV-10（跨平台 Shell 断言回归）：CI run `29152804806` 暴露
+  `test_upgrade_cli.sh` 在 `pipefail` 下使用 `echo | grep -q` 累计 help 检查不稳定；改为
+  Bash 原生字符串匹配，四项语义不变并能报告具体缺失项。使用 worktree binary 与隔离
+  `BIFROST_DATA_DIR` 真实复跑通过。
