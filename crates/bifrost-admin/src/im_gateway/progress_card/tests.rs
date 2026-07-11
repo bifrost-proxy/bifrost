@@ -2,6 +2,37 @@ use super::*;
 use bifrost_agent::PlanStepStatus;
 
 #[test]
+fn assistant_stream_content_is_hidden_until_final_output() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "inspect branch");
+    let streamed_content = "我\n先\n按\n仓\n库\n规\n范\n检\n查";
+
+    snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {
+        content: streamed_content.to_string(),
+    });
+    snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
+        content: "我先按仓库规范检查".to_string(),
+    });
+
+    let running_card = build_feishu_progress_card(&snapshot, true);
+    let running_serialized = serde_json::to_string(&running_card).unwrap();
+    assert!(!running_serialized.contains("我先按仓库规范检查"));
+    assert!(!running_serialized.contains("我\\n先\\n按"));
+    assert!(!running_serialized.contains(PROCESS_PANEL_ELEMENT_ID));
+    assert_eq!(snapshot.last_thought, None);
+    assert!(snapshot.timeline.is_empty());
+    assert!(snapshot.output.is_empty());
+
+    snapshot.apply_event(AgentTurnProgressEvent::TurnFinished {
+        content: "我先按仓库规范检查".to_string(),
+    });
+
+    let finished_card = build_feishu_progress_card(&snapshot, false);
+    let finished_body = serde_json::to_string(&finished_card["body"]).unwrap();
+    assert_eq!(finished_body.matches("我先按仓库规范检查").count(), 1);
+    assert!(!finished_body.contains(PROCESS_PANEL_ELEMENT_ID));
+}
+
+#[test]
 fn progress_snapshot_tracks_tool_plan_queue_and_final_output() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "initial task");
     assert_eq!(snapshot.title.as_deref(), Some("initial task"));
@@ -12,10 +43,7 @@ fn progress_snapshot_tracks_tool_plan_queue_and_final_output() {
     snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {
         content: "I will inspect the workspace.".to_string(),
     });
-    assert_eq!(
-        snapshot.last_thought.as_deref(),
-        Some("I will inspect the workspace.")
-    );
+    assert_eq!(snapshot.last_thought, None);
     snapshot.apply_event(AgentTurnProgressEvent::ToolStarted {
         tool_name: "shell".to_string(),
         arguments: "{\"cmd\":\"ls\"}".to_string(),
@@ -61,10 +89,9 @@ fn progress_snapshot_tracks_tool_plan_queue_and_final_output() {
     assert_eq!(snapshot.output, "done");
     assert_eq!(snapshot.plan_steps.len(), 1);
     assert_eq!(snapshot.tool_calls.len(), 1);
-    assert_eq!(snapshot.timeline.len(), 2);
-    assert_eq!(snapshot.timeline[0].kind, ProgressTimelineKind::Thinking);
-    assert_eq!(snapshot.timeline[1].kind, ProgressTimelineKind::Tool);
-    assert!(snapshot.timeline[1].completed);
+    assert_eq!(snapshot.timeline.len(), 1);
+    assert_eq!(snapshot.timeline[0].kind, ProgressTimelineKind::Tool);
+    assert!(snapshot.timeline[0].completed);
     assert_eq!(snapshot.queue_items.len(), 1);
     assert!(snapshot.guide_pending);
     assert_eq!(
@@ -109,7 +136,7 @@ fn external_runner_todo_list_plan_renders_in_feishu_progress_card() {
 }
 
 #[test]
-fn assistant_final_is_pipeline_content_until_turn_finished() {
+fn assistant_final_is_hidden_from_process_until_turn_finished() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "review task");
     snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
         content: "我先看分支差异。".to_string(),
@@ -132,17 +159,13 @@ fn assistant_final_is_pipeline_content_until_turn_finished() {
     });
 
     assert!(snapshot.output.is_empty());
-    assert_eq!(snapshot.timeline.len(), 3);
-    assert_eq!(snapshot.timeline[0].kind, ProgressTimelineKind::Thinking);
-    assert_eq!(snapshot.timeline[1].kind, ProgressTimelineKind::Tool);
-    assert_eq!(snapshot.timeline[2].kind, ProgressTimelineKind::Thinking);
+    assert_eq!(snapshot.timeline.len(), 1);
+    assert_eq!(snapshot.timeline[0].kind, ProgressTimelineKind::Tool);
 
     let running_card = build_feishu_progress_card(&snapshot, true);
     let running_serialized = serde_json::to_string(&running_card).unwrap();
-    assert!(running_serialized.contains("我先看分支差异"));
-    assert!(running_serialized.contains("接下来逐个模块检查"));
-    assert!(!running_serialized.contains("1. 我先看分支差异"));
-    assert!(!running_serialized.contains("2. 接下来逐个模块检查"));
+    assert!(!running_serialized.contains("我先看分支差异"));
+    assert!(!running_serialized.contains("接下来逐个模块检查"));
     assert!(!running_serialized.contains("最终结论"));
     assert!(!running_serialized.contains("Loop"));
     assert!(!running_serialized.contains("Pipeline"));
@@ -154,7 +177,7 @@ fn assistant_final_is_pipeline_content_until_turn_finished() {
 }
 
 #[test]
-fn traex_model_messages_stay_visible_while_machine_statuses_are_hidden() {
+fn traex_model_messages_are_hidden_while_tool_progress_stays_visible() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "检查 Traex 版本");
     for state in [
         "turn started",
@@ -187,8 +210,8 @@ fn traex_model_messages_stay_visible_while_machine_statuses_are_hidden() {
 
     let running_card = build_feishu_progress_card(&snapshot, true);
     let running_serialized = serde_json::to_string(&running_card).unwrap();
-    assert!(running_serialized.contains("检查当前 Traex 版本并与最新可用版本对比"));
-    assert!(running_serialized.contains("当前 Traex 版本为"));
+    assert!(!running_serialized.contains("检查当前 Traex 版本并与最新可用版本对比"));
+    assert!(!running_serialized.contains("当前 Traex 版本为"));
     assert!(running_serialized.contains("已完成：exec_command"));
     assert!(!running_serialized.contains("状态：tool_calls"));
     assert!(!running_serialized.contains("状态：waiting_on_session"));
@@ -201,13 +224,9 @@ fn traex_model_messages_stay_visible_while_machine_statuses_are_hidden() {
     });
 
     assert_eq!(snapshot.output, final_output);
-    assert_eq!(
-        snapshot.last_thought.as_deref(),
-        Some("检查当前 Traex 版本并与最新可用版本对比。")
-    );
-    assert_eq!(snapshot.timeline.len(), 2);
-    assert_eq!(snapshot.timeline[0].kind, ProgressTimelineKind::Thinking);
-    assert_eq!(snapshot.timeline[1].kind, ProgressTimelineKind::Tool);
+    assert_eq!(snapshot.last_thought, None);
+    assert_eq!(snapshot.timeline.len(), 1);
+    assert_eq!(snapshot.timeline[0].kind, ProgressTimelineKind::Tool);
 
     let finished_card = build_feishu_progress_card(&snapshot, false);
     let finished_serialized = serde_json::to_string(&finished_card).unwrap();
@@ -222,7 +241,7 @@ fn traex_model_messages_stay_visible_while_machine_statuses_are_hidden() {
             .expect("process element"),
     )
     .unwrap();
-    assert!(finished_serialized.contains("检查当前 Traex 版本并与最新可用版本对比"));
+    assert!(!finished_serialized.contains("检查当前 Traex 版本并与最新可用版本对比"));
     assert!(finished_serialized.contains("已完成：exec_command"));
     assert!(finished_serialized.contains("当前 Traex 版本为"));
     assert!(!process_serialized.contains("当前 Traex 版本为"));
@@ -300,13 +319,12 @@ fn machine_status_events_do_not_flood_process_card() {
         arguments: "cargo test -p bifrost-admin progress_card".to_string(),
     });
 
-    assert_eq!(snapshot.timeline.len(), 2);
-    assert_eq!(snapshot.timeline[0].kind, ProgressTimelineKind::Thinking);
-    assert_eq!(snapshot.timeline[1].kind, ProgressTimelineKind::Tool);
+    assert_eq!(snapshot.timeline.len(), 1);
+    assert_eq!(snapshot.timeline[0].kind, ProgressTimelineKind::Tool);
 
     let card = build_feishu_progress_card(&snapshot, true);
     let serialized = serde_json::to_string(&card).unwrap();
-    assert!(serialized.contains("我会先检查失败用例"));
+    assert!(!serialized.contains("我会先检查失败用例"));
     assert!(serialized.contains("正在运行：exec_command"));
     assert!(!serialized.contains("状态：tool_calls"));
     assert!(!serialized.contains("状态：waiting_on_session"));
@@ -343,7 +361,7 @@ fn progress_prose_linebreak_normalizer_keeps_ascii_words_readable() {
 }
 
 #[test]
-fn feishu_progress_card_collapses_fragmented_thinking_lines() {
+fn feishu_progress_card_hides_fragmented_assistant_stream_content() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "run task");
     snapshot.apply_event(AgentTurnProgressEvent::Status(Box::new(active_status(0))));
     snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {
@@ -363,17 +381,12 @@ fn feishu_progress_card_collapses_fragmented_thinking_lines() {
                 .find(|element| element["element_id"] == PROCESS_PANEL_ELEMENT_ID)
         })
         .expect("process element");
-    let process_content = process_element["elements"][0]["content"].as_str().unwrap();
+    let process_content = serde_json::to_string(process_element).unwrap();
 
-    assert!(
-        process_content.contains(
-            "启动检查发现当前工作区已有一处用户改动:`e2e-tests/tests/test_rule_share_confirm_browser.sh`"
-        ),
-        "fragmented thinking should be rendered as a readable sentence: {process_content}"
-    );
-    assert!(!process_content.contains("启动\n检查"));
-    assert!(!process_content.contains("工作\n区"));
-    assert!(!process_content.contains("test_rule_share\n_confirm"));
+    assert!(!process_content.contains("启动检查"));
+    assert!(!process_content.contains("启动\\n检查"));
+    assert!(!process_content.contains("用户改动"));
+    assert!(process_content.contains("git status --short --branch"));
 }
 
 #[test]
@@ -439,19 +452,19 @@ fn consecutive_process_tools_are_grouped_by_default() {
         })
         .expect("process element");
     let process_elements = process_element["elements"].as_array().unwrap();
-    assert_eq!(process_elements.len(), 2);
-    assert_eq!(process_elements[1]["element_id"], "ap_tg_1");
-    assert_eq!(process_elements[1]["expanded"], false);
+    assert_eq!(process_elements.len(), 1);
+    assert_eq!(process_elements[0]["element_id"], "ap_tg_0");
+    assert_eq!(process_elements[0]["expanded"], false);
     assert_eq!(
-        process_elements[1]["header"]["title"]["content"],
+        process_elements[0]["header"]["title"]["content"],
         "已运行 3 条命令"
     );
-    let grouped_tools = process_elements[1]["elements"].as_array().unwrap();
+    let grouped_tools = process_elements[0]["elements"].as_array().unwrap();
     assert_eq!(grouped_tools.len(), 3);
-    assert_eq!(grouped_tools[0]["element_id"], "ap_t_1");
+    assert_eq!(grouped_tools[0]["element_id"], "ap_t_0");
     assert_eq!(grouped_tools[0]["expanded"], false);
-    assert_eq!(grouped_tools[1]["element_id"], "ap_t_2");
-    assert_eq!(grouped_tools[2]["element_id"], "ap_t_3");
+    assert_eq!(grouped_tools[1]["element_id"], "ap_t_1");
+    assert_eq!(grouped_tools[2]["element_id"], "ap_t_2");
     let serialized = serde_json::to_string(&card).unwrap();
     assert!(serialized.contains("已完成：exec_command · 20ms"));
     assert!(!serialized.contains("ok ok ok"));
@@ -520,8 +533,7 @@ fn feishu_progress_card_expands_process_while_running_and_collapses_after_finish
     let running_serialized = serde_json::to_string(&running_card).unwrap();
     assert!(running_serialized.contains(PROCESS_PANEL_ELEMENT_ID));
     assert!(running_serialized.contains(r#""expanded":true"#));
-    assert!(running_serialized.contains("我会先检查代码路径"));
-    assert!(!running_serialized.contains("1. 我会先检查代码路径"));
+    assert!(!running_serialized.contains("我会先检查代码路径"));
     assert!(running_serialized.contains("正在运行：exec_command"));
     assert!(!running_serialized.contains("Loop"));
     assert!(!running_serialized.contains("[模型]"));
@@ -556,9 +568,9 @@ fn feishu_progress_card_expands_process_while_running_and_collapses_after_finish
     assert!(!finished_serialized.contains("Loop"));
     assert!(!finished_serialized.contains("工具摘要"));
     let process_elements = elements[1]["elements"].as_array().unwrap();
-    assert_eq!(process_elements[1]["element_id"], "ap_t_1");
-    assert_eq!(process_elements[1]["expanded"], false);
-    assert!(process_elements[1]["header"]["title"]["content"]
+    assert_eq!(process_elements[0]["element_id"], "ap_t_0");
+    assert_eq!(process_elements[0]["expanded"], false);
+    assert!(process_elements[0]["header"]["title"]["content"]
         .as_str()
         .unwrap()
         .contains("已完成：exec_command"));
@@ -586,11 +598,11 @@ fn feishu_progress_card_process_element_ids_stay_within_feishu_limits() {
     let mut element_ids = Vec::new();
     collect_element_ids(&card, &mut element_ids);
     assert!(
-        element_ids.iter().any(|id| id == "ap_t_35"),
+        element_ids.iter().any(|id| id == "ap_t_17"),
         "test must cover two-digit process tool ids: {element_ids:?}"
     );
     assert!(
-        element_ids.iter().any(|id| id == "ap_td_35"),
+        element_ids.iter().any(|id| id == "ap_td_17"),
         "test must cover two-digit process tool detail ids: {element_ids:?}"
     );
     for element_id in element_ids {
@@ -1004,8 +1016,7 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
     for id in [
         PLAN_ELEMENT_ID,
         PROCESS_PANEL_ELEMENT_ID,
-        PROCESS_LOG_ELEMENT_ID,
-        "ap_t_1",
+        "ap_t_0",
         "已收到引导：rerun failed path",
     ] {
         assert!(
@@ -1039,29 +1050,22 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
         .unwrap();
     assert_eq!(process_element["tag"], "collapsible_panel");
     assert_eq!(process_element["expanded"], true);
-    let process_content = process_element["elements"][0]["content"].as_str().unwrap();
-    assert!(
-        process_content.contains("Inspecting files before running tests."),
-        "process content should show the latest thought: {process_content}"
-    );
-    assert!(!process_content.contains("Loop"));
-    assert!(!process_content.contains("[模型]"));
+    let process_content = serde_json::to_string(process_element).unwrap();
+    assert!(!process_content.contains("Inspecting files before running tests."));
+    assert!(!process_content.contains("Now I will write the final summary."));
     let process_elements = process_element["elements"].as_array().unwrap();
-    assert_eq!(process_elements[1]["element_id"], "ap_t_1");
-    assert_eq!(process_elements[1]["tag"], "collapsible_panel");
-    assert_eq!(process_elements[1]["expanded"], false);
-    assert!(process_elements[1]["header"]["title"]["content"]
+    assert_eq!(process_elements.len(), 1);
+    assert_eq!(process_elements[0]["element_id"], "ap_t_0");
+    assert_eq!(process_elements[0]["tag"], "collapsible_panel");
+    assert_eq!(process_elements[0]["expanded"], false);
+    assert!(process_elements[0]["header"]["title"]["content"]
         .as_str()
         .unwrap()
         .contains("已完成：shell"));
-    assert!(process_elements[1]["elements"][0]["content"]
+    assert!(process_elements[0]["elements"][0]["content"]
         .as_str()
         .unwrap()
         .contains("tests passed"));
-    assert!(process_elements[2]["content"]
-        .as_str()
-        .unwrap()
-        .contains("Now I will write the final summary."));
 }
 
 #[test]
@@ -1650,16 +1654,15 @@ async fn progress_event_uses_compact_card_when_rollover_create_also_exceeds_limi
         session.message_info().expect("message info").card_id,
         "card_3"
     );
-    assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 3);
+    assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 2);
     let update_payloads = server
         .card_update_payloads
         .lock()
         .expect("update payloads")
         .clone();
-    let compact_update = update_payloads.last().expect("compact update payload");
-    assert!(compact_update.contains("精简状态卡"));
-    assert!(compact_update.contains("继续检查恢复后的进度卡片"));
-    assert!(!compact_update.contains(OVERSIZED_MARKER));
+    assert!(update_payloads
+        .iter()
+        .all(|payload| !payload.contains("继续检查恢复后的进度卡片")));
 }
 
 #[tokio::test(flavor = "current_thread")]
