@@ -194,20 +194,13 @@ impl ImAgentProgressSnapshot {
                     self.title = Some(title);
                 }
             }
-            AgentTurnProgressEvent::AssistantDelta { content } => {
-                if !content.trim().is_empty() {
-                    self.push_timeline(ProgressTimelineItem::thinking(content.clone()));
-                    self.last_thought = Some(content);
-                }
-            }
+            // Assistant text is delivered once through TurnFinished. Rendering streaming
+            // deltas here duplicates the final answer in the process panel and makes
+            // token-sized chunks appear as one-character lines in Feishu cards.
+            AgentTurnProgressEvent::AssistantDelta { .. } => {}
             AgentTurnProgressEvent::AssistantFinal { content } => {
-                if !content.trim().is_empty() {
-                    if matches!(self.phase, ImProgressPhase::Running) {
-                        self.push_timeline(ProgressTimelineItem::thinking(content.clone()));
-                        self.last_thought = Some(content);
-                    } else {
-                        self.output = content;
-                    }
+                if !matches!(self.phase, ImProgressPhase::Running) && !content.trim().is_empty() {
+                    self.output = content;
                 }
             }
             AgentTurnProgressEvent::TurnFinished { content } => {
@@ -477,17 +470,6 @@ pub struct ProgressTimelineItem {
 }
 
 impl ProgressTimelineItem {
-    fn thinking(content: String) -> Self {
-        Self {
-            kind: ProgressTimelineKind::Thinking,
-            title: "思考".to_string(),
-            summary: truncate_one_line(&content, 120),
-            detail: content,
-            completed: true,
-            success: None,
-        }
-    }
-
     fn status(content: String) -> Self {
         Self {
             kind: ProgressTimelineKind::Status,

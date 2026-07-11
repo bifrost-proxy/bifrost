@@ -1189,7 +1189,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
         ),
         TestCase::standalone(
             "im_gateway_agent_streaming_progress_card_renderer",
-            "Validate IM Agent progress snapshot renders Feishu streaming card sections and guide/queue footer state",
+            "Validate Feishu progress cards hide streamed assistant prose while retaining process events and one final answer",
             "admin",
             || async move {
                 use bifrost_admin::im_gateway::progress_card::{
@@ -1259,7 +1259,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     "agent_plan_panel",
                     "agent_plan",
                     "agent_process_panel",
-                    "agent_process_log",
+                    "ap_t_0",
+                    "ap_td_0",
                     "agent_status_panel",
                     "agent_footer",
                     "list_directory",
@@ -1271,20 +1272,27 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     "执行过程",
                     "耗时：2 分 05 秒",
                     "已完成：list_directory",
-                    "checking progress card sections",
-                    "启动检查发现当前工作区已有一处用户改动",
-                    "test_rule_share_confirm_browser.sh",
                 ] {
                     if !body.contains(needle) {
                         return Err(format!("streaming card body missing {needle}: {body}"));
                     }
                 }
-                for fragmented in ["启动\\n检查", "工作\\n区", "test_rule_share\\n_confirm"] {
-                    if body.contains(fragmented) {
+                for hidden_assistant_text in [
+                    "checking progress card sections",
+                    "启动检查发现当前工作区已有一处用户改动",
+                    "启动\\n检查",
+                    "test_rule_share_confirm_browser.sh",
+                ] {
+                    if body.contains(hidden_assistant_text) {
                         return Err(format!(
-                            "streaming card body should collapse fragmented progress prose {fragmented}: {body}"
+                            "streaming card body must hide redundant assistant stream content {hidden_assistant_text}: {body}"
                         ));
                     }
+                }
+                if body.matches("streaming card done").count() != 1 {
+                    return Err(format!(
+                        "final answer should appear once in the card body: {body}"
+                    ));
                 }
                 for legacy_id in [
                     "\"agent_thinking\"",

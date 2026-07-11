@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-本模块验证飞书通道的 Agent progress card 在展示执行过程、Progress Step 和思考信息时不会把外部 Runner 的短行/token stream 文本原样渲染成几字一行，同时验证 token usage 机器态事件不会污染执行过程，并会刷新卡片尾部的可读执行耗时。
+本模块验证飞书通道的 Agent progress card 不会把外部 Runner 的 `AssistantDelta` / 运行中 `AssistantFinal` 重复展示到执行过程；最终正文只在卡片底部出现一次。工具、可读状态、错误、token usage 刷新和可读执行耗时仍按原语义工作。
 
 ## 前置条件
 
@@ -12,18 +12,18 @@
 
 ## 测试用例列表
 
-### TC-FPC-01：Progress thinking 短行文本合并为自然段
+### TC-FPC-01：逐字符 assistant stream 不进入执行过程
 
 **操作步骤**：
 1. 执行：
    ```bash
-   cargo test -p bifrost-admin --lib feishu_progress_card_collapses_fragmented_thinking_lines -- --nocapture
+   cargo test -p bifrost-admin --lib assistant_stream_content_is_hidden_until_final_output -- --nocapture
    ```
 
 **预期结果**：
 - 测试通过。
-- Feishu progress card process panel 的 markdown content 包含 `启动检查发现当前工作区已有一处用户改动`。
-- content 不包含 `启动\n检查`、`工作\n区` 或 `test_rule_share\n_confirm` 这类异常硬换行。
+- Running 卡片不包含逐字符 `AssistantDelta`，也不包含运行中的 `AssistantFinal`。
+- `TurnFinished` 后卡片 body 只出现一次完整最终正文，且不存在仅由 assistant stream 产生的 `agent_process_panel`。
 
 ### TC-FPC-02：Prose normalizer 保留列表和代码块
 
@@ -38,7 +38,7 @@
 - 中文短行被合并，英文软换行补空格。
 - Markdown 列表和 fenced code block 原始换行保留。
 
-### TC-FPC-03：E2E renderer 输出的 progress card payload 不含短行断裂
+### TC-FPC-03：E2E renderer 隐藏 assistant stream 并保留真实过程事件
 
 **操作步骤**：
 1. 执行：
@@ -48,15 +48,16 @@
 
 **预期结果**：
 - E2E renderer 用例通过。
-- progress card JSON 2.0 的 `agent_process_panel` 中包含合并后的思考内容。
-- payload 不包含 `启动\n检查`、`工作\n区` 或 `test_rule_share\n_confirm`。
+- progress card JSON 2.0 的 `agent_process_panel` 包含 `list_directory` 工具事件、耗时和状态。
+- payload 不包含 `checking progress card sections`、逐字符中文或路径片段。
+- 卡片 body 中 `streaming card done` 最终正文只出现一次。
 
 ### TC-FPC-04：token usage 机器态不展示为过程状态行
 
 **操作步骤**：
 1. 执行：
    ```bash
-   cargo test -p bifrost-admin --lib progress_card -- --nocapture
+   cargo test -p bifrost-admin --lib codex_usage_progress_event_refreshes_status_without_timeline_noise -- --nocapture
    ```
 
 **预期结果**：
@@ -82,17 +83,11 @@
 **操作步骤**：
 1. 执行：
    ```bash
-   cargo test -p bifrost-admin --lib progress_card -- --nocapture
+   cargo test -p bifrost-admin --lib progress_footer_formats_elapsed_duration_without_milliseconds -- --nocapture
    ```
-2. 执行：
-   ```bash
-   cargo run -p bifrost-e2e -- --test im_gateway_agent_streaming_progress_card_renderer --jobs 1 --timeout 120
-   ```
-
 **预期结果**：
 - 测试通过。
-- footer 中展示 `耗时：1 分 05 秒` 或 `耗时：2 分 05 秒` 这类可读耗时，不展示毫秒精度。
-- token usage progress event 能触发 status refresh，但 process panel 不展示 `token usage updated`。
+- duration formatter 输出 `1 分 05 秒`、`1 小时 03 分` 等可读耗时，不展示毫秒精度。
 
 ## 清理步骤
 
