@@ -260,5 +260,7 @@ macOS Shell 按 `proxy-core`、`remote`、`agent-extensions` 三个能力 job �
 - TC-COV-10（全绿后慢 job 审计）：CI run `29157919216` 35/35 全绿；唯一超过 30 分钟
   的 job 是 Windows x86_64 CLI build（32m12s），其中 `cargo build --release` 独占
   30m46s。日志显示 `No cache found` 且 job 结束未保存 Rust cache，Actions cache API
-  也查不到对应 key。根因是 7 处 `save-if: always()` 未使用 GitHub expression，修为
-  `save-if: ${{ always() }}` 并由 coverage pipeline contract 阻止普通字符串回归。
+  也查不到对应 key。根因是 7 处 `save-if: always()` 不是布尔输入；首次修为
+  `${{ always() }}` 后 run `29159544439` 在 workflow 解析期 0 job 失败，进一步确认状态
+  函数不能用于 action input。最终修为 `save-if: ${{ true }}`，并由 coverage pipeline
+  contract 同时阻止两种错误写法回归。

@@ -232,9 +232,9 @@ design/
   `test_desktop_open_requests_contract.sh` 保留为本地桌面发布验证，不进入通用 macOS
   Shell CI；CI 继续通过桌面 bundle 编译生产路径，并把这两个例外放入显式跳过清单，
   防止它们在 Shell job 内重复编译 18-19 分钟。
-- Rust cache 的 `save-if` 必须使用可求值的 GitHub 表达式 `${{ always() }}`。禁止写成
-  普通字符串 `always()`；后者会造成 PR job 每轮冷编译却从不落盘缓存，Windows release
-  CLI 冷构建实测会占用约 31 分钟。
+- Rust cache 的 `save-if` 必须使用有效的常量布尔表达式 `${{ true }}`。禁止写成普通
+  字符串 `always()`（不会保存），也不能把仅限条件判断的状态函数 `${{ always() }}`
+  用在 action input 中（workflow 无法创建 job）；Windows release CLI 冷构建实测约 31 分钟。
 
 ### Phase 1：机制脚本落地
 
