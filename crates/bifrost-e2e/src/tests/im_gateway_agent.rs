@@ -1189,7 +1189,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
         ),
         TestCase::standalone(
             "im_gateway_agent_streaming_progress_card_renderer",
-            "Validate Feishu progress cards hide streamed assistant prose while retaining process events and one final answer",
+            "Validate Feishu progress cards coalesce streamed assistant prose while retaining process events and one final answer",
             "admin",
             || async move {
                 use bifrost_admin::im_gateway::progress_card::{
@@ -1207,11 +1207,13 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::Status(Box::new(
                     status,
                 )));
-                snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::AssistantDelta {
-                    content: "checking progress card sections".to_string(),
-                });
-                snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::AssistantDelta {
-                    content: "启动\n检查\n发现\n当前\n工作\n区\n已有\n一处\n用户\n改动\n:\n`e2e-tests/tests/test_rule_share\n_confirm_browser.sh`".to_string(),
+                for fragment in ["启动\n", "检查\n", "飞书\n", "过程\n", "卡片"] {
+                    snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::AssistantDelta {
+                        content: fragment.to_string(),
+                    });
+                }
+                snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::AssistantFinal {
+                    content: "启动检查飞书过程卡片".to_string(),
                 });
                 snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::ToolStarted {
                     tool_name: "list_directory".to_string(),
@@ -1242,6 +1244,9 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     true,
                     Some("已收到引导：check latest logs".to_string()),
                 );
+                snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::AssistantFinal {
+                    content: "streaming card done".to_string(),
+                });
                 snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::TurnFinished {
                     content: "streaming card done".to_string(),
                 });
@@ -1259,8 +1264,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     "agent_plan_panel",
                     "agent_plan",
                     "agent_process_panel",
-                    "ap_t_0",
-                    "ap_td_0",
+                    "ap_t_1",
+                    "ap_td_1",
                     "agent_status_panel",
                     "agent_footer",
                     "list_directory",
@@ -1270,6 +1275,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     "已收到引导：check latest logs",
                     "任务计划：Render latest status card",
                     "执行过程",
+                    "启动检查飞书过程卡片",
                     "耗时：2 分 05 秒",
                     "已完成：list_directory",
                 ] {
@@ -1277,15 +1283,10 @@ pub fn get_all_tests() -> Vec<TestCase> {
                         return Err(format!("streaming card body missing {needle}: {body}"));
                     }
                 }
-                for hidden_assistant_text in [
-                    "checking progress card sections",
-                    "启动检查发现当前工作区已有一处用户改动",
-                    "启动\\n检查",
-                    "test_rule_share_confirm_browser.sh",
-                ] {
-                    if body.contains(hidden_assistant_text) {
+                for fragmented_assistant_text in ["启动\\n检查", "检查\\n飞书", "飞书\\n过程"] {
+                    if body.contains(fragmented_assistant_text) {
                         return Err(format!(
-                            "streaming card body must hide redundant assistant stream content {hidden_assistant_text}: {body}"
+                            "streaming card body must coalesce assistant stream fragment {fragmented_assistant_text}: {body}"
                         ));
                     }
                 }
