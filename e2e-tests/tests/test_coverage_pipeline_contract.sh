@@ -55,6 +55,11 @@ grep -Fq 'capability: remote' "$ci_workflow"
 grep -Fq 'capability: agent-extensions' "$ci_workflow"
 grep -Fq 'BIFROST_E2E_SHARD_TOTAL: "3"' "$ci_workflow"
 grep -Fq 'BIFROST_E2E_CAPABILITY_SHARDS: "1"' "$ci_workflow"
+if grep -Fq 'save-if: always()' "$ci_workflow"; then
+  echo "rust-cache save-if must use an evaluated GitHub expression" >&2
+  exit 1
+fi
+grep -Fq 'save-if: ${{ always() }}' "$ci_workflow"
 BIFROST_E2E_CAPABILITY_SHARDS=1 BIFROST_E2E_SHELL_JOBS=2 bash "$runner" \
   --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build \
   --shard 1/3 --check-shell-shard-balance

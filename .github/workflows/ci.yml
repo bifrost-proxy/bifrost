@@ -121,7 +121,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: always()
+          save-if: ${{ always() }}
       - name: Unit and integration tests
         run: cargo test --workspace --all-features
 
@@ -144,7 +144,7 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: always()
+          save-if: ${{ always() }}
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Collect unit + integration coverage and enforce gate
@@ -184,7 +184,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: always()
+          save-if: ${{ always() }}
       - name: Build release binary
         run: cargo build --release --bin bifrost
       - name: Upload release binary
@@ -580,7 +580,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: cli-build-aarch64-apple-darwin
-          save-if: always()
+          save-if: ${{ always() }}
       - name: Cache sherpa-onnx archive
         # ASR native runtime assets are supported only on Apple Silicon macOS.
         # Windows/Linux CI must not fetch or bundle sherpa/qwen ASR artifacts.
@@ -638,7 +638,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: cli-build-x86_64-apple-darwin
-          save-if: always()
+          save-if: ${{ always() }}
       - name: Build CLI
         env:
           SKIP_FRONTEND_BUILD: "1"
@@ -1057,7 +1057,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: cli-build-${{ matrix.target }}
-          save-if: always()
+          save-if: ${{ always() }}
       - name: Build CLI
         run: cargo build -p bifrost-cli --release --target ${{ matrix.target }}
       - name: Upload release binary
@@ -1101,7 +1101,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: desktop-windows-${{ matrix.target }}
-          save-if: always()
+          save-if: ${{ always() }}
       - name: Download CLI binary
         uses: actions/download-artifact@v4
         with:

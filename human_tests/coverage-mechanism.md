@@ -257,3 +257,8 @@ macOS Shell 按 `proxy-core`、`remote`、`agent-extensions` 三个能力 job �
 - TC-COV-10（优化后 CI 实测）：同一 run 中 `agent-extensions` 成功耗时 14m05s，
   `remote` 成功耗时 16m57s；`remote` 相比优化前 39m17s 缩短 22m20s（约 57%）。
   `proxy-core` 在 19m44s 因上述 HTTPS readiness 假失败结束，非能力分组超时。
+- TC-COV-10（全绿后慢 job 审计）：CI run `29157919216` 35/35 全绿；唯一超过 30 分钟
+  的 job 是 Windows x86_64 CLI build（32m12s），其中 `cargo build --release` 独占
+  30m46s。日志显示 `No cache found` 且 job 结束未保存 Rust cache，Actions cache API
+  也查不到对应 key。根因是 7 处 `save-if: always()` 未使用 GitHub expression，修为
+  `save-if: ${{ always() }}` 并由 coverage pipeline contract 阻止普通字符串回归。
