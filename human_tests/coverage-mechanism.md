@@ -249,3 +249,11 @@ macOS Shell 按 `proxy-core`、`remote`、`agent-extensions` 三个能力 job �
   权重并调整能力归组后，167 个 CI Shell 用例分布为 `proxy-core` 79 个 / 816s、
   `remote` 37 个 / 790s、`agent-extensions` 51 个 / 874s，0 重复、0 遗漏，最大估算
   偏差 10.2%，通过 15% 门禁；CI 显式跳过项由 28 个增至 30 个。
+- TC-COV-10（HTTPS fixture readiness 回归）：CI run `29156752284` 的 `proxy-core`
+  暴露 `test_trustworthy_traffic_metrics.sh` 用 80 次固定轮询等待临时 RSA 证书与 HTTPS
+  fixture，在 macOS 负载下误报未就绪。改为 90 秒真实墙钟 deadline；正常启动不增加
+  等待，慢 runner 仍会在明确上限内失败并打印 fixture 日志。使用 worktree release
+  binary、动态端口、临时数据目录并保护 9900 真实复跑该用例。
+- TC-COV-10（优化后 CI 实测）：同一 run 中 `agent-extensions` 成功耗时 14m05s，
+  `remote` 成功耗时 16m57s；`remote` 相比优化前 39m17s 缩短 22m20s（约 57%）。
+  `proxy-core` 在 19m44s 因上述 HTTPS readiness 假失败结束，非能力分组超时。
