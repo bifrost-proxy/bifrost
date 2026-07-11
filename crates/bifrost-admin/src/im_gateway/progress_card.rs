@@ -194,13 +194,16 @@ impl ImAgentProgressSnapshot {
                     self.title = Some(title);
                 }
             }
-            // Assistant text is delivered once through TurnFinished. Rendering streaming
-            // deltas here duplicates the final answer in the process panel and makes
-            // token-sized chunks appear as one-character lines in Feishu cards.
-            AgentTurnProgressEvent::AssistantDelta { .. } => {}
+            AgentTurnProgressEvent::AssistantDelta { content } => {
+                self.merge_assistant_delta(content);
+            }
             AgentTurnProgressEvent::AssistantFinal { content } => {
-                if !matches!(self.phase, ImProgressPhase::Running) && !content.trim().is_empty() {
-                    self.output = content;
+                if !content.trim().is_empty() {
+                    if matches!(self.phase, ImProgressPhase::Running) {
+                        self.finish_assistant_stream(content);
+                    } else {
+                        self.output = content;
+                    }
                 }
             }
             AgentTurnProgressEvent::TurnFinished { content } => {
@@ -258,13 +261,59 @@ impl ImAgentProgressSnapshot {
         self.timeline.push(item);
     }
 
+    fn merge_assistant_delta(&mut self, content: String) {
+        if content.is_empty()
+            || (content.trim().is_empty()
+                && !self
+                    .timeline
+                    .last()
+                    .is_some_and(|item| item.kind == ProgressTimelineKind::Thinking))
+        {
+            return;
+        }
+
+        if let Some(item) = self
+            .timeline
+            .last_mut()
+            .filter(|item| item.kind == ProgressTimelineKind::Thinking)
+        {
+            let merged = merge_streaming_assistant_text(&item.detail, &content);
+            item.summary = truncate_one_line(&merged, 120);
+            item.detail = merged.clone();
+            self.last_thought = Some(merged);
+            return;
+        }
+
+        self.push_timeline(ProgressTimelineItem::thinking(content.clone()));
+        self.last_thought = Some(content);
+    }
+
+    fn finish_assistant_stream(&mut self, content: String) {
+        if let Some(item) = self
+            .timeline
+            .last_mut()
+            .filter(|item| item.kind == ProgressTimelineKind::Thinking)
+        {
+            if assistant_texts_overlap(&item.detail, &content) {
+                item.summary = truncate_one_line(&content, 120);
+                item.detail = content.clone();
+                self.last_thought = Some(content);
+                return;
+            }
+        }
+
+        self.push_timeline(ProgressTimelineItem::thinking(content.clone()));
+        self.last_thought = Some(content);
+    }
+
     fn remove_terminal_output_from_timeline(&mut self, content: &str) {
         let content = content.trim();
         if content.is_empty() {
             return;
         }
         if self.timeline.last().is_some_and(|item| {
-            item.kind == ProgressTimelineKind::Thinking && item.detail.trim() == content
+            item.kind == ProgressTimelineKind::Thinking
+                && assistant_texts_equivalent(&item.detail, content)
         }) {
             self.timeline.pop();
             self.last_thought = self.timeline.iter().rev().find_map(|item| {
@@ -470,6 +519,17 @@ pub struct ProgressTimelineItem {
 }
 
 impl ProgressTimelineItem {
+    fn thinking(content: String) -> Self {
+        Self {
+            kind: ProgressTimelineKind::Thinking,
+            title: "思考".to_string(),
+            summary: truncate_one_line(&content, 120),
+            detail: content,
+            completed: true,
+            success: None,
+        }
+    }
+
     fn status(content: String) -> Self {
         Self {
             kind: ProgressTimelineKind::Status,
@@ -2625,6 +2685,50 @@ fn format_footer_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
             }
         }
     }
+}
+
+fn merge_streaming_assistant_text(existing: &str, incoming: &str) -> String {
+    if existing.trim().is_empty() {
+        return incoming.to_string();
+    }
+    if incoming.is_empty() {
+        return existing.to_string();
+    }
+
+    if incoming.len() > existing.len() && incoming.starts_with(existing) {
+        return incoming.to_string();
+    }
+    if incoming.len() > existing.len() {
+        let existing_key = assistant_text_comparison_key(existing);
+        let incoming_key = assistant_text_comparison_key(incoming);
+        if incoming_key.starts_with(&existing_key) {
+            return incoming.to_string();
+        }
+    }
+
+    format!("{existing}{incoming}")
+}
+
+fn assistant_texts_overlap(left: &str, right: &str) -> bool {
+    let left = assistant_text_comparison_key(left);
+    let right = assistant_text_comparison_key(right);
+    !left.is_empty() && !right.is_empty() && (left.starts_with(&right) || right.starts_with(&left))
+}
+
+fn assistant_texts_equivalent(left: &str, right: &str) -> bool {
+    let left = assistant_text_comparison_key(left);
+    let right = assistant_text_comparison_key(right);
+    !left.is_empty() && left == right
+}
+
+fn assistant_text_comparison_key(input: &str) -> String {
+    if input.contains("```") {
+        return input.trim().to_string();
+    }
+    normalize_progress_prose_linebreaks(input)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn truncate_str(input: &str, max_chars: usize) -> String {

@@ -1280,14 +1280,14 @@ rm -rf ./.bifrost-test
   - 工具执行状态仅在出现工具事件后展示；详情区域默认折叠，折叠外可见最新工具名和基本状态。
   - 底部状态默认折叠，通常折叠标题只显示 token 消耗；当 guide/queue 刚被注入或修改时，标题追加一条轻量提示，避免用户误以为输入没有反馈。
   - 展开底部状态后显示 loop 次数、context 用量、压缩次数、工作路径、queue 和 guide 状态。
-  - `AssistantDelta` 和运行中的 `AssistantFinal` 不进入执行过程，不出现逐字符/逐 token 文本，也不与最终输出重复。
+  - `AssistantDelta` 和运行中的 `AssistantFinal` 进入执行过程并归并为可读思考，不出现逐字符/逐 token 独立条目，也不与最终输出重复。
   - 长任务执行过程主动控体积：当工具调用超过 30 次时，`agent_process_panel` 只保留最新 30 次工具调用对应的过程信息，并在面板顶部提示前面已省略的调用次数。
   - 最终输出模块位于卡片最后，任务计划、工具状态和底部状态的相对顺序保持不变；完整最终正文只展示一次。
   - 聊天栏摘要在完成后不再停留在 `[生成中...]`。
 - **执行记录（2026-05-10）**:
   - `bash e2e-tests/tests/test_im_agent_streaming_progress_card.sh`：PASS，本地 E2E 验证 JSON 2.0 streaming card、固定 CardKit element id、可选计划/工具/思考模块、思考过程默认可见完整最新内容、工具耗时、最终输出和折叠状态区渲染。
   - 2026-06-05 复测：`SKIP_FRONTEND_BUILD=1 bash e2e-tests/tests/test_im_agent_streaming_progress_card.sh` PASS；覆盖 `agent_thinking_panel` 不再渲染为 `collapsible_panel`，默认以 markdown 展示“思考过程”和最新完整思考内容。
-  - 2026-07-11 产品语义调整：上述思考正文展示已被替换为 assistant stream 过滤；专项 shell E2E 验证过程区仅保留工具/状态，最终正文只展示一次。
+  - 2026-07-11 回归修复：assistant stream 改为连续片段/累计快照归并；专项 shell E2E 验证过程区同时保留可读思考、工具与状态，最终正文只展示一次。
   - 修复后复测：`cargo test -p bifrost-admin progress_card` PASS，覆盖更新 uuid 不拼接 `card_id` 且保持短长度、guide 可见提示、最终输出置底等回归。
   - 修复后复测：`bash e2e-tests/tests/test_im_agent_streaming_progress_card.sh` PASS，覆盖 guide/queue 状态进入同一卡片并在标题中给出可见 guide 提示。
   - 默认数据目录真实 Feishu 链路（端口 9900，`--no-system-proxy`）：已观察到 IM 消息到达后立即发送 `interactive` CardKit progress card，随后进入 Agent loop；旧问题 `uuid` 字段校验失败已消失。

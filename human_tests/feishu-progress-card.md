@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-本模块验证飞书通道的 Agent progress card 不会把外部 Runner 的 `AssistantDelta` / 运行中 `AssistantFinal` 重复展示到执行过程；最终正文只在卡片底部出现一次。工具、可读状态、错误、token usage 刷新和可读执行耗时仍按原语义工作。
+本模块验证飞书通道的 Agent progress card 会保留内置 Loop 与外部 Runner 的 `AssistantDelta` / 运行中 `AssistantFinal` 过程信息，同时把逐字符/累计快照归并成可读思考；最终正文只在卡片底部出现一次。工具、计划、可读状态、错误、token usage 刷新和可读执行耗时仍按原语义工作。
 
 ## 前置条件
 
@@ -12,18 +12,19 @@
 
 ## 测试用例列表
 
-### TC-FPC-01：逐字符 assistant stream 不进入执行过程
+### TC-FPC-01：逐字符 assistant stream 归并为可读过程且最终不重复
 
 **操作步骤**：
 1. 执行：
    ```bash
-   cargo test -p bifrost-admin --lib assistant_stream_content_is_hidden_until_final_output -- --nocapture
+   cargo test -p bifrost-admin --lib assistant_stream_fragments_are_coalesced_and_terminal_duplicate_is_removed -- --nocapture
    ```
 
 **预期结果**：
 - 测试通过。
-- Running 卡片不包含逐字符 `AssistantDelta`，也不包含运行中的 `AssistantFinal`。
-- `TurnFinished` 后卡片 body 只出现一次完整最终正文，且不存在仅由 assistant stream 产生的 `agent_process_panel`。
+- Running 卡片包含归并后的完整思考正文与 `agent_process_panel`，不包含逐字符硬换行。
+- snapshot 只有一条 thinking item，不会为每个字符生成一条 timeline。
+- `TurnFinished` 后等价的末尾 thinking 被移除，卡片 body 只出现一次完整最终正文。
 
 ### TC-FPC-02：Prose normalizer 保留列表和代码块
 
@@ -38,7 +39,7 @@
 - 中文短行被合并，英文软换行补空格。
 - Markdown 列表和 fenced code block 原始换行保留。
 
-### TC-FPC-03：E2E renderer 隐藏 assistant stream 并保留真实过程事件
+### TC-FPC-03：E2E renderer 归并 assistant stream 并保留完整过程事件
 
 **操作步骤**：
 1. 执行：
@@ -48,8 +49,8 @@
 
 **预期结果**：
 - E2E renderer 用例通过。
-- progress card JSON 2.0 的 `agent_process_panel` 包含 `list_directory` 工具事件、耗时和状态。
-- payload 不包含 `checking progress card sections`、逐字符中文或路径片段。
+- progress card JSON 2.0 的 `agent_process_panel` 同时包含归并后的 `启动检查飞书过程卡片` 思考、`list_directory` 工具事件、耗时和状态。
+- payload 不包含 `启动\\n检查` 等逐字符硬换行。
 - 卡片 body 中 `streaming card done` 最终正文只出现一次。
 
 ### TC-FPC-04：token usage 机器态不展示为过程状态行
