@@ -179,9 +179,11 @@ shasum -a 256 ~/.bifrost/config.toml ~/.bifrost/runtime.json \
 bash scripts/ci/check-shell-syntax.sh
 bash e2e-tests/tests/test_coverage_pipeline_contract.sh
 bash scripts/ci/check-e2e-shell-ci-coverage.sh
+grep -A8 -F 'e2e-macos-shell:' .github/workflows/ci.yml | grep -F 'timeout-minutes: 75'
 ```
 
-**预期**：三条命令均退出 0；新增 `test_*.sh` 自动进入 CI 或有显式跳过原因。
+**预期**：四条命令均退出 0；新增 `test_*.sh` 自动进入 CI 或有显式跳过原因；
+macOS Shell shard 的总 job 预算为 75 分钟，单用例 timeout 与断言保持不变。
 
 ## 执行记录
 
@@ -221,3 +223,7 @@ bash scripts/ci/check-e2e-shell-ci-coverage.sh
 - TC-COV-10：PASS。`check-shell-syntax.sh` 检查 249 个 tracked Shell 文件，失败 0；
   `test_coverage_pipeline_contract.sh` 通过；`check-e2e-shell-ci-coverage.sh` 发现 197 个
   Shell 测试，169 个进入 CI、28 个有显式跳过原因，检查通过。
+- TC-COV-10（CI 回归补测）：PASS。首轮 CI run `29148890471` 的 macOS Shell shard
+  1/2 在持续完成用例约 58 分钟后，于最后串行 fixture 被 60 分钟 job 上限取消；完整
+  job log 证明期间持续有新测试结果，并非单用例静默死锁。总 job 预算调整为 75 分钟，
+  单用例 `BIFROST_E2E_SHELL_TEST_TIMEOUT=1260` 与所有断言不变；契约检查已覆盖该值。

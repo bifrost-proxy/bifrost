@@ -710,7 +710,10 @@ jobs:
     name: E2E Shell (aarch64-apple-darwin, shard ${{ matrix.shard }}/2)
     needs: [build-cli-macos-aarch64]
     runs-on: macos-15
-    timeout-minutes: 60
+    # Shard 1 continuously made progress for ~58 minutes before the 60-minute
+    # job budget cancelled its final serial fixture. Keep per-test timeouts and
+    # assertions unchanged, but leave enough budget for cleanup and log upload.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:

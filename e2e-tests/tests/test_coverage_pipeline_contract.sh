@@ -9,6 +9,7 @@ coverage_all="scripts/ci/coverage-all.sh"
 coverage_e2e="scripts/ci/coverage-e2e.sh"
 runner="scripts/run_all_e2e.sh"
 serial_rules="e2e-tests/test_rules.sh"
+ci_workflow=".github/workflows/ci.yml"
 
 bash -n "$coverage_all"
 bash -n "$coverage_e2e"
@@ -47,6 +48,7 @@ grep -Fq 'REFUSING: coverage E2E data directory is under production data' "$cove
 grep -Fq 'BIFROST_E2E_PROTECTED_PORTS' "$coverage_e2e"
 grep -Fq 'export HOME="$ORIGINAL_HOME"' "$coverage_e2e"
 grep -Fq 'Instrumented E2E suite failed' "$coverage_e2e"
+grep -A8 -F 'e2e-macos-shell:' "$ci_workflow" | grep -Fq 'timeout-minutes: 75'
 
 if grep -Fq 'Some E2E suites had failures, but coverage data was still collected' "$coverage_e2e"; then
   echo "coverage-e2e still masks E2E failures" >&2
