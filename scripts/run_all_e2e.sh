@@ -1510,8 +1510,8 @@ ui_build_ok=1
 
 if [[ "$RUN_RULES" -eq 1 || "$RUN_SHELL" -eq 1 ]]; then
   if [[ "$SKIP_RELEASE_BUILD" -eq 1 ]]; then
-    _prebuilt="$ROOT_DIR/target/release/bifrost"
-    if is_windows; then
+    _prebuilt="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}"
+    if is_windows && [[ -z "${BIFROST_BIN:-}" ]]; then
       _prebuilt="$ROOT_DIR/target/release/bifrost.exe"
     fi
     if [[ -f "$_prebuilt" ]]; then
@@ -1598,9 +1598,24 @@ if [[ "$RUN_RUNNER" -eq 1 ]]; then
   # Also give runner its own extended suite timeout.
   _prev_suite_timeout="${BIFROST_E2E_SUITE_TIMEOUT:-}"
   export BIFROST_E2E_SUITE_TIMEOUT="$RUNNER_TIMEOUT"
-  run_and_capture \
-    "runner:bifrost-e2e" \
-    "$CARGO_BIN" run -p bifrost-e2e -- --port "$BIFROST_UI_TEST_RUNNER_PORT" --jobs "$RUNNER_JOBS" --timeout "$RUNNER_TIMEOUT"
+  if [[ -n "${BIFROST_E2E_BIN:-}" ]]; then
+    if [[ ! -x "$BIFROST_E2E_BIN" ]]; then
+      register_suite \
+        "runner:bifrost-e2e" \
+        "failed" \
+        "" \
+        "BIFROST_E2E_BIN is not executable: $BIFROST_E2E_BIN" \
+        "0"
+    else
+      run_and_capture \
+        "runner:bifrost-e2e" \
+        "$BIFROST_E2E_BIN" --port "$BIFROST_UI_TEST_RUNNER_PORT" --jobs "$RUNNER_JOBS" --timeout "$RUNNER_TIMEOUT"
+    fi
+  else
+    run_and_capture \
+      "runner:bifrost-e2e" \
+      "$CARGO_BIN" run -p bifrost-e2e -- --port "$BIFROST_UI_TEST_RUNNER_PORT" --jobs "$RUNNER_JOBS" --timeout "$RUNNER_TIMEOUT"
+  fi
   if [[ -n "${_prev_suite_timeout:-}" ]]; then
     export BIFROST_E2E_SUITE_TIMEOUT="$_prev_suite_timeout"
   else

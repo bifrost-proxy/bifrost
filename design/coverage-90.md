@@ -1,4 +1,4 @@
-# 单元 + 集成 + 可选 E2E 代码覆盖率机制（90% 门禁）设计方案
+# 分层代码覆盖率与全面测试能力（90% 门禁）设计方案
 
 ## 背景
 
@@ -24,6 +24,11 @@ Bifrost 早期覆盖率工具链分散：
 - Makefile 增加 `coverage`（= `coverage-gate`）、`coverage-unit`、`coverage-e2e`、`coverage-html`、`coverage-json`、`coverage-crate CRATE=<name>`、`coverage-gate` 六个入口。
 - AGENTS.md 增加 90% 门禁执行心法：任何改业务代码的任务必须通过 CI 覆盖率门禁；本地默认不跑全量 coverage，除非用户明确要求或专项排查覆盖率失败。
 - `human_tests/coverage-mechanism.md` 覆盖机制本身的真实场景验证用例。
+- 覆盖报告必须区分 `unit + integration`、`E2E` 与 union，不能用未插桩
+  不同 codegen profile 的二进制产生“看似合并、实际只有单测”的报告。
+- 覆盖 E2E 必须使用仓库 worktree 内的隔离数据目录、隔离 HOME/XDG 目录和
+  动态端口，且把正在运行的主服务端口 9900 设为禁止清理端口。
+- 任一插桩 E2E 套件失败时，允许生成诊断报告，但覆盖命令最终必须失败。
 
 ### 必须不破坏
 
@@ -44,13 +49,22 @@ Bifrost 早期覆盖率工具链分散：
 
 ### 覆盖率来源三层
 
-一次 `coverage-all.sh` 执行覆盖三个来源：
+一次 `coverage-all.sh --with-e2e` 执行覆盖三个来源，并保存三个可独立审计的
+报告：
 
 1. **单元测试**：`#[cfg(test)]` 与 `#[test]` 函数。
 2. **集成测试**：`crates/*/tests/*.rs`、`tests/*.rs`（通过 `bifrost-tests` 汇聚）。
 3. **E2E 测试（可选）**：`bifrost` / `bifrost-e2e` 插桩二进制在真实进程里跑 e2e 场景。
 
 一行代码只要 **任意一层** 覆盖到就算 covered。合并后的报告才是“真实覆盖率”，与 90% 目标一致。
+
+- `unit-integration.json`：只包含单元与进程内集成测试。
+- `e2e.json`：只包含与单元测试使用同一 debug codegen profile 的显式插桩
+  `bifrost` / `bifrost-e2e` 执行结果。
+- `coverage.json`：上述 profile 的 union，也是 coverage gate 的输入。
+
+这三份报告必须满足 `unit <= union`、`e2e <= union`。如果 E2E 没有产生
+profraw、使用的二进制不可执行、数据目录落在 `~/.bifrost` 下，命令必须拒绝继续。
 
 ### 棘轮 vs 目标
 
@@ -105,16 +119,25 @@ design/
 1. cargo llvm-cov clean --workspace
 2. cargo llvm-cov --workspace --all-features --no-report
       → 生成 unit + integration profraw
-3. (--with-e2e) bash scripts/ci/coverage-e2e.sh
-      → 生成 E2E instrumented profraw，落到共享 target
-4. cargo llvm-cov report --text|--json|--lcov|--html
-      → 输出合并报告
-5. (--gate) python3 scripts/ci/coverage-gate.py target/coverage/coverage.json
+3. 保存 unit/integration profraw + `unit-integration.json`
+4. (--with-e2e) `cargo llvm-cov show-env --sh` 后在同一 debug profile 构建 binaries
+      → 显式导出 BIFROST_BIN / BIFROST_E2E_BIN
+5. 在隔离 BIFROST_DATA_DIR + HOME/XDG + 动态端口中执行 E2E
+6. 保存 E2E profraw + `e2e.json`，再恢复 unit profile
+7. cargo llvm-cov report --text|--json|--lcov|--html
+      → 输出 union `coverage.json`
+8. (--gate) python3 scripts/ci/coverage-gate.py target/coverage/coverage.json
 ```
 
 关键约束：
 
-- 用 `cargo llvm-cov run` 复用 workspace 的 target 目录，让 E2E profraw 直接落到 unit 报告目录下，`llvm-cov report` 能一次性合并。
+- 用 `cargo llvm-cov show-env --sh` 在与单元测试完全相同的 target/debug profile
+  构建真正插桩的二进制；禁止混用 release/debug profile，因为两套 LLVM counter
+  映射不兼容，也禁止让 E2E 回退到普通 `target/release/bifrost`。
+- E2E runner 支持 `BIFROST_E2E_BIN`，覆盖任务不再通过 `cargo run` 隐式重编译
+  一个来源不明的 runner。
+- unit/integration 与 E2E profraw 分目录快照，生成各层报告后恢复到同一 target，
+  由 `llvm-cov report` 生成 union。
 - 通过 `raise_fd_limit` 提升 `ulimit -n`，避免 llvm profile 写入时因 FD 不足失败。
 - 通过 `CARGO_BUILD_JOBS` / `RAYON_NUM_THREADS` 限制并发，避免 128 核机器 spawn 过多 rustc/link 进程把链接器 OOM。
 - `--fail-under PCT` 直接透传给 `cargo llvm-cov`；90% 棘轮由 `coverage-gate.py` 单独执行，避免 llvm-cov 自身粗粒度阈值把棘轮语义搞混。
@@ -195,6 +218,13 @@ design/
 
 ## 实现切分
 
+### Phase 0：测量可信度（当前推进）
+
+- 修复同 profile 插桩 binary 注入和 E2E failure propagation。
+- 产出 `unit-integration.json`、`e2e.json`、`coverage.json` 三层证据。
+- 新增全仓 Shell `bash -n` 门禁与覆盖管线契约 E2E。
+- 增加生产数据目录拒绝、隔离 HOME/XDG 与 9900 protected-port 断言。
+
 ### Phase 1：机制脚本落地
 
 - 新增 `coverage-all.sh`、`coverage-crate.sh`、`coverage-gate.py`、`coverage-thresholds.toml`。
@@ -221,6 +251,20 @@ design/
 - 对客观阻塞 crate 在 “不适用清单” 里做完 justification 后维持不变。
 - 观察 `enforce_ratchet_up=true` 打开的时机（默认关闭以避免噪音）。
 
+### Phase 5：从行覆盖到功能完备
+
+- 为 HTTP tunnel/handler、SOCKS TCP/UDP、WebSocket upgrade/capture 建立可注入的
+  connector、DNS、clock、traffic store 与 fault injector，先把核心代理从 67%
+  分波推进到 75% / 82% / 90%。
+- 建立机器可读 capability matrix：协议、正常/异常/边界场景、平台、对应
+  unit/integration/E2E/human test 和 CI job 必须一一映射。
+- 对规则解析、URL/header/body 变换、WebSocket/SOCKS frame 增加 property/fuzz；
+  对 shutdown、取消、session cleanup 增加受控并发测试。
+- 下一波引入 ShellCheck 和 Bats；先对安装/升级与 coverage/CI 编排脚本建立函数级
+  测试，再评估 kcov 的 Linux Shell 行覆盖门禁，避免一次引入全部存量告警。
+- nightly 执行插桩全量 E2E、fuzz、mutation 与明确跳过项；release gate 执行真实
+  安装、升级、证书、系统代理和外部 relay 场景。
+
 ## 测试方案
 
 ### 单元 / 脚本验证
@@ -234,6 +278,10 @@ design/
 ### E2E
 
 - `bash scripts/ci/coverage-all.sh --with-e2e --json`：合并 E2E profraw；HTML 报告里能看到 E2E 独占覆盖行。
+- `bash scripts/ci/coverage-all.sh --with-e2e --e2e-suite rules --json`：只运行
+  rules 层，产出三份 JSON，且 E2E 失败时最终退出非 0。
+- `bash e2e-tests/tests/test_coverage_pipeline_contract.sh`：验证插桩二进制注入、
+  分层 profile、生产目录拒绝、9900 protected port 与失败传播契约。
 - CI workflow 内 `coverage-all.sh --json --gate` 步骤：绿灯 = 门禁生效。
 
 ### 真实场景测试（human_tests/coverage-mechanism.md）

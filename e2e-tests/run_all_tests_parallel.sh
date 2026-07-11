@@ -167,6 +167,10 @@ ensure_cargo_on_path() {
 }
 
 resolve_bifrost_release_bin() {
+    if [[ -n "${BIFROST_BIN:-}" && -x "$BIFROST_BIN" ]]; then
+        printf '%s\n' "$BIFROST_BIN"
+        return 0
+    fi
     local release_dir="${PROJECT_DIR}/target/release"
     local unix_bin="${release_dir}/bifrost"
     local windows_bin="${release_dir}/bifrost.exe"

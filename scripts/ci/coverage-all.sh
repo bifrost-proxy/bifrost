@@ -2,7 +2,7 @@
 #
 # Unified coverage for the Bifrost workspace.
 #
-# Produces a SINGLE merged coverage report that combines:
+# Produces truthful per-layer reports plus a merged report:
 #   1. Unit tests          (in-crate `#[cfg(test)]` modules)
 #   2. Integration tests   (crates/bifrost-tests -> repo-root tests/*.rs)
 #   3. (optional) E2E tests (instrumented `bifrost` + `bifrost-e2e` binaries)
@@ -15,10 +15,13 @@
 # How it works:
 #   * Unit + integration coverage is collected with `cargo llvm-cov`, but WITHOUT
 #     finalizing the report (`--no-report`), so the raw profile data is kept.
-#   * If --with-e2e is passed, the E2E suites are run against the same llvm-cov
-#     environment (`cargo llvm-cov run` / shared LLVM_PROFILE_FILE) so their
-#     profraw lands in the same target dir.
-#   * Finally `cargo llvm-cov report` merges everything into text/json/lcov/html.
+#   * The unit+integration profile is snapshotted before E2E starts.
+#   * If --with-e2e is passed, debug binaries are built in the same llvm-cov
+#     target/profile as the unit tests and passed explicitly to the E2E harness.
+#     Keeping one codegen profile is essential: release and debug coverage
+#     counters cannot be truthfully merged.
+#   * Reports are emitted as unit-integration.json, e2e.json, and coverage.json
+#     (the union used by the gate).
 #
 # The instrumented build can crash the system linker when it spawns one thread
 # per CPU on many-core machines with a small locked-memory ulimit. We therefore
@@ -38,6 +41,7 @@
 #   --html             Also write HTML report to OUTPUT_DIR/html
 #   --text             Print text table to stdout
 #   --with-e2e         Also run E2E suites and merge their coverage
+#   --e2e-suite NAME   Limit E2E to rules, shell, or runner (requires --with-e2e)
 #   --gate             After reporting, run coverage-gate.py to enforce floors
 #   --gaps             Pass --gaps to the gate (prints where to add tests)
 #   --fail-under PCT   Hard workspace floor passed straight to llvm-cov
@@ -73,6 +77,12 @@ FAIL_UNDER=""
 OUTPUT_DIR="target/coverage"
 PACKAGE=""
 JOBS="${COVERAGE_JOBS:-4}"
+E2E_SUITE="${BIFROST_COVERAGE_E2E_SUITE:-}"
+ORIGINAL_HOME="${HOME:-}"
+ORIGINAL_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-}"
+ORIGINAL_XDG_DATA_HOME="${XDG_DATA_HOME:-}"
+ORIGINAL_BIFROST_DATA_DIR="${BIFROST_DATA_DIR:-}"
+PROFILE_ROOT="$ROOT_DIR/target/llvm-cov-target"
 
 usage() { sed -n '2,/^$/s/^# \?//p' "$0"; }
 
@@ -83,6 +93,7 @@ while [[ $# -gt 0 ]]; do
     --html)       WANT_HTML=1; shift ;;
     --text)       WANT_TEXT=1; shift ;;
     --with-e2e)   WITH_E2E=1; shift ;;
+    --e2e-suite)  E2E_SUITE="$2"; shift 2 ;;
     --gate)       RUN_GATE=1; shift ;;
     --gaps)       GATE_GAPS=1; RUN_GATE=1; shift ;;
     --fail-under) FAIL_UNDER="$2"; shift 2 ;;
@@ -93,6 +104,22 @@ while [[ $# -gt 0 ]]; do
     *) echo -e "${RED}Unknown option: $1${NC}" >&2; usage; exit 1 ;;
   esac
 done
+
+if [[ -n "$E2E_SUITE" ]]; then
+  case "$E2E_SUITE" in
+    rules|shell|runner) ;;
+    *) echo -e "${RED}Unknown E2E suite: $E2E_SUITE${NC}" >&2; exit 2 ;;
+  esac
+  if [[ "$WITH_E2E" -ne 1 ]]; then
+    echo -e "${RED}--e2e-suite requires --with-e2e${NC}" >&2
+    exit 2
+  fi
+fi
+
+if [[ "$WITH_E2E" -eq 1 && -n "$PACKAGE" ]]; then
+  echo -e "${RED}--with-e2e cannot be combined with --package; E2E exercises the workspace binary${NC}" >&2
+  exit 2
+fi
 
 step() {
   echo ""
@@ -130,6 +157,94 @@ else
   SCOPE_ARGS=(--workspace)
 fi
 
+snapshot_profiles() {
+  local destination="$1"
+  mkdir -p "$destination"
+  local profile
+  local found=0
+  shopt -s nullglob
+  for profile in "$PROFILE_ROOT"/*.profraw; do
+    mv "$profile" "$destination/"
+    found=1
+  done
+  shopt -u nullglob
+  if [[ "$found" -ne 1 ]]; then
+    echo -e "${RED}No coverage profiles were produced${NC}" >&2
+    return 1
+  fi
+}
+
+restore_profiles() {
+  local source_dir="$1"
+  local profile
+  shopt -s nullglob
+  for profile in "$source_dir"/*.profraw; do
+    cp "$profile" "$PROFILE_ROOT/"
+  done
+  shopt -u nullglob
+}
+
+prepare_isolated_e2e_environment() {
+  local data_dir="$OUTPUT_DIR/.bifrost-data"
+  local home_dir="$OUTPUT_DIR/home"
+  local data_abs
+  local production_abs=""
+
+  mkdir -p "$data_dir" "$home_dir/xdg-config" "$home_dir/xdg-data"
+  data_abs="$(cd "$data_dir" && pwd -P)"
+  if [[ -n "$ORIGINAL_HOME" && -d "$ORIGINAL_HOME" ]]; then
+    production_abs="$(cd "$ORIGINAL_HOME" && pwd -P)/.bifrost"
+  fi
+  if [[ -n "$production_abs" \
+      && ( "$data_abs" == "$production_abs" || "$data_abs" == "$production_abs/"* ) ]]; then
+    echo -e "${RED}REFUSING: coverage E2E data directory is under production data: $data_abs${NC}" >&2
+    return 1
+  fi
+
+  export BIFROST_DATA_DIR="$data_abs"
+  export HOME="$(cd "$home_dir" && pwd -P)"
+  export XDG_CONFIG_HOME="$HOME/xdg-config"
+  export XDG_DATA_HOME="$HOME/xdg-data"
+  export BIFROST_E2E_PROTECTED_PORTS="${BIFROST_E2E_PROTECTED_PORTS:-9900}"
+  echo -e "${BLUE}E2E data :${NC} $BIFROST_DATA_DIR"
+  echo -e "${BLUE}E2E home :${NC} $HOME"
+  echo -e "${BLUE}Protected:${NC} $BIFROST_E2E_PROTECTED_PORTS"
+}
+
+restore_tool_environment() {
+  export HOME="$ORIGINAL_HOME"
+  if [[ -n "$ORIGINAL_XDG_CONFIG_HOME" ]]; then
+    export XDG_CONFIG_HOME="$ORIGINAL_XDG_CONFIG_HOME"
+  else
+    unset XDG_CONFIG_HOME
+  fi
+  if [[ -n "$ORIGINAL_XDG_DATA_HOME" ]]; then
+    export XDG_DATA_HOME="$ORIGINAL_XDG_DATA_HOME"
+  else
+    unset XDG_DATA_HOME
+  fi
+  if [[ -n "$ORIGINAL_BIFROST_DATA_DIR" ]]; then
+    export BIFROST_DATA_DIR="$ORIGINAL_BIFROST_DATA_DIR"
+  else
+    unset BIFROST_DATA_DIR
+  fi
+}
+
+run_selected_e2e() {
+  local -a suites=(rules shell runner)
+  if [[ -n "$E2E_SUITE" ]]; then
+    suites=("$E2E_SUITE")
+  fi
+
+  local suite
+  local status=0
+  for suite in "${suites[@]}"; do
+    echo -e "${BLUE}-> run-e2e-${suite}${NC}"
+    bash "scripts/ci/run-e2e-${suite}.sh" || status=$?
+  done
+  return "$status"
+}
+
 main() {
   step "Bifrost Unified Coverage"
   raise_fd_limit
@@ -138,6 +253,7 @@ main() {
 
   echo -e "${BLUE}Scope    :${NC} ${PACKAGE:-workspace}"
   echo -e "${BLUE}E2E      :${NC} $([[ $WITH_E2E -eq 1 ]] && echo yes || echo no)"
+  echo -e "${BLUE}E2E suite:${NC} ${E2E_SUITE:-all}"
   echo -e "${BLUE}Jobs     :${NC} $JOBS"
   echo -e "${BLUE}Output   :${NC} $OUTPUT_DIR"
 
@@ -149,23 +265,43 @@ main() {
   step "Running unit + integration tests with instrumentation"
   cargo llvm-cov "${SCOPE_ARGS[@]}" --all-features --no-report --jobs "$JOBS"
 
-  # 3. Optional E2E: run instrumented binaries inside the llvm-cov env.
+  if [[ "$WANT_JSON" -eq 1 ]]; then
+    cargo llvm-cov report --json --output-path "$OUTPUT_DIR/unit-integration.json"
+    echo -e "${GREEN}Unit+integration JSON : $OUTPUT_DIR/unit-integration.json${NC}"
+  fi
+
+  # 3. Optional E2E: build and run binaries with the exact same instrumentation
+  # profile used by the unit/integration tests. Mixing release E2E profiles with
+  # debug unit profiles produces incompatible counters and a false zero-percent
+  # E2E layer.
+  local e2e_status=0
   if [[ "$WITH_E2E" -eq 1 ]]; then
-    step "Running E2E suites with instrumentation (merged)"
-    # `cargo llvm-cov run` instruments and runs a binary, keeping profiles in
-    # the shared target dir. We build the bifrost + e2e binaries instrumented,
-    # then invoke the existing suite scripts which use those binaries.
-    cargo llvm-cov run --no-report --jobs "$JOBS" --bin bifrost -- --help >/dev/null 2>&1 || true
-    # Run the suite scripts; they consume target/release-style binaries. The
-    # scripts already collect profraw via LLVM_PROFILE_FILE set by llvm-cov.
-    local had_failure=0
-    for s in run-e2e-rules run-e2e-shell run-e2e-runner; do
-      if [[ -f "scripts/ci/$s.sh" ]]; then
-        echo -e "${BLUE}-> $s${NC}"
-        bash "scripts/ci/$s.sh" || had_failure=1
-      fi
-    done
-    [[ "$had_failure" -ne 0 ]] && echo -e "${YELLOW}Some E2E suites failed; coverage still collected.${NC}"
+    local unit_profiles="$OUTPUT_DIR/profiles/unit-integration"
+    snapshot_profiles "$unit_profiles"
+
+    step "Building E2E binaries with llvm-cov instrumentation"
+    eval "$(cargo llvm-cov show-env --sh)"
+    export CARGO_TARGET_DIR="$PROFILE_ROOT"
+    export CARGO_LLVM_COV_TARGET_DIR="$PROFILE_ROOT"
+    export CARGO_LLVM_COV_BUILD_DIR="$PROFILE_ROOT"
+    export LLVM_PROFILE_FILE="$PROFILE_ROOT/bifrost-e2e-%p-%16m.profraw"
+    cargo build --bin bifrost --bin bifrost-e2e --jobs "$JOBS"
+    export BIFROST_BIN="$PROFILE_ROOT/debug/bifrost"
+    export BIFROST_E2E_BIN="$PROFILE_ROOT/debug/bifrost-e2e"
+    prepare_isolated_e2e_environment
+
+    step "Running E2E suites with instrumented binaries"
+    run_selected_e2e || e2e_status=$?
+    restore_tool_environment
+
+    local e2e_profiles="$OUTPUT_DIR/profiles/e2e"
+    snapshot_profiles "$e2e_profiles"
+    restore_profiles "$e2e_profiles"
+    if [[ "$WANT_JSON" -eq 1 ]]; then
+      cargo llvm-cov report --json --output-path "$OUTPUT_DIR/e2e.json"
+      echo -e "${GREEN}E2E JSON : $OUTPUT_DIR/e2e.json${NC}"
+    fi
+    restore_profiles "$unit_profiles"
   fi
 
   # 4. Merge + emit reports.
@@ -198,6 +334,11 @@ main() {
     [[ -n "$PACKAGE" ]] && gate_args+=(--single-crate)
     [[ "$GATE_GAPS" -eq 1 ]] && gate_args+=(--gaps)
     python3 scripts/ci/coverage-gate.py "${gate_args[@]}"
+  fi
+
+  if [[ "$e2e_status" -ne 0 ]]; then
+    echo -e "${RED}One or more instrumented E2E suites failed (status $e2e_status)${NC}" >&2
+    exit "$e2e_status"
   fi
 }
 

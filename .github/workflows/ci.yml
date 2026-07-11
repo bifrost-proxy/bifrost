@@ -52,6 +52,9 @@ jobs:
       - name: E2E shell CI coverage guard
         shell: bash
         run: bash scripts/ci/check-e2e-shell-ci-coverage.sh
+      - name: Shell syntax guard
+        shell: bash
+        run: bash scripts/ci/check-shell-syntax.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
