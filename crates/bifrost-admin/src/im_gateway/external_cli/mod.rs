@@ -4163,6 +4163,15 @@ pub fn external_progress_to_agent_turn_event(
                 status,
             )))
         }
+        ExternalCliProgressEventType::AssistantDelta
+            if is_codex_app_server_agent_message_delta(event) =>
+        {
+            // Codex app-server emits token-sized `item/agentMessage/delta` frames and
+            // then one completed `agentMessage` with the full text. The completed item
+            // is the Progress Step; forwarding every delta would render the same text
+            // as one token per line and duplicate the completed message in Feishu.
+            None
+        }
         ExternalCliProgressEventType::AssistantDelta => {
             Some(bifrost_agent::AgentTurnProgressEvent::AssistantDelta {
                 content: event.content.clone(),
@@ -4221,6 +4230,10 @@ pub fn external_progress_to_agent_turn_event(
             })
         }
     }
+}
+
+fn is_codex_app_server_agent_message_delta(event: &ExternalCliProgressEvent) -> bool {
+    event.raw.get("method").and_then(serde_json::Value::as_str) == Some("item/agentMessage/delta")
 }
 
 fn external_progress_arguments_text(event: &ExternalCliProgressEvent) -> String {

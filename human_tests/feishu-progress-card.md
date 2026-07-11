@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-本模块验证飞书通道的 Agent progress card 在展示执行过程、Progress Step 和思考信息时不会把外部 Runner 的短行/token stream 文本原样渲染成几字一行，同时验证 token usage 机器态事件不会污染执行过程，并会刷新卡片尾部的可读执行耗时。
+本模块验证飞书通道只过滤 Codex app-server 同一条 `agentMessage` 的逐 token delta，保留完整 Progress Step、reasoning、AssistantFinal 与工具时间线；同时验证单条过程正文不会被渲染成几字一行，token usage 机器态事件不会污染执行过程。
 
 ## 前置条件
 
@@ -12,18 +12,19 @@
 
 ## 测试用例列表
 
-### TC-FPC-01：Progress thinking 短行文本合并为自然段
+### TC-FPC-01：只过滤 Codex agentMessage token delta
 
 **操作步骤**：
 1. 执行：
    ```bash
-   cargo test -p bifrost-admin --lib feishu_progress_card_collapses_fragmented_thinking_lines -- --nocapture
+   cargo test -p bifrost-admin --lib codex_app_server_agent_message_delta_is_not_mapped_to_progress_timeline -- --nocapture
    ```
 
 **预期结果**：
 - 测试通过。
-- Feishu progress card process panel 的 markdown content 包含 `启动检查发现当前工作区已有一处用户改动`。
-- content 不包含 `启动\n检查`、`工作\n区` 或 `test_rule_share\n_confirm` 这类异常硬换行。
+- `item/agentMessage/delta` 不映射为 progress timeline，逐 token 片段不会逐行展示。
+- `item/completed agentMessage` 仍映射为完整 `AssistantFinal` Progress Step。
+- 普通 Runner AssistantDelta、reasoning 和工具事件不受影响。
 
 ### TC-FPC-02：Prose normalizer 保留列表和代码块
 

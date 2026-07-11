@@ -1533,6 +1533,60 @@ fn external_progress_maps_to_agent_turn_progress_events() {
     }
 }
 
+#[test]
+fn codex_app_server_agent_message_delta_is_not_mapped_to_progress_timeline() {
+    let token_delta = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::AssistantDelta,
+        content: "仓".to_string(),
+        title: Some("agent_message".to_string()),
+        raw: serde_json::json!({
+            "method": "item/agentMessage/delta",
+            "params": {"delta": "仓"}
+        }),
+    };
+    let context = ExternalCliProgressStatusContext::new(
+        Some("Codex"),
+        None,
+        None,
+        None,
+        None,
+        Some(Path::new("/tmp/work")),
+    );
+
+    assert!(external_progress_to_agent_turn_event(
+        "session-a",
+        DEFAULT_ADAPTER,
+        context,
+        &token_delta,
+    )
+    .is_none());
+
+    let completed_message = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::AssistantFinal,
+        content: "我先检查仓库状态。".to_string(),
+        title: Some("agent_message".to_string()),
+        raw: serde_json::json!({
+            "method": "item/completed",
+            "params": {
+                "item": {"type": "agentMessage", "text": "我先检查仓库状态。"}
+            }
+        }),
+    };
+    let mapped = external_progress_to_agent_turn_event(
+        "session-a",
+        DEFAULT_ADAPTER,
+        context,
+        &completed_message,
+    )
+    .expect("completed agent message must stay visible as a progress step");
+
+    assert!(matches!(
+        mapped,
+        bifrost_agent::AgentTurnProgressEvent::AssistantFinal { ref content }
+            if content == "我先检查仓库状态。"
+    ));
+}
+
 #[tokio::test]
 async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
     let temp_dir = tempfile::tempdir().unwrap();

@@ -2,11 +2,13 @@
 
 ## 背景
 
-飞书 CardKit 会尊重 markdown 内容中的硬换行。外部 Runner 的实时过程事件有时会把自然语言思考内容按 token 或短片段输出，例如每几个中文字符就带一个换行。Bifrost 之前在 `progress_card` 的执行过程面板中直接渲染这些换行，导致飞书移动端卡片里出现几字一行甚至近似竖排的 Progress Step/思考过程。
+飞书 CardKit 会尊重 markdown 内容中的硬换行。Codex app-server 对同一条 `agentMessage` 先发送多条 `item/agentMessage/delta` token 片段，再发送一条 `item/completed agentMessage` 完整正文。若两者都进入 progress timeline，卡片会把每个 token 渲染成独立一行，并再次展示完整正文。其它 reasoning、AssistantDelta、AssistantFinal 与工具事件仍是有效执行过程，不能整体过滤或合并。
 
 ## 目标
 
-- 飞书 progress card 的自然语言过程信息应以正常段落展示，不保留 token stream 带来的短行硬换行。
+- 只忽略 Codex app-server 的 `item/agentMessage/delta` token 碎片，保留随后完整 `agentMessage` 作为一个 Progress Step。
+- reasoning、其它 Runner 的 AssistantDelta、运行中的 AssistantFinal 和全部工具事件保持原有时间线与顺序。
+- 展示层自然语言过程信息仍以正常段落展示，不保留单条完整事件内部的短行硬换行。
 - 工具详情、命令输出、代码块、列表、表格等结构化 markdown 不能被合并。
 - 修复点只作用于飞书 progress card 的过程/思考展示层，不改变 Agent timeline 持久化内容，也不影响 Web UI history。
 - token usage 机器态事件不应作为执行过程状态行展示，但应作为卡片刷新信号更新尾部执行耗时。
@@ -14,7 +16,8 @@
 
 ## 实现方案
 
-- 在 `crates/bifrost-admin/src/im_gateway/progress_card.rs` 增加 progress prose 归一化：
+- 在 `external_progress_to_agent_turn_event` 精确识别 raw method 为 `item/agentMessage/delta` 的事件并跳过映射；`item/completed agentMessage` 继续映射为 `AssistantFinal`。
+- `crates/bifrost-admin/src/im_gateway/progress_card.rs` 的 progress prose 归一化继续作为单条事件内部换行的展示层保护：
   - 对普通自然语言相邻非空行进行软合并。
   - 中文相邻片段直接拼接，ASCII 单词之间补一个空格。
   - 空行、代码围栏、列表、引用、标题、表格行保持原结构。
@@ -25,6 +28,7 @@
 
 ## 验证计划
 
+- 单元测试覆盖 Codex token delta 不映射、完整 agentMessage 仍映射为 Progress Step、普通 AssistantDelta 不受影响。
 - 单元测试覆盖中文逐字换行合并、英文软换行补空格、列表与代码块保留、完整 Feishu card process content 不含异常硬换行。
 - 单元测试覆盖执行耗时格式化、token usage status refresh 推进 footer 耗时且不进入过程状态行。
 - E2E renderer 用例覆盖 progress card JSON 2.0 中的 process panel 内容。
@@ -33,4 +37,4 @@
 
 ## 风险
 
-- 如果 Runner 故意用普通行表达诗歌或特殊排版，该归一化会把它视为 prose 合并。当前作用范围仅限 progress thinking/status，不作用于最终回答和工具输出，风险可接受。
+- raw method 精确匹配只覆盖 Codex app-server 协议；若协议改名，回归测试需同步更新。其它 Runner 和工具事件不受该过滤影响。
