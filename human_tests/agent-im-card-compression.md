@@ -64,7 +64,7 @@
    cargo test -p bifrost-admin im_gateway::progress_card::tests::machine_status_events_do_not_flood_process_card --lib -- --nocapture
    ```
 2. 检查测试输出是否为 `1 passed`。
-3. 检查断言覆盖卡片 JSON：不包含 assistant 流式正文，仍包含正在运行的工具调用，但不包含 `状态：tool_calls`、`状态：waiting_on_session`、`状态：model_request`、`状态：model_response` 或自定义蛇形机器态。
+3. 检查断言覆盖卡片 JSON：仍包含真实思考内容和正在运行的工具调用，但不包含 `状态：tool_calls`、`状态：waiting_on_session`、`状态：model_request`、`状态：model_response` 或自定义蛇形机器态。
 4. 运行以下命令确认外部 Runner footer 不会从 `当前状态：xxx` 漏出机器态：
    ```bash
    cargo test -p bifrost-admin im_gateway::progress_card::tests::external_runner_footer_hides_machine_status_line --lib -- --nocapture
@@ -73,11 +73,11 @@
 **预期结果**：
 
 - `Status` 事件仍更新运行状态上下文，但不会追加到执行过程 timeline。
-- 飞书卡片执行过程只展示工具调用和可读状态，不展示会在最终区重复出现的 assistant 正文。
+- 飞书卡片执行过程只展示真实思考和工具调用等人类可读内容。
 - 卡片 JSON 不包含 `状态：tool_calls`、`状态：waiting_on_session`、`状态：model_request`、`状态：model_response` 或 `custom_machine_state`。
 - 外部 Runner footer 不展示 `当前状态：model_request`。
 
-**本次执行结果**：通过。2026-07-11 执行 `cargo test -p bifrost-admin im_gateway::progress_card::tests::machine_status_events_do_not_flood_process_card --lib -- --nocapture` 和 `cargo test -p bifrost-admin im_gateway::progress_card::tests::external_runner_footer_hides_machine_status_line --lib -- --nocapture`，断言确认卡片 JSON 过滤 assistant 正文并保留 `正在运行：exec_command`，同时过滤过程区和 footer 中的机器态状态行。
+**本次执行结果**：通过。2026-06-12 执行 `cargo test -p bifrost-admin im_gateway::progress_card::tests::machine_status_events_do_not_flood_process_card --lib -- --nocapture` 和 `cargo test -p bifrost-admin im_gateway::progress_card::tests::external_runner_footer_hides_machine_status_line --lib -- --nocapture`，均输出 `1 passed`；断言确认卡片 JSON 保留 `我会先检查失败用例` 与 `正在运行：exec_command`，并过滤过程区和 footer 中的机器态状态行。
 
 ## 清理步骤
 
