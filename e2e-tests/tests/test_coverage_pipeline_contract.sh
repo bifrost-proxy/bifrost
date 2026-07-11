@@ -55,7 +55,7 @@ grep -Fq 'capability: remote' "$ci_workflow"
 grep -Fq 'capability: agent-extensions' "$ci_workflow"
 grep -Fq 'BIFROST_E2E_SHARD_TOTAL: "3"' "$ci_workflow"
 grep -Fq 'BIFROST_E2E_CAPABILITY_SHARDS: "1"' "$ci_workflow"
-BIFROST_E2E_CAPABILITY_SHARDS=1 bash "$runner" \
+BIFROST_E2E_CAPABILITY_SHARDS=1 BIFROST_E2E_SHELL_JOBS=2 bash "$runner" \
   --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build \
   --shard 1/3 --check-shell-shard-balance
 
@@ -65,7 +65,7 @@ BIFROST_E2E_CAPABILITY_SHARDS=0 BIFROST_E2E_SHARD_INDEX=0 BIFROST_E2E_SHARD_TOTA
   bash "$runner" --ci --full-shell --skip-rules --skip-runner --skip-ui \
   --skip-build --list-shell-tests | sort > "$partition_dir/all.txt"
 for shard in 1 2 3; do
-  BIFROST_E2E_CAPABILITY_SHARDS=1 bash "$runner" \
+  BIFROST_E2E_CAPABILITY_SHARDS=1 BIFROST_E2E_SHELL_JOBS=2 bash "$runner" \
     --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build \
     --shard "$shard/3" --list-shell-tests | sort > "$partition_dir/shard-$shard.txt"
 done

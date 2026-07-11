@@ -179,7 +179,8 @@ shasum -a 256 ~/.bifrost/config.toml ~/.bifrost/runtime.json \
 bash scripts/ci/check-shell-syntax.sh
 bash e2e-tests/tests/test_coverage_pipeline_contract.sh
 bash scripts/ci/check-e2e-shell-ci-coverage.sh
-BIFROST_E2E_CAPABILITY_SHARDS=1 bash scripts/run_all_e2e.sh \
+BIFROST_E2E_CAPABILITY_SHARDS=1 BIFROST_E2E_SHELL_JOBS=2 \
+  bash scripts/run_all_e2e.sh \
   --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build \
   --shard 1/3 --check-shell-shard-balance
 ```
@@ -232,3 +233,6 @@ macOS Shell 按 `proxy-core`、`remote`、`agent-extensions` 三个能力 job �
   job：`proxy-core` 84 个 / 1068s、`remote` 35 个 / 1215s、
   `agent-extensions` 50 个 / 1079s；169 个用例 0 重复、0 遗漏，最大估算偏差
   13.1%，通过 capability 模式 15% 平衡门禁。单用例 timeout 与所有断言不变。
+- TC-COV-10（环境继承回归）：PASS。CI run `29151557395` 暴露 Linux Shell 外层
+  `BIFROST_E2E_SHELL_JOBS=4` 会污染契约中的 macOS 平衡估算；契约现显式固定 macOS
+  的 2 lanes，并在外层 `BIFROST_E2E_SHELL_JOBS=4` 环境中复跑通过。
