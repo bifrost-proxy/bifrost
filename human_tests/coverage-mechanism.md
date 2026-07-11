@@ -186,7 +186,7 @@ BIFROST_E2E_CAPABILITY_SHARDS=1 BIFROST_E2E_SHELL_JOBS=2 \
 ```
 
 **预期**：四条命令均退出 0；新增 `test_*.sh` 自动进入 CI 或有显式跳过原因；
-macOS Shell 按 `proxy-core`、`remote`、`agent-extensions` 三个能力 job 拆分；169 个
+macOS Shell 按 `proxy-core`、`remote`、`agent-extensions` 三个能力 job 拆分；167 个
 测试无重复、无遗漏，按历史耗时估算的最大 job 偏差不超过平均值 15%。
 
 ## 执行记录
@@ -240,3 +240,12 @@ macOS Shell 按 `proxy-core`、`remote`、`agent-extensions` 三个能力 job �
   `test_upgrade_cli.sh` 在 `pipefail` 下使用 `echo | grep -q` 累计 help 检查不稳定；改为
   Bash 原生字符串匹配，四项语义不变并能报告具体缺失项。使用 worktree binary 与隔离
   `BIFROST_DATA_DIR` 真实复跑通过。
+- TC-COV-10（macOS 能力组耗时优化）：CI run `29154062293` 三个能力 job 均通过，实际
+  耗时分别为 `proxy-core` 21m07s、`remote` 39m17s、`agent-extensions` 12m39s。下载
+  `remote` 完整 job log 后确认，`test_desktop_sidecar_launchd_env_contract.sh` 与
+  `test_desktop_open_requests_contract.sh` 分别耗时 1153s、1079s，主要成本是 Shell job
+  内重新编译 Tauri/Rust 图，不是远程调用本身。按用户决定将这两个本地桌面发布契约
+  加入 CI 显式跳过清单；其余真实远程、同步、长期记忆用例保留。用本轮真实日志重校
+  权重并调整能力归组后，167 个 CI Shell 用例分布为 `proxy-core` 79 个 / 816s、
+  `remote` 37 个 / 790s、`agent-extensions` 51 个 / 874s，0 重复、0 遗漏，最大估算
+  偏差 10.2%，通过 15% 门禁；CI 显式跳过项由 28 个增至 30 个。

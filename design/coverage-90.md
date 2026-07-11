@@ -227,6 +227,11 @@ design/
 - macOS Shell E2E 按 `proxy-core`、`remote`、`agent-extensions` 三个稳定能力域分组；
   组内继续使用历史耗时权重平衡串行/并行 lane，CI 对三组估算 wall time 执行 15%
   最大偏差门禁，防止后续新增用例把某一能力 job 再次推到总超时边缘。
+- CI 权重必须以成功 job 的单用例耗时日志定期重校，不能长期依赖初始估算。纯桌面
+  Rust/Tauri 编译契约 `test_desktop_sidecar_launchd_env_contract.sh` 与
+  `test_desktop_open_requests_contract.sh` 保留为本地桌面发布验证，不进入通用 macOS
+  Shell CI；CI 继续通过桌面 bundle 编译生产路径，并把这两个例外放入显式跳过清单，
+  防止它们在 Shell job 内重复编译 18-19 分钟。
 
 ### Phase 1：机制脚本落地
 

@@ -632,6 +632,11 @@ SKIP_IN_CI_TESTS=(
   "test_im_agent_markdown_image_reply.sh"
   "test_im_agent_streaming_progress_card.sh"
   "test_utf8_safe_preview_e2e.sh"
+  # These two desktop contract wrappers spend 18-19 minutes compiling the
+  # Tauri graph on macOS. Keep them as explicit local desktop release
+  # validation; the CI desktop bundle still compiles the production path.
+  "test_desktop_open_requests_contract.sh"
+  "test_desktop_sidecar_launchd_env_contract.sh"
   # ASR/voice runtime tests may initialize local models, native audio stacks, or
   # external model downloads. Keep all ASR capability validation local-only so
   # CI never fails because a runtime dependency or model host is unavailable.
@@ -669,33 +674,36 @@ is_skipped_in_ci() {
 shell_test_weight() {
   case "$1" in
     test_agent_send_msg_default_channel.sh) echo 30 ;;
-    test_long_term_memory_remember_recall.sh) echo 529 ;;
+    test_long_term_memory_remember_recall.sh) echo 207 ;;
     test_desktop_open_requests_contract.sh) echo 620 ;;
-    test_chatgpt_web_behavior_artifacts.sh) echo 540 ;;
+    test_sync_github_gist_expired_status_e2e.sh) echo 302 ;;
+    test_im_gateway_long_reply_delivery_regression.sh) echo 178 ;;
     test_tls_intercept_e2e.sh) echo 170 ;;
-    test_im_gateway_long_reply_delivery_regression.sh) echo 142 ;;
-    test_remote_file_relay_e2e.sh) echo 128 ;;
+    test_agent_send_msg_feishu_card.sh) echo 162 ;;
+    test_skill_creator_flow.sh) echo 148 ;;
+    test_remote_file_relay_e2e.sh) echo 132 ;;
     test_http3_e2e.sh) echo 120 ;;
+    test_cli_online_commands_e2e.sh) echo 109 ;;
     test_client_process_transport_attribution.sh) echo 103 ;;
-    test_skill_creator_flow.sh) echo 180 ;;
-    test_security_hardening_functional.sh) echo 69 ;;
-    test_agent_builtin_status_runtime.sh) echo 64 ;;
-    test_upgrade_admin_api_restart_e2e.sh) echo 61 ;;
-    test_cli_online_commands_e2e.sh) echo 60 ;;
-    test_remote_invoke_e2e.sh) echo 59 ;;
+    test_im_online_notification_runner_context.sh) echo 87 ;;
+    test_chatgpt_web_behavior_artifacts.sh) echo 85 ;;
+    test_remote_invoke_e2e.sh) echo 75 ;;
+    test_security_hardening_functional.sh) echo 72 ;;
+    test_agent_builtin_status_runtime.sh) echo 61 ;;
     test_remote_invoke_ssh_e2e.sh) echo 59 ;;
-    test_devtools_page_bridge_api.sh) echo 54 ;;
-    test_group_sync_e2e.sh) echo 49 ;;
-    test_replay_websocket_frames.sh) echo 42 ;;
-    test_traffic_persistence_e2e.sh) echo 41 ;;
-    test_group_sync_no_logstorm_e2e.sh) echo 39 ;;
+    test_devtools_page_bridge_api.sh) echo 52 ;;
+    test_group_sync_e2e.sh) echo 46 ;;
+    test_upgrade_admin_api_restart_e2e.sh) echo 43 ;;
+    test_replay_websocket_frames.sh) echo 41 ;;
+    test_traffic_persistence_e2e.sh) echo 40 ;;
+    test_group_sync_no_logstorm_e2e.sh) echo 38 ;;
     test_sse_frames.sh) echo 38 ;;
     test_body_cache_sync_cleanup_admin_api.sh) echo 33 ;;
-    test_traffic_push_e2e.sh) echo 33 ;;
-    test_total_size_cleanup_admin_api.sh) echo 32 ;;
+    test_traffic_push_e2e.sh) echo 32 ;;
+    test_total_size_cleanup_admin_api.sh) echo 31 ;;
     test_frames_admin_api.sh) echo 29 ;;
-    test_req_res_script_e2e.sh) echo 27 ;;
-    test_traffic_db_e2e.sh) echo 27 ;;
+    test_req_res_script_e2e.sh) echo 26 ;;
+    test_traffic_db_e2e.sh) echo 28 ;;
     test_large_body_protection.sh) echo 25 ;;
     test_breakpoint_performance_guard.sh) echo 24 ;;
     test_remote_search_traffic_cli_isomorphic_e2e.sh) echo 24 ;;
@@ -765,7 +773,10 @@ shell_test_capability_group() {
     test_setting_ssh_key_cli.sh|\
     test_ssh_key_*|\
     test_status_tui_remote_invoke_panel.sh|\
+    test_cli_online_commands_e2e.sh|\
     test_sync_*|\
+    test_group_sync_*|\
+    test_security_hardening_functional.sh|\
     test_long_term_memory_remember_recall.sh|\
     test_e2e_scripts_disable_sync_login_prompt.sh|\
     test_install_*|\
@@ -791,8 +802,6 @@ shell_test_capability_group() {
     test_header_*|\
     test_host_*|\
     test_http*|\
-    test_im_gateway_long_reply_delivery_regression.sh|\
-    test_group_sync_*|\
     test_large_body_*|\
     test_metrics_*|\
     test_multiline_rule_*|\
