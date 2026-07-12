@@ -841,10 +841,13 @@ main() {
 
     if [[ "${SKIP_CARGO_TEST:-false}" != "true" ]]; then
         echo "Pre-compiling HTTP/3 integration test binary..."
-        local cargo_test_timeout="${BIFROST_HTTP3_CARGO_TEST_TIMEOUT:-180}"
+        # CI runners can start from a cold Rust cache, especially on macOS.
+        # Pre-compile the same release artifact used below instead of compiling
+        # debug here and release again in test_http3_client_direct.
+        local cargo_test_timeout="${BIFROST_HTTP3_CARGO_TEST_TIMEOUT:-600}"
         if ! run_with_timeout "$cargo_test_timeout" env SKIP_FRONTEND_BUILD=1 \
             "$CARGO_BIN" test -p bifrost-proxy --test upstream_http3_e2e \
-            --all-features --no-run; then
+            --release --all-features --no-run; then
             echo "ERROR: Failed to pre-compile HTTP/3 integration test"
             exit 1
         fi
