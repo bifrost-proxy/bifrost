@@ -86,7 +86,8 @@ pub(super) fn build_command_spec(
                 "--output-format".to_string(),
                 "stream-json".to_string(),
                 "--input-format".to_string(),
-                "text".to_string(),
+                "stream-json".to_string(),
+                "--replay-user-messages".to_string(),
             ];
         }
         if !config.args.is_empty() {

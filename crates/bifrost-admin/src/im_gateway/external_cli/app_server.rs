@@ -1,28 +1,8 @@
 use super::*;
 
-const GUIDE_STARTUP_WAIT_MS: u64 = 10_000;
-const GUIDE_ACK_TIMEOUT_SECS: u64 = 8;
 const HANDSHAKE_TIMEOUT_SECS: u64 = 30;
 const CAPACITY_MAX_RETRIES: u32 = 3;
 const CAPACITY_RETRY_BASE_DELAY_MS: u64 = 1_000;
-
-#[derive(Clone)]
-struct ActiveAppServerHandle {
-    run_id: String,
-    thread_id: String,
-    turn_id: String,
-    guide_tx: mpsc::UnboundedSender<AppServerGuideCommand>,
-}
-
-struct AppServerGuideCommand {
-    guide_id: String,
-    message: String,
-    ack_tx: oneshot::Sender<ExternalCliGuideResult>,
-}
-
-static ACTIVE_APP_SERVER_SESSIONS: once_cell::sync::Lazy<
-    dashmap::DashMap<String, ActiveAppServerHandle>,
-> = once_cell::sync::Lazy::new(dashmap::DashMap::new);
 
 struct AppServerRunCleanup {
     run_id: String,
@@ -59,13 +39,35 @@ pub(super) fn resolved_transport(
     let config = &request.adapter_config;
     match config.transport {
         Some(ExternalCliTransport::Exec) => Ok(ExternalCliTransport::Exec),
+        Some(ExternalCliTransport::StreamJson) => {
+            validate_stream_json_transport(request)?;
+            Ok(ExternalCliTransport::StreamJson)
+        }
         Some(ExternalCliTransport::AppServer) => {
             validate_app_server_transport(request)?;
             Ok(ExternalCliTransport::AppServer)
         }
         None if is_default_app_server_candidate(request) => Ok(ExternalCliTransport::AppServer),
+        None if is_default_stream_json_candidate(request) => Ok(ExternalCliTransport::StreamJson),
         None => Ok(ExternalCliTransport::Exec),
     }
+}
+
+fn is_default_stream_json_candidate(request: &ExternalCliRunRequest) -> bool {
+    request.adapter == CLAUDE_CODE_ADAPTER && request.adapter_config.args.is_empty()
+}
+
+fn validate_stream_json_transport(request: &ExternalCliRunRequest) -> Result<(), String> {
+    if request.adapter != CLAUDE_CODE_ADAPTER {
+        return Err(format!(
+            "adapter '{}' does not support stream_json transport",
+            request.adapter
+        ));
+    }
+    if !request.adapter_config.args.is_empty() {
+        return Err("stream_json transport cannot be combined with adapterConfig.args".to_string());
+    }
+    Ok(())
 }
 
 fn is_default_app_server_candidate(request: &ExternalCliRunRequest) -> bool {
@@ -125,97 +127,29 @@ fn validate_app_server_transport(request: &ExternalCliRunRequest) -> Result<(), 
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) async fn request_session_guide(
     session_key: &str,
     guide_id: String,
     message: String,
 ) -> ExternalCliGuideResult {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(GUIDE_STARTUP_WAIT_MS);
-    let handle = loop {
-        if let Some(handle) = ACTIVE_APP_SERVER_SESSIONS
-            .get(session_key)
-            .map(|entry| entry.clone())
-        {
-            let owns_session = ACTIVE_SESSIONS
-                .get(session_key)
-                .is_some_and(|entry| entry.value() == &handle.run_id);
-            if owns_session {
-                break Some(handle);
-            }
-            remove_active_app_server_session(session_key, &handle.run_id);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            break None;
-        }
-        sleep(Duration::from_millis(25)).await;
-    };
-    let Some(handle) = handle else {
-        return rejected_guide(
-            guide_id,
-            None,
-            None,
-            "active runner does not expose app-server steering".to_string(),
-        );
-    };
-    let (ack_tx, ack_rx) = oneshot::channel();
-    if handle
-        .guide_tx
-        .send(AppServerGuideCommand {
-            guide_id: guide_id.clone(),
-            message,
-            ack_tx,
-        })
-        .is_err()
-    {
-        return rejected_guide(
-            guide_id,
-            Some(handle.thread_id),
-            Some(handle.turn_id),
-            "app-server guide channel is closed".to_string(),
-        );
-    }
-    match timeout(Duration::from_secs(GUIDE_ACK_TIMEOUT_SECS), ack_rx).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(_)) => rejected_guide(
-            guide_id,
-            Some(handle.thread_id),
-            Some(handle.turn_id),
-            "app-server guide response channel is closed".to_string(),
-        ),
-        Err(_) => rejected_guide(
-            guide_id,
-            Some(handle.thread_id),
-            Some(handle.turn_id),
-            "app-server guide acknowledgement timed out".to_string(),
-        ),
-    }
+    live_guide::request_session_guide(session_key, guide_id, message).await
 }
 
 fn register_active_app_server_session(
     session_key: &str,
     run_id: &str,
-    handle: ActiveAppServerHandle,
+    handle: live_guide::ActiveGuideHandle,
 ) -> bool {
-    let owns_session = active_session_is_owned_by(session_key, run_id);
-    if !owns_session {
-        return false;
-    }
-    ACTIVE_APP_SERVER_SESSIONS.insert(session_key.to_string(), handle);
-    let still_owns_session = active_session_is_owned_by(session_key, run_id);
-    if !still_owns_session {
-        remove_active_app_server_session(session_key, run_id);
-    }
-    still_owns_session
+    live_guide::register_session(session_key, run_id, handle)
 }
 
 fn active_session_is_owned_by(session_key: &str, run_id: &str) -> bool {
-    ACTIVE_SESSIONS
-        .get(session_key)
-        .is_some_and(|entry| entry.value() == run_id)
+    live_guide::active_session_is_owned_by(session_key, run_id)
 }
 
 fn remove_active_app_server_session(session_key: &str, run_id: &str) {
-    ACTIVE_APP_SERVER_SESSIONS.remove_if(session_key, |_, handle| handle.run_id == run_id);
+    live_guide::remove_session(session_key, run_id);
 }
 
 fn rejected_guide(
@@ -224,13 +158,7 @@ fn rejected_guide(
     turn_id: Option<String>,
     reason: String,
 ) -> ExternalCliGuideResult {
-    ExternalCliGuideResult {
-        guide_id,
-        accepted: false,
-        thread_id,
-        turn_id,
-        reason: Some(reason),
-    }
+    live_guide::rejected_guide(guide_id, thread_id, turn_id, reason)
 }
 
 pub(super) async fn run_command(
@@ -359,15 +287,15 @@ pub(super) async fn run_command(
         .map(str::to_string)
         .ok_or_else(|| "app-server turn response missing turn.id".to_string())?;
 
-    let (guide_tx, mut guide_rx) = mpsc::unbounded_channel::<AppServerGuideCommand>();
+    let (guide_tx, mut guide_rx) = mpsc::unbounded_channel::<live_guide::LiveGuideCommand>();
     if let Some(session_key) = session_key {
         register_active_app_server_session(
             session_key,
             run_id,
-            ActiveAppServerHandle {
+            live_guide::ActiveGuideHandle {
                 run_id: run_id.to_string(),
-                thread_id: thread_id.clone(),
-                turn_id: turn_id.clone(),
+                thread_id: Some(thread_id.clone()),
+                turn_id: Some(turn_id.clone()),
                 guide_tx: guide_tx.clone(),
             },
         );
@@ -382,7 +310,7 @@ pub(super) async fn run_command(
     };
     tokio::pin!(timeout_sleep);
     let mut next_request_id = 100u64;
-    let mut pending_guides = HashMap::<u64, AppServerGuideCommand>::new();
+    let mut pending_guides = HashMap::<u64, live_guide::LiveGuideCommand>::new();
     let mut status = ExternalCliRunStatus::Failed;
     let mut exit_code = Some(1);
     let mut terminal = false;
@@ -1348,6 +1276,10 @@ mod tests {
             ExternalCliTransport::AppServer
         );
         assert_eq!(
+            resolved_transport(&request(CLAUDE_CODE_ADAPTER)).unwrap(),
+            ExternalCliTransport::StreamJson
+        );
+        assert_eq!(
             build_command_spec(&request(DEFAULT_ADAPTER)).args[..2],
             ["app-server", "--stdio"]
         );
@@ -1377,6 +1309,17 @@ mod tests {
         custom_executable.adapter_config.executable = Some("/tmp/mock-codex".to_string());
         assert_eq!(
             resolved_transport(&custom_executable).unwrap(),
+            ExternalCliTransport::Exec
+        );
+
+        let mut custom_claude = request(CLAUDE_CODE_ADAPTER);
+        custom_claude.adapter_config.args = vec![
+            "-p".to_string(),
+            "--input-format".to_string(),
+            "text".to_string(),
+        ];
+        assert_eq!(
+            resolved_transport(&custom_claude).unwrap(),
             ExternalCliTransport::Exec
         );
     }
@@ -1535,10 +1478,10 @@ mod tests {
         assert!(register_active_app_server_session(
             &session_key,
             &old_run_id,
-            ActiveAppServerHandle {
+            live_guide::ActiveGuideHandle {
                 run_id: old_run_id.clone(),
-                thread_id: "thread-old".to_string(),
-                turn_id: "turn-old".to_string(),
+                thread_id: Some("thread-old".to_string()),
+                turn_id: Some("turn-old".to_string()),
                 guide_tx: old_guide_tx,
             },
         ));
@@ -1547,22 +1490,20 @@ mod tests {
         assert!(register_active_app_server_session(
             &session_key,
             &new_run_id,
-            ActiveAppServerHandle {
+            live_guide::ActiveGuideHandle {
                 run_id: new_run_id.clone(),
-                thread_id: "thread-new".to_string(),
-                turn_id: "turn-new".to_string(),
+                thread_id: Some("thread-new".to_string()),
+                turn_id: Some("turn-new".to_string()),
                 guide_tx: new_guide_tx,
             },
         ));
 
         remove_active_app_server_session(&session_key, &old_run_id);
-        let active = ACTIVE_APP_SERVER_SESSIONS
-            .get(&session_key)
-            .map(|entry| entry.clone())
+        let active = live_guide::active_handle(&session_key)
             .expect("replacement app-server handle must remain registered");
         assert_eq!(active.run_id, new_run_id);
-        assert_eq!(active.thread_id, "thread-new");
-        assert_eq!(active.turn_id, "turn-new");
+        assert_eq!(active.thread_id.as_deref(), Some("thread-new"));
+        assert_eq!(active.turn_id.as_deref(), Some("turn-new"));
 
         remove_active_app_server_session(&session_key, &active.run_id);
         ACTIVE_SESSIONS.remove(&session_key);
@@ -1579,14 +1520,14 @@ mod tests {
         assert!(!register_active_app_server_session(
             &session_key,
             &stale_run_id,
-            ActiveAppServerHandle {
+            live_guide::ActiveGuideHandle {
                 run_id: stale_run_id.clone(),
-                thread_id: "thread-stale".to_string(),
-                turn_id: "turn-stale".to_string(),
+                thread_id: Some("thread-stale".to_string()),
+                turn_id: Some("turn-stale".to_string()),
                 guide_tx,
             },
         ));
-        assert!(!ACTIVE_APP_SERVER_SESSIONS.contains_key(&session_key));
+        assert!(live_guide::active_handle(&session_key).is_none());
 
         ACTIVE_SESSIONS.remove(&session_key);
     }
@@ -1678,7 +1619,7 @@ for line in sys.stdin:
         }));
         assert!(!ACTIVE_RUNS.contains_key("mock-app-server-run"));
         assert!(!ACTIVE_SESSIONS.contains_key(session_key));
-        assert!(!ACTIVE_APP_SERVER_SESSIONS.contains_key(session_key));
+        assert!(live_guide::active_handle(session_key).is_none());
     }
 
     #[cfg(unix)]

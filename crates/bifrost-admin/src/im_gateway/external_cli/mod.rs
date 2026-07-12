@@ -199,10 +199,8 @@ async fn run_worker_stdio_async() -> Result<(), String> {
     })?;
     let request = *request;
     let session_key = request.request.session_key.clone().unwrap_or_default();
-    let supports_live_guide = matches!(
-        app_server::resolved_transport(&request.request),
-        Ok(ExternalCliTransport::AppServer)
-    );
+    let supports_live_guide = app_server::resolved_transport(&request.request)
+        .is_ok_and(ExternalCliTransport::supports_live_guide);
     let runtime = ExternalCliRuntime::new(PathBuf::from(&request.runs_root));
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
     let progress_task = tokio::spawn(async move {
@@ -228,7 +226,7 @@ async fn run_worker_stdio_async() -> Result<(), String> {
                     }
                     Some(ExternalCliWorkerCommand::Guide { guide_id, message }) => {
                         let result = if supports_live_guide {
-                            app_server::request_session_guide(
+                            live_guide::request_session_guide(
                                 &session_key,
                                 guide_id,
                                 message,
@@ -272,6 +270,8 @@ async fn run_worker_stdio_async() -> Result<(), String> {
 
 mod app_server;
 mod command_spec;
+mod live_guide;
+mod stream_json;
 use command_spec::build_command_spec;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -413,6 +413,13 @@ pub struct ExternalCliAdapterConfig {
 pub enum ExternalCliTransport {
     Exec,
     AppServer,
+    StreamJson,
+}
+
+impl ExternalCliTransport {
+    fn supports_live_guide(self) -> bool {
+        matches!(self, Self::AppServer | Self::StreamJson)
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1201,10 +1208,9 @@ impl ExternalCliRuntime {
             } else {
                 Some(app_server::resolved_transport(&request)?)
             };
-        let spec = if external_cli_transport == Some(ExternalCliTransport::AppServer) {
-            app_server::build_command_spec(&request)
-        } else {
-            build_command_spec(&request, &last_message_path)?
+        let spec = match external_cli_transport {
+            Some(ExternalCliTransport::AppServer) => app_server::build_command_spec(&request),
+            _ => build_command_spec(&request, &last_message_path)?,
         };
         let cli_version = detect_cli_version(&request.adapter, &spec).await;
         let snapshot = command_snapshot(&request, &spec);
@@ -1312,6 +1318,17 @@ impl ExternalCliRuntime {
                         &run_id,
                         session_key_for_stop.as_deref(),
                         &request,
+                        prompt.clone(),
+                        stop_marker_path.clone(),
+                        progress_tx,
+                    )
+                    .await?
+                }
+                ExternalCliTransport::StreamJson => {
+                    stream_json::run_command(
+                        &run_id,
+                        session_key_for_stop.as_deref(),
+                        spec.clone(),
                         prompt.clone(),
                         stop_marker_path.clone(),
                         progress_tx,

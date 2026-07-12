@@ -1318,6 +1318,29 @@
 4. 普通错误以及已经产生 assistant 输出后的容量错误都只启动一个 turn，不自动重试。
 5. 测试只使用临时 `BIFROST_DATA_DIR` 和随机端口，不影响正式 9900 服务或真实 provider。
 
+### TC-IEC-62: Claude Code stream-json LiveGuideChannel
+
+操作步骤：
+
+1. 执行 transport、帧格式与同进程 guide 单元回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin external_cli --lib -- --nocapture
+   ```
+2. 通过真实 Bifrost 临时服务和 mock Claude CLI 执行 CLI/API 黑盒链路：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_external_runner_live_guide.sh
+   ```
+
+预期结果：
+
+1. Claude Code 无 custom args 时选择 `stream_json` transport；custom args（包括 `--input-format text`）与显式 `transport=exec` 继续使用一次性 exec 并在 guide 时诚实排队。
+2. stream-json 首条 user frame 启动 turn，后续 guide 写入同一 stdin；mock 的 start/guide 记录 PID 相同且只出现一次 start。
+3. `--replay-user-messages` 回显匹配 guide frame 后返回 `accepted=true`；result 先到、回显超时、session 被替换或 stdin 关闭时返回 rejected，交由上层 queue fallback。
+4. Claude `session_id` 映射为 `threadId`，没有虚构 `turnId`；assistant/tool/result 继续映射现有 progress events，下一轮仍使用既有 `--resume <session_id>`。
+
+执行记录（2026-07-12）：PASS — `external_cli` focused suite 89 个测试全部通过（含 stream-json frame、同进程 guide、transport fallback 与既有 app-server 回归）；真实临时服务 E2E 输出 `[external-runner-live-guide] PASS`，Claude、Codex、Traex 三条 steer 链路以及 reject/exec/inactive fallback 全部通过。
+
 ## 最近执行记录
 
 - 2026-07-12：新增并立即执行 TC-IEC-61。两个 focused Rust 单测分别输出 `1 passed`；`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_codex_capacity_retry.sh` 输出 `[codex-capacity-retry] PASS`。隔离 mock app-server 验证首次 `serverOverloaded` 后在同一 thread 第二次成功、持续容量错误 3 次重试后失败、普通错误不重试、已有 assistant delta 后不重试；成功 run 未输出中间 `run_failed`，并持久化 `runner.capacityRetryCount=1`。

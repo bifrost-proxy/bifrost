@@ -1191,6 +1191,8 @@ fn claude_code_adapter_applies_session_model_to_command_spec() {
 
     assert_eq!(spec.executable, "claude");
     assert!(spec.args.contains(&"-p".to_string()));
+    assert!(has_arg_pair(&spec.args, "--input-format", "stream-json"));
+    assert!(spec.args.contains(&"--replay-user-messages".to_string()));
     assert!(has_arg_pair(
         &spec.args,
         "--model",

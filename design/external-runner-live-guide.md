@@ -6,7 +6,7 @@ Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动
 
 内置 Bifrost Agent 已支持 guide channel：运行中消息可在工具调用 checkpoint 后进入同一 turn。Codex CLI 与 Trae CLI 的 app-server 协议也都提供 `turn/steer`，要求携带当前 `threadId`、`expectedTurnId` 与输入。当前差距不是产品入口，而是 external runner worker 只支持 `Run` / `Stop`，且底层 adapter 没有保留可双向控制的协议连接。
 
-本方案让内置 Codex、Traex runner 默认使用每轮独立的 stdio app-server transport，并把 worker 控制协议扩展为 `Run` / `Guide` / `Stop`。IM 与 WebUI 在会话忙碌时默认把普通后续文本视为 Guide，只有显式 `/q` 或 UI 选择 Queue 才排队；ChatGPT Web 因浏览器对话链路无法安全注入当前生成过程，继续默认 Queue。Claude Code、自定义 CLI 和显式 exec transport 会先尝试 worker guide capability，无法实时注入时明确降级到 FIFO queue，不能伪装成已注入。
+本方案让内置 Codex、Traex runner 默认使用每轮独立的 stdio app-server transport，让 Claude Code 默认使用单 turn 生命周期的 stream-json transport，并把 worker 控制协议扩展为 `Run` / `Guide` / `Stop`。IM 与 WebUI 在会话忙碌时默认把普通后续文本视为 Guide，只有显式 `/q` 或 UI 选择 Queue 才排队；ChatGPT Web 因浏览器对话链路无法安全注入当前生成过程，继续默认 Queue。自定义 CLI、custom args 和显式 exec transport 会先尝试 worker guide capability，无法实时注入时明确降级到 FIFO queue，不能伪装成已注入。
 
 ## 用户目标验证清单
 
@@ -28,7 +28,7 @@ Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动
 
 - 自定义 `adapterConfig.args` 的 Codex/Traex runner 继续使用原始 exec transport。
 - 配置 `adapterConfig.transport=exec` 时强制使用 exec；旧配置没有 transport 字段时，内置 Codex/Traex、没有 custom args，且 executable 未覆盖或 basename 是 `codex` / `traex` / `traecli` 时才默认 app-server。自定义 wrapper 继续 exec，除非显式声明 `transport=app_server`。
-- ChatGPT Web 保持默认排队语义；Claude Code 与自定义 adapter 在缺少 live guide transport 时必须明确降级排队并保留原消息。
+- ChatGPT Web 保持默认排队语义；Claude Code 默认使用 stream-json 实时通道，显式 text/custom args/exec 与自定义 adapter 在缺少 live guide transport 时必须明确降级排队并保留原消息。
 - `/stop`、run stop marker、超时、worker process group 清理与服务退出清理继续有效。
 - model、reasoning effort、sandbox/approval、service tier、config override、feature flag、work dir、图片路径和 session resume 语义不因 transport 迁移丢失。
 - 现有 `run_started`、progress、`run_finished` NDJSON 消费方兼容；只允许增加字段与 guide 专用响应。
@@ -57,14 +57,14 @@ Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动
 - `guide`：追加到当前 active regular turn，由 runner 在当前工具调用/模型 checkpoint 后消费。
 - `queue`：当前 turn 结束后作为新 turn 执行。
 - 除 ChatGPT Web 外，IM 与 WebUI 的普通 busy text 默认请求 guide；`/g` 是显式 Guide，`/q` 是显式 Queue。
-- Codex/Traex app-server 成功 ack 后展示已注入；Claude Code、自定义/exec transport 或 turn-end race 无法 ack 时展示降级原因并排队。
+- Codex/Traex app-server RPC 成功 ack，或 Claude Code 通过 `--replay-user-messages` 回显确认输入帧后展示已注入；自定义/exec transport、回显超时或 turn-end race 显示降级原因并排队。
 - ChatGPT Web 始终默认 Queue，WebUI 不展示 Guide 切换，IM 普通 busy message 直接排队。
 - 图片暂不进入 `turn/steer` 文本协议；external runner 忙碌时收到图片必须保留附件并明确降级排队，不能只注入占位文本或丢失图片。
 - 调用方收到 `delivery=steered` 才能展示“已注入”；`delivery=queued` 必须展示降级原因。
 
 ### 运行态真源
 
-主进程 worker registry 与 worker 内 app-server registry 共同构成实时真源，均按 `session_key` 索引：
+主进程 worker registry 与 worker 内 runner 无关的 `ACTIVE_GUIDE_SESSIONS` 共同构成实时真源，均按 `session_key` 索引：
 
 ```text
 main process: session_key -> worker_pid + control_tx
@@ -99,14 +99,24 @@ worker process: session_key -> thread_id + turn_id + guide_tx
 - `thread/started`、`turn/started`、`item/started`、`item/completed`、`turn/completed` 映射成现有 Codex-like normalized events。
 - `agentMessage` 作为最终 response；command/file/MCP/dynamic tool item 映射 tool started/finished；plan/reasoning 保持现有展示。
 
+### Claude Code stream-json transport
+
+- Claude Code 无 custom args 时默认参数为 `-p --verbose --output-format stream-json --input-format stream-json --replay-user-messages`；显式 custom args（包括 `--input-format text`）继续走 exec。
+- 首条 user JSONL 帧启动 turn，stdin 在本 turn 内保持打开；后续 guide 通过同一 stdin 追加 user JSONL 帧，不启动第二个进程。
+- 收到 `system/init` 后以 Claude `session_id` 注册通用 live guide handle；`result`、stop、timeout 或 session ownership 变化时按 run id 条件注销，避免旧 turn 清理新 handle。
+- guide 写入成功后仍不立即声称 steered；只有 `--replay-user-messages` 回显匹配的 user frame 才返回 accepted。若 result 先到、通道关闭或回显超时，返回 rejected 并由上层原子降级排队。
+- stdout 继续复用 Claude Code 现有 `ExternalCliProgressEvent` 解析，assistant/tool/result 展示与原 exec transport 兼容；持久化 `session_id` 仍用于下一轮 `--resume`。
+
 ### Transport 选择
 
 ```text
 transport=exec                         -> exec
 transport=app_server + unsupported     -> clear startup error
+transport=stream_json + non-Claude      -> clear startup error
 custom adapterConfig.args              -> exec
 custom executable basename             -> exec（显式 app_server 除外）
 Codex/Traex + official executable      -> app_server
+Claude Code + no custom args            -> stream_json
 other adapter                          -> existing transport
 ```
 
@@ -153,7 +163,7 @@ bifrost agent guide --session cli-Codex "先检查失败日志"
 
 ### 单元测试
 
-- transport selection：Codex/Traex default、explicit exec、custom args、unsupported adapter。
+- transport selection：Codex/Traex default app-server、Claude Code default stream-json、explicit exec、text/custom args fallback、unsupported adapter。
 - app-server request：initialize/initialized、thread start/resume、turn start、turn steer 字段完整。
 - notification normalization：agent message、command execution、reasoning、plan、turn completed/failed。
 - worker protocol：Guide serialize/parse、ack correlation、worker exit rejects pending、control channel 饱和快速拒绝与 32 条 pending 上限。
@@ -176,4 +186,4 @@ Web Playwright 同时覆盖 Codex/Traex/Claude Code 默认 Guide、显式 Queue�
 - 配置映射与 exec flag 不完全等价：所有已支持 model/effort/sandbox/config 字段必须有单测；无法等价的 custom args 自动保留 exec。
 - turn-end race：必须依赖 expected turn id + ack + queue fallback，不允许 fire-and-forget。
 - app-server stdout 可能包含未知 notification：保留 raw frame，忽略未知展示事件但不能中断 turn。
-- 回滚：用户可设置 `adapterConfig.transport=exec` 恢复原路径；自定义 args 天然继续 exec。
+- 回滚：用户可设置 `adapterConfig.transport=exec`，或给 Claude Code 配置 `--input-format text` custom args 恢复原路径；其他自定义 args 天然继续 exec。
