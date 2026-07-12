@@ -3198,6 +3198,11 @@ fn append_external_cli_observability_metadata(
         "runner.injectBifrostTools",
         request.inject_bifrost_tools,
     );
+    insert_metadata_u64(
+        metadata,
+        "runner.capacityRetryCount",
+        capacity_retry_count(events),
+    );
     insert_metadata_json(metadata, "config.addDirs", &request.adapter_config.add_dirs);
     insert_metadata_json(
         metadata,
@@ -3316,6 +3321,15 @@ fn append_external_cli_observability_metadata(
     append_tool_observability_metadata(events, metadata);
     append_plan_observability_metadata(events, metadata);
     append_message_observability_metadata(events, metadata);
+}
+
+fn capacity_retry_count(events: &[ExternalCliProgressEvent]) -> u64 {
+    events
+        .iter()
+        .filter(|event| {
+            event.raw.get("type").and_then(serde_json::Value::as_str) == Some("capacity_retry")
+        })
+        .count() as u64
 }
 
 fn append_tool_observability_metadata(

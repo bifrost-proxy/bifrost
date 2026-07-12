@@ -2573,6 +2573,17 @@ fn codex_and_traex_metadata_include_runner_observability() {
         };
         let events = vec![
             ExternalCliProgressEvent {
+                event_type: ExternalCliProgressEventType::Status,
+                content: "retrying capacity error".to_string(),
+                title: Some("Codex capacity retry".to_string()),
+                raw: serde_json::json!({
+                    "type": "capacity_retry",
+                    "retryAttempt": 1,
+                    "maxRetries": 3,
+                    "delayMs": 1000
+                }),
+            },
+            ExternalCliProgressEvent {
                 event_type: ExternalCliProgressEventType::ToolFinished,
                 content: "tool output".to_string(),
                 title: Some("Shell".to_string()),
@@ -2650,6 +2661,10 @@ fn codex_and_traex_metadata_include_runner_observability() {
             Some(&"120".to_string())
         );
         assert_eq!(metadata.get("tools.count"), Some(&"1".to_string()));
+        assert_eq!(
+            metadata.get("runner.capacityRetryCount"),
+            Some(&"1".to_string())
+        );
         assert_eq!(
             metadata.get("tools.totalDurationMs"),
             Some(&"120".to_string())

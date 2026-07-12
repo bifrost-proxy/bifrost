@@ -92,6 +92,23 @@ Codex 归一化：`command_execution` → `ToolStarted`/`ToolFinished`，tool na
 
 回归测试必须覆盖 stdout `turn.completed` 早于最终 response 的场景。
 
+### App-server 容量错误自动恢复
+
+Codex/Trae app-server 可能在 turn 尚未开始实际工作时返回
+`codexErrorInfo=serverOverloaded`，并同时声明 `willRetry=false`。External Runner
+不能把这种瞬时容量抖动直接暴露为最终失败，应在同一个 app-server 进程、同一个
+thread 内重新发起 turn：
+
+- 最多自动重试 3 次，退避为 1s、2s、4s；总 turn timeout 继续生效。
+- 初次 turn 与重试 turn 复用同一个 `clientUserMessageId`，标识为同一条用户输入。
+- 重试过程输出 canonical `Status` 事件，原始容量错误不输出 `RunFailed`；run
+  metadata 记录 `runner.capacityRetryCount`。
+- 只认结构化 `codexErrorInfo=serverOverloaded`，认证、参数、模型不存在等错误立即失败。
+- 一旦本轮已产生 assistant 内容、工具调用或存在待确认 guide，禁止自动重试，
+  避免重复执行有副作用的操作。
+- `/stop` 在退避等待期间仍立即生效；重试后的 active guide handle 必须切换到新的 turn id。
+- 3 次重试仍失败时，保留最后一次原始错误并正常收敛为 failed。
+
 ### 外部 Runner 状态展示
 
 外部 CLI runner 不能照搬内置 Agent 的 loop/context/compaction 指标。飞书 progress card 与 Web Chat 显示：
