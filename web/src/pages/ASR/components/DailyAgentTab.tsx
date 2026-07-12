@@ -272,6 +272,8 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
         send_policy: "on_success_with_report",
       },
       output_dir: id,
+      dependencies: [],
+      dependency_failure_policy: "skip",
     };
     setSelectedAgentId(id);
     void saveAgents([...agents, nextAgent]);
@@ -552,6 +554,77 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                 }
               />
             </Descriptions.Item>
+            <Descriptions.Item label="Dependencies" span={2}>
+              <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                <Select
+                  data-testid="asr-daily-agent-dependencies-select"
+                  mode="multiple"
+                  allowClear
+                  value={(selectedAgent.dependencies || []).map(
+                    (dependency) => dependency.agent_id
+                  )}
+                  placeholder="Select upstream agents..."
+                  options={agents
+                    .filter((agent) => agent.id !== selectedAgent.id)
+                    .map((agent) => ({ label: agent.name, value: agent.id }))}
+                  onChange={(dependencyIds: string[]) => {
+                    const existing = new Map(
+                      (selectedAgent.dependencies || []).map((dependency) => [
+                        dependency.agent_id,
+                        dependency,
+                      ])
+                    );
+                    updateAgent(selectedAgent.id, {
+                      dependencies: dependencyIds.map(
+                        (agent_id) =>
+                          existing.get(agent_id) || {
+                            agent_id,
+                            include_output: true,
+                          }
+                      ),
+                    });
+                  }}
+                  style={{ width: "100%" }}
+                />
+                {(selectedAgent.dependencies || []).map((dependency) => (
+                  <Space key={dependency.agent_id}>
+                    <Text code>{dependency.agent_id}</Text>
+                    <Text type="secondary">Include output</Text>
+                    <Switch
+                      size="small"
+                      checked={dependency.include_output !== false}
+                      onChange={(include_output) =>
+                        updateAgent(selectedAgent.id, {
+                          dependencies: (selectedAgent.dependencies || []).map(
+                            (item) =>
+                              item.agent_id === dependency.agent_id
+                                ? { ...item, include_output }
+                                : item
+                          ),
+                        })
+                      }
+                    />
+                  </Space>
+                ))}
+              </Space>
+            </Descriptions.Item>
+            <Descriptions.Item label="Dependency Failure">
+              <Select
+                data-testid="asr-daily-agent-dependency-failure-policy"
+                size="small"
+                value={selectedAgent.dependency_failure_policy || "skip"}
+                onChange={(dependency_failure_policy) =>
+                  updateAgent(selectedAgent.id, {
+                    dependency_failure_policy,
+                  })
+                }
+                style={{ width: 180 }}
+                options={[
+                  { label: "Skip this agent", value: "skip" },
+                  { label: "Continue", value: "continue" },
+                ]}
+              />
+            </Descriptions.Item>
             <Descriptions.Item label="Instructions Source">
               <Tag>{instructions?.source || selectedAgent.instructions_source}</Tag>
             </Descriptions.Item>
@@ -652,6 +725,8 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                     ? "green"
                     : selectedAgent.last_status === "failed"
                       ? "red"
+                      : selectedAgent.last_status === "skipped_dependency_failed"
+                        ? "orange"
                       : "default"
                 }
               >
@@ -921,7 +996,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
           type="info"
           showIcon
           style={{ marginBottom: 12 }}
-          message="Each ASR daily markdown is processed by enabled agents in order. Open an agent to edit runner, IM delivery, output directory, and instructions."
+          message="Enabled agents run in dependency order. Without dependencies, the configured list order is preserved."
         />
         <Table<AsrDailyAgentItem>
           data-testid="asr-daily-agents-table"
@@ -929,7 +1004,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
           rowKey="id"
           dataSource={agents}
           pagination={false}
-          scroll={{ x: 1180 }}
+          scroll={{ x: 1370 }}
           columns={[
             {
               title: <span style={{ whiteSpace: "nowrap" }}>Enabled</span>,
@@ -983,6 +1058,24 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
               ),
             },
             {
+              title: <span style={{ whiteSpace: "nowrap" }}>Dependencies</span>,
+              dataIndex: "dependencies",
+              width: 190,
+              render: (_, record) =>
+                record.dependencies?.length ? (
+                  <Space size={[4, 4]} wrap>
+                    {record.dependencies.map((dependency) => (
+                      <Tag key={dependency.agent_id}>
+                        {dependency.agent_id}
+                        {dependency.include_output === false ? " / order" : ""}
+                      </Tag>
+                    ))}
+                  </Space>
+                ) : (
+                  <Text type="secondary">None</Text>
+                ),
+            },
+            {
               title: <span style={{ whiteSpace: "nowrap" }}>IM Delivery</span>,
               dataIndex: ["im_delivery", "enabled"],
               width: 190,
@@ -1011,6 +1104,8 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                           ? "green"
                           : record.last_status === "failed"
                             ? "red"
+                            : record.last_status === "skipped_dependency_failed"
+                              ? "orange"
                             : "default"
                       }
                     >

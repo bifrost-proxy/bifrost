@@ -1588,6 +1588,8 @@ export interface AsrDailyAgentConfig {
   instructions_source: "default" | "custom";
   im_delivery: AsrDailyAgentImDeliveryConfig;
   output_dir: string;
+  dependencies?: AsrDailyAgentDependency[];
+  dependency_failure_policy?: "skip" | "continue";
   agents?: AsrDailyAgentItem[];
   terminology?: string;
   report_sync_dir?: string;
@@ -1610,12 +1612,19 @@ export interface AsrDailyAgentItem {
   instructions?: string;
   im_delivery: AsrDailyAgentImDeliveryConfig;
   output_dir: string;
+  dependencies?: AsrDailyAgentDependency[];
+  dependency_failure_policy?: "skip" | "continue";
   report_sync_dir?: string;
   last_report_sync?: AsrDailyAgentReportSyncResult;
   last_run_at_ms?: number;
   last_status?: string;
   last_error?: string;
   last_run_id?: string;
+}
+
+export interface AsrDailyAgentDependency {
+  agent_id: string;
+  include_output: boolean;
 }
 
 export interface AsrDailyAgentImDeliveryConfig {

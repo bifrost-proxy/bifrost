@@ -4,7 +4,7 @@
 
 ASR 定时任务(`AsrDirectoryTask`)按目录批量转写音频后,会在 `<BIFROST_DATA_DIR>/asr/data/text/<task_id>/.daily/YYYY-MM-DD.md` 生成每日转写汇总 Markdown。这些原始 daily markdown 只是转写产物,不承担业务表达:用户实际想要的是"日报"、"明日 To Do"、"复盘"、"重点摘录"等二次整理。旧方案只把 daily markdown 存盘,用户需要手动喂给外部工具生成日报,链路断裂。
 
-Daily Agent Runner 是 ASR 定时任务的后处理阶段:ASR 音频转写成功、daily markdown 有增量后,自动为该 task 排队一个 Daily Agent 队列,按顺序把每个 enabled Agent 交给对应 Runner(ChatGPT Web / Bifrost Agent / codex / 自定义)执行,输出 report 到 `.daily/agents/<agent_id>/output/<output_dir>/YYYY-MM-DD-report.md`,可选 IM 通道发送 summary 或 full report,可选把 report 复制到用户指定的外部目录(iCloud、企业网盘)。
+Daily Agent Runner 是 ASR 定时任务的后处理阶段:ASR 音频转写成功、daily markdown 有增量后,自动为该 task 排队一个 Daily Agent 队列,按稳定依赖拓扑把每个 enabled Agent 交给对应 Runner(ChatGPT Web / Bifrost Agent / codex / 自定义)执行,输出 report 到 `.daily/agents/<agent_id>/output/<output_dir>/YYYY-MM-DD-report.md`,可选把同日上游产物注入下游 Agent,可选 IM 通道发送 summary 或 full report,可选把 report 复制到用户指定的外部目录(iCloud、企业网盘)。没有依赖配置时继续保留原数组顺序。
 
 本方案不改动 ASR 音频转写主链路(chunk retry、diarization、daily markdown 生成不变);只在 ASR run terminal 后接一个后处理队列,并在 WebUI/CLI 上提供管理入口。
 
@@ -17,6 +17,7 @@ Daily Agent Runner 是 ASR 定时任务的后处理阶段:ASR 音频转写成功
 - Agent 标识约束:`id`/`name`/`output_dir` 仅允许 `[A-Za-z0-9_-]`;不同 Agent 有独立 processed key `<agent_id>:<date>`,避免跨 Agent 覆盖。
 - ASR run terminal 后调用 `maybe_enqueue_daily_agent_after_asr_run(&updated)`;仅当 daily markdown 有增量(new_file/appended/rewritten)时排队;`unchanged` 跳过。
 - 并发控制:全局 `DAILY_AGENT_TASK_LOCKS`(per-task) + `DAILY_AGENT_RUNNING_TASKS`(去重) + `DAILY_AGENT_TASK_CONFIG_LOCK`(配置写);同 task 内多 Agent 串行,不并发抢 ChatGPT Web runner。
+- Agent 依赖:`dependencies[{agent_id,include_output}]` 建立稳定 DAG;未知/自/重复/循环依赖保存失败;`dependency_failure_policy=skip|continue` 控制上游失败传播。`include_output=true` 时同日产物挂载到 `input/upstream/<agent_id>/<date>-report.md`,ChatGPT Web 每次消息直接注入正文。
 - ChatGPT Web 大输入必须走剪贴板 + `Meta+V/Ctrl+V` 原生粘贴路径,不再按字符数分片;composer 大文本后 ChatGPT 可能上传为文件,输入框无正文属于正常状态;adapter 只轮询发送按钮可用状态。
 - ChatGPT Web 契约输出:`daily_report` 必须含 `# YYYY-MM-DD 日报` / `## 今日概览` / `## 证据与不确定性`;`tomorrow_todo` 必须含 `# 明日 To Do List - YYYY-MM-DD` / `## 明天必须完成` / `## 可选推进` / `## 需要确认`;重试续写按 Agent 契约分流。
 - ChatGPT Web browser 恢复只恢复与当前 `execution_mode` 一致的 orphan;headed 不复用 headless,反之亦然。
@@ -110,6 +111,8 @@ adapter 不允许把 `tomorrow_todo` 输出误导为日报格式。ChatGPT Web b
     └── <agent_id>/
         ├── AGENTS.md                # Runner cwd 指向该目录
         ├── input/YYYY-MM-DD.md      # daily markdown 副本
+        ├── input/upstream/          # 显式依赖的同日产物
+        │   └── <upstream_agent_id>/YYYY-MM-DD-report.md
         └── output/<output_dir>/YYYY-MM-DD-report.md
 ```
 

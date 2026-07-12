@@ -1953,11 +1953,27 @@ async fn open_login_and_capture(config: &RuntimeConfig) -> Result<AuthState, Str
                     .as_ref()
                     .is_some_and(|proof: &BrowserAccountCheckProof| proof.logged_in)
             {
-                info!(
-                    header_count = captured_headers.len(),
-                    "chatgpt_web login: auth headers captured successfully"
-                );
-                break;
+                match inspect_login_page_state(&cdp).await {
+                    Ok(page_state) if login_page_state_is_ready(&page_state) => {
+                        info!(
+                            header_count = captured_headers.len(),
+                            "chatgpt_web login: auth headers captured and composer is ready"
+                        );
+                        break;
+                    }
+                    Ok(page_state) => {
+                        debug!(
+                            page_state = %page_state,
+                            "chatgpt_web login: waiting for account chooser or blocking dialog to be completed"
+                        );
+                    }
+                    Err(error) => {
+                        debug!(
+                            error = %error,
+                            "chatgpt_web login: could not inspect composer readiness yet"
+                        );
+                    }
+                }
             }
             if browser.has_exited()? {
                 if let Some(state) = read_logged_in_auth_state(config).await? {
@@ -2032,6 +2048,59 @@ async fn open_login_and_capture(config: &RuntimeConfig) -> Result<AuthState, Str
         cdp.close();
     }
     result
+}
+
+async fn inspect_login_page_state(cdp: &CdpClient) -> Result<Value, String> {
+    evaluate_value(
+        cdp,
+        r#"(() => {
+          const isVisible = (el) => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+          const composer = document.querySelector('#prompt-textarea') ||
+            document.querySelector('[data-testid="composer-text-input"]') ||
+            document.querySelector('[contenteditable="true"]') ||
+            document.querySelector('textarea');
+          const composerVisible = isVisible(composer);
+          const composerDisabled = composer ? Boolean(
+            composer.disabled || composer.readOnly || composer.getAttribute('aria-disabled') === 'true'
+          ) : true;
+          const visibleDialogTexts = Array.from(document.querySelectorAll('[role="dialog"]'))
+            .filter(isVisible)
+            .map((dialog) => (dialog.innerText || '').trim().toLowerCase());
+          const bodyText = (document.body?.innerText || '').toLowerCase();
+          const accountChooserMarkers = [
+            'welcome back',
+            'choose an account',
+            'select an account',
+            'sign in to another account',
+            '欢迎回来',
+            '选择一个帐户',
+            '选择一个账户',
+            '登录至另一个帐户',
+            '登录至另一个账户'
+          ];
+          const containsAccountChooser = (text) =>
+            accountChooserMarkers.some((marker) => text.includes(marker));
+          const accountChooserVisible = visibleDialogTexts.some(containsAccountChooser) ||
+            containsAccountChooser(bodyText);
+          return { composerVisible, composerDisabled, accountChooserVisible };
+        })()"#,
+    )
+    .await
+}
+
+fn login_page_state_is_ready(page_state: &Value) -> bool {
+    page_state
+        .get("composerVisible")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && !page_state
+            .get("composerDisabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+        && !page_state
+            .get("accountChooserVisible")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
 }
 
 fn has_handoff_submission_evidence(event_types: &[String]) -> bool {

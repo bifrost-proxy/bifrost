@@ -242,6 +242,9 @@ for agent in config["agents"]:
     agent["runner"]="bifrost_agent"
     agent["timeout_ms"]=60000
     agent.setdefault("im_delivery", {})["enabled"]=False
+    if agent["id"] == "tomorrow_todo":
+        agent["dependencies"]=[{"agent_id":"daily_report","include_output":True}]
+        agent["dependency_failure_policy"]="skip"
 payload={
     "enabled": True,
     "agents": config["agents"],
@@ -348,6 +351,7 @@ grep -q "E2E_DAILY_AGENT_REAL_RUN" "$SYNC_DIR/tomorrow_todo/2026-05-22-report.md
 test ! -f "$SYNC_DIR/2026-05-22-report.md"
 grep -q "整理上线 checklist" "$AGENTS_DIR/daily_report/input/2026-05-22.md"
 grep -q "整理上线 checklist" "$AGENTS_DIR/tomorrow_todo/input/2026-05-22.md"
+grep -q "E2E_DAILY_AGENT_REAL_RUN" "$AGENTS_DIR/tomorrow_todo/input/upstream/daily_report/2026-05-22-report.md"
 test ! -f "$DAILY_DIR/report/2026-05-22-report.md"
 test ! -f "$DAILY_DIR/tomorrow_todo/2026-05-22-report.md"
 
@@ -394,6 +398,7 @@ assert "E2E_CUSTOM_TOMORROW_AGENT_MARKER" in dump, "custom AGENTS.md marker neve
 assert "TERMS.md" in dump, "terminology relative file reference missing from model context"
 assert "output/report/2026-05-22-report.md" in dump, "daily_report target missing from model prompt"
 assert "output/tomorrow_todo/2026-05-22-report.md" in dump, "tomorrow_todo target missing from model prompt"
+assert "input/upstream/daily_report/2026-05-22-report.md" in dump, "dependency output path missing from downstream prompt"
 PY
 
 RUN_IDS_BEFORE_APPEND="$E2E_DIR/run_ids_before_append.json"
@@ -414,11 +419,26 @@ cat >> "$DAILY_DIR/2026-05-22.md" <<'MD'
 MD
 
 APPEND_RUN_JSON="$E2E_DIR/run_response_appended.json"
-curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/$TASK_ID/daily-agent/run?date=2026-05-22" > "$APPEND_RUN_JSON"
+APPEND_RUN_QUEUED=0
+for _ in {1..30}; do
+  curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/$TASK_ID/daily-agent/run?date=2026-05-22" > "$APPEND_RUN_JSON"
+  if python3 - <<'PY' "$APPEND_RUN_JSON"
+import json, sys
+body=json.load(open(sys.argv[1]))
+if body.get("status") != "queued":
+    raise SystemExit(1)
+PY
+  then
+    APPEND_RUN_QUEUED=1
+    break
+  fi
+  sleep 0.2
+done
+[[ "$APPEND_RUN_QUEUED" == "1" ]]
 python3 - <<'PY' "$APPEND_RUN_JSON"
 import json, sys
 body=json.load(open(sys.argv[1]))
-assert body["status"] in ("queued", "already_running"), body
+assert body["status"] == "queued", body
 assert body.get("date") == "2026-05-22", body
 PY
 
@@ -461,5 +481,65 @@ lines=[json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.
 dump="\n".join(json.dumps(line, ensure_ascii=False) for line in lines)
 assert "change_kind=Appended" in dump, "appended daily markdown did not reach model prompt"
 PY
+
+FAILURE_CONFIG="$E2E_DIR/config_dependency_failure.json"
+curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/$TASK_ID/daily-agent" > "$FAILURE_CONFIG"
+python3 - <<'PY' "$FAILURE_CONFIG" "$E2E_DIR/config_dependency_failure_update.json"
+import json, sys
+body=json.load(open(sys.argv[1]))
+agents=body["config"]["agents"]
+for agent in agents:
+    if agent["id"] == "daily_report":
+        agent["runner"]="missing-runner"
+json.dump({"agents": agents}, open(sys.argv[2], "w"), ensure_ascii=False)
+PY
+curl -fsS -X PUT "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/$TASK_ID/daily-agent" \
+  -H 'content-type: application/json' \
+  -d @"$E2E_DIR/config_dependency_failure_update.json" >/dev/null
+cat >> "$DAILY_DIR/2026-05-22.md" <<'MD'
+
+依赖失败回归：上游 runner 不可用时，下游必须跳过。
+MD
+DEPENDENCY_RUN_RESPONSE="$E2E_DIR/run_response_dependency_failure.json"
+DEPENDENCY_RUN_QUEUED=0
+for _ in {1..30}; do
+  curl -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/$TASK_ID/daily-agent/run?date=2026-05-22&force=1" > "$DEPENDENCY_RUN_RESPONSE"
+  if python3 - <<'PY' "$DEPENDENCY_RUN_RESPONSE"
+import json, sys
+body=json.load(open(sys.argv[1]))
+if body.get("status") != "queued":
+    raise SystemExit(1)
+PY
+  then
+    DEPENDENCY_RUN_QUEUED=1
+    break
+  fi
+  sleep 0.2
+done
+[[ "$DEPENDENCY_RUN_QUEUED" == "1" ]]
+DEPENDENCY_SKIP_DONE=0
+for _ in {1..60}; do
+  curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/asr/tasks/$TASK_ID/daily-agent" > "$E2E_DIR/config_dependency_skip_result.json"
+  if python3 - <<'PY' "$E2E_DIR/config_dependency_skip_result.json"
+import json, sys
+body=json.load(open(sys.argv[1]))
+agents={agent["id"]: agent for agent in body["config"]["agents"]}
+todo=agents["tomorrow_todo"]
+if todo.get("last_status") != "skipped_dependency_failed":
+    raise SystemExit(1)
+error=todo.get("last_error", "")
+assert "daily_report=" in error, todo
+assert any(status in error for status in ("failed", "not_run")), todo
+PY
+  then
+    DEPENDENCY_SKIP_DONE=1
+    break
+  fi
+  sleep 1
+done
+if [[ "$DEPENDENCY_SKIP_DONE" != "1" ]]; then
+  cat "$E2E_DIR/config_dependency_skip_result.json" >&2 || true
+  exit 1
+fi
 
 echo "ASR daily agents API E2E passed: task=$TASK_ID data_dir=$DATA_DIR"
