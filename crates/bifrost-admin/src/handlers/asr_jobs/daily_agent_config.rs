@@ -93,6 +93,10 @@ pub(crate) struct AsrDailyAgentConfig {
     #[serde(default = "default_daily_agent_output_dir")]
     pub output_dir: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<AsrDailyAgentDependency>,
+    #[serde(default)]
+    pub dependency_failure_policy: AsrDailyAgentDependencyFailurePolicy,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<AsrDailyAgentItem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminology: Option<String>,
@@ -124,6 +128,8 @@ impl Default for AsrDailyAgentConfig {
             instructions: None,
             im_delivery: AsrDailyAgentImDeliveryConfig::default(),
             output_dir: default_daily_agent_output_dir(),
+            dependencies: Vec::new(),
+            dependency_failure_policy: AsrDailyAgentDependencyFailurePolicy::default(),
             agents: default_daily_agent_items(),
             terminology: None,
             report_sync_dir: None,
@@ -160,6 +166,10 @@ pub(crate) struct AsrDailyAgentItem {
     pub im_delivery: AsrDailyAgentImDeliveryConfig,
     #[serde(default = "default_daily_agent_output_dir")]
     pub output_dir: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<AsrDailyAgentDependency>,
+    #[serde(default)]
+    pub dependency_failure_policy: AsrDailyAgentDependencyFailurePolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_sync_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -188,6 +198,8 @@ impl AsrDailyAgentItem {
             instructions: None,
             im_delivery: AsrDailyAgentImDeliveryConfig::default(),
             output_dir: DEFAULT_DAILY_AGENT_OUTPUT_DIR.to_string(),
+            dependencies: Vec::new(),
+            dependency_failure_policy: AsrDailyAgentDependencyFailurePolicy::default(),
             report_sync_dir: None,
             last_report_sync: None,
             last_run_at_ms: None,
@@ -217,6 +229,8 @@ impl AsrDailyAgentItem {
                 last_send_error: None,
             },
             output_dir: DEFAULT_TOMORROW_TODO_OUTPUT_DIR.to_string(),
+            dependencies: Vec::new(),
+            dependency_failure_policy: AsrDailyAgentDependencyFailurePolicy::default(),
             report_sync_dir: None,
             last_report_sync: None,
             last_run_at_ms: None,
@@ -239,7 +253,9 @@ fn daily_agent_item_from_legacy(config: &AsrDailyAgentConfig) -> AsrDailyAgentIt
         && config.agent_id == DEFAULT_DAILY_AGENT_ID
         && config.name == DEFAULT_DAILY_AGENT_NAME
         && config.runner == default_daily_agent_runner()
-        && config.output_dir == DEFAULT_DAILY_AGENT_OUTPUT_DIR;
+        && config.output_dir == DEFAULT_DAILY_AGENT_OUTPUT_DIR
+        && config.dependencies.is_empty()
+        && config.dependency_failure_policy == AsrDailyAgentDependencyFailurePolicy::Skip;
     if primary_defaults {
         return config.agents[0].clone();
     }
@@ -267,6 +283,8 @@ fn daily_agent_item_from_legacy(config: &AsrDailyAgentConfig) -> AsrDailyAgentIt
         } else {
             config.output_dir.trim().to_string()
         },
+        dependencies: config.dependencies.clone(),
+        dependency_failure_policy: config.dependency_failure_policy.clone(),
         report_sync_dir: config.report_sync_dir.clone(),
         last_report_sync: config.last_report_sync.clone(),
         last_run_at_ms: config.last_run_at_ms,
@@ -289,6 +307,8 @@ fn daily_agent_config_from_item(item: &AsrDailyAgentItem) -> AsrDailyAgentConfig
         instructions: item.instructions.clone(),
         im_delivery: item.im_delivery.clone(),
         output_dir: item.output_dir.clone(),
+        dependencies: item.dependencies.clone(),
+        dependency_failure_policy: item.dependency_failure_policy.clone(),
         agents: Vec::new(),
         terminology: None,
         report_sync_dir: item.report_sync_dir.clone(),
@@ -348,6 +368,14 @@ fn normalize_daily_agent_item(mut item: AsrDailyAgentItem) -> AsrDailyAgentItem 
         .report_sync_dir
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    item.dependencies = item
+        .dependencies
+        .into_iter()
+        .map(|mut dependency| {
+            dependency.agent_id = dependency.agent_id.trim().to_string();
+            dependency
+        })
+        .collect();
     item
 }
 
@@ -431,7 +459,87 @@ fn validate_daily_agent_config(config: &AsrDailyAgentConfig) -> Result<(), Strin
             ));
         }
     }
+    let known_ids = agents
+        .iter()
+        .map(|agent| agent.id.as_str())
+        .collect::<HashSet<_>>();
+    for agent in &agents {
+        let mut seen_dependencies = HashSet::new();
+        for dependency in &agent.dependencies {
+            if dependency.agent_id.is_empty() {
+                return Err(format!(
+                    "Daily Agent '{}' dependency agent_id cannot be empty",
+                    agent.id
+                ));
+            }
+            if dependency.agent_id == agent.id {
+                return Err(format!(
+                    "Daily Agent '{}' cannot depend on itself",
+                    agent.id
+                ));
+            }
+            if !known_ids.contains(dependency.agent_id.as_str()) {
+                return Err(format!(
+                    "Daily Agent '{}' depends on unknown agent '{}'",
+                    agent.id, dependency.agent_id
+                ));
+            }
+            if !seen_dependencies.insert(dependency.agent_id.as_str()) {
+                return Err(format!(
+                    "Daily Agent '{}' has duplicate dependency '{}'",
+                    agent.id, dependency.agent_id
+                ));
+            }
+        }
+    }
+    stable_topological_daily_agents(&agents)?;
     Ok(())
+}
+
+fn stable_topological_daily_agents(
+    agents: &[AsrDailyAgentItem],
+) -> Result<Vec<AsrDailyAgentItem>, String> {
+    let mut ordered = Vec::with_capacity(agents.len());
+    let mut emitted = HashSet::new();
+
+    while ordered.len() < agents.len() {
+        let mut progressed = false;
+        for agent in agents {
+            if emitted.contains(agent.id.as_str()) {
+                continue;
+            }
+            if agent
+                .dependencies
+                .iter()
+                .all(|dependency| emitted.contains(dependency.agent_id.as_str()))
+            {
+                emitted.insert(agent.id.clone());
+                ordered.push(agent.clone());
+                progressed = true;
+            }
+        }
+        if !progressed {
+            let blocked = agents
+                .iter()
+                .filter(|agent| !emitted.contains(agent.id.as_str()))
+                .map(|agent| agent.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "Daily Agent dependency cycle detected among: {blocked}"
+            ));
+        }
+    }
+
+    Ok(ordered)
+}
+
+fn ordered_daily_agents(
+    config: &AsrDailyAgentConfig,
+) -> Result<Vec<AsrDailyAgentItem>, String> {
+    let agents = normalized_daily_agents(config);
+    validate_daily_agent_config(config)?;
+    stable_topological_daily_agents(&agents)
 }
 
 fn task_for_daily_agent(task: &AsrDirectoryTask, agent: &AsrDailyAgentItem) -> AsrDirectoryTask {
@@ -444,6 +552,25 @@ fn task_for_daily_agent(task: &AsrDirectoryTask, agent: &AsrDailyAgentItem) -> A
         task.daily_agent.report_sync_dir = inherited_report_sync_dir;
     }
     task
+}
+
+fn daily_agent_dependency_includes_output() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct AsrDailyAgentDependency {
+    pub agent_id: String,
+    #[serde(default = "daily_agent_dependency_includes_output")]
+    pub include_output: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AsrDailyAgentDependencyFailurePolicy {
+    #[default]
+    Skip,
+    Continue,
 }
 
 fn daily_agent_instruction_content(task: &AsrDirectoryTask) -> String {
@@ -484,6 +611,10 @@ fn daily_agent_terms_path(task: &AsrDirectoryTask) -> PathBuf {
 
 fn daily_agent_input_dir(task: &AsrDirectoryTask) -> PathBuf {
     daily_agent_work_dir(task).join("input")
+}
+
+fn daily_agent_upstream_input_dir(task: &AsrDirectoryTask, agent_id: &str) -> PathBuf {
+    daily_agent_input_dir(task).join("upstream").join(agent_id)
 }
 
 fn daily_agent_output_root_dir(task: &AsrDirectoryTask) -> PathBuf {

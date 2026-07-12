@@ -127,6 +127,85 @@ fn sync_daily_agent_plan_sources_to_work_dir(
     Ok(())
 }
 
+fn sync_daily_agent_dependency_outputs(
+    task: &AsrDirectoryTask,
+    agent: &AsrDailyAgentItem,
+    agents_by_id: &HashMap<String, AsrDailyAgentItem>,
+    requested_date: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let downstream_task = task_for_daily_agent(task, agent);
+    let downstream_work_dir = daily_agent_work_dir(&downstream_task);
+    let mut copied = Vec::new();
+
+    for dependency in agent
+        .dependencies
+        .iter()
+        .filter(|dependency| dependency.include_output)
+    {
+        let Some(upstream_agent) = agents_by_id.get(&dependency.agent_id) else {
+            return Err(format!(
+                "Daily Agent '{}' dependency '{}' is not configured",
+                agent.id, dependency.agent_id
+            ));
+        };
+        let upstream_task = task_for_daily_agent(task, upstream_agent);
+        let source_dir = daily_agent_output_dir(&upstream_task);
+        if !source_dir.exists() {
+            continue;
+        }
+        let target_dir = daily_agent_upstream_input_dir(&downstream_task, &dependency.agent_id);
+        std::fs::create_dir_all(&target_dir).map_err(|error| {
+            format!(
+                "create Daily Agent upstream input dir {}: {error}",
+                target_dir.display()
+            )
+        })?;
+
+        let mut entries = std::fs::read_dir(&source_dir)
+            .map_err(|error| {
+                format!(
+                    "read Daily Agent dependency output dir {}: {error}",
+                    source_dir.display()
+                )
+            })?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .collect::<Vec<_>>();
+        entries.sort();
+
+        for source_path in entries {
+            let Some(filename) = source_path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(date) = filename.strip_suffix("-report.md") else {
+                continue;
+            };
+            if !source_path.is_file()
+                || !is_valid_date_format(date)
+                || requested_date.is_some_and(|requested| requested != date)
+            {
+                continue;
+            }
+            let target_path = target_dir.join(filename);
+            std::fs::copy(&source_path, &target_path).map_err(|error| {
+                format!(
+                    "copy Daily Agent dependency output {} to {}: {error}",
+                    source_path.display(),
+                    target_path.display()
+                )
+            })?;
+            copied.push(
+                target_path
+                    .strip_prefix(&downstream_work_dir)
+                    .unwrap_or(&target_path)
+                    .to_string_lossy()
+                    .to_string(),
+            );
+        }
+    }
+
+    Ok(copied)
+}
+
 fn migrate_daily_agent_instructions_content(task: &AsrDirectoryTask, content: &str) -> String {
     let report_dir = format!("./output/{}/", task.daily_agent.output_dir);
     content

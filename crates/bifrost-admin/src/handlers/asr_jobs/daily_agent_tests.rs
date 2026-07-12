@@ -39,6 +39,8 @@ fn daily_agent_legacy_config_is_upgraded_to_two_agents_without_losing_settings()
         instructions: Some("legacy instructions".to_string()),
         im_delivery: AsrDailyAgentImDeliveryConfig::default(),
         output_dir: "meeting_notes".to_string(),
+        dependencies: Vec::new(),
+        dependency_failure_policy: AsrDailyAgentDependencyFailurePolicy::Skip,
         agents: Vec::new(),
         terminology: Some("  Alpha 项目 = A  ".to_string()),
         report_sync_dir: Some("~/reports".to_string()),
@@ -175,6 +177,129 @@ fn daily_agent_validation_rejects_non_english_tokens_and_duplicates() {
 }
 
 #[test]
+fn daily_agent_dependencies_use_stable_topological_order() {
+    let mut config = AsrDailyAgentConfig::default();
+    let mut dispatcher = AsrDailyAgentItem::daily_report();
+    dispatcher.id = "research_dispatcher".to_string();
+    dispatcher.name = dispatcher.id.clone();
+    dispatcher.output_dir = dispatcher.id.clone();
+    dispatcher.dependencies = vec![AsrDailyAgentDependency {
+        agent_id: "research_seed".to_string(),
+        include_output: true,
+    }];
+    let mut seed = AsrDailyAgentItem::daily_report();
+    seed.id = "research_seed".to_string();
+    seed.name = seed.id.clone();
+    seed.output_dir = seed.id.clone();
+    seed.dependencies = vec![AsrDailyAgentDependency {
+        agent_id: DEFAULT_DAILY_AGENT_ID.to_string(),
+        include_output: true,
+    }];
+    config.agents = vec![dispatcher, seed, AsrDailyAgentItem::daily_report()];
+
+    let ordered = ordered_daily_agents(&config).unwrap();
+    assert_eq!(
+        ordered
+            .iter()
+            .map(|agent| agent.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            DEFAULT_DAILY_AGENT_ID,
+            "research_seed",
+            "research_dispatcher"
+        ]
+    );
+}
+
+#[test]
+fn daily_agent_dependency_validation_rejects_invalid_graphs() {
+    let mut unknown = AsrDailyAgentConfig::default();
+    unknown.agents[1].dependencies = vec![AsrDailyAgentDependency {
+        agent_id: "missing".to_string(),
+        include_output: true,
+    }];
+    assert!(validate_daily_agent_config(&unknown)
+        .unwrap_err()
+        .contains("depends on unknown agent 'missing'"));
+
+    let mut self_dependency = AsrDailyAgentConfig::default();
+    self_dependency.agents[0].dependencies = vec![AsrDailyAgentDependency {
+        agent_id: DEFAULT_DAILY_AGENT_ID.to_string(),
+        include_output: true,
+    }];
+    assert!(validate_daily_agent_config(&self_dependency)
+        .unwrap_err()
+        .contains("cannot depend on itself"));
+
+    let mut duplicate = AsrDailyAgentConfig::default();
+    duplicate.agents[1].dependencies = vec![
+        AsrDailyAgentDependency {
+            agent_id: DEFAULT_DAILY_AGENT_ID.to_string(),
+            include_output: true,
+        },
+        AsrDailyAgentDependency {
+            agent_id: DEFAULT_DAILY_AGENT_ID.to_string(),
+            include_output: false,
+        },
+    ];
+    assert!(validate_daily_agent_config(&duplicate)
+        .unwrap_err()
+        .contains("duplicate dependency"));
+
+    let mut cycle = AsrDailyAgentConfig::default();
+    cycle.agents[0].dependencies = vec![AsrDailyAgentDependency {
+        agent_id: DEFAULT_TOMORROW_TODO_AGENT_ID.to_string(),
+        include_output: true,
+    }];
+    cycle.agents[1].dependencies = vec![AsrDailyAgentDependency {
+        agent_id: DEFAULT_DAILY_AGENT_ID.to_string(),
+        include_output: true,
+    }];
+    assert!(validate_daily_agent_config(&cycle)
+        .unwrap_err()
+        .contains("dependency cycle detected"));
+}
+
+#[test]
+fn daily_agent_dependency_defaults_include_output_and_skip_failures() {
+    let dependency: AsrDailyAgentDependency =
+        serde_json::from_value(serde_json::json!({"agent_id": "daily_report"})).unwrap();
+    assert!(dependency.include_output);
+
+    let item: AsrDailyAgentItem = serde_json::from_value(serde_json::json!({
+        "id": "research_seed",
+        "name": "research_seed",
+        "enabled": true,
+        "runner": "codex",
+        "timeout_ms": 1000,
+        "trigger_policy": "after_asr_run",
+        "instructions_source": "default",
+        "im_delivery": {},
+        "output_dir": "research_seed",
+        "dependencies": [{"agent_id": "daily_report"}]
+    }))
+    .unwrap();
+    assert_eq!(
+        item.dependency_failure_policy,
+        AsrDailyAgentDependencyFailurePolicy::Skip
+    );
+    assert!(item.dependencies[0].include_output);
+
+    let issues = vec!["daily_report=failed".to_string()];
+    assert!(daily_agent_should_skip_for_dependency_issues(&item, &issues));
+    let mut continue_item = item;
+    continue_item.dependency_failure_policy = AsrDailyAgentDependencyFailurePolicy::Continue;
+    assert!(!daily_agent_should_skip_for_dependency_issues(
+        &continue_item,
+        &issues
+    ));
+    assert!(!daily_agent_should_skip_for_dependency_issues(
+        &continue_item,
+        &[]
+    ));
+}
+
+#[test]
 fn daily_agent_workspace_creates_per_agent_instruction_and_output_dirs() {
     let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();
@@ -255,6 +380,44 @@ fn daily_agent_workspace_creates_per_agent_instruction_and_output_dirs() {
         .unwrap()
         .contains("明日 To Do List"));
     assert_eq!(status.agents.len(), 2);
+
+    task.daily_agent.agents[1].dependencies = vec![AsrDailyAgentDependency {
+        agent_id: DEFAULT_DAILY_AGENT_ID.to_string(),
+        include_output: true,
+    }];
+    let daily_report_task = task_for_daily_agent(&task, &task.daily_agent.agents[0]);
+    std::fs::write(
+        daily_agent_output_dir(&daily_report_task).join("2026-05-22-report.md"),
+        "# 2026-05-22 日报\n\n上游日报内容",
+    )
+    .unwrap();
+    let agents_by_id = task
+        .daily_agent
+        .agents
+        .iter()
+        .cloned()
+        .map(|agent| (agent.id.clone(), agent))
+        .collect::<HashMap<_, _>>();
+    let copied = sync_daily_agent_dependency_outputs(
+        &task,
+        &task.daily_agent.agents[1],
+        &agents_by_id,
+        Some("2026-05-22"),
+    )
+    .unwrap();
+    assert_eq!(
+        copied,
+        vec!["input/upstream/daily_report/2026-05-22-report.md"]
+    );
+    assert_eq!(
+        std::fs::read_to_string(
+            daily_dir.join(
+                "agents/tomorrow_todo/input/upstream/daily_report/2026-05-22-report.md"
+            )
+        )
+        .unwrap(),
+        "# 2026-05-22 日报\n\n上游日报内容"
+    );
 }
 
 #[test]
@@ -488,6 +651,180 @@ fn daily_agent_prompt_uses_file_list_for_file_capable_runners() {
     assert!(chatgpt_next.contains("AGENTS.md 内容"));
     assert!(chatgpt_next.contains("本条消息已附带 AGENTS.md 指令"));
     assert!(chatgpt_next.contains("今日新增转写内容"));
+}
+
+#[test]
+fn daily_agent_prompt_injects_same_date_dependency_output_by_runner_capability() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let config = AsrDailyAgentConfig {
+        agent_id: "research_seed".to_string(),
+        name: "research_seed".to_string(),
+        output_dir: "research_seed".to_string(),
+        dependencies: vec![AsrDailyAgentDependency {
+            agent_id: DEFAULT_DAILY_AGENT_ID.to_string(),
+            include_output: true,
+        }],
+        agents: Vec::new(),
+        ..AsrDailyAgentConfig::default()
+    };
+    let task = AsrDirectoryTask {
+        id: "daily-agent-upstream-prompt-task".to_string(),
+        name: "Daily Agent Upstream Prompt Task".to_string(),
+        audio_dir: temp.path().join("audio"),
+        recursive: true,
+        enabled: true,
+        paused: false,
+        paused_at_ms: None,
+        schedule: AsrTaskSchedule::Hourly { minute: 0 },
+        language: "chinese".to_string(),
+        model: "Qwen3-ASR-1.7B".to_string(),
+        runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+        max_concurrent_files: default_max_concurrent_files(),
+        diarization: AsrDiarizationConfig::default(),
+        created_at_ms: 1,
+        updated_at_ms: 1,
+        last_run_at_ms: None,
+        next_run_at_ms: Some(1),
+        last_error: None,
+        daily_agent: config,
+        external_devices: Vec::new(),
+        import_policy: AsrExternalImportPolicy::default(),
+    };
+    ensure_asr_daily_workspace(&task).unwrap();
+    let daily_dir = daily_dir_for_task(&task.id);
+    std::fs::write(daily_dir.join("2026-07-09.md"), "帮我研究微软基础设施判断").unwrap();
+    let upstream_dir = daily_agent_upstream_input_dir(&task, DEFAULT_DAILY_AGENT_ID);
+    std::fs::create_dir_all(&upstream_dir).unwrap();
+    std::fs::write(
+        upstream_dir.join("2026-07-09-report.md"),
+        "# 2026-07-09 日报\n\n微软正在成为企业数字基础设施。",
+    )
+    .unwrap();
+    let source_path = daily_dir.join("2026-07-09.md");
+    let mut processed = AsrDailyAgentProcessedState::default();
+    processed.documents.insert(
+        format!("{DEFAULT_DAILY_AGENT_ID}:2026-07-09"),
+        AsrDailyAgentProcessedDocument {
+            agent_id: DEFAULT_DAILY_AGENT_ID.to_string(),
+            agent_name: DEFAULT_DAILY_AGENT_NAME.to_string(),
+            output_dir: DEFAULT_DAILY_AGENT_OUTPUT_DIR.to_string(),
+            date: "2026-07-09".to_string(),
+            source_sha256: compute_sha256(&source_path).unwrap(),
+            source_len_bytes: std::fs::metadata(&source_path).unwrap().len(),
+            processed_at_ms: 1,
+            runner: "bifrost_agent".to_string(),
+            report_path: Some(
+                upstream_dir
+                    .join("2026-07-09-report.md")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            last_run_id: "upstream-prompt-run".to_string(),
+        },
+    );
+    save_daily_agent_processed_state(&task.id, &processed).unwrap();
+
+    let plan = build_daily_agent_change_plan(&task, "test", None, false).unwrap();
+    let codex_prompt = build_daily_agent_prompt(&task, &plan, "codex", false).unwrap();
+    assert!(codex_prompt.contains(
+        "input/upstream/daily_report/2026-07-09-report.md"
+    ));
+    assert!(!codex_prompt.contains("微软正在成为企业数字基础设施"));
+
+    let chatgpt_prompt =
+        build_daily_agent_prompt(&task, &plan, "chatgpt_web", false).unwrap();
+    assert!(chatgpt_prompt.contains("上游 Agent 产物"));
+    assert!(chatgpt_prompt.contains("agent=daily_report, date=2026-07-09"));
+    assert!(chatgpt_prompt.contains("微软正在成为企业数字基础设施"));
+
+    processed
+        .documents
+        .get_mut(&format!("{DEFAULT_DAILY_AGENT_ID}:2026-07-09"))
+        .unwrap()
+        .source_sha256 = "stale-source-hash".to_string();
+    save_daily_agent_processed_state(&task.id, &processed).unwrap();
+    let stale_prompt = build_daily_agent_prompt(&task, &plan, "chatgpt_web", false).unwrap();
+    assert!(!stale_prompt.contains("微软正在成为企业数字基础设施"));
+}
+
+#[test]
+fn daily_agent_dependency_output_must_match_current_source_hash() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let audio_dir = temp.path().join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let mut task = test_directory_task("daily-agent-fresh-upstream-task", audio_dir);
+    let mut agents = normalized_daily_agents(&task.daily_agent);
+    agents[1].dependencies = vec![AsrDailyAgentDependency {
+        agent_id: agents[0].id.clone(),
+        include_output: true,
+    }];
+    task.daily_agent.agents = agents.clone();
+    ensure_asr_daily_workspace(&task).unwrap();
+
+    let date = "2026-07-10";
+    let daily_path = daily_dir_for_task(&task.id).join(format!("{date}.md"));
+    std::fs::write(&daily_path, "current daily source").unwrap();
+    let upstream_task = task_for_daily_agent(&task, &agents[0]);
+    let upstream_report = daily_agent_output_dir(&upstream_task).join(format!("{date}-report.md"));
+    std::fs::write(&upstream_report, "# upstream report").unwrap();
+
+    let agents_by_id = agents
+        .iter()
+        .cloned()
+        .map(|agent| (agent.id.clone(), agent))
+        .collect::<HashMap<_, _>>();
+    sync_daily_agent_dependency_outputs(
+        &task,
+        &agents[1],
+        &agents_by_id,
+        Some(date),
+    )
+    .unwrap();
+
+    let stale = missing_daily_agent_dependency_outputs(
+        &task,
+        &agents[1],
+        &agents_by_id,
+        "manual",
+        Some(date),
+        false,
+    )
+    .unwrap();
+    assert_eq!(stale, vec![format!("{}:{date}=stale", agents[0].id)]);
+
+    let source_sha256 = compute_sha256(&daily_path).unwrap();
+    let mut processed = AsrDailyAgentProcessedState::default();
+    processed.documents.insert(
+        daily_agent_processed_key(&upstream_task, date),
+        AsrDailyAgentProcessedDocument {
+            agent_id: agents[0].id.clone(),
+            agent_name: agents[0].name.clone(),
+            output_dir: agents[0].output_dir.clone(),
+            date: date.to_string(),
+            source_sha256,
+            source_len_bytes: std::fs::metadata(&daily_path).unwrap().len(),
+            processed_at_ms: 1,
+            runner: agents[0].runner.clone(),
+            report_path: Some(upstream_report.to_string_lossy().to_string()),
+            last_run_id: "fresh-upstream-run".to_string(),
+        },
+    );
+    save_daily_agent_processed_state(&task.id, &processed).unwrap();
+
+    let fresh = missing_daily_agent_dependency_outputs(
+        &task,
+        &agents[1],
+        &agents_by_id,
+        "manual",
+        Some(date),
+        false,
+    )
+    .unwrap();
+    assert!(fresh.is_empty(), "fresh upstream should be accepted: {fresh:?}");
 }
 
 #[test]

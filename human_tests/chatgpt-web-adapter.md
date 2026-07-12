@@ -762,7 +762,28 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 - 只有等待 stop button 消失超时才返回 `conversation_busy`；该错误不进入整轮 send retry，不会连续多次粘贴同一 retry prompt。
 - diagnostic screenshot 不应再出现 stop button 可见且 composer 中残留 `上一条回复不是最终日报...` / `上一条回复不是最终明日待办...` 的状态。
 
+### TC-CWA-34：回归 - 账号选择弹窗未完成时不得提前判定登录成功
+
+**前置条件**：共享 profile 已保存一个可识别账号，但打开 `chatgpt.com` 后仍显示“欢迎回来 / 选择一个帐户以继续”弹窗。
+
+**操作步骤**：
+1. 点击 `Open Login Browser`，暂不选择弹窗中的账号卡片。
+2. 确认登录请求继续等待，不返回 `logged_in`。
+3. 点击账号卡片，直到正常新对话输入框可见、可编辑且账号选择弹窗消失。
+4. 执行：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin login_page_readiness_rejects_account_chooser_and_disabled_composer --lib -- --nocapture
+   ```
+
+**预期结果**：
+- 仅捕获 Authorization 和 `accounts/check` 成功证明不足以结束登录流程。
+- 账号选择弹窗可见、composer 不可见或 disabled 时，登录请求持续等待。
+- 只有 composer 可见且可编辑、账号选择弹窗消失后，才保存登录态并返回 `logged_in`。
+- 运行阶段不再因弹窗遮挡而报 `send button not actionable: not_found`。
+
 ## 真实执行记录
+
+- 2026-07-12：执行 TC-CWA-34 通过。隔离服务首次登录在 `accounts/check` 已证明账号存在时提前返回 `logged_in`，随后真实 Daily Agent diagnostic screenshot 显示“欢迎回来 / 选择一个帐户以继续”弹窗遮挡 composer，run 失败为 `send button not actionable: not_found`，下游依赖正确跳过。修复后登录循环同时要求 composer 可见、可编辑且账号选择弹窗消失；`login_page_readiness_rejects_account_chooser_and_disabled_composer` 单测通过。使用同一隔离 profile 重新执行 `Open Login Browser` 返回 `loggedIn=true / identityComplete=true / accountCheckOk=true`，随后 ChatGPT Web 真实 `daily_report -> research_agent` 两段运行均为 `success`，并产出同日上游报告和研究报告。
 
 - 2026-07-01：补充执行 TC-CWA-33 真实失败样本回归。全量补跑 Daily Agent 矩阵时，`2026-06-15 daily_report` run `1782928234093-1e821cdd-0c0a-43fa-9f1c-6c477670e1b4` 失败于 `send button not actionable after native clipboard paste upload wait`，diagnostic screenshot `/var/folders/xw/55z6437s54d6pgr93j2ztz2h0000gn/T/bifrost-diagnostic-screenshots/diag-1782928476064.png` 显示上一条 assistant 长回复仍在生成、右下角 stop button 可见，同时 composer 已残留 `上一条回复不是最终日报...` retry prompt。修复后 send 层在 composer 注入前和 send button 不可点击后都以 stop button 为硬 busy gate；stop 可见时清空 composer，等待 stop button 消失后继续同一次 send 流程；只有等待超时才返回不可整轮重试的 `conversation_busy`。代码级哨兵新增 `diagnostic_has_visible_stop_button_is_the_busy_gate`。
 - 2026-07-01：补充执行 TC-CWA-33 / Daily Agent 全量真实矩阵。使用默认数据目录任务 `895233666de34b2399fa5f10e60c07e8`，串行强制运行 17 个 Daily Docs 的 `daily_report` 与 `tomorrow_todo` 共 34 个 agent 格子。执行中 `2026-06-11 tomorrow_todo` 首次命中 stop button 可见的 retry busy 场景；修复并安装后重跑通过。最终 `daily_agent_processed.json` 包含 34 条 `<agent_id>:<date>` 记录，文件系统校验 34/34 个输出标题匹配：`daily_report` 为 `# YYYY-MM-DD 日报`，`tomorrow_todo` 为源日期 + 1 天的 `# 明日 To Do List - YYYY-MM-DD`。最后一个真实 run 为 `2026-06-30 tomorrow_todo`，run id `1782941957290-a3ce6175-395f-4d28-8471-96c81ff0bf28`，落盘标题 `# 明日 To Do List - 2026-07-01`。

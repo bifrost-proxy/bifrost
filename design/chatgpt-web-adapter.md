@@ -22,6 +22,7 @@ ChatGPT Web 的正确落点是新增内置 adapter `chatgpt_web`：Runner 只是
 - 新增 `chatgpt_web` adapter，支持创建对话、发起对话、列出对话、获取消息、等待输出结果、展示最终结果。
 - 一个设备只登录一次；登录态存储在运行 Bifrost 的本机数据目录，后续 run 自动复用。
 - 每次 run 开始前自动检查登录态；登录失效时给出明确反馈，并由 Bifrost 后端自动弹出 Edge/Chromium 浏览器让用户完成登录。
+- 登录完成不能只依赖 `Authorization` 或 `accounts/check` 流量证明；登录页必须同时出现可见且可用的 composer，并且不再显示账号选择器，否则继续等待用户选定账号。
 - headless 配置遇到登录页 / Cloudflare / 真人验证时，adapter 必须临时切换到 headed 等待用户处理并刷新登录态；处理完成后自动关闭 headed browser，让当前重试与后续运行都恢复 headless。
 - 登录弹窗、cookie/header 提取、登录状态验证都属于 `chatgpt_web` adapter 能力，不能依赖 Agent 操作浏览器或外部脚本/skill。
 - 与 runner/adapter 抽象对齐：Chat Gateway、IM Provider、IM Route、Schedule、WebUI 都选择 runner；runner 再通过 `adapter = "chatgpt_web"` 进入 ChatGPT Web 执行实现。
@@ -41,6 +42,7 @@ ChatGPT Web 的正确落点是新增内置 adapter `chatgpt_web`：Runner 只是
 - 用 Bifrost Traffic 确认 Edge/Chromium 中 `chatgpt.com` 的真实接口契约。
 - 用本机真实浏览器 profile 完成首次登录，随后关闭浏览器再用 `chatgpt_web` adapter 执行 `list/get/ask`。
 - 手动使登录态失效或使用空 profile，验证 adapter 自动弹出浏览器并给出可理解反馈。
+- 使用停留在“欢迎回来 / 选择一个账户”的 profile，验证 adapter 不会误报 `LoggedIn`；选定账号、composer 可用后才结束登录等待。
 - 验证最终结果来自 `GET /backend-api/conversation/{conversation_id}` 的 `current_node` assistant text，而不是提交请求的短 SSE handoff。
 
 ## 产品语义
@@ -199,7 +201,7 @@ WebUI 选择 `chatgpt_web` 后：隐藏 executable/args/env/sandbox/approval pol
 4. 返回 guest account / anonymous / JWT 缺少字段 / JWT 过期 / 401/403 / Cloudflare / HTML 登录页 / sentinel 错误 / 账号 fingerprint 不匹配时，进入 `AuthRequired`。
 5. runner `browser.openOnAuthRequired=true` 时由 `BrowserLoginBroker::open_login()` 弹出浏览器。
 6. Broker 通过 CDP 打开 `https://chatgpt.com/`，监听真实 `accounts/check` 请求捕获可复用认证 header。
-7. 捕获后导出 `chatgpt.com` cookies + header 写回 `auth_state.json`（权限 `0600`）。
+7. 捕获后还要确认账号选择器已消失、composer 可见且可用，再导出 `chatgpt.com` cookies + header 写回 `auth_state.json`（权限 `0600`）；若页面仍停留在账号选择器则继续等待。
 8. 立即再执行一次 native HTTP probe。native 通过则继续 run；native 因本机网络/代理/TLS 失败但当次浏览器 `accounts/check` 响应证明可用账号存在时，短期兜底为 `LoggedIn` 并保留失败原因；不能在后续 run 中替代当前 native `accounts/check`。
 9. 登录等待无固定超时：用户完成 / 关闭登录窗口 / WebUI stop login 时才结束。关闭窗口或主动停止都返回 `auth_required`，错误文本区分 `login window was closed` 与 `login was stopped by request`。
 

@@ -125,6 +125,10 @@ struct DailyAgentRunResult {
     finished_at_ms: u64,
     error: Option<String>,
     reports_generated: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    dependency_run_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped_reason: Option<String>,
 }
 
 // ─── Core Functions ───────────────────────────────────────────────────────────
@@ -489,15 +493,32 @@ async fn run_daily_agents(
     requested_date: Option<&str>,
     force: bool,
 ) -> Vec<DailyAgentRunResult> {
-    let agents = normalized_daily_agents(&task.daily_agent);
-    let runnable_agents: Vec<_> = agents
-        .into_iter()
+    let agents = match ordered_daily_agents(&task.daily_agent) {
+        Ok(agents) => agents,
+        Err(error) => {
+            tracing::error!(
+                task_id = %task.id,
+                trigger_source,
+                error = %error,
+                "failed to order ASR Daily Agent dependency graph"
+            );
+            return Vec::new();
+        }
+    };
+    let agents_by_id = agents
+        .iter()
+        .cloned()
+        .map(|agent| (agent.id.clone(), agent))
+        .collect::<HashMap<_, _>>();
+    let runnable_ids = agents
+        .iter()
         .filter(|agent| agent.enabled && daily_agent_runner_ready_for_agent(agent))
         .filter(|agent| {
             trigger_source == "manual"
                 || agent.trigger_policy == AsrDailyAgentTriggerPolicy::AfterAsrRun
         })
-        .collect();
+        .map(|agent| agent.id.clone())
+        .collect::<HashSet<_>>();
 
     let task_id = task.id.clone();
     {
@@ -511,11 +532,124 @@ async fn run_daily_agents(
     let _lock = task_lock.lock().await;
 
     let mut results = Vec::new();
-    for agent in runnable_agents {
+    let mut results_by_agent = HashMap::<String, DailyAgentRunResult>::new();
+    for agent in agents {
+        if !runnable_ids.contains(&agent.id) {
+            continue;
+        }
         let agent_task = task_for_daily_agent(task, &agent);
-        results.push(
-            run_daily_agent_locked(&agent_task, trigger_source, requested_date, force).await,
-        );
+        let dependency_run_ids = agent
+            .dependencies
+            .iter()
+            .filter_map(|dependency| {
+                results_by_agent
+                    .get(&dependency.agent_id)
+                    .map(|result| result.run_id.clone())
+            })
+            .collect::<Vec<_>>();
+        let dependency_issues = agent
+            .dependencies
+            .iter()
+            .filter_map(|dependency| match results_by_agent.get(&dependency.agent_id) {
+                Some(result) if result.status == "success" => None,
+                Some(result) => Some(format!(
+                    "{}={}",
+                    dependency.agent_id, result.status
+                )),
+                None => Some(format!("{}=not_run", dependency.agent_id)),
+            })
+            .collect::<Vec<_>>();
+
+        if daily_agent_should_skip_for_dependency_issues(&agent, &dependency_issues) {
+            let reason = format!(
+                "dependency requirements were not satisfied: {}",
+                dependency_issues.join(", ")
+            );
+            let result = skipped_daily_agent_dependency_result(
+                &agent_task,
+                trigger_source,
+                reason,
+                dependency_run_ids,
+            );
+            results_by_agent.insert(agent.id.clone(), result.clone());
+            results.push(result);
+            continue;
+        }
+
+        if !dependency_issues.is_empty() {
+            tracing::warn!(
+                task_id = %task.id,
+                agent_id = %agent.id,
+                dependency_issues = ?dependency_issues,
+                "continuing ASR Daily Agent despite dependency failures"
+            );
+        }
+
+        if let Err(error) = sync_daily_agent_dependency_outputs(
+            task,
+            &agent,
+            &agents_by_id,
+            requested_date,
+        ) {
+            if agent.dependency_failure_policy == AsrDailyAgentDependencyFailurePolicy::Skip {
+                let result = skipped_daily_agent_dependency_result(
+                    &agent_task,
+                    trigger_source,
+                    error,
+                    dependency_run_ids,
+                );
+                results_by_agent.insert(agent.id.clone(), result.clone());
+                results.push(result);
+                continue;
+            }
+            tracing::warn!(
+                task_id = %task.id,
+                agent_id = %agent.id,
+                error = %error,
+                "continuing ASR Daily Agent without all dependency outputs"
+            );
+        }
+
+        let artifact_issues = match missing_daily_agent_dependency_outputs(
+            task,
+            &agent,
+            &agents_by_id,
+            trigger_source,
+            requested_date,
+            force,
+        ) {
+            Ok(issues) => issues,
+            Err(error) => vec![error],
+        };
+        if daily_agent_should_skip_for_dependency_issues(&agent, &artifact_issues) {
+            let reason = format!(
+                "dependency outputs were not available: {}",
+                artifact_issues.join(", ")
+            );
+            let result = skipped_daily_agent_dependency_result(
+                &agent_task,
+                trigger_source,
+                reason,
+                dependency_run_ids,
+            );
+            results_by_agent.insert(agent.id.clone(), result.clone());
+            results.push(result);
+            continue;
+        }
+        if !artifact_issues.is_empty() {
+            tracing::warn!(
+                task_id = %task.id,
+                agent_id = %agent.id,
+                artifact_issues = ?artifact_issues,
+                "continuing ASR Daily Agent without all dependency outputs"
+            );
+        }
+
+        let mut result =
+            run_daily_agent_locked(&agent_task, trigger_source, requested_date, force).await;
+        result.dependency_run_ids = dependency_run_ids;
+        results_by_agent.insert(agent.id.clone(), result.clone());
+        results.push(result);
     }
 
     {
@@ -526,6 +660,200 @@ async fn run_daily_agents(
     }
 
     results
+}
+
+fn skipped_daily_agent_dependency_result(
+    task: &AsrDirectoryTask,
+    trigger_source: &str,
+    reason: String,
+    dependency_run_ids: Vec<String>,
+) -> DailyAgentRunResult {
+    let started_at_ms = now_ms();
+    let run_id = format!("{}-{}", started_at_ms, uuid::Uuid::new_v4());
+    let status = "skipped_dependency_failed";
+    let _ = update_daily_agent_status(task, status, Some(&reason), &run_id);
+    tracing::warn!(
+        task_id = %task.id,
+        agent_id = %task.daily_agent.agent_id,
+        trigger_source,
+        reason = %reason,
+        "skipped ASR Daily Agent because dependency requirements were not satisfied"
+    );
+    DailyAgentRunResult {
+        agent_id: task.daily_agent.agent_id.clone(),
+        agent_name: task.daily_agent.name.clone(),
+        run_id,
+        status: status.to_string(),
+        trigger_source: trigger_source.to_string(),
+        started_at_ms,
+        finished_at_ms: now_ms(),
+        error: Some(reason.clone()),
+        reports_generated: Vec::new(),
+        dependency_run_ids,
+        skipped_reason: Some(reason),
+    }
+}
+
+fn daily_agent_should_skip_for_dependency_issues(
+    agent: &AsrDailyAgentItem,
+    dependency_issues: &[String],
+) -> bool {
+    !dependency_issues.is_empty()
+        && agent.dependency_failure_policy == AsrDailyAgentDependencyFailurePolicy::Skip
+}
+
+fn missing_daily_agent_dependency_outputs(
+    task: &AsrDirectoryTask,
+    agent: &AsrDailyAgentItem,
+    agents_by_id: &HashMap<String, AsrDailyAgentItem>,
+    trigger_source: &str,
+    requested_date: Option<&str>,
+    force: bool,
+) -> Result<Vec<String>, String> {
+    if agent
+        .dependencies
+        .iter()
+        .all(|dependency| !dependency.include_output)
+    {
+        return Ok(Vec::new());
+    }
+    let agent_task = task_for_daily_agent(task, agent);
+    let plan = build_daily_agent_change_plan(&agent_task, trigger_source, requested_date, force)?;
+    let processed = load_daily_agent_processed_state(&task.id);
+    let mut missing = Vec::new();
+    for dependency in agent
+        .dependencies
+        .iter()
+        .filter(|dependency| dependency.include_output)
+    {
+        let Some(upstream_agent) = agents_by_id.get(&dependency.agent_id) else {
+            missing.push(format!("{}=not_configured", dependency.agent_id));
+            continue;
+        };
+        let upstream_task = task_for_daily_agent(task, upstream_agent);
+        for entry in plan
+            .entries
+            .iter()
+            .filter(|entry| entry.change_kind != DailyAgentChangeKind::Unchanged)
+        {
+            let path = daily_agent_upstream_input_dir(&agent_task, &dependency.agent_id)
+                .join(format!("{}-report.md", entry.date));
+            if !path.is_file() {
+                missing.push(format!("{}:{}", dependency.agent_id, entry.date));
+                continue;
+            }
+            let processed_key = daily_agent_processed_key(&upstream_task, &entry.date);
+            let upstream_document = processed.documents.get(&processed_key).or_else(|| {
+                (upstream_agent.id == DEFAULT_DAILY_AGENT_ID)
+                    .then(|| processed.documents.get(&entry.date))
+                    .flatten()
+            });
+            if upstream_document
+                .is_none_or(|document| document.source_sha256 != entry.source_sha256)
+            {
+                missing.push(format!(
+                    "{}:{}=stale",
+                    dependency.agent_id, entry.date
+                ));
+            }
+        }
+    }
+    Ok(missing)
+}
+
+async fn run_selected_daily_agent_with_dependencies(
+    task: &AsrDirectoryTask,
+    agent: &AsrDailyAgentItem,
+    trigger_source: &str,
+    requested_date: Option<&str>,
+    force: bool,
+) -> DailyAgentRunResult {
+    let agent_task = task_for_daily_agent(task, agent);
+    let agents = normalized_daily_agents(&task.daily_agent);
+    let agents_by_id = agents
+        .iter()
+        .cloned()
+        .map(|agent| (agent.id.clone(), agent))
+        .collect::<HashMap<_, _>>();
+    let dependency_run_ids = agent
+        .dependencies
+        .iter()
+        .filter_map(|dependency| {
+            agents_by_id
+                .get(&dependency.agent_id)
+                .and_then(|upstream| upstream.last_run_id.clone())
+        })
+        .collect::<Vec<_>>();
+    let dependency_issues = agent
+        .dependencies
+        .iter()
+        .filter_map(|dependency| {
+            let status = agents_by_id
+                .get(&dependency.agent_id)
+                .and_then(|upstream| upstream.last_status.as_deref())
+                .unwrap_or("not_run");
+            (status != "success").then(|| format!("{}={status}", dependency.agent_id))
+        })
+        .collect::<Vec<_>>();
+
+    if daily_agent_should_skip_for_dependency_issues(agent, &dependency_issues) {
+        return skipped_daily_agent_dependency_result(
+            &agent_task,
+            trigger_source,
+            format!(
+                "dependency requirements were not satisfied: {}",
+                dependency_issues.join(", ")
+            ),
+            dependency_run_ids,
+        );
+    }
+
+    if let Err(error) =
+        sync_daily_agent_dependency_outputs(task, agent, &agents_by_id, requested_date)
+    {
+        if agent.dependency_failure_policy == AsrDailyAgentDependencyFailurePolicy::Skip {
+            return skipped_daily_agent_dependency_result(
+                &agent_task,
+                trigger_source,
+                error,
+                dependency_run_ids,
+            );
+        }
+        tracing::warn!(
+            task_id = %task.id,
+            agent_id = %agent.id,
+            error = %error,
+            "continuing manually selected ASR Daily Agent without all dependency outputs"
+        );
+    }
+
+    let artifact_issues = match missing_daily_agent_dependency_outputs(
+        task,
+        agent,
+        &agents_by_id,
+        trigger_source,
+        requested_date,
+        force,
+    ) {
+        Ok(issues) => issues,
+        Err(error) => vec![error],
+    };
+    if daily_agent_should_skip_for_dependency_issues(agent, &artifact_issues) {
+        return skipped_daily_agent_dependency_result(
+            &agent_task,
+            trigger_source,
+            format!(
+                "dependency outputs were not available: {}",
+                artifact_issues.join(", ")
+            ),
+            dependency_run_ids,
+        );
+    }
+
+    let mut result =
+        run_daily_agent(&agent_task, trigger_source, requested_date, force).await;
+    result.dependency_run_ids = dependency_run_ids;
+    result
 }
 
 fn daily_agent_effective_last_status(task: &AsrDirectoryTask) -> Option<String> {
@@ -688,6 +1016,8 @@ async fn run_daily_agent_locked(
         finished_at_ms,
         error,
         reports_generated,
+        dependency_run_ids: Vec::new(),
+        skipped_reason: None,
     }
 }
 

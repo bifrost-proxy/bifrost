@@ -8,6 +8,26 @@ fn chatgpt_web_browser_defaults_to_headed_mode() {
 }
 
 #[test]
+fn login_page_readiness_rejects_account_chooser_and_disabled_composer() {
+    assert!(login_page_state_is_ready(&serde_json::json!({
+        "composerVisible": true,
+        "composerDisabled": false,
+        "accountChooserVisible": false
+    })));
+    assert!(!login_page_state_is_ready(&serde_json::json!({
+        "composerVisible": true,
+        "composerDisabled": false,
+        "accountChooserVisible": true
+    })));
+    assert!(!login_page_state_is_ready(&serde_json::json!({
+        "composerVisible": true,
+        "composerDisabled": true,
+        "accountChooserVisible": false
+    })));
+    assert!(!login_page_state_is_ready(&serde_json::json!({})));
+}
+
+#[test]
 fn im_long_reply_delivery_chatgpt_web_dom_extraction_does_not_truncate_response_text() {
     let source = include_str!("interaction.rs");
     assert!(
