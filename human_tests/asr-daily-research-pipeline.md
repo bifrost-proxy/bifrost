@@ -76,6 +76,19 @@
 - 每题摘要均可点击进入对应独立 ChatGPT 会话。
 - 周报只保留反复判断、未解决问题、形成中的方法论、产品机会、认知变化和下周优先项。
 
+### TC-ADRP-07：“帮我记录一下”研究意图精确分流
+
+1. 输入用户确认的真实研究正样本：华为“韬”定律、SpaceX、Claude Managed Agents、Codex Sub Agent、播客声纹翻译、微软“企业数字基础设施”、段永平微软持仓、金建成修正系数、信贷与储蓄/长短周期、阿里研究。
+2. 同时输入线上超时、报警屏蔽、Proxy 拦截失效、Session 队列、TCC/PPE 差异、消息重复、修 Bug、查日志等记录事项。
+3. 使用默认 `research_seed` Prompt 生成分类结果，再由 `research_dispatcher` 生成 manifest。
+
+预期：
+
+- 正样本进入 `research_questions`，并保留原始问题与上下文。
+- 运行故障和执行事项进入 `action_item` 或 `internal_investigation`，不会进入 manifest。
+- “帮我记录一下”本身不触发研究；没有真正研究问题时允许输出空数组。
+- 不输出研究优先级或分数。
+
 ## 执行记录
 
 | 日期 | 用例 | 结果 |
@@ -86,3 +99,4 @@
 | 2026-07-12 | TC-ADRP-04 | 检查 `ibkr-portfolio-dashboard`：GitHub 跟踪代码、Supabase schema 和读取逻辑；真实交易行不在 Git 跟踪文件中。context Runner 类型限制测试与编译通过。 |
 | 2026-07-12 | TC-ADRP-05 | 前端 TypeScript 构建与 160 个单元测试通过；临时 18883 真实服务页面确认 fan-out 开关已开启、Max Questions=8、Runner=`chatgpt-web`、`ibkr_runtime` fallback 可见，页面明确提示每题独立会话及 Chat + Pro 约束。截图：`artifacts/asr-daily-research-ui.png`。 |
 | 2026-07-12 | TC-ADRP-06 | 待 Pro 真实研究完成后执行微信与周度洞察人验。 |
+| 2026-07-12 | TC-ADRP-07 | 通过。使用默认 `research_seed` Prompt 真实运行 Codex：用户确认的 10 个研究主题全部进入 `research_questions`，6 个故障/执行事项全部进入 `non_research_items`（10/10、6/6）。追加未直接写入样例的泛化测试：云厂商基础设施判断、多代理框架比较、保留音色翻译正确进入研究；只有主题词的“帮我记录一下 SpaceX”进入 `memory_only`，异常归因产品灵感进入 `weekly_insight`，入口白屏修复进入 `action_item`。全程未输出优先级或分数。 |

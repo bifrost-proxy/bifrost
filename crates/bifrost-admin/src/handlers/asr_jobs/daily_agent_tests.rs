@@ -584,11 +584,69 @@ fn daily_agent_default_template_keeps_knowledge_modules_inside_report() {
     assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("### 长期想法与效率方案"));
     assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("### 方向决策与判断"));
     assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("### 跨天待办追踪"));
-    assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("资料搜索结果"));
+    assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("## 用户主动记录事项"));
+    assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("只保证内容不丢失"));
+    assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("不能单独作为外部研究的判断依据"));
     assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("可行性分析"));
     assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("方案草案"));
     assert!(DEFAULT_ASR_DAILY_AGENTS_MD.contains("不是装饰性标题"));
     assert!(!DEFAULT_ASR_DAILY_AGENTS_MD.contains("`knowledge/"));
+}
+
+#[test]
+fn daily_agent_research_seed_template_separates_recording_from_research_intent() {
+    assert_eq!(
+        daily_agent_instruction_template(DEFAULT_RESEARCH_SEED_AGENT_ID),
+        DEFAULT_ASR_RESEARCH_SEED_AGENT_MD
+    );
+    assert!(DEFAULT_ASR_RESEARCH_SEED_AGENT_MD
+        .contains("“帮我记录一下”只表示用户希望保留这段内容，不代表用户要求研究"));
+    assert!(DEFAULT_ASR_RESEARCH_SEED_AGENT_MD.contains("external_research"));
+    assert!(DEFAULT_ASR_RESEARCH_SEED_AGENT_MD.contains("internal_investigation"));
+    assert!(DEFAULT_ASR_RESEARCH_SEED_AGENT_MD.contains("华为“韬”定律"));
+    assert!(DEFAULT_ASR_RESEARCH_SEED_AGENT_MD.contains("Claude Managed Agents"));
+    assert!(DEFAULT_ASR_RESEARCH_SEED_AGENT_MD.contains("微软是否正在成为“企业数字基础设施”"));
+    assert!(DEFAULT_ASR_RESEARCH_SEED_AGENT_MD.contains("线上超时、报警屏蔽"));
+    assert!(DEFAULT_ASR_RESEARCH_SEED_AGENT_MD.contains("不做研究优先级排序"));
+}
+
+#[test]
+fn daily_agent_research_dispatcher_only_schedules_research_questions() {
+    assert_eq!(
+        daily_agent_instruction_template(DEFAULT_RESEARCH_DISPATCHER_AGENT_ID),
+        DEFAULT_ASR_RESEARCH_DISPATCHER_AGENT_MD
+    );
+    assert!(DEFAULT_ASR_RESEARCH_DISPATCHER_AGENT_MD
+        .contains("只调度上游 `research_questions`"));
+    assert!(DEFAULT_ASR_RESEARCH_DISPATCHER_AGENT_MD
+        .contains("绝不调度 `non_research_items`"));
+    assert!(DEFAULT_ASR_RESEARCH_DISPATCHER_AGENT_MD.contains("不做优先级排序"));
+    assert!(DEFAULT_ASR_RESEARCH_DISPATCHER_AGENT_MD.contains("original_question"));
+}
+
+#[test]
+fn daily_agent_research_template_migration_preserves_custom_instructions() {
+    let legacy_generic = "# 全天候私人助理整理指南\n\n旧的通用模板";
+    assert!(should_replace_legacy_generic_research_instructions(
+        DEFAULT_RESEARCH_SEED_AGENT_ID,
+        &AsrDailyAgentInstructionsSource::Default,
+        legacy_generic,
+    ));
+    assert!(should_replace_legacy_generic_research_instructions(
+        DEFAULT_RESEARCH_DISPATCHER_AGENT_ID,
+        &AsrDailyAgentInstructionsSource::Default,
+        legacy_generic,
+    ));
+    assert!(!should_replace_legacy_generic_research_instructions(
+        DEFAULT_RESEARCH_SEED_AGENT_ID,
+        &AsrDailyAgentInstructionsSource::Custom,
+        legacy_generic,
+    ));
+    assert!(!should_replace_legacy_generic_research_instructions(
+        DEFAULT_DAILY_AGENT_ID,
+        &AsrDailyAgentInstructionsSource::Default,
+        legacy_generic,
+    ));
 }
 
 #[test]

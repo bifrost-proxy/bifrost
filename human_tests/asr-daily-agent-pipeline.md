@@ -39,7 +39,7 @@
 2. 创建包含公开合成日报的临时 ASR Task，配置 `daily_report -> research_agent` 并关闭自动 IM Delivery。
 3. Run All，等待两个 Agent 成功并读取两个 report。
 
-预期：日报突出结论、决定、待办和“帮我记录一下”的灵感；研究 Agent 基于同日上游日报抽取高价值研究种子并完成一轮调研；两者使用独立新会话且不含认证信息。
+预期：日报突出结论、决定、待办和“帮我记录一下”的灵感；研究 Agent 基于同日上游日报抽取真正的外部研究问题、保留原始问题并完成一轮调研，不做优先级评分；两者使用独立新会话且不含认证信息。
 
 ### TC-DAP-05 周度洞察 Schedule 可复用研究产物
 
@@ -65,6 +65,6 @@
 ## 真实执行记录
 
 - 2026-07-12：TC-DAP-01/02/03 通过。`cargo test -p bifrost-admin daily_agent --lib` 通过 49 项；`test_asr_daily_agents_api.sh` 使用隔离数据目录验证反向数组仍按依赖拓扑执行、同日产物复制、非法依赖拒绝、上游失败时下游 `skipped_dependency_failed`，并覆盖陈旧 source hash 拦截。
-- 2026-07-12：TC-DAP-04 通过。隔离端口 `18881`、隔离数据目录和公开合成日报下，真实 ChatGPT Web `daily_report -> research_agent` 两段 run 均为 `success`；日报保留两条“帮我记录一下”并对三个研究种子评分，研究报告区分事实、推断、不确定性和最小验证动作。
+- 2026-07-12：TC-DAP-04 通过。隔离端口 `18881`、隔离数据目录和公开合成日报下，真实 ChatGPT Web `daily_report -> research_agent` 两段 run 均为 `success`；日报保留两条“帮我记录一下”，研究报告区分事实、推断、不确定性和最小验证动作。该早期原型曾输出研究种子评分，现已由 `asr-daily-research-pipeline.md` 的五段流水线替代；当前契约明确禁止优先级评分。
 - 2026-07-12：TC-DAP-05/06 通过。默认 `9900` 服务临时创建并手动执行周度 Codex Schedule，run `6f4a092e` 为 `success`，微信 outbound 成功后删除测试 Schedule；随后把真实研究报告精简结论发送到 `jcc-reader-weixin`，message id `bifrost-weixin-1783824014855-adfbaab4-d661-4d1c-962b-28767e42de60`，未发送原始录音或完整转录。
 - 2026-07-12：TC-DAP-07 通过。浏览器真实页面显示 `Dependencies` 列；研究 Agent 详情页正确展示 `daily_report`、`Include output` 和 `Skip this agent`，关键截图保存在 `/tmp/bifrost-dap-agent-dependencies.png`。
