@@ -818,6 +818,10 @@ jobs:
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "2"
       BIFROST_E2E_SHELL_TEST_TIMEOUT: "1260"
+      # Linux Unit/Integration and Linux Shell already compile and execute the
+      # HTTP/3 Rust integration test. macOS still runs the real proxy scenarios
+      # without spending 10+ minutes rebuilding test-only dependencies.
+      SKIP_CARGO_TEST: "true"
       TIMEOUT: "90"
       PYTHONIOENCODING: utf-8
     steps:
