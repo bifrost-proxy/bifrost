@@ -40,9 +40,7 @@ mod client;
 mod host_rule;
 mod io;
 
-pub use self::bidirectional::{
-    tunnel_bidirectional, tunnel_bidirectional_with_cancel, TunnelStats,
-};
+pub use self::bidirectional::{tunnel_bidirectional_with_cancel, TunnelStats};
 pub use self::cert::SingleCertResolver;
 use self::host_rule::parse_host_rule;
 use self::io::{BufferedIo, CombinedAsyncRw};
@@ -1429,11 +1427,14 @@ struct RawTlsTunnelContext {
     cancel_rx: oneshot::Receiver<()>,
 }
 
-async fn tunnel_intercepted_non_http_tls_with_cancel(
-    client_tls: tokio_rustls::server::TlsStream<TokioIo<Upgraded>>,
+async fn tunnel_intercepted_non_http_tls_with_cancel<C>(
+    client_tls: C,
     initial_payload: BytesMut,
     ctx: RawTlsTunnelContext,
-) -> Result<bool> {
+) -> Result<bool>
+where
+    C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let RawTlsTunnelContext {
         original_host,
         original_port,
@@ -10979,6 +10980,53 @@ mod coverage_90_wave {
 
         cancel_tx.send(()).unwrap();
         assert!(task.await.unwrap().unwrap());
+    }
+
+    #[tokio::test]
+    async fn intercepted_non_http_tls_connects_and_relays_through_tls_upstream() {
+        bifrost_tls::init_crypto_provider();
+        let ca = Arc::new(bifrost_tls::generate_root_ca().unwrap());
+        let cert = bifrost_tls::DynamicCertGenerator::new(ca)
+            .generate_for_domain("127.0.0.1")
+            .unwrap();
+        let acceptor =
+            TlsAcceptor::from(bifrost_tls::TlsConfig::build_server_config(&cert).unwrap());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_address = listener.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = acceptor.accept(stream).await.unwrap();
+            let mut received = [0_u8; 14];
+            stream.read_exact(&mut received).await.unwrap();
+            assert_eq!(&received, b"initial-client");
+            stream.write_all(b"upstream").await.unwrap();
+            let mut closed = [0_u8; 1];
+            let _ = stream.read(&mut closed).await;
+        });
+
+        let (proxy_client, mut client_peer) = tokio::io::duplex(1024);
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let relay_task = tokio::spawn(tunnel_intercepted_non_http_tls_with_cancel(
+            proxy_client,
+            BytesMut::from(&b"initial-"[..]),
+            RawTlsTunnelContext {
+                original_host: "127.0.0.1".to_string(),
+                original_port: upstream_address.port(),
+                unsafe_ssl: true,
+                verbose_logging: true,
+                req_id: "REQ-intercepted-raw-tls".to_string(),
+                admin_state: None,
+                cancel_rx,
+            },
+        ));
+
+        client_peer.write_all(b"client").await.unwrap();
+        let mut response = [0_u8; 8];
+        client_peer.read_exact(&mut response).await.unwrap();
+        assert_eq!(&response, b"upstream");
+        cancel_tx.send(()).unwrap();
+        assert!(relay_task.await.unwrap().unwrap());
+        upstream_task.await.unwrap();
     }
 
     #[tokio::test]

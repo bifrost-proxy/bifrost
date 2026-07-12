@@ -10,23 +10,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::debug;
 
-pub async fn tunnel_bidirectional(
-    upgraded: Upgraded,
-    target: TcpStream,
-    verbose_logging: bool,
-    req_id: &str,
-    admin_state: Option<&Arc<AdminState>>,
-) -> Result<()> {
-    tunnel_bidirectional_io(
-        TokioIo::new(upgraded),
-        target,
-        verbose_logging,
-        req_id,
-        admin_state,
-    )
-    .await
-}
-
+#[allow(dead_code)]
 async fn tunnel_bidirectional_io<C, T>(
     client: C,
     target: T,

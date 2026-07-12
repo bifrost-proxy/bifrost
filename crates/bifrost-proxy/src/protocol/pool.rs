@@ -917,7 +917,7 @@ mod tests {
         pool.cleanup().await;
 
         let task = pool.clone().start_cleanup_task();
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
     }

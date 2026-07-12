@@ -299,12 +299,17 @@ BIFROST_E2E=1 BIFROST_CHATGPT_WEB_E2E_MOCK=1 \
   target/release/bifrost-e2e \
   --test im_gateway_chatgpt_web_restores_conversation_after_service_restart \
   --jobs 1 --test-timeout 120
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy \
+  intercepted_non_http_tls_connects_and_relays_through_tls_upstream \
+  --all-features -- --nocapture
 ```
 
 **预期**：coverage pipeline contract 全部通过；TLS ON -> OFF 后第二次请求使用新连接，
 流量统计精确为 `HTTPS=1` 且 `TUNNEL>=1`；release Runner 只有在 E2E 上下文与 mock
 请求双开关同时存在时走 ChatGPT Web mock，服务重启会话恢复用例 1/1 通过；
 `bifrost-e2e` 显式显示 `EXEMPT`，且不进入 crate/workspace 自覆盖率百分比门禁。
+非 HTTP TLS 拦截成功连接真实本地 TLS upstream，并双向转发初始载荷、客户端载荷和
+upstream 响应，取消信号能够正常结束 relay。
 
 ## 执行记录
 
@@ -408,4 +413,5 @@ BIFROST_E2E=1 BIFROST_CHATGPT_WEB_E2E_MOCK=1 \
   10 个能力契约及 3 个能力分片均通过；真实运行 TLS ON -> OFF 用例 1/1 通过，切换后
   流量为 `HTTPS=1`、`TUNNEL=1`；release Runner 双开关 ChatGPT Web 会话恢复用例
   1/1 通过，耗时 1.11 秒；测试框架自身已按产品边界标记为 `metric="exempt"`，
-  其 Rules/Shell/Runner 可执行门禁保持强制。
+  其 Rules/Shell/Runner 可执行门禁保持强制；非 HTTP TLS 拦截真实本地 TLS upstream
+  双向 relay 用例 1/1 通过。
