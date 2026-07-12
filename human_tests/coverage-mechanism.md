@@ -340,6 +340,8 @@ Linux/macOS Shell CI 显式跳过重复的 Rust integration 编译，但仍执�
 integration test。
 Layered Coverage 的 Shell 阶段也不得额外构建未插桩 release test；HTTP/3 integration
 coverage 来自前置 Unit/Integration profile，Shell 只追加真实代理行为 profile。
+Layered Coverage 必须预先构建 Web 静态资源，并让历史 `target/release` 路径解析到
+同一份 debug 插桩二进制，避免旧 Shell 用例绕过覆盖率或因路径缺失产生假失败。
 
 ## 执行记录
 

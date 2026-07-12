@@ -377,6 +377,7 @@ main() {
     snapshot_profiles "$unit_profiles"
 
     step "Building E2E binaries with llvm-cov instrumentation"
+    pnpm --dir web build
     eval "$(cargo llvm-cov show-env --sh)"
     export CARGO_TARGET_DIR="$PROFILE_ROOT"
     export CARGO_LLVM_COV_TARGET_DIR="$PROFILE_ROOT"
@@ -385,6 +386,9 @@ main() {
     cargo build --bin bifrost --bin bifrost-e2e --jobs "$JOBS"
     export BIFROST_BIN="$PROFILE_ROOT/debug/bifrost"
     export BIFROST_E2E_BIN="$PROFILE_ROOT/debug/bifrost-e2e"
+    mkdir -p target/release
+    ln -sfn "$BIFROST_BIN" target/release/bifrost
+    ln -sfn "$BIFROST_E2E_BIN" target/release/bifrost-e2e
     prepare_isolated_e2e_environment
 
     step "Running E2E suites with instrumented binaries"
