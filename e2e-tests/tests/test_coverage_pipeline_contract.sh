@@ -71,6 +71,7 @@ grep -Fq 'bash scripts/ci/coverage-all.sh --with-e2e' "$layered_workflow"
 grep -Fq 'production-coverage.json' "$layered_workflow"
 grep -Fq 'metric = "production"' scripts/ci/coverage-thresholds.toml
 grep -Fq 'min = 90.0' scripts/ci/coverage-thresholds.toml
+grep -A5 -F '[crates.bifrost-e2e]' scripts/ci/coverage-thresholds.toml | grep -Fq 'metric = "exempt"'
 grep -Fq 'Enforcing bifrost-proxy production coverage gate' "$coverage_all"
 grep -Fq 'unit-integration.json' "$layered_workflow"
 grep -Fq 'e2e.json' "$layered_workflow"

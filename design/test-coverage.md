@@ -93,7 +93,7 @@ Bifrost 是一个多 crate workspace（bifrost-core / bifrost-proxy / bifrost-ad
 | bifrost-asr | 94.0 | 91.0 | baseline 94.52% |
 | bifrost-script | 91.0 | — | baseline 91.42% |
 | skills | 90.0 | — | reached 95.4% |
-| bifrost-e2e | 50.0 | — | Linux baseline 50.68% |
+| bifrost-e2e | exempt | — | 测试框架不做自覆盖率；由 Rules/Shell/Runner 可执行契约门禁 |
 
 ### E2E 插桩细节
 

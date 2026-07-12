@@ -140,5 +140,7 @@ min = 91.0
 # tempdir-backed store round-trips, and full authoring state-machine paths.
 min = 90.0
 [crates.bifrost-e2e]
-# Linux CI baseline is 50.68%; ratchet upward as e2e harness coverage grows.
-min = 50.0
+# Test harness, not production code. Its quality is enforced by executable
+# Rules/Shell/Runner contracts; self-coverage is excluded from crate and
+# workspace percentage gates.
+metric = "exempt"

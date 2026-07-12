@@ -177,7 +177,7 @@ design/
 | `bifrost-asr` | 94.0 | 当前基线 94.52% |
 | `bifrost-script` | 91.0 | 当前基线 91.42% |
 | `skills` | 90.0 | Linux CI 95.4% |
-| `bifrost-e2e` | 50.0 | 测试运行器自身，棘轮随 e2e 扩容 |
+| `bifrost-e2e` | exempt | 测试运行器自身；质量由可执行 Rules/Shell/Runner 契约约束，不统计自覆盖率 |
 | `agent` | 78.0 | 当前基线 78.78% |
 | `bifrost-cli` | 55.0 | wave 3-5 后基线 |
 
@@ -186,7 +186,7 @@ design/
 | Crate | 现状 | 阻塞原因 |
 |-------|------|----------|
 | `bifrost-tests` | placeholder | workspace integration test 容器；测试落在其他 crate |
-| `bifrost-e2e` | 测试运行器自身 | 不自测自己；`coverage-e2e.sh` 已通过 `--ignore-filename-regex=crates/bifrost-e2e/` 排除 |
+| `bifrost-e2e` | 测试运行器自身 | `metric="exempt"` 显式排除 crate 与 workspace 百分比门禁；`coverage-e2e.sh` 也通过 `--ignore-filename-regex=crates/bifrost-e2e/` 排除，质量由 Rules/Shell/Runner 实际执行结果保证 |
 | `bifrost-power` | 平台 hooks | macOS / Windows IOKit 分支 Linux 不可达 |
 | `bifrost-device` | 平台特性 | macOS-only ioreg / Apple Configurator |
 | `bifrost-asr` | 依赖 sherpa-onnx | 部分模型文件在 CI 缺失，用 mock 走通核心路径 |
