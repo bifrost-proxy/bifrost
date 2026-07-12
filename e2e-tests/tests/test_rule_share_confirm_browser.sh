@@ -412,7 +412,7 @@ for (let i = 0; i < 120; i += 1) {
     title: document.querySelector('h1')?.textContent || '',
     hasApply: Boolean(document.querySelector('#apply')),
     hasHashInput: Boolean(document.querySelector('#confirmation')),
-    requiresHashText: document.body.innerText.includes('Type the full content hash to apply'),
+    requiresHashText: document.body?.innerText.includes('Type the full content hash to apply') ?? false,
     applyDisabled: document.querySelector('#apply')?.disabled ?? null,
     status: document.querySelector('#status')?.textContent || '',
     body: document.body?.innerText || ''
