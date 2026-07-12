@@ -22,7 +22,7 @@ ChatGPT Web 的正确落点是新增内置 adapter `chatgpt_web`：Runner 只是
 - 新增 `chatgpt_web` adapter，支持创建对话、发起对话、列出对话、获取消息、等待输出结果、展示最终结果。
 - 一个设备只登录一次；登录态存储在运行 Bifrost 的本机数据目录，后续 run 自动复用。
 - 每次 run 开始前自动检查登录态；登录失效时给出明确反馈，并由 Bifrost 后端自动弹出 Edge/Chromium 浏览器让用户完成登录。
-- 登录完成不能只依赖 `Authorization` 或 `accounts/check` 流量证明；登录页必须同时出现可见且可用的 composer，并且不再显示账号选择器，否则继续等待用户选定账号。
+- 登录完成不能只依赖 `Authorization` 或 `accounts/check` 流量证明；登录页必须同时出现可见且可用的 composer，并且不再显示账号选择器，否则继续等待用户选定账号。“欢迎回来”只有出现在可见 dialog 中才视为阻塞信号，普通首页正文的欢迎语不能单独阻塞登录完成。
 - headless 配置遇到登录页 / Cloudflare / 真人验证时，adapter 必须临时切换到 headed 等待用户处理并刷新登录态；处理完成后自动关闭 headed browser，让当前重试与后续运行都恢复 headless。
 - 登录弹窗、cookie/header 提取、登录状态验证都属于 `chatgpt_web` adapter 能力，不能依赖 Agent 操作浏览器或外部脚本/skill。
 - 与 runner/adapter 抽象对齐：Chat Gateway、IM Provider、IM Route、Schedule、WebUI 都选择 runner；runner 再通过 `adapter = "chatgpt_web"` 进入 ChatGPT Web 执行实现。

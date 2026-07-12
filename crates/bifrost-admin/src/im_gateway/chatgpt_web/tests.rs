@@ -28,6 +28,18 @@ fn login_page_readiness_rejects_account_chooser_and_disabled_composer() {
 }
 
 #[test]
+fn login_page_inspection_only_treats_welcome_back_as_a_dialog_marker() {
+    let source = include_str!("../chatgpt_web.rs");
+    let body_markers = source
+        .split("const bodyAccountChooserMarkers = [")
+        .nth(1)
+        .and_then(|value| value.split("];").next())
+        .expect("body account chooser marker list should exist");
+    assert!(!body_markers.contains("welcome back"));
+    assert!(!body_markers.contains("欢迎回来"));
+}
+
+#[test]
 fn im_long_reply_delivery_chatgpt_web_dom_extraction_does_not_truncate_response_text() {
     let source = include_str!("interaction.rs");
     assert!(
