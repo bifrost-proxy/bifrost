@@ -624,12 +624,13 @@ pub async fn run_adapter(
     prompt: &str,
     run_dir: &Path,
 ) -> Result<ChatGptWebRunOutput, String> {
-    if std::env::var("BIFROST_COVERAGE_E2E").ok().as_deref() == Some("1")
-        && std::env::var("BIFROST_CHATGPT_WEB_E2E_MOCK")
-            .ok()
-            .as_deref()
-            == Some("1")
-    {
+    let e2e_mock_requested = std::env::var("BIFROST_CHATGPT_WEB_E2E_MOCK")
+        .ok()
+        .as_deref()
+        == Some("1");
+    let explicit_e2e = std::env::var("BIFROST_E2E").ok().as_deref() == Some("1")
+        || std::env::var("BIFROST_COVERAGE_E2E").ok().as_deref() == Some("1");
+    if e2e_mock_requested && explicit_e2e {
         return Ok(mock_run_adapter_for_e2e(request, prompt));
     }
 

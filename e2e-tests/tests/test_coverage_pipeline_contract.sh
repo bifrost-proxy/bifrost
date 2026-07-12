@@ -111,6 +111,7 @@ grep -Fq 'export RUSTUP_HOME="$ORIGINAL_RUSTUP_HOME"' "$coverage_e2e"
 grep -Fq 'trap cleanup_coverage_environment EXIT' "$coverage_e2e"
 grep -Fq 'export PATH="$(dirname "$NODE_BIN"):$PATH"' "$coverage_e2e"
 grep -Fq 'Instrumented E2E suite failed' "$coverage_e2e"
+grep -Fq 'export BIFROST_E2E=1' scripts/ci/run-e2e-runner.sh
 grep -Fq 'shell_test_capability_group()' "$runner"
 grep -Fq 'use_capability_shell_shards()' "$runner"
 grep -Fq 'capability: proxy-core' "$ci_workflow"
@@ -132,13 +133,13 @@ partition_dir="$(mktemp -d)"
 trap 'rm -rf "$partition_dir"' EXIT
 BIFROST_E2E_CAPABILITY_SHARDS=0 BIFROST_E2E_SHARD_INDEX=0 BIFROST_E2E_SHARD_TOTAL=0 \
   bash "$runner" --ci --full-shell --skip-rules --skip-runner --skip-ui \
-  --skip-build --list-shell-tests | sort > "$partition_dir/all.txt"
+  --skip-build --list-shell-tests | sort >"$partition_dir/all.txt"
 for shard in 1 2 3; do
   BIFROST_E2E_CAPABILITY_SHARDS=1 BIFROST_E2E_SHELL_JOBS=2 bash "$runner" \
     --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build \
-    --shard "$shard/3" --list-shell-tests | sort > "$partition_dir/shard-$shard.txt"
+    --shard "$shard/3" --list-shell-tests | sort >"$partition_dir/shard-$shard.txt"
 done
-sort "$partition_dir"/shard-*.txt > "$partition_dir/combined.txt"
+sort "$partition_dir"/shard-*.txt >"$partition_dir/combined.txt"
 cmp -s "$partition_dir/all.txt" "$partition_dir/combined.txt"
 [[ "$(uniq -d "$partition_dir/combined.txt" | wc -l | tr -d ' ')" -eq 0 ]]
 grep -Fxq 'test_http3_e2e.sh' "$partition_dir/shard-1.txt"

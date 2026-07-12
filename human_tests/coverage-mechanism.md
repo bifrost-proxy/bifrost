@@ -295,10 +295,15 @@ HOME="$HOME" CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" \
   BIFROST_BIN="$PWD/target/release/bifrost" \
   target/release/bifrost-e2e --test tls_switch_intercept_to_tunnel \
   --jobs 1 --test-timeout 30
+BIFROST_E2E=1 BIFROST_CHATGPT_WEB_E2E_MOCK=1 \
+  target/release/bifrost-e2e \
+  --test im_gateway_chatgpt_web_restores_conversation_after_service_restart \
+  --jobs 1 --test-timeout 120
 ```
 
 **预期**：coverage pipeline contract 全部通过；TLS ON -> OFF 后第二次请求使用新连接，
-流量统计精确为 `HTTPS=1` 且 `TUNNEL>=1`，用例 1/1 通过。
+流量统计精确为 `HTTPS=1` 且 `TUNNEL>=1`；release Runner 只有在 E2E 上下文与 mock
+请求双开关同时存在时走 ChatGPT Web mock，服务重启会话恢复用例 1/1 通过。
 
 ## 执行记录
 
@@ -400,4 +405,5 @@ HOME="$HOME" CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" \
   `production-coverage.json`。
 - TC-COV-17：PASS。coverage pipeline contract 检查 253 个 Shell 文件、23 个工具单测、
   10 个能力契约及 3 个能力分片均通过；真实运行 TLS ON -> OFF 用例 1/1 通过，切换后
-  流量为 `HTTPS=1`、`TUNNEL=1`。
+  流量为 `HTTPS=1`、`TUNNEL=1`；release Runner 双开关 ChatGPT Web 会话恢复用例
+  1/1 通过，耗时 1.11 秒。
