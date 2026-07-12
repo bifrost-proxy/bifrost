@@ -32,6 +32,44 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let client = TokioIo::new(upgraded);
+    websocket_bidirectional_streams_with_capture(
+        client,
+        target,
+        record_id,
+        admin_state,
+        compression_cfg,
+        upstream_leftover,
+        ctx,
+        resolved_rules,
+        request_url,
+        request_method,
+        request_headers,
+        ws_meta,
+        decode_scripts,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn websocket_bidirectional_streams_with_capture<C, S>(
+    client: C,
+    target: S,
+    record_id: &str,
+    admin_state: Option<Arc<AdminState>>,
+    compression_cfg: Option<crate::protocol::PerMessageDeflateConfig>,
+    upstream_leftover: bytes::BytesMut,
+    ctx: RequestContext,
+    resolved_rules: crate::server::ResolvedRules,
+    request_url: String,
+    request_method: String,
+    request_headers: Vec<(String, String)>,
+    ws_meta: WsHandshakeMeta,
+    decode_scripts: Vec<String>,
+) -> Result<()>
+where
+    C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let (target_read, target_write) = tokio::io::split(target);
     let (client_read, client_write) = tokio::io::split(client);
 
@@ -338,5 +376,113 @@ where
                 Err(BifrostError::Network(format!("WebSocket error: {}", e)))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::BytesMut;
+    use futures_util::StreamExt;
+    use tokio::io::{duplex, split, AsyncWriteExt};
+    use tokio::time::{timeout, Duration};
+
+    use super::*;
+    use crate::protocol::{Opcode, WebSocketFrame, WebSocketReader, WebSocketWriter};
+
+    fn spawn_forwarder(
+        client: tokio::io::DuplexStream,
+        target: tokio::io::DuplexStream,
+        leftover: BytesMut,
+    ) -> tokio::task::JoinHandle<Result<()>> {
+        tokio::spawn(async move {
+            websocket_bidirectional_streams_with_capture(
+                client,
+                target,
+                "ws-capture-test",
+                None,
+                None,
+                leftover,
+                RequestContext::new(),
+                crate::server::ResolvedRules::default(),
+                "ws://example.test/socket".to_string(),
+                "GET".to_string(),
+                Vec::new(),
+                WsHandshakeMeta::default(),
+                Vec::new(),
+            )
+            .await
+        })
+    }
+
+    #[tokio::test]
+    async fn forwards_masked_client_and_unmasked_server_frames() {
+        let (client_peer, client_proxy) = duplex(4096);
+        let (server_proxy, server_peer) = duplex(4096);
+        let task = spawn_forwarder(client_proxy, server_proxy, BytesMut::new());
+
+        let (client_read, client_write) = split(client_peer);
+        let (server_read, server_write) = split(server_peer);
+        let mut client_reader = WebSocketReader::new(client_read);
+        let mut client_writer = WebSocketWriter::new(client_write, true);
+        let mut server_reader = WebSocketReader::new(server_read);
+        let mut server_writer = WebSocketWriter::new(server_write, false);
+
+        client_writer.write_text("from-client").await.unwrap();
+        let forwarded = timeout(Duration::from_secs(2), server_reader.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(forwarded.opcode, Opcode::Text);
+        assert_eq!(forwarded.payload.as_ref(), b"from-client");
+        assert!(forwarded.mask.is_some());
+
+        server_writer.write_binary(b"from-server").await.unwrap();
+        let returned = timeout(Duration::from_secs(2), client_reader.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(returned.opcode, Opcode::Binary);
+        assert_eq!(returned.payload.as_ref(), b"from-server");
+        assert!(returned.mask.is_none());
+
+        client_writer.into_inner().shutdown().await.unwrap();
+        server_writer.into_inner().shutdown().await.unwrap();
+        timeout(Duration::from_secs(2), task)
+            .await
+            .expect("forwarder timed out")
+            .expect("forwarder task panicked")
+            .expect("forwarder returned an error");
+    }
+
+    #[tokio::test]
+    async fn forwards_upstream_leftover_before_reading_target_stream() {
+        let (client_peer, client_proxy) = duplex(4096);
+        let (server_proxy, server_peer) = duplex(4096);
+        let initial = WebSocketFrame::text("handshake-leftover").encode();
+        let task = spawn_forwarder(client_proxy, server_proxy, BytesMut::from(initial.as_ref()));
+
+        let (client_read, client_write) = split(client_peer);
+        let (_server_read, server_write) = split(server_peer);
+        let mut client_reader = WebSocketReader::new(client_read);
+
+        let forwarded = timeout(Duration::from_secs(2), client_reader.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(forwarded.opcode, Opcode::Text);
+        assert_eq!(forwarded.payload.as_ref(), b"handshake-leftover");
+
+        let mut client_write = client_write;
+        let mut server_write = server_write;
+        client_write.shutdown().await.unwrap();
+        server_write.shutdown().await.unwrap();
+        timeout(Duration::from_secs(2), task)
+            .await
+            .expect("forwarder timed out")
+            .expect("forwarder task panicked")
+            .expect("forwarder returned an error");
     }
 }

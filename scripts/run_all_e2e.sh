@@ -1138,6 +1138,37 @@ print_final_report() {
       echo "  reason: ${SUITE_REASONS[$i]}"
     done
   fi
+
+  write_machine_report
+}
+
+write_machine_report() {
+  local ledger="$REPORT_DIR/summary.tsv"
+  local output="${BIFROST_E2E_SUMMARY_JSON:-$REPORT_DIR/summary.json}"
+  local i
+
+  : > "$ledger"
+  for i in "${!SUITE_NAMES[@]}"; do
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "${SUITE_STATUSES[$i]}" \
+      "$(tsv_clean "${SUITE_NAMES[$i]}")" \
+      "${SUITE_DURATIONS[$i]}" \
+      "$(tsv_clean "${SUITE_LOGS[$i]}")" \
+      "$(tsv_clean "${SUITE_REASONS[$i]}")" >> "$ledger"
+  done
+
+  python3 scripts/ci/e2e-summary.py "$ledger" "$output" \
+    --metadata "platform=$PLATFORM" \
+    --metadata "mode=$MODE" \
+    --metadata "shell_mode=$SHELL_MODE" \
+    --metadata "shard=${SHARD_INDEX}/${SHARD_TOTAL}"
+}
+
+tsv_clean() {
+  local value="$1"
+  value="${value//$'\t'/ }"
+  value="${value//$'\n'/\\n}"
+  printf '%s' "$value"
 }
 
 should_skip_full_shell_test() {
@@ -1766,7 +1797,11 @@ if [[ "$RUN_UI" -eq 1 ]]; then
 
   header "Running Playwright UI E2E suite"
   if [[ "$ui_build_ok" -eq 1 ]]; then
-    run_and_capture "ui:playwright" "$PNPM_BIN" --dir web run test:ui
+    if [[ "${BIFROST_UI_TEST_PROFILE:-full}" == "critical" ]]; then
+      run_and_capture "ui:playwright-critical" bash scripts/ci/run-ui-critical.sh
+    else
+      run_and_capture "ui:playwright" "$PNPM_BIN" --dir web run test:ui
+    fi
   else
     skip_suite "ui:playwright" "ui debug build failed"
   fi

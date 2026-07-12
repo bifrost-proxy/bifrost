@@ -1,0 +1,68 @@
+name: Full UI E2E Audit
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 20 * * 6"
+
+permissions:
+  contents: read
+
+jobs:
+  playwright-full-audit:
+    name: Complete Playwright suite (debt audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-ui-full-audit
+      BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports/ui-full
+      BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT: "1"
+      BIFROST_DISABLE_TRAY: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium-headless-shell
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ true }}
+      - name: Run complete Playwright suite and retain the current debt signal
+        id: full_ui
+        continue-on-error: true
+        run: >-
+          bash scripts/run_all_e2e.sh --ci --skip-rules --skip-shell
+          --skip-runner
+      - name: Publish audit status
+        if: always()
+        run: |
+          echo "## Full UI E2E audit" >> "$GITHUB_STEP_SUMMARY"
+          echo "Result: ${{ steps.full_ui.outcome }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "The PR gate is the critical capability matrix; this scheduled run tracks the complete historical suite until its registered debt reaches zero." >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload complete Playwright diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-e2e-full-audit
+          path: |
+            ${{ github.workspace }}/.e2e-reports/ui-full/
+            ${{ github.workspace }}/web/playwright-report/
+            ${{ github.workspace }}/web/test-results/
+            ${{ github.workspace }}/.ui-backend.log
+          retention-days: 14
+          if-no-files-found: ignore
+          include-hidden-files: true
+      - name: Keep unresolved full-suite debt visible
+        if: always() && steps.full_ui.outcome != 'success'
+        run: |
+          echo "The complete Playwright audit still has unresolved failures; see the uploaded report." >&2
+          exit 1

@@ -265,7 +265,7 @@ pub async fn handle_websocket_upgrade(
     Ok(response.body(empty_body()).unwrap())
 }
 
-fn build_websocket_handshake(req: &Request<Incoming>) -> Result<String> {
+fn build_websocket_handshake<B>(req: &Request<B>) -> Result<String> {
     let path = req
         .uri()
         .path_and_query()
@@ -342,4 +342,72 @@ fn build_websocket_handshake(req: &Request<Incoming>) -> Result<String> {
 
     handshake.push_str("\r\n");
     Ok(handshake)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handshake_preserves_end_to_end_headers_and_websocket_negotiation() {
+        let request = Request::builder()
+            .uri("/socket?room=alpha")
+            .header("Host", "example.test:8080")
+            .header("Sec-WebSocket-Key", "dGVzdC1rZXk=")
+            .header("Sec-WebSocket-Version", "12")
+            .header("Sec-WebSocket-Protocol", "chat, superchat")
+            .header("Sec-WebSocket-Extensions", "permessage-deflate")
+            .header("X-Trace-Id", "trace-123")
+            .body(())
+            .unwrap();
+
+        let handshake = build_websocket_handshake(&request).unwrap();
+        assert!(handshake.starts_with("GET /socket?room=alpha HTTP/1.1\r\n"));
+        assert!(handshake.contains("Host: example.test:8080\r\n"));
+        assert!(handshake.contains("Sec-WebSocket-Key: dGVzdC1rZXk=\r\n"));
+        assert!(handshake.contains("Sec-WebSocket-Version: 12\r\n"));
+        assert!(handshake.contains("Sec-WebSocket-Protocol: chat, superchat\r\n"));
+        assert!(handshake.contains("Sec-WebSocket-Extensions: permessage-deflate\r\n"));
+        assert!(handshake.contains("x-trace-id: trace-123\r\n"));
+        assert!(handshake.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn handshake_filters_hop_by_hop_and_body_framing_headers() {
+        let request = Request::builder()
+            .uri("/")
+            .header("Host", "example.test")
+            .header("Connection", "keep-alive, Upgrade")
+            .header("Proxy-Connection", "keep-alive")
+            .header("Keep-Alive", "timeout=5")
+            .header("TE", "trailers")
+            .header("Trailer", "X-Checksum")
+            .header("Content-Length", "99")
+            .header("Transfer-Encoding", "chunked")
+            .body(())
+            .unwrap();
+
+        let handshake = build_websocket_handshake(&request).unwrap();
+        assert_eq!(handshake.matches("Connection: Upgrade\r\n").count(), 1);
+        for forbidden in [
+            "Proxy-Connection:",
+            "Keep-Alive:",
+            "TE:",
+            "Trailer:",
+            "Content-Length:",
+            "Transfer-Encoding:",
+        ] {
+            assert!(!handshake.contains(forbidden), "leaked {forbidden}");
+        }
+    }
+
+    #[test]
+    fn handshake_uses_safe_defaults_for_optional_websocket_headers() {
+        let request = Request::builder().uri("/events").body(()).unwrap();
+        let handshake = build_websocket_handshake(&request).unwrap();
+
+        assert!(handshake.contains("Host: localhost\r\n"));
+        assert!(handshake.contains("Sec-WebSocket-Key: \r\n"));
+        assert!(handshake.contains("Sec-WebSocket-Version: 13\r\n"));
+    }
 }

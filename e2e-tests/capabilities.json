@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "capabilities": [
+    {
+      "id": "http-forwarding",
+      "criticality": "p0",
+      "owner": "bifrost-proxy/http",
+      "layers": ["unit", "integration", "e2e"],
+      "platforms": ["linux", "macos", "windows"],
+      "failure_modes": ["connection-refused", "upstream-reset", "timeout"],
+      "evidence": ["crates/bifrost-proxy/src/proxy/http/handler.rs", "crates/bifrost-proxy/tests/protocol_e2e.rs", "e2e-tests/rules/forwarding/http_to_http.txt", "e2e-tests/tests/test_no_rule_content_length_transparency.sh"]
+    },
+    {
+      "id": "https-connect-mitm",
+      "criticality": "p0",
+      "owner": "bifrost-proxy/tunnel",
+      "layers": ["unit", "integration", "e2e"],
+      "platforms": ["linux", "macos", "windows"],
+      "failure_modes": ["invalid-certificate", "handshake-timeout", "passthrough-fallback"],
+      "evidence": ["crates/bifrost-proxy/src/proxy/http/tunnel/mod.rs", "tests/https_proxy_test.rs", "e2e-tests/tests/test_tls_intercept_e2e.sh", "e2e-tests/tests/test_unsafe_ssl_e2e.sh"]
+    },
+    {
+      "id": "websocket-forwarding-capture",
+      "criticality": "p0",
+      "owner": "bifrost-proxy/websocket",
+      "layers": ["unit", "integration", "e2e"],
+      "platforms": ["linux", "macos", "windows"],
+      "failure_modes": ["upgrade-rejected", "half-close", "connection-reset"],
+      "evidence": ["crates/bifrost-proxy/src/proxy/http/websocket/capture.rs", "crates/bifrost-proxy/src/proxy/http/websocket/upgrade.rs", "crates/bifrost-proxy/tests/protocol_e2e.rs", "e2e-tests/tests/test_websocket_frames.sh"]
+    },
+    {
+      "id": "sse-streaming-capture",
+      "criticality": "p0",
+      "owner": "bifrost-proxy/sse",
+      "layers": ["unit", "integration", "e2e"],
+      "platforms": ["linux", "macos", "windows"],
+      "failure_modes": ["partial-event", "upstream-disconnect", "slow-consumer"],
+      "evidence": ["crates/bifrost-proxy/src/protocol/sse.rs", "crates/bifrost-e2e/src/tests/replay_sse.rs", "e2e-tests/tests/test_sse_frames.sh"]
+    },
+    {
+      "id": "socks5-tcp",
+      "criticality": "p0",
+      "owner": "bifrost-proxy/socks",
+      "layers": ["unit", "integration", "e2e"],
+      "platforms": ["linux", "macos", "windows"],
+      "failure_modes": ["auth-rejected", "dns-failure", "upstream-refused"],
+      "evidence": ["crates/bifrost-proxy/src/proxy/socks/tcp.rs", "tests/socks5_test.rs", "e2e-tests/tests/test_socks5_tls_rules.sh"]
+    },
+    {
+      "id": "rule-resolution-and-hot-reload",
+      "criticality": "p0",
+      "owner": "bifrost-core/rules",
+      "layers": ["unit", "integration", "e2e"],
+      "platforms": ["linux", "macos", "windows"],
+      "failure_modes": ["invalid-rule", "concurrent-update", "filesystem-reload"],
+      "evidence": ["crates/bifrost-core/src/rule/resolver.rs", "e2e-tests/rules/regression/rule_semantics_split_parsing.txt", "e2e-tests/tests/test_rules_hot_reload.sh", "e2e-tests/tests/test_rules_filesystem_hot_reload.sh"]
+    },
+    {
+      "id": "request-response-body-transform",
+      "criticality": "p0",
+      "owner": "bifrost-proxy/transform",
+      "layers": ["unit", "integration", "e2e"],
+      "platforms": ["linux", "macos", "windows"],
+      "failure_modes": ["invalid-compression", "body-limit", "binary-bypass"],
+      "evidence": ["crates/bifrost-proxy/src/transform/request.rs", "crates/bifrost-proxy/src/transform/response.rs", "e2e-tests/rules/advanced/body_size_strategy.txt", "e2e-tests/tests/test_large_body_protection.sh"]
+    },
+    {
+      "id": "proxy-authentication",
+      "criticality": "p0",
+      "owner": "bifrost-proxy/auth",
+      "layers": ["unit", "integration", "e2e"],
+      "platforms": ["linux", "macos", "windows"],
+      "failure_modes": ["invalid-credentials", "rate-limit", "account-isolation"],
+      "evidence": ["crates/bifrost-proxy/src/proxy/socks/tcp.rs", "crates/bifrost-e2e/src/tests/brute_force.rs", "e2e-tests/tests/test_userpass_loopback_e2e.sh"]
+    },
+    {
+      "id": "socks5-udp",
+      "criticality": "p1",
+      "owner": "bifrost-proxy/socks",
+      "layers": ["unit", "e2e"],
+      "platforms": ["linux", "macos"],
+      "failure_modes": ["association-timeout", "malformed-datagram"],
+      "evidence": ["crates/bifrost-proxy/src/proxy/socks/udp.rs", "e2e-tests/tests/test_socks5_udp.sh", "e2e-tests/tests/test_socks5_udp_rules.sh"]
+    },
+    {
+      "id": "http3-upstream",
+      "criticality": "p1",
+      "owner": "bifrost-proxy/http3",
+      "layers": ["unit", "integration", "e2e"],
+      "platforms": ["linux", "macos"],
+      "failure_modes": ["quic-handshake-failure", "http2-fallback"],
+      "evidence": ["crates/bifrost-proxy/src/http3/client.rs", "crates/bifrost-proxy/tests/upstream_http3_e2e.rs", "e2e-tests/tests/test_http3_e2e.sh"]
+    }
+  ]
+}

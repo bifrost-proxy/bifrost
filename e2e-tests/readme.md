@@ -245,6 +245,17 @@ bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-
 bash scripts/ci/check-e2e-shell-ci-coverage.sh
 ```
 
+### 可审计能力与结果清单
+
+- `e2e-tests/capabilities.json` 是代理核心功能的机器可读能力矩阵；运行
+  `python3 scripts/ci/check-e2e-capabilities.py` 校验 P0 测试层、平台、失败模式和证据文件。
+- 统一入口结束时在 `$BIFROST_E2E_REPORT_DIR/summary.json` 生成机器可读结果，包含每个
+  suite 的状态、耗时、日志和跳过原因。CI 成功与失败都会上传该报告。
+- PR 的 Rust 新增/修改生产行由 `scripts/ci/coverage-diff.py` 执行 95% changed-lines
+  门禁；主分支定时任务额外生成 unit+integration、E2E-only、union 三层覆盖报告。
+- 完整 Playwright suite 由独立 `E2E UI (Playwright)` job 执行，不再依赖其他 Shell
+  测试间接覆盖管理端页面。
+
 ### Admin API 客户端工具
 
 `test_utils/admin_client.sh` 提供 Admin API 的封装函数，可在自定义测试中使用：

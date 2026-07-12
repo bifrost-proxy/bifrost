@@ -31,6 +31,11 @@
 | TC-COV-08 | 设计文档 `design/coverage-90.md` 列出 mechanism + 不适用清单 | doc |
 | TC-COV-09 | 覆盖 E2E 与生产数据目录、HOME/XDG、9900 端口硬隔离 | safety |
 | TC-COV-10 | 覆盖管线与全仓 Shell 语法契约通过 | regression |
+| TC-COV-11 | PR changed-lines 95% 门禁 | gate |
+| TC-COV-12 | Shell 静态质量门禁 | regression |
+| TC-COV-13 | 代理核心能力矩阵 | contract |
+| TC-COV-14 | E2E 机器可读结果 | observability |
+| TC-COV-15 | WebSocket 核心与 Playwright 关键矩阵 | e2e |
 
 ## 用例细节
 
@@ -189,6 +194,76 @@ BIFROST_E2E_CAPABILITY_SHARDS=1 BIFROST_E2E_SHELL_JOBS=2 \
 macOS Shell 按 `proxy-core`、`remote`、`agent-extensions` 三个能力 job 拆分；167 个
 测试无重复、无遗漏，按历史耗时估算的最大 job 偏差不超过平均值 15%。
 
+### TC-COV-11 PR changed-lines 95% 门禁
+
+**步骤**：
+
+```bash
+python3 -m unittest discover -s scripts/ci/tests -p 'test_*.py' -v
+grep -n 'changed_lines_min = 95.0' scripts/ci/coverage-thresholds.toml
+grep -n 'coverage-diff.py' .github/workflows/ci.yml
+```
+
+**预期**：工具单测全部通过；PR coverage job 在 LCOV 生成后执行 changed-lines 95%
+门禁；`#[cfg(test)] mod tests` 中的测试代码不计入生产增量覆盖率。
+
+### TC-COV-12 Shell 静态质量门禁
+
+**步骤**：
+
+```bash
+PATH="$(go env GOBIN):$PATH" BIFROST_REQUIRE_SHELL_TOOLS=1 \
+  bash scripts/ci/check-shell-quality.sh origin/main
+```
+
+**预期**：全仓 Shell `bash -n` 与 ShellCheck error gate 通过；变更的
+`scripts/ci/*.sh` 通过 shfmt；缺少检查工具时 CI 必须失败而不是静默跳过。
+
+### TC-COV-13 代理核心能力矩阵
+
+**步骤**：
+
+```bash
+python3 scripts/ci/check-e2e-capabilities.py
+```
+
+**预期**：P0 能力均具备 unit/integration/E2E、Linux/macOS/Windows、失败模式和真实
+证据文件；重复 ID、缺失证据或缺少维度时校验失败。
+
+### TC-COV-14 E2E 机器可读结果
+
+**步骤**：
+
+```bash
+rm -rf .e2e-reports/summary-human
+BIFROST_E2E_REPORT_DIR="$PWD/.e2e-reports/summary-human" \
+  bash scripts/run_all_e2e.sh --ci --skip-rules --skip-shell --skip-runner \
+  --skip-ui --skip-build
+python3 -m json.tool .e2e-reports/summary-human/summary.json
+```
+
+**预期**：生成 schema version 1 的 JSON，包含 metadata、counts、suites；即使 selected
+suite 为 0 也生成合法空报告，真实执行时逐项记录 passed/failed/skipped 与原因。
+
+### TC-COV-15 WebSocket 核心与 Playwright 关键矩阵
+
+**步骤**：
+
+```bash
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy \
+  websocket::capture::tests --lib
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy \
+  websocket::upgrade::tests --lib
+BIFROST_DATA_DIR="$PWD/.bifrost-ui-test-human" \
+  BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 \
+  bash scripts/ci/run-ui-critical.sh
+```
+
+**预期**：WebSocket 双向帧、mask 方向、leftover、握手 header 过滤均通过；Playwright
+关键矩阵 7/7 通过，覆盖 Rules、Values、Scripts、Traffic、Breakpoint 与 Agent 新会话，
+使用隔离数据目录和动态端口，不连接或停止生产 9900 服务。完整 211 条历史套件由
+`.github/workflows/ui-e2e-full.yml` 每周审计并上传失败证据，PR 合入门禁不隐瞒其存量债务。
+
 ## 执行记录
 
 | 用例 ID | 执行人 | 结果 | 备注 |
@@ -264,3 +339,18 @@ macOS Shell 按 `proxy-core`、`remote`、`agent-extensions` 三个能力 job �
   `${{ always() }}` 后 run `29159544439` 在 workflow 解析期 0 job 失败，进一步确认状态
   函数不能用于 action input。最终修为 `save-if: ${{ true }}`，并由 coverage pipeline
   contract 同时阻止两种错误写法回归。
+
+2026-07-12 执行补充（Phase 6 完备性门禁）：
+
+- TC-COV-11：PASS。`scripts/ci/tests` 共 12 条工具单测通过，其中 changed-lines 6 条；
+  阈值固定为 95%，并验证内联测试模块不会抬高生产代码增量覆盖率。
+- TC-COV-12：PASS。251 个 tracked Shell 文件 `bash -n` 与 ShellCheck error gate 全部
+  通过；变更的 `scripts/ci/*.sh` 通过 shfmt。门禁真实发现并修复 7 处 stdin 重定向、
+  命令替换和条件表达式错误，未使用全局 disable。
+- TC-COV-13：PASS。能力矩阵校验 10 个代理核心能力，P0 的测试层、三平台、失败模式与
+  证据文件完整。
+- TC-COV-14：PASS。隔离运行生成 `.e2e-reports/summary-human/summary.json`，schema v1
+  可解析，空选择也包含 metadata、counts 与 suites。
+- TC-COV-15：PASS。WebSocket capture 2 条、upgrade 3 条专项 Rust 测试通过；Playwright
+  关键能力矩阵 7/7 通过。完整历史套件首次审计在 211 条中运行至第 73 条时已暴露 11 条
+  旧页面契约失败，验证了新增每周完整审计的必要性；该债务如实保留，不计为关键矩阵通过。

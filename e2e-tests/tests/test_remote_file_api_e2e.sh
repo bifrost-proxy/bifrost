@@ -367,13 +367,10 @@ test_missing_required_path_fails() {
 
 test_missing_write_content_file_reads_stdin() {
     header "missing --content-file: write should read stdin"
-    local out rc
-    out=$(printf 'hello' | "$BIFROST_BIN" remote file write test.txt --help >/dev/null 2>&1)
-    rc=$?
-    if [[ $rc -eq 0 ]]; then
+    if printf 'hello' | "$BIFROST_BIN" remote file write test.txt --help >/dev/null 2>&1; then
         pass "write supports stdin by default; help command exits cleanly"
     else
-        fail "write help unexpectedly failed: $out"
+        fail "write help unexpectedly failed"
     fi
 }
 
@@ -637,7 +634,7 @@ test_subcommand_about_descriptions() {
     root_out=$(run_bifrost remote file --help)
     local any_fail=0
     for sub in "${REMOTE_FILE_SUBCOMMANDS[@]}"; do
-        if ! output_has "$root_out" -qiE "$sub[[:space:]]"; then
+        if ! output_has "$root_out" -qiE "${sub}[[:space:]]"; then
             fail "subcommand $sub not visible in root help"
             any_fail=1
         fi

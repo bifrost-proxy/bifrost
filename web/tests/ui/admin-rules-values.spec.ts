@@ -629,6 +629,9 @@ test("Values 页面支持 bifrost-file 导出后再导入恢复数据", async ({
     mimeType: "text/plain",
     buffer: Buffer.from(exportedContent, "utf8"),
   });
+  const importPreview = page.getByRole("dialog", { name: `Preview ${valueName}.bifrost` });
+  await expect(importPreview).toBeVisible();
+  await importPreview.getByRole("button", { name: "Import" }).click();
   await expect(page.getByTestId("value-item").filter({ hasText: valueName }).first()).toBeVisible();
 });
 

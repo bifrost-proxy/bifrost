@@ -467,7 +467,7 @@ print(json.load(open(sys.argv[1]))["pid"])
 PY
 )"
     fi
-    if [[ "$new_pid" == "$old_pid" && ! is_windows ]]; then
+    if [[ "$new_pid" == "$old_pid" ]] && ! is_windows; then
         _log_fail "upgrade replaced daemon pid" "new PID different from $old_pid" "$new_pid"
         return 1
     fi

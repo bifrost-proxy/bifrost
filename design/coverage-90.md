@@ -276,6 +276,28 @@ design/
 - nightly 执行插桩全量 E2E、fuzz、mutation 与明确跳过项；release gate 执行真实
   安装、升级、证书、系统代理和外部 relay 场景。
 
+### Phase 6：PR 增量门禁与持续分层覆盖（当前推进）
+
+- PR coverage job 生成 LCOV 后执行 `coverage-diff.py`，只统计
+  `crates/*/src/**/*.rs` 中发生变化且被 LLVM 标记为可插桩的生产行；内联
+  `#[cfg(test)] mod tests` 必须从分子和分母中排除。
+- changed-lines 最低门禁为 95%，高于 workspace 和 crate 历史棘轮，避免大型 crate
+  依靠既有已覆盖代码吸收未测试新增逻辑。
+- `e2e-tests/capabilities.json` 维护 P0/P1 代理能力的 owner、测试层、平台、失败模式和
+  证据文件。P0 必须同时具备 unit、integration、E2E 与 Linux/macOS/Windows 证据。
+- `scripts/run_all_e2e.sh` 每次结束生成 `summary.json`，固定记录 selected suite 的
+  passed/failed/skipped、耗时、日志和跳过原因；Linux E2E artifact 无论成功失败都上传。
+- 主 CI 增加阻断式 Playwright 关键能力矩阵，覆盖 Rules、Values、Scripts、Traffic、
+  Breakpoint 和 Agent 新会话；完整 211 条历史套件进入每周审计并保留 artifact。在历史
+  旧页面契约清零前，禁止把完整审计伪装成合入绿灯，也禁止让已知存量失败阻断所有 PR。
+- 定时 `Layered E2E Coverage` workflow 使用同一插桩 profile 执行 rules E2E，并上传
+  unit+integration、E2E-only、union 三份报告，作为长期趋势基线。
+- Shell 质量分为三层：全仓 `bash -n`、全仓 ShellCheck error gate、变更的
+  `scripts/ci/*.sh` shfmt gate；ShellCheck 首次启用发现的 stdin redirection 和常量条件
+  必须作为行为缺陷修复，禁止以全局 disable 绕过。
+- WebSocket upgrade handshake 和双向 capture 使用可注入 duplex stream 做专项测试，
+  覆盖 hop-by-hop header 过滤、mask 方向、双向 payload 与 handshake leftover。
+
 ## 测试方案
 
 ### 单元 / 脚本验证
