@@ -2067,7 +2067,7 @@ async fn inspect_login_page_state(cdp: &CdpClient) -> Result<Value, String> {
             .filter(isVisible)
             .map((dialog) => (dialog.innerText || '').trim().toLowerCase());
           const bodyText = (document.body?.innerText || '').toLowerCase();
-          const accountChooserMarkers = [
+          const dialogAccountChooserMarkers = [
             'welcome back',
             'choose an account',
             'select an account',
@@ -2078,10 +2078,18 @@ async fn inspect_login_page_state(cdp: &CdpClient) -> Result<Value, String> {
             '登录至另一个帐户',
             '登录至另一个账户'
           ];
-          const containsAccountChooser = (text) =>
-            accountChooserMarkers.some((marker) => text.includes(marker));
-          const accountChooserVisible = visibleDialogTexts.some(containsAccountChooser) ||
-            containsAccountChooser(bodyText);
+          const bodyAccountChooserMarkers = [
+            'choose an account',
+            'select an account',
+            'sign in to another account',
+            '选择一个帐户',
+            '选择一个账户',
+            '登录至另一个帐户',
+            '登录至另一个账户'
+          ];
+          const accountChooserVisible = visibleDialogTexts.some((text) =>
+            dialogAccountChooserMarkers.some((marker) => text.includes(marker))
+          ) || bodyAccountChooserMarkers.some((marker) => bodyText.includes(marker));
           return { composerVisible, composerDisabled, accountChooserVisible };
         })()"#,
     )
