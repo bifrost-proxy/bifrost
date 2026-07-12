@@ -90,8 +90,8 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
 - **预期结果**: 函数包含三个分支：
   1. `/q <text>` — 调用 `queue_manager.push_queue()` 并回复队列状态
   2. `/rq <N>` — 调用 `queue_manager.remove_queue()` 并回复更新后的队列状态
-  3. 内置 Bifrost Agent 默认 — 调用 `queue_manager.inject_guide()` 注入引导消息
-  4. 非 ChatGPT Web Runner 默认 — 请求 active worker Guide，失败后调用 `queue_manager.push_queue()`；ChatGPT Web 直接排队等待当前 run 结束
+  3. 所有 Runner 的普通 busy 消息 — 调用 `queue_manager.push_queue_with_images()` 排队等待当前 run 结束
+  4. `/g <text>` — 内置 Agent 注入 guide；支持 live guide 的外部 Runner 请求 active worker Guide，失败时完整降级排队
 
 ### TC-GQ-06: run_agent_chat_with_interleave 使用 tokio::select! 交错处理
 
@@ -204,23 +204,24 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
 - **执行记录（2026-05-10）**: PASS — 执行 `source ~/.zshrc && SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" ADMIN_PORT=18131 MOCK_HTTP_PORT=18132 bash e2e-tests/tests/test_im_guide_queue_human_api.sh`，脚本启动临时 Bifrost 与 mock provider，通过 `/agent/chat` 注入两条 `guide_messages`，在首轮慢模型请求期间轮询 `/status` 并断言 pending guide JSON 与文案明细，随后断言最终模型请求收到合并后的单条 guide user message。
 - **回归记录（2026-05-29）**: CI `26635014024` 暴露隔离 worker 场景中 `/status` 用主进程 guide queue 覆盖 worker active status，导致 `pending_guide_messages` 为空。修复后 `/status` 合并 worker active guides 与主进程 queue guides，并去重避免非隔离路径重复展示。
 
-### TC-GQ-15: 内置 Bifrost Agent busy 普通 IM 消息默认进入 guide
+### TC-GQ-15: 内置 Bifrost Agent 普通 IM 消息默认排队，显式 `/g` 仍可引导
 
 - **操作步骤**:
   ```bash
   cargo test -p bifrost-admin busy_default_mode_is_guide_for_builtin_bifrost_agent --lib
   cargo test -p bifrost-admin apply_busy_message_default_guides_builtin_messages_without_queueing --lib
+  cargo test -p bifrost-admin ordinary_busy_messages_always_queue_without_creating_guides --lib
   ```
 - **预期结果**:
-  - `runner = null` 或 `runner = "bifrost_agent"` 时 busy 默认策略为 guide。
-  - 普通消息进入 `guide_status`，不会进入 `queue_status`。
-  - 普通消息被事件循环转交给隔离 worker 后，`/status` 仍能看到 `pending_guide_messages: ["默认引导消息"]`，直到当前 turn 完成并清理 session queue 状态。
-  - `/q <消息>` 仍显式进入 queue，不受默认 guide 策略影响。
+  - `runner = null` 或 `runner = "bifrost_agent"` 时仍具备 guide 能力，供显式 `/g` 使用。
+  - 普通消息进入 `queue_status`，不会进入 `guide_status`；当前 turn 完成后按 FIFO 开启下一轮。
+  - `/g <消息>` 进入 guide，`/q <消息>` 继续显式进入 queue。
 - **执行记录（2026-05-21）**: PASS — 执行 `cargo test -p bifrost-admin busy_default_mode --lib`、`cargo test -p bifrost-admin apply_busy_message_default --lib` 和 `BIFROST_PORT=18897 MOCK_PORT=18898 bash e2e-tests/tests/test_im_guide_queue_human_api.sh`。E2E 通过 `/_bifrost/api/im-gateway/debug/mock-inbound` 注入真实 IM inbound 事件，在内置 Bifrost Agent active turn 期间发送普通消息，`/agent/chat` 的 `/status` 返回 pending guide `["默认引导消息"]`，最终 mock 模型请求也收到该 guide。
 - **回归执行记录（2026-06-02）**: PASS — CI run `26798673764` 的 macOS aarch64 shell shard 暴露隔离 worker handoff 后 `/status` 返回 `pending_guide_messages: []`。修复后执行 `source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_gateway::queue_manager::tests::test_guide_status_includes_worker_handoff_snapshot` 通过，验证 handed-off guide 快照清理边界；执行 `source ~/.zshrc && SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_E2E_HTTP_RETRIES=2 bash e2e-tests/tests/test_im_guide_queue_human_api.sh` 通过，验证真实 Bifrost + mock inbound 链路中默认 IM 消息仍作为 pending guide 展示并被 worker 消费。
 - **回归执行记录（2026-06-02）**: PASS — CI run `26813811064` 的 macOS aarch64 shell shard 3 暴露内置 IM Agent active turn 阻塞在隔离 worker/mock model 时，主进程只等待 worker event，没有监听 guide channel notification，导致 busy 普通 IM 消息已经进入 pending guide 但未及时转发给 worker，脚本失败于 `default IM inbound guide was not consumed by the active loop`。修复后 `process_agent_chat()` 在 worker wait loop 中同时监听 guide notification，收到 guide 后立即 drain、记录 handed-off snapshot 并发送 worker `Guide` 命令；执行 `source ~/.zshrc && SKIP_FRONTEND_BUILD=1 BIFROST_E2E_HTTP_RETRIES=2 bash e2e-tests/tests/test_im_guide_queue_human_api.sh` 通过，验证真实 Bifrost + mock inbound 链路中默认 IM 消息会被及时转发并被 active loop 消费。
+- **回归执行记录（2026-07-12）**: PASS — `ordinary_busy_messages_always_queue_without_creating_guides` 验证内置与外部 Runner 的普通消息均只进入 queue；`test_external_runner_live_guide.sh` 验证普通消息在当前 turn 完成后作为下一轮执行，显式 `/g` 仍只注入当前 turn。
 
-### TC-GQ-16: 外部 Runner busy 默认 Guide，ChatGPT Web 与失败路径进入 queue
+### TC-GQ-16: IM busy 默认 Queue，显式 Guide 按能力注入或降级
 
 - **操作步骤**:
   ```bash
@@ -231,8 +232,8 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
   SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_external_runner_live_guide.sh
   ```
 - **预期结果**:
-  - `runner = "codex"`、`"traex"`、`"claude_code"` 或其他非 ChatGPT Web runner 时 busy 默认策略为 ExternalGuide；ChatGPT Web 为 Queue。
-  - 普通消息与 `/g <消息>` 尝试注入 active worker；不支持、拒绝或超时则完整进入 FIFO queue，`/q` 始终直接排队。
+  - Runner 的能力枚举仍区分内置 Guide、外部 ExternalGuide 和仅 Queue，但所有普通 IM busy 消息都直接进入 FIFO queue。
+  - 只有 `/g <消息>` 尝试注入 active worker；不支持、拒绝或超时则完整进入 FIFO queue，`/q` 始终直接排队。
   - Codex/Traex app-server 接收 `turn/steer`，并在等待 ACK 时保持 runner control future 持续运行。
   - 上一轮 Codex result metadata 中的 `threadId` 会注入下一条排队消息的 request params；显式传入的 `threadId` 不会被覆盖。
 - **执行记录（2026-05-21）**: PASS — 执行 `cargo test -p bifrost-admin busy_default_mode --lib`、`cargo test -p bifrost-admin apply_busy_message_default --lib`、`cargo test -p bifrost-admin codex_runner_metadata --lib`、`codex exec --help` 和 `codex exec resume --help`。本机 Codex CLI `0.132.0` 显示 `exec` 只接收初始 prompt/stdin，`resume` 支持按 session/thread 接续下一轮；未发现运行中追加 guide 的 CLI 命令。

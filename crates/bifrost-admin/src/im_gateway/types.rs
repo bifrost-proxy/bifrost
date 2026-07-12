@@ -650,7 +650,19 @@ pub struct ImEventMessage {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImImageAttachment>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<ImMessageReference>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_type: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImMessageReference {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -732,6 +744,9 @@ pub struct ImMessageLog {
     /// Text preview (truncated for large messages)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_preview: Option<String>,
+    /// Text content retained for resolving later message replies/quotes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
     /// How the message was triggered
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trigger: Option<String>,

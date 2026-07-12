@@ -13,6 +13,19 @@ struct MockInboundRequest {
     message_id: Option<String>,
     #[serde(default)]
     event_id: Option<String>,
+    #[serde(default)]
+    reply_to: Option<MockInboundReplyReference>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MockInboundReplyReference {
+    #[serde(default)]
+    message_id: Option<String>,
+    #[serde(default)]
+    created_at_ms: Option<u64>,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 pub(super) async fn handle_debug(
@@ -95,6 +108,13 @@ async fn handle_mock_inbound(
             text: body.text,
             mentions: Vec::new(),
             images: Vec::new(),
+            reply_to: body
+                .reply_to
+                .map(|reply| crate::im_gateway::types::ImMessageReference {
+                    message_id: reply.message_id,
+                    created_at_ms: reply.created_at_ms,
+                    text: reply.text,
+                }),
             raw_type: Some("text".to_string()),
         }),
         received_at: now_ms(),

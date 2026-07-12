@@ -698,17 +698,17 @@
 5. 连续多个工具调用默认合并为“已运行 N 条命令”的一级折叠组；展开该组后，单条工具仍保持折叠，用户可继续展开查看输入/输出。
 6. 模型公开 content 直接按时间顺序展示，不额外添加 `1.`、`2.`、`3.` 这类编号前缀。
 
-### TC-IEC-35: 外部 Runner 运行中默认 Guide，显式 Queue 续接原生 thread
+### TC-IEC-35: IM 默认 Queue、Web 默认 Guide，并续接原生 thread
 
 操作步骤：
 1. 启动一个长时间运行的 Codex 或 Trae external runner session，确保同一 `sessionKey` 处于 active 状态。
-2. 在该 session 运行期间，从同一 IM 会话发送一条普通用户消息，并从 Web Chat Guide 模式发送一条消息。
-3. 确认 app-server 收到当前 `threadId` / `turnId` 对应的 `turn/steer`；再发送 `/q <消息>` 或在 WebUI 选择 Queue。
+2. 在该 session 运行期间，从同一 IM 会话发送一条普通用户消息和一条 `/g <引导>`，并从 Web Chat Guide 模式发送一条消息。
+3. 确认普通 IM 消息未触发 steer，而两条显式 Guide 路径让 app-server 收到当前 `threadId` / `turnId` 对应的 `turn/steer`；再发送 `/q <消息>` 或在 WebUI 选择 Queue。
 4. 读取即时响应或 progress card 队列状态；当前 run 完成后，读取显式排队消息下一轮 run 的 `runtime_snapshot.json`。
 5. 分别对 Codex 和 Trae runner 执行上述检查。
 
 预期结果：
-1. Codex 和 Trae 这类 app-server runner 的普通 busy 文本默认注入当前 turn；只有 `/q` 或 WebUI Queue 明确进入排队队列。
+1. Codex 和 Trae 这类 app-server runner 的普通 IM busy 文本默认进入排队队列；显式 `/g` 和 WebUI Guide 才注入当前 turn。
 2. `/stop` 仍作为控制命令立即尝试停止当前外部 runner，不作为普通排队消息。
 3. 当前 run 完成后只自动处理显式排队或 Guide 失败降级的消息，成功注入的 Guide 不得重复执行下一轮。
 4. Codex/Traex 排队下一轮复用已保存的 `threadId`；app-server transport 使用 `thread/resume` 后再 `turn/start`，不能退化为新建 thread。
@@ -1226,8 +1226,8 @@
 
 预期结果：
 
-1. 飞书 IM 的 Codex、Traex、Claude Code 与其他非 ChatGPT Web runner 在 session 忙碌时，普通消息默认按 Guide 处理；只有 `/q <消息>` 明确加入下一轮队列。
-2. Codex/Traex app-server 收到 `turn/steer`，引导文本只进入当前 turn，不会因等待 steer ACK 阻塞 runner 控制循环，也不会在成功 steer 后再次作为下一轮执行。
+1. 飞书/微信 IM 的 Codex、Traex、Claude Code 与其他 runner 在 session 忙碌时，普通消息默认加入下一轮 FIFO 队列；只有 `/g <消息>` 明确请求当前 turn 引导。
+2. 显式 `/g` 时 Codex/Traex app-server 收到 `turn/steer`，引导文本只进入当前 turn，不会因等待 steer ACK 阻塞 runner 控制循环，也不会在成功 steer 后再次作为下一轮执行。
 3. `/q queue-explicit` 不进入 `turn/steer`；当前 turn 结束后只执行一次排队消息，文本和顺序保持不变。
 4. runner 拒绝 Guide、控制通道失败或不支持 live guide 时，原消息明确降级排队，队列中仍保留完整文本。
 5. Agent Chat WebUI 在 Codex/Traex/Claude Code 与自定义 runner 运行中默认选中 Guide，发送 `/g <消息>`；切换 Queue 后发送 `/q <消息>`，控制回执不会错误结束主 turn 或被陈旧 thread summary 覆盖。

@@ -493,6 +493,7 @@ pub(super) fn im_help_includes_im_only_commands_without_dropping_builtins() {
     assert!(help.contains("/remember <text>"));
     assert!(help.contains("/goal [命令]"));
     assert!(help.contains("运行中会排队"));
+    assert!(help.contains("普通后续消息默认排队"));
 }
 
 #[test]
@@ -517,7 +518,7 @@ pub(super) fn im_help_for_external_cli_runner_only_lists_supported_commands() {
     assert!(help.contains("/efforts"));
     assert!(help.contains("/effort [级别]"));
     assert!(help.contains("/g <引导内容>"));
-    assert!(help.contains("使用 /q 才排队"));
+    assert!(help.contains("普通后续消息默认排队"));
     assert!(!help.contains("/remember"));
     assert!(!help.contains("/memories"));
     assert!(!help.contains("/forget"));

@@ -160,6 +160,7 @@ mod tests {
                 text: text.to_string(),
                 mentions: vec![],
                 images: vec![],
+                reply_to: None,
                 raw_type: None,
             }),
             received_at: 1000,

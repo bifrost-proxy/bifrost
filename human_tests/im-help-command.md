@@ -88,7 +88,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 **预期结果**：
 - 帮助区包含 `Bifrost Agent 命令:`。
 - 展示 `/clear`、`/compact`、`/forget`、`/goal`、`/help`、`/memories`、`/remember`、`/reset`、`/resume`、`/skill`、`/status`、`/stop`、`/undo` 等内置 Agent 命令。
-- `IM 通道命令（所有 Runner）:` 中展示 `/g <引导内容>`，因为内置 Agent 支持运行中引导注入。
+- `IM 通道命令（所有 Runner）:` 中展示 `/g <引导内容>`，因为内置 Agent 支持显式运行中引导注入；帮助文案同时说明普通后续消息默认排队。
 - 命令描述使用中文，且提示 `直接输入文本即可与 AI 对话`。
 
 ### TC-IH-07: 外部 Runner 上线帮助不展示内置 Agent memory/goal/skill 命令
@@ -101,7 +101,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 **预期结果**：
 - 帮助区包含 `IM 通道命令（所有 Runner）:`，展示 `/cwd`、`/runner`、`/q`、`/rq`。
 - 帮助区不展示 `/remember`、`/memories`、`/forget`、`/goal`、`/skill`、`/compact` 等仅内置 Agent 支持的命令。
-- Codex/Traex/Claude Code 等非 ChatGPT Web Runner 展示 `/g <引导内容>`，并提示普通后续消息默认按 Guide 处理、使用 `/q` 才排队；ChatGPT Web 不展示 `/g`。
+- Codex/Traex/Claude Code 等非 ChatGPT Web Runner 展示 `/g <引导内容>`，并提示普通后续消息默认排队；ChatGPT Web 不展示 `/g`。
 - Codex/Traex/Claude Code 这类 Runner 展示它们支持的 `/models`、`/model`、`/effort` 或对应 runner-specific 控制命令。
 
 ### TC-IH-08: Runner-aware `/help` 与上线帮助保持一致

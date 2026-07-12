@@ -6,7 +6,7 @@ Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动
 
 内置 Bifrost Agent 已支持 guide channel：运行中消息可在工具调用 checkpoint 后进入同一 turn。Codex CLI 与 Trae CLI 的 app-server 协议也都提供 `turn/steer`，要求携带当前 `threadId`、`expectedTurnId` 与输入。当前差距不是产品入口，而是 external runner worker 只支持 `Run` / `Stop`，且底层 adapter 没有保留可双向控制的协议连接。
 
-本方案让内置 Codex、Traex runner 默认使用每轮独立的 stdio app-server transport，并把 worker 控制协议扩展为 `Run` / `Guide` / `Stop`。IM 与 WebUI 在会话忙碌时默认把普通后续文本视为 Guide，只有显式 `/q` 或 UI 选择 Queue 才排队；ChatGPT Web 因浏览器对话链路无法安全注入当前生成过程，继续默认 Queue。Claude Code、自定义 CLI 和显式 exec transport 会先尝试 worker guide capability，无法实时注入时明确降级到 FIFO queue，不能伪装成已注入。
+本方案让内置 Codex、Traex runner 默认使用每轮独立的 stdio app-server transport，并把 worker 控制协议扩展为 `Run` / `Guide` / `Stop`。WebUI 在会话忙碌时可选择 Guide/Queue，普通输入默认采用 Guide；IM 的普通后续消息统一 FIFO 排队，只有显式 `/g` 才尝试注入当前 turn。ChatGPT Web 因浏览器对话链路无法安全注入当前生成过程，继续只支持 Queue。Claude Code、自定义 CLI 和显式 exec transport 收到显式 `/g` 时会先尝试 worker guide capability，无法实时注入时明确降级到 FIFO queue，不能伪装成已注入。
 
 ## 用户目标验证清单
 
@@ -22,7 +22,7 @@ Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动
 - app-server notification 映射到现有 `ExternalCliProgressEvent`，保留 tool、plan、assistant、run status 与最终回复展示。
 - 下一轮继续复用现有 `external_thread_id`，通过 `thread/resume` + `turn/start` 续聊。
 - 新增 `bifrost agent guide --session <key> <message>`；session 必填，避免向错误的默认 runner session 发送控制消息。
-- 新增 Chat Gateway session guide endpoint；IM `/g` 与除 ChatGPT Web 外的普通 busy message 都按 live capability 判断 steer 或 queue，只有 `/q` 明确进入队列。
+- 新增 Chat Gateway session guide endpoint；IM 只有显式 `/g` 按 live capability 判断 steer 或 queue，普通 busy message 与 `/q` 都进入队列。
 
 ### 必须不破坏
 
@@ -32,7 +32,7 @@ Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动
 - `/stop`、run stop marker、超时、worker process group 清理与服务退出清理继续有效。
 - model、reasoning effort、sandbox/approval、service tier、config override、feature flag、work dir、图片路径和 session resume 语义不因 transport 迁移丢失。
 - 现有 `run_started`、progress、`run_finished` NDJSON 消费方兼容；只允许增加字段与 guide 专用响应。
-- 同一 session 只允许一个 active turn；除 ChatGPT Web 外，新普通文本消息默认请求 guide，显式 `/q` 才排队。
+- 同一 session 只允许一个 active turn；WebUI 可按运行中模式选择 guide/queue，IM 普通文本默认排队、显式 `/g` 才请求 guide。
 
 ### 必须真实验证
 
@@ -56,7 +56,7 @@ Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动
 
 - `guide`：追加到当前 active regular turn，由 runner 在当前工具调用/模型 checkpoint 后消费。
 - `queue`：当前 turn 结束后作为新 turn 执行。
-- 除 ChatGPT Web 外，IM 与 WebUI 的普通 busy text 默认请求 guide；`/g` 是显式 Guide，`/q` 是显式 Queue。
+- 除 ChatGPT Web 外，WebUI 的普通 busy text 按界面当前模式处理且默认 Guide；IM 普通 busy text 默认 Queue，`/g` 才显式请求 Guide。
 - Codex/Traex app-server 成功 ack 后展示已注入；Claude Code、自定义/exec transport 或 turn-end race 无法 ack 时展示降级原因并排队。
 - ChatGPT Web 始终默认 Queue，WebUI 不展示 Guide 切换，IM 普通 busy message 直接排队。
 - 图片暂不进入 `turn/steer` 文本协议；external runner 忙碌时收到图片必须保留附件并明确降级排队，不能只注入占位文本或丢失图片。
@@ -164,7 +164,7 @@ bifrost agent guide --session cli-Codex "先检查失败日志"
 
 新增 `e2e-tests/tests/test_external_runner_live_guide.sh`，用 mock app-server/exec 可执行文件与独立数据目录启动真实 Bifrost 二进制，覆盖 Codex、Traex、reject-to-queue、explicit exec 与 inactive-session reject；既有 worker stop 聚焦测试继续覆盖 stop cleanup。脚本由 CI full-shell 的 `test_*.sh` 自动收录。
 
-Web Playwright 同时覆盖 Codex/Traex/Claude Code 默认 Guide、显式 Queue、ChatGPT Web 只展示 Queue，以及 Guide 降级后刷新队列状态。IM mock inbound 覆盖普通 busy text 默认 steer、`/q` 显式排队和 ChatGPT Web 默认排队。
+Web Playwright 同时覆盖 Codex/Traex/Claude Code 默认 Guide、显式 Queue、ChatGPT Web 只展示 Queue，以及 Guide 降级后刷新队列状态。IM mock inbound 覆盖普通 busy text 默认排队、显式 `/g` steer、`/q` 显式排队和 ChatGPT Web 默认排队。
 
 ### Human tests
 

@@ -1937,6 +1937,7 @@ pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Opt
             text,
             mentions: Vec::new(),
             images,
+            reply_to: None,
             raw_type: message_type,
         }),
         received_at: now,

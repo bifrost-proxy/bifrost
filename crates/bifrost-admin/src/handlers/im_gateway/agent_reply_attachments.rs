@@ -454,6 +454,7 @@ pub(super) async fn send_agent_reply_attachments(
                 "[file:{label}] local={}",
                 attachment.path.display()
             )),
+            content: Some(format!("[file:{label}]")),
             trigger: Some("agent".to_string()),
             error: error_msg,
             sender_open_id: None,

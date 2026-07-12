@@ -172,6 +172,10 @@ impl ToolHandler for SendMsgTool {
         };
         let msg_type = prepared.msg_type.clone();
         let content_preview = prepared.content_preview.clone();
+        let log_content = match &prepared.payload {
+            PreparedSendPayloadKind::Text(text) => Some(text.clone()),
+            PreparedSendPayloadKind::Card(_) => None,
+        };
         let send_result = match prepared.payload {
             PreparedSendPayloadKind::Text(text) => self.send_text(&provider, &target, &text).await,
             PreparedSendPayloadKind::Card(card) => self.send_card(&provider, &target, card).await,
@@ -196,6 +200,7 @@ impl ToolHandler for SendMsgTool {
             target_name: Some(target.display_name.clone()),
             message_id: message_id.clone(),
             msg_type: Some(msg_type.clone()),
+            content: log_content,
             content_preview: Some(content_preview),
             trigger: Some("agent_tool:send_msg".to_string()),
             error: error.clone(),

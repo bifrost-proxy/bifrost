@@ -313,15 +313,14 @@ pub(super) fn build_im_channel_help_sections(runner_kind: &ImHelpRunnerKind) -> 
              /forget <id|last> 删除一条长期记忆\n\
              /compact         压缩当前会话上下文\n\
              /goal [命令]      查看或管理当前目标\n\
-             /g <引导内容>     给正在运行的内置 Agent 注入引导；普通后续消息默认同样按引导处理"
+             /g <引导内容>     给正在运行的内置 Agent 注入引导；普通后续消息默认排队"
                 .to_string(),
         ),
         ImHelpRunnerKind::External { adapter } => {
             let mut runner_lines = Vec::new();
             if adapter != crate::im_gateway::chatgpt_web::ADAPTER_ID {
-                runner_lines.push(
-                    "/g <引导内容> 给正在运行的 Runner 注入引导；普通后续消息默认按引导处理，使用 /q 才排队",
-                );
+                runner_lines
+                    .push("/g <引导内容> 给正在运行的 Runner 注入引导；普通后续消息默认排队");
             }
             if crate::im_gateway::external_cli::supports_external_cli_model_slash(adapter) {
                 runner_lines
@@ -1154,6 +1153,47 @@ pub(super) fn agent_message_text(message: &crate::im_gateway::types::ImEventMess
     }
 }
 
+pub(super) const MAX_QUOTED_AGENT_CONTEXT_CHARS: usize = 8_000;
+
+pub(super) fn agent_message_text_with_reference(
+    message: &crate::im_gateway::types::ImEventMessage,
+    provider_id: &str,
+    peer_id: Option<&str>,
+    current_message_id: Option<&str>,
+    message_log_store: &ImMessageLogStore,
+) -> String {
+    let current = agent_message_text(message);
+    if current.trim_start().starts_with('/') {
+        return current;
+    }
+    let Some(reference) = message.reply_to.as_ref() else {
+        return current;
+    };
+    let Some(quoted) = message_log_store.resolve_reference_text(
+        provider_id,
+        peer_id,
+        current_message_id,
+        reference,
+    ) else {
+        debug!(
+            provider_id,
+            peer_id,
+            reference_message_id = ?reference.message_id,
+            reference_created_at_ms = ?reference.created_at_ms,
+            "quoted IM message could not be resolved; continuing with current message"
+        );
+        return current;
+    };
+    let quoted = bifrost_core::text::truncate_chars_with_ellipsis(
+        quoted.trim(),
+        MAX_QUOTED_AGENT_CONTEXT_CHARS,
+    );
+    format!(
+        "【引用消息（仅作为上下文）】\n{quoted}\n\n【当前消息】\n{}",
+        current.trim()
+    )
+}
+
 pub(super) fn inbound_message_preview(
     message: &crate::im_gateway::types::ImEventMessage,
 ) -> String {
@@ -1460,9 +1500,8 @@ pub(super) async fn handle_busy_message(
         return;
     }
 
-    // Default behavior depends on the active runtime:
-    // - built-in Bifrost Agent supports mid-turn guide injection
-    // - external runners try live guide except ChatGPT Web, which keeps queue semantics
+    // Ordinary busy messages are always queued. Runtime guide capability is
+    // consulted only by the explicit `/g` branch above.
     handle_busy_default_message(trimmed, session_key, &ctx).await;
 }
 
@@ -1858,7 +1897,13 @@ pub(super) async fn handle_concurrent_event_during_chat(
         Some(m) if !m.text.trim().is_empty() || !m.images.is_empty() => m,
         _ => return,
     };
-    let msg_text = agent_message_text(message);
+    let msg_text = agent_message_text_with_reference(
+        message,
+        &event.provider_id,
+        event.source.user_id.as_deref(),
+        event.source.message_id.as_deref(),
+        message_log_store,
+    );
 
     let session_key = build_session_key(&event.provider_id, event.source.user_id.as_deref());
     // Check if this event is for the currently active session
@@ -2502,6 +2547,7 @@ pub(super) async fn process_agent_chat(
             message_id: progress_message_info.and_then(|info| info.message_id),
             msg_type: Some("interactive".to_string()),
             content_preview: Some(truncate_str(&main_response_for_card, 200)),
+            content: Some(main_response_for_card.clone()),
             trigger: Some("agent_streaming".to_string()),
             error: None,
             sender_open_id: None,
@@ -2634,6 +2680,7 @@ pub(super) async fn process_agent_chat(
         message_id,
         msg_type: Some("interactive".to_string()),
         content_preview: Some(truncate_str(&main_response_for_card, 200)),
+        content: Some(main_response_for_card.clone()),
         trigger: Some("agent".to_string()),
         error: error_msg,
         sender_open_id: None,
@@ -2900,6 +2947,7 @@ mod tests {
                 text: text.to_string(),
                 mentions: Vec::new(),
                 images: Vec::new(),
+                reply_to: None,
                 raw_type: Some("text".to_string()),
             }),
             received_at: now_ms(),
@@ -2908,7 +2956,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn drain_ready_events_after_turn_preserves_late_message_as_guide() {
+    async fn drain_ready_events_after_turn_preserves_late_message_in_queue() {
         let temp_dir = tempfile::tempdir().expect("temp data dir");
         let (base_url, counters) = spawn_progress_card_mock_server().await;
         let feishu = Arc::new(crate::im_gateway::feishu::FeishuProvider::new());
@@ -2960,19 +3008,9 @@ mod tests {
         )
         .await;
 
-        let guides = queue_manager.guide_status("feishu-main:ou_owner");
-        assert_eq!(guides, vec!["late message at final boundary".to_string()]);
-        let drained: Vec<String> = queue_manager
-            .get_or_create_guide_channel("feishu-main:ou_owner")
-            .lock()
-            .unwrap()
-            .drain(..)
-            .collect();
-        let combined =
-            bifrost_agent::session::combine_guide_messages(drained).expect("combined guide");
-        queue_manager
-            .push_queue("feishu-main:ou_owner", combined)
-            .expect("push combined guide into queue");
+        assert!(queue_manager
+            .guide_status("feishu-main:ou_owner")
+            .is_empty());
         assert_eq!(
             queue_manager.pop_queue("feishu-main:ou_owner").as_deref(),
             Some("late message at final boundary")
