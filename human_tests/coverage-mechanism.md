@@ -344,9 +344,10 @@ BIFROST_DATA_DIR="$PWD/.bifrost-ui-test-human" \
 
 - TC-COV-11：PASS。`scripts/ci/tests` 共 12 条工具单测通过，其中 changed-lines 6 条；
   阈值固定为 95%，并验证内联测试模块不会抬高生产代码增量覆盖率。
-- TC-COV-12：PASS。251 个 tracked Shell 文件 `bash -n` 与 ShellCheck error gate 全部
+- TC-COV-12：PASS。253 个 tracked Shell 文件 `bash -n` 与 ShellCheck error gate 全部
   通过；变更的 `scripts/ci/*.sh` 通过 shfmt。门禁真实发现并修复 7 处 stdin 重定向、
-  命令替换和条件表达式错误，未使用全局 disable。
+  命令替换和条件表达式错误，未使用全局 disable。首次远端 CI 还发现本地检查未纳入
+  尚未提交的新 Shell 文件；现已把 untracked `scripts/ci/*.sh` 一并纳入本地 shfmt 选择。
 - TC-COV-13：PASS。能力矩阵校验 10 个代理核心能力，P0 的测试层、三平台、失败模式与
   证据文件完整。
 - TC-COV-14：PASS。隔离运行生成 `.e2e-reports/summary-human/summary.json`，schema v1
