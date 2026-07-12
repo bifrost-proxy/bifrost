@@ -102,7 +102,7 @@ if grep -Fq 'local BIFROST_BIN=' "$serial_rules"; then
   echo "serial rule runner shadows injected BIFROST_BIN" >&2
   exit 1
 fi
-grep -Fq '> "$OUTPUT_DIR/coverage.json"' "$coverage_e2e"
+grep -Fq '>"$OUTPUT_DIR/coverage.json"' "$coverage_e2e"
 grep -Fq 'REFUSING: coverage E2E data directory is under production data' "$coverage_e2e"
 grep -Fq 'BIFROST_E2E_PROTECTED_PORTS' "$coverage_e2e"
 grep -Fq 'export HOME="$ORIGINAL_HOME"' "$coverage_e2e"

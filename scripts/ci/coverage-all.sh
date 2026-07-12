@@ -55,7 +55,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
 
 raise_fd_limit() {
   local target="${BIFROST_COVERAGE_FD_LIMIT:-4096}"
@@ -90,27 +94,74 @@ usage() { sed -n '2,/^$/s/^# \?//p' "$0"; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --json)       WANT_JSON=1; shift ;;
-    --lcov)       WANT_LCOV=1; shift ;;
-    --html)       WANT_HTML=1; shift ;;
-    --text)       WANT_TEXT=1; shift ;;
-    --with-e2e)   WITH_E2E=1; shift ;;
-    --e2e-suite)  E2E_SUITE="$2"; shift 2 ;;
-    --gate)       RUN_GATE=1; shift ;;
-    --gaps)       GATE_GAPS=1; RUN_GATE=1; shift ;;
-    --fail-under) FAIL_UNDER="$2"; shift 2 ;;
-    --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
-    -p|--package) PACKAGE="$2"; shift 2 ;;
-    --jobs)       JOBS="$2"; shift 2 ;;
-    -h|--help)    usage; exit 0 ;;
-    *) echo -e "${RED}Unknown option: $1${NC}" >&2; usage; exit 1 ;;
+    --json)
+      WANT_JSON=1
+      shift
+      ;;
+    --lcov)
+      WANT_LCOV=1
+      shift
+      ;;
+    --html)
+      WANT_HTML=1
+      shift
+      ;;
+    --text)
+      WANT_TEXT=1
+      shift
+      ;;
+    --with-e2e)
+      WITH_E2E=1
+      shift
+      ;;
+    --e2e-suite)
+      E2E_SUITE="$2"
+      shift 2
+      ;;
+    --gate)
+      RUN_GATE=1
+      shift
+      ;;
+    --gaps)
+      GATE_GAPS=1
+      RUN_GATE=1
+      shift
+      ;;
+    --fail-under)
+      FAIL_UNDER="$2"
+      shift 2
+      ;;
+    --output-dir)
+      OUTPUT_DIR="$2"
+      shift 2
+      ;;
+    -p | --package)
+      PACKAGE="$2"
+      shift 2
+      ;;
+    --jobs)
+      JOBS="$2"
+      shift 2
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo -e "${RED}Unknown option: $1${NC}" >&2
+      usage
+      exit 1
+      ;;
   esac
 done
 
 if [[ -n "$E2E_SUITE" ]]; then
   case "$E2E_SUITE" in
-    rules|shell|runner) ;;
-    *) echo -e "${RED}Unknown E2E suite: $E2E_SUITE${NC}" >&2; exit 2 ;;
+    rules | shell | runner) ;;
+    *)
+      echo -e "${RED}Unknown E2E suite: $E2E_SUITE${NC}" >&2
+      exit 2
+      ;;
   esac
   if [[ "$WITH_E2E" -ne 1 ]]; then
     echo -e "${RED}--e2e-suite requires --with-e2e${NC}" >&2
@@ -219,8 +270,8 @@ prepare_isolated_e2e_environment() {
   if [[ -n "$ORIGINAL_HOME" && -d "$ORIGINAL_HOME" ]]; then
     production_abs="$(cd "$ORIGINAL_HOME" && pwd -P)/.bifrost"
   fi
-  if [[ -n "$production_abs" \
-      && ( "$data_abs" == "$production_abs" || "$data_abs" == "$production_abs/"* ) ]]; then
+  if [[ -n "$production_abs" &&
+    ("$data_abs" == "$production_abs" || "$data_abs" == "$production_abs/"*) ]]; then
     echo -e "${RED}REFUSING: coverage E2E data directory is under production data: $data_abs${NC}" >&2
     return 1
   fi
@@ -358,7 +409,7 @@ main() {
     cargo llvm-cov report --json --output-path "$OUTPUT_DIR/coverage.json"
     echo -e "${GREEN}JSON : $OUTPUT_DIR/coverage.json${NC}"
   fi
-  if [[ "$WANT_LCOV" -eq 1 || ( "$RUN_GATE" -eq 1 && "$WITH_E2E" -eq 1 ) ]]; then
+  if [[ "$WANT_LCOV" -eq 1 || ("$RUN_GATE" -eq 1 && "$WITH_E2E" -eq 1) ]]; then
     cargo llvm-cov report --lcov --output-path "$OUTPUT_DIR/lcov.info"
     echo -e "${GREEN}LCOV : $OUTPUT_DIR/lcov.info${NC}"
   fi
@@ -369,10 +420,14 @@ main() {
   # Text summary + optional hard floor.
   if [[ -n "$FAIL_UNDER" ]]; then
     cargo llvm-cov report --fail-under-lines "$FAIL_UNDER" || {
-      echo -e "${RED}llvm-cov hard floor (--fail-under) not met${NC}"; exit 1; }
+      echo -e "${RED}llvm-cov hard floor (--fail-under) not met${NC}"
+      exit 1
+    }
   else
     cargo llvm-cov report || {
-      echo -e "${RED}llvm-cov report failed${NC}"; exit 1; }
+      echo -e "${RED}llvm-cov report failed${NC}"
+      exit 1
+    }
   fi
 
   # 5. Optional gate (per-crate floors + gap analysis).

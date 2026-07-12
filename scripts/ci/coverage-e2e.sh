@@ -92,16 +92,48 @@ usage() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --html)       FORMAT="html"; shift ;;
-    --lcov)       FORMAT="lcov"; shift ;;
-    --json)       FORMAT="json"; shift ;;
-    --fail-under) FAIL_UNDER="$2"; shift 2 ;;
-    --open)       FORMAT="html"; OPEN_REPORT=1; shift ;;
-    --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
-    --suite)      SUITE="$2"; shift 2 ;;
-    --skip-build) SKIP_BUILD=1; shift ;;
-    -h|--help)    usage; exit 0 ;;
-    *)            echo -e "${RED}Unknown option: $1${NC}" >&2; usage; exit 1 ;;
+    --html)
+      FORMAT="html"
+      shift
+      ;;
+    --lcov)
+      FORMAT="lcov"
+      shift
+      ;;
+    --json)
+      FORMAT="json"
+      shift
+      ;;
+    --fail-under)
+      FAIL_UNDER="$2"
+      shift 2
+      ;;
+    --open)
+      FORMAT="html"
+      OPEN_REPORT=1
+      shift
+      ;;
+    --output-dir)
+      OUTPUT_DIR="$2"
+      shift 2
+      ;;
+    --suite)
+      SUITE="$2"
+      shift 2
+      ;;
+    --skip-build)
+      SKIP_BUILD=1
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo -e "${RED}Unknown option: $1${NC}" >&2
+      usage
+      exit 1
+      ;;
   esac
 done
 
@@ -173,8 +205,8 @@ run_e2e_suites() {
   if [[ -n "$ORIGINAL_HOME" && -d "$ORIGINAL_HOME" ]]; then
     production_abs="$(cd "$ORIGINAL_HOME" && pwd -P)/.bifrost"
   fi
-  if [[ -n "$production_abs" \
-      && ( "$data_abs" == "$production_abs" || "$data_abs" == "$production_abs/"* ) ]]; then
+  if [[ -n "$production_abs" &&
+    ("$data_abs" == "$production_abs" || "$data_abs" == "$production_abs/"*) ]]; then
     echo -e "${RED}REFUSING: coverage E2E data directory is under production data: $data_abs${NC}" >&2
     return 1
   fi
@@ -289,13 +321,13 @@ merge_and_report() {
       mkdir -p "$OUTPUT_DIR"
       echo -e "${BLUE}Generating LCOV report...${NC}"
       "$llvm_cov" export "${object_args[@]}" "${report_args[@]}" \
-        -format=lcov > "$OUTPUT_DIR/lcov.info"
+        -format=lcov >"$OUTPUT_DIR/lcov.info"
 
       echo -e "${GREEN}LCOV report generated at: $OUTPUT_DIR/lcov.info${NC}"
       ;;
     json)
       "$llvm_cov" export "${object_args[@]}" "${report_args[@]}" \
-        -format=text > "$OUTPUT_DIR/coverage.json"
+        -format=text >"$OUTPUT_DIR/coverage.json"
       echo -e "${GREEN}JSON report generated at: $OUTPUT_DIR/coverage.json${NC}"
       ;;
     text)
