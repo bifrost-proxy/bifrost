@@ -4,7 +4,7 @@ use bifrost_admin::{AdminState, FrameDirection, TrafficType};
 use bifrost_core::{BifrostError, Result};
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -17,8 +17,28 @@ pub async fn tunnel_bidirectional(
     req_id: &str,
     admin_state: Option<&Arc<AdminState>>,
 ) -> Result<()> {
-    let client = TokioIo::new(upgraded);
-    let (mut target_read, mut target_write) = target.into_split();
+    tunnel_bidirectional_io(
+        TokioIo::new(upgraded),
+        target,
+        verbose_logging,
+        req_id,
+        admin_state,
+    )
+    .await
+}
+
+async fn tunnel_bidirectional_io<C, T>(
+    client: C,
+    target: T,
+    verbose_logging: bool,
+    req_id: &str,
+    admin_state: Option<&Arc<AdminState>>,
+) -> Result<()>
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut target_read, mut target_write) = tokio::io::split(target);
 
     let (client_read, client_write) = tokio::io::split(client);
     let mut client_read = client_read;
@@ -92,6 +112,7 @@ pub async fn tunnel_bidirectional(
     }
 }
 
+#[derive(Debug)]
 pub struct TunnelStats {
     pub bytes_sent: u64,
     pub bytes_received: u64,
@@ -133,9 +154,30 @@ pub async fn tunnel_bidirectional_with_cancel(
     admin_state: Option<&Arc<AdminState>>,
     cancel_rx: oneshot::Receiver<()>,
 ) -> Result<TunnelStats> {
-    let client = TokioIo::new(upgraded);
-    let (mut target_read, mut target_write) = target.into_split();
+    tunnel_bidirectional_with_cancel_io(
+        TokioIo::new(upgraded),
+        target,
+        verbose_logging,
+        req_id,
+        admin_state,
+        cancel_rx,
+    )
+    .await
+}
 
+async fn tunnel_bidirectional_with_cancel_io<C, T>(
+    client: C,
+    target: T,
+    verbose_logging: bool,
+    req_id: &str,
+    admin_state: Option<&Arc<AdminState>>,
+    cancel_rx: oneshot::Receiver<()>,
+) -> Result<TunnelStats>
+where
+    C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut target_read, mut target_write) = tokio::io::split(target);
     let (client_read, client_write) = tokio::io::split(client);
     let mut client_read = client_read;
     let mut client_write = client_write;
@@ -257,5 +299,191 @@ pub async fn tunnel_bidirectional_with_cancel(
             }
             Ok(TunnelStats { bytes_sent: 0, bytes_received: 0, cancelled: true })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tunnel_error_classification_handles_expected_disconnects_and_other_errors() {
+        for kind in [
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::BrokenPipe,
+        ] {
+            let stats =
+                tunnel_result_from_error(true, "REQ-test", std::io::Error::new(kind, "closed"))
+                    .unwrap();
+            assert_eq!(stats.bytes_sent, 0);
+            assert_eq!(stats.bytes_received, 0);
+            assert!(!stats.cancelled);
+        }
+        let error = tunnel_result_from_error(
+            false,
+            "REQ-test",
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "bad"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Tunnel error"));
+    }
+
+    #[tokio::test]
+    async fn cancelable_tunnel_reports_client_to_target_bytes() {
+        let (mut client_peer, client) = tokio::io::duplex(128);
+        let (target, mut target_peer) = tokio::io::duplex(128);
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            tunnel_bidirectional_with_cancel_io(
+                client,
+                target,
+                true,
+                "REQ-client-end",
+                None,
+                cancel_rx,
+            )
+            .await
+        });
+        client_peer.write_all(b"client-data").await.unwrap();
+        client_peer.shutdown().await.unwrap();
+        let mut received = Vec::new();
+        target_peer.read_to_end(&mut received).await.unwrap();
+        let stats = task.await.unwrap().unwrap();
+        assert_eq!(received, b"client-data");
+        assert_eq!(stats.bytes_sent, 11);
+        assert!(!stats.cancelled);
+    }
+
+    #[tokio::test]
+    async fn cancelable_tunnel_reports_target_to_client_bytes_with_metrics() {
+        let state = Arc::new(AdminState::new(0));
+        let (client, mut client_peer) = tokio::io::duplex(128);
+        let (mut target_peer, target) = tokio::io::duplex(128);
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        let task = tokio::spawn({
+            let state = state.clone();
+            async move {
+                tunnel_bidirectional_with_cancel_io(
+                    client,
+                    target,
+                    false,
+                    "REQ-target-end",
+                    Some(&state),
+                    cancel_rx,
+                )
+                .await
+            }
+        });
+        target_peer.write_all(b"target-data").await.unwrap();
+        target_peer.shutdown().await.unwrap();
+        let mut received = Vec::new();
+        client_peer.read_to_end(&mut received).await.unwrap();
+        let stats = task.await.unwrap().unwrap();
+        assert_eq!(received, b"target-data");
+        assert_eq!(stats.bytes_received, 11);
+        assert!(!stats.cancelled);
+    }
+
+    #[tokio::test]
+    async fn cancelable_tunnel_stops_both_tasks_on_signal() {
+        let (_client_peer, client) = tokio::io::duplex(64);
+        let (target, _target_peer) = tokio::io::duplex(64);
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        cancel_tx.send(()).unwrap();
+        let stats = tunnel_bidirectional_with_cancel_io(
+            client,
+            target,
+            true,
+            "REQ-cancel",
+            None,
+            cancel_rx,
+        )
+        .await
+        .unwrap();
+        assert!(stats.cancelled);
+        assert_eq!(stats.bytes_sent, 0);
+        assert_eq!(stats.bytes_received, 0);
+    }
+
+    #[tokio::test]
+    async fn basic_tunnel_forwards_both_directions_and_updates_metrics() {
+        let state = Arc::new(AdminState::new(0));
+        let (client, mut client_peer) = tokio::io::duplex(128);
+        let (target, mut target_peer) = tokio::io::duplex(128);
+        let task = tokio::spawn({
+            let state = state.clone();
+            async move { tunnel_bidirectional_io(client, target, true, "REQ-basic", Some(&state)).await }
+        });
+        client_peer.write_all(b"client").await.unwrap();
+        target_peer.write_all(b"target").await.unwrap();
+        let mut from_client = [0u8; 6];
+        target_peer.read_exact(&mut from_client).await.unwrap();
+        let mut from_target = [0u8; 6];
+        client_peer.read_exact(&mut from_target).await.unwrap();
+        assert_eq!(&from_client, b"client");
+        assert_eq!(&from_target, b"target");
+        client_peer.shutdown().await.unwrap();
+        target_peer.shutdown().await.unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    struct ErrorIo(std::io::ErrorKind);
+
+    impl AsyncRead for ErrorIo {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::Error::new(self.0, "covered")))
+        }
+    }
+
+    impl AsyncWrite for ErrorIo {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Err(std::io::Error::new(self.0, "covered")))
+        }
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn basic_tunnel_treats_disconnect_as_success_and_other_errors_as_failure() {
+        let (_, peer) = tokio::io::duplex(16);
+        tunnel_bidirectional_io(
+            ErrorIo(std::io::ErrorKind::ConnectionReset),
+            peer,
+            false,
+            "REQ-reset",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (_, peer) = tokio::io::duplex(16);
+        let error = tunnel_bidirectional_io(
+            ErrorIo(std::io::ErrorKind::InvalidData),
+            peer,
+            true,
+            "REQ-error",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Tunnel error"));
     }
 }

@@ -98,11 +98,18 @@ try:
             if chunk is None:
                 continue
             buffer += chunk
-            if "MOBILE AVAILABILITY CHECK" in buffer:
+            # The stable readiness contract is the foreground stop prompt.
+            # The old MOBILE AVAILABILITY CHECK section is optional and is no
+            # longer printed for every startup configuration.
+            if "Press Ctrl+C to stop" in buffer:
                 break
     else:
         raise RuntimeError(f"timed out waiting for foreground startup\n{buffer[-4000:]}")
 
+    # The prompt is printed immediately before the async signal listener gets
+    # its first scheduling opportunity. Coverage instrumentation makes that
+    # gap visible, so allow the listener to become active before sending ^C.
+    time.sleep(1)
     os.write(master_fd, b"\x03")
     exit_deadline = time.time() + 8
     while time.time() < exit_deadline:

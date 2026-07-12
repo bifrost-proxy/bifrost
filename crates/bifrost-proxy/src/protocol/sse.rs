@@ -472,4 +472,49 @@ mod tests {
         let result = String::from_utf8(output).unwrap();
         assert_eq!(result, ": keepalive\n\n");
     }
+
+    #[tokio::test]
+    async fn coverage_90_forward_transforms_filters_and_tracks_events() {
+        use tokio::io::AsyncReadExt;
+
+        let input = b"id: 1\ndata: first\n\nid: 2\ndata: second\n\n".to_vec();
+        let (mut reader, mut input_writer) = tokio::io::duplex(256);
+        tokio::spawn(async move {
+            input_writer.write_all(&input).await.unwrap();
+        });
+        let (output_writer, mut output_reader) = tokio::io::duplex(256);
+        let count = SseForwarder::forward(
+            &mut reader,
+            output_writer,
+            Some(Box::new(|event| {
+                (event.id.as_deref() == Some("2"))
+                    .then(|| SseEvent::new(event.data.to_uppercase()).with_id("changed"))
+            })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+        let mut output = Vec::new();
+        output_reader.read_to_end(&mut output).await.unwrap();
+        assert!(String::from_utf8_lossy(&output).contains("data: SECOND"));
+
+        let reader = SseReader::new(tokio::io::empty());
+        assert_eq!(reader.last_event_id(), None);
+        let _ = reader.into_inner();
+        let writer = SseWriter::new(tokio::io::sink());
+        let _ = writer.into_inner();
+    }
+
+    #[tokio::test]
+    async fn coverage_90_forward_raw_handles_multiple_chunks() {
+        use tokio::io::AsyncReadExt;
+        let (writer, mut reader) = tokio::io::duplex(64);
+        let total = SseForwarder::forward_raw(&b"abcdef"[..], writer, 2)
+            .await
+            .unwrap();
+        assert_eq!(total, 6);
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output).await.unwrap();
+        assert_eq!(output, b"abcdef");
+    }
 }

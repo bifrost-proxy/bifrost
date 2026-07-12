@@ -917,4 +917,83 @@ mod tests {
             "10.0.0.1, 1.2.3.4"
         );
     }
+
+    #[test]
+    fn coverage_90_full_verbose_request_pipeline_covers_remaining_rules() {
+        let request = hyper::Request::builder()
+            .method("POST")
+            .uri("http://example.test/")
+            .header("x-delete", "old")
+            .header("x-replace", "before value")
+            .header(hyper::header::AUTHORIZATION, "Bearer old")
+            .header(hyper::header::CONTENT_TYPE, "text/plain; charset=ascii")
+            .header(hyper::header::COOKIE, "remove=1; keep=old")
+            .body(())
+            .unwrap();
+        let (mut parts, _) = request.into_parts();
+        let rules = ResolvedRules {
+            delete_req_headers: vec!["x-delete".into(), "invalid header".into()],
+            req_headers: vec![
+                ("x-new".into(), "new".into()),
+                ("bad header".into(), "x".into()),
+            ],
+            req_cookies: vec![
+                ("keep".into(), "new;quoted\"".into()),
+                ("space name".into(), "ok".into()),
+            ],
+            req_del_cookies: vec!["remove".into()],
+            method: Some("PATCH".into()),
+            ua: Some("coverage-agent".into()),
+            referer: Some("https://referer.test/".into()),
+            auth: Some("user:pass".into()),
+            header_replace: vec![crate::server::HeaderReplaceRule {
+                target: HeaderReplaceTarget::Request,
+                header_name: "x-replace".into(),
+                pattern: "before".into(),
+                replacement: "after".into(),
+            }],
+            req_type: Some("json".into()),
+            req_charset: Some("utf-8".into()),
+            forwarded_for: Some("203.0.113.8".into()),
+            req_cors: CorsConfig {
+                enabled: true,
+                origin: Some("https://origin.test".into()),
+                methods: Some("PATCH".into()),
+                headers: Some("x-new".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        apply_req_rules(&mut parts, &rules, true, &RequestContext::new());
+        assert_eq!(parts.method, hyper::Method::PATCH);
+        assert!(!parts.headers.contains_key("x-delete"));
+        assert_eq!(parts.headers["x-replace"], "after value");
+        assert_eq!(
+            parts.headers[hyper::header::CONTENT_TYPE],
+            "application/json; charset=utf-8"
+        );
+        assert!(parts.headers[hyper::header::COOKIE]
+            .to_str()
+            .unwrap()
+            .contains("space%20name=ok"));
+        assert_eq!(parts.headers["origin"], "https://origin.test");
+    }
+
+    #[test]
+    fn coverage_90_cookie_escape_and_wildcard_cors_paths() {
+        assert_eq!(escape_cookie_name("a b"), "a%20b");
+        assert_eq!(escape_cookie_value("a,b;c\\d\n"), "a%2Cb%3Bc%5Cd%0A");
+        let request = hyper::Request::builder().uri("/").body(()).unwrap();
+        let (mut parts, _) = request.into_parts();
+        let rules = ResolvedRules {
+            req_cors: CorsConfig {
+                enabled: true,
+                origin: Some("*".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        apply_req_rules(&mut parts, &rules, true, &RequestContext::new());
+        assert_eq!(parts.headers["origin"], "*");
+    }
 }

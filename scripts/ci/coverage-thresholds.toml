@@ -75,8 +75,12 @@ min = 89.0
 macos_min = 87.0
 
 [crates.bifrost-proxy]
-# Ratcheted to 64% after wave 3-5 proxy tests added.
-min = 64.0
+# Exact production Rust coverage, excluding only items compiled under exact
+# #[cfg(test)]. Enforced from the merged unit + integration + full E2E LCOV by
+# coverage-production.py; the raw llvm JSON contains test helpers and is not
+# the declared denominator for this crate. Verified baseline: 90.01%.
+min = 90.0
+metric = "production"
 
 [crates.bifrost-admin]
 # Ratcheted to 56% after wave 3-5 admin tests added.

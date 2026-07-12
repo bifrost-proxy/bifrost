@@ -18,7 +18,7 @@ ADMIN_BASE_URL="http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}"
 TEST_DATA_DIR="${TEST_DATA_DIR:-./.bifrost-persistence-test}"
 MOCK_HTTP_PORT="${MOCK_HTTP_PORT:-3198}"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-BIFROST_BIN="${PROJECT_ROOT}/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-${PROJECT_ROOT}/target/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi

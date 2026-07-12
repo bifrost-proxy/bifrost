@@ -23,7 +23,7 @@ SECONDARY_HTTPS_PORT="${SECONDARY_HTTPS_PORT:-$((14743 + ($$ % 500)))}"
 if [[ -n "${BIFROST_BIN:-}" ]]; then
     :
 elif [[ -x "$PROJECT_ROOT/target/release/bifrost" ]]; then
-    BIFROST_BIN="$PROJECT_ROOT/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-$PROJECT_ROOT/target/release/bifrost}"
 else
     BIFROST_BIN="$PROJECT_ROOT/target/debug/bifrost"
 fi

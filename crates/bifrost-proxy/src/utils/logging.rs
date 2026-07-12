@@ -490,4 +490,76 @@ mod tests {
         assert!(detail.contains("req_delay: 100ms"));
         assert!(detail.contains("res_delay: 200ms"));
     }
+
+    #[test]
+    fn coverage_90_formats_every_summary_field_and_rule_provenance() {
+        use crate::server::{CorsConfig, ResCookieValue, RuleValue};
+        use bifrost_core::Protocol;
+
+        let rule = RuleValue {
+            pattern: "source.test".to_string(),
+            protocol: Protocol::Host,
+            value: "target.test".to_string(),
+            options: HashMap::new(),
+            rule_name: Some("rules.conf".to_string()),
+            raw: Some("source.test target.test".to_string()),
+            line: Some(7),
+            auto_tls_intercept: true,
+        };
+        let rules = ResolvedRules {
+            host: Some("target.test".to_string()),
+            proxy: Some("http://proxy.test:8080".to_string()),
+            req_headers: vec![("x-request".to_string(), "yes".to_string())],
+            res_headers: vec![("x-response".to_string(), "yes".to_string())],
+            req_body: Some(Bytes::from_static(b"request")),
+            res_body: Some(Bytes::from_static(b"response")),
+            req_cookies: vec![("request".to_string(), "cookie".to_string())],
+            res_cookies: vec![(
+                "response".to_string(),
+                ResCookieValue::simple("cookie".to_string()),
+            )],
+            req_delay: Some(1),
+            res_delay: Some(2),
+            status_code: Some(201),
+            method: Some("PATCH".to_string()),
+            ua: Some("coverage-agent".to_string()),
+            referer: Some("https://referer.test/".to_string()),
+            req_cors: CorsConfig::enable_all(),
+            res_cors: CorsConfig::enable_all(),
+            rules: vec![rule],
+            ..Default::default()
+        };
+        let summary = format_rules_summary(&rules);
+        for name in [
+            "host",
+            "proxy",
+            "req_headers",
+            "res_headers",
+            "req_body",
+            "res_body",
+            "req_cookies",
+            "res_cookies",
+            "req_delay",
+            "res_delay",
+            "status_code",
+            "method",
+            "ua",
+            "referer",
+            "req_cors",
+            "res_cors",
+        ] {
+            assert!(summary.contains(name), "missing {name}: {summary}");
+        }
+        let detail = format_rules_detail(&rules);
+        assert!(detail.contains("matched 1 rule(s)"));
+        assert!(detail.contains("rules.conf:7"));
+        assert!(detail.contains("raw: source.test target.test"));
+        assert_eq!(build_matched_rules(&rules).unwrap().len(), 1);
+
+        let mut cli_rule = rules.clone();
+        cli_rule.rules[0].rule_name = None;
+        cli_rule.rules[0].raw = None;
+        cli_rule.rules[0].line = None;
+        assert!(format_rules_detail(&cli_rule).contains("<cli>"));
+    }
 }

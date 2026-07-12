@@ -747,6 +747,62 @@ mod tests {
     }
 
     #[test]
+    fn coverage_90_classifies_all_connect_io_kinds_and_non_connect_failures() {
+        for (kind, expected) in [
+            (io::ErrorKind::ConnectionRefused, "REQUEST_CONNECT_REFUSED"),
+            (io::ErrorKind::ConnectionReset, "REQUEST_CONNECT_RESET"),
+            (io::ErrorKind::ConnectionAborted, "REQUEST_CONNECT_ABORTED"),
+            (io::ErrorKind::AddrInUse, "REQUEST_CONNECT_ADDR_IN_USE"),
+            (
+                io::ErrorKind::AddrNotAvailable,
+                "REQUEST_CONNECT_ADDR_NOT_AVAILABLE",
+            ),
+            (io::ErrorKind::NotFound, "REQUEST_CONNECT_NOT_FOUND"),
+            (
+                io::ErrorKind::NetworkUnreachable,
+                "REQUEST_CONNECT_NETWORK_UNREACHABLE",
+            ),
+            (
+                io::ErrorKind::HostUnreachable,
+                "REQUEST_CONNECT_HOST_UNREACHABLE",
+            ),
+            (io::ErrorKind::Other, "REQUEST_CONNECT_FAILED"),
+        ] {
+            assert_eq!(
+                classify_error_type_inner(true, Some(kind), "ordinary connect failure"),
+                expected
+            );
+        }
+        assert_eq!(
+            classify_error_type_inner(false, None, "certificate verify failed"),
+            "REQUEST_TLS_FAILED"
+        );
+        assert_eq!(
+            classify_error_type_inner(false, Some(io::ErrorKind::Other), "too many open files"),
+            "REQUEST_RESOURCE_EXHAUSTED"
+        );
+        assert_eq!(
+            classify_error_type_inner(false, None, "ordinary request failure"),
+            "REQUEST_FAILED"
+        );
+    }
+
+    #[test]
+    fn coverage_90_tls_config_builders_cover_safe_and_unsafe_variants() {
+        for unsafe_ssl in [false, true] {
+            let negotiated = get_tls_client_config(unsafe_ssl);
+            assert_eq!(
+                negotiated.alpn_protocols,
+                vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+            );
+            let http1 = get_tls_client_config_http1_only(unsafe_ssl);
+            assert_eq!(http1.alpn_protocols, vec![b"http/1.1".to_vec()]);
+            let raw = get_tls_client_config_without_alpn(unsafe_ssl);
+            assert!(raw.alpn_protocols.is_empty());
+        }
+    }
+
+    #[test]
     fn marks_http1_fallback_for_partition() {
         let pool_partition = "orig=example.com|target=https://example.com:443";
         assert!(!should_prefer_http1_upstream(false, &[], pool_partition));

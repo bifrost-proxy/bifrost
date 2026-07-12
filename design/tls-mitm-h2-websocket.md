@@ -92,7 +92,7 @@ if is_websocket_upgrade_request(&req) {
 
 ### H2 到 HTTP/1.1 上游桥接
 
-`crates/bifrost-proxy/src/proxy/http/websocket/upgrade.rs`:
+`crates/bifrost-proxy/src/proxy/http/websocket/mod.rs`:
 
 - 从下游 H2 CONNECT 帧中提取 `:protocol`、`Sec-WebSocket-Protocol`、`Sec-WebSocket-Extensions`。
 - 使用 `rand`/`base64` 生成 16 字节随机 `Sec-WebSocket-Key`,拼接 HTTP/1.1 握手行:
@@ -142,7 +142,7 @@ if is_websocket_upgrade_request(&req) {
 
 ## Phase 3: 上游 H1 兼容与响应改写
 
-- `websocket/upgrade.rs` 支持 H2 -> H1 桥接: 生成 Sec-WebSocket-Key、返回 200 给 H2 客户端、透传协商结果。
+- `websocket/mod.rs` 支持 H2 -> H1 桥接: 生成 Sec-WebSocket-Key、返回 200 给 H2 客户端、透传协商结果。
 - 帧路径继续走 `websocket/capture.rs` 与 `ws_decode`,H2 WebSocket 与 H1 共存。
 
 ## Phase 4: 兼容性验证与文档
@@ -159,7 +159,7 @@ if is_websocket_upgrade_request(&req) {
   - `test_is_websocket_upgrade_request_true_for_http1_headers_v4`
   - `test_is_websocket_upgrade_request_false_without_headers_v4`
   - 新增 `test_is_websocket_upgrade_request_true_for_http2_extended_connect`(H2 CONNECT + `:protocol=websocket`)。
-- `crates/bifrost-proxy/src/proxy/http/websocket/upgrade.rs`: 覆盖 H2 -> H1 桥接的 Sec-WebSocket-Key 生成与响应改写。
+- `crates/bifrost-proxy/src/proxy/http/websocket/mod.rs`: 覆盖 H2 -> H1 桥接的 Sec-WebSocket-Key 生成与响应改写。
 - `crates/bifrost-proxy/src/protocol/websocket/handshake.rs`: 覆盖 extension 解析。
 
 ### 集成/E2E 测试

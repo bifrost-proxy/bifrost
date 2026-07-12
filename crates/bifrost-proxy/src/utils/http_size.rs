@@ -132,4 +132,15 @@ mod tests {
         assert_eq!(status_reason(101), "Switching Protocols");
         assert_eq!(status_reason(999), "Unknown");
     }
+
+    #[test]
+    fn coverage_90_status_reason_covers_every_supported_status() {
+        for code in [
+            100, 101, 200, 201, 202, 204, 206, 301, 302, 303, 304, 307, 308, 400, 401, 403, 404,
+            405, 408, 409, 410, 413, 414, 415, 429, 500, 501, 502, 503, 504,
+        ] {
+            assert_ne!(status_reason(code), "Unknown", "status {code}");
+            assert!(calculate_response_headers_size(code, &[]) > 12);
+        }
+    }
 }

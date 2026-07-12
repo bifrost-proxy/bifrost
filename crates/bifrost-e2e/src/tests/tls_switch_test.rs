@@ -1,4 +1,4 @@
-use crate::mock::HttpbinMockServer;
+use crate::mock::HttpsMockServer;
 use crate::proxy::ProxyInstance;
 use crate::runner::TestCase;
 use serde_json::Value;
@@ -77,6 +77,11 @@ async fn update_tls_config_like_api(
         old_value = config.enable_tls_interception;
         should_disconnect = config.disconnect_on_config_change;
         config.enable_tls_interception = enable_tls_interception;
+        config.intercept_include = if enable_tls_interception {
+            vec!["localtest.me".to_string()]
+        } else {
+            Vec::new()
+        };
     }
 
     let global_changed = old_value != enable_tls_interception;
@@ -110,12 +115,12 @@ async fn test_tls_switch_intercept_to_tunnel() -> Result<(), String> {
     let port = portpicker::pick_unused_port().unwrap();
     println!("[SETUP] Proxy will run on port {}", port);
 
-    let mock = HttpbinMockServer::start().await;
-    let rules = mock.http_rules();
-    let rule_refs: Vec<&str> = rules.iter().map(String::as_str).collect();
-    let (proxy, admin_state) = ProxyInstance::start_with_admin(port, rule_refs, true, true)
+    let mock = HttpsMockServer::start("localtest.me").await;
+    let target_url = format!("https://localtest.me:{}/switch", mock.port);
+    let (proxy, admin_state) = ProxyInstance::start_with_admin(port, vec![], true, true)
         .await
         .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    admin_state.runtime_config.write().await.intercept_include = vec!["localtest.me".to_string()];
 
     println!("[SETUP] Proxy started with TLS interception ENABLED");
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -131,7 +136,7 @@ async fn test_tls_switch_intercept_to_tunnel() -> Result<(), String> {
 
     println!("\n[PHASE 1] Send HTTPS request with TLS interception ENABLED");
     let _ = https_client
-        .get("https://httpbin.org/get?test=1")
+        .get(format!("{target_url}?test=1"))
         .send()
         .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -162,8 +167,17 @@ async fn test_tls_switch_intercept_to_tunnel() -> Result<(), String> {
     );
 
     println!("\n[PHASE 3] Send HTTPS request with TLS interception DISABLED");
-    let _ = https_client
-        .get("https://httpbin.org/get?test=2")
+    // Build a fresh client after the configuration change. reqwest's pool may
+    // otherwise reuse the already-established MITM connection, which never
+    // reaches the proxy's CONNECT routing decision again.
+    let tunnel_client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(&proxy_url).unwrap())
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("Failed to create post-switch HTTPS client: {e}"))?;
+    let _ = tunnel_client
+        .get(format!("{target_url}?test=2"))
         .send()
         .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -186,7 +200,9 @@ async fn test_tls_switch_intercept_to_tunnel() -> Result<(), String> {
     if https_count == 1 && tunnel_count >= 1 {
         println!("[RESULT] ✅ TEST PASSED - ON -> OFF switch works correctly");
     } else {
-        println!("[RESULT] ⚠️ TEST FAILED - Expected HTTPS=1, TUNNEL>=1");
+        return Err(format!(
+            "Expected HTTPS=1 and TUNNEL>=1 after ON -> OFF switch, got HTTPS={https_count}, TUNNEL={tunnel_count}"
+        ));
     }
 
     drop(proxy);
@@ -202,10 +218,9 @@ async fn test_tls_switch_tunnel_to_intercept() -> Result<(), String> {
     let port = portpicker::pick_unused_port().unwrap();
     println!("[SETUP] Proxy will run on port {}", port);
 
-    let mock = HttpbinMockServer::start().await;
-    let rules = mock.http_rules();
-    let rule_refs: Vec<&str> = rules.iter().map(String::as_str).collect();
-    let (proxy, admin_state) = ProxyInstance::start_with_admin(port, rule_refs, false, true)
+    let mock = HttpsMockServer::start("localtest.me").await;
+    let target_url = format!("https://localtest.me:{}/switch", mock.port);
+    let (proxy, admin_state) = ProxyInstance::start_with_admin(port, vec![], false, true)
         .await
         .map_err(|e| format!("Failed to start proxy: {}", e))?;
 
@@ -239,7 +254,7 @@ async fn test_tls_switch_tunnel_to_intercept() -> Result<(), String> {
 
     println!("\n[REQUEST 1] Sending HTTPS request (tunnel mode)");
     let result1 = https_client
-        .get("https://httpbin.org/get?phase=1")
+        .get(format!("{target_url}?phase=1"))
         .send()
         .await;
     match &result1 {
@@ -322,7 +337,7 @@ async fn test_tls_switch_tunnel_to_intercept() -> Result<(), String> {
 
     println!("\n[REQUEST 2] Sending HTTPS request (should be intercepted now)");
     let result2 = https_client2
-        .get("https://httpbin.org/get?phase=3")
+        .get(format!("{target_url}?phase=3"))
         .send()
         .await;
     match &result2 {
@@ -383,16 +398,13 @@ async fn test_tls_switch_tunnel_to_intercept() -> Result<(), String> {
             println!("         - 新请求使用了 TLS 拦截模式");
             println!("         - 转发规则将会生效");
         } else if https_count == 0 {
-            println!("\n[RESULT] ⚠️ TEST FAILED");
-            println!("         没有 HTTPS 记录！");
-            println!("         旧的 tunnel 连接没有被断开，新请求仍在复用旧连接");
-            println!("         这就是用户报告的问题！");
+            return Err(format!(
+                "Expected at least one HTTPS record after OFF -> ON switch, got TUNNEL={tunnel_count}, HTTPS=0"
+            ));
         } else if tunnel_count > 1 {
-            println!("\n[RESULT] ⚠️ TEST FAILED");
-            println!(
-                "         发现 {} 个 TUNNEL 记录，可能有额外的 tunnel 请求",
-                tunnel_count
-            );
+            return Err(format!(
+                "Expected exactly one tunnel record before OFF -> ON switch, got TUNNEL={tunnel_count}, HTTPS={https_count}"
+            ));
         }
     }
 

@@ -1231,139 +1231,6 @@ async fn handle_tls_interception(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
-async fn tls_intercept_tunnel(
-    upgraded: Upgraded,
-    server_config: Arc<ServerConfig>,
-    original_host: &str,
-    original_port: u16,
-    rules: Arc<dyn RulesResolver>,
-    verbose_logging: bool,
-    max_body_buffer_size: usize,
-    max_body_probe_size: usize,
-    unsafe_ssl: bool,
-    inject_bifrost_badge: bool,
-    req_id: &str,
-    admin_state: Option<Arc<AdminState>>,
-    client_ip: String,
-    client_app: Option<String>,
-    client_pid: Option<u32>,
-    client_path: Option<String>,
-    account_name: Option<String>,
-    listener_port: u16,
-    push_manager: Option<SharedPushManager>,
-) -> Result<()> {
-    let acceptor = TlsAcceptor::from(server_config);
-    let client_tls = match acceptor.accept(TokioIo::new(upgraded)).await {
-        Ok(tls) => {
-            if let Some(ref state) = admin_state {
-                if let Some(ref tracker) = state.client_trust_tracker {
-                    tracker.record_handshake_success(
-                        &client_ip,
-                        client_app.as_deref(),
-                        original_host,
-                    );
-                }
-            }
-            tls
-        }
-        Err(e) => {
-            if let Some(ref state) = admin_state {
-                if let Some(ref tracker) = state.client_trust_tracker {
-                    let reason = bifrost_admin::classify_tls_accept_error(&e);
-                    tracker.record_handshake_failure(
-                        &client_ip,
-                        client_app.as_deref(),
-                        original_host,
-                        &reason,
-                    );
-                }
-            }
-            return Err(BifrostError::Tls(format!("TLS accept failed: {e}")));
-        }
-    };
-
-    if verbose_logging {
-        debug!("[{}] TLS handshake with client completed", req_id);
-    }
-
-    let original_host_for_requests = original_host.to_string();
-    let original_port_for_requests = original_port;
-    let admin_state_clone = admin_state.clone();
-    let rules_clone = rules.clone();
-    let verbose = verbose_logging;
-    let client_ip_clone = client_ip.clone();
-    let client_app_clone = client_app.clone();
-    let client_path_clone = client_path.clone();
-    let account_name_clone = account_name.clone();
-    let push_manager_clone = push_manager.clone();
-
-    let service = service_fn(move |req: Request<Incoming>| {
-        let original_host = original_host_for_requests.clone();
-        let original_port = original_port_for_requests;
-        let req_id = crate::utils::logging::generate_request_id();
-        let admin_state = admin_state_clone.clone();
-        let rules = rules_clone.clone();
-        let client_ip = client_ip_clone.clone();
-        let client_app = client_app_clone.clone();
-        let client_pid = client_pid;
-        let client_path = client_path_clone.clone();
-        let account_name = account_name_clone.clone();
-        let push_manager = push_manager_clone.clone();
-        async move {
-            handle_intercepted_request_with_protocol(
-                req,
-                &original_host,
-                original_port,
-                &req_id,
-                admin_state,
-                rules,
-                verbose,
-                max_body_buffer_size,
-                max_body_probe_size,
-                unsafe_ssl,
-                client_ip,
-                client_app,
-                client_pid,
-                client_path,
-                account_name,
-                listener_port,
-                push_manager,
-                inject_bifrost_badge,
-            )
-            .await
-        }
-    });
-
-    let (client_read, client_write) = tokio::io::split(client_tls);
-    let client_io = TokioIo::new(CombinedAsyncRw::new(client_read, client_write));
-
-    let http2_max_header_list_size = if let Some(ref state) = admin_state {
-        if let Some(ref config_manager) = state.config_manager {
-            config_manager
-                .config()
-                .await
-                .server
-                .http2_max_header_list_size
-        } else {
-            256 * 1024
-        }
-    } else {
-        256 * 1024
-    };
-    let builder = build_tls_intercept_server_builder(http2_max_header_list_size);
-    let conn = builder.serve_connection_with_upgrades(client_io, service);
-
-    if let Err(e) = conn.await {
-        if verbose_logging {
-            debug!("[{}] HTTP connection ended: {}", req_id, e);
-        }
-    }
-
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
 async fn tls_intercept_tunnel_with_cancel(
     upgraded: Upgraded,
     server_config: Arc<ServerConfig>,
@@ -1612,6 +1479,31 @@ async fn tunnel_intercepted_non_http_tls_with_cancel(
             ))
         })?;
 
+    relay_raw_tls_streams_with_cancel(
+        client_tls,
+        upstream_tls,
+        initial_payload,
+        verbose_logging,
+        req_id,
+        admin_state,
+        cancel_rx,
+    )
+    .await
+}
+
+async fn relay_raw_tls_streams_with_cancel<C, U>(
+    client_tls: C,
+    upstream_tls: U,
+    initial_payload: BytesMut,
+    verbose_logging: bool,
+    req_id: String,
+    admin_state: Option<Arc<AdminState>>,
+    cancel_rx: oneshot::Receiver<()>,
+) -> Result<bool>
+where
+    C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    U: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let (mut client_read, mut client_write) = tokio::io::split(client_tls);
     let (mut upstream_read, mut upstream_write) = tokio::io::split(upstream_tls);
 
@@ -4452,28 +4344,6 @@ async fn handle_intercepted_request_with_protocol(
         }
 
         state.record_traffic(record);
-
-        if is_sse {
-            let event_count = parse_and_record_sse_events(&res_body_bytes);
-            let response_size = res_body_bytes.len();
-            state.update_traffic_by_id(req_id, move |record| {
-                record.response_size = response_size;
-                record.download_bytes = response_size;
-                record.frame_count = event_count;
-                record.last_frame_id = event_count as u64;
-                record.socket_status = Some(bifrost_admin::SocketStatus {
-                    is_open: false,
-                    send_count: 0,
-                    receive_count: event_count as u64,
-                    send_bytes: 0,
-                    receive_bytes: response_size as u64,
-                    frame_count: event_count,
-                    close_code: None,
-                    close_reason: Some("SSE stream completed".to_string()),
-                });
-            });
-            state.sse_hub.unregister(req_id);
-        }
     }
 
     if let Some(delay_ms) = resolved_rules.res_delay {
@@ -4552,6 +4422,13 @@ async fn handle_intercepted_request_with_protocol(
             .to_ascii_lowercase()
             .starts_with("text/html")
     {
+        res_parts.headers.insert(
+            hyper::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
+        );
+        res_parts
+            .headers
+            .insert(hyper::header::PRAGMA, HeaderValue::from_static("no-cache"));
         let final_res_headers: Vec<(String, String)> = res_parts
             .headers
             .iter()
@@ -4828,6 +4705,16 @@ async fn handle_intercepted_request_with_protocol(
         let original_res_headers_for_update = original_res_headers.clone();
         let res_script_results_for_update = res_script_results.clone();
         let final_download_bytes = final_body.len();
+        let final_is_sse = res_parts
+            .headers
+            .get(hyper::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.to_ascii_lowercase().starts_with("text/event-stream"));
+        let final_sse_event_count = if final_is_sse {
+            parse_and_record_sse_events(&final_body)
+        } else {
+            0
+        };
         if let Some(ref state) = admin_state {
             state.update_traffic_by_id(req_id, move |record| {
                 record.status = final_status;
@@ -4840,6 +4727,21 @@ async fn handle_intercepted_request_with_protocol(
                     None
                 };
                 record.res_script_results = Some(res_script_results_for_update.clone());
+                if final_is_sse {
+                    record.set_sse();
+                    record.frame_count = final_sse_event_count;
+                    record.last_frame_id = final_sse_event_count as u64;
+                    record.socket_status = Some(bifrost_admin::SocketStatus {
+                        is_open: false,
+                        send_count: 0,
+                        receive_count: final_sse_event_count as u64,
+                        send_bytes: 0,
+                        receive_bytes: final_download_bytes as u64,
+                        frame_count: final_sse_event_count,
+                        close_code: None,
+                        close_reason: Some("SSE stream completed".to_string()),
+                    });
+                }
             });
         }
     }
@@ -4948,7 +4850,25 @@ async fn handle_intercepted_request_with_protocol(
                 } else {
                     None
                 };
-                let response_body_ref = store.store(req_id, "res", decoded_res_output.as_ref());
+                let final_is_sse = res_parts
+                    .headers
+                    .get(hyper::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| {
+                        value.to_ascii_lowercase().starts_with("text/event-stream")
+                    });
+                let response_body_ref = store.store(
+                    req_id,
+                    if final_is_sse { "sse_raw" } else { "res" },
+                    decoded_res_output.as_ref(),
+                );
+                let derived_response_body_ref = final_is_sse
+                    .then(|| std::str::from_utf8(decoded_res_output.as_ref()).ok())
+                    .flatten()
+                    .and_then(bifrost_admin::assemble_openai_like_response_body_from_text)
+                    .and_then(|assembled| {
+                        store.store(req_id, "res_openai_like", assembled.as_bytes())
+                    });
                 let has_decode_scripts_for_update = has_decode_scripts;
                 state.update_traffic_by_id(req_id, move |record| {
                     if let Some(body_ref) = request_body_ref.clone() {
@@ -4956,6 +4876,9 @@ async fn handle_intercepted_request_with_protocol(
                     }
                     if let Some(body_ref) = response_body_ref.clone() {
                         record.response_body_ref = Some(body_ref);
+                    }
+                    if let Some(body_ref) = derived_response_body_ref.clone() {
+                        record.derived_response_body_ref = Some(body_ref);
                     }
                     if has_decode_scripts_for_update {
                         record.raw_request_body_ref = raw_request_body_ref.clone();
@@ -9879,5 +9802,1656 @@ mod coverage_boost_v4 {
             &tls_config,
             &rules,
         ));
+    }
+}
+
+#[cfg(test)]
+mod coverage_90_wave {
+    use super::*;
+    use crate::server::{HeaderReplaceRule, HeaderReplaceTarget};
+    use http_body_util::{BodyExt, Full, StreamBody};
+    use hyper::client::conn::http1 as client_http1;
+    use hyper::server::conn::http1 as server_http1;
+    use hyper::service::service_fn;
+    use hyper::{header, Method, StatusCode};
+    use hyper_util::rt::TokioIo;
+    use std::collections::HashMap;
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+    #[derive(Clone)]
+    struct StaticResolver(ResolvedRules);
+
+    impl RulesResolver for StaticResolver {
+        fn resolve_with_context(
+            &self,
+            _url: &str,
+            _method: &str,
+            _req_headers: &HashMap<String, String>,
+            _req_cookies: &HashMap<String, String>,
+        ) -> ResolvedRules {
+            self.0.clone()
+        }
+    }
+
+    fn temp_path(extension: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "bifrost-tunnel-coverage-{}-{}.{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+            extension
+        ))
+    }
+
+    async fn run_intercepted_request<B>(
+        rules: ResolvedRules,
+        admin_state: Option<Arc<AdminState>>,
+        request: Request<B>,
+        max_body_buffer_size: usize,
+        max_body_probe_size: usize,
+        verbose: bool,
+    ) -> Response<Incoming>
+    where
+        B: hyper::body::Body<Data = Bytes> + Send + 'static,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        run_intercepted_request_config(
+            rules,
+            admin_state,
+            request,
+            max_body_buffer_size,
+            max_body_probe_size,
+            verbose,
+            "source.test",
+            443,
+            false,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_intercepted_request_config<B>(
+        rules: ResolvedRules,
+        admin_state: Option<Arc<AdminState>>,
+        request: Request<B>,
+        max_body_buffer_size: usize,
+        max_body_probe_size: usize,
+        verbose: bool,
+        original_host: &str,
+        original_port: u16,
+        inject_badge: bool,
+    ) -> Response<Incoming>
+    where
+        B: hyper::body::Body<Data = Bytes> + Send + 'static,
+        B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        let (client_io, server_io) = tokio::io::duplex(128 * 1024);
+        let (mut sender, client_conn) = client_http1::handshake(TokioIo::new(client_io))
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let _ = client_conn.await;
+        });
+
+        let resolver: Arc<dyn RulesResolver> = Arc::new(StaticResolver(rules));
+        let original_host = original_host.to_string();
+        let service = service_fn(move |request: Request<Incoming>| {
+            let resolver = resolver.clone();
+            let admin_state = admin_state.clone();
+            let original_host = original_host.clone();
+            async move {
+                handle_intercepted_request_with_protocol(
+                    request,
+                    &original_host,
+                    original_port,
+                    "REQ-tunnel-coverage",
+                    admin_state,
+                    resolver,
+                    verbose,
+                    max_body_buffer_size,
+                    max_body_probe_size,
+                    true,
+                    "127.0.0.1".to_string(),
+                    Some("coverage-client".to_string()),
+                    Some(42),
+                    Some("/tmp/coverage-client".to_string()),
+                    Some("coverage-account".to_string()),
+                    19443,
+                    None,
+                    inject_badge,
+                )
+                .await
+            }
+        });
+        tokio::spawn(async move {
+            let _ = server_http1::Builder::new()
+                .serve_connection(TokioIo::new(server_io), service)
+                .await;
+        });
+        sender.send_request(request).await.unwrap()
+    }
+
+    async fn body_bytes(response: Response<Incoming>) -> Bytes {
+        response.into_body().collect().await.unwrap().to_bytes()
+    }
+
+    fn breakpoint_rule(value: &str) -> crate::server::RuleValue {
+        crate::server::RuleValue {
+            pattern: "source.test".to_string(),
+            protocol: Protocol::Breakpoint,
+            value: value.to_string(),
+            options: HashMap::new(),
+            rule_name: Some("coverage-breakpoint".to_string()),
+            raw: None,
+            line: None,
+            auto_tls_intercept: true,
+        }
+    }
+
+    async fn wait_for_breakpoint(state: &AdminState) {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !state.breakpoint_manager.has_pending("REQ-tunnel-coverage") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("breakpoint should become pending");
+    }
+
+    async fn chunked_http_fixture() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service_fn(|request: Request<Incoming>| async move {
+                let request_body = request.into_body().collect().await.unwrap().to_bytes();
+                assert_eq!(request_body, Bytes::from_static(b"tunnel-new-body"));
+                let frames = futures_util::stream::iter(vec![
+                    Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from_static(b"chunked"))),
+                    Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from_static(b"-tunnel"))),
+                ]);
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "text/plain")
+                        .body(StreamBody::new(frames))
+                        .unwrap(),
+                )
+            });
+            server_http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await
+                .unwrap();
+        });
+        (address, task)
+    }
+
+    #[tokio::test]
+    async fn intercepted_status_covers_request_and_response_body_pipelines() {
+        let rules = ResolvedRules {
+            status_code: Some(213),
+            req_prepend: Some(Bytes::from_static(b"pre-")),
+            req_append: Some(Bytes::from_static(b"-post")),
+            req_replace: vec![("old".to_string(), "new".to_string())],
+            res_body: Some(Bytes::from_static(b"old-response")),
+            res_replace: vec![("old".to_string(), "new".to_string())],
+            res_append: Some(Bytes::from_static(b"-tail")),
+            method: Some("PUT".to_string()),
+            req_headers: vec![("X-Tunnel-Request".to_string(), "yes".to_string())],
+            res_headers: vec![("X-Tunnel-Response".to_string(), "yes".to_string())],
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/status?one=1&two=2")
+            .header(header::HOST, "source.test")
+            .header(header::CONTENT_TYPE, "text/plain")
+            .header(header::CONTENT_LENGTH, "8")
+            .header(header::COOKIE, "a=1")
+            .header(header::COOKIE, "b=2")
+            .body(Full::new(Bytes::from_static(b"old-body")))
+            .unwrap();
+        let response = run_intercepted_request(
+            rules,
+            Some(Arc::new(AdminState::new(19443))),
+            request,
+            1024,
+            64,
+            true,
+        )
+        .await;
+        assert_eq!(response.status().as_u16(), 213);
+        assert_eq!(response.headers()["x-tunnel-response"], "yes");
+        assert_eq!(
+            body_bytes(response).await,
+            Bytes::from_static(b"new-response-tail")
+        );
+    }
+
+    #[tokio::test]
+    async fn intercepted_mock_files_cover_plain_template_raw_and_missing_paths() {
+        let plain = temp_path("txt");
+        let template = temp_path("tpl");
+        let raw = temp_path("bin");
+        tokio::fs::write(&plain, "plain mock").await.unwrap();
+        tokio::fs::write(&template, "${host}|${pathname}|${method}|${query}")
+            .await
+            .unwrap();
+        tokio::fs::write(&raw, [0_u8, 1, 2, 3]).await.unwrap();
+
+        let variants = [
+            ResolvedRules {
+                mock_file: Some(plain.to_string_lossy().into_owned()),
+                status_code: Some(214),
+                ..Default::default()
+            },
+            ResolvedRules {
+                mock_template: Some(template.to_string_lossy().into_owned()),
+                status_code: Some(215),
+                ..Default::default()
+            },
+            ResolvedRules {
+                mock_rawfile: Some(raw.to_string_lossy().into_owned()),
+                status_code: Some(216),
+                ..Default::default()
+            },
+            ResolvedRules {
+                mock_file: Some(temp_path("missing").to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        ];
+        for (index, rules) in variants.into_iter().enumerate() {
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri(format!("/mock/{index}?q=yes"))
+                .header(header::HOST, "source.test")
+                .body(Full::new(Bytes::new()))
+                .unwrap();
+            let response = run_intercepted_request(
+                rules,
+                Some(Arc::new(AdminState::new(19444))),
+                request,
+                1024,
+                64,
+                true,
+            )
+            .await;
+            if index == 3 {
+                assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            } else {
+                assert!(response.status().is_success());
+            }
+            let _ = body_bytes(response).await;
+        }
+        for file in [plain, template, raw] {
+            tokio::fs::remove_file(file).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn intercepted_http_upstream_covers_host_rewrite_body_rules_and_response_rules() {
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("PATCH"))
+            .and(wiremock::matchers::body_string("new-body"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(201)
+                    .insert_header("Content-Type", "text/plain")
+                    .set_body_string("old-upstream"),
+            )
+            .mount(&upstream)
+            .await;
+        let rules = ResolvedRules {
+            host: Some(format!("{}/target/path", upstream.address())),
+            host_protocol: Some(Protocol::Http),
+            method: Some("PATCH".to_string()),
+            req_body: Some(Bytes::from_static(b"new-body")),
+            req_headers: vec![("X-Forwarded-Test".to_string(), "yes".to_string())],
+            res_replace: vec![("old".to_string(), "new".to_string())],
+            res_append: Some(Bytes::from_static(b"-tail")),
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/original")
+            .header(header::HOST, "source.test")
+            .header(header::CONTENT_LENGTH, "8")
+            .body(Full::new(Bytes::from_static(b"original")))
+            .unwrap();
+        let response = run_intercepted_request(
+            rules,
+            Some(Arc::new(AdminState::new(19445))),
+            request,
+            1024,
+            64,
+            true,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            body_bytes(response).await,
+            Bytes::from_static(b"new-upstream-tail")
+        );
+    }
+
+    #[tokio::test]
+    async fn intercepted_oversized_request_streams_original_body_to_upstream() {
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::body_string("0123456789abcdef"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&upstream)
+            .await;
+        let rules = ResolvedRules {
+            host: Some(upstream.address().to_string()),
+            host_protocol: Some(Protocol::Http),
+            req_replace: vec![("0".to_string(), "x".to_string())],
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/oversized")
+            .header(header::HOST, "source.test")
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_LENGTH, "16")
+            .body(Full::new(Bytes::from_static(b"0123456789abcdef")))
+            .unwrap();
+        let response = run_intercepted_request(rules, None, request, 4, 2, true).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_bytes(response).await, Bytes::from_static(b"ok"));
+    }
+
+    #[tokio::test]
+    async fn intercepted_forward_covers_request_and_response_metadata_rules() {
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("PUT"))
+            .and(wiremock::matchers::header(
+                "referer",
+                "https://referer.test/",
+            ))
+            .and(wiremock::matchers::header("user-agent", "coverage-agent"))
+            .and(wiremock::matchers::header("x-added", "request"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(202)
+                    .insert_header("content-type", "text/plain")
+                    .insert_header("x-remove", "gone")
+                    .insert_header("x-rewrite", "old-value")
+                    .set_body_string("metadata-response"),
+            )
+            .mount(&upstream)
+            .await;
+        let rules = ResolvedRules {
+            host: Some(upstream.address().to_string()),
+            host_protocol: Some(Protocol::Http),
+            method: Some("PUT".to_string()),
+            req_headers: vec![("x-added".to_string(), "request".to_string())],
+            req_cookies: vec![("added".to_string(), "two".to_string())],
+            referer: Some("https://referer.test/".to_string()),
+            ua: Some("coverage-agent".to_string()),
+            req_delay: Some(1),
+            res_delay: Some(1),
+            req_speed: Some(1024 * 1024),
+            res_speed: Some(1024 * 1024),
+            res_headers: vec![("x-response-added".to_string(), "yes".to_string())],
+            delete_res_headers: vec!["x-remove".to_string()],
+            header_replace: vec![HeaderReplaceRule {
+                target: HeaderReplaceTarget::Response,
+                header_name: "x-rewrite".to_string(),
+                pattern: "old".to_string(),
+                replacement: "new".to_string(),
+            }],
+            res_type: Some("txt".to_string()),
+            res_charset: Some("utf-8".to_string()),
+            cache: Some("15".to_string()),
+            attachment: Some("coverage.txt".to_string()),
+            response_for: Some("coverage-upstream".to_string()),
+            trailers: vec![("x-checksum".to_string(), "done".to_string())],
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/metadata?x=1")
+            .header(header::HOST, "source.test")
+            .header(header::CONTENT_TYPE, "text/plain")
+            .header(header::CONTENT_LENGTH, "4")
+            .header(header::COOKIE, "original=one")
+            .header(header::REFERER, "https://old.test/")
+            .header(header::USER_AGENT, "old-agent")
+            .body(Full::new(Bytes::from_static(b"body")))
+            .unwrap();
+        let response = run_intercepted_request(rules, None, request, 1024, 64, true).await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(response.headers()["x-response-added"], "yes");
+        assert_eq!(response.headers()["x-rewrite"], "new-value");
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "max-age=15");
+        assert_eq!(
+            response.headers()["x-bifrost-response-for"],
+            "coverage-upstream"
+        );
+        assert!(!response.headers().contains_key("x-remove"));
+        assert_eq!(
+            body_bytes(response).await,
+            Bytes::from_static(b"metadata-response")
+        );
+        let requests = upstream.received_requests().await.unwrap();
+        let cookie = requests[0]
+            .headers
+            .get(header::COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(cookie.contains("original=one"));
+        assert!(cookie.contains("added=two"));
+    }
+
+    #[tokio::test]
+    async fn intercepted_connection_failure_applies_response_override() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unavailable = listener.local_addr().unwrap();
+        drop(listener);
+        let rules = ResolvedRules {
+            host: Some(unavailable.to_string()),
+            host_protocol: Some(Protocol::Http),
+            replace_status: Some(521),
+            res_body: Some(Bytes::from_static(b"custom-connect-error")),
+            res_headers: vec![("x-connect-override".to_string(), "yes".to_string())],
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/unavailable")
+            .header(header::HOST, "source.test")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let response = run_intercepted_request(
+            rules,
+            Some(Arc::new(AdminState::new(19446))),
+            request,
+            1024,
+            64,
+            true,
+        )
+        .await;
+        assert_eq!(response.status().as_u16(), 521);
+        assert_eq!(response.headers()["x-connect-override"], "yes");
+        assert_eq!(
+            body_bytes(response).await,
+            Bytes::from_static(b"custom-connect-error")
+        );
+    }
+
+    #[tokio::test]
+    async fn intercepted_html_response_injects_badge_for_plain_and_gzip_bodies() {
+        for compressed in [false, true] {
+            let upstream = wiremock::MockServer::start().await;
+            let html = b"<!doctype html><html><body>coverage</body></html>";
+            let mut template = wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "text/html; charset=utf-8");
+            if compressed {
+                let encoded = crate::transform::compress_body(html, "gzip").unwrap();
+                template = template
+                    .insert_header("content-encoding", "gzip")
+                    .set_body_bytes(encoded);
+            } else {
+                template = template.set_body_bytes(html);
+            }
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .respond_with(template)
+                .mount(&upstream)
+                .await;
+            let rules = ResolvedRules {
+                host: Some(upstream.address().to_string()),
+                host_protocol: Some(Protocol::Http),
+                ..Default::default()
+            };
+            let request = Request::builder()
+                .method(Method::GET)
+                .uri("/badge")
+                .header(header::HOST, "source.test")
+                .body(Full::new(Bytes::new()))
+                .unwrap();
+            let response = run_intercepted_request_config(
+                rules,
+                None,
+                request,
+                1024 * 1024,
+                64,
+                true,
+                "source.test",
+                443,
+                true,
+            )
+            .await;
+            let encoding = response
+                .headers()
+                .get(header::CONTENT_ENCODING)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let bytes = body_bytes(response).await;
+            let decoded = crate::transform::decompress_body(&bytes, encoding.as_deref());
+            assert!(String::from_utf8_lossy(&decoded).contains("__bifrost_badge__"));
+        }
+    }
+
+    #[tokio::test]
+    async fn intercepted_admin_virtual_host_routes_to_admin_router() {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/_bifrost/api/proxy/address")
+            .header(header::HOST, ADMIN_VIRTUAL_HOST)
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let response = run_intercepted_request_config(
+            ResolvedRules::default(),
+            Some(Arc::new(AdminState::new(19447))),
+            request,
+            1024,
+            64,
+            true,
+            ADMIN_VIRTUAL_HOST,
+            443,
+            false,
+        )
+        .await;
+        assert_ne!(response.status(), StatusCode::BAD_GATEWAY);
+        let _ = body_bytes(response).await;
+    }
+
+    #[tokio::test]
+    async fn intercepted_forward_with_fully_wired_admin_persists_bodies_and_traffic() {
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19448)
+            .build();
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/persist"))
+            .and(wiremock::matchers::body_string("request-payload"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_string("{\"source\":\"upstream\"}"),
+            )
+            .mount(&upstream)
+            .await;
+        let rules = ResolvedRules {
+            host: Some(upstream.address().to_string()),
+            host_protocol: Some(Protocol::Http),
+            req_append: Some(Bytes::new()),
+            res_replace: vec![("upstream".to_string(), "stored".to_string())],
+            decode_scripts: vec!["utf8".to_string()],
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/persist?source=coverage")
+            .header(header::HOST, "source.test")
+            .header(header::CONTENT_TYPE, "text/plain")
+            .header(header::CONTENT_LENGTH, "15")
+            .body(Full::new(Bytes::from_static(b"request-payload")))
+            .unwrap();
+        let response =
+            run_intercepted_request(rules, Some(harness.state()), request, 1024, 64, true).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body_bytes(response).await,
+            Bytes::from_static(b"{\"source\":\"stored\"}")
+        );
+
+        let record = harness
+            .traffic_db
+            .get_by_id("REQ-tunnel-coverage")
+            .expect("traffic record should be persisted");
+        assert!(record.request_body_ref.is_some());
+        assert!(record.response_body_ref.is_some());
+
+        harness.state().set_binary_traffic_performance_mode(true);
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/binary"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/octet-stream")
+                    .set_body_bytes(vec![0x5a; 256]),
+            )
+            .mount(&upstream)
+            .await;
+        let binary_rules = ResolvedRules {
+            host: Some(upstream.address().to_string()),
+            host_protocol: Some(Protocol::Http),
+            ..Default::default()
+        };
+        let binary_request = Request::builder()
+            .method(Method::GET)
+            .uri("/binary")
+            .header(header::HOST, "source.test")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let binary_response = run_intercepted_request(
+            binary_rules,
+            Some(harness.state()),
+            binary_request,
+            32,
+            16,
+            true,
+        )
+        .await;
+        assert_eq!(body_bytes(binary_response).await.len(), 256);
+
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/events"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string("data: one\n\ndata: two\n\n"),
+            )
+            .mount(&upstream)
+            .await;
+        let event_rules = ResolvedRules {
+            host: Some(upstream.address().to_string()),
+            host_protocol: Some(Protocol::Http),
+            ..Default::default()
+        };
+        let event_request = Request::builder()
+            .method(Method::GET)
+            .uri("/events")
+            .header(header::HOST, "source.test")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let event_response = run_intercepted_request(
+            event_rules,
+            Some(harness.state()),
+            event_request,
+            8,
+            8,
+            true,
+        )
+        .await;
+        assert_eq!(
+            body_bytes(event_response).await,
+            Bytes::from_static(b"data: one\n\ndata: two\n\n")
+        );
+
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/large-request"))
+            .and(wiremock::matchers::body_string("0123456789abcdef"))
+            .respond_with(wiremock::ResponseTemplate::new(204))
+            .mount(&upstream)
+            .await;
+        let large_request_rules = ResolvedRules {
+            host: Some(upstream.address().to_string()),
+            host_protocol: Some(Protocol::Http),
+            req_replace: vec![("0".to_string(), "x".to_string())],
+            ..Default::default()
+        };
+        let large_request = Request::builder()
+            .method(Method::POST)
+            .uri("/large-request")
+            .header(header::HOST, "source.test")
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(header::CONTENT_LENGTH, "16")
+            .body(Full::new(Bytes::from_static(b"0123456789abcdef")))
+            .unwrap();
+        let large_response = run_intercepted_request(
+            large_request_rules,
+            Some(harness.state()),
+            large_request,
+            4,
+            2,
+            true,
+        )
+        .await;
+        assert_eq!(large_response.status(), StatusCode::NO_CONTENT);
+        let _ = body_bytes(large_response).await;
+    }
+
+    #[tokio::test]
+    async fn intercepted_forward_executes_request_response_and_decode_scripts() {
+        use bifrost_admin::ScriptManager;
+        use bifrost_script::ScriptType;
+
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19449)
+            .build();
+        let scripts_dir = harness.data_dir().join("scripts");
+        let manager = ScriptManager::new(scripts_dir);
+        manager.init().await.unwrap();
+        manager
+            .engine()
+            .save_script(
+                ScriptType::Request,
+                "coverage-request",
+                r#"request.method = "PUT"; request.body = "script-request";"#,
+            )
+            .await
+            .unwrap();
+        manager
+            .engine()
+            .save_script(
+                ScriptType::Response,
+                "coverage-response",
+                r#"response.status = 207; response.headers["content-type"] = "text/event-stream"; response.body = ["data: script-response", "", "data: [DONE]", "", ""].join(String.fromCharCode(10));"#,
+            )
+            .await
+            .unwrap();
+        manager
+            .engine()
+            .save_script(
+                ScriptType::Decode,
+                "coverage-decode",
+                r#"ctx.output = { code: "0", data: "decoded-storage", msg: "" };"#,
+            )
+            .await
+            .unwrap();
+
+        let state = Arc::new(
+            AdminState::new(19449)
+                .with_traffic_db_store_shared(harness.traffic_db.clone())
+                .with_body_store(harness.body_store.clone())
+                .with_config_manager_shared(harness.config_manager.clone())
+                .with_script_manager(manager),
+        );
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("PUT"))
+            .and(wiremock::matchers::body_string("script-request"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/plain")
+                    .set_body_string("upstream-response"),
+            )
+            .mount(&upstream)
+            .await;
+        let rules = ResolvedRules {
+            host: Some(upstream.address().to_string()),
+            host_protocol: Some(Protocol::Http),
+            req_scripts: vec!["coverage-request".to_string()],
+            res_scripts: vec!["coverage-response".to_string()],
+            decode_scripts: vec!["coverage-decode".to_string()],
+            values: HashMap::from([("coverage".to_string(), "yes".to_string())]),
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/scripts")
+            .header(header::HOST, "source.test")
+            .header(header::CONTENT_TYPE, "text/plain")
+            .header(header::CONTENT_LENGTH, "8")
+            .body(Full::new(Bytes::from_static(b"original")))
+            .unwrap();
+        let response =
+            run_intercepted_request(rules, Some(state.clone()), request, 1024, 64, true).await;
+        assert_eq!(response.status().as_u16(), 207);
+        assert_eq!(
+            body_bytes(response).await,
+            Bytes::from_static(b"data: script-response\\n\\ndata: [DONE]\\n\\n")
+        );
+
+        let record = harness
+            .traffic_db
+            .get_by_id("REQ-tunnel-coverage")
+            .expect("scripted traffic should be persisted");
+        assert!(record
+            .req_script_results
+            .as_ref()
+            .is_some_and(|items| !items.is_empty()));
+        assert!(record
+            .res_script_results
+            .as_ref()
+            .is_some_and(|items| !items.is_empty()));
+        assert!(record
+            .decode_req_script_results
+            .as_ref()
+            .is_some_and(|items| !items.is_empty()));
+        assert!(record
+            .decode_res_script_results
+            .as_ref()
+            .is_some_and(|items| !items.is_empty()));
+        assert_eq!(record.frame_count, 1);
+
+        let direct_rules = ResolvedRules {
+            status_code: Some(202),
+            res_body: Some(Bytes::from_static(b"direct-before-script")),
+            res_scripts: vec!["coverage-response".to_string()],
+            values: HashMap::from([("coverage".to_string(), "direct".to_string())]),
+            ..Default::default()
+        };
+        let direct_request = Request::builder()
+            .method(Method::GET)
+            .uri("/direct-script")
+            .header(header::HOST, "source.test")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let direct_response = run_intercepted_request(
+            direct_rules,
+            Some(state.clone()),
+            direct_request,
+            1024,
+            64,
+            true,
+        )
+        .await;
+        assert_eq!(direct_response.status().as_u16(), 207);
+        assert_eq!(
+            body_bytes(direct_response).await,
+            Bytes::from_static(b"data: script-response\\n\\ndata: [DONE]\\n\\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn intercepted_connection_failure_applies_response_overrides() {
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19454)
+            .build();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unavailable = listener.local_addr().unwrap();
+        drop(listener);
+        let rules = ResolvedRules {
+            host: Some(unavailable.to_string()),
+            host_protocol: Some(Protocol::Http),
+            replace_status: Some(521),
+            res_body: Some(Bytes::from_static(b"tunnel-connect-error")),
+            res_headers: vec![("x-tunnel-error".into(), "overridden".into())],
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/unavailable")
+            .header(header::HOST, "source.test")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let response =
+            run_intercepted_request(rules, Some(harness.state()), request, 4096, 64, true).await;
+        assert_eq!(response.status().as_u16(), 521);
+        assert_eq!(response.headers()["x-tunnel-error"], "overridden");
+        assert_eq!(
+            body_bytes(response).await,
+            Bytes::from_static(b"tunnel-connect-error")
+        );
+        let record = harness
+            .traffic_db
+            .get_by_id("REQ-tunnel-coverage")
+            .expect("connection failure traffic record");
+        assert_eq!(record.status, 521);
+    }
+
+    #[tokio::test]
+    async fn intercepted_chunked_request_and_response_cover_unknown_lengths() {
+        let (address, upstream_task) = chunked_http_fixture().await;
+        let rules = ResolvedRules {
+            host: Some(address.to_string()),
+            host_protocol: Some(Protocol::Http),
+            req_replace: vec![("old".into(), "new".into())],
+            res_replace: vec![("chunked".into(), "streamed".into())],
+            ..Default::default()
+        };
+        let frames = futures_util::stream::iter(vec![
+            Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from_static(b"tunnel-old-"))),
+            Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from_static(b"body"))),
+        ]);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/chunked")
+            .header(header::HOST, "source.test")
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(StreamBody::new(frames))
+            .unwrap();
+        let response = run_intercepted_request(rules, None, request, 4096, 64, true).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body_bytes(response).await,
+            Bytes::from_static(b"streamed-tunnel")
+        );
+        upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn intercepted_breakpoints_edit_request_and_buffered_sse_response() {
+        use bifrost_admin::breakpoint::{BreakpointEdit, BreakpointSettings};
+
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19450)
+            .build();
+        let state = harness.state();
+        state
+            .breakpoint_manager
+            .update_settings(BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 4096,
+            });
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/breakpoint-sse"))
+            .and(wiremock::matchers::body_string("edited-request"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_bytes(b"data: original\n\ndata: [DONE]\n\n".to_vec())
+                    .insert_header("content-type", "text/event-stream")
+                    .insert_header("content-length", "30"),
+            )
+            .mount(&upstream)
+            .await;
+        let rules = ResolvedRules {
+            host: Some(upstream.address().to_string()),
+            host_protocol: Some(Protocol::Http),
+            rules: vec![breakpoint_rule("both")],
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/breakpoint-sse")
+            .header(header::HOST, "source.test")
+            .header(header::CONTENT_TYPE, "text/plain")
+            .header(header::CONTENT_LENGTH, "8")
+            .body(Full::new(Bytes::from_static(b"original")))
+            .unwrap();
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            run_intercepted_request(rules, Some(task_state), request, 4096, 64, true).await
+        });
+
+        wait_for_breakpoint(&state).await;
+        assert!(state.breakpoint_manager.resume(
+            "REQ-tunnel-coverage",
+            "request",
+            BreakpointEdit {
+                headers: vec![("x-breakpoint-request".into(), "yes".into())],
+                body: Some("edited-request".into()),
+            },
+        ));
+        wait_for_breakpoint(&state).await;
+        assert!(state.breakpoint_manager.resume(
+            "REQ-tunnel-coverage",
+            "response",
+            BreakpointEdit {
+                headers: vec![("x-breakpoint-response".into(), "yes".into())],
+                body: Some("data: edited\n\ndata: [DONE]\n\n".into()),
+            },
+        ));
+
+        let response = task.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-breakpoint-response"], "yes");
+        assert_eq!(
+            body_bytes(response).await,
+            Bytes::from_static(b"data: edited\n\ndata: [DONE]\n\n")
+        );
+        let record = harness
+            .traffic_db
+            .get_by_id("REQ-tunnel-coverage")
+            .expect("breakpoint traffic record");
+        assert_eq!(record.status, 200);
+        assert!(record.request_body_ref.is_some());
+        assert!(record.response_body_ref.is_some());
+    }
+
+    #[tokio::test]
+    async fn intercepted_breakpoints_edit_regular_response_and_record_final_state() {
+        use bifrost_admin::breakpoint::{BreakpointEdit, BreakpointSettings};
+
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19455)
+            .build();
+        let state = harness.state();
+        state
+            .breakpoint_manager
+            .update_settings(BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 4096,
+            });
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/breakpoint-regular"))
+            .and(wiremock::matchers::body_string("regular-edited-request"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_bytes(b"regular-upstream".to_vec())
+                    .insert_header("content-type", "text/plain"),
+            )
+            .mount(&upstream)
+            .await;
+        let rules = ResolvedRules {
+            host: Some(upstream.address().to_string()),
+            host_protocol: Some(Protocol::Http),
+            rules: vec![breakpoint_rule("both")],
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/breakpoint-regular")
+            .header(header::HOST, "source.test")
+            .header(header::CONTENT_TYPE, "text/plain")
+            .header(header::CONTENT_LENGTH, "8")
+            .body(Full::new(Bytes::from_static(b"original")))
+            .unwrap();
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            run_intercepted_request(rules, Some(task_state), request, 4096, 64, true).await
+        });
+
+        wait_for_breakpoint(&state).await;
+        assert!(state.breakpoint_manager.resume(
+            "REQ-tunnel-coverage",
+            "request",
+            BreakpointEdit {
+                headers: vec![("x-regular-request".into(), "yes".into())],
+                body: Some("regular-edited-request".into()),
+            },
+        ));
+        wait_for_breakpoint(&state).await;
+        assert!(state.breakpoint_manager.resume(
+            "REQ-tunnel-coverage",
+            "response",
+            BreakpointEdit {
+                headers: vec![("x-regular-response".into(), "yes".into())],
+                body: Some("regular-edited-response".into()),
+            },
+        ));
+        let response = task.await.unwrap();
+        assert_eq!(response.headers()["x-regular-response"], "yes");
+        assert_eq!(
+            body_bytes(response).await,
+            Bytes::from_static(b"regular-edited-response")
+        );
+        let record = harness
+            .traffic_db
+            .get_by_id("REQ-tunnel-coverage")
+            .expect("regular breakpoint traffic record");
+        assert_eq!(record.status, 200);
+        assert!(record.response_body_ref.is_some());
+    }
+
+    async fn websocket_upstream_response(status: u16) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0_u8; 1];
+            while request.len() < 16 * 1024 {
+                if stream.read_exact(&mut byte).await.is_err() {
+                    return;
+                }
+                request.push(byte[0]);
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            assert!(String::from_utf8_lossy(&request)
+                .to_ascii_lowercase()
+                .contains("x-coverage: request"));
+            let response = if status == 101 {
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: upstream-accept\r\nSec-WebSocket-Protocol: chat.v1\r\nSec-WebSocket-Extensions: permessage-deflate\r\nX-Upstream: present\r\n\r\n"
+                    .to_string()
+            } else {
+                format!("HTTP/1.1 {status} Forbidden\r\nContent-Length: 0\r\n\r\n")
+            };
+            stream.write_all(response.as_bytes()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        });
+        (address, task)
+    }
+
+    async fn websocket_tls_upstream_response() -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        bifrost_tls::init_crypto_provider();
+        let ca = Arc::new(bifrost_tls::generate_root_ca().unwrap());
+        let cert = bifrost_tls::DynamicCertGenerator::new(ca)
+            .generate_for_domain("127.0.0.1")
+            .unwrap();
+        let mut config = (*bifrost_tls::TlsConfig::build_server_config(&cert).unwrap()).clone();
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = acceptor.accept(stream).await.unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0_u8; 1];
+            while request.len() < 16 * 1024 {
+                stream.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            assert!(String::from_utf8_lossy(&request)
+                .to_ascii_lowercase()
+                .contains("x-coverage: request"));
+            stream
+                .write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: tls-upstream\r\nSec-WebSocket-Protocol: chat.v1\r\nSec-WebSocket-Extensions: permessage-deflate\r\nX-TLS-Upstream: yes\r\n\r\n")
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        });
+        (address, task)
+    }
+
+    fn websocket_request() -> Request<Full<Bytes>> {
+        Request::builder()
+            .method(Method::GET)
+            .uri("/socket?coverage=1")
+            .header(header::HOST, "source.test")
+            .header(header::UPGRADE, "websocket")
+            .header(header::CONNECTION, "Upgrade")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-protocol", "chat.v1, other")
+            .header("sec-websocket-extensions", "permessage-deflate")
+            .header("origin", "https://source.test")
+            .header("cookie", "session=coverage")
+            .body(Full::new(Bytes::new()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn raw_tls_relay_forwards_both_directions_and_honors_cancel() {
+        let (proxy_client, mut client_peer) = tokio::io::duplex(1024);
+        let (proxy_upstream, mut upstream_peer) = tokio::io::duplex(1024);
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let state = Arc::new(AdminState::new(19452));
+        state
+            .connection_monitor
+            .register_connection("REQ-raw-tls-coverage");
+        let task = tokio::spawn(relay_raw_tls_streams_with_cancel(
+            proxy_client,
+            proxy_upstream,
+            BytesMut::from(&b"initial-"[..]),
+            true,
+            "REQ-raw-tls-coverage".to_string(),
+            Some(state),
+            cancel_rx,
+        ));
+
+        client_peer.write_all(b"client").await.unwrap();
+        let mut upstream_received = [0_u8; 14];
+        upstream_peer
+            .read_exact(&mut upstream_received)
+            .await
+            .unwrap();
+        assert_eq!(&upstream_received, b"initial-client");
+
+        upstream_peer.write_all(b"upstream").await.unwrap();
+        let mut client_received = [0_u8; 8];
+        client_peer.read_exact(&mut client_received).await.unwrap();
+        assert_eq!(&client_received, b"upstream");
+
+        cancel_tx.send(()).unwrap();
+        assert!(task.await.unwrap().unwrap());
+    }
+
+    #[tokio::test]
+    async fn raw_tls_relay_treats_clean_half_closes_as_completion() {
+        let (proxy_client, client_peer) = tokio::io::duplex(128);
+        let (proxy_upstream, _upstream_peer) = tokio::io::duplex(128);
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        drop(client_peer);
+        assert!(!relay_raw_tls_streams_with_cancel(
+            proxy_client,
+            proxy_upstream,
+            BytesMut::new(),
+            false,
+            "REQ-raw-client-close".to_string(),
+            None,
+            cancel_rx,
+        )
+        .await
+        .unwrap());
+
+        let (proxy_client, _client_peer) = tokio::io::duplex(128);
+        let (proxy_upstream, upstream_peer) = tokio::io::duplex(128);
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+        drop(upstream_peer);
+        assert!(!relay_raw_tls_streams_with_cancel(
+            proxy_client,
+            proxy_upstream,
+            BytesMut::new(),
+            false,
+            "REQ-raw-upstream-close".to_string(),
+            None,
+            cancel_rx,
+        )
+        .await
+        .unwrap());
+    }
+
+    #[tokio::test]
+    async fn intercepted_html_covers_devtools_and_badge_injection_encodings() {
+        let upstream = wiremock::MockServer::start().await;
+        let html = b"<html><head></head><body><script src=\"/app.js\"></script></body></html>";
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/devtools"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_bytes(html.to_vec())
+                    .insert_header("content-type", "text/html; charset=utf-8"),
+            )
+            .mount(&upstream)
+            .await;
+        let compressed = compress_body(html, "gzip").unwrap();
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/devtools-gzip"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_bytes(compressed)
+                    .insert_header("content-type", "text/html")
+                    .insert_header("content-encoding", "gzip"),
+            )
+            .mount(&upstream)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/badge"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_bytes(html.to_vec())
+                    .insert_header("content-type", "text/html"),
+            )
+            .mount(&upstream)
+            .await;
+        let badge_gzip = compress_body(html, "gzip").unwrap();
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/badge-gzip"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_bytes(badge_gzip)
+                    .insert_header("content-type", "text/html")
+                    .insert_header("content-encoding", "gzip"),
+            )
+            .mount(&upstream)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/badge-invalid"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_bytes(b"not-gzip".to_vec())
+                    .insert_header("content-type", "text/html")
+                    .insert_header("content-encoding", "gzip"),
+            )
+            .mount(&upstream)
+            .await;
+
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19453)
+            .build();
+        for (path, gzip) in [("/devtools", false), ("/devtools-gzip", true)] {
+            let rules = ResolvedRules {
+                host: Some(upstream.address().to_string()),
+                host_protocol: Some(Protocol::Http),
+                devtools: Some(crate::server::DevtoolsRule::default()),
+                ..Default::default()
+            };
+            let request = Request::builder()
+                .method(Method::GET)
+                .uri(path)
+                .header(header::HOST, "source.test")
+                .body(Full::new(Bytes::new()))
+                .unwrap();
+            let response =
+                run_intercepted_request(rules, Some(harness.state()), request, 4096, 64, true)
+                    .await;
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                "no-store, no-cache, must-revalidate, max-age=0"
+            );
+            assert_eq!(response.headers()[header::PRAGMA], "no-cache");
+            let body = body_bytes(response).await;
+            let decoded = if gzip {
+                crate::transform::decompress_body_with_limit(&body, Some("gzip"), 10 * 1024 * 1024)
+            } else {
+                body
+            };
+            let text = String::from_utf8(decoded.to_vec()).unwrap();
+            assert!(text.contains("__bifrost_devtools_bridge__"));
+            assert!(text.contains("__bifrost_client_req_id="));
+        }
+
+        for (path, encoding, expected) in [
+            ("/badge", None, true),
+            ("/badge-gzip", Some("gzip"), true),
+            ("/badge-invalid", Some("gzip"), false),
+        ] {
+            let badge_rules = ResolvedRules {
+                host: Some(upstream.address().to_string()),
+                host_protocol: Some(Protocol::Http),
+                ..Default::default()
+            };
+            let badge_request = Request::builder()
+                .method(Method::GET)
+                .uri(path)
+                .header(header::HOST, "source.test")
+                .body(Full::new(Bytes::new()))
+                .unwrap();
+            let badge_response = run_intercepted_request_config(
+                badge_rules,
+                None,
+                badge_request,
+                4096,
+                64,
+                true,
+                "source.test",
+                443,
+                true,
+            )
+            .await;
+            let badge_body = body_bytes(badge_response).await;
+            let decoded = crate::transform::decompress_body_with_limit(
+                &badge_body,
+                encoding,
+                10 * 1024 * 1024,
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&decoded).contains("__bifrost_badge__"),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn intercepted_websocket_covers_plain_upstream_success_and_rejection() {
+        for status in [101_u16, 403] {
+            let (address, upstream_task) = websocket_upstream_response(status).await;
+            let rules = ResolvedRules {
+                host: Some(address.to_string()),
+                host_protocol: Some(Protocol::Http),
+                req_headers: vec![("x-coverage".into(), "request".into())],
+                res_headers: vec![("x-coverage-response".into(), "yes".into())],
+                ..Default::default()
+            };
+            let response = run_intercepted_request(
+                rules,
+                Some(Arc::new(AdminState::new(19451))),
+                websocket_request(),
+                4096,
+                64,
+                true,
+            )
+            .await;
+            if status == 101 {
+                assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+                assert_eq!(response.headers()["x-upstream"], "present");
+                assert_eq!(response.headers()["x-coverage-response"], "yes");
+                assert_eq!(response.headers()["sec-websocket-protocol"], "chat.v1");
+            } else {
+                assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            }
+            let _ = body_bytes(response).await;
+            upstream_task.await.unwrap();
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unavailable = listener.local_addr().unwrap();
+        drop(listener);
+        let rules = ResolvedRules {
+            host: Some(unavailable.to_string()),
+            host_protocol: Some(Protocol::Http),
+            ..Default::default()
+        };
+        let response =
+            run_intercepted_request(rules, None, websocket_request(), 4096, 64, true).await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn intercepted_websocket_covers_tls_upstream_handshake() {
+        let (address, upstream_task) = websocket_tls_upstream_response().await;
+        let rules = ResolvedRules {
+            host: Some(address.to_string()),
+            host_protocol: Some(Protocol::Https),
+            upstream_unsafe_ssl: true,
+            req_headers: vec![("x-coverage".into(), "request".into())],
+            res_headers: vec![("x-tls-response".into(), "yes".into())],
+            ..Default::default()
+        };
+        let response = run_intercepted_request(
+            rules,
+            Some(Arc::new(AdminState::new(19456))),
+            websocket_request(),
+            4096,
+            64,
+            true,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        assert_eq!(response.headers()["x-tls-upstream"], "yes");
+        assert_eq!(response.headers()["x-tls-response"], "yes");
+        assert_eq!(response.headers()["sec-websocket-protocol"], "chat.v1");
+        let _ = body_bytes(response).await;
+        upstream_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn intercepted_response_breakpoint_header_only_preserves_large_body() {
+        use bifrost_admin::breakpoint::{BreakpointEdit, BreakpointSettings};
+
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19459)
+            .build();
+        let state = harness.state();
+        state
+            .breakpoint_manager
+            .update_settings(BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 8,
+            });
+        let upstream = wiremock::MockServer::start().await;
+        let large_body = "tunnel-large-response-body";
+        wiremock::Mock::given(wiremock::matchers::path("/large-breakpoint"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/plain")
+                    .set_body_string(large_body),
+            )
+            .mount(&upstream)
+            .await;
+        let rules = ResolvedRules {
+            host: Some(upstream.address().to_string()),
+            host_protocol: Some(Protocol::Http),
+            rules: vec![breakpoint_rule("response")],
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .uri("/large-breakpoint")
+            .header(header::HOST, "source.test")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            run_intercepted_request(rules, Some(task_state), request, 4096, 64, true).await
+        });
+        wait_for_breakpoint(&state).await;
+        assert!(state.breakpoint_manager.resume(
+            "REQ-tunnel-coverage",
+            "response",
+            BreakpointEdit {
+                headers: vec![("x-header-only".into(), "yes".into())],
+                body: None,
+            },
+        ));
+        let response = task.await.unwrap();
+        assert_eq!(response.headers()["x-header-only"], "yes");
+        assert_eq!(body_bytes(response).await, Bytes::from(large_body));
+    }
+
+    #[test]
+    fn retryable_request_blueprint_rebuilds_http1_request() {
+        let blueprint = RetryableRequestBlueprint {
+            method: Method::PATCH,
+            uri: "https://retry.test/resource".parse().unwrap(),
+            headers: hyper::HeaderMap::from_iter([(
+                header::HeaderName::from_static("x-retry"),
+                header::HeaderValue::from_static("yes"),
+            )]),
+            body: Bytes::from_static(b"retry-body"),
+        };
+        let request = blueprint.build().unwrap();
+        assert_eq!(request.version(), hyper::Version::HTTP_11);
+        assert_eq!(request.method(), Method::PATCH);
+        assert_eq!(request.uri(), "https://retry.test/resource");
+        assert_eq!(request.headers()["x-retry"], "yes");
+    }
+
+    #[cfg(feature = "http3")]
+    #[tokio::test]
+    async fn intercepted_http3_attempt_falls_back_after_unavailable_quic_origin() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unavailable = listener.local_addr().unwrap();
+        drop(listener);
+        let rules = ResolvedRules {
+            host: Some(unavailable.to_string()),
+            host_protocol: Some(Protocol::Https),
+            upstream_http3: true,
+            upstream_unsafe_ssl: true,
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .uri("/http3-fallback")
+            .header(header::HOST, "source.test")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let response = run_intercepted_request(rules, None, request, 4096, 64, true).await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn intercepted_direct_status_request_script_mutates_recorded_request() {
+        use bifrost_admin::ScriptManager;
+        use bifrost_script::ScriptType;
+
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19460)
+            .build();
+        let manager = ScriptManager::new(harness.data_dir().join("tunnel-direct-request-script"));
+        manager.init().await.unwrap();
+        manager
+            .engine()
+            .save_script(
+                ScriptType::Request,
+                "tunnel-direct-request",
+                r#"request.method = "PATCH"; request.headers["x-tunnel-scripted"] = "yes"; request.body = "tunnel-scripted-body";"#,
+            )
+            .await
+            .unwrap();
+        let state = Arc::new(
+            AdminState::new(19460)
+                .with_traffic_db_store_shared(harness.traffic_db.clone())
+                .with_body_store(harness.body_store.clone())
+                .with_config_manager_shared(harness.config_manager.clone())
+                .with_script_manager(manager),
+        );
+        let rules = ResolvedRules {
+            status_code: Some(219),
+            req_scripts: vec!["tunnel-direct-request".to_string()],
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/direct-script")
+            .header(header::HOST, "source.test")
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(Full::new(Bytes::from_static(b"original")))
+            .unwrap();
+        let response = run_intercepted_request(rules, Some(state), request, 1024, 64, true).await;
+        assert_eq!(response.status().as_u16(), 219);
+        let record = harness
+            .traffic_db
+            .get_by_id("REQ-tunnel-coverage")
+            .expect("tunnel direct scripted traffic");
+        assert_eq!(record.method, "POST");
+        assert!(record
+            .req_script_results
+            .as_ref()
+            .is_some_and(|results| results.iter().any(|result| result.success)));
+    }
+
+    #[tokio::test]
+    async fn intercepted_invalid_upstream_uri_and_host_prefix_rewrite_cover_errors_and_paths() {
+        let invalid = ResolvedRules {
+            host: Some("[invalid-host".to_string()),
+            host_protocol: Some(Protocol::Http),
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .uri("/invalid")
+            .header(header::HOST, "source.test")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        assert_eq!(
+            run_intercepted_request(invalid, None, request, 1024, 64, true)
+                .await
+                .status(),
+            StatusCode::BAD_GATEWAY
+        );
+
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("tunnel-rewritten"))
+            .mount(&upstream)
+            .await;
+        let target = format!("{}/base", upstream.address());
+        let rule = crate::server::RuleValue {
+            pattern: "source.test/api".to_string(),
+            protocol: Protocol::Http,
+            value: target.clone(),
+            options: HashMap::new(),
+            rule_name: Some("tunnel-prefix".to_string()),
+            raw: None,
+            line: Some(1),
+            auto_tls_intercept: true,
+        };
+        let rules = ResolvedRules {
+            host: Some(target),
+            host_protocol: Some(Protocol::Http),
+            rules: vec![rule],
+            ..Default::default()
+        };
+        let request = Request::builder()
+            .uri("/api/item")
+            .header(header::HOST, "source.test")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let response = run_intercepted_request(rules, None, request, 1024, 64, true).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body_bytes(response).await,
+            Bytes::from_static(b"tunnel-rewritten")
+        );
+        let requests = upstream.received_requests().await.unwrap();
+        let path = requests[0].url.path();
+        assert!(path.contains("base") && path.contains("item"), "{path}");
+    }
+
+    #[tokio::test]
+    async fn intercepted_unknown_length_oversized_bodies_use_admin_streaming_tees() {
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19461)
+            .build();
+        let (address, upstream_task) = chunked_http_fixture().await;
+        let rules = ResolvedRules {
+            host: Some(address.to_string()),
+            host_protocol: Some(Protocol::Http),
+            req_replace: vec![("old".to_string(), "new".to_string())],
+            res_replace: vec![("chunked".to_string(), "new".to_string())],
+            ..Default::default()
+        };
+        let frames = futures_util::stream::iter(vec![
+            Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from_static(b"tunnel-new-"))),
+            Ok::<_, Infallible>(hyper::body::Frame::data(Bytes::from_static(b"body"))),
+        ]);
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/unknown-oversized")
+            .header(header::HOST, "source.test")
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(StreamBody::new(frames))
+            .unwrap();
+        let response =
+            run_intercepted_request(rules, Some(harness.state()), request, 4, 2, true).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body_bytes(response).await,
+            Bytes::from_static(b"chunked-tunnel")
+        );
+        upstream_task.abort();
     }
 }

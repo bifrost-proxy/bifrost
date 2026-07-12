@@ -195,6 +195,14 @@ mod tests {
     }
 
     #[test]
+    fn coverage_90_default_inflater_handles_empty_message() {
+        let mut inflater = PerMessageDeflateInflater::default();
+        assert!(inflater.decompress_message(&[]).unwrap().is_empty());
+        inflater.reset();
+        assert!(inflater.decompress_message(&[]).unwrap().is_empty());
+    }
+
+    #[test]
     fn decompression_bomb_is_capped() {
         // A highly compressible payload that inflates far beyond the cap.
         let huge = vec![0u8; MAX_DECOMPRESSED_MESSAGE_BYTES * 2];

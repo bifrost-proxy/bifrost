@@ -1009,6 +1009,100 @@ mod tests {
     }
 
     #[test]
+    fn coverage_90_encoding_fallbacks_preserve_or_drop_headers_correctly() {
+        let ctx = mock_ctx();
+        let rules = ResolvedRules {
+            req_append: Some(Bytes::from_static(b"-request")),
+            html_append: Some("<em>injected</em>".to_string()),
+            ..Default::default()
+        };
+
+        let identity = apply_body_rules_preserving_encoding(
+            Bytes::from_static(b"body"),
+            &rules,
+            Phase::Request,
+            Some("text/plain"),
+            ContentInjectionEncoding {
+                source: Some("identity"),
+                output: None,
+                max_decompress_output_bytes: 1024,
+            },
+            true,
+            &ctx,
+        );
+        assert_eq!(identity.body, Bytes::from_static(b"body-request"));
+        assert_eq!(identity.content_encoding, None);
+
+        let invalid_output = apply_body_rules_preserving_encoding(
+            Bytes::from_static(b"body"),
+            &rules,
+            Phase::Request,
+            Some("text/plain"),
+            ContentInjectionEncoding {
+                source: None,
+                output: Some("not-an-encoding"),
+                max_decompress_output_bytes: 1024,
+            },
+            true,
+            &ctx,
+        );
+        assert_eq!(invalid_output.body, Bytes::from_static(b"body-request"));
+        assert_eq!(invalid_output.content_encoding, None);
+
+        let invalid_source = apply_body_rules_preserving_encoding(
+            Bytes::from_static(b"encoded-looking"),
+            &rules,
+            Phase::Request,
+            Some("text/plain"),
+            ContentInjectionEncoding {
+                source: Some("not-an-encoding"),
+                output: None,
+                max_decompress_output_bytes: 1024,
+            },
+            true,
+            &ctx,
+        );
+        assert_eq!(invalid_source.body, Bytes::from_static(b"encoded-looking"));
+        assert_eq!(
+            invalid_source.content_encoding.as_deref(),
+            Some("not-an-encoding")
+        );
+
+        let html = Bytes::from_static(b"<html><body>x</body></html>");
+        let invalid_html_output = apply_content_injection_preserving_encoding(
+            html.clone(),
+            "text/html",
+            ContentInjectionEncoding {
+                source: None,
+                output: Some("not-an-encoding"),
+                max_decompress_output_bytes: 1024,
+            },
+            &rules,
+            true,
+            &ctx,
+        );
+        assert!(String::from_utf8_lossy(&invalid_html_output.body).contains("injected"));
+        assert_eq!(invalid_html_output.content_encoding, None);
+
+        let invalid_html_source = apply_content_injection_preserving_encoding(
+            html,
+            "text/html",
+            ContentInjectionEncoding {
+                source: Some("not-an-encoding"),
+                output: None,
+                max_decompress_output_bytes: 1024,
+            },
+            &rules,
+            true,
+            &ctx,
+        );
+        assert_eq!(
+            invalid_html_source.content_encoding.as_deref(),
+            Some("not-an-encoding")
+        );
+    }
+
+    #[test]
     fn test_html_injection_append_uses_last_html_close_case_insensitive() {
         let body = Bytes::from("<html><body>outer</body><template></html></template></HTML>");
         let rules = ResolvedRules {
@@ -1248,5 +1342,300 @@ mod tests {
         let result =
             apply_content_injection(body.clone(), "application/json", &rules, false, &mock_ctx());
         assert_eq!(result, body);
+    }
+
+    #[test]
+    fn coverage_90_form_merge_all_value_types_and_non_object_patch() {
+        let rules = ResolvedRules {
+            req_merge: Some(serde_json::json!({
+                "text": "updated",
+                "number": 42,
+                "enabled": true,
+                "empty": null,
+                "nested": {"ok": true}
+            })),
+            ..Default::default()
+        };
+        let result = apply_body_rules(
+            Bytes::from("text=old&keep=yes"),
+            &rules,
+            Phase::Request,
+            Some("application/x-www-form-urlencoded; charset=utf-8"),
+            true,
+            &mock_ctx(),
+        );
+        let pairs: std::collections::HashMap<_, _> =
+            url::form_urlencoded::parse(&result).into_owned().collect();
+        assert_eq!(pairs.get("text").map(String::as_str), Some("updated"));
+        assert_eq!(pairs.get("number").map(String::as_str), Some("42"));
+        assert_eq!(pairs.get("enabled").map(String::as_str), Some("true"));
+        assert_eq!(pairs.get("empty").map(String::as_str), Some(""));
+        assert_eq!(
+            pairs.get("nested").map(String::as_str),
+            Some("{\"ok\":true}")
+        );
+
+        assert!(merge_form_urlencoded(b"a=1", &serde_json::json!([1, 2])).is_none());
+    }
+
+    #[test]
+    fn coverage_90_verbose_body_rules_cover_text_binary_and_response_paths() {
+        let rules = ResolvedRules {
+            res_body: Some(Bytes::from("${statusCode}")),
+            res_prepend: Some(Bytes::from("[")),
+            res_append: Some(Bytes::from("]")),
+            res_replace: vec![("never".into(), "changed".into())],
+            res_replace_regex: vec![RegexReplace {
+                pattern: regex::Regex::new("n.+r").unwrap(),
+                replacement: "changed".into(),
+                global: false,
+            }],
+            ..Default::default()
+        };
+        let mut ctx = mock_ctx();
+        ctx.res_status = Some(201);
+        let result = apply_body_rules(
+            Bytes::from("original"),
+            &rules,
+            Phase::Response,
+            Some("text/plain"),
+            true,
+            &ctx,
+        );
+        assert_eq!(result, Bytes::from("[201]"));
+
+        let binary = apply_body_rules(
+            Bytes::from_static(b"never"),
+            &rules,
+            Phase::Response,
+            Some("application/protobuf"),
+            true,
+            &ctx,
+        );
+        assert_eq!(binary, Bytes::from("[201]"));
+    }
+
+    #[test]
+    fn coverage_90_encoding_failures_and_identity_paths_are_lossless() {
+        let rules = ResolvedRules {
+            req_append: Some(Bytes::from("!")),
+            html_append: Some("<footer>ok</footer>".into()),
+            ..Default::default()
+        };
+        let invalid = Bytes::from_static(b"not compressed");
+        let result = apply_body_rules_preserving_encoding(
+            invalid.clone(),
+            &rules,
+            Phase::Request,
+            Some("text/plain"),
+            ContentInjectionEncoding {
+                source: Some("gzip"),
+                output: Some("br"),
+                max_decompress_output_bytes: 1024,
+            },
+            true,
+            &mock_ctx(),
+        );
+        assert_eq!(result.body, invalid);
+        assert_eq!(result.content_encoding.as_deref(), Some("gzip"));
+
+        let unsupported = apply_body_rules_preserving_encoding(
+            Bytes::from_static(b"plain"),
+            &rules,
+            Phase::Request,
+            Some("text/plain"),
+            ContentInjectionEncoding {
+                source: Some("identity"),
+                output: Some("unsupported"),
+                max_decompress_output_bytes: 1024,
+            },
+            true,
+            &mock_ctx(),
+        );
+        assert_eq!(unsupported.body, Bytes::from_static(b"plain!"));
+        assert_eq!(unsupported.content_encoding, None);
+
+        let injected = apply_content_injection_preserving_encoding(
+            Bytes::from_static(b"bad gzip"),
+            "text/html",
+            ContentInjectionEncoding {
+                source: Some("gzip"),
+                output: None,
+                max_decompress_output_bytes: 1024,
+            },
+            &rules,
+            true,
+            &mock_ctx(),
+        );
+        assert_eq!(injected.body, Bytes::from_static(b"bad gzip"));
+        assert_eq!(injected.content_encoding.as_deref(), Some("gzip"));
+    }
+
+    #[test]
+    fn coverage_90_verbose_html_js_css_fallbacks() {
+        let ctx = mock_ctx();
+        let html_prepend = ResolvedRules {
+            html_prepend: Some("<meta name=covered>".into()),
+            html_append: Some("<footer>covered</footer>".into()),
+            ..Default::default()
+        };
+        let without_html = apply_content_injection(
+            Bytes::from_static(b"fragment"),
+            "application/xhtml+xml",
+            &html_prepend,
+            true,
+            &ctx,
+        );
+        assert!(String::from_utf8_lossy(&without_html).starts_with("<!DOCTYPE html>"));
+
+        let with_doctype = apply_content_injection(
+            Bytes::from_static(b"<!doctype html>fragment"),
+            "text/html",
+            &html_prepend,
+            true,
+            &ctx,
+        );
+        assert!(String::from_utf8_lossy(&with_doctype).starts_with("<meta name=covered>"));
+
+        for (content_type, rules) in [
+            (
+                "text/js",
+                ResolvedRules {
+                    js_prepend: Some("before;".into()),
+                    js_append: Some("after;".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "text/css",
+                ResolvedRules {
+                    css_prepend: Some("before{}".into()),
+                    css_append: Some("after{}".into()),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let result = apply_content_injection(
+                Bytes::from_static(b"middle"),
+                content_type,
+                &rules,
+                true,
+                &ctx,
+            );
+            assert!(String::from_utf8_lossy(&result).contains("middle"));
+        }
+    }
+
+    #[test]
+    fn coverage_90_successful_encoding_and_full_content_replacement_paths() {
+        let rules = ResolvedRules {
+            req_append: Some(Bytes::from_static(b"!")),
+            html_body: Some("<html>replacement</html>".to_string()),
+            js_body: Some("replacement();".to_string()),
+            css_body: Some("replacement{}".to_string()),
+            ..Default::default()
+        };
+        let encoded = apply_body_rules_preserving_encoding(
+            Bytes::from_static(b"plain"),
+            &rules,
+            Phase::Request,
+            Some("text/plain"),
+            ContentInjectionEncoding {
+                source: None,
+                output: Some("gzip"),
+                max_decompress_output_bytes: 1024,
+            },
+            true,
+            &mock_ctx(),
+        );
+        assert_eq!(encoded.content_encoding.as_deref(), Some("gzip"));
+        assert_eq!(
+            try_decompress_body_with_limit(&encoded.body, "gzip", 1024).unwrap(),
+            b"plain!"
+        );
+        for (content_type, expected) in [
+            ("text/html", "<html>replacement</html>"),
+            ("application/javascript", "replacement();"),
+            ("text/css", "replacement{}"),
+        ] {
+            let result = apply_content_injection(
+                Bytes::from_static(b"original"),
+                content_type,
+                &rules,
+                true,
+                &mock_ctx(),
+            );
+            assert_eq!(String::from_utf8_lossy(&result), expected);
+        }
+        assert_eq!(
+            apply_content_injection(
+                Bytes::from_static(b"unchanged"),
+                "application/octet-stream",
+                &rules,
+                true,
+                &mock_ctx(),
+            ),
+            Bytes::from_static(b"unchanged")
+        );
+
+        let compressed = compress_body(b"encoded", "gzip").unwrap();
+        let decoded_identity = apply_body_rules_preserving_encoding(
+            Bytes::from(compressed.clone()),
+            &ResolvedRules::default(),
+            Phase::Request,
+            Some("text/plain"),
+            ContentInjectionEncoding {
+                source: Some("gzip"),
+                output: None,
+                max_decompress_output_bytes: 1024,
+            },
+            true,
+            &mock_ctx(),
+        );
+        assert_eq!(decoded_identity.body, Bytes::from_static(b"encoded"));
+        assert_eq!(decoded_identity.content_encoding, None);
+        let invalid_recompression = apply_body_rules_preserving_encoding(
+            Bytes::from(compressed.clone()),
+            &ResolvedRules::default(),
+            Phase::Request,
+            Some("text/plain"),
+            ContentInjectionEncoding {
+                source: Some("gzip"),
+                output: Some("unsupported"),
+                max_decompress_output_bytes: 1024,
+            },
+            true,
+            &mock_ctx(),
+        );
+        assert_eq!(invalid_recompression.body, Bytes::from_static(b"encoded"));
+        assert_eq!(invalid_recompression.content_encoding, None);
+
+        let html = compress_body(b"<html><body>x</body></html>", "gzip").unwrap();
+        let injected_identity = apply_content_injection_preserving_encoding(
+            Bytes::from(html.clone()),
+            "text/html",
+            ContentInjectionEncoding {
+                source: Some("gzip"),
+                output: None,
+                max_decompress_output_bytes: 1024,
+            },
+            &ResolvedRules::default(),
+            true,
+            &mock_ctx(),
+        );
+        assert_eq!(injected_identity.content_encoding, None);
+        let invalid_injection_recompression = apply_content_injection_preserving_encoding(
+            Bytes::from(html),
+            "text/html",
+            ContentInjectionEncoding {
+                source: Some("gzip"),
+                output: Some("unsupported"),
+                max_decompress_output_bytes: 1024,
+            },
+            &ResolvedRules::default(),
+            true,
+            &mock_ctx(),
+        );
+        assert_eq!(invalid_injection_recompression.content_encoding, None);
     }
 }

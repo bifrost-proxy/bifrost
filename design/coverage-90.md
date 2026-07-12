@@ -168,7 +168,7 @@ design/
 | `bifrost-command` | 90.0 | 已达 98.3% |
 | `bifrost-tls` | 90.0 | Linux CI 91.5%；macOS 本地 `macos_min=78.0` |
 | `bifrost-core` | 89.0 | Linux 89.4%；网络/`macOS` 代码降低聚合 |
-| `bifrost-proxy` | 64.0 | wave 3-5 后基线 |
+| `bifrost-proxy` | 90.0 | production Rust；unit + integration + full E2E 合并后 90.01% |
 | `bifrost-admin` | 56.0 | wave 3-5 后基线 |
 | `bifrost-storage` | 90.0 | Linux CI 94.5% |
 | `bifrost-sync` | 90.0 | Linux CI 94.0% |
@@ -258,7 +258,7 @@ design/
 
 ### Phase 4：迭代收敛
 
-- 定期把 crate min 上调（`bifrost-proxy` / `bifrost-admin` / `agent` / `bifrost-cli`）。
+- 定期把未达标 crate min 上调（`bifrost-admin` / `agent` / `bifrost-cli`）。
 - 对客观阻塞 crate 在 “不适用清单” 里做完 justification 后维持不变。
 - 观察 `enforce_ratchet_up=true` 打开的时机（默认关闭以避免噪音）。
 
@@ -290,8 +290,10 @@ design/
 - 主 CI 增加阻断式 Playwright 关键能力矩阵，覆盖 Rules、Values、Scripts、Traffic、
   Breakpoint 和 Agent 新会话；完整 211 条历史套件进入每周审计并保留 artifact。在历史
   旧页面契约清零前，禁止把完整审计伪装成合入绿灯，也禁止让已知存量失败阻断所有 PR。
-- 定时 `Layered E2E Coverage` workflow 使用同一插桩 profile 执行 rules E2E，并上传
-  unit+integration、E2E-only、union 三份报告，作为长期趋势基线。
+- PR 与定时 `Layered E2E Coverage` workflow 使用同一插桩 profile 执行完整 Rules、
+  Shell、Runner E2E，并上传 unit+integration、E2E-only、union 与 production 四份报告。
+  `bifrost-proxy` 使用 `metric="production"`：只排除 exact `#[cfg(test)]` item 及其外置
+  module，生产分母不因测试辅助代码规模变化；当前证据为 19304/21446 = 90.01%。
 - Shell 质量分为三层：全仓 `bash -n`、全仓 ShellCheck error gate、变更的
   `scripts/ci/*.sh` shfmt gate；ShellCheck 首次启用发现的 stdin redirection 和常量条件
   必须作为行为缺陷修复，禁止以全局 disable 绕过。
@@ -311,8 +313,9 @@ design/
 ### E2E
 
 - `bash scripts/ci/coverage-all.sh --with-e2e --json`：合并 E2E profraw；HTML 报告里能看到 E2E 独占覆盖行。
-- `bash scripts/ci/coverage-all.sh --with-e2e --e2e-suite rules --json`：只运行
-  rules 层，产出三份 JSON，且 E2E 失败时最终退出非 0。
+- `bash scripts/ci/coverage-all.sh --with-e2e --json --lcov --gate`：运行完整
+  Rules / Shell / Runner，产出三层 JSON、LCOV 和 `production-coverage.json`；
+  `bifrost-proxy` production 低于 90% 或任一 E2E 失败时最终退出非 0。
 - `bash e2e-tests/tests/test_coverage_pipeline_contract.sh`：验证插桩二进制注入、
   分层 profile、生产目录拒绝、9900 protected port 与失败传播契约。
 - CI workflow 内 `coverage-all.sh --json --gate` 步骤：绿灯 = 门禁生效。
@@ -340,7 +343,8 @@ design/
 
 - 复核 `coverage-all.sh`：unit / integration / E2E profraw 是否真的落到共享 target；`--fail-under` 与 `--gate` 语义是否分离清楚。
 - 复核 `coverage-gate.py`：workspace 聚合、per-crate min、`macos_min`、`enforce_ratchet_up` 都走同一入口。
-- 复核 `coverage-thresholds.toml`：min 与当前基线一致，注释解释达不到 90 的原因。
+- 复核 `coverage-thresholds.toml`：`bifrost-proxy min=90` 且
+  `metric="production"`，其余 min 与当前基线一致并解释例外原因。
 - 跑 `make coverage`、`make coverage-crate CRATE=<changed>`。
 
 ### 第 2 轮
@@ -351,10 +355,14 @@ design/
 
 ## 风险与决策点
 
-- **E2E 环境限制**：某些环境（无 Tauri、无 macOS keychain、无网络）跑不动 E2E。当前策略是允许 `make coverage-unit` 降级，并在交付报告写明；未来若 CI 全量支持 E2E，可考虑把 `--with-e2e` 变默认。
+- **E2E 环境限制**：某些本地环境（无 Tauri、无 macOS keychain、无网络）跑不动
+  E2E；本地可用 `make coverage-unit` 迭代，但 PR 的 `Layered E2E Coverage` 必须运行
+  full E2E 并执行 production 90% 门禁，不能用本地降级结果代替。
 - **棘轮下调**：任何 PR 下调 `min` 视为红线，需要 reviewer 显式同意并在 PR 描述里说明原因。
 - **`enforce_ratchet_up`**：默认关闭，等大家习惯棘轮流程后再考虑打开。打开后写测试补覆盖率必须同步上调 `min`，否则 gate 失败。
 - **workspace 聚合门禁**：`workspace_min` 保护聚合值，但如果某个大 crate 被拆分或删掉，聚合值可能跳变；维护者需要在 refactor 时同步调整。
-- **CI 时间成本**：`coverage-all.sh --with-e2e` 比普通 unit CI 慢很多，需要平衡；建议 PR 阶段跑 unit gate，主分支合并后跑 `--with-e2e`。
+- **CI 时间成本**：`coverage-all.sh --with-e2e` 比普通 unit CI 慢很多，但核心代理
+  90% 的分子包含 E2E 独占路径，因此 PR 修改代理、E2E 或覆盖脚本时必须运行；定时任务
+  继续提供主分支每日审计。
 - **平台特异 min**：`macos_min` 只在 macOS 本地跑覆盖时校验，避免让 macOS-only 代码在 Linux CI 上被错误计入；对应 crate 的注释必须解释清楚。
 - **thresholds 文件的变更节奏**：min 只允许 PR 内上调；下调需 justified；`workspace_min` 每次上调都要跑一次 `--gate` 确认聚合值稳定。

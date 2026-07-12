@@ -36,6 +36,8 @@
 | TC-COV-13 | 代理核心能力矩阵 | contract |
 | TC-COV-14 | E2E 机器可读结果 | observability |
 | TC-COV-15 | WebSocket 核心与 Playwright 关键矩阵 | e2e |
+| TC-COV-16 | 核心代理 production coverage 90% 门禁 | gate |
+| TC-COV-17 | Full E2E 门禁与 TLS 动态切换确定性 | e2e |
 
 ## 用例细节
 
@@ -253,7 +255,7 @@ suite 为 0 也生成合法空报告，真实执行时逐项记录 passed/failed
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy \
   websocket::capture::tests --lib
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy \
-  websocket::upgrade::tests --lib
+  proxy::http::websocket::tests --lib
 BIFROST_DATA_DIR="$PWD/.bifrost-ui-test-human" \
   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 \
   bash scripts/ci/run-ui-critical.sh
@@ -263,6 +265,40 @@ BIFROST_DATA_DIR="$PWD/.bifrost-ui-test-human" \
 关键矩阵 7/7 通过，覆盖 Rules、Values、Scripts、Traffic、Breakpoint 与 Agent 新会话，
 使用隔离数据目录和动态端口，不连接或停止生产 9900 服务。完整 211 条历史套件由
 `.github/workflows/ui-e2e-full.yml` 每周审计并上传失败证据，PR 合入门禁不隐瞒其存量债务。
+
+### TC-COV-16 核心代理 production coverage 90% 门禁
+
+**步骤**：
+
+```bash
+python3 scripts/ci/coverage-production.py \
+  target/coverage-current-merge/coverage-wave15.lcov \
+  --crate bifrost-proxy \
+  --thresholds scripts/ci/coverage-thresholds.toml \
+  --json-output target/coverage-current-merge/production-human.json --top 5
+grep -A8 '^\[crates.bifrost-proxy\]' scripts/ci/coverage-thresholds.toml
+grep -n 'production-coverage.json\|coverage-all.sh --with-e2e' \
+  .github/workflows/coverage-e2e.yml
+```
+
+**预期**：production reporter 输出 `PASS` 且覆盖率不少于 90%；阈值文件中
+`bifrost-proxy min = 90.0`、`metric = "production"`；PR layered workflow 执行完整
+`--with-e2e` 并上传 `production-coverage.json`。
+
+### TC-COV-17 Full E2E 门禁与 TLS 动态切换确定性
+
+**步骤**：
+
+```bash
+bash e2e-tests/tests/test_coverage_pipeline_contract.sh
+HOME="$HOME" CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" \
+  BIFROST_BIN="$PWD/target/release/bifrost" \
+  target/release/bifrost-e2e --test tls_switch_intercept_to_tunnel \
+  --jobs 1 --test-timeout 30
+```
+
+**预期**：coverage pipeline contract 全部通过；TLS ON -> OFF 后第二次请求使用新连接，
+流量统计精确为 `HTTPS=1` 且 `TUNNEL>=1`，用例 1/1 通过。
 
 ## 执行记录
 
@@ -355,3 +391,13 @@ BIFROST_DATA_DIR="$PWD/.bifrost-ui-test-human" \
 - TC-COV-15：PASS。WebSocket capture 2 条、upgrade 3 条专项 Rust 测试通过；Playwright
   关键能力矩阵 7/7 通过。完整历史套件首次审计在 211 条中运行至第 73 条时已暴露 11 条
   旧页面契约失败，验证了新增每周完整审计的必要性；该债务如实保留，不计为关键矩阵通过。
+
+2026-07-12 执行补充（核心代理 90%）：
+
+- TC-COV-16：PASS。production reporter 对合并 LCOV 统计为
+  `19304/21446 = 90.01%`，90% 门禁通过；阈值文件确认 `min=90.0`、
+  `metric="production"`，PR layered workflow 执行完整 `--with-e2e` 并上传
+  `production-coverage.json`。
+- TC-COV-17：PASS。coverage pipeline contract 检查 253 个 Shell 文件、23 个工具单测、
+  10 个能力契约及 3 个能力分片均通过；真实运行 TLS ON -> OFF 用例 1/1 通过，切换后
+  流量为 `HTTPS=1`、`TUNNEL=1`。

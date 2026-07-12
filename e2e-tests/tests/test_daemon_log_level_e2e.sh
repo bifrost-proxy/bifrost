@@ -11,9 +11,14 @@ source "${PROJECT_DIR}/e2e-tests/test_utils/assert.sh"
 source "${PROJECT_DIR}/e2e-tests/test_utils/process.sh"
 
 PROXY_PORT="${PROXY_PORT:-18891}"
-BIFROST_BIN="${PROJECT_DIR}/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-${PROJECT_DIR}/target/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
+fi
+
+if [[ "${BIFROST_COVERAGE_E2E:-0}" == "1" ]]; then
+    echo "SKIP: daemon detachment cannot provide a bounded LLVM profile lifecycle"
+    exit 0
 fi
 
 TEST_DATA_DIR=""

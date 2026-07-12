@@ -22,7 +22,7 @@ EXTERNAL_TEST_URL=${EXTERNAL_TEST_URL:-"https://www.google.com/"}
 ONLY_TEST=${ONLY_TEST:-""}
 CURL_COMMON_ARGS=(--connect-timeout 5 --max-time 15)
 
-BIFROST_BIN="$PROJECT_ROOT/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-$PROJECT_ROOT/target/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi

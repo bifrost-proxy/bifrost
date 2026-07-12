@@ -841,9 +841,12 @@ main() {
 
     if [[ "${SKIP_CARGO_TEST:-false}" != "true" ]]; then
         echo "Pre-compiling HTTP/3 integration test binary..."
-        if ! run_with_timeout 90 "$CARGO_BIN" test -p bifrost-proxy --test upstream_http3_e2e --release --all-features --no-run 2>/dev/null; then
-            echo "WARN: Failed to pre-compile HTTP/3 integration test (skipping cargo test)"
-            export SKIP_CARGO_TEST=true
+        local cargo_test_timeout="${BIFROST_HTTP3_CARGO_TEST_TIMEOUT:-180}"
+        if ! run_with_timeout "$cargo_test_timeout" env SKIP_FRONTEND_BUILD=1 \
+            "$CARGO_BIN" test -p bifrost-proxy --test upstream_http3_e2e \
+            --all-features --no-run; then
+            echo "ERROR: Failed to pre-compile HTTP/3 integration test"
+            exit 1
         fi
     fi
     

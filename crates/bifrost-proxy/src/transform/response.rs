@@ -760,6 +760,7 @@ pub fn format_set_cookie(name: &str, value: &str, options: &SetCookieOptions) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::{HeaderReplaceRule, ResCookieValue};
     use hyper::Response;
 
     fn create_test_parts() -> Parts {
@@ -1026,5 +1027,202 @@ mod tests {
                 .unwrap(),
             "1.1.1.1"
         );
+    }
+
+    #[test]
+    fn response_rules_cover_delete_replace_attachment_type_charset_cache_and_trailers() {
+        let mut parts = create_test_parts();
+        parts
+            .headers
+            .insert("x-remove", HeaderValue::from_static("gone"));
+        parts.headers.insert(
+            "x-replace",
+            HeaderValue::from_static("before-middle-before"),
+        );
+        parts.headers.insert(
+            hyper::header::CONTENT_LENGTH,
+            HeaderValue::from_static("12"),
+        );
+        let rules = ResolvedRules {
+            delete_res_headers: vec!["x-remove".to_string(), "bad header".to_string()],
+            header_replace: vec![
+                HeaderReplaceRule {
+                    target: HeaderReplaceTarget::Request,
+                    header_name: "x-replace".to_string(),
+                    pattern: "before".to_string(),
+                    replacement: "ignored".to_string(),
+                },
+                HeaderReplaceRule {
+                    target: HeaderReplaceTarget::Response,
+                    header_name: "x-replace".to_string(),
+                    pattern: "before".to_string(),
+                    replacement: "after".to_string(),
+                },
+            ],
+            attachment: Some(String::new()),
+            res_type: Some("json".to_string()),
+            res_charset: Some("utf-8".to_string()),
+            cache: Some("60".to_string()),
+            trailers: vec![
+                ("x-checksum".to_string(), "sha256".to_string()),
+                ("bad header".to_string(), "ignored".to_string()),
+            ],
+            ..Default::default()
+        };
+        let ctx = RequestContext::new().with_request_info(
+            "https://example.test/files/report.json".to_string(),
+            "GET".to_string(),
+            "example.test".to_string(),
+            "/files/report.json".to_string(),
+            String::new(),
+            "127.0.0.1".to_string(),
+        );
+
+        apply_res_rules(&mut parts, &rules, true, &ctx, None);
+
+        assert!(!parts.headers.contains_key("x-remove"));
+        assert_eq!(parts.headers["x-replace"], "after-middle-after");
+        assert_eq!(
+            parts.headers[hyper::header::CONTENT_DISPOSITION],
+            "attachment; filename=\"report.json\""
+        );
+        assert_eq!(
+            parts.headers[hyper::header::CONTENT_TYPE],
+            "application/json; charset=utf-8"
+        );
+        assert_eq!(parts.headers[hyper::header::CACHE_CONTROL], "max-age=60");
+        assert_eq!(parts.headers[hyper::header::TRAILER], "x-checksum");
+        assert!(!parts.headers.contains_key(hyper::header::CONTENT_LENGTH));
+    }
+
+    #[test]
+    fn response_rules_cover_cookie_deletion_cache_zero_custom_attachment_and_cors() {
+        let mut parts = create_test_parts();
+        parts.headers.append(
+            hyper::header::SET_COOKIE,
+            HeaderValue::from_static("session=old; Path=/"),
+        );
+        parts.headers.append(
+            hyper::header::SET_COOKIE,
+            HeaderValue::from_static("other=keep"),
+        );
+        let rules = ResolvedRules {
+            res_del_cookies: vec!["session".to_string()],
+            res_cookies: vec![(
+                "fresh".to_string(),
+                ResCookieValue::simple("yes".to_string()),
+            )],
+            attachment: Some("résumé 2026.txt".to_string()),
+            cache: Some("0".to_string()),
+            res_cors: CorsConfig {
+                enabled: true,
+                origin: Some("*".to_string()),
+                methods: Some("GET, HEAD".to_string()),
+                headers: Some("x-token".to_string()),
+                expose_headers: Some("x-result".to_string()),
+                credentials: Some(false),
+                max_age: Some(120),
+            },
+            ..Default::default()
+        };
+        let ctx = RequestContext::new();
+
+        apply_res_rules(&mut parts, &rules, true, &ctx, Some("https://client.test"));
+
+        let cookies: Vec<_> = parts
+            .headers
+            .get_all(hyper::header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert!(cookies.iter().any(|v| v.starts_with("session=; Max-Age=0")));
+        assert!(cookies.iter().any(|v| v.starts_with("fresh=yes")));
+        assert_eq!(
+            parts.headers[hyper::header::CACHE_CONTROL],
+            "no-cache, no-store, must-revalidate"
+        );
+        assert!(parts.headers[hyper::header::CONTENT_DISPOSITION]
+            .to_str()
+            .unwrap()
+            .starts_with("attachment; filename=\"r%E9sum%E9%202026.txt\""));
+        assert_eq!(
+            parts.headers[hyper::header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            "https://client.test"
+        );
+        assert_eq!(parts.headers[hyper::header::ACCESS_CONTROL_MAX_AGE], "120");
+        assert!(!parts
+            .headers
+            .contains_key(hyper::header::ACCESS_CONTROL_ALLOW_CREDENTIALS));
+    }
+
+    #[test]
+    fn template_and_content_type_helpers_cover_edge_values() {
+        let mut ctx = RequestContext::new().with_request_info(
+            "https://example.test:8443/p?q=1".to_string(),
+            "POST".to_string(),
+            "example.test".to_string(),
+            "/p".to_string(),
+            "?q=1".to_string(),
+            "10.0.0.1".to_string(),
+        );
+        ctx.port = 8443;
+        ctx.req_headers
+            .insert("x-token".to_string(), "header".to_string());
+        ctx.req_cookies
+            .insert("session".to_string(), "cookie".to_string());
+        ctx.query_params
+            .insert("q".to_string(), "query".to_string());
+        let expanded = process_template_value(
+            "${method}|${url.host}|${url.port}|${path}|${search}|${clientIp}|${port}|${reqHeaders.x-token}|${reqCookies.session}|${query.q}|$${literal}|${randomInt(7-7)}|${randomInt(0)}",
+            &ctx,
+        );
+        assert!(expanded.starts_with(
+            "POST|example.test|8443|/p|?q=1|10.0.0.1|8443|header|cookie|query|${literal}|7|0"
+        ));
+
+        for (shortcut, expected) in [
+            ("html", "text/html"),
+            ("jpeg", "image/jpeg"),
+            ("woff2", "font/woff2"),
+            ("gzip", "application/gzip"),
+            ("form", "application/x-www-form-urlencoded"),
+            ("custom/type", "custom/type"),
+        ] {
+            assert_eq!(expand_content_type_shortcut(shortcut), expected);
+        }
+        assert_eq!(extract_filename_from_url("/path/"), "download");
+        assert_eq!(extract_filename_from_url("/path/no-extension"), "download");
+        assert_eq!(encode_content_disposition_filename("a b.txt"), "a%20b.txt");
+    }
+
+    #[test]
+    fn coverage_90_template_expands_environment_random_and_identity_tokens() {
+        let key = "BIFROST_RESPONSE_TEMPLATE_COVERAGE";
+        std::env::set_var(key, "environment-value");
+        let ctx = RequestContext::new().with_request_info(
+            "https://template.test/path".to_string(),
+            "GET".to_string(),
+            "template.test".to_string(),
+            "/path".to_string(),
+            "".to_string(),
+            "127.0.0.1".to_string(),
+        );
+        let expanded = process_template_value(
+            &format!(
+                "${{env.{key}}}|${{env.BIFROST_MISSING_TEMPLATE_VALUE}}|${{randomInt(1-3)}}|${{url}}|${{url.hostname}}|${{url.pathname}}|${{reqId}}|${{now}}|${{timestamp}}|${{randomUUID}}|${{random}}|${{version}}"
+            ),
+            &ctx,
+        );
+        std::env::remove_var(key);
+        let fields = expanded.split('|').collect::<Vec<_>>();
+        assert_eq!(fields[0], "environment-value");
+        assert_eq!(fields[1], "");
+        assert!((1..=3).contains(&fields[2].parse::<u64>().unwrap()));
+        assert_eq!(fields[3], "https://template.test/path");
+        assert_eq!(fields[4], "template.test");
+        assert_eq!(fields[5], "/path");
+        assert!(fields[6].starts_with("REQ-"));
+        assert!(uuid::Uuid::parse_str(fields[9]).is_ok());
+        assert_eq!(fields[11], env!("CARGO_PKG_VERSION"));
     }
 }

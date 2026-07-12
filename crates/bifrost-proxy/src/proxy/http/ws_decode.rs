@@ -490,4 +490,136 @@ mod tests {
         let result = out.expect("expected some output");
         assert_eq!(result, builtin_decode_utf8(&payload));
     }
+
+    #[tokio::test]
+    async fn decode_ws_payload_covers_metadata_receive_and_failed_script_paths() {
+        let admin = make_admin_state_with_script_manager();
+        let admin_state = Some(admin);
+        let ctx = make_ctx();
+        let mut resolved = ResolvedRules::default();
+        resolved
+            .values
+            .insert("existing".to_string(), "rule".to_string());
+        let meta = WsHandshakeMeta {
+            negotiated_protocol: Some("chat.v1".to_string()),
+            negotiated_extensions: Some(
+                "permessage-deflate; client_no_context_takeover; server_no_context_takeover; client_max_window_bits=12; server_max_window_bits=13"
+                    .to_string(),
+            ),
+        };
+        let headers = vec![("Authorization".to_string(), "Bearer test".to_string())];
+
+        let out = decode_ws_payload_for_storage(
+            &admin_state,
+            &["missing-script".to_string()],
+            &ctx,
+            &resolved,
+            "wss://example.com:9443/socket?token=1",
+            "GET",
+            &headers,
+            &meta,
+            FrameDirection::Receive,
+            FrameType::Binary,
+            b"payload",
+        )
+        .await;
+        assert!(out.is_none());
+
+        let out = decode_ws_payload_for_storage(
+            &admin_state,
+            &[
+                " ".to_string(),
+                "missing-script".to_string(),
+                "default".to_string(),
+            ],
+            &ctx,
+            &resolved,
+            "not a websocket url",
+            "POST",
+            &headers,
+            &WsHandshakeMeta {
+                negotiated_protocol: None,
+                negotiated_extensions: Some("unsupported-extension".to_string()),
+            },
+            FrameDirection::Send,
+            FrameType::Text,
+            b"payload",
+        )
+        .await;
+        assert_eq!(out.unwrap(), b"payload".to_vec());
+    }
+
+    #[tokio::test]
+    async fn coverage_90_custom_scripts_cover_configured_send_receive_and_error_outputs() {
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19610)
+            .build();
+        let manager = ScriptManager::new(harness.data_dir().join("ws-decode-scripts"));
+        manager.init().await.unwrap();
+        manager
+            .engine()
+            .save_script(
+                ScriptType::Decode,
+                "ws-success",
+                r#"ctx.output = { code: "0", data: "decoded-ws", msg: "" };"#,
+            )
+            .await
+            .unwrap();
+        manager
+            .engine()
+            .save_script(
+                ScriptType::Decode,
+                "ws-error",
+                r#"ctx.output = { code: "9", data: "ignored", msg: "decode-rejected" };"#,
+            )
+            .await
+            .unwrap();
+        let state = Arc::new(
+            AdminState::new(19610)
+                .with_config_manager_shared(harness.config_manager.clone())
+                .with_script_manager(manager),
+        );
+        let admin = Some(state);
+        let ctx = make_ctx();
+        let rules = ResolvedRules {
+            values: HashMap::from([("rule-value".to_string(), "present".to_string())]),
+            ..Default::default()
+        };
+        let meta = WsHandshakeMeta {
+            negotiated_protocol: Some("chat.v1".to_string()),
+            negotiated_extensions: Some("permessage-deflate".to_string()),
+        };
+        for direction in [FrameDirection::Send, FrameDirection::Receive] {
+            let decoded = decode_ws_payload_for_storage(
+                &admin,
+                &["ws-success".to_string()],
+                &ctx,
+                &rules,
+                "wss://example.test/socket",
+                "GET",
+                &[("x-test".to_string(), "yes".to_string())],
+                &meta,
+                direction,
+                FrameType::Binary,
+                b"wire-payload",
+            )
+            .await;
+            assert_eq!(decoded.as_deref(), Some(b"decoded-ws".as_slice()));
+        }
+        let rejected = decode_ws_payload_for_storage(
+            &admin,
+            &["ws-error".to_string(), "ws-success".to_string()],
+            &ctx,
+            &rules,
+            "ws://example.test/socket",
+            "POST",
+            &[],
+            &WsHandshakeMeta::default(),
+            FrameDirection::Receive,
+            FrameType::Text,
+            b"wire-payload",
+        )
+        .await;
+        assert_eq!(rejected.as_deref(), Some(b"decode-rejected".as_slice()));
+    }
 }

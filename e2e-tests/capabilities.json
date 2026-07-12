@@ -26,7 +26,7 @@
       "layers": ["unit", "integration", "e2e"],
       "platforms": ["linux", "macos", "windows"],
       "failure_modes": ["upgrade-rejected", "half-close", "connection-reset"],
-      "evidence": ["crates/bifrost-proxy/src/proxy/http/websocket/capture.rs", "crates/bifrost-proxy/src/proxy/http/websocket/upgrade.rs", "crates/bifrost-proxy/tests/protocol_e2e.rs", "e2e-tests/tests/test_websocket_frames.sh"]
+      "evidence": ["crates/bifrost-proxy/src/proxy/http/websocket/capture.rs", "crates/bifrost-proxy/src/proxy/http/handler.rs", "crates/bifrost-proxy/tests/protocol_e2e.rs", "e2e-tests/tests/test_websocket_frames.sh"]
     },
     {
       "id": "sse-streaming-capture",

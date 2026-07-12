@@ -427,6 +427,35 @@ impl<S: Send + 'static> Clone for ConnectionPool<S> {
     }
 }
 
+impl<S: Send + 'static> ConnectionPool<S> {
+    pub fn stats(&self) -> PoolStatsSnapshot {
+        self.inner.stats.snapshot()
+    }
+
+    pub async fn cleanup(&self) {
+        self.inner.cleanup_expired().await;
+    }
+
+    pub async fn close_by_host(&self, host: &str) -> usize {
+        self.inner.close_by_host(host).await
+    }
+
+    pub async fn close_by_pattern(&self, pattern: &str) -> usize {
+        self.inner.close_by_pattern(pattern).await
+    }
+
+    pub fn start_cleanup_task(self) -> tokio::task::JoinHandle<()> {
+        let pool = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                pool.cleanup().await;
+            }
+        })
+    }
+}
+
 impl ConnectionPool<TcpStream> {
     pub fn new(config: PoolConfig) -> Self {
         Self {
@@ -491,33 +520,6 @@ impl ConnectionPool<TcpStream> {
             created_at: Instant::now(),
             last_used: Instant::now(),
             pool: self.inner.clone(),
-        })
-    }
-
-    pub fn stats(&self) -> PoolStatsSnapshot {
-        self.inner.stats.snapshot()
-    }
-
-    pub async fn cleanup(&self) {
-        self.inner.cleanup_expired().await;
-    }
-
-    pub async fn close_by_host(&self, host: &str) -> usize {
-        self.inner.close_by_host(host).await
-    }
-
-    pub async fn close_by_pattern(&self, pattern: &str) -> usize {
-        self.inner.close_by_pattern(pattern).await
-    }
-
-    pub fn start_cleanup_task(self) -> tokio::task::JoinHandle<()> {
-        let pool = self.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
-            loop {
-                interval.tick().await;
-                pool.cleanup().await;
-            }
         })
     }
 }
@@ -787,5 +789,136 @@ mod tests {
         assert_eq!(snapshot.idle_connections, 1);
         assert_eq!(snapshot.total_connections, 1);
         assert_eq!(snapshot.connections_closed, 3);
+    }
+
+    #[tokio::test]
+    async fn pooled_connection_accessors_discard_and_drop_cover_lifecycle() {
+        let pool: ConnectionPool<DummyStream> =
+            ConnectionPool::with_stream_type(PoolConfig::default());
+        let key = ConnectionKey::https("example.test", 443);
+
+        let mut wrapped = pool.wrap(key.clone(), DummyStream);
+        assert_eq!(wrapped.key(), &key);
+        assert!(wrapped.age() < Duration::from_secs(1));
+        assert!(wrapped.idle_time() < Duration::from_secs(1));
+        let _ = wrapped.stream();
+        let _: &DummyStream = &wrapped;
+        let _: &mut DummyStream = &mut wrapped;
+        wrapped.discard();
+
+        let wrapped = pool.wrap(key.clone(), DummyStream);
+        let _stream = wrapped.into_stream();
+        assert_eq!(pool.stats().connections_created, 2);
+
+        let wrapped = pool.wrap(key, DummyStream);
+        drop(wrapped);
+        tokio::task::yield_now().await;
+        assert_eq!(pool.stats().idle_connections, 1);
+    }
+
+    #[tokio::test]
+    async fn return_connection_rejects_old_and_over_capacity_streams() {
+        let config = PoolConfig {
+            max_idle_per_host: 1,
+            max_total_connections: 4,
+            idle_timeout: Duration::from_secs(60),
+            max_age: Duration::from_millis(1),
+            connect_timeout: Duration::from_secs(1),
+        };
+        let pool: ConnectionPool<DummyStream> = ConnectionPool::with_stream_type(config);
+        let key = ConnectionKey::http("capacity.test", 80);
+        pool.inner
+            .stats
+            .total_connections
+            .store(3, Ordering::Relaxed);
+
+        pool.inner
+            .return_connection(
+                key.clone(),
+                DummyStream,
+                Instant::now() - Duration::from_secs(1),
+            )
+            .await;
+        assert_eq!(pool.stats().connections_closed, 1);
+
+        pool.inner
+            .return_connection(key.clone(), DummyStream, Instant::now())
+            .await;
+        pool.inner
+            .return_connection(key, DummyStream, Instant::now())
+            .await;
+        let snapshot = pool.stats();
+        assert_eq!(snapshot.idle_connections, 1);
+        assert_eq!(snapshot.connections_closed, 2);
+    }
+
+    #[tokio::test]
+    async fn get_or_create_covers_create_reuse_error_and_timeout() {
+        let config = PoolConfig {
+            connect_timeout: Duration::from_millis(20),
+            ..PoolConfig::default()
+        };
+        let pool: ConnectionPool<DummyStream> = ConnectionPool::with_stream_type(config);
+        let key = ConnectionKey::http("create.test", 80);
+
+        let first = pool
+            .get_or_create(key.clone(), |_| async { Ok(DummyStream) })
+            .await
+            .unwrap();
+        drop(first);
+        tokio::task::yield_now().await;
+        let reused = pool
+            .get_or_create(key.clone(), |_| async {
+                panic!("idle connection should be reused")
+            })
+            .await
+            .unwrap();
+        reused.discard();
+        assert_eq!(pool.stats().connections_reused, 1);
+
+        let error = match pool
+            .get_or_create(ConnectionKey::http("error.test", 80), |_| async {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "refused",
+                ))
+            })
+            .await
+        {
+            Ok(_) => panic!("connection creation should fail"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+
+        let timeout_error = match pool
+            .get_or_create(ConnectionKey::http("timeout.test", 80), |_| async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                Ok(DummyStream)
+            })
+            .await
+        {
+            Ok(_) => panic!("connection creation should time out"),
+            Err(error) => error,
+        };
+        assert_eq!(timeout_error.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(pool.stats().connection_errors, 2);
+    }
+
+    #[tokio::test]
+    async fn close_non_wildcard_pattern_and_cleanup_noop_are_safe() {
+        let pool: ConnectionPool<DummyStream> =
+            ConnectionPool::with_stream_type(PoolConfig::default());
+        let key = ConnectionKey::http("api.example.test", 80);
+        drop(pool.wrap(key, DummyStream));
+        tokio::task::yield_now().await;
+
+        assert_eq!(pool.close_by_pattern("example.test").await, 1);
+        assert_eq!(pool.close_by_host("missing.test").await, 0);
+        pool.cleanup().await;
+
+        let task = pool.clone().start_cleanup_task();
+        tokio::task::yield_now().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
     }
 }

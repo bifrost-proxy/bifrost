@@ -2,6 +2,11 @@
 
 set -euo pipefail
 
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+: "${BIFROST_DISABLE_TRAY:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+export BIFROST_DISABLE_TRAY
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -13,6 +18,7 @@ ci_workflow=".github/workflows/ci.yml"
 layered_workflow=".github/workflows/coverage-e2e.yml"
 ui_full_workflow=".github/workflows/ui-e2e-full.yml"
 coverage_diff="scripts/ci/coverage-diff.py"
+coverage_production="scripts/ci/coverage-production.py"
 shell_quality="scripts/ci/check-shell-quality.sh"
 e2e_summary="scripts/ci/e2e-summary.py"
 ui_critical="scripts/ci/run-ui-critical.sh"
@@ -36,10 +42,16 @@ grep -Fq 'export BIFROST_BIN=' "$coverage_all"
 grep -Fq 'export BIFROST_E2E_BIN=' "$coverage_all"
 grep -Fq 'prepare_isolated_e2e_environment' "$coverage_all"
 grep -Fq 'restore_tool_environment' "$coverage_all"
+grep -Fq 'trap cleanup_on_exit EXIT' "$coverage_all"
+grep -Fq 'export CARGO_HOME="$ORIGINAL_CARGO_HOME"' "$coverage_all"
+grep -Fq 'export RUSTUP_HOME="$ORIGINAL_RUSTUP_HOME"' "$coverage_all"
+grep -Fq 'export BIFROST_COVERAGE_E2E=1' "$coverage_all"
+grep -Fq 'export PATH="$(dirname "$NODE_BIN"):$PATH"' "$coverage_all"
 grep -Fq 'REFUSING: coverage E2E data directory is under production data' "$coverage_all"
 grep -Fq 'BIFROST_E2E_PROTECTED_PORTS' "$coverage_all"
 grep -Fq 'One or more instrumented E2E suites failed' "$coverage_all"
 grep -Fq 'Changed production Rust line coverage' "$coverage_diff"
+grep -Fq 'all exact #[cfg(test)] items excluded' "$coverage_production"
 grep -Fq 'changed_lines_min = 95.0' scripts/ci/coverage-thresholds.toml
 grep -Fq 'coverage-diff.py target/coverage/lcov.info' "$ci_workflow"
 grep -Fq 'E2E UI (Playwright)' "$ci_workflow"
@@ -55,7 +67,11 @@ grep -Fq 'schema_version' "$e2e_summary"
 python3 scripts/ci/check-e2e-capabilities.py
 grep -Fq 'Proxy E2E capability contract' "$ci_workflow"
 grep -Fq 'Layered E2E Coverage' "$layered_workflow"
-grep -Fq -- '--with-e2e --e2e-suite rules' "$layered_workflow"
+grep -Fq 'bash scripts/ci/coverage-all.sh --with-e2e' "$layered_workflow"
+grep -Fq 'production-coverage.json' "$layered_workflow"
+grep -Fq 'metric = "production"' scripts/ci/coverage-thresholds.toml
+grep -Fq 'min = 90.0' scripts/ci/coverage-thresholds.toml
+grep -Fq 'Enforcing bifrost-proxy production coverage gate' "$coverage_all"
 grep -Fq 'unit-integration.json' "$layered_workflow"
 grep -Fq 'e2e.json' "$layered_workflow"
 grep -Fq 'Full UI E2E Audit' "$ui_full_workflow"
@@ -68,6 +84,18 @@ if grep -Fq 'cp "$BIFROST_BIN" "$ROOT_DIR/target/release/bifrost"' "$coverage_al
 fi
 
 grep -Fq 'BIFROST_E2E_BIN' "$runner"
+grep -Fq 'BIFROST_BIN="${BIFROST_BIN:-${PROJECT_DIR}/target/release/bifrost}"' \
+  e2e-tests/tests/test_daemon_cert_check_e2e.sh
+grep -Fq 'BIFROST_BIN="${BIFROST_BIN:-${PROJECT_DIR}/target/release/bifrost}"' \
+  e2e-tests/tests/test_daemon_log_level_e2e.sh
+grep -Fq 'Page.navigate", { url: confirmUrl }' \
+  e2e-tests/tests/test_rule_share_confirm_browser.sh
+for daemon_test in \
+  e2e-tests/tests/test_daemon_cert_check_e2e.sh \
+  e2e-tests/tests/test_daemon_log_level_e2e.sh \
+  e2e-tests/tests/test_stop_restart_shutdown_marker.sh; do
+  grep -Fq 'daemon detachment cannot provide a bounded LLVM profile lifecycle' "$daemon_test"
+done
 grep -Fq '_prebuilt="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}"' "$runner"
 grep -Fq 'resolved_bifrost_bin=$(resolve_bifrost_release_bin' "$serial_rules"
 if grep -Fq 'local BIFROST_BIN=' "$serial_rules"; then
@@ -78,6 +106,10 @@ grep -Fq '> "$OUTPUT_DIR/coverage.json"' "$coverage_e2e"
 grep -Fq 'REFUSING: coverage E2E data directory is under production data' "$coverage_e2e"
 grep -Fq 'BIFROST_E2E_PROTECTED_PORTS' "$coverage_e2e"
 grep -Fq 'export HOME="$ORIGINAL_HOME"' "$coverage_e2e"
+grep -Fq 'export CARGO_HOME="$ORIGINAL_CARGO_HOME"' "$coverage_e2e"
+grep -Fq 'export RUSTUP_HOME="$ORIGINAL_RUSTUP_HOME"' "$coverage_e2e"
+grep -Fq 'trap cleanup_coverage_environment EXIT' "$coverage_e2e"
+grep -Fq 'export PATH="$(dirname "$NODE_BIN"):$PATH"' "$coverage_e2e"
 grep -Fq 'Instrumented E2E suite failed' "$coverage_e2e"
 grep -Fq 'shell_test_capability_group()' "$runner"
 grep -Fq 'use_capability_shell_shards()' "$runner"

@@ -14,6 +14,7 @@ source "${PROJECT_DIR}/e2e-tests/test_utils/process.sh"
 BIFROST_BIN="${BIFROST_BIN:-${PROJECT_DIR}/target/debug/bifrost}"
 TEST_DATA_DIR=""
 ADMIN_PORT="${ADMIN_PORT:-}"
+BIFROST_PID=""
 
 pick_free_port() {
     python3 - <<'PY'
@@ -25,6 +26,10 @@ PY
 }
 
 cleanup() {
+    if [[ -n "$BIFROST_PID" ]]; then
+        kill "$BIFROST_PID" >/dev/null 2>&1 || true
+        wait "$BIFROST_PID" >/dev/null 2>&1 || true
+    fi
     if [[ -n "$TEST_DATA_DIR" ]]; then
         BIFROST_DATA_DIR="$TEST_DATA_DIR" "$BIFROST_BIN" stop >/dev/null 2>&1 || true
     fi
@@ -152,8 +157,16 @@ main() {
     export BIFROST_BIN
     ADMIN_PORT="${ADMIN_PORT:-$(pick_free_port)}"
 
-    "$BIFROST_BIN" start -p "$ADMIN_PORT" -H 127.0.0.1 \
-        --daemon --skip-cert-check --unsafe-ssl --no-system-proxy --no-intercept
+    local -a start_args=(
+        start -p "$ADMIN_PORT" -H 127.0.0.1
+        --skip-cert-check --unsafe-ssl --no-system-proxy --no-intercept
+    )
+    if [[ "${BIFROST_COVERAGE_E2E:-0}" == "1" ]]; then
+        "$BIFROST_BIN" "${start_args[@]}" >"$TEST_DATA_DIR/bifrost.log" 2>&1 &
+        BIFROST_PID=$!
+    else
+        "$BIFROST_BIN" "${start_args[@]}" --daemon
+    fi
 
     wait_for_admin_api
     assert_remote_invoke_api_ready

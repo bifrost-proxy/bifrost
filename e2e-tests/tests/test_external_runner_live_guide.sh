@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+unset BIFROST_DETACHED_DAEMON_CHILD
+unset BIFROST_EXTERNAL_CLI_WORKER
+
 : "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
 : "${BIFROST_DISABLE_TRAY:=1}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
@@ -63,7 +66,10 @@ if "--version" in sys.argv:
 if "app-server" not in sys.argv:
     prompt = sys.stdin.read()
     record({"event":"exec_started","runner":runner,"prompt":prompt})
-    time.sleep(1)
+    # The coverage-instrumented CLI has materially higher startup overhead.
+    # Keep the exec transport active long enough for the guide command to be
+    # issued after the explicit exec_started readiness marker.
+    time.sleep(10 if runner == "codex-exec" else 1)
     send({"type":"thread.started","thread_id":thread_id})
     send({"type":"turn.started"})
     send({"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":f"EXEC_{runner}"}})
@@ -82,6 +88,11 @@ for line in sys.stdin:
     elif method == "turn/start":
         record({"event":"turn_started","runner":runner,"params":frame["params"]})
         send({"jsonrpc":"2.0","id":request_id,"result":{"turn":{"id":turn_id}}})
+        # The product registers the steerable session only after consuming the
+        # turn/start response. Publish a separate readiness marker after that
+        # protocol boundary instead of racing on turn_started above.
+        time.sleep(0.5)
+        record({"event":"turn_ready","runner":runner})
         prompt = frame["params"]["input"][0]["text"]
         if "queue-explicit" in prompt:
             send({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":thread_id,"turnId":turn_id,"item":{"id":"message-queued-explicit","type":"agentMessage","text":f"QUEUED_EXPLICIT_{runner}"}}})
@@ -195,7 +206,7 @@ run_case() {
   local run_pid=$!
 
   for _ in $(seq 1 200); do
-    if grep -q "\"event\":\"turn_started\",\"runner\":\"$runner\"" "$MOCK_LOG" 2>/dev/null; then
+    if grep -q "\"event\":\"turn_ready\",\"runner\":\"$runner\"" "$MOCK_LOG" 2>/dev/null; then
       break
     fi
     if ! kill -0 "$run_pid" >/dev/null 2>&1; then
@@ -273,7 +284,7 @@ run_web_guide_case() {
   local stream_pid=$!
 
   for _ in $(seq 1 200); do
-    if grep -q "\"event\":\"turn_started\",\"runner\":\"$runner\"" "$MOCK_LOG" 2>/dev/null; then
+    if grep -q "\"event\":\"turn_ready\",\"runner\":\"$runner\"" "$MOCK_LOG" 2>/dev/null; then
       break
     fi
     kill -0 "$stream_pid" >/dev/null 2>&1 || return 1
@@ -344,13 +355,13 @@ wait_for_mock_record() {
 
 create_im_provider "im-guide-provider" "im-guide-owner" "codex-im"
 send_im_inbound "im-guide-provider" "im-guide-owner" "wait for default IM guide"
-wait_for_mock_record '"event":"turn_started","runner":"codex-im"'
+wait_for_mock_record '"event":"turn_ready","runner":"codex-im"'
 send_im_inbound "im-guide-provider" "im-guide-owner" "default-im-guide"
 wait_for_mock_record 'default-im-guide'
 
 create_im_provider "im-queue-provider" "im-queue-owner" "codex-im-queue"
 send_im_inbound "im-queue-provider" "im-queue-owner" "wait for explicit IM queue"
-wait_for_mock_record '"event":"turn_started","runner":"codex-im-queue"'
+wait_for_mock_record '"event":"turn_ready","runner":"codex-im-queue"'
 send_im_inbound "im-queue-provider" "im-queue-owner" "/q queue-explicit"
 send_im_inbound "im-queue-provider" "im-queue-owner" "/g release-queue"
 wait_for_mock_record 'queue-explicit'
@@ -392,7 +403,7 @@ run_queue_fallback_case() {
   local session="live-guide-$runner"
   local stream_log="$TEST_DIR/$runner-stream.ndjson"
   local guide_log="$TEST_DIR/$runner-guide.json"
-  local wait_event="turn_started"
+  local wait_event="turn_ready"
   [[ "$runner" == "codex-exec" ]] && wait_event="exec_started"
 
   curl -sS -N --noproxy '*' \

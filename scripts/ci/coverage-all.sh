@@ -79,6 +79,8 @@ PACKAGE=""
 JOBS="${COVERAGE_JOBS:-4}"
 E2E_SUITE="${BIFROST_COVERAGE_E2E_SUITE:-}"
 ORIGINAL_HOME="${HOME:-}"
+ORIGINAL_CARGO_HOME="${CARGO_HOME:-${HOME:-}/.cargo}"
+ORIGINAL_RUSTUP_HOME="${RUSTUP_HOME:-${HOME:-}/.rustup}"
 ORIGINAL_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-}"
 ORIGINAL_XDG_DATA_HOME="${XDG_DATA_HOME:-}"
 ORIGINAL_BIFROST_DATA_DIR="${BIFROST_DATA_DIR:-}"
@@ -148,6 +150,15 @@ export CARGO_INCREMENTAL=0
 : "${BIFROST_DISABLE_TRAY:=1}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 export BIFROST_DISABLE_TRAY
+export BIFROST_COVERAGE_E2E=1
+if [[ -z "${NODE_BIN:-}" && -x "$ORIGINAL_HOME/.local/share/mise/installs/node/22.22.0/bin/node" ]]; then
+  export NODE_BIN="$ORIGINAL_HOME/.local/share/mise/installs/node/22.22.0/bin/node"
+fi
+if [[ -n "${NODE_BIN:-}" && -x "$NODE_BIN" ]]; then
+  export PATH="$(dirname "$NODE_BIN"):$PATH"
+fi
+unset BIFROST_DETACHED_DAEMON_CHILD
+unset BIFROST_EXTERNAL_CLI_WORKER
 export SKIP_FRONTEND_BUILD=1
 
 SCOPE_ARGS=()
@@ -184,9 +195,22 @@ restore_profiles() {
   shopt -u nullglob
 }
 
+sanitize_profiles() {
+  local profile_dir="$1"
+  local llvm_profdata
+  llvm_profdata="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-profdata"
+  python3 scripts/ci/coverage-sanitize-profraw.py "$profile_dir" \
+    --llvm-profdata "$llvm_profdata" \
+    --json-output "$OUTPUT_DIR/profile-sanitizer.json"
+}
+
 prepare_isolated_e2e_environment() {
   local data_dir="$OUTPUT_DIR/.bifrost-data"
-  local home_dir="$OUTPUT_DIR/home"
+  local runtime_key home_dir
+  runtime_key="$(printf '%s' "$OUTPUT_DIR" | cksum | awk '{print $1}')"
+  # Keep HOME outside target/: remote-file policy intentionally denies
+  # **/target/**, while several E2E cases use HOME for disposable files.
+  home_dir="$ROOT_DIR/.coverage-runtime/home-$runtime_key"
   local data_abs
   local production_abs=""
 
@@ -203,12 +227,24 @@ prepare_isolated_e2e_environment() {
 
   export BIFROST_DATA_DIR="$data_abs"
   export HOME="$(cd "$home_dir" && pwd -P)"
+  # HOME is isolated so E2E cannot read or mutate production Bifrost state.
+  # Keep the already-selected Rust toolchain available to nested shell tests
+  # that invoke cargo/rustup; otherwise rustup resolves against the empty HOME.
+  export CARGO_HOME="$ORIGINAL_CARGO_HOME"
+  export RUSTUP_HOME="$ORIGINAL_RUSTUP_HOME"
   export XDG_CONFIG_HOME="$HOME/xdg-config"
   export XDG_DATA_HOME="$HOME/xdg-data"
   export BIFROST_E2E_PROTECTED_PORTS="${BIFROST_E2E_PROTECTED_PORTS:-9900}"
   echo -e "${BLUE}E2E data :${NC} $BIFROST_DATA_DIR"
   echo -e "${BLUE}E2E home :${NC} $HOME"
   echo -e "${BLUE}Protected:${NC} $BIFROST_E2E_PROTECTED_PORTS"
+}
+
+cleanup_isolated_e2e_environment() {
+  if [[ "${HOME:-}" == "$ROOT_DIR/.coverage-runtime/"* ]]; then
+    rm -rf "$HOME"
+  fi
+  rmdir "$ROOT_DIR/.coverage-runtime" 2>/dev/null || true
 }
 
 restore_tool_environment() {
@@ -229,6 +265,16 @@ restore_tool_environment() {
     unset BIFROST_DATA_DIR
   fi
 }
+
+cleanup_on_exit() {
+  cleanup_isolated_e2e_environment
+  restore_tool_environment
+}
+
+# Interrupted coverage runs must not leave an isolated HOME or toolchain state
+# behind in the workspace. Both helpers are idempotent, so the normal E2E
+# cleanup path can still run before report generation.
+trap cleanup_on_exit EXIT
 
 run_selected_e2e() {
   local -a suites=(rules shell runner)
@@ -292,10 +338,12 @@ main() {
 
     step "Running E2E suites with instrumented binaries"
     run_selected_e2e || e2e_status=$?
+    cleanup_isolated_e2e_environment
     restore_tool_environment
 
     local e2e_profiles="$OUTPUT_DIR/profiles/e2e"
     snapshot_profiles "$e2e_profiles"
+    sanitize_profiles "$e2e_profiles"
     restore_profiles "$e2e_profiles"
     if [[ "$WANT_JSON" -eq 1 ]]; then
       cargo llvm-cov report --json --output-path "$OUTPUT_DIR/e2e.json"
@@ -310,7 +358,7 @@ main() {
     cargo llvm-cov report --json --output-path "$OUTPUT_DIR/coverage.json"
     echo -e "${GREEN}JSON : $OUTPUT_DIR/coverage.json${NC}"
   fi
-  if [[ "$WANT_LCOV" -eq 1 ]]; then
+  if [[ "$WANT_LCOV" -eq 1 || ( "$RUN_GATE" -eq 1 && "$WITH_E2E" -eq 1 ) ]]; then
     cargo llvm-cov report --lcov --output-path "$OUTPUT_DIR/lcov.info"
     echo -e "${GREEN}LCOV : $OUTPUT_DIR/lcov.info${NC}"
   fi
@@ -331,9 +379,16 @@ main() {
   if [[ "$RUN_GATE" -eq 1 ]]; then
     step "Enforcing per-crate coverage gate"
     local -a gate_args=("$OUTPUT_DIR/coverage.json")
-    [[ -n "$PACKAGE" ]] && gate_args+=(--single-crate)
+    [[ -n "$PACKAGE" ]] && gate_args+=(--single-crate --crate "$PACKAGE")
     [[ "$GATE_GAPS" -eq 1 ]] && gate_args+=(--gaps)
     python3 scripts/ci/coverage-gate.py "${gate_args[@]}"
+    if [[ "$WITH_E2E" -eq 1 && -z "$PACKAGE" ]]; then
+      step "Enforcing bifrost-proxy production coverage gate"
+      python3 scripts/ci/coverage-production.py "$OUTPUT_DIR/lcov.info" \
+        --crate bifrost-proxy \
+        --thresholds scripts/ci/coverage-thresholds.toml \
+        --json-output "$OUTPUT_DIR/production-coverage.json"
+    fi
   fi
 
   if [[ "$e2e_status" -ne 0 ]]; then

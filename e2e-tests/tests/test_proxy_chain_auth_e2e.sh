@@ -24,7 +24,7 @@ if [[ -z "${ENTRY_PORT:-}" || -z "${UPSTREAM_PORT:-}" || -z "${ECHO_HTTP_PORT:-}
     PROXY_ECHO_PORT="${PROXY_ECHO_PORT:-$((PORT_BASE + 3))}"
 fi
 
-BIFROST_BIN="$ROOT_DIR/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi

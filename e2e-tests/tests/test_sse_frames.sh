@@ -6,7 +6,7 @@ export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIFROST_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/target/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi

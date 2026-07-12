@@ -20,6 +20,11 @@ FAKE_PROXY_BIN=""
 FAKE_PROXY_STATE=""
 FAKE_PROXY_COMMAND_LOG=""
 
+if [[ "${BIFROST_COVERAGE_E2E:-0}" == "1" ]]; then
+    echo "SKIP: daemon detachment cannot provide a bounded LLVM profile lifecycle"
+    exit 0
+fi
+
 remove_test_data_dir() {
     local dir="$1"
     [[ -n "${dir}" && -d "${dir}" ]] || return 0

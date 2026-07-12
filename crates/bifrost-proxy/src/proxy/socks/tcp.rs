@@ -2348,6 +2348,17 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn coverage_90_server_accessors_expose_access_control_and_udp_address() {
+        let server = SocksServer::new(SocksConfig::default());
+        let access = Arc::clone(server.access_control());
+        assert!(Arc::ptr_eq(&access, server.access_control()));
+        assert_eq!(server.get_udp_relay_addr().await, None);
+        let address: SocketAddr = "127.0.0.1:19080".parse().unwrap();
+        *server.udp_relay_addr.write().await = Some(address);
+        assert_eq!(server.get_udp_relay_addr().await, Some(address));
+    }
+
     #[test]
     fn test_socks_server_unsafe_ssl_explicit_true() {
         let server = SocksServer::new(SocksConfig::default()).with_unsafe_ssl(true);
@@ -3201,6 +3212,101 @@ mod coverage_boost_v2 {
             udp_relay_addr,
         );
         (handler, client)
+    }
+
+    #[tokio::test]
+    async fn coverage_90_full_handshake_rejects_bind_command() {
+        let (mut handler, mut client) = make_handler_with_opts(false, None, None, 30, None).await;
+        let server_task = tokio::spawn(async move { handler.handle_client().await });
+        client
+            .write_all(&[SOCKS5_VERSION, 1, AuthMethod::NoAuth as u8])
+            .await
+            .unwrap();
+        let mut auth = [0_u8; 2];
+        client.read_exact(&mut auth).await.unwrap();
+        assert_eq!(auth, [SOCKS5_VERSION, AuthMethod::NoAuth as u8]);
+        client
+            .write_all(&[
+                SOCKS5_VERSION,
+                SocksCommand::Bind as u8,
+                0,
+                AddressType::IPv4 as u8,
+                127,
+                0,
+                0,
+                1,
+                0,
+                80,
+            ])
+            .await
+            .unwrap();
+        let mut reply = [0_u8; 10];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply[1], SocksReply::CommandNotSupported as u8);
+        assert!(server_task
+            .await
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("BIND"));
+    }
+
+    #[tokio::test]
+    async fn coverage_90_connect_failure_returns_specific_reply_and_error() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unavailable = listener.local_addr().unwrap();
+        drop(listener);
+        let (mut handler, mut client) = make_handler_with_opts(false, None, None, 30, None).await;
+        let server_task = tokio::spawn(async move {
+            handler
+                .connect_and_relay(SocksAddress::IPv4(Ipv4Addr::LOCALHOST), unavailable.port())
+                .await
+        });
+        let mut reply = [0_u8; 10];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply[1], SocksReply::ConnectionRefused as u8);
+        let error = server_task.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("Failed to connect"));
+    }
+
+    #[tokio::test]
+    async fn relay_raw_forwards_both_directions_and_records_totals() {
+        let (mut handler, mut client_peer) =
+            make_handler_with_opts(false, None, None, 30, None).await;
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19457)
+            .build();
+        handler.admin_state = Some(harness.state());
+        handler.authenticated_account_name = Some("coverage-account".to_string());
+
+        let (target_stream, mut target_peer, _) = make_connected_pair().await;
+        let task =
+            tokio::spawn(async move { handler.relay_raw(target_stream, "relay.test", 8080).await });
+
+        client_peer.write_all(b"client-to-target").await.unwrap();
+        let mut target_received = [0_u8; 16];
+        target_peer.read_exact(&mut target_received).await.unwrap();
+        assert_eq!(&target_received, b"client-to-target");
+
+        target_peer.write_all(b"target-to-client").await.unwrap();
+        let mut client_received = [0_u8; 16];
+        client_peer.read_exact(&mut client_received).await.unwrap();
+        assert_eq!(&client_received, b"target-to-client");
+
+        client_peer.shutdown().await.unwrap();
+        target_peer.shutdown().await.unwrap();
+        task.await.unwrap().unwrap();
+
+        let record = harness
+            .traffic_db
+            .query_latest_window(10)
+            .records
+            .into_iter()
+            .find(|record| record.h == "relay.test")
+            .expect("SOCKS relay traffic record");
+        assert_eq!(record.up, 16);
+        assert_eq!(record.down, 16);
+        assert_eq!(record.acct.as_deref(), Some("coverage-account"));
     }
 
     #[tokio::test]

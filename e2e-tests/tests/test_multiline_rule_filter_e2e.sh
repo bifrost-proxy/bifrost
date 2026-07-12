@@ -16,7 +16,7 @@ PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-$((18880 + ($$ % 500)))}"
 ECHO_HTTP_PORT="${ECHO_HTTP_PORT:-$((13000 + ($$ % 500)))}"
 
-BIFROST_BIN="$ROOT_DIR/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi

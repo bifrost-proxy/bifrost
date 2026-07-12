@@ -269,3 +269,27 @@ impl WebSocketFrame {
         self.rsv1
     }
 }
+
+#[cfg(test)]
+mod coverage_90_tests {
+    use super::*;
+
+    #[test]
+    fn large_payload_uses_64_bit_length_and_rejects_truncation() {
+        let frame = WebSocketFrame::binary(vec![b'x'; 70_000]);
+        let encoded = frame.encode();
+        assert_eq!(encoded[1] & 0x7f, 127);
+        assert!(WebSocketFrame::parse(&encoded[..9]).is_none());
+        assert!(WebSocketFrame::parse(&encoded[..encoded.len() - 1]).is_none());
+        let (parsed, consumed) = WebSocketFrame::parse(&encoded).unwrap();
+        assert_eq!(parsed.payload.len(), 70_000);
+        assert_eq!(consumed, encoded.len());
+    }
+
+    #[test]
+    fn invalid_compressed_payload_falls_back_to_wire_bytes() {
+        let mut frame = WebSocketFrame::text("invalid-deflate");
+        frame.rsv1 = true;
+        assert_eq!(frame.decompress_payload(), frame.payload);
+    }
+}

@@ -21,7 +21,7 @@ ECHO_WSS_PORT="${ECHO_WSS_PORT:-$((13250 + ($$ % 500)))}"
 ECHO_SSE_PORT="${ECHO_SSE_PORT:-$((13300 + ($$ % 500)))}"
 ECHO_PROXY_PORT="${ECHO_PROXY_PORT:-$((13999 + ($$ % 200)))}"
 
-BIFROST_BIN="$ROOT_DIR/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi

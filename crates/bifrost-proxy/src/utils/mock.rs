@@ -636,6 +636,25 @@ pub fn should_intercept_response(rules: &ResolvedRules) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body_util::BodyExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+    async fn body_text(response: Response<BoxBody>) -> String {
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    fn temp_path(extension: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "bifrost-mock-test-{}-{}.{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+            extension
+        ))
+    }
 
     #[test]
     fn test_guess_content_type_html() {
@@ -792,5 +811,308 @@ mod tests {
             .to_str()
             .unwrap();
         assert_eq!(cache_control, "no-cache, no-store");
+    }
+
+    #[tokio::test]
+    async fn generate_mock_response_covers_ignore_redirect_and_location() {
+        let uri: hyper::Uri = "http://example.test/base/path?x=1".parse().unwrap();
+        let ctx = RequestContext::new();
+        let mut rules = ResolvedRules::default();
+        rules.ignored.all = true;
+        assert!(generate_mock_response(&rules, &uri, true, &ctx)
+            .await
+            .is_none());
+
+        rules.ignored.all = false;
+        rules.redirect = Some("/next".to_string());
+        rules.redirect_status = Some(307);
+        let response = generate_mock_response(&rules, &uri, true, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            response.headers()[header::LOCATION],
+            "http://example.test/next"
+        );
+
+        rules.redirect = None;
+        rules.location_href = Some("https://target.test/landing".to_string());
+        let response = generate_mock_response(&rules, &uri, true, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_text(response).await.contains("target.test/landing"));
+    }
+
+    #[tokio::test]
+    async fn generate_mock_response_covers_inline_file_and_rawfile_formats() {
+        let uri: hyper::Uri = "http://example.test/".parse().unwrap();
+        let ctx = RequestContext::new();
+        let rules = ResolvedRules {
+            status_code: Some(0),
+            mock_file: Some("(inline body)".to_string()),
+            res_headers: vec![("X-Mock".to_string(), "inline".to_string())],
+            ..Default::default()
+        };
+        let response = generate_mock_response(&rules, &uri, true, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-mock"], "inline");
+        assert_eq!(body_text(response).await, "inline body");
+
+        let rules = ResolvedRules {
+            mock_rawfile: Some(
+                "(HTTP/1.1 201 Created\\r\\nX-Raw: yes\\r\\n\\r\\nraw body)".to_string(),
+            ),
+            ..Default::default()
+        };
+        let response = generate_mock_response(&rules, &uri, true, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(response.headers()["x-raw"], "yes");
+        assert_eq!(body_text(response).await, "raw body");
+
+        let rules = ResolvedRules {
+            mock_rawfile: Some("(plain raw body)".to_string()),
+            ..Default::default()
+        };
+        let response = generate_mock_response(&rules, &uri, false, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_text(response).await, "plain raw body");
+    }
+
+    #[tokio::test]
+    async fn generate_mock_response_covers_file_and_rawfile_success_and_failure() {
+        let uri: hyper::Uri = "http://example.test/".parse().unwrap();
+        let ctx = RequestContext::new();
+        let file = temp_path("json");
+        tokio::fs::write(&file, br#"{"file":true}"#).await.unwrap();
+
+        let rules = ResolvedRules {
+            status_code: Some(202),
+            mock_file: Some(file.to_string_lossy().into_owned()),
+            res_headers: vec![("X-File".to_string(), "yes".to_string())],
+            ..Default::default()
+        };
+        let response = generate_mock_response(&rules, &uri, true, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/json; charset=utf-8"
+        );
+        assert_eq!(response.headers()["x-file"], "yes");
+        assert!(body_text(response).await.contains("file"));
+
+        let rules = ResolvedRules {
+            mock_rawfile: Some(file.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let response = generate_mock_response(&rules, &uri, true, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_text(response).await.contains("file"));
+        tokio::fs::remove_file(&file).await.unwrap();
+
+        for rules in [
+            ResolvedRules {
+                mock_file: Some(file.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+            ResolvedRules {
+                mock_rawfile: Some(file.to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        ] {
+            let response = generate_mock_response(&rules, &uri, false, &ctx)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert_eq!(body_text(response).await, "File not found");
+        }
+    }
+
+    #[tokio::test]
+    async fn template_response_covers_inline_file_context_and_missing_file() {
+        let uri: hyper::Uri = "http://uri-host.test/from-uri?q=1".parse().unwrap();
+        let ctx = RequestContext::new().with_request_info(
+            "http://ctx-host.test/ctx-path".to_string(),
+            "POST".to_string(),
+            "ctx-host.test".to_string(),
+            "/ctx-path".to_string(),
+            "".to_string(),
+            "127.0.0.1".to_string(),
+        );
+        let rules = ResolvedRules {
+            status_code: Some(201),
+            res_type: Some("text/plain".to_string()),
+            mock_template: Some("({{host}}|{{path}}|{{method}}|{{url}}|{{now}})".to_string()),
+            res_headers: vec![("X-Template".to_string(), "yes".to_string())],
+            ..Default::default()
+        };
+        let response = generate_mock_response(&rules, &uri, true, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "text/plain");
+        assert_eq!(response.headers()["x-template"], "yes");
+        let body = body_text(response).await;
+        assert!(body.contains("ctx-host.test|/ctx-path|POST|http://ctx-host.test/ctx-path"));
+
+        let file = temp_path("tpl");
+        tokio::fs::write(&file, "file {{host}} {{path}}")
+            .await
+            .unwrap();
+        let rules = ResolvedRules {
+            mock_template: Some(file.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let response = generate_mock_response(&rules, &uri, true, &RequestContext::new())
+            .await
+            .unwrap();
+        assert!(body_text(response)
+            .await
+            .contains("file uri-host.test /from-uri"));
+        tokio::fs::remove_file(&file).await.unwrap();
+
+        let response = generate_mock_response(&rules, &uri, false, &RequestContext::new())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body_text(response).await, "Template file not found");
+    }
+
+    #[tokio::test]
+    async fn remote_http_mock_covers_success_and_connection_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nremote body")
+                .await
+                .unwrap();
+        });
+        let uri: hyper::Uri = "http://example.test/".parse().unwrap();
+        let ctx = RequestContext::new();
+        let rules = ResolvedRules {
+            status_code: Some(206),
+            mock_file: Some(format!("http://{address}/data.json?download=1")),
+            res_headers: vec![("X-Remote".to_string(), "yes".to_string())],
+            ..Default::default()
+        };
+        let response = generate_mock_response(&rules, &uri, true, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/json; charset=utf-8"
+        );
+        assert_eq!(response.headers()["x-remote"], "yes");
+        assert_eq!(body_text(response).await, "remote body");
+        server.await.unwrap();
+
+        let dead_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_address = dead_listener.local_addr().unwrap();
+        drop(dead_listener);
+        let rules = ResolvedRules {
+            mock_file: Some(format!("http://{dead_address}/missing")),
+            ..Default::default()
+        };
+        let response = generate_mock_response(&rules, &uri, false, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert!(body_text(response)
+            .await
+            .contains("Failed to fetch remote URL"));
+    }
+
+    #[tokio::test]
+    async fn coverage_90_remote_https_and_invalid_url_fail_closed() {
+        let uri: hyper::Uri = "http://example.test/".parse().unwrap();
+        let ctx = RequestContext::new();
+
+        let invalid = ResolvedRules {
+            mock_file: Some("http://[invalid".to_string()),
+            ..Default::default()
+        };
+        let response = generate_mock_response(&invalid, &uri, true, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let unavailable = listener.local_addr().unwrap();
+        drop(listener);
+        let https = ResolvedRules {
+            mock_file: Some(format!("https://{unavailable}/missing.json")),
+            ..Default::default()
+        };
+        let response = generate_mock_response(&https, &uri, true, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert!(body_text(response)
+            .await
+            .contains("Failed to fetch remote URL"));
+    }
+
+    #[test]
+    fn status_and_content_type_helpers_cover_edge_values() {
+        let rules = ResolvedRules {
+            status_code: Some(0),
+            res_body: Some(Bytes::from_static(b"custom")),
+            res_charset: Some("utf-16".to_string()),
+            cache: Some("0".to_string()),
+            res_headers: vec![("X-Status".to_string(), "edge".to_string())],
+            ..Default::default()
+        };
+        let response = build_status_response(0, &rules);
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/plain; charset=utf-16"
+        );
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "no-cache, no-store, must-revalidate"
+        );
+        assert_eq!(response.headers()["x-status"], "edge");
+
+        assert_eq!(
+            build_redirect_response(0, "/fallback").status(),
+            StatusCode::FOUND
+        );
+        assert_eq!(
+            build_error_response(0, "bad").status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert!(is_text_mime("text/plain; charset=utf-8"));
+        assert!(is_text_mime("application/problem+json"));
+        assert!(is_text_mime("application/soap+xml"));
+        assert!(!is_text_mime("application/octet-stream"));
+
+        assert!(should_intercept_response(&ResolvedRules {
+            location_href: Some("/a".to_string()),
+            ..ResolvedRules::default()
+        }));
+        assert!(should_intercept_response(&ResolvedRules {
+            mock_rawfile: Some("(raw)".to_string()),
+            ..ResolvedRules::default()
+        }));
+        assert!(should_intercept_response(&ResolvedRules {
+            mock_template: Some("(tpl)".to_string()),
+            ..ResolvedRules::default()
+        }));
     }
 }

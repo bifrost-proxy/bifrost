@@ -166,6 +166,143 @@ fn test_conn_key_uses_proxy_addr() {
     );
 }
 
+#[test]
+fn client_process_display_name_and_default_resolver_are_stable() {
+    let process = ClientProcess {
+        pid: 77,
+        name: "coverage-client".to_string(),
+        path: None,
+    };
+    assert_eq!(process.display_name(), "coverage-client");
+    let resolver = ProcessResolver::default();
+    assert!(resolver.cache.read().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn async_resolvers_cover_connection_cache_and_non_loopback_shortcuts() {
+    let resolver = ProcessResolver::new();
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 54001);
+    let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9900);
+    let process = ClientProcess {
+        pid: 88,
+        name: "cached-connection".to_string(),
+        path: Some("/tmp/cached".to_string()),
+    };
+    let key = ConnKey::from_connection(&peer, &local);
+    resolver.update_cache(key, Some(process.clone()));
+    assert_eq!(
+        resolver
+            .resolve_cached_for_connection(&peer, &local)
+            .unwrap()
+            .pid,
+        88
+    );
+    assert_eq!(
+        resolver
+            .resolve_async_for_connection(peer, local, 0, 0)
+            .await
+            .unwrap()
+            .name,
+        "cached-connection"
+    );
+
+    let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 54002);
+    assert!(resolver.resolve_async(remote, 0, 0).await.is_none());
+    assert!(resolver
+        .resolve_async_for_connection(remote, local, 0, 0)
+        .await
+        .is_none());
+}
+
+#[test]
+fn expired_and_large_process_cache_entries_are_pruned_or_missed() {
+    let resolver = ProcessResolver::new();
+    let key = ConnKey::from_peer_addr(&SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 55000));
+    resolver.cache.write().unwrap().insert(
+        key,
+        CachedProcess {
+            process: Some(ClientProcess {
+                pid: 99,
+                name: "expired".to_string(),
+                path: None,
+            }),
+            expires_at: Instant::now() - Duration::from_secs(1),
+        },
+    );
+    assert!(resolver.get_from_cache(&key).is_none());
+
+    {
+        let mut cache = resolver.cache.write().unwrap();
+        for port in 0..=10000_u16 {
+            let entry_key =
+                ConnKey::from_peer_addr(&SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port));
+            cache.insert(
+                entry_key,
+                CachedProcess {
+                    process: None,
+                    expires_at: Instant::now() - Duration::from_secs(1),
+                },
+            );
+        }
+    }
+    resolver.update_cache(key, None);
+    assert!(resolver.cache.read().unwrap().len() <= 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn limited_blocking_resolution_covers_success_closed_and_join_error() {
+    let key = ConnKey::from_peer_addr(&SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 56000));
+    let resolved = resolve_with_limited_blocking_task_for_semaphore(
+        key,
+        Arc::new(Semaphore::new(1)),
+        1,
+        Duration::from_secs(1),
+        || {
+            Some(ClientProcess {
+                pid: 101,
+                name: "resolved".to_string(),
+                path: None,
+            })
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(resolved.unwrap().pid, 101);
+
+    let closed = Arc::new(Semaphore::new(1));
+    closed.close();
+    assert!(resolve_with_limited_blocking_task_for_semaphore(
+        key,
+        closed,
+        1,
+        Duration::from_secs(1),
+        || panic!("closed semaphore must not run resolver"),
+    )
+    .await
+    .unwrap()
+    .is_none());
+
+    let task = tokio::spawn(async { panic!("join failure") });
+    let error = wait_for_process_resolution_with_timeout(task, key, Duration::from_secs(1))
+        .await
+        .unwrap_err();
+    assert!(error.is_panic());
+}
+
+#[test]
+fn app_policy_retry_config_is_nonzero_and_format_uses_path_fallback_name() {
+    let (retries, delay_ms) = app_policy_process_resolution_retry_config();
+    assert!(retries > 0);
+    assert!(delay_ms > 0);
+    let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 57000);
+    let process = ClientProcess {
+        pid: 102,
+        name: "display".to_string(),
+        path: Some("/tmp/display".to_string()),
+    };
+    assert_eq!(format_client_info(&peer, Some(&process)), "display");
+}
+
 #[cfg(target_os = "macos")]
 fn find_test_program(program: &str) -> Option<PathBuf> {
     let mut candidates = Vec::new();
@@ -332,4 +469,109 @@ async fn test_process_resolver_detects_python_client() {
     .expect("resolve python client process");
 
     assert_process_name_matches(&process, &["python"]);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn coverage_90_macos_process_introspection_covers_current_and_invalid_pids() {
+    let pid = std::process::id();
+    let (name, path) = get_process_info(pid);
+    assert!(!name.is_empty());
+    assert!(path.is_some());
+    assert!(get_process_name_macos(pid).is_some());
+    assert!(get_process_path_macos(pid).is_some());
+    assert!(get_process_name_macos(u32::MAX).is_none());
+    assert!(get_process_path_macos(u32::MAX).is_none());
+
+    let _ = super::macos::lookup_socket_pid_map_macos();
+    let _ = describe_process_tcp_sockets(pid);
+    let invalid = describe_process_tcp_sockets(u32::MAX);
+    assert!(!invalid.is_empty());
+}
+
+#[tokio::test]
+async fn coverage_90_public_process_resolution_wrappers_are_safe_for_remote_clients() {
+    let remote: SocketAddr = "192.0.2.10:54321".parse().unwrap();
+    let local: SocketAddr = "127.0.0.1:9900".parse().unwrap();
+
+    let _ = resolve_client_process(&remote);
+    let _ = resolve_client_process_for_connection(&remote, &local);
+    let _ = resolve_client_process_cached(&remote);
+    let _ = resolve_client_process_cached_for_connection(&remote, &local);
+    let _ = resolve_client_process_with_retry(&remote, 0, 0);
+    let _ = resolve_client_process_for_connection_with_retry(&remote, &local, 0, 0);
+    assert!(resolve_client_process_async(&remote).await.is_none());
+    assert!(resolve_client_process_async_for_connection(&remote, &local)
+        .await
+        .is_none());
+    assert!(resolve_client_process_async_with_retry(&remote, 0, 0)
+        .await
+        .is_none());
+    assert!(
+        resolve_client_process_async_for_connection_with_retry(&remote, &local, 0, 0)
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn coverage_90_background_process_resolution_always_finishes() {
+    let peer: SocketAddr = "192.0.2.20:12345".parse().unwrap();
+    let local: SocketAddr = "127.0.0.1:9900".parse().unwrap();
+    let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+    spawn_async_process_resolver_with_finish(
+        peer,
+        local,
+        "coverage-record".into(),
+        |_id, _process| panic!("remote peer must not resolve"),
+        move || {
+            let _ = finished_tx.send(());
+        },
+    );
+    tokio::time::timeout(Duration::from_secs(5), finished_rx)
+        .await
+        .expect("background resolver timeout")
+        .expect("finish callback dropped");
+
+    spawn_async_process_resolver(peer, local, "fire-and-forget".into(), |_id, _process| {});
+}
+
+#[test]
+fn coverage_90_cleanup_expired_removes_all_cache_layers() {
+    let resolver = ProcessResolver::new();
+    let peer: SocketAddr = "127.0.0.1:54329".parse().unwrap();
+    let key = ConnKey::from_peer_addr(&peer);
+    resolver.cache.write().unwrap().insert(
+        key,
+        CachedProcess {
+            process: None,
+            expires_at: Instant::now() - Duration::from_secs(1),
+        },
+    );
+    resolver.pid_cache.write().unwrap().insert(
+        42,
+        CachedProcess {
+            process: Some(ClientProcess {
+                pid: 42,
+                name: "expired".to_string(),
+                path: None,
+            }),
+            expires_at: Instant::now() - Duration::from_secs(1),
+        },
+    );
+    *resolver.socket_snapshot.write().unwrap() = Some(SocketSnapshot {
+        connections_to_pids: HashMap::from([(key, 42)]),
+        refreshed_at: Instant::now() - Duration::from_secs(2),
+        expires_at: Instant::now() - Duration::from_secs(1),
+    });
+    resolver.cleanup_expired();
+    assert!(resolver.cache.read().unwrap().is_empty());
+    assert!(resolver.pid_cache.read().unwrap().is_empty());
+    assert!(resolver.socket_snapshot.read().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn coverage_90_local_async_wrapper_runs_limited_blocking_resolution() {
+    let peer: SocketAddr = "127.0.0.1:54331".parse().unwrap();
+    let _ = resolve_client_process_async_with_retry(&peer, 0, 0).await;
 }

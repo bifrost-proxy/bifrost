@@ -573,6 +573,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coverage_90_cache_empty_clear_and_dot_hostname_validation() {
+        let cache = DnsCache::new(60, 4);
+        assert!(cache.is_empty().await);
+        cache
+            .put("coverage.test", "system", "127.0.0.1".parse().unwrap())
+            .await;
+        assert!(!cache.is_empty().await);
+        cache.clear().await;
+        assert!(cache.is_empty().await);
+
+        let error = DnsServerType::parse("tls://resolver.example:853").unwrap_err();
+        assert!(error.to_string().contains("DoT requires IP address"));
+        assert!(matches!(
+            DnsServerType::parse("tls://1.1.1.1").unwrap(),
+            DnsServerType::DoT { .. }
+        ));
+        assert!(matches!(
+            DnsServerType::parse("1.1.1.1").unwrap(),
+            DnsServerType::Standard { .. }
+        ));
+        let resolver = DnsResolver::new(false);
+        assert!(resolver.resolve_with_system("localhost").await.is_ok());
+        assert!(resolver
+            .resolve_with_system("definitely-not-a-real-host.invalid")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
     async fn test_resolver_skip_ip_address() {
         let resolver = DnsResolver::new(false);
         let result = resolver.resolve("192.168.1.1", &[]).await.unwrap();
@@ -680,5 +709,62 @@ mod tests {
         let stats = resolver.cache_stats().await;
         assert_eq!(stats.ttl_secs, 120);
         assert_eq!(stats.capacity, 500);
+    }
+
+    #[tokio::test]
+    async fn coverage_90_custom_resolver_failures_fall_back_and_cache_resolvers() {
+        let resolver = DnsResolver::new(true).with_timeout(Duration::from_millis(20));
+        let servers = vec![
+            " , https://127.0.0.1/dns-query".to_string(),
+            "tls://127.0.0.1:853".to_string(),
+            "127.0.0.1:9".to_string(),
+            "invalid-server".to_string(),
+        ];
+        assert_eq!(
+            resolver
+                .resolve("coverage.invalid", &servers)
+                .await
+                .unwrap(),
+            None
+        );
+
+        let first = resolver
+            .get_or_create_resolver("127.0.0.1:9")
+            .await
+            .unwrap();
+        let second = resolver
+            .get_or_create_resolver("127.0.0.1:9")
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(resolver
+            .get_or_create_resolver("not-an-address")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn coverage_90_system_resolution_and_expired_capacity_paths() {
+        let resolver = DnsResolver::default().with_timeout(Duration::from_secs(2));
+        assert_eq!(
+            resolver.resolve_with_system("127.0.0.9").await.unwrap(),
+            IpAddr::from_str("127.0.0.9").unwrap()
+        );
+        assert!(resolver.resolve_with_system("localhost").await.is_ok());
+
+        let cache = DnsCache::new(0, 1);
+        cache
+            .put("expired", "server", IpAddr::from_str("127.0.0.1").unwrap())
+            .await;
+        cache
+            .put(
+                "replacement",
+                "server",
+                IpAddr::from_str("127.0.0.2").unwrap(),
+            )
+            .await;
+        let stats = cache.stats().await;
+        assert_eq!(stats.capacity, 1);
+        assert!(stats.expired_entries <= stats.total_entries);
     }
 }

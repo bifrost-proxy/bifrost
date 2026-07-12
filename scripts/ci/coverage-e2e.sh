@@ -54,9 +54,37 @@ SUITE=""
 SKIP_BUILD=0
 PROFRAW_DIR=""
 ORIGINAL_HOME="${HOME:-}"
+ORIGINAL_CARGO_HOME="${CARGO_HOME:-${HOME:-}/.cargo}"
+ORIGINAL_RUSTUP_HOME="${RUSTUP_HOME:-${HOME:-}/.rustup}"
 ORIGINAL_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-}"
 ORIGINAL_XDG_DATA_HOME="${XDG_DATA_HOME:-}"
 ORIGINAL_BIFROST_DATA_DIR="${BIFROST_DATA_DIR:-}"
+
+cleanup_coverage_environment() {
+  unset LLVM_PROFILE_FILE
+  if [[ "${HOME:-}" == "$ROOT_DIR/.coverage-runtime/"* ]]; then
+    rm -rf "$HOME"
+  fi
+  rmdir "$ROOT_DIR/.coverage-runtime" 2>/dev/null || true
+  export HOME="$ORIGINAL_HOME"
+  if [[ -n "$ORIGINAL_XDG_CONFIG_HOME" ]]; then
+    export XDG_CONFIG_HOME="$ORIGINAL_XDG_CONFIG_HOME"
+  else
+    unset XDG_CONFIG_HOME
+  fi
+  if [[ -n "$ORIGINAL_XDG_DATA_HOME" ]]; then
+    export XDG_DATA_HOME="$ORIGINAL_XDG_DATA_HOME"
+  else
+    unset XDG_DATA_HOME
+  fi
+  if [[ -n "$ORIGINAL_BIFROST_DATA_DIR" ]]; then
+    export BIFROST_DATA_DIR="$ORIGINAL_BIFROST_DATA_DIR"
+  else
+    unset BIFROST_DATA_DIR
+  fi
+}
+
+trap cleanup_coverage_environment EXIT
 
 usage() {
   sed -n '2,/^$/s/^# \?//p' "$0"
@@ -133,7 +161,11 @@ run_e2e_suites() {
   export LLVM_PROFILE_FILE="$PROFRAW_DIR/e2e-%p-%m.profraw"
 
   local data_dir="$OUTPUT_DIR/.bifrost-data"
-  local home_dir="$OUTPUT_DIR/home"
+  local runtime_key home_dir
+  runtime_key="$(printf '%s' "$OUTPUT_DIR" | cksum | awk '{print $1}')"
+  # Remote-file policy denies **/target/** by design; HOME must therefore not
+  # live below the default target/coverage-e2e output directory.
+  home_dir="$ROOT_DIR/.coverage-runtime/home-$runtime_key"
   local data_abs
   local production_abs=""
   mkdir -p "$data_dir" "$home_dir/xdg-config" "$home_dir/xdg-data"
@@ -148,9 +180,20 @@ run_e2e_suites() {
   fi
   export BIFROST_DATA_DIR="$data_abs"
   export HOME="$(cd "$home_dir" && pwd -P)"
+  export CARGO_HOME="$ORIGINAL_CARGO_HOME"
+  export RUSTUP_HOME="$ORIGINAL_RUSTUP_HOME"
   export XDG_CONFIG_HOME="$HOME/xdg-config"
   export XDG_DATA_HOME="$HOME/xdg-data"
   export BIFROST_E2E_PROTECTED_PORTS="${BIFROST_E2E_PROTECTED_PORTS:-9900}"
+  if [[ -z "${NODE_BIN:-}" && -x "$ORIGINAL_HOME/.local/share/mise/installs/node/22.22.0/bin/node" ]]; then
+    export NODE_BIN="$ORIGINAL_HOME/.local/share/mise/installs/node/22.22.0/bin/node"
+  fi
+  if [[ -n "${NODE_BIN:-}" && -x "$NODE_BIN" ]]; then
+    export PATH="$(dirname "$NODE_BIN"):$PATH"
+  fi
+  export BIFROST_COVERAGE_E2E=1
+  unset BIFROST_DETACHED_DAEMON_CHILD
+  unset BIFROST_EXTERNAL_CLI_WORKER
   export BIFROST_BIN="$ROOT_DIR/target/release/bifrost"
   export BIFROST_E2E_BIN="$ROOT_DIR/target/release/bifrost-e2e"
 
@@ -189,28 +232,18 @@ run_e2e_suites() {
     echo -e "${YELLOW}Some E2E suites failed; a diagnostic report will be generated and the command will fail.${NC}"
   fi
 
-  unset LLVM_PROFILE_FILE
-  export HOME="$ORIGINAL_HOME"
-  if [[ -n "$ORIGINAL_XDG_CONFIG_HOME" ]]; then
-    export XDG_CONFIG_HOME="$ORIGINAL_XDG_CONFIG_HOME"
-  else
-    unset XDG_CONFIG_HOME
-  fi
-  if [[ -n "$ORIGINAL_XDG_DATA_HOME" ]]; then
-    export XDG_DATA_HOME="$ORIGINAL_XDG_DATA_HOME"
-  else
-    unset XDG_DATA_HOME
-  fi
-  if [[ -n "$ORIGINAL_BIFROST_DATA_DIR" ]]; then
-    export BIFROST_DATA_DIR="$ORIGINAL_BIFROST_DATA_DIR"
-  else
-    unset BIFROST_DATA_DIR
-  fi
+  cleanup_coverage_environment
   return "$had_failure"
 }
 
 merge_and_report() {
   step "Generating coverage report"
+
+  local llvm_profdata llvm_cov profdata_path
+  llvm_profdata="$(resolve_llvm_tool llvm-profdata)"
+  python3 scripts/ci/coverage-sanitize-profraw.py "$PROFRAW_DIR" \
+    --llvm-profdata "$llvm_profdata" \
+    --json-output "$OUTPUT_DIR/profile-sanitizer.json"
 
   local profraw_count
   profraw_count="$(find "$PROFRAW_DIR" -name '*.profraw' 2>/dev/null | wc -l | tr -d ' ')"
@@ -222,8 +255,6 @@ merge_and_report() {
     return 1
   fi
 
-  local llvm_profdata llvm_cov profdata_path
-  llvm_profdata="$(resolve_llvm_tool llvm-profdata)"
   llvm_cov="$(resolve_llvm_tool llvm-cov)"
   profdata_path="$OUTPUT_DIR/e2e.profdata"
   "$llvm_profdata" merge -sparse "$PROFRAW_DIR"/*.profraw -o "$profdata_path"

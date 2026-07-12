@@ -1547,6 +1547,8 @@ pub(super) fn maybe_inject_devtools_bridge_html(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::RuleValue;
+    use bifrost_core::Protocol;
     use hyper::header::HeaderValue;
 
     #[test]
@@ -1609,5 +1611,176 @@ mod tests {
         );
         assert!(marked.contains(r#"src="https://cdn.example.test/cdn.js""#));
         assert!(marked.contains(r#"src="//cdn.example.test/image.png""#));
+    }
+
+    fn matched_rule(value: &str) -> RuleValue {
+        RuleValue {
+            pattern: "example.test".to_string(),
+            protocol: Protocol::DevTools,
+            value: value.to_string(),
+            options: std::collections::HashMap::new(),
+            rule_name: Some("devtools-rule".to_string()),
+            raw: Some(format!("example.test devtools://{value}")),
+            line: Some(7),
+            auto_tls_intercept: false,
+        }
+    }
+
+    #[test]
+    fn devtools_rule_parser_and_effective_rule_cover_modes_deny_and_allowlist() {
+        let parsed = parse_devtools_rule_value(
+            "mode=read,inject=off&deny=yes,evaluate_allowlist=['document.title'|'location.href'],unknown=x",
+        );
+        assert_eq!(parsed.mode, DevtoolsMode::Read);
+        assert_eq!(parsed.inject, DevtoolsInjectMode::Off);
+        assert!(parsed.deny);
+        assert_eq!(
+            parsed.evaluate_allowlist,
+            ["document.title", "location.href"]
+        );
+
+        let mut rules = ResolvedRules {
+            rules: vec![matched_rule(
+                "mode=control,inject=bridge,evaluate_allowlist=[a|b]",
+            )],
+            ..Default::default()
+        };
+        assert!(devtools_bridge_requested(&rules));
+        let matched = devtools_matched_rule(&rules).unwrap();
+        assert_eq!(matched.pattern, "example.test");
+        assert_eq!(matched.line, Some(7));
+        assert_eq!(matched.evaluate_allowlist, ["a", "b"]);
+
+        rules.devtools = Some(DevtoolsRule {
+            deny: true,
+            inject: DevtoolsInjectMode::Bridge,
+            ..Default::default()
+        });
+        assert!(!devtools_bridge_requested(&rules));
+        assert_eq!(
+            admin_devtools_mode(rules.devtools.as_ref().unwrap()),
+            AdminDevtoolsMode::Control
+        );
+    }
+
+    #[test]
+    fn client_request_id_helpers_cover_absolute_url_empty_duplicate_and_replay_cases() {
+        let mut absolute: Uri = "https://example.test/a?__bifrost_client_req_id=first&x=1&__bifrost_client_req_id=second"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            take_devtools_client_req_id_from_uri(&mut absolute),
+            Some("first".to_string())
+        );
+        assert_eq!(absolute.to_string(), "https://example.test/a?x=1");
+        assert_eq!(
+            strip_devtools_client_req_id_from_url(
+                "https://example.test/a?x=1&__bifrost_client_req_id=url-id#frag"
+            ),
+            "https://example.test/a?x=1#frag"
+        );
+        assert_eq!(
+            strip_devtools_client_req_id_from_url("not a url?__bifrost_client_req_id=x"),
+            "not a url?__bifrost_client_req_id=x"
+        );
+        assert!(strip_devtools_client_req_id_query(Some("__bifrost_client_req_id=%20")).is_none());
+        assert!(is_devtools_client_req_id_header(
+            "X-BIFROST-CLIENT-REQUEST-ID"
+        ));
+
+        let mut record = TrafficRecord::new(
+            "id".to_string(),
+            "GET".to_string(),
+            "https://example.test".to_string(),
+        );
+        attach_devtools_client_req_id(&mut record, &Some(" value ".to_string()));
+        assert_eq!(record.devtools_client_req_id.as_deref(), Some("value"));
+        record.is_replay = true;
+        attach_devtools_client_req_id(&mut record, &Some("replacement".to_string()));
+        assert_eq!(record.devtools_client_req_id.as_deref(), Some("value"));
+    }
+
+    #[test]
+    fn bridge_html_helpers_cover_insertion_resource_markers_and_origin_edges() {
+        assert_eq!(
+            origin_from_url("https://example.test:8443/a"),
+            "https://example.test:8443"
+        );
+        assert_eq!(origin_from_url("invalid"), "");
+        assert!(
+            insert_devtools_bridge_script("<head></head>", "<script>x</script>")
+                .starts_with("<script>")
+        );
+        assert!(
+            insert_devtools_bridge_script("<html><body>x</body></html>", "<script>x</script>")
+                .contains("<html><script>")
+        );
+        assert!(
+            insert_devtools_bridge_script("fragment", "<script>x</script>").starts_with("<script>")
+        );
+
+        let html = r#"<img srcset="/one.png 1x, /two.png 2x"><link imagesrcset="data:image/png,x 1x"><video poster="/poster.png#part"></video>"#;
+        let marked = mark_devtools_static_resource_urls(html, "page", "https://example.test");
+        assert!(marked.contains("/one.png?__bifrost_client_req_id=page-tag-1 1x"));
+        assert!(marked.contains("/two.png?__bifrost_client_req_id=page-tag-2 2x"));
+        assert!(marked.contains("/poster.png?__bifrost_client_req_id=page-tag-3#part"));
+        assert_eq!(
+            mark_resource_url("#anchor", "p", "https://example.test", 1),
+            "#anchor"
+        );
+        assert_eq!(
+            mark_resource_url("mailto:a@example.test", "p", "https://example.test", 1),
+            "mailto:a@example.test"
+        );
+        assert!(!resource_url_matches_page_origin("/a", ""));
+        assert!(!resource_url_matches_page_origin(
+            "//cdn.test/a",
+            "https://example.test"
+        ));
+    }
+
+    #[test]
+    fn maybe_inject_devtools_bridge_registers_page_and_marks_resources() {
+        let state = AdminState::new(9900);
+        let rules = ResolvedRules {
+            rules: vec![matched_rule(
+                "mode=read,inject=bridge,evaluate_allowlist=[document.title]",
+            )],
+            ..Default::default()
+        };
+        let body = Bytes::from_static(
+            br#"<!doctype html><html><head><script src="/app.js"></script></head><body>ok</body></html>"#,
+        );
+        let injected = maybe_inject_devtools_bridge_html(
+            body,
+            "text/html; charset=utf-8",
+            &rules,
+            Some(&state),
+            "https://example.test/page",
+            "traffic-1",
+        );
+        let html = String::from_utf8(injected.to_vec()).unwrap();
+        assert!(html.contains("__bifrost_devtools_bridge__"));
+        assert!(html.contains("/_bifrost/api/devtools/bridge/"));
+        assert!(html.contains("/app.js?__bifrost_client_req_id="));
+
+        let unchanged = maybe_inject_devtools_bridge_html(
+            Bytes::from_static(b"{}"),
+            "application/json",
+            &rules,
+            Some(&state),
+            "https://example.test/page",
+            "traffic-2",
+        );
+        assert_eq!(unchanged, Bytes::from_static(b"{}"));
+        let no_state = maybe_inject_devtools_bridge_html(
+            Bytes::from_static(b"<html></html>"),
+            "text/html",
+            &rules,
+            None,
+            "https://example.test/page",
+            "traffic-3",
+        );
+        assert_eq!(no_state, Bytes::from_static(b"<html></html>"));
     }
 }

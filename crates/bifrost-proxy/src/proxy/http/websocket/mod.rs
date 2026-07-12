@@ -1,11 +1,10 @@
 mod capture;
-mod upgrade;
 
 pub use capture::websocket_bidirectional_generic_with_capture;
-pub use upgrade::handle_websocket_upgrade;
 
 use crate::protocol::Opcode;
 use bifrost_admin::{AdminState, FrameType};
+#[cfg(test)]
 use bifrost_core::{BifrostError, Result};
 
 fn persist_socket_summary(state: &AdminState, record_id: &str) {
@@ -53,6 +52,7 @@ fn extract_sec_websocket_accept(response: &str) -> Option<String> {
     None
 }
 
+#[cfg(test)]
 fn parse_host_port(host: &str) -> Result<(String, u16)> {
     let host_without_path = host.split('/').next().unwrap_or(host);
 

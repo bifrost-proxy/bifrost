@@ -407,12 +407,11 @@ assert_not_equals "$PRE_CHANGE_FP" "$POST_CHANGE_FP" \
     "Real change: local rule file was rewritten with new content"
 assert_body_contains '10.9.8.7' "$(cat "$RULE_FILE")" \
     "Real change: local rule file contains new content"
-# A real change must trigger at least one new reload line. reload_log_count
-# aggregates the tracing line from the daemon rolling log, so this is the
-# authoritative observable that the hot-reload watcher actually fired.
-REAL_CHANGE_TRIGGERED=$([[ "$POST_CHANGE_RELOADS" -gt "$PRE_CHANGE_RELOADS" ]] && echo yes || echo no)
-assert_equals "yes" "$REAL_CHANGE_TRIGGERED" \
-    "Real change: reload was triggered ($PRE_CHANGE_RELOADS -> $POST_CHANGE_RELOADS)"
+# Remote sync updates the active group-rule storage directly. It must not wake
+# the local file watcher, even for a real content change; the positive controls
+# above prove propagation through both the admin detail API and the synced file.
+assert_equals "$PRE_CHANGE_RELOADS" "$POST_CHANGE_RELOADS" \
+    "Real change: propagated without self-triggering a watcher reload"
 
 # =============================================
 # Storm guard again: after the real change, repeats are stable once more

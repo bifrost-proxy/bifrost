@@ -510,6 +510,44 @@ mod tests {
     }
 
     #[test]
+    fn coverage_90_request_and_response_convenience_paths() {
+        let request = HttpRequest::new("POST", "/json")
+            .with_header("Host", "example.test")
+            .with_header("Content-Type", "application/json; charset=utf-8")
+            .with_header("Transfer-Encoding", "gzip, Chunked")
+            .with_header("Content-Length", "4");
+        assert_eq!(request.host(), Some("example.test"));
+        assert!(matches!(request.content_type(), Some(ContentType::Json)));
+        assert_eq!(request.content_length(), Some(4));
+        assert!(request.is_chunked());
+        assert!(!HttpRequest::new("GET", "/").is_chunked());
+
+        let raw = b"POST /body HTTP/1.1\r\nHost: example.test\r\nContent-Length: 4\r\n\r\ndata";
+        let (parsed, consumed) = HttpRequest::parse(raw).unwrap();
+        assert_eq!(parsed.body, Some(Bytes::from_static(b"data")));
+        assert_eq!(consumed, raw.len());
+        assert!(HttpRequest::parse(&raw[..raw.len() - 1]).is_none());
+
+        for response in [
+            HttpResponse::bad_request(),
+            HttpResponse::not_found(),
+            HttpResponse::internal_error(),
+            HttpResponse::bad_gateway(),
+            HttpResponse::connection_established(),
+        ] {
+            assert!(response.status_code >= 200);
+        }
+        let json = HttpResponse::ok().with_json_body("{\"ok\":true}");
+        assert!(matches!(json.content_type(), Some(ContentType::Json)));
+        assert_eq!(json.content_length(), Some(11));
+        let text = HttpResponse::ok().with_text_body("hello");
+        assert!(matches!(text.content_type(), Some(ContentType::PlainText)));
+        let chunked = HttpResponse::ok().with_header("Transfer-Encoding", "chunked");
+        assert!(chunked.is_chunked());
+        assert!(!HttpResponse::ok().is_chunked());
+    }
+
+    #[test]
     fn test_parse_host_port() {
         assert_eq!(
             parse_host_port("example.com:8080"),

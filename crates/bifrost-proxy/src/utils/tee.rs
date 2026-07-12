@@ -1035,7 +1035,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    use bifrost_admin::BodyStore;
+    use bifrost_admin::{BodyStore, TrafficDbStore};
     use parking_lot::RwLock;
 
     #[test]
@@ -1213,6 +1213,161 @@ mod tests {
         assert!(capture.take().is_none());
         assert!(!dir.join("super-mode-stream_req").exists());
         assert!(!dir.join("super-mode-stream_res").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn test_state_with_body_store(prefix: &str) -> (Arc<AdminState>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "bifrost-tee-{prefix}-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let body_store = Arc::new(RwLock::new(BodyStore::new(
+            dir.clone(),
+            1024 * 1024,
+            1,
+            64 * 1024,
+            Duration::from_millis(1),
+        )));
+        let traffic_store = TrafficDbStore::new(dir.join("traffic-db"), 100, 0, None).unwrap();
+        (
+            Arc::new(
+                AdminState::new(0)
+                    .with_body_store(body_store)
+                    .with_traffic_db_store(traffic_store),
+            ),
+            dir,
+        )
+    }
+
+    #[tokio::test]
+    async fn sse_tee_persists_raw_and_derived_bodies_and_socket_summary() {
+        let (state, dir) = test_state_with_body_store("sse");
+        let record_id = "sse-covered";
+        state.record_traffic(bifrost_admin::TrafficRecord::new(
+            record_id.into(),
+            "GET".into(),
+            "http://example.test/events".into(),
+        ));
+        let writer =
+            start_body_stream(state.body_store.as_ref().unwrap(), record_id, "sse_raw").unwrap();
+        let payload = Bytes::from_static(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: [DONE]\n\n",
+        );
+        let body = create_sse_tee_body(
+            crate::server::full_body(payload.clone()),
+            Some(state.clone()),
+            record_id.into(),
+            Some(TrafficType::Http),
+            Some(writer),
+            1024,
+        );
+        assert!(!body.is_end_stream());
+        assert_eq!(body.size_hint().lower(), payload.len() as u64);
+        let collected = body.boxed().collect().await.unwrap().to_bytes();
+        assert_eq!(collected, payload);
+
+        let record = state
+            .traffic_db_store
+            .as_ref()
+            .and_then(|store| store.get_by_id(record_id))
+            .expect("traffic record");
+        assert!(record.response_body_ref.is_some());
+        assert!(record.derived_response_body_ref.is_some());
+        assert_eq!(record.frame_count, 2);
+        assert_eq!(record.download_bytes, payload.len());
+        assert!(state.sse_hub.get_socket_status(record_id).is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn sse_chunk_parser_covers_split_boundaries_overflow_and_no_state() {
+        let body = crate::server::full_body(Bytes::new());
+        let mut tee = SseTeeBody::new(body, None, "none".into(), None, None, 3);
+        tee.process_sse_chunk(b"abcd");
+        assert!(tee.overflowed);
+        tee.process_sse_chunk(b"\n");
+        tee.process_sse_chunk(b"\n");
+        assert!(!tee.overflowed);
+        tee.process_sse_chunk(b"x\n\n");
+        assert_eq!(tee.event_size, 0);
+        let collected = tee.boxed().collect().await.unwrap().to_bytes();
+        assert!(collected.is_empty());
+
+        let capped = create_sse_tee_body(
+            crate::server::full_body(Bytes::new()),
+            None,
+            "capped".into(),
+            None,
+            None,
+            usize::MAX,
+        );
+        assert_eq!(capped.max_buffer_size, DEFAULT_MAX_SSE_EVENT_BUFFER_BYTES);
+    }
+
+    #[tokio::test]
+    async fn normal_request_response_and_metrics_tee_paths_store_and_forward() {
+        let (state, dir) = test_state_with_body_store("normal");
+        let record_id = "normal-covered";
+        state.record_traffic(bifrost_admin::TrafficRecord::new(
+            record_id.into(),
+            "POST".into(),
+            "http://example.test/".into(),
+        ));
+
+        let (request, capture) = create_request_tee_body(
+            crate::server::full_body(Bytes::from_static(b"request-body")),
+            Some(state.clone()),
+            record_id.into(),
+        );
+        assert_eq!(request.size_hint().lower(), 12);
+        assert_eq!(
+            request.collect().await.unwrap().to_bytes(),
+            Bytes::from_static(b"request-body")
+        );
+        // The drop guard transfers the captured body reference into the traffic
+        // record, so the caller-side handle is intentionally empty afterwards.
+        assert!(capture.clone_ref().or_else(|| capture.take()).is_none());
+
+        let response = create_tee_body_with_store(
+            crate::server::full_body(Bytes::from_static(b"response-body")),
+            Some(state.clone()),
+            record_id.into(),
+            TeeBodyCaptureOptions {
+                max_body_size: Some(1024),
+                content_encoding: None,
+                traffic_type: None,
+                monitor_connection: false,
+                response_headers_size: 10,
+            },
+        );
+        assert_eq!(
+            response.collect().await.unwrap().to_bytes(),
+            Bytes::from_static(b"response-body")
+        );
+
+        let metrics = create_metrics_body(
+            crate::server::full_body(Bytes::from_static(b"metrics")),
+            Some(state.clone()),
+            Some(TrafficType::Http),
+        );
+        assert_eq!(
+            metrics.collect().await.unwrap().to_bytes(),
+            Bytes::from_static(b"metrics")
+        );
+        let record = state
+            .traffic_db_store
+            .as_ref()
+            .and_then(|store| store.get_by_id(record_id))
+            .expect("traffic record");
+        assert!(record.request_body_ref.is_some());
+        assert!(record.response_body_ref.is_some());
+        assert!(store_request_body(&Some(state.clone()), "direct", b"request", None).is_some());
+        assert!(store_response_body(&Some(state), "direct", b"response").is_some());
+        assert!(store_request_body(&None, "none", b"request", None).is_none());
+        assert!(store_response_body(&None, "none", b"response").is_none());
+        assert!(store_request_body(&None, "empty", b"", None).is_none());
+        assert!(store_response_body(&None, "empty", b"").is_none());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

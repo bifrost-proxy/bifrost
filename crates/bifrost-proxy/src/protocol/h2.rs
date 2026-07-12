@@ -323,6 +323,37 @@ mod tests {
     }
 
     #[test]
+    fn coverage_90_all_frame_and_error_code_variants_roundtrip() {
+        for value in 0_u8..=10 {
+            let frame_type = FrameType::from(value);
+            let encoded = u8::from(frame_type);
+            assert_eq!(encoded, value);
+        }
+        for (value, expected) in [
+            (0, ErrorCode::NoError),
+            (1, ErrorCode::ProtocolError),
+            (2, ErrorCode::InternalError),
+            (3, ErrorCode::FlowControlError),
+            (4, ErrorCode::SettingsTimeout),
+            (5, ErrorCode::StreamClosed),
+            (6, ErrorCode::FrameSizeError),
+            (7, ErrorCode::RefusedStream),
+            (8, ErrorCode::Cancel),
+            (9, ErrorCode::CompressionError),
+            (10, ErrorCode::ConnectError),
+            (11, ErrorCode::EnhanceYourCalm),
+            (12, ErrorCode::InadequateSecurity),
+            (13, ErrorCode::Http11Required),
+            (14, ErrorCode::ProtocolError),
+        ] {
+            assert_eq!(ErrorCode::from(value), expected);
+        }
+        assert!(FrameHeader::parse(&[0; FRAME_HEADER_SIZE - 1]).is_none());
+        let header = FrameHeader::new(FrameType::Data, 0, 1, 4).encode();
+        assert!(Frame::parse(&header).is_none());
+    }
+
+    #[test]
     fn test_frame_header_encode_decode() {
         let header = FrameHeader::new(FrameType::Settings, flags::ACK, 0, 0);
         let encoded = header.encode();
