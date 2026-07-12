@@ -239,6 +239,185 @@ fn normalize_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+async fn prepare_new_chat_surface(cdp: &CdpClient, config: &RuntimeConfig) -> Result<(), String> {
+    let interface_mode = config.chatgpt.interface_mode.trim().to_ascii_lowercase();
+    match interface_mode.as_str() {
+        "" | "auto" => {}
+        "chat" => ensure_chat_mode(cdp).await?,
+        other => {
+            return Err(format!(
+                "browser_ui: unsupported ChatGPT interface mode '{other}'"
+            ));
+        }
+    }
+
+    let model = config.chatgpt.model.trim().to_ascii_lowercase();
+    match model.as_str() {
+        "" | "auto" => {}
+        "pro" => ensure_pro_model(cdp).await?,
+        other => {
+            return Err(format!(
+                "browser_ui: unsupported ChatGPT model preference '{other}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn wait_chat_surface_value(
+    cdp: &CdpClient,
+    expression: &str,
+    timeout_duration: Duration,
+    is_ready: impl Fn(&Value) -> bool,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + timeout_duration;
+    loop {
+        let value = evaluate_value(cdp, expression).await?;
+        if is_ready(&value) {
+            return Ok(value);
+        }
+        if Instant::now() >= deadline {
+            return Ok(value);
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn ensure_chat_mode(cdp: &CdpClient) -> Result<(), String> {
+    let locate = r#"(() => {
+      const visible = (el) => {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const item = Array.from(document.querySelectorAll('[role="radio"]'))
+        .filter(visible)
+        .find((el) => (el.textContent || '').replace(/\s+/g, ' ').trim() === 'Chat');
+      if (!item) return { ok: false, error: 'chat_mode_control_not_found', url: location.href };
+      const rect = item.getBoundingClientRect();
+      return {
+        ok: true,
+        checked: item.getAttribute('aria-checked') === 'true',
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2
+      };
+    })()"#;
+    let state = wait_chat_surface_value(cdp, locate, Duration::from_secs(5), |value| {
+        value.get("ok").and_then(Value::as_bool) == Some(true)
+    })
+    .await?;
+    if !state.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(format!("browser_ui: cannot enforce Chat mode: {state}"));
+    }
+    if !state
+        .get("checked")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let x = state.get("x").and_then(Value::as_f64).unwrap_or(0.0);
+        let y = state.get("y").and_then(Value::as_f64).unwrap_or(0.0);
+        cdp_click(cdp, x, y).await?;
+    }
+    let verified = wait_chat_surface_value(cdp, locate, Duration::from_secs(5), |value| {
+        value.get("checked").and_then(Value::as_bool) == Some(true)
+    })
+    .await?;
+    if verified.get("checked").and_then(Value::as_bool) != Some(true) {
+        return Err(format!(
+            "browser_ui: Chat mode selection could not be verified: {verified}"
+        ));
+    }
+    info!("chatgpt_web send: verified Chat interface mode");
+    Ok(())
+}
+
+async fn ensure_pro_model(cdp: &CdpClient) -> Result<(), String> {
+    let picker_expression = r#"(() => {
+      const visible = (el) => {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const candidates = Array.from(document.querySelectorAll('main button[aria-haspopup="menu"]'))
+        .filter(visible)
+        .map((el) => ({ el, text: (el.textContent || '').replace(/\s+/g, ' ').trim() }));
+      if (candidates.length !== 1) {
+        return { ok: false, error: 'model_picker_not_unique', count: candidates.length, labels: candidates.map((item) => item.text) };
+      }
+      const item = candidates[0];
+      const rect = item.el.getBoundingClientRect();
+      return {
+        ok: true,
+        selected: /(^|\s)Pro($|\s)/i.test(item.text),
+        label: item.text,
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2
+      };
+    })()"#;
+    let picker = wait_chat_surface_value(cdp, picker_expression, Duration::from_secs(5), |value| {
+        value.get("ok").and_then(Value::as_bool) == Some(true)
+    })
+    .await?;
+    if !picker.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(format!(
+            "browser_ui: cannot locate ChatGPT model picker: {picker}"
+        ));
+    }
+    if picker
+        .get("selected")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        info!("chatgpt_web send: verified Pro model");
+        return Ok(());
+    }
+
+    let x = picker.get("x").and_then(Value::as_f64).unwrap_or(0.0);
+    let y = picker.get("y").and_then(Value::as_f64).unwrap_or(0.0);
+    cdp_click(cdp, x, y).await?;
+    let option_expression = r#"(() => {
+          const visible = (el) => {
+            if (!el) return false;
+            const rect = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
+            return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+          };
+          const items = Array.from(document.querySelectorAll('[role="menuitemradio"]'))
+            .filter(visible)
+            .filter((el) => (el.textContent || '').replace(/\s+/g, ' ').trim() === 'Pro');
+          if (items.length !== 1) return { ok: false, error: 'pro_model_option_not_unique', count: items.length };
+          const rect = items[0].getBoundingClientRect();
+          return { ok: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        })()"#;
+    let option = wait_chat_surface_value(cdp, option_expression, Duration::from_secs(5), |value| {
+        value.get("ok").and_then(Value::as_bool) == Some(true)
+    })
+    .await?;
+    if !option.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(format!("browser_ui: cannot select Pro model: {option}"));
+    }
+    cdp_click(
+        cdp,
+        option.get("x").and_then(Value::as_f64).unwrap_or(0.0),
+        option.get("y").and_then(Value::as_f64).unwrap_or(0.0),
+    )
+    .await?;
+    let verified =
+        wait_chat_surface_value(cdp, picker_expression, Duration::from_secs(5), |value| {
+            value.get("selected").and_then(Value::as_bool) == Some(true)
+        })
+        .await?;
+    if verified.get("selected").and_then(Value::as_bool) != Some(true) {
+        return Err(format!(
+            "browser_ui: Pro model selection could not be verified: {verified}"
+        ));
+    }
+    info!("chatgpt_web send: selected and verified Pro model");
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::im_gateway::chatgpt_web) enum ComposerTextInjectionMode {
     InsertText,
@@ -799,6 +978,10 @@ async fn send_with_browser_once(
             }
         } else {
             composer_result?;
+        }
+        if expected_conversation_id.is_none() {
+            prepare_new_chat_surface(cdp, config).await?;
+            wait_composer(cdp, None, Duration::from_secs(30)).await?;
         }
         let mut retry_as_new_available = expected_conversation_id.is_some();
         let send = loop {

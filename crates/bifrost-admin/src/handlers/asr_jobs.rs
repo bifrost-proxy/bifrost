@@ -82,6 +82,7 @@ include!("asr_jobs/daily_agent_config.rs");
 include!("asr_jobs/daily_agent.rs");
 include!("asr_jobs/daily_agent_workspace.rs");
 include!("asr_jobs/daily_agent_prompt.rs");
+include!("asr_jobs/daily_agent_research.rs");
 include!("asr_jobs/daily_agent_records.rs");
 include!("asr_jobs/daily_agent_im.rs");
 include!("asr_jobs/daily_agent_sync.rs");

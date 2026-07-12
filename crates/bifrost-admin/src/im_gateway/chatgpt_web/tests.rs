@@ -8,6 +8,42 @@ fn chatgpt_web_browser_defaults_to_headed_mode() {
 }
 
 #[test]
+fn chatgpt_web_surface_preferences_default_to_auto() {
+    let config = ChatGptConfig::default();
+    assert_eq!(config.interface_mode, "auto");
+    assert_eq!(config.model, "auto");
+}
+
+#[test]
+fn chatgpt_web_surface_preferences_parse_chat_and_pro() {
+    let parsed: ChatGptWebAdapterConfig = serde_json::from_value(serde_json::json!({
+        "chatgpt": {
+            "interfaceMode": "chat",
+            "model": "pro"
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(parsed.chatgpt.interface_mode, "chat");
+    assert_eq!(parsed.chatgpt.model, "pro");
+}
+
+#[test]
+fn chatgpt_web_send_enforces_surface_before_composer_injection() {
+    let source = include_str!("send.rs");
+    let prepare = source
+        .find("prepare_new_chat_surface(cdp, config).await?")
+        .expect("new ChatGPT conversations must enforce configured surface preferences");
+    let inject = source
+        .find("set_composer_text(cdp, text).await")
+        .expect("send path must inject the composer text");
+
+    assert!(prepare < inject);
+    assert!(source.contains("'[role=\"radio\"]'"));
+    assert!(source.contains("'[role=\"menuitemradio\"]'"));
+}
+
+#[test]
 fn login_page_readiness_rejects_account_chooser_and_disabled_composer() {
     assert!(login_page_state_is_ready(&serde_json::json!({
         "composerVisible": true,
@@ -933,6 +969,8 @@ async fn auth_status_accepts_recent_browser_account_check_when_native_probe_fail
             base_url: "http://[::1".to_string(),
             poll_interval_ms: 1,
             timeout_secs: 1,
+            interface_mode: "auto".to_string(),
+            model: "auto".to_string(),
             session_consistency: "strong".to_string(),
             rate_limit_retry_secs: 180,
             rate_limit_max_retries: 5,
@@ -1002,6 +1040,8 @@ async fn read_logged_in_auth_state_recovers_valid_captured_login() {
             base_url: "http://[::1".to_string(),
             poll_interval_ms: 1,
             timeout_secs: 1,
+            interface_mode: "auto".to_string(),
+            model: "auto".to_string(),
             session_consistency: "strong".to_string(),
             rate_limit_retry_secs: 180,
             rate_limit_max_retries: 5,
@@ -1054,6 +1094,8 @@ async fn read_logged_in_auth_state_rejects_expired_captured_login() {
             base_url: "http://[::1".to_string(),
             poll_interval_ms: 1,
             timeout_secs: 1,
+            interface_mode: "auto".to_string(),
+            model: "auto".to_string(),
             session_consistency: "strong".to_string(),
             rate_limit_retry_secs: 180,
             rate_limit_max_retries: 5,
@@ -1119,6 +1161,8 @@ async fn auth_status_accepts_browser_account_check_when_native_probe_is_forbidde
             base_url: format!("http://127.0.0.1:{port}"),
             poll_interval_ms: 1,
             timeout_secs: 1,
+            interface_mode: "auto".to_string(),
+            model: "auto".to_string(),
             session_consistency: "strong".to_string(),
             rate_limit_retry_secs: 180,
             rate_limit_max_retries: 5,
@@ -1175,6 +1219,8 @@ async fn auth_status_rejects_expired_authorization_identity() {
             base_url: "http://[::1".to_string(),
             poll_interval_ms: 1,
             timeout_secs: 1,
+            interface_mode: "auto".to_string(),
+            model: "auto".to_string(),
             session_consistency: "strong".to_string(),
             rate_limit_retry_secs: 180,
             rate_limit_max_retries: 5,
@@ -1216,7 +1262,9 @@ async fn auth_status_rejects_stale_browser_account_check_when_native_forbidden()
 
     let mut headers = BTreeMap::new();
     headers.insert("authorization".to_string(), "Bearer captured".to_string());
-    let stale_captured_at = (chrono::Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
+    let stale_captured_at = (chrono::Utc::now()
+        - chrono::Duration::seconds(BROWSER_ACCOUNT_CHECK_PROOF_MAX_AGE_SECS + 300))
+    .to_rfc3339();
     let state = AuthState {
         captured_at: iso_now(),
         base_url: DEFAULT_BASE_URL.to_string(),
@@ -1245,6 +1293,8 @@ async fn auth_status_rejects_stale_browser_account_check_when_native_forbidden()
             base_url: format!("http://127.0.0.1:{port}"),
             poll_interval_ms: 1,
             timeout_secs: 1,
+            interface_mode: "auto".to_string(),
+            model: "auto".to_string(),
             session_consistency: "strong".to_string(),
             rate_limit_retry_secs: 180,
             rate_limit_max_retries: 5,

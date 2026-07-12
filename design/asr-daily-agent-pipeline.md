@@ -89,37 +89,109 @@ Prompt 规则：
 
 ## 日报研究工作流（本地配置，不进入默认值）
 
+### 2026-07-12 完整研究编排决策
+
+真实日报验证后，研究链路从固定的 `daily_report -> research_agent` 两段升级为：
+
+`daily_report -> research_seed -> research_dispatcher -> N 个独立 research child run -> research_digest`
+
+- `research_seed` 必须保留每一项的 `original_question`、原始片段、提出问题时的背景和所需上下文，不能只输出缩写标题或优先级分数。
+- `research_dispatcher` 是主编排 Agent：只负责识别问题类型、选择 Runner、选择上下文配置并生成结构化 manifest，不在同一会话里完成全部研究。
+- 每个研究问题创建独立 child run；ChatGPT Web 每题创建新 conversation，Codex/Bifrost Agent 每题使用独立 session key。一个问题失败不阻塞其他问题。
+- `research_digest` 不再按价值/紧迫性给问题打分，而是逐项展示原始问题、核心结论、证据、不确定性和完整研究链接。
+- 每个 Agent 继续支持独立 instructions；child run 的最终 Prompt 由 Agent instructions、领域模板、原始问题和上下文共同组成。
+- 本轮不实现 `external_shareable` 或信息分级；相关数据边界另行设计。
+
+上下文获取默认与研究 Agent 合并。ChatGPT Web 优先通过用户已经授权的 GitHub Connector 直接读取已提交、已授权并完成索引的仓库内容；文件型本地 Runner 则可以在显式允许的工作目录内直接读取仓库。两种情况都不额外创建“事实 Agent”。仅在以下情况拆出 context run：
+
+1. 问题需要的事实不在 GitHub 中，例如本机未提交文件、Supabase/IBKR 运行时交易行、私有日志或实时接口结果；
+2. ChatGPT Web 当前账号尚未授权目标仓库，或目标仓库尚未完成索引；
+3. 同一事实包会被多个问题复用；
+4. 需要保存可审计的数据快照或固定查询口径。
+
+投资类研究默认先让 ChatGPT Web 通过 GitHub Connector 读取 `ibkr-portfolio-dashboard` 的实现、数据口径和文档。该仓库中的 Supabase 表结构和查询逻辑可直接研究，但真实成交、持仓、成本和现金记录不是 GitHub 仓库内容；涉及这些真实记录时，再由受控本地 context profile 查询并把事实包交给对应的独立 ChatGPT conversation。
+
+ChatGPT Web child run 发送前必须强制校验：
+
+- 使用 `Chat` 模式，不允许落到 `Work`；
+- 使用 `Pro` 模型；
+- 模式或模型无法切换、无法验证时直接失败，不发送研究问题；
+- Prompt 明确指定要使用已连接的 GitHub 仓库，并要求在结果中列出实际读取的仓库文件。若模型报告仓库不可见，则明确标记不可用；需要本地事实的问题必须预先配置 context profile，不能假装已经读取。
+- 单题结果记录 `github_connector_status=verified/unavailable/missing`；只有明确返回 `verified` 才显示为 GitHub 已核验。配置了本地 context profile 时可显示 `success_with_local_context`，否则明确显示 Connector 不可用或未验证。
+
+### Research manifest 契约
+
+`research_dispatcher` 输出 Markdown 中的 JSON manifest：
+
+```json
+{
+  "questions": [
+    {
+      "id": "2026-06-26-msft-355",
+      "original_question": "微软 355 美元到底意味着什么，还有哪些下行情景？",
+      "source_excerpt": "日报中的原始问题和相邻上下文",
+      "background": "为什么当天提出该问题",
+      "runner": "chatgpt-web",
+      "github_repositories": ["ibkr-portfolio-dashboard"],
+      "context_profile": "ibkr-runtime-fallback",
+      "research_prompt": "直接回答原始问题，并区分事实、推断和不确定性"
+    }
+  ]
+}
+```
+
+- `id` 仅允许稳定 token，作为目录名和 child session 后缀。
+- `original_question` 必填，并原样进入研究报告与微信摘要。
+- `runner` 必须在 fan-out Agent 配置的 allowlist 中，不能由模型任意指定本机命令。
+- `github_repositories` 用于告诉 ChatGPT Web 应读取哪些已连接仓库；它不是授权机制，真正可见性仍由 ChatGPT Connector 授权与索引状态决定。
+- `context_profile` 是可选回退，只能引用本机配置的安全映射；manifest 不能直接提供任意绝对路径。
+- `research_prompt` 是单题补充要求，不替代 Agent 的基础 instructions。
+
+### Child run 产物
+
+每个日期的 fan-out 输出结构为：
+
+```text
+agents/research_dispatcher/output/research_result/
+├── YYYY-MM-DD-report.md
+└── YYYY-MM-DD/
+    ├── manifest.json
+    ├── <question_id>.md
+    └── <question_id>.json
+```
+
+单题 JSON 保存 `original_question / runner / github_repositories / context_profile / status / run_id / conversation_id / full_report_link / result_path / error`。ChatGPT Web 成功时 `full_report_link` 为对应的 `https://chatgpt.com/c/<conversation_id>`；本地 Runner 使用本地结果路径。日期级 report 供下游 `research_digest` 消费，并保留每一项原始问题和完整结果链接。
+
 ### daily_report
 
 - Runner：ChatGPT Web。
 - 输入：当日转写。
 - 输出：结构化日报。
-- IM：发送完整日报。
+- IM：发送日报摘要。
 
 ### research_seed
 
 - Runner：Codex。
 - 依赖：`daily_report`。
-- 输出：Markdown 中嵌 JSON 研究种子；至少包含 `id/question/type/priority/external_shareable/status`。
+- 输出：保留 `original_question/source_excerpt/background` 的研究种子，不做优先级评分。
 - IM：关闭。
 
 ### research_dispatcher
 
 - Runner：Codex。
 - 依赖：`research_seed`。
-- 公开且 `external_shareable=true` 的问题调用 ChatGPT Web Runner。
-- `internal_repo`、`internal_log` 和未脱敏 `mixed` 问题留在本地 Runner。
-- 输出：研究结果和逐项状态。
-- IM：发送完整结果。
+- 为每题选择 Runner、GitHub 仓库和可选运行时数据 fallback，输出结构化 research manifest。
+- 本轮不实现信息分级或 `external_shareable`；需要真实运行时数据的问题由明确配置的 context profile 处理。
+- 输出：研究 manifest，不在调度会话里完成研究。
+- IM：关闭；最终由 `research_digest` 发送各题核心结论和完整 ChatGPT 链接。
 
 ### weekly_insight
 
 使用现有 IM Agent Schedule，不新增 Daily Agent 特殊逻辑。Codex 读取最近七天 `report/research_seed/research_result`，输出反复判断、未解决问题、形成中的方法论、产品机会、认知变化和下周优先项。
 
-## 安全边界
+## 本轮运行边界
 
-- ChatGPT Web 只接收显式依赖产物和公开研究所需的最小上下文。
-- 研究种子必须显式标记 `external_shareable`；默认 `false`。
+- 本轮暂不实现 `external_shareable` 或数据分级，后续单独设计。
 - Provider ID、登录态、内部术语、真实转写和个人 Prompt 只保存在本机配置，不提交仓库。
 - ChatGPT Web 使用现有独立浏览器 profile，不复制 Cookie 或密码。
 

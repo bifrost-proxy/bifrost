@@ -1824,7 +1824,10 @@ async fn run_daily_agent_inner(
     // 5. Dispatch to runner
     let conversation_success: Option<(String, Option<DailyAgentBTreeMap<String, String>>)>;
 
-    if let Some(runner_id) = daily_agent_external_runner_id(task) {
+    if task.daily_agent.research_fanout.is_some() {
+        run_daily_agent_research_fanout(task, &plan).await?;
+        conversation_success = None;
+    } else if let Some(runner_id) = daily_agent_external_runner_id(task) {
             let runner_id = runner_id.to_string();
             // Read runner config to get adapter and other settings
             let config_store = crate::im_gateway::external_cli::ExternalCliConfigStore::new(

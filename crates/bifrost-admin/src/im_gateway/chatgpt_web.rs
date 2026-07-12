@@ -67,7 +67,12 @@ const CONVERSATIONS_PATH: &str =
     "/backend-api/conversations?offset=0&limit=20&order=updated&is_archived=false&is_starred=false";
 const F_CONVERSATION_URL: &str = "https://chatgpt.com/backend-api/f/conversation";
 const AUTH_EXPIRY_SKEW_SECS: i64 = 60;
-const BROWSER_ACCOUNT_CHECK_PROOF_MAX_AGE_SECS: i64 = 15 * 60;
+// Browser proof is a fallback for native probes that can be rejected by
+// anti-bot controls even while the same persistent browser session is valid.
+// Keep it long enough for unattended daily runs; the captured bearer identity
+// still has an independent expiry check and the browser send path revalidates
+// the actual logged-in UI before submitting anything.
+const BROWSER_ACCOUNT_CHECK_PROOF_MAX_AGE_SECS: i64 = 24 * 60 * 60;
 const BROWSER_ACCOUNT_CHECK_PROOF_FUTURE_SKEW_SECS: i64 = 60;
 static LOGIN_SESSION_SEQ: AtomicU64 = AtomicU64::new(1);
 static LOGIN_SESSIONS: OnceLock<DashMap<String, ActiveLoginSession>> = OnceLock::new();
@@ -491,6 +496,14 @@ struct ChatGptConfig {
     poll_interval_ms: u64,
     #[serde(default = "default_timeout_secs")]
     timeout_secs: u64,
+    /// Preferred ChatGPT surface for new conversations.
+    /// Supported values: `auto` (leave unchanged) and `chat`.
+    #[serde(default = "default_interface_mode")]
+    interface_mode: String,
+    /// Preferred model label for new conversations.
+    /// Supported values: `auto` (leave unchanged) and `pro`.
+    #[serde(default = "default_chatgpt_model")]
+    model: String,
     /// Session consistency mode when hitting 429 rate limits.
     ///
     /// - `"strong"` (default): wait and retry the **same** conversation on the
@@ -516,11 +529,21 @@ impl Default for ChatGptConfig {
             base_url: default_base_url(),
             poll_interval_ms: default_poll_interval_ms(),
             timeout_secs: default_timeout_secs(),
+            interface_mode: default_interface_mode(),
+            model: default_chatgpt_model(),
             session_consistency: default_session_consistency(),
             rate_limit_retry_secs: default_rate_limit_retry_secs(),
             rate_limit_max_retries: default_rate_limit_max_retries(),
         }
     }
+}
+
+fn default_interface_mode() -> String {
+    "auto".to_string()
+}
+
+fn default_chatgpt_model() -> String {
+    "auto".to_string()
 }
 
 impl ChatGptConfig {
@@ -1922,7 +1945,12 @@ async fn open_login_and_capture(config: &RuntimeConfig) -> Result<AuthState, Str
         cdp.enable_domains().await?;
         cdp.send("Page.bringToFront", json!({})).await?;
         let mut events = cdp.subscribe();
-        cdp.send("Page.navigate", json!({"url": config.chatgpt.base_url}))
+        let login_refresh_url = format!(
+            "{}/?bifrost_login_refresh={}",
+            config.chatgpt.base_url.trim_end_matches('/'),
+            uuid::Uuid::new_v4()
+        );
+        cdp.send("Page.navigate", json!({"url": login_refresh_url}))
             .await?;
 
         let mut captured_headers = BTreeMap::new();
@@ -3408,7 +3436,7 @@ mod coverage_boost {
     #[test]
     fn browser_account_check_proof_is_stale_for_old_timestamp() {
         let proof = BrowserAccountCheckProof {
-            captured_at: (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339(),
+            captured_at: (chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339(),
             status: 200,
             logged_in: true,
         };
@@ -3813,6 +3841,17 @@ mod coverage_boost_v2 {
     #[test]
     fn browser_account_check_proof_is_fresh_allows_small_future_skew() {
         let ts = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
+        let proof = BrowserAccountCheckProof {
+            captured_at: ts,
+            status: 200,
+            logged_in: true,
+        };
+        assert!(browser_account_check_proof_is_fresh(&proof));
+    }
+
+    #[test]
+    fn browser_account_check_proof_remains_valid_for_daily_automation() {
+        let ts = (chrono::Utc::now() - chrono::Duration::hours(12)).to_rfc3339();
         let proof = BrowserAccountCheckProof {
             captured_at: ts,
             status: 200,

@@ -120,16 +120,41 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(500, {"error": "report target missing from prompt", "text": full_text[-1000:]})
                 return
             report_path = match.group(1).strip()
-            agent_id = "tomorrow_todo" if "tomorrow_todo/" in report_path else "daily_report"
+            if "research_dispatcher/" in report_path:
+                agent_id = "research_dispatcher"
+            elif "research_digest/" in report_path:
+                agent_id = "research_digest"
+            elif "research_seed/" in report_path:
+                agent_id = "research_seed"
+            elif "tomorrow_todo/" in report_path:
+                agent_id = "tomorrow_todo"
+            else:
+                agent_id = "daily_report"
             if agent_id == "tomorrow_todo" and "E2E_CUSTOM_TOMORROW_AGENT_MARKER" not in full_text:
                 self._json(500, {"error": "custom tomorrow AGENTS.md marker missing from model context"})
                 return
-            report_content = (
-                f"# E2E generated report for {agent_id}\n\n"
-                f"- report_path: {report_path}\n"
-                "- source: 2026-05-22.md\n"
-                "- marker: E2E_DAILY_AGENT_REAL_RUN\n"
-            )
+            if agent_id == "research_dispatcher":
+                report_content = """# Research manifest
+
+```json
+{"questions":[{"id":"github-question","original_question":"ibkr 仓库如何计算成交成本？","source_excerpt":"帮我记录一下并研究 IBKR 成交成本","background":"日报中的投资研究问题","runner":"web-research","github_repositories":["ibkr-portfolio-dashboard"],"research_prompt":"列出实际读取的仓库文件"},{"id":"product-question","original_question":"日报研究问题如何做到每题独立会话？","source_excerpt":"帮我记录一下自动研究流程","background":"日报 Agent 产品设计","runner":"web-research","research_prompt":"给出直接结论"}]}
+```
+"""
+            elif agent_id == "research_digest":
+                links = sorted(set(re.findall(r"https://chatgpt\.com/c/[A-Za-z0-9_-]+", full_text)))
+                report_content = (
+                    "# Research digest\n\n"
+                    "## ibkr 仓库如何计算成交成本？\n\n"
+                    "- 核心结论：已由独立研究会话处理。\n"
+                    + "".join(f"- 完整研究：{link}\n" for link in links)
+                )
+            else:
+                report_content = (
+                    f"# E2E generated report for {agent_id}\n\n"
+                    f"- report_path: {report_path}\n"
+                    "- source: 2026-05-22.md\n"
+                    "- marker: E2E_DAILY_AGENT_REAL_RUN\n"
+                )
             message = {
                 "role": "assistant",
                 "content": None,
@@ -165,7 +190,7 @@ curl -fsS "http://127.0.0.1:$MOCK_PORT/health" >/dev/null
 
 SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
 
-BIFROST_DATA_DIR="$DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 "$BIN" start -p "$PORT" --unsafe-ssl --no-system-proxy --skip-cert-check >"$DATA_DIR/server.log" 2>&1 &
+BIFROST_DATA_DIR="$DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 BIFROST_CHATGPT_WEB_E2E_MOCK=1 "$BIN" start -p "$PORT" --unsafe-ssl --no-system-proxy --skip-cert-check >"$DATA_DIR/server.log" 2>&1 &
 PID="$!"
 
 for _ in {1..120}; do
@@ -399,6 +424,170 @@ assert "TERMS.md" in dump, "terminology relative file reference missing from mod
 assert "output/report/2026-05-22-report.md" in dump, "daily_report target missing from model prompt"
 assert "output/tomorrow_todo/2026-05-22-report.md" in dump, "tomorrow_todo target missing from model prompt"
 assert "input/upstream/daily_report/2026-05-22-report.md" in dump, "dependency output path missing from downstream prompt"
+PY
+
+python3 - <<'PY' "$PORT" "$DATA_DIR" "$AUDIO_DIR"
+import json
+import pathlib
+import sys
+import time
+import urllib.request
+
+port, data_dir, audio_dir = sys.argv[1:]
+base = f"http://127.0.0.1:{port}/_bifrost/api"
+
+def request(method, path, payload=None):
+    data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        base + path,
+        data=data,
+        headers={"content-type": "application/json"},
+        method=method,
+    )
+    with urllib.request.urlopen(req, timeout=30) as response:
+        return json.loads(response.read().decode("utf-8") or "{}")
+
+request("PATCH", "/im-gateway/chat/config", {
+    "version": 1,
+    "defaultRunnerId": "web-research",
+    "runners": {
+        "web-research": {
+            "enabled": True,
+            "adapter": "chatgpt_web",
+            "adapterConfig": {},
+            "injectBifrostTools": False,
+            "skillPaths": [],
+            "deliveryMode": "final_reply",
+        }
+    },
+    "channels": {},
+})
+
+task = request("POST", "/asr/tasks", {
+    "name": "research fanout e2e",
+    "audio_dir": audio_dir,
+    "enabled": False,
+    "recursive": False,
+    "daily_agent": {"enabled": True},
+})
+task_id = task["id"]
+
+def agent(agent_id, runner, output_dir, dependencies=None, fanout=None):
+    value = {
+        "id": agent_id,
+        "name": agent_id,
+        "enabled": True,
+        "runner": runner,
+        "timeout_ms": 60000,
+        "trigger_policy": "after_asr_run",
+        "instructions_source": "default",
+        "im_delivery": {
+            "enabled": False,
+            "mode": "summary",
+            "send_policy": "on_success_with_report",
+        },
+        "output_dir": output_dir,
+        "dependencies": [
+            {"agent_id": dependency, "include_output": True}
+            for dependency in (dependencies or [])
+        ],
+        "dependency_failure_policy": "skip",
+    }
+    if fanout is not None:
+        value["research_fanout"] = fanout
+    return value
+
+agents = [
+    agent("daily_report", "bifrost_agent", "report"),
+    agent("research_seed", "bifrost_agent", "research_seed", ["daily_report"]),
+    agent("research_dispatcher", "bifrost_agent", "research_dispatcher", ["research_seed"]),
+    agent(
+        "research_fanout",
+        "web-research",
+        "research_result",
+        ["research_dispatcher"],
+        {
+            "max_questions": 8,
+            "allowed_runners": ["web-research"],
+            "context_profiles": {},
+        },
+    ),
+    agent("research_digest", "bifrost_agent", "research_digest", ["research_fanout"]),
+]
+updated = request("PUT", f"/asr/tasks/{task_id}/daily-agent", {
+    "enabled": True,
+    "agents": agents,
+})
+stored = {item["id"]: item for item in updated["config"]["agents"]}
+assert stored["research_fanout"]["research_fanout"]["max_questions"] == 8, stored
+assert stored["research_fanout"]["research_fanout"]["chatgpt_interface_mode"] == "chat", stored
+assert stored["research_fanout"]["research_fanout"]["chatgpt_model"] == "pro", stored
+assert stored["research_fanout"]["dependencies"] == [
+    {"agent_id": "research_dispatcher", "include_output": True}
+], stored
+
+daily_dir = pathlib.Path(data_dir) / "asr" / "data" / "text" / task_id / ".daily"
+daily_dir.mkdir(parents=True, exist_ok=True)
+(daily_dir / "2026-05-23.md").write_text(
+    "# 2026-05-23\n\n帮我记录一下并研究 IBKR 成交成本。\n"
+    "另一个问题：日报研究问题如何做到每题独立会话？\n",
+    encoding="utf-8",
+)
+queued = request(
+    "POST",
+    f"/asr/tasks/{task_id}/daily-agent/run?date=2026-05-23&force=1",
+)
+assert queued["status"] in ("queued", "already_running"), queued
+
+runs = None
+for _ in range(180):
+    runs = request("GET", f"/asr/tasks/{task_id}/daily-agent/runs")
+    docs = {
+        item["agent_id"]: item
+        for item in runs.get("processed_documents", [])
+        if item.get("date") == "2026-05-23"
+    }
+    if set(docs) == {
+        "daily_report",
+        "research_seed",
+        "research_dispatcher",
+        "research_fanout",
+        "research_digest",
+    }:
+        break
+    time.sleep(1)
+else:
+    raise AssertionError(runs)
+
+fanout_dir = daily_dir / "agents" / "research_fanout" / "output" / "research_result"
+children_dir = fanout_dir / "2026-05-23"
+manifest = json.loads((children_dir / "manifest.json").read_text(encoding="utf-8"))
+assert len(manifest["questions"]) == 2, manifest
+github = json.loads((children_dir / "github-question.json").read_text(encoding="utf-8"))
+product = json.loads((children_dir / "product-question.json").read_text(encoding="utf-8"))
+assert github["original_question"] == "ibkr 仓库如何计算成交成本？", github
+assert product["original_question"] == "日报研究问题如何做到每题独立会话？", product
+assert github["conversation_id"] != product["conversation_id"], (github, product)
+assert github["full_report_link"].startswith("https://chatgpt.com/c/"), github
+assert product["full_report_link"].startswith("https://chatgpt.com/c/"), product
+
+github_report = (children_dir / "github-question.md").read_text(encoding="utf-8")
+assert "ibkr-portfolio-dashboard" in github_report, github_report
+assert "GITHUB_CONNECTOR_STATUS: verified" in github_report, github_report
+fanout_report = (fanout_dir / "2026-05-23-report.md").read_text(encoding="utf-8")
+assert "## ibkr 仓库如何计算成交成本？" in fanout_report, fanout_report
+assert github["full_report_link"] in fanout_report, fanout_report
+assert product["full_report_link"] in fanout_report, fanout_report
+
+digest_path = daily_dir / "agents" / "research_digest" / "output" / "research_digest" / "2026-05-23-report.md"
+digest = digest_path.read_text(encoding="utf-8")
+assert "ibkr 仓库如何计算成交成本？" in digest, digest
+digest_upstream = daily_dir / "agents" / "research_digest" / "input" / "upstream" / "research_fanout" / "2026-05-23-report.md"
+digest_input = digest_upstream.read_text(encoding="utf-8")
+assert github["full_report_link"] in digest_input, digest_input
+assert product["full_report_link"] in digest_input, digest_input
+
+print(f"research fanout e2e passed: task={task_id}")
 PY
 
 RUN_IDS_BEFORE_APPEND="$E2E_DIR/run_ids_before_append.json"

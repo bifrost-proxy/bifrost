@@ -96,6 +96,8 @@ pub(crate) struct AsrDailyAgentConfig {
     pub dependencies: Vec<AsrDailyAgentDependency>,
     #[serde(default)]
     pub dependency_failure_policy: AsrDailyAgentDependencyFailurePolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research_fanout: Option<AsrDailyAgentResearchFanoutConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<AsrDailyAgentItem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,6 +132,7 @@ impl Default for AsrDailyAgentConfig {
             output_dir: default_daily_agent_output_dir(),
             dependencies: Vec::new(),
             dependency_failure_policy: AsrDailyAgentDependencyFailurePolicy::default(),
+            research_fanout: None,
             agents: default_daily_agent_items(),
             terminology: None,
             report_sync_dir: None,
@@ -171,6 +174,8 @@ pub(crate) struct AsrDailyAgentItem {
     #[serde(default)]
     pub dependency_failure_policy: AsrDailyAgentDependencyFailurePolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research_fanout: Option<AsrDailyAgentResearchFanoutConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_sync_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_report_sync: Option<AsrDailyAgentReportSyncResult>,
@@ -200,6 +205,7 @@ impl AsrDailyAgentItem {
             output_dir: DEFAULT_DAILY_AGENT_OUTPUT_DIR.to_string(),
             dependencies: Vec::new(),
             dependency_failure_policy: AsrDailyAgentDependencyFailurePolicy::default(),
+            research_fanout: None,
             report_sync_dir: None,
             last_report_sync: None,
             last_run_at_ms: None,
@@ -231,6 +237,7 @@ impl AsrDailyAgentItem {
             output_dir: DEFAULT_TOMORROW_TODO_OUTPUT_DIR.to_string(),
             dependencies: Vec::new(),
             dependency_failure_policy: AsrDailyAgentDependencyFailurePolicy::default(),
+            research_fanout: None,
             report_sync_dir: None,
             last_report_sync: None,
             last_run_at_ms: None,
@@ -285,6 +292,7 @@ fn daily_agent_item_from_legacy(config: &AsrDailyAgentConfig) -> AsrDailyAgentIt
         },
         dependencies: config.dependencies.clone(),
         dependency_failure_policy: config.dependency_failure_policy.clone(),
+        research_fanout: config.research_fanout.clone(),
         report_sync_dir: config.report_sync_dir.clone(),
         last_report_sync: config.last_report_sync.clone(),
         last_run_at_ms: config.last_run_at_ms,
@@ -309,6 +317,7 @@ fn daily_agent_config_from_item(item: &AsrDailyAgentItem) -> AsrDailyAgentConfig
         output_dir: item.output_dir.clone(),
         dependencies: item.dependencies.clone(),
         dependency_failure_policy: item.dependency_failure_policy.clone(),
+        research_fanout: item.research_fanout.clone(),
         agents: Vec::new(),
         terminology: None,
         report_sync_dir: item.report_sync_dir.clone(),
@@ -376,6 +385,35 @@ fn normalize_daily_agent_item(mut item: AsrDailyAgentItem) -> AsrDailyAgentItem 
             dependency
         })
         .collect();
+    if let Some(mut fanout) = item.research_fanout.take() {
+        fanout.chatgpt_interface_mode = fanout
+            .chatgpt_interface_mode
+            .trim()
+            .to_ascii_lowercase();
+        fanout.chatgpt_model = fanout.chatgpt_model.trim().to_ascii_lowercase();
+        fanout.allowed_runners = fanout
+            .allowed_runners
+            .into_iter()
+            .map(|runner| runner.trim().to_string())
+            .filter(|runner| !runner.is_empty())
+            .collect();
+        fanout.allowed_runners.sort();
+        fanout.allowed_runners.dedup();
+        fanout.context_profiles = fanout
+            .context_profiles
+            .into_iter()
+            .map(|(key, mut profile)| {
+                profile.runner = profile.runner.trim().to_string();
+                profile.work_dir = profile.work_dir.trim().to_string();
+                profile.instructions = profile
+                    .instructions
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+                (key.trim().to_string(), profile)
+            })
+            .collect();
+        item.research_fanout = Some(fanout);
+    }
     item
 }
 
@@ -439,6 +477,42 @@ fn validate_daily_agent_item(item: &AsrDailyAgentItem) -> Result<(), String> {
     }
     if item.im_delivery.enabled && daily_agent_im_channel_for_config(&item.im_delivery).is_none() {
         return Err(format!("Daily Agent '{}' must select an IM channel", item.name));
+    }
+    if let Some(fanout) = &item.research_fanout {
+        if fanout.max_questions == 0 || fanout.max_questions > 50 {
+            return Err(format!(
+                "Daily Agent '{}' research_fanout.max_questions must be between 1 and 50",
+                item.name
+            ));
+        }
+        if fanout.chatgpt_interface_mode != "chat" || fanout.chatgpt_model != "pro" {
+            return Err(format!(
+                "Daily Agent '{}' research fan-out requires ChatGPT interface_mode='chat' and model='pro'",
+                item.name
+            ));
+        }
+        for runner in &fanout.allowed_runners {
+            if runner.trim().is_empty() {
+                return Err(format!(
+                    "Daily Agent '{}' research_fanout.allowed_runners cannot contain an empty runner",
+                    item.name
+                ));
+            }
+        }
+        for (key, profile) in &fanout.context_profiles {
+            if !is_valid_daily_agent_token(key) {
+                return Err(format!(
+                    "Daily Agent '{}' context profile '{}' must use English letters, numbers, '_' or '-'",
+                    item.name, key
+                ));
+            }
+            if profile.runner.trim().is_empty() || profile.work_dir.trim().is_empty() {
+                return Err(format!(
+                    "Daily Agent '{}' context profile '{}' requires runner and work_dir",
+                    item.name, key
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -571,6 +645,53 @@ pub(crate) enum AsrDailyAgentDependencyFailurePolicy {
     #[default]
     Skip,
     Continue,
+}
+
+fn default_research_fanout_max_questions() -> usize {
+    8
+}
+
+fn default_research_chatgpt_interface_mode() -> String {
+    "chat".to_string()
+}
+
+fn default_research_chatgpt_model() -> String {
+    "pro".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct AsrDailyAgentResearchFanoutConfig {
+    #[serde(default = "default_research_fanout_max_questions")]
+    pub max_questions: usize,
+    #[serde(default = "default_research_chatgpt_interface_mode")]
+    pub chatgpt_interface_mode: String,
+    #[serde(default = "default_research_chatgpt_model")]
+    pub chatgpt_model: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_runners: Vec<String>,
+    #[serde(default, skip_serializing_if = "DailyAgentBTreeMap::is_empty")]
+    pub context_profiles:
+        DailyAgentBTreeMap<String, AsrDailyAgentResearchContextProfile>,
+}
+
+impl Default for AsrDailyAgentResearchFanoutConfig {
+    fn default() -> Self {
+        Self {
+            max_questions: default_research_fanout_max_questions(),
+            chatgpt_interface_mode: default_research_chatgpt_interface_mode(),
+            chatgpt_model: default_research_chatgpt_model(),
+            allowed_runners: Vec::new(),
+            context_profiles: DailyAgentBTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct AsrDailyAgentResearchContextProfile {
+    pub runner: String,
+    pub work_dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
 }
 
 fn daily_agent_instruction_content(task: &AsrDirectoryTask) -> String {
