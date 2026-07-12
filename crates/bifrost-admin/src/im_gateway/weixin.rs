@@ -17,8 +17,8 @@ use bifrost_core::Result;
 use crate::im_gateway::provider::{EventSink, ImProvider};
 use crate::im_gateway::types::{
     ConnectionHandle, ImEvent, ImEventMessage, ImEventSource, ImImageAttachment, ImImageSource,
-    ImProviderConfig, ImProviderType, ImTarget, ProviderValidation, SendOptions, SendResult,
-    UploadedImage,
+    ImMessageReference, ImProviderConfig, ImProviderType, ImTarget, ProviderValidation,
+    SendOptions, SendResult, UploadedImage,
 };
 
 const DEFAULT_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
@@ -361,6 +361,7 @@ impl WeixinProvider {
         )
         .unwrap_or_else(|| format!("weixin-{}-{:016x}", account_id, stable_hash(&raw_json)));
         let images = Self::message_images(&update);
+        let reply_to = Self::message_reference(&update);
         let mut text = Self::message_text(&update);
         if text.trim().is_empty() && images.is_empty() {
             text = truncate_chars(&raw_json, 2_000);
@@ -390,6 +391,7 @@ impl WeixinProvider {
                 text,
                 mentions: Vec::new(),
                 images,
+                reply_to,
                 raw_type: Some(raw_type),
             }),
             received_at: now_ms(),
@@ -419,6 +421,8 @@ impl WeixinProvider {
             return Self::extract_text_from_string(&text);
         }
         for pointer in [
+            "/text_item/text",
+            "/text_item/content",
             "/content/text",
             "/content/content",
             "/message/text",
@@ -447,6 +451,30 @@ impl WeixinProvider {
             }
         }
         String::new()
+    }
+
+    fn message_reference(value: &serde_json::Value) -> Option<ImMessageReference> {
+        let items = value.get("item_list")?.as_array()?;
+        items.iter().find_map(|item| {
+            let reference = item.pointer("/ref_msg/message_item")?;
+            let message_id = Self::string_or_number_field(
+                reference,
+                &["msg_id", "message_id", "id", "client_msg_id", "new_msg_id"],
+            );
+            let created_at_ms = Self::u64_field(
+                reference,
+                &["create_time_ms", "created_at_ms", "timestamp_ms"],
+            );
+            let text = Self::message_text(reference).trim().to_string();
+            let text = (!text.is_empty()).then_some(text);
+            (message_id.is_some() || created_at_ms.is_some() || text.is_some()).then_some(
+                ImMessageReference {
+                    message_id,
+                    created_at_ms,
+                    text,
+                },
+            )
+        })
     }
 
     fn message_images(value: &serde_json::Value) -> Vec<ImImageAttachment> {
@@ -582,6 +610,17 @@ impl WeixinProvider {
                     .map(str::to_string)
                     .or_else(|| v.as_u64().map(|n| n.to_string()))
                     .or_else(|| v.as_i64().map(|n| n.to_string()))
+            })
+        })
+    }
+
+    fn u64_field(value: &serde_json::Value, keys: &[&str]) -> Option<u64> {
+        keys.iter().find_map(|key| {
+            value.get(*key).and_then(|field| {
+                field
+                    .as_u64()
+                    .or_else(|| field.as_i64().and_then(|number| u64::try_from(number).ok()))
+                    .or_else(|| field.as_str().and_then(|number| number.parse().ok()))
             })
         })
     }

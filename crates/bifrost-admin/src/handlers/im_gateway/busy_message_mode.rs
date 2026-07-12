@@ -18,6 +18,8 @@ pub(super) struct BusyMessageContext<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Runtime guide capability used by explicit `/g`; ordinary busy IM messages
+/// are queued regardless of this value.
 pub(super) enum BusyMessageDefaultMode {
     Guide,
     ExternalGuide,
@@ -82,6 +84,19 @@ pub(super) fn apply_busy_message_default(
             .push_queue(session_key, message.to_string())
             .map(|items| BusyMessageDefaultResult::Queue { items }),
     }
+}
+
+pub(super) fn enqueue_busy_default_message(
+    queue_manager: &SessionQueueManager,
+    session_key: &str,
+    message: &str,
+    images: Vec<bifrost_agent::ChatImageInput>,
+) -> Result<Vec<crate::im_gateway::queue_manager::QueueItem>, &'static str> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err("消息内容不能为空");
+    }
+    queue_manager.push_queue_with_images(session_key, message.to_string(), images)
 }
 
 pub(super) async fn handle_busy_guide_command(
@@ -247,117 +262,14 @@ pub(super) async fn handle_busy_default_message(
         .await;
         return;
     }
-    if ctx.default_mode == BusyMessageDefaultMode::ExternalGuide
-        && ctx
-            .event
-            .message
-            .as_ref()
-            .is_none_or(|event_message| event_message.images.is_empty())
-    {
-        handle_busy_guide_command(message, session_key, ctx).await;
-        return;
-    }
-    if matches!(
-        ctx.default_mode,
-        BusyMessageDefaultMode::ExternalGuide | BusyMessageDefaultMode::Queue
-    ) {
-        let images = match ctx.event.message.as_ref() {
-            Some(event_message) if !event_message.images.is_empty() => {
-                resolve_event_images(ctx.client, ctx.provider, ctx.event, &event_message.images)
-                    .await
-            }
-            _ => Vec::new(),
-        };
-        match ctx
-            .queue_manager
-            .push_queue_with_images(session_key, message.to_string(), images)
-        {
-            Ok(items) => {
-                let guide_pending = !ctx.queue_manager.guide_status(session_key).is_empty();
-                let status_message = if ctx.default_mode == BusyMessageDefaultMode::ExternalGuide {
-                    format!(
-                        "运行中引导暂不支持图片，已保留附件并排队：{}",
-                        truncate_str(message, 48)
-                    )
-                } else {
-                    format!("消息已排队：{}", truncate_str(message, 48))
-                };
-                let updated = ctx
-                    .progress_registry
-                    .update_queue_state(
-                        session_key,
-                        items.clone(),
-                        guide_pending,
-                        Some(status_message),
-                    )
-                    .await;
-                if !updated {
-                    let reply = if ctx.default_mode == BusyMessageDefaultMode::ExternalGuide {
-                        format!(
-                            "⚠️ 运行中引导暂不支持图片，已保留附件并排队（排队 {} 条）",
-                            items.len()
-                        )
-                    } else {
-                        format!(
-                            "✅ 消息已收到，将在当前任务完成后处理（排队 {} 条）",
-                            items.len()
-                        )
-                    };
-                    send_agent_reply(
-                        ctx.client,
-                        ctx.provider,
-                        ctx.event,
-                        &reply,
-                        ctx.message_log_store,
-                    )
-                    .await;
-                }
-            }
-            Err(err) => {
-                send_agent_reply(
-                    ctx.client,
-                    ctx.provider,
-                    ctx.event,
-                    &format!("排队失败: {err}"),
-                    ctx.message_log_store,
-                )
-                .await;
-            }
+    let images = match ctx.event.message.as_ref() {
+        Some(event_message) if !event_message.images.is_empty() => {
+            resolve_event_images(ctx.client, ctx.provider, ctx.event, &event_message.images).await
         }
-        return;
-    }
-
-    match apply_busy_message_default(ctx.queue_manager, session_key, message, ctx.default_mode) {
-        Ok(BusyMessageDefaultResult::Guide { pending_count }) => {
-            let reply = if pending_count > 1 {
-                format!(
-                    "🔀 已追加引导消息（当前 {} 条尚未进入 loop，将合并后生效）",
-                    pending_count
-                )
-            } else {
-                "🔀 已注入引导消息，将在当前工具调用完成后生效".to_string()
-            };
-            let updated = ctx
-                .progress_registry
-                .update_queue_state(
-                    session_key,
-                    ctx.queue_manager.queue_status(session_key),
-                    true,
-                    Some(format!("已收到引导：{}", truncate_str(message, 48))),
-                )
-                .await;
-            if !updated {
-                send_agent_reply(
-                    ctx.client,
-                    ctx.provider,
-                    ctx.event,
-                    &reply,
-                    ctx.message_log_store,
-                )
-                .await;
-            }
-        }
-        Ok(BusyMessageDefaultResult::Queue { items }) => {
+        _ => Vec::new(),
+    };
+    match enqueue_busy_default_message(ctx.queue_manager, session_key, message, images) {
+        Ok(items) => {
             let guide_pending = !ctx.queue_manager.guide_status(session_key).is_empty();
             let updated = ctx
                 .progress_registry

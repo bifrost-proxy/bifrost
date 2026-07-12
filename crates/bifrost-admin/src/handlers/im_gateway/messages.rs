@@ -169,6 +169,12 @@ pub(super) async fn handle_messages_send(
             Err((status, message)) => return error_response(status, &message),
         };
     let content_preview = build_content_preview(&body.msg_type, &prepared);
+    let log_content = (body.msg_type == "text").then(|| {
+        prepared
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| serde_json::to_string(&prepared).unwrap_or_default())
+    });
     let log_msg_type = outbound_log_msg_type(&resolved.provider, &body.msg_type);
 
     // Send via the configured provider implementation.
@@ -215,6 +221,7 @@ pub(super) async fn handle_messages_send(
         target_name: Some(resolved.log_target_name),
         message_id,
         msg_type: Some(log_msg_type),
+        content: log_content,
         content_preview,
         trigger: Some("api".to_string()),
         error: error_msg,

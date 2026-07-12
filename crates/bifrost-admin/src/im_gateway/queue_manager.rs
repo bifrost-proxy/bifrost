@@ -1,8 +1,10 @@
 //! Session queue manager for IM guide mode and queue mode.
 //!
 //! Two messaging modes when a session is busy:
-//! - **Guide mode** (default): inject message mid-turn, consumed after current tool call batch
-//! - **Queue mode** (`/q <msg>`): FIFO queue, processed after current turn completes
+//! - **Queue mode** (default for ordinary IM messages): FIFO queue, processed after current turn
+//!   completes
+//! - **Guide mode** (`/g <msg>` in IM or Guide selection in WebUI): mid-turn guidance for
+//!   runtimes that support it
 
 use dashmap::DashMap;
 use serde::Serialize;

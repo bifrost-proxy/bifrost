@@ -587,6 +587,7 @@ pub(super) fn agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt
             encrypted_query_param: None,
             aes_key: None,
         }],
+        reply_to: None,
         raw_type: Some("text".to_string()),
     };
     assert_eq!(agent_message_text(&text_message), "请分析这张图");
@@ -603,6 +604,7 @@ pub(super) fn agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt
             encrypted_query_param: None,
             aes_key: None,
         }],
+        reply_to: None,
         raw_type: Some("image".to_string()),
     };
     assert_eq!(
@@ -614,9 +616,108 @@ pub(super) fn agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt
         text: "   ".to_string(),
         mentions: Vec::new(),
         images: Vec::new(),
+        reply_to: None,
         raw_type: None,
     };
     assert!(agent_message_text(&empty_message).is_empty());
+}
+
+#[test]
+pub(super) fn agent_chat_message_text_includes_resolved_reply_context_and_preserves_commands() {
+    let temp = tempfile::tempdir().expect("temp message store");
+    let store = ImMessageLogStore::new(temp.path());
+    store
+        .add(ImMessageLog {
+            id: "quoted-log".to_string(),
+            provider_id: "weixin-main".to_string(),
+            direction: MessageDirection::Outbound,
+            status: MessageStatus::Success,
+            timestamp: 1_000,
+            target_id: Some("peer-a".to_string()),
+            target_name: None,
+            message_id: Some("quoted-message-id".to_string()),
+            msg_type: Some("text".to_string()),
+            content_preview: Some("原回复".to_string()),
+            content: Some("原回复 https://example.com/article".to_string()),
+            trigger: Some("agent".to_string()),
+            error: None,
+            sender_open_id: None,
+            event_id: None,
+            reaction_added: None,
+        })
+        .expect("add quoted message");
+    let reply_to = Some(crate::im_gateway::types::ImMessageReference {
+        message_id: Some("quoted-message-id".to_string()),
+        created_at_ms: Some(1_000),
+        text: None,
+    });
+    let message = crate::im_gateway::types::ImEventMessage {
+        text: "这个链接对应哪篇文章？".to_string(),
+        mentions: Vec::new(),
+        images: Vec::new(),
+        reply_to: reply_to.clone(),
+        raw_type: Some("text".to_string()),
+    };
+
+    let prompt =
+        agent_message_text_with_reference(&message, "weixin-main", Some("peer-a"), None, &store);
+    assert!(prompt.contains("【引用消息（仅作为上下文）】"));
+    assert!(prompt.contains("原回复 https://example.com/article"));
+    assert!(prompt.ends_with("【当前消息】\n这个链接对应哪篇文章？"));
+
+    let command = crate::im_gateway::types::ImEventMessage {
+        text: "/g 只处理当前回合".to_string(),
+        mentions: Vec::new(),
+        images: Vec::new(),
+        reply_to,
+        raw_type: Some("text".to_string()),
+    };
+    assert_eq!(
+        agent_message_text_with_reference(&command, "weixin-main", Some("peer-a"), None, &store),
+        "/g 只处理当前回合"
+    );
+}
+
+#[test]
+pub(super) fn agent_chat_message_text_limits_reply_context_and_ignores_missing_reference() {
+    let temp = tempfile::tempdir().expect("temp message store");
+    let store = ImMessageLogStore::new(temp.path());
+    let long_quote = "引".repeat(MAX_QUOTED_AGENT_CONTEXT_CHARS + 200);
+    let message = crate::im_gateway::types::ImEventMessage {
+        text: "继续解释".to_string(),
+        mentions: Vec::new(),
+        images: Vec::new(),
+        reply_to: Some(crate::im_gateway::types::ImMessageReference {
+            message_id: None,
+            created_at_ms: None,
+            text: Some(long_quote),
+        }),
+        raw_type: Some("text".to_string()),
+    };
+    let prompt =
+        agent_message_text_with_reference(&message, "weixin-main", Some("peer-a"), None, &store);
+    let quoted = prompt
+        .split("\n\n【当前消息】")
+        .next()
+        .expect("quoted section");
+    assert!(quoted.ends_with("..."));
+    assert!(quoted.chars().count() <= MAX_QUOTED_AGENT_CONTEXT_CHARS + 32);
+
+    let missing = crate::im_gateway::types::ImEventMessage {
+        text: "仍然处理当前消息".to_string(),
+        mentions: Vec::new(),
+        images: Vec::new(),
+        reply_to: Some(crate::im_gateway::types::ImMessageReference {
+            message_id: Some("missing".to_string()),
+            created_at_ms: None,
+            text: None,
+        }),
+        raw_type: Some("text".to_string()),
+    };
+    assert_eq!(
+        agent_message_text_with_reference(&missing, "weixin-main", Some("peer-a"), None, &store),
+        "仍然处理当前消息"
+    );
 }
 
 #[test]
@@ -644,6 +745,7 @@ pub(super) fn inbound_message_preview_summarizes_image_only_and_truncates_text()
                 aes_key: None,
             },
         ],
+        reply_to: None,
         raw_type: Some("image".to_string()),
     };
     assert_eq!(inbound_message_preview(&image_message), "[图片消息: 2 张]");
@@ -653,6 +755,7 @@ pub(super) fn inbound_message_preview_summarizes_image_only_and_truncates_text()
         text: long_text,
         mentions: Vec::new(),
         images: Vec::new(),
+        reply_to: None,
         raw_type: Some("text".to_string()),
     };
     let preview = inbound_message_preview(&text_message);
@@ -1224,6 +1327,7 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
             text: "run external cli".to_string(),
             mentions: Vec::new(),
             images: Vec::new(),
+            reply_to: None,
             raw_type: Some("text".to_string()),
         }),
         received_at: now_ms(),
@@ -1484,6 +1588,7 @@ pub(super) async fn im_event_loop_external_cli_route_processes_image_only_messag
                     aes_key: None,
                 },
             ],
+            reply_to: None,
             raw_type: Some("image".to_string()),
         }),
         received_at: now_ms(),
@@ -1601,6 +1706,7 @@ pub(super) async fn im_event_loop_external_cli_session_records_runner_failure() 
             text: "trigger broken external cli".to_string(),
             mentions: Vec::new(),
             images: Vec::new(),
+            reply_to: None,
             raw_type: Some("text".to_string()),
         }),
         received_at: now_ms(),
@@ -1755,6 +1861,7 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
             text: text.to_string(),
             mentions: Vec::new(),
             images: Vec::new(),
+            reply_to: None,
             raw_type: Some("text".to_string()),
         }),
         received_at: now_ms(),

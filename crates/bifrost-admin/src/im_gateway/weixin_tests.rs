@@ -106,6 +106,49 @@ fn normalize_update_extracts_ilink_item_list_text_and_numeric_message_id() {
 }
 
 #[test]
+fn normalize_update_extracts_weixin_reply_reference() {
+    let provider = test_provider();
+    let event = WeixinProvider::normalize_update(
+        &provider,
+        "mock-bot@im.bot",
+        serde_json::json!({
+            "message_id": 7481921678546968584u64,
+            "from_user_id": "user-reply@im.wechat",
+            "message_type": 1,
+            "item_list": [
+                {
+                    "type": 1,
+                    "text_item": {
+                        "text": "这个链接对应哪篇文章？"
+                    },
+                    "ref_msg": {
+                        "message_item": {
+                            "type": 1,
+                            "msg_id": 7481920452618855176u64,
+                            "create_time_ms": 1783828843000u64,
+                            "text_item": {
+                                "text": "原回复 https://example.com/article"
+                            }
+                        }
+                    }
+                }
+            ]
+        }),
+    );
+
+    let message = event.message.expect("normalized message");
+    assert_eq!(message.text, "这个链接对应哪篇文章？");
+    assert_eq!(
+        message.reply_to,
+        Some(ImMessageReference {
+            message_id: Some("7481920452618855176".to_string()),
+            created_at_ms: Some(1783828843000),
+            text: Some("原回复 https://example.com/article".to_string()),
+        })
+    );
+}
+
+#[test]
 fn normalize_update_extracts_ilink_image_item_for_multimodal_agent() {
     let provider = test_provider();
     let event = WeixinProvider::normalize_update(

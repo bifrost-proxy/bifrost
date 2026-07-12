@@ -5,7 +5,7 @@
 Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动 Codex、Traex 等 external CLI runner。当前 Codex/Traex adapter 使用 `exec --json ... -`：Bifrost 只在进程启动时把首条 prompt 写入 stdin，随后关闭 stdin 并等待 JSONL 输出。相同 `session_key` 在任务运行期间收到的新消息会进入 FIFO queue，必须等当前 turn 结束后再通过 `exec resume` 启动下一轮。
 
 
-本方案让内置 Codex、Traex runner 默认使用每轮独立的 stdio app-server transport，让 Claude Code 默认使用长连接 stream-json transport，并把 worker 控制协议扩展为 `Run` / `Guide` / `Stop`。IM 与 WebUI 在会话忙碌时默认把普通后续文本视为 Guide，只有显式 `/q` 或 UI 选择 Queue 才排队；ChatGPT Web 因浏览器对话链路无法安全注入当前生成过程，继续默认 Queue。自定义 CLI、custom args 和显式 exec transport 会先尝试 worker guide capability，无法实时注入时明确降级到 FIFO queue，不能伪装成已注入。
+本方案让内置 Codex、Traex runner 默认使用每轮独立的 stdio app-server transport，让 Claude Code 默认使用长连接 stream-json transport，并把 worker 控制协议扩展为 `Run` / `Guide` / `Stop`。WebUI 在会话忙碌时可选择 Guide/Queue，普通输入默认采用 Guide；IM 的普通后续消息统一 FIFO 排队，只有显式 `/g` 才尝试注入当前 turn。ChatGPT Web 因浏览器对话链路无法安全注入当前生成过程，继续只支持 Queue。Claude Code、自定义 CLI 和显式 exec transport 收到显式 `/g` 时会先尝试 worker guide capability，无法实时注入时明确降级到 FIFO queue，不能伪装成已注入。
 
 ## 用户目标验证清单
 
@@ -21,7 +21,7 @@ Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动
 - app-server notification 映射到现有 `ExternalCliProgressEvent`，保留 tool、plan、assistant、run status 与最终回复展示。
 - 下一轮继续复用现有 `external_thread_id`，通过 `thread/resume` + `turn/start` 续聊。
 - 新增 `bifrost agent guide --session <key> <message>`；session 必填，避免向错误的默认 runner session 发送控制消息。
-- 新增 Chat Gateway session guide endpoint；除 ChatGPT Web 外的普通 busy message 都按 live capability 判断 steer 或 queue，只有 `/q` 明确进入队列。`/g` 仅保留为不再展示的兼容别名。
+- 新增 Chat Gateway session guide endpoint；IM 只有显式 `/g` 按 live capability 判断 steer 或 queue，普通 busy message 与 `/q` 都进入队列。
 - busy external runner 必须先拦截 `/models`、`/model`、`/efforts`、`/effort` 等 Bifrost slash 命令，再进入默认 Guide/Queue 路由；控制命令不得作为 `turn/steer` 输入透传给 Runner。
 
 ### 必须不破坏
@@ -32,7 +32,7 @@ Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动
 - `/stop`、run stop marker、超时、worker process group 清理与服务退出清理继续有效。
 - model、reasoning effort、sandbox/approval、service tier、config override、feature flag、work dir、图片路径和 session resume 语义不因 transport 迁移丢失。
 - 现有 `run_started`、progress、`run_finished` NDJSON 消费方兼容；只允许增加字段与 guide 专用响应。
-- 同一 session 只允许一个 active turn；除 ChatGPT Web 外，新普通文本消息默认请求 guide，显式 `/q` 才排队。
+- 同一 session 只允许一个 active turn；WebUI 可按运行中模式选择 guide/queue，IM 普通文本默认排队、显式 `/g` 才请求 guide。
 
 ### 必须真实验证
 
@@ -56,7 +56,7 @@ Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动
 
 - `guide`：要求当前 active runner 立即改变执行方向。Codex/Traex 通过 `turn/steer` 修改当前 turn；Claude Code 通过官方 interrupt control request 中断当前响应，再在同一进程与同一 session 中接续处理 guide。
 - `queue`：当前 turn 结束后作为新 turn 执行。
-- 除 ChatGPT Web 外，IM 与 WebUI 的普通 busy text 默认请求 guide；`/q` 是显式 Queue。`/g` 不再出现在帮助中，但继续按显式 Guide 解析以兼容已有用户和自动化调用。
+- 除 ChatGPT Web 外，WebUI 的普通 busy text 按界面当前模式处理且默认 Guide；IM 普通 busy text 默认 Queue，`/g` 才显式请求 Guide。
 - busy 状态下 `/efforts` 与 `/effort` 继续走 Bifrost session 命令处理：查询即时返回，设置只影响下一轮，不改变已运行中的 turn。
 - Codex/Traex app-server RPC 成功 ack 后展示当前 turn 已引导。Claude Code 必须先收到 interrupt control response，再发送 guide user frame，并在 `--replay-user-messages` 回显确认后展示 session 已重定向；单独的 user-frame 回显只代表排队确认，不得伪装成当前响应已被引导。自定义/exec transport 或 turn-end race 无法 ack 时展示降级原因并排队。
 - ChatGPT Web 始终默认 Queue，WebUI 不展示 Guide 切换，IM 普通 busy message 直接排队。
@@ -179,7 +179,7 @@ bifrost agent guide --session cli-Codex "先检查失败日志"
 
 所有模拟 Claude Code stream-json 的测试夹具必须读取一条初始 user JSONL frame 后开始输出，不能通过 `cat` 等待 stdin EOF。需要验证 guide 的夹具还必须依次校验 interrupt control request、返回匹配 request id 的 control response、读取 guide user frame，并模拟旧响应的 interrupted result 与 guide 的最终 success result。真实 transport 会保持 stdin 打开；等待 EOF 会让夹具在正确的产品行为下永久阻塞并最终误报 30 秒超时。
 
-Web Playwright 同时覆盖 Codex/Traex/Claude Code 默认 Guide、显式 Queue、ChatGPT Web 只展示 Queue，以及 Guide 降级后刷新队列状态。IM mock inbound 覆盖普通 busy text 默认 steer、`/q` 显式排队、busy Codex/Traex 的 `/efforts` 与 `/effort` 不透传，以及 ChatGPT Web 默认排队。
+Web Playwright 同时覆盖 Codex/Traex/Claude Code 默认 Guide、显式 Queue、ChatGPT Web 只展示 Queue，以及 Guide 降级后刷新队列状态。IM mock inbound 覆盖普通 busy text 默认排队、显式 `/g` steer、`/q` 显式排队、busy Codex/Traex 的 `/efforts` 与 `/effort` 不透传、微信引用上下文，以及 ChatGPT Web 默认排队。
 
 ### Human tests
 

@@ -208,7 +208,7 @@ $BIFROST_DATA_DIR/im_gateway/chat_runs/<run_id>/
 
 ### 会话状态持久化与默认续接
 
-`session_state.json` 按 `sessionKey + adapter + runnerId` scope 保存 threadId 与 modelOverride，用于跨轮 resume。Codex/Traex app-server 运行中通过 `turn/steer` 接收 Guide；Claude Code 与自定义/exec transport 先请求 active worker capability，无法注入时完整降级 queue。只有 `/q` 始终显式排队，ChatGPT Web 保持默认 queue；`/stop` 映射到 active runner 进程并终止其独立进程组。
+`session_state.json` 按 `sessionKey + adapter + runnerId` scope 保存 threadId 与 modelOverride，用于跨轮 resume。运行中收到的普通后续消息默认进入 FIFO queue，当前 turn 完成后作为独立下一轮执行；`/q` 继续提供显式排队与序号管理。只有显式 `/g` 才尝试运行中引导：Codex/Traex app-server 通过 `turn/steer` 接收 Guide，Claude Code 与自定义/exec transport 先请求 active worker capability，无法注入时完整降级 queue。ChatGPT Web 不提供 `/g`；`/stop` 映射到 active runner 进程并终止其独立进程组。
 
 ## CLI + Web + Admin API
 
