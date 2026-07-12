@@ -307,6 +307,8 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy \
   --all-features -- --nocapture
 SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" \
   bash e2e-tests/tests/test_group_sync_no_logstorm_e2e.sh
+cd web && pnpm exec playwright test tests/ui/admin-rules-values.spec.ts \
+  --grep "Values 页面完成 CRUD" --workers=1
 ```
 
 **预期**：coverage pipeline contract 全部通过；TLS ON -> OFF 后第二次请求使用新连接，
@@ -319,6 +321,8 @@ upstream 响应，取消信号能够正常结束 relay。
 平台调度时序。
 Group Rules 真实远端变更会传播到 API 与规则文件；当 info 日志可观测时产生 runtime
 reload，随后重复未变更同步前后日志计数与规则文件指纹均稳定，不形成 log storm。
+Values CRUD/sort/push 用例在切换排序前移开 Refresh tooltip 的 hover，排序选择器可点击，
+完整目标用例通过且不再因 tooltip 截获 pointer events 超时。
 
 ## 执行记录
 
@@ -425,4 +429,5 @@ reload，随后重复未变更同步前后日志计数与规则文件指纹均�
   其 Rules/Shell/Runner 可执行门禁保持强制；非 HTTP TLS 拦截真实本地 TLS upstream
   双向 relay 用例 1/1 通过；进程解析限流的 success/closed/cancelled join-error 用例
   1/1 通过；Group Rules no-logstorm 真实脚本 20/20 通过，远端内容成功传播并在 15 次
-  重复同步前后保持文件指纹和 reload 计数稳定。
+  重复同步前后保持文件指纹和 reload 计数稳定；Values CRUD/sort/push Playwright 目标
+  用例 1/1 通过，耗时 8.1 秒，不再被 Refresh tooltip 截获点击。

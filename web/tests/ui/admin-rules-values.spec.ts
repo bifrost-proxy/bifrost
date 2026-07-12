@@ -20,6 +20,11 @@ import {
 test.describe.configure({ mode: "serial" });
 
 async function changeSort(page: import("@playwright/test").Page, testId: string, label: string) {
+  // A tooltip from the previously clicked toolbar action can overlap the sort
+  // control indefinitely while Playwright's virtual cursor remains hovered.
+  // Move away first so the click verifies the select itself, not tooltip timing.
+  await page.mouse.move(0, 0);
+  await expect(page.locator(".ant-tooltip:visible")).toHaveCount(0);
   await page.getByTestId(testId).click();
   await page.locator(".ant-select-dropdown").getByText(label, { exact: true }).click();
 }
