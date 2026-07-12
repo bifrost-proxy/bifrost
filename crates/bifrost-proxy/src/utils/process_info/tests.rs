@@ -282,11 +282,12 @@ async fn limited_blocking_resolution_covers_success_closed_and_join_error() {
     .unwrap()
     .is_none());
 
-    let task = tokio::spawn(async { panic!("join failure") });
+    let task = tokio::spawn(std::future::pending());
+    task.abort();
     let error = wait_for_process_resolution_with_timeout(task, key, Duration::from_secs(1))
         .await
         .unwrap_err();
-    assert!(error.is_panic());
+    assert!(error.is_cancelled());
 }
 
 #[test]
