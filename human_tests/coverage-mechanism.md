@@ -335,8 +335,9 @@ Rule Share 浏览器确认页在导航切换期间允许 `document.body` 暂时�
 读取空 body 的 `innerText` 提前失败，并最终完成规则应用与目标页跳转。
 HTTP/3 E2E 冷缓存预编译使用与实际测试相同的 release profile，600 秒预算内完成，
 避免 debug/release 重复编译和 macOS runner 180 秒误超时。
-macOS CI 显式跳过重复的 Rust integration 编译，但仍执行 HTTP/3 脚本的全部真实代理
-场景；Linux Unit/Integration 与 Linux Shell 继续双重强制执行 Rust integration test。
+Linux/macOS Shell CI 显式跳过重复的 Rust integration 编译，但仍执行 HTTP/3 脚本的
+全部真实代理场景；Unit/Integration 与 Coverage 两个独立 job 双重强制执行 Rust
+integration test。
 
 ## 执行记录
 
@@ -446,5 +447,5 @@ macOS CI 显式跳过重复的 Rust integration 编译，但仍执行 HTTP/3 脚
   重复同步前后保持文件指纹和 reload 计数稳定；Values CRUD/sort/push Playwright 目标
   用例 1/1 通过，耗时 8.1 秒，不再被 Refresh tooltip 截获点击；Rule Share 浏览器确认
   脚本通过，规则成功应用并跳转目标页，导航瞬间空 body 不再中断 CDP 轮询；HTTP/3
-  release 预编译 1 分 33 秒完成，全量脚本 34/34 通过；macOS CI 等价配置下 Rust
-  integration 标记为平台重复跳过，其余真实代理场景仍为 34/34、失败 0。
+  release 预编译 1 分 33 秒完成，全量脚本 34/34 通过；Linux/macOS Shell CI 等价配置
+  下 Rust integration 标记为重复跳过，其余真实代理场景仍为 34/34、失败 0。

@@ -298,6 +298,10 @@ jobs:
       BIFROST_E2E_SHELL_JOBS: "4"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "2"
+      # Unit/Integration and Coverage both execute the HTTP/3 Rust integration
+      # test. Shell E2E keeps the real proxy scenarios without rebuilding the
+      # full test-only dependency graph from a cold cache.
+      SKIP_CARGO_TEST: "true"
       TIMEOUT: "90"
       PYTHONIOENCODING: utf-8
     steps:
@@ -818,9 +822,9 @@ jobs:
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "2"
       BIFROST_E2E_SHELL_TEST_TIMEOUT: "1260"
-      # Linux Unit/Integration and Linux Shell already compile and execute the
-      # HTTP/3 Rust integration test. macOS still runs the real proxy scenarios
-      # without spending 10+ minutes rebuilding test-only dependencies.
+      # Unit/Integration and Coverage already compile and execute the HTTP/3
+      # Rust integration test. macOS still runs the real proxy scenarios without
+      # spending 10+ minutes rebuilding test-only dependencies.
       SKIP_CARGO_TEST: "true"
       TIMEOUT: "90"
       PYTHONIOENCODING: utf-8
