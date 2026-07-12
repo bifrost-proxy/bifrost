@@ -180,7 +180,9 @@ start_https_server() {
         "$HTTPS_PORT" >"$HTTPS_LOG" 2>&1 &
     HTTPS_PID=$!
 
-    for _ in $(seq 1 80); do
+    local start
+    start="$(date +%s)"
+    while true; do
         if ! kill -0 "$HTTPS_PID" 2>/dev/null; then
             log_fail "HTTPS server exited early"
             cat "$HTTPS_LOG" >&2 || true
@@ -191,11 +193,13 @@ start_https_server() {
                 "https://127.0.0.1:${HTTPS_PORT}/health" >/dev/null 2>&1; then
             return 0
         fi
+        if (( $(date +%s) - start > 90 )); then
+            log_fail "HTTPS server did not become ready within 90s"
+            cat "$HTTPS_LOG" >&2 || true
+            return 1
+        fi
         sleep 0.2
     done
-    log_fail "HTTPS server did not become ready"
-    cat "$HTTPS_LOG" >&2 || true
-    return 1
 }
 
 start_bifrost_with_socks() {

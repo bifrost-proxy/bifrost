@@ -26,9 +26,11 @@
 | TC-COV-03 | `bash scripts/ci/coverage-all.sh --json --fail-under 0` 输出 coverage.json | smoke |
 | TC-COV-04 | `bash scripts/ci/coverage-all.sh --text --fail-under 9999` 因门禁失败而退出非 0 | gate |
 | TC-COV-05 | `make coverage-html` 生成 HTML 报告并可在浏览器查看 | smoke |
-| TC-COV-06 | `coverage-e2e.sh` 在禁用网络下跳过失败用例但仍产出 profraw | resilience |
+| TC-COV-06 | `coverage-e2e.sh` 产出 E2E JSON 且不掩盖失败 | resilience |
 | TC-COV-07 | AGENTS.md 已注明 90% CI 门禁且本地 coverage 默认不跑 | doc |
 | TC-COV-08 | 设计文档 `design/coverage-90.md` 列出 mechanism + 不适用清单 | doc |
+| TC-COV-09 | 覆盖 E2E 与生产数据目录、HOME/XDG、9900 端口硬隔离 | safety |
+| TC-COV-10 | 覆盖管线与全仓 Shell 语法契约通过 | regression |
 
 ## 用例细节
 
@@ -105,18 +107,19 @@ ls target/coverage/html/index.html
 - `target/coverage/html/index.html` 存在
 - 浏览器打开后可看到每个 crate 的覆盖率热点视图
 
-### TC-COV-06 E2E 弹性
+### TC-COV-06 E2E 报告与失败传播
 
 **步骤（仅在 E2E 环境完整时执行；CI sandbox 可跳过并写明）**：
 
 ```bash
-bash scripts/ci/coverage-e2e.sh --json
+bash scripts/ci/coverage-e2e.sh --json --suite rules
 ```
 
 **预期**：
 
-- 即使部分 E2E 套件失败，也能在 `target/coverage-e2e` 下产出 `.profraw`
-- 输出末尾包含 `"covered"` 字段
+- `target/coverage-e2e/coverage.json` 存在且为合法 JSON。
+- rules 套件通过时命令退出 0。
+- 任一 E2E 套件失败时可保留诊断覆盖报告，但命令最终退出非 0，禁止把失败掩盖成绿灯。
 
 ### TC-COV-07 AGENTS.md 覆盖率默认执行边界
 
@@ -145,6 +148,47 @@ grep -n "不适用清单" design/coverage-90.md
 
 **预期**：文档存在且包含「不适用清单」章节
 
+### TC-COV-09 生产服务与数据目录隔离
+
+**步骤**：
+
+```bash
+bifrost status --format json
+shasum -a 256 ~/.bifrost/config.toml ~/.bifrost/runtime.json \
+  ~/.bifrost/admin/im_gateway_providers.json
+grep -n 'prepare_isolated_e2e_environment\|BIFROST_E2E_PROTECTED_PORTS\|REFUSING:' \
+  scripts/ci/coverage-all.sh scripts/ci/coverage-e2e.sh
+bash e2e-tests/tests/test_coverage_pipeline_contract.sh
+bifrost status --format json
+shasum -a 256 ~/.bifrost/config.toml ~/.bifrost/runtime.json \
+  ~/.bifrost/admin/im_gateway_providers.json
+```
+
+**预期**：
+
+- 测试前后主服务 PID 与 9900 listener 不变。
+- 三个生产配置文件哈希不变。
+- 覆盖 E2E 使用 worktree `target/` 下的数据目录和 HOME/XDG，不使用 `~/.bifrost`。
+- cleanup helper 将 9900 作为 protected port。
+
+### TC-COV-10 覆盖管线与 Shell 语法契约
+
+**步骤**：
+
+```bash
+bash scripts/ci/check-shell-syntax.sh
+bash e2e-tests/tests/test_coverage_pipeline_contract.sh
+bash scripts/ci/check-e2e-shell-ci-coverage.sh
+BIFROST_E2E_CAPABILITY_SHARDS=1 BIFROST_E2E_SHELL_JOBS=2 \
+  bash scripts/run_all_e2e.sh \
+  --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build \
+  --shard 1/3 --check-shell-shard-balance
+```
+
+**预期**：四条命令均退出 0；新增 `test_*.sh` 自动进入 CI 或有显式跳过原因；
+macOS Shell 按 `proxy-core`、`remote`、`agent-extensions` 三个能力 job 拆分；167 个
+测试无重复、无遗漏，按历史耗时估算的最大 job 偏差不超过平均值 15%。
+
 ## 执行记录
 
 | 用例 ID | 执行人 | 结果 | 备注 |
@@ -161,3 +205,62 @@ grep -n "不适用清单" design/coverage-90.md
 2026-07-09 执行补充：
 
 - TC-COV-07：PASS。执行 `grep -n "coverage 90% CI 门禁" AGENTS.md`、`grep -n "默认情况下不要在本机运行" AGENTS.md`、`grep -n "coverage-all.sh --json --gate" AGENTS.md` 均命中；执行固定字符串检索确认“收尾/提交前必须在本机跑 make coverage”这类旧强制本地 coverage 表述不再存在于 AGENTS.md / design/coverage-90.md / human_tests/coverage-mechanism.md。
+
+2026-07-11 执行补充（本次覆盖机制专项验证）：
+
+- TC-COV-03：PASS。执行
+  `COVERAGE_JOBS=4 bash scripts/ci/coverage-all.sh --with-e2e --e2e-suite rules --json --output-dir target/coverage-layered-debug`
+  退出 0；三份 JSON 均可解析。unit + integration 为
+  `218743/324449 = 67.42%`，E2E-only 为 `20896/324449 = 6.44%`，联合覆盖为
+  `221038/324449 = 68.13%`；联合覆盖比 unit + integration 多覆盖 2295 行，证明
+  E2E profile 被真实合并，而不是仅执行测试后仍输出单测报告。
+- TC-COV-06：PASS。独立执行
+  `COVERAGE_JOBS=4 bash scripts/ci/coverage-e2e.sh --json --suite rules --skip-build --output-dir target/coverage-e2e-rules`
+  退出 0，67/67 fixture、582/582 assertion 通过，生成合法 E2E-only JSON；另由
+  `test_coverage_pipeline_contract.sh` 断言 E2E 非零退出码不会被吞掉。
+- TC-COV-09：PASS。覆盖测试前后线上服务均为 PID `12141`、listener `9900`、数据目录
+  `~/.bifrost`；`config.toml`、`runtime.json`、`admin/im_gateway_providers.json`
+  的 SHA-256 分别始终为 `42676e4a...7235235`、`8bf03442...b5b0c5a`、
+  `eca06315...3f0eb0`。测试数据实际位于 worktree 的
+  `target/coverage-layered-debug/.bifrost-data`，测试 HOME/XDG 同样位于该 target 目录；
+  未执行 upgrade/start/stop，未修改系统代理。
+- TC-COV-10：PASS。`check-shell-syntax.sh` 检查 249 个 tracked Shell 文件，失败 0；
+  `test_coverage_pipeline_contract.sh` 通过；`check-e2e-shell-ci-coverage.sh` 发现 197 个
+  Shell 测试，169 个进入 CI、28 个有显式跳过原因，检查通过。
+- TC-COV-10（CI 回归补测）：PASS。首轮 CI run `29148890471` 的 macOS Shell shard
+  1/2 在持续完成用例约 58 分钟后，于最后串行 fixture 被 60 分钟 job 上限取消；完整
+  job log 证明期间持续有新测试结果，并非单用例静默死锁。按用户要求改为三个能力
+  job：`proxy-core` 84 个 / 1068s、`remote` 35 个 / 1215s、
+  `agent-extensions` 50 个 / 1079s；169 个用例 0 重复、0 遗漏，最大估算偏差
+  13.1%，通过 capability 模式 15% 平衡门禁。单用例 timeout 与所有断言不变。
+- TC-COV-10（环境继承回归）：PASS。CI run `29151557395` 暴露 Linux Shell 外层
+  `BIFROST_E2E_SHELL_JOBS=4` 会污染契约中的 macOS 平衡估算；契约现显式固定 macOS
+  的 2 lanes，并在外层 `BIFROST_E2E_SHELL_JOBS=4` 环境中复跑通过。
+- TC-COV-10（跨平台 Shell 断言回归）：CI run `29152804806` 暴露
+  `test_upgrade_cli.sh` 在 `pipefail` 下使用 `echo | grep -q` 累计 help 检查不稳定；改为
+  Bash 原生字符串匹配，四项语义不变并能报告具体缺失项。使用 worktree binary 与隔离
+  `BIFROST_DATA_DIR` 真实复跑通过。
+- TC-COV-10（macOS 能力组耗时优化）：CI run `29154062293` 三个能力 job 均通过，实际
+  耗时分别为 `proxy-core` 21m07s、`remote` 39m17s、`agent-extensions` 12m39s。下载
+  `remote` 完整 job log 后确认，`test_desktop_sidecar_launchd_env_contract.sh` 与
+  `test_desktop_open_requests_contract.sh` 分别耗时 1153s、1079s，主要成本是 Shell job
+  内重新编译 Tauri/Rust 图，不是远程调用本身。按用户决定将这两个本地桌面发布契约
+  加入 CI 显式跳过清单；其余真实远程、同步、长期记忆用例保留。用本轮真实日志重校
+  权重并调整能力归组后，167 个 CI Shell 用例分布为 `proxy-core` 79 个 / 816s、
+  `remote` 37 个 / 790s、`agent-extensions` 51 个 / 874s，0 重复、0 遗漏，最大估算
+  偏差 10.2%，通过 15% 门禁；CI 显式跳过项由 28 个增至 30 个。
+- TC-COV-10（HTTPS fixture readiness 回归）：CI run `29156752284` 的 `proxy-core`
+  暴露 `test_trustworthy_traffic_metrics.sh` 用 80 次固定轮询等待临时 RSA 证书与 HTTPS
+  fixture，在 macOS 负载下误报未就绪。改为 90 秒真实墙钟 deadline；正常启动不增加
+  等待，慢 runner 仍会在明确上限内失败并打印 fixture 日志。使用 worktree release
+  binary、动态端口、临时数据目录并保护 9900 真实复跑该用例。
+- TC-COV-10（优化后 CI 实测）：同一 run 中 `agent-extensions` 成功耗时 14m05s，
+  `remote` 成功耗时 16m57s；`remote` 相比优化前 39m17s 缩短 22m20s（约 57%）。
+  `proxy-core` 在 19m44s 因上述 HTTPS readiness 假失败结束，非能力分组超时。
+- TC-COV-10（全绿后慢 job 审计）：CI run `29157919216` 35/35 全绿；唯一超过 30 分钟
+  的 job 是 Windows x86_64 CLI build（32m12s），其中 `cargo build --release` 独占
+  30m46s。日志显示 `No cache found` 且 job 结束未保存 Rust cache，Actions cache API
+  也查不到对应 key。根因是 7 处 `save-if: always()` 不是布尔输入；首次修为
+  `${{ always() }}` 后 run `29159544439` 在 workflow 解析期 0 job 失败，进一步确认状态
+  函数不能用于 action input。最终修为 `save-if: ${{ true }}`，并由 coverage pipeline
+  contract 同时阻止两种错误写法回归。

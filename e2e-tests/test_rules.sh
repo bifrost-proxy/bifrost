@@ -84,6 +84,10 @@ array_contains() {
 }
 
 resolve_bifrost_release_bin() {
+    if [[ -n "${BIFROST_BIN:-}" && -x "$BIFROST_BIN" ]]; then
+        printf '%s\n' "$BIFROST_BIN"
+        return 0
+    fi
     local release_dir="${PROJECT_DIR}/target/release"
     local unix_bin="${release_dir}/bifrost"
     local windows_bin="${release_dir}/bifrost.exe"
@@ -565,13 +569,13 @@ start_proxy() {
     fi
 
     if [[ "$USE_BINARY" == "true" ]]; then
-        local BIFROST_BIN=""
-        BIFROST_BIN=$(resolve_bifrost_release_bin 2>/dev/null || true)
-        if [[ -z "$BIFROST_BIN" ]]; then
-            echo -e "${RED}✗${NC} 二进制文件不存在或不可执行: $BIFROST_BIN"
+        local resolved_bifrost_bin=""
+        resolved_bifrost_bin=$(resolve_bifrost_release_bin 2>/dev/null || true)
+        if [[ -z "$resolved_bifrost_bin" ]]; then
+            echo -e "${RED}✗${NC} 二进制文件不存在或不可执行"
             return 1
         fi
-        BIFROST_DATA_DIR="${TEST_DATA_DIR}" "$BIFROST_BIN" \
+        BIFROST_DATA_DIR="${TEST_DATA_DIR}" "$resolved_bifrost_bin" \
             --port "${PROXY_PORT}" \
             start -y --access-mode allow_all --skip-cert-check --unsafe-ssl --no-system-proxy --rules-file "${processed_rule_file}" "${extra_flags[@]}" &
     else

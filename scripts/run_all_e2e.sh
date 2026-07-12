@@ -182,7 +182,8 @@ Options:
   --list-shell-tests  Print the shell tests selected by the current mode/shard and exit
   --check-shell-shard-balance
                       Print weighted shell shard loads and fail if max/min drift
-                      exceeds BIFROST_E2E_SHARD_BALANCE_MAX_DIFF_PCT (default: 20)
+                      exceeds BIFROST_E2E_SHARD_BALANCE_MAX_DIFF_PCT
+                      (default: 10; capability shards: 15)
   -h, --help          Show this help
 
 Environment variables:
@@ -258,6 +259,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "${BIFROST_E2E_CAPABILITY_SHARDS:-0}" == "1" && "$SHARD_TOTAL" -ne 3 ]]; then
+  echo "Error: capability shell sharding requires exactly 3 shards" >&2
+  exit 1
+fi
 
 run_shell_test() {
   local script_name="$1"
@@ -626,6 +632,11 @@ SKIP_IN_CI_TESTS=(
   "test_im_agent_markdown_image_reply.sh"
   "test_im_agent_streaming_progress_card.sh"
   "test_utf8_safe_preview_e2e.sh"
+  # These two desktop contract wrappers spend 18-19 minutes compiling the
+  # Tauri graph on macOS. Keep them as explicit local desktop release
+  # validation; the CI desktop bundle still compiles the production path.
+  "test_desktop_open_requests_contract.sh"
+  "test_desktop_sidecar_launchd_env_contract.sh"
   # ASR/voice runtime tests may initialize local models, native audio stacks, or
   # external model downloads. Keep all ASR capability validation local-only so
   # CI never fails because a runtime dependency or model host is unavailable.
@@ -663,33 +674,36 @@ is_skipped_in_ci() {
 shell_test_weight() {
   case "$1" in
     test_agent_send_msg_default_channel.sh) echo 30 ;;
-    test_long_term_memory_remember_recall.sh) echo 529 ;;
+    test_long_term_memory_remember_recall.sh) echo 207 ;;
     test_desktop_open_requests_contract.sh) echo 620 ;;
-    test_chatgpt_web_behavior_artifacts.sh) echo 540 ;;
+    test_sync_github_gist_expired_status_e2e.sh) echo 302 ;;
+    test_im_gateway_long_reply_delivery_regression.sh) echo 178 ;;
     test_tls_intercept_e2e.sh) echo 170 ;;
-    test_im_gateway_long_reply_delivery_regression.sh) echo 142 ;;
-    test_remote_file_relay_e2e.sh) echo 128 ;;
+    test_agent_send_msg_feishu_card.sh) echo 162 ;;
+    test_skill_creator_flow.sh) echo 148 ;;
+    test_remote_file_relay_e2e.sh) echo 132 ;;
     test_http3_e2e.sh) echo 120 ;;
+    test_cli_online_commands_e2e.sh) echo 109 ;;
     test_client_process_transport_attribution.sh) echo 103 ;;
-    test_skill_creator_flow.sh) echo 180 ;;
-    test_security_hardening_functional.sh) echo 69 ;;
-    test_agent_builtin_status_runtime.sh) echo 64 ;;
-    test_upgrade_admin_api_restart_e2e.sh) echo 61 ;;
-    test_cli_online_commands_e2e.sh) echo 60 ;;
-    test_remote_invoke_e2e.sh) echo 59 ;;
+    test_im_online_notification_runner_context.sh) echo 87 ;;
+    test_chatgpt_web_behavior_artifacts.sh) echo 85 ;;
+    test_remote_invoke_e2e.sh) echo 75 ;;
+    test_security_hardening_functional.sh) echo 72 ;;
+    test_agent_builtin_status_runtime.sh) echo 61 ;;
     test_remote_invoke_ssh_e2e.sh) echo 59 ;;
-    test_devtools_page_bridge_api.sh) echo 54 ;;
-    test_group_sync_e2e.sh) echo 49 ;;
-    test_replay_websocket_frames.sh) echo 42 ;;
-    test_traffic_persistence_e2e.sh) echo 41 ;;
-    test_group_sync_no_logstorm_e2e.sh) echo 39 ;;
+    test_devtools_page_bridge_api.sh) echo 52 ;;
+    test_group_sync_e2e.sh) echo 46 ;;
+    test_upgrade_admin_api_restart_e2e.sh) echo 43 ;;
+    test_replay_websocket_frames.sh) echo 41 ;;
+    test_traffic_persistence_e2e.sh) echo 40 ;;
+    test_group_sync_no_logstorm_e2e.sh) echo 38 ;;
     test_sse_frames.sh) echo 38 ;;
     test_body_cache_sync_cleanup_admin_api.sh) echo 33 ;;
-    test_traffic_push_e2e.sh) echo 33 ;;
-    test_total_size_cleanup_admin_api.sh) echo 32 ;;
+    test_traffic_push_e2e.sh) echo 32 ;;
+    test_total_size_cleanup_admin_api.sh) echo 31 ;;
     test_frames_admin_api.sh) echo 29 ;;
-    test_req_res_script_e2e.sh) echo 27 ;;
-    test_traffic_db_e2e.sh) echo 27 ;;
+    test_req_res_script_e2e.sh) echo 26 ;;
+    test_traffic_db_e2e.sh) echo 28 ;;
     test_large_body_protection.sh) echo 25 ;;
     test_breakpoint_performance_guard.sh) echo 24 ;;
     test_remote_search_traffic_cli_isomorphic_e2e.sh) echo 24 ;;
@@ -746,6 +760,96 @@ shell_test_runs_serial_in_parallel_shell_job() {
   esac
 }
 
+# Stable macOS capability shards. Tests stay with the product surface they
+# exercise, while the existing per-test weights still balance serial and
+# parallel lanes inside each capability job.
+#
+# 1: proxy-core   - proxy protocols, rules, traffic, TLS, admin/runtime safety
+# 2: remote       - remote invoke/file/SSH/relay plus sync/install/desktop
+# 3: agent-extensions - Agent, IM, skills, upgrade/UI and remaining extensions
+shell_test_capability_group() {
+  case "$1" in
+    test_remote_*|\
+    test_setting_ssh_key_cli.sh|\
+    test_ssh_key_*|\
+    test_status_tui_remote_invoke_panel.sh|\
+    test_cli_online_commands_e2e.sh|\
+    test_sync_*|\
+    test_group_sync_*|\
+    test_security_hardening_functional.sh|\
+    test_long_term_memory_remember_recall.sh|\
+    test_e2e_scripts_disable_sync_login_prompt.sh|\
+    test_install_*|\
+    test_desktop_*|\
+    test_windows_*)
+      echo 2
+      ;;
+    test_admin_*|\
+    test_badge_*|\
+    test_bifrost_file_syntax_admin_api.sh|\
+    test_body_*|\
+    test_bp_*|\
+    test_breakpoint_*|\
+    test_cert_*|\
+    test_cli_foreground_*|\
+    test_cli_offline_*|\
+    test_cli_online_*|\
+    test_cli_proxy_*|\
+    test_cli_start_*|\
+    test_client_process_*|\
+    test_daemon_*|\
+    test_frames_*|\
+    test_header_*|\
+    test_host_*|\
+    test_http*|\
+    test_large_body_*|\
+    test_metrics_*|\
+    test_multiline_rule_*|\
+    test_network_account_*|\
+    test_no_rule_*|\
+    test_openai_like_sse_*|\
+    test_pac_*|\
+    test_performance_*|\
+    test_port_*|\
+    test_proxy_*|\
+    test_replay_*|\
+    test_req_res_*|\
+    test_res_body_*|\
+    test_rule_*|\
+    test_rules_*|\
+    test_script_*|\
+    test_scripts_*|\
+    test_search_traffic_*|\
+    test_security_*|\
+    test_server_config_*|\
+    test_socks5_*|\
+    test_sse_*|\
+    test_startup_listener_*|\
+    test_stop_restart_*|\
+    test_super_performance_*|\
+    test_system_admin_*|\
+    test_temporary_port_*|\
+    test_tls_*|\
+    test_total_size_*|\
+    test_traffic_*|\
+    test_trustworthy_traffic_*|\
+    test_unsafe_ssl_*|\
+    test_userpass_*|\
+    test_values_*|\
+    test_websocket_*|\
+    test_whitelist_*)
+      echo 1
+      ;;
+    *)
+      echo 3
+      ;;
+  esac
+}
+
+use_capability_shell_shards() {
+  [[ "${BIFROST_E2E_CAPABILITY_SHARDS:-0}" == "1" && "$SHARD_TOTAL" -eq 3 ]]
+}
+
 shell_parallel_job_count() {
   local jobs="${BIFROST_E2E_SHELL_JOBS:-2}"
   if [[ ! "$jobs" =~ ^[0-9]+$ || "$jobs" -lt 1 ]]; then
@@ -797,8 +901,17 @@ collect_shell_shard_assignments() {
     local best_projected=-1
     local best_current=-1
     local best_count=-1
+    local shard_start=0
+    local shard_end="$SHARD_TOTAL"
 
-    for ((s = 0; s < SHARD_TOTAL; s++)); do
+    if use_capability_shell_shards; then
+      local capability_group
+      capability_group="$(shell_test_capability_group "$name")"
+      shard_start=$((capability_group - 1))
+      shard_end="$capability_group"
+    fi
+
+    for ((s = shard_start; s < shard_end; s++)); do
       local max_lane_load=0
       local min_lane=0
       local min_lane_load="${shard_lane_load[$((s * parallel_jobs))]}"
@@ -893,7 +1006,11 @@ check_shell_shard_balance() {
     return 1
   fi
 
-  local threshold="${BIFROST_E2E_SHARD_BALANCE_MAX_DIFF_PCT:-10}"
+  local default_threshold=10
+  if use_capability_shell_shards; then
+    default_threshold=15
+  fi
+  local threshold="${BIFROST_E2E_SHARD_BALANCE_MAX_DIFF_PCT:-$default_threshold}"
   local all_tests=()
   local name
   while IFS= read -r name; do
@@ -1510,8 +1627,8 @@ ui_build_ok=1
 
 if [[ "$RUN_RULES" -eq 1 || "$RUN_SHELL" -eq 1 ]]; then
   if [[ "$SKIP_RELEASE_BUILD" -eq 1 ]]; then
-    _prebuilt="$ROOT_DIR/target/release/bifrost"
-    if is_windows; then
+    _prebuilt="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}"
+    if is_windows && [[ -z "${BIFROST_BIN:-}" ]]; then
       _prebuilt="$ROOT_DIR/target/release/bifrost.exe"
     fi
     if [[ -f "$_prebuilt" ]]; then
@@ -1598,9 +1715,24 @@ if [[ "$RUN_RUNNER" -eq 1 ]]; then
   # Also give runner its own extended suite timeout.
   _prev_suite_timeout="${BIFROST_E2E_SUITE_TIMEOUT:-}"
   export BIFROST_E2E_SUITE_TIMEOUT="$RUNNER_TIMEOUT"
-  run_and_capture \
-    "runner:bifrost-e2e" \
-    "$CARGO_BIN" run -p bifrost-e2e -- --port "$BIFROST_UI_TEST_RUNNER_PORT" --jobs "$RUNNER_JOBS" --timeout "$RUNNER_TIMEOUT"
+  if [[ -n "${BIFROST_E2E_BIN:-}" ]]; then
+    if [[ ! -x "$BIFROST_E2E_BIN" ]]; then
+      register_suite \
+        "runner:bifrost-e2e" \
+        "failed" \
+        "" \
+        "BIFROST_E2E_BIN is not executable: $BIFROST_E2E_BIN" \
+        "0"
+    else
+      run_and_capture \
+        "runner:bifrost-e2e" \
+        "$BIFROST_E2E_BIN" --port "$BIFROST_UI_TEST_RUNNER_PORT" --jobs "$RUNNER_JOBS" --timeout "$RUNNER_TIMEOUT"
+    fi
+  else
+    run_and_capture \
+      "runner:bifrost-e2e" \
+      "$CARGO_BIN" run -p bifrost-e2e -- --port "$BIFROST_UI_TEST_RUNNER_PORT" --jobs "$RUNNER_JOBS" --timeout "$RUNNER_TIMEOUT"
+  fi
   if [[ -n "${_prev_suite_timeout:-}" ]]; then
     export BIFROST_E2E_SUITE_TIMEOUT="$_prev_suite_timeout"
   else
