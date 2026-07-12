@@ -247,7 +247,10 @@ run_e2e_suites() {
 
   if [[ "$run_all" -eq 1 || "$SUITE" == "shell" ]]; then
     echo -e "${BLUE}Running E2E shell suite...${NC}"
-    bash scripts/ci/run-e2e-shell.sh || had_failure=1
+    # Unit/integration coverage already executes and instruments the HTTP/3
+    # Rust integration test. Avoid an uninstrumented release rebuild here;
+    # Shell coverage still runs every real proxy scenario.
+    SKIP_CARGO_TEST=true bash scripts/ci/run-e2e-shell.sh || had_failure=1
   fi
 
   if [[ "$run_all" -eq 1 || "$SUITE" == "runner" ]]; then

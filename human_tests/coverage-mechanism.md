@@ -338,6 +338,8 @@ HTTP/3 E2E 冷缓存预编译使用与实际测试相同的 release profile，60
 Linux/macOS Shell CI 显式跳过重复的 Rust integration 编译，但仍执行 HTTP/3 脚本的
 全部真实代理场景；Unit/Integration 与 Coverage 两个独立 job 双重强制执行 Rust
 integration test。
+Layered Coverage 的 Shell 阶段也不得额外构建未插桩 release test；HTTP/3 integration
+coverage 来自前置 Unit/Integration profile，Shell 只追加真实代理行为 profile。
 
 ## 执行记录
 
