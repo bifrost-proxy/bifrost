@@ -207,6 +207,13 @@ fn sync_daily_agent_dependency_outputs(
 }
 
 fn migrate_daily_agent_instructions_content(task: &AsrDirectoryTask, content: &str) -> String {
+    if should_replace_legacy_generic_research_instructions(
+        &task.daily_agent.agent_id,
+        &task.daily_agent.instructions_source,
+        content,
+    ) {
+        return daily_agent_instruction_content(task);
+    }
     let report_dir = format!("./output/{}/", task.daily_agent.output_dir);
     content
         .replace(
@@ -236,6 +243,19 @@ fn migrate_daily_agent_instructions_content(task: &AsrDirectoryTask, content: &s
             "- 默认输出目录是 `./tomorrow_todo/`。",
             &format!("- 默认输出目录是 `{report_dir}`。"),
         )
+}
+
+fn should_replace_legacy_generic_research_instructions(
+    agent_id: &str,
+    source: &AsrDailyAgentInstructionsSource,
+    content: &str,
+) -> bool {
+    source == &AsrDailyAgentInstructionsSource::Default
+        && matches!(
+            agent_id,
+            DEFAULT_RESEARCH_SEED_AGENT_ID | DEFAULT_RESEARCH_DISPATCHER_AGENT_ID
+        )
+        && content.trim_start().starts_with("# 全天候私人助理整理指南")
 }
 
 fn daily_agent_terms_reference_block() -> String {

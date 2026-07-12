@@ -173,14 +173,17 @@ agents/research_dispatcher/output/research_result/
 
 - Runner：Codex。
 - 依赖：`daily_report`。
-- 输出：保留 `original_question/source_excerpt/background` 的研究种子，不做优先级评分。
+- 先把用户主动记录事项分为 `memory_only / action_item / internal_investigation / external_research / weekly_insight`；“帮我记录一下”只保证保留，不能单独触发研究。
+- 只有存在外部知识缺口、预期产物是事实/解释/比较/证据，并且主要依赖公开资料的问题，才能进入 `external_research`。
+- 当前系统 Bug、日志/Trace、告警、环境差异、发布验证和明确执行事项分别进入 `internal_investigation` 或 `action_item`；产品机会和方法论进入 `weekly_insight`。
+- 输出：`research_questions` 保留 `original_question/source_excerpt/background/intent_evidence/expected_evidence`；`non_research_items` 保留未派发事项及原因。不做优先级评分。
 - IM：关闭。
 
 ### research_dispatcher
 
 - Runner：Codex。
 - 依赖：`research_seed`。
-- 为每题选择 Runner、GitHub 仓库和可选运行时数据 fallback，输出结构化 research manifest。
+- 只读取 `research_questions`，绝不调度 `non_research_items`；为每题选择 Runner、GitHub 仓库和可选运行时数据 fallback，输出结构化 research manifest。
 - 本轮不实现信息分级或 `external_shareable`；需要真实运行时数据的问题由明确配置的 context profile 处理。
 - 输出：研究 manifest，不在调度会话里完成研究。
 - IM：关闭；最终由 `research_digest` 发送各题核心结论和完整 ChatGPT 链接。

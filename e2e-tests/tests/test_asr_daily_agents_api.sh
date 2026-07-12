@@ -133,11 +133,21 @@ class Handler(BaseHTTPRequestHandler):
             if agent_id == "tomorrow_todo" and "E2E_CUSTOM_TOMORROW_AGENT_MARKER" not in full_text:
                 self._json(500, {"error": "custom tomorrow AGENTS.md marker missing from model context"})
                 return
+            if agent_id == "research_seed" and "帮我记录一下" not in full_text:
+                self._json(500, {"error": "research seed intent gate missing from model context"})
+                return
             if agent_id == "research_dispatcher":
                 report_content = """# Research manifest
 
 ```json
 {"questions":[{"id":"github-question","original_question":"ibkr 仓库如何计算成交成本？","source_excerpt":"帮我记录一下并研究 IBKR 成交成本","background":"日报中的投资研究问题","runner":"web-research","github_repositories":["ibkr-portfolio-dashboard"],"research_prompt":"列出实际读取的仓库文件"},{"id":"product-question","original_question":"日报研究问题如何做到每题独立会话？","source_excerpt":"帮我记录一下自动研究流程","background":"日报 Agent 产品设计","runner":"web-research","research_prompt":"给出直接结论"}]}
+```
+"""
+            elif agent_id == "research_seed":
+                report_content = """# Research seeds
+
+```json
+{"research_questions":[{"id":"github-question","original_question":"ibkr 仓库如何计算成交成本？","source_excerpt":"帮我记录一下并研究 IBKR 成交成本","background":"日报中的投资研究问题","intent_evidence":"需要仓库代码和计算口径","expected_evidence":["实际仓库文件"]},{"id":"product-question","original_question":"日报研究问题如何做到每题独立会话？","source_excerpt":"帮我记录一下自动研究流程","background":"日报 Agent 产品设计","intent_evidence":"需要跨产品研究与方案比较","expected_evidence":["产品与实现资料"]}],"non_research_items":[{"source_excerpt":"帮我记录一下修复线上超时","classification":"internal_investigation","reason":"需要当前系统日志和 Trace，不是外部研究"}]}
 ```
 """
             elif agent_id == "research_digest":
@@ -530,7 +540,8 @@ daily_dir = pathlib.Path(data_dir) / "asr" / "data" / "text" / task_id / ".daily
 daily_dir.mkdir(parents=True, exist_ok=True)
 (daily_dir / "2026-05-23.md").write_text(
     "# 2026-05-23\n\n帮我记录一下并研究 IBKR 成交成本。\n"
-    "另一个问题：日报研究问题如何做到每题独立会话？\n",
+    "另一个问题：日报研究问题如何做到每题独立会话？\n"
+    "帮我记录一下修复线上超时并查询 Trace。\n",
     encoding="utf-8",
 )
 queued = request(
@@ -563,6 +574,10 @@ fanout_dir = daily_dir / "agents" / "research_fanout" / "output" / "research_res
 children_dir = fanout_dir / "2026-05-23"
 manifest = json.loads((children_dir / "manifest.json").read_text(encoding="utf-8"))
 assert len(manifest["questions"]) == 2, manifest
+assert "修复线上超时" not in json.dumps(manifest, ensure_ascii=False), manifest
+seed_path = daily_dir / "agents" / "research_seed" / "output" / "research_seed" / "2026-05-23-report.md"
+seed_report = seed_path.read_text(encoding="utf-8")
+assert '"classification":"internal_investigation"' in seed_report, seed_report
 github = json.loads((children_dir / "github-question.json").read_text(encoding="utf-8"))
 product = json.loads((children_dir / "product-question.json").read_text(encoding="utf-8"))
 assert github["original_question"] == "ibkr 仓库如何计算成交成本？", github

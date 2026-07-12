@@ -8,6 +8,10 @@ use std::sync::Arc;
 const DEFAULT_DAILY_AGENT_TIMEOUT_MS: u64 = 7_200_000; // 2 hours
 const DEFAULT_ASR_DAILY_AGENTS_MD: &str = include_str!("daily_agent_template.md");
 const DEFAULT_ASR_TOMORROW_TODO_AGENT_MD: &str = include_str!("daily_agent_tomorrow_todo_template.md");
+const DEFAULT_ASR_RESEARCH_SEED_AGENT_MD: &str =
+    include_str!("daily_agent_research_seed_template.md");
+const DEFAULT_ASR_RESEARCH_DISPATCHER_AGENT_MD: &str =
+    include_str!("daily_agent_research_dispatcher_template.md");
 const PROCESSED_STATE_VERSION: u32 = 1;
 const CONVERSATION_STATE_VERSION: u32 = 1;
 const DEFAULT_DAILY_AGENT_ID: &str = "daily_report";
@@ -16,6 +20,8 @@ const DEFAULT_DAILY_AGENT_OUTPUT_DIR: &str = "report";
 const DEFAULT_TOMORROW_TODO_AGENT_ID: &str = "tomorrow_todo";
 const DEFAULT_TOMORROW_TODO_AGENT_NAME: &str = "tomorrow_todo";
 const DEFAULT_TOMORROW_TODO_OUTPUT_DIR: &str = "tomorrow_todo";
+const DEFAULT_RESEARCH_SEED_AGENT_ID: &str = "research_seed";
+const DEFAULT_RESEARCH_DISPATCHER_AGENT_ID: &str = "research_dispatcher";
 const DEFAULT_DAILY_AGENT_IM_CHANNEL: &str = "owner:feishu-main";
 const DAILY_AGENT_TERMS_FILENAME: &str = "TERMS.md";
 
@@ -694,24 +700,23 @@ pub(crate) struct AsrDailyAgentResearchContextProfile {
     pub instructions: Option<String>,
 }
 
-fn daily_agent_instruction_content(task: &AsrDirectoryTask) -> String {
-    if task.daily_agent.agent_id == DEFAULT_TOMORROW_TODO_AGENT_ID {
-        DEFAULT_ASR_TOMORROW_TODO_AGENT_MD
-            .replace("{{task_name}}", &task.name)
-            .replace("{{daily_dir}}", "./input")
-            .replace(
-                "{{report_dir}}",
-                &format!("./output/{}/", task.daily_agent.output_dir),
-            )
-    } else {
-        DEFAULT_ASR_DAILY_AGENTS_MD
-            .replace("{{task_name}}", &task.name)
-            .replace("{{daily_dir}}", "./input")
-            .replace(
-                "{{report_dir}}",
-                &format!("./output/{}/", task.daily_agent.output_dir),
-            )
+fn daily_agent_instruction_template(agent_id: &str) -> &'static str {
+    match agent_id {
+        DEFAULT_TOMORROW_TODO_AGENT_ID => DEFAULT_ASR_TOMORROW_TODO_AGENT_MD,
+        DEFAULT_RESEARCH_SEED_AGENT_ID => DEFAULT_ASR_RESEARCH_SEED_AGENT_MD,
+        DEFAULT_RESEARCH_DISPATCHER_AGENT_ID => DEFAULT_ASR_RESEARCH_DISPATCHER_AGENT_MD,
+        _ => DEFAULT_ASR_DAILY_AGENTS_MD,
     }
+}
+
+fn daily_agent_instruction_content(task: &AsrDirectoryTask) -> String {
+    daily_agent_instruction_template(&task.daily_agent.agent_id)
+        .replace("{{task_name}}", &task.name)
+        .replace("{{daily_dir}}", "./input")
+        .replace(
+            "{{report_dir}}",
+            &format!("./output/{}/", task.daily_agent.output_dir),
+        )
 }
 
 fn daily_agent_instructions_dir(task_id: &str) -> PathBuf {
