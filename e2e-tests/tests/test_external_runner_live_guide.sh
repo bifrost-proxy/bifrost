@@ -68,9 +68,27 @@ if "--input-format" in sys.argv and sys.argv[sys.argv.index("--input-format") + 
     record({"event":"turn_started","runner":runner,"pid":os.getpid(),"frame":first})
     send({"type":"system","subtype":"init","session_id":thread_id})
     send(first)
+    prompt = first["message"]["content"][0]["text"]
+    if "queue-after-reject" in prompt:
+        send({"type":"assistant","message":{"content":[{"type":"text","text":f"QUEUED_{runner}"}]},"session_id":thread_id})
+        send({"type":"result","subtype":"success","is_error":False,"result":f"QUEUED_{runner}","session_id":thread_id})
+        sys.exit(0)
+    interrupt = json.loads(sys.stdin.readline())
+    assert interrupt["type"] == "control_request", interrupt
+    assert interrupt["request"]["subtype"] == "interrupt", interrupt
+    record({"event":"stream_interrupt_received","runner":runner,"pid":os.getpid(),"frame":interrupt})
+    if mode == "reject":
+        send({"type":"control_response","response":{"subtype":"error","request_id":interrupt["request_id"],"error":"no active Claude response"}})
+        time.sleep(0.5)
+        send({"type":"assistant","message":{"content":[{"type":"text","text":f"FIRST_{runner}"}]},"session_id":thread_id})
+        send({"type":"result","subtype":"success","is_error":False,"result":f"FIRST_{runner}","session_id":thread_id})
+        sys.exit(0)
+    send({"type":"control_response","response":{"subtype":"success","request_id":interrupt["request_id"],"response":{}}})
     guide = json.loads(sys.stdin.readline())
     record({"event":"stream_guide_received","runner":runner,"pid":os.getpid(),"frame":guide})
     send(guide)
+    send({"type":"result","subtype":"error_during_execution","is_error":True,"session_id":thread_id})
+    send({"type":"system","subtype":"init","session_id":thread_id})
     send({"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-claude","name":"Bash","input":{"command":"pwd"}}]},"session_id":thread_id})
     send({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-claude","content":"/tmp"}]},"session_id":thread_id})
     send({"type":"assistant","message":{"content":[{"type":"text","text":f"GUIDED_{runner}"}]},"session_id":thread_id})
@@ -188,6 +206,7 @@ for runner_name, adapter, mode, transport in (
     ("codex-im", "codex", "accept", "app_server"),
     ("codex-im-queue", "codex", "accept", "app_server"),
     ("codex-reject", "codex", "reject", "app_server"),
+    ("claude-reject", "claude_code", "reject", None),
     ("codex-exec", "codex", "accept", "exec"),
     ("claude", "claude_code", "accept", None),
 ):
@@ -261,6 +280,9 @@ assert tool_started[0] < tool_finished[0] < events.index(finished[0]), events
 
 records = [json.loads(line) for line in open(mock_path, encoding="utf-8")]
 if runner == "claude":
+    interrupts = [record for record in records if record.get("event") == "stream_interrupt_received" and record.get("runner") == runner]
+    assert len(interrupts) == 1, records
+    assert interrupts[0]["frame"]["request"]["subtype"] == "interrupt", interrupts
     steered = [record for record in records if record.get("event") == "stream_guide_received" and record.get("runner") == runner]
     assert len(steered) == 1, records
     frame = steered[0]["frame"]
@@ -468,10 +490,11 @@ assert guide["delivery"] == expected_delivery, guide
 events = [json.loads(line) for line in open(stream_path, encoding="utf-8") if line.strip()]
 finished = [event for event in events if event.get("eventType") == "run_finished"]
 assert len(finished) == 2, events
-if runner == "codex-reject":
-    assert finished[0]["response"] == "FIRST_codex-reject", finished
-    assert finished[1]["response"] == "QUEUED_codex-reject", finished
-    assert "no active turn to steer" in guide["reason"], guide
+if runner in ("codex-reject", "claude-reject"):
+    assert finished[0]["response"] == f"FIRST_{runner}", finished
+    assert finished[1]["response"] == f"QUEUED_{runner}", finished
+    expected_reason = "no active turn to steer" if runner == "codex-reject" else "no active Claude response"
+    assert expected_reason in guide["reason"], guide
 else:
     assert all(event["response"] == "EXEC_codex-exec" for event in finished), finished
     assert "exec transport" in guide["reason"], guide
@@ -479,6 +502,7 @@ PY
 }
 
 run_queue_fallback_case codex-reject queued
+run_queue_fallback_case claude-reject queued
 run_queue_fallback_case codex-exec queued
 
 python3 - "$BIFROST_PORT" <<'PY'

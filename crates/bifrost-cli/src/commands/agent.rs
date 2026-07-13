@@ -101,16 +101,25 @@ fn handle_agent_guide(
         .unwrap_or("unknown");
     match delivery {
         "steered" => {
-            let turn_id = value
-                .get("turnId")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            println!(
-                "{} Guided active turn {} (session={})",
-                "✓".bright_green(),
-                turn_id.bright_cyan(),
-                session,
-            );
+            if let Some(turn_id) = value.get("turnId").and_then(Value::as_str) {
+                println!(
+                    "{} Guided active turn {} (session={})",
+                    "✓".bright_green(),
+                    turn_id.bright_cyan(),
+                    session,
+                );
+            } else {
+                let thread_id = value
+                    .get("threadId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                println!(
+                    "{} Redirected active runner session {} (session={})",
+                    "✓".bright_green(),
+                    thread_id.bright_cyan(),
+                    session,
+                );
+            }
         }
         "queued" => {
             let reason = value
@@ -637,6 +646,20 @@ mod tests {
         assert!(request
             .starts_with("POST /_bifrost/api/im-gateway/chat/sessions/team%2Fa/guide HTTP/1.1"));
         assert!(request.contains(r#"{"message":"focus on tests"}"#));
+    }
+
+    #[test]
+    fn handle_agent_guide_accepts_session_redirect_without_turn_id() {
+        let (port, handle) = spawn_recording_http_server(
+            r#"{"delivery":"steered","threadId":"claude-session","sessionKey":"team/claude"}"#,
+        );
+
+        handle_agent_guide("127.0.0.1", port, "team/claude", "focus on tests", false).unwrap();
+        let request = handle.join().unwrap();
+
+        assert!(request.starts_with(
+            "POST /_bifrost/api/im-gateway/chat/sessions/team%2Fclaude/guide HTTP/1.1"
+        ));
     }
 
     #[test]

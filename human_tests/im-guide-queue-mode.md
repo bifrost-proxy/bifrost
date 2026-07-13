@@ -281,22 +281,26 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
   - 真实并发复现：修复前同等 4-way 并发稳定复现 DRAIN 失败 2/24；修复后在干净端口下的多轮并发运行 0 次 DRAIN 失败。
 - **执行记录（2026-06-16）**: PASS — `cargo fmt --all -- --check` 通过；`cargo clippy -p bifrost-agent -p bifrost-admin --all-targets -- -D warnings` 0 warning；`cargo test -p bifrost-admin im_gateway` 447 passed / 0 failed；`cargo test -p bifrost-agent session` 130 passed / 0 failed。真实复现对照：修复前 4-way 并发稳定复现 DRAIN 丢失（保留的 mock 日志证明引导"丢失非延迟"，第二轮请求从未到达 mock）；修复后干净端口并发运行未再出现任何 DRAIN 失败（残留失败均为端口占用 `Errno 48` 的环境噪声，已与丢引导 bug 区分）。
 
-### TC-GQ-20: Claude Code busy 消息通过 stream-json 注入当前 turn
+### TC-GQ-20: Claude Code busy 消息通过 stream-json 中断并接续当前 session
 
 - **操作步骤**:
   ```bash
   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
-    mock_stream_json_runner_accepts_live_guide_in_same_process --lib -- --nocapture
+    mock_stream_json_runner_redirects_live_guide_in_same_process --lib -- --nocapture
+  SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+    result_frame_force_kills_runner_that_does_not_exit --lib -- --nocapture
   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
     bash e2e-tests/tests/test_external_runner_live_guide.sh
   ```
 - **预期结果**:
   - Claude Code 默认命令包含 `--input-format stream-json --output-format stream-json --replay-user-messages`，显式 text/custom args/exec 保留 queue fallback。
-  - 首条 prompt 与 busy guide 是同一个 mock Claude 进程收到的两条 user JSONL 帧；guide 不启动第二个进程或下一轮 resume。
-  - 只有 mock 通过 replay user frame 回显确认 guide 后，CLI/API 才返回 `delivery=steered`；`threadId` 为 Claude `session_id`，`turnId` 为空。
-  - 原 run 在同一 turn 返回 `GUIDED_claude`，tool started/finished 顺序正常，run detail 持久化 Claude session 与 usage。
-  - Codex/Traex app-server steer、reject-to-queue、显式 exec queue fallback 和 inactive session reject 同时回归通过。
+  - 首条 prompt 与 busy guide 使用同一个 mock Claude 进程和 session；guide 先发送 `control_request/subtype=interrupt`，收到 request id 匹配的 success response 后才发送 user JSONL 帧，不启动第二个进程或额外 resume。
+  - 只有 interrupt 成功且 replay user frame 回显确认 guide 后，CLI/API 才返回 `delivery=steered`；`threadId` 为 Claude `session_id`，`turnId` 为空，表示 session redirect 而不是 Codex 风格的 same-turn steer。
+  - transport 抑制已确认 interrupt 对应的 `result/error_during_execution`，继续等待 guide 的最终 success；外部只看到一个成功的 `run_finished`，最终响应为 `GUIDED_claude`。
+  - runner 已输出终态 result 但不退出时，grace timeout 后终止进程组，并在 5 秒测试上限内完成 stderr reader 清理，不残留 `ACTIVE_RUNS`。
+  - Codex/Traex app-server steer、Codex app-server reject-to-queue、Claude interrupt control reject-to-queue、显式 exec queue fallback 和 inactive session reject 同时回归通过。
 - **执行记录（2026-07-12）**: PASS — `mock_stream_json_runner_accepts_live_guide_in_same_process` 通过；重新构建当前源码后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh` 输出 `[external-runner-live-guide] PASS`。mock 记录证明 Claude 初始帧与 guide 帧 PID 相同，CLI 返回 `delivery=steered`、`threadId=thread-claude`、无 `turnId`，最终同一 run 返回 `GUIDED_claude`。
+- **执行记录（2026-07-13）**: PASS — 先用本机 Claude Code `2.1.207` 真实验证官方控制协议：长工具执行期间发送 interrupt control request，收到 matching success response 后发送 guide；同一 PID 依次输出旧响应 `error_during_execution` 与新响应 `success/GUIDED`。随后 `mock_stream_json_runner_redirects_live_guide_in_same_process` 和 `result_frame_force_kills_runner_that_does_not_exit` 各 `1 passed`，后者在约 2.17 秒内结束忽略 SIGTERM 的 mock；重新构建后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh` 输出 `[external-runner-live-guide] PASS`，Claude 外部事件只有一个成功 `run_finished`；mock Claude interrupt 明确拒绝时返回 `delivery=queued`，首轮 `FIRST_claude-reject` 后仅执行一次 `QUEUED_claude-reject`，拒绝原因完整保留。
 
 ## 清理步骤
 
