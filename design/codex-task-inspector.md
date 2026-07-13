@@ -151,7 +151,7 @@ markers 缺失不代表探测失败，只是提示 “这个目录看上去不�
 `codex-task-inspector` 不新增任何 Bifrost CLI 命令或 API 端点，只在 skill 内部提供脚本。原因：
 
 - 探测 Codex 数据目录不属于 Bifrost 主链路能力。
-- skill 已经是 Bifrost agent 的一等公民，通过 skill 调用即可复用。
+- skill 已经是 Bifrost 外部 Runner 生态的一等公民，通过 skill 调用即可复用。
 
 ## 数据 / Sync 边界
 

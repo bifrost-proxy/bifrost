@@ -508,7 +508,7 @@ mod tests {
         mgr.inject_guide("s1", "请帮我分析这个问题".into());
 
         // ── The fix: drain guide_channel BEFORE checking queue/clear ──
-        // This is what `run_agent_chat_with_interleave` now does after turn completes.
+        // The external runner event loop drains this queue after each turn completes.
         let unconsumed: Vec<String> = channel.lock().unwrap().drain(..).collect();
         assert_eq!(unconsumed, vec!["请帮我分析这个问题".to_string()]);
 

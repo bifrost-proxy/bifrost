@@ -114,35 +114,13 @@ pub(super) async fn request_agent_stop_with_runs_root(
     runs_root: impl AsRef<Path>,
 ) -> bool {
     let internal_stopped = manager.request_stop(session_key);
-    let worker_stopped = crate::im_gateway::agent_worker::request_session_stop(session_key).await;
     let external_worker_stopped =
         crate::im_gateway::external_cli::request_worker_session_stop(session_key).await;
     let external_stopped =
         crate::im_gateway::external_cli::request_session_stop(runs_root, session_key)
             .await
             .is_ok();
-    internal_stopped || worker_stopped || external_worker_stopped || external_stopped
-}
-
-pub(super) async fn clear_builtin_im_agent_session(
-    manager: &bifrost_agent::AgentSessionManager,
-    queue_manager: &crate::im_gateway::SessionQueueManager,
-    session_key: &str,
-) {
-    manager.request_stop(session_key);
-    let _ = crate::im_gateway::agent_worker::request_session_stop(session_key).await;
-    if let Some(mut session) = manager.try_take_session(session_key) {
-        session.clear();
-        manager.return_session(session);
-    } else {
-        manager.clear_session(session_key);
-    }
-    queue_manager.clear_session(session_key);
-    clear_persisted_agent_session_state(
-        session_key,
-        Some(crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER),
-        None,
-    );
+    internal_stopped || external_worker_stopped || external_stopped
 }
 
 /// Extract a path segment that appears before a known suffix.
@@ -252,26 +230,26 @@ pub(super) fn build_online_notification_agent_context(
     agent_session_manager: &bifrost_agent::AgentSessionManager,
 ) -> OnlineNotificationAgentContext {
     let effective_agent_config = effective_agent_config_for_provider(base_agent_config, provider);
-    let (runner_type, runner_id, model_config) = match effective_agent_config.runner.as_ref() {
-        Some(bifrost_agent::AgentRunnerMode::Custom(runner_id)) => {
-            let external =
-                crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
-                    external_cli_config,
-                    Some(provider.id.as_str()),
-                    Some(runner_id.as_str()),
-                );
-            let model_config =
-                crate::im_gateway::external_cli::resolve_external_cli_status_model_config(
-                    &external.settings.adapter,
-                    &external.settings.adapter_config,
-                );
-            (
-                external.settings.adapter,
-                Some(external.runner_id),
-                Some(model_config),
-            )
-        }
-        _ => ("bifrost_agent".to_string(), None, None),
+    let runner_override = effective_agent_config
+        .runner
+        .as_ref()
+        .and_then(|runner| runner.custom_runner_id());
+    let (runner_type, runner_id, model_config) = {
+        let external = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
+            external_cli_config,
+            Some(provider.id.as_str()),
+            runner_override,
+        );
+        let model_config =
+            crate::im_gateway::external_cli::resolve_external_cli_status_model_config(
+                &external.settings.adapter,
+                &external.settings.adapter_config,
+            );
+        (
+            external.settings.adapter,
+            Some(external.runner_id),
+            Some(model_config),
+        )
     };
     let session_key = build_session_key(&provider.id, provider.owner_open_id.as_deref());
     let user_turn_count = online_notification_user_turn_count(agent_session_manager, &session_key);
@@ -336,7 +314,7 @@ pub(super) fn build_online_notification_message_with_context(
     let work_dir = online_notification_work_dir(provider);
     let runner_type = agent_context
         .map(|context| context.runner_type.as_str())
-        .unwrap_or("bifrost_agent");
+        .unwrap_or("external");
     let runner_id = agent_context
         .and_then(|context| context.runner_id.as_deref())
         .unwrap_or("N/A");
@@ -367,7 +345,9 @@ pub(super) fn build_online_notification_message_with_context(
     );
     let runner_kind = agent_context
         .map(|context| ImHelpRunnerKind::from_runner_type(&context.runner_type))
-        .unwrap_or(ImHelpRunnerKind::Builtin);
+        .unwrap_or_else(|| ImHelpRunnerKind::External {
+            adapter: "codex".to_string(),
+        });
     message.push_str("\n\n");
     message.push_str(&build_im_startup_help_for_runner(&runner_kind));
     message
@@ -388,50 +368,6 @@ pub(super) fn outbound_log_msg_type(
 ///
 /// Used by the plan listener task: first call creates a new card via send_card,
 /// subsequent calls update the same card via patch_card.
-pub(super) fn build_plan_card(
-    steps: &[bifrost_agent::PlanStep],
-    session_title: Option<&str>,
-) -> serde_json::Value {
-    let completed = steps
-        .iter()
-        .filter(|s| matches!(s.status, bifrost_agent::PlanStepStatus::Completed))
-        .count();
-    let total = steps.len();
-
-    let mut plan_md = String::new();
-    for s in steps {
-        plan_md.push_str(&format!("{} {}\n", s.status.emoji(), s.step));
-    }
-
-    let title = session_title.unwrap_or("Bifrost AI");
-
-    serde_json::json!({
-        "schema": "2.0",
-        "config": {
-            "width_mode": "fill",
-            "update_multi": true
-        },
-        "header": {
-            "template": "turquoise",
-            "title": {
-                "tag": "plain_text",
-                "content": title
-            },
-            "subtitle": {
-                "tag": "plain_text",
-                "content": format!("📋 任务计划（{}/{}）", completed, total)
-            }
-        },
-        "body": {
-            "elements": [{
-                "tag": "markdown",
-                "content": plan_md
-            }]
-        }
-    })
-}
-
-/// Build a status text for IM display.
 /// Shows detailed status if session exists, otherwise shows a "new session" placeholder.
 pub(super) fn build_im_status_text(
     detail: Option<&SessionDetail>,
@@ -449,13 +385,13 @@ pub(super) fn build_im_status_text(
                 .as_ref()
                 .or(context.agent_type.as_ref())
                 .map(String::as_str)
-                .unwrap_or("Bifrost Agent");
+                .unwrap_or("External Runner Agent");
             let runner_type = d
                 .runner_type
                 .as_ref()
                 .or(context.runner_type.as_ref())
                 .map(String::as_str)
-                .unwrap_or("bifrost_agent");
+                .unwrap_or("external");
             let runner_id = d
                 .runner_id
                 .as_ref()
@@ -530,106 +466,6 @@ pub(super) fn build_im_status_text(
     }
 }
 
-pub(super) fn build_agent_api_status_text(
-    detail: Option<&SessionDetail>,
-    config: &bifrost_agent::config::AgentConfig,
-) -> String {
-    let context = status_context_from_agent_config(config);
-    let default_work_dir = config.resolve_work_dir().display().to_string();
-    match detail {
-        Some(d) => {
-            let real = d
-                .total_tokens_used
-                .map(bifrost_agent::format_status_metric_count)
-                .unwrap_or_else(|| "N/A".to_string());
-            let agent_type = d
-                .agent_type
-                .as_ref()
-                .or(context.agent_type.as_ref())
-                .map(String::as_str)
-                .unwrap_or("Bifrost Agent");
-            let runner_type = d
-                .runner_type
-                .as_ref()
-                .or(context.runner_type.as_ref())
-                .map(String::as_str)
-                .unwrap_or("bifrost_agent");
-            let runner_id = d
-                .runner_id
-                .as_ref()
-                .or(context.runner_id.as_ref())
-                .map(String::as_str)
-                .unwrap_or("N/A");
-            let model_text = bifrost_agent::format_model_ref(
-                d.model
-                    .as_ref()
-                    .or(context.model.as_ref())
-                    .map(String::as_str),
-                d.model_provider
-                    .as_ref()
-                    .or(context.model_provider.as_ref())
-                    .map(String::as_str),
-            );
-            let reasoning_effort_text = bifrost_agent::format_optional_status_text(
-                d.model_reasoning_effort
-                    .as_ref()
-                    .or(context.model_reasoning_effort.as_ref())
-                    .map(String::as_str),
-            );
-            let reasoning_summary_text = bifrost_agent::format_optional_status_text(
-                d.model_reasoning_summary
-                    .as_ref()
-                    .or(context.model_reasoning_summary.as_ref())
-                    .map(String::as_str),
-            );
-            let conversation_ref = bifrost_agent::format_conversation_ref(
-                d.external_thread_id
-                    .as_ref()
-                    .or(context.external_thread_id.as_ref())
-                    .map(String::as_str),
-                d.external_conversation_id
-                    .as_ref()
-                    .or(context.external_conversation_id.as_ref())
-                    .map(String::as_str),
-            );
-            let context_window = config
-                .model_context_window
-                .and_then(|value| u32::try_from(value).ok())
-                .filter(|value| *value > 0)
-                .unwrap_or(bifrost_agent::config::AgentConfig::DEFAULT_MODEL_CONTEXT_WINDOW as u32);
-            let context_percent =
-                ((d.estimated_tokens as f64 / context_window as f64) * 1000.0).round() / 10.0;
-            let work_dir = d.work_dir.as_deref().unwrap_or(default_work_dir.as_str());
-            let context_management_text =
-                bifrost_agent::format_context_management_status(d.message_count);
-            format!(
-                "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 模型: {}\n- 思考强度: {}\n- 思考摘要: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- Context 用量: ~{} / {} ({:.1}%)\n- 显式压缩次数: {}\n- 上下文管理: {}\n- 历史版本: {}\n- MCP 工具数: 0",
-                work_dir,
-                agent_type,
-                runner_type,
-                runner_id,
-                model_text,
-                reasoning_effort_text,
-                reasoning_summary_text,
-                conversation_ref,
-                d.user_turn_count,
-                d.message_count,
-                bifrost_agent::format_status_metric_count(d.estimated_tokens.into()),
-                real,
-                bifrost_agent::format_status_metric_count(d.estimated_tokens.into()),
-                bifrost_agent::format_status_metric_count(context_window.into()),
-                context_percent,
-                d.compaction_count,
-                context_management_text,
-                d.history_version,
-            )
-        }
-        None => {
-            "会话状态:\n- 消息数: 0\n- 状态: 新会话\n\n提示: 发送消息即可开始对话。".to_string()
-        }
-    }
-}
-
 pub(super) fn status_context_from_agent_runner(
     runner: Option<&bifrost_agent::AgentRunnerMode>,
 ) -> bifrost_agent::StatusRuntimeContext {
@@ -637,17 +473,7 @@ pub(super) fn status_context_from_agent_runner(
         Some(bifrost_agent::AgentRunnerMode::Custom(runner_id)) => {
             status_context_from_external_runner(runner_id, runner_id)
         }
-        _ => bifrost_agent::StatusRuntimeContext {
-            agent_type: Some("Bifrost Agent".to_string()),
-            runner_type: Some("bifrost_agent".to_string()),
-            runner_id: None,
-            model: None,
-            model_provider: None,
-            model_reasoning_effort: None,
-            model_reasoning_summary: None,
-            external_conversation_id: None,
-            external_thread_id: None,
-        },
+        _ => status_context_from_external_runner("Codex", "codex"),
     }
 }
 
@@ -676,27 +502,6 @@ pub(super) fn status_context_from_external_runner(
         model_reasoning_summary: None,
         external_conversation_id: None,
         external_thread_id: None,
-    }
-}
-
-pub(super) fn resolve_agent_api_status_detail(
-    manager: &bifrost_agent::AgentSessionManager,
-    session_key: &str,
-    requested_work_dir: Option<String>,
-) -> Option<SessionDetail> {
-    let has_requested_work_dir = requested_work_dir
-        .as_deref()
-        .is_some_and(|work_dir| !work_dir.trim().is_empty());
-    if !has_requested_work_dir && manager.get_session_detail(session_key).is_none() {
-        return None;
-    }
-
-    match manager.try_take_session_with_work_dir(session_key, requested_work_dir) {
-        Some(session) => {
-            manager.return_session(session);
-            manager.get_session_detail(session_key)
-        }
-        None => manager.get_session_detail(session_key),
     }
 }
 
@@ -1332,44 +1137,6 @@ pub(super) fn remember_session_state_from_agent_session(
     }
 }
 
-pub(super) fn remember_session_turn_started(
-    session_key: &str,
-    adapter: &str,
-    runner_id: Option<&str>,
-    user_message: &str,
-    history_path: Option<String>,
-    work_dir: Option<String>,
-) {
-    let user_message = user_message.trim();
-    if user_message.is_empty() {
-        return;
-    }
-    if let Err(error) = crate::im_gateway::session_state::upsert_session_state(
-        session_key,
-        adapter,
-        runner_id,
-        |state| {
-            state.title.get_or_insert_with(|| user_message.to_string());
-            state.last_user_message = Some(user_message.to_string());
-            state.last_response = None;
-            state.status = Some("running".to_string());
-            if let Some(history_path) = history_path {
-                state.history_path = Some(history_path);
-            }
-            if let Some(work_dir) = work_dir {
-                state.work_dir = Some(work_dir);
-            }
-        },
-    ) {
-        warn!(
-            session_key = %session_key,
-            adapter = %adapter,
-            error = %error,
-            "failed to persist IM agent turn start state"
-        );
-    }
-}
-
 fn latest_role_content(session: &bifrost_agent::AgentSession, role: &str) -> Option<String> {
     session
         .history
@@ -1554,7 +1321,7 @@ pub(super) fn restore_session_from_history_path(
     session.history_version = session.history_version.saturating_add(1);
     session.last_response_tokens = None;
     session.last_response_history_len = None;
-    session.memory_cleared = false;
+    session.history_cleared = false;
     session.title = summary.title;
     if session.work_dir.is_none() {
         session.work_dir = summary.work_dir;
@@ -1565,11 +1332,9 @@ pub(super) fn restore_session_from_history_path(
     match bifrost_agent::persistence::load_session_runtime_state(&path) {
         Ok(runtime_state) => {
             session.current_goal = runtime_state.current_goal;
-            session.current_plan = runtime_state.current_plan;
             session.total_tokens_used = runtime_state.total_tokens_used;
             session.restore_token_snapshot(runtime_state.last_response_tokens);
             session.compaction_count = runtime_state.compaction_count;
-            session.resolved_base_instructions = runtime_state.base_instructions;
             bifrost_agent::tools::goal::goal_runtime_apply(
                 session,
                 bifrost_agent::tools::goal::GoalRuntimeEvent::ThreadResumed,
@@ -1612,12 +1377,19 @@ pub(super) fn parse_session_filename(filename: &str) -> (String, u64) {
 
 #[cfg(test)]
 mod attachment_tests {
-    use super::resolve_attachment_path;
+    use super::{resolve_attachment_path, status_context_from_agent_runner};
 
     #[test]
     fn attachment_path_resolution_stays_inside_attachment_root() {
         assert!(resolve_attachment_path("chatgpt_web/run/image.png").is_some());
         assert!(resolve_attachment_path("../secret.png").is_none());
         assert!(resolve_attachment_path("/tmp/secret.png").is_none());
+    }
+
+    #[test]
+    fn missing_runner_uses_codex_external_status_context() {
+        let context = status_context_from_agent_runner(None);
+        assert_eq!(context.runner_id.as_deref(), Some("Codex"));
+        assert_eq!(context.runner_type.as_deref(), Some("codex"));
     }
 }

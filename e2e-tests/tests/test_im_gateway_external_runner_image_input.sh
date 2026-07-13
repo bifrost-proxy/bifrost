@@ -371,8 +371,8 @@ runner_events = stream(
     "/runner-calls/stream",
     {
         "callerSessionKey": caller_session_key,
-        "callerRunnerId": "bifrost_agent",
-        "callerRunnerAdapter": "bifrost_agent",
+        "callerRunnerId": "Codex",
+        "callerRunnerAdapter": "Codex",
         "targetRunnerId": runner_id,
         "message": "",
         "images": [

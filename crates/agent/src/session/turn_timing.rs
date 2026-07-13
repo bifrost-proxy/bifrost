@@ -1,4 +1,4 @@
-//! Turn Timing metrics for Bifrost Agent.
+//! Turn timing metrics shared by external runner sessions.
 //!
 //! Tracks TTFT (Time to First Token) and TTFM (Time to First Message) for
 //! each turn, providing observability into model response latency. Modeled

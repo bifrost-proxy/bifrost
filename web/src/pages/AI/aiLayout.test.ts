@@ -31,7 +31,7 @@ describe("resolveAiRouteState", () => {
       resolveAiRouteState(params("aiSection=agent-chat&agentSection=chat")),
     ).toMatchObject({
       view: "chat",
-      chatMode: "new",
+      chatMode: "thread",
       settings: null,
       agentSection: "chat",
     });
@@ -145,7 +145,6 @@ describe("runner options", () => {
 
     expect(options.map((option) => option.label)).toEqual([
       "Codex Runner",
-      "Bifrost Agent",
       "Claude Code",
       "Trae X",
       "custom_runner (shell)",
@@ -174,8 +173,8 @@ describe("runner options", () => {
     });
 
     expect(selectDefaultRunner(options)).toMatchObject({
-      label: "Bifrost Agent",
-      value: "bifrost_agent",
+      label: "Claude Code",
+      value: "claude_runner",
     });
   });
 

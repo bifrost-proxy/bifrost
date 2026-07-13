@@ -42,8 +42,6 @@ pub fn handle_agent_command(
             session,
             json,
         } => handle_agent_guide(host, port, &session, &message, json),
-        AgentCommands::Worker => bifrost_admin::im_gateway::agent_worker::run_worker_stdio()
-            .map_err(bifrost_core::BifrostError::Config),
         AgentCommands::ExternalRunnerWorker => {
             bifrost_admin::im_gateway::external_cli::run_worker_stdio()
                 .map_err(bifrost_core::BifrostError::Config)

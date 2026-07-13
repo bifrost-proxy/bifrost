@@ -54,7 +54,7 @@ bifrost im provider add weixin-main --type weixin --runner codex
 
 Feishu interactive setup prints an authorization URL and terminal QR code. Weixin interactive setup prints a scan QR code. The CLI keeps waiting until the user authorizes or scans, then creates and connects the provider. Non-interactive runs must pass `--runner`; interactive terminals can present a keyboard-selectable runner list. Invalid runners are rejected with the current supported runner list. Feishu and Weixin provider base URLs are fixed by provider type, so agents should not suggest `--base-url`.
 
-When an IM channel comes online, Bifrost sends the online notification followed by runner-aware help. Agents should keep command guidance aligned with the bound runner: the built-in Bifrost Agent supports memory, goal, compaction, and guidance commands, while external runners such as Codex, Traex, and Claude Code should only advertise model or reasoning effort commands when their adapter supports them.
+When an IM channel comes online, Bifrost sends the online notification followed by runner-aware help. External runners such as Codex, Traex, and Claude Code should advertise model or reasoning-effort commands only when their adapter supports them.
 
 Useful options and environment variables:
 

@@ -12,7 +12,7 @@ async function routeAiLayoutApis(page: Page) {
       owner_open_id: "ou_mock_owner",
       enabled: true,
       event_connection_enabled: true,
-      agent_config: { runner: "bifrost_agent", work_dir: "/tmp/default-agent" },
+      agent_config: { runner: "codex", work_dir: "/tmp/default-agent" },
     },
     {
       id: "weixin-main",
@@ -58,7 +58,7 @@ async function routeAiLayoutApis(page: Page) {
             title: "Existing thread",
             source: "admin-api",
             runner_type: "codex",
-            runner_id: "codex_runner",
+            runner_id: "codex",
             work_dir: "/tmp/workspace",
             start_time: 1_779_700_000,
             last_active_time: 1_779_700_100,
@@ -77,7 +77,7 @@ async function routeAiLayoutApis(page: Page) {
         title: "Existing thread",
         source: "admin-api",
         runner_type: "codex",
-        runner_id: "codex_runner",
+        runner_id: "codex",
         work_dir: "/tmp/workspace",
         messages: [
           { role: "user", content: "Existing prompt" },
@@ -99,9 +99,9 @@ async function routeAiLayoutApis(page: Page) {
       contentType: "application/json",
       body: JSON.stringify({
         version: 1,
-        defaultRunnerId: "bifrost_agent",
+        defaultRunnerId: "codex",
         runners: {
-          codex_runner: { enabled: true, adapter: "codex" },
+          codex: { enabled: true, adapter: "codex" },
           claude_runner: { enabled: true, adapter: "claude_code" },
           traex_runner: { enabled: true, adapter: "traex" },
         },
@@ -229,7 +229,7 @@ test("AI layout defaults to new chat with centered composer and runner picker", 
 
   await landing.getByTestId("agent-chat-inline-runner").click();
   const dropdown = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)").last();
-  await expect(dropdown.getByText("Bifrost Agent", { exact: true })).toBeVisible();
+  await expect(dropdown.getByText("Codex Runner", { exact: true })).toBeVisible();
   await expect(dropdown.getByText("Claude Code", { exact: true })).toBeVisible();
   await dropdown.getByText("Claude Code", { exact: true }).click();
 
@@ -305,9 +305,9 @@ test("AI left rail switches ASR, IM, Settings, and history threads", async ({ pa
   await expect(page.getByRole("button", { name: "Back" })).toHaveCount(0);
   await expect(page.getByText("Session Detail")).toHaveCount(0);
   await expect(page.getByTestId("agent-settings-section-general")).toBeVisible();
-  await expect(page.getByTestId("agent-settings-section-model")).toBeVisible();
-  await expect(page.getByTestId("agent-settings-section-runtime")).toBeVisible();
-  await expect(page.getByTestId("agent-settings-section-mcp-servers")).toBeVisible();
+  await expect(page.getByTestId("agent-settings-section-model")).toHaveCount(0);
+  await expect(page.getByTestId("agent-settings-section-runtime")).toHaveCount(0);
+  await expect(page.getByTestId("agent-settings-section-mcp-servers")).toHaveCount(0);
   await expect(page.getByTestId("agent-settings-section-runners")).toHaveCount(0);
   await expectCenteredTrack(page, "ai-settings-content", "ai-settings-track");
 
@@ -331,7 +331,7 @@ test("AI layout maps legacy links into the new shell", async ({ page }) => {
   await openPage(page, "ai?aiSection=agent-model&agentSection=model");
   await expect(page.getByTestId("ai-settings-content")).toBeVisible();
   await expect(page.getByRole("tab", { name: "Agent" })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByTestId("agent-settings-section-model")).toBeVisible();
+  await expect(page.getByTestId("agent-settings-section-general")).toBeVisible();
 
   await openPage(page, "ai?settings=agent&agentSection=runners");
   await expect(page.getByTestId("ai-settings-content")).toBeVisible();
@@ -382,7 +382,7 @@ test("AI Settings clears conversation route state and only shows configuration t
   await expect(page.getByText("Session Detail")).toHaveCount(0);
   await expect(page.getByText("Messages", { exact: true })).toHaveCount(0);
   await expect(page.getByTestId("agent-settings-section-general")).toBeVisible();
-  await expect(page.getByTestId("agent-settings-section-model")).toBeVisible();
+  await expect(page.getByTestId("agent-settings-section-model")).toHaveCount(0);
 
   await page.getByRole("tab", { name: "Runner" }).click();
   await expect(page).toHaveURL(/settings=agent/);
@@ -399,7 +399,7 @@ test("AI Settings clears conversation route state and only shows configuration t
 test("AI Settings does not trap left rail navigation", async ({ page }) => {
   await openPage(page, "ai?view=settings&settings=agent&agentSection=model");
   await expect(page.getByTestId("ai-settings-content")).toBeVisible();
-  await expect(page.getByTestId("agent-settings-section-model")).toBeVisible();
+  await expect(page.getByTestId("agent-settings-section-general")).toBeVisible();
 
   await page.getByTestId("ai-nav-tools-asr").click();
   await expect(page).toHaveURL(/view=asr/);

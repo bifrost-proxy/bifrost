@@ -12,16 +12,12 @@ type HistorySessionEntry = (
     bifrost_agent::persistence::SessionFileSummary,
 );
 
-fn is_builtin_runner_value(value: &str) -> bool {
-    matches!(value, "bifrost_agent" | "builtin" | "bifrost")
-}
-
 fn is_external_runner_metadata(runner_type: Option<&str>, runner_id: Option<&str>) -> bool {
     runner_type
-        .map(|value| !is_builtin_runner_value(value))
+        .map(|value| !value.trim().is_empty())
         .unwrap_or(false)
         || runner_id
-            .map(|value| !is_builtin_runner_value(value))
+            .map(|value| !value.trim().is_empty())
             .unwrap_or(false)
 }
 
@@ -67,7 +63,7 @@ fn enrich_detail_with_history_runner_metadata(detail: &mut bifrost_agent::Sessio
     }
     detail.runner_type = runner_type;
     detail.runner_id = runner_id;
-    if detail.agent_type.as_deref() == Some("Bifrost Agent") || detail.agent_type.is_none() {
+    if detail.agent_type.is_none() {
         detail.agent_type = Some("external_cli".to_string());
     }
 }
@@ -150,49 +146,6 @@ pub(super) async fn handle_agent(
             _ => method_not_allowed(),
         };
     }
-
-    // GET /agent/mcp-status — check configured MCP server availability
-    if rest == "/mcp-status" {
-        if req.method() != Method::GET {
-            return method_not_allowed();
-        }
-        let config = service.agent_config_store.load();
-        let mcp_http_network = service
-            .agent_client
-            .model_proxy_url()
-            .map(|proxy_url| {
-                bifrost_agent::mcp::McpHttpNetwork::with_proxy_and_ca(
-                    proxy_url.to_string(),
-                    Some(bifrost_storage::data_dir().join("certs").join("ca.crt")),
-                )
-            })
-            .unwrap_or_else(bifrost_agent::mcp::McpHttpNetwork::direct);
-        let statuses = bifrost_agent::mcp::check_server_availability_with_http_network(
-            &config.mcp_servers,
-            mcp_http_network,
-        )
-        .await;
-        return json_response(&serde_json::json!({ "servers": statuses }));
-    }
-
-    // GET /agent/providers — list all built-in model providers
-    if rest == "/providers" {
-        if req.method() != Method::GET {
-            return method_not_allowed();
-        }
-        let providers = bifrost_agent::list_builtin_providers();
-        return json_response(&providers);
-    }
-
-    // GET /agent/tools — list all built-in agent tools
-    if rest == "/tools" {
-        if req.method() != Method::GET {
-            return method_not_allowed();
-        }
-        let tools = service.agent_tools.definitions();
-        return json_response(&serde_json::json!({ "tools": tools }));
-    }
-
     if let Some(skills_rest) = rest.strip_prefix("/skills") {
         return crate::handlers::agent_skills::handle_agent_skills(req, service, skills_rest).await;
     }
@@ -360,10 +313,7 @@ pub(super) async fn handle_agent(
                     .unwrap_or_default()
             };
             let duration_secs = s.updated_at.saturating_sub(s.started_at);
-            let queue_snapshot = crate::handlers::agent_chat::queue_snapshot_payload(
-                &service.queue_manager,
-                &s.session_key,
-            );
+            let queue_snapshot = queue_snapshot_payload(&service.queue_manager, &s.session_key);
             unified.push(serde_json::json!({
                 "session_key": s.session_key,
                 "status": "active",
@@ -436,10 +386,7 @@ pub(super) async fn handle_agent(
                     .unwrap_or_default()
             };
             let duration_secs = s.last_active_at.saturating_sub(s.created_at);
-            let queue_snapshot = crate::handlers::agent_chat::queue_snapshot_payload(
-                &service.queue_manager,
-                &s.session_key,
-            );
+            let queue_snapshot = queue_snapshot_payload(&service.queue_manager, &s.session_key);
             let has_active_turn = s.running;
             let run_state = active_session_list_run_state(has_active_turn, &s.run_state);
             unified.push(serde_json::json!({
@@ -900,436 +847,7 @@ pub(super) async fn handle_agent(
         return method_not_allowed();
     }
 
-    // POST /agent/chat — internal test endpoint (bypasses Feishu)
-    if rest == "/chat" {
-        if req.method() != Method::POST {
-            return method_not_allowed();
-        }
-        #[derive(Deserialize)]
-        struct ChatRequest {
-            message: String,
-            #[serde(default)]
-            images: Vec<ChatImageRequest>,
-            #[serde(default)]
-            session_key: Option<String>,
-            #[serde(default)]
-            system_prompt: Option<String>,
-            #[serde(default, alias = "collaborationMode")]
-            collaboration_mode: Option<bifrost_agent::CollaborationMode>,
-            #[serde(default)]
-            work_dir: Option<String>,
-            /// Optional JSONL history file to restore before continuing.
-            #[serde(default)]
-            history_path: Option<String>,
-            /// Inject a guide message into guide_channel before starting the turn.
-            /// Used to test the scenario where a user sends a message while the
-            /// agent is finishing its turn (guide_channel drain at turn end).
-            #[serde(default)]
-            guide_message: Option<String>,
-            /// Inject multiple guide messages into guide_channel before starting
-            /// the turn. Used to verify pending guide status and merge behavior.
-            #[serde(default)]
-            guide_messages: Vec<String>,
-            /// Inject messages into the pending queue before starting the turn.
-            /// Used to test queued message processing. Each message will be
-            /// processed sequentially within the same `run_turn_with_mcp` call.
-            #[serde(default)]
-            queue_messages: Vec<String>,
-        }
-        #[derive(Deserialize)]
-        struct ChatImageRequest {
-            #[serde(default = "default_chat_image_mime_type")]
-            mime_type: String,
-            /// Base64 image bytes or a data URL.
-            data: String,
-        }
-        pub(super) fn default_chat_image_mime_type() -> String {
-            "image/png".to_string()
-        }
-        let mut body: ChatRequest = match read_body_json(req).await {
-            Ok(v) => v,
-            Err(resp) => return resp,
-        };
-        let slash_mode = crate::im_gateway::agent_slash::parse_agent_slash_mode(&body.message);
-        body.message = slash_mode.message;
-        body.collaboration_mode = crate::im_gateway::agent_slash::merge_collaboration_mode(
-            body.collaboration_mode,
-            slash_mode.collaboration_mode,
-        );
-        if body.message.trim().is_empty() && body.images.is_empty() {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "message must not be empty after /plan",
-            );
-        }
-        let config = service.agent_config_store.load();
-        if !config.enabled {
-            return error_response(StatusCode::SERVICE_UNAVAILABLE, "Agent is disabled");
-        }
-        let session_key = body
-            .session_key
-            .unwrap_or_else(|| "test-session".to_string());
-        info!(
-            session_key = %session_key,
-            message_len = body.message.len(),
-            has_system_prompt_override = body.system_prompt.is_some(),
-            "invoking agent chat api"
-        );
-
-        // ── Session-free command fast path ──────────────────────────────
-        if body.message.trim() == "/status" {
-            if let Some(mut status) = service
-                .agent_session_manager
-                .get_active_turn_status(&session_key)
-            {
-                let pending_guides = merge_pending_guide_messages(
-                    &status.pending_guide_messages,
-                    service.queue_manager.guide_status(&session_key),
-                );
-                status.pending_guide_messages = pending_guides.clone();
-                let status_context = status_context_from_agent_config(&config);
-                return json_response(&serde_json::json!({
-                    "success": true,
-                    "response": bifrost_agent::format_active_turn_status_text_with_context(
-                        &status,
-                        &status_context
-                    ),
-                    "active_status": status,
-                    "pending_guide_messages": pending_guides,
-                    "tool_calls": [],
-                    "plan_steps": null
-                }));
-            }
-            let detail = if service
-                .agent_session_manager
-                .get_session_detail(&session_key)
-                .is_none()
-            {
-                let has_requested_work_dir = body
-                    .work_dir
-                    .as_deref()
-                    .is_some_and(|work_dir| !work_dir.trim().is_empty());
-                if let Some(mut session) = service
-                    .agent_session_manager
-                    .try_take_session_with_work_dir(&session_key, body.work_dir.clone())
-                {
-                    session.source = "api".to_string();
-                    session.mark_bifrost_agent_runtime();
-                    let restored = restore_session_from_persisted_history(
-                        &mut session,
-                        &session_key,
-                        crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
-                        None,
-                        config.history.as_ref().and_then(|h| h.max_bytes),
-                    );
-                    if restored.is_some() || has_requested_work_dir {
-                        service.agent_session_manager.return_session(session);
-                    } else {
-                        service.agent_session_manager.release_active(&session_key);
-                    }
-                }
-                service
-                    .agent_session_manager
-                    .get_session_detail(&session_key)
-            } else {
-                resolve_agent_api_status_detail(
-                    &service.agent_session_manager,
-                    &session_key,
-                    body.work_dir,
-                )
-            };
-            let response = build_agent_api_status_text(detail.as_ref(), &config);
-            return json_response(&serde_json::json!({
-                "success": true,
-                "response": response,
-                "tool_calls": [],
-                "plan_steps": null
-            }));
-        }
-
-        if body.message.trim() == "/stop" {
-            let stopped = request_agent_stop(&service.agent_session_manager, &session_key).await;
-            let repaired_stale_running = if stopped {
-                0
-            } else {
-                repair_stale_persisted_running_states(&session_key)
-            };
-            return json_response(&serde_json::json!({
-                "success": true,
-                "response": if stopped {
-                    "已请求停止当前 Agent loop。"
-                } else if repaired_stale_running > 0 {
-                    "当前没有正在执行的 Agent loop，已修复残留运行状态。"
-                } else {
-                    "当前没有正在执行的 Agent loop。"
-                },
-                "stopped": stopped,
-                "repaired_stale_running": repaired_stale_running,
-                "tool_calls": [],
-                "plan_steps": null
-            }));
-        }
-
-        if matches!(body.message.trim(), "/clear" | "/reset") {
-            clear_builtin_im_agent_session(
-                &service.agent_session_manager,
-                &service.queue_manager,
-                &session_key,
-            )
-            .await;
-            return json_response(&serde_json::json!({
-                "success": true,
-                "response": "会话已重置，可以开始新的对话。",
-                "tool_calls": [],
-                "plan_steps": null
-            }));
-        }
-
-        if let Some(response) =
-            bifrost_agent::handle_session_free_command(&session_key, &body.message, &config)
-        {
-            return json_response(&serde_json::json!({
-                "success": true,
-                "response": response,
-                "tool_calls": [],
-                "plan_steps": null
-            }));
-        }
-
-        // ── Busy check ─────────────────────────────────────────────────
-        let mut session = match service
-            .agent_session_manager
-            .try_take_session_with_work_dir(&session_key, body.work_dir)
-        {
-            Some(s) => s,
-            None => {
-                return json_response(&serde_json::json!({
-                    "success": true,
-                    "response": "⏳ Agent 正在处理中，请稍后再试。\n\n提示: /stop 可立即停止当前 loop；/help、/remember、/memories、/forget 等命令即使在处理中也可立即响应。",
-                    "tool_calls": [],
-                    "plan_steps": null
-                }))
-            }
-        };
-        session.source = "api".to_string();
-        session.mark_bifrost_agent_runtime();
-        let is_manual_compaction = body.message.trim() == "/compact";
-        let requested_history_path = body
-            .history_path
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        if let Some(history_path) = requested_history_path {
-            if session.history.is_empty() {
-                if let Err(error) = restore_session_from_history_path(
-                    &mut session,
-                    history_path,
-                    &session_key,
-                    config.history.as_ref().and_then(|h| h.max_bytes),
-                ) {
-                    service.agent_session_manager.return_session(session);
-                    return error_response(StatusCode::BAD_REQUEST, &error);
-                }
-            }
-        } else {
-            restore_session_from_persisted_history(
-                &mut session,
-                &session_key,
-                crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
-                None,
-                config.history.as_ref().and_then(|h| h.max_bytes),
-            );
-        }
-        service.agent_session_manager.update_active_session_preview(
-            &session_key,
-            if is_manual_compaction {
-                session.title.clone()
-            } else {
-                session
-                    .title
-                    .clone()
-                    .or_else(|| Some(body.message.trim().to_string()))
-            },
-            session.work_dir.clone(),
-            Some("api".to_string()),
-            Some(crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER.to_string()),
-            None,
-        );
-        prime_builtin_worker_active_status(&service.agent_session_manager, &session, &config);
-        consume_imported_contexts_for_builtin_agent(&mut session);
-        // Initial guide messages are passed to the isolated worker request.
-        // Avoid writing them into the main-process guide queue, otherwise the
-        // same guide can leak into a later turn after the worker has finished.
-        let history_path = session
-            .recorder
-            .as_ref()
-            .map(|recorder| recorder.file_path().display().to_string())
-            .or_else(|| body.history_path.clone());
-        if !is_manual_compaction {
-            remember_session_turn_started(
-                &session_key,
-                crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
-                None,
-                &body.message,
-                history_path.clone(),
-                session.work_dir.clone(),
-            );
-        }
-        let images: Vec<bifrost_agent::ChatImageInput> = body
-            .images
-            .iter()
-            .take(MAX_AGENT_IMAGES_PER_MESSAGE)
-            .filter(|image| !image.data.trim().is_empty())
-            .map(|image| bifrost_agent::ChatImageInput {
-                mime_type: image.mime_type.clone(),
-                data: image.data.clone(),
-            })
-            .collect();
-        if body.images.len() > MAX_AGENT_IMAGES_PER_MESSAGE {
-            warn!(
-                session_key = %session_key,
-                image_count = body.images.len(),
-                max_images = MAX_AGENT_IMAGES_PER_MESSAGE,
-                "too many /agent/chat images in one request; truncating images"
-            );
-        }
-        let mut worker_request = crate::im_gateway::agent_worker::build_run_request(
-            session_key.clone(),
-            body.message.clone(),
-            images,
-            &config,
-            session.work_dir.clone(),
-            history_path,
-            Some("api".to_string()),
-        );
-        worker_request.system_prompt = body.system_prompt.clone();
-        worker_request.collaboration_mode = body.collaboration_mode;
-        worker_request.guide_messages = body
-            .guide_message
-            .clone()
-            .into_iter()
-            .chain(body.guide_messages.clone())
-            .collect();
-        worker_request.queued_messages = body.queue_messages.clone();
-        let mut worker =
-            match crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(
-                worker_request,
-            )
-            .await
-            {
-                Ok(worker) => worker,
-                Err(error) => {
-                    service.agent_session_manager.return_session(session);
-                    return json_response(&serde_json::json!({
-                        "success": false,
-                        "error": format!("Agent worker 启动失败: {error}"),
-                    }));
-                }
-            };
-        let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<
-            crate::im_gateway::agent_worker::AgentWorkerStopRequest,
-        >();
-        let worker_pid = worker.child_id().unwrap_or(0);
-        crate::im_gateway::agent_worker::register_active_worker(
-            &session_key,
-            worker_pid,
-            stop_tx,
-            None,
-        );
-        let mut stop_ack = None;
-        let result = loop {
-            tokio::select! {
-                maybe_stop = stop_rx.recv() => {
-                    let _ = worker.terminate().await;
-                    stop_ack = maybe_stop;
-                    break Err("已收到 /stop，Agent worker 子进程已停止。".to_string());
-                }
-                event = worker.next_event() => {
-                    match event {
-                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Started { .. })) => {}
-                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Progress { event })) => {
-                            if let bifrost_agent::AgentTurnProgressEvent::Status(status) = event {
-                                service.agent_session_manager.update_active_turn_status_from_worker(*status);
-                            }
-                        }
-                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Finished { result })) => {
-                            if let Some(history_path) = result.history_path.as_deref() {
-                                let _ = restore_session_from_history_path(
-                                    &mut session,
-                                    history_path,
-                                    &session_key,
-                                    config.history.as_ref().and_then(|h| h.max_bytes),
-                                );
-                            }
-                            break Ok(bifrost_agent::TurnResult::from(result));
-                        }
-                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Failed { error })) => break Err(error),
-                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Stopped)) => {
-                            break Err("已收到 /stop，Agent worker 子进程已停止。".to_string());
-                        }
-                        Ok(None) => break Err("agent worker exited without result".to_string()),
-                        Err(error) => break Err(format!("agent worker failed: {error}")),
-                    }
-                }
-            }
-        };
-        crate::im_gateway::agent_worker::clear_active_worker(&session_key);
-        if let Ok(turn_result) = &result {
-            if let Some(new_dir) = turn_result.work_dir_switched.as_ref() {
-                session.work_dir = Some(new_dir.clone());
-            }
-        }
-        remember_session_state_from_agent_session(
-            &session,
-            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
-            None,
-        );
-        service.agent_session_manager.return_session(session);
-        if let Some(stop_request) = stop_ack {
-            stop_request.ack();
-        }
-        match result {
-            Ok(turn_result) => {
-                info!(
-                    session_key = %session_key,
-                    response_len = turn_result.response.len(),
-                    tool_call_count = turn_result.tool_calls_log.len(),
-                    "agent chat api completed"
-                );
-                json_response(&serde_json::json!({
-                    "success": true,
-                    "response": turn_result.response,
-                    "tool_calls": turn_result.tool_calls_log,
-                    "plan_steps": turn_result.plan_steps,
-                    "proposed_plan": turn_result.proposed_plan
-                }))
-            }
-            Err(e) => {
-                if e.contains("已收到 /stop") {
-                    info!(
-                        session_key = %session_key,
-                        response = %e,
-                        "agent chat api stopped"
-                    );
-                    return json_response(&serde_json::json!({
-                        "success": true,
-                        "response": e,
-                        "stopped": true,
-                        "tool_calls": [],
-                        "plan_steps": null
-                    }));
-                }
-                error!(
-                    session_key = %session_key,
-                    error = %e,
-                    "agent chat api failed"
-                );
-                error_response(StatusCode::INTERNAL_SERVER_ERROR, &e)
-            }
-        }
-    } else {
-        error_response(StatusCode::NOT_FOUND, "Agent endpoint not found")
-    }
+    error_response(StatusCode::NOT_FOUND, "Agent endpoint not found")
 }
 
 fn agent_session_events_response(service: &ImGatewayService) -> Response<BoxBody> {
@@ -1369,97 +887,10 @@ fn agent_session_events_response(service: &ImGatewayService) -> Response<BoxBody
         .unwrap()
 }
 
-fn consume_imported_contexts_for_builtin_agent(session: &mut bifrost_agent::AgentSession) {
-    let contexts = match crate::im_gateway::session_state::take_imported_contexts(
-        &session.session_key,
-        crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
-        None,
-    ) {
-        Ok(contexts) => contexts,
-        Err(error) => {
-            warn!(
-                session_key = %session.session_key,
-                error = %error,
-                "failed to consume imported runner contexts for built-in agent"
-            );
-            Vec::new()
-        }
-    };
-    let Some(rendered) = crate::im_gateway::session_state::render_imported_contexts(&contexts)
-    else {
-        return;
-    };
-    session
-        .history
-        .push(bifrost_agent::ChatMessage::developer(&rendered));
-}
-
-fn restore_session_from_history_path(
-    session: &mut bifrost_agent::AgentSession,
-    history_path: &str,
-    expected_session_key: &str,
-    max_bytes: Option<usize>,
-) -> Result<(), String> {
-    let data_dir = bifrost_agent::config::agent_home_dir();
-    let path =
-        bifrost_agent::persistence::validate_conversation_path(&data_dir, Path::new(history_path))?;
-    let report = bifrost_agent::persistence::load_conversation_lossy(&path)?;
-    if let Some(restored_key) = report.session_key.as_deref() {
-        if restored_key != expected_session_key {
-            return Err("history session_key does not match the requested session_key".to_string());
-        }
-    }
-    if report.messages.is_empty() {
-        return Err("history file does not contain restorable chat messages".to_string());
-    }
-
-    let summary = bifrost_agent::persistence::scan_session_summary(&path);
-    session.history = report.messages;
-    session.history_version = session.history_version.saturating_add(1);
-    session.last_response_tokens = None;
-    session.last_response_history_len = None;
-    session.memory_cleared = false;
-    session.title = summary.title;
-    if session.work_dir.is_none() {
-        session.work_dir = summary.work_dir;
-    }
-    if !summary.source.is_empty() {
-        session.source = summary.source;
-    }
-    match bifrost_agent::persistence::load_session_runtime_state(&path) {
-        Ok(runtime_state) => {
-            session.current_goal = runtime_state.current_goal;
-            session.current_plan = runtime_state.current_plan;
-            session.total_tokens_used = runtime_state.total_tokens_used;
-            session.restore_token_snapshot(runtime_state.last_response_tokens);
-            session.compaction_count = runtime_state.compaction_count;
-            session.resolved_base_instructions = runtime_state.base_instructions;
-            bifrost_agent::tools::goal::goal_runtime_apply(
-                session,
-                bifrost_agent::tools::goal::GoalRuntimeEvent::ThreadResumed,
-            );
-        }
-        Err(error) => {
-            warn!(history_path = %path.display(), error = %error, "restored chat history without runtime state");
-            session.total_tokens_used = Some(summary.total_tokens);
-            session.compaction_count = summary.compaction_count;
-        }
-    }
-    if report.skipped_lines > 0 {
-        warn!(
-            history_path = %path.display(),
-            skipped_lines = report.skipped_lines,
-            "restored chat history with skipped JSONL lines"
-        );
-    }
-    session.recorder = Some(ConversationRecorder::from_existing_file(path, max_bytes));
-    Ok(())
-}
-
 pub(super) fn agent_config_response(
     config: crate::im_gateway::agent::ImAgentConfig,
 ) -> serde_json::Value {
-    let default_base_instructions = bifrost_agent::prompt::default_base_instructions();
+    let default_base_instructions = "";
     let effective_base_instructions = config
         .base_instructions
         .as_deref()
@@ -1524,9 +955,6 @@ pub(super) fn apply_agent_config_patch(
     if let Some(provider) = patch.get("model_provider").and_then(|v| v.as_str()) {
         config.model_provider = Some(provider.to_string());
     }
-    if let Some(tokens) = patch.get("max_completion_tokens").and_then(|v| v.as_u64()) {
-        config.max_completion_tokens = Some(u32::try_from(tokens).unwrap_or(u32::MAX));
-    }
     if let Some(effort) = patch
         .get("model_reasoning_effort")
         .or_else(|| patch.get("reasoning_effort"))
@@ -1544,17 +972,6 @@ pub(super) fn apply_agent_config_patch(
     if let Some(window) = patch.get("model_context_window").and_then(|v| v.as_i64()) {
         config.model_context_window = Some(window);
     }
-    if let Some(compact) = patch
-        .get("model_auto_compact_token_limit")
-        .or_else(|| patch.get("compact_threshold_tokens"))
-    {
-        if compact.is_null() {
-            // null → clear override, fall back to context_window × 90%
-            config.model_auto_compact_token_limit = None;
-        } else if let Some(v) = compact.as_i64() {
-            config.model_auto_compact_token_limit = Some(v);
-        }
-    }
     patch_optional_string(&mut config.base_instructions, patch, &["base_instructions"]);
     patch_optional_string(
         &mut config.developer_instructions,
@@ -1564,18 +981,6 @@ pub(super) fn apply_agent_config_patch(
     patch_optional_string(&mut config.user_instructions, patch, &["user_instructions"]);
     if let Some(ttl) = patch.get("session_ttl_secs").and_then(|v| v.as_u64()) {
         config.session_ttl_secs = Some(ttl);
-    }
-    if let Some(timeout) = patch.get("request_timeout_secs").and_then(|v| v.as_u64()) {
-        config.request_timeout_secs = Some(timeout);
-    }
-    if let Some(max_iter) = patch.get("max_turn_iterations").and_then(|v| v.as_u64()) {
-        config.max_turn_iterations = Some(u32::try_from(max_iter).unwrap_or(u32::MAX));
-    }
-    if let Some(tool_limit) = patch
-        .get("tool_output_token_limit")
-        .and_then(|v| v.as_u64())
-    {
-        config.tool_output_token_limit = Some(tool_limit as usize);
     }
     if let Some(doc_max) = patch.get("project_doc_max_bytes").and_then(|v| v.as_u64()) {
         config.project_doc_max_bytes = Some(doc_max as usize);
@@ -1601,179 +1006,6 @@ pub(super) fn apply_agent_config_patch(
             history.max_bytes = Some(max_bytes as usize);
         }
     }
-    if let Some(memories_obj) = patch.get("memories").and_then(|v| v.as_object()) {
-        let memories = config.memories.get_or_insert_with(Default::default);
-        if let Some(v) = memories_obj
-            .get("disable_on_external_context")
-            .and_then(|v| v.as_bool())
-        {
-            memories.disable_on_external_context = Some(v);
-        }
-        if let Some(v) = memories_obj
-            .get("generate_memories")
-            .and_then(|v| v.as_bool())
-        {
-            memories.generate_memories = Some(v);
-        }
-        if let Some(v) = memories_obj.get("use_memories").and_then(|v| v.as_bool()) {
-            memories.use_memories = Some(v);
-        }
-        if let Some(v) = memories_obj
-            .get("max_raw_memories_for_consolidation")
-            .and_then(|v| v.as_u64())
-        {
-            memories.max_raw_memories_for_consolidation = Some(v as usize);
-        }
-        if let Some(v) = memories_obj.get("max_unused_days").and_then(|v| v.as_i64()) {
-            memories.max_unused_days = Some(v);
-        }
-        if let Some(v) = memories_obj
-            .get("max_rollout_age_days")
-            .and_then(|v| v.as_i64())
-        {
-            memories.max_rollout_age_days = Some(v);
-        }
-        if let Some(v) = memories_obj
-            .get("max_rollouts_per_startup")
-            .and_then(|v| v.as_u64())
-        {
-            memories.max_rollouts_per_startup = Some(v as usize);
-        }
-        if let Some(v) = memories_obj
-            .get("min_rollout_idle_hours")
-            .and_then(|v| v.as_i64())
-        {
-            memories.min_rollout_idle_hours = Some(v);
-        }
-        if let Some(v) = memories_obj
-            .get("min_rate_limit_remaining_percent")
-            .and_then(|v| v.as_i64())
-        {
-            memories.min_rate_limit_remaining_percent = Some(v);
-        }
-        if let Some(v) = memories_obj.get("extract_model").and_then(|v| v.as_str()) {
-            memories.extract_model = Some(v.to_string());
-        }
-        if let Some(v) = memories_obj
-            .get("consolidation_model")
-            .and_then(|v| v.as_str())
-        {
-            memories.consolidation_model = Some(v.to_string());
-        }
-    }
-    if let Some(timeout) = patch
-        .get("background_terminal_max_timeout")
-        .and_then(|v| v.as_u64())
-    {
-        config.background_terminal_max_timeout = Some(timeout);
-    }
-    if let Some(channel) = patch.get("default_message_channel") {
-        if channel.is_null() {
-            config.default_message_channel = None;
-        } else if let Ok(binding) =
-            serde_json::from_value::<bifrost_agent::ImMessageChannelBinding>(channel.clone())
-        {
-            config.default_message_channel = Some(binding);
-        }
-    }
-
-    // Provider-level fields: apply to the active provider in model_providers
-    let provider_id = config
-        .model_provider
-        .clone()
-        .unwrap_or_else(|| "aidp_crawl".to_string());
-    let provider = config
-        .model_providers
-        .entry(provider_id.clone())
-        .or_insert_with(|| bifrost_agent::ModelProviderConfig {
-            name: Some(provider_id.clone()),
-            base_url: None,
-            wire_api: Some(bifrost_agent::ModelWireApi::ChatCompletions),
-            env_key: None,
-            api_key: None,
-            http_headers: None,
-            env_http_headers: None,
-            request_max_retries: None,
-            stream_idle_timeout_ms: None,
-            stream_max_retries: None,
-        });
-    if let Some(url) = patch.get("base_url").and_then(|v| v.as_str()) {
-        provider.base_url = Some(url.to_string());
-    }
-    if let Some(key) = patch.get("api_key").and_then(|v| v.as_str()) {
-        if key.is_empty() {
-            provider.api_key = None;
-            if let Some(headers) = provider.http_headers.as_mut() {
-                headers.remove("api-key");
-                if headers.is_empty() {
-                    provider.http_headers = None;
-                }
-            }
-        } else {
-            provider.api_key = Some(key.to_string());
-            if uses_api_key_header(&provider_id, patch) {
-                provider
-                    .http_headers
-                    .get_or_insert_with(HashMap::new)
-                    .insert("api-key".to_string(), key.to_string());
-            }
-        }
-    }
-    if let Some(env_key) = patch.get("env_key").and_then(|v| v.as_str()) {
-        provider.env_key = Some(env_key.to_string());
-    }
-    if let Some(by_azure) = patch.get("by_azure").and_then(|v| v.as_bool()) {
-        if by_azure {
-            let headers = provider.http_headers.get_or_insert_with(HashMap::new);
-            if !headers.contains_key("api-key") {
-                headers.insert("api-key".to_string(), String::new());
-            }
-        } else if let Some(ref mut headers) = provider.http_headers {
-            headers.remove("api-key");
-        }
-    }
-    if let Some(retries) = patch.get("request_max_retries").and_then(|v| v.as_u64()) {
-        provider.request_max_retries = Some(retries);
-    }
-    if let Some(timeout) = patch.get("stream_idle_timeout_ms").and_then(|v| v.as_u64()) {
-        provider.stream_idle_timeout_ms = Some(timeout);
-    }
-    if let Some(retries) = patch.get("stream_max_retries").and_then(|v| v.as_u64()) {
-        provider.stream_max_retries = Some(retries);
-    }
-
-    // MCP servers: full replacement via JSON object
-    if let Some(mcp_obj) = patch.get("mcp_servers").and_then(|v| v.as_object()) {
-        let mut mcp_servers = HashMap::new();
-        for (name, server_val) in mcp_obj {
-            if let Ok(server_config) =
-                serde_json::from_value::<bifrost_agent::McpServerConfig>(server_val.clone())
-            {
-                mcp_servers.insert(name.clone(), server_config);
-            }
-        }
-        config.mcp_servers = mcp_servers;
-    }
-
-    // Model providers: full replacement via JSON object
-    if let Some(providers_obj) = patch.get("model_providers").and_then(|v| v.as_object()) {
-        let mut model_providers = HashMap::new();
-        for (name, provider_val) in providers_obj {
-            if let Ok(provider_config) =
-                serde_json::from_value::<bifrost_agent::ModelProviderConfig>(provider_val.clone())
-            {
-                model_providers.insert(name.clone(), provider_config);
-            }
-        }
-        config.model_providers = model_providers;
-    }
-}
-
-pub(super) fn uses_api_key_header(provider_id: &str, patch: &serde_json::Value) -> bool {
-    patch
-        .get("by_azure")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(matches!(provider_id, "aidp_crawl" | "azure"))
 }
 
 fn dedupe_unified_sessions_by_key(unified: &mut Vec<serde_json::Value>) {
@@ -1904,9 +1136,6 @@ fn persisted_session_projection(
         if let Some(run_state) = history_run_state {
             return terminal_persisted_session_projection(run_state, true, true);
         }
-        if state.adapter == crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER {
-            return terminal_persisted_session_projection("completed", true, false);
-        }
         if state.latest_run_id.is_none() {
             return terminal_persisted_session_projection("completed", true, false);
         }
@@ -1984,98 +1213,6 @@ fn summary_end_time(summary: &bifrost_agent::persistence::SessionFileSummary) ->
     }
 }
 
-fn repair_stale_persisted_running_states(session_key: &str) -> usize {
-    let mut repaired = 0;
-    for state in crate::im_gateway::session_state::list_session_states()
-        .into_iter()
-        .filter(|state| state.session_key == session_key)
-        .filter(|state| state.status.as_deref() == Some("running"))
-    {
-        let history_summary = persisted_state_history_summary(&state);
-        let projection = persisted_session_projection(&state, history_summary.as_ref());
-        if !projection.stale_running {
-            continue;
-        }
-        let next_status = status_from_run_state(&projection.run_state).to_string();
-        match crate::im_gateway::session_state::upsert_session_state(
-            &state.session_key,
-            &state.adapter,
-            state.runner_id.as_deref(),
-            |stored| {
-                stored.status = Some(next_status.clone());
-            },
-        ) {
-            Ok(_) => repaired += 1,
-            Err(error) => {
-                warn!(
-                    session_key = %state.session_key,
-                    adapter = %state.adapter,
-                    runner_id = ?state.runner_id,
-                    error = %error,
-                    "failed to repair stale persisted Agent running state"
-                );
-            }
-        }
-    }
-    repaired
-}
-
-fn persisted_state_history_summary(
-    state: &crate::im_gateway::session_state::ImAgentSessionState,
-) -> Option<bifrost_agent::persistence::SessionFileSummary> {
-    let data_dir = bifrost_agent::config::agent_home_dir();
-    let path = state.history_path.as_deref().and_then(|path| {
-        bifrost_agent::persistence::validate_conversation_path(
-            &data_dir,
-            std::path::Path::new(path),
-        )
-        .ok()
-    });
-    path.map(|path| bifrost_agent::persistence::scan_session_summary(&path))
-}
-
-fn status_from_run_state(run_state: &str) -> &'static str {
-    match run_state {
-        "failed" => "failed",
-        "stopped" => "stopped",
-        "timed_out" => "timed_out",
-        _ => "ended",
-    }
-}
-
-fn prime_builtin_worker_active_status(
-    manager: &bifrost_agent::AgentSessionManager,
-    session: &bifrost_agent::AgentSession,
-    config: &bifrost_agent::AgentConfig,
-) {
-    let Some(mut status) = manager.get_active_turn_status(&session.session_key) else {
-        return;
-    };
-    let estimated_context_tokens = session.effective_token_count();
-    let context_window_tokens = config
-        .model_context_window
-        .and_then(|value| u32::try_from(value).ok())
-        .filter(|value| *value > 0);
-    status.state = "running".to_string();
-    status.current_loop_iteration = status.current_loop_iteration.max(1);
-    status.max_loop_iterations = config.get_max_turn_iterations();
-    status.last_response_tokens = session.last_response_tokens;
-    status.total_tokens_used = session.total_tokens_used;
-    status.estimated_context_tokens = estimated_context_tokens;
-    status.context_window_tokens = context_window_tokens;
-    status.context_usage_percent = context_window_tokens
-        .map(|window| ((estimated_context_tokens as f64 / window as f64) * 1000.0).round() / 10.0);
-    status.compaction_count = session.compaction_count;
-    status.history_version = session.history_version;
-    status.work_dir = session.work_dir.clone();
-    status.message_count = session.history.len();
-    status.user_turn_count = session.user_turn_count();
-    status.agent_type = session.agent_type.clone();
-    status.runner_type = session.runner_type.clone();
-    status.runner_id = session.runner_id.clone();
-    manager.update_active_turn_status_from_worker(status);
-}
-
 fn insert_queue_snapshot(
     value: &mut serde_json::Value,
     queue_manager: &crate::im_gateway::SessionQueueManager,
@@ -2083,26 +1220,23 @@ fn insert_queue_snapshot(
     let Some(session_key) = value.get("session_key").and_then(|value| value.as_str()) else {
         return;
     };
-    let queue_snapshot =
-        crate::handlers::agent_chat::queue_snapshot_payload(queue_manager, session_key);
+    let snapshot = queue_snapshot_payload(queue_manager, session_key);
     if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "queue_length".to_string(),
-            queue_snapshot["queueLength"].clone(),
-        );
-        object.insert(
-            "queue_items".to_string(),
-            queue_snapshot["queueItems"].clone(),
-        );
-        object.insert(
-            "queueLength".to_string(),
-            queue_snapshot["queueLength"].clone(),
-        );
-        object.insert(
-            "queueItems".to_string(),
-            queue_snapshot["queueItems"].clone(),
-        );
+        for key in ["queue_length", "queueLength"] {
+            object.insert(key.to_string(), snapshot["queueLength"].clone());
+        }
+        for key in ["queue_items", "queueItems"] {
+            object.insert(key.to_string(), snapshot["queueItems"].clone());
+        }
     }
+}
+
+fn queue_snapshot_payload(
+    queue_manager: &crate::im_gateway::SessionQueueManager,
+    session_key: &str,
+) -> serde_json::Value {
+    let items = queue_manager.queue_status(session_key);
+    serde_json::json!({ "queueLength": items.len(), "queueItems": items })
 }
 
 fn overlay_active_status_on_session_detail(
@@ -2456,7 +1590,6 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         .iter()
         .filter(|message| message.role == "user")
         .count();
-    let is_builtin_agent = state.adapter == crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER;
     let run_state = match state.status.as_deref() {
         Some("running") => "running",
         Some("failed" | "stopped" | "timed_out") => "failed",
@@ -2506,11 +1639,7 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         history_version: 0,
         work_dir: state.work_dir,
         source: "admin-api".to_string(),
-        agent_type: Some(if is_builtin_agent {
-            "Bifrost Agent".to_string()
-        } else {
-            "external_cli".to_string()
-        }),
+        agent_type: Some("external_cli".to_string()),
         runner_type: Some(state.adapter),
         runner_id: state.runner_id,
         model,
@@ -2700,9 +1829,9 @@ mod tests {
             history_version: 1,
             work_dir: None,
             source: "web".to_string(),
-            agent_type: Some("Bifrost Agent".to_string()),
-            runner_type: Some("bifrost_agent".to_string()),
-            runner_id: None,
+            agent_type: Some("External Runner Agent".to_string()),
+            runner_type: Some("codex".to_string()),
+            runner_id: Some("Codex".to_string()),
             model: None,
             model_provider: None,
             model_reasoning_effort: None,
@@ -2739,9 +1868,9 @@ mod tests {
             history_version: 1,
             work_dir: None,
             source: "web".to_string(),
-            agent_type: Some("Bifrost Agent".to_string()),
-            runner_type: Some("bifrost_agent".to_string()),
-            runner_id: None,
+            agent_type: Some("External Runner Agent".to_string()),
+            runner_type: Some("codex".to_string()),
+            runner_id: Some("Codex".to_string()),
             model: None,
             model_provider: None,
             model_reasoning_effort: None,
@@ -2849,9 +1978,9 @@ mod tests {
             mcp_tool_count: 2,
             pending_guide_messages: Vec::new(),
             user_turn_count: 50,
-            agent_type: Some("Bifrost Agent".to_string()),
-            runner_type: Some("bifrost_agent".to_string()),
-            runner_id: None,
+            agent_type: Some("External Runner Agent".to_string()),
+            runner_type: Some("codex".to_string()),
+            runner_id: Some("Codex".to_string()),
             model: Some("gpt-5".to_string()),
             model_provider: Some("openai".to_string()),
             model_reasoning_effort: Some("high".to_string()),
@@ -2872,38 +2001,6 @@ mod tests {
         assert_eq!(value["last_response_tokens"], 181_900);
         assert_eq!(value["active_status"]["estimated_context_tokens"], 186_727);
         assert_eq!(value["history_path"], "/tmp/history.jsonl");
-    }
-
-    #[test]
-    fn prime_builtin_worker_active_status_publishes_running_snapshot() {
-        let manager = bifrost_agent::AgentSessionManager::new(3600);
-        let mut session = manager.take_session_with_work_dir(
-            "worker-prime-status",
-            Some("/tmp/worker-prime-status".to_string()),
-        );
-        session.mark_bifrost_agent_runtime();
-        session
-            .history
-            .push(bifrost_agent::ChatMessage::user("hello"));
-
-        let config = bifrost_agent::AgentConfig {
-            max_turn_iterations: Some(8),
-            ..Default::default()
-        };
-
-        prime_builtin_worker_active_status(&manager, &session, &config);
-
-        let status = manager
-            .get_active_turn_status("worker-prime-status")
-            .expect("active status");
-        assert_eq!(status.state, "running");
-        assert_eq!(status.current_loop_iteration, 1);
-        assert_eq!(status.max_loop_iterations, 8);
-        assert_eq!(status.work_dir.as_deref(), Some("/tmp/worker-prime-status"));
-        assert_eq!(status.context_window_tokens, Some(250_000));
-        assert_eq!(status.agent_type.as_deref(), Some("Bifrost Agent"));
-        assert_eq!(status.runner_type.as_deref(), Some("bifrost_agent"));
-        assert_eq!(status.user_turn_count, 1);
     }
 
     fn persisted_state(
@@ -2932,43 +2029,6 @@ mod tests {
             run_state: Some(run_state.to_string()),
             ..bifrost_agent::persistence::SessionFileSummary::default()
         }
-    }
-
-    #[test]
-    fn stale_running_builtin_with_terminal_history_projects_completed() {
-        let state = persisted_state(
-            "stale-builtin-terminal",
-            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
-            "running",
-        );
-        let summary = summary_with_run_state("completed", 10, 20);
-
-        let projection = persisted_session_projection(&state, Some(&summary));
-
-        assert!(!projection.running);
-        assert_eq!(projection.status, "ended");
-        assert_eq!(projection.state, "ended");
-        assert_eq!(projection.run_state, "completed");
-        assert!(projection.stale_running);
-        assert!(projection.prefer_history_time);
-    }
-
-    #[test]
-    fn stale_running_builtin_without_live_runtime_projects_completed() {
-        let state = persisted_state(
-            "stale-builtin-no-history",
-            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
-            "running",
-        );
-
-        let projection = persisted_session_projection(&state, None);
-
-        assert!(!projection.running);
-        assert_eq!(projection.status, "ended");
-        assert_eq!(projection.state, "ended");
-        assert_eq!(projection.run_state, "completed");
-        assert!(projection.stale_running);
-        assert!(!projection.prefer_history_time);
     }
 
     #[test]
@@ -3015,46 +2075,6 @@ mod tests {
         assert_eq!(projection.run_state, "completed");
         assert!(projection.stale_running);
         assert!(projection.prefer_history_time);
-    }
-
-    #[test]
-    fn external_running_without_explicit_history_path_ignores_unlinked_terminal_history() {
-        let _lock = AGENT_API_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = tempfile::tempdir().expect("tempdir");
-        let _guard = AgentApiEnvGuard::new(dir.path());
-        let session_key = "external-unlinked-terminal-history";
-        let data_dir = bifrost_agent::config::agent_home_dir();
-        let mut recorder =
-            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
-        recorder
-            .record_session_start(session_key, serde_json::json!({"source": "web"}))
-            .expect("record start");
-        recorder
-            .record_user_message(session_key, "old unlinked user")
-            .expect("record user");
-        recorder
-            .record_assistant_message(session_key, "old unlinked assistant")
-            .expect("record assistant");
-        recorder
-            .record_run_state(session_key, "completed", Some("test"), Some("external"))
-            .expect("record run state");
-
-        let mut state = persisted_state(session_key, "codex", "running");
-        state.latest_run_id = Some("run-current".to_string());
-        let summary = persisted_state_history_summary(&state);
-
-        assert!(
-            summary.is_none(),
-            "unlinked terminal history must not be discovered by session_key fallback"
-        );
-        let projection = persisted_session_projection(&state, summary.as_ref());
-        assert!(projection.running);
-        assert_eq!(projection.status, "active");
-        assert_eq!(projection.state, "running");
-        assert_eq!(projection.run_state, "running");
-        assert!(!projection.stale_running);
     }
 
     struct AgentApiEnvGuard {
@@ -3105,53 +2125,6 @@ mod tests {
         assert_eq!(detail.messages[0].content, "Codex task");
         assert_eq!(detail.messages[1].role, "assistant");
         assert_eq!(detail.messages[1].content, "Codex answer");
-    }
-
-    #[test]
-    fn stale_running_repair_marks_builtin_state_ended() {
-        let _lock = AGENT_API_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = tempfile::tempdir().expect("tempdir");
-        let _guard = AgentApiEnvGuard::new(dir.path());
-        let session_key = "stale-running-repair";
-        let data_dir = bifrost_agent::config::agent_home_dir();
-        let mut recorder =
-            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
-        recorder
-            .record_session_start(session_key, serde_json::json!({"source": "admin-api"}))
-            .expect("record start");
-        recorder
-            .record_user_message(session_key, "repair me")
-            .expect("record user");
-        recorder
-            .record_assistant_message(session_key, "done")
-            .expect("record assistant");
-        recorder
-            .record_run_state(session_key, "completed", Some("test"), Some("builtin"))
-            .expect("record run state");
-        let history_path = recorder.file_path().display().to_string();
-
-        crate::im_gateway::session_state::remember_session_state(
-            crate::im_gateway::session_state::ImAgentSessionState {
-                session_key: session_key.to_string(),
-                adapter: crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER.to_string(),
-                title: Some("Stale repair".to_string()),
-                last_user_message: Some("repair me".to_string()),
-                history_path: Some(history_path),
-                status: Some("running".to_string()),
-                updated_at: 1_780_274_116_096,
-                ..crate::im_gateway::session_state::ImAgentSessionState::default()
-            },
-        )
-        .expect("remember state");
-
-        assert_eq!(repair_stale_persisted_running_states(session_key), 1);
-
-        let repaired =
-            crate::im_gateway::session_state::load_latest_session_state(session_key, None, None)
-                .expect("repaired state");
-        assert_eq!(repaired.status.as_deref(), Some("ended"));
     }
 
     #[test]
@@ -3409,51 +2382,6 @@ mod tests {
     }
 
     #[test]
-    fn session_detail_prefers_latest_builtin_turn_state_over_stale_external_state() {
-        let _lock = AGENT_API_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = tempfile::tempdir().expect("tempdir");
-        let _guard = AgentApiEnvGuard::new(dir.path());
-
-        crate::im_gateway::session_state::remember_session_state(
-            crate::im_gateway::session_state::ImAgentSessionState {
-                session_key: "shared-thread".to_string(),
-                adapter: "chatgpt_web".to_string(),
-                runner_id: Some("web".to_string()),
-                title: Some("Old web title".to_string()),
-                last_user_message: Some("old web prompt".to_string()),
-                last_response: Some("old web answer".to_string()),
-                status: Some("succeeded".to_string()),
-                updated_at: 1_770_000_000_000,
-                ..crate::im_gateway::session_state::ImAgentSessionState::default()
-            },
-        )
-        .expect("remember stale state");
-        crate::im_gateway::session_state::remember_session_state(
-            crate::im_gateway::session_state::ImAgentSessionState {
-                session_key: "shared-thread".to_string(),
-                adapter: crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER.to_string(),
-                title: Some("Old web title".to_string()),
-                last_user_message: Some("new builtin prompt".to_string()),
-                status: Some("running".to_string()),
-                updated_at: 1_770_000_001_000,
-                ..crate::im_gateway::session_state::ImAgentSessionState::default()
-            },
-        )
-        .expect("remember latest state");
-
-        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-        let detail = runtime
-            .block_on(external_runner_session_detail("shared-thread"))
-            .expect("detail");
-        assert_eq!(detail.runner_type.as_deref(), Some("bifrost_agent"));
-        assert_eq!(detail.agent_type.as_deref(), Some("Bifrost Agent"));
-        assert_eq!(detail.messages.len(), 1);
-        assert_eq!(detail.messages[0].content, "new builtin prompt");
-    }
-
-    #[test]
     fn history_session_detail_uses_server_side_title_fallback() {
         let _lock = AGENT_API_ENV_LOCK
             .lock()
@@ -3572,9 +2500,9 @@ mod tests {
             history_version: 0,
             work_dir: None,
             source: "admin-api".to_string(),
-            agent_type: Some("Bifrost Agent".to_string()),
-            runner_type: Some("bifrost_agent".to_string()),
-            runner_id: None,
+            agent_type: Some("External Runner Agent".to_string()),
+            runner_type: Some("codex".to_string()),
+            runner_id: Some("Codex".to_string()),
             model: None,
             model_provider: None,
             model_reasoning_effort: None,
@@ -3596,7 +2524,7 @@ mod tests {
         assert_eq!(detail.runner_type.as_deref(), Some("traex"));
         assert_eq!(detail.runner_id.as_deref(), Some("traex"));
         assert_eq!(detail.external_thread_id.as_deref(), Some("thread-traex"));
-        assert_eq!(detail.agent_type.as_deref(), Some("external_cli"));
+        assert_eq!(detail.agent_type.as_deref(), Some("External Runner Agent"));
     }
 
     #[test]
@@ -3643,9 +2571,9 @@ mod tests {
             history_version: 0,
             work_dir: None,
             source: "admin-api".to_string(),
-            agent_type: Some("Bifrost Agent".to_string()),
-            runner_type: Some("bifrost_agent".to_string()),
-            runner_id: None,
+            agent_type: Some("External Runner Agent".to_string()),
+            runner_type: Some("codex".to_string()),
+            runner_id: Some("Codex".to_string()),
             model: None,
             model_provider: None,
             model_reasoning_effort: None,
@@ -3670,24 +2598,13 @@ mod tests {
             detail.external_conversation_id.as_deref(),
             Some("conversation-web")
         );
-        assert_eq!(detail.agent_type.as_deref(), Some("external_cli"));
+        assert_eq!(detail.agent_type.as_deref(), Some("External Runner Agent"));
     }
 
     #[test]
-    fn is_builtin_runner_value_matches_known_aliases() {
-        for value in ["bifrost_agent", "builtin", "bifrost"] {
-            assert!(is_builtin_runner_value(value));
-        }
-        assert!(!is_builtin_runner_value("external_cli"));
-        assert!(!is_builtin_runner_value(""));
-    }
-
-    #[test]
-    fn is_external_runner_metadata_is_true_when_type_or_id_not_builtin() {
-        assert!(!is_external_runner_metadata(
-            Some("bifrost_agent"),
-            Some("bifrost")
-        ));
+    fn is_external_runner_metadata_requires_a_nonempty_type_or_id() {
+        assert!(!is_external_runner_metadata(None, None));
+        assert!(!is_external_runner_metadata(Some(""), Some("  ")));
         assert!(is_external_runner_metadata(Some("chatgpt_web"), None));
         assert!(is_external_runner_metadata(None, Some("web-main")));
         assert!(is_external_runner_metadata(
@@ -3705,23 +2622,17 @@ mod tests {
         };
 
         let (r_type, r_id) = merge_history_runner_metadata(
-            Some("bifrost_agent".to_string()),
-            Some("builtin".to_string()),
+            Some("codex".to_string()),
+            Some("Codex".to_string()),
             Some(&summary),
         );
         assert_eq!(r_type.as_deref(), Some("chatgpt_web"));
         assert_eq!(r_id.as_deref(), Some("web-main"));
 
-        // Built-in history should not override explicit external config.
-        let builtin_summary = bifrost_agent::persistence::SessionFileSummary {
-            runner_type: Some("bifrost_agent".to_string()),
-            runner_id: Some("bifrost".to_string()),
-            ..Default::default()
-        };
         let (r_type2, r_id2) = merge_history_runner_metadata(
             Some("chatgpt_web".to_string()),
             Some("web-main".to_string()),
-            Some(&builtin_summary),
+            None,
         );
         assert_eq!(r_type2.as_deref(), Some("chatgpt_web"));
         assert_eq!(r_id2.as_deref(), Some("web-main"));
@@ -3842,7 +2753,7 @@ mod coverage_boost {
 
         let value = agent_config_response(config.clone());
 
-        let default_instructions = bifrost_agent::prompt::default_base_instructions();
+        let default_instructions = "";
         assert_eq!(
             value["default_base_instructions"].as_str(),
             Some(default_instructions)
@@ -3881,19 +2792,6 @@ mod coverage_boost {
     }
 
     #[test]
-    fn uses_api_key_header_respects_by_azure_override_and_defaults() {
-        assert!(uses_api_key_header("aidp_crawl", &json!({})));
-        assert!(uses_api_key_header("azure", &json!({})));
-        assert!(!uses_api_key_header("openai", &json!({})));
-
-        assert!(uses_api_key_header("openai", &json!({"by_azure": true})));
-        assert!(!uses_api_key_header(
-            "aidp_crawl",
-            &json!({"by_azure": false})
-        ));
-    }
-
-    #[test]
     fn apply_agent_config_patch_updates_core_fields() {
         let mut config = crate::im_gateway::agent::ImAgentConfig::default();
         let patch = json!({
@@ -3901,17 +2799,13 @@ mod coverage_boost {
             "runner": "custom-runner",
             "model": "gpt-4-mini",
             "model_provider": "azure",
-            "max_completion_tokens": 1024u64,
             "model_reasoning_effort": "medium",
             "model_reasoning_summary": "concise",
             "model_context_window": 200000,
-            "model_auto_compact_token_limit": 12345,
             "base_instructions": " Base ",
             "developer_instructions": " Dev ",
             "user_instructions": " User ",
-            "session_ttl_secs": 3600u64,
-            "request_timeout_secs": 30u64,
-            "max_turn_iterations": 12u64
+            "session_ttl_secs": 3600u64
         });
 
         apply_agent_config_patch(&mut config, &patch);
@@ -3925,59 +2819,37 @@ mod coverage_boost {
         }
         assert_eq!(config.model.as_deref(), Some("gpt-4-mini"));
         assert_eq!(config.model_provider.as_deref(), Some("azure"));
-        assert_eq!(config.max_completion_tokens, Some(1024));
         assert_eq!(config.model_reasoning_effort.as_deref(), Some("medium"));
         assert_eq!(config.model_reasoning_summary.as_deref(), Some("concise"));
         assert_eq!(config.model_context_window, Some(200000));
-        assert_eq!(config.model_auto_compact_token_limit, Some(12345));
         assert_eq!(config.base_instructions.as_deref(), Some("Base"));
         assert_eq!(config.developer_instructions.as_deref(), Some("Dev"));
         assert_eq!(config.user_instructions.as_deref(), Some("User"));
         assert_eq!(config.session_ttl_secs, Some(3600));
-        assert_eq!(config.request_timeout_secs, Some(30));
-        assert_eq!(config.max_turn_iterations, Some(12));
     }
 
     #[test]
-    fn apply_agent_config_patch_clears_auto_compact_and_runner() {
+    fn apply_agent_config_patch_clears_runner() {
         let mut config = crate::im_gateway::agent::ImAgentConfig {
-            model_auto_compact_token_limit: Some(10),
             runner: Some(bifrost_agent::AgentRunnerMode::Custom("old".into())),
             ..Default::default()
         };
 
-        let patch = json!({
-            "model_auto_compact_token_limit": null,
-            "runner": null
-        });
+        let patch = json!({"runner": null});
 
         apply_agent_config_patch(&mut config, &patch);
 
-        assert!(config.model_auto_compact_token_limit.is_none());
         assert!(config.runner.is_none());
     }
 
     #[test]
-    fn apply_agent_config_patch_updates_history_and_memories() {
+    fn apply_agent_config_patch_updates_history() {
         let mut config = crate::im_gateway::agent::ImAgentConfig::default();
         let patch = json!({
             "ephemeral": true,
             "history": {
                 "persistence": "last-90-days",
                 "max_bytes": 8192u64
-            },
-            "memories": {
-                "disable_on_external_context": true,
-                "generate_memories": false,
-                "use_memories": true,
-                "max_raw_memories_for_consolidation": 123u64,
-                "max_unused_days": 10,
-                "max_rollout_age_days": 20,
-                "max_rollouts_per_startup": 5u64,
-                "min_rollout_idle_hours": 48,
-                "min_rate_limit_remaining_percent": 30,
-                "extract_model": "gpt-extract",
-                "consolidation_model": "gpt-consolidate"
             }
         });
 
@@ -3990,94 +2862,6 @@ mod coverage_boost {
             bifrost_agent::HistoryPersistence::Last90Days
         );
         assert_eq!(history.max_bytes, Some(8192usize));
-
-        let memories = config.memories.expect("memories config");
-        assert_eq!(memories.disable_on_external_context, Some(true));
-        assert_eq!(memories.generate_memories, Some(false));
-        assert_eq!(memories.use_memories, Some(true));
-        assert_eq!(memories.max_raw_memories_for_consolidation, Some(123));
-        assert_eq!(memories.max_unused_days, Some(10));
-        assert_eq!(memories.max_rollout_age_days, Some(20));
-        assert_eq!(memories.max_rollouts_per_startup, Some(5));
-        assert_eq!(memories.min_rollout_idle_hours, Some(48));
-        assert_eq!(memories.min_rate_limit_remaining_percent, Some(30));
-        assert_eq!(memories.extract_model.as_deref(), Some("gpt-extract"));
-        assert_eq!(
-            memories.consolidation_model.as_deref(),
-            Some("gpt-consolidate")
-        );
-    }
-
-    #[test]
-    fn apply_agent_config_patch_updates_provider_and_api_key_header() {
-        let mut config = crate::im_gateway::agent::ImAgentConfig {
-            model_provider: Some("aidp_crawl".to_string()),
-            ..Default::default()
-        };
-
-        let patch = json!({
-            "base_url": "https://example.com",
-            "api_key": "secret",
-            "env_key": "OPENAI_API_KEY",
-            "by_azure": true,
-            "request_max_retries": 2u64,
-            "stream_idle_timeout_ms": 5000u64,
-            "stream_max_retries": 3u64
-        });
-
-        apply_agent_config_patch(&mut config, &patch);
-
-        let provider = config.model_providers.get("aidp_crawl").expect("provider");
-        assert_eq!(provider.base_url.as_deref(), Some("https://example.com"));
-        assert_eq!(provider.api_key.as_deref(), Some("secret"));
-        assert_eq!(provider.env_key.as_deref(), Some("OPENAI_API_KEY"));
-        assert_eq!(provider.request_max_retries, Some(2));
-        assert_eq!(provider.stream_idle_timeout_ms, Some(5000));
-        assert_eq!(provider.stream_max_retries, Some(3));
-
-        let headers = provider.http_headers.as_ref().expect("headers");
-        assert_eq!(headers.get("api-key").map(String::as_str), Some("secret"));
-
-        // Clearing the API key should also clear the header map.
-        let patch_clear = json!({"api_key": ""});
-        let mut config2 = config.clone();
-        apply_agent_config_patch(&mut config2, &patch_clear);
-        let provider2 = config2.model_providers.get("aidp_crawl").expect("provider");
-        assert!(provider2.api_key.is_none());
-        assert!(provider2
-            .http_headers
-            .as_ref()
-            .map(|m| m.is_empty())
-            .unwrap_or(true));
-    }
-
-    #[test]
-    fn apply_agent_config_patch_replaces_mcp_servers_and_model_providers() {
-        let mut config = crate::im_gateway::agent::ImAgentConfig::default();
-        let patch = json!({
-            "mcp_servers": {
-                "docs": {"url": "https://example.com/mcp", "enabled": true}
-            },
-            "model_providers": {
-                "openai": {
-                    "name": "OpenAI",
-                    "base_url": "https://api.openai.com",
-                    "wire_api": "chat_completions",
-                    "env_key": "OPENAI_API_KEY"
-                }
-            }
-        });
-
-        apply_agent_config_patch(&mut config, &patch);
-
-        assert!(config.mcp_servers.contains_key("docs"));
-        let provider = config
-            .model_providers
-            .get("openai")
-            .expect("openai provider");
-        assert_eq!(provider.name.as_deref(), Some("OpenAI"));
-        assert_eq!(provider.base_url.as_deref(), Some("https://api.openai.com"));
-        assert_eq!(provider.env_key.as_deref(), Some("OPENAI_API_KEY"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4129,130 +2913,6 @@ mod coverage_boost {
             .await
             .unwrap();
         assert!(entries.len() <= 2);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn restore_session_from_history_path_errors_on_mismatched_key() {
-        let _env = new_temp_bifrost_dir();
-        let data_dir = bifrost_agent::config::agent_home_dir();
-        let session_key = "restore-mismatch";
-        let mut recorder =
-            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
-        recorder
-            .record_session_start(session_key, json!({"source": "admin-api"}))
-            .expect("start");
-        recorder
-            .record_user_message(session_key, "hello")
-            .expect("msg");
-        let history_path = recorder.file_path().display().to_string();
-
-        let manager = bifrost_agent::AgentSessionManager::new(3600);
-        let mut session =
-            manager.take_session_with_work_dir("different-key", Some("/tmp/restore".to_string()));
-
-        let err =
-            restore_session_from_history_path(&mut session, &history_path, "different-key", None)
-                .unwrap_err();
-        assert!(err.contains("does not match"));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn restore_session_from_history_path_errors_on_empty_messages() {
-        let _env = new_temp_bifrost_dir();
-        let data_dir = bifrost_agent::config::agent_home_dir();
-        let sessions_dir = data_dir.join("sessions/2026/05/25");
-        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
-        let path = sessions_dir.join("session-empty-1779690000.jsonl");
-        std::fs::write(
-            &path,
-            r#"{"timestamp":1,"event_type":"session_start","session_key":"session-empty","content":{"source":"admin-api"}}"#,
-        )
-        .expect("write jsonl");
-
-        let history_path = path.display().to_string();
-        let manager = bifrost_agent::AgentSessionManager::new(3600);
-        let mut session = manager
-            .take_session_with_work_dir("session-empty", Some("/tmp/restore-empty".to_string()));
-
-        let err =
-            restore_session_from_history_path(&mut session, &history_path, "session-empty", None)
-                .unwrap_err();
-        assert!(err.contains("does not contain restorable chat messages"));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    #[allow(clippy::absurd_extreme_comparisons, unused_comparisons)]
-    async fn restore_session_from_history_path_restores_fields_from_summary_and_runtime() {
-        let _env = new_temp_bifrost_dir();
-        let data_dir = bifrost_agent::config::agent_home_dir();
-        let session_key = "restore-complete";
-        let mut recorder =
-            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
-        recorder
-            .record_session_start(
-                session_key,
-                json!({"source": "admin-api", "work_dir": "/tmp/work"}),
-            )
-            .expect("start");
-        recorder
-            .record_user_message(session_key, "hello")
-            .expect("user");
-        recorder
-            .record_assistant_message(session_key, "world")
-            .expect("assistant");
-        recorder
-            .record_run_state(session_key, "completed", Some("goal"), Some("builtin"))
-            .expect("run state");
-        let history_path = recorder.file_path().display().to_string();
-
-        let manager = bifrost_agent::AgentSessionManager::new(3600);
-        let mut session = manager.take_session_with_work_dir(session_key, None);
-        session.source = "web".to_string();
-
-        restore_session_from_history_path(&mut session, &history_path, session_key, None)
-            .expect("restore");
-
-        assert_eq!(session.history.len(), 2);
-        assert_eq!(session.work_dir.as_deref(), Some("/tmp/work"));
-        assert_eq!(session.source, "admin-api");
-        assert!(session.total_tokens_used.is_some());
-        assert!(session.compaction_count >= 0);
-        assert!(session.recorder.is_some());
-    }
-
-    #[test]
-    fn consume_imported_contexts_for_builtin_agent_appends_developer_message() {
-        let _env = new_temp_bifrost_dir();
-        let manager = bifrost_agent::AgentSessionManager::new(3600);
-        let mut session = manager.take_session_with_work_dir(
-            "imported-context-session",
-            Some("/tmp/import".to_string()),
-        );
-
-        crate::im_gateway::session_state::push_imported_context(
-            &session.session_key,
-            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
-            None,
-            crate::im_gateway::session_state::ImImportedRunnerContext {
-                call_id: "call-1".to_string(),
-                source_session_key: session.session_key.clone(),
-                target_runner_id: "web".to_string(),
-                target_adapter: "chatgpt_web".to_string(),
-                user_message: "summarize".to_string(),
-                response: "summary".to_string(),
-                created_at: 1,
-            },
-        )
-        .expect("push context");
-
-        consume_imported_contexts_for_builtin_agent(&mut session);
-
-        assert_eq!(session.history.len(), 1);
-        let first = &session.history[0];
-        assert_eq!(first.role, "developer");
-        let content = first.content.as_deref().unwrap_or("");
-        assert!(content.contains("Imported Runner Results"));
-        assert!(content.contains("summary"));
     }
 
     #[test]
@@ -4339,70 +2999,6 @@ mod coverage_boost {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn agent_mcp_status_returns_servers_field() {
-        let harness = TestAdminState::builder().build();
-        let service = harness.im_gateway_service();
-
-        let (status, body) =
-            agent_request_json(service, Method::GET, "/agent/mcp-status", None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.get("servers").is_some());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn agent_mcp_status_method_not_allowed_for_post() {
-        let harness = TestAdminState::builder().build();
-        let service = harness.im_gateway_service();
-
-        let (status, body) =
-            agent_request_json(service, Method::POST, "/agent/mcp-status", None).await;
-        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
-        assert_eq!(body["status"], 405);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn agent_providers_get_returns_builtin_list() {
-        let harness = TestAdminState::builder().build();
-        let service = harness.im_gateway_service();
-
-        let (status, body) =
-            agent_request_json(service, Method::GET, "/agent/providers", None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.as_array().is_some());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn agent_providers_post_method_not_allowed() {
-        let harness = TestAdminState::builder().build();
-        let service = harness.im_gateway_service();
-
-        let (status, body) =
-            agent_request_json(service, Method::POST, "/agent/providers", None).await;
-        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
-        assert_eq!(body["status"], 405);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn agent_tools_get_returns_tool_definitions() {
-        let harness = TestAdminState::builder().build();
-        let service = harness.im_gateway_service();
-
-        let (status, body) = agent_request_json(service, Method::GET, "/agent/tools", None).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body["tools"].is_array());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn agent_tools_post_method_not_allowed() {
-        let harness = TestAdminState::builder().build();
-        let service = harness.im_gateway_service();
-
-        let (status, body) = agent_request_json(service, Method::POST, "/agent/tools", None).await;
-        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
-        assert_eq!(body["status"], 405);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn agent_instructions_get_returns_content_and_work_dir() {
         let harness = TestAdminState::builder().build();
         let service = harness.im_gateway_service();
@@ -4442,35 +3038,14 @@ mod coverage_boost {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn agent_chat_rejects_empty_message() {
+    async fn unknown_agent_endpoint_returns_not_found() {
         let harness = TestAdminState::builder().build();
         let service = harness.im_gateway_service();
 
-        let body = json!({"message": "   ", "images": []});
         let (status, body) =
-            agent_request_json(service, Method::POST, "/agent/chat", Some(body)).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["status"], 400);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn agent_chat_returns_service_unavailable_when_disabled() {
-        let harness = TestAdminState::builder().build();
-        let service = harness.im_gateway_service();
-
-        // Disable agent in config.
-        let mut config = service.agent_config_store.load();
-        config.enabled = false;
-        service
-            .agent_config_store
-            .save(&config)
-            .expect("save config");
-
-        let body = json!({"message": "hello"});
-        let (status, body) =
-            agent_request_json(service, Method::POST, "/agent/chat", Some(body)).await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(body["status"], 503);
+            agent_request_json(service, Method::GET, "/agent/unknown-endpoint", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "Agent endpoint not found");
     }
 }
 
@@ -4580,6 +3155,35 @@ mod coverage_boost_v2 {
             agent_request_json(service, Method::GET, "/agent/sessions/all?limit=1", None).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["total"].as_u64().unwrap_or(0) <= 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_sessions_all_projects_active_external_preview() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+        assert!(service
+            .agent_session_manager
+            .try_start_external_session_preview(
+                "active-external-session",
+                Some("Active external runner".to_string()),
+                Some("/tmp/active-external".to_string()),
+                Some("codex".to_string()),
+                Some("codex".to_string()),
+                Some("Codex".to_string()),
+            ));
+
+        let (status, body) =
+            agent_request_json(service.clone(), Method::GET, "/agent/sessions/all", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["active_count"], 1);
+        assert_eq!(
+            body["sessions"][0]["session_key"],
+            "active-external-session"
+        );
+        assert_eq!(body["sessions"][0]["running"], true);
+        service
+            .agent_session_manager
+            .clear_active_session_preview("active-external-session");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4809,14 +3413,6 @@ mod coverage_boost_v2 {
 
     // ---------------------------------------------------------------------
     // Helper functions coverage
-
-    #[test]
-    fn status_from_run_state_maps_variants() {
-        assert_eq!(status_from_run_state("failed"), "failed");
-        assert_eq!(status_from_run_state("stopped"), "stopped");
-        assert_eq!(status_from_run_state("timed_out"), "timed_out");
-        assert_eq!(status_from_run_state("other"), "ended");
-    }
 
     #[test]
     fn summary_end_time_prefers_end_when_present() {

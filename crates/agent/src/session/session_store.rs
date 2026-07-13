@@ -104,11 +104,6 @@ impl AgentSessionManager {
         session.stop_signal = Some(self.create_stop_signal(session_key));
     }
 
-    #[cfg(test)]
-    pub(crate) fn drop_active_stop_signal_for_test(&self, session_key: &str) {
-        self.active_stop_signals.remove(session_key);
-    }
-
     fn attach_active_turn_handles(&self, session_key: &str, session: &mut AgentSession) {
         self.attach_active_turn_status(session_key, session);
         self.attach_stop_signal(session_key, session);
@@ -127,7 +122,7 @@ impl AgentSessionManager {
             return;
         }
         session.reinitialize_work_dir(work_dir.to_string());
-        session.memory_cleared = false;
+        session.history_cleared = false;
     }
 
     /// Check if a session is currently being processed by a turn loop.
@@ -213,7 +208,6 @@ impl AgentSessionManager {
         session.active_turn_status = None;
         session.stop_signal = None;
         session.progress_sender = None;
-        session.plan_sender = None;
         self.sessions.insert(key.clone(), session);
         self.active_sessions.remove(&key);
         self.active_session_infos.remove(&key);

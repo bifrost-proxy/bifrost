@@ -78,7 +78,7 @@ bifrost im provider add weixin-main --type weixin --runner codex
 
 Feishu 交互式配置会在终端输出授权 URL 和二维码；Weixin 交互式配置会输出扫码二维码。CLI 会保持等待，直到用户完成授权或扫码确认，然后自动创建并连接 provider。非交互环境必须显式传 `--runner`；交互式终端可以让用户用键盘选择 Runner。Runner 不存在或未启用时，CLI 会列出当前支持的 Runner。Feishu / Weixin provider 的 `base_url` 由系统按 provider 类型固定管理，不要向用户建议传 `--base-url`。
 
-IM 通道上线后，Bifrost 会自动推送上线通知和 runner-aware 帮助。Agent 应按实际 Runner 区分命令范围：内置 Bifrost Agent 支持 memory、goal、compact、guidance 等命令；Codex / Traex / Claude Code 等外部 Runner 只应展示其适配器支持的模型和 reasoning effort 命令。
+IM 通道上线后，Bifrost 会自动推送上线通知和 runner-aware 帮助。Codex / Traex / Claude Code 等外部 Runner 只应展示其适配器支持的模型和 reasoning effort 命令。
 
 ### 参数说明
 

@@ -2,7 +2,7 @@
 
 ## 背景
 
-Bifrost Agent 的会话历史以 JSONL append-only 事件流形式落盘（`ConversationRecorder`）。早期 WebUI Agent Chat History 打开一个 session 时，一次性 `GET` 全量事件并整体渲染，随着单个 session 越写越长，出现以下问题：
+Agent Chat 的会话历史以 JSONL append-only 事件流形式落盘（`ConversationRecorder`）。早期 WebUI Agent Chat History 打开一个 session 时，一次性 `GET` 全量事件并整体渲染，随着单个 session 越写越长，出现以下问题：
 
 - 首屏时间线性增长，长会话首屏加载几百 KB 甚至几 MB JSON。
 - 前端一次性反序列化并 mount 上千条 timeline items，首屏帧率抖动。

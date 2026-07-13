@@ -2,14 +2,12 @@
 
 ## 功能模块说明
 
-验证 Agent Session 的 JSONL 持久化功能：
-- 通过飞书机器人或 `/agent/chat` API 发送消息后，session 事件自动写入 `~/.bifrost/agent/sessions/` 目录的 JSONL 文件
+验证外部 Runner Session 的 JSONL 持久化功能：
+- 通过 IM 消息或 WebUI 启动外部 Runner 后，session 事件自动写入 `~/.bifrost/agent/sessions/` 目录的 JSONL 文件
 - JSONL 文件包含完整执行过程（session_start、user_message、tool_call、tool_result、assistant_message、compaction、session_end 等）
 - WebUI 可查看 session 历史文件列表、查看详细事件时间线、删除 session 文件
 - WebUI Sessions 列表可通过点击 title 或整行进入 session 详情，不再依赖单独的查看 icon 按钮
 - WebUI Session 详情页默认展示 Messages Tab，Settings Tab 承载 session metadata、AGENTS.md 和 Skills，长消息/事件列表在内容区域内真实滚动
-- 跨 turn 复用同一 recorder（同一 session 多次对话写入同一文件）
-- 受 `ephemeral` 和 `history.persistence` 配置控制
 
 ## 前置条件
 
@@ -17,63 +15,10 @@
    ```bash
    BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
    ```
-2. 确保 Agent 功能已启用（`enabled: true`）
-3. 确保 `ephemeral` 为 `false`，`history.persistence` 为 `SaveAll`（默认即可）
-4. 清空 `~/.bifrost/agent/sessions/` 目录以便观察新生成文件
+2. 配置并启用一个外部 Runner。
+3. 准备至少一份外部 Runner 生成的 session JSONL，或使用测试 fixture 写入等价事件。
 
 ## 测试用例
-
-### TC-ASP-01：通过 /agent/chat API 发送消息后生成 JSONL 文件
-
-**操作步骤**：
-1. 调用 `POST http://localhost:8800/_bifrost/agent/chat`，body: `{"message": "hello, what is 1+1?", "session_key": "test-persist-01"}`
-2. 等待响应返回
-3. 检查 `~/.bifrost/agent/sessions/` 目录是否生成了包含 `test-persist-01` 的 JSONL 文件
-
-**预期结果**：
-- API 返回 `{ "success": true, "response": "..." }`
-- `~/.bifrost/agent/sessions/` 目录下生成 `session-test-persist-01-*.jsonl` 文件
-
-### TC-ASP-02：JSONL 文件包含 session_start 事件
-
-**操作步骤**：
-1. 读取 TC-ASP-01 生成的 JSONL 文件
-2. 解析第一行 JSON
-
-**预期结果**：
-- 第一行的 `event_type` 为 `session_start`
-- `session_key` 为 `test-persist-01`
-- `content` 包含 `model` 和 `provider` 字段
-
-### TC-ASP-03：JSONL 文件包含 user_message 事件
-
-**操作步骤**：
-1. 读取 TC-ASP-01 生成的 JSONL 文件
-2. 查找 `event_type` 为 `user_message` 的行
-
-**预期结果**：
-- 存在 `user_message` 事件
-- `content` 包含用户发送的消息文本 `"hello, what is 1+1?"`
-
-### TC-ASP-04：JSONL 文件包含 assistant_message 事件
-
-**操作步骤**：
-1. 读取 TC-ASP-01 生成的 JSONL 文件
-2. 查找 `event_type` 为 `assistant_message` 的行
-
-**预期结果**：
-- 存在 `assistant_message` 事件
-- `content` 包含 Agent 的回复文本
-
-### TC-ASP-05：跨 turn 复用同一 JSONL 文件
-
-**操作步骤**：
-1. 使用相同 session_key 再次调用 `POST /agent/chat`，body: `{"message": "and what is 2+2?", "session_key": "test-persist-01"}`
-2. 检查 `~/.bifrost/agent/sessions/` 目录
-
-**预期结果**：
-- 不会生成新的 JSONL 文件（仍然只有一个 `session-test-persist-01-*.jsonl`）
-- 文件内容追加了第二轮对话的 user_message 和 assistant_message 事件
 
 ### TC-ASP-06：GET /agent/sessions/history 列表 API
 
@@ -155,25 +100,6 @@
 - 所有文本、卡片、标签在暗色主题下清晰可辨
 - 事件卡片颜色适配暗色主题
 
-### TC-ASP-13：恢复持久化 session 后继续 tool loop 回归
-
-**操作步骤**：
-1. 执行持久化恢复回归：
-   ```bash
-   cargo run -p bifrost-e2e -- --test im_gateway_agent_tool_history_resume_regression --jobs 1 --timeout 240
-   ```
-2. 该用例会使用临时目录创建 `ConversationRecorder`，先触发一次 `list_directory` 工具调用并写入 JSONL。
-3. 用 `load_conversation()` 从 JSONL 恢复 session history。
-4. 恢复后再次发起需要工具调用的 turn。
-5. 检查输出中 mock Chat Completions 服务没有拒绝任何请求。
-
-**预期结果**：
-- E2E 输出 `PASS im_gateway_agent_tool_history_resume_regression`
-- 恢复出的 history 包含合法的 `assistant(tool_calls)` + `tool` 消息对
-- 第二轮恢复后工具调用成功执行
-- 不出现 `messages with role 'tool' must be a response to a preceeding message with 'tool_calls'`
-- 不出现 orphan `tool` message 或不完整 tool-call suffix
-
 ### TC-ASP-14：WebUI Session 详情 Messages/Settings Tab 与右侧内容滚动回归
 
 **操作步骤**：
@@ -211,25 +137,6 @@
 - 点击 active session 当前行后进入 active 详情页，URL 包含对应 `session`、`view=active`，并默认选中 `Messages` Tab。
 - 删除按钮仍然只触发删除确认，不会因为事件冒泡而打开详情页。
 - 亮色和暗色主题下行 hover、title 可点击状态和删除按钮均清晰可辨。
-
-### TC-ASP-16：重启恢复后 Context 不使用累计 token 回归
-
-**操作步骤**：
-1. 执行持久化恢复回归：
-   ```bash
-   cargo run -p bifrost-e2e -- --test im_gateway_agent_chat_restores_history_after_service_restart --jobs 1 --timeout 240
-   ```
-2. 该用例会使用临时数据目录创建 `/agent/chat` session，第一轮 mock 响应写入 `assistant_message.tokens = 15`。
-3. 用同一 `BIFROST_DATA_DIR` 重建 `ImGatewayService` 模拟服务重启。
-4. 重启恢复后立即向同一 session 发送 `/status`。
-5. 继续发送第二条业务消息，确认恢复后的历史仍包含第一轮消息。
-
-**预期结果**：
-- `/status` 返回 `Context 用量: ~15 / ...`，说明恢复后使用最近响应 context 快照，而不是历史累计 token。
-- 第二条业务消息发给 mock 模型时仍包含第一轮和第二轮 marker，说明对话保持未被破坏。
-- `/reset` 后再次发送新消息不会携带旧 marker。
-
-**执行记录（2026-05-25）**：PASS — 执行 `source ~/.zshrc && cargo run -p bifrost-e2e -- --test im_gateway_agent_chat_restores_history_after_service_restart --jobs 1 --timeout 240`，用例通过。日志中存在测试环境 CA 缺失和 AGENTS.md 截断 warning，但 mock 模型链路未走 TLS 拦截，测试最终 `1 passed`。
 
 ### TC-ASP-17：Sessions 列表不把空闲恢复会话误报为 Running
 
@@ -277,38 +184,6 @@
 - 当前线程处于 `Running` 时仍可点击 `New Chat` 并创建新的独立 session；该动作不停止、不复用、也不修改原 running 线程。
 
 **执行记录（2026-05-29）**：PASS — 执行 `source ~/.zshrc && pnpm --dir web exec playwright test agent-chat.spec.ts -g "deep link|restores active timeline process steps|keeps polling running history timeline|can start a new chat"`，5 个相关 UI 用例通过；另用 Vite dev server 代理 `BACKEND_PORT=9900` 打开真实 history 深链 `/Users/eden/.bifrost/agent/sessions/2026/05/29/session-feishu-main_ou_82c9bc36c12abfaed40c2c52ef4b7fea-1780017943.jsonl`，刷新后默认显示 `已处理 4m 26s` 和最终结论，展开后旧 turn 的过程摘要显示 `Ran ...`，不再误显示 `Running ...`，且可从持久化 timeline 恢复工具耗时；运行中 turn 输出顶部显示实时更新的 `已处理 <duration>`；将浏览器缩到约 640px 后消息列随视口收窄并保留左右 padding，没有横向溢出；消息区离开底部时滚动到底部按钮在输入框正上方居中淡入，点击后直接回到底部并淡出；`Running` 线程页面的 `New Chat` 可点击并能创建新 session。
-
-### TC-ASP-19：陈旧 Running 状态与 Stop 一致性回归
-
-**操作步骤**：
-1. 使用临时 `BIFROST_DATA_DIR` 创建一条内置 Bifrost Agent session：canonical JSONL 中最后一个 `run_state_changed` 为 `completed`，但 `agent/im_gateway/session_state.json` 中同一 `sessionKey`、`adapter:"bifrost_agent"` 的 `status` 仍为 `running`。
-2. 同时创建一条外部 runner session：`adapter` 使用非 `bifrost_agent` 值（例如 `codex`、`chatgpt_web` 或自定义 CLI adapter），`status:"running"`，且没有 completed/failed/stopped/timed_out 的 canonical timeline 终态。
-3. 用临时端口启动 Bifrost，启动参数必须包含：
-   ```bash
-   --unsafe-ssl --skip-cert-check --no-system-proxy
-   ```
-4. 请求：
-   ```bash
-   curl -fsS --noproxy '*' "http://127.0.0.1:$MAIN_PORT/_bifrost/api/im-gateway/agent/sessions/all"
-   ```
-5. 对第 1 步的内置 Agent session 发送：
-   ```bash
-   curl -fsS --noproxy '*' -X POST "http://127.0.0.1:$MAIN_PORT/_bifrost/api/im-gateway/agent/chat" \
-     -H 'Content-Type: application/json' \
-     -d '{"session_key":"<stale-session-key>","message":"/stop"}'
-   ```
-6. 再次请求 `/sessions/all`，并读取临时数据目录下的 `agent/im_gateway/session_state.json`。
-
-**预期结果**：
-- 第 1 步内置 Agent session 在 `/sessions/all` 中显示 `running:false`、`status:"ended"`、`state:"ended"`、`run_state:"completed"`，不会再显示为 `Running`。
-- 第 1 步内置 Agent session 的 `last_active_time` 来自 canonical JSONL 终态时间，而不是陈旧 `session_state.updatedAt`。
-- `/stop` 返回 `stopped:false`，并返回 `repaired_stale_running >= 1`，响应文案说明当前没有正在执行的 Agent loop 且已修复残留运行状态。
-- `session_state.json` 中该内置 Agent session 的 `status` 被修复为 `ended`。
-- 第 2 步外部 runner session 仍显示 `running:true`、`status:"active"`、`state:"running"`、`run_state:"running"`；该修复不会误停止或误结束不同装置、不同 adapter 的外部 runner。
-- 如果任意 runner adapter 后续已有 canonical timeline 终态，则 `/sessions/all` 按该终态投影为 completed/failed/stopped/timed_out，不再受 persisted `status:"running"` 覆盖。
-- 终态投影只使用最新模型显式写入的 `history_path`；未绑定到 `session_state.history_path` 的旧 history 文件不会被按 `sessionKey` 额外扫描或用于修正状态。
-
-**执行记录（2026-06-02）**：PASS — 执行 `source ~/.zshrc && e2e-tests/tests/test_agent_session_stale_running_reconciliation.sh`，脚本使用临时数据目录和随机端口启动 Bifrost（包含 `--no-system-proxy`），先验证 completed JSONL + stale `bifrost_agent` running state 在 `/sessions/all` 投影为 ended/completed，再验证 `/stop` 返回 `stopped:false` 且 `repaired_stale_running >= 1` 并把 persisted status 修复为 `ended`，最后确认无终态 timeline 的外部 `codex`、`chatgpt_web` 和 `custom_cli` runner 都仍保持 running。follow-up 复核补充执行 `source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin external_running -- --nocapture --test-threads=1`，确认未绑定到显式 `history_path` 的 terminal history 不会被按 `sessionKey` 扫描用于状态投影；并执行 `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_agent_session_stale_running_reconciliation.sh` 复跑真实 API 场景，结果 PASS。
 
 ### TC-ASP-20：Active Idle 会话不继承历史 Running run_state
 

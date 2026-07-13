@@ -565,7 +565,7 @@ Daily Agent 运行时需要参考随任务不断变化的专有名词、项目�
 - `daily_agent.terminology` 是任务级全局文本配置，由 Daily Agent 页面提供 `Terminology` 文本输入框保存；空白内容归一化为未配置。
 - Workspace 初始化、保存配置、读取配置和运行前都会把术语写入每个 enabled/known Agent 工作目录根目录的 `TERMS.md`。该文件位于 `.daily/agents/<agent_id>/TERMS.md`，与 `AGENTS.md`、`input/`、`output/` 同级。
 - `AGENTS.md` 通过 Bifrost 托管块引用相对路径 `TERMS.md`，说明 Runner 运行前必须读取该文件；托管块可重复刷新，不覆盖用户自定义指令正文。清空术语时删除 `TERMS.md` 并移除托管块。
-- Bifrost Agent、Codex 和其他文件型 Runner 的 prompt 只引用 `TERMS.md` 相对文件路径，不内联术语正文，保证工作目录是单一事实源。
+- Codex 和其他文件型外部 Runner 的 prompt 只引用 `TERMS.md` 相对文件路径，不内联术语正文，保证工作目录是单一事实源。
 - `chatgpt_web` Runner 每次构造 prompt 时都从 `TERMS.md` 或最新配置读取术语，并把 `## 专有名词配置（每次运行动态注入）` 放在 prompt 最前面；不依赖固定 conversation 首轮缓存，后续轮次也会注入最新术语。
 - 单 Agent task projection 必须继承任务级术语，避免 normalize 或按 agent 串行运行时丢失全局配置。
 

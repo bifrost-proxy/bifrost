@@ -58,14 +58,14 @@ Bifrost 的 shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_a
 
 **Cargo-heavy 用例串行**
 
-- `scripts/run_all_e2e.sh` 定义 `CARGO_HEAVY_TESTS`，包含 `test_agent_codex_parity_contracts.sh`、`test_chatgpt_web_behavior_artifacts.sh`、`test_im_agent_streaming_progress_card.sh`、`test_asr_task_pause_resume.sh`、`test_voice_input_runtime.sh` 等触发 `cargo check/test/run` 的用例。
+- `scripts/run_all_e2e.sh` 定义 `CARGO_HEAVY_TESTS`，包含 `test_chatgpt_web_behavior_artifacts.sh`、`test_asr_task_pause_resume.sh`、`test_voice_input_runtime.sh` 等触发 `cargo check/test/run` 的用例。
 - `run_shell_tests_parallel` 把 `is_cargo_heavy` 用例加入 `serial_tests`，串行执行，避免 Cargo artifact lock 竞争让业务已通过但被 900s per-test timeout 杀掉。
 
 **macOS 双分片负载均衡**
 
 - macOS `E2E Shell (aarch64-apple-darwin, shard N/2)` 使用 `shell_test_weight` 的实测秒级权重分片。权重来自近期 GitHub Actions job 日志里的 `[PASS] shell:<script> (<seconds>s)` 记录，而不是脚本数量。
 - shard 内执行模型必须纳入分片计算：safe shell tests 先按 `BIFROST_E2E_SHELL_JOBS=2` 并发执行，lock-sensitive / cargo-heavy tests 再串行执行。分片算法按“串行预计耗时 + 并发 lane 最长预计耗时”估算墙钟，避免一个大的并发脚本抵消另一个 shard 的串行长尾。
-- 2026-07-07 复核的异常样本包含 `CI` run `28803571034`（shard 1: 19.85 min，shard 2: 37.70 min）和 `28778932181`（shard 1: 22.85 min，shard 2: 32.18 min）。主要长尾来自 `test_chatgpt_web_behavior_artifacts.sh`、`test_long_term_memory_remember_recall.sh`、`test_im_gateway_long_reply_delivery_regression.sh`，以及此前按默认 8s 估计但实际可达数百秒的 `test_desktop_open_requests_contract.sh`、`test_skill_creator_flow.sh`。
+- 2026-07-07 复核的异常样本包含 `CI` run `28803571034`（shard 1: 19.85 min，shard 2: 37.70 min）和 `28778932181`（shard 1: 22.85 min，shard 2: 32.18 min）。主要长尾来自 `test_chatgpt_web_behavior_artifacts.sh`、`test_im_gateway_long_reply_delivery_regression.sh`，以及此前按默认 8s 估计但实际可达数百秒的 `test_desktop_open_requests_contract.sh`、`test_skill_creator_flow.sh`。
 - `CI` run `28881027276` 通过后，实测 shard 1 为 1168s、shard 2 为 1847s；该结果证明单纯平衡总权重仍会被串行段拖长。后续权重与验收口径改为 estimated wall clock。
 - `scripts/run_all_e2e.sh --check-shell-shard-balance` 会打印每个 shard 的 `estimated_wall`、串行耗时、并发 lane 耗时和测试数量，并在最大/最小预计墙钟差超过平均预计墙钟的 `BIFROST_E2E_SHARD_BALANCE_MAX_DIFF_PCT` 时返回非 0。默认门槛为 20%，对应用户目标的“两边耗时误差不超过 20%”。
 - 调整权重后必须运行：
@@ -82,12 +82,9 @@ Bifrost 的 shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_a
 - `admin_client.sh` 复用已有管理端前先请求 `/api/auth/status` 并校验响应是 Bifrost 鉴权 JSON，避免端口碰撞误连本机其它服务。
 - `test_temporary_port_bindings.sh` 对 `port bind --port` 做有限重试；`another process is already listening` 时重新分配端口。
 - `e2e-tests/test_utils/process.sh` Bifrost 清理优先 `SIGINT` + `wait`，仅当端口迟迟不释放才 force kill，避免 `Killed ...` 让 Linux shard 把 PASS 用例误判失败。
-- Agent/IM human-api shell 用例（`test_agent_builtin_status_runtime.sh`、`test_im_guide_queue_human_api.sh`、`test_long_term_memory_human_api.sh`、`test_update_plan_human_api.sh`、`test_agent_loop_runtime_limits.sh`、`test_agent_send_msg_feishu_card.sh` 等）必须优先消费调度器注入的 `ADMIN_PORT` / `MOCK_HTTP_PORT`，再回退单脚本默认；`SKIP_BUILD=true` 时默认 `$REPO_DIR/target/release/bifrost`；尊重外部 `BIFROST_BIN`。
-- `test_agent_chat_history_continue.sh` 让 Chat Completions mock 绑定 `127.0.0.1:0` 后回传真实端口，避免"先挑空闲端口再释放给 mock 绑定"的 TOCTOU。
 - `test_remote_relay_url_fallback_e2e.sh` 在 `SKIP_BUILD=true` 且已有 `BIFROST_BIN` 时输出 `Using existing bifrost binary`，不再无条件 `cargo build`。
 - `scripts/run_all_e2e.sh` 的 `CARGO_BIN` 默认从当前 `PATH` 解析（`resolve_cargo_command`），不再硬编码 `$HOME/.cargo/bin/cargo`。
 - 顶层入口默认注入预构建 release `BIFROST_BIN`，但保留外部覆盖；`test_chatgpt_web_startup_auth_preflight.sh` 等 startup 类脚本必须尊重 `SKIP_BUILD=true`。
-- `test_long_term_memory_human_api.sh` 构建 Bifrost 时设 `SKIP_FRONTEND_BUILD=1`，避免并行 `pnpm build` 重写 `web/dist` 让 `rust_embed` 编译期读到临时缺失。
 
 **Windows rules 内层预算**
 
@@ -224,9 +221,6 @@ Bash 调度逻辑，无 Rust 公共函数变更。
 - `HTTPS_MOCK_PORT=<free> PROXY_PORT=<free> ADMIN_PORT=<same> BIFROST_DATA_DIR=<tmp> bash e2e-tests/tests/test_unsafe_ssl_e2e.sh`：5/5 用例通过；被占端口场景 alternate。
 - `SKIP_BUILD=true bash e2e-tests/tests/test_temporary_port_bindings.sh`：55 个 temporary port 用例全过。
 - `PROXY_PORT=<free> MOCK_HTTP_PORT=<free> MOCK_SSE_PORT=<free> MOCK_WS_PORT=<free> BIFROST_DATA_DIR=<tmp> SERVER_LOG_DIR=<tmp> SKIP_BUILD=true bash e2e-tests/tests/test_replay_rules.sh`：`SSE Replay with Rules` 收到 `id>=12` 的 post-timeout 事件。
-- `ADMIN_PORT=18121 MOCK_HTTP_PORT=18122 bash e2e-tests/tests/test_agent_builtin_status_runtime.sh`；`ADMIN_PORT=18111 MOCK_HTTP_PORT=18112 bash e2e-tests/tests/test_im_guide_queue_human_api.sh`：调度器端口注入下真实链路通过。
-- `SKIP_BUILD=true BIFROST_BIN=<release> bash e2e-tests/tests/test_agent_chat_history_continue.sh`：Chat Completions mock 动态端口回传，`REQUEST_CONNECT_REFUSED` 不复现。
-- `SKIP_BUILD=true BIFROST_BIN=<release> ADMIN_PORT=18945 MOCK_HTTP_PORT=18946 bash e2e-tests/tests/test_agent_send_msg_feishu_card.sh`：Feishu interactive card 真实链路通过。
 - `SKIP_BUILD=true BIFROST_BIN=<release> bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh`：输出 `Using existing bifrost binary`，三段 relay fallback 全过。
 - `BIFROST_BIN=<release> SKIP_BUILD=true SKIP_CARGO_TEST=true PROXY_PORT=<free> ECHO_HTTP_PORT=<free> ECHO_HTTPS_PORT=<free> bash e2e-tests/tests/test_http3_e2e.sh`：全部命中本地 mock，`Failed: 0`。
 - Linux 与 macOS Shell capability matrix 显式设置 `SKIP_CARGO_TEST=true`：HTTP/3 Rust integration test 由 Unit/Integration 与 Coverage 两个独立 job 双重执行；Shell 保留全部真实代理场景，避免冷缓存下 test-only 依赖编译超过 job 预算。
@@ -283,14 +277,6 @@ Bash 调度逻辑，无 Rust 公共函数变更。
 - `e2e-tests/run_all_tests_parallel.sh`
 - `e2e-tests/tests/test_system_proxy_e2e.sh`
 - `e2e-tests/tests/test_unsafe_ssl_e2e.sh`
-- `e2e-tests/tests/test_long_term_memory_human_api.sh`
-- `e2e-tests/tests/test_agent_builtin_status_runtime.sh`
-- `e2e-tests/tests/test_im_guide_queue_human_api.sh`
-- `e2e-tests/tests/test_update_plan_human_api.sh`
-- `e2e-tests/tests/test_agent_loop_runtime_limits.sh`
-- `e2e-tests/tests/test_agent_send_msg_feishu_card.sh`
-- `e2e-tests/tests/test_agent_chat_history_continue.sh`
-- `e2e-tests/tests/test_agent_direct_path_switch.sh`
 - `e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh`
 - `e2e-tests/tests/test_http3_e2e.sh`
 - `e2e-tests/tests/test_replay_body_decode.sh`

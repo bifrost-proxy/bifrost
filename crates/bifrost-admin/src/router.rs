@@ -10,8 +10,6 @@ use tracing::debug;
 
 use crate::cors::apply_cors_headers;
 use crate::handlers::{
-    agent_chat::handle_agent_chat,
-    agent_memories::handle_agent_memories,
     app_icon::handle_app_icon,
     asr::handle_asr,
     audit::handle_audit,
@@ -256,11 +254,7 @@ impl AdminRouter {
             return handle_audit(req, path).await;
         }
 
-        if path.starts_with("/api/agent/chat") {
-            handle_agent_chat(req, state, path).await
-        } else if path.starts_with("/api/agent/memories") {
-            handle_agent_memories(req, path).await
-        } else if path.starts_with("/api/asr") {
+        if path.starts_with("/api/asr") {
             handle_asr(req, path).await
         } else if path.starts_with("/api/speech") {
             handle_speech(req, path).await

@@ -1,11 +1,10 @@
 use super::*;
 use crate::im_gateway::types::ImProviderType;
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 mod busy_message_mode_tests;
@@ -217,7 +216,7 @@ pub(super) fn online_notification_message_uses_provider_work_dir_override() {
     assert!(message.contains("- **Provider**: Feishu Main (`feishu-main`)"));
     assert!(message.contains("- **Device**: eden-macbook"));
     assert!(message.contains("- **Workspace**: `/custom/im-provider-workdir`"));
-    assert!(message.contains("- **Runner Type**: `bifrost_agent`"));
+    assert!(message.contains("- **Runner Type**: `external`"));
     assert!(message.contains("- **Runner ID**: `N/A`"));
     assert!(message.contains("- **Model**: `N/A`"));
     assert!(message.contains("- **Reasoning Effort**: `N/A`"));
@@ -227,9 +226,7 @@ pub(super) fn online_notification_message_uses_provider_work_dir_override() {
     assert!(message.contains("- **Status**: Ready"));
     assert!(message.contains("可用命令:"));
     assert!(message.contains("IM 通道命令（所有 Runner）:"));
-    assert!(message.contains("Bifrost Agent 命令:"));
-    assert!(message.contains("/remember <text>"));
-    assert!(message.contains("/g <引导内容>"));
+    assert!(!message.contains("/remember <text>"));
 }
 
 #[test]
@@ -686,9 +683,9 @@ pub(super) fn progress_events_flush_immediately_only_for_visible_chat_updates() 
         mcp_tool_count: 0,
         pending_guide_messages: Vec::new(),
         user_turn_count: 0,
-        agent_type: Some("Bifrost Agent".to_string()),
-        runner_type: Some("bifrost_agent".to_string()),
-        runner_id: None,
+        agent_type: Some("External Runner Agent".to_string()),
+        runner_type: Some("codex".to_string()),
+        runner_id: Some("Codex".to_string()),
         model: None,
         model_provider: None,
         model_reasoning_effort: None,
@@ -913,166 +910,6 @@ pub(super) fn agent_reply_target_uses_feishu_open_id_without_chat_id() {
     );
 }
 
-#[test]
-pub(super) fn start_notice_is_plain_weixin_only_without_progress_card() {
-    let mut provider = test_provider();
-    provider.provider_type = ImProviderType::Weixin;
-
-    assert!(should_send_plain_im_task_start_notice(&provider, false));
-    assert!(!should_send_plain_im_task_start_notice(&provider, true));
-
-    provider.provider_type = ImProviderType::Feishu;
-    assert!(!should_send_plain_im_task_start_notice(&provider, false));
-}
-
-pub(super) struct TestChatCompletionMock {
-    port: u16,
-    requests: Arc<Mutex<Vec<serde_json::Value>>>,
-}
-
-impl TestChatCompletionMock {
-    pub(super) async fn start() -> Self {
-        Self::start_with_content("IM_PROVIDER_CONFIG_OK").await
-    }
-
-    pub(super) async fn start_with_content(content: &str) -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind mock chat server");
-        let port = listener.local_addr().expect("mock local addr").port();
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let requests_for_server = Arc::clone(&requests);
-        let content = content.to_string();
-
-        tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    break;
-                };
-                let io = TokioIo::new(stream);
-                let requests = Arc::clone(&requests_for_server);
-                let content = content.clone();
-                tokio::spawn(async move {
-                    let service = service_fn(move |req: Request<Incoming>| {
-                        let requests = Arc::clone(&requests);
-                        let content = content.clone();
-                        async move {
-                            let body_bytes = req
-                                .into_body()
-                                .collect()
-                                .await
-                                .map(|body| body.to_bytes())
-                                .unwrap_or_else(|_| Bytes::new());
-                            let body: serde_json::Value =
-                                serde_json::from_slice(&body_bytes).unwrap_or_default();
-                            requests.lock().expect("requests lock").push(body);
-                            let response = serde_json::json!({
-                                "choices": [{
-                                    "message": {
-                                        "role": "assistant",
-                                        "content": content
-                                    },
-                                    "finish_reason": "stop"
-                                }],
-                                "usage": {
-                                    "prompt_tokens": 10,
-                                    "completion_tokens": 4,
-                                    "total_tokens": 14
-                                }
-                            });
-                            Ok::<_, hyper::Error>(
-                                Response::builder()
-                                    .status(StatusCode::OK)
-                                    .header("Content-Type", "application/json")
-                                    .body(Full::new(Bytes::from(response.to_string())))
-                                    .unwrap(),
-                            )
-                        }
-                    });
-                    let _ = http1::Builder::new().serve_connection(io, service).await;
-                });
-            }
-        });
-
-        Self { port, requests }
-    }
-
-    pub(super) fn url(&self) -> String {
-        format!("http://127.0.0.1:{}/chat/completions", self.port)
-    }
-}
-
-pub(super) fn request_messages_contain(body: &serde_json::Value, needle: &str) -> bool {
-    body.get("messages")
-        .and_then(|messages| messages.as_array())
-        .map(|messages| {
-            messages.iter().any(|message| {
-                let Some(content) = message.get("content") else {
-                    return false;
-                };
-                if let Some(text) = content.as_str() {
-                    return text.contains(needle);
-                }
-                content
-                    .as_array()
-                    .map(|parts| {
-                        parts.iter().any(|part| {
-                            part.get("text")
-                                .and_then(|value| value.as_str())
-                                .map(|text| text.contains(needle))
-                                .unwrap_or(false)
-                        })
-                    })
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
-}
-
-pub(super) fn request_contains_image_url(body: &serde_json::Value) -> bool {
-    request_image_url_count(body) > 0
-}
-
-pub(super) fn request_image_url_count(body: &serde_json::Value) -> usize {
-    body.get("messages")
-        .and_then(|messages| messages.as_array())
-        .map(|messages| {
-            messages
-                .iter()
-                .map(|message| {
-                    message
-                        .get("content")
-                        .and_then(|content| content.as_array())
-                        .map(|parts| {
-                            parts
-                                .iter()
-                                .filter(|part| {
-                                    part.get("type").and_then(|value| value.as_str())
-                                        == Some("image_url")
-                                        && part
-                                            .pointer("/image_url/url")
-                                            .and_then(|value| value.as_str())
-                                            .is_some_and(|url| {
-                                                url.starts_with("data:image/png;base64,")
-                                            })
-                                })
-                                .count()
-                        })
-                        .unwrap_or(0)
-                })
-                .sum()
-        })
-        .unwrap_or(0)
-}
-
-pub(super) fn request_message_role(body: &serde_json::Value, idx: usize) -> Option<&str> {
-    body.get("messages")?
-        .as_array()?
-        .get(idx)?
-        .get("role")?
-        .as_str()
-}
-
 pub(super) fn test_provider() -> ImProviderConfig {
     ImProviderConfig {
         id: "feishu-main".to_string(),
@@ -1250,136 +1087,6 @@ pub(super) async fn rich_card_builder_uses_image_key_and_markdown() {
 mod provider_agent_tests;
 
 #[tokio::test(flavor = "current_thread")]
-pub(super) async fn im_event_loop_uses_provider_agent_config_for_agent_chat() {
-    let temp_dir = tempfile::tempdir().expect("temp data dir");
-    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
-    let _worker_env_lock = crate::test_env::agent_worker_env_lock().lock().await;
-    let _force_worker_guard = EnvVarGuard::remove("BIFROST_FORCE_AGENT_WORKER");
-    let mock = TestChatCompletionMock::start().await;
-    let service = ImGatewayService::new(temp_dir.path());
-
-    let mut base_config = service.agent_config_store.load();
-    base_config.enabled = true;
-    base_config.model = Some("mock-model".to_string());
-    base_config.model_provider = Some("mock".to_string());
-    base_config.work_dir = Some(std::env::current_dir().unwrap().display().to_string());
-    base_config.base_instructions = Some("GLOBAL_BASE_SHOULD_NOT_APPEAR".to_string());
-    base_config.developer_instructions = Some("GLOBAL_DEV_SHOULD_NOT_APPEAR".to_string());
-    base_config.user_instructions = Some("GLOBAL_USER_SHOULD_NOT_APPEAR".to_string());
-    base_config.max_turn_iterations = Some(1);
-    base_config.model_providers.insert(
-        "mock".to_string(),
-        bifrost_agent::config::ModelProviderConfig {
-            name: Some("Mock".to_string()),
-            base_url: Some(mock.url()),
-            wire_api: Some(bifrost_agent::config::ModelWireApi::ChatCompletions),
-            env_key: None,
-            api_key: None,
-            http_headers: Some(HashMap::from([(
-                "Authorization".to_string(),
-                "Bearer test".to_string(),
-            )])),
-            env_http_headers: None,
-            request_max_retries: None,
-            stream_idle_timeout_ms: None,
-            stream_max_retries: None,
-        },
-    );
-    service
-        .agent_config_store
-        .save(&base_config)
-        .expect("save base agent config");
-
-    let mut provider = test_provider();
-    provider.id = "new-im-provider-config".to_string();
-    provider.owner_open_id = Some("owner-open-id".to_string());
-    provider.base_url = Some("http://127.0.0.1:9".to_string());
-    let mut provider_in_store = provider.clone();
-    provider_in_store.agent_config = Some(ImProviderAgentConfig {
-        runner: None,
-        work_dir: Some(std::env::current_dir().unwrap().display().to_string()),
-        base_instructions: Some("IM_PROVIDER_BASE_OK: answer IM_PROVIDER_CONFIG_OK".to_string()),
-        developer_instructions: Some("IM_PROVIDER_DEV_OK".to_string()),
-        user_instructions: Some("IM_PROVIDER_USER_OK".to_string()),
-    });
-    service
-        .provider_store
-        .add(provider_in_store)
-        .expect("add current provider config to store");
-
-    let (tx, rx) = mpsc::unbounded_channel();
-    let handle = tokio::spawn(run_event_loop(
-        rx,
-        ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider())),
-        provider.clone(),
-        Arc::clone(&service.event_store),
-        Arc::clone(&service.message_log_store),
-        Arc::clone(&service.route_store),
-        Arc::clone(&service.provider_store),
-        Arc::clone(&service.agent_config_store),
-        Arc::clone(&service.agent_client),
-        Arc::clone(&service.agent_tools),
-        Arc::clone(&service.schedule_store),
-        Arc::clone(&service.scheduler),
-        Arc::clone(&service.target_store),
-        Arc::clone(&service.connection_manager),
-        Arc::clone(&service.agent_session_manager),
-        Arc::clone(&service.external_cli_config_store),
-        Arc::clone(&service.queue_manager),
-        Arc::clone(&service.progress_registry),
-    ));
-
-    tx.send(ImEvent {
-        event_id: "evt-im-provider-agent-config".to_string(),
-        provider_id: provider.id.clone(),
-        provider_type: ImProviderType::Feishu,
-        event_type: "message.receive".to_string(),
-        source: crate::im_gateway::types::ImEventSource {
-            chat_id: Some("chat-id".to_string()),
-            user_id: Some("owner-open-id".to_string()),
-            message_id: None,
-        },
-        message: Some(crate::im_gateway::types::ImEventMessage {
-            text: "IM_PROVIDER_CHAT_MARKER 请只回复 IM_PROVIDER_CONFIG_OK".to_string(),
-            mentions: Vec::new(),
-            images: Vec::new(),
-            raw_type: Some("text".to_string()),
-        }),
-        received_at: now_ms(),
-        raw_digest: None,
-    })
-    .expect("send IM event");
-    drop(tx);
-
-    tokio::time::timeout(std::time::Duration::from_secs(60), handle)
-        .await
-        .expect("event loop timed out")
-        .expect("event loop task panicked");
-
-    let requests = mock.requests.lock().expect("requests lock");
-    let request = requests.first().expect("mock received chat request");
-    assert_eq!(request_message_role(request, 0), Some("system"));
-    assert_eq!(request_message_role(request, 1), Some("developer"));
-    assert_eq!(request_message_role(request, 2), Some("user"));
-    assert!(request_messages_contain(request, "IM_PROVIDER_BASE_OK"));
-    assert!(request_messages_contain(request, "IM_PROVIDER_DEV_OK"));
-    assert!(request_messages_contain(request, "IM_PROVIDER_USER_OK"));
-    assert!(request_messages_contain(request, "IM_PROVIDER_CHAT_MARKER"));
-    assert!(!request_messages_contain(
-        request,
-        "GLOBAL_BASE_SHOULD_NOT_APPEAR"
-    ));
-    assert!(!request_messages_contain(
-        request,
-        "GLOBAL_DEV_SHOULD_NOT_APPEAR"
-    ));
-    assert!(!request_messages_contain(
-        request,
-        "GLOBAL_USER_SHOULD_NOT_APPEAR"
-    ));
-}
-
-#[tokio::test(flavor = "current_thread")]
 pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled_default_flag() {
     let temp_dir = tempfile::tempdir().expect("temp data dir");
     let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
@@ -1446,6 +1153,31 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
         .provider_store
         .add(provider.clone())
         .expect("add provider");
+    service
+        .route_store
+        .add(crate::im_gateway::types::ImRoute {
+            id: "agent-chat-external-runner".to_string(),
+            provider_id: provider.id.clone(),
+            name: "Agent Chat external runner".to_string(),
+            enabled: true,
+            event_type: crate::im_gateway::types::ImEventType::MessageReceive,
+            matcher: crate::im_gateway::types::ImEventMatcher {
+                chat_ids: Vec::new(),
+                user_ids: vec!["owner-open-id".to_string()],
+                keyword: None,
+                regex: None,
+            },
+            action: crate::im_gateway::types::ImRouteAction::AgentChat {
+                system_prompt: None,
+                model: None,
+                reply_target: crate::im_gateway::types::ReplyTarget::OriginalChat,
+            },
+            timeout_ms: 30_000,
+            max_output_bytes: 1_048_576,
+            created_at: now_ms(),
+            updated_at: now_ms(),
+        })
+        .expect("add AgentChat route");
     let session_key = build_session_key(&provider.id, Some("owner-open-id"));
     crate::im_gateway::session_state::upsert_session_state(
         &session_key,
@@ -1468,8 +1200,6 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
         Arc::clone(&service.route_store),
         Arc::clone(&service.provider_store),
         Arc::clone(&service.agent_config_store),
-        Arc::clone(&service.agent_client),
-        Arc::clone(&service.agent_tools),
         Arc::clone(&service.schedule_store),
         Arc::clone(&service.scheduler),
         Arc::clone(&service.target_store),
@@ -1711,8 +1441,6 @@ pub(super) async fn im_event_loop_external_cli_route_processes_image_only_messag
         Arc::clone(&service.route_store),
         Arc::clone(&service.provider_store),
         Arc::clone(&service.agent_config_store),
-        Arc::clone(&service.agent_client),
-        Arc::clone(&service.agent_tools),
         Arc::clone(&service.schedule_store),
         Arc::clone(&service.scheduler),
         Arc::clone(&service.target_store),
@@ -1849,8 +1577,6 @@ pub(super) async fn im_event_loop_external_cli_session_records_runner_failure() 
         Arc::clone(&service.route_store),
         Arc::clone(&service.provider_store),
         Arc::clone(&service.agent_config_store),
-        Arc::clone(&service.agent_client),
-        Arc::clone(&service.agent_tools),
         Arc::clone(&service.schedule_store),
         Arc::clone(&service.scheduler),
         Arc::clone(&service.target_store),
@@ -1931,227 +1657,218 @@ pub(super) async fn im_event_loop_external_cli_session_records_runner_failure() 
                 .is_some_and(|value| value.starts_with("Runner failed:"))));
 }
 
-#[tokio::test(flavor = "current_thread")]
-pub(super) async fn agent_chat_final_reply_sends_local_markdown_images_as_im_images() {
+#[test]
+pub(super) fn external_help_and_runner_switch_use_external_configuration() {
     let temp_dir = tempfile::tempdir().expect("temp data dir");
     let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
-    let _worker_env_lock = crate::test_env::agent_worker_env_lock().lock().await;
-    let _force_worker_guard = EnvVarGuard::remove("BIFROST_FORCE_AGENT_WORKER");
-    let image_path = temp_dir.path().join("chatgpt-web-image-1.png");
-    std::fs::write(&image_path, b"fake png bytes").expect("write image");
-    let response = format!(
-        "已生成图片，正在发送原图。\n\n![ChatGPT 生成图片 1]({})\n\n正文继续。",
-        image_path.display()
-    );
-    let mock = TestChatCompletionMock::start_with_content(&response).await;
     let service = ImGatewayService::new(temp_dir.path());
-
-    let mut agent_config = service.agent_config_store.load();
-    agent_config.enabled = true;
-    agent_config.model = Some("mock-model".to_string());
-    agent_config.model_provider = Some("mock".to_string());
-    agent_config.work_dir = Some(temp_dir.path().display().to_string());
-    agent_config.max_turn_iterations = Some(1);
-    agent_config.model_providers.insert(
-        "mock".to_string(),
-        bifrost_agent::config::ModelProviderConfig {
-            name: Some("Mock".to_string()),
-            base_url: Some(mock.url()),
-            wire_api: Some(bifrost_agent::config::ModelWireApi::ChatCompletions),
-            env_key: None,
-            api_key: None,
-            http_headers: Some(HashMap::from([(
-                "Authorization".to_string(),
-                "Bearer test".to_string(),
-            )])),
-            env_http_headers: None,
-            request_max_retries: None,
-            stream_idle_timeout_ms: None,
-            stream_max_retries: None,
-        },
-    );
-
     let mut provider = test_provider();
-    provider.id = "weixin-image-reply-provider".to_string();
-    provider.provider_type = ImProviderType::Weixin;
-    provider.owner_open_id = Some("owner@im.wechat".to_string());
-    provider.base_url = Some("http://127.0.0.1:9".to_string());
-    provider.secret_ref = Some("test-token".to_string());
+    provider.id = "runner-switch-provider".to_string();
     service
         .provider_store
         .add(provider.clone())
         .expect("add provider");
 
-    let event = ImEvent {
-        event_id: "evt-weixin-generated-image".to_string(),
-        provider_id: provider.id.clone(),
-        provider_type: ImProviderType::Weixin,
-        event_type: "message.receive".to_string(),
-        source: crate::im_gateway::types::ImEventSource {
-            chat_id: Some("sender@im.wechat".to_string()),
-            user_id: Some("sender@im.wechat".to_string()),
-            message_id: Some("msg-1".to_string()),
+    let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    config.runners.insert(
+        "custom-runner".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            adapter: crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER.to_string(),
+            enabled: true,
+            ..Default::default()
         },
-        message: None,
-        received_at: 0,
-        raw_digest: None,
+    );
+    let agent_config = crate::im_gateway::agent::ImAgentConfig {
+        runner: Some(bifrost_agent::AgentRunnerMode::Custom(
+            "custom-runner".to_string(),
+        )),
+        ..Default::default()
     };
+    assert_eq!(
+        im_help_runner_kind_for_agent_config(&agent_config, &config, Some(&provider.id)),
+        ImHelpRunnerKind::External {
+            adapter: crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER.to_string()
+        }
+    );
 
-    process_agent_chat(
-        &ImProviderClient::Weixin(Arc::clone(service.connection_manager.weixin_provider())),
-        &provider,
+    let selection = resolve_im_runner_selection(&config, "custom-runner").expect("selection");
+    let mut session = bifrost_agent::AgentSession::new("runner-switch-session");
+    let reply = apply_im_runner_switch_to_session(
         &service.provider_store,
-        &event,
-        &service.agent_client,
-        &agent_config,
-        &service.agent_tools,
-        &service.schedule_store,
-        &service.scheduler,
-        &service.target_store,
-        &service.connection_manager,
-        &service.agent_session_manager,
-        &service.progress_registry,
-        &service.queue_manager,
-        "weixin:image-reply-test",
-        "生成图片",
-        &[],
-        None,
-        None,
-        &service.message_log_store,
-        None,
-    )
-    .await;
-
-    let logs = service.message_log_store.list_by_provider(&provider.id);
-    assert!(logs.iter().any(|log| {
-        log.msg_type.as_deref() == Some("image")
-            && log
-                .content_preview
-                .as_deref()
-                .is_some_and(|preview| preview.contains("ChatGPT 生成图片 1"))
-    }));
-    assert!(logs.iter().any(|log| {
-        log.msg_type.as_deref() == Some("interactive")
-            && log
-                .content_preview
-                .as_deref()
-                .is_some_and(|preview| !preview.contains("chatgpt-web-image-1.png"))
-    }));
+        &provider.id,
+        "runner-switch-session",
+        &mut session,
+        &selection,
+    );
+    assert!(reply.contains("custom-runner"));
+    assert_eq!(session.runner_id.as_deref(), Some("custom-runner"));
+    assert_eq!(
+        session.runner_type.as_deref(),
+        Some(crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER)
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
-pub(super) async fn im_event_loop_forwards_image_attachment_to_agent_chat() {
+pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions() {
     let temp_dir = tempfile::tempdir().expect("temp data dir");
     let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
-    let _worker_env_lock = crate::test_env::agent_worker_env_lock().lock().await;
-    let _force_worker_guard = EnvVarGuard::remove("BIFROST_FORCE_AGENT_WORKER");
-    let mock = TestChatCompletionMock::start().await;
     let service = ImGatewayService::new(temp_dir.path());
-
-    let mut base_config = service.agent_config_store.load();
-    base_config.enabled = true;
-    base_config.model = Some("mock-vision-model".to_string());
-    base_config.model_provider = Some("mock".to_string());
-    base_config.work_dir = Some(std::env::current_dir().unwrap().display().to_string());
-    base_config.max_turn_iterations = Some(1);
-    base_config.model_providers.insert(
-        "mock".to_string(),
-        bifrost_agent::config::ModelProviderConfig {
-            name: Some("Mock".to_string()),
-            base_url: Some(mock.url()),
-            wire_api: Some(bifrost_agent::config::ModelWireApi::ChatCompletions),
-            env_key: None,
-            api_key: None,
-            http_headers: Some(HashMap::from([(
-                "Authorization".to_string(),
-                "Bearer test".to_string(),
-            )])),
-            env_http_headers: None,
-            request_max_retries: None,
-            stream_idle_timeout_ms: None,
-            stream_max_retries: None,
-        },
-    );
-    service
-        .agent_config_store
-        .save(&base_config)
-        .expect("save base agent config");
-
     let mut provider = test_provider();
-    provider.id = "image-provider".to_string();
-    provider.owner_open_id = Some("owner-open-id".to_string());
+    provider.id = "concurrent-provider".to_string();
     provider.base_url = Some("http://127.0.0.1:9".to_string());
+    provider.agent_config = Some(ImProviderAgentConfig {
+        runner: Some(bifrost_agent::AgentRunnerMode::Custom("web".to_string())),
+        work_dir: None,
+        base_instructions: None,
+        developer_instructions: None,
+        user_instructions: None,
+    });
     service
         .provider_store
         .add(provider.clone())
         .expect("add provider");
-
-    let (tx, rx) = mpsc::unbounded_channel();
-    let handle = tokio::spawn(run_event_loop(
-        rx,
-        ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider())),
-        provider.clone(),
-        Arc::clone(&service.event_store),
-        Arc::clone(&service.message_log_store),
-        Arc::clone(&service.route_store),
-        Arc::clone(&service.provider_store),
-        Arc::clone(&service.agent_config_store),
-        Arc::clone(&service.agent_client),
-        Arc::clone(&service.agent_tools),
-        Arc::clone(&service.schedule_store),
-        Arc::clone(&service.scheduler),
-        Arc::clone(&service.target_store),
-        Arc::clone(&service.connection_manager),
-        Arc::clone(&service.agent_session_manager),
-        Arc::clone(&service.external_cli_config_store),
-        Arc::clone(&service.queue_manager),
-        Arc::clone(&service.progress_registry),
-    ));
-
-    tx.send(ImEvent {
-        event_id: "evt-im-image-agent-chat".to_string(),
+    let mut external_config = service.external_cli_config_store.load();
+    external_config.runners.insert(
+        "web".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
+            enabled: true,
+            ..Default::default()
+        },
+    );
+    service
+        .external_cli_config_store
+        .save(external_config)
+        .expect("save external config");
+    let client = ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider()));
+    let event_for = |event_id: &str, user_id: &str, text: &str| ImEvent {
+        event_id: event_id.to_string(),
         provider_id: provider.id.clone(),
         provider_type: ImProviderType::Feishu,
         event_type: "message.receive".to_string(),
         source: crate::im_gateway::types::ImEventSource {
             chat_id: Some("chat-id".to_string()),
-            user_id: Some("owner-open-id".to_string()),
-            message_id: Some("om-image".to_string()),
+            user_id: Some(user_id.to_string()),
+            message_id: Some(format!("message-{event_id}")),
         },
         message: Some(crate::im_gateway::types::ImEventMessage {
-            text: "".to_string(),
+            text: text.to_string(),
             mentions: Vec::new(),
-            images: (0..7)
-                .map(|idx| crate::im_gateway::types::ImImageAttachment {
-                    file_key: format!("img-unit-{idx}"),
-                    source: crate::im_gateway::types::ImImageSource::MessageResource,
-                    mime_type: Some("image/png".to_string()),
-                    data_base64: Some("iVBORw0KGgo=".to_string()),
-                    download_url: None,
-                    encrypted_query_param: None,
-                    aes_key: None,
-                })
-                .collect(),
-            raw_type: Some("image".to_string()),
+            images: Vec::new(),
+            raw_type: Some("text".to_string()),
         }),
         received_at: now_ms(),
         raw_digest: None,
-    })
-    .expect("send IM image event");
-    drop(tx);
+    };
 
-    tokio::time::timeout(std::time::Duration::from_secs(60), handle)
-        .await
-        .expect("event loop timed out")
-        .expect("event loop task panicked");
+    let active_session_key = build_session_key(&provider.id, Some("owner-open-id"));
+    let active_session = service
+        .agent_session_manager
+        .take_session(&active_session_key);
+    let active_event = event_for("active", "owner-open-id", "queue active message");
+    handle_concurrent_event_during_chat(
+        &active_event,
+        &provider,
+        &active_session_key,
+        &service.queue_manager,
+        &client,
+        &service.message_log_store,
+        &service.agent_session_manager,
+        &service.progress_registry,
+        &service.agent_config_store,
+        &service.provider_store,
+        &service.event_store,
+        &service.external_cli_config_store,
+        BusyMessageDefaultMode::Queue,
+    )
+    .await;
+    assert_eq!(
+        service
+            .queue_manager
+            .queue_status(&active_session_key)
+            .len(),
+        1
+    );
+    service.agent_session_manager.return_session(active_session);
 
-    let requests = mock.requests.lock().expect("requests lock");
-    if let Some(request) = requests.first() {
-        assert!(request_messages_contain(request, IMAGE_ONLY_AGENT_PROMPT));
-        assert!(request_contains_image_url(request));
-        assert_eq!(
-            request_image_url_count(request),
-            MAX_AGENT_IMAGES_PER_MESSAGE
-        );
-    }
+    let other_session_key = build_session_key(&provider.id, Some("other-owner"));
+    let other_session = service
+        .agent_session_manager
+        .take_session(&other_session_key);
+    let other_event = event_for("other-active", "other-owner", "queue other active message");
+    handle_concurrent_event_during_chat(
+        &other_event,
+        &provider,
+        "some-other-active-session",
+        &service.queue_manager,
+        &client,
+        &service.message_log_store,
+        &service.agent_session_manager,
+        &service.progress_registry,
+        &service.agent_config_store,
+        &service.provider_store,
+        &service.event_store,
+        &service.external_cli_config_store,
+        BusyMessageDefaultMode::Queue,
+    )
+    .await;
+    assert_eq!(
+        service.queue_manager.queue_status(&other_session_key).len(),
+        1
+    );
+    service.agent_session_manager.return_session(other_session);
+
+    let inactive_event = event_for("inactive", "inactive-owner", "queue inactive message");
+    let inactive_session_key = build_session_key(&provider.id, Some("inactive-owner"));
+    handle_concurrent_event_during_chat(
+        &inactive_event,
+        &provider,
+        "some-other-active-session",
+        &service.queue_manager,
+        &client,
+        &service.message_log_store,
+        &service.agent_session_manager,
+        &service.progress_registry,
+        &service.agent_config_store,
+        &service.provider_store,
+        &service.event_store,
+        &service.external_cli_config_store,
+        BusyMessageDefaultMode::Queue,
+    )
+    .await;
+    assert_eq!(
+        service
+            .queue_manager
+            .queue_status(&inactive_session_key)
+            .len(),
+        1
+    );
+
+    let mut restricted_provider = provider.clone();
+    restricted_provider.owner_open_id = Some("owner-open-id".to_string());
+    service
+        .provider_store
+        .update(restricted_provider.clone())
+        .expect("restrict provider owner");
+    let unauthorized = event_for("unauthorized", "not-owner", "ignored");
+    handle_concurrent_event_during_chat(
+        &unauthorized,
+        &restricted_provider,
+        &active_session_key,
+        &service.queue_manager,
+        &client,
+        &service.message_log_store,
+        &service.agent_session_manager,
+        &service.progress_registry,
+        &service.agent_config_store,
+        &service.provider_store,
+        &service.event_store,
+        &service.external_cli_config_store,
+        BusyMessageDefaultMode::Queue,
+    )
+    .await;
+    assert!(service
+        .queue_manager
+        .queue_status(&build_session_key(&provider.id, Some("not-owner")))
+        .is_empty());
 }

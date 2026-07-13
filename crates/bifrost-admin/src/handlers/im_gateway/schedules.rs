@@ -26,11 +26,8 @@ pub(super) async fn handle_schedules(
                     schedule.created_at = now;
                 }
                 schedule.updated_at = now;
-                if let Err(e) = crate::im_gateway::schedule_tools::normalize_schedule_with_context(
-                    &mut schedule,
-                    Some(&service.target_store),
-                    None,
-                ) {
+                if let Err(e) = crate::im_gateway::schedule_tools::normalize_schedule(&mut schedule)
+                {
                     return error_response(StatusCode::BAD_REQUEST, &e);
                 }
                 match service.schedule_store.add(schedule.clone()) {
@@ -88,11 +85,7 @@ pub(super) async fn handle_schedule_by_id(
                 return error_response(StatusCode::NOT_FOUND, "Schedule not found");
             };
             apply_schedule_patch(&mut existing, &patch);
-            if let Err(e) = crate::im_gateway::schedule_tools::normalize_schedule_with_context(
-                &mut existing,
-                Some(&service.target_store),
-                None,
-            ) {
+            if let Err(e) = crate::im_gateway::schedule_tools::normalize_schedule(&mut existing) {
                 return error_response(StatusCode::BAD_REQUEST, &e);
             }
             match service.schedule_store.update(existing.clone()) {
@@ -406,76 +399,16 @@ pub(super) async fn execute_agent_schedule_once(
     run.provider_id = Some(provider.id.clone());
     run.target_id = Some(target.id.clone());
 
-    let runner_id = normalize_schedule_runner_id(agent_task.runner_id.as_deref());
-    run.runner_id = runner_id.clone();
-    if let Some(runner_id) = runner_id.as_deref() {
-        return execute_external_runner_schedule_once(
-            service, schedule, agent_task, run, runner_id,
-        )
-        .await;
-    }
-
-    let mut config =
-        effective_agent_config_for_provider(&service.agent_config_store.load(), &provider);
-    let schedule_work_dir =
-        schedule_agent_effective_work_dir(agent_task, config.work_dir.as_deref());
-    config.work_dir = schedule_work_dir.clone();
-    let session_key = agent_task
-        .session_key
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("schedule:{}", schedule.id));
-    let mut session = service
-        .agent_session_manager
-        .take_session_with_work_dir(&session_key, schedule_work_dir);
-    session.source = "schedule".to_string();
-
-    let turn = tokio::time::timeout(
-        std::time::Duration::from_millis(schedule.timeout_ms),
-        bifrost_agent::session::run_turn(
-            &service.agent_client,
-            &config,
-            &mut session,
-            &service.build_agent_tool_registry(schedule.message_channel.clone()),
-            &agent_task.prompt,
-            agent_task.system_prompt.as_deref(),
-        ),
-    )
-    .await;
-    service.agent_session_manager.return_session(session);
-
-    match turn {
-        Ok(Ok(result)) => {
-            let ended = now_ms();
-            run.status = crate::im_gateway::types::TaskRunStatus::Success;
-            run.stdout_preview = Some(truncate_str(
-                &result.response,
-                schedule.max_output_bytes.min(4096) as usize,
-            ));
-            run.agent_final_response = Some(result.response.clone());
-            run.agent_tool_calls = result.tool_calls_log;
-            run.agent_plan_steps = result.plan_steps;
-            run.ended_at = Some(ended);
-            run.duration_ms = Some(ended.saturating_sub(run.started_at));
-        }
-        Ok(Err(error)) => finish_failed_run(&mut run, error),
-        Err(_) => {
-            let ended = now_ms();
-            run.status = crate::im_gateway::types::TaskRunStatus::Timeout;
-            run.error = Some(format!("timeout after {}ms", schedule.timeout_ms));
-            run.ended_at = Some(ended);
-            run.duration_ms = Some(ended.saturating_sub(run.started_at));
-        }
-    }
-
-    run
+    let runner_id = normalize_schedule_runner_id(agent_task.runner_id.as_deref())
+        .unwrap_or_else(|| service.external_cli_config_store.load().default_runner_id);
+    run.runner_id = Some(runner_id.clone());
+    execute_external_runner_schedule_once(service, schedule, agent_task, run, &runner_id).await
 }
 
 fn normalize_schedule_runner_id(runner_id: Option<&str>) -> Option<String> {
     runner_id
         .map(str::trim)
-        .filter(|value| !value.is_empty() && *value != "bifrost_agent")
+        .filter(|value| !value.is_empty())
         .map(str::to_string)
 }
 
@@ -637,24 +570,6 @@ async fn execute_external_runner_schedule_once(
     }
 
     run
-}
-
-pub(super) fn schedule_agent_effective_work_dir(
-    agent_task: &crate::im_gateway::types::ScheduleAgentTask,
-    inherited_work_dir: Option<&str>,
-) -> Option<String> {
-    agent_task
-        .work_dir
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            inherited_work_dir
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        })
 }
 
 fn external_schedule_effective_work_dir(

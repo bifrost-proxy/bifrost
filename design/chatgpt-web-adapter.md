@@ -6,7 +6,7 @@
 
 ## 背景
 
-Bifrost Agent 执行配置最终拆成两层：
+Agent Chat runner 执行配置最终拆成两层：
 
 - Runner：实例层。`AgentRunnerRegistry` 承载 `defaultRunnerId + runners + channels`，Provider/Channel 只覆盖 `runnerId / enabled / deliveryMode`。
 - Adapter：实现层。每个 runner 里有 `adapter` 与 `adapterConfig`，内置 adapter 包括 `codex / custom / mock / chatgpt_web`。

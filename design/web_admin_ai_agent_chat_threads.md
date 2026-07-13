@@ -147,7 +147,7 @@ E2E 用例通过这些 testid 定位，保持后端 push / API 无关。
 
 - 新增 `web/tests/ui/agent-chat-threads.spec.ts` Playwright 用例：
   - `AI Agent Chat thread list loads in batches and virtualizes rows`
-- 更新 `human_tests/im-gateway-agent.md` 增加 Agent Chat Threads 大量历史性能回归用例。
+- 更新 `human_tests/im-gateway-external-cli-chat-gateway.md` 增加 Agent Chat Threads 大量历史性能回归用例。
 - 更新 `human_tests/readme.md` 中 IM Gateway Agent 行的用例数与说明。
 
 ## 测试方案
@@ -172,13 +172,11 @@ E2E 用例通过这些 testid 定位，保持后端 push / API 无关。
   - `web/tests/ui/agent-chat.spec.ts`
 - 关联的 e2e 后端脚本（用于支撑 push 与 sessions 语义未破坏）：
   - `e2e-tests/tests/test_agent_history_pagination_api.sh`
-  - `e2e-tests/tests/test_agent_run_timeline_channel_unification.sh`
-  - `e2e-tests/tests/test_agent_session_stale_running_reconciliation.sh`
   - `e2e-tests/tests/test_im_gateway_external_runner_delayed_final_state.sh`
 
 ### 真实场景测试 human_tests
 
-- `human_tests/im-gateway-agent.md`：Agent Chat Threads 大量历史性能回归用例。
+- `human_tests/im-gateway-external-cli-chat-gateway.md`：Agent Chat Threads 大量历史性能回归用例。
 - `human_tests/readme.md`：同步 IM Gateway Agent 分组的用例数与说明。
 - 关联用例：`human_tests/agent-chat-history-pagination.md`、`human_tests/agent-session-persistence.md`。
 

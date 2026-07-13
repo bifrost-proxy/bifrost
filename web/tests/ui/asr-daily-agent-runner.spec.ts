@@ -72,7 +72,7 @@ function taskDetail() {
 async function installDailyAgentMocks(page: Page) {
   let dailyAgentConfig = {
     enabled: false,
-    runner: "bifrost_agent",
+    runner: "codex",
     timeout_ms: 7_200_000,
     trigger_policy: "after_asr_run",
     session_key: undefined as string | undefined,
@@ -103,7 +103,7 @@ async function installDailyAgentMocks(page: Page) {
         id: "daily_report",
         name: "daily_report",
         enabled: true,
-        runner: "bifrost_agent",
+        runner: "codex",
         timeout_ms: 7_200_000,
         trigger_policy: "after_asr_run",
         session_key: undefined as string | undefined,
@@ -480,11 +480,11 @@ test("ASR Daily Agent uses simple Runner and IM Channel dropdowns", async ({ pag
   await expect(page.getByText("1/2")).toBeVisible();
   await expect(page.getByText("Unindexed Reports")).toBeVisible();
   const runnerSelect = page.getByTestId("asr-daily-agent-runner-select");
-  await expect(runnerSelect).toContainText("Bifrost Agent");
+  await expect(runnerSelect).toContainText("codex");
 
   await runnerSelect.click();
   const dropdown = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)").last();
-  await expect(dropdown).toContainText("Bifrost Agent");
+  await expect(dropdown).toContainText("codex");
   await expect(dropdown).toContainText("codex");
   await expect(dropdown).toContainText("web");
   const runnerConfigReload = waitForDailyAgentConfigReload(page);

@@ -25,7 +25,6 @@ Chat Gateway 不是新的 Agent 产品形态，也不是绕过 IM Gateway 的快
 - 不把测试请求中的任意 work_dir 直接放开到外部 CLI Agent；必须经过 allowlist 或配置解析。
 - 不让 Chat Gateway 和 IM Gateway 各自实现两套 message sanitizer、progress renderer 或 session queue。
 - 不把 secret、provider token、完整 provider config 暴露到 Chat Gateway 响应。
-- 已有内置 Bifrost Agent runtime 继续可选；`AgentConfig.runner=bifrost_agent` 保持默认可选值。
 
 ### 必须真实验证
 
@@ -111,11 +110,11 @@ thread 内重新发起 turn：
 
 ### 外部 Runner 状态展示
 
-外部 CLI runner 不能照搬内置 Agent 的 loop/context/compaction 指标。飞书 progress card 与 Web Chat 显示：
+外部 CLI runner 的飞书 progress card 与 Web Chat 显示：
 
 - 状态标题：`Runner` 和模型标签；配置了 `adapterConfig.model` 时展示真实模型名和来源。
 - 状态正文：运行状态、Runner、Adapter、模型、外部会话、队列/引导、工作路径、最新工具摘要、token usage、最近输入 context（来自 `turn.completed.usage.input_tokens` 近似值）。
-- 不展示内置 Agent 专属的 `Loop 0/0`、`压缩 0 次` 空指标；未知字段保持 N/A。
+- 不展示没有外部 runner 数据来源的 `Loop 0/0`、`压缩 0 次` 空指标；未知字段保持 N/A。
 - 隐藏 chain-of-thought 不可见，也不伪造；只展示 CLI 明确输出的 reasoning summary / status / tool / final。
 
 ### 图片附件桥接
@@ -176,7 +175,6 @@ adapter 声明能力，WebUI/API 按能力显隐配置项：
 | `mcp_servers` | 按 server name 合并；secret/env 来自安全存储 |
 | `reply_mode=real_im` | 必须 global 允许 + channel 允许 + request 显式 + 权限校验 |
 
-`AgentConfig.runner` 与 `ImProviderAgentConfig.runner` 使用统一 runner 语义：`bifrost_agent` 表示内置 Agent，自定义 runner 直接保存 runner ID（`Codex`、`Claude-Code`、`abc` 等）。
 
 ### Codex adapter 参数映射
 

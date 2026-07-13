@@ -726,7 +726,7 @@ bifrost im messages list --provider feishu-main --direction inbound
 - 支持常见 Runner 别名：`codex`、`traex` / `trae`、`Claude Code`。如果用户给了具体 runner，先让 CLI 校验，不要自己猜配置文件。
 - Feishu / Weixin / WeChat provider 的 `base_url` 由 provider 类型固定管理。不要建议传 `--base-url`；CLI 会拒绝该参数。
 - 已有 App ID / Secret 时可以手动配置，但 secret 应使用 `env:NAME`，避免写入 shell history 或最终报告。
-- IM 通道上线通知会自动附带 runner-aware 帮助。所有 Runner 支持 `/help`、`/status`、`/cwd`、`/runner`、`/q`、`/rq`、`/stop`；只有内置 Bifrost Agent 支持 `/remember`、`/memories`、`/forget`、`/compact`、`/goal`、`/g`；Codex / Traex / Claude Code 等外部 Runner 只在适配器支持时展示 `/models`、`/model`、`/efforts`、`/effort`。
+- IM 通道上线通知会自动附带 runner-aware 帮助。所有外部 Runner 支持 `/help`、`/status`、`/cwd`、`/runner`、`/q`、`/rq`、`/stop`；Codex / Traex / Claude Code 等 Runner 只在适配器支持时展示 `/models`、`/model`、`/efforts`、`/effort`。
 
 ### 22. 安装 Skill 到 AI 工具
 

@@ -724,7 +724,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
         task_id: "task-1",
         config: {
           enabled: true,
-          runner: "bifrost_agent",
+          runner: "codex",
           timeout_ms: 7200000,
           trigger_policy: "after_asr_run",
           instructions_source: "default",
@@ -774,7 +774,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
             source_sha256: "old1234567890",
             source_len_bytes: 128,
             processed_at_ms: Date.now() - 3000,
-            runner: "bifrost_agent",
+            runner: "codex",
             report_path:
               "/tmp/bifrost/asr/data/text/task-1/.daily/report/2026-05-13-report.md",
             last_run_id: "run-20260513",
@@ -784,7 +784,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
             source_sha256: "abcdef1234567890",
             source_len_bytes: 256,
             processed_at_ms: Date.now() - 1000,
-            runner: "bifrost_agent",
+            runner: "codex",
             report_path:
               "/tmp/bifrost/asr/data/text/task-1/.daily/report/2026-05-14-report.md",
             last_run_id: "run-20260514",
@@ -794,7 +794,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
             source_sha256: "new1234567890",
             source_len_bytes: 512,
             processed_at_ms: Date.now() - 500,
-            runner: "bifrost_agent",
+            runner: "codex",
             report_path:
               "/tmp/bifrost/asr/data/text/task-1/.daily/report/2026-05-15-report.md",
             last_run_id: "run-20260515",
@@ -818,7 +818,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
           modified_ms: Date.now() - 500,
           content: "# Daily Agent Report\n\n运行记录内容",
           processed_at_ms: Date.now() - 1000,
-          runner: "bifrost_agent",
+          runner: "codex",
           last_run_id: "run-20260514",
         }),
       });

@@ -162,7 +162,7 @@
 操作步骤：
 1. 使用默认服务 `http://127.0.0.1:9900`，确认服务由当前源码重启，且 `System Proxy: Disabled`。
 2. 从已有默认任务 `a911c68b0f7a43afa29d1863cc02229a` 的 `.daily` 目录复制真实 Daily Docs，例如 `2026-05-18.md` 和 `2026-05-20.md`，到一个新建临时 ASR task 的 `.daily` 目录。
-3. 在临时 task 上配置三个 Agent：`builtin_io` 使用 `bifrost_agent`，`codex_io` 使用 `codex` runner，`chatgpt_io` 使用 ChatGPT Web runner `abc`；三个 Agent 均关闭 IM Delivery，并写入各自的 custom `AGENTS.md` marker。
+3. 配置两个 Agent，分别使用 Codex 和 ChatGPT Web runner；两者均关闭 IM Delivery，并写入各自的 custom `AGENTS.md` marker。
 4. 保存配置后请求 `GET /daily-agent`，检查每个 Agent 工作目录都包含 `AGENTS.md`、`input/`、`output/<output_dir>/`。
 5. 对每个 Agent 分别请求 `POST /daily-agent/run?agent_id=<agent>&date=2026-05-18&force=1`，等待该 Agent 状态变为 `success`。
 6. 请求 `/daily-agent/runs` 与 `/daily-agent/reports/2026-05-18?agent_id=<agent>`，并在 WebUI Daily Agent Records 页面打开报告详情。
@@ -172,7 +172,7 @@
 - 每个 Agent 的 `input/2026-05-18.md` 和 `input/2026-05-20.md` 与源 `.daily/YYYY-MM-DD.md` 逐字一致，新增 Agent 后不会缺失既有 Daily Docs 副本。
 - 当源 `.daily/YYYY-MM-DD.md` 已存在但内容刷新时，下一次 workspace 初始化或运行前同步会更新每个 Agent 的 `input/YYYY-MM-DD.md`；内容一致时跳过，不刷新 mtime。
 - 每个 Agent 的 report 都写入 `.daily/agents/<agent_id>/output/<output_dir>/2026-05-18-report.md`，不会写入旧版 `.daily/<output_dir>/`。
-- `/daily-agent/runs` 返回三条 records，runner 分别为 `bifrost_agent`、`codex`、`abc`，且 `report_path` 都指向各自 `output/<output_dir>/`。
+- `/daily-agent/runs` 返回两条 records，runner 分别为配置的 Codex 与 ChatGPT Web runner。
 - `/daily-agent/reports/{date}` 能读取对应 report 内容；WebUI Daily Agent Records 列表和详情页都能访问内容。
 - Daily Agent 编辑详情页使用 `asrDailyAgentEdit=<agent_id>` 路由，刷新后仍保持详情页，不回到列表页。
 
@@ -207,7 +207,7 @@
 - `config.terminology` 按保存内容返回，空白不会污染配置。
 - 每个 Agent 工作目录根目录都有最新 `TERMS.md`，内容包含 `E2E_TERMS_MARKER`。
 - 每个 Agent 的 `AGENTS.md` 都通过托管块引用相对路径 `TERMS.md`，用户自定义指令正文不被覆盖。
-- Bifrost Agent/Codex 等文件型 Runner 的 prompt 使用相对文件引用，不内联专有名词正文。
+- Codex 等文件型外部 Runner 的 prompt 使用相对文件引用，不内联专有名词正文。
 - GPT Web Runner 首轮和后续轮次的 prompt 都以 `## 专有名词配置（每次运行动态注入）` 开头，并包含最新术语正文。
 - 专有名词配置不影响两个 Agent 生成 report、processed records、IM 配置和 report sync 分目录同步。
 
@@ -332,7 +332,6 @@
 - 2026-06-03：执行 TC-ADA-09 WebUI 验证。使用 Playwright 打开 `http://127.0.0.1:3000/_bifrost/ai?aiSection=tools-asr&asrTask=a911c68b0f7a43afa29d1863cc02229a&asrTaskTab=daily`，拦截 `POST /daily-agent/run` 避免真实触发任务。点击行级主按钮 `Run All Agents` 后，请求为 `/daily-agent/run?date=2026-05-20`，确认省略 `agent_id` 表示全部 Agent；打开右侧下拉菜单，菜单包含 `Run All Agents`、`Run daily_report`、`Run tomorrow_todo`；选择 `Run daily_report` 后，请求为 `/daily-agent/run?date=2026-05-20&agent_id=daily_report`。
 - 2026-06-03：执行 TC-ADA-10 真实 ChatGPT Web Runner 失败隔离验证。当前 `abc` runner 为 `chatgpt_web`，`daily_report` 与 `tomorrow_todo` 均临时使用 `abc`，timeout 缩短为 15000ms，IM Delivery 关闭；ChatGPT Web auth status 为 `auth_required`，`accountStatus=401`，提示 authorization token 已于 `2026-06-03 03:24:20 UTC` 过期。触发 `POST /daily-agent/run?date=2026-05-20&force=1` 后返回 `queued`；运行中再次触发返回 `already_running`。轮询结果显示 `daily_report` 生成新 `run_id=1780457232354-07553a92-e688-43b9-90d2-671adcd6d47c` 并因 `daily agent run timed out after 15000ms` 失败，随后 `tomorrow_todo` 也生成独立新 `run_id=1780457247477-662ecfbe-2d64-43ea-80ec-9da7360d06af` 并同样超时失败，确认第一个 ChatGPT Web runner 失败没有阻断第二个 Agent 执行；脚本最后已恢复原始 Daily Agent 配置。
 - 2026-06-03：执行 TC-ADA-10 真实 ChatGPT Web Runner 成功链路验证。用户完成登录后，`GET /im-gateway/chat/adapters/chatgpt-web/auth/status?runnerId=abc` 返回 `state=logged_in`、`loggedIn=true`、`identityComplete=true`、`accountCheckOk=true`、`accountStatus=200`，确认后端登录检查成功态是 `logged_in` 而不是 `ready`。触发 `POST /daily-agent/run?date=2026-05-20&force=1` 返回 `queued`，运行中再次触发返回 `already_running`。轮询显示 `daily_report` 先进入 `running` 并以 `run_id=1780457629759-4577aa35-096d-43fb-8a41-55790f68345b` 成功结束；随后 `tomorrow_todo` 才进入 `running` 并以 `run_id=1780457946462-79723d55-d02f-49d1-a49e-551fa0044b27` 成功结束。`/daily-agent/runs` 返回 `2026-05-20` 两条新 processed records，分别写入 `.daily/report/2026-05-20-report.md` 和 `.daily/tomorrow_todo/2026-05-20-report.md`，确认两个 Agent 共用同一 ChatGPT Web runner 时串行运行、不会抢占，且成功产出各自报告。
-- 2026-06-03：执行 TC-ADA-11 默认服务真实三 Runner 验证。先用当前源码重启默认 `9900` 服务，确认 `System Proxy: Disabled`；创建临时 task `158a1e559db74e93a91eea697dcb9a5d`，从默认任务 `a911c68b0f7a43afa29d1863cc02229a` 复制真实 Daily Docs `2026-05-18.md` 与 `2026-05-20.md`。保存三个 Agent 后，逐字比对确认 `builtin_io`、`codex_io`、`chatgpt_io` 的 `input/2026-05-18.md` 和 `input/2026-05-20.md` 均与源文件一致。分别运行 `bifrost_agent`、`codex`、ChatGPT Web `abc`，三者均成功，records 的 `report_path` 分别为 `.daily/agents/builtin_io/output/builtin_io/2026-05-18-report.md`、`.daily/agents/codex_io/output/codex_io/2026-05-18-report.md`、`.daily/agents/chatgpt_io/output/chatgpt_io/2026-05-18-report.md`。Playwright 打开 `http://127.0.0.1:3000/_bifrost/ai?...asrTask=158a1e559db74e93a91eea697dcb9a5d&asrTaskTab=daily-agent-records`，确认三条记录可见；打开 ChatGPT report 详情能看到 `REAL_IO_TEST_CHATGPT_OUTPUT` 和 `REAL_IO_TEST_REAL_DAILY_SOURCE`；打开 `asrDailyAgentEdit=codex_io` 并刷新后仍保持 Agent 详情页。
 - 2026-06-03：补充执行同 task 的差异复制验证。先确认 `codex_io/input/2026-05-20.md` 与源文件一致；将源 `.daily/2026-05-20.md` 修改 1 个字节且保持文件长度不变，再调用 `GET /daily-agent` 触发 workspace sync，确认 input sha256 从 `abea9dcd...` 更新为 `d203c43f...`；随后恢复源文件，再次 sync 后 input sha256 恢复为 `abea9dcd...`，证明同步判断会比较内容而不是只看文件是否存在。
 - 2026-06-03：补充执行历史任务兼容验证。使用默认服务打开历史任务 `a911c68b0f7a43afa29d1863cc02229a` 的 Daily Agent 页面，触发 workspace 初始化后，确认旧 `daily_report/AGENTS.md` 从“源文件位于当前目录”迁移为 `input/YYYY-MM-DD.md`，旧 `tomorrow_todo/AGENTS.md` 从“当前目录根部”迁移为 `input/YYYY-MM-DD.md`，输出目录迁移为 `./output/tomorrow_todo/`。逐字比对确认该任务所有顶层 Daily Docs 与两个 Agent 的 `input/` 副本一致。随后调用 `POST /daily-agent/run?date=2026-05-14&agent_id=tomorrow_todo&force=1`，返回 queued，轮询状态从 running 到 success，报告落档到 `.daily/agents/tomorrow_todo/output/tomorrow_todo/2026-05-14-report.md`，records 中 `report_path` 也指向该新路径。
 

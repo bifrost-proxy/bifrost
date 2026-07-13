@@ -24,7 +24,7 @@ fn default_daily_agent_timeout_ms() -> u64 {
 }
 
 fn default_daily_agent_runner() -> String {
-    "bifrost_agent".to_string()
+    "Codex".to_string()
 }
 
 fn default_daily_agent_id() -> String {

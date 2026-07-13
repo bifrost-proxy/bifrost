@@ -9,9 +9,8 @@ IM Gateway 把这些能力收敛为一个 Bifrost 内部模块：
 - 以 `ImProvider` 抽象为中心，第一版内置 Feishu / Weixin，预留 WeChat / Webhook 扩展位。
 - 复用 Bifrost 已有的 Remote Invoke 授权、Admin API、CLI 分发和 WebUI 布局。
 - 保证 secret、token、完整 provider config 不被泄漏到日志、Remote Invoke summary 或前端 DTO。
-- 为 IM Agent（内置 Bifrost Agent 与 Codex/Claude Code/Trae 等外部 Runner）提供入站消息、进度卡、schedule 通知的统一发送通道。
 
-IM Gateway 不承担 Agent loop 本身；Agent loop 相关内容在 `im-gateway-agent.md`、`im-agent-streaming-card.md`、`im-gateway-codex-cli-chat-gateway.md`、`im-markdown-converter.md` 单独展开。本文只关注 gateway 层：连接、目标、路由、调度、消息发送、事件循环、持久化、权限与远端管理。
+IM Gateway 不承担 Runner loop 本身；外部 Runner 相关内容在 `im-gateway-codex-cli-chat-gateway.md`、`external-runner-live-guide.md`、`im-markdown-converter.md` 单独展开。本文只关注 gateway 层：连接、目标、路由、调度、消息发送、事件循环、持久化、权限与远端管理。
 
 ## 用户目标验证清单
 
@@ -52,12 +51,12 @@ IM Gateway 不承担 Agent loop 本身；Agent loop 相关内容在 `im-gateway-
 Gateway 只负责“把 IM 消息接进来 / 把消息发出去 / 把定时任务派发出去”。业务侧的 Agent loop、Chat Gateway、进度卡、Markdown 转换均由上层模块消费 gateway 提供的 provider / target / event 抽象。这样：
 
 - 新增 Feishu 或 Weixin 之外的 provider 只需要实现 `ImProvider` trait，注册到 `ImConnectionManager`，声明 `ImSendCapability`，其他模块不需要感知。
-- Agent、Chat Gateway、Schedule 之间没有互相直连；他们全部通过 gateway 的 `send_msg`、outbound message log 和 target/route/schedule 抽象协作。
+- 外部 Runner、Chat Gateway、Schedule 之间没有互相直连；它们通过 gateway 的 outbound message log 和 target/route/schedule 抽象协作。
 - 停用 gateway 或某个 provider 时，其他模块只失去发送能力，不会崩溃。
 
 ### Provider 能力驱动 UI 与工具 schema
 
-Provider 声明 `ImSendCapability`（支持的消息类型、是否支持流式卡片、是否支持撤回、是否支持图片附件等）。Agent 的 `send_msg` 工具、进度卡渲染、Add Provider 表单、Schedule 通知等入口都按 capability 动态裁剪：飞书暴露 text/markdown/interactive card，微信只暴露当前支持的类型；不支持的字段直接从 schema/表单中隐藏，不出现在 tool description。
+Provider 声明 `ImSendCapability`（支持的消息类型、是否支持流式卡片、是否支持撤回、是否支持图片附件等）。外部 Runner 进度卡渲染、Add Provider 表单、Schedule 通知等入口都按 capability 动态裁剪：飞书暴露 text/markdown/interactive card，微信只暴露当前支持的类型；不支持的字段直接从 schema/表单中隐藏。
 
 ### 权限先审再执行
 
@@ -88,9 +87,8 @@ Provider 声明 `ImSendCapability`（支持的消息类型、是否支持流式�
 - `scheduler.rs`：cron/interval 计算与常驻 loop。
 - `event_router.rs`：Provider event → route matcher → task 派发。
 - `task_executor.rs`：Script 任务执行器（cwd/env/timeout/输出上限）。
-- `agent_worker.rs`：内置 Agent worker client（in-process / 子进程可切换）。
 
-Handler 层 `crates/bifrost-admin/src/handlers/im_gateway/` 按功能拆分：`service.rs` / `providers.rs` / `event_loop.rs` / `agent_chat.rs` / `agent_reply.rs` / `agent_reply_attachments.rs` / `messages.rs` / `schedules.rs` / `agent_api.rs` / `chat_gateway.rs` / `busy_message_mode.rs` / `debug_inbound.rs` / `utils.rs`；子模块通过真实 `mod` 边界拆分，单文件 ≤ 1500 行。
+Handler 层 `crates/bifrost-admin/src/handlers/im_gateway/` 按功能拆分：`service.rs` / `providers.rs` / `event_loop.rs` / `agent_chat.rs` / `agent_reply.rs` / `agent_reply_attachments.rs` / `messages.rs` / `schedules.rs` / `agent_api.rs` / `chat_gateway.rs` / `busy_message_mode.rs` / `debug_inbound.rs` / `utils.rs`；子模块通过真实 `mod` 边界拆分。
 
 ### `ImProvider` trait
 
@@ -316,7 +314,7 @@ Provider 选择：显式 `--provider` 优先；单 enabled provider 自动选中
 - IM `/help` / `/cwd` / `/runner` / `/q` / `/rq` / `/g` 快路径。
 - Provider 删除/禁用立即停止长连接；auto-connect / supervisor 尊重 `enabled && event_connection_enabled && secret_ref`。
 - Provider/IM `/status` 展示 `resolved_work_dir`；重启上线通知补 Runner + 最近轮次。
-- Outbound message log `trigger` 区分 `agent_tool:send_msg` / `schedule:<id>` / `manual_run:<id>` / `route:<id>` / `remote:<caller>`。
+- Outbound message log `trigger` 区分 `schedule:<id>` / `manual_run:<id>` / `route:<id>` / `remote:<caller>`。
 
 ## 测试方案
 

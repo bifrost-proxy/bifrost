@@ -86,8 +86,6 @@ pub(super) async fn run_event_loop(
     route_store: Arc<ImRouteStore>,
     provider_store: Arc<ImProviderStore>,
     agent_config_store: Arc<ImAgentConfigStore>,
-    agent_client: Arc<ImAgentClient>,
-    agent_tools: Arc<ImAgentToolRegistry>,
     schedule_store: Arc<ImScheduleStore>,
     scheduler: Arc<ImScheduler>,
     target_store: Arc<ImTargetStore>,
@@ -106,8 +104,6 @@ pub(super) async fn run_event_loop(
         route_store,
         provider_store,
         agent_config_store,
-        agent_client,
-        agent_tools,
         schedule_store,
         scheduler,
         target_store,
@@ -131,12 +127,10 @@ pub(super) async fn run_event_loop_with_options(
     route_store: Arc<ImRouteStore>,
     provider_store: Arc<ImProviderStore>,
     agent_config_store: Arc<ImAgentConfigStore>,
-    agent_client: Arc<ImAgentClient>,
-    agent_tools: Arc<ImAgentToolRegistry>,
-    schedule_store: Arc<ImScheduleStore>,
-    scheduler: Arc<ImScheduler>,
-    target_store: Arc<ImTargetStore>,
-    connection_manager: Arc<ImConnectionManager>,
+    _schedule_store: Arc<ImScheduleStore>,
+    _scheduler: Arc<ImScheduler>,
+    _target_store: Arc<ImTargetStore>,
+    _connection_manager: Arc<ImConnectionManager>,
     agent_session_manager: Arc<ImAgentSessionManager>,
     external_cli_config_store: Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
     queue_manager: Arc<SessionQueueManager>,
@@ -166,26 +160,6 @@ pub(super) async fn run_event_loop_with_options(
                 info!(removed, "cleaned up expired session files (>90 days)");
             }
         }
-    }
-
-    let mcp_http_network = agent_client
-        .model_proxy_url()
-        .map(|proxy_url| {
-            bifrost_agent::mcp::McpHttpNetwork::with_proxy_and_ca(
-                proxy_url.to_string(),
-                Some(bifrost_storage::data_dir().join("certs").join("ca.crt")),
-            )
-        })
-        .unwrap_or_else(bifrost_agent::mcp::McpHttpNetwork::direct);
-    let mut mcp_manager =
-        ImMcpManager::new_with_http_network(&init_config.mcp_servers, mcp_http_network).await;
-    let mcp_tool_count = mcp_manager.list_tools().len();
-    if mcp_tool_count > 0 {
-        info!(
-            provider_id = %provider.id,
-            mcp_tools = mcp_tool_count,
-            "MCP manager initialized with tools"
-        );
     }
 
     // Send online notification to owner on connect
@@ -448,96 +422,41 @@ pub(super) async fn run_event_loop_with_options(
                             continue;
                         }
 
-                        if let Some(runner_id) = effective_agent_config
+                        let runner_id = effective_agent_config
                             .runner
                             .as_ref()
-                            .and_then(|runner| runner.custom_runner_id())
-                        {
-                            run_external_cli_agent_chat(
-                                ExternalCliChatContext {
-                                    rx: &mut rx,
-                                    client: &client,
-                                    provider: &provider,
-                                    provider_store: &provider_store,
-                                    event: &event,
-                                    message_log_store: &message_log_store,
-                                    agent_config_store: &agent_config_store,
-                                    external_cli_config_store: &external_cli_config_store,
-                                    agent_session_manager: &agent_session_manager,
-                                    queue_manager: &queue_manager,
-                                    progress_registry: &progress_registry,
-                                    event_store: &event_store,
-                                },
-                                ExternalCliChatInput {
-                                    message_text: agent_message,
-                                    images: external_cli_images_from_chat_images(
-                                        resolve_event_images(
-                                            &client,
-                                            &provider,
-                                            &event,
-                                            &msg.images,
-                                        )
+                            .and_then(|runner| runner.custom_runner_id());
+                        run_external_cli_agent_chat(
+                            ExternalCliChatContext {
+                                rx: &mut rx,
+                                client: &client,
+                                provider: &provider,
+                                provider_store: &provider_store,
+                                event: &event,
+                                message_log_store: &message_log_store,
+                                agent_config_store: &agent_config_store,
+                                external_cli_config_store: &external_cli_config_store,
+                                agent_session_manager: &agent_session_manager,
+                                queue_manager: &queue_manager,
+                                progress_registry: &progress_registry,
+                                event_store: &event_store,
+                            },
+                            ExternalCliChatInput {
+                                message_text: agent_message,
+                                images: external_cli_images_from_chat_images(
+                                    resolve_event_images(&client, &provider, &event, &msg.images)
                                         .await,
-                                    ),
-                                    session_key: session_key.clone(),
-                                    adapter_override: None,
-                                    instructions_override: None,
-                                    delivery_override: None,
-                                    runner_id_override: Some(runner_id.to_string()),
-                                    runner_selected: true,
-                                },
-                            )
-                            .await;
-                            continue;
-                        }
-
-                        if matches!(agent_message.trim(), "/clear" | "/reset") {
-                            clear_builtin_im_agent_session(
-                                &agent_session_manager,
-                                &queue_manager,
-                                &session_key,
-                            )
-                            .await;
-                            send_agent_reply(
-                                &client,
-                                &provider,
-                                &event,
-                                "会话已重置，下一条消息将开始新的对话。",
-                                &message_log_store,
-                            )
-                            .await;
-                            continue;
-                        }
-
-                        // Session is free — start processing with select! interleaving
-                        let images =
-                            resolve_event_images(&client, &provider, &event, &msg.images).await;
-                        run_agent_chat_with_interleave(
-                            &mut rx,
-                            &client,
-                            &provider,
-                            &provider_store,
-                            &event,
-                            &agent_client,
-                            &agent_config_store,
-                            &agent_tools,
-                            &schedule_store,
-                            &scheduler,
-                            &target_store,
-                            &connection_manager,
-                            &agent_session_manager,
-                            &queue_manager,
-                            &progress_registry,
-                            &session_key,
-                            &agent_message,
-                            images,
-                            None,
-                            &mut mcp_manager,
-                            &message_log_store,
-                            &event_store,
-                            &external_cli_config_store,
+                                ),
+                                session_key: session_key.clone(),
+                                adapter_override: None,
+                                instructions_override: None,
+                                delivery_override: None,
+                                runner_id_override: runner_id.map(ToString::to_string),
+                                runner_selected: runner_id.is_some(),
+                            },
                         )
                         .await;
+                        continue;
                     }
                 }
             }
@@ -557,7 +476,7 @@ pub(super) async fn run_event_loop_with_options(
                 // Script execution (existing logic, kept as-is for this route type)
                 info!(route_id = %route_match.route.id, "RunScriptAndReply action matched (execution handled by task executor)");
             }
-            ImRouteAction::AgentChat { system_prompt, .. } => {
+            ImRouteAction::AgentChat { .. } => {
                 let raw_message_text = route_match.message_text.as_deref().unwrap_or("");
                 let has_images = event
                     .message
@@ -625,102 +544,44 @@ pub(super) async fn run_event_loop_with_options(
                     continue;
                 }
 
-                if let Some(runner_id) = agent_config
+                let runner_id = agent_config
                     .runner
                     .as_ref()
-                    .and_then(|runner| runner.custom_runner_id())
-                {
-                    run_external_cli_agent_chat(
-                        ExternalCliChatContext {
-                            rx: &mut rx,
-                            client: &client,
-                            provider: &provider,
-                            provider_store: &provider_store,
-                            event: &event,
-                            message_log_store: &message_log_store,
-                            agent_config_store: &agent_config_store,
-                            external_cli_config_store: &external_cli_config_store,
-                            agent_session_manager: &agent_session_manager,
-                            queue_manager: &queue_manager,
-                            progress_registry: &progress_registry,
-                            event_store: &event_store,
-                        },
-                        ExternalCliChatInput {
-                            message_text,
-                            images: match event.message.as_ref() {
-                                Some(message) => external_cli_images_from_chat_images(
-                                    resolve_event_images(
-                                        &client,
-                                        &provider,
-                                        &event,
-                                        &message.images,
-                                    )
+                    .and_then(|runner| runner.custom_runner_id());
+                run_external_cli_agent_chat(
+                    ExternalCliChatContext {
+                        rx: &mut rx,
+                        client: &client,
+                        provider: &provider,
+                        provider_store: &provider_store,
+                        event: &event,
+                        message_log_store: &message_log_store,
+                        agent_config_store: &agent_config_store,
+                        external_cli_config_store: &external_cli_config_store,
+                        agent_session_manager: &agent_session_manager,
+                        queue_manager: &queue_manager,
+                        progress_registry: &progress_registry,
+                        event_store: &event_store,
+                    },
+                    ExternalCliChatInput {
+                        message_text,
+                        images: match event.message.as_ref() {
+                            Some(message) => external_cli_images_from_chat_images(
+                                resolve_event_images(&client, &provider, &event, &message.images)
                                     .await,
-                                ),
-                                None => Vec::new(),
-                            },
-                            session_key: session_key.clone(),
-                            adapter_override: None,
-                            instructions_override: None,
-                            delivery_override: None,
-                            runner_id_override: Some(runner_id.to_string()),
-                            runner_selected: true,
+                            ),
+                            None => Vec::new(),
                         },
-                    )
-                    .await;
-                    continue;
-                }
-
-                if matches!(message_text.trim(), "/clear" | "/reset") {
-                    clear_builtin_im_agent_session(
-                        &agent_session_manager,
-                        &queue_manager,
-                        &session_key,
-                    )
-                    .await;
-                    send_agent_reply(
-                        &client,
-                        &provider,
-                        &event,
-                        "会话已重置，下一条消息将开始新的对话。",
-                        &message_log_store,
-                    )
-                    .await;
-                    continue;
-                }
-
-                let images = match event.message.as_ref() {
-                    Some(message) => {
-                        resolve_event_images(&client, &provider, &event, &message.images).await
-                    }
-                    None => Vec::new(),
-                };
-                run_agent_chat_with_interleave(
-                    &mut rx,
-                    &client,
-                    &provider,
-                    &provider_store,
-                    &event,
-                    &agent_client,
-                    &agent_config_store,
-                    &agent_tools,
-                    &schedule_store,
-                    &scheduler,
-                    &target_store,
-                    &connection_manager,
-                    &agent_session_manager,
-                    &queue_manager,
-                    &progress_registry,
-                    &session_key,
-                    &message_text,
-                    images,
-                    system_prompt.as_deref(),
-                    &mut mcp_manager,
-                    &message_log_store,
-                    &event_store,
-                    &external_cli_config_store,
+                        session_key: session_key.clone(),
+                        adapter_override: None,
+                        instructions_override: None,
+                        delivery_override: None,
+                        runner_id_override: runner_id.map(ToString::to_string),
+                        runner_selected: runner_id.is_some(),
+                    },
                 )
                 .await;
+                continue;
             }
             ImRouteAction::ExternalCliAgentChat {
                 adapter,
@@ -803,8 +664,6 @@ pub(super) async fn run_event_loop_with_options(
             }
         }
     }
-
-    mcp_manager.shutdown().await;
 
     info!(
         provider_id = %provider.id,
@@ -1578,7 +1437,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
             None => break,
         };
     }
-    if recorder.is_some() && !session.memory_cleared {
+    if recorder.is_some() && !session.history_cleared {
         session.recorder = recorder;
     }
     remember_session_state_from_agent_session(
