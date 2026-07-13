@@ -111,7 +111,7 @@ Bifrost 使用 `traecli exec --json ... -` 的一轮一进程模式,不依赖 Tr
 - `/model <slug>`: 先用 `debug models` catalog 校验 slug;不存在时返回可见拒绝消息且不写入 override。存在时把 `<slug>` 写入 `session_state.json` 的 `modelOverride`,来源为 `session slash command`。后续同 session 同 runner 的 Codex/Traex run 在 Web Chat、runner-call 和 IM event loop 中合并为 `adapterConfig.model`,最终由 command spec 追加 `--model <slug>`,包括 `exec resume`。
 - `/model clear`: 删除 session override,让下一轮回到 runner 配置或 Traex 默认模型。
 
-Web UI 在当前 runner adapter 为 `codex` 或 `traex` 时展示 `/models` 和 `/model`。`/models` 在补全菜单中回车会直接发送;`/model` 回车或 Tab 会补齐命令并把光标放到末尾,方便继续输入模型 slug。IM 通道空闲时支持同一命令,运行中发送 `/model` 只提示等待当前任务结束,避免把控制命令当普通 prompt 送入 Codex/Traex。Slash 命令结果作为 display-only system message 写入 `session_state.json` 供刷新回放;即使该会话已有 canonical JSONL timeline,session detail 也必须把这些 system display messages 合并到返回的 `messages` 中,并保持为独立居中系统行。该消息不注入 runner prompt,避免污染模型上下文。
+Web UI 在当前 runner adapter 为 `codex` 或 `traex` 时展示 `/models` 和 `/model`。`/models` 在补全菜单中回车会直接发送;`/model` 回车或 Tab 会补齐命令并把光标放到末尾,方便继续输入模型 slug。IM 通道空闲时支持同一命令,运行中发送 `/model` 只提示等待当前任务结束,避免把控制命令当普通 prompt 送入 Codex/Traex。`/efforts` 与 `/effort` 在 busy 状态也必须由 Bifrost 命令层优先处理；设置只影响下一轮，不能经默认 Guide 进入当前 `turn/steer`。Slash 命令结果作为 display-only system message 写入 `session_state.json` 供刷新回放;即使该会话已有 canonical JSONL timeline,session detail 也必须把这些 system display messages 合并到返回的 `messages` 中,并保持为独立居中系统行。该消息不注入 runner prompt,避免污染模型上下文。
 
 Agent Chat 底部 token HUD 需要从 session detail、history summary 和外部 runner metadata 合并 `model`、`modelProvider`、`usageTotalTokens`、`usageInputTokens`。刷新页面、加载 history、发送下一轮消息以及运行中的 status 空快照都不能把已知模型、token 和 context 覆盖为空或 0。
 

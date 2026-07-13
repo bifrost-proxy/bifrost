@@ -11,6 +11,7 @@ pub(super) struct BusyMessageContext<'a> {
     pub(super) progress_registry: &'a Arc<ImAgentProgressRegistry>,
     pub(super) external_cli_config_store:
         &'a Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
+    pub(super) agent_config: &'a crate::im_gateway::agent::ImAgentConfig,
     pub(super) default_mode: BusyMessageDefaultMode,
     pub(super) status_context: bifrost_agent::StatusRuntimeContext,
     pub(super) default_work_dir: Option<String>,

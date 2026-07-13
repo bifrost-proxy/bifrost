@@ -260,9 +260,7 @@ pub(super) fn build_im_channel_help_sections(runner_kind: &ImHelpRunnerKind) -> 
         ImHelpRunnerKind::External { adapter } => {
             let mut runner_lines = Vec::new();
             if adapter != crate::im_gateway::chatgpt_web::ADAPTER_ID {
-                runner_lines.push(
-                    "/g <引导内容> 给正在运行的 Runner 注入引导；普通后续消息默认按引导处理，使用 /q 才排队",
-                );
+                runner_lines.push("普通后续消息默认按引导处理，使用 /q 才排队");
             }
             if crate::im_gateway::external_cli::supports_external_cli_model_slash(adapter) {
                 runner_lines
@@ -1192,6 +1190,23 @@ pub(super) async fn handle_busy_message(
             message_log_store,
         )
         .await;
+        return;
+    }
+
+    if handle_im_effort_command(
+        trimmed,
+        session_key,
+        ctx.agent_config,
+        ImModelCommandContext {
+            client,
+            provider,
+            external_cli_config_store: ctx.external_cli_config_store,
+            event,
+            message_log_store,
+        },
+    )
+    .await
+    {
         return;
     }
 

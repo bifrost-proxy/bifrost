@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-当用户通过 IM（飞书消息）发送 `/help` 命令时，系统应返回当前外部 Runner 支持的命令帮助，而非"未知命令"，并让 `/cwd`、`/runner`、排队和引导能力可发现。
+当用户通过 IM（飞书消息）发送 `/help` 命令时，系统应返回当前外部 Runner 支持的命令帮助，而非"未知命令"，并让 `/cwd`、`/runner`、排队和引导能力可发现，同时不再展示与普通后续消息等价的冗余 `/g`。
 
 Provider 上线通知也必须在原有在线提示后追加同一套帮助命令，并按当前通道绑定的外部 Runner 能力裁剪命令范围。
 
@@ -47,7 +47,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - 响应包含 `/cwd <绝对路径>`，并说明路径必须存在且是目录。
 - 响应说明运行中 `/cwd` 会排队到当前任务结束后执行。
 - 响应包含 `/runner [Runner]`，并说明可查看或切换当前 IM 通道绑定的 Runner。
-- 响应包含 `/q <消息>`、`/rq <序号>`、`/g <引导内容>`。
+- 响应包含 `/q <消息>`、`/rq <序号>`，不包含 `/g <引导内容>`。
 - `/cwd` 和 `/runner` 不作为 WebUI/API Agent slash command 注册；WebUI/API 普通 `/help` 不需要展示这些 IM 专属命令。
 
 ### TC-IH-05: Provider 上线通知自动追加帮助命令
@@ -73,7 +73,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 **预期结果**：
 - 帮助区包含 `IM 通道命令（所有 Runner）:`，展示 `/cwd`、`/runner`、`/q`、`/rq`。
 - 帮助区不展示已删除的 `/remember`、`/memories`、`/forget`、`/goal`、`/skill`、`/compact` 命令。
-- Codex/Traex/Claude Code 等非 ChatGPT Web Runner 展示 `/g <引导内容>`，并提示普通后续消息默认按 Guide 处理、使用 `/q` 才排队；ChatGPT Web 不展示 `/g`。
+- 所有 Runner 都不展示冗余的 `/g <引导内容>`；Codex/Traex/Claude Code 等非 ChatGPT Web Runner 提示普通后续消息默认按 Guide 处理、使用 `/q` 才排队。
 - Codex/Traex/Claude Code 这类 Runner 展示它们支持的 `/models`、`/model`、`/effort` 或对应 runner-specific 控制命令。
 
 ### TC-IH-08: Runner-aware `/help` 与上线帮助保持一致
@@ -88,6 +88,8 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - 未知命令 `/foobar` 仍返回 `未知命令: /foobar`，不会被启动帮助逻辑吞掉。
 
 ## 执行记录
+
+- 2026-07-13：PASS — 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_help_ --lib -- --nocapture` 和 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin online_notification_message_ --lib -- --nocapture`，确认外部 Runner 的主动 `/help`、上线通知均不再展示冗余 `/g`，同时保留 `/q`、runner-specific 模型与 effort 命令。
 
 ## 清理步骤
 

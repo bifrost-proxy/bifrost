@@ -233,10 +233,11 @@ pub enum RemoteImGatewayAction {
 
 在 IM event loop idle/session-free 分支内拦截（不进入模型、不注册到 WebUI/API Agent slash router）：
 
-- `/help`：追加 `IM 通道命令` 分组，列出 `/cwd`、`/runner`、`/q`、`/rq`、`/g`。
+- `/help`：追加 `IM 通道命令` 分组，列出 `/cwd`、`/runner`、`/q`、`/rq`；普通 busy 消息默认作为 Guide，`/g` 只保留隐藏兼容解析。
 - `/cwd <绝对路径>`：切换当前 Provider `agent_config.work_dir`；路径必须存在且是目录；运行中排队到当前任务结束后执行；切换后清理 session history 和 thread 元数据。
 - `/runner`：读取 `ExternalCliGatewayConfig` 输出可用 Runner 列表；`/runner <Runner>` 切换当前 Provider `agent_config.runner`；运行中只提示不抢占。
-- `/q <消息>` / `/rq <序号>` / `/g <引导内容>`：队列控制命令，不作为普通用户消息。
+- `/q <消息>` / `/rq <序号>`：队列控制命令，不作为普通用户消息；`/g <引导内容>` 保留兼容解析但不再进入帮助文案。
+- busy Codex/Traex/Claude Code Runner 收到 `/models`、`/model`、`/efforts`、`/effort` 时必须先按系统命令处理，禁止落入默认 Guide 并透传到当前 turn。
 
 ## CLI + Web + Admin API
 
@@ -311,7 +312,7 @@ Provider 选择：显式 `--provider` 优先；单 enabled provider 自动选中
 
 ### Phase 4：命令快路径 + 观察性完善
 
-- IM `/help` / `/cwd` / `/runner` / `/q` / `/rq` / `/g` 快路径。
+- IM `/help` / `/cwd` / `/runner` / `/q` / `/rq` 快路径，以及隐藏兼容 `/g` 解析。
 - Provider 删除/禁用立即停止长连接；auto-connect / supervisor 尊重 `enabled && event_connection_enabled && secret_ref`。
 - Provider/IM `/status` 展示 `resolved_work_dir`；重启上线通知补 Runner + 最近轮次。
 - Outbound message log `trigger` 区分 `schedule:<id>` / `manual_run:<id>` / `route:<id>` / `remote:<caller>`。

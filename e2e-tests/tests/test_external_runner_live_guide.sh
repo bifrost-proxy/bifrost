@@ -63,6 +63,22 @@ if "--version" in sys.argv:
     print(f"{runner} 0.0.0-mock")
     sys.exit(0)
 
+if sys.argv[1:3] == ["debug", "models"]:
+    print(json.dumps({
+        "models": [{
+            "slug": f"{runner}-model",
+            "display_name": f"{runner} model",
+            "default_reasoning_level": "medium",
+            "supported_reasoning_levels": [
+                {"effort": "low"},
+                {"effort": "medium"},
+                {"effort": "high"},
+            ],
+            "visibility": "list",
+        }]
+    }))
+    sys.exit(0)
+
 if "--input-format" in sys.argv and sys.argv[sys.argv.index("--input-format") + 1] == "stream-json":
     first = json.loads(sys.stdin.readline())
     record({"event":"turn_started","runner":runner,"pid":os.getpid(),"frame":first})
@@ -214,6 +230,8 @@ for runner_name, adapter, mode, transport in (
     ("traex-web", "traex", "accept", "app_server"),
     ("codex-im", "codex", "accept", "app_server"),
     ("codex-im-queue", "codex", "accept", "app_server"),
+    ("codex-im-effort", "codex", "accept", "app_server"),
+    ("traex-im-effort", "traex", "accept", "app_server"),
     ("codex-reject", "codex", "reject", "app_server"),
     ("claude-reject", "claude_code", "reject", None),
     ("codex-exec", "codex", "accept", "exec"),
@@ -435,7 +453,48 @@ send_im_inbound "im-queue-provider" "im-queue-owner" "/q queue-explicit"
 send_im_inbound "im-queue-provider" "im-queue-owner" "/g release-queue"
 wait_for_mock_record 'queue-explicit'
 
-python3 - "$MOCK_LOG" <<'PY'
+run_im_effort_case() {
+  local adapter="$1"
+  local runner="$adapter-im-effort"
+  local provider="im-$adapter-effort-provider"
+  local owner="im-$adapter-effort-owner"
+
+  create_im_provider "$provider" "$owner" "$runner"
+  send_im_inbound "$provider" "$owner" "wait for $adapter effort commands"
+  wait_for_mock_record "\"event\":\"turn_ready\",\"runner\":\"$runner\""
+  send_im_inbound "$provider" "$owner" "/efforts"
+  send_im_inbound "$provider" "$owner" "/effort high"
+
+  python3 - "$TEST_DIR/agent/im_gateway/session_state.json" "$runner" <<'PY'
+import json
+import pathlib
+import sys
+import time
+
+state_path = pathlib.Path(sys.argv[1])
+runner = sys.argv[2]
+for _ in range(200):
+    if state_path.exists():
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        sessions = [
+            value for value in state.get("sessions", {}).values()
+            if value.get("runnerId") == runner
+        ]
+        if sessions and sessions[0].get("reasoningEffortOverride") == "high":
+            break
+    time.sleep(0.05)
+else:
+    raise AssertionError(f"missing high effort override for {runner}")
+PY
+
+  send_im_inbound "$provider" "$owner" "release-$adapter-after-effort"
+  wait_for_mock_record "release-$adapter-after-effort"
+}
+
+run_im_effort_case codex
+run_im_effort_case traex
+
+python3 - "$MOCK_LOG" "$TEST_DIR/agent/im_gateway/session_state.json" <<'PY'
 import json
 import sys
 
@@ -464,6 +523,29 @@ queued_turns = [
     and "queue-explicit" in record.get("params", {}).get("input", [{}])[0].get("text", "")
 ]
 assert len(queued_turns) == 1, queued_turns
+
+for adapter in ("codex", "traex"):
+    runner = f"{adapter}-im-effort"
+    effort_steers = [
+        record for record in records
+        if record.get("event") == "turn_steered" and record.get("runner") == runner
+    ]
+    assert len(effort_steers) == 1, effort_steers
+    assert effort_steers[0]["params"]["input"][0]["text"] == f"release-{adapter}-after-effort", effort_steers
+    assert all(
+        record["params"]["input"][0]["text"] not in ("/efforts", "/effort high")
+        for record in effort_steers
+    ), effort_steers
+
+state = json.load(open(sys.argv[2], encoding="utf-8"))
+for adapter in ("codex", "traex"):
+    runner = f"{adapter}-im-effort"
+    session = next(
+        value for value in state["sessions"].values()
+        if value.get("runnerId") == runner
+    )
+    assert session["reasoningEffortOverride"] == "high", session
+    assert session["reasoningEffortOverrideSource"] == "session slash command", session
 PY
 
 run_queue_fallback_case() {
