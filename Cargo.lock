@@ -443,7 +443,6 @@ dependencies = [
  "dashmap",
  "filetime",
  "include_dir",
- "nix 0.28.0",
  "rand 0.8.6",
  "reqwest",
  "serde",
