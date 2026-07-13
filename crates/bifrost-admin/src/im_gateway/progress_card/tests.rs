@@ -450,7 +450,7 @@ fn feishu_progress_card_file_change_tool_expands_with_detail() {
     let card = build_feishu_progress_card(&snapshot, true);
     let serialized = serde_json::to_string(&card).unwrap();
 
-    assert!(serialized.contains("file_change"));
+    assert!(serialized.contains("文件变更"));
     assert!(serialized.contains("src/main.rs"));
     assert!(serialized.contains("updated startup text"));
     assert!(serialized.contains("-old"));
@@ -491,7 +491,7 @@ fn consecutive_process_tools_are_grouped_by_default() {
     assert_eq!(process_elements[1]["expanded"], false);
     assert_eq!(
         process_elements[1]["header"]["title"]["content"],
-        "已运行 3 条命令"
+        "已执行 3 个步骤"
     );
     let grouped_tools = process_elements[1]["elements"].as_array().unwrap();
     assert_eq!(grouped_tools.len(), 3);
@@ -530,7 +530,7 @@ fn process_timeline_keeps_latest_thirty_tool_calls_with_omission_notice() {
         .expect("process element");
     assert_eq!(
         process_element["header"]["title"]["content"],
-        "执行过程：已运行 35 条命令"
+        "执行过程：已执行 35 个步骤"
     );
     let process_elements = process_element["elements"].as_array().unwrap();
     assert_eq!(process_elements[0]["element_id"], PROCESS_LOG_ELEMENT_ID);
@@ -596,7 +596,7 @@ fn feishu_progress_card_expands_process_while_running_and_collapses_after_finish
 
     let finished_serialized = serde_json::to_string(&finished_card).unwrap();
     assert!(finished_serialized.contains("最终结论：测试通过。"));
-    assert!(finished_serialized.contains("执行过程：已运行 1 条命令"));
+    assert!(finished_serialized.contains("执行过程：已执行 1 个步骤"));
     assert!(finished_serialized.contains("已完成：exec_command"));
     assert!(finished_serialized.contains("test result: ok"));
     assert!(!finished_serialized.contains("Pipeline"));

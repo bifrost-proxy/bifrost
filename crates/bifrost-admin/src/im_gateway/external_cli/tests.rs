@@ -403,6 +403,68 @@ fn file_change_detail_keeps_action_when_diff_has_no_changed_lines() {
 }
 
 #[test]
+fn file_change_detail_counts_plain_added_and_deleted_content() {
+    let detail = file_change_detail_from_value(&serde_json::json!({
+        "type": "fileChange",
+        "changes": [
+            {
+                "path": "/workspace/src/new.rs",
+                "kind": {"type": "add"},
+                "diff": "first\n+literal content\n-third\n"
+            },
+            {
+                "path": "/workspace/src/old.rs",
+                "kind": {"type": "delete"},
+                "diff": "first\n\nthird\n"
+            }
+        ]
+    }))
+    .expect("file change detail");
+
+    assert!(detail.contains("file: /workspace/src/new.rs (新增 3 行)"));
+    assert!(detail.contains("file: /workspace/src/old.rs (删除 3 行)"));
+}
+
+#[test]
+fn file_change_detail_uses_workspace_relative_paths_and_indents_every_diff_line() {
+    let detail = file_change_detail_from_value_with_work_dir(
+        &serde_json::json!({
+            "type": "fileChange",
+            "changes": [{
+                "path": "/workspace/project/target/demo.txt",
+                "kind": {"type": "add"},
+                "diff": "first\nsecond\nthird\n"
+            }]
+        }),
+        Some(Path::new("/workspace/project")),
+    )
+    .expect("file change detail");
+
+    assert_eq!(
+        detail,
+        "changes:\n- file: target/demo.txt (新增 3 行)\n  first\n  second\n  third"
+    );
+}
+
+#[test]
+fn file_change_detail_preserves_paths_outside_workspace() {
+    let detail = file_change_detail_from_value_with_work_dir(
+        &serde_json::json!({
+            "type": "fileChange",
+            "changes": [{
+                "path": "/shared/demo.txt",
+                "kind": {"type": "add"},
+                "diff": "one\n"
+            }]
+        }),
+        Some(Path::new("/workspace/project")),
+    )
+    .expect("file change detail");
+
+    assert!(detail.contains("file: /shared/demo.txt (新增 1 行)"));
+}
+
+#[test]
 fn file_change_detail_preserves_unknown_actions_and_path_only_changes() {
     let detail = file_change_detail_from_value(&serde_json::json!({
         "changes": [

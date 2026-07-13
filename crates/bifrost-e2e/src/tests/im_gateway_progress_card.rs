@@ -12,25 +12,37 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 build_feishu_progress_card, ImAgentProgressSnapshot,
             };
 
+            let event = bifrost_admin::im_gateway::external_cli::parse_progress_events(
+                r#"{"type":"item.completed","item":{"id":"item_file_1","type":"fileChange","status":"completed","changes":[{"path":"/workspace/project/target/demo.txt","kind":{"type":"add"},"diff":"first\nsecond\nthird\n"}]}}"#,
+            )
+            .pop()
+            .ok_or_else(|| "file change event was not parsed".to_string())?;
+            let agent_event =
+                bifrost_admin::im_gateway::external_cli::external_progress_to_agent_turn_event(
+                    "provider:owner",
+                    "codex",
+                    bifrost_admin::im_gateway::external_cli::ExternalCliProgressStatusContext::new(
+                        Some("Codex"),
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(std::path::Path::new("/workspace/project")),
+                    ),
+                    &event,
+                )
+                .ok_or_else(|| "file change event was not mapped".to_string())?;
+
             let mut snapshot =
                 ImAgentProgressSnapshot::new("provider:owner", "render file change");
-            snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::ToolFinished {
-                log: bifrost_agent::ToolCallLog {
-                    tool_name: "fileChange".to_string(),
-                    arguments: String::new(),
-                    result: "changes:\n- file: src/main.rs (修改 1 行 · 新增 1 行)\n  @@ -1 +1,2 @@\n  -old\n  +new\n  +extra"
-                        .to_string(),
-                    success: true,
-                },
-                duration_ms: 0,
-            });
+            snapshot.apply_event(agent_event);
             snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::TurnFinished {
                 content: "file updated".to_string(),
             });
 
             let card = build_feishu_progress_card(&snapshot, true);
             let body = card["body"]["elements"].to_string();
-            for needle in ["fileChange", "src/main.rs", "修改 1 行 · 新增 1 行"] {
+            for needle in ["文件变更", "target/demo.txt", "新增 3 行", "已执行 1 个步骤"] {
                 if !body.contains(needle) {
                     return Err(format!("file change card body missing {needle}: {body}"));
                 }
@@ -39,6 +51,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 return Err(format!(
                     "file change detail unexpectedly used empty fallback: {body}"
                 ));
+            }
+            if body.contains("/workspace/project") {
+                return Err(format!("file change card leaked workspace prefix: {body}"));
+            }
+            if !body.contains("  first\\n  second\\n  third") {
+                return Err(format!("file change detail lines were not aligned: {body}"));
             }
             let process_element = card["body"]["elements"]
                 .as_array()
@@ -55,7 +73,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                         element["element_id"]
                             .as_str()
                             .is_some_and(|id| id.starts_with("ap_t_"))
-                            && element.to_string().contains("fileChange")
+                            && element.to_string().contains("文件变更")
                     })
                 })
                 .ok_or_else(|| "file change card missing expandable tool element".to_string())?;

@@ -1445,15 +1445,23 @@ mod tests {
         let agent_event = external_progress_to_agent_turn_event(
             "session-1",
             DEFAULT_ADAPTER,
-            ExternalCliProgressStatusContext::new(Some("Codex"), None, None, None, None, None),
+            ExternalCliProgressStatusContext::new(
+                Some("Codex"),
+                None,
+                None,
+                None,
+                None,
+                Some(std::path::Path::new("/workspace")),
+            ),
             &event,
         )
         .expect("tool event");
         let bifrost_agent::AgentTurnProgressEvent::ToolFinished { log, .. } = agent_event else {
             panic!("expected tool finished event");
         };
-        assert_eq!(log.tool_name, "fileChange");
-        assert!(log.result.contains("/workspace/src/main.rs"));
+        assert_eq!(log.tool_name, "文件变更");
+        assert!(log.result.contains("src/main.rs"));
+        assert!(!log.result.contains("/workspace/src/main.rs"));
         assert!(log.result.contains("修改 1 行"));
         assert!(log.result.contains("新增 1 行"));
     }
