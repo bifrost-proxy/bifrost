@@ -198,7 +198,7 @@ fn sync_daily_agent_dependency_outputs(
                     .strip_prefix(&downstream_work_dir)
                     .unwrap_or(&target_path)
                     .to_string_lossy()
-                    .to_string(),
+                    .replace('\\', "/"),
             );
         }
     }
