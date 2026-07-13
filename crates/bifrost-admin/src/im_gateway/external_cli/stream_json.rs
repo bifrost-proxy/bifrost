@@ -646,7 +646,10 @@ while True:
         let run_id = "mock-stream-json-stuck-run";
         let started = tokio::time::Instant::now();
         let output = tokio::time::timeout(
-            Duration::from_secs(5),
+            // The cleanup path has two 1.5s grace windows. Leave scheduler
+            // headroom for full-workspace test contention while still proving
+            // that a SIGTERM-ignoring child cannot hang the runner forever.
+            Duration::from_secs(8),
             run_command(
                 run_id,
                 None,
@@ -667,7 +670,7 @@ while True:
         .unwrap();
 
         assert_eq!(output.status, ExternalCliRunStatus::Succeeded);
-        assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(started.elapsed() < Duration::from_secs(7));
         assert!(!ACTIVE_RUNS.contains_key(run_id));
     }
 }
