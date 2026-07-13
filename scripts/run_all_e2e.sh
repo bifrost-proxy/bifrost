@@ -758,6 +758,7 @@ shell_test_capability_group() {
     test_setting_ssh_key_cli.sh|\
     test_ssh_key_*|\
     test_status_tui_remote_invoke_panel.sh|\
+    test_client_process_transport_attribution.sh|\
     test_cli_online_commands_e2e.sh|\
     test_sync_*|\
     test_group_sync_*|\
