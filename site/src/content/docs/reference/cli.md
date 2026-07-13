@@ -748,7 +748,7 @@ bifrost remote keep-awake mode get
 
 ```bash
 export BIFROST_REMOTE_CLIENT_ID=devbox
-bifrost remote file read go.mod --cwd /repo
+bifrost remote file read Cargo.toml --cwd /repo
 bifrost remote --client-id macbook exec --detach --shell-text "python3 check.py"
 bifrost remote --client-id macbook job watch <call_id> --output-file ./check.log
 ```

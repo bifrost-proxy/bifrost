@@ -14,7 +14,7 @@ PROXY_HOST=${PROXY_HOST:-127.0.0.1}
 PROXY_PORT=${PROXY_PORT:-18080}
 SOCKS5_PORT=${SOCKS5_PORT:-11080}
 export SOCKS5_PORT
-BIFROST_BIN="${PROJECT_ROOT}/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-${PROJECT_ROOT}/target/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi

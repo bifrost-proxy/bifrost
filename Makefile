@@ -1,6 +1,6 @@
 .PHONY: all build build-release clean test lint fmt install-deps dev help setup build-cli \
         coverage coverage-unit coverage-e2e coverage-html coverage-json coverage-crate \
-        coverage-gate
+	coverage-gate coverage-diff
 
 # Development servers must never adopt the installed service's ~/.bifrost
 # runtime/PID files or its production-like 9900 listener. Override these only
@@ -83,6 +83,12 @@ coverage-e2e:
 # (scripts/ci/coverage-thresholds.toml; goal: 90%) plus the workspace floor.
 coverage-gate:
 	bash scripts/ci/coverage-all.sh --json --gate --gaps
+
+# Changed production Rust lines against BASE_REF must be covered by the LCOV
+# report produced by coverage-all.sh. Usage: make coverage-diff BASE_REF=origin/main
+coverage-diff:
+	@test -n "$(BASE_REF)" || { echo "Usage: make coverage-diff BASE_REF=<git-ref>" >&2; exit 2; }
+	python3 scripts/ci/coverage-diff.py target/coverage/lcov.info --base-ref "$(BASE_REF)" --threshold 95
 
 # HTML report (output: target/coverage/html/index.html). Skips the gate
 # so a low-coverage report is still browsable.

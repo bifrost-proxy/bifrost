@@ -25,9 +25,14 @@ fi
 TEST_ROOT="$(mktemp -d)"
 API_DATA_DIR=""
 API_PORT=""
+API_PID=""
 cleanup() {
     if [[ -n "$API_DATA_DIR" && -n "$API_PORT" ]]; then
         BIFROST_DATA_DIR="$API_DATA_DIR" "$BIFROST_BIN" stop >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$API_PID" ]]; then
+        kill "$API_PID" >/dev/null 2>&1 || true
+        wait "$API_PID" 2>/dev/null || true
     fi
     rm -rf "$TEST_ROOT"
 }
@@ -141,8 +146,14 @@ BIFROST_DATA_DIR="$API_DATA_DIR" \
 BIFROST_INSTALL_SKILL_DIR="$API_SKILL_DIR" \
 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
 BIFROST_DISABLE_TRAY=1 \
-    "$BIFROST_BIN" start --daemon --host 127.0.0.1 -p "$API_PORT" \
-    --no-system-proxy --skip-cert-check --unsafe-ssl --access-mode allow_all --yes >/tmp/bifrost-desktop-app-api-start.log 2>&1
+    "$BIFROST_BIN" start $([[ "${BIFROST_COVERAGE_E2E:-0}" == "1" ]] || printf '%s' '--daemon') \
+    --host 127.0.0.1 -p "$API_PORT" --no-system-proxy --skip-cert-check \
+    --unsafe-ssl --access-mode allow_all --yes >/tmp/bifrost-desktop-app-api-start.log 2>&1 &
+API_PID=$!
+if [[ "${BIFROST_COVERAGE_E2E:-0}" != "1" ]]; then
+    wait "$API_PID"
+    API_PID=""
+fi
 
 for _ in $(seq 1 100); do
     if curl -fsS "http://127.0.0.1:${API_PORT}/_bifrost/api/system" >/dev/null 2>&1; then
@@ -201,6 +212,10 @@ fi
 api_status_response="$(curl -fsS "http://127.0.0.1:${API_PORT}/_bifrost/api/system/cli-install")"
 assert_contains_text "$api_status_response" "install_path" "CLI install status endpoint returns install metadata"
 BIFROST_DATA_DIR="$API_DATA_DIR" "$BIFROST_BIN" stop >/dev/null 2>&1 || true
+if [[ -n "$API_PID" ]]; then
+    wait "$API_PID" 2>/dev/null || true
+    API_PID=""
+fi
 API_DATA_DIR=""
 API_PORT=""
 

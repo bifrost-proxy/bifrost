@@ -4,7 +4,7 @@
 
 Bifrost 的头部规则（`reqHeaders`、`resHeaders`、`delete_req_headers`、`delete_res_headers`、`ua`、`referer`、`auth`、`headerReplace`）在普通 HTTP/HTTPS 请求上生效，但 WebSocket 升级链路有两条完全独立的代码路径：
 
-- 普通 `http://` 代理入口在识别 `Upgrade: websocket` 后走 `crates/bifrost-proxy/src/proxy/http/websocket/upgrade.rs`，不再进入普通 HTTP 请求 transform。
+- 普通 `http://` 代理入口在识别 `Upgrade: websocket` 后由 `crates/bifrost-proxy/src/proxy/http/handler.rs` 调用 `websocket::handle_http_websocket`，不再进入普通 HTTP 请求 transform。
 - TLS intercept `https://` 拆包后的 WSS 走 `crates/bifrost-proxy/src/proxy/http/tunnel/mod.rs` 的 `build_websocket_handshake_request`，也是独立握手构造。
 - Replay 模块直接作为独立 WebSocket 客户端发起握手 (`crates/bifrost-admin/src/replay_executor.rs` / `replay_scripts.rs`)，规则通过 `ResolvedRules` 由 Admin 侧再解析一次。
 
@@ -71,7 +71,7 @@ pub fn apply_websocket_handshake_response_headers(
 
 ### 普通 `ws://` 分支
 
-- 入口：`crates/bifrost-proxy/src/proxy/http/handler.rs` 识别 upgrade 后调用 `crates/bifrost-proxy/src/proxy/http/websocket/upgrade.rs::handle_http_websocket`。
+- 入口：`crates/bifrost-proxy/src/proxy/http/handler.rs` 识别 upgrade 后调用 `crates/bifrost-proxy/src/proxy/http/websocket/mod.rs::handle_http_websocket`。
 - 关键点：
   - `let resolved_rules = rules.resolve(&url, "GET");` 在建立 upstream 连接之前先解析。
   - `let req_headers: Vec<(String, String)> = crate::proxy::http::headers_to_pairs(req.headers());` 收集 original headers 用作 traffic 记录。
@@ -130,7 +130,7 @@ pub fn apply_websocket_handshake_response_headers(
 
 ### Phase 2：普通 WS 路径接入
 
-- `crates/bifrost-proxy/src/proxy/http/websocket/upgrade.rs` 在 `build_websocket_handshake` 前后各调用一次 helper。
+- `crates/bifrost-proxy/src/proxy/http/websocket/mod.rs` 在 `build_websocket_handshake` 前后各调用一次 helper。
 - 写入 traffic 的 original vs final header。
 - 补集成测试：`tests/https_proxy_test.rs::test_http_websocket_applies_request_and_response_header_rules`。
 

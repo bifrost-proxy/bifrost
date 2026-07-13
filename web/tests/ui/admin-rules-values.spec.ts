@@ -20,6 +20,11 @@ import {
 test.describe.configure({ mode: "serial" });
 
 async function changeSort(page: import("@playwright/test").Page, testId: string, label: string) {
+  // A tooltip from the previously clicked toolbar action can overlap the sort
+  // control indefinitely while Playwright's virtual cursor remains hovered.
+  // Move away first so the click verifies the select itself, not tooltip timing.
+  await page.mouse.move(0, 0);
+  await expect(page.locator(".ant-tooltip:visible")).toHaveCount(0);
   await page.getByTestId(testId).click();
   await page.locator(".ant-select-dropdown").getByText(label, { exact: true }).click();
 }
@@ -629,6 +634,9 @@ test("Values 页面支持 bifrost-file 导出后再导入恢复数据", async ({
     mimeType: "text/plain",
     buffer: Buffer.from(exportedContent, "utf8"),
   });
+  const importPreview = page.getByRole("dialog", { name: `Preview ${valueName}.bifrost` });
+  await expect(importPreview).toBeVisible();
+  await importPreview.getByRole("button", { name: "Import" }).click();
   await expect(page.getByTestId("value-item").filter({ hasText: valueName }).first()).toBeVisible();
 });
 

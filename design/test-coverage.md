@@ -67,7 +67,8 @@ Bifrost 是一个多 crate workspace（bifrost-core / bifrost-proxy / bifrost-ad
 | `scripts/ci/coverage-all.sh` | 统一入口：合并单元 + 集成覆盖率，输出多格式，可挂 `--gate/--gaps/--fail-under` |
 | `scripts/ci/coverage-crate.sh` | 单 crate 覆盖率封装 |
 | `scripts/ci/coverage-e2e.sh` | E2E 覆盖率：插桩二进制 + profraw 收集 + merge + report |
-| `scripts/ci/coverage-gate.py` | 读 `coverage.json` + `coverage-thresholds.toml` 执行门禁；`--gaps` gap 榜；`--markdown` job summary |
+| `scripts/ci/coverage-gate.py` | 读 `coverage.json` + `coverage-thresholds.toml` 执行普通 crate/workspace 门禁；production metric 委派给精确 LCOV gate |
+| `scripts/ci/coverage-production.py` | 从 union LCOV 排除 exact `#[cfg(test)]` item，执行 `bifrost-proxy` production 90% 门禁 |
 | `scripts/ci/coverage-thresholds.toml` | `default = 90.0`、`workspace_min = 65.0`、每 crate `min` + `macos_min` |
 | `scripts/ci/local-ci.sh` | `--coverage` / `--coverage-gate` / `--coverage-html` 开关（已上线） |
 | `.github/workflows/ci.yml` | `coverage` job 定义（第 117 行起） |
@@ -81,7 +82,7 @@ Bifrost 是一个多 crate workspace（bifrost-core / bifrost-proxy / bifrost-ad
 | bifrost-command | 90.0 | — | measured 98.3% |
 | bifrost-tls | 90.0 | 78.0 | Linux 91.5%；macOS 计入 install.rs keychain/certutil |
 | bifrost-core | 89.0 | 87.0 | Linux 89.4%（可达 95.9%）；macOS 计入 system_proxy* |
-| bifrost-proxy | 64.0 | — | wave 3-5 后从 59 提升 |
+| bifrost-proxy | 90.0 | — | production metric；unit + integration + full E2E union 为 90.01% |
 | bifrost-admin | 56.0 | — | wave 3-5 后从 49 提升 |
 | agent | 78.0 | — | baseline 78.78% |
 | bifrost-cli | 55.0 | — | wave 3-5 后从 45 提升 |
@@ -92,7 +93,7 @@ Bifrost 是一个多 crate workspace（bifrost-core / bifrost-proxy / bifrost-ad
 | bifrost-asr | 94.0 | 91.0 | baseline 94.52% |
 | bifrost-script | 91.0 | — | baseline 91.42% |
 | skills | 90.0 | — | reached 95.4% |
-| bifrost-e2e | 50.0 | — | Linux baseline 50.68% |
+| bifrost-e2e | exempt | — | 测试框架不做自覆盖率；由 Rules/Shell/Runner 可执行契约门禁 |
 
 ### E2E 插桩细节
 
@@ -189,7 +190,8 @@ bash scripts/ci/local-ci.sh --skip-e2e --coverage-html
 
 ### Phase 4：Ratchet 推进 + 平台分线
 
-- 每 wave 结束更新 `coverage-thresholds.toml`：wave 3-5 把 bifrost-proxy 59→64、bifrost-admin 49→56、bifrost-cli 45→55；`workspace_min` 55→65。
+- 历史 wave 3-5 曾把 bifrost-proxy 59→64；当前阶段已通过 production metric 将其
+  提升到 90%，其余未达标 crate 继续按 wave 上调；`workspace_min` 已从 55→65。
 - macOS 与 Linux 分线：新增 `macos_min`（bifrost-tls / bifrost-core / bifrost-power / bifrost-asr），承认 IOKit / keychain / system_proxy 平台差。
 - `enforce_ratchet_up` + `ratchet_slack = 5.0` 保留为未来"强制上调 floor"开关，默认关闭。
 

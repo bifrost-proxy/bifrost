@@ -605,6 +605,23 @@ impl Drop for UdpRelay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::ResolvedRules;
+    use tokio::time::timeout;
+
+    #[derive(Clone)]
+    struct StaticRules(ResolvedRules);
+
+    impl RulesResolver for StaticRules {
+        fn resolve_with_context(
+            &self,
+            _url: &str,
+            _method: &str,
+            _req_headers: &HashMap<String, String>,
+            _req_cookies: &HashMap<String, String>,
+        ) -> ResolvedRules {
+            self.0.clone()
+        }
+    }
 
     #[test]
     fn test_parse_ipv4_address() {
@@ -693,5 +710,235 @@ mod tests {
         assert_eq!(&response[4..20], &expected_ip);
         assert_eq!(&response[20..22], &addr.port().to_be_bytes());
         assert_eq!(&response[22..], b"quic");
+    }
+
+    #[tokio::test]
+    async fn udp_relay_forwards_roundtrip_reuses_session_and_shuts_down() {
+        let echo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo.local_addr().unwrap();
+        let echo_task = tokio::spawn(async move {
+            let mut buf = [0_u8; 64];
+            for _ in 0..2 {
+                let (n, peer) = echo.recv_from(&mut buf).await.unwrap();
+                echo.send_to(&buf[..n], peer).await.unwrap();
+            }
+        });
+
+        let mut relay = UdpRelay::new("127.0.0.1:0".parse().unwrap())
+            .with_proxy_config(ProxyConfig {
+                verbose_logging: true,
+                ..Default::default()
+            })
+            .with_admin_state(None)
+            .with_dns_resolver(Arc::new(DnsResolver::new(false)));
+        let relay_addr = relay.start().await.unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        for payload in [b"one".as_slice(), b"two".as_slice()] {
+            let mut packet = vec![0, 0, 0, AddressType::IPv4 as u8];
+            packet.extend_from_slice(&[127, 0, 0, 1]);
+            packet.extend_from_slice(&echo_addr.port().to_be_bytes());
+            packet.extend_from_slice(payload);
+            client.send_to(&packet, relay_addr).await.unwrap();
+            let mut response = [0_u8; 64];
+            let (n, source) = timeout(Duration::from_secs(2), client.recv_from(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(source, relay_addr);
+            assert_eq!(&response[10..n], payload);
+        }
+
+        let sessions = relay.sessions.read().await;
+        let session = sessions.values().next().unwrap();
+        assert_eq!(session.packet_count.load(Ordering::Relaxed), 2);
+        assert_eq!(session.bytes_sent.load(Ordering::Relaxed), 6);
+        drop(sessions);
+        relay.shutdown().await;
+        echo_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn udp_relay_handles_invalid_packets_and_cleans_expired_sessions() {
+        let relay_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let source: SocketAddr = "127.0.0.1:30001".parse().unwrap();
+
+        let error = UdpRelay::handle_packet(
+            &relay_socket,
+            &sessions,
+            &[0, 0, 0],
+            source,
+            &None,
+            &None,
+            &None,
+            &None,
+            false,
+            0,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("too short"));
+
+        let mut bad_rsv = vec![0, 1, 0, AddressType::IPv4 as u8];
+        bad_rsv.extend_from_slice(&[127, 0, 0, 1, 0, 80]);
+        assert!(UdpRelay::handle_packet(
+            &relay_socket,
+            &sessions,
+            &bad_rsv,
+            source,
+            &None,
+            &None,
+            &None,
+            &None,
+            false,
+            0,
+        )
+        .await
+        .is_err());
+        let mut fragmented = bad_rsv;
+        fragmented[0] = 0;
+        fragmented[1] = 0;
+        fragmented[2] = 1;
+        UdpRelay::handle_packet(
+            &relay_socket,
+            &sessions,
+            &fragmented,
+            source,
+            &None,
+            &None,
+            &None,
+            &None,
+            false,
+            0,
+        )
+        .await
+        .unwrap();
+
+        let session_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        sessions.write().await.insert(
+            source,
+            UdpSession {
+                client_addr: source,
+                relay_socket: session_socket,
+                last_activity: Instant::now() - SESSION_TIMEOUT - Duration::from_secs(1),
+                bytes_sent: Arc::new(AtomicU64::new(0)),
+                bytes_received: Arc::new(AtomicU64::new(0)),
+                packet_count: Arc::new(AtomicU64::new(0)),
+                req_id: generate_udp_session_id(),
+            },
+        );
+        UdpRelay::cleanup_sessions(&sessions).await;
+        assert!(sessions.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn coverage_90_domain_roundtrip_records_admin_traffic_and_applies_rules() {
+        let echo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo.local_addr().unwrap();
+        let echo_task = tokio::spawn(async move {
+            let mut buf = [0_u8; 64];
+            for _ in 0..3 {
+                let (n, peer) = echo.recv_from(&mut buf).await.unwrap();
+                echo.send_to(&buf[..n], peer).await.unwrap();
+            }
+        });
+
+        let main_relay = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let source = client.local_addr().unwrap();
+        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let harness = bifrost_admin::test_support::TestAdminState::builder()
+            .port(19510)
+            .build();
+        let rules: Option<Arc<dyn RulesResolver>> = Some(Arc::new(StaticRules(ResolvedRules {
+            host: Some(format!("127.0.0.1:{}", echo_addr.port())),
+            dns_servers: vec!["1.1.1.1".to_string()],
+            ..Default::default()
+        })));
+
+        let domain = b"localhost";
+        let mut packet = vec![0, 0, 0, AddressType::DomainName as u8, domain.len() as u8];
+        packet.extend_from_slice(domain);
+        packet.extend_from_slice(&443_u16.to_be_bytes());
+        packet.extend_from_slice(b"domain-payload");
+        UdpRelay::handle_packet(
+            &main_relay,
+            &sessions,
+            &packet,
+            source,
+            &rules,
+            &Some(Arc::new(DnsResolver::new(false))),
+            &Some(harness.state()),
+            &None,
+            true,
+            19510,
+        )
+        .await
+        .unwrap();
+
+        let mut response = [0_u8; 128];
+        let (n, _) = timeout(Duration::from_secs(2), client.recv_from(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&response[10..n], b"domain-payload");
+        let session = sessions.read().await.values().next().unwrap().clone();
+        assert_eq!(session.bytes_sent.load(Ordering::Relaxed), 14);
+        let record = harness
+            .traffic_db
+            .get_by_id(&session.req_id)
+            .expect("UDP traffic record");
+        assert_eq!(record.protocol, "socks5-udp");
+        assert_eq!(record.listener_port, 19510);
+
+        for resolver in [Some(Arc::new(DnsResolver::new(false))), None] {
+            let direct_domain = b"127.0.0.1";
+            let mut direct = vec![
+                0,
+                0,
+                0,
+                AddressType::DomainName as u8,
+                direct_domain.len() as u8,
+            ];
+            direct.extend_from_slice(direct_domain);
+            direct.extend_from_slice(&echo_addr.port().to_be_bytes());
+            direct.extend_from_slice(b"domain-payload");
+            UdpRelay::handle_packet(
+                &main_relay,
+                &sessions,
+                &direct,
+                source,
+                &None,
+                &resolver,
+                &None,
+                &None,
+                true,
+                19510,
+            )
+            .await
+            .unwrap();
+            let (n, _) = timeout(Duration::from_secs(2), client.recv_from(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(&response[10..n], b"domain-payload");
+        }
+        echo_task.await.unwrap();
+
+        let domain_rule: Option<Arc<dyn RulesResolver>> =
+            Some(Arc::new(StaticRules(ResolvedRules {
+                host: Some("replacement.test:8443".to_string()),
+                ..Default::default()
+            })));
+        let (host, port, _) = UdpRelay::apply_rules(
+            &SocksAddress::DomainName("source.test".to_string()),
+            80,
+            &domain_rule,
+            false,
+            true,
+        );
+        assert!(matches!(host, SocksAddress::DomainName(ref value) if value == "replacement.test"));
+        assert_eq!(port, 8443);
     }
 }

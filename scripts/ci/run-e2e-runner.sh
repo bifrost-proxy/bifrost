@@ -94,5 +94,6 @@ start_e2e_sync_server() {
 }
 
 cd "$ROOT_DIR"
+export BIFROST_E2E=1
 start_e2e_sync_server
 bash scripts/run_all_e2e.sh --ci --skip-rules --skip-shell --skip-ui --skip-build

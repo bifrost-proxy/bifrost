@@ -314,11 +314,19 @@ const targetUrl = process.argv[4];
 const errors = [];
 const observedUrls = [];
 
+function withTimeout(promise, label, timeoutMs = 10000) {
+  let timeout;
+  const expired = new Promise((_, reject) => {
+    timeout = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  return Promise.race([promise, expired]).finally(() => clearTimeout(timeout));
+}
+
 async function openTab(url) {
   const endpoint = `http://127.0.0.1:${debugPort}/json/new?${encodeURIComponent(url)}`;
-  let response = await fetch(endpoint, { method: "PUT" });
+  let response = await fetch(endpoint, { method: "PUT", signal: AbortSignal.timeout(10000) });
   if (!response.ok) {
-    response = await fetch(endpoint);
+    response = await fetch(endpoint, { signal: AbortSignal.timeout(10000) });
   }
   if (!response.ok) {
     throw new Error(`failed to open Chrome tab: ${response.status}`);
@@ -328,10 +336,10 @@ async function openTab(url) {
 
 async function connect(wsUrl) {
   const ws = new WebSocket(wsUrl);
-  await new Promise((resolve, reject) => {
+  await withTimeout(new Promise((resolve, reject) => {
     ws.addEventListener("open", resolve, { once: true });
     ws.addEventListener("error", reject, { once: true });
-  });
+  }), "DevTools websocket connection");
   let seq = 0;
   const pending = new Map();
   ws.addEventListener("message", event => {
@@ -365,7 +373,10 @@ async function connect(wsUrl) {
     send(method, params = {}) {
       const id = ++seq;
       ws.send(JSON.stringify({ id, method, params }));
-      return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+      return withTimeout(
+        new Promise((resolve, reject) => pending.set(id, { resolve, reject })),
+        `DevTools ${method}`
+      ).finally(() => pending.delete(id));
     },
     close() {
       ws.close();
@@ -385,12 +396,13 @@ async function evaluate(client, expression) {
   return result.result?.value;
 }
 
-const tab = await openTab(confirmUrl);
+const tab = await openTab("about:blank");
 const client = await connect(tab.webSocketDebuggerUrl);
 await client.send("Runtime.enable");
 await client.send("Log.enable");
 await client.send("Page.enable");
 await client.send("Network.enable");
+await client.send("Page.navigate", { url: confirmUrl });
 
 let before = null;
 for (let i = 0; i < 120; i += 1) {
@@ -400,7 +412,7 @@ for (let i = 0; i < 120; i += 1) {
     title: document.querySelector('h1')?.textContent || '',
     hasApply: Boolean(document.querySelector('#apply')),
     hasHashInput: Boolean(document.querySelector('#confirmation')),
-    requiresHashText: document.body.innerText.includes('Type the full content hash to apply'),
+    requiresHashText: document.body?.innerText.includes('Type the full content hash to apply') ?? false,
     applyDisabled: document.querySelector('#apply')?.disabled ?? null,
     status: document.querySelector('#status')?.textContent || '',
     body: document.body?.innerText || ''

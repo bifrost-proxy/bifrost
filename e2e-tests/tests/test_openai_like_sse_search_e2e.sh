@@ -32,7 +32,7 @@ ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
 ADMIN_BASE_URL="http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}"
 SSE_PROXY="http://${PROXY_HOST}:${PROXY_PORT}"
 SSE_TARGET="http://${SSE_HOST}:${SSE_PORT}"
-BIFROST_BIN="${PROJECT_DIR}/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-${PROJECT_DIR}/target/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi

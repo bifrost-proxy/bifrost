@@ -1,0 +1,13 @@
+test_proxy_chain_auth_e2e.sh
+test_socks5_tls_routing_exceptions.sh
+test_socks5_tls_rules.sh
+test_socks5_udp.sh
+test_socks5_udp_rules.sh
+test_tls_intercept_e2e.sh
+test_tls_intercept_mode_api.sh
+test_breakpoint_performance_guard.sh
+test_body_replace.sh
+test_header_replace.sh
+test_req_res_script_e2e.sh
+test_websocket_frames.sh
+test_trustworthy_traffic_metrics.sh

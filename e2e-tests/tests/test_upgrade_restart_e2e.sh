@@ -62,11 +62,22 @@ run_bifrost() {
 
 start_daemon() {
     local log_file="${TEST_DATA_DIR}/proxy-${RANDOM}.log"
-    BIFROST_DATA_DIR="${TEST_DATA_DIR}" "$BIFROST_BIN" start -d \
-        -p "${PROXY_PORT}" \
-        --skip-cert-check --unsafe-ssl --no-system-proxy -y \
-        >"${log_file}" 2>&1
-    local exit_code=$?
+    local exit_code=0
+    if [[ "${BIFROST_COVERAGE_E2E:-0}" == "1" ]]; then
+        # LLVM-instrumented binaries must stay alive to flush their profile and
+        # therefore cannot use the normal detached-daemon launcher contract.
+        BIFROST_DATA_DIR="${TEST_DATA_DIR}" "$BIFROST_BIN" start \
+            -p "${PROXY_PORT}" \
+            --skip-cert-check --unsafe-ssl --no-system-proxy -y \
+            >"${log_file}" 2>&1 &
+        PROXY_PID=$!
+    else
+        BIFROST_DATA_DIR="${TEST_DATA_DIR}" "$BIFROST_BIN" start -d \
+            -p "${PROXY_PORT}" \
+            --skip-cert-check --unsafe-ssl --no-system-proxy -y \
+            >"${log_file}" 2>&1
+        exit_code=$?
+    fi
 
     if [[ $exit_code -ne 0 ]]; then
         echo "  [DEBUG] start -d exited with code $exit_code" >&2
@@ -76,7 +87,7 @@ start_daemon() {
 
     sleep 1
 
-    local pid
+    local pid="${PROXY_PID}"
     pid="$(cat "${TEST_DATA_DIR}/bifrost.pid" 2>/dev/null || true)"
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
         PROXY_PID="$pid"

@@ -41,7 +41,7 @@ BIFROST_DATA_DIR_BASE="${PROJECT_DIR}/.bifrost-e2e-badge"
 HTML_DIR="${PROJECT_DIR}/e2e-tests/test_data/badge_injection"
 
 BIFROST_TARGET_DIR="${CARGO_TARGET_DIR:-${PROJECT_DIR}/target}"
-BIFROST_BIN="${BIFROST_TARGET_DIR}/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-${BIFROST_TARGET_DIR}/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi
@@ -87,6 +87,12 @@ cleanup() {
 trap cleanup EXIT
 
 build_bifrost() {
+  if [[ -x "$BIFROST_BIN" ]]; then
+    echo "[INFO] Using injected/existing bifrost binary: $BIFROST_BIN" >&2
+    echo "$BIFROST_BIN"
+    return 0
+  fi
+
   if [[ -f "$BIFROST_BIN" ]] && [[ "${SKIP_BUILD:-false}" == "true" ]]; then
     echo "[INFO] Skipping build (SKIP_BUILD=true), using existing binary: $BIFROST_BIN" >&2
     echo "$BIFROST_BIN"

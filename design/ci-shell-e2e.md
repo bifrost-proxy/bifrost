@@ -12,6 +12,20 @@ Bifrost 的 shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_a
 
 本设计把这些点整体收敛为一套稳定化规则：CI-only skip list、串行 heavy 用例、隐藏日志目录 artifact 上传、失败原因抓取、并行度分层、Windows rules 内层预算。
 
+## Go 工具链移除
+
+- 仓库不再跟踪 `.go`、`go.mod`、`go.sum`、`go.work` 或 Go 编译产物。历史
+  `e2e-tests/tests/quic_socks5_client/` 没有入口脚本、CI 调用或断言，是未接入测试体系的
+  孤立实验代码，删除它不会减少实际执行的 E2E 场景。
+- HTTP/3 能力继续由 Rust integration test
+  `crates/bifrost-proxy/tests/upstream_http3_e2e.rs` 验证真实本地 QUIC/H3 origin；SOCKS5
+  UDP ASSOCIATE、UDP 转发与 QUIC-like 数据包继续由 Rust 单测和现有 Shell E2E 验证。
+- CI 不再使用 `actions/setup-go`。`shfmt` 从官方 v3.12.0 release 下载 Linux amd64
+  预编译二进制，并在安装前校验固定 SHA-256，避免为了 Shell 格式检查引入 Go 工具链，
+  同时避免未经校验的可执行文件进入 runner。
+- `test_coverage_pipeline_contract.sh` 同时门禁“无 tracked Go 文件”“旧客户端目录无任何
+  tracked artifact”“无 Go setup/install”和 `shfmt` 版本/哈希，防止后续依赖悄悄回流。
+
 ## 用户目标验证清单
 
 ### 必须实现
@@ -211,6 +225,10 @@ Bash 调度逻辑，无 Rust 公共函数变更。
 - `SKIP_BUILD=true BIFROST_BIN=<release> ADMIN_PORT=18945 MOCK_HTTP_PORT=18946 bash e2e-tests/tests/test_agent_send_msg_feishu_card.sh`：Feishu interactive card 真实链路通过。
 - `SKIP_BUILD=true BIFROST_BIN=<release> bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh`：输出 `Using existing bifrost binary`，三段 relay fallback 全过。
 - `BIFROST_BIN=<release> SKIP_BUILD=true SKIP_CARGO_TEST=true PROXY_PORT=<free> ECHO_HTTP_PORT=<free> ECHO_HTTPS_PORT=<free> bash e2e-tests/tests/test_http3_e2e.sh`：全部命中本地 mock，`Failed: 0`。
+- Linux 与 macOS Shell capability matrix 显式设置 `SKIP_CARGO_TEST=true`：HTTP/3 Rust integration test 由 Unit/Integration 与 Coverage 两个独立 job 双重执行；Shell 保留全部真实代理场景，避免冷缓存下 test-only 依赖编译超过 job 预算。
+- Layered Coverage 的 Shell 阶段同样设置 `SKIP_CARGO_TEST=true`：前置 Unit/Integration coverage 已执行并采集 HTTP/3 integration test，后续 Shell 只运行可贡献 E2E profile 的真实代理场景，禁止额外构建未插桩 release test。
+- Layered Coverage 在插桩构建前生成 Web 资产，并把历史 Shell 用例使用的 `target/release/{bifrost,bifrost-e2e}` 兼容路径链接到同一份 debug 插桩二进制；既保证管理端资源与旧用例路径可用，也不混入未插桩进程。
+- PR 不再触发完整 Layered Coverage；主 Coverage 使用 `--e2e-suite proxy`，通过 `BIFROST_E2E_SHELL_TESTS` 精确选择 13 个 SOCKS/CONNECT/HTTP/WebSocket 核心场景并合并 Rules、Runner profile。完整 167 个 Shell 的分层报告只在每周和手动审计生成。
 - `BIFROST_BIN=<release> SKIP_BUILD=true PROXY_PORT=<free> MOCK_HTTP_PORT=<free> BIFROST_DATA_DIR=<tmp> SERVER_LOG_DIR=<tmp> bash e2e-tests/tests/test_replay_body_decode.sh`：本地 `/gzip` 返回 200 + `"gzipped": true`。
 - 静态：`scripts/run_all_e2e.sh` 的 `CARGO_BIN` 默认来自 `resolve_cargo_command`；`heartbeat_while_running` 用 `BIFROST_E2E_HEARTBEAT_INTERVAL`。
 - 静态：`e2e-tests/run_all_tests_parallel.sh` 存在 `result_has_status`，Windows 下 `loop_sleep` 默认 `BIFROST_E2E_WINDOWS_POLL_INTERVAL:-1`。

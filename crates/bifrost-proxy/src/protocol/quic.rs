@@ -91,6 +91,25 @@ mod tests {
     }
 
     #[test]
+    fn coverage_90_all_long_packet_types_and_short_inputs() {
+        assert_eq!(QuicPacketDetector::get_long_packet_type(&[]), None);
+        assert_eq!(QuicPacketDetector::get_long_packet_type(&[0x40]), None);
+        for (bits, expected) in [
+            (0_u8, QuicLongPacketType::Initial),
+            (1, QuicLongPacketType::ZeroRtt),
+            (2, QuicLongPacketType::Handshake),
+            (3, QuicLongPacketType::Retry),
+        ] {
+            let mut packet = vec![0x80 | (bits << 4), 0, 0, 0, 1];
+            packet.extend_from_slice(&[0; 8]);
+            assert_eq!(
+                QuicPacketDetector::get_long_packet_type(&packet),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
     fn test_short_header() {
         let mut packet = vec![0x40]; // Short header (fixed bit set)
         packet.extend_from_slice(&[0x00; 25]);

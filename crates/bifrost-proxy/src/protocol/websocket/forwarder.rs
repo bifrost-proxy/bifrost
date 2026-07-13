@@ -150,4 +150,27 @@ mod tests {
         assert_eq!(client_to_server, 1);
         assert_eq!(server_to_client, 0);
     }
+
+    #[tokio::test]
+    async fn coverage_90_server_callback_transforms_and_counts_frame() {
+        let (server_forwarder, mut server_peer) = duplex(1024);
+        let frame = WebSocketFrame::text("server").encode();
+        let writer = tokio::spawn(async move {
+            server_peer.write_all(&frame).await.unwrap();
+        });
+        let callback: WebSocketFrameCallback = Box::new(|_| Some(WebSocketFrame::text("changed")));
+        let (client_count, server_count) = WebSocketForwarder::bidirectional(
+            empty(),
+            sink(),
+            server_forwarder,
+            sink(),
+            None,
+            Some(callback),
+        )
+        .await
+        .unwrap();
+        writer.await.unwrap();
+        assert_eq!(client_count, 0);
+        assert_eq!(server_count, 1);
+    }
 }

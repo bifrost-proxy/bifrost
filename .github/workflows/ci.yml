@@ -49,6 +49,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: E2E shell CI coverage guard
         shell: bash
         run: bash scripts/ci/check-e2e-shell-ci-coverage.sh
@@ -60,9 +62,25 @@ jobs:
           bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules
           --skip-runner --skip-ui --skip-build --shard 1/3
           --check-shell-shard-balance
-      - name: Shell syntax guard
+      - name: Install Shell quality tools
         shell: bash
-        run: bash scripts/ci/check-shell-syntax.sh
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          fi
+          curl -fsSLo /tmp/shfmt \
+            https://github.com/mvdan/sh/releases/download/v3.12.0/shfmt_v3.12.0_linux_amd64
+          echo "d9fbb2a9c33d13f47e7618cf362a914d029d02a6df124064fff04fd688a745ea  /tmp/shfmt" \
+            | sha256sum --check --strict
+          sudo install -m 0755 /tmp/shfmt /usr/local/bin/shfmt
+      - name: Shell syntax and static quality guard
+        shell: bash
+        env:
+          SHELL_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || 'HEAD^' }}
+        run: bash scripts/ci/check-shell-quality.sh "$SHELL_BASE_REF"
+      - name: Proxy E2E capability contract
+        run: python3 scripts/ci/check-e2e-capabilities.py
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -126,10 +144,12 @@ jobs:
         run: cargo test --workspace --all-features
 
   coverage:
-    name: Coverage (Unit + Integration) & 90% Gate
+    name: Coverage (Unit + Proxy E2E) & 90% Gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -147,11 +167,23 @@ jobs:
           save-if: ${{ true }}
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Collect unit + integration coverage and enforce gate
+      - name: Coverage tooling unit tests
+        run: python3 -m unittest discover -s scripts/ci/tests -p 'test_*.py' -v
+      - name: Collect unit + proxy E2E coverage and enforce gate
         # Per-crate floors + workspace floor live in
         # scripts/ci/coverage-thresholds.toml. The gate fails the job if any
         # crate drops below its ratcheted floor (goal: 90%).
-        run: bash scripts/ci/coverage-all.sh --json --lcov --gate --gaps
+        run: >-
+          bash scripts/ci/coverage-all.sh --with-e2e --e2e-suite proxy
+          --json --lcov --gate --gaps
+      - name: Changed production Rust line coverage (95%)
+        if: github.event_name == 'pull_request'
+        env:
+          COVERAGE_BASE_REF: origin/${{ github.base_ref }}
+        run: >-
+          python3 scripts/ci/coverage-diff.py target/coverage/lcov.info
+          --base-ref "$COVERAGE_BASE_REF" --threshold 95
+          --json-output target/coverage/changed-lines.json
       - name: Coverage summary (job summary)
         if: always()
         run: |
@@ -165,6 +197,8 @@ jobs:
           path: |
             target/coverage/coverage.json
             target/coverage/lcov.info
+            target/coverage/production-coverage.json
+            target/coverage/changed-lines.json
           retention-days: 7
 
   build-e2e:
@@ -244,8 +278,8 @@ jobs:
           done
           echo "=== E2E Data Directory ==="
           find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
-      - name: Upload E2E logs
-        if: failure()
+      - name: Upload E2E report and logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-rules-logs-linux
@@ -267,6 +301,10 @@ jobs:
       BIFROST_E2E_SHELL_JOBS: "4"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "2"
+      # Unit/Integration and Coverage both execute the HTTP/3 Rust integration
+      # test. Shell E2E keeps the real proxy scenarios without rebuilding the
+      # full test-only dependency graph from a cold cache.
+      SKIP_CARGO_TEST: "true"
       TIMEOUT: "90"
       PYTHONIOENCODING: utf-8
     steps:
@@ -322,8 +360,8 @@ jobs:
           done
           echo "=== E2E Data Directory ==="
           find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
-      - name: Upload E2E logs
-        if: failure()
+      - name: Upload E2E report and logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-shell-logs-linux
@@ -376,14 +414,62 @@ jobs:
           done
           echo "=== E2E Data Directory ==="
           find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
-      - name: Upload E2E logs
-        if: failure()
+      - name: Upload E2E report and logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-runner-logs-linux
           path: |
             ${{ github.workspace }}/.e2e-reports/
             ${{ github.workspace }}/.bifrost-e2e-ci/
+          retention-days: 7
+          if-no-files-found: ignore
+          include-hidden-files: true
+
+  e2e-ui:
+    name: E2E UI (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-ui-test
+      BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports/ui
+      BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT: "1"
+      BIFROST_DISABLE_TRAY: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium-headless-shell
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ true }}
+      - name: Run critical Playwright capability matrix through unified E2E entrypoint
+        shell: bash
+        env:
+          BIFROST_UI_TEST_PROFILE: critical
+        run: >-
+          bash scripts/run_all_e2e.sh --ci --skip-rules --skip-shell
+          --skip-runner
+      - name: Upload Playwright diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-ui-playwright-report-linux
+          path: |
+            ${{ github.workspace }}/.e2e-reports/ui/
+            ${{ github.workspace }}/web/playwright-report/
+            ${{ github.workspace }}/web/test-results/
+            ${{ github.workspace }}/.ui-backend.log
           retention-days: 7
           if-no-files-found: ignore
           include-hidden-files: true
@@ -739,6 +825,10 @@ jobs:
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "2"
       BIFROST_E2E_SHELL_TEST_TIMEOUT: "1260"
+      # Unit/Integration and Coverage already compile and execute the HTTP/3
+      # Rust integration test. macOS still runs the real proxy scenarios without
+      # spending 10+ minutes rebuilding test-only dependencies.
+      SKIP_CARGO_TEST: "true"
       TIMEOUT: "90"
       PYTHONIOENCODING: utf-8
     steps:

@@ -358,7 +358,7 @@ bifrost remote run --script-file ./smoke.py --interpreter python3 --cwd /path/to
 
 ```bash
 export BIFROST_REMOTE_CLIENT_ID=devbox
-bifrost remote file read main.go --cwd /repo
+bifrost remote file read Cargo.toml --cwd /repo
 bifrost remote --client-id macbook run --script-file ./query.py --interpreter python3 --cwd /repo
 ```
 

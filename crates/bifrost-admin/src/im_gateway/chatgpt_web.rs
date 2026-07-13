@@ -624,12 +624,13 @@ pub async fn run_adapter(
     prompt: &str,
     run_dir: &Path,
 ) -> Result<ChatGptWebRunOutput, String> {
-    #[cfg(debug_assertions)]
-    if std::env::var("BIFROST_CHATGPT_WEB_E2E_MOCK")
+    let e2e_mock_requested = std::env::var("BIFROST_CHATGPT_WEB_E2E_MOCK")
         .ok()
         .as_deref()
-        == Some("1")
-    {
+        == Some("1");
+    let explicit_e2e = std::env::var("BIFROST_E2E").ok().as_deref() == Some("1")
+        || std::env::var("BIFROST_COVERAGE_E2E").ok().as_deref() == Some("1");
+    if e2e_mock_requested && explicit_e2e {
         return Ok(mock_run_adapter_for_e2e(request, prompt));
     }
 
@@ -759,7 +760,6 @@ async fn wait_for_stop_marker(path: PathBuf) {
     }
 }
 
-#[cfg(debug_assertions)]
 fn mock_run_adapter_for_e2e(request: &ExternalCliRunRequest, prompt: &str) -> ChatGptWebRunOutput {
     let conversation_id = conversation_id_hint_from_request(request)
         .unwrap_or_else(|| format!("mock-conversation-{}", uuid::Uuid::new_v4()));

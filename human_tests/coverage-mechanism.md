@@ -31,6 +31,16 @@
 | TC-COV-08 | 设计文档 `design/coverage-90.md` 列出 mechanism + 不适用清单 | doc |
 | TC-COV-09 | 覆盖 E2E 与生产数据目录、HOME/XDG、9900 端口硬隔离 | safety |
 | TC-COV-10 | 覆盖管线与全仓 Shell 语法契约通过 | regression |
+| TC-COV-11 | PR changed-lines 95% 门禁 | gate |
+| TC-COV-12 | Shell 静态质量门禁 | regression |
+| TC-COV-13 | 代理核心能力矩阵 | contract |
+| TC-COV-14 | E2E 机器可读结果 | observability |
+| TC-COV-15 | WebSocket 核心与 Playwright 关键矩阵 | e2e |
+| TC-COV-16 | 核心代理 production coverage 90% 门禁 | gate |
+| TC-COV-17 | Full E2E 门禁与 TLS 动态切换确定性 | e2e |
+| TC-COV-18 | PR 轻量代理门禁与每周完整审计 | gate |
+| TC-COV-19 | 仓库移除 Go 工具链且测试能力不降级 | regression |
+| TC-COV-20 | 最终 PR 功能影响与测试辅助代码边界 | regression |
 
 ## 用例细节
 
@@ -189,6 +199,220 @@ BIFROST_E2E_CAPABILITY_SHARDS=1 BIFROST_E2E_SHELL_JOBS=2 \
 macOS Shell 按 `proxy-core`、`remote`、`agent-extensions` 三个能力 job 拆分；167 个
 测试无重复、无遗漏，按历史耗时估算的最大 job 偏差不超过平均值 15%。
 
+### TC-COV-11 PR changed-lines 95% 门禁
+
+**步骤**：
+
+```bash
+python3 -m unittest discover -s scripts/ci/tests -p 'test_*.py' -v
+grep -n 'changed_lines_min = 95.0' scripts/ci/coverage-thresholds.toml
+grep -n 'coverage-diff.py' .github/workflows/ci.yml
+```
+
+**预期**：工具单测全部通过；PR coverage job 在 LCOV 生成后执行 changed-lines 95%
+门禁；`#[cfg(test)] mod tests` 中的测试代码不计入生产增量覆盖率。
+
+### TC-COV-12 Shell 静态质量门禁
+
+**步骤**：
+
+```bash
+PATH="$(go env GOBIN):$PATH" BIFROST_REQUIRE_SHELL_TOOLS=1 \
+  bash scripts/ci/check-shell-quality.sh origin/main
+```
+
+**预期**：全仓 Shell `bash -n` 与 ShellCheck error gate 通过；变更的
+`scripts/ci/*.sh` 通过 shfmt；缺少检查工具时 CI 必须失败而不是静默跳过。
+
+### TC-COV-13 代理核心能力矩阵
+
+**步骤**：
+
+```bash
+python3 scripts/ci/check-e2e-capabilities.py
+```
+
+**预期**：P0 能力均具备 unit/integration/E2E、Linux/macOS/Windows、失败模式和真实
+证据文件；重复 ID、缺失证据或缺少维度时校验失败。
+
+### TC-COV-14 E2E 机器可读结果
+
+**步骤**：
+
+```bash
+rm -rf .e2e-reports/summary-human
+BIFROST_E2E_REPORT_DIR="$PWD/.e2e-reports/summary-human" \
+  bash scripts/run_all_e2e.sh --ci --skip-rules --skip-shell --skip-runner \
+  --skip-ui --skip-build
+python3 -m json.tool .e2e-reports/summary-human/summary.json
+```
+
+**预期**：生成 schema version 1 的 JSON，包含 metadata、counts、suites；即使 selected
+suite 为 0 也生成合法空报告，真实执行时逐项记录 passed/failed/skipped 与原因。
+
+### TC-COV-15 WebSocket 核心与 Playwright 关键矩阵
+
+**步骤**：
+
+```bash
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy \
+  websocket::capture::tests --lib
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy \
+  proxy::http::websocket::tests --lib
+BIFROST_DATA_DIR="$PWD/.bifrost-ui-test-human" \
+  BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 \
+  bash scripts/ci/run-ui-critical.sh
+```
+
+**预期**：WebSocket 双向帧、mask 方向、leftover、握手 header 过滤均通过；Playwright
+关键矩阵 7/7 通过，覆盖 Rules、Values、Scripts、Traffic、Breakpoint 与 Agent 新会话，
+使用隔离数据目录和动态端口，不连接或停止生产 9900 服务。完整 211 条历史套件由
+`.github/workflows/ui-e2e-full.yml` 每周审计并上传失败证据，PR 合入门禁不隐瞒其存量债务。
+
+### TC-COV-16 核心代理 production coverage 90% 门禁
+
+**步骤**：
+
+```bash
+python3 scripts/ci/coverage-production.py \
+  target/coverage-current-merge/coverage-wave15.lcov \
+  --crate bifrost-proxy \
+  --thresholds scripts/ci/coverage-thresholds.toml \
+  --json-output target/coverage-current-merge/production-human.json --top 5
+grep -A8 '^\[crates.bifrost-proxy\]' scripts/ci/coverage-thresholds.toml
+grep -n 'production-coverage.json\|coverage-all.sh --with-e2e' \
+  .github/workflows/coverage-e2e.yml
+```
+
+**预期**：production reporter 输出 `PASS` 且覆盖率不少于 90%；阈值文件中
+`bifrost-proxy min = 90.0`、`metric = "production"`；PR 主 Coverage 使用
+`--with-e2e --e2e-suite proxy` 执行轻量绝对门禁，每周/手动 layered workflow 执行完整
+`--with-e2e` 并上传 `production-coverage.json`。
+
+### TC-COV-17 Full E2E 门禁与 TLS 动态切换确定性
+
+**步骤**：
+
+```bash
+bash e2e-tests/tests/test_coverage_pipeline_contract.sh
+HOME="$HOME" CARGO_HOME="$HOME/.cargo" RUSTUP_HOME="$HOME/.rustup" \
+  BIFROST_BIN="$PWD/target/release/bifrost" \
+  target/release/bifrost-e2e --test tls_switch_intercept_to_tunnel \
+  --jobs 1 --test-timeout 30
+BIFROST_E2E=1 BIFROST_CHATGPT_WEB_E2E_MOCK=1 \
+  target/release/bifrost-e2e \
+  --test im_gateway_chatgpt_web_restores_conversation_after_service_restart \
+  --jobs 1 --test-timeout 120
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy \
+  intercepted_non_http_tls_connects_and_relays_through_tls_upstream \
+  --all-features -- --nocapture
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy \
+  limited_blocking_resolution_covers_success_closed_and_join_error \
+  --all-features -- --nocapture
+SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" \
+  bash e2e-tests/tests/test_group_sync_no_logstorm_e2e.sh
+cd web && pnpm exec playwright test tests/ui/admin-rules-values.spec.ts \
+  --grep "Values 页面完成 CRUD" --workers=1
+SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" \
+  bash e2e-tests/tests/test_rule_share_confirm_browser.sh
+BIFROST_HTTP3_CARGO_TEST_TIMEOUT=600 SKIP_BUILD=true \
+  BIFROST_BIN="$PWD/target/release/bifrost" \
+  bash e2e-tests/tests/test_http3_e2e.sh
+CI=true SKIP_CARGO_TEST=true SKIP_BUILD=true \
+  BIFROST_BIN="$PWD/target/release/bifrost" \
+  bash e2e-tests/tests/test_http3_e2e.sh
+```
+
+**预期**：coverage pipeline contract 全部通过；TLS ON -> OFF 后第二次请求使用新连接，
+流量统计精确为 `HTTPS=1` 且 `TUNNEL>=1`；release Runner 只有在 E2E 上下文与 mock
+请求双开关同时存在时走 ChatGPT Web mock，服务重启会话恢复用例 1/1 通过；
+`bifrost-e2e` 显式显示 `EXEMPT`，且不进入 crate/workspace 自覆盖率百分比门禁。
+非 HTTP TLS 拦截成功连接真实本地 TLS upstream，并双向转发初始载荷、客户端载荷和
+upstream 响应，取消信号能够正常结束 relay。
+进程解析限流测试用已取消 task 确定性地产生 `JoinError`，不依赖 panic 回溯速度或
+平台调度时序。
+Group Rules 真实远端变更会传播到 API 与规则文件；当 info 日志可观测时产生 runtime
+reload，随后重复未变更同步前后日志计数与规则文件指纹均稳定，不形成 log storm。
+Values CRUD/sort/push 用例在切换排序前移开 Refresh tooltip 的 hover，排序选择器可点击，
+完整目标用例通过且不再因 tooltip 截获 pointer events 超时。
+Rule Share 浏览器确认页在导航切换期间允许 `document.body` 暂时为空，CDP 轮询不会因
+读取空 body 的 `innerText` 提前失败，并最终完成规则应用与目标页跳转。
+HTTP/3 E2E 冷缓存预编译使用与实际测试相同的 release profile，600 秒预算内完成，
+避免 debug/release 重复编译和 macOS runner 180 秒误超时。
+Linux/macOS Shell CI 显式跳过重复的 Rust integration 编译，但仍执行 HTTP/3 脚本的
+全部真实代理场景；Unit/Integration 与 Coverage 两个独立 job 双重强制执行 Rust
+integration test。
+Layered Coverage 的 Shell 阶段也不得额外构建未插桩 release test；HTTP/3 integration
+coverage 来自前置 Unit/Integration profile，Shell 只追加真实代理行为 profile。
+Layered Coverage 必须预先构建 Web 静态资源，并让历史 `target/release` 路径解析到
+同一份 debug 插桩二进制，避免旧 Shell 用例绕过覆盖率或因路径缺失产生假失败。
+
+### TC-COV-18 PR 轻量代理门禁与每周完整审计
+
+**步骤**：
+
+```bash
+test "$(grep -c '^  pull_request:' .github/workflows/coverage-e2e.yml)" -eq 0
+grep -F 'cron: "30 18 * * 0"' .github/workflows/coverage-e2e.yml
+grep -F -- '--with-e2e --e2e-suite proxy' .github/workflows/ci.yml
+BIFROST_E2E_SHELL_TESTS='test_trustworthy_traffic_metrics.sh,test_socks5_tls_rules.sh' \
+  bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner \
+  --skip-ui --skip-build --list-shell-tests
+bash e2e-tests/tests/test_coverage_pipeline_contract.sh
+python3 scripts/ci/coverage-production.py \
+  target/coverage-proxy-runner/proxy-smoke4-lcov.info --crate bifrost-proxy \
+  --thresholds scripts/ci/coverage-thresholds.toml --top 3
+```
+
+**预期**：Layered workflow 没有 PR 触发器，仅每周日 UTC 18:30（北京时间周一 02:30）
+和手动触发；主 Coverage 明确运行 proxy E2E 子集；Shell 精确过滤只列出指定的两个脚本；
+覆盖率契约通过；实测轻量集合的 `bifrost-proxy` production 覆盖率不少于 90%。
+
+### TC-COV-19 仓库移除 Go 工具链且测试能力不降级
+
+**步骤**：
+
+```bash
+test -z "$(find . -path './.git' -prune -o -path './target' -prune \
+  -o -path './web/node_modules' -prune -o \
+  \( -name '*.go' -o -name go.mod -o -name go.sum -o -name go.work \) -print)"
+test ! -d e2e-tests/tests/quic_socks5_client
+! rg -n 'actions/setup-go|(^|[[:space:]])go[[:space:]]+install([[:space:]]|$)' \
+  .github/workflows
+grep -F 'shfmt_v3.12.0_linux_amd64' .github/workflows/ci.yml
+grep -F 'd9fbb2a9c33d13f47e7618cf362a914d029d02a6df124064fff04fd688a745ea' \
+  .github/workflows/ci.yml
+bash e2e-tests/tests/test_coverage_pipeline_contract.sh
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy --test upstream_http3_e2e \
+  --all-features test_http_proxy_to_h3_origin_enabled_by_rule -- --exact --nocapture
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy --lib --all-features \
+  proxy::socks::udp::tests -- --nocapture
+```
+
+**预期**：排除依赖安装目录和通用构建产物后仓库没有 Go 源码或模块文件，旧客户端目录
+也没有被跟踪的编译产物；CI 不安装 Go；
+`shfmt` 使用固定版本并校验 SHA-256；覆盖率契约通过；Rust 的真实 HTTP/3 origin E2E
+以及 SOCKS5 UDP 编解码正常、边界和错误路径测试全部通过。
+
+### TC-COV-20 最终 PR 功能影响与测试辅助代码边界
+
+**步骤**：
+
+```bash
+test -z "$(git grep -n '#\[allow(dead_code)\]' -- \
+  crates/bifrost-proxy/src/proxy/http/tunnel/bidirectional.rs)"
+grep -A1 -F '#[cfg(test)]' \
+  crates/bifrost-proxy/src/proxy/http/tunnel/bidirectional.rs \
+  | grep -F 'async fn tunnel_bidirectional_io'
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy --lib --all-features \
+  proxy::http::tunnel::bidirectional::tests -- --nocapture
+SKIP_FRONTEND_BUILD=1 cargo build -p bifrost-proxy --all-features
+```
+
+**预期**：普通 tunnel 的测试 helper 仅在 test cfg 编译，不通过 `allow(dead_code)` 混入
+生产二进制或 production coverage 分母；其双向转发、统计、取消与错误路径测试全部通过；
+生产配置仍可独立构建。
+
 ## 执行记录
 
 | 用例 ID | 执行人 | 结果 | 备注 |
@@ -199,6 +423,10 @@ macOS Shell 按 `proxy-core`、`remote`、`agent-extensions` 三个能力 job �
 | TC-COV-04 | Codex | ✅ | 受磁盘限制改跑 `coverage-all.sh -p bifrost-command --text --fail-under 9999`；返回 rc=1，证明门禁失败路径生效 |
 | TC-COV-05 | Codex | ✅ | 受磁盘限制改跑 `coverage-all.sh -p bifrost-command --html --fail-under 0 --output-dir target/coverage-command-html`；`target/coverage-command-html/html/index.html` 已生成 |
 | TC-COV-06 | Codex | ⚠️ | 未跑全量 E2E coverage；本机磁盘不足已阻塞 workspace coverage，继续跑 E2E coverage 风险同类失败 |
+| TC-COV-18 | Codex | ✅ | 2026-07-13：确认 Layered workflow 无 `pull_request`、保留每周日 UTC 18:30 与手动触发；主 Coverage 使用 `--with-e2e --e2e-suite proxy`；精确 Shell 过滤只列出指定的两个用例；coverage pipeline contract 通过（253 个 Shell 语法、24 个工具单测、10 个 capability）；本地 unit+integration、Runner、Rules 与 13 个 proxy Shell profile 合并后 `bifrost-proxy` production 为 90.11%（19313/21433），90% 门禁 PASS。 |
+| TC-COV-18-CI | Codex | ✅ | 2026-07-13：首次远端 run 29218085900 在 23 秒内暴露 `Unknown E2E suite: proxy`，确认执行分支已新增但参数白名单遗漏；将 `proxy` 加入白名单，并在 coverage pipeline contract 固定断言 `rules | shell | runner | proxy`，防止入口与执行分支再次漂移。 |
+| TC-COV-19 | Codex | ✅ | 2026-07-13：仓库源码（排除依赖安装目录和通用构建产物）无 `.go`/`go.mod`/`go.sum`/`go.work`，旧客户端目录也无 tracked ARM64 编译产物；workflow 无 `setup-go`/`go install`；`shfmt` v3.12.0 固定下载地址与 SHA-256 均命中；coverage pipeline contract 通过（253 个 Shell 语法、24 个工具单测、10 个 capability）；Rust 本地 HTTP/3 origin 真链路 1/1、SOCKS5 UDP 正常/边界/错误/真实 relay 9/9 通过。首次执行发现 human test 扫描了契约自身的禁用字面量而误报，已收窄到 workflow 执行面后从头复跑通过；第 2 轮 review 发现并删除无扩展名的旧 Go 客户端 Mach-O 产物，再次从头复跑通过。 |
+| TC-COV-20 | Codex | ✅ | 2026-07-13：最终全 PR review 发现普通 tunnel 泛型 helper 在移除生产调用后仍以 `allow(dead_code)` 进入 release 构建；改为 `#[cfg(test)]` 后，双向转发、字节统计、取消、断连与错误路径 6/6 通过，`cargo build -p bifrost-proxy --all-features` 通过。同步补齐此前遗漏的 TC-COV-18/19/20 用例索引，避免 human_tests 详情与索引漂移。 |
 | TC-COV-07 | Codex | ✅ | AGENTS.md 已加入 90% CI 门禁段落，并明确本地默认不跑全量 coverage |
 | TC-COV-08 | Codex | ✅ | design/coverage-90.md 已落地 |
 
@@ -264,3 +492,38 @@ macOS Shell 按 `proxy-core`、`remote`、`agent-extensions` 三个能力 job �
   `${{ always() }}` 后 run `29159544439` 在 workflow 解析期 0 job 失败，进一步确认状态
   函数不能用于 action input。最终修为 `save-if: ${{ true }}`，并由 coverage pipeline
   contract 同时阻止两种错误写法回归。
+
+2026-07-12 执行补充（Phase 6 完备性门禁）：
+
+- TC-COV-11：PASS。`scripts/ci/tests` 共 12 条工具单测通过，其中 changed-lines 6 条；
+  阈值固定为 95%，并验证内联测试模块不会抬高生产代码增量覆盖率。
+- TC-COV-12：PASS。253 个 tracked Shell 文件 `bash -n` 与 ShellCheck error gate 全部
+  通过；变更的 `scripts/ci/*.sh` 通过 shfmt。门禁真实发现并修复 7 处 stdin 重定向、
+  命令替换和条件表达式错误，未使用全局 disable。首次远端 CI 还发现本地检查未纳入
+  尚未提交的新 Shell 文件；现已把 untracked `scripts/ci/*.sh` 一并纳入本地 shfmt 选择。
+- TC-COV-13：PASS。能力矩阵校验 10 个代理核心能力，P0 的测试层、三平台、失败模式与
+  证据文件完整。
+- TC-COV-14：PASS。隔离运行生成 `.e2e-reports/summary-human/summary.json`，schema v1
+  可解析，空选择也包含 metadata、counts 与 suites。
+- TC-COV-15：PASS。WebSocket capture 2 条、upgrade 3 条专项 Rust 测试通过；Playwright
+  关键能力矩阵 7/7 通过。完整历史套件首次审计在 211 条中运行至第 73 条时已暴露 11 条
+  旧页面契约失败，验证了新增每周完整审计的必要性；该债务如实保留，不计为关键矩阵通过。
+
+2026-07-12 执行补充（核心代理 90%）：
+
+- TC-COV-16：PASS。production reporter 对合并 LCOV 统计为
+  `19304/21446 = 90.01%`，90% 门禁通过；阈值文件确认 `min=90.0`、
+  `metric="production"`。该历史完整 Layered 证据继续由每周/手动审计保留；PR 已改为
+  主 Coverage 的 proxy E2E 子集执行同一 90% production 门禁。
+- TC-COV-17：PASS。coverage pipeline contract 检查 253 个 Shell 文件、23 个工具单测、
+  10 个能力契约及 3 个能力分片均通过；真实运行 TLS ON -> OFF 用例 1/1 通过，切换后
+  流量为 `HTTPS=1`、`TUNNEL=1`；release Runner 双开关 ChatGPT Web 会话恢复用例
+  1/1 通过，耗时 1.11 秒；测试框架自身已按产品边界标记为 `metric="exempt"`，
+  其 Rules/Shell/Runner 可执行门禁保持强制；非 HTTP TLS 拦截真实本地 TLS upstream
+  双向 relay 用例 1/1 通过；进程解析限流的 success/closed/cancelled join-error 用例
+  1/1 通过；Group Rules no-logstorm 真实脚本 20/20 通过，远端内容成功传播并在 15 次
+  重复同步前后保持文件指纹和 reload 计数稳定；Values CRUD/sort/push Playwright 目标
+  用例 1/1 通过，耗时 8.1 秒，不再被 Refresh tooltip 截获点击；Rule Share 浏览器确认
+  脚本通过，规则成功应用并跳转目标页，导航瞬间空 body 不再中断 CDP 轮询；HTTP/3
+  release 预编译 1 分 33 秒完成，全量脚本 34/34 通过；Linux/macOS Shell CI 等价配置
+  下 Rust integration 标记为重复跳过，其余真实代理场景仍为 34/34、失败 0。

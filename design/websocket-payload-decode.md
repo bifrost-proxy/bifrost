@@ -152,7 +152,7 @@ pub struct WebSocketFrameRecord {
 - `crates/bifrost-proxy`：
   - `src/proxy/http/ws_decode.rs`（新逻辑集中于此）
   - `src/proxy/http/websocket/capture.rs`（transfer decode_scripts 到 forwarder）
-  - `src/proxy/http/websocket/upgrade.rs`（把 `ws_rules.decode_scripts.clone()` 透传给 forwarder，见第 189/207 行）
+  - `src/proxy/http/websocket/mod.rs`（把 `ws_rules.decode_scripts.clone()` 透传给 forwarder）
   - `src/protocol/websocket/forwarder.rs`（在 `record_frame` 前调用 decode）
 - `crates/bifrost-admin`：
   - `src/connection_monitor.rs`（`WebSocketFrameRecord` 字段扩展）

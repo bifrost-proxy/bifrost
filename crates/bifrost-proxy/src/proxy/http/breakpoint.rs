@@ -370,6 +370,7 @@ pub async fn breakpoint_response_hook(
 mod tests {
     use super::*;
     use crate::server::RuleValue;
+    use hyper::header::HeaderValue;
     use std::collections::HashMap;
 
     fn resolved_with_breakpoint(value: &str) -> ResolvedRules {
@@ -512,5 +513,180 @@ mod tests {
 
         assert!(body_edit_within_limit(&state, "12345"));
         assert!(!body_edit_within_limit(&state, "123456"));
+    }
+
+    async fn wait_until_pending(state: &AdminState, id: &str) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !state.breakpoint_manager.has_pending(id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn coverage_90_request_and_response_hooks_apply_resumed_edits() {
+        use bifrost_admin::breakpoint::{BreakpointEdit, BreakpointSettings};
+        let state = Arc::new(AdminState::new(0));
+        state
+            .breakpoint_manager
+            .update_settings(BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 64,
+            });
+
+        let task_state = state.clone();
+        let request_task = tokio::spawn(async move {
+            let mut headers = HeaderMap::new();
+            headers.insert(hyper::header::CONTENT_LENGTH, HeaderValue::from_static("3"));
+            let mut final_body = Bytes::from_static(b"old");
+            let outcome = breakpoint_request_hook(
+                &Some(task_state),
+                &None,
+                "request-covered",
+                "POST",
+                "http://example.test/",
+                &mut headers,
+                final_body.clone(),
+                Some(3),
+                false,
+                &mut final_body,
+            )
+            .await;
+            (outcome, headers, final_body)
+        });
+        wait_until_pending(&state, "request-covered").await;
+        assert!(state.breakpoint_manager.resume(
+            "request-covered",
+            "request",
+            BreakpointEdit {
+                headers: vec![
+                    ("content-type".into(), "text/plain".into()),
+                    ("bad header".into(), "x".into())
+                ],
+                body: Some("new-body".into()),
+            }
+        ));
+        let (outcome, headers, body) = request_task.await.unwrap();
+        assert!(outcome.body_replaced);
+        assert_eq!(body, Bytes::from_static(b"new-body"));
+        assert_eq!(headers[hyper::header::CONTENT_LENGTH], "8");
+
+        let task_state = state.clone();
+        let response_task = tokio::spawn(async move {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                hyper::header::CONTENT_ENCODING,
+                HeaderValue::from_static("gzip"),
+            );
+            let mut final_body = Bytes::from_static(b"old");
+            let outcome = breakpoint_response_hook(
+                &Some(task_state),
+                &None,
+                "response-covered",
+                "GET",
+                "http://example.test/",
+                200,
+                &mut headers,
+                final_body.clone(),
+                Some(3),
+                false,
+                &mut final_body,
+            )
+            .await;
+            (outcome, headers, final_body)
+        });
+        wait_until_pending(&state, "response-covered").await;
+        assert!(state.breakpoint_manager.resume(
+            "response-covered",
+            "response",
+            BreakpointEdit {
+                headers: vec![("x-edited".into(), "yes".into())],
+                body: Some("response-new".into()),
+            }
+        ));
+        let (outcome, headers, body) = response_task.await.unwrap();
+        assert!(outcome.body_replaced);
+        assert_eq!(headers["x-edited"], "yes");
+        assert!(!headers.contains_key(hyper::header::CONTENT_ENCODING));
+        assert_eq!(body, Bytes::from_static(b"response-new"));
+    }
+
+    #[tokio::test]
+    async fn coverage_90_hooks_cover_disabled_cancelled_and_oversized_edit_paths() {
+        use bifrost_admin::breakpoint::{BreakpointEdit, BreakpointSettings};
+        let mut headers = HeaderMap::new();
+        let mut final_body = Bytes::new();
+        assert!(
+            !breakpoint_request_hook(
+                &None,
+                &None,
+                "none",
+                "GET",
+                "/",
+                &mut headers,
+                Bytes::new(),
+                None,
+                false,
+                &mut final_body,
+            )
+            .await
+            .body_replaced
+        );
+
+        let state = Arc::new(AdminState::new(0));
+        assert!(
+            !breakpoint_response_hook(
+                &Some(state.clone()),
+                &None,
+                "disabled",
+                "GET",
+                "/",
+                200,
+                &mut headers,
+                Bytes::new(),
+                None,
+                false,
+                &mut final_body,
+            )
+            .await
+            .body_replaced
+        );
+        state
+            .breakpoint_manager
+            .update_settings(BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 2,
+            });
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            let mut headers = HeaderMap::new();
+            let mut final_body = Bytes::from_static(b"old");
+            breakpoint_response_hook(
+                &Some(task_state),
+                &None,
+                "oversized",
+                "GET",
+                "/",
+                200,
+                &mut headers,
+                final_body.clone(),
+                Some(3),
+                true,
+                &mut final_body,
+            )
+            .await
+        });
+        wait_until_pending(&state, "oversized").await;
+        assert!(state.breakpoint_manager.resume(
+            "oversized",
+            "response",
+            BreakpointEdit {
+                headers: vec![],
+                body: Some("way too large".into()),
+            }
+        ));
+        assert!(!task.await.unwrap().body_replaced);
     }
 }

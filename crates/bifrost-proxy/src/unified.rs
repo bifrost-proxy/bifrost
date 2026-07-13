@@ -236,6 +236,7 @@ impl UnifiedUdpSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn test_quic_long_header_detection() {
@@ -291,5 +292,131 @@ mod tests {
             UdpPacketDetector::detect(&socks5_packet, &registered, &unknown_source),
             UdpPacketType::Unknown
         );
+    }
+
+    #[test]
+    fn transport_protocol_conversion_covers_all_variants() {
+        assert_eq!(
+            DetectedProtocol::from(TransportProtocol::Http1),
+            DetectedProtocol::Http
+        );
+        assert_eq!(
+            DetectedProtocol::from(TransportProtocol::Http2),
+            DetectedProtocol::Http
+        );
+        assert_eq!(
+            DetectedProtocol::from(TransportProtocol::Tls),
+            DetectedProtocol::Tls
+        );
+        assert_eq!(
+            DetectedProtocol::from(TransportProtocol::Socks5),
+            DetectedProtocol::Socks5
+        );
+        assert_eq!(
+            DetectedProtocol::from(TransportProtocol::Socks4),
+            DetectedProtocol::Socks4
+        );
+        for protocol in [
+            TransportProtocol::WebSocket,
+            TransportProtocol::Sse,
+            TransportProtocol::Grpc,
+            TransportProtocol::Raw,
+        ] {
+            assert_eq!(DetectedProtocol::from(protocol), DetectedProtocol::Http);
+        }
+    }
+
+    #[test]
+    fn socks5_udp_detection_rejects_boundaries_and_accepts_ipv6() {
+        assert!(!UdpPacketDetector::is_socks5_udp_packet(&[0; 9]));
+        assert!(!UdpPacketDetector::is_socks5_udp_packet(&[
+            1, 0, 0, 1, 0, 0, 0, 0, 0, 0
+        ]));
+        assert!(!UdpPacketDetector::is_socks5_udp_packet(&[
+            0, 0, 0, 3, 10, b'a', 0, 0, 0, 0
+        ]));
+        assert!(!UdpPacketDetector::is_socks5_udp_packet(&[
+            0, 0, 0, 9, 0, 0, 0, 0, 0, 0
+        ]));
+
+        let mut ipv6 = vec![0, 0, 0, 4];
+        ipv6.extend_from_slice(&[0; 16]);
+        ipv6.extend_from_slice(&[0, 80]);
+        assert!(UdpPacketDetector::is_socks5_udp_packet(&ipv6));
+    }
+
+    #[tokio::test]
+    async fn peekable_stream_detects_and_replays_peeked_bytes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            stream.write_all(b"GET / HTTP/1.1\r\n").await.unwrap();
+            let mut reply = [0; 2];
+            stream.read_exact(&mut reply).await.unwrap();
+            reply
+        });
+
+        let (stream, peer) = listener.accept().await.unwrap();
+        let mut peekable = PeekableStream::new(stream);
+        assert_eq!(peekable.peer_addr().unwrap(), peer);
+        assert_eq!(
+            peekable.detect_protocol().await.unwrap(),
+            DetectedProtocol::Http
+        );
+        let mut request = [0; 16];
+        peekable.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"GET / HTTP/1.1\r\n");
+        peekable.write_all(b"OK").await.unwrap();
+        peekable.flush().await.unwrap();
+        assert_eq!(client.await.unwrap(), *b"OK");
+        let _inner = peekable.into_inner();
+    }
+
+    #[tokio::test]
+    async fn peekable_stream_reports_unknown_on_clean_eof() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move { TcpStream::connect(addr).await.unwrap() });
+        let (stream, _) = listener.accept().await.unwrap();
+        drop(client.await.unwrap());
+        let mut peekable = PeekableStream::new(stream);
+        assert_eq!(
+            peekable.detect_protocol().await.unwrap(),
+            DetectedProtocol::Unknown
+        );
+        peekable.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unified_udp_socket_registers_classifies_sends_and_unwraps() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let receiver_addr = receiver.local_addr().unwrap();
+        let unified = UnifiedUdpSocket::new(receiver);
+        assert_eq!(unified.local_addr().unwrap(), receiver_addr);
+        assert_eq!(unified.inner().local_addr().unwrap(), receiver_addr);
+
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sender_addr = sender.local_addr().unwrap();
+        unified.register_socks5_client(sender_addr).await;
+        unified.register_socks5_client(sender_addr).await;
+        let packet = [0, 0, 0, 1, 127, 0, 0, 1, 0, 80, b'x'];
+        sender.send_to(&packet, receiver_addr).await.unwrap();
+
+        let mut buf = [0; 64];
+        let (n, source, kind) = unified.recv_from_with_type(&mut buf).await.unwrap();
+        assert_eq!(source, sender_addr);
+        assert_eq!(kind, UdpPacketType::Socks5Relay);
+        assert_eq!(&buf[..n], &packet);
+
+        unified.unregister_socks5_client(&sender_addr).await;
+        sender.send_to(&packet, receiver_addr).await.unwrap();
+        let (_, _, kind) = unified.recv_from_with_type(&mut buf).await.unwrap();
+        assert_eq!(kind, UdpPacketType::Unknown);
+
+        unified.send_to(b"pong", sender_addr).await.unwrap();
+        let (n, _) = sender.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"pong");
+        assert_eq!(unified.into_inner().local_addr().unwrap(), receiver_addr);
     }
 }

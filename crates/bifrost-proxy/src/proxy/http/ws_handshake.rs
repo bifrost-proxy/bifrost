@@ -116,6 +116,7 @@ pub fn negotiate_extensions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt;
 
     #[test]
     fn test_negotiate_extensions_filters_by_client_offer() {
@@ -144,6 +145,37 @@ mod tests {
         );
         assert_eq!(
             negotiate_protocol(Some("chat, superchat"), Some("unknown")),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn coverage_90_handshake_reader_reports_closed_and_oversized_headers() {
+        let (mut writer, mut reader) = tokio::io::duplex(8192);
+        writer.shutdown().await.unwrap();
+        let error = read_http1_response_with_leftover(&mut reader, 1024)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("closed connection"));
+
+        let (mut writer, mut reader) = tokio::io::duplex(16 * 1024);
+        let task = tokio::spawn(async move {
+            writer.write_all(&vec![b'x'; 8192]).await.unwrap();
+        });
+        let error = read_http1_response_with_leftover(&mut reader, 1024)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("headers too large"));
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn coverage_90_negotiation_rejects_empty_and_unoffered_values() {
+        assert_eq!(negotiate_protocol(Some("chat"), Some("  ")), None);
+        assert_eq!(negotiate_protocol(None, Some("chat")), None);
+        assert_eq!(negotiate_extensions(Some(" , "), &["x".to_string()]), None);
+        assert_eq!(
+            negotiate_extensions(Some("x-foo"), &[" , x-bar, ".to_string()]),
             None
         );
     }

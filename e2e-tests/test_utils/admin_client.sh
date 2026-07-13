@@ -363,14 +363,14 @@ admin_auth_required() {
         echo "0"
         return 0
     fi
-    "$py" - <<'PY' 2>/dev/null <<<"$body" || echo "0"
-import json,sys
+    "$py" -c '
+import json, sys
 try:
-  data=json.load(sys.stdin)
-  print("1" if bool(data.get("auth_required", False)) else "0")
+    data = json.load(sys.stdin)
+    print("1" if bool(data.get("auth_required", False)) else "0")
 except Exception:
-  print("0")
-PY
+    print("0")
+' 2>/dev/null <<<"$body" || echo "0"
 }
 
 admin_login_if_needed() {
@@ -410,15 +410,14 @@ PY
         "$url" 2>/dev/null || true)
 
     local token
-    token=$("$py" - <<'PY' 2>/dev/null <<<"$resp" || true
-import json,sys
+    token=$("$py" -c '
+import json, sys
 try:
-  data=json.load(sys.stdin)
-  print(data.get("token",""))
+    data = json.load(sys.stdin)
+    print(data.get("token", ""))
 except Exception:
-  print("")
-PY
-)
+    print("")
+' 2>/dev/null <<<"$resp" || true)
     if [[ -z "${token:-}" ]]; then
         admin_log_fail "Failed to login to admin API (token missing)"
         return 1

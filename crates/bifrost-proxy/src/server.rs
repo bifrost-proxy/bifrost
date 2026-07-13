@@ -2140,11 +2140,7 @@ fn rewrite_virtual_host_request(req: Request<Incoming>) -> Request<Incoming> {
     Request::from_parts(parts, body)
 }
 
-fn is_direct_browser_access(
-    req: &Request<Incoming>,
-    config: &ProxyConfig,
-    allow_remote: bool,
-) -> bool {
+fn is_direct_browser_access<B>(req: &Request<B>, config: &ProxyConfig, allow_remote: bool) -> bool {
     let uri = req.uri();
     let path = uri.path();
 
@@ -2199,6 +2195,26 @@ fn convert_admin_response(
 mod tests {
     use super::*;
     use bifrost_tls::{generate_root_ca, init_crypto_provider, DynamicCertGenerator, SniResolver};
+    use hyper::header::{CONTENT_TYPE, LOCATION};
+    use hyper::StatusCode;
+
+    #[derive(Clone)]
+    struct StaticStatusRules;
+
+    impl RulesResolver for StaticStatusRules {
+        fn resolve_with_context(
+            &self,
+            _url: &str,
+            _method: &str,
+            _req_headers: &HashMap<String, String>,
+            _req_cookies: &HashMap<String, String>,
+        ) -> ResolvedRules {
+            ResolvedRules {
+                status_code: Some(204),
+                ..Default::default()
+            }
+        }
+    }
 
     #[test]
     fn test_incomplete_message_is_treated_as_noisy_connection_close() {
@@ -2576,5 +2592,392 @@ mod tests {
 
         assert!(Arc::ptr_eq(&config1, &config2));
         assert_eq!(config1.alpn_protocols, alpn);
+    }
+
+    #[test]
+    fn udp_fallback_detection_covers_io_network_and_unrelated_errors() {
+        assert!(is_udp_relay_fallback_bind_error(&BifrostError::Io(
+            std::io::Error::new(std::io::ErrorKind::AddrInUse, "busy")
+        )));
+        for message in [
+            "Address already in use",
+            "AddrInUse",
+            "bind failed: os error 48",
+            "bind failed: os error 98",
+            "bind failed: os error 10013",
+            "Only one usage of each socket address is normally permitted",
+        ] {
+            assert!(is_udp_relay_fallback_bind_error(&BifrostError::Network(
+                message.to_string()
+            )));
+        }
+        assert!(!is_udp_relay_fallback_bind_error(&BifrostError::Network(
+            "connection refused".to_string()
+        )));
+        assert!(!is_udp_relay_fallback_bind_error(&BifrostError::Parse(
+            "bad config".to_string()
+        )));
+    }
+
+    #[test]
+    fn response_cookie_serialization_escapes_and_emits_all_attributes() {
+        let cookie = ResCookieValue {
+            value: "quoted,semi;slash\\unicode-雪".to_string(),
+            max_age: Some(60),
+            path: Some("/api".to_string()),
+            domain: Some("example.test".to_string()),
+            secure: true,
+            http_only: true,
+            same_site: Some("Strict".to_string()),
+        };
+        let serialized = cookie.to_set_cookie_string("bad name");
+        assert!(serialized.starts_with("bad%20name="));
+        assert!(serialized.contains("%2C"));
+        assert!(serialized.contains("%3B"));
+        assert!(serialized.contains("%5C"));
+        assert!(serialized.contains("Max-Age=60"));
+        assert!(serialized.contains("Expires="));
+        assert!(serialized.contains("Path=/api"));
+        assert!(serialized.contains("Domain=example.test"));
+        assert!(serialized.contains("Secure"));
+        assert!(serialized.contains("HttpOnly"));
+        assert!(serialized.contains("SameSite=Strict"));
+        assert_eq!(cookie.to_string(), cookie.value);
+
+        let simple = ResCookieValue::simple("value".to_string());
+        assert_eq!(simple.to_set_cookie_string("name"), "name=value");
+    }
+
+    #[test]
+    fn direct_browser_access_covers_host_port_path_scheme_remote_and_accept_matrix() {
+        let config = ProxyConfig {
+            host: "127.0.0.1".to_string(),
+            port: 9900,
+            ..ProxyConfig::default()
+        };
+        let make = |uri: &str, host: Option<&str>, accept: Option<&str>| {
+            let mut builder = Request::builder().uri(uri);
+            if let Some(host) = host {
+                builder = builder.header(HOST, host);
+            }
+            if let Some(accept) = accept {
+                builder = builder.header("accept", accept);
+            }
+            builder.body(()).unwrap()
+        };
+        assert!(is_direct_browser_access(
+            &make("/", Some("127.0.0.1:9900"), Some("text/html,*/*")),
+            &config,
+            false
+        ));
+        assert!(is_direct_browser_access(
+            &make("/", Some("remote.test:9900"), Some("text/html")),
+            &config,
+            true
+        ));
+        assert!(!is_direct_browser_access(
+            &make("/other", Some("127.0.0.1:9900"), Some("text/html")),
+            &config,
+            false
+        ));
+        assert!(!is_direct_browser_access(
+            &make(
+                "http://127.0.0.1:9900/",
+                Some("127.0.0.1:9900"),
+                Some("text/html")
+            ),
+            &config,
+            false
+        ));
+        assert!(!is_direct_browser_access(
+            &make("/", None, Some("text/html")),
+            &config,
+            false
+        ));
+        assert!(!is_direct_browser_access(
+            &make("/", Some("remote.test:9900"), Some("text/html")),
+            &config,
+            false
+        ));
+        assert!(!is_direct_browser_access(
+            &make("/", Some("127.0.0.1:8800"), Some("text/html")),
+            &config,
+            false
+        ));
+        assert!(!is_direct_browser_access(
+            &make("/", Some("127.0.0.1:9900"), Some("application/json")),
+            &config,
+            false
+        ));
+    }
+
+    #[test]
+    fn proxy_target_routing_covers_self_loopback_wildcard_and_remote_hosts() {
+        let request = |uri: &str| Request::builder().uri(uri).body(()).unwrap();
+        assert!(!is_proxy_request_targeting_other(
+            &request("/relative"),
+            9900,
+            "127.0.0.1"
+        ));
+        assert!(is_proxy_request_targeting_other(
+            &request("http://example.test:8800/"),
+            9900,
+            "127.0.0.1"
+        ));
+        assert!(!is_proxy_request_targeting_other(
+            &request("http://127.0.0.1:9900/"),
+            9900,
+            "0.0.0.0"
+        ));
+        assert!(!is_proxy_request_targeting_other(
+            &request("http://example.test:9900/"),
+            9900,
+            "0.0.0.0"
+        ));
+        assert!(is_proxy_request_targeting_other(
+            &request("http://example.test:9900/"),
+            9900,
+            "proxy.test"
+        ));
+    }
+
+    #[tokio::test]
+    async fn trust_probe_bypass_and_response_helpers_cover_all_status_paths() {
+        use http_body_util::BodyExt;
+
+        let options = trust_probe_proxy_bypass_required_response(&Method::OPTIONS);
+        assert_eq!(options.status(), StatusCode::NO_CONTENT);
+        assert_eq!(options.headers()["access-control-allow-origin"], "*");
+        assert!(options
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty());
+
+        let get = trust_probe_proxy_bypass_required_response(&Method::GET);
+        assert_eq!(get.status(), StatusCode::CONFLICT);
+        assert_eq!(get.headers()[CONTENT_TYPE], "application/json");
+        let body = get.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("trust_probe_must_bypass_proxy"));
+
+        let redirect = redirect_response("https://example.test/next");
+        assert_eq!(redirect.status(), StatusCode::FOUND);
+        assert_eq!(redirect.headers()[LOCATION], "https://example.test/next");
+
+        let required = proxy_auth_required_response();
+        assert_eq!(required.status(), StatusCode::PROXY_AUTHENTICATION_REQUIRED);
+        assert!(required.headers().contains_key("proxy-authenticate"));
+        let banned = proxy_auth_banned_response();
+        assert_eq!(banned.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(banned.headers()["retry-after"], "300");
+    }
+
+    #[test]
+    fn tls_config_without_resolver_or_generator_returns_explicit_error() {
+        let error = TlsConfig::default()
+            .resolve_server_config("example.test", &[b"h2".to_vec()])
+            .unwrap_err();
+        assert!(error.to_string().contains("cert generator not configured"));
+    }
+
+    #[test]
+    fn proxy_server_builder_accessors_cover_optional_state() {
+        let state = AdminState::new(19900);
+        let access = Arc::new(RwLock::new(ClientAccessControl::new(
+            AccessControlConfig::default(),
+        )));
+        let server = ProxyServer::new(ProxyConfig::default())
+            .with_access_control(access.clone())
+            .with_admin_state(state)
+            .with_tls_config(Arc::new(TlsConfig::default()))
+            .with_rules(Arc::new(NoOpRulesResolver));
+        assert!(server.admin_state().is_some());
+        assert!(Arc::ptr_eq(server.access_control(), &access));
+        assert!(server.push_manager().is_none());
+    }
+
+    #[test]
+    fn coverage_90_debug_fd_limit_and_noop_values_helpers() {
+        let replacement = RegexReplace {
+            pattern: Regex::new("old.+").unwrap(),
+            replacement: "new".to_string(),
+            global: true,
+        };
+        let debug = format!("{replacement:?}");
+        assert!(debug.contains("old.+"));
+        assert!(debug.contains("replacement"));
+        assert!(debug.contains("global: true"));
+
+        #[cfg(unix)]
+        {
+            assert!(is_fd_limit_error(&std::io::Error::from_raw_os_error(
+                libc::EMFILE
+            )));
+            assert!(is_fd_limit_error(&std::io::Error::from_raw_os_error(
+                libc::ENFILE
+            )));
+            assert!(!is_fd_limit_error(&std::io::Error::from_raw_os_error(
+                libc::EINVAL
+            )));
+        }
+        let resolver = NoOpRulesResolver;
+        assert!(RulesResolver::values(&resolver).is_empty());
+    }
+
+    #[tokio::test]
+    async fn coverage_90_real_http_connection_spawns_deferred_process_resolution() {
+        use http_body_util::{BodyExt, Full};
+        use hyper::client::conn::http1 as client_http1;
+        use hyper::server::conn::http1 as server_http1;
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let peer: SocketAddr = "127.0.0.1:54340".parse().unwrap();
+        let local: SocketAddr = "127.0.0.1:19920".parse().unwrap();
+        let access = Arc::new(RwLock::new(ClientAccessControl::new(
+            AccessControlConfig::default(),
+        )));
+        let initial_generation = access.read().await.generation();
+        let service_access = Arc::clone(&access);
+        let service = service_fn(move |request: Request<Incoming>| {
+            let access = Arc::clone(&service_access);
+            async move {
+                handle_request(
+                    request,
+                    peer,
+                    local,
+                    Arc::new(StaticStatusRules),
+                    Arc::new(TlsConfig::default()),
+                    ProxyConfig {
+                        port: 19920,
+                        ..Default::default()
+                    },
+                    Some(Arc::new(AdminState::new(19920))),
+                    None,
+                    AdminSecurityConfig::new(19920),
+                    Arc::new(DnsResolver::new(false)),
+                    access,
+                    initial_generation,
+                    Arc::new(Mutex::new(None)),
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(ProxyAuthRateLimiter::new()),
+                )
+                .await
+            }
+        });
+        tokio::spawn(async move {
+            server_http1::Builder::new()
+                .serve_connection(TokioIo::new(server_io), service)
+                .await
+                .unwrap();
+        });
+        let (mut sender, connection) = client_http1::handshake(TokioIo::new(client_io))
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let response = sender
+            .send_request(
+                Request::builder()
+                    .uri("http://coverage.test/deferred-process")
+                    .header(hyper::header::HOST, "coverage.test")
+                    .body(Full::new(Bytes::new()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty());
+
+        for (uri, host) in [
+            ("/login.html", "127.0.0.1:19920"),
+            ("http://bifrost.local/", "bifrost.local"),
+        ] {
+            let response = sender
+                .send_request(
+                    Request::builder()
+                        .uri(uri)
+                        .header(hyper::header::HOST, host)
+                        .body(Full::new(Bytes::new()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let _ = response.into_body().collect().await.unwrap();
+        }
+
+        let (remote_client_io, remote_server_io) = tokio::io::duplex(64 * 1024);
+        let remote_peer: SocketAddr = "192.0.2.44:54341".parse().unwrap();
+        let remote_access = Arc::new(RwLock::new(ClientAccessControl::new(
+            AccessControlConfig::default(),
+        )));
+        let remote_generation = remote_access.read().await.generation();
+        let service_access = Arc::clone(&remote_access);
+        let remote_service = service_fn(move |request: Request<Incoming>| {
+            let access = Arc::clone(&service_access);
+            async move {
+                handle_request(
+                    request,
+                    remote_peer,
+                    local,
+                    Arc::new(StaticStatusRules),
+                    Arc::new(TlsConfig::default()),
+                    ProxyConfig {
+                        port: 19920,
+                        ..Default::default()
+                    },
+                    Some(Arc::new(AdminState::new(19920))),
+                    None,
+                    AdminSecurityConfig::new(19920),
+                    Arc::new(DnsResolver::new(false)),
+                    access,
+                    remote_generation,
+                    Arc::new(Mutex::new(None)),
+                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(ProxyAuthRateLimiter::new()),
+                )
+                .await
+            }
+        });
+        tokio::spawn(async move {
+            server_http1::Builder::new()
+                .serve_connection(TokioIo::new(remote_server_io), remote_service)
+                .await
+                .unwrap();
+        });
+        let (mut remote_sender, remote_connection) =
+            client_http1::handshake(TokioIo::new(remote_client_io))
+                .await
+                .unwrap();
+        tokio::spawn(async move {
+            let _ = remote_connection.await;
+        });
+        for (uri, host) in [
+            ("/login.html", "127.0.0.1:19920"),
+            ("http://bifrost.local/", "bifrost.local"),
+        ] {
+            let response = remote_sender
+                .send_request(
+                    Request::builder()
+                        .uri(uri)
+                        .header(hyper::header::HOST, host)
+                        .body(Full::new(Bytes::new()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            let _ = response.into_body().collect().await.unwrap();
+        }
     }
 }

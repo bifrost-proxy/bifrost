@@ -2266,11 +2266,17 @@ await adminPage.getByTestId('devtools-console-run').click();
 await adminPage.getByTestId('devtools-console-row-result').filter({ hasText: 'Bifrost DevTools Basic' }).last().waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-back').click();
 await adminPage.getByTestId('devtools-page-list').waitFor({ timeout: 8000 });
+await adminPage.getByRole('button', { name: /Refresh Pages/ }).click();
 await adminPage.getByPlaceholder('Search online pages').fill('av-cdp-control');
 const reloadedPrimaryCard = adminPage.getByTestId('devtools-page-card').filter({ hasText: 'Bifrost DevTools Basic' });
-await reloadedPrimaryCard.waitFor({ timeout: 8000 });
-if (await reloadedPrimaryCard.count() !== 1) {
-  throw new Error(`AV-CDP-22 failed: target reload should leave exactly one WebUI card, got ${await reloadedPrimaryCard.count()}`);
+let reloadedPrimaryCount = 0;
+for (let attempt = 0; attempt < 32; attempt += 1) {
+  reloadedPrimaryCount = await reloadedPrimaryCard.count();
+  if (reloadedPrimaryCount === 1) break;
+  await adminPage.waitForTimeout(250);
+}
+if (reloadedPrimaryCount !== 1) {
+  throw new Error(`AV-CDP-22 failed: target reload should leave exactly one WebUI card, got ${reloadedPrimaryCount}`);
 }
 
 await adminPage.getByTestId('devtools-page-list').waitFor({ timeout: 8000 });

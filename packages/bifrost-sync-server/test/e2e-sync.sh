@@ -155,7 +155,7 @@ wait_for_sync_status() {
     body=$(curl -s "$url" 2>/dev/null) || body=""
     if [ -n "$body" ]; then
       local ok
-      ok=$(printf '%s' "$body" | "$PYTHON_BIN" - <<'PY'
+      ok=$(printf '%s' "$body" | "$PYTHON_BIN" -c '
 import json
 import sys
 
@@ -168,8 +168,7 @@ except Exception:
 reachable = bool(data.get("reachable", False))
 authorized = bool(data.get("authorized", False))
 print("1" if (reachable and authorized) else "0")
-PY
-)
+')
       if [ "$ok" = "1" ]; then
         echo -e "${GREEN}[ready] $name is reachable+authorized${NC}"
         return 0
@@ -191,7 +190,7 @@ wait_for_remote_env_count() {
     body=$(curl -s "$url" -H "x-bifrost-token: $token" 2>/dev/null) || body=""
     if [ -n "$body" ]; then
       local count
-      count=$(printf '%s' "$body" | "$PYTHON_BIN" - <<'PY'
+      count=$(printf '%s' "$body" | "$PYTHON_BIN" -c '
 import json
 import sys
 
@@ -201,8 +200,7 @@ try:
   print(len(lst))
 except Exception:
   print(-1)
-PY
-)
+')
       if [ "$count" = "$expected" ]; then
         return 0
       fi

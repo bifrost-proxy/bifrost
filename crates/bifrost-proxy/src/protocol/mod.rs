@@ -188,6 +188,32 @@ impl Default for ProtocolRegistry {
 mod tests {
     use super::*;
 
+    struct TestHandler {
+        name: &'static str,
+        result: DetectionResult,
+        priority: Priority,
+    }
+
+    impl ProtocolHandler for TestHandler {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn detect(&self, _data: &[u8]) -> DetectionResult {
+            self.result.clone()
+        }
+        fn handle(
+            &self,
+            _stream: TcpStream,
+            _ctx: ProxyContext,
+            _initial_data: Option<Vec<u8>>,
+        ) -> BoxFuture<'_, Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn priority(&self) -> Priority {
+            self.priority
+        }
+    }
+
     #[test]
     fn test_priority_ordering() {
         assert!(Priority::HIGHEST < Priority::HIGH);
@@ -244,5 +270,51 @@ mod tests {
     fn test_protocol_registry() {
         let registry = ProtocolRegistry::new();
         assert!(registry.handlers().is_empty());
+    }
+
+    #[test]
+    fn coverage_90_registry_selects_best_match_and_sorts_handlers() {
+        let mut registry = ProtocolRegistry::default();
+        registry.register(Arc::new(TestHandler {
+            name: "low",
+            result: DetectionResult::Match(Priority::LOW),
+            priority: Priority::LOW,
+        }));
+        registry.register(Arc::new(TestHandler {
+            name: "high",
+            result: DetectionResult::Match(Priority::HIGH),
+            priority: Priority::HIGH,
+        }));
+        registry.register(Arc::new(TestHandler {
+            name: "more",
+            result: DetectionResult::NeedMoreData(8),
+            priority: Priority::HIGHEST,
+        }));
+        registry.register(Arc::new(TestHandler {
+            name: "none",
+            result: DetectionResult::NotMatch,
+            priority: Priority::LOWEST,
+        }));
+        assert_eq!(registry.handlers()[0].name(), "none");
+        let (handler, priority) = registry.detect(b"anything").unwrap();
+        assert_eq!(handler.name(), "high");
+        assert_eq!(priority, Priority::HIGH);
+
+        let rules: Arc<dyn RulesResolver> = Arc::new(crate::server::NoOpRulesResolver);
+        let context = ProxyContext::new(rules).with_tls_interception(true);
+        assert!(context.enable_tls_interception);
+        assert_eq!(context.detected_protocol, None);
+    }
+
+    #[test]
+    fn coverage_90_content_types_cover_xml_and_octet_stream() {
+        assert_eq!(
+            ContentType::from_header("application/xml"),
+            ContentType::Xml
+        );
+        assert_eq!(
+            ContentType::from_header("application/octet-stream"),
+            ContentType::OctetStream
+        );
     }
 }

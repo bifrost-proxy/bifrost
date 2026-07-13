@@ -323,6 +323,58 @@ impl ServerCertVerifier for NoVerifier {
 mod tests {
     use super::*;
 
+    #[test]
+    fn coverage_90_no_verifier_and_client_construction() {
+        use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+
+        let verifier = NoVerifier;
+        let cert = CertificateDer::from(vec![0u8]);
+        let server_name = ServerName::try_from("localhost").unwrap();
+        assert!(verifier
+            .verify_server_cert(
+                &cert,
+                &[],
+                &server_name,
+                &[],
+                UnixTime::since_unix_epoch(Duration::ZERO)
+            )
+            .is_ok());
+        assert!(verifier
+            .supported_verify_schemes()
+            .contains(&SignatureScheme::ED25519));
+        // Some CI hosts disable IPv6, in which case QUIC endpoint creation is
+        // expected to fail. Both TLS configuration paths must still be safe.
+        let _ = Http3Client::new();
+        let _ = Http3Client::new_with_options(true);
+    }
+
+    #[tokio::test]
+    async fn coverage_90_resolution_and_connection_failures_are_reported() {
+        let resolver = DnsResolver::default();
+        assert_eq!(
+            Http3Client::resolve_target_addr("127.0.0.7", 443, &resolver, &[])
+                .await
+                .unwrap(),
+            "127.0.0.7:443".parse().unwrap()
+        );
+        assert!(
+            Http3Client::resolve_target_addr("invalid host name", 443, &resolver, &[])
+                .await
+                .is_err()
+        );
+
+        let client = Http3Client::new().unwrap();
+        let request = Request::builder()
+            .uri("https://invalid/")
+            .body(Bytes::new())
+            .unwrap();
+        assert!(client
+            .request("invalid host name", 443, request)
+            .await
+            .is_err());
+        assert!(!Http3Client::check_h3_support("127.0.0.1", 9).await.unwrap());
+    }
+
     #[tokio::test]
     #[ignore]
     async fn test_http3_client_xiaohongshu() {

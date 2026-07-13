@@ -1,0 +1,81 @@
+name: Layered E2E Coverage
+
+on:
+  schedule:
+    - cron: "30 18 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: layered-e2e-coverage-main
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_HTTP_TIMEOUT: "120"
+  CARGO_NET_RETRY: "10"
+  RUST_BACKTRACE: 1
+  BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT: "1"
+  BIFROST_DISABLE_TRAY: "1"
+  BIFROST_E2E_PROTECTED_PORTS: "9900"
+
+jobs:
+  layered-coverage:
+    name: Unit + Integration + Full E2E Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: web
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ true }}
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Validate coverage and E2E contracts
+        run: |
+          python3 -m unittest discover -s scripts/ci/tests -p 'test_*.py' -v
+          python3 scripts/ci/check-e2e-capabilities.py
+          bash e2e-tests/tests/test_coverage_pipeline_contract.sh
+      - name: Collect truthful layered coverage
+        run: >-
+          bash scripts/ci/coverage-all.sh --with-e2e
+          --json --lcov --gate --gaps --output-dir target/coverage-layered
+      - name: Layered coverage summary
+        if: always()
+        run: |
+          for report in unit-integration.json e2e.json coverage.json; do
+            if [[ -f "target/coverage-layered/$report" ]]; then
+              echo "## $report" >> "$GITHUB_STEP_SUMMARY"
+              python3 scripts/ci/coverage-gate.py \
+                "target/coverage-layered/$report" --markdown --no-gate \
+                >> "$GITHUB_STEP_SUMMARY" || true
+            fi
+          done
+      - name: Upload layered coverage evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-layered-unit-integration-full-e2e
+          path: |
+            target/coverage-layered/unit-integration.json
+            target/coverage-layered/e2e.json
+            target/coverage-layered/coverage.json
+            target/coverage-layered/lcov.info
+            target/coverage-layered/production-coverage.json
+            target/coverage-layered/.bifrost-data/
+            .e2e-reports/
+          retention-days: 14
+          if-no-files-found: ignore
+          include-hidden-files: true

@@ -728,4 +728,138 @@ mod tests {
         assert!(r.success);
         assert_eq!(r.script_type, ScriptType::Decode);
     }
+
+    #[tokio::test]
+    async fn coverage_90_custom_decode_scripts_cover_success_failure_and_missing_paths() {
+        let admin = make_admin_state_with_script_manager();
+        {
+            let manager = admin.script_manager.as_ref().unwrap().read().await;
+            manager.init().await.unwrap();
+            manager
+                .engine()
+                .save_script(
+                    ScriptType::Decode,
+                    "decode-success",
+                    r#"ctx.output = { code: "0", data: "decoded-success", msg: "" };"#,
+                )
+                .await
+                .unwrap();
+            manager
+                .engine()
+                .save_script(
+                    ScriptType::Decode,
+                    "decode-failure",
+                    r#"ctx.output = { code: "1", data: "ignored", msg: "expected failure" };"#,
+                )
+                .await
+                .unwrap();
+        }
+        let (req, res) = make_script_io();
+        let scripts = vec![
+            " ".to_string(),
+            "decode-success".to_string(),
+            "decode-failure".to_string(),
+            "not-reached".to_string(),
+        ];
+        let result = apply_decode_scripts_for_storage(
+            &Some(admin.clone()),
+            &scripts,
+            "response",
+            &make_request_context(),
+            &ResolvedRules::default(),
+            &req,
+            &res,
+            &HashMap::new(),
+            Bytes::from_static(b"original"),
+        )
+        .await;
+        assert_eq!(result.output, Bytes::from_static(b"decoded-success"));
+        assert_eq!(result.results.len(), 2);
+        assert!(result.results[0].success);
+        assert!(!result.results[1].success);
+
+        let missing = apply_decode_scripts_for_storage(
+            &Some(admin),
+            &["missing-script".to_string()],
+            "request",
+            &make_request_context(),
+            &ResolvedRules::default(),
+            &req,
+            &res,
+            &HashMap::new(),
+            Bytes::from_static(b"original"),
+        )
+        .await;
+        assert_eq!(missing.output, Bytes::from_static(b"original"));
+        assert_eq!(missing.results.len(), 1);
+        assert!(!missing.results[0].success);
+        assert!(missing.results[0].decode_output.is_none());
+    }
+
+    #[tokio::test]
+    async fn coverage_90_bp_parser_scripts_cover_success_failure_and_missing_paths() {
+        let admin = make_admin_state_with_script_manager();
+        {
+            let manager = admin.script_manager.as_ref().unwrap().read().await;
+            manager.init().await.unwrap();
+            manager
+                .engine()
+                .save_script(
+                    ScriptType::Parser,
+                    "parser-success",
+                    r#"ctx.output = { code: "0", data: "parser-output", msg: "" };"#,
+                )
+                .await
+                .unwrap();
+            manager
+                .engine()
+                .save_script(
+                    ScriptType::Parser,
+                    "parser-failure",
+                    r#"ctx.output = { code: "2", data: "ignored", msg: "parser rejected" };"#,
+                )
+                .await
+                .unwrap();
+        }
+        let (req, res) = make_script_io();
+        let rules = ResolvedRules {
+            bp_scripts: vec![" ".into(), "parser-success".into(), "parser-failure".into()],
+            ..Default::default()
+        };
+        let result = apply_decode_scripts_for_storage(
+            &Some(admin.clone()),
+            &["bp".to_string()],
+            "request",
+            &make_request_context(),
+            &rules,
+            &req,
+            &res,
+            &HashMap::new(),
+            Bytes::from_static(b"original"),
+        )
+        .await;
+        assert_eq!(result.output, Bytes::from_static(b"parser-output"));
+        assert_eq!(result.results.len(), 2);
+        assert!(result.results[0].success);
+        assert!(!result.results[1].success);
+
+        let missing_rules = ResolvedRules {
+            bp_scripts: vec!["missing-parser".into()],
+            ..Default::default()
+        };
+        let missing = apply_decode_scripts_for_storage(
+            &Some(admin),
+            &["bp".to_string()],
+            "response",
+            &make_request_context(),
+            &missing_rules,
+            &req,
+            &res,
+            &HashMap::new(),
+            Bytes::from_static(b"original"),
+        )
+        .await;
+        assert_eq!(missing.results.len(), 1);
+        assert!(!missing.results[0].success);
+    }
 }

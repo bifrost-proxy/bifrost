@@ -29,7 +29,7 @@ source "$SCRIPT_DIR/../test_utils/process.sh"
 ADMIN_BASE_URL="http://${ADMIN_HOST}:${ADMIN_PORT}${ADMIN_PATH_PREFIX}"
 export ADMIN_BASE_URL
 
-BIFROST_BIN="$ROOT_DIR/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi

@@ -127,6 +127,11 @@ impl<R: AsyncRead + Unpin> Stream for WebSocketReader<R> {
                     *this.fragment_rsv3 = frame.rsv3;
                     this.fragment_buffer.clear();
                     this.fragment_buffer.extend_from_slice(&frame.payload);
+                    // The read buffer may already contain continuation or
+                    // control frames. Parse those before polling the socket
+                    // again; an EOF immediately after a complete wire buffer
+                    // must not discard the buffered fragments.
+                    continue;
                 } else {
                     return Poll::Ready(Some(Ok(frame)));
                 }
@@ -204,4 +209,145 @@ fn generate_mask() -> [u8; 4] {
         .unwrap_or_default()
         .as_nanos() as u32;
     seed.to_be_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn encoded(mut frame: WebSocketFrame) -> Vec<u8> {
+        frame.mask = None;
+        frame.encode().to_vec()
+    }
+
+    #[tokio::test]
+    async fn reader_reassembles_fragments_preserves_rsv_and_emits_control_frames() {
+        let mut first = WebSocketFrame::text("hel");
+        first.fin = false;
+        first.rsv1 = true;
+        first.rsv2 = true;
+        let ping = WebSocketFrame::ping(b"p");
+        let continuation = WebSocketFrame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Continuation,
+            mask: None,
+            payload: Bytes::from_static(b"lo"),
+        };
+        let mut wire = encoded(first);
+        wire.extend(encoded(ping));
+        wire.extend(encoded(continuation));
+        let mut reader = WebSocketReader::with_initial_buffer(
+            tokio::io::empty(),
+            BytesMut::from(wire.as_slice()),
+        );
+        let control = reader.next().await.unwrap().unwrap();
+        assert_eq!(control.opcode, Opcode::Ping);
+        let complete = reader.next().await.unwrap().unwrap();
+        assert_eq!(complete.opcode, Opcode::Text);
+        assert_eq!(complete.payload, Bytes::from_static(b"hello"));
+        assert!(complete.rsv1);
+        assert!(complete.rsv2);
+        assert!(reader.next().await.is_none());
+        let _ = reader.into_inner();
+    }
+
+    #[tokio::test]
+    async fn reader_drops_oversized_initial_and_continuation_fragments_then_recovers() {
+        let mut oversized = WebSocketFrame::text("toolong");
+        oversized.fin = false;
+        let valid = WebSocketFrame::text("ok");
+        let mut wire = encoded(oversized);
+        wire.extend(encoded(valid.clone()));
+        let mut reader = WebSocketReader::with_max_fragment_size(&wire[..], 3);
+        assert_eq!(reader.next().await.unwrap().unwrap().payload, valid.payload);
+
+        let mut first = WebSocketFrame::text("ab");
+        first.fin = false;
+        let continuation = WebSocketFrame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Continuation,
+            mask: None,
+            payload: Bytes::from_static(b"cd"),
+        };
+        let fallback = WebSocketFrame::binary(b"z");
+        let mut wire = encoded(first);
+        wire.extend(encoded(continuation));
+        wire.extend(encoded(fallback.clone()));
+        let mut reader = WebSocketReader::with_max_fragment_size(&wire[..], 3);
+        let frame = reader.next().await.unwrap().unwrap();
+        assert_eq!(frame.payload, fallback.payload);
+    }
+
+    #[tokio::test]
+    async fn reader_handles_split_reads_and_propagates_io_errors() {
+        let wire = encoded(WebSocketFrame::text("split"));
+        let (mut tx, rx) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            for byte in wire {
+                tx.write_all(&[byte]).await.unwrap();
+                tokio::task::yield_now().await;
+            }
+        });
+        let mut reader = WebSocketReader::new(rx);
+        assert_eq!(
+            reader.next().await.unwrap().unwrap().payload,
+            Bytes::from_static(b"split")
+        );
+
+        struct ErrorReader;
+        impl AsyncRead for ErrorReader {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                _buf: &mut ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                Poll::Ready(Err(std::io::Error::other("covered")))
+            }
+        }
+        let mut reader = WebSocketReader::new(ErrorReader);
+        assert!(reader.next().await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn writer_covers_all_frame_helpers_and_client_masking() {
+        let (writer_io, mut reader_io) = tokio::io::duplex(4096);
+        let task = tokio::spawn(async move {
+            let mut writer = WebSocketWriter::new(writer_io, true);
+            writer.write_text("text").await.unwrap();
+            writer.write_binary(b"bin").await.unwrap();
+            writer.write_ping(b"ping").await.unwrap();
+            writer.write_pong(b"pong").await.unwrap();
+            writer.write_close(Some(1000), "done").await.unwrap();
+            let _ = writer.into_inner();
+        });
+        let mut bytes = Vec::new();
+        reader_io.read_to_end(&mut bytes).await.unwrap();
+        task.await.unwrap();
+        let mut reader = WebSocketReader::with_initial_buffer(
+            tokio::io::empty(),
+            BytesMut::from(bytes.as_slice()),
+        );
+        let mut opcodes = Vec::new();
+        while let Some(frame) = reader.next().await {
+            opcodes.push(frame.unwrap().opcode);
+        }
+        assert_eq!(
+            opcodes,
+            vec![
+                Opcode::Text,
+                Opcode::Binary,
+                Opcode::Ping,
+                Opcode::Pong,
+                Opcode::Close
+            ]
+        );
+    }
 }

@@ -26,6 +26,9 @@
 default = 90.0
 # Aggregate (workspace-wide) line coverage floor.
 workspace_min = 65.0
+# New or modified production Rust must meet a stricter PR-local threshold so
+# large crates cannot absorb untested additions while staying above a low floor.
+changed_lines_min = 95.0
 # When true, the gate fails if measured coverage exceeds a crate floor by more
 # than `ratchet_slack` without the floor being updated (keeps floors honest).
 # Disabled by default to avoid noisy failures.
@@ -72,8 +75,12 @@ min = 89.0
 macos_min = 87.0
 
 [crates.bifrost-proxy]
-# Ratcheted to 64% after wave 3-5 proxy tests added.
-min = 64.0
+# Exact production Rust coverage, excluding only items compiled under exact
+# #[cfg(test)]. Enforced from the merged unit + integration + full E2E LCOV by
+# coverage-production.py; the raw llvm JSON contains test helpers and is not
+# the declared denominator for this crate. Verified baseline: 90.01%.
+min = 90.0
+metric = "production"
 
 [crates.bifrost-admin]
 # Ratcheted to 56% after wave 3-5 admin tests added.
@@ -133,5 +140,7 @@ min = 91.0
 # tempdir-backed store round-trips, and full authoring state-machine paths.
 min = 90.0
 [crates.bifrost-e2e]
-# Linux CI baseline is 50.68%; ratchet upward as e2e harness coverage grows.
-min = 50.0
+# Test harness, not production code. Its quality is enforced by executable
+# Rules/Shell/Runner contracts; self-coverage is excluded from crate and
+# workspace percentage gates.
+metric = "exempt"

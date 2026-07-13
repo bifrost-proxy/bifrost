@@ -242,6 +242,7 @@ test_admin_api_upgrade_restarts_daemon_with_new_binary() {
     BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES=1 \
     BIFROST_UPGRADE_TEST_LATEST_VERSION="$TEST_VERSION" \
     BIFROST_UPGRADE_TEST_ARCHIVE="$archive_path" \
+    BIFROST_APP_INSTALL_DIR="$TEST_ROOT/no-desktop-app" \
     "$INSTALL_BIN" start -p "$PROXY_PORT" --host 127.0.0.1 --daemon \
         --access-mode allow_all --skip-cert-check --no-system-proxy \
         --no-intercept "${tray_args[@]}" -y >/tmp/bifrost-admin-upgrade-start.log 2>&1

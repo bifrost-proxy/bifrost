@@ -235,8 +235,7 @@ env:
   - `e2e-tests/tests/test_socks5_tls_rules.sh`
   - `e2e-tests/rules/socks5_udp/dns_redirect_domain.txt`
   - `e2e-tests/rules/socks5_udp/dns_redirect_ip.txt`
-  - `e2e-tests/tests/quic_socks5_client/main.go`
-  - `e2e-tests/tests/quic_socks5_test.py`
+  - `crates/bifrost-proxy/tests/upstream_http3_e2e.rs`
 
 ### 真实场景测试
 

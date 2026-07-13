@@ -73,10 +73,13 @@ def load_thresholds(path: str) -> dict:
             elif "=" in line and section is not None:
                 key, _, val = line.partition("=")
                 key, val = key.strip(), val.strip()
-                try:
-                    parsed: object = float(val)
-                except ValueError:
-                    parsed = val.strip('"').lower() in ("true", "1", "yes")
+                if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                    parsed: object = val[1:-1]
+                else:
+                    try:
+                        parsed = float(val)
+                    except ValueError:
+                        parsed = val.lower() in ("true", "1", "yes")
                 if section[0] == "settings":
                     data["settings"][key] = parsed
                 else:
@@ -167,6 +170,18 @@ def crate_floor(crate_cfg: dict, crate: str, default: float) -> float:
     return float(cfg.get(key, cfg.get("min", default)))
 
 
+def crate_metric(crate_cfg: dict, crate: str) -> str:
+    return str(crate_cfg.get(crate, {}).get("metric", "raw"))
+
+
+def uses_production_metric(crate_cfg: dict, crate: str) -> bool:
+    return crate_metric(crate_cfg, crate) == "production"
+
+
+def is_exempt_metric(crate_cfg: dict, crate: str) -> bool:
+    return crate_metric(crate_cfg, crate) == "exempt"
+
+
 def run_gate(crate_tot, ws, thresholds, skip_workspace=False) -> tuple[bool, list[str]]:
     settings = thresholds.get("settings", {})
     default = float(settings.get("default", 90.0))
@@ -189,6 +204,11 @@ def run_gate(crate_tot, ws, thresholds, skip_workspace=False) -> tuple[bool, lis
 
     # Per-crate floors.
     for crate, tot in sorted(crate_tot.items()):
+        if uses_production_metric(crate_cfg, crate) or is_exempt_metric(crate_cfg, crate):
+            # Exact production coverage is evaluated from LCOV after unit and
+            # E2E profiles are merged. The raw llvm JSON includes cfg(test)
+            # helpers and is therefore not the declared metric for this crate.
+            continue
         floor = crate_floor(crate_cfg, crate, default)
         p = pct(tot["covered"], tot["count"])
         if p + 1e-9 < floor:
@@ -207,22 +227,32 @@ def print_crate_table(crate_tot, thresholds, markdown=False):
 
     rows = []
     for crate, tot in sorted(crate_tot.items()):
-        floor = crate_floor(crate_cfg, crate, default)
         p = pct(tot["covered"], tot["count"])
-        status = "PASS" if p + 1e-9 >= floor else "FAIL"
+        if is_exempt_metric(crate_cfg, crate):
+            floor = None
+            status = "EXEMPT"
+        else:
+            floor = crate_floor(crate_cfg, crate, default)
+            status = (
+                "PRODUCTION-LCOV"
+                if uses_production_metric(crate_cfg, crate)
+                else ("PASS" if p + 1e-9 >= floor else "FAIL")
+            )
         rows.append((crate, p, floor, tot["covered"], tot["count"], status))
 
     if markdown:
         print("| Crate | Coverage | Floor | Lines | Status |")
         print("|---|---:|---:|---:|---|")
         for crate, p, floor, cov, cnt, status in rows:
-            emoji = "✅" if status == "PASS" else "❌"
-            print(f"| `{crate}` | {p:.2f}% | {floor:.0f}% | {cov}/{cnt} | {emoji} |")
+            emoji = "✅" if status in ("PASS", "PRODUCTION-LCOV") else ("➖" if status == "EXEMPT" else "❌")
+            floor_text = "—" if floor is None else f"{floor:.0f}%"
+            print(f"| `{crate}` | {p:.2f}% | {floor_text} | {cov}/{cnt} | {emoji} {status} |")
     else:
         print(f"{'Crate':24s}{'Cover':>9s}{'Floor':>8s}{'Lines':>14s}  Status")
         print("-" * 70)
         for crate, p, floor, cov, cnt, status in rows:
-            print(f"{crate:24s}{p:8.2f}%{floor:7.0f}%{cov:>7d}/{cnt:<6d}  {status}")
+            floor_text = "—" if floor is None else f"{floor:.0f}%"
+            print(f"{crate:24s}{p:8.2f}%{floor_text:>8s}{cov:>7d}/{cnt:<6d}  {status}")
 
 
 def print_gaps(files_out, thresholds, top):
@@ -265,6 +295,11 @@ def main(argv=None) -> int:
         action="store_true",
         help="Skip the workspace-aggregate floor (for -p single-crate runs)",
     )
+    ap.add_argument(
+        "--crate",
+        dest="crate_filter",
+        help="Only report and gate the named crate (used by coverage-all.sh -p)",
+    )
     ap.add_argument("--markdown", action="store_true")
     args = ap.parse_args(argv)
 
@@ -282,18 +317,36 @@ def main(argv=None) -> int:
         _eprint(f"error: failed to parse coverage JSON: {exc}")
         return 2
 
-    ws_pct = pct(ws["covered"], ws["count"])
-    print(f"Workspace line coverage: {ws_pct:.2f}% ({ws['covered']}/{ws['count']})")
+    if args.crate_filter:
+        files_out = [f for f in files_out if f["crate"] == args.crate_filter]
+        if args.crate_filter not in crate_tot:
+            _eprint(f"error: crate not found in coverage JSON: {args.crate_filter}")
+            return 2
+        crate_tot = {args.crate_filter: crate_tot[args.crate_filter]}
+        ws = dict(crate_tot[args.crate_filter])
+
+    crate_cfg = thresholds.get("crates", {})
+    gated_ws = {"covered": 0, "count": 0}
+    for crate, totals in crate_tot.items():
+        if not is_exempt_metric(crate_cfg, crate):
+            gated_ws["covered"] += totals["covered"]
+            gated_ws["count"] += totals["count"]
+    ws_pct = pct(gated_ws["covered"], gated_ws["count"])
+    print(
+        f"Workspace gate line coverage: {ws_pct:.2f}% "
+        f"({gated_ws['covered']}/{gated_ws['count']}; exempt metrics excluded)"
+    )
     print()
     print_crate_table(crate_tot, thresholds, markdown=args.markdown)
 
     if args.gaps:
-        print_gaps(files_out, thresholds, args.top)
+        gated_files = [f for f in files_out if not is_exempt_metric(crate_cfg, f["crate"])]
+        print_gaps(gated_files, thresholds, args.top)
 
     if args.no_gate:
         return 0
 
-    ok, failures = run_gate(crate_tot, ws, thresholds, skip_workspace=args.single_crate)
+    ok, failures = run_gate(crate_tot, gated_ws, thresholds, skip_workspace=args.single_crate)
     print()
     if ok:
         print("COVERAGE GATE: PASS")
