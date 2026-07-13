@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
+use url::Url;
 
 use super::external_cli::{
     ExternalCliAdapterConfig, ExternalCliAgentSettings, ExternalCliProgressEvent,
@@ -52,9 +53,10 @@ use send::send_with_browser;
 use send::{
     composer_text_injection_mode, extract_conversation_id_from_url, handoff_heartbeat_error,
     handoff_page_heartbeat_error, native_clipboard_paste_followup_instruction,
-    page_state_is_auth_flow_page, parse_send_sse, paste_modifier, send_button_ready_max_wait,
-    send_button_ready_retry_max_wait, should_retry_as_new_conversation, target_page_error,
-    target_page_is_terminal_mismatch, target_page_matches, ComposerTextInjectionMode,
+    new_conversation_url, page_state_is_auth_flow_page, parse_send_sse, paste_modifier,
+    same_project_page, send_button_ready_max_wait, send_button_ready_retry_max_wait,
+    should_retry_as_new_conversation, target_page_error, target_page_is_terminal_mismatch,
+    target_page_matches, ComposerTextInjectionMode,
 };
 use storage::{read_auth_state, write_auth_state, write_redacted_json};
 
@@ -504,6 +506,9 @@ struct ChatGptConfig {
     /// Supported values: `auto` (leave unchanged) and `pro`.
     #[serde(default = "default_chatgpt_model")]
     model: String,
+    /// Optional ChatGPT Project home used only when creating a new conversation.
+    #[serde(default)]
+    project_url: Option<String>,
     /// Session consistency mode when hitting 429 rate limits.
     ///
     /// - `"strong"` (default): wait and retry the **same** conversation on the
@@ -531,6 +536,7 @@ impl Default for ChatGptConfig {
             timeout_secs: default_timeout_secs(),
             interface_mode: default_interface_mode(),
             model: default_chatgpt_model(),
+            project_url: None,
             session_consistency: default_session_consistency(),
             rate_limit_retry_secs: default_rate_limit_retry_secs(),
             rate_limit_max_retries: default_rate_limit_max_retries(),
@@ -544,6 +550,55 @@ fn default_interface_mode() -> String {
 
 fn default_chatgpt_model() -> String {
     "auto".to_string()
+}
+
+pub(crate) fn normalize_project_url(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let parsed = Url::parse(value)
+        .map_err(|error| format!("must be an absolute ChatGPT Project URL: {error}"))?;
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("chatgpt.com")
+        || parsed.port_or_known_default() != Some(443)
+    {
+        return Err("must use the https://chatgpt.com origin".to_string());
+    }
+    let Some(project_segment) = chatgpt_project_segment(&parsed) else {
+        return Err("path must match /g/g-p-<project-id>/project".to_string());
+    };
+    Ok(Some(format!(
+        "https://chatgpt.com/g/{}/project",
+        project_segment
+    )))
+}
+
+fn chatgpt_project_segment(url: &Url) -> Option<&str> {
+    let path = url.path().trim_end_matches('/');
+    let mut segments = path.strip_prefix('/')?.split('/');
+    let root = segments.next()?;
+    let project = segments.next()?;
+    let leaf = segments.next()?;
+    if root == "g"
+        && project.starts_with("g-p-")
+        && project.len() > "g-p-".len()
+        && leaf == "project"
+        && segments.next().is_none()
+    {
+        Some(project)
+    } else {
+        None
+    }
+}
+
+pub(in crate::im_gateway::chatgpt_web) fn chatgpt_project_identity(url: &Url) -> Option<String> {
+    let segment = chatgpt_project_segment(url)?;
+    let raw = segment.strip_prefix("g-p-")?;
+    let stable_id = raw.get(..32).filter(|candidate| {
+        candidate.chars().all(|ch| ch.is_ascii_hexdigit())
+            && (raw.len() == 32 || raw.as_bytes().get(32) == Some(&b'-'))
+    });
+    Some(stable_id.unwrap_or(raw).to_ascii_lowercase())
 }
 
 impl ChatGptConfig {
@@ -786,7 +841,20 @@ async fn wait_for_stop_marker(path: PathBuf) {
 fn mock_run_adapter_for_e2e(request: &ExternalCliRunRequest, prompt: &str) -> ChatGptWebRunOutput {
     let conversation_id = conversation_id_hint_from_request(request)
         .unwrap_or_else(|| format!("mock-conversation-{}", uuid::Uuid::new_v4()));
-    let response = format!("chatgpt_web_e2e_mock: {}", prompt.trim());
+    let project_url = request
+        .adapter_config
+        .extra
+        .get("chatgpt")
+        .and_then(Value::as_object)
+        .and_then(|chatgpt| chatgpt.get("projectUrl"))
+        .and_then(Value::as_str);
+    let response = match project_url {
+        Some(project_url) => format!(
+            "chatgpt_web_e2e_mock: {}\nCHATGPT_PROJECT_URL: {project_url}",
+            prompt.trim()
+        ),
+        None => format!("chatgpt_web_e2e_mock: {}", prompt.trim()),
+    };
     let mut metadata = BTreeMap::new();
     metadata.insert("conversationId".to_string(), conversation_id.clone());
     ChatGptWebRunOutput {
@@ -2672,6 +2740,7 @@ fn runtime_config(config: &ExternalCliAdapterConfig) -> Result<RuntimeConfig, St
     if let Some(timeout_secs) = config.timeout_secs {
         parsed.chatgpt.timeout_secs = timeout_secs;
     }
+    parsed.chatgpt.project_url = normalize_project_url(parsed.chatgpt.project_url.as_deref())?;
     let base = bifrost_agent::config::agent_home_dir()
         .join("im_gateway")
         .join("chatgpt_web");

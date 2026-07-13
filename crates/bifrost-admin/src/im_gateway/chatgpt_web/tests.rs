@@ -12,6 +12,7 @@ fn chatgpt_web_surface_preferences_default_to_auto() {
     let config = ChatGptConfig::default();
     assert_eq!(config.interface_mode, "auto");
     assert_eq!(config.model, "auto");
+    assert!(config.project_url.is_none());
 }
 
 #[test]
@@ -29,8 +30,88 @@ fn chatgpt_web_surface_preferences_parse_chat_and_pro() {
 }
 
 #[test]
+fn chatgpt_web_project_url_normalizes_to_canonical_project_home() {
+    assert_eq!(
+        normalize_project_url(Some(
+            " https://chatgpt.com/g/g-p-daily-research/project/?utm_source=test#new "
+        ))
+        .unwrap()
+        .as_deref(),
+        Some("https://chatgpt.com/g/g-p-daily-research/project")
+    );
+    assert_eq!(normalize_project_url(Some("  ")).unwrap(), None);
+}
+
+#[test]
+fn chatgpt_web_project_url_rejects_non_project_or_untrusted_origins() {
+    for value in [
+        "http://chatgpt.com/g/g-p-daily-research/project",
+        "https://example.com/g/g-p-daily-research/project",
+        "https://chatgpt.com/c/conversation-id",
+        "https://chatgpt.com/g/not-a-project/project",
+    ] {
+        assert!(normalize_project_url(Some(value)).is_err(), "{value}");
+    }
+}
+
+#[test]
+fn chatgpt_web_new_conversation_url_uses_project_without_changing_homepage_fallback() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = RuntimeConfig {
+        browser: BrowserConfig::default(),
+        chatgpt: ChatGptConfig::default(),
+        profile_dir: temp.path().join("profile"),
+        state_path: temp.path().join("auth_state.json"),
+        sessions_path: temp.path().join("sessions.json"),
+        attachments_dir: temp.path().join("attachments"),
+    };
+
+    assert!(new_conversation_url(&config).starts_with("https://chatgpt.com/?bifrost_new_chat="));
+
+    config.chatgpt.project_url =
+        Some("https://chatgpt.com/g/g-p-daily-research/project".to_string());
+    assert!(new_conversation_url(&config)
+        .starts_with("https://chatgpt.com/g/g-p-daily-research/project?bifrost_new_chat="));
+}
+
+#[test]
+fn chatgpt_web_project_page_match_ignores_query_and_trailing_slash_only() {
+    let expected = "https://chatgpt.com/g/g-p-daily-research/project";
+    assert!(same_project_page(
+        "https://chatgpt.com/g/g-p-daily-research/project/?bifrost_new_chat=123",
+        expected
+    ));
+    assert!(!same_project_page("https://chatgpt.com/", expected));
+    assert!(!same_project_page(
+        "https://chatgpt.com/g/g-p-other/project",
+        expected
+    ));
+
+    let stable_project = "https://chatgpt.com/g/g-p-6a548942f5048191b11b08f623e9be34/project";
+    assert!(same_project_page(
+        "https://chatgpt.com/g/g-p-6a548942f5048191b11b08f623e9be34-ri-bao-yan-jiu/project?bifrost_new_chat=123",
+        stable_project
+    ));
+}
+
+#[test]
+fn chatgpt_web_runtime_config_rejects_invalid_project_url() {
+    let mut adapter = ExternalCliAdapterConfig::default();
+    adapter.extra.insert(
+        "chatgpt".to_string(),
+        serde_json::json!({"projectUrl": "https://example.com/project"}),
+    );
+
+    let error = runtime_config(&adapter).unwrap_err();
+    assert!(error.contains("https://chatgpt.com origin"), "{error}");
+}
+
+#[test]
 fn chatgpt_web_send_enforces_surface_before_composer_injection() {
     let source = include_str!("send.rs");
+    let ensure_project = source
+        .find("ensure_new_conversation_project(cdp, config).await?")
+        .expect("new ChatGPT conversations must enforce the configured Project");
     let prepare = source
         .find("prepare_new_chat_surface(cdp, config).await?")
         .expect("new ChatGPT conversations must enforce configured surface preferences");
@@ -38,9 +119,40 @@ fn chatgpt_web_send_enforces_surface_before_composer_injection() {
         .find("set_composer_text(cdp, text).await")
         .expect("send path must inject the composer text");
 
+    assert!(ensure_project < prepare);
     assert!(prepare < inject);
     assert!(source.contains("'[role=\"radio\"]'"));
     assert!(source.contains("'[role=\"menuitemradio\"]'"));
+}
+
+#[test]
+fn chatgpt_web_stale_conversation_fallback_reenters_configured_project() {
+    let source = include_str!("send.rs");
+    let fallback = source
+        .split("if retry_as_new_available && should_retry_as_new_conversation(&error)")
+        .nth(1)
+        .and_then(|value| value.split("return Err(error)").next())
+        .expect("stale conversation fallback branch must exist");
+    let recovery = source
+        .split("async fn recover_to_new_conversation")
+        .nth(1)
+        .and_then(|value| {
+            value
+                .split("pub(in crate::im_gateway::chatgpt_web) fn same_project_page")
+                .next()
+        })
+        .expect("new conversation recovery helper must exist");
+
+    assert!(fallback.contains("recover_to_new_conversation(cdp, config, &error).await?"));
+    assert!(
+        source
+            .matches("recover_to_new_conversation(cdp, config")
+            .count()
+            >= 4
+    );
+    assert!(recovery.contains("navigate_to_new_conversation(cdp, config, reason).await?"));
+    assert!(recovery.contains("ensure_new_conversation_project(cdp, config).await?"));
+    assert!(recovery.contains("prepare_new_chat_surface(cdp, config).await?"));
 }
 
 #[test]
@@ -971,6 +1083,7 @@ async fn auth_status_accepts_recent_browser_account_check_when_native_probe_fail
             timeout_secs: 1,
             interface_mode: "auto".to_string(),
             model: "auto".to_string(),
+            project_url: None,
             session_consistency: "strong".to_string(),
             rate_limit_retry_secs: 180,
             rate_limit_max_retries: 5,
@@ -1042,6 +1155,7 @@ async fn read_logged_in_auth_state_recovers_valid_captured_login() {
             timeout_secs: 1,
             interface_mode: "auto".to_string(),
             model: "auto".to_string(),
+            project_url: None,
             session_consistency: "strong".to_string(),
             rate_limit_retry_secs: 180,
             rate_limit_max_retries: 5,
@@ -1096,6 +1210,7 @@ async fn read_logged_in_auth_state_rejects_expired_captured_login() {
             timeout_secs: 1,
             interface_mode: "auto".to_string(),
             model: "auto".to_string(),
+            project_url: None,
             session_consistency: "strong".to_string(),
             rate_limit_retry_secs: 180,
             rate_limit_max_retries: 5,
@@ -1163,6 +1278,7 @@ async fn auth_status_accepts_browser_account_check_when_native_probe_is_forbidde
             timeout_secs: 1,
             interface_mode: "auto".to_string(),
             model: "auto".to_string(),
+            project_url: None,
             session_consistency: "strong".to_string(),
             rate_limit_retry_secs: 180,
             rate_limit_max_retries: 5,
@@ -1221,6 +1337,7 @@ async fn auth_status_rejects_expired_authorization_identity() {
             timeout_secs: 1,
             interface_mode: "auto".to_string(),
             model: "auto".to_string(),
+            project_url: None,
             session_consistency: "strong".to_string(),
             rate_limit_retry_secs: 180,
             rate_limit_max_retries: 5,
@@ -1295,6 +1412,7 @@ async fn auth_status_rejects_stale_browser_account_check_when_native_forbidden()
             timeout_secs: 1,
             interface_mode: "auto".to_string(),
             model: "auto".to_string(),
+            project_url: None,
             session_consistency: "strong".to_string(),
             rate_limit_retry_secs: 180,
             rate_limit_max_retries: 5,

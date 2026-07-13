@@ -1633,6 +1633,7 @@ export interface AsrDailyAgentResearchFanoutConfig {
   max_questions: number;
   chatgpt_interface_mode: "chat";
   chatgpt_model: "pro";
+  chatgpt_project_url?: string;
   allowed_runners: string[];
   context_profiles: Record<string, AsrDailyAgentResearchContextProfile>;
 }

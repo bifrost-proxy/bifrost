@@ -2329,6 +2329,7 @@ fn daily_agent_research_manifest_preserves_original_question_and_github_reposito
         max_questions: 8,
         chatgpt_interface_mode: "chat".to_string(),
         chatgpt_model: "pro".to_string(),
+        chatgpt_project_url: None,
         allowed_runners: vec!["chatgpt-web".to_string()],
         context_profiles: DailyAgentBTreeMap::new(),
     };
@@ -2342,6 +2343,9 @@ fn daily_agent_research_fanout_normalizes_runner_and_context_profile_values() {
         max_questions: 8,
         chatgpt_interface_mode: " Chat ".to_string(),
         chatgpt_model: " Pro ".to_string(),
+        chatgpt_project_url: Some(
+            " https://chatgpt.com/g/g-p-daily-research/project/?source=test#new ".to_string(),
+        ),
         allowed_runners: vec![" web ".to_string(), "web".to_string()],
         context_profiles: DailyAgentBTreeMap::from([(
             " ibkr ".to_string(),
@@ -2358,6 +2362,10 @@ fn daily_agent_research_fanout_normalizes_runner_and_context_profile_values() {
     assert_eq!(fanout.allowed_runners, vec!["web"]);
     assert_eq!(fanout.chatgpt_interface_mode, "chat");
     assert_eq!(fanout.chatgpt_model, "pro");
+    assert_eq!(
+        fanout.chatgpt_project_url.as_deref(),
+        Some("https://chatgpt.com/g/g-p-daily-research/project")
+    );
     assert_eq!(fanout.context_profiles["ibkr"].runner, "Codex");
     assert_eq!(fanout.context_profiles["ibkr"].work_dir, "/tmp/ibkr");
     assert_eq!(
@@ -2381,6 +2389,41 @@ fn daily_agent_research_fanout_enforces_chat_and_pro_on_chatgpt_children() {
             "model": "pro"
         }))
     );
+}
+
+#[test]
+fn daily_agent_research_fanout_projects_chatgpt_project_url_to_children() {
+    let mut adapter_config =
+        crate::im_gateway::external_cli::ExternalCliAdapterConfig::default();
+    let fanout = AsrDailyAgentResearchFanoutConfig {
+        chatgpt_project_url: Some(
+            "https://chatgpt.com/g/g-p-daily-research/project".to_string(),
+        ),
+        ..Default::default()
+    };
+
+    enforce_daily_research_chatgpt_surface(&mut adapter_config, &fanout);
+
+    assert_eq!(
+        adapter_config.extra.get("chatgpt"),
+        Some(&serde_json::json!({
+            "interfaceMode": "chat",
+            "model": "pro",
+            "projectUrl": "https://chatgpt.com/g/g-p-daily-research/project"
+        }))
+    );
+}
+
+#[test]
+fn daily_agent_research_fanout_rejects_invalid_chatgpt_project_url() {
+    let mut item = AsrDailyAgentItem::daily_report();
+    item.research_fanout = Some(AsrDailyAgentResearchFanoutConfig {
+        chatgpt_project_url: Some("https://example.com/project".to_string()),
+        ..Default::default()
+    });
+
+    let error = validate_daily_agent_item(&item).unwrap_err();
+    assert!(error.contains("chatgpt_project_url is invalid"), "{error}");
 }
 
 #[test]

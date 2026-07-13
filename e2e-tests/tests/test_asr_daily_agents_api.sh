@@ -518,6 +518,7 @@ agents = [
         ["research_dispatcher"],
         {
             "max_questions": 8,
+            "chatgpt_project_url": "https://chatgpt.com/g/g-p-daily-research/project",
             "allowed_runners": ["web-research"],
             "context_profiles": {},
         },
@@ -532,6 +533,7 @@ stored = {item["id"]: item for item in updated["config"]["agents"]}
 assert stored["research_fanout"]["research_fanout"]["max_questions"] == 8, stored
 assert stored["research_fanout"]["research_fanout"]["chatgpt_interface_mode"] == "chat", stored
 assert stored["research_fanout"]["research_fanout"]["chatgpt_model"] == "pro", stored
+assert stored["research_fanout"]["research_fanout"]["chatgpt_project_url"] == "https://chatgpt.com/g/g-p-daily-research/project", stored
 assert stored["research_fanout"]["dependencies"] == [
     {"agent_id": "research_dispatcher", "include_output": True}
 ], stored
@@ -589,6 +591,9 @@ assert product["full_report_link"].startswith("https://chatgpt.com/c/"), product
 github_report = (children_dir / "github-question.md").read_text(encoding="utf-8")
 assert "ibkr-portfolio-dashboard" in github_report, github_report
 assert "GITHUB_CONNECTOR_STATUS: verified" in github_report, github_report
+assert "CHATGPT_PROJECT_URL: https://chatgpt.com/g/g-p-daily-research/project" in github_report, github_report
+product_report = (children_dir / "product-question.md").read_text(encoding="utf-8")
+assert "CHATGPT_PROJECT_URL: https://chatgpt.com/g/g-p-daily-research/project" in product_report, product_report
 fanout_report = (fanout_dir / "2026-05-23-report.md").read_text(encoding="utf-8")
 assert "## ibkr 仓库如何计算成交成本？" in fanout_report, fanout_report
 assert github["full_report_link"] in fanout_report, fanout_report

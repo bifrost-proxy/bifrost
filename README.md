@@ -84,9 +84,23 @@ http://127.0.0.1:9900/_bifrost/
 检查通过后，页面会显示可点击复制的代理地址 `<局域网 IP>:<端口>`，也可以打开代理二维码继续配置。若检查失败，页面会按 iOS/Android 给出下一步：安装 CA、iOS 进入 `设置 > 通用 > 关于本机 > 证书信任设置` 开启完全信任，或到管理端批准该设备的代理访问。
 
 ## 和AI集成
+
 ```bash
 bifrost install-skill -y
 ```
+
+ASR Daily Agent 支持把一篇日报拆成多个独立研究问题，并由 ChatGPT Web 分别创建会话。研究 fan-out 可选配置 `chatgpt_project_url`；配置后，新会话会归档到指定 ChatGPT Project，同时仍强制使用 Chat 模式和 Pro 模型：
+
+```json
+{
+  "max_questions": 8,
+  "chatgpt_interface_mode": "chat",
+  "chatgpt_model": "pro",
+  "chatgpt_project_url": "https://chatgpt.com/g/g-p-<project-id>/project"
+}
+```
+
+完整 Agent 组合、研究 manifest 和失败边界见 [`design/asr-daily-agent-pipeline.md`](design/asr-daily-agent-pipeline.md)。
 
 ## 特性说明
 

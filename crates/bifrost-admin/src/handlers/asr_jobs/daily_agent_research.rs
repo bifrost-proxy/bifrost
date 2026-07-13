@@ -87,6 +87,12 @@ fn enforce_daily_research_chatgpt_surface(
         "model".to_string(),
         serde_json::Value::String(fanout.chatgpt_model.clone()),
     );
+    if let Some(project_url) = fanout.chatgpt_project_url.as_deref() {
+        chatgpt.insert(
+            "projectUrl".to_string(),
+            serde_json::Value::String(project_url.to_string()),
+        );
+    }
     config
         .extra
         .insert("chatgpt".to_string(), serde_json::Value::Object(chatgpt));

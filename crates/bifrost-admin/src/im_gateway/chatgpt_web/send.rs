@@ -828,16 +828,17 @@ async fn send_with_browser_once(
                             "chatgpt_web send [strong]: page redirected but no conversation_id to navigate back to"
                         );
                         expected_conversation_id = None;
+                        recover_to_new_conversation(cdp, config, &error).await?;
                     }
                 } else {
                     // ── Weak consistency mode ──
                     // Accept whatever page we're on. Dismiss modals and proceed.
                     warn!(
                         %error,
-                        "chatgpt_web send [weak]: conversation not reachable, using current page as-is (no navigation)"
+                        "chatgpt_web send [weak]: conversation not reachable, recovering a clean new conversation target"
                     );
-                    dismiss_modal_and_wait(cdp).await;
                     expected_conversation_id = None;
+                    recover_to_new_conversation(cdp, config, &error).await?;
                 }
             } else {
                 return Err(error);
@@ -970,16 +971,20 @@ async fn send_with_browser_once(
                         conversation_id.unwrap_or("unknown")
                     ));
                 }
-                // Weak consistency: accept current page.
-                info!("chatgpt_web send [weak]: fallback — dismissing modals and using current page (no navigation)");
-                dismiss_modal_and_wait(cdp).await;
+                info!("chatgpt_web send [weak]: fallback — recovering a clean new conversation target");
                 expected_conversation_id = None;
-                wait_composer(cdp, None, Duration::from_secs(60)).await?;
+                recover_to_new_conversation(
+                    cdp,
+                    config,
+                    "weak consistency composer recovery",
+                )
+                .await?;
             }
         } else {
             composer_result?;
         }
         if expected_conversation_id.is_none() {
+            ensure_new_conversation_project(cdp, config).await?;
             prepare_new_chat_surface(cdp, config).await?;
             wait_composer(cdp, None, Duration::from_secs(30)).await?;
         }
@@ -991,10 +996,8 @@ async fn send_with_browser_once(
             {
                 if retry_as_new_available && should_retry_as_new_conversation(&error) {
                     retry_as_new_available = false;
-                    // Don't navigate — dismiss modals and use current page.
-                    dismiss_modal_and_wait(cdp).await;
                     expected_conversation_id = None;
-                    wait_composer(cdp, None, Duration::from_secs(60)).await?;
+                    recover_to_new_conversation(cdp, config, &error).await?;
                     continue;
                 }
                 return Err(error);
@@ -1004,6 +1007,9 @@ async fn send_with_browser_once(
             // One more check for rate-limit modals that may have appeared
             // after the composer became visible but before we type.
             dismiss_modal_and_wait(cdp).await;
+            if expected_conversation_id.is_none() {
+                ensure_new_conversation_project(cdp, config).await?;
+            }
             assert_target_page(cdp, expected_conversation_id, true).await?;
             wait_until_conversation_not_busy(
                 cdp,
@@ -1309,10 +1315,8 @@ async fn send_with_browser_once(
                         && should_retry_as_new_conversation(&error) =>
                 {
                     retry_as_new_available = false;
-                    // Don't navigate — dismiss modals and use current page.
-                    dismiss_modal_and_wait(cdp).await;
                     expected_conversation_id = None;
-                    wait_composer(cdp, None, Duration::from_secs(60)).await?;
+                    recover_to_new_conversation(cdp, config, &error).await?;
                 }
                 Err(error) => return Err(error),
             }
@@ -3273,9 +3277,19 @@ async fn navigate_to_new_conversation(
         .and_then(Value::as_str)
         .unwrap_or_default();
     let current_url_conversation_id = current.get("urlConversationId").and_then(Value::as_str);
+    let current_url = current
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let on_expected_project = config
+        .chatgpt
+        .project_url
+        .as_deref()
+        .is_none_or(|expected| same_project_page(current_url, expected));
     let needs_navigate = current_kind != "new_conversation"
         || current_url_conversation_id.is_some()
-        || page_body_has_fatal_error(&current);
+        || page_body_has_fatal_error(&current)
+        || !on_expected_project;
 
     if needs_navigate {
         let new_url = new_conversation_url(config);
@@ -3298,10 +3312,71 @@ async fn navigate_to_new_conversation(
     }
 }
 
-fn new_conversation_url(config: &RuntimeConfig) -> String {
-    let base = config.chatgpt.base_url.trim_end_matches('/');
+pub(in crate::im_gateway::chatgpt_web) fn new_conversation_url(config: &RuntimeConfig) -> String {
     let nonce = now_ms();
-    format!("{base}/?bifrost_new_chat={nonce}")
+    if let Some(project_url) = config.chatgpt.project_url.as_deref() {
+        format!("{project_url}?bifrost_new_chat={nonce}")
+    } else {
+        format!(
+            "{}/?bifrost_new_chat={nonce}",
+            config.chatgpt.base_url.trim_end_matches('/')
+        )
+    }
+}
+
+async fn recover_to_new_conversation(
+    cdp: &CdpClient,
+    config: &RuntimeConfig,
+    reason: &str,
+) -> Result<(), String> {
+    dismiss_modal_and_wait(cdp).await;
+    navigate_to_new_conversation(cdp, config, reason).await?;
+    wait_composer(cdp, None, Duration::from_secs(60)).await?;
+    ensure_new_conversation_project(cdp, config).await?;
+    prepare_new_chat_surface(cdp, config).await?;
+    wait_composer(cdp, None, Duration::from_secs(30)).await
+}
+
+pub(in crate::im_gateway::chatgpt_web) fn same_project_page(
+    current_url: &str,
+    expected_url: &str,
+) -> bool {
+    let Ok(current) = url::Url::parse(current_url) else {
+        return false;
+    };
+    let Ok(expected) = url::Url::parse(expected_url) else {
+        return false;
+    };
+    if current.scheme() != expected.scheme()
+        || current.host_str() != expected.host_str()
+        || current.port_or_known_default() != expected.port_or_known_default()
+    {
+        return false;
+    }
+    match (
+        super::chatgpt_project_identity(&current),
+        super::chatgpt_project_identity(&expected),
+    ) {
+        (Some(current), Some(expected)) => current == expected,
+        _ => false,
+    }
+}
+
+async fn ensure_new_conversation_project(
+    cdp: &CdpClient,
+    config: &RuntimeConfig,
+) -> Result<(), String> {
+    let Some(expected_url) = config.chatgpt.project_url.as_deref() else {
+        return Ok(());
+    };
+    let state = inspect_page(cdp).await?;
+    let current_url = state.get("url").and_then(Value::as_str).unwrap_or_default();
+    if same_project_page(current_url, expected_url) {
+        return Ok(());
+    }
+    Err(format!(
+        "browser_ui: ChatGPT Project page mismatch before prompt submission: expected={expected_url} actual={current_url}"
+    ))
 }
 
 async fn set_composer_text(cdp: &CdpClient, text: &str) -> Result<Value, String> {
