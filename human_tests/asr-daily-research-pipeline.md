@@ -109,6 +109,7 @@
 
 | 日期 | 用例 | 结果 |
 | --- | --- | --- |
+| 2026-07-13 | TC-ADRP-01 当前主干回归 | `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_asr_daily_agents_api.sh` 通过；基础四段使用外部 Codex mock，逐题研究使用 ChatGPT Web mock。五个 Agent 全部生成 processed document，两个原始问题获得不同 conversation id 和完整链接，内部故障记录未进入 manifest，fan-out 的两个链接均进入 digest 上游输入和最终 digest。 |
 | 2026-07-12 | TC-ADRP-01 | `bash e2e-tests/tests/test_asr_daily_agents_api.sh` 通过；五个 Agent 均产出 processed document，两个研究问题生成不同 conversation id 与链接。 |
 | 2026-07-12 | TC-ADRP-02 免费账号负向用例 | 真实 run `1783850408000-b48c2cdf-711f-40fe-9171-0e481a2c4c90` 在发送前失败，错误为 `chat_mode_control_not_found`；诊断页面确认该独立 Chrome 登录的是免费账号，Prompt 未发送。 |
 | 2026-07-12 | TC-ADRP-03 状态契约 | 单元测试覆盖 `verified / unavailable / missing`；Pro 账号真实 GitHub 读取等待用户在 Bifrost 独立 Chrome 完成账号切换。 |

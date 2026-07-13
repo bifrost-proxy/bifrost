@@ -64,6 +64,7 @@
 
 ## 真实执行记录
 
+- 2026-07-13：在最新 `main` 已移除内置 Agent 的架构上重建并执行 TC-DAP-01/02。`cargo test -p bifrost-admin daily_agent --lib -- --nocapture` 通过 60 项；`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_asr_daily_agents_api.sh` 使用外部 Codex mock、ChatGPT Web mock、动态端口和临时数据目录通过。测试故意倒序保存五个 Agent，确认依赖拓扑、同日产物复制和非法依赖 400 拒绝均保持有效，未触碰正式 9900 服务。
 - 2026-07-12：TC-DAP-01/02/03 通过。`cargo test -p bifrost-admin daily_agent --lib` 通过 49 项；`test_asr_daily_agents_api.sh` 使用隔离数据目录验证反向数组仍按依赖拓扑执行、同日产物复制、非法依赖拒绝、上游失败时下游 `skipped_dependency_failed`，并覆盖陈旧 source hash 拦截。
 - 2026-07-12：TC-DAP-04 通过。隔离端口 `18881`、隔离数据目录和公开合成日报下，真实 ChatGPT Web `daily_report -> research_agent` 两段 run 均为 `success`；日报保留两条“帮我记录一下”，研究报告区分事实、推断、不确定性和最小验证动作。该早期原型曾输出研究种子评分，现已由 `asr-daily-research-pipeline.md` 的五段流水线替代；当前契约明确禁止优先级评分。
 - 2026-07-12：TC-DAP-05/06 通过。默认 `9900` 服务临时创建并手动执行周度 Codex Schedule，run `6f4a092e` 为 `success`，微信 outbound 成功后删除测试 Schedule；随后把真实研究报告精简结论发送到 `jcc-reader-weixin`，message id `bifrost-weixin-1783824014855-adfbaab4-d661-4d1c-962b-28767e42de60`，未发送原始录音或完整转录。
