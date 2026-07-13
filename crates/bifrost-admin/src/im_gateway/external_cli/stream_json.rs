@@ -297,14 +297,7 @@ pub(super) async fn run_command(
             "Claude Code session completed before guide redirect acknowledgement".to_string(),
         ));
     }
-    while let Ok(command) = guide_rx.try_recv() {
-        let _ = command.ack_tx.send(live_guide::rejected_guide(
-            command.guide_id,
-            thread_id.clone(),
-            None,
-            "turn is no longer active".to_string(),
-        ));
-    }
+    reject_queued_guides(&mut guide_rx, thread_id.clone());
 
     drop(stdin);
     let status = terminal_status.unwrap_or(ExternalCliRunStatus::Failed);
@@ -342,6 +335,20 @@ pub(super) async fn run_command(
         stderr,
         events,
     })
+}
+
+fn reject_queued_guides(
+    guide_rx: &mut mpsc::UnboundedReceiver<live_guide::LiveGuideCommand>,
+    thread_id: Option<String>,
+) {
+    while let Ok(command) = guide_rx.try_recv() {
+        let _ = command.ack_tx.send(live_guide::rejected_guide(
+            command.guide_id,
+            thread_id.clone(),
+            None,
+            "turn is no longer active".to_string(),
+        ));
+    }
 }
 
 async fn wait_for_stream_json_child(
@@ -474,6 +481,54 @@ fn replayed_user_text(raw: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn mock_executable(temp_dir: &tempfile::TempDir, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let executable = temp_dir.path().join(name);
+        std::fs::write(&executable, body).unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        executable
+    }
+
+    #[cfg(unix)]
+    fn mock_spec(executable: &Path, timeout_secs: Option<u64>) -> CommandSpec {
+        CommandSpec {
+            executable: executable.display().to_string(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            work_dir: None,
+            timeout_secs,
+        }
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_active_handle(session_key: &str) -> live_guide::ActiveGuideHandle {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(handle) = live_guide::active_handle(session_key) {
+                    break handle;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("live guide handle")
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_path(path: &Path) {
+        timeout(Duration::from_secs(10), async {
+            while !path.exists() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("mock runner marker");
+    }
 
     #[test]
     fn user_frame_contains_stream_json_message() {
@@ -672,5 +727,552 @@ while True:
         assert_eq!(output.status, ExternalCliRunStatus::Succeeded);
         assert!(started.elapsed() < Duration::from_secs(7));
         assert!(!ACTIVE_RUNS.contains_key(run_id));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runner_eof_before_result_reports_failure_and_stderr() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-eof",
+            r#"#!/usr/bin/env python3
+import sys
+sys.stdin.readline()
+sys.stderr.write("mock stderr without newline")
+"#,
+        );
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        let output = run_command(
+            "mock-stream-json-eof-run",
+            None,
+            CommandSpec {
+                work_dir: Some(temp_dir.path().to_path_buf()),
+                env: BTreeMap::from([("BIFROST_STREAM_JSON_TEST".to_string(), "1".to_string())]),
+                ..mock_spec(&executable, Some(5))
+            },
+            "initial task".to_string(),
+            temp_dir.path().join("stop"),
+            Some(progress_tx),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(output.status, ExternalCliRunStatus::Failed);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("mock stderr without newline\nstream-json runner exited"));
+        assert!(progress_rx.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runner_timeout_and_stop_marker_terminate_child() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-wait",
+            r#"#!/usr/bin/env python3
+import sys
+import time
+sys.stdin.readline()
+time.sleep(30)
+"#,
+        );
+
+        let timed_out = run_command(
+            "mock-stream-json-timeout-run",
+            None,
+            mock_spec(&executable, Some(1)),
+            "initial task".to_string(),
+            temp_dir.path().join("timeout-stop"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(timed_out.status, ExternalCliRunStatus::TimedOut);
+        assert!(String::from_utf8_lossy(&timed_out.stderr)
+            .contains("stream-json runner timed out after 1 seconds"));
+
+        let stop_marker = temp_dir.path().join("requested-stop");
+        let stop_marker_for_task = stop_marker.clone();
+        let stop_run = tokio::spawn(run_command(
+            "mock-stream-json-stop-run",
+            None,
+            mock_spec(&executable, None),
+            "initial task".to_string(),
+            stop_marker_for_task,
+            None,
+        ));
+        sleep(Duration::from_millis(100)).await;
+        tokio::fs::write(&stop_marker, b"stop").await.unwrap();
+        let stopped = stop_run.await.unwrap().unwrap();
+        assert_eq!(stopped.status, ExternalCliRunStatus::Stopped);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn interrupt_rejection_uses_default_reason_and_run_can_finish() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-reject-interrupt",
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"reject-session"})
+send(first)
+interrupt = json.loads(sys.stdin.readline())
+send({"type":"control_response","response":{"subtype":"error","request_id":interrupt["request_id"]}})
+send({"type":"result","subtype":"success","is_error":False,"result":"done","session_id":"reject-session"})
+"#,
+        );
+        let session_key = "mock-stream-json-reject-session";
+        let run_id = "mock-stream-json-reject-run";
+        ACTIVE_SESSIONS.insert(session_key.to_string(), run_id.to_string());
+        let run_task = tokio::spawn(run_command(
+            run_id,
+            Some(session_key),
+            mock_spec(&executable, Some(5)),
+            "initial task".to_string(),
+            temp_dir.path().join("stop"),
+            None,
+        ));
+
+        let rejected = live_guide::request_session_guide(
+            session_key,
+            "guide-rejected".to_string(),
+            "focus tests".to_string(),
+        )
+        .await;
+        assert_eq!(
+            rejected.reason.as_deref(),
+            Some("Claude Code rejected the interrupt request")
+        );
+        assert_eq!(
+            run_task.await.unwrap().unwrap().status,
+            ExternalCliRunStatus::Succeeded
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pending_guide_rejects_parallel_redirect() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-parallel-guide",
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"parallel-session"})
+send(first)
+interrupt = json.loads(sys.stdin.readline())
+with open(os.environ["INTERRUPT_MARKER"], "w", encoding="utf-8") as handle:
+    handle.write("ready")
+time.sleep(0.5)
+send({"type":"control_response","response":{"subtype":"success","request_id":interrupt["request_id"]}})
+guide = json.loads(sys.stdin.readline())
+send(guide)
+send({"type":"result","subtype":"error_during_execution","is_error":True,"session_id":"parallel-session"})
+send({"type":"result","subtype":"success","is_error":False,"result":"done","session_id":"parallel-session"})
+"#,
+        );
+        let session_key = "mock-stream-json-parallel-session";
+        let run_id = "mock-stream-json-parallel-run";
+        ACTIVE_SESSIONS.insert(session_key.to_string(), run_id.to_string());
+        let interrupt_marker = temp_dir.path().join("interrupt-ready");
+        let run_task = tokio::spawn(run_command(
+            run_id,
+            Some(session_key),
+            CommandSpec {
+                env: BTreeMap::from([(
+                    "INTERRUPT_MARKER".to_string(),
+                    interrupt_marker.display().to_string(),
+                )]),
+                ..mock_spec(&executable, Some(5))
+            },
+            "initial task".to_string(),
+            temp_dir.path().join("stop"),
+            None,
+        ));
+
+        let first_guide = tokio::spawn(live_guide::request_session_guide(
+            session_key,
+            "guide-first".to_string(),
+            "first guide".to_string(),
+        ));
+        timeout(Duration::from_secs(3), async {
+            while !interrupt_marker.exists() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("first interrupt marker");
+        let handle = wait_for_active_handle(session_key).await;
+        let (ack_tx, ack_rx) = oneshot::channel();
+        handle
+            .guide_tx
+            .send(live_guide::LiveGuideCommand {
+                guide_id: "guide-second".to_string(),
+                message: "second guide".to_string(),
+                ack_tx,
+            })
+            .unwrap();
+        let second = ack_rx.await.unwrap();
+        assert_eq!(
+            second.reason.as_deref(),
+            Some("another Claude Code guide redirect is awaiting acknowledgement")
+        );
+        assert!(first_guide.await.unwrap().accepted);
+        assert_eq!(
+            run_task.await.unwrap().unwrap().status,
+            ExternalCliRunStatus::Succeeded
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replaced_session_rejects_direct_guide_command() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-replaced-session",
+            r#"#!/usr/bin/env python3
+import json
+import sys
+import time
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"replaced-session"})
+send(first)
+time.sleep(2)
+send({"type":"result","subtype":"success","is_error":False,"result":"done","session_id":"replaced-session"})
+"#,
+        );
+        let session_key = "mock-stream-json-replaced-session";
+        let run_id = "mock-stream-json-replaced-run";
+        ACTIVE_SESSIONS.insert(session_key.to_string(), run_id.to_string());
+        let run_task = tokio::spawn(run_command(
+            run_id,
+            Some(session_key),
+            mock_spec(&executable, Some(5)),
+            "initial task".to_string(),
+            temp_dir.path().join("stop"),
+            None,
+        ));
+        let handle = wait_for_active_handle(session_key).await;
+        ACTIVE_SESSIONS.insert(session_key.to_string(), "replacement-run".to_string());
+        let (ack_tx, ack_rx) = oneshot::channel();
+        handle
+            .guide_tx
+            .send(live_guide::LiveGuideCommand {
+                guide_id: "guide-replaced".to_string(),
+                message: "should reject".to_string(),
+                ack_tx,
+            })
+            .unwrap();
+        let rejected = ack_rx.await.unwrap();
+        assert_eq!(
+            rejected.reason.as_deref(),
+            Some("active session was replaced before guide delivery")
+        );
+        assert_eq!(
+            run_task.await.unwrap().unwrap().status,
+            ExternalCliRunStatus::Succeeded
+        );
+        ACTIVE_SESSIONS.remove(session_key);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_completion_rejects_pending_guide() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-pending-result",
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"pending-session"})
+send(first)
+json.loads(sys.stdin.readline())
+send({"type":"result","subtype":"success","is_error":False,"result":"done","session_id":"pending-session"})
+"#,
+        );
+        let session_key = "mock-stream-json-pending-session";
+        let run_id = "mock-stream-json-pending-run";
+        ACTIVE_SESSIONS.insert(session_key.to_string(), run_id.to_string());
+        let run_task = tokio::spawn(run_command(
+            run_id,
+            Some(session_key),
+            mock_spec(&executable, Some(5)),
+            "initial task".to_string(),
+            temp_dir.path().join("stop"),
+            None,
+        ));
+        let rejected = live_guide::request_session_guide(
+            session_key,
+            "guide-pending".to_string(),
+            "pending guide".to_string(),
+        )
+        .await;
+        assert_eq!(
+            rejected.reason.as_deref(),
+            Some("Claude Code session completed before guide redirect acknowledgement")
+        );
+        assert_eq!(
+            run_task.await.unwrap().unwrap().status,
+            ExternalCliRunStatus::Succeeded
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closed_stdin_rejects_interrupt_write() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-closed-stdin",
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"closed-stdin-session"})
+send(first)
+os.close(0)
+time.sleep(0.5)
+send({"type":"result","subtype":"success","is_error":False,"result":"done","session_id":"closed-stdin-session"})
+"#,
+        );
+        let session_key = "mock-stream-json-closed-stdin-session";
+        let run_id = "mock-stream-json-closed-stdin-run";
+        ACTIVE_SESSIONS.insert(session_key.to_string(), run_id.to_string());
+        let run_task = tokio::spawn(run_command(
+            run_id,
+            Some(session_key),
+            mock_spec(&executable, Some(5)),
+            "initial task".to_string(),
+            temp_dir.path().join("stop"),
+            None,
+        ));
+        let rejected = live_guide::request_session_guide(
+            session_key,
+            "guide-closed-stdin".to_string(),
+            "cannot write".to_string(),
+        )
+        .await;
+        assert!(!rejected.accepted);
+        assert!(rejected.reason.as_deref().is_some_and(|reason| {
+            reason.contains("write stream-json frame") || reason.contains("flush stream-json frame")
+        }));
+        assert_eq!(
+            run_task.await.unwrap().unwrap().status,
+            ExternalCliRunStatus::Succeeded
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_guide_request_is_not_replayed_after_interrupt_ack() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-cancelled-guide",
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"cancelled-guide-session"})
+send(first)
+interrupt = json.loads(sys.stdin.readline())
+with open(os.environ["INTERRUPT_MARKER"], "w", encoding="utf-8") as handle:
+    handle.write("ready")
+while not os.path.exists(os.environ["CONTINUE_MARKER"]):
+    time.sleep(0.01)
+send({"type":"control_response","response":{"subtype":"success","request_id":interrupt["request_id"]}})
+time.sleep(0.1)
+send({"type":"result","subtype":"success","is_error":False,"result":"done","session_id":"cancelled-guide-session"})
+"#,
+        );
+        let session_key = "mock-stream-json-cancelled-guide-session";
+        let run_id = "mock-stream-json-cancelled-guide-run";
+        let interrupt_marker = temp_dir.path().join("interrupt-ready");
+        let continue_marker = temp_dir.path().join("continue");
+        ACTIVE_SESSIONS.insert(session_key.to_string(), run_id.to_string());
+        let run_task = tokio::spawn(run_command(
+            run_id,
+            Some(session_key),
+            CommandSpec {
+                env: BTreeMap::from([
+                    (
+                        "INTERRUPT_MARKER".to_string(),
+                        interrupt_marker.display().to_string(),
+                    ),
+                    (
+                        "CONTINUE_MARKER".to_string(),
+                        continue_marker.display().to_string(),
+                    ),
+                ]),
+                ..mock_spec(&executable, Some(5))
+            },
+            "initial task".to_string(),
+            temp_dir.path().join("stop"),
+            None,
+        ));
+        let guide_task = tokio::spawn(live_guide::request_session_guide(
+            session_key,
+            "guide-cancelled".to_string(),
+            "do not replay".to_string(),
+        ));
+        wait_for_path(&interrupt_marker).await;
+        guide_task.abort();
+        std::fs::write(&continue_marker, b"continue").unwrap();
+
+        assert_eq!(
+            run_task.await.unwrap().unwrap().status,
+            ExternalCliRunStatus::Succeeded
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closed_stdin_after_interrupt_ack_rejects_user_frame() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-user-frame-failure",
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+first = json.loads(sys.stdin.readline())
+send({"type":"system","subtype":"init","session_id":"user-frame-failure-session"})
+send(first)
+interrupt = json.loads(sys.stdin.readline())
+os.close(0)
+send({"type":"control_response","response":{"subtype":"success","request_id":interrupt["request_id"]}})
+time.sleep(0.2)
+send({"type":"result","subtype":"success","is_error":False,"result":"done","session_id":"user-frame-failure-session"})
+"#,
+        );
+        let session_key = "mock-stream-json-user-frame-failure-session";
+        let run_id = "mock-stream-json-user-frame-failure-run";
+        ACTIVE_SESSIONS.insert(session_key.to_string(), run_id.to_string());
+        let run_task = tokio::spawn(run_command(
+            run_id,
+            Some(session_key),
+            mock_spec(&executable, Some(5)),
+            "initial task".to_string(),
+            temp_dir.path().join("stop"),
+            None,
+        ));
+        let rejected = live_guide::request_session_guide(
+            session_key,
+            "guide-user-frame-failure".to_string(),
+            "cannot replay".to_string(),
+        )
+        .await;
+        assert!(!rejected.accepted);
+        assert!(rejected.reason.as_deref().is_some_and(|reason| {
+            reason.contains("write stream-json user frame")
+                || reason.contains("flush stream-json user frame")
+        }));
+        assert_eq!(
+            run_task.await.unwrap().unwrap().status,
+            ExternalCliRunStatus::Succeeded
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_result_is_forwarded_to_progress_channel() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = mock_executable(
+            &temp_dir,
+            "mock-claude-failed-result",
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+json.loads(sys.stdin.readline())
+print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":"partial"}]}}), flush=True)
+print(json.dumps({"type":"result","subtype":"error_max_turns","is_error":True,"result":"failed"}), flush=True)
+"#,
+        );
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        let output = run_command(
+            "mock-stream-json-failed-result-run",
+            None,
+            mock_spec(&executable, Some(5)),
+            "initial task".to_string(),
+            temp_dir.path().join("stop"),
+            Some(progress_tx),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.status, ExternalCliRunStatus::Failed);
+        assert!(progress_rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn terminal_cleanup_rejects_queued_guide_commands() {
+        let (guide_tx, mut guide_rx) = mpsc::unbounded_channel();
+        let mut acknowledgements = Vec::new();
+        for index in 0..3 {
+            let (ack_tx, ack_rx) = oneshot::channel();
+            guide_tx
+                .send(live_guide::LiveGuideCommand {
+                    guide_id: format!("guide-drain-{index}"),
+                    message: "queued".to_string(),
+                    ack_tx,
+                })
+                .unwrap();
+            acknowledgements.push(ack_rx);
+        }
+
+        reject_queued_guides(&mut guide_rx, Some("thread-drain".to_string()));
+        for ack_rx in acknowledgements {
+            let result = ack_rx.await.unwrap();
+            assert_eq!(result.thread_id.as_deref(), Some("thread-drain"));
+            assert_eq!(result.reason.as_deref(), Some("turn is no longer active"));
+        }
+        assert!(guide_rx.try_recv().is_err());
     }
 }

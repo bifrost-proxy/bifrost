@@ -1341,6 +1341,27 @@ mod tests {
     }
 
     #[test]
+    fn explicit_stream_json_validates_adapter_and_custom_args() {
+        let mut claude = request(CLAUDE_CODE_ADAPTER);
+        claude.adapter_config.transport = Some(ExternalCliTransport::StreamJson);
+        assert_eq!(
+            resolved_transport(&claude).unwrap(),
+            ExternalCliTransport::StreamJson
+        );
+
+        let mut unsupported = request(DEFAULT_ADAPTER);
+        unsupported.adapter_config.transport = Some(ExternalCliTransport::StreamJson);
+        assert!(resolved_transport(&unsupported)
+            .unwrap_err()
+            .contains("does not support stream_json"));
+
+        claude.adapter_config.args = vec!["--custom".to_string()];
+        assert!(resolved_transport(&claude)
+            .unwrap_err()
+            .contains("adapterConfig.args"));
+    }
+
+    #[test]
     fn turn_steer_request_contains_active_turn_precondition_and_client_id() {
         let value = build_turn_steer_request("thread-1", "turn-1", "guide-1", "focus tests");
         assert_eq!(value["threadId"], "thread-1");
