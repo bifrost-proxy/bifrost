@@ -1513,7 +1513,7 @@ async fn guide_external_cli_stream_response(
         Ok(result) if result.accepted => serde_json::json!({
             "eventType": "run_finished",
             "sessionKey": session_key,
-            "response": "🔀 已注入当前 Runner turn，将在当前工具调用完成后生效",
+            "response": "🔀 已发送到当前 Runner session，将按 Runner 的实时引导语义生效",
             "guide": true,
             "guideId": result.guide_id,
             "delivery": "steered",

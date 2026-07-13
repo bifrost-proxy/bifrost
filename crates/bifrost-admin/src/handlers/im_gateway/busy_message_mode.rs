@@ -103,9 +103,9 @@ pub(super) async fn handle_busy_guide_command(
                     thread_id = ?result.thread_id,
                     turn_id = ?result.turn_id,
                     guide_msg_len = guide_text.len(),
-                    "guide message steered into active external runner turn"
+                    "guide message delivered to active external runner session"
                 );
-                let reply = "🔀 已注入当前 Runner turn，将在当前工具调用完成后生效";
+                let reply = "🔀 已发送到当前 Runner session，将按 Runner 的实时引导语义生效";
                 let updated = ctx
                     .progress_registry
                     .update_queue_state(

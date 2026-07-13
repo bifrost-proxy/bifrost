@@ -1191,6 +1191,8 @@ fn claude_code_adapter_applies_session_model_to_command_spec() {
 
     assert_eq!(spec.executable, "claude");
     assert!(spec.args.contains(&"-p".to_string()));
+    assert!(has_arg_pair(&spec.args, "--input-format", "stream-json"));
+    assert!(spec.args.contains(&"--replay-user-messages".to_string()));
     assert!(has_arg_pair(
         &spec.args,
         "--model",
@@ -1199,6 +1201,36 @@ fn claude_code_adapter_applies_session_model_to_command_spec() {
     assert!(spec
         .args
         .contains(&"--dangerously-skip-permissions".to_string()));
+}
+
+#[test]
+fn claude_code_explicit_exec_transport_keeps_text_stdin() {
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: Some(DEFAULT_CLAUDE_CODE_RUNNER_ID.to_string()),
+        session_key: Some("session:claude-exec".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: CLAUDE_CODE_ADAPTER.to_string(),
+        work_dir: Some(PathBuf::from("/tmp/work")),
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            transport: Some(ExternalCliTransport::Exec),
+            danger_full_access: Some(true),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert!(has_arg_pair(&spec.args, "--input-format", "text"));
+    assert!(!spec.args.contains(&"--replay-user-messages".to_string()));
 }
 
 #[test]
@@ -1316,6 +1348,70 @@ async fn external_cli_runtime_runs_mock_command_and_writes_artifacts() {
     assert_eq!(result.events.len(), 2);
     assert!(Path::new(&result.artifacts.command_snapshot).exists());
     assert!(Path::new(&result.artifacts.normalized_events).exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn external_cli_runtime_dispatches_default_claude_stream_json_transport() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let executable = temp_dir.path().join("mock-claude-runtime");
+    std::fs::write(
+        &executable,
+        r#"#!/usr/bin/env python3
+import json
+import sys
+
+if "--version" in sys.argv:
+    print("mock claude 1.0")
+    raise SystemExit(0)
+
+first = json.loads(sys.stdin.readline())
+print(json.dumps({"type":"system","subtype":"init","session_id":"runtime-stream-session"}), flush=True)
+print(json.dumps(first), flush=True)
+print(json.dumps({"type":"assistant","message":{"content":[{"type":"text","text":"runtime stream final"}]},"session_id":"runtime-stream-session"}), flush=True)
+print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":"runtime stream final","session_id":"runtime-stream-session"}), flush=True)
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+
+    let runtime = ExternalCliRuntime::new(temp_dir.path().join("runs"));
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello stream runtime".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: Some(DEFAULT_CLAUDE_CODE_RUNNER_ID.to_string()),
+        session_key: Some("runtime-stream-session-key".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: CLAUDE_CODE_ADAPTER.to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some(executable.display().to_string()),
+            timeout_secs: Some(5),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    assert!(ExternalCliTransport::AppServer.supports_live_guide());
+    assert!(ExternalCliTransport::StreamJson.supports_live_guide());
+    assert!(!ExternalCliTransport::Exec.supports_live_guide());
+    let result = runtime.run(request).await.unwrap();
+    assert_eq!(result.status, ExternalCliRunStatus::Succeeded);
+    assert_eq!(result.response, "runtime stream final");
+    assert!(result
+        .events
+        .iter()
+        .any(|event| event.event_type == ExternalCliProgressEventType::AssistantFinal));
 }
 
 #[tokio::test]

@@ -63,17 +63,58 @@ if "--version" in sys.argv:
     print(f"{runner} 0.0.0-mock")
     sys.exit(0)
 
+if "--input-format" in sys.argv and sys.argv[sys.argv.index("--input-format") + 1] == "stream-json":
+    first = json.loads(sys.stdin.readline())
+    record({"event":"turn_started","runner":runner,"pid":os.getpid(),"frame":first})
+    send({"type":"system","subtype":"init","session_id":thread_id})
+    send(first)
+    # Publish readiness only after the mock emits the init frame and replays
+    # the initial prompt. The adapter then registers its steerable session;
+    # app-server uses turn_ready below.
+    record({"event":"stream_ready","runner":runner,"pid":os.getpid()})
+    prompt = first["message"]["content"][0]["text"]
+    if "queue-after-reject" in prompt:
+        send({"type":"assistant","message":{"content":[{"type":"text","text":f"QUEUED_{runner}"}]},"session_id":thread_id})
+        send({"type":"result","subtype":"success","is_error":False,"result":f"QUEUED_{runner}","session_id":thread_id})
+        sys.exit(0)
+    interrupt = json.loads(sys.stdin.readline())
+    assert interrupt["type"] == "control_request", interrupt
+    assert interrupt["request"]["subtype"] == "interrupt", interrupt
+    record({"event":"stream_interrupt_received","runner":runner,"pid":os.getpid(),"frame":interrupt})
+    if mode == "reject":
+        send({"type":"control_response","response":{"subtype":"error","request_id":interrupt["request_id"],"error":"no active Claude response"}})
+        time.sleep(0.5)
+        send({"type":"assistant","message":{"content":[{"type":"text","text":f"FIRST_{runner}"}]},"session_id":thread_id})
+        send({"type":"result","subtype":"success","is_error":False,"result":f"FIRST_{runner}","session_id":thread_id})
+        sys.exit(0)
+    send({"type":"control_response","response":{"subtype":"success","request_id":interrupt["request_id"],"response":{}}})
+    guide = json.loads(sys.stdin.readline())
+    record({"event":"stream_guide_received","runner":runner,"pid":os.getpid(),"frame":guide})
+    send(guide)
+    send({"type":"result","subtype":"error_during_execution","is_error":True,"session_id":thread_id})
+    send({"type":"system","subtype":"init","session_id":thread_id})
+    send({"type":"assistant","message":{"content":[{"type":"tool_use","id":"tool-claude","name":"Bash","input":{"command":"pwd"}}]},"session_id":thread_id})
+    send({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool-claude","content":"/tmp"}]},"session_id":thread_id})
+    send({"type":"assistant","message":{"content":[{"type":"text","text":f"GUIDED_{runner}"}]},"session_id":thread_id})
+    send({"type":"result","subtype":"success","is_error":False,"result":f"GUIDED_{runner}","session_id":thread_id,"usage":{"input_tokens":11,"output_tokens":7}})
+    sys.exit(0)
+
 if "app-server" not in sys.argv:
     prompt = sys.stdin.read()
-    record({"event":"exec_started","runner":runner,"prompt":prompt})
+    record({"event":"exec_started","runner":runner,"prompt":prompt,"argv":sys.argv[1:]})
     # The coverage-instrumented CLI has materially higher startup overhead.
     # Keep the exec transport active long enough for the guide command to be
     # issued after the explicit exec_started readiness marker.
-    time.sleep(10 if runner == "codex-exec" else 1)
-    send({"type":"thread.started","thread_id":thread_id})
-    send({"type":"turn.started"})
-    send({"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":f"EXEC_{runner}"}})
-    send({"type":"turn.completed","usage":{"input_tokens":5,"cached_input_tokens":0,"output_tokens":3,"reasoning_output_tokens":0,"total_tokens":8}})
+    time.sleep(10 if runner.endswith("-exec") else 1)
+    if runner.startswith("claude"):
+        send({"type":"system","subtype":"init","session_id":thread_id})
+        send({"type":"assistant","message":{"content":[{"type":"text","text":f"EXEC_{runner}"}]},"session_id":thread_id})
+        send({"type":"result","subtype":"success","is_error":False,"result":f"EXEC_{runner}","session_id":thread_id})
+    else:
+        send({"type":"thread.started","thread_id":thread_id})
+        send({"type":"turn.started"})
+        send({"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":f"EXEC_{runner}"}})
+        send({"type":"turn.completed","usage":{"input_tokens":5,"cached_input_tokens":0,"output_tokens":3,"reasoning_output_tokens":0,"total_tokens":8}})
     sys.exit(0)
 
 for line in sys.stdin:
@@ -174,7 +215,10 @@ for runner_name, adapter, mode, transport in (
     ("codex-im", "codex", "accept", "app_server"),
     ("codex-im-queue", "codex", "accept", "app_server"),
     ("codex-reject", "codex", "reject", "app_server"),
+    ("claude-reject", "claude_code", "reject", None),
     ("codex-exec", "codex", "accept", "exec"),
+    ("claude-exec", "claude_code", "accept", "exec"),
+    ("claude", "claude_code", "accept", None),
 ):
     configured[runner_name] = runner(adapter, mode, transport)
 
@@ -199,6 +243,8 @@ run_case() {
   local session="live-guide-$runner"
   local stream_log="$TEST_DIR/$runner-stream.ndjson"
   local guide_log="$TEST_DIR/$runner-guide.json"
+  local wait_event="turn_ready"
+  [[ "$runner" == claude* ]] && wait_event="stream_ready"
 
   "$BIFROST_BIN" -H 127.0.0.1 -p "$BIFROST_PORT" agent run \
     --runner "$runner" --session "$session" --json \
@@ -206,7 +252,7 @@ run_case() {
   local run_pid=$!
 
   for _ in $(seq 1 200); do
-    if grep -q "\"event\":\"turn_ready\",\"runner\":\"$runner\"" "$MOCK_LOG" 2>/dev/null; then
+    if grep -q "\"event\":\"$wait_event\",\"runner\":\"$runner\"" "$MOCK_LOG" 2>/dev/null; then
       break
     fi
     if ! kill -0 "$run_pid" >/dev/null 2>&1; then
@@ -229,7 +275,10 @@ runner, guide_path, stream_path, mock_path, port = sys.argv[1:6]
 guide = json.load(open(guide_path, encoding="utf-8"))
 assert guide["delivery"] == "steered", guide
 assert guide["threadId"] == f"thread-{runner}", guide
-assert guide["turnId"] == f"turn-{runner}", guide
+if runner == "claude":
+    assert guide.get("turnId") is None, guide
+else:
+    assert guide["turnId"] == f"turn-{runner}", guide
 
 events = [json.loads(line) for line in open(stream_path, encoding="utf-8") if line.strip().startswith("{")]
 finished = [event for event in events if event.get("eventType") == "run_finished"]
@@ -242,12 +291,26 @@ assert len(tool_started) == len(tool_finished) == 1, events
 assert tool_started[0] < tool_finished[0] < events.index(finished[0]), events
 
 records = [json.loads(line) for line in open(mock_path, encoding="utf-8")]
-steered = [record for record in records if record.get("event") == "turn_steered" and record.get("runner") == runner]
-assert len(steered) == 1, records
-params = steered[0]["params"]
-assert params["expectedTurnId"] == f"turn-{runner}", params
-assert params["input"][0]["text"] == f"focus-{runner}", params
-assert params["clientUserMessageId"].startswith("guide-"), params
+if runner == "claude":
+    interrupts = [record for record in records if record.get("event") == "stream_interrupt_received" and record.get("runner") == runner]
+    assert len(interrupts) == 1, records
+    assert interrupts[0]["frame"]["request"]["subtype"] == "interrupt", interrupts
+    steered = [record for record in records if record.get("event") == "stream_guide_received" and record.get("runner") == runner]
+    assert len(steered) == 1, records
+    frame = steered[0]["frame"]
+    assert frame["type"] == "user", frame
+    assert frame["message"]["content"][0]["text"] == f"focus-{runner}", frame
+    starts = [record for record in records if record.get("event") == "turn_started" and record.get("runner") == runner]
+    assert len(starts) == 1 and starts[0]["pid"] == steered[0]["pid"], records
+    ready = [record for record in records if record.get("event") == "stream_ready" and record.get("runner") == runner]
+    assert len(ready) == 1 and ready[0]["pid"] == steered[0]["pid"], records
+else:
+    steered = [record for record in records if record.get("event") == "turn_steered" and record.get("runner") == runner]
+    assert len(steered) == 1, records
+    params = steered[0]["params"]
+    assert params["expectedTurnId"] == f"turn-{runner}", params
+    assert params["input"][0]["text"] == f"focus-{runner}", params
+    assert params["clientUserMessageId"].startswith("guide-"), params
 
 run_id = finished[0]["runId"]
 with urllib.request.urlopen(
@@ -255,7 +318,11 @@ with urllib.request.urlopen(
 ) as response:
     detail = json.loads(response.read().decode())
 args = detail["snapshot"]["args"]
-if runner == "traex":
+if runner == "claude":
+    assert "--input-format" in args, args
+    assert args[args.index("--input-format") + 1] == "stream-json", args
+    assert "--replay-user-messages" in args, args
+elif runner == "traex":
     assert args[:3] == ["app-server", "--listen", "stdio://"], args
 else:
     assert args[:2] == ["app-server", "--stdio"], args
@@ -263,12 +330,14 @@ metadata = detail["metadata"]
 assert metadata["threadId"] == f"thread-{runner}", metadata
 assert metadata["usageInputTokens"] == "11", metadata
 assert metadata["usageOutputTokens"] == "7", metadata
-assert metadata["usageTotalTokens"] == "18", metadata
+if runner != "claude":
+    assert metadata["usageTotalTokens"] == "18", metadata
 PY
 }
 
 run_case codex
 run_case traex
+run_case claude
 
 run_web_guide_case() {
   local runner="$1"
@@ -404,7 +473,8 @@ run_queue_fallback_case() {
   local stream_log="$TEST_DIR/$runner-stream.ndjson"
   local guide_log="$TEST_DIR/$runner-guide.json"
   local wait_event="turn_ready"
-  [[ "$runner" == "codex-exec" ]] && wait_event="exec_started"
+  [[ "$runner" == claude* ]] && wait_event="stream_ready"
+  [[ "$runner" == *"-exec" ]] && wait_event="exec_started"
 
   curl -sS -N --noproxy '*' \
     -H 'content-type: application/json' \
@@ -435,18 +505,38 @@ assert guide["delivery"] == expected_delivery, guide
 events = [json.loads(line) for line in open(stream_path, encoding="utf-8") if line.strip()]
 finished = [event for event in events if event.get("eventType") == "run_finished"]
 assert len(finished) == 2, events
-if runner == "codex-reject":
-    assert finished[0]["response"] == "FIRST_codex-reject", finished
-    assert finished[1]["response"] == "QUEUED_codex-reject", finished
-    assert "no active turn to steer" in guide["reason"], guide
+if runner in ("codex-reject", "claude-reject"):
+    assert finished[0]["response"] == f"FIRST_{runner}", finished
+    assert finished[1]["response"] == f"QUEUED_{runner}", finished
+    expected_reason = "no active turn to steer" if runner == "codex-reject" else "no active Claude response"
+    assert expected_reason in guide["reason"], guide
 else:
-    assert all(event["response"] == "EXEC_codex-exec" for event in finished), finished
+    assert all(event["response"] == f"EXEC_{runner}" for event in finished), finished
     assert "exec transport" in guide["reason"], guide
 PY
 }
 
 run_queue_fallback_case codex-reject queued
+run_queue_fallback_case claude-reject queued
 run_queue_fallback_case codex-exec queued
+run_queue_fallback_case claude-exec queued
+
+python3 - "$MOCK_LOG" <<'PY'
+import json
+import sys
+
+records = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+claude_exec = [
+    record for record in records
+    if record.get("event") == "exec_started" and record.get("runner") == "claude-exec"
+]
+assert len(claude_exec) == 2, claude_exec
+for record in claude_exec:
+    argv = record["argv"]
+    input_format = argv[argv.index("--input-format") + 1]
+    assert input_format == "text", record
+    assert "--replay-user-messages" not in argv, record
+PY
 
 python3 - "$BIFROST_PORT" <<'PY'
 import json
