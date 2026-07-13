@@ -121,3 +121,4 @@
 | 2026-07-12 | TC-ADRP-06 | 待 Pro 真实研究完成后执行微信与周度洞察人验。 |
 | 2026-07-12 | TC-ADRP-07 | 通过。使用默认 `research_seed` Prompt 真实运行 Codex：用户确认的 10 个研究主题全部进入 `research_questions`，6 个故障/执行事项全部进入 `non_research_items`（10/10、6/6）。追加未直接写入样例的泛化测试：云厂商基础设施判断、多代理框架比较、保留音色翻译正确进入研究；只有主题词的“帮我记录一下 SpaceX”进入 `memory_only`，异常归因产品灵感进入 `weekly_insight`，入口白屏修复进入 `action_item`。全程未输出优先级或分数。 |
 | 2026-07-13 | TC-ADRP-08 | 通过。真实 Project“日报研究”在带 nonce 的入口保持 Chat + Pro + Project composer；ChatGPT 将裸 project id 重定向为带 `ri-bao-yan-jiu` slug 后仍被识别为同一项目。11 个既有真实研究会话已逐项迁入。新建冒烟会话 `6a549006-51a0-83ea-945a-1568e098f08f` 位于该 Project 内，Pro 最终回复 `PROJECT_ARCHIVE_OK`。Project URL 单测、研究 fan-out API E2E 和 WebUI 保存测试均通过。 |
+| 2026-07-14 | TC-ADRP-01/02/03 回归 | `bifrost-admin` release 单测 2627/2627 通过；新增真实 mock CLI/CDP/HTTP 用例覆盖编排依赖链、局部/全部失败、GitHub `verified/unavailable/missing`、本地 context fallback、Chat + Pro 发送前门禁、Project 新会话恢复和选定 Agent API 异步执行。新增生产 Rust changed-lines 覆盖率为 95.57%（1727/1807），通过 95% 门禁。 |

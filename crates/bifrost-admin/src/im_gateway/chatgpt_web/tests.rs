@@ -1,5 +1,43 @@
 use super::*;
-use std::collections::BTreeMap;
+use futures_util::{SinkExt, StreamExt};
+use std::collections::{BTreeMap, VecDeque};
+use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite::Message;
+
+async fn test_cdp(values: Vec<Value>) -> CdpClient {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let mut values = VecDeque::from(values);
+        while let Some(Ok(message)) = socket.next().await {
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let request: Value = serde_json::from_str(&text).unwrap();
+            let id = request.get("id").and_then(Value::as_u64).unwrap();
+            let method = request
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let result = if method == "Runtime.evaluate" {
+                json!({"result": {"value": values.pop_front().unwrap_or(Value::Null)}})
+            } else {
+                json!({})
+            };
+            socket
+                .send(Message::Text(
+                    json!({"id": id, "result": result}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+        }
+    });
+    CdpClient::connect(&format!("ws://{address}"))
+        .await
+        .unwrap()
+}
 
 #[test]
 fn chatgpt_web_browser_defaults_to_headed_mode() {
@@ -173,6 +211,46 @@ fn login_page_readiness_rejects_account_chooser_and_disabled_composer() {
         "accountChooserVisible": false
     })));
     assert!(!login_page_state_is_ready(&serde_json::json!({})));
+}
+
+#[tokio::test]
+async fn login_page_inspection_returns_browser_composer_state() {
+    let expected = json!({
+        "composerVisible": true,
+        "composerDisabled": false,
+        "accountChooserVisible": false
+    });
+    let cdp = test_cdp(vec![expected.clone()]).await;
+    assert_eq!(inspect_login_page_state(&cdp).await.unwrap(), expected);
+    cdp.close();
+}
+
+#[test]
+fn chatgpt_web_e2e_mock_includes_project_and_reuses_conversation_hint() {
+    let mut request =
+        make_run_request_with_params(json!({"conversationId": "existing-conversation"}), None);
+    request.adapter_config.extra.insert(
+        "chatgpt".to_string(),
+        json!({"projectUrl": "https://chatgpt.com/g/g-p-research/project"}),
+    );
+    let output = mock_run_adapter_for_e2e(&request, "  research prompt  ");
+    assert_eq!(
+        output.metadata.get("conversationId").map(String::as_str),
+        Some("existing-conversation")
+    );
+    assert!(output.response.contains("research prompt"));
+    assert!(output
+        .response
+        .contains("CHATGPT_PROJECT_URL: https://chatgpt.com/g/g-p-research/project"));
+
+    request.params = Value::Null;
+    request.adapter_config.extra.clear();
+    let output = mock_run_adapter_for_e2e(&request, "plain");
+    assert!(output.response.starts_with("chatgpt_web_e2e_mock: plain"));
+    assert!(output
+        .metadata
+        .get("conversationId")
+        .is_some_and(|value| value.starts_with("mock-conversation-")));
 }
 
 #[test]

@@ -3942,7 +3942,50 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{SinkExt, StreamExt};
     use serde_json::{json, Value};
+    use std::collections::VecDeque;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::Message;
+
+    async fn mock_cdp(values: Vec<Value>) -> CdpClient {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut values = VecDeque::from(values);
+            while let Some(Ok(message)) = socket.next().await {
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let id = request.get("id").and_then(Value::as_u64).unwrap();
+                let method = request
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let result = if method == "Runtime.evaluate" {
+                    json!({
+                        "result": {
+                            "value": values.pop_front().unwrap_or(Value::Null)
+                        }
+                    })
+                } else {
+                    json!({})
+                };
+                socket
+                    .send(Message::Text(
+                        json!({"id": id, "result": result}).to_string().into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+        CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap()
+    }
 
     #[test]
     fn normalize_whitespace_collapses_runs_and_trims() {
@@ -4123,6 +4166,233 @@ mod tests {
             extract_conversation_id_from_url("https://chatgpt.com/"),
             None,
         );
+    }
+
+    #[tokio::test]
+    async fn wait_chat_surface_value_polls_until_ready() {
+        let cdp = mock_cdp(vec![json!({"ready": false}), json!({"ready": true})]).await;
+        let value = wait_chat_surface_value(&cdp, "surface", Duration::from_secs(1), |value| {
+            value.get("ready").and_then(Value::as_bool) == Some(true)
+        })
+        .await
+        .unwrap();
+        assert_eq!(value, json!({"ready": true}));
+        cdp.close();
+    }
+
+    #[tokio::test]
+    async fn wait_chat_surface_value_returns_last_value_at_deadline() {
+        let cdp = mock_cdp(vec![json!({"ready": false})]).await;
+        let value = wait_chat_surface_value(&cdp, "surface", Duration::ZERO, |_| false)
+            .await
+            .unwrap();
+        assert_eq!(value, json!({"ready": false}));
+        cdp.close();
+    }
+
+    #[tokio::test]
+    async fn prepare_new_chat_surface_accepts_auto_and_rejects_unknown_preferences() {
+        let cdp = mock_cdp(Vec::new()).await;
+        let mut config = test_runtime_config_with_execution_mode("headed");
+        prepare_new_chat_surface(&cdp, &config).await.unwrap();
+
+        config.chatgpt.interface_mode = "canvas".to_string();
+        assert!(prepare_new_chat_surface(&cdp, &config)
+            .await
+            .unwrap_err()
+            .contains("unsupported ChatGPT interface mode 'canvas'"));
+
+        config.chatgpt.interface_mode = "auto".to_string();
+        config.chatgpt.model = "enterprise".to_string();
+        assert!(prepare_new_chat_surface(&cdp, &config)
+            .await
+            .unwrap_err()
+            .contains("unsupported ChatGPT model preference 'enterprise'"));
+        cdp.close();
+    }
+
+    #[tokio::test]
+    async fn prepare_new_chat_surface_verifies_already_selected_chat_and_pro() {
+        let chat = json!({"ok": true, "checked": true, "x": 10.0, "y": 20.0});
+        let pro = json!({"ok": true, "selected": true, "x": 30.0, "y": 40.0});
+        let cdp = mock_cdp(vec![chat.clone(), chat, pro]).await;
+        let mut config = test_runtime_config_with_execution_mode("headed");
+        config.chatgpt.interface_mode = " Chat ".to_string();
+        config.chatgpt.model = " Pro ".to_string();
+        prepare_new_chat_surface(&cdp, &config).await.unwrap();
+        cdp.close();
+    }
+
+    #[tokio::test]
+    async fn chat_and_pro_controls_are_clicked_and_verified_when_unselected() {
+        let cdp = mock_cdp(vec![
+            json!({"ok": true, "checked": false, "x": 10.0, "y": 20.0}),
+            json!({"ok": true, "checked": true, "x": 10.0, "y": 20.0}),
+            json!({"ok": true, "selected": false, "x": 30.0, "y": 40.0}),
+            json!({"ok": true, "x": 50.0, "y": 60.0}),
+            json!({"ok": true, "selected": true, "x": 30.0, "y": 40.0}),
+        ])
+        .await;
+        ensure_chat_mode(&cdp).await.unwrap();
+        ensure_pro_model(&cdp).await.unwrap();
+        cdp.close();
+    }
+
+    #[tokio::test]
+    async fn chat_and_pro_control_failures_are_actionable() {
+        let chat_missing = mock_cdp(vec![json!({"ok": false})]).await;
+        let chat_unverified = mock_cdp(vec![
+            json!({"ok": true, "checked": false}),
+            json!({"ok": true, "checked": false}),
+        ])
+        .await;
+        let pro_missing = mock_cdp(vec![json!({"ok": false})]).await;
+        let pro_option_missing = mock_cdp(vec![
+            json!({"ok": true, "selected": false}),
+            json!({"ok": false}),
+        ])
+        .await;
+        let pro_unverified = mock_cdp(vec![
+            json!({"ok": true, "selected": false}),
+            json!({"ok": true}),
+            json!({"ok": true, "selected": false}),
+        ])
+        .await;
+
+        let (
+            chat_missing_error,
+            chat_verify_error,
+            pro_missing_error,
+            pro_option_error,
+            pro_verify_error,
+        ) = tokio::join!(
+            ensure_chat_mode(&chat_missing),
+            ensure_chat_mode(&chat_unverified),
+            ensure_pro_model(&pro_missing),
+            ensure_pro_model(&pro_option_missing),
+            ensure_pro_model(&pro_unverified),
+        );
+        assert!(chat_missing_error
+            .unwrap_err()
+            .contains("cannot enforce Chat mode"));
+        assert!(chat_verify_error
+            .unwrap_err()
+            .contains("Chat mode selection could not be verified"));
+        assert!(pro_missing_error
+            .unwrap_err()
+            .contains("cannot locate ChatGPT model picker"));
+        assert!(pro_option_error
+            .unwrap_err()
+            .contains("cannot select Pro model"));
+        assert!(pro_verify_error
+            .unwrap_err()
+            .contains("Pro model selection could not be verified"));
+        for cdp in [
+            &chat_missing,
+            &chat_unverified,
+            &pro_missing,
+            &pro_option_missing,
+            &pro_unverified,
+        ] {
+            cdp.close();
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_project_must_match_current_page() {
+        let expected = "https://chatgpt.com/g/g-p-daily-research/project";
+        let cdp = mock_cdp(vec![
+            json!({"url": format!("{expected}/?bifrost_new_chat=1")}),
+            json!({"url": "https://chatgpt.com/"}),
+        ])
+        .await;
+        let mut config = test_runtime_config_with_execution_mode("headed");
+        ensure_new_conversation_project(&cdp, &config)
+            .await
+            .unwrap();
+        config.chatgpt.project_url = Some(expected.to_string());
+        ensure_new_conversation_project(&cdp, &config)
+            .await
+            .unwrap();
+        assert!(ensure_new_conversation_project(&cdp, &config)
+            .await
+            .unwrap_err()
+            .contains("Project page mismatch"));
+        cdp.close();
+    }
+
+    #[tokio::test]
+    async fn new_conversation_navigation_reuses_clean_homepage() {
+        let cdp = mock_cdp(vec![json!({
+            "pageKind": "new_conversation",
+            "urlConversationId": null,
+            "url": "https://chatgpt.com/",
+            "bodyText": "ready"
+        })])
+        .await;
+        let config = test_runtime_config_with_execution_mode("headed");
+        navigate_to_new_conversation(&cdp, &config, "test clean homepage")
+            .await
+            .unwrap();
+        cdp.close();
+    }
+
+    #[tokio::test]
+    async fn recover_to_new_conversation_rechecks_clean_surface() {
+        let page = json!({
+            "readyState": "complete",
+            "pageKind": "new_conversation",
+            "conversationId": null,
+            "urlConversationId": null,
+            "url": "https://chatgpt.com/",
+            "bodyText": "ready",
+            "visibleComposerCount": 1,
+            "busyCount": 0
+        });
+        let actionable = json!({"actionable": true});
+        let cdp = mock_cdp(vec![
+            Value::String(r#"{"dismissed":false}"#.to_string()),
+            page.clone(),
+            actionable.clone(),
+            page.clone(),
+            actionable,
+            page,
+        ])
+        .await;
+        let config = test_runtime_config_with_execution_mode("headed");
+        recover_to_new_conversation(&cdp, &config, "test recovery")
+            .await
+            .unwrap();
+        cdp.close();
+    }
+
+    #[test]
+    fn project_page_match_rejects_invalid_and_cross_origin_urls() {
+        let expected = "https://chatgpt.com/g/g-p-research/project";
+        assert!(!same_project_page("not a url", expected));
+        assert!(!same_project_page("https://chatgpt.com/", "not a url"));
+        assert!(!same_project_page(
+            "https://example.com/g/g-p-research/project",
+            expected
+        ));
+    }
+
+    fn test_runtime_config_with_execution_mode(execution_mode: &str) -> RuntimeConfig {
+        let browser = super::super::BrowserConfig {
+            execution_mode: execution_mode.to_string(),
+            ..Default::default()
+        };
+        let root = PathBuf::from(format!(
+            "/tmp/bifrost-chatgpt-web-send-surface-test-{execution_mode}"
+        ));
+        RuntimeConfig {
+            browser,
+            chatgpt: super::super::ChatGptConfig::default(),
+            profile_dir: root.join("profile"),
+            state_path: root.join("auth_state.json"),
+            sessions_path: root.join("sessions.json"),
+            attachments_dir: root.join("attachments"),
+        }
     }
 }
 

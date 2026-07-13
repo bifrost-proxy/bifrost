@@ -1518,6 +1518,16 @@ async fn final_response_prefers_run_failed_message_over_protocol_stdout() {
 }
 
 #[tokio::test]
+async fn final_response_falls_back_to_trimmed_stdout() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let response = final_response(&temp_dir.path().join("missing.md"), "  raw fallback  ", &[])
+        .await
+        .unwrap();
+
+    assert_eq!(response, "raw fallback");
+}
+
+#[tokio::test]
 async fn external_cli_runtime_runs_mock_command_and_writes_artifacts() {
     let temp_dir = tempfile::tempdir().unwrap();
     let runtime = ExternalCliRuntime::new(temp_dir.path());

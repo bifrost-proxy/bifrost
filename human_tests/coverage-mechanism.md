@@ -549,3 +549,11 @@ Rust 正常、边界、错误和 relay 测试验证；覆盖率契约禁止这�
   脚本通过，规则成功应用并跳转目标页，导航瞬间空 body 不再中断 CDP 轮询；HTTP/3
   release 预编译 1 分 33 秒完成，全量脚本 34/34 通过；Linux/macOS Shell CI 等价配置
   下 Rust integration 标记为重复跳过，其余真实代理场景仍为 34/34、失败 0。
+
+2026-07-14 执行补充（Daily Research changed-lines）：
+
+- TC-COV-11：PASS。使用 `cargo llvm-cov` 的 release `bifrost-admin` 单测 profile 和
+  `scripts/ci/coverage-diff.py --base-ref origin/main --threshold 95` 计算，新增/修改生产
+  Rust 行覆盖率为 `1727/1807 = 95.57%`。门禁真实覆盖选定 Daily Agent HTTP 触发、
+  研究 fan-out 成功/降级/失败、ChatGPT Project 会话恢复、IM mock inbound、消息发送与
+  Windows 路径归一化，没有降低阈值或把测试代码计入分母。

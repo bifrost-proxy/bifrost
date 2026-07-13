@@ -178,6 +178,105 @@ fn daily_agent_validation_rejects_non_english_tokens_and_duplicates() {
 }
 
 #[test]
+fn daily_agent_research_fanout_validation_rejects_invalid_fields() {
+    let valid_item = || {
+        let mut item = AsrDailyAgentItem::daily_report();
+        item.runner = "runner".to_string();
+        item.im_delivery.enabled = false;
+        item.research_fanout = Some(AsrDailyAgentResearchFanoutConfig {
+            max_questions: 4,
+            allowed_runners: vec!["runner".to_string()],
+            context_profiles: DailyAgentBTreeMap::from([(
+                "repo".to_string(),
+                AsrDailyAgentResearchContextProfile {
+                    runner: "runner".to_string(),
+                    work_dir: "/tmp".to_string(),
+                    instructions: None,
+                },
+            )]),
+            ..Default::default()
+        });
+        item
+    };
+
+    let mut item = valid_item();
+    item.research_fanout.as_mut().unwrap().max_questions = 0;
+    assert!(validate_daily_agent_item(&item)
+        .unwrap_err()
+        .contains("max_questions must be between 1 and 50"));
+
+    let mut item = valid_item();
+    item.research_fanout
+        .as_mut()
+        .unwrap()
+        .chatgpt_model = "auto".to_string();
+    assert!(validate_daily_agent_item(&item)
+        .unwrap_err()
+        .contains("requires ChatGPT interface_mode='chat' and model='pro'"));
+
+    let mut item = valid_item();
+    item.research_fanout
+        .as_mut()
+        .unwrap()
+        .chatgpt_project_url = Some("https://example.com/project".to_string());
+    assert!(validate_daily_agent_item(&item)
+        .unwrap_err()
+        .contains("chatgpt_project_url is invalid"));
+
+    let mut item = valid_item();
+    item.research_fanout
+        .as_mut()
+        .unwrap()
+        .allowed_runners
+        .push(" ".to_string());
+    assert!(validate_daily_agent_item(&item)
+        .unwrap_err()
+        .contains("allowed_runners cannot contain an empty runner"));
+
+    let mut item = valid_item();
+    let profile = item
+        .research_fanout
+        .as_mut()
+        .unwrap()
+        .context_profiles
+        .remove("repo")
+        .unwrap();
+    item.research_fanout
+        .as_mut()
+        .unwrap()
+        .context_profiles
+        .insert("bad profile".to_string(), profile);
+    assert!(validate_daily_agent_item(&item)
+        .unwrap_err()
+        .contains("context profile 'bad profile' must use English"));
+
+    let mut item = valid_item();
+    item.research_fanout
+        .as_mut()
+        .unwrap()
+        .context_profiles
+        .get_mut("repo")
+        .unwrap()
+        .work_dir = " ".to_string();
+    assert!(validate_daily_agent_item(&item)
+        .unwrap_err()
+        .contains("requires runner and work_dir"));
+
+    let mut config = AsrDailyAgentConfig::default();
+    config.agents[0].runner = "runner".to_string();
+    config.agents[0].im_delivery.enabled = false;
+    config.agents[1].runner = "runner".to_string();
+    config.agents[1].im_delivery.enabled = false;
+    config.agents[1].dependencies = vec![AsrDailyAgentDependency {
+        agent_id: String::new(),
+        include_output: true,
+    }];
+    assert!(validate_daily_agent_config(&config)
+        .unwrap_err()
+        .contains("dependency agent_id cannot be empty"));
+}
+
+#[test]
 fn daily_agent_dependencies_use_stable_topological_order() {
     let mut config = AsrDailyAgentConfig::default();
     let mut dispatcher = AsrDailyAgentItem::daily_report();
@@ -495,6 +594,120 @@ fn daily_agent_workspace_migrates_legacy_instruction_paths() {
     assert!(tomorrow_todo.contains("`input/YYYY-MM-DD.md`"));
     assert!(tomorrow_todo.contains("`./output/tomorrow_todo/`"));
     assert!(!tomorrow_todo.contains("当前目录根部的 `YYYY-MM-DD.md`"));
+}
+
+#[test]
+fn daily_agent_dependency_sync_filters_invalid_entries_and_reports_unknown_dependency() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let mut task = test_directory_task("daily-agent-sync-filter", temp.path().join("audio"));
+    let mut agents = normalized_daily_agents(&task.daily_agent);
+    agents[0].runner = "runner".to_string();
+    agents[1].runner = "runner".to_string();
+    agents[1].dependencies = vec![AsrDailyAgentDependency {
+        agent_id: agents[0].id.clone(),
+        include_output: true,
+    }];
+    task.daily_agent.agents = agents.clone();
+
+    let downstream = &agents[1];
+    let missing_map = HashMap::new();
+    assert!(sync_daily_agent_dependency_outputs(&task, downstream, &missing_map, None)
+        .unwrap_err()
+        .contains("is not configured"));
+
+    let map = agents
+        .iter()
+        .cloned()
+        .map(|agent| (agent.id.clone(), agent))
+        .collect::<HashMap<_, _>>();
+    assert!(sync_daily_agent_dependency_outputs(&task, downstream, &map, None)
+        .unwrap()
+        .is_empty());
+
+    let upstream_task = task_for_daily_agent(&task, &agents[0]);
+    let output = daily_agent_output_dir(&upstream_task);
+    std::fs::create_dir_all(output.join("2026-07-20-report.md")).unwrap();
+    std::fs::write(output.join("notes.md"), "ignore").unwrap();
+    std::fs::write(output.join("bad-date-report.md"), "ignore").unwrap();
+    std::fs::write(output.join("2026-07-21-report.md"), "wrong date").unwrap();
+    std::fs::write(output.join("2026-07-20-report.txt"), "ignore").unwrap();
+
+    assert!(sync_daily_agent_dependency_outputs(
+        &task,
+        downstream,
+        &map,
+        Some("2026-07-20"),
+    )
+    .unwrap()
+    .is_empty());
+
+    let mut research_task = task_for_daily_agent(&task, &agents[0]);
+    research_task.daily_agent.agent_id = DEFAULT_RESEARCH_SEED_AGENT_ID.to_string();
+    research_task.daily_agent.instructions_source = AsrDailyAgentInstructionsSource::Default;
+    let migrated = migrate_daily_agent_instructions_content(
+        &research_task,
+        "# 全天候私人助理整理指南\n\n旧的通用模板",
+    );
+    assert_eq!(migrated, daily_agent_instruction_content(&research_task));
+}
+
+#[test]
+fn daily_agent_dependency_sync_reports_filesystem_failures() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+
+    let configured = |task_id: &str| {
+        let mut task = test_directory_task(task_id, temp.path().join(format!("{task_id}-audio")));
+        let mut agents = normalized_daily_agents(&task.daily_agent);
+        agents[0].runner = "runner".to_string();
+        agents[1].runner = "runner".to_string();
+        agents[1].dependencies = vec![AsrDailyAgentDependency {
+            agent_id: agents[0].id.clone(),
+            include_output: true,
+        }];
+        task.daily_agent.agents = agents.clone();
+        let map = agents
+            .iter()
+            .cloned()
+            .map(|agent| (agent.id.clone(), agent))
+            .collect::<HashMap<_, _>>();
+        (task, agents, map)
+    };
+
+    let (task, agents, map) = configured("daily-agent-sync-create-error");
+    let upstream_task = task_for_daily_agent(&task, &agents[0]);
+    std::fs::create_dir_all(daily_agent_output_dir(&upstream_task)).unwrap();
+    let downstream_task = task_for_daily_agent(&task, &agents[1]);
+    std::fs::create_dir_all(daily_agent_work_dir(&downstream_task)).unwrap();
+    std::fs::write(daily_agent_input_dir(&downstream_task), "not a directory").unwrap();
+    assert!(sync_daily_agent_dependency_outputs(&task, &agents[1], &map, None)
+        .unwrap_err()
+        .contains("create Daily Agent upstream input dir"));
+
+    let (task, agents, map) = configured("daily-agent-sync-read-error");
+    let upstream_task = task_for_daily_agent(&task, &agents[0]);
+    let source_dir = daily_agent_output_dir(&upstream_task);
+    std::fs::create_dir_all(source_dir.parent().unwrap()).unwrap();
+    std::fs::write(&source_dir, "not a directory").unwrap();
+    assert!(sync_daily_agent_dependency_outputs(&task, &agents[1], &map, None)
+        .unwrap_err()
+        .contains("read Daily Agent dependency output dir"));
+
+    let (task, agents, map) = configured("daily-agent-sync-copy-error");
+    let upstream_task = task_for_daily_agent(&task, &agents[0]);
+    let source_dir = daily_agent_output_dir(&upstream_task);
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("2026-07-20-report.md"), "report").unwrap();
+    let downstream_task = task_for_daily_agent(&task, &agents[1]);
+    let target_path = daily_agent_upstream_input_dir(&downstream_task, &agents[0].id)
+        .join("2026-07-20-report.md");
+    std::fs::create_dir_all(&target_path).unwrap();
+    assert!(sync_daily_agent_dependency_outputs(&task, &agents[1], &map, None)
+        .unwrap_err()
+        .contains("copy Daily Agent dependency output"));
 }
 
 #[test]
@@ -2523,4 +2736,995 @@ fn daily_agent_research_index_does_not_expose_local_result_paths() {
     let report = render_daily_research_index("2026-07-13", &[result]);
     assert!(report.contains("完整研究文件：`q1.md`"));
     assert!(!report.contains("/Users/private"));
+}
+
+fn daily_agent_mock_runner_settings(
+    content: &str,
+) -> crate::im_gateway::external_cli::ExternalCliAgentSettings {
+    daily_agent_mock_file_runner_settings(content, None)
+}
+
+fn daily_agent_mock_file_runner_settings(
+    content: &str,
+    report_path: Option<&str>,
+) -> crate::im_gateway::external_cli::ExternalCliAgentSettings {
+    let escaped = serde_json::to_string(content).unwrap();
+    let event = format!(r#"{{"type":"assistant_final","content":{escaped}}}"#);
+    let (executable, args) = if cfg!(windows) {
+        let write_report = report_path.map_or_else(String::new, |path| {
+            let path = path.replace('/', "\\");
+            let parent = Path::new(&path)
+                .parent()
+                .map(|value| value.to_string_lossy().to_string())
+                .unwrap_or_default();
+            format!(
+                "if not exist \"{parent}\" mkdir \"{parent}\" & >\"{path}\" echo # mock report & "
+            )
+        });
+        (
+            "cmd.exe".to_string(),
+            vec![
+                "/D".to_string(),
+                "/C".to_string(),
+                format!("{write_report}more >nul & echo {event}"),
+            ],
+        )
+    } else {
+        let write_report = report_path.map_or_else(String::new, |path| {
+            let parent = Path::new(path)
+                .parent()
+                .map(|value| value.to_string_lossy().to_string())
+                .unwrap_or_default();
+            format!(
+                "mkdir -p '{}'; printf '%s\\n' '# mock report' > '{}'; ",
+                parent.replace('\'', "'\\''"),
+                path.replace('\'', "'\\''")
+            )
+        });
+        (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                format!(
+                    "{write_report}cat >/dev/null; printf '%s\\n' '{}'",
+                    event.replace('\'', "'\\''")
+                ),
+            ],
+        )
+    };
+    crate::im_gateway::external_cli::ExternalCliAgentSettings {
+        enabled: true,
+        adapter: "mock".to_string(),
+        adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
+            executable: Some(executable),
+            args,
+            timeout_secs: Some(10),
+            ..Default::default()
+        },
+        inject_bifrost_tools: false,
+        ..Default::default()
+    }
+}
+
+fn save_daily_agent_mock_runners(
+    data_dir: &Path,
+    runners: impl IntoIterator<
+        Item = (
+            &'static str,
+            crate::im_gateway::external_cli::ExternalCliAgentSettings,
+        ),
+    >,
+) {
+    let store = crate::im_gateway::external_cli::ExternalCliConfigStore::new(data_dir);
+    let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    for (id, settings) in runners {
+        config.runners.insert(id.to_string(), settings);
+    }
+    store.save(config).unwrap();
+}
+
+fn daily_agent_research_plan(
+    task: &AsrDirectoryTask,
+    date: &str,
+) -> AsrDailyAgentChangePlan {
+    let report_target = daily_agent_output_dir(task)
+        .join(format!("{date}-report.md"))
+        .to_string_lossy()
+        .to_string();
+    AsrDailyAgentChangePlan {
+        task_id: task.id.clone(),
+        entries: vec![DailyAgentChangePlanEntry {
+            date: date.to_string(),
+            source_path: daily_dir_for_task(&task.id)
+                .join(format!("{date}.md"))
+                .to_string_lossy()
+                .to_string(),
+            change_kind: DailyAgentChangeKind::Force,
+            source_sha256: "research-source".to_string(),
+            source_len_bytes: 10,
+            report_target,
+            append_offset: None,
+        }],
+        skipped: false,
+        skip_reason: None,
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn daily_agent_research_fanout_executes_local_context_and_records_failures() {
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    save_daily_agent_mock_runners(
+        temp.path(),
+        [
+            (
+                "mock-main",
+                daily_agent_mock_runner_settings("GITHUB_CONNECTOR_STATUS: verified"),
+            ),
+            (
+                "mock-context",
+                daily_agent_mock_runner_settings("context facts"),
+            ),
+            (
+                "mock-unavailable",
+                daily_agent_mock_runner_settings("GITHUB_CONNECTOR_STATUS: unavailable"),
+            ),
+            (
+                "web-context",
+                crate::im_gateway::external_cli::ExternalCliAgentSettings {
+                    enabled: true,
+                    adapter: "chatgpt_web".to_string(),
+                    ..Default::default()
+                },
+            ),
+        ],
+    );
+
+    let direct_dir = temp.path().join("direct-context");
+    let local_dir = temp.path().join("local-context");
+    std::fs::create_dir_all(&direct_dir).unwrap();
+    std::fs::create_dir_all(&local_dir).unwrap();
+    let mut fanout = AsrDailyAgentResearchFanoutConfig {
+        max_questions: 10,
+        allowed_runners: vec![
+            "mock-main".to_string(),
+            "mock-context".to_string(),
+            "mock-unavailable".to_string(),
+            "missing-runner".to_string(),
+        ],
+        ..Default::default()
+    };
+    fanout.context_profiles.insert(
+        "direct".to_string(),
+        AsrDailyAgentResearchContextProfile {
+            runner: "mock-main".to_string(),
+            work_dir: direct_dir.to_string_lossy().to_string(),
+            instructions: Some("read direct facts".to_string()),
+        },
+    );
+    fanout.context_profiles.insert(
+        "local".to_string(),
+        AsrDailyAgentResearchContextProfile {
+            runner: "mock-context".to_string(),
+            work_dir: local_dir.to_string_lossy().to_string(),
+            instructions: Some("collect facts".to_string()),
+        },
+    );
+    fanout.context_profiles.insert(
+        "web".to_string(),
+        AsrDailyAgentResearchContextProfile {
+            runner: "web-context".to_string(),
+            work_dir: local_dir.to_string_lossy().to_string(),
+            instructions: None,
+        },
+    );
+    fanout.context_profiles.insert(
+        "missing-dir".to_string(),
+        AsrDailyAgentResearchContextProfile {
+            runner: "mock-context".to_string(),
+            work_dir: temp.path().join("missing-context").to_string_lossy().to_string(),
+            instructions: None,
+        },
+    );
+    fanout.context_profiles.insert(
+        "direct-missing".to_string(),
+        AsrDailyAgentResearchContextProfile {
+            runner: "mock-main".to_string(),
+            work_dir: temp
+                .path()
+                .join("missing-direct-context")
+                .to_string_lossy()
+                .to_string(),
+            instructions: None,
+        },
+    );
+
+    let mut agent = AsrDailyAgentItem::daily_report();
+    agent.id = "research_fanout".to_string();
+    agent.name = "research_fanout".to_string();
+    agent.output_dir = "research_fanout".to_string();
+    agent.runner = "mock-main".to_string();
+    agent.timeout_ms = 30_000;
+    agent.dependencies = vec![AsrDailyAgentDependency {
+        agent_id: "research_dispatcher".to_string(),
+        include_output: true,
+    }];
+    agent.research_fanout = Some(fanout);
+
+    let mut task = test_directory_task("research-fanout-runtime", temp.path().join("audio"));
+    task.daily_agent.agents = vec![agent.clone()];
+    let task = task_for_daily_agent(&task, &agent);
+    ensure_asr_daily_workspace(&task).unwrap();
+    let date = "2026-07-14";
+    let manifest = AsrDailyResearchManifest {
+        questions: vec![
+            AsrDailyResearchQuestion {
+                id: "verified".to_string(),
+                original_question: "核验仓库".to_string(),
+                source_excerpt: "source".to_string(),
+                background: "background".to_string(),
+                runner: None,
+                github_repositories: vec!["owner/repo".to_string()],
+                context_profile: None,
+                research_prompt: Some("focus".to_string()),
+            },
+            AsrDailyResearchQuestion {
+                id: "direct".to_string(),
+                original_question: "直接读取上下文".to_string(),
+                source_excerpt: String::new(),
+                background: String::new(),
+                runner: None,
+                github_repositories: Vec::new(),
+                context_profile: Some("direct".to_string()),
+                research_prompt: None,
+            },
+            AsrDailyResearchQuestion {
+                id: "local".to_string(),
+                original_question: "先收集上下文".to_string(),
+                source_excerpt: String::new(),
+                background: String::new(),
+                runner: None,
+                github_repositories: Vec::new(),
+                context_profile: Some("local".to_string()),
+                research_prompt: None,
+            },
+            AsrDailyResearchQuestion {
+                id: "local-unavailable".to_string(),
+                original_question: "连接器不可用时使用本地上下文".to_string(),
+                source_excerpt: String::new(),
+                background: String::new(),
+                runner: Some("mock-unavailable".to_string()),
+                github_repositories: vec!["owner/repo".to_string()],
+                context_profile: Some("local".to_string()),
+                research_prompt: None,
+            },
+            AsrDailyResearchQuestion {
+                id: "connector-unverified".to_string(),
+                original_question: "连接器状态缺失".to_string(),
+                source_excerpt: String::new(),
+                background: String::new(),
+                runner: Some("mock-context".to_string()),
+                github_repositories: vec!["owner/repo".to_string()],
+                context_profile: None,
+                research_prompt: None,
+            },
+            AsrDailyResearchQuestion {
+                id: "missing-runner".to_string(),
+                original_question: "缺少 runner".to_string(),
+                source_excerpt: String::new(),
+                background: String::new(),
+                runner: Some("missing-runner".to_string()),
+                github_repositories: Vec::new(),
+                context_profile: None,
+                research_prompt: None,
+            },
+            AsrDailyResearchQuestion {
+                id: "web-context".to_string(),
+                original_question: "拒绝网页上下文".to_string(),
+                source_excerpt: String::new(),
+                background: String::new(),
+                runner: None,
+                github_repositories: Vec::new(),
+                context_profile: Some("web".to_string()),
+                research_prompt: None,
+            },
+            AsrDailyResearchQuestion {
+                id: "missing-context".to_string(),
+                original_question: "拒绝缺失目录".to_string(),
+                source_excerpt: String::new(),
+                background: String::new(),
+                runner: None,
+                github_repositories: Vec::new(),
+                context_profile: Some("missing-dir".to_string()),
+                research_prompt: None,
+            },
+            AsrDailyResearchQuestion {
+                id: "direct-missing".to_string(),
+                original_question: "拒绝缺失的直接上下文".to_string(),
+                source_excerpt: String::new(),
+                background: String::new(),
+                runner: None,
+                github_repositories: Vec::new(),
+                context_profile: Some("direct-missing".to_string()),
+                research_prompt: None,
+            },
+            AsrDailyResearchQuestion {
+                id: "connector-unavailable".to_string(),
+                original_question: "连接器不可用".to_string(),
+                source_excerpt: String::new(),
+                background: String::new(),
+                runner: Some("mock-unavailable".to_string()),
+                github_repositories: vec!["owner/repo".to_string()],
+                context_profile: None,
+                research_prompt: None,
+            },
+        ],
+    };
+    let dependency_dir = daily_agent_upstream_input_dir(&task, "research_dispatcher");
+    std::fs::create_dir_all(&dependency_dir).unwrap();
+    std::fs::write(
+        dependency_dir.join(format!("{date}-report.md")),
+        serde_json::to_string(&manifest).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        daily_dir_for_task(&task.id).join(format!("{date}.md")),
+        "research fan-out source",
+    )
+    .unwrap();
+
+    run_daily_agent_inner(&task, "manual", Some(date), true, "research-fanout-run")
+        .await
+        .unwrap();
+
+    let child_dir = daily_agent_output_dir(&task).join(date);
+    let verified: AsrDailyResearchChildResult =
+        serde_json::from_slice(&std::fs::read(child_dir.join("verified.json")).unwrap()).unwrap();
+    assert_eq!(verified.status, "success");
+    assert_eq!(verified.github_connector_status.as_deref(), Some("verified"));
+    let local: AsrDailyResearchChildResult =
+        serde_json::from_slice(&std::fs::read(child_dir.join("local.json")).unwrap()).unwrap();
+    assert_eq!(local.status, "success");
+    assert!(local.context_path.is_some());
+    let local_unavailable: AsrDailyResearchChildResult = serde_json::from_slice(
+        &std::fs::read(child_dir.join("local-unavailable.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(local_unavailable.status, "success_with_local_context");
+    assert!(local_unavailable.context_path.is_some());
+    let connector_unverified: AsrDailyResearchChildResult = serde_json::from_slice(
+        &std::fs::read(child_dir.join("connector-unverified.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(connector_unverified.status, "github_connector_unverified");
+    for id in [
+        "missing-runner",
+        "web-context",
+        "missing-context",
+        "direct-missing",
+    ] {
+        let result: AsrDailyResearchChildResult =
+            serde_json::from_slice(&std::fs::read(child_dir.join(format!("{id}.json"))).unwrap())
+                .unwrap();
+        assert_eq!(result.status, "failed", "{id}");
+        assert!(result.error.is_some(), "{id}");
+    }
+    let unavailable: AsrDailyResearchChildResult = serde_json::from_slice(
+        &std::fs::read(child_dir.join("connector-unavailable.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(unavailable.status, "github_connector_unavailable");
+    let report = std::fs::read_to_string(
+        daily_agent_output_dir(&task).join(format!("{date}-report.md")),
+    )
+    .unwrap();
+    assert!(report.contains("核验仓库"));
+    assert!(report.contains("拒绝网页上下文"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn daily_agent_research_fanout_reports_all_children_failed() {
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let mut agent = AsrDailyAgentItem::daily_report();
+    agent.id = "research_fanout".to_string();
+    agent.name = "research_fanout".to_string();
+    agent.output_dir = "research_fanout".to_string();
+    agent.runner = "missing-runner".to_string();
+    agent.dependencies = vec![AsrDailyAgentDependency {
+        agent_id: "research_dispatcher".to_string(),
+        include_output: true,
+    }];
+    agent.research_fanout = Some(AsrDailyAgentResearchFanoutConfig {
+        allowed_runners: vec!["missing-runner".to_string()],
+        ..Default::default()
+    });
+    let mut task = test_directory_task("research-all-failed", temp.path().join("audio"));
+    task.daily_agent.agents = vec![agent.clone()];
+    let task = task_for_daily_agent(&task, &agent);
+    ensure_asr_daily_workspace(&task).unwrap();
+    let date = "2026-07-15";
+    let dependency_dir = daily_agent_upstream_input_dir(&task, "research_dispatcher");
+    std::fs::create_dir_all(&dependency_dir).unwrap();
+    std::fs::write(
+        dependency_dir.join(format!("{date}-report.md")),
+        r#"{"questions":[{"id":"q1","original_question":"问题"}]}"#,
+    )
+    .unwrap();
+
+    let error = run_daily_agent_research_fanout(&task, &daily_agent_research_plan(&task, date))
+        .await
+        .unwrap_err();
+    assert!(error.contains("all 1 research child runs failed"), "{error}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn daily_agent_research_child_reports_disabled_surface_timeout_and_process_failure() {
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let mut disabled = daily_agent_mock_runner_settings("disabled");
+    disabled.enabled = false;
+    let chatgpt = crate::im_gateway::external_cli::ExternalCliAgentSettings {
+        enabled: true,
+        adapter: "chatgpt_web".to_string(),
+        ..Default::default()
+    };
+    let mut failing = daily_agent_mock_runner_settings("unreachable");
+    if cfg!(windows) {
+        failing.adapter_config.executable = Some("cmd.exe".to_string());
+        failing.adapter_config.args = vec![
+            "/D".to_string(),
+            "/C".to_string(),
+            "more >nul & exit /b 7".to_string(),
+        ];
+    } else {
+        failing.adapter_config.executable = Some("sh".to_string());
+        failing.adapter_config.args = vec![
+            "-c".to_string(),
+            "cat >/dev/null; exit 7".to_string(),
+        ];
+    }
+    save_daily_agent_mock_runners(
+        temp.path(),
+        [
+            ("disabled", disabled),
+            ("chatgpt", chatgpt),
+            ("timeout", daily_agent_mock_runner_settings("late")),
+            ("failing", failing),
+        ],
+    );
+
+    let work_dir = temp.path().join("research-child");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    let mut agent = AsrDailyAgentItem::daily_report();
+    agent.id = "research_child".to_string();
+    agent.output_dir = "research_child".to_string();
+    agent.timeout_ms = 30_000;
+    let mut parent = test_directory_task("research-child-errors", temp.path().join("audio"));
+    parent.daily_agent.agents = vec![agent.clone()];
+    let task = task_for_daily_agent(&parent, &agent);
+
+    let disabled_error = match run_daily_research_child(
+        &task,
+        "disabled",
+        "prompt".to_string(),
+        &work_dir,
+        "disabled-session",
+    )
+    .await
+    {
+        Ok(_) => panic!("disabled runner unexpectedly succeeded"),
+        Err(error) => error,
+    };
+    assert!(disabled_error.contains("is disabled"));
+    let surface_error = match run_daily_research_child(
+        &task,
+        "chatgpt",
+        "prompt".to_string(),
+        &work_dir,
+        "chatgpt-session",
+    )
+    .await
+    {
+        Ok(_) => panic!("ChatGPT runner unexpectedly succeeded without fan-out config"),
+        Err(error) => error,
+    };
+    assert!(surface_error.contains("research fan-out config is missing"));
+
+    let mut timeout_task = task.clone();
+    timeout_task.daily_agent.timeout_ms = 0;
+    let timeout_error = match run_daily_research_child(
+        &timeout_task,
+        "timeout",
+        "prompt".to_string(),
+        &work_dir,
+        "timeout-session",
+    )
+    .await
+    {
+        Ok(_) => panic!("zero-timeout runner unexpectedly succeeded"),
+        Err(error) => error,
+    };
+    assert!(timeout_error.contains("timed out after 0ms"));
+
+    let failure = match run_daily_research_child(
+        &task,
+        "failing",
+        "prompt".to_string(),
+        &work_dir,
+        "failing-session",
+    )
+    .await
+    {
+        Ok(_) => panic!("failing runner unexpectedly succeeded"),
+        Err(error) => error,
+    };
+    assert!(
+        failure.contains("research child runner returned")
+            || failure.contains("research child runner failed"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn daily_agent_research_manifest_validation_covers_error_matrix() {
+    let fanout = AsrDailyAgentResearchFanoutConfig {
+        max_questions: 1,
+        allowed_runners: vec!["allowed".to_string()],
+        context_profiles: DailyAgentBTreeMap::from([(
+            "known".to_string(),
+            AsrDailyAgentResearchContextProfile {
+                runner: "allowed".to_string(),
+                work_dir: "/tmp".to_string(),
+                instructions: None,
+            },
+        )]),
+        ..Default::default()
+    };
+    let question = |id: &str| AsrDailyResearchQuestion {
+        id: id.to_string(),
+        original_question: "question".to_string(),
+        source_excerpt: String::new(),
+        background: String::new(),
+        runner: None,
+        github_repositories: Vec::new(),
+        context_profile: None,
+        research_prompt: None,
+    };
+    let too_many = AsrDailyResearchManifest {
+        questions: vec![question("q1"), question("q2")],
+    };
+    assert!(validate_daily_research_manifest(&too_many, &fanout, "allowed")
+        .unwrap_err()
+        .contains("exceeding max_questions"));
+
+    for (mut item, expected) in [
+        (question("bad id"), "must use English"),
+        ({
+            let mut value = question("q1");
+            value.original_question.clear();
+            value
+        }, "preserve original_question"),
+        ({
+            let mut value = question("q1");
+            value.runner = Some("denied".to_string());
+            value
+        }, "outside the configured allowlist"),
+        ({
+            let mut value = question("q1");
+            value.context_profile = Some("unknown".to_string());
+            value
+        }, "unknown context profile"),
+    ] {
+        let error = validate_daily_research_manifest(
+            &AsrDailyResearchManifest {
+                questions: vec![item.clone()],
+            },
+            &fanout,
+            "allowed",
+        )
+        .unwrap_err();
+        assert!(error.contains(expected), "{error}");
+        item.original_question = "question".to_string();
+    }
+
+    let duplicate = AsrDailyResearchManifest {
+        questions: vec![question("same"), question("same")],
+    };
+    let wide_fanout = AsrDailyAgentResearchFanoutConfig {
+        max_questions: 2,
+        ..fanout.clone()
+    };
+    assert!(validate_daily_research_manifest(&duplicate, &wide_fanout, "allowed")
+        .unwrap_err()
+        .contains("duplicate"));
+
+    let mut oversized = question("oversized");
+    oversized.original_question = "x".repeat(20_001);
+    assert!(validate_daily_research_manifest(
+        &AsrDailyResearchManifest {
+            questions: vec![oversized]
+        },
+        &fanout,
+        "allowed"
+    )
+    .unwrap_err()
+    .contains("prompt field limits"));
+
+    assert!(parse_daily_research_manifest("```json\n{\"questions\": []}\n")
+        .unwrap_err()
+        .contains("non-empty"));
+}
+
+#[test]
+fn daily_agent_research_manifest_loader_and_conversation_link_cover_edges() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let mut task = test_directory_task("research-loader", temp.path().join("audio"));
+    let mut agent = AsrDailyAgentItem::daily_report();
+    agent.id = "fanout".to_string();
+    agent.name = "fanout".to_string();
+    agent.output_dir = "fanout".to_string();
+    agent.dependencies = vec![AsrDailyAgentDependency {
+        agent_id: "dispatcher".to_string(),
+        include_output: true,
+    }];
+    task.daily_agent.agents = vec![agent.clone()];
+    let task = task_for_daily_agent(&task, &agent);
+    assert!(load_daily_research_manifest_for_date(&task, "2026-07-16")
+        .unwrap_err()
+        .contains("no research manifest"));
+    let input = daily_agent_upstream_input_dir(&task, "dispatcher");
+    std::fs::create_dir_all(&input).unwrap();
+    std::fs::write(input.join("2026-07-16-report.md"), "not-json").unwrap();
+    assert!(load_daily_research_manifest_for_date(&task, "2026-07-16")
+        .unwrap_err()
+        .contains("no valid research manifest"));
+
+    let execution = AsrDailyResearchExecution {
+        run_id: "run".to_string(),
+        response: "response".to_string(),
+        adapter: "chatgpt_web".to_string(),
+        metadata: DailyAgentBTreeMap::from([(
+            "conversation_id".to_string(),
+            "conversation-42".to_string(),
+        )]),
+    };
+    assert_eq!(
+        daily_research_conversation_link(&execution),
+        (
+            Some("conversation-42".to_string()),
+            Some("https://chatgpt.com/c/conversation-42".to_string())
+        )
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn daily_agent_orchestrator_runs_dependency_chain_and_tracks_run_ids() {
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    save_daily_agent_mock_runners(
+        temp.path(),
+        [
+            (
+                "mock-report",
+                daily_agent_mock_file_runner_settings(
+                    "report complete",
+                    Some("output/report/2026-07-17-report.md"),
+                ),
+            ),
+            (
+                "mock-todo",
+                daily_agent_mock_file_runner_settings(
+                    "todo complete",
+                    Some("output/tomorrow_todo/2026-07-17-report.md"),
+                ),
+            ),
+        ],
+    );
+
+    let mut task = test_directory_task("daily-agent-orchestrator-success", temp.path().join("audio"));
+    let mut agents = normalized_daily_agents(&task.daily_agent);
+    agents[0].runner = "mock-report".to_string();
+    agents[0].im_delivery.enabled = false;
+    agents[1].runner = "mock-todo".to_string();
+    agents[1].dependencies = vec![AsrDailyAgentDependency {
+        agent_id: agents[0].id.clone(),
+        include_output: true,
+    }];
+    agents[1].im_delivery.enabled = false;
+    task.daily_agent.enabled = true;
+    task.daily_agent.agents = agents;
+    ensure_asr_daily_workspace(&task).unwrap();
+    std::fs::write(
+        daily_dir_for_task(&task.id).join("2026-07-17.md"),
+        "source for dependency chain",
+    )
+    .unwrap();
+
+    let results = run_daily_agents(&task, "manual", Some("2026-07-17"), false).await;
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert!(results.iter().all(|result| result.status == "success"), "{results:?}");
+    assert!(results[0].dependency_run_ids.is_empty());
+    assert_eq!(results[1].dependency_run_ids, vec![results[0].run_id.clone()]);
+    assert!(daily_agent_upstream_input_dir(
+        &task_for_daily_agent(&task, &task.daily_agent.agents[1]),
+        &task.daily_agent.agents[0].id,
+    )
+    .join("2026-07-17-report.md")
+    .is_file());
+    assert!(!DAILY_AGENT_RUNNING_TASKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(&task.id));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn daily_agent_orchestrator_skips_or_continues_after_dependency_failure() {
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    save_daily_agent_mock_runners(
+        temp.path(),
+        [
+            ("mock-no-report", daily_agent_mock_runner_settings("no report")),
+            (
+                "mock-continue",
+                daily_agent_mock_file_runner_settings(
+                    "continued",
+                    Some("output/continued/2026-07-18-report.md"),
+                ),
+            ),
+        ],
+    );
+
+    let failed = AsrDailyAgentItem {
+        id: "failed_upstream".to_string(),
+        name: "failed_upstream".to_string(),
+        runner: "mock-no-report".to_string(),
+        output_dir: "failed_upstream".to_string(),
+        im_delivery: AsrDailyAgentImDeliveryConfig::default(),
+        ..AsrDailyAgentItem::daily_report()
+    };
+    let mut skipped = AsrDailyAgentItem {
+        id: "skipped_child".to_string(),
+        name: "skipped_child".to_string(),
+        runner: "mock-continue".to_string(),
+        output_dir: "skipped".to_string(),
+        dependencies: vec![AsrDailyAgentDependency {
+            agent_id: failed.id.clone(),
+            include_output: true,
+        }],
+        im_delivery: AsrDailyAgentImDeliveryConfig::default(),
+        ..AsrDailyAgentItem::daily_report()
+    };
+    skipped.dependency_failure_policy = AsrDailyAgentDependencyFailurePolicy::Skip;
+    let mut continued = skipped.clone();
+    continued.id = "continued_child".to_string();
+    continued.name = "continued_child".to_string();
+    continued.output_dir = "continued".to_string();
+    continued.dependency_failure_policy = AsrDailyAgentDependencyFailurePolicy::Continue;
+
+    let mut task = test_directory_task("daily-agent-orchestrator-failure", temp.path().join("audio"));
+    task.daily_agent.enabled = true;
+    task.daily_agent.agents = vec![failed, skipped, continued];
+    ensure_asr_daily_workspace(&task).unwrap();
+    std::fs::write(
+        daily_dir_for_task(&task.id).join("2026-07-18.md"),
+        "dependency failure source",
+    )
+    .unwrap();
+
+    let results = run_daily_agents(&task, "manual", Some("2026-07-18"), false).await;
+    assert_eq!(
+        results.iter().map(|value| value.status.as_str()).collect::<Vec<_>>(),
+        vec!["failed", "skipped_dependency_failed", "success"]
+    );
+    assert!(results[1]
+        .skipped_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("failed_upstream=failed")));
+    assert_eq!(results[1].dependency_run_ids, vec![results[0].run_id.clone()]);
+    assert_eq!(results[2].dependency_run_ids, vec![results[0].run_id.clone()]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn daily_agent_orchestrator_filters_triggers_and_handles_invalid_graph() {
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let mut task = test_directory_task("daily-agent-orchestrator-filter", temp.path().join("audio"));
+    let mut manual_only = AsrDailyAgentItem::daily_report();
+    manual_only.runner = "mock".to_string();
+    manual_only.trigger_policy = AsrDailyAgentTriggerPolicy::ManualOnly;
+    task.daily_agent.agents = vec![manual_only.clone()];
+    assert!(run_daily_agents(&task, "asr_completion", None, false)
+        .await
+        .is_empty());
+
+    manual_only.dependencies = vec![AsrDailyAgentDependency {
+        agent_id: manual_only.id.clone(),
+        include_output: false,
+    }];
+    task.daily_agent.agents = vec![manual_only];
+    assert!(run_daily_agents(&task, "manual", None, false).await.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn selected_daily_agent_honors_persisted_dependency_policy() {
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    save_daily_agent_mock_runners(
+        temp.path(),
+        [("mock-selected", daily_agent_mock_file_runner_settings(
+            "selected",
+            Some("output/selected/2026-07-19-report.md"),
+        ))],
+    );
+    let mut upstream = AsrDailyAgentItem::daily_report();
+    upstream.id = "persisted_upstream".to_string();
+    upstream.name = "persisted_upstream".to_string();
+    upstream.output_dir = "persisted_upstream".to_string();
+    upstream.last_status = Some("failed".to_string());
+    upstream.last_run_id = Some("persisted-run".to_string());
+    let mut selected = AsrDailyAgentItem::daily_report();
+    selected.id = "selected".to_string();
+    selected.name = "selected".to_string();
+    selected.runner = "mock-selected".to_string();
+    selected.output_dir = "selected".to_string();
+    selected.dependencies = vec![AsrDailyAgentDependency {
+        agent_id: upstream.id.clone(),
+        include_output: true,
+    }];
+    selected.im_delivery.enabled = false;
+
+    let mut task = test_directory_task("daily-agent-selected-policy", temp.path().join("audio"));
+    task.daily_agent.enabled = true;
+    task.daily_agent.agents = vec![upstream, selected.clone()];
+    ensure_asr_daily_workspace(&task).unwrap();
+    std::fs::write(
+        daily_dir_for_task(&task.id).join("2026-07-19.md"),
+        "selected source",
+    )
+    .unwrap();
+
+    let skipped = run_selected_daily_agent_with_dependencies(
+        &task,
+        &selected,
+        "manual",
+        Some("2026-07-19"),
+        false,
+    )
+    .await;
+    assert_eq!(skipped.status, "skipped_dependency_failed");
+    assert_eq!(skipped.dependency_run_ids, vec!["persisted-run"]);
+
+    task.daily_agent.agents[0].last_status = Some("success".to_string());
+    let missing_artifact = run_selected_daily_agent_with_dependencies(
+        &task,
+        &selected,
+        "manual",
+        Some("2026-07-19"),
+        false,
+    )
+    .await;
+    assert_eq!(missing_artifact.status, "skipped_dependency_failed");
+    assert!(missing_artifact
+        .skipped_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("dependency outputs were not available")));
+
+    let mut unknown_dependency = selected.clone();
+    unknown_dependency.dependencies = vec![AsrDailyAgentDependency {
+        agent_id: "not_configured".to_string(),
+        include_output: true,
+    }];
+    let unknown = run_selected_daily_agent_with_dependencies(
+        &task,
+        &unknown_dependency,
+        "manual",
+        Some("2026-07-19"),
+        false,
+    )
+    .await;
+    assert_eq!(unknown.status, "skipped_dependency_failed");
+    assert!(unknown
+        .skipped_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("not_configured=not_run")));
+
+    selected.dependency_failure_policy = AsrDailyAgentDependencyFailurePolicy::Continue;
+    let continued = run_selected_daily_agent_with_dependencies(
+        &task,
+        &selected,
+        "manual",
+        Some("2026-07-19"),
+        false,
+    )
+    .await;
+    assert_eq!(continued.status, "success", "{continued:?}");
+    assert_eq!(continued.dependency_run_ids, vec!["persisted-run"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn daily_agent_run_api_executes_selected_agent_background_job() {
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    save_daily_agent_mock_runners(
+        temp.path(),
+        [(
+            "mock-api",
+            daily_agent_mock_file_runner_settings(
+                "api complete",
+                Some("output/report/2026-07-22-report.md"),
+            ),
+        )],
+    );
+    let mut task = test_directory_task("daily-agent-api-run", temp.path().join("audio"));
+    let mut agent = AsrDailyAgentItem::daily_report();
+    agent.runner = "mock-api".to_string();
+    agent.im_delivery.enabled = false;
+    task.daily_agent.enabled = true;
+    task.daily_agent.agents = vec![agent.clone()];
+    ensure_asr_daily_workspace(&task).unwrap();
+    std::fs::write(
+        daily_dir_for_task(&task.id).join("2026-07-22.md"),
+        "API source",
+    )
+    .unwrap();
+    add_task(task.clone()).unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let io = hyper_util::rt::TokioIo::new(stream);
+        hyper::server::conn::http1::Builder::new()
+            .serve_connection(
+                io,
+                hyper::service::service_fn(|request| async move {
+                    let path = request.uri().path().to_string();
+                    Ok::<_, std::convert::Infallible>(handle_asr_tasks(request, &path).await)
+                }),
+            )
+            .await
+            .unwrap();
+    });
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{address}/api/asr/tasks/{}/daily-agent/run?agent_id={}&date=2026-07-22&force=1",
+            task.id, agent.id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    server.await.unwrap();
+
+    let report = daily_agent_output_dir(&task_for_daily_agent(&task, &agent))
+        .join("2026-07-22-report.md");
+    for _ in 0..100 {
+        if report.is_file() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(report.is_file(), "selected API job did not produce its report");
+    for _ in 0..100 {
+        if !DAILY_AGENT_RUNNING_TASKS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&task.id)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !DAILY_AGENT_RUNNING_TASKS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&task.id),
+        "selected API job did not release its running marker"
+    );
 }

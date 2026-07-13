@@ -23,6 +23,33 @@ impl EnvGuard {
     }
 }
 
+async fn spawn_im_gateway_http(
+    service: SharedImGatewayService,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind IM Gateway test server");
+    let address = listener.local_addr().expect("IM Gateway server address");
+    let handle = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept IM Gateway request");
+        let io = TokioIo::new(stream);
+        let handler = service_fn(move |request: Request<Incoming>| {
+            let service = service.clone();
+            async move {
+                let path = request.uri().path().to_string();
+                Ok::<_, std::convert::Infallible>(
+                    handle_im_gateway(request, Some(service), &path).await,
+                )
+            }
+        });
+        let _ = http1::Builder::new()
+            .keep_alive(false)
+            .serve_connection(io, handler)
+            .await;
+    });
+    (address, handle)
+}
+
 struct EnvVarGuard {
     key: &'static str,
     old_value: Option<String>,
@@ -1029,6 +1056,99 @@ pub(super) fn test_provider() -> ImProviderConfig {
         created_at: 0,
         updated_at: 0,
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn debug_mock_inbound_maps_reply_reference_into_event() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = Arc::new(ImGatewayService::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.owner_open_id = Some("owner-open-id".to_string());
+    service
+        .provider_store
+        .add(provider)
+        .expect("provider should be saved");
+    let (address, server) = spawn_im_gateway_http(service).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{address}/api/im-gateway/debug/mock-inbound"
+        ))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "providerId": "feishu-main",
+            "text": "quoted follow-up",
+            "userId": "sender-open-id",
+            "chatId": "chat-id",
+            "messageId": "message-id",
+            "eventId": "event-id",
+            "replyTo": {
+                "messageId": "quoted-message-id",
+                "createdAtMs": 1234,
+                "text": "quoted original"
+            }
+        }))
+        .send()
+        .await
+        .expect("send mock inbound request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.expect("mock inbound response");
+    assert_eq!(body["eventId"], "event-id");
+    assert_eq!(body["messageId"], "message-id");
+    server.await.expect("mock inbound server task");
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn text_message_send_uses_provider_client_and_records_failure() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = Arc::new(ImGatewayService::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "weixin-main".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    provider.display_name = "Weixin Main".to_string();
+    service
+        .provider_store
+        .add(provider)
+        .expect("provider should be saved");
+    service
+        .target_store
+        .add(ImTarget {
+            id: "weixin-owner".to_string(),
+            provider_id: "weixin-main".to_string(),
+            display_name: "Weixin Owner".to_string(),
+            receive_id_type: "open_id".to_string(),
+            receive_id: "weixin-user".to_string(),
+            default_msg_type: "text".to_string(),
+            enabled: true,
+            created_at: 1,
+            updated_at: 1,
+        })
+        .expect("target should be saved");
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/api/im-gateway/messages/send"))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "provider_id": "weixin-main",
+            "target_id": "weixin-owner",
+            "msg_type": "text",
+            "content": "migration smoke test"
+        }))
+        .send()
+        .await
+        .expect("send outbound message request");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    server.await.expect("message send server task");
+    let logs = service.message_log_store.list();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].content.as_deref(), Some("migration smoke test"));
+    assert_eq!(logs[0].status, MessageStatus::Failed);
 }
 
 #[test]

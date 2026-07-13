@@ -388,6 +388,20 @@ mod tests {
     }
 
     #[test]
+    fn blank_peer_filter_matches_any_peer() {
+        let value = message(
+            "inbound",
+            "provider-a",
+            MessageDirection::Inbound,
+            "peer-a",
+            None,
+            1,
+            "hello",
+        );
+        assert!(ImMessageLogStore::matches_peer(&value, Some("   ")));
+    }
+
+    #[test]
     fn rejects_timestamp_reference_outside_window() {
         let temp = tempfile::tempdir().expect("temp message store");
         let store = ImMessageLogStore::new(temp.path());

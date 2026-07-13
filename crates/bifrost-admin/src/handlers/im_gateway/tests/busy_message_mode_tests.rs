@@ -123,6 +123,11 @@ fn apply_busy_message_default_queues_custom_runner_messages() {
 fn ordinary_busy_messages_always_queue_without_creating_guides() {
     let manager = SessionQueueManager::new();
 
+    assert_eq!(
+        enqueue_busy_default_message(&manager, "empty", "   ", Vec::new()),
+        Err("消息内容不能为空")
+    );
+
     for session in ["builtin-busy", "external-busy", "web-busy"] {
         let items =
             enqueue_busy_default_message(&manager, session, "  下一条独立问题  ", Vec::new())

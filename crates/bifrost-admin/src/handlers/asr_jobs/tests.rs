@@ -1101,6 +1101,24 @@ mod tests {
         assert!(detail_task.await.unwrap().unwrap().is_none());
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn get_task_response_returns_detail_and_not_found() {
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        add_task(test_directory_task("task-response", audio_dir)).unwrap();
+
+        assert_eq!(
+            get_task_response("task-response").await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            get_task_response("missing-task").await.status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
     #[test]
     fn task_watch_snapshot_marks_eta_confidence_without_duration() {
         let _guard = test_data_dir_lock();
