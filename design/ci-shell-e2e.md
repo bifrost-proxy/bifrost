@@ -20,11 +20,15 @@ Bifrost 的 shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_a
 - HTTP/3 能力继续由 Rust integration test
   `crates/bifrost-proxy/tests/upstream_http3_e2e.rs` 验证真实本地 QUIC/H3 origin；SOCKS5
   UDP ASSOCIATE、UDP 转发与 QUIC-like 数据包继续由 Rust 单测和现有 Shell E2E 验证。
+- 删除未接入任何测试入口、且未实现真实 QUIC-over-SOCKS5 transport 的历史
+  `quic_socks5_test.py`。这条能力只保留可执行、可断言的 Rust 与 Shell 证据，避免把演示脚本
+  误认为有效回归用例。
 - CI 不再使用 `actions/setup-go`。`shfmt` 从官方 v3.12.0 release 下载 Linux amd64
   预编译二进制，并在安装前校验固定 SHA-256，避免为了 Shell 格式检查引入 Go 工具链，
   同时避免未经校验的可执行文件进入 runner。
 - `test_coverage_pipeline_contract.sh` 同时门禁“无 tracked Go 文件”“旧客户端目录无任何
-  tracked artifact”“无 Go setup/install”和 `shfmt` 版本/哈希，防止后续依赖悄悄回流。
+  tracked artifact”“旧 Python 演示客户端不回流”“无 Go setup/install”和 `shfmt` 版本/哈希，
+  防止后续无效依赖或伪测试悄悄回流。
 
 ## 用户目标验证清单
 
