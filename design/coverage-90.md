@@ -49,6 +49,9 @@ Bifrost 早期覆盖率工具链分散：
 
 ### 覆盖率来源三层
 
+仅供测试调用的 helper 必须放在 `#[cfg(test)]` 下，禁止用 `#[allow(dead_code)]`
+把测试辅助实现带入 release 二进制或 production coverage 分母。
+
 一次 `coverage-all.sh --with-e2e` 执行覆盖三个来源，并保存三个可独立审计的
 报告：
 

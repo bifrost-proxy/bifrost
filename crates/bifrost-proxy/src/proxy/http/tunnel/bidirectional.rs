@@ -10,7 +10,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::debug;
 
-#[allow(dead_code)]
+#[cfg(test)]
 async fn tunnel_bidirectional_io<C, T>(
     client: C,
     target: T,
