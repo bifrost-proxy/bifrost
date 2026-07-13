@@ -4503,7 +4503,7 @@ test("AI new chat landing sends pasted images without unused tool buttons", asyn
     });
   });
   await page.route("**/_bifrost/api/im-gateway/agent/sessions/admin-chat-*", async (route) => {
-    const image = (requestPayload?.images as Array<{ data?: string; mime_type?: string }> | undefined)?.[0];
+    const image = (requestPayload?.images as Array<{ data?: string; mimeType?: string }> | undefined)?.[0];
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -4523,7 +4523,7 @@ test("AI new chat landing sends pasted images without unused tool buttons", asyn
               {
                 type: "image_url",
                 image_url: {
-                  url: `data:${image?.mime_type || "image/png"};base64,${image?.data || ""}`,
+                  url: `data:${image?.mimeType || "image/png"};base64,${image?.data || ""}`,
                   detail: "auto",
                 },
               },
@@ -4572,7 +4572,7 @@ test("AI new chat landing sends pasted images without unused tool buttons", asyn
     message: "Describe the pasted screenshot",
   });
   expect(requestPayload?.images).toEqual([
-    expect.objectContaining({ mime_type: "image/png", data: expect.any(String) }),
+    expect.objectContaining({ mimeType: "image/png", data: expect.any(String) }),
   ]);
 });
 
