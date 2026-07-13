@@ -524,7 +524,7 @@ else:
     raise AssertionError(f"missing high effort override for {runner}")
 PY
 
-  send_im_inbound "$provider" "$owner" "release-$adapter-after-effort"
+  send_im_inbound "$provider" "$owner" "/g release-$adapter-after-effort"
   wait_for_mock_record "release-$adapter-after-effort"
 }
 
