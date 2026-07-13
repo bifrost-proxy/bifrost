@@ -639,6 +639,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                           max_questions: 8,
                           chatgpt_interface_mode: "chat",
                           chatgpt_model: "pro",
+                          chatgpt_project_url: undefined,
                           allowed_runners: selectedAgent.runner
                             ? [selectedAgent.runner]
                             : [],
@@ -663,6 +664,23 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                         research_fanout: {
                           ...selectedAgent.research_fanout!,
                           max_questions: Number(maxQuestions || 1),
+                        },
+                      })
+                    }
+                  />
+                </Descriptions.Item>
+                <Descriptions.Item label="ChatGPT Project URL" span={2}>
+                  <Input
+                    data-testid="asr-daily-agent-research-project-url"
+                    size="small"
+                    value={selectedAgent.research_fanout.chatgpt_project_url || ""}
+                    placeholder="https://chatgpt.com/g/g-p-.../project"
+                    onChange={(event) =>
+                      updateAgent(selectedAgent.id, {
+                        research_fanout: {
+                          ...selectedAgent.research_fanout!,
+                          chatgpt_project_url:
+                            event.target.value || undefined,
                         },
                       })
                     }
@@ -920,7 +938,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
               type="info"
               showIcon
               message="Each research question runs in its own conversation"
-              description="The upstream dispatcher must output a research manifest. ChatGPT Web research runs are forced to Chat mode with the Pro model before a question is sent."
+              description="The upstream dispatcher must output a research manifest. ChatGPT Web research runs are forced to Chat mode with the Pro model before a question is sent. When a Project URL is configured, every new research conversation is created inside that ChatGPT Project."
             />
           ) : null}
         </Card>

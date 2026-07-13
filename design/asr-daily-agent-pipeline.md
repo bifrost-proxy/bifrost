@@ -115,9 +115,31 @@ ChatGPT Web child run 发送前必须强制校验：
 
 - 使用 `Chat` 模式，不允许落到 `Work`；
 - 使用 `Pro` 模型；
+- 如果 fan-out 配置了 `chatgpt_project_url`，新会话必须从该 ChatGPT Project 首页创建，使会话自动归档到项目；每个问题仍创建独立 conversation，不复用其他问题的上下文。
 - 模式或模型无法切换、无法验证时直接失败，不发送研究问题；
 - Prompt 明确指定要使用已连接的 GitHub 仓库，并要求在结果中列出实际读取的仓库文件。若模型报告仓库不可见，则明确标记不可用；需要本地事实的问题必须预先配置 context profile，不能假装已经读取。
 - 单题结果记录 `github_connector_status=verified/unavailable/missing`；只有明确返回 `verified` 才显示为 GitHub 已核验。配置了本地 context profile 时可显示 `success_with_local_context`，否则明确显示 Connector 不可用或未验证。
+
+### ChatGPT Project 归档
+
+`research_fanout` 可选配置 `chatgpt_project_url`，例如：
+
+```json
+{
+  "chatgpt_interface_mode": "chat",
+  "chatgpt_model": "pro",
+  "chatgpt_project_url": "https://chatgpt.com/g/g-p-<project-id>/project"
+}
+```
+
+- 保存配置时去除首尾空白并校验为 `https://chatgpt.com/g/g-p-*/project`；空值等价于未配置。
+- ChatGPT 可能把无标题的 Project URL 重定向为带可读 slug 的 URL；校验以稳定 project id 为准，因此该重定向仍视为同一个项目。
+- fan-out 把该值投影到单题 ChatGPT Web request 的 `chatgpt.projectUrl`，不修改 Runner 持久配置，因此普通聊天、日报 Agent 和其他任务不受影响。
+- ChatGPT Web adapter 只在创建新 conversation 时导航到 Project URL；已有 `conversation_id` 的后续轮次仍导航到标准 `/c/<conversation_id>`。
+- Project URL 只承担归档入口，不改变单题 Prompt。研究 Prompt 必须继续携带完整原始问题，并声明本会话只研究一个问题，不能把项目内其他聊天当作证据。
+- 未配置项目时继续导航到 ChatGPT 首页，保持旧配置和旧任务行为不变。
+- 项目页面缺少 composer、Chat/Pro 控件或跳到登录/真人验证时，在写入 Prompt 前失败；不静默退回普通聊天首页，避免研究会话散落到项目外。
+- ChatGPT Web 没有公开、稳定的 Project 管理 API；实现继续使用现有浏览器/CDP 自动化。项目 URL 与页面控件变化由定向单元测试、E2E 和真实 human test 共同守护。
 
 ### Research manifest 契约
 
@@ -211,12 +233,15 @@ agents/research_dispatcher/output/research_result/
 - ChatGPT Web Prompt 注入同日上游正文。
 - 文件型 Runner Prompt 只暴露稳定相对路径。
 - 旧配置序列化/反序列化兼容。
+- `chatgpt_project_url` 规范化、非法 host/path 拒绝、未配置兼容，以及 fan-out 到 adapter request 的投影。
+- 新 conversation 使用 Project URL，已有 conversation 继续使用 `/c/<conversation_id>`。
 
 ### E2E
 
 - 使用隔离 `BIFROST_DATA_DIR`、fake external runners 和反向排列的双 Agent 配置。
 - 验证 Agent 执行顺序、同日上游产物、失败跳过和 IM 内容。
 - 验证手动单 Agent 运行不意外启动依赖。
+- 验证项目配置进入 ChatGPT Web child request，未配置时不出现 `projectUrl`。
 
 ### 真实场景测试
 
@@ -225,6 +250,7 @@ agents/research_dispatcher/output/research_result/
 - WebUI 配置依赖。
 - 真实 ChatGPT Web 日报和上游注入。
 - ChatGPT Web 日报中的研究种子抽取与下游调研。
+- 真实 Project 首页处于 Chat + Pro，带 nonce 打开后仍显示项目 composer；发送冒烟问题后生成的独立会话出现在项目列表。
 - Weixin 投递。
 - 周度 Schedule 聚合。
 - 登录失效、上游失败和敏感种子不外发。

@@ -397,6 +397,16 @@ fn normalize_daily_agent_item(mut item: AsrDailyAgentItem) -> AsrDailyAgentItem 
             .trim()
             .to_ascii_lowercase();
         fanout.chatgpt_model = fanout.chatgpt_model.trim().to_ascii_lowercase();
+        let trimmed_project_url = fanout
+            .chatgpt_project_url
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        fanout.chatgpt_project_url = trimmed_project_url.as_deref().map(|value| {
+            crate::im_gateway::chatgpt_web::normalize_project_url(Some(value))
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| value.to_string())
+        });
         fanout.allowed_runners = fanout
             .allowed_runners
             .into_iter()
@@ -496,6 +506,16 @@ fn validate_daily_agent_item(item: &AsrDailyAgentItem) -> Result<(), String> {
                 "Daily Agent '{}' research fan-out requires ChatGPT interface_mode='chat' and model='pro'",
                 item.name
             ));
+        }
+        if let Some(project_url) = fanout.chatgpt_project_url.as_deref() {
+            crate::im_gateway::chatgpt_web::normalize_project_url(Some(project_url)).map_err(
+                |error| {
+                    format!(
+                        "Daily Agent '{}' research_fanout.chatgpt_project_url is invalid: {error}",
+                        item.name
+                    )
+                },
+            )?;
         }
         for runner in &fanout.allowed_runners {
             if runner.trim().is_empty() {
@@ -673,6 +693,8 @@ pub(crate) struct AsrDailyAgentResearchFanoutConfig {
     pub chatgpt_interface_mode: String,
     #[serde(default = "default_research_chatgpt_model")]
     pub chatgpt_model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chatgpt_project_url: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_runners: Vec<String>,
     #[serde(default, skip_serializing_if = "DailyAgentBTreeMap::is_empty")]
@@ -686,6 +708,7 @@ impl Default for AsrDailyAgentResearchFanoutConfig {
             max_questions: default_research_fanout_max_questions(),
             chatgpt_interface_mode: default_research_chatgpt_interface_mode(),
             chatgpt_model: default_research_chatgpt_model(),
+            chatgpt_project_url: None,
             allowed_runners: Vec::new(),
             context_profiles: DailyAgentBTreeMap::new(),
         }

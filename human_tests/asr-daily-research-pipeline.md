@@ -89,6 +89,22 @@
 - “帮我记录一下”本身不触发研究；没有真正研究问题时允许输出空数组。
 - 不输出研究优先级或分数。
 
+### TC-ADRP-08：ChatGPT Project 归档与独立新会话
+
+1. 在 Independent Research 中填写一个真实 ChatGPT Project URL。
+2. 使用带 `bifrost_new_chat` nonce 的 Project URL 打开新研究入口。
+3. 确认页面仍是指定 Project，且 Chat 模式、Pro 模型和 Project 专用 composer 同时可见。
+4. 发送一个只返回固定标记的冒烟问题，并把至少一个已有研究会话通过“移至项目”归档。
+5. 使用同一个 Project 连续创建多个研究问题。
+
+预期：
+
+- 配置保存后保持规范的 `https://chatgpt.com/g/g-p-<project-id>/project`；错误 host、普通 conversation URL 和非 Project 路径被拒绝。
+- ChatGPT 自动增加可读 slug 时仍按稳定 project id 识别为同一 Project。
+- 冒烟问题生成 `/g/g-p-.../c/<conversation-id>` 项目内链接，且 Pro 回复固定标记。
+- 历史研究和新研究都出现在 Project 的“聊天”列表；不同问题仍是不同 conversation，不共享一条聊天。
+- 页面若跳回普通首页或其他 Project，Bifrost 在写入 Prompt 前失败，不把问题发送到项目外。
+
 ## 执行记录
 
 | 日期 | 用例 | 结果 |
@@ -100,3 +116,4 @@
 | 2026-07-12 | TC-ADRP-05 | 前端 TypeScript 构建与 160 个单元测试通过；临时 18883 真实服务页面确认 fan-out 开关已开启、Max Questions=8、Runner=`chatgpt-web`、`ibkr_runtime` fallback 可见，页面明确提示每题独立会话及 Chat + Pro 约束。截图：`artifacts/asr-daily-research-ui.png`。 |
 | 2026-07-12 | TC-ADRP-06 | 待 Pro 真实研究完成后执行微信与周度洞察人验。 |
 | 2026-07-12 | TC-ADRP-07 | 通过。使用默认 `research_seed` Prompt 真实运行 Codex：用户确认的 10 个研究主题全部进入 `research_questions`，6 个故障/执行事项全部进入 `non_research_items`（10/10、6/6）。追加未直接写入样例的泛化测试：云厂商基础设施判断、多代理框架比较、保留音色翻译正确进入研究；只有主题词的“帮我记录一下 SpaceX”进入 `memory_only`，异常归因产品灵感进入 `weekly_insight`，入口白屏修复进入 `action_item`。全程未输出优先级或分数。 |
+| 2026-07-13 | TC-ADRP-08 | 通过。真实 Project“日报研究”在带 nonce 的入口保持 Chat + Pro + Project composer；ChatGPT 将裸 project id 重定向为带 `ri-bao-yan-jiu` slug 后仍被识别为同一项目。11 个既有真实研究会话已逐项迁入。新建冒烟会话 `6a549006-51a0-83ea-945a-1568e098f08f` 位于该 Project 内，Pro 最终回复 `PROJECT_ARCHIVE_OK`。Project URL 单测、研究 fan-out API E2E 和 WebUI 保存测试均通过。 |
