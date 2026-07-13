@@ -68,6 +68,10 @@ if "--input-format" in sys.argv and sys.argv[sys.argv.index("--input-format") + 
     record({"event":"turn_started","runner":runner,"pid":os.getpid(),"frame":first})
     send({"type":"system","subtype":"init","session_id":thread_id})
     send(first)
+    # Publish readiness only after the mock emits the init frame and replays
+    # the initial prompt. The adapter then registers its steerable session;
+    # app-server uses turn_ready below.
+    record({"event":"stream_ready","runner":runner,"pid":os.getpid()})
     prompt = first["message"]["content"][0]["text"]
     if "queue-after-reject" in prompt:
         send({"type":"assistant","message":{"content":[{"type":"text","text":f"QUEUED_{runner}"}]},"session_id":thread_id})
@@ -239,6 +243,8 @@ run_case() {
   local session="live-guide-$runner"
   local stream_log="$TEST_DIR/$runner-stream.ndjson"
   local guide_log="$TEST_DIR/$runner-guide.json"
+  local wait_event="turn_ready"
+  [[ "$runner" == claude* ]] && wait_event="stream_ready"
 
   "$BIFROST_BIN" -H 127.0.0.1 -p "$BIFROST_PORT" agent run \
     --runner "$runner" --session "$session" --json \
@@ -246,7 +252,7 @@ run_case() {
   local run_pid=$!
 
   for _ in $(seq 1 200); do
-    if grep -q "\"event\":\"turn_ready\",\"runner\":\"$runner\"" "$MOCK_LOG" 2>/dev/null; then
+    if grep -q "\"event\":\"$wait_event\",\"runner\":\"$runner\"" "$MOCK_LOG" 2>/dev/null; then
       break
     fi
     if ! kill -0 "$run_pid" >/dev/null 2>&1; then
@@ -296,6 +302,8 @@ if runner == "claude":
     assert frame["message"]["content"][0]["text"] == f"focus-{runner}", frame
     starts = [record for record in records if record.get("event") == "turn_started" and record.get("runner") == runner]
     assert len(starts) == 1 and starts[0]["pid"] == steered[0]["pid"], records
+    ready = [record for record in records if record.get("event") == "stream_ready" and record.get("runner") == runner]
+    assert len(ready) == 1 and ready[0]["pid"] == steered[0]["pid"], records
 else:
     steered = [record for record in records if record.get("event") == "turn_steered" and record.get("runner") == runner]
     assert len(steered) == 1, records
@@ -465,6 +473,7 @@ run_queue_fallback_case() {
   local stream_log="$TEST_DIR/$runner-stream.ndjson"
   local guide_log="$TEST_DIR/$runner-guide.json"
   local wait_event="turn_ready"
+  [[ "$runner" == claude* ]] && wait_event="stream_ready"
   [[ "$runner" == *"-exec" ]] && wait_event="exec_started"
 
   curl -sS -N --noproxy '*' \

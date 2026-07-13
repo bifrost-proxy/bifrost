@@ -302,6 +302,20 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
 - **执行记录（2026-07-12）**: PASS — `mock_stream_json_runner_accepts_live_guide_in_same_process` 通过；重新构建当前源码后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh` 输出 `[external-runner-live-guide] PASS`。mock 记录证明 Claude 初始帧与 guide 帧 PID 相同，CLI 返回 `delivery=steered`、`threadId=thread-claude`、无 `turnId`，最终同一 run 返回 `GUIDED_claude`。
 - **执行记录（2026-07-13）**: PASS — 先用本机 Claude Code `2.1.207` 真实验证官方控制协议：长工具执行期间发送 interrupt control request，收到 matching success response 后发送 guide；同一 PID 依次输出旧响应 `error_during_execution` 与新响应 `success/GUIDED`。随后 `mock_stream_json_runner_redirects_live_guide_in_same_process` 和 `result_frame_force_kills_runner_that_does_not_exit` 各 `1 passed`，后者在约 2.17 秒内结束忽略 SIGTERM 的 mock；重新构建后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh` 输出 `[external-runner-live-guide] PASS`，Claude 外部事件只有一个成功 `run_finished`；mock Claude interrupt 明确拒绝时返回 `delivery=queued`，首轮 `FIRST_claude-reject` 后仅执行一次 `QUEUED_claude-reject`，拒绝原因完整保留。
 
+### TC-GQ-21: Claude stream-json 就绪后立即发送 live guide（macOS CI 回归）
+
+- **操作步骤**:
+  ```bash
+  SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+  SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+    bash e2e-tests/tests/test_external_runner_live_guide.sh
+  ```
+- **预期结果**:
+  - mock Claude 在输出 `system/init` 和回放首条 user frame 后记录 `stream_ready`；测试脚本以该事件而非 app-server 专用的 `turn_ready` 作为 Claude guide 的发起条件。
+  - 同一 mock PID 收到一次 `control_request/interrupt` 与一次 guide user JSONL 帧；CLI 返回 `delivery=steered`，最终唯一 `run_finished` 为 `succeeded` 且响应 `GUIDED_claude`。
+  - 在 macOS shell E2E 分片中不因无效的 10 秒等待挤压 30 秒 runner timeout。
+- **执行记录（2026-07-13）**: PASS — 重新构建后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh` 输出 `[external-runner-live-guide] PASS`。该命令覆盖 Claude stream-json 的 `stream_ready` 触发、同 PID interrupt-and-guide、Codex/Traex app-server guide、Web/IM guide、reject-to-queue 与显式 exec queue fallback。
+
 ## 清理步骤
 
 ```bash
