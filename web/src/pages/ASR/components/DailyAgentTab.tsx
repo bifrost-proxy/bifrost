@@ -671,19 +671,33 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                 </Descriptions.Item>
                 <Descriptions.Item label="ChatGPT Project URL" span={2}>
                   <Input
+                    key={`${selectedAgent.id}-project-url-${
+                      selectedAgent.research_fanout.chatgpt_project_url || ""
+                    }`}
                     data-testid="asr-daily-agent-research-project-url"
                     size="small"
-                    value={selectedAgent.research_fanout.chatgpt_project_url || ""}
+                    defaultValue={
+                      selectedAgent.research_fanout.chatgpt_project_url || ""
+                    }
                     placeholder="https://chatgpt.com/g/g-p-.../project"
-                    onChange={(event) =>
+                    onBlur={(event) => {
+                      const chatgptProjectUrl = event.target.value.trim();
+                      if (
+                        chatgptProjectUrl ===
+                        (selectedAgent.research_fanout!
+                          .chatgpt_project_url || "")
+                      ) {
+                        return;
+                      }
                       updateAgent(selectedAgent.id, {
                         research_fanout: {
                           ...selectedAgent.research_fanout!,
                           chatgpt_project_url:
-                            event.target.value || undefined,
+                            chatgptProjectUrl || undefined,
                         },
-                      })
-                    }
+                      });
+                    }}
+                    onPressEnter={(event) => event.currentTarget.blur()}
                   />
                 </Descriptions.Item>
                 <Descriptions.Item label="Allowed Research Runners" span={2}>
@@ -732,11 +746,16 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                           style={{ width: 180 }}
                         />
                         <Input
+                          key={`${profileId}-work-dir-${profile.work_dir}`}
                           aria-label={`${profileId} fallback working folder`}
                           size="small"
-                          value={profile.work_dir}
+                          defaultValue={profile.work_dir}
                           placeholder="Local working folder"
-                          onChange={(event) =>
+                          onBlur={(event) => {
+                            const workDir = event.target.value.trim();
+                            if (workDir === profile.work_dir) {
+                              return;
+                            }
                             updateAgent(selectedAgent.id, {
                               research_fanout: {
                                 ...selectedAgent.research_fanout!,
@@ -745,20 +764,28 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                                     .context_profiles,
                                   [profileId]: {
                                     ...profile,
-                                    work_dir: event.target.value,
+                                    work_dir: workDir,
                                   },
                                 },
                               },
-                            })
-                          }
+                            });
+                          }}
+                          onPressEnter={(event) => event.currentTarget.blur()}
                           style={{ width: 260 }}
                         />
                         <Input
+                          key={`${profileId}-instructions-${
+                            profile.instructions || ""
+                          }`}
                           aria-label={`${profileId} fallback instructions`}
                           size="small"
-                          value={profile.instructions || ""}
+                          defaultValue={profile.instructions || ""}
                           placeholder="What facts should be collected?"
-                          onChange={(event) =>
+                          onBlur={(event) => {
+                            const instructions = event.target.value.trim();
+                            if (instructions === (profile.instructions || "")) {
+                              return;
+                            }
                             updateAgent(selectedAgent.id, {
                               research_fanout: {
                                 ...selectedAgent.research_fanout!,
@@ -768,12 +795,13 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                                   [profileId]: {
                                     ...profile,
                                     instructions:
-                                      event.target.value || undefined,
+                                      instructions || undefined,
                                   },
                                 },
                               },
-                            })
-                          }
+                            });
+                          }}
+                          onPressEnter={(event) => event.currentTarget.blur()}
                           style={{ width: 260 }}
                         />
                         <Button

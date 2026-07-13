@@ -562,6 +562,16 @@ test("ASR Daily Agent saves a ChatGPT Project for independent research", async (
     "https://chatgpt.com/g/g-p-.../project",
   );
   await projectInput.fill(projectUrl);
+  expect(updates.at(-1)).not.toMatchObject({
+    agents: expect.arrayContaining([
+      expect.objectContaining({
+        research_fanout: expect.objectContaining({
+          chatgpt_project_url: projectUrl,
+        }),
+      }),
+    ]),
+  });
+  await projectInput.press("Enter");
   await waitForToast(page, "Configuration saved");
 
   await expect(

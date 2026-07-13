@@ -57,11 +57,13 @@
 1. 打开某个 Daily Agent 的详情。
 2. 开启 Independent Research。
 3. 配置最大问题数、允许的研究 Runner 和可选 Runtime Data Fallback。
+4. 在 Project URL、已有 fallback 目录和说明中连续输入文本，观察保存时机。
 
 预期：
 
 - 页面明确说明每题独立会话，以及 Chat + Pro 的发送前约束。
 - 新增 fallback 必须先填写名称、Runner 和本地目录，未完整填写时不会保存无效配置。
+- 长文本字段只在失焦或按回车时保存一次，不会逐字符发请求或被乱序响应覆盖。
 - 每个 Agent 仍可独立编辑自己的 AGENTS.md Prompt。
 
 ### TC-ADRP-06：微信摘要与周度洞察
@@ -109,6 +111,7 @@
 
 | 日期 | 用例 | 结果 |
 | --- | --- | --- |
+| 2026-07-13 | TC-ADRP-05 长文本保存时序回归 | Playwright 用例确认 Project URL 连续输入期间不提交，按回车后只保存完整 URL；前端定向用例与构建通过。 |
 | 2026-07-13 | TC-ADRP-01 当前主干回归 | `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_asr_daily_agents_api.sh` 通过；基础四段使用外部 Codex mock，逐题研究使用 ChatGPT Web mock。五个 Agent 全部生成 processed document，两个原始问题获得不同 conversation id 和完整链接，内部故障记录未进入 manifest，fan-out 的两个链接均进入 digest 上游输入和最终 digest。 |
 | 2026-07-12 | TC-ADRP-01 | `bash e2e-tests/tests/test_asr_daily_agents_api.sh` 通过；五个 Agent 均产出 processed document，两个研究问题生成不同 conversation id 与链接。 |
 | 2026-07-12 | TC-ADRP-02 免费账号负向用例 | 真实 run `1783850408000-b48c2cdf-711f-40fe-9171-0e481a2c4c90` 在发送前失败，错误为 `chat_mode_control_not_found`；诊断页面确认该独立 Chrome 登录的是免费账号，Prompt 未发送。 |
