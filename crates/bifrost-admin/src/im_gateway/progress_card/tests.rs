@@ -2260,6 +2260,104 @@ async fn compact_card_non_limit_failure_does_not_create_duplicate_message() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn reduced_card_non_limit_failure_stops_before_compact_retry() {
+    use std::sync::atomic::Ordering;
+
+    let server = spawn_mock_feishu_progress_server_with_failures(
+        None,
+        vec![(1, 300305), (2, 10002)],
+        Vec::new(),
+        None,
+    )
+    .await;
+    let registry = ImAgentProgressRegistry::new();
+    let session = registry
+        .start_feishu(
+            "s1",
+            Arc::new(FeishuProvider::new()),
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
+            "first turn",
+        )
+        .await
+        .expect("start progress card");
+
+    let mut session = session.lock().await;
+    session
+        .snapshot
+        .apply_event(AgentTurnProgressEvent::ToolFinished {
+            log: ToolCallLog {
+                tool_name: "exec_command".to_string(),
+                arguments: r#"{"cmd":"large"}"#.to_string(),
+                result: "x".repeat(20_000),
+                success: true,
+            },
+            duration_ms: 42,
+        });
+    let error = session
+        .flush_snapshot_with_limit_rollover("freeze")
+        .await
+        .expect_err("ordinary reduced-card failure must be returned");
+
+    assert!(error.to_string().contains("code=10002"));
+    assert_eq!(server.card_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(server.message_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rollover_creation_failure_preserves_the_full_limit_error_chain() {
+    use std::sync::atomic::Ordering;
+
+    let server = spawn_mock_feishu_progress_server_with_failures(
+        None,
+        vec![(1, 300305), (2, 300305), (3, 300305)],
+        vec![(2, 10002)],
+        None,
+    )
+    .await;
+    let registry = ImAgentProgressRegistry::new();
+    let session = registry
+        .start_feishu(
+            "s1",
+            Arc::new(FeishuProvider::new()),
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
+            "first turn",
+        )
+        .await
+        .expect("start progress card");
+
+    let mut session = session.lock().await;
+    session
+        .snapshot
+        .apply_event(AgentTurnProgressEvent::ToolFinished {
+            log: ToolCallLog {
+                tool_name: "exec_command".to_string(),
+                arguments: r#"{"cmd":"large"}"#.to_string(),
+                result: "x".repeat(20_000),
+                success: true,
+            },
+            duration_ms: 42,
+        });
+    let error = session
+        .flush_snapshot_with_limit_rollover("freeze")
+        .await
+        .expect_err("failed rollover creation must preserve recovery context");
+    let message = error.to_string();
+
+    assert!(message.contains("progress card limit recovery failed"));
+    assert!(message.contains("initial="));
+    assert!(message.contains("reduced="));
+    assert!(message.contains("compact="));
+    assert!(message.contains("rollover failed"));
+    assert!(message.contains("code=10002"));
+    assert_eq!(server.card_counter.load(Ordering::SeqCst), 2);
+    assert_eq!(server.message_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn finish_retries_same_card_when_final_update_hits_limit() {
     use std::sync::atomic::Ordering;
 

@@ -969,7 +969,6 @@ impl FeishuProgressCardSession {
             Err(error) => {
                 warn!(
                     error = %error,
-                    limit = ?feishu_card_limit_kind(&error),
                     "Feishu progress card create hit CardKit limit; retrying with reduced history"
                 );
             }
@@ -988,7 +987,6 @@ impl FeishuProgressCardSession {
             Err(error) => {
                 warn!(
                     error = %error,
-                    limit = ?feishu_card_limit_kind(&error),
                     "Feishu rejected reduced progress card; retrying with compact card"
                 );
             }
@@ -1244,7 +1242,6 @@ impl FeishuProgressCardSession {
                 warn!(
                     card_id = previous_card_id,
                     error = %error,
-                    limit = ?feishu_card_limit_kind(&error),
                     "retrying Feishu progress card with reduced history after CardKit limit"
                 );
                 self.card_budget = FEISHU_CARD_RETRY_BUDGET;
@@ -1254,7 +1251,6 @@ impl FeishuProgressCardSession {
                         warn!(
                             card_id = previous_card_id,
                             error = %retry_error,
-                            limit = ?feishu_card_limit_kind(&retry_error),
                             "reduced Feishu progress card still exceeds limit; retrying compact card"
                         );
                         match self.replace_current_card_after_limit(true).await {
