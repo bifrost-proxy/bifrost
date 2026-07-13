@@ -407,10 +407,10 @@ pub(super) async fn run_command(
                             register_active_app_server_session(
                                 session_key,
                                 run_id,
-                                ActiveAppServerHandle {
+                                live_guide::ActiveGuideHandle {
                                     run_id: run_id.to_string(),
-                                    thread_id: thread_id.clone(),
-                                    turn_id: turn_id.clone(),
+                                    thread_id: Some(thread_id.clone()),
+                                    turn_id: Some(turn_id.clone()),
                                     guide_tx: guide_tx.clone(),
                                 },
                             );
@@ -1703,6 +1703,6 @@ for line in sys.stdin:
         }));
         assert!(!ACTIVE_RUNS.contains_key("mock-capacity-retry-run"));
         assert!(!ACTIVE_SESSIONS.contains_key(session_key));
-        assert!(!ACTIVE_APP_SERVER_SESSIONS.contains_key(session_key));
+        assert!(live_guide::active_handle(session_key).is_none());
     }
 }
