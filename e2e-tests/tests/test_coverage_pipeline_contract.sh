@@ -64,6 +64,35 @@ grep -Fq -- '--skip-runner' "$ci_workflow"
 grep -Fq 'check-shell-quality.sh' "$ci_workflow"
 grep -Fq 'shellcheck --severity=error' "$shell_quality"
 grep -Fq 'shfmt -d -i 2 -ci' "$shell_quality"
+grep -Fq 'shfmt_v3.12.0_linux_amd64' "$ci_workflow"
+grep -Fq 'd9fbb2a9c33d13f47e7618cf362a914d029d02a6df124064fff04fd688a745ea' "$ci_workflow"
+if grep -Eq 'actions/setup-go|(^|[[:space:]])go[[:space:]]+install([[:space:]]|$)' "$ci_workflow"; then
+  echo "CI must not install the Go toolchain" >&2
+  exit 1
+fi
+tracked_go_files="$(
+  git ls-files -- \
+    ':(glob)**/*.go' 'go.mod' 'go.sum' 'go.work' \
+    ':(glob)**/go.mod' ':(glob)**/go.sum' ':(glob)**/go.work' |
+    while IFS= read -r tracked_go_file; do
+      [[ ! -e "$tracked_go_file" ]] || printf '%s\n' "$tracked_go_file"
+    done
+)"
+if [[ -n "$tracked_go_files" ]]; then
+  echo "tracked Go files are forbidden:" >&2
+  echo "$tracked_go_files" >&2
+  exit 1
+fi
+legacy_go_artifacts="$(
+  git ls-files -- 'e2e-tests/tests/quic_socks5_client/**' |
+    while IFS= read -r legacy_go_artifact; do
+      [[ ! -e "$legacy_go_artifact" ]] || printf '%s\n' "$legacy_go_artifact"
+    done
+)"
+if [[ -n "$legacy_go_artifacts" ]]; then
+  echo "legacy Go QUIC/SOCKS5 client artifacts are forbidden" >&2
+  exit 1
+fi
 grep -Fq 'write_machine_report' "$runner"
 grep -Fq 'summary.json' "$runner"
 grep -Fq 'schema_version' "$e2e_summary"
