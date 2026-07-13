@@ -29,6 +29,7 @@ const CONFIG_VERSION: u32 = 1;
 const MAX_EXTERNAL_RUNNER_IMAGES_PER_MESSAGE: usize = 6;
 const MAX_PENDING_EXTERNAL_GUIDES: usize = 32;
 const WORKER_STOP_GRACE_MS: u64 = 1500;
+const CODEX_WEEKLY_WINDOW_MINUTES: u64 = 7 * 24 * 60;
 #[cfg(unix)]
 const PROCESS_KILL_GRACE_MS: u64 = 250;
 
@@ -1913,6 +1914,86 @@ fn append_external_cli_metadata(
         }
     }
     append_external_cli_usage_metadata(events, metadata);
+    for event in events {
+        merge_external_cli_progress_metadata(adapter, event, metadata);
+    }
+}
+
+pub fn merge_external_cli_progress_metadata(
+    adapter: &str,
+    event: &ExternalCliProgressEvent,
+    metadata: &mut BTreeMap<String, String>,
+) -> bool {
+    if !is_codex_like_adapter(adapter) {
+        return false;
+    }
+    let before = metadata.clone();
+    if let Some(usage) = event
+        .raw
+        .get("usage")
+        .and_then(serde_json::Value::as_object)
+    {
+        insert_usage_metadata(usage, metadata);
+    }
+    if let Some(window) = codex_weekly_rate_limit_window(&event.raw) {
+        if let Some(used_percent) = window
+            .get("usedPercent")
+            .and_then(serde_json::Value::as_u64)
+        {
+            metadata.insert(
+                "codexWeeklyUsedPercent".to_string(),
+                used_percent.min(100).to_string(),
+            );
+            metadata.insert(
+                "codexWeeklyWindowMinutes".to_string(),
+                CODEX_WEEKLY_WINDOW_MINUTES.to_string(),
+            );
+        }
+        if let Some(resets_at) = window.get("resetsAt").and_then(serde_json::Value::as_u64) {
+            metadata.insert("codexWeeklyResetsAt".to_string(), resets_at.to_string());
+        }
+    }
+    *metadata != before
+}
+
+fn codex_weekly_rate_limit_window(raw: &serde_json::Value) -> Option<&serde_json::Value> {
+    let snapshots = [
+        raw.get("weekly"),
+        raw.get("rateLimitsByLimitId")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|limits| limits.get("codex")),
+        raw.get("rateLimits"),
+        raw.pointer("/params/rateLimits"),
+        raw.pointer("/result/rateLimits"),
+    ];
+    snapshots.into_iter().flatten().find_map(|snapshot| {
+        [snapshot.get("primary"), snapshot.get("secondary")]
+            .into_iter()
+            .flatten()
+            .find(|window| {
+                window
+                    .get("windowDurationMins")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(CODEX_WEEKLY_WINDOW_MINUTES)
+            })
+    })
+}
+
+fn insert_usage_metadata(
+    usage: &serde_json::Map<String, serde_json::Value>,
+    metadata: &mut BTreeMap<String, String>,
+) {
+    for (source, target) in [
+        ("input_tokens", "usageInputTokens"),
+        ("cached_input_tokens", "usageCachedInputTokens"),
+        ("output_tokens", "usageOutputTokens"),
+        ("reasoning_output_tokens", "usageReasoningOutputTokens"),
+        ("total_tokens", "usageTotalTokens"),
+    ] {
+        if let Some(value) = usage_u64(usage, source) {
+            metadata.insert(target.to_string(), value.to_string());
+        }
+    }
 }
 
 fn append_external_cli_usage_metadata(

@@ -2818,6 +2818,106 @@ fn codex_like_metadata_includes_turn_usage_tokens() {
 }
 
 #[test]
+fn codex_progress_metadata_merges_thread_total_and_weekly_window() {
+    let usage_event = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::Status,
+        content: "token usage updated".to_string(),
+        title: Some("token_usage".to_string()),
+        raw: serde_json::json!({
+            "usage": {
+                "input_tokens": 1200,
+                "cached_input_tokens": 300,
+                "output_tokens": 80,
+                "reasoning_output_tokens": 20,
+                "total_tokens": 1280
+            }
+        }),
+    };
+    let limits_event = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::Status,
+        content: "usage updated".to_string(),
+        title: Some("rate_limits".to_string()),
+        raw: serde_json::json!({
+            "params": {
+                "rateLimits": {
+                    "limitId": "codex",
+                    "primary": {
+                        "usedPercent": 63,
+                        "windowDurationMins": 10080,
+                        "resetsAt": 1784490086
+                    },
+                    "secondary": {
+                        "usedPercent": 5,
+                        "windowDurationMins": 300,
+                        "resetsAt": 1784000000
+                    }
+                }
+            }
+        }),
+    };
+    let mut metadata = std::collections::BTreeMap::new();
+
+    assert!(merge_external_cli_progress_metadata(
+        DEFAULT_ADAPTER,
+        &usage_event,
+        &mut metadata
+    ));
+    assert!(merge_external_cli_progress_metadata(
+        DEFAULT_ADAPTER,
+        &limits_event,
+        &mut metadata
+    ));
+
+    assert_eq!(
+        metadata.get("usageTotalTokens").map(String::as_str),
+        Some("1280")
+    );
+    assert_eq!(
+        metadata.get("codexWeeklyUsedPercent").map(String::as_str),
+        Some("63")
+    );
+    assert_eq!(
+        metadata.get("codexWeeklyWindowMinutes").map(String::as_str),
+        Some("10080")
+    );
+    assert_eq!(
+        metadata.get("codexWeeklyResetsAt").map(String::as_str),
+        Some("1784490086")
+    );
+}
+
+#[test]
+fn codex_progress_metadata_ignores_short_windows_and_non_codex_adapters() {
+    let event = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::Status,
+        content: "usage updated".to_string(),
+        title: Some("rate_limits".to_string()),
+        raw: serde_json::json!({
+            "rateLimits": {
+                "primary": {
+                    "usedPercent": 20,
+                    "windowDurationMins": 300,
+                    "resetsAt": 1784000000
+                }
+            }
+        }),
+    };
+    let mut metadata = std::collections::BTreeMap::new();
+
+    assert!(!merge_external_cli_progress_metadata(
+        DEFAULT_ADAPTER,
+        &event,
+        &mut metadata
+    ));
+    assert!(!merge_external_cli_progress_metadata(
+        CLAUDE_CODE_ADAPTER,
+        &event,
+        &mut metadata
+    ));
+    assert!(metadata.is_empty());
+}
+
+#[test]
 fn codex_and_traex_metadata_include_runner_observability() {
     for adapter in [DEFAULT_ADAPTER, TRAEX_ADAPTER] {
         let request = ExternalCliRunRequest {
