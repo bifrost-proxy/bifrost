@@ -459,6 +459,36 @@ fn feishu_progress_card_file_change_tool_expands_with_detail() {
 }
 
 #[test]
+fn process_tool_group_title_distinguishes_running_and_failed_steps() {
+    let mut running = ImAgentProgressSnapshot::new("s1", "running task");
+    running.apply_event(AgentTurnProgressEvent::ToolStarted {
+        tool_name: "exec_command".to_string(),
+        arguments: "cargo test".to_string(),
+    });
+    let running_items = running.timeline.iter().enumerate().collect::<Vec<_>>();
+    assert_eq!(
+        format_process_tool_group_title(&running_items),
+        "正在执行 1 个步骤"
+    );
+
+    let mut failed = ImAgentProgressSnapshot::new("s2", "failed task");
+    failed.apply_event(AgentTurnProgressEvent::ToolFinished {
+        log: ToolCallLog {
+            tool_name: "exec_command".to_string(),
+            arguments: "cargo test".to_string(),
+            result: "failed".to_string(),
+            success: false,
+        },
+        duration_ms: 0,
+    });
+    let failed_items = failed.timeline.iter().enumerate().collect::<Vec<_>>();
+    assert_eq!(
+        format_process_tool_group_title(&failed_items),
+        "已执行 1 个步骤，1 个失败"
+    );
+}
+
+#[test]
 fn consecutive_process_tools_are_grouped_by_default() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "review task");
     snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {

@@ -486,6 +486,67 @@ fn file_change_line_stats_do_not_pair_changes_across_hunks() {
 }
 
 #[test]
+fn external_progress_result_prefers_file_detail_and_keeps_structured_fallbacks() {
+    let nested_file_change = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::ToolFinished,
+        content: "stale absolute-path detail".to_string(),
+        title: Some("fileChange".to_string()),
+        raw: serde_json::json!({
+            "params": {
+                "item": {
+                    "type": "fileChange",
+                    "path": "/workspace/project/src/main.rs",
+                    "kind": {"type": "update"}
+                }
+            }
+        }),
+    };
+    assert_eq!(
+        external_progress_result_text(&nested_file_change, Some(Path::new("/workspace/project"))),
+        "file: src/main.rs (修改)"
+    );
+
+    let detail_free_file_change = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::ToolFinished,
+        content: String::new(),
+        title: Some("fileChange".to_string()),
+        raw: serde_json::json!({"item": {"type": "fileChange"}}),
+    };
+    assert!(
+        external_progress_result_text(&detail_free_file_change, None)
+            .contains(r#""type": "fileChange""#)
+    );
+
+    let empty_regular_tool = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::ToolFinished,
+        content: String::new(),
+        title: Some("exec_command".to_string()),
+        raw: serde_json::json!({}),
+    };
+    assert!(external_progress_result_text(&empty_regular_tool, None).is_empty());
+}
+
+#[test]
+fn file_change_detail_covers_top_level_diff_and_header_only_unified_diff() {
+    let detail = file_change_detail_from_value(&serde_json::json!({
+        "diff": "--- a/src/main.rs\n+++ b/src/main.rs\n-old\n+new\n"
+    }))
+    .expect("top-level diff detail");
+    assert_eq!(
+        detail,
+        "diff:\n  --- a/src/main.rs\n  +++ b/src/main.rs\n  -old\n  +new"
+    );
+    assert!(looks_like_unified_diff(
+        "--- a/src/main.rs\n+++ b/src/main.rs\n-old\n+new\n"
+    ));
+
+    assert_eq!(
+        format_file_change_path("src/main.rs", Some("修改"), Some("context only"), None),
+        "file: src/main.rs (修改)"
+    );
+}
+
+#[test]
 fn traex_cli_parser_maps_real_jsonl_events() {
     let stdout = r#"{"type":"thread.started","thread_id":"019e9f78-traex"}
 {"type":"turn.started"}
