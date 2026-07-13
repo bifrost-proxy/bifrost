@@ -161,7 +161,7 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
             else {
                 return error_response(StatusCode::NOT_FOUND, "ASR task endpoint not found");
             };
-            get_task_response(id)
+            get_task_response(id).await
         }
         (&Method::DELETE, _) if path.starts_with("/api/asr/tasks/") => {
             let Some(id) = path
@@ -535,10 +535,22 @@ fn list_tasks_response() -> Response<BoxBody> {
     json_response(&serde_json::json!({ "tasks": tasks }))
 }
 
-fn get_task_response(id: &str) -> Response<BoxBody> {
-    match find_task(id) {
-        Some(task) => json_response(&task_detail(task)),
-        None => error_response(StatusCode::NOT_FOUND, "ASR task not found"),
+async fn task_detail_in_blocking_worker<F>(work: F) -> Result<Option<TaskDetail>, tokio::task::JoinError>
+where
+    F: FnOnce() -> Option<TaskDetail> + Send + 'static,
+{
+    tokio::task::spawn_blocking(work).await
+}
+
+async fn get_task_response(id: &str) -> Response<BoxBody> {
+    let id = id.to_string();
+    match task_detail_in_blocking_worker(move || find_task(&id).map(task_detail)).await {
+        Ok(Some(detail)) => json_response(&detail),
+        Ok(None) => error_response(StatusCode::NOT_FOUND, "ASR task not found"),
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("load ASR task detail: {error}"),
+        ),
     }
 }
 

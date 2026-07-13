@@ -1077,6 +1077,30 @@ mod tests {
         assert_eq!(detail.summary.pending, 0);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn task_detail_work_does_not_block_the_async_runtime() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let detail_task = tokio::spawn(task_detail_in_blocking_worker(move || {
+            let _ = started_tx.send(());
+            release_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("watchdog should release blocking task-detail work");
+            None
+        }));
+        let watchdog = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            let _ = release_tx.send(());
+        });
+
+        tokio::time::timeout(Duration::from_millis(100), started_rx)
+            .await
+            .expect("task-detail filesystem work must not block the async runtime")
+            .expect("blocking worker should announce that it started");
+        watchdog.join().expect("watchdog thread should finish");
+        assert!(detail_task.await.unwrap().unwrap().is_none());
+    }
+
     #[test]
     fn task_watch_snapshot_marks_eta_confidence_without_duration() {
         let _guard = test_data_dir_lock();
