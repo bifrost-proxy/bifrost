@@ -666,6 +666,7 @@ fn feishu_card_limit_errors_are_classified_by_official_codes() {
     let ordinary_error = BifrostError::Network(
         "feishu update card entity failed: code=10002, msg=invalid request".to_string(),
     );
+    let non_network_error = BifrostError::Config("feishu card config".to_string());
 
     assert_eq!(
         feishu_card_limit_kind(&size_error),
@@ -676,6 +677,7 @@ fn feishu_card_limit_errors_are_classified_by_official_codes() {
         Some(FeishuCardLimitKind::ComponentCount)
     );
     assert_eq!(feishu_card_limit_kind(&ordinary_error), None);
+    assert_eq!(feishu_card_limit_kind(&non_network_error), None);
 }
 
 #[test]
@@ -1268,7 +1270,7 @@ struct MockFeishuProgressServer {
 }
 
 async fn spawn_mock_feishu_progress_server() -> MockFeishuProgressServer {
-    spawn_mock_feishu_progress_server_with_failures(None, Vec::new(), None, None, 300305).await
+    spawn_mock_feishu_progress_server_with_failures(None, Vec::new(), Vec::new(), None).await
 }
 
 async fn spawn_mock_feishu_progress_server_with_send_failure(
@@ -1277,9 +1279,8 @@ async fn spawn_mock_feishu_progress_server_with_send_failure(
     spawn_mock_feishu_progress_server_with_failures(
         fail_message_send_number,
         Vec::new(),
+        Vec::new(),
         None,
-        None,
-        300305,
     )
     .await
 }
@@ -1290,9 +1291,8 @@ async fn spawn_mock_feishu_progress_server_with_invalid_card_id_send_failure(
     spawn_mock_feishu_progress_server_with_failures(
         None,
         Vec::new(),
-        None,
+        Vec::new(),
         fail_invalid_card_id_send_number,
-        300305,
     )
     .await
 }
@@ -1306,9 +1306,8 @@ async fn spawn_mock_feishu_progress_server_with_card_update_failure(
             .into_iter()
             .map(|number| (number, 300305))
             .collect(),
+        Vec::new(),
         None,
-        None,
-        300305,
     )
     .await
 }
@@ -1323,9 +1322,8 @@ async fn spawn_mock_feishu_progress_server_with_card_update_limit(
             .into_iter()
             .map(|number| (number, limit_error_code))
             .collect(),
+        Vec::new(),
         None,
-        None,
-        limit_error_code,
     )
     .await
 }
@@ -1340,9 +1338,8 @@ async fn spawn_mock_feishu_progress_server_with_card_update_limits(
             .into_iter()
             .map(|number| (number, limit_error_code))
             .collect(),
+        Vec::new(),
         None,
-        None,
-        limit_error_code,
     )
     .await
 }
@@ -1350,14 +1347,8 @@ async fn spawn_mock_feishu_progress_server_with_card_update_limits(
 async fn spawn_mock_feishu_progress_server_with_card_update_codes(
     fail_card_update_codes: Vec<(usize, i64)>,
 ) -> MockFeishuProgressServer {
-    spawn_mock_feishu_progress_server_with_failures(
-        None,
-        fail_card_update_codes,
-        None,
-        None,
-        300305,
-    )
-    .await
+    spawn_mock_feishu_progress_server_with_failures(None, fail_card_update_codes, Vec::new(), None)
+        .await
 }
 
 async fn spawn_mock_feishu_progress_server_with_card_create_limit(
@@ -1367,19 +1358,27 @@ async fn spawn_mock_feishu_progress_server_with_card_create_limit(
     spawn_mock_feishu_progress_server_with_failures(
         None,
         Vec::new(),
-        fail_card_create_number,
+        fail_card_create_number
+            .into_iter()
+            .map(|number| (number, limit_error_code))
+            .collect(),
         None,
-        limit_error_code,
     )
     .await
+}
+
+async fn spawn_mock_feishu_progress_server_with_card_create_codes(
+    fail_card_create_codes: Vec<(usize, i64)>,
+) -> MockFeishuProgressServer {
+    spawn_mock_feishu_progress_server_with_failures(None, Vec::new(), fail_card_create_codes, None)
+        .await
 }
 
 async fn spawn_mock_feishu_progress_server_with_failures(
     fail_message_send_number: Option<usize>,
     fail_card_update_codes: Vec<(usize, i64)>,
-    fail_card_create_number: Option<usize>,
+    fail_card_create_codes: Vec<(usize, i64)>,
     fail_invalid_card_id_send_number: Option<usize>,
-    limit_error_code: i64,
 ) -> MockFeishuProgressServer {
     use bytes::Bytes;
     use http_body_util::{BodyExt, Full};
@@ -1402,6 +1401,11 @@ async fn spawn_mock_feishu_progress_server_with_failures(
             .into_iter()
             .collect::<std::collections::HashMap<_, _>>(),
     );
+    let fail_card_create_codes = Arc::new(
+        fail_card_create_codes
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>(),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind mock feishu server");
@@ -1414,6 +1418,7 @@ async fn spawn_mock_feishu_progress_server_with_failures(
     let card_create_payloads_for_server = Arc::clone(&card_create_payloads);
     let card_update_payloads_for_server = Arc::clone(&card_update_payloads);
     let fail_card_update_codes_for_server = Arc::clone(&fail_card_update_codes);
+    let fail_card_create_codes_for_server = Arc::clone(&fail_card_create_codes);
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
@@ -1428,6 +1433,7 @@ async fn spawn_mock_feishu_progress_server_with_failures(
             let card_create_payloads = Arc::clone(&card_create_payloads_for_server);
             let card_update_payloads = Arc::clone(&card_update_payloads_for_server);
             let fail_card_update_codes = Arc::clone(&fail_card_update_codes_for_server);
+            let fail_card_create_codes = Arc::clone(&fail_card_create_codes_for_server);
             tokio::spawn(async move {
                 let service = service_fn(move |req: Request<Incoming>| {
                     let card_counter = Arc::clone(&card_counter);
@@ -1438,6 +1444,7 @@ async fn spawn_mock_feishu_progress_server_with_failures(
                     let card_create_payloads = Arc::clone(&card_create_payloads);
                     let card_update_payloads = Arc::clone(&card_update_payloads);
                     let fail_card_update_codes = Arc::clone(&fail_card_update_codes);
+                    let fail_card_create_codes = Arc::clone(&fail_card_create_codes);
                     async move {
                         let method = req.method().clone();
                         let path = req.uri().path().to_string();
@@ -1468,8 +1475,8 @@ async fn spawn_mock_feishu_progress_server_with_failures(
                                 .lock()
                                 .expect("create payloads lock")
                                 .push(data);
-                            if fail_card_create_number == Some(idx) {
-                                let message = if limit_error_code == 200860 {
+                            if let Some(error_code) = fail_card_create_codes.get(&idx) {
+                                let message = if *error_code == 200860 {
                                     "Card content exceeds limit"
                                 } else {
                                     "element exceeds the limit"
@@ -1478,7 +1485,7 @@ async fn spawn_mock_feishu_progress_server_with_failures(
                                     Response::builder()
                                         .status(StatusCode::OK)
                                         .body(Full::new(Bytes::from(format!(
-                                            r#"{{"code":{limit_error_code},"msg":"{message}"}}"#
+                                            r#"{{"code":{error_code},"msg":"{message}"}}"#
                                         ))))
                                         .unwrap(),
                                 );
@@ -1681,6 +1688,187 @@ async fn initial_content_size_limit_retries_creation_with_reduced_budget() {
     assert!(create_payloads
         .iter()
         .all(|payload| !payload.contains("精简状态卡")));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn initial_limits_fall_back_to_compact_card_before_sending_message() {
+    use std::sync::atomic::Ordering;
+
+    let server =
+        spawn_mock_feishu_progress_server_with_card_create_codes(vec![(1, 200860), (2, 300305)])
+            .await;
+    let registry = ImAgentProgressRegistry::new();
+    let session = registry
+        .start_feishu(
+            "s1",
+            Arc::new(FeishuProvider::new()),
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
+            "first turn",
+        )
+        .await
+        .expect("compact initial card should recover from both limits");
+
+    let session = session.lock().await;
+    assert!(session.compact_card_mode);
+    assert_eq!(
+        session.message_info().expect("message info").card_id,
+        "card_3"
+    );
+    assert_eq!(server.card_counter.load(Ordering::SeqCst), 3);
+    assert_eq!(server.message_counter.load(Ordering::SeqCst), 1);
+    let payloads = server
+        .card_create_payloads
+        .lock()
+        .expect("create payloads")
+        .clone();
+    assert_eq!(payloads.len(), 3);
+    assert!(payloads[2].contains("精简状态卡"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn initial_reduced_card_non_limit_error_is_not_hidden() {
+    use std::sync::atomic::Ordering;
+
+    let server =
+        spawn_mock_feishu_progress_server_with_card_create_codes(vec![(1, 200860), (2, 10002)])
+            .await;
+    let registry = ImAgentProgressRegistry::new();
+    let result = registry
+        .start_feishu(
+            "s1",
+            Arc::new(FeishuProvider::new()),
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
+            "first turn",
+        )
+        .await;
+
+    let error = match result {
+        Ok(_) => panic!("ordinary create error must be returned"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("code=10002"));
+    assert_eq!(server.card_counter.load(Ordering::SeqCst), 2);
+    assert_eq!(server.message_counter.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn already_compact_reduced_initial_card_does_not_retry_forever() {
+    use std::sync::atomic::Ordering;
+
+    let server =
+        spawn_mock_feishu_progress_server_with_card_create_codes(vec![(2, 200860), (3, 300305)])
+            .await;
+    let registry = ImAgentProgressRegistry::new();
+    let session = registry
+        .start_feishu(
+            "s1",
+            Arc::new(FeishuProvider::new()),
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
+            "first turn",
+        )
+        .await
+        .expect("start normal progress card");
+
+    let mut session = session.lock().await;
+    session.snapshot.output = "large final output".repeat(10_000);
+    session.snapshot.phase = ImProgressPhase::Finished;
+    let result = session.create_initial_card_entity().await;
+
+    assert!(result.is_err());
+    assert_eq!(server.card_counter.load(Ordering::SeqCst), 3);
+    assert_eq!(server.message_counter.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_turn_rollover_restores_previous_card_state() {
+    let server = spawn_mock_feishu_progress_server_with_card_create_codes(vec![(2, 10002)]).await;
+    let registry = ImAgentProgressRegistry::new();
+    let session = registry
+        .start_feishu(
+            "s1",
+            Arc::new(FeishuProvider::new()),
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
+            "first turn",
+        )
+        .await
+        .expect("start first card");
+
+    let mut session = session.lock().await;
+    let previous = session.message_info().expect("previous message");
+    let error = session
+        .rollover_turn("second turn")
+        .await
+        .expect_err("ordinary create failure must abort rollover");
+
+    assert!(error.to_string().contains("code=10002"));
+    let restored = session.message_info().expect("restored message");
+    assert_eq!(restored.card_id, previous.card_id);
+    assert_eq!(restored.message_id, previous.message_id);
+    assert_eq!(session.snapshot().title.as_deref(), Some("first turn"));
+    assert!(!session.compact_card_mode);
+    assert_eq!(session.card_budget, FEISHU_CARD_STANDARD_BUDGET);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn local_budget_can_switch_existing_card_to_compact_mode() {
+    let server = spawn_mock_feishu_progress_server().await;
+    let registry = ImAgentProgressRegistry::new();
+    let session = registry
+        .start_feishu(
+            "s1",
+            Arc::new(FeishuProvider::new()),
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
+            "first turn",
+        )
+        .await
+        .expect("start progress card");
+
+    let mut session = session.lock().await;
+    session.snapshot.output = "large final output".repeat(10_000);
+    session.snapshot.phase = ImProgressPhase::Finished;
+    session
+        .flush_snapshot()
+        .await
+        .expect("compact local update");
+
+    assert!(session.compact_card_mode);
+    let payloads = server
+        .card_update_payloads
+        .lock()
+        .expect("update payloads")
+        .clone();
+    assert_eq!(payloads.len(), 1);
+    assert!(payloads[0].contains("精简状态卡"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn limit_recovery_requires_an_existing_card_handle() {
+    let server = spawn_mock_feishu_progress_server().await;
+    let registry = ImAgentProgressRegistry::new();
+    let session = registry
+        .start_feishu(
+            "s1",
+            Arc::new(FeishuProvider::new()),
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
+            "first turn",
+        )
+        .await
+        .expect("start progress card");
+
+    let mut session = session.lock().await;
+    session.handle = None;
+    let error = session
+        .replace_current_card_after_limit(false)
+        .await
+        .expect_err("missing handle must not be synthesized");
+
+    assert!(error.to_string().contains("handle missing"));
 }
 
 #[tokio::test(flavor = "current_thread")]

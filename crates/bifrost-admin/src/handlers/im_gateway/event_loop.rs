@@ -2086,6 +2086,23 @@ mod tests {
         assert_eq!(summary.reasoning_source.as_deref(), Some("runner 配置"));
     }
 
+    #[test]
+    fn external_cli_progress_runner_summary_reads_weekly_usage_metadata() {
+        let mut metadata = std::collections::BTreeMap::new();
+        metadata.insert("codexWeeklyUsedPercent".to_string(), "140".to_string());
+        metadata.insert("codexWeeklyWindowMinutes".to_string(), "10080".to_string());
+        metadata.insert("codexWeeklyResetsAt".to_string(), "1784490086".to_string());
+
+        let usage = external_cli_weekly_usage_from_metadata(&metadata)
+            .expect("valid weekly metadata should be rendered");
+
+        assert_eq!(usage.used_percent, 100);
+        assert_eq!(usage.window_minutes, 10_080);
+        assert_eq!(usage.resets_at, Some(1_784_490_086));
+        metadata.remove("codexWeeklyWindowMinutes");
+        assert!(external_cli_weekly_usage_from_metadata(&metadata).is_none());
+    }
+
     fn external_cli_result_with_status(
         status: crate::im_gateway::external_cli::ExternalCliRunStatus,
     ) -> crate::im_gateway::external_cli::ExternalCliRunResult {

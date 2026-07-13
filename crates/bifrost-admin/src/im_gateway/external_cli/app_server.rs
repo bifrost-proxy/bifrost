@@ -1732,6 +1732,7 @@ for line in sys.stdin:
         send({"jsonrpc":"2.0","id":request_id,"result":{"turn":{"id":"turn-mock"}}})
     elif method == "account/rateLimits/read":
         send({"jsonrpc":"2.0","id":request_id,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":63,"windowDurationMins":10080,"resetsAt":1784490086},"secondary":None}}})
+        send({"jsonrpc":"2.0","id":request_id,"error":{"code":-32601,"message":"method not found after snapshot"}})
     elif method == "turn/steer":
         assert frame["params"]["expectedTurnId"] == "turn-mock"
         assert frame["params"]["input"][0]["text"] == "focus on tests"
@@ -1749,6 +1750,7 @@ for line in sys.stdin:
         request.adapter_config.transport = Some(ExternalCliTransport::AppServer);
         request.adapter_config.executable = Some(executable.display().to_string());
         let session_key = "mock-app-server-session";
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
         let run_task = tokio::spawn({
             let stop_marker = temp_dir.path().join("stop");
             async move {
@@ -1758,7 +1760,7 @@ for line in sys.stdin:
                     &request,
                     "initial prompt".to_string(),
                     stop_marker,
-                    None,
+                    Some(progress_tx),
                 )
                 .await
             }
@@ -1794,6 +1796,14 @@ for line in sys.stdin:
             event.title.as_deref() == Some("rate_limits")
                 && event.raw["weekly"]["windowDurationMins"] == 10_080
                 && event.raw.get("rateLimits").is_none()
+        }));
+        let mut streamed_events = Vec::new();
+        while let Ok(event) = progress_rx.try_recv() {
+            streamed_events.push(event);
+        }
+        assert!(streamed_events.iter().any(|event| {
+            event.title.as_deref() == Some("rate_limits")
+                && event.raw["weekly"]["windowDurationMins"] == 10_080
         }));
         assert!(!ACTIVE_RUNS.contains_key("mock-app-server-run"));
         assert!(!ACTIVE_SESSIONS.contains_key(session_key));
