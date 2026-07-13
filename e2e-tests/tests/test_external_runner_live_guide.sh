@@ -97,15 +97,20 @@ if "--input-format" in sys.argv and sys.argv[sys.argv.index("--input-format") + 
 
 if "app-server" not in sys.argv:
     prompt = sys.stdin.read()
-    record({"event":"exec_started","runner":runner,"prompt":prompt})
+    record({"event":"exec_started","runner":runner,"prompt":prompt,"argv":sys.argv[1:]})
     # The coverage-instrumented CLI has materially higher startup overhead.
     # Keep the exec transport active long enough for the guide command to be
     # issued after the explicit exec_started readiness marker.
-    time.sleep(10 if runner == "codex-exec" else 1)
-    send({"type":"thread.started","thread_id":thread_id})
-    send({"type":"turn.started"})
-    send({"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":f"EXEC_{runner}"}})
-    send({"type":"turn.completed","usage":{"input_tokens":5,"cached_input_tokens":0,"output_tokens":3,"reasoning_output_tokens":0,"total_tokens":8}})
+    time.sleep(10 if runner.endswith("-exec") else 1)
+    if runner.startswith("claude"):
+        send({"type":"system","subtype":"init","session_id":thread_id})
+        send({"type":"assistant","message":{"content":[{"type":"text","text":f"EXEC_{runner}"}]},"session_id":thread_id})
+        send({"type":"result","subtype":"success","is_error":False,"result":f"EXEC_{runner}","session_id":thread_id})
+    else:
+        send({"type":"thread.started","thread_id":thread_id})
+        send({"type":"turn.started"})
+        send({"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":f"EXEC_{runner}"}})
+        send({"type":"turn.completed","usage":{"input_tokens":5,"cached_input_tokens":0,"output_tokens":3,"reasoning_output_tokens":0,"total_tokens":8}})
     sys.exit(0)
 
 for line in sys.stdin:
@@ -208,6 +213,7 @@ for runner_name, adapter, mode, transport in (
     ("codex-reject", "codex", "reject", "app_server"),
     ("claude-reject", "claude_code", "reject", None),
     ("codex-exec", "codex", "accept", "exec"),
+    ("claude-exec", "claude_code", "accept", "exec"),
     ("claude", "claude_code", "accept", None),
 ):
     configured[runner_name] = runner(adapter, mode, transport)
@@ -459,7 +465,7 @@ run_queue_fallback_case() {
   local stream_log="$TEST_DIR/$runner-stream.ndjson"
   local guide_log="$TEST_DIR/$runner-guide.json"
   local wait_event="turn_ready"
-  [[ "$runner" == "codex-exec" ]] && wait_event="exec_started"
+  [[ "$runner" == *"-exec" ]] && wait_event="exec_started"
 
   curl -sS -N --noproxy '*' \
     -H 'content-type: application/json' \
@@ -496,7 +502,7 @@ if runner in ("codex-reject", "claude-reject"):
     expected_reason = "no active turn to steer" if runner == "codex-reject" else "no active Claude response"
     assert expected_reason in guide["reason"], guide
 else:
-    assert all(event["response"] == "EXEC_codex-exec" for event in finished), finished
+    assert all(event["response"] == f"EXEC_{runner}" for event in finished), finished
     assert "exec transport" in guide["reason"], guide
 PY
 }
@@ -504,6 +510,24 @@ PY
 run_queue_fallback_case codex-reject queued
 run_queue_fallback_case claude-reject queued
 run_queue_fallback_case codex-exec queued
+run_queue_fallback_case claude-exec queued
+
+python3 - "$MOCK_LOG" <<'PY'
+import json
+import sys
+
+records = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+claude_exec = [
+    record for record in records
+    if record.get("event") == "exec_started" and record.get("runner") == "claude-exec"
+]
+assert len(claude_exec) == 2, claude_exec
+for record in claude_exec:
+    argv = record["argv"]
+    input_format = argv[argv.index("--input-format") + 1]
+    assert input_format == "text", record
+    assert "--replay-user-messages" not in argv, record
+PY
 
 python3 - "$BIFROST_PORT" <<'PY'
 import json

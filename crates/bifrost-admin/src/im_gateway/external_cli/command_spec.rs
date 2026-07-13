@@ -80,15 +80,23 @@ pub(super) fn build_command_spec(
         }
     } else if request.adapter == CLAUDE_CODE_ADAPTER {
         if args.is_empty() {
+            let input_format =
+                if app_server::resolved_transport(request)? == ExternalCliTransport::StreamJson {
+                    "stream-json"
+                } else {
+                    "text"
+                };
             args = vec![
                 "-p".to_string(),
                 "--verbose".to_string(),
                 "--output-format".to_string(),
                 "stream-json".to_string(),
                 "--input-format".to_string(),
-                "stream-json".to_string(),
-                "--replay-user-messages".to_string(),
+                input_format.to_string(),
             ];
+            if input_format == "stream-json" {
+                args.push("--replay-user-messages".to_string());
+            }
         }
         if !config.args.is_empty() {
             append_claude_code_config_args(&mut args, config);

@@ -27,7 +27,7 @@ Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动
 ### 必须不破坏
 
 - 自定义 `adapterConfig.args` 的 Codex/Traex runner 继续使用原始 exec transport。
-- 配置 `adapterConfig.transport=exec` 时强制使用 exec；旧配置没有 transport 字段时，内置 Codex/Traex、没有 custom args，且 executable 未覆盖或 basename 是 `codex` / `traex` / `traecli` 时才默认 app-server。自定义 wrapper 继续 exec，除非显式声明 `transport=app_server`。
+- 配置 `adapterConfig.transport=exec` 时强制使用 exec；Claude Code 在该路径保持 `--input-format text`，因为一次性 exec 会把原始 prompt 文本写入 stdin，不能沿用 stream-json 输入参数。旧配置没有 transport 字段时，内置 Codex/Traex、没有 custom args，且 executable 未覆盖或 basename 是 `codex` / `traex` / `traecli` 时才默认 app-server。自定义 wrapper 继续 exec，除非显式声明 `transport=app_server`。
 - ChatGPT Web 保持默认排队语义；Claude Code 默认使用 stream-json 实时通道，显式 text/custom args/exec 与自定义 adapter 在缺少 live guide transport 时必须明确降级排队并保留原消息。
 - `/stop`、run stop marker、超时、worker process group 清理与服务退出清理继续有效。
 - model、reasoning effort、sandbox/approval、service tier、config override、feature flag、work dir、图片路径和 session resume 语义不因 transport 迁移丢失。
@@ -39,7 +39,7 @@ Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动
 - mock Codex app-server：运行慢工具期间发送 guide，断言收到 `turn/steer`，`expectedTurnId` 等于 active turn，最终回复包含 steer 后结果且没有第二个 turn/start。
 - mock Traex app-server：验证同一协议路径和 adapter 可执行文件选择。
 - mock app-server 在 steer 时返回 no-active/mismatch：Chat Gateway 响应为 `delivery=queued`，当前 turn 结束后消息作为下一 turn 执行。
-- 显式 `transport=exec` 与 custom args：guide 返回 queue fallback，原 exec JSONL 仍成功。
+- 显式 `transport=exec` 与 custom args：guide 返回 queue fallback，原 exec JSONL 仍成功；Claude exec 默认参数必须是 `--input-format text` 且不包含 `--replay-user-messages`。
 - 真实本机 Codex 与 Traex CLI：使用独立 `BIFROST_DATA_DIR` 和临时端口启动最新二进制，分别启动长任务、从第二终端发送 guide、确认同 turn 接收并正常收尾，无残留 app-server/worker 进程。
 - `/stop` 在 app-server turn 运行期间能结束 worker 与子进程，run/session 状态不残留 running。
 

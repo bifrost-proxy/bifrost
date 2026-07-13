@@ -1204,6 +1204,36 @@ fn claude_code_adapter_applies_session_model_to_command_spec() {
 }
 
 #[test]
+fn claude_code_explicit_exec_transport_keeps_text_stdin() {
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: Some(DEFAULT_CLAUDE_CODE_RUNNER_ID.to_string()),
+        session_key: Some("session:claude-exec".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: CLAUDE_CODE_ADAPTER.to_string(),
+        work_dir: Some(PathBuf::from("/tmp/work")),
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            transport: Some(ExternalCliTransport::Exec),
+            danger_full_access: Some(true),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert!(has_arg_pair(&spec.args, "--input-format", "text"));
+    assert!(!spec.args.contains(&"--replay-user-messages".to_string()));
+}
+
+#[test]
 fn claude_code_adapter_applies_session_effort_to_command_spec() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
