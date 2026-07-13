@@ -57,9 +57,6 @@ struct AsrDailyResearchExecution {
 }
 
 fn daily_research_runner_adapter(runner_id: &str) -> Option<String> {
-    if runner_id == "bifrost_agent" {
-        return Some("bifrost_agent".to_string());
-    }
     let store = crate::im_gateway::external_cli::ExternalCliConfigStore::new(
         &bifrost_storage::data_dir(),
     );
@@ -310,17 +307,6 @@ async fn run_daily_research_child(
     work_dir: &Path,
     session_key: &str,
 ) -> Result<AsrDailyResearchExecution, String> {
-    if runner_id == "bifrost_agent" {
-        let response =
-            run_bifrost_agent_daily_runner(task, &prompt, work_dir, session_key).await?;
-        return Ok(AsrDailyResearchExecution {
-            run_id: session_key.to_string(),
-            response,
-            adapter: "bifrost_agent".to_string(),
-            metadata: DailyAgentBTreeMap::new(),
-        });
-    }
-
     let config_store =
         crate::im_gateway::external_cli::ExternalCliConfigStore::new(&bifrost_storage::data_dir());
     let config = config_store.load();
