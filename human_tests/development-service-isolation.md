@@ -64,7 +64,6 @@
 操作步骤：
 
 1. 执行 `bash -n scripts/run_all_e2e.sh`。
-2. 以 `set -u` 方式调用 `run_shell_test_isolated test_agent_send_msg_default_channel.sh`，使用临时 E2E sandbox 和当前 release 二进制。
 3. 观察测试后的 `[CLEANUP]` 输出；再由 Linux CI 执行完整 Shell E2E suite。
 
 预期结果：

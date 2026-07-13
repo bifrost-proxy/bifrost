@@ -163,20 +163,11 @@ function supportsBuiltInAgentCommands({
   selectedThread?: AgentThreadSummary;
   status?: RunTelemetry["status"];
 }) {
-  const explicit = explicitRunnerIdentity(status, selectedThread);
-  if (/\b(codex|chatgpt|webgpt|external|external_runner|chatgpt_web)\b/.test(explicit)) {
-    return false;
-  }
-  if (/\b(bifrost_agent|builtin)\b/.test(explicit)) {
-    return true;
-  }
-  if (selectedThread?.runner_id && selectedThread.runner_id !== "bifrost_agent") {
-    return false;
-  }
-  if (status?.runner_id && status.runner_id !== "bifrost_agent") {
-    return false;
-  }
-  return runnerId === "bifrost_agent" || selectedRunnerAdapter(runnerOptions, runnerId) === "bifrost_agent";
+  void runnerId;
+  void runnerOptions;
+  void selectedThread;
+  void status;
+  return false;
 }
 
 export function supportsRunningGuide({
@@ -344,11 +335,11 @@ export default function AgentChatSection({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [newChatWorkDir, setNewChatWorkDir] = useState("");
-  const [newChatRunnerId, setNewChatRunnerId] = useState("bifrost_agent");
-  const [runnerId, setRunnerId] = useState("bifrost_agent");
-  const [defaultRunnerId, setDefaultRunnerId] = useState("bifrost_agent");
+  const [newChatRunnerId, setNewChatRunnerId] = useState("Codex");
+  const [runnerId, setRunnerId] = useState("Codex");
+  const [defaultRunnerId, setDefaultRunnerId] = useState("Codex");
   const [runnerOptions, setRunnerOptions] = useState<RunnerOption[]>([
-    { label: "Bifrost Agent", value: "bifrost_agent", adapter: "bifrost_agent" },
+    { label: "Codex Runner", value: "Codex", adapter: "codex" },
   ]);
   const [composerMode, setComposerMode] = useState<AgentCollaborationMode | undefined>();
   const [activeCollaborationMode, setActiveCollaborationMode] = useState<AgentCollaborationMode | undefined>();
@@ -678,8 +669,8 @@ export default function AgentChatSection({
         source: telemetry.status?.source,
         runner_type:
           telemetry.status?.runner_type ||
-          (runnerId === "bifrost_agent" ? "bifrost_agent" : selectedRunnerAdapter(runnerOptions, runnerId)),
-        runner_id: telemetry.status?.runner_id || (runnerId === "bifrost_agent" ? undefined : runnerId),
+          selectedRunnerAdapter(runnerOptions, runnerId),
+        runner_id: telemetry.status?.runner_id || runnerId,
         agent_type: telemetry.status?.agent_type,
       });
   const currentRunnerTag = formatRunnerTag(telemetry.status, selectedThread, runnerId);
@@ -871,15 +862,11 @@ export default function AgentChatSection({
         const defaultRunner = selectDefaultRunner(options).value;
         setRunnerOptions(options);
         setDefaultRunnerId(defaultRunner);
-        setRunnerId((current) =>
-          current === "bifrost_agent" ? defaultRunner : current,
-        );
-        setNewChatRunnerId((current) =>
-          current === "bifrost_agent" ? defaultRunner : current,
-        );
+        setRunnerId((current) => options.some((option) => option.value === current) ? current : defaultRunner);
+        setNewChatRunnerId((current) => options.some((option) => option.value === current) ? current : defaultRunner);
       })
       .catch(() => {
-        // Keep runner selection usable with the built-in runner fallback.
+        // Keep the last known external runner selection when configuration refresh fails.
       });
     return () => {
       cancelled = true;
@@ -1123,7 +1110,7 @@ export default function AgentChatSection({
             }),
           );
           setWorkDir(detail.work_dir || matchedThread?.work_dir || defaultWorkDir);
-          setRunnerId(detail.runner_id || matchedThread?.runner_id || "bifrost_agent");
+          setRunnerId(detail.runner_id || matchedThread?.runner_id || defaultRunnerId);
         })
         .finally(() => {
           if (!cancelled) {
@@ -1171,7 +1158,7 @@ export default function AgentChatSection({
               return changed ? next : prev;
             });
           }
-          setRunnerId(matchedThread?.runner_id || "bifrost_agent");
+          setRunnerId(matchedThread?.runner_id || defaultRunnerId);
           const eventSessionKey =
             pageEvents.find((event) => event.session_key)?.session_key;
           if (nextSessionKey || eventSessionKey) {
@@ -1533,7 +1520,7 @@ export default function AgentChatSection({
         queueItemsFromUnknown(thread.queueItems ?? thread.queue_items) ?? [],
       );
       setWorkDir(thread.work_dir || defaultWorkDir);
-      setRunnerId(thread.runner_id || "bifrost_agent");
+      setRunnerId(thread.runner_id || defaultRunnerId);
       pendingInstantScrollRef.current = true;
       if (!thread.history_path) {
         setMessages(STARTER_MESSAGES);
@@ -1707,7 +1694,7 @@ export default function AgentChatSection({
             ? "Queueing..."
             : "Injecting guide...",
       timestamp: Date.now() / 1000,
-      meta: "Bifrost Agent",
+      meta: "Runner",
     };
     if (rendersMessage) {
       pendingInstantScrollRef.current = true;
@@ -1858,10 +1845,7 @@ export default function AgentChatSection({
         : undefined;
     const content = parsedPlanSlash.message.trim();
     const compactCommand = builtInAgentCommandsSupported && rawContent === "/compact";
-    const telemetryRunnerId =
-      telemetry.status?.runner_id && telemetry.status.runner_id !== "bifrost_agent"
-        ? telemetry.status.runner_id
-        : undefined;
+    const telemetryRunnerId = telemetry.status?.runner_id;
     const activeRunnerId = options?.runnerIdOverride || telemetryRunnerId || runnerId;
     const activeRunnerAdapter = selectedRunnerAdapter(runnerOptions, activeRunnerId);
     const runnerModelCommand = isRunnerModelSlashCommand(rawContent, activeRunnerAdapter);
@@ -1901,7 +1885,7 @@ export default function AgentChatSection({
       role: runnerModelCommand ? "system" : "assistant",
       content: controlCommand ? "" : collaborationMode === "plan" ? "Planning..." : "Agent is running...",
       timestamp: Date.now() / 1000,
-      meta: runnerModelCommand ? "System" : "Bifrost Agent",
+      meta: runnerModelCommand ? "System" : "Runner",
       processSteps: compactCommand
         ? [
             {
@@ -1941,11 +1925,8 @@ export default function AgentChatSection({
       status: {
         ...(prev.status || {}),
         work_dir: workDir || undefined,
-        runner_id: activeRunnerId === "bifrost_agent" ? undefined : activeRunnerId,
-        runner_type:
-          activeRunnerId === "bifrost_agent"
-            ? "bifrost_agent"
-            : selectedRunnerAdapter(runnerOptions, activeRunnerId),
+        runner_id: activeRunnerId,
+        runner_type: selectedRunnerAdapter(runnerOptions, activeRunnerId),
       },
       plan: [],
       tools: [],
@@ -1965,11 +1946,8 @@ export default function AgentChatSection({
           start_time: Math.floor(Date.now() / 1000),
           last_active_time: Math.floor(Date.now() / 1000),
           duration_secs: 0,
-          runner_id: activeRunnerId === "bifrost_agent" ? undefined : activeRunnerId,
-          runner_type:
-            activeRunnerId === "bifrost_agent"
-              ? "bifrost_agent"
-              : selectedRunnerAdapter(runnerOptions, activeRunnerId),
+          runner_id: activeRunnerId,
+          runner_type: selectedRunnerAdapter(runnerOptions, activeRunnerId),
           work_dir: workDir || undefined,
         },
         ...prev.filter((thread) => thread.session_key !== sessionKey),
@@ -1984,7 +1962,6 @@ export default function AgentChatSection({
     let assistantSegmentHasText = false;
     let assistantSegmentHasSteps = compactCommand;
     let assistantSegmentHasProposedPlan = false;
-    let nextAssistantDeltaStartsSegment = false;
     try {
 
       const appendAssistantSegment = (initialContent = "") => {
@@ -1993,13 +1970,12 @@ export default function AgentChatSection({
         assistantSegmentId = `assistant-${Date.now()}-${assistantSegmentIndex}`;
         assistantSegmentHasText = initialContent.trim().length > 0;
         assistantSegmentHasSteps = false;
-        nextAssistantDeltaStartsSegment = false;
         const message: ChatMessage = {
           id: assistantSegmentId,
           role: "assistant",
           content: initialContent,
           timestamp: Date.now() / 1000,
-          meta: "Bifrost Agent",
+          meta: "Runner",
         };
         setMessages((prev) => [
           ...prev.map((item) =>
@@ -2009,38 +1985,6 @@ export default function AgentChatSection({
         ]);
       };
 
-      const appendAssistantDelta = (delta: string) => {
-        if (!delta) {
-          return;
-        }
-        if (
-          nextAssistantDeltaStartsSegment &&
-          (assistantSegmentHasText || assistantSegmentHasSteps)
-        ) {
-          appendAssistantSegment();
-        }
-        const targetId = assistantSegmentId;
-        const segmentHadText = assistantSegmentHasText;
-        setMessages((prev) =>
-          prev.map((message) => {
-            if (message.id !== targetId) {
-              return message;
-            }
-            const nextContent =
-              !segmentHadText &&
-              (message.content === "Agent is running..." || message.content === "Planning...")
-                ? delta
-                : `${message.content}${delta}`;
-            return {
-              ...message,
-              content: nextContent,
-            };
-          }),
-        );
-        assistantSegmentHasText =
-          assistantSegmentHasText || delta.trim().length > 0;
-        nextAssistantDeltaStartsSegment = false;
-      };
 
       const appendProcessStep = (step: ProcessStep) => {
         const targetId = assistantSegmentId;
@@ -2157,7 +2101,6 @@ export default function AgentChatSection({
           return prev;
         });
         assistantSegmentHasSteps = true;
-        nextAssistantDeltaStartsSegment = true;
       };
 
       const updateRunningToolPreview = (toolResult: string, durationMs?: number) => {
@@ -2362,14 +2305,6 @@ export default function AgentChatSection({
               });
               return changed ? next : prev;
             });
-          }
-          if (
-            event.eventType === "assistant_delta" &&
-            typeof event.content === "string" &&
-            runnerId === "bifrost_agent"
-          ) {
-            appendAssistantDelta(event.content);
-            return;
           }
           if (event.eventType === "tool_started") {
             const toolStep = eventToProcessStep(event);
@@ -2688,14 +2623,8 @@ export default function AgentChatSection({
         start_time: Math.floor(message.timestamp || Date.now() / 1000),
         last_active_time: Math.floor(Date.now() / 1000),
         duration_secs: 0,
-        runner_id:
-          runnerCall.targetRunnerId === "bifrost_agent"
-            ? undefined
-            : runnerCall.targetRunnerId,
-        runner_type:
-          runnerCall.targetRunnerId === "bifrost_agent"
-            ? "bifrost_agent"
-            : runnerCall.targetAdapter || runnerCall.targetRunnerId,
+        runner_id: runnerCall.targetRunnerId,
+        runner_type: runnerCall.targetAdapter || runnerCall.targetRunnerId,
         work_dir: workDir || undefined,
       });
     },

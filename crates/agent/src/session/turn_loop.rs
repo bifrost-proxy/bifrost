@@ -1336,8 +1336,11 @@ pub async fn run_turn_with_mcp_multimodal(
         let context_management_text =
             crate::session_status::format_context_management_status(session.history.len());
         let work_dir_text = session.work_dir.as_deref().unwrap_or("N/A");
-        let agent_type = session.agent_type.as_deref().unwrap_or("Bifrost Agent");
-        let runner_type = session.runner_type.as_deref().unwrap_or("bifrost_agent");
+        let agent_type = session
+            .agent_type
+            .as_deref()
+            .unwrap_or("External Runner Agent");
+        let runner_type = session.runner_type.as_deref().unwrap_or("external");
         let runner_id = session.runner_id.as_deref().unwrap_or("N/A");
         let conversation_ref = crate::session_status::format_conversation_ref(
             session.external_thread_id.as_deref(),

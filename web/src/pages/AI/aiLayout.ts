@@ -67,8 +67,11 @@ export function resolveAiRouteState(params: URLSearchParams): AiRouteState {
   }
 
   const hasThreadTarget = Boolean(params.get("session") || params.get("historyPath"));
+  const legacyChatRoute = legacyAiSection === "agent-chat";
   const chatMode: AiChatMode =
-    view === "chat" && !hasThreadTarget && (params.get("mode") === "new" || !params.get("mode"))
+    view === "chat" &&
+    !hasThreadTarget &&
+    (params.get("mode") === "new" || (!params.get("mode") && !legacyChatRoute))
       ? "new"
       : "thread";
 
@@ -90,9 +93,6 @@ function normalizeSettingsTarget(value: string | null): AiSettingsTarget {
 
 function runnerDisplayName(id: string, adapter?: string) {
   if (adapter === "codex" || id === "codex") return "Codex Runner";
-  if (adapter === "bifrost_agent" || adapter === "builtin" || id === "bifrost_agent") {
-    return "Bifrost Agent";
-  }
   if (adapter === "claude_code" || id === "claude_code") return "Claude Code";
   if (adapter === "traex" || id === "traex") return "Trae X";
   if (adapter === "chatgpt_web" || id === "chatgpt_web") return "ChatGPT Web";
@@ -103,10 +103,9 @@ function runnerRank(option: RunnerOption) {
   const value = option.value.toLowerCase();
   const adapter = (option.adapter || "").toLowerCase();
   if (adapter === "codex" || value === "codex") return 0;
-  if (adapter === "bifrost_agent" || adapter === "builtin" || value === "bifrost_agent") return 1;
-  if (adapter === "claude_code" || value === "claude_code") return 2;
-  if (adapter === "traex" || value === "traex") return 3;
-  if (adapter === "chatgpt_web" || value === "chatgpt_web") return 4;
+  if (adapter === "claude_code" || value === "claude_code") return 1;
+  if (adapter === "traex" || value === "traex") return 2;
+  if (adapter === "chatgpt_web" || value === "chatgpt_web") return 3;
   return 20;
 }
 
@@ -118,14 +117,7 @@ export function buildRunnerOptions(payload?: RunnerConfigPayload): RunnerOption[
       value: id,
       adapter: settings.adapter,
     }));
-  const hasBuiltin = custom.some((option) => option.value === "bifrost_agent");
-  const options = [
-    ...(hasBuiltin
-      ? []
-      : [{ label: "Bifrost Agent", value: "bifrost_agent", adapter: "bifrost_agent" }]),
-    ...custom,
-  ];
-  return dedupeRunnerOptions(options).sort((a, b) => {
+  return dedupeRunnerOptions(custom).sort((a, b) => {
     const rank = runnerRank(a) - runnerRank(b);
     return rank !== 0 ? rank : a.label.localeCompare(b.label);
   });
@@ -145,6 +137,6 @@ export function selectDefaultRunner(options: RunnerOption[]) {
   return (
     options.find((option) => option.adapter === "codex" || option.value === "codex") ||
     options[0] ||
-    { label: "Bifrost Agent", value: "bifrost_agent", adapter: "bifrost_agent" }
+    { label: "Codex Runner", value: "Codex", adapter: "codex" }
   );
 }

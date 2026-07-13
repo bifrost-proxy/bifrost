@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-Skill Creator 子系统让 Bifrost Agent 在 Settings -> Agent 中管理 skill，支持查看详情、删除、启用/禁用、导入 zip 包。新建 skill 必须通过 Agent 对话或导入 zip 包，WebUI 不提供直接创建和编辑功能。
+Skill Creator 子系统让 Bifrost 在 Settings -> Agent 中管理 skill，支持查看详情、删除、启用/禁用、导入 zip 包。新建 skill 通过外部 Agent 对话或导入 zip 包完成，WebUI 不提供直接创建和编辑功能。
 
 ## 前置条件
 

@@ -27,7 +27,7 @@ pub struct AgentConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    /// Default IM runner. Empty means the built-in Bifrost agent runner.
+    /// Default external runner selected from the runner registry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner: Option<AgentRunnerMode>,
 
@@ -174,16 +174,13 @@ pub struct ImMessageChannelBinding {
 /// Runtime selected for IM agent messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentRunnerMode {
-    /// Built-in Bifrost agent runtime.
-    BifrostAgent,
-    /// A custom runner ID from the Agent runner registry.
+    /// A runner ID from the external runner registry.
     Custom(String),
 }
 
 impl AgentRunnerMode {
     pub fn custom_runner_id(&self) -> Option<&str> {
         match self {
-            Self::BifrostAgent => None,
             Self::Custom(id) => Some(id.as_str()),
         }
     }
@@ -199,7 +196,6 @@ impl Serialize for AgentRunnerMode {
         S: serde::Serializer,
     {
         match self {
-            Self::BifrostAgent => serializer.serialize_str("bifrost_agent"),
             Self::Custom(id) => serializer.serialize_str(id),
         }
     }
@@ -212,18 +208,18 @@ impl<'de> Deserialize<'de> for AgentRunnerMode {
     {
         let value = String::deserialize(deserializer)?;
         let trimmed = value.trim();
-        if is_builtin_runner_id(trimmed) {
-            Ok(Self::BifrostAgent)
-        } else {
-            Ok(Self::Custom(trimmed.to_string()))
+        if trimmed.is_empty() || is_removed_builtin_runner_id(trimmed) {
+            return Err(serde::de::Error::custom(
+                "the built-in Bifrost Agent runner has been removed; select an external runner",
+            ));
         }
+        Ok(Self::Custom(trimmed.to_string()))
     }
 }
 
-fn is_builtin_runner_id(value: &str) -> bool {
+fn is_removed_builtin_runner_id(value: &str) -> bool {
     let normalized = value.trim().to_ascii_lowercase();
-    normalized.is_empty()
-        || normalized == "bifrost_agent"
+    normalized == "bifrost_agent"
         || normalized == "bifrost agent"
         || normalized == "builtin"
         || normalized == "bifrost"
@@ -497,7 +493,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            runner: None,
+            runner: Some(AgentRunnerMode::Custom("Codex".to_string())),
             model: Some(AgentConfig::DEFAULT_MODEL.to_string()),
             model_provider: Some("aidp_crawl".to_string()),
             model_providers: HashMap::new(),
@@ -1408,16 +1404,6 @@ enabled = true
     }
 
     #[test]
-    fn agent_runner_mode_accepts_display_name_for_builtin_runner() {
-        for value in ["Bifrost Agent", "bifrost_agent", "builtin", "bifrost", ""] {
-            let parsed: AgentRunnerMode = toml::from_str(&format!("runner = \"{value}\""))
-                .map(|config: AgentConfig| config.runner.expect("runner"))
-                .expect("parse runner");
-            assert_eq!(parsed, AgentRunnerMode::BifrostAgent);
-        }
-    }
-
-    #[test]
     fn test_agent_home_dir_default() {
         let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         // Clear env to test default path
@@ -1501,5 +1487,24 @@ enabled = true
         assert_eq!(effective.wire_api, ModelWireApi::Responses);
         // Built-in env_http_headers should still be present (api-key, X-TT-LOGID)
         assert!(effective.use_azure_auth);
+    }
+
+    #[test]
+    fn default_runner_is_external_codex() {
+        assert_eq!(
+            AgentConfig::default().runner,
+            Some(AgentRunnerMode::Custom("Codex".to_string()))
+        );
+    }
+
+    #[test]
+    fn removed_builtin_runner_aliases_are_rejected() {
+        for value in ["", "bifrost_agent", "Bifrost Agent", "builtin", "bifrost"] {
+            let encoded = serde_json::to_string(value).expect("encode runner");
+            assert!(
+                serde_json::from_str::<AgentRunnerMode>(&encoded).is_err(),
+                "removed runner alias should be rejected: {value:?}"
+            );
+        }
     }
 }

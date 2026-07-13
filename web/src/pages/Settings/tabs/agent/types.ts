@@ -7,7 +7,7 @@ export const BASE = "/im-gateway";
 
 // Defaults matching Rust AgentConfig::default()
 export const DEFAULTS = {
-  runner: "bifrost_agent",
+  runner: "Codex",
   model: "gpt-5.4-2026-03-05",
   model_provider: "aidp_crawl",
   model_reasoning_effort: "medium",

@@ -9,9 +9,8 @@ IM Gateway 把这些能力收敛为一个 Bifrost 内部模块：
 - 以 `ImProvider` 抽象为中心，第一版内置 Feishu / Weixin，预留 WeChat / Webhook 扩展位。
 - 复用 Bifrost 已有的 Remote Invoke 授权、Admin API、CLI 分发和 WebUI 布局。
 - 保证 secret、token、完整 provider config 不被泄漏到日志、Remote Invoke summary 或前端 DTO。
-- 为 IM Agent（内置 Bifrost Agent 与 Codex/Claude Code/Trae 等外部 Runner）提供入站消息、进度卡、schedule 通知的统一发送通道。
 
-IM Gateway 不承担 Agent loop 本身；Agent loop 相关内容在 `im-gateway-agent.md`、`im-agent-streaming-card.md`、`im-gateway-codex-cli-chat-gateway.md`、`im-markdown-converter.md` 单独展开。本文只关注 gateway 层：连接、目标、路由、调度、消息发送、事件循环、持久化、权限与远端管理。
+IM Gateway 不承担 Runner loop 本身；外部 Runner 相关内容在 `im-gateway-codex-cli-chat-gateway.md`、`external-runner-live-guide.md`、`im-markdown-converter.md` 单独展开。本文只关注 gateway 层：连接、目标、路由、调度、消息发送、事件循环、持久化、权限与远端管理。
 
 ## 用户目标验证清单
 
@@ -88,9 +87,8 @@ Provider 声明 `ImSendCapability`（支持的消息类型、是否支持流式�
 - `scheduler.rs`：cron/interval 计算与常驻 loop。
 - `event_router.rs`：Provider event → route matcher → task 派发。
 - `task_executor.rs`：Script 任务执行器（cwd/env/timeout/输出上限）。
-- `agent_worker.rs`：内置 Agent worker client（in-process / 子进程可切换）。
 
-Handler 层 `crates/bifrost-admin/src/handlers/im_gateway/` 按功能拆分：`service.rs` / `providers.rs` / `event_loop.rs` / `agent_chat.rs` / `agent_reply.rs` / `agent_reply_attachments.rs` / `messages.rs` / `schedules.rs` / `agent_api.rs` / `chat_gateway.rs` / `busy_message_mode.rs` / `debug_inbound.rs` / `utils.rs`；子模块通过真实 `mod` 边界拆分，单文件 ≤ 1500 行。
+Handler 层 `crates/bifrost-admin/src/handlers/im_gateway/` 按功能拆分：`service.rs` / `providers.rs` / `event_loop.rs` / `agent_chat.rs` / `agent_reply.rs` / `agent_reply_attachments.rs` / `messages.rs` / `schedules.rs` / `agent_api.rs` / `chat_gateway.rs` / `busy_message_mode.rs` / `debug_inbound.rs` / `utils.rs`；子模块通过真实 `mod` 边界拆分。
 
 ### `ImProvider` trait
 

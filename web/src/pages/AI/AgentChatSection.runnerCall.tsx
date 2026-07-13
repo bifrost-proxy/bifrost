@@ -256,11 +256,8 @@ export function useRunnerCallHandler({
             start_time: now,
             last_active_time: now,
             duration_secs: 0,
-            runner_id: runnerId === "bifrost_agent" ? undefined : runnerId,
-            runner_type:
-              runnerId === "bifrost_agent"
-                ? "bifrost_agent"
-                : selectedRunnerAdapter(runnerOptions, runnerId),
+            runner_id: runnerId,
+            runner_type: selectedRunnerAdapter(runnerOptions, runnerId),
             work_dir: workDir || undefined,
           },
           ...prev.filter((thread) => thread.session_key !== sessionKey),
@@ -270,11 +267,8 @@ export function useRunnerCallHandler({
         phase: "running",
         status: {
           work_dir: workDir || undefined,
-          runner_id: runnerId === "bifrost_agent" ? undefined : runnerId,
-          runner_type:
-            runnerId === "bifrost_agent"
-              ? "bifrost_agent"
-              : selectedRunnerAdapter(runnerOptions, runnerId),
+          runner_id: runnerId,
+          runner_type: selectedRunnerAdapter(runnerOptions, runnerId),
         },
         plan: [],
         tools: [],

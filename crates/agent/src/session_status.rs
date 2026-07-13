@@ -357,13 +357,13 @@ pub fn format_active_turn_status_text_with_context(
         .as_ref()
         .or(context.agent_type.as_ref())
         .map(String::as_str)
-        .unwrap_or("Bifrost Agent");
+        .unwrap_or("External Runner Agent");
     let runner_type = status
         .runner_type
         .as_ref()
         .or(context.runner_type.as_ref())
         .map(String::as_str)
-        .unwrap_or("bifrost_agent");
+        .unwrap_or("external");
     let runner_id = status
         .runner_id
         .as_ref()
@@ -594,9 +594,9 @@ mod tests {
             mcp_tool_count: 5,
             pending_guide_messages: vec!["第一条引导".to_string(), "第二条引导".to_string()],
             user_turn_count: 4,
-            agent_type: Some("Bifrost Agent".to_string()),
-            runner_type: Some("bifrost_agent".to_string()),
-            runner_id: None,
+            agent_type: Some("External Runner Agent".to_string()),
+            runner_type: Some("codex".to_string()),
+            runner_id: Some("Codex".to_string()),
             model: Some("gpt-5".to_string()),
             model_provider: Some("openai".to_string()),
             model_reasoning_effort: Some("high".to_string()),
@@ -610,8 +610,8 @@ mod tests {
         let text = format_active_turn_status_text(&status);
         assert!(text.contains("工作路径: /tmp/bifrost-work"));
         assert!(text.contains("当前状态: model_response"));
-        assert!(text.contains("Agent 类型: Bifrost Agent"));
-        assert!(text.contains("Runner 类型: bifrost_agent"));
+        assert!(text.contains("Agent 类型: External Runner Agent"));
+        assert!(text.contains("Runner 类型: codex"));
         assert!(text.contains("模型: gpt-5（openai）"));
         assert!(text.contains("外部会话: Codex threadId=thread-runtime"));
         assert!(text.contains("历史对话轮次: 4"));

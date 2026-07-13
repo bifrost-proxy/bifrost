@@ -824,8 +824,6 @@ pub enum AgentCommands {
         #[arg(long, help = "Output raw JSON")]
         json: bool,
     },
-    #[command(hide = true, about = "Run isolated built-in agent worker over stdio")]
-    Worker,
     #[command(hide = true, about = "Run isolated external runner worker over stdio")]
     ExternalRunnerWorker,
 }

@@ -278,38 +278,6 @@
 
 **执行记录（2026-05-29）**：PASS — 执行 `source ~/.zshrc && pnpm --dir web exec playwright test agent-chat.spec.ts -g "deep link|restores active timeline process steps|keeps polling running history timeline|can start a new chat"`，5 个相关 UI 用例通过；另用 Vite dev server 代理 `BACKEND_PORT=9900` 打开真实 history 深链 `/Users/eden/.bifrost/agent/sessions/2026/05/29/session-feishu-main_ou_82c9bc36c12abfaed40c2c52ef4b7fea-1780017943.jsonl`，刷新后默认显示 `已处理 4m 26s` 和最终结论，展开后旧 turn 的过程摘要显示 `Ran ...`，不再误显示 `Running ...`，且可从持久化 timeline 恢复工具耗时；运行中 turn 输出顶部显示实时更新的 `已处理 <duration>`；将浏览器缩到约 640px 后消息列随视口收窄并保留左右 padding，没有横向溢出；消息区离开底部时滚动到底部按钮在输入框正上方居中淡入，点击后直接回到底部并淡出；`Running` 线程页面的 `New Chat` 可点击并能创建新 session。
 
-### TC-ASP-19：陈旧 Running 状态与 Stop 一致性回归
-
-**操作步骤**：
-1. 使用临时 `BIFROST_DATA_DIR` 创建一条内置 Bifrost Agent session：canonical JSONL 中最后一个 `run_state_changed` 为 `completed`，但 `agent/im_gateway/session_state.json` 中同一 `sessionKey`、`adapter:"bifrost_agent"` 的 `status` 仍为 `running`。
-2. 同时创建一条外部 runner session：`adapter` 使用非 `bifrost_agent` 值（例如 `codex`、`chatgpt_web` 或自定义 CLI adapter），`status:"running"`，且没有 completed/failed/stopped/timed_out 的 canonical timeline 终态。
-3. 用临时端口启动 Bifrost，启动参数必须包含：
-   ```bash
-   --unsafe-ssl --skip-cert-check --no-system-proxy
-   ```
-4. 请求：
-   ```bash
-   curl -fsS --noproxy '*' "http://127.0.0.1:$MAIN_PORT/_bifrost/api/im-gateway/agent/sessions/all"
-   ```
-5. 对第 1 步的内置 Agent session 发送：
-   ```bash
-   curl -fsS --noproxy '*' -X POST "http://127.0.0.1:$MAIN_PORT/_bifrost/api/im-gateway/agent/chat" \
-     -H 'Content-Type: application/json' \
-     -d '{"session_key":"<stale-session-key>","message":"/stop"}'
-   ```
-6. 再次请求 `/sessions/all`，并读取临时数据目录下的 `agent/im_gateway/session_state.json`。
-
-**预期结果**：
-- 第 1 步内置 Agent session 在 `/sessions/all` 中显示 `running:false`、`status:"ended"`、`state:"ended"`、`run_state:"completed"`，不会再显示为 `Running`。
-- 第 1 步内置 Agent session 的 `last_active_time` 来自 canonical JSONL 终态时间，而不是陈旧 `session_state.updatedAt`。
-- `/stop` 返回 `stopped:false`，并返回 `repaired_stale_running >= 1`，响应文案说明当前没有正在执行的 Agent loop 且已修复残留运行状态。
-- `session_state.json` 中该内置 Agent session 的 `status` 被修复为 `ended`。
-- 第 2 步外部 runner session 仍显示 `running:true`、`status:"active"`、`state:"running"`、`run_state:"running"`；该修复不会误停止或误结束不同装置、不同 adapter 的外部 runner。
-- 如果任意 runner adapter 后续已有 canonical timeline 终态，则 `/sessions/all` 按该终态投影为 completed/failed/stopped/timed_out，不再受 persisted `status:"running"` 覆盖。
-- 终态投影只使用最新模型显式写入的 `history_path`；未绑定到 `session_state.history_path` 的旧 history 文件不会被按 `sessionKey` 额外扫描或用于修正状态。
-
-**执行记录（2026-06-02）**：PASS — 执行 `source ~/.zshrc && e2e-tests/tests/test_agent_session_stale_running_reconciliation.sh`，脚本使用临时数据目录和随机端口启动 Bifrost（包含 `--no-system-proxy`），先验证 completed JSONL + stale `bifrost_agent` running state 在 `/sessions/all` 投影为 ended/completed，再验证 `/stop` 返回 `stopped:false` 且 `repaired_stale_running >= 1` 并把 persisted status 修复为 `ended`，最后确认无终态 timeline 的外部 `codex`、`chatgpt_web` 和 `custom_cli` runner 都仍保持 running。follow-up 复核补充执行 `source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin external_running -- --nocapture --test-threads=1`，确认未绑定到显式 `history_path` 的 terminal history 不会被按 `sessionKey` 扫描用于状态投影；并执行 `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_agent_session_stale_running_reconciliation.sh` 复跑真实 API 场景，结果 PASS。
-
 ### TC-ASP-20：Active Idle 会话不继承历史 Running run_state
 
 **操作步骤**：

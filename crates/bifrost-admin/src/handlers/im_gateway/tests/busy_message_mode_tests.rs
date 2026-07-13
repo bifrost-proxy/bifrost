@@ -17,33 +17,6 @@ fn runner_config(
 }
 
 #[test]
-fn busy_default_mode_is_guide_for_builtin_bifrost_agent() {
-    assert_eq!(
-        busy_default_mode_for_agent_config(
-            &bifrost_agent::AgentConfig {
-                runner: None,
-                ..Default::default()
-            },
-            &Default::default(),
-            None,
-        ),
-        BusyMessageDefaultMode::Guide
-    );
-
-    assert_eq!(
-        busy_default_mode_for_agent_config(
-            &bifrost_agent::AgentConfig {
-                runner: Some(bifrost_agent::AgentRunnerMode::BifrostAgent),
-                ..Default::default()
-            },
-            &Default::default(),
-            None,
-        ),
-        BusyMessageDefaultMode::Guide
-    );
-}
-
-#[test]
 fn busy_default_mode_guides_external_runners_except_chatgpt_web() {
     for (runner_id, adapter) in [
         ("codex-main", "codex"),

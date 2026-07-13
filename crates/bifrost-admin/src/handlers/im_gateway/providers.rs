@@ -961,8 +961,6 @@ async fn start_provider_event_connection(
     let route_store = service.route_store.clone();
     let provider_store = service.provider_store.clone();
     let agent_config_store = service.agent_config_store.clone();
-    let agent_client = service.agent_client.clone();
-    let agent_tools = service.agent_tools.clone();
     let schedule_store = service.schedule_store.clone();
     let scheduler = service.scheduler.clone();
     let target_store = service.target_store.clone();
@@ -981,8 +979,6 @@ async fn start_provider_event_connection(
             route_store,
             provider_store,
             agent_config_store,
-            agent_client,
-            agent_tools,
             schedule_store,
             scheduler,
             target_store,

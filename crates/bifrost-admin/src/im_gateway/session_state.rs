@@ -4,8 +4,6 @@ use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
-pub const BUILTIN_AGENT_ADAPTER: &str = "bifrost_agent";
-
 const STORE_VERSION: u32 = 1;
 const STORE_FILENAME: &str = "session_state.json";
 const MAX_STORE_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -766,7 +764,7 @@ mod tests {
             ("codex", Some("runner-a"), "thread-a"),
             ("codex", Some("runner-b"), "thread-b"),
             ("chatgpt_web", Some("chatgpt"), "conversation-a"),
-            (BUILTIN_AGENT_ADAPTER, None, "builtin"),
+            ("claude", Some("claude"), "thread-claude"),
         ] {
             remember_session_state(ImAgentSessionState {
                 session_key: "im:provider:user".to_string(),
@@ -786,7 +784,7 @@ mod tests {
         assert!(load_session_state("im:provider:user", "codex", Some("runner-a")).is_none());
         assert!(load_session_state("im:provider:user", "codex", Some("runner-b")).is_some());
         assert!(load_session_state("im:provider:user", "chatgpt_web", Some("chatgpt")).is_some());
-        assert!(load_session_state("im:provider:user", BUILTIN_AGENT_ADAPTER, None).is_some());
+        assert!(load_session_state("im:provider:user", "claude", Some("claude")).is_some());
     }
 
     #[test]
@@ -820,7 +818,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = EnvGuard::new(dir.path());
 
-        for adapter in ["codex", "chatgpt_web", BUILTIN_AGENT_ADAPTER] {
+        for adapter in ["codex", "chatgpt_web", "claude"] {
             remember_session_state(ImAgentSessionState {
                 session_key: "im:provider:user".to_string(),
                 adapter: adapter.to_string(),

@@ -170,10 +170,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
 
   const runnerOptions = useMemo(() => {
     const runnerIds = Object.keys(runnerConfig?.runners || {}).sort();
-    return [
-      { label: "Bifrost Agent", value: "bifrost_agent" },
-      ...runnerIds.map((id) => ({ label: id, value: id })),
-    ];
+    return runnerIds.map((id) => ({ label: id, value: id }));
   }, [runnerConfig?.runners]);
 
   const agents = useMemo(
@@ -262,7 +259,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
       id,
       name: id,
       enabled: true,
-      runner: template.runner || "bifrost_agent",
+      runner: template.runner || runnerConfig?.defaultRunnerId || runnerOptions[0]?.value || "Codex",
       timeout_ms: template.timeout_ms || 7_200_000,
       trigger_policy: "after_asr_run",
       instructions_source: "default",
@@ -978,7 +975,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
               width: 140,
               render: (value) => (
                 <Tag style={{ whiteSpace: "nowrap" }}>
-                  {value || "bifrost_agent"}
+                  {value || "Not configured"}
                 </Tag>
               ),
             },

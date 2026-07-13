@@ -415,7 +415,7 @@ Feishu 会在终端显示授权 URL 和二维码；Weixin 会显示登录二维�
 bifrost im provider add feishu-main --type feishu --app-id cli_xxx --secret env:FEISHU_APP_SECRET --owner-open-id ou_xxx --runner "Claude Code"
 ```
 
-IM 通道连接成功后会收到上线通知和可用命令帮助。帮助会按 Runner 类型过滤：所有 Runner 都有 `/help`、`/status`、`/cwd`、`/runner`、`/q`、`/rq`、`/stop`；内置 Bifrost Agent 才显示 memory / goal / compact / guidance 类命令；Codex、Traex、Claude Code 等外部 Runner 只显示其支持的模型和 reasoning effort 命令。
+IM 通道连接成功后会收到上线通知和可用命令帮助。所有外部 Runner 都有 `/help`、`/status`、`/cwd`、`/runner`、`/q`、`/rq`、`/stop`；Codex、Traex、Claude Code 等 Runner 还会按适配器能力显示模型和 reasoning effort 命令。
 
 Agent skill 的完整协作流程见下一节。
 

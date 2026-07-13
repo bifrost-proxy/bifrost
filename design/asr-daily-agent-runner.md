@@ -4,7 +4,7 @@
 
 ASR 定时任务(`AsrDirectoryTask`)按目录批量转写音频后,会在 `<BIFROST_DATA_DIR>/asr/data/text/<task_id>/.daily/YYYY-MM-DD.md` 生成每日转写汇总 Markdown。这些原始 daily markdown 只是转写产物,不承担业务表达:用户实际想要的是"日报"、"明日 To Do"、"复盘"、"重点摘录"等二次整理。旧方案只把 daily markdown 存盘,用户需要手动喂给外部工具生成日报,链路断裂。
 
-Daily Agent Runner 是 ASR 定时任务的后处理阶段:ASR 音频转写成功、daily markdown 有增量后,自动为该 task 排队一个 Daily Agent 队列,按顺序把每个 enabled Agent 交给对应 Runner(ChatGPT Web / Bifrost Agent / codex / 自定义)执行,输出 report 到 `.daily/agents/<agent_id>/output/<output_dir>/YYYY-MM-DD-report.md`,可选 IM 通道发送 summary 或 full report,可选把 report 复制到用户指定的外部目录(iCloud、企业网盘)。
+Daily Agent Runner 是 ASR 定时任务的后处理阶段:ASR 音频转写成功、daily markdown 有增量后,自动为该 task 排队一个 Daily Agent 队列,按顺序把每个 enabled Agent 交给对应外部 Runner(ChatGPT Web / Codex / Claude Code / Trae X / 自定义)执行,输出 report 到 `.daily/agents/<agent_id>/output/<output_dir>/YYYY-MM-DD-report.md`,可选 IM 通道发送 summary 或 full report,可选把 report 复制到用户指定的外部目录(iCloud、企业网盘)。
 
 本方案不改动 ASR 音频转写主链路(chunk retry、diarization、daily markdown 生成不变);只在 ASR run terminal 后接一个后处理队列,并在 WebUI/CLI 上提供管理入口。
 
@@ -31,7 +31,7 @@ Daily Agent Runner 是 ASR 定时任务的后处理阶段:ASR 音频转写成功
 - ASR run terminal 判定、`update_task_after_run` 语义、`repair_interrupted_processing_records_on_startup` 恢复流程不变。
 - 全局 `ASR_JOB_RUN_LOCK`(GPU 单例) 不被 Daily Agent 占用;Daily Agent 只用自身 per-task 锁。
 - 已有 AGENTS.md 与 conversation state 不被覆盖;git 不可用时不阻塞任务创建与 report 生成。
-- Bifrost Agent / codex / 其他 runner 的现有配置(session_key、adapter_config、allow_work_dirs)保留原语义。
+- Codex / ChatGPT Web / 其他外部 runner 的现有配置(session_key、adapter_config、allow_work_dirs)保留原语义。
 - 旧单 Agent 配置(`agent_id`/`name`/`runner`/`output_dir`/`instructions`)保留为兼容镜像;加载时补齐默认 `tomorrow_todo`。
 
 ### 必须真实验证
@@ -132,7 +132,7 @@ Runner `work_dir = <task>/.daily/agents/<agent_id>`;`allow_work_dirs = [<daily_d
 - `rewritten`:hash 变化且非 append,发送全文并标记覆盖。
 - `unchanged`:hash 相同,skip。
 
-ChatGPT Web plan 不包含 `unchanged`;Bifrost Agent plan 不塞 daily markdown 全文(只传路径/摘要,减少 token)。
+ChatGPT Web plan 不包含 `unchanged`;文件型外部 runner 的 plan 不塞 daily markdown 全文(只传路径/摘要,减少 token)。
 
 ### Runner 触发
 
@@ -146,12 +146,12 @@ ChatGPT Web plan 不包含 `unchanged`;Bifrost Agent plan 不塞 daily markdown 
 
 ### Runner 消息组织
 
-统一走 `ExternalCliRunRequest`(runner=chatgpt_web / bifrost_agent / codex / custom):
+统一走 `ExternalCliRunRequest`（runner 为 Codex、Trae、Claude Code、ChatGPT Web 或自定义 external runner）：
 
 - `session_key`:默认 `daily-agent:<task_id>:<agent_id>`。
 - `work_dir`:`.daily/agents/<agent_id>`。
 - `allow_work_dirs`:`[daily_dir]`。
-- `input`:按 ChatGPT Web / Bifrost Agent / codex 三分支组织;ChatGPT Web 走剪贴板大输入路径。
+- `input`:按 ChatGPT Web / 文件型外部 runner 组织;ChatGPT Web 走剪贴板大输入路径。
 - `adapter_config`:透传 conversation ref、execution_mode。
 
 ### IM 发送
@@ -206,7 +206,7 @@ ChatGPT Web plan 不包含 `unchanged`;Bifrost Agent plan 不塞 daily markdown 
 ### Phase 2:Runner 集成 + ChangePlanner + processed state
 
 - ChangePlanner 四态判定;processed key `<agent_id>:<date>`。
-- `ExternalCliRunRequest` 组装;ChatGPT Web 大输入剪贴板路径;Bifrost Agent / codex 直调。
+- `ExternalCliRunRequest` 组装;ChatGPT Web 大输入剪贴板路径;Codex 等文件型外部 runner 直调。
 - ASR terminal hook `maybe_enqueue_daily_agent_after_asr_run` 接入 `runner.rs` + `retry.rs`。
 
 ### Phase 3:IM + report_sync + API + CLI
@@ -234,7 +234,7 @@ ChatGPT Web plan 不包含 `unchanged`;Bifrost Agent plan 不塞 daily markdown 
 - `maybe_enqueue_daily_agent_after_asr_run` 只在 ASR terminal + daily 刷新后排队。
 - ChangePlanner 四态(new_file / appended / rewritten / unchanged) + byte range 正确。
 - Runner 成功 → 更新 processed state;失败 → 不更新;同日多 Agent processed key 不覆盖。
-- ChatGPT Web plan 不含 unchanged;Bifrost Agent plan 不塞 daily markdown 全文。
+- ChatGPT Web plan 不含 unchanged;文件型外部 runner 的 plan 不塞 daily markdown 全文。
 - Active run 不重复启动;work_dir 只允许 daily_dir。
 - IM channel 解析 `owner:xxx` / `target:xxx`;full_report 超长拆多条。
 

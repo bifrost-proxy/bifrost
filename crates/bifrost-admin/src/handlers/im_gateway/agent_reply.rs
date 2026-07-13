@@ -996,13 +996,6 @@ fn first_non_empty<const N: usize>(values: [Option<&str>; N]) -> Option<String> 
         .map(str::to_string)
 }
 
-pub(super) fn should_send_plain_im_task_start_notice(
-    provider: &ImProviderConfig,
-    progress_enabled: bool,
-) -> bool {
-    provider.provider_type == ImProviderType::Weixin && !progress_enabled
-}
-
 pub(super) fn build_agent_reply_target(
     provider: &ImProviderConfig,
     event: &ImEvent,
@@ -1414,7 +1407,7 @@ pub(super) async fn send_error_card_to_owner(
         "config": { "width_mode": "fill" },
         "header": {
             "template": "red",
-            "title": { "tag": "plain_text", "content": "Bifrost Agent Error" }
+            "title": { "tag": "plain_text", "content": "Agent Runner Error" }
         },
         "body": {
             "elements": [{

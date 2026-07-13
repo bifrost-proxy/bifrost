@@ -1,12 +1,9 @@
 use std::collections::{HashMap, VecDeque};
-use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use base64::Engine as _;
-use bifrost_core::text::truncate_bytes_with_suffix;
-use futures_util::FutureExt;
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use parking_lot::RwLock;
@@ -25,9 +22,9 @@ use crate::im_gateway::types::{
 };
 use crate::im_gateway::weixin::WeixinProvider;
 use crate::im_gateway::{
-    ImAgentClient, ImAgentConfigStore, ImAgentSessionManager, ImAgentToolRegistry,
-    ImConnectionManager, ImEventStore, ImMcpManager, ImMessageLogStore, ImProviderStore,
-    ImRouteStore, ImRunStore, ImScheduleStore, ImScheduler, ImTargetStore, SessionQueueManager,
+    ImAgentConfigStore, ImAgentSessionManager, ImConnectionManager, ImEventStore,
+    ImMessageLogStore, ImProviderStore, ImRouteStore, ImRunStore, ImScheduleStore, ImScheduler,
+    ImTargetStore, SessionQueueManager,
 };
 use bifrost_agent::persistence::ConversationRecorder;
 use bifrost_agent::{PlanStep, SessionDetail, ToolCallLog};

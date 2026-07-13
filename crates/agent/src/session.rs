@@ -194,7 +194,7 @@ pub struct AgentSession {
     /// User-visible agent runtime family used by status surfaces.
     pub agent_type: Option<String>,
 
-    /// Runner adapter/runtime label, such as `bifrost_agent`, `codex`, or `chatgpt_web`.
+    /// Runner adapter/runtime label, such as `codex`, `traex`, or `chatgpt_web`.
     pub runner_type: Option<String>,
 
     /// Configured runner id for external runner sessions.
@@ -491,12 +491,6 @@ impl AgentSession {
     pub fn with_source(mut self, source: &str) -> Self {
         self.source = source.to_string();
         self
-    }
-
-    pub fn mark_bifrost_agent_runtime(&mut self) {
-        self.agent_type = Some("Bifrost Agent".to_string());
-        self.runner_type = Some("bifrost_agent".to_string());
-        self.runner_id = None;
     }
 
     pub fn mark_external_runner_runtime(&mut self, runner_id: &str, adapter: &str) {

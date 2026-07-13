@@ -75,7 +75,7 @@
 
 - 命令退出码为 `0`。
 - 输出显示 5 个用例全部通过。
-- CI 中 `std::env::current_exe()` 指向 `bifrost-e2e` 时，`agent worker` / `agent external-runner-worker` 隐藏入口仍能被 pass-through 执行，不出现 `agent worker exited before final event: exit status: 2`。
+- CI 中 `std::env::current_exe()` 指向 `bifrost-e2e` 时，`agent external-runner-worker` 隐藏入口仍能被 pass-through 执行。
 
 ## 清理步骤
 

@@ -2,7 +2,7 @@
 
 ## 背景
 
-Bifrost Web 端 Agent Chat 只能与当前会话默认 Runner 单点对话；用户想临时借用另一个 Runner（例如 Codex 会话中借 ChatGPT Web / Bifrost Agent）时，必须切换 provider/channel 或另开线程，导致上下文断裂。
+Bifrost Web 端 Agent Chat 只能与当前会话默认 Runner 单点对话；用户想临时借用另一个 Runner（例如 Codex 会话中借 ChatGPT Web / Claude Code）时，必须切换 provider/channel 或另开线程，导致上下文断裂。
 
 本方案引入 slash runner call：在输入框输入 `/` 后展示 Runner 选择面板；选中后输入框展示 `Run with <runner>` chip，用户继续输入消息并发送。发送不切换当前会话默认 Runner，而是发起一次用户显式触发的 Runner 调用：后端把当前会话上下文和本次消息打包给目标 Runner，目标 Runner 执行完成后，结果以一条 Runner Call 消息回到当前会话，并成为当前 Runner 后续对话可消费的上下文。
 
@@ -12,7 +12,6 @@ Bifrost Web 端 Agent Chat 只能与当前会话默认 Runner 单点对话；用
 
 ### 必须实现
 
-- 在 Web Agent Chat 输入框中输入 `/` 时展示 Runner 选择面板（包含内置 Bifrost Agent 与所有外部 Runner）。
 - 选择 Runner 后输入框展示 `Run with <runner>` chip，chip 后可继续输入消息。
 - 发送后调用目标 Runner，请求体包含当前会话 user/assistant transcript 与本次用户消息。
 - 目标 Runner 的执行过程与最终结果展示在当前会话消息流中。
@@ -30,7 +29,6 @@ Bifrost Web 端 Agent Chat 只能与当前会话默认 Runner 单点对话；用
 ### 必须真实验证
 
 - Web UI 用真实 Playwright 操作验证 `/` 触发 Runner 选择、chip 展示、发送与结果渲染。
-- API 用 mock 外部 Runner 验证 context bundle 包含当前会话 transcript，并验证内置 Bifrost Agent 可作为目标 Runner 被调用。
 - 再发一条普通外部 Runner 消息，断言请求 prompt/instructions 含 imported context。
 - 断线重连或页面刷新后源会话内 `Run with <runner>` 与最终结果都能恢复。
 
@@ -43,10 +41,8 @@ Bifrost Web 端 Agent Chat 只能与当前会话默认 Runner 单点对话；用
 
 Chip 视觉与消息气泡颜色都必须让用户能看出这是一次借用而不是切换。
 
-### 内置 Bifrost Agent 与外部 Runner 的区别
 
 - 外部 Runner（`codex / custom / mock / chatgpt_web` 等）：通过 chat gateway `/runner-calls/stream` 打进 external runner 执行链路，`callerMessages` 直接进入 prompt bundle。
-- 内置 Bifrost Agent：走独立 `runner-call:<source>:bifrost_agent` 子会话执行，通过 `/agent/chat` 入口。子会话仅作为内部执行容器，不出现在 Agent Chat 线程列表。
 
 ### 结果消费
 
@@ -59,8 +55,6 @@ Chip 视觉与消息气泡颜色都必须让用户能看出这是一次借用而
 ~~~json
 {
   "callerSessionKey": "admin-chat-...",
-  "callerRunnerId": "bifrost_agent",
-  "callerRunnerAdapter": "bifrost_agent",
   "targetRunnerId": "codex",
   "message": "基于当前上下文给出实现建议",
   "workDir": "/Users/eden/work/github/bifrost",
@@ -114,7 +108,7 @@ Content-Type: application/json
 Accept: application/x-ndjson
 ~~~
 
-已实现路径：`crates/bifrost-admin/src/handlers/im_gateway/chat_gateway.rs` 中 `/runner-calls/stream` 分支，包含 `RunnerCallStreamRequest` / `RunnerCallMessage` / `RunnerCallTarget::{BuiltinAgent, External}` / `resolve_runner_call_target` / `runner_call_stream_response` / `builtin_runner_call_stream_response`。
+已实现路径：`crates/bifrost-admin/src/handlers/im_gateway/chat_gateway.rs` 中 `/runner-calls/stream` 分支，包含 `RunnerCallStreamRequest` / `RunnerCallMessage` / `RunnerCallTarget::External` / `resolve_runner_call_target` / `runner_call_stream_response`。
 
 响应 NDJSON 事件：
 
@@ -138,7 +132,6 @@ V1 使用 UI 当前展示的 `callerMessages` 作为 transcript 来源；这能�
 ## UI 设计
 
 - 输入框输入 `/` 且没有选择 Runner 时展示 slash panel。
-- slash panel 列出全部可用 Runner（包含当前 Runner 与内置 Bifrost Agent）。
 - 选择后显示 chip：`Run with <runner>`；chip 有独立 close 按钮，允许在发送前撤销选择。
 - 消息流用户气泡显示 `Run with <runner>` chip + 用户输入。
 - Assistant 区域显示目标 Runner 的过程步骤与最终输出，视觉与普通 assistant 消息一致，但顶部有 `Runner <name>` 徽标。
@@ -166,14 +159,12 @@ V1 使用 UI 当前展示的 `callerMessages` 作为 transcript 来源；这能�
 
 - Chat Gateway 新增 `/runner-calls/stream` 分支。
 - `RunnerCallStreamRequest` / `RunnerCallTarget` / `resolve_runner_call_target` 完成。
-- 内置 Bifrost Agent 子会话通过 `builtin_runner_call_stream_response` 承接。
 - 外部 Runner 复用 `ExternalCliRunRequest` 派发。
 
 ### Phase 2：Session 与 Imported Context
 
 - `session_state.rs` 中 `pending_imported_contexts` / `push_imported_context` / `take_imported_contexts` / `render_imported_contexts` 完成。
 - 外部 Runner 在 `build_prompt` 前消费 pending context 并追加到 instructions。
-- 内置 Bifrost Agent 在 `/agent/chat` 取出 session 后消费。
 
 ### Phase 3：Web UI
 
@@ -206,13 +197,12 @@ V1 使用 UI 当前展示的 `callerMessages` 作为 transcript 来源；这能�
 
 ### human_tests
 
-更新 `human_tests/im-gateway-agent.md`：
+更新 `human_tests/im-gateway-external-cli-chat-gateway.md`：
 
 - TC-IMA-126：Slash Runner Call 正常路径（含刷新页面后从源会话持久化恢复 `Run with <runner>` 用户消息与目标 Runner running/完成状态、`runner-call:*` 子会话不展示为新线程的回归记录）。
 - TC-IMA-127：调用结果被下一轮当前 Runner 消费。
 - TC-IMA-128：选择 Runner 不改变当前会话默认 Runner。
 - TC-IMA-145：Slash Runner Call 失败状态不误报成功；`runner_call_failed` 事件驱动 assistant 消息由 running 状态更新为失败状态并保留错误信息。
-- TC-IMA-146（新增）：内置 Bifrost Agent 作为目标 Runner 的完整路径。
 
 ### 覆盖率与项目校验
 
@@ -246,5 +236,4 @@ V1 使用 UI 当前展示的 `callerMessages` 作为 transcript 来源；这能�
 - V1 直接把前端 `callerMessages` 作为 transcript 来源；如果前端未加载完整历史，目标 Runner 拿到的 transcript 可能不完整。后续可扩展后端从 active session detail + JSONL history 主动合并，本方案已保留 `RunnerContextBundle` 抽象层。
 - `pending_imported_contexts` 只在下一次消息前被消费；若用户连续多次 slash 调用而不发送普通消息，可能堆积多条 context。控制策略：单次消费全部 pending contexts，并按时间顺序渲染。
 - 子会话 session_key 命名固定 `runner-call:<source>:<target>`，需确保 Sync 白名单过滤此前缀，避免误上传。
-- 内置 Bifrost Agent 作为目标 Runner 时使用独立 sub-session 执行；若用户在源会话与子会话之间频繁切换，需要保证 Web UI 不误把子会话展示为新线程。
 - 失败路径必须显式区分 `runner_call_failed` 与目标 Runner 内部工具失败：前者直接把源会话 running assistant 标为失败；后者仍由目标 Runner 自身报告并写入结果消息。

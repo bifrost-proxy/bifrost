@@ -30,25 +30,6 @@ pub(super) fn schedule_chatgpt_web_initial_prompt_is_sent_as_first_message_only(
 }
 
 #[test]
-pub(super) fn schedule_agent_work_dir_prefers_schedule_then_inherited_default() {
-    let mut agent_task = crate::im_gateway::types::ScheduleAgentTask {
-        prompt: "TASK".to_string(),
-        ..Default::default()
-    };
-
-    assert_eq!(
-        schedule_agent_effective_work_dir(&agent_task, Some(" /repo/default ")).as_deref(),
-        Some("/repo/default")
-    );
-
-    agent_task.work_dir = Some(" /repo/schedule ".to_string());
-    assert_eq!(
-        schedule_agent_effective_work_dir(&agent_task, Some("/repo/default")).as_deref(),
-        Some("/repo/schedule")
-    );
-}
-
-#[test]
 pub(super) fn schedule_patch_merges_agent_adapter_config_without_dropping_prompt() {
     let mut schedule = ImSchedule {
         id: "schedule-patch".to_string(),

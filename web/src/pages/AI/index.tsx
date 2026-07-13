@@ -46,13 +46,8 @@ const { useBreakpoint } = Grid;
 
 const AI_SETTINGS_AGENT_SECTIONS: AgentSectionId[] = [
   "general",
-  "model",
-  "runtime",
   "history",
-  "memories",
   "skills",
-  "memory-records",
-  "mcp-servers",
   "sessions",
 ];
 const AI_SETTINGS_RUNNER_SECTIONS: AgentSectionId[] = ["runners"];
@@ -78,9 +73,9 @@ export default function AI() {
   const [newChatImages, setNewChatImages] = useState<PendingChatImage[]>([]);
   const [newChatSubmitting, setNewChatSubmitting] = useState(false);
   const [runnerOptions, setRunnerOptions] = useState<RunnerOption[]>([
-    { label: "Bifrost Agent", value: "bifrost_agent", adapter: "bifrost_agent" },
+    { label: "Codex Runner", value: "Codex", adapter: "codex" },
   ]);
-  const [selectedRunnerId, setSelectedRunnerId] = useState("bifrost_agent");
+  const [selectedRunnerId, setSelectedRunnerId] = useState("Codex");
   const routeState = useMemo(() => resolveAiRouteState(searchParams), [searchParams]);
 
   useEffect(() => {

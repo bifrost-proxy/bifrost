@@ -59,7 +59,7 @@ struct Args {
 }
 
 fn main() -> ExitCode {
-    if let Some(exit_code) = maybe_run_agent_worker_entrypoint() {
+    if let Some(exit_code) = maybe_run_external_runner_worker_entrypoint() {
         return exit_code;
     }
 
@@ -187,7 +187,7 @@ async fn run_e2e() -> ExitCode {
     }
 }
 
-fn maybe_run_agent_worker_entrypoint() -> Option<ExitCode> {
+fn maybe_run_external_runner_worker_entrypoint() -> Option<ExitCode> {
     let mut args = std::env::args().skip(1);
     let first = args.next()?;
     if first != "agent" {
@@ -195,14 +195,6 @@ fn maybe_run_agent_worker_entrypoint() -> Option<ExitCode> {
     }
     let second = args.next()?;
     match second.as_str() {
-        "worker" => Some(
-            bifrost_admin::im_gateway::agent_worker::run_worker_stdio()
-                .map(|()| ExitCode::SUCCESS)
-                .unwrap_or_else(|error| {
-                    eprintln!("{error}");
-                    ExitCode::FAILURE
-                }),
-        ),
         "external-runner-worker" => Some(
             bifrost_admin::im_gateway::external_cli::run_worker_stdio()
                 .map(|()| ExitCode::SUCCESS)

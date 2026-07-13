@@ -139,7 +139,7 @@ async function runWebUiConfigE2e(chatConfig, providers) {
     method: "PUT",
     body: JSON.stringify({
       enabled: true,
-      runner: "bifrost_agent",
+      runner: "codex",
       timeout_ms: timeoutMs,
       trigger_policy: "manual_only",
       im_delivery: { enabled: true, channel: "owner:feishu-main", mode: "full_report", send_policy: "on_success_with_report" },
@@ -260,7 +260,7 @@ async function runImSendCase() {
     method: "PUT",
     body: JSON.stringify({
       enabled: true,
-      runner: "bifrost_agent",
+      runner: "codex",
       timeout_ms: timeoutMs,
       trigger_policy: "manual_only",
       im_delivery: {
@@ -330,7 +330,7 @@ async function main() {
   ]);
   const ui = await runWebUiConfigE2e(chatConfig, providers);
   const runnerResults = [];
-  for (const runnerId of ["bifrost_agent", "codex", "web"]) {
+  for (const runnerId of ["codex", "codex", "web"]) {
     runnerResults.push(await runRunnerCase(runnerId));
   }
   const imSend = await runImSendCase();

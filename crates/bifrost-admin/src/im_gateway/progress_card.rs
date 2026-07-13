@@ -2218,7 +2218,7 @@ fn is_external_runner_status(status: &bifrost_agent::ActiveTurnStatus) -> bool {
         || status
             .runner_type
             .as_deref()
-            .is_some_and(|value| value.trim() != "bifrost_agent")
+            .is_some_and(|value| !value.trim().is_empty())
         || status.agent_type.as_deref() == Some("External Runner Agent")
 }
 

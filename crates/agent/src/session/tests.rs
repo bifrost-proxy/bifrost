@@ -2084,7 +2084,7 @@ fn test_session_manager_broadcasts_session_list_changes() {
         Some("event title".to_string()),
         None,
         Some("im".to_string()),
-        Some("bifrost_agent".to_string()),
+        Some("codex".to_string()),
         None,
     );
     let updated = events

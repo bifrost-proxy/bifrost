@@ -776,15 +776,15 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **操作步骤**:
   1. 点击 Schedules 页面 Add，选择 `Task Type=Agent`。
   2. 在 `IM Channel` 中选择一个 Connection。
-  3. 在 `Runner` 中选择 `Bifrost Agent`，确认表单没有展示 ChatGPT Web 专用 `First-round Prompt`。
+  3. 在 `Runner` 中选择 Codex，确认表单没有展示 ChatGPT Web 专用 `First-round Prompt`。
   4. 将 `Runner` 切换到 ChatGPT Web Runner，填写 `First-round Prompt`、`Preset Prompt` 和 `Default Execution Directory`。
   5. 提交创建 schedule，并查看详情页。
   6. 点击该 schedule 行上的 Run 按钮手动触发，随后进入详情页检查 run 记录与发送结果。
 - **预期结果**:
   - Agent schedule 创建时 `IM Channel` 必填且可选择现有 Connection，不需要选择具体发送对象。
-  - Runner 下拉包含 `Bifrost Agent` 与已配置的外部 Runner。
+  - Runner 下拉只包含已配置并启用的外部 Runner。
   - 选择 ChatGPT Web Runner 后展示 `First-round Prompt`，提交 payload 中保存为 `agent.initial_prompt`；该 schedule session 尚无 ChatGPT Web conversation 绑定时先发送这条初始化消息，后续 run 复用同一 conversation 并只发送 `Preset Prompt`。
-  - Bifrost Agent 与 Codex Runner 都可保存 `agent.work_dir` 作为默认执行目录；实际 run 必须从该目录执行，未配置 schedule 目录时继承 Provider/全局 Agent 工作目录。
+  - Codex 等文件型外部 Runner 可保存 `agent.work_dir` 作为默认执行目录；实际 run 必须从该目录执行，未配置 schedule 目录时继承 Provider/全局 Agent 工作目录。
   - ChatGPT Web run 成功后 schedule 原信息写入 `agent.conversation_ref.conversation_id`；Codex run 成功后写入 `agent.conversation_ref.thread_id`；下一次 run 复用该 schedule 自身的对话引用。
   - run 记录包含 `runner_id`、`provider_id`、`input_preview` 和 `agent_final_response`。
   - schedule run 完成后使用绑定 IM Channel 的默认接收者发送完成消息，消息正文优先包含 Agent 最终结果。
@@ -792,7 +792,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **清理步骤**:
   - 删除测试 schedule。
   - 如启动了临时 Bifrost/Vite 服务，停止进程并删除临时数据目录。
-- **执行记录（2026-05-19）**: PASS — 执行 `pnpm --dir web exec tsc -b --pretty false` 通过，确认 SchedulesPanel 类型接入 `ExternalCliGatewayConfig`、Agent 表单包含 Runner、`Default Execution Directory` 与 ChatGPT Web `First-round Prompt` 条件展示，`IM Channel` 下拉直接使用 Connections；执行 `cargo test -p bifrost-admin schedule_agent_can_run_selected_external_runner_with_initial_prompt -- --nocapture` 通过，mock 外部 Runner 断言输入同时包含 `INIT_MARKER` 和 `TASK_MARKER`，run 记录为 `status=Success`、`runner_id=chatgpt-test`、`provider_id=feishu-main`、`input_preview` 包含实际发送消息、`agent_final_response=SCHEDULE_RUNNER_OK`。第二轮 review 补充 `schedule_chatgpt_web_initial_prompt_is_sent_as_first_message_only`，覆盖 ChatGPT Web 初始 Prompt 仅在没有 conversation 绑定时作为第一条消息发送，已有 conversation 后只发送 preset prompt。后续增强执行 `cargo test -p bifrost-admin schedule_agent_persists_codex_thread_id_for_next_run -- --nocapture`、`cargo test -p bifrost-admin schedule_external_result_extracts_chatgpt_conversation_id -- --nocapture`、`cargo test -p bifrost-admin schedule_agent_work_dir_prefers_schedule_then_inherited_default -- --nocapture`、`cargo test -p bifrost-admin schedule_external_runner_executes_from_configured_work_dir -- --nocapture` 通过，验证 schedule 持久化 ChatGPT/Codex 对话引用，并且 Bifrost Agent/Codex Runner 使用 schedule 或继承的默认执行目录。
+- **执行记录（2026-05-19）**: PASS — 执行 `pnpm --dir web exec tsc -b --pretty false` 通过，确认 SchedulesPanel 类型接入 `ExternalCliGatewayConfig`、Agent 表单包含 Runner、`Default Execution Directory` 与 ChatGPT Web `First-round Prompt` 条件展示，`IM Channel` 下拉直接使用 Connections；执行 `cargo test -p bifrost-admin schedule_agent_can_run_selected_external_runner_with_initial_prompt -- --nocapture` 通过，mock 外部 Runner 断言输入同时包含 `INIT_MARKER` 和 `TASK_MARKER`，run 记录为 `status=Success`、`runner_id=chatgpt-test`、`provider_id=feishu-main`、`input_preview` 包含实际发送消息、`agent_final_response=SCHEDULE_RUNNER_OK`。第二轮 review 补充 `schedule_chatgpt_web_initial_prompt_is_sent_as_first_message_only`，覆盖 ChatGPT Web 初始 Prompt 仅在没有 conversation 绑定时作为第一条消息发送，已有 conversation 后只发送 preset prompt。后续增强执行 `cargo test -p bifrost-admin schedule_agent_persists_codex_thread_id_for_next_run -- --nocapture`、`cargo test -p bifrost-admin schedule_external_result_extracts_chatgpt_conversation_id -- --nocapture`、`cargo test -p bifrost-admin schedule_agent_work_dir_prefers_schedule_then_inherited_default -- --nocapture`、`cargo test -p bifrost-admin schedule_external_runner_executes_from_configured_work_dir -- --nocapture` 通过，验证 schedule 持久化 ChatGPT/Codex 对话引用，并且 Codex Runner 使用 schedule 或继承的默认执行目录。
 
 ### TC-IMG-55: Agent Markdown 图片附件通过 IM 图片通道发送
 
@@ -807,7 +807,6 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - 准备 Weixin provider 配置，`base_url` 指向不可达测试地址即可；本用例验证发送层会尝试走 image 通道并记录 message log，不依赖真实微信外网成功。
 - **操作步骤**:
   1. 运行 E2E wrapper：
-     `e2e-tests/tests/test_im_agent_markdown_image_reply.sh`
   2. 该 wrapper 内部运行 Markdown 图片拆分与远端附件下载单元测试：
      `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin agent_reply_ --lib`
   3. 该 wrapper 内部运行主 Agent Chat 回归测试：
@@ -825,7 +824,6 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - 明确的非图片附件会下载到 `agent/im_gateway/attachments/agent_reply_files/`；支持文件消息的通道发送 `msg_type=file`，不支持时记录失败并保留本地文件。
   - favicon / 引用卡片小图标不会被误发为用户图片。
   - 文字卡片仍发送剩余正文，图片通过 IM 图片消息逐张发送。
-- **执行记录（2026-05-20）**: PASS — 执行 `e2e-tests/tests/test_im_agent_markdown_image_reply.sh` 通过。wrapper 内部执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin agent_reply_ --lib`，10 个 Agent reply 图片/附件解析、下载和目标选择测试全部通过，覆盖本地路径、远端附件下载、普通下载链接按 `Content-Type=image/png` 转图片通道、非图片附件识别、普通链接排除、favicon 排除、代码块保护和去重；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin agent_chat_final_reply_sends_local_markdown_images_as_im_images --lib` 通过，mock 模型返回 `![ChatGPT 生成图片 1](<本地图片路径>)` 后，主 Agent Chat 链路产生 `msg_type=image` outbound message log，interactive preview 不再包含本地图片路径。
 
 ### TC-IMG-56: Connections 新建 Provider 先选择类型再进入平台连接
 
@@ -986,7 +984,6 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 
 - **前置条件**:
   - 使用临时数据目录启动源码版 Bifrost，必须设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，必须携带 `--no-system-proxy`。
-  - 存在一个配置了 `owner_open_id` 的 IM Provider，Provider 专属 Agent Runner 可配置为内置 `bifrost_agent` 或外部 Runner，例如 `chatgpt_web`。
   - 该 owner 对应 session 已有至少一轮历史对话，或在临时数据目录中预置同 session key 的 history JSONL。
 - **操作步骤**:
   1. 启动或重启 Bifrost，等待 Provider 自动连接；或手动调用 `POST /_bifrost/api/im-gateway/providers/<provider-id>/connect` 触发重连。
@@ -995,13 +992,11 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
      curl -sS http://127.0.0.1:<port>/_bifrost/api/im-gateway/providers/<provider-id>/messages?direction=outbound\&limit=20
      ```
   3. 打开 owner IM 会话，查看最新上线通知卡片。
-  4. 如果 Provider 绑定外部 Runner，确认 Runner 类型来自外部 Runner adapter；如果未绑定外部 Runner，确认显示为内置 `bifrost_agent`。
 - **预期结果**:
   - 最新上线通知 `trigger=online`、`status=success`；Feishu 通道 `msg_type=interactive`，微信通道按现有能力降级为文本。
   - 通知正文仍以 `**Bifrost is online**` 开头，并保留 `Provider`、`Device`、`Workspace`、`Status`。
   - 通知新增并正确展示 `Runner Type`、`Runner ID`、`Bound Session`、`Completed User Turns`。
   - `Bound Session` 与 IM Agent 会话 key 一致，格式为 `<provider_id>:<owner_open_id>`；`Completed User Turns` 与当前内存 session 或持久化 history 中 user message 数一致。
-  - 外部 Runner 场景下 `Runner Type` 显示 adapter（例如 `chatgpt_web`），`Runner ID` 显示用户配置的 runner id；内置 Runner 场景下 `Runner Type` 为 `bifrost_agent`，`Runner ID` 为 `N/A`。
 - **清理步骤**:
   - 删除测试 Provider。
   - 停止临时服务并删除临时 `BIFROST_DATA_DIR`。
@@ -1029,34 +1024,6 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **清理步骤**:
   - 无需清理；保留一条测试消息记录用于观察。
 - **执行记录（2026-06-03）**: PASS — 使用默认服务 `9900` 和 provider `feishu-main` 发送 marker `FEISHU_CARD_TEXT_DEFAULT_20260603_143043`。API 返回 `message_id=om_x100b6ec8eff87cacc086e6db7f5da35`；消息记录 `id=dddcc129`、`status=success`、`trigger=api`、`msg_type=interactive`，`content_preview` 以 `**Bifrost Feishu Card Test**` 开头并包含 marker。
-
-### TC-IMG-64: IM 内置 Agent mock 模型用例隔离 worker 环境变量
-
-- **前置条件**:
-  - 工作目录为项目根目录。
-  - 不启动 Bifrost 服务，不使用 9900，不修改系统代理。
-  - 本机可执行 Rust 单元测试。
-- **操作步骤**:
-  1. 复现/验证本地 workspace 暴露的 IM 图片消息 mock 模型用例：
-     ```bash
-     cargo test -p bifrost-admin handlers::im_gateway::tests::im_event_loop_forwards_image_attachment_to_agent_chat -- --nocapture
-     ```
-  2. 验证 agent worker 自测仍能覆盖强制外部 worker 与默认 in-process worker 两条分支：
-     ```bash
-     cargo test -p bifrost-admin 'im_gateway::agent_worker::tests::spawn_' -- --nocapture
-     ```
-  3. 执行 workspace 全量兜底：
-     ```bash
-     cargo test --workspace --all-features
-     ```
-- **预期结果**:
-  - 第 1 步 mock server 能收到 chat request，并断言图片 URL 数量为 `MAX_AGENT_IMAGES_PER_MESSAGE`。
-  - 第 2 步两个 agent worker 环境变量相关测试全部通过。
-  - 第 3 步不再因 `BIFROST_FORCE_AGENT_WORKER` 并发污染导致 IM 内置 Agent mock 模型用例偶发没有请求。
-  - 测试不启动真实服务、不使用 9900、不修改系统代理。
-- **清理步骤**:
-  - 无特殊清理；测试使用临时目录与进程内 mock server。
-- **执行记录（2026-06-04）**: PASS — 本地 `cargo test --workspace --all-features` 首次暴露 `im_event_loop_forwards_image_attachment_to_agent_chat` 偶发未收到 mock chat request，单独重跑通过，定位为 worker 环境变量并发隔离不足。修复后执行第 1 步通过；第 2 步执行 `cargo test -p bifrost-admin 'im_gateway::agent_worker::tests::spawn_' -- --nocapture`，2 个用例通过。workspace 全量继续由本地复跑和远端 CI 共同兜底。
 
 ### TC-IMG-66: 删除或禁用微信 Provider 后停止 getupdates 轮询
 
@@ -1099,7 +1066,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
      ```bash
      cargo test -p bifrost-admin feishu_codex_like_external_runner_defaults_to_progress_card_without_channel_override --lib -- --nocapture
      ```
-  3. 检查实现中内置 Agent progress target / plan target 和外部 CLI Runner progress target 都通过 `build_agent_reply_target` 构造：
+  3. 检查实现中外部 CLI Runner progress target 通过 `build_agent_reply_target` 构造：
      ```bash
      rg -n "build_agent_reply_target\\(|__agent_progress__|__plan_card__|receive_id_type" crates/bifrost-admin/src/handlers/im_gateway
      ```
@@ -1108,10 +1075,10 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - 第 1 步 `agent_reply_target_uses_feishu_open_id_without_chat_id` 通过，断言缺少 `chat_id` 时仍回退到 `open_id`。
   - 第 1 步 `agent_reply_target_uses_weixin_sender_instead_of_owner` 通过，确认非 Feishu 回复目标不漂移到 owner。
   - 第 2 步通过，确认 Feishu + Codex/Trae 类外部 Runner 仍默认启用 progress card，而不是等待最终输出后才回复。
-  - 第 3 步能看到内置 Agent 与外部 CLI Runner 的 `__agent_progress__` 以及内置 Agent 的 `__plan_card__` 都复用 `build_agent_reply_target`，不存在 hardcoded owner open_id 的实时卡片路径。
+  - 第 3 步能看到外部 CLI Runner 的 `__agent_progress__` 复用 `build_agent_reply_target`，不存在 hardcoded owner open_id 的实时卡片路径。
 - **清理步骤**:
   - 无需清理；测试不启动服务、不创建临时数据目录、不发送真实 IM 消息。
-- **执行记录（2026-06-09）**: PASS — 执行 `cargo test -p bifrost-admin agent_reply_target_ --lib -- --nocapture`，3 个回复目标用例通过，覆盖 Feishu `chat_id` 优先、Feishu `open_id` 回退和 Weixin 来源目标保持；执行 `cargo test -p bifrost-admin feishu_codex_like_external_runner_defaults_to_progress_card_without_channel_override --lib -- --nocapture`，1 个 delivery mode 用例通过；执行 `rg -n "build_agent_reply_target\\(|__agent_progress__|__plan_card__|receive_id_type" crates/bifrost-admin/src/handlers/im_gateway`，确认内置 Agent 与外部 CLI Runner 的进度卡目标以及内置 Agent plan card 目标均通过统一 helper 构造。
+- **执行记录（2026-06-09）**: PASS — 执行 `cargo test -p bifrost-admin agent_reply_target_ --lib -- --nocapture`，3 个回复目标用例通过，覆盖 Feishu `chat_id` 优先、Feishu `open_id` 回退和 Weixin 来源目标保持；执行 `cargo test -p bifrost-admin feishu_codex_like_external_runner_defaults_to_progress_card_without_channel_override --lib -- --nocapture`，1 个 delivery mode 用例通过。
 
 ### TC-IMG-68: Windows 外部 Runner 工作目录与 script_text 退出码回归
 
@@ -1298,9 +1265,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **操作步骤**:
   1. 执行默认通道真实 E2E：
      ```bash
-     BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_agent_send_msg_default_channel.sh
      ```
-  2. 在 CI shell 并发环境中观察 `E2E Shell (Linux)` 不再因 `test_agent_send_msg_default_channel.sh` 的 mock server 固定端口占用失败。
 - **预期结果**:
   - 脚本的内嵌 Python `ThreadingHTTPServer` 默认绑定 `127.0.0.1:0`，并把实际端口写回临时文件。
   - Bifrost provider 和 Agent model `base_url` 使用写回后的真实 mock 端口。
@@ -1308,4 +1273,3 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - 端口占用不会导致 `mock server did not become ready` 或 `OSError: [Errno 98] Address already in use`。
 - **清理步骤**:
   - 脚本退出时清理临时 Bifrost 进程、mock server 进程和临时目录。
-- **执行记录（2026-07-09）**: PASS — PR 361 run `29009025995` 的 `E2E Shell (Linux)` 暴露 `test_agent_send_msg_default_channel.sh` 固定 mock port `18942` 偶发被占用，日志显示 `OSError: [Errno 98] Address already in use` 和 `mock server did not become ready`。修复后 mock server 默认使用 OS 动态端口并写回 shell；本地执行 `BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_agent_send_msg_default_channel.sh` 通过，输出 `[agent-send-msg-default-channel] PASS`。

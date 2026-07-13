@@ -846,9 +846,9 @@ fn active_status(compaction_count: u32) -> ActiveTurnStatus {
         mcp_tool_count: 5,
         pending_guide_messages: Vec::new(),
         user_turn_count: 2,
-        agent_type: Some("Bifrost Agent".to_string()),
-        runner_type: Some("bifrost_agent".to_string()),
-        runner_id: None,
+        agent_type: Some("External Runner Agent".to_string()),
+        runner_type: Some("codex".to_string()),
+        runner_id: Some("Codex".to_string()),
         model: Some("gpt-5".to_string()),
         model_provider: Some("openai".to_string()),
         model_reasoning_effort: Some("high".to_string()),
@@ -872,58 +872,6 @@ fn context_snapshot(compaction_count: u32) -> AgentContextSnapshot {
         last_response_tokens: Some(77),
         total_tokens_used: Some(1_077),
     }
-}
-
-fn compaction_progress(compaction_count: u32) -> bifrost_agent::AgentCompactionProgress {
-    bifrost_agent::AgentCompactionProgress {
-        trigger: "auto".to_string(),
-        reason: "context_limit".to_string(),
-        phase: "mid_turn".to_string(),
-        pre_tokens: 4_000,
-        post_tokens: Some(1_200),
-        tokens_saved: Some(2_800),
-        messages_removed: Some(5),
-        duration_ms: Some(42),
-        compaction_count,
-        history_version: 8,
-        context: context_snapshot(compaction_count),
-    }
-}
-
-#[test]
-fn progress_snapshot_updates_status_from_compaction_context() {
-    let mut snapshot = ImAgentProgressSnapshot::new("s1", "compact task");
-    snapshot.apply_event(AgentTurnProgressEvent::Status(Box::new(active_status(0))));
-    snapshot.apply_event(AgentTurnProgressEvent::CompactionFinished {
-        progress: compaction_progress(2),
-    });
-
-    let status = snapshot.status.as_ref().expect("status should be kept");
-    assert_eq!(status.compaction_count, 2);
-    assert_eq!(status.history_version, 8);
-    assert_eq!(status.estimated_context_tokens, 1_200);
-    assert_eq!(status.last_response_tokens, Some(77));
-    assert_eq!(status.total_tokens_used, Some(1_077));
-    assert_eq!(snapshot.context.as_ref().unwrap().compaction_count, 2);
-
-    let card = build_feishu_progress_card(&snapshot, true);
-    let serialized = serde_json::to_string(&card).unwrap();
-    assert!(serialized.contains("压缩：2 次"));
-    assert!(serialized.contains("Token：累计 1.1K · 最近 77"));
-    assert!(serialized.contains("Token：累计 1.1K，最近 77"));
-    assert!(!serialized.contains("压缩：0 次"));
-}
-
-#[test]
-fn internal_agent_status_panel_displays_model() {
-    let mut snapshot = ImAgentProgressSnapshot::new("s1", "model task");
-    snapshot.apply_event(AgentTurnProgressEvent::Status(Box::new(active_status(0))));
-
-    let title = format_status_panel_title(&snapshot);
-    let footer = format_footer_markdown(&snapshot);
-
-    assert!(title.contains("模型：gpt-5（openai）"));
-    assert!(footer.contains("模型：gpt-5（openai）"));
 }
 
 #[test]
@@ -956,27 +904,6 @@ fn card_metric_count_uses_readable_kmb_units() {
         bifrost_agent::format_status_metric_count(1_280_000_000),
         "1.3B"
     );
-}
-
-#[test]
-fn feishu_progress_card_formats_large_token_usage() {
-    let mut snapshot = ImAgentProgressSnapshot::new("s1", "token task");
-    let mut status = active_status(1);
-    status.last_response_tokens = Some(1_234_567);
-    status.total_tokens_used = Some(1_000_000);
-    status.estimated_context_tokens = 260_000;
-    status.context_window_tokens = Some(1_000_000);
-    status.context_usage_percent = Some(26.0);
-    snapshot.status = Some(status);
-
-    let card = build_feishu_progress_card(&snapshot, true);
-    let serialized = serde_json::to_string(&card).unwrap();
-    assert!(serialized.contains("Token：累计 1M · 最近 1.2M"));
-    assert!(serialized.contains("Context：~260K / 1M (26.0%)"));
-    assert!(serialized.contains("Token：累计 1M，最近 1.2M"));
-    assert!(!serialized.contains("Token：累计 1000000"));
-    assert!(!serialized.contains("最近 1234567"));
-    assert!(!serialized.contains("Context：~260000 / 1000000"));
 }
 
 #[test]

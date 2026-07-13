@@ -340,7 +340,7 @@ export function sessionDetailToMessages(detail: SessionDetail): ChatMessage[] {
             ? "You"
             : role === "system"
               ? "System"
-              : "Bifrost Agent",
+              : "Runner",
         runnerCall: runnerCall?.meta,
       };
     })
@@ -519,14 +519,6 @@ export function formatThreadRunnerMark(thread: AgentThreadSummary) {
   }
   if (explicitRunner.includes("chatgpt") || explicitRunner.includes("webgpt")) {
     return "GPT";
-  }
-  if (
-    explicitRunner.includes("bifrost_agent") ||
-    explicitRunner.includes("builtin") ||
-    explicitRunner.includes("bifrost") ||
-    explicitRunner.includes("agent")
-  ) {
-    return "Bf";
   }
   const fallback = [thread.source, thread.title].filter(Boolean).join(" ").toLowerCase();
   if (fallback.includes("codex")) {
@@ -802,17 +794,16 @@ export async function runAgentStream(params: {
   onFinal: (content: string) => void;
   signal?: AbortSignal;
 }) {
-  const isExternalRunner =
-    params.runnerId && params.runnerId !== "bifrost_agent";
+  if (!params.runnerId) {
+    throw new Error("No external runner is configured");
+  }
   const response = await apiFetch(
-    isExternalRunner ? "/api/im-gateway/chat/stream" : "/api/agent/chat/stream",
+    "/api/im-gateway/chat/stream",
     {
       method: "POST",
       signal: params.signal,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(
-        isExternalRunner
-          ? {
+      body: JSON.stringify({
               message: params.message,
               images: (params.images || []).map((image) => ({
                 mimeType: image.mimeType,
@@ -824,19 +815,7 @@ export async function runAgentStream(params: {
               adapter: params.runnerAdapter,
               params: params.historyPath ? { historyPath: params.historyPath } : undefined,
               workDir: params.workDir,
-            }
-          : {
-              message: params.message,
-              images: (params.images || []).map((image) => ({
-                mime_type: image.mimeType,
-                data: image.data,
-              })),
-              session_key: params.sessionKey,
-              history_path: params.historyPath,
-              work_dir: params.workDir,
-              collaboration_mode: params.collaborationMode,
-            },
-      ),
+            }),
     },
   );
   if (!response.ok || !response.body) {
@@ -878,28 +857,16 @@ export async function runAgentStream(params: {
       break;
     }
     buffer += decoder.decode(value, { stream: true });
-    if (isExternalRunner) {
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (const line of lines) {
-        const event = parseNdjsonEvent(line);
-        if (event) {
-          handleEvent(event);
-        }
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      const event = parseNdjsonEvent(line);
+      if (event) {
+        handleEvent(event);
       }
-      continue;
-    }
-    const frames = buffer.split("\n\n");
-    buffer = frames.pop() || "";
-    for (const frame of frames) {
-      const event = parseSseFrame(frame);
-      if (!event) {
-        continue;
-      }
-      handleEvent(event);
     }
   }
-  const tailEvent = isExternalRunner ? parseNdjsonEvent(buffer) : parseSseFrame(buffer);
+  const tailEvent = parseNdjsonEvent(buffer);
   if (tailEvent) {
     handleEvent(tailEvent);
   }

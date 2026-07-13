@@ -62,7 +62,7 @@ impl Drop for BifrostDataDirGuard {
 }
 
 #[cfg(test)]
-pub(crate) fn agent_worker_env_lock() -> &'static tokio::sync::Mutex<()> {
+pub(crate) fn runner_worker_env_lock() -> &'static tokio::sync::Mutex<()> {
     AGENT_WORKER_ENV_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
