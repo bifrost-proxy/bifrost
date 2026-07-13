@@ -376,6 +376,7 @@ python3 scripts/ci/coverage-production.py \
 | TC-COV-05 | Codex | ✅ | 受磁盘限制改跑 `coverage-all.sh -p bifrost-command --html --fail-under 0 --output-dir target/coverage-command-html`；`target/coverage-command-html/html/index.html` 已生成 |
 | TC-COV-06 | Codex | ⚠️ | 未跑全量 E2E coverage；本机磁盘不足已阻塞 workspace coverage，继续跑 E2E coverage 风险同类失败 |
 | TC-COV-18 | Codex | ✅ | 2026-07-13：确认 Layered workflow 无 `pull_request`、保留每周日 UTC 18:30 与手动触发；主 Coverage 使用 `--with-e2e --e2e-suite proxy`；精确 Shell 过滤只列出指定的两个用例；coverage pipeline contract 通过（253 个 Shell 语法、24 个工具单测、10 个 capability）；本地 unit+integration、Runner、Rules 与 13 个 proxy Shell profile 合并后 `bifrost-proxy` production 为 90.11%（19313/21433），90% 门禁 PASS。 |
+| TC-COV-18-CI | Codex | ✅ | 2026-07-13：首次远端 run 29218085900 在 23 秒内暴露 `Unknown E2E suite: proxy`，确认执行分支已新增但参数白名单遗漏；将 `proxy` 加入白名单，并在 coverage pipeline contract 固定断言 `rules | shell | runner | proxy`，防止入口与执行分支再次漂移。 |
 | TC-COV-07 | Codex | ✅ | AGENTS.md 已加入 90% CI 门禁段落，并明确本地默认不跑全量 coverage |
 | TC-COV-08 | Codex | ✅ | design/coverage-90.md 已落地 |
 

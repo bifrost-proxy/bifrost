@@ -125,6 +125,7 @@ grep -Fq 'export BIFROST_E2E=1' scripts/ci/run-e2e-runner.sh
 grep -Fq 'shell_test_capability_group()' "$runner"
 grep -Fq 'BIFROST_E2E_SHELL_TESTS' "$runner"
 grep -Fq 'PROXY_COVERAGE_SHELL_MANIFEST' "$coverage_all"
+grep -Fq 'rules | shell | runner | proxy' "$coverage_all"
 [[ "$(wc -l <"$proxy_coverage_shell_manifest" | tr -d ' ')" -eq 13 ]]
 while IFS= read -r proxy_shell_test; do
   [[ -f "e2e-tests/tests/$proxy_shell_test" ]]

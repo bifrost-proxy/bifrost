@@ -159,7 +159,7 @@ done
 
 if [[ -n "$E2E_SUITE" ]]; then
   case "$E2E_SUITE" in
-    rules | shell | runner) ;;
+    rules | shell | runner | proxy) ;;
     *)
       echo -e "${RED}Unknown E2E suite: $E2E_SUITE${NC}" >&2
       exit 2
