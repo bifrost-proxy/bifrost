@@ -955,9 +955,6 @@ pub(super) fn apply_agent_config_patch(
     if let Some(provider) = patch.get("model_provider").and_then(|v| v.as_str()) {
         config.model_provider = Some(provider.to_string());
     }
-    if let Some(tokens) = patch.get("max_completion_tokens").and_then(|v| v.as_u64()) {
-        config.max_completion_tokens = Some(u32::try_from(tokens).unwrap_or(u32::MAX));
-    }
     if let Some(effort) = patch
         .get("model_reasoning_effort")
         .or_else(|| patch.get("reasoning_effort"))
@@ -975,17 +972,6 @@ pub(super) fn apply_agent_config_patch(
     if let Some(window) = patch.get("model_context_window").and_then(|v| v.as_i64()) {
         config.model_context_window = Some(window);
     }
-    if let Some(compact) = patch
-        .get("model_auto_compact_token_limit")
-        .or_else(|| patch.get("compact_threshold_tokens"))
-    {
-        if compact.is_null() {
-            // null → clear override, fall back to context_window × 90%
-            config.model_auto_compact_token_limit = None;
-        } else if let Some(v) = compact.as_i64() {
-            config.model_auto_compact_token_limit = Some(v);
-        }
-    }
     patch_optional_string(&mut config.base_instructions, patch, &["base_instructions"]);
     patch_optional_string(
         &mut config.developer_instructions,
@@ -995,18 +981,6 @@ pub(super) fn apply_agent_config_patch(
     patch_optional_string(&mut config.user_instructions, patch, &["user_instructions"]);
     if let Some(ttl) = patch.get("session_ttl_secs").and_then(|v| v.as_u64()) {
         config.session_ttl_secs = Some(ttl);
-    }
-    if let Some(timeout) = patch.get("request_timeout_secs").and_then(|v| v.as_u64()) {
-        config.request_timeout_secs = Some(timeout);
-    }
-    if let Some(max_iter) = patch.get("max_turn_iterations").and_then(|v| v.as_u64()) {
-        config.max_turn_iterations = Some(u32::try_from(max_iter).unwrap_or(u32::MAX));
-    }
-    if let Some(tool_limit) = patch
-        .get("tool_output_token_limit")
-        .and_then(|v| v.as_u64())
-    {
-        config.tool_output_token_limit = Some(tool_limit as usize);
     }
     if let Some(doc_max) = patch.get("project_doc_max_bytes").and_then(|v| v.as_u64()) {
         config.project_doc_max_bytes = Some(doc_max as usize);
@@ -1032,179 +1006,6 @@ pub(super) fn apply_agent_config_patch(
             history.max_bytes = Some(max_bytes as usize);
         }
     }
-    if let Some(memories_obj) = patch.get("memories").and_then(|v| v.as_object()) {
-        let memories = config.memories.get_or_insert_with(Default::default);
-        if let Some(v) = memories_obj
-            .get("disable_on_external_context")
-            .and_then(|v| v.as_bool())
-        {
-            memories.disable_on_external_context = Some(v);
-        }
-        if let Some(v) = memories_obj
-            .get("generate_memories")
-            .and_then(|v| v.as_bool())
-        {
-            memories.generate_memories = Some(v);
-        }
-        if let Some(v) = memories_obj.get("use_memories").and_then(|v| v.as_bool()) {
-            memories.use_memories = Some(v);
-        }
-        if let Some(v) = memories_obj
-            .get("max_raw_memories_for_consolidation")
-            .and_then(|v| v.as_u64())
-        {
-            memories.max_raw_memories_for_consolidation = Some(v as usize);
-        }
-        if let Some(v) = memories_obj.get("max_unused_days").and_then(|v| v.as_i64()) {
-            memories.max_unused_days = Some(v);
-        }
-        if let Some(v) = memories_obj
-            .get("max_rollout_age_days")
-            .and_then(|v| v.as_i64())
-        {
-            memories.max_rollout_age_days = Some(v);
-        }
-        if let Some(v) = memories_obj
-            .get("max_rollouts_per_startup")
-            .and_then(|v| v.as_u64())
-        {
-            memories.max_rollouts_per_startup = Some(v as usize);
-        }
-        if let Some(v) = memories_obj
-            .get("min_rollout_idle_hours")
-            .and_then(|v| v.as_i64())
-        {
-            memories.min_rollout_idle_hours = Some(v);
-        }
-        if let Some(v) = memories_obj
-            .get("min_rate_limit_remaining_percent")
-            .and_then(|v| v.as_i64())
-        {
-            memories.min_rate_limit_remaining_percent = Some(v);
-        }
-        if let Some(v) = memories_obj.get("extract_model").and_then(|v| v.as_str()) {
-            memories.extract_model = Some(v.to_string());
-        }
-        if let Some(v) = memories_obj
-            .get("consolidation_model")
-            .and_then(|v| v.as_str())
-        {
-            memories.consolidation_model = Some(v.to_string());
-        }
-    }
-    if let Some(timeout) = patch
-        .get("background_terminal_max_timeout")
-        .and_then(|v| v.as_u64())
-    {
-        config.background_terminal_max_timeout = Some(timeout);
-    }
-    if let Some(channel) = patch.get("default_message_channel") {
-        if channel.is_null() {
-            config.default_message_channel = None;
-        } else if let Ok(binding) =
-            serde_json::from_value::<bifrost_agent::ImMessageChannelBinding>(channel.clone())
-        {
-            config.default_message_channel = Some(binding);
-        }
-    }
-
-    // Provider-level fields: apply to the active provider in model_providers
-    let provider_id = config
-        .model_provider
-        .clone()
-        .unwrap_or_else(|| "aidp_crawl".to_string());
-    let provider = config
-        .model_providers
-        .entry(provider_id.clone())
-        .or_insert_with(|| bifrost_agent::ModelProviderConfig {
-            name: Some(provider_id.clone()),
-            base_url: None,
-            wire_api: Some(bifrost_agent::ModelWireApi::ChatCompletions),
-            env_key: None,
-            api_key: None,
-            http_headers: None,
-            env_http_headers: None,
-            request_max_retries: None,
-            stream_idle_timeout_ms: None,
-            stream_max_retries: None,
-        });
-    if let Some(url) = patch.get("base_url").and_then(|v| v.as_str()) {
-        provider.base_url = Some(url.to_string());
-    }
-    if let Some(key) = patch.get("api_key").and_then(|v| v.as_str()) {
-        if key.is_empty() {
-            provider.api_key = None;
-            if let Some(headers) = provider.http_headers.as_mut() {
-                headers.remove("api-key");
-                if headers.is_empty() {
-                    provider.http_headers = None;
-                }
-            }
-        } else {
-            provider.api_key = Some(key.to_string());
-            if uses_api_key_header(&provider_id, patch) {
-                provider
-                    .http_headers
-                    .get_or_insert_with(HashMap::new)
-                    .insert("api-key".to_string(), key.to_string());
-            }
-        }
-    }
-    if let Some(env_key) = patch.get("env_key").and_then(|v| v.as_str()) {
-        provider.env_key = Some(env_key.to_string());
-    }
-    if let Some(by_azure) = patch.get("by_azure").and_then(|v| v.as_bool()) {
-        if by_azure {
-            let headers = provider.http_headers.get_or_insert_with(HashMap::new);
-            if !headers.contains_key("api-key") {
-                headers.insert("api-key".to_string(), String::new());
-            }
-        } else if let Some(ref mut headers) = provider.http_headers {
-            headers.remove("api-key");
-        }
-    }
-    if let Some(retries) = patch.get("request_max_retries").and_then(|v| v.as_u64()) {
-        provider.request_max_retries = Some(retries);
-    }
-    if let Some(timeout) = patch.get("stream_idle_timeout_ms").and_then(|v| v.as_u64()) {
-        provider.stream_idle_timeout_ms = Some(timeout);
-    }
-    if let Some(retries) = patch.get("stream_max_retries").and_then(|v| v.as_u64()) {
-        provider.stream_max_retries = Some(retries);
-    }
-
-    // MCP servers: full replacement via JSON object
-    if let Some(mcp_obj) = patch.get("mcp_servers").and_then(|v| v.as_object()) {
-        let mut mcp_servers = HashMap::new();
-        for (name, server_val) in mcp_obj {
-            if let Ok(server_config) =
-                serde_json::from_value::<bifrost_agent::McpServerConfig>(server_val.clone())
-            {
-                mcp_servers.insert(name.clone(), server_config);
-            }
-        }
-        config.mcp_servers = mcp_servers;
-    }
-
-    // Model providers: full replacement via JSON object
-    if let Some(providers_obj) = patch.get("model_providers").and_then(|v| v.as_object()) {
-        let mut model_providers = HashMap::new();
-        for (name, provider_val) in providers_obj {
-            if let Ok(provider_config) =
-                serde_json::from_value::<bifrost_agent::ModelProviderConfig>(provider_val.clone())
-            {
-                model_providers.insert(name.clone(), provider_config);
-            }
-        }
-        config.model_providers = model_providers;
-    }
-}
-
-pub(super) fn uses_api_key_header(provider_id: &str, patch: &serde_json::Value) -> bool {
-    patch
-        .get("by_azure")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(matches!(provider_id, "aidp_crawl" | "azure"))
 }
 
 fn dedupe_unified_sessions_by_key(unified: &mut Vec<serde_json::Value>) {
@@ -2991,19 +2792,6 @@ mod coverage_boost {
     }
 
     #[test]
-    fn uses_api_key_header_respects_by_azure_override_and_defaults() {
-        assert!(uses_api_key_header("aidp_crawl", &json!({})));
-        assert!(uses_api_key_header("azure", &json!({})));
-        assert!(!uses_api_key_header("openai", &json!({})));
-
-        assert!(uses_api_key_header("openai", &json!({"by_azure": true})));
-        assert!(!uses_api_key_header(
-            "aidp_crawl",
-            &json!({"by_azure": false})
-        ));
-    }
-
-    #[test]
     fn apply_agent_config_patch_updates_core_fields() {
         let mut config = crate::im_gateway::agent::ImAgentConfig::default();
         let patch = json!({
@@ -3011,17 +2799,13 @@ mod coverage_boost {
             "runner": "custom-runner",
             "model": "gpt-4-mini",
             "model_provider": "azure",
-            "max_completion_tokens": 1024u64,
             "model_reasoning_effort": "medium",
             "model_reasoning_summary": "concise",
             "model_context_window": 200000,
-            "model_auto_compact_token_limit": 12345,
             "base_instructions": " Base ",
             "developer_instructions": " Dev ",
             "user_instructions": " User ",
-            "session_ttl_secs": 3600u64,
-            "request_timeout_secs": 30u64,
-            "max_turn_iterations": 12u64
+            "session_ttl_secs": 3600u64
         });
 
         apply_agent_config_patch(&mut config, &patch);
@@ -3035,59 +2819,37 @@ mod coverage_boost {
         }
         assert_eq!(config.model.as_deref(), Some("gpt-4-mini"));
         assert_eq!(config.model_provider.as_deref(), Some("azure"));
-        assert_eq!(config.max_completion_tokens, Some(1024));
         assert_eq!(config.model_reasoning_effort.as_deref(), Some("medium"));
         assert_eq!(config.model_reasoning_summary.as_deref(), Some("concise"));
         assert_eq!(config.model_context_window, Some(200000));
-        assert_eq!(config.model_auto_compact_token_limit, Some(12345));
         assert_eq!(config.base_instructions.as_deref(), Some("Base"));
         assert_eq!(config.developer_instructions.as_deref(), Some("Dev"));
         assert_eq!(config.user_instructions.as_deref(), Some("User"));
         assert_eq!(config.session_ttl_secs, Some(3600));
-        assert_eq!(config.request_timeout_secs, Some(30));
-        assert_eq!(config.max_turn_iterations, Some(12));
     }
 
     #[test]
-    fn apply_agent_config_patch_clears_auto_compact_and_runner() {
+    fn apply_agent_config_patch_clears_runner() {
         let mut config = crate::im_gateway::agent::ImAgentConfig {
-            model_auto_compact_token_limit: Some(10),
             runner: Some(bifrost_agent::AgentRunnerMode::Custom("old".into())),
             ..Default::default()
         };
 
-        let patch = json!({
-            "model_auto_compact_token_limit": null,
-            "runner": null
-        });
+        let patch = json!({"runner": null});
 
         apply_agent_config_patch(&mut config, &patch);
 
-        assert!(config.model_auto_compact_token_limit.is_none());
         assert!(config.runner.is_none());
     }
 
     #[test]
-    fn apply_agent_config_patch_updates_history_and_memories() {
+    fn apply_agent_config_patch_updates_history() {
         let mut config = crate::im_gateway::agent::ImAgentConfig::default();
         let patch = json!({
             "ephemeral": true,
             "history": {
                 "persistence": "last-90-days",
                 "max_bytes": 8192u64
-            },
-            "memories": {
-                "disable_on_external_context": true,
-                "generate_memories": false,
-                "use_memories": true,
-                "max_raw_memories_for_consolidation": 123u64,
-                "max_unused_days": 10,
-                "max_rollout_age_days": 20,
-                "max_rollouts_per_startup": 5u64,
-                "min_rollout_idle_hours": 48,
-                "min_rate_limit_remaining_percent": 30,
-                "extract_model": "gpt-extract",
-                "consolidation_model": "gpt-consolidate"
             }
         });
 
@@ -3100,94 +2862,6 @@ mod coverage_boost {
             bifrost_agent::HistoryPersistence::Last90Days
         );
         assert_eq!(history.max_bytes, Some(8192usize));
-
-        let memories = config.memories.expect("memories config");
-        assert_eq!(memories.disable_on_external_context, Some(true));
-        assert_eq!(memories.generate_memories, Some(false));
-        assert_eq!(memories.use_memories, Some(true));
-        assert_eq!(memories.max_raw_memories_for_consolidation, Some(123));
-        assert_eq!(memories.max_unused_days, Some(10));
-        assert_eq!(memories.max_rollout_age_days, Some(20));
-        assert_eq!(memories.max_rollouts_per_startup, Some(5));
-        assert_eq!(memories.min_rollout_idle_hours, Some(48));
-        assert_eq!(memories.min_rate_limit_remaining_percent, Some(30));
-        assert_eq!(memories.extract_model.as_deref(), Some("gpt-extract"));
-        assert_eq!(
-            memories.consolidation_model.as_deref(),
-            Some("gpt-consolidate")
-        );
-    }
-
-    #[test]
-    fn apply_agent_config_patch_updates_provider_and_api_key_header() {
-        let mut config = crate::im_gateway::agent::ImAgentConfig {
-            model_provider: Some("aidp_crawl".to_string()),
-            ..Default::default()
-        };
-
-        let patch = json!({
-            "base_url": "https://example.com",
-            "api_key": "secret",
-            "env_key": "OPENAI_API_KEY",
-            "by_azure": true,
-            "request_max_retries": 2u64,
-            "stream_idle_timeout_ms": 5000u64,
-            "stream_max_retries": 3u64
-        });
-
-        apply_agent_config_patch(&mut config, &patch);
-
-        let provider = config.model_providers.get("aidp_crawl").expect("provider");
-        assert_eq!(provider.base_url.as_deref(), Some("https://example.com"));
-        assert_eq!(provider.api_key.as_deref(), Some("secret"));
-        assert_eq!(provider.env_key.as_deref(), Some("OPENAI_API_KEY"));
-        assert_eq!(provider.request_max_retries, Some(2));
-        assert_eq!(provider.stream_idle_timeout_ms, Some(5000));
-        assert_eq!(provider.stream_max_retries, Some(3));
-
-        let headers = provider.http_headers.as_ref().expect("headers");
-        assert_eq!(headers.get("api-key").map(String::as_str), Some("secret"));
-
-        // Clearing the API key should also clear the header map.
-        let patch_clear = json!({"api_key": ""});
-        let mut config2 = config.clone();
-        apply_agent_config_patch(&mut config2, &patch_clear);
-        let provider2 = config2.model_providers.get("aidp_crawl").expect("provider");
-        assert!(provider2.api_key.is_none());
-        assert!(provider2
-            .http_headers
-            .as_ref()
-            .map(|m| m.is_empty())
-            .unwrap_or(true));
-    }
-
-    #[test]
-    fn apply_agent_config_patch_replaces_mcp_servers_and_model_providers() {
-        let mut config = crate::im_gateway::agent::ImAgentConfig::default();
-        let patch = json!({
-            "mcp_servers": {
-                "docs": {"url": "https://example.com/mcp", "enabled": true}
-            },
-            "model_providers": {
-                "openai": {
-                    "name": "OpenAI",
-                    "base_url": "https://api.openai.com",
-                    "wire_api": "chat_completions",
-                    "env_key": "OPENAI_API_KEY"
-                }
-            }
-        });
-
-        apply_agent_config_patch(&mut config, &patch);
-
-        assert!(config.mcp_servers.contains_key("docs"));
-        let provider = config
-            .model_providers
-            .get("openai")
-            .expect("openai provider");
-        assert_eq!(provider.name.as_deref(), Some("OpenAI"));
-        assert_eq!(provider.base_url.as_deref(), Some("https://api.openai.com"));
-        assert_eq!(provider.env_key.as_deref(), Some("OPENAI_API_KEY"));
     }
 
     #[tokio::test(flavor = "current_thread")]

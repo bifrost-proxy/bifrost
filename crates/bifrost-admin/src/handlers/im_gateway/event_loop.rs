@@ -1437,7 +1437,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
             None => break,
         };
     }
-    if recorder.is_some() && !session.memory_cleared {
+    if recorder.is_some() && !session.history_cleared {
         session.recorder = recorder;
     }
     remember_session_state_from_agent_session(

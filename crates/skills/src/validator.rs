@@ -44,16 +44,8 @@ impl SkillValidator {
     pub fn new() -> Self {
         Self {
             builtin_slash_commands: [
-                "/clear",
-                "/reset",
-                "/undo",
-                "/compact",
-                "/status",
-                "/resume",
-                "/remember",
-                "/memories",
-                "/forget",
-                "/skill",
+                "/help", "/clear", "/reset", "/status", "/stop", "/cwd", "/runner", "/q", "/rq",
+                "/g", "/models", "/model", "/efforts", "/effort",
             ]
             .into_iter()
             .map(str::to_string)

@@ -17,21 +17,6 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 
 ## 测试用例
 
-### TC-IH-01: /help 命令返回帮助信息
-
-**操作步骤**：
-1. 通过 Agent API 发送 `/help` 消息（或通过 IM 发送）
-2. 检查响应内容
-
-**预期结果**：
-- 响应包含"可用命令:"标题
-- 响应包含"内置命令:"分类
-- 响应列出所有内置命令：/help、/clear、/reset、/undo、/compact、/status、/stop、/resume、/remember、/memories、/forget、/goal、/skill
-- IM 响应额外包含"IM 通道命令:"分类
-- IM 通道命令列出 `/cwd <绝对路径>`、`/runner [Runner]`、`/q <消息>`、`/rq <序号>`、`/g <引导内容>`
-- 每个命令附带中文描述说明
-- 响应末尾包含"提示: 直接输入文本即可与 AI 对话。"
-
 ### TC-IH-02: /help 不再返回"未知命令"
 
 **操作步骤**：

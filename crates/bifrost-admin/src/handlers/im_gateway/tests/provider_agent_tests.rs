@@ -507,7 +507,7 @@ pub(super) fn im_help_for_external_cli_runner_only_lists_supported_commands() {
 }
 
 #[test]
-pub(super) fn im_help_for_unsupported_external_runner_omits_model_and_builtin_commands() {
+pub(super) fn im_help_for_unsupported_external_runner_omits_unsupported_commands() {
     let help = build_im_startup_help_for_runner(&ImHelpRunnerKind::External {
         adapter: "chatgpt_web".to_string(),
     });

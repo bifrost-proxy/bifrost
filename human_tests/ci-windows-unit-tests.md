@@ -113,42 +113,6 @@ source ~/.zshrc && rg -n '/bin/(pwd|echo)|TEST_DATA_DIR_LOCK\.lock\(\)\.unwrap\(
 - 不再存在裸 `TEST_DATA_DIR_LOCK.lock().unwrap()`。
 - 不再存在 Windows 单测会执行到的硬编码 `/` 路径后缀断言。
 
-### TC-CWUT-07 Agent exec_command 与 Goal prompt Windows 回归
-
-操作步骤：
-
-```bash
-source ~/.zshrc && for filter in \
-  exec_command_returns_completed_output \
-  exec_command_yields_session_and_write_stdin_polls_to_exit \
-  runtime_poll_exec_session_reports_unchanged_without_model_tool_call \
-  runtime_poll_exec_session_wakes_on_output_before_deadline \
-  exec_command_background_watcher_observes_exit_before_next_poll \
-  exec_command_write_stdin_drives_pipe_process \
-  exec_command_ctrl_c_terminates_running_process \
-  exec_command_nonzero_exit_is_successful_tool_result \
-  exec_command_login_false_uses_non_login_shell_flag \
-  test_exec_command_tty_reports_isatty_true \
-  exec_command_long_task_waits_in_runtime_without_model_polling \
-  exec_command_long_task_user_message_interrupts_runtime_wait_then_continues \
-  exec_command_long_task_stall_detection_returns_control_to_model \
-  exec_command_tty_prompt_stall_returns_control_to_model_for_stdin_decision \
-  budget_limit_prompt_contains_objective_and_budget \
-  continuation_prompt_contains_remaining_tokens
-do
-  SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-agent "$filter" --lib -- --nocapture
-done
-```
-
-预期结果：
-- Windows 下 `exec_command` 默认 shell 为 PowerShell，不再回退到 CI runner 不保证存在的 `bash`。
-- 长任务、后台 watcher、stdin、Ctrl-C、非零退出码和 TTY 探针均使用平台化命令，不依赖 `/bin/sh`、Unix `sleep/printf` 或 `python3`；Windows 非零退出允许先返回 running session 后再轮询并累积输出，短命 TTY 探针重点验证 PTY 启动和 exit code。
-- Agent session 层通过模型工具调用间接触发的长任务、用户插话、stall detection、TTY prompt 测试同样使用平台化命令；Windows 非交互长任务显式走 `cmd.exe`，TTY prompt 使用 `cmd set /p`，避免 PowerShell/PTY `ReadLine()` 时序和回车语义差异导致 CI 抖动。Windows 上 ConPTY child launch / TTY prompt / stall timing 的平台不稳定用例必须显式 ignored 并写明原因，不能伪装成通过。
-- Windows cfg 分支不能引用只在非 Windows 分支定义的 TTY marker helper；短命 TTY 探针的轮询退出条件必须按平台拆分。
-- `p1_tools_e2e::exec_command_tool_works_end_to_end` 的 long-running 命令必须按平台选择 shell 语法，并把初始 exec 输出与后续 `write_stdin` poll 输出一起累计，避免 Windows PowerShell 启动/输出 flush 时序导致 `long-end` 假阴性。
-- PowerShell/cmd 的 shell 参数映射有单元断言覆盖，Unix shell 继续保持 `-c` / `-lc` 行为。
-- Goal prompt 断言先归一化 CRLF/LF，Windows checkout 不会因为换行风格导致失败。
-
 ### TC-CWUT-08 AdminState 托盘 callback 单测不依赖全局数据目录
 
 操作步骤：
@@ -174,7 +138,7 @@ prlctl exec "Windows 11" --current-user cmd.exe /c "call \"C:\Program Files\Micr
 ```
 
 预期结果：
-- Windows x86_64 `bifrost-agent` lib test、`p1_tools_e2e` 和 `session_skills_integration` 测试二进制均能完成编译。
+- Windows x86_64 `bifrost-agent` lib test 和 `session_skills_integration` 测试二进制均能完成编译。
 - 被 `#[cfg_attr(windows, ignore = ...)]` 标记的测试函数体仍必须通过 Windows 编译；测试 helper 不得只在 `cfg(not(windows))` 下定义却被 Windows 测试体引用。
 - 本地验证必须优先使用 rustup shim 的 `cargo/rustc`，并显式配置 `lld-link`，避免 Windows ARM VM 中多套 Rust/VS 工具链路径混用造成假失败。
 
@@ -265,7 +229,6 @@ prlctl exec "Windows 11" cmd /c "cd /d C:\Users\eden\github\bifrost && call \"C:
 预期结果：
 - Windows VM 中的当前任务分支必须先同步最新 `origin/main`，再在 `C:\Users\eden\github\bifrost` 运行完整 workspace all-features 测试。
 - IM Gateway external CLI 停止逻辑在 Windows 本地化 `taskkill` 输出、进程已消失和部分成功场景下都必须幂等收敛为 stopped。
-- `p1_tools_e2e::exec_command_tool_works_end_to_end` 必须兼容 Windows 上 exec 初始响应先返回 running/null exit code 的时序，并通过后续 `write_stdin` poll 累积最终输出。
 - `bifrost-admin`、`bifrost-agent`、`bifrost-asr`、`bifrost-cli`、`bifrost-core`、`bifrost-proxy`、`skills` 以及 workspace integration tests/doc-tests 全部通过。
 
 ### TC-CWUT-17 Skills absolute path assertions use platform paths
@@ -340,20 +303,15 @@ source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib command
 | 2026-06-11 | TC-CWUT-04 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin` 过滤 `request_agent_stop_stops_external_runner_by_session_key`、`schedule_external_runner_executes_from_configured_work_dir`。 | 通过，2 个 IM Gateway external runner Windows shell/stdin 回归用例均通过 |
 | 2026-06-11 | TC-CWUT-05 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin remote_invoke::file_access_roots::tests --lib -- --nocapture`。 | 通过，16 个 file_access_roots 用例均通过 |
 | 2026-06-11 | TC-CWUT-06 | 执行 `rg -n '/bin/(pwd\|echo)\|TEST_DATA_DIR_LOCK\.lock\(\)\.unwrap\(\)\|chatgpt_web/auth_state\.json\|ends_with\(".*\.daily/.+"\)' crates/bifrost-admin/src -g '*.rs'`。 | 通过，仅剩 `/bin/pwd` 与 `/bin/echo` 在平台分支 helper 的 Unix 分支中命中，无裸锁 unwrap、ChatGPT Web slash path 或 `.daily/...` slash suffix 断言残留 |
-| 2026-06-11 | TC-CWUT-07 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-agent` 过滤 `exec_command_returns_completed_output`、`exec_command_yields_session_and_write_stdin_polls_to_exit`、`runtime_poll_exec_session_reports_unchanged_without_model_tool_call`、`runtime_poll_exec_session_wakes_on_output_before_deadline`、`exec_command_background_watcher_observes_exit_before_next_poll`、`exec_command_write_stdin_drives_pipe_process`、`exec_command_ctrl_c_terminates_running_process`、`exec_command_nonzero_exit_is_successful_tool_result`、`exec_command_login_false_uses_non_login_shell_flag`、`test_exec_command_tty_reports_isatty_true`、`budget_limit_prompt_contains_objective_and_budget`、`continuation_prompt_contains_remaining_tokens`、`exec_command_long_task_waits_in_runtime_without_model_polling`、`exec_command_long_task_user_message_interrupts_runtime_wait_then_continues`、`exec_command_long_task_stall_detection_returns_control_to_model`、`exec_command_tty_prompt_stall_returns_control_to_model_for_stdin_decision`；Windows CI 失败后复跑其中 `exec_command_nonzero_exit_is_successful_tool_result`、`test_exec_command_tty_reports_isatty_true`、`exec_command_long_task_user_message_interrupts_runtime_wait_then_continues`、`exec_command_long_task_stall_detection_returns_control_to_model`、`exec_command_tty_prompt_stall_returns_control_to_model_for_stdin_decision`。 | 通过，16 个 tools/session/goal 过滤用例均通过；补充验证 PowerShell flush、非零退出轮询输出累积、Windows TTY 启动/退出码、`cmd.exe` 长任务与 `cmd /V:ON set /p` prompt 输入 |
-| 2026-06-11 | TC-CWUT-07 | 在 Parallels `Windows 11` VM 的 `C:\Users\eden\github\bifrost` 切到 `codex/tray-helper-design`，初始化 VS `vcvarsarm64_amd64` 后执行 x86_64 target 复现：`cargo test -p bifrost-agent test_exec_command_tty_reports_isatty_true --locked --target x86_64-pc-windows-msvc -- --nocapture`、`exec_command_tty_prompt_stall_returns_control_to_model_for_stdin_decision`、`exec_command_long_task_stall_detection_returns_control_to_model`、`exec_command_long_task_user_message_interrupts_runtime_wait_then_continues`。 | 通过。真实复现到 Windows x86_64 PTY child `exit_code=-1073741502` 和 child-process timing hang；修复后前三个 Windows-hostile 用例显式 ignored，`exec_command_long_task_user_message_interrupts_runtime_wait_then_continues` 通过 |
-| 2026-06-11 | TC-CWUT-07 | 跟进 GitHub Actions run `27353589451` 的 `Windows Unit Tests (x86_64)`，定位到 `crates\agent\src\tools\exec_command.rs:1778` 在 Windows cfg 下引用非 Windows helper `tty_probe_expected_output()`；本地执行 `cargo test -p bifrost-agent test_exec_command_tty_reports_isatty_true --lib -- --nocapture` 与 `cargo fmt --all -- --check`。 | 通过。本地非 Windows 仍验证 marker，Windows 轮询退出条件改为只等待 exit code，避免 Windows cfg 编译失败 |
 | 2026-06-11 | TC-CWUT-04 | 跟进 GitHub Actions run `27354395092` 的 `Unit & Integration Tests`，定位 `schedule_external_runner_executes_from_configured_work_dir` 在 CI 快速退出 fake runner 时可能先退出再被 runtime 写 stdin，触发 BrokenPipe 并标记 Failed；本地旧实现过滤用例重复 20 次通过，新实现执行目标过滤用例和 `bifrost-admin --lib`。 | 通过。fake runner 先消费 stdin 再输出 workdir 结果，避免依赖本地/CI 进程退出时序 |
-| 2026-06-11 | TC-CWUT-07 | 跟进 GitHub Actions run `27355528937` 与 `27356956085` 的 `Windows Unit Tests (x86_64)`，定位 `p1_tools_e2e::exec_command_tool_works_end_to_end` 仍要求 Windows TTY 初始输出包含 `True True` 且必须返回 running `session_id`；本地执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-agent --test p1_tools_e2e exec_command_tool_works_end_to_end -- --nocapture`。 | 通过。非 Windows 合并初始输出与后续 `write_stdin` poll 输出后断言 `isatty`/`exec-ready`/回显；Windows 跳过 ConPTY interactive 分支，继续覆盖同一用例里的非 TTY exec、long session 与 write_stdin 路径 |
 | 2026-06-11 | TC-CWUT-08 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin state::tests::request_tray_launch_invokes_registered_callback --lib -- --nocapture` 与 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin state::tests::reconcile_socket_summary --lib -- --nocapture`。 | 通过，托盘 callback 与 4 个 reconcile socket summary 单测均使用显式临时 `RulesStorage` 后稳定通过 |
 | 2026-06-11 | TC-CWUT-10 | 跟进 GitHub Actions run `27358341485` 的 `Windows Unit Tests (x86_64)`，定位 `bifrost-asr::timeline::tests::generates_daily_summary_grouped_by_date` 在 Windows 上输出 `sub\meeting_b` 后断言 `sub/meeting_b` 失败；本地执行 ASR filtered tests。 | 通过，Daily summary source label 对 `\` 统一归一为 `/`，Windows/Linux 不需要 native ASR runtime 即可覆盖 core artifact 文本逻辑 |
 | 2026-06-11 | TC-CWUT-11 | 跟进 GitHub Actions run `27361916126` 的 `Windows Unit Tests (x86_64)`，定位 `commands::upgrade::tests::upgrade_archive_validation_rejects_invalid_tar_xz_before_extract` 因 Windows 早退跳过非 zip 预检而失败；本地执行目标过滤用例。 | 通过，`validate_downloaded_archive()` 仅对 zip 早退，坏 tar.xz 在所有平台都必须预检失败 |
-| 2026-06-11 | TC-CWUT-07 | 跟进 GitHub Actions run `27363268897` 的 `Windows Unit Tests (x86_64)`，定位 `p1_tools_e2e::exec_command_tool_works_end_to_end` long-running 分支单次/短窗口 poll 没拿到 `long-end`；本地执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-agent --test p1_tools_e2e exec_command_tool_works_end_to_end -- --nocapture`。 | 通过，long-running 命令改为平台化 PowerShell/Unix shell，初始输出与后续 poll 输出合并，bounded poll 最多 40 次直到 exit code 和 `long-end` 都出现 |
 | 2026-06-11 | TC-CWUT-12 | 跟进 GitHub Actions run `27364370904` 与 `27365788851` 的 `Windows Unit Tests (x86_64)`，定位 `bifrost-cli --test cli_commands` 中 help/completion/alias 子进程输出断言批量失败，以及真实 `install-skill` 子进程在 Windows 下栈溢出；本地执行完整 `cli_commands` 测试。 | 通过，help/completion/alias schema 测试改为 clap 内存渲染，install-skill 落盘验证改为 in-process 调用 `handle_install_skill()` |
 | 2026-06-11 | TC-CWUT-13 | 跟进 GitHub Actions run `27367354517` 的 `Windows Unit Tests (x86_64)`，定位 `bifrost-cli --test cli_help` 中 8 个 help 文案断言仍通过真实 `bifrost.exe --help` 子进程取 stdout/stderr；本地执行完整 `cli_help` 测试。 | 通过，root/port/start/search/traffic help 文案测试改为 clap 内存渲染，避免 Windows 子进程 stdout/stderr 和栈行为差异 |
 | 2026-06-11 | TC-CWUT-14 | 跟进 GitHub Actions run `27368683603` 的 `Windows Unit Tests (x86_64)`，定位 `system_proxy_launchd::tests::parse_installed_plist_detects_program_data_dir_and_version` 把归一化后的 Windows 当前盘符路径与 Unix 字面 `/tmp/...` 比较。 | 通过，plist parse 断言改为与 `SystemProxyLaunchdConfig` 归一化后的 program/data-dir 比较 |
 | 2026-06-11 | TC-CWUT-15 | 跟进 GitHub Actions run `27369929153` 的 `Windows Unit Tests (x86_64)`，定位 `skills::registry::tests::watcher_reloads_one_slug_and_removes_deleted_slug` 删除目录后 watcher 事件路径与 canonical root 形态不一致，导致提不出 slug 并等待超时。 | 通过，watcher roots 和事件路径都使用 raw/canonical 双候选提取 slug |
-| 2026-06-12 | TC-CWUT-16 | 在 Parallels `Windows 11` VM 的 `C:\Users\eden\github\bifrost` 同步最新 `origin/main` 后，执行 `cargo +stable test --workspace --all-features -j1`。首轮暴露 `im_gateway::external_cli` Windows 本地化 `taskkill`/missing PID 幂等问题，修复后目标过滤 `35 passed`；次轮暴露 `p1_tools_e2e::exec_command_tool_works_end_to_end` 初始 running/null exit code 时序问题，修复后 `8 passed; 1 ignored`。最终再次执行完整 workspace all-features。 | 通过，完整 workspace all-features、integration tests 与 doc-tests 全部通过 |
+| 2026-06-12 | TC-CWUT-16 | 在 Parallels `Windows 11` VM 的 `C:\Users\eden\github\bifrost` 同步最新 `origin/main` 后，执行 `cargo +stable test --workspace --all-features -j1`。首轮暴露 `im_gateway::external_cli` Windows 本地化 `taskkill`/missing PID 幂等问题，修复后目标过滤 `35 passed`，最终再次执行完整 workspace all-features。 | 通过，完整 workspace all-features、integration tests 与 doc-tests 全部通过 |
 | 2026-06-12 | TC-CWUT-17 | 在 Parallels `Windows 11` VM 的 `C:\Users\eden\github\bifrost` 同步最新 `origin/main` 后，执行 `cargo +stable test -p skills --all-features -j1`、`cargo +stable test --workspace --all-features -j1`、`cargo +stable test -p bifrost-core --all-features -j1`、`cargo +stable clippy --workspace --all-targets --all-features -j1 -- -D warnings`。 | 通过，skills 89 passed，完整 workspace all-features、bifrost-core 897 passed，workspace clippy 通过；Windows-only symlink 测试 warning 已通过 `#[cfg(unix)]` 收敛 |
 | 2026-06-12 | TC-CWUT-18 | 跟进 GitHub Actions run `27404962469`，定位 `Windows Unit Tests (x86_64)` 的测试主体后失败点为 `Post Run Swatinem/rust-cache` 保存 cache；更新 workflow 后重新检查 PR checks。 | 待复验，预期 Windows Unit Tests 不再因 cache post-step 保存失败变红 |
 | 2026-06-12 | TC-CWUT-19 | 在 Parallels `Windows 11` VM 的 `C:\Users\eden\github\bifrost` 同步远端分支并 rebase 到最新 `origin/main` 后，执行 `cargo +stable clippy -p bifrost-device --all-targets --all-features -j1 -- -D warnings` 与 `cargo +stable test -p bifrost-device --all-features -j1`。 | 通过，clippy 无 warning；`bifrost-device` 49 个单元测试与 doc-tests 全部通过，覆盖 iOS cfgutil macOS-only helper 和 Android CA status Unix-only module 的 Windows 编译回归 |

@@ -1340,21 +1340,15 @@ pub(super) async fn handle_busy_message(
         return;
     }
 
-    // Other builtin commands that need session state — defer until session is free
-    if matches!(
-        trimmed,
-        "/clear" | "/reset" | "/undo" | "/compact" | "/resume" | "/goal" | "/skill"
-    ) || trimmed.starts_with("/undo ")
-        || trimmed.starts_with("/goal ")
-        || trimmed.starts_with("/skill ")
-    {
+    // Session reset commands need the active external run to release its state.
+    if matches!(trimmed, "/clear" | "/reset") {
         let reply = format!(
             "⏳ Agent 正在处理中，{} 命令需要等待当前任务完成后执行。\n\n\
              可用操作:\n\
              - /q <消息> — 排队消息\n\
              - /rq <序号> — 取消排队\n\
              - /status — 查看状态\n\
-             - /stop — 立即停止当前 loop\n\
+             - /stop — 立即停止当前 Runner\n\
              - /help — 查看帮助",
             trimmed.split_whitespace().next().unwrap_or(trimmed)
         );

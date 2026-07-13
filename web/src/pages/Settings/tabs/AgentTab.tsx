@@ -404,7 +404,7 @@ export default function AgentTab({ hideSectionNav = false, visibleSections }: Ag
                 </Col>
               </Row>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                Enable or disable the agent
+                Enable or disable external runner sessions
               </Text>
 
               <Divider style={{ margin: "12px 0" }} />
@@ -444,7 +444,7 @@ export default function AgentTab({ hideSectionNav = false, visibleSections }: Ag
                 </Col>
               </Row>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                Agent working directory for file operations
+                Default working directory passed to external runners
               </Text>
 
               <Divider style={{ margin: "12px 0" }} />
@@ -453,8 +453,8 @@ export default function AgentTab({ hideSectionNav = false, visibleSections }: Ag
                 label="Base Instructions / System Prompt"
                 value={config.base_instructions ?? ""}
                 onChange={(value) => handleStringChange("base_instructions", value)}
-                placeholder={config.default_base_instructions || "Built-in default Agent prompt"}
-                description="Overrides the built-in base prompt. Leave empty to inherit the default; use the editor button to copy the default into a custom draft."
+                placeholder="Optional instructions for external runners"
+                description="Optional base instructions forwarded to runners that support instruction overrides."
                 testId="settings-agent-base-instructions"
                 copyPlaceholderLabel="Copy default into editor"
               />

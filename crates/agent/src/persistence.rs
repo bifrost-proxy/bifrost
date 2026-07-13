@@ -1975,19 +1975,14 @@ mod tests {
         recorder
             .record_session_start(
                 "run-state-session",
-                serde_json::json!({"source": "im", "runner_id": "builtin"}),
+                serde_json::json!({"source": "im", "runner_id": "codex"}),
             )
             .unwrap();
         recorder
-            .record_run_state("run-state-session", "running", Some("im"), Some("builtin"))
+            .record_run_state("run-state-session", "running", Some("im"), Some("codex"))
             .unwrap();
         recorder
-            .record_run_state(
-                "run-state-session",
-                "completed",
-                Some("web"),
-                Some("builtin"),
-            )
+            .record_run_state("run-state-session", "completed", Some("web"), Some("codex"))
             .unwrap();
         recorder.close();
 

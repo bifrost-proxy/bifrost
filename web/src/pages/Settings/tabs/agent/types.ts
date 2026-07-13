@@ -5,92 +5,9 @@
 // API base path
 export const BASE = "/im-gateway";
 
-// Defaults matching Rust AgentConfig::default()
-export const DEFAULTS = {
-  runner: "Codex",
-  model: "gpt-5.4-2026-03-05",
-  model_provider: "aidp_crawl",
-  model_reasoning_effort: "medium",
-  model_reasoning_summary: "auto",
-  model_context_window: 250_000,
-  // When null/undefined, backend derives from context_window × 90% (Codex-compatible).
-  model_auto_compact_token_limit: undefined as number | undefined,
-  max_completion_tokens: 16_384,
-  max_turn_iterations: 1000,
-  session_ttl_secs: 3600,
-  request_timeout_secs: 600,
-  tool_output_token_limit: 10_000,
-  project_doc_max_bytes: 32_768,
-  background_terminal_max_timeout: 600_000,
-} as const;
-
-/** Derive the effective compact threshold (context_window × 90%). */
-export function getEffectiveCompactLimit(config: Partial<AgentConfig>): number {
-  if (config.model_auto_compact_token_limit != null) {
-    return config.model_auto_compact_token_limit;
-  }
-  const cw = config.model_context_window ?? DEFAULTS.model_context_window;
-  return Math.floor(cw * 0.9);
-}
-
-// Types
-export interface McpServerConfig {
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  cwd?: string;
-  url?: string;
-  bearer_token_env_var?: string;
-  enabled: boolean;
-  startup_timeout_sec?: number;
-  tool_timeout_sec?: number;
-}
-
 export interface HistoryConfig {
   persistence?: "save-all" | "none";
   max_bytes?: number;
-}
-
-export interface MemoriesConfig {
-  disable_on_external_context?: boolean;
-  generate_memories?: boolean;
-  use_memories?: boolean;
-  max_raw_memories_for_consolidation?: number;
-  max_unused_days?: number;
-  max_rollout_age_days?: number;
-  max_rollouts_per_startup?: number;
-  min_rollout_idle_hours?: number;
-  min_rate_limit_remaining_percent?: number;
-  extract_model?: string;
-  consolidation_model?: string;
-}
-
-export type MemoryScopeType = "global" | "user" | "project" | "session";
-export type MemoryKind =
-  | "fact"
-  | "preference"
-  | "rule"
-  | "skill"
-  | "task_context"
-  | "other";
-
-export interface MemoryScope {
-  type: MemoryScopeType;
-  value?: string;
-}
-
-export interface MemoryRecord {
-  id: string;
-  path: string;
-  content: string;
-}
-
-export interface MemoryStats {
-  memory_root: string;
-  memory_summary_bytes: number;
-  memory_md_bytes: number;
-  rollout_summary_count: number;
-  skill_count: number;
 }
 
 export interface AgentConfig {
@@ -98,7 +15,6 @@ export interface AgentConfig {
   runner?: string;
   model?: string;
   model_provider?: string;
-  model_providers: Record<string, Record<string, unknown>>;
   base_instructions?: string;
   developer_instructions?: string;
   user_instructions?: string;
@@ -107,28 +23,14 @@ export interface AgentConfig {
   model_reasoning_effort?: string;
   model_reasoning_summary?: string;
   model_context_window?: number;
-  model_auto_compact_token_limit?: number;
-  max_completion_tokens?: number;
-  mcp_servers: Record<string, McpServerConfig>;
   skills?: Record<string, unknown>;
   project_doc_max_bytes?: number;
-  max_turn_iterations?: number;
   session_ttl_secs?: number;
-  tool_output_token_limit?: number;
-  request_timeout_secs?: number;
   work_dir?: string;
   resolved_work_dir?: string;
   // History & Session (Codex-compatible)
   history?: HistoryConfig;
   ephemeral?: boolean;
-  // Memories subsystem (Codex-compatible)
-  memories?: MemoriesConfig;
-  // Background terminal
-  background_terminal_max_timeout?: number;
-  // Provider-level fields (resolved from active provider)
-  request_max_retries?: number;
-  stream_idle_timeout_ms?: number;
-  stream_max_retries?: number;
 }
 
 export interface SessionInfo {
@@ -153,16 +55,6 @@ export interface SessionMessage {
 
 export interface SessionDetail extends SessionInfo {
   messages: SessionMessage[];
-}
-
-export interface ProviderInfo {
-  id: string;
-  name: string;
-  base_url: string | null;
-  env_key: string | null;
-  request_max_retries?: number | null;
-  stream_idle_timeout_ms?: number | null;
-  stream_max_retries?: number | null;
 }
 
 export interface SkillInfo {

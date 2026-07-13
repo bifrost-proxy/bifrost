@@ -68,23 +68,6 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
   - 刷新 `view=active` 的 Web Agent Chat 页面时状态标签显示 Ready，不显示 Stop，不追加 `Agent is running...` 占位消息。
 - **执行记录（2026-06-16）**: PARTIAL — 执行 `cargo test -p bifrost-admin session_detail_without_active_status_reports_explicit_idle_state --lib` 通过，验证后端 detail idle 真源。执行 `pnpm test:ui --grep "active detail idle run_state"` 通过，新增 Playwright 用例覆盖 active detail `run_state:"idle"` + stale running history 的页面期望。执行 `pnpm test:unit AgentChatSection.timeline.test.ts` 在 Vitest worker 启动阶段失败，错误为 `ERR_REQUIRE_ESM`（`html-encoding-sniffer` require ESM `@exodus/bytes`），未进入新增断言，待本地 Vitest/jsdom 依赖环境修复后复跑。
 
-### TC-GQ-19: 隔离 Worker 引导消息 IPC 竞态不丢失（确认应答 + 重新入队）
-
-- **背景**: 隔离 worker 子进程下，引导消息经过两段异步跳转（父进程 `forward_pending_guides_to_worker` → worker stdin 的独立 `std::thread` 读取线程 `push_back`）。在 CPU 高竞争（CI 上 `BIFROST_E2E_SHELL_JOBS=4` 并发 4 个重脚本）时，`push_back` 可能晚于 worker 的 turn-end 单次非阻塞 drain，引导消息被静默丢弃，不触发第二次模型调用。表现为 `test_im_guide_queue_human_api.sh` 的 DRAIN 断言失败（"default IM inbound guide was not consumed by the active loop"）。
-- **根因**: worker 的 turn-end drain 是单次非阻塞检查，与跨 IPC 管道的 `push_back` 存在竞态；父进程原有的 post-turn 重新入队只检查父侧 `guide_channel`，但该引导已被 `mark_guides_handed_to_worker` 移入 `handed_off_guides`，无法被回收。
-- **修复**: 基于确认应答的重新入队。worker 记录实际消费的引导 `consumed_guide_messages`，通过 `AgentWorkerRunResult` 回传父进程；父进程用 `reconcile_handed_off_guides` 将 handed-off 集合与已消费集合对账，把"已交付但未消费"的引导重新 `push_queue`，由下一轮处理。
-- **操作步骤**:
-  ```bash
-  cargo test -p bifrost-admin im_gateway
-  cargo test -p bifrost-agent session
-  ```
-- **预期结果**:
-  - `reconcile_handed_off_guides` 三个单测通过：未消费引导被返回（`returns_unconsumed`）、全部消费返回空（`all_consumed`）、未交付返回空（`none_handed`）。
-  - `bifrost-admin` im_gateway 全量测试通过（447 passed, 0 failed）。
-  - `bifrost-agent` session 全量测试通过（130 passed, 0 failed），覆盖 turn-end / mid-turn 两处 `consumed_guide_messages` 记录。
-  - 真实并发复现：修复前同等 4-way 并发稳定复现 DRAIN 失败 2/24；修复后在干净端口下的多轮并发运行 0 次 DRAIN 失败。
-- **执行记录（2026-06-16）**: PASS — `cargo fmt --all -- --check` 通过；`cargo clippy -p bifrost-agent -p bifrost-admin --all-targets -- -D warnings` 0 warning；`cargo test -p bifrost-admin im_gateway` 447 passed / 0 failed；`cargo test -p bifrost-agent session` 130 passed / 0 failed。真实复现对照：修复前 4-way 并发稳定复现 DRAIN 丢失（保留的 mock 日志证明引导"丢失非延迟"，第二轮请求从未到达 mock）；修复后干净端口并发运行未再出现任何 DRAIN 失败（残留失败均为端口占用 `Errno 48` 的环境噪声，已与丢引导 bug 区分）。
-
 ## 清理步骤
 
 ```bash

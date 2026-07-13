@@ -128,13 +128,13 @@ pub enum GoalRuntimeEvent {
     MaybeContinueIfIdle,
     /// The task was aborted (error, user interrupt, etc.)
     TaskAborted { reason: GoalAbortReason },
-    /// An external mutation is about to happen (e.g. user /goal set). Flush accounting first.
+    /// An external runner is about to update the goal. Flush accounting first.
     ExternalMutationStarting,
-    /// External status override (e.g. /goal pause, /goal resume).
+    /// External status override from a runner or persisted session event.
     ExternalSet { status: GoalStatus },
     /// Goal was externally cleared.
     ExternalClear,
-    /// Thread was resumed (e.g. /resume). Restore interrupted goal.
+    /// Thread was resumed by an external runner. Restore interrupted goal.
     ThreadResumed,
 }
 
@@ -445,7 +445,7 @@ pub fn goal_runtime_apply(session: &mut AgentSession, event: GoalRuntimeEvent) -
             None
         }
         GoalRuntimeEvent::ExternalSet { status } => {
-            // Apply external status; this is used by /goal pause|resume.
+            // Apply status restored or reported by an external runner.
             let now = current_time_secs();
             let total_tokens_used = session.total_tokens_used.unwrap_or(0);
             if let Some(goal) = session.current_goal.as_mut() {

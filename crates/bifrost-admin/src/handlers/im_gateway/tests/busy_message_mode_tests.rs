@@ -57,7 +57,7 @@ fn busy_default_mode_guides_external_runners_except_chatgpt_web() {
 }
 
 #[test]
-fn apply_busy_message_default_guides_builtin_messages_without_queueing() {
+fn apply_busy_message_default_guides_messages_without_queueing() {
     let manager = SessionQueueManager::new();
 
     let result = apply_busy_message_default(

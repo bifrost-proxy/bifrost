@@ -58,12 +58,12 @@ Bifrost 需要在 Parallels Windows VM 与 GitHub Actions `windows-latest` runne
 ### 必须真实验证
 
 - Windows VM 本地跑 `cargo test --workspace --all-features -j1`，输出全绿并记录到 `human_tests/ci-windows-unit-tests.md`。
-- 受影响 targeted tests 在 VM 内单独复跑（`bifrost-agent exec_command`、`bifrost-admin` IM Gateway、`skills` watcher、`bifrost-core` launchd parser、`bifrost-device` iOS/Android helper 编译）。
+- 受影响 targeted tests 在 VM 内单独复跑（`bifrost-admin` IM Gateway、`skills` watcher、`bifrost-core` launchd parser、`bifrost-device` iOS/Android helper 编译）。
 - `cargo clippy --workspace --all-targets --all-features -j1 -- -D warnings` 在 Windows 上通过。
 - GitHub Actions `Windows Unit Tests (x86_64)` 在 CI 上：
   - 主体测试全绿。
   - `Post Run Swatinem/rust-cache@v2` 不再出现因保存 cache 失败让 job 红灯的情况。
-- E2E / 集成兜底：`cargo test -p bifrost-agent --test p1_tools_e2e` 与 `cargo test -p bifrost-tests --test https_proxy_test` 在 Windows VM 内通过。
+- E2E / 集成兜底：`cargo test -p bifrost-tests --test https_proxy_test` 在 Windows VM 内通过。
 
 ## 产品语义
 
@@ -71,7 +71,6 @@ Bifrost 需要在 Parallels Windows VM 与 GitHub Actions `windows-latest` runne
 
 - Skills registry watcher 在 Windows 上删除路径时，缓存立即清理，与 macOS/Linux 一致；用户不会看到"已删除的 skill 仍出现在列表"的过时状态。
 - HTTPS H2 → HTTP/1.1 fallback 后，客户端拿到的响应体完整且 header 规范；不会因 body decode 错误影响 Chat/IM 场景。
-- Agent `exec_command` 在 Windows 上允许长命令通过 poll 拿输出，交互式 stdin 用例移到非硬性断言，不影响非 Windows 用户体验。
 
 ## 技术细节
 
@@ -176,7 +175,6 @@ test-windows-tray:
 
 覆盖修复涉及的所有 crate：
 
-- `bifrost-agent`：`exec_command` Windows / Unix 分支覆盖，P1 tools E2E `--test p1_tools_e2e`。
 - `bifrost-admin`：IM Gateway external CLI Windows `taskkill` PID 消失分支。
 - `bifrost-tests`：`https_proxy_test` H2 body reset fallback 用例。
 - `skills`：registry watcher raw/canonical remove 事件。
@@ -186,7 +184,6 @@ test-windows-tray:
 
 ### 集成 & E2E 测试
 
-- `cargo test -p bifrost-agent --test p1_tools_e2e` 在 Windows VM 通过。
 - `cargo test -p bifrost-tests --test https_proxy_test` 在 Windows VM 通过。
 - CI `test-windows-tray` job 在 GitHub Actions 通过。
 - Workspace 兜底：至少一次完整 `cargo test --workspace --all-features -j1`（本地 VM）。

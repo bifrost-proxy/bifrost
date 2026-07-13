@@ -1321,7 +1321,7 @@ pub(super) fn restore_session_from_history_path(
     session.history_version = session.history_version.saturating_add(1);
     session.last_response_tokens = None;
     session.last_response_history_len = None;
-    session.memory_cleared = false;
+    session.history_cleared = false;
     session.title = summary.title;
     if session.work_dir.is_none() {
         session.work_dir = summary.work_dir;
@@ -1332,11 +1332,9 @@ pub(super) fn restore_session_from_history_path(
     match bifrost_agent::persistence::load_session_runtime_state(&path) {
         Ok(runtime_state) => {
             session.current_goal = runtime_state.current_goal;
-            session.current_plan = runtime_state.current_plan;
             session.total_tokens_used = runtime_state.total_tokens_used;
             session.restore_token_snapshot(runtime_state.last_response_tokens);
             session.compaction_count = runtime_state.compaction_count;
-            session.resolved_base_instructions = runtime_state.base_instructions;
             bifrost_agent::tools::goal::goal_runtime_apply(
                 session,
                 bifrost_agent::tools::goal::GoalRuntimeEvent::ThreadResumed,

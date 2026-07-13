@@ -5,4 +5,3 @@
 pub use bifrost_agent::AgentConfig as ImAgentConfig;
 pub use bifrost_agent::AgentConfigStore as ImAgentConfigStore;
 pub use bifrost_agent::AgentSessionManager as ImAgentSessionManager;
-pub use bifrost_agent::ModelProviderConfig as ImModelProviderConfig;

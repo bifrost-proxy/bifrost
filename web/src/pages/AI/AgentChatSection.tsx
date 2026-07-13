@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type CSSProperties, type KeyboardEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Button, Card, Empty, Grid, Input, Modal, Segmented, Select, Space, Tag, Typography, message as antdMessage, theme } from "antd";
-import { BulbOutlined, DeleteOutlined, DownOutlined, FolderOpenOutlined, BorderOutlined, LeftOutlined, RobotOutlined, SendOutlined, SettingOutlined } from "@ant-design/icons";
+import { DeleteOutlined, DownOutlined, FolderOpenOutlined, BorderOutlined, LeftOutlined, RobotOutlined, SendOutlined, SettingOutlined } from "@ant-design/icons";
 import { apiFetch } from "../../api/apiFetch";
 import { buildApiUrl } from "../../runtime";
 import { getClientId } from "../../services/clientId";
@@ -73,7 +73,6 @@ const { TextArea } = Input;
 const { useBreakpoint } = Grid;
 const HISTORY_EVENT_PAGE_SIZE = 300;
 const THREAD_RAIL_COLLAPSED_STORAGE_KEY = "bifrost.agentChat.threadRailCollapsed";
-type AgentCollaborationMode = "plan";
 
 type AgentSessionEventPayload = {
   eventType?: string;
@@ -115,24 +114,6 @@ type AgentChatSectionProps = {
   onControlsReady?: (handle: AgentChatSectionHandle) => void;
 };
 
-function parseAgentPlanSlash(content: string): {
-  message: string;
-  collaborationMode?: AgentCollaborationMode;
-} {
-  const trimmed = content.trimStart();
-  if (!trimmed.startsWith("/plan")) {
-    return { message: content };
-  }
-  const rest = trimmed.slice("/plan".length);
-  if (rest.length > 0 && !/\s/.test(rest[0])) {
-    return { message: content };
-  }
-  return {
-    message: rest.trimStart(),
-    collaborationMode: "plan",
-  };
-}
-
 function explicitRunnerIdentity(
   status: RunTelemetry["status"] | undefined,
   thread: AgentThreadSummary | undefined,
@@ -150,24 +131,6 @@ function explicitRunnerIdentity(
     .filter((value): value is string => Boolean(value))
     .join(" ")
     .toLowerCase();
-}
-
-function supportsBuiltInAgentCommands({
-  runnerId,
-  runnerOptions,
-  selectedThread,
-  status,
-}: {
-  runnerId: string;
-  runnerOptions: RunnerOption[];
-  selectedThread?: AgentThreadSummary;
-  status?: RunTelemetry["status"];
-}) {
-  void runnerId;
-  void runnerOptions;
-  void selectedThread;
-  void status;
-  return false;
 }
 
 export function supportsRunningGuide({
@@ -341,8 +304,6 @@ export default function AgentChatSection({
   const [runnerOptions, setRunnerOptions] = useState<RunnerOption[]>([
     { label: "Codex Runner", value: "Codex", adapter: "codex" },
   ]);
-  const [composerMode, setComposerMode] = useState<AgentCollaborationMode | undefined>();
-  const [activeCollaborationMode, setActiveCollaborationMode] = useState<AgentCollaborationMode | undefined>();
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const slashActiveIndexRef = useRef(0);
   const [defaultWorkDir, setDefaultWorkDir] = useState("");
@@ -683,12 +644,6 @@ export default function AgentChatSection({
   });
   const currentStateTag = formatCurrentStateTag(telemetry, selectedThread, displayRunning);
   const showLoadOlder = historyHasOlder;
-  const builtInAgentCommandsSupported = supportsBuiltInAgentCommands({
-    runnerId,
-    runnerOptions,
-    selectedThread,
-    status: telemetry.status,
-  });
   const currentRunnerAdapter = selectedRunnerAdapter(runnerOptions, runnerId);
   const modelCommandsSupported = supportsRunnerModelSlashCommand(currentRunnerAdapter);
   const guideSupported = supportsRunningGuide({
@@ -704,21 +659,12 @@ export default function AgentChatSection({
     slashRunnerOptions,
     showSlashRunnerPanel,
   } = useSlashRunnerSelection({
-    enableCommands: builtInAgentCommandsSupported,
     enableModelCommands: modelCommandsSupported,
     draft,
     running,
     supplementSubmitting,
     runnerOptions,
   });
-
-  useEffect(() => {
-    if (builtInAgentCommandsSupported) {
-      return;
-    }
-    setComposerMode(undefined);
-    setActiveCollaborationMode(undefined);
-  }, [builtInAgentCommandsSupported]);
 
   const refreshThreads = useCallback(async () => {
     try {
@@ -1413,8 +1359,6 @@ export default function AgentChatSection({
     if (isUninitializedDraftSession) {
       setWorkDir(selectedWorkDir);
       setRunnerId(newChatRunnerId);
-      setComposerMode(undefined);
-      setActiveCollaborationMode(undefined);
       setNewChatOpen(false);
       return;
     }
@@ -1425,8 +1369,6 @@ export default function AgentChatSection({
     setMessages([]);
     setDraft("");
     setSlashRunner(undefined);
-    setComposerMode(undefined);
-    setActiveCollaborationMode(undefined);
     setTelemetry(EMPTY_TELEMETRY);
     setQueuedInputs([]);
     setRunning(false);
@@ -1477,8 +1419,6 @@ export default function AgentChatSection({
     setRunning(false);
     setSupplementSubmitting(false);
     setSlashRunner(undefined);
-    setComposerMode(undefined);
-    setActiveCollaborationMode(undefined);
     setWorkDir(defaultWorkDir);
     setRunnerId(defaultRunnerId);
     setNewChatRunnerId(defaultRunnerId);
@@ -1514,8 +1454,6 @@ export default function AgentChatSection({
       setDraft("");
       setSupplementSubmitting(false);
       setTelemetry(telemetryFromThread(thread));
-      setComposerMode(undefined);
-      setActiveCollaborationMode(undefined);
       setQueuedInputs(
         queueItemsFromUnknown(thread.queueItems ?? thread.queue_items) ?? [],
       );
@@ -1588,8 +1526,6 @@ export default function AgentChatSection({
           setQueuedInputs([]);
           setDraft("");
           setSlashRunner(undefined);
-          setComposerMode(undefined);
-          setActiveCollaborationMode(undefined);
           pendingInstantScrollRef.current = true;
           setSearchParams(
             (prev) => {
@@ -1825,7 +1761,6 @@ export default function AgentChatSection({
     contentOverride?: string;
     imagesOverride?: PendingChatImage[];
     runnerIdOverride?: string;
-    silentCommand?: boolean;
   }) => {
     const rawContent = (options?.contentOverride ?? draft).trim();
     const imagesForSend = options?.imagesOverride ?? (options?.contentOverride ? [] : pendingImages);
@@ -1836,33 +1771,13 @@ export default function AgentChatSection({
       await handleRunningInput(rawContent);
       return;
     }
-    const parsedPlanSlash = builtInAgentCommandsSupported
-      ? parseAgentPlanSlash(rawContent)
-      : { message: rawContent };
-    const collaborationMode =
-      builtInAgentCommandsSupported
-        ? parsedPlanSlash.collaborationMode || composerMode
-        : undefined;
-    const content = parsedPlanSlash.message.trim();
-    const compactCommand = builtInAgentCommandsSupported && rawContent === "/compact";
+    const content = rawContent;
     const telemetryRunnerId = telemetry.status?.runner_id;
     const activeRunnerId = options?.runnerIdOverride || telemetryRunnerId || runnerId;
     const activeRunnerAdapter = selectedRunnerAdapter(runnerOptions, activeRunnerId);
     const runnerModelCommand = isRunnerModelSlashCommand(rawContent, activeRunnerAdapter);
-    const controlCommand =
-      compactCommand ||
-      runnerModelCommand ||
-      (builtInAgentCommandsSupported && options?.silentCommand === true);
-    const hiddenControlCommand =
-      compactCommand ||
-      (builtInAgentCommandsSupported &&
-        options?.silentCommand === true &&
-        !runnerModelCommand);
+    const controlCommand = runnerModelCommand;
     if (!content && imagesForSend.length === 0) {
-      if (collaborationMode === "plan" && imagesForSend.length === 0) {
-        antdMessage.warning("Type a task to start Plan Mode.");
-        setComposerMode("plan");
-      }
       return;
     }
     if (slashRunner && !running && !controlCommand) {
@@ -1883,40 +1798,18 @@ export default function AgentChatSection({
     const assistantMessage: ChatMessage = {
       id: assistantId,
       role: runnerModelCommand ? "system" : "assistant",
-      content: controlCommand ? "" : collaborationMode === "plan" ? "Planning..." : "Agent is running...",
+      content: controlCommand ? "" : "Agent is running...",
       timestamp: Date.now() / 1000,
       meta: runnerModelCommand ? "System" : "Runner",
-      processSteps: compactCommand
-        ? [
-            {
-              type: "compaction",
-              summary: "上下文正在自动压缩",
-              status: "running",
-            },
-          ]
-        : collaborationMode === "plan"
-          ? [
-              {
-                type: "status",
-                summary: "Plan Mode: drafting an implementation plan",
-                status: "running",
-              },
-            ]
-          : undefined,
     };
     pendingInstantScrollRef.current = true;
     setMessages((prev) => {
       if (runnerModelCommand) {
         return prev;
       }
-      if (hiddenControlCommand) {
-        return [...prev, assistantMessage];
-      }
       return [...prev, userMessage, assistantMessage];
     });
     setDraft("");
-    setComposerMode(undefined);
-    setActiveCollaborationMode(collaborationMode);
     setPendingImages([]);
     setRunning(true);
     setTelemetry((prev) => ({
@@ -1934,9 +1827,8 @@ export default function AgentChatSection({
     }));
     // Ensure the current session is visible in the threads list with first message as fallback title
     setThreads((prev) => {
-      const fallbackTitle = hiddenControlCommand
-        ? currentSessionFallbackTitle || (compactCommand ? "Context compaction" : "Runner command")
-        : userVisibleContent.length > 40 ? `${userVisibleContent.slice(0, 40)}…` : userVisibleContent;
+      const fallbackTitle =
+        userVisibleContent.length > 40 ? `${userVisibleContent.slice(0, 40)}…` : userVisibleContent;
       return dedupeThreads([
         {
           session_key: sessionKey,
@@ -1960,7 +1852,7 @@ export default function AgentChatSection({
     let assistantSegmentId = assistantId;
     let assistantSegmentIndex = 0;
     let assistantSegmentHasText = false;
-    let assistantSegmentHasSteps = compactCommand;
+    let assistantSegmentHasSteps = false;
     let assistantSegmentHasProposedPlan = false;
     try {
 
@@ -2010,7 +1902,7 @@ export default function AgentChatSection({
                     ...message,
                     content:
                       !segmentHadText &&
-                      (message.content === "Agent is running..." || message.content === "Planning...")
+                      message.content === "Agent is running..."
                         ? ""
                         : message.content,
                     processSteps,
@@ -2020,32 +1912,6 @@ export default function AgentChatSection({
           ),
         );
         assistantSegmentHasSteps = true;
-      };
-
-      const finishSilentCommandCompaction = (
-        status: "success" | "failed",
-        summary: string,
-      ) => {
-        setMessages((prev) =>
-          prev.map((message) => {
-            if (message.id !== assistantId) {
-              return message;
-            }
-            const processSteps = [...(message.processSteps || [])];
-            const runningCompactionIndex = processSteps.findIndex(
-              (item) => item.type === "compaction" && item.status === "running",
-            );
-            if (runningCompactionIndex < 0) {
-              return message;
-            }
-            processSteps[runningCompactionIndex] = {
-              ...processSteps[runningCompactionIndex],
-              status,
-              summary,
-            };
-            return { ...message, content: "", processSteps };
-          }),
-        );
       };
 
       const updateRunningToolStep = (
@@ -2269,21 +2135,10 @@ export default function AgentChatSection({
         workDir: workDir || undefined,
         runnerId: activeRunnerId,
         runnerAdapter: activeRunnerAdapter,
-        collaborationMode,
         signal: abortController.signal,
         onEvent: (event) => {
           if (selectedSessionKeyRef.current !== sendSessionKey) return;
           setTelemetry((prev) => reduceTelemetry(prev, event));
-          if (compactCommand) {
-            const step = eventToProcessStep(event);
-            if (step?.type === "compaction") {
-              appendProcessStep(step);
-            }
-            return;
-          }
-          if (hiddenControlCommand) {
-            return;
-          }
           if (event.eventType === "proposed_plan" && typeof event.content === "string") {
             appendProposedPlan(event.content);
             return;
@@ -2343,10 +2198,6 @@ export default function AgentChatSection({
         },
         onFinal: (response) => {
           if (selectedSessionKeyRef.current !== sendSessionKey) return;
-          if (compactCommand) {
-            finishSilentCommandCompaction("success", "上下文已自动压缩");
-            return;
-          }
           if (runnerModelCommand) {
             appendSystemDisplayMessage(
               runnerModelSlashSystemDisplayContent(rawContent, response),
@@ -2374,24 +2225,7 @@ export default function AgentChatSection({
       setMessages((prev) =>
         prev.map((message) =>
           message.id === assistantSegmentId
-            ? compactCommand
-              ? {
-                  ...message,
-                  content: "",
-                  processSteps: [
-                    ...(message.processSteps || []).filter(
-                      (step) =>
-                        !(step.type === "compaction" && step.status === "running"),
-                    ),
-                    {
-                      type: "compaction",
-                      summary: "上下文压缩失败",
-                      status: "failed",
-                      result: text,
-                    },
-                  ],
-                }
-              : {
+            ? {
                   ...message,
                   content: text,
                   processSteps: [
@@ -2425,7 +2259,6 @@ export default function AgentChatSection({
     } finally {
       if (selectedSessionKeyRef.current === sendSessionKey) {
         setRunning(false);
-        setActiveCollaborationMode(undefined);
       }
       if (streamAbortRef.current === abortController) {
         streamAbortRef.current = null;
@@ -2488,19 +2321,13 @@ export default function AgentChatSection({
         input?.setSelectionRange(cursor, cursor);
       }, 0);
     };
-    if (option.value === "plan") {
-      setComposerMode("plan");
-      setDraft("");
-      focusComposerAtEnd("");
-      return;
-    }
     if (option.action === "insert") {
       const inserted = option.insertText || `${option.command} `;
       setDraft(inserted);
       focusComposerAtEnd(inserted);
       return;
     }
-    void handleSend({ contentOverride: option.command, silentCommand: true });
+    void handleSend({ contentOverride: option.command });
   };
 
   const updateSlashActiveIndex = useCallback((nextIndex: number | ((index: number) => number)) => {
@@ -2546,7 +2373,6 @@ export default function AgentChatSection({
       return false;
     }
     setSlashRunner(runner);
-    setComposerMode(undefined);
     setDraft("");
     return true;
   }, [
@@ -2675,11 +2501,6 @@ export default function AgentChatSection({
                 >
                   {currentStateTag}
                 </Tag>
-                {activeCollaborationMode === "plan" ? (
-                  <Tag color="gold" data-testid="agent-chat-active-plan-mode">
-                    Plan Mode
-                  </Tag>
-                ) : null}
               </Space>
             </div>
           }
@@ -2857,7 +2678,6 @@ export default function AgentChatSection({
                   }}
                   onSelect={(option) => {
                     setSlashRunner(option);
-                    setComposerMode(undefined);
                     setDraft("");
                   }}
                 />
@@ -2890,14 +2710,10 @@ export default function AgentChatSection({
                   }}
                   onPaste={handlePasteImages}
                   onKeyDown={handleComposerKeyDown}
-                  placeholder={
-                    composerMode === "plan"
-                      ? "Describe what should be planned..."
-                      : "Describe a task for the Agent..."
-                  }
+                  placeholder="Describe a task for the Agent..."
                   autoSize={{ minRows: 2, maxRows: 7 }}
                   style={{
-                    padding: slashRunner || composerMode === "plan"
+                    padding: slashRunner
                       ? "42px 56px 30px 14px"
                       : "8px 56px 30px 14px",
                     border: "none",
@@ -2907,25 +2723,8 @@ export default function AgentChatSection({
                     resize: "none",
                   }}
                 />
-                {composerMode === "plan" ? (
-                  <Tag
-                    color="gold"
-                    data-testid="agent-chat-plan-mode-pill"
-                    style={styles.planModePill}
-                    closable
-                    onClose={(event) => {
-                      event.preventDefault();
-                      setComposerMode(undefined);
-                    }}
-                  >
-                    <BulbOutlined style={{ marginRight: 4 }} />
-                    Plan Mode
-                  </Tag>
-                ) : null}
                 <Text style={styles.inputHint} data-testid="agent-chat-input-hint">
-                  {composerMode === "plan"
-                    ? "Planning only. Shift + Enter for a new line"
-                    : "Shift + Enter for a new line"}
+                  Shift + Enter for a new line
                 </Text>
                 <Button
                   shape="circle"

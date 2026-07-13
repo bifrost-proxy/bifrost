@@ -24,11 +24,6 @@ BIFROST_DATA_DIR="$BIFROST_DATA_DIR" cargo run --bin bifrost -- start -p 8800 --
 - **操作步骤**: `cargo test -p skills`
 - **预期结果**: 通过所有 `skills` 单元测试，覆盖 manifest serde、validator、checksum、commit 归档、registry slash、executor inline、packager import/export 和 authoring 状态机。
 
-### TC-SC-02: Agent slash router 与 skill_creator meta-tool 回归
-
-- **操作步骤**: `cargo test -p bifrost-agent slash:: tools::skill_creator:: -- --nocapture`
-- **预期结果**: `/remember` 等内置命令由 router 分发，skill slash command 可解析到 skill，`skill_creator.start` 返回 `session_id`。
-
 ### TC-SC-03: Admin Skill CRUD 回归
 
 - **操作步骤**: `cargo test -p bifrost-admin agent_skills -- --nocapture`
@@ -47,7 +42,7 @@ BIFROST_DATA_DIR="$BIFROST_DATA_DIR" cargo run --bin bifrost -- start -p 8800 --
   pnpm run lint
   pnpm run build
   ```
-- **预期结果**: ESLint 零 error；TypeScript build 通过；Settings -> Agent 中 Skills 面板挂在 Memory Records 后、MCP Servers 前。
+- **预期结果**: ESLint 零 error；TypeScript build 通过；Settings -> Agent 中 Skills 面板作为独立 section 可访问。
 
 ### TC-SC-06: WebUI Skills 面板无 New Skill 按钮、无 Edit 按钮
 

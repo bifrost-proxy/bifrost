@@ -51,12 +51,12 @@ IM Gateway 不承担 Runner loop 本身；外部 Runner 相关内容在 `im-gate
 Gateway 只负责“把 IM 消息接进来 / 把消息发出去 / 把定时任务派发出去”。业务侧的 Agent loop、Chat Gateway、进度卡、Markdown 转换均由上层模块消费 gateway 提供的 provider / target / event 抽象。这样：
 
 - 新增 Feishu 或 Weixin 之外的 provider 只需要实现 `ImProvider` trait，注册到 `ImConnectionManager`，声明 `ImSendCapability`，其他模块不需要感知。
-- Agent、Chat Gateway、Schedule 之间没有互相直连；他们全部通过 gateway 的 `send_msg`、outbound message log 和 target/route/schedule 抽象协作。
+- 外部 Runner、Chat Gateway、Schedule 之间没有互相直连；它们通过 gateway 的 outbound message log 和 target/route/schedule 抽象协作。
 - 停用 gateway 或某个 provider 时，其他模块只失去发送能力，不会崩溃。
 
 ### Provider 能力驱动 UI 与工具 schema
 
-Provider 声明 `ImSendCapability`（支持的消息类型、是否支持流式卡片、是否支持撤回、是否支持图片附件等）。Agent 的 `send_msg` 工具、进度卡渲染、Add Provider 表单、Schedule 通知等入口都按 capability 动态裁剪：飞书暴露 text/markdown/interactive card，微信只暴露当前支持的类型；不支持的字段直接从 schema/表单中隐藏，不出现在 tool description。
+Provider 声明 `ImSendCapability`（支持的消息类型、是否支持流式卡片、是否支持撤回、是否支持图片附件等）。外部 Runner 进度卡渲染、Add Provider 表单、Schedule 通知等入口都按 capability 动态裁剪：飞书暴露 text/markdown/interactive card，微信只暴露当前支持的类型；不支持的字段直接从 schema/表单中隐藏。
 
 ### 权限先审再执行
 
@@ -314,7 +314,7 @@ Provider 选择：显式 `--provider` 优先；单 enabled provider 自动选中
 - IM `/help` / `/cwd` / `/runner` / `/q` / `/rq` / `/g` 快路径。
 - Provider 删除/禁用立即停止长连接；auto-connect / supervisor 尊重 `enabled && event_connection_enabled && secret_ref`。
 - Provider/IM `/status` 展示 `resolved_work_dir`；重启上线通知补 Runner + 最近轮次。
-- Outbound message log `trigger` 区分 `agent_tool:send_msg` / `schedule:<id>` / `manual_run:<id>` / `route:<id>` / `remote:<caller>`。
+- Outbound message log `trigger` 区分 `schedule:<id>` / `manual_run:<id>` / `route:<id>` / `remote:<caller>`。
 
 ## 测试方案
 

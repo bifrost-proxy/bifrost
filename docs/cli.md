@@ -807,8 +807,6 @@ Runner 选择规则：交互式终端中未传 `--runner` 时会展示启用 Run
 
 IM 通道建立后，Bifrost 会先推送上线通知和可用命令帮助。所有外部 Runner 都显示 `/help`、`/status`、`/cwd`、`/runner`、`/q`、`/rq`、`/stop` 等 IM 通道命令；Codex / Traex / Claude Code 等 Runner 只在适配器支持时显示 `/models`、`/model`、`/efforts`、`/effort`。
 
-Agent 配置支持 `default_message_channel`，用于给 turn 级 `send_msg` 工具和 Agent 创建的 schedule 提供默认 IM 发送目标。手动创建 schedule 时仍应显式绑定目标（例如 `--target oncall`，或 API 的 `message_channel`），避免任务执行时把通知发到最近一次对话；通过 IM 消息触发的 Agent 创建 schedule 时会自动继承当前来源通道，通过 `/agent/chat` 创建时会回退到 `default_message_channel`。
-
 `bifrost im schedule add/update` 创建 Agent schedule 时可用 `--agent-runner-id` 选择 Runner，并通过 `--agent-model`、`--agent-profile`、`--agent-profile-v2`、`--agent-sandbox`、`--agent-reasoning-effort`、`--agent-reasoning-summary`、`--agent-approval-policy`、`--agent-danger-full-access`、`--agent-bypass-hook-trust`、`--agent-skip-git-repo-check`、`--agent-ignore-user-config`、`--agent-ignore-rules`、`--agent-add-dir`、`--agent-config`、`--agent-enable`、`--agent-disable` 等参数写入 `agent.adapter_config`。这些 schedule 级参数会在运行时覆盖 Runner 默认 Codex adapter 配置；历史 `--agent-search` 仅作为兼容入口映射为 `--enable web_search`，不再生成当前 Codex CLI 不支持的 `--search`。
 
 ### 本地语音输入（ai voice）

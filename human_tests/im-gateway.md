@@ -574,25 +574,6 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - Run history 中能查到该手动执行记录，并展示当次输入和输出。
 - **执行记录（2026-05-12）**: PASS — 使用临时数据目录 `.bifrost-test-im-schedules`、端口 `18892`、`--no-system-proxy` 启动源码版 Bifrost；通过 API 创建 `schedule-provider` 后，`POST /schedules` 创建 `script-schedule` 返回完整 schedule JSON，包含 `message_channel`、`task_type=script`、`script.script_text=echo script-ok` 与 `next_run_at`；创建 `agent-schedule` 返回 `task_type=agent`、`agent.prompt=Summarize schedule state` 与 `next_run_at`；`GET /schedules` 同时列出两类任务；`POST /schedules/script-schedule/run` 返回 `status=Success`、`exit_code=0`、`input_preview` 与 `stdout_preview=script-ok\n`；`GET /schedules/script-schedule/runs` 返回对应 `manual_run` 记录。
 
-### TC-IMG-44: Agent 内置 schedule 工具支持查询、新增、更新、删除
-
-- **前置条件**:
-  - 复用 TC-IMG-43 的临时 Bifrost 服务。
-  - 通过 `/agent/chat` 使用测试模型或 mock 模型，使模型依次调用 `schedule_create`、`schedule_list`、`schedule_update`、`schedule_delete` 工具。
-- **操作步骤**:
-  1. 发送 Agent 请求，要求创建一个 id 为 `agent-tool-schedule` 的 agent schedule，preset prompt 为 `tool prompt`。
-  2. 发送 Agent 请求，要求查询定时任务列表并确认包含 `agent-tool-schedule`。
-  3. 发送 Agent 请求，要求把该 schedule 的 prompt 更新为 `updated tool prompt` 并禁用任务。
-  4. 发送 Agent 请求，要求删除 `agent-tool-schedule`。
-  5. 通过 schedules API 直接读取列表做二次确认。
-- **预期结果**:
-  - Agent 可见工具列表包含 `schedule_list`、`schedule_create`、`schedule_update`、`schedule_delete`。
-  - `schedule_create` 成功后 API 列表出现 `agent-tool-schedule`。
-  - `schedule_update` 后 `enabled=false` 且 `agent.prompt=updated tool prompt`。
-  - `schedule_delete` 后 API 列表不再出现该 schedule。
-  - 工具失败时返回结构化错误，不会静默吞掉 store 错误。
-- **执行记录（2026-05-12）**: PASS — 启动临时 mock Chat Completions 服务并通过 `/agent` PATCH 配置 `model_provider=mock-schedule-tools`；调用真实 `/agent/chat`，mock model 依次返回 `schedule_create`、`schedule_list`、`schedule_update`、`schedule_delete` tool calls；响应 `tool_calls` 中四个工具均 `success=true`，create 结果包含 `agent-tool-schedule` 与 `agent.prompt=tool prompt`，list 结果包含该任务，update 结果包含 `enabled=false` 与 `agent.prompt=updated tool prompt`，delete 结果为 `{"deleted":"agent-tool-schedule"}`；最后通过 schedules API 验证列表只剩 `script-schedule` 与 `agent-schedule`，不再包含 `agent-tool-schedule`。
-
 ### TC-IMG-45: WebUI Schedules 面板可手动新增 Script/Agent 任务且支持明暗主题
 
 - **前置条件**:
@@ -654,26 +635,6 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - 亮色和暗色主题下弹窗、表格滚动区域和卡片字段均可读。
 - **执行记录（2026-05-12）**: BLOCKED — 代码实现后执行 `cargo check -p bifrost-admin -p bifrost-cli` 通过，构建过程包含 WebUI `tsc -b && vite build` 并成功生成 gzip assets；尝试用 Codex in-app Browser 验证用户当前 `http://localhost:3000` 页面时被浏览器安全策略拒绝访问该 host；随后按项目要求尝试启动临时源码版 Bifrost（`BIFROST_DATA_DIR=./.bifrost-test-layout cargo run --bin bifrost -- start -H 127.0.0.1 -p 18893 --unsafe-ssl --no-system-proxy --skip-cert-check`）用于 `127.0.0.1` 浏览器验证，但当前沙箱禁止绑定端口，返回 `Operation not permitted`。本用例需要在用户当前浏览器手动刷新后完成视觉确认。
 
-### TC-IMG-48: Agent Chat 模式通过内置工具创建和更新两类定时任务
-
-- **前置条件**:
-  - 使用临时数据目录启动源码版 Bifrost，端口不得使用 9900，必须禁用系统代理：
-    ```bash
-    BIFROST_DATA_DIR=./.bifrost-test-chat-schedules cargo run --bin bifrost -- start -H 127.0.0.1 -p 18892 --unsafe-ssl --no-system-proxy --skip-cert-check
-    ```
-  - 启动一个 mock Chat Completions 服务，并通过 `PATCH /_bifrost/api/im-gateway/agent` 将 Agent 配置到该 mock 模型。
-- **操作步骤**:
-  1. 调用 `POST /_bifrost/api/im-gateway/agent/chat`，要求 Agent 使用 schedule 工具创建一个 script 定时任务和一个 agent 定时任务。
-  2. mock 模型依次返回 `schedule_create` script、`schedule_create` agent、`schedule_update` script、`schedule_list` 四个 tool call。
-  3. 调用 `GET /_bifrost/api/im-gateway/schedules` 查看最终任务列表。
-- **预期结果**:
-  - `/agent/chat` 返回 `success=true`，且 `tool_calls` 中四个 schedule 工具调用都成功。
-  - Script 定时任务必须包含 `message_channel`；后端对缺少 `message_channel` 的 script schedule 返回结构化错误。
-  - Script 定时任务被创建后可通过 `schedule_update` 修改名称、启用状态、interval、脚本文本和 timeout。
-  - Agent 定时任务被创建后保留 `task_type=agent` 与 preset prompt。
-  - `schedule_list` 和 schedules API 均能同时看到 script 与 agent 两类任务。
-- **执行记录（2026-05-13）**: PASS — 使用 mock Chat Completions 服务端口 `28992` 与源码版 Bifrost 端口 `18892` 完成真实 `/agent/chat` 链路验证；第一次请求故意让 script schedule 缺少 `message_channel`，工具返回 `schedule requires message_channel`，确认校验生效；清理后第二次请求让 mock model 依次调用 `schedule_create` script、`schedule_create` agent、`schedule_update` script、`schedule_list`，四个 `tool_calls` 均 `success=true`；最终 `GET /_bifrost/api/im-gateway/schedules` 显示 `chat-script-schedule` 已更新为 `Chat Script Schedule Updated`、`enabled=false`、`every_ms=180000`、`script.script_text=echo chat-script-v2`、`timeout_ms=60000`，同时 `chat-agent-schedule` 保留 `task_type=agent`、`agent.prompt=Run the chat-created agent schedule`、`every_ms=120000`、`timeout_ms=45000`。
-
 ### TC-IMG-49: Handler 模块化拆分后 IM Gateway 功能回归
 
 - **前置条件**:
@@ -683,15 +644,13 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   1. 执行 `cargo check -p bifrost-admin`，确认真实子模块拆分后可编译，且 WebUI build script 仍能完成。
   2. 执行 `cargo test -p bifrost-admin im_gateway::tests -- --nocapture`，覆盖 Provider 配置、消息发送、Agent reply、事件循环、图片输入和状态 helper。
   3. 启动源码版 Bifrost：`BIFROST_DATA_DIR=./.bifrost-e2e-im-regression cargo run --bin bifrost -- start -H 127.0.0.1 -p 18894 --unsafe-ssl --no-system-proxy --skip-cert-check`。
-  4. 通过管理端 API 验证 `/providers`、`/targets`、`/routes`、`/schedules`、`/history/task-runs`、`/agent` 和 `/agent/chat` 路由仍可访问。
-  5. 将 Agent 配置到 mock Chat Completions 服务，通过 `/agent/chat` 触发 schedule tools 创建 Script/Agent 两类任务、更新 Script 配置并读取 schedules API。
+  4. 通过管理端 API 验证 `/providers`、`/targets`、`/routes`、`/schedules`、`/history/task-runs` 和 `/agent` 路由仍可访问。
 - **预期结果**:
   - `handlers/im_gateway.rs` 只保留路由分发和子模块声明，单文件低于 1500 行；每个子模块文件也低于 1500 行。
   - 后端编译和 handler 单元/集成测试全部通过。
   - 真实启动的 Bifrost 管理端 API ready，核心 IM Gateway 路由不返回 404/500。
-  - `/agent/chat` 真实链路仍能创建 `task_type=script` 和 `task_type=agent` 两类定时任务，并能更新 Script 任务配置。
-  - schedules API 最终能同时返回更新后的 Script schedule 与 Agent schedule。
-- **执行记录（2026-05-13）**: PASS — 已将 `im_gateway.rs` 从 `include!` 机械拆分改为真实 `mod` 子模块；`wc -l` 确认入口文件 97 行，最大子模块 `agent_chat.rs` 低于 1500 行；`cargo fmt --all -- --check` 通过，`cargo check -p bifrost-admin` 通过，`cargo test -p bifrost-admin im_gateway::tests -- --nocapture` 通过 23 个测试，`cargo test -p bifrost-admin schedule_tools_create_update_list_delete_agent_schedule` 通过，`cargo test -p bifrost-agent mcp_availability` 通过，`cargo test -p bifrost-cli parse_schedule` 通过；启动源码版 Bifrost（临时数据目录 `.bifrost-e2e-im-regression`、端口 `18894`、`--no-system-proxy`），验证 `/providers`、`/targets`、`/routes`、`/schedules`、`/history/runs`、`/agent` 均返回 200；将 Agent 配置到 mock Chat Completions 后，通过真实 `/agent/chat` 触发 schedule tools 创建 Script/Agent 两类任务并更新 Script 配置，最终 schedules API 同时返回 `chat-script-schedule` 与 `chat-agent-schedule`；WebUI 影响面回归 `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts tests/ui/agent-mcp-servers.spec.ts tests/ui/im-gateway-provider.spec.ts --grep "AI|Settings Agent|Settings IM Provider|IM Gateway Provider"` 通过 11 个用例。
+  - schedules API 仍能返回 Script schedule 与外部 Runner Agent schedule。
+- **执行记录（2026-05-13）**: PASS — 已将 `im_gateway.rs` 从 `include!` 机械拆分改为真实 `mod` 子模块；`wc -l` 确认入口文件 97 行，最大子模块低于 1500 行；`cargo fmt --all -- --check` 通过，`cargo check -p bifrost-admin` 通过，`cargo test -p bifrost-admin im_gateway::tests -- --nocapture` 通过；启动源码版 Bifrost（临时数据目录 `.bifrost-e2e-im-regression`、端口 `18894`、`--no-system-proxy`），验证 `/providers`、`/targets`、`/routes`、`/schedules`、`/history/runs`、`/agent` 均返回 200。
 
 ### TC-IMG-50: 远端 CI Windows Rules shard 不被外层 timeout 提前取消
 
@@ -708,46 +667,6 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - workflow 外层 timeout 足够覆盖 Windows rules shard 的内部 suite timeout、fixture 启动和 runner 清理开销。
   - 新 run 不再因为 shard 外层 envelope 被提前取消。
 - **执行记录（2026-05-13）**: IN PROGRESS — 首次远端 CI run `25752880592` 中 32 个 job 成功，仅 `E2E Rules (x86_64-pc-windows-msvc, shard 1/4)` 在 `E2E rules tests` step 运行中被 job 外层 timeout 取消；run-level log zip 中没有该 cancelled shard 的 suite log，其它 Windows rules shards 均成功。已将 `.github/workflows/ci.yml` 的 `e2e-windows-rules.timeout-minutes` 从 30 调整为 60，待重新推送后继续 watch 到最终结论。
-
-### TC-IMG-51: Schedule 绑定消息通道设计一致性
-
-- **前置条件**:
-  - 本用例用于设计文档变更后的真实可检索性检查，不启动 Bifrost 服务。
-  - 技术方案已写入 `design/im-gateway.md`。
-- **操作步骤**:
-  1. 执行 `rg -n "ImMessageChannelBinding|message_channel|手动创建 schedule|Agent 创建 schedule|Schedule 执行" design/im-gateway.md`。
-  2. 执行 `rg -n "IM Channel|Connection|default_message_channel|任务通知漂移" design/im-gateway.md`。
-  3. 执行 `rg -n "TC-IMG-51|Schedule 绑定消息通道" human_tests/im-gateway.md human_tests/readme.md`。
-- **预期结果**:
-  - 技术文档明确说明 `ImSchedule.message_channel` 是 schedule 的唯一通道绑定。
-  - 技术文档明确说明手动创建 schedule 必须显式选择或传入 IM 通道。
-  - 技术文档明确说明 Agent 创建 schedule 时可从当前 IM 来源或 Agent 默认通道推导绑定通道。
-  - 技术文档明确说明 schedule 执行时优先使用自身保存的 `message_channel`，避免通知漂移到错误群或错误用户。
-  - `human_tests/readme.md` 索引包含本用例覆盖点。
-- **执行记录（2026-05-13）**: PASS — 执行 `rg -n "ImMessageChannelBinding|message_channel|手动创建 schedule|Agent 创建 schedule|Schedule 执行" design/im-gateway.md`，命中 schedule 消息通道数据模型、手动创建、Agent 创建和执行规则；执行 `rg -n "IM Channel|Connection|default_message_channel|任务通知漂移" design/im-gateway.md`，命中唯一通道绑定、Connection 下拉、Agent 默认通道和通知不漂移约束；执行 `rg -n "TC-IMG-51|Schedule 绑定消息通道" human_tests/im-gateway.md human_tests/readme.md`，确认 human_tests 用例与索引均可检索。
-
-### TC-IMG-52: 真实 Agent Schedule 使用绑定 IM 通道发送消息
-
-- **前置条件**:
-  - 从 `~/.bifrost` 复制真实用户 IM Provider 与 Agent 配置到临时 `BIFROST_DATA_DIR`。
-  - 用当前源码启动 Bifrost：`BIFROST_DATA_DIR=<temp> cargo run --bin bifrost -- start -p 18955 --unsafe-ssl --no-system-proxy`。
-  - 已确认真实 Feishu `bifrost` provider owner 通道可发送消息。
-- **操作步骤**:
-  1. 调用 `POST /api/im-gateway/schedules` 创建 disabled agent schedule，`message_channel` 绑定 `provider_id=bifrost,target_mode=owner,target_id=owner`。
-  2. schedule 的 agent prompt 要求模型只调用一次 `send_msg`，发送唯一时间戳文本。
-  3. 调用 `POST /api/im-gateway/schedules/<id>/run` 手动触发一次。
-  4. 查询 `GET /api/im-gateway/schedules/<id>/runs`，检查 run 状态和 agent tool calls。
-  5. 检查 `admin/im_gateway_message_logs.json`，确认 schedule 内部 `send_msg` 和 schedule 完成通知均发送成功。
-- **预期结果**:
-  - schedule 保存后包含 `message_channel`，没有 schedule 级发送目标字段。
-  - 手动 run 返回 `status=Success`，`stdout_preview` 为 agent 最终回复。
-  - run 记录中的 `agent_tool_calls` 包含 `send_msg` 且 `success=true`。
-  - 消息日志包含一条 `trigger=agent_tool:send_msg` 的真实发送成功记录，以及一条 `trigger=schedule:<id>` 的完成通知成功记录。
-  - disabled schedule 不会在测试结束后继续周期触发。
-- **清理步骤**:
-  - 停止测试 Bifrost 进程。
-  - 删除临时 `BIFROST_DATA_DIR`。
-- **执行记录（2026-05-13）**: PASS — 创建 `real-agent-schedule-20260513-124107`，保存结果包含 `message_channel.provider_id=bifrost,target_mode=owner,target_id=owner` 且 `enabled=false`。手动触发 `/run` 返回 `run_id=8864e487,status=Success,duration_ms=7638,stdout_preview=schedule send_msg succeeded`。运行历史中 `agent_tool_calls[0].tool_name=send_msg,success=true`，工具结果包含真实 `message_id=om_x100b6f74403218acc45ca19e00d32f4`。消息日志同时记录 schedule 内部 `send_msg` 成功和完成通知成功，完成通知 message_id 为 `om_x100b6f74418a5ca8c22d79d534bd554`。
 
 ### TC-IMG-53: Connections Provider 单列卡片与关键字段复制
 
@@ -1256,20 +1175,3 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
 - **清理步骤**:
   - 如果第 2 步创建了测试 Provider，删除该 Provider。
 - **执行记录（2026-07-08）**: PASS — 修复 `render_terminal_qr_code` 使用 `Dense1x2` + `module_dimensions(1, 1)`，避免原先 `module_dimensions(2, 1)` 导致终端二维码宽度翻倍；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli terminal_qr_code_renders_with_square_terminal_ratio --lib -- --nocapture` 通过。
-
-### TC-IMG-75: Agent send_msg 默认通道 E2E mock server 动态端口
-
-- **前置条件**:
-  - 工作目录为项目根目录。
-  - 已构建可用的 `target/debug/bifrost`，或允许脚本自行构建。
-- **操作步骤**:
-  1. 执行默认通道真实 E2E：
-     ```bash
-     ```
-- **预期结果**:
-  - 脚本的内嵌 Python `ThreadingHTTPServer` 默认绑定 `127.0.0.1:0`，并把实际端口写回临时文件。
-  - Bifrost provider 和 Agent model `base_url` 使用写回后的真实 mock 端口。
-  - `send_msg` 通过默认 message channel 发送到 owner，`schedule_create` 继承相同默认通道。
-  - 端口占用不会导致 `mock server did not become ready` 或 `OSError: [Errno 98] Address already in use`。
-- **清理步骤**:
-  - 脚本退出时清理临时 Bifrost 进程、mock server 进程和临时目录。

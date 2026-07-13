@@ -788,7 +788,6 @@ export async function runAgentStream(params: {
   workDir?: string;
   runnerId?: string;
   runnerAdapter?: string;
-  collaborationMode?: "plan";
   onEvent: (event: Record<string, unknown>) => void;
   onDelta: (content: string) => void;
   onFinal: (content: string) => void;
