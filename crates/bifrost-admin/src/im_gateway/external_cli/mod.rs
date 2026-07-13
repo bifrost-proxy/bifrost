@@ -5174,6 +5174,12 @@ async fn final_response(
     }) {
         return Ok(event.content.trim().to_string());
     }
+    if let Some(event) = events.iter().rev().find(|event| {
+        event.event_type == ExternalCliProgressEventType::RunFailed
+            && !event.content.trim().is_empty()
+    }) {
+        return Ok(event.content.trim().to_string());
+    }
     Ok(stdout_text.trim().to_string())
 }
 

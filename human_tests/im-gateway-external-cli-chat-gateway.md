@@ -1377,6 +1377,25 @@
 2. mock 两次都能从 stdin 读取完整原始 prompt 文本并返回 `EXEC_claude-exec`，不会进入 stream-json 解析分支或因非 JSON 输入失败。
 3. guide 响应为 `delivery=queued` 且 reason 包含 `exec transport`；两轮 `run_finished` 都成功，排队消息没有丢失或重复。
 
+### TC-IEC-65: Codex 可重试断流不提前终止且失败回复不泄露协议
+
+操作步骤：
+
+1. 从仓库根目录执行确定性的 mock app-server 回归：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost \
+     e2e-tests/tests/test_im_gateway_codex_retryable_error.sh
+   ```
+2. 脚本使用动态非正式端口和临时数据目录启动当前源码构建的 Bifrost，不连接真实 IM Provider。
+3. 第一轮 mock Codex 依次发送 `error(willRetry=true)`、assistant final、`turn/completed`；第二轮发送 `error(willRetry=false)`。
+
+预期结果：
+
+1. 第一轮状态为 `succeeded`，回复为 `BIFROST_RETRY_RECOVERED`；重连提示归一化为 `status`，不存在 `run_failed`。
+2. 第二轮状态为 `failed`，用户可见回复精确为 `permanent request failure`。
+3. 两轮回复都不以 app-server 初始化 JSON（如 `{"id":1`）开头；原始 JSON-RPC stdout 只保存在 run artifact 中。
+4. 脚本输出 `[im-gateway-codex-retryable-error] PASS` 并清理其临时进程和数据。
+
 ## 最近执行记录
 
 - 2026-07-13：针对 PR #377 自动 Review 的 Claude 显式 exec stdin 兼容问题新增并立即执行 TC-IEC-64。单元回归输出 `1 passed`；真实临时 Bifrost E2E 输出 `[external-runner-live-guide] PASS`。mock 记录两次 `claude-exec` 均带 `--input-format text` 且不含 `--replay-user-messages`，首轮 guide 返回 `delivery=queued`，两轮均返回 `EXEC_claude-exec`。
