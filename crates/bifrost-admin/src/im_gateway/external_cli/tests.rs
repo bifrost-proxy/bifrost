@@ -403,6 +403,20 @@ fn file_change_detail_keeps_action_when_diff_has_no_changed_lines() {
 }
 
 #[test]
+fn file_change_detail_preserves_unknown_actions_and_path_only_changes() {
+    let detail = file_change_detail_from_value(&serde_json::json!({
+        "changes": [
+            {"path": "scripts/tool.sh", "action": "chmod"},
+            {"path": "assets/empty.txt"}
+        ]
+    }))
+    .expect("file change detail");
+
+    assert!(detail.contains("file: scripts/tool.sh (chmod)"));
+    assert!(detail.contains("file: assets/empty.txt"));
+}
+
+#[test]
 fn file_change_line_stats_do_not_pair_changes_across_hunks() {
     let diff = "@@ -1 +1 @@\n-old\n context\n@@ -8 +8,2 @@\n context\n+new\n";
 
