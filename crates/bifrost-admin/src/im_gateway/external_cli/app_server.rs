@@ -1260,7 +1260,9 @@ fn progress_event_from_app_server_item(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("tool")
                 .to_string();
-            let content = if completed {
+            let content = if completed && item_type == "fileChange" {
+                file_change_detail_from_value(item).unwrap_or_default()
+            } else if completed {
                 item.get("result")
                     .or_else(|| item.get("error"))
                     .map(serde_json::Value::to_string)
@@ -1446,6 +1448,50 @@ mod tests {
         assert_eq!(command_event.title.as_deref(), Some("exec_command"));
         assert_eq!(command_event.raw["success"], true);
         assert_eq!(command_event.raw["durationMs"], 12);
+    }
+
+    #[test]
+    fn app_server_file_change_notification_includes_paths_and_line_stats() {
+        let file_change = serde_json::json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": {
+                    "id":"item-3",
+                    "type":"fileChange",
+                    "status":"completed",
+                    "changes":[{
+                        "path":"/workspace/src/main.rs",
+                        "kind":{"type":"update","move_path":null},
+                        "diff":"@@ -1,2 +1,3 @@\n-old\n+new\n+extra\n context\n"
+                    }]
+                }
+            }
+        });
+
+        let event = progress_event_from_app_server_frame(&file_change).unwrap();
+        assert_eq!(event.event_type, ExternalCliProgressEventType::ToolFinished);
+        assert_eq!(event.title.as_deref(), Some("fileChange"));
+        assert!(event.content.contains("/workspace/src/main.rs"));
+        assert!(event.content.contains("修改 1 行"));
+        assert!(event.content.contains("新增 1 行"));
+        assert!(!event.content.contains("暂无工具详情"));
+
+        let agent_event = external_progress_to_agent_turn_event(
+            "session-1",
+            DEFAULT_ADAPTER,
+            ExternalCliProgressStatusContext::new(Some("Codex"), None, None, None, None, None),
+            &event,
+        )
+        .expect("tool event");
+        let bifrost_agent::AgentTurnProgressEvent::ToolFinished { log, .. } = agent_event else {
+            panic!("expected tool finished event");
+        };
+        assert_eq!(log.tool_name, "fileChange");
+        assert!(log.result.contains("/workspace/src/main.rs"));
+        assert!(log.result.contains("修改 1 行"));
+        assert!(log.result.contains("新增 1 行"));
     }
 
     #[test]

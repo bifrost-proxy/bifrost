@@ -91,6 +91,8 @@ Web Chat 和 IM event loop 使用 `record_external_cli_progress_event_to_timelin
 
 前端 `ProcessStepsBlock` 运行中默认展开,完成后默认折叠。运行中按实时 conversation timeline 从上到下展示模型公开 content 和工具调用;模型公开 content 直接展示原文,不额外添加 `1.` / `2.` 这类序号。工具行默认只展示可读命令标题,点击后展开输入/输出详情。`run_state_changed` 仍是后端判定 running/completed 的内部事实源,但不渲染成 `Run state: Running` 这类用户可见过程项;UI 顶部状态标签和 thread summary 才负责表达整体状态。飞书 progress card 会把连续工具调用折叠成 "已运行 N 条命令" 的一级分组,展开后再显示单条工具详情折叠项。噪音状态(run id、turn started/completed、model rerouted)不进入过程列表,避免卡片顶部被内部事件淹没。
 
+Codex app-server 的 `fileChange` 完成事件必须从 `params.item.changes[]` 提取文件路径、`kind.type` 和 unified diff；展开工具详情按文件展示新增、删除和修改行数，并保留 diff 作为核验依据。只有事件本身确实没有结构化内容时才显示“暂无工具详情”，不能因为 `result` 字段为空而丢弃 `changes[]`。
+
 Web timeline 会按 `call_id` 合并工具 start/result,并跳过重复 start。后端在写 conversation timeline 时也会跳过同一 `call_id` 的重复 `ToolStarted`,避免 Trae/Codex 重复输出 `item.started` 时造成 WebView active command 计数虚高。
 
 历史回放时,external runner 的 pending thinking/tool process steps 必须挂在同一轮最终 `assistant_message` 上。不能在最终回复前先 flush 成 `Agent is running...` 占位消息,否则用户在 Web UI 展开最终结果时会看不到过程信息,且时间戳/折叠状态会误导为两条 assistant 回复。

@@ -4311,7 +4311,13 @@ fn event_title_or_default(event: &ExternalCliProgressEvent, default: &str) -> St
 fn is_file_change_item_type(item_type: &str) -> bool {
     matches!(
         item_type,
-        "file_change" | "file_changes" | "file_diff" | "file_edit" | "file_edits" | "patch"
+        "fileChange"
+            | "file_change"
+            | "file_changes"
+            | "file_diff"
+            | "file_edit"
+            | "file_edits"
+            | "patch"
     )
 }
 
@@ -4375,10 +4381,18 @@ fn file_change_detail_from_value(value: &serde_json::Value) -> Option<String> {
             .map(str::trim)
             .filter(|path| !path.is_empty())
         {
-            lines.push(match file_change_action_label(value) {
-                Some(action) => format!("file: {path} ({action})"),
-                None => format!("file: {path}"),
+            let diff = ["diff", "patch"].iter().find_map(|key| {
+                value
+                    .get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
             });
+            lines.push(format_file_change_path(
+                path,
+                file_change_action_label(value).as_deref(),
+                diff,
+            ));
             break;
         }
     }
@@ -4425,10 +4439,17 @@ fn append_file_change_items(lines: &mut Vec<String>, label: &str, items: &[serde
                         .filter(|value| !value.is_empty())
                 })
                 .unwrap_or("[unknown file]");
-            lines.push(match file_change_action_label(item) {
-                Some(action) => format!("- {path} ({action})"),
-                None => format!("- {path}"),
+            let diff = ["diff", "patch"].iter().find_map(|key| {
+                object
+                    .get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
             });
+            lines.push(format!(
+                "- {}",
+                format_file_change_path(path, file_change_action_label(item).as_deref(), diff,)
+            ));
             if let Some(summary) = ["summary", "message", "description"]
                 .iter()
                 .find_map(|key| {
@@ -4454,12 +4475,112 @@ fn append_file_change_items(lines: &mut Vec<String>, label: &str, items: &[serde
     }
 }
 
-fn file_change_action_label(value: &serde_json::Value) -> Option<&str> {
-    ["action", "status", "operation", "kind"]
+fn file_change_action_label(value: &serde_json::Value) -> Option<String> {
+    let action = ["action", "operation"]
         .iter()
         .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
+        .or_else(|| value.get("kind").and_then(serde_json::Value::as_str))
+        .or_else(|| {
+            value
+                .get("kind")
+                .and_then(|kind| kind.get("type"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| value.get("status").and_then(serde_json::Value::as_str))
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.is_empty())?;
+    Some(
+        match action.to_ascii_lowercase().as_str() {
+            "add" | "added" | "create" | "created" => "新增",
+            "delete" | "deleted" | "remove" | "removed" => "删除",
+            "update" | "updated" | "modify" | "modified" => "修改",
+            "move" | "moved" | "rename" | "renamed" => "移动",
+            _ => action,
+        }
+        .to_string(),
+    )
+}
+
+fn format_file_change_path(path: &str, action: Option<&str>, diff: Option<&str>) -> String {
+    let mut details = Vec::new();
+    if let Some(diff) = diff {
+        let (added, deleted, modified) = unified_diff_line_stats(diff);
+        if modified > 0 {
+            details.push(format!("修改 {modified} 行"));
+        }
+        if added > 0 {
+            details.push(format!("新增 {added} 行"));
+        }
+        if deleted > 0 {
+            details.push(format!("删除 {deleted} 行"));
+        }
+    }
+    if details.is_empty() {
+        if let Some(action) = action {
+            details.push(action.to_string());
+        }
+    }
+    if details.is_empty() {
+        format!("file: {path}")
+    } else {
+        format!("file: {path} ({})", details.join(" · "))
+    }
+}
+
+fn unified_diff_line_stats(diff: &str) -> (usize, usize, usize) {
+    let mut added = 0usize;
+    let mut deleted = 0usize;
+    let mut modified = 0usize;
+    let mut block_added = 0usize;
+    let mut block_deleted = 0usize;
+    for line in diff.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            accumulate_diff_block_stats(
+                &mut added,
+                &mut deleted,
+                &mut modified,
+                &mut block_added,
+                &mut block_deleted,
+            );
+            continue;
+        }
+        if line.starts_with('+') {
+            block_added += 1;
+        } else if line.starts_with('-') {
+            block_deleted += 1;
+        } else {
+            accumulate_diff_block_stats(
+                &mut added,
+                &mut deleted,
+                &mut modified,
+                &mut block_added,
+                &mut block_deleted,
+            );
+        }
+    }
+    accumulate_diff_block_stats(
+        &mut added,
+        &mut deleted,
+        &mut modified,
+        &mut block_added,
+        &mut block_deleted,
+    );
+    (added, deleted, modified)
+}
+
+fn accumulate_diff_block_stats(
+    added: &mut usize,
+    deleted: &mut usize,
+    modified: &mut usize,
+    block_added: &mut usize,
+    block_deleted: &mut usize,
+) {
+    let block_modified = (*block_added).min(*block_deleted);
+    *modified += block_modified;
+    *added += *block_added - block_modified;
+    *deleted += *block_deleted - block_modified;
+    *block_added = 0;
+    *block_deleted = 0;
 }
 
 fn is_codex_like_adapter(adapter: &str) -> bool {

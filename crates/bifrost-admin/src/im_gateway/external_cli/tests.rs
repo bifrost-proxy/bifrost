@@ -361,6 +361,55 @@ fn codex_cli_parser_maps_real_command_execution_events() {
 }
 
 #[test]
+fn file_change_detail_counts_added_deleted_and_modified_lines() {
+    let detail = file_change_detail_from_value(&serde_json::json!({
+        "type": "fileChange",
+        "changes": [
+            {
+                "path": "src/updated.rs",
+                "kind": {"type": "update", "move_path": null},
+                "diff": "--- a/src/updated.rs\n+++ b/src/updated.rs\n@@ -1,2 +1,3 @@\n-old\n+new\n+extra\n context\n"
+            },
+            {
+                "path": "src/new.rs",
+                "kind": {"type": "add"},
+                "diff": "--- /dev/null\n+++ b/src/new.rs\n@@ -0,0 +1,2 @@\n+one\n+two\n"
+            },
+            {
+                "path": "src/old.rs",
+                "kind": {"type": "delete"},
+                "diff": "--- a/src/old.rs\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-one\n-two\n"
+            }
+        ]
+    }))
+    .expect("file change detail");
+
+    assert!(detail.contains("file: src/updated.rs (修改 1 行 · 新增 1 行)"));
+    assert!(detail.contains("file: src/new.rs (新增 2 行)"));
+    assert!(detail.contains("file: src/old.rs (删除 2 行)"));
+    assert!(!detail.contains("修改 2 行 · 新增 1 行 · 删除 1 行"));
+}
+
+#[test]
+fn file_change_detail_keeps_action_when_diff_has_no_changed_lines() {
+    let detail = file_change_detail_from_value(&serde_json::json!({
+        "path": "src/renamed.rs",
+        "status": "completed",
+        "kind": {"type": "move", "move_path": "src/original.rs"}
+    }))
+    .expect("file change detail");
+
+    assert_eq!(detail, "file: src/renamed.rs (移动)");
+}
+
+#[test]
+fn file_change_line_stats_do_not_pair_changes_across_hunks() {
+    let diff = "@@ -1 +1 @@\n-old\n context\n@@ -8 +8,2 @@\n context\n+new\n";
+
+    assert_eq!(unified_diff_line_stats(diff), (1, 1, 0));
+}
+
+#[test]
 fn traex_cli_parser_maps_real_jsonl_events() {
     let stdout = r#"{"type":"thread.started","thread_id":"019e9f78-traex"}
 {"type":"turn.started"}
