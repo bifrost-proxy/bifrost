@@ -89,7 +89,9 @@ Web Chat 和 IM event loop 使用 `record_external_cli_progress_event_to_timelin
 - `ToolFinished` 写入 tool call + tool result,优先使用 Trae 原始事件中的 call id、tool name、arguments。
 - `AssistantFinal` 在 runner 仍运行时写入过程 timeline,作为 Trae/Codex 公开的模型 content 展示;底部最终回答仍由 run result/turn finish 统一记录为 assistant message。
 
-前端 `ProcessStepsBlock` 运行中默认展开,完成后默认折叠。运行中按实时 conversation timeline 从上到下展示模型公开 content 和工具调用;模型公开 content 直接展示原文,不额外添加 `1.` / `2.` 这类序号。工具行默认只展示可读命令标题,点击后展开输入/输出详情。`run_state_changed` 仍是后端判定 running/completed 的内部事实源,但不渲染成 `Run state: Running` 这类用户可见过程项;UI 顶部状态标签和 thread summary 才负责表达整体状态。飞书 progress card 会把连续工具调用折叠成 "已运行 N 条命令" 的一级分组,展开后再显示单条工具详情折叠项。噪音状态(run id、turn started/completed、model rerouted)不进入过程列表,避免卡片顶部被内部事件淹没。
+前端 `ProcessStepsBlock` 运行中默认展开,完成后默认折叠。运行中按实时 conversation timeline 从上到下展示模型公开 content 和工具调用;模型公开 content 直接展示原文,不额外添加 `1.` / `2.` 这类序号。工具行默认只展示可读命令标题,点击后展开输入/输出详情。`run_state_changed` 仍是后端判定 running/completed 的内部事实源,但不渲染成 `Run state: Running` 这类用户可见过程项;UI 顶部状态标签和 thread summary 才负责表达整体状态。飞书 progress card 会把连续工具调用折叠成“已执行 N 个步骤”的一级分组,展开后再显示单条工具详情折叠项。噪音状态(run id、turn started/completed、model rerouted)不进入过程列表,避免卡片顶部被内部事件淹没。
+
+Codex app-server 的 `fileChange` 完成事件必须从 `params.item.changes[]` 提取文件路径、`kind.type` 和 diff；展开工具详情按文件展示新增、删除和修改行数，并保留 diff 作为核验依据。app-server 对新增或删除文件可能只返回不带 `+` / `-` 的正文，此时按 `kind.type` 和正文逻辑行数兜底统计。卡片使用 Runner 的真实 `work_dir` 把工作区内绝对路径显示为相对路径，多行详情逐行缩进；artifact 仍保留原始事件。工具标题显示为“文件变更”，执行过程按“已执行 N 个步骤”计数，避免把文件编辑误称为命令。只有事件本身确实没有结构化内容时才显示“暂无工具详情”，不能因为 `result` 字段为空而丢弃 `changes[]`。
 
 Web timeline 会按 `call_id` 合并工具 start/result,并跳过重复 start。后端在写 conversation timeline 时也会跳过同一 `call_id` 的重复 `ToolStarted`,避免 Trae/Codex 重复输出 `item.started` 时造成 WebView active command 计数虚高。
 
@@ -111,7 +113,7 @@ Bifrost 使用 `traecli exec --json ... -` 的一轮一进程模式,不依赖 Tr
 - `/model <slug>`: 先用 `debug models` catalog 校验 slug;不存在时返回可见拒绝消息且不写入 override。存在时把 `<slug>` 写入 `session_state.json` 的 `modelOverride`,来源为 `session slash command`。后续同 session 同 runner 的 Codex/Traex run 在 Web Chat、runner-call 和 IM event loop 中合并为 `adapterConfig.model`,最终由 command spec 追加 `--model <slug>`,包括 `exec resume`。
 - `/model clear`: 删除 session override,让下一轮回到 runner 配置或 Traex 默认模型。
 
-Web UI 在当前 runner adapter 为 `codex` 或 `traex` 时展示 `/models` 和 `/model`。`/models` 在补全菜单中回车会直接发送;`/model` 回车或 Tab 会补齐命令并把光标放到末尾,方便继续输入模型 slug。IM 通道空闲时支持同一命令,运行中发送 `/model` 只提示等待当前任务结束,避免把控制命令当普通 prompt 送入 Codex/Traex。Slash 命令结果作为 display-only system message 写入 `session_state.json` 供刷新回放;即使该会话已有 canonical JSONL timeline,session detail 也必须把这些 system display messages 合并到返回的 `messages` 中,并保持为独立居中系统行。该消息不注入 runner prompt,避免污染模型上下文。
+Web UI 在当前 runner adapter 为 `codex` 或 `traex` 时展示 `/models` 和 `/model`。`/models` 在补全菜单中回车会直接发送;`/model` 回车或 Tab 会补齐命令并把光标放到末尾,方便继续输入模型 slug。IM 通道空闲时支持同一命令,运行中发送 `/model` 只提示等待当前任务结束,避免把控制命令当普通 prompt 送入 Codex/Traex。`/efforts` 与 `/effort` 在 busy 状态也必须由 Bifrost 命令层优先处理；设置只影响下一轮，不能经默认 Guide 进入当前 `turn/steer`。Slash 命令结果作为 display-only system message 写入 `session_state.json` 供刷新回放;即使该会话已有 canonical JSONL timeline,session detail 也必须把这些 system display messages 合并到返回的 `messages` 中,并保持为独立居中系统行。该消息不注入 runner prompt,避免污染模型上下文。
 
 Agent Chat 底部 token HUD 需要从 session detail、history summary 和外部 runner metadata 合并 `model`、`modelProvider`、`usageTotalTokens`、`usageInputTokens`。刷新页面、加载 history、发送下一轮消息以及运行中的 status 空快照都不能把已知模型、token 和 context 覆盖为空或 0。
 

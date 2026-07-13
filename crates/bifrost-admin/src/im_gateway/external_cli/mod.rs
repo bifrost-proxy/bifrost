@@ -4227,7 +4227,7 @@ pub fn external_progress_to_agent_turn_event(
                 log: bifrost_agent::ToolCallLog {
                     tool_name: event_title_or_default(event, "runner"),
                     arguments: external_progress_arguments_text(event),
-                    result: external_progress_result_text(event),
+                    result: external_progress_result_text(event, context.work_dir),
                     success: event
                         .raw
                         .get("success")
@@ -4291,24 +4291,45 @@ fn external_progress_arguments_text(event: &ExternalCliProgressEvent) -> String 
         .unwrap_or_default()
 }
 
-fn external_progress_result_text(event: &ExternalCliProgressEvent) -> String {
+fn external_progress_result_text(
+    event: &ExternalCliProgressEvent,
+    work_dir: Option<&Path>,
+) -> String {
+    if external_progress_is_file_change(event, external_progress_item(event)) {
+        if let Some(detail) =
+            file_change_detail_from_value_with_work_dir(external_progress_item(event), work_dir)
+        {
+            return detail;
+        }
+    }
     if !event.content.trim().is_empty() {
         return event.content.clone();
     }
-    external_progress_structured_detail(event).unwrap_or_default()
+    external_progress_structured_detail(event, work_dir).unwrap_or_default()
 }
 
-fn external_progress_structured_detail(event: &ExternalCliProgressEvent) -> Option<String> {
-    let item = event.raw.get("item").unwrap_or(&event.raw);
+fn external_progress_item(event: &ExternalCliProgressEvent) -> &serde_json::Value {
+    event
+        .raw
+        .get("item")
+        .or_else(|| event.raw.pointer("/params/item"))
+        .unwrap_or(&event.raw)
+}
+
+fn external_progress_structured_detail(
+    event: &ExternalCliProgressEvent,
+    work_dir: Option<&Path>,
+) -> Option<String> {
+    let item = external_progress_item(event);
     if external_progress_is_file_change(event, item) {
-        return file_change_detail_from_value(item)
+        return file_change_detail_from_value_with_work_dir(item, work_dir)
             .or_else(|| serde_json::to_string_pretty(item).ok());
     }
     None
 }
 
 fn event_title_or_default(event: &ExternalCliProgressEvent, default: &str) -> String {
-    event
+    let title = event
         .title
         .as_deref()
         .map(str::trim)
@@ -4322,14 +4343,24 @@ fn event_title_or_default(event: &ExternalCliProgressEvent, default: &str) -> St
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
         })
-        .unwrap_or(default)
-        .to_string()
+        .unwrap_or(default);
+    if is_file_change_item_type(title) {
+        "文件变更".to_string()
+    } else {
+        title.to_string()
+    }
 }
 
 fn is_file_change_item_type(item_type: &str) -> bool {
     matches!(
         item_type,
-        "file_change" | "file_changes" | "file_diff" | "file_edit" | "file_edits" | "patch"
+        "fileChange"
+            | "file_change"
+            | "file_changes"
+            | "file_diff"
+            | "file_edit"
+            | "file_edits"
+            | "patch"
     )
 }
 
@@ -4375,6 +4406,13 @@ fn codex_file_change_event(raw: &serde_json::Value, item_type: &str) -> External
 }
 
 fn file_change_detail_from_value(value: &serde_json::Value) -> Option<String> {
+    file_change_detail_from_value_with_work_dir(value, None)
+}
+
+fn file_change_detail_from_value_with_work_dir(
+    value: &serde_json::Value,
+    work_dir: Option<&Path>,
+) -> Option<String> {
     let mut lines = Vec::new();
     for key in ["text", "message", "summary", "content", "description"] {
         if let Some(text) = value
@@ -4393,26 +4431,34 @@ fn file_change_detail_from_value(value: &serde_json::Value) -> Option<String> {
             .map(str::trim)
             .filter(|path| !path.is_empty())
         {
-            lines.push(match file_change_action_label(value) {
-                Some(action) => format!("file: {path} ({action})"),
-                None => format!("file: {path}"),
+            let diff = ["diff", "patch"].iter().find_map(|key| {
+                value
+                    .get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|text| !text.trim().is_empty())
             });
+            lines.push(format_file_change_path(
+                path,
+                file_change_action_label(value).as_deref(),
+                diff,
+                work_dir,
+            ));
             break;
         }
     }
     for key in ["files", "changes", "edits"] {
         if let Some(items) = value.get(key).and_then(serde_json::Value::as_array) {
-            append_file_change_items(&mut lines, key, items);
+            append_file_change_items(&mut lines, key, items, work_dir);
         }
     }
     for key in ["diff", "patch"] {
         if let Some(text) = value
             .get(key)
             .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
+            .filter(|text| !text.trim().is_empty())
         {
-            lines.push(format!("{key}:\n{text}"));
+            lines.push(format!("{key}:"));
+            lines.extend(text.lines().map(|line| format!("  {line}")));
         }
     }
     if lines.is_empty() {
@@ -4422,7 +4468,12 @@ fn file_change_detail_from_value(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn append_file_change_items(lines: &mut Vec<String>, label: &str, items: &[serde_json::Value]) {
+fn append_file_change_items(
+    lines: &mut Vec<String>,
+    label: &str,
+    items: &[serde_json::Value],
+    work_dir: Option<&Path>,
+) {
     if items.is_empty() {
         return;
     }
@@ -4443,10 +4494,21 @@ fn append_file_change_items(lines: &mut Vec<String>, label: &str, items: &[serde
                         .filter(|value| !value.is_empty())
                 })
                 .unwrap_or("[unknown file]");
-            lines.push(match file_change_action_label(item) {
-                Some(action) => format!("- {path} ({action})"),
-                None => format!("- {path}"),
+            let diff = ["diff", "patch"].iter().find_map(|key| {
+                object
+                    .get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
             });
+            lines.push(format!(
+                "- {}",
+                format_file_change_path(
+                    path,
+                    file_change_action_label(item).as_deref(),
+                    diff,
+                    work_dir,
+                )
+            ));
             if let Some(summary) = ["summary", "message", "description"]
                 .iter()
                 .find_map(|key| {
@@ -4457,27 +4519,165 @@ fn append_file_change_items(lines: &mut Vec<String>, label: &str, items: &[serde
                         .filter(|value| !value.is_empty())
                 })
             {
-                lines.push(format!("  {summary}"));
+                lines.extend(summary.lines().map(|line| format!("  {line}")));
             }
             if let Some(diff) = ["diff", "patch"].iter().find_map(|key| {
                 object
                     .get(*key)
                     .and_then(serde_json::Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
+                    .filter(|value| !value.trim().is_empty())
             }) {
-                lines.push(format!("  {diff}"));
+                lines.extend(diff.lines().map(|line| format!("  {line}")));
             }
         }
     }
 }
 
-fn file_change_action_label(value: &serde_json::Value) -> Option<&str> {
-    ["action", "status", "operation", "kind"]
+fn file_change_action_label(value: &serde_json::Value) -> Option<String> {
+    let action = ["action", "operation"]
         .iter()
         .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
+        .or_else(|| value.get("kind").and_then(serde_json::Value::as_str))
+        .or_else(|| {
+            value
+                .get("kind")
+                .and_then(|kind| kind.get("type"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| value.get("status").and_then(serde_json::Value::as_str))
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.is_empty())?;
+    Some(
+        match action.to_ascii_lowercase().as_str() {
+            "add" | "added" | "create" | "created" => "新增",
+            "delete" | "deleted" | "remove" | "removed" => "删除",
+            "update" | "updated" | "modify" | "modified" => "修改",
+            "move" | "moved" | "rename" | "renamed" => "移动",
+            _ => action,
+        }
+        .to_string(),
+    )
+}
+
+fn format_file_change_path(
+    path: &str,
+    action: Option<&str>,
+    diff: Option<&str>,
+    work_dir: Option<&Path>,
+) -> String {
+    let mut details = Vec::new();
+    if let Some(diff) = diff {
+        let is_plain_file_content =
+            matches!(action, Some("新增" | "删除")) && !looks_like_unified_diff(diff);
+        let (added, deleted, modified) = if is_plain_file_content {
+            (0, 0, 0)
+        } else {
+            unified_diff_line_stats(diff)
+        };
+        if modified > 0 {
+            details.push(format!("修改 {modified} 行"));
+        }
+        if added > 0 {
+            details.push(format!("新增 {added} 行"));
+        }
+        if deleted > 0 {
+            details.push(format!("删除 {deleted} 行"));
+        }
+        if added == 0 && deleted == 0 && modified == 0 {
+            let line_count = diff.lines().count();
+            match action {
+                Some("新增") if line_count > 0 => details.push(format!("新增 {line_count} 行")),
+                Some("删除") if line_count > 0 => details.push(format!("删除 {line_count} 行")),
+                _ => {}
+            }
+        }
+    }
+    if details.is_empty() {
+        if let Some(action) = action {
+            details.push(action.to_string());
+        }
+    }
+    if details.is_empty() {
+        format!("file: {}", display_file_change_path(path, work_dir))
+    } else {
+        format!(
+            "file: {} ({})",
+            display_file_change_path(path, work_dir),
+            details.join(" · ")
+        )
+    }
+}
+
+fn display_file_change_path(path: &str, work_dir: Option<&Path>) -> String {
+    let path = Path::new(path);
+    work_dir
+        .and_then(|root| path.strip_prefix(root).ok())
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+fn looks_like_unified_diff(diff: &str) -> bool {
+    diff.lines().any(|line| line.starts_with("@@"))
+        || (diff.lines().any(|line| line.starts_with("--- "))
+            && diff.lines().any(|line| line.starts_with("+++ ")))
+}
+
+fn unified_diff_line_stats(diff: &str) -> (usize, usize, usize) {
+    let mut added = 0usize;
+    let mut deleted = 0usize;
+    let mut modified = 0usize;
+    let mut block_added = 0usize;
+    let mut block_deleted = 0usize;
+    for line in diff.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            accumulate_diff_block_stats(
+                &mut added,
+                &mut deleted,
+                &mut modified,
+                &mut block_added,
+                &mut block_deleted,
+            );
+            continue;
+        }
+        if line.starts_with('+') {
+            block_added += 1;
+        } else if line.starts_with('-') {
+            block_deleted += 1;
+        } else {
+            accumulate_diff_block_stats(
+                &mut added,
+                &mut deleted,
+                &mut modified,
+                &mut block_added,
+                &mut block_deleted,
+            );
+        }
+    }
+    accumulate_diff_block_stats(
+        &mut added,
+        &mut deleted,
+        &mut modified,
+        &mut block_added,
+        &mut block_deleted,
+    );
+    (added, deleted, modified)
+}
+
+fn accumulate_diff_block_stats(
+    added: &mut usize,
+    deleted: &mut usize,
+    modified: &mut usize,
+    block_added: &mut usize,
+    block_deleted: &mut usize,
+) {
+    let block_modified = (*block_added).min(*block_deleted);
+    *modified += block_modified;
+    *added += *block_added - block_modified;
+    *deleted += *block_deleted - block_modified;
+    *block_added = 0;
+    *block_deleted = 0;
 }
 
 fn is_codex_like_adapter(adapter: &str) -> bool {

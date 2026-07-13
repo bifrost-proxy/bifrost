@@ -24,7 +24,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
 
 ## 测试用例列表
 
-### TC-GQ-16: 外部 Runner busy 默认 Guide，ChatGPT Web 与失败路径进入 queue
+### TC-GQ-16: 外部 Runner busy 默认 Guide，系统 slash 不透传，失败路径进入 queue
 
 - **操作步骤**:
   ```bash
@@ -32,14 +32,17 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
   cargo test -p bifrost-admin apply_busy_message_default_queues_custom_runner_messages --lib
   cargo test -p bifrost-admin codex_runner_metadata_resumes_queued_messages_after_current_run --lib
   cargo test -p bifrost-admin codex_runner_metadata_does_not_override_explicit_thread --lib
+  SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin external_cli_effort_slash --lib
   SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_external_runner_live_guide.sh
   ```
 - **预期结果**:
   - `runner = "codex"`、`"traex"`、`"claude_code"` 或其他非 ChatGPT Web runner 时 busy 默认策略为 ExternalGuide；ChatGPT Web 为 Queue。
-  - 普通消息与 `/g <消息>` 尝试注入 active worker；不支持、拒绝或超时则完整进入 FIFO queue，`/q` 始终直接排队。
+  - 普通消息尝试注入 active worker；隐藏兼容命令 `/g <消息>` 行为相同；不支持、拒绝或超时则完整进入 FIFO queue，`/q` 始终直接排队。
+  - Codex/Traex active 时，`/efforts` 与 `/effort <级别>` 由 Bifrost 作为系统命令处理，不得进入 `turn/steer`；effort override 写入 session，并从下一轮生效。
   - Codex/Traex app-server 接收 `turn/steer`，并在等待 ACK 时保持 runner control future 持续运行。
   - 上一轮 Codex result metadata 中的 `threadId` 会注入下一条排队消息的 request params；显式传入的 `threadId` 不会被覆盖。
 - **执行记录（2026-05-21）**: PASS — 执行 `cargo test -p bifrost-admin busy_default_mode --lib`、`cargo test -p bifrost-admin apply_busy_message_default --lib`、`cargo test -p bifrost-admin codex_runner_metadata --lib`、`codex exec --help` 和 `codex exec resume --help`。本机 Codex CLI `0.132.0` 显示 `exec` 只接收初始 prompt/stdin，`resume` 支持按 session/thread 接续下一轮；未发现运行中追加 guide 的 CLI 命令。
+- **回归执行记录（2026-07-13）**: PASS — 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin external_cli_effort_slash --lib -- --nocapture`（1 项）和 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_external_runner_live_guide.sh`。真实 Bifrost + mock IM inbound 链路分别保持 Codex/Traex active，发送 `/efforts`、`/effort high` 后确认两条系统命令均未进入 `turn/steer`，session effort override 为 `high` 且来源为 `session slash command`；随后普通消息仍作为唯一 Guide 注入并完成当前 turn。
 
 ### TC-GQ-17: Web Agent Chat `/q` 竞态不会写入普通对话消息
 

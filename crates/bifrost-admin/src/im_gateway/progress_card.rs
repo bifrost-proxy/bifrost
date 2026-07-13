@@ -1913,7 +1913,7 @@ fn format_process_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
     if tool_count == 0 {
         base.to_string()
     } else {
-        format!("{base}：已运行 {tool_count} 条命令")
+        format!("{base}：已执行 {tool_count} 个步骤")
     }
 }
 
@@ -1945,11 +1945,11 @@ fn format_process_tool_group_title(items: &[(usize, &ProgressTimelineItem)]) -> 
         .filter(|(_, item)| item.success.is_none())
         .count();
     if failed_count > 0 {
-        format!("已运行 {} 条命令，{} 条失败", items.len(), failed_count)
+        format!("已执行 {} 个步骤，{} 个失败", items.len(), failed_count)
     } else if running_count > 0 {
-        format!("正在运行 {} 条命令", items.len())
+        format!("正在执行 {} 个步骤", items.len())
     } else {
-        format!("已运行 {} 条命令", items.len())
+        format!("已执行 {} 个步骤", items.len())
     }
 }
 

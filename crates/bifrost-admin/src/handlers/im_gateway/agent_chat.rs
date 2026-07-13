@@ -260,9 +260,7 @@ pub(super) fn build_im_channel_help_sections(runner_kind: &ImHelpRunnerKind) -> 
         ImHelpRunnerKind::External { adapter } => {
             let mut runner_lines = Vec::new();
             if adapter != crate::im_gateway::chatgpt_web::ADAPTER_ID {
-                runner_lines.push(
-                    "/g <引导内容> 给正在运行的 Runner 注入引导；普通后续消息默认按引导处理，使用 /q 才排队",
-                );
+                runner_lines.push("普通后续消息默认按引导处理，使用 /q 才排队");
             }
             if crate::im_gateway::external_cli::supports_external_cli_model_slash(adapter) {
                 runner_lines
@@ -1195,6 +1193,23 @@ pub(super) async fn handle_busy_message(
         return;
     }
 
+    if handle_im_effort_command(
+        trimmed,
+        session_key,
+        ctx.agent_config,
+        ImModelCommandContext {
+            client,
+            provider,
+            external_cli_config_store: ctx.external_cli_config_store,
+            event,
+            message_log_store,
+        },
+    )
+    .await
+    {
+        return;
+    }
+
     if let Some(command) = parse_im_cwd_command(trimmed) {
         match command {
             Ok(path) => {
@@ -1513,6 +1528,7 @@ pub(super) async fn handle_concurrent_event_during_chat(
                 agent_session_manager,
                 progress_registry,
                 external_cli_config_store,
+                agent_config: &agent_config,
                 default_mode: active_session_default_mode,
                 status_context: status_context_from_agent_config(&agent_config),
                 default_work_dir: Some(agent_config.resolve_work_dir().display().to_string()),
@@ -1537,6 +1553,7 @@ pub(super) async fn handle_concurrent_event_during_chat(
                 agent_session_manager,
                 progress_registry,
                 external_cli_config_store,
+                agent_config: &agent_config,
                 default_mode: busy_default_mode,
                 status_context: status_context_from_agent_config(&agent_config),
                 default_work_dir: Some(agent_config.resolve_work_dir().display().to_string()),

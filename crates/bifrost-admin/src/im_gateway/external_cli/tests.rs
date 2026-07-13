@@ -361,6 +361,192 @@ fn codex_cli_parser_maps_real_command_execution_events() {
 }
 
 #[test]
+fn file_change_detail_counts_added_deleted_and_modified_lines() {
+    let detail = file_change_detail_from_value(&serde_json::json!({
+        "type": "fileChange",
+        "changes": [
+            {
+                "path": "src/updated.rs",
+                "kind": {"type": "update", "move_path": null},
+                "diff": "--- a/src/updated.rs\n+++ b/src/updated.rs\n@@ -1,2 +1,3 @@\n-old\n+new\n+extra\n context\n"
+            },
+            {
+                "path": "src/new.rs",
+                "kind": {"type": "add"},
+                "diff": "--- /dev/null\n+++ b/src/new.rs\n@@ -0,0 +1,2 @@\n+one\n+two\n"
+            },
+            {
+                "path": "src/old.rs",
+                "kind": {"type": "delete"},
+                "diff": "--- a/src/old.rs\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-one\n-two\n"
+            }
+        ]
+    }))
+    .expect("file change detail");
+
+    assert!(detail.contains("file: src/updated.rs (修改 1 行 · 新增 1 行)"));
+    assert!(detail.contains("file: src/new.rs (新增 2 行)"));
+    assert!(detail.contains("file: src/old.rs (删除 2 行)"));
+    assert!(!detail.contains("修改 2 行 · 新增 1 行 · 删除 1 行"));
+}
+
+#[test]
+fn file_change_detail_keeps_action_when_diff_has_no_changed_lines() {
+    let detail = file_change_detail_from_value(&serde_json::json!({
+        "path": "src/renamed.rs",
+        "status": "completed",
+        "kind": {"type": "move", "move_path": "src/original.rs"}
+    }))
+    .expect("file change detail");
+
+    assert_eq!(detail, "file: src/renamed.rs (移动)");
+}
+
+#[test]
+fn file_change_detail_counts_plain_added_and_deleted_content() {
+    let detail = file_change_detail_from_value(&serde_json::json!({
+        "type": "fileChange",
+        "changes": [
+            {
+                "path": "/workspace/src/new.rs",
+                "kind": {"type": "add"},
+                "diff": "first\n+literal content\n-third\n"
+            },
+            {
+                "path": "/workspace/src/old.rs",
+                "kind": {"type": "delete"},
+                "diff": "first\n\nthird\n"
+            }
+        ]
+    }))
+    .expect("file change detail");
+
+    assert!(detail.contains("file: /workspace/src/new.rs (新增 3 行)"));
+    assert!(detail.contains("file: /workspace/src/old.rs (删除 3 行)"));
+}
+
+#[test]
+fn file_change_detail_uses_workspace_relative_paths_and_indents_every_diff_line() {
+    let detail = file_change_detail_from_value_with_work_dir(
+        &serde_json::json!({
+            "type": "fileChange",
+            "changes": [{
+                "path": "/workspace/project/target/demo.txt",
+                "kind": {"type": "add"},
+                "diff": "first\nsecond\nthird\n"
+            }]
+        }),
+        Some(Path::new("/workspace/project")),
+    )
+    .expect("file change detail");
+
+    assert_eq!(
+        detail,
+        "changes:\n- file: target/demo.txt (新增 3 行)\n  first\n  second\n  third"
+    );
+}
+
+#[test]
+fn file_change_detail_preserves_paths_outside_workspace() {
+    let detail = file_change_detail_from_value_with_work_dir(
+        &serde_json::json!({
+            "type": "fileChange",
+            "changes": [{
+                "path": "/shared/demo.txt",
+                "kind": {"type": "add"},
+                "diff": "one\n"
+            }]
+        }),
+        Some(Path::new("/workspace/project")),
+    )
+    .expect("file change detail");
+
+    assert!(detail.contains("file: /shared/demo.txt (新增 1 行)"));
+}
+
+#[test]
+fn file_change_detail_preserves_unknown_actions_and_path_only_changes() {
+    let detail = file_change_detail_from_value(&serde_json::json!({
+        "changes": [
+            {"path": "scripts/tool.sh", "action": "chmod"},
+            {"path": "assets/empty.txt"}
+        ]
+    }))
+    .expect("file change detail");
+
+    assert!(detail.contains("file: scripts/tool.sh (chmod)"));
+    assert!(detail.contains("file: assets/empty.txt"));
+}
+
+#[test]
+fn file_change_line_stats_do_not_pair_changes_across_hunks() {
+    let diff = "@@ -1 +1 @@\n-old\n context\n@@ -8 +8,2 @@\n context\n+new\n";
+
+    assert_eq!(unified_diff_line_stats(diff), (1, 1, 0));
+}
+
+#[test]
+fn external_progress_result_prefers_file_detail_and_keeps_structured_fallbacks() {
+    let nested_file_change = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::ToolFinished,
+        content: "stale absolute-path detail".to_string(),
+        title: Some("fileChange".to_string()),
+        raw: serde_json::json!({
+            "params": {
+                "item": {
+                    "type": "fileChange",
+                    "path": "/workspace/project/src/main.rs",
+                    "kind": {"type": "update"}
+                }
+            }
+        }),
+    };
+    assert_eq!(
+        external_progress_result_text(&nested_file_change, Some(Path::new("/workspace/project"))),
+        "file: src/main.rs (修改)"
+    );
+
+    let detail_free_file_change = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::ToolFinished,
+        content: String::new(),
+        title: Some("fileChange".to_string()),
+        raw: serde_json::json!({"item": {"type": "fileChange"}}),
+    };
+    assert!(
+        external_progress_result_text(&detail_free_file_change, None)
+            .contains(r#""type": "fileChange""#)
+    );
+
+    let empty_regular_tool = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::ToolFinished,
+        content: String::new(),
+        title: Some("exec_command".to_string()),
+        raw: serde_json::json!({}),
+    };
+    assert!(external_progress_result_text(&empty_regular_tool, None).is_empty());
+}
+
+#[test]
+fn file_change_detail_covers_top_level_diff_and_header_only_unified_diff() {
+    let detail = file_change_detail_from_value(&serde_json::json!({
+        "diff": "--- a/src/main.rs\n+++ b/src/main.rs\n-old\n+new\n"
+    }))
+    .expect("top-level diff detail");
+    assert_eq!(
+        detail,
+        "diff:\n  --- a/src/main.rs\n  +++ b/src/main.rs\n  -old\n  +new"
+    );
+    assert!(looks_like_unified_diff(
+        "--- a/src/main.rs\n+++ b/src/main.rs\n-old\n+new\n"
+    ));
+
+    assert_eq!(
+        format_file_change_path("src/main.rs", Some("修改"), Some("context only"), None),
+        "file: src/main.rs (修改)"
+    );
+}
+
+#[test]
 fn traex_cli_parser_maps_real_jsonl_events() {
     let stdout = r#"{"type":"thread.started","thread_id":"019e9f78-traex"}
 {"type":"turn.started"}

@@ -21,7 +21,8 @@ Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动
 - app-server notification 映射到现有 `ExternalCliProgressEvent`，保留 tool、plan、assistant、run status 与最终回复展示。
 - 下一轮继续复用现有 `external_thread_id`，通过 `thread/resume` + `turn/start` 续聊。
 - 新增 `bifrost agent guide --session <key> <message>`；session 必填，避免向错误的默认 runner session 发送控制消息。
-- 新增 Chat Gateway session guide endpoint；IM `/g` 与除 ChatGPT Web 外的普通 busy message 都按 live capability 判断 steer 或 queue，只有 `/q` 明确进入队列。
+- 新增 Chat Gateway session guide endpoint；除 ChatGPT Web 外的普通 busy message 都按 live capability 判断 steer 或 queue，只有 `/q` 明确进入队列。`/g` 仅保留为不再展示的兼容别名。
+- busy external runner 必须先拦截 `/models`、`/model`、`/efforts`、`/effort` 等 Bifrost slash 命令，再进入默认 Guide/Queue 路由；控制命令不得作为 `turn/steer` 输入透传给 Runner。
 
 ### 必须不破坏
 
@@ -55,8 +56,9 @@ Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动
 
 - `guide`：要求当前 active runner 立即改变执行方向。Codex/Traex 通过 `turn/steer` 修改当前 turn；Claude Code 通过官方 interrupt control request 中断当前响应，再在同一进程与同一 session 中接续处理 guide。
 - `queue`：当前 turn 结束后作为新 turn 执行。
-- 除 ChatGPT Web 外，IM 与 WebUI 的普通 busy text 默认请求 guide；`/g` 是显式 Guide，`/q` 是显式 Queue。
-- Codex/Traex app-server RPC 成功 ack 后展示当前 turn 已引导。Claude Code 必须先收到 interrupt control response，再发送 guide user frame，并在 `--replay-user-messages` 回显确认后展示 session 已重定向；单独的 user-frame 回显只代表排队确认，不得伪装成当前响应已被引导。
+- 除 ChatGPT Web 外，IM 与 WebUI 的普通 busy text 默认请求 guide；`/q` 是显式 Queue。`/g` 不再出现在帮助中，但继续按显式 Guide 解析以兼容已有用户和自动化调用。
+- busy 状态下 `/efforts` 与 `/effort` 继续走 Bifrost session 命令处理：查询即时返回，设置只影响下一轮，不改变已运行中的 turn。
+- Codex/Traex app-server RPC 成功 ack 后展示当前 turn 已引导。Claude Code 必须先收到 interrupt control response，再发送 guide user frame，并在 `--replay-user-messages` 回显确认后展示 session 已重定向；单独的 user-frame 回显只代表排队确认，不得伪装成当前响应已被引导。自定义/exec transport 或 turn-end race 无法 ack 时展示降级原因并排队。
 - ChatGPT Web 始终默认 Queue，WebUI 不展示 Guide 切换，IM 普通 busy message 直接排队。
 - 图片暂不进入 `turn/steer` 文本协议；external runner 忙碌时收到图片必须保留附件并明确降级排队，不能只注入占位文本或丢失图片。
 - 调用方收到 `delivery=steered` 才能展示实时引导已生效；有 `turnId` 表示当前 turn steer，无 `turnId` 表示同一 runner session interrupt-and-continue。`delivery=queued` 必须展示降级原因。
@@ -177,7 +179,7 @@ bifrost agent guide --session cli-Codex "先检查失败日志"
 
 所有模拟 Claude Code stream-json 的测试夹具必须读取一条初始 user JSONL frame 后开始输出，不能通过 `cat` 等待 stdin EOF。需要验证 guide 的夹具还必须依次校验 interrupt control request、返回匹配 request id 的 control response、读取 guide user frame，并模拟旧响应的 interrupted result 与 guide 的最终 success result。真实 transport 会保持 stdin 打开；等待 EOF 会让夹具在正确的产品行为下永久阻塞并最终误报 30 秒超时。
 
-Web Playwright 同时覆盖 Codex/Traex/Claude Code 默认 Guide、显式 Queue、ChatGPT Web 只展示 Queue，以及 Guide 降级后刷新队列状态。IM mock inbound 覆盖普通 busy text 默认 steer、`/q` 显式排队和 ChatGPT Web 默认排队。
+Web Playwright 同时覆盖 Codex/Traex/Claude Code 默认 Guide、显式 Queue、ChatGPT Web 只展示 Queue，以及 Guide 降级后刷新队列状态。IM mock inbound 覆盖普通 busy text 默认 steer、`/q` 显式排队、busy Codex/Traex 的 `/efforts` 与 `/effort` 不透传，以及 ChatGPT Web 默认排队。
 
 ### Human tests
 

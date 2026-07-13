@@ -387,6 +387,7 @@ pub(super) async fn run_event_loop_with_options(
                                     agent_session_manager: &agent_session_manager,
                                     progress_registry: &progress_registry,
                                     external_cli_config_store: &external_cli_config_store,
+                                    agent_config: &effective_agent_config,
                                     default_mode: busy_default_mode,
                                     status_context: status_context_from_agent_config(
                                         &effective_agent_config,
@@ -514,6 +515,7 @@ pub(super) async fn run_event_loop_with_options(
                             agent_session_manager: &agent_session_manager,
                             progress_registry: &progress_registry,
                             external_cli_config_store: &external_cli_config_store,
+                            agent_config: &agent_config,
                             default_mode: busy_default_mode,
                             status_context: status_context_from_agent_config(&agent_config),
                             default_work_dir: Some(
@@ -892,6 +894,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                 agent_session_manager: ctx.agent_session_manager,
                 progress_registry: ctx.progress_registry,
                 external_cli_config_store: ctx.external_cli_config_store,
+                agent_config: &provider_agent_config,
                 default_mode: busy_default_mode_for_external_adapter(&settings.adapter),
                 status_context,
                 default_work_dir: Some(
@@ -1109,7 +1112,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
             tokio::sync::mpsc::unbounded_channel();
         let request_for_progress = request.clone();
         // Keep the runner control loop independently polled while this task
-        // handles an inbound /g (or the default Guide message). Awaiting the
+        // handles a default Guide message (or a legacy inbound /g). Awaiting the
         // guide acknowledgement inline otherwise stalls `run_with_progress`,
         // which is also responsible for forwarding that guide to the worker.
         let request_for_run = request.clone();
