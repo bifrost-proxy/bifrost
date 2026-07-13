@@ -93,6 +93,11 @@ if [[ -n "$legacy_go_artifacts" ]]; then
   echo "legacy Go QUIC/SOCKS5 client artifacts are forbidden" >&2
   exit 1
 fi
+if [[ -e e2e-tests/tests/quic_socks5_test.py ]] &&
+  git ls-files --error-unmatch e2e-tests/tests/quic_socks5_test.py >/dev/null 2>&1; then
+  echo "legacy incomplete Python QUIC/SOCKS5 client is forbidden" >&2
+  exit 1
+fi
 grep -Fq 'write_machine_report' "$runner"
 grep -Fq 'summary.json' "$runner"
 grep -Fq 'schema_version' "$e2e_summary"

@@ -41,6 +41,7 @@
 | TC-COV-18 | PR 轻量代理门禁与每周完整审计 | gate |
 | TC-COV-19 | 仓库移除 Go 工具链且测试能力不降级 | regression |
 | TC-COV-20 | 最终 PR 功能影响与测试辅助代码边界 | regression |
+| TC-COV-21 | QUIC/SOCKS5 测试仅保留 Rust/Shell 有效实现 | regression |
 
 ## 用例细节
 
@@ -413,6 +414,26 @@ SKIP_FRONTEND_BUILD=1 cargo build -p bifrost-proxy --all-features
 生产二进制或 production coverage 分母；其双向转发、统计、取消与错误路径测试全部通过；
 生产配置仍可独立构建。
 
+### TC-COV-21 QUIC/SOCKS5 测试仅保留 Rust/Shell 有效实现
+
+**步骤**：
+
+```bash
+test ! -e e2e-tests/tests/quic_socks5_test.py
+test -z "$(git ls-files | rg '(^|/)(go\.mod|go\.sum|go\.work)$|\.go$')"
+test -z "$(git grep -n 'quic_socks5_test.py' -- ':!design/**' ':!human_tests/**' \
+  ':!e2e-tests/tests/test_coverage_pipeline_contract.sh')"
+bash e2e-tests/tests/test_coverage_pipeline_contract.sh
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy --test upstream_http3_e2e \
+  --all-features test_http_proxy_to_h3_origin_enabled_by_rule -- --exact --nocapture
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-proxy --lib --all-features \
+  proxy::socks::udp::tests -- --nocapture
+```
+
+**预期**：仓库没有 Go 源码/模块，也不保留未接入入口且未完成真实 transport 的 Python
+QUIC/SOCKS5 演示脚本；HTTP/3 由 Rust 本地 QUIC/H3 origin 集成测试验证，SOCKS5 UDP 由
+Rust 正常、边界、错误和 relay 测试验证；覆盖率契约禁止这些遗留文件回流。
+
 ## 执行记录
 
 | 用例 ID | 执行人 | 结果 | 备注 |
@@ -427,6 +448,7 @@ SKIP_FRONTEND_BUILD=1 cargo build -p bifrost-proxy --all-features
 | TC-COV-18-CI | Codex | ✅ | 2026-07-13：首次远端 run 29218085900 在 23 秒内暴露 `Unknown E2E suite: proxy`，确认执行分支已新增但参数白名单遗漏；将 `proxy` 加入白名单，并在 coverage pipeline contract 固定断言 `rules | shell | runner | proxy`，防止入口与执行分支再次漂移。 |
 | TC-COV-19 | Codex | ✅ | 2026-07-13：仓库源码（排除依赖安装目录和通用构建产物）无 `.go`/`go.mod`/`go.sum`/`go.work`，旧客户端目录也无 tracked ARM64 编译产物；workflow 无 `setup-go`/`go install`；`shfmt` v3.12.0 固定下载地址与 SHA-256 均命中；coverage pipeline contract 通过（253 个 Shell 语法、24 个工具单测、10 个 capability）；Rust 本地 HTTP/3 origin 真链路 1/1、SOCKS5 UDP 正常/边界/错误/真实 relay 9/9 通过。首次执行发现 human test 扫描了契约自身的禁用字面量而误报，已收窄到 workflow 执行面后从头复跑通过；第 2 轮 review 发现并删除无扩展名的旧 Go 客户端 Mach-O 产物，再次从头复跑通过。 |
 | TC-COV-20 | Codex | ✅ | 2026-07-13：最终全 PR review 发现普通 tunnel 泛型 helper 在移除生产调用后仍以 `allow(dead_code)` 进入 release 构建；改为 `#[cfg(test)]` 后，双向转发、字节统计、取消、断连与错误路径 6/6 通过，`cargo build -p bifrost-proxy --all-features` 通过。同步补齐此前遗漏的 TC-COV-18/19/20 用例索引，避免 human_tests 详情与索引漂移。 |
+| TC-COV-21 | Codex | ✅ | 2026-07-13：删除未接入测试入口且未完成 QUIC transport 的历史 Python 演示脚本；确认仓库无 Go 文件/模块、无有效入口引用；coverage pipeline contract 通过（254 个 Shell 语法、24 个工具单测、10 个 capability）；Rust HTTP/3 本地 QUIC/H3 真链路 1/1、Rust SOCKS5 UDP 正常/边界/错误/真实 relay 9/9 通过。首轮执行发现契约用 `git ls-files --error-unmatch` 会把工作区已删除但尚未暂存的文件误判为回流，已改为同时要求文件实际存在并从头复跑通过。 |
 | TC-COV-07 | Codex | ✅ | AGENTS.md 已加入 90% CI 门禁段落，并明确本地默认不跑全量 coverage |
 | TC-COV-08 | Codex | ✅ | design/coverage-90.md 已落地 |
 
