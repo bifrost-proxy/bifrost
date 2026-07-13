@@ -273,7 +273,7 @@ design/
   对 shutdown、取消、session cleanup 增加受控并发测试。
 - 下一波引入 ShellCheck 和 Bats；先对安装/升级与 coverage/CI 编排脚本建立函数级
   测试，再评估 kcov 的 Linux Shell 行覆盖门禁，避免一次引入全部存量告警。
-- nightly 执行插桩全量 E2E、fuzz、mutation 与明确跳过项；release gate 执行真实
+- 每周/手动审计执行插桩全量 E2E、fuzz、mutation 与明确跳过项；release gate 执行真实
   安装、升级、证书、系统代理和外部 relay 场景。
 
 ### Phase 6：PR 增量门禁与持续分层覆盖（当前推进）
@@ -290,8 +290,10 @@ design/
 - 主 CI 增加阻断式 Playwright 关键能力矩阵，覆盖 Rules、Values、Scripts、Traffic、
   Breakpoint 和 Agent 新会话；完整 211 条历史套件进入每周审计并保留 artifact。在历史
   旧页面契约清零前，禁止把完整审计伪装成合入绿灯，也禁止让已知存量失败阻断所有 PR。
-- PR 与定时 `Layered E2E Coverage` workflow 使用同一插桩 profile 执行完整 Rules、
-  Shell、Runner E2E，并上传 unit+integration、E2E-only、union 与 production 四份报告。
+- PR 主 Coverage job 使用同一插桩 profile 执行 unit+integration、Rules、Runner 与 13 个
+  代理核心 Shell 场景；每周/手动 `Layered E2E Coverage` 才执行完整 Rules、Shell、Runner，
+  并上传 unit+integration、E2E-only、union 与 production 四份报告。PR 不重复串行 167 个
+  Shell 场景，但仍以轻量代理集合执行 production 90% 绝对门禁。
   `bifrost-proxy` 使用 `metric="production"`：只排除 exact `#[cfg(test)]` item 及其外置
   module，生产分母不因测试辅助代码规模变化；当前证据为 19304/21446 = 90.01%。
 - Shell 质量分为三层：全仓 `bash -n`、全仓 ShellCheck error gate、变更的
@@ -356,13 +358,13 @@ design/
 ## 风险与决策点
 
 - **E2E 环境限制**：某些本地环境（无 Tauri、无 macOS keychain、无网络）跑不动
-  E2E；本地可用 `make coverage-unit` 迭代，但 PR 的 `Layered E2E Coverage` 必须运行
-  full E2E 并执行 production 90% 门禁，不能用本地降级结果代替。
+  E2E；本地可用 `make coverage-unit` 迭代，但 PR 主 Coverage 必须运行 proxy E2E 子集并
+  执行 production 90% 门禁，不能用本地降级结果代替。完整分层覆盖改为每周与手动审计。
 - **棘轮下调**：任何 PR 下调 `min` 视为红线，需要 reviewer 显式同意并在 PR 描述里说明原因。
 - **`enforce_ratchet_up`**：默认关闭，等大家习惯棘轮流程后再考虑打开。打开后写测试补覆盖率必须同步上调 `min`，否则 gate 失败。
 - **workspace 聚合门禁**：`workspace_min` 保护聚合值，但如果某个大 crate 被拆分或删掉，聚合值可能跳变；维护者需要在 refactor 时同步调整。
-- **CI 时间成本**：`coverage-all.sh --with-e2e` 比普通 unit CI 慢很多，但核心代理
-  90% 的分子包含 E2E 独占路径，因此 PR 修改代理、E2E 或覆盖脚本时必须运行；定时任务
-  继续提供主分支每日审计。
+- **CI 时间成本**：核心代理 90% 的分子包含 E2E 独占路径，因此 PR 主 Coverage 使用
+  `--e2e-suite proxy` 只采集 Runner、Rules 与 13 个核心代理 Shell 场景；完整
+  `coverage-all.sh --with-e2e` 仅每周/手动执行，避免每个 PR 重复约 84 分钟的全量串行审计。
 - **平台特异 min**：`macos_min` 只在 macOS 本地跑覆盖时校验，避免让 macOS-only 代码在 Linux CI 上被错误计入；对应 crate 的注释必须解释清楚。
 - **thresholds 文件的变更节奏**：min 只允许 PR 内上调；下调需 justified；`workspace_min` 每次上调都要跑一次 `--gate` 确认聚合值稳定。

@@ -41,7 +41,8 @@
 #   --html             Also write HTML report to OUTPUT_DIR/html
 #   --text             Print text table to stdout
 #   --with-e2e         Also run E2E suites and merge their coverage
-#   --e2e-suite NAME   Limit E2E to rules, shell, or runner (requires --with-e2e)
+#   --e2e-suite NAME   Limit E2E to rules, shell, runner, or the lightweight
+#                      proxy coverage set (requires --with-e2e)
 #   --gate             After reporting, run coverage-gate.py to enforce floors
 #   --gaps             Pass --gaps to the gate (prints where to add tests)
 #   --fail-under PCT   Hard workspace floor passed straight to llvm-cov
@@ -89,6 +90,7 @@ ORIGINAL_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-}"
 ORIGINAL_XDG_DATA_HOME="${XDG_DATA_HOME:-}"
 ORIGINAL_BIFROST_DATA_DIR="${BIFROST_DATA_DIR:-}"
 PROFILE_ROOT="$ROOT_DIR/target/llvm-cov-target"
+PROXY_COVERAGE_SHELL_MANIFEST="$ROOT_DIR/scripts/ci/proxy-coverage-shell-tests.txt"
 
 usage() { sed -n '2,/^$/s/^# \?//p' "$0"; }
 
@@ -329,7 +331,9 @@ trap cleanup_on_exit EXIT
 
 run_selected_e2e() {
   local -a suites=(rules shell runner)
-  if [[ -n "$E2E_SUITE" ]]; then
+  if [[ "$E2E_SUITE" == "proxy" ]]; then
+    suites=(rules shell runner)
+  elif [[ -n "$E2E_SUITE" ]]; then
     suites=("$E2E_SUITE")
   fi
 
@@ -337,7 +341,16 @@ run_selected_e2e() {
   local status=0
   for suite in "${suites[@]}"; do
     echo -e "${BLUE}-> run-e2e-${suite}${NC}"
-    bash "scripts/ci/run-e2e-${suite}.sh" || status=$?
+    if [[ "$suite" == "shell" && "$E2E_SUITE" == "proxy" ]]; then
+      local proxy_shell_tests
+      proxy_shell_tests="$(paste -sd, "$PROXY_COVERAGE_SHELL_MANIFEST")"
+      BIFROST_E2E_SHELL_TESTS="$proxy_shell_tests" \
+        SKIP_CARGO_TEST=true bash "scripts/ci/run-e2e-${suite}.sh" || status=$?
+    elif [[ "$suite" == "shell" ]]; then
+      SKIP_CARGO_TEST=true bash "scripts/ci/run-e2e-${suite}.sh" || status=$?
+    else
+      bash "scripts/ci/run-e2e-${suite}.sh" || status=$?
+    fi
   done
   return "$status"
 }

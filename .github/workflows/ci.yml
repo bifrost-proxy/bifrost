@@ -144,7 +144,7 @@ jobs:
         run: cargo test --workspace --all-features
 
   coverage:
-    name: Coverage (Unit + Integration) & 90% Gate
+    name: Coverage (Unit + Proxy E2E) & 90% Gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -169,11 +169,13 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Coverage tooling unit tests
         run: python3 -m unittest discover -s scripts/ci/tests -p 'test_*.py' -v
-      - name: Collect unit + integration coverage and enforce gate
+      - name: Collect unit + proxy E2E coverage and enforce gate
         # Per-crate floors + workspace floor live in
         # scripts/ci/coverage-thresholds.toml. The gate fails the job if any
         # crate drops below its ratcheted floor (goal: 90%).
-        run: bash scripts/ci/coverage-all.sh --json --lcov --gate --gaps
+        run: >-
+          bash scripts/ci/coverage-all.sh --with-e2e --e2e-suite proxy
+          --json --lcov --gate --gaps
       - name: Changed production Rust line coverage (95%)
         if: github.event_name == 'pull_request'
         env:
@@ -195,6 +197,7 @@ jobs:
           path: |
             target/coverage/coverage.json
             target/coverage/lcov.info
+            target/coverage/production-coverage.json
             target/coverage/changed-lines.json
           retention-days: 7
 

@@ -214,6 +214,7 @@ Bash 调度逻辑，无 Rust 公共函数变更。
 - Linux 与 macOS Shell capability matrix 显式设置 `SKIP_CARGO_TEST=true`：HTTP/3 Rust integration test 由 Unit/Integration 与 Coverage 两个独立 job 双重执行；Shell 保留全部真实代理场景，避免冷缓存下 test-only 依赖编译超过 job 预算。
 - Layered Coverage 的 Shell 阶段同样设置 `SKIP_CARGO_TEST=true`：前置 Unit/Integration coverage 已执行并采集 HTTP/3 integration test，后续 Shell 只运行可贡献 E2E profile 的真实代理场景，禁止额外构建未插桩 release test。
 - Layered Coverage 在插桩构建前生成 Web 资产，并把历史 Shell 用例使用的 `target/release/{bifrost,bifrost-e2e}` 兼容路径链接到同一份 debug 插桩二进制；既保证管理端资源与旧用例路径可用，也不混入未插桩进程。
+- PR 不再触发完整 Layered Coverage；主 Coverage 使用 `--e2e-suite proxy`，通过 `BIFROST_E2E_SHELL_TESTS` 精确选择 13 个 SOCKS/CONNECT/HTTP/WebSocket 核心场景并合并 Rules、Runner profile。完整 167 个 Shell 的分层报告只在每周和手动审计生成。
 - `BIFROST_BIN=<release> SKIP_BUILD=true PROXY_PORT=<free> MOCK_HTTP_PORT=<free> BIFROST_DATA_DIR=<tmp> SERVER_LOG_DIR=<tmp> bash e2e-tests/tests/test_replay_body_decode.sh`：本地 `/gzip` 返回 200 + `"gzipped": true`。
 - 静态：`scripts/run_all_e2e.sh` 的 `CARGO_BIN` 默认来自 `resolve_cargo_command`；`heartbeat_while_running` 用 `BIFROST_E2E_HEARTBEAT_INTERVAL`。
 - 静态：`e2e-tests/run_all_tests_parallel.sh` 存在 `result_has_status`，Windows 下 `loop_sleep` 默认 `BIFROST_E2E_WINDOWS_POLL_INTERVAL:-1`。

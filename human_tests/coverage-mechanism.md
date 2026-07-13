@@ -282,7 +282,8 @@ grep -n 'production-coverage.json\|coverage-all.sh --with-e2e' \
 ```
 
 **预期**：production reporter 输出 `PASS` 且覆盖率不少于 90%；阈值文件中
-`bifrost-proxy min = 90.0`、`metric = "production"`；PR layered workflow 执行完整
+`bifrost-proxy min = 90.0`、`metric = "production"`；PR 主 Coverage 使用
+`--with-e2e --e2e-suite proxy` 执行轻量绝对门禁，每周/手动 layered workflow 执行完整
 `--with-e2e` 并上传 `production-coverage.json`。
 
 ### TC-COV-17 Full E2E 门禁与 TLS 动态切换确定性
@@ -343,6 +344,27 @@ coverage 来自前置 Unit/Integration profile，Shell 只追加真实代理行�
 Layered Coverage 必须预先构建 Web 静态资源，并让历史 `target/release` 路径解析到
 同一份 debug 插桩二进制，避免旧 Shell 用例绕过覆盖率或因路径缺失产生假失败。
 
+### TC-COV-18 PR 轻量代理门禁与每周完整审计
+
+**步骤**：
+
+```bash
+test "$(grep -c '^  pull_request:' .github/workflows/coverage-e2e.yml)" -eq 0
+grep -F 'cron: "30 18 * * 0"' .github/workflows/coverage-e2e.yml
+grep -F -- '--with-e2e --e2e-suite proxy' .github/workflows/ci.yml
+BIFROST_E2E_SHELL_TESTS='test_trustworthy_traffic_metrics.sh,test_socks5_tls_rules.sh' \
+  bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner \
+  --skip-ui --skip-build --list-shell-tests
+bash e2e-tests/tests/test_coverage_pipeline_contract.sh
+python3 scripts/ci/coverage-production.py \
+  target/coverage-proxy-runner/proxy-smoke4-lcov.info --crate bifrost-proxy \
+  --thresholds scripts/ci/coverage-thresholds.toml --top 3
+```
+
+**预期**：Layered workflow 没有 PR 触发器，仅每周日 UTC 18:30（北京时间周一 02:30）
+和手动触发；主 Coverage 明确运行 proxy E2E 子集；Shell 精确过滤只列出指定的两个脚本；
+覆盖率契约通过；实测轻量集合的 `bifrost-proxy` production 覆盖率不少于 90%。
+
 ## 执行记录
 
 | 用例 ID | 执行人 | 结果 | 备注 |
@@ -353,6 +375,7 @@ Layered Coverage 必须预先构建 Web 静态资源，并让历史 `target/rele
 | TC-COV-04 | Codex | ✅ | 受磁盘限制改跑 `coverage-all.sh -p bifrost-command --text --fail-under 9999`；返回 rc=1，证明门禁失败路径生效 |
 | TC-COV-05 | Codex | ✅ | 受磁盘限制改跑 `coverage-all.sh -p bifrost-command --html --fail-under 0 --output-dir target/coverage-command-html`；`target/coverage-command-html/html/index.html` 已生成 |
 | TC-COV-06 | Codex | ⚠️ | 未跑全量 E2E coverage；本机磁盘不足已阻塞 workspace coverage，继续跑 E2E coverage 风险同类失败 |
+| TC-COV-18 | Codex | ✅ | 2026-07-13：确认 Layered workflow 无 `pull_request`、保留每周日 UTC 18:30 与手动触发；主 Coverage 使用 `--with-e2e --e2e-suite proxy`；精确 Shell 过滤只列出指定的两个用例；coverage pipeline contract 通过（253 个 Shell 语法、24 个工具单测、10 个 capability）；本地 unit+integration、Runner、Rules 与 13 个 proxy Shell profile 合并后 `bifrost-proxy` production 为 90.11%（19313/21433），90% 门禁 PASS。 |
 | TC-COV-07 | Codex | ✅ | AGENTS.md 已加入 90% CI 门禁段落，并明确本地默认不跑全量 coverage |
 | TC-COV-08 | Codex | ✅ | design/coverage-90.md 已落地 |
 
@@ -439,8 +462,8 @@ Layered Coverage 必须预先构建 Web 静态资源，并让历史 `target/rele
 
 - TC-COV-16：PASS。production reporter 对合并 LCOV 统计为
   `19304/21446 = 90.01%`，90% 门禁通过；阈值文件确认 `min=90.0`、
-  `metric="production"`，PR layered workflow 执行完整 `--with-e2e` 并上传
-  `production-coverage.json`。
+  `metric="production"`。该历史完整 Layered 证据继续由每周/手动审计保留；PR 已改为
+  主 Coverage 的 proxy E2E 子集执行同一 90% production 门禁。
 - TC-COV-17：PASS。coverage pipeline contract 检查 253 个 Shell 文件、23 个工具单测、
   10 个能力契约及 3 个能力分片均通过；真实运行 TLS ON -> OFF 用例 1/1 通过，切换后
   流量为 `HTTPS=1`、`TUNNEL=1`；release Runner 双开关 ChatGPT Web 会话恢复用例

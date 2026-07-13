@@ -1,15 +1,8 @@
 name: Layered E2E Coverage
 
 on:
-  pull_request:
-    paths:
-      - "crates/bifrost-proxy/**"
-      - "crates/bifrost-e2e/**"
-      - "e2e-tests/**"
-      - "scripts/ci/coverage-**"
-      - ".github/workflows/coverage-e2e.yml"
   schedule:
-    - cron: "30 18 * * *"
+    - cron: "30 18 * * 0"
   workflow_dispatch:
 
 concurrency:

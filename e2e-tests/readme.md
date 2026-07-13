@@ -252,7 +252,8 @@ bash scripts/ci/check-e2e-shell-ci-coverage.sh
 - 统一入口结束时在 `$BIFROST_E2E_REPORT_DIR/summary.json` 生成机器可读结果，包含每个
   suite 的状态、耗时、日志和跳过原因。CI 成功与失败都会上传该报告。
 - PR 的 Rust 新增/修改生产行由 `scripts/ci/coverage-diff.py` 执行 95% changed-lines
-  门禁；主分支定时任务额外生成 unit+integration、E2E-only、union 三层覆盖报告。
+  门禁，主 Coverage 以 proxy E2E 子集执行 `bifrost-proxy` production 90% 绝对门禁；
+  每周/手动任务额外生成 unit+integration、E2E-only、union 三层覆盖报告。
 - 完整 Playwright suite 由独立 `E2E UI (Playwright)` job 执行，不再依赖其他 Shell
   测试间接覆盖管理端页面。
 

@@ -19,6 +19,7 @@ layered_workflow=".github/workflows/coverage-e2e.yml"
 ui_full_workflow=".github/workflows/ui-e2e-full.yml"
 coverage_diff="scripts/ci/coverage-diff.py"
 coverage_production="scripts/ci/coverage-production.py"
+proxy_coverage_shell_manifest="scripts/ci/proxy-coverage-shell-tests.txt"
 shell_quality="scripts/ci/check-shell-quality.sh"
 e2e_summary="scripts/ci/e2e-summary.py"
 ui_critical="scripts/ci/run-ui-critical.sh"
@@ -54,6 +55,8 @@ grep -Fq 'Changed production Rust line coverage' "$coverage_diff"
 grep -Fq 'all exact #[cfg(test)] items excluded' "$coverage_production"
 grep -Fq 'changed_lines_min = 95.0' scripts/ci/coverage-thresholds.toml
 grep -Fq 'coverage-diff.py target/coverage/lcov.info' "$ci_workflow"
+grep -Fq -- '--with-e2e --e2e-suite proxy' "$ci_workflow"
+grep -Fq 'target/coverage/production-coverage.json' "$ci_workflow"
 grep -Fq 'E2E UI (Playwright)' "$ci_workflow"
 grep -Fq 'BIFROST_UI_TEST_PROFILE: critical' "$ci_workflow"
 grep -Fq 'run-ui-critical.sh' "$runner"
@@ -67,6 +70,12 @@ grep -Fq 'schema_version' "$e2e_summary"
 python3 scripts/ci/check-e2e-capabilities.py
 grep -Fq 'Proxy E2E capability contract' "$ci_workflow"
 grep -Fq 'Layered E2E Coverage' "$layered_workflow"
+if grep -Fq 'pull_request:' "$layered_workflow"; then
+  echo "full layered coverage must not run for every pull request" >&2
+  exit 1
+fi
+grep -Fq 'cron: "30 18 * * 0"' "$layered_workflow"
+grep -Fq 'workflow_dispatch:' "$layered_workflow"
 grep -Fq 'bash scripts/ci/coverage-all.sh --with-e2e' "$layered_workflow"
 grep -Fq 'production-coverage.json' "$layered_workflow"
 grep -Fq 'metric = "production"' scripts/ci/coverage-thresholds.toml
@@ -114,6 +123,18 @@ grep -Fq 'export PATH="$(dirname "$NODE_BIN"):$PATH"' "$coverage_e2e"
 grep -Fq 'Instrumented E2E suite failed' "$coverage_e2e"
 grep -Fq 'export BIFROST_E2E=1' scripts/ci/run-e2e-runner.sh
 grep -Fq 'shell_test_capability_group()' "$runner"
+grep -Fq 'BIFROST_E2E_SHELL_TESTS' "$runner"
+grep -Fq 'PROXY_COVERAGE_SHELL_MANIFEST' "$coverage_all"
+[[ "$(wc -l <"$proxy_coverage_shell_manifest" | tr -d ' ')" -eq 13 ]]
+while IFS= read -r proxy_shell_test; do
+  [[ -f "e2e-tests/tests/$proxy_shell_test" ]]
+done <"$proxy_coverage_shell_manifest"
+manifest_filtered_shell_tests="$(
+  BIFROST_E2E_SHELL_TESTS="$(paste -sd, "$proxy_coverage_shell_manifest")" \
+    bash "$runner" --ci --full-shell --skip-rules --skip-runner --skip-ui \
+    --skip-build --list-shell-tests
+)"
+[[ "$manifest_filtered_shell_tests" == "$(cat "$proxy_coverage_shell_manifest")" ]]
 grep -Fq 'use_capability_shell_shards()' "$runner"
 grep -Fq 'capability: proxy-core' "$ci_workflow"
 grep -Fq 'capability: remote' "$ci_workflow"
@@ -126,6 +147,13 @@ if grep -Fq 'save-if: always()' "$ci_workflow" ||
   exit 1
 fi
 grep -Fq 'save-if: ${{ true }}' "$ci_workflow"
+proxy_filter='test_trustworthy_traffic_metrics.sh,test_socks5_tls_rules.sh'
+filtered_shell_tests="$(
+  BIFROST_E2E_SHELL_TESTS="$proxy_filter" bash "$runner" \
+    --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build \
+    --list-shell-tests
+)"
+[[ "$filtered_shell_tests" == $'test_trustworthy_traffic_metrics.sh\ntest_socks5_tls_rules.sh' ]]
 BIFROST_E2E_CAPABILITY_SHARDS=1 BIFROST_E2E_SHELL_JOBS=2 bash "$runner" \
   --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build \
   --shard 1/3 --check-shell-shard-balance

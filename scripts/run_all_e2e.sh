@@ -189,6 +189,7 @@ Options:
 Environment variables:
   BIFROST_E2E_SHARD_INDEX  Shard index (1-indexed), same as N in --shard N/M
   BIFROST_E2E_SHARD_TOTAL  Total shards, same as M in --shard N/M
+  BIFROST_E2E_SHELL_TESTS  Optional comma-separated exact shell test names
 EOF
 }
 
@@ -961,7 +962,18 @@ collect_shell_shard_assignments() {
 
 collect_all_shell_tests() {
   local all_tests=()
-  if [[ "$SHELL_MODE" == "full" ]]; then
+  if [[ -n "${BIFROST_E2E_SHELL_TESTS:-}" ]]; then
+    local requested=()
+    local name
+    IFS=',' read -r -a requested <<<"$BIFROST_E2E_SHELL_TESTS"
+    for name in "${requested[@]}"; do
+      if [[ -z "$name" || "$name" == */* || ! -f "$E2E_DIR/tests/$name" ]]; then
+        echo "Error: invalid BIFROST_E2E_SHELL_TESTS entry: $name" >&2
+        return 1
+      fi
+      all_tests+=("$name")
+    done
+  elif [[ "$SHELL_MODE" == "full" ]]; then
     while IFS= read -r script_path; do
       local name
       name="$(basename "$script_path")"
