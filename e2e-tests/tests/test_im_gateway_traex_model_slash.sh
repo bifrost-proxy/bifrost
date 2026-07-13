@@ -133,7 +133,12 @@ chmod +x "$MOCK_TRAECLI"
 cat >"$MOCK_CLAUDE" <<'SH'
 #!/usr/bin/env sh
 printf '%s\n' "$*" >> "$BIFROST_MOCK_CLAUDE_ARGV_LOG"
-cat >/dev/null
+# Claude stream-json keeps stdin open so live guide frames can arrive during the
+# active turn. Consume the initial user frame instead of waiting for EOF.
+if ! IFS= read -r initial_frame; then
+  printf '%s\n' 'missing initial stream-json user frame' >&2
+  exit 1
+fi
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"BIFROST_CLAUDE_MODEL_SLASH_OK"}]}}'
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"BIFROST_CLAUDE_MODEL_SLASH_OK","session_id":"thread-claude-model-slash","usage":{"input_tokens":1,"output_tokens":1}}'
 SH

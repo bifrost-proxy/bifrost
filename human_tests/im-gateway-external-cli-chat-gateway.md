@@ -1341,8 +1341,32 @@
 
 执行记录（2026-07-12）：PASS — `external_cli` focused suite 89 个测试全部通过（含 stream-json frame、同进程 guide、transport fallback 与既有 app-server 回归）；真实临时服务 E2E 输出 `[external-runner-live-guide] PASS`，Claude、Codex、Traex 三条 steer 链路以及 reject/exec/inactive fallback 全部通过。
 
+### TC-IEC-63: Claude Code stream-json mock 不等待 stdin EOF 回归
+
+操作步骤：
+
+1. 确认当前分支已构建最新 Bifrost debug binary：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+   ```
+2. 使用真实 Bifrost 进程运行模型与思考等级 shell E2E：
+   ```bash
+   SKIP_BUILD=true \
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+   bash e2e-tests/tests/test_im_gateway_traex_model_slash.sh
+   ```
+3. 检查测试用 mock Claude Code 的输入处理：它只消费一条初始 user JSONL frame，随后输出 assistant 与 result frame；不等待 stdin EOF。
+
+预期结果：
+
+1. 脚本输出 `[im-gateway-model-slash] PASS` 并以 0 退出。
+2. Claude Code 的 model 与 effort 两次运行均返回 `BIFROST_CLAUDE_MODEL_SLASH_OK`。
+3. 不再出现 `stream-json runner timed out after 30 seconds`。
+4. Codex 与 Traex 的既有 model/effort 断言继续通过。
+
 ## 最近执行记录
 
+- 2026-07-13：针对 PR #377 Linux `E2E Shell` 失败新增并立即执行 TC-IEC-63。修复前同一命令稳定在 Python 第 246 行收到 `stream-json runner timed out after 30 seconds`；修复 mock Claude 从等待 stdin EOF 改为消费一条初始 user JSONL frame 后，`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_traex_model_slash.sh` 输出 `[im-gateway-model-slash] PASS`。Codex、Traex、Claude Code 的 model 与 effort 六次真实临时服务运行全部通过，Claude run 为 `1783925191553-f1ad8e07-13b0-44c3-b237-c05cedac9305`、effort run 为 `1783925198233-c9920e47-70ea-4976-bbae-d38932762e75`，无 30 秒超时。
 - 2026-07-12：新增并立即执行 TC-IEC-61。两个 focused Rust 单测分别输出 `1 passed`；`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_codex_capacity_retry.sh` 输出 `[codex-capacity-retry] PASS`。隔离 mock app-server 验证首次 `serverOverloaded` 后在同一 thread 第二次成功、持续容量错误 3 次重试后失败、普通错误不重试、已有 assistant delta 后不重试；成功 run 未输出中间 `run_failed`，并持久化 `runner.capacityRetryCount=1`。
 - 2026-07-10：第 4 轮性能 review 新增并立即执行 TC-IEC-60。`worker_guide_rejects_saturated_control_channel_without_waiting` 与 `guide_stream_falls_back_to_queue_without_losing_message` 均输出 `1 passed`；同时复跑 `external_worker_`，陈旧 channel 不误杀 PID 与已 ACK Stop 不追加 kill 两项均通过。确认控制通道饱和时 Guide 快速返回上限错误，上层仍保留完整消息进入 Queue，且 Stop 的 PID reuse 安全边界未被有界通道改造破坏。
 - 2026-07-10：第 3 轮全面 review 新增并立即执行 TC-IEC-59。`stale_app_server_cleanup_preserves_replacement_session_owner`、`app_server_registration_rejects_stale_run_ownership` 与 `stale_run_session_cleanup_preserves_replacement_owner` 均通过，app-server 模块合计 `9 passed`；确认旧 run cleanup 按 `run_id` 条件删除、失去所有权的 run 不能晚到注册，且 `ACTIVE_SESSIONS` 的旧 owner 不能删除替代 owner。随后用当前源码重新构建 `target/debug/bifrost`，执行 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_external_runner_live_guide.sh` 输出 `[external-runner-live-guide] PASS`。
