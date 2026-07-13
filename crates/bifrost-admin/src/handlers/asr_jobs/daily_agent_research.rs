@@ -455,7 +455,11 @@ fn render_daily_research_index(
         if let Some(link) = result.full_report_link.as_deref() {
             report.push_str(&format!("- 完整研究：[打开独立 ChatGPT 会话]({link})\n"));
         } else if let Some(path) = result.result_path.as_deref() {
-            report.push_str(&format!("- 完整研究文件：`{path}`\n"));
+            let display_name = Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("research-report.md");
+            report.push_str(&format!("- 完整研究文件：`{display_name}`\n"));
         }
         if let Some(error) = result.error.as_deref() {
             report.push_str(&format!("- 错误：{error}\n"));

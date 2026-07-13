@@ -2501,3 +2501,26 @@ fn daily_agent_research_index_keeps_original_question_and_chatgpt_link() {
     assert!(report.contains("## 这是日报中的原始问题吗？"));
     assert!(report.contains("https://chatgpt.com/c/conversation-1"));
 }
+
+#[test]
+fn daily_agent_research_index_does_not_expose_local_result_paths() {
+    let result = AsrDailyResearchChildResult {
+        question_id: "q1".to_string(),
+        original_question: "本地研究问题".to_string(),
+        runner: "codex".to_string(),
+        github_repositories: Vec::new(),
+        github_connector_status: None,
+        context_profile: None,
+        status: "success".to_string(),
+        run_id: Some("run-1".to_string()),
+        conversation_id: None,
+        full_report_link: None,
+        result_path: Some("/Users/private/research/2026-07-13/q1.md".to_string()),
+        context_path: None,
+        error: None,
+    };
+
+    let report = render_daily_research_index("2026-07-13", &[result]);
+    assert!(report.contains("完整研究文件：`q1.md`"));
+    assert!(!report.contains("/Users/private"));
+}
