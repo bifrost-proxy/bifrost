@@ -70,6 +70,7 @@ pub struct ExternalCliGuideResult {
     pub reason: Option<String>,
 }
 
+#[cfg(test)]
 pub(crate) fn terminate_process_group(pid: u32) -> Result<(), String> {
     terminate_process(pid)
 }

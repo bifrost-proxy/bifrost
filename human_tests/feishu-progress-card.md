@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-本模块验证飞书通道的 Agent progress card 会保留内置 Loop 与外部 Runner 的 `AssistantDelta` / 运行中 `AssistantFinal` 过程信息，同时把逐字符/累计快照归并成可读思考；最终正文只在卡片底部出现一次。工具、计划、可读状态、错误、token usage 刷新和可读执行耗时仍按原语义工作。
+本模块验证飞书通道的 Agent progress card 会保留外部 Runner 的 `AssistantDelta` / 运行中 `AssistantFinal` 过程信息，同时把逐字符/累计快照归并成可读思考；最终正文只在卡片底部出现一次。工具、计划、可读状态、错误、token usage 刷新和可读执行耗时仍按原语义工作。
 
 ## 前置条件
 

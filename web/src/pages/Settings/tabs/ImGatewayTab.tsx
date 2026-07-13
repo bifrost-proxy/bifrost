@@ -63,9 +63,8 @@ import {
 const { Text } = Typography;
 const { useBreakpoint } = Grid;
 
-const BUILTIN_AGENT_RUNNER_OPTIONS = [
+const AGENT_RUNNER_OPTIONS = [
   { label: "Inherit global default", value: "__inherit__" },
-  { label: "Bifrost Agent", value: "bifrost_agent" },
 ];
 
 type ProviderCreateStep = 0 | 1 | 2;
@@ -490,15 +489,14 @@ function ConnectionsPanel({
   );
   const agentRunnerOptions = useMemo(
     () => [
-      ...BUILTIN_AGENT_RUNNER_OPTIONS,
+      ...AGENT_RUNNER_OPTIONS,
       ...runnerIds.map((id) => ({ label: id, value: id })),
     ],
     [runnerIds],
   );
-  const inheritedRunner = agentDefaults?.runner || "Bifrost Agent";
+  const inheritedRunner = agentDefaults?.runner || externalCliConfig?.defaultRunnerId || "Codex";
 
   const displayRunnerLabel = (provider: ImProviderConfig) => {
-    if (provider.agent_config?.runner === "bifrost_agent") return "Bifrost Agent";
     if (provider.agent_config?.runner) return provider.agent_config.runner;
     if (externalCliConfig?.channels[provider.id]?.runnerId) {
       return externalCliConfig.channels[provider.id].runnerId;
@@ -507,7 +505,6 @@ function ConnectionsPanel({
   };
 
   const providerRunnerFormValue = useCallback((provider: ImProviderConfig) => {
-    if (provider.agent_config?.runner === "bifrost_agent") return "bifrost_agent";
     if (provider.agent_config?.runner) return provider.agent_config.runner;
     if (externalCliConfig?.channels[provider.id]?.runnerId) {
       return externalCliConfig.channels[provider.id].runnerId;
@@ -567,7 +564,7 @@ function ConnectionsPanel({
     if (!externalCliConfig) return;
     const channels = { ...externalCliConfig.channels };
     const current = channels[providerId] || {};
-    if (runnerValue && runnerValue !== "__inherit__" && runnerValue !== "bifrost_agent") {
+    if (runnerValue && runnerValue !== "__inherit__") {
       channels[providerId] = {
         ...current,
         runnerId: runnerValue,
@@ -1214,7 +1211,7 @@ function ConnectionsPanel({
                         {p.event_connection_enabled ? "Long Connection" : "Webhook"}
                       </Tag>
                       {displayRunnerLabel(p) ? (
-                        <Tag color={p.agent_config?.runner === "bifrost_agent" ? "green" : "geekblue"}>
+                        <Tag color="geekblue">
                           {displayRunnerLabel(p)}
                         </Tag>
                       ) : null}
@@ -1396,13 +1393,7 @@ function ConnectionsPanel({
                         {
                           label: "Agent Runner",
                           value: displayRunnerLabel(p) ? (
-                            <Tag
-                              color={
-                                p.agent_config?.runner === "bifrost_agent"
-                                  ? "green"
-                                  : "geekblue"
-                              }
-                            >
+                            <Tag color="geekblue">
                               {displayRunnerLabel(p)}
                             </Tag>
                           ) : (
@@ -2195,10 +2186,9 @@ function SchedulesPanel({
   const [form] = Form.useForm();
   const taskType = Form.useWatch("task_type", form) || "script";
   const triggerType = Form.useWatch("trigger_type", form) || "interval";
-  const selectedRunnerId = Form.useWatch("agent_runner_id", form) || "bifrost_agent";
+  const selectedRunnerId = Form.useWatch("agent_runner_id", form) || externalCliConfig?.defaultRunnerId || "Codex";
   const scheduleRunnerOptions = useMemo(
     () => [
-      { label: "Bifrost Agent", value: "bifrost_agent" },
       ...Object.keys(externalCliConfig?.runners || {})
         .sort()
         .map((id) => ({ label: id, value: id })),
@@ -2271,10 +2261,7 @@ function SchedulesPanel({
       if (values.task_type === "agent") {
         payload.agent = {
           prompt: values.agent_prompt,
-          runner_id:
-            values.agent_runner_id && values.agent_runner_id !== "bifrost_agent"
-              ? values.agent_runner_id
-              : undefined,
+          runner_id: values.agent_runner_id || undefined,
           initial_prompt: selectedRunnerIsChatGptWeb
             ? values.agent_initial_prompt || undefined
             : undefined,
@@ -2384,7 +2371,7 @@ function SchedulesPanel({
       key: "runner",
       width: 130,
       render: (_: unknown, record: ImSchedule) =>
-        record.task_type === "agent" ? record.agent?.runner_id || "Bifrost Agent" : "-",
+        record.task_type === "agent" ? record.agent?.runner_id || externalCliConfig?.defaultRunnerId || "Codex" : "-",
     },
     {
       title: "Trigger",
@@ -2469,7 +2456,7 @@ function SchedulesPanel({
             form.setFieldsValue({
               enabled: true,
               task_type: "script",
-              agent_runner_id: "bifrost_agent",
+              agent_runner_id: externalCliConfig?.defaultRunnerId || "Codex",
               trigger_type: "interval",
               every_ms: 60000,
               timezone: "UTC",
@@ -2595,7 +2582,7 @@ function SchedulesPanel({
 
           {taskType === "agent" ? (
             <>
-              <Form.Item name="agent_runner_id" label="Runner" initialValue="bifrost_agent">
+              <Form.Item name="agent_runner_id" label="Runner" initialValue={externalCliConfig?.defaultRunnerId || "Codex"}>
                 <Select options={scheduleRunnerOptions} />
               </Form.Item>
               {selectedRunnerIsChatGptWeb && (
@@ -2621,11 +2608,6 @@ function SchedulesPanel({
                   <Input placeholder="Project path used for runner execution" />
                 </Form.Item>
               </div>
-              {selectedRunnerId === "bifrost_agent" && (
-                <Form.Item name="agent_system_prompt" label="System Prompt Override">
-                  <Input.TextArea rows={3} placeholder="Optional" />
-                </Form.Item>
-              )}
             </>
           ) : (
             <>
@@ -2757,7 +2739,7 @@ function ScheduleDetailModal({
         <Descriptions.Item label="IM Channel">{renderTarget()}</Descriptions.Item>
         {schedule.task_type === "agent" && (
           <Descriptions.Item label="Runner">
-            {schedule.agent?.runner_id || "Bifrost Agent"}
+            {schedule.agent?.runner_id || "Default external runner"}
           </Descriptions.Item>
         )}
         {schedule.task_type === "agent" && (
@@ -2852,7 +2834,7 @@ function RunDetailCard({ run }: { run: ImTaskRun }) {
         <Descriptions.Item label="Target">{run.target_id || "-"}</Descriptions.Item>
         {isAgent && (
           <Descriptions.Item label="Runner">
-            {run.runner_id || "Bifrost Agent"}
+            {run.runner_id || "Default external runner"}
           </Descriptions.Item>
         )}
         <Descriptions.Item label="Started">

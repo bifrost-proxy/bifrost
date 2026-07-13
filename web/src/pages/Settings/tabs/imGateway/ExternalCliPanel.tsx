@@ -436,7 +436,7 @@ export default function ExternalCliPanel({
 
   return (
     <div>
-      <SectionHeader description="Manage custom runners. Other modules can select Bifrost Agent or any configured runner. Working directory is inherited from IM Provider Agent settings, then global Agent settings.">
+      <SectionHeader description="Manage external runners used by Agent Chat, IM providers, schedules, and ASR Daily Agent. Working directory is inherited from IM Provider Agent settings, then global Agent settings.">
         <Button icon={<ReloadOutlined />} onClick={fetchConfig} loading={loading || saving}>
           Refresh
         </Button>

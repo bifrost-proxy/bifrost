@@ -99,7 +99,6 @@ Web timeline 会按 `call_id` 合并工具 start/result,并跳过重复 start。
 
 外部 runner (Codex/Trae) 使用 app-server transport 时支持 `turn/steer`: 同 session 的普通 busy 文本默认请求 Guide,Web Chat 展示 Guide/Queue 且默认选中 Guide;只有 `/q` 或 UI 选择 Queue 才直接进入 `SessionQueueManager`。不支持 live guide、runner 拒绝、控制通道失败或图片输入时必须明确降级排队并保留原消息/附件;成功 steer 的消息不得重复排队。`/stop` 仍作为单独控制命令立即尝试停止当前外部进程。当前 run 结束后,IM/Web Chat runner loop 只弹出显式排队或降级排队的消息启动下一轮,Codex 和 Trae 都复用上一轮保存的 `threadId` 续接 runner 原生会话上下文。ChatGPT Web 保持只支持 Queue。
 
-Agent Chat 右侧 Threads 列表支持折叠: 卡片标题右侧按钮向右收起,收起后只保留右上悬浮向左展开按钮,状态写入 `localStorage`,刷新页面后保持。Threads runner 标记优先使用 `runner_id`/`runner_type`/`agent_type`,缺失时才从 `source`/`title` fallback 识别 Trae/Codex/ChatGPT,避免 Trae 会话误显示为 `Bf`。历史 JSONL 摘要和 session detail API 都必须保留 external runner metadata;服务重启后继续同一个 session 时,以绑定的 runner/thread/conversation 为准续接,无法恢复原生 thread 时才显式降级为同 runner 的新 thread,不能静默退回内置 Bifrost Agent。
 
 Runners 配置页的 Adapter 下拉只展示产品化入口: Codex CLI、Trae CLI、ChatGPT Web。后端仍接受历史或测试用途的 `custom`/`mock` adapter,保证已有配置和自动化测试不被破坏,但新建/编辑弹窗不再把这些未来扩展项暴露给普通用户。
 
@@ -199,7 +198,6 @@ Agent Chat 底部 token HUD 需要从 session detail、history summary 和外部
 - `e2e-tests/tests/test_im_gateway_traex_model_slash.sh`: 覆盖 `/models`、`/model <slug>`、`/model clear`。
 - `e2e-tests/tests/test_im_gateway_external_runner_delayed_final_state.sh`: 覆盖延迟 final state 的收敛。
 - `e2e-tests/tests/test_im_gateway_external_runner_image_input.sh`: 覆盖图像输入的 progress 语义。
-- `crates/bifrost-e2e/src/tests/im_gateway_agent.rs`: 覆盖 IM gateway + external CLI runner。
 - 使用临时 `BIFROST_DATA_DIR`、非 9900 端口,启动服务后调用 `/chat/stream`,断言 NDJSON 中包含 Trae progress event、最终 `run_finished`、run detail artifacts 和 timeline。
 - Playwright 断言 external runner 运行中输入只显示 Queue 并发送 `/q ...`;断言 Threads 折叠状态写入 localStorage,刷新后仍保持;断言 Trae fallback thread mark 不显示为 `Bf`;断言运行中 history 由 `timeline_changed` SSE 触发增量更新,其他线程的 timeline 事件不会污染当前消息区,且不会高频请求 `/sessions/all`。
 - Playwright 打开 Agent Runners 的 Add Runner 弹窗,断言 Adapter 下拉包含 Codex CLI、Trae CLI、ChatGPT Web,且不包含 Custom、Mock。

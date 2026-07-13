@@ -14,7 +14,7 @@ test("AI Agent Chat thread list loads in batches and virtualizes rows", async ({
       running: ordinal === 1,
       title: `Thread ${label}`,
       source: "admin-api",
-      runner_type: "bifrost_agent",
+      runner_type: "codex",
       work_dir: "/tmp/thread-batch-workspace",
       start_time: 1_779_700_000 - ordinal * 120,
       last_active_time: 1_779_700_000 - ordinal * 60,
@@ -42,7 +42,7 @@ test("AI Agent Chat thread list loads in batches and virtualizes rows", async ({
       contentType: "application/json",
       body: JSON.stringify({
         version: 1,
-        defaultRunnerId: "bifrost_agent",
+        defaultRunnerId: "codex",
         runners: {},
         channels: {},
       }),

@@ -10,7 +10,7 @@
 - 不使用正式 `9900` 端口。
 - 使用最新源码启动 WebUI；推荐通过 Playwright UI 测试 global setup 或临时 Bifrost 后端启动。
 - 测试数据目录必须是临时目录，不能复用用户真实 `~/.bifrost` 数据。
-- 后端 `/api/im-gateway/chat/config` 至少提供以下 enabled runner 中的若干项：Codex、Bifrost Agent、Claude Code、Trae X。若 Codex 不可用，测试必须记录实际 fallback runner。
+- 后端 `/api/im-gateway/chat/config` 至少提供以下 enabled 外部 runner 中的若干项：Codex、Claude Code、Trae X。若 Codex 不可用，测试必须记录实际 fallback runner。
 - 若 ASR capability 在当前平台不可用，ASR 入口隐藏或展示能力不可用空态均可接受，但必须与 capability API 返回一致。
 
 ## 测试用例列表
@@ -45,15 +45,14 @@
 1. 在 `/ai` 默认新建对话态查看 Runner 下拉当前值。
 2. 打开 Runner 下拉。
 3. 查看可选项。
-4. 选择 `Bifrost Agent`。
-5. 再次打开下拉并选择 `Claude Code` 或 `Trae X`，取决于当前后端 enabled runner。
+4. 选择 `Claude Code` 或 `Trae X`，取决于当前后端 enabled runner。
 
 预期结果：
 
 - Codex Runner 可用时，默认值为 `Codex Runner`。
 - Codex Runner 不可用时，默认值显示真实 fallback runner，不能显示 Codex 但实际使用其它 runner。
 - 下拉列表只包含 enabled runner，或 disabled runner 置灰且不可提交。
-- 可用 runner 至少按产品排序展示：Codex Runner、Bifrost Agent、Claude Code、Trae X、ChatGPT Web、自定义 runner。
+- 可用 runner 至少按产品排序展示：Codex Runner、Claude Code、Trae X、ChatGPT Web、自定义 runner。
 - 切换 runner 后，当前新建对话输入态保持不变，输入内容不丢失。
 
 ### TC-AILR-03 首条消息创建新线程
@@ -321,7 +320,6 @@
 - 亮色和暗色主题下图片预览条、删除按钮和大小标签都清晰可见。
 - 发送按钮在文本或图片至少一项存在时可点击；文本和图片都为空时保持禁用。
 - 发送后用户消息在普通对话页面展示文本和图片缩略图。
-- 请求 payload 中包含用户文本和图片数据；内置 Bifrost Agent 请求使用 `mime_type=image/png`，外部 Runner 请求继续使用 `mimeType=image/png`。
 - 已有对话 composer 的粘贴图片预览、最多 6 张上限、纯图片发送和外部 Runner 图片桥接能力保持不变。
 
 ## 清理步骤
@@ -356,7 +354,7 @@
 | 用例 | 实际结果 |
 | --- | --- |
 | TC-AILR-01 | 通过。打开 `/ai` 后左侧 `New Chat` 为 `aria-current=true`，线程列表可见且没有选中线程，右侧 AI Shell 显示 `How can Bifrost help?` 与居中输入面板；Playwright 断言侧栏宽度在 `210-230px`、输入面板高度在 `110-140px`、圆角大于等于 `16px`，并验证 textarea 位于底部工具栏上方，Runner 与发送按钮都在同一工具栏内，未进入 Agent General/Model 配置页。 |
-| TC-AILR-02 | 通过。mock 后端提供 `codex_runner`、`claude_runner`、`traex_runner`，默认显示 `Codex Runner`；打开下拉可见 `Bifrost Agent`、`Claude Code`，切换到 `Claude Code` 后输入内容保持可发送。 |
+| TC-AILR-02 | 通过。mock 后端提供 `codex_runner`、`claude_runner`、`traex_runner`，默认显示 `Codex Runner`；打开下拉可见 `Claude Code`、`Trae X`，切换到 `Claude Code` 后输入内容保持可发送。 |
 | TC-AILR-03 | 通过。在新建态输入 `Summarize current workspace status` 并发送，请求命中 `/api/im-gateway/chat/stream`，body 中 `runnerId=claude_runner`；NDJSON `run_finished` 返回后右侧显示 `Summary complete`，URL 更新为包含 `session=admin-chat-...` 且不再包含 `mode=new`。 |
 | TC-AILR-04 | 通过。左侧点击 `Existing thread` 后 `New Chat` 取消选中，右侧显示历史消息 `Existing answer`；右上角保留 `Status`，不再显示内部 `agent-chat-new` 按钮；Playwright 断言线程行选中前后高度一致，composer 宽度充分使用右侧主内容区，不再保留旧内部 thread rail 空列；再次点击左侧 `New Chat` 回到新建对话输入态。 |
 | TC-AILR-05 | 通过。ASR capability mock 为可用，左侧展示 `ASR`；点击后 URL 包含 `view=asr`，右侧渲染 ASR 工作台，不打开 Settings 二级内容页。 |

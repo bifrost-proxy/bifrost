@@ -234,94 +234,11 @@ pub fn snapshot_agent_context(
     }
 }
 
-pub(crate) fn update_active_turn_status<F>(session: &AgentSession, f: F)
-where
-    F: FnOnce(&mut ActiveTurnStatus),
-{
-    let mut snapshot = None;
-    if let Some(handle) = &session.active_turn_status {
-        if let Ok(mut status) = handle.lock() {
-            f(&mut status);
-            status.updated_at = current_time_secs();
-            snapshot = Some(status.clone());
-        }
-    }
-    if let (Some(sender), Some(status)) = (&session.progress_sender, snapshot) {
-        let _ = sender.send(AgentTurnProgressEvent::Status(Box::new(status)));
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ActiveTurnProgress {
-    pub state: &'static str,
-    pub current_loop_iteration: u32,
-    pub completed_loop_iterations: u32,
-    pub max_loop_iterations: u32,
-    pub local_tool_count: usize,
-    pub mcp_tool_count: usize,
-}
-
 fn current_time_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-pub(crate) fn refresh_active_turn_status(
-    session: &AgentSession,
-    config: &AgentConfig,
-    progress: ActiveTurnProgress,
-) {
-    let context_window_tokens = config_context_window_tokens(config);
-    let estimated_context_tokens = session.effective_token_count();
-    update_active_turn_status(session, |status| {
-        status.state = progress.state.to_string();
-        status.current_loop_iteration = progress.current_loop_iteration;
-        status.completed_loop_iterations = progress.completed_loop_iterations;
-        status.max_loop_iterations = progress.max_loop_iterations;
-        status.last_response_tokens = session.last_response_tokens;
-        status.total_tokens_used = session.total_tokens_used;
-        status.estimated_context_tokens = estimated_context_tokens;
-        status.context_window_tokens = context_window_tokens;
-        status.context_usage_percent =
-            context_usage_percent(estimated_context_tokens, context_window_tokens);
-        status.compaction_count = session.compaction_count;
-        status.history_version = session.history_version;
-        status.work_dir = session.work_dir.clone();
-        status.message_count = session.history.len();
-        status.local_tool_count = progress.local_tool_count;
-        status.mcp_tool_count = progress.mcp_tool_count;
-        status.user_turn_count = session.user_turn_count();
-        status.agent_type = session.agent_type.clone();
-        status.runner_type = session.runner_type.clone();
-        status.runner_id = session.runner_id.clone();
-        status.model = session.model.clone().or_else(|| config.model.clone());
-        status.model_provider = session
-            .model_provider
-            .clone()
-            .or_else(|| config.model_provider.clone());
-        status.model_reasoning_effort = session
-            .model_reasoning_effort
-            .clone()
-            .or_else(|| config.model_reasoning_effort.clone());
-        status.model_reasoning_summary = session
-            .model_reasoning_summary
-            .clone()
-            .or_else(|| config.model_reasoning_summary.clone());
-        status.external_conversation_id = session.external_conversation_id.clone();
-        status.external_thread_id = session.external_thread_id.clone();
-        status.pending_guide_messages = session
-            .guide_channel
-            .as_ref()
-            .map(|ch| ch.lock().unwrap().iter().cloned().collect())
-            .unwrap_or_default();
-    });
-    if let Some(sender) = &session.progress_sender {
-        let _ = sender.send(AgentTurnProgressEvent::ContextUpdated {
-            context: snapshot_agent_context(session, config),
-        });
-    }
 }
 
 pub fn format_active_turn_status_text(status: &ActiveTurnStatus) -> String {
@@ -357,13 +274,13 @@ pub fn format_active_turn_status_text_with_context(
         .as_ref()
         .or(context.agent_type.as_ref())
         .map(String::as_str)
-        .unwrap_or("Bifrost Agent");
+        .unwrap_or("External Runner Agent");
     let runner_type = status
         .runner_type
         .as_ref()
         .or(context.runner_type.as_ref())
         .map(String::as_str)
-        .unwrap_or("bifrost_agent");
+        .unwrap_or("external");
     let runner_id = status
         .runner_id
         .as_ref()
@@ -594,9 +511,9 @@ mod tests {
             mcp_tool_count: 5,
             pending_guide_messages: vec!["第一条引导".to_string(), "第二条引导".to_string()],
             user_turn_count: 4,
-            agent_type: Some("Bifrost Agent".to_string()),
-            runner_type: Some("bifrost_agent".to_string()),
-            runner_id: None,
+            agent_type: Some("External Runner Agent".to_string()),
+            runner_type: Some("codex".to_string()),
+            runner_id: Some("Codex".to_string()),
             model: Some("gpt-5".to_string()),
             model_provider: Some("openai".to_string()),
             model_reasoning_effort: Some("high".to_string()),
@@ -610,8 +527,8 @@ mod tests {
         let text = format_active_turn_status_text(&status);
         assert!(text.contains("工作路径: /tmp/bifrost-work"));
         assert!(text.contains("当前状态: model_response"));
-        assert!(text.contains("Agent 类型: Bifrost Agent"));
-        assert!(text.contains("Runner 类型: bifrost_agent"));
+        assert!(text.contains("Agent 类型: External Runner Agent"));
+        assert!(text.contains("Runner 类型: codex"));
         assert!(text.contains("模型: gpt-5（openai）"));
         assert!(text.contains("外部会话: Codex threadId=thread-runtime"));
         assert!(text.contains("历史对话轮次: 4"));

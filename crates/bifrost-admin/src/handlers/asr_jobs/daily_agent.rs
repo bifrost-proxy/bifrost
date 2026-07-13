@@ -804,13 +804,9 @@ fn daily_agent_runner_ready_for_agent(agent: &AsrDailyAgentItem) -> bool {
     !agent.runner.trim().is_empty()
 }
 
-fn daily_agent_runner_is_bifrost(task: &AsrDirectoryTask) -> bool {
-    task.daily_agent.runner.trim() == "bifrost_agent"
-}
-
 fn daily_agent_external_runner_id(task: &AsrDirectoryTask) -> Option<&str> {
     let runner = task.daily_agent.runner.trim();
-    (!runner.is_empty() && runner != "bifrost_agent").then_some(runner)
+    (!runner.is_empty()).then_some(runner)
 }
 
 fn collect_report_outputs_for_plan(
@@ -1126,93 +1122,6 @@ fn persist_daily_agent_conversation_success(
     save_daily_agent_conversation_state_for_task(task, &state)
 }
 
-async fn run_bifrost_agent_daily_runner(
-    task: &AsrDirectoryTask,
-    prompt: &str,
-    daily_dir: &Path,
-    session_key: &str,
-) -> Result<String, String> {
-    bifrost_agent::install_system_skills();
-    let agent_data_dir = bifrost_storage::data_dir().join("agent");
-    let _ = std::fs::create_dir_all(&agent_data_dir);
-    let mut config = bifrost_agent::AgentConfigStore::new(&agent_data_dir).load();
-    config.enabled = true;
-    config.runner = None;
-    config.work_dir = Some(daily_dir.to_string_lossy().to_string());
-
-    let client = bifrost_agent::AgentClient::default();
-    let tools = bifrost_agent::ToolRegistry::with_defaults();
-    let session_manager = bifrost_agent::AgentSessionManager::new(config.get_session_ttl_secs());
-    let Some(mut session) = session_manager.try_take_session_with_work_dir(
-        session_key,
-        Some(daily_dir.to_string_lossy().to_string()),
-    ) else {
-        return Err(format!(
-            "bifrost_agent session '{session_key}' is already running"
-        ));
-    };
-
-    // 设置 session 来源标记，使其在 sessions 列表中可见
-    session.source = "daily_agent".to_string();
-    session.mark_bifrost_agent_runtime();
-
-    // 创建 ConversationRecorder 以持久化会话记录
-    let persist_data_dir = bifrost_agent::config::agent_home_dir();
-    let mut recorder = bifrost_agent::persistence::ConversationRecorder::new(
-        &persist_data_dir,
-        session_key,
-    );
-    let _ = recorder.record_session_start(
-        session_key,
-        serde_json::json!({
-            "source": "daily_agent",
-            "work_dir": daily_dir.to_string_lossy(),
-            "task_id": task.id,
-            "task_name": task.name,
-            "model": config.model,
-            "provider": config.model_provider,
-        }),
-    );
-
-    let timeout_result = tokio::time::timeout(
-        Duration::from_millis(task.daily_agent.timeout_ms),
-        bifrost_agent::session::run_turn_with_mcp(
-            &client,
-            &config,
-            &mut session,
-            &tools,
-            None,
-            prompt,
-            None,
-            Some(&mut recorder),
-        ),
-    )
-    .await;
-
-    // 无论成功、失败还是超时，都记录 session 结束
-    let (status, final_result) = match timeout_result {
-        Ok(Ok(turn)) => ("success", Ok(turn.response)),
-        Ok(Err(e)) => ("failed", Err(format!("bifrost_agent run failed: {e}"))),
-        Err(_) => (
-            "timeout",
-            Err(format!(
-                "daily agent run timed out after {}ms",
-                task.daily_agent.timeout_ms
-            )),
-        ),
-    };
-
-    let _ = recorder.record_session_end(
-        session_key,
-        serde_json::json!({
-            "total_tokens": session.total_tokens_used.unwrap_or(0),
-            "status": status,
-        }),
-    );
-
-    session_manager.return_session(session);
-    final_result
-}
 
 async fn run_external_daily_agent_prompt(
     task: &AsrDirectoryTask,
@@ -1465,9 +1374,7 @@ async fn run_daily_agent_inner(
     }
 
     // 3. Determine adapter for prompt construction
-    let adapter = if daily_agent_runner_is_bifrost(task) {
-        "bifrost_agent".to_string()
-    } else if let Some(runner_id) = daily_agent_external_runner_id(task) {
+    let adapter = if let Some(runner_id) = daily_agent_external_runner_id(task) {
         let config_store =
             crate::im_gateway::external_cli::ExternalCliConfigStore::new(&bifrost_storage::data_dir());
         let config = config_store.load();
@@ -1735,16 +1642,8 @@ async fn run_daily_agent_inner(
             }
             conversation_success = Some((effective.settings.adapter.clone(), last_metadata));
         } else {
-            let prompt = build_daily_agent_prompt(task, &plan, &adapter, false)?;
-            let response =
-                run_bifrost_agent_daily_runner(task, &prompt, &agent_work_dir, &session_key).await?;
-            conversation_success = Some(("bifrost_agent".to_string(), None));
-            tracing::info!(
-                task_id = %task.id,
-                response_len = response.len(),
-                "bifrost_agent daily runner completed"
-            );
-    }
+            return Err("daily agent requires an external runner".to_string());
+        }
 
     // 6. Validate reports before marking source documents processed.
     let (reports_generated, missing_reports) = collect_report_outputs_for_plan(&plan);

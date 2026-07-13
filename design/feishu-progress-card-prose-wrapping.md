@@ -2,7 +2,7 @@
 
 ## 背景
 
-内置 Agent Loop 和外部 Runner 会持续产生 `AssistantDelta` / 运行中的 `AssistantFinal`，随后 `TurnFinished` 又携带完整最终回复。过程正文必须实时出现在飞书卡片中，否则用户只能看到最终结果，无法了解模型在做什么；但若把每个 token/字符都追加成独立 timeline item，同一段思考会近似竖排，最终正文还会在过程区和卡片底部重复。
+外部 Runner 会持续产生 `AssistantDelta` / 运行中的 `AssistantFinal`，随后 `TurnFinished` 又携带完整最终回复。过程正文必须实时出现在飞书卡片中，否则用户只能看到最终结果，无法了解模型在做什么；但若把每个 token/字符都追加成独立 timeline item，同一段思考会近似竖排，最终正文还会在过程区和卡片底部重复。
 
 PR #370 通过丢弃全部 `AssistantDelta` 和 Running 阶段的 `AssistantFinal` 消除了重复，同时也误删了用户需要的执行过程。本设计改为在 progress snapshot 边界归并同一条 assistant stream，并只在 turn 收束时移除与最终答案等价的末尾过程项。
 

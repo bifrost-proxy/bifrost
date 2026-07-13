@@ -73,7 +73,6 @@ ISOLATED_AFTER_TESTS=(
   "test_remote_shell_exec_streaming_e2e.sh"
   "test_traffic_db_e2e.sh"
   "test_openai_like_sse_search_e2e.sh"
-  "test_agent_send_msg_default_channel.sh"
   "test_e2e_process_cleanup_isolation.sh"
 )
 
@@ -628,10 +627,7 @@ SKIP_IN_CI_TESTS=(
   # These shell wrappers are pure Rust compile/test contract checks, not shell
   # E2E flows. Keep them local-only so CI shell jobs do not compile again after
   # the dedicated unit/integration jobs already covered the Rust paths.
-  "test_agent_codex_parity_contracts.sh"
   "test_chatgpt_web_shared_profile.sh"
-  "test_im_agent_markdown_image_reply.sh"
-  "test_im_agent_streaming_progress_card.sh"
   "test_utf8_safe_preview_e2e.sh"
   # These two desktop contract wrappers spend 18-19 minutes compiling the
   # Tauri graph on macOS. Keep them as explicit local desktop release
@@ -643,7 +639,6 @@ SKIP_IN_CI_TESTS=(
   # CI never fails because a runtime dependency or model host is unavailable.
   "test_asr_admin_csrf.sh"
   "test_asr_daily_agent_template.sh"
-  "test_asr_daily_agents_api.sh"
   "test_asr_diarization_cli.sh"
   "test_asr_model_autonomy.sh"
   "test_asr_platform_gating.sh"
@@ -674,13 +669,10 @@ is_skipped_in_ci() {
 # a small default; exact values are not critical, only relative ordering is.
 shell_test_weight() {
   case "$1" in
-    test_agent_send_msg_default_channel.sh) echo 30 ;;
-    test_long_term_memory_remember_recall.sh) echo 207 ;;
     test_desktop_open_requests_contract.sh) echo 620 ;;
     test_sync_github_gist_expired_status_e2e.sh) echo 302 ;;
     test_im_gateway_long_reply_delivery_regression.sh) echo 178 ;;
     test_tls_intercept_e2e.sh) echo 170 ;;
-    test_agent_send_msg_feishu_card.sh) echo 162 ;;
     test_skill_creator_flow.sh) echo 148 ;;
     test_remote_file_relay_e2e.sh) echo 132 ;;
     test_http3_e2e.sh) echo 120 ;;
@@ -690,7 +682,6 @@ shell_test_weight() {
     test_chatgpt_web_behavior_artifacts.sh) echo 85 ;;
     test_remote_invoke_e2e.sh) echo 75 ;;
     test_security_hardening_functional.sh) echo 72 ;;
-    test_agent_builtin_status_runtime.sh) echo 61 ;;
     test_remote_invoke_ssh_e2e.sh) echo 59 ;;
     test_devtools_page_bridge_api.sh) echo 52 ;;
     test_group_sync_e2e.sh) echo 46 ;;
@@ -735,18 +726,11 @@ shell_test_runs_serial_in_parallel_shell_job() {
     test_remote_shell_exec_streaming_e2e.sh|\
     test_traffic_db_e2e.sh|\
     test_openai_like_sse_search_e2e.sh|\
-    test_agent_send_msg_default_channel.sh|\
-    test_agent_builtin_status_runtime.sh|\
-    test_agent_codex_parity_contracts.sh|\
-    test_agent_loop_runtime_limits.sh|\
     test_asr_model_autonomy.sh|\
     test_asr_task_pause_resume.sh|\
     test_chatgpt_web_behavior_artifacts.sh|\
     test_http3_e2e.sh|\
-    test_im_agent_markdown_image_reply.sh|\
-    test_im_agent_streaming_progress_card.sh|\
     test_im_gateway_long_reply_delivery_regression.sh|\
-    test_long_term_memory_remember_recall.sh|\
     test_qwen3_asr_local_server.sh|\
     test_qwen3_asr_runtime_guards.sh|\
     test_skill_creator_flow.sh|\
@@ -774,11 +758,11 @@ shell_test_capability_group() {
     test_setting_ssh_key_cli.sh|\
     test_ssh_key_*|\
     test_status_tui_remote_invoke_panel.sh|\
+    test_client_process_transport_attribution.sh|\
     test_cli_online_commands_e2e.sh|\
     test_sync_*|\
     test_group_sync_*|\
     test_security_hardening_functional.sh|\
-    test_long_term_memory_remember_recall.sh|\
     test_e2e_scripts_disable_sync_login_prompt.sh|\
     test_install_*|\
     test_desktop_*|\
@@ -1252,18 +1236,12 @@ run_shell_tests_parallel() {
   # Cargo's shared target artifact lock while sibling tests compile. Keep them
   # serial so the timeout measures test work instead of lock contention.
   local CARGO_HEAVY_TESTS=(
-    "test_agent_builtin_status_runtime.sh"
-    "test_agent_codex_parity_contracts.sh"
-    "test_agent_loop_runtime_limits.sh"
     "test_asr_model_autonomy.sh"
     "test_asr_task_pause_resume.sh"
     "test_chatgpt_web_behavior_artifacts.sh"
     "test_client_process_transport_attribution.sh"
     "test_http3_e2e.sh"
-    "test_im_agent_markdown_image_reply.sh"
-    "test_im_agent_streaming_progress_card.sh"
     "test_im_gateway_long_reply_delivery_regression.sh"
-    "test_long_term_memory_remember_recall.sh"
     "test_qwen3_asr_local_server.sh"
     "test_qwen3_asr_runtime_guards.sh"
     "test_skill_creator_flow.sh"

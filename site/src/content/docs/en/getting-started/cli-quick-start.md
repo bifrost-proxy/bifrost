@@ -104,7 +104,7 @@ If you already have credentials, use manual setup and keep secrets out of shell 
 bifrost im provider add feishu-main --type feishu --app-id cli_xxx --secret env:FEISHU_APP_SECRET --owner-open-id ou_xxx --runner "Claude Code"
 ```
 
-After a channel connects, Bifrost sends an online notification followed by runner-aware help. All runners see channel commands such as `/help`, `/status`, `/cwd`, `/runner`, `/q`, `/rq`, and `/stop`; built-in Bifrost Agent sessions also show memory, compaction, goal, and guidance commands; external runners only show model or reasoning effort commands when the adapter supports them.
+After a channel connects, Bifrost sends an online notification followed by runner-aware help. All external runners see channel commands such as `/help`, `/status`, `/cwd`, `/runner`, `/q`, `/rq`, and `/stop`; model and reasoning-effort commands are shown only when the adapter supports them.
 
 ## Agent Collaboration
 

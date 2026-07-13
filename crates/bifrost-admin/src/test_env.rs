@@ -2,8 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 static BIFROST_DATA_DIR_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-#[cfg(test)]
-static AGENT_WORKER_ENV_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 pub(crate) struct BifrostDataDirGuard {
     _guard: MutexGuard<'static, ()>,
@@ -59,11 +57,6 @@ impl Drop for BifrostDataDirGuard {
         }
         bifrost_storage::set_data_dir(self.old_static_dir.clone());
     }
-}
-
-#[cfg(test)]
-pub(crate) fn agent_worker_env_lock() -> &'static tokio::sync::Mutex<()> {
-    AGENT_WORKER_ENV_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 #[cfg(test)]

@@ -163,7 +163,7 @@ convert_to_feishu_markdown
 
 所有面向飞书卡片的 Markdown 内容在写入 JSON 前都经 `convert_to_feishu_markdown()`：
 
-1. `handlers/im_gateway/agent_chat.rs::process_agent_chat` — Agent 主回复。
+1. `handlers/im_gateway/event_loop.rs` — 外部 Runner 主回复。
 2. `handlers/im_gateway/agent_reply.rs::send_agent_reply_with_title` — 带标题回复。
 3. `handlers/im_gateway/agent_reply.rs::send_agent_reply_with_plan` — 带任务计划回复。
 4. `handlers/im_gateway/agent_reply.rs::send_error_card_to_owner` — 错误通知卡。
@@ -236,7 +236,6 @@ Web 只能通过发送真实消息间接观察转换效果。
 ### E2E 测试
 
 - IM Gateway Agent 回归中已经间接覆盖：真实 Agent loop 输出会走本函数，只要单元测试全绿且六个应用点没漏接，E2E 无需单独用例。
-- 若需要显式回归，可在 `crates/bifrost-e2e/src/tests/im_gateway_agent.rs` 增加对 outbound message payload 的断言：确认卡片正文里没有 `[ ]`、`***text***`、`<div>` 等未清理产物。
 
 ### 真实场景测试
 

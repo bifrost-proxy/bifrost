@@ -4,7 +4,6 @@
 
 Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动 Codex、Traex 等 external CLI runner。当前 Codex/Traex adapter 使用 `exec --json ... -`：Bifrost 只在进程启动时把首条 prompt 写入 stdin，随后关闭 stdin 并等待 JSONL 输出。相同 `session_key` 在任务运行期间收到的新消息会进入 FIFO queue，必须等当前 turn 结束后再通过 `exec resume` 启动下一轮。
 
-内置 Bifrost Agent 已支持 guide channel：运行中消息可在工具调用 checkpoint 后进入同一 turn。Codex CLI 与 Trae CLI 的 app-server 协议也都提供 `turn/steer`，要求携带当前 `threadId`、`expectedTurnId` 与输入。当前差距不是产品入口，而是 external runner worker 只支持 `Run` / `Stop`，且底层 adapter 没有保留可双向控制的协议连接。
 
 本方案让内置 Codex、Traex runner 默认使用每轮独立的 stdio app-server transport，让 Claude Code 默认使用长连接 stream-json transport，并把 worker 控制协议扩展为 `Run` / `Guide` / `Stop`。IM 与 WebUI 在会话忙碌时默认把普通后续文本视为 Guide，只有显式 `/q` 或 UI 选择 Queue 才排队；ChatGPT Web 因浏览器对话链路无法安全注入当前生成过程，继续默认 Queue。自定义 CLI、custom args 和显式 exec transport 会先尝试 worker guide capability，无法实时注入时明确降级到 FIFO queue，不能伪装成已注入。
 

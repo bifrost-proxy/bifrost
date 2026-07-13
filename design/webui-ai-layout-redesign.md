@@ -20,7 +20,7 @@
 - `/ai` 默认展示新建对话面板，左侧 `New Chat` 处于选中态，不默认打开配置页。
 - 新建对话面板在右侧主内容区垂直居中展示输入框，用户输入消息并发送后才创建新线程。
 - 新建对话输入面板底部工具栏展示 Runner 下拉选择，位置对应截图中“高级”操作区，默认使用 Codex Runner。
-- Runner 下拉必须包含后端已启用的 runner，至少能展示 Codex、Bifrost Agent、Claude Code、Trae X 这几类可用 runner。
+- Runner 下拉必须包含后端已启用的外部 runner，至少能展示 Codex、Claude Code、Trae X 这几类可用 runner。
 - 左侧顶部区域包含 `New Chat`、`ASR`、`Videos`、`IM` 四个工作入口。
 - 左侧中间区域展示所有 Agent threads，支持选中、运行状态、加载更多、右键删除或等效删除入口。
 - 左侧底部只有一个 Settings 入口，点击后在 Settings 内容页中操作原 AI 左侧菜单里的配置项。Settings 顶部只保留 `Agent`、`Runner`、`IM` 三个分组 tab；每个 tab 内把归属该分组的配置项以卡片方式向下平铺。
@@ -53,7 +53,7 @@
 ### 必须真实验证
 
 - WebUI 自动化测试覆盖默认进入 `/ai` 后的新建对话居中输入态。
-- WebUI 自动化测试覆盖默认 Codex Runner 选择、Runner 下拉可切换到 Bifrost Agent / Claude Code / Trae X。
+- WebUI 自动化测试覆盖默认 Codex Runner 选择、Runner 下拉可切换到 Claude Code / Trae X。
 - WebUI 自动化测试覆盖发送首条消息后创建 session，URL 和左侧线程选中态同步。
 - WebUI 自动化测试覆盖点击历史 thread 后退出新建态并打开旧对话。
 - WebUI 自动化测试覆盖打开历史 thread 时全量展示旧消息、中间消息和最新消息，不出现无必要的 `Load more`；运行中 timeline 推送追加后历史消息仍保留。
@@ -151,7 +151,6 @@ Runner 展示名建议：
 | adapter / runner | 展示名 |
 | --- | --- |
 | `codex` | Codex Runner |
-| `bifrost_agent` / `builtin` | Bifrost Agent |
 | `claude_code` | Claude Code |
 | `traex` | Trae X |
 | `chatgpt_web` | ChatGPT Web |
@@ -160,11 +159,10 @@ Runner 展示名建议：
 排序规则：
 
 1. Codex Runner。
-2. Bifrost Agent。
-3. Claude Code。
-4. Trae X。
-5. ChatGPT Web。
-6. 其它自定义 runner 按 label 或 id 排序。
+2. Claude Code。
+3. Trae X。
+4. ChatGPT Web。
+5. 其它自定义 runner 按 label 或 id 排序。
 
 Runner 下拉必须展示不可用状态：
 
@@ -342,7 +340,7 @@ Settings URL 语义：
   - 断言线程列表可见但没有选中 thread。
   - 断言 Runner 下拉默认 `Codex Runner`。
 - `ai-layout-create-thread.spec.ts`
-  - mock chat config 包含 Codex、Bifrost Agent、Claude Code、Trae X。
+  - mock chat config 包含 Codex、Claude Code、Trae X。
   - 切换 Runner 到 Claude Code。
   - 输入首条消息并发送。
   - 断言请求使用 Claude Code runner。

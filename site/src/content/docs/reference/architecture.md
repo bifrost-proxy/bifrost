@@ -85,7 +85,7 @@ Rust 端到端测试 runner。
 
 ### `agent`
 
-Agent 运行时与内置工具相关能力，负责把 Bifrost 流量、文件、远程调用等能力暴露给自动化协作场景。
+Agent 会话与外部 Runner 编排能力，负责持久化会话、状态和运行记录，并把 Codex、Claude Code 等外部执行器接入 Chat、IM 与定时任务场景。
 
 ### `skills`
 

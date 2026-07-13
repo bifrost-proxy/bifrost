@@ -31,7 +31,7 @@ fn daily_agent_legacy_config_is_upgraded_to_two_agents_without_losing_settings()
         enabled: false,
         agent_id: "meeting_notes".to_string(),
         name: "meeting_notes".to_string(),
-        runner: "codex_runner".to_string(),
+        runner: "codex".to_string(),
         timeout_ms: 12345,
         trigger_policy: AsrDailyAgentTriggerPolicy::ManualOnly,
         session_key: Some("legacy-session".to_string()),
@@ -53,7 +53,7 @@ fn daily_agent_legacy_config_is_upgraded_to_two_agents_without_losing_settings()
     assert!(!normalized.enabled);
     assert_eq!(normalized.agents.len(), 2);
     assert_eq!(normalized.agents[0].id, "meeting_notes");
-    assert_eq!(normalized.agents[0].runner, "codex_runner");
+    assert_eq!(normalized.agents[0].runner, "codex");
     assert_eq!(normalized.agents[0].trigger_policy, AsrDailyAgentTriggerPolicy::ManualOnly);
     assert_eq!(normalized.agents[0].instructions.as_deref(), Some("legacy instructions"));
     assert_eq!(normalized.agents[0].output_dir, "meeting_notes");
@@ -1625,7 +1625,7 @@ fn daily_agent_runner_is_single_required_value() {
     task.daily_agent.runner = String::new();
     assert!(!daily_agent_runner_ready(&task));
 
-    task.daily_agent.runner = "bifrost_agent".to_string();
+    task.daily_agent.runner = "Codex".to_string();
     assert!(daily_agent_runner_ready(&task));
 
     task.daily_agent.runner = "codex-runner".to_string();

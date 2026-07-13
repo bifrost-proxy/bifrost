@@ -510,36 +510,3 @@ pub(super) async fn send_agent_reply_assets(
         .await;
     }
 }
-
-pub(super) async fn send_agent_reply_images_for_event(
-    client: &ImProviderClient,
-    provider: &ImProviderConfig,
-    event: &ImEvent,
-    images: &[AgentReplyLocalImage],
-    attachments: &[AgentReplyLocalAttachment],
-    message_log_store: &Arc<ImMessageLogStore>,
-) {
-    if images.is_empty() && attachments.is_empty() {
-        return;
-    }
-    if let Some(reply_target) = build_agent_reply_target(
-        provider,
-        event,
-        "__agent_reply__",
-        "Agent Reply",
-        "interactive",
-    ) {
-        send_agent_reply_assets(
-            client,
-            provider,
-            event,
-            &reply_target,
-            images,
-            attachments,
-            message_log_store,
-        )
-        .await;
-    } else {
-        error!("no reply target to send agent reply attachments");
-    }
-}

@@ -67,7 +67,7 @@
 
 1. 使用已扫码授权的 `weixin` provider 启动真实 Bifrost：
    ```bash
-   BIFROST_DATA_DIR="<tmp>" RUST_LOG=bifrost_admin=debug,bifrost_agent=info,info target/debug/bifrost start -p 18938 --unsafe-ssl --no-system-proxy
+   BIFROST_DATA_DIR="<tmp>" RUST_LOG=bifrost_admin=debug,info target/debug/bifrost start -p 18938 --unsafe-ssl --no-system-proxy
    ```
 2. 从微信 ClawBot 向该 bot 发送一条普通消息。
 3. 观察 Bifrost 日志、`history/events` 和消息日志。

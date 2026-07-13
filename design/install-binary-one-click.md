@@ -218,7 +218,7 @@ Admin API 与 Web UI 不参与安装本身；`bifrost upgrade` 期间会通过�
 
 ### 真实场景测试
 
-- `human_tests/install-binary-one-click.md`：默认镜像自适应、Windows 镜像自适应、下载回退、临时目录真实安装（`BIFROST_INSTALL_DIR=$(mktemp -d) --no-post-install --no-modify-path`）、命令顺序、全局 / 分步 opt-out、help 可发现、下载进度可见、竞速静音、原子替换、`bifrost upgrade` 最快源 / 进度 / env 超时 / 二进制校验硬超时、restart 端口释放 + 明确诊断、runtime.json 缺失回退、macOS/Windows exec-child + wildcard 归一、本地真实 upgrade restart 链路、IM/Agent worker 优雅收口。
+- `human_tests/install-binary-one-click.md`：默认镜像自适应、Windows 镜像自适应、下载回退、临时目录真实安装（`BIFROST_INSTALL_DIR=$(mktemp -d) --no-post-install --no-modify-path`）、命令顺序、全局 / 分步 opt-out、help 可发现、下载进度可见、竞速静音、原子替换、`bifrost upgrade` 最快源 / 进度 / env 超时 / 二进制校验硬超时、restart 端口释放 + 明确诊断、runtime.json 缺失回退、macOS/Windows exec-child + wildcard 归一、本地真实 upgrade restart 链路、IM/外部 Runner worker 优雅收口。
 - `human_tests/cli-start-stop-status.md`：新增 macOS daemon exec-child 回归用例，临时数据目录启动真实 daemon，start/status/stop 正常、`runtime.json` 标记 daemon、日志无 `+[NSNumber initialize]` / `objc_initializeAfterForkError`、stop 后无同数据目录 tray helper。
 
 ## Review/Fix/Test 闭环方案

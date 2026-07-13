@@ -221,8 +221,6 @@ pub struct ImGatewayService {
     pub message_log_store: Arc<ImMessageLogStore>,
     pub connection_manager: Arc<ImConnectionManager>,
     pub agent_config_store: Arc<ImAgentConfigStore>,
-    pub agent_client: Arc<ImAgentClient>,
-    pub agent_tools: Arc<ImAgentToolRegistry>,
     pub agent_session_manager: Arc<ImAgentSessionManager>,
     pub external_cli_config_store: Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
     pub queue_manager: Arc<SessionQueueManager>,
@@ -243,10 +241,7 @@ impl ImGatewayService {
         Self::new_with_agent_proxy_port(data_dir, None)
     }
 
-    pub fn new_with_agent_proxy_port(data_dir: &std::path::Path, proxy_port: Option<u16>) -> Self {
-        // Install embedded system skills on startup (idempotent, fingerprint-checked)
-        bifrost_agent::install_system_skills();
-
+    pub fn new_with_agent_proxy_port(data_dir: &std::path::Path, _proxy_port: Option<u16>) -> Self {
         // Store agent config under data_dir/agent/ for unified directory structure
         let agent_data_dir = data_dir.join("agent");
         let _ = std::fs::create_dir_all(&agent_data_dir);
@@ -255,19 +250,6 @@ impl ImGatewayService {
         let schedule_store = Arc::new(ImScheduleStore::new(data_dir));
         let scheduler = Arc::new(ImScheduler::new());
         let target_store = Arc::new(ImTargetStore::new(data_dir));
-        let mut agent_tools = ImAgentToolRegistry::with_defaults();
-        crate::im_gateway::schedule_tools::register_schedule_tools(
-            &mut agent_tools,
-            schedule_store.clone(),
-            scheduler.clone(),
-            target_store.clone(),
-            crate::im_gateway::schedule_tools::ScheduleToolContext::default(),
-        );
-        let agent_tools = Arc::new(agent_tools);
-        let ca_cert_path = data_dir.join("certs").join("ca.crt");
-        let agent_client = proxy_port
-            .map(|port| ImAgentClient::new_with_bifrost_proxy_and_ca(port, Some(&ca_cert_path)))
-            .unwrap_or_default();
         Self {
             data_dir: data_dir.to_path_buf(),
             provider_store: Arc::new(ImProviderStore::new(data_dir)),
@@ -280,8 +262,6 @@ impl ImGatewayService {
             message_log_store: Arc::new(ImMessageLogStore::new(data_dir)),
             connection_manager: Arc::new(ImConnectionManager::new()),
             agent_config_store,
-            agent_client: Arc::new(agent_client),
-            agent_tools,
             agent_session_manager: Arc::new(ImAgentSessionManager::new(
                 agent_config.get_session_ttl_secs(),
             )),
@@ -294,32 +274,6 @@ impl ImGatewayService {
             weixin_login_pending: Arc::new(RwLock::new(HashMap::new())),
             feishu_setup_pending: Arc::new(RwLock::new(load_pending_feishu_setups(data_dir))),
         }
-    }
-
-    pub fn build_agent_tool_registry(
-        &self,
-        message_channel: Option<crate::im_gateway::types::ImMessageChannelBinding>,
-    ) -> Arc<ImAgentToolRegistry> {
-        let mut registry = (*self.agent_tools).clone();
-        crate::im_gateway::schedule_tools::register_schedule_tools(
-            &mut registry,
-            self.schedule_store.clone(),
-            self.scheduler.clone(),
-            self.target_store.clone(),
-            crate::im_gateway::schedule_tools::ScheduleToolContext {
-                message_channel: message_channel.clone(),
-            },
-        );
-        registry.register(Arc::new(
-            crate::im_gateway::send_msg_tool::SendMsgTool::new(
-                self.provider_store.clone(),
-                self.target_store.clone(),
-                self.message_log_store.clone(),
-                self.connection_manager.clone(),
-                crate::im_gateway::send_msg_tool::SendMsgToolContext { message_channel },
-            ),
-        ));
-        Arc::new(registry)
     }
 
     pub(super) fn provider_client(&self, provider: &ImProviderConfig) -> ImProviderClient {
@@ -493,8 +447,6 @@ impl ImGatewayService {
             let route_store = self.route_store.clone();
             let provider_store = self.provider_store.clone();
             let agent_config_store = self.agent_config_store.clone();
-            let agent_client = self.agent_client.clone();
-            let agent_tools = self.agent_tools.clone();
             let schedule_store = self.schedule_store.clone();
             let scheduler = self.scheduler.clone();
             let target_store = self.target_store.clone();
@@ -513,8 +465,6 @@ impl ImGatewayService {
                     route_store,
                     provider_store,
                     agent_config_store,
-                    agent_client,
-                    agent_tools,
                     schedule_store,
                     scheduler,
                     target_store,
@@ -683,8 +633,6 @@ impl ImGatewayService {
                             let route_store = self.route_store.clone();
                             let provider_store = self.provider_store.clone();
                             let agent_config_store = self.agent_config_store.clone();
-                            let agent_client = self.agent_client.clone();
-                            let agent_tools = self.agent_tools.clone();
                             let schedule_store = self.schedule_store.clone();
                             let scheduler = self.scheduler.clone();
                             let target_store = self.target_store.clone();
@@ -703,8 +651,6 @@ impl ImGatewayService {
                                     route_store,
                                     provider_store,
                                     agent_config_store,
-                                    agent_client,
-                                    agent_tools,
                                     schedule_store,
                                     scheduler,
                                     target_store,

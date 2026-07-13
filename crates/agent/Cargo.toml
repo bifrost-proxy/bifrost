@@ -2,7 +2,7 @@
 name = "bifrost-agent"
 version.workspace = true
 edition.workspace = true
-description = "AI Agent runtime for Bifrost with tool calling, multi-turn dialogue, and memory compaction"
+description = "Shared session and persistence support for Bifrost external runners"
 
 [dependencies]
 bifrost-core = { path = "../bifrost-core" }
@@ -17,33 +17,17 @@ reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls",
   "stream",
 ] }
-anyhow = "1"
 async-trait = "0.1"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2.0"
 dashmap = "6"
 include_dir = "0.7"
-fs2 = "0.4"
-rusqlite = { version = "0.33", features = ["bundled"] }
-futures = "0.3"
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
 url = "2.5"
-open = "5"
-bm25 = "2.3.2"
-keyring = { version = "3", optional = true }
-portable-pty = "0.9"
-
-[features]
-default = ["slash-router"]
-slash-router = []
-keyring-store = ["keyring"]
 
 [dev-dependencies]
 tempfile = "3"
 filetime = "0.2"
-
-[target.'cfg(unix)'.dependencies]
-nix = { version = "0.28", features = ["signal", "process"] }
