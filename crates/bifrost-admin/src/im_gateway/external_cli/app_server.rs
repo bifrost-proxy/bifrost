@@ -3,6 +3,8 @@ use super::*;
 const GUIDE_STARTUP_WAIT_MS: u64 = 10_000;
 const GUIDE_ACK_TIMEOUT_SECS: u64 = 8;
 const HANDSHAKE_TIMEOUT_SECS: u64 = 30;
+const CAPACITY_MAX_RETRIES: u32 = 3;
+const CAPACITY_RETRY_BASE_DELAY_MS: u64 = 1_000;
 
 #[derive(Clone)]
 struct ActiveAppServerHandle {
@@ -334,11 +336,12 @@ pub(super) async fn run_command(
         .or(existing_thread_id)
         .ok_or_else(|| "app-server thread response missing thread.id".to_string())?;
 
+    let client_user_message_id = format!("bifrost-{run_id}");
     send_jsonrpc_request(
         &mut stdin,
         3,
         "turn/start",
-        build_turn_start_request(request, &thread_id, prompt),
+        build_turn_start_request(request, &thread_id, prompt.clone(), &client_user_message_id),
     )
     .await?;
     let turn_response = read_handshake_response(
@@ -349,7 +352,7 @@ pub(super) async fn run_command(
         progress_tx.as_ref(),
     )
     .await?;
-    let turn_id = turn_response
+    let mut turn_id = turn_response
         .get("turn")
         .and_then(|turn| turn.get("id"))
         .and_then(serde_json::Value::as_str)
@@ -384,6 +387,8 @@ pub(super) async fn run_command(
     let mut exit_code = Some(1);
     let mut terminal = false;
     let mut terminal_error = None;
+    let mut capacity_retries = 0u32;
+    let mut turn_has_side_effects = false;
 
     while !terminal {
         tokio::select! {
@@ -408,6 +413,84 @@ pub(super) async fn run_command(
                     continue;
                 }
                 if let Some(event) = progress_event_from_app_server_frame(&frame) {
+                    let can_retry_capacity = should_retry_capacity_error(
+                        &frame,
+                        turn_has_side_effects,
+                        !pending_guides.is_empty(),
+                        capacity_retries,
+                    );
+                    if can_retry_capacity {
+                        capacity_retries = capacity_retries.saturating_add(1);
+                        let delay = capacity_retry_delay(capacity_retries);
+                        let retry_event = capacity_retry_status_event(
+                            capacity_retries,
+                            CAPACITY_MAX_RETRIES,
+                            delay,
+                            &frame,
+                        );
+                        if let Some(progress_tx) = progress_tx.as_ref() {
+                            let _ = progress_tx.send(retry_event.clone());
+                        }
+                        events.push(retry_event);
+                        if let Some(session_key) = session_key {
+                            remove_active_app_server_session(session_key, run_id);
+                        }
+                        tokio::select! {
+                            _ = sleep(delay) => {}
+                            _ = wait_for_stop_marker(stop_marker_path.clone()) => {
+                                status = ExternalCliRunStatus::Stopped;
+                                exit_code = None;
+                                terminal = true;
+                            }
+                        }
+                        if terminal {
+                            continue;
+                        }
+                        let retry_request_id = 3u64.saturating_add(capacity_retries as u64);
+                        send_jsonrpc_request(
+                            &mut stdin,
+                            retry_request_id,
+                            "turn/start",
+                            build_turn_start_request(
+                                request,
+                                &thread_id,
+                                prompt.clone(),
+                                &client_user_message_id,
+                            ),
+                        )
+                        .await?;
+                        let retry_turn_response = read_handshake_response(
+                            &mut lines,
+                            retry_request_id,
+                            &mut stdout_bytes,
+                            &mut events,
+                            progress_tx.as_ref(),
+                        )
+                        .await?;
+                        turn_id = retry_turn_response
+                            .get("turn")
+                            .and_then(|turn| turn.get("id"))
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .ok_or_else(|| {
+                                "app-server retry response missing turn.id".to_string()
+                            })?;
+                        if let Some(session_key) = session_key {
+                            register_active_app_server_session(
+                                session_key,
+                                run_id,
+                                ActiveAppServerHandle {
+                                    run_id: run_id.to_string(),
+                                    thread_id: thread_id.clone(),
+                                    turn_id: turn_id.clone(),
+                                    guide_tx: guide_tx.clone(),
+                                },
+                            );
+                        }
+                        turn_has_side_effects = false;
+                        continue;
+                    }
+                    turn_has_side_effects |= progress_event_has_retry_side_effect(&event);
                     if let Some(progress_tx) = progress_tx.as_ref() {
                         let _ = progress_tx.send(event.clone());
                     }
@@ -543,6 +626,76 @@ pub(super) async fn run_command(
     })
 }
 
+fn is_capacity_error_frame(frame: &serde_json::Value) -> bool {
+    if frame.get("method").and_then(serde_json::Value::as_str) != Some("error") {
+        return false;
+    }
+    let params = frame.get("params");
+    let overloaded = params
+        .and_then(|params| params.get("error"))
+        .and_then(|error| error.get("codexErrorInfo"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case("serverOverloaded"));
+    let cli_will_retry = params
+        .and_then(|params| params.get("willRetry"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    overloaded && !cli_will_retry
+}
+
+fn should_retry_capacity_error(
+    frame: &serde_json::Value,
+    turn_has_side_effects: bool,
+    has_pending_guides: bool,
+    retries_used: u32,
+) -> bool {
+    is_capacity_error_frame(frame)
+        && !turn_has_side_effects
+        && !has_pending_guides
+        && retries_used < CAPACITY_MAX_RETRIES
+}
+
+fn progress_event_has_retry_side_effect(event: &ExternalCliProgressEvent) -> bool {
+    matches!(
+        event.event_type,
+        ExternalCliProgressEventType::AssistantDelta
+            | ExternalCliProgressEventType::AssistantFinal
+            | ExternalCliProgressEventType::ToolStarted
+            | ExternalCliProgressEventType::ToolFinished
+    )
+}
+
+fn capacity_retry_delay(retry_attempt: u32) -> Duration {
+    if cfg!(test) {
+        return Duration::from_millis(10);
+    }
+    let exponent = retry_attempt.saturating_sub(1).min(2);
+    Duration::from_millis(CAPACITY_RETRY_BASE_DELAY_MS.saturating_mul(1u64 << exponent))
+}
+
+fn capacity_retry_status_event(
+    retry_attempt: u32,
+    max_retries: u32,
+    delay: Duration,
+    error_frame: &serde_json::Value,
+) -> ExternalCliProgressEvent {
+    ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::Status,
+        content: format!(
+            "Selected model is at capacity; retrying in {} ms ({retry_attempt}/{max_retries})",
+            delay.as_millis()
+        ),
+        title: Some("Codex capacity retry".to_string()),
+        raw: serde_json::json!({
+            "type": "capacity_retry",
+            "retryAttempt": retry_attempt,
+            "maxRetries": max_retries,
+            "delayMs": delay.as_millis(),
+            "error": error_frame,
+        }),
+    }
+}
+
 pub(super) fn build_command_spec(request: &ExternalCliRunRequest) -> CommandSpec {
     let config = &request.adapter_config;
     let mut args = if request.adapter == TRAEX_ADAPTER {
@@ -654,6 +807,7 @@ fn build_turn_start_request(
     request: &ExternalCliRunRequest,
     thread_id: &str,
     prompt: String,
+    client_user_message_id: &str,
 ) -> serde_json::Value {
     let config = &request.adapter_config;
     let mut params = serde_json::Map::from_iter([
@@ -661,6 +815,10 @@ fn build_turn_start_request(
         (
             "input".to_string(),
             serde_json::json!([{ "type": "text", "text": prompt }]),
+        ),
+        (
+            "clientUserMessageId".to_string(),
+            serde_json::json!(client_user_message_id),
         ),
     ]);
     if let Some(work_dir) = request.work_dir.as_ref() {
@@ -1313,6 +1471,59 @@ mod tests {
     }
 
     #[test]
+    fn capacity_retry_classification_is_strict_and_side_effect_aware() {
+        let overloaded = serde_json::json!({
+            "method": "error",
+            "params": {
+                "error": {
+                    "message": "Selected model is at capacity.",
+                    "codexErrorInfo": "serverOverloaded"
+                },
+                "willRetry": false
+            }
+        });
+        assert!(is_capacity_error_frame(&overloaded));
+        let mut internally_retried = overloaded.clone();
+        internally_retried["params"]["willRetry"] = serde_json::json!(true);
+        assert!(!is_capacity_error_frame(&internally_retried));
+        assert!(should_retry_capacity_error(&overloaded, false, false, 0));
+        assert!(!should_retry_capacity_error(&overloaded, true, false, 0));
+        assert!(!should_retry_capacity_error(&overloaded, false, true, 0));
+        assert!(!should_retry_capacity_error(
+            &overloaded,
+            false,
+            false,
+            CAPACITY_MAX_RETRIES
+        ));
+
+        let ordinary_error = serde_json::json!({
+            "method": "error",
+            "params": {"error": {"message": "invalid request", "codexErrorInfo": "other"}}
+        });
+        assert!(!is_capacity_error_frame(&ordinary_error));
+        assert!(!is_capacity_error_frame(&serde_json::json!({
+            "method": "warning",
+            "params": {"error": {"codexErrorInfo": "serverOverloaded"}}
+        })));
+
+        let assistant = ExternalCliProgressEvent {
+            event_type: ExternalCliProgressEventType::AssistantDelta,
+            content: "partial".to_string(),
+            title: None,
+            raw: serde_json::json!({}),
+        };
+        let status = ExternalCliProgressEvent {
+            event_type: ExternalCliProgressEventType::Status,
+            content: "turn started".to_string(),
+            title: None,
+            raw: serde_json::json!({}),
+        };
+        assert!(progress_event_has_retry_side_effect(&assistant));
+        assert!(!progress_event_has_retry_side_effect(&status));
+        assert_eq!(capacity_retry_delay(1), Duration::from_millis(10));
+    }
+
+    #[test]
     fn stale_app_server_cleanup_preserves_replacement_session_owner() {
         let session_key = format!("session-replacement-{}", uuid::Uuid::new_v4());
         let old_run_id = format!("run-old-{}", uuid::Uuid::new_v4());
@@ -1466,6 +1677,90 @@ for line in sys.stdin:
                 && event.content == "guided result"
         }));
         assert!(!ACTIVE_RUNS.contains_key("mock-app-server-run"));
+        assert!(!ACTIVE_SESSIONS.contains_key(session_key));
+        assert!(!ACTIVE_APP_SERVER_SESSIONS.contains_key(session_key));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mock_app_server_retries_capacity_error_on_same_thread() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let executable = temp_dir.path().join("codex");
+        std::fs::write(
+            &executable,
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+turn_attempt = 0
+client_user_message_id = None
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+for line in sys.stdin:
+    frame = json.loads(line)
+    method = frame.get("method")
+    request_id = frame.get("id")
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":request_id,"result":{}})
+    elif method == "thread/start":
+        send({"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"id":"thread-capacity"}}})
+        send({"jsonrpc":"2.0","id":request_id,"result":{"thread":{"id":"thread-capacity"}}})
+    elif method == "turn/start":
+        turn_attempt += 1
+        turn_id = f"turn-{turn_attempt}"
+        assert frame["params"]["threadId"] == "thread-capacity"
+        if client_user_message_id is None:
+            client_user_message_id = frame["params"]["clientUserMessageId"]
+        else:
+            assert frame["params"]["clientUserMessageId"] == client_user_message_id
+        send({"jsonrpc":"2.0","id":request_id,"result":{"turn":{"id":turn_id}}})
+        if turn_attempt == 1:
+            send({"jsonrpc":"2.0","method":"error","params":{"threadId":"thread-capacity","turnId":turn_id,"error":{"message":"Selected model is at capacity. Please try a different model.","codexErrorInfo":"serverOverloaded","additionalDetails":None},"willRetry":False}})
+        else:
+            send({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":"thread-capacity","turnId":turn_id,"item":{"id":"message-1","type":"agentMessage","text":"recovered"}}})
+            send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thread-capacity","turn":{"id":turn_id,"status":"completed"}}})
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let mut request = request(DEFAULT_ADAPTER);
+        request.adapter_config.transport = Some(ExternalCliTransport::AppServer);
+        request.adapter_config.executable = Some(executable.display().to_string());
+        let session_key = "mock-capacity-retry-session";
+        let output = run_command(
+            "mock-capacity-retry-run",
+            Some(session_key),
+            &request,
+            "retry me".to_string(),
+            temp_dir.path().join("stop"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(output.status, ExternalCliRunStatus::Succeeded);
+        assert_eq!(output.exit_code, Some(0));
+        assert!(output.events.iter().any(|event| {
+            event.raw["type"] == "capacity_retry"
+                && event.raw["retryAttempt"] == 1
+                && event.raw["maxRetries"] == CAPACITY_MAX_RETRIES
+        }));
+        assert!(!output
+            .events
+            .iter()
+            .any(|event| { event.event_type == ExternalCliProgressEventType::RunFailed }));
+        assert!(output.events.iter().any(|event| {
+            event.event_type == ExternalCliProgressEventType::AssistantFinal
+                && event.content == "recovered"
+        }));
+        assert!(!ACTIVE_RUNS.contains_key("mock-capacity-retry-run"));
         assert!(!ACTIVE_SESSIONS.contains_key(session_key));
         assert!(!ACTIVE_APP_SERVER_SESSIONS.contains_key(session_key));
     }

@@ -1285,8 +1285,42 @@
 2. 通道已满时新 Guide 立即返回 `too many pending guide requests`，不等待 20 秒 ACK timeout，也不继续增长内存。
 3. 上层收到该错误后把完整原消息降级到 FIFO Queue；Stop 在饱和 channel 上仍有直接终止 worker 的兜底。
 
+### TC-IEC-61: Codex app-server 容量错误有限自动重试
+
+操作步骤：
+
+1. 执行容量错误分类与副作用门禁单测：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     capacity_retry_classification_is_strict_and_side_effect_aware \
+     --lib -- --nocapture
+   ```
+2. 执行同一 thread 容量失败后恢复单测：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     mock_app_server_retries_capacity_error_on_same_thread \
+     --lib -- --nocapture
+   ```
+3. 使用当前源码二进制执行隔离黑盒 E2E：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost \
+     bash e2e-tests/tests/test_im_gateway_codex_capacity_retry.sh
+   ```
+
+预期结果：
+
+1. `codexErrorInfo=serverOverloaded` 在没有助手输出、工具调用和 pending guide 时，
+   同一 thread 最多重试 3 次，退避为 1s、2s、4s。
+2. 首次容量失败、第二次成功的场景只产生一个最终成功结果，不向调用方输出中间
+   `run_failed`，metadata 为 `runner.capacityRetryCount=1`。
+3. 持续容量失败总共启动 4 个 turn，最终保留原始容量错误并失败，metadata 为
+   `runner.capacityRetryCount=3`。
+4. 普通错误以及已经产生 assistant 输出后的容量错误都只启动一个 turn，不自动重试。
+5. 测试只使用临时 `BIFROST_DATA_DIR` 和随机端口，不影响正式 9900 服务或真实 provider。
+
 ## 最近执行记录
 
+- 2026-07-12：新增并立即执行 TC-IEC-61。两个 focused Rust 单测分别输出 `1 passed`；`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_codex_capacity_retry.sh` 输出 `[codex-capacity-retry] PASS`。隔离 mock app-server 验证首次 `serverOverloaded` 后在同一 thread 第二次成功、持续容量错误 3 次重试后失败、普通错误不重试、已有 assistant delta 后不重试；成功 run 未输出中间 `run_failed`，并持久化 `runner.capacityRetryCount=1`。
 - 2026-07-10：第 4 轮性能 review 新增并立即执行 TC-IEC-60。`worker_guide_rejects_saturated_control_channel_without_waiting` 与 `guide_stream_falls_back_to_queue_without_losing_message` 均输出 `1 passed`；同时复跑 `external_worker_`，陈旧 channel 不误杀 PID 与已 ACK Stop 不追加 kill 两项均通过。确认控制通道饱和时 Guide 快速返回上限错误，上层仍保留完整消息进入 Queue，且 Stop 的 PID reuse 安全边界未被有界通道改造破坏。
 - 2026-07-10：第 3 轮全面 review 新增并立即执行 TC-IEC-59。`stale_app_server_cleanup_preserves_replacement_session_owner`、`app_server_registration_rejects_stale_run_ownership` 与 `stale_run_session_cleanup_preserves_replacement_owner` 均通过，app-server 模块合计 `9 passed`；确认旧 run cleanup 按 `run_id` 条件删除、失去所有权的 run 不能晚到注册，且 `ACTIVE_SESSIONS` 的旧 owner 不能删除替代 owner。随后用当前源码重新构建 `target/debug/bifrost`，执行 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_external_runner_live_guide.sh` 输出 `[external-runner-live-guide] PASS`。
 - 2026-07-10：新增并立即执行 TC-IEC-58。三个 focused Rust 命令分别通过 `10/10`、`2/2`、`1/1`；`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_external_runner_live_guide.sh` 通过，真实临时服务验证 Codex/Traex Web steer、飞书 IM 普通消息默认 steer、`/q queue-explicit` 只在当前 turn 完成后执行一次、`/g release-queue` 注入当前 turn、拒绝/exec transport 明确降级队列且原消息不丢失；Playwright 三组运行中输入用例 `3/3` 通过，覆盖非 ChatGPT Web runner 默认 Guide、显式 Queue、ChatGPT Web 仅 Queue，以及内置 Runner Stop/Guide/Queue/移除队列回归。定位并修复了 IM handler 等待 Guide ACK 时暂停 runner control future 导致 20 秒自锁、成功 steer 后又错误排队重复执行的问题。
