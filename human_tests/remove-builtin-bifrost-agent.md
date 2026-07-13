@@ -58,4 +58,5 @@ No service or temporary data directory is created by these cases.
 
 ## Execution record
 
+- 2026-07-13: After CI exposed changed-line coverage gaps, the external session, default AgentChat route, concurrent queue, runner switch, active session API, schedule, and progress-card regressions were added and executed. The exact local CI coverage workflow passed all crate floors, the proxy production 90% gate, 67 proxy E2E suites with 582 assertions, and the changed production line gate at 95.08% (232/244).
 - 2026-07-13: TC-RBA-01 through TC-RBA-04 all passed in the isolated task worktree after the final residual audit. Rust and TypeScript checks succeeded, the external chat stream/default registry remained present, the built-in client/turn loop/tool/MCP/memory runtime, model-provider runtime configuration, WebUI plan/compact controls, and dedicated tests were absent, and no stale `/agent/chat` or guide-worker references remained outside this removal contract.

@@ -23,3 +23,45 @@ pub trait ToolHandler: Send + Sync {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ExampleHandler;
+
+    #[async_trait]
+    impl ToolHandler for ExampleHandler {
+        fn name(&self) -> &str {
+            "example"
+        }
+
+        fn description(&self) -> &str {
+            "example handler"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(&self, _arguments: &str, _work_dir: &Path) -> ToolResult {
+            ToolResult {
+                success: true,
+                output: "ok".to_string(),
+                runtime_events: Vec::new(),
+            }
+        }
+    }
+
+    #[test]
+    fn handler_definition_uses_handler_metadata() {
+        let definition = ExampleHandler.definition();
+        let function = definition.function.expect("function definition");
+        assert_eq!(function.name, "example");
+        assert_eq!(function.description, "example handler");
+        assert_eq!(
+            function.parameters,
+            Some(serde_json::json!({"type": "object"}))
+        );
+    }
+}

@@ -860,6 +860,15 @@ fn active_status(compaction_count: u32) -> ActiveTurnStatus {
     }
 }
 
+#[test]
+fn runner_type_alone_marks_status_as_external() {
+    let mut status = active_status(0);
+    status.runner_id = None;
+    status.agent_type = None;
+    status.runner_type = Some("codex".to_string());
+    assert!(is_external_runner_status(&status));
+}
+
 fn context_snapshot(compaction_count: u32) -> AgentContextSnapshot {
     AgentContextSnapshot {
         estimated_context_tokens: 1_200,

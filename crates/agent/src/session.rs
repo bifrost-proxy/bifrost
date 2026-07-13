@@ -323,6 +323,110 @@ pub use session_store::{
     AgentSessionEvent, AgentSessionManager, SessionDetail, SessionInfo, SessionMessage,
 };
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::goal::{GoalState, GoalStatus};
+    use crate::types::{ChatImageUrl, FunctionCallInfo, ToolCallMessage};
+
+    #[test]
+    fn guide_channel_and_combiner_cover_pending_message_shapes() {
+        let channel = GuideMessageChannel::new();
+        assert!(!channel.has_pending());
+        assert_eq!(channel.push_back("  ".to_string()), 1);
+        assert!(!channel.has_pending());
+        assert_eq!(channel.push_back("first".to_string()), 2);
+        assert!(channel.has_pending());
+        assert_eq!(channel.snapshot(), vec!["  ", "first"]);
+        assert_eq!(channel.drain(), vec!["  ", "first"]);
+
+        assert_eq!(
+            combine_guide_messages(vec![" only ".to_string()]).as_deref(),
+            Some("only")
+        );
+        assert_eq!(
+            combine_guide_messages(vec![" one ".to_string(), "two".to_string()]).as_deref(),
+            Some("引导消息 1:\none\n\n引导消息 2:\ntwo")
+        );
+    }
+
+    #[test]
+    fn session_metadata_expiry_and_tool_tokens_cover_external_state() {
+        let mut session = AgentSession::new("coverage-session");
+        session.remember_external_conversation_ref(
+            Some("conversation-1".to_string()),
+            Some("thread-1".to_string()),
+        );
+        assert_eq!(
+            session.external_conversation_id.as_deref(),
+            Some("conversation-1")
+        );
+        assert_eq!(session.external_thread_id.as_deref(), Some("thread-1"));
+        session.last_active_at = 0;
+        assert!(session.is_expired(0));
+
+        session.history.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: Some("answer".to_string()),
+            content_parts: Some(vec![
+                ChatContentPart::Text {
+                    text: "text".to_string(),
+                },
+                ChatContentPart::ImageUrl {
+                    image_url: ChatImageUrl {
+                        url: "data:image/png;base64,AA==".to_string(),
+                        detail: None,
+                    },
+                },
+            ]),
+            tool_calls: Some(vec![ToolCallMessage {
+                id: "call-1".to_string(),
+                call_type: "function".to_string(),
+                function: Some(FunctionCallInfo {
+                    name: "inspect".to_string(),
+                    arguments: "{\"path\":\"/tmp\"}".to_string(),
+                }),
+            }]),
+            tool_call_id: None,
+            name: None,
+        });
+        assert!(session.estimate_tokens() > 0);
+    }
+
+    #[test]
+    fn clear_records_goal_cleanup_before_dropping_external_state() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut session = AgentSession::new("clear-goal-session");
+        session.recorder = Some(ConversationRecorder::new(dir.path(), &session.session_key));
+        session.current_goal = Some(GoalState {
+            goal_id: "goal-1".to_string(),
+            objective: "remove built-in runtime".to_string(),
+            status: GoalStatus::Active,
+            pause_reason: None,
+            token_budget: None,
+            created_at: 1,
+            updated_at: 1,
+            accumulated_tokens_used: 0,
+            accumulated_time_used_seconds: 0,
+            active_total_tokens_baseline: None,
+            active_started_at: None,
+            start_total_tokens: 0,
+            completed_total_tokens: None,
+            completed_time_used_seconds: None,
+        });
+        session.external_conversation_id = Some("conversation".to_string());
+        session.external_thread_id = Some("thread".to_string());
+
+        session.clear();
+
+        assert!(session.current_goal.is_none());
+        assert!(session.external_conversation_id.is_none());
+        assert!(session.external_thread_id.is_none());
+        assert!(session.history_cleared);
+        assert!(session.recorder.is_none());
+    }
+}
+
 #[path = "session/turn_timing.rs"]
 pub mod turn_timing;
 

@@ -1153,6 +1153,31 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
         .provider_store
         .add(provider.clone())
         .expect("add provider");
+    service
+        .route_store
+        .add(crate::im_gateway::types::ImRoute {
+            id: "agent-chat-external-runner".to_string(),
+            provider_id: provider.id.clone(),
+            name: "Agent Chat external runner".to_string(),
+            enabled: true,
+            event_type: crate::im_gateway::types::ImEventType::MessageReceive,
+            matcher: crate::im_gateway::types::ImEventMatcher {
+                chat_ids: Vec::new(),
+                user_ids: vec!["owner-open-id".to_string()],
+                keyword: None,
+                regex: None,
+            },
+            action: crate::im_gateway::types::ImRouteAction::AgentChat {
+                system_prompt: None,
+                model: None,
+                reply_target: crate::im_gateway::types::ReplyTarget::OriginalChat,
+            },
+            timeout_ms: 30_000,
+            max_output_bytes: 1_048_576,
+            created_at: now_ms(),
+            updated_at: now_ms(),
+        })
+        .expect("add AgentChat route");
     let session_key = build_session_key(&provider.id, Some("owner-open-id"));
     crate::im_gateway::session_state::upsert_session_state(
         &session_key,
@@ -1630,4 +1655,220 @@ pub(super) async fn im_event_loop_external_cli_session_records_runner_failure() 
                 .get("message")
                 .and_then(|value| value.as_str())
                 .is_some_and(|value| value.starts_with("Runner failed:"))));
+}
+
+#[test]
+pub(super) fn external_help_and_runner_switch_use_external_configuration() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = ImGatewayService::new(temp_dir.path());
+    let mut provider = test_provider();
+    provider.id = "runner-switch-provider".to_string();
+    service
+        .provider_store
+        .add(provider.clone())
+        .expect("add provider");
+
+    let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    config.runners.insert(
+        "custom-runner".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            adapter: crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER.to_string(),
+            enabled: true,
+            ..Default::default()
+        },
+    );
+    let agent_config = crate::im_gateway::agent::ImAgentConfig {
+        runner: Some(bifrost_agent::AgentRunnerMode::Custom(
+            "custom-runner".to_string(),
+        )),
+        ..Default::default()
+    };
+    assert_eq!(
+        im_help_runner_kind_for_agent_config(&agent_config, &config, Some(&provider.id)),
+        ImHelpRunnerKind::External {
+            adapter: crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER.to_string()
+        }
+    );
+
+    let selection = resolve_im_runner_selection(&config, "custom-runner").expect("selection");
+    let mut session = bifrost_agent::AgentSession::new("runner-switch-session");
+    let reply = apply_im_runner_switch_to_session(
+        &service.provider_store,
+        &provider.id,
+        "runner-switch-session",
+        &mut session,
+        &selection,
+    );
+    assert!(reply.contains("custom-runner"));
+    assert_eq!(session.runner_id.as_deref(), Some("custom-runner"));
+    assert_eq!(
+        session.runner_type.as_deref(),
+        Some(crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER)
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = ImGatewayService::new(temp_dir.path());
+    let mut provider = test_provider();
+    provider.id = "concurrent-provider".to_string();
+    provider.base_url = Some("http://127.0.0.1:9".to_string());
+    provider.agent_config = Some(ImProviderAgentConfig {
+        runner: Some(bifrost_agent::AgentRunnerMode::Custom("web".to_string())),
+        work_dir: None,
+        base_instructions: None,
+        developer_instructions: None,
+        user_instructions: None,
+    });
+    service
+        .provider_store
+        .add(provider.clone())
+        .expect("add provider");
+    let mut external_config = service.external_cli_config_store.load();
+    external_config.runners.insert(
+        "web".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
+            enabled: true,
+            ..Default::default()
+        },
+    );
+    service
+        .external_cli_config_store
+        .save(external_config)
+        .expect("save external config");
+    let client = ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider()));
+    let event_for = |event_id: &str, user_id: &str, text: &str| ImEvent {
+        event_id: event_id.to_string(),
+        provider_id: provider.id.clone(),
+        provider_type: ImProviderType::Feishu,
+        event_type: "message.receive".to_string(),
+        source: crate::im_gateway::types::ImEventSource {
+            chat_id: Some("chat-id".to_string()),
+            user_id: Some(user_id.to_string()),
+            message_id: Some(format!("message-{event_id}")),
+        },
+        message: Some(crate::im_gateway::types::ImEventMessage {
+            text: text.to_string(),
+            mentions: Vec::new(),
+            images: Vec::new(),
+            raw_type: Some("text".to_string()),
+        }),
+        received_at: now_ms(),
+        raw_digest: None,
+    };
+
+    let active_session_key = build_session_key(&provider.id, Some("owner-open-id"));
+    let active_session = service
+        .agent_session_manager
+        .take_session(&active_session_key);
+    let active_event = event_for("active", "owner-open-id", "queue active message");
+    handle_concurrent_event_during_chat(
+        &active_event,
+        &provider,
+        &active_session_key,
+        &service.queue_manager,
+        &client,
+        &service.message_log_store,
+        &service.agent_session_manager,
+        &service.progress_registry,
+        &service.agent_config_store,
+        &service.provider_store,
+        &service.event_store,
+        &service.external_cli_config_store,
+        BusyMessageDefaultMode::Queue,
+    )
+    .await;
+    assert_eq!(
+        service
+            .queue_manager
+            .queue_status(&active_session_key)
+            .len(),
+        1
+    );
+    service.agent_session_manager.return_session(active_session);
+
+    let other_session_key = build_session_key(&provider.id, Some("other-owner"));
+    let other_session = service
+        .agent_session_manager
+        .take_session(&other_session_key);
+    let other_event = event_for("other-active", "other-owner", "queue other active message");
+    handle_concurrent_event_during_chat(
+        &other_event,
+        &provider,
+        "some-other-active-session",
+        &service.queue_manager,
+        &client,
+        &service.message_log_store,
+        &service.agent_session_manager,
+        &service.progress_registry,
+        &service.agent_config_store,
+        &service.provider_store,
+        &service.event_store,
+        &service.external_cli_config_store,
+        BusyMessageDefaultMode::Queue,
+    )
+    .await;
+    assert_eq!(
+        service.queue_manager.queue_status(&other_session_key).len(),
+        1
+    );
+    service.agent_session_manager.return_session(other_session);
+
+    let inactive_event = event_for("inactive", "inactive-owner", "queue inactive message");
+    let inactive_session_key = build_session_key(&provider.id, Some("inactive-owner"));
+    handle_concurrent_event_during_chat(
+        &inactive_event,
+        &provider,
+        "some-other-active-session",
+        &service.queue_manager,
+        &client,
+        &service.message_log_store,
+        &service.agent_session_manager,
+        &service.progress_registry,
+        &service.agent_config_store,
+        &service.provider_store,
+        &service.event_store,
+        &service.external_cli_config_store,
+        BusyMessageDefaultMode::Queue,
+    )
+    .await;
+    assert_eq!(
+        service
+            .queue_manager
+            .queue_status(&inactive_session_key)
+            .len(),
+        1
+    );
+
+    let mut restricted_provider = provider.clone();
+    restricted_provider.owner_open_id = Some("owner-open-id".to_string());
+    service
+        .provider_store
+        .update(restricted_provider.clone())
+        .expect("restrict provider owner");
+    let unauthorized = event_for("unauthorized", "not-owner", "ignored");
+    handle_concurrent_event_during_chat(
+        &unauthorized,
+        &restricted_provider,
+        &active_session_key,
+        &service.queue_manager,
+        &client,
+        &service.message_log_store,
+        &service.agent_session_manager,
+        &service.progress_registry,
+        &service.agent_config_store,
+        &service.provider_store,
+        &service.event_store,
+        &service.external_cli_config_store,
+        BusyMessageDefaultMode::Queue,
+    )
+    .await;
+    assert!(service
+        .queue_manager
+        .queue_status(&build_session_key(&provider.id, Some("not-owner")))
+        .is_empty());
 }

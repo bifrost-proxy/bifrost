@@ -4,6 +4,48 @@ use super::{
 };
 
 #[test]
+pub(super) fn normalize_schedule_trims_channel_and_rejects_missing_agent_channel() {
+    let mut schedule = ImSchedule {
+        id: String::new(),
+        name: "Trim channel".to_string(),
+        enabled: true,
+        message_channel: Some(crate::im_gateway::types::ImMessageChannelBinding {
+            provider_id: "  feishu-main  ".to_string(),
+            target_id: "  owner-open-id  ".to_string(),
+            target_mode: crate::im_gateway::types::MessageTargetMode::ConfiguredTarget,
+        }),
+        trigger: crate::im_gateway::types::ScheduleTrigger::Interval { every_ms: 60_000 },
+        task_type: crate::im_gateway::types::ScheduleTaskType::Agent,
+        script: Default::default(),
+        agent: Some(crate::im_gateway::types::ScheduleAgentTask {
+            prompt: "Summarize".to_string(),
+            runner_id: Some("codex".to_string()),
+            ..Default::default()
+        }),
+        timeout_ms: 10_000,
+        max_output_bytes: 1024,
+        concurrency_policy: Default::default(),
+        retry: Default::default(),
+        next_run_at: None,
+        last_run_at: None,
+        created_at: 0,
+        updated_at: 0,
+    };
+
+    crate::im_gateway::schedule_tools::normalize_schedule(&mut schedule).expect("valid schedule");
+    let channel = schedule.message_channel.as_ref().expect("message channel");
+    assert_eq!(channel.provider_id, "feishu-main");
+    assert_eq!(channel.target_id, "owner-open-id");
+    assert!(!schedule.id.is_empty());
+
+    schedule.message_channel = None;
+    assert_eq!(
+        crate::im_gateway::schedule_tools::normalize_schedule(&mut schedule),
+        Err("schedule requires message_channel".to_string())
+    );
+}
+
+#[test]
 pub(super) fn schedule_chatgpt_web_initial_prompt_is_sent_as_first_message_only() {
     assert_eq!(
         schedule_external_runner_messages(

@@ -1377,12 +1377,19 @@ pub(super) fn parse_session_filename(filename: &str) -> (String, u64) {
 
 #[cfg(test)]
 mod attachment_tests {
-    use super::resolve_attachment_path;
+    use super::{resolve_attachment_path, status_context_from_agent_runner};
 
     #[test]
     fn attachment_path_resolution_stays_inside_attachment_root() {
         assert!(resolve_attachment_path("chatgpt_web/run/image.png").is_some());
         assert!(resolve_attachment_path("../secret.png").is_none());
         assert!(resolve_attachment_path("/tmp/secret.png").is_none());
+    }
+
+    #[test]
+    fn missing_runner_uses_codex_external_status_context() {
+        let context = status_context_from_agent_runner(None);
+        assert_eq!(context.runner_id.as_deref(), Some("Codex"));
+        assert_eq!(context.runner_type.as_deref(), Some("codex"));
     }
 }

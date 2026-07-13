@@ -3036,6 +3036,17 @@ mod coverage_boost {
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(body["status"], 405);
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unknown_agent_endpoint_returns_not_found() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+
+        let (status, body) =
+            agent_request_json(service, Method::GET, "/agent/unknown-endpoint", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "Agent endpoint not found");
+    }
 }
 
 #[cfg(test)]
@@ -3144,6 +3155,35 @@ mod coverage_boost_v2 {
             agent_request_json(service, Method::GET, "/agent/sessions/all?limit=1", None).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["total"].as_u64().unwrap_or(0) <= 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_sessions_all_projects_active_external_preview() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+        assert!(service
+            .agent_session_manager
+            .try_start_external_session_preview(
+                "active-external-session",
+                Some("Active external runner".to_string()),
+                Some("/tmp/active-external".to_string()),
+                Some("codex".to_string()),
+                Some("codex".to_string()),
+                Some("Codex".to_string()),
+            ));
+
+        let (status, body) =
+            agent_request_json(service.clone(), Method::GET, "/agent/sessions/all", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["active_count"], 1);
+        assert_eq!(
+            body["sessions"][0]["session_key"],
+            "active-external-session"
+        );
+        assert_eq!(body["sessions"][0]["running"], true);
+        service
+            .agent_session_manager
+            .clear_active_session_preview("active-external-session");
     }
 
     #[tokio::test(flavor = "current_thread")]
