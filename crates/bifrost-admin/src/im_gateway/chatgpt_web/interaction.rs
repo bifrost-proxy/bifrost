@@ -1086,6 +1086,33 @@ pub(super) enum DomExtractOutcome {
     NotFound,
 }
 
+#[cfg(test)]
+fn test_dom_outcomes() -> &'static std::sync::Mutex<BTreeMap<String, Vec<DomExtractOutcome>>> {
+    static OUTCOMES: std::sync::OnceLock<
+        std::sync::Mutex<BTreeMap<String, Vec<DomExtractOutcome>>>,
+    > = std::sync::OnceLock::new();
+    OUTCOMES.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+fn set_test_dom_outcomes(conversation_id: &str, outcomes: Vec<DomExtractOutcome>) {
+    test_dom_outcomes()
+        .lock()
+        .expect("test DOM outcomes lock")
+        .insert(conversation_id.to_string(), outcomes);
+}
+
+#[cfg(test)]
+fn take_test_dom_outcome(conversation_id: &str) -> Option<DomExtractOutcome> {
+    let mut outcomes = test_dom_outcomes().lock().expect("test DOM outcomes lock");
+    let queue = outcomes.get_mut(conversation_id)?;
+    if queue.is_empty() {
+        outcomes.remove(conversation_id);
+        return None;
+    }
+    Some(queue.remove(0))
+}
+
 /// Extract the latest assistant message content directly from the page DOM.
 ///
 /// This is a fallback for when the backend API returns 429 but the page
@@ -1585,6 +1612,11 @@ pub(super) async fn try_extract_dom_outcome(
     profile_dir: &Path,
     conversation_id: &str,
 ) -> DomExtractOutcome {
+    #[cfg(test)]
+    if let Some(outcome) = take_test_dom_outcome(conversation_id) {
+        return outcome;
+    }
+
     let tab = match super::browser::get_conversation_tab(profile_dir, conversation_id) {
         Some(tab) => tab,
         None => {
@@ -2585,6 +2617,77 @@ mod tests {
         assert_ne!(
             dom_ready_signature(&waited("ABCD")),
             dom_ready_signature(&waited("WXYZ"))
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_final_resets_settle_for_equal_length_content_replacement() {
+        let waited = |text: &str| WaitedFinal {
+            final_message: json!({
+                "text": text,
+                "turnId": "assistant-message-1",
+                "source": "dom_fallback",
+                "imageCount": 0,
+            }),
+            summary: json!({"source": "dom_fallback_outcome"}),
+            all_texts: vec![text.to_string()],
+            had_429_or_fallback: true,
+        };
+        let conversation_id = "test-equal-length-settle";
+        set_test_dom_outcomes(
+            conversation_id,
+            vec![
+                DomExtractOutcome::Ready(waited("ABCD")),
+                DomExtractOutcome::Ready(waited("WXYZ")),
+                DomExtractOutcome::Ready(waited("WXYZ")),
+                DomExtractOutcome::Ready(waited("WXYZ")),
+                DomExtractOutcome::Ready(waited("WXYZ")),
+                DomExtractOutcome::Ready(waited("WXYZ")),
+                DomExtractOutcome::Ready(waited("WXYZ")),
+            ],
+        );
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = RuntimeConfig {
+            browser: super::super::BrowserConfig::default(),
+            chatgpt: super::super::ChatGptConfig::default(),
+            profile_dir: temp.path().join("profile"),
+            state_path: temp.path().join("auth-state.json"),
+            sessions_path: temp.path().join("sessions.json"),
+            attachments_dir: temp.path().join("attachments"),
+        };
+        let auth = AuthState {
+            captured_at: String::new(),
+            base_url: String::new(),
+            user_agent: String::new(),
+            captured_auth_headers: BTreeMap::new(),
+            captured_auth_identity: super::super::AuthorizationIdentity::default(),
+            captured_account_check: None,
+            cookies: Vec::new(),
+        };
+        let stop_marker = temp.path().join("stop");
+
+        let result = wait_final(
+            &config,
+            &auth,
+            conversation_id,
+            None,
+            WaitFinalOptions {
+                duration: std::time::Duration::from_secs(8),
+                stop_marker_path: &stop_marker,
+                profile_dir: Some(&config.profile_dir),
+                terminal_idle_stable_for: std::time::Duration::ZERO,
+            },
+        )
+        .await
+        .expect("settled final result");
+
+        while take_test_dom_outcome(conversation_id).is_some() {}
+        assert!(take_test_dom_outcome(conversation_id).is_none());
+
+        assert_eq!(
+            result.final_message.get("text").and_then(Value::as_str),
+            Some("WXYZ")
         );
     }
 

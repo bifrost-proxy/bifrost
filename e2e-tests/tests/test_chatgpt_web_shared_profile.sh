@@ -44,6 +44,10 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   --lib -- --nocapture
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  wait_final_resets_settle_for_equal_length_content_replacement \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   is_retryable_send_error_matches_known_prefixes \
   --lib -- --nocapture
 
