@@ -24,6 +24,9 @@ use crate::im_gateway::types::{
 const DEFAULT_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
 const DEFAULT_CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
 const DEFAULT_POLL_INTERVAL_MS: u64 = 3_000;
+const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const LOGIN_HTTP_TIMEOUT: Duration = Duration::from_secs(75);
+const LOGIN_QR_EXPIRES_IN_SECONDS: u64 = 60;
 const TEXT_RETRY_CHUNK_MAX_CHARS: usize = 1_000;
 const TEXT_RETRY_CHUNK_MAX_BYTES: usize = 3_000;
 
@@ -60,6 +63,7 @@ struct OutboundImage {
 
 pub struct WeixinProvider {
     http: reqwest::Client,
+    login_http: reqwest::Client,
     runtime: Arc<RwLock<HashMap<String, AccountRuntime>>>,
     outbound_images: Arc<RwLock<HashMap<String, OutboundImage>>>,
 }
@@ -72,12 +76,21 @@ impl Default for WeixinProvider {
 
 impl WeixinProvider {
     pub fn new() -> Self {
+        Self::with_http_timeouts(DEFAULT_HTTP_TIMEOUT, LOGIN_HTTP_TIMEOUT)
+    }
+
+    fn with_http_timeouts(default_timeout: Duration, login_timeout: Duration) -> Self {
         let http = bifrost_core::outbound_reqwest_client_builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(default_timeout)
+            .build()
+            .unwrap_or_default();
+        let login_http = bifrost_core::outbound_reqwest_client_builder()
+            .timeout(login_timeout)
             .build()
             .unwrap_or_default();
         Self {
             http,
+            login_http,
             runtime: Arc::new(RwLock::new(HashMap::new())),
             outbound_images: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -131,7 +144,7 @@ impl WeixinProvider {
             url: Option<String>,
         }
         let body: QrResponse = self
-            .http
+            .login_http
             .get(url)
             .header("iLink-App-ClientVersion", "1")
             .send()
@@ -160,7 +173,7 @@ impl WeixinProvider {
         Ok(WeixinLoginStart {
             poll_key,
             scan_url,
-            expires_in_seconds: 60,
+            expires_in_seconds: LOGIN_QR_EXPIRES_IN_SECONDS,
         })
     }
 
@@ -181,7 +194,7 @@ impl WeixinProvider {
                 urlencoding::encode(poll_key)
             );
             let status: serde_json::Value = self
-                .http
+                .login_http
                 .get(url)
                 .header("iLink-App-ClientVersion", "1")
                 .send()
@@ -1116,6 +1129,7 @@ impl ImProvider for WeixinProvider {
         let config = config.clone();
         let provider = Self {
             http: self.http.clone(),
+            login_http: self.login_http.clone(),
             runtime: Arc::clone(&self.runtime),
             outbound_images: Arc::clone(&self.outbound_images),
         };

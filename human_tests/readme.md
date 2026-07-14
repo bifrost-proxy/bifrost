@@ -85,7 +85,7 @@
 | [webui-replay.md](./webui-replay.md) | Web UI Replay 页面 | 24 | HTTP 请求重放、集合管理、SSE/WebSocket 重放、Replay WebSocket 规则头回归、curl 导入、多种 Body 类型、localhost 转发与 passthrough 优先级回归 |
 | [webui-settings.md](./webui-settings.md) | Web UI Settings 页面 | 42 | Proxy/Certificate/TLS/Performance/Access Control/Appearance/Metrics/Sync 各 Tab，含 Sync Provider 卡片、旧 Remote Sync 面板移除、Bifrost Cloud URL 编辑不被状态轮询回滚、GitHub Gist token 登录、真实 rules/config snapshot 同步，以及多 provider 同时连接时的防覆盖/防震荡机制 |
 | [skill-creator.md](./skill-creator.md) | Skill Creator WebUI 与外部 Agent 工作流 | 14 | Skill Creator crate、Admin CRUD、WebUI Skills 面板（只读详情/删除/导入 zip/固定分页）、E2E create-test-invoke-delete-import、executor 环境白名单、registry watcher 单 slug 热重载、checksum 缺失 manifest、packager import scope 保留、authoring.test 非法状态 |
-| [weixin-provider.md](./weixin-provider.md) | Weixin Provider | 8 | 原生 `weixin` IM provider 扫码登录、二维码自动轮询/刷新、微信文本消息触发 Agent、guide/queue/slash 命令回执、最终纯正文回写、History 表格窄宽度滚动与 Tooltip、图片消息下载后传给多模态模型、Agent 生成图片通过微信独立发送原图 |
+| [weixin-provider.md](./weixin-provider.md) | Weixin Provider | 9 | 原生 `weixin` IM provider 扫码登录、二维码自动轮询/刷新、真实 iLink 登录长轮询 timeout 隔离、微信文本消息触发 Agent、guide/queue/slash 命令回执、最终纯正文回写、History 表格窄宽度滚动与 Tooltip、图片消息下载后传给多模态模型、Agent 生成图片通过微信独立发送原图 |
 | [file-access-webui.md](./file-access-webui.md) | File Access WebUI 策略配置 | 17 | Grants 行级 File Access 入口、禁止手动录入不存在 grant、只读/读写与指定/所有目录策略、SSH Key grant 继承默认 All Directories 策略、grant 删除自动清理策略、重新连接后重新配置、deny patterns、字节限制、API 验证 |
 | [webui-groups.md](./webui-groups.md) | Web UI Groups 页面 | 13 | Group 列表、详情、规则管理、搜索 |
 | [webui-search.md](./webui-search.md) | Web UI 搜索模式 | 12 | 搜索模式进入/退出、关键词搜索、过滤器、结果高亮、状态持久化 |

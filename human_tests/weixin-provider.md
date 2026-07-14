@@ -61,6 +61,25 @@
 
 - 已执行过真实 WebUI 链路并修复：创建后二维码自动弹出，过期后 UI 展示过期并刷新，授权成功后 provider 自动连接。
 
+### TC-WIP-09：真实 iLink 登录长轮询不被普通请求超时截断
+
+**操作步骤：**
+
+1. 在正式服务创建或复用一个未授权的 Weixin provider，调用 `weixin-login/start` 获取二维码。
+2. 不立即扫码，观察真实 `get_qrcode_status` 返回 `wait` 所需时间。
+3. 扫描新二维码，再调用 `weixin-login/status` 或 `complete` 完成授权。
+
+**预期结果：**
+
+- iLink 状态长轮询约 35 秒返回 `wait` 时，Bifrost 不会在 30 秒提前报 502。
+- 登录专用 HTTP timeout 长于二维码 60 秒生命周期；普通消息请求仍保持 30 秒 timeout。
+- 扫码后 provider 写入脱敏账号信息并进入 connected，响应与日志不泄露 bot token。
+
+**实际执行结果（2026-07-14）：**
+
+- 修复前正式服务连续复现：直连 iLink 约 35 秒返回 `{"ret":0,"status":"wait"}`，Bifrost 在 30 秒返回 `weixin qr status request failed` / HTTP 502。
+- 增加独立 75 秒登录客户端，并用延迟 mock 回归证明登录状态请求可超过普通请求 timeout；真实扫码验证见本次迁移执行记录。
+
 ### TC-WIP-03：微信文本消息触发 Agent 并回写给原发送方
 
 **操作步骤：**

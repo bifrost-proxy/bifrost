@@ -60,6 +60,8 @@ POST /api/im-gateway/providers/:id/weixin-login/complete
 
 Modal 每 2 秒 poll 一次；二维码临近过期或已过期时 WebUI 自动重新调用 `start` 刷新，用户无需手动"已扫码"。
 
+iLink 的 `get_qrcode_status` 本身是长轮询，请求在未扫码时可能约 35 秒才返回 `wait`。登录 API 使用独立的 75 秒 HTTP timeout，必须长于二维码 60 秒生命周期；普通发消息、下载等请求仍保留 30 秒 timeout，避免登录长轮询扩大其他接口的故障等待时间。
+
 ### 事件连接
 
 `ImConnectionManager` 持有 `WeixinProvider`。`connect_events` 以固定 `DEFAULT_POLL_INTERVAL_MS = 3_000` ms 间隔调用 `POST /ilink/bot/getupdates`，认证头为：
@@ -103,6 +105,9 @@ Weixin 没有 Feishu CardKit 进度卡能力，因此默认 Agent chat 进入真
 DEFAULT_BASE_URL                = "https://ilinkai.weixin.qq.com"
 DEFAULT_CDN_BASE_URL            = "https://novac2c.cdn.weixin.qq.com/c2c"
 DEFAULT_POLL_INTERVAL_MS        = 3_000
+DEFAULT_HTTP_TIMEOUT            = 30s
+LOGIN_HTTP_TIMEOUT              = 75s
+LOGIN_QR_EXPIRES_IN_SECONDS     = 60
 TEXT_RETRY_CHUNK_MAX_CHARS      = 1_000
 TEXT_RETRY_CHUNK_MAX_BYTES      = 3_000
 ```
