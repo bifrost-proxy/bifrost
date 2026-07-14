@@ -57,10 +57,11 @@ use super::devtools::{
 use super::handler::decode::{apply_decode_scripts_for_storage, DecodeForStorageResult};
 use super::handler::{
     apply_immediate_response_body_rules, apply_websocket_request_header_rules,
-    apply_websocket_response_header_rules, build_connection_error_response, build_error_body,
-    build_overridden_error_response, connect_via_upstream_http_proxy_tunnel,
-    merge_websocket_header_rule_candidates, needs_body_processing, needs_request_body_processing,
-    needs_response_override, needs_response_phase_resolve, parse_and_record_sse_events,
+    apply_websocket_response_header_rules, build_connection_error_body,
+    build_connection_error_response_from_body, build_overridden_error_response_from_body,
+    connect_via_upstream_http_proxy_tunnel, merge_websocket_header_rule_candidates,
+    needs_body_processing, needs_request_body_processing, needs_response_override,
+    needs_response_phase_resolve, parse_and_record_sse_events, request_explicitly_accepts_html,
     ConnectionErrorInfo,
 };
 use super::scripts::{
@@ -2206,6 +2207,7 @@ async fn handle_intercepted_request_with_protocol(
         method
     };
 
+    let accepts_html_error = request_explicitly_accepts_html(&parts.headers);
     let original_req_headers: Vec<(String, String)> = super::headers_to_pairs(&parts.headers);
 
     let req_headers = original_req_headers.clone();
@@ -2913,14 +2915,41 @@ async fn handle_intercepted_request_with_protocol(
     // Pre-resolving here only adds duplicate lookup cost and stretches H2 tail latency.
     let dns_ms = None;
 
+    let error_badge_rules_json = if inject_bifrost_badge && accepts_html_error {
+        Some(super::handler::build_badge_rules_json(admin_state.as_deref(), listener_port).await)
+    } else {
+        None
+    };
     let build_conn_error_record_and_response =
         |error_type: &'static str, error_msg: String, tls_ms: Option<u64>| {
             let error_info = ConnectionErrorInfo {
                 error_type,
                 error_message: error_msg.clone(),
-                host: actual_target_host.clone(),
+                host: super::handler::format_connection_endpoint(
+                    &actual_target_host,
+                    actual_target_port,
+                ),
                 request_url: original_uri.clone(),
             };
+            let response_status = if needs_response_override(&resolved_rules) {
+                resolved_rules
+                    .status_code
+                    .or(resolved_rules.replace_status)
+                    .unwrap_or(502)
+            } else {
+                502
+            };
+            let (response_body, default_content_type) =
+                if let Some(ref res_body) = resolved_rules.res_body {
+                    (res_body.clone(), None)
+                } else {
+                    let (body, content_type) = build_connection_error_body(
+                        response_status,
+                        &error_info,
+                        error_badge_rules_json.as_deref(),
+                    );
+                    (body, Some(content_type))
+                };
             let total_ms = start_time.elapsed().as_millis() as u64;
             if let Some(ref state) = admin_state {
                 let mut record = TrafficRecord::new(
@@ -2929,14 +2958,7 @@ async fn handle_intercepted_request_with_protocol(
                     original_uri.clone(),
                 );
                 attach_devtools_client_req_id(&mut record, &devtools_client_req_id);
-                record.status = if needs_response_override(&resolved_rules) {
-                    resolved_rules
-                        .status_code
-                        .or(resolved_rules.replace_status)
-                        .unwrap_or(502)
-                } else {
-                    502
-                };
+                record.status = response_status;
                 record.duration_ms = total_ms;
                 record.host = original_host.to_string();
                 apply_listener_context(
@@ -2981,15 +3003,6 @@ async fn handle_intercepted_request_with_protocol(
                     None
                 };
 
-                let response_body = if needs_response_override(&resolved_rules) {
-                    if let Some(ref res_body) = resolved_rules.res_body {
-                        res_body.clone()
-                    } else {
-                        build_error_body(record.status, &error_info)
-                    }
-                } else {
-                    build_error_body(502, &error_info)
-                };
                 record.response_body_ref = if state.get_super_performance_mode() {
                     None
                 } else if let Some(ref body_store) = state.body_store {
@@ -3005,18 +3018,18 @@ async fn handle_intercepted_request_with_protocol(
                         for (name, value) in &resolved_rules.res_headers {
                             res_header_pairs.push((name.clone(), value.clone()));
                         }
-                        if resolved_rules.res_body.is_none() {
-                            res_header_pairs.push((
-                                "content-type".to_string(),
-                                "text/plain; charset=utf-8".to_string(),
-                            ));
+                        if let Some(content_type) = default_content_type {
+                            res_header_pairs
+                                .push(("content-type".to_string(), content_type.to_string()));
                             res_header_pairs
                                 .push(("x-bifrost-error".to_string(), error_type.to_string()));
                         }
                     } else {
                         res_header_pairs.push((
                             "content-type".to_string(),
-                            "text/plain; charset=utf-8".to_string(),
+                            default_content_type
+                                .unwrap_or("text/plain; charset=utf-8")
+                                .to_string(),
                         ));
                         res_header_pairs
                             .push(("x-bifrost-error".to_string(), error_type.to_string()));
@@ -3042,11 +3055,23 @@ async fn handle_intercepted_request_with_protocol(
                         req_id, error_type
                     );
                 }
-                build_overridden_error_response(&resolved_rules, 502, &error_info)
+                build_overridden_error_response_from_body(
+                    &resolved_rules,
+                    response_status,
+                    &error_info,
+                    response_body,
+                    default_content_type,
+                )
             } else {
-                build_connection_error_response(502, &error_info)
+                build_connection_error_response_from_body(
+                    502,
+                    &error_info,
+                    response_body,
+                    default_content_type.unwrap_or("text/plain; charset=utf-8"),
+                )
             }
         };
+
     let (mut upstream_parts, upstream_body) = outgoing_req.into_parts();
     upstream_parts.uri = upstream_uri.clone();
     upstream_parts.headers.remove(hyper::header::HOST);
@@ -4547,8 +4572,12 @@ async fn handle_intercepted_request_with_protocol(
     };
 
     let mut final_body = if inject_bifrost_badge {
-        let badge_rules_json =
-            super::handler::build_badge_rules_json(admin_state.as_deref(), listener_port).await;
+        let badge_rules_json = match error_badge_rules_json.as_ref() {
+            Some(rules_json) => rules_json.clone(),
+            None => {
+                super::handler::build_badge_rules_json(admin_state.as_deref(), listener_port).await
+            }
+        };
         let final_res_content_type = res_parts
             .headers
             .get(hyper::header::CONTENT_TYPE)
