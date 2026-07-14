@@ -376,7 +376,7 @@ test("Settings 性能配置在第二个页面主动刷新后可见", async ({
   }
 });
 
-test("Network 超级性能模式覆盖右侧详情区并可跳转高亮 Performance 开关", async ({
+test("Network 超级性能模式覆盖整个工作区并可跳转高亮 Performance 开关", async ({
   page,
   request,
 }) => {
@@ -391,28 +391,67 @@ test("Network 超级性能模式覆盖右侧详情区并可跳转高亮 Performa
       data: { super_performance_mode: true },
     });
 
-    await openPage(page, "traffic");
+    let releasePerformanceRequest!: () => void;
+    const performanceRequestGate = new Promise<void>((resolve) => {
+      releasePerformanceRequest = resolve;
+    });
+    await page.route("**/_bifrost/api/config/performance", async (route) => {
+      await performanceRequestGate;
+      await route.continue();
+    });
+
+    const navigation = openPage(page, "traffic");
+    const loading = page.getByTestId("traffic-performance-loading");
     const overlay = page.getByTestId("traffic-super-performance-overlay");
+    await expect(loading).toBeVisible();
+    await expect(loading).toContainText("Loading Network...");
+    await expect(overlay).toHaveCount(0);
+    releasePerformanceRequest();
+    await navigation;
+    await expect(loading).toHaveCount(0);
+    const trafficPage = page.getByTestId("traffic-page");
     const detailPane = page.getByTestId("traffic-detail-pane");
     const trafficTable = page.getByTestId("traffic-table");
+    const filterSearch = page.getByPlaceholder("Search filters...");
+    const toolbarControl = page.getByTestId("toolbar-clear-all");
+    const globalMenuControl = page.getByTestId("theme-toggle");
     await expect(overlay).toBeVisible();
     await expect(overlay).toContainText("Super performance mode is enabled");
-    await expect(trafficTable).toBeVisible();
     await expect(overlay.locator(".ant-alert")).toHaveCount(0);
 
-    const [overlayBox, detailBox, tableBox] = await Promise.all([
+    const [overlayBox, pageBox, detailBox, tableBox, filterBox, toolbarBox, menuBox] =
+      await Promise.all([
       overlay.boundingBox(),
+      trafficPage.boundingBox(),
       detailPane.boundingBox(),
       trafficTable.boundingBox(),
+      filterSearch.boundingBox(),
+      toolbarControl.boundingBox(),
+      globalMenuControl.boundingBox(),
     ]);
     expect(overlayBox).not.toBeNull();
+    expect(pageBox).not.toBeNull();
     expect(detailBox).not.toBeNull();
     expect(tableBox).not.toBeNull();
-    expect(Math.abs(overlayBox!.x - detailBox!.x)).toBeLessThanOrEqual(1);
-    expect(Math.abs(overlayBox!.y - detailBox!.y)).toBeLessThanOrEqual(1);
-    expect(Math.abs(overlayBox!.width - detailBox!.width)).toBeLessThanOrEqual(1);
-    expect(Math.abs(overlayBox!.height - detailBox!.height)).toBeLessThanOrEqual(1);
-    expect(tableBox!.x + tableBox!.width).toBeLessThanOrEqual(overlayBox!.x);
+    expect(filterBox).not.toBeNull();
+    expect(toolbarBox).not.toBeNull();
+    expect(menuBox).not.toBeNull();
+    expect(Math.abs(overlayBox!.x - pageBox!.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(overlayBox!.y - pageBox!.y)).toBeLessThanOrEqual(1);
+    expect(Math.abs(overlayBox!.width - pageBox!.width)).toBeLessThanOrEqual(1);
+    expect(Math.abs(overlayBox!.height - pageBox!.height)).toBeLessThanOrEqual(1);
+
+    for (const coveredBox of [toolbarBox!, filterBox!, tableBox!, detailBox!]) {
+      expect(coveredBox.x).toBeGreaterThanOrEqual(overlayBox!.x);
+      expect(coveredBox.y).toBeGreaterThanOrEqual(overlayBox!.y);
+      expect(coveredBox.x + coveredBox.width).toBeLessThanOrEqual(
+        overlayBox!.x + overlayBox!.width,
+      );
+      expect(coveredBox.y + coveredBox.height).toBeLessThanOrEqual(
+        overlayBox!.y + overlayBox!.height,
+      );
+    }
+    expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(overlayBox!.x);
 
     const lightColors = await overlay.evaluate((element) => {
       const style = window.getComputedStyle(element);

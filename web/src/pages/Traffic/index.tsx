@@ -8,7 +8,7 @@ import {
   type CSSProperties,
 } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Button, message, theme } from "antd";
+import { Button, message, Spin, theme } from "antd";
 import { ThunderboltOutlined } from "@ant-design/icons";
 import { useShallow } from "zustand/react/shallow";
 import {
@@ -37,8 +37,8 @@ import {
   encodeJsonForQueryParam,
 } from "../../utils/urlState";
 import { buildAppRouteUrl, isMacDesktopShell } from "../../runtime";
-import { getPerformanceConfig } from "../../api/config";
 import pushService from "../../services/pushService";
+import { usePerformanceModeStore } from "../../stores/usePerformanceModeStore";
 import type {
   TrafficSummary,
   FilterCondition,
@@ -106,7 +106,15 @@ export default function Traffic() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [superPerformanceMode, setSuperPerformanceMode] = useState(false);
+  const superPerformanceMode = usePerformanceModeStore(
+    (state) => state.superPerformanceMode,
+  );
+  const fetchPerformanceMode = usePerformanceModeStore(
+    (state) => state.fetchPerformanceMode,
+  );
+  const setSuperPerformanceMode = usePerformanceModeStore(
+    (state) => state.setSuperPerformanceMode,
+  );
   const detachedPopupRef = useRef<Window | null>(null);
 
   const records = useTrafficStore((state) => state.records);
@@ -186,21 +194,11 @@ export default function Traffic() {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
     const refreshPerformanceMode = async () => {
-      try {
-        const config = await getPerformanceConfig();
-        if (!cancelled) {
-          setSuperPerformanceMode(config.traffic.super_performance_mode);
-        }
-      } catch {
-        if (!cancelled) {
-          setSuperPerformanceMode(false);
-        }
-      }
+      await fetchPerformanceMode(true);
     };
 
-    void refreshPerformanceMode();
+    void fetchPerformanceMode();
     pushService.connect({
       ...pushService.getSubscription(),
       settings_scopes: Array.from(
@@ -222,10 +220,9 @@ export default function Traffic() {
     });
 
     return () => {
-      cancelled = true;
       unsubscribe();
     };
-  }, []);
+  }, [fetchPerformanceMode, setSuperPerformanceMode]);
 
   const filterPanelCollapsed = useFilterPanelStore(
     (state) => state.panelCollapsed,
@@ -760,6 +757,7 @@ export default function Traffic() {
           flexDirection: "column",
           height: "100%",
           overflow: "hidden",
+          position: "relative",
           backgroundColor: macDesktopShell ? "transparent" : token.colorBgContainer,
         },
         filterBarWrapper: {
@@ -785,12 +783,22 @@ export default function Traffic() {
           backgroundColor: token.colorBgContainer,
         },
         superPerformanceOverlay: {
-          width: "100%",
-          height: "100%",
+          position: "absolute",
+          inset: 0,
+          zIndex: 100,
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
           padding: 32,
+          backgroundColor: token.colorBgContainer,
+        },
+        performanceModeLoading: {
+          position: "absolute",
+          inset: 0,
+          zIndex: 100,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
           backgroundColor: token.colorBgContainer,
         },
         superPerformanceContent: {
@@ -885,47 +893,19 @@ export default function Traffic() {
 
   const renderDetail = () => (
     <div style={styles.detailWrapper} data-testid="traffic-detail-pane">
-      {superPerformanceMode ? (
-        <div
-          data-testid="traffic-super-performance-overlay"
-          style={styles.superPerformanceOverlay}
-        >
-          <div style={styles.superPerformanceContent}>
-            <div style={styles.superPerformanceIcon} aria-hidden="true">
-              <ThunderboltOutlined />
-            </div>
-            <div style={styles.superPerformanceTitle}>
-              Super performance mode is enabled
-            </div>
-            <div style={styles.superPerformanceDescription}>
-              Bifrost is still processing proxy rules, but traffic records, bodies,
-              WebSocket frames, and database updates are not being stored. Turn the mode
-              off to inspect Network traffic again.
-            </div>
-            <Button
-              type="primary"
-              onClick={handleOpenPerformanceSettings}
-              data-testid="traffic-super-performance-disable-button"
-            >
-              Open Performance Settings
-            </Button>
-          </div>
-        </div>
-      ) : (
-        <div style={styles.detailContent}>
-          <TrafficDetail
-            record={currentRecord}
-            requestBody={requestBody}
-            responseBody={responseBody}
-            requestRawBody={requestRawBody}
-            responseRawBody={responseRawBody}
-            loading={detailLoading}
-            error={detailError}
-            onOpenInNewWindow={handleOpenDetailInNewWindow}
-            onSelectById={setSelectedId}
-          />
-        </div>
-      )}
+      <div style={styles.detailContent}>
+        <TrafficDetail
+          record={currentRecord}
+          requestBody={requestBody}
+          responseBody={responseBody}
+          requestRawBody={requestRawBody}
+          responseRawBody={responseRawBody}
+          loading={detailLoading}
+          error={detailError}
+          onOpenInNewWindow={handleOpenDetailInNewWindow}
+          onSelectById={setSelectedId}
+        />
+      </div>
     </div>
   );
 
@@ -945,7 +925,7 @@ export default function Traffic() {
   );
 
   return (
-    <div style={styles.container}>
+    <div style={styles.container} data-testid="traffic-page">
       <Toolbar
         filters={toolbarFilters}
         onClearAll={handleClearAll}
@@ -987,6 +967,41 @@ export default function Traffic() {
           <div style={{ flex: 1 }} />
         )}
       </div>
+      {superPerformanceMode === null && (
+        <div
+          data-testid="traffic-performance-loading"
+          style={styles.performanceModeLoading}
+        >
+          <Spin size="large" tip="Loading Network..." />
+        </div>
+      )}
+      {superPerformanceMode === true && (
+        <div
+          data-testid="traffic-super-performance-overlay"
+          style={styles.superPerformanceOverlay}
+        >
+          <div style={styles.superPerformanceContent}>
+            <div style={styles.superPerformanceIcon} aria-hidden="true">
+              <ThunderboltOutlined />
+            </div>
+            <div style={styles.superPerformanceTitle}>
+              Super performance mode is enabled
+            </div>
+            <div style={styles.superPerformanceDescription}>
+              Bifrost is still processing proxy rules, but traffic records, bodies,
+              WebSocket frames, and database updates are not being stored. Turn the mode
+              off to inspect Network traffic again.
+            </div>
+            <Button
+              type="primary"
+              onClick={handleOpenPerformanceSettings}
+              data-testid="traffic-super-performance-disable-button"
+            >
+              Open Performance Settings
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
