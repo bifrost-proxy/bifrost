@@ -91,8 +91,9 @@ impl NativeCertCache {
                 return self.publish(Arc::clone(&previous), now);
             }
         } else if loaded.error_count > 0 {
+            let cert_count = loaded.certificates_der.len();
             tracing::warn!(
-                cert_count = loaded.certificates_der.len(),
+                cert_count,
                 error_count = loaded.error_count,
                 "native certificate trust store loaded with partial errors"
             );
