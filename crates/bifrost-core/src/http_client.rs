@@ -223,9 +223,12 @@ pub fn direct_ureq_agent() -> ureq::Agent {
 }
 
 fn trusted_reqwest_client_builder(profile: TlsTrustProfile) -> reqwest::ClientBuilder {
-    let builder = direct_reqwest_client_builder()
-        .tls_built_in_webpki_certs(true)
-        .tls_built_in_native_certs(true);
+    let builder = add_native_root_certificates(
+        direct_reqwest_client_builder()
+            .tls_built_in_webpki_certs(true)
+            .tls_built_in_native_certs(false),
+        profile,
+    );
     let builder = add_extra_root_certificates(builder, profile);
     if unsafe_ssl_from_env(profile) {
         builder.danger_accept_invalid_certs(true)
@@ -237,15 +240,72 @@ fn trusted_reqwest_client_builder(profile: TlsTrustProfile) -> reqwest::ClientBu
 fn trusted_blocking_reqwest_client_builder(
     profile: TlsTrustProfile,
 ) -> reqwest::blocking::ClientBuilder {
-    let builder = direct_blocking_reqwest_client_builder()
-        .tls_built_in_webpki_certs(true)
-        .tls_built_in_native_certs(true);
+    let builder = add_blocking_native_root_certificates(
+        direct_blocking_reqwest_client_builder()
+            .tls_built_in_webpki_certs(true)
+            .tls_built_in_native_certs(false),
+        profile,
+    );
     let builder = add_blocking_extra_root_certificates(builder, profile);
     if unsafe_ssl_from_env(profile) {
         builder.danger_accept_invalid_certs(true)
     } else {
         builder
     }
+}
+
+fn add_native_root_certificates(
+    mut builder: reqwest::ClientBuilder,
+    profile: TlsTrustProfile,
+) -> reqwest::ClientBuilder {
+    let certificates = crate::native_certificates_der();
+    let mut added = 0usize;
+    for certificate_der in certificates.iter() {
+        match reqwest::Certificate::from_der(certificate_der) {
+            Ok(certificate) => {
+                builder = builder.add_root_certificate(certificate);
+                added += 1;
+            }
+            Err(error) => tracing::warn!(
+                error = %error,
+                trust_profile = profile.name,
+                "skipping invalid cached native certificate"
+            ),
+        }
+    }
+    tracing::trace!(
+        cert_count = added,
+        trust_profile = profile.name,
+        "added cached native certificates to HTTP client"
+    );
+    builder
+}
+
+fn add_blocking_native_root_certificates(
+    mut builder: reqwest::blocking::ClientBuilder,
+    profile: TlsTrustProfile,
+) -> reqwest::blocking::ClientBuilder {
+    let certificates = crate::native_certificates_der();
+    let mut added = 0usize;
+    for certificate_der in certificates.iter() {
+        match reqwest::Certificate::from_der(certificate_der) {
+            Ok(certificate) => {
+                builder = builder.add_root_certificate(certificate);
+                added += 1;
+            }
+            Err(error) => tracing::warn!(
+                error = %error,
+                trust_profile = profile.name,
+                "skipping invalid cached native certificate"
+            ),
+        }
+    }
+    tracing::trace!(
+        cert_count = added,
+        trust_profile = profile.name,
+        "added cached native certificates to blocking HTTP client"
+    );
+    builder
 }
 
 fn add_extra_root_certificates(

@@ -7,6 +7,8 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tracing::{debug, trace, warn};
 
+use bifrost_core::ProcessResolverDiagnostics;
+
 const PROCESS_RESOLUTION_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
@@ -55,6 +57,13 @@ struct SocketSnapshot {
     expires_at: Instant,
 }
 
+struct SocketPidMapScan {
+    connections_to_pids: HashMap<ConnKey, u32>,
+    scanned_pids: usize,
+    scanned_fds: usize,
+    failed: bool,
+}
+
 pub struct ProcessResolver {
     cache: RwLock<HashMap<ConnKey, CachedProcess>>,
     pid_cache: RwLock<HashMap<u32, CachedProcess>>,
@@ -65,6 +74,7 @@ pub struct ProcessResolver {
     negative_cache_ttl: Duration,
     socket_snapshot_ttl: Duration,
     socket_snapshot_miss_refresh_interval: Duration,
+    diagnostics: Arc<ProcessResolverDiagnostics>,
 }
 
 impl Default for ProcessResolver {
@@ -85,7 +95,12 @@ impl ProcessResolver {
             negative_cache_ttl: Duration::from_millis(500),
             socket_snapshot_ttl: Duration::from_millis(250),
             socket_snapshot_miss_refresh_interval: Duration::from_millis(50),
+            diagnostics: Arc::new(ProcessResolverDiagnostics::default()),
         }
+    }
+
+    pub fn diagnostics(&self) -> Arc<ProcessResolverDiagnostics> {
+        Arc::clone(&self.diagnostics)
     }
 
     pub fn resolve(&self, peer_addr: &SocketAddr) -> Option<ClientProcess> {
@@ -220,6 +235,7 @@ impl ProcessResolver {
         if let Some(cached) = cache.get(key) {
             if cached.expires_at > Instant::now() {
                 trace!(?key, "Process info cache hit");
+                self.diagnostics.record_cache_hit(cached.process.is_some());
                 return Some(cached.process.clone());
             }
         }
@@ -249,8 +265,11 @@ impl ProcessResolver {
     }
 
     fn lookup_process(&self, key: &ConnKey) -> Option<ClientProcess> {
-        let pid = self.lookup_pid(key)?;
-        self.lookup_cached_process_by_pid(pid)
+        let process = self
+            .lookup_pid(key)
+            .and_then(|pid| self.lookup_cached_process_by_pid(pid));
+        self.diagnostics.record_lookup_result(process.is_some());
+        process
     }
 
     fn lookup_pid(&self, key: &ConnKey) -> Option<u32> {
@@ -260,11 +279,13 @@ impl ProcessResolver {
             if let Some(snapshot) = snapshot_guard.as_ref() {
                 if snapshot.expires_at > now {
                     if let Some(pid) = snapshot.connections_to_pids.get(key).copied() {
+                        self.diagnostics.record_snapshot_hit();
                         return Some(pid);
                     }
                     if now.duration_since(snapshot.refreshed_at)
                         < self.socket_snapshot_miss_refresh_interval
                     {
+                        self.diagnostics.record_snapshot_miss();
                         return None;
                     }
                 }
@@ -281,23 +302,34 @@ impl ProcessResolver {
             if let Some(snapshot) = snapshot_guard.as_ref() {
                 if snapshot.expires_at > refresh_now {
                     if let Some(pid) = snapshot.connections_to_pids.get(key).copied() {
+                        self.diagnostics.record_snapshot_hit();
                         return Some(pid);
                     }
                     if refresh_now.duration_since(snapshot.refreshed_at)
                         < self.socket_snapshot_miss_refresh_interval
                     {
+                        self.diagnostics.record_snapshot_miss();
                         return None;
                     }
                 }
             }
         }
 
-        let connections_to_pids = lookup_socket_pid_map();
-        let pid = connections_to_pids.get(key).copied();
+        self.diagnostics.record_snapshot_miss();
+        let scan_started_at = Instant::now();
+        let scan = lookup_socket_pid_map();
+        let scan_duration_us = scan_started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        self.diagnostics.record_snapshot_refresh(
+            scan_duration_us,
+            scan.scanned_pids,
+            scan.scanned_fds,
+            scan.failed,
+        );
+        let pid = scan.connections_to_pids.get(key).copied();
 
         if let Ok(mut snapshot_guard) = self.socket_snapshot.write() {
             *snapshot_guard = Some(SocketSnapshot {
-                connections_to_pids,
+                connections_to_pids: scan.connections_to_pids,
                 refreshed_at: refresh_now,
                 expires_at: refresh_now + self.socket_snapshot_ttl,
             });
@@ -420,7 +452,7 @@ fn get_process_path_macos(pid: u32) -> Option<String> {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::ConnKey;
+    use super::{ConnKey, SocketPidMapScan};
     use std::collections::HashMap;
     use std::mem::size_of;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -489,24 +521,37 @@ mod macos {
         remote_addr_raw: [u8; 16],
     }
 
-    pub(super) fn lookup_socket_pid_map_macos() -> HashMap<ConnKey, u32> {
-        let pids = list_all_pids();
+    pub(super) fn lookup_socket_pid_map_macos() -> SocketPidMapScan {
+        let Some(pids) = list_all_pids() else {
+            return SocketPidMapScan {
+                connections_to_pids: HashMap::new(),
+                scanned_pids: 0,
+                scanned_fds: 0,
+                failed: true,
+            };
+        };
         let mut connections_to_pids = HashMap::new();
+        let mut scanned_fds = 0usize;
         for pid in &pids {
-            collect_process_tcp_sockets(*pid, &mut connections_to_pids);
+            scanned_fds += collect_process_tcp_sockets(*pid, &mut connections_to_pids);
         }
         debug!(
             pid_count = pids.len(),
             socket_count = connections_to_pids.len(),
             "Refreshed macOS client socket pid snapshot"
         );
-        connections_to_pids
+        SocketPidMapScan {
+            connections_to_pids,
+            scanned_pids: pids.len(),
+            scanned_fds,
+            failed: false,
+        }
     }
 
-    fn list_all_pids() -> Vec<u32> {
+    fn list_all_pids() -> Option<Vec<u32>> {
         let estimated_bytes = unsafe { proc_listpids(PROC_ALL_PIDS, 0, std::ptr::null_mut(), 0) };
         if estimated_bytes <= 0 {
-            return Vec::new();
+            return None;
         }
 
         let mut buffer =
@@ -520,18 +565,23 @@ mod macos {
             )
         };
         if bytes_filled <= 0 {
-            return Vec::new();
+            return None;
         }
 
         buffer.truncate(bytes_filled as usize / size_of::<i32>());
-        buffer
-            .into_iter()
-            .filter(|pid| *pid > 0)
-            .map(|pid| pid as u32)
-            .collect()
+        Some(
+            buffer
+                .into_iter()
+                .filter(|pid| *pid > 0)
+                .map(|pid| pid as u32)
+                .collect(),
+        )
     }
 
-    fn collect_process_tcp_sockets(pid: u32, connections_to_pids: &mut HashMap<ConnKey, u32>) {
+    fn collect_process_tcp_sockets(
+        pid: u32,
+        connections_to_pids: &mut HashMap<ConnKey, u32>,
+    ) -> usize {
         let mut capacity = 64usize;
         loop {
             let mut fds = vec![
@@ -553,7 +603,7 @@ mod macos {
             };
 
             if bytes_filled <= 0 {
-                return;
+                return 0;
             }
 
             if bytes_filled as usize == buffer_size as usize && capacity < 4096 {
@@ -562,6 +612,7 @@ mod macos {
             }
 
             fds.truncate(bytes_filled as usize / size_of::<ProcFdInfo>());
+            let scanned_fds = fds.len();
             for fd in fds {
                 if fd.proc_fdtype != PROX_FDTYPE_SOCKET {
                     continue;
@@ -575,7 +626,7 @@ mod macos {
                 }
             }
 
-            return;
+            return scanned_fds;
         }
     }
 
@@ -758,7 +809,7 @@ mod macos {
 }
 
 #[cfg(target_os = "macos")]
-fn lookup_socket_pid_map() -> HashMap<ConnKey, u32> {
+fn lookup_socket_pid_map() -> SocketPidMapScan {
     macos::lookup_socket_pid_map_macos()
 }
 
@@ -893,7 +944,7 @@ static APP_POLICY_PROCESS_RESOLUTION_DELAY_MS: std::sync::LazyLock<u64> =
     });
 
 #[cfg(not(target_os = "macos"))]
-fn lookup_socket_pid_map() -> HashMap<ConnKey, u32> {
+fn lookup_socket_pid_map() -> SocketPidMapScan {
     use netstat2::{
         get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState,
     };
@@ -905,11 +956,18 @@ fn lookup_socket_pid_map() -> HashMap<ConnKey, u32> {
         Ok(sockets) => sockets,
         Err(error) => {
             warn!(error = %error, "Failed to get socket info");
-            return HashMap::new();
+            return SocketPidMapScan {
+                connections_to_pids: HashMap::new(),
+                scanned_pids: 0,
+                scanned_fds: 0,
+                failed: true,
+            };
         }
     };
 
+    let scanned_fds = sockets.len();
     let mut connections_to_pids = HashMap::new();
+    let mut scanned_pids = std::collections::HashSet::new();
     for socket in sockets {
         if let ProtocolSocketInfo::Tcp(tcp) = socket.protocol_socket_info {
             if matches!(
@@ -923,6 +981,7 @@ fn lookup_socket_pid_map() -> HashMap<ConnKey, u32> {
                     | TcpState::LastAck
             ) {
                 if let Some(&pid) = socket.associated_pids.first() {
+                    scanned_pids.insert(pid);
                     let key = ConnKey {
                         client_addr: SocketAddr::new(tcp.local_addr, tcp.local_port),
                         proxy_addr: Some(SocketAddr::new(tcp.remote_addr, tcp.remote_port)),
@@ -940,7 +999,12 @@ fn lookup_socket_pid_map() -> HashMap<ConnKey, u32> {
         socket_count = connections_to_pids.len(),
         "Refreshed client socket pid snapshot"
     );
-    connections_to_pids
+    SocketPidMapScan {
+        connections_to_pids,
+        scanned_pids: scanned_pids.len(),
+        scanned_fds,
+        failed: false,
+    }
 }
 
 pub fn resolve_client_process(peer_addr: &SocketAddr) -> Option<ClientProcess> {

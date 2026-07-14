@@ -55,6 +55,43 @@ fn test_process_resolver_cached_lookup_miss() {
     assert!(cached.is_none());
 }
 
+#[test]
+fn process_resolver_diagnostics_distinguish_positive_and_negative_cache_hits() {
+    let resolver = ProcessResolver::new();
+    let positive = ConnKey::from_peer_addr(&"127.0.0.1:54331".parse().unwrap());
+    let negative = ConnKey::from_peer_addr(&"127.0.0.1:54332".parse().unwrap());
+    resolver.update_cache(
+        positive,
+        Some(ClientProcess {
+            pid: 123,
+            name: "diagnostics-client".to_string(),
+            path: None,
+        }),
+    );
+    resolver.update_cache(negative, None);
+
+    assert!(resolver.get_from_cache(&positive).unwrap().is_some());
+    assert!(resolver.get_from_cache(&negative).unwrap().is_none());
+    let snapshot = resolver.diagnostics().snapshot();
+    assert_eq!(snapshot.positive_cache_hits_total, 1);
+    assert_eq!(snapshot.negative_cache_hits_total, 1);
+}
+
+#[test]
+fn process_resolver_diagnostics_record_snapshot_refresh_cost() {
+    let resolver = ProcessResolver::new();
+    let addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+
+    let _ = resolver.resolve(&addr);
+
+    let snapshot = resolver.diagnostics().snapshot();
+    assert_eq!(snapshot.lookup_requests_total, 1);
+    assert_eq!(snapshot.snapshot_misses_total, 1);
+    assert_eq!(snapshot.snapshot_refreshes_total, 1);
+    assert_eq!(snapshot.resolved_total + snapshot.unresolved_total, 1);
+    assert!(snapshot.scan_duration_max_us <= snapshot.scan_duration_total_us);
+}
+
 #[tokio::test]
 async fn test_process_resolver_async_returns_cached_hit() {
     let resolver = ProcessResolver::new();

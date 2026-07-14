@@ -78,7 +78,7 @@
 
 ## CLI / Web / Admin API
 
-本方案不新增用户可见 API 字段，只落地环境变量与内部行为：
+前序方案不新增用户可见 API 字段，只落地环境变量与内部行为；本次增量新增一个按需读取、无历史和无推送的诊断 API，见文末 Phase 5：
 
 | 入口 | 作用 |
 | --- | --- |
@@ -180,3 +180,44 @@
 - `human_tests/webui-traffic.md` 保留高并发 CONNECT 真实回归。
 - `human_tests/readme.md` 同步 Web UI Traffic 用例数量。
 - 本方案与 `design/proxy-performance-stress-test.md` 中“macOS 应用识别怎么测”一节双向引用，保证性能压测框架能验证本次优化的功能等价与热路径开销门禁。
+
+## Phase 5 —— 管理请求硬跳过、按需诊断与原生证书缓存
+
+### 管理请求硬跳过
+
+请求进入 `handle_request` 后先复用现有 Admin 路由判定生成 `AdminRoutingDecision`：
+
+- `SkipAdmin`：请求会被路由到本机 `AdminRouter`，包括本机 Admin path、`bifrost.local` 虚拟主机和 DevTools bridge；
+- `SyncAppPolicy`：CONNECT 且存在应用级 TLS include/exclude；
+- `Normal`：其他流量。
+
+`AdminRoutingDecision` 由 `is_admin_virtual_host_request` 与 `is_proxy_request_to_other_for_admin_routing` 的既有结果构成，进程识别和后续 Admin 分发共用同一个判定。不能仅按 path 跳过：例如代理到外部 upstream 的绝对 URI `http://example.com/_bifrost/...` 必须继续按普通代理流量识别进程。`SkipAdmin` 必须在读取连接级进程缓存之前返回 `client_process=None`，不得访问正负缓存、socket snapshot，不得创建阻塞任务、后台任务或重试。管理请求仍保留 client IP、client port、Admin 认证和审计信息。
+
+### 诊断数据边界
+
+`bifrost-core::ProcessResolverDiagnostics` 使用 relaxed 原子计数器，由 resolver 持有并在实际 cache/lookup/scan 位置更新。`AdminState` 只保存共享句柄并提供按需快照：
+
+```text
+GET /_bifrost/api/diagnostics/process-resolver
+```
+
+接口包含 lookup/resolved/unresolved、正负缓存命中、snapshot hit/miss/refresh/failure、累计与最大扫描耗时、扫描 PID/FD 总数。它不进入 `/api/metrics`、metrics history、数据库或 WebSocket 周期推送。已有 `client_process_resolution_failures` 与 `client_process_policy_unknown_decisions` 作为用户可感知的策略降级指标继续保留。
+
+### 原生证书缓存
+
+`bifrost-core::NativeCertCache` 缓存 `Arc<[Vec<u8>]>` DER：
+
+1. TTL 10 分钟，未过期直接克隆 Arc；
+2. miss/过期通过 refresh mutex + double-check 保证并发只加载一次；
+3. 部分成功时发布可用证书并记录 warning；
+4. 刷新完全失败时保留最后一份可用快照；首次失败缓存空结果至 TTL，避免每次 client build 重复读取 TrustSettings；
+5. Admin API 成功安装本地 CA 后显式失效；外部 Keychain 变更通过 TTL 最终收敛。
+
+reqwest 保留 WebPKI roots，关闭 reqwest 内建 native roots 自动加载，再添加缓存 DER。HTTP Replay 和 WebSocket Replay 使用同一 DER 快照构建 rustls `RootCertStore`；unsafe SSL 分支不读取缓存。
+
+### Phase 5 验证
+
+- 单元测试：Admin 路由决策、外部 Admin-like path 防误伤、诊断计数、证书缓存并发/失效/失败回退；
+- E2E：隔离端口大量访问管理 API，断言 `snapshot_refreshes_total` 增量为 0；代理到外部 upstream 的 `/_bifrost/...` 必须正常转发并增加 lookup；普通代理请求仍可转发；
+- human test：隔离实例执行 10,000 次管理请求，核对诊断快照和扫描增量；
+- 远端 CI：workspace、E2E、changed-lines 与 `coverage-all.sh --json --gate` 全绿。

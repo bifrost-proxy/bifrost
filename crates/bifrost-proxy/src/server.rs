@@ -31,7 +31,7 @@ use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, RwLock, Semaphore};
 use tokio_rustls::rustls::ServerConfig as RustlsServerConfig;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
 
@@ -45,7 +45,7 @@ use crate::utils::logging::RequestContext;
 use crate::utils::process_info::{
     app_policy_process_resolution_retry_config, resolve_client_process_async_for_connection,
     resolve_client_process_async_for_connection_with_retry,
-    spawn_async_process_resolver_with_finish, ClientProcess,
+    spawn_async_process_resolver_with_finish, ClientProcess, PROCESS_RESOLVER,
 };
 use bifrost_core::{
     AccessControlConfig, AccessDecision, AccessMode, ClientAccessControl, ProxyAuthRateLimiter,
@@ -132,8 +132,27 @@ fn should_defer_client_process_resolution(_method: &Method, _verbose_logging: bo
     false
 }
 
-fn is_admin_request_path(path: &str) -> bool {
-    path == "/_bifrost" || path.starts_with("/_bifrost/")
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientProcessResolutionMode {
+    SkipAdmin,
+    SyncAppPolicy,
+    Normal,
+}
+
+fn client_process_resolution_mode(
+    routes_to_admin: bool,
+    method: &Method,
+    tls_intercept_config: Option<&TlsInterceptConfig>,
+) -> ClientProcessResolutionMode {
+    if routes_to_admin {
+        ClientProcessResolutionMode::SkipAdmin
+    } else if method == Method::CONNECT
+        && tls_intercept_config.is_some_and(requires_client_app_for_tls_decision)
+    {
+        ClientProcessResolutionMode::SyncAppPolicy
+    } else {
+        ClientProcessResolutionMode::Normal
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -699,11 +718,13 @@ impl ProxyServer {
 
     pub fn with_admin_state(mut self, admin_state: AdminState) -> Self {
         let admin_state = admin_state.with_access_control(Arc::clone(&self.access_control));
+        admin_state.set_process_resolver_diagnostics(PROCESS_RESOLVER.diagnostics());
         self.admin_state = Some(Arc::new(admin_state));
         self
     }
 
     pub fn with_admin_state_shared(mut self, admin_state: Arc<AdminState>) -> Self {
+        admin_state.set_process_resolver_diagnostics(PROCESS_RESOLVER.diagnostics());
         self.admin_state = Some(admin_state);
         self
     }
@@ -1253,9 +1274,7 @@ async fn handle_request(
     let path = uri.path();
     let verbose_logging = proxy_config.verbose_logging;
     let is_local_client = peer_addr.ip().is_loopback();
-    let is_admin_request = is_admin_request_path(path);
-    let can_defer_client_process =
-        !is_admin_request && should_defer_client_process_resolution(&method, verbose_logging);
+    let admin_routing = admin_routing_decision(&req, proxy_config.port, &proxy_config.host);
 
     let connect_tls_intercept_config = if method == Method::CONNECT {
         Some(if let Some(ref state) = admin_state {
@@ -1276,40 +1295,61 @@ async fn handle_request(
     } else {
         None
     };
+    let process_resolution_mode = client_process_resolution_mode(
+        admin_routing.routes_to_admin,
+        &method,
+        connect_tls_intercept_config.as_ref(),
+    );
+    let can_defer_client_process = process_resolution_mode == ClientProcessResolutionMode::Normal
+        && should_defer_client_process_resolution(&method, verbose_logging);
 
     let mut ctx = RequestContext::new()
         .with_client_ip(peer_addr.ip().to_string())
         .with_port(proxy_config.port);
-    let cached_client_process = client_process_cache
-        .lock()
-        .ok()
-        .and_then(|cache| cache.clone());
+    let cached_client_process = if process_resolution_mode == ClientProcessResolutionMode::SkipAdmin
+    {
+        None
+    } else {
+        client_process_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.clone())
+    };
 
-    let client_process = if let Some(client_process) = cached_client_process {
+    let client_process = if process_resolution_mode == ClientProcessResolutionMode::SkipAdmin {
+        trace!(
+            req_id = ctx.id_str(),
+            path,
+            "Skipping client process resolution for internal admin request"
+        );
+        None
+    } else if let Some(client_process) = cached_client_process {
         Some(client_process)
-    } else if let Some(ref tls_intercept_config) = connect_tls_intercept_config {
-        let client_process =
-            if is_local_client && requires_client_app_for_tls_decision(tls_intercept_config) {
-                let (max_retries, delay_ms) = app_policy_process_resolution_retry_config();
-                debug!(
-                    req_id = ctx.id_str(),
-                    peer_addr = %peer_addr,
-                    local_addr = %local_addr,
-                    max_retries,
-                    delay_ms,
-                    "CONNECT request requires synchronous client process resolution for app policy"
-                );
-                resolve_client_process_async_for_connection_with_retry(
-                    &peer_addr,
-                    &local_addr,
-                    max_retries,
-                    delay_ms,
-                )
-                .await
-            } else {
-                resolve_client_process_async_for_connection(&peer_addr, &local_addr).await
-            };
-        if is_local_client && requires_client_app_for_tls_decision(tls_intercept_config) {
+    } else if connect_tls_intercept_config.is_some() {
+        let client_process = if is_local_client
+            && process_resolution_mode == ClientProcessResolutionMode::SyncAppPolicy
+        {
+            let (max_retries, delay_ms) = app_policy_process_resolution_retry_config();
+            debug!(
+                req_id = ctx.id_str(),
+                peer_addr = %peer_addr,
+                local_addr = %local_addr,
+                max_retries,
+                delay_ms,
+                "CONNECT request requires synchronous client process resolution for app policy"
+            );
+            resolve_client_process_async_for_connection_with_retry(
+                &peer_addr,
+                &local_addr,
+                max_retries,
+                delay_ms,
+            )
+            .await
+        } else {
+            resolve_client_process_async_for_connection(&peer_addr, &local_addr).await
+        };
+        if is_local_client && process_resolution_mode == ClientProcessResolutionMode::SyncAppPolicy
+        {
             match client_process.as_ref() {
                 Some(process) => debug!(
                     req_id = ctx.id_str(),
@@ -1516,9 +1556,8 @@ async fn handle_request(
         }
     }
 
-    let is_admin_virtual_host = is_admin_virtual_host_request(&req);
-    let is_proxy_request_to_other_server =
-        is_proxy_request_to_other_for_admin_routing(&req, proxy_config.port, &proxy_config.host);
+    let is_admin_virtual_host = admin_routing.is_admin_virtual_host;
+    let is_proxy_request_to_other_server = admin_routing.is_proxy_request_to_other_server;
 
     if is_devtools_bridge_admin_path(path) {
         if let Some(state) = admin_state {
@@ -2001,6 +2040,33 @@ fn is_admin_virtual_host_request<B>(req: &Request<B>) -> bool {
     false
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AdminRoutingDecision {
+    is_admin_virtual_host: bool,
+    is_proxy_request_to_other_server: bool,
+    routes_to_admin: bool,
+}
+
+fn admin_routing_decision<B>(
+    req: &Request<B>,
+    self_port: u16,
+    self_host: &str,
+) -> AdminRoutingDecision {
+    let is_admin_virtual_host = is_admin_virtual_host_request(req);
+    let is_proxy_request_to_other_server =
+        is_proxy_request_to_other_for_admin_routing(req, self_port, self_host);
+    let path = req.uri().path();
+    let routes_to_admin = is_devtools_bridge_admin_path(path)
+        || (!is_proxy_request_to_other_server
+            && (path.starts_with(ADMIN_PATH_PREFIX) || is_admin_virtual_host));
+
+    AdminRoutingDecision {
+        is_admin_virtual_host,
+        is_proxy_request_to_other_server,
+        routes_to_admin,
+    }
+}
+
 fn is_proxy_request_to_other_for_admin_routing<B>(
     req: &Request<B>,
     self_port: u16,
@@ -2354,11 +2420,68 @@ mod tests {
     }
 
     #[test]
-    fn test_is_admin_request_path() {
-        assert!(is_admin_request_path("/_bifrost"));
-        assert!(is_admin_request_path("/_bifrost/api/traffic"));
-        assert!(!is_admin_request_path("/api/_bifrost"));
-        assert!(!is_admin_request_path("/_bifrostish/api"));
+    fn test_client_process_resolution_mode_uses_admin_routing_decision() {
+        assert_eq!(
+            client_process_resolution_mode(true, &Method::GET, None),
+            ClientProcessResolutionMode::SkipAdmin
+        );
+        assert_eq!(
+            client_process_resolution_mode(false, &Method::GET, None),
+            ClientProcessResolutionMode::Normal
+        );
+    }
+
+    #[test]
+    fn test_client_process_resolution_mode_keeps_connect_app_policy_synchronous() {
+        let config = TlsInterceptConfig {
+            enable_tls_interception: false,
+            intercept_exclude: Vec::new(),
+            intercept_include: Vec::new(),
+            app_intercept_exclude: Vec::new(),
+            app_intercept_include: vec!["*Chrome*".to_string()],
+            ip_intercept_exclude: Vec::new(),
+            ip_intercept_include: Vec::new(),
+            unsafe_ssl: false,
+        };
+        assert_eq!(
+            client_process_resolution_mode(false, &Method::CONNECT, Some(&config)),
+            ClientProcessResolutionMode::SyncAppPolicy
+        );
+        assert_eq!(
+            client_process_resolution_mode(false, &Method::GET, Some(&config)),
+            ClientProcessResolutionMode::Normal
+        );
+    }
+
+    #[test]
+    fn test_admin_routing_decision_does_not_misclassify_external_admin_like_path() {
+        let external = Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/_bifrost/api/proxy/address")
+            .header("host", "example.com")
+            .body(())
+            .unwrap();
+        let external_decision = admin_routing_decision(&external, 9900, "127.0.0.1");
+        assert!(external_decision.is_proxy_request_to_other_server);
+        assert!(!external_decision.routes_to_admin);
+
+        let local = Request::builder()
+            .method(Method::GET)
+            .uri("/_bifrost/api/proxy/address")
+            .header("host", "127.0.0.1:9900")
+            .body(())
+            .unwrap();
+        assert!(admin_routing_decision(&local, 9900, "127.0.0.1").routes_to_admin);
+
+        let virtual_host = Request::builder()
+            .method(Method::GET)
+            .uri("http://bifrost.local/settings")
+            .header("host", "bifrost.local")
+            .body(())
+            .unwrap();
+        let virtual_host_decision = admin_routing_decision(&virtual_host, 9900, "127.0.0.1");
+        assert!(virtual_host_decision.is_admin_virtual_host);
+        assert!(virtual_host_decision.routes_to_admin);
     }
 
     #[test]

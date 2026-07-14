@@ -196,6 +196,7 @@
 |------|---------|-----------|------|
 | [app-icon-memory-optimization.md](./app-icon-memory-optimization.md) | App Icon 内存优化 | 3 | macOS 多真实系统 App 图标请求后主进程 RSS 增量防护、非 App bundle 路径不触发 AppKit fallback、图标内存缓存按字节驱逐 |
 | [memory-sqlite-cache-optimization.md](./memory-sqlite-cache-optimization.md) | SQLite Cache Size 与内存优化 | 6 | SQLite cache_size 降低、读连接池缩减、metadata_cache LRU 化后的功能回归与内存验证 |
+| [process-resolution-performance.md](./process-resolution-performance.md) | 进程识别与原生证书缓存性能 | 6 | 复用真实 Admin 路由决策跳过进程识别、外部 Admin-like path 防误伤、专用诊断计数与扫描耗时、主 metrics 隔离、普通代理回归、原生证书信任库缓存与失败回退 |
 | [super-performance-mode.md](./super-performance-mode.md) | Super Performance Mode | 5 | CLI/API/WebUI 开关、规则仍执行、traffic/body/ws/frame 禁写、Network 磨砂浮层跳转 Settings 高亮关闭开关、normal vs super 压测零记录门禁 |
 
 ### CI/DevOps 测试

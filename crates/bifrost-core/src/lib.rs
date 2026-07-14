@@ -6,8 +6,10 @@ pub mod http_client;
 pub mod limits;
 pub mod logging;
 pub mod matcher;
+pub mod native_cert_cache;
 pub mod panic_handler;
 pub mod process_alias;
+pub mod process_resolver_diagnostics;
 pub mod process_start_time;
 pub mod protocol;
 pub mod rule;
@@ -48,8 +50,12 @@ pub use matcher::{
     factory::parse_pattern, DomainMatcher, IpMatcher, MatchResult, Matcher, RegexMatcher,
     WildcardMatcher,
 };
+pub use native_cert_cache::{invalidate_native_certificate_cache, native_certificates_der};
 pub use panic_handler::{install_panic_hook, spawn_with_panic_guard};
 pub use process_alias::process_alias_executable;
+pub use process_resolver_diagnostics::{
+    ProcessResolverDiagnostics, ProcessResolverDiagnosticsSnapshot,
+};
 pub use process_start_time::{
     current_process_start_time_ms, get_process_start_time_ms, start_times_match, StartTimeMatch,
     START_TIME_MATCH_TOLERANCE_MS,

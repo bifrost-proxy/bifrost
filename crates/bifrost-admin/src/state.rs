@@ -10,7 +10,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use bifrost_core::{ClientAccessControl, SystemProxyManager};
+use bifrost_core::{ClientAccessControl, ProcessResolverDiagnostics, SystemProxyManager};
 use bifrost_storage::{ConfigManager, RulesStorage, SharedConfigManager, ValuesStorage};
 use bifrost_sync::SharedSyncManager;
 use rand::{distributions::Alphanumeric, Rng};
@@ -383,6 +383,7 @@ pub struct AdminState {
     pub traffic_db_store: Option<SharedTrafficDbStore>,
     pub async_traffic_writer: Option<SharedAsyncTrafficWriter>,
     pub metrics_collector: SharedMetricsCollector,
+    process_resolver_diagnostics: ParkingRwLock<Option<Arc<ProcessResolverDiagnostics>>>,
     pub rules_storage: RulesStorage,
     pub values_storage: Option<SharedValuesStorage>,
     pub auth_db: Option<SharedAuthDb>,
@@ -453,6 +454,7 @@ impl AdminState {
             traffic_db_store: None,
             async_traffic_writer: None,
             metrics_collector: Arc::new(MetricsCollector::default()),
+            process_resolver_diagnostics: ParkingRwLock::new(None),
             rules_storage,
             values_storage: None,
             auth_db: None,
@@ -516,6 +518,14 @@ impl AdminState {
         if old != port {
             tracing::info!("AdminState port updated: {} -> {}", old, port);
         }
+    }
+
+    pub fn set_process_resolver_diagnostics(&self, diagnostics: Arc<ProcessResolverDiagnostics>) {
+        *self.process_resolver_diagnostics.write() = Some(diagnostics);
+    }
+
+    pub fn process_resolver_diagnostics(&self) -> Option<Arc<ProcessResolverDiagnostics>> {
+        self.process_resolver_diagnostics.read().clone()
     }
 
     pub fn csrf_token(&self) -> &str {
