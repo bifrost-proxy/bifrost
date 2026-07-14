@@ -221,3 +221,52 @@ reqwest 保留 WebPKI roots，关闭 reqwest 内建 native roots 自动加载，
 - E2E：隔离端口大量访问管理 API，断言 `snapshot_refreshes_total` 增量为 0；代理到外部 upstream 的 `/_bifrost/...` 必须正常转发并增加 lookup；普通代理请求仍可转发；
 - human test：隔离实例执行 10,000 次管理请求，核对诊断快照和扫描增量；
 - 远端 CI：workspace、E2E、changed-lines 与 `coverage-all.sh --json --gate` 全绿。
+
+## Phase 6 —— 准确性无损的 Client 与扫描合并
+
+本阶段只消除重复工作，不缩短应用策略进程识别的等待窗口、不延长策略关键路径的
+negative cache，也不复用跨连接的最终进程结论。TLS 应用 include/exclude 的 PID、名称、
+路径和 unknown passthrough 语义保持不变。
+
+### 长期共享 outbound HTTP Client
+
+`bifrost-core` 为通用 outbound 请求提供 generation-aware 共享 Client：
+
+1. Client 与 native certificate snapshot generation 绑定；同一 generation 返回同一个
+   `Arc<reqwest::Client>`，复用连接池和已经解析的证书；
+2. native certificate TTL 到期或安装本地 CA 触发 invalidation 后，下一次获取 Client
+   会基于新 generation 原子重建；
+3. 仍需要独立 proxy、unsafe SSL、redirect 或超时策略的 Replay/下载器保留专用 Builder；
+   普通请求改用 request-level timeout，不为每个附件或轮询重新构建 Client。
+
+### 连接生命周期解析状态
+
+每个 accept 后的 TCP 连接持有一个 `ConnectionProcessState`：
+
+- `OnceLock<ClientProcess>` 只缓存成功结果，因此同一连接的 CONNECT、Traffic、TLS policy
+  和 keep-alive 请求共享完全相同的 PID/name/path；
+- 前台与后台解析共用连接级 CAS in-flight 状态和 `Notify`，等待同一个解析 future，避免
+  同一连接重复启动系统扫描；前台 future 被取消时由 RAII guard 释放状态并唤醒等待者；
+- unknown 不写入 `OnceLock`，后续请求仍可等待新的 socket snapshot generation
+  再尝试；
+- 后台 backfill 成功时也写入同一个 cell，连接关闭后 cell 随连接一起释放，避免端口复用
+  导致跨连接误归因。
+
+### Snapshot generation 协调器
+
+系统 socket 扫描由 `SnapshotRefreshCoordinator { generation, refreshing } + Condvar` 协调：
+
+1. 一个请求成为当前 generation 的 refresh leader，并在锁外执行系统扫描；
+2. 其他连接等待 generation 变化，不再排队后各自扫描；
+3. leader 发布完整 snapshot、递增 generation 并唤醒所有等待者；
+4. 等待者只消费刚发布的 generation；若仍 miss，沿用原有 retry delay 等待后续 generation；
+5. TTL、miss refresh interval、最大重试次数和 unknown TLS 决策本阶段不变。
+
+### Phase 6 验证
+
+- 单元测试：同 generation 共享 HTTP Client、证书 generation 变化后重建 Client；
+- 单元测试：同连接并发解析只执行一个 initializer、成功结果稳定、unknown 不缓存；
+- 单元测试：多连接并发 snapshot miss 只执行一次 scanner，全部读取同一 generation；
+- E2E/human test：高并发 CONNECT 下扫描次数受控，同时 Chrome/Edge include 仍解包、
+  exclude 仍透传、unknown 仍按既有安全语义透传；
+- CI：changed-lines 95% 与 `coverage-all.sh --json --gate` 90% 门禁保持全绿。

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::error::Error;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
 pub const BIFROST_CA_BUNDLE_ENV: &str = "BIFROST_CA_BUNDLE";
 pub const BIFROST_CA_DIR_ENV: &str = "BIFROST_CA_DIR";
@@ -118,6 +119,50 @@ const OUTBOUND_TRUST_PROFILE: TlsTrustProfile = TlsTrustProfile {
     unsafe_ssl_envs: OUTBOUND_UNSAFE_SSL_ENVS,
 };
 
+#[derive(Default)]
+struct SharedHttpClientCache {
+    state: RwLock<Option<(u64, Arc<reqwest::Client>)>>,
+    refresh_lock: Mutex<()>,
+}
+
+impl SharedHttpClientCache {
+    fn get_or_build(
+        &self,
+        generation: u64,
+        build: impl FnOnce() -> Result<reqwest::Client, reqwest::Error>,
+    ) -> Result<Arc<reqwest::Client>, reqwest::Error> {
+        if let Some(client) = self.client_for_generation(generation) {
+            return Ok(client);
+        }
+        let _guard = self
+            .refresh_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(client) = self.client_for_generation(generation) {
+            return Ok(client);
+        }
+        let client = Arc::new(build()?);
+        *self
+            .state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some((generation, Arc::clone(&client)));
+        Ok(client)
+    }
+
+    fn client_for_generation(&self, generation: u64) -> Option<Arc<reqwest::Client>> {
+        self.state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .filter(|(cached_generation, _)| *cached_generation == generation)
+            .map(|(_, client)| Arc::clone(client))
+    }
+}
+
+static OUTBOUND_HTTP_CLIENT: LazyLock<SharedHttpClientCache> =
+    LazyLock::new(SharedHttpClientCache::default);
+
 pub fn direct_reqwest_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder().no_proxy()
 }
@@ -156,6 +201,15 @@ pub fn github_blocking_reqwest_client_builder() -> reqwest::blocking::ClientBuil
 
 pub fn outbound_reqwest_client_builder() -> reqwest::ClientBuilder {
     trusted_reqwest_client_builder(OUTBOUND_TRUST_PROFILE)
+}
+
+/// Returns the shared outbound client for the current native trust-store generation.
+pub fn outbound_reqwest_client() -> Result<Arc<reqwest::Client>, reqwest::Error> {
+    let (certificates, generation) =
+        crate::native_cert_cache::native_certificates_der_with_generation();
+    OUTBOUND_HTTP_CLIENT.get_or_build(generation, || {
+        trusted_reqwest_client_builder_with_native(OUTBOUND_TRUST_PROFILE, &certificates).build()
+    })
 }
 
 pub fn outbound_blocking_reqwest_client_builder() -> reqwest::blocking::ClientBuilder {
@@ -223,10 +277,19 @@ pub fn direct_ureq_agent() -> ureq::Agent {
 }
 
 fn trusted_reqwest_client_builder(profile: TlsTrustProfile) -> reqwest::ClientBuilder {
+    let certificates = crate::native_certificates_der();
+    trusted_reqwest_client_builder_with_native(profile, &certificates)
+}
+
+fn trusted_reqwest_client_builder_with_native(
+    profile: TlsTrustProfile,
+    certificates: &[Vec<u8>],
+) -> reqwest::ClientBuilder {
     let builder = add_native_root_certificates(
         direct_reqwest_client_builder()
             .tls_built_in_webpki_certs(true)
             .tls_built_in_native_certs(false),
+        certificates,
         profile,
     );
     let builder = add_extra_root_certificates(builder, profile);
@@ -256,10 +319,10 @@ fn trusted_blocking_reqwest_client_builder(
 
 fn add_native_root_certificates(
     mut builder: reqwest::ClientBuilder,
+    certificates_der: &[Vec<u8>],
     profile: TlsTrustProfile,
 ) -> reqwest::ClientBuilder {
-    let certificates = crate::native_certificates_der();
-    let certificates = parse_native_root_certificates(&certificates);
+    let certificates = parse_native_root_certificates(certificates_der);
     let added = certificates.len();
     for certificate in certificates {
         builder = builder.add_root_certificate(certificate);
@@ -671,13 +734,14 @@ mod tests {
         outbound_unsafe_ssl_from_env, parse_native_root_certificates, parse_remote_relay_headers,
         proxied_reqwest_client_builder, remote_relay_ca_file_paths_from_env,
         remote_relay_reqwest_client_builder, remote_relay_unsafe_ssl_from_env,
-        BIFROST_CA_BUNDLE_ENV, BIFROST_CA_DIR_ENV, BIFROST_UNSAFE_SSL_ENV, COMMON_CA_DIR_ENVS,
-        COMMON_CA_FILE_ENVS, GITHUB_CA_BUNDLE_ENV, GITHUB_CA_DIR_ENV, GITHUB_UNSAFE_SSL_ENV,
-        REMOTE_RELAY_CA_BUNDLE_ENV, REMOTE_RELAY_HEADERS_ENV, REMOTE_UNSAFE_SSL_ENV,
-        UPGRADE_CA_BUNDLE_ENV, UPGRADE_CA_DIR_ENV, UPGRADE_UNSAFE_SSL_ENV,
+        SharedHttpClientCache, BIFROST_CA_BUNDLE_ENV, BIFROST_CA_DIR_ENV, BIFROST_UNSAFE_SSL_ENV,
+        COMMON_CA_DIR_ENVS, COMMON_CA_FILE_ENVS, GITHUB_CA_BUNDLE_ENV, GITHUB_CA_DIR_ENV,
+        GITHUB_UNSAFE_SSL_ENV, REMOTE_RELAY_CA_BUNDLE_ENV, REMOTE_RELAY_HEADERS_ENV,
+        REMOTE_UNSAFE_SSL_ENV, UPGRADE_CA_BUNDLE_ENV, UPGRADE_CA_DIR_ENV, UPGRADE_UNSAFE_SSL_ENV,
     };
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::Arc;
     use std::sync::{Mutex, OnceLock};
     use std::thread;
     use std::time::Duration;
@@ -685,6 +749,23 @@ mod tests {
     fn proxy_env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn shared_http_client_reuses_generation_and_rebuilds_after_change() {
+        let cache = SharedHttpClientCache::default();
+        let first = cache
+            .get_or_build(1, || reqwest::Client::builder().build())
+            .unwrap();
+        let same = cache
+            .get_or_build(1, || panic!("same generation must not rebuild"))
+            .unwrap();
+        let next = cache
+            .get_or_build(2, || reqwest::Client::builder().build())
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&first, &same));
+        assert!(!Arc::ptr_eq(&first, &next));
     }
 
     #[test]

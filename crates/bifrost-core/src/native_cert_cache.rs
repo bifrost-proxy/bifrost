@@ -13,6 +13,7 @@ struct NativeCertLoad {
 struct CachedNativeCerts {
     certificates_der: Arc<[Vec<u8>]>,
     expires_at: Instant,
+    generation: u64,
 }
 
 type NativeCertLoader = dyn Fn() -> NativeCertLoad + Send + Sync;
@@ -22,6 +23,7 @@ struct NativeCertCache {
     refresh_lock: Mutex<()>,
     ttl: Duration,
     loader: Arc<NativeCertLoader>,
+    next_generation: std::sync::atomic::AtomicU64,
 }
 
 impl NativeCertCache {
@@ -49,10 +51,15 @@ impl NativeCertCache {
             refresh_lock: Mutex::new(()),
             ttl,
             loader: Arc::new(loader),
+            next_generation: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
     fn get(&self) -> Arc<[Vec<u8>]> {
+        self.get_with_generation().0
+    }
+
+    fn get_with_generation(&self) -> (Arc<[Vec<u8>]>, u64) {
         let now = Instant::now();
         if let Some(cached) = self.fresh_snapshot(now) {
             return cached;
@@ -81,8 +88,7 @@ impl NativeCertCache {
                 "failed to refresh native certificate trust store"
             );
             if let Some(previous) = previous {
-                self.publish(Arc::clone(&previous), now);
-                return previous;
+                return self.publish(Arc::clone(&previous), now);
             }
         } else if loaded.error_count > 0 {
             tracing::warn!(
@@ -93,20 +99,22 @@ impl NativeCertCache {
         }
 
         let certificates_der = loaded.certificates_der;
-        self.publish(Arc::clone(&certificates_der), now);
-        certificates_der
+        self.publish(certificates_der, now)
     }
 
-    fn fresh_snapshot(&self, now: Instant) -> Option<Arc<[Vec<u8>]>> {
+    fn fresh_snapshot(&self, now: Instant) -> Option<(Arc<[Vec<u8>]>, u64)> {
         self.state
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .as_ref()
             .filter(|cached| cached.expires_at > now)
-            .map(|cached| Arc::clone(&cached.certificates_der))
+            .map(|cached| (Arc::clone(&cached.certificates_der), cached.generation))
     }
 
-    fn publish(&self, certificates_der: Arc<[Vec<u8>]>, now: Instant) {
+    fn publish(&self, certificates_der: Arc<[Vec<u8>]>, now: Instant) -> (Arc<[Vec<u8>]>, u64) {
+        let generation = self
+            .next_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut state = self
             .state
             .write()
@@ -114,7 +122,15 @@ impl NativeCertCache {
         *state = Some(CachedNativeCerts {
             certificates_der,
             expires_at: now + self.ttl,
+            generation,
         });
+        let certificates_der = Arc::clone(
+            &state
+                .as_ref()
+                .expect("snapshot was published")
+                .certificates_der,
+        );
+        (certificates_der, generation)
     }
 
     fn invalidate(&self) {
@@ -133,6 +149,10 @@ static NATIVE_CERT_CACHE: LazyLock<NativeCertCache> =
 
 pub fn native_certificates_der() -> Arc<[Vec<u8>]> {
     NATIVE_CERT_CACHE.get()
+}
+
+pub(crate) fn native_certificates_der_with_generation() -> (Arc<[Vec<u8>]>, u64) {
+    NATIVE_CERT_CACHE.get_with_generation()
 }
 
 pub fn invalidate_native_certificate_cache() {
@@ -191,10 +211,15 @@ mod tests {
             load(&[format!("cert-{generation}").as_bytes()], 0)
         });
 
-        assert_eq!(&*cache.get(), &[b"cert-1".to_vec()]);
-        assert_eq!(&*cache.get(), &[b"cert-1".to_vec()]);
+        let (first, first_generation) = cache.get_with_generation();
+        let (cached, cached_generation) = cache.get_with_generation();
+        assert_eq!(&*first, &[b"cert-1".to_vec()]);
+        assert_eq!(&*cached, &[b"cert-1".to_vec()]);
+        assert_eq!(cached_generation, first_generation);
         cache.invalidate();
-        assert_eq!(&*cache.get(), &[b"cert-2".to_vec()]);
+        let (refreshed, refreshed_generation) = cache.get_with_generation();
+        assert_eq!(&*refreshed, &[b"cert-2".to_vec()]);
+        assert!(refreshed_generation > first_generation);
         assert_eq!(loads.load(Ordering::SeqCst), 2);
     }
 

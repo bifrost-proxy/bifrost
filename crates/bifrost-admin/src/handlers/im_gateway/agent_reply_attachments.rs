@@ -201,20 +201,22 @@ fn is_explicit_attachment_label_or_path(label: &str, path: &str) -> bool {
 pub(super) async fn download_agent_reply_remote_attachment(
     attachment: &AgentReplyRemoteAttachment,
 ) -> bifrost_core::Result<AgentReplyDownloadedAttachment> {
-    let http = bifrost_core::outbound_reqwest_client_builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|error| {
-            bifrost_core::BifrostError::Network(format!(
-                "build agent reply attachment downloader failed: {error}"
-            ))
-        })?;
-    let response = http.get(&attachment.url).send().await.map_err(|error| {
+    let http = bifrost_core::outbound_reqwest_client().map_err(|error| {
         bifrost_core::BifrostError::Network(format!(
-            "download agent reply attachment failed: {}",
-            bifrost_core::format_reqwest_error(&error)
+            "build agent reply attachment downloader failed: {error}"
         ))
     })?;
+    let response = http
+        .get(&attachment.url)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|error| {
+            bifrost_core::BifrostError::Network(format!(
+                "download agent reply attachment failed: {}",
+                bifrost_core::format_reqwest_error(&error)
+            ))
+        })?;
     if !response.status().is_success() {
         return Err(bifrost_core::BifrostError::Network(format!(
             "download agent reply attachment returned HTTP {}",

@@ -6,6 +6,10 @@ use std::env;
 use std::net::{IpAddr, Ipv4Addr};
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
+use std::thread;
+use std::time::Duration;
 
 #[cfg(target_os = "macos")]
 use std::process::Stdio;
@@ -90,6 +94,58 @@ fn process_resolver_diagnostics_record_snapshot_refresh_cost() {
     assert_eq!(snapshot.snapshot_refreshes_total, 1);
     assert_eq!(snapshot.resolved_total + snapshot.unresolved_total, 1);
     assert!(snapshot.scan_duration_max_us <= snapshot.scan_duration_total_us);
+}
+
+#[test]
+fn concurrent_connections_share_one_snapshot_generation() {
+    let keys = (0..16)
+        .map(|offset| {
+            ConnKey::from_connection(
+                &format!("127.0.0.1:{}", 45_000 + offset).parse().unwrap(),
+                &"127.0.0.1:9900".parse().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let connections_to_pids = keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| (*key, 10_000 + index as u32))
+        .collect::<HashMap<_, _>>();
+    let scan_count = Arc::new(AtomicUsize::new(0));
+    let scan_count_for_scanner = Arc::clone(&scan_count);
+    let resolver = Arc::new(ProcessResolver::with_socket_pid_scanner(move || {
+        scan_count_for_scanner.fetch_add(1, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(30));
+        SocketPidMapScan {
+            connections_to_pids: connections_to_pids.clone(),
+            scanned_pids: 16,
+            scanned_fds: 16,
+            failed: false,
+        }
+    }));
+    let barrier = Arc::new(Barrier::new(keys.len()));
+
+    let workers = keys
+        .into_iter()
+        .enumerate()
+        .map(|(index, key)| {
+            let resolver = Arc::clone(&resolver);
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+                assert_eq!(resolver.lookup_pid(&key), Some(10_000 + index as u32));
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+
+    assert_eq!(scan_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        resolver.diagnostics().snapshot().snapshot_refreshes_total,
+        1
+    );
 }
 
 #[cfg(not(target_os = "macos"))]

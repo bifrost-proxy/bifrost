@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -29,7 +30,7 @@ use hyper::HeaderMap;
 use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, RwLock, Semaphore};
+use tokio::sync::{oneshot, Notify, RwLock, Semaphore};
 use tokio_rustls::rustls::ServerConfig as RustlsServerConfig;
 use tracing::{debug, error, info, warn};
 
@@ -137,6 +138,77 @@ enum ClientProcessResolutionMode {
     SkipAdmin,
     SyncAppPolicy,
     Normal,
+}
+
+#[derive(Default)]
+struct ConnectionProcessState {
+    process: OnceLock<ClientProcess>,
+    resolution_in_flight: AtomicBool,
+    resolution_finished: Notify,
+}
+
+struct ConnectionResolutionGuard<'a>(&'a ConnectionProcessState);
+
+impl Drop for ConnectionResolutionGuard<'_> {
+    fn drop(&mut self) {
+        self.0.finish_resolution();
+    }
+}
+
+impl ConnectionProcessState {
+    fn cached(&self) -> Option<ClientProcess> {
+        self.process.get().cloned()
+    }
+
+    fn store(&self, process: ClientProcess) -> ClientProcess {
+        let _ = self.process.set(process);
+        self.process
+            .get()
+            .expect("connection process was initialized")
+            .clone()
+    }
+
+    async fn resolve<F, Fut>(&self, resolver: F) -> Option<ClientProcess>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Option<ClientProcess>>,
+    {
+        let mut resolver = Some(resolver);
+        loop {
+            if let Some(process) = self.cached() {
+                return Some(process);
+            }
+            let finished = self.resolution_finished.notified();
+            if self.try_start_resolution() {
+                let _guard = ConnectionResolutionGuard(self);
+                let resolver = resolver
+                    .take()
+                    .expect("connection resolver can only become leader once");
+                let process = resolver().await?;
+                return Some(self.store(process));
+            }
+            finished.await;
+        }
+    }
+
+    fn try_start_background_resolution(&self) -> bool {
+        self.try_start_resolution()
+    }
+
+    fn finish_background_resolution(&self) {
+        self.finish_resolution();
+    }
+
+    fn try_start_resolution(&self) -> bool {
+        self.resolution_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn finish_resolution(&self) {
+        self.resolution_in_flight.store(false, Ordering::Release);
+        self.resolution_finished.notify_waiters();
+    }
 }
 
 fn client_process_resolution_mode(
@@ -1193,8 +1265,7 @@ async fn handle_http_connection(
         }
     };
     let io = TokioIo::new(stream);
-    let client_process_cache = Arc::new(Mutex::new(None::<ClientProcess>));
-    let client_process_resolution_started = Arc::new(AtomicBool::new(false));
+    let client_process_state = Arc::new(ConnectionProcessState::default());
 
     let http1_max_header_size = if let Some(ref state) = admin_state {
         if let Some(ref config_manager) = state.config_manager {
@@ -1215,8 +1286,7 @@ async fn handle_http_connection(
         let admin_security_config = admin_security_config.clone();
         let dns_resolver = Arc::clone(&dns_resolver);
         let access_control = Arc::clone(&access_control);
-        let client_process_cache = Arc::clone(&client_process_cache);
-        let client_process_resolution_started = Arc::clone(&client_process_resolution_started);
+        let client_process_state = Arc::clone(&client_process_state);
         let proxy_auth_rate_limiter = Arc::clone(&proxy_auth_rate_limiter);
         async move {
             handle_request(
@@ -1232,8 +1302,7 @@ async fn handle_http_connection(
                 dns_resolver,
                 access_control,
                 initial_generation,
-                client_process_cache,
-                client_process_resolution_started,
+                client_process_state,
                 proxy_auth_rate_limiter,
             )
             .await
@@ -1265,8 +1334,7 @@ async fn handle_request(
     dns_resolver: Arc<DnsResolver>,
     access_control: Arc<tokio::sync::RwLock<ClientAccessControl>>,
     initial_generation: u64,
-    client_process_cache: Arc<Mutex<Option<ClientProcess>>>,
-    client_process_resolution_started: Arc<AtomicBool>,
+    client_process_state: Arc<ConnectionProcessState>,
     proxy_auth_rate_limiter: Arc<ProxyAuthRateLimiter>,
 ) -> std::result::Result<Response<BoxBody>, hyper::Error> {
     let method = req.method().clone();
@@ -1310,10 +1378,7 @@ async fn handle_request(
     {
         None
     } else {
-        client_process_cache
-            .lock()
-            .ok()
-            .and_then(|cache| cache.clone())
+        client_process_state.cached()
     };
 
     let client_process = if process_resolution_mode == ClientProcessResolutionMode::SkipAdmin {
@@ -1321,28 +1386,32 @@ async fn handle_request(
     } else if let Some(client_process) = cached_client_process {
         Some(client_process)
     } else if connect_tls_intercept_config.is_some() {
-        let client_process = if is_local_client
-            && process_resolution_mode == ClientProcessResolutionMode::SyncAppPolicy
-        {
-            let (max_retries, delay_ms) = app_policy_process_resolution_retry_config();
-            debug!(
-                req_id = ctx.id_str(),
-                peer_addr = %peer_addr,
-                local_addr = %local_addr,
-                max_retries,
-                delay_ms,
-                "CONNECT request requires synchronous client process resolution for app policy"
-            );
-            resolve_client_process_async_for_connection_with_retry(
-                &peer_addr,
-                &local_addr,
-                max_retries,
-                delay_ms,
-            )
-            .await
-        } else {
-            resolve_client_process_async_for_connection(&peer_addr, &local_addr).await
-        };
+        let client_process = client_process_state
+            .resolve(|| async {
+                if is_local_client
+                    && process_resolution_mode == ClientProcessResolutionMode::SyncAppPolicy
+                {
+                    let (max_retries, delay_ms) = app_policy_process_resolution_retry_config();
+                    debug!(
+                        req_id = ctx.id_str(),
+                        peer_addr = %peer_addr,
+                        local_addr = %local_addr,
+                        max_retries,
+                        delay_ms,
+                        "CONNECT request requires synchronous client process resolution for app policy"
+                    );
+                    resolve_client_process_async_for_connection_with_retry(
+                        &peer_addr,
+                        &local_addr,
+                        max_retries,
+                        delay_ms,
+                    )
+                    .await
+                } else {
+                    resolve_client_process_async_for_connection(&peer_addr, &local_addr).await
+                }
+            })
+            .await;
         if is_local_client && process_resolution_mode == ClientProcessResolutionMode::SyncAppPolicy
         {
             match client_process.as_ref() {
@@ -1362,74 +1431,59 @@ async fn handle_request(
                 ),
             }
         }
-        if let Some(ref client_process) = client_process {
-            if let Ok(mut cache) = client_process_cache.lock() {
-                *cache = Some(client_process.clone());
-            }
-        }
         client_process
     } else if can_defer_client_process {
         if let Some(state) = admin_state.clone() {
-            let should_spawn = !client_process_resolution_started.swap(true, Ordering::AcqRel);
+            let should_spawn = client_process_state.try_start_background_resolution();
             if should_spawn {
                 let record_id = ctx.id_str();
-                let client_process_cache = Arc::clone(&client_process_cache);
-                let resolution_started_for_finish = Arc::clone(&client_process_resolution_started);
+                let state_for_success = Arc::clone(&client_process_state);
+                let state_for_finish = Arc::clone(&client_process_state);
                 spawn_async_process_resolver_with_finish(
                     peer_addr,
                     local_addr,
                     record_id.to_string(),
                     move |id, process| {
-                        if let Ok(mut cache) = client_process_cache.lock() {
-                            *cache = Some(process.clone());
-                        }
+                        state_for_success.store(process.clone());
                         state.update_client_process(&id, process.name, process.pid, process.path);
                     },
                     move || {
-                        resolution_started_for_finish.store(false, Ordering::Release);
+                        state_for_finish.finish_background_resolution();
                     },
                 );
             }
         }
         None
     } else {
-        let client_process =
-            resolve_client_process_async_for_connection(&peer_addr, &local_addr).await;
-        if let Some(ref client_process) = client_process {
-            if let Ok(mut cache) = client_process_cache.lock() {
-                *cache = Some(client_process.clone());
-            }
-        }
+        let client_process = client_process_state
+            .resolve(|| async {
+                resolve_client_process_async_for_connection(&peer_addr, &local_addr).await
+            })
+            .await;
         let client_process = if client_process.is_some() {
             client_process
         } else if is_local_client {
             let mut resolved = None;
             for _ in 0..20 {
                 tokio::time::sleep(Duration::from_millis(50)).await;
-                if let Ok(guard) = client_process_cache.lock() {
-                    if guard.is_some() {
-                        resolved = guard.clone();
-                        break;
-                    }
+                if let Some(process) = client_process_state.cached() {
+                    resolved = Some(process);
+                    break;
                 }
             }
             if resolved.is_none() {
                 if let Some(state) = admin_state.clone() {
-                    let should_spawn =
-                        !client_process_resolution_started.swap(true, Ordering::AcqRel);
+                    let should_spawn = client_process_state.try_start_background_resolution();
                     if should_spawn {
                         let record_id = ctx.id_str();
-                        let client_process_cache = Arc::clone(&client_process_cache);
-                        let resolution_started_for_finish =
-                            Arc::clone(&client_process_resolution_started);
+                        let state_for_success = Arc::clone(&client_process_state);
+                        let state_for_finish = Arc::clone(&client_process_state);
                         spawn_async_process_resolver_with_finish(
                             peer_addr,
                             local_addr,
                             record_id.to_string(),
                             move |id, process| {
-                                if let Ok(mut cache) = client_process_cache.lock() {
-                                    *cache = Some(process.clone());
-                                }
+                                state_for_success.store(process.clone());
                                 state.update_client_process(
                                     &id,
                                     process.name,
@@ -1438,7 +1492,7 @@ async fn handle_request(
                                 );
                             },
                             move || {
-                                resolution_started_for_finish.store(false, Ordering::Release);
+                                state_for_finish.finish_background_resolution();
                             },
                         );
                     }
@@ -2426,6 +2480,130 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn connection_process_state_shares_one_successful_resolution() {
+        let state = Arc::new(ConnectionProcessState::default());
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let barrier = Arc::new(tokio::sync::Barrier::new(12));
+        let tasks = (0..12)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                let calls = Arc::clone(&calls);
+                let barrier = Arc::clone(&barrier);
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    state
+                        .resolve(|| async {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                            Some(ClientProcess {
+                                pid: 42,
+                                name: "SharedBrowser".to_string(),
+                                path: Some("/Applications/SharedBrowser.app".to_string()),
+                            })
+                        })
+                        .await
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for task in tasks {
+            assert_eq!(task.await.unwrap().unwrap().pid, 42);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(state.cached().unwrap().name, "SharedBrowser");
+    }
+
+    #[tokio::test]
+    async fn connection_process_state_does_not_cache_unknown() {
+        let state = ConnectionProcessState::default();
+        assert!(state.resolve(|| async { None }).await.is_none());
+        let resolved = state
+            .resolve(|| async {
+                Some(ClientProcess {
+                    pid: 84,
+                    name: "LateBrowser".to_string(),
+                    path: None,
+                })
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.pid, 84);
+        assert_eq!(state.cached().unwrap().pid, 84);
+    }
+
+    #[tokio::test]
+    async fn connection_process_state_uses_background_result_without_reinitializing() {
+        let state = ConnectionProcessState::default();
+        state.store(ClientProcess {
+            pid: 126,
+            name: "BackgroundBrowser".to_string(),
+            path: None,
+        });
+
+        let resolved = state
+            .resolve(|| async { panic!("cached background result must bypass resolver") })
+            .await
+            .unwrap();
+        assert_eq!(resolved.pid, 126);
+    }
+
+    #[tokio::test]
+    async fn connection_process_state_waits_for_inflight_background_resolution() {
+        let state = Arc::new(ConnectionProcessState::default());
+        assert!(state.try_start_background_resolution());
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let state_for_waiter = Arc::clone(&state);
+        let calls_for_waiter = Arc::clone(&calls);
+        let waiter = tokio::spawn(async move {
+            state_for_waiter
+                .resolve(|| async move {
+                    calls_for_waiter.fetch_add(1, Ordering::SeqCst);
+                    None
+                })
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        state.store(ClientProcess {
+            pid: 168,
+            name: "BackgroundWinner".to_string(),
+            path: None,
+        });
+        state.finish_background_resolution();
+
+        assert_eq!(waiter.await.unwrap().unwrap().pid, 168);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn connection_process_state_releases_inflight_after_cancellation() {
+        let state = Arc::new(ConnectionProcessState::default());
+        let state_for_cancelled = Arc::clone(&state);
+        let cancelled = tokio::spawn(async move {
+            state_for_cancelled
+                .resolve(|| async { std::future::pending::<Option<ClientProcess>>().await })
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        cancelled.abort();
+        let _ = cancelled.await;
+
+        let resolved = state
+            .resolve(|| async {
+                Some(ClientProcess {
+                    pid: 210,
+                    name: "RecoveredBrowser".to_string(),
+                    path: None,
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(resolved.pid, 210);
+    }
+
     #[test]
     fn test_client_process_resolution_mode_keeps_connect_app_policy_synchronous() {
         let config = TlsInterceptConfig {
@@ -2979,8 +3157,7 @@ mod tests {
                     Arc::new(DnsResolver::new(false)),
                     access,
                     initial_generation,
-                    Arc::new(Mutex::new(None)),
-                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(ConnectionProcessState::default()),
                     Arc::new(ProxyAuthRateLimiter::new()),
                 )
                 .await
@@ -3060,8 +3237,7 @@ mod tests {
                     Arc::new(DnsResolver::new(false)),
                     access,
                     remote_generation,
-                    Arc::new(Mutex::new(None)),
-                    Arc::new(AtomicBool::new(false)),
+                    Arc::new(ConnectionProcessState::default()),
                     Arc::new(ProxyAuthRateLimiter::new()),
                 )
                 .await

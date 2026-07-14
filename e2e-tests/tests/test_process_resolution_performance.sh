@@ -147,6 +147,32 @@ main() {
     curl --noproxy "" -fsS -x "http://127.0.0.1:${PROXY_PORT}" \
         "http://127.0.0.1:${UPSTREAM_PORT}/" >/dev/null
 
+    local before_burst after_burst lookup_delta refresh_delta burst_count
+    burst_count=128
+    before_burst="$(read_diagnostics)"
+    seq "$burst_count" | xargs -P "$CONCURRENCY" -I{} \
+        curl --noproxy "" -fsS -o /dev/null \
+        -x "http://127.0.0.1:${PROXY_PORT}" \
+        "http://127.0.0.1:${UPSTREAM_PORT}/?burst={}"
+    after_burst="$(read_diagnostics)"
+    lookup_delta=$((
+        $(jq -r '.lookup_requests_total' <<<"$after_burst") -
+        $(jq -r '.lookup_requests_total' <<<"$before_burst")
+    ))
+    refresh_delta=$((
+        $(jq -r '.snapshot_refreshes_total' <<<"$after_burst") -
+        $(jq -r '.snapshot_refreshes_total' <<<"$before_burst")
+    ))
+    if [[ "$lookup_delta" -le 0 ]]; then
+        echo "Concurrent ordinary proxy requests unexpectedly skipped process lookup" >&2
+        exit 1
+    fi
+    if [[ "$refresh_delta" -ge "$burst_count" ]]; then
+        echo "Snapshot generations were not shared across the concurrent burst" >&2
+        echo "lookups=${lookup_delta} refreshes=${refresh_delta} requests=${burst_count}" >&2
+        exit 1
+    fi
+
     local metrics
     metrics="$(curl -fsS "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/metrics")"
     if jq -e '
@@ -164,6 +190,7 @@ main() {
     echo "before=${before}"
     echo "after=${after}"
     echo "after_external_proxy=${after_external_proxy}"
+    echo "burst_lookups=${lookup_delta} burst_snapshot_refreshes=${refresh_delta} burst_requests=${burst_count}"
 }
 
 main "$@"

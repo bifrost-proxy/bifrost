@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Semaphore;
@@ -64,11 +64,21 @@ struct SocketPidMapScan {
     failed: bool,
 }
 
+#[derive(Default)]
+struct SnapshotRefreshCoordinator {
+    generation: u64,
+    refreshing: bool,
+}
+
+type SocketPidMapScanner = dyn Fn() -> SocketPidMapScan + Send + Sync;
+
 pub struct ProcessResolver {
     cache: RwLock<HashMap<ConnKey, CachedProcess>>,
     pid_cache: RwLock<HashMap<u32, CachedProcess>>,
     socket_snapshot: RwLock<Option<SocketSnapshot>>,
-    socket_snapshot_refresh: Mutex<()>,
+    snapshot_refresh: Mutex<SnapshotRefreshCoordinator>,
+    snapshot_published: Condvar,
+    socket_pid_scanner: Arc<SocketPidMapScanner>,
     cache_ttl: Duration,
     pid_cache_ttl: Duration,
     negative_cache_ttl: Duration,
@@ -85,11 +95,19 @@ impl Default for ProcessResolver {
 
 impl ProcessResolver {
     pub fn new() -> Self {
+        Self::with_socket_pid_scanner(lookup_socket_pid_map)
+    }
+
+    fn with_socket_pid_scanner(
+        scanner: impl Fn() -> SocketPidMapScan + Send + Sync + 'static,
+    ) -> Self {
         Self {
             cache: RwLock::new(HashMap::new()),
             pid_cache: RwLock::new(HashMap::new()),
             socket_snapshot: RwLock::new(None),
-            socket_snapshot_refresh: Mutex::new(()),
+            snapshot_refresh: Mutex::new(SnapshotRefreshCoordinator::default()),
+            snapshot_published: Condvar::new(),
+            socket_pid_scanner: Arc::new(scanner),
             cache_ttl: Duration::from_secs(30),
             pid_cache_ttl: Duration::from_secs(2),
             negative_cache_ttl: Duration::from_millis(500),
@@ -274,50 +292,36 @@ impl ProcessResolver {
 
     fn lookup_pid(&self, key: &ConnKey) -> Option<u32> {
         let now = Instant::now();
-
-        if let Ok(snapshot_guard) = self.socket_snapshot.read() {
-            if let Some(snapshot) = snapshot_guard.as_ref() {
-                if snapshot.expires_at > now {
-                    if let Some(pid) = snapshot.connections_to_pids.get(key).copied() {
-                        self.diagnostics.record_snapshot_hit();
-                        return Some(pid);
-                    }
-                    if now.duration_since(snapshot.refreshed_at)
-                        < self.socket_snapshot_miss_refresh_interval
-                    {
-                        self.diagnostics.record_snapshot_miss();
-                        return None;
-                    }
-                }
-            }
+        if let Some(result) = self.lookup_fresh_snapshot(key, now) {
+            return result;
         }
 
-        let _refresh_guard = match self.socket_snapshot_refresh.lock() {
+        let mut coordinator = match self.snapshot_refresh.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        let refresh_now = Instant::now();
-
-        if let Ok(snapshot_guard) = self.socket_snapshot.read() {
-            if let Some(snapshot) = snapshot_guard.as_ref() {
-                if snapshot.expires_at > refresh_now {
-                    if let Some(pid) = snapshot.connections_to_pids.get(key).copied() {
-                        self.diagnostics.record_snapshot_hit();
-                        return Some(pid);
-                    }
-                    if refresh_now.duration_since(snapshot.refreshed_at)
-                        < self.socket_snapshot_miss_refresh_interval
-                    {
-                        self.diagnostics.record_snapshot_miss();
-                        return None;
-                    }
-                }
+        if coordinator.refreshing {
+            let observed_generation = coordinator.generation;
+            while coordinator.refreshing && coordinator.generation == observed_generation {
+                coordinator = self
+                    .snapshot_published
+                    .wait(coordinator)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
             }
+            drop(coordinator);
+            return self.lookup_published_generation(key);
         }
+
+        if let Some(result) = self.lookup_fresh_snapshot(key, Instant::now()) {
+            return result;
+        }
+
+        coordinator.refreshing = true;
+        drop(coordinator);
 
         self.diagnostics.record_snapshot_miss();
         let scan_started_at = Instant::now();
-        let scan = lookup_socket_pid_map();
+        let scan = (self.socket_pid_scanner)();
         let scan_duration_us = scan_started_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
         self.diagnostics.record_snapshot_refresh(
             scan_duration_us,
@@ -326,16 +330,56 @@ impl ProcessResolver {
             scan.failed,
         );
         let pid = scan.connections_to_pids.get(key).copied();
+        let published_at = Instant::now();
 
         if let Ok(mut snapshot_guard) = self.socket_snapshot.write() {
             *snapshot_guard = Some(SocketSnapshot {
                 connections_to_pids: scan.connections_to_pids,
-                refreshed_at: refresh_now,
-                expires_at: refresh_now + self.socket_snapshot_ttl,
+                refreshed_at: published_at,
+                expires_at: published_at + self.socket_snapshot_ttl,
             });
         }
 
+        let mut coordinator = self
+            .snapshot_refresh
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        coordinator.generation = coordinator.generation.wrapping_add(1);
+        coordinator.refreshing = false;
+        self.snapshot_published.notify_all();
+
         pid
+    }
+
+    fn lookup_fresh_snapshot(&self, key: &ConnKey, now: Instant) -> Option<Option<u32>> {
+        let snapshot_guard = self.socket_snapshot.read().ok()?;
+        let snapshot = snapshot_guard.as_ref()?;
+        if snapshot.expires_at <= now {
+            return None;
+        }
+        if let Some(pid) = snapshot.connections_to_pids.get(key).copied() {
+            self.diagnostics.record_snapshot_hit();
+            return Some(Some(pid));
+        }
+        if now.duration_since(snapshot.refreshed_at) < self.socket_snapshot_miss_refresh_interval {
+            self.diagnostics.record_snapshot_miss();
+            return Some(None);
+        }
+        None
+    }
+
+    fn lookup_published_generation(&self, key: &ConnKey) -> Option<u32> {
+        let result = self.socket_snapshot.read().ok().and_then(|snapshot| {
+            snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.connections_to_pids.get(key).copied())
+        });
+        if result.is_some() {
+            self.diagnostics.record_snapshot_hit();
+        } else {
+            self.diagnostics.record_snapshot_miss();
+        }
+        result
     }
 
     fn lookup_cached_process_by_pid(&self, pid: u32) -> Option<ClientProcess> {

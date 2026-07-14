@@ -102,6 +102,62 @@
 - 未配置诊断对象时返回 503，而不是伪造全零成功响应。
 - 写方法被拒绝，专用诊断接口保持只读。
 
+### TC-PRP-07 长期共享 outbound HTTP Client
+
+操作步骤：
+
+1. 运行：
+
+   ```bash
+   cargo test -p bifrost-core shared_http_client_reuses_generation_and_rebuilds_after_change -- --nocapture
+   ```
+
+2. 检查附件、图片与飞书应用注册请求使用 request-level timeout 和共享 outbound Client。
+
+预期结果：
+
+- 同一 native certificate generation 返回同一个 `Arc<reqwest::Client>`。
+- generation 变化后重建 Client，确保新安装或更新的系统 CA 生效。
+- Client 复用不读取或修改任何 socket、PID、进程名称或 TLS 应用策略状态。
+
+### TC-PRP-08 连接生命周期共享解析结果
+
+操作步骤：
+
+1. 运行：
+
+   ```bash
+   cargo test -p bifrost-proxy connection_process_state_ -- --nocapture
+   ```
+
+预期结果：
+
+- 同一连接的 12 个并发调用只执行一个解析 initializer。
+- 成功的 PID/name/path 在该连接后续请求中保持稳定。
+- unknown 不写入连接级 `OnceLock`，后续 generation 仍可重新识别。
+- 连接关闭后状态随连接释放，不把旧端口的进程结果复用到新连接。
+
+### TC-PRP-09 跨连接 snapshot generation 合并与策略准确性
+
+操作步骤：
+
+1. 运行：
+
+   ```bash
+   cargo test -p bifrost-proxy concurrent_connections_share_one_snapshot_generation -- --nocapture
+   cargo test -p bifrost-proxy test_should_not_intercept_when_app_policy_configured_but_client_app_unknown -- --nocapture
+   REQUEST_COUNT=1000 CONCURRENCY=16 SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_process_resolution_performance.sh
+   ```
+
+2. 检查 E2E 输出的 `burst_lookups`、`burst_snapshot_refreshes` 与 `burst_requests`。
+
+预期结果：
+
+- 16 个不同连接并发 miss 时只执行一次注入 scanner，并共享同一 generation。
+- 128 个真实并发代理请求的 snapshot refresh 数小于请求数，证明扫描按 generation 合并。
+- TTL、miss interval、应用策略重试次数均未缩短或延长。
+- 配置应用策略但客户端进程 unknown 时仍保持既有 passthrough 语义；本优化不把 unknown 错当成任何应用。
+
 ## 清理步骤
 
 - E2E 脚本自动停止自己启动的 Bifrost 与 Python 子进程并删除临时目录。
@@ -127,3 +183,16 @@
 - TC-PRP-06：通过。
   - `cargo test -p bifrost-admin diagnostics -- --nocapture`
   - 相关测试全部通过，包含共享快照、未配置 503 与写方法拒绝。
+- TC-PRP-07：通过。
+  - 共享 Client 单测通过；同 generation `Arc::ptr_eq=true`，generation 变化后重建。
+  - 图片、附件和飞书应用注册改为共享 Client + request-level timeout。
+- TC-PRP-08：通过。
+  - 12 个并发调用共享一个 initializer，调用计数为 1。
+  - unknown 后再次解析成功，证明失败结果未写入连接级 `OnceLock`。
+- TC-PRP-09：通过。
+  - 16 个不同连接并发 miss 的注入 scanner 调用计数为 1。
+  - `REQUEST_COUNT=10000 CONCURRENCY=32` 真实 E2E 通过；128 个并发普通代理请求产生
+    `burst_lookups=335`、`burst_snapshot_refreshes=15`，远低于逐 lookup/逐请求扫描。
+  - 第 2 轮连接状态修复后以 `REQUEST_COUNT=1000 CONCURRENCY=16` 复跑通过；128 个并发
+    普通代理请求产生 `burst_lookups=302`、`burst_snapshot_refreshes=16`。
+  - app policy + unknown 的 passthrough 回归测试通过；TTL、miss interval 和重试配置未修改。
