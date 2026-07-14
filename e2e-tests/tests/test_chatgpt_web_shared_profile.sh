@@ -11,6 +11,9 @@ grep -q "restored headless mode for current retry and future runs" crates/bifros
 grep -q "required_dom_terminal_idle_for" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
 grep -q "dom_terminal_content_settle_for" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
 grep -q "stop_button_visible" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
+grep -q "assistant_message_not_committed" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
+grep -q "provisionalAssistantShell" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
+grep -q "hasGeneratedImageAfterLastUser" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
 grep -q "conversation_busy" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
 grep -q "conversation_busy_if_stop_button_visible" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
 grep -q "diagnostic_has_visible_stop_button" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
@@ -30,6 +33,14 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   dom_terminal_content_settle_waits_after_controls_idle_for_markdown_render \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  dom_output_in_progress_reason_waits_for_committed_assistant_message \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  dom_ready_signature_detects_equal_length_content_replacement \
   --lib -- --nocapture
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
