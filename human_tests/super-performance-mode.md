@@ -50,16 +50,18 @@
 - `GET /_bifrost/api/traffic?limit=100` 和 `POST /_bifrost/api/traffic/query` 均返回 0 条记录。
 - 临时 `body_cache` 下没有请求/响应 body 文件。
 
-### TC-SPM-04 Network 浮层与 Settings 高亮跳转
+### TC-SPM-04 Network 右侧详情覆盖层与 Settings 高亮跳转
 
 操作步骤：
 
-1. 运行 `pnpm --dir web exec playwright test web/tests/ui/admin-settings.spec.ts -g "Network 超级性能模式浮层可跳转并高亮 Performance 开关"`。
+1. 运行 `pnpm --dir web exec playwright test web/tests/ui/admin-settings.spec.ts -g "Network 超级性能模式覆盖右侧详情区并可跳转高亮 Performance 开关"`。
 
 预期结果：
 
-- 通过 Admin API 打开超级性能模式后，Network 表格区域显示磨砂浮层。
-- 浮层提示说明当前处于超级性能模式，Network 录制不可用。
+- 通过 Admin API 打开超级性能模式后，Network 中间流量表格保持可见且不被遮挡。
+- 右侧请求详情区域被状态页完整覆盖，覆盖层与详情 pane 的位置和尺寸一致。
+- 状态页不再使用大面积黄色 Alert，且浅色/深色主题均使用主题 token 保持可读。
+- 状态页说明当前处于超级性能模式，Network 录制不可用。
 - 点击浮层按钮跳转到 `/settings?tab=performance&highlight=super-performance-mode`。
 - Settings > Performance 顶部 Super Performance Mode 开关处于开启状态并高亮。
 
@@ -89,6 +91,14 @@ rm -rf .bifrost-super-perf-* .artifacts/loadtest/super-performance-*.tmp
 ```
 
 ## 执行记录
+
+2026-07-14 右侧详情覆盖层 UI 回归：
+
+- TC-SPM-04：通过。
+  - 自动化：`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" pnpm --dir web exec playwright test web/tests/ui/admin-settings.spec.ts -g "Network 超级性能模式覆盖右侧详情区并可跳转高亮 Performance 开关"`，1 条用例通过。
+  - 真实 Chrome：启动 `BACKEND_PORT=9900 pnpm --dir web dev --host 127.0.0.1 --port 3000`，打开 `http://127.0.0.1:3000/_bifrost/traffic`。
+  - 浅色主题与深色主题均确认：中间流量列表保持可见，状态页完整覆盖右侧详情 pane，不再显示大面积黄色 Alert，操作按钮可见且文本可读。
+  - 测试后恢复原有浅色主题与 `super_performance_mode=false` 配置；3000 端口前端 dev 服务保留供复核。
 
 2026-07-10 本轮执行结果：
 

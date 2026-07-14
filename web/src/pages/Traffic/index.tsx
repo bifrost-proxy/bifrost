@@ -8,7 +8,8 @@ import {
   type CSSProperties,
 } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Alert, Button, message, theme } from "antd";
+import { Button, message, theme } from "antd";
+import { ThunderboltOutlined } from "@ant-design/icons";
 import { useShallow } from "zustand/react/shallow";
 import {
   useTrafficStore,
@@ -784,25 +785,55 @@ export default function Traffic() {
           backgroundColor: token.colorBgContainer,
         },
         superPerformanceOverlay: {
-          position: "absolute",
-          inset: 0,
-          zIndex: 5,
+          width: "100%",
+          height: "100%",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          padding: 24,
-          background: `${token.colorBgContainer}cc`,
-          backdropFilter: "blur(12px) saturate(1.2)",
-          WebkitBackdropFilter: "blur(12px) saturate(1.2)",
+          padding: 32,
+          backgroundColor: token.colorBgContainer,
         },
-        superPerformanceAlert: {
-          maxWidth: 620,
-          boxShadow: token.boxShadowSecondary,
+        superPerformanceContent: {
+          width: "100%",
+          maxWidth: 420,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          textAlign: "center",
+        },
+        superPerformanceIcon: {
+          width: 48,
+          height: 48,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          marginBottom: 16,
+          borderRadius: token.borderRadiusLG,
+          color: token.colorWarning,
+          backgroundColor: token.colorWarningBg,
+          fontSize: 24,
+        },
+        superPerformanceTitle: {
+          marginBottom: 8,
+          color: token.colorText,
+          fontSize: 18,
+          fontWeight: 600,
+          lineHeight: 1.4,
+        },
+        superPerformanceDescription: {
+          marginBottom: 20,
+          color: token.colorTextSecondary,
+          fontSize: 13,
+          lineHeight: 1.65,
         },
         detailWrapper: {
           height: "100%",
-          padding: 4,
           backgroundColor: token.colorBgContainer,
+          overflow: "hidden",
+        },
+        detailContent: {
+          height: "100%",
+          padding: 4,
           overflow: "auto",
         },
       };
@@ -848,46 +879,53 @@ export default function Traffic() {
             onScrollTopChange={handleScrollTopChange}
           />
         )}
-        {superPerformanceMode && (
-          <div
-            data-testid="traffic-super-performance-overlay"
-            style={styles.superPerformanceOverlay}
-          >
-            <Alert
-              type="warning"
-              showIcon
-              message="Super performance mode is enabled"
-              description="Bifrost is processing proxy rules without storing traffic records, bodies, WebSocket frames, or traffic database updates. Turn it off to use Network recording and traffic inspection again."
-              style={styles.superPerformanceAlert}
-              action={
-                <Button
-                  type="primary"
-                  onClick={handleOpenPerformanceSettings}
-                  data-testid="traffic-super-performance-disable-button"
-                >
-                  Open Performance Settings
-                </Button>
-              }
-            />
-          </div>
-        )}
       </div>
     </div>
   );
 
   const renderDetail = () => (
-    <div style={styles.detailWrapper}>
-      <TrafficDetail
-        record={currentRecord}
-        requestBody={requestBody}
-        responseBody={responseBody}
-        requestRawBody={requestRawBody}
-        responseRawBody={responseRawBody}
-        loading={detailLoading}
-        error={detailError}
-        onOpenInNewWindow={handleOpenDetailInNewWindow}
-        onSelectById={setSelectedId}
-      />
+    <div style={styles.detailWrapper} data-testid="traffic-detail-pane">
+      {superPerformanceMode ? (
+        <div
+          data-testid="traffic-super-performance-overlay"
+          style={styles.superPerformanceOverlay}
+        >
+          <div style={styles.superPerformanceContent}>
+            <div style={styles.superPerformanceIcon} aria-hidden="true">
+              <ThunderboltOutlined />
+            </div>
+            <div style={styles.superPerformanceTitle}>
+              Super performance mode is enabled
+            </div>
+            <div style={styles.superPerformanceDescription}>
+              Bifrost is still processing proxy rules, but traffic records, bodies,
+              WebSocket frames, and database updates are not being stored. Turn the mode
+              off to inspect Network traffic again.
+            </div>
+            <Button
+              type="primary"
+              onClick={handleOpenPerformanceSettings}
+              data-testid="traffic-super-performance-disable-button"
+            >
+              Open Performance Settings
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div style={styles.detailContent}>
+          <TrafficDetail
+            record={currentRecord}
+            requestBody={requestBody}
+            responseBody={responseBody}
+            requestRawBody={requestRawBody}
+            responseRawBody={responseRawBody}
+            loading={detailLoading}
+            error={detailError}
+            onOpenInNewWindow={handleOpenDetailInNewWindow}
+            onSelectById={setSelectedId}
+          />
+        </div>
+      )}
     </div>
   );
 

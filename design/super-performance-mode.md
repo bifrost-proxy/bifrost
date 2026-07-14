@@ -13,9 +13,10 @@ When enabled:
 - No request body, response body, SSE body, WebSocket frame, or WebSocket payload
   is persisted.
 - Traffic query APIs return an empty result set.
-- The Network page stays visible but is covered by a frosted notice explaining
-  that recording is disabled, with a button to open Settings > Performance and
-  highlight the switch.
+- The Network page stays visible, but the right-side request detail pane becomes
+  a full-pane status view explaining that recording is disabled. The traffic
+  list remains visible, and the status view includes a button to open Settings >
+  Performance and highlight the switch.
 
 ## Configuration Surface
 
@@ -58,9 +59,12 @@ Settings > Performance shows "Super Performance Mode" at the top of the tab.
 The description states that Bifrost will process rules but will not store any
 traffic entries, bodies, frames, or DB updates.
 
-Network stays mounted. When the mode is active, the traffic table region gets a
-frosted overlay with a warning and an "Open Performance Settings" button. The
-button navigates to:
+Network stays mounted. When the mode is active, the traffic table remains
+visible while the entire right-side request detail pane is replaced by a compact
+status view with an "Open Performance Settings" button. The status view uses
+theme tokens for its surface, text, warning icon, and action so light and dark
+themes remain equivalent without a large yellow warning card. The button
+navigates to:
 
 ```text
 /settings?tab=performance&highlight=super-performance-mode
@@ -92,7 +96,8 @@ E2E:
 UI:
 
 - Force the mode on through Admin API.
-- Open Network and assert the frosted overlay is visible.
+- Open Network and assert the status view covers the entire right detail pane
+  without covering the traffic table, in both light and dark themes.
 - Click the overlay action and assert Settings > Performance opens with the
   Super Performance Mode switch highlighted and checked.
 

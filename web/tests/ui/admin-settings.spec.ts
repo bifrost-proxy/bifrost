@@ -376,7 +376,7 @@ test("Settings 性能配置在第二个页面主动刷新后可见", async ({
   }
 });
 
-test("Network 超级性能模式浮层可跳转并高亮 Performance 开关", async ({
+test("Network 超级性能模式覆盖右侧详情区并可跳转高亮 Performance 开关", async ({
   page,
   request,
 }) => {
@@ -393,8 +393,40 @@ test("Network 超级性能模式浮层可跳转并高亮 Performance 开关", as
 
     await openPage(page, "traffic");
     const overlay = page.getByTestId("traffic-super-performance-overlay");
+    const detailPane = page.getByTestId("traffic-detail-pane");
+    const trafficTable = page.getByTestId("traffic-table");
     await expect(overlay).toBeVisible();
     await expect(overlay).toContainText("Super performance mode is enabled");
+    await expect(trafficTable).toBeVisible();
+    await expect(overlay.locator(".ant-alert")).toHaveCount(0);
+
+    const [overlayBox, detailBox, tableBox] = await Promise.all([
+      overlay.boundingBox(),
+      detailPane.boundingBox(),
+      trafficTable.boundingBox(),
+    ]);
+    expect(overlayBox).not.toBeNull();
+    expect(detailBox).not.toBeNull();
+    expect(tableBox).not.toBeNull();
+    expect(Math.abs(overlayBox!.x - detailBox!.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(overlayBox!.y - detailBox!.y)).toBeLessThanOrEqual(1);
+    expect(Math.abs(overlayBox!.width - detailBox!.width)).toBeLessThanOrEqual(1);
+    expect(Math.abs(overlayBox!.height - detailBox!.height)).toBeLessThanOrEqual(1);
+    expect(tableBox!.x + tableBox!.width).toBeLessThanOrEqual(overlayBox!.x);
+
+    const lightColors = await overlay.evaluate((element) => {
+      const style = window.getComputedStyle(element);
+      return { background: style.backgroundColor, color: style.color };
+    });
+    expect(lightColors.background).not.toBe("rgb(255, 251, 230)");
+
+    await page.getByTestId("theme-toggle").click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    const darkColors = await overlay.evaluate((element) => {
+      const style = window.getComputedStyle(element);
+      return { background: style.backgroundColor, color: style.color };
+    });
+    expect(darkColors.background).not.toBe(lightColors.background);
 
     await page.getByTestId("traffic-super-performance-disable-button").click();
     await expect(page).toHaveURL(
