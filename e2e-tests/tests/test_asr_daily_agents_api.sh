@@ -65,6 +65,13 @@ def send(value):
 
 def report_content(report_path, prompt):
     if "/research_dispatcher/" in report_path:
+        if "2026-07-14-report.md" in report_path:
+            return """# Research manifest
+
+```json
+{"questions":[]}
+```
+"""
         return """# Research manifest
 
 ```json
@@ -72,6 +79,13 @@ def report_content(report_path, prompt):
 ```
 """
     if "/research_seed/" in report_path:
+        if "2026-07-14-report.md" in report_path:
+            return """# Research seeds
+
+```json
+{"research_questions":[],"non_research_items":[{"source_excerpt":"修复线上超时","classification":"internal_investigation","reason":"这是内部执行事项"}]}
+```
+"""
         return """# Research seeds
 
 ```json
@@ -79,6 +93,8 @@ def report_content(report_path, prompt):
 ```
 """
     if "/research_digest/" in report_path:
+        if "2026-07-14-report.md" in report_path:
+            return "# Research digest\n\n本日报未识别到需要外部研究的问题。\n"
         links = []
         for upstream in pathlib.Path.cwd().glob("input/upstream/research_fanout/*-report.md"):
             links.extend(re.findall(r"https://chatgpt\.com/c/[A-Za-z0-9_-]+", upstream.read_text(encoding="utf-8")))
@@ -350,6 +366,62 @@ digest_path = daily_dir / "agents" / "research_digest" / "output" / "research_di
 digest = digest_path.read_text(encoding="utf-8")
 assert github["full_report_link"] in digest, digest
 assert product["full_report_link"] in digest, digest
+
+empty_date = "2026-07-14"
+(daily_dir / f"{empty_date}.md").write_text(
+    "# 2026-07-14\n\n帮我记录一下修复线上超时。\n",
+    encoding="utf-8",
+)
+queued = request(
+    "POST",
+    f"/asr/tasks/{task_id}/daily-agent/run?date={empty_date}&force=1",
+    expected=(200, 202),
+)
+assert queued["status"] in ("queued", "already_running"), queued
+
+empty_runs = None
+for _ in range(180):
+    empty_runs = request("GET", f"/asr/tasks/{task_id}/daily-agent/runs")
+    empty_docs = {
+        item["agent_id"]: item
+        for item in empty_runs.get("processed_documents", [])
+        if item.get("date") == empty_date
+    }
+    if set(empty_docs) == expected_agents:
+        break
+    time.sleep(0.5)
+else:
+    raise AssertionError(empty_runs)
+
+empty_children_dir = fanout_dir / empty_date
+empty_manifest = json.loads(
+    (empty_children_dir / "manifest.json").read_text(encoding="utf-8")
+)
+assert empty_manifest["questions"] == [], empty_manifest
+assert list(empty_children_dir.glob("*.json")) == [empty_children_dir / "manifest.json"]
+empty_fanout_report = (
+    fanout_dir / f"{empty_date}-report.md"
+).read_text(encoding="utf-8")
+assert "本日报未识别到需要外部研究的问题" in empty_fanout_report, empty_fanout_report
+empty_digest_upstream = (
+    daily_dir
+    / "agents"
+    / "research_digest"
+    / "input"
+    / "upstream"
+    / "research_fanout"
+    / f"{empty_date}-report.md"
+).read_text(encoding="utf-8")
+assert "本日报未识别到需要外部研究的问题" in empty_digest_upstream
+empty_digest = (
+    daily_dir
+    / "agents"
+    / "research_digest"
+    / "output"
+    / "research_digest"
+    / f"{empty_date}-report.md"
+).read_text(encoding="utf-8")
+assert "本日报未识别到需要外部研究的问题" in empty_digest
 
 print(f"[asr-daily-agents] PASS task={task_id}")
 PY

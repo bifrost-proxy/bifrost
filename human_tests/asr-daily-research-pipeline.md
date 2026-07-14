@@ -107,10 +107,24 @@
 - 历史研究和新研究都出现在 Project 的“聊天”列表；不同问题仍是不同 conversation，不共享一条聊天。
 - 页面若跳回普通首页或其他 Project，Bifrost 在写入 Prompt 前失败，不把问题发送到项目外。
 
+### TC-ADRP-09：空研究清单正常收敛
+
+1. 使用只包含内部故障或执行事项、没有外部研究问题的日报运行五段 Agent 链路。
+2. 确认 `research_dispatcher` 输出 `{"questions":[]}`。
+3. 检查 fan-out 产物和下游 `research_digest`。
+
+预期：
+
+- fan-out 成功完成，保存空的 `manifest.json`，且不创建任何 child run。
+- 日期级 fan-out report 明确写明当日没有需要外部研究的问题。
+- `research_digest` 继续执行并生成可投递摘要；不创建无意义的 ChatGPT 研究会话。
+- 非空 manifest 的全部 child run 失败时仍然按失败处理。
+
 ## 执行记录
 
 | 日期 | 用例 | 结果 |
 | --- | --- | --- |
+| 2026-07-14 | TC-ADRP-09 | 通过。隔离数据目录和动态端口运行完整五段链路：dispatcher 输出 `{"questions":[]}`；fan-out 成功保存唯一的 `manifest.json`，未创建 child run，日期报告明确写明无外部研究问题；digest 继续生成同义摘要。原有非空 manifest 全部 child 失败负向单测仍通过。 |
 | 2026-07-13 | TC-ADRP-05 长文本保存时序回归 | Playwright 用例确认 Project URL 连续输入期间不提交，按回车后只保存完整 URL；前端定向用例与构建通过。 |
 | 2026-07-13 | TC-ADRP-01 当前主干回归 | `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_asr_daily_agents_api.sh` 通过；基础四段使用外部 Codex mock，逐题研究使用 ChatGPT Web mock。五个 Agent 全部生成 processed document，两个原始问题获得不同 conversation id 和完整链接，内部故障记录未进入 manifest，fan-out 的两个链接均进入 digest 上游输入和最终 digest。 |
 | 2026-07-12 | TC-ADRP-01 | `bash e2e-tests/tests/test_asr_daily_agents_api.sh` 通过；五个 Agent 均产出 processed document，两个研究问题生成不同 conversation id 与链接。 |

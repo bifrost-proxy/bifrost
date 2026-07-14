@@ -168,6 +168,7 @@ ChatGPT Web child run 发送前必须强制校验：
 - `github_repositories` 用于告诉 ChatGPT Web 应读取哪些已连接仓库；它不是授权机制，真正可见性仍由 ChatGPT Connector 授权与索引状态决定。
 - `context_profile` 是可选回退，只能引用本机配置的安全映射；manifest 不能直接提供任意绝对路径。
 - `research_prompt` 是单题补充要求，不替代 Agent 的基础 instructions。
+- `questions: []` 是合法结果，表示当日日报没有需要外部研究的问题；fan-out 必须成功收敛，不能把零个子任务判定为全部失败。
 
 ### Child run 产物
 
@@ -183,6 +184,8 @@ agents/research_dispatcher/output/research_result/
 ```
 
 单题 JSON 保存 `original_question / runner / github_repositories / context_profile / status / run_id / conversation_id / full_report_link / result_path / error`。ChatGPT Web 成功时 `full_report_link` 为对应的 `https://chatgpt.com/c/<conversation_id>`；本地 Runner 使用本地结果路径。日期级 report 供下游 `research_digest` 消费，并保留每一项原始问题和完整结果链接。
+
+当 manifest 为空时，fan-out 仍保存空的 `manifest.json` 和日期级 report，不启动任何 child run；report 明确写明当日没有外部研究问题，供 `research_digest` 和 IM 投递正常消费。“全部子任务失败”只适用于非空 manifest 且成功数为零的情况。
 
 ### daily_report
 

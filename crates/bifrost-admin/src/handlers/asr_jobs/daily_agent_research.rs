@@ -118,15 +118,19 @@ fn parse_daily_research_manifest(content: &str) -> Result<AsrDailyResearchManife
         }
     }
 
+    let mut empty_manifest = None;
     for candidate in candidates {
         let Ok(manifest) = serde_json::from_str::<AsrDailyResearchManifest>(candidate) else {
             continue;
         };
-        if !manifest.questions.is_empty() {
+        if manifest.questions.is_empty() {
+            empty_manifest.get_or_insert(manifest);
+        } else {
             return Ok(manifest);
         }
     }
-    Err("research manifest must contain a non-empty JSON questions array".to_string())
+    empty_manifest
+        .ok_or_else(|| "research manifest must contain a JSON questions array".to_string())
 }
 
 fn validate_daily_research_manifest(
@@ -438,6 +442,10 @@ fn render_daily_research_index(
     results: &[AsrDailyResearchChildResult],
 ) -> String {
     let mut report = format!("# {date} 独立研究结果\n\n");
+    if results.is_empty() {
+        report.push_str("本日报未识别到需要外部研究的问题；未创建独立研究会话。\n");
+        return report;
+    }
     report.push_str("每一项均保留原始问题，并由独立研究会话处理。\n\n");
     for result in results {
         report.push_str(&format!("## {}\n\n", result.original_question.trim()));
@@ -659,7 +667,7 @@ async fn run_daily_agent_research_fanout(
         }
         std::fs::write(&report_path, report)
             .map_err(|error| format!("write research index report failed: {error}"))?;
-        if success_count == 0 {
+        if !results.is_empty() && success_count == 0 {
             return Err(format!(
                 "all {} research child runs failed for {}",
                 results.len(), entry.date

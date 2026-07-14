@@ -2716,6 +2716,14 @@ fn daily_agent_research_index_keeps_original_question_and_chatgpt_link() {
 }
 
 #[test]
+fn daily_agent_research_index_explains_an_empty_manifest() {
+    let report = render_daily_research_index("2026-07-14", &[]);
+
+    assert!(report.contains("本日报未识别到需要外部研究的问题"));
+    assert!(report.contains("未创建独立研究会话"));
+}
+
+#[test]
 fn daily_agent_research_index_does_not_expose_local_result_paths() {
     let result = AsrDailyResearchChildResult {
         question_id: "q1".to_string(),
@@ -3159,6 +3167,51 @@ async fn daily_agent_research_fanout_reports_all_children_failed() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn daily_agent_research_fanout_accepts_an_empty_manifest() {
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let mut agent = AsrDailyAgentItem::daily_report();
+    agent.id = "research_fanout".to_string();
+    agent.name = "research_fanout".to_string();
+    agent.output_dir = "research_fanout".to_string();
+    agent.runner = "missing-runner".to_string();
+    agent.dependencies = vec![AsrDailyAgentDependency {
+        agent_id: "research_dispatcher".to_string(),
+        include_output: true,
+    }];
+    agent.research_fanout = Some(AsrDailyAgentResearchFanoutConfig {
+        allowed_runners: vec!["missing-runner".to_string()],
+        ..Default::default()
+    });
+    let mut task = test_directory_task("research-empty", temp.path().join("audio"));
+    task.daily_agent.agents = vec![agent.clone()];
+    let task = task_for_daily_agent(&task, &agent);
+    ensure_asr_daily_workspace(&task).unwrap();
+    let date = "2026-07-14";
+    let dependency_dir = daily_agent_upstream_input_dir(&task, "research_dispatcher");
+    std::fs::create_dir_all(&dependency_dir).unwrap();
+    std::fs::write(
+        dependency_dir.join(format!("{date}-report.md")),
+        r#"{"questions":[]}"#,
+    )
+    .unwrap();
+
+    run_daily_agent_research_fanout(&task, &daily_agent_research_plan(&task, date))
+        .await
+        .unwrap();
+
+    let output_dir = daily_agent_output_dir(&task);
+    let manifest: AsrDailyResearchManifest = serde_json::from_slice(
+        &std::fs::read(output_dir.join(date).join("manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(manifest.questions.is_empty());
+    let report =
+        std::fs::read_to_string(output_dir.join(format!("{date}-report.md"))).unwrap();
+    assert!(report.contains("本日报未识别到需要外部研究的问题"));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn daily_agent_research_child_reports_disabled_surface_timeout_and_process_failure() {
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
@@ -3352,8 +3405,15 @@ fn daily_agent_research_manifest_validation_covers_error_matrix() {
     .contains("prompt field limits"));
 
     assert!(parse_daily_research_manifest("```json\n{\"questions\": []}\n")
-        .unwrap_err()
-        .contains("non-empty"));
+        .unwrap()
+        .questions
+        .is_empty());
+    let preferred = parse_daily_research_manifest(
+        "```json\n{\"questions\":[]}\n```\n```json\n{\"questions\":[{\"id\":\"q1\",\"original_question\":\"question\"}]}\n```",
+    )
+    .unwrap();
+    assert_eq!(preferred.questions.len(), 1);
+    assert_eq!(preferred.questions[0].id, "q1");
 }
 
 #[test]
