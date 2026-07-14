@@ -676,4 +676,45 @@ mod runner_tests {
             )
         );
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runner_retries_failed_test_once_and_replaces_the_result() {
+        struct RetryEnvGuard(Option<std::ffi::OsString>);
+
+        impl Drop for RetryEnvGuard {
+            fn drop(&mut self) {
+                if let Some(value) = self.0.take() {
+                    std::env::set_var("BIFROST_E2E_RETRY_FAILED_ONCE", value);
+                } else {
+                    std::env::remove_var("BIFROST_E2E_RETRY_FAILED_ONCE");
+                }
+            }
+        }
+
+        let previous = std::env::var_os("BIFROST_E2E_RETRY_FAILED_ONCE");
+        std::env::set_var("BIFROST_E2E_RETRY_FAILED_ONCE", "1");
+        let _env_guard = RetryEnvGuard(previous);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut runner = TestRunner::new(21005, Reporter::new(false)).with_concurrency(1);
+        runner.add_test(TestCase::standalone("retry-once", "", "unit", {
+            let attempts = Arc::clone(&attempts);
+            move || {
+                let attempts = Arc::clone(&attempts);
+                async move {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err("fail the initial attempt".to_string())
+                    } else {
+                        Ok(())
+                    }
+                }
+            }
+        }));
+
+        let results = runner.run_all().await;
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "retry-once");
+        assert_eq!(results[0].status, TestStatus::Passed);
+    }
 }

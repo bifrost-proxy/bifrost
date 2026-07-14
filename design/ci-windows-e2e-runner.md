@@ -296,5 +296,13 @@ CI workflow YAML + bash 脚本，无 Rust 逻辑变更。
   与 `block_on` 调用线程不同。
 - `runner_tests::retry_test_converts_spawned_task_panic_to_failed_result`：断言 task panic 被收敛为
   带原用例名的失败结果。
+- `runner_tests::runner_retries_failed_test_once_and_replaces_the_result`：通过完整 `run_all()`
+  制造首轮失败、重试通过，断言执行两次且最终结果被重试结果替换；同时覆盖 retry loop 的
+  TestCase clone、端口等待和 worker helper 调用。
 - runner 单测使用 synthetic standalone 用例验证 worker 隔离与 panic 收敛，确认 retry helper
   不在 `block_on` 线程内联执行；Windows x86_64 的完整 retry 路径由 GitHub Actions 最终补验。
+
+CI run `29311063590` 的 changed-lines coverage gate 报告 retry loop 变更行仅覆盖 13/15
+（86.67%），缺少第 256、260 行的完整路径覆盖。上述 full-run retry 回归用例专门关闭该缺口，
+不降低 95% 变更行门禁，也不对生产代码增加覆盖率排除。本地使用单 crate instrumentation 报告
+和 CI 同款 `coverage-diff.py` 复核后，`runner.rs` 变更生产行覆盖率为 15/15（100%）。
