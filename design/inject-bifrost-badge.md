@@ -16,6 +16,7 @@
 ### 必须实现
 
 - HTML 响应默认在左下角固定注入一个 Bifrost 小圆点（Badge），最高 `z-index` 常驻。
+- Bifrost 自身生成的上游连接失败页面（例如直连目标端口失败返回的 502）在 Badge 开启时也必须注入同一小圆点与操作面板，不能因为错误响应提前返回而丢失入口。
 - Badge hover 弹窗展示当前请求命中的 Merged Rules，右上角提供一键复制按钮。
 - 全局开关 `traffic.inject_bifrost_badge` 可通过 CLI (`--enable-badge-injection` / `--disable-badge-injection`)、`UnifiedConfig` 持久化，以及 Admin API `PUT /api/config/performance` 修改，默认 `true`。
 - Web UI Settings -> Proxy 提供开关，读写走 `GET/PUT /api/config/performance`。
@@ -26,6 +27,8 @@
 ### 必须不破坏
 
 - 非 HTML、SSE、streaming、被识别为 JSON 的响应绝不注入。
+- `--disable-badge-injection` 下的连接错误响应继续保持 `text/plain; charset=utf-8`；规则显式提供 `resBody` 时尊重用户响应体，不强行包装或注入 Badge。
+- 连接错误字段必须先做 HTML 文本转义再放入 `<pre>`，host、URL 或上游错误文本中的标签不能逃逸为页面 DOM 或脚本。
 - 已注入过 Badge 的响应不重复注入（同一 body 出现多次会被跳过）。
 - 原响应带 `Content-Encoding: gzip/br/deflate/zstd` 时必须解压 -> 注入 -> 按原 encoding 重压，并通过 `normalize_res_headers` 修正 `Content-Length` / `Transfer-Encoding`。
 - 存在高 `z-index` 浮层的业务页面上 Badge 仍能可见（使用 `z-index: 2147483647 !important`）。
@@ -34,6 +37,7 @@
 ### 必须真实验证
 
 - 通过临时 `BIFROST_DATA_DIR` 启动的 CLI 实例，浏览器访问真实 HTML 页面时看到 Badge，hover 展开 Merged Rules，复制到系统剪贴板后内容匹配。
+- 通过代理请求一个真实未监听的远端端口，确认 502 响应为 HTML、保留 Status/Error/Host/URL 诊断文本，并包含可展开的 Bifrost Badge；关闭开关后同一路径恢复纯文本且不含 Badge。
 - `Content-Type: text/html` 但 body 为 JSON 时客户端仍收到原始 JSON，无任何 Badge 片段。
 - 含 `</script>` / `<iframe srcdoc>` / `<!--` 等敏感 token 的 `htmlAppend://` 规则文本仅出现在转义后的 Merged Rules 中，不会以原始标签形态出现在页面中。
 - Group 规则 API 启停后立即请求代理页面，Badge 面板 active 数量与 Rules 一致。
@@ -56,6 +60,8 @@ Badge 由三部分组成：
 - body 明文不以 `{` / `[` 开头（避免误标 JSON）
 - 非 SSE、非 streaming
 - body 未包含 `id="__bifrost_badge__"`（避免重复注入）
+
+普通上游响应在响应 body 收集完成后执行上述判定。连接建立失败没有上游响应，会在转发函数中提前返回；该路径必须先把 Bifrost 生成的纯文本诊断安全包装为 `<!doctype html><html><body><pre>...</pre></body></html>`，再调用同一个 `maybe_inject_bifrost_badge_html`。Badge 关闭或规则显式覆盖 `resBody` 时不做包装。
 
 ### 转义与安全
 
@@ -80,6 +86,7 @@ Badge 由三部分组成：
 - `crates/bifrost-proxy/src/transform/badge.rs`：核心注入逻辑与常量 `BIFROST_BADGE_ELEMENT_ID = "__bifrost_badge__"`。
 - `crates/bifrost-proxy/src/transform/mod.rs`：暴露 `maybe_inject_bifrost_badge_html`；与 `compress` 模块协作完成解压 / 重压。
 - `crates/bifrost-proxy/src/proxy/http/handler.rs`、`http/tunnel/mod.rs`、`socks/tcp.rs`：普通 HTTP、HTTPS MITM、SOCKS 三条路径统一在 body 已 collect 成 bytes 后调用注入。
+- `crates/bifrost-proxy/src/proxy/http/handler.rs`、`http/tunnel/mod.rs`：HTTP 直连与 HTTPS MITM 的连接错误提前返回路径按开关生成纯文本或带 Badge 的 HTML；错误页规则摘要按实际 listener port 构建，临时端口仍展示自己的 active rules。
 - `crates/bifrost-proxy/src/server.rs`：`ProxyConfig` 携带 `inject_bifrost_badge` 到 runtime，热更新配置后新连接立即生效。
 
 ### Admin / Rules 缓存
@@ -170,6 +177,7 @@ POST /_bifrost/api/group-rules/sync     # 从远端 sync 刷新本地 Group 规�
 - `test_badge_share_env_badge_and_exit_button_present`
 - `test_skip_duplicate_injection`
 - `test_badge_rule_row_links_to_admin_ui`
+- `build_connection_error_response_with_badge_*`：覆盖默认纯文本、Badge HTML、诊断字段 HTML 转义、显式 `resBody` 不注入。
 
 编解码链路复用 `transform::compress::test_brotli_roundtrip` / `test_zstd_roundtrip`；Admin 侧新增 `badge_rules_cache_preserves_group_navigation_mapping`。
 
@@ -180,6 +188,9 @@ POST /_bifrost/api/group-rules/sync     # 从远端 sync 刷新本地 Group 规�
   - 断言注入片段包含 `__bifrost_badge__`、`__bb_copy`、`Copy merged rules`、`navigator.clipboard`、`z-index:2147483647!important`。
   - 配置 `htmlAppend://{vconsole-inject}` 值含 `</script><script>new VConsole()</script>`，断言响应中只有 `</script>`。
   - 上游返回 `Content-Type: text/html; charset=utf-8` 但 body 为 `{"code":200,...}`，断言响应不包含任何 Badge 片段。
+- 请求本地未监听端口触发真实 502，断言开启时 `Content-Type: text/html`、诊断文本和 Badge/操作脚本同时存在；关闭时仍为 `text/plain` 且无 Badge。
+- HTML 错误页采用水平/垂直居中的响应式状态卡片，展示 502 状态、错误摘要、Host、时间、请求 URL、分步排查引导、Rules 跳转、重试入口和折叠原始诊断；覆盖深浅色与窄屏样式。
+- 错误页按原始请求 `Accept` 做保守内容协商：只有明确接受 `text/html`、`application/xhtml+xml` 或 `text/*` 且质量值非零时生成 HTML + Badge；缺失 `Accept`、只有 `*/*`、仅接受 JSON/纯文本或显式 `text/html;q=0` 时保持原纯文本诊断。请求规则对 `Accept` 的改写不改变该判定。
 - `crates/bifrost-e2e/src/tests/group_rules.rs`
   - `group_rules_enable_refreshes_badge_cache`
   - `group_rules_rapid_toggle_keeps_active_summary_and_badge_consistent`
@@ -194,6 +205,7 @@ POST /_bifrost/api/group-rules/sync     # 从远端 sync 刷新本地 Group 规�
 - TC-BHP-12：通过 Group Rule API 启用规则后，不重启服务直接请求代理 HTML，Badge active 数量与规则列表立即更新，链接可正确定位。
 - TC-BHP-13：连续快速启用 / 停用同一 Group 规则，active summary 与 Badge cache 在限定时间内收敛一致。
 - TC-BHP-14：本地已 enabled Group 规则旧内容 + 远端同步同名新内容时，只触发 Group list-sync（不手动保存），Badge active 数量与 Merged Rules 立即更新。
+- TC-BHP-15：真实请求未监听远端端口，验证居中的美化 502 状态页、诊断信息、排查引导、Rules/重试操作，以及左下角 Badge、hover 操作面板和关闭开关后的纯文本回退。
 
 启动命令示例：
 

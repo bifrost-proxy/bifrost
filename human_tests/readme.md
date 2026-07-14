@@ -188,7 +188,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
-| [badge-hover-panel.md](./badge-hover-panel.md) | Badge Hover 规则详情面板 | 14 | Badge hover 展开面板、规则列表展示、Merged Rules 折叠与一键复制、规则行跳转编辑页、高 z-index 浮层覆盖回归、暗色模式、缓存性能、禁用验证、Merged Rules HTML/Script 标签片段通用转义、误标 HTML 响应头的 JSON 数据接口不注入、Group 规则启用后缓存与代理运行时刷新、快速启停最终一致性、Group 远端同步已启用规则后的 Badge cache 刷新 |
+| [badge-hover-panel.md](./badge-hover-panel.md) | Badge Hover 规则详情面板 | 15 | Badge hover 展开面板、规则列表展示、Merged Rules 折叠与一键复制、规则行跳转编辑页、高 z-index 浮层覆盖回归、暗色模式、缓存性能、禁用验证、Merged Rules HTML/Script 标签片段通用转义、误标 HTML 响应头的 JSON 数据接口不注入、Group 规则启用后缓存与代理运行时刷新、快速启停最终一致性、Group 远端同步已启用规则后的 Badge cache 刷新、HTTPS 上游连接失败时居中美化 502 页面、诊断/排查引导、Rules/重试操作与 Badge 面板 |
 
 ### 性能与内存优化测试
 

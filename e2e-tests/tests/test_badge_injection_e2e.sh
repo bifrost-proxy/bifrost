@@ -426,6 +426,66 @@ assert_mislabeled_json_not_injected() {
   assert_body_not_contains "__bb_copy" "$HTTP_BODY" "Badge panel should not be injected into JSON body"
 }
 
+assert_connection_error_badge() {
+  local expected="$1"
+  local scheme="$2"
+  local accept_header="${3:-text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8}"
+  local unreachable_port
+  unreachable_port="$(pick_free_port)"
+  local request_host="127.0.0.1:${unreachable_port}"
+  if [[ "$scheme" == "https" ]]; then
+    request_host="badge-error-${unreachable_port}.test"
+    create_rule_api \
+      "badge-${expected}-https-error-${unreachable_port}" \
+      "${request_host} host://127.0.0.1:${unreachable_port}" \
+      "true" || return 1
+  fi
+  local url="${scheme}://${request_host}/connection-error"
+  local headers_file
+  headers_file="$(mktemp)"
+  local body_file
+  body_file="$(mktemp)"
+
+  HTTP_STATUS="$(NO_PROXY="" no_proxy="" curl -k -sS --max-time "$(http_timeout)" \
+    --proxy "http://${PROXY_HOST}:${PROXY_PORT}" -D "$headers_file" -o "$body_file" \
+    -H "Accept: ${accept_header}" \
+    -w '%{http_code}' "$url" 2>/dev/null)"
+  if [[ -z "$HTTP_STATUS" ]]; then
+    HTTP_STATUS="000"
+  fi
+  HTTP_HEADERS="$(tr -d '\r' <"$headers_file")"
+  HTTP_BODY="$(cat "$body_file")"
+  rm -f "$headers_file" "$body_file"
+  local headers_lower
+  headers_lower="$(printf '%s' "$HTTP_HEADERS" | tr '[:upper:]' '[:lower:]')"
+
+  assert_status "502" "$HTTP_STATUS" "${scheme} unreachable upstream should return 502" || return 1
+  assert_body_contains "Status: 502" "$HTTP_BODY" "Connection error should preserve status diagnostics" || return 1
+  assert_body_contains "Host: 127.0.0.1" "$HTTP_BODY" "Connection error should preserve host diagnostics" || return 1
+  assert_body_contains "URL: ${url}" "$HTTP_BODY" "Connection error should preserve URL diagnostics" || return 1
+
+  if [[ "$expected" == "present" ]]; then
+    assert_body_contains "content-type: text/html; charset=utf-8" "$headers_lower" "Badge error page should be HTML" || return 1
+    assert_body_contains "<!doctype html>" "$HTTP_BODY" "Badge error page should use an HTML document" || return 1
+    assert_body_contains "Unable to reach the upstream service" "$HTTP_BODY" "Badge error page should explain the failure" || return 1
+    assert_body_contains "What you can do" "$HTTP_BODY" "Badge error page should include recovery guidance" || return 1
+    assert_body_contains "Open Bifrost rules" "$HTTP_BODY" "Badge error page should expose the Rules action" || return 1
+    assert_body_contains "Try again" "$HTTP_BODY" "Badge error page should expose a retry action" || return 1
+    assert_body_contains "place-items:center" "$HTTP_BODY" "Badge error page should center the status card" || return 1
+    assert_body_contains "@media(max-width:600px)" "$HTTP_BODY" "Badge error page should include narrow-screen layout" || return 1
+    assert_body_contains "@media(prefers-color-scheme:dark)" "$HTTP_BODY" "Badge error page should support dark mode" || return 1
+    assert_body_contains "__bifrost_badge__" "$HTTP_BODY" "Connection error page should include Badge marker" || return 1
+    assert_body_contains "__bb_panel__" "$HTTP_BODY" "Connection error page should include operation panel" || return 1
+    assert_body_contains "Copy merged rules" "$HTTP_BODY" "Connection error page should retain merged-rules action" || return 1
+    assert_body_contains "\"admin_port\":${PROXY_PORT}" "$HTTP_BODY" "Connection error page should carry the active Bifrost admin port" || return 1
+    assert_body_contains "/_bifrost/rules" "$HTTP_BODY" "Connection error page should retain the Rules navigation action" || return 1
+  else
+    assert_body_contains "content-type: text/plain; charset=utf-8" "$headers_lower" "Non-HTML connection error should remain plain text" || return 1
+    assert_body_not_contains "__bifrost_badge__" "$HTTP_BODY" "Plain-text connection error should not include marker" || return 1
+    assert_body_not_contains "__bb_panel__" "$HTTP_BODY" "Plain-text connection error should not include operation panel" || return 1
+  fi
+}
+
 assert_vconsole_rule_is_not_promoted_to_page_script() {
   local url="http://127.0.0.1:${HTML_PORT}/index.html"
 
@@ -537,11 +597,17 @@ start_html_server
 echo "[INFO] Case 1: --disable-badge-injection"
 start_proxy "${BIFROST_DATA_DIR_BASE}-disabled" --disable-badge-injection
 assert_badge_injection "absent" || { print_test_summary || true; exit 1; }
+assert_connection_error_badge "absent" "http" || { print_test_summary || true; exit 1; }
+assert_connection_error_badge "absent" "https" || { print_test_summary || true; exit 1; }
 stop_proxy
 
 echo "[INFO] Case 2: --enable-badge-injection"
 start_proxy "${BIFROST_DATA_DIR_BASE}-enabled" --enable-badge-injection
 assert_badge_injection "present" || { print_test_summary || true; exit 1; }
+assert_connection_error_badge "present" "http" || { print_test_summary || true; exit 1; }
+assert_connection_error_badge "present" "https" || { print_test_summary || true; exit 1; }
+assert_connection_error_badge "absent" "http" "*/*" || { print_test_summary || true; exit 1; }
+assert_connection_error_badge "absent" "https" "*/*" || { print_test_summary || true; exit 1; }
 stop_proxy
 
 echo "[INFO] Case 3: --enable-badge-injection skips mislabeled JSON"
