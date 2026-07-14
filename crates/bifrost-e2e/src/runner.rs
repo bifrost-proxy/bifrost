@@ -253,11 +253,11 @@ impl TestRunner {
             let test_timeout = self.test_timeout;
             let total_tests = self.tests.len() as u16;
             for &idx in &failed_indices {
-                let test = &self.tests[idx];
+                let test = self.tests[idx].clone();
                 let retry_port = self.base_port + total_tests + (idx as u16);
                 wait_for_port_available(retry_port).await;
                 tracing::info!("  Retrying: {} (port {})", test.name, retry_port);
-                let result = run_single_test(test, retry_port, test_timeout).await;
+                let result = run_retry_test(test, retry_port, test_timeout).await;
                 tracing::info!(
                     "  Retry result: {} {} ({}ms)",
                     match result.status {
@@ -412,6 +412,26 @@ impl TestRunner {
     }
 }
 
+async fn run_retry_test(test: TestCase, port: u16, test_timeout: Duration) -> TestResult {
+    let name = test.name.clone();
+    let category = test.category.clone();
+
+    // The initial parallel run executes tests in spawned runtime tasks, but retrying inline would
+    // poll the same test future on the thread calling Runtime::block_on. That thread has a smaller
+    // stack on Windows, so a test that ran normally on a worker could overflow only on retry.
+    // Keep retry attempts on the same isolated worker-task execution model as the initial run.
+    match tokio::spawn(async move { run_single_test(&test, port, test_timeout).await }).await {
+        Ok(result) => result,
+        Err(error) => TestResult {
+            name,
+            category,
+            status: TestStatus::Failed,
+            duration: Duration::ZERO,
+            error: Some(format!("retry task failed: {error}")),
+        },
+    }
+}
+
 async fn run_single_test(test: &TestCase, port: u16, test_timeout: Duration) -> TestResult {
     let start = Instant::now();
 
@@ -528,6 +548,7 @@ impl Default for TestRunner {
 mod runner_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     #[tokio::test]
     async fn parallel_runner_keeps_result_order_and_runs_serial_tests_after_parallel_tests() {
@@ -609,5 +630,91 @@ mod runner_tests {
             .all(|result| result.status == TestStatus::Passed));
         assert_eq!(sequence.load(Ordering::SeqCst), 3);
         assert_eq!(serial_seen.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_test_runs_on_runtime_worker_instead_of_block_on_thread() {
+        let block_on_thread = std::thread::current().id();
+        let retry_thread = Arc::new(Mutex::new(None));
+        let test = TestCase::standalone("retry-worker", "", "unit", {
+            let retry_thread = Arc::clone(&retry_thread);
+            move || {
+                let retry_thread = Arc::clone(&retry_thread);
+                async move {
+                    *retry_thread.lock().expect("retry thread lock poisoned") =
+                        Some(std::thread::current().id());
+                    Ok(())
+                }
+            }
+        });
+
+        let result = run_retry_test(test, 21003, Duration::from_secs(1)).await;
+
+        assert_eq!(result.status, TestStatus::Passed);
+        assert_ne!(
+            retry_thread
+                .lock()
+                .expect("retry thread lock poisoned")
+                .expect("retry test did not record its thread"),
+            block_on_thread
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_test_converts_spawned_task_panic_to_failed_result() {
+        let test = TestCase::standalone("retry-panic", "", "unit", || async {
+            panic!("intentional retry panic");
+        });
+
+        let result = run_retry_test(test, 21004, Duration::from_secs(1)).await;
+
+        assert_eq!(result.status, TestStatus::Failed);
+        assert_eq!(result.name, "retry-panic");
+        assert!(
+            result.error.as_deref().is_some_and(
+                |error| error.contains("retry task failed") && error.contains("panicked")
+            )
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runner_retries_failed_test_once_and_replaces_the_result() {
+        struct RetryEnvGuard(Option<std::ffi::OsString>);
+
+        impl Drop for RetryEnvGuard {
+            fn drop(&mut self) {
+                if let Some(value) = self.0.take() {
+                    std::env::set_var("BIFROST_E2E_RETRY_FAILED_ONCE", value);
+                } else {
+                    std::env::remove_var("BIFROST_E2E_RETRY_FAILED_ONCE");
+                }
+            }
+        }
+
+        let previous = std::env::var_os("BIFROST_E2E_RETRY_FAILED_ONCE");
+        std::env::set_var("BIFROST_E2E_RETRY_FAILED_ONCE", "1");
+        let _env_guard = RetryEnvGuard(previous);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let mut runner = TestRunner::new(21005, Reporter::new(false)).with_concurrency(1);
+        runner.add_test(TestCase::standalone("retry-once", "", "unit", {
+            let attempts = Arc::clone(&attempts);
+            move || {
+                let attempts = Arc::clone(&attempts);
+                async move {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err("fail the initial attempt".to_string())
+                    } else {
+                        Ok(())
+                    }
+                }
+            }
+        }));
+
+        let results = runner.run_all().await;
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "retry-once");
+        assert_eq!(results[0].status, TestStatus::Passed);
     }
 }

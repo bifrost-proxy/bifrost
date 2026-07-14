@@ -973,6 +973,7 @@ fn run_desktop_upgrade_relaunch_helper_from_env() -> bool {
     wait_for_upgrade_handoff_release(&data_dir, &marker);
 
     let mut command = relaunch_command_for_target(&target);
+    sanitize_desktop_upgrade_relaunch_command(&mut command);
     hide_windows_child_console(&mut command);
     match command
         .stdin(Stdio::null())
@@ -1007,6 +1008,13 @@ fn relaunch_command_for_target(target: &Path) -> Command {
     }
 
     Command::new(target)
+}
+
+fn sanitize_desktop_upgrade_relaunch_command(command: &mut Command) {
+    command
+        .env_remove(DESKTOP_UPGRADE_RELAUNCH_HELPER_ENV)
+        .env_remove(DESKTOP_UPGRADE_RELAUNCH_MARKER_ENV)
+        .env_remove(DESKTOP_UPGRADE_RELAUNCH_TARGET_ENV);
 }
 
 fn wait_for_process_exit(pid: u32, timeout: Duration) -> bool {
@@ -2168,7 +2176,7 @@ fn restart_desktop_after_update(app: AppHandle) -> Result<(), String> {
 fn desktop_relaunch_target(exe: &Path) -> PathBuf {
     #[cfg(target_os = "macos")]
     {
-        if let Some(app_bundle) = macos_app_bundle_from_exe_path(&exe) {
+        if let Some(app_bundle) = macos_app_bundle_from_exe_path(exe) {
             return app_bundle;
         }
     }
@@ -2611,12 +2619,13 @@ mod tests {
         is_upgrade_relaunch_marker_active, main_interface_decorations_for_platform,
         mark_backend_unavailable_for_manual_start, may_reuse_existing_backend,
         parse_port_update_response, poll_managed_backend_exit, read_active_upgrade_relaunch_marker,
-        resolve_bifrost_binary_from_env, resolve_desktop_config_path, resolve_desktop_data_dir,
-        save_desktop_config, uses_borderless_desktop_chrome_for_platform,
-        write_upgrade_relaunch_marker, BackendState, DesktopConfig, DesktopUpgradeRelaunchMarker,
-        HostWindowCloseBehavior,
+        relaunch_command_for_target, resolve_bifrost_binary_from_env, resolve_desktop_config_path,
+        resolve_desktop_data_dir, sanitize_desktop_upgrade_relaunch_command, save_desktop_config,
+        uses_borderless_desktop_chrome_for_platform, write_upgrade_relaunch_marker, BackendState,
+        DesktopConfig, DesktopUpgradeRelaunchMarker, HostWindowCloseBehavior,
     };
     use bifrost_storage::data_dir as shared_bifrost_data_dir;
+    use std::ffi::OsStr;
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -2627,6 +2636,21 @@ mod tests {
     use std::thread;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn assert_upgrade_relaunch_environment_removed(command: &Command) {
+        for key in [
+            super::DESKTOP_UPGRADE_RELAUNCH_HELPER_ENV,
+            super::DESKTOP_UPGRADE_RELAUNCH_MARKER_ENV,
+            super::DESKTOP_UPGRADE_RELAUNCH_TARGET_ENV,
+        ] {
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(name, value)| name == OsStr::new(key) && value.is_none()),
+                "relaunch command must remove {key} before it opens the new App"
+            );
+        }
+    }
 
     fn test_backend_state(
         data_dir: PathBuf,
@@ -2906,6 +2930,32 @@ mod tests {
 
         assert!(may_reuse_existing_backend(None));
         assert!(!may_reuse_existing_backend(Some(&marker)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn upgrade_relaunch_app_command_strips_helper_environment_before_open() {
+        let target = PathBuf::from("/Applications/Bifrost.app");
+        let mut command = relaunch_command_for_target(&target);
+        sanitize_desktop_upgrade_relaunch_command(&mut command);
+
+        assert_eq!(command.get_program(), OsStr::new("open"));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![OsStr::new("-n"), target.as_os_str()]
+        );
+        assert_upgrade_relaunch_environment_removed(&command);
+    }
+
+    #[test]
+    fn upgrade_relaunch_executable_command_strips_helper_environment() {
+        let target = PathBuf::from("/tmp/bifrost-desktop");
+        let mut command = relaunch_command_for_target(&target);
+        sanitize_desktop_upgrade_relaunch_command(&mut command);
+
+        assert_eq!(command.get_program(), target.as_os_str());
+        assert_eq!(command.get_args().count(), 0);
+        assert_upgrade_relaunch_environment_removed(&command);
     }
 
     #[test]

@@ -25,4 +25,10 @@ fi
 CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
   cargo test --manifest-path desktop/src-tauri/Cargo.toml upgrade_relaunch -- --nocapture
 
+if ! grep -Fq 'sanitize_desktop_upgrade_relaunch_command(&mut command)' \
+  "$REPO_ROOT/desktop/src-tauri/src/main.rs"; then
+  echo "[desktop-upgrade-handoff] FAIL: relaunch path does not sanitize helper-only environment"
+  exit 1
+fi
+
 echo "[desktop-upgrade-handoff] PASS"

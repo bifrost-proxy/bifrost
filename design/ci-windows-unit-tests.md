@@ -233,3 +233,35 @@ test-windows-tray:
 - 更新 `human_tests/ci-windows-unit-tests.md`
 - 更新 `human_tests/readme.md`
 - 本修复不新增 CLI/API 配置项，不需要更新 README
+
+## 2026-07-14 端口探测单测竞争补充
+
+PR #386 的 CI run `29307008072` 在 `Windows Unit Tests (x86_64)` 中失败于
+`is_port_in_use_uses_fallback_socketaddr_on_parse_failure`。旧测试通过
+`allocate_loopback_port()` 获取端口后立即释放 listener，再断言端口未占用；释放与断言之间存在
+TOCTOU 窗口，Windows 并行测试或系统服务可抢占该端口。
+
+稳定化方案不修改 `is_port_in_use()` 产品逻辑，只修测试夹具：
+
+- 测试在 `127.0.0.1:0` 建立 listener 并保持其存活。
+- 使用非法 host 强制进入 fallback `127.0.0.1` 的连接探测。
+- 断言 fallback 能检测到仍被 listener 占用的端口。
+
+该断言同时验证 fallback 语义且不存在“释放后等待别人不要抢端口”的时间窗口；本地目标用例需
+重复执行，最终由 GitHub Actions Windows Unit Tests 补验。
+
+## 2026-07-14 external CLI mock 进程测试预算补充
+
+`cargo test --workspace --all-features` 在高并发负载下稳定暴露
+`external_cli_runtime_dispatches_default_claude_stream_json_transport` 的 5 秒超时。保留失败产物
+诊断确认 mock Python 进程能够正确接收 user frame、输出 assistant/result frame，产品侧
+stream-json 解析和超时判定均正常；不稳定点是集成式测试把可执行文件版本探测、Python 启动和
+完整进程往返压在 5 秒预算内，当前高负载机器一次正常成功已耗时约 4.35 秒。
+
+稳定化统一调整这组 Unix stream-json mock 进程测试的运行预算为 15 秒，并把 interrupt marker
+等待统一到已有的 10 秒有界 helper；不修改产品默认超时或超时判定逻辑。该预算仍能快速暴露
+真正的子进程挂死，同时给 workspace 并行编译/测试和 Windows/macOS 进程启动留下调度余量。
+
+第二次 workspace 全量复测进一步暴露 `pending_guide_rejects_parallel_redirect` 的 3 秒 marker
+等待和 `replaced_session_rejects_direct_guide_command` 的 5 秒 mock run 预算不足，因此不能只放宽
+最先失败的 runtime dispatch 用例，必须统一消除同一模块内的脆弱硬编码预算。

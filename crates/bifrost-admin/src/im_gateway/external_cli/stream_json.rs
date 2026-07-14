@@ -483,6 +483,9 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    const MOCK_RUN_TIMEOUT_SECS: u64 = 15;
+
+    #[cfg(unix)]
     fn mock_executable(temp_dir: &tempfile::TempDir, name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
 
@@ -749,7 +752,7 @@ sys.stderr.write("mock stderr without newline")
             CommandSpec {
                 work_dir: Some(temp_dir.path().to_path_buf()),
                 env: BTreeMap::from([("BIFROST_STREAM_JSON_TEST".to_string(), "1".to_string())]),
-                ..mock_spec(&executable, Some(5))
+                ..mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS))
             },
             "initial task".to_string(),
             temp_dir.path().join("stop"),
@@ -837,7 +840,7 @@ send({"type":"result","subtype":"success","is_error":False,"result":"done","sess
         let run_task = tokio::spawn(run_command(
             run_id,
             Some(session_key),
-            mock_spec(&executable, Some(5)),
+            mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS)),
             "initial task".to_string(),
             temp_dir.path().join("stop"),
             None,
@@ -901,7 +904,7 @@ send({"type":"result","subtype":"success","is_error":False,"result":"done","sess
                     "INTERRUPT_MARKER".to_string(),
                     interrupt_marker.display().to_string(),
                 )]),
-                ..mock_spec(&executable, Some(5))
+                ..mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS))
             },
             "initial task".to_string(),
             temp_dir.path().join("stop"),
@@ -913,13 +916,7 @@ send({"type":"result","subtype":"success","is_error":False,"result":"done","sess
             "guide-first".to_string(),
             "first guide".to_string(),
         ));
-        timeout(Duration::from_secs(3), async {
-            while !interrupt_marker.exists() {
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("first interrupt marker");
+        wait_for_path(&interrupt_marker).await;
         let handle = wait_for_active_handle(session_key).await;
         let (ack_tx, ack_rx) = oneshot::channel();
         handle
@@ -970,7 +967,7 @@ send({"type":"result","subtype":"success","is_error":False,"result":"done","sess
         let run_task = tokio::spawn(run_command(
             run_id,
             Some(session_key),
-            mock_spec(&executable, Some(5)),
+            mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS)),
             "initial task".to_string(),
             temp_dir.path().join("stop"),
             None,
@@ -1025,7 +1022,7 @@ send({"type":"result","subtype":"success","is_error":False,"result":"done","sess
         let run_task = tokio::spawn(run_command(
             run_id,
             Some(session_key),
-            mock_spec(&executable, Some(5)),
+            mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS)),
             "initial task".to_string(),
             temp_dir.path().join("stop"),
             None,
@@ -1076,7 +1073,7 @@ send({"type":"result","subtype":"success","is_error":False,"result":"done","sess
         let run_task = tokio::spawn(run_command(
             run_id,
             Some(session_key),
-            mock_spec(&executable, Some(5)),
+            mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS)),
             "initial task".to_string(),
             temp_dir.path().join("stop"),
             None,
@@ -1145,7 +1142,7 @@ send({"type":"result","subtype":"success","is_error":False,"result":"done","sess
                         continue_marker.display().to_string(),
                     ),
                 ]),
-                ..mock_spec(&executable, Some(5))
+                ..mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS))
             },
             "initial task".to_string(),
             temp_dir.path().join("stop"),
@@ -1198,7 +1195,7 @@ send({"type":"result","subtype":"success","is_error":False,"result":"done","sess
         let run_task = tokio::spawn(run_command(
             run_id,
             Some(session_key),
-            mock_spec(&executable, Some(5)),
+            mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS)),
             "initial task".to_string(),
             temp_dir.path().join("stop"),
             None,
@@ -1240,7 +1237,7 @@ print(json.dumps({"type":"result","subtype":"error_max_turns","is_error":True,"r
         let output = run_command(
             "mock-stream-json-failed-result-run",
             None,
-            mock_spec(&executable, Some(5)),
+            mock_spec(&executable, Some(MOCK_RUN_TIMEOUT_SECS)),
             "initial task".to_string(),
             temp_dir.path().join("stop"),
             Some(progress_tx),

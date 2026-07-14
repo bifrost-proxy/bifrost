@@ -289,6 +289,49 @@ source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib command
 - Group CLI 测试 mock server 必须循环读取到 `\r\n\r\n` 后声明的 `content-length` 完整 body，再把请求写入 logs。
 - 新增 helper 单测覆盖 header 已到、body 分段稍后到达时 `http_request_is_complete()` 先返回 false，追加完整 body 后返回 true。
 
+### TC-CWUT-21 无效 host fallback 端口探测不依赖释放端口
+
+操作步骤：
+
+```bash
+source ~/.zshrc
+for _ in {1..50}; do
+  SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --bin bifrost \
+    commands::start::tests::is_port_in_use_uses_fallback_socketaddr_on_parse_failure \
+    -- --exact >/dev/null || exit 1
+done
+```
+
+预期结果：
+- 测试在断言期间保持 loopback listener 存活，不再调用“分配后立即释放”的端口 helper。
+- 非法 host 解析失败后 fallback 到 `127.0.0.1`，能够稳定检测该 listener 占用的端口。
+- 连续 50 次执行全部退出码 0；不因并行进程抢占刚释放的临时端口产生假阴性。
+- `is_port_in_use()` 生产逻辑不变。
+
+### TC-CWUT-22 Claude stream-json mock 进程测试保留调度余量
+
+操作步骤：
+
+```bash
+source ~/.zshrc
+for _ in {1..5}; do
+  SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib \
+    im_gateway::external_cli::tests::external_cli_runtime_dispatches_default_claude_stream_json_transport \
+    -- --exact || exit 1
+done
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib \
+  im_gateway::external_cli::stream_json::tests -- --nocapture
+```
+
+预期结果：
+- 连续 5 次均退出码 0，状态为 `Succeeded`，最终响应为 `runtime stream final`。
+- stream-json 模块进程用例全部通过，包括 parallel guide marker、replacement session、pending
+  guide、closed stdin 和 timeout/stop 等路径。
+- 常规 mock 运行统一使用 15 秒预算，marker 使用 10 秒有界等待，覆盖可执行文件版本探测、
+  Python 启动、stdin user frame 和 stdout assistant/result frame 的完整进程往返。
+- 产品默认超时、用户配置超时和 stream-json timeout 判定逻辑均不改变。
+- mock 若真实挂死仍会在有限时间内失败，不使用无限等待掩盖问题。
+
 ## 清理步骤
 
 本测试只运行单元测试和静态扫描；cargo 产物由常规构建缓存管理，无额外临时服务需要停止。
@@ -297,6 +340,8 @@ source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib command
 
 | 日期 | 用例 | 执行方式 | 结果 |
 | --- | --- | --- | --- |
+| 2026-07-14 | TC-CWUT-22 | 连续 5 次精确执行 Claude runtime dispatch 测试，并执行完整 stream-json 模块测试；覆盖版本探测、Python 启动、guide marker、replacement session 与 stdin/stdout 完整往返。 | 通过；精确 dispatch 5/5 次成功，单次耗时 4.11–6.50 秒；stream-json 模块 15/15 通过，包含此前失败的 parallel guide marker 与 replacement session 路径 |
+| 2026-07-14 | TC-CWUT-21 | 连续 50 次执行 `is_port_in_use_uses_fallback_socketaddr_on_parse_failure` 精确过滤用例；检查测试持有 `TcpListener` 到断言结束。 | 通过，50/50 次退出码 0；无效 host fallback 稳定检测仍被 listener 占用的 loopback 端口，不再存在释放端口后的 TOCTOU 窗口 |
 | 2026-06-11 | TC-CWUT-01 | 执行 `rg -n 'cfg\(all\(target_os = "macos", target_arch = "aarch64"\)\)' crates/bifrost-admin/src/handlers/asr_cli_invoke.rs crates/bifrost-admin/src/handlers/asr_jobs/tests.rs`，命中 ASR CLI child 与 3 个 native voiceprint identity/enrollment 测试；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin asr_platform_support_matrix_is_apple_silicon_macos_only --lib -- --nocapture`。 | 通过 |
 | 2026-06-11 | TC-CWUT-02 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin` 过滤 `chatgpt_web_startup_auth_dry_run_reports_login_prompt`、`im_cwd_command_rejects_invalid_paths`、`spawn_process_fallback_to_in_process_on_missing_executable`、`spawn_or_fallback_fails_closed_when_forced_worker_cannot_start`。 | 通过，4 个过滤用例均通过 |
 | 2026-06-11 | TC-CWUT-03 | 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin` 过滤 `test_legacy_full_access_argv_exec_actually_runs`、`test_legacy_full_access_without_allowed_exec_modes_permits_argv`、`test_select_policy_single_rejection_has_no_double_error_prefix`、`test_resolve_shell_command_policy_for_grant`。 | 通过，前 3 个 executor 用例与 3 个 worker policy 用例均通过 |
