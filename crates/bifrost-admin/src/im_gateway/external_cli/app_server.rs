@@ -300,6 +300,16 @@ pub(super) async fn run_command(
             },
         );
     }
+    const RATE_LIMIT_REQUEST_ID: u64 = 90;
+    if request.adapter == DEFAULT_ADAPTER {
+        send_jsonrpc_request(
+            &mut stdin,
+            RATE_LIMIT_REQUEST_ID,
+            "account/rateLimits/read",
+            serde_json::Value::Null,
+        )
+        .await?;
+    }
 
     let timeout_secs = request.adapter_config.timeout_secs;
     let timeout_sleep = async move {
@@ -329,6 +339,21 @@ pub(super) async fn run_command(
                 let frame: serde_json::Value = serde_json::from_str(&line)
                     .map_err(|error| format!("parse app-server frame failed: {error}; line={line}"))?;
                 if let Some(id) = frame.get("id").and_then(serde_json::Value::as_u64) {
+                    if id == RATE_LIMIT_REQUEST_ID {
+                        if let Some(response) = frame.get("result").cloned() {
+                            let event = account_rate_limits_event(response);
+                            if let Some(progress_tx) = progress_tx.as_ref() {
+                                let _ = progress_tx.send(event.clone());
+                            }
+                            events.push(event);
+                        } else if let Some(error) = frame.get("error") {
+                            tracing::debug!(
+                                error = %jsonrpc_error_message(error),
+                                "Codex app-server does not provide an account rate-limit snapshot"
+                            );
+                        }
+                        continue;
+                    }
                     if let Some(command) = pending_guides.remove(&id) {
                         let result = guide_result_from_response(
                             command.guide_id,
@@ -1085,6 +1110,7 @@ fn progress_event_from_app_server_frame(
                 raw,
             })
         }
+        "account/rateLimits/updated" => Some(account_rate_limits_event(params)),
         "item/started" | "item/completed" => {
             progress_event_from_app_server_item(method, &params, raw)
         }
@@ -1101,6 +1127,44 @@ fn progress_event_from_app_server_frame(
         }),
         _ => None,
     }
+}
+
+fn account_rate_limits_event(response: serde_json::Value) -> ExternalCliProgressEvent {
+    let weekly = codex_weekly_rate_limit_window(&response)
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::Status,
+        content: "usage updated".to_string(),
+        title: Some("rate_limits".to_string()),
+        raw: serde_json::json!({
+            "type": "account_rate_limits",
+            "weekly": weekly,
+        }),
+    }
+}
+
+fn codex_weekly_rate_limit_window(value: &serde_json::Value) -> Option<&serde_json::Value> {
+    const WEEKLY_WINDOW_MINUTES: u64 = 7 * 24 * 60;
+    let snapshots = [
+        value
+            .get("rateLimitsByLimitId")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|limits| limits.get("codex")),
+        value.get("rateLimits"),
+        Some(value),
+    ];
+    snapshots.into_iter().flatten().find_map(|snapshot| {
+        [snapshot.get("primary"), snapshot.get("secondary")]
+            .into_iter()
+            .flatten()
+            .find(|window| {
+                window
+                    .get("windowDurationMins")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(WEEKLY_WINDOW_MINUTES)
+            })
+    })
 }
 
 fn progress_event_from_app_server_item(
@@ -1415,6 +1479,38 @@ mod tests {
     }
 
     #[test]
+    fn app_server_rate_limit_notification_keeps_only_weekly_display_fields() {
+        let notification = serde_json::json!({
+            "method": "account/rateLimits/updated",
+            "params": {
+                "rateLimits": {
+                    "limitId": "codex",
+                    "credits": {"hasCredits": true, "balance": "private"},
+                    "primary": {
+                        "usedPercent": 64,
+                        "windowDurationMins": 10080,
+                        "resetsAt": 1784490086
+                    },
+                    "secondary": {
+                        "usedPercent": 5,
+                        "windowDurationMins": 300,
+                        "resetsAt": 1784000000
+                    }
+                }
+            }
+        });
+
+        let event = progress_event_from_app_server_frame(&notification).expect("rate limit event");
+
+        assert_eq!(event.title.as_deref(), Some("rate_limits"));
+        assert_eq!(event.raw["weekly"]["usedPercent"], 64);
+        assert_eq!(event.raw["weekly"]["windowDurationMins"], 10_080);
+        assert_eq!(event.raw["weekly"]["resetsAt"], 1_784_490_086u64);
+        assert!(event.raw.get("rateLimits").is_none());
+        assert!(!event.raw.to_string().contains("private"));
+    }
+
+    #[test]
     fn app_server_file_change_notification_includes_paths_and_line_stats() {
         let file_change = serde_json::json!({
             "method": "item/completed",
@@ -1634,6 +1730,9 @@ for line in sys.stdin:
         send({"jsonrpc":"2.0","id":request_id,"result":{"thread":{"id":"thread-mock"}}})
     elif method == "turn/start":
         send({"jsonrpc":"2.0","id":request_id,"result":{"turn":{"id":"turn-mock"}}})
+    elif method == "account/rateLimits/read":
+        send({"jsonrpc":"2.0","id":request_id,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":63,"windowDurationMins":10080,"resetsAt":1784490086},"secondary":None}}})
+        send({"jsonrpc":"2.0","id":request_id,"error":{"code":-32601,"message":"method not found after snapshot"}})
     elif method == "turn/steer":
         assert frame["params"]["expectedTurnId"] == "turn-mock"
         assert frame["params"]["input"][0]["text"] == "focus on tests"
@@ -1651,6 +1750,7 @@ for line in sys.stdin:
         request.adapter_config.transport = Some(ExternalCliTransport::AppServer);
         request.adapter_config.executable = Some(executable.display().to_string());
         let session_key = "mock-app-server-session";
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
         let run_task = tokio::spawn({
             let stop_marker = temp_dir.path().join("stop");
             async move {
@@ -1660,7 +1760,7 @@ for line in sys.stdin:
                     &request,
                     "initial prompt".to_string(),
                     stop_marker,
-                    None,
+                    Some(progress_tx),
                 )
                 .await
             }
@@ -1691,6 +1791,19 @@ for line in sys.stdin:
         assert!(output.events.iter().any(|event| {
             event.event_type == ExternalCliProgressEventType::AssistantFinal
                 && event.content == "guided result"
+        }));
+        assert!(output.events.iter().any(|event| {
+            event.title.as_deref() == Some("rate_limits")
+                && event.raw["weekly"]["windowDurationMins"] == 10_080
+                && event.raw.get("rateLimits").is_none()
+        }));
+        let mut streamed_events = Vec::new();
+        while let Ok(event) = progress_rx.try_recv() {
+            streamed_events.push(event);
+        }
+        assert!(streamed_events.iter().any(|event| {
+            event.title.as_deref() == Some("rate_limits")
+                && event.raw["weekly"]["windowDurationMins"] == 10_080
         }));
         assert!(!ACTIVE_RUNS.contains_key("mock-app-server-run"));
         assert!(!ACTIVE_SESSIONS.contains_key(session_key));

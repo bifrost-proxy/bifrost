@@ -31,9 +31,35 @@ const PROCESS_DYNAMIC_LOG_ELEMENT_PREFIX: &str = "ap_log";
 const PROCESS_TOOL_ELEMENT_PREFIX: &str = "ap_t";
 const PROCESS_TOOL_DETAIL_ELEMENT_PREFIX: &str = "ap_td";
 const PROCESS_TOOL_GROUP_ELEMENT_PREFIX: &str = "ap_tg";
-const PROCESS_TOOL_INPUT_PREVIEW_CHARS: usize = 300;
-const PROCESS_TOOL_OUTPUT_PREVIEW_CHARS: usize = 700;
+const PROCESS_TOOL_INPUT_PREVIEW_CHARS: usize = 1000;
+const PROCESS_TOOL_OUTPUT_PREVIEW_CHARS: usize = 3000;
 const PROCESS_TIMELINE_VISIBLE_TOOL_LIMIT: usize = 30;
+const FEISHU_CARD_STANDARD_MAX_BYTES: usize = 24 * 1024;
+const FEISHU_CARD_STANDARD_MAX_COMPONENTS: usize = 180;
+const FEISHU_CARD_RETRY_MAX_BYTES: usize = 16 * 1024;
+const FEISHU_CARD_RETRY_MAX_COMPONENTS: usize = 120;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FeishuCardBudget {
+    max_bytes: usize,
+    max_components: usize,
+}
+
+const FEISHU_CARD_STANDARD_BUDGET: FeishuCardBudget = FeishuCardBudget {
+    max_bytes: FEISHU_CARD_STANDARD_MAX_BYTES,
+    max_components: FEISHU_CARD_STANDARD_MAX_COMPONENTS,
+};
+const FEISHU_CARD_RETRY_BUDGET: FeishuCardBudget = FeishuCardBudget {
+    max_bytes: FEISHU_CARD_RETRY_MAX_BYTES,
+    max_components: FEISHU_CARD_RETRY_MAX_COMPONENTS,
+};
+
+#[derive(Debug)]
+struct BudgetedProgressCard {
+    card: serde_json::Value,
+    compact: bool,
+    omitted_timeline_items: usize,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImProgressCardCapability {
@@ -478,9 +504,17 @@ pub struct ProgressRunnerSummary {
     pub reasoning_summary: Option<String>,
     pub reasoning_source: Option<String>,
     pub token_usage: Option<ProgressRunnerTokenUsage>,
+    pub weekly_usage: Option<ProgressRunnerWeeklyUsage>,
     pub work_dir: Option<String>,
     pub external_thread_id: Option<String>,
     pub external_conversation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProgressRunnerWeeklyUsage {
+    pub used_percent: u64,
+    pub window_minutes: u64,
+    pub resets_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -613,6 +647,7 @@ pub struct FeishuProgressCardSession {
     handle: Option<FeishuProgressCardHandle>,
     generation: u64,
     compact_card_mode: bool,
+    card_budget: FeishuCardBudget,
 }
 
 impl FeishuProgressCardSession {
@@ -630,6 +665,7 @@ impl FeishuProgressCardSession {
             handle: None,
             generation: 0,
             compact_card_mode: false,
+            card_budget: FEISHU_CARD_STANDARD_BUDGET,
         }
     }
 
@@ -707,6 +743,7 @@ impl FeishuProgressCardSession {
         let previous_snapshot = self.snapshot.clone();
         let previous_generation = self.generation;
         let previous_compact_card_mode = self.compact_card_mode;
+        let previous_card_budget = self.card_budget;
         let session_key = self.snapshot.session_key.clone();
         self.snapshot = ImAgentProgressSnapshot::new(session_key, initial_message);
         if let Err(error) = self.send_initial_card().await {
@@ -714,6 +751,7 @@ impl FeishuProgressCardSession {
             self.handle = previous_handle;
             self.generation = previous_generation;
             self.compact_card_mode = previous_compact_card_mode;
+            self.card_budget = previous_card_budget;
             return Err(error);
         }
         self.freeze_previous_card_after_rollover(
@@ -734,10 +772,12 @@ impl FeishuProgressCardSession {
         let previous_snapshot = self.snapshot.clone();
         let previous_generation = self.generation;
         let previous_compact_card_mode = self.compact_card_mode;
+        let previous_card_budget = self.card_budget;
         if let Err(error) = self.send_initial_card().await {
             self.handle = previous_handle;
             self.generation = previous_generation;
             self.compact_card_mode = previous_compact_card_mode;
+            self.card_budget = previous_card_budget;
             return Err(error);
         }
         self.freeze_previous_card_after_rollover(
@@ -838,6 +878,7 @@ impl FeishuProgressCardSession {
     async fn send_initial_card(&mut self) -> Result<SendResult> {
         self.generation = self.generation.saturating_add(1);
         self.compact_card_mode = false;
+        self.card_budget = FEISHU_CARD_STANDARD_BUDGET;
         let mut invalid_card_id_retried = false;
         let (card_id, compact_card_mode, send_result) = loop {
             let (card_id, compact_card_mode) = self.create_initial_card_entity().await?;
@@ -915,33 +956,58 @@ impl FeishuProgressCardSession {
         Ok(send_result)
     }
 
-    async fn create_initial_card_entity(&self) -> Result<(String, bool)> {
-        let card = build_feishu_progress_card(&self.snapshot, true);
-        match self.feishu.create_card_entity(&self.provider, card).await {
-            Ok(card_id) => Ok((card_id, false)),
-            Err(error) if is_feishu_card_entity_limit_error(&error) => {
+    async fn create_initial_card_entity(&mut self) -> Result<(String, bool)> {
+        let standard =
+            build_budgeted_feishu_progress_card(&self.snapshot, true, FEISHU_CARD_STANDARD_BUDGET);
+        match self
+            .feishu
+            .create_card_entity(&self.provider, standard.card)
+            .await
+        {
+            Ok(card_id) => return Ok((card_id, standard.compact)),
+            Err(error) if !is_feishu_card_limit_error(&error) => return Err(error),
+            Err(error) => {
                 warn!(
                     error = %error,
-                    "Feishu progress card create hit CardKit entity limit; retrying with compact card"
+                    "Feishu progress card create hit CardKit limit; retrying with reduced history"
                 );
-                let compact_card = build_feishu_compact_progress_card(&self.snapshot, true);
-                let card_id = self
-                    .feishu
-                    .create_card_entity(&self.provider, compact_card)
-                    .await?;
-                Ok((card_id, true))
             }
-            Err(error) => Err(error),
         }
+
+        self.card_budget = FEISHU_CARD_RETRY_BUDGET;
+        let reduced = build_budgeted_feishu_progress_card(&self.snapshot, true, self.card_budget);
+        match self
+            .feishu
+            .create_card_entity(&self.provider, reduced.card)
+            .await
+        {
+            Ok(card_id) => return Ok((card_id, reduced.compact)),
+            Err(error) if !is_feishu_card_limit_error(&error) => return Err(error),
+            Err(error) if reduced.compact => return Err(error),
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "Feishu rejected reduced progress card; retrying with compact card"
+                );
+            }
+        }
+
+        let compact_card = build_feishu_compact_progress_card(&self.snapshot, true);
+        let card_id = self
+            .feishu
+            .create_card_entity(&self.provider, compact_card)
+            .await?;
+        Ok((card_id, true))
     }
 
     async fn flush_snapshot(&mut self) -> Result<()> {
-        let Some(handle) = self.handle.as_mut() else {
+        if self.handle.is_none() {
             return Ok(());
-        };
+        }
         if self.compact_card_mode {
             let card = build_feishu_compact_progress_card(&self.snapshot, true);
             let card_hash = compact_card_hash(&self.snapshot, true);
+            let handle = self.handle.as_mut().expect("checked progress card handle");
             if handle.rendered_output_hash != card_hash
                 || handle.rendered_phase != self.snapshot.phase
             {
@@ -964,12 +1030,16 @@ impl FeishuProgressCardSession {
             }
             return Ok(());
         }
+
+        let budgeted = build_budgeted_feishu_progress_card(&self.snapshot, true, self.card_budget);
         let current_title = header_title(&self.snapshot).to_string();
         let current_has_plan = has_plan_state(&self.snapshot);
         let current_has_process = has_process_state(&self.snapshot);
         let current_has_tool = has_tool_state(&self.snapshot) && !current_has_process;
         let current_has_thinking = has_thinking_state(&self.snapshot) && !current_has_process;
         let current_process_hash = current_has_process_hash(&self.snapshot);
+        let force_budgeted_full_update = budgeted.compact || budgeted.omitted_timeline_items > 0;
+        let handle = self.handle.as_mut().expect("checked progress card handle");
         if handle.rendered_title != current_title
             || handle.rendered_has_plan != current_has_plan
             || handle.rendered_has_tool != current_has_tool
@@ -977,24 +1047,40 @@ impl FeishuProgressCardSession {
             || handle.rendered_has_process != current_has_process
             || handle.rendered_process_hash != current_process_hash
             || handle.rendered_phase != self.snapshot.phase
+            || force_budgeted_full_update
         {
-            let card = build_feishu_progress_card(&self.snapshot, true);
             let (sequence, uuid) = handle.next_sequence();
             self.feishu
-                .update_card_entity(&self.provider, &handle.card_id, card, sequence, &uuid)
+                .update_card_entity(
+                    &self.provider,
+                    &handle.card_id,
+                    budgeted.card,
+                    sequence,
+                    &uuid,
+                )
                 .await?;
             handle.rendered_title = current_title;
-            handle.rendered_has_plan = current_has_plan;
-            handle.rendered_has_tool = current_has_tool;
-            handle.rendered_has_thinking = current_has_thinking;
-            handle.rendered_has_process = current_has_process;
+            handle.rendered_has_plan = !budgeted.compact && current_has_plan;
+            handle.rendered_has_tool = !budgeted.compact && current_has_tool;
+            handle.rendered_has_thinking = !budgeted.compact && current_has_thinking;
+            handle.rendered_has_process = !budgeted.compact && current_has_process;
             handle.rendered_phase = self.snapshot.phase;
-            handle.rendered_output_hash = output_hash(&self.snapshot);
-            handle.rendered_plan_hash = current_has_plan_hash(&self.snapshot);
-            handle.rendered_tool_hash = current_has_tool_hash(&self.snapshot);
-            handle.rendered_status_hash = status_hash(&self.snapshot);
-            handle.rendered_thinking_hash = current_has_thinking_hash(&self.snapshot);
-            handle.rendered_process_hash = current_process_hash;
+            if budgeted.compact {
+                self.compact_card_mode = true;
+                handle.rendered_output_hash = compact_card_hash(&self.snapshot, true);
+                handle.rendered_plan_hash = None;
+                handle.rendered_tool_hash = None;
+                handle.rendered_status_hash = compact_status_hash(&self.snapshot);
+                handle.rendered_thinking_hash = None;
+                handle.rendered_process_hash = None;
+            } else {
+                handle.rendered_output_hash = output_hash(&self.snapshot);
+                handle.rendered_plan_hash = current_has_plan_hash(&self.snapshot);
+                handle.rendered_tool_hash = current_has_tool_hash(&self.snapshot);
+                handle.rendered_status_hash = status_hash(&self.snapshot);
+                handle.rendered_thinking_hash = current_has_thinking_hash(&self.snapshot);
+                handle.rendered_process_hash = current_process_hash;
+            }
             return Ok(());
         }
 
@@ -1088,25 +1174,100 @@ impl FeishuProgressCardSession {
         Ok(())
     }
 
+    async fn replace_current_card_after_limit(&mut self, force_compact: bool) -> Result<()> {
+        let budgeted = if force_compact {
+            BudgetedProgressCard {
+                card: build_feishu_compact_progress_card(&self.snapshot, true),
+                compact: true,
+                omitted_timeline_items: self.snapshot.timeline.len(),
+            }
+        } else {
+            build_budgeted_feishu_progress_card(&self.snapshot, true, self.card_budget)
+        };
+        let compact = budgeted.compact;
+        let current_title = header_title(&self.snapshot).to_string();
+        let current_has_plan = has_plan_state(&self.snapshot);
+        let current_has_process = has_process_state(&self.snapshot);
+        let current_has_tool = has_tool_state(&self.snapshot) && !current_has_process;
+        let current_has_thinking = has_thinking_state(&self.snapshot) && !current_has_process;
+        let current_process_hash = current_has_process_hash(&self.snapshot);
+        let handle = self.handle.as_mut().ok_or_else(|| {
+            BifrostError::Network("progress card handle missing during limit recovery".to_string())
+        })?;
+        let (sequence, uuid) = handle.next_sequence();
+        self.feishu
+            .update_card_entity(
+                &self.provider,
+                &handle.card_id,
+                budgeted.card,
+                sequence,
+                &uuid,
+            )
+            .await?;
+
+        self.compact_card_mode = compact;
+        handle.rendered_title = current_title;
+        handle.rendered_has_plan = !compact && current_has_plan;
+        handle.rendered_has_tool = !compact && current_has_tool;
+        handle.rendered_has_thinking = !compact && current_has_thinking;
+        handle.rendered_has_process = !compact && current_has_process;
+        handle.rendered_phase = self.snapshot.phase;
+        if compact {
+            handle.rendered_output_hash = compact_card_hash(&self.snapshot, true);
+            handle.rendered_plan_hash = None;
+            handle.rendered_tool_hash = None;
+            handle.rendered_status_hash = compact_status_hash(&self.snapshot);
+            handle.rendered_thinking_hash = None;
+            handle.rendered_process_hash = None;
+        } else {
+            handle.rendered_output_hash = output_hash(&self.snapshot);
+            handle.rendered_plan_hash = current_has_plan_hash(&self.snapshot);
+            handle.rendered_tool_hash = current_has_tool_hash(&self.snapshot);
+            handle.rendered_status_hash = status_hash(&self.snapshot);
+            handle.rendered_thinking_hash = current_has_thinking_hash(&self.snapshot);
+            handle.rendered_process_hash = current_process_hash;
+        }
+        Ok(())
+    }
+
     async fn flush_snapshot_with_limit_rollover(&mut self, freeze_notice: &str) -> Result<()> {
         match self.flush_snapshot().await {
             Ok(()) => Ok(()),
-            Err(error) if is_feishu_card_entity_limit_error(&error) && self.handle.is_some() => {
+            Err(error) if is_feishu_card_limit_error(&error) && self.handle.is_some() => {
                 let previous_card_id = self
                     .handle
                     .as_ref()
-                    .map(|handle| handle.card_id.as_str())
-                    .unwrap_or("");
+                    .map(|handle| handle.card_id.clone())
+                    .unwrap_or_default();
                 warn!(
                     card_id = previous_card_id,
                     error = %error,
-                    "rolling over Feishu progress card after CardKit entity limit"
+                    "retrying Feishu progress card with reduced history after CardKit limit"
                 );
-                self.rollover_snapshot(freeze_notice).await.map_err(|rollover_error| {
-                    BifrostError::Network(format!(
-                        "progress card update hit Feishu entity limit ({error}); rollover failed: {rollover_error}"
-                    ))
-                })
+                self.card_budget = FEISHU_CARD_RETRY_BUDGET;
+                match self.replace_current_card_after_limit(false).await {
+                    Ok(()) => Ok(()),
+                    Err(retry_error) if is_feishu_card_limit_error(&retry_error) => {
+                        warn!(
+                            card_id = previous_card_id,
+                            error = %retry_error,
+                            "reduced Feishu progress card still exceeds limit; retrying compact card"
+                        );
+                        match self.replace_current_card_after_limit(true).await {
+                            Ok(()) => Ok(()),
+                            Err(compact_error) if is_feishu_card_limit_error(&compact_error) => self
+                                .rollover_snapshot(freeze_notice)
+                                .await
+                                .map_err(|rollover_error| {
+                                    BifrostError::Network(format!(
+                                        "progress card limit recovery failed (initial={error}; reduced={retry_error}; compact={compact_error}); rollover failed: {rollover_error}"
+                                    ))
+                                }),
+                            Err(compact_error) => Err(compact_error),
+                        }
+                    }
+                    Err(retry_error) => Err(retry_error),
+                }
             }
             Err(error) => Err(error),
         }
@@ -1303,6 +1464,13 @@ pub fn build_feishu_progress_card(
     snapshot: &ImAgentProgressSnapshot,
     streaming_mode: bool,
 ) -> serde_json::Value {
+    build_budgeted_feishu_progress_card(snapshot, streaming_mode, FEISHU_CARD_STANDARD_BUDGET).card
+}
+
+fn build_feishu_progress_card_unchecked(
+    snapshot: &ImAgentProgressSnapshot,
+    streaming_mode: bool,
+) -> serde_json::Value {
     let mut elements = Vec::new();
     let output_element = serde_json::json!({
         "tag": "markdown",
@@ -1404,6 +1572,65 @@ pub fn build_feishu_compact_progress_card(
     })
 }
 
+fn build_budgeted_feishu_progress_card(
+    snapshot: &ImAgentProgressSnapshot,
+    streaming_mode: bool,
+    budget: FeishuCardBudget,
+) -> BudgetedProgressCard {
+    let mut view = snapshot.clone();
+    let mut omitted_timeline_items = 0;
+
+    loop {
+        let mut candidate = view.clone();
+        if omitted_timeline_items > 0 {
+            candidate.timeline.insert(
+                0,
+                ProgressTimelineItem::status(format!(
+                    "为适配飞书卡片大小，已省略前面 {omitted_timeline_items} 条过程记录，仅保留最新内容。"
+                )),
+            );
+        }
+        let card = build_feishu_progress_card_unchecked(&candidate, streaming_mode);
+        if feishu_card_fits_budget(&card, budget) {
+            return BudgetedProgressCard {
+                card,
+                compact: false,
+                omitted_timeline_items,
+            };
+        }
+        if view.timeline.len() <= 1 {
+            return BudgetedProgressCard {
+                card: build_feishu_compact_progress_card(snapshot, streaming_mode),
+                compact: true,
+                omitted_timeline_items: snapshot.timeline.len(),
+            };
+        }
+        view.timeline.remove(0);
+        omitted_timeline_items += 1;
+    }
+}
+
+fn feishu_card_fits_budget(card: &serde_json::Value, budget: FeishuCardBudget) -> bool {
+    serde_json::to_vec(card)
+        .map(|serialized| serialized.len() <= budget.max_bytes)
+        .unwrap_or(false)
+        && count_feishu_card_components(card) <= budget.max_components
+}
+
+fn count_feishu_card_components(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Object(object) => {
+            usize::from(object.contains_key("tag"))
+                + object
+                    .values()
+                    .map(count_feishu_card_components)
+                    .sum::<usize>()
+        }
+        serde_json::Value::Array(values) => values.iter().map(count_feishu_card_components).sum(),
+        _ => 0,
+    }
+}
+
 fn header_title(snapshot: &ImAgentProgressSnapshot) -> &str {
     snapshot.title.as_deref().unwrap_or("Bifrost AI")
 }
@@ -1503,14 +1730,30 @@ fn stable_hash(value: &str) -> u64 {
     hasher.finish()
 }
 
-fn is_feishu_card_entity_limit_error(error: &BifrostError) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeishuCardLimitKind {
+    ContentSize,
+    ComponentCount,
+}
+
+fn feishu_card_limit_kind(error: &BifrostError) -> Option<FeishuCardLimitKind> {
     let BifrostError::Network(message) = error else {
-        return false;
+        return None;
     };
-    message.contains("feishu")
-        && message.contains("card")
-        && message.contains("code=300305")
-        && message.contains("element exceeds the limit")
+    if !message.contains("feishu") || !message.contains("card") {
+        return None;
+    }
+    if message.contains("code=200860") {
+        return Some(FeishuCardLimitKind::ContentSize);
+    }
+    if message.contains("code=300305") {
+        return Some(FeishuCardLimitKind::ComponentCount);
+    }
+    None
+}
+
+fn is_feishu_card_limit_error(error: &BifrostError) -> bool {
+    feishu_card_limit_kind(error).is_some()
 }
 
 fn is_feishu_card_id_invalid_error(error: &BifrostError) -> bool {
@@ -1904,7 +2147,7 @@ fn process_dynamic_element_id(prefix: &str, index: usize) -> String {
 }
 
 fn format_process_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
-    let tool_count = process_tool_count(snapshot);
+    let tool_count = process_tool_count(snapshot).max(snapshot.tool_calls.len());
     let base = match snapshot.phase {
         ImProgressPhase::Running => "执行过程",
         ImProgressPhase::Finished => "执行过程",
@@ -2132,12 +2375,39 @@ fn format_status_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
         let reasoning = external_runner_reasoning_title(snapshot)
             .map(|value| format!(" · {value}"))
             .unwrap_or_default();
-        let title = format!(
+        let mut title = format!(
             "Runner：{} · 模型：{}{}",
             truncate_str(&runner_id, 24),
             model,
             reasoning
         );
+        if let Some(total) = snapshot
+            .runner
+            .as_ref()
+            .and_then(|runner| runner.token_usage.as_ref())
+            .and_then(|usage| usage.total_tokens)
+        {
+            title.push_str(&format!(
+                " · 本次：{} Token",
+                bifrost_agent::format_status_metric_count(total)
+            ));
+        }
+        if let Some(weekly) = snapshot
+            .runner
+            .as_ref()
+            .and_then(|runner| runner.weekly_usage.as_ref())
+        {
+            title.push_str(&format!(
+                " · 周余额：{}%",
+                100u64.saturating_sub(weekly.used_percent.min(100))
+            ));
+        }
+        if let Some(elapsed) = progress_elapsed_seconds(snapshot) {
+            title.push_str(&format!(
+                " · 耗时：{}",
+                format_progress_elapsed_duration(elapsed)
+            ));
+        }
         return if let Some(notice) = snapshot.activity_notice.as_deref() {
             format!("{title} · {notice}")
         } else {
@@ -2200,6 +2470,26 @@ fn format_status_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
     } else {
         token_title
     }
+}
+
+fn external_runner_weekly_usage_line(snapshot: &ImAgentProgressSnapshot) -> Option<String> {
+    let usage = snapshot.runner.as_ref()?.weekly_usage.as_ref()?;
+    let remaining = 100u64.saturating_sub(usage.used_percent.min(100));
+    let reset = usage
+        .resets_at
+        .and_then(|timestamp| chrono::DateTime::from_timestamp(timestamp as i64, 0))
+        .map(|timestamp| {
+            timestamp
+                .with_timezone(&chrono::Local)
+                .format("%m-%d %H:%M")
+                .to_string()
+        })
+        .map(|value| format!(" · 重置：{value}"))
+        .unwrap_or_default();
+    Some(format!(
+        "Codex 周额度：剩余 {remaining}%（已用 {}%）{reset}",
+        usage.used_percent.min(100)
+    ))
 }
 
 fn snapshot_has_external_runner(snapshot: &ImAgentProgressSnapshot) -> bool {
@@ -2551,6 +2841,9 @@ fn format_footer_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
         let token_line = external_runner_token_usage_line(snapshot)
             .map(|line| format!("\n{line}"))
             .unwrap_or_default();
+        let weekly_line = external_runner_weekly_usage_line(snapshot)
+            .map(|line| format!("\n{line}"))
+            .unwrap_or_default();
         let reasoning_line = external_runner_reasoning_line(snapshot)
             .map(|line| format!(" · {line}"))
             .unwrap_or_default();
@@ -2564,7 +2857,7 @@ fn format_footer_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
             .map(|line| format!("\n{line}"))
             .unwrap_or_default();
         return format!(
-            "{}状态：{}{}{}\nRunner：`{}` · Adapter：`{}`\n模型：{}{}{}{}\n外部会话：{}\n队列：{} · 引导：{}\n工作路径：`{}`{}",
+            "{}状态：{}{}{}\nRunner：`{}` · Adapter：`{}`\n模型：{}{}{}{}{}\n外部会话：{}\n队列：{} · 引导：{}\n工作路径：`{}`{}",
             prefix,
             phase,
             state_line,
@@ -2574,6 +2867,7 @@ fn format_footer_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
             external_runner_model_label(snapshot),
             reasoning_line,
             token_line,
+            weekly_line,
             context_line,
             external_runner_conversation_ref(snapshot),
             queue_text,

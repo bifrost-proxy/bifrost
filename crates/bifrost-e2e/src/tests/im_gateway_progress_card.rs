@@ -3,7 +3,8 @@
 use crate::TestCase;
 
 pub fn get_all_tests() -> Vec<TestCase> {
-    vec![TestCase::standalone(
+    vec![
+        TestCase::standalone(
         "im_gateway_file_change_progress_card_renderer",
         "Validate a completed File Change tool expands to file paths and line statistics instead of the empty-detail fallback",
         "admin",
@@ -84,5 +85,92 @@ pub fn get_all_tests() -> Vec<TestCase> {
             }
             Ok(())
         },
-    )]
+        ),
+        TestCase::standalone(
+        "im_gateway_progress_card_budget_and_codex_resources",
+        "Validate a long progress card stays inside the local byte budget while its top status exposes Codex session tokens, weekly balance, and elapsed time",
+        "admin",
+        || async move {
+            use bifrost_admin::im_gateway::progress_card::{
+                build_feishu_progress_card, ImAgentProgressSnapshot, ProgressRunnerSummary,
+                ProgressRunnerTokenUsage, ProgressRunnerWeeklyUsage,
+            };
+
+            let mut snapshot =
+                ImAgentProgressSnapshot::new("provider:owner", "render a long Codex task");
+            snapshot.runner = Some(ProgressRunnerSummary {
+                runner_id: "codex".to_string(),
+                adapter: "codex".to_string(),
+                model: Some("gpt-test".to_string()),
+                model_source: Some("runner config".to_string()),
+                reasoning_effort: None,
+                reasoning_summary: None,
+                reasoning_source: None,
+                token_usage: Some(ProgressRunnerTokenUsage {
+                    input_tokens: Some(10_000),
+                    cached_input_tokens: Some(2_000),
+                    output_tokens: Some(2_345),
+                    reasoning_output_tokens: Some(345),
+                    total_tokens: Some(12_345),
+                }),
+                weekly_usage: Some(ProgressRunnerWeeklyUsage {
+                    used_percent: 63,
+                    window_minutes: 10_080,
+                    resets_at: Some(1_800_000_000),
+                }),
+                work_dir: Some("/workspace/project".to_string()),
+                external_thread_id: Some("thread-resource-e2e".to_string()),
+                external_conversation_id: None,
+            });
+            let mut status = bifrost_agent::ActiveTurnStatus::new("provider:owner");
+            status.state = "running".to_string();
+            status.runner_type = Some("codex".to_string());
+            status.runner_id = Some("codex".to_string());
+            status.started_at = 1_800_000_000;
+            status.updated_at = 1_800_000_125;
+            snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::Status(Box::new(status)));
+            for index in 0..40 {
+                snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::ToolFinished {
+                    log: bifrost_agent::ToolCallLog {
+                        tool_name: "exec_command".to_string(),
+                        arguments: format!(
+                            "MARKER_{index}_{}",
+                            "input".repeat(220)
+                        ),
+                        result: format!(
+                            "{}_{}",
+                            if index == 39 { "LATEST_MARKER" } else { "OLD_MARKER" },
+                            "output".repeat(520)
+                        ),
+                        success: true,
+                    },
+                    duration_ms: 10,
+                });
+            }
+
+            let card = build_feishu_progress_card(&snapshot, true);
+            let bytes = serde_json::to_vec(&card).map_err(|error| error.to_string())?;
+            if bytes.len() > 24 * 1024 {
+                return Err(format!("progress card exceeded 24KB budget: {} bytes", bytes.len()));
+            }
+            let serialized = String::from_utf8(bytes).map_err(|error| error.to_string())?;
+            for needle in [
+                "本次：12.3K Token",
+                "周余额：37%",
+                "耗时：2 分 05 秒",
+                "Codex 周额度：剩余 37%",
+                "LATEST_MARKER",
+                "已省略前面",
+            ] {
+                if !serialized.contains(needle) {
+                    return Err(format!("resource-aware card missing {needle}: {serialized}"));
+                }
+            }
+            if serialized.contains("MARKER_0_") {
+                return Err("oldest process record was not removed from the card view".to_string());
+            }
+            Ok(())
+        },
+        ),
+    ]
 }

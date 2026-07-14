@@ -1033,6 +1033,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
             "im_turn_started",
         );
         let mut progress_enabled = false;
+        let mut progress_runner_metadata = std::collections::BTreeMap::new();
         let mut progress_tx_for_finish = None;
         let mut progress_task = None;
         if matches!(
@@ -1144,6 +1145,24 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                                 "im_progress",
                             );
                         }
+                    }
+                    if progress_enabled
+                        && crate::im_gateway::external_cli::merge_external_cli_progress_metadata(
+                            &settings.adapter,
+                            &progress_event,
+                            &mut progress_runner_metadata,
+                        )
+                    {
+                        let runner_summary = external_cli_progress_runner_summary(
+                            &effective.runner_id,
+                            &settings.adapter,
+                            &request_for_progress,
+                            Some(&progress_runner_metadata),
+                        );
+                        let _ = ctx
+                            .progress_registry
+                            .update_runner_summary(&input.session_key, runner_summary)
+                            .await;
                     }
                     if progress_enabled {
                         if let (Some(progress_tx), Some(agent_event)) = (
@@ -1898,6 +1917,7 @@ fn external_cli_progress_runner_summary(
             .reasoning_source
             .map(|value| format_runner_model_source(&value)),
         token_usage: metadata.and_then(external_cli_token_usage_from_metadata),
+        weekly_usage: metadata.and_then(external_cli_weekly_usage_from_metadata),
         work_dir: request
             .work_dir
             .as_ref()
@@ -1905,6 +1925,18 @@ fn external_cli_progress_runner_summary(
         external_thread_id,
         external_conversation_id,
     }
+}
+
+fn external_cli_weekly_usage_from_metadata(
+    metadata: &std::collections::BTreeMap<String, String>,
+) -> Option<crate::im_gateway::progress_card::ProgressRunnerWeeklyUsage> {
+    Some(
+        crate::im_gateway::progress_card::ProgressRunnerWeeklyUsage {
+            used_percent: metadata_u64(metadata, "codexWeeklyUsedPercent")?.min(100),
+            window_minutes: metadata_u64(metadata, "codexWeeklyWindowMinutes")?,
+            resets_at: metadata_u64(metadata, "codexWeeklyResetsAt"),
+        },
+    )
 }
 
 fn external_cli_token_usage_from_metadata(
@@ -2052,6 +2084,23 @@ mod tests {
         assert_eq!(summary.model.as_deref(), Some("GPT-5.5"));
         assert_eq!(summary.reasoning_effort.as_deref(), Some("high"));
         assert_eq!(summary.reasoning_source.as_deref(), Some("runner 配置"));
+    }
+
+    #[test]
+    fn external_cli_progress_runner_summary_reads_weekly_usage_metadata() {
+        let mut metadata = std::collections::BTreeMap::new();
+        metadata.insert("codexWeeklyUsedPercent".to_string(), "140".to_string());
+        metadata.insert("codexWeeklyWindowMinutes".to_string(), "10080".to_string());
+        metadata.insert("codexWeeklyResetsAt".to_string(), "1784490086".to_string());
+
+        let usage = external_cli_weekly_usage_from_metadata(&metadata)
+            .expect("valid weekly metadata should be rendered");
+
+        assert_eq!(usage.used_percent, 100);
+        assert_eq!(usage.window_minutes, 10_080);
+        assert_eq!(usage.resets_at, Some(1_784_490_086));
+        metadata.remove("codexWeeklyWindowMinutes");
+        assert!(external_cli_weekly_usage_from_metadata(&metadata).is_none());
     }
 
     fn external_cli_result_with_status(
