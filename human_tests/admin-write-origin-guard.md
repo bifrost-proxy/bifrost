@@ -122,7 +122,33 @@
 - `全局弹窗操作遇到过期 CSRF token 时会刷新 token 并重试` 通过。
 - `Approve`、`Reject`、`Clear All` 既有 pending auth 用例继续通过。
 
+### TC-AOG-08：桌面 App Runner 与 IM Channel 保存的 PATCH CSRF 预检与真实写入
+
+**操作步骤**：
+
+1. 执行聚焦 CORS 契约单元测试：
+   ```bash
+   source ~/.zshrc && cargo test -p bifrost-admin cors_preflight_allows_desktop_client_header --lib -- --nocapture
+   ```
+2. 构建当前源码二进制后执行真实 Admin security E2E：
+   ```bash
+   source ~/.zshrc && cargo build --bin bifrost && \
+   BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_admin_cross_site_security.sh
+   ```
+
+**预期结果**：
+
+- 单元测试确认 `Access-Control-Allow-Methods` 包含独立的 `PATCH` method，并继续允许 `X-Bifrost-CSRF` 与 `X-Client-Id` 请求头。
+- E2E 启动隔离临时数据目录的真实 Bifrost；模拟 `Origin: tauri://localhost` 的 Runner config OPTIONS 预检返回该 Origin、`PATCH` 和 `X-Bifrost-CSRF`。
+- E2E 获取真实 CSRF token 后，对 `/_bifrost/api/im-gateway/chat/config` 执行模拟桌面 WebView 的 PATCH，写入 IM Channel 的 disabled、Runner Override 和 `no_im` Delivery Override，返回 HTTP 200。
+- 随后的 GET 回读出完全一致的 channel override，覆盖截图红框中的自动保存与 `Save Channel` 共用链路。
+- 同一脚本中的外部 cross-site、缺 CSRF、DNS rebinding、Rule Share 与 WebSocket 安全回归全部继续通过。
+
 ## 清理步骤
 
 - Playwright 场景使用独立测试代理和数据目录，测试结束自动清理。
 - 本用例不要求修改用户默认 `~/.bifrost` 数据。
+
+## 执行记录
+
+- 2026-07-14：TC-AOG-08 PASS。`cargo test -p bifrost-admin cors_preflight_allows_desktop_client_header --lib -- --nocapture` 为 1 passed；`cargo build --bin bifrost` 成功；`BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_admin_cross_site_security.sh` 连续通过。真实临时服务的 Tauri OPTIONS 响应允许 `PATCH` 与 `X-Bifrost-CSRF`，Runner/IM Channel config PATCH 返回 200，GET 回读 disabled、Runner Override 与 `no_im` Delivery Override 一致；同脚本的跨站、缺 CSRF、DNS rebinding、Rule Share 与 WebSocket 安全回归全部通过。

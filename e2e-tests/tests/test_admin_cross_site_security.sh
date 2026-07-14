@@ -96,6 +96,71 @@ assert_header_matches /tmp/bifrost-admin-security-index.headers "^content-securi
 
 TOKEN="$(csrf_token)"
 
+# Desktop WebView runner saves use PATCH and carry X-Bifrost-CSRF, so the
+# browser performs a CORS preflight before sending the configuration update.
+curl -sS -o /dev/null \
+  -D "$DATA_DIR/runner-save-preflight.headers" \
+  -X OPTIONS "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/im-gateway/chat/config" \
+  -H 'Origin: tauri://localhost' \
+  -H 'Access-Control-Request-Method: PATCH' \
+  -H 'Access-Control-Request-Headers: content-type,x-client-id,x-bifrost-csrf'
+assert_header_matches \
+  "$DATA_DIR/runner-save-preflight.headers" \
+  '^access-control-allow-origin: tauri://localhost$' \
+  "desktop runner save preflight allows the trusted Tauri origin"
+assert_header_matches \
+  "$DATA_DIR/runner-save-preflight.headers" \
+  '^access-control-allow-methods:.*[ ,]PATCH([ ,]|$)' \
+  "desktop runner save preflight allows PATCH"
+assert_header_matches \
+  "$DATA_DIR/runner-save-preflight.headers" \
+  '^access-control-allow-headers: .*X-Bifrost-CSRF' \
+  "desktop runner save preflight allows the CSRF header"
+
+curl -fsS \
+  "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/im-gateway/chat/config" \
+  -o "$DATA_DIR/runner-config.json"
+python3 - "$DATA_DIR/runner-config.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as source:
+    config = json.load(source)
+config.setdefault("channels", {})["desktop-runner-save-e2e"] = {
+    "enabled": False,
+    "runnerId": config["defaultRunnerId"],
+    "deliveryMode": "no_im",
+}
+with open(path, "w", encoding="utf-8") as output:
+    json.dump(config, output)
+PY
+STATUS="$(http_status \
+  -X PATCH "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/im-gateway/chat/config" \
+  -H 'Content-Type: application/json' \
+  -H 'Origin: tauri://localhost' \
+  -H 'Sec-Fetch-Site: cross-site' \
+  -H 'X-Client-Id: desktop-runner-save-e2e' \
+  -H "X-Bifrost-CSRF: $TOKEN" \
+  --data-binary "@$DATA_DIR/runner-config.json")"
+[[ "$STATUS" == "200" ]] || {
+  echo "desktop runner save PATCH failed with HTTP $STATUS" >&2
+  cat /tmp/bifrost-admin-security-response.json >&2
+  exit 1
+}
+curl -fsS \
+  "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/im-gateway/chat/config" \
+  | python3 -c '
+import json
+import sys
+
+config = json.load(sys.stdin)
+channel = config["channels"]["desktop-runner-save-e2e"]
+assert channel["enabled"] is False
+assert channel["runnerId"] == config["defaultRunnerId"]
+assert channel["deliveryMode"] == "no_im"
+'
+
 CREATE_BODY='{"name":"safe-rule","content":"safe.test bp://127.0.0.1:3000","enabled":false}'
 STATUS="$(http_status -X POST "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/rules" \
   -H 'Content-Type: application/json' \

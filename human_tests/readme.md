@@ -148,7 +148,7 @@
 | [api-group.md](./api-group.md) | Group API | 13 | 团队组列表/详情、团队规则 CRUD、权限校验 |
 | [api-search.md](./api-search.md) | Search API | 16 | 全文搜索、搜索范围、过滤条件、分页、流式搜索 |
 | [api-auth.md](./api-auth.md) | Auth API | 12 | 鉴权状态查询、登录、密码管理、远程访问开关、JWT 会话吊销 |
-| [admin-write-origin-guard.md](./admin-write-origin-guard.md) | Admin 写接口 Origin Guard 回归 | 7 | Mac 桌面壳可信 Origin 被 `Sec-Fetch-Site: cross-site` 误判导致写接口整体 403 的回归，覆盖外部跨站拦截、可信桌面 Origin 放行、CSRF 继续强制、WebSocket guard、真实 9900 写接口、Pending Authorization 弹窗关闭不依赖服务端成功与 stale CSRF 次级恢复 |
+| [admin-write-origin-guard.md](./admin-write-origin-guard.md) | Admin 写接口 Origin Guard 回归 | 8 | Mac 桌面壳可信 Origin 被 `Sec-Fetch-Site: cross-site` 误判导致写接口整体 403 的回归，覆盖外部跨站拦截、可信桌面 Origin 放行、CSRF 继续强制、WebSocket guard、真实 9900 写接口、Pending Authorization 弹窗关闭不依赖服务端成功、stale CSRF 次级恢复，以及 Runner/IM Channel 保存 PATCH 预检、写入和回读 |
 | [admin-cross-site-security.md](./admin-cross-site-security.md) | Admin Cross-Site Security | 10 | Admin API 跨站写请求、DNS rebinding Host、代理 absolute-form 伪造、代理 Admin Push WebSocket 伪造拒绝、DevTools page bridge 窄例外、Rule Share 确认页和 CSRF 防护回归 |
 | [webui-csrf-transport-guard.md](./webui-csrf-transport-guard.md) | Web UI CSRF 传输层 ESLint 守卫 | 5 | ESLint `no-restricted-imports` 禁止 `web/src/**` 直接 `import axios`（仅 `api/client.ts` 白名单），强制写接口走 `apiFetch` 或共享 `client` 注入 `X-Bifrost-CSRF`；覆盖规则真实触发、白名单不误伤、`bifrost-file.ts` 移除默认 axios 后行为不变、`pnpm lint` 全绿与全量单测/类型构建通过 |
 | [security-hardening.md](./security-hardening.md) | Security Hardening | 11 | 2026-07 安全审计修复回归：Shell 策略全匹配、登录失败非破坏性、脚本 SSRF 防护、Admin 虚拟主机鉴权、SSH 密钥权限/授权有效期、安装 checksum fail-close、glob symlink、open_call AAD、Sync 禁明文和 unsafe SSL 显式 opt-in |
