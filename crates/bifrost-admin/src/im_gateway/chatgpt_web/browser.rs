@@ -673,50 +673,6 @@ impl BrowserSession {
         self.close_stale_pages(&list, None).await;
     }
 
-    pub(super) async fn close_chatgpt_pages_for_fresh_run(&self) {
-        let list: Vec<CdpPage> = match wait_for_json(
-            &format!("http://127.0.0.1:{}/json/list", self.port),
-            Duration::from_secs(5),
-        )
-        .await
-        {
-            Ok(list) => list,
-            Err(error) => {
-                warn!(
-                    error = %error,
-                    "chatgpt_web browser: failed to list pages before fresh run"
-                );
-                return;
-            }
-        };
-        let to_close: Vec<CdpPage> = list
-            .into_iter()
-            .filter(|page| page.url.starts_with(DEFAULT_BASE_URL))
-            .collect();
-        if to_close.is_empty() {
-            return;
-        }
-        info!(
-            close_count = to_close.len(),
-            "chatgpt_web browser: closing existing ChatGPT pages before fresh run"
-        );
-        for page in to_close {
-            debug!(
-                page_id = %page.id,
-                page_url = %page.url,
-                "chatgpt_web browser: closing ChatGPT page before fresh run"
-            );
-            if let Err(error) = self.close_target(&page.id).await {
-                warn!(
-                    page_id = %page.id,
-                    error = %error,
-                    "chatgpt_web browser: failed to close ChatGPT page before fresh run"
-                );
-            }
-        }
-        clear_conversation_tabs_for_profile(&self.profile_dir);
-    }
-
     #[allow(dead_code)]
     async fn close_stale_pages(&self, pages: &[CdpPage], keep_id: Option<&str>) {
         let chatgpt_pages: Vec<&CdpPage> = pages
@@ -813,23 +769,26 @@ impl BrowserSession {
     }
 }
 
-fn page_url_matches_conversation(url: &str, base_url: &str, conversation_id: &str) -> bool {
-    let base = base_url.trim_end_matches('/');
-    let candidates = [
-        format!("{base}/c/{conversation_id}"),
-        format!(
-            "{}/c/{conversation_id}",
-            DEFAULT_BASE_URL.trim_end_matches('/')
-        ),
-    ];
-    candidates.iter().any(|candidate| {
-        if !url.starts_with(candidate) {
+pub(super) fn page_url_matches_conversation(
+    url: &str,
+    base_url: &str,
+    conversation_id: &str,
+) -> bool {
+    [base_url, DEFAULT_BASE_URL].iter().any(|candidate_base| {
+        let Some(rest) = url.strip_prefix(candidate_base.trim_end_matches('/')) else {
+            return false;
+        };
+        if !rest.starts_with('/') {
             return false;
         }
-        matches!(
-            url.as_bytes().get(candidate.len()).copied(),
-            None | Some(b'?') | Some(b'#') | Some(b'/')
-        )
+        let path = rest.split(['?', '#']).next().unwrap_or(rest);
+        let segments = path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        segments
+            .windows(2)
+            .any(|pair| pair[0] == "c" && pair[1] == conversation_id)
     })
 }
 
@@ -889,8 +848,18 @@ mod tests {
             "https://chatgpt.com/",
             "abc-123"
         ));
+        assert!(page_url_matches_conversation(
+            "https://chatgpt.com/g/g-p-daily-research/c/abc-123?model=pro",
+            "https://chatgpt.com",
+            "abc-123"
+        ));
         assert!(!page_url_matches_conversation(
             "https://chatgpt.com/c/abc-1234",
+            "https://chatgpt.com",
+            "abc-123"
+        ));
+        assert!(!page_url_matches_conversation(
+            "https://chatgpt.com.evil.example/c/abc-123",
             "https://chatgpt.com",
             "abc-123"
         ));

@@ -147,6 +147,7 @@ if [[ "${SKIP_BUILD:-false}" != "true" ]]; then
 fi
 
 BIFROST_DATA_DIR="$DATA_DIR" BIFROST_E2E=1 BIFROST_CHATGPT_WEB_E2E_MOCK=1 \
+  BIFROST_CHATGPT_WEB_E2E_MOCK_PLANNING_FIRST=1 \
   "$BIFROST_BIN" start \
   --host 127.0.0.1 \
   -p "$BIFROST_PORT" \
@@ -348,12 +349,33 @@ assert '"classification":"internal_investigation"' in seed_report, seed_report
 
 github = json.loads((children_dir / "github-question.json").read_text(encoding="utf-8"))
 product = json.loads((children_dir / "product-question.json").read_text(encoding="utf-8"))
+github_report = (children_dir / "github-question.md").read_text(encoding="utf-8")
+product_report = (children_dir / "product-question.md").read_text(encoding="utf-8")
 assert github["original_question"] == "IBKR 仓库如何计算成交成本？", github
 assert product["original_question"] == "日报研究问题如何做到每题独立会话？", product
 assert github["conversation_id"] != product["conversation_id"], (github, product)
 assert github["full_report_link"].startswith("https://chatgpt.com/c/"), github
 assert product["full_report_link"].startswith("https://chatgpt.com/c/"), product
 assert github["github_connector_status"] == "missing", github
+for report in (github_report, product_report):
+    assert "## 原始问题" in report, report
+    assert "## 核心结论" in report, report
+    assert "## 事实与证据" in report, report
+    assert "## 推断与不确定性" in report, report
+    assert "## 对原始问题的直接回答" in report, report
+wait_prompts = [
+    path
+    for path in (pathlib.Path(data_dir) / "im_gateway" / "runs").glob("*/prompt.md")
+    if not path.read_text(encoding="utf-8").strip()
+]
+assert len(wait_prompts) >= 2, wait_prompts
+retry_prompts = [
+    path
+    for path in (pathlib.Path(data_dir) / "im_gateway" / "runs").glob("*/prompt.md")
+    if "上一条回复不是最终研究报告"
+    in path.read_text(encoding="utf-8")
+]
+assert len(retry_prompts) >= 2, retry_prompts
 
 fanout_report = (fanout_dir / f"{date}-report.md").read_text(encoding="utf-8")
 assert github["full_report_link"] in fanout_report, fanout_report

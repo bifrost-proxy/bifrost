@@ -262,24 +262,52 @@ fn build_daily_research_context_prompt(
     )
 }
 
+const DAILY_RESEARCH_BACKGROUND_PROMPT_CHARS: usize = 2_000;
+const DAILY_RESEARCH_SOURCE_EXCERPT_PROMPT_CHARS: usize = 4_000;
+const DAILY_RESEARCH_CUSTOM_PROMPT_CHARS: usize = 8_000;
+const DAILY_RESEARCH_CONTEXT_PROMPT_CHARS: usize = 20_000;
+
+fn compact_daily_research_prompt_field(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let mut compact = trimmed.chars().take(max_chars).collect::<String>();
+    compact.push_str("\n[上下文已截断；请以原始问题为准。]");
+    compact
+}
+
 fn build_daily_research_child_prompt(
-    task: &AsrDirectoryTask,
     question: &AsrDailyResearchQuestion,
     context: Option<&str>,
     research_runner_can_read_context_repo: bool,
 ) -> String {
-    let base_instructions = std::fs::read_to_string(daily_agent_instructions_path(task))
-        .unwrap_or_else(|_| daily_agent_instruction_content(task));
     let mut prompt = format!(
-        "你正在独立研究一个问题。必须直接回答原始问题，不要给问题打优先级分数，也不要把它改写成另一个问题。\n\n## 原始问题\n{}\n\n## 提出问题时的背景\n{}\n\n## 原始片段\n{}\n\n## 本研究 Agent 的要求\n{}\n",
+        "你正在独立研究一个问题。必须直接回答原始问题，不要给问题打优先级分数，也不要把它改写成另一个问题。优先使用一手、权威和可复查来源；区分事实、推断与未知，标注数据时点并提供可访问链接。\n\n## 原始问题\n{}\n",
         question.original_question.trim(),
-        question.background.trim(),
-        question.source_excerpt.trim(),
-        base_instructions.trim()
     );
+    if !question.background.trim().is_empty() {
+        prompt.push_str("\n## 提出问题时的背景\n");
+        prompt.push_str(&compact_daily_research_prompt_field(
+            &question.background,
+            DAILY_RESEARCH_BACKGROUND_PROMPT_CHARS,
+        ));
+        prompt.push('\n');
+    }
+    if !question.source_excerpt.trim().is_empty() {
+        prompt.push_str("\n## 原始片段\n");
+        prompt.push_str(&compact_daily_research_prompt_field(
+            &question.source_excerpt,
+            DAILY_RESEARCH_SOURCE_EXCERPT_PROMPT_CHARS,
+        ));
+        prompt.push('\n');
+    }
     if let Some(research_prompt) = question.research_prompt.as_deref() {
         prompt.push_str("\n## 单题补充要求\n");
-        prompt.push_str(research_prompt.trim());
+        prompt.push_str(&compact_daily_research_prompt_field(
+            research_prompt,
+            DAILY_RESEARCH_CUSTOM_PROMPT_CHARS,
+        ));
         prompt.push('\n');
     }
     if !question.github_repositories.is_empty() {
@@ -293,7 +321,10 @@ fn build_daily_research_child_prompt(
     }
     if let Some(context) = context {
         prompt.push_str("\n## 已核验的上下文事实\n");
-        prompt.push_str(context.trim());
+        prompt.push_str(&compact_daily_research_prompt_field(
+            context,
+            DAILY_RESEARCH_CONTEXT_PROMPT_CHARS,
+        ));
         prompt.push('\n');
     } else if research_runner_can_read_context_repo {
         prompt.push_str("\n你可以直接读取当前工作目录中的真实数据；先核验事实，再完成研究。\n");
@@ -304,12 +335,157 @@ fn build_daily_research_child_prompt(
     prompt
 }
 
+const DAILY_RESEARCH_REQUIRED_HEADINGS: [&str; 5] = [
+    "## 原始问题",
+    "## 核心结论",
+    "## 事实与证据",
+    "## 推断与不确定性",
+    "## 对原始问题的直接回答",
+];
+
+const DAILY_RESEARCH_PROMPT_SCAFFOLDING_HEADINGS: [&str; 6] = [
+    "## 提出问题时的背景",
+    "## 原始片段",
+    "## 本研究 Agent 的要求",
+    "## 单题补充要求",
+    "## 必须使用的 GitHub Connector 仓库",
+    "## 已核验的上下文事实",
+];
+
+fn validate_daily_research_response(
+    response: &str,
+    question: &AsrDailyResearchQuestion,
+) -> Result<(), String> {
+    let trimmed = response.trim();
+    if trimmed.len() < 512 {
+        return Err(format!(
+            "research response for '{}' is too short: {} bytes",
+            question.id,
+            trimmed.len()
+        ));
+    }
+    if !trimmed.contains(question.original_question.trim()) {
+        return Err(format!(
+            "research response for '{}' does not preserve the original question",
+            question.id
+        ));
+    }
+    let lines = trimmed.lines().collect::<Vec<_>>();
+    if let Some(heading) = DAILY_RESEARCH_PROMPT_SCAFFOLDING_HEADINGS
+        .iter()
+        .find(|heading| lines.iter().any(|line| line.trim() == **heading))
+    {
+        return Err(format!(
+            "research response for '{}' echoed prompt scaffolding heading: {heading}",
+            question.id
+        ));
+    }
+    let mut heading_positions = Vec::with_capacity(DAILY_RESEARCH_REQUIRED_HEADINGS.len());
+    let mut search_from = 0usize;
+    let mut missing = Vec::new();
+    for heading in DAILY_RESEARCH_REQUIRED_HEADINGS {
+        let position = lines
+            .iter()
+            .enumerate()
+            .skip(search_from)
+            .find_map(|(index, line)| (line.trim() == heading).then_some(index));
+        if let Some(position) = position {
+            heading_positions.push((heading, position));
+            search_from = position + 1;
+        } else {
+            missing.push(heading);
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "research response for '{}' is missing required headings: {}",
+            question.id,
+            missing.join(", ")
+        ));
+    }
+    for (index, (heading, position)) in heading_positions.iter().enumerate() {
+        let section_end = heading_positions
+            .get(index + 1)
+            .map(|(_, position)| *position)
+            .unwrap_or(lines.len());
+        if !lines[position + 1..section_end]
+            .iter()
+            .any(|line| !line.trim().is_empty())
+        {
+            return Err(format!(
+                "research response for '{}' has an empty section: {heading}",
+                question.id
+            ));
+        }
+    }
+    if chatgpt_web_response_is_placeholder(chatgpt_web_normalized_response(trimmed)) {
+        return Err(format!(
+            "research response for '{}' is a status/error placeholder",
+            question.id
+        ));
+    }
+    Ok(())
+}
+
+fn daily_research_retry_prompt(question: &AsrDailyResearchQuestion) -> String {
+    let mut prompt = format!(
+        "上一条回复不是最终研究报告。请不要说明计划，不要再说你将要做什么，立即基于本会话中已经完成的检索和证据，重新输出完整 Markdown 研究报告。\n\n原始问题：\n{}\n\n必须逐字保留原始问题，并包含以下全部章节：`## 原始问题`、`## 核心结论`、`## 事实与证据`、`## 推断与不确定性`、`## 对原始问题的直接回答`。事实附可复查来源链接；没有验证到的内容明确写为未验证。不要使用代码块包装。",
+        question.original_question.trim()
+    );
+    if !question.github_repositories.is_empty() {
+        prompt.push_str(
+            "\n本题要求使用 GitHub Connector；最终报告仍必须输出 `GITHUB_CONNECTOR_STATUS: verified` 或 `GITHUB_CONNECTOR_STATUS: unavailable`，并列出实际读取的仓库文件路径，不能省略状态。",
+        );
+    }
+    prompt
+}
+
 async fn run_daily_research_child(
     task: &AsrDirectoryTask,
     runner_id: &str,
     prompt: String,
     work_dir: &Path,
     session_key: &str,
+) -> Result<AsrDailyResearchExecution, String> {
+    run_daily_research_child_with_params(
+        task,
+        runner_id,
+        prompt,
+        work_dir,
+        session_key,
+        serde_json::json!({}),
+    )
+    .await
+}
+
+async fn run_daily_research_child_with_params(
+    task: &AsrDirectoryTask,
+    runner_id: &str,
+    prompt: String,
+    work_dir: &Path,
+    session_key: &str,
+    params: serde_json::Value,
+) -> Result<AsrDailyResearchExecution, String> {
+    run_daily_research_child_request(
+        task,
+        runner_id,
+        prompt,
+        work_dir,
+        session_key,
+        params,
+        None,
+    )
+    .await
+}
+
+async fn run_daily_research_child_request(
+    task: &AsrDirectoryTask,
+    runner_id: &str,
+    prompt: String,
+    work_dir: &Path,
+    session_key: &str,
+    params: serde_json::Value,
+    operation_override: Option<&str>,
 ) -> Result<AsrDailyResearchExecution, String> {
     let config_store =
         crate::im_gateway::external_cli::ExternalCliConfigStore::new(&bifrost_storage::data_dir());
@@ -327,10 +503,17 @@ async fn run_daily_research_child(
     }
     let adapter = effective.settings.adapter.as_str();
     let request_session_key = (adapter != "chatgpt_web").then(|| session_key.to_string());
-    if adapter == "chatgpt_web" {
+    let continues_chatgpt_conversation = adapter == "chatgpt_web"
+        && ["conversationId", "conversation_id"].iter().any(|key| {
+            params
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+    if adapter == "chatgpt_web" && !continues_chatgpt_conversation {
         crate::im_gateway::chatgpt_web::clear_session_conversation(session_key).await;
     }
-    let operation = if adapter == "codex" { "run" } else { "send" };
+    let operation = operation_override.unwrap_or(if adapter == "codex" { "run" } else { "send" });
     let mut adapter_config = daily_agent_external_runner_adapter_config(
         adapter,
         &effective.settings.adapter_config,
@@ -357,7 +540,7 @@ async fn run_daily_research_child(
         images: Vec::new(),
         message: prompt,
         operation: operation.to_string(),
-        params: serde_json::json!({}),
+        params,
         provider_id: None,
         runner_id: Some(runner_id.to_string()),
         session_key: request_session_key,
@@ -397,6 +580,81 @@ async fn run_daily_research_child(
         adapter: result.adapter,
         metadata: result.metadata,
     })
+}
+
+async fn ensure_complete_daily_research_execution(
+    task: &AsrDirectoryTask,
+    runner_id: &str,
+    question: &AsrDailyResearchQuestion,
+    work_dir: &Path,
+    session_key: &str,
+    execution: AsrDailyResearchExecution,
+) -> Result<AsrDailyResearchExecution, String> {
+    let Err(first_error) = validate_daily_research_response(&execution.response, question) else {
+        return Ok(execution);
+    };
+    if execution.adapter != "chatgpt_web" {
+        return Err(first_error);
+    }
+    let conversation_id = metadata_value(
+        &execution.metadata,
+        &["conversationId", "conversation_id"],
+    )
+    .ok_or_else(|| format!("{first_error}; ChatGPT Web did not return a conversation id"))?;
+    tracing::warn!(
+        question_id = %question.id,
+        conversation_id = %conversation_id,
+        error = %first_error,
+        "daily research response failed validation; waiting for the same ChatGPT conversation"
+    );
+    let waited = run_daily_research_child_request(
+        task,
+        runner_id,
+        String::new(),
+        work_dir,
+        session_key,
+        serde_json::json!({ "conversationId": conversation_id }),
+        Some("wait"),
+    )
+    .await;
+    if let Ok(waited) = waited {
+        if validate_daily_research_response(&waited.response, question).is_ok() {
+            tracing::info!(
+                question_id = %question.id,
+                conversation_id = %conversation_id,
+                "same-conversation wait produced a complete daily research report"
+            );
+            return Ok(waited);
+        }
+        tracing::warn!(
+            question_id = %question.id,
+            conversation_id = %conversation_id,
+            waited_len = waited.response.trim().len(),
+            "same-conversation wait still returned an incomplete research report; sending one final-output retry"
+        );
+    } else if let Err(wait_error) = waited {
+        tracing::warn!(
+            question_id = %question.id,
+            conversation_id = %conversation_id,
+            error = %wait_error,
+            "same-conversation wait failed; sending one final-output retry"
+        );
+    }
+    let retry = run_daily_research_child_with_params(
+        task,
+        runner_id,
+        daily_research_retry_prompt(question),
+        work_dir,
+        session_key,
+        serde_json::json!({ "conversationId": conversation_id }),
+    )
+    .await?;
+    validate_daily_research_response(&retry.response, question).map_err(|retry_error| {
+        format!(
+            "initial research response failed validation ({first_error}); same-conversation retry failed validation ({retry_error})"
+        )
+    })?;
+    Ok(retry)
 }
 
 fn daily_research_conversation_link(
@@ -583,7 +841,6 @@ async fn run_daily_agent_research_fanout(
                     }
                 }
                 let prompt = build_daily_research_child_prompt(
-                    task,
                     question,
                     context_content.as_deref(),
                     direct_context_access,
@@ -592,12 +849,21 @@ async fn run_daily_agent_research_fanout(
                     "asr-research:{}:{}:{}:{}:research",
                     task.id, task.daily_agent.agent_id, entry.date, question_id
                 );
-                run_daily_research_child(
+                let execution = run_daily_research_child(
                     task,
                     &final_runner,
                     prompt,
                     &final_work_dir,
                     &child_session,
+                )
+                .await?;
+                ensure_complete_daily_research_execution(
+                    task,
+                    &final_runner,
+                    question,
+                    &final_work_dir,
+                    &child_session,
+                    execution,
                 )
                 .await
             }

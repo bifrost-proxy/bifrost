@@ -711,6 +711,16 @@ pub async fn run_adapter(
     if e2e_mock_requested && explicit_e2e {
         return Ok(mock_run_adapter_for_e2e(request, prompt));
     }
+    let live_e2e_requested = std::env::var("BIFROST_CHATGPT_WEB_LIVE_E2E")
+        .ok()
+        .as_deref()
+        == Some("1");
+    if live_adapter_forbidden_in_e2e(explicit_e2e, e2e_mock_requested, live_e2e_requested) {
+        return Err(
+            "live ChatGPT Web is disabled during tests; set BIFROST_CHATGPT_WEB_E2E_MOCK=1, or explicitly opt in with BIFROST_CHATGPT_WEB_LIVE_E2E=1"
+                .to_string(),
+        );
+    }
 
     let config = match runtime_config(&request.adapter_config) {
         Ok(config) => config,
@@ -829,6 +839,14 @@ pub async fn run_adapter(
     })
 }
 
+fn live_adapter_forbidden_in_e2e(
+    explicit_e2e: bool,
+    e2e_mock_requested: bool,
+    live_e2e_requested: bool,
+) -> bool {
+    explicit_e2e && !e2e_mock_requested && !live_e2e_requested
+}
+
 async fn wait_for_stop_marker(path: PathBuf) {
     loop {
         if stop_requested(&path).await {
@@ -848,12 +866,41 @@ fn mock_run_adapter_for_e2e(request: &ExternalCliRunRequest, prompt: &str) -> Ch
         .and_then(Value::as_object)
         .and_then(|chatgpt| chatgpt.get("projectUrl"))
         .and_then(Value::as_str);
-    let response = match project_url {
-        Some(project_url) => format!(
-            "chatgpt_web_e2e_mock: {}\nCHATGPT_PROJECT_URL: {project_url}",
-            prompt.trim()
-        ),
-        None => format!("chatgpt_web_e2e_mock: {}", prompt.trim()),
+    let planning_first = std::env::var("BIFROST_CHATGPT_WEB_E2E_MOCK_PLANNING_FIRST")
+        .ok()
+        .as_deref()
+        == Some("1");
+    let initial_research_turn = planning_first
+        && request.operation != "wait"
+        && prompt.contains("你正在独立研究一个问题")
+        && !prompt.contains("上一条回复不是最终研究报告");
+    let final_research_retry = planning_first
+        && prompt.contains("上一条回复不是最终研究报告")
+        && prompt.contains("原始问题：\n");
+    let response = if initial_research_turn {
+        "我会先检索和核验资料，再输出完整研究报告。".to_string()
+    } else if final_research_retry {
+        let original_question = prompt
+            .split_once("原始问题：\n")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n\n必须逐字保留原始问题"))
+            .map(|(question, _)| question.trim())
+            .unwrap_or("E2E 原始研究问题");
+        format!(
+            "## 原始问题\n{original_question}\n\n## 核心结论\n{}\n\n## 事实与证据\n{}\n\n## 推断与不确定性\n{}\n\n## 对原始问题的直接回答\n{}",
+            "E2E 已通过同一会话重试生成最终研究结论。".repeat(20),
+            "E2E 可复查事实证据。".repeat(20),
+            "E2E 中仍需标注的推断与不确定性。".repeat(20),
+            "E2E 对原始问题的直接回答。".repeat(20),
+        )
+    } else {
+        match project_url {
+            Some(project_url) => format!(
+                "chatgpt_web_e2e_mock: {}\nCHATGPT_PROJECT_URL: {project_url}",
+                prompt.trim()
+            ),
+            None => format!("chatgpt_web_e2e_mock: {}", prompt.trim()),
+        }
     };
     let mut metadata = BTreeMap::new();
     metadata.insert("conversationId".to_string(), conversation_id.clone());
@@ -4090,6 +4137,14 @@ mod coverage_boost_v3 {
     use super::*;
     use serde_json::json;
     use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn live_chatgpt_web_is_fail_closed_during_e2e_without_explicit_opt_in() {
+        assert!(live_adapter_forbidden_in_e2e(true, false, false));
+        assert!(!live_adapter_forbidden_in_e2e(true, true, false));
+        assert!(!live_adapter_forbidden_in_e2e(true, false, true));
+        assert!(!live_adapter_forbidden_in_e2e(false, false, false));
+    }
 
     #[test]
     fn decode_cdp_response_body_invalid_base64_returns_none() {

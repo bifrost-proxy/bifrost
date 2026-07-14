@@ -2550,6 +2550,113 @@ fn daily_agent_research_manifest_preserves_original_question_and_github_reposito
 }
 
 #[test]
+fn daily_agent_research_response_requires_complete_report_contract() {
+    let question = AsrDailyResearchQuestion {
+        id: "complete-report".to_string(),
+        original_question: "为什么微软是互联网时代的基建？".to_string(),
+        source_excerpt: String::new(),
+        background: String::new(),
+        runner: None,
+        github_repositories: Vec::new(),
+        context_profile: None,
+        research_prompt: None,
+    };
+    let valid = format!(
+        "## 原始问题\n{}\n\n## 核心结论\n{}\n\n## 事实与证据\n证据\n\n## 推断与不确定性\n推断\n\n## 对原始问题的直接回答\n回答",
+        question.original_question,
+        "完整结论".repeat(100)
+    );
+    validate_daily_research_response(&valid, &question).unwrap();
+
+    let short = "我会先查找资料，再给出完整回答。";
+    assert!(validate_daily_research_response(short, &question)
+        .unwrap_err()
+        .contains("too short"));
+
+    let missing_question = valid.replace(&question.original_question, "另一个问题");
+    assert!(validate_daily_research_response(&missing_question, &question)
+        .unwrap_err()
+        .contains("does not preserve"));
+
+    let missing_heading = valid.replace("## 事实与证据", "## 资料");
+    assert!(validate_daily_research_response(&missing_heading, &question)
+        .unwrap_err()
+        .contains("## 事实与证据"));
+
+    let empty_section = valid.replace("## 事实与证据\n证据", "## 事实与证据\n");
+    assert!(validate_daily_research_response(&empty_section, &question)
+        .unwrap_err()
+        .contains("empty section"));
+
+    let prompt_echo = format!(
+        "## 原始问题\n{}\n\n## 提出问题时的背景\n背景\n\n{}",
+        question.original_question, valid
+    );
+    assert!(validate_daily_research_response(&prompt_echo, &question)
+        .unwrap_err()
+        .contains("prompt scaffolding"));
+
+    let inline_headings = format!(
+        "{}\n\n{}\n\n必须包含 `{}`、`{}`、`{}`、`{}`、`{}`。",
+        "说明".repeat(300),
+        question.original_question,
+        DAILY_RESEARCH_REQUIRED_HEADINGS[0],
+        DAILY_RESEARCH_REQUIRED_HEADINGS[1],
+        DAILY_RESEARCH_REQUIRED_HEADINGS[2],
+        DAILY_RESEARCH_REQUIRED_HEADINGS[3],
+        DAILY_RESEARCH_REQUIRED_HEADINGS[4],
+    );
+    assert!(validate_daily_research_response(&inline_headings, &question)
+        .unwrap_err()
+        .contains("missing required headings"));
+}
+
+#[test]
+fn daily_agent_research_retry_prompt_preserves_question_and_contract() {
+    let question = AsrDailyResearchQuestion {
+        id: "retry".to_string(),
+        original_question: "原始问题必须原样保留吗？".to_string(),
+        source_excerpt: String::new(),
+        background: String::new(),
+        runner: None,
+        github_repositories: vec!["owner/repo".to_string()],
+        context_profile: None,
+        research_prompt: None,
+    };
+
+    let prompt = daily_research_retry_prompt(&question);
+    assert!(prompt.contains(&question.original_question));
+    for heading in DAILY_RESEARCH_REQUIRED_HEADINGS {
+        assert!(prompt.contains(heading), "{heading}");
+    }
+    assert!(prompt.contains("不要再说你将要做什么"));
+    assert!(prompt.contains("GITHUB_CONNECTOR_STATUS: verified"));
+    assert!(prompt.contains("GITHUB_CONNECTOR_STATUS: unavailable"));
+}
+
+#[test]
+fn daily_agent_research_child_prompt_is_compact_and_excludes_daily_report_instructions() {
+    let question = AsrDailyResearchQuestion {
+        id: "compact".to_string(),
+        original_question: "信贷是否必须由储蓄锚定、能否无限扩张？".to_string(),
+        source_excerpt: "原始片段".repeat(10_000),
+        background: "问题背景".repeat(10_000),
+        runner: None,
+        github_repositories: Vec::new(),
+        context_profile: None,
+        research_prompt: Some("单题要求".repeat(10_000)),
+    };
+
+    let prompt = build_daily_research_child_prompt(&question, None, false);
+
+    assert!(prompt.contains(&question.original_question));
+    assert!(prompt.contains("优先使用一手、权威和可复查来源"));
+    assert!(prompt.contains("[上下文已截断；请以原始问题为准。]"));
+    assert!(!prompt.contains("全天候私人助理整理指南"));
+    assert!(prompt.chars().count() < 15_000, "prompt was too large");
+}
+
+#[test]
 fn daily_agent_research_fanout_normalizes_runner_and_context_profile_values() {
     let mut item = AsrDailyAgentItem::daily_report();
     item.research_fanout = Some(AsrDailyAgentResearchFanoutConfig {
@@ -2752,6 +2859,23 @@ fn daily_agent_mock_runner_settings(
     daily_agent_mock_file_runner_settings(content, None)
 }
 
+fn daily_agent_mock_complete_research_response(marker: &str) -> String {
+    format!(
+        "## 原始问题\n{}\n\n## 核心结论\n{}\n\n## 事实与证据\n{marker}\n{}\n\n## 推断与不确定性\n测试研究仍需人工核验。\n\n## 对原始问题的直接回答\n以上问题均由测试 runner 返回完整研究结构。",
+        [
+            "核验仓库",
+            "直接读取上下文",
+            "先收集上下文",
+            "连接器不可用时使用本地上下文",
+            "连接器状态缺失",
+            "连接器不可用",
+        ]
+        .join("；"),
+        "完整研究结论。".repeat(50),
+        "可复查证据。".repeat(50),
+    )
+}
+
 fn daily_agent_mock_file_runner_settings(
     content: &str,
     report_path: Option<&str>,
@@ -2867,15 +2991,21 @@ async fn daily_agent_research_fanout_executes_local_context_and_records_failures
         [
             (
                 "mock-main",
-                daily_agent_mock_runner_settings("GITHUB_CONNECTOR_STATUS: verified"),
+                daily_agent_mock_runner_settings(&daily_agent_mock_complete_research_response(
+                    "GITHUB_CONNECTOR_STATUS: verified",
+                )),
             ),
             (
                 "mock-context",
-                daily_agent_mock_runner_settings("context facts"),
+                daily_agent_mock_runner_settings(&daily_agent_mock_complete_research_response(
+                    "context facts",
+                )),
             ),
             (
                 "mock-unavailable",
-                daily_agent_mock_runner_settings("GITHUB_CONNECTOR_STATUS: unavailable"),
+                daily_agent_mock_runner_settings(&daily_agent_mock_complete_research_response(
+                    "GITHUB_CONNECTOR_STATUS: unavailable",
+                )),
             ),
             (
                 "web-context",

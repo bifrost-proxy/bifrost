@@ -75,8 +75,9 @@ ChatGPT Web 页面可能把一次回答渲染成多条 assistant message：前�
 - IM 通道：只投递过程批次与最终答案，不投递工具调用事件，避免 IM 出现调试噪音。
 - 图片结果：ChatGPT 生成图先缓存到本机附件目录；IM 文本卡片移除本地图片 Markdown 后按顺序逐张发送图片消息；CLI JSON 保留最终文本中的本地图片 Markdown，便于调用方读取附件路径。
 - DOM fallback 不能只凭文本判断最终态。文本只作为候选内容；允许重新提取最新消息并返回前必须确认页面控制态已恢复：stop/cancel 按钮消失、composer 可见且可用；composer 中仍有待发送文本时提交按钮必须可见。空 composer 下发送位切回语音/提交控制不表示仍在输出。
-- DOM fallback 候选稳定性基于内容签名（turn/message id、最终文本、自然批次数、图片数、附件数），而非文本长度。签名变化即重置稳定窗口。硬 busy 信号：`data-testid="stop-button"` 与中英文 Stop/Cancel aria-label。页面空闲后按签名短稳定确认：图片/短文本 2s、中等文本 3s、超长文本 5s。发送按钮 selector 禁止使用 `composer-submit-btn` 这类 stop 也带的非语义 class；发送前必须重新检查 stop button，可见则清空 composer 草稿并等待 stop 消失后再发送；超时才返回 `conversation_busy`。
+- DOM fallback 候选稳定性基于内容签名（turn/message id、最终文本、自然批次数、图片数、附件数），而非文本长度。签名变化即重置稳定窗口。硬 busy 信号：`data-testid="stop-button"` 与中英文 Stop/Cancel aria-label。页面空闲后按签名短稳定确认；以“我会 / 我将 / I'll / I will / Let me”等开头的短规划句至少观察 15s，以覆盖 Web 深度研究在规划句结束后延迟恢复 busy 控件的间隙。发送按钮 selector 禁止使用 `composer-submit-btn` 这类 stop 也带的非语义 class；发送前必须重新检查 stop button，可见则清空 composer 草稿并等待 stop 消失后再发送；超时才返回 `conversation_busy`。
 - `wait` operation 不能只依赖进程内 `ConversationTab` 池。send 结束后浏览器 tab 仍打开，但内存池会随进程退出而消失。DOM fallback 找不到 tab 时，必须通过共享 browser session 的 DevTools target 列表重新发现 `/c/{conversationId}`，attach CDP 后再提取；只有浏览器也找不到会话页时才返回 `NotFound`。
+- 新会话必须创建自己的隔离 tab，不能先关闭共享 profile 中的其他 ChatGPT tab；其他 tab 可能仍有深度研究在后台继续，关闭它们会使后续 `wait` 无法重新 attach 到原会话。
 - 图片消息可能渲染为后续 `section[data-testid^="conversation-turn-"]`（正文只有 `ChatGPT 说：`），图片在 section 内的 `estuary/content` URL。DOM fallback 必须把最后一个 user turn 之后的这类 image-only section 当作 assistant 结果；空壳文本且图片数为 0 必须继续等待。
 - DOM 提取和 `allMarkdownTexts` 自然批次必须保存完整文本，不允许固定字符数截断；`response`、`last_message.md`、`result.json` 必须保留长任务最终输出全文。
 
@@ -93,6 +94,11 @@ ChatGPT Web 页面可能把一次回答渲染成多条 assistant message：前�
 - WebUI 根据 adapter capabilities 展示字段。
 - ChatGPT Web Runner 的浏览器用户数据只能来自共享 profile：默认路径 `BIFROST_DATA_DIR/agent/im_gateway/chatgpt_web/browser_profile`；send 与 wait 复用同一 `profileDir`。
 - `BIFROST_DATA_DIR/im_gateway/runs/<run_id>/` 只允许保存 run artifact，禁止创建 run-local 完整 Chromium 用户数据目录，避免孤儿浏览器进程与缓存膨胀。
+- ChatGPT 页面可能在 `main` 内同时渲染多个 `aria-haspopup="menu"` 按钮。Pro 硬校验必须优先从全部可见候选中识别唯一带 `Pro` token 的已选模型按钮；未选中 Pro 时再使用 `data-testid`、`aria-label`、`title` 或已知模型标签定位唯一模型选择器。不得因无关菜单按钮增多而失败，也不得在存在多个 Pro/模型候选时猜测点击。
+- DOM fallback 在读取回答前必须验证当前 tab URL 的 `/c/<conversation-id>` 与本次 handoff 返回的 conversation id 完全一致；普通 `/c/...` 和 Project `/g/g-p-.../c/...` 都应支持。tab 尚未导航完成或落在其他历史会话时只允许继续等待，禁止把旧会话的计划前缀或答案冒充为本次研究结果。
+- 独立研究 fan-out 不能把 adapter 的 `Succeeded` 直接等同于研究完成。最终正文必须达到最小长度、逐字保留原始问题并包含约定的五个 Markdown 章节；短规划句或缺章回复先对同一 conversation id 执行纯等待并重新提取，仍不完整时才补发一次明确的最终输出指令，重试仍不满足契约则该 child 标记失败，不进入研究摘要。
+- 单题研究 Prompt 只携带原始问题、必要背景/片段、单题要求、显式仓库和已核验上下文，不再嵌入整份日报 `AGENTS.md`；各上下文字段有长度上限，避免把与研究无关的日报说明发送给 Pro。
+- 测试环境默认禁止调用真实 ChatGPT Web。`BIFROST_E2E=1` / `BIFROST_COVERAGE_E2E=1` 下必须使用 `BIFROST_CHATGPT_WEB_E2E_MOCK=1`；只有显式设置 `BIFROST_CHATGPT_WEB_LIVE_E2E=1` 才允许真实研究会话。
 
 Runner 配置样例：
 

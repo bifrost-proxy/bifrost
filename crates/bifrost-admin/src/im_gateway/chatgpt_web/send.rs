@@ -342,41 +342,31 @@ async fn ensure_pro_model(cdp: &CdpClient) -> Result<(), String> {
       };
       const candidates = Array.from(document.querySelectorAll('main button[aria-haspopup="menu"]'))
         .filter(visible)
-        .map((el) => ({ el, text: (el.textContent || '').replace(/\s+/g, ' ').trim() }));
-      if (candidates.length !== 1) {
-        return { ok: false, error: 'model_picker_not_unique', count: candidates.length, labels: candidates.map((item) => item.text) };
-      }
-      const item = candidates[0];
-      const rect = item.el.getBoundingClientRect();
-      return {
-        ok: true,
-        selected: /(^|\s)Pro($|\s)/i.test(item.text),
-        label: item.text,
-        x: rect.left + rect.width / 2,
-        y: rect.top + rect.height / 2
-      };
+        .map((el) => {
+          const rect = el.getBoundingClientRect();
+          return {
+            text: (el.textContent || '').replace(/\s+/g, ' ').trim(),
+            ariaLabel: el.getAttribute('aria-label') || '',
+            testId: el.getAttribute('data-testid') || '',
+            title: el.getAttribute('title') || '',
+            x: rect.left + rect.width / 2,
+            y: rect.top + rect.height / 2
+          };
+        });
+      return { candidates };
     })()"#;
     let picker = wait_chat_surface_value(cdp, picker_expression, Duration::from_secs(5), |value| {
-        value.get("ok").and_then(Value::as_bool) == Some(true)
+        select_pro_model_picker(value).is_ok()
     })
     .await?;
-    if !picker.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-        return Err(format!(
-            "browser_ui: cannot locate ChatGPT model picker: {picker}"
-        ));
-    }
-    if picker
-        .get("selected")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+    let picker = select_pro_model_picker(&picker)
+        .map_err(|error| format!("browser_ui: cannot locate ChatGPT model picker: {error}"))?;
+    if picker.selected {
         info!("chatgpt_web send: verified Pro model");
         return Ok(());
     }
 
-    let x = picker.get("x").and_then(Value::as_f64).unwrap_or(0.0);
-    let y = picker.get("y").and_then(Value::as_f64).unwrap_or(0.0);
-    cdp_click(cdp, x, y).await?;
+    cdp_click(cdp, picker.x, picker.y).await?;
     let option_expression = r#"(() => {
           const visible = (el) => {
             if (!el) return false;
@@ -406,16 +396,126 @@ async fn ensure_pro_model(cdp: &CdpClient) -> Result<(), String> {
     .await?;
     let verified =
         wait_chat_surface_value(cdp, picker_expression, Duration::from_secs(5), |value| {
-            value.get("selected").and_then(Value::as_bool) == Some(true)
+            select_pro_model_picker(value)
+                .map(|picker| picker.selected)
+                .unwrap_or(false)
         })
         .await?;
-    if verified.get("selected").and_then(Value::as_bool) != Some(true) {
+    let verified = select_pro_model_picker(&verified).map_err(|error| {
+        format!("browser_ui: Pro model selection could not be verified: {error}")
+    })?;
+    if !verified.selected {
         return Err(format!(
-            "browser_ui: Pro model selection could not be verified: {verified}"
+            "browser_ui: Pro model selection could not be verified: {verified:?}"
         ));
     }
     info!("chatgpt_web send: selected and verified Pro model");
     Ok(())
+}
+
+#[derive(Debug)]
+struct ProModelPicker {
+    selected: bool,
+    x: f64,
+    y: f64,
+}
+
+fn select_pro_model_picker(value: &Value) -> Result<ProModelPicker, String> {
+    let candidates = value
+        .get("candidates")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("model_picker_candidates_missing value={value}"))?;
+
+    let pro_candidates = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| {
+                    text.split_whitespace()
+                        .any(|token| token.eq_ignore_ascii_case("pro"))
+                })
+        })
+        .collect::<Vec<_>>();
+    if pro_candidates.len() == 1 {
+        return pro_model_picker_from_candidate(pro_candidates[0], true);
+    }
+    if pro_candidates.len() > 1 {
+        return Err(format!(
+            "pro_model_picker_not_unique count={} labels={}",
+            pro_candidates.len(),
+            model_picker_labels(&pro_candidates)
+        ));
+    }
+
+    let hinted_candidates = candidates
+        .iter()
+        .filter(|candidate| model_picker_candidate_has_hint(candidate))
+        .collect::<Vec<_>>();
+    if hinted_candidates.len() == 1 {
+        return pro_model_picker_from_candidate(hinted_candidates[0], false);
+    }
+
+    Err(format!(
+        "model_picker_not_unique count={} hinted_count={} labels={}",
+        candidates.len(),
+        hinted_candidates.len(),
+        model_picker_labels(&candidates.iter().collect::<Vec<_>>())
+    ))
+}
+
+fn model_picker_candidate_has_hint(candidate: &Value) -> bool {
+    for field in ["ariaLabel", "testId", "title"] {
+        if candidate
+            .get(field)
+            .and_then(Value::as_str)
+            .is_some_and(|value| {
+                let value = value.to_ascii_lowercase();
+                value.contains("model") || value.contains("模型")
+            })
+        {
+            return true;
+        }
+    }
+
+    candidate
+        .get("text")
+        .and_then(Value::as_str)
+        .is_some_and(|text| {
+            let text = text.trim().to_ascii_lowercase();
+            matches!(text.as_str(), "auto" | "instant" | "thinking") || text.starts_with("gpt-")
+        })
+}
+
+fn pro_model_picker_from_candidate(
+    candidate: &Value,
+    selected: bool,
+) -> Result<ProModelPicker, String> {
+    let x = candidate
+        .get("x")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| format!("model_picker_x_missing candidate={candidate}"))?;
+    let y = candidate
+        .get("y")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| format!("model_picker_y_missing candidate={candidate}"))?;
+    Ok(ProModelPicker { selected, x, y })
+}
+
+fn model_picker_labels(candidates: &[&Value]) -> String {
+    serde_json::to_string(
+        &candidates
+            .iter()
+            .map(|candidate| {
+                candidate
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".to_string())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -475,14 +575,13 @@ async fn send_with_browser_once(
     // Reuse existing browser or launch a new one (persistent across calls).
     let mut browser = BrowserSession::get_or_launch(config, headless).await?;
     info!("chatgpt_web send: browser ready");
-    if conversation_id.is_none() {
-        browser.close_chatgpt_pages_for_fresh_run().await;
-    }
 
     // Each concurrent run gets its own isolated tab.  This allows multiple
     // channels (Feishu, WeChat, CLI, …) to operate the same browser in
     // parallel without CDP / page-state collisions, while still sharing the
-    // same user-data-dir (login cookies, profile, etc.).
+    // same user-data-dir (login cookies, profile, etc.). A fresh conversation
+    // must not close older tabs: their server-side research may still be
+    // running during a brief terminal-looking planning gap.
     let navigate_url = if let Some(cid) = conversation_id {
         format!("{}/c/{}", config.chatgpt.base_url, cid)
     } else {
@@ -3987,6 +4086,19 @@ mod tests {
             .unwrap()
     }
 
+    fn model_picker_value(text: &str, x: f64, y: f64) -> Value {
+        json!({
+            "candidates": [{
+                "text": text,
+                "ariaLabel": "",
+                "testId": "",
+                "title": "",
+                "x": x,
+                "y": y
+            }]
+        })
+    }
+
     #[test]
     fn normalize_whitespace_collapses_runs_and_trims() {
         assert_eq!(normalize_whitespace("  a  b\n\n c\t\td"), "a b c d");
@@ -4214,7 +4326,7 @@ mod tests {
     #[tokio::test]
     async fn prepare_new_chat_surface_verifies_already_selected_chat_and_pro() {
         let chat = json!({"ok": true, "checked": true, "x": 10.0, "y": 20.0});
-        let pro = json!({"ok": true, "selected": true, "x": 30.0, "y": 40.0});
+        let pro = model_picker_value("Pro", 30.0, 40.0);
         let cdp = mock_cdp(vec![chat.clone(), chat, pro]).await;
         let mut config = test_runtime_config_with_execution_mode("headed");
         config.chatgpt.interface_mode = " Chat ".to_string();
@@ -4228,9 +4340,9 @@ mod tests {
         let cdp = mock_cdp(vec![
             json!({"ok": true, "checked": false, "x": 10.0, "y": 20.0}),
             json!({"ok": true, "checked": true, "x": 10.0, "y": 20.0}),
-            json!({"ok": true, "selected": false, "x": 30.0, "y": 40.0}),
+            model_picker_value("Auto", 30.0, 40.0),
             json!({"ok": true, "x": 50.0, "y": 60.0}),
-            json!({"ok": true, "selected": true, "x": 30.0, "y": 40.0}),
+            model_picker_value("Pro", 30.0, 40.0),
         ])
         .await;
         ensure_chat_mode(&cdp).await.unwrap();
@@ -4246,16 +4358,16 @@ mod tests {
             json!({"ok": true, "checked": false}),
         ])
         .await;
-        let pro_missing = mock_cdp(vec![json!({"ok": false})]).await;
+        let pro_missing = mock_cdp(vec![json!({"candidates": []})]).await;
         let pro_option_missing = mock_cdp(vec![
-            json!({"ok": true, "selected": false}),
+            model_picker_value("Auto", 30.0, 40.0),
             json!({"ok": false}),
         ])
         .await;
         let pro_unverified = mock_cdp(vec![
-            json!({"ok": true, "selected": false}),
+            model_picker_value("Auto", 30.0, 40.0),
             json!({"ok": true}),
-            json!({"ok": true, "selected": false}),
+            model_picker_value("Auto", 30.0, 40.0),
         ])
         .await;
 
@@ -4296,6 +4408,61 @@ mod tests {
         ] {
             cdp.close();
         }
+    }
+
+    #[test]
+    fn pro_model_picker_prefers_unique_pro_label_among_unrelated_menu_buttons() {
+        let mut candidates = (0..14)
+            .map(|index| {
+                json!({
+                    "text": "",
+                    "ariaLabel": format!("menu-{index}"),
+                    "testId": "",
+                    "title": "",
+                    "x": index as f64,
+                    "y": index as f64
+                })
+            })
+            .collect::<Vec<_>>();
+        candidates.push(json!({
+            "text": "Pro",
+            "ariaLabel": "",
+            "testId": "model-switcher-dropdown-button",
+            "title": "",
+            "x": 30.0,
+            "y": 40.0
+        }));
+
+        let picker = select_pro_model_picker(&json!({"candidates": candidates})).unwrap();
+        assert!(picker.selected);
+        assert_eq!(picker.x, 30.0);
+        assert_eq!(picker.y, 40.0);
+    }
+
+    #[test]
+    fn pro_model_picker_uses_unique_model_hint_when_pro_is_not_selected() {
+        let picker = select_pro_model_picker(&json!({
+            "candidates": [
+                {"text": "", "ariaLabel": "More", "testId": "", "title": "", "x": 1.0, "y": 2.0},
+                {"text": "Auto", "ariaLabel": "", "testId": "model-switcher-dropdown-button", "title": "", "x": 3.0, "y": 4.0}
+            ]
+        }))
+        .unwrap();
+        assert!(!picker.selected);
+        assert_eq!(picker.x, 3.0);
+        assert_eq!(picker.y, 4.0);
+    }
+
+    #[test]
+    fn pro_model_picker_rejects_multiple_pro_candidates() {
+        let error = select_pro_model_picker(&json!({
+            "candidates": [
+                {"text": "Pro", "ariaLabel": "", "testId": "model-a", "title": "", "x": 1.0, "y": 2.0},
+                {"text": "GPT-5 Pro", "ariaLabel": "", "testId": "model-b", "title": "", "x": 3.0, "y": 4.0}
+            ]
+        }))
+        .unwrap_err();
+        assert!(error.contains("pro_model_picker_not_unique count=2"));
     }
 
     #[tokio::test]
