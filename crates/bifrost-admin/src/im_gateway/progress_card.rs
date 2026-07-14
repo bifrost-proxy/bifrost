@@ -31,9 +31,10 @@ const PROCESS_DYNAMIC_LOG_ELEMENT_PREFIX: &str = "ap_log";
 const PROCESS_TOOL_ELEMENT_PREFIX: &str = "ap_t";
 const PROCESS_TOOL_DETAIL_ELEMENT_PREFIX: &str = "ap_td";
 const PROCESS_TOOL_GROUP_ELEMENT_PREFIX: &str = "ap_tg";
-const PROCESS_TOOL_INPUT_PREVIEW_CHARS: usize = 1000;
-const PROCESS_TOOL_OUTPUT_PREVIEW_CHARS: usize = 3000;
+const PROCESS_TOOL_INPUT_PREVIEW_CHARS: usize = 300;
+const PROCESS_TOOL_OUTPUT_PREVIEW_CHARS: usize = 300;
 const PROCESS_TIMELINE_VISIBLE_TOOL_LIMIT: usize = 30;
+const PROCESS_TIMELINE_MIN_VISIBLE_THINKING: usize = 5;
 const FEISHU_CARD_STANDARD_MAX_BYTES: usize = 24 * 1024;
 const FEISHU_CARD_STANDARD_MAX_COMPONENTS: usize = 180;
 const FEISHU_CARD_RETRY_MAX_BYTES: usize = 16 * 1024;
@@ -1586,7 +1587,7 @@ fn build_budgeted_feishu_progress_card(
             candidate.timeline.insert(
                 0,
                 ProgressTimelineItem::status(format!(
-                    "为适配飞书卡片大小，已省略前面 {omitted_timeline_items} 条过程记录，仅保留最新内容。"
+                    "为适配飞书卡片大小，已省略前面 {omitted_timeline_items} 条过程记录，优先保留最近思考与工具。"
                 )),
             );
         }
@@ -1598,16 +1599,48 @@ fn build_budgeted_feishu_progress_card(
                 omitted_timeline_items,
             };
         }
-        if view.timeline.len() <= 1 {
+        let Some(remove_index) = oldest_budget_removable_timeline_index(&view.timeline) else {
             return BudgetedProgressCard {
                 card: build_feishu_compact_progress_card(snapshot, streaming_mode),
                 compact: true,
                 omitted_timeline_items: snapshot.timeline.len(),
             };
-        }
-        view.timeline.remove(0);
+        };
+        view.timeline.remove(remove_index);
         omitted_timeline_items += 1;
     }
+}
+
+fn oldest_budget_removable_timeline_index(timeline: &[ProgressTimelineItem]) -> Option<usize> {
+    let latest_tool_index = timeline
+        .iter()
+        .rposition(|item| item.kind == ProgressTimelineKind::Tool);
+
+    if let Some(index) = timeline.iter().enumerate().find_map(|(index, item)| {
+        (item.kind == ProgressTimelineKind::Tool && Some(index) != latest_tool_index)
+            .then_some(index)
+    }) {
+        return Some(index);
+    }
+
+    if let Some(index) = timeline
+        .iter()
+        .position(|item| item.kind == ProgressTimelineKind::Status)
+    {
+        return Some(index);
+    }
+
+    let thinking_count = timeline
+        .iter()
+        .filter(|item| item.kind == ProgressTimelineKind::Thinking)
+        .count();
+    if thinking_count > PROCESS_TIMELINE_MIN_VISIBLE_THINKING {
+        return timeline
+            .iter()
+            .position(|item| item.kind == ProgressTimelineKind::Thinking);
+    }
+
+    None
 }
 
 fn feishu_card_fits_budget(card: &serde_json::Value, budget: FeishuCardBudget) -> bool {
@@ -2038,28 +2071,22 @@ fn visible_process_timeline(
     }
 
     let omitted_tool_count = total_tool_count - PROCESS_TIMELINE_VISIBLE_TOOL_LIMIT;
-    let mut seen_tool_count = 0;
-    let mut start_index = 0;
-    for (index, item) in snapshot.timeline.iter().enumerate() {
-        if item.kind != ProgressTimelineKind::Tool {
-            continue;
-        }
-        if seen_tool_count == omitted_tool_count {
-            start_index = index;
-            break;
-        }
-        seen_tool_count += 1;
-    }
+    let mut remaining_omitted_tools = omitted_tool_count;
+    let visible_timeline = snapshot
+        .timeline
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| {
+            if item.kind == ProgressTimelineKind::Tool && remaining_omitted_tools > 0 {
+                remaining_omitted_tools -= 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
 
-    (
-        omitted_tool_count,
-        snapshot
-            .timeline
-            .iter()
-            .enumerate()
-            .skip(start_index)
-            .collect(),
-    )
+    (omitted_tool_count, visible_timeline)
 }
 
 fn flush_process_markdown(
@@ -2280,7 +2307,7 @@ fn timeline_tool_matches(item: &ProgressTimelineItem, log: &ToolCallLog) -> bool
 fn format_tool_input_preview(arguments: &str) -> String {
     format!(
         "输入：`{}`",
-        truncate_str(arguments, PROCESS_TOOL_INPUT_PREVIEW_CHARS)
+        truncate_str_within_limit(arguments, PROCESS_TOOL_INPUT_PREVIEW_CHARS)
     )
 }
 
@@ -2300,7 +2327,10 @@ fn format_tool_timeline_detail(arguments: &str, result: &str, duration_ms: u64) 
             detail.push_str("\n\n");
         }
         detail.push_str("输出：\n```text\n");
-        detail.push_str(&truncate_str(result, PROCESS_TOOL_OUTPUT_PREVIEW_CHARS));
+        detail.push_str(&truncate_str_within_limit(
+            result,
+            PROCESS_TOOL_OUTPUT_PREVIEW_CHARS,
+        ));
         detail.push_str("\n```");
     }
     if detail.is_empty() {
@@ -2804,7 +2834,7 @@ fn format_tool_details_markdown(
                 "- {} `{}`\n```\n{}\n```",
                 icon,
                 log.tool_name,
-                truncate_str(&log.result, 500)
+                truncate_str_within_limit(&log.result, PROCESS_TOOL_OUTPUT_PREVIEW_CHARS)
             )
         })
         .collect::<Vec<_>>()
@@ -3033,6 +3063,21 @@ fn truncate_str(input: &str, max_chars: usize) -> String {
     } else {
         truncated
     }
+}
+
+fn truncate_str_within_limit(input: &str, max_chars: usize) -> String {
+    let mut iter = input.chars();
+    let prefix: String = iter.by_ref().take(max_chars).collect();
+    if iter.next().is_none() {
+        return prefix;
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+    format!(
+        "{}...",
+        prefix.chars().take(max_chars - 3).collect::<String>()
+    )
 }
 
 fn truncate_one_line(input: &str, max_chars: usize) -> String {

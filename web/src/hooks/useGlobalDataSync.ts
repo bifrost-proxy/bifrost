@@ -10,6 +10,7 @@ import pushService from '../services/pushService';
 import { useForceRefreshStore } from '../stores/useForceRefreshStore';
 import { usePendingAuthStore } from '../stores/usePendingAuthStore';
 import { usePendingIpTlsStore } from '../stores/usePendingIpTlsStore';
+import { usePerformanceModeStore } from '../stores/usePerformanceModeStore';
 
 const VERSION_CHECK_INTERVAL = 60 * 60 * 1000;
 
@@ -47,6 +48,7 @@ export function useGlobalDataSync({ trafficEnabled = true }: { trafficEnabled?: 
     const filterPanelStore = useFilterPanelStore.getState();
     const metricsStore = useMetricsStore.getState();
     const versionStore = useVersionStore.getState();
+    const performanceModeStore = usePerformanceModeStore.getState();
 
     const pauseRealtime = () => {
       if (globalState.visibilityPaused) return;
@@ -116,6 +118,7 @@ export function useGlobalDataSync({ trafficEnabled = true }: { trafficEnabled?: 
         filterPanelStore.loadFromServer(),
         metricsStore.fetchOverview(),
         versionStore.checkVersion({ skipCache: true }),
+        performanceModeStore.fetchPerformanceMode(),
       ]);
 
       if (globalState.forceRefresh) {

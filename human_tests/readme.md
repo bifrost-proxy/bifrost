@@ -197,7 +197,7 @@
 | [app-icon-memory-optimization.md](./app-icon-memory-optimization.md) | App Icon 内存优化 | 3 | macOS 多真实系统 App 图标请求后主进程 RSS 增量防护、非 App bundle 路径不触发 AppKit fallback、图标内存缓存按字节驱逐 |
 | [memory-sqlite-cache-optimization.md](./memory-sqlite-cache-optimization.md) | SQLite Cache Size 与内存优化 | 6 | SQLite cache_size 降低、读连接池缩减、metadata_cache LRU 化后的功能回归与内存验证 |
 | [process-resolution-performance.md](./process-resolution-performance.md) | 进程识别与原生证书缓存性能 | 9 | 复用真实 Admin 路由决策跳过进程识别、外部 Admin-like path 防误伤、专用诊断计数、共享 HTTP Client、连接级解析 future、跨连接 snapshot generation 合并与 TLS 应用策略准确性 |
-| [super-performance-mode.md](./super-performance-mode.md) | Super Performance Mode | 5 | CLI/API/WebUI 开关、规则仍执行、traffic/body/ws/frame 禁写、Network 磨砂浮层跳转 Settings 高亮关闭开关、normal vs super 压测零记录门禁 |
+| [super-performance-mode.md](./super-performance-mode.md) | Super Performance Mode | 5 | CLI/API/WebUI 开关、规则仍执行、traffic/body/ws/frame 禁写、Network 工作区整面状态层与明暗主题、跳转 Settings 高亮关闭开关、normal vs super 压测零记录门禁 |
 
 ### CI/DevOps 测试
 
@@ -235,7 +235,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
-| [feishu-progress-card.md](./feishu-progress-card.md) | Feishu Progress Card | 8 | 飞书 Agent progress card 归并逐字符 assistant stream 并保留模型思考、工具、计划与可读状态，最终答案仅展示一次，同时过滤 token usage 机器态状态；覆盖文件变更详情、Codex session 累计 Token、7 天额度余额、任务耗时，以及长卡片 UTF-8 字节/组件预算、保新去旧、200860/300305 同卡收缩重试和精简降级，通过本地 CardKit JSON 2.0 renderer 与 mock API 验证 payload |
+| [feishu-progress-card.md](./feishu-progress-card.md) | Feishu Progress Card | 8 | 飞书 Agent progress card 归并逐字符 assistant stream 并保留模型思考、工具、计划与可读状态，最终答案仅展示一次，同时过滤 token usage 机器态状态；覆盖文件变更详情、Codex session 累计 Token、7 天额度余额、任务耗时，以及长卡片工具输入/输出 300 字符上限、最近 5 轮思考优先、UTF-8 字节/组件预算、200860/300305 同卡收缩重试和精简降级，通过本地 CardKit JSON 2.0 renderer 与 mock API 验证 payload |
 | [agent-chat-history-pagination.md](./agent-chat-history-pagination.md) | Agent Chat History Pagination | 8 | Agent Chat 列表只加载摘要，选中详情后按尾页渐进加载历史，向上查看旧页，running 轮询按 since 增量加载，分页详情不反序列化未选中旧事件，WebUI 连续加载旧页直到完整线程可见，Chat 线程列表限量扫描最新摘要，Chat 页面不触发 Traffic 历史回填 |
 | [remove-builtin-bifrost-agent.md](./remove-builtin-bifrost-agent.md) | Remove built-in Bifrost Agent | 4 | 内置 runtime HTTP/worker/CLI/UI 入口已删除、Agent Chat 只走 external runner stream、专属代码文档测试资产已删除、Codex/Trae X/Claude Code/ChatGPT Web 与自定义 Runner 保留 |
 | [asr-scheduled-task-plan-b.md](./asr-scheduled-task-plan-b.md) | ASR 定时任务 Runtime 策略 | 42 | ASR runtime 策略、Daily Agent 外部 Runner、ChatGPT Web、IM delivery、恢复与性能回归 |
