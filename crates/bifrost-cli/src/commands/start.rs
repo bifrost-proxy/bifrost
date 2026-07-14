@@ -4946,10 +4946,12 @@ mod tests {
     #[test]
     fn is_port_in_use_uses_fallback_socketaddr_on_parse_failure() {
         // Force parse(...) to fail by using an invalid host literal; this should
-        // fall back to 127.0.0.1 without panicking.
-        let port = allocate_loopback_port();
+        // fall back to 127.0.0.1 without panicking. Keep the listener alive so
+        // the assertion cannot race another process for a released port.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
 
-        assert!(!is_port_in_use("256.256.256.256", port));
+        assert!(is_port_in_use("256.256.256.256", port));
     }
 
     #[cfg(unix)]

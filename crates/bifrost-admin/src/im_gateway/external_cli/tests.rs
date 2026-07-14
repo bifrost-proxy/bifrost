@@ -1580,7 +1580,9 @@ print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":
         instructions: None,
         adapter_config: ExternalCliAdapterConfig {
             executable: Some(executable.display().to_string()),
-            timeout_secs: Some(5),
+            // This is an integration-style process test that includes executable probing and
+            // Python startup. Keep enough scheduling headroom when the workspace suite is busy.
+            timeout_secs: Some(15),
             ..Default::default()
         },
         allow_work_dirs: Vec::new(),
