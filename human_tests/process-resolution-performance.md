@@ -195,7 +195,7 @@
     `burst_lookups=335`、`burst_snapshot_refreshes=15`，远低于逐 lookup/逐请求扫描。
   - 第 2 轮连接状态修复后以 `REQUEST_COUNT=1000 CONCURRENCY=16` 复跑通过；128 个并发
     普通代理请求产生 `burst_lookups=302`、`burst_snapshot_refreshes=16`。
-  - rebase 最新 `main` 并整合共享解析 commit 后再次以相同 1000 请求参数复跑通过；管理请求
+  - rebase 最新 `main`、整合共享解析 commit 并收敛 coverage 不可达分支后，以相同 1000 请求参数复跑通过；管理请求
     lookup/refresh 保持 `0 -> 0`，外部 Admin-like path lookup/refresh 均增加，128 个并发普通
-    代理请求产生 `burst_lookups=322`、`burst_snapshot_refreshes=17`。
+    代理请求产生 `burst_lookups=325`、`burst_snapshot_refreshes=16`。
   - app policy + unknown 的 passthrough 回归测试通过；TTL、miss interval 和重试配置未修改。

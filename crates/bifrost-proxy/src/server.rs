@@ -129,10 +129,6 @@ fn is_noisy_connection_close(err_debug: &str, err_display: &str) -> bool {
     err_debug.contains("IncompleteMessage") || err_display.contains("message completed")
 }
 
-fn should_defer_client_process_resolution(_method: &Method, _verbose_logging: bool) -> bool {
-    false
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClientProcessResolutionMode {
     SkipAdmin,
@@ -1368,9 +1364,6 @@ async fn handle_request(
         &method,
         connect_tls_intercept_config.as_ref(),
     );
-    let can_defer_client_process = process_resolution_mode == ClientProcessResolutionMode::Normal
-        && should_defer_client_process_resolution(&method, verbose_logging);
-
     let mut ctx = RequestContext::new()
         .with_client_ip(peer_addr.ip().to_string())
         .with_port(proxy_config.port);
@@ -1432,28 +1425,6 @@ async fn handle_request(
             }
         }
         client_process
-    } else if can_defer_client_process {
-        if let Some(state) = admin_state.clone() {
-            let should_spawn = client_process_state.try_start_background_resolution();
-            if should_spawn {
-                let record_id = ctx.id_str();
-                let state_for_success = Arc::clone(&client_process_state);
-                let state_for_finish = Arc::clone(&client_process_state);
-                spawn_async_process_resolver_with_finish(
-                    peer_addr,
-                    local_addr,
-                    record_id.to_string(),
-                    move |id, process| {
-                        state_for_success.store(process.clone());
-                        state.update_client_process(&id, process.name, process.pid, process.path);
-                    },
-                    move || {
-                        state_for_finish.finish_background_resolution();
-                    },
-                );
-            }
-        }
-        None
     } else {
         let client_process = client_process_state
             .resolve(|| async {
@@ -2448,24 +2419,6 @@ mod tests {
         assert!(server.config().verbose_logging);
         assert_eq!(server.config().access_mode, AccessMode::Whitelist);
         assert!(server.config().allow_lan);
-    }
-
-    #[test]
-    fn test_should_not_defer_client_process_for_connect() {
-        assert!(!should_defer_client_process_resolution(
-            &Method::CONNECT,
-            false
-        ));
-    }
-
-    #[test]
-    fn test_should_not_defer_client_process_for_plain_http() {
-        assert!(!should_defer_client_process_resolution(&Method::GET, false));
-    }
-
-    #[test]
-    fn test_should_not_defer_client_process_for_verbose_plain_http() {
-        assert!(!should_defer_client_process_resolution(&Method::GET, true));
     }
 
     #[test]
