@@ -341,9 +341,94 @@
 
 ---
 
+### TC-WLN-18：Safari 左侧导航标签完整显示回归
+
+**前置条件**：
+
+1. 执行 `pnpm --dir web run build`，再执行 `cargo build --bin bifrost`，确保最新 WebUI 已嵌入测试二进制。
+2. 使用独立目录启动服务：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-webkit-human \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   BIFROST_DISABLE_TRAY=1 \
+   target/debug/bifrost start --host 127.0.0.1 -p 18990 \
+     --unsafe-ssl --no-system-proxy --skip-cert-check --access-mode allow_all
+   ```
+3. 使用 `lsof -nP -iTCP:18990 -sTCP:LISTEN` 和 `curl -sS http://127.0.0.1:18990/_bifrost/api/proxy/address` 确认最新进程与 Admin API ready。
+
+**操作步骤**：
+
+1. 在 Safari 打开 `http://127.0.0.1:18990/_bifrost/activity`。
+2. 从上到下观察 `Activity`、`Network`、`Replay`、`Rules`、`Values`、`Scripts`、`AI`、`DevTools`、`Notify`、`Settings` 的图标和英文标签。
+3. 检查侧栏底部 `OpenAPI` 与主题切换按钮。
+4. 点击主题切换按钮进入暗色主题，再重复第 2、3 步。
+5. 缩小 Safari 窗口高度直到导航列表发生纵向溢出，在侧栏内向下滚动并点击 `Settings`。
+
+**预期结果**：
+
+- 侧栏外宽保持 50px，内容区不因修复发生整体横向偏移。
+- 每个图标和标签都完整显示；`Network`、`DevTools`、`Settings` 不缺末尾字符，也不越过右侧边框。
+- 亮色和暗色主题的文字、激活背景与图标均清晰可读。
+- 小窗口下导航列表仍可纵向滚动，滚动条不占用窄栏横向内容宽度。
+- 点击 `Settings` 后进入 `/_bifrost/settings`，底部 OpenAPI 和主题按钮不随列表滚动。
+
+---
+
+### TC-WLN-19：macOS Tauri WebView 左侧导航回归
+
+**前置条件**：
+
+1. 执行 `pnpm --dir web run build:desktop`。
+2. 执行 `cargo build --manifest-path desktop/src-tauri/Cargo.toml`。
+3. 使用独立 `BIFROST_DATA_DIR`、`BIFROST_DESKTOP_SKIP_CERT_PREFLIGHT=1` 和禁用系统代理的测试配置启动 `desktop/src-tauri/target/debug/bifrost-desktop`。
+
+**操作步骤**：
+
+1. 等待 Tauri 启动页 handoff 到主界面 Activity 页。
+2. 从上到下检查所有可见一级导航图标和标签，重点检查 `Network`、`DevTools`、`Settings`。
+3. 切换暗色主题后重复检查。
+4. 缩小窗口高度并在导航区域向下滚动，确认 Settings 可见、可点击。
+5. 在导航项附近拖动窗口并点击导航，确认本次布局修复没有破坏桌面 drag region 与点击行为。
+
+**预期结果**：
+
+- Tauri 系统 WebView 与 Safari 一致：所有导航图标和标签完整，不发生横向裁切。
+- 侧栏保持 50px，macOS 顶部 38px window control spacer 和 35px 顶部 drag strip 不变。
+- 亮色、暗色、小窗口滚动、导航点击和窗口拖动均正常。
+- 不启用系统代理，不影响正式 9900 服务和默认用户数据目录。
+
+---
+
+### TC-WLN-20：Chromium 侧栏对照回归
+
+**前置条件**：复用 TC-WLN-18 的独立 18990 服务。
+
+**操作步骤**：
+
+1. 在 Chrome/Chromium 打开 `http://127.0.0.1:18990/_bifrost/activity`。
+2. 检查所有一级导航图标、标签、OpenAPI 与主题按钮的横向边界。
+3. 切换暗色主题重复检查。
+4. 缩小窗口高度，滚动到 Settings 并点击。
+
+**预期结果**：
+
+- Chromium 中导航布局与修复前保持一致，没有因 WebKit 兼容修复产生横向偏移或文字裁切。
+- 亮色、暗色、小窗口纵向滚动和 Settings 导航均通过。
+- Playwright Chromium 几何断言与真实 Chrome 观察结果一致。
+
+### 2026-07-14 WebKit 侧栏兼容修复执行记录
+
+| 用例 | 执行命令 / 真实证据 | 实际结果 |
+| --- | --- | --- |
+| TC-WLN-18 | `BIFROST_DATA_DIR=./.bifrost-webkit-human ... target/debug/bifrost start -p 18990 --no-system-proxy`；Safari 真实打开 `http://127.0.0.1:18990/_bifrost/activity`，使用辅助功能树与截图逐项检查亮色、暗色；将窗口缩小后点击视口外的 `Settings`。 | 通过。所有一级导航标签、OpenAPI 和主题按钮完整显示；小窗口中导航列表自动滚动并进入 `/_bifrost/settings`；18990 测试实例已停止。 |
+| TC-WLN-19 | `pnpm run desktop:dev` 验证标准 dev 启动链；随后执行 `pnpm exec tauri build --debug --bundles app --no-sign --config desktop/src-tauri/tauri.conf.json` 生成可被 macOS 辅助功能识别的本地 debug `.app`。以 `BIFROST_DATA_DIR=./.bifrost-webkit-desktop`、`proxy_port=18991`、`BIFROST_DESKTOP_NO_SYSTEM_PROXY=1`、`BIFROST_DESKTOP_SKIP_CERT_PREFLIGHT=1` 启动；Computer Use 实际检查亮色、暗色、缩小窗口、Settings 点击和顶部 drag region。 | 通过。WebView URL 为 `tauri://localhost#/activity` / `#/settings`，System Proxy 卡片显示 `http://127.0.0.1:18991`；所有导航标签完整；缩小窗口后 Settings 可滚动并点击；拖动窗口后 Activity 仍可点击。debug App 与 18991 sidecar 已退出，正式 9900 监听未被停止或改写。 |
+| TC-WLN-20 | 真实 Chrome 打开 18990；DOM 几何实测侧栏外宽 50px、内部可用宽度 49px、`scrollbar-gutter: auto`，逐项断言所有标签左右边界均在侧栏内；切换暗色，将视口设为 900×360，滚动到底并点击 Settings，最后重置视口并关闭测试标签页。 | 通过。亮色、暗色和小窗口下均无横向裁切；小窗口 `scrollHeight=704`、`clientHeight=266`、`scrollTop=438`，点击后进入 `/_bifrost/settings`。 |
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：
 ```bash
-rm -rf .bifrost-test
+rm -rf .bifrost-test .bifrost-webkit-human .bifrost-webkit-desktop
 ```
