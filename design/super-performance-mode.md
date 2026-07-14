@@ -13,9 +13,11 @@ When enabled:
 - No request body, response body, SSE body, WebSocket frame, or WebSocket payload
   is persisted.
 - Traffic query APIs return an empty result set.
-- The Network page stays visible but is covered by a frosted notice explaining
-  that recording is disabled, with a button to open Settings > Performance and
-  highlight the switch.
+- The global navigation stays visible, while the entire Network workbench to its
+  right becomes a full-area status view explaining that recording is disabled.
+  This covers the Network toolbar, filter panel, traffic list, and request detail
+  pane, and includes a button to open Settings > Performance and highlight the
+  switch.
 
 ## Configuration Surface
 
@@ -58,13 +60,24 @@ Settings > Performance shows "Super Performance Mode" at the top of the tab.
 The description states that Bifrost will process rules but will not store any
 traffic entries, bodies, frames, or DB updates.
 
-Network stays mounted. When the mode is active, the traffic table region gets a
-frosted overlay with a warning and an "Open Performance Settings" button. The
-button navigates to:
+Network stays mounted. When the mode is active, a status layer covers the entire
+Network workbench to the right of the global navigation, including the top
+toolbar, left filter panel, traffic list, and request detail pane. The global
+navigation and global status bar remain outside the layer. The status view uses
+theme tokens for its surface, text, warning icon, and action so light and dark
+themes remain equivalent without a large yellow warning card. Its "Open
+Performance Settings" button navigates to:
 
 ```text
 /settings?tab=performance&highlight=super-performance-mode
 ```
+
+The app-level data sync preloads and caches the mode before the user opens
+Network. On a direct Network load where the request is still pending, Network
+keeps its explicit loading state and does not claim that Super Performance Mode
+is enabled. After the request resolves, Network transitions directly from
+loading to either the full-area status view or the normal workbench. The filters
+and traffic list must never flash between those states.
 
 The Settings page reads the `highlight` query parameter and visually highlights
 the Super Performance Mode switch.
@@ -92,7 +105,10 @@ E2E:
 UI:
 
 - Force the mode on through Admin API.
-- Open Network and assert the frosted overlay is visible.
+- Open Network and assert the status view covers the full Network workbench while
+  leaving the global navigation outside it, in both light and dark themes.
+- Delay the performance-config response and assert Network keeps its explicit
+  loading state before the enabled status content appears.
 - Click the overlay action and assert Settings > Performance opens with the
   Super Performance Mode switch highlighted and checked.
 

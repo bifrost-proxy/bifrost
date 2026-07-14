@@ -50,16 +50,20 @@
 - `GET /_bifrost/api/traffic?limit=100` 和 `POST /_bifrost/api/traffic/query` 均返回 0 条记录。
 - 临时 `body_cache` 下没有请求/响应 body 文件。
 
-### TC-SPM-04 Network 浮层与 Settings 高亮跳转
+### TC-SPM-04 Network 整个工作区覆盖层与 Settings 高亮跳转
 
 操作步骤：
 
-1. 运行 `pnpm --dir web exec playwright test web/tests/ui/admin-settings.spec.ts -g "Network 超级性能模式浮层可跳转并高亮 Performance 开关"`。
+1. 运行 `pnpm --dir web exec playwright test web/tests/ui/admin-settings.spec.ts -g "Network 超级性能模式覆盖整个工作区并可跳转高亮 Performance 开关"`。
 
 预期结果：
 
-- 通过 Admin API 打开超级性能模式后，Network 表格区域显示磨砂浮层。
-- 浮层提示说明当前处于超级性能模式，Network 录制不可用。
+- 通过 Admin API 打开超级性能模式后，状态页覆盖全局左侧菜单以外的整个 Network 工作区。
+- Network 顶部工具栏、左侧 Filters、中间流量列表和右侧请求详情均位于覆盖层之下。
+- 全局左侧菜单和底部状态栏不被覆盖。
+- 从其他页面切换到 Network 或直接打开 Network 时，Filters、列表和详情不会先闪现；配置未确认前保持明确的 `Loading Network...` 状态，确认后直接进入正常工作区或超级性能模式提示层。
+- 状态页不再使用大面积黄色 Alert，且浅色/深色主题均使用主题 token 保持可读。
+- 状态页说明当前处于超级性能模式，Network 录制不可用。
 - 点击浮层按钮跳转到 `/settings?tab=performance&highlight=super-performance-mode`。
 - Settings > Performance 顶部 Super Performance Mode 开关处于开启状态并高亮。
 
@@ -89,6 +93,18 @@ rm -rf .bifrost-super-perf-* .artifacts/loadtest/super-performance-*.tmp
 ```
 
 ## 执行记录
+
+2026-07-14 Network 整个工作区覆盖层 UI 回归：
+
+- TC-SPM-04：通过。
+  - 真实 Chrome：启动 `BACKEND_PORT=9900 pnpm --dir web dev --host 127.0.0.1 --port 3000`，打开 `http://127.0.0.1:3000/_bifrost/traffic`。
+  - 覆盖边界实测：`traffic-page` 与状态层均为 `x=50, y=0, width=2315, height=1134`；顶部工具栏、Filters、中间列表和详情 pane 全部位于状态层范围内，全局菜单位于状态层左侧，底部状态栏位于状态层下方。
+  - 浅色主题与深色主题均确认：不再显示大面积黄色 Alert，操作按钮可见且文本可读；深色状态层为 `rgb(20, 20, 20)`，文本为 `rgba(255, 255, 255, 0.85)`。
+  - 从 Activity 切换到已预加载配置的 Network 后，页面容器出现时 `traffic-performance-loading=0`、`traffic-super-performance-overlay=1`，未观察到底层工作区闪现。
+  - `Open Performance Settings` 跳转到 `/settings?tab=performance&highlight=super-performance-mode`。
+  - 前端单元测试：`pnpm --dir web exec vitest run src/stores/usePerformanceModeStore.test.ts`，3 条用例通过，覆盖缓存、强制刷新、并发去重和失败回退。
+  - 前端静态验证：`pnpm --dir web exec eslint ...` 与 `pnpm --dir web exec tsc -b --pretty false` 均通过。
+  - 测试后恢复原有浅色主题与 `super_performance_mode=false` 配置；3000 端口前端 dev 服务保留供复核。
 
 2026-07-10 本轮执行结果：
 
