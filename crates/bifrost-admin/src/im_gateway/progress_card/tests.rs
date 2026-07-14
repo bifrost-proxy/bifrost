@@ -537,6 +537,9 @@ fn consecutive_process_tools_are_grouped_by_default() {
 #[test]
 fn process_timeline_keeps_latest_thirty_tool_calls_with_omission_notice() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "long task");
+    snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
+        content: "THINKING_BEFORE_OMITTED_TOOLS".to_string(),
+    });
     for index in 0..35 {
         snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
             log: ToolCallLog {
@@ -568,38 +571,66 @@ fn process_timeline_keeps_latest_thirty_tool_calls_with_omission_notice() {
         .as_str()
         .unwrap()
         .contains("已省略前面 5 次工具调用，仅显示最新 30 次。"));
-    assert_eq!(process_elements[1]["element_id"], "ap_tg_5");
+    assert_eq!(process_elements[1]["element_id"], "ap_tg_6");
 
     let grouped_tools = process_elements[1]["elements"].as_array().unwrap();
     assert_eq!(grouped_tools.len(), 30);
-    assert_eq!(grouped_tools[0]["element_id"], "ap_t_5");
-    assert_eq!(grouped_tools[29]["element_id"], "ap_t_34");
+    assert_eq!(grouped_tools[0]["element_id"], "ap_t_6");
+    assert_eq!(grouped_tools[29]["element_id"], "ap_t_35");
 
     let serialized = serde_json::to_string(&card).unwrap();
     assert!(!serialized.contains("tool-0"));
     assert!(!serialized.contains("result-4"));
     assert!(serialized.contains("tool-5"));
     assert!(serialized.contains("result-34"));
+    assert!(serialized.contains("THINKING_BEFORE_OMITTED_TOOLS"));
 }
 
 #[test]
-fn process_tool_detail_uses_expanded_input_and_output_previews() {
-    let input_tail = "INPUT_TAIL_VISIBLE";
-    let output_tail = "OUTPUT_TAIL_VISIBLE";
+fn process_tool_detail_caps_input_and_output_previews_at_three_hundred_chars() {
+    let input_visible = "INPUT_VISIBLE";
+    let input_hidden = "INPUT_HIDDEN";
+    let output_visible = "OUTPUT_VISIBLE";
+    let output_hidden = "OUTPUT_HIDDEN";
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "long tool detail");
     snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
         log: ToolCallLog {
             tool_name: "exec_command".to_string(),
-            arguments: format!("{}{}", "a".repeat(800), input_tail),
-            result: format!("{}{}", "b".repeat(2000), output_tail),
+            arguments: format!("{input_visible}{}{input_hidden}", "a".repeat(300)),
+            result: format!("{output_visible}{}{output_hidden}", "b".repeat(300)),
             success: true,
         },
         duration_ms: 12,
     });
 
     let serialized = serde_json::to_string(&build_feishu_progress_card(&snapshot, true)).unwrap();
-    assert!(serialized.contains(input_tail));
-    assert!(serialized.contains(output_tail));
+    assert!(serialized.contains(input_visible));
+    assert!(serialized.contains(output_visible));
+    assert!(!serialized.contains(input_hidden));
+    assert!(!serialized.contains(output_hidden));
+    assert_eq!(
+        truncate_str_within_limit(&"中".repeat(301), PROCESS_TOOL_INPUT_PREVIEW_CHARS)
+            .chars()
+            .count(),
+        300
+    );
+    assert_eq!(
+        truncate_str_within_limit(&"x".repeat(301), PROCESS_TOOL_OUTPUT_PREVIEW_CHARS)
+            .chars()
+            .count(),
+        300
+    );
+    let fallback_tool_panel = format_tool_details_markdown(
+        &[ToolCallLog {
+            tool_name: "exec_command".to_string(),
+            arguments: String::new(),
+            result: format!("FALLBACK_VISIBLE{}FALLBACK_HIDDEN", "x".repeat(300)),
+            success: true,
+        }],
+        None,
+    );
+    assert!(fallback_tool_panel.contains("FALLBACK_VISIBLE"));
+    assert!(!fallback_tool_panel.contains("FALLBACK_HIDDEN"));
 }
 
 #[test]
@@ -621,18 +652,58 @@ fn budgeted_card_drops_oldest_process_items_and_keeps_latest() {
         &snapshot,
         true,
         FeishuCardBudget {
-            max_bytes: 9 * 1024,
+            max_bytes: 6 * 1024,
             max_components: 180,
         },
     );
     let serialized = serde_json::to_string(&rendered.card).unwrap();
     assert!(!rendered.compact);
     assert!(rendered.omitted_timeline_items > 0);
-    assert!(serialized.len() <= 9 * 1024);
+    assert!(serialized.len() <= 6 * 1024);
     assert!(serialized.contains("RESULT_MARKER_7"));
     assert!(!serialized.contains("RESULT_MARKER_0"));
     assert!(serialized.contains("已省略前面"));
-    assert!(serialized.contains("仅保留最新内容"));
+    assert!(serialized.contains("优先保留最近思考与工具"));
+}
+
+#[test]
+fn budgeted_card_removes_old_tools_before_preserving_latest_five_thinking_rounds() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "thinking-first budget");
+    for index in 0..8 {
+        snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
+            content: format!("THINKING_ROUND_{index}_{}", "思考".repeat(240)),
+        });
+        snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
+            log: ToolCallLog {
+                tool_name: "exec_command".to_string(),
+                arguments: format!("TOOL_INPUT_{index}_{}", "i".repeat(500)),
+                result: format!("TOOL_OUTPUT_{index}_{}", "o".repeat(500)),
+                success: true,
+            },
+            duration_ms: 10,
+        });
+    }
+
+    let rendered = build_budgeted_feishu_progress_card(
+        &snapshot,
+        true,
+        FeishuCardBudget {
+            max_bytes: 16 * 1024,
+            max_components: 180,
+        },
+    );
+    let serialized = serde_json::to_string(&rendered.card).unwrap();
+
+    assert!(!rendered.compact);
+    assert!(rendered.omitted_timeline_items > 0);
+    for index in 3..8 {
+        assert!(
+            serialized.contains(&format!("THINKING_ROUND_{index}")),
+            "latest five thinking rounds must remain visible: {serialized}"
+        );
+    }
+    assert!(serialized.contains("TOOL_OUTPUT_7"));
+    assert!(!serialized.contains("TOOL_OUTPUT_0"));
 }
 
 #[test]
@@ -2014,7 +2085,7 @@ async fn content_size_limit_retries_same_card_with_less_old_history() {
         .expect("start progress card");
     {
         let mut session = session.lock().await;
-        for index in 0..8 {
+        for index in 0..30 {
             session
                 .snapshot
                 .apply_event(AgentTurnProgressEvent::ToolFinished {
@@ -2064,7 +2135,7 @@ async fn content_size_limit_retries_same_card_with_less_old_history() {
     assert!(payloads[1].contains("LATEST_HISTORY_MARKER"));
     assert!(payloads[1].contains("已省略前面"));
     assert!(payloads[1].len() < payloads[0].len());
-    assert!((0..8).any(|index| {
+    assert!((0..30).any(|index| {
         let marker = format!("HISTORY_MARKER_{index}");
         payloads[0].contains(&marker) && !payloads[1].contains(&marker)
     }));

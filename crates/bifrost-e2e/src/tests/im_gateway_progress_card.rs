@@ -88,7 +88,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
         ),
         TestCase::standalone(
         "im_gateway_progress_card_budget_and_codex_resources",
-        "Validate a long progress card stays inside the local byte budget while its top status exposes Codex session tokens, weekly balance, and elapsed time",
+        "Validate a long progress card caps tool details at 300 characters, preserves the latest five model-thinking rounds, and stays inside the local byte budget while its top status exposes Codex session tokens, weekly balance, and elapsed time",
         "admin",
         || async move {
             use bifrost_admin::im_gateway::progress_card::{
@@ -130,17 +130,23 @@ pub fn get_all_tests() -> Vec<TestCase> {
             status.updated_at = 1_800_000_125;
             snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::Status(Box::new(status)));
             for index in 0..40 {
+                snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::AssistantFinal {
+                    content: format!(
+                        "THINKING_ROUND_{index}_{}",
+                        "reasoning".repeat(100)
+                    ),
+                });
                 snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::ToolFinished {
                     log: bifrost_agent::ToolCallLog {
                         tool_name: "exec_command".to_string(),
                         arguments: format!(
-                            "MARKER_{index}_{}",
-                            "input".repeat(220)
+                            "MARKER_{index}_{}INPUT_HIDDEN_{index}",
+                            "input".repeat(220),
                         ),
                         result: format!(
-                            "{}_{}",
+                            "{}_{}OUTPUT_HIDDEN_{index}",
                             if index == 39 { "LATEST_MARKER" } else { "OLD_MARKER" },
-                            "output".repeat(520)
+                            "output".repeat(520),
                         ),
                         success: true,
                     },
@@ -160,6 +166,11 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 "耗时：2 分 05 秒",
                 "Codex 周额度：剩余 37%",
                 "LATEST_MARKER",
+                "THINKING_ROUND_35",
+                "THINKING_ROUND_36",
+                "THINKING_ROUND_37",
+                "THINKING_ROUND_38",
+                "THINKING_ROUND_39",
                 "已省略前面",
             ] {
                 if !serialized.contains(needle) {
@@ -168,6 +179,15 @@ pub fn get_all_tests() -> Vec<TestCase> {
             }
             if serialized.contains("MARKER_0_") {
                 return Err("oldest process record was not removed from the card view".to_string());
+            }
+            for forbidden in [
+                "THINKING_ROUND_0",
+                "INPUT_HIDDEN_39",
+                "OUTPUT_HIDDEN_39",
+            ] {
+                if serialized.contains(forbidden) {
+                    return Err(format!("budgeted card unexpectedly retained {forbidden}"));
+                }
             }
             Ok(())
         },
