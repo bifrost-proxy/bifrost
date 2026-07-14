@@ -259,19 +259,10 @@ fn add_native_root_certificates(
     profile: TlsTrustProfile,
 ) -> reqwest::ClientBuilder {
     let certificates = crate::native_certificates_der();
-    let mut added = 0usize;
-    for certificate_der in certificates.iter() {
-        match reqwest::Certificate::from_der(certificate_der) {
-            Ok(certificate) => {
-                builder = builder.add_root_certificate(certificate);
-                added += 1;
-            }
-            Err(error) => tracing::warn!(
-                error = %error,
-                trust_profile = profile.name,
-                "skipping invalid cached native certificate"
-            ),
-        }
+    let certificates = parse_native_root_certificates(&certificates);
+    let added = certificates.len();
+    for certificate in certificates {
+        builder = builder.add_root_certificate(certificate);
     }
     tracing::trace!(
         cert_count = added,
@@ -286,19 +277,10 @@ fn add_blocking_native_root_certificates(
     profile: TlsTrustProfile,
 ) -> reqwest::blocking::ClientBuilder {
     let certificates = crate::native_certificates_der();
-    let mut added = 0usize;
-    for certificate_der in certificates.iter() {
-        match reqwest::Certificate::from_der(certificate_der) {
-            Ok(certificate) => {
-                builder = builder.add_root_certificate(certificate);
-                added += 1;
-            }
-            Err(error) => tracing::warn!(
-                error = %error,
-                trust_profile = profile.name,
-                "skipping invalid cached native certificate"
-            ),
-        }
+    let certificates = parse_native_root_certificates(&certificates);
+    let added = certificates.len();
+    for certificate in certificates {
+        builder = builder.add_root_certificate(certificate);
     }
     tracing::trace!(
         cert_count = added,
@@ -306,6 +288,13 @@ fn add_blocking_native_root_certificates(
         "added cached native certificates to blocking HTTP client"
     );
     builder
+}
+
+fn parse_native_root_certificates(certificates_der: &[Vec<u8>]) -> Vec<reqwest::Certificate> {
+    certificates_der
+        .iter()
+        .filter_map(|certificate_der| reqwest::Certificate::from_der(certificate_der).ok())
+        .collect()
 }
 
 fn add_extra_root_certificates(
@@ -679,13 +668,13 @@ mod tests {
         github_reqwest_client_builder, github_unsafe_ssl_from_env, load_reqwest_certificate,
         load_reqwest_certificate_bundle, outbound_blocking_reqwest_client_builder,
         outbound_ca_file_paths_from_env, outbound_reqwest_client_builder,
-        outbound_unsafe_ssl_from_env, parse_remote_relay_headers, proxied_reqwest_client_builder,
-        remote_relay_ca_file_paths_from_env, remote_relay_reqwest_client_builder,
-        remote_relay_unsafe_ssl_from_env, BIFROST_CA_BUNDLE_ENV, BIFROST_CA_DIR_ENV,
-        BIFROST_UNSAFE_SSL_ENV, COMMON_CA_DIR_ENVS, COMMON_CA_FILE_ENVS, GITHUB_CA_BUNDLE_ENV,
-        GITHUB_CA_DIR_ENV, GITHUB_UNSAFE_SSL_ENV, REMOTE_RELAY_CA_BUNDLE_ENV,
-        REMOTE_RELAY_HEADERS_ENV, REMOTE_UNSAFE_SSL_ENV, UPGRADE_CA_BUNDLE_ENV, UPGRADE_CA_DIR_ENV,
-        UPGRADE_UNSAFE_SSL_ENV,
+        outbound_unsafe_ssl_from_env, parse_native_root_certificates, parse_remote_relay_headers,
+        proxied_reqwest_client_builder, remote_relay_ca_file_paths_from_env,
+        remote_relay_reqwest_client_builder, remote_relay_unsafe_ssl_from_env,
+        BIFROST_CA_BUNDLE_ENV, BIFROST_CA_DIR_ENV, BIFROST_UNSAFE_SSL_ENV, COMMON_CA_DIR_ENVS,
+        COMMON_CA_FILE_ENVS, GITHUB_CA_BUNDLE_ENV, GITHUB_CA_DIR_ENV, GITHUB_UNSAFE_SSL_ENV,
+        REMOTE_RELAY_CA_BUNDLE_ENV, REMOTE_RELAY_HEADERS_ENV, REMOTE_UNSAFE_SSL_ENV,
+        UPGRADE_CA_BUNDLE_ENV, UPGRADE_CA_DIR_ENV, UPGRADE_UNSAFE_SSL_ENV,
     };
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -696,6 +685,13 @@ mod tests {
     fn proxy_env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn cached_native_certificate_der_is_wrapped_for_reqwest() {
+        let certificates = parse_native_root_certificates(&[b"cached-native-root".to_vec()]);
+
+        assert_eq!(certificates.len(), 1);
     }
 
     fn with_invalid_proxy_env<T>(f: impl FnOnce() -> T) -> T {

@@ -31,7 +31,7 @@ use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, RwLock, Semaphore};
 use tokio_rustls::rustls::ServerConfig as RustlsServerConfig;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, warn};
 
 use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
 
@@ -1317,11 +1317,6 @@ async fn handle_request(
     };
 
     let client_process = if process_resolution_mode == ClientProcessResolutionMode::SkipAdmin {
-        trace!(
-            req_id = ctx.id_str(),
-            path,
-            "Skipping client process resolution for internal admin request"
-        );
         None
     } else if let Some(client_process) = cached_client_process {
         Some(client_process)

@@ -78,7 +78,6 @@ impl NativeCertCache {
         if loaded.certificates_der.is_empty() && loaded.error_count > 0 {
             tracing::warn!(
                 error_count = loaded.error_count,
-                has_stale_snapshot = previous.is_some(),
                 "failed to refresh native certificate trust store"
             );
             if let Some(previous) = previous {
@@ -90,11 +89,6 @@ impl NativeCertCache {
                 cert_count = loaded.certificates_der.len(),
                 error_count = loaded.error_count,
                 "native certificate trust store loaded with partial errors"
-            );
-        } else {
-            tracing::debug!(
-                cert_count = loaded.certificates_der.len(),
-                "loaded native certificate trust store"
             );
         }
 
@@ -234,5 +228,24 @@ mod tests {
         assert!(cache.get().is_empty());
         assert!(cache.get().is_empty());
         assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn partial_success_is_cached() {
+        let cache =
+            NativeCertCache::with_loader(Duration::from_secs(60), || load(&[b"usable-cert"], 1));
+
+        assert_eq!(&*cache.get(), &[b"usable-cert".to_vec()]);
+        assert_eq!(&*cache.get(), &[b"usable-cert".to_vec()]);
+    }
+
+    #[test]
+    fn public_cache_can_be_loaded_and_invalidated() {
+        let before = native_certificates_der();
+        invalidate_native_certificate_cache();
+        let after = native_certificates_der();
+
+        assert!(!before.is_empty());
+        assert!(!after.is_empty());
     }
 }

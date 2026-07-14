@@ -954,15 +954,7 @@ fn lookup_socket_pid_map() -> SocketPidMapScan {
 
     let sockets = match get_sockets_info(af_flags, proto_flags) {
         Ok(sockets) => sockets,
-        Err(error) => {
-            warn!(error = %error, "Failed to get socket info");
-            return SocketPidMapScan {
-                connections_to_pids: HashMap::new(),
-                scanned_pids: 0,
-                scanned_fds: 0,
-                failed: true,
-            };
-        }
+        Err(error) => return failed_socket_pid_map_scan(&error),
     };
 
     let scanned_fds = sockets.len();
@@ -1004,6 +996,17 @@ fn lookup_socket_pid_map() -> SocketPidMapScan {
         scanned_pids: scanned_pids.len(),
         scanned_fds,
         failed: false,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn failed_socket_pid_map_scan(error: &dyn std::fmt::Display) -> SocketPidMapScan {
+    warn!(error = %error, "Failed to get socket info");
+    SocketPidMapScan {
+        connections_to_pids: HashMap::new(),
+        scanned_pids: 0,
+        scanned_fds: 0,
+        failed: true,
     }
 }
 

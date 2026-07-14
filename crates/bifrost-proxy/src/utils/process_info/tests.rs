@@ -92,6 +92,17 @@ fn process_resolver_diagnostics_record_snapshot_refresh_cost() {
     assert!(snapshot.scan_duration_max_us <= snapshot.scan_duration_total_us);
 }
 
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn failed_socket_scan_reports_failure_without_partial_counts() {
+    let scan = failed_socket_pid_map_scan(&"synthetic netstat failure");
+
+    assert!(scan.failed);
+    assert!(scan.connections_to_pids.is_empty());
+    assert_eq!(scan.scanned_pids, 0);
+    assert_eq!(scan.scanned_fds, 0);
+}
+
 #[tokio::test]
 async fn test_process_resolver_async_returns_cached_hit() {
     let resolver = ProcessResolver::new();
