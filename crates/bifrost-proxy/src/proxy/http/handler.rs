@@ -1286,6 +1286,23 @@ fn escape_html_text(value: &str) -> String {
     escaped
 }
 
+pub(crate) fn format_connection_endpoint(host: &str, port: u16) -> String {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+fn request_endpoint(request_url: &str) -> Option<String> {
+    let url = Url::parse(request_url).ok()?;
+    Some(format_connection_endpoint(
+        url.host_str()?,
+        url.port_or_known_default()?,
+    ))
+}
+
 /// Returns true only when the request explicitly advertises an HTML-capable media range.
 /// A missing `Accept` header or the generic `*/*` range is intentionally treated as plain text.
 pub(crate) fn request_explicitly_accepts_html(headers: &HeaderMap) -> bool {
@@ -1349,7 +1366,10 @@ pub(crate) fn build_connection_error_body(
     let status = escape_html_text(&status_code.to_string());
     let error_type = escape_html_text(error_info.error_type);
     let error_message = escape_html_text(&error_info.error_message);
-    let host = escape_html_text(&error_info.host);
+    let upstream_target = escape_html_text(&error_info.host);
+    let request_target = request_endpoint(&error_info.request_url)
+        .map(|endpoint| escape_html_text(&endpoint))
+        .unwrap_or_else(|| "Unknown".to_string());
     let request_url = escape_html_text(&error_info.request_url);
     let rules_url = serde_json::from_str::<serde_json::Value>(rules_json)
         .ok()
@@ -1394,7 +1414,7 @@ pub(crate) fn build_connection_error_body(
             "</style></head><body><main><section class=\"page\" aria-labelledby=\"error-title\"><article class=\"card\">",
             "<header class=\"hero\"><div class=\"icon\" aria-hidden=\"true\">!</div><div><div class=\"eyebrow\"><span class=\"status\">{status}</span> Bifrost proxy</div><h1 id=\"error-title\">Unable to reach the upstream service</h1><p class=\"summary\">Bifrost received your request, but could not connect to its destination.</p></div></header>",
             "<div class=\"content\"><div class=\"error\"><code>{error_type}</code><br>{error_message}</div>",
-            "<dl class=\"details\"><dt>Status</dt><dd>{status}</dd><dt>Host</dt><dd>{host}</dd><dt>Time</dt><dd>{date}</dd><dt>Request URL</dt><dd>{request_url}</dd></dl>",
+            "<dl class=\"details\"><dt>Status</dt><dd>{status}</dd><dt>Request target</dt><dd>{request_target}</dd><dt>Upstream target</dt><dd>{upstream_target}</dd><dt>Time</dt><dd>{date}</dd><dt>Request URL</dt><dd>{request_url}</dd></dl>",
             "<section class=\"guide\"><h2>What you can do</h2><ol><li>Check that the target service is running and reachable.</li><li>Confirm the matched Bifrost rule points to the correct host and port.</li><li>After fixing the upstream or rule, retry this request.</li></ol></section>",
             "{suggestion}<div class=\"actions\">{rules_action}<button class=\"button\" type=\"button\" onclick=\"location.reload()\">Try again</button></div>",
             "<details><summary class=\"hint\">Raw diagnostics</summary><pre>{diagnostics}</pre></details>",
@@ -1403,7 +1423,8 @@ pub(crate) fn build_connection_error_body(
         status = status,
         error_type = error_type,
         error_message = error_message,
-        host = host,
+        request_target = request_target,
+        upstream_target = upstream_target,
         date = date,
         request_url = request_url,
         suggestion = suggestion,
@@ -2553,15 +2574,17 @@ pub async fn handle_http_request(
             _ => is_https,
         }
     };
+    let error_badge_rules_json = if inject_bifrost_badge && accepts_html_error {
+        Some(build_badge_rules_json(admin_state.as_deref(), ctx.port).await)
+    } else {
+        None
+    };
     let build_conn_error_and_record =
-        |error_type: &'static str,
-         error_msg: String,
-         err_tls_ms: Option<u64>,
-         badge_rules_json: Option<&str>| {
+        |error_type: &'static str, error_msg: String, err_tls_ms: Option<u64>| {
             let error_info = ConnectionErrorInfo {
                 error_type,
                 error_message: error_msg.clone(),
-                host: host.clone(),
+                host: format_connection_endpoint(&host, port),
                 request_url: url.clone(),
             };
             let response_status = if needs_response_override(&resolved_rules) {
@@ -2576,8 +2599,11 @@ pub async fn handle_http_request(
                 if let Some(ref res_body) = resolved_rules.res_body {
                     (res_body.clone(), None)
                 } else {
-                    let (body, content_type) =
-                        build_connection_error_body(response_status, &error_info, badge_rules_json);
+                    let (body, content_type) = build_connection_error_body(
+                        response_status,
+                        &error_info,
+                        error_badge_rules_json.as_deref(),
+                    );
                     (body, Some(content_type))
                 };
             let total_ms = start_time.elapsed().as_millis() as u64;
@@ -2713,22 +2739,6 @@ pub async fn handle_http_request(
                 )
             }
         };
-
-    macro_rules! connection_error_response {
-        ($error_type:expr, $error_message:expr, $tls_ms:expr $(,)?) => {{
-            let badge_rules_json = if inject_bifrost_badge && accepts_html_error {
-                Some(build_badge_rules_json(admin_state.as_deref(), ctx.port).await)
-            } else {
-                None
-            };
-            build_conn_error_and_record(
-                $error_type,
-                $error_message,
-                $tls_ms,
-                badge_rules_json.as_deref(),
-            )
-        }};
-    }
 
     let path = {
         let original_path = processed_uri
@@ -2897,7 +2907,7 @@ pub async fn handle_http_request(
                         original_host,
                         processed_uri
                     );
-                    return Ok(connection_error_response!(
+                    return Ok(build_conn_error_and_record(
                         "REQUEST_PROXY_FAILED",
                         error_message,
                         None,
@@ -2975,7 +2985,7 @@ pub async fn handle_http_request(
                                 for source in &classified.source_chain {
                                     error!("[{}] Request failure source: {}", ctx.id_str(), source);
                                 }
-                                return Ok(connection_error_response!(
+                                return Ok(build_conn_error_and_record(
                                     classified.error_type,
                                     classified.error_message,
                                     None,
@@ -2995,7 +3005,7 @@ pub async fn handle_http_request(
                         for source in &classified.source_chain {
                             error!("[{}] Request failure source: {}", ctx.id_str(), source);
                         }
-                        return Ok(connection_error_response!(
+                        return Ok(build_conn_error_and_record(
                             classified.error_type,
                             classified.error_message,
                             None,
@@ -3033,7 +3043,7 @@ pub async fn handle_http_request(
                         original_host,
                         processed_uri
                     );
-                    return Ok(connection_error_response!(
+                    return Ok(build_conn_error_and_record(
                         "REQUEST_PROXY_FAILED",
                         error_message,
                         None,
@@ -3067,7 +3077,7 @@ pub async fn handle_http_request(
                     for source in &classified.source_chain {
                         error!("[{}] Request failure source: {}", ctx.id_str(), source);
                     }
-                    return Ok(connection_error_response!(
+                    return Ok(build_conn_error_and_record(
                         classified.error_type,
                         classified.error_message,
                         None,
@@ -3160,7 +3170,7 @@ pub async fn handle_http_request(
                             for source in &classified.source_chain {
                                 error!("[{}] Request failure source: {}", ctx.id_str(), source);
                             }
-                            return Ok(connection_error_response!(
+                            return Ok(build_conn_error_and_record(
                                 classified.error_type,
                                 classified.error_message,
                                 None,
@@ -3215,7 +3225,7 @@ pub async fn handle_http_request(
                     for source in &classified.source_chain {
                         error!("[{}] Request failure source: {}", ctx.id_str(), source);
                     }
-                    return Ok(connection_error_response!(
+                    return Ok(build_conn_error_and_record(
                         classified.error_type,
                         classified.error_message,
                         None,
@@ -3888,7 +3898,10 @@ pub async fn handle_http_request(
     };
 
     if inject_bifrost_badge {
-        let badge_rules_json = build_badge_rules_json(admin_state.as_deref(), ctx.port).await;
+        let badge_rules_json = match error_badge_rules_json.as_ref() {
+            Some(rules_json) => rules_json.clone(),
+            None => build_badge_rules_json(admin_state.as_deref(), ctx.port).await,
+        };
         let final_res_content_type = get_content_type(&res_parts);
         if final_res_content_type.starts_with("text/html") {
             if let Some(content_encoding) = response_content_encoding(&res_parts) {
@@ -6339,7 +6352,7 @@ mod coverage_boost {
     async fn build_connection_error_response_with_badge_wraps_and_escapes_diagnostics() {
         let info = ConnectionErrorInfo {
             error_type: "REQUEST_FAILED",
-            error_message: "connect <script>alert(1)</script> & failed".to_string(),
+            error_message: "connect <script>alert(\"x\')</script> & failed".to_string(),
             host: "<upstream.example>".to_string(),
             request_url: "http://example.test/?q=<img>".to_string(),
         };
@@ -6370,14 +6383,42 @@ mod coverage_boost {
         assert!(html.contains("Try again"));
         assert!(html.contains("Raw diagnostics"));
         assert!(html.contains("Status: 502"));
+        assert!(html.contains("<dt>Request target</dt><dd>example.test:80</dd>"));
+        assert!(html.contains("<dt>Upstream target</dt><dd>&lt;upstream.example&gt;</dd>"));
         assert!(html.contains("Host: &lt;upstream.example&gt;"));
         assert!(html.contains("q=&lt;img&gt;"));
-        assert!(html.contains("connect &lt;script&gt;alert(1)&lt;/script&gt; &amp; failed"));
+        assert!(
+            html.contains("connect &lt;script&gt;alert(&quot;x&#39;)&lt;/script&gt; &amp; failed")
+        );
         assert!(!html.contains("Host: <upstream.example>"));
         assert!(html.contains("__bifrost_badge__"));
         assert!(html.contains("__bb_panel__"));
         assert!(html.contains("active-rule"));
         assert!(html.contains("Copy merged rules"));
+
+        let tls_info = ConnectionErrorInfo {
+            error_type: "REQUEST_TLS_FAILED",
+            error_message: "certificate verify failed".to_string(),
+            host: "tls.example".to_string(),
+            request_url: "https://tls.example/".to_string(),
+        };
+        let (hint_body, hint_content_type) =
+            build_connection_error_body(502, &tls_info, Some(r#"{"rules":[]}"#));
+        let hint_html = String::from_utf8(hint_body.to_vec()).expect("utf-8 hint page");
+        assert_eq!(hint_content_type, "text/html; charset=utf-8");
+        assert!(hint_html.contains("Certificate hint"));
+        assert!(hint_html.contains("upstreamUnsafeSsl://true"));
+        assert!(hint_html.contains("Hover the Bifrost badge"));
+
+        assert_eq!(
+            format_connection_endpoint("2001:db8::1", 8443),
+            "[2001:db8::1]:8443"
+        );
+        assert_eq!(
+            request_endpoint("https://example.test/path").as_deref(),
+            Some("example.test:443")
+        );
+        assert!(request_endpoint("not a URL").is_none());
     }
 
     #[test]
@@ -6420,6 +6461,13 @@ mod coverage_boost {
         headers.insert(
             header::ACCEPT,
             HeaderValue::from_static("text/html;q=invalid, */*"),
+        );
+        assert!(!request_explicitly_accepts_html(&headers));
+
+        headers.clear();
+        headers.append(
+            header::ACCEPT,
+            HeaderValue::from_bytes(b"\xff").expect("opaque header value"),
         );
         assert!(!request_explicitly_accepts_html(&headers));
     }

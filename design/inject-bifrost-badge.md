@@ -37,7 +37,7 @@
 ### 必须真实验证
 
 - 通过临时 `BIFROST_DATA_DIR` 启动的 CLI 实例，浏览器访问真实 HTML 页面时看到 Badge，hover 展开 Merged Rules，复制到系统剪贴板后内容匹配。
-- 通过代理请求一个真实未监听的远端端口，确认 502 响应为 HTML、保留 Status/Error/Host/URL 诊断文本，并包含可展开的 Bifrost Badge；关闭开关后同一路径恢复纯文本且不含 Badge。
+- 通过代理请求一个真实未监听的远端端口，确认 502 响应为 HTML、保留 Status/Error/URL 诊断文本，明确区分请求域名与规则改写后的实际上游 `host:port`，并包含可展开的 Bifrost Badge；关闭开关后同一路径恢复纯文本且不含 Badge。
 - `Content-Type: text/html` 但 body 为 JSON 时客户端仍收到原始 JSON，无任何 Badge 片段。
 - 含 `</script>` / `<iframe srcdoc>` / `<!--` 等敏感 token 的 `htmlAppend://` 规则文本仅出现在转义后的 Merged Rules 中，不会以原始标签形态出现在页面中。
 - Group 规则 API 启停后立即请求代理页面，Badge 面板 active 数量与 Rules 一致。
@@ -189,7 +189,7 @@ POST /_bifrost/api/group-rules/sync     # 从远端 sync 刷新本地 Group 规�
   - 配置 `htmlAppend://{vconsole-inject}` 值含 `</script><script>new VConsole()</script>`，断言响应中只有 `</script>`。
   - 上游返回 `Content-Type: text/html; charset=utf-8` 但 body 为 `{"code":200,...}`，断言响应不包含任何 Badge 片段。
 - 请求本地未监听端口触发真实 502，断言开启时 `Content-Type: text/html`、诊断文本和 Badge/操作脚本同时存在；关闭时仍为 `text/plain` 且无 Badge。
-- HTML 错误页采用水平/垂直居中的响应式状态卡片，展示 502 状态、错误摘要、Host、时间、请求 URL、分步排查引导、Rules 跳转、重试入口和折叠原始诊断；覆盖深浅色与窄屏样式。
+- HTML 错误页采用水平/垂直居中的响应式状态卡片，展示 502 状态、错误摘要、请求目标（原始域名/IP + 端口）、实际上游目标（规则改写后的域名/IP + 端口）、时间、请求 URL、分步排查引导、Rules 跳转、重试入口和折叠原始诊断；覆盖深浅色与窄屏样式。
 - 错误页按原始请求 `Accept` 做保守内容协商：只有明确接受 `text/html`、`application/xhtml+xml` 或 `text/*` 且质量值非零时生成 HTML + Badge；缺失 `Accept`、只有 `*/*`、仅接受 JSON/纯文本或显式 `text/html;q=0` 时保持原纯文本诊断。请求规则对 `Accept` 的改写不改变该判定。
 - `crates/bifrost-e2e/src/tests/group_rules.rs`
   - `group_rules_enable_refreshes_badge_cache`

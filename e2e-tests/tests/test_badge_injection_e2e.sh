@@ -433,8 +433,10 @@ assert_connection_error_badge() {
   local unreachable_port
   unreachable_port="$(pick_free_port)"
   local request_host="127.0.0.1:${unreachable_port}"
+  local request_target="$request_host"
   if [[ "$scheme" == "https" ]]; then
     request_host="badge-error-${unreachable_port}.test"
+    request_target="${request_host}:443"
     create_rule_api \
       "badge-${expected}-https-error-${unreachable_port}" \
       "${request_host} host://127.0.0.1:${unreachable_port}" \
@@ -461,7 +463,7 @@ assert_connection_error_badge() {
 
   assert_status "502" "$HTTP_STATUS" "${scheme} unreachable upstream should return 502" || return 1
   assert_body_contains "Status: 502" "$HTTP_BODY" "Connection error should preserve status diagnostics" || return 1
-  assert_body_contains "Host: 127.0.0.1" "$HTTP_BODY" "Connection error should preserve host diagnostics" || return 1
+  assert_body_contains "Host: 127.0.0.1:${unreachable_port}" "$HTTP_BODY" "Connection error should preserve upstream endpoint diagnostics" || return 1
   assert_body_contains "URL: ${url}" "$HTTP_BODY" "Connection error should preserve URL diagnostics" || return 1
 
   if [[ "$expected" == "present" ]]; then
@@ -471,6 +473,8 @@ assert_connection_error_badge() {
     assert_body_contains "What you can do" "$HTTP_BODY" "Badge error page should include recovery guidance" || return 1
     assert_body_contains "Open Bifrost rules" "$HTTP_BODY" "Badge error page should expose the Rules action" || return 1
     assert_body_contains "Try again" "$HTTP_BODY" "Badge error page should expose a retry action" || return 1
+    assert_body_contains "<dt>Request target</dt><dd>${request_target}</dd>" "$HTTP_BODY" "Badge error page should show the requested domain or endpoint" || return 1
+    assert_body_contains "<dt>Upstream target</dt><dd>127.0.0.1:${unreachable_port}</dd>" "$HTTP_BODY" "Badge error page should show the actual upstream IP and port" || return 1
     assert_body_contains "place-items:center" "$HTTP_BODY" "Badge error page should center the status card" || return 1
     assert_body_contains "@media(max-width:600px)" "$HTTP_BODY" "Badge error page should include narrow-screen layout" || return 1
     assert_body_contains "@media(prefers-color-scheme:dark)" "$HTTP_BODY" "Badge error page should support dark mode" || return 1

@@ -2915,15 +2915,20 @@ async fn handle_intercepted_request_with_protocol(
     // Pre-resolving here only adds duplicate lookup cost and stretches H2 tail latency.
     let dns_ms = None;
 
+    let error_badge_rules_json = if inject_bifrost_badge && accepts_html_error {
+        Some(super::handler::build_badge_rules_json(admin_state.as_deref(), listener_port).await)
+    } else {
+        None
+    };
     let build_conn_error_record_and_response =
-        |error_type: &'static str,
-         error_msg: String,
-         tls_ms: Option<u64>,
-         badge_rules_json: Option<&str>| {
+        |error_type: &'static str, error_msg: String, tls_ms: Option<u64>| {
             let error_info = ConnectionErrorInfo {
                 error_type,
                 error_message: error_msg.clone(),
-                host: actual_target_host.clone(),
+                host: super::handler::format_connection_endpoint(
+                    &actual_target_host,
+                    actual_target_port,
+                ),
                 request_url: original_uri.clone(),
             };
             let response_status = if needs_response_override(&resolved_rules) {
@@ -2938,8 +2943,11 @@ async fn handle_intercepted_request_with_protocol(
                 if let Some(ref res_body) = resolved_rules.res_body {
                     (res_body.clone(), None)
                 } else {
-                    let (body, content_type) =
-                        build_connection_error_body(response_status, &error_info, badge_rules_json);
+                    let (body, content_type) = build_connection_error_body(
+                        response_status,
+                        &error_info,
+                        error_badge_rules_json.as_deref(),
+                    );
                     (body, Some(content_type))
                 };
             let total_ms = start_time.elapsed().as_millis() as u64;
@@ -3064,24 +3072,6 @@ async fn handle_intercepted_request_with_protocol(
             }
         };
 
-    macro_rules! connection_error_response {
-        ($error_type:expr, $error_message:expr, $tls_ms:expr $(,)?) => {{
-            let badge_rules_json = if inject_bifrost_badge && accepts_html_error {
-                Some(
-                    super::handler::build_badge_rules_json(admin_state.as_deref(), listener_port)
-                        .await,
-                )
-            } else {
-                None
-            };
-            build_conn_error_record_and_response(
-                $error_type,
-                $error_message,
-                $tls_ms,
-                badge_rules_json.as_deref(),
-            )
-        }};
-    }
     let (mut upstream_parts, upstream_body) = outgoing_req.into_parts();
     upstream_parts.uri = upstream_uri.clone();
     upstream_parts.headers.remove(hyper::header::HOST);
@@ -3221,7 +3211,7 @@ async fn handle_intercepted_request_with_protocol(
                     {
                         Ok(request) => request,
                         Err(err) => {
-                            return Ok(connection_error_response!(
+                            return Ok(build_conn_error_record_and_response(
                                 "REQUEST_BUILD_FAILED",
                                 err.to_string(),
                                 None,
@@ -3246,7 +3236,7 @@ async fn handle_intercepted_request_with_protocol(
                             for source in &classified.source_chain {
                                 error!("[{}] Request failure source: {}", req_id, source);
                             }
-                            return Ok(connection_error_response!(
+                            return Ok(build_conn_error_record_and_response(
                                 classified.error_type,
                                 classified.error_message,
                                 None,
@@ -3262,7 +3252,7 @@ async fn handle_intercepted_request_with_protocol(
                     for source in &classified.source_chain {
                         error!("[{}] Request failure source: {}", req_id, source);
                     }
-                    return Ok(connection_error_response!(
+                    return Ok(build_conn_error_record_and_response(
                         classified.error_type,
                         classified.error_message,
                         None,
@@ -3309,7 +3299,7 @@ async fn handle_intercepted_request_with_protocol(
                     {
                         Ok(request) => request,
                         Err(err) => {
-                            return Ok(connection_error_response!(
+                            return Ok(build_conn_error_record_and_response(
                                 "REQUEST_BUILD_FAILED",
                                 err.to_string(),
                                 None,
@@ -3334,7 +3324,7 @@ async fn handle_intercepted_request_with_protocol(
                             for source in &classified.source_chain {
                                 error!("[{}] Request failure source: {}", req_id, source);
                             }
-                            return Ok(connection_error_response!(
+                            return Ok(build_conn_error_record_and_response(
                                 classified.error_type,
                                 classified.error_message,
                                 None,
@@ -3350,7 +3340,7 @@ async fn handle_intercepted_request_with_protocol(
                     for source in &classified.source_chain {
                         error!("[{}] Request failure source: {}", req_id, source);
                     }
-                    return Ok(connection_error_response!(
+                    return Ok(build_conn_error_record_and_response(
                         classified.error_type,
                         classified.error_message,
                         None,
@@ -3415,7 +3405,7 @@ async fn handle_intercepted_request_with_protocol(
                     {
                         Ok(request) => request,
                         Err(err) => {
-                            return Ok(connection_error_response!(
+                            return Ok(build_conn_error_record_and_response(
                                 "REQUEST_BUILD_FAILED",
                                 err.to_string(),
                                 None,
@@ -3450,7 +3440,7 @@ async fn handle_intercepted_request_with_protocol(
                             for source in &classified.source_chain {
                                 error!("[{}] Request failure source: {}", req_id, source);
                             }
-                            return Ok(connection_error_response!(
+                            return Ok(build_conn_error_record_and_response(
                                 classified.error_type,
                                 classified.error_message,
                                 None,
@@ -3476,7 +3466,7 @@ async fn handle_intercepted_request_with_protocol(
             {
                 Ok(request) => request,
                 Err(err) => {
-                    return Ok(connection_error_response!(
+                    return Ok(build_conn_error_record_and_response(
                         "REQUEST_BUILD_FAILED",
                         err.to_string(),
                         None,
@@ -3511,7 +3501,7 @@ async fn handle_intercepted_request_with_protocol(
                     for source in &classified.source_chain {
                         error!("[{}] Request failure source: {}", req_id, source);
                     }
-                    return Ok(connection_error_response!(
+                    return Ok(build_conn_error_record_and_response(
                         classified.error_type,
                         classified.error_message,
                         None,
@@ -4582,8 +4572,12 @@ async fn handle_intercepted_request_with_protocol(
     };
 
     let mut final_body = if inject_bifrost_badge {
-        let badge_rules_json =
-            super::handler::build_badge_rules_json(admin_state.as_deref(), listener_port).await;
+        let badge_rules_json = match error_badge_rules_json.as_ref() {
+            Some(rules_json) => rules_json.clone(),
+            None => {
+                super::handler::build_badge_rules_json(admin_state.as_deref(), listener_port).await
+            }
+        };
         let final_res_content_type = res_parts
             .headers
             .get(hyper::header::CONTENT_TYPE)

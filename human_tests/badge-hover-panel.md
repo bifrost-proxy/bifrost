@@ -377,14 +377,14 @@ curl -x http://127.0.0.1:8800 http://httpbin.org/html -s | grep "__bb_panel__"
      -D /tmp/bifrost-error-page.headers \
      -o /tmp/bifrost-error-page.html
    ```
-4. 使用 Chrome 打开 `/tmp/bifrost-error-page.html`，确认 502 状态卡片在视口中水平、垂直居中，视觉层级清晰；页面展示错误摘要、Status、Host、Time、Request URL 和 `What you can do` 分步引导。
+4. 使用 Chrome 打开 `/tmp/bifrost-error-page.html`，确认 502 状态卡片在视口中水平、垂直居中，视觉层级清晰；页面展示错误摘要、Status、Request target（`badge-error-page.test:443`）、Upstream target（`127.0.0.1:18895`）、Time、Request URL 和 `What you can do` 分步引导。
 5. 确认页面提供 `Open Bifrost rules` 与 `Try again` 操作，并在窄屏尺寸下没有横向溢出；切换浏览器深色模式后文字、边框和错误状态仍清晰可辨。
 6. 鼠标悬浮 Badge，确认面板展开并显示 `badge-error-page-human`、Merged Rules 和 Copy；检查规则行链接指向 `http://127.0.0.1:18894/_bifrost/rules?...`。
 7. 点击 Copy，确认剪贴板含测试规则且按钮显示 `Copied`；再关闭 Badge 注入后重试同一路径。
 8. 保持 Badge 开启，分别以浏览器导航风格 `Accept: text/html,application/xhtml+xml,...` 和通用 `Accept: */*` 重试；再发起一个不带 `Accept` 的请求。
 
 **预期结果**：
-- 代理响应状态为 502，`Content-Type` 为 `text/html; charset=utf-8`；居中状态卡片保留 Status、错误类型/消息、Host、Time、Request URL，并给出上游服务、规则目标和重试三步引导。
+- 代理响应状态为 502，`Content-Type` 为 `text/html; charset=utf-8`；居中状态卡片保留 Status、错误类型/消息、Request target、Upstream target、Time、Request URL；请求域名和规则改写后的实际 IP/域名及端口不能混淆，并给出上游服务、规则目标和重试三步引导。
 - Rules 与重试入口可用，长 URL 可自动折行，窄屏与深色模式下布局和对比度正常。
 - 明确接受 HTML 的请求返回美化 HTML + Badge；只有 `*/*` 或缺失 `Accept` 时返回原始 `text/plain; charset=utf-8`，不会把 HTML 页面强加给 CLI/SDK。
 - Chrome 左下角显示与普通代理 HTML 页面相同的 Bifrost Badge；hover 面板可展开，规则列表、Merged Rules、Copy 和规则跳转功能存在。
@@ -401,6 +401,7 @@ curl -x http://127.0.0.1:8800 http://httpbin.org/html -s | grep "__bb_panel__"
 | --- | --- | --- | --- |
 | 2026-07-14 | 使用 `target/debug/bifrost`、临时数据目录、18894 代理端口和未监听的 18895 上游端口执行 HTTPS `host://` 连接失败；真实响应保存为 `/tmp/bifrost-error-page.html`，并用 Chrome 打开、hover Badge、展开 Merged Rules、点击 Copy；随后通过 Performance API 关闭 Badge 并复请求同一路径 | 502 响应为 `text/html; charset=utf-8`，保留完整诊断文本；Chrome 左下角显示 Badge，hover 面板显示 `Default` 与 `badge-error-page-human`，规则链接指向 18894，Merged Rules 可展开，Copy 后剪贴板包含 `badge-error-page.test host://127.0.0.1:18895` 且按钮显示 `Copied`；关闭开关后响应恢复 `text/plain; charset=utf-8`，Badge/面板标记均不存在。当前系统亮色主题真实截图可读；暗色契约由错误页 `color-scheme: light dark` 与复用 Badge 的 `prefers-color-scheme: dark` 样式单元断言覆盖 | 通过 |
 | 2026-07-14 | 美化 UI 与内容协商追加复测：用当前源码重新构建二进制，在相同隔离端口生成真实 HTTP/HTTPS 502；分别发送浏览器导航风格 `Accept` 与通用 `*/*`，检查响应状态、DOM/CSS、引导与操作入口，再关闭 Badge 复请求；尝试用 Chrome 打开本机测试页 | 浏览器风格 `Accept` 返回 502 HTML，包含居中卡片、错误摘要、Status/Host/Time/Request URL、三步引导、Rules/重试入口、窄屏与深色样式、Badge/面板；`*/*` 返回原始纯文本，无 Badge；关闭 Badge 后即使接受 HTML 也保持纯文本。HTTP/HTTPS 自动 E2E 140/140，临时实例与文件已清理。Chrome 自动化访问本机测试 URL 被浏览器安全策略 `ERR_BLOCKED_BY_CLIENT` 明确阻断，因此本轮新增 UI 的真实 Chrome 视觉、窄屏和深色交互未完成；上一轮 Badge hover/Copy 的真实 Chrome 结果仍有效 | 部分通过（Chrome 环境阻塞） |
+| 2026-07-14 | 地址信息增强复测：用当前源码重建 CLI，通过隔离代理分别触发 HTTP 直连和 HTTPS `host://` 改写后的未监听端口错误；检查 HTML 明细与纯文本原始诊断 | HTTP/HTTPS HTML 均明确显示 `Request target`（原请求域名/IP + 端口）和 `Upstream target`（实际连接 IP + 端口）；HTTPS 用例验证请求域名与 `127.0.0.1:<port>` 不再混为 Host；纯文本 `Host` 同样包含实际上游端口。Badge 开关、浏览器 Accept、`*/*` 回退及既有交互回归共 144/144 通过，临时实例已清理 | 通过 |
 
 ---
 
