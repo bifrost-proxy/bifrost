@@ -54,10 +54,14 @@ The helper is a small process mode of the desktop executable:
 2. Wait for the old App PID to disappear.
 3. Wait for the recorded core PID to disappear when available.
 4. Wait for the recorded proxy port to stop answering health checks.
-5. Relaunch the App bundle.
+5. Remove the helper-only `HELPER`, `MARKER`, and `TARGET` environment variables from the relaunch
+   command.
+6. Relaunch the App bundle.
 
 The helper does not start core itself. Its only responsibility is to avoid opening the new App while
-the old App still owns the shutdown operation.
+the old App still owns the shutdown operation. Clearing the helper-only environment is a hard
+one-shot boundary: on macOS, LaunchServices otherwise propagates the environment of `open -n` into
+the new App, which would make every new App enter helper mode, exit, and open another App forever.
 
 ### New App
 
@@ -94,6 +98,10 @@ stateDiagram-v2
 - Startup with an active marker disables existing backend reuse.
 - Successful handoff startup clears the marker.
 - Relaunch helper waits for process/port release before opening the App.
+- The command that opens the new App explicitly removes all helper-only environment variables, for
+  both macOS `.app` targets and direct executable targets.
+- A real macOS update relaunch creates one new stable App process instead of a recursive Dock-icon
+  launch/exit loop.
 - CLI install reconnect errors trigger runtime/status recheck instead of permanently entering
   install-error state.
 - The shell contract is executable when desktop system dependencies and sidecar resources are

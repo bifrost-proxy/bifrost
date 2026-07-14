@@ -612,6 +612,32 @@
 - CLI 安装请求期间发生 transient network error 时，前端不会直接把一次连接中断判定为最终安装失败。
 - core ready 后前端会重新读取 CLI install status；若已安装成功，用户看到成功态。
 
+### TC-DAU-14 macOS 更新 helper 只能 relaunch 一次
+
+操作步骤：
+
+1. 构建当前源码的真实 macOS App bundle：
+   ```bash
+   BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 pnpm run desktop:build:app
+   ```
+2. 记录当前桌面 App PID，然后受控退出旧 App；使用 `BIFROST_APP_SKIP_RESTART=1`
+   将构建产物安装到 `/Applications/Bifrost.app`，避免安装命令额外触发一次启动。
+3. 写入一次性 `desktop-upgrade-relaunch.json`，以修复后的
+   `/Applications/Bifrost.app/Contents/MacOS/bifrost-desktop` 进入 helper 模式。
+4. 等待日志出现 `desktop upgrade relaunch helper started` 后删除测试 marker，再结束步骤 2
+   记录的旧 App PID；测试 marker 使用未监听的临时端口，避免影响正式 `9900` core。
+5. 等待 helper 通过 LaunchServices 打开新 App，记录新 PID；连续观察至少 10 秒。
+6. 检查新 PID 的 launchd 环境不包含
+   `BIFROST_DESKTOP_UPGRADE_RELAUNCH_HELPER`、`BIFROST_DESKTOP_UPGRADE_RELAUNCH_MARKER`、
+   `BIFROST_DESKTOP_UPGRADE_RELAUNCH_TARGET`，并检查 `desktop-bootstrap.log` 完成 WebView handoff。
+
+预期结果：
+
+- helper 只打开一次目标 App，不产生 `helper -> open -> helper` 递归链。
+- 新 App 在观察窗口内保持同一个 PID，Dock 图标不再反复弹跳、退出和重启。
+- 测试 marker 不残留；正式 `9900` core 不被停止或替换。
+- 新 App 正常进入桌面启动路径，日志出现 `embedded webview handoff completed`。
+
 ## 清理步骤
 
 ```bash
@@ -643,3 +669,4 @@ bifrost app uninstall
 | 2026-07-07 | TC-DAU-08E / 08F | `pnpm --dir web run test:unit -- src/pages/Settings/tabs/ProxyTab.test.ts`; `pnpm --dir web run lint`; `pnpm --dir web run build`; 代码 review `web/src/pages/Settings/tabs/ProxyTab.tsx` | PASS：CLI 缺失时只展示 `Install CLI` 且请求 `install_skills=false`；CLI 已安装后隐藏 CLI 安装按钮并展示独立 AI Skills 按钮；Skills 已安装时文案为 `Reinstall AI Skills`。端口行改为 `Row align="bottom"`，输入框与 `Apply & Restart` 位于同一 test id 行，便于后续像素/坐标回归 |
 | 2026-07-10 | TC-DAU-11 | `bash e2e-tests/tests/test_desktop_upgrade_handoff_contract.sh` | PASS：macOS 本地 3/3 通过，覆盖 fresh/stale/unsupported marker 判定、stale marker 自动删除、active upgrade marker 禁止复用既有 backend；Linux CI runner 缺 `glib-2.0.pc` 或通用 shell shard 缺 `desktop/src-tauri/resources/bin/*` 时预期输出 SKIP，避免桌面编译前置条件缺失误伤 shell E2E |
 | 2026-07-10 | TC-DAU-12 / 13 | 代码 review `desktop/src-tauri/src/main.rs`、`web/src/App.tsx`，真实 App 更新 GUI 路径需发布包/桌面会话补跑 | 待复测：本轮新增日志可追踪 handoff 生命周期与 CLI install transient reconnect 后自动复查状态 |
+| 2026-07-14 | TC-DAU-14 | 构建并 ad-hoc 签名真实 `Bifrost.app`，安装到 `/Applications`；以 one-shot marker 启动修复后的 helper，helper 读取 marker 后删除测试 marker 并释放 hold PID；检查新 App PID、launchd 环境、正式 core PID 与 `desktop-bootstrap.log` | PASS：helper 只打开一次 App；新 PID `75504` 连续 10 秒稳定；三项 `BIFROST_DESKTOP_UPGRADE_RELAUNCH_*` 环境变量均未继承；marker 不残留；正式 core PID `19574` 未变化；WebView handoff 与证书预检完成。首次安装准备因同版本跳过覆盖而失败，改为先卸载旧 bundle、签名并恢复安装后完整重跑通过 |
