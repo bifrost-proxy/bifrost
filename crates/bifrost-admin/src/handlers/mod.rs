@@ -57,6 +57,7 @@ use serde::Serialize;
 pub type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 pub const ADMIN_CORS_ALLOW_HEADERS: &str =
     "Content-Type, Authorization, X-Client-Id, X-Bifrost-CSRF";
+pub const ADMIN_CORS_ALLOW_METHODS: &str = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
 pub const PUBLIC_CORS_ALLOW_METHODS: &str = "GET, HEAD, OPTIONS";
 
 pub fn full_body(body: impl Into<Bytes>) -> BoxBody {
@@ -123,10 +124,7 @@ pub fn method_not_allowed() -> Response<BoxBody> {
 pub fn cors_preflight() -> Response<BoxBody> {
     Response::builder()
         .status(StatusCode::NO_CONTENT)
-        .header(
-            "Access-Control-Allow-Methods",
-            "GET, POST, PUT, DELETE, OPTIONS",
-        )
+        .header("Access-Control-Allow-Methods", ADMIN_CORS_ALLOW_METHODS)
         .header("Access-Control-Allow-Headers", ADMIN_CORS_ALLOW_HEADERS)
         .header("Access-Control-Max-Age", "86400")
         .body(empty_body())
@@ -144,7 +142,7 @@ pub fn public_response_builder(status: StatusCode) -> hyper::http::response::Bui
 mod tests {
     use super::{
         cors_preflight, public_response_builder, ADMIN_CORS_ALLOW_HEADERS,
-        PUBLIC_CORS_ALLOW_METHODS,
+        ADMIN_CORS_ALLOW_METHODS, PUBLIC_CORS_ALLOW_METHODS,
     };
     use hyper::StatusCode;
 
@@ -152,10 +150,20 @@ mod tests {
     fn cors_preflight_allows_desktop_client_header() {
         let response = cors_preflight();
         let headers = response.headers();
+        let allow_methods = headers
+            .get("Access-Control-Allow-Methods")
+            .and_then(|value| value.to_str().ok());
         let allow_headers = headers
             .get("Access-Control-Allow-Headers")
             .and_then(|value| value.to_str().ok());
 
+        assert_eq!(allow_methods, Some(ADMIN_CORS_ALLOW_METHODS));
+        assert!(
+            allow_methods
+                .map(|value| value.split(',').any(|method| method.trim() == "PATCH"))
+                .unwrap_or(false),
+            "desktop runner saves require PATCH to pass CORS preflight"
+        );
         assert_eq!(allow_headers, Some(ADMIN_CORS_ALLOW_HEADERS));
         assert!(
             allow_headers
