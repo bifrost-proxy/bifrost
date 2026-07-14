@@ -38,6 +38,11 @@ import {
   getDesktopDragRegionAttributes,
   getDesktopTopDragRightInset,
 } from "./desktopChrome";
+import {
+  APP_SIDEBAR_WIDTH,
+  SIDEBAR_MENU_ITEM_STYLE,
+  SIDEBAR_MENU_SCROLL_STYLE,
+} from "./sidebarLayout";
 
 interface MenuItem {
   key: string;
@@ -245,7 +250,7 @@ export default function AppLayout() {
     desktopTopDragRegion: {
       position: "absolute",
       top: 0,
-      left: 50,
+      left: APP_SIDEBAR_WIDTH,
       right: 0,
       height: DESKTOP_TOP_DRAG_HEIGHT,
       zIndex: 4,
@@ -261,7 +266,7 @@ export default function AppLayout() {
       zIndex: 2,
     },
     sidebar: {
-      width: 50,
+      width: APP_SIDEBAR_WIDTH,
       height: "100%",
       background:
         desktopEnabled
@@ -296,29 +301,13 @@ export default function AppLayout() {
       userSelect: "none",
     },
     menuScroll: {
-      width: "100%",
-      flex: 1,
-      minHeight: 0,
-      overflowY: "auto",
-      overflowX: "hidden",
-      display: "flex",
-      flexDirection: "column",
-      alignItems: "center",
-      scrollbarGutter: "stable",
+      ...SIDEBAR_MENU_SCROLL_STYLE,
     },
     menuItem: {
-      width: 50,
-      height: 64,
-      minHeight: 64,
-      flexShrink: 0,
-      display: "flex",
-      flexDirection: "column",
-      alignItems: "center",
-      justifyContent: "center",
+      ...SIDEBAR_MENU_ITEM_STYLE,
       cursor: "pointer",
       fontSize: 18,
       color: token.colorTextSecondary,
-      position: "relative",
       transition: "all 0.2s",
     },
     menuItemLabel: {
@@ -501,7 +490,11 @@ export default function AppLayout() {
               style={styles.macWindowControlSpacer}
             />
           ) : null}
-          <div style={styles.menuScroll} data-testid="app-sidebar-nav-scroll">
+          <div
+            className="app-sidebar-nav-scroll"
+            style={styles.menuScroll}
+            data-testid="app-sidebar-nav-scroll"
+          >
             {menuItems.filter((item) => !item.hidden).map((item) => {
               const active = isActive(item.key);
               return (
@@ -517,8 +510,12 @@ export default function AppLayout() {
                   onClick={() => handleClick(item.key)}
                 >
                   {active && <div style={styles.activeBorder as CSSProperties} />}
-                  <div style={styles.menuItemIcon}>{renderMenuIcon(item)}</div>
-                  <div style={styles.menuItemLabel}>{item.label}</div>
+                  <div data-testid="app-sidebar-nav-icon" style={styles.menuItemIcon}>
+                    {renderMenuIcon(item)}
+                  </div>
+                  <div data-testid="app-sidebar-nav-label" style={styles.menuItemLabel}>
+                    {item.label}
+                  </div>
                 </div>
               );
             })}

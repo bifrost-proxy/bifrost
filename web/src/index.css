@@ -58,6 +58,11 @@ button {
   background: #5a5a5a;
 }
 
+.app-sidebar-nav-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
 mark {
   background-color: #ffe58f;
   color: inherit;

@@ -7,6 +7,7 @@ Admin WebUI 采用固定宽度的左侧 sidebar + 顶部/底部工具栏 + 三�
 1. **小屏 sidebar 溢出**：一级导航项 + 底部主题切换按钮同列时，窗口较矮会让最下方的 tab（Settings / Notify 等）被状态栏挤压或不可见；导航区没有独立滚动。
 2. **状态栏 Sync 入口路径过长**：底部 `statusbar-sync` 只展示状态 + tooltip；用户要处理 Sync 登录 / 远端地址 / 手动同步 / 断线重连时必须多点几次到 Settings 内部切换到 Sync tab。
 3. **版本弹窗 Copy 假成功**：`copyToClipboard()` 存在 fallback，`document.execCommand('copy')` 在嵌入式浏览器可能返回 `true` 但未真正写入剪贴板；版本弹窗又没有检查返回值，会出现 "提示复制成功但实际剪贴板为空" 的用户投诉。
+4. **Safari/Tauri 窄栏裁切**：导航滚动容器使用 `scrollbar-gutter: stable` 时，WebKit 会在 50px sidebar 内永久预留滚动条宽度，固定宽度导航项居中后被 `overflow-x: hidden` 横向裁掉；Tauri macOS 系统 WebView 会复现同一问题。
 
 本设计把三件事合并处理，因为它们都由 Layout / StatusBar / 剪贴板工具在同一批 UX polish 中改动。
 
@@ -15,13 +16,14 @@ Admin WebUI 采用固定宽度的左侧 sidebar + 顶部/底部工具栏 + 三�
 ### 必须实现
 
 - **小屏 sidebar**：导航容器有独立滚动能力，底部主题切换按钮固定在 sidebar 底部；小窗口下能滚到所有 tab。
+- **WebKit sidebar**：Safari 与 Tauri macOS 中所有一级导航图标和英文标签完整显示，不因滚动条 gutter 缺字。
 - **状态栏 Sync 快捷入口**：点击底部 `statusbar-sync` 直接跳到 `Settings → Sync tab`；支持键盘 Enter/Space；tooltip、状态色、`data-sync-state` / `data-sync-action` 测试属性保留。
 - **Copy 命令真实写入**：`copyToClipboard()` 只有在真的写入剪贴板时才返回 `true`；版本弹窗根据返回值给出成功/失败提示。
 - 三处改动都通过 Playwright 与 human_tests 真实浏览器验证。
 
 ### 必须不破坏
 
-- 大屏 sidebar 视觉与 hover 效果不变。
+- sidebar 外宽继续保持 50px；大屏视觉与 hover 效果不变。
 - 底部状态栏其余节点（DevMode、Cert、Data Dir、Sync 之外的状态）交互不变。
 - 亮色 / 暗色主题的字色、hover 色继续用 Ant Design token (`colorFillSecondary` 等)。
 - Ant Layout / SplitPane / FilterPanel 折叠展开不受影响。
@@ -30,6 +32,7 @@ Admin WebUI 采用固定宽度的左侧 sidebar + 顶部/底部工具栏 + 三�
 ### 必须真实验证
 
 - 手动或 Playwright 缩小 viewport 到 700px 高，滚动到 sidebar 底部仍可点 Settings / Notify。
+- Playwright WebKit/Chromium 与真实 Safari/Chrome/Tauri 均验证亮色、暗色和小窗口下标签横向边界完整。
 - 手动或 Playwright 点击 `statusbar-sync` 后 URL 变为 `/_bifrost/settings?tab=sync` 且 Sync tab `aria-selected=true`；键盘 Enter 也生效。
 - 打开版本弹窗点 Copy 后 `navigator.clipboard.readText()` 返回真实命令；执行环境不支持剪贴板 API 时提示失败。
 
@@ -40,6 +43,7 @@ Admin WebUI 采用固定宽度的左侧 sidebar + 顶部/底部工具栏 + 三�
 - 整个 sidebar 固定宽度、整高。
 - 内部由 "导航滚动容器" + "固定底部主题按钮" 组成：
   - 导航容器：`flex: 1`、`minHeight: 0`、`overflowY: auto`、`overflowX: hidden`。
+  - 导航容器不使用稳定 gutter：`scrollbarGutter: auto`；窄栏通过 `scrollbarWidth: none` 与局部 `::-webkit-scrollbar { width: 0; height: 0; }` 隐藏原生滚动条轨道，但保留滚动能力。
   - 每个 tab item `minHeight: 64`、`flexShrink: 0`，保证识别度。
   - `data-testid="app-sidebar-nav-scroll"` 用作 Playwright 断言容器可滚。
 - 底部主题按钮不放入滚动容器；用户永远能一键切主题。
@@ -65,17 +69,17 @@ Admin WebUI 采用固定宽度的左侧 sidebar + 顶部/底部工具栏 + 三�
 
 关键代码位置：
 
-- Sidebar container：`styles.sidebar`（第 204 行附近）。
-- 导航滚动容器：`<div style={styles.menuScroll} data-testid="app-sidebar-nav-scroll">`（第 365 行）。
-- 每个导航项：`data-testid="app-sidebar-nav-item"`（第 371 行）。
-- 底部主题按钮 / OpenAPI：`data-testid="app-sidebar-openapi"`（第 388 行）；不放入 menuScroll。
+- Sidebar container：`styles.sidebar`，宽度引用 `APP_SIDEBAR_WIDTH`。
+- 导航滚动容器：`className="app-sidebar-nav-scroll"` + `data-testid="app-sidebar-nav-scroll"`，基础几何契约来自 `sidebarLayout.ts`。
+- 每个导航项：`data-testid="app-sidebar-nav-item"`，图标/标签分别使用 `app-sidebar-nav-icon` / `app-sidebar-nav-label`。
+- 底部主题按钮 / OpenAPI：`data-testid="app-sidebar-openapi"`；不放入 menuScroll。
 
 样式片段（伪代码）：
 
 ```tsx
 const styles = {
   sidebar: {
-    width: 220,
+    width: APP_SIDEBAR_WIDTH, // 50px
     height: '100%',
     display: 'flex',
     flexDirection: 'column',
@@ -86,6 +90,8 @@ const styles = {
     minHeight: 0,
     overflowY: 'auto',
     overflowX: 'hidden',
+    scrollbarGutter: 'auto',
+    scrollbarWidth: 'none',
   },
   navItem: {
     minHeight: 64,
@@ -196,6 +202,8 @@ const handleCopyCommand = async () => {
 - data-testid 保留列表：
   - `app-sidebar-nav-scroll`
   - `app-sidebar-nav-item`
+  - `app-sidebar-nav-icon`
+  - `app-sidebar-nav-label`
   - `app-sidebar-openapi`
   - `statusbar-sync`（携带 `data-sync-state` / `data-sync-action`）
 
