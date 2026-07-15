@@ -122,78 +122,41 @@ fn sync_daily_agent_original_files(
     original_paths: &[String],
 ) -> Result<AsrDailyAgentReportSyncResult, String> {
     let target_dir = daily_agent_original_sync_target_dir(task)?;
-    std::fs::create_dir_all(&target_dir).map_err(|error| {
-        format!(
-            "create original transcript sync directory {}: {error}",
-            target_dir.display()
-        )
-    })?;
-
-    let mut result = AsrDailyAgentReportSyncResult {
-        target_dir: target_dir.to_string_lossy().to_string(),
-        total_files: original_paths.len(),
-        synced_at_ms: now_ms(),
-        ..Default::default()
-    };
+    let mut valid_paths = Vec::new();
+    let mut validation_errors = Vec::new();
+    let mut skipped_files = 0;
 
     for original_path in original_paths {
         let source = PathBuf::from(original_path);
-        let Some(file_name) = source.file_name() else {
-            result.failed_files += 1;
-            result
-                .errors
-                .push(format!("invalid original transcript path: {original_path}"));
-            continue;
-        };
         if !is_daily_source_markdown_path(&source) {
-            result.failed_files += 1;
-            result.errors.push(format!(
+            validation_errors.push(format!(
                 "original transcript does not exist or is not a daily markdown file: {}",
                 source.display()
             ));
             continue;
         }
-
-        let target = target_dir.join(file_name);
-        if source == target {
-            result.skipped_files += 1;
-            continue;
-        }
+        let target = target_dir.join(source.file_name().expect("validated daily source filename"));
         if target.is_file()
             && matches!(daily_agent_source_copy_is_current(&source, &target), Ok(true))
         {
-            result.skipped_files += 1;
+            skipped_files += 1;
             continue;
         }
-
-        let temp_target = target_dir.join(format!(
-            ".{}.{}.{}.tmp",
-            file_name.to_string_lossy(),
-            std::process::id(),
-            now_ms()
-        ));
-        match std::fs::copy(&source, &temp_target).and_then(|_| {
-            match std::fs::rename(&temp_target, &target) {
-                Ok(()) => Ok(()),
-                Err(error) if target.exists() => {
-                    std::fs::remove_file(&target)?;
-                    std::fs::rename(&temp_target, &target).map_err(|_| error)
-                }
-                Err(error) => Err(error),
-            }
-        }) {
-            Ok(()) => result.copied_files += 1,
-            Err(error) => {
-                let _ = std::fs::remove_file(&temp_target);
-                result.failed_files += 1;
-                result.errors.push(format!(
-                    "copy original transcript {} to {}: {error}",
-                    source.display(),
-                    target.display()
-                ));
-            }
-        }
+        valid_paths.push(original_path.clone());
     }
+
+    // Reuse the report sync copier so both report and original transcript
+    // files share the same atomic replace and unchanged-file skip behavior.
+    let mut original_task = task.clone();
+    original_task.daily_agent.report_sync_dir = Some(target_dir.to_string_lossy().to_string());
+    original_task.daily_agent.agent_id.clear();
+    original_task.daily_agent.output_dir.clear();
+    let mut result = sync_daily_agent_report_files(&original_task, &valid_paths)?;
+    result.target_dir = target_dir.to_string_lossy().to_string();
+    result.total_files = original_paths.len();
+    result.skipped_files += skipped_files;
+    result.failed_files += validation_errors.len();
+    result.errors.extend(validation_errors);
 
     tracing::info!(
         task_id = %task.id,
