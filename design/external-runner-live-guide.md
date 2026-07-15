@@ -192,4 +192,5 @@ Web Playwright 同时覆盖 Codex/Traex/Claude Code 默认 Guide、显式 Queue�
 - 配置映射与 exec flag 不完全等价：所有已支持 model/effort/sandbox/config 字段必须有单测；无法等价的 custom args 自动保留 exec。
 - turn-end race：必须依赖 expected turn id + ack + queue fallback，不允许 fire-and-forget。
 - app-server stdout 可能包含未知 notification：保留 raw frame，忽略未知展示事件但不能中断 turn。
+- Linux 并行测试或 CLI 更新窗口中，`fork/exec` 可能因其它线程短暂持有可执行文件的可写句柄而返回 `ETXTBSY`。app-server 启动层只对该 OS 错误执行最多 8 次、总计不超过 140ms 的线性退避重试；其它 spawn 错误立即返回，且不得在进程已成功启动后重跑，以免重复创建 thread 或产生副作用。
 - 回滚：用户可设置 `adapterConfig.transport=exec`，或给 Claude Code 配置 `--input-format text` custom args 恢复原路径；其他自定义 args 天然继续 exec。

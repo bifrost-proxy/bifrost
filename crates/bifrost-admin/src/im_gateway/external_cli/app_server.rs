@@ -3,8 +3,8 @@ use super::*;
 const HANDSHAKE_TIMEOUT_SECS: u64 = 30;
 const CAPACITY_MAX_RETRIES: u32 = 3;
 const CAPACITY_RETRY_BASE_DELAY_MS: u64 = 1_000;
-const APP_SERVER_SPAWN_MAX_ATTEMPTS: u32 = 5;
-const APP_SERVER_SPAWN_RETRY_BASE_DELAY_MS: u64 = 20;
+const APP_SERVER_SPAWN_MAX_ATTEMPTS: u32 = 8;
+const APP_SERVER_SPAWN_RETRY_BASE_DELAY_MS: u64 = 5;
 #[cfg(unix)]
 const TEXT_FILE_BUSY_RAW_OS_ERROR: i32 = 26;
 
@@ -30,10 +30,16 @@ async fn spawn_app_server_with_retry<T>(
                 if is_retryable_app_server_spawn_error(&error)
                     && attempt < APP_SERVER_SPAWN_MAX_ATTEMPTS =>
             {
-                tokio::time::sleep(Duration::from_millis(
-                    APP_SERVER_SPAWN_RETRY_BASE_DELAY_MS * u64::from(attempt),
-                ))
-                .await;
+                let delay = Duration::from_millis(
+                    APP_SERVER_SPAWN_RETRY_BASE_DELAY_MS.saturating_mul(u64::from(attempt)),
+                );
+                tracing::warn!(
+                    attempt,
+                    max_attempts = APP_SERVER_SPAWN_MAX_ATTEMPTS,
+                    delay_ms = delay.as_millis(),
+                    "app-server executable is temporarily busy; retrying spawn"
+                );
+                sleep(delay).await;
             }
             Err(error) => return Err(error),
         }
@@ -198,16 +204,7 @@ fn rejected_guide(
     live_guide::rejected_guide(guide_id, thread_id, turn_id, reason)
 }
 
-pub(super) async fn run_command(
-    run_id: &str,
-    session_key: Option<&str>,
-    request: &ExternalCliRunRequest,
-    prompt: String,
-    stop_marker_path: PathBuf,
-    progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
-) -> Result<CommandOutput, String> {
-    validate_app_server_transport(request)?;
-    let spec = build_command_spec(request);
+fn app_server_command(spec: &CommandSpec) -> Command {
     let mut command = Command::new(&spec.executable);
     command
         .args(&spec.args)
@@ -223,15 +220,29 @@ pub(super) async fn run_command(
     for (key, value) in &spec.env {
         command.env(key, value);
     }
+    command
+}
 
-    let mut child = spawn_app_server_with_retry(|| command.spawn())
-        .await
-        .map_err(|error| {
-            format!(
-                "spawn {} app-server failed for executable '{}': {error}",
-                request.adapter, spec.executable
-            )
-        })?;
+async fn spawn_app_server(spec: &CommandSpec) -> std::io::Result<tokio::process::Child> {
+    spawn_app_server_with_retry(|| app_server_command(spec).spawn()).await
+}
+
+pub(super) async fn run_command(
+    run_id: &str,
+    session_key: Option<&str>,
+    request: &ExternalCliRunRequest,
+    prompt: String,
+    stop_marker_path: PathBuf,
+    progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
+) -> Result<CommandOutput, String> {
+    validate_app_server_transport(request)?;
+    let spec = build_command_spec(request);
+    let mut child = spawn_app_server(&spec).await.map_err(|error| {
+        format!(
+            "spawn {} app-server failed for executable '{}': {error}",
+            request.adapter, spec.executable
+        )
+    })?;
     let pid = child.id().unwrap_or(0);
     if pid != 0 {
         ACTIVE_RUNS.insert(run_id.to_string(), pid);
@@ -1780,6 +1791,44 @@ mod tests {
         assert!(live_guide::active_handle(&session_key).is_none());
 
         ACTIVE_SESSIONS.remove(&session_key);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn app_server_spawn_retries_linux_text_file_busy() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let executable = temp_dir.path().join("mock-busy-app-server");
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n").expect("write mock executable");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("mock executable metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).expect("chmod mock executable");
+
+        let writable_handle = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&executable)
+            .expect("hold mock executable open for writing");
+        let release_handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(writable_handle);
+        });
+        let spec = CommandSpec {
+            executable: executable.display().to_string(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            work_dir: None,
+            timeout_secs: None,
+        };
+
+        let mut child = spawn_app_server(&spec)
+            .await
+            .expect("ETXTBSY should clear within the bounded retry window");
+        let status = child.wait().await.expect("wait for mock app-server");
+        release_handle.join().expect("release writable handle");
+        assert!(status.success());
     }
 
     #[cfg(unix)]

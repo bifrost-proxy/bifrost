@@ -1377,24 +1377,44 @@
 2. mock 两次都能从 stdin 读取完整原始 prompt 文本并返回 `EXEC_claude-exec`，不会进入 stream-json 解析分支或因非 JSON 输入失败。
 3. guide 响应为 `delivery=queued` 且 reason 包含 `exec transport`；两轮 `run_finished` 都成功，排队消息没有丢失或重复。
 
-### TC-IEC-65: App-server executable 瞬态占用时有界重试
+### TC-IEC-65: Linux app-server `ETXTBSY` 有界重试
 
 操作步骤：
-1. 执行：
+
+1. 执行注入瞬态 `ETXTBSY` 与非瞬态 `NotFound` 的确定性回归：
    ```bash
-   cargo test -p bifrost-admin app_server_spawn_ -- --nocapture
-   cargo test -p bifrost-admin mock_app_server_accepts_live_guide_and_completes_same_turn -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     app_server_spawn_ --lib -- --nocapture
    ```
-2. 检查瞬态 `Text file busy` 与非瞬态 `NotFound` 两条分支的尝试次数。
+2. 在 Linux 执行故意保持 mock app-server 可执行文件写句柄、延迟释放的真实 spawn 回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     app_server_spawn_retries_linux_text_file_busy \
+     --lib -- --nocapture
+   ```
+3. 执行触发原 CI 失败的 app-server Live Guide 单测：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     mock_app_server_accepts_live_guide_and_completes_same_turn \
+     --lib -- --nocapture
+   ```
+4. 使用当前源码二进制执行隔离 app-server 黑盒链路：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_external_runner_live_guide.sh
+   ```
+5. 推送后确认 PR 的 `Coverage (Unit + Proxy E2E) & 90% Gate` job 通过。
 
 预期结果：
-1. Unix `ETXTBSY` 前两次失败、第三次成功时返回成功且总尝试次数为 3。
-2. 非瞬态 executable 不存在错误立即返回，尝试次数为 1。
-3. mock Codex app-server 仍能在同一 turn 接受 Guide 并正常收尾，不因重试逻辑重复创建 thread/turn。
+
+1. Unix `ETXTBSY` 前两次失败、第三次成功时返回成功；Linux 真实 spawn 在写句柄释放后同样成功。启动层以 5ms 线性递增退避，最多尝试 8 次、总等待不超过 140ms。
+2. 非 `ETXTBSY` 错误只尝试一次；成功 spawn 后不做第二次启动，避免重复 thread 或副作用。
+3. Live Guide 与真实临时服务 E2E 保持通过，运行结束后不残留 active run/session。
+4. coverage job 不再因该 mock app-server 测试的 `ETXTBSY` 瞬态失败而中断，并继续执行 90% gate。
 
 ## 最近执行记录
 
-- 2026-07-15：针对 PR #394 coverage job 的 Linux `Text file busy (os error 26)` 新增并立即执行 TC-IEC-65。`cargo test -p bifrost-admin app_server_spawn_ -- --nocapture` 输出 `2 passed`，确定性验证 Unix `ETXTBSY` 前两次失败后第三次成功、`NotFound` 仅尝试一次；`cargo test -p bifrost-admin mock_app_server_accepts_live_guide_and_completes_same_turn -- --nocapture` 输出 `1 passed`，mock app-server 仍在同一 turn 接受 Guide 并正常清理 run/session。
+- 2026-07-15：针对 PR #394 coverage job 的 Linux `Text file busy (os error 26)` 新增并立即执行 TC-IEC-65。注入回归验证 Unix `ETXTBSY` 前两次失败后第三次成功、`NotFound` 仅尝试一次；本机 macOS 按平台预期过滤 Linux 真实 spawn 用例，原失败用例 `mock_app_server_accepts_live_guide_and_completes_same_turn` 输出 `1 passed`；重新构建当前源码二进制后，`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh` 输出 `[external-runner-live-guide] PASS`。Linux 持有写句柄的真实回归与 90% coverage gate 由 PR CI 在目标平台执行并作为本用例最终门禁。
 - 2026-07-13：针对 PR #377 自动 Review 的 Claude 显式 exec stdin 兼容问题新增并立即执行 TC-IEC-64。单元回归输出 `1 passed`；真实临时 Bifrost E2E 输出 `[external-runner-live-guide] PASS`。mock 记录两次 `claude-exec` 均带 `--input-format text` 且不含 `--replay-user-messages`，首轮 guide 返回 `delivery=queued`，两轮均返回 `EXEC_claude-exec`。
 - 2026-07-13：针对 PR #377 Linux `E2E Shell` 失败新增并立即执行 TC-IEC-63。修复前同一命令稳定在 Python 第 246 行收到 `stream-json runner timed out after 30 seconds`；修复 mock Claude 从等待 stdin EOF 改为消费一条初始 user JSONL frame 后，`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_traex_model_slash.sh` 输出 `[im-gateway-model-slash] PASS`。Codex、Traex、Claude Code 的 model 与 effort 六次真实临时服务运行全部通过，Claude run 为 `1783925191553-f1ad8e07-13b0-44c3-b237-c05cedac9305`、effort run 为 `1783925198233-c9920e47-70ea-4976-bbae-d38932762e75`，无 30 秒超时。
 - 2026-07-12：新增并立即执行 TC-IEC-61。两个 focused Rust 单测分别输出 `1 passed`；`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_codex_capacity_retry.sh` 输出 `[codex-capacity-retry] PASS`。隔离 mock app-server 验证首次 `serverOverloaded` 后在同一 thread 第二次成功、持续容量错误 3 次重试后失败、普通错误不重试、已有 assistant delta 后不重试；成功 run 未输出中间 `run_failed`，并持久化 `runner.capacityRetryCount=1`。
