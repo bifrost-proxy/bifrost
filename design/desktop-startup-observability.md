@@ -187,7 +187,7 @@ $BIFROST_DATA_DIR/
 ## 未落地部分（保持不写成事实）
 
 - **Web 侧 `#startup-splash` 骨架**：桌面启动视觉仍是 native launcher overlay + host window handoff；没有单独的 web 层 splash。前端只需订阅 `desktop://handoff-complete` 事件把自身 loading 状态清掉。
-- **结构化 log**：`desktop-bootstrap.log` 仍是自由文本，不是 JSON。诊断复杂问题时需要人肉阅读。
+- **结构化 log**：`desktop-bootstrap.log` 仍是自由文本，不是 JSON，而且多次启动共用追加文件、没有独立 session ID。诊断复杂问题时需要按时间人工关联。
 
 以上都是明确的“非目标”，需要新增能力时再单独文档化。
 
@@ -312,6 +312,7 @@ $BIFROST_DATA_DIR/
 - 桌面壳层直接写文本日志而非 tracing：优先保证 sidecar tracing 未就绪时也有轨迹；未来可以引入更结构化的 pipeline，但需保持“无 tracing 依赖”的兜底能力。
 - sidecar stdout / stderr 采用 `create + append`：多次启动会持续追加，长期可能变大。日志保留策略只按天数删除，未按 size 截断；可接受，若产生问题可加 size cap。
 - `record_startup_error` 触发 `request_desktop_shutdown`（bootstrap 完全失败时）：让用户看到错误弹窗后进程退出，避免长期黑屏。若产品希望允许失败后继续 launcher-only 展示，可在未来解耦。
-- 桌面壳层未做“快速失败”优化：`wait_for_backend` 首次 wait 阶段仍要 20s，用户在 sidecar 立即 panic 时会等一段时间。已通过 watchdog 侧的 `poll_managed_backend_exit` 兜底，但不在首启动路径。若成为 P0 问题再补短路。
+- `wait_for_backend` 已在 sidecar 提前退出时立即短路，因此立即 panic 不再消耗完整的 20 秒 readiness timeout。sidecar 保持存活但死锁时仍只能由 30 秒 launcher deadline 兜底；日志可通过最后一个已完成的 sidecar 启动 phase 缩小范围，但精确到线程的根因仍可能需要 macOS sample/spindump。
+- 应用日志不记录 macOS Application Firewall 的用户决策、LaunchServices 终止原因或第三方安全软件动作。涉及这些系统层的事故，除 `~/.bifrost/logs/` 外还必须收集同时间段的 macOS Unified Log，以及存在时的 `~/Library/Logs/DiagnosticReports/` 产物。
 - `desktop-config.json` 与 daemon runtime marker 共用 `~/.bifrost`：CLI 用户可能看到额外的 `desktop-config.json`，但结构简单不会破坏 CLI；反过来桌面端也能读到 CLI 生成的 `bifrost.pid` / `runtime.json` 用于复用现有 backend。
 - 未做结构化 JSON 日志：诊断复杂问题需人肉阅读。若接入分布式排障工具再评估。
