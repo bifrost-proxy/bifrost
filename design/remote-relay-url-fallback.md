@@ -13,7 +13,7 @@
 
 - CI / 沙箱 / macOS Launch Agent 首次拉起 remote 命令时必然失败；
 - 用户即使把 relay URL 写入 `config.toml` 也无法跳过 `bifrost start`；
-- 内部默认 relay `https://bifrost.bytedance.net` 每次都得手动传，与 `SyncConfig::default()` 硬编码不一致。
+- 内部默认 relay `https://bifrost.example.com` 每次都得手动传，与 `SyncConfig::default()` 硬编码不一致。
 
 ## 用户目标验证清单
 
@@ -23,7 +23,7 @@
   1. CLI 显式参数 `--relay-url`
   2. 正在运行的本地 Bifrost 实例中的 `sync.remote_base_url`（`/_bifrost/api/sync/status`）
   3. 本地配置文件 `config.toml` 中的 `sync.remote_base_url`
-  4. 默认常量 `bifrost_storage::DEFAULT_REMOTE_BASE_URL`（`https://bifrost.bytedance.net`）
+  4. 默认常量 `bifrost_storage::DEFAULT_REMOTE_BASE_URL`（`https://bifrost.example.com`）
 - 空字符串 / 空白字符视为“未配置”，跳过该层。
 - 默认值仅在前三层都未命中时生效；不能把默认值误判为“配置层命中”。
 - “运行环境”明确指本地 Bifrost 服务，不引入任何环境变量兜底。
@@ -71,7 +71,7 @@ Relay URL 是一个纯读的字符串配置：
 `crates/bifrost-storage/src/lib.rs` 暴露：
 
 ```rust
-pub const DEFAULT_REMOTE_BASE_URL: &str = "https://bifrost.bytedance.net";
+pub const DEFAULT_REMOTE_BASE_URL: &str = "https://bifrost.example.com";
 ```
 
 供以下位置复用（`grep DEFAULT_REMOTE_BASE_URL`）：

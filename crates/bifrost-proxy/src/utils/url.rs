@@ -588,7 +588,7 @@ mod tests {
             protocol: Protocol::Http,
             value: "127.0.0.1:8999/approvals".to_string(),
             pattern:
-                "^https://cdn-tos-cn.bytedance.net/obj/archi/obj/okrx-web/approvals-web/1.0.0.*/index.html"
+                "^https://cdn.example.com/obj/archi/obj/okrx-web/approvals-web/1.0.0.*/index.html"
                     .to_string(),
             options: std::collections::HashMap::new(),
             line: Some(1),

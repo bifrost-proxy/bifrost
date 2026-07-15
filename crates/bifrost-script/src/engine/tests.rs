@@ -693,9 +693,9 @@ async fn test_build_in_bp_decodes_next_agent_http_rpc_response() {
             format!("http://{addr}").replace(':', "%3A").replace('/', "%2F")
         );
     let request = RequestData {
-        url: "https://nextoncall.bytedance.net/api/nextagent/v1/healthz".to_string(),
+        url: "https://app.example.com/api/nextagent/v1/healthz".to_string(),
         method: "GET".to_string(),
-        host: "nextoncall.bytedance.net".to_string(),
+        host: "app.example.com".to_string(),
         path: "/api/nextagent/v1/healthz".to_string(),
         protocol: "https".to_string(),
         ..Default::default()

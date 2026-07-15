@@ -11,7 +11,7 @@ Bifrost 的路径通配 matcher 使用 `^` 前缀，例如：
 历史用户还写过带 scheme 前缀的路径通配规则：
 
 ```text
-^https://cdn-tos-cn.bytedance.net/obj/archi/obj/okrx-web/approvals-web/1.0.0.*/index.html
+^https://cdn.example.com/obj/archi/obj/okrx-web/approvals-web/1.0.0.*/index.html
 ```
 
 早期 `PathWildcardMatcher` 只识别裸 host，没有 scheme 感知，用户不得不手动删掉 `https://`。目标是让 matcher 无损兼容带 scheme 的历史规则，同时允许 `http*://` 与 `//` 表示 scheme 通配，避免破坏既有 `^example.com/...` 语义。
@@ -58,7 +58,7 @@ Bifrost 的路径通配 matcher 使用 `^` 前缀，例如：
 带 scheme 的 `^...` 路径通配转发到含 path 的目标时，目标 path 视为绝对结果，不再拼接原请求 path。示例：
 
 ```text
-^https://cdn-tos-cn.bytedance.net/obj/archi/obj/okrx-web/approvals-web/1.0.0.*/index.html \
+^https://cdn.example.com/obj/archi/obj/okrx-web/approvals-web/1.0.0.*/index.html \
   http://127.0.0.1:8999/approvals
 ```
 

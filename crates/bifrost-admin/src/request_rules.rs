@@ -1295,12 +1295,12 @@ mod tests {
     #[test]
     fn test_apply_forward_rule_from_path_wildcard_uses_exact_target_path() {
         let rules = parse_rules(
-            "^https://cdn-tos-cn.bytedance.net/obj/archi/obj/okrx-web/approvals-web/1.0.0.*/index.html http://127.0.0.1:8999/approvals",
+            "^https://cdn.example.com/obj/archi/obj/okrx-web/approvals-web/1.0.0.*/index.html http://127.0.0.1:8999/approvals",
         )
         .unwrap();
         let resolver = RulesResolver::new(rules);
         let ctx = RequestContext::from_url(
-            "https://cdn-tos-cn.bytedance.net/obj/archi/obj/okrx-web/approvals-web/1.0.0.3505/index.html",
+            "https://cdn.example.com/obj/archi/obj/okrx-web/approvals-web/1.0.0.3505/index.html",
         )
         .with_method("GET");
         let resolved_rules = resolver.resolve(&ctx);

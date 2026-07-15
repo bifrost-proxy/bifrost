@@ -1831,7 +1831,7 @@ mod tests {
     fn remote_invoke_workers_track_single_and_dual_channel_relays() {
         let harness = crate::test_support::TestAdminState::builder().build();
         let state = harness.state();
-        let bytedance = make_remote_invoke_worker(&harness, "https://bifrost.bytedance.net");
+        let bytedance = make_remote_invoke_worker(&harness, "https://bifrost.example.com");
         let cloud = make_remote_invoke_worker(&harness, "https://sync.example.test");
 
         state.set_remote_invoke_workers(vec![bytedance.clone(), cloud.clone()]);
@@ -1845,14 +1845,14 @@ mod tests {
             .remote_invoke_worker_for_relay_url("https://sync.example.test/")
             .is_some());
 
-        state.stop_remote_invoke_workers_except(&["https://bifrost.bytedance.net".to_string()]);
+        state.stop_remote_invoke_workers_except(&["https://bifrost.example.com".to_string()]);
 
         assert_eq!(state.remote_invoke_workers().len(), 1);
         assert!(state
             .remote_invoke_worker_for_relay_url("https://sync.example.test")
             .is_none());
         assert!(state
-            .remote_invoke_worker_for_relay_url("https://bifrost.bytedance.net")
+            .remote_invoke_worker_for_relay_url("https://bifrost.example.com")
             .is_some());
 
         state.upsert_remote_invoke_worker(cloud.clone());

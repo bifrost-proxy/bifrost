@@ -334,7 +334,7 @@ fn sync_login_direct_options_parse() {
     assert!(help.contains("--token"), "sync login should have --token");
     assert!(help.contains("--url"), "sync login should have --url");
     assert!(
-        help.contains("https://bifrost.bytedance.net/v4/sso/token-login"),
+        help.contains("https://bifrost.example.com/v4/sso/token-login"),
         "sync login help should explain where to get a token"
     );
 
@@ -401,7 +401,7 @@ fn sync_login_direct_options_parse() {
         "--token",
         "ci-token",
         "--url",
-        "https://bifrost.bytedance.net",
+        "https://bifrost.example.com",
     ])
     .expect("sync login direct options should parse");
 
@@ -414,7 +414,7 @@ fn sync_login_direct_options_parse() {
                 },
         }) => {
             assert_eq!(token, "ci-token");
-            assert_eq!(url, "https://bifrost.bytedance.net");
+            assert_eq!(url, "https://bifrost.example.com");
         }
         _ => panic!("expected sync login command"),
     }
@@ -430,7 +430,7 @@ fn top_level_login_options_parse_like_sync_login() {
         "login help should explain sync login equivalence"
     );
     assert!(
-        help.contains("https://bifrost.bytedance.net/v4/sso/token-login"),
+        help.contains("https://bifrost.example.com/v4/sso/token-login"),
         "login help should explain where to get a token"
     );
 
@@ -486,7 +486,7 @@ fn top_level_login_options_parse_like_sync_login() {
         "--token",
         "ci-token",
         "--url",
-        "https://bifrost.bytedance.net",
+        "https://bifrost.example.com",
     ])
     .expect("top-level login direct options should parse");
 
@@ -496,7 +496,7 @@ fn top_level_login_options_parse_like_sync_login() {
             url: Some(url),
         }) => {
             assert_eq!(token, "ci-token");
-            assert_eq!(url, "https://bifrost.bytedance.net");
+            assert_eq!(url, "https://bifrost.example.com");
         }
         _ => panic!("expected top-level login command"),
     }

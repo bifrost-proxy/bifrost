@@ -347,7 +347,7 @@ impl Default for RemoteInvokeConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            relay_url: "https://bifrost.bytedance.net".to_string(),
+            relay_url: "https://bifrost.example.com".to_string(),
             sse_keepalive_ms: default_sse_keepalive_ms(),
             pair_code_ttl_secs: default_pair_code_ttl_secs(),
             max_active_calls: default_max_active_calls(),

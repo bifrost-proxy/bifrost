@@ -244,11 +244,11 @@ mod tests {
     fn sync_token_login_url_uses_default_provider_when_remote_is_missing() {
         assert_eq!(
             sync_token_login_url(None),
-            "https://bifrost.bytedance.net/v4/sso/token-login"
+            "https://bifrost.example.com/v4/sso/token-login"
         );
         assert_eq!(
             sync_token_login_url(Some("   ")),
-            "https://bifrost.bytedance.net/v4/sso/token-login"
+            "https://bifrost.example.com/v4/sso/token-login"
         );
     }
 

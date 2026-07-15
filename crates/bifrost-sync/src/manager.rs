@@ -226,8 +226,8 @@ pub struct SyncRuntimeState {
     pub last_error: Option<String>,
 }
 
-fn is_bytedance_remote(remote_base_url: &str) -> bool {
-    remote_base_url.contains("bytedance.net")
+fn is_managed_remote(remote_base_url: &str) -> bool {
+    normalize_remote_base_url(remote_base_url) == normalize_remote_base_url(DEFAULT_REMOTE_BASE_URL)
 }
 
 fn normalize_remote_base_url(remote_base_url: &str) -> String {
@@ -239,7 +239,7 @@ fn provider_id_for_remote(remote_base_url: &str) -> Option<&'static str> {
     if normalized.is_empty() {
         return None;
     }
-    if is_bytedance_remote(&normalized) {
+    if is_managed_remote(&normalized) {
         Some("bytedance_internal")
     } else {
         Some("bifrost_cloud")
@@ -369,7 +369,7 @@ fn build_provider_statuses(
         .remote_base_url
         .trim_end_matches('/')
         .to_string();
-    let bytedance_selected = is_bytedance_remote(&current_url);
+    let bytedance_selected = is_managed_remote(&current_url);
     let cloud_selected = !bytedance_selected && !current_url.is_empty();
     let legacy_current_connected =
         provider_sessions.is_empty() && has_session && runtime.authorized;
@@ -3432,7 +3432,7 @@ mod tests {
     #[tokio::test]
     async fn server_auto_sync_cooldown_skips_probe_ticks_but_allows_forced_changes() {
         let (_temp, _config_manager, manager) =
-            sync_manager_for_remote("https://bifrost.bytedance.net").await;
+            sync_manager_for_remote("https://bifrost.example.com").await;
 
         assert!(manager.should_run_server_auto_sync("bytedance_internal", false));
 
@@ -3451,9 +3451,9 @@ mod tests {
     #[tokio::test]
     async fn server_config_sync_action_updates_last_changed_only_for_content_changes() {
         let (_temp, _config_manager, manager) =
-            sync_manager_for_remote("https://bifrost.bytedance.net").await;
+            sync_manager_for_remote("https://bifrost.example.com").await;
         let sync_config = SyncConfig {
-            remote_base_url: "https://bifrost.bytedance.net".to_string(),
+            remote_base_url: "https://bifrost.example.com".to_string(),
             ..Default::default()
         };
 
@@ -3705,11 +3705,15 @@ mod tests {
     fn provider_and_github_gist_helpers_cover_routing_edges() {
         assert_eq!(provider_id_for_remote("   "), None);
         assert_eq!(
-            provider_id_for_remote("https://bifrost.bytedance.net/"),
+            provider_id_for_remote("https://bifrost.example.com/"),
             Some("bytedance_internal")
         );
         assert_eq!(
             provider_id_for_remote("https://sync.example.test/"),
+            Some("bifrost_cloud")
+        );
+        assert_eq!(
+            provider_id_for_remote("https://api.example.com/"),
             Some("bifrost_cloud")
         );
 
@@ -4919,7 +4923,7 @@ mod tests {
         manager
             .save_login_session(
                 "  ci-token  ".to_string(),
-                "https://bifrost.bytedance.net/".to_string(),
+                "https://bifrost.example.com/".to_string(),
             )
             .await
             .unwrap();
@@ -4928,7 +4932,7 @@ mod tests {
         let status = manager.status().await;
         assert!(config.sync.auto_sync);
         assert!(config.sync.enabled);
-        assert_eq!(config.sync.remote_base_url, "https://bifrost.bytedance.net");
+        assert_eq!(config.sync.remote_base_url, "https://bifrost.example.com");
         assert!(status.has_session);
         assert_eq!(manager.state.lock().token.as_deref(), Some("ci-token"));
     }

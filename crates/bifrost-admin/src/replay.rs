@@ -1038,13 +1038,13 @@ mod tests {
         let candidates = vec![
             AuthCandidate {
                 id: "old".into(),
-                host: "bits.bytedance.net".into(),
+                host: "api.example.com".into(),
                 headers: vec![("Authorization".into(), "Bearer old".into())],
                 recency: 100,
             },
             AuthCandidate {
                 id: "new".into(),
-                host: "bits.bytedance.net".into(),
+                host: "api.example.com".into(),
                 headers: vec![
                     ("Authorization".into(), "Bearer new".into()),
                     ("Cookie".into(), "sid=abc".into()),
@@ -1059,7 +1059,7 @@ mod tests {
                 recency: 999,
             },
         ];
-        let (id, hs) = find_refresh_auth_source(&candidates, "BITS.BYTEDANCE.NET").unwrap();
+        let (id, hs) = find_refresh_auth_source(&candidates, "api.example.com").unwrap();
         assert_eq!(id, "new");
         let names: Vec<String> = hs.iter().map(|(k, _)| k.clone()).collect();
         assert!(names.contains(&"Authorization".to_string()));
@@ -1133,7 +1133,7 @@ mod tests {
     #[tokio::test]
     async fn replay_request_with_refresh_auth_applies_authorization_and_cookie() {
         let client = MockClient {
-            expected_url: "https://bits.bytedance.net/api/foo".to_string(),
+            expected_url: "https://api.example.com/api/foo".to_string(),
             expected_method: "GET".to_string(),
             captured_body: std::sync::Mutex::new(None),
             captured_headers: std::sync::Mutex::new(None),
@@ -1145,7 +1145,7 @@ mod tests {
         };
         let candidates = vec![AuthCandidate {
             id: "src-1".into(),
-            host: "bits.bytedance.net".into(),
+            host: "api.example.com".into(),
             headers: vec![
                 ("Authorization".into(), "Bearer FRESH".into()),
                 ("Cookie".into(), "sid=z".into()),
@@ -1160,7 +1160,7 @@ mod tests {
         let result = replay_request(
             &client,
             "GET",
-            "https://bits.bytedance.net/api/foo",
+            "https://api.example.com/api/foo",
             &[("Authorization".into(), "Bearer STALE".into())],
             b"",
             &opts,

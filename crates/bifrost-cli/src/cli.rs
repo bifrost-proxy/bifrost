@@ -648,12 +648,12 @@ previous runtime settings."
             "remote URL, which defaults to the built-in Bifrost provider.\n",
             "\n",
             "Get a token from:\n",
-            "  https://bifrost.bytedance.net/v4/sso/token-login\n",
+            "  https://bifrost.example.com/v4/sso/token-login\n",
             "\n",
             "EXAMPLES:\n",
             "  bifrost login\n",
             "  bifrost login --token \"$BIFROST_SYNC_TOKEN\"\n",
-            "  bifrost login --token \"$BIFROST_SYNC_TOKEN\" --url https://bifrost.bytedance.net",
+            "  bifrost login --token \"$BIFROST_SYNC_TOKEN\" --url https://bifrost.example.com",
         )
     )]
     Login {
@@ -662,7 +662,7 @@ previous runtime settings."
             value_name = "TOKEN",
             num_args = 0..=1,
             default_missing_value = "",
-            help = "Sync session token for non-interactive login; get one at https://bifrost.bytedance.net/v4/sso/token-login"
+            help = "Sync session token for non-interactive login; get one at https://bifrost.example.com/v4/sso/token-login"
         )]
         token: Option<String>,
         #[arg(
@@ -2591,12 +2591,12 @@ pub enum SyncCommands {
             "Bifrost provider.\n",
             "\n",
             "Get a token from:\n",
-            "  https://bifrost.bytedance.net/v4/sso/token-login\n",
+            "  https://bifrost.example.com/v4/sso/token-login\n",
             "\n",
             "EXAMPLES:\n",
             "  bifrost sync login\n",
             "  bifrost sync login --token \"$BIFROST_SYNC_TOKEN\"\n",
-            "  bifrost sync login --token \"$BIFROST_SYNC_TOKEN\" --url https://bifrost.bytedance.net",
+            "  bifrost sync login --token \"$BIFROST_SYNC_TOKEN\" --url https://bifrost.example.com",
         )
     )]
     Login {
@@ -2605,7 +2605,7 @@ pub enum SyncCommands {
             value_name = "TOKEN",
             num_args = 0..=1,
             default_missing_value = "",
-            help = "Sync session token for non-interactive login; get one at https://bifrost.bytedance.net/v4/sso/token-login"
+            help = "Sync session token for non-interactive login; get one at https://bifrost.example.com/v4/sso/token-login"
         )]
         token: Option<String>,
         #[arg(

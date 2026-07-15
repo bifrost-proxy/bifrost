@@ -38,7 +38,7 @@ Bifrost 需要一条“等待并捕获下一条匹配请求”的能力。真实
 
 ### 必须真实验证
 
-- 真跑一次：`bifrost capture wait --host bits.bytedance.net --method POST --path /api/widget --open <url> --timeout 2m`，浏览器被打开触发操作后，CLI 输出命中记录。
+- 真跑一次：`bifrost capture wait --host api.example.com --method POST --path /api/widget --open <url> --timeout 2m`，浏览器被打开触发操作后，CLI 输出命中记录。
 - 无匹配：等待到超时，退出码 `124`。
 - 并发：两个 `subscribe_once` 用不同 matcher 同时等，各自命中不同流量。
 - 服务端未跑：CLI 打印明确错误信息，非 `panic`。
@@ -95,7 +95,7 @@ HTTP handler 把命中 record 通过 store.get_by_id() 拿到完整 TrafficRecor
 
 ```json
 {
-  "host_contains": "bits.bytedance.net",
+  "host_contains": "api.example.com",
   "method": "POST",
   "path_contains": "/api/widget",
   "req_json": [{"path": "$.chart_name", "value": "Commit基本信息"}],
@@ -189,7 +189,7 @@ pub enum CaptureOutputFormat { Human, Json }
 ## CLI 交互
 
 ```
-bifrost capture wait --host bits.bytedance.net --method POST --path /api/widget --timeout 2m
+bifrost capture wait --host api.example.com --method POST --path /api/widget --timeout 2m
 bifrost capture wait --host example.com --open https://example.com/dashboard --format json
 bifrost capture wait --path /api/login --format human
 bifrost capture wait --path /api/never --timeout 10s        # 超时退 124
@@ -200,7 +200,7 @@ human 输出示例：
 
 ```
 [capture] matched in 3210ms (scanned 5 records)
-POST https://bits.bytedance.net/api/widget?token=…
+POST https://api.example.com/api/widget?token=…
   request headers: content-type=application/json, cookie=…
   request body: 1.2 KiB (ref: rb-2b8a…)
   status: 200 OK
