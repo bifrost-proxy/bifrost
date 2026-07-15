@@ -2050,9 +2050,8 @@ fn get_ws_tls_client_config(unsafe_ssl: bool) -> rustls::ClientConfig {
             .with_no_client_auth()
     } else {
         let mut root_store = RootCertStore::empty();
-        let certs = rustls_native_certs::load_native_certs();
-        for cert in certs.certs {
-            let _ = root_store.add(cert);
+        for cert_der in bifrost_core::native_certificates_der().iter() {
+            let _ = root_store.add(rustls::pki_types::CertificateDer::from(cert_der.clone()));
         }
 
         ClientConfig::builder()

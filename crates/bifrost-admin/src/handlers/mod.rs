@@ -15,6 +15,7 @@ pub mod capture;
 pub mod cert;
 pub mod config;
 pub mod devtools;
+pub mod diagnostics;
 pub mod env;
 pub mod frames;
 pub mod group;

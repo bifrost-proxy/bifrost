@@ -262,7 +262,10 @@ async fn install_local_ca(
     .await;
 
     match install_result {
-        Ok(Ok(())) => json_response(&build_cert_info(&state)),
+        Ok(Ok(())) => {
+            bifrost_core::invalidate_native_certificate_cache();
+            json_response(&build_cert_info(&state))
+        }
         Ok(Err(error)) => error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             &format!("Failed to install and trust local CA certificate: {error}"),

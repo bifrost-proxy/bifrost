@@ -1209,6 +1209,18 @@ fn generate_paths() -> serde_json::Value {
                 "responses": {"200": {"description": "Per-host metrics"}}
             }
         },
+        "/api/diagnostics/process-resolver": {
+            "get": {
+                "tags": ["Diagnostics"],
+                "summary": "Process resolver diagnostics snapshot",
+                "description": "Returns cumulative, on-demand process resolver counters. These diagnostics are not recorded in metrics history or pushed periodically.",
+                "operationId": "getProcessResolverDiagnostics",
+                "responses": {
+                    "200": {"description": "Process resolver diagnostics"},
+                    "503": {"description": "Process resolver diagnostics are not configured"}
+                }
+            }
+        },
 
         // ═══════════════════════════════════════════════════════
         // Ports
