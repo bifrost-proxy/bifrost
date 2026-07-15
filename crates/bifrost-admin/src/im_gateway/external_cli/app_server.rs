@@ -23,7 +23,8 @@ fn is_retryable_app_server_spawn_error(error: &std::io::Error) -> bool {
 async fn spawn_app_server_with_retry<T>(
     mut spawn: impl FnMut() -> std::io::Result<T>,
 ) -> std::io::Result<T> {
-    for attempt in 1..=APP_SERVER_SPAWN_MAX_ATTEMPTS {
+    let mut attempt = 1;
+    loop {
         match spawn() {
             Ok(child) => return Ok(child),
             Err(error)
@@ -36,15 +37,14 @@ async fn spawn_app_server_with_retry<T>(
                 tracing::warn!(
                     attempt,
                     max_attempts = APP_SERVER_SPAWN_MAX_ATTEMPTS,
-                    delay_ms = delay.as_millis(),
                     "app-server executable is temporarily busy; retrying spawn"
                 );
                 sleep(delay).await;
+                attempt += 1;
             }
             Err(error) => return Err(error),
         }
     }
-    unreachable!("app-server spawn retry loop always returns")
 }
 
 struct AppServerRunCleanup {
@@ -1399,6 +1399,30 @@ mod tests {
 
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
         assert_eq!(attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn app_server_run_reports_spawn_executable_context() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let executable = temp_dir.path().join("missing").join("codex");
+        let mut request = request(DEFAULT_ADAPTER);
+        request.adapter_config.executable = Some(executable.display().to_string());
+
+        let error = run_command(
+            "spawn-error-run",
+            Some("spawn-error-session"),
+            &request,
+            "hello".to_string(),
+            temp_dir.path().join("stop"),
+            None,
+        )
+        .await
+        .expect_err("missing executable should fail before creating app-server state");
+
+        assert!(error.contains("spawn codex app-server failed for executable"));
+        assert!(error.contains(executable.to_string_lossy().as_ref()));
+        assert!(!ACTIVE_RUNS.contains_key("spawn-error-run"));
+        assert!(!ACTIVE_SESSIONS.contains_key("spawn-error-session"));
     }
 
     fn request(adapter: &str) -> ExternalCliRunRequest {
