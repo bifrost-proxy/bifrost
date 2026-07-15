@@ -72,6 +72,10 @@ const DESKTOP_UPGRADE_RELAUNCH_PORT_WAIT: Duration = Duration::from_secs(30);
 const SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV: &str =
     "BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL";
 const DESKTOP_STARTUP_DEADLINE_MS_ENV: &str = "BIFROST_DESKTOP_STARTUP_DEADLINE_MS";
+const DESKTOP_STARTUP_SESSION_ENV: &str = "BIFROST_DESKTOP_STARTUP_SESSION_ID";
+const DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV: &str =
+    "BIFROST_DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES";
+static DESKTOP_BOOTSTRAP_LOG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DesktopConfig {
@@ -122,6 +126,7 @@ struct BackendState {
     binary_path: PathBuf,
     data_dir: PathBuf,
     config_path: PathBuf,
+    startup_session_id: String,
     launcher_only: bool,
     expected_port: Mutex<u16>,
     port: Mutex<u16>,
@@ -293,13 +298,16 @@ fn main() {
             }
         });
 
+    let builder = builder.plugin(tauri_plugin_deep_link::init());
+    let builder = if desktop_test_allows_multiple_instances() {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            handle_cli_file_open_arguments(app, args.into_iter().skip(1), Some(PathBuf::from(cwd)));
+        }))
+    };
+
     builder
-        .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_single_instance::init(
-            |app, args, cwd| {
-                handle_cli_file_open_arguments(app, args.into_iter().skip(1), Some(PathBuf::from(cwd)));
-            },
-        ))
         .invoke_handler(tauri::generate_handler![
             get_desktop_runtime,
             start_desktop_core,
@@ -321,6 +329,7 @@ fn main() {
             let binary_path = resolve_bifrost_binary(app.handle())?;
             let app_data_dir = resolve_desktop_data_dir()?;
             let config_path = resolve_desktop_config_path(&app_data_dir);
+            let startup_session_id = desktop_startup_session_id();
             let app_config_dir = config_path
                 .parent()
                 .map(Path::to_path_buf)
@@ -333,12 +342,30 @@ fn main() {
             append_desktop_bootstrap_log(
                 &app_data_dir,
                 format!(
-                    "desktop setup started; binary_path={} data_dir={} config_dir={}",
+                    "desktop startup session started; session_id={} desktop_pid={} app_version={} target_os={} target_arch={}",
+                    startup_session_id,
+                    std::process::id(),
+                    env!("CARGO_PKG_VERSION"),
+                    std::env::consts::OS,
+                    std::env::consts::ARCH,
+                ),
+            );
+            append_desktop_bootstrap_log(
+                &app_data_dir,
+                format!(
+                    "desktop setup started; session_id={} binary_path={} data_dir={} config_dir={}",
+                    startup_session_id,
                     binary_path.display(),
                     app_data_dir.display(),
                     app_config_dir.display()
                 ),
             );
+            if desktop_test_allows_multiple_instances() {
+                append_desktop_bootstrap_log(
+                    &app_data_dir,
+                    "debug E2E mode enabled; single-instance plugin intentionally disabled",
+                );
+            }
             let config = load_desktop_config(&config_path)?;
             let launcher_only = is_launcher_only_mode();
             let upgrade_relaunch = read_active_upgrade_relaunch_marker(&app_data_dir);
@@ -359,6 +386,7 @@ fn main() {
                 binary_path,
                 data_dir: app_data_dir,
                 config_path,
+                startup_session_id,
                 launcher_only,
                 expected_port: Mutex::new(config.proxy_port),
                 port: Mutex::new(config.proxy_port),
@@ -774,14 +802,20 @@ fn prepare_desktop_certificates(data_dir: &Path) -> Result<CertStatus, String> {
         .map_err(|error| format!("failed to re-check CA trust status: {error}"))
 }
 
-fn start_backend(binary_path: &Path, data_dir: &Path, port: u16) -> tauri::Result<Child> {
+fn start_backend(
+    binary_path: &Path,
+    data_dir: &Path,
+    startup_session_id: &str,
+    port: u16,
+) -> tauri::Result<Child> {
     let stdout_log = open_sidecar_log_file(data_dir, "desktop-sidecar.out.log")?;
     let stderr_log = open_sidecar_log_file(data_dir, "desktop-sidecar.err.log")?;
 
     append_desktop_bootstrap_log(
         data_dir,
         format!(
-            "starting sidecar; binary_path={} data_dir={} port={} stdout_log={} stderr_log={}",
+            "starting sidecar; session_id={} binary_path={} data_dir={} port={} stdout_log={} stderr_log={}",
+            startup_session_id,
             binary_path.display(),
             data_dir.display(),
             port,
@@ -793,13 +827,23 @@ fn start_backend(binary_path: &Path, data_dir: &Path, port: u16) -> tauri::Resul
     let mut command = Command::new(binary_path);
     command
         .args(desktop_backend_start_args(port))
-        .envs(desktop_backend_env(data_dir))
+        .envs(desktop_backend_env(data_dir, startup_session_id))
         .stdout(Stdio::from(stdout_log))
         .stderr(Stdio::from(stderr_log));
     hide_windows_child_console(&mut command);
-    command
+    let child = command
         .spawn()
-        .map_err(|error| anyhow(format!("failed to start backend: {error}")))
+        .map_err(|error| anyhow(format!("failed to start backend: {error}")))?;
+    append_desktop_bootstrap_log(
+        data_dir,
+        format!(
+            "sidecar spawned; session_id={} pid={} port={}",
+            startup_session_id,
+            child.id(),
+            port
+        ),
+    );
+    Ok(child)
 }
 
 fn desktop_backend_start_args(port: u16) -> Vec<String> {
@@ -817,12 +861,48 @@ fn desktop_backend_start_args(port: u16) -> Vec<String> {
     args
 }
 
-fn desktop_backend_env(data_dir: &Path) -> Vec<(&'static str, String)> {
+fn desktop_startup_session_id() -> String {
+    let started_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("{started_at_ms}-{}", std::process::id())
+}
+
+fn desktop_backend_env(data_dir: &Path, startup_session_id: &str) -> Vec<(&'static str, String)> {
     vec![
         ("BIFROST_DATA_DIR", data_dir.to_string_lossy().into_owned()),
         (DESKTOP_CORE_ENV, "1".to_string()),
+        (DESKTOP_STARTUP_SESSION_ENV, startup_session_id.to_string()),
+        ("RUST_LOG", desktop_sidecar_rust_log()),
         (SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV, "1".to_string()),
     ]
+}
+
+fn desktop_sidecar_rust_log() -> String {
+    let inherited = std::env::var("RUST_LOG")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "info".to_string());
+    if inherited
+        .split(',')
+        .any(|directive| directive.trim().starts_with("bifrost_cli::startup="))
+    {
+        inherited
+    } else {
+        format!("{inherited},bifrost_cli::startup=info")
+    }
+}
+
+fn desktop_test_allows_multiple_instances() -> bool {
+    should_allow_multiple_instances(
+        cfg!(debug_assertions),
+        env_flag_enabled(DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV),
+    )
+}
+
+fn should_allow_multiple_instances(debug_build: bool, requested: bool) -> bool {
+    debug_build && requested
 }
 
 fn desktop_no_system_proxy_requested() -> bool {
@@ -1107,6 +1187,7 @@ fn process_is_running(pid: u32) -> bool {
 fn ensure_backend_running(
     binary_path: &Path,
     data_dir: &Path,
+    startup_session_id: &str,
     preferred_port: u16,
     upgrade_relaunch: Option<&DesktopUpgradeRelaunchMarker>,
 ) -> tauri::Result<(Option<Child>, u16)> {
@@ -1140,13 +1221,19 @@ fn ensure_backend_running(
 
     cleanup_existing_backend(binary_path, data_dir)?;
 
-    let (child, port) = launch_backend_on_available_port(binary_path, data_dir, preferred_port)?;
+    let (child, port) = launch_backend_on_available_port(
+        binary_path,
+        data_dir,
+        startup_session_id,
+        preferred_port,
+    )?;
     Ok((Some(child), port))
 }
 
 fn launch_backend_on_available_port(
     binary_path: &Path,
     data_dir: &Path,
+    startup_session_id: &str,
     preferred_port: u16,
 ) -> tauri::Result<(Child, u16)> {
     for offset in 0..=MAX_PORT_INCREMENT_ATTEMPTS {
@@ -1158,7 +1245,7 @@ fn launch_backend_on_available_port(
             continue;
         }
 
-        let mut child = start_backend(binary_path, data_dir, port)?;
+        let mut child = start_backend(binary_path, data_dir, startup_session_id, port)?;
         match wait_for_backend(&mut child, port, Duration::from_secs(20)) {
             Ok(()) => {
                 append_desktop_bootstrap_log(
@@ -1529,7 +1616,13 @@ fn attempt_backend_recovery(app: &AppHandle, reason: &str) {
         }
     };
 
-    match ensure_backend_running(&state.binary_path, &state.data_dir, preferred_port, None) {
+    match ensure_backend_running(
+        &state.binary_path,
+        &state.data_dir,
+        &state.startup_session_id,
+        preferred_port,
+        None,
+    ) {
         Ok((child, port)) => {
             if let Ok(mut child_guard) = state.child.lock() {
                 *child_guard = child;
@@ -1723,6 +1816,7 @@ fn start_desktop_backend_now(app: &AppHandle, reason: &str) -> Result<DesktopRun
     match ensure_backend_running(
         &state.binary_path,
         &state.data_dir,
+        &state.startup_session_id,
         preferred_port,
         upgrade_relaunch.as_ref(),
     ) {
@@ -2744,8 +2838,12 @@ fn restart_backend_on_port(
 
     wait_for_backend_shutdown(current_port, Duration::from_secs(3));
 
-    let (child, actual_port) =
-        launch_backend_on_available_port(&state.binary_path, &state.data_dir, expected_port)?;
+    let (child, actual_port) = launch_backend_on_available_port(
+        &state.binary_path,
+        &state.data_dir,
+        &state.startup_session_id,
+        expected_port,
+    )?;
 
     if let Ok(mut child_guard) = state.child.lock() {
         *child_guard = Some(child);
@@ -2794,6 +2892,10 @@ fn append_desktop_bootstrap_log(data_dir: &Path, message: impl AsRef<str>) {
         return;
     }
     cleanup_desktop_logs_once(data_dir);
+
+    let _write_guard = DESKTOP_BOOTSTRAP_LOG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let log_path = log_dir.join("desktop-bootstrap.log");
     let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) else {
@@ -2907,8 +3009,10 @@ fn is_server_config_response(response_body: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        begin_backend_recovery, clear_backend_unavailable_if_healthy, desktop_backend_env,
-        desktop_backend_start_args, desktop_startup_deadline, desktop_upgrade_relaunch_marker_path,
+        append_desktop_bootstrap_log, begin_backend_recovery, clear_backend_unavailable_if_healthy,
+        desktop_backend_env, desktop_backend_start_args, desktop_sidecar_rust_log,
+        desktop_startup_deadline, desktop_startup_session_id,
+        desktop_test_allows_multiple_instances, desktop_upgrade_relaunch_marker_path,
         host_window_close_behavior_for_platform, is_server_config_response,
         is_upgrade_relaunch_marker_active, main_interface_decorations_for_platform,
         mark_backend_unavailable_for_manual_start, may_reuse_existing_backend,
@@ -2916,10 +3020,12 @@ mod tests {
         read_active_upgrade_relaunch_marker, record_startup_deadline_error,
         relaunch_command_for_target, resolve_bifrost_binary_from_env, resolve_desktop_config_path,
         resolve_desktop_data_dir, sanitize_desktop_upgrade_relaunch_command, save_desktop_config,
-        should_handoff_to_main, should_retry_backend_candidate, startup_deadline_disposition,
-        uses_borderless_desktop_chrome_for_platform, wait_for_backend, wait_for_child_exit,
-        write_upgrade_relaunch_marker, BackendState, BackendWaitFailureKind, DesktopConfig,
-        DesktopUpgradeRelaunchMarker, HostWindowCloseBehavior, StartupDeadlineDisposition,
+        should_allow_multiple_instances, should_handoff_to_main, should_retry_backend_candidate,
+        startup_deadline_disposition, uses_borderless_desktop_chrome_for_platform,
+        wait_for_backend, wait_for_child_exit, write_upgrade_relaunch_marker, BackendState,
+        BackendWaitFailureKind, DesktopConfig, DesktopUpgradeRelaunchMarker,
+        HostWindowCloseBehavior, StartupDeadlineDisposition,
+        DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
     };
     use bifrost_storage::data_dir as shared_bifrost_data_dir;
     use std::ffi::OsStr;
@@ -2929,7 +3035,7 @@ mod tests {
     use std::path::PathBuf;
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -2960,6 +3066,7 @@ mod tests {
             binary_path: PathBuf::new(),
             data_dir: data_dir.clone(),
             config_path: data_dir.join("desktop-config.json"),
+            startup_session_id: "test-session".to_string(),
             launcher_only: false,
             expected_port: Mutex::new(port),
             port: Mutex::new(port),
@@ -3093,9 +3200,83 @@ mod tests {
     }
 
     #[test]
-    fn desktop_sidecar_disables_launchd_cleanup_registration() {
+    fn desktop_startup_session_id_contains_timestamp_and_pid() {
+        let session_id = desktop_startup_session_id();
+        let (timestamp, pid) = session_id
+            .rsplit_once('-')
+            .expect("session id should contain a pid separator");
+
+        assert!(timestamp.parse::<u128>().is_ok());
+        assert_eq!(pid, std::process::id().to_string());
+    }
+
+    #[test]
+    fn multiple_instances_test_override_is_debug_only_and_explicit() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let previous = std::env::var_os(DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV);
+
+        std::env::remove_var(DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV);
+        assert!(!desktop_test_allows_multiple_instances());
+        std::env::set_var(DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV, "1");
+        assert_eq!(
+            desktop_test_allows_multiple_instances(),
+            cfg!(debug_assertions)
+        );
+
+        match previous {
+            Some(value) => std::env::set_var(DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV, value),
+            None => std::env::remove_var(DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV),
+        }
+    }
+
+    #[test]
+    fn release_build_never_allows_multiple_instances() {
+        assert!(!should_allow_multiple_instances(false, false));
+        assert!(!should_allow_multiple_instances(false, true));
+        assert!(!should_allow_multiple_instances(true, false));
+        assert!(should_allow_multiple_instances(true, true));
+    }
+
+    #[test]
+    fn desktop_bootstrap_log_concurrent_writes_remain_line_atomic() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
-        let env = desktop_backend_env(temp_dir.path());
+        let data_dir = Arc::new(temp_dir.path().to_path_buf());
+        let barrier = Arc::new(Barrier::new(8));
+        let mut handles = Vec::new();
+
+        for writer in 0..8 {
+            let data_dir = data_dir.clone();
+            let barrier = barrier.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                for line in 0..25 {
+                    append_desktop_bootstrap_log(
+                        &data_dir,
+                        format!("atomic_test writer={writer} line={line}"),
+                    );
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("log writer thread");
+        }
+
+        let content = fs::read_to_string(temp_dir.path().join("logs/desktop-bootstrap.log"))
+            .expect("bootstrap log");
+        let lines = content.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 200);
+        assert!(lines.iter().all(|line| {
+            line.starts_with("[SystemTime ")
+                && line.matches("atomic_test writer=").count() == 1
+                && line.matches(" line=").count() == 1
+        }));
+    }
+
+    #[test]
+    fn desktop_sidecar_disables_launchd_cleanup_registration() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let env = desktop_backend_env(temp_dir.path(), "session-123");
         let expected_data_dir = temp_dir.path().to_string_lossy().into_owned();
 
         assert!(env.iter().any(|(key, value)| {
@@ -3104,9 +3285,37 @@ mod tests {
         assert!(env
             .iter()
             .any(|(key, value)| *key == "BIFROST_DESKTOP_CORE" && value == "1"));
+        assert!(env.iter().any(|(key, value)| {
+            *key == "BIFROST_DESKTOP_STARTUP_SESSION_ID" && value == "session-123"
+        }));
+        assert!(env.iter().any(|(key, value)| {
+            *key == "RUST_LOG" && value.contains("bifrost_cli::startup=info")
+        }));
         assert!(env
             .iter()
             .any(|(key, value)| { *key == "BIFROST_DATA_DIR" && value == &expected_data_dir }));
+    }
+
+    #[test]
+    fn desktop_sidecar_rust_log_preserves_user_filter_and_startup_info() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let previous = std::env::var_os("RUST_LOG");
+
+        std::env::set_var("RUST_LOG", "warn,hyper=debug");
+        assert_eq!(
+            desktop_sidecar_rust_log(),
+            "warn,hyper=debug,bifrost_cli::startup=info"
+        );
+        std::env::set_var("RUST_LOG", "debug,bifrost_cli::startup=trace");
+        assert_eq!(
+            desktop_sidecar_rust_log(),
+            "debug,bifrost_cli::startup=trace"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("RUST_LOG", value),
+            None => std::env::remove_var("RUST_LOG"),
+        }
     }
 
     #[test]
@@ -3542,6 +3751,7 @@ mod tests {
             binary_path: PathBuf::new(),
             data_dir: PathBuf::new(),
             config_path: PathBuf::new(),
+            startup_session_id: "test-session".to_string(),
             launcher_only: false,
             expected_port: Mutex::new(0),
             port: Mutex::new(0),

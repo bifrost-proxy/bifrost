@@ -114,8 +114,8 @@
 预期结果：
 
 - readiness 等待检测到 sidecar child 退出后立即失败，不等待完整 20 秒，也不顺延到其余候选端口重复尝试。
-- `desktop-bootstrap.log` 包含 `exited before becoming ready`、`desktop backend bootstrap failed`、`starting embedded webview handoff` 和 `embedded webview handoff completed`。
-- `desktop-sidecar.err.log` 保留 stub 的原始 stderr。
+- `desktop-bootstrap.log` 包含唯一 `session_id`、desktop PID、版本/OS/架构、sidecar spawn PID、`exited before becoming ready`、`desktop backend bootstrap failed`、`starting embedded webview handoff` 和 `embedded webview handoff completed`。
+- `desktop-sidecar.err.log` 保留 stub 的原始 stderr，并且其中的 `session_id` 与 bootstrap 日志一致。
 - 桌面进程继续存活，native launcher 在 10 秒内移除，主 WebView 可读取 `startupError` 并展示 “Start Bifrost Service” 重试入口。
 - 测试不复用本机已有 9900 backend，不修改系统代理或用户数据。
 
@@ -161,14 +161,46 @@
 - bootstrap log 明确记录 stale backend stop 失败，并说明拒绝为同一数据目录启动第二个 backend。
 - sidecar stub 只收到一次 `stop`，不得收到 `start` 或其他第二实例启动参数。
 - failure handoff 完成，桌面进程继续存活并向用户暴露可恢复错误。
-- 测试使用临时 `BIFROST_DATA_DIR`，不修改本机服务、系统代理或用户数据。
+- debug 测试使用临时 `BIFROST_DATA_DIR` 和仅 debug 生效的多实例开关，不修改本机服务、系统代理、正式 App 或用户数据。
+
+### TC-DLS-10 正式 App 运行时仍可隔离执行启动诊断回归
+
+操作步骤：
+
+1. 记录当前 `/Applications/Bifrost.app/Contents/MacOS/bifrost-desktop` PID；若本机未安装或未运行正式 App，则记录为不适用但继续后续步骤。
+2. 确认 `desktop/src-tauri/target/debug/bifrost-desktop` 是当前分支最新构建。
+3. 依次执行 `SKIP_BUILD=true e2e-tests/tests/test_desktop_launcher_startup_failure_handoff.sh` 与 `SKIP_BUILD=true e2e-tests/tests/test_desktop_launcher_startup_deadline_handoff.sh`。
+4. 再次检查正式 App PID，并检查两个测试各自临时 `BIFROST_DATA_DIR` 的 bootstrap/sidecar 日志断言结果。
+
+预期结果：
+
+- debug 测试通过 `BIFROST_DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES=1` 仅关闭测试进程的 single-instance plugin，不要求退出或杀死正式 App。
+- release 构建不响应此测试开关，正式产品仍保持 single-instance。
+- 两条 E2E 都能启动隔离 App、完成 failure handoff，并证明 bootstrap 与 sidecar stderr 使用同一 `session_id`。
+- 若测试前存在正式 App，其 PID 在测试后仍存活；测试不改变正式 App 数据目录、9900 服务或系统代理。
+
+### TC-DLS-11 低日志级别下保留启动阶段且 Bootstrap 行不穿插
+
+操作步骤：
+
+1. 执行 `RUST_LOG=warn SKIP_BUILD=true e2e-tests/tests/test_desktop_launcher_startup_no_crash.sh`。
+2. 检查独立数据目录中的 `desktop-bootstrap.log` 与日期化 `bifrost*.log`。
+3. 确认脚本实际使用动态空闲端口拉起当前分支 sidecar，而不是复用正式 9900 backend。
+
+预期结果：
+
+- sidecar 日志保留用户的 `warn` filter，同时仍包含当前 `session_id`、`startup phase started` 与 `startup phase completed`。
+- bootstrap 日志包含 desktop/sidecar PID、版本、OS、架构和相同 `session_id`。
+- bootstrap/watchdog/handoff 并发写入后，每行仍完整匹配单个 `[SystemTime ...] message`，没有两条日志拼接或半行。
+- 正常启动完成 handoff，测试 App 保持存活到观察窗口结束，正式 App 不受影响。
 
 ## 清理步骤
 
 ```bash
-pkill -f bifrost-desktop || true
-bifrost stop || true
-rm -rf "$BIFROST_DATA_DIR"
+# E2E 脚本通过 trap 只终止自身记录的 APP_PID/sidecar PID，并删除自身 mktemp 目录。
+# 手动测试时也只能终止本次记录的 PID；禁止 pkill/killall，以免关闭正式 Bifrost。
+kill "$TEST_APP_PID" 2>/dev/null || true
+rm -rf "$TEST_DATA_DIR"
 ```
 
 ## 执行记录
@@ -184,3 +216,5 @@ rm -rf "$BIFROST_DATA_DIR"
 | 2026-07-15 | TC-DLS-07 | `e2e-tests/tests/test_macos_desktop_architecture_gate.sh`；验证 arm64 thin、arm64+x86_64 universal fixture，再验证缺少 arm64 的 sidecar 被拒绝。 | 通过：thin/universal 包逐个输出 `Validated macOS architecture`，缺失目标架构的包非零退出并包含 `Architecture mismatch`。 |
 | 2026-07-15 | TC-DLS-08 | `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_desktop_launcher_startup_deadline_handoff.sh`；使用 hanging sidecar stub 和 1500ms deadline。 | 通过：输出 `PASS: launcher deadline exposed a recoverable startup error instead of hanging indefinitely`；日志记录 deadline exceeded、startup error 与 handoff completed，进程保持存活。 |
 | 2026-07-15 | TC-DLS-09 | `SKIP_BUILD=true e2e-tests/tests/test_desktop_stale_backend_stop_failure_handoff.sh`；使用 stop exit 17 stub、runtime marker 与独立数据目录。 | 通过：stub 只收到一次 `stop`；bootstrap log 记录拒绝第二实例、startup error 与 handoff completed；桌面进程保持存活。 |
+| 2026-07-15 | TC-DLS-10 | 先记录正式 App PID `15260`，再依次执行 `SKIP_BUILD=true e2e-tests/tests/test_desktop_launcher_startup_failure_handoff.sh` 与 `SKIP_BUILD=true e2e-tests/tests/test_desktop_launcher_startup_deadline_handoff.sh`，最后复查正式 App PID。 | 通过：两条测试分别输出 failure handoff / deadline handoff PASS；debug App 在正式 App 同时运行时成功启动，bootstrap 与 sidecar stderr 的 session ID 断言通过；正式 App PID 前后均为 `15260`，未被测试终止。 |
+| 2026-07-15 | TC-DLS-11 | 正式 App PID `15260` 运行时执行 `RUST_LOG=warn SKIP_BUILD=true e2e-tests/tests/test_desktop_launcher_startup_no_crash.sh`，断言独立端口、session/phase 日志和 bootstrap 行格式。 | 通过：输出 `PASS: bifrost-desktop stayed alive through launcher handoff startup window`；`warn` 环境下仍保留 startup info，所有 bootstrap 行满足单行格式，正式 App PID 前后保持 `15260`。 |

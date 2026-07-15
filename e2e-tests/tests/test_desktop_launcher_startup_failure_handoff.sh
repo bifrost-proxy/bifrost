@@ -32,7 +32,10 @@ fi
 TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-desktop-startup-failure.XXXXXX")"
 APP_LOG="$TEST_DIR/bifrost-desktop.log"
 STUB_BIN="$TEST_DIR/bifrost-failing-sidecar"
-printf '%s\n' '#!/bin/sh' 'echo "simulated sidecar startup failure" >&2' 'exit 42' >"$STUB_BIN"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'echo "simulated sidecar startup failure; session_id=${BIFROST_DESKTOP_STARTUP_SESSION_ID:-missing}" >&2' \
+  'exit 42' >"$STUB_BIN"
 chmod +x "$STUB_BIN"
 
 cleanup() {
@@ -50,6 +53,7 @@ export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
 export BIFROST_DISABLE_TRAY=1
 export BIFROST_DESKTOP_NO_SYSTEM_PROXY=1
 export BIFROST_DESKTOP_SKIP_CERT_PREFLIGHT=1
+export BIFROST_DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES=1
 export BIFROST_DATA_DIR="$TEST_DIR/data"
 mkdir -p "$BIFROST_DATA_DIR"
 TEST_PORT="$(/usr/bin/python3 <<'PY'
@@ -98,7 +102,17 @@ if [[ ! -f "$BOOTSTRAP_LOG" ]]; then
   exit 1
 fi
 
+SESSION_ID="$(sed -n 's/.*desktop startup session started; session_id=\([^ ]*\).*/\1/p' "$BOOTSTRAP_LOG" | tail -1)"
+if [[ -z "$SESSION_ID" ]]; then
+  echo "FAIL: desktop bootstrap log did not expose a startup session id"
+  tail -160 "$BOOTSTRAP_LOG" || true
+  exit 1
+fi
+
 for expected in \
+  "desktop setup started; session_id=$SESSION_ID" \
+  "starting sidecar; session_id=$SESSION_ID" \
+  "sidecar spawned; session_id=$SESSION_ID" \
   "exited before becoming ready" \
   "desktop backend bootstrap failed" \
   "starting embedded webview handoff" \
@@ -117,7 +131,7 @@ if (( elapsed >= 10 )); then
   exit 1
 fi
 
-if ! grep -Fq "simulated sidecar startup failure" "$BIFROST_DATA_DIR/logs/desktop-sidecar.err.log"; then
+if ! grep -Fq "simulated sidecar startup failure; session_id=$SESSION_ID" "$BIFROST_DATA_DIR/logs/desktop-sidecar.err.log"; then
   echo "FAIL: sidecar stderr did not retain the startup failure"
   exit 1
 fi

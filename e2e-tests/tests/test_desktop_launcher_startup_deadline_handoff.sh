@@ -21,7 +21,10 @@ fi
 
 TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-desktop-startup-deadline.XXXXXX")"
 STUB_BIN="$TEST_DIR/bifrost-hanging-sidecar"
-printf '%s\n' '#!/bin/sh' 'sleep 30' >"$STUB_BIN"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'echo "simulated hanging sidecar; session_id=${BIFROST_DESKTOP_STARTUP_SESSION_ID:-missing}" >&2' \
+  'sleep 30' >"$STUB_BIN"
 chmod +x "$STUB_BIN"
 
 cleanup() {
@@ -41,6 +44,7 @@ export BIFROST_DESKTOP_NO_SYSTEM_PROXY=1
 export BIFROST_DESKTOP_SKIP_CERT_PREFLIGHT=1
 export BIFROST_DISABLE_TRAY=1
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
+export BIFROST_DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES=1
 export BIFROST_DATA_DIR="$TEST_DIR/data"
 mkdir -p "$BIFROST_DATA_DIR"
 TEST_PORT="$(/usr/bin/python3 <<'PY'
@@ -81,7 +85,17 @@ for _ in $(seq 1 28); do
   sleep 0.25
 done
 
+SESSION_ID="$(sed -n 's/.*desktop startup session started; session_id=\([^ ]*\).*/\1/p' "$BOOTSTRAP_LOG" | tail -1)"
+if [[ -z "$SESSION_ID" ]]; then
+  echo "FAIL: desktop bootstrap log did not expose a startup session id"
+  tail -180 "$BOOTSTRAP_LOG" 2>/dev/null || true
+  exit 1
+fi
+
 for expected in \
+  "desktop setup started; session_id=$SESSION_ID" \
+  "starting sidecar; session_id=$SESSION_ID" \
+  "sidecar spawned; session_id=$SESSION_ID" \
   "desktop startup deadline exceeded after 1500ms" \
   "desktop startup deadline recorded a recoverable startup error" \
   "starting embedded webview handoff; reason=desktop startup deadline" \
@@ -93,6 +107,11 @@ do
     exit 1
   fi
 done
+
+if ! grep -Fq "simulated hanging sidecar; session_id=$SESSION_ID" "$BIFROST_DATA_DIR/logs/desktop-sidecar.err.log"; then
+  echo "FAIL: hanging sidecar stderr did not retain the startup session id"
+  exit 1
+fi
 
 if ! kill -0 "$APP_PID" >/dev/null 2>&1; then
   echo "FAIL: desktop app did not remain available after launcher deadline handoff"

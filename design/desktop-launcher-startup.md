@@ -209,6 +209,7 @@ Launcher 本身没有 CLI 命令；控制入口只有环境变量：
 - `BIFROST_DESKTOP_LAUNCHER_ONLY=1|true|yes|on`：仅展示 launcher，不启动 backend、不加载 webview，用于开发时快速验证 overlay。
 - `BIFROST_DATA_DIR`：影响 backend 数据目录与日志路径。
 - `BIFROST_DESKTOP_STARTUP_DEADLINE_MS`：测试用 launcher deadline override；非法值或 0 回退到 30 秒默认值。
+- `BIFROST_DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES=1`：仅 debug/E2E 使用，允许隔离数据目录的测试 App 与已安装正式 App 并存；release 构建忽略该开关并继续强制 single-instance。
 - 桌面端可执行文件本身 (`bifrost-desktop`) 一律无子命令。
 
 ## Web 交互契约

@@ -29,6 +29,7 @@
   - `desktop-config.json` 位于同一目录，而不是 Tauri 私有目录；
   - 数据目录解析复用 `bifrost_storage::data_dir()`，桌面端不额外维护路径。
 - 桌面壳层写入 `logs/desktop-bootstrap.log`，记录：
+  - 每次启动唯一的 `session_id`、desktop PID、版本、目标 OS 与架构；
   - 使用的 bifrost 二进制路径；
   - 目标数据目录；
   - 目标端口与实际端口尝试过程；
@@ -39,6 +40,7 @@
 - 桌面壳层将 sidecar 的 `stdout` / `stderr` 分别追加写入 `logs/desktop-sidecar.out.log` / `logs/desktop-sidecar.err.log`：
   - 覆盖 sidecar tracing 初始化前的 `println!` / `eprintln!` / panic；
   - 覆盖配置解析错误等冷启动异常。
+- 桌面壳层通过 `BIFROST_DESKTOP_STARTUP_SESSION_ID` 把同一个 `session_id` 传给 sidecar；sidecar 的 `bifrost_cli::startup` 日志记录进程 PID、版本、目标平台，以及每个初始化 phase 的 started/completed 与耗时。桌面启动 sidecar 时保留既有 `RUST_LOG` filter，并追加 `bifrost_cli::startup=info`（用户已显式配置该 target 时不覆盖），避免全局 `RUST_LOG=warn` 吞掉关键启动轨迹。
 - Backend bootstrap 失败：
   - 通过 `record_startup_error` 写入 `desktop-bootstrap.log`；
   - 同时更新 `BackendState.startup_error: Mutex<Option<String>>`；
@@ -50,6 +52,7 @@
 - macOS 发布包必须校验桌面主程序与内置 `resources/bin/bifrost` 的 Mach-O 架构都包含发布 target；允许 universal binary，但禁止 Apple Silicon 包夹带 Intel-only sidecar、反之亦然。
 - 桌面日志按 `DESKTOP_LOG_RETENTION_DAYS = DEFAULT_LOG_RETENTION_DAYS` 自动清理（复用 `bifrost_core::cleanup_bifrost_log_dir`）。
 - 每个 `data_dir` 每进程只做一次清理，避免每次写日志都扫目录。
+- `desktop-bootstrap.log` 的单行追加由进程内 mutex 串行化，避免 bootstrap/watchdog/handoff 线程并发写入时把两条事件拼接成不可解析的一行。
 
 ### 必须不破坏
 
@@ -157,7 +160,8 @@ $BIFROST_DATA_DIR/
 
 `desktop-bootstrap.log` 至少覆盖以下事件（按发生顺序）：
 
-- `desktop setup started; binary_path=... data_dir=... config_dir=...`
+- `desktop startup session started; session_id=... desktop_pid=... app_version=... target_os=... target_arch=...`
+- `desktop setup started; session_id=... binary_path=... data_dir=... config_dir=...`
 - `native launcher unsupported on this platform; entering webview directly`（非 macOS）
 - `launcher-only mode enabled; skipping embedded webview and backend bootstrap`（BIFROST_DESKTOP_LAUNCHER_ONLY=1）
 - `desktop backend bootstrap started asynchronously`
@@ -165,7 +169,8 @@ $BIFROST_DATA_DIR/
 - `reusing existing backend instance already serving on port ...`
 - `detected healthy backend candidate on port ... before spawning`
 - `found existing backend runtime markers under ...; stopping stale backend`
-- `starting sidecar; binary_path=... data_dir=... port=... stdout_log=... stderr_log=...`
+- `starting sidecar; session_id=... binary_path=... data_dir=... port=... stdout_log=... stderr_log=...`
+- `sidecar spawned; session_id=... pid=... port=...`
 - `backend became ready at http://127.0.0.1:{port}`
 - `backend failed to become ready on port ...: {error}`
 - `desktop backend bootstrap finished; active_port=...`
@@ -187,7 +192,7 @@ $BIFROST_DATA_DIR/
 ## 未落地部分（保持不写成事实）
 
 - **Web 侧 `#startup-splash` 骨架**：桌面启动视觉仍是 native launcher overlay + host window handoff；没有单独的 web 层 splash。前端只需订阅 `desktop://handoff-complete` 事件把自身 loading 状态清掉。
-- **结构化 log**：`desktop-bootstrap.log` 仍是自由文本，不是 JSON，而且多次启动共用追加文件、没有独立 session ID。诊断复杂问题时需要按时间人工关联。
+- **结构化 log**：`desktop-bootstrap.log` 仍是自由文本，不是 JSON。现在可以用 `session_id` 区分启动会话，但跨 bootstrap/sidecar/系统 Unified Log 的复杂诊断仍需人工关联。
 
 以上都是明确的“非目标”，需要新增能力时再单独文档化。
 
@@ -204,8 +209,10 @@ $BIFROST_DATA_DIR/
 - 无新 CLI。
 - 环境变量：
   - `BIFROST_DATA_DIR`：数据目录与日志根。
-- `BIFROST_DESKTOP_LAUNCHER_ONLY=1`：仅 launcher 模式仍写入 `desktop-bootstrap.log` 的 launcher-only 提示。
+  - `BIFROST_DESKTOP_LAUNCHER_ONLY=1`：仅 launcher 模式仍写入 `desktop-bootstrap.log` 的 launcher-only 提示。
   - `BIFROST_DESKTOP_STARTUP_DEADLINE_MS`：仅测试覆盖 launcher deadline；默认 30 秒。
+  - `BIFROST_DESKTOP_STARTUP_SESSION_ID`：桌面壳层内部生成并透传给 sidecar，不是用户配置。
+  - `BIFROST_DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES=1`：仅 debug 构建的 E2E 隔离开关；release 构建始终保留 single-instance。
 - Tauri invoke：`get_desktop_runtime()` 输出 `startupError` / `startupReady`。
 - Admin API：无扩展。
 
@@ -322,4 +329,4 @@ $BIFROST_DATA_DIR/
 - `wait_for_backend` 已在 sidecar 提前退出时立即短路，因此立即 panic 不再消耗完整的 20 秒 readiness timeout。sidecar 保持存活但死锁时仍只能由 30 秒 launcher deadline 兜底；日志可通过最后一个已完成的 sidecar 启动 phase 缩小范围，但精确到线程的根因仍可能需要 macOS sample/spindump。
 - 应用日志不记录 macOS Application Firewall 的用户决策、LaunchServices 终止原因或第三方安全软件动作。涉及这些系统层的事故，除 `~/.bifrost/logs/` 外还必须收集同时间段的 macOS Unified Log，以及存在时的 `~/Library/Logs/DiagnosticReports/` 产物。
 - `desktop-config.json` 与 daemon runtime marker 共用 `~/.bifrost`：CLI 用户可能看到额外的 `desktop-config.json`，但结构简单不会破坏 CLI；反过来桌面端也能读到 CLI 生成的 `bifrost.pid` / `runtime.json` 用于复用现有 backend。
-- 未做结构化 JSON 日志：诊断复杂问题需人肉阅读。若接入分布式排障工具再评估。
+- 未做结构化 JSON 日志：可按 `session_id` 收敛单次启动，但诊断复杂问题仍需人肉阅读。若接入分布式排障工具再评估。
