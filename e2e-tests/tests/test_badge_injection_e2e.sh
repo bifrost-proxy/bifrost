@@ -410,6 +410,9 @@ assert_badge_injection() {
     assert_body_contains "clipboardData.setData('text/plain',text)" "$HTTP_BODY" "Fallback copy should write text via copy event clipboardData"
     assert_body_contains "ok&&copied?resolve()" "$HTTP_BODY" "Fallback copy should only report success after copy event writes data"
     assert_body_contains "z-index:2147483647!important" "$HTTP_BODY" "Badge panel should use top z-index"
+    assert_body_contains "cursor:pointer;overflow:hidden;white-space:nowrap" "$HTTP_BODY" "Collapsed Badge should clip its invisible label hit area"
+    assert_body_contains "display:none;position:absolute;right:2px;top:2px" "$HTTP_BODY" "Share indicator should stay inside the clipped Badge"
+    assert_body_not_contains "cursor:pointer;overflow:visible;white-space:nowrap" "$HTTP_BODY" "Collapsed Badge should not expose the invisible label hit area"
   else
     assert_body_not_contains "__bifrost_badge__" "$HTTP_BODY" "Badge marker should not be injected"
     assert_body_not_contains "__bb_copy" "$HTTP_BODY" "Merged rules copy button should not be injected"

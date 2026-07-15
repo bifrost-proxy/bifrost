@@ -23,6 +23,7 @@
 - Group 规则通过 Admin API 启停 / 新增 / 更新 / 删除或从远端 sync 拉取后，`AdminState.badge_rules_cache` 立即被刷新，同时触发 runtime rules hot reload；不需要用户「随便保存一条规则」。
 - 规则数据在注入前必须做统一 HTML/JS 转义：`<` -> `<`、`>` -> `>`、`&` -> `&`、U+2028/U+2029 -> ` `/` `；异常 JSON 回退为空对象，绝不把原始字符串拼进 `<script>`。
 - Group 规则字段组合保持既有导航契约：Badge 点击可跳转到 `/_bifrost/rules?group=...` 的对应 Group。
+- Badge 收起时必须裁剪透明的 `.__bb_txt` 文案，圆点之外的不可见区域不得消费页面 hover / click；hover 到 30px 圆点后仍平滑展开完整文案。
 
 ### 必须不破坏
 
@@ -33,6 +34,7 @@
 - 原响应带 `Content-Encoding: gzip/br/deflate/zstd` 时必须解压 -> 注入 -> 按原 encoding 重压，并通过 `normalize_res_headers` 修正 `Content-Length` / `Transfer-Encoding`。
 - 存在高 `z-index` 浮层的业务页面上 Badge 仍能可见（使用 `z-index: 2147483647 !important`）。
 - Merged Rules 复制按钮既支持 `navigator.clipboard.writeText`，也保留 `document.execCommand('copy')` fallback；fallback 必须真实触发 copy 事件才显示 `Copied`，否则显示 `Failed`。
+- Badge 使用 `overflow: hidden` 约束收起态命中盒；Share 红点必须位于圆点内部，不能因裁剪而消失。
 
 ### 必须真实验证
 
@@ -49,6 +51,8 @@ Badge 由三部分组成：
 1. 固定定位的圆点元素 `id=__bifrost_badge__`，默认可见，点击可隐藏。
 2. Hover 弹窗：显示 Bifrost 分组、Merged Rules、Share Env、Exit 等入口。
 3. 内联脚本 + 内联 JSON（含当前请求命中规则），支撑弹窗渲染与跳转。
+
+圆点本体宽高为 30px，收起态通过 `overflow: hidden` 同时裁剪透明文案的绘制与命中区域；只有指针进入圆点实际边界触发 `:hover` 后，容器宽度才扩展到 220px 并显示文案。Share 红点定位在这 30px 边界内，确保裁剪不会破坏状态提示。
 
 `transform::badge::maybe_inject_bifrost_badge_html(body, rules_json) -> (Bytes, bool)` 是唯一的注入入口；返回布尔 `injected` 供调用方决定是否需要重压 body 并修正 headers。
 
@@ -186,6 +190,7 @@ POST /_bifrost/api/group-rules/sync     # 从远端 sync 刷新本地 Group 规�
 - `e2e-tests/tests/test_badge_injection_e2e.sh`
   - 启动本地 HTTP server 返回 `Content-Type: text/html`。
   - 断言注入片段包含 `__bifrost_badge__`、`__bb_copy`、`Copy merged rules`、`navigator.clipboard`、`z-index:2147483647!important`。
+  - 断言圆点样式包含 `overflow:hidden`、不再包含 `overflow:visible`，并确认 Share 红点位于裁剪边界内。
   - 配置 `htmlAppend://{vconsole-inject}` 值含 `</script><script>new VConsole()</script>`，断言响应中只有 `</script>`。
   - 上游返回 `Content-Type: text/html; charset=utf-8` 但 body 为 `{"code":200,...}`，断言响应不包含任何 Badge 片段。
 - 请求本地未监听端口触发真实 502，断言开启时 `Content-Type: text/html`、诊断文本和 Badge/操作脚本同时存在；关闭时仍为 `text/plain` 且无 Badge。

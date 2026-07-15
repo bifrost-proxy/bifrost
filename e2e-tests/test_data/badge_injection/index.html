@@ -3,8 +3,36 @@
   <head>
     <meta charset="utf-8" />
     <title>Bifrost Badge Injection Test</title>
+    <style>
+      #badge-hit-target {
+        position: fixed;
+        left: 50px;
+        bottom: 15px;
+        width: 170px;
+        height: 30px;
+      }
+
+      #badge-hit-target[data-hovered="true"] {
+        outline: 3px solid #d57926;
+      }
+    </style>
   </head>
   <body>
     <h1>Hello Bifrost</h1>
+    <button id="badge-hit-target" type="button" data-hovered="false" data-clicks="0">
+      Page action behind collapsed badge label
+    </button>
+    <script>
+      const hitTarget = document.getElementById("badge-hit-target");
+      hitTarget.addEventListener("mouseenter", () => {
+        hitTarget.dataset.hovered = "true";
+      });
+      hitTarget.addEventListener("mouseleave", () => {
+        hitTarget.dataset.hovered = "false";
+      });
+      hitTarget.addEventListener("click", () => {
+        hitTarget.dataset.clicks = String(Number(hitTarget.dataset.clicks) + 1);
+      });
+    </script>
   </body>
 </html>

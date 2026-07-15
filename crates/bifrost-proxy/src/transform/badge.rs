@@ -10,7 +10,7 @@ const BADGE_STYLE: &str = concat!(
     "height:30px;width:30px;border-radius:9999px;",
     "background:linear-gradient(135deg,#7BEBC0,#6CBFCF);",
     "box-shadow:0 0 10px 2px rgba(123,235,192,0.35),0 0 0 2px rgba(255,255,255,0.9);",
-    "cursor:pointer;overflow:visible;white-space:nowrap;",
+    "cursor:pointer;overflow:hidden;white-space:nowrap;",
     "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;",
     "user-select:none;-webkit-user-select:none;",
     "transition:width .4s cubic-bezier(.4,0,.2,1),border-radius .4s cubic-bezier(.4,0,.2,1),box-shadow .3s;",
@@ -34,7 +34,7 @@ const BADGE_STYLE: &str = concat!(
     "animation:__bb_share_pulse 1.8s ease-in-out infinite;",
     "}",
     "#__bifrost_badge__ .__bb_share_dot{",
-    "display:none;position:absolute;right:-2px;top:-2px;",
+    "display:none;position:absolute;right:2px;top:2px;",
     "width:8px;height:8px;border-radius:9999px;background:#ff4d4f;",
     "border:2px solid #fff;box-shadow:0 2px 7px rgba(255,77,79,.45);",
     "}",
@@ -466,6 +466,15 @@ mod tests {
         assert!(snippet.contains(":hover"));
         assert!(snippet.contains("left:15px"));
         assert!(snippet.contains("bottom:15px"));
+    }
+
+    #[test]
+    fn test_badge_clips_hidden_label_without_clipping_share_indicator() {
+        let snippet = build_badge_snippet(SHARE_RULES);
+
+        assert!(snippet.contains("cursor:pointer;overflow:hidden;white-space:nowrap"));
+        assert!(!snippet.contains("cursor:pointer;overflow:visible;white-space:nowrap"));
+        assert!(snippet.contains("display:none;position:absolute;right:2px;top:2px;"));
     }
 
     #[test]
