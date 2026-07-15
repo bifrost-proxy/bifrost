@@ -36,6 +36,12 @@ chmod +x "$FAKE_LIPO"
 LIPO_BIN="$FAKE_LIPO" bash scripts/validate-macos-desktop-architectures.sh \
   "$APP_PATH" aarch64-apple-darwin
 
+printf '%s\n' 'x86_64 arm64' >"$MAIN_BIN"
+printf '%s\n' 'arm64 x86_64' >"$SIDECAR_BIN"
+LIPO_BIN="$FAKE_LIPO" bash scripts/validate-macos-desktop-architectures.sh \
+  "$APP_PATH" aarch64-apple-darwin
+
+printf '%s\n' 'arm64' >"$MAIN_BIN"
 printf '%s\n' 'x86_64' >"$SIDECAR_BIN"
 if LIPO_BIN="$FAKE_LIPO" bash scripts/validate-macos-desktop-architectures.sh \
   "$APP_PATH" aarch64-apple-darwin >"$TEST_DIR/mismatch.log" 2>&1
@@ -50,4 +56,4 @@ if ! grep -Fq "Architecture mismatch" "$TEST_DIR/mismatch.log"; then
   exit 1
 fi
 
-echo "PASS: macOS desktop architecture gate accepts matching binaries and rejects a mixed bundle"
+echo "PASS: macOS desktop architecture gate accepts thin/universal matching binaries and rejects a missing target architecture"

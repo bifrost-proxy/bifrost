@@ -185,9 +185,17 @@ const HANDOFF_COMPLETE_EVENT: &str = "desktop://handoff-complete";
   - `main_webview_loaded` 保持 false，`try_start_native_handoff` 不会触发。
   - 需要依赖前端的 `notify_main_window_ready` 兜底：前端在 window `load` / React root ready 时主动握手；即使 `main_webview_loaded == false`，`notify_main_window_ready` 会直接调 `start_main_window_handoff`，避免 overlay 卡死。
 - Backend 或 WebView 永久阻塞：
-  - 启动后同时调度 30 秒 launcher deadline；到期仍未 handoff 时写入完整状态，必要时记录 recoverable `startup_error`，然后强制调用 `start_main_window_handoff`。
-  - deadline 的职责只是保证原生 launcher 不会无限覆盖诊断界面；它不会把 backend 标记为 ready，也不会吞掉原始错误。
+  - 启动后同时调度 30 秒 launcher deadline；到期仍未 handoff 时写入完整状态，并在 backend 未就绪时记录 recoverable `startup_error`。
+  - WebView 已 loaded 时进入正常 failure handoff；WebView 未 loaded 时不把 parked WebView 强行移入窗口，而是停止虚拟进度动画并把原生 launcher 切换成明确错误态。后续 WebView 若恢复并触发 load finished，仍可继续正常 handoff。
+  - deadline 写错误前会再次读取 `startup_ready`；backend 成功路径先发布 ready 再清理旧错误，避免恰好在 30 秒边界成功时残留伪 timeout。
   - `BIFROST_DESKTOP_STARTUP_DEADLINE_MS` 只用于自动化测试缩短等待，不是面向终端用户的配置。
+- Stale backend 清理失败：
+  - 同步 `bifrost stop` helper 最多等待 5 秒，超时后发送 kill，并最多再等待 2 秒回收；kill 失败或回收仍超时都会返回错误，不能回到无界 `wait()`。
+  - stop 任一失败必须写入 bootstrap log 并中止本次 backend 启动；禁止在同一 `BIFROST_DATA_DIR` 上启动第二个 core。
+- 端口竞争：
+  - 启动前已占用端口继续按候选端口顺延。
+  - child 提前退出且原端口在启动后变为不可用，视为检查与 bind 之间的竞争，可尝试下一个候选端口。
+  - 配置错误、child 检查错误或 readiness timeout 不盲目顺延，避免把确定性失败放大成 65 轮等待。
 - Overlay 淡出失败（例如 objc2 崩溃）：
   - `fade_out_launcher_overlay` 内部所有调用 `let _ =`，不会 panic；overlay 最后仍会调 `remove_overlay`。
   - `remove_overlay` 不在主线程 `join()` 动画线程，也不释放 `LauncherOverlayHandle`。动画线程可能已经通过 `run_on_main_thread` 排队了 tick 回调；如果移除时释放 handle，晚到的 tick 会解引用悬空指针并在 macOS runloop observer 中触发 Rust foreign exception / `SIGABRT`。保留 handle 的泄漏量为一次启动一个 overlay，随桌面进程退出回收。

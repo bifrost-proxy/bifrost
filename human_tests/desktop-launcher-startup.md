@@ -124,12 +124,12 @@
 操作步骤：
 
 1. 执行 `e2e-tests/tests/test_macos_desktop_architecture_gate.sh`。
-2. 检查匹配场景（Apple Silicon app + arm64 sidecar）与不匹配场景（Apple Silicon app + x86_64 sidecar）的结果。
+2. 检查 thin 匹配场景、包含目标架构的 universal binary 场景，以及缺少目标架构的不匹配场景。
 3. 检查 `.github/workflows/ci.yml` 与 `.github/workflows/release.yml` 都在 macOS app 重新签名后调用 `scripts/validate-macos-desktop-architectures.sh`。
 
 预期结果：
 
-- target 为 `aarch64-apple-darwin` 时，桌面主程序和 `Contents/Resources/resources/bin/bifrost` 都必须为 `arm64`；target 为 `x86_64-apple-darwin` 时两者都必须为 `x86_64`。
+- target 为 `aarch64-apple-darwin` 时，桌面主程序和 `Contents/Resources/resources/bin/bifrost` 都必须包含 `arm64`；target 为 `x86_64-apple-darwin` 时两者都必须包含 `x86_64`。thin 与 universal binary 均允许。
 - 任一组件架构不匹配时脚本非零退出，并打印包含 expected、actual、target 和文件路径的诊断。
 - 普通 CI bundle 与 release bundle 都执行同一门禁，混合架构 DMG 无法发布。
 
@@ -147,6 +147,21 @@
 - `desktop-bootstrap.log` 包含 `desktop startup deadline exceeded`、可恢复的 `startup_error` 以及 handoff start/completed。
 - 桌面进程继续存活，主 WebView 可展示 “Start Bifrost Service” 重试入口。
 - 默认产品 deadline 为 30 秒；测试专用环境变量只缩短测试等待，不改变正式默认值。
+
+### TC-DLS-09 Stale backend 停止失败时禁止启动第二实例
+
+操作步骤：
+
+1. 完成前置构建，确认 `desktop/src-tauri/target/debug/bifrost-desktop` 存在。
+2. 执行 `SKIP_BUILD=true e2e-tests/tests/test_desktop_stale_backend_stop_failure_handoff.sh`。脚本创建 runtime marker，并使用 `stop` 返回 17、其他命令记录为意外启动的 sidecar stub。
+3. 检查 `desktop-bootstrap.log`、stub 调用记录与桌面进程状态。
+
+预期结果：
+
+- bootstrap log 明确记录 stale backend stop 失败，并说明拒绝为同一数据目录启动第二个 backend。
+- sidecar stub 只收到一次 `stop`，不得收到 `start` 或其他第二实例启动参数。
+- failure handoff 完成，桌面进程继续存活并向用户暴露可恢复错误。
+- 测试使用临时 `BIFROST_DATA_DIR`，不修改本机服务、系统代理或用户数据。
 
 ## 清理步骤
 
@@ -166,5 +181,6 @@ rm -rf "$BIFROST_DATA_DIR"
 | 2026-07-06 | TC-DLS-04 | `pnpm exec tauri dev --config desktop/src-tauri/tauri.conf.json`，临时目录 `/tmp/bifrost-launcher-handoff-20260706085524`；截图 `initial.png`、`after.png`；窗口记录 `window-initial.txt` 与 `window-after.txt` 均为 `560,230 1440x920`。 | 通过：handoff 前后窗口位置和尺寸保持一致，启动页淡出后主界面在同一尺寸下显现，未见小窗放大或中间尺寸重排。 |
 | 2026-07-09 | TC-DLS-05 | `source ~/.zshrc && e2e-tests/tests/test_desktop_launcher_startup_no_crash.sh`；脚本构建 `web/dist-desktop`、`bifrost-cli` sidecar 与 `desktop/src-tauri/target/debug/bifrost-desktop`，使用临时 `BIFROST_DATA_DIR`、禁用系统代理/托盘/证书预检，启动后等待 8 秒，并断言 `desktop-bootstrap.log` 包含 setup、page load、handoff start、handoff completed。补充复跑：`source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_desktop_launcher_startup_no_crash.sh`。CI shell shard 适配验证：`source ~/.zshrc && SKIP_BUILD=true BIFROST_DESKTOP_APP_BIN=/tmp/bifrost-missing-desktop-bin e2e-tests/tests/test_desktop_launcher_startup_no_crash.sh`。 | 通过：真实启动两次均输出 `PASS: bifrost-desktop stayed alive through launcher handoff startup window`，验证 handoff 后进程保持存活且日志到达完整 handoff，未出现启动期 `SIGABRT`/foreign exception 闪退；CI 缺少桌面 debug binary 且 `SKIP_BUILD=true` 时输出 `SKIP: missing desktop binary ...` 并退出 0，避免通用 shell shard 误报失败。 |
 | 2026-07-15 | TC-DLS-06 | `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_desktop_launcher_startup_failure_handoff.sh`；使用动态空闲端口与 exit 42 sidecar stub，检查 bootstrap/sidecar stderr、进程存活和 failure handoff。 | 通过：输出 `PASS: sidecar failure became visible through launcher handoff in 2s`；日志包含 child 提前退出、startup error、handoff start/completed，未复用本机 9900 backend。 |
-| 2026-07-15 | TC-DLS-07 | `source ~/.zshrc && e2e-tests/tests/test_macos_desktop_architecture_gate.sh`；先验证 arm64/arm64 fixture，再把 sidecar 改为 x86_64 验证拒绝。 | 通过：匹配包逐个输出 `Validated macOS architecture`，混合架构包非零退出并包含 `Architecture mismatch`。 |
+| 2026-07-15 | TC-DLS-07 | `e2e-tests/tests/test_macos_desktop_architecture_gate.sh`；验证 arm64 thin、arm64+x86_64 universal fixture，再验证缺少 arm64 的 sidecar 被拒绝。 | 通过：thin/universal 包逐个输出 `Validated macOS architecture`，缺失目标架构的包非零退出并包含 `Architecture mismatch`。 |
 | 2026-07-15 | TC-DLS-08 | `source ~/.zshrc && SKIP_BUILD=true e2e-tests/tests/test_desktop_launcher_startup_deadline_handoff.sh`；使用 hanging sidecar stub 和 1500ms deadline。 | 通过：输出 `PASS: launcher deadline exposed a recoverable startup error instead of hanging indefinitely`；日志记录 deadline exceeded、startup error 与 handoff completed，进程保持存活。 |
+| 2026-07-15 | TC-DLS-09 | `SKIP_BUILD=true e2e-tests/tests/test_desktop_stale_backend_stop_failure_handoff.sh`；使用 stop exit 17 stub、runtime marker 与独立数据目录。 | 通过：stub 只收到一次 `stop`；bootstrap log 记录拒绝第二实例、startup error 与 handoff completed；桌面进程保持存活。 |

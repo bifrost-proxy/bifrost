@@ -41,7 +41,7 @@ for executable in "$app_executable" "$sidecar"; do
   fi
 
   architectures="$($lipo_bin -archs "$executable")"
-  if [[ "$architectures" != "$expected_arch" ]]; then
+  if [[ " $architectures " != *" $expected_arch "* ]]; then
     echo "Architecture mismatch for $executable: expected=$expected_arch actual=$architectures target=$target" >&2
     exit 1
   fi
