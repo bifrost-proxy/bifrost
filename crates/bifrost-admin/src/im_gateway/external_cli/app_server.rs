@@ -1401,6 +1401,23 @@ mod tests {
         assert_eq!(attempts, 1);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn app_server_spawn_stops_after_retry_limit() {
+        let mut attempts = 0;
+        let error = spawn_app_server_with_retry(|| -> std::io::Result<()> {
+            attempts += 1;
+            Err(std::io::Error::from_raw_os_error(
+                TEXT_FILE_BUSY_RAW_OS_ERROR,
+            ))
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.raw_os_error(), Some(TEXT_FILE_BUSY_RAW_OS_ERROR));
+        assert_eq!(attempts, APP_SERVER_SPAWN_MAX_ATTEMPTS);
+    }
+
     #[tokio::test]
     async fn app_server_run_reports_spawn_executable_context() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
