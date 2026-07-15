@@ -395,6 +395,48 @@ curl -x http://127.0.0.1:8800 http://httpbin.org/html -s | grep "__bb_panel__"
 
 ---
 
+### TC-BHP-16：回归 - 收起态透明文案不遮挡页面 hover / click
+
+**操作步骤**：
+1. 使用当前源码构建的二进制、临时数据目录和非正式端口启动 Bifrost，禁止修改系统代理：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-human-badge-overflow \
+     BIFROST_DISABLE_TRAY=1 \
+     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+     target/release/bifrost start -p 18896 --unsafe-ssl --no-system-proxy --enable-badge-injection
+   ```
+2. 启动测试页面服务：
+   ```bash
+   python3 -m http.server 18897 --bind 127.0.0.1 --directory e2e-tests/test_data/badge_injection
+   ```
+3. 通过代理取得真实注入页，再使用 Chrome 打开该页面：
+   ```bash
+   NO_PROXY='' no_proxy='' curl -sS -x http://127.0.0.1:18896 \
+     http://127.0.0.1:18897/index.html \
+     -o e2e-tests/test_data/badge_injection/proxied.html
+   ```
+   Chrome 打开 `http://127.0.0.1:18897/proxied.html`。
+4. 不触碰左下角 30px Badge 圆点，将鼠标移动到其右侧的 `Page action behind collapsed badge label` 按钮；检查按钮 `data-hovered`，点击一次并检查 `data-clicks`；移开后确认 `data-hovered` 恢复为 `false`。
+5. 将鼠标移到 Badge 圆点本体，等待宽度动画完成；检查 `Bifrost proxy is working` 文案与上方面板。
+6. 将鼠标移开，等待 Badge 收回；再次把鼠标移到按钮并点击，确认页面交互仍可命中。
+
+**预期结果**：
+- Badge 收起时计算样式为 `overflow: hidden`，实际边界为 30px × 30px。
+- 鼠标位于圆点右侧、原透明 `.__bb_txt` 占位区域时，按钮收到 hover：`data-hovered="true"`；点击后 `data-clicks` 递增，Badge 不展开且不隐藏。
+- 鼠标进入 30px 圆点本体后 Badge 才展开到 220px，`Bifrost proxy is working` 文案可见，上方规则面板正常出现。
+- 移出后 Badge 正常收回，按钮可继续收到 hover / click；修复不破坏可见 Badge 的展开与面板交互。
+- Share 环境红点定位在圆点裁剪边界内，不因 `overflow: hidden` 消失。
+
+**回归目的**：覆盖透明 `.__bb_txt` 溢出到 30px 圆点之外并参与 hit testing，导致不可见区域消费 hover / click、遮挡页面内容的问题。
+
+## TC-BHP-16 执行记录
+
+| 日期 | 执行范围 | 实际结果 | 结论 |
+| --- | --- | --- | --- |
+| 2026-07-15 | 使用当前 `target/release/bifrost`、隔离数据目录、18896 代理端口和 18897 本地页面服务生成真实注入页；在 Chrome 中分别移动到透明文案原覆盖区、点击背后按钮、hover 30px Badge 本体、移出收回后再次点击 | 收起态 Badge 边界为 30×30，计算样式 `overflow: hidden`；按钮中心 `elementFromPoint` 为 `badge-hit-target`，hover 后 `data-hovered=true`、Badge 仍为 30px 且面板未展开，两次点击令 `data-clicks` 从 0 增至 2，Badge 始终可见；进入圆点本体后 Badge 展开到 220px、文案 opacity 为 1、面板可见；移出后重新收回；Share 红点计算位置为 `right: 2px; top: 2px` | 通过 |
+
+---
+
 ## TC-BHP-15 执行记录
 
 | 日期 | 执行范围 | 实际结果 | 结论 |
@@ -416,4 +458,6 @@ curl -X PUT http://127.0.0.1:8800/_bifrost/api/config/performance \
   -H "Content-Type: application/json" -d '{"inject_bifrost_badge":true}' -s
 rm -f /tmp/bifrost-badge-escape-rule.json /tmp/bifrost-badge-escape.html /tmp/bifrost-badge-mislabeled-json.txt /tmp/bifrost-badge-group-cache.html /tmp/bifrost-badge-rapid-toggle-enabled.txt /tmp/bifrost-badge-group-sync-cache.html
 rm -f /tmp/bifrost-error-page.headers /tmp/bifrost-error-page.html
+rm -f e2e-tests/test_data/badge_injection/proxied.html
+rm -rf ./.bifrost-human-badge-overflow
 ```
