@@ -26,6 +26,7 @@
 3. 在 Pro 账号页面存在侧边栏、Project 操作等多个可见 `aria-haspopup="menu"` 按钮时，保持模型按钮显示 `Pro`，再从真实 Project 发起一次独立研究。
 4. Project 中预先保留其他历史研究会话；新研究 handoff 返回 conversation id 后，核对最终报告正文和链接均属于该 id，而不是历史会话内容。
 5. 让首条回复只返回“我会先检索……”一类规划句，再观察系统是否在同一 conversation id 内要求完整最终报告。
+6. 模拟深度研究刚开始时只出现没有 `data-message-id` 的 assistant 外壳，随后让原会话完成；再模拟 fan-out 因等待超时留下包含 conversation id 的失败元数据并重跑同一题。
 
 预期：
 
@@ -35,7 +36,9 @@
 - 创建下一题的新会话时，不关闭前一题的 Project conversation tab；前一题即使仍在后台深度研究，也能由后续 `wait` 重新 attach 并取回最终稿。
 - DOM fallback 只从本次 handoff 对应的普通或 Project conversation URL 取结果；页面仍处在其他会话或 Project 入口时继续等待，不返回历史会话的短计划前缀。
 - 以“我会 / 我将 / I'll / I will / Let me”等开头的短规划句进入 15 秒观察窗；深度研究 busy 控件在间隙后恢复时继续等待同一轮最终正文，不提前结束 adapter run。
+- 没有 `data-message-id` 的 provisional assistant 外壳即使 composer 暂时恢复空闲也保持进行中，直到原会话出现带 message id 的最终 assistant 正文。
 - `Succeeded` 但长度不足、缺少原始问题或缺少五个规定章节的回复不计为研究成功；系统先在同一会话执行纯等待并重新提取，仍不完整时才自动补发一次最终输出要求，重试仍不完整则 child 失败，不能进入 digest 或微信。
+- 失败元数据与当前题目、原始问题和 runner 完全一致时，重跑只对其中的 conversation id 执行 `wait`；恢复结果仍不完整则继续失败，不能新建会话或重复发送 Pro Prompt。Project 会话恢复成功后，JSON、fan-out 和 digest 都保留项目内完整链接。
 - 隔离 E2E 的 ChatGPT Web mock 首轮固定返回短规划句；run artifacts 至少出现每题一个空 `prompt.md` 的 wait 子 run和一个最终输出 retry prompt，最终 child 报告按顺序包含五个独立章节及各节正文，不接受提示词回显。
 - 失败产物明确记录是模式/模型校验失败。
 
@@ -145,6 +148,7 @@
 
 | 日期 | 用例 | 结果 |
 | --- | --- | --- |
+| 2026-07-16 | TC-ADRP-02/06 同会话恢复与真实微信投递 | `2026-07-14` 的播客研究曾因旧版把无 `data-message-id` 的规划外壳误判为完成，随后等待超时而失败。部署修复后，fan-out 从失败元数据恢复原 conversation `6a57becd-5cec-83ea-82c7-7ecdcac88da9`，只执行 `wait`，4.9 秒取回 37333 字节、五章齐全的最终稿；未新建 conversation、未重复发送 Pro Prompt。成功 JSON、fan-out 和 digest 保持 Project 内完整链接。研究摘要 run `1784137650213-afa516b8-56d0-4d67-b3c0-d341177825da` 与日报概要 run `1784137768366-049c2ff2-7459-4270-9903-bbb29005a479` 均成功；微信出站 `5691644c`、`5a66c73d` 均为 `msg_type=text`、`status=success`，研究摘要包含原始问题、核心概要与原 Project 链接。 |
 | 2026-07-15 | TC-ADRP-10 | 根据真实信贷研究 Prompt（19594 字节）确认其中误带整份“全天候私人助理整理指南”。修复后单题 Prompt 不再读取日报 `AGENTS.md`，并为背景、原始片段、单题要求和已核验上下文设置独立字符上限；`daily_agent_research_child_prompt_is_compact_and_excludes_daily_report_instructions` 与 `live_chatgpt_web_is_fail_closed_during_e2e_without_explicit_opt_in` 通过。mock 流水线 E2E task `dd2a3454d9154d96a3bf4c41f6662fae` 通过且未创建真实 Pro 会话；`local-ci.sh --skip-e2e` 的格式、clippy、全工作区测试和依赖审计全部通过。 |
 | 2026-07-15 | TC-ADRP-02/06 历史补跑与真实微信投递 | 使用 `2026-07-09` 的真实“帮我记录一下”研究清单补跑。ChatGPT Web 在 Project“日报研究”中以 Chat + Pro 分别生成 4 个独立会话；四份结果大小分别为 31808、19590、12222、12069 字节，均包含 `原始问题 / 核心结论 / 事实与证据 / 推断与不确定性 / 对原始问题的直接回答` 五段。fan-out 聚合报告 76913 字节，digest run `1784046733550-ec44d3d4-c38a-4de7-a6c0-d35cb81ac105` 成功生成 21602 字节摘要。首次自动微信投递明确失败为 `weixin sendmessage failed: ret=-2`，消息日志正确记录失败；用户在 Bot 对话发送 `1` 刷新微信会话后，补发两段摘要成功，出站日志 `ca7e24f3`、`6fccd249` 均为 `✓`。 |
 | 2026-07-14 | TC-ADRP-09 | 通过。隔离数据目录和动态端口运行完整五段链路：dispatcher 输出 `{"questions":[]}`；fan-out 成功保存唯一的 `manifest.json`，未创建 child run，日期报告明确写明无外部研究问题；digest 继续生成同义摘要。原有非空 manifest 全部 child 失败负向单测仍通过。 |

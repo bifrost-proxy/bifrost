@@ -3582,11 +3582,90 @@ fn daily_agent_research_manifest_loader_and_conversation_link_cover_edges() {
         )]),
     };
     assert_eq!(
-        daily_research_conversation_link(&execution),
+        daily_research_conversation_link(&execution, None),
         (
             Some("conversation-42".to_string()),
             Some("https://chatgpt.com/c/conversation-42".to_string())
         )
+    );
+    assert_eq!(
+        daily_research_conversation_link(
+            &execution,
+            Some("https://chatgpt.com/g/g-p-daily-research/project")
+        ),
+        (
+            Some("conversation-42".to_string()),
+            Some(
+                "https://chatgpt.com/g/g-p-daily-research/c/conversation-42".to_string()
+            )
+        )
+    );
+    assert_eq!(
+        daily_research_conversation_id_from_text(
+            "conversation_busy: page=https://chatgpt.com/g/g-p-project/c/abc-12345, stopButton=VISIBLE"
+        )
+        .as_deref(),
+        Some("abc-12345")
+    );
+}
+
+#[test]
+fn daily_agent_research_failed_child_recovers_only_matching_conversation() {
+    let temp = TempDir::new().unwrap();
+    let metadata_path = temp.path().join("question.json");
+    let question = AsrDailyResearchQuestion {
+        id: "podcast".to_string(),
+        original_question: "如何把文字生成播客？".to_string(),
+        source_excerpt: String::new(),
+        background: String::new(),
+        runner: Some("chatgpt-web".to_string()),
+        github_repositories: Vec::new(),
+        context_profile: None,
+        research_prompt: None,
+    };
+    let failed = AsrDailyResearchChildResult {
+        question_id: question.id.clone(),
+        original_question: question.original_question.clone(),
+        runner: "chatgpt-web".to_string(),
+        github_repositories: Vec::new(),
+        github_connector_status: None,
+        context_profile: None,
+        status: "failed".to_string(),
+        run_id: None,
+        conversation_id: None,
+        full_report_link: None,
+        result_path: None,
+        context_path: None,
+        error: Some(
+            "conversation_busy: page=https://chatgpt.com/g/g-p-project/c/conversation-42, stopButton=VISIBLE"
+                .to_string(),
+        ),
+    };
+    std::fs::write(&metadata_path, serde_json::to_vec(&failed).unwrap()).unwrap();
+
+    assert_eq!(
+        recoverable_daily_research_conversation_id(
+            &metadata_path,
+            &question,
+            "chatgpt-web"
+        )
+        .as_deref(),
+        Some("conversation-42")
+    );
+    assert_eq!(
+        recoverable_daily_research_conversation_id(&metadata_path, &question, "other-runner"),
+        None
+    );
+
+    let mut changed_question = question;
+    changed_question.original_question = "另一个问题".to_string();
+    assert_eq!(
+        recoverable_daily_research_conversation_id(
+            &metadata_path,
+            &changed_question,
+            "chatgpt-web"
+        ),
+        None
     );
 }
 

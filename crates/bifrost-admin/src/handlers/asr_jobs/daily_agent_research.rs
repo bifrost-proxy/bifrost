@@ -657,8 +657,16 @@ async fn ensure_complete_daily_research_execution(
     Ok(retry)
 }
 
+fn daily_research_conversation_url(project_url: Option<&str>, conversation_id: &str) -> String {
+    project_url
+        .and_then(|url| url.trim().trim_end_matches('/').strip_suffix("/project"))
+        .map(|project_root| format!("{project_root}/c/{conversation_id}"))
+        .unwrap_or_else(|| format!("https://chatgpt.com/c/{conversation_id}"))
+}
+
 fn daily_research_conversation_link(
     execution: &AsrDailyResearchExecution,
+    project_url: Option<&str>,
 ) -> (Option<String>, Option<String>) {
     let conversation_id = metadata_value(
         &execution.metadata,
@@ -668,10 +676,42 @@ fn daily_research_conversation_link(
         .then(|| {
             conversation_id
                 .as_deref()
-                .map(|id| format!("https://chatgpt.com/c/{id}"))
+                .map(|id| daily_research_conversation_url(project_url, id))
         })
         .flatten();
     (conversation_id, link)
+}
+
+fn daily_research_conversation_id_from_text(text: &str) -> Option<String> {
+    text.split("/c/").skip(1).find_map(|suffix| {
+        let id: String = suffix
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
+            .collect();
+        (id.len() >= 8).then_some(id)
+    })
+}
+
+fn recoverable_daily_research_conversation_id(
+    metadata_path: &Path,
+    question: &AsrDailyResearchQuestion,
+    runner_id: &str,
+) -> Option<String> {
+    let result: AsrDailyResearchChildResult =
+        serde_json::from_slice(&std::fs::read(metadata_path).ok()?).ok()?;
+    if result.status != "failed"
+        || result.question_id.trim() != question.id.trim()
+        || result.original_question.trim() != question.original_question.trim()
+        || result.runner.trim() != runner_id.trim()
+    {
+        return None;
+    }
+    result.conversation_id.or_else(|| {
+        result
+            .error
+            .as_deref()
+            .and_then(daily_research_conversation_id_from_text)
+    })
 }
 
 fn daily_research_github_connector_status(
@@ -840,14 +880,54 @@ async fn run_daily_agent_research_fanout(
                         context_content = Some(context_execution.response);
                     }
                 }
+                let child_session = format!(
+                    "asr-research:{}:{}:{}:{}:research",
+                    task.id, task.daily_agent.agent_id, entry.date, question_id
+                );
+                if final_adapter == "chatgpt_web" {
+                    if let Some(conversation_id) = recoverable_daily_research_conversation_id(
+                        &metadata_path,
+                        question,
+                        &final_runner,
+                    ) {
+                        tracing::info!(
+                            question_id,
+                            conversation_id,
+                            "recovering failed daily research child by waiting on its existing ChatGPT conversation"
+                        );
+                        let conversation_url = daily_research_conversation_url(
+                            fanout.chatgpt_project_url.as_deref(),
+                            &conversation_id,
+                        );
+                        let waited = run_daily_research_child_request(
+                            task,
+                            &final_runner,
+                            String::new(),
+                            &final_work_dir,
+                            &child_session,
+                            serde_json::json!({ "conversationId": conversation_id }),
+                            Some("wait"),
+                        )
+                        .await
+                        .map_err(|error| {
+                            format!(
+                                "existing ChatGPT research conversation {conversation_url} wait failed; refusing to create duplicate Pro research: {error}"
+                            )
+                        })?;
+                        validate_daily_research_response(&waited.response, question).map_err(
+                            |error| {
+                                format!(
+                                    "existing ChatGPT research conversation {conversation_url} is still incomplete; refusing to create duplicate Pro research: {error}"
+                                )
+                            },
+                        )?;
+                        return Ok(waited);
+                    }
+                }
                 let prompt = build_daily_research_child_prompt(
                     question,
                     context_content.as_deref(),
                     direct_context_access,
-                );
-                let child_session = format!(
-                    "asr-research:{}:{}:{}:{}:research",
-                    task.id, task.daily_agent.agent_id, entry.date, question_id
                 );
                 let execution = run_daily_research_child(
                     task,
@@ -874,7 +954,10 @@ async fn run_daily_agent_research_fanout(
                     std::fs::write(&result_path, execution.response.trim())
                         .map_err(|error| format!("write research result failed: {error}"))?;
                     let (conversation_id, full_report_link) =
-                        daily_research_conversation_link(&execution);
+                        daily_research_conversation_link(
+                            &execution,
+                            fanout.chatgpt_project_url.as_deref(),
+                        );
                     let connector_status =
                         daily_research_github_connector_status(question, &execution.response);
                     let status = match connector_status {
@@ -904,23 +987,29 @@ async fn run_daily_agent_research_fanout(
                         error: None,
                     }
                 }
-                Err(error) => AsrDailyResearchChildResult {
-                    question_id: question_id.to_string(),
-                    original_question: question.original_question.clone(),
-                    runner: final_runner.clone(),
-                    github_repositories: question.github_repositories.clone(),
-                    github_connector_status: None,
-                    context_profile: question.context_profile.clone(),
-                    status: "failed".to_string(),
-                    run_id: None,
-                    conversation_id: None,
-                    full_report_link: None,
-                    result_path: None,
-                    context_path: context_path
-                        .is_file()
-                        .then(|| context_path.to_string_lossy().to_string()),
-                    error: Some(error),
-                },
+                Err(error) => {
+                    let conversation_id = daily_research_conversation_id_from_text(&error);
+                    let full_report_link = conversation_id.as_deref().map(|id| {
+                        daily_research_conversation_url(fanout.chatgpt_project_url.as_deref(), id)
+                    });
+                    AsrDailyResearchChildResult {
+                        question_id: question_id.to_string(),
+                        original_question: question.original_question.clone(),
+                        runner: final_runner.clone(),
+                        github_repositories: question.github_repositories.clone(),
+                        github_connector_status: None,
+                        context_profile: question.context_profile.clone(),
+                        status: "failed".to_string(),
+                        run_id: None,
+                        conversation_id,
+                        full_report_link,
+                        result_path: None,
+                        context_path: context_path
+                            .is_file()
+                            .then(|| context_path.to_string_lossy().to_string()),
+                        error: Some(error),
+                    }
+                }
             };
             atomic_json_write(&metadata_path, &child_result)?;
             results.push(child_result);

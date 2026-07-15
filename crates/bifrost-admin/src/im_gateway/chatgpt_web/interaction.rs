@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -201,6 +202,7 @@ struct TerminalReadyCandidate {
     waited: WaitedFinal,
     text_len: usize,
     image_count: usize,
+    signature: u64,
     stable_since: tokio::time::Instant,
 }
 
@@ -371,6 +373,7 @@ pub(super) async fn wait_final(
                     .and_then(|v| v.as_array())
                     .map(|a| a.len())
                     .unwrap_or(0);
+                let ready_signature = dom_ready_signature(&waited);
                 let now = tokio::time::Instant::now();
                 let stable_since = *terminal_idle_since.get_or_insert(now);
                 let terminal_idle_stable_for = options.terminal_idle_stable_for;
@@ -402,6 +405,7 @@ pub(super) async fn wait_final(
                     waited,
                     text_len: dom_text_len,
                     image_count: dom_image_count,
+                    signature: ready_signature,
                     stable_since: now,
                 };
                 match terminal_ready_candidate.as_mut() {
@@ -415,10 +419,7 @@ pub(super) async fn wait_final(
                             "chatgpt_web wait_final: terminal DOM ready, waiting for rendered content to settle"
                         );
                     }
-                    Some(candidate)
-                        if ready_candidate.text_len > candidate.text_len
-                            || ready_candidate.image_count > candidate.image_count =>
-                    {
+                    Some(candidate) if ready_candidate.signature != candidate.signature => {
                         tracing::info!(
                             conversation_id,
                             previous_text_len = candidate.text_len,
@@ -426,7 +427,7 @@ pub(super) async fn wait_final(
                             previous_image_count = candidate.image_count,
                             dom_image_count = ready_candidate.image_count,
                             required_stable_ms = settle_for.as_millis(),
-                            "chatgpt_web wait_final: terminal DOM content grew, resetting settle timer"
+                            "chatgpt_web wait_final: terminal DOM content changed, resetting settle timer"
                         );
                         terminal_ready_candidate = Some(ready_candidate);
                     }
@@ -1675,6 +1676,7 @@ async fn extract_dom_outcome_inner(
             turnId = lastTurn.getAttribute('data-turn-id') || '';
           }}
           let assistantBatchNodes = [];
+          let provisionalAssistantShell = false;
           if (roleMessageNodes.length > 0) {{
             let lastUserIdx = -1;
             for (let i = 0; i < roleMessageNodes.length; i++) {{
@@ -1715,8 +1717,29 @@ async fn extract_dom_outcome_inner(
                 turnId = lastTurn.getAttribute('data-turn-id') ||
                   lastTurn.getAttribute('data-testid') ||
                   turnId;
+                const hasCommittedAssistantMessage = !!(
+                  lastTurn.matches('[data-message-author-role="assistant"][data-message-id]') ||
+                  lastTurn.querySelector('[data-message-author-role="assistant"][data-message-id]')
+                );
+                const hasGeneratedImage = lastTurn.querySelector(
+                  'img[alt^="已生成图片"], img[alt^="Generated image"], img[src*="estuary/content"], img[src*="oaidalleapi"], img[src*="dall-e"]'
+                ) !== null;
+                provisionalAssistantShell = !hasCommittedAssistantMessage && !hasGeneratedImage;
               }}
             }}
+          }}
+          if (assistantBatchNodes.length === 0 && roleMessageNodes.length > 0) {{
+            const userNodes = roleMessageNodes
+              .filter((node) => node.getAttribute('data-message-author-role') === 'user');
+            const lastUserNode = userNodes[userNodes.length - 1];
+            const hasGeneratedImageAfterLastUser = !!lastUserNode && allTurns
+              .filter((node) => !!(
+                lastUserNode.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING
+              ))
+              .some((node) => node.querySelector(
+                'img[alt^="已生成图片"], img[alt^="Generated image"], img[src*="estuary/content"], img[src*="oaidalleapi"], img[src*="dall-e"]'
+              ) !== null);
+            provisionalAssistantShell = !!lastUserNode && !hasGeneratedImageAfterLastUser;
           }}
           if (!lastTurn) {{
             return JSON.stringify({{ found: false, reason: 'no_assistant_turn' }});
@@ -1874,6 +1897,7 @@ async fn extract_dom_outcome_inner(
             imageGenBusy,
             stopButtonVisible,
             waitingForCompleteReply,
+            provisionalAssistantShell,
             composerVisible,
             composerDisabled,
             composerTextLength,
@@ -2339,6 +2363,18 @@ pub(super) fn dom_terminal_content_settle_poll_for() -> std::time::Duration {
     std::time::Duration::from_millis(500)
 }
 
+fn dom_ready_signature(waited: &WaitedFinal) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(&waited.final_message)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    waited.all_texts.hash(&mut hasher);
+    serde_json::to_string(&waited.summary)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
 fn normalize_dom_status_text(text: &str) -> &str {
     text.trim()
         .trim_start_matches('\u{feff}')
@@ -2432,6 +2468,13 @@ pub(super) fn dom_output_in_progress_reason(data: &Value) -> Option<&'static str
         .unwrap_or(false)
     {
         return Some("waiting_for_complete_reply");
+    }
+    if data
+        .get("provisionalAssistantShell")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Some("assistant_message_not_committed");
     }
     let composer_visible = data
         .get("composerVisible")
@@ -2564,6 +2607,47 @@ mod tests {
             dom_output_in_progress_reason(&data),
             Some("stop_button_visible")
         );
+    }
+
+    #[test]
+    fn dom_output_in_progress_reason_waits_for_committed_assistant_message() {
+        let data = json!({
+            "streamingSignal": false,
+            "imageGenBusy": false,
+            "stopButtonVisible": false,
+            "waitingForCompleteReply": false,
+            "provisionalAssistantShell": true,
+            "composerVisible": true,
+            "composerDisabled": false,
+            "composerTextLength": 0,
+            "imageCount": 0,
+            "pendingOutputStatusText": false,
+            "isStreaming": false,
+            "text": "我会先核对主流 TTS，再给出完整方案。",
+        });
+
+        assert_eq!(
+            dom_output_in_progress_reason(&data),
+            Some("assistant_message_not_committed")
+        );
+    }
+
+    #[test]
+    fn dom_ready_signature_detects_same_length_content_changes() {
+        let first = WaitedFinal {
+            final_message: json!({"text": "abc", "turnId": "turn-1"}),
+            summary: json!({"source": "dom_fallback"}),
+            all_texts: vec!["abc".to_string()],
+            had_429_or_fallback: true,
+        };
+        let second = WaitedFinal {
+            final_message: json!({"text": "xyz", "turnId": "turn-1"}),
+            summary: json!({"source": "dom_fallback"}),
+            all_texts: vec!["xyz".to_string()],
+            had_429_or_fallback: true,
+        };
+
+        assert_ne!(dom_ready_signature(&first), dom_ready_signature(&second));
     }
 
     #[test]
