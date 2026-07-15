@@ -82,6 +82,40 @@ fn process_resolver_diagnostics_distinguish_positive_and_negative_cache_hits() {
 }
 
 #[test]
+fn connection_owned_lookup_ignores_cross_connection_positive_but_keeps_short_negative() {
+    let resolver = ProcessResolver::new();
+    let positive = ConnKey::from_connection(
+        &"127.0.0.1:54333".parse().unwrap(),
+        &"127.0.0.1:9900".parse().unwrap(),
+    );
+    let negative = ConnKey::from_connection(
+        &"127.0.0.1:54334".parse().unwrap(),
+        &"127.0.0.1:9900".parse().unwrap(),
+    );
+    resolver.update_cache(
+        positive,
+        Some(ClientProcess {
+            pid: 321,
+            name: "old-port-owner".to_string(),
+            path: None,
+        }),
+    );
+    resolver.update_cache(negative, None);
+
+    assert!(resolver
+        .get_from_cache_for_connection_owned(&positive)
+        .is_none());
+    assert!(matches!(
+        resolver.get_from_cache_for_connection_owned(&negative),
+        Some(None)
+    ));
+    assert_eq!(
+        resolver.get_from_cache(&positive).unwrap().unwrap().pid,
+        321
+    );
+}
+
+#[test]
 fn process_resolver_diagnostics_record_snapshot_refresh_cost() {
     let resolver = ProcessResolver::new();
     let addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
@@ -279,7 +313,7 @@ fn client_process_display_name_and_default_resolver_are_stable() {
     };
     assert_eq!(process.display_name(), "coverage-client");
     let resolver = ProcessResolver::default();
-    assert!(resolver.cache.read().unwrap().is_empty());
+    assert_eq!(resolver.cache.len(), 0);
 }
 
 #[tokio::test]
@@ -319,38 +353,60 @@ async fn async_resolvers_cover_connection_cache_and_non_loopback_shortcuts() {
 }
 
 #[test]
-fn expired_and_large_process_cache_entries_are_pruned_or_missed() {
+fn bounded_ttl_cache_expires_entries_and_hard_caps_live_cardinality() {
     let resolver = ProcessResolver::new();
     let key = ConnKey::from_peer_addr(&SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 55000));
-    resolver.cache.write().unwrap().insert(
+    resolver.cache.insert(
         key,
-        CachedProcess {
-            process: Some(ClientProcess {
-                pid: 99,
-                name: "expired".to_string(),
-                path: None,
-            }),
-            expires_at: Instant::now() - Duration::from_secs(1),
-        },
+        Some(Arc::new(ClientProcess {
+            pid: 99,
+            name: "expired".to_string(),
+            path: None,
+        })),
+        Instant::now() - Duration::from_secs(1),
     );
     assert!(resolver.get_from_cache(&key).is_none());
 
-    {
-        let mut cache = resolver.cache.write().unwrap();
-        for port in 0..=10000_u16 {
-            let entry_key =
-                ConnKey::from_peer_addr(&SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port));
-            cache.insert(
-                entry_key,
-                CachedProcess {
-                    process: None,
-                    expires_at: Instant::now() - Duration::from_secs(1),
-                },
-            );
-        }
+    let cache = BoundedTtlCache::new(64, 4);
+    for value in 0..10_000_u64 {
+        cache.insert(value, value, Instant::now() + Duration::from_secs(30));
     }
-    resolver.update_cache(key, None);
-    assert!(resolver.cache.read().unwrap().len() <= 1);
+    assert!(cache.len() <= 64);
+    assert!(cache.evictions_total() >= 9_936);
+}
+
+#[test]
+fn bounded_ttl_cache_replacement_ignores_stale_expiry_markers() {
+    let cache = BoundedTtlCache::new(64, 4);
+    let now = Instant::now();
+    cache.insert(7_u64, "old", now + Duration::from_millis(5));
+    cache.insert(7_u64, "new", now + Duration::from_secs(30));
+
+    assert_eq!(cache.cleanup_expired(now + Duration::from_millis(10)), 0);
+    assert_eq!(cache.get(&7, now + Duration::from_millis(10)), Some("new"));
+    assert_eq!(cache.len(), 1);
+}
+
+#[test]
+fn bounded_ttl_cache_concurrent_inserts_remain_within_hard_capacity() {
+    let cache = Arc::new(BoundedTtlCache::new(256, 8));
+    let workers = (0..8_u64)
+        .map(|worker| {
+            let cache = Arc::clone(&cache);
+            thread::spawn(move || {
+                for offset in 0..2_000_u64 {
+                    let key = worker * 2_000 + offset;
+                    cache.insert(key, key, Instant::now() + Duration::from_secs(30));
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+
+    assert!(cache.len() <= 256);
+    assert!(cache.evictions_total() >= 15_744);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -380,13 +436,13 @@ async fn limited_blocking_resolution_covers_success_closed_and_join_error() {
         closed,
         1,
         Duration::from_secs(1),
-        || panic!("closed semaphore must not run resolver"),
+        || -> Option<ClientProcess> { panic!("closed semaphore must not run resolver") },
     )
     .await
     .unwrap()
     .is_none());
 
-    let task = tokio::spawn(std::future::pending());
+    let task = tokio::spawn(std::future::pending::<Option<ClientProcess>>());
     task.abort();
     let error = wait_for_process_resolution_with_timeout(task, key, Duration::from_secs(1))
         .await
@@ -646,23 +702,17 @@ fn coverage_90_cleanup_expired_removes_all_cache_layers() {
     let resolver = ProcessResolver::new();
     let peer: SocketAddr = "127.0.0.1:54329".parse().unwrap();
     let key = ConnKey::from_peer_addr(&peer);
-    resolver.cache.write().unwrap().insert(
-        key,
-        CachedProcess {
-            process: None,
-            expires_at: Instant::now() - Duration::from_secs(1),
-        },
-    );
-    resolver.pid_cache.write().unwrap().insert(
+    resolver
+        .cache
+        .insert(key, None, Instant::now() - Duration::from_secs(1));
+    resolver.pid_cache.insert(
         42,
-        CachedProcess {
-            process: Some(ClientProcess {
-                pid: 42,
-                name: "expired".to_string(),
-                path: None,
-            }),
-            expires_at: Instant::now() - Duration::from_secs(1),
-        },
+        Arc::new(ClientProcess {
+            pid: 42,
+            name: "expired".to_string(),
+            path: None,
+        }),
+        Instant::now() - Duration::from_secs(1),
     );
     *resolver.socket_snapshot.write().unwrap() = Some(SocketSnapshot {
         connections_to_pids: HashMap::from([(key, 42)]),
@@ -670,8 +720,8 @@ fn coverage_90_cleanup_expired_removes_all_cache_layers() {
         expires_at: Instant::now() - Duration::from_secs(1),
     });
     resolver.cleanup_expired();
-    assert!(resolver.cache.read().unwrap().is_empty());
-    assert!(resolver.pid_cache.read().unwrap().is_empty());
+    assert_eq!(resolver.cache.len(), 0);
+    assert_eq!(resolver.pid_cache.len(), 0);
     assert!(resolver.socket_snapshot.read().unwrap().is_none());
 }
 

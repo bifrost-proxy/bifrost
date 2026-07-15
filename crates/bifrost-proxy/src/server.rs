@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::future::Future;
 use std::net::SocketAddr;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+#[cfg(test)]
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -30,7 +30,7 @@ use hyper::HeaderMap;
 use hyper::{Method, Request, Response};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, Notify, RwLock, Semaphore};
+use tokio::sync::{oneshot, RwLock, Semaphore};
 use tokio_rustls::rustls::ServerConfig as RustlsServerConfig;
 use tracing::{debug, error, info, warn};
 
@@ -38,15 +38,18 @@ use socket2::{Domain, Protocol as SocketProtocol, Socket, Type};
 
 use crate::dns::DnsResolver;
 use crate::proxy::http::{
-    handle_connect, handle_http_request, requires_client_app_for_tls_decision, SingleCertResolver,
+    handle_connect_with_process_state as handle_connect, handle_http_request,
+    requires_client_app_for_tls_decision, SingleCertResolver,
 };
 use crate::proxy::socks::{SocksConfig, SocksHandler, SocksServer, UdpRelay};
 use crate::unified::{DetectedProtocol, PeekableStream};
 use crate::utils::logging::RequestContext;
+#[cfg(test)]
+use crate::utils::process_info::ClientProcess;
 use crate::utils::process_info::{
-    app_policy_process_resolution_retry_config, resolve_client_process_async_for_connection,
-    resolve_client_process_async_for_connection_with_retry,
-    spawn_async_process_resolver_with_finish, ClientProcess, PROCESS_RESOLVER,
+    app_policy_process_resolution_retry_config, resolve_client_process_async_for_connection_shared,
+    resolve_client_process_async_for_connection_with_retry_shared,
+    spawn_async_process_resolver_with_finish, ConnectionProcessState, PROCESS_RESOLVER,
 };
 use bifrost_core::{
     AccessControlConfig, AccessDecision, AccessMode, ClientAccessControl, ProxyAuthRateLimiter,
@@ -134,77 +137,6 @@ enum ClientProcessResolutionMode {
     SkipAdmin,
     SyncAppPolicy,
     Normal,
-}
-
-#[derive(Default)]
-struct ConnectionProcessState {
-    process: OnceLock<ClientProcess>,
-    resolution_in_flight: AtomicBool,
-    resolution_finished: Notify,
-}
-
-struct ConnectionResolutionGuard<'a>(&'a ConnectionProcessState);
-
-impl Drop for ConnectionResolutionGuard<'_> {
-    fn drop(&mut self) {
-        self.0.finish_resolution();
-    }
-}
-
-impl ConnectionProcessState {
-    fn cached(&self) -> Option<ClientProcess> {
-        self.process.get().cloned()
-    }
-
-    fn store(&self, process: ClientProcess) -> ClientProcess {
-        let _ = self.process.set(process);
-        self.process
-            .get()
-            .expect("connection process was initialized")
-            .clone()
-    }
-
-    async fn resolve<F, Fut>(&self, resolver: F) -> Option<ClientProcess>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Option<ClientProcess>>,
-    {
-        let mut resolver = Some(resolver);
-        loop {
-            if let Some(process) = self.cached() {
-                return Some(process);
-            }
-            let finished = self.resolution_finished.notified();
-            if self.try_start_resolution() {
-                let _guard = ConnectionResolutionGuard(self);
-                let resolver = resolver
-                    .take()
-                    .expect("connection resolver can only become leader once");
-                let process = resolver().await?;
-                return Some(self.store(process));
-            }
-            finished.await;
-        }
-    }
-
-    fn try_start_background_resolution(&self) -> bool {
-        self.try_start_resolution()
-    }
-
-    fn finish_background_resolution(&self) {
-        self.finish_resolution();
-    }
-
-    fn try_start_resolution(&self) -> bool {
-        self.resolution_in_flight
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-    }
-
-    fn finish_resolution(&self) {
-        self.resolution_in_flight.store(false, Ordering::Release);
-        self.resolution_finished.notify_waiters();
-    }
 }
 
 fn client_process_resolution_mode(
@@ -1393,7 +1325,7 @@ async fn handle_request(
                         delay_ms,
                         "CONNECT request requires synchronous client process resolution for app policy"
                     );
-                    resolve_client_process_async_for_connection_with_retry(
+                    resolve_client_process_async_for_connection_with_retry_shared(
                         &peer_addr,
                         &local_addr,
                         max_retries,
@@ -1401,7 +1333,8 @@ async fn handle_request(
                     )
                     .await
                 } else {
-                    resolve_client_process_async_for_connection(&peer_addr, &local_addr).await
+                    resolve_client_process_async_for_connection_shared(&peer_addr, &local_addr)
+                        .await
                 }
             })
             .await;
@@ -1428,7 +1361,7 @@ async fn handle_request(
     } else {
         let client_process = client_process_state
             .resolve(|| async {
-                resolve_client_process_async_for_connection(&peer_addr, &local_addr).await
+                resolve_client_process_async_for_connection_shared(&peer_addr, &local_addr).await
             })
             .await;
         let client_process = if client_process.is_some() {
@@ -1454,12 +1387,12 @@ async fn handle_request(
                             local_addr,
                             record_id.to_string(),
                             move |id, process| {
-                                state_for_success.store(process.clone());
+                                let process = state_for_success.store(Arc::new(process));
                                 state.update_client_process(
                                     &id,
-                                    process.name,
+                                    process.name.clone(),
                                     process.pid,
-                                    process.path,
+                                    process.path.clone(),
                                 );
                             },
                             move || {
@@ -1750,6 +1683,7 @@ async fn handle_request(
             admin_state.clone(),
             Some(dns_resolver),
             push_manager.clone(),
+            Arc::clone(&client_process_state),
         )
         .await
         {
@@ -2449,11 +2383,11 @@ mod tests {
                         .resolve(|| async {
                             calls.fetch_add(1, Ordering::SeqCst);
                             tokio::time::sleep(Duration::from_millis(20)).await;
-                            Some(ClientProcess {
+                            Some(Arc::new(ClientProcess {
                                 pid: 42,
                                 name: "SharedBrowser".to_string(),
                                 path: Some("/Applications/SharedBrowser.app".to_string()),
-                            })
+                            }))
                         })
                         .await
                 })
@@ -2473,11 +2407,11 @@ mod tests {
         assert!(state.resolve(|| async { None }).await.is_none());
         let resolved = state
             .resolve(|| async {
-                Some(ClientProcess {
+                Some(Arc::new(ClientProcess {
                     pid: 84,
                     name: "LateBrowser".to_string(),
                     path: None,
-                })
+                }))
             })
             .await
             .unwrap();
@@ -2489,11 +2423,11 @@ mod tests {
     #[tokio::test]
     async fn connection_process_state_uses_background_result_without_reinitializing() {
         let state = ConnectionProcessState::default();
-        state.store(ClientProcess {
+        state.store(Arc::new(ClientProcess {
             pid: 126,
             name: "BackgroundBrowser".to_string(),
             path: None,
-        });
+        }));
 
         let resolved = state
             .resolve(|| async { panic!("cached background result must bypass resolver") })
@@ -2520,11 +2454,11 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(calls.load(Ordering::SeqCst), 0);
 
-        state.store(ClientProcess {
+        state.store(Arc::new(ClientProcess {
             pid: 168,
             name: "BackgroundWinner".to_string(),
             path: None,
-        });
+        }));
         state.finish_background_resolution();
 
         assert_eq!(waiter.await.unwrap().unwrap().pid, 168);
@@ -2537,7 +2471,7 @@ mod tests {
         let state_for_cancelled = Arc::clone(&state);
         let cancelled = tokio::spawn(async move {
             state_for_cancelled
-                .resolve(|| async { std::future::pending::<Option<ClientProcess>>().await })
+                .resolve(|| async { std::future::pending::<Option<Arc<ClientProcess>>>().await })
                 .await
         });
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2546,11 +2480,11 @@ mod tests {
 
         let resolved = state
             .resolve(|| async {
-                Some(ClientProcess {
+                Some(Arc::new(ClientProcess {
                     pid: 210,
                     name: "RecoveredBrowser".to_string(),
                     path: None,
-                })
+                }))
             })
             .await
             .unwrap();

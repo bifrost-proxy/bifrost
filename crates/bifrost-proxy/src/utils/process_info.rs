@@ -1,15 +1,22 @@
-use std::collections::HashMap;
+use std::cmp::{Ordering as CmpOrdering, Reverse};
+use std::collections::{BinaryHeap, HashMap};
+use std::future::Future;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::SocketAddr;
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tracing::{debug, trace, warn};
 
 use bifrost_core::ProcessResolverDiagnostics;
 
 const PROCESS_RESOLUTION_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+const CONNECTION_CACHE_CAPACITY: usize = 16_384;
+const PID_CACHE_CAPACITY: usize = 2_048;
+const CACHE_SHARD_COUNT: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct ClientProcess {
@@ -21,6 +28,82 @@ pub struct ClientProcess {
 impl ClientProcess {
     pub fn display_name(&self) -> String {
         self.name.clone()
+    }
+}
+
+/// Successful process attribution owned by one accepted TCP connection.
+///
+/// A positive result is immutable for the connection lifetime, while a miss is
+/// deliberately retryable because the OS socket table can lag accept().
+#[derive(Default)]
+pub(crate) struct ConnectionProcessState {
+    process: OnceLock<Arc<ClientProcess>>,
+    resolution_in_flight: AtomicBool,
+    resolution_finished: Notify,
+}
+
+struct ConnectionResolutionGuard<'a>(&'a ConnectionProcessState);
+
+impl Drop for ConnectionResolutionGuard<'_> {
+    fn drop(&mut self) {
+        self.0.finish_resolution();
+    }
+}
+
+impl ConnectionProcessState {
+    pub(crate) fn cached(&self) -> Option<Arc<ClientProcess>> {
+        self.process.get().cloned()
+    }
+
+    pub(crate) fn store(&self, process: Arc<ClientProcess>) -> Arc<ClientProcess> {
+        let _ = self.process.set(process);
+        Arc::clone(
+            self.process
+                .get()
+                .expect("connection process was initialized"),
+        )
+    }
+
+    pub(crate) async fn resolve<F, Fut>(&self, resolver: F) -> Option<Arc<ClientProcess>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Option<Arc<ClientProcess>>>,
+    {
+        let mut resolver = Some(resolver);
+        loop {
+            if let Some(process) = self.cached() {
+                return Some(process);
+            }
+            let finished = self.resolution_finished.notified();
+            if self.try_start_resolution() {
+                let _guard = ConnectionResolutionGuard(self);
+                let resolver = resolver
+                    .take()
+                    .expect("connection resolver can only become leader once");
+                let process = resolver().await?;
+                return Some(self.store(process));
+            }
+            finished.await;
+        }
+    }
+
+    pub(crate) fn try_start_background_resolution(&self) -> bool {
+        self.try_start_resolution()
+    }
+
+    pub(crate) fn finish_background_resolution(&self) {
+        self.finish_resolution();
+    }
+
+    fn try_start_resolution(&self) -> bool {
+        self.resolution_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn finish_resolution(&self) {
+        self.resolution_in_flight.store(false, Ordering::Release);
+        self.resolution_finished.notify_waiters();
     }
 }
 
@@ -46,9 +129,218 @@ impl ConnKey {
     }
 }
 
-struct CachedProcess {
-    process: Option<ClientProcess>,
+#[derive(Debug)]
+struct CacheEntry<V> {
+    value: V,
     expires_at: Instant,
+    generation: u64,
+}
+
+#[derive(Debug)]
+struct CacheMarker<K> {
+    key: K,
+    expires_at: Instant,
+    generation: u64,
+}
+
+impl<K> PartialEq for CacheMarker<K> {
+    fn eq(&self, other: &Self) -> bool {
+        self.expires_at == other.expires_at && self.generation == other.generation
+    }
+}
+
+impl<K> Eq for CacheMarker<K> {}
+
+impl<K> PartialOrd for CacheMarker<K> {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<K> Ord for CacheMarker<K> {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        self.expires_at
+            .cmp(&other.expires_at)
+            .then_with(|| self.generation.cmp(&other.generation))
+    }
+}
+
+struct CacheShard<K, V> {
+    entries: HashMap<K, CacheEntry<V>>,
+    expiry: BinaryHeap<Reverse<CacheMarker<K>>>,
+    next_generation: u64,
+    capacity: usize,
+}
+
+impl<K, V> CacheShard<K, V>
+where
+    K: Clone + Eq + Hash,
+{
+    fn purge_expired(&mut self, now: Instant) -> usize {
+        let mut removed = 0;
+        while self
+            .expiry
+            .peek()
+            .is_some_and(|marker| marker.0.expires_at <= now)
+        {
+            let Reverse(marker) = self.expiry.pop().expect("peeked expiry marker");
+            if self.entries.get(&marker.key).is_some_and(|entry| {
+                entry.generation == marker.generation && entry.expires_at <= now
+            }) {
+                self.entries.remove(&marker.key);
+                removed += 1;
+            }
+        }
+        removed
+    }
+
+    fn evict_over_capacity(&mut self) -> usize {
+        let mut evicted = 0;
+        while self.entries.len() > self.capacity {
+            let Some(Reverse(marker)) = self.expiry.pop() else {
+                break;
+            };
+            if self
+                .entries
+                .get(&marker.key)
+                .is_some_and(|entry| entry.generation == marker.generation)
+            {
+                self.entries.remove(&marker.key);
+                evicted += 1;
+            }
+        }
+        evicted
+    }
+}
+
+/// A bounded, sharded TTL cache whose insert path is O(log shard capacity).
+///
+/// Expiry and hard-cap eviction use a min-heap, so short-lived negative entries
+/// are discarded before longer-lived positive entries. Stale markers are
+/// ignored by generation, so replacing a key never requires a full table scan.
+/// Reads only acquire the selected shard's shared lock.
+struct BoundedTtlCache<K, V> {
+    shards: Vec<RwLock<CacheShard<K, V>>>,
+    entry_count: AtomicUsize,
+    evictions_total: AtomicU64,
+    expired_total: AtomicU64,
+}
+
+impl<K, V> BoundedTtlCache<K, V>
+where
+    K: Clone + Eq + Hash,
+    V: Clone,
+{
+    fn new(capacity: usize, shard_count: usize) -> Self {
+        assert!(capacity > 0, "cache capacity must be non-zero");
+        assert!(shard_count > 0, "cache shard count must be non-zero");
+        let base_capacity = capacity / shard_count;
+        let remainder = capacity % shard_count;
+        let shards = (0..shard_count)
+            .map(|index| {
+                RwLock::new(CacheShard {
+                    entries: HashMap::new(),
+                    expiry: BinaryHeap::new(),
+                    next_generation: 0,
+                    capacity: base_capacity + usize::from(index < remainder),
+                })
+            })
+            .collect();
+        Self {
+            shards,
+            entry_count: AtomicUsize::new(0),
+            evictions_total: AtomicU64::new(0),
+            expired_total: AtomicU64::new(0),
+        }
+    }
+
+    fn shard_index(&self, key: &K) -> usize {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        (hasher.finish() as usize) % self.shards.len()
+    }
+
+    fn get(&self, key: &K, now: Instant) -> Option<V> {
+        let shard = self.shards[self.shard_index(key)]
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        shard
+            .entries
+            .get(key)
+            .filter(|entry| entry.expires_at > now)
+            .map(|entry| entry.value.clone())
+    }
+
+    fn insert(&self, key: K, value: V, expires_at: Instant) {
+        let shard_index = self.shard_index(&key);
+        let mut shard = self.shards[shard_index]
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let expired = shard.purge_expired(Instant::now());
+        if expired > 0 {
+            self.entry_count.fetch_sub(expired, Ordering::Relaxed);
+            self.expired_total
+                .fetch_add(expired as u64, Ordering::Relaxed);
+        }
+
+        shard.next_generation = shard.next_generation.wrapping_add(1);
+        let generation = shard.next_generation;
+        let marker = CacheMarker {
+            key: key.clone(),
+            expires_at,
+            generation,
+        };
+        let replaced = shard
+            .entries
+            .insert(
+                key,
+                CacheEntry {
+                    value,
+                    expires_at,
+                    generation,
+                },
+            )
+            .is_some();
+        shard.expiry.push(Reverse(marker));
+        if !replaced {
+            self.entry_count.fetch_add(1, Ordering::Relaxed);
+        }
+
+        let evicted = shard.evict_over_capacity();
+        if evicted > 0 {
+            self.entry_count.fetch_sub(evicted, Ordering::Relaxed);
+            self.evictions_total
+                .fetch_add(evicted as u64, Ordering::Relaxed);
+        }
+    }
+
+    fn cleanup_expired(&self, now: Instant) -> usize {
+        let mut removed = 0;
+        for shard in &self.shards {
+            removed += shard
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .purge_expired(now);
+        }
+        if removed > 0 {
+            self.entry_count.fetch_sub(removed, Ordering::Relaxed);
+            self.expired_total
+                .fetch_add(removed as u64, Ordering::Relaxed);
+        }
+        removed
+    }
+
+    fn len(&self) -> usize {
+        self.entry_count.load(Ordering::Relaxed)
+    }
+
+    fn evictions_total(&self) -> u64 {
+        self.evictions_total.load(Ordering::Relaxed)
+    }
+
+    fn expired_total(&self) -> u64 {
+        self.expired_total.load(Ordering::Relaxed)
+    }
 }
 
 struct SocketSnapshot {
@@ -73,8 +365,8 @@ struct SnapshotRefreshCoordinator {
 type SocketPidMapScanner = dyn Fn() -> SocketPidMapScan + Send + Sync;
 
 pub struct ProcessResolver {
-    cache: RwLock<HashMap<ConnKey, CachedProcess>>,
-    pid_cache: RwLock<HashMap<u32, CachedProcess>>,
+    cache: BoundedTtlCache<ConnKey, Option<Arc<ClientProcess>>>,
+    pid_cache: BoundedTtlCache<u32, Arc<ClientProcess>>,
     socket_snapshot: RwLock<Option<SocketSnapshot>>,
     snapshot_refresh: Mutex<SnapshotRefreshCoordinator>,
     snapshot_published: Condvar,
@@ -102,8 +394,8 @@ impl ProcessResolver {
         scanner: impl Fn() -> SocketPidMapScan + Send + Sync + 'static,
     ) -> Self {
         Self {
-            cache: RwLock::new(HashMap::new()),
-            pid_cache: RwLock::new(HashMap::new()),
+            cache: BoundedTtlCache::new(CONNECTION_CACHE_CAPACITY, CACHE_SHARD_COUNT),
+            pid_cache: BoundedTtlCache::new(PID_CACHE_CAPACITY, CACHE_SHARD_COUNT),
             socket_snapshot: RwLock::new(None),
             snapshot_refresh: Mutex::new(SnapshotRefreshCoordinator::default()),
             snapshot_published: Condvar::new(),
@@ -122,7 +414,8 @@ impl ProcessResolver {
     }
 
     pub fn resolve(&self, peer_addr: &SocketAddr) -> Option<ClientProcess> {
-        self.resolve_by_key(ConnKey::from_peer_addr(peer_addr))
+        self.resolve_by_key_shared(ConnKey::from_peer_addr(peer_addr))
+            .map(|process| process.as_ref().clone())
     }
 
     pub fn resolve_for_connection(
@@ -130,12 +423,14 @@ impl ProcessResolver {
         peer_addr: &SocketAddr,
         local_addr: &SocketAddr,
     ) -> Option<ClientProcess> {
-        self.resolve_by_key(ConnKey::from_connection(peer_addr, local_addr))
+        self.resolve_by_key_shared(ConnKey::from_connection(peer_addr, local_addr))
+            .map(|process| process.as_ref().clone())
     }
 
     pub fn resolve_cached(&self, peer_addr: &SocketAddr) -> Option<ClientProcess> {
         self.get_from_cache(&ConnKey::from_peer_addr(peer_addr))
             .flatten()
+            .map(|process| process.as_ref().clone())
     }
 
     pub fn resolve_cached_for_connection(
@@ -145,6 +440,7 @@ impl ProcessResolver {
     ) -> Option<ClientProcess> {
         self.get_from_cache(&ConnKey::from_connection(peer_addr, local_addr))
             .flatten()
+            .map(|process| process.as_ref().clone())
     }
 
     pub fn resolve_with_retry(
@@ -153,7 +449,12 @@ impl ProcessResolver {
         max_retries: u32,
         delay_ms: u64,
     ) -> Option<ClientProcess> {
-        self.resolve_with_retry_by_key(ConnKey::from_peer_addr(peer_addr), max_retries, delay_ms)
+        self.resolve_with_retry_by_key_shared(
+            ConnKey::from_peer_addr(peer_addr),
+            max_retries,
+            delay_ms,
+        )
+        .map(|process| process.as_ref().clone())
     }
 
     pub fn resolve_for_connection_with_retry(
@@ -163,11 +464,12 @@ impl ProcessResolver {
         max_retries: u32,
         delay_ms: u64,
     ) -> Option<ClientProcess> {
-        self.resolve_with_retry_by_key(
+        self.resolve_with_retry_by_key_shared(
             ConnKey::from_connection(peer_addr, local_addr),
             max_retries,
             delay_ms,
         )
+        .map(|process| process.as_ref().clone())
     }
 
     pub async fn resolve_async(
@@ -177,7 +479,7 @@ impl ProcessResolver {
         delay_ms: u64,
     ) -> Option<ClientProcess> {
         if let Some(cached) = self.get_from_cache(&ConnKey::from_peer_addr(&peer_addr)) {
-            return cached;
+            return cached.map(|process| process.as_ref().clone());
         }
 
         if !peer_addr.ip().is_loopback() {
@@ -196,7 +498,7 @@ impl ProcessResolver {
     ) -> Option<ClientProcess> {
         let key = ConnKey::from_connection(&peer_addr, &local_addr);
         if let Some(cached) = self.get_from_cache(&key) {
-            return cached;
+            return cached.map(|process| process.as_ref().clone());
         }
 
         if !peer_addr.ip().is_loopback() {
@@ -206,31 +508,31 @@ impl ProcessResolver {
         self.resolve_for_connection_with_retry(&peer_addr, &local_addr, max_retries, delay_ms)
     }
 
-    fn resolve_by_key(&self, key: ConnKey) -> Option<ClientProcess> {
+    fn resolve_by_key_shared(&self, key: ConnKey) -> Option<Arc<ClientProcess>> {
         if let Some(cached) = self.get_from_cache(&key) {
             return cached;
         }
 
-        let process = self.lookup_process(&key);
-        self.update_cache(key, process.clone());
+        let process = self.lookup_process_shared(&key);
+        self.update_cache_shared(key, process.clone());
         process
     }
 
-    fn resolve_with_retry_by_key(
+    fn resolve_with_retry_by_key_shared(
         &self,
         key: ConnKey,
         max_retries: u32,
         delay_ms: u64,
-    ) -> Option<ClientProcess> {
+    ) -> Option<Arc<ClientProcess>> {
         for attempt in 0..=max_retries {
             if attempt > 0 {
                 std::thread::sleep(Duration::from_millis(delay_ms));
             }
 
-            let process = self.lookup_process(&key);
+            let process = self.lookup_process_shared(&key);
             if process.is_some() {
                 debug!(?key, attempt, "Resolved client process");
-                self.update_cache(key, process.clone());
+                self.update_cache_shared(key, process.clone());
                 return process;
             }
 
@@ -244,45 +546,54 @@ impl ProcessResolver {
             ?key,
             max_retries, delay_ms, "Failed to resolve client process after retries"
         );
-        self.update_cache(key, None);
+        self.update_cache_shared(key, None);
         None
     }
 
-    fn get_from_cache(&self, key: &ConnKey) -> Option<Option<ClientProcess>> {
-        let cache = self.cache.read().ok()?;
-        if let Some(cached) = cache.get(key) {
-            if cached.expires_at > Instant::now() {
-                trace!(?key, "Process info cache hit");
-                self.diagnostics.record_cache_hit(cached.process.is_some());
-                return Some(cached.process.clone());
-            }
+    fn get_from_cache(&self, key: &ConnKey) -> Option<Option<Arc<ClientProcess>>> {
+        if let Some(cached) = self.cache.get(key, Instant::now()) {
+            trace!(?key, "Process info cache hit");
+            self.diagnostics.record_cache_hit(cached.is_some());
+            return Some(cached);
         }
         None
+    }
+
+    fn get_from_cache_for_connection_owned(
+        &self,
+        key: &ConnKey,
+    ) -> Option<Option<Arc<ClientProcess>>> {
+        match self.cache.get(key, Instant::now()) {
+            Some(None) => {
+                self.diagnostics.record_cache_hit(false);
+                Some(None)
+            }
+            Some(Some(_)) => {
+                trace!(
+                    ?key,
+                    "Ignoring cross-connection positive cache for connection-owned attribution"
+                );
+                None
+            }
+            None => None,
+        }
     }
 
     fn update_cache(&self, key: ConnKey, process: Option<ClientProcess>) {
-        if let Ok(mut cache) = self.cache.write() {
-            let ttl = if process.is_some() {
-                self.cache_ttl
-            } else {
-                self.negative_cache_ttl
-            };
-            cache.insert(
-                key,
-                CachedProcess {
-                    process,
-                    expires_at: Instant::now() + ttl,
-                },
-            );
-
-            if cache.len() > 10000 {
-                let now = Instant::now();
-                cache.retain(|_, value| value.expires_at > now);
-            }
-        }
+        self.update_cache_shared(key, process.map(Arc::new));
     }
 
-    fn lookup_process(&self, key: &ConnKey) -> Option<ClientProcess> {
+    fn update_cache_shared(&self, key: ConnKey, process: Option<Arc<ClientProcess>>) {
+        let ttl = if process.is_some() {
+            self.cache_ttl
+        } else {
+            self.negative_cache_ttl
+        };
+        self.cache.insert(key, process, Instant::now() + ttl);
+        self.record_cache_diagnostics();
+    }
+
+    fn lookup_process_shared(&self, key: &ConnKey) -> Option<Arc<ClientProcess>> {
         let process = self
             .lookup_pid(key)
             .and_then(|pid| self.lookup_cached_process_by_pid(pid));
@@ -382,55 +693,37 @@ impl ProcessResolver {
         result
     }
 
-    fn lookup_cached_process_by_pid(&self, pid: u32) -> Option<ClientProcess> {
+    fn lookup_cached_process_by_pid(&self, pid: u32) -> Option<Arc<ClientProcess>> {
         let now = Instant::now();
 
-        if let Ok(cache) = self.pid_cache.read() {
-            if let Some(cached) = cache.get(&pid) {
-                if cached.expires_at > now {
-                    trace!(pid, "Process info pid cache hit");
-                    return cached.process.clone();
-                }
-            }
+        if let Some(process) = self.pid_cache.get(&pid, now) {
+            trace!(pid, "Process info pid cache hit");
+            return Some(process);
         }
 
         let (name, path) = get_process_info(pid);
-        let process = Some(ClientProcess { pid, name, path });
+        let process = Arc::new(ClientProcess { pid, name, path });
+        self.pid_cache
+            .insert(pid, Arc::clone(&process), now + self.pid_cache_ttl);
+        self.record_cache_diagnostics();
 
-        if let Ok(mut cache) = self.pid_cache.write() {
-            cache.insert(
-                pid,
-                CachedProcess {
-                    process: process.clone(),
-                    expires_at: now + self.pid_cache_ttl,
-                },
-            );
-            if cache.len() > 10000 {
-                cache.retain(|_, value| value.expires_at > now);
-            }
-        }
-
-        process
+        Some(process)
     }
 
     pub fn cleanup_expired(&self) {
-        if let Ok(mut cache) = self.cache.write() {
-            let now = Instant::now();
-            let before = cache.len();
-            cache.retain(|_, value| value.expires_at > now);
-            let after = cache.len();
-            if before != after {
-                debug!(
-                    removed = before - after,
-                    remaining = after,
-                    "Cleaned up expired process cache entries"
-                );
-            }
+        let now = Instant::now();
+        let removed = self.cache.cleanup_expired(now);
+        let removed_pids = self.pid_cache.cleanup_expired(now);
+        if removed > 0 || removed_pids > 0 {
+            debug!(
+                removed,
+                removed_pids,
+                remaining = self.cache.len(),
+                remaining_pids = self.pid_cache.len(),
+                "Cleaned up expired process cache entries"
+            );
         }
-
-        if let Ok(mut cache) = self.pid_cache.write() {
-            cache.retain(|_, value| value.expires_at > Instant::now());
-        }
+        self.record_cache_diagnostics();
 
         if let Ok(mut snapshot) = self.socket_snapshot.write() {
             if snapshot
@@ -440,6 +733,17 @@ impl ProcessResolver {
                 *snapshot = None;
             }
         }
+    }
+
+    fn record_cache_diagnostics(&self) {
+        self.diagnostics.record_cache_state(
+            self.cache.len(),
+            self.cache.evictions_total(),
+            self.cache.expired_total(),
+            self.pid_cache.len(),
+            self.pid_cache.evictions_total(),
+            self.pid_cache.expired_total(),
+        );
     }
 }
 
@@ -1104,6 +1408,14 @@ pub async fn resolve_client_process_async_for_connection(
     resolve_client_process_async_for_connection_with_retry(peer_addr, local_addr, 6, 10).await
 }
 
+pub(crate) async fn resolve_client_process_async_for_connection_shared(
+    peer_addr: &SocketAddr,
+    local_addr: &SocketAddr,
+) -> Option<Arc<ClientProcess>> {
+    resolve_client_process_async_for_connection_with_retry_shared(peer_addr, local_addr, 6, 10)
+        .await
+}
+
 pub async fn resolve_client_process_async_with_retry(
     peer_addr: &SocketAddr,
     max_retries: u32,
@@ -1111,7 +1423,7 @@ pub async fn resolve_client_process_async_with_retry(
 ) -> Option<ClientProcess> {
     let key = ConnKey::from_peer_addr(peer_addr);
     if let Some(cached) = PROCESS_RESOLVER.get_from_cache(&key) {
-        return cached;
+        return cached.map(|process| process.as_ref().clone());
     }
 
     if !peer_addr.ip().is_loopback() {
@@ -1138,18 +1450,58 @@ pub async fn resolve_client_process_async_for_connection_with_retry(
     max_retries: u32,
     delay_ms: u64,
 ) -> Option<ClientProcess> {
+    resolve_client_process_async_for_connection_with_retry_impl(
+        peer_addr,
+        local_addr,
+        max_retries,
+        delay_ms,
+        true,
+    )
+    .await
+    .map(|process| process.as_ref().clone())
+}
+
+pub(crate) async fn resolve_client_process_async_for_connection_with_retry_shared(
+    peer_addr: &SocketAddr,
+    local_addr: &SocketAddr,
+    max_retries: u32,
+    delay_ms: u64,
+) -> Option<Arc<ClientProcess>> {
+    resolve_client_process_async_for_connection_with_retry_impl(
+        peer_addr,
+        local_addr,
+        max_retries,
+        delay_ms,
+        false,
+    )
+    .await
+}
+
+async fn resolve_client_process_async_for_connection_with_retry_impl(
+    peer_addr: &SocketAddr,
+    local_addr: &SocketAddr,
+    max_retries: u32,
+    delay_ms: u64,
+    reuse_positive_connection_cache: bool,
+) -> Option<Arc<ClientProcess>> {
     let key = ConnKey::from_connection(peer_addr, local_addr);
-    if let Some(cached) = PROCESS_RESOLVER.get_from_cache(&key) {
-        if let Some(ref process) = cached {
-            debug!(
-                peer_addr = %peer_addr,
-                local_addr = %local_addr,
-                client_app = %process.name,
-                client_pid = process.pid,
-                "Client process resolution cache hit for connection"
-            );
+    if reuse_positive_connection_cache {
+        if let Some(cached) = PROCESS_RESOLVER.get_from_cache(&key) {
+            if let Some(ref process) = cached {
+                debug!(
+                    peer_addr = %peer_addr,
+                    local_addr = %local_addr,
+                    client_app = %process.name,
+                    client_pid = process.pid,
+                    "Client process resolution cache hit for connection"
+                );
+            }
+            return cached;
         }
-        return cached;
+    } else {
+        if let Some(cached) = PROCESS_RESOLVER.get_from_cache_for_connection_owned(&key) {
+            return cached;
+        }
     }
 
     if !peer_addr.ip().is_loopback() {
@@ -1167,12 +1519,7 @@ pub async fn resolve_client_process_async_for_connection_with_retry(
     let peer_addr = *peer_addr;
     let local_addr = *local_addr;
     let result = resolve_with_limited_blocking_task(key, move || {
-        PROCESS_RESOLVER.resolve_for_connection_with_retry(
-            &peer_addr,
-            &local_addr,
-            max_retries,
-            delay_ms,
-        )
+        PROCESS_RESOLVER.resolve_with_retry_by_key_shared(key, max_retries, delay_ms)
     })
     .await;
     match result {
@@ -1230,6 +1577,16 @@ pub fn spawn_async_process_resolver_with_finish<F, G>(
     G: FnOnce() + Send + 'static,
 {
     tokio::spawn(async move {
+        struct FinishGuard<G: FnOnce()>(Option<G>);
+        impl<G: FnOnce()> Drop for FinishGuard<G> {
+            fn drop(&mut self) {
+                if let Some(finish) = self.0.take() {
+                    finish();
+                }
+            }
+        }
+
+        let _finish_guard = FinishGuard(Some(finish));
         debug!(
             record_id,
             peer_addr = %peer_addr,
@@ -1246,7 +1603,6 @@ pub fn spawn_async_process_resolver_with_finish<F, G>(
                     limit = *BACKGROUND_PROCESS_RESOLUTION_CONCURRENCY,
                     "Background client process backfill skipped because concurrency limit is saturated"
                 );
-                finish();
                 return;
             }
         };
@@ -1291,16 +1647,16 @@ pub fn spawn_async_process_resolver_with_finish<F, G>(
                 );
             }
         }
-        finish();
     });
 }
 
-async fn resolve_with_limited_blocking_task<F>(
+async fn resolve_with_limited_blocking_task<F, T>(
     key: ConnKey,
     resolver: F,
-) -> Result<Option<ClientProcess>, tokio::task::JoinError>
+) -> Result<Option<T>, tokio::task::JoinError>
 where
-    F: FnOnce() -> Option<ClientProcess> + Send + 'static,
+    F: FnOnce() -> Option<T> + Send + 'static,
+    T: Send + 'static,
 {
     resolve_with_limited_blocking_task_for_semaphore(
         key,
@@ -1312,15 +1668,16 @@ where
     .await
 }
 
-async fn resolve_with_limited_blocking_task_for_semaphore<F>(
+async fn resolve_with_limited_blocking_task_for_semaphore<F, T>(
     key: ConnKey,
     semaphore: Arc<Semaphore>,
     concurrency_limit: usize,
     timeout_duration: Duration,
     resolver: F,
-) -> Result<Option<ClientProcess>, tokio::task::JoinError>
+) -> Result<Option<T>, tokio::task::JoinError>
 where
-    F: FnOnce() -> Option<ClientProcess> + Send + 'static,
+    F: FnOnce() -> Option<T> + Send + 'static,
+    T: Send + 'static,
 {
     let started_at = Instant::now();
     let permit = match tokio::time::timeout(timeout_duration, semaphore.acquire_owned()).await {
@@ -1363,11 +1720,14 @@ where
     wait_for_process_resolution_with_timeout(task, key, remaining_timeout).await
 }
 
-async fn wait_for_process_resolution_with_timeout(
-    task: JoinHandle<Option<ClientProcess>>,
+async fn wait_for_process_resolution_with_timeout<T>(
+    task: JoinHandle<Option<T>>,
     key: ConnKey,
     timeout_duration: Duration,
-) -> Result<Option<ClientProcess>, tokio::task::JoinError> {
+) -> Result<Option<T>, tokio::task::JoinError>
+where
+    T: Send + 'static,
+{
     match tokio::time::timeout(timeout_duration, task).await {
         Ok(result) => result,
         Err(_) => {

@@ -3,10 +3,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ProcessResolverDiagnosticsSnapshot {
     pub lookup_requests_total: u64,
     pub positive_cache_hits_total: u64,
     pub negative_cache_hits_total: u64,
+    pub connection_cache_entries: u64,
+    pub connection_cache_peak_entries: u64,
+    pub connection_cache_evictions_total: u64,
+    pub connection_cache_expired_total: u64,
+    pub pid_cache_entries: u64,
+    pub pid_cache_peak_entries: u64,
+    pub pid_cache_evictions_total: u64,
+    pub pid_cache_expired_total: u64,
     pub snapshot_hits_total: u64,
     pub snapshot_misses_total: u64,
     pub snapshot_refreshes_total: u64,
@@ -24,6 +33,14 @@ pub struct ProcessResolverDiagnostics {
     lookup_requests_total: AtomicU64,
     positive_cache_hits_total: AtomicU64,
     negative_cache_hits_total: AtomicU64,
+    connection_cache_entries: AtomicU64,
+    connection_cache_peak_entries: AtomicU64,
+    connection_cache_evictions_total: AtomicU64,
+    connection_cache_expired_total: AtomicU64,
+    pid_cache_entries: AtomicU64,
+    pid_cache_peak_entries: AtomicU64,
+    pid_cache_evictions_total: AtomicU64,
+    pid_cache_expired_total: AtomicU64,
     snapshot_hits_total: AtomicU64,
     snapshot_misses_total: AtomicU64,
     snapshot_refreshes_total: AtomicU64,
@@ -56,6 +73,36 @@ impl ProcessResolverDiagnostics {
             self.negative_cache_hits_total
                 .fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    #[inline]
+    pub fn record_cache_state(
+        &self,
+        connection_entries: usize,
+        connection_evictions_total: u64,
+        connection_expired_total: u64,
+        pid_entries: usize,
+        pid_evictions_total: u64,
+        pid_expired_total: u64,
+    ) {
+        let connection_entries = connection_entries as u64;
+        self.connection_cache_entries
+            .store(connection_entries, Ordering::Relaxed);
+        self.connection_cache_peak_entries
+            .fetch_max(connection_entries, Ordering::Relaxed);
+        self.connection_cache_evictions_total
+            .store(connection_evictions_total, Ordering::Relaxed);
+        self.connection_cache_expired_total
+            .store(connection_expired_total, Ordering::Relaxed);
+
+        let pid_entries = pid_entries as u64;
+        self.pid_cache_entries.store(pid_entries, Ordering::Relaxed);
+        self.pid_cache_peak_entries
+            .fetch_max(pid_entries, Ordering::Relaxed);
+        self.pid_cache_evictions_total
+            .store(pid_evictions_total, Ordering::Relaxed);
+        self.pid_cache_expired_total
+            .store(pid_expired_total, Ordering::Relaxed);
     }
 
     #[inline]
@@ -97,6 +144,20 @@ impl ProcessResolverDiagnostics {
             lookup_requests_total: self.lookup_requests_total.load(Ordering::Relaxed),
             positive_cache_hits_total: self.positive_cache_hits_total.load(Ordering::Relaxed),
             negative_cache_hits_total: self.negative_cache_hits_total.load(Ordering::Relaxed),
+            connection_cache_entries: self.connection_cache_entries.load(Ordering::Relaxed),
+            connection_cache_peak_entries: self
+                .connection_cache_peak_entries
+                .load(Ordering::Relaxed),
+            connection_cache_evictions_total: self
+                .connection_cache_evictions_total
+                .load(Ordering::Relaxed),
+            connection_cache_expired_total: self
+                .connection_cache_expired_total
+                .load(Ordering::Relaxed),
+            pid_cache_entries: self.pid_cache_entries.load(Ordering::Relaxed),
+            pid_cache_peak_entries: self.pid_cache_peak_entries.load(Ordering::Relaxed),
+            pid_cache_evictions_total: self.pid_cache_evictions_total.load(Ordering::Relaxed),
+            pid_cache_expired_total: self.pid_cache_expired_total.load(Ordering::Relaxed),
             snapshot_hits_total: self.snapshot_hits_total.load(Ordering::Relaxed),
             snapshot_misses_total: self.snapshot_misses_total.load(Ordering::Relaxed),
             snapshot_refreshes_total: self.snapshot_refreshes_total.load(Ordering::Relaxed),
@@ -124,6 +185,8 @@ mod tests {
         diagnostics.record_lookup_result(false);
         diagnostics.record_cache_hit(true);
         diagnostics.record_cache_hit(false);
+        diagnostics.record_cache_state(10, 2, 3, 4, 1, 5);
+        diagnostics.record_cache_state(6, 4, 7, 2, 3, 8);
         diagnostics.record_snapshot_hit();
         diagnostics.record_snapshot_miss();
         diagnostics.record_snapshot_refresh(12, 3, 20, false);
@@ -135,6 +198,14 @@ mod tests {
                 lookup_requests_total: 2,
                 positive_cache_hits_total: 1,
                 negative_cache_hits_total: 1,
+                connection_cache_entries: 6,
+                connection_cache_peak_entries: 10,
+                connection_cache_evictions_total: 4,
+                connection_cache_expired_total: 7,
+                pid_cache_entries: 2,
+                pid_cache_peak_entries: 4,
+                pid_cache_evictions_total: 3,
+                pid_cache_expired_total: 8,
                 snapshot_hits_total: 1,
                 snapshot_misses_total: 1,
                 snapshot_refreshes_total: 2,
@@ -147,5 +218,17 @@ mod tests {
                 unresolved_total: 1,
             }
         );
+    }
+
+    #[test]
+    fn snapshot_deserializes_legacy_payload_without_cache_capacity_fields() {
+        let snapshot: ProcessResolverDiagnosticsSnapshot =
+            serde_json::from_str(r#"{"lookup_requests_total":3,"positive_cache_hits_total":1}"#)
+                .unwrap();
+
+        assert_eq!(snapshot.lookup_requests_total, 3);
+        assert_eq!(snapshot.positive_cache_hits_total, 1);
+        assert_eq!(snapshot.connection_cache_entries, 0);
+        assert_eq!(snapshot.pid_cache_evictions_total, 0);
     }
 }

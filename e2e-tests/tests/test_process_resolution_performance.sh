@@ -20,6 +20,7 @@ PROXY_PORT="${PROXY_PORT:-$(allocate_port)}"
 UPSTREAM_PORT="${UPSTREAM_PORT:-$(allocate_port)}"
 REQUEST_COUNT="${REQUEST_COUNT:-1000}"
 CONCURRENCY="${CONCURRENCY:-16}"
+CACHE_STRESS_COUNT="${CACHE_STRESS_COUNT:-0}"
 BIFROST_BIN="${BIFROST_BIN:-${PROJECT_DIR}/target/debug/bifrost}"
 TEST_DATA_DIR=""
 PROXY_PID=""
@@ -98,6 +99,14 @@ main() {
         .lookup_requests_total >= 0 and
         .positive_cache_hits_total >= 0 and
         .negative_cache_hits_total >= 0 and
+        .connection_cache_entries >= 0 and
+        .connection_cache_peak_entries >= 0 and
+        .connection_cache_evictions_total >= 0 and
+        .connection_cache_expired_total >= 0 and
+        .pid_cache_entries >= 0 and
+        .pid_cache_peak_entries >= 0 and
+        .pid_cache_evictions_total >= 0 and
+        .pid_cache_expired_total >= 0 and
         .snapshot_hits_total >= 0 and
         .snapshot_misses_total >= 0 and
         .snapshot_refreshes_total >= 0 and
@@ -147,6 +156,15 @@ main() {
     curl --noproxy "" -fsS -x "http://127.0.0.1:${PROXY_PORT}" \
         "http://127.0.0.1:${UPSTREAM_PORT}/" >/dev/null
 
+    local socks_status
+    socks_status="$(curl --noproxy "" -sS -o /dev/null -w '%{http_code}' \
+        --socks5-hostname "127.0.0.1:${PROXY_PORT}" \
+        "http://127.0.0.1:${UPSTREAM_PORT}/?transport=socks5")"
+    if [[ "$socks_status" != "200" ]]; then
+        echo "SOCKS5 process-attribution path failed to forward: status=${socks_status}" >&2
+        exit 1
+    fi
+
     local before_burst after_burst lookup_delta refresh_delta burst_count
     burst_count=128
     before_burst="$(read_diagnostics)"
@@ -173,6 +191,39 @@ main() {
         exit 1
     fi
 
+    local stress_summary="disabled"
+    if [[ "$CACHE_STRESS_COUNT" -gt 0 ]]; then
+        local before_stress after_stress evictions_delta expired_delta peak_entries current_entries
+        before_stress="$(read_diagnostics)"
+        seq "$CACHE_STRESS_COUNT" | xargs -P "$CONCURRENCY" -I{} \
+            curl --noproxy "" -fsS -o /dev/null \
+            -x "http://127.0.0.1:${PROXY_PORT}" \
+            "http://127.0.0.1:${UPSTREAM_PORT}/?cache-stress={}"
+        after_stress="$(read_diagnostics)"
+        evictions_delta=$((
+            $(jq -r '.connection_cache_evictions_total' <<<"$after_stress") -
+            $(jq -r '.connection_cache_evictions_total' <<<"$before_stress")
+        ))
+        expired_delta=$((
+            $(jq -r '.connection_cache_expired_total' <<<"$after_stress") -
+            $(jq -r '.connection_cache_expired_total' <<<"$before_stress")
+        ))
+        peak_entries="$(jq -r '.connection_cache_peak_entries' <<<"$after_stress")"
+        current_entries="$(jq -r '.connection_cache_entries' <<<"$after_stress")"
+        if [[ "$peak_entries" -gt 16384 || "$current_entries" -gt 16384 ]]; then
+            echo "Connection cache exceeded its hard capacity" >&2
+            echo "after_stress=${after_stress}" >&2
+            exit 1
+        fi
+        if [[ "$CACHE_STRESS_COUNT" -gt 16384 && "$evictions_delta" -le 0 && "$expired_delta" -le 0 ]]; then
+            echo "High-cardinality stress did not exercise TTL expiry or hard-cap eviction" >&2
+            echo "before_stress=${before_stress}" >&2
+            echo "after_stress=${after_stress}" >&2
+            exit 1
+        fi
+        stress_summary="requests=${CACHE_STRESS_COUNT} evictions=${evictions_delta} expired=${expired_delta} peak=${peak_entries} current=${current_entries}"
+    fi
+
     local metrics
     metrics="$(curl -fsS "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/metrics")"
     if jq -e '
@@ -191,6 +242,8 @@ main() {
     echo "after=${after}"
     echo "after_external_proxy=${after_external_proxy}"
     echo "burst_lookups=${lookup_delta} burst_snapshot_refreshes=${refresh_delta} burst_requests=${burst_count}"
+    echo "socks_status=${socks_status}"
+    echo "cache_stress=${stress_summary}"
 }
 
 main "$@"

@@ -158,6 +158,44 @@
 - TTL、miss interval、应用策略重试次数均未缩短或延长。
 - 配置应用策略但客户端进程 unknown 时仍保持既有 passthrough 语义；本优化不把 unknown 错当成任何应用。
 
+### TC-PRP-10 18k 高基数连接缓存硬容量
+
+操作步骤：
+
+1. 运行：
+
+   ```bash
+   REQUEST_COUNT=1000 CONCURRENCY=32 CACHE_STRESS_COUNT=18000 SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_process_resolution_performance.sh
+   ```
+
+2. 检查输出中的 `cache_stress` 与最终诊断快照。
+
+预期结果：
+
+- 18,000 个真实 curl 进程通过隔离 Bifrost 访问本地 Python upstream，全部转发成功。
+- `connection_cache_peak_entries` 与 `connection_cache_entries` 都不超过 16,384。
+- `connection_cache_evictions_total` 或 `connection_cache_expired_total` 有增长，证明 live 高基数和 TTL 都不会进入全表 `retain`。
+- 脚本正常结束且代理保持 ready，不出现死锁、崩溃、FD 泄漏或正式 9900 服务被停止。
+
+### TC-PRP-11 SOCKS 与 tunnel 连接级 Arc/singleflight 回归
+
+操作步骤：
+
+1. 运行：
+
+   ```bash
+   cargo test -p bifrost-proxy socks_handler_reuses_one_connection_owned_process_arc -- --nocapture
+   cargo test -p bifrost-proxy test_maybe_backfill_joins_existing_connection_resolution -- --nocapture
+   ```
+
+2. 观察 TC-PRP-10 E2E 输出中的 `socks_status`。
+
+预期结果：
+
+- 同一 SOCKS 连接的多阶段解析返回 `Arc::ptr_eq=true` 的同一 PID/name/path，不克隆 String 或再次扫描。
+- server 已有解析 in-flight 时，CONNECT tunnel backfill 不启动第二个 resolver；前一任务完成后状态可再次获取。
+- 真实 SOCKS5 请求成功访问 Python upstream，`socks_status=200`，协议功能没有因连接状态改造回归。
+
 ## 清理步骤
 
 - E2E 脚本自动停止自己启动的 Bifrost 与 Python 子进程并删除临时目录。
@@ -199,3 +237,16 @@
     lookup/refresh 保持 `0 -> 0`，外部 Admin-like path lookup/refresh 均增加，128 个并发普通
     代理请求产生 `burst_lookups=325`、`burst_snapshot_refreshes=16`。
   - app policy + unknown 的 passthrough 回归测试通过；TTL、miss interval 和重试配置未修改。
+
+2026-07-15 本轮 Phase 7 执行结果：
+
+- TC-PRP-10：通过。
+  - `REQUEST_COUNT=1000 CONCURRENCY=32 CACHE_STRESS_COUNT=18000 SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_process_resolution_performance.sh`
+  - 18,000 个普通代理请求全部通过真实 curl 进程、隔离 Bifrost 和 Python upstream；脚本退出码为 0。
+  - `cache_stress=requests=18000 evictions=0 expired=6770 peak=11464 current=11360`；压力期间 TTL 已回收 6,770 项，峰值和当前值均低于 16,384 硬容量，没有触发旧 10k 全表扫描悬崖。
+  - 128 请求预热 burst 为 `burst_lookups=203`、`burst_snapshot_refreshes=6`，snapshot generation 继续有效合并。
+- TC-PRP-11：通过。
+  - `cargo test -p bifrost-proxy socks_handler_reuses_one_connection_owned_process_arc -- --nocapture`：1 个测试通过，同连接返回同一 `Arc`。
+  - `cargo test -p bifrost-proxy test_maybe_backfill_joins_existing_connection_resolution -- --nocapture`：1 个测试通过，已有 in-flight 时 tunnel 未启动重复解析。
+  - 同一真实 E2E 输出 `socks_status=200`，SOCKS5 转发功能正常。
+  - 第 1 轮兼容 wrapper 与 Drop guard 修复后，以 `REQUEST_COUNT=1000 CONCURRENCY=16 CACHE_STRESS_COUNT=0` 复跑最新二进制通过：`burst_lookups=249`、`burst_snapshot_refreshes=11`、`socks_status=200`。

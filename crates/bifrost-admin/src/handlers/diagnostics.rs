@@ -27,15 +27,27 @@ pub async fn handle_diagnostics<B>(
 mod tests {
     use std::sync::Arc;
 
+    use bifrost_storage::RulesStorage;
     use http_body_util::BodyExt;
     use hyper::Request;
+    use tempfile::TempDir;
 
     use super::*;
     use crate::state::AdminState;
 
+    fn isolated_state() -> (TempDir, Arc<AdminState>) {
+        let temp_dir = TempDir::new().expect("create diagnostics test directory");
+        let rules_storage = RulesStorage::with_dir(temp_dir.path().join("rules"))
+            .expect("create diagnostics test RulesStorage");
+        (
+            temp_dir,
+            Arc::new(AdminState::new_for_test(0, rules_storage)),
+        )
+    }
+
     #[tokio::test]
     async fn process_resolver_diagnostics_returns_shared_snapshot() {
-        let state = Arc::new(AdminState::new(0));
+        let (_temp_dir, state) = isolated_state();
         let diagnostics = Arc::new(bifrost_core::ProcessResolverDiagnostics::default());
         diagnostics.record_lookup_result(true);
         diagnostics.record_snapshot_refresh(25, 4, 30, false);
@@ -60,7 +72,7 @@ mod tests {
 
     #[tokio::test]
     async fn process_resolver_diagnostics_rejects_writes_and_missing_state() {
-        let state = Arc::new(AdminState::new(0));
+        let (_temp_dir, state) = isolated_state();
         let post = Request::builder()
             .method(Method::POST)
             .uri("/_bifrost/api/diagnostics/process-resolver")

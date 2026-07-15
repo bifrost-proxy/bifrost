@@ -92,7 +92,9 @@ use crate::utils::http_size::{
     calculate_request_size, calculate_response_headers_size, calculate_response_size,
 };
 use crate::utils::logging::{format_rules_summary, RequestContext};
-use crate::utils::process_info::spawn_async_process_resolver;
+use crate::utils::process_info::{
+    spawn_async_process_resolver_with_finish, ConnectionProcessState,
+};
 use crate::utils::tee::{
     create_metrics_body, create_request_tee_body, create_sse_tee_body, create_tee_body_with_store,
     store_request_body, store_response_body, BodyCaptureHandle, TeeBodyCaptureOptions,
@@ -130,18 +132,16 @@ async fn get_values_from_state(admin_state: &Option<Arc<AdminState>>) -> HashMap
 
 fn maybe_backfill_tunnel_client_process(
     state: &Arc<AdminState>,
+    connection_process_state: &Arc<ConnectionProcessState>,
     req_id: &str,
-    client_app: Option<&str>,
-    client_pid: Option<u32>,
+    has_client_process: bool,
     peer_addr: SocketAddr,
     local_addr: SocketAddr,
     skip_unknown_backfill: bool,
 ) {
-    if client_app.is_some() && client_pid.is_some() {
+    if has_client_process {
         debug!(
             req_id,
-            client_app = ?client_app,
-            client_pid = ?client_pid,
             "Skipping tunnel client process backfill because client metadata is already present"
         );
         return;
@@ -171,17 +171,28 @@ fn maybe_backfill_tunnel_client_process(
         req_id,
         peer_addr = %peer_addr,
         local_addr = %local_addr,
-        existing_client_app = ?client_app,
-        existing_client_pid = ?client_pid,
         "Scheduling tunnel client process backfill"
     );
 
+    if !connection_process_state.try_start_background_resolution() {
+        debug!(
+            req_id,
+            peer_addr = %peer_addr,
+            local_addr = %local_addr,
+            "Skipping tunnel client process backfill because this connection already has a resolver in flight"
+        );
+        return;
+    }
+
     let state = Arc::clone(state);
-    spawn_async_process_resolver(
+    let state_for_success = Arc::clone(connection_process_state);
+    let state_for_finish = Arc::clone(connection_process_state);
+    spawn_async_process_resolver_with_finish(
         peer_addr,
         local_addr,
         req_id.to_string(),
         move |id, process| {
+            let process = state_for_success.store(Arc::new(process));
             info!(
                 req_id = %id,
                 client_app = %process.name,
@@ -189,11 +200,17 @@ fn maybe_backfill_tunnel_client_process(
                 client_path = ?process.path,
                 "Applying tunnel client process backfill to traffic record"
             );
-            state.update_client_process(&id, process.name.clone(), process.pid, process.path);
+            state.update_client_process(
+                &id,
+                process.name.clone(),
+                process.pid,
+                process.path.clone(),
+            );
             state
                 .connection_registry
                 .update_client_app(&id, process.name.clone());
         },
+        move || state_for_finish.finish_background_resolution(),
     );
 }
 
@@ -619,6 +636,40 @@ pub async fn handle_connect(
     dns_resolver: Option<Arc<DnsResolver>>,
     push_manager: Option<SharedPushManager>,
 ) -> Result<Response<BoxBody>> {
+    handle_connect_with_process_state(
+        req,
+        peer_addr,
+        local_addr,
+        rules,
+        tls_config,
+        tls_intercept_config,
+        proxy_config,
+        verbose_logging,
+        ctx,
+        admin_state,
+        dns_resolver,
+        push_manager,
+        Arc::new(ConnectionProcessState::default()),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_connect_with_process_state(
+    req: Request<Incoming>,
+    peer_addr: SocketAddr,
+    local_addr: SocketAddr,
+    rules: Arc<dyn RulesResolver>,
+    tls_config: Arc<TlsConfig>,
+    tls_intercept_config: &TlsInterceptConfig,
+    proxy_config: &ProxyConfig,
+    verbose_logging: bool,
+    ctx: &RequestContext,
+    admin_state: Option<Arc<AdminState>>,
+    dns_resolver: Option<Arc<DnsResolver>>,
+    push_manager: Option<SharedPushManager>,
+    connection_process_state: Arc<ConnectionProcessState>,
+) -> Result<Response<BoxBody>> {
     let uri = req.uri().clone();
     let authority = uri
         .authority()
@@ -1026,9 +1077,9 @@ pub async fn handle_connect(
         state.record_traffic(record);
         maybe_backfill_tunnel_client_process(
             state,
+            &connection_process_state,
             &req_id,
-            client_app.as_deref(),
-            client_pid,
+            client_app.is_some() && client_pid.is_some(),
             peer_addr,
             local_addr,
             requires_client_app,
@@ -8881,9 +8932,9 @@ mod coverage_boost_v3 {
         // Should early-return without spawning background resolver
         maybe_backfill_tunnel_client_process(
             &state,
+            &Arc::new(ConnectionProcessState::default()),
             "req-meta",
-            Some("Browser"),
-            Some(42),
+            true,
             peer_addr,
             local_addr,
             false,
@@ -8897,7 +8948,13 @@ mod coverage_boost_v3 {
         let local_addr = SocketAddr::from((IpAddr::V4(Ipv4Addr::LOCALHOST), 443));
 
         maybe_backfill_tunnel_client_process(
-            &state, "req-skip", None, None, peer_addr, local_addr, true,
+            &state,
+            &Arc::new(ConnectionProcessState::default()),
+            "req-skip",
+            false,
+            peer_addr,
+            local_addr,
+            true,
         );
     }
 
@@ -8909,13 +8966,37 @@ mod coverage_boost_v3 {
 
         maybe_backfill_tunnel_client_process(
             &state,
+            &Arc::new(ConnectionProcessState::default()),
             "req-nonloop",
-            None,
-            None,
+            false,
             peer_addr,
             local_addr,
             false,
         );
+    }
+
+    #[test]
+    fn test_maybe_backfill_joins_existing_connection_resolution() {
+        let state = Arc::new(AdminState::new(0));
+        let process_state = Arc::new(ConnectionProcessState::default());
+        let peer_addr = SocketAddr::from((IpAddr::V4(Ipv4Addr::LOCALHOST), 12346));
+        let local_addr = SocketAddr::from((IpAddr::V4(Ipv4Addr::LOCALHOST), 443));
+        assert!(process_state.try_start_background_resolution());
+
+        maybe_backfill_tunnel_client_process(
+            &state,
+            &process_state,
+            "req-inflight",
+            false,
+            peer_addr,
+            local_addr,
+            false,
+        );
+
+        assert!(!process_state.try_start_background_resolution());
+        process_state.finish_background_resolution();
+        assert!(process_state.try_start_background_resolution());
+        process_state.finish_background_resolution();
     }
 
     // ---------------- domain / app / ip matching helpers ----------------
