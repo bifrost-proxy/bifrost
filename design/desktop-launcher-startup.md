@@ -28,7 +28,7 @@
 - macOS 上启动阶段展示原生 launcher overlay，无独立第二个窗口。
 - 非 macOS 平台没有 overlay 能力时，host 窗口直接以最终尺寸显示，不阻塞用户使用。
 - 主 webview 与 backend 启动可以并行进行。
-- Overlay、主 webview、backend 三者就绪后自动 handoff：
+- Overlay、主 webview、backend 三者就绪后自动 handoff；如果 backend 启动失败，则在主 webview 就绪后进入同一个 handoff，让用户看到可重试的错误界面而不是永久停留在 launcher：
   - host 窗口从启动一开始就是 `TARGET_WINDOW_WIDTH×TARGET_WINDOW_HEIGHT`，避免主 Web UI 在中间尺寸下响应式重排；
   - 恢复背景色、装饰、阴影、macOS Sidebar/UnderWindow 特效；
   - 主 webview 从 park 位置移动到 `(0,0)` 并 resize 到 host 内部尺寸；
@@ -84,7 +84,7 @@
 `try_start_native_handoff(app, reason)` 是唯一的 handoff 触发入口。它满足三个前置条件才会调用真正的 `start_main_window_handoff`：
 
 1. `supports_native_launcher()` 为 true（macOS）。
-2. `state.startup_ready == true`（backend 就绪或已复用现有 backend）。
+2. `state.startup_ready == true`（backend 就绪或已复用现有 backend），或 `state.startup_error.is_some()`（backend 已明确失败，需要展示恢复 UI）。
 3. `state.main_webview_loaded == true`（webview 完成首屏渲染）。
 
 三条流水线都会调 `try_start_native_handoff`：
@@ -92,6 +92,7 @@
 - backend bootstrap 完成后：`try_start_native_handoff(app, "backend ready")`。
 - backend watchdog 恢复后：`try_start_native_handoff(app, "backend watchdog recovery")`。
 - webview `PageLoadEvent::Finished` 后：`try_start_native_handoff(webview.app_handle(), "webview finished loading")`。
+- backend bootstrap 失败后：记录 `startup_error`，再调用 `try_start_native_handoff(app, "backend startup failed")`；若 WebView 尚未 loaded，由后续 page-load 回调完成 handoff。
 - 前端主动握手：`notify_main_window_ready` 调 `start_main_window_handoff(app, "frontend ready handshake")`（跳过 webview_loaded 检查，前端明确表示自己 ready）。
 
 `start_main_window_handoff` 内部用两个原子标记做幂等保护：
@@ -165,6 +166,7 @@ const OVERLAY_FADE_STEPS: u16 = 8;
 const OVERLAY_FADE_STEP_DELAY: Duration = Duration::from_millis(14);
 const WEBVIEW_PARK_OFFSET: f64 = 2000.0;
 const WEBVIEW_REVEAL_SETTLE_DELAY: Duration = Duration::from_millis(90);
+const DEFAULT_DESKTOP_STARTUP_DEADLINE: Duration = Duration::from_secs(30);
 const HANDOFF_COMPLETE_EVENT: &str = "desktop://handoff-complete";
 ```
 
@@ -176,12 +178,16 @@ const HANDOFF_COMPLETE_EVENT: &str = "desktop://handoff-complete";
   - 把 `handoff_started` / `handoff_completed` 置 true（跳过 handoff），直接沿用 host window 当前状态。
   - `append_desktop_bootstrap_log`：`native launcher unsupported on this platform; entering webview directly`。
 - Backend 启动失败：
-  - `record_startup_error`；随后 `request_desktop_shutdown`，前端弹窗展示错误。
-  - Handoff 因为 `startup_ready == false` 不会触发；overlay 会一直显示直到进程退出。
-  - Watchdog 后续恢复成功会再触发 handoff。
+  - 首次 readiness 等待同时检查 sidecar child；child 提前退出会立即带退出状态失败，不会在 65 个候选端口上重复等待。
+  - `record_startup_error` 后调用 failure handoff；WebView 从 `get_desktop_runtime` 读取错误并展示 “Start Bifrost Service” 重试入口。
+  - native launcher 不得继续覆盖错误界面；watchdog 或用户重试成功后恢复正常状态。
 - Webview 加载失败（`PageLoadEvent::Started` 之后没有 `Finished`）：
   - `main_webview_loaded` 保持 false，`try_start_native_handoff` 不会触发。
   - 需要依赖前端的 `notify_main_window_ready` 兜底：前端在 window `load` / React root ready 时主动握手；即使 `main_webview_loaded == false`，`notify_main_window_ready` 会直接调 `start_main_window_handoff`，避免 overlay 卡死。
+- Backend 或 WebView 永久阻塞：
+  - 启动后同时调度 30 秒 launcher deadline；到期仍未 handoff 时写入完整状态，必要时记录 recoverable `startup_error`，然后强制调用 `start_main_window_handoff`。
+  - deadline 的职责只是保证原生 launcher 不会无限覆盖诊断界面；它不会把 backend 标记为 ready，也不会吞掉原始错误。
+  - `BIFROST_DESKTOP_STARTUP_DEADLINE_MS` 只用于自动化测试缩短等待，不是面向终端用户的配置。
 - Overlay 淡出失败（例如 objc2 崩溃）：
   - `fade_out_launcher_overlay` 内部所有调用 `let _ =`，不会 panic；overlay 最后仍会调 `remove_overlay`。
   - `remove_overlay` 不在主线程 `join()` 动画线程，也不释放 `LauncherOverlayHandle`。动画线程可能已经通过 `run_on_main_thread` 排队了 tick 回调；如果移除时释放 handle，晚到的 tick 会解引用悬空指针并在 macOS runloop observer 中触发 Rust foreign exception / `SIGABRT`。保留 handle 的泄漏量为一次启动一个 overlay，随桌面进程退出回收。
@@ -194,6 +200,7 @@ Launcher 本身没有 CLI 命令；控制入口只有环境变量：
 
 - `BIFROST_DESKTOP_LAUNCHER_ONLY=1|true|yes|on`：仅展示 launcher，不启动 backend、不加载 webview，用于开发时快速验证 overlay。
 - `BIFROST_DATA_DIR`：影响 backend 数据目录与日志路径。
+- `BIFROST_DESKTOP_STARTUP_DEADLINE_MS`：测试用 launcher deadline override；非法值或 0 回退到 30 秒默认值。
 - 桌面端可执行文件本身 (`bifrost-desktop`) 一律无子命令。
 
 ## Web 交互契约
@@ -237,6 +244,7 @@ Launcher 不新增 admin API。相关信息通过：
 - 非 macOS 直接跳过 handoff。
 - `BIFROST_DESKTOP_LAUNCHER_ONLY` 支持仅 launcher 调试。
 - 前端 `notify_main_window_ready` 强制推进兜底。
+- sidecar 提前退出时以 failure handoff 暴露 `startupError`；所有其他未知阻塞由 30 秒 launcher deadline 最终兜底。
 
 ### Phase 4：文档 & 测试维护
 
@@ -256,6 +264,10 @@ Launcher 不新增 admin API。相关信息通过：
 - `non_macos_close_request_shuts_down_app`
 - `backend_recovery_guard_prevents_parallel_recovery`
 - `poll_managed_backend_exit_reports_exited_child`
+- `launcher_handoff_allows_ready_or_recoverable_error`
+- `desktop_startup_deadline_defaults_and_accepts_test_override`
+- `wait_for_child_exit_kills_process_after_timeout`
+- `wait_for_backend_reports_child_exit_without_waiting_for_timeout`
 - `native_launcher::imp::tests::virtual_progress_matches_startup_milestones`
 - `native_launcher::imp::tests::handoff_progress_uses_only_final_one_percent`
 
@@ -267,6 +279,8 @@ Overlay 视觉、窗口层级和 handoff 仍以真实窗口验证为主；虚拟
   - TC-DLS-01：macOS 冷启动显示全尺寸启动页，只出现一个 Bifrost 窗口，主 Web UI 在 overlay 淡出前不可见。
   - TC-DLS-02：`BIFROST_DESKTOP_LAUNCHER_ONLY=1` 下截图验证虚拟进度条首次约 21%、约 1 秒 80%、约 1.5 秒 99%。
   - TC-DLS-03：验证启动页背景在当前暗色/亮色偏好下与主窗口背景风格连续，标题和进度条可读且不过度抢眼。
+  - TC-DLS-06：sidecar 提前退出后快速 failure handoff，主界面显示可恢复错误。
+  - TC-DLS-08：sidecar 永久阻塞时 deadline 强制移除 launcher。
   - TC-DLS-04：真实 handoff 过程中窗口尺寸和位置保持稳定，仅发生 launcher 淡出和正式页面淡入。
 
 启动必须使用临时 `BIFROST_DATA_DIR`、非 9900 端口、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1` 和 `--no-system-proxy`。

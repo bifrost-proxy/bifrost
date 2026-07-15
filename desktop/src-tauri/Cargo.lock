@@ -272,7 +272,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bifrost-core"
-version = "0.0.147"
+version = "0.0.154"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -287,6 +287,7 @@ dependencies = [
  "rand 0.8.6",
  "regex",
  "reqwest 0.12.28",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "sha2",
@@ -307,7 +308,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-desktop"
-version = "0.0.147"
+version = "0.0.154"
 dependencies = [
  "bifrost-core",
  "bifrost-storage",
@@ -329,12 +330,14 @@ dependencies = [
 
 [[package]]
 name = "bifrost-storage"
-version = "0.0.147"
+version = "0.0.154"
 dependencies = [
+ "base64 0.22.1",
  "bifrost-core",
  "chrono",
  "dirs 5.0.1",
  "futures",
+ "ring",
  "serde",
  "serde_json",
  "sha2",
@@ -348,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-tls"
-version = "0.0.147"
+version = "0.0.154"
 dependencies = [
  "bifrost-core",
  "chrono",

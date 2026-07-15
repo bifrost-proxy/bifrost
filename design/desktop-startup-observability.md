@@ -17,7 +17,7 @@
 2. 桌面壳层自身写 `desktop-bootstrap.log`；sidecar 的 stdout/stderr 落盘为 `desktop-sidecar.out.log` / `desktop-sidecar.err.log`；
 3. Backend bootstrap 失败原因回写到 `state.startup_error`，前端可读，UI 弹错误提示。
 
-本文覆盖启动期日志文件、数据目录统一、失败信号传播、日志保留、以及尚未落地的“快速失败 / 前端首屏骨架” 边界。相关：`desktop-launcher-startup.md`、`desktop-macos-close-behavior.md`、`desktop-runtime-port-switch.md`、`desktop-core-watchdog-resource-guard.md`、`desktop-core-cert-bootstrap.md`。
+本文覆盖启动期日志文件、数据目录统一、失败信号传播、日志保留、sidecar 快速失败和 launcher 故障 handoff。相关：`desktop-launcher-startup.md`、`desktop-macos-close-behavior.md`、`desktop-runtime-port-switch.md`、`desktop-core-watchdog-resource-guard.md`、`desktop-core-cert-bootstrap.md`。
 
 ## 用户目标验证清单
 
@@ -42,7 +42,12 @@
 - Backend bootstrap 失败：
   - 通过 `record_startup_error` 写入 `desktop-bootstrap.log`；
   - 同时更新 `BackendState.startup_error: Mutex<Option<String>>`；
-  - 前端通过 `get_desktop_runtime` invoke 读到 `startupError` 并弹提示。
+  - 首次启动等待同时轮询 child 状态；sidecar 提前退出时立即返回退出状态，不再对后续端口重复 20 秒等待；
+  - 主 WebView 已加载后必须执行 failure handoff，移除 native launcher；
+  - 前端通过 `get_desktop_runtime` invoke 读到 `startupError` 并展示重试界面。
+- 任一未知启动阶段阻塞超过 30 秒时，launcher deadline 必须写入当时的 backend/WebView 状态并强制 handoff；用户可以看到恢复界面，不能永远停在原生 loading 页。
+- 停止 stale backend 的同步子进程最多等待 5 秒；超时后杀掉 helper 并把失败原因写入日志，不能让首次启动初始化无限卡住。
+- macOS 发布包必须校验桌面主程序与内置 `resources/bin/bifrost` 的 Mach-O 架构都匹配发布 target，避免 Apple Silicon 包夹带 Intel sidecar、反之亦然。
 - 桌面日志按 `DESKTOP_LOG_RETENTION_DAYS = DEFAULT_LOG_RETENTION_DAYS` 自动清理（复用 `bifrost_core::cleanup_bifrost_log_dir`）。
 - 每个 `data_dir` 每进程只做一次清理，避免每次写日志都扫目录。
 
@@ -63,6 +68,24 @@
 - 桌面壳层与 CLI 同时运行时不会互相污染日志（因为共用同一 daemon 状态而不是多副本）。
 
 ## 产品语义
+
+### 本次首次启动卡死的证据分层
+
+已由代码和截图确认：
+
+- 桌面 sidecar 以 `--host 0.0.0.0` 启动，因此首次创建入站 listener 会进入 macOS Application Firewall 决策链路；这不是 System Proxy 授权窗。
+- 当前 release workflow 明确使用 `APPLE_SIGNING_IDENTITY=-`。Application Firewall 会基于代码签名的 designated requirement 做首次与后续识别；在项目暂时没有 Developer ID / 公证凭据的约束下，不能依赖系统自动信任来消除授权窗。
+- 历史 handoff 只接受 `startup_ready=true`。即使 sidecar 已退出并产生 `startup_error`，原生 launcher 仍覆盖在可重试页面上，于是用户只看到永远停住的 loading。
+
+高度可能但仍需用户机器日志最终确认：
+
+- 授权窗出现后立即消失，说明触发监听的进程或 socket 很可能随即消失、被替换或重启。正常情况下系统授权窗应等待用户选择；截图本身不能区分 sidecar crash、stale-backend stop 卡住、端口/配置错误或系统终止。
+- “首次初始化没完成”是合理候选：sidecar 在 listener ready 前会打开配置、流量数据库、认证/回放存储、规则和脚本等持久化状态。目录权限、损坏/不兼容 SQLite、半写配置、磁盘不足都可能导致提前退出或长时间阻塞。现在 stdout/stderr、child exit status 与 30 秒 deadline 会把这些原因暴露出来，但不能在没有用户日志时把其中某一项宣称为根因。
+
+目前没有证据支持：
+
+- Rosetta 是 M3 用户的默认修复。Rosetta 只在包内存在 Intel-only 可执行文件时才相关；架构门禁会在发布前阻止 arm64 app 混入 x86_64 sidecar。
+- 证书预检、CLI 安装或 System Proxy 是最初 loading 的直接阻塞点：这些步骤分别发生在 backend ready 之后、主界面阶段或异步路径。
 
 ### 与 CLI 对齐的数据目录
 
@@ -163,7 +186,6 @@ $BIFROST_DATA_DIR/
 
 ## 未落地部分（保持不写成事实）
 
-- **子进程提前退出快速失败**：目前 `wait_for_backend` 是固定超时轮询（20s）。若 sidecar 立刻 exit，我们仍然要等到 20s 才 timeout。已通过 watchdog 侧的 `poll_managed_backend_exit` 检测 child 退出，但 bootstrap 首次 wait 阶段没有这种短路。第一版接受此权衡；未来可以在 `wait_for_backend` 里同时 poll `child.try_wait`。
 - **Web 侧 `#startup-splash` 骨架**：桌面启动视觉仍是 native launcher overlay + host window handoff；没有单独的 web 层 splash。前端只需订阅 `desktop://handoff-complete` 事件把自身 loading 状态清掉。
 - **结构化 log**：`desktop-bootstrap.log` 仍是自由文本，不是 JSON。诊断复杂问题时需要人肉阅读。
 
@@ -182,7 +204,8 @@ $BIFROST_DATA_DIR/
 - 无新 CLI。
 - 环境变量：
   - `BIFROST_DATA_DIR`：数据目录与日志根。
-  - `BIFROST_DESKTOP_LAUNCHER_ONLY=1`：仅 launcher 模式仍写入 `desktop-bootstrap.log` 的 launcher-only 提示。
+- `BIFROST_DESKTOP_LAUNCHER_ONLY=1`：仅 launcher 模式仍写入 `desktop-bootstrap.log` 的 launcher-only 提示。
+  - `BIFROST_DESKTOP_STARTUP_DEADLINE_MS`：仅测试覆盖 launcher deadline；默认 30 秒。
 - Tauri invoke：`get_desktop_runtime()` 输出 `startupError` / `startupReady`。
 - Admin API：无扩展。
 
@@ -212,7 +235,16 @@ $BIFROST_DATA_DIR/
 - `get_desktop_runtime` invoke 返回 `startupError`。
 - 前端 store + 弹窗展示。
 
-### Phase 4：文档与人工测试维护
+### Phase 4：sidecar 快速失败与可见故障恢复
+
+- `wait_for_backend` 同时探测 health 与 `Child::try_wait()`，记录 pid/exit status。
+- 可用端口上的新 sidecar 一旦退出或超时，立即结束本次启动；端口顺延只用于跳过启动前已经被占用的端口。
+- `try_start_native_handoff` 在 WebView 已 loaded 且 backend ready **或** `startup_error` 已记录时允许 handoff。
+- `schedule_desktop_startup_deadline` 在 30 秒后记录状态并强制 handoff，覆盖 child 未退出但也永不 ready、WebView load event 丢失等未知阻塞。
+- stale backend stop helper 使用 5 秒有界等待；超时后 kill + wait，避免 `.status()` 永久卡住 bootstrap。
+- CI/release 在 DMG 打包前校验 app executable 与 bundled sidecar 架构。
+
+### Phase 5：文档与人工测试维护
 
 - 保持本文与 launcher / close / port-switch / watchdog / cert-bootstrap 边界清晰。
 - Human_tests 覆盖真实失败场景。
@@ -231,6 +263,9 @@ $BIFROST_DATA_DIR/
   - `non_macos_close_request_shuts_down_app`
   - `backend_recovery_guard_prevents_parallel_recovery`
   - `poll_managed_backend_exit_reports_exited_child`
+  - `wait_for_backend_reports_child_exit_without_waiting_for_timeout`
+  - `desktop_startup_deadline_defaults_and_accepts_test_override`
+  - `wait_for_child_exit_kills_process_after_timeout`
 - `crates/bifrost-storage`：`data_dir` 相关测试（默认 & 环境变量覆盖）。
 - `crates/bifrost-core`：`cleanup_bifrost_log_dir` 相关测试（按天清理、错误吞噬）。
 
@@ -243,6 +278,7 @@ $BIFROST_DATA_DIR/
 - TC-DSO-05：`BIFROST_DESKTOP_LAUNCHER_ONLY=1` → 日志仅记录 launcher-only 提示，没有 sidecar 相关行。
 - TC-DSO-06：Handoff / close / reopen 事件都出现在 bootstrap 日志中。
 - TC-DSO-07：日志超过 `DEFAULT_LOG_RETENTION_DAYS` 天数的旧文件会被自动清理（可 mock mtime 验证）。
+- TC-DLS-08：hanging sidecar + 缩短 deadline，确认 launcher 有界退出并保留 recoverable error。
 
 启动使用临时 `BIFROST_DATA_DIR`、非 9900 端口、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`。
 

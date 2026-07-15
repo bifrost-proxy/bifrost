@@ -13,7 +13,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Mutex, OnceLock,
@@ -53,6 +53,8 @@ const OVERLAY_FADE_STEP_DELAY: Duration = Duration::from_millis(14);
 const BACKEND_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const BACKEND_WATCHDOG_RECOVERY_RETRY_DELAY: Duration = Duration::from_secs(3);
 const BACKEND_WATCHDOG_FAILURE_THRESHOLD: u8 = 2;
+const BACKEND_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_DESKTOP_STARTUP_DEADLINE: Duration = Duration::from_secs(30);
 const WEBVIEW_PARK_OFFSET: f64 = 2000.0;
 const WEBVIEW_REVEAL_SETTLE_DELAY: Duration = Duration::from_millis(90);
 const HANDOFF_COMPLETE_EVENT: &str = "desktop://handoff-complete";
@@ -68,6 +70,7 @@ const DESKTOP_UPGRADE_RELAUNCH_PROCESS_WAIT: Duration = Duration::from_secs(30);
 const DESKTOP_UPGRADE_RELAUNCH_PORT_WAIT: Duration = Duration::from_secs(30);
 const SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV: &str =
     "BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL";
+const DESKTOP_STARTUP_DEADLINE_MS_ENV: &str = "BIFROST_DESKTOP_STARTUP_DEADLINE_MS";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DesktopConfig {
@@ -387,6 +390,7 @@ fn main() {
                     monitor_desktop_backend(&app_handle);
                 });
 
+                schedule_desktop_startup_deadline(app.handle());
             }
 
             Ok(())
@@ -1126,8 +1130,8 @@ fn launch_backend_on_available_port(
             continue;
         }
 
-        let child = start_backend(binary_path, data_dir, port)?;
-        match wait_for_backend(port, Duration::from_secs(20)) {
+        let mut child = start_backend(binary_path, data_dir, port)?;
+        match wait_for_backend(&mut child, port, Duration::from_secs(20)) {
             Ok(()) => {
                 append_desktop_bootstrap_log(
                     data_dir,
@@ -1136,15 +1140,17 @@ fn launch_backend_on_available_port(
                 return Ok((child, port));
             }
             Err(error) => {
+                let error = anyhow(format!(
+                    "{error}; inspect {}",
+                    log_dir(data_dir).join("desktop-sidecar.err.log").display()
+                ));
                 append_desktop_bootstrap_log(
                     data_dir,
                     format!("backend failed to become ready on port {port}: {error}"),
                 );
                 let _ = stop_backend_with_binary(binary_path, data_dir);
                 let _ = terminate_child(child);
-                if offset == MAX_PORT_INCREMENT_ATTEMPTS {
-                    return Err(error);
-                }
+                return Err(error);
             }
         }
     }
@@ -1165,6 +1171,74 @@ fn bootstrap_desktop_backend(app: &AppHandle) {
     );
 
     let _ = start_desktop_backend_now(app, "startup");
+}
+
+fn desktop_startup_deadline() -> Duration {
+    std::env::var(DESKTOP_STARTUP_DEADLINE_MS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_DESKTOP_STARTUP_DEADLINE)
+}
+
+fn schedule_desktop_startup_deadline(app: &AppHandle) {
+    if !supports_native_launcher() {
+        return;
+    }
+
+    let app = app.clone();
+    let deadline = desktop_startup_deadline();
+    std::thread::spawn(move || {
+        std::thread::sleep(deadline);
+        let Some(state) = app.try_state::<BackendState>() else {
+            return;
+        };
+        if state.handoff_started.load(Ordering::SeqCst)
+            || state.handoff_completed.load(Ordering::SeqCst)
+        {
+            return;
+        }
+
+        let startup_ready = state.startup_ready.load(Ordering::SeqCst);
+        let webview_loaded = state.main_webview_loaded.load(Ordering::SeqCst);
+        append_desktop_bootstrap_log(
+            &state.data_dir,
+            format!(
+                "desktop startup deadline exceeded after {}ms; startup_ready={startup_ready} main_webview_loaded={webview_loaded}; forcing launcher handoff",
+                deadline.as_millis()
+            ),
+        );
+
+        if !startup_ready {
+            let mut should_record_error = false;
+            if let Ok(mut startup_error) = state.startup_error.lock() {
+                if startup_error.is_none() {
+                    *startup_error = Some(format!(
+                        "Bifrost core did not finish starting within {} seconds. Check {} and retry.",
+                        deadline.as_secs_f32(),
+                        log_dir(&state.data_dir)
+                            .join("desktop-bootstrap.log")
+                            .display()
+                    ));
+                    should_record_error = true;
+                }
+            }
+            if should_record_error {
+                append_desktop_bootstrap_log(
+                    &state.data_dir,
+                    "desktop startup deadline recorded a recoverable startup error",
+                );
+            }
+        }
+
+        if let Err(error) = start_main_window_handoff(&app, "desktop startup deadline") {
+            append_desktop_bootstrap_log(
+                &state.data_dir,
+                format!("desktop startup deadline handoff failed: {error}"),
+            );
+        }
+    });
 }
 
 struct BackendRecoveryGuard<'a> {
@@ -1572,16 +1646,32 @@ fn start_desktop_backend_now(app: &AppHandle, reason: &str) -> Result<DesktopRun
         Err(error) => {
             let message = error.to_string();
             record_startup_error(&state, message.clone());
+            try_start_native_handoff(app, "backend startup failed");
             Err(message)
         }
     }
 }
 
-fn wait_for_backend(port: u16, timeout: Duration) -> tauri::Result<()> {
+fn wait_for_backend(child: &mut Child, port: u16, timeout: Duration) -> tauri::Result<()> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if is_backend_ready(port) {
             return Ok(());
+        }
+
+        let pid = child.id();
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(anyhow(format!(
+                    "backend process pid={pid} exited before becoming ready at http://{BACKEND_ADMIN_HOST}:{port}; status={status}"
+                )));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Err(anyhow(format!(
+                    "failed to inspect backend process pid={pid} while waiting for http://{BACKEND_ADMIN_HOST}:{port}: {error}"
+                )));
+            }
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -1680,9 +1770,15 @@ fn stop_backend_with_binary(binary_path: &Path, data_dir: &Path) -> tauri::Resul
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     hide_windows_child_console(&mut command);
-    let status = command
-        .status()
+    let mut child = command
+        .spawn()
         .map_err(|error| anyhow(format!("failed to stop backend: {error}")))?;
+    let status = wait_for_child_exit(&mut child, BACKEND_STOP_TIMEOUT).map_err(|error| {
+        anyhow(format!(
+            "backend stop command did not complete within {}ms: {error}",
+            BACKEND_STOP_TIMEOUT.as_millis()
+        ))
+    })?;
 
     if status.success() {
         Ok(())
@@ -1691,6 +1787,23 @@ fn stop_backend_with_binary(binary_path: &Path, data_dir: &Path) -> tauri::Resul
             "backend stop command exited with status {status}"
         )))
     }
+}
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> std::io::Result<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let _ = child.kill();
+    child.wait()?;
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("process pid={} timed out", child.id()),
+    ))
 }
 
 fn spawn_backend_stop(binary_path: &Path, data_dir: &Path) -> tauri::Result<Child> {
@@ -1887,15 +2000,28 @@ fn try_start_native_handoff(app: &AppHandle, reason: &str) {
         return;
     };
 
-    if !state.startup_ready.load(Ordering::SeqCst) {
-        return;
-    }
-
-    if !state.main_webview_loaded.load(Ordering::SeqCst) {
+    let startup_error_present = state
+        .startup_error
+        .lock()
+        .map(|error| error.is_some())
+        .unwrap_or(true);
+    if !should_handoff_to_main(
+        state.startup_ready.load(Ordering::SeqCst),
+        startup_error_present,
+        state.main_webview_loaded.load(Ordering::SeqCst),
+    ) {
         return;
     }
 
     let _ = start_main_window_handoff(app, reason);
+}
+
+fn should_handoff_to_main(
+    startup_ready: bool,
+    startup_error_present: bool,
+    main_webview_loaded: bool,
+) -> bool {
+    main_webview_loaded && (startup_ready || startup_error_present)
 }
 
 fn restore_host_window(app: &AppHandle) {
@@ -2614,15 +2740,16 @@ fn is_server_config_response(response_body: &str) -> bool {
 mod tests {
     use super::{
         begin_backend_recovery, clear_backend_unavailable_if_healthy, desktop_backend_env,
-        desktop_backend_start_args, desktop_upgrade_relaunch_marker_path,
+        desktop_backend_start_args, desktop_startup_deadline, desktop_upgrade_relaunch_marker_path,
         host_window_close_behavior_for_platform, is_server_config_response,
         is_upgrade_relaunch_marker_active, main_interface_decorations_for_platform,
         mark_backend_unavailable_for_manual_start, may_reuse_existing_backend,
         parse_port_update_response, poll_managed_backend_exit, read_active_upgrade_relaunch_marker,
         relaunch_command_for_target, resolve_bifrost_binary_from_env, resolve_desktop_config_path,
         resolve_desktop_data_dir, sanitize_desktop_upgrade_relaunch_command, save_desktop_config,
-        uses_borderless_desktop_chrome_for_platform, write_upgrade_relaunch_marker, BackendState,
-        DesktopConfig, DesktopUpgradeRelaunchMarker, HostWindowCloseBehavior,
+        should_handoff_to_main, uses_borderless_desktop_chrome_for_platform, wait_for_backend,
+        wait_for_child_exit, write_upgrade_relaunch_marker, BackendState, DesktopConfig,
+        DesktopUpgradeRelaunchMarker, HostWindowCloseBehavior,
     };
     use bifrost_storage::data_dir as shared_bifrost_data_dir;
     use std::ffi::OsStr;
@@ -2634,6 +2761,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
     use std::thread;
+    use std::time::{Duration, Instant};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -3055,6 +3183,74 @@ mod tests {
                 .as_deref(),
             Some("Bifrost service is not running.")
         );
+    }
+
+    #[test]
+    fn launcher_handoff_allows_ready_or_terminal_startup_state() {
+        assert!(should_handoff_to_main(true, false, true));
+        assert!(should_handoff_to_main(false, true, true));
+        assert!(!should_handoff_to_main(false, false, true));
+        assert!(!should_handoff_to_main(true, false, false));
+        assert!(!should_handoff_to_main(false, true, false));
+    }
+
+    #[test]
+    fn desktop_startup_deadline_defaults_and_accepts_test_override() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let previous = std::env::var_os(super::DESKTOP_STARTUP_DEADLINE_MS_ENV);
+
+        std::env::remove_var(super::DESKTOP_STARTUP_DEADLINE_MS_ENV);
+        assert_eq!(
+            desktop_startup_deadline(),
+            super::DEFAULT_DESKTOP_STARTUP_DEADLINE
+        );
+
+        std::env::set_var(super::DESKTOP_STARTUP_DEADLINE_MS_ENV, "1250");
+        assert_eq!(desktop_startup_deadline(), Duration::from_millis(1250));
+
+        match previous {
+            Some(value) => std::env::set_var(super::DESKTOP_STARTUP_DEADLINE_MS_ENV, value),
+            None => std::env::remove_var(super::DESKTOP_STARTUP_DEADLINE_MS_ENV),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_wait_timeout_terminates_stuck_process() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 5"])
+            .spawn()
+            .expect("spawn stuck child");
+        let started_at = Instant::now();
+        let error = wait_for_child_exit(&mut child, Duration::from_millis(100))
+            .expect_err("stuck child should time out");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started_at.elapsed() < Duration::from_secs(2));
+        assert!(child.try_wait().expect("poll killed child").is_some());
+    }
+
+    #[test]
+    fn wait_for_backend_reports_child_exit_without_waiting_for_timeout() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("reserve port");
+        let port = listener.local_addr().expect("reserved addr").port();
+        drop(listener);
+
+        let mut child = Command::new(std::env::current_exe().expect("current test executable"))
+            .args(["--list", "--format", "terse"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn short-lived child");
+        let started_at = Instant::now();
+        let error = wait_for_backend(&mut child, port, Duration::from_secs(5))
+            .expect_err("short-lived child should fail readiness wait");
+
+        assert!(
+            started_at.elapsed() < Duration::from_secs(2),
+            "child exit should short-circuit the readiness timeout"
+        );
+        assert!(error.to_string().contains("exited before becoming ready"));
     }
 
     #[test]

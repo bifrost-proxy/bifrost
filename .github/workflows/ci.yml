@@ -1076,6 +1076,7 @@ jobs:
           fi
 
           bash scripts/resign-macos-app.sh "${APP_PATH}"
+          bash scripts/validate-macos-desktop-architectures.sh "${APP_PATH}" "${{ matrix.target }}"
       - name: Package macOS desktop dmg
         shell: bash
         run: |
