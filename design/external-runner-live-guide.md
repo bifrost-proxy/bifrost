@@ -123,7 +123,7 @@ Claude Code + no custom args            -> stream_json
 other adapter                          -> existing transport
 ```
 
-不在 app-server 启动失败后静默重跑 exec，因为第一进程可能已经创建 thread/产生副作用；错误必须可见。兼容 fallback 只由明确 transport 选择与能力判断决定。
+不在 app-server 启动失败后静默重跑 exec，因为第一进程可能已经创建 thread/产生副作用；错误必须可见。兼容 fallback 只由明确 transport 选择与能力判断决定。Unix 在 `spawn` 尚未创建子进程时若返回瞬态 `ETXTBSY`（例如 CLI 刚完成原子升级或 CI 刚落盘 mock executable），允许在 200ms 内有界重试同一命令；其他错误立即返回，且一旦成功创建子进程就不再做启动重放。
 
 ### Worker 协议
 
@@ -168,6 +168,7 @@ bifrost agent guide --session cli-Codex "先检查失败日志"
 
 - transport selection：Codex/Traex default app-server、Claude Code default stream-json、explicit exec、text/custom args fallback、unsupported adapter。
 - app-server request：initialize/initialized、thread start/resume、turn start、turn steer 字段完整。
+- app-server spawn：Unix `ETXTBSY` 有界重试后成功，非瞬态错误不重试。
 - notification normalization：agent message、command execution、reasoning、plan、turn completed/failed。
 - worker protocol：Guide serialize/parse、ack correlation、worker exit rejects pending、control channel 饱和快速拒绝与 32 条 pending 上限。
 - guide result：accepted、no active、mismatch、non-steerable、timeout -> queue fallback。

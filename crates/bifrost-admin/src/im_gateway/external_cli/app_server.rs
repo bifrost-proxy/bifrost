@@ -3,6 +3,43 @@ use super::*;
 const HANDSHAKE_TIMEOUT_SECS: u64 = 30;
 const CAPACITY_MAX_RETRIES: u32 = 3;
 const CAPACITY_RETRY_BASE_DELAY_MS: u64 = 1_000;
+const APP_SERVER_SPAWN_MAX_ATTEMPTS: u32 = 5;
+const APP_SERVER_SPAWN_RETRY_BASE_DELAY_MS: u64 = 20;
+#[cfg(unix)]
+const TEXT_FILE_BUSY_RAW_OS_ERROR: i32 = 26;
+
+fn is_retryable_app_server_spawn_error(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(TEXT_FILE_BUSY_RAW_OS_ERROR)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+async fn spawn_app_server_with_retry<T>(
+    mut spawn: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    for attempt in 1..=APP_SERVER_SPAWN_MAX_ATTEMPTS {
+        match spawn() {
+            Ok(child) => return Ok(child),
+            Err(error)
+                if is_retryable_app_server_spawn_error(&error)
+                    && attempt < APP_SERVER_SPAWN_MAX_ATTEMPTS =>
+            {
+                tokio::time::sleep(Duration::from_millis(
+                    APP_SERVER_SPAWN_RETRY_BASE_DELAY_MS * u64::from(attempt),
+                ))
+                .await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("app-server spawn retry loop always returns")
+}
 
 struct AppServerRunCleanup {
     run_id: String,
@@ -187,9 +224,14 @@ pub(super) async fn run_command(
         command.env(key, value);
     }
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("spawn {} app-server failed: {error}", request.adapter))?;
+    let mut child = spawn_app_server_with_retry(|| command.spawn())
+        .await
+        .map_err(|error| {
+            format!(
+                "spawn {} app-server failed for executable '{}': {error}",
+                request.adapter, spec.executable
+            )
+        })?;
     let pid = child.id().unwrap_or(0);
     if pid != 0 {
         ACTIVE_RUNS.insert(run_id.to_string(), pid);
@@ -1310,6 +1352,43 @@ fn string_or_string_array(value: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn app_server_spawn_retries_text_file_busy_and_then_succeeds() {
+        let mut attempts = 0;
+        let result = spawn_app_server_with_retry(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(std::io::Error::from_raw_os_error(
+                    TEXT_FILE_BUSY_RAW_OS_ERROR,
+                ))
+            } else {
+                Ok("spawned")
+            }
+        })
+        .await;
+
+        assert_eq!(result.unwrap(), "spawned");
+        assert_eq!(attempts, 3);
+    }
+
+    #[tokio::test]
+    async fn app_server_spawn_does_not_retry_non_transient_errors() {
+        let mut attempts = 0;
+        let error = spawn_app_server_with_retry(|| -> std::io::Result<()> {
+            attempts += 1;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "missing app-server executable",
+            ))
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(attempts, 1);
+    }
 
     fn request(adapter: &str) -> ExternalCliRunRequest {
         ExternalCliRunRequest {

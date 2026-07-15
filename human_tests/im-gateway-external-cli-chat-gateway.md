@@ -1377,8 +1377,24 @@
 2. mock 两次都能从 stdin 读取完整原始 prompt 文本并返回 `EXEC_claude-exec`，不会进入 stream-json 解析分支或因非 JSON 输入失败。
 3. guide 响应为 `delivery=queued` 且 reason 包含 `exec transport`；两轮 `run_finished` 都成功，排队消息没有丢失或重复。
 
+### TC-IEC-65: App-server executable 瞬态占用时有界重试
+
+操作步骤：
+1. 执行：
+   ```bash
+   cargo test -p bifrost-admin app_server_spawn_ -- --nocapture
+   cargo test -p bifrost-admin mock_app_server_accepts_live_guide_and_completes_same_turn -- --nocapture
+   ```
+2. 检查瞬态 `Text file busy` 与非瞬态 `NotFound` 两条分支的尝试次数。
+
+预期结果：
+1. Unix `ETXTBSY` 前两次失败、第三次成功时返回成功且总尝试次数为 3。
+2. 非瞬态 executable 不存在错误立即返回，尝试次数为 1。
+3. mock Codex app-server 仍能在同一 turn 接受 Guide 并正常收尾，不因重试逻辑重复创建 thread/turn。
+
 ## 最近执行记录
 
+- 2026-07-15：针对 PR #394 coverage job 的 Linux `Text file busy (os error 26)` 新增并立即执行 TC-IEC-65。`cargo test -p bifrost-admin app_server_spawn_ -- --nocapture` 输出 `2 passed`，确定性验证 Unix `ETXTBSY` 前两次失败后第三次成功、`NotFound` 仅尝试一次；`cargo test -p bifrost-admin mock_app_server_accepts_live_guide_and_completes_same_turn -- --nocapture` 输出 `1 passed`，mock app-server 仍在同一 turn 接受 Guide 并正常清理 run/session。
 - 2026-07-13：针对 PR #377 自动 Review 的 Claude 显式 exec stdin 兼容问题新增并立即执行 TC-IEC-64。单元回归输出 `1 passed`；真实临时 Bifrost E2E 输出 `[external-runner-live-guide] PASS`。mock 记录两次 `claude-exec` 均带 `--input-format text` 且不含 `--replay-user-messages`，首轮 guide 返回 `delivery=queued`，两轮均返回 `EXEC_claude-exec`。
 - 2026-07-13：针对 PR #377 Linux `E2E Shell` 失败新增并立即执行 TC-IEC-63。修复前同一命令稳定在 Python 第 246 行收到 `stream-json runner timed out after 30 seconds`；修复 mock Claude 从等待 stdin EOF 改为消费一条初始 user JSONL frame 后，`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_traex_model_slash.sh` 输出 `[im-gateway-model-slash] PASS`。Codex、Traex、Claude Code 的 model 与 effort 六次真实临时服务运行全部通过，Claude run 为 `1783925191553-f1ad8e07-13b0-44c3-b237-c05cedac9305`、effort run 为 `1783925198233-c9920e47-70ea-4976-bbae-d38932762e75`，无 30 秒超时。
 - 2026-07-12：新增并立即执行 TC-IEC-61。两个 focused Rust 单测分别输出 `1 passed`；`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_codex_capacity_retry.sh` 输出 `[codex-capacity-retry] PASS`。隔离 mock app-server 验证首次 `serverOverloaded` 后在同一 thread 第二次成功、持续容量错误 3 次重试后失败、普通错误不重试、已有 assistant delta 后不重试；成功 run 未输出中间 `run_failed`，并持久化 `runner.capacityRetryCount=1`。

@@ -240,7 +240,7 @@
 | [remove-builtin-bifrost-agent.md](./remove-builtin-bifrost-agent.md) | Remove built-in Bifrost Agent | 4 | 内置 runtime HTTP/worker/CLI/UI 入口已删除、Agent Chat 只走 external runner stream、专属代码文档测试资产已删除、Codex/Trae X/Claude Code/ChatGPT Web 与自定义 Runner 保留 |
 | [asr-scheduled-task-plan-b.md](./asr-scheduled-task-plan-b.md) | ASR 定时任务 Runtime 策略 | 42 | ASR runtime 策略、Daily Agent 外部 Runner、ChatGPT Web、IM delivery、恢复与性能回归 |
 | [im-gateway.md](./im-gateway.md) | IM Gateway 网关模块 | 69 | IM Provider、Target、Route、外部 Runner Schedule、消息投递与 WebUI 回归 |
-| [im-gateway-external-cli-chat-gateway.md](./im-gateway-external-cli-chat-gateway.md) | Agent Custom Runner / Chat Gateway | 60 | Codex、Trae、Claude Code、ChatGPT Web 与自定义 Runner 的运行、历史、进度和控制链路，含 Codex/Traex app-server 容量错误有限自动重试 |
+| [im-gateway-external-cli-chat-gateway.md](./im-gateway-external-cli-chat-gateway.md) | Agent Custom Runner / Chat Gateway | 64 | Codex、Trae、Claude Code、ChatGPT Web 与自定义 Runner 的运行、历史、进度和控制链路，含 Codex/Traex app-server 容量错误有限自动重试及 Unix executable 瞬态占用重试 |
 | [im-help-command.md](./im-help-command.md) | IM /help 命令帮助信息 | 6 | 外部 Runner 通用通道命令与 adapter-specific 模型、effort、默认 Guide 与显式 `/q` 帮助，同时隐藏冗余 `/g` |
 | [im-guide-queue-mode.md](./im-guide-queue-mode.md) | IM 引导模式和排队模式 | 4 | 外部 Runner Guide/Queue、排队取消、busy effort slash 系统处理不透传、并发事件与失败降级回归，Claude stream-json 回放首帧后的 `stream_ready` guide 触发 |
 | [external-runner-plan-ui.md](./external-runner-plan-ui.md) | External Runner Plan UI | 5 | Codex/Traex external runner `todo_list` / `plan_updated` 输出采样与解析，飞书 progress card 任务计划面板，Web UI history telemetry 恢复 external runner plan，真实 Bifrost `/chat/stream`、run detail 与 session JSONL 持久化回归 |
