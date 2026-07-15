@@ -6,7 +6,7 @@ async fn ffmpeg_split_chunk(
     duration_secs: u64,
     pause_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
 ) -> Result<(), String> {
-    let mut command = Command::new("ffmpeg");
+    let mut command = crate::handlers::media_tools::command("ffmpeg");
     command
         .arg("-nostdin")
         .arg("-hide_banner")
@@ -50,7 +50,7 @@ async fn ffmpeg_cut_wav_ms(
     if duration_ms == 0 {
         return Err("ffmpeg segment cut: empty duration".to_string());
     }
-    let mut command = Command::new("ffmpeg");
+    let mut command = crate::handlers::media_tools::command("ffmpeg");
     command
         .arg("-nostdin")
         .arg("-hide_banner")
@@ -223,7 +223,7 @@ async fn is_already_normalized_wav(input: &Path) -> bool {
         return true;
     }
 
-    let result = Command::new("ffprobe")
+    let result = crate::handlers::media_tools::command("ffprobe")
         .arg("-v")
         .arg("error")
         .arg("-select_streams")
@@ -335,7 +335,7 @@ async fn normalize_audio_file(
         return Ok(());
     }
 
-    let mut command = Command::new("ffmpeg");
+    let mut command = crate::handlers::media_tools::command("ffmpeg");
     command
         .arg("-nostdin")
         .arg("-hide_banner")

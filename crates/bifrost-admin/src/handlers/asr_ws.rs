@@ -628,7 +628,7 @@ async fn transcode_realtime_session(
     let input_path = tmp_root.join(format!("ws-{id}.{extension}"));
     let output_path = tmp_root.join(format!("ws-{id}.wav"));
     std::fs::write(&input_path, audio_bytes).map_err(|error| format!("write WS audio: {error}"))?;
-    let output = Command::new("ffmpeg")
+    let output = crate::handlers::media_tools::command("ffmpeg")
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
@@ -656,7 +656,7 @@ async fn transcode_realtime_session(
 }
 
 async fn probe_realtime_audio(wav_path: &std::path::Path) -> Result<RealtimeAudioInfo, String> {
-    let output = Command::new("ffprobe")
+    let output = crate::handlers::media_tools::command("ffprobe")
         .arg("-v")
         .arg("error")
         .arg("-show_entries")
@@ -692,7 +692,7 @@ async fn extract_realtime_segment(
 ) -> Result<PathBuf, String> {
     let id = Uuid::new_v4();
     let output_path = tmp_root.join(format!("ws-segment-{id}.wav"));
-    let output = Command::new("ffmpeg")
+    let output = crate::handlers::media_tools::command("ffmpeg")
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")

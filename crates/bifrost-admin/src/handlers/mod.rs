@@ -20,6 +20,7 @@ pub mod frames;
 pub mod group;
 pub mod group_rules;
 pub mod im_gateway;
+mod media_tools;
 pub mod metrics;
 pub mod mobile_devices;
 pub mod notification;

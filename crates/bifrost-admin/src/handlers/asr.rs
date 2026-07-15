@@ -963,7 +963,7 @@ async fn ffmpeg_split_upload_chunk(
     offset_secs: u64,
     duration_secs: u64,
 ) -> Result<(), String> {
-    let output = Command::new("ffmpeg")
+    let output = crate::handlers::media_tools::command("ffmpeg")
         .arg("-nostdin")
         .arg("-hide_banner")
         .arg("-loglevel")
@@ -1271,7 +1271,7 @@ async fn transcode_audio_to_wav(upload: UploadedAudio) -> Result<Vec<u8>, String
     std::fs::write(&input_path, upload.bytes)
         .map_err(|error| format!("write uploaded audio: {error}"))?;
 
-    let output = Command::new("ffmpeg")
+    let output = crate::handlers::media_tools::command("ffmpeg")
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
@@ -1950,7 +1950,11 @@ fn summarize_command_output(stdout: &[u8], stderr: &[u8]) -> String {
 }
 
 async fn command_succeeds(command: &str, args: &[&str]) -> bool {
-    Command::new(command)
+    let mut child = match command {
+        "ffmpeg" | "ffprobe" => crate::handlers::media_tools::command(command),
+        _ => Command::new(command),
+    };
+    child
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())

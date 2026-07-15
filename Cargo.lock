@@ -375,6 +375,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "gethostname",
+ "hickory-resolver",
  "http-body-util",
  "hyper",
  "hyper-util",

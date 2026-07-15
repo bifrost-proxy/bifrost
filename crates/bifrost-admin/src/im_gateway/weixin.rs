@@ -1,13 +1,18 @@
 use std::collections::HashMap;
+use std::error::Error;
 use std::hash::{Hash, Hasher};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyInit};
 use async_trait::async_trait;
 use base64::Engine as _;
+use hickory_resolver::{config::LookupIpStrategy, TokioResolver};
+use once_cell::sync::OnceCell;
 use parking_lot::RwLock;
 use rand::RngCore;
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
@@ -29,6 +34,42 @@ const LOGIN_HTTP_TIMEOUT: Duration = Duration::from_secs(75);
 const LOGIN_QR_EXPIRES_IN_SECONDS: u64 = 60;
 const TEXT_RETRY_CHUNK_MAX_CHARS: usize = 1_000;
 const TEXT_RETRY_CHUNK_MAX_BYTES: usize = 3_000;
+
+type DnsError = Box<dyn Error + Send + Sync>;
+
+#[derive(Clone, Default)]
+struct WeixinDnsResolver {
+    resolver: Arc<OnceCell<TokioResolver>>,
+}
+
+impl Resolve for WeixinDnsResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        let resolver = self.clone();
+        Box::pin(async move {
+            let resolver = resolver
+                .resolver
+                .get_or_try_init(build_weixin_dns_resolver)?;
+            let lookup = resolver.lookup_ip(name.as_str()).await?;
+            let addrs: Addrs = Box::new(
+                lookup
+                    .iter()
+                    .map(|ip| SocketAddr::new(ip, 0))
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+            );
+            Ok(addrs)
+        })
+    }
+}
+
+fn build_weixin_dns_resolver() -> std::result::Result<TokioResolver, DnsError> {
+    let mut builder =
+        TokioResolver::builder_tokio().map_err(|error| -> DnsError { Box::new(error) })?;
+    builder.options_mut().ip_strategy = LookupIpStrategy::Ipv4AndIpv6;
+    builder
+        .build()
+        .map_err(|error| -> DnsError { Box::new(error) })
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,11 +121,14 @@ impl WeixinProvider {
     }
 
     fn with_http_timeouts(default_timeout: Duration, login_timeout: Duration) -> Self {
+        let dns_resolver = Arc::new(WeixinDnsResolver::default());
         let http = bifrost_core::outbound_reqwest_client_builder()
+            .dns_resolver(Arc::clone(&dns_resolver))
             .timeout(default_timeout)
             .build()
             .unwrap_or_default();
         let login_http = bifrost_core::outbound_reqwest_client_builder()
+            .dns_resolver(dns_resolver)
             .timeout(login_timeout)
             .build()
             .unwrap_or_default();

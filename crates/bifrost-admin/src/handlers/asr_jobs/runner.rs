@@ -1723,7 +1723,8 @@ async fn transcribe_diarized_segments_for_task(
     let mut all_text = String::new();
     let mut timeline_segments = Vec::new();
     let mut chunk_metrics = Vec::new();
-    let failed_chunks = Vec::new();
+    let mut failed_chunks = Vec::new();
+    let mut usable_output_found = false;
     let mut fallback_reason = server_state
         .as_ref()
         .and_then(|state| state.fallback_reason.clone())
@@ -1745,7 +1746,8 @@ async fn transcribe_diarized_segments_for_task(
             hooks.pause_check,
         )
         .await?;
-        if compute_wav_rms_energy(&segment_wav).is_some_and(|rms| rms < SILENCE_RMS_THRESHOLD) {
+        let segment_rms = compute_wav_rms_energy(&segment_wav);
+        if segment_rms.is_some_and(|rms| rms < SILENCE_RMS_THRESHOLD) {
             continue;
         }
         let duration_ms = asr_unit
@@ -1781,13 +1783,16 @@ async fn transcribe_diarized_segments_for_task(
             .and_then(|state| state.fallback_reason.clone())
             .or_else(|| fallback_reason.clone());
 
-        let chunk_result = attempt.result?;
-        append_diarized_segment_result(
+        usable_output_found |= merge_diarized_segment_attempt(
             &mut all_text,
             &mut timeline_segments,
+            &mut failed_chunks,
             asr_unit,
-            chunk_result,
-        );
+            index,
+            duration_secs,
+            segment_rms,
+            attempt.result,
+        )?;
         if let Some(context) = hooks.partial_artifacts.as_ref() {
             persist_partial_transcription_artifacts(
                 context,
@@ -1805,6 +1810,17 @@ async fn transcribe_diarized_segments_for_task(
         callback(total_units, total_units);
     }
 
+    if !usable_output_found && !failed_chunks.is_empty() {
+        let last_error = failed_chunks
+            .last()
+            .map(|failure| failure.error.as_str())
+            .unwrap_or("unknown ASR failure");
+        return Err(format!(
+            "diarization_all_asr_units_failed: {} unit(s) failed; last error: {last_error}",
+            failed_chunks.len()
+        ));
+    }
+
     Ok(DiarizedTranscriptionOutput {
         text: all_text,
         timeline_segments,
@@ -1815,6 +1831,62 @@ async fn transcribe_diarized_segments_for_task(
         chunk_metrics,
         fallback_reason,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_diarized_segment_attempt(
+    all_text: &mut String,
+    timeline_segments: &mut Vec<TimelineSegment>,
+    failed_chunks: &mut Vec<FailedChunkRecord>,
+    asr_unit: &AsrAudioUnit,
+    chunk_index: usize,
+    duration_secs: u64,
+    energy_rms: Option<f64>,
+    result: Result<WholeFileTranscription, String>,
+) -> Result<bool, String> {
+    match result {
+        Ok(chunk_result) => {
+            let text_len_before = all_text.len();
+            let timeline_len_before = timeline_segments.len();
+            append_diarized_segment_result(
+                all_text,
+                timeline_segments,
+                asr_unit,
+                chunk_result,
+            );
+            Ok(all_text.len() > text_len_before
+                || timeline_segments.len() > timeline_len_before)
+        }
+        Err(error) if error == ASR_TASK_PAUSED_MESSAGE => Err(error),
+        Err(error) => {
+            let offset_secs = asr_unit.source_start_ms / 1000;
+            tracing::error!(
+                chunk = chunk_index,
+                offset_secs,
+                duration_secs,
+                rms = ?energy_rms,
+                %error,
+                "diarized ASR unit failed all retries; preserving usable partial transcript"
+            );
+            failed_chunks.push(FailedChunkRecord {
+                chunk_index,
+                offset_secs: asr_unit.source_start_ms / 1000,
+                duration_secs,
+                error,
+                attempts: 3,
+                energy_rms,
+                is_silent: false,
+            });
+            if !all_text.is_empty() {
+                all_text.push('\n');
+            }
+            all_text.push_str(&format!(
+                "[chunk {chunk_index} failed: {offset_secs}s-{}s]",
+                offset_secs + duration_secs
+            ));
+            Ok(false)
+        }
+    }
 }
 
 fn append_diarized_segment_result(
@@ -2247,6 +2319,91 @@ mod coverage_boost {
     }
 
     // --- append_diarized_segment_result ------------------------------------
+
+    #[test]
+    fn merge_diarized_segment_attempt_records_failure_without_discarding_text() {
+        let unit = make_asr_unit(12_500, 13_500);
+        let mut all_text = "usable transcript".to_string();
+        let mut timeline = Vec::new();
+        let mut failed_chunks = Vec::new();
+
+        let usable = merge_diarized_segment_attempt(
+            &mut all_text,
+            &mut timeline,
+            &mut failed_chunks,
+            &unit,
+            7,
+            1,
+            Some(42.5),
+            Err("memory footprint limit".to_string()),
+        )
+        .unwrap();
+
+        assert!(!usable);
+        assert_eq!(
+            all_text,
+            "usable transcript\n[chunk 7 failed: 12s-13s]"
+        );
+        assert!(timeline.is_empty());
+        assert_eq!(failed_chunks.len(), 1);
+        let failure = &failed_chunks[0];
+        assert_eq!(failure.chunk_index, 7);
+        assert_eq!(failure.offset_secs, 12);
+        assert_eq!(failure.duration_secs, 1);
+        assert_eq!(failure.error, "memory footprint limit");
+        assert_eq!(failure.energy_rms, Some(42.5));
+        assert!(!failure.is_silent);
+    }
+
+    #[test]
+    fn merge_diarized_segment_attempt_reports_usable_success() {
+        let unit = make_asr_unit(1_000, 3_000);
+        let mut all_text = String::new();
+        let mut timeline = Vec::new();
+        let mut failed_chunks = Vec::new();
+
+        let usable = merge_diarized_segment_attempt(
+            &mut all_text,
+            &mut timeline,
+            &mut failed_chunks,
+            &unit,
+            0,
+            2,
+            Some(100.0),
+            Ok(WholeFileTranscription {
+                text: "recovered speech".to_string(),
+                segments: Vec::new(),
+            }),
+        )
+        .unwrap();
+
+        assert!(usable);
+        assert_eq!(all_text, "recovered speech");
+        assert_eq!(timeline.len(), 1);
+        assert!(failed_chunks.is_empty());
+    }
+
+    #[test]
+    fn merge_diarized_segment_attempt_propagates_pause_without_recording_failure() {
+        let unit = make_asr_unit(0, 1_000);
+        let mut all_text = String::new();
+        let mut timeline = Vec::new();
+        let mut failed_chunks = Vec::new();
+
+        let result = merge_diarized_segment_attempt(
+            &mut all_text,
+            &mut timeline,
+            &mut failed_chunks,
+            &unit,
+            0,
+            1,
+            None,
+            Err(ASR_TASK_PAUSED_MESSAGE.to_string()),
+        );
+
+        assert!(matches!(result, Err(error) if error == ASR_TASK_PAUSED_MESSAGE));
+        assert!(failed_chunks.is_empty());
+    }
 
     #[test]
     fn append_diarized_segment_result_noop_for_empty_text_and_segments() {
