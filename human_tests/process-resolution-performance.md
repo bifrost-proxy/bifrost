@@ -250,3 +250,4 @@
   - `cargo test -p bifrost-proxy test_maybe_backfill_joins_existing_connection_resolution -- --nocapture`：1 个测试通过，已有 in-flight 时 tunnel 未启动重复解析。
   - 同一真实 E2E 输出 `socks_status=200`，SOCKS5 转发功能正常。
   - 第 1 轮兼容 wrapper 与 Drop guard 修复后，以 `REQUEST_COUNT=1000 CONCURRENCY=16 CACHE_STRESS_COUNT=0` 复跑最新二进制通过：`burst_lookups=249`、`burst_snapshot_refreshes=11`、`socks_status=200`。
+  - coverage 门禁补测与 tunnel 回填副作用提取后，再次执行同参数真实 E2E 通过：`burst_lookups=247`、`burst_snapshot_refreshes=10`、`socks_status=200`；管理请求仍保持零进程扫描。

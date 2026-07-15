@@ -388,6 +388,38 @@ fn bounded_ttl_cache_replacement_ignores_stale_expiry_markers() {
 }
 
 #[test]
+fn cache_marker_equality_and_empty_expiry_heap_capacity_guard_are_stable() {
+    let now = Instant::now();
+    let marker = CacheMarker {
+        key: 7_u64,
+        expires_at: now,
+        generation: 3,
+    };
+    let same_marker = CacheMarker {
+        key: 99_u64,
+        expires_at: now,
+        generation: 3,
+    };
+    assert_eq!(marker, same_marker);
+
+    let mut shard = CacheShard {
+        entries: HashMap::from([(
+            7_u64,
+            CacheEntry {
+                value: "live",
+                expires_at: now + Duration::from_secs(30),
+                generation: 3,
+            },
+        )]),
+        expiry: BinaryHeap::new(),
+        next_generation: 4,
+        capacity: 0,
+    };
+    assert_eq!(shard.evict_over_capacity(), 0);
+    assert_eq!(shard.entries.get(&7).map(|entry| entry.value), Some("live"));
+}
+
+#[test]
 fn bounded_ttl_cache_concurrent_inserts_remain_within_hard_capacity() {
     let cache = Arc::new(BoundedTtlCache::new(256, 8));
     let workers = (0..8_u64)

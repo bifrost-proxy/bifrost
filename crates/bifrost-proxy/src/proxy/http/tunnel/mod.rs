@@ -93,7 +93,7 @@ use crate::utils::http_size::{
 };
 use crate::utils::logging::{format_rules_summary, RequestContext};
 use crate::utils::process_info::{
-    spawn_async_process_resolver_with_finish, ConnectionProcessState,
+    spawn_async_process_resolver_with_finish, ClientProcess, ConnectionProcessState,
 };
 use crate::utils::tee::{
     create_metrics_body, create_request_tee_body, create_sse_tee_body, create_tee_body_with_store,
@@ -128,6 +128,31 @@ async fn get_values_from_state(admin_state: &Option<Arc<AdminState>>) -> HashMap
         }
     }
     HashMap::new()
+}
+
+fn apply_tunnel_client_process_backfill(
+    state: &AdminState,
+    connection_process_state: &ConnectionProcessState,
+    req_id: String,
+    process: ClientProcess,
+) {
+    let process = connection_process_state.store(Arc::new(process));
+    info!(
+        req_id,
+        client_app = %process.name,
+        client_pid = process.pid,
+        client_path = ?process.path,
+        "Applying tunnel client process backfill to traffic record"
+    );
+    state.update_client_process(
+        &req_id,
+        process.name.clone(),
+        process.pid,
+        process.path.clone(),
+    );
+    state
+        .connection_registry
+        .update_client_app(&req_id, process.name.clone());
 }
 
 fn maybe_backfill_tunnel_client_process(
@@ -192,23 +217,7 @@ fn maybe_backfill_tunnel_client_process(
         local_addr,
         req_id.to_string(),
         move |id, process| {
-            let process = state_for_success.store(Arc::new(process));
-            info!(
-                req_id = %id,
-                client_app = %process.name,
-                client_pid = process.pid,
-                client_path = ?process.path,
-                "Applying tunnel client process backfill to traffic record"
-            );
-            state.update_client_process(
-                &id,
-                process.name.clone(),
-                process.pid,
-                process.path.clone(),
-            );
-            state
-                .connection_registry
-                .update_client_app(&id, process.name.clone());
+            apply_tunnel_client_process_backfill(&state, &state_for_success, id, process);
         },
         move || state_for_finish.finish_background_resolution(),
     );
@@ -8898,6 +8907,7 @@ mod coverage_boost_v2 {
 mod coverage_boost_v3 {
     use super::*;
 
+    use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
 
@@ -8920,6 +8930,21 @@ mod coverage_boost_v3 {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::server::{ResolvedRules, TlsInterceptConfig};
+
+    #[derive(Clone)]
+    struct EmptyRulesResolver;
+
+    impl RulesResolver for EmptyRulesResolver {
+        fn resolve_with_context(
+            &self,
+            _url: &str,
+            _method: &str,
+            _req_headers: &HashMap<String, String>,
+            _req_cookies: &HashMap<String, String>,
+        ) -> ResolvedRules {
+            ResolvedRules::default()
+        }
+    }
 
     // ---------------- maybe_backfill_tunnel_client_process ----------------
 
@@ -8997,6 +9022,103 @@ mod coverage_boost_v3 {
         process_state.finish_background_resolution();
         assert!(process_state.try_start_background_resolution());
         process_state.finish_background_resolution();
+    }
+
+    #[test]
+    fn test_apply_tunnel_client_process_backfill_updates_connection_state_and_registry() {
+        let state = AdminState::new(0);
+        let process_state = ConnectionProcessState::default();
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+        state.connection_registry.register(ConnectionInfo::new(
+            "req-backfill".to_string(),
+            "example.com".to_string(),
+            443,
+            false,
+            None,
+            cancel_tx,
+        ));
+
+        apply_tunnel_client_process_backfill(
+            &state,
+            &process_state,
+            "req-backfill".to_string(),
+            ClientProcess {
+                pid: 4242,
+                name: "coverage-client".to_string(),
+                path: Some("/tmp/coverage-client".to_string()),
+            },
+        );
+
+        let cached = process_state
+            .cached()
+            .expect("process state must be filled");
+        assert_eq!(cached.pid, 4242);
+        assert_eq!(cached.name, "coverage-client");
+        assert_eq!(
+            state.connection_registry.list_connections_full()[0].4,
+            Some("coverage-client".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_connect_public_wrapper_rejects_missing_authority() {
+        let (client_side, server_side) = duplex(16 * 1024);
+
+        let server_task = tokio::spawn(async move {
+            let io = TokioIo::new(server_side);
+            let service = service_fn(|req: Request<Incoming>| async move {
+                let proxy_config = ProxyConfig::default();
+                let tls_intercept_config = TlsInterceptConfig::from_proxy_config(&proxy_config);
+                let result = handle_connect(
+                    req,
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, 12347)),
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, 9900)),
+                    Arc::new(EmptyRulesResolver),
+                    Arc::new(TlsConfig {
+                        ca_cert: None,
+                        ca_key: None,
+                        cert_generator: None,
+                        sni_resolver: None,
+                    }),
+                    &tls_intercept_config,
+                    &proxy_config,
+                    false,
+                    &RequestContext::new(),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+                assert!(result
+                    .expect_err("origin-form URI must not be accepted as CONNECT")
+                    .to_string()
+                    .contains("missing authority"));
+                Ok::<_, hyper::Error>(Response::new(Full::new(Bytes::from_static(b"ok"))))
+            });
+            server_http1::Builder::new()
+                .serve_connection(io, service)
+                .await
+                .unwrap();
+        });
+
+        let io = TokioIo::new(client_side);
+        let (mut sender, conn) = client_http1::handshake(io).await.unwrap();
+        let client_task = tokio::spawn(conn);
+        let response = sender
+            .send_request(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/")
+                    .body(Empty::<Bytes>::new())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        drop(sender);
+        client_task.await.unwrap().unwrap();
+        server_task.await.unwrap();
     }
 
     // ---------------- domain / app / ip matching helpers ----------------
