@@ -203,7 +203,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
-| [internal-domain-sanitization.md](./internal-domain-sanitization.md) | 内部域名脱敏与回归门禁 | 4 | tracked/工作区文本零受限域名命中、RFC 2606 中性 fixture 完整性、受管 Provider 精确 URL 分类、真实 CLI help 脱敏地址与 Shell E2E 防回归门禁 |
+| [internal-domain-sanitization.md](./internal-domain-sanitization.md) | 内部域名脱敏与回归门禁 | 4 | 唯一必需登录域名 allowlist、其余内部域名零命中、RFC 2606 中性 fixture 完整性、受管 Provider 精确 URL 分类与 Shell E2E 防回归门禁 |
 | [ci-cross-build.md](./ci-cross-build.md) | CI Cross Build | 5 | PR CI 与 release workflow 的 Linux cross build 禁用 Docker buildkit，armv7 pre-build 使用 HTTPS Ubuntu 源和 apt retry，aarch64-musl cross build 对 GHCR 临时超时进行有限重试，避免 buildx/buildkit、HTTP apt mirror 或容器镜像拉取波动导致失败，并由远端 CI 验证 |
 | [coverage-mechanism.md](./coverage-mechanism.md) | Coverage Gate 机制 | 21 | unit + integration / E2E / union / production 分层覆盖、核心代理 production 90% 与 PR changed-lines 95% 门禁、PR 轻量 proxy coverage 与每周完整审计、仓库与 CI 移除 Go 工具链且由 Rust/Shell 测试保持 HTTP/3、SOCKS5 能力、删除未实现真实 transport 的旧 Python 演示客户端、测试 helper 不进入生产二进制与 production coverage 分母、ShellCheck/shfmt、机器可读能力矩阵与 E2E summary、完整 Playwright、WebSocket 双向转发、TLS 动态切换、生产 `~/.bifrost` 与 9900 硬隔离，以及 AGENTS.md / design 文档对齐 |
 | [ci-shell-e2e-sharding.md](./ci-shell-e2e-sharding.md) | CI Shell E2E 测试分片优化 | 44 | 分片覆盖与平衡门禁、动态端口隔离、预构建 binary 复用、失败日志 artifact、资源重型用例串行化、Linux/macOS/Windows E2E 预算与稳定性回归 |

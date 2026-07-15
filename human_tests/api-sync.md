@@ -536,8 +536,8 @@ Bifrost Sync API 提供云端同步管理功能，包括同步状态查询、配
 
 **预期结果**：
 - 第 3 步 CLI 输出包含 `"Login successful."`
-- 第 3 步 CLI 输出包含默认远端 URL `"https://bifrost.example.com"`
-- 第 4 步 help 输出包含 token 获取地址 `https://bifrost.example.com/v4/sso/token-login`
+- 第 3 步 CLI 输出包含默认远端 URL `"https://bifrost.bytedance.net"`
+- 第 4 步 help 输出包含 token 获取地址 `https://bifrost.bytedance.net/v4/sso/token-login`
 - 第 6 步 CLI 输出包含 `"Login successful."`
 - 第 6 步 CLI 输出包含 mock sync URL，说明 token-only 走当前同步配置
 - 第 7 步 CLI 输出包含 `"Login successful."`
@@ -680,13 +680,13 @@ Bifrost Sync API 提供云端同步管理功能，包括同步状态查询、配
 **预期结果**：
 - 两条命令都在真正发起登录前失败，退出码为 1。
 - 默认 Provider 场景输出包含 `--token must not be empty`。
-- 默认 Provider 场景输出包含 `Sync session token for non-interactive login; get one at https://bifrost.example.com/v4/sso/token-login`。
+- 默认 Provider 场景输出包含 `Sync session token for non-interactive login; get one at https://bifrost.bytedance.net/v4/sso/token-login`。
 - 自定义 relay URL 场景输出包含 `--token must not be empty`。
 - 自定义 relay URL 场景输出包含 `Sync session token for non-interactive login; get one at http://127.0.0.1:<mock_sync_port>/v4/sso/token-login`。
 - 命令不会打开浏览器、不会写入新的 sync session token，也不会修改系统代理。
 
 **真实执行记录**：
-- 2026-06-17：执行 `bash e2e-tests/tests/test_sync_login_direct_e2e.sh` 通过。脚本先从当前 checkout 重新构建 `target/release/bifrost`，再使用临时 `BIFROST_DATA_DIR`、随机 Admin 端口、本地 mock sync server 和 `--no-system-proxy` 启动隔离服务；`bifrost sync login --token` 返回退出码 1，输出包含 `--token must not be empty` 和默认链接 `https://bifrost.example.com/v4/sso/token-login`；`bifrost sync login --token --url http://127.0.0.1:<mock_sync_port>` 同样返回退出码 1，并输出 mock relay 链接 `http://127.0.0.1:<mock_sync_port>/v4/sso/token-login`。后续 token-only、token+URL、API token-only、API URL-only 和默认 Provider 回归均通过，成功输出使用当前文案 `Login successful`, 未打开浏览器，未修改系统代理。
+- 2026-06-17：执行 `bash e2e-tests/tests/test_sync_login_direct_e2e.sh` 通过。脚本先从当前 checkout 重新构建 `target/release/bifrost`，再使用临时 `BIFROST_DATA_DIR`、随机 Admin 端口、本地 mock sync server 和 `--no-system-proxy` 启动隔离服务；`bifrost sync login --token` 返回退出码 1，输出包含 `--token must not be empty` 和默认链接 `https://bifrost.bytedance.net/v4/sso/token-login`；`bifrost sync login --token --url http://127.0.0.1:<mock_sync_port>` 同样返回退出码 1，并输出 mock relay 链接 `http://127.0.0.1:<mock_sync_port>/v4/sso/token-login`。后续 token-only、token+URL、API token-only、API URL-only 和默认 Provider 回归均通过，成功输出使用当前文案 `Login successful`, 未打开浏览器，未修改系统代理。
 
 ---
 
@@ -715,15 +715,15 @@ Bifrost Sync API 提供云端同步管理功能，包括同步状态查询、配
    ```
 
 **预期结果**：
-- `bifrost login --help` 输出包含 `Equivalent to \`bifrost sync login\``、`--token`、`--url` 和默认 token 获取链接 `https://bifrost.example.com/v4/sso/token-login`。
+- `bifrost login --help` 输出包含 `Equivalent to \`bifrost sync login\``、`--token`、`--url` 和默认 token 获取链接 `https://bifrost.bytedance.net/v4/sso/token-login`。
 - `bifrost login --token` 在真正发起登录前失败，退出码为 1，输出包含 `--token must not be empty` 和默认 token 获取链接。
 - `bifrost login --token --url http://127.0.0.1:<mock_sync_port>` 在真正发起登录前失败，退出码为 1，输出包含 `--token must not be empty` 和 mock relay token 获取链接。
 - `bifrost login --token ci-token --url http://127.0.0.1:<mock_sync_port>` 与 `bifrost sync login --token ci-token --url ...` 一样完成直登，输出 `Login successful`。
 - 所有场景均不打开浏览器、不会修改系统代理。
 
 **真实执行记录**：
-- 2026-06-17：执行 `bash e2e-tests/tests/test_sync_login_direct_e2e.sh` 通过。脚本先从当前 checkout 重新构建 `target/release/bifrost`，再使用临时 `BIFROST_DATA_DIR`、随机 Admin 端口、本地 mock sync server 和 `--no-system-proxy` 启动隔离服务；`bifrost login --help` 输出包含 `Equivalent to \`bifrost sync login\`` 和默认 token 获取链接；`bifrost login --token` 返回退出码 1，输出包含 `--token must not be empty` 和默认链接 `https://bifrost.example.com/v4/sso/token-login`；`bifrost login --token --url http://127.0.0.1:<mock_sync_port>` 返回退出码 1，并输出 mock relay 链接 `http://127.0.0.1:<mock_sync_port>/v4/sso/token-login`；`bifrost login --token ci-token --url http://127.0.0.1:<mock_sync_port>` 输出 `Login successful`，与 `bifrost sync login` 等价。全流程未打开浏览器，未修改系统代理。
-- 2026-07-07：执行 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/release/bifrost BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_sync_login_direct_e2e.sh` 通过。确认当前 CLI 成功文案为 `Login successful`; token-only 默认 Provider 登录后通过 `/api/sync/status` 验证 `remote_base_url` 仍为 `https://bifrost.example.com`, 不再依赖 CLI 输出旧版 `Remote URL: ...` 文案。
+- 2026-06-17：执行 `bash e2e-tests/tests/test_sync_login_direct_e2e.sh` 通过。脚本先从当前 checkout 重新构建 `target/release/bifrost`，再使用临时 `BIFROST_DATA_DIR`、随机 Admin 端口、本地 mock sync server 和 `--no-system-proxy` 启动隔离服务；`bifrost login --help` 输出包含 `Equivalent to \`bifrost sync login\`` 和默认 token 获取链接；`bifrost login --token` 返回退出码 1，输出包含 `--token must not be empty` 和默认链接 `https://bifrost.bytedance.net/v4/sso/token-login`；`bifrost login --token --url http://127.0.0.1:<mock_sync_port>` 返回退出码 1，并输出 mock relay 链接 `http://127.0.0.1:<mock_sync_port>/v4/sso/token-login`；`bifrost login --token ci-token --url http://127.0.0.1:<mock_sync_port>` 输出 `Login successful`，与 `bifrost sync login` 等价。全流程未打开浏览器，未修改系统代理。
+- 2026-07-07：执行 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/release/bifrost BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_sync_login_direct_e2e.sh` 通过。确认当前 CLI 成功文案为 `Login successful`; token-only 默认 Provider 登录后通过 `/api/sync/status` 验证 `remote_base_url` 仍为 `https://bifrost.bytedance.net`, 不再依赖 CLI 输出旧版 `Remote URL: ...` 文案。
 
 ---
 

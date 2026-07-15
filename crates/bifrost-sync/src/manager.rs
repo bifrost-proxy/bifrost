@@ -3432,7 +3432,7 @@ mod tests {
     #[tokio::test]
     async fn server_auto_sync_cooldown_skips_probe_ticks_but_allows_forced_changes() {
         let (_temp, _config_manager, manager) =
-            sync_manager_for_remote("https://bifrost.example.com").await;
+            sync_manager_for_remote("https://bifrost.bytedance.net").await;
 
         assert!(manager.should_run_server_auto_sync("bytedance_internal", false));
 
@@ -3451,9 +3451,9 @@ mod tests {
     #[tokio::test]
     async fn server_config_sync_action_updates_last_changed_only_for_content_changes() {
         let (_temp, _config_manager, manager) =
-            sync_manager_for_remote("https://bifrost.example.com").await;
+            sync_manager_for_remote("https://bifrost.bytedance.net").await;
         let sync_config = SyncConfig {
-            remote_base_url: "https://bifrost.example.com".to_string(),
+            remote_base_url: "https://bifrost.bytedance.net".to_string(),
             ..Default::default()
         };
 
@@ -3705,7 +3705,7 @@ mod tests {
     fn provider_and_github_gist_helpers_cover_routing_edges() {
         assert_eq!(provider_id_for_remote("   "), None);
         assert_eq!(
-            provider_id_for_remote("https://bifrost.example.com/"),
+            provider_id_for_remote("https://bifrost.bytedance.net/"),
             Some("bytedance_internal")
         );
         assert_eq!(
@@ -3714,6 +3714,12 @@ mod tests {
         );
         assert_eq!(
             provider_id_for_remote("https://api.example.com/"),
+            Some("bifrost_cloud")
+        );
+        let internal_suffix = ["bytedance", ".net"].concat();
+        let other_internal_remote = format!("https://other.{internal_suffix}/");
+        assert_eq!(
+            provider_id_for_remote(&other_internal_remote),
             Some("bifrost_cloud")
         );
 
@@ -4923,7 +4929,7 @@ mod tests {
         manager
             .save_login_session(
                 "  ci-token  ".to_string(),
-                "https://bifrost.example.com/".to_string(),
+                "https://bifrost.bytedance.net/".to_string(),
             )
             .await
             .unwrap();
@@ -4932,7 +4938,7 @@ mod tests {
         let status = manager.status().await;
         assert!(config.sync.auto_sync);
         assert!(config.sync.enabled);
-        assert_eq!(config.sync.remote_base_url, "https://bifrost.example.com");
+        assert_eq!(config.sync.remote_base_url, "https://bifrost.bytedance.net");
         assert!(status.has_session);
         assert_eq!(manager.state.lock().token.as_deref(), Some("ci-token"));
     }

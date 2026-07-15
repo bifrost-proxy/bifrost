@@ -1068,7 +1068,7 @@ test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", asy
       await request.put(`${apiBase}/sync/config`, {
         data: {
           enabled: false,
-          remote_base_url: "https://bifrost.example.com",
+          remote_base_url: "https://bifrost.bytedance.net",
         },
       });
     } catch {
@@ -1194,7 +1194,7 @@ test("Settings Sync 轮询刷新不会覆盖正在编辑的 Bifrost Cloud URL", 
       id: "bytedance_internal",
       name: "ByteDance Internal",
       description: "Internal trusted sync and Remote Invoke provider.",
-      remote_base_url: "https://bifrost.example.com",
+      remote_base_url: "https://bifrost.bytedance.net",
       connected: signedIn,
       enabled: true,
       reachable: true,
@@ -1324,7 +1324,7 @@ test("Settings Sync Bifrost Cloud URL 必须先通过基础校验再连接", asy
       body: JSON.stringify({
         enabled: true,
         auto_sync: true,
-        remote_base_url: "https://bifrost.example.com",
+        remote_base_url: "https://bifrost.bytedance.net",
         has_session: false,
         reachable: true,
         authorized: false,
@@ -1340,7 +1340,7 @@ test("Settings Sync Bifrost Cloud URL 必须先通过基础校验再连接", asy
             id: "bytedance_internal",
             name: "ByteDance Internal",
             description: "Internal trusted sync and Remote Invoke provider.",
-            remote_base_url: "https://bifrost.example.com",
+            remote_base_url: "https://bifrost.bytedance.net",
             connected: false,
             enabled: true,
             reachable: true,
@@ -1422,7 +1422,7 @@ test("Settings Sync 展示三类 Provider 卡片并支持首登弹窗关闭与�
   const statusBody = {
     enabled: true,
     auto_sync: true,
-    remote_base_url: "https://bifrost.example.com",
+    remote_base_url: "https://bifrost.bytedance.net",
     has_session: false,
     reachable: true,
     authorized: false,
@@ -1438,7 +1438,7 @@ test("Settings Sync 展示三类 Provider 卡片并支持首登弹窗关闭与�
         id: "bytedance_internal",
         name: "ByteDance Internal",
         description: "Internal trusted sync and Remote Invoke provider.",
-        remote_base_url: "https://bifrost.example.com",
+        remote_base_url: "https://bifrost.bytedance.net",
         connected: false,
         enabled: true,
         reachable: true,
@@ -1528,7 +1528,7 @@ test("Settings Sync GitHub Gist 支持 token 登录", async ({ page }) => {
   const baseStatus = {
     enabled: true,
     auto_sync: true,
-    remote_base_url: "https://bifrost.example.com",
+    remote_base_url: "https://bifrost.bytedance.net",
     has_session: false,
     reachable: true,
     authorized: false,
@@ -1544,7 +1544,7 @@ test("Settings Sync GitHub Gist 支持 token 登录", async ({ page }) => {
         id: "bytedance_internal",
         name: "ByteDance Internal",
         description: "Internal trusted sync and Remote Invoke provider.",
-        remote_base_url: "https://bifrost.example.com",
+        remote_base_url: "https://bifrost.bytedance.net",
         connected: false,
         enabled: true,
         reachable: true,
@@ -1653,7 +1653,7 @@ test("Settings Sync GitHub Gist token 失效时显示卡片级重连提示", asy
       body: JSON.stringify({
         enabled: true,
         auto_sync: true,
-        remote_base_url: "https://bifrost.example.com",
+        remote_base_url: "https://bifrost.bytedance.net",
         has_session: true,
         reachable: true,
         authorized: false,
@@ -1669,7 +1669,7 @@ test("Settings Sync GitHub Gist token 失效时显示卡片级重连提示", asy
             id: "bytedance_internal",
             name: "ByteDance Internal",
             description: "Internal trusted sync and Remote Invoke provider.",
-            remote_base_url: "https://bifrost.example.com",
+            remote_base_url: "https://bifrost.bytedance.net",
             connected: false,
             enabled: true,
             reachable: true,
@@ -1755,7 +1755,7 @@ test("Settings Sync provider 退出登录只影响当前卡片", async ({ page }
       id: "bytedance_internal",
       name: "ByteDance Internal",
       description: "Internal trusted sync and Remote Invoke provider.",
-      remote_base_url: "https://bifrost.example.com",
+      remote_base_url: "https://bifrost.bytedance.net",
       connected: true,
       enabled: true,
       reachable: true,
@@ -1821,7 +1821,7 @@ test("Settings Sync provider 退出登录只影响当前卡片", async ({ page }
   const statusBody = () => ({
     enabled: true,
     auto_sync: true,
-    remote_base_url: "https://bifrost.example.com",
+    remote_base_url: "https://bifrost.bytedance.net",
     has_session: providers.some((provider) => provider.connected),
     reachable: true,
     authorized: providers.some((provider) => provider.connected),
@@ -1899,7 +1899,7 @@ test("Settings Sync Remote Invoke 支持 ByteDance、Bifrost Cloud 与双通道�
       body: JSON.stringify({
         enabled: true,
         auto_sync: true,
-        remote_base_url: "https://bifrost.example.com",
+        remote_base_url: "https://bifrost.bytedance.net",
         has_session: true,
         reachable: true,
         authorized: true,
@@ -1920,7 +1920,7 @@ test("Settings Sync Remote Invoke 支持 ByteDance、Bifrost Cloud 与双通道�
             id: "bytedance_internal",
             name: "ByteDance Internal",
             description: "Internal trusted sync and Remote Invoke provider.",
-            remote_base_url: "https://bifrost.example.com",
+            remote_base_url: "https://bifrost.bytedance.net",
             connected: true,
             enabled: true,
             reachable: true,
@@ -3482,7 +3482,7 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
       await request.put(`${apiBase}/sync/config`, {
         data: {
           enabled: false,
-          remote_base_url: "https://bifrost.example.com",
+          remote_base_url: "https://bifrost.bytedance.net",
         },
       });
     } catch {

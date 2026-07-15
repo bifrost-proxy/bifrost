@@ -141,26 +141,26 @@ admin_start_bifrost || exit 1
 
 log "Help should explain where to get a headless login token"
 HELP_OUTPUT="$("$BIFROST_BIN" sync login --help 2>&1)"
-assert_body_contains "https://bifrost.example.com/v4/sso/token-login" "$HELP_OUTPUT" "sync login help should include token login URL" || exit 1
+assert_body_contains "https://bifrost.bytedance.net/v4/sso/token-login" "$HELP_OUTPUT" "sync login help should include token login URL" || exit 1
 
 log "Top-level login help should match sync login semantics"
 TOP_LEVEL_HELP_OUTPUT="$("$BIFROST_BIN" login --help 2>&1)"
 assert_body_contains "Equivalent to \`bifrost sync login\`" "$TOP_LEVEL_HELP_OUTPUT" "top-level login help should explain sync login equivalence" || exit 1
-assert_body_contains "https://bifrost.example.com/v4/sso/token-login" "$TOP_LEVEL_HELP_OUTPUT" "top-level login help should include token login URL" || exit 1
+assert_body_contains "https://bifrost.bytedance.net/v4/sso/token-login" "$TOP_LEVEL_HELP_OUTPUT" "top-level login help should include token login URL" || exit 1
 
 log "Missing --token value should explain the default token login URL"
 MISSING_DEFAULT_OUTPUT="$(CI=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" sync login --token 2>&1)"
 MISSING_DEFAULT_STATUS=$?
 assert_equals "1" "$MISSING_DEFAULT_STATUS" "missing token value should fail before login" || exit 1
 assert_body_contains "--token must not be empty" "$MISSING_DEFAULT_OUTPUT" "missing token error should stay explicit" || exit 1
-assert_body_contains "Sync session token for non-interactive login; get one at https://bifrost.example.com/v4/sso/token-login" "$MISSING_DEFAULT_OUTPUT" "missing token error should include default token login URL" || exit 1
+assert_body_contains "Sync session token for non-interactive login; get one at https://bifrost.bytedance.net/v4/sso/token-login" "$MISSING_DEFAULT_OUTPUT" "missing token error should include default token login URL" || exit 1
 
 log "Top-level login missing --token value should explain the default token login URL"
 TOP_LEVEL_MISSING_DEFAULT_OUTPUT="$(CI=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" login --token 2>&1)"
 TOP_LEVEL_MISSING_DEFAULT_STATUS=$?
 assert_equals "1" "$TOP_LEVEL_MISSING_DEFAULT_STATUS" "top-level missing token value should fail before login" || exit 1
 assert_body_contains "--token must not be empty" "$TOP_LEVEL_MISSING_DEFAULT_OUTPUT" "top-level missing token error should stay explicit" || exit 1
-assert_body_contains "Sync session token for non-interactive login; get one at https://bifrost.example.com/v4/sso/token-login" "$TOP_LEVEL_MISSING_DEFAULT_OUTPUT" "top-level missing token error should include default token login URL" || exit 1
+assert_body_contains "Sync session token for non-interactive login; get one at https://bifrost.bytedance.net/v4/sso/token-login" "$TOP_LEVEL_MISSING_DEFAULT_OUTPUT" "top-level missing token error should include default token login URL" || exit 1
 
 log "Missing --token value with explicit url should explain the custom token login URL"
 MISSING_CUSTOM_OUTPUT="$(CI=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" sync login --token --url "$MOCK_URL" 2>&1)"
@@ -229,6 +229,6 @@ admin_start_bifrost || exit 1
 LOGIN_DEFAULT_OUTPUT="$(CI=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" sync login --token ci-token-default 2>&1)"
 assert_body_contains "Login successful" "$LOGIN_DEFAULT_OUTPUT" "CLI token-only login should save token" || exit 1
 DEFAULT_STATUS="$(admin_get "/api/sync/status")"
-assert_body_contains '"remote_base_url":"https://bifrost.example.com"' "$DEFAULT_STATUS" "CLI token-only login should keep built-in default URL" || exit 1
+assert_body_contains '"remote_base_url":"https://bifrost.bytedance.net"' "$DEFAULT_STATUS" "CLI token-only login should keep built-in default URL" || exit 1
 
 log "PASS"

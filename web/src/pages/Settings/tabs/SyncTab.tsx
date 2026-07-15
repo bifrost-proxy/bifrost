@@ -126,7 +126,7 @@ const fallbackProviders: SyncProviderStatus[] = [
     id: "bytedance_internal",
     name: "ByteDance Internal",
     description: "Internal trusted sync and Remote Invoke provider.",
-    remote_base_url: "https://bifrost.example.com",
+    remote_base_url: "https://bifrost.bytedance.net",
     connected: false,
     enabled: false,
     reachable: false,

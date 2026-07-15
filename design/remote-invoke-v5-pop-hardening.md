@@ -11,7 +11,7 @@ v5 PoP 主稿把 caller 长期身份 (Ed25519 SPKI) 与每次请求的 PoP envel
 - **P0-3**：`submitSshConnectResult` 的 approved 分支直接落库 `permanent` + `max_calls=999999` + `user_id=''`，完全绕过 v5 claim_token / grant_session_token 链路。
 - **P0-4**：`startPairing` 把 caller 上报的 `caller_info.fingerprint` 直接写进 pairing 记录并推给 client UI，攻击者可以伪装为合法 caller 骗取用户批准。
 
-2026-06-29 追加：PPE 环境（`bifrost.example.com`）出现真实双 Bifrost 场景下 `POST /v5/remote-invoke/pairings/start` 后端 404 的回归。根因是 TLB 在 `/v5/` 前缀被剥离后转发为 `/remote-invoke/*`。此外 caller / target 都要在 PPE 上带上 `x-tt-env=ppe_ticket_system` 与 `x-use-ppe=1` header，用于发布前真实环境验证。
+2026-06-29 追加：PPE 环境（`bifrost.bytedance.net`）出现真实双 Bifrost 场景下 `POST /v5/remote-invoke/pairings/start` 后端 404 的回归。根因是 TLB 在 `/v5/` 前缀被剥离后转发为 `/remote-invoke/*`。此外 caller / target 都要在 PPE 上带上 `x-tt-env=ppe_ticket_system` 与 `x-use-ppe=1` header，用于发布前真实环境验证。
 
 ## 用户目标验证清单
 
@@ -201,7 +201,7 @@ target 端 worker 与 caller 端 CLI 的 relay 注册 / 心跳 / pair-code / SSE
 `e2e-tests/tests/test_remote_invoke_ppe_full_e2e.sh`：
 
 - 默认构建当前分支 `target/debug/bifrost`；`SKIP_BUILD=true` 可跳过。
-- 从默认 Bifrost 数据目录读取登录 token，连接 `https://bifrost.example.com`。
+- 从默认 Bifrost 数据目录读取登录 token，连接 `https://bifrost.bytedance.net`。
 - 覆盖 code 授权 / SSH key 授权 / remote traffic / remote file / remote exec / remote run / remote job / 连接清理矩阵。
 - 允许通过 `BIFROST_REMOTE_RELAY_URL` / `BIFROST_REMOTE_RELAY_HEADERS` / `BIFROST_SYNC_STATE_FILE` / `BIFROST_SYNC_TOKEN` 覆盖默认环境。
 

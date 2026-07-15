@@ -5,13 +5,13 @@ set -euo pipefail
 #
 # This intentionally uses two local Bifrost processes built from the current
 # checkout: one target daemon and two isolated caller data dirs. The relay is
-# always remote (default: https://bifrost.example.com), never a local relay.
+# always remote (default: https://bifrost.bytedance.net), never a local relay.
 # Set BIFROST_REMOTE_RELAY_HEADERS only when a pre-release PPE route must be
 # exercised, for example: x-tt-env=ppe_ticket_system,x-use-ppe=1.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
-RELAY_URL="${BIFROST_REMOTE_RELAY_URL:-https://bifrost.example.com}"
+RELAY_URL="${BIFROST_REMOTE_RELAY_URL:-https://bifrost.bytedance.net}"
 REMOTE_RELAY_HEADERS="${BIFROST_REMOTE_RELAY_HEADERS-}"
 SYNC_STATE_FILE="${BIFROST_SYNC_STATE_FILE:-$HOME/.bifrost/sync-state.json}"
 BIFROST_BIN="${BIFROST_BIN:-$REPO/target/debug/bifrost}"

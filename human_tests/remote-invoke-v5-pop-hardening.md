@@ -123,7 +123,7 @@ Execution result (2026-06-29, local dist entry):
 ## TC-P0-6: 正式 relay 默认链路与 PPE header 开关真实链路
 
 Regression target: caller 和 target 都使用当前分支编译出的 Bifrost 二进制，
-直连正式域名 `https://bifrost.example.com`。默认不设置
+直连正式域名 `https://bifrost.bytedance.net`。默认不设置
 `BIFROST_REMOTE_RELAY_HEADERS`，用于正式环境回归；发布前 PPE 验证时才显式
 设置 `BIFROST_REMOTE_RELAY_HEADERS='x-tt-env=ppe_ticket_system,x-use-ppe=1'`。
 该开关不依赖 UI、不改持久化配置。
@@ -141,7 +141,7 @@ Steps:
 4. 脚本创建临时 target / caller-code / caller-ssh 数据目录，target 使用
    `--no-system-proxy --no-tray --skip-cert-check --unsafe-ssl` 启动当前分支
    Bifrost。未设置 `BIFROST_REMOTE_RELAY_HEADERS` 时不注入任何 relay header。
-5. 脚本直连正式域名 `https://bifrost.example.com`，先执行 Code 授权
+5. 脚本直连正式域名 `https://bifrost.bytedance.net`，先执行 Code 授权
    pair-code 流程，再执行 SSH key 授权流程。
 6. 两种授权方式均执行同一 Remote 能力矩阵：`remote conn status`、
    `remote traffic list/get/search`、`remote file read/read-many/scratch-dir/list/stat/glob/find/hash/outline/write/edit/mkdir/move/delete/patch`、
@@ -171,7 +171,7 @@ Execution result:
   `1abe9e37a1472dd1d6995aa205dde2f35d26cf3e53498441c179228885fc0191`。
 - 执行命令：
   `KEEP_TMP=1 SKIP_BUILD=true e2e-tests/tests/test_remote_invoke_ppe_full_e2e.sh`。
-  脚本直连 `https://bifrost.example.com`，使用
+  脚本直连 `https://bifrost.bytedance.net`，使用
   `BIFROST_REMOTE_RELAY_HEADERS=x-tt-env=ppe_ticket_system,x-use-ppe=1`。
 - 本轮 target client id 为 `56431d7a-7dfc-4d93-8dcb-9f63da53918c`，
   target 端口为 `52484`，临时目录为 `/tmp/bifrost-ppe-full.Qjyhbl`。
@@ -317,7 +317,7 @@ Steps:
    that same binary for both local Bifrost clients: one target and one caller
    at a time.
 6. Verify the deployed relay phase connects to
-   `https://bifrost.example.com`, runs the Code authorization path, runs a
+   `https://bifrost.bytedance.net`, runs the Code authorization path, runs a
    separate Code `remote_power_mgmt` authorization path, then runs the SSH key
    authorization path.
 7. Verify Code shell/file and SSH key authorization paths execute the full
@@ -372,7 +372,7 @@ Execution result:
   `ri:mq:{caller:<callId>}`.
 - PASS. 2026-06-29 after the updated `bifrost-server-v4` PPE deployment,
   executed the full command again against
-  `https://bifrost.example.com` with PPE headers. The run used the current
+  `https://bifrost.bytedance.net` with PPE headers. The run used the current
   branch binary for both local Bifrost clients and reported `GIT_DIRTY=false`.
   Evidence:
   - Temp dir: `/tmp/bifrost-relay-full.228i8D`.

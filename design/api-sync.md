@@ -4,7 +4,7 @@
 
 Sync API 负责把本机 Bifrost 的规则、Group、部分配置与远端同步服务绑定。原有 `bifrost sync login` 只支持打开浏览器并等待远端 SSO 回调把 token 写回本地服务；在 CI、沙箱、SSH 无 GUI、Docker 容器或无浏览器环境中无法完成登录。而且服务首次启动时缺少统一的登录引导：老用户不知道 Sync 已默认开启，也没有明确入口指出“可以扫码/直登拿到 token”。
 
-本方案在 CLI 上把 `login` 提升为一级命令并同时保留 `bifrost sync login`，两者对齐支持 `--token / --url` 直登；在 Admin API 上支持 body 直登；在服务启动路径上加一次“login preflight”，可达才自动弹一次登录页，之后不再骚扰用户；同时把默认远端固定为内置 Bifrost Provider `https://bifrost.example.com`。
+本方案在 CLI 上把 `login` 提升为一级命令并同时保留 `bifrost sync login`，两者对齐支持 `--token / --url` 直登；在 Admin API 上支持 body 直登；在服务启动路径上加一次“login preflight”，可达才自动弹一次登录页，之后不再骚扰用户；同时把默认远端固定为内置 Bifrost Provider `https://bifrost.bytedance.net`。
 
 ## 用户目标验证清单
 
@@ -13,10 +13,10 @@ Sync API 负责把本机 Bifrost 的规则、Group、部分配置与远端同步
 - CLI 支持一级命令 `bifrost login`，语义等价于 `bifrost sync login`。
 - CLI 支持 `bifrost login --token <token>` / `bifrost sync login --token <token>` 直登。
 - CLI 支持 `bifrost login --token <token> --url <remote-url>` / `bifrost sync login --token <token> --url <remote-url>` 显式覆盖远端同步服务地址。
-- 只提供 `--token` 时，复用当前同步配置中的 `remote_base_url`；新安装默认 `https://bifrost.example.com`。
+- 只提供 `--token` 时，复用当前同步配置中的 `remote_base_url`；新安装默认 `https://bifrost.bytedance.net`。
 - 无参数时保持原有打开浏览器登录行为。
 - 只提供 `--url` 返回错误，避免误以为完成登录。
-- CLI help 输出必须展示 token 获取地址：`https://bifrost.example.com/v4/sso/token-login`，自定义 relay 时替换为 `<relay>/v4/sso/token-login`。
+- CLI help 输出必须展示 token 获取地址：`https://bifrost.bytedance.net/v4/sso/token-login`，自定义 relay 时替换为 `<relay>/v4/sso/token-login`。
 - Admin API `POST /_bifrost/api/sync/login` 接收 `{ token, remote_base_url }`，token-only 走当前 remote，token+url 覆盖 remote，空 body 保持原浏览器登录流程。
 - 服务启动时如果本地有 sync session token，不再为“是否弹登录页”额外探测远端。
 - 服务启动时如果没有 session token 且此前从未自动弹过登录页，进入 startup login preflight：最多 3 次探测 `GET /v4/sso/check`，可达才自动打开登录页；不可达不弹。
@@ -47,7 +47,7 @@ Help 输出必须同时告知：
 
 - 无参数走浏览器登录。
 - 使用 `--token` 或 `--token/--url` 走 CI/沙箱直登。
-- token 获取地址：`https://bifrost.example.com/v4/sso/token-login`；自定义 relay 时是 `<relay>/v4/sso/token-login`（不允许双斜杠）。
+- token 获取地址：`https://bifrost.bytedance.net/v4/sso/token-login`；自定义 relay 时是 `<relay>/v4/sso/token-login`（不允许双斜杠）。
 
 ### Token 直登遵循 “url-only 是错误” 原则
 
@@ -74,9 +74,9 @@ Help 输出必须同时告知：
 
 `SyncLogin` 与顶级 `Login` 命令共享同名字段：
 
-- `token: Option<String>`，help 明确要求“Sync session token for non-interactive login; get one at https://bifrost.example.com/v4/sso/token-login”。
+- `token: Option<String>`，help 明确要求“Sync session token for non-interactive login; get one at https://bifrost.bytedance.net/v4/sso/token-login”。
 - `url: Option<String>`，用于覆盖 remote。
-- `long_about` 分行展示：token 获取地址、无参数说明、`bifrost login --token "$BIFROST_SYNC_TOKEN"` 示例、`bifrost login --token "$BIFROST_SYNC_TOKEN" --url https://bifrost.example.com` 示例。
+- `long_about` 分行展示：token 获取地址、无参数说明、`bifrost login --token "$BIFROST_SYNC_TOKEN"` 示例、`bifrost login --token "$BIFROST_SYNC_TOKEN" --url https://bifrost.bytedance.net` 示例。
 
 自定义 relay 时 help 中的 token 获取地址被替换为 `<relay>/v4/sso/token-login`；拼接必须处理 trailing slash，避免出现 `https://x//v4/sso/token-login`。
 
@@ -126,7 +126,7 @@ struct SyncLoginRequest {
 ### Sync 配置默认值（`crates/bifrost-storage/src/unified_config.rs`）
 
 ```rust
-pub const DEFAULT_REMOTE_BASE_URL: &str = "https://bifrost.example.com";
+pub const DEFAULT_REMOTE_BASE_URL: &str = "https://bifrost.bytedance.net";
 
 impl Default for SyncConfig {
     fn default() -> Self {
@@ -186,7 +186,7 @@ bifrost login --token "$BIFROST_SYNC_TOKEN"
 bifrost sync login --token "$BIFROST_SYNC_TOKEN"
 
 # token + 显式 remote
-bifrost login --token "$BIFROST_SYNC_TOKEN" --url https://bifrost.example.com
+bifrost login --token "$BIFROST_SYNC_TOKEN" --url https://bifrost.bytedance.net
 bifrost sync login --token "$BIFROST_SYNC_TOKEN" --url https://relay.company.example
 
 # 错误：只提供 url
@@ -198,11 +198,11 @@ Help 中必须出现：
 
 ```
 Sync session token for non-interactive login; get one at
-  https://bifrost.example.com/v4/sso/token-login
+  https://bifrost.bytedance.net/v4/sso/token-login
 
 Examples:
   bifrost login --token "$BIFROST_SYNC_TOKEN"
-  bifrost login --token "$BIFROST_SYNC_TOKEN" --url https://bifrost.example.com
+  bifrost login --token "$BIFROST_SYNC_TOKEN" --url https://bifrost.bytedance.net
 ```
 
 ## Web / Admin UI
@@ -266,7 +266,7 @@ Examples:
 - `startup_login_preflight_retry_delay_reads_env`。
 - `sync_login_direct_options_parse`：`--token`、`--token/--url` 参数解析、缺 token 值时业务错误、help 输出的 token 获取地址。
 - `top_level_login_options_parse_like_sync_login`：一级 `bifrost login` 的 help、`--token`、缺 token 值、`--token/--url` 与 `bifrost sync login` 等价。
-- `sync_token_login_url_*`：默认 `https://bifrost.example.com/v4/sso/token-login`；自定义 relay 时 `<relay>/v4/sso/token-login` 且不出现双斜杠。
+- `sync_token_login_url_*`：默认 `https://bifrost.bytedance.net/v4/sso/token-login`；自定义 relay 时 `<relay>/v4/sso/token-login` 且不出现双斜杠。
 
 ### E2E 测试
 
@@ -328,7 +328,7 @@ Examples:
 
 ## 风险与决策点
 
-- 默认 Provider 固定为 `https://bifrost.example.com`：如果需要区域切换，需要单独“区域自动选择”方案，不复用本次直登。
+- 默认 Provider 固定为 `https://bifrost.bytedance.net`：如果需要区域切换，需要单独“区域自动选择”方案，不复用本次直登。
 - Preflight 持久化 key 属于本机状态，不参与规则 sync；跨设备不共享，避免用户在多台机器上都被抑制自动引导。
 - 3 次探测阈值经验值：目标是覆盖冷启动网络抖动，同时不拖慢代理启动主线。若产品要求更高鲁棒性可提升到 5，但需要同步测试。
 - `--url` 只出现返回 400 是显式选择：如果未来允许“先设 url 再手动 login”，应在 Sync UI 中单独提供“修改 remote”入口，而不是复用 login 命令。
