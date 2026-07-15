@@ -461,7 +461,7 @@ fn is_human_readable_progress_status(status: &str) -> bool {
     true
 }
 
-fn is_token_usage_machine_status(value: &str) -> bool {
+pub(crate) fn is_token_usage_machine_status(value: &str) -> bool {
     let normalized = value
         .trim()
         .to_ascii_lowercase()
