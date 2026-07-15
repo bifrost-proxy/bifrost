@@ -383,7 +383,7 @@ async fn post_daily_agent_sync_response(task_id: &str) -> Response<BoxBody> {
         return error_response(StatusCode::NOT_FOUND, "ASR task not found");
     };
 
-    let (sync_result, per_agent_results) = match sync_all_daily_agent_reports_by_agent_isolated(task.clone()).await {
+    let (sync_result, per_agent_results, original_result) = match sync_all_daily_agent_reports_by_agent_isolated(task.clone()).await {
         Ok(result) => result,
         Err(error) => {
             let message = error.message();
@@ -404,6 +404,10 @@ async fn post_daily_agent_sync_response(task_id: &str) -> Response<BoxBody> {
             );
         }
     };
+
+    if let Err(error) = update_daily_agent_original_sync_status(&task, original_result) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+    }
 
     for (agent_task, agent_result) in per_agent_results {
         if let Err(error) = update_daily_agent_report_sync_status(&agent_task, agent_result) {
