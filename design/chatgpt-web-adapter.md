@@ -74,6 +74,7 @@ ChatGPT Web 页面可能把一次回答渲染成多条 assistant message：前�
 - 图片结果：ChatGPT 生成图先缓存到本机附件目录；IM 文本卡片移除本地图片 Markdown 后按顺序逐张发送图片消息；CLI JSON 保留最终文本中的本地图片 Markdown，便于调用方读取附件路径。
 - DOM fallback 不能只凭文本判断最终态。文本只作为候选内容；允许重新提取最新消息并返回前必须确认页面控制态已恢复：stop/cancel 按钮消失、composer 可见且可用；composer 中仍有待发送文本时提交按钮必须可见。空 composer 下发送位切回语音/提交控制不表示仍在输出。
 - DOM fallback 候选稳定性基于内容签名（turn/message id、最终文本、自然批次数、图片数、附件数），而非文本长度。签名变化即重置稳定窗口。硬 busy 信号：`data-testid="stop-button"` 与中英文 Stop/Cancel aria-label。页面空闲后按签名短稳定确认：图片/短文本 2s、中等文本 3s、超长文本 5s。发送按钮 selector 禁止使用 `composer-submit-btn` 这类 stop 也带的非语义 class；发送前必须重新检查 stop button，可见则清空 composer 草稿并等待 stop 消失后再发送；超时才返回 `conversation_busy`。
+- `stream_handoff` 的异步推理/检索阶段可能暂时移除 stop button，并把 planning 文案渲染到 `request-*`（当前页面常见为 `request-WEB:*`）临时 assistant shell；composer 此时也可能已恢复可用。只要页面已经存在带 `data-message-id` 的 user 节点、但该 user 之后尚未出现带 `data-message-author-role="assistant"` + `data-message-id` 的正式 assistant message，text-only 临时 shell 必须继续返回 `Streaming(assistant_message_not_committed)`。role-less 图片 section 仍按图片完成规则处理，避免破坏生成图片结果。
 - `wait` operation 不能只依赖进程内 `ConversationTab` 池。send 结束后浏览器 tab 仍打开，但内存池会随进程退出而消失。DOM fallback 找不到 tab 时，必须通过共享 browser session 的 DevTools target 列表重新发现 `/c/{conversationId}`，attach CDP 后再提取；只有浏览器也找不到会话页时才返回 `NotFound`。
 - 图片消息可能渲染为后续 `section[data-testid^="conversation-turn-"]`（正文只有 `ChatGPT 说：`），图片在 section 内的 `estuary/content` URL。DOM fallback 必须把最后一个 user turn 之后的这类 image-only section 当作 assistant 结果；空壳文本且图片数为 0 必须继续等待。
 - DOM 提取和 `allMarkdownTexts` 自然批次必须保存完整文本，不允许固定字符数截断；`response`、`last_message.md`、`result.json` 必须保留长任务最终输出全文。
