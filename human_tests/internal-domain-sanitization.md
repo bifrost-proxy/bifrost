@@ -2,8 +2,9 @@
 
 ## 功能模块说明
 
-验证公开仓库只保留内网登录必需的唯一企业域名，其他 URL/规则测试使用 IANA
-保留的 `example.com` 子域，并且同步 Provider 分类和 CLI 登录仍保持可用。
+验证公开仓库不保存内部域名明文；登录、默认同步和 Remote Invoke 必需的默认
+host 仅以 Base64 保存并在消费时解码。其他 URL/规则测试使用 IANA 保留的
+`example.com` 子域，同步 Provider 分类和 CLI 登录保持可用。
 
 ## 前置条件
 
@@ -13,22 +14,18 @@
 
 ## 测试用例
 
-### TC-IDS-01：tracked 文本只命中唯一允许的内部域名
+### TC-IDS-01：tracked 文本不包含内部域名明文
 
 操作步骤：
 
 ```bash
 internal_suffix="bytedance"
 internal_suffix="${internal_suffix}.net"
-allowed_host="bifrost.${internal_suffix}"
-escaped_suffix="${internal_suffix//./\\.}"
-actual_hosts="$(git grep -I -h -o -i -E "([[:alnum:]_-]+\\.)*${escaped_suffix}" -- . \
-  | tr '[:upper:]' '[:lower:]' | sort -u)"
-test "$actual_hosts" = "$allowed_host"
+! git grep -I -n -i -F "$internal_suffix" -- .
 ```
 
-预期结果：命令退出码为 0，提取结果只有 `bifrost.bytedance.net`；其他服务名、
-嵌套子域或大小写变体都不能绕过精确 allowlist。
+预期结果：命令退出码为 0 且没有输出；默认 host、其他服务名、嵌套子域或
+大小写变体都不能以明文进入 tracked 文件。
 
 ### TC-IDS-02：E2E 防回归脚本可独立执行
 
@@ -38,8 +35,8 @@ test "$actual_hosts" = "$allowed_host"
 bash e2e-tests/tests/test_internal_domain_leaks.sh
 ```
 
-预期结果：脚本退出码为 0，输出两条 `OK`，分别确认唯一登录域名 allowlist
-和登录域名加三类中性 Rust fixture 仍存在。
+预期结果：脚本退出码为 0，输出三条 `OK`，分别确认明文零命中、Base64 默认
+host 可解码为 HTTPS URL，以及三类中性 Rust fixture 仍存在。
 
 ### TC-IDS-03：受管 Provider 只匹配受控默认 URL
 
@@ -49,21 +46,23 @@ bash e2e-tests/tests/test_internal_domain_leaks.sh
 cargo test -p bifrost-sync provider_and_github_gist_helpers_cover_routing_edges -- --nocapture
 ```
 
-预期结果：测试通过；`bifrost.bytedance.net` 被识别为既有受管 Provider，
-`api.example.com`、自定义同步地址和动态构造的其他内部子域仍被识别为
-Bifrost Cloud，证明受管 Provider 只按完整默认 URL 判断。
+预期结果：测试通过；运行时解码的默认 URL 被识别为既有受管 Provider，
+`api.example.com`、自定义同步地址和动态构造的其他内部子域仍被识别为 Bifrost
+Cloud，证明受管 Provider 只按完整默认 URL 判断。
 
 ### TC-IDS-04：真实 CLI help 保留可用的默认登录地址
 
 操作步骤：
 
 ```bash
+source e2e-tests/test_utils/default_remote.sh
+BIFROST_DEFAULT_REMOTE_URL="$(bifrost_default_remote_base_url)"
 cargo run --quiet --bin bifrost -- login --help > /tmp/bifrost-domain-sanitization-help.txt
-rg -F "https://bifrost.bytedance.net/v4/sso/token-login" /tmp/bifrost-domain-sanitization-help.txt
+rg -F "${BIFROST_DEFAULT_REMOTE_URL}/v4/sso/token-login" /tmp/bifrost-domain-sanitization-help.txt
 ```
 
 预期结果：两个命令退出码均为 0，CLI help 包含内网可用的默认 token 登录地址，
-且不需要启动代理服务或连接远端 relay。该地址是 allowlist 中唯一允许的内部域名。
+且不需要启动代理服务或连接远端 relay；地址只在 helper 和 CLI 的实际消费点解码。
 
 ## 清理步骤
 
@@ -78,7 +77,7 @@ rm -f /tmp/bifrost-domain-sanitization-help.txt
 
 | 日期 | 用例 | 结果 | 证据 |
 | --- | --- | --- | --- |
-| 2026-07-16 | TC-IDS-01 | 通过 | 动态拼接后缀并提取 tracked 文本中的完整 host，去重结果仅为 `bifrost.bytedance.net`，精确比较退出码为 0。 |
-| 2026-07-16 | TC-IDS-02 | 通过 | E2E 脚本输出唯一登录域名 allowlist 与中性 fixture 两条 `OK`，退出码为 0。 |
-| 2026-07-16 | TC-IDS-03 | 通过 | `bifrost-sync` 专项测试 1 passed、0 failed；覆盖默认受管 URL、两个公开地址与动态构造的其他内部子域。 |
-| 2026-07-16 | TC-IDS-04 | 通过 | 真实 CLI help 输出两处 `https://bifrost.bytedance.net/v4/sso/token-login`，命令退出码为 0，未启动代理。 |
+| 2026-07-16 | TC-IDS-01 | 通过 | 动态拼接受限后缀后，`git grep -I` 对 tracked 文件零命中，退出码符合预期。 |
+| 2026-07-16 | TC-IDS-02 | 通过 | E2E 门禁输出明文零命中、Base64 可解码为 HTTPS URL、中性 fixture 完整三条 `OK`。 |
+| 2026-07-16 | TC-IDS-03 | 通过 | `bifrost-sync` 专项 1 passed、0 failed；覆盖运行时默认 URL、公开地址与动态构造的其他内部子域。 |
+| 2026-07-16 | TC-IDS-04 | 通过 | 从共享 helper 解码期望值后，真实 `bifrost login --help` 与 `bifrost sync login --help` 均命中默认 token URL；完整 sync-login E2E 通过，解码后的正式 `/v4/sso/check` 返回预期 HTTP 401，证明内网 Provider 可达且要求登录。 |

@@ -9,6 +9,11 @@
 1. 当前工作区位于 Bifrost 仓库根目录。
 2. 已存在 `design/sync-provider-architecture.md`。
 3. 不启动 Bifrost 服务, 不修改系统代理, 不连接真实远端同步服务。
+4. 需要比对内置默认 URL 时，先按需解码：
+   ```bash
+   source e2e-tests/test_utils/default_remote.sh
+   BIFROST_DEFAULT_REMOTE_URL="$(bifrost_default_remote_base_url)"
+   ```
 
 ## 测试用例列表
 
@@ -53,13 +58,13 @@
 
 1. 执行:
    ```bash
-   rg -n "ByteDance|auto|detect|bifrost.bytedance.net|do not override|managed" design/sync-provider-architecture.md
+   rg -n "ByteDance|auto|detect|runtime-decoded-default-url|do not override|managed" design/sync-provider-architecture.md
    ```
 2. 阅读 ByteDance Internal Provider 章节和 Product Defaults。
 
 **预期结果**:
 
-- 文档指定探测 `https://bifrost.bytedance.net/v4/sso/check`。
+- 文档指定探测 `${BIFROST_DEFAULT_REMOTE_URL}/v4/sso/check`。
 - 文档指定 200/401 算可达, DNS/TLS/timeout/5xx 算不可用。
 - 文档说明仅当用户尚未选择 provider 时自动推荐或创建 managed provider。
 - 文档明确已选 GitHub 或其他 provider 时不能自动覆盖。

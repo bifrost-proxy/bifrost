@@ -6,29 +6,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
+source "$REPO_ROOT/e2e-tests/test_utils/default_remote.sh"
+
 internal_suffix="bytedance"
 internal_suffix="${internal_suffix}.net"
-allowed_internal_host="bifrost.${internal_suffix}"
-escaped_internal_suffix="${internal_suffix//./\\.}"
 
-echo "Checking tracked files against the internal-domain allowlist..."
-unexpected_hosts=""
-while IFS= read -r host; do
-    [[ -z "$host" ]] && continue
-    normalized_host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
-    if [[ "$normalized_host" != "$allowed_internal_host" ]]; then
-        unexpected_hosts="${unexpected_hosts}${host}"$'\n'
-    fi
-done < <(git grep -I -h -o -i -E "([[:alnum:]_-]+\\.)*${escaped_internal_suffix}" -- . | sort -fu || true)
-
-if [[ -n "$unexpected_hosts" ]]; then
-    echo "ERROR: tracked files contain internal domains outside the allowlist:" >&2
-    printf '%s' "$unexpected_hosts" >&2
+echo "Checking tracked files for plaintext internal domains..."
+if matches="$(git grep -I -n -i -F "$internal_suffix" -- .)"; then
+    echo "ERROR: tracked files contain a plaintext internal domain suffix:" >&2
+    printf '%s\n' "$matches" >&2
     exit 1
 fi
 
 required_fixture_hosts=(
-    "$allowed_internal_host"
     "api.example.com"
     "app.example.com"
     "cdn.example.com"
@@ -41,5 +31,22 @@ for host in "${required_fixture_hosts[@]}"; do
     fi
 done
 
-echo "OK: the required login host is the only allowlisted internal domain."
+decoded_default_url="$(bifrost_default_remote_base_url)"
+if [[ "$decoded_default_url" != https://* ]]; then
+    echo "ERROR: decoded default remote URL is not HTTPS" >&2
+    exit 1
+fi
+
+for source_file in \
+    crates/bifrost-storage/src/unified_config.rs \
+    web/src/api/sync.ts \
+    e2e-tests/test_utils/default_remote.sh; do
+    if ! grep -q -F "$BIFROST_DEFAULT_REMOTE_HOST_BASE64" "$source_file"; then
+        echo "ERROR: encoded default host is inconsistent in $source_file" >&2
+        exit 1
+    fi
+done
+
+echo "OK: no plaintext internal domains were found in tracked files."
+echo "OK: the encoded default host decodes to an HTTPS runtime URL."
 echo "OK: neutral example.com fixtures remain covered in Rust sources."

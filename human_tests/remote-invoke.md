@@ -63,6 +63,11 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
    ```bash
    cargo run --bin bifrost -- remote status --relay http://127.0.0.1:8686 --token "$SYNC_TOKEN"
    ```
+8. 需要连接内置远端 relay 的用例先按需解码默认 URL：
+   ```bash
+   source e2e-tests/test_utils/default_remote.sh
+   BIFROST_DEFAULT_REMOTE_URL="$(bifrost_default_remote_base_url)"
+   ```
 
 ---
 
@@ -1921,7 +1926,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 测试环境：
 - Bifrost: 本地 port 8800，`BIFROST_DATA_DIR=./.bifrost-test`
-- Relay Server: 远端 `https://bifrost.bytedance.net`（bifrost-server-v4）
+- Relay Server: 远端 `${BIFROST_DEFAULT_REMOTE_URL}`（bifrost-server-v4）
 - 测试日期：2026-04-19
 
 | 用例编号 | 用例名称 | 结果 | 说明 |
@@ -2426,7 +2431,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 测试环境：
 - Bifrost: 本地 port 8800，`BIFROST_DATA_DIR=./.bifrost-test`
-- Relay Server: 远端 `https://bifrost.bytedance.net`
+- Relay Server: 远端 `${BIFROST_DEFAULT_REMOTE_URL}`
 - 测试日期：2026-04-19
 
 | 用例编号 | 用例名称 | 结果 | 说明 |
@@ -2555,7 +2560,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 1. 使用一个虚拟的 callId 直接访问 events 路由，不携带 Authorization 头：
    ```bash
    curl -sS -o /dev/null -w '%{http_code}' \
-     "https://bifrost.bytedance.net/v4/remote-invoke/calls/00000000-0000-0000-0000-000000000000/events"
+     "${BIFROST_DEFAULT_REMOTE_URL}/v4/remote-invoke/calls/00000000-0000-0000-0000-000000000000/events"
    ```
 
 **预期结果**：
@@ -2571,7 +2576,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
    ```bash
    curl -sS -o /dev/null -w '%{http_code}' \
      -H "Authorization: Bearer fake-token-12345" \
-     "https://bifrost.bytedance.net/v4/remote-invoke/calls/00000000-0000-0000-0000-000000000000/events"
+     "${BIFROST_DEFAULT_REMOTE_URL}/v4/remote-invoke/calls/00000000-0000-0000-0000-000000000000/events"
    ```
 
 **预期结果**：
@@ -2586,7 +2591,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 1. 使用虚拟 callId 直接 POST input 路由，不携带 Authorization：
    ```bash
    curl -sS -o /dev/null -w '%{http_code}' \
-     -X POST "https://bifrost.bytedance.net/v4/remote-invoke/calls/00000000-0000-0000-0000-000000000000/input" \
+     -X POST "${BIFROST_DEFAULT_REMOTE_URL}/v4/remote-invoke/calls/00000000-0000-0000-0000-000000000000/input" \
      -H "Content-Type: application/json" \
      -d '{"data":"test"}'
    ```
@@ -2602,7 +2607,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 1. 使用虚拟 callId 直接 POST cancel 路由，不携带 Authorization：
    ```bash
    curl -sS -o /dev/null -w '%{http_code}' \
-     -X POST "https://bifrost.bytedance.net/v4/remote-invoke/calls/00000000-0000-0000-0000-000000000000/cancel"
+     -X POST "${BIFROST_DEFAULT_REMOTE_URL}/v4/remote-invoke/calls/00000000-0000-0000-0000-000000000000/cancel"
    ```
 
 **预期结果**：
@@ -2618,12 +2623,12 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 1. 访问原路径 `GET /v4/remote-invoke/calls`（不携带 client 认证）：
    ```bash
    curl -sS -o /dev/null -w '%{http_code}' \
-     "https://bifrost.bytedance.net/v4/remote-invoke/calls"
+     "${BIFROST_DEFAULT_REMOTE_URL}/v4/remote-invoke/calls"
    ```
 2. 访问新路径 `GET /v4/remote-invoke/client/calls`（不携带 client 认证）：
    ```bash
    curl -sS -o /dev/null -w '%{http_code}' \
-     "https://bifrost.bytedance.net/v4/remote-invoke/client/calls"
+     "${BIFROST_DEFAULT_REMOTE_URL}/v4/remote-invoke/client/calls"
    ```
 
 **预期结果**：
@@ -2705,7 +2710,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 测试环境：
 - Bifrost: 本地，`BIFROST_DATA_DIR` 临时目录
-- Relay Server: 远端 `https://bifrost.bytedance.net`
+- Relay Server: 远端 `${BIFROST_DEFAULT_REMOTE_URL}`
 - 测试日期：2026-04-20
 
 | 用例编号 | 用例名称 | 结果 | 说明 |
@@ -2723,7 +2728,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 ### TC-RI-回归-79：真实 relay E2E — 完整配对流程（discovery → connect → approve）
 
-**背景**：使用真实 relay 服务（`bifrost.bytedance.net`）而非本地 mock 验证完整配对流程的端到端可靠性。
+**背景**：使用内置默认 relay（运行时解码）而非本地 mock 验证完整配对流程的端到端可靠性。
 
 **操作步骤**：
 1. 启动 Bifrost 服务连接真实 relay：
@@ -2740,7 +2745,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
    ```
 4. 使用 caller CLI 发起配对：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-caller-test ./target/debug/bifrost remote --relay-url https://bifrost.bytedance.net connect <pair_code>
+   BIFROST_DATA_DIR=./.bifrost-caller-test ./target/debug/bifrost remote --relay-url ${BIFROST_DEFAULT_REMOTE_URL} connect <pair_code>
    ```
 5. 查看 pending pairings 并批准：
    ```bash
@@ -2765,11 +2770,11 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 **操作步骤**：
 1. 使用 caller CLI 执行远程 status 命令：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-caller-test ./target/debug/bifrost remote --relay-url https://bifrost.bytedance.net status
+   BIFROST_DATA_DIR=./.bifrost-caller-test ./target/debug/bifrost remote --relay-url ${BIFROST_DEFAULT_REMOTE_URL} status
    ```
 2. 使用 caller CLI 执行远程 traffic list 命令：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-caller-test ./target/debug/bifrost remote --relay-url https://bifrost.bytedance.net traffic list --limit 3
+   BIFROST_DATA_DIR=./.bifrost-caller-test ./target/debug/bifrost remote --relay-url ${BIFROST_DEFAULT_REMOTE_URL} traffic list --limit 3
    ```
 
 **预期结果**：
@@ -2791,7 +2796,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 2. 确认 grants 列表为空
 3. 再次用 caller 执行命令：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-caller-test ./target/debug/bifrost remote --relay-url https://bifrost.bytedance.net status
+   BIFROST_DATA_DIR=./.bifrost-caller-test ./target/debug/bifrost remote --relay-url ${BIFROST_DEFAULT_REMOTE_URL} status
    ```
 
 **预期结果**：
@@ -2809,12 +2814,12 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 2. 确认 grant 为 active，max_calls=1, remaining_calls=1
 3. 第一次执行远程命令（应成功）：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-caller-test ./target/debug/bifrost remote --relay-url https://bifrost.bytedance.net status
+   BIFROST_DATA_DIR=./.bifrost-caller-test ./target/debug/bifrost remote --relay-url ${BIFROST_DEFAULT_REMOTE_URL} status
    ```
 4. 确认 grants 列表为空（once grant 已消耗并清理）
 5. 第二次执行远程命令（应被拒绝）：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-caller-test ./target/debug/bifrost remote --relay-url https://bifrost.bytedance.net status
+   BIFROST_DATA_DIR=./.bifrost-caller-test ./target/debug/bifrost remote --relay-url ${BIFROST_DEFAULT_REMOTE_URL} status
    ```
 
 **预期结果**：
@@ -2828,7 +2833,7 @@ Remote Invoke 允许调用方通过 `bifrost remote` 命令，经由本地 relay
 
 测试环境：
 - Bifrost: 本地 port 8801，`BIFROST_DATA_DIR=./.bifrost-grant-test`
-- Relay Server: 远端 `https://bifrost.bytedance.net`
+- Relay Server: 远端 `${BIFROST_DEFAULT_REMOTE_URL}`
 - 测试日期：2026-04-20
 
 | 用例编号 | 用例名称 | 结果 | 说明 |
@@ -3379,7 +3384,7 @@ PY
 
 **预期结果**：
 - CLI 不再输出 `Error: --relay-url is required (could not detect from running proxy)`
-- relay 目标回退为默认值 `https://bifrost.bytedance.net`
+- relay 目标回退为默认值 `${BIFROST_DEFAULT_REMOTE_URL}`
 - 若默认 relay 当前不可达，错误表现为网络/业务错误，而不是缺少参数错误
 
 ### TC-RI-回归-98 ~ TC-RI-回归-101 执行结果（2026-04-21）
@@ -3627,7 +3632,7 @@ PY
 ### TC-RI-回归-111：线上 relay 的 reusable grant 查询应能命中 SSH grant
 
 **前置条件**：
-- 远端 relay 为 `https://bifrost.bytedance.net`
+- 远端 relay 为 `${BIFROST_DEFAULT_REMOTE_URL}`
 - 已通过 SSH `challenge/connect` 成功建立授权
 - client 侧 `GET /api/remote-invoke/grants` 已出现 `auth_method=ssh_publickey` 的 active grant
 
@@ -3635,7 +3640,7 @@ PY
 1. 记录本次 SSH 授权对应的 `client_instance_id`、`ssh_key_fingerprint`、`grant_id`
 2. 调用：
    ```bash
-   curl -s "https://bifrost.bytedance.net/v4/remote-invoke/grants/reusable?client_instance_id=<client_instance_id>&caller_fingerprint=<ssh_key_fingerprint>"
+   curl -s "${BIFROST_DEFAULT_REMOTE_URL}/v4/remote-invoke/grants/reusable?client_instance_id=<client_instance_id>&caller_fingerprint=<ssh_key_fingerprint>"
    ```
 
 **预期结果**：
@@ -3661,7 +3666,7 @@ PY
    ```
 2. 调用：
    ```bash
-   curl -s -X POST "https://bifrost.bytedance.net/v4/remote-invoke/calls/open" \
+   curl -s -X POST "${BIFROST_DEFAULT_REMOTE_URL}/v4/remote-invoke/calls/open" \
      -H 'Content-Type: application/json' \
      -d '<payload>'
    ```
@@ -3753,7 +3758,7 @@ PY
 ### TC-RI-回归-117：回归 — 线上 relay 下 caller 主动取消后 target client 进入 cancelled 且 caller 不无限挂起
 
 **前置条件**：
-- relay 为 `https://bifrost.bytedance.net`
+- relay 为 `${BIFROST_DEFAULT_REMOTE_URL}`
 - 目标 client 已保存有效 sync session
 - 已完成一次有效的 `remote connect`
 - 目标 client 上存在足够多的流量记录，保证 `remote search` 会持续输出至少数秒
@@ -3761,7 +3766,7 @@ PY
 **操作步骤**：
 1. 发起：
    ```bash
-   cargo run --bin bifrost -- remote search "<marker>" --relay-url https://bifrost.bytedance.net --client-id <client_prefix> --limit 500
+   cargo run --bin bifrost -- remote search "<marker>" --relay-url ${BIFROST_DEFAULT_REMOTE_URL} --client-id <client_prefix> --limit 500
    ```
 2. 在 caller 终端出现持续输出后按 `Ctrl-C`
 3. 查询 target client Recent Calls / call detail
@@ -3864,7 +3869,7 @@ PY
 ### TC-RI-回归-123：远端 relay 下 client 重启后已落盘的加密 grant 仍可继续执行 remote status
 
 **前置条件**：
-- 远端 relay 使用 `https://bifrost.bytedance.net`
+- 远端 relay 使用 `${BIFROST_DEFAULT_REMOTE_URL}`
 - target client 已连接远端 relay，且 `/_bifrost/api/remote-invoke/status` 为 `Connected`
 - caller 已通过 `pair-code` 或 `--ssh-key` 完成一次有效的 `remote connect`
 - caller 和 client 都使用独立数据目录，便于确认落盘文件
@@ -3872,7 +3877,7 @@ PY
 **操作步骤**：
 1. 在 caller 侧先执行一次：
    ```bash
-   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote status --relay-url https://bifrost.bytedance.net
+   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote status --relay-url ${BIFROST_DEFAULT_REMOTE_URL}
    ```
 2. 在 target client 上确认 admin 数据目录下已生成 grant crypto 持久化文件：
    ```bash
@@ -3885,7 +3890,7 @@ PY
 4. 等待 `/_bifrost/api/remote-invoke/status` 再次恢复为 `Connected`。
 5. 不重新执行 `remote connect`，直接在同一 caller 数据目录下再次执行：
    ```bash
-   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote status --relay-url https://bifrost.bytedance.net
+   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote status --relay-url ${BIFROST_DEFAULT_REMOTE_URL}
    ```
 
 **预期结果**：
@@ -3897,7 +3902,7 @@ PY
 ### TC-RI-回归-124：同一远端连续两次 pair-code connect 后 caller 必须只使用最后一次连接的 grant
 
 **前置条件**：
-- 远端 relay 使用 `https://bifrost.bytedance.net`
+- 远端 relay 使用 `${BIFROST_DEFAULT_REMOTE_URL}`
 - target client 已连接远端 relay，且 `/_bifrost/api/remote-invoke/status` 为 `Connected`
 - caller 使用独立 `BIFROST_DATA_DIR`
 - 允许在 target client 上查看当前 grants
@@ -3906,19 +3911,19 @@ PY
 1. 在 target client 上进入 discovery mode，记录第一个 pair code。
 2. caller 使用独立数据目录执行第一次连接：
    ```bash
-   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote connect <pair_code_1> --relay-url https://bifrost.bytedance.net
+   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote connect <pair_code_1> --relay-url ${BIFROST_DEFAULT_REMOTE_URL}
    ```
 3. 记录 caller 本地 `remote-connections.json` 中第一次连接得到的 `grant_id`。
 4. 再次进入 discovery mode，记录第二个 pair code。
 5. 使用同一个 caller 数据目录执行第二次连接：
    ```bash
-   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote connect <pair_code_2> --relay-url https://bifrost.bytedance.net
+   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote connect <pair_code_2> --relay-url ${BIFROST_DEFAULT_REMOTE_URL}
    ```
 6. 再次检查同一 caller 数据目录下的 `remote-connections.json`。
 7. 在 target client 上查询 grants 列表，确认是否同时存在两条 pair-code grant。
 8. 使用同一 caller 数据目录直接执行：
    ```bash
-   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote status --relay-url https://bifrost.bytedance.net
+   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote status --relay-url ${BIFROST_DEFAULT_REMOTE_URL}
    ```
 
 **预期结果**：
@@ -3930,7 +3935,7 @@ PY
 ### TC-RI-回归-125：同一远端同一 caller 先用 SSH key 再用 pair-code connect 时必须稳定切换到最后一次连接
 
 **前置条件**：
-- 远端 relay 使用 `https://bifrost.bytedance.net`
+- 远端 relay 使用 `${BIFROST_DEFAULT_REMOTE_URL}`
 - target client 已连接远端 relay，且 `/_bifrost/api/remote-invoke/status` 为 `Connected`
 - caller 使用独立 `BIFROST_DATA_DIR`
 - target client 已可导出可用的 SSH key
@@ -3939,19 +3944,19 @@ PY
 1. 在 target client 上重置或导出当前 SSH key，得到可用的 `bifrost_key_file`。
 2. caller 使用独立数据目录执行 SSH 连接：
    ```bash
-   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote connect --ssh-key <bifrost_key_file> --relay-url https://bifrost.bytedance.net
+   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote connect --ssh-key <bifrost_key_file> --relay-url ${BIFROST_DEFAULT_REMOTE_URL}
    ```
 3. 记录 caller 本地 `remote-connections.json` 中 SSH 连接得到的 `grant_id`、`auth_method` 与加密上下文。
 4. 在同一个 target client 上进入 discovery mode，记录 pair code。
 5. 使用同一个 caller 数据目录执行 pair-code 连接：
    ```bash
-   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote connect <pair_code> --relay-url https://bifrost.bytedance.net
+   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote connect <pair_code> --relay-url ${BIFROST_DEFAULT_REMOTE_URL}
    ```
 6. 再次检查同一 caller 数据目录下的 `remote-connections.json`。
 7. 在 target client 上查询 grants 列表，确认是否同时存在 `ssh_publickey` 与 `pair_code` 两条 active grant。
 8. 使用同一 caller 数据目录直接执行：
    ```bash
-   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote status --relay-url https://bifrost.bytedance.net
+   BIFROST_DATA_DIR=<caller_dir> cargo run --bin bifrost -- remote status --relay-url ${BIFROST_DEFAULT_REMOTE_URL}
    ```
 
 **预期结果**：
@@ -4044,19 +4049,19 @@ PY
 
 **执行环境**：
 - Bifrost Admin：`cargo run --release --bin bifrost -- -H 127.0.0.1 -p <随机端口> start -y --access-mode allow_all --skip-cert-check --unsafe-ssl --no-system-proxy`
-- Relay Server：远端 `https://bifrost.bytedance.net`
+- Relay Server：远端 `${BIFROST_DEFAULT_REMOTE_URL}`
 - Sync Session：复用本机已登录的真实线上账号 token
 
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
-| TC-RI-回归-111 | ✅ PASS | 使用真实线上 relay `https://bifrost.bytedance.net` 重新执行 SSH `challenge/connect` 后，client 侧成功创建 active `ssh_publickey` grant；随后 `GET /v4/remote-invoke/grants/reusable?...caller_fingerprint=<ssh_key_fingerprint>` 正确返回该 grant，`grant_id` 与 client 侧列表一致。 |
+| TC-RI-回归-111 | ✅ PASS | 使用真实线上 relay `${BIFROST_DEFAULT_REMOTE_URL}` 重新执行 SSH `challenge/connect` 后，client 侧成功创建 active `ssh_publickey` grant；随后 `GET /v4/remote-invoke/grants/reusable?...caller_fingerprint=<ssh_key_fingerprint>` 正确返回该 grant，`grant_id` 与 client 侧列表一致。 |
 | TC-RI-回归-112 | ✅ PASS | 在同一组 `client_instance_id` / `grant_id` / `caller_fingerprint` 条件下，调用线上 relay `POST /v4/remote-invoke/calls/open` 执行 `search.get` 成功返回 `call_id` 与 `relay_token`，caller `events` SSE 收到包含目标 marker 的结果；继续执行 `traffic.get` 也成功返回目标 `traffic_id` 与响应体 marker，最后 `DELETE /api/remote-invoke/ssh-key` 后旧 `device_code` 再次变为 `device_code_not_found`。 |
 
 ### TC-RI-回归-113 ~ TC-RI-回归-119 执行结果（2026-04-21，取消与限流收尾）
 
 **执行环境**：
 - Local relay：`pnpm --dir packages/bifrost-sync-server exec tsx src/cli.ts -p <随机端口> -d <临时目录> --enable-remote-invoke`
-- Online relay：`https://bifrost.bytedance.net`
+- Online relay：`${BIFROST_DEFAULT_REMOTE_URL}`
 - Bifrost Admin：`target/release/bifrost -H 127.0.0.1 -p <随机端口> start -y --access-mode allow_all --skip-cert-check --unsafe-ssl --no-system-proxy`
 - Caller：`target/release/bifrost remote ...`
 
@@ -4105,46 +4110,46 @@ PY
 ### TC-RI-回归-123 执行结果（2026-04-22，远端 relay + client 重启后 grant crypto 持续可用）
 
 **执行环境**：
-- 远端 relay：[https://bifrost.bytedance.net](https://bifrost.bytedance.net)
+- 远端 relay：`${BIFROST_DEFAULT_REMOTE_URL}`
 - Target client：`BIFROST_DATA_DIR=<REPO_ROOT>/.tmp-remote-e2e-client cargo run --bin bifrost -- start -p 8810 --unsafe-ssl --no-system-proxy`
 - Caller：`BIFROST_DATA_DIR=<REPO_ROOT>/.tmp-remote-restart-ssh-caller cargo run --bin bifrost -- remote ...`
 
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
-| TC-RI-回归-123 | ✅ PASS | 先通过 `POST /_bifrost/api/remote-invoke/ssh-key/reset` 导出新的 `bifrost_key_file`，caller 执行 `remote connect --ssh-key ... --relay-url https://bifrost.bytedance.net` 成功建立新 grant `57a4c4ee-5810-4573-8014-171f39cb85f0`；首次 `remote status` 成功返回目标状态。随后确认 client 数据目录下已生成 `admin/remote_invoke_grant_crypto.json` 与 `.key`，其中记录了该 grant 的 `caller_ephemeral_pub` / `client_ephemeral_pub` / 加密后的 `shared_secret`。重启 target client 后，不重新 `remote connect`，直接复用同一 caller 目录再次执行 `remote status` 仍成功返回状态；client 日志显示已用持久化恢复的 grant crypto 派生 open_call key 并完成解密执行，整个流程未再出现 `missing grant shared secret for encrypted remote command`。 |
+| TC-RI-回归-123 | ✅ PASS | 先通过 `POST /_bifrost/api/remote-invoke/ssh-key/reset` 导出新的 `bifrost_key_file`，caller 执行 `remote connect --ssh-key ... --relay-url ${BIFROST_DEFAULT_REMOTE_URL}` 成功建立新 grant `57a4c4ee-5810-4573-8014-171f39cb85f0`；首次 `remote status` 成功返回目标状态。随后确认 client 数据目录下已生成 `admin/remote_invoke_grant_crypto.json` 与 `.key`，其中记录了该 grant 的 `caller_ephemeral_pub` / `client_ephemeral_pub` / 加密后的 `shared_secret`。重启 target client 后，不重新 `remote connect`，直接复用同一 caller 目录再次执行 `remote status` 仍成功返回状态；client 日志显示已用持久化恢复的 grant crypto 派生 open_call key 并完成解密执行，整个流程未再出现 `missing grant shared secret for encrypted remote command`。 |
 
 ### TC-RI-回归-124 执行结果（2026-04-22，远端 relay + 同一 caller 连续两次 pair-code connect）
 
 **执行环境**：
-- 远端 relay：[https://bifrost.bytedance.net](https://bifrost.bytedance.net)
+- 远端 relay：`${BIFROST_DEFAULT_REMOTE_URL}`
 - Target client：`BIFROST_DATA_DIR=<REPO_ROOT>/.tmp-remote-e2e-client cargo run --bin bifrost -- start -p 8810 --unsafe-ssl --no-system-proxy`
 - Caller：`BIFROST_DATA_DIR=<REPO_ROOT>/.tmp-remote-repeat-pair-caller cargo run --bin bifrost -- remote ...`
 
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
-| TC-RI-回归-124 | ✅ PASS | 同一 target client 先后用两个 pair code 完成两次 `remote connect`，第一次 grant 为 `1f43205651506fe6`，第二次 grant 为 `12e91b6bef344396`。第二次 connect 后，caller 本地 [remote-connections.json](../.tmp-remote-repeat-pair-caller/remote-connections.json) 已被覆盖为第二次 grant，并落盘新的 `caller_ephemeral_pub` / `client_ephemeral_pub` / `shared_secret_encrypted`；同时 client 侧 `GET /api/remote-invoke/grants` 仍可看到两条 active pair-code grant 并存，证明“服务端多 grant 并存 + caller 本地只保留最后一次连接”这一高风险场景已真实出现。随后直接用同一 caller 目录执行 `cargo run --bin bifrost -- remote status --relay-url https://bifrost.bytedance.net`，日志先告警 relay `grants/reusable` 返回了另一条旧 grant `b4f32cf75bf2b73e`，caller 改为整套使用本地最后一次连接保存的 `grant_id=12e91b6bef344396` 与对应 ephemeral pub，最终 `remote status` 成功返回目标设备状态 JSON，不再出现 `missing grant shared secret` 或 `caller_ephemeral_pub does not match saved encrypted transport context`。 |
+| TC-RI-回归-124 | ✅ PASS | 同一 target client 先后用两个 pair code 完成两次 `remote connect`，第一次 grant 为 `1f43205651506fe6`，第二次 grant 为 `12e91b6bef344396`。第二次 connect 后，caller 本地 [remote-connections.json](../.tmp-remote-repeat-pair-caller/remote-connections.json) 已被覆盖为第二次 grant，并落盘新的 `caller_ephemeral_pub` / `client_ephemeral_pub` / `shared_secret_encrypted`；同时 client 侧 `GET /api/remote-invoke/grants` 仍可看到两条 active pair-code grant 并存，证明“服务端多 grant 并存 + caller 本地只保留最后一次连接”这一高风险场景已真实出现。随后直接用同一 caller 目录执行 `cargo run --bin bifrost -- remote status --relay-url ${BIFROST_DEFAULT_REMOTE_URL}`，日志先告警 relay `grants/reusable` 返回了另一条旧 grant `b4f32cf75bf2b73e`，caller 改为整套使用本地最后一次连接保存的 `grant_id=12e91b6bef344396` 与对应 ephemeral pub，最终 `remote status` 成功返回目标设备状态 JSON，不再出现 `missing grant shared secret` 或 `caller_ephemeral_pub does not match saved encrypted transport context`。 |
 
 ### TC-RI-回归-125 执行结果（2026-04-22，远端 relay + 同一 caller 先 SSH key 后 pair-code）
 
 **执行环境**：
-- 远端 relay：[https://bifrost.bytedance.net](https://bifrost.bytedance.net)
+- 远端 relay：`${BIFROST_DEFAULT_REMOTE_URL}`
 - Target client：`BIFROST_DATA_DIR=<REPO_ROOT>/.tmp-remote-e2e-client cargo run --bin bifrost -- -H 127.0.0.1 -p 8810 start -y --skip-cert-check --unsafe-ssl --no-system-proxy`
 - Caller：`BIFROST_DATA_DIR=<REPO_ROOT>/.tmp-remote-mixed-auth-caller cargo run --bin bifrost -- remote ...`
 
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
-| TC-RI-回归-125 | ✅ PASS | 先在 target client 上 `POST /_bifrost/api/remote-invoke/ssh-key/reset` 导出新的 `bifrost_key_file`，同一 caller 目录执行 `remote connect --ssh-key ... --relay-url https://bifrost.bytedance.net` 成功建立 `ssh_publickey` grant `5f25ecf0-8b1a-4804-9f47-b379a212e58a`，caller 本地 [remote-connections.json](../.tmp-remote-mixed-auth-caller/remote-connections.json) 记录为 `auth_method=ssh_publickey` 且落盘对应加密上下文，随后 `remote status` 成功返回目标状态。接着在同一 target client 上开启 discovery mode，并继续用同一个 caller 目录执行 pair-code connect，成功建立 `pair_code` grant `208006cff246d9b2`；此时 caller 本地连接记录被新连接覆盖为 `auth_method=pair_code`，而 client 侧 `GET /api/remote-invoke/grants` 同时存在一条 `ssh_publickey` active grant 和一条 `pair_code` active grant。最后再用同一 caller 目录执行 `remote status`，CLI 明确按本地最后一次连接的 pair-code transport context 工作，虽然 relay `grants/reusable` 返回了另一条旧 grant `b4f32cf75bf2b73e`，但 caller 仍稳定回退到本地保存的 `grant_id=208006cff246d9b2` 与对应 ephemeral pub，命令成功返回目标设备状态 JSON。结论是：同一 client 上两种 grant 可以同时在服务端共存并都有效，但同一个 caller 数据目录只保存最后一次 connect 的那一种模式，不会同时保留两套本地加密上下文。 |
+| TC-RI-回归-125 | ✅ PASS | 先在 target client 上 `POST /_bifrost/api/remote-invoke/ssh-key/reset` 导出新的 `bifrost_key_file`，同一 caller 目录执行 `remote connect --ssh-key ... --relay-url ${BIFROST_DEFAULT_REMOTE_URL}` 成功建立 `ssh_publickey` grant `5f25ecf0-8b1a-4804-9f47-b379a212e58a`，caller 本地 [remote-connections.json](../.tmp-remote-mixed-auth-caller/remote-connections.json) 记录为 `auth_method=ssh_publickey` 且落盘对应加密上下文，随后 `remote status` 成功返回目标状态。接着在同一 target client 上开启 discovery mode，并继续用同一个 caller 目录执行 pair-code connect，成功建立 `pair_code` grant `208006cff246d9b2`；此时 caller 本地连接记录被新连接覆盖为 `auth_method=pair_code`，而 client 侧 `GET /api/remote-invoke/grants` 同时存在一条 `ssh_publickey` active grant 和一条 `pair_code` active grant。最后再用同一 caller 目录执行 `remote status`，CLI 明确按本地最后一次连接的 pair-code transport context 工作，虽然 relay `grants/reusable` 返回了另一条旧 grant `b4f32cf75bf2b73e`，但 caller 仍稳定回退到本地保存的 `grant_id=208006cff246d9b2` 与对应 ephemeral pub，命令成功返回目标设备状态 JSON。结论是：同一 client 上两种 grant 可以同时在服务端共存并都有效，但同一个 caller 数据目录只保存最后一次 connect 的那一种模式，不会同时保留两套本地加密上下文。 |
 
 ### TC-RI-回归-126 执行结果（2026-04-22，Recent Calls 命令摘要恢复）
 
 **执行环境**：
-- 远端 relay：[https://bifrost.bytedance.net](https://bifrost.bytedance.net)
+- 远端 relay：`${BIFROST_DEFAULT_REMOTE_URL}`
 - Target client：`BIFROST_DATA_DIR=<REPO_ROOT>/.tmp-remote-e2e-client target/debug/bifrost -H 127.0.0.1 -p 8810 start -y --skip-cert-check --unsafe-ssl --no-system-proxy`
 - Caller：`BIFROST_DATA_DIR=<REPO_ROOT>/.tmp-human-recentcalls-caller target/debug/bifrost remote ...`
 
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
-| TC-RI-回归-126 | ✅ PASS | 先在 target client 上重新进入 discovery mode，caller 用新的 pair code `465613` 完成连接并建立 grant `d7d94397baaf6212`。随后执行 `target/debug/bifrost remote status --relay-url https://bifrost.bytedance.net` 成功返回目标设备状态 JSON。紧接着查询 `GET http://127.0.0.1:8810/_bifrost/api/remote-invoke/calls`，最新记录返回 `{ "command_summary": { "command_preview": "status" }, "command": { "command": "status", "kind": "query.readonly" }, "command_kind": "query.readonly", "status": "completed" }`。这说明 Recent Calls 已不再展示空白或协议级占位的 `query.readonly`，而是恢复为真实可读的命令摘要 `status`。 |
+| TC-RI-回归-126 | ✅ PASS | 先在 target client 上重新进入 discovery mode，caller 用新的 pair code `465613` 完成连接并建立 grant `d7d94397baaf6212`。随后执行 `target/debug/bifrost remote status --relay-url ${BIFROST_DEFAULT_REMOTE_URL}` 成功返回目标设备状态 JSON。紧接着查询 `GET http://127.0.0.1:8810/_bifrost/api/remote-invoke/calls`，最新记录返回 `{ "command_summary": { "command_preview": "status" }, "command": { "command": "status", "kind": "query.readonly" }, "command_kind": "query.readonly", "status": "completed" }`。这说明 Recent Calls 已不再展示空白或协议级占位的 `query.readonly`，而是恢复为真实可读的命令摘要 `status`。 |
 
 ### TC-RI-回归-127：shell E2E 夹具与当前加密协议保持一致
 
@@ -5288,14 +5293,14 @@ rm -rf /tmp/bifrost-remote-overload.*
 
 ## TC-RI-回归-153：PPE V4 Relay 真实双端全 Remote 能力必须通过
 
-**背景**：`ppe_ticket_system` PPE 环境已部署 `https://bifrost.bytedance.net` 的 V4 Relay。发布前必须在本机启动两个 Bifrost 端：target 使用临时数据目录启动并从默认 `~/.bifrost/sync-state.json` 读取登录 token 注册到 PPE relay，caller 使用独立临时数据目录连接同一 relay，验证 code 授权、SSH key 授权、remote traffic、remote file、remote exec/run/job、remote keep-awake 与连接清理全部可用。
+**背景**：`ppe_ticket_system` PPE 环境已部署 `${BIFROST_DEFAULT_REMOTE_URL}` 的 V4 Relay。发布前必须在本机启动两个 Bifrost 端：target 使用临时数据目录启动并从默认 `~/.bifrost/sync-state.json` 读取登录 token 注册到 PPE relay，caller 使用独立临时数据目录连接同一 relay，验证 code 授权、SSH key 授权、remote traffic、remote file、remote exec/run/job、remote keep-awake 与连接清理全部可用。
 
 ### 操作步骤
 
 1. 确认默认 token 文件存在且包含 token：
    `ls -l ~/.bifrost/sync-state.json && jq -r 'has("token"), (.token|type)' ~/.bifrost/sync-state.json`。
 2. 执行 PPE full remote 矩阵：
-   `RUN_LOCAL_CASES=0 RUN_SERVER_V4_CASES=0 RUN_REMOTE_RELAY_CASES=1 KEEP_TMP=1 BIFROST_REMOTE_RELAY_URL='https://bifrost.bytedance.net' BIFROST_REMOTE_RELAY_HEADERS='x-tt-env=ppe_ticket_system,x-use-ppe=1' BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_remote_invoke_ppe_full_e2e.sh`。
+   `RUN_LOCAL_CASES=0 RUN_SERVER_V4_CASES=0 RUN_REMOTE_RELAY_CASES=1 KEEP_TMP=1 BIFROST_REMOTE_RELAY_URL='${BIFROST_DEFAULT_REMOTE_URL}' BIFROST_REMOTE_RELAY_HEADERS='x-tt-env=ppe_ticket_system,x-use-ppe=1' BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_remote_invoke_ppe_full_e2e.sh`。
 3. 若 target 在 `remote file read` 阶段退出，检查 `$TMP_ROOT/target/logs/bifrost.err`，确认没有 `stack overflow, aborting`。
 4. 检查脚本 SUMMARY，确认 code 授权、power grant、SSH key 授权和清理均 PASS。
 
@@ -5312,7 +5317,7 @@ rm -rf /tmp/bifrost-remote-overload.*
 
 | 用例编号 | 结果 | 实际结果 |
 |---------|------|---------|
-| TC-RI-回归-153 | ✅ PASS | 2026-07-02 先执行 PPE full remote 矩阵复现问题：target 在 `remote file read` 阶段退出，`/tmp/bifrost-relay-full.evfjfw/target/logs/bifrost.err` 与 `/tmp/bifrost-relay-full.pOnDK3/target/logs/bifrost.err` 均显示 `thread 'tokio-rt-worker' ... has overflowed its stack` / `fatal runtime error: stack overflow, aborting`；修复 `bifrost start` runtime 使用 8 MiB tokio worker stack，并补充 `execute_file_read_with_absolute_temp_path_returns_json` 多线程 tokio 回归后，重新执行上述 PPE 命令通过。最终 SUMMARY 显示 `relay mode=PPE relay_url=https://bifrost.bytedance.net headers=x-tt-env=ppe_ticket_system,x-use-ppe=1`、target `port=53130`、`client_id=b2b3297e-c240-4553-83d1-ef8babe65fa1`、code grant `5ee9afe97fb5c001`、power grant `19b7057e2a1bcb36`；`code remote conn status`、`code remote traffic list`、`code remote traffic get/search`、`code remote file all subcommands`、`code remote exec/run/job`、`code-power remote keep-awake all subcommands`、`ssh-key authorization connected via relay`、`ssh remote traffic get/search`、`ssh remote file all subcommands`、`ssh remote exec/run/job`、`ssh remote keep-awake all subcommands` 和 `remote conn down cleanup` 全部 PASS。脚本退出码 0，保留临时目录 `/tmp/bifrost-relay-full.lavFJX`，二进制 `target/debug/bifrost` SHA256 为 `20b182e8e2d3a47a10ad67e859cb9864a557d78b7669dc2a6d7ebc4601195736`。 |
+| TC-RI-回归-153 | ✅ PASS | 2026-07-02 先执行 PPE full remote 矩阵复现问题：target 在 `remote file read` 阶段退出，`/tmp/bifrost-relay-full.evfjfw/target/logs/bifrost.err` 与 `/tmp/bifrost-relay-full.pOnDK3/target/logs/bifrost.err` 均显示 `thread 'tokio-rt-worker' ... has overflowed its stack` / `fatal runtime error: stack overflow, aborting`；修复 `bifrost start` runtime 使用 8 MiB tokio worker stack，并补充 `execute_file_read_with_absolute_temp_path_returns_json` 多线程 tokio 回归后，重新执行上述 PPE 命令通过。最终 SUMMARY 显示 `relay mode=PPE relay_url=${BIFROST_DEFAULT_REMOTE_URL} headers=x-tt-env=ppe_ticket_system,x-use-ppe=1`、target `port=53130`、`client_id=b2b3297e-c240-4553-83d1-ef8babe65fa1`、code grant `5ee9afe97fb5c001`、power grant `19b7057e2a1bcb36`；`code remote conn status`、`code remote traffic list`、`code remote traffic get/search`、`code remote file all subcommands`、`code remote exec/run/job`、`code-power remote keep-awake all subcommands`、`ssh-key authorization connected via relay`、`ssh remote traffic get/search`、`ssh remote file all subcommands`、`ssh remote exec/run/job`、`ssh remote keep-awake all subcommands` 和 `remote conn down cleanup` 全部 PASS。脚本退出码 0，保留临时目录 `/tmp/bifrost-relay-full.lavFJX`，二进制 `target/debug/bifrost` SHA256 为 `20b182e8e2d3a47a10ad67e859cb9864a557d78b7669dc2a6d7ebc4601195736`。 |
 
 ## TC-RI-回归-154：Remote Invoke shell E2E 不能在同一 shard 内并行互相撤销授权
 

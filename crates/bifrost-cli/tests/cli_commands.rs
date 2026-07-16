@@ -6,6 +6,7 @@ use bifrost_cli::cli::{
     Commands, RemoteCommands, RemoteFileCommands, SettingCommands, SyncCommands,
 };
 use bifrost_cli::commands::handle_install_skill;
+use bifrost_storage::DEFAULT_REMOTE_BASE_URL;
 use clap::{CommandFactory, Parser};
 use clap_complete::{generate, Shell};
 
@@ -331,10 +332,11 @@ fn sync_config_options_parse() {
 #[test]
 fn sync_login_direct_options_parse() {
     let help = run_help(&["sync", "login"]);
+    let token_login_url = format!("{}/v4/sso/token-login", DEFAULT_REMOTE_BASE_URL.as_str());
     assert!(help.contains("--token"), "sync login should have --token");
     assert!(help.contains("--url"), "sync login should have --url");
     assert!(
-        help.contains("https://bifrost.bytedance.net/v4/sso/token-login"),
+        help.contains(&token_login_url),
         "sync login help should explain where to get a token"
     );
 
@@ -401,7 +403,7 @@ fn sync_login_direct_options_parse() {
         "--token",
         "ci-token",
         "--url",
-        "https://bifrost.bytedance.net",
+        DEFAULT_REMOTE_BASE_URL.as_str(),
     ])
     .expect("sync login direct options should parse");
 
@@ -414,7 +416,7 @@ fn sync_login_direct_options_parse() {
                 },
         }) => {
             assert_eq!(token, "ci-token");
-            assert_eq!(url, "https://bifrost.bytedance.net");
+            assert_eq!(url, DEFAULT_REMOTE_BASE_URL.as_str());
         }
         _ => panic!("expected sync login command"),
     }
@@ -423,6 +425,7 @@ fn sync_login_direct_options_parse() {
 #[test]
 fn top_level_login_options_parse_like_sync_login() {
     let help = run_help(&["login"]);
+    let token_login_url = format!("{}/v4/sso/token-login", DEFAULT_REMOTE_BASE_URL.as_str());
     assert!(help.contains("--token"), "login should have --token");
     assert!(help.contains("--url"), "login should have --url");
     assert!(
@@ -430,7 +433,7 @@ fn top_level_login_options_parse_like_sync_login() {
         "login help should explain sync login equivalence"
     );
     assert!(
-        help.contains("https://bifrost.bytedance.net/v4/sso/token-login"),
+        help.contains(&token_login_url),
         "login help should explain where to get a token"
     );
 
@@ -486,7 +489,7 @@ fn top_level_login_options_parse_like_sync_login() {
         "--token",
         "ci-token",
         "--url",
-        "https://bifrost.bytedance.net",
+        DEFAULT_REMOTE_BASE_URL.as_str(),
     ])
     .expect("top-level login direct options should parse");
 
@@ -496,7 +499,7 @@ fn top_level_login_options_parse_like_sync_login() {
             url: Some(url),
         }) => {
             assert_eq!(token, "ci-token");
-            assert_eq!(url, "https://bifrost.bytedance.net");
+            assert_eq!(url, DEFAULT_REMOTE_BASE_URL.as_str());
         }
         _ => panic!("expected top-level login command"),
     }

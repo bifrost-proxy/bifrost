@@ -146,7 +146,7 @@ fn sync_token_login_url(remote_base_url: Option<&str>) -> String {
     let base = remote_base_url
         .map(str::trim)
         .filter(|url| !url.is_empty())
-        .unwrap_or(DEFAULT_REMOTE_BASE_URL);
+        .unwrap_or(DEFAULT_REMOTE_BASE_URL.as_str());
     format!("{}{}", base.trim_end_matches('/'), SYNC_TOKEN_LOGIN_PATH)
 }
 
@@ -238,18 +238,17 @@ fn sync_config(
 
 #[cfg(test)]
 mod tests {
-    use super::sync_token_login_url;
+    use super::{sync_token_login_url, DEFAULT_REMOTE_BASE_URL, SYNC_TOKEN_LOGIN_PATH};
 
     #[test]
     fn sync_token_login_url_uses_default_provider_when_remote_is_missing() {
-        assert_eq!(
-            sync_token_login_url(None),
-            "https://bifrost.bytedance.net/v4/sso/token-login"
+        let expected = format!(
+            "{}{}",
+            DEFAULT_REMOTE_BASE_URL.as_str(),
+            SYNC_TOKEN_LOGIN_PATH
         );
-        assert_eq!(
-            sync_token_login_url(Some("   ")),
-            "https://bifrost.bytedance.net/v4/sso/token-login"
-        );
+        assert_eq!(sync_token_login_url(None), expected);
+        assert_eq!(sync_token_login_url(Some("   ")), expected);
     }
 
     #[test]

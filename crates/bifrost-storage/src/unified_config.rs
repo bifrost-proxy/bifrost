@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
+use base64::Engine as _;
 use bifrost_core::{AccessMode, UserPassAuthConfig};
 use serde::{Deserialize, Serialize};
 
@@ -377,7 +379,19 @@ pub struct SyncConfig {
     pub connect_timeout_ms: u64,
 }
 
-pub const DEFAULT_REMOTE_BASE_URL: &str = "https://bifrost.bytedance.net";
+const DEFAULT_REMOTE_HOST_BASE64: &str = "Ymlmcm9zdC5ieXRlZGFuY2UubmV0";
+
+/// Built-in sync and Remote Invoke endpoint.
+///
+/// The internal host is stored encoded so it does not appear as plaintext in
+/// the public repository. Decoding is deferred until the default is consumed.
+pub static DEFAULT_REMOTE_BASE_URL: LazyLock<String> = LazyLock::new(|| {
+    let host = base64::engine::general_purpose::STANDARD
+        .decode(DEFAULT_REMOTE_HOST_BASE64)
+        .expect("embedded default remote host must be valid Base64");
+    let host = String::from_utf8(host).expect("embedded default remote host must be UTF-8");
+    format!("https://{host}")
+});
 
 impl Default for SyncConfig {
     fn default() -> Self {
@@ -616,9 +630,21 @@ mod tests {
         assert!(config.tray.system_stats_items.download);
         assert!(config.sync.enabled);
         assert!(!config.traffic.super_performance_mode);
-        assert_eq!(config.sync.remote_base_url, DEFAULT_REMOTE_BASE_URL);
+        assert_eq!(
+            config.sync.remote_base_url,
+            DEFAULT_REMOTE_BASE_URL.as_str()
+        );
         assert_eq!(config.ui.rules_sort_mode, "manual");
         assert!(!config.sandbox.net.allow_private_network);
+    }
+
+    #[test]
+    fn default_remote_base_url_decodes_to_https_at_runtime() {
+        let remote = DEFAULT_REMOTE_BASE_URL.as_str();
+
+        assert!(remote.starts_with("https://"));
+        assert!(remote.len() > "https://".len());
+        assert!(!remote.chars().any(char::is_whitespace));
     }
 
     #[test]

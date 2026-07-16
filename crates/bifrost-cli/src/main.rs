@@ -862,7 +862,7 @@ mod tests {
 
         assert_eq!(
             select_remote_relay_url(None, None, None),
-            DEFAULT_REMOTE_BASE_URL
+            DEFAULT_REMOTE_BASE_URL.as_str()
         );
     }
 
