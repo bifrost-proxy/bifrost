@@ -117,6 +117,12 @@ struct DesktopServerConfigResponse {
     websocket_handshake_max_header_size: usize,
 }
 
+#[derive(Debug, Deserialize)]
+struct DesktopRuntimeMarker {
+    pid: u32,
+    port: u16,
+}
+
 enum BackendPortTransition {
     Rebound(DesktopPortUpdateResponse),
     RestartRequired,
@@ -1246,7 +1252,7 @@ fn launch_backend_on_available_port(
         }
 
         let mut child = start_backend(binary_path, data_dir, startup_session_id, port)?;
-        match wait_for_backend(&mut child, port, Duration::from_secs(20)) {
+        match wait_for_backend(&mut child, data_dir, port, Duration::from_secs(20)) {
             Ok(()) => {
                 append_desktop_bootstrap_log(
                     data_dir,
@@ -1853,15 +1859,12 @@ fn start_desktop_backend_now(app: &AppHandle, reason: &str) -> Result<DesktopRun
 
 fn wait_for_backend(
     child: &mut Child,
+    data_dir: &Path,
     port: u16,
     timeout: Duration,
 ) -> Result<(), BackendWaitFailure> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if is_backend_ready(port) {
-            return Ok(());
-        }
-
         let pid = child.id();
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -1882,6 +1885,11 @@ fn wait_for_backend(
                 });
             }
         }
+
+        if is_backend_ready(port) && runtime_marker_matches_child(data_dir, pid, port) {
+            return Ok(());
+        }
+
         std::thread::sleep(Duration::from_millis(250));
     }
 
@@ -1893,6 +1901,18 @@ fn wait_for_backend(
 
 fn is_backend_ready(port: u16) -> bool {
     probe_backend_health(port)
+}
+
+fn runtime_marker_matches_child(data_dir: &Path, child_pid: u32, port: u16) -> bool {
+    let runtime_file = data_dir.join("runtime.json");
+    let Ok(content) = fs::read_to_string(runtime_file) else {
+        return false;
+    };
+    let Ok(marker) = serde_json::from_str::<DesktopRuntimeMarker>(&content) else {
+        return false;
+    };
+
+    marker.pid == child_pid && marker.port == port
 }
 
 fn find_existing_backend_port(data_dir: &Path, preferred_port: u16) -> Option<u16> {
@@ -3875,8 +3895,9 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("spawn short-lived child");
+        let temp_dir = tempfile::tempdir().expect("temp dir");
         let started_at = Instant::now();
-        let error = wait_for_backend(&mut child, port, Duration::from_secs(5))
+        let error = wait_for_backend(&mut child, temp_dir.path(), port, Duration::from_secs(5))
             .expect_err("short-lived child should fail readiness wait");
 
         assert!(
@@ -3885,6 +3906,56 @@ mod tests {
         );
         assert_eq!(error.kind, BackendWaitFailureKind::ChildExited);
         assert!(error.to_string().contains("exited before becoming ready"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_for_backend_ignores_health_from_unrelated_process() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let stop = Arc::new(AtomicBool::new(false));
+        let (port, health_server) = spawn_persistent_health_server(stop.clone());
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 0.2")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn short-lived child");
+
+        let error = wait_for_backend(&mut child, temp_dir.path(), port, Duration::from_secs(3))
+            .expect_err("external health server must not satisfy managed child readiness");
+
+        stop.store(true, Ordering::SeqCst);
+        health_server.join().expect("health server thread");
+        assert_eq!(error.kind, BackendWaitFailureKind::ChildExited);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_for_backend_accepts_health_from_matching_runtime_child() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let stop = Arc::new(AtomicBool::new(false));
+        let (port, health_server) = spawn_persistent_health_server(stop.clone());
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 3")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn long-lived child");
+        fs::write(
+            temp_dir.path().join("runtime.json"),
+            format!(r#"{{"pid":{},"port":{}}}"#, child.id(), port),
+        )
+        .expect("write runtime marker");
+
+        wait_for_backend(&mut child, temp_dir.path(), port, Duration::from_secs(3))
+            .expect("matching runtime marker should satisfy readiness");
+
+        let _ = child.kill();
+        let _ = child.wait();
+        stop.store(true, Ordering::SeqCst);
+        health_server.join().expect("health server thread");
     }
 
     #[test]

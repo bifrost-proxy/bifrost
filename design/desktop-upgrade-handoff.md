@@ -70,7 +70,10 @@ the new App, which would make every new App enter helper mode, exit, and open an
 3. In upgrade handoff mode, `ensure_backend_running` skips health-based reuse entirely.
 4. It waits briefly for the recorded port to release, then runs the existing stale-marker cleanup and
    launches the bundled backend as a managed child.
-5. After the backend becomes ready, the marker is removed.
+5. Readiness for the newly launched child requires both a healthy backend response and a
+   `runtime.json` marker whose `pid` and `port` match that child. A health response from another
+   process on the same port is not enough to complete managed startup.
+6. After the backend becomes ready, the marker is removed.
 
 Expired or invalid markers are removed and normal startup continues.
 
@@ -96,6 +99,8 @@ stateDiagram-v2
 - A fresh marker is considered active.
 - A stale marker is ignored and deleted.
 - Startup with an active marker disables existing backend reuse.
+- Managed startup does not accept a healthy response from an unrelated process on the same port.
+- Managed startup only accepts readiness when `runtime.json` belongs to the child it just spawned.
 - Successful handoff startup clears the marker.
 - Relaunch helper waits for process/port release before opening the App.
 - The command that opens the new App explicitly removes all helper-only environment variables, for
