@@ -1,11 +1,28 @@
 import { describe, expect, it } from "vitest";
 import {
   buildProcessLogItems,
+  eventToProcessStep,
   formatCommandGroupSummary,
   type ProcessStep,
 } from "./AgentChatSection.helpers";
 
 describe("process log grouping", () => {
+  it("suppresses internal usage refresh events from the live process log", () => {
+    expect(
+      eventToProcessStep({
+        eventType: "assistant_delta",
+        content: "token_usage: token usage updated",
+      }),
+    ).toBeNull();
+    expect(
+      eventToProcessStep({
+        eventType: "status",
+        title: "rate_limits",
+        content: "usage updated",
+      }),
+    ).toBeNull();
+  });
+
   it("groups adjacent tool steps while preserving text step order", () => {
     const steps: ProcessStep[] = [
       { type: "thinking", summary: "Inspecting", status: "success" },

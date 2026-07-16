@@ -17,6 +17,10 @@ import {
   type ChatMessage,
   type ProcessStep,
 } from "./AgentChatSection.helpers";
+import {
+  chatGptWebCitationSourcesFromNode,
+  extractPreviewableMarkdownImages,
+} from "./AgentChatSection.markdown";
 import { RunnerCallChip } from "./AgentChatSection.runnerCall";
 
 const { Text, Paragraph } = Typography;
@@ -352,11 +356,46 @@ export function AgentChatMessageList({
                       <Markdown
                         remarkPlugins={[remarkGfm]}
                         components={{
-                          a: ({ href, children }) => (
-                            <a href={href} target="_blank" rel="noreferrer">
-                              {children}
-                            </a>
-                          ),
+                          a: ({ href, children, node }) => {
+                            const citationSources = chatGptWebCitationSourcesFromNode(node);
+                            if (!citationSources) {
+                              return (
+                                <a href={href} target="_blank" rel="noreferrer">
+                                  {children}
+                                </a>
+                              );
+                            }
+                            const sourceLabel = citationSources
+                              .map((source) => source.label)
+                              .join(", ");
+                            return (
+                              <a
+                                href={href}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="agent-chat-citation"
+                                data-testid="agent-chat-citation"
+                                aria-label={`Sources: ${sourceLabel}`}
+                                title={sourceLabel}
+                              >
+                                {citationSources.map((source, sourceIndex) => (
+                                  <span
+                                    key={`${source.iconSrc}-${sourceIndex}`}
+                                    className="agent-chat-citation-source"
+                                  >
+                                    <img
+                                      src={source.iconSrc}
+                                      alt=""
+                                      aria-hidden="true"
+                                      className="agent-chat-citation-icon"
+                                      data-testid="agent-chat-citation-icon"
+                                    />
+                                    <span>{source.label}</span>
+                                  </span>
+                                ))}
+                              </a>
+                            );
+                          },
                           img: ({ src, alt }) => {
                             const imageId = previewMarkdownImageIdFor(
                               message.id,
@@ -580,7 +619,7 @@ function collectPreviewImages(messages: ChatMessage[], running: boolean): Previe
     if (!isVisibleMessage(message, running)) {
       return [];
     }
-    const markdownImages = extractMarkdownImages(message.content).map((image) => ({
+    const markdownImages = extractPreviewableMarkdownImages(message.content).map((image) => ({
       id: previewMarkdownImageIdFor(
         message.id,
         resolveAgentMarkdownImageSrc(image.src),
@@ -601,22 +640,6 @@ function collectPreviewImages(messages: ChatMessage[], running: boolean): Previe
       }));
     return [...markdownImages, ...partImages];
   });
-}
-
-function extractMarkdownImages(content: string) {
-  const images: Array<{ alt: string; src: string }> = [];
-  const imagePattern = /!\[([^\]]*)\]\((<[^>]+>|[^)\s]+)(?:\s+["'][^"']*["'])?\)/g;
-  let match: RegExpExecArray | null;
-  while ((match = imagePattern.exec(content)) !== null) {
-    const rawSrc = match[2] || "";
-    const src = rawSrc.startsWith("<") && rawSrc.endsWith(">")
-      ? rawSrc.slice(1, -1)
-      : rawSrc;
-    if (src) {
-      images.push({ alt: match[1] || "", src });
-    }
-  }
-  return images;
 }
 
 function buildMessageGroups(messages: ChatMessage[], running: boolean): MessageGroup[] {

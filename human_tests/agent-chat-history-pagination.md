@@ -1,151 +1,128 @@
-# Agent Chat History Pagination 真实场景测试
+# Agent Chat 全量历史与过程渲染真实场景测试
 
 ## 功能模块说明
 
-验证 Agent Chat 页面不再打开即全量加载历史详情。会话列表只加载摘要；选中某个历史会话后，详情首屏只加载最新事件页；继续查看旧内容时再按需加载上一页；运行中的历史轮询只拉取新增事件。历史文件扫描和详情读取不能占用主 async worker；分页详情不能反序列化未展示的旧 JSONL 事件；WebUI 必须能连续加载旧页直到看到完整线程。
+验证 Agent Chat 默认一次加载完整对话历史，不出现 `Load older`、loader 或 modal 式补载；外部 Runner 的逐 token `assistant_delta` 必须合并成连续段落，`token_usage` / `rate_limits` 内部刷新不得显示。完整 timeline 是页面的权威来源，session detail 仅在 timeline 请求失败时兜底。
 
 ## 前置条件
 
-1. 在仓库根目录执行命令前先运行 `source ~/.zshrc`。
-2. 使用独立临时数据目录，避免污染本机 Bifrost 数据。
-3. 启动服务时必须带 `--no-system-proxy`，除非测试目标是系统代理。
-4. 测试用 history 文件至少包含 6 条 event，用于验证 tail、cursor、since。
+1. 在仓库根目录执行命令。
+2. WebUI 自动化使用 Playwright 的独立测试服务；真实会话验证使用本地 Vite 开发服务代理到 9900，不能修改会话数据。
+3. 将待验证 JSONL 绝对路径设为 `HISTORY_PATH`，并确认文件可读。
+4. 涉及独立 Bifrost 进程时必须使用临时 `BIFROST_DATA_DIR`、非 9900 端口和 `--no-system-proxy`。
 
 ## 测试用例列表
 
-### TC-ACH-01 列表接口只返回摘要
+### TC-ACH-01 无参数 history API 返回完整事件
 
 操作步骤：
 
-1. 启动测试 Bifrost 服务。
-2. 请求 `GET /_bifrost/api/im-gateway/agent/sessions/all`。
-3. 检查响应中的 session 条目。
+1. URL encode `HISTORY_PATH`。
+2. 请求 `GET /_bifrost/api/im-gateway/agent/sessions/history/{encoded_history_path}`，不携带 `tail`、`cursor` 或 `limit`。
+3. 对比 JSONL 行数与响应 `events.length` / `total_count`。
 
 预期结果：
 
-- 响应包含 `session_key`、`title`、`history_path`、`timeline_event_count` 等摘要字段。
-- 响应不包含 `events` 数组。
-- 响应不包含完整对话正文详情。
+- 请求在可接受时间内成功。
+- `events.length == total_count == JSONL` 当前有效事件数。
+- `start_index=0`、`end_index=total_count`、`has_more=false`、`next_cursor=null`。
 
-### TC-ACH-02 选中详情首屏只加载尾页
+### TC-ACH-02 WebUI 首屏完整加载且永不显示旧页 loader
 
 操作步骤：
 
-1. 使用 TC-ACH-01 得到的 `history_path`。
-2. 请求 `GET /_bifrost/api/im-gateway/agent/sessions/history/{history_path}?tail=true&limit=2`。
-3. 检查分页元数据与事件数量。
+1. 打开带 `session` 与 `historyPath` 的 Agent Chat 深链。
+2. 检查 history detail 请求 query。
+3. 检查页面 DOM 中 `agent-chat-load-older`。
+4. 运行 Playwright 用例；fixture 故意返回旧的 `has_more=true` 与 `next_cursor`。
 
 预期结果：
 
-- `count` 为 `2`。
-- `total_count` 大于 `count`。
-- `start_index` 指向尾页起始下标。
-- `has_more` 为 `true`。
-- 响应只包含尾页事件，不包含整份 JSONL 的全部事件。
+- 首次请求不带 `tail`、`cursor`、`limit`。
+- 最旧与最新消息均在同一次响应后可见。
+- 即使响应含旧分页元数据，页面也不存在 `Load older`、分页 loading 或 modal。
 
-### TC-ACH-03 向上查看时加载旧页
+### TC-ACH-03 逐 token delta 合并且 usage 元事件不可见
 
 操作步骤：
 
-1. 读取 TC-ACH-02 响应中的 `next_cursor`。
-2. 请求 `GET /_bifrost/api/im-gateway/agent/sessions/history/{history_path}?cursor={next_cursor}&limit=2`。
-3. 检查返回事件与尾页不同。
+1. 使用包含逐字中文 `assistant_delta`、`token_usage: token usage updated`、`rate_limits: usage updated`、工具调用和最终回答的事件序列恢复历史。
+2. 检查 `agent-chat-process-text` 节点与消息区文本。
 
 预期结果：
 
-- `count` 为 `2`。
-- 返回的是尾页之前的旧事件。
-- `end_index` 等于上一次尾页的 `start_index`。
-- 如果更早还有内容，`has_more` 继续为 `true`。
+- 相邻字符显示为完整句子，不是一字一个过程节点。
+- 工具步骤仍形成边界，工具前后过程内容顺序正确。
+- 消息区不包含 `token_usage`、`token usage updated` 或 `rate_limits`。
+- 聚合 delta 若与最终回答全文相同，只显示一次最终回答；不同的真实思考过程仍保留。
+- 最终回答仍完整显示。
 
-### TC-ACH-04 运行中轮询只加载新增事件
+### TC-ACH-04 完整 timeline 不与有噪音的 detail fallback 混合
 
 操作步骤：
 
-1. 请求 `GET /_bifrost/api/im-gateway/agent/sessions/history/{history_path}?since=5`。
-2. 检查响应事件数量和下标。
+1. 让 session detail 返回包含 usage 文本的旧消息投影。
+2. 让 history detail 返回完整、可归一化的 timeline。
+3. 打开同一会话并检查消息区。
 
 预期结果：
 
-- 响应只包含下标 `5` 及之后的事件。
-- `start_index` 为 `5`。
-- `end_index` 等于当前 `total_count`。
-- 不返回 `since` 之前的旧事件。
+- history timeline 请求成功时只使用 timeline 渲染结果。
+- detail 中的 usage 噪音和逐 token 消息不会被重新合并回页面。
+- timeline 请求失败时 detail 仍可作为基础聊天内容兜底。
 
-### TC-ACH-05 分页详情不反序列化未选中旧事件
+### TC-ACH-05 真实长会话 DOM 收敛
 
 操作步骤：
 
-1. 构造一个 JSONL 文件，其中旧行包含无法解析成事件的坏数据，后两行为合法事件。
-2. 调用分页读取逻辑请求 `tail=true&limit=2`。
-3. 再调用无分页全量读取逻辑读取同一文件。
+1. 使用用户报告问题的长 JSONL 会话打开本地开发页面。
+2. 统计 `agent-chat-process-text` 节点数、单字符节点数和最长段落长度。
+3. 检查报告中的中文过程句是否作为单个合并节点出现。
 
 预期结果：
 
-- `tail=true&limit=2` 成功返回最后两条合法事件。
-- 分页响应的 `total_count`、`start_index`、`end_index`、`has_more` 正确。
-- 无分页全量读取因旧坏行失败，证明分页读取没有反序列化未选中的旧行。
+- 页面加载全部历史且无 `Load older`。
+- 单字符过程节点数为 0。
+- 报告中的连续中文过程句在一个 process text 节点中出现。
+- usage 元事件不可见。
 
-### TC-ACH-06 WebUI 可连续加载旧页直到完整线程可见
+### TC-ACH-06 亮色与暗色主题一致
 
 操作步骤：
 
-1. 打开 Agent Chat history 深链，URL 带 `session`、`view=history` 和 `historyPath`。
-2. 拦截 history detail API，首个响应只返回最新尾页并设置 `has_more=true`。
-3. 点击消息区顶部的 `Load older` 按钮，返回中间旧页并继续设置 `has_more=true`。
-4. 再次点击 `Load older`，返回最旧页并设置 `has_more=false`。
-5. 检查消息区内容。
+1. 在亮色主题执行 TC-ACH-05 的 DOM 断言。
+2. 点击 `theme-toggle` 切换暗色主题。
+3. 再次执行相同 DOM 断言并检查页面背景切换。
 
 预期结果：
 
-- 首屏请求包含 `tail=true` 和 `limit`，不包含 `cursor`。
-- 首屏只显示最新消息，不显示最旧消息。
-- 第一次加载后能看到中间页消息。
-- 第二次加载后同时能看到最旧消息和最新消息。
-- 旧页请求都使用 `cursor`，不会退化成无参数全量 history detail 请求。
+- 两种主题均无 loader、usage 噪音和逐字断行。
+- 暗色主题背景生效，文本仍清晰可见，布局与节点数量不发生语义变化。
 
-### TC-ACH-07 Chat 线程列表限量扫描最新摘要
+### TC-ACH-07 新 usage refresh 不再写入 timeline
 
 操作步骤：
 
-1. 使用默认 `~/.bifrost` 数据目录启动 9900 服务。
-2. 确认数据目录中存在多个同一 session key 的旧大 JSONL 历史文件。
-3. 请求 `GET /_bifrost/api/im-gateway/agent/sessions/all?limit=80` 并记录耗时。
-4. 请求 `GET /_bifrost/api/im-gateway/agent/sessions/all?limit=20`，检查旧的外部 runner `status=running` 但没有 `latest_run_id` / `history_path` 的会话投影。
+1. 构造 `ExternalCliProgressEventType::Status`，内容分别为 `token usage updated` 与 `usage updated`，标题分别为 `token_usage` 与 `rate_limits`。
+2. 调用 timeline recorder 后读取 JSONL。
+3. 同时写入一条普通可读状态和 assistant 内容作为对照。
 
 预期结果：
 
-- `limit=80` 列表接口只扫描每个 session key 最新 history 摘要，耗时应保持在百毫秒量级。
-- 响应不包含完整 `events` 数组。
-- 没有 `latest_run_id` 和 `history_path` 的旧外部 runner running 状态应投影为 `status=ended`、`running=false`、`run_state=completed`。
-
-### TC-ACH-08 Chat 页面不触发 Traffic 历史回填
-
-操作步骤：
-
-1. 使用默认 `~/.bifrost` 数据目录启动 9900 服务。
-2. 用浏览器打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat`。
-3. 记录页面发出的 `/_bifrost/api/*` 请求。
-4. 采样 Bifrost 主进程 CPU 至少 5 秒。
-
-预期结果：
-
-- Chat 页面只请求 Agent Chat 必需接口和全局轻量状态接口。
-- Chat 页面不应触发 `/traffic?cursor=...` 历史回填请求。
-- 主进程 CPU 仅有短暂初始化波动，稳定后回落到低占用；峰值不应接近长期 100%。
+- usage refresh 不生成 `assistant_delta`。
+- 普通可读状态、assistant 内容和工具记录仍正常持久化。
 
 ## 清理步骤
 
-1. 停止测试 Bifrost 进程。
-2. 删除临时 `BIFROST_DATA_DIR`。
-3. 删除测试期间生成的临时响应文件。
+1. 停止本次启动的 Vite / 临时 Bifrost 进程。
+2. 删除临时 `BIFROST_DATA_DIR`、Playwright 产物和临时响应文件。
+3. 不删除或修改用户原始 JSONL 会话。
 
-## 执行记录
+## 本次执行记录
 
-- 通过。2026-05-29 执行 `bash e2e-tests/tests/test_agent_history_pagination_api.sh`，脚本使用独立 `BIFROST_DATA_DIR` 创建 7 条事件的 JSONL，启动测试 Bifrost 服务并逐条验证 TC-ACH-01 至 TC-ACH-04：`sessions/all` 只返回摘要且无 `events`；`tail=true&limit=2` 只返回尾页并带 `has_more=true`；`cursor=5&limit=2` 返回旧页；`since=6` 只返回新增事件。最终输出 `agent history pagination API checks passed`。
-- 通过。2026-06-07 执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_agent_history_pagination_api.sh`，复用最新 debug 二进制和独立临时数据目录验证 TC-ACH-01 至 TC-ACH-04，最终输出 `agent history pagination API checks passed`。
-- 通过。2026-06-07 执行 `cargo test -p bifrost-agent test_load_conversation_events_page -- --nocapture`，验证 TC-ACH-02 至 TC-ACH-05：分页 tail/cursor/since 语义正确，且 `tail=true&limit=2` 在旧行包含坏 JSONL 时仍成功返回最后两条合法事件，无分页全量读取同一文件失败，证明分页详情没有反序列化未选中的旧事件。
-- 通过。2026-06-07 执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "loads history detail progressively"`，验证 TC-ACH-06：WebUI history 深链首屏只请求 `tail=true`，连续两次点击 `Load older` 分别用 `cursor=3` 和 `cursor=2` 加载旧页，最终同屏可见最旧消息和最新消息，未发生无参数全量 history detail 请求。
-- 通过。2026-06-08 使用默认 `~/.bifrost` 数据目录启动 9900 服务，执行 `GET /_bifrost/api/im-gateway/agent/sessions/all?limit=80` 验证 TC-ACH-07：接口耗时约 `0.06s`，响应为 4 条摘要列表；旧 `admin-chat-1779726991205` ChatGPT Web running 遗留状态返回 `status=ended`、`running=false`、`run_state=completed`。
-- 通过。2026-06-08 使用 Playwright 打开默认 9900 的 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat` 验证 TC-ACH-08：请求列表中 `trafficBackfillCount=0`，`sessions/all?limit=80` 请求只带 `?limit=80`，页面不显示无效 `Run state:` 状态行，Bifrost 主进程 CPU 采样峰值 `28.4%`、均值 `3.61%`，未出现持续高 CPU。
-- 通过。2026-06-08 执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts tests/ui/agent-chat-threads.spec.ts --reporter=line`：43 个 Agent Chat UI 用例全部通过，覆盖线程列表、折叠状态、running/terminal SSE、外部 runner 排队/停止/错误展示、跨线程隔离和历史恢复。
+- 通过。2026-07-15 执行 TC-ACH-01：用户指定的运行中 JSONL 当时为 12,155 条 / 6,456,544 bytes；无参数 API 在 0.045s 内返回全部 12,155 条，`start_index=0`、`end_index=12155`、`has_more=false`、`next_cursor=null`。
+- 通过。2026-07-15 执行 TC-ACH-02 至 TC-ACH-04：`pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "loads full history without restoring obsolete pagination controls"` 为 1/1 通过；所有 history 请求均无 `tail` / `cursor` / `limit`，fixture 即使返回 `has_more=true` 也无 `Load older`，展开完成回合后可见合并句且 usage 文本不可见。
+- 通过。2026-07-15 执行 TC-ACH-03：第 2 轮复查后聚焦 Vitest 为 29/29 通过，覆盖相邻 delta 合并、累计快照去重、工具边界、历史/实时 usage 过滤，以及聚合 delta 与最终回答全文等价时的去重。
+- 通过。2026-07-15 执行 TC-ACH-05：真实长会话完整载入后仅 19 个可见 process text 节点，单字符节点 0、重复长段落 0；目标中文过程句在单个节点中出现，`Load older` 为 0，usage 元事件不可见。
+- 通过。2026-07-15 执行 TC-ACH-06：暗色背景 `rgb(20, 20, 20)` 与亮色主题均保持 `Load older=0`、usage 不可见、单字符节点 0、合并过程句可见。
+- 通过。2026-07-15 执行 TC-ACH-07：`cargo test -p bifrost-admin external_runner_progress_events_are_recorded_as_visible_timeline_steps -- --nocapture` 为 1/1 通过；usage refresh 未写入 timeline，普通状态、assistant 内容和工具记录保持可见。

@@ -43,6 +43,7 @@ fn daily_agent_legacy_config_is_upgraded_to_two_agents_without_losing_settings()
         terminology: Some("  Alpha 项目 = A  ".to_string()),
         report_sync_dir: Some("~/reports".to_string()),
         last_report_sync: None,
+        last_original_sync: None,
         last_run_at_ms: Some(11),
         last_status: Some("success".to_string()),
         last_error: None,
@@ -65,7 +66,15 @@ fn daily_agent_legacy_config_is_upgraded_to_two_agents_without_losing_settings()
 
 #[test]
 fn daily_agent_report_sync_dir_update_survives_task_normalization() {
-    let mut config = AsrDailyAgentConfig::default();
+    let mut config = AsrDailyAgentConfig {
+        last_original_sync: Some(AsrDailyAgentReportSyncResult {
+            target_dir: "/tmp/original".to_string(),
+            total_files: 1,
+            copied_files: 1,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
 
     set_primary_daily_agent_report_sync_dir(
         &mut config,
@@ -86,6 +95,13 @@ fn daily_agent_report_sync_dir_update_survives_task_normalization() {
     );
 
     let normalized = normalize_daily_agent_config(&config);
+    assert_eq!(
+        normalized
+            .last_original_sync
+            .as_ref()
+            .map(|sync| sync.target_dir.as_str()),
+        Some("/tmp/original")
+    );
     assert_eq!(
         normalized.report_sync_dir.as_deref(),
         Some("/tmp/bifrost-daily-agent-reports")
@@ -1272,6 +1288,396 @@ fn daily_agent_report_sync_copies_reports_into_agent_subdirectories() {
     assert!(!sync_dir.join("2026-05-14-report.md").exists());
 }
 
+#[test]
+fn daily_agent_original_sync_copies_only_daily_markdown_and_skips_current_files() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let sync_dir = temp.path().join("icloud-sync");
+    let mut task = test_directory_task(
+        "daily-agent-original-sync-task",
+        temp.path().join("audio"),
+    );
+    set_primary_daily_agent_report_sync_dir(
+        &mut task.daily_agent,
+        Some(sync_dir.to_string_lossy().to_string()),
+    );
+
+    let daily_dir = daily_dir_for_task(&task.id);
+    std::fs::create_dir_all(&daily_dir).unwrap();
+    let source = daily_dir.join("2026-05-14.md");
+    std::fs::write(&source, "original transcript v1").unwrap();
+    std::fs::write(daily_dir.join("notes.md"), "not a dated transcript").unwrap();
+    std::fs::write(daily_dir.join(".hidden.md"), "hidden metadata").unwrap();
+
+    let original_paths = list_daily_agent_original_files(&task);
+    assert_eq!(original_paths, vec![source.to_string_lossy().to_string()]);
+
+    let first = sync_daily_agent_original_files(&task, &original_paths).unwrap();
+    assert_eq!(first.total_files, 1);
+    assert_eq!(first.copied_files, 1);
+    assert_eq!(first.skipped_files, 0);
+    assert_eq!(first.failed_files, 0);
+    let target = sync_dir
+        .join(DAILY_AGENT_ORIGINAL_SYNC_DIR_NAME)
+        .join("2026-05-14.md");
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "original transcript v1"
+    );
+
+    let second = sync_daily_agent_original_files(&task, &original_paths).unwrap();
+    assert_eq!(second.copied_files, 0);
+    assert_eq!(second.skipped_files, 1);
+    assert_eq!(second.failed_files, 0);
+
+    std::fs::write(&source, "original transcript v2").unwrap();
+    let third = sync_daily_agent_original_files(&task, &original_paths).unwrap();
+    assert_eq!(third.copied_files, 1);
+    assert_eq!(third.skipped_files, 0);
+    assert_eq!(third.failed_files, 0);
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "original transcript v2"
+    );
+
+    let invalid = sync_daily_agent_original_files(
+        &task,
+        &[String::new(), daily_dir.join("notes.md").to_string_lossy().to_string()],
+    )
+    .unwrap();
+    assert_eq!(invalid.total_files, 2);
+    assert_eq!(invalid.failed_files, 2);
+    assert_eq!(invalid.errors.len(), 2);
+}
+
+#[test]
+fn daily_agent_original_sync_after_refresh_persists_status_when_agent_is_disabled() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let task_id = "daily-agent-original-auto-sync-task";
+    let sync_dir = temp.path().join("icloud-sync");
+    let mut task = test_directory_task(task_id, temp.path().join("audio"));
+    task.daily_agent.enabled = false;
+    set_primary_daily_agent_report_sync_dir(
+        &mut task.daily_agent,
+        Some(sync_dir.to_string_lossy().to_string()),
+    );
+    let daily_dir = daily_dir_for_task(task_id);
+    std::fs::create_dir_all(&daily_dir).unwrap();
+    std::fs::write(daily_dir.join("2026-05-15.md"), "automatic original transcript").unwrap();
+    save_tasks(&TaskStore {
+        version: TASK_STORE_VERSION,
+        tasks: vec![task.clone()],
+    })
+    .unwrap();
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(sync_daily_agent_original_files_after_refresh(&task));
+
+    let target = sync_dir
+        .join(DAILY_AGENT_ORIGINAL_SYNC_DIR_NAME)
+        .join("2026-05-15.md");
+    assert_eq!(
+        std::fs::read_to_string(target).unwrap(),
+        "automatic original transcript"
+    );
+    let stored = load_tasks()
+        .tasks
+        .into_iter()
+        .find(|stored| stored.id == task_id)
+        .unwrap();
+    let status = stored.daily_agent.last_original_sync.unwrap();
+    assert_eq!(status.target_dir, sync_dir.join(DAILY_AGENT_ORIGINAL_SYNC_DIR_NAME).to_string_lossy());
+    assert_eq!(status.total_files, 1);
+    assert_eq!(status.copied_files, 1);
+    assert_eq!(status.failed_files, 0);
+}
+
+#[test]
+fn daily_agent_original_sync_handles_missing_sources_and_rejects_file_target_root() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let mut task = test_directory_task(
+        "daily-agent-original-sync-invalid-root-task",
+        temp.path().join("audio"),
+    );
+
+    assert!(list_daily_agent_original_files(&task).is_empty());
+
+    let sync_root = temp.path().join("sync-root-file");
+    std::fs::write(&sync_root, "not a directory").unwrap();
+    set_primary_daily_agent_report_sync_dir(
+        &mut task.daily_agent,
+        Some(sync_root.to_string_lossy().to_string()),
+    );
+
+    let error = daily_agent_original_sync_target_dir(&task).unwrap_err();
+    assert!(error.contains("not a directory"));
+    let error = sync_daily_agent_original_files(&task, &[]).unwrap_err();
+    assert!(error.contains("not a directory"));
+}
+
+#[test]
+fn daily_agent_original_sync_failure_paths_persist_structured_status() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let missing_config = test_directory_task(
+        "daily-agent-original-sync-missing-config-task",
+        temp.path().join("audio-missing"),
+    );
+    runtime.block_on(sync_daily_agent_original_files_after_refresh(&missing_config));
+    let isolated_error = runtime
+        .block_on(sync_daily_agent_original_files_isolated(
+            missing_config.clone(),
+            Vec::new(),
+        ))
+        .unwrap_err();
+    assert!(matches!(
+        isolated_error,
+        DailyAgentReportSyncExecutionError::Sync(_)
+    ));
+    let failed = failed_daily_agent_original_sync_result(&missing_config, 0, "failed".to_string());
+    assert!(failed.target_dir.is_empty());
+    assert_eq!(failed.failed_files, 1);
+    assert!(update_daily_agent_original_sync_status(
+        &missing_config,
+        AsrDailyAgentReportSyncResult::default()
+    )
+    .unwrap_err()
+    .contains("not found"));
+
+    let sync_root = temp.path().join("sync-root-file");
+    std::fs::write(&sync_root, "not a directory").unwrap();
+    let mut failing_task = test_directory_task(
+        "daily-agent-original-sync-failing-task",
+        temp.path().join("audio-failing"),
+    );
+    set_primary_daily_agent_report_sync_dir(
+        &mut failing_task.daily_agent,
+        Some(sync_root.to_string_lossy().to_string()),
+    );
+    save_tasks(&TaskStore {
+        version: TASK_STORE_VERSION,
+        tasks: vec![failing_task.clone()],
+    })
+    .unwrap();
+
+    runtime.block_on(sync_daily_agent_original_files_after_refresh(&failing_task));
+    let stored = find_task(&failing_task.id).unwrap();
+    let status = stored.daily_agent.last_original_sync.unwrap();
+    assert_eq!(status.failed_files, 1);
+    assert!(status.errors[0].contains("not a directory"));
+
+    let unsaved_sync_root = temp.path().join("unsaved-sync");
+    let mut unsaved_task = test_directory_task(
+        "daily-agent-original-sync-unsaved-task",
+        temp.path().join("audio-unsaved"),
+    );
+    set_primary_daily_agent_report_sync_dir(
+        &mut unsaved_task.daily_agent,
+        Some(unsaved_sync_root.to_string_lossy().to_string()),
+    );
+    runtime.block_on(sync_daily_agent_original_files_after_refresh(&unsaved_task));
+    assert!(unsaved_sync_root
+        .join(DAILY_AGENT_ORIGINAL_SYNC_DIR_NAME)
+        .is_dir());
+}
+
+#[test]
+fn daily_agent_original_sync_spawn_persists_status_in_background() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let without_config = test_directory_task(
+        "daily-agent-original-spawn-without-config-task",
+        temp.path().join("audio-none"),
+    );
+    runtime.block_on(async {
+        spawn_daily_agent_original_files_after_refresh(&without_config);
+        tokio::task::yield_now().await;
+    });
+
+    let task_id = "daily-agent-original-spawn-task";
+    let sync_root = temp.path().join("spawn-sync");
+    let mut task = test_directory_task(task_id, temp.path().join("audio"));
+    set_primary_daily_agent_report_sync_dir(
+        &mut task.daily_agent,
+        Some(sync_root.to_string_lossy().to_string()),
+    );
+    let daily_dir = daily_dir_for_task(task_id);
+    std::fs::create_dir_all(&daily_dir).unwrap();
+    std::fs::write(daily_dir.join("2026-05-17.md"), "spawned transcript").unwrap();
+    save_tasks(&TaskStore {
+        version: TASK_STORE_VERSION,
+        tasks: vec![task.clone()],
+    })
+    .unwrap();
+
+    runtime.block_on(async {
+        spawn_daily_agent_original_files_after_refresh(&task);
+        for _ in 0..100 {
+            if find_task(task_id)
+                .and_then(|task| task.daily_agent.last_original_sync)
+                .is_some()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("background original transcript sync did not persist status");
+    });
+
+    assert_eq!(
+        std::fs::read_to_string(
+            sync_root
+                .join(DAILY_AGENT_ORIGINAL_SYNC_DIR_NAME)
+                .join("2026-05-17.md")
+        )
+        .unwrap(),
+        "spawned transcript"
+    );
+}
+
+#[test]
+fn daily_agent_manual_sync_preserves_per_agent_report_failure() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let sync_root = temp.path().join("manual-sync");
+    let mut task = test_directory_task(
+        "daily-agent-manual-report-failure-task",
+        temp.path().join("audio"),
+    );
+    set_primary_daily_agent_report_sync_dir(
+        &mut task.daily_agent,
+        Some(sync_root.to_string_lossy().to_string()),
+    );
+    ensure_asr_daily_workspace(&task).unwrap();
+    save_tasks(&TaskStore {
+        version: TASK_STORE_VERSION,
+        tasks: vec![task.clone()],
+    })
+    .unwrap();
+    let agent = normalized_daily_agents(&task.daily_agent)
+        .into_iter()
+        .find(|agent| agent.id == DEFAULT_DAILY_AGENT_ID)
+        .unwrap();
+    let agent_task = task_for_daily_agent(&task, &agent);
+    std::fs::write(
+        daily_agent_output_dir(&agent_task).join("2026-05-18-report.md"),
+        "report",
+    )
+    .unwrap();
+    std::fs::create_dir_all(&sync_root).unwrap();
+    std::fs::write(sync_root.join(DEFAULT_DAILY_AGENT_ID), "not a directory").unwrap();
+
+    let (aggregate, per_agent, original) =
+        sync_all_daily_agent_reports_by_agent(&task).unwrap();
+
+    assert_eq!(original.failed_files, 0);
+    assert_eq!(per_agent.len(), 1);
+    assert_eq!(per_agent[0].1.failed_files, 1);
+    assert!(per_agent[0].1.errors[0].contains("create report sync directory"));
+    assert_eq!(aggregate.failed_files, 1);
+}
+
+#[test]
+fn daily_agent_manual_sync_api_returns_original_sync_status() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let task_id = "daily-agent-manual-sync-api-task";
+    let sync_root = temp.path().join("api-sync");
+    let mut task = test_directory_task(task_id, temp.path().join("audio"));
+    set_primary_daily_agent_report_sync_dir(
+        &mut task.daily_agent,
+        Some(sync_root.to_string_lossy().to_string()),
+    );
+    let daily_dir = daily_dir_for_task(task_id);
+    std::fs::create_dir_all(&daily_dir).unwrap();
+    std::fs::write(daily_dir.join("2026-05-19.md"), "api transcript").unwrap();
+    save_tasks(&TaskStore {
+        version: TASK_STORE_VERSION,
+        tasks: vec![task],
+    })
+    .unwrap();
+
+    let response = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(post_daily_agent_sync_response(task_id));
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(response.into_body().collect())
+        .unwrap()
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["sync"]["total_files"], 1);
+    assert_eq!(json["sync"]["copied_files"], 1);
+    let stored = find_task(task_id).unwrap();
+    assert_eq!(
+        stored
+            .daily_agent
+            .last_original_sync
+            .unwrap()
+            .copied_files,
+        1
+    );
+}
+
+#[test]
+fn daily_agent_manual_sync_preserves_original_failure_as_structured_result() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let sync_dir = temp.path().join("icloud-sync");
+    let mut task = test_directory_task(
+        "daily-agent-original-manual-failure-task",
+        temp.path().join("audio"),
+    );
+    set_primary_daily_agent_report_sync_dir(
+        &mut task.daily_agent,
+        Some(sync_dir.to_string_lossy().to_string()),
+    );
+    let daily_dir = daily_dir_for_task(&task.id);
+    std::fs::create_dir_all(&daily_dir).unwrap();
+    std::fs::write(daily_dir.join("2026-05-16.md"), "original transcript").unwrap();
+    std::fs::create_dir_all(&sync_dir).unwrap();
+    std::fs::write(sync_dir.join(DAILY_AGENT_ORIGINAL_SYNC_DIR_NAME), "not a directory").unwrap();
+
+    let (aggregate, per_agent, original) = sync_all_daily_agent_reports_by_agent(&task).unwrap();
+
+    assert!(per_agent.is_empty());
+    assert_eq!(original.total_files, 1);
+    assert_eq!(original.failed_files, 1);
+    assert_eq!(original.errors.len(), 1);
+    assert_eq!(aggregate.total_files, 1);
+    assert_eq!(aggregate.failed_files, 1);
+    assert_eq!(aggregate.errors, original.errors);
+}
+
 #[cfg(unix)]
 #[test]
 fn daily_agent_report_sync_overwrites_unreadable_target_without_reading_target_hash() {
@@ -1430,6 +1836,8 @@ fn daily_agent_report_sync_requires_configured_directory() {
     };
 
     let error = sync_daily_agent_report_files(&task, &[]).unwrap_err();
+    assert!(error.contains("report sync directory is not configured"));
+    let error = sync_daily_agent_original_files(&task, &[]).unwrap_err();
     assert!(error.contains("report sync directory is not configured"));
 }
 

@@ -298,6 +298,7 @@ async fn run_directory_task(
                 task
             }
         };
+        spawn_daily_agent_original_files_after_refresh(&updated);
         return Ok((updated, 0, 0));
     }
 
@@ -488,6 +489,7 @@ async fn run_directory_task(
             task
         }
     };
+    spawn_daily_agent_original_files_after_refresh(&updated);
     // Hook: trigger Daily Agent if configured
     maybe_enqueue_daily_agent_after_asr_run(&updated).await;
 

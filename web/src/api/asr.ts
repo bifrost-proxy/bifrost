@@ -1592,6 +1592,7 @@ export interface AsrDailyAgentConfig {
   terminology?: string;
   report_sync_dir?: string;
   last_report_sync?: AsrDailyAgentReportSyncResult;
+  last_original_sync?: AsrDailyAgentReportSyncResult;
   last_run_at_ms?: number;
   last_status?: string;
   last_error?: string;

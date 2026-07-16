@@ -1,6 +1,7 @@
 import {
   EMPTY_TELEMETRY,
   finishTool,
+  isReadableProgressStatus,
   numberFrom,
   parsePlanSteps,
   stringFrom,
@@ -16,62 +17,6 @@ export type HistoryMessagesOptions = {
   ensureRunningAssistant?: boolean;
   runningState?: string;
 };
-
-export function mergeDetailMessagesWithTimeline(
-  detailMessages: ChatMessage[],
-  timelineMessages: ChatMessage[],
-): ChatMessage[] {
-  if (detailMessages.length === 0) {
-    return timelineMessages;
-  }
-  if (timelineMessages.length === 0) {
-    return detailMessages;
-  }
-  const merged = detailMessages.map((message) => ({ ...message }));
-  let searchStart = Math.max(0, merged.length - timelineMessages.length - 8);
-  timelineMessages.forEach((timelineMessage) => {
-    const matchIndex = findMergeMessageIndex(merged, timelineMessage, searchStart);
-    if (matchIndex >= 0) {
-      merged[matchIndex] = mergeChatMessage(merged[matchIndex], timelineMessage);
-      searchStart = matchIndex + 1;
-      return;
-    }
-    if (!hasEquivalentMessage(merged, timelineMessage)) {
-      merged.push(timelineMessage);
-      searchStart = merged.length;
-    }
-  });
-  return sortMessagesByTimestamp(merged);
-}
-
-export function sliceRecentChatTurns(
-  messages: ChatMessage[],
-  visibleTurns: number,
-): { messages: ChatMessage[]; hasOlder: boolean } {
-  if (visibleTurns <= 0) {
-    return { messages, hasOlder: false };
-  }
-  let seenUserTurns = 0;
-  let startIndex = 0;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index].role !== "user") {
-      continue;
-    }
-    seenUserTurns += 1;
-    if (seenUserTurns === visibleTurns) {
-      startIndex = index;
-    } else if (seenUserTurns > visibleTurns) {
-      break;
-    }
-  }
-  while (startIndex > 0 && messages[startIndex - 1].role === "system") {
-    startIndex -= 1;
-  }
-  return {
-    messages: messages.slice(startIndex),
-    hasOlder: startIndex > 0,
-  };
-}
 
 export function historyEventsToMessages(
   events: HistoryEvent[],
@@ -95,10 +40,10 @@ export function historyEventsToMessages(
       const index = messages.length - 1;
       messages[index] = {
         ...messages[index],
-        processSteps: insertProcessStep(messages[index].processSteps || [], step),
+        processSteps: appendProcessStepToTimeline(messages[index].processSteps || [], step),
       };
     } else {
-      pendingSteps = insertProcessStep(pendingSteps, step);
+      pendingSteps = appendProcessStepToTimeline(pendingSteps, step);
     }
   };
 
@@ -160,7 +105,7 @@ export function historyEventsToMessages(
         stringFrom(event.content.message) || stringFrom(event.content.content) || "";
       if (externalRunnerTimeline) {
         if (
-          content.trim().length > 0 &&
+          isReadableProgressStatus(content) &&
           !finalAssistantMessages.has(normalizedAssistantText(content) || "")
         ) {
           appendProcessStep({
@@ -205,14 +150,18 @@ export function historyEventsToMessages(
       lastEventWasAssistantDelta = false;
       const content = event.content.message;
       if (typeof content === "string" && content.trim().length > 0) {
-        const processSteps = pendingSteps.length > 0 ? pendingSteps : undefined;
+        const processSteps = pendingSteps.filter(
+          (step) =>
+            step.type !== "thinking" ||
+            normalizedAssistantText(step.summary) !== normalizedAssistantText(content),
+        );
         messages.push({
           id: `history-${index}`,
           role: "assistant",
           content,
           timestamp: event.timestamp,
           meta: "History assistant",
-          processSteps,
+          processSteps: processSteps.length > 0 ? processSteps : undefined,
         });
         pendingSteps = [];
       } else {
@@ -365,65 +314,6 @@ export function historyEventsToMessages(
   }
 }
 
-function findMergeMessageIndex(
-  messages: ChatMessage[],
-  target: ChatMessage,
-  startIndex: number,
-) {
-  for (let index = Math.max(0, startIndex); index < messages.length; index += 1) {
-    if (isSameConversationMessage(messages[index], target)) {
-      return index;
-    }
-  }
-  for (let index = Math.max(0, startIndex) - 1; index >= 0; index -= 1) {
-    if (isSameConversationMessage(messages[index], target)) {
-      return index;
-    }
-  }
-  return -1;
-}
-
-function hasEquivalentMessage(messages: ChatMessage[], target: ChatMessage) {
-  return messages.some((message) => isSameConversationMessage(message, target));
-}
-
-function sortMessagesByTimestamp(messages: ChatMessage[]) {
-  if (!messages.every((message) => typeof message.timestamp === "number")) {
-    return messages;
-  }
-  return messages
-    .map((message, index) => ({ message, index }))
-    .sort((left, right) => {
-      const leftTimestamp = left.message.timestamp as number;
-      const rightTimestamp = right.message.timestamp as number;
-      if (leftTimestamp === rightTimestamp) {
-        return left.index - right.index;
-      }
-      return leftTimestamp - rightTimestamp;
-    })
-    .map(({ message }) => message);
-}
-
-function isSameConversationMessage(left: ChatMessage, right: ChatMessage) {
-  return (
-    left.role === right.role &&
-    normalizedAssistantText(left.content) === normalizedAssistantText(right.content)
-  );
-}
-
-function mergeChatMessage(detailMessage: ChatMessage, timelineMessage: ChatMessage) {
-  return {
-    ...timelineMessage,
-    id: detailMessage.id,
-    role: detailMessage.role,
-    content: detailMessage.content || timelineMessage.content,
-    contentParts: detailMessage.contentParts || timelineMessage.contentParts,
-    meta: detailMessage.meta || timelineMessage.meta,
-    timestamp: timelineMessage.timestamp || detailMessage.timestamp,
-    processSteps: timelineMessage.processSteps || detailMessage.processSteps,
-  };
-}
-
 function contentPartsFromHistoryUserMessage(
   content: Record<string, unknown>,
 ): ChatMessage["contentParts"] | undefined {
@@ -466,7 +356,7 @@ function hasImageContentParts(contentParts: ChatMessage["contentParts"] | undefi
   );
 }
 
-function insertProcessStep(steps: ProcessStep[], step: ProcessStep) {
+export function appendProcessStepToTimeline(steps: ProcessStep[], step: ProcessStep) {
   if (step.type !== "thinking") {
     return [...steps, step];
   }
@@ -478,7 +368,35 @@ function insertProcessStep(steps: ProcessStep[], step: ProcessStep) {
   ) {
     insertAt -= 1;
   }
+  const previous = steps[insertAt - 1];
+  if (previous?.type === "thinking") {
+    return [
+      ...steps.slice(0, insertAt - 1),
+      {
+        ...previous,
+        summary: mergeAssistantDeltaSummary(previous.summary, step.summary),
+        status: step.status,
+        completedAt: step.completedAt ?? previous.completedAt,
+      },
+      ...steps.slice(insertAt),
+    ];
+  }
   return [...steps.slice(0, insertAt), step, ...steps.slice(insertAt)];
+}
+
+function mergeAssistantDeltaSummary(previous: string, incoming: string) {
+  // External runners can emit both token-sized deltas and a final cumulative
+  // snapshot for the same progress update. Keep repeated short tokens (for
+  // example "哈" + "哈"), but treat sentence-sized prefix/equality matches as
+  // snapshots so the rendered paragraph is not duplicated.
+  const snapshotThreshold = 8;
+  if (previous.length >= snapshotThreshold && incoming.startsWith(previous)) {
+    return incoming;
+  }
+  if (incoming.length >= snapshotThreshold && previous.startsWith(incoming)) {
+    return previous;
+  }
+  return `${previous}${incoming}`;
 }
 
 function normalizedAssistantText(value: unknown) {
