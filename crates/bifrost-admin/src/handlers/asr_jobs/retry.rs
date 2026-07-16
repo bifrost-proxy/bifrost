@@ -14,6 +14,7 @@ async fn retry_failed_chunks_response(task_id: &str, file_key: &str) -> Response
         Ok(outcome) => {
             if !outcome.daily_documents_refreshed.is_empty() {
                 if let Some(task) = find_task(task_id) {
+                    spawn_daily_agent_original_files_after_refresh(&task);
                     maybe_enqueue_daily_agent_after_asr_run(&task).await;
                 }
             }
@@ -639,6 +640,7 @@ async fn run_bulk_failed_chunk_retry(task: AsrDirectoryTask) {
     }
 
     if refreshed_daily_documents {
+        spawn_daily_agent_original_files_after_refresh(&task);
         maybe_enqueue_daily_agent_after_asr_run(&task).await;
     }
 }
