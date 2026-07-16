@@ -12,7 +12,7 @@ const DEFAULT_ASR_RESEARCH_SEED_AGENT_MD: &str =
     include_str!("daily_agent_research_seed_template.md");
 const DEFAULT_ASR_RESEARCH_DISPATCHER_AGENT_MD: &str =
     include_str!("daily_agent_research_dispatcher_template.md");
-const PROCESSED_STATE_VERSION: u32 = 1;
+const PROCESSED_STATE_VERSION: u32 = 2;
 const CONVERSATION_STATE_VERSION: u32 = 1;
 const DEFAULT_DAILY_AGENT_ID: &str = "daily_report";
 const DEFAULT_DAILY_AGENT_NAME: &str = "daily_report";
@@ -94,6 +94,8 @@ pub(crate) struct AsrDailyAgentConfig {
     pub instructions_source: AsrDailyAgentInstructionsSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chatgpt_project_url: Option<String>,
     #[serde(default)]
     pub im_delivery: AsrDailyAgentImDeliveryConfig,
     #[serde(default = "default_daily_agent_output_dir")]
@@ -106,6 +108,8 @@ pub(crate) struct AsrDailyAgentConfig {
     pub research_fanout: Option<AsrDailyAgentResearchFanoutConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<AsrDailyAgentItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_process_from_date: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminology: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -134,12 +138,14 @@ impl Default for AsrDailyAgentConfig {
             session_key: None,
             instructions_source: AsrDailyAgentInstructionsSource::default(),
             instructions: None,
+            chatgpt_project_url: None,
             im_delivery: AsrDailyAgentImDeliveryConfig::default(),
             output_dir: default_daily_agent_output_dir(),
             dependencies: Vec::new(),
             dependency_failure_policy: AsrDailyAgentDependencyFailurePolicy::default(),
             research_fanout: None,
             agents: default_daily_agent_items(),
+            auto_process_from_date: None,
             terminology: None,
             report_sync_dir: None,
             last_report_sync: None,
@@ -171,6 +177,8 @@ pub(crate) struct AsrDailyAgentItem {
     pub instructions_source: AsrDailyAgentInstructionsSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chatgpt_project_url: Option<String>,
     #[serde(default)]
     pub im_delivery: AsrDailyAgentImDeliveryConfig,
     #[serde(default = "default_daily_agent_output_dir")]
@@ -207,6 +215,7 @@ impl AsrDailyAgentItem {
             session_key: None,
             instructions_source: AsrDailyAgentInstructionsSource::Default,
             instructions: None,
+            chatgpt_project_url: None,
             im_delivery: AsrDailyAgentImDeliveryConfig::default(),
             output_dir: DEFAULT_DAILY_AGENT_OUTPUT_DIR.to_string(),
             dependencies: Vec::new(),
@@ -232,6 +241,7 @@ impl AsrDailyAgentItem {
             session_key: None,
             instructions_source: AsrDailyAgentInstructionsSource::Default,
             instructions: None,
+            chatgpt_project_url: None,
             im_delivery: AsrDailyAgentImDeliveryConfig {
                 enabled: true,
                 channel: Some(DEFAULT_DAILY_AGENT_IM_CHANNEL.to_string()),
@@ -290,6 +300,7 @@ fn daily_agent_item_from_legacy(config: &AsrDailyAgentConfig) -> AsrDailyAgentIt
         session_key: config.session_key.clone(),
         instructions_source: config.instructions_source.clone(),
         instructions: config.instructions.clone(),
+        chatgpt_project_url: config.chatgpt_project_url.clone(),
         im_delivery: config.im_delivery.clone(),
         output_dir: if config.output_dir.trim().is_empty() {
             default_daily_agent_output_dir()
@@ -319,12 +330,14 @@ fn daily_agent_config_from_item(item: &AsrDailyAgentItem) -> AsrDailyAgentConfig
         session_key: item.session_key.clone(),
         instructions_source: item.instructions_source.clone(),
         instructions: item.instructions.clone(),
+        chatgpt_project_url: item.chatgpt_project_url.clone(),
         im_delivery: item.im_delivery.clone(),
         output_dir: item.output_dir.clone(),
         dependencies: item.dependencies.clone(),
         dependency_failure_policy: item.dependency_failure_policy.clone(),
         research_fanout: item.research_fanout.clone(),
         agents: Vec::new(),
+        auto_process_from_date: None,
         terminology: None,
         report_sync_dir: item.report_sync_dir.clone(),
         last_report_sync: item.last_report_sync.clone(),
@@ -358,6 +371,24 @@ fn is_valid_daily_agent_token(value: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
 }
 
+fn normalize_daily_agent_chatgpt_project_url(value: Option<String>) -> Option<String> {
+    let trimmed = value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    trimmed.as_deref().map(|value| {
+        crate::im_gateway::chatgpt_web::normalize_project_url(Some(value))
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| value.to_string())
+    })
+}
+
+fn normalize_daily_agent_auto_process_from_date(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn normalize_daily_agent_item(mut item: AsrDailyAgentItem) -> AsrDailyAgentItem {
     item.id = item.id.trim().to_string();
     if item.id.is_empty() {
@@ -379,6 +410,8 @@ fn normalize_daily_agent_item(mut item: AsrDailyAgentItem) -> AsrDailyAgentItem 
         .session_key
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    item.chatgpt_project_url =
+        normalize_daily_agent_chatgpt_project_url(item.chatgpt_project_url);
     item.report_sync_dir = item
         .report_sync_dir
         .map(|value| value.trim().to_string())
@@ -471,6 +504,8 @@ fn normalize_daily_agent_config(config: &AsrDailyAgentConfig) -> AsrDailyAgentCo
     normalized.enabled = enabled;
     normalized.agents = agents;
     normalized.terminology = normalize_daily_agent_terminology(config.terminology.clone());
+    normalized.auto_process_from_date =
+        normalize_daily_agent_auto_process_from_date(config.auto_process_from_date.clone());
     normalized
 }
 
@@ -493,6 +528,16 @@ fn validate_daily_agent_item(item: &AsrDailyAgentItem) -> Result<(), String> {
     }
     if item.im_delivery.enabled && daily_agent_im_channel_for_config(&item.im_delivery).is_none() {
         return Err(format!("Daily Agent '{}' must select an IM channel", item.name));
+    }
+    if let Some(project_url) = item.chatgpt_project_url.as_deref() {
+        crate::im_gateway::chatgpt_web::normalize_project_url(Some(project_url)).map_err(
+            |error| {
+                format!(
+                    "Daily Agent '{}' chatgpt_project_url is invalid: {error}",
+                    item.name
+                )
+            },
+        )?;
     }
     if let Some(fanout) = &item.research_fanout {
         if fanout.max_questions == 0 || fanout.max_questions > 50 {
@@ -550,6 +595,11 @@ fn validate_daily_agent_item(item: &AsrDailyAgentItem) -> Result<(), String> {
 }
 
 fn validate_daily_agent_config(config: &AsrDailyAgentConfig) -> Result<(), String> {
+    if let Some(date) = config.auto_process_from_date.as_deref() {
+        NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| {
+            "Daily Agent auto_process_from_date must use a valid YYYY-MM-DD date".to_string()
+        })?;
+    }
     let agents = normalized_daily_agents(config);
     let mut seen_ids = HashSet::new();
     let mut seen_dirs = HashSet::new();
@@ -651,9 +701,12 @@ fn ordered_daily_agents(
 fn task_for_daily_agent(task: &AsrDirectoryTask, agent: &AsrDailyAgentItem) -> AsrDirectoryTask {
     let inherited_report_sync_dir = task.daily_agent.report_sync_dir.clone();
     let inherited_terminology = task.daily_agent.terminology.clone();
+    let inherited_auto_process_from_date = task.daily_agent.auto_process_from_date.clone();
     let mut task = task.clone();
     task.daily_agent = daily_agent_config_from_item(agent);
     task.daily_agent.terminology = normalize_daily_agent_terminology(inherited_terminology);
+    task.daily_agent.auto_process_from_date =
+        normalize_daily_agent_auto_process_from_date(inherited_auto_process_from_date);
     if task.daily_agent.report_sync_dir.is_none() {
         task.daily_agent.report_sync_dir = inherited_report_sync_dir;
     }

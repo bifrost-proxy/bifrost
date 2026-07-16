@@ -1639,12 +1639,14 @@ export interface AsrDailyAgentConfig {
   trigger_policy: "after_asr_run" | "manual_only";
   session_key?: string;
   instructions_source: "default" | "custom";
+  chatgpt_project_url?: string;
   im_delivery: AsrDailyAgentImDeliveryConfig;
   output_dir: string;
   dependencies?: AsrDailyAgentDependency[];
   dependency_failure_policy?: "skip" | "continue";
   research_fanout?: AsrDailyAgentResearchFanoutConfig;
   agents?: AsrDailyAgentItem[];
+  auto_process_from_date?: string;
   terminology?: string;
   report_sync_dir?: string;
   last_report_sync?: AsrDailyAgentReportSyncResult;
@@ -1664,6 +1666,7 @@ export interface AsrDailyAgentItem {
   session_key?: string;
   instructions_source: "default" | "custom";
   instructions?: string;
+  chatgpt_project_url?: string;
   im_delivery: AsrDailyAgentImDeliveryConfig;
   output_dir: string;
   dependencies?: AsrDailyAgentDependency[];

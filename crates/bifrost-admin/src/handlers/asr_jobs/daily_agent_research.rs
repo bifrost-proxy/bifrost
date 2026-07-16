@@ -530,6 +530,7 @@ async fn run_daily_research_child_request(
         adapter,
         &effective.settings.adapter_config,
         task.daily_agent.timeout_ms,
+        None,
     );
     if adapter == "chatgpt_web" {
         let fanout = task

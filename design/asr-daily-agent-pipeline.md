@@ -120,7 +120,7 @@ Prompt 规则：
 - `research_fanout`：逐题独立研究，允许有界并发。
 - `research_digest`：汇总核心结论与完整研究链接。
 
-模板 API 返回可审计的模板元数据和 Agent 配置；应用模板时替换当前 Agent 列表，但保留任务级术语与报告同步目录。Runner 默认复用任务当前首个 Agent 的 Runner，也允许调用方显式覆盖主 Runner 与研究 Runner。模板默认关闭 IM 投递，不包含 Channel；用户确认目标后自行启用。模板中的全部 Prompt 必须是最短通用文本，不出现个人实例中的真实词汇、仓库、账户、Project URL 或上下文 profile。
+模板 API 返回可审计的模板元数据和 Agent 配置；应用模板时替换当前 Agent 列表，但保留任务级术语、自动处理起始日期与报告同步目录。Runner 默认复用任务当前首个 Agent 的 Runner，也允许调用方显式覆盖主 Runner 与研究 Runner。模板默认关闭 IM 投递，不包含 Channel；用户确认目标后自行启用。模板中的全部 Prompt 必须是最短通用文本，不出现个人实例中的真实词汇、仓库、账户、Project URL 或上下文 profile。
 
 模板应用后，各 Agent 都是普通的用户配置副本：用户可以编辑、删除、增补依赖或另存配置，不与内置模板共享可变状态。模板升级也不会覆盖已经应用到任务的用户 Prompt。
 
@@ -318,6 +318,90 @@ agents/research_dispatcher/output/research_result/
 ### 第 3 轮
 
 - 真实 ChatGPT Web 验证发现账号选择页在已捕获认证流量时会被误判为登录完成。
+
+## 2026-07-17 增量：未来日报 Project 归档与历史回补隔离
+
+### 问题与目标
+
+一次 `asr_completion` 自动运行可能同时发现多个尚未处理或因上游产物变化而需要刷新的历史日期。旧实现会让下游 Agent 处理全部日期，并把本轮生成的所有 `full_report` 拼接后自动发送到 IM。历史回补因此可能在当前日期集中推送，且微信分片部分成功、整体失败时存在后续重复发送风险。
+
+本增量同时完成两个目标：
+
+1. 普通 Daily Agent 可单独指定 ChatGPT Project，新会话直接创建在该 Project 中；已有历史日报不迁移、不重新生成。
+2. 自动运行可设置日期下界，历史日期在下界之前完全不进入 change plan；自动 IM 每次只尝试投递最新一份新报告，并对同一报告内容实行持久化的 at-most-once 自动尝试。
+
+### 配置模型
+
+任务级 `AsrDailyAgentConfig` 新增：
+
+```json
+{
+  "auto_process_from_date": "2026-07-17"
+}
+```
+
+- 可选，格式必须为 `YYYY-MM-DD`。
+- 只约束 `asr_completion` 自动运行；日期早于下界的 source 不进入 change plan，也不会重新生成、同步、研究或自动推送。
+- 用户在 WebUI/API 明确指定历史日期手动运行时可覆盖该边界；显式操作不应被自动安全策略静默拒绝。
+- 空值保持旧任务兼容，但新建或迁移的个人任务可把启用当天写为下界，形成“从现在开始”的行为。
+
+每个 `AsrDailyAgentItem` 新增：
+
+```json
+{
+  "chatgpt_project_url": "https://chatgpt.com/g/g-p-<project-id>/project"
+}
+```
+
+- 仅在该 Agent 的 Runner adapter 为 `chatgpt_web` 时投影到 request-local `chatgpt.projectUrl`。
+- 不修改 Runner 全局配置，不影响其他 Agent、任务或用户。
+- 保存时复用 ChatGPT Web Project URL 规范化和校验；空值表示从普通 ChatGPT 首页创建会话。
+- 只影响配置生效后的新 conversation；系统不扫描、上传或迁移现有 report，也不创建额外 archive Agent。
+
+### 自动运行日期边界
+
+`build_daily_agent_change_plan` 必须使用真实 `trigger_source`：
+
+- `trigger_source=asr_completion`、没有显式 `requested_date` 且配置了 `auto_process_from_date` 时，过滤所有较早日期。
+- `manual` 或显式 `requested_date` 保持现有行为。
+- 所有顶层 Agent 和依赖检查使用同一任务级边界，避免上游跳过历史日期、下游却重新处理历史 backlog。
+- 边界过滤后的空 plan 返回明确的 skip reason，不触发 Runner、Project conversation、同步或 IM。
+
+### 自动 IM 选择与幂等
+
+自动 IM 不再消费整个 `reports_generated`：
+
+1. `asr_completion` 成功时按报告日期选择最新一份；历史或同批更早报告只落盘，不推送。
+2. 发送前计算 report SHA-256，并在 `daily_agent_processed.json` 的 `im_delivery_attempts` 中以 `<agent_id>:<date>:<report_sha256>` 保存内容 hash、run id、attempt time 和状态。
+3. 同一 Agent、日期和 report hash 已存在尝试记录时，自动运行不再次发送；失败或进程中断也不自动重试同一内容，用户仍可显式执行手动 Send。
+4. 尝试记录在调用 IM API 前原子落盘，发送完成后更新为 `succeeded` 或 `failed`，优先保证不会因崩溃或微信部分分片成功而自动重复。
+5. 手动 Send 是显式用户动作，不受自动幂等记录阻止。
+
+这是 at-most-once 自动投递语义：极端情况下可能需要用户手动补发，但不会为了追求自动重试而重复轰炸 IM。
+
+### 测试方案
+
+#### 单元测试
+
+- 自动日期下界过滤历史 `new_file/appended/rewritten`，显式手动日期可覆盖。
+- 边界后的空 plan 不运行 Runner。
+- 自动 IM 从多份报告中只选择最新日期。
+- 同一日期 + report hash 已有 `attempting/succeeded/failed` 任一记录时均不再次自动发送；内容变化后允许一次新尝试。
+- 普通 Agent `chatgpt_project_url` 规范化、非法 host/path 拒绝、legacy 镜像兼容和 request-local adapter 投影。
+- research fan-out 的 Project URL 行为保持不变。
+
+#### E2E
+
+- API 保存并回读任务级 `auto_process_from_date` 与每 Agent `chatgpt_project_url`。
+- 隔离服务中准备多个历史 daily source，自动运行只产出下界之后的报告，IM mock 只收到最新一份。
+- 重复自动运行不产生第二次 IM 调用；显式手动 Send 仍可调用。
+- 显式手动指定下界之前的日期仍可运行，证明恢复入口未被破坏。
+
+#### human_tests
+
+- WebUI 在亮色和暗色主题下可查看、编辑并清空自动处理起始日期和普通 Agent Project URL。
+- 正式任务设置启用当天为边界后，回读 API 确认历史日期不会进入后续自动运行。
+- 创建新的私人 ChatGPT Project 并绑定 `daily_report`；仅验证配置和 Project 页面，不触发真实旧日报或 Pro 研究。
 - 登录完成条件增加“账号选择器消失且 composer 可见、可编辑”，并覆盖中英文页面文案。
 - 重跑登录判定单测、Daily Agent 49 项定向测试、API E2E、Web lint/build、严格 clippy 与 workspace all-features。
 

@@ -101,6 +101,20 @@ ASR Daily Agent 支持把一篇日报拆成多个独立研究问题，并由 Cha
 }
 ```
 
+普通 Daily Agent 也可以单独配置 `chatgpt_project_url`，例如只把 `daily_report` 之后新建的 ChatGPT Web 对话放进“日报”Project，而不影响研究 fan-out 的 Project。任务级 `auto_process_from_date` 为自动 ASR 完成触发设置日期下限；更早的日报不会自动回补或重新生成，只有用户明确指定日期的手动运行可以越过该下限。自动 IM 投递只发送本次最新日期的产物，并按 Agent、日期和报告内容哈希记录发送尝试，避免同一内容在失败恢复或重复触发时再次发送。
+
+```json
+{
+  "auto_process_from_date": "2026-07-17",
+  "agents": [
+    {
+      "id": "daily_report",
+      "chatgpt_project_url": "https://chatgpt.com/g/g-p-<project-id>/project"
+    }
+  ]
+}
+```
+
 Web UI 提供官方 `Daily Research` 一键模板，使用“串行阶段 + 有界并发研究”执行方式。模板只包含五个通用 Agent、依赖关系和最短 Prompt，不包含任何用户关键词、仓库、IM Channel 或 ChatGPT Project；应用后每个 Agent 的 Custom Prompt 都是任务自己的可编辑副本。用户可在 dispatcher Prompt 中定义关键词到 GitHub 仓库的路由，实际仓库访问仍由用户自己的 GitHub Connector 授权与索引控制。
 
 模板 API 为 `GET /_bifrost/api/asr/daily-agent-templates` 和 `POST /_bifrost/api/asr/tasks/{task_id}/daily-agent/apply-template`。`max_concurrency` 控制同一 manifest 内独立研究问题的并发上限，允许 1–8，旧配置默认使用 3；顶层 Agent DAG 仍按稳定拓扑顺序串行执行。

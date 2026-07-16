@@ -26,6 +26,37 @@ fn daily_agent_default_config_has_report_and_tomorrow_todo_agents() {
 }
 
 #[test]
+fn daily_agent_normalizes_and_validates_project_and_automatic_date_floor() {
+    let mut item = AsrDailyAgentItem::daily_report();
+    item.chatgpt_project_url = Some(
+        "  https://chatgpt.com/g/g-p-daily-report/project?utm_source=test#fragment  "
+            .to_string(),
+    );
+    let normalized = normalize_daily_agent_item(item);
+    assert_eq!(
+        normalized.chatgpt_project_url.as_deref(),
+        Some("https://chatgpt.com/g/g-p-daily-report/project")
+    );
+    validate_daily_agent_item(&normalized).unwrap();
+
+    let mut invalid_item = AsrDailyAgentItem::daily_report();
+    invalid_item.chatgpt_project_url = Some("https://example.com/project".to_string());
+    assert!(validate_daily_agent_item(&invalid_item)
+        .unwrap_err()
+        .contains("chatgpt_project_url is invalid"));
+
+    let mut config = AsrDailyAgentConfig {
+        auto_process_from_date: Some("2026-07-17".to_string()),
+        ..Default::default()
+    };
+    validate_daily_agent_config(&config).unwrap();
+    config.auto_process_from_date = Some("2026-02-30".to_string());
+    assert!(validate_daily_agent_config(&config)
+        .unwrap_err()
+        .contains("valid YYYY-MM-DD"));
+}
+
+#[test]
 fn official_daily_research_template_is_generic_valid_and_prompt_customizable() {
     let templates = official_daily_agent_templates();
     assert_eq!(templates.len(), 1);
@@ -142,12 +173,14 @@ fn daily_agent_legacy_config_is_upgraded_to_two_agents_without_losing_settings()
         session_key: Some("legacy-session".to_string()),
         instructions_source: AsrDailyAgentInstructionsSource::Custom,
         instructions: Some("legacy instructions".to_string()),
+        chatgpt_project_url: None,
         im_delivery: AsrDailyAgentImDeliveryConfig::default(),
         output_dir: "meeting_notes".to_string(),
         dependencies: Vec::new(),
         dependency_failure_policy: AsrDailyAgentDependencyFailurePolicy::Skip,
         research_fanout: None,
         agents: Vec::new(),
+        auto_process_from_date: None,
         terminology: Some("  Alpha 项目 = A  ".to_string()),
         report_sync_dir: Some("~/reports".to_string()),
         last_report_sync: None,
@@ -980,6 +1013,86 @@ fn daily_agent_research_template_migration_preserves_custom_instructions() {
 }
 
 #[test]
+fn daily_agent_automatic_date_floor_skips_history_but_manual_date_overrides_it() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let audio_dir = temp.path().join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let mut task = test_directory_task("daily-agent-date-floor", audio_dir);
+    task.daily_agent.auto_process_from_date = Some("2026-07-17".to_string());
+    ensure_asr_daily_workspace(&task).unwrap();
+    let daily_dir = daily_dir_for_task(&task.id);
+    std::fs::write(daily_dir.join("2026-06-30.md"), "historical source").unwrap();
+    std::fs::write(daily_dir.join("2026-07-17.md"), "new source").unwrap();
+
+    let automatic =
+        build_daily_agent_change_plan(&task, "asr_completion", None, false).unwrap();
+    assert_eq!(
+        automatic
+            .entries
+            .iter()
+            .map(|entry| entry.date.as_str())
+            .collect::<Vec<_>>(),
+        vec!["2026-07-17"]
+    );
+
+    let manual =
+        build_daily_agent_change_plan(&task, "manual", Some("2026-06-30"), false).unwrap();
+    assert_eq!(manual.entries.len(), 1);
+    assert_eq!(manual.entries[0].date, "2026-06-30");
+}
+
+#[test]
+fn daily_agent_automatic_im_selects_only_latest_and_never_retries_same_content() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let audio_dir = temp.path().join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let task = test_directory_task("daily-agent-im-dedupe", audio_dir);
+    ensure_asr_daily_workspace(&task).unwrap();
+    let report_dir = daily_agent_output_dir(&task);
+    let old_report = report_dir.join("2026-06-30-report.md");
+    let new_report = report_dir.join("2026-07-17-report.md");
+    std::fs::write(&old_report, "old report").unwrap();
+    std::fs::write(&new_report, "new report v1").unwrap();
+    let reports = vec![
+        old_report.to_string_lossy().to_string(),
+        new_report.to_string_lossy().to_string(),
+    ];
+
+    let selected = select_automatic_daily_agent_im_report(&task, &reports)
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.date, "2026-07-17");
+    assert_eq!(selected.path, new_report.to_string_lossy());
+    record_automatic_daily_agent_im_attempt(&task, &selected, "run-1").unwrap();
+    finish_automatic_daily_agent_im_attempt(
+        &task,
+        &selected,
+        AsrDailyAgentImDeliveryAttemptStatus::Failed,
+        Some("network error"),
+    )
+    .unwrap();
+
+    assert!(select_automatic_daily_agent_im_report(&task, &reports)
+        .unwrap()
+        .is_none());
+    let processed = load_daily_agent_processed_state(&task.id);
+    let attempt = processed.im_delivery_attempts.values().next().unwrap();
+    assert_eq!(attempt.status, AsrDailyAgentImDeliveryAttemptStatus::Failed);
+    assert_eq!(attempt.error.as_deref(), Some("network error"));
+
+    std::fs::write(&new_report, "new report v2").unwrap();
+    let changed = select_automatic_daily_agent_im_report(&task, &reports)
+        .unwrap()
+        .unwrap();
+    assert_eq!(changed.date, "2026-07-17");
+    assert_ne!(changed.report_sha256, selected.report_sha256);
+}
+
+#[test]
 fn daily_agent_prompt_uses_file_list_for_file_capable_runners() {
     let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();
@@ -1298,8 +1411,12 @@ fn daily_agent_chatgpt_web_timeout_is_bounded_below_outer_timeout() {
         ..Default::default()
     };
 
-    let bounded =
-        daily_agent_external_runner_adapter_config("chatgpt_web", &config, 7_200_000);
+    let bounded = daily_agent_external_runner_adapter_config(
+        "chatgpt_web",
+        &config,
+        7_200_000,
+        None,
+    );
 
     assert_eq!(bounded.timeout_secs, Some(7_170));
 
@@ -1308,15 +1425,52 @@ fn daily_agent_chatgpt_web_timeout_is_bounded_below_outer_timeout() {
         ..Default::default()
     };
 
-    let bounded =
-        daily_agent_external_runner_adapter_config("chatgpt_web", &already_short, 7_200_000);
+    let bounded = daily_agent_external_runner_adapter_config(
+        "chatgpt_web",
+        &already_short,
+        7_200_000,
+        None,
+    );
 
     assert_eq!(bounded.timeout_secs, Some(7_170));
 
     let non_web =
-        daily_agent_external_runner_adapter_config("codex", &config, 7_200_000);
+        daily_agent_external_runner_adapter_config("codex", &config, 7_200_000, None);
 
     assert_eq!(non_web.timeout_secs, Some(720_000));
+}
+
+#[test]
+fn daily_agent_projects_agent_specific_chatgpt_project_to_request_config() {
+    let mut config = crate::im_gateway::external_cli::ExternalCliAdapterConfig::default();
+    config.extra.insert(
+        "chatgpt".to_string(),
+        serde_json::json!({ "interfaceMode": "chat", "model": "pro" }),
+    );
+    let project_url = "https://chatgpt.com/g/g-p-daily-report/project";
+
+    let projected = daily_agent_external_runner_adapter_config(
+        "chatgpt_web",
+        &config,
+        7_200_000,
+        Some(project_url),
+    );
+    assert_eq!(
+        projected.extra.get("chatgpt"),
+        Some(&serde_json::json!({
+            "interfaceMode": "chat",
+            "model": "pro",
+            "projectUrl": project_url
+        }))
+    );
+
+    let codex = daily_agent_external_runner_adapter_config(
+        "codex",
+        &config,
+        7_200_000,
+        Some(project_url),
+    );
+    assert_eq!(codex.extra, config.extra);
 }
 
 #[test]

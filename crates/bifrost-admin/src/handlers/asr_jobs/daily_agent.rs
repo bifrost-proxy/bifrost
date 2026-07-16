@@ -6,6 +6,8 @@ struct AsrDailyAgentProcessedState {
     pub version: u32,
     #[serde(default)]
     pub documents: DailyAgentBTreeMap<String, AsrDailyAgentProcessedDocument>,
+    #[serde(default)]
+    pub im_delivery_attempts: DailyAgentBTreeMap<String, AsrDailyAgentImDeliveryAttempt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +25,33 @@ struct AsrDailyAgentProcessedDocument {
     pub runner: String,
     pub report_path: Option<String>,
     pub last_run_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AsrDailyAgentImDeliveryAttemptStatus {
+    Attempting,
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AsrDailyAgentImDeliveryAttempt {
+    pub agent_id: String,
+    pub date: String,
+    pub report_sha256: String,
+    pub run_id: String,
+    pub attempted_at_ms: u64,
+    pub status: AsrDailyAgentImDeliveryAttemptStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DailyAgentAutomaticImReport {
+    pub path: String,
+    pub date: String,
+    pub report_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -241,16 +270,20 @@ fn compute_sha256_of_bytes(data: &[u8]) -> String {
 
 fn build_daily_agent_change_plan(
     task: &AsrDirectoryTask,
-    _trigger_source: &str,
+    trigger_source: &str,
     requested_date: Option<&str>,
     force: bool,
 ) -> Result<AsrDailyAgentChangePlan, String> {
     let daily_dir = daily_dir_for_task(&task.id);
     let report_dir = daily_agent_output_dir(task);
     let processed = load_daily_agent_processed_state(&task.id);
+    let automatic_date_floor = (trigger_source == "asr_completion" && requested_date.is_none())
+        .then_some(task.daily_agent.auto_process_from_date.as_deref())
+        .flatten();
 
     // Scan daily/*.md files (exclude AGENTS.md, hidden files, report/)
     let mut entries = Vec::new();
+    let mut dates_before_automatic_floor = 0usize;
     let dir_entries =
         std::fs::read_dir(&daily_dir).map_err(|e| format!("read daily dir: {e}"))?;
 
@@ -279,6 +312,11 @@ fn build_daily_agent_change_plan(
                 filename,
                 "skipped non-date markdown file"
             );
+            continue;
+        }
+
+        if automatic_date_floor.is_some_and(|floor| date < floor) {
+            dates_before_automatic_floor += 1;
             continue;
         }
 
@@ -369,11 +407,15 @@ fn build_daily_agent_change_plan(
     }
 
     if entries.is_empty() {
+        let skip_reason = automatic_date_floor
+            .filter(|_| dates_before_automatic_floor > 0)
+            .map(|floor| format!("no daily markdown files on or after {floor}"))
+            .unwrap_or_else(|| "no daily markdown files found".to_string());
         return Ok(AsrDailyAgentChangePlan {
             task_id: task.id.clone(),
             entries,
             skipped: true,
-            skip_reason: Some("no daily markdown files found".to_string()),
+            skip_reason: Some(skip_reason),
         });
     }
 
@@ -905,6 +947,95 @@ async fn run_daily_agent(
     result
 }
 
+fn daily_agent_im_delivery_attempt_key(
+    task: &AsrDirectoryTask,
+    date: &str,
+    report_sha256: &str,
+) -> String {
+    format!(
+        "{}:{date}:{report_sha256}",
+        task.daily_agent.agent_id
+    )
+}
+
+fn select_automatic_daily_agent_im_report(
+    task: &AsrDirectoryTask,
+    reports_generated: &[String],
+) -> Result<Option<DailyAgentAutomaticImReport>, String> {
+    let Some((date, path)) = reports_generated
+        .iter()
+        .filter_map(|path| {
+            let report_path = PathBuf::from(path);
+            daily_agent_report_date_from_path(&report_path)
+                .map(|date| (date, path.clone()))
+        })
+        .max_by(|left, right| left.0.cmp(&right.0))
+    else {
+        return Ok(None);
+    };
+    let report_sha256 = compute_sha256(Path::new(&path))?;
+    let attempt_key = daily_agent_im_delivery_attempt_key(task, &date, &report_sha256);
+    let processed = load_daily_agent_processed_state(&task.id);
+    if processed.im_delivery_attempts.contains_key(&attempt_key) {
+        tracing::info!(
+            task_id = %task.id,
+            agent_id = %task.daily_agent.agent_id,
+            date,
+            report_sha256 = %&report_sha256[..8],
+            "skipped duplicate automatic Daily Agent IM delivery attempt"
+        );
+        return Ok(None);
+    }
+    Ok(Some(DailyAgentAutomaticImReport {
+        path,
+        date,
+        report_sha256,
+    }))
+}
+
+fn record_automatic_daily_agent_im_attempt(
+    task: &AsrDirectoryTask,
+    report: &DailyAgentAutomaticImReport,
+    run_id: &str,
+) -> Result<(), String> {
+    let mut processed = load_daily_agent_processed_state(&task.id);
+    let attempt_key =
+        daily_agent_im_delivery_attempt_key(task, &report.date, &report.report_sha256);
+    processed.im_delivery_attempts.insert(
+        attempt_key,
+        AsrDailyAgentImDeliveryAttempt {
+            agent_id: task.daily_agent.agent_id.clone(),
+            date: report.date.clone(),
+            report_sha256: report.report_sha256.clone(),
+            run_id: run_id.to_string(),
+            attempted_at_ms: now_ms(),
+            status: AsrDailyAgentImDeliveryAttemptStatus::Attempting,
+            error: None,
+        },
+    );
+    processed.version = PROCESSED_STATE_VERSION;
+    save_daily_agent_processed_state(&task.id, &processed)
+}
+
+fn finish_automatic_daily_agent_im_attempt(
+    task: &AsrDirectoryTask,
+    report: &DailyAgentAutomaticImReport,
+    status: AsrDailyAgentImDeliveryAttemptStatus,
+    error: Option<&str>,
+) -> Result<(), String> {
+    let mut processed = load_daily_agent_processed_state(&task.id);
+    let attempt_key =
+        daily_agent_im_delivery_attempt_key(task, &report.date, &report.report_sha256);
+    let attempt = processed
+        .im_delivery_attempts
+        .get_mut(&attempt_key)
+        .ok_or_else(|| format!("Daily Agent IM delivery attempt '{attempt_key}' not found"))?;
+    attempt.status = status;
+    attempt.error = error.map(str::to_string);
+    processed.version = PROCESSED_STATE_VERSION;
+    save_daily_agent_processed_state(&task.id, &processed)
+}
+
 async fn run_daily_agent_locked(
     task: &AsrDirectoryTask,
     trigger_source: &str,
@@ -958,21 +1089,70 @@ async fn run_daily_agent_locked(
     // Persist daily agent state in task config
     let _ = update_daily_agent_status(task, &status_str, error.as_deref(), &run_id);
 
-    // IM delivery based on send_policy
+    // IM delivery based on send_policy. Automatic runs deliver at most the
+    // newest report and persist an at-most-once attempt before contacting IM.
     let success = error.is_none();
-    let should_send_im = task.daily_agent.im_delivery.enabled
-        && daily_agent_im_channel(task).is_some()
+    let automatic_delivery = trigger_source == "asr_completion";
+    let im_configured = task.daily_agent.im_delivery.enabled
+        && daily_agent_im_channel(task).is_some();
+    let automatic_im_report = if im_configured && success && automatic_delivery {
+        match select_automatic_daily_agent_im_report(task, &reports_generated) {
+            Ok(report) => report,
+            Err(selection_error) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    agent_id = %task.daily_agent.agent_id,
+                    error = %selection_error,
+                    "failed to select automatic Daily Agent IM report"
+                );
+                let _ = update_daily_agent_im_error(task, &selection_error);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let reports_for_im = if automatic_delivery {
+        automatic_im_report
+            .as_ref()
+            .map(|report| vec![report.path.clone()])
+            .unwrap_or_default()
+    } else {
+        reports_generated.clone()
+    };
+    let should_send_im = im_configured
         && match task.daily_agent.im_delivery.send_policy {
-            AsrDailyAgentImSendPolicy::Always => true,
-            AsrDailyAgentImSendPolicy::OnSuccess => success,
+            AsrDailyAgentImSendPolicy::Always => {
+                !success || !automatic_delivery || !reports_for_im.is_empty()
+            }
+            AsrDailyAgentImSendPolicy::OnSuccess => {
+                success && (!automatic_delivery || !reports_for_im.is_empty())
+            }
             AsrDailyAgentImSendPolicy::OnSuccessWithReport => {
-                success && !reports_generated.is_empty()
+                success && !reports_for_im.is_empty()
             }
         };
 
+    let mut may_send_im = should_send_im;
     if should_send_im {
+        if let Some(report) = automatic_im_report.as_ref() {
+            if let Err(attempt_error) =
+                record_automatic_daily_agent_im_attempt(task, report, &run_id)
+            {
+                tracing::warn!(
+                    task_id = %task.id,
+                    agent_id = %task.daily_agent.agent_id,
+                    error = %attempt_error,
+                    "refused automatic Daily Agent IM delivery without a durable attempt record"
+                );
+                let _ = update_daily_agent_im_error(task, &attempt_error);
+                may_send_im = false;
+            }
+        }
+    }
+    if may_send_im {
         let im_content = if success {
-            build_im_content_for_reports(task, &reports_generated)
+            build_im_content_for_reports(task, &reports_for_im)
         } else {
             // For Always policy on failure, send error notification
             format!(
@@ -982,15 +1162,33 @@ async fn run_daily_agent_locked(
             )
         };
 
-        if let Err(e) =
-            send_daily_agent_im_message(task, &im_content, &run_id, reports_generated.len()).await
-        {
-            tracing::warn!(
-                task_id = %task.id,
-                error = %e,
-                "ASR daily agent IM delivery failed"
-            );
-            let _ = update_daily_agent_im_error(task, &e);
+        match send_daily_agent_im_message(task, &im_content, &run_id, reports_for_im.len()).await {
+            Ok(()) => {
+                if let Some(report) = automatic_im_report.as_ref() {
+                    let _ = finish_automatic_daily_agent_im_attempt(
+                        task,
+                        report,
+                        AsrDailyAgentImDeliveryAttemptStatus::Succeeded,
+                        None,
+                    );
+                }
+            }
+            Err(send_error) => {
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %send_error,
+                    "ASR daily agent IM delivery failed"
+                );
+                if let Some(report) = automatic_im_report.as_ref() {
+                    let _ = finish_automatic_daily_agent_im_attempt(
+                        task,
+                        report,
+                        AsrDailyAgentImDeliveryAttemptStatus::Failed,
+                        Some(&send_error),
+                    );
+                }
+                let _ = update_daily_agent_im_error(task, &send_error);
+            }
         }
     }
 
@@ -1501,6 +1699,7 @@ async fn run_external_daily_agent_prompt_with_params(
         effective.settings.adapter.as_str(),
         &effective.settings.adapter_config,
         task.daily_agent.timeout_ms,
+        task.daily_agent.chatgpt_project_url.as_deref(),
     );
 
     let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
@@ -1560,6 +1759,7 @@ async fn wait_chatgpt_web_daily_agent_conversation(
         effective.settings.adapter.as_str(),
         &effective.settings.adapter_config,
         daily_agent_chatgpt_web_same_conversation_wait_timeout_ms(task.daily_agent.timeout_ms),
+        task.daily_agent.chatgpt_project_url.as_deref(),
     );
     let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         images: Vec::new(),
@@ -1612,6 +1812,7 @@ fn daily_agent_external_runner_adapter_config(
     adapter: &str,
     config: &crate::im_gateway::external_cli::ExternalCliAdapterConfig,
     daily_timeout_ms: u64,
+    chatgpt_project_url: Option<&str>,
 ) -> crate::im_gateway::external_cli::ExternalCliAdapterConfig {
     let mut config = config.clone();
     if adapter != "chatgpt_web" {
@@ -1619,6 +1820,20 @@ fn daily_agent_external_runner_adapter_config(
     }
     let inner_timeout_secs = daily_agent_chatgpt_web_inner_timeout_secs(daily_timeout_ms);
     config.timeout_secs = Some(inner_timeout_secs);
+    if let Some(project_url) = chatgpt_project_url {
+        let mut chatgpt = config
+            .extra
+            .remove("chatgpt")
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        chatgpt.insert(
+            "projectUrl".to_string(),
+            serde_json::Value::String(project_url.to_string()),
+        );
+        config
+            .extra
+            .insert("chatgpt".to_string(), serde_json::Value::Object(chatgpt));
+    }
     config
 }
 
@@ -2083,6 +2298,7 @@ fn mirror_daily_agent_legacy_status(task_config: &mut AsrDailyAgentConfig, agent
             task_config.session_key = agent.session_key;
             task_config.instructions_source = agent.instructions_source;
             task_config.instructions = agent.instructions;
+            task_config.chatgpt_project_url = agent.chatgpt_project_url;
             task_config.im_delivery = agent.im_delivery;
             task_config.output_dir = agent.output_dir;
             task_config.report_sync_dir = agent.report_sync_dir;

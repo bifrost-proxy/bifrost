@@ -78,6 +78,7 @@ async function installDailyAgentMocks(page: Page) {
     session_key: undefined as string | undefined,
     instructions_source: "default",
     report_sync_dir: undefined as string | undefined,
+    auto_process_from_date: undefined as string | undefined,
     last_report_sync: undefined as
       | {
           target_dir: string;
@@ -107,6 +108,7 @@ async function installDailyAgentMocks(page: Page) {
         timeout_ms: 7_200_000,
         trigger_policy: "after_asr_run",
         session_key: undefined as string | undefined,
+        chatgpt_project_url: undefined as string | undefined,
         instructions_source: "default",
         im_delivery: {
           enabled: false,
@@ -675,6 +677,45 @@ test("ASR Daily Agent saves a ChatGPT Project for independent research", async (
           chatgpt_model: "pro",
           chatgpt_project_url: projectUrl,
         }),
+      }),
+    ]),
+  });
+});
+
+test("ASR Daily Agent saves the future-only cutoff and report Project", async ({
+  page,
+}) => {
+  const { updates } = await installDailyAgentMocks(page);
+  const projectUrl = "https://chatgpt.com/g/g-p-daily-report/project";
+
+  await openPage(page, `ai?aiSection=tools-asr&asrTask=${taskId}`);
+  await page.getByRole("tab", { name: "Daily Agent", exact: true }).click();
+
+  const cutoff = page.getByTestId("asr-daily-agent-auto-process-from-date");
+  await cutoff.fill("2026-07-17");
+  await page
+    .getByTestId("asr-daily-agent-auto-process-from-date-save")
+    .click();
+  await waitForToast(page, "Automatic processing start date saved");
+  expect(updates.at(-1)).toMatchObject({
+    auto_process_from_date: "2026-07-17",
+  });
+
+  await page.getByTestId("asr-daily-agent-edit-daily_report").click();
+  const projectInput = page.getByTestId("asr-daily-agent-project-url");
+  await expect(projectInput).toBeVisible();
+  await expect(
+    page.getByText("Existing reports are not migrated.", { exact: false }),
+  ).toBeVisible();
+  await projectInput.fill(projectUrl);
+  await projectInput.press("Enter");
+  await waitForToast(page, "Configuration saved");
+
+  expect(updates.at(-1)).toMatchObject({
+    agents: expect.arrayContaining([
+      expect.objectContaining({
+        id: "daily_report",
+        chatgpt_project_url: projectUrl,
       }),
     ]),
   });

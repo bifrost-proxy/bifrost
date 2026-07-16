@@ -4,7 +4,6 @@ import {
   Button,
   Card,
   Descriptions,
-  Empty,
   Input,
   InputNumber,
   message,
@@ -35,11 +34,10 @@ import type {
   AsrDailyAgentConfigResponse,
   AsrDailyAgentInstructionsResponse,
   AsrDailyAgentItem,
-  AsrDailyAgentProcessedDocument,
-  AsrDailyAgentRunsResponse,
   AsrDailyAgentTemplate,
 } from "../../../api/asr";
 import { hasRunningDailyAgent } from "../asrUtils";
+import { DailyAgentResearchFields } from "./DailyAgentResearchFields";
 import * as imGatewayApi from "../../../api/imGateway";
 import type {
   ExternalCliGatewayConfig,
@@ -50,7 +48,6 @@ import {
   applyDailyAgentTemplate,
   getDailyAgentConfig,
   getDailyAgentTemplates,
-  getDailyAgentRuns,
   getDailyAgentInstructions,
   sendDailyAgentReport,
   syncDailyAgentReports,
@@ -62,7 +59,6 @@ import {
 const { Text } = Typography;
 const { TextArea } = Input;
 const DAILY_AGENT_TOKEN_RE = /^[A-Za-z0-9_-]+$/;
-const DAILY_AGENT_RECORDS_TABLE_SCROLL_X = 1080;
 
 function normalizeAgentToken(value: string): string {
   return value
@@ -108,14 +104,11 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
   const [detailAgentId, setDetailAgentId] = useState<string | null>(null);
   const [reportSyncDir, setReportSyncDir] = useState("");
   const [reportSyncDirDirty, setReportSyncDirDirty] = useState(false);
+  const [autoProcessFromDate, setAutoProcessFromDate] = useState("");
+  const [autoProcessFromDateDirty, setAutoProcessFromDateDirty] =
+    useState(false);
   const [terminology, setTerminology] = useState("");
   const [terminologyDirty, setTerminologyDirty] = useState(false);
-  const [contextProfileDraft, setContextProfileDraft] = useState<{
-    id: string;
-    runner: string;
-    work_dir: string;
-    instructions: string;
-  } | null>(null);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
@@ -146,6 +139,8 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
       setInstructionsDirty(false);
       setReportSyncDir(config.config.report_sync_dir || "");
       setReportSyncDirDirty(false);
+      setAutoProcessFromDate(config.config.auto_process_from_date || "");
+      setAutoProcessFromDateDirty(false);
       setTerminology(config.config.terminology || "");
       setTerminologyDirty(false);
       setRunnerConfig(runners);
@@ -364,6 +359,22 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
       fetchAll();
     } catch (error: unknown) {
       message.error(`Failed to save sync directory: ${errorMessage(error)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSaveAutoProcessFromDate = async () => {
+    setSaving(true);
+    try {
+      await updateDailyAgentConfig(taskId, {
+        auto_process_from_date: autoProcessFromDate,
+      });
+      message.success("Automatic processing start date saved");
+      setAutoProcessFromDateDirty(false);
+      fetchAll();
+    } catch (error: unknown) {
+      message.error(`Failed to save start date: ${errorMessage(error)}`);
     } finally {
       setSaving(false);
     }
@@ -671,360 +682,17 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                 ]}
               />
             </Descriptions.Item>
-            <Descriptions.Item label="Independent Research">
-              <Switch
-                data-testid="asr-daily-agent-research-fanout-switch"
-                checked={Boolean(selectedAgent.research_fanout)}
-                onChange={(enabled) =>
-                  updateAgent(selectedAgent.id, {
-                    research_fanout: enabled
-                      ? {
-                          max_questions: 8,
-                          max_concurrency: 3,
-                          chatgpt_interface_mode: "chat",
-                          chatgpt_model: "pro",
-                          chatgpt_project_url: undefined,
-                          allowed_runners: selectedAgent.runner
-                            ? [selectedAgent.runner]
-                            : [],
-                          context_profiles: {},
-                        }
-                      : undefined,
-                  })
-                }
-              />
-            </Descriptions.Item>
-            {selectedAgent.research_fanout ? (
-              <>
-                <Descriptions.Item label="Max Questions">
-                  <InputNumber
-                    data-testid="asr-daily-agent-research-max-questions"
-                    size="small"
-                    min={1}
-                    max={50}
-                    value={selectedAgent.research_fanout.max_questions}
-                    onChange={(maxQuestions) =>
-                      updateAgent(selectedAgent.id, {
-                        research_fanout: {
-                          ...selectedAgent.research_fanout!,
-                          max_questions: Number(maxQuestions || 1),
-                        },
-                      })
-                    }
-                  />
-                </Descriptions.Item>
-                <Descriptions.Item label="Max Concurrent Research">
-                  <InputNumber
-                    data-testid="asr-daily-agent-research-max-concurrency"
-                    size="small"
-                    min={1}
-                    max={8}
-                    value={selectedAgent.research_fanout.max_concurrency}
-                    onChange={(maxConcurrency) =>
-                      updateAgent(selectedAgent.id, {
-                        research_fanout: {
-                          ...selectedAgent.research_fanout!,
-                          max_concurrency: Number(maxConcurrency || 1),
-                        },
-                      })
-                    }
-                  />
-                </Descriptions.Item>
-                <Descriptions.Item label="ChatGPT Project URL" span={2}>
-                  <Input
-                    key={`${selectedAgent.id}-project-url-${
-                      selectedAgent.research_fanout.chatgpt_project_url || ""
-                    }`}
-                    data-testid="asr-daily-agent-research-project-url"
-                    size="small"
-                    defaultValue={
-                      selectedAgent.research_fanout.chatgpt_project_url || ""
-                    }
-                    placeholder="https://chatgpt.com/g/g-p-.../project"
-                    onBlur={(event) => {
-                      const chatgptProjectUrl = event.target.value.trim();
-                      if (
-                        chatgptProjectUrl ===
-                        (selectedAgent.research_fanout!.chatgpt_project_url ||
-                          "")
-                      ) {
-                        return;
-                      }
-                      updateAgent(selectedAgent.id, {
-                        research_fanout: {
-                          ...selectedAgent.research_fanout!,
-                          chatgpt_project_url: chatgptProjectUrl || undefined,
-                        },
-                      });
-                    }}
-                    onPressEnter={(event) => event.currentTarget.blur()}
-                  />
-                </Descriptions.Item>
-                <Descriptions.Item label="Allowed Research Runners" span={2}>
-                  <Select
-                    data-testid="asr-daily-agent-research-runners"
-                    mode="multiple"
-                    allowClear
-                    value={selectedAgent.research_fanout.allowed_runners}
-                    options={runnerOptions}
-                    onChange={(allowedRunners: string[]) =>
-                      updateAgent(selectedAgent.id, {
-                        research_fanout: {
-                          ...selectedAgent.research_fanout!,
-                          allowed_runners: allowedRunners,
-                        },
-                      })
-                    }
-                    style={{ width: "100%" }}
-                  />
-                </Descriptions.Item>
-                <Descriptions.Item label="Runtime Data Fallbacks" span={2}>
-                  <Space
-                    direction="vertical"
-                    size={8}
-                    style={{ width: "100%" }}
-                  >
-                    {Object.entries(
-                      selectedAgent.research_fanout.context_profiles || {},
-                    ).map(([profileId, profile]) => (
-                      <Space key={profileId} wrap style={{ width: "100%" }}>
-                        <Text code>{profileId}</Text>
-                        <Select
-                          aria-label={`${profileId} fallback runner`}
-                          size="small"
-                          value={profile.runner || undefined}
-                          placeholder="Runner"
-                          options={runnerOptions}
-                          onChange={(runner) =>
-                            updateAgent(selectedAgent.id, {
-                              research_fanout: {
-                                ...selectedAgent.research_fanout!,
-                                context_profiles: {
-                                  ...selectedAgent.research_fanout!
-                                    .context_profiles,
-                                  [profileId]: { ...profile, runner },
-                                },
-                              },
-                            })
-                          }
-                          style={{ width: 180 }}
-                        />
-                        <Input
-                          key={`${profileId}-work-dir-${profile.work_dir}`}
-                          aria-label={`${profileId} fallback working folder`}
-                          size="small"
-                          defaultValue={profile.work_dir}
-                          placeholder="Local working folder"
-                          onBlur={(event) => {
-                            const workDir = event.target.value.trim();
-                            if (workDir === profile.work_dir) {
-                              return;
-                            }
-                            updateAgent(selectedAgent.id, {
-                              research_fanout: {
-                                ...selectedAgent.research_fanout!,
-                                context_profiles: {
-                                  ...selectedAgent.research_fanout!
-                                    .context_profiles,
-                                  [profileId]: {
-                                    ...profile,
-                                    work_dir: workDir,
-                                  },
-                                },
-                              },
-                            });
-                          }}
-                          onPressEnter={(event) => event.currentTarget.blur()}
-                          style={{ width: 260 }}
-                        />
-                        <Input
-                          key={`${profileId}-instructions-${
-                            profile.instructions || ""
-                          }`}
-                          aria-label={`${profileId} fallback instructions`}
-                          size="small"
-                          defaultValue={profile.instructions || ""}
-                          placeholder="What facts should be collected?"
-                          onBlur={(event) => {
-                            const instructions = event.target.value.trim();
-                            if (instructions === (profile.instructions || "")) {
-                              return;
-                            }
-                            updateAgent(selectedAgent.id, {
-                              research_fanout: {
-                                ...selectedAgent.research_fanout!,
-                                context_profiles: {
-                                  ...selectedAgent.research_fanout!
-                                    .context_profiles,
-                                  [profileId]: {
-                                    ...profile,
-                                    instructions: instructions || undefined,
-                                  },
-                                },
-                              },
-                            });
-                          }}
-                          onPressEnter={(event) => event.currentTarget.blur()}
-                          style={{ width: 260 }}
-                        />
-                        <Button
-                          size="small"
-                          danger
-                          onClick={() => {
-                            const nextProfiles = {
-                              ...selectedAgent.research_fanout!
-                                .context_profiles,
-                            };
-                            delete nextProfiles[profileId];
-                            updateAgent(selectedAgent.id, {
-                              research_fanout: {
-                                ...selectedAgent.research_fanout!,
-                                context_profiles: nextProfiles,
-                              },
-                            });
-                          }}
-                        >
-                          Remove
-                        </Button>
-                      </Space>
-                    ))}
-                    {contextProfileDraft ? (
-                      <Space wrap style={{ width: "100%" }}>
-                        <Input
-                          aria-label="New fallback name"
-                          size="small"
-                          value={contextProfileDraft.id}
-                          placeholder="Fallback name"
-                          onChange={(event) =>
-                            setContextProfileDraft({
-                              ...contextProfileDraft,
-                              id: normalizeAgentToken(event.target.value),
-                            })
-                          }
-                          style={{ width: 160 }}
-                        />
-                        <Select
-                          aria-label="New fallback runner"
-                          size="small"
-                          value={contextProfileDraft.runner || undefined}
-                          placeholder="Runner"
-                          options={runnerOptions}
-                          onChange={(runner) =>
-                            setContextProfileDraft({
-                              ...contextProfileDraft,
-                              runner,
-                            })
-                          }
-                          style={{ width: 180 }}
-                        />
-                        <Input
-                          aria-label="New fallback working folder"
-                          size="small"
-                          value={contextProfileDraft.work_dir}
-                          placeholder="Local working folder"
-                          onChange={(event) =>
-                            setContextProfileDraft({
-                              ...contextProfileDraft,
-                              work_dir: event.target.value,
-                            })
-                          }
-                          style={{ width: 260 }}
-                        />
-                        <Input
-                          aria-label="New fallback instructions"
-                          size="small"
-                          value={contextProfileDraft.instructions}
-                          placeholder="What facts should be collected?"
-                          onChange={(event) =>
-                            setContextProfileDraft({
-                              ...contextProfileDraft,
-                              instructions: event.target.value,
-                            })
-                          }
-                          style={{ width: 260 }}
-                        />
-                        <Button
-                          size="small"
-                          type="primary"
-                          onClick={() => {
-                            const profileId = contextProfileDraft.id.trim();
-                            const runner = contextProfileDraft.runner.trim();
-                            const workDir = contextProfileDraft.work_dir.trim();
-                            if (
-                              !DAILY_AGENT_TOKEN_RE.test(profileId) ||
-                              !runner ||
-                              !workDir
-                            ) {
-                              message.warning(
-                                "Fallback name, runner, and local working folder are required",
-                              );
-                              return;
-                            }
-                            updateAgent(selectedAgent.id, {
-                              research_fanout: {
-                                ...selectedAgent.research_fanout!,
-                                context_profiles: {
-                                  ...selectedAgent.research_fanout!
-                                    .context_profiles,
-                                  [profileId]: {
-                                    runner,
-                                    work_dir: workDir,
-                                    instructions:
-                                      contextProfileDraft.instructions.trim() ||
-                                      undefined,
-                                  },
-                                },
-                              },
-                            });
-                            setContextProfileDraft(null);
-                          }}
-                        >
-                          Save fallback
-                        </Button>
-                        <Button
-                          size="small"
-                          onClick={() => setContextProfileDraft(null)}
-                        >
-                          Cancel
-                        </Button>
-                      </Space>
-                    ) : null}
-                    <Button
-                      data-testid="asr-daily-agent-add-context-profile"
-                      size="small"
-                      icon={<PlusOutlined />}
-                      onClick={() => {
-                        const profiles =
-                          selectedAgent.research_fanout!.context_profiles || {};
-                        let index = Object.keys(profiles).length + 1;
-                        let profileId = `context_${index}`;
-                        while (profiles[profileId]) {
-                          index += 1;
-                          profileId = `context_${index}`;
-                        }
-                        setContextProfileDraft({
-                          id: profileId,
-                          runner:
-                            selectedAgent.research_fanout!.allowed_runners[0] ||
-                            selectedAgent.runner,
-                          work_dir: "",
-                          instructions: "",
-                        });
-                      }}
-                      disabled={Boolean(contextProfileDraft)}
-                    >
-                      Add runtime fallback
-                    </Button>
-                  </Space>
-                </Descriptions.Item>
-              </>
-            ) : null}
             <Descriptions.Item label="Instructions Source">
               <Tag>
                 {instructions?.source || selectedAgent.instructions_source}
               </Tag>
             </Descriptions.Item>
           </Descriptions>
+          <DailyAgentResearchFields
+            agent={selectedAgent}
+            runnerOptions={runnerOptions}
+            onChange={(patch) => updateAgent(selectedAgent.id, patch)}
+          />
           {selectedAgent.research_fanout ? (
             <Alert
               style={{ marginTop: 12 }}
@@ -1382,6 +1050,48 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
           </Space>
           <div
             style={{
+              alignItems: "center",
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 8,
+              width: "100%",
+            }}
+          >
+            <Text type="secondary" style={{ width: 160, lineHeight: "24px" }}>
+              Auto process from
+            </Text>
+            <Space.Compact>
+              <Input
+                data-testid="asr-daily-agent-auto-process-from-date"
+                type="date"
+                size="small"
+                value={autoProcessFromDate}
+                onChange={(event) => {
+                  setAutoProcessFromDate(event.target.value);
+                  setAutoProcessFromDateDirty(true);
+                }}
+                onPressEnter={handleSaveAutoProcessFromDate}
+                disabled={saving}
+                style={{ width: 180 }}
+              />
+              <Button
+                data-testid="asr-daily-agent-auto-process-from-date-save"
+                size="small"
+                icon={<SaveOutlined />}
+                onClick={handleSaveAutoProcessFromDate}
+                disabled={!autoProcessFromDateDirty}
+                loading={saving}
+              >
+                Save
+              </Button>
+            </Space.Compact>
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              Earlier dates are ignored by automatic ASR completion runs;
+              explicit manual dates remain available.
+            </Text>
+          </div>
+          <div
+            style={{
               alignItems: "flex-start",
               display: "flex",
               flexWrap: "wrap",
@@ -1626,259 +1336,4 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
   );
 }
 
-export function DailyAgentRecordsTab({
-  taskId,
-  onOpenReport,
-}: DailyAgentTabProps) {
-  const [runsData, setRunsData] = useState<AsrDailyAgentRunsResponse | null>(
-    null,
-  );
-  const [loading, setLoading] = useState(false);
-  const [agentFilter, setAgentFilter] = useState<string | undefined>();
-  const [dateFilter, setDateFilter] = useState<string | undefined>();
-  const [runnerFilter, setRunnerFilter] = useState<string | undefined>();
-
-  const fetchRuns = useCallback(async () => {
-    setLoading(true);
-    try {
-      setRunsData(await getDailyAgentRuns(taskId));
-    } catch (error: unknown) {
-      message.error(
-        `Failed to load Daily Agent records: ${errorMessage(error)}`,
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, [taskId]);
-
-  useEffect(() => {
-    fetchRuns();
-  }, [fetchRuns]);
-
-  useEffect(() => {
-    setAgentFilter(undefined);
-    setDateFilter(undefined);
-    setRunnerFilter(undefined);
-  }, [taskId]);
-
-  const processedDocuments = useMemo(
-    () =>
-      [...(runsData?.processed_documents ?? [])].sort((a, b) => {
-        const dateOrder = b.date.localeCompare(a.date);
-        if (dateOrder !== 0) {
-          return dateOrder;
-        }
-        return (b.processed_at_ms ?? 0) - (a.processed_at_ms ?? 0);
-      }),
-    [runsData],
-  );
-
-  const filterOptions = useMemo(() => {
-    const agents = new Map<string, string>();
-    const dates = new Set<string>();
-    const runners = new Set<string>();
-
-    for (const record of processedDocuments) {
-      const agentId = record.agent_id || "daily_report";
-      agents.set(agentId, record.agent_name || agentId);
-      if (record.date) {
-        dates.add(record.date);
-      }
-      if (record.runner) {
-        runners.add(record.runner);
-      }
-    }
-
-    return {
-      agents: [...agents.entries()]
-        .sort((a, b) => a[1].localeCompare(b[1]))
-        .map(([value, label]) => ({
-          value,
-          label: label === value ? label : `${label} (${value})`,
-        })),
-      dates: [...dates]
-        .sort((a, b) => b.localeCompare(a))
-        .map((value) => ({
-          value,
-          label: value,
-        })),
-      runners: [...runners].sort().map((value) => ({
-        value,
-        label: value,
-      })),
-    };
-  }, [processedDocuments]);
-
-  const filteredDocuments = useMemo(
-    () =>
-      processedDocuments.filter((record) => {
-        if (
-          agentFilter &&
-          (record.agent_id || "daily_report") !== agentFilter
-        ) {
-          return false;
-        }
-        if (dateFilter && record.date !== dateFilter) {
-          return false;
-        }
-        if (runnerFilter && record.runner !== runnerFilter) {
-          return false;
-        }
-        return true;
-      }),
-    [agentFilter, dateFilter, processedDocuments, runnerFilter],
-  );
-
-  return (
-    <Card
-      size="small"
-      title="Run Results"
-      style={{ width: "100%", minWidth: 0 }}
-      loading={loading && !runsData}
-      extra={
-        <Button icon={<ReloadOutlined />} onClick={fetchRuns} loading={loading}>
-          Refresh
-        </Button>
-      }
-    >
-      {runsData && processedDocuments.length > 0 ? (
-        <Space
-          direction="vertical"
-          size={12}
-          style={{ width: "100%", minWidth: 0 }}
-        >
-          <Space size={8} wrap>
-            <Select
-              allowClear
-              showSearch
-              placeholder="Agent"
-              style={{ width: 220 }}
-              value={agentFilter}
-              options={filterOptions.agents}
-              optionFilterProp="label"
-              onChange={setAgentFilter}
-              data-testid="asr-daily-agent-records-agent-filter"
-            />
-            <Select
-              allowClear
-              showSearch
-              placeholder="Date"
-              style={{ width: 160 }}
-              value={dateFilter}
-              options={filterOptions.dates}
-              optionFilterProp="label"
-              onChange={setDateFilter}
-              data-testid="asr-daily-agent-records-date-filter"
-            />
-            <Select
-              allowClear
-              showSearch
-              placeholder="Runner"
-              style={{ width: 160 }}
-              value={runnerFilter}
-              options={filterOptions.runners}
-              optionFilterProp="label"
-              onChange={setRunnerFilter}
-              data-testid="asr-daily-agent-records-runner-filter"
-            />
-          </Space>
-          <div
-            data-testid="asr-daily-agent-run-results-table"
-            style={{ width: "100%", minWidth: 0, overflow: "hidden" }}
-          >
-            <Table<AsrDailyAgentProcessedDocument>
-              rowKey={(record) =>
-                [
-                  record.agent_id || "daily_report",
-                  record.date,
-                  record.last_run_id ||
-                    record.report_path ||
-                    record.output_dir ||
-                    "",
-                ].join(":")
-              }
-              size="small"
-              tableLayout="fixed"
-              scroll={{ x: DAILY_AGENT_RECORDS_TABLE_SCROLL_X }}
-              dataSource={filteredDocuments}
-              pagination={{ pageSize: 10, hideOnSinglePage: true }}
-              columns={[
-                { title: "Date", dataIndex: "date", width: 120 },
-                {
-                  title: "Agent",
-                  dataIndex: "agent_name",
-                  width: 140,
-                  render: (v, record) => <Tag>{v || record.agent_id}</Tag>,
-                },
-                {
-                  title: "Output",
-                  dataIndex: "output_dir",
-                  width: 120,
-                  render: (v) => <Text code>{v || "report"}</Text>,
-                },
-                {
-                  title: "Processed At",
-                  dataIndex: "processed_at_ms",
-                  width: 180,
-                  render: (v) => (v ? new Date(v).toLocaleString() : "-"),
-                },
-                {
-                  title: "SHA256",
-                  dataIndex: "source_sha256",
-                  width: 100,
-                  render: (v) => (
-                    <Text code style={{ fontSize: 10 }}>
-                      {v?.slice(0, 8)}
-                    </Text>
-                  ),
-                },
-                {
-                  title: "Size",
-                  dataIndex: "source_len_bytes",
-                  width: 80,
-                  render: (v: number) =>
-                    v < 1024
-                      ? `${v} B`
-                      : v < 1024 * 1024
-                        ? `${(v / 1024).toFixed(1)} KB`
-                        : `${(v / 1024 / 1024).toFixed(1)} MB`,
-                },
-                {
-                  title: "Runner",
-                  dataIndex: "runner",
-                  width: 100,
-                  render: (v) => <Tag>{v}</Tag>,
-                },
-                {
-                  title: "Report",
-                  dataIndex: "report_path",
-                  width: 220,
-                  ellipsis: true,
-                  render: (v, record) =>
-                    v ? (
-                      <Button
-                        type="link"
-                        size="small"
-                        data-testid={`asr-daily-agent-report-link-${record.agent_id}-${record.date}`}
-                        style={{ padding: 0, height: "auto", fontSize: 11 }}
-                        onClick={() =>
-                          onOpenReport?.(record.date, record.agent_id)
-                        }
-                      >
-                        {v.split("/").pop()}
-                      </Button>
-                    ) : (
-                      "-"
-                    ),
-                },
-              ]}
-              locale={{ emptyText: "No matching Daily Agent records" }}
-            />
-          </div>
-        </Space>
-      ) : (
-        <Empty description="No Daily Agent records yet" />
-      )}
-    </Card>
-  );
-}
+export { DailyAgentRecordsTab } from "./DailyAgentRecordsTab";

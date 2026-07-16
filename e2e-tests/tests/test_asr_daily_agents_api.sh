@@ -256,6 +256,7 @@ for personal_marker in (
 request("PUT", f"/asr/tasks/{task_id}/daily-agent", {
     "terminology": "E2E USER TERMINOLOGY",
     "report_sync_dir": str(pathlib.Path(data_dir) / "template-sync"),
+    "auto_process_from_date": "2026-07-17",
 })
 applied_template = request(
     "POST",
@@ -276,6 +277,7 @@ assert [item["id"] for item in applied_config["agents"]] == [
 ], applied_config
 assert applied_config["terminology"] == "E2E USER TERMINOLOGY", applied_config
 assert applied_config["report_sync_dir"].endswith("template-sync"), applied_config
+assert applied_config["auto_process_from_date"] == "2026-07-17", applied_config
 applied_fanout = next(
     item for item in applied_config["agents"] if item["id"] == "research_fanout"
 )
@@ -342,11 +344,19 @@ agents = [
 ]
 agents[1]["instructions_source"] = "custom"
 agents[1]["instructions"] = custom_prompt
+agents[-1]["chatgpt_project_url"] = (
+    "https://chatgpt.com/g/g-p-daily-report/project?source=e2e#fragment"
+)
 updated = request("PUT", f"/asr/tasks/{task_id}/daily-agent", {
     "enabled": True,
+    "auto_process_from_date": "2026-07-17",
     "agents": agents,
 })
 stored = {item["id"]: item for item in updated["config"]["agents"]}
+assert updated["config"]["auto_process_from_date"] == "2026-07-17", updated
+assert stored["daily_report"]["chatgpt_project_url"] == (
+    "https://chatgpt.com/g/g-p-daily-report/project"
+), stored
 assert stored["research_fanout"]["research_fanout"]["chatgpt_interface_mode"] == "chat", stored
 assert stored["research_fanout"]["research_fanout"]["chatgpt_model"] == "pro", stored
 assert stored["research_fanout"]["research_fanout"]["max_concurrency"] == 2, stored
@@ -355,6 +365,14 @@ invalid = list(agents)
 invalid[0] = dict(invalid[0], dependencies=[{"agent_id":"missing-agent","include_output":True}])
 rejected = request("PUT", f"/asr/tasks/{task_id}/daily-agent", {"agents":invalid}, expected=400)
 assert "missing-agent" in json.dumps(rejected), rejected
+
+invalid_date = request(
+    "PUT",
+    f"/asr/tasks/{task_id}/daily-agent",
+    {"auto_process_from_date": "2026-02-30"},
+    expected=400,
+)
+assert "valid YYYY-MM-DD" in json.dumps(invalid_date), invalid_date
 
 date = "2026-07-13"
 daily_dir = pathlib.Path(data_dir) / "asr" / "data" / "text" / task_id / ".daily"

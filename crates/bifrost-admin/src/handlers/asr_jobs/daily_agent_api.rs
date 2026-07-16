@@ -44,6 +44,8 @@ async fn put_daily_agent_config_response(
         #[serde(default)]
         agents: Option<Vec<AsrDailyAgentItem>>,
         #[serde(default)]
+        auto_process_from_date: Option<String>,
+        #[serde(default)]
         runner: Option<String>,
         #[serde(default)]
         timeout_ms: Option<u64>,
@@ -96,6 +98,10 @@ async fn put_daily_agent_config_response(
         let enabled = update.enabled.unwrap_or(task.daily_agent.enabled);
         normalize_daily_agent_config_in_place(&mut task.daily_agent);
         task.daily_agent.enabled = enabled;
+    }
+    if let Some(auto_process_from_date) = update.auto_process_from_date {
+        task.daily_agent.auto_process_from_date =
+            normalize_daily_agent_auto_process_from_date(Some(auto_process_from_date));
     }
     if let Some(runner) = update.runner {
         task.daily_agent.runner = runner.trim().to_string();

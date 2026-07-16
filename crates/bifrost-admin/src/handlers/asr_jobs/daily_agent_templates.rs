@@ -41,6 +41,7 @@ fn official_daily_agent_template_item(
         session_key: None,
         instructions_source: AsrDailyAgentInstructionsSource::Custom,
         instructions: Some(instructions.to_string()),
+        chatgpt_project_url: None,
         im_delivery: AsrDailyAgentImDeliveryConfig::default(),
         output_dir: output_dir.to_string(),
         dependencies,
