@@ -7,7 +7,7 @@ const reportPath = `/tmp/bifrost-asr-runner-select/.daily/report/${reportDate}-r
 const longInstructions = Array.from(
   { length: 36 },
   (_, index) =>
-    `# Daily Agent line ${index + 1}\n\nKeep the ASR daily report concise, actionable, and tied to the transcript evidence.`
+    `# Daily Agent line ${index + 1}\n\nKeep the ASR daily report concise, actionable, and tied to the transcript evidence.`,
 ).join("\n");
 const reportContent = [
   "# Daily Agent Markdown Report",
@@ -120,6 +120,47 @@ async function installDailyAgentMocks(page: Page) {
   };
   const updates: Array<Record<string, unknown>> = [];
   const runRequests: string[] = [];
+  const templateApplyRequests: Array<Record<string, unknown>> = [];
+
+  const officialTemplate = {
+    id: "daily-research",
+    version: 1,
+    name: "Daily Research",
+    description:
+      "Generate a daily summary, extract research questions, dispatch independent research, and produce a linked digest.",
+    official: true,
+    prompt_customizable: true,
+    execution_mode: "serial_stages_parallel_research_fanout",
+    agents: [],
+  };
+
+  await page.route(
+    "**/_bifrost/api/asr/daily-agent-templates",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ templates: [officialTemplate] }),
+      });
+    },
+  );
+
+  await page.route(
+    `**/_bifrost/api/asr/tasks/${taskId}/daily-agent/apply-template`,
+    async (route) => {
+      const payload = route.request().postDataJSON() as Record<string, unknown>;
+      templateApplyRequests.push(payload);
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: true,
+          template_id: "daily-research",
+          config: dailyAgentConfig,
+        }),
+      });
+    },
+  );
 
   await page.route("**/_bifrost/api/asr/status**", async (route) => {
     await route.fulfill({
@@ -142,63 +183,77 @@ async function installDailyAgentMocks(page: Page) {
     });
   });
 
-  await page.route(`**/_bifrost/api/asr/tasks/${taskId}/daily-agent/sync`, async (route) => {
-    dailyAgentConfig = {
-      ...dailyAgentConfig,
-      last_report_sync: {
-        target_dir: dailyAgentConfig.report_sync_dir || "/tmp/bifrost-asr-runner-select-sync",
-        total_files: 2,
-        copied_files: 2,
-        skipped_files: 0,
-        failed_files: 0,
-        synced_at_ms: 1_779_212_999_000,
-      },
-    };
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        ok: true,
-        sync: dailyAgentConfig.last_report_sync,
-      }),
-    });
-  });
+  await page.route(
+    `**/_bifrost/api/asr/tasks/${taskId}/daily-agent/sync`,
+    async (route) => {
+      dailyAgentConfig = {
+        ...dailyAgentConfig,
+        last_report_sync: {
+          target_dir:
+            dailyAgentConfig.report_sync_dir ||
+            "/tmp/bifrost-asr-runner-select-sync",
+          total_files: 2,
+          copied_files: 2,
+          skipped_files: 0,
+          failed_files: 0,
+          synced_at_ms: 1_779_212_999_000,
+        },
+      };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: true,
+          sync: dailyAgentConfig.last_report_sync,
+        }),
+      });
+    },
+  );
 
-  await page.route(`**/_bifrost/api/asr/tasks/${taskId}/daily-agent/run**`, async (route) => {
-    runRequests.push(route.request().url());
-    await route.fulfill({
-      status: 202,
-      contentType: "application/json",
-      body: JSON.stringify({
-        status: "queued",
-        message: "Daily Agent run queued",
-      }),
-    });
-  });
+  await page.route(
+    `**/_bifrost/api/asr/tasks/${taskId}/daily-agent/run**`,
+    async (route) => {
+      runRequests.push(route.request().url());
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "queued",
+          message: "Daily Agent run queued",
+        }),
+      });
+    },
+  );
 
-  await page.route(`**/_bifrost/api/asr/tasks/${taskId}/daily/${reportDate}`, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        task_id: taskId,
-        task_name: "ASR Runner Select Test",
-        date: reportDate,
-        path: `/tmp/bifrost-asr-runner-select/.daily/${reportDate}.md`,
-        size: 148_000,
-        modified_ms: 1_779_212_700_000,
-        content: `# ${reportDate} Daily Document\n\nSingle document run source.`,
-      }),
-    });
-  });
+  await page.route(
+    `**/_bifrost/api/asr/tasks/${taskId}/daily/${reportDate}`,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          task_id: taskId,
+          task_name: "ASR Runner Select Test",
+          date: reportDate,
+          path: `/tmp/bifrost-asr-runner-select/.daily/${reportDate}.md`,
+          size: 148_000,
+          modified_ms: 1_779_212_700_000,
+          content: `# ${reportDate} Daily Document\n\nSingle document run source.`,
+        }),
+      });
+    },
+  );
 
-  await page.route(new RegExp(`.*/_bifrost/api/asr/tasks/${taskId}$`), async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(taskDetail()),
-    });
-  });
+  await page.route(
+    new RegExp(`.*/_bifrost/api/asr/tasks/${taskId}$`),
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(taskDetail()),
+      });
+    },
+  );
 
   await page.route(new RegExp(".*/_bifrost/api/asr/tasks$"), async (route) => {
     await route.fulfill({
@@ -208,54 +263,78 @@ async function installDailyAgentMocks(page: Page) {
     });
   });
 
-  await page.route(`**/_bifrost/api/asr/tasks/${taskId}/daily-agent`, async (route) => {
-    if (route.request().method() === "PUT") {
-      const payload = route.request().postDataJSON() as Record<string, unknown>;
-      updates.push(payload);
-      dailyAgentConfig = { ...dailyAgentConfig, ...payload };
-    }
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        ok: true,
-        task_id: taskId,
-        config: dailyAgentConfig,
-        workspace: {
-          daily_dir: "/tmp/bifrost-asr-runner-select/.daily",
-          report_dir: "/tmp/bifrost-asr-runner-select/.daily/report",
-          agents_path: "/tmp/bifrost-asr-runner-select/.daily/AGENTS.md",
-          agents_exists: true,
-          git_available: true,
-          git_initialized: true,
-          report_count: 0,
-          agents: [
-            {
-              agent_id: "daily_report",
-              name: "daily_report",
-              output_dir: "daily_report",
-              report_dir: "/tmp/bifrost-asr-runner-select/.daily/report/daily_report",
-              instructions_path: "/tmp/bifrost-asr-runner-select/.daily/daily_report/AGENTS.md",
-              instructions_exists: true,
-              report_count: 2,
-            },
-          ],
-        },
-        report_index_status: {
-          report_files: 2,
-          processed_documents: 1,
-          indexed_reports: 1,
-          unindexed_reports: 1,
-          processed_missing_report: 0,
-          unindexed_dates: ["2026-05-15"],
-        },
-        last_run: {},
-      }),
-    });
-  });
+  await page.route(
+    `**/_bifrost/api/asr/tasks/${taskId}/daily-agent`,
+    async (route) => {
+      if (route.request().method() === "PUT") {
+        const payload = route.request().postDataJSON() as Record<
+          string,
+          unknown
+        >;
+        updates.push(payload);
+        dailyAgentConfig = { ...dailyAgentConfig, ...payload };
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: true,
+          task_id: taskId,
+          config: dailyAgentConfig,
+          workspace: {
+            daily_dir: "/tmp/bifrost-asr-runner-select/.daily",
+            report_dir: "/tmp/bifrost-asr-runner-select/.daily/report",
+            agents_path: "/tmp/bifrost-asr-runner-select/.daily/AGENTS.md",
+            agents_exists: true,
+            git_available: true,
+            git_initialized: true,
+            report_count: 0,
+            agents: [
+              {
+                agent_id: "daily_report",
+                name: "daily_report",
+                output_dir: "daily_report",
+                report_dir:
+                  "/tmp/bifrost-asr-runner-select/.daily/report/daily_report",
+                instructions_path:
+                  "/tmp/bifrost-asr-runner-select/.daily/daily_report/AGENTS.md",
+                instructions_exists: true,
+                report_count: 2,
+              },
+            ],
+          },
+          report_index_status: {
+            report_files: 2,
+            processed_documents: 1,
+            indexed_reports: 1,
+            unindexed_reports: 1,
+            processed_missing_report: 0,
+            unindexed_dates: ["2026-05-15"],
+          },
+          last_run: {},
+        }),
+      });
+    },
+  );
 
-  await page.route(`**/_bifrost/api/asr/tasks/${taskId}/daily-agent/agents**`, async (route) => {
-    if (route.request().method() === "PUT") {
+  await page.route(
+    `**/_bifrost/api/asr/tasks/${taskId}/daily-agent/agents**`,
+    async (route) => {
+      if (route.request().method() === "PUT") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            task_id: taskId,
+            agent_id: "daily_report",
+            agent_name: "daily_report",
+            content:
+              route.request().postDataJSON()?.content ?? longInstructions,
+            source: "file",
+          }),
+        });
+        return;
+      }
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -263,77 +342,72 @@ async function installDailyAgentMocks(page: Page) {
           task_id: taskId,
           agent_id: "daily_report",
           agent_name: "daily_report",
-          content: route.request().postDataJSON()?.content ?? longInstructions,
-          source: "file",
+          content: longInstructions,
+          source: "default",
         }),
       });
-      return;
-    }
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        task_id: taskId,
-        agent_id: "daily_report",
-        agent_name: "daily_report",
-        content: longInstructions,
-        source: "default",
-      }),
-    });
-  });
+    },
+  );
 
-  await page.route(`**/_bifrost/api/asr/tasks/${taskId}/daily-agent/runs`, async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        task_id: taskId,
-        processed_documents: [
-          {
-            date: "2026-05-13",
-            agent_id: "daily_report",
-            agent_name: "daily_report",
-            output_dir: "daily_report",
-            source_sha256: "13ac5f76d34dbb35",
-            source_len_bytes: 128_000,
-            processed_at_ms: 1_779_126_000_000,
-            runner: "web",
-            report_path: `/tmp/bifrost-asr-runner-select/.daily/report/2026-05-13-report.md`,
-            last_run_id: "daily-agent-older-report-run",
-          },
-          {
-            date: reportDate,
-            agent_id: "daily_report",
-            agent_name: "daily_report",
-            output_dir: "daily_report",
-            source_sha256: "43ac5f76d34dbb35",
-            source_len_bytes: 190_512,
-            processed_at_ms: 1_779_212_800_000,
-            runner: "web",
-            report_path: reportPath,
-            last_run_id: "daily-agent-report-run",
-          },
-          {
-            date: "2026-05-16",
-            agent_id: "daily_report",
-            agent_name: "daily_report",
-            output_dir: "daily_report",
-            source_sha256: "16ac5f76d34dbb35",
-            source_len_bytes: 220_000,
-            processed_at_ms: 1_779_385_600_000,
-            runner: "web",
-            report_path: `/tmp/bifrost-asr-runner-select/.daily/report/2026-05-16-report.md`,
-            last_run_id: "daily-agent-newest-report-run",
-          },
-        ],
-      }),
-    });
-  });
+  await page.route(
+    `**/_bifrost/api/asr/tasks/${taskId}/daily-agent/runs`,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          task_id: taskId,
+          processed_documents: [
+            {
+              date: "2026-05-13",
+              agent_id: "daily_report",
+              agent_name: "daily_report",
+              output_dir: "daily_report",
+              source_sha256: "13ac5f76d34dbb35",
+              source_len_bytes: 128_000,
+              processed_at_ms: 1_779_126_000_000,
+              runner: "web",
+              report_path: `/tmp/bifrost-asr-runner-select/.daily/report/2026-05-13-report.md`,
+              last_run_id: "daily-agent-older-report-run",
+            },
+            {
+              date: reportDate,
+              agent_id: "daily_report",
+              agent_name: "daily_report",
+              output_dir: "daily_report",
+              source_sha256: "43ac5f76d34dbb35",
+              source_len_bytes: 190_512,
+              processed_at_ms: 1_779_212_800_000,
+              runner: "web",
+              report_path: reportPath,
+              last_run_id: "daily-agent-report-run",
+            },
+            {
+              date: "2026-05-16",
+              agent_id: "daily_report",
+              agent_name: "daily_report",
+              output_dir: "daily_report",
+              source_sha256: "16ac5f76d34dbb35",
+              source_len_bytes: 220_000,
+              processed_at_ms: 1_779_385_600_000,
+              runner: "web",
+              report_path: `/tmp/bifrost-asr-runner-select/.daily/report/2026-05-16-report.md`,
+              last_run_id: "daily-agent-newest-report-run",
+            },
+          ],
+        }),
+      });
+    },
+  );
 
   await page.route(
     `**/_bifrost/api/asr/tasks/${taskId}/daily-agent/reports/**`,
     async (route) => {
-      if (new URL(route.request().url()).pathname.endsWith(`/reports/${reportDate}`)) {
+      if (
+        new URL(route.request().url()).pathname.endsWith(
+          `/reports/${reportDate}`,
+        )
+      ) {
         await route.fulfill({
           status: 200,
           contentType: "application/json",
@@ -432,7 +506,7 @@ async function installDailyAgentMocks(page: Page) {
     });
   });
 
-  return { updates, runRequests };
+  return { updates, runRequests, templateApplyRequests };
 }
 
 function waitForDailyAgentConfigReload(page: Page) {
@@ -446,7 +520,9 @@ function waitForDailyAgentConfigReload(page: Page) {
   });
 }
 
-test("ASR Daily Agent uses simple Runner and IM Channel dropdowns", async ({ page }) => {
+test("ASR Daily Agent uses simple Runner and IM Channel dropdowns", async ({
+  page,
+}) => {
   const { updates } = await installDailyAgentMocks(page);
 
   await openPage(page, `ai?aiSection=tools-asr&asrTask=${taskId}`);
@@ -465,25 +541,29 @@ test("ASR Daily Agent uses simple Runner and IM Channel dropdowns", async ({ pag
       instructions.evaluate((node) => {
         const textarea = node as HTMLTextAreaElement;
         return textarea.clientHeight + 2 >= textarea.scrollHeight;
-      })
+      }),
     )
     .toBe(true);
   await expect
     .poll(async () =>
-      instructions.evaluate((node) => window.getComputedStyle(node).overflowY)
+      instructions.evaluate((node) => window.getComputedStyle(node).overflowY),
     )
     .toBe("hidden");
 
   await expect(page.getByText("Runner Type")).toHaveCount(0);
   await expect(page.getByText("Runner ID")).toHaveCount(0);
-  await expect(page.getByText("Indexed Reports", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("Indexed Reports", { exact: true }),
+  ).toBeVisible();
   await expect(page.getByText("1/2")).toBeVisible();
   await expect(page.getByText("Unindexed Reports")).toBeVisible();
   const runnerSelect = page.getByTestId("asr-daily-agent-runner-select");
   await expect(runnerSelect).toContainText("codex");
 
   await runnerSelect.click();
-  const dropdown = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)").last();
+  const dropdown = page
+    .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
+    .last();
   await expect(dropdown).toContainText("codex");
   await expect(dropdown).toContainText("codex");
   await expect(dropdown).toContainText("web");
@@ -502,7 +582,9 @@ test("ASR Daily Agent uses simple Runner and IM Channel dropdowns", async ({ pag
   await expect(page.getByText("Provider ID")).toHaveCount(0);
   await expect(page.getByText("Target ID")).toHaveCount(0);
   await imChannelSelect.click();
-  const channelDropdown = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)").last();
+  const channelDropdown = page
+    .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
+    .last();
   await expect(channelDropdown).toContainText("Feishu Main / Owner");
   await expect(channelDropdown).toContainText("Daily Report Room");
   const channelConfigReload = waitForDailyAgentConfigReload(page);
@@ -514,7 +596,9 @@ test("ASR Daily Agent uses simple Runner and IM Channel dropdowns", async ({ pag
     agents: expect.arrayContaining([
       expect.objectContaining({
         id: "custom_agent_2",
-        im_delivery: expect.objectContaining({ channel: "target:daily-report-room" }),
+        im_delivery: expect.objectContaining({
+          channel: "target:daily-report-room",
+        }),
       }),
     ]),
   });
@@ -522,7 +606,9 @@ test("ASR Daily Agent uses simple Runner and IM Channel dropdowns", async ({ pag
   await page.getByRole("button", { name: "Daily Agents" }).click();
   await expect(page.getByTestId("asr-daily-agents-table")).toBeVisible();
   const syncDirInput = page.getByTestId("asr-daily-agent-report-sync-dir");
-  const syncDirSaveButton = page.getByTestId("asr-daily-agent-report-sync-dir-save");
+  const syncDirSaveButton = page.getByTestId(
+    "asr-daily-agent-report-sync-dir-save",
+  );
   await expect(syncDirInput).toBeEnabled();
   await expect(syncDirSaveButton).toBeDisabled();
   const nextSyncDir = "/tmp/bifrost-asr-runner-select-sync-updated";
@@ -544,8 +630,7 @@ test("ASR Daily Agent saves a ChatGPT Project for independent research", async (
   page,
 }) => {
   const { updates } = await installDailyAgentMocks(page);
-  const projectUrl =
-    "https://chatgpt.com/g/g-p-daily-research/project";
+  const projectUrl = "https://chatgpt.com/g/g-p-daily-research/project";
 
   await openPage(page, `ai?aiSection=tools-asr&asrTask=${taskId}`);
   await page.getByRole("tab", { name: "Daily Agent", exact: true }).click();
@@ -553,9 +638,10 @@ test("ASR Daily Agent saves a ChatGPT Project for independent research", async (
 
   await page.getByTestId("asr-daily-agent-research-fanout-switch").click();
   await waitForToast(page, "Configuration saved");
-  const projectInput = page.getByTestId(
-    "asr-daily-agent-research-project-url",
-  );
+  await expect(
+    page.getByTestId("asr-daily-agent-research-max-concurrency"),
+  ).toHaveValue("3");
+  const projectInput = page.getByTestId("asr-daily-agent-research-project-url");
   await expect(projectInput).toBeVisible();
   await expect(projectInput).toHaveAttribute(
     "placeholder",
@@ -594,13 +680,57 @@ test("ASR Daily Agent saves a ChatGPT Project for independent research", async (
   });
 });
 
+test("ASR Daily Agent applies the official customizable research template", async ({
+  page,
+}) => {
+  const { templateApplyRequests } = await installDailyAgentMocks(page);
+
+  await openPage(page, `ai?aiSection=tools-asr&asrTask=${taskId}`);
+  await page.getByRole("tab", { name: "Daily Agent", exact: true }).click();
+
+  const template = page.getByTestId("asr-daily-agent-template-daily-research");
+  await expect(template).toBeVisible();
+  await expect(template).toContainText("Daily Research (Official Template)");
+  await expect(template).toContainText("Every Agent Prompt remains editable");
+  await expect(template).toContainText(
+    "no personal keywords, repositories, channels, or ChatGPT Project are included",
+  );
+  const templateBox = await template.boundingBox();
+  expect(templateBox?.width).toBeGreaterThan(600);
+  expect(templateBox?.height).toBeGreaterThan(100);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(template).toBeVisible();
+  await page
+    .getByTestId("asr-daily-agent-apply-template-daily-research")
+    .click();
+  await page
+    .locator(".ant-popconfirm-buttons")
+    .getByRole("button", { name: "Use template", exact: true })
+    .click();
+  await waitForToast(page, "Official Daily Research template applied");
+
+  expect(templateApplyRequests).toEqual([
+    expect.objectContaining({ template_id: "daily-research" }),
+  ]);
+  if (process.env.BIFROST_UI_SCREENSHOT_PATH) {
+    await page.screenshot({
+      path: process.env.BIFROST_UI_SCREENSHOT_PATH,
+      fullPage: true,
+    });
+  }
+});
+
 test("ASR Daily Agent opens processed reports as full-page Markdown details", async ({
   page,
 }) => {
   await installDailyAgentMocks(page);
 
   await openPage(page, `ai?aiSection=tools-asr&asrTask=${taskId}`);
-  await page.getByRole("tab", { name: "Daily Agent Records", exact: true }).click();
+  await page
+    .getByRole("tab", { name: "Daily Agent Records", exact: true })
+    .click();
   await expect(page).toHaveURL(/asrTaskTab=daily-agent-records/);
 
   await page.reload();
@@ -610,7 +740,10 @@ test("ASR Daily Agent opens processed reports as full-page Markdown details", as
   await expect(page.getByText("Run Results")).toBeVisible();
   await page.getByRole("tab", { name: "Daily Agent", exact: true }).click();
   await expect(page.getByText("Processed Documents")).toHaveCount(0);
-  await openPage(page, `ai?aiSection=tools-asr&asrTask=${taskId}&asrTaskTab=daily-agent-records`);
+  await openPage(
+    page,
+    `ai?aiSection=tools-asr&asrTask=${taskId}&asrTaskTab=daily-agent-records`,
+  );
   await expect(
     page.getByRole("tab", { name: "Daily Agent Records", exact: true }),
   ).toHaveAttribute("aria-selected", "true");
@@ -620,7 +753,9 @@ test("ASR Daily Agent opens processed reports as full-page Markdown details", as
     .locator(".ant-table-tbody tr.ant-table-row");
   await expect(runRows.first().locator("td").first()).toHaveText("2026-05-16");
 
-  const reportLink = page.getByTestId(`asr-daily-agent-report-link-daily_report-${reportDate}`);
+  const reportLink = page.getByTestId(
+    `asr-daily-agent-report-link-daily_report-${reportDate}`,
+  );
   await expect(reportLink).toHaveText(`${reportDate}-report.md`);
   await expect(reportLink).toBeVisible();
   await reportLink.scrollIntoViewIfNeeded();
@@ -629,22 +764,28 @@ test("ASR Daily Agent opens processed reports as full-page Markdown details", as
   await expect(page).toHaveURL(new RegExp(`asrDailyReport=${reportDate}`));
   const reportPage = page.getByTestId("asr-daily-agent-report-page");
   await expect(reportPage).toBeVisible();
-  await expect(reportPage.getByText(`${reportDate}-report.md`, { exact: true })).toBeVisible();
+  await expect(
+    reportPage.getByText(`${reportDate}-report.md`, { exact: true }),
+  ).toBeVisible();
   await expect(reportPage.getByText("ASR Runner Select Test")).toBeVisible();
   await expect(reportPage.getByText(reportPath, { exact: true })).toBeVisible();
   await expect(reportPage.getByText("web", { exact: true })).toBeVisible();
 
   const markdown = page.getByTestId("asr-daily-agent-report-content");
-  await expect(markdown.locator("h1")).toHaveText("Daily Agent Markdown Report");
-  await expect(markdown.locator("li").first()).toHaveText("Runner validation passed");
+  await expect(markdown.locator("h1")).toHaveText(
+    "Daily Agent Markdown Report",
+  );
+  await expect(markdown.locator("li").first()).toHaveText(
+    "Runner validation passed",
+  );
   await expect(markdown.locator("table")).toContainText(reportDate);
 
   await page.reload();
   await expect(page).toHaveURL(new RegExp(`asrDailyReport=${reportDate}`));
   await expect(page.getByTestId("asr-daily-agent-report-page")).toBeVisible();
-  await expect(page.getByTestId("asr-daily-agent-report-content").locator("h1")).toHaveText(
-    "Daily Agent Markdown Report",
-  );
+  await expect(
+    page.getByTestId("asr-daily-agent-report-content").locator("h1"),
+  ).toHaveText("Daily Agent Markdown Report");
 
   await page.getByLabel("Back to Daily Agent reports").click();
   await expect(page).not.toHaveURL(/asrDailyReport=/);
@@ -666,10 +807,15 @@ test("ASR Daily Agent opens processed reports as full-page Markdown details", as
   ).toHaveAttribute("aria-selected", "true");
 });
 
-test("ASR Daily Docs row can run Daily Agent for one document", async ({ page }) => {
+test("ASR Daily Docs row can run Daily Agent for one document", async ({
+  page,
+}) => {
   const { runRequests } = await installDailyAgentMocks(page);
 
-  await openPage(page, `ai?aiSection=tools-asr&asrTask=${taskId}&asrTaskTab=daily`);
+  await openPage(
+    page,
+    `ai?aiSection=tools-asr&asrTask=${taskId}&asrTaskTab=daily`,
+  );
   await expect(page.getByRole("tab", { name: /Daily Docs/ })).toHaveAttribute(
     "aria-selected",
     "true",
@@ -680,7 +826,9 @@ test("ASR Daily Docs row can run Daily Agent for one document", async ({ page })
 
   expect(runRequests).toHaveLength(1);
   const runUrl = new URL(runRequests[0]);
-  expect(runUrl.pathname).toBe(`/_bifrost/api/asr/tasks/${taskId}/daily-agent/run`);
+  expect(runUrl.pathname).toBe(
+    `/_bifrost/api/asr/tasks/${taskId}/daily-agent/run`,
+  );
   expect(runUrl.searchParams.get("date")).toBe(reportDate);
   expect(runUrl.searchParams.has("force")).toBe(false);
 

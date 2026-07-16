@@ -390,13 +390,10 @@ export interface AsrTaskSummary {
 }
 
 export type AsrRuntimeStrategy =
-  | "fork_per_chunk"
-  | "reuse_server"
-  | "reuse_per_file"
-  | "auto"
-  | "compare";
+  "fork_per_chunk" | "reuse_server" | "reuse_per_file" | "auto" | "compare";
 
-export type AsrTaskFileStatus = "pending" | "processing" | "success" | "partial_success" | "failed";
+export type AsrTaskFileStatus =
+  "pending" | "processing" | "success" | "partial_success" | "failed";
 
 export interface AsrFailedChunkRecord {
   chunk_index: number;
@@ -789,13 +786,16 @@ const ASR_LEGACY_PARAMS_STORAGE_KEYS = [
   "bifrost.asr.model-management.connection.v1",
 ];
 const ASR_PARAMS_STORAGE_KEY = "bifrost.asr.workbench.connection.v2";
-const ASR_MODEL_MANAGEMENT_PARAMS_STORAGE_KEY = "bifrost.asr.model-management.connection.v2";
+const ASR_MODEL_MANAGEMENT_PARAMS_STORAGE_KEY =
+  "bifrost.asr.model-management.connection.v2";
 export const ASR_PARAMS_CHANGED_EVENT = "bifrost.asr.params.changed";
 export const ASR_STATUS_CHANGED_EVENT = "bifrost.asr.status.changed";
 export const DEFAULT_ASR_MODEL = "Qwen3-ASR-0.6B";
 
 function clearLegacyAsrParams(): void {
-  ASR_LEGACY_PARAMS_STORAGE_KEYS.forEach((key) => window.localStorage.removeItem(key));
+  ASR_LEGACY_PARAMS_STORAGE_KEYS.forEach((key) =>
+    window.localStorage.removeItem(key),
+  );
 }
 
 export function defaultAsrParams(): Required<
@@ -810,7 +810,10 @@ export function defaultAsrParams(): Required<
 }
 
 export function defaultVoiceRealtimeParams(): Required<
-  Pick<VoiceRealtimeParams, "host" | "language" | "model" | "chunkMs" | "ownerModule">
+  Pick<
+    VoiceRealtimeParams,
+    "host" | "language" | "model" | "chunkMs" | "ownerModule"
+  >
 > {
   const workbenchDefaults = defaultAsrParams();
   return {
@@ -848,7 +851,9 @@ export function loadAsrParams(): AsrConnectionParams {
 
 export function loadModelManagementParams(): AsrConnectionParams {
   try {
-    const raw = window.localStorage.getItem(ASR_MODEL_MANAGEMENT_PARAMS_STORAGE_KEY);
+    const raw = window.localStorage.getItem(
+      ASR_MODEL_MANAGEMENT_PARAMS_STORAGE_KEY,
+    );
     if (!raw) {
       clearLegacyAsrParams();
       return defaultModelManagementParams();
@@ -952,12 +957,22 @@ export async function triggerVoiceWake(
   });
 }
 
-export async function startVoiceWakeListener(): Promise<{ listener: VoiceWakeListenerStatus }> {
-  return post<{ listener: VoiceWakeListenerStatus }>("/voice/wake/listener/start", {});
+export async function startVoiceWakeListener(): Promise<{
+  listener: VoiceWakeListenerStatus;
+}> {
+  return post<{ listener: VoiceWakeListenerStatus }>(
+    "/voice/wake/listener/start",
+    {},
+  );
 }
 
-export async function stopVoiceWakeListener(): Promise<{ listener: VoiceWakeListenerStatus }> {
-  return post<{ listener: VoiceWakeListenerStatus }>("/voice/wake/listener/stop", {});
+export async function stopVoiceWakeListener(): Promise<{
+  listener: VoiceWakeListenerStatus;
+}> {
+  return post<{ listener: VoiceWakeListenerStatus }>(
+    "/voice/wake/listener/stop",
+    {},
+  );
 }
 
 export async function getVoiceWakeEvents(): Promise<VoiceWakeEventsResponse> {
@@ -993,12 +1008,18 @@ export async function initAsrDiarizationProfile(
   return getAsrDiarizationStatus(profile);
 }
 
-export async function listAsrSpeakerProfiles(): Promise<AsrSpeakerProfileSummary[]> {
-  const response = await get<{ profiles: AsrSpeakerProfileSummary[] }>("/asr/speaker-profiles");
+export async function listAsrSpeakerProfiles(): Promise<
+  AsrSpeakerProfileSummary[]
+> {
+  const response = await get<{ profiles: AsrSpeakerProfileSummary[] }>(
+    "/asr/speaker-profiles",
+  );
   return response.profiles;
 }
 
-export async function deleteAsrSpeakerProfile(profileId: string): Promise<void> {
+export async function deleteAsrSpeakerProfile(
+  profileId: string,
+): Promise<void> {
   const response = await asrFetch(
     `/asr/speaker-profiles/${encodeURIComponent(profileId)}`,
     {
@@ -1053,7 +1074,9 @@ export async function createAsrSpeakerEnrollmentSession(
     },
     body: JSON.stringify({ name, diarization_profile: diarizationProfile }),
   });
-  const payload = await readJsonResponse<{ session: AsrSpeakerEnrollmentSession }>(response);
+  const payload = await readJsonResponse<{
+    session: AsrSpeakerEnrollmentSession;
+  }>(response);
   return payload.session;
 }
 
@@ -1134,20 +1157,26 @@ export async function finishAsrSpeakerEnrollment(
 export async function startAsrService(
   params: AsrConnectionParams,
 ): Promise<AsrServiceResult> {
-  const response = await asrFetch(`/asr/service/start?${buildAsrQuery(params)}`, {
-    method: "POST",
-    headers: buildStreamHeaders(),
-  });
+  const response = await asrFetch(
+    `/asr/service/start?${buildAsrQuery(params)}`,
+    {
+      method: "POST",
+      headers: buildStreamHeaders(),
+    },
+  );
   return readAsrServiceResponse(response);
 }
 
 export async function stopAsrService(
   params: AsrConnectionParams,
 ): Promise<AsrServiceResult> {
-  const response = await asrFetch(`/asr/service/stop?${buildAsrQuery(params)}`, {
-    method: "POST",
-    headers: buildStreamHeaders(),
-  });
+  const response = await asrFetch(
+    `/asr/service/stop?${buildAsrQuery(params)}`,
+    {
+      method: "POST",
+      headers: buildStreamHeaders(),
+    },
+  );
   return readJsonResponse<AsrServiceResult>(response);
 }
 
@@ -1178,7 +1207,10 @@ export async function getAsrTaskDailyDocument(
   );
 }
 
-export function buildAsrTaskFileSourceUrl(taskId: string, fileKey: string): string {
+export function buildAsrTaskFileSourceUrl(
+  taskId: string,
+  fileKey: string,
+): string {
   return buildApiUrl(
     `/asr/tasks/${encodeURIComponent(taskId)}/files/${encodeURIComponent(fileKey)}/source`,
   );
@@ -1214,7 +1246,9 @@ export async function updateAsrTask(
 }
 
 export async function listAsrExternalVolumes(): Promise<AsrExternalVolume[]> {
-  const response = await get<{ volumes: AsrExternalVolume[] }>("/asr/external-volumes");
+  const response = await get<{ volumes: AsrExternalVolume[] }>(
+    "/asr/external-volumes",
+  );
   return response.volumes;
 }
 
@@ -1226,9 +1260,7 @@ export async function getAsrExternalImportStatus(
   );
 }
 
-export async function runAsrExternalImport(
-  taskId: string,
-): Promise<{
+export async function runAsrExternalImport(taskId: string): Promise<{
   imported: number;
   message: string;
   task: AsrDirectoryTask;
@@ -1282,19 +1314,28 @@ export async function pauseAsrTask(
 }
 
 export async function resumeAsrTask(id: string): Promise<ControlAsrTaskResult> {
-  const response = await asrFetch(`/asr/tasks/${encodeURIComponent(id)}/resume`, {
-    method: "POST",
-    headers: buildStreamHeaders(),
-  });
+  const response = await asrFetch(
+    `/asr/tasks/${encodeURIComponent(id)}/resume`,
+    {
+      method: "POST",
+      headers: buildStreamHeaders(),
+    },
+  );
   return readJsonResponse<ControlAsrTaskResult>(response);
 }
 
-export async function deleteAsrTask(id: string, confirmName: string): Promise<void> {
+export async function deleteAsrTask(
+  id: string,
+  confirmName: string,
+): Promise<void> {
   const query = new URLSearchParams({ confirm_name: confirmName });
-  const response = await asrFetch(`/asr/tasks/${encodeURIComponent(id)}?${query}`, {
-    method: "DELETE",
-    headers: buildStreamHeaders(),
-  });
+  const response = await asrFetch(
+    `/asr/tasks/${encodeURIComponent(id)}?${query}`,
+    {
+      method: "DELETE",
+      headers: buildStreamHeaders(),
+    },
+  );
   await readJsonResponse<{ ok: boolean }>(response);
 }
 
@@ -1363,12 +1404,15 @@ export async function streamAsrTranscription(
   form.append("language", params.language || defaultAsrParams().language);
   form.append("response_format", "text");
 
-  const response = await asrFetch(`/asr/transcribe-stream?${buildAsrQuery(params)}`, {
-    method: "POST",
-    headers: buildStreamHeaders(),
-    body: form,
-    signal,
-  });
+  const response = await asrFetch(
+    `/asr/transcribe-stream?${buildAsrQuery(params)}`,
+    {
+      method: "POST",
+      headers: buildStreamHeaders(),
+      body: form,
+      signal,
+    },
+  );
   await readSseResponse(response, onEvent);
 }
 
@@ -1390,7 +1434,10 @@ export async function createAsrOfflineJob(
   if (params.port) {
     query.set("port", String(params.port));
   }
-  query.set("language", options.language || params.language || defaults.language);
+  query.set(
+    "language",
+    options.language || params.language || defaults.language,
+  );
   query.set("model", options.model || params.model || defaults.model);
   query.set(
     "pipeline_profile",
@@ -1424,7 +1471,9 @@ export async function getAsrOfflineJobArtifact(
   );
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    throw new Error(body || `ASR artifact request failed with status ${response.status}`);
+    throw new Error(
+      body || `ASR artifact request failed with status ${response.status}`,
+    );
   }
   return response.text();
 }
@@ -1526,12 +1575,16 @@ async function readSseResponse(
 async function readJsonResponse<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    throw new Error(body || `ASR request failed with status ${response.status}`);
+    throw new Error(
+      body || `ASR request failed with status ${response.status}`,
+    );
   }
   return response.json() as Promise<T>;
 }
 
-async function readAsrServiceResponse(response: Response): Promise<AsrServiceResult> {
+async function readAsrServiceResponse(
+  response: Response,
+): Promise<AsrServiceResult> {
   if (response.ok || response.status === 409) {
     return response.json() as Promise<AsrServiceResult>;
   }
@@ -1631,11 +1684,27 @@ export interface AsrDailyAgentDependency {
 
 export interface AsrDailyAgentResearchFanoutConfig {
   max_questions: number;
+  max_concurrency: number;
   chatgpt_interface_mode: "chat";
   chatgpt_model: "pro";
   chatgpt_project_url?: string;
   allowed_runners: string[];
   context_profiles: Record<string, AsrDailyAgentResearchContextProfile>;
+}
+
+export interface AsrDailyAgentTemplate {
+  id: string;
+  version: number;
+  name: string;
+  description: string;
+  official: boolean;
+  prompt_customizable: boolean;
+  execution_mode: "serial_stages_parallel_research_fanout";
+  agents: AsrDailyAgentItem[];
+}
+
+export interface AsrDailyAgentTemplatesResponse {
+  templates: AsrDailyAgentTemplate[];
 }
 
 export interface AsrDailyAgentResearchContextProfile {
@@ -1756,6 +1825,33 @@ export async function getDailyAgentConfig(
   return readJsonResponse(response);
 }
 
+export async function getDailyAgentTemplates(): Promise<AsrDailyAgentTemplatesResponse> {
+  const response = await asrFetch("/asr/daily-agent-templates");
+  return readJsonResponse(response);
+}
+
+export async function applyDailyAgentTemplate(
+  taskId: string,
+  templateId: string,
+  runners?: { primaryRunner?: string; researchRunner?: string },
+): Promise<{ ok: boolean; template_id: string; config: AsrDailyAgentConfig }> {
+  const response = await asrFetch(
+    `/asr/tasks/${taskId}/daily-agent/apply-template`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        template_id: templateId,
+        primary_runner: runners?.primaryRunner,
+        research_runner: runners?.researchRunner,
+      }),
+    },
+  );
+  return readJsonResponse(response);
+}
+
 export async function updateDailyAgentConfig(
   taskId: string,
   config: Partial<AsrDailyAgentConfig>,
@@ -1777,7 +1873,9 @@ export async function getDailyAgentInstructions(
   const params = new URLSearchParams();
   if (agentId) params.set("agent_id", agentId);
   const query = params.toString() ? `?${params.toString()}` : "";
-  const response = await asrFetch(`/asr/tasks/${taskId}/daily-agent/agents${query}`);
+  const response = await asrFetch(
+    `/asr/tasks/${taskId}/daily-agent/agents${query}`,
+  );
   return readJsonResponse(response);
 }
 
@@ -1789,13 +1887,16 @@ export async function updateDailyAgentInstructions(
   const params = new URLSearchParams();
   if (agentId) params.set("agent_id", agentId);
   const query = params.toString() ? `?${params.toString()}` : "";
-  const response = await asrFetch(`/asr/tasks/${taskId}/daily-agent/agents${query}`, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
+  const response = await asrFetch(
+    `/asr/tasks/${taskId}/daily-agent/agents${query}`,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ content }),
     },
-    body: JSON.stringify({ content }),
-  });
+  );
   return readJsonResponse(response);
 }
 
@@ -1808,9 +1909,12 @@ export async function triggerDailyAgentRun(
   if (options?.date) params.set("date", options.date);
   if (options?.agentId) params.set("agent_id", options.agentId);
   const query = params.toString() ? `?${params.toString()}` : "";
-  const response = await asrFetch(`/asr/tasks/${taskId}/daily-agent/run${query}`, {
-    method: "POST",
-  });
+  const response = await asrFetch(
+    `/asr/tasks/${taskId}/daily-agent/run${query}`,
+    {
+      method: "POST",
+    },
+  );
   return readJsonResponse(response);
 }
 
@@ -1821,9 +1925,12 @@ export async function sendDailyAgentReport(
   const params = new URLSearchParams();
   if (agentId) params.set("agent_id", agentId);
   const query = params.toString() ? `?${params.toString()}` : "";
-  const response = await asrFetch(`/asr/tasks/${taskId}/daily-agent/send${query}`, {
-    method: "POST",
-  });
+  const response = await asrFetch(
+    `/asr/tasks/${taskId}/daily-agent/send${query}`,
+    {
+      method: "POST",
+    },
+  );
   return readJsonResponse(response);
 }
 

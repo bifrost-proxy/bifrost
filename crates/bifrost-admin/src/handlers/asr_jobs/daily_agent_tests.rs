@@ -26,6 +26,111 @@ fn daily_agent_default_config_has_report_and_tomorrow_todo_agents() {
 }
 
 #[test]
+fn official_daily_research_template_is_generic_valid_and_prompt_customizable() {
+    let templates = official_daily_agent_templates();
+    assert_eq!(templates.len(), 1);
+    let template = &templates[0];
+    assert_eq!(template.id, OFFICIAL_DAILY_RESEARCH_TEMPLATE_ID);
+    assert!(template.official);
+    assert!(template.prompt_customizable);
+    assert_eq!(
+        template.execution_mode,
+        "serial_stages_parallel_research_fanout"
+    );
+    assert_eq!(template.agents.len(), 5);
+    assert_eq!(
+        template
+            .agents
+            .iter()
+            .map(|agent| agent.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "daily_report",
+            "research_seed",
+            "research_dispatcher",
+            "research_fanout",
+            "research_digest",
+        ]
+    );
+    let config = AsrDailyAgentConfig {
+        agents: template.agents.clone(),
+        ..Default::default()
+    };
+    validate_daily_agent_config(&config).unwrap();
+    let serialized = serde_json::to_string(template).unwrap().to_ascii_lowercase();
+    for personal_marker in [
+        "金渐成",
+        "鸡哥",
+        "机哥",
+        "天机",
+        "jinjiancheng",
+        "ibkr",
+        "owner:",
+        "g-p-",
+    ] {
+        assert!(
+            !serialized.contains(personal_marker),
+            "official template leaked personal marker {personal_marker}"
+        );
+    }
+    assert!(template.agents.iter().all(|agent| {
+        agent.instructions_source == AsrDailyAgentInstructionsSource::Custom
+            && agent
+                .instructions
+                .as_deref()
+                .is_some_and(|prompt| prompt.chars().count() < 200)
+            && !agent.im_delivery.enabled
+    }));
+}
+
+#[test]
+fn applying_official_template_preserves_task_settings_and_uses_user_runners() {
+    let mut config = AsrDailyAgentConfig::default();
+    config.agents[0].runner = "current-runner".to_string();
+    config.terminology = Some("user terminology".to_string());
+    config.report_sync_dir = Some("/tmp/user-reports".to_string());
+
+    let applied = apply_official_daily_agent_template(
+        &config,
+        OFFICIAL_DAILY_RESEARCH_TEMPLATE_ID,
+        None,
+        Some("research-runner"),
+    )
+    .unwrap();
+
+    assert!(applied.enabled);
+    assert_eq!(applied.agents.len(), 5);
+    assert_eq!(applied.terminology.as_deref(), Some("user terminology"));
+    assert_eq!(
+        applied.report_sync_dir.as_deref(),
+        Some("/tmp/user-reports")
+    );
+    assert_eq!(applied.agents[0].runner, "current-runner");
+    let fanout = applied
+        .agents
+        .iter()
+        .find(|agent| agent.id == "research_fanout")
+        .unwrap();
+    assert_eq!(fanout.runner, "research-runner");
+    assert_eq!(
+        fanout
+            .research_fanout
+            .as_ref()
+            .unwrap()
+            .allowed_runners,
+        vec!["research-runner"]
+    );
+
+    let mut edited = applied.clone();
+    edited.agents[0].instructions = Some("user edited prompt".to_string());
+    let fresh = official_daily_agent_templates();
+    assert_ne!(
+        fresh[0].agents[0].instructions.as_deref(),
+        edited.agents[0].instructions.as_deref()
+    );
+}
+
+#[test]
 fn daily_agent_legacy_config_is_upgraded_to_two_agents_without_losing_settings() {
     let legacy = AsrDailyAgentConfig {
         enabled: false,
@@ -204,6 +309,18 @@ fn daily_agent_research_fanout_validation_rejects_invalid_fields() {
     assert!(validate_daily_agent_item(&item)
         .unwrap_err()
         .contains("max_questions must be between 1 and 50"));
+
+    let mut item = valid_item();
+    item.research_fanout.as_mut().unwrap().max_concurrency = 0;
+    assert!(validate_daily_agent_item(&item)
+        .unwrap_err()
+        .contains("max_concurrency must be between 1 and 8"));
+
+    let mut item = valid_item();
+    item.research_fanout.as_mut().unwrap().max_concurrency = 9;
+    assert!(validate_daily_agent_item(&item)
+        .unwrap_err()
+        .contains("max_concurrency must be between 1 and 8"));
 
     let mut item = valid_item();
     item.research_fanout
@@ -2540,6 +2657,7 @@ fn daily_agent_research_manifest_preserves_original_question_and_github_reposito
 
     let fanout = AsrDailyAgentResearchFanoutConfig {
         max_questions: 8,
+        max_concurrency: 3,
         chatgpt_interface_mode: "chat".to_string(),
         chatgpt_model: "pro".to_string(),
         chatgpt_project_url: None,
@@ -2647,7 +2765,7 @@ fn daily_agent_research_child_prompt_is_compact_and_excludes_daily_report_instru
         research_prompt: Some("单题要求".repeat(10_000)),
     };
 
-    let prompt = build_daily_research_child_prompt(&question, None, false);
+    let prompt = build_daily_research_child_prompt(&question, None, None, false);
 
     assert!(prompt.contains(&question.original_question));
     assert!(prompt.contains("优先使用一手、权威和可复查来源"));
@@ -2657,10 +2775,62 @@ fn daily_agent_research_child_prompt_is_compact_and_excludes_daily_report_instru
 }
 
 #[test]
+fn daily_agent_research_child_prompt_includes_only_explicit_custom_agent_prompt() {
+    let question = AsrDailyResearchQuestion {
+        id: "custom-prompt".to_string(),
+        original_question: "这个问题是否需要检索用户指定的仓库？".to_string(),
+        source_excerpt: String::new(),
+        background: String::new(),
+        runner: None,
+        github_repositories: vec!["user/repository".to_string()],
+        context_profile: None,
+        research_prompt: Some("单题要求".to_string()),
+    };
+    let custom = "CUSTOM_AGENT_RULE: 按用户自己的关键词与仓库路由执行";
+
+    let with_custom =
+        build_daily_research_child_prompt(&question, Some(custom), None, false);
+    assert!(with_custom.contains("## 本研究 Agent 的要求"));
+    assert!(with_custom.contains(custom));
+    assert!(with_custom.contains("## 单题补充要求"));
+
+    let without_custom = build_daily_research_child_prompt(&question, None, None, false);
+    assert!(!without_custom.contains("## 本研究 Agent 的要求"));
+    assert!(!without_custom.contains("CUSTOM_AGENT_RULE"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn daily_agent_research_jobs_respect_bounded_concurrency() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let jobs = (0..6).map(|index| {
+        let active = active.clone();
+        let peak = peak.clone();
+        async move {
+            let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(current, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            active.fetch_sub(1, Ordering::SeqCst);
+            index
+        }
+    });
+
+    let mut completed = collect_bounded_daily_research_jobs(jobs, 2).await;
+    completed.sort_unstable();
+
+    assert_eq!(completed, vec![0, 1, 2, 3, 4, 5]);
+    assert_eq!(peak.load(Ordering::SeqCst), 2);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn daily_agent_research_fanout_normalizes_runner_and_context_profile_values() {
     let mut item = AsrDailyAgentItem::daily_report();
     item.research_fanout = Some(AsrDailyAgentResearchFanoutConfig {
         max_questions: 8,
+        max_concurrency: 3,
         chatgpt_interface_mode: " Chat ".to_string(),
         chatgpt_model: " Pro ".to_string(),
         chatgpt_project_url: Some(
@@ -3258,6 +3428,10 @@ async fn daily_agent_research_fanout_executes_local_context_and_records_failures
     .unwrap();
     assert!(report.contains("核验仓库"));
     assert!(report.contains("拒绝网页上下文"));
+    let verified_position = report.find("核验仓库").unwrap();
+    let direct_position = report.find("直接读取上下文").unwrap();
+    let local_position = report.find("先收集上下文").unwrap();
+    assert!(verified_position < direct_position && direct_position < local_position);
 }
 
 #[tokio::test(flavor = "current_thread")]

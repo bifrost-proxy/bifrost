@@ -37,6 +37,7 @@ import type {
   AsrDailyAgentItem,
   AsrDailyAgentProcessedDocument,
   AsrDailyAgentRunsResponse,
+  AsrDailyAgentTemplate,
 } from "../../../api/asr";
 import { hasRunningDailyAgent } from "../asrUtils";
 import * as imGatewayApi from "../../../api/imGateway";
@@ -46,7 +47,9 @@ import type {
   ImTarget,
 } from "../../../api/imGateway";
 import {
+  applyDailyAgentTemplate,
   getDailyAgentConfig,
+  getDailyAgentTemplates,
   getDailyAgentRuns,
   getDailyAgentInstructions,
   sendDailyAgentReport,
@@ -93,13 +96,15 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
     useState<ExternalCliGatewayConfig | null>(null);
   const [imProviders, setImProviders] = useState<ImProviderConfig[]>([]);
   const [imTargets, setImTargets] = useState<ImTarget[]>([]);
+  const [templates, setTemplates] = useState<AsrDailyAgentTemplate[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [runningAgentId, setRunningAgentId] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [instructionsText, setInstructionsText] = useState("");
   const [instructionsDirty, setInstructionsDirty] = useState(false);
-  const [selectedAgentId, setSelectedAgentId] = useState<string>("daily_report");
+  const [selectedAgentId, setSelectedAgentId] =
+    useState<string>("daily_report");
   const [detailAgentId, setDetailAgentId] = useState<string | null>(null);
   const [reportSyncDir, setReportSyncDir] = useState("");
   const [reportSyncDirDirty, setReportSyncDirDirty] = useState(false);
@@ -115,18 +120,25 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [config, runners, providers, targets] = await Promise.all([
-        getDailyAgentConfig(taskId),
-        imGatewayApi.getExternalCliConfig(),
-        imGatewayApi.listProviders(),
-        imGatewayApi.listTargets(),
-      ]);
+      const [config, runners, providers, targets, templateData] =
+        await Promise.all([
+          getDailyAgentConfig(taskId),
+          imGatewayApi.getExternalCliConfig(),
+          imGatewayApi.listProviders(),
+          imGatewayApi.listTargets(),
+          getDailyAgentTemplates(),
+        ]);
       const agents = config.config.agents || [];
       const preferredAgentId = routeDetailAgentId || selectedAgentId;
-      const nextSelectedAgentId = agents.some((agent) => agent.id === preferredAgentId)
+      const nextSelectedAgentId = agents.some(
+        (agent) => agent.id === preferredAgentId,
+      )
         ? preferredAgentId
         : agents[0]?.id || "daily_report";
-      const instr = await getDailyAgentInstructions(taskId, nextSelectedAgentId);
+      const instr = await getDailyAgentInstructions(
+        taskId,
+        nextSelectedAgentId,
+      );
       setConfigData(config);
       setInstructions(instr);
       setSelectedAgentId(nextSelectedAgentId);
@@ -139,8 +151,11 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
       setRunnerConfig(runners);
       setImProviders(providers);
       setImTargets(targets);
+      setTemplates(templateData.templates);
     } catch (error: unknown) {
-      message.error(`Failed to load Daily Agent config: ${errorMessage(error)}`);
+      message.error(
+        `Failed to load Daily Agent config: ${errorMessage(error)}`,
+      );
     } finally {
       setLoading(false);
     }
@@ -157,9 +172,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
     }
   }, [routeDetailAgentId]);
 
-  const handleConfigUpdate = async (
-    updates: Partial<AsrDailyAgentConfig>
-  ) => {
+  const handleConfigUpdate = async (updates: Partial<AsrDailyAgentConfig>) => {
     setSaving(true);
     try {
       const result = await updateDailyAgentConfig(taskId, updates);
@@ -181,20 +194,20 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
 
   const agents = useMemo(
     () => configData?.config.agents || [],
-    [configData?.config.agents]
+    [configData?.config.agents],
   );
 
   const selectedAgent = useMemo(
     () => agents.find((agent) => agent.id === selectedAgentId) || agents[0],
-    [agents, selectedAgentId]
+    [agents, selectedAgentId],
   );
 
   const selectedWorkspaceAgent = useMemo(
     () =>
       configData?.workspace?.agents?.find(
-        (agent) => agent.agent_id === selectedAgent?.id
+        (agent) => agent.agent_id === selectedAgent?.id,
       ),
-    [configData?.workspace?.agents, selectedAgent?.id]
+    [configData?.workspace?.agents, selectedAgent?.id],
   );
 
   const loadAgentInstructions = useCallback(
@@ -204,7 +217,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
       setInstructionsText(instr.content);
       setInstructionsDirty(false);
     },
-    [taskId]
+    [taskId],
   );
 
   const openAgentDetail = async (agentId: string) => {
@@ -246,7 +259,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
 
   const updateAgent = (agentId: string, patch: Partial<AsrDailyAgentItem>) => {
     const nextAgents = agents.map((agent) =>
-      agent.id === agentId ? { ...agent, ...patch } : agent
+      agent.id === agentId ? { ...agent, ...patch } : agent,
     );
     void saveAgents(nextAgents);
   };
@@ -265,7 +278,11 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
       id,
       name: id,
       enabled: true,
-      runner: template.runner || runnerConfig?.defaultRunnerId || runnerOptions[0]?.value || "Codex",
+      runner:
+        template.runner ||
+        runnerConfig?.defaultRunnerId ||
+        runnerOptions[0]?.value ||
+        "Codex",
       timeout_ms: template.timeout_ms || 7_200_000,
       trigger_policy: "after_asr_run",
       instructions_source: "default",
@@ -299,7 +316,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
 
   const imChannelOptions = useMemo<ImChannelOption[]>(() => {
     const providerById = new Map(
-      imProviders.map((provider) => [provider.id, provider])
+      imProviders.map((provider) => [provider.id, provider]),
     );
     const ownerOptions = imProviders
       .filter((provider) => provider.owner_open_id?.trim())
@@ -324,7 +341,11 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
   const handleSaveInstructions = async () => {
     setSaving(true);
     try {
-      await updateDailyAgentInstructions(taskId, instructionsText, selectedAgent?.id);
+      await updateDailyAgentInstructions(
+        taskId,
+        instructionsText,
+        selectedAgent?.id,
+      );
       message.success("Instructions saved");
       setInstructionsDirty(false);
     } catch (error: unknown) {
@@ -362,12 +383,26 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
     }
   };
 
+  const handleApplyTemplate = async (templateId: string) => {
+    setSaving(true);
+    try {
+      await applyDailyAgentTemplate(taskId, templateId);
+      message.success("Official Daily Research template applied");
+      setDetailAgentId(null);
+      await fetchAll();
+    } catch (error: unknown) {
+      message.error(`Failed to apply template: ${errorMessage(error)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleSyncReports = async () => {
     setSyncing(true);
     try {
       const result = await syncDailyAgentReports(taskId);
       message.success(
-        `Synced ${result.sync.copied_files} copied, ${result.sync.skipped_files} skipped`
+        `Synced ${result.sync.copied_files} copied, ${result.sync.skipped_files} skipped`,
       );
       fetchAll();
     } catch (error: unknown) {
@@ -426,7 +461,8 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
   const config = configData?.config;
   const reportIndex = configData?.report_index_status;
   const activeAgentId = selectedAgent?.id || selectedAgentId;
-  const reportSync = selectedAgent?.last_report_sync || config?.last_report_sync;
+  const reportSync =
+    selectedAgent?.last_report_sync || config?.last_report_sync;
   const formatTimestamp = (value?: number) =>
     value ? new Date(value).toLocaleString() : "Never";
 
@@ -448,26 +484,33 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
       >
         <Space style={{ justifyContent: "space-between", width: "100%" }}>
           <Space>
-            <Button
-              icon={<ArrowLeftOutlined />}
-              onClick={closeAgentDetail}
-            >
+            <Button icon={<ArrowLeftOutlined />} onClick={closeAgentDetail}>
               Daily Agents
             </Button>
             <Text strong>{selectedAgent.name}</Text>
             <Text code>{selectedAgent.id}</Text>
           </Space>
-          <Button icon={<ReloadOutlined />} onClick={fetchAll} loading={loading}>
+          <Button
+            icon={<ReloadOutlined />}
+            onClick={fetchAll}
+            loading={loading}
+          >
             Refresh
           </Button>
         </Space>
 
-        <Card size="small" title="Agent Configuration" loading={loading && !config}>
+        <Card
+          size="small"
+          title="Agent Configuration"
+          loading={loading && !config}
+        >
           <Descriptions column={2} size="small" bordered>
             <Descriptions.Item label="Enabled">
               <Switch
                 checked={selectedAgent.enabled}
-                onChange={(enabled) => updateAgent(selectedAgent.id, { enabled })}
+                onChange={(enabled) =>
+                  updateAgent(selectedAgent.id, { enabled })
+                }
                 loading={saving}
               />
             </Descriptions.Item>
@@ -564,7 +607,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                   mode="multiple"
                   allowClear
                   value={(selectedAgent.dependencies || []).map(
-                    (dependency) => dependency.agent_id
+                    (dependency) => dependency.agent_id,
                   )}
                   placeholder="Select upstream agents..."
                   options={agents
@@ -575,7 +618,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                       (selectedAgent.dependencies || []).map((dependency) => [
                         dependency.agent_id,
                         dependency,
-                      ])
+                      ]),
                     );
                     updateAgent(selectedAgent.id, {
                       dependencies: dependencyIds.map(
@@ -583,7 +626,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                           existing.get(agent_id) || {
                             agent_id,
                             include_output: true,
-                          }
+                          },
                       ),
                     });
                   }}
@@ -602,7 +645,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                             (item) =>
                               item.agent_id === dependency.agent_id
                                 ? { ...item, include_output }
-                                : item
+                                : item,
                           ),
                         })
                       }
@@ -637,6 +680,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                     research_fanout: enabled
                       ? {
                           max_questions: 8,
+                          max_concurrency: 3,
                           chatgpt_interface_mode: "chat",
                           chatgpt_model: "pro",
                           chatgpt_project_url: undefined,
@@ -669,6 +713,23 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                     }
                   />
                 </Descriptions.Item>
+                <Descriptions.Item label="Max Concurrent Research">
+                  <InputNumber
+                    data-testid="asr-daily-agent-research-max-concurrency"
+                    size="small"
+                    min={1}
+                    max={8}
+                    value={selectedAgent.research_fanout.max_concurrency}
+                    onChange={(maxConcurrency) =>
+                      updateAgent(selectedAgent.id, {
+                        research_fanout: {
+                          ...selectedAgent.research_fanout!,
+                          max_concurrency: Number(maxConcurrency || 1),
+                        },
+                      })
+                    }
+                  />
+                </Descriptions.Item>
                 <Descriptions.Item label="ChatGPT Project URL" span={2}>
                   <Input
                     key={`${selectedAgent.id}-project-url-${
@@ -684,16 +745,15 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                       const chatgptProjectUrl = event.target.value.trim();
                       if (
                         chatgptProjectUrl ===
-                        (selectedAgent.research_fanout!
-                          .chatgpt_project_url || "")
+                        (selectedAgent.research_fanout!.chatgpt_project_url ||
+                          "")
                       ) {
                         return;
                       }
                       updateAgent(selectedAgent.id, {
                         research_fanout: {
                           ...selectedAgent.research_fanout!,
-                          chatgpt_project_url:
-                            chatgptProjectUrl || undefined,
+                          chatgpt_project_url: chatgptProjectUrl || undefined,
                         },
                       });
                     }}
@@ -719,7 +779,11 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                   />
                 </Descriptions.Item>
                 <Descriptions.Item label="Runtime Data Fallbacks" span={2}>
-                  <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                  <Space
+                    direction="vertical"
+                    size={8}
+                    style={{ width: "100%" }}
+                  >
                     {Object.entries(
                       selectedAgent.research_fanout.context_profiles || {},
                     ).map(([profileId, profile]) => (
@@ -794,8 +858,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                                     .context_profiles,
                                   [profileId]: {
                                     ...profile,
-                                    instructions:
-                                      instructions || undefined,
+                                    instructions: instructions || undefined,
                                   },
                                 },
                               },
@@ -957,7 +1020,9 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
               </>
             ) : null}
             <Descriptions.Item label="Instructions Source">
-              <Tag>{instructions?.source || selectedAgent.instructions_source}</Tag>
+              <Tag>
+                {instructions?.source || selectedAgent.instructions_source}
+              </Tag>
             </Descriptions.Item>
           </Descriptions>
           {selectedAgent.research_fanout ? (
@@ -966,7 +1031,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
               type="info"
               showIcon
               message="Each research question runs in its own conversation"
-              description="The upstream dispatcher must output a research manifest. ChatGPT Web research runs are forced to Chat mode with the Pro model before a question is sent. When a Project URL is configured, every new research conversation is created inside that ChatGPT Project."
+              description="The upstream dispatcher must output a research manifest. Independent questions run concurrently up to the configured limit and keep manifest order in the final digest. ChatGPT Web research runs are forced to Chat mode with the Pro model before a question is sent. When a Project URL is configured, every new research conversation is created inside that ChatGPT Project. GitHub access still requires the user's Connector authorization."
             />
           ) : null}
         </Card>
@@ -1065,9 +1130,10 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                     ? "green"
                     : selectedAgent.last_status === "failed"
                       ? "red"
-                      : selectedAgent.last_status === "skipped_dependency_failed"
+                      : selectedAgent.last_status ===
+                          "skipped_dependency_failed"
                         ? "orange"
-                      : "default"
+                        : "default"
                 }
               >
                 {selectedAgent.last_status || "never"}
@@ -1085,12 +1151,16 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
               {selectedWorkspaceAgent?.report_count ?? 0}
             </Descriptions.Item>
             <Descriptions.Item label="Output Dir">
-              <Text code>{selectedWorkspaceAgent?.output_dir || selectedAgent.output_dir}</Text>
+              <Text code>
+                {selectedWorkspaceAgent?.output_dir || selectedAgent.output_dir}
+              </Text>
             </Descriptions.Item>
             <Descriptions.Item label="Instructions File">
               <Tag
                 color={
-                  selectedWorkspaceAgent?.instructions_exists ? "green" : "orange"
+                  selectedWorkspaceAgent?.instructions_exists
+                    ? "green"
+                    : "orange"
                 }
               >
                 {selectedWorkspaceAgent?.instructions_exists
@@ -1100,7 +1170,11 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
             </Descriptions.Item>
             {selectedAgent.last_error && (
               <Descriptions.Item label="Error" span={3}>
-                <Alert type="error" message={selectedAgent.last_error} showIcon />
+                <Alert
+                  type="error"
+                  message={selectedAgent.last_error}
+                  showIcon
+                />
               </Descriptions.Item>
             )}
           </Descriptions>
@@ -1109,7 +1183,8 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
               <Descriptions column={3} size="small" style={{ marginTop: 8 }}>
                 <Descriptions.Item label="Report Sync">
                   <Tag color={reportSync.failed_files > 0 ? "red" : "green"}>
-                    {reportSync.copied_files} copied / {reportSync.total_files} total
+                    {reportSync.copied_files} copied / {reportSync.total_files}{" "}
+                    total
                   </Tag>
                 </Descriptions.Item>
                 <Descriptions.Item label="Skipped">
@@ -1194,7 +1269,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
 
         <Card
           size="small"
-          title={`Agent Instructions (${selectedAgent.name || activeAgentId})`}
+          title={`Custom Prompt / Instructions (${selectedAgent.name || activeAgentId})`}
           extra={
             <Button
               type="primary"
@@ -1225,7 +1300,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                 fontSize: 12,
               },
             }}
-            placeholder="Agent instructions..."
+            placeholder="Define this user's domain rules, tool routing, repository mapping, and output requirements..."
           />
           {instructions?.source && (
             <Text
@@ -1243,7 +1318,11 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
       <Card size="small" title="Daily Agents" loading={loading && !config}>
-        <Space direction="vertical" size={8} style={{ width: "100%", marginBottom: 12 }}>
+        <Space
+          direction="vertical"
+          size={8}
+          style={{ width: "100%", marginBottom: 12 }}
+        >
           <Space
             style={{
               justifyContent: "space-between",
@@ -1293,7 +1372,11 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                 Sync Reports
               </Button>
             </Space>
-            <Button icon={<ReloadOutlined />} onClick={fetchAll} loading={loading}>
+            <Button
+              icon={<ReloadOutlined />}
+              onClick={fetchAll}
+              loading={loading}
+            >
               Refresh
             </Button>
           </Space>
@@ -1336,8 +1419,44 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
           type="info"
           showIcon
           style={{ marginBottom: 12 }}
-          message="Enabled agents run in dependency order. Without dependencies, the configured list order is preserved."
+          message="Stages run serially in dependency order; independent research questions can run concurrently with a configured limit."
         />
+        {templates.map((template) => (
+          <Alert
+            key={template.id}
+            data-testid={`asr-daily-agent-template-${template.id}`}
+            type="success"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message={`${template.name} (Official Template)`}
+            description={
+              <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                <Text>{template.description}</Text>
+                <Text type="secondary">
+                  Uses minimal generic prompts. Every Agent Prompt remains
+                  editable; no personal keywords, repositories, channels, or
+                  ChatGPT Project are included.
+                </Text>
+                <Popconfirm
+                  title="Replace the current Agent list with this template?"
+                  description="Task terminology and report sync settings are preserved. IM delivery stays off until you configure it."
+                  okText="Use template"
+                  onConfirm={() => handleApplyTemplate(template.id)}
+                >
+                  <Button
+                    data-testid={`asr-daily-agent-apply-template-${template.id}`}
+                    type="primary"
+                    size="small"
+                    loading={saving}
+                    style={{ width: "fit-content" }}
+                  >
+                    Use Template
+                  </Button>
+                </Popconfirm>
+              </Space>
+            }
+          />
+        ))}
         <Table<AsrDailyAgentItem>
           data-testid="asr-daily-agents-table"
           size="small"
@@ -1353,7 +1472,9 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
               render: (enabled, record) => (
                 <Switch
                   checked={enabled}
-                  onChange={(checked) => updateAgent(record.id, { enabled: checked })}
+                  onChange={(checked) =>
+                    updateAgent(record.id, { enabled: checked })
+                  }
                 />
               ),
             },
@@ -1446,7 +1567,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                             ? "red"
                             : record.last_status === "skipped_dependency_failed"
                               ? "orange"
-                            : "default"
+                              : "default"
                       }
                     >
                       {record.last_status}
@@ -1493,7 +1614,11 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
             },
           ]}
         />
-        <Button style={{ marginTop: 12 }} icon={<PlusOutlined />} onClick={addAgent}>
+        <Button
+          style={{ marginTop: 12 }}
+          icon={<PlusOutlined />}
+          onClick={addAgent}
+        >
           Add Agent
         </Button>
       </Card>
@@ -1501,8 +1626,13 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
   );
 }
 
-export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProps) {
-  const [runsData, setRunsData] = useState<AsrDailyAgentRunsResponse | null>(null);
+export function DailyAgentRecordsTab({
+  taskId,
+  onOpenReport,
+}: DailyAgentTabProps) {
+  const [runsData, setRunsData] = useState<AsrDailyAgentRunsResponse | null>(
+    null,
+  );
   const [loading, setLoading] = useState(false);
   const [agentFilter, setAgentFilter] = useState<string | undefined>();
   const [dateFilter, setDateFilter] = useState<string | undefined>();
@@ -1513,7 +1643,9 @@ export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProp
     try {
       setRunsData(await getDailyAgentRuns(taskId));
     } catch (error: unknown) {
-      message.error(`Failed to load Daily Agent records: ${errorMessage(error)}`);
+      message.error(
+        `Failed to load Daily Agent records: ${errorMessage(error)}`,
+      );
     } finally {
       setLoading(false);
     }
@@ -1564,10 +1696,12 @@ export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProp
           value,
           label: label === value ? label : `${label} (${value})`,
         })),
-      dates: [...dates].sort((a, b) => b.localeCompare(a)).map((value) => ({
-        value,
-        label: value,
-      })),
+      dates: [...dates]
+        .sort((a, b) => b.localeCompare(a))
+        .map((value) => ({
+          value,
+          label: value,
+        })),
       runners: [...runners].sort().map((value) => ({
         value,
         label: value,
@@ -1578,7 +1712,10 @@ export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProp
   const filteredDocuments = useMemo(
     () =>
       processedDocuments.filter((record) => {
-        if (agentFilter && (record.agent_id || "daily_report") !== agentFilter) {
+        if (
+          agentFilter &&
+          (record.agent_id || "daily_report") !== agentFilter
+        ) {
           return false;
         }
         if (dateFilter && record.date !== dateFilter) {
@@ -1605,7 +1742,11 @@ export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProp
       }
     >
       {runsData && processedDocuments.length > 0 ? (
-        <Space direction="vertical" size={12} style={{ width: "100%", minWidth: 0 }}>
+        <Space
+          direction="vertical"
+          size={12}
+          style={{ width: "100%", minWidth: 0 }}
+        >
           <Space size={8} wrap>
             <Select
               allowClear
@@ -1650,7 +1791,10 @@ export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProp
                 [
                   record.agent_id || "daily_report",
                   record.date,
-                  record.last_run_id || record.report_path || record.output_dir || "",
+                  record.last_run_id ||
+                    record.report_path ||
+                    record.output_dir ||
+                    "",
                 ].join(":")
               }
               size="small"
@@ -1717,7 +1861,9 @@ export function DailyAgentRecordsTab({ taskId, onOpenReport }: DailyAgentTabProp
                         size="small"
                         data-testid={`asr-daily-agent-report-link-${record.agent_id}-${record.date}`}
                         style={{ padding: 0, height: "auto", fontSize: 11 }}
-                        onClick={() => onOpenReport?.(record.date, record.agent_id)}
+                        onClick={() =>
+                          onOpenReport?.(record.date, record.agent_id)
+                        }
                       >
                         {v.split("/").pop()}
                       </Button>

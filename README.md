@@ -94,11 +94,16 @@ ASR Daily Agent 支持把一篇日报拆成多个独立研究问题，并由 Cha
 ```json
 {
   "max_questions": 8,
+  "max_concurrency": 3,
   "chatgpt_interface_mode": "chat",
   "chatgpt_model": "pro",
   "chatgpt_project_url": "https://chatgpt.com/g/g-p-<project-id>/project"
 }
 ```
+
+Web UI 提供官方 `Daily Research` 一键模板，使用“串行阶段 + 有界并发研究”执行方式。模板只包含五个通用 Agent、依赖关系和最短 Prompt，不包含任何用户关键词、仓库、IM Channel 或 ChatGPT Project；应用后每个 Agent 的 Custom Prompt 都是任务自己的可编辑副本。用户可在 dispatcher Prompt 中定义关键词到 GitHub 仓库的路由，实际仓库访问仍由用户自己的 GitHub Connector 授权与索引控制。
+
+模板 API 为 `GET /_bifrost/api/asr/daily-agent-templates` 和 `POST /_bifrost/api/asr/tasks/{task_id}/daily-agent/apply-template`。`max_concurrency` 控制同一 manifest 内独立研究问题的并发上限，允许 1–8，旧配置默认使用 3；顶层 Agent DAG 仍按稳定拓扑顺序串行执行。
 
 完整 Agent 组合、研究 manifest 和失败边界见 [`design/asr-daily-agent-pipeline.md`](design/asr-daily-agent-pipeline.md)。
 

@@ -20,6 +20,10 @@
 - 上游失败时，下游默认跳过；用户可配置为继续执行。
 - 未知依赖、自依赖、重复依赖和循环依赖在保存配置时被拒绝。
 - WebUI 可以配置依赖和依赖失败策略，并看到依赖关系。
+- 每个 Agent 的 Prompt 独立保存、独立编辑；研究 child run 只继承所属 fan-out Agent 的用户自定义 Prompt。
+- 提供可一键套用的官方日报研究模板，但模板中只包含通用角色、最短 Prompt 和依赖关系。
+- 官方模板不得包含任何真实用户的关键词、仓库名、Provider、Project URL、术语、上下文 profile 或个人 Prompt。
+- 研究 fan-out 支持用户可配置的有界并发，并保持最终报告与 manifest 中的问题顺序一致。
 
 ### 必须不破坏
 
@@ -67,6 +71,8 @@ dependency_failure_policy: skip
 5. 对 `include_output=true` 的依赖，把上游输出同步到下游工作区。
 6. 下游照常生成自己的 change plan、执行 Runner、保存报告和发送 IM。
 
+顶层 DAG 当前采用稳定拓扑顺序串行执行，不声明同层并发。原因是同一任务共享运行锁、processed state 和部分 Runner 会话状态；在这些状态完成事务化拆分前，并行执行同层 Agent 会引入覆盖与重复运行风险。研究 fan-out 是明确的并发边界：同一 manifest 中互不依赖的问题可按 `max_concurrency` 有界并发，结果完成后再按原问题顺序落盘并生成索引。因此产品对外准确表述为“串行阶段编排 + 并发研究分流”，而不是“任意 DAG 全并发”。
+
 跳过状态使用 `skipped_dependency_failed`，错误信息包含依赖 Agent ID 和状态，便于 WebUI 与 API 诊断。
 
 ## 上游产物
@@ -86,6 +92,37 @@ Prompt 规则：
 - Codex、Bifrost Agent 等文件型 Runner 收到上游路径说明。
 - ChatGPT Web 收到与本轮变更日期匹配的上游文件完整正文。
 - 缺失或陈旧的产物由执行层按 `skip` / `continue` 策略处理。
+
+## 用户自定义 Prompt 与工具路由
+
+每个 Agent 使用现有 `instructions_source=default|custom` 与 `instructions` 字段独立保存 Prompt。WebUI 对每个 Agent 暴露可编辑的 Custom Prompt；更新一个 Agent 不影响同任务内其他 Agent，也不影响其他用户或任务。
+
+研究 dispatcher 的自定义 Prompt 可以定义用户自己的领域路由，例如“出现某类术语时，把指定仓库写入 manifest 的 `github_repositories`”。这类术语与仓库映射只存在用户任务配置中，不写入内置模板。manifest 声明仓库后，ChatGPT Web child Prompt 会要求使用已连接的 GitHub Connector；Prompt 只能请求工具，不能授予仓库权限。用户仍需在自己的 ChatGPT/GitHub 连接器中完成授权与索引。
+
+研究 child run 的 Prompt 由四层组成：
+
+1. 系统维护的最小研究契约（直接回答、来源与输出结构）；
+2. fan-out Agent 的用户自定义 Prompt，仅当 `instructions_source=custom` 时注入；
+3. dispatcher 为该问题生成的 `research_prompt`；
+4. 原始问题、背景、原始片段、仓库列表和可选的已核验上下文。
+
+自定义 Prompt 单独限长并清晰标记。默认日报等大模板不得隐式注入 child run，避免把无关的长 Prompt 重复发送给 ChatGPT Pro。
+
+## 官方模板
+
+内置 `daily-research` 官方模板提供以下五个通用节点：
+
+`daily_report -> research_seed -> research_dispatcher -> research_fanout -> research_digest`
+
+- `daily_report`：从当日材料生成简短日报。
+- `research_seed`：原样提取值得独立研究的问题。
+- `research_dispatcher`：输出结构化 manifest，并由用户 Prompt 决定领域关键词、仓库和 Runner 路由。
+- `research_fanout`：逐题独立研究，允许有界并发。
+- `research_digest`：汇总核心结论与完整研究链接。
+
+模板 API 返回可审计的模板元数据和 Agent 配置；应用模板时替换当前 Agent 列表，但保留任务级术语与报告同步目录。Runner 默认复用任务当前首个 Agent 的 Runner，也允许调用方显式覆盖主 Runner 与研究 Runner。模板默认关闭 IM 投递，不包含 Channel；用户确认目标后自行启用。模板中的全部 Prompt 必须是最短通用文本，不出现个人实例中的真实词汇、仓库、账户、Project URL 或上下文 profile。
+
+模板应用后，各 Agent 都是普通的用户配置副本：用户可以编辑、删除、增补依赖或另存配置，不与内置模板共享可变状态。模板升级也不会覆盖已经应用到任务的用户 Prompt。
 
 ## 日报研究工作流（本地配置，不进入默认值）
 
@@ -169,6 +206,7 @@ ChatGPT Web child run 发送前必须强制校验：
 - `context_profile` 是可选回退，只能引用本机配置的安全映射；manifest 不能直接提供任意绝对路径。
 - `research_prompt` 是单题补充要求，不替代 Agent 的基础 instructions。
 - `questions: []` 是合法结果，表示当日日报没有需要外部研究的问题；fan-out 必须成功收敛，不能把零个子任务判定为全部失败。
+- `max_concurrency` 只控制同一日期内 research child run 的并发上限；每个 child 使用独立 session key、结果文件和 metadata 文件。完成顺序不得改变 manifest 和汇总报告中的问题顺序。
 
 ### Child run 产物
 
@@ -238,6 +276,9 @@ agents/research_dispatcher/output/research_result/
 - 旧配置序列化/反序列化兼容。
 - `chatgpt_project_url` 规范化、非法 host/path 拒绝、未配置兼容，以及 fan-out 到 adapter request 的投影。
 - 新 conversation 使用 Project URL，已有 conversation 继续使用 `/c/<conversation_id>`。
+- 只有 fan-out Agent 的 custom Prompt 会进入研究 child Prompt；default Prompt 不会泄漏或重复发送。
+- fan-out 并发数边界校验、并发执行和结果顺序稳定。
+- 官方模板 DAG 合法、Prompt 可独立修改，并且不含个人关键词、仓库、Provider、Project URL 或 context profile。
 
 ### E2E
 
@@ -245,6 +286,8 @@ agents/research_dispatcher/output/research_result/
 - 验证 Agent 执行顺序、同日上游产物、失败跳过和 IM 内容。
 - 验证手动单 Agent 运行不意外启动依赖。
 - 验证项目配置进入 ChatGPT Web child request，未配置时不出现 `projectUrl`。
+- 列出并一键应用官方模板，验证五节点 DAG、最短 Prompt、Runner 继承和任务级设置保留。
+- 应用模板后更新单个 Agent Prompt，验证其他 Agent 与内置模板响应保持不变。
 
 ### 真实场景测试
 

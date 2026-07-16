@@ -144,10 +144,43 @@
 - 背景、片段、单题要求与已核验上下文超过上限时截断，并明确提示以原始问题为准。
 - E2E 未配置 mock 时在启动真实浏览器前失败；配置 mock 时不访问真实 ChatGPT；只有 `BIFROST_CHATGPT_WEB_LIVE_E2E=1` 才允许创建真实会话。
 
+### TC-ADRP-11：官方模板与每用户 Prompt 隔离
+
+1. 请求 `GET /_bifrost/api/asr/daily-agent-templates`，检查 `daily-research` 官方模板。
+2. 搜索模板 JSON 中是否出现真实用户关键词、仓库、Provider、Channel、ChatGPT Project URL 或 context profile。
+3. 对临时任务调用 `POST /_bifrost/api/asr/tasks/{task_id}/daily-agent/apply-template`，显式传入主 Runner 和研究 Runner。
+4. 在 WebUI 中点击 `Use Template`，确认后进入 `research_dispatcher` 和 `research_fanout` 分别编辑 Custom Prompt。
+5. 修改一个 Agent Prompt 后重新读取其他 Agent 与官方模板 API。
+
+预期：
+
+- 模板只包含 `daily_report -> research_seed -> research_dispatcher -> research_fanout -> research_digest` 五个通用节点、依赖和最短 Prompt。
+- 模板不包含任何真实用户关键词、仓库名、IM Channel、Provider、Project URL、运行时目录或个人 Prompt；默认关闭 IM Delivery。
+- 应用模板保留任务级 terminology 与 report sync 目录，Runner 使用调用方选择；应用后的配置是用户自己的副本。
+- 每个 Agent Prompt 可独立编辑；修改一个 Agent 不改变其他 Agent，也不改变后续模板 API 返回值。
+- 用户可在 dispatcher Prompt 中定义自己的关键词到 GitHub 仓库映射；Prompt 只能请求 GitHub Connector，不能绕过用户账户的授权与索引。
+
+### TC-ADRP-12：串行阶段与有界并发研究
+
+1. 对包含多层依赖的五个 Agent 执行 Run All，观察顶层执行顺序。
+2. 在 `research_fanout` 设置 `max_concurrency=2`，让 manifest 同时包含至少六个互不依赖问题。
+3. 运行 `cargo test -p bifrost-admin daily_agent_research_jobs_respect_bounded_concurrency -- --nocapture`。
+4. 执行隔离 API E2E，并比较 manifest、每题 JSON 和最终 fan-out report 的问题顺序。
+5. 在 WebUI 将 Max Concurrent Research 分别设为 1、3、8，并尝试越界值。
+
+预期：
+
+- 顶层 Agent DAG 仍按稳定拓扑顺序串行执行，不宣称任意同层并发。
+- 同一 manifest 的独立研究 child run 最多同时执行 `max_concurrency` 个；不同 child 使用独立 session、结果和 metadata 文件。
+- 并发完成先后不会改变 manifest 和最终 report 的问题顺序；单题失败不阻塞其他题。
+- 后端只接受 1–8；旧配置没有该字段时自动使用默认值 3。
+- WebUI 准确说明“串行阶段 + 并发研究分流”，并显示 GitHub Connector 仍需用户授权。
+
 ## 执行记录
 
 | 日期 | 用例 | 结果 |
 | --- | --- | --- |
+| 2026-07-16 | TC-ADRP-11/12 | 官方 `daily-research` 模板 API、应用 API、Prompt 隔离、隐私 marker 扫描、Runner/terminology/report sync 保留和有界并发单测通过；隔离 Bifrost API E2E 通过，fan-out 使用 `max_concurrency=2` 且 custom 研究 Prompt 进入两个独立 ChatGPT mock run；Playwright 使用本机 Chrome 验证模板确认交互与并发配置。 |
 | 2026-07-16 | TC-ADRP-02/06 同会话恢复与真实微信投递 | `2026-07-14` 的播客研究曾因旧版把无 `data-message-id` 的规划外壳误判为完成，随后等待超时而失败。部署修复后，fan-out 从失败元数据恢复原 conversation `6a57becd-5cec-83ea-82c7-7ecdcac88da9`，只执行 `wait`，4.9 秒取回 37333 字节、五章齐全的最终稿；未新建 conversation、未重复发送 Pro Prompt。成功 JSON、fan-out 和 digest 保持 Project 内完整链接。研究摘要 run `1784137650213-afa516b8-56d0-4d67-b3c0-d341177825da` 与日报概要 run `1784137768366-049c2ff2-7459-4270-9903-bbb29005a479` 均成功；微信出站 `5691644c`、`5a66c73d` 均为 `msg_type=text`、`status=success`，研究摘要包含原始问题、核心概要与原 Project 链接。 |
 | 2026-07-15 | TC-ADRP-10 | 根据真实信贷研究 Prompt（19594 字节）确认其中误带整份“全天候私人助理整理指南”。修复后单题 Prompt 不再读取日报 `AGENTS.md`，并为背景、原始片段、单题要求和已核验上下文设置独立字符上限；`daily_agent_research_child_prompt_is_compact_and_excludes_daily_report_instructions` 与 `live_chatgpt_web_is_fail_closed_during_e2e_without_explicit_opt_in` 通过。mock 流水线 E2E task `dd2a3454d9154d96a3bf4c41f6662fae` 通过且未创建真实 Pro 会话；`local-ci.sh --skip-e2e` 的格式、clippy、全工作区测试和依赖审计全部通过。 |
 | 2026-07-15 | TC-ADRP-02/06 历史补跑与真实微信投递 | 使用 `2026-07-09` 的真实“帮我记录一下”研究清单补跑。ChatGPT Web 在 Project“日报研究”中以 Chat + Pro 分别生成 4 个独立会话；四份结果大小分别为 31808、19590、12222、12069 字节，均包含 `原始问题 / 核心结论 / 事实与证据 / 推断与不确定性 / 对原始问题的直接回答` 五段。fan-out 聚合报告 76913 字节，digest run `1784046733550-ec44d3d4-c38a-4de7-a6c0-d35cb81ac105` 成功生成 21602 字节摘要。首次自动微信投递明确失败为 `weixin sendmessage failed: ret=-2`，消息日志正确记录失败；用户在 Bot 对话发送 `1` 刷新微信会话后，补发两段摘要成功，出站日志 `ca7e24f3`、`6fccd249` 均为 `✓`。 |

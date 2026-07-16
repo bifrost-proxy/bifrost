@@ -246,6 +246,7 @@ pub async fn handle_asr(req: Request<Incoming>, path: &str) -> Response<BoxBody>
         || path.starts_with("/api/asr/diarization")
         || path.starts_with("/api/asr/speaker-profiles")
         || path == "/api/asr/external-volumes"
+        || path == "/api/asr/daily-agent-templates"
     {
         return handle_asr_tasks(req, path).await;
     }

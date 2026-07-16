@@ -279,6 +279,7 @@ fn compact_daily_research_prompt_field(value: &str, max_chars: usize) -> String 
 
 fn build_daily_research_child_prompt(
     question: &AsrDailyResearchQuestion,
+    agent_instructions: Option<&str>,
     context: Option<&str>,
     research_runner_can_read_context_repo: bool,
 ) -> String {
@@ -299,6 +300,17 @@ fn build_daily_research_child_prompt(
         prompt.push_str(&compact_daily_research_prompt_field(
             &question.source_excerpt,
             DAILY_RESEARCH_SOURCE_EXCERPT_PROMPT_CHARS,
+        ));
+        prompt.push('\n');
+    }
+    if let Some(agent_instructions) = agent_instructions
+        .map(str::trim)
+        .filter(|instructions| !instructions.is_empty())
+    {
+        prompt.push_str("\n## 本研究 Agent 的要求\n");
+        prompt.push_str(&compact_daily_research_prompt_field(
+            agent_instructions,
+            DAILY_RESEARCH_CUSTOM_PROMPT_CHARS,
         ));
         prompt.push('\n');
     }
@@ -782,6 +794,236 @@ fn render_daily_research_index(
     report
 }
 
+async fn run_daily_agent_research_question(
+    task: &AsrDirectoryTask,
+    fanout: &AsrDailyAgentResearchFanoutConfig,
+    date: &str,
+    agent_work_dir: &Path,
+    child_dir: &Path,
+    question: &AsrDailyResearchQuestion,
+) -> Result<(AsrDailyResearchChildResult, bool), String> {
+    let question_id = question.id.trim();
+    let final_runner = question
+        .runner
+        .as_deref()
+        .unwrap_or(&task.daily_agent.runner)
+        .trim()
+        .to_string();
+    let result_path = child_dir.join(format!("{question_id}.md"));
+    let context_path = child_dir.join(format!("{question_id}-context.md"));
+    let metadata_path = child_dir.join(format!("{question_id}.json"));
+    let context_profile = question
+        .context_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|key| fanout.context_profiles.get(key).map(|profile| (key, profile)));
+    let final_adapter =
+        daily_research_runner_adapter(&final_runner).unwrap_or_else(|| final_runner.clone());
+    let context_adapter = context_profile
+        .and_then(|(_, profile)| daily_research_runner_adapter(profile.runner.trim()));
+    let direct_context_access = context_profile.is_some_and(|(_, profile)| {
+        profile.runner.trim() == final_runner && final_adapter != "chatgpt_web"
+    });
+    let final_work_dir = if direct_context_access {
+        PathBuf::from(context_profile.expect("checked context profile").1.work_dir.trim())
+    } else {
+        agent_work_dir.to_path_buf()
+    };
+
+    let execution = async {
+        if !final_work_dir.is_dir() {
+            return Err(format!(
+                "research work_dir does not exist: {}",
+                final_work_dir.display()
+            ));
+        }
+        let mut context_content = None;
+        if let Some((profile_key, profile)) = context_profile {
+            if !direct_context_access {
+                if context_adapter.as_deref() == Some("chatgpt_web") {
+                    return Err(format!(
+                        "context profile '{profile_key}' must use a local file-capable runner, not ChatGPT Web"
+                    ));
+                }
+                let context_work_dir = PathBuf::from(profile.work_dir.trim());
+                if !context_work_dir.is_dir() {
+                    return Err(format!(
+                        "context profile '{profile_key}' work_dir does not exist: {}",
+                        context_work_dir.display()
+                    ));
+                }
+                let context_prompt = build_daily_research_context_prompt(question, profile);
+                let context_session = format!(
+                    "asr-research:{}:{}:{date}:{question_id}:context",
+                    task.id, task.daily_agent.agent_id
+                );
+                let context_execution = run_daily_research_child(
+                    task,
+                    profile.runner.trim(),
+                    context_prompt,
+                    &context_work_dir,
+                    &context_session,
+                )
+                .await?;
+                std::fs::write(&context_path, context_execution.response.trim())
+                    .map_err(|error| format!("write context result failed: {error}"))?;
+                context_content = Some(context_execution.response);
+            }
+        }
+        let child_session = format!(
+            "asr-research:{}:{}:{date}:{question_id}:research",
+            task.id, task.daily_agent.agent_id
+        );
+        if final_adapter == "chatgpt_web" {
+            if let Some(conversation_id) = recoverable_daily_research_conversation_id(
+                &metadata_path,
+                question,
+                &final_runner,
+            ) {
+                tracing::info!(
+                    question_id,
+                    conversation_id,
+                    "recovering failed daily research child by waiting on its existing ChatGPT conversation"
+                );
+                let conversation_url = daily_research_conversation_url(
+                    fanout.chatgpt_project_url.as_deref(),
+                    &conversation_id,
+                );
+                let waited = run_daily_research_child_request(
+                    task,
+                    &final_runner,
+                    String::new(),
+                    &final_work_dir,
+                    &child_session,
+                    serde_json::json!({ "conversationId": conversation_id }),
+                    Some("wait"),
+                )
+                .await
+                .map_err(|error| {
+                    format!(
+                        "existing ChatGPT research conversation {conversation_url} wait failed; refusing to create duplicate Pro research: {error}"
+                    )
+                })?;
+                validate_daily_research_response(&waited.response, question).map_err(|error| {
+                    format!(
+                        "existing ChatGPT research conversation {conversation_url} is still incomplete; refusing to create duplicate Pro research: {error}"
+                    )
+                })?;
+                return Ok(waited);
+            }
+        }
+        let agent_instructions = (task.daily_agent.instructions_source
+            == AsrDailyAgentInstructionsSource::Custom)
+            .then_some(task.daily_agent.instructions.as_deref())
+            .flatten();
+        let prompt = build_daily_research_child_prompt(
+            question,
+            agent_instructions,
+            context_content.as_deref(),
+            direct_context_access,
+        );
+        let execution = run_daily_research_child(
+            task,
+            &final_runner,
+            prompt,
+            &final_work_dir,
+            &child_session,
+        )
+        .await?;
+        ensure_complete_daily_research_execution(
+            task,
+            &final_runner,
+            question,
+            &final_work_dir,
+            &child_session,
+            execution,
+        )
+        .await
+    }
+    .await;
+
+    let (child_result, succeeded) = match execution {
+        Ok(execution) => {
+            std::fs::write(&result_path, execution.response.trim())
+                .map_err(|error| format!("write research result failed: {error}"))?;
+            let (conversation_id, full_report_link) = daily_research_conversation_link(
+                &execution,
+                fanout.chatgpt_project_url.as_deref(),
+            );
+            let connector_status =
+                daily_research_github_connector_status(question, &execution.response);
+            let status = match connector_status {
+                Some("verified") | None => "success",
+                Some("unavailable") if context_path.is_file() => "success_with_local_context",
+                Some("unavailable") => "github_connector_unavailable",
+                Some(_) => "github_connector_unverified",
+            };
+            (
+                AsrDailyResearchChildResult {
+                    question_id: question_id.to_string(),
+                    original_question: question.original_question.clone(),
+                    runner: final_runner.clone(),
+                    github_repositories: question.github_repositories.clone(),
+                    github_connector_status: connector_status.map(str::to_string),
+                    context_profile: question.context_profile.clone(),
+                    status: status.to_string(),
+                    run_id: Some(execution.run_id),
+                    conversation_id,
+                    full_report_link,
+                    result_path: Some(result_path.to_string_lossy().to_string()),
+                    context_path: context_path
+                        .is_file()
+                        .then(|| context_path.to_string_lossy().to_string()),
+                    error: None,
+                },
+                true,
+            )
+        }
+        Err(error) => {
+            let conversation_id = daily_research_conversation_id_from_text(&error);
+            let full_report_link = conversation_id.as_deref().map(|id| {
+                daily_research_conversation_url(fanout.chatgpt_project_url.as_deref(), id)
+            });
+            (
+                AsrDailyResearchChildResult {
+                    question_id: question_id.to_string(),
+                    original_question: question.original_question.clone(),
+                    runner: final_runner.clone(),
+                    github_repositories: question.github_repositories.clone(),
+                    github_connector_status: None,
+                    context_profile: question.context_profile.clone(),
+                    status: "failed".to_string(),
+                    run_id: None,
+                    conversation_id,
+                    full_report_link,
+                    result_path: None,
+                    context_path: context_path
+                        .is_file()
+                        .then(|| context_path.to_string_lossy().to_string()),
+                    error: Some(error),
+                },
+                false,
+            )
+        }
+    };
+    atomic_json_write(&metadata_path, &child_result)?;
+    Ok((child_result, succeeded))
+}
+
+async fn collect_bounded_daily_research_jobs<I, F, T>(jobs: I, max_concurrency: usize) -> Vec<T>
+where
+    I: IntoIterator<Item = F>,
+    F: std::future::Future<Output = T>,
+{
+    use futures_util::StreamExt as _;
+
+    futures_util::stream::iter(jobs)
+        .buffer_unordered(max_concurrency)
+        .collect::<Vec<_>>()
+        .await
+}
+
 async fn run_daily_agent_research_fanout(
     task: &AsrDirectoryTask,
     plan: &AsrDailyAgentChangePlan,
@@ -808,211 +1050,36 @@ async fn run_daily_agent_research_fanout(
             .map_err(|error| format!("create research output dir failed: {error}"))?;
         atomic_json_write(&child_dir.join("manifest.json"), &manifest)?;
 
-        let mut results = Vec::new();
-        let mut success_count = 0usize;
-        for question in &manifest.questions {
-            let question_id = question.id.trim();
-            let final_runner = question
-                .runner
-                .as_deref()
-                .unwrap_or(&task.daily_agent.runner)
-                .trim()
-                .to_string();
-            let result_path = child_dir.join(format!("{question_id}.md"));
-            let context_path = child_dir.join(format!("{question_id}-context.md"));
-            let metadata_path = child_dir.join(format!("{question_id}.json"));
-            let context_profile = question
-                .context_profile
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .and_then(|key| fanout.context_profiles.get(key).map(|profile| (key, profile)));
-            let final_adapter = daily_research_runner_adapter(&final_runner)
-                .unwrap_or_else(|| final_runner.clone());
-            let context_adapter = context_profile
-                .and_then(|(_, profile)| daily_research_runner_adapter(profile.runner.trim()));
-            let direct_context_access = context_profile.is_some_and(|(_, profile)| {
-                profile.runner.trim() == final_runner && final_adapter != "chatgpt_web"
+        let entry_date = entry.date.as_str();
+        let agent_work_dir_ref = agent_work_dir.as_path();
+        let child_dir_ref = child_dir.as_path();
+        let jobs = manifest
+            .questions
+            .clone()
+            .into_iter()
+            .enumerate()
+            .map(|(index, question)| async move {
+                let result = run_daily_agent_research_question(
+                    task,
+                    fanout,
+                    entry_date,
+                    agent_work_dir_ref,
+                    child_dir_ref,
+                    &question,
+                )
+                .await;
+                (index, result)
             });
-            let final_work_dir = if direct_context_access {
-                PathBuf::from(context_profile.expect("checked context profile").1.work_dir.trim())
-            } else {
-                agent_work_dir.clone()
-            };
+        let mut completed =
+            collect_bounded_daily_research_jobs(jobs, fanout.max_concurrency).await;
+        completed.sort_by_key(|(index, _)| *index);
 
-            let execution = async {
-                if !final_work_dir.is_dir() {
-                    return Err(format!(
-                        "research work_dir does not exist: {}",
-                        final_work_dir.display()
-                    ));
-                }
-                let mut context_content = None;
-                if let Some((profile_key, profile)) = context_profile {
-                    if !direct_context_access {
-                        if context_adapter.as_deref() == Some("chatgpt_web") {
-                            return Err(format!(
-                                "context profile '{profile_key}' must use a local file-capable runner, not ChatGPT Web"
-                            ));
-                        }
-                        let context_work_dir = PathBuf::from(profile.work_dir.trim());
-                        if !context_work_dir.is_dir() {
-                            return Err(format!(
-                                "context profile '{profile_key}' work_dir does not exist: {}",
-                                context_work_dir.display()
-                            ));
-                        }
-                        let context_prompt = build_daily_research_context_prompt(question, profile);
-                        let context_session = format!(
-                            "asr-research:{}:{}:{}:{}:context",
-                            task.id, task.daily_agent.agent_id, entry.date, question_id
-                        );
-                        let context_execution = run_daily_research_child(
-                            task,
-                            profile.runner.trim(),
-                            context_prompt,
-                            &context_work_dir,
-                            &context_session,
-                        )
-                        .await?;
-                        std::fs::write(&context_path, context_execution.response.trim())
-                            .map_err(|error| format!("write context result failed: {error}"))?;
-                        context_content = Some(context_execution.response);
-                    }
-                }
-                let child_session = format!(
-                    "asr-research:{}:{}:{}:{}:research",
-                    task.id, task.daily_agent.agent_id, entry.date, question_id
-                );
-                if final_adapter == "chatgpt_web" {
-                    if let Some(conversation_id) = recoverable_daily_research_conversation_id(
-                        &metadata_path,
-                        question,
-                        &final_runner,
-                    ) {
-                        tracing::info!(
-                            question_id,
-                            conversation_id,
-                            "recovering failed daily research child by waiting on its existing ChatGPT conversation"
-                        );
-                        let conversation_url = daily_research_conversation_url(
-                            fanout.chatgpt_project_url.as_deref(),
-                            &conversation_id,
-                        );
-                        let waited = run_daily_research_child_request(
-                            task,
-                            &final_runner,
-                            String::new(),
-                            &final_work_dir,
-                            &child_session,
-                            serde_json::json!({ "conversationId": conversation_id }),
-                            Some("wait"),
-                        )
-                        .await
-                        .map_err(|error| {
-                            format!(
-                                "existing ChatGPT research conversation {conversation_url} wait failed; refusing to create duplicate Pro research: {error}"
-                            )
-                        })?;
-                        validate_daily_research_response(&waited.response, question).map_err(
-                            |error| {
-                                format!(
-                                    "existing ChatGPT research conversation {conversation_url} is still incomplete; refusing to create duplicate Pro research: {error}"
-                                )
-                            },
-                        )?;
-                        return Ok(waited);
-                    }
-                }
-                let prompt = build_daily_research_child_prompt(
-                    question,
-                    context_content.as_deref(),
-                    direct_context_access,
-                );
-                let execution = run_daily_research_child(
-                    task,
-                    &final_runner,
-                    prompt,
-                    &final_work_dir,
-                    &child_session,
-                )
-                .await?;
-                ensure_complete_daily_research_execution(
-                    task,
-                    &final_runner,
-                    question,
-                    &final_work_dir,
-                    &child_session,
-                    execution,
-                )
-                .await
-            }
-            .await;
-
-            let child_result = match execution {
-                Ok(execution) => {
-                    std::fs::write(&result_path, execution.response.trim())
-                        .map_err(|error| format!("write research result failed: {error}"))?;
-                    let (conversation_id, full_report_link) =
-                        daily_research_conversation_link(
-                            &execution,
-                            fanout.chatgpt_project_url.as_deref(),
-                        );
-                    let connector_status =
-                        daily_research_github_connector_status(question, &execution.response);
-                    let status = match connector_status {
-                        Some("verified") | None => "success",
-                        Some("unavailable") if context_path.is_file() => {
-                            "success_with_local_context"
-                        }
-                        Some("unavailable") => "github_connector_unavailable",
-                        Some(_) => "github_connector_unverified",
-                    };
-                    success_count += 1;
-                    AsrDailyResearchChildResult {
-                        question_id: question_id.to_string(),
-                        original_question: question.original_question.clone(),
-                        runner: final_runner.clone(),
-                        github_repositories: question.github_repositories.clone(),
-                        github_connector_status: connector_status.map(str::to_string),
-                        context_profile: question.context_profile.clone(),
-                        status: status.to_string(),
-                        run_id: Some(execution.run_id),
-                        conversation_id,
-                        full_report_link,
-                        result_path: Some(result_path.to_string_lossy().to_string()),
-                        context_path: context_path
-                            .is_file()
-                            .then(|| context_path.to_string_lossy().to_string()),
-                        error: None,
-                    }
-                }
-                Err(error) => {
-                    let conversation_id = daily_research_conversation_id_from_text(&error);
-                    let full_report_link = conversation_id.as_deref().map(|id| {
-                        daily_research_conversation_url(fanout.chatgpt_project_url.as_deref(), id)
-                    });
-                    AsrDailyResearchChildResult {
-                        question_id: question_id.to_string(),
-                        original_question: question.original_question.clone(),
-                        runner: final_runner.clone(),
-                        github_repositories: question.github_repositories.clone(),
-                        github_connector_status: None,
-                        context_profile: question.context_profile.clone(),
-                        status: "failed".to_string(),
-                        run_id: None,
-                        conversation_id,
-                        full_report_link,
-                        result_path: None,
-                        context_path: context_path
-                            .is_file()
-                            .then(|| context_path.to_string_lossy().to_string()),
-                        error: Some(error),
-                    }
-                }
-            };
-            atomic_json_write(&metadata_path, &child_result)?;
-            results.push(child_result);
+        let mut results = Vec::with_capacity(completed.len());
+        let mut success_count = 0usize;
+        for (_, completed_result) in completed {
+            let (result, succeeded) = completed_result?;
+            success_count += usize::from(succeeded);
+            results.push(result);
         }
 
         let report = render_daily_research_index(&entry.date, &results);

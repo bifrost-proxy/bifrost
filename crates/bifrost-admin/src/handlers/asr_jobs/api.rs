@@ -15,6 +15,9 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
             json_response(&serde_json::json!({ "volumes": volumes }))
         }
         (&Method::GET, "/api/asr/tasks/-/watch") => list_task_watch_response(),
+        (&Method::GET, "/api/asr/daily-agent-templates") => {
+            get_daily_agent_templates_response()
+        }
         (&Method::GET, "/api/asr/tasks") => list_tasks_response(),
         (&Method::POST, "/api/asr/tasks") => create_task_response(req).await,
         (&Method::PATCH, _) if path.starts_with("/api/asr/tasks/") => {
@@ -89,6 +92,9 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
                 [task_id, "daily-agent", "run"] => post_daily_agent_run_response(task_id, req).await,
                 [task_id, "daily-agent", "send"] => post_daily_agent_send_response(task_id, req).await,
                 [task_id, "daily-agent", "sync"] => post_daily_agent_sync_response(task_id).await,
+                [task_id, "daily-agent", "apply-template"] => {
+                    post_apply_daily_agent_template_response(task_id, req).await
+                }
                 _ => error_response(StatusCode::NOT_FOUND, "ASR task endpoint not found"),
             }
         }

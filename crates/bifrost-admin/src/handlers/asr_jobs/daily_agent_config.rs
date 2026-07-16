@@ -501,6 +501,12 @@ fn validate_daily_agent_item(item: &AsrDailyAgentItem) -> Result<(), String> {
                 item.name
             ));
         }
+        if fanout.max_concurrency == 0 || fanout.max_concurrency > 8 {
+            return Err(format!(
+                "Daily Agent '{}' research_fanout.max_concurrency must be between 1 and 8",
+                item.name
+            ));
+        }
         if fanout.chatgpt_interface_mode != "chat" || fanout.chatgpt_model != "pro" {
             return Err(format!(
                 "Daily Agent '{}' research fan-out requires ChatGPT interface_mode='chat' and model='pro'",
@@ -677,6 +683,10 @@ fn default_research_fanout_max_questions() -> usize {
     8
 }
 
+fn default_research_fanout_max_concurrency() -> usize {
+    3
+}
+
 fn default_research_chatgpt_interface_mode() -> String {
     "chat".to_string()
 }
@@ -689,6 +699,8 @@ fn default_research_chatgpt_model() -> String {
 pub(crate) struct AsrDailyAgentResearchFanoutConfig {
     #[serde(default = "default_research_fanout_max_questions")]
     pub max_questions: usize,
+    #[serde(default = "default_research_fanout_max_concurrency")]
+    pub max_concurrency: usize,
     #[serde(default = "default_research_chatgpt_interface_mode")]
     pub chatgpt_interface_mode: String,
     #[serde(default = "default_research_chatgpt_model")]
@@ -706,6 +718,7 @@ impl Default for AsrDailyAgentResearchFanoutConfig {
     fn default() -> Self {
         Self {
             max_questions: default_research_fanout_max_questions(),
+            max_concurrency: default_research_fanout_max_concurrency(),
             chatgpt_interface_mode: default_research_chatgpt_interface_mode(),
             chatgpt_model: default_research_chatgpt_model(),
             chatgpt_project_url: None,

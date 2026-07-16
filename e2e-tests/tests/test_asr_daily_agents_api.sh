@@ -97,7 +97,7 @@ def report_content(report_path, prompt):
             return "# Research digest\n\n本日报未识别到需要外部研究的问题。\n"
         links = []
         for upstream in pathlib.Path.cwd().glob("input/upstream/research_fanout/*-report.md"):
-            links.extend(re.findall(r"https://chatgpt\.com/c/[A-Za-z0-9_-]+", upstream.read_text(encoding="utf-8")))
+            links.extend(re.findall(r"https://chatgpt\.com/(?:g/g-p-[A-Za-z0-9_-]+/)?c/[A-Za-z0-9_-]+", upstream.read_text(encoding="utf-8")))
         unique_links = sorted(set(links))
         return (
             "# Research digest\n\n"
@@ -240,6 +240,61 @@ task = request("POST", "/asr/tasks", {
 }, expected=(200, 201))
 task_id = task["id"]
 
+templates_response = request("GET", "/asr/daily-agent-templates")
+assert len(templates_response["templates"]) == 1, templates_response
+official_template = templates_response["templates"][0]
+assert official_template["id"] == "daily-research", official_template
+assert official_template["official"] is True, official_template
+assert official_template["prompt_customizable"] is True, official_template
+assert official_template["execution_mode"] == "serial_stages_parallel_research_fanout"
+template_text = json.dumps(official_template, ensure_ascii=False).lower()
+for personal_marker in (
+    "金渐成", "鸡哥", "机哥", "天机", "jinjiancheng", "ibkr", "owner:", "g-p-"
+):
+    assert personal_marker not in template_text, (personal_marker, official_template)
+
+request("PUT", f"/asr/tasks/{task_id}/daily-agent", {
+    "terminology": "E2E USER TERMINOLOGY",
+    "report_sync_dir": str(pathlib.Path(data_dir) / "template-sync"),
+})
+applied_template = request(
+    "POST",
+    f"/asr/tasks/{task_id}/daily-agent/apply-template",
+    {
+        "template_id": "daily-research",
+        "primary_runner": "daily-codex",
+        "research_runner": "web-research",
+    },
+)
+applied_config = applied_template["config"]
+assert [item["id"] for item in applied_config["agents"]] == [
+    "daily_report",
+    "research_seed",
+    "research_dispatcher",
+    "research_fanout",
+    "research_digest",
+], applied_config
+assert applied_config["terminology"] == "E2E USER TERMINOLOGY", applied_config
+assert applied_config["report_sync_dir"].endswith("template-sync"), applied_config
+applied_fanout = next(
+    item for item in applied_config["agents"] if item["id"] == "research_fanout"
+)
+assert applied_fanout["runner"] == "web-research", applied_fanout
+assert applied_fanout["research_fanout"]["max_concurrency"] == 3, applied_fanout
+assert all(not item["im_delivery"]["enabled"] for item in applied_config["agents"])
+
+custom_prompt = "E2E_CUSTOM_RESEARCH_AGENT_RULE: use the user's repository mapping"
+saved_prompt = request(
+    "PUT",
+    f"/asr/tasks/{task_id}/daily-agent/agents?agent_id=research_fanout",
+    {"content": custom_prompt},
+)
+assert saved_prompt["ok"] is True, saved_prompt
+loaded_prompt = request(
+    "GET", f"/asr/tasks/{task_id}/daily-agent/agents?agent_id=research_fanout"
+)
+assert custom_prompt in loaded_prompt["content"], loaded_prompt
+
 def agent(agent_id, runner, output_dir, dependencies=None, fanout=None):
     value = {
         "id": agent_id,
@@ -275,6 +330,7 @@ agents = [
         ["research_dispatcher"],
         {
             "max_questions": 8,
+            "max_concurrency": 2,
             "chatgpt_project_url": "https://chatgpt.com/g/g-p-daily-research/project",
             "allowed_runners": ["web-research"],
             "context_profiles": {},
@@ -284,6 +340,8 @@ agents = [
     agent("research_seed", "daily-codex", "research_seed", ["daily_report"]),
     agent("daily_report", "daily-codex", "report"),
 ]
+agents[1]["instructions_source"] = "custom"
+agents[1]["instructions"] = custom_prompt
 updated = request("PUT", f"/asr/tasks/{task_id}/daily-agent", {
     "enabled": True,
     "agents": agents,
@@ -291,6 +349,7 @@ updated = request("PUT", f"/asr/tasks/{task_id}/daily-agent", {
 stored = {item["id"]: item for item in updated["config"]["agents"]}
 assert stored["research_fanout"]["research_fanout"]["chatgpt_interface_mode"] == "chat", stored
 assert stored["research_fanout"]["research_fanout"]["chatgpt_model"] == "pro", stored
+assert stored["research_fanout"]["research_fanout"]["max_concurrency"] == 2, stored
 
 invalid = list(agents)
 invalid[0] = dict(invalid[0], dependencies=[{"agent_id":"missing-agent","include_output":True}])
@@ -354,8 +413,12 @@ product_report = (children_dir / "product-question.md").read_text(encoding="utf-
 assert github["original_question"] == "IBKR 仓库如何计算成交成本？", github
 assert product["original_question"] == "日报研究问题如何做到每题独立会话？", product
 assert github["conversation_id"] != product["conversation_id"], (github, product)
-assert github["full_report_link"].startswith("https://chatgpt.com/c/"), github
-assert product["full_report_link"].startswith("https://chatgpt.com/c/"), product
+assert github["full_report_link"].startswith(
+    "https://chatgpt.com/g/g-p-daily-research/c/"
+), github
+assert product["full_report_link"].startswith(
+    "https://chatgpt.com/g/g-p-daily-research/c/"
+), product
 assert github["github_connector_status"] == "missing", github
 for report in (github_report, product_report):
     assert "## 原始问题" in report, report
@@ -376,6 +439,12 @@ retry_prompts = [
     in path.read_text(encoding="utf-8")
 ]
 assert len(retry_prompts) >= 2, retry_prompts
+custom_prompts = [
+    path
+    for path in (pathlib.Path(data_dir) / "im_gateway" / "runs").glob("*/prompt.md")
+    if custom_prompt in path.read_text(encoding="utf-8")
+]
+assert len(custom_prompts) >= 2, custom_prompts
 
 fanout_report = (fanout_dir / f"{date}-report.md").read_text(encoding="utf-8")
 assert github["full_report_link"] in fanout_report, fanout_report
