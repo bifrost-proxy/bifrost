@@ -7,7 +7,7 @@ Bifrost 当前 Sync 体系把远端同步服务建模为一个全局 `remote_bas
 - 同时启用多个同步目标, 例如 ByteDance Internal + Bifrost Cloud + GitHub Gist; 三者独立连接, 不互斥。
 - 区分 provider 能力: 有的只支持规则同步和基础配置同步, 有的支持小组规则, 有的还能承担 Remote Invoke relay。
 - 把 GitHub Gist 这类公开可信开发者服务纳入个人规则同步, 同时保留现有 Bifrost Sync Server 协议。
-- 在 ByteDance 内网自动检测可用 provider, 检测通过后自动推荐或配置 `https://bifrost.bytedance.net`。
+- 在 ByteDance 内网自动检测可用 provider, 检测通过后自动推荐或配置 `${BIFROST_DEFAULT_REMOTE_URL}`。
 - 当用户完全没有登录任何同步服务时, Web UI 首次进入 Sync 页面应主动弹出登录选择窗口。
 - 让未来 Gitee, WebDAV, OneDrive, Google Drive 等 provider 可以按同一扩展点接入。
 
@@ -180,7 +180,7 @@ display_name = "ByteDance Sync"
 managed = true
 
 [sync.providers.byte-work.config]
-remote_base_url = "https://bifrost.bytedance.net"
+remote_base_url = "<runtime-decoded-default-url>"
 
 [sync.providers.bifrost-cloud]
 type = "bifrost-server"
@@ -231,7 +231,7 @@ Existing:
 
 ```toml
 [sync]
-remote_base_url = "https://bifrost.bytedance.net"
+remote_base_url = "<runtime-decoded-default-url>"
 ```
 
 Migrates at read time to:
@@ -242,7 +242,7 @@ type = "bifrost-server"
 enabled = true
 
 [sync.providers.default-bifrost-server.config]
-remote_base_url = "https://bifrost.bytedance.net"
+remote_base_url = "<runtime-decoded-default-url>"
 ```
 
 Compat APIs still surface `remote_base_url` as the selected `bifrost-server` provider URL until UI/CLI migration completes.
@@ -453,11 +453,11 @@ Gist does not provide strong compare-and-swap for file update. Bifrost must use 
 
 ### Detection
 
-The `bytedance-internal` managed provider wraps `bifrost-server` type with canonical URL `https://bifrost.bytedance.net`.
+The `bytedance-internal` managed provider wraps `bifrost-server` type with canonical URL `${BIFROST_DEFAULT_REMOTE_URL}`.
 
 Detection:
 
-1. Probe `GET https://bifrost.bytedance.net/v4/sso/check`.
+1. Probe `GET ${BIFROST_DEFAULT_REMOTE_URL}/v4/sso/check`.
 2. Use short timeout, default 800-1500ms.
 3. Treat HTTP 200 or 401 as reachable.
 4. Treat DNS failure, TLS failure, timeout, and 5xx as unavailable.

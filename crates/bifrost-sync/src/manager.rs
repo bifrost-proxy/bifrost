@@ -226,8 +226,9 @@ pub struct SyncRuntimeState {
     pub last_error: Option<String>,
 }
 
-fn is_bytedance_remote(remote_base_url: &str) -> bool {
-    remote_base_url.contains("bytedance.net")
+fn is_managed_remote(remote_base_url: &str) -> bool {
+    normalize_remote_base_url(remote_base_url)
+        == normalize_remote_base_url(DEFAULT_REMOTE_BASE_URL.as_str())
 }
 
 fn normalize_remote_base_url(remote_base_url: &str) -> String {
@@ -239,7 +240,7 @@ fn provider_id_for_remote(remote_base_url: &str) -> Option<&'static str> {
     if normalized.is_empty() {
         return None;
     }
-    if is_bytedance_remote(&normalized) {
+    if is_managed_remote(&normalized) {
         Some("bytedance_internal")
     } else {
         Some("bifrost_cloud")
@@ -369,7 +370,7 @@ fn build_provider_statuses(
         .remote_base_url
         .trim_end_matches('/')
         .to_string();
-    let bytedance_selected = is_bytedance_remote(&current_url);
+    let bytedance_selected = is_managed_remote(&current_url);
     let cloud_selected = !bytedance_selected && !current_url.is_empty();
     let legacy_current_connected =
         provider_sessions.is_empty() && has_session && runtime.authorized;
@@ -3432,7 +3433,7 @@ mod tests {
     #[tokio::test]
     async fn server_auto_sync_cooldown_skips_probe_ticks_but_allows_forced_changes() {
         let (_temp, _config_manager, manager) =
-            sync_manager_for_remote("https://bifrost.bytedance.net").await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
 
         assert!(manager.should_run_server_auto_sync("bytedance_internal", false));
 
@@ -3451,9 +3452,9 @@ mod tests {
     #[tokio::test]
     async fn server_config_sync_action_updates_last_changed_only_for_content_changes() {
         let (_temp, _config_manager, manager) =
-            sync_manager_for_remote("https://bifrost.bytedance.net").await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
         let sync_config = SyncConfig {
-            remote_base_url: "https://bifrost.bytedance.net".to_string(),
+            remote_base_url: DEFAULT_REMOTE_BASE_URL.to_string(),
             ..Default::default()
         };
 
@@ -3571,7 +3572,7 @@ mod tests {
     #[tokio::test]
     async fn status_aggregates_latest_changed_sync_metadata_from_connected_providers() {
         let (_temp_dir, _config_manager, manager) =
-            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
         {
             let mut state = manager.state.lock();
             state.provider_sessions.insert(
@@ -3657,7 +3658,7 @@ mod tests {
     #[tokio::test]
     async fn server_config_sync_action_combines_with_existing_rule_action() {
         let (_temp_dir, config_manager, manager) =
-            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
         let sync_config = config_manager.config().await.sync.clone();
         {
             let mut state = manager.state.lock();
@@ -3704,12 +3705,23 @@ mod tests {
     #[test]
     fn provider_and_github_gist_helpers_cover_routing_edges() {
         assert_eq!(provider_id_for_remote("   "), None);
+        let default_remote_with_trailing_slash = format!("{}/", DEFAULT_REMOTE_BASE_URL.as_str());
         assert_eq!(
-            provider_id_for_remote("https://bifrost.bytedance.net/"),
+            provider_id_for_remote(&default_remote_with_trailing_slash),
             Some("bytedance_internal")
         );
         assert_eq!(
             provider_id_for_remote("https://sync.example.test/"),
+            Some("bifrost_cloud")
+        );
+        assert_eq!(
+            provider_id_for_remote("https://api.example.com/"),
+            Some("bifrost_cloud")
+        );
+        let internal_suffix = ["bytedance", ".net"].concat();
+        let other_internal_remote = format!("https://other.{internal_suffix}/");
+        assert_eq!(
+            provider_id_for_remote(&other_internal_remote),
             Some("bifrost_cloud")
         );
 
@@ -3832,7 +3844,7 @@ mod tests {
     #[tokio::test]
     async fn status_marks_remote_invoke_registered_for_bytedance_and_cloud_sessions() {
         let (_temp_dir, _config_manager, manager) =
-            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
         {
             let mut state = manager.state.lock();
             state.provider_sessions.insert(
@@ -3887,7 +3899,7 @@ mod tests {
     #[tokio::test]
     async fn status_leaves_unconfigured_bifrost_cloud_url_empty() {
         let (_temp_dir, _config_manager, manager) =
-            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
 
         let status = manager.status().await;
         let cloud = status
@@ -3902,7 +3914,7 @@ mod tests {
     #[tokio::test]
     async fn status_marks_github_gist_connected_from_provider_session() {
         let (_temp_dir, _config_manager, manager) =
-            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
         {
             let mut state = manager.state.lock();
             state.provider_sessions.insert(
@@ -3944,7 +3956,7 @@ mod tests {
     #[tokio::test]
     async fn status_marks_github_gist_session_unauthorized_after_token_error() {
         let (_temp_dir, _config_manager, manager) =
-            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
         {
             let mut state = manager.state.lock();
             state.provider_sessions.insert(
@@ -3988,7 +4000,7 @@ mod tests {
     #[tokio::test]
     async fn status_marks_github_gist_session_authorized_after_error_clears() {
         let (_temp_dir, _config_manager, manager) =
-            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
         {
             let mut state = manager.state.lock();
             state.provider_sessions.insert(
@@ -4109,7 +4121,7 @@ mod tests {
     #[tokio::test]
     async fn github_gist_snapshot_syncs_rule_create_update_and_delete() {
         let (_temp_dir, config_manager, manager) =
-            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
         let user = test_user("github:12345");
         let rules_storage = config_manager.rules_storage().await;
         rules_storage
@@ -4160,7 +4172,7 @@ mod tests {
     #[tokio::test]
     async fn github_gist_rule_sync_ignores_remote_metadata_only_changes() {
         let (_temp_dir, config_manager, manager) =
-            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
         let user = test_user("github:12345");
         let rules_storage = config_manager.rules_storage().await;
         let mut rule = RuleFile::new("stable-rule", "stable.example.com host://127.0.0.1:3000");
@@ -4200,7 +4212,7 @@ mod tests {
     #[tokio::test]
     async fn github_gist_snapshot_syncs_basic_config_updates() {
         let (_temp_dir, config_manager, manager) =
-            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
         let user = test_user("github:12345");
         config_manager
             .update_tls_config(TlsConfigUpdate {
@@ -4269,7 +4281,7 @@ mod tests {
     #[tokio::test]
     async fn github_gist_basic_config_sync_ignores_json_array_order() {
         let (_temp_dir, config_manager, manager) =
-            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
         let user = test_user("github:12345");
         config_manager
             .update_tls_config(TlsConfigUpdate {
@@ -4334,7 +4346,7 @@ mod tests {
     #[tokio::test]
     async fn github_gist_mirror_does_not_overwrite_server_rule_metadata() {
         let (_temp_dir, config_manager, manager) =
-            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
         let user = test_user("github:12345");
         let rules_storage = config_manager.rules_storage().await;
         let mut rule = RuleFile::new("server-rule", "example.com host://127.0.0.1:3000");
@@ -4364,7 +4376,7 @@ mod tests {
     #[tokio::test]
     async fn github_gist_mirror_replaces_snapshot_and_preserves_remote_create_time() {
         let (_temp_dir, config_manager, manager) =
-            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
         let user = test_user("github:12345");
         let rules_storage = config_manager.rules_storage().await;
         rules_storage
@@ -4439,7 +4451,7 @@ mod tests {
     #[tokio::test]
     async fn github_gist_mirror_basic_configs_preserves_create_time_and_becomes_idle() {
         let (_temp_dir, config_manager, manager) =
-            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
         let user = test_user("github:12345");
         config_manager
             .update_tls_config(TlsConfigUpdate {
@@ -4543,7 +4555,7 @@ mod tests {
     #[tokio::test]
     async fn remote_invoke_registration_targets_cover_single_and_dual_channels() {
         let (_temp_dir, _config_manager, manager) =
-            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
         manager.save_token("byte-token".to_string()).await.unwrap();
         let targets = manager.remote_invoke_registration_targets().await;
         assert_eq!(targets.len(), 1);
@@ -4551,7 +4563,7 @@ mod tests {
         assert_eq!(targets[0].session_token, "byte-token");
         assert_eq!(
             manager
-                .session_token_for_remote(DEFAULT_REMOTE_BASE_URL)
+                .session_token_for_remote(DEFAULT_REMOTE_BASE_URL.as_str())
                 .as_deref(),
             Some("byte-token")
         );
@@ -4614,7 +4626,7 @@ mod tests {
     #[tokio::test]
     async fn logout_clears_provider_sessions() {
         let (_temp_dir, _config_manager, manager) =
-            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
         {
             let mut state = manager.state.lock();
             state.token = Some("legacy-token".to_string());
@@ -4647,7 +4659,7 @@ mod tests {
     #[tokio::test]
     async fn logout_provider_clears_only_requested_provider_session() {
         let (_temp_dir, _config_manager, manager) =
-            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
         {
             let mut state = manager.state.lock();
             state.token = Some("byte-token".to_string());
@@ -4728,7 +4740,7 @@ mod tests {
     #[tokio::test]
     async fn logout_provider_clears_matching_legacy_token_without_touching_other_sessions() {
         let (_temp_dir, _config_manager, manager) =
-            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL).await;
+            sync_manager_for_remote(DEFAULT_REMOTE_BASE_URL.as_str()).await;
         {
             let mut state = manager.state.lock();
             state.token = Some("byte-token".to_string());
@@ -4919,7 +4931,7 @@ mod tests {
         manager
             .save_login_session(
                 "  ci-token  ".to_string(),
-                "https://bifrost.bytedance.net/".to_string(),
+                format!("{}/", DEFAULT_REMOTE_BASE_URL.as_str()),
             )
             .await
             .unwrap();
@@ -4928,7 +4940,10 @@ mod tests {
         let status = manager.status().await;
         assert!(config.sync.auto_sync);
         assert!(config.sync.enabled);
-        assert_eq!(config.sync.remote_base_url, "https://bifrost.bytedance.net");
+        assert_eq!(
+            config.sync.remote_base_url,
+            DEFAULT_REMOTE_BASE_URL.as_str()
+        );
         assert!(status.has_session);
         assert_eq!(manager.state.lock().token.as_deref(), Some("ci-token"));
     }

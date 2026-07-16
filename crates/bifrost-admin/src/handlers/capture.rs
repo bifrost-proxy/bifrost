@@ -210,7 +210,7 @@ mod tests {
         let state_clone = state.clone();
         let waiter = tokio::spawn(async move {
             let req = CaptureWaitRequest {
-                host_contains: Some("bits".to_string()),
+                host_contains: Some("api".to_string()),
                 method: Some("POST".to_string()),
                 path_contains: Some("/api/widget".to_string()),
                 req_json: None,
@@ -224,7 +224,7 @@ mod tests {
         let mut record = TrafficRecord::new(
             "cap-handler-1".to_string(),
             "POST".to_string(),
-            "http://bits.bytedance.net/api/widget/run".to_string(),
+            "http://api.example.com/api/widget/run".to_string(),
         );
         record.status = 200;
         store.record(record);

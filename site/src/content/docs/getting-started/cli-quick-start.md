@@ -389,7 +389,7 @@ bifrost login --token "$BIFROST_SYNC_TOKEN" --url https://example.com
 bifrost sync run
 ```
 
-`bifrost login` 与 `bifrost sync login` 等价。Headless/CI 登录 token 可从 `https://bifrost.bytedance.net/v4/sso/token-login` 获取；省略 `--url` 时使用当前同步配置的远端 URL，默认是内置 Bifrost Provider。
+`bifrost login` 与 `bifrost sync login` 等价。运行 `bifrost login --help` 可查看当前内置 Provider 的 Headless/CI token 获取地址；省略 `--url` 时使用当前同步配置的远端 URL，默认是内置 Bifrost Provider。
 
 Shell 补全：
 

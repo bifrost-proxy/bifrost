@@ -18,7 +18,11 @@ import {
   LoginOutlined,
   LogoutOutlined,
 } from "@ant-design/icons";
-import type { SyncProviderStatus, SyncStatus } from "../../../api/sync";
+import {
+  getDefaultRemoteBaseUrl,
+  type SyncProviderStatus,
+  type SyncStatus,
+} from "../../../api/sync";
 
 const { Text } = Typography;
 const GITHUB_GIST_TOKEN_URL =
@@ -126,7 +130,7 @@ const fallbackProviders: SyncProviderStatus[] = [
     id: "bytedance_internal",
     name: "ByteDance Internal",
     description: "Internal trusted sync and Remote Invoke provider.",
-    remote_base_url: "https://bifrost.bytedance.net",
+    remote_base_url: getDefaultRemoteBaseUrl(),
     connected: false,
     enabled: false,
     reachable: false,

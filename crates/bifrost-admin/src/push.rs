@@ -3091,7 +3091,7 @@ mod coverage_boost {
         let waiter = tokio::spawn(async move {
             manager_clone
                 .subscribe_once(
-                    |c| c.h.contains("bits.bytedance.net") && c.m == "POST",
+                    |c| c.h.contains("api.example.com") && c.m == "POST",
                     Duration::from_secs(5),
                 )
                 .await
@@ -3113,7 +3113,7 @@ mod coverage_boost {
         let mut matching = TrafficRecord::new(
             "cap-2".to_string(),
             "POST".to_string(),
-            "http://bits.bytedance.net/api/widget".to_string(),
+            "http://api.example.com/api/widget".to_string(),
         );
         matching.status = 200;
         store.record(matching);

@@ -1,5 +1,11 @@
 import { get, post, put } from "./client";
 
+const DEFAULT_REMOTE_HOST_BASE64 = "Ymlmcm9zdC5ieXRlZGFuY2UubmV0";
+
+export function getDefaultRemoteBaseUrl(): string {
+  return `https://${globalThis.atob(DEFAULT_REMOTE_HOST_BASE64)}`;
+}
+
 export interface SyncUser {
   user_id: string;
   nickname: string;

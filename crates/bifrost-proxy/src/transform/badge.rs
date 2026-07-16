@@ -502,7 +502,7 @@ mod tests {
 
     #[test]
     fn test_badge_inline_rules_data_escapes_script_close_tag() {
-        let rules = r#"{"rules":[{"name":"debug","rule_count":1,"group_id":null,"group_name":null}],"merged_content":"https://nextoncall.bytedance.net/ htmlAppend://{vconsole-inject}\n``` vconsole-inject\n<script src=\"https://unpkg.com/vconsole/dist/vconsole.min.js\"></script>\n<script>new VConsole();</script>\n```","admin_port":8800}"#;
+        let rules = r#"{"rules":[{"name":"debug","rule_count":1,"group_id":null,"group_name":null}],"merged_content":"https://app.example.com/ htmlAppend://{vconsole-inject}\n``` vconsole-inject\n<script src=\"https://unpkg.com/vconsole/dist/vconsole.min.js\"></script>\n<script>new VConsole();</script>\n```","admin_port":8800}"#;
         let snippet = build_badge_snippet(rules);
 
         assert!(snippet.contains(r#"\u003C/script\u003E"#));

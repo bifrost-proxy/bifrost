@@ -595,7 +595,7 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 操作步骤：
 
 1. 启动临时 Bifrost 代理并配置显式 `devtools://` 规则。
-2. 使用同一个浏览器通过代理打开两个相同 URL 的页面，例如两个 `https://nextoncall.bytedance.net/assistant` 标签页。
+2. 使用同一个浏览器通过代理打开两个相同 URL 的页面，例如两个 `https://app.example.com/assistant` 标签页。
 3. 保持两个目标页都在线，打开 WebUI DevTools 页面列表。
 4. 分别进入两个卡片的详情页，切换 Console / Network / Storage tab。
 5. 在第一个目标页写入 `localStorage.setItem('bifrost-tab-marker', 'tab-a')`，在第二个目标页写入 `tab-b`，并分别刷新 DevTools Storage snapshot。
