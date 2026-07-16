@@ -1406,8 +1406,44 @@
 3. 普通 Markdown 图片、图片附件、普通外链和带描述文字的链接图片维持原有渲染与灯箱行为。
 4. 亮色和暗色主题均使用 Ant Design token，边框、背景、文字和 focus/hover 状态可读。
 
+### TC-IEC-66: Linux app-server `ETXTBSY` 有界重试
+
+操作步骤：
+
+1. 执行注入瞬态 `ETXTBSY`、持续 `ETXTBSY` 与非瞬态 `NotFound` 的确定性回归，并验证缺失 executable 的用户错误：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     app_server_spawn_ --lib -- --nocapture
+   ```
+2. 在 Linux 执行故意保持 mock app-server 可执行文件写句柄、延迟释放的真实 spawn 回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     app_server_spawn_retries_linux_text_file_busy \
+     --lib -- --nocapture
+   ```
+3. 执行触发原 CI 失败的 app-server Live Guide 单测：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     mock_app_server_accepts_live_guide_and_completes_same_turn \
+     --lib -- --nocapture
+   ```
+4. 使用当前源码二进制执行隔离 app-server 黑盒链路：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_external_runner_live_guide.sh
+   ```
+5. 推送后确认 PR 的 `Coverage (Unit + Proxy E2E) & 90% Gate` job 通过。
+
+预期结果：
+
+1. Unix `ETXTBSY` 前两次失败、第三次成功时返回成功；持续 `ETXTBSY` 时恰好尝试 8 次后返回；Linux 真实 spawn 在写句柄释放后同样成功。启动层以 5ms 线性递增退避，最多尝试 8 次、总等待不超过 140ms。
+2. 非 `ETXTBSY` 错误只尝试一次；缺失 executable 的用户错误包含 adapter 与实际路径；成功 spawn 后不做第二次启动，避免重复 thread 或副作用。
+3. Live Guide 与真实临时服务 E2E 保持通过，运行结束后不残留 active run/session。
+4. coverage job 不再因该 mock app-server 测试的 `ETXTBSY` 瞬态失败而中断，并继续执行 90% gate。
+
 ## 最近执行记录
 
+- 2026-07-15：针对 PR #394 coverage job 的 Linux `Text file busy (os error 26)` 新增并立即执行 TC-IEC-66。注入回归验证 Unix `ETXTBSY` 前两次失败后第三次成功、持续占用恰好尝试 8 次后返回、`NotFound` 仅尝试一次，并验证缺失 executable 的用户错误保留 adapter 与实际路径；本机 macOS 按平台预期过滤 Linux 真实 spawn 用例，原失败用例 `mock_app_server_accepts_live_guide_and_completes_same_turn` 输出 `1 passed`；重新构建当前源码二进制后，`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh` 输出 `[external-runner-live-guide] PASS`。Linux 持有写句柄的真实回归与 95% changed-lines / 90% workspace coverage gate 由 PR CI 在目标平台执行并作为本用例最终门禁。
 - 2026-07-15：新增并立即执行 TC-IEC-65。引用结构单元回归 `6/6` 通过，覆盖双来源、单来源、非法/混合节点、普通图片，以及独立/描述性 favicon 仍可预览；Playwright focused E2E `1/1` 通过，确认双来源 favicon 均为 `14px × 14px`、无图片预览 ID，普通正文图片仍是唯一灯箱图片，暗色主题可见。随后以 `BACKEND_PORT=9900 WEB_PORT=3015 pnpm --dir web exec vite --host 127.0.0.1 --port 3015` 代理现有正式后端，在 Codex 内置浏览器打开用户真实 session/history；当前 canonical Agent Chat 参数下共识别 14 组来源引用、15 个 favicon，首组 `Reuters+2AP News+2` 高度 24px、两个图标均为 `14px × 14px`，页面没有正文预览图片。暗色主题下引用背景为 `rgba(255, 255, 255, 0.04)`、边框为 `rgb(48, 48, 48)`，组件持续可见。未停止或替换 9900 服务，未修改系统代理。
 - 2026-07-13：针对 PR #377 自动 Review 的 Claude 显式 exec stdin 兼容问题新增并立即执行 TC-IEC-64。单元回归输出 `1 passed`；真实临时 Bifrost E2E 输出 `[external-runner-live-guide] PASS`。mock 记录两次 `claude-exec` 均带 `--input-format text` 且不含 `--replay-user-messages`，首轮 guide 返回 `delivery=queued`，两轮均返回 `EXEC_claude-exec`。
 - 2026-07-13：针对 PR #377 Linux `E2E Shell` 失败新增并立即执行 TC-IEC-63。修复前同一命令稳定在 Python 第 246 行收到 `stream-json runner timed out after 30 seconds`；修复 mock Claude 从等待 stdin EOF 改为消费一条初始 user JSONL frame 后，`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_traex_model_slash.sh` 输出 `[im-gateway-model-slash] PASS`。Codex、Traex、Claude Code 的 model 与 effort 六次真实临时服务运行全部通过，Claude run 为 `1783925191553-f1ad8e07-13b0-44c3-b237-c05cedac9305`、effort run 为 `1783925198233-c9920e47-70ea-4976-bbae-d38932762e75`，无 30 秒超时。

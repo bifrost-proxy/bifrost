@@ -123,7 +123,7 @@ Claude Code + no custom args            -> stream_json
 other adapter                          -> existing transport
 ```
 
-不在 app-server 启动失败后静默重跑 exec，因为第一进程可能已经创建 thread/产生副作用；错误必须可见。兼容 fallback 只由明确 transport 选择与能力判断决定。
+不在 app-server 启动失败后静默重跑 exec，因为第一进程可能已经创建 thread/产生副作用；错误必须可见。兼容 fallback 只由明确 transport 选择与能力判断决定。Unix 在 `spawn` 尚未创建子进程时若返回瞬态 `ETXTBSY`（例如 CLI 刚完成原子升级或 CI 刚落盘 mock executable），允许在 200ms 内有界重试同一命令；其他错误立即返回，且一旦成功创建子进程就不再做启动重放。
 
 ### Worker 协议
 
@@ -168,6 +168,7 @@ bifrost agent guide --session cli-Codex "先检查失败日志"
 
 - transport selection：Codex/Traex default app-server、Claude Code default stream-json、explicit exec、text/custom args fallback、unsupported adapter。
 - app-server request：initialize/initialized、thread start/resume、turn start、turn steer 字段完整。
+- app-server spawn：Unix `ETXTBSY` 有界重试后成功，非瞬态错误不重试。
 - notification normalization：agent message、command execution、reasoning、plan、turn completed/failed。
 - worker protocol：Guide serialize/parse、ack correlation、worker exit rejects pending、control channel 饱和快速拒绝与 32 条 pending 上限。
 - guide result：accepted、no active、mismatch、non-steerable、timeout -> queue fallback。
@@ -191,4 +192,5 @@ Web Playwright 同时覆盖 Codex/Traex/Claude Code 默认 Guide、显式 Queue�
 - 配置映射与 exec flag 不完全等价：所有已支持 model/effort/sandbox/config 字段必须有单测；无法等价的 custom args 自动保留 exec。
 - turn-end race：必须依赖 expected turn id + ack + queue fallback，不允许 fire-and-forget。
 - app-server stdout 可能包含未知 notification：保留 raw frame，忽略未知展示事件但不能中断 turn。
+- Linux 并行测试或 CLI 更新窗口中，`fork/exec` 可能因其它线程短暂持有可执行文件的可写句柄而返回 `ETXTBSY`。app-server 启动层只对该 OS 错误执行最多 8 次、总计不超过 140ms 的线性退避重试；其它 spawn 错误立即返回，且不得在进程已成功启动后重跑，以免重复创建 thread 或产生副作用。
 - 回滚：用户可设置 `adapterConfig.transport=exec`，或给 Claude Code 配置 `--input-format text` custom args 恢复原路径；其他自定义 args 天然继续 exec。

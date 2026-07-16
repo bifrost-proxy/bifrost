@@ -42,6 +42,7 @@ mod imp {
         progress_highlight: Retained<NSView>,
         current_progress: Mutex<f64>,
         animation_running: Arc<AtomicBool>,
+        error_visible: AtomicBool,
         animation_thread: Mutex<Option<JoinHandle<()>>>,
     }
 
@@ -111,6 +112,7 @@ mod imp {
             progress_highlight,
             current_progress: Mutex::new(INITIAL_VISIBLE_PROGRESS),
             animation_running: Arc::new(AtomicBool::new(true)),
+            error_visible: AtomicBool::new(false),
             animation_thread: Mutex::new(None),
         });
 
@@ -162,15 +164,45 @@ mod imp {
     ) -> tauri::Result<()> {
         let handle = unsafe { &*(overlay_ptr as *mut LauncherOverlayHandle) };
         sync_overlay_frame(window, handle)?;
+        if handle.error_visible.swap(false, Ordering::Relaxed) {
+            handle.title.setStringValue(&NSString::from_str("Bifrost"));
+            handle
+                .title
+                .setFont(Some(&NSFont::systemFontOfSize_weight(21.0, 0.38)));
+            handle.progress_track.setAlphaValue(1.0);
+            handle.progress_fill.setAlphaValue(1.0);
+            handle.progress_highlight.setAlphaValue(1.0);
+        }
         let visible_progress =
             FINAL_VIRTUAL_PROGRESS + progress.clamp(0.0, 1.0) * HANDOFF_PROGRESS_RANGE;
         apply_visible_progress(handle, visible_progress);
         Ok(())
     }
 
+    pub fn set_overlay_error(window: &Window, overlay_ptr: usize) -> tauri::Result<()> {
+        let window = window.clone();
+        window.run_on_main_thread(move || {
+            let handle = unsafe { &*(overlay_ptr as *mut LauncherOverlayHandle) };
+            handle.animation_running.store(false, Ordering::Relaxed);
+            handle.error_visible.store(true, Ordering::Relaxed);
+            handle
+                .title
+                .setStringValue(&NSString::from_str("Bifrost couldn't load"));
+            handle
+                .title
+                .setFont(Some(&NSFont::systemFontOfSize_weight(18.0, 0.38)));
+            handle.progress_track.setAlphaValue(0.0);
+            handle.progress_fill.setAlphaValue(0.0);
+            handle.progress_highlight.setAlphaValue(0.0);
+        })
+    }
+
     pub fn tick_overlay(window: &Window, overlay_ptr: usize, tick: u64) -> tauri::Result<()> {
         let handle = unsafe { &*(overlay_ptr as *mut LauncherOverlayHandle) };
         sync_overlay_frame(window, handle)?;
+        if handle.error_visible.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         let virtual_progress = virtual_progress_for_tick(tick);
         let current_progress = handle
             .current_progress
@@ -437,6 +469,10 @@ mod imp {
         Ok(())
     }
 
+    pub fn set_overlay_error(_window: &Window, _overlay_ptr: usize) -> tauri::Result<()> {
+        Ok(())
+    }
+
     pub fn tick_overlay(_window: &Window, _overlay_ptr: usize, _tick: u64) -> tauri::Result<()> {
         Ok(())
     }
@@ -464,6 +500,10 @@ pub fn set_overlay_progress(
     progress: f64,
 ) -> tauri::Result<()> {
     imp::set_overlay_progress(window, overlay_ptr, progress)
+}
+
+pub fn set_overlay_error(window: &Window, overlay_ptr: usize) -> tauri::Result<()> {
+    imp::set_overlay_error(window, overlay_ptr)
 }
 
 pub fn remove_overlay(window: &Window, overlay_ptr: usize) -> tauri::Result<()> {

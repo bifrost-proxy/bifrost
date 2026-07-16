@@ -88,7 +88,7 @@ Bifrost 桌面端默认代理端口是 9900。用户会在多种场景下修改�
 2. `state.startup_ready = false` + 清 `startup_error`。
 3. Kill 当前 managed child（如果还持有）。
 4. 同步调用 `stop_backend_with_binary`（`<embedded core> stop`）保证 daemon runtime marker 被清理。
-5. `wait_for_backend_shutdown(current_port, 3s)` 等旧端口断开。
+5. `wait_for_backend_shutdown(current_port, 3s)` 等旧端口断开；stop helper 失败或超时后旧端口仍健康时立即返回错误，禁止继续启动 replacement core。
 6. `launch_backend_on_available_port(expected_port)`：从 `expected_port` 开始，最多 `MAX_PORT_INCREMENT_ATTEMPTS = 64` 次端口顺延。
 7. 成功后写回 `state.child`、`state.startup_ready = true`。
 
@@ -246,7 +246,7 @@ update_desktop_proxy_port(port)
 
 ### Phase 3：桌面壳层重启兜底（已完成）
 
-- `restart_backend_on_port` 走 `stop_backend_with_binary` + `wait_for_backend_shutdown` + `launch_backend_on_available_port`。
+- `restart_backend_on_port` 走 `terminate_managed_backend` + `stop_backend_before_restart` + `launch_backend_on_available_port`；前两步必须成功且旧端口必须确认下线，否则 fail-closed。
 - `begin_backend_recovery` guard 与 watchdog 共享。
 
 ### Phase 4：前端 UI 与 store 收敛（已完成）
