@@ -210,23 +210,23 @@ BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18880 --unsa
 - `daily sync` 首次和二次执行都能返回，二次同步返回 `copied_files=1`、`skipped_files=0`、`failed_files=0`。
 - 如果真实外部目录/I/O 超过同步超时，`/_bifrost/api/asr/tasks/<task_id>/daily-agent/sync` 返回结构化失败结果，代理进程仍能响应其他 admin/proxy 请求。
 
-### TC-DAR-14 Daily Agent 同步原始转写文件
+### TC-DAR-14 Daily Agent 同步原始转写文件到 original_text
 
 操作步骤：
 
 1. 执行 `bash e2e-tests/tests/test_asr_task_cli.sh`；脚本必须使用临时 `BIFROST_DATA_DIR`、非 9900 端口和临时同步目录。
 2. 脚本为临时 ASR task 生成 `.daily/2026-05-17.md` 与 `daily_report/2026-05-17-report.md`，再配置 `report_sync_dir`。
-3. 执行 `bifrost ai asr task daily sync <task_id>`，检查 `<sync_dir>/原始文件/2026-05-17.md` 与 `<sync_dir>/daily_report/2026-05-17-report.md`。
+3. 执行 `bifrost ai asr task daily sync <task_id>`，检查 `<sync_dir>/original_text/2026-05-17.md` 与 `<sync_dir>/daily_report/2026-05-17-report.md`，并确认没有创建旧的 `<sync_dir>/原始文件/`。
 4. 再次执行 `daily sync --json`，检查未变化的原始文件计入 `skipped_files`，report 仍按既有覆盖语义计入 `copied_files`。
-5. 删除同步目标中的 `原始文件/2026-05-17.md`，执行无待处理音频的 `bifrost ai asr task run <task_id> --wait`，确认 daily markdown 刷新后自动恢复原始文件。
+5. 删除同步目标中的 `original_text/2026-05-17.md`，执行无待处理音频的 `bifrost ai asr task run <task_id> --wait`，确认 daily markdown 刷新后自动恢复原始文件。
 6. 请求 `GET /_bifrost/api/asr/tasks/<task_id>/daily-agent`，核对 `config.last_original_sync`。
 
 预期结果：
 
-- 同步根目录创建字面目录 `原始文件/`，其中只复制 `.daily/` 根目录下合法的 `YYYY-MM-DD.md`，不复制 Agent workspace、隐藏文件或逐音频 JSON/SRT/VTT 派生文件。
+- 同步根目录创建字面目录 `original_text/`，且不创建旧目录 `原始文件/`；其中只复制 `.daily/` 根目录下合法的 `YYYY-MM-DD.md`，不复制 Agent workspace、隐藏文件或逐音频 JSON/SRT/VTT 派生文件。
 - 手动同步聚合结果包含 report 与原始文件；首次为 `total_files=2`、`copied_files=2`、`failed_files=0`，第二次为 `total_files=2`、`copied_files=1`、`skipped_files=1`、`failed_files=0`。
 - ASR daily markdown 刷新后无需等待 Daily Agent Runner 成功即可自动同步原始文件；即使 Daily Agent 被禁用，只要 `report_sync_dir` 已配置仍会同步。
-- `last_original_sync.target_dir` 指向 `<sync_dir>/原始文件`，并记录本轮 total/copied/skipped/failed；同步失败不把 ASR 主任务判为失败。
+- `last_original_sync.target_dir` 指向 `<sync_dir>/original_text`，并记录本轮 total/copied/skipped/failed；同步失败不把 ASR 主任务判为失败。
 
 ### TC-DAR-09 Daily Agent Records 支持按 Agent、Date、Runner 筛选
 
@@ -323,4 +323,4 @@ BIFROST_DATA_DIR="$(mktemp -d)" cargo run --bin bifrost -- start -p 18880 --unsa
 | 2026-06-03 | TC-DAR-09 Daily Agent Records 支持按 Agent、Date、Runner 筛选 | `source ~/.zshrc; pnpm --dir web exec node --input-type=module <Playwright script>` 打开 `asrTaskTab=daily-agent-records`，选择 Agent=`tomorrow_todo`、Date=`2026-05-20`、Runner=`abc`，再依次清空筛选；同脚本打开 `asrTaskTab=daily` 复查 Daily Docs 表头高度 | PASS：Run Results 初始 9 行，Agent 筛选后 1 行，Date 叠加后 1 行，Runner 叠加后 1 行，样例行为 `2026-05-20 tomorrow_todo ... abc 2026-05-20-report.md`；清空筛选后恢复 9 行；Daily Docs 表头最大高度 40px |
 | 2026-06-03 | TC-DAR-12 ASR 任务详情页滚动限制在当前 Tab 内部 | `source ~/.zshrc; node <Playwright script>` 使用 900x520 视口打开历史任务 `a911c68b0f7a43afa29d1863cc02229a`，分别检查 `files`、`daily`、`daily-agent-records`；另用 1000x620 视口检查 `overview`、`daily-agent` | PASS：各 tab 中 `window.scrollY=0`、任务详情根节点 `scrollTop=0`、任务详情 Card body `scrollTop=0`；`.asr-task-detail-tabs > .ant-tabs-content-holder` 的 `overflow-y=auto` 且可滚动，Files tab `holderScroll=1595/client=261`、Daily Docs `552/261`、Records `588/261`；Overview 与 Daily Agent 也只在 tab content-holder 内滚动 |
 | 2026-06-06 | TC-DAR-13 Daily Agent report 同步外部目录卡死回归 | `source ~/.zshrc; SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_report_sync_overwrites_unreadable_target_without_reading_target_hash --lib -- --nocapture`；`source ~/.zshrc; SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_report_sync_auto_after_generation_uses_isolated_copy_path --lib -- --nocapture`；`source ~/.zshrc; bash e2e-tests/tests/test_asr_task_cli.sh` | PASS：目标文件已存在且不可读时同步不读取目标 hash，使用临时文件覆盖为新 report；每日任务执行结束后的自动同步同样走隔离复制路径并写回 Agent `last_report_sync`；真实 CLI/API E2E 首次和二次 `daily sync` 均成功，二次返回 `copied_files=1`、`skipped_files=0`、`failed_files=0` |
-| 2026-07-15 | TC-DAR-14 Daily Agent 同步原始转写文件 | `bash e2e-tests/tests/test_asr_task_cli.sh` | PASS：临时 Bifrost 使用 18990 端口完成真实 CLI/API 链路；首次手动同步把 report 与 `.daily/2026-05-17.md` 分别写入 `daily_report/` 和 `原始文件/`，总计 `copied_files=2`；二次同步返回 `total_files=2`、`copied_files=1`、`skipped_files=1`、`failed_files=0`；删除目标原始文件后执行无待处理音频的 `task run --wait`，自动恢复 `原始文件/2026-05-17.md`，`config.last_original_sync.target_dir`、total/copied/failed 均符合预期；脚本清理临时服务和数据目录 |
+| 2026-07-16 | TC-DAR-14 Daily Agent 同步原始转写文件到 original_text | `bash e2e-tests/tests/test_asr_task_cli.sh` | PASS：临时 Bifrost 使用 18990 端口完成真实 CLI/API 链路；首次手动同步把 report 与 `.daily/2026-05-17.md` 分别写入 `daily_report/` 和 `original_text/`，总计 `copied_files=2`，且未创建旧 `原始文件/`；二次同步返回 `total_files=2`、`copied_files=1`、`skipped_files=1`、`failed_files=0`；删除目标原始文件后执行无待处理音频的 `task run --wait`，自动恢复 `original_text/2026-05-17.md`，`config.last_original_sync.target_dir`、total/copied/failed 均符合预期；脚本清理临时服务和数据目录 |

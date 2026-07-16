@@ -307,8 +307,9 @@ grep -q "Copied:  *2" "$ADMIN_DATA_DIR/daily-sync.out"
 grep -q "Skipped:  *0" "$ADMIN_DATA_DIR/daily-sync.out"
 test -f "$SYNC_DIR/daily_report/2026-05-17-report.md"
 grep -q "报告同步目录验证内容" "$SYNC_DIR/daily_report/2026-05-17-report.md"
-test -f "$SYNC_DIR/原始文件/2026-05-17.md"
-grep -q "完整内容整理" "$SYNC_DIR/原始文件/2026-05-17.md"
+test -f "$SYNC_DIR/original_text/2026-05-17.md"
+grep -q "完整内容整理" "$SYNC_DIR/original_text/2026-05-17.md"
+test ! -e "$SYNC_DIR/原始文件"
 test ! -f "$SYNC_DIR/2026-05-17-report.md"
 BIFROST_DATA_DIR="$ADMIN_DATA_DIR" "$BIFROST_BIN" ai asr task daily sync "$TASK_ID" --json >"$ADMIN_DATA_DIR/daily-sync-second.json"
 python3 - "$ADMIN_DATA_DIR/daily-sync-second.json" "$SYNC_DIR" <<'PY'
@@ -325,16 +326,16 @@ assert sync["failed_files"] == 0, sync
 PY
 
 echo "[asr-task-cli-e2e] run --wait refreshes daily documents without requiring ASR model when no files are pending"
-rm "$SYNC_DIR/原始文件/2026-05-17.md"
+rm "$SYNC_DIR/original_text/2026-05-17.md"
 BIFROST_DATA_DIR="$ADMIN_DATA_DIR" "$BIFROST_BIN" ai asr task run "$TASK_ID" --wait >"$ADMIN_DATA_DIR/task-run.out"
 grep -q "ASR task completed" "$ADMIN_DATA_DIR/task-run.out"
 BIFROST_DATA_DIR="$ADMIN_DATA_DIR" "$BIFROST_BIN" ai asr task daily list "$TASK_ID" >"$ADMIN_DATA_DIR/daily-list-after-run.out"
 grep -q "2026-05-17" "$ADMIN_DATA_DIR/daily-list-after-run.out"
 for _ in $(seq 1 100); do
-  test -f "$SYNC_DIR/原始文件/2026-05-17.md" && break
+  test -f "$SYNC_DIR/original_text/2026-05-17.md" && break
   sleep 0.1
 done
-test -f "$SYNC_DIR/原始文件/2026-05-17.md"
+test -f "$SYNC_DIR/original_text/2026-05-17.md"
 for _ in $(seq 1 100); do
   curl -fsS "http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/asr/tasks/${TASK_ID}/daily-agent" \
     >"$ADMIN_DATA_DIR/daily-agent-after-auto-original-sync.json"
@@ -347,7 +348,7 @@ assert result["config"].get("last_original_sync")
 PY
   sleep 0.1
 done
-python3 - "$ADMIN_DATA_DIR/daily-agent-after-auto-original-sync.json" "$SYNC_DIR/原始文件" <<'PY'
+python3 - "$ADMIN_DATA_DIR/daily-agent-after-auto-original-sync.json" "$SYNC_DIR/original_text" <<'PY'
 import json
 import os
 import sys
