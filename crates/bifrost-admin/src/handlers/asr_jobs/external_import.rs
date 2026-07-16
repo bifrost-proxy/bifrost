@@ -95,7 +95,7 @@ fn save_content_hash_index(task_id: &str, index: &AsrContentHashIndex) -> Result
 
 fn list_external_volumes() -> Vec<ExternalVolumeInfo> {
     let mut volumes = Vec::new();
-    let Ok(entries) = std::fs::read_dir("/Volumes") else {
+    let Ok(entries) = retry_interrupted(|| std::fs::read_dir("/Volumes")) else {
         return volumes;
     };
     for entry in entries.flatten() {
@@ -127,6 +127,15 @@ fn list_external_volumes() -> Vec<ExternalVolumeInfo> {
     }
     volumes.sort_by(|left, right| left.name.cmp(&right.name));
     volumes
+}
+
+fn retry_interrupted<T>(mut operation: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    loop {
+        match operation() {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => return result,
+        }
+    }
 }
 
 fn cached_external_volumes(
@@ -657,7 +666,7 @@ fn collect_volume_audio_files(volume: &ExternalVolumeInfo) -> (Vec<PathBuf>, usi
     let mut failed = 0usize;
     let mut stack = vec![volume.mount_path.clone()];
     while let Some(dir) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
+        let entries = match retry_interrupted(|| std::fs::read_dir(&dir)) {
             Ok(entries) => entries,
             Err(error) => {
                 tracing::warn!(dir = %dir.display(), %error, "skipping unreadable external directory");

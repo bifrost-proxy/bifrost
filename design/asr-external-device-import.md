@@ -598,6 +598,7 @@ GET  /api/asr/tasks/{task_id}/external-import/runs  (planned, not yet shipped as
 - 后台导入必须运行在独立阻塞任务/worker 中，文件遍历、读取、内容 hash 计算和复制不得占住 Admin API 主请求路径；完整文件 hash 计算还必须通过全局内容哈希队列串行化。导入期间 `GET /api/asr/tasks`、任务详情和状态接口必须持续响应。
 - 外接卷枚举同样是潜在阻塞操作：`/Volumes`、`diskutil info` 和 `df` 必须通过 `spawn_blocking` 与 Tokio 主请求 worker 隔离，不能直接在 async handler 中执行。
 - 卷枚举 API 使用单航班探测：最多一个阻塞探测占有 gate；重复请求最多等待 500ms，探测响应最多等待 2s，任一超时立即返回上次成功缓存。已经超时的底层探测继续持有 gate，直到系统调用实际结束，防止轮询继续堆积新的阻塞任务。
+- `read_dir` 被系统信号打断并返回 `EINTR` 时必须透明重试，不能把已连接设备或可读目录误记为扫描失败。
 - 即使 macOS Disk Arbitration 或某个外接卷永久卡住，健康检查、微信投递和其他 Admin API 也必须保持响应；缓存为空时允许临时返回空卷列表，不允许用无限等待换取“最新”设备列表。
 - `GET /api/asr/tasks/{task_id}/external-import` 返回 `current_run`：`run_id`、`status`、`current_device`、`current_file`、`current_file_size`、`current_file_copied_bytes`、`processed_files`、`total_files_discovered`、`imported/skipped/processed_record_skipped/failed`、`message`。如果服务重启导致 `current_run.status=importing` 但本进程无对应后台任务，状态归一为 `failed` 并提示用户重新导入。
 - 返回状态区分 `ready`、`not_connected`、`ambiguous`、`importing`、`insufficient_space`、`permission_denied`、`device_disconnected`、`completed_with_errors`。

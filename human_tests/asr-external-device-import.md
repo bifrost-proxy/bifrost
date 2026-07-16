@@ -430,7 +430,7 @@
    ```
 2. 检查卷枚举 API 具有阻塞线程隔离、单航班 gate、超时和缓存回退：
    ```bash
-   rg -n "spawn_blocking|EXTERNAL_VOLUME_API_PROBE_GATE|wait_timeout|probe_timeout|cached_external_volumes" crates/bifrost-admin/src/handlers/asr_jobs/{state.rs,external_import.rs}
+   rg -n "spawn_blocking|EXTERNAL_VOLUME_API_PROBE_GATE|wait_timeout|probe_timeout|cached_external_volumes|retry_interrupted" crates/bifrost-admin/src/handlers/asr_jobs/{state.rs,external_import.rs}
    ```
 3. 使用最新正式构建启动本机 Bifrost，在不写入真实外接盘的前提下并发读取 `/api/asr/external-volumes`，同时连续请求 `/api/proxy/address`。
 
@@ -438,11 +438,13 @@
 
 - 底层卷探测在 blocking worker 中等待时，单 worker Tokio runtime 仍能及时执行其他 async task。
 - 同一时刻最多一个真实卷枚举探测；重复请求超时后返回缓存，不继续堆积 `read_dir`、`diskutil` 或 `df` 调用。
+- `read_dir` 返回 `EINTR` 时透明重试，不把临时系统信号误报为设备扫描失败。
 - 正式服务并发读取卷列表期间，健康/代理地址接口持续返回 HTTP 200；测试不向真实外接盘写入任何文件。
 
 执行结果：
 
 - 已执行并通过专门单元测试：阻塞探测运行期间单 worker Tokio runtime 仍可调度，第二个请求在 20ms gate 等待超时后返回缓存，且未执行重复 probe。
+- 已执行 `external_volume_scan_retries_interrupted_system_calls`：前两次模拟 `EINTR`，第三次成功，扫描结果正常返回。
 - 已安装最新 release 构建并重启正式 9900 服务；并发发起 16 个只读卷列表请求，同时连续发起 24 个 `/api/proxy/address` 请求。卷列表 16/16 返回 HTTP 200，最慢 0.5920 秒；健康接口 24/24 返回 HTTP 200，最慢 0.1043 秒，无 curl 错误。
 - 测试仅读取 API 和进程状态，没有向 `/Volumes/TX1`、`/Volumes/TX2` 写入文件；服务重启后微信 provider 状态仍为 `connected`。
 

@@ -3444,6 +3444,23 @@ mod tests {
     }
 
     #[test]
+    fn external_volume_scan_retries_interrupted_system_calls() {
+        let mut attempts = 0usize;
+        let value = retry_interrupted(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+            } else {
+                Ok("ready")
+            }
+        })
+        .expect("interrupted operations should be retried");
+
+        assert_eq!(value, "ready");
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
     fn external_import_defers_recently_modified_files() {
         let now = now_ms();
         assert!(should_defer_unstable_source(
