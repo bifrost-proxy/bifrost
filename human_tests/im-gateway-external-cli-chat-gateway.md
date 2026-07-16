@@ -1377,8 +1377,38 @@
 2. mock 两次都能从 stdin 读取完整原始 prompt 文本并返回 `EXEC_claude-exec`，不会进入 stream-json 解析分支或因非 JSON 输入失败。
 3. guide 响应为 `delivery=queued` 且 reason 包含 `exec transport`；两轮 `run_finished` 都成功，排队消息没有丢失或重复。
 
+### TC-IEC-65: GPT Web 搜索来源 favicon 紧凑引用渲染回归
+
+操作步骤：
+
+1. 执行 GPT Web 引用结构单元回归：
+   ```bash
+   pnpm --dir web exec vitest run src/pages/AI/AgentChatSection.markdown.test.ts
+   ```
+2. 执行 Agent Chat 真实浏览器 E2E：
+   ```bash
+   pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts \
+     -g "renders GPT Web source favicons as compact citations" --reporter=line
+   ```
+3. E2E 消息使用真实 GPT Web 结构：
+   ```markdown
+   [![](https://www.google.com/s2/favicons?domain=https://www.reuters.com&sz=128)Reuters+2![](https://www.google.com/s2/favicons?domain=https://apnews.com&sz=128)AP News+2](https://www.reuters.com/world/china/example?utm_source=chatgpt.com)
+   ```
+   同一条 assistant 消息另放一张普通 Markdown 正文图片。
+4. 检查 DOM：来源引用只有一个外链、包含两个来源名称和两个 14px favicon；favicon 不带 `data-agent-chat-image-id`，普通正文图片仍带预览标识。
+5. 点击普通正文图片，确认灯箱只有这一张图片；关闭灯箱后切换暗色主题，确认来源引用仍清晰可见。
+6. 启动当前 worktree 的 Vite 前端并代理现有 9900 后端，在浏览器打开用户提供的真实 `session` / `historyPath`；如果旧 `view=chat` 参数未直接选中当前 Agent Chat 路由，则补齐当前 canonical 参数 `aiSection=agent-chat&agentSection=chat&view=active`。检查 Reuters/AP、新华网、卫报等来源引用均不再显示为正文大图。
+
+预期结果：
+
+1. GPT Web 的 Google favicon + 来源名称序列被识别为紧凑来源引用，图标位于对应来源文字前方，整组仍跳转到原文章 URL。
+2. 来源 favicon 固定为 14px，不获得正文图片的 120px 最小宽度/90px 最小高度，也不进入图片灯箱计数。
+3. 普通 Markdown 图片、图片附件、普通外链和带描述文字的链接图片维持原有渲染与灯箱行为。
+4. 亮色和暗色主题均使用 Ant Design token，边框、背景、文字和 focus/hover 状态可读。
+
 ## 最近执行记录
 
+- 2026-07-15：新增并立即执行 TC-IEC-65。引用结构单元回归 `6/6` 通过，覆盖双来源、单来源、非法/混合节点、普通图片，以及独立/描述性 favicon 仍可预览；Playwright focused E2E `1/1` 通过，确认双来源 favicon 均为 `14px × 14px`、无图片预览 ID，普通正文图片仍是唯一灯箱图片，暗色主题可见。随后以 `BACKEND_PORT=9900 WEB_PORT=3015 pnpm --dir web exec vite --host 127.0.0.1 --port 3015` 代理现有正式后端，在 Codex 内置浏览器打开用户真实 session/history；当前 canonical Agent Chat 参数下共识别 14 组来源引用、15 个 favicon，首组 `Reuters+2AP News+2` 高度 24px、两个图标均为 `14px × 14px`，页面没有正文预览图片。暗色主题下引用背景为 `rgba(255, 255, 255, 0.04)`、边框为 `rgb(48, 48, 48)`，组件持续可见。未停止或替换 9900 服务，未修改系统代理。
 - 2026-07-13：针对 PR #377 自动 Review 的 Claude 显式 exec stdin 兼容问题新增并立即执行 TC-IEC-64。单元回归输出 `1 passed`；真实临时 Bifrost E2E 输出 `[external-runner-live-guide] PASS`。mock 记录两次 `claude-exec` 均带 `--input-format text` 且不含 `--replay-user-messages`，首轮 guide 返回 `delivery=queued`，两轮均返回 `EXEC_claude-exec`。
 - 2026-07-13：针对 PR #377 Linux `E2E Shell` 失败新增并立即执行 TC-IEC-63。修复前同一命令稳定在 Python 第 246 行收到 `stream-json runner timed out after 30 seconds`；修复 mock Claude 从等待 stdin EOF 改为消费一条初始 user JSONL frame 后，`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_traex_model_slash.sh` 输出 `[im-gateway-model-slash] PASS`。Codex、Traex、Claude Code 的 model 与 effort 六次真实临时服务运行全部通过，Claude run 为 `1783925191553-f1ad8e07-13b0-44c3-b237-c05cedac9305`、effort run 为 `1783925198233-c9920e47-70ea-4976-bbae-d38932762e75`，无 30 秒超时。
 - 2026-07-12：新增并立即执行 TC-IEC-61。两个 focused Rust 单测分别输出 `1 passed`；`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_codex_capacity_retry.sh` 输出 `[codex-capacity-retry] PASS`。隔离 mock app-server 验证首次 `serverOverloaded` 后在同一 thread 第二次成功、持续容量错误 3 次重试后失败、普通错误不重试、已有 assistant delta 后不重试；成功 run 未输出中间 `run_failed`，并持久化 `runner.capacityRetryCount=1`。
