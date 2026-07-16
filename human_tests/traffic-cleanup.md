@@ -188,6 +188,31 @@
 - cleanup_total_disk_usage 能在一次调用中通过多轮删除将磁盘占用降到目标水位以下
 - 这是对旧 bug（body 文件清理滞后于记录清理）的回归验证
 
+### TC-CL-08: 不兼容旧 Traffic DB 启动时自动重建（回归验证）
+
+**操作步骤**：
+1. 执行旧 schema 启动回归 E2E：
+   ```bash
+   e2e-tests/tests/test_traffic_db_schema_reset_e2e.sh
+   ```
+2. 脚本会在临时 `BIFROST_DATA_DIR` 下预置一个旧版 `traffic/traffic.db`：
+   - `metadata.schema_version = 10`
+   - `traffic_records` 缺少当前 schema 的 `devtools_client_req_id`
+   - 预置一条历史流量记录 `legacy-record`
+3. 脚本用当前源码构建 `target/debug/bifrost`，通过临时端口启动：
+   ```bash
+   BIFROST_DATA_DIR=<tmp> target/debug/bifrost start -p <free-port> --host 127.0.0.1 --skip-cert-check --no-system-proxy
+   ```
+4. 脚本等待 `/_bifrost/api/proxy/address` ready 后，检查 `traffic.db`。
+
+**预期结果**：
+- `bifrost start` 不再因为 `no such column: devtools_client_req_id` panic。
+- 不兼容旧 `traffic.db` 被删除并重建。
+- 重建后的 `traffic_records` 包含 `devtools_client_req_id` 列。
+- 重建后的索引包含 `idx_devtools_client_req_id`。
+- 历史临时流量记录被清空，`SELECT COUNT(*) FROM traffic_records` 返回 0。
+- `metadata.schema_version` 为当前版本 `14`。
+
 ## 清理步骤
 
 ```bash
@@ -196,3 +221,7 @@ kill $(lsof -ti:8800) 2>/dev/null
 # 删除测试数据目录
 rm -rf .bifrost-test
 ```
+
+## 执行记录
+
+- 2026-07-16：通过。执行 `e2e-tests/tests/test_traffic_db_schema_reset_e2e.sh`，脚本先真实复现旧 debug binary 对旧 `traffic.db` 的 `no such column: devtools_client_req_id` panic；修复后脚本强制构建当前源码并重跑，通过临时端口启动成功，断言旧 Traffic DB 被重建、历史记录数为 0、`devtools_client_req_id` 列与 `idx_devtools_client_req_id` 索引存在、`schema_version=14`。

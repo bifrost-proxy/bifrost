@@ -328,29 +328,37 @@ impl TrafficDbStore {
                     "[TRAFFIC_DB] Schema version mismatch, resetting database"
                 );
                 drop(conn);
-
-                let wal_path = db_path.with_extension("db-wal");
-                let shm_path = db_path.with_extension("db-shm");
-                if let Err(e) = fs::remove_file(db_path) {
-                    tracing::warn!(error = %e, "[TRAFFIC_DB] Failed to remove old database file");
-                }
-                if wal_path.exists() {
-                    fs::remove_file(&wal_path).ok();
-                }
-                if shm_path.exists() {
-                    fs::remove_file(&shm_path).ok();
-                }
-
-                let mut new_conn = Connection::open(db_path)?;
-                init_database(&mut new_conn).map_err(|e| match e {
-                    InitError::Sqlite(e) => e,
-                    InitError::VersionMismatch { .. } => rusqlite::Error::QueryReturnedNoRows,
-                })?;
-                tracing::info!("[TRAFFIC_DB] Database reset successfully");
-                Ok(new_conn)
+                Self::reset_database(db_path)
             }
-            Err(InitError::Sqlite(e)) => Err(e),
+            Err(InitError::Sqlite(e)) => {
+                tracing::warn!(
+                    error = %e,
+                    "[TRAFFIC_DB] Schema initialization failed, resetting database"
+                );
+                drop(conn);
+                Self::reset_database(db_path)
+            }
         }
+    }
+
+    fn reset_database(db_path: &PathBuf) -> Result<Connection, rusqlite::Error> {
+        let wal_path = db_path.with_extension("db-wal");
+        let shm_path = db_path.with_extension("db-shm");
+        for path in [db_path, &wal_path, &shm_path] {
+            if let Err(e) = fs::remove_file(path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        error = %e,
+                        "[TRAFFIC_DB] Failed to remove old database file"
+                    );
+                }
+            }
+        }
+
+        let mut new_conn = Connection::open(db_path)?;
+        init_database(&mut new_conn).map_err(|_| rusqlite::Error::QueryReturnedNoRows)?;
+        tracing::info!("[TRAFFIC_DB] Database reset successfully");
+        Ok(new_conn)
     }
 
     fn get_max_sequence(conn: &Connection) -> Option<u64> {
@@ -2031,6 +2039,188 @@ mod tests {
 
     fn cleanup_test_dir(dir: &PathBuf) {
         let _ = fs::remove_dir_all(dir);
+    }
+
+    fn create_legacy_v10_traffic_db(db_path: &PathBuf) {
+        let conn = Connection::open(db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE traffic_records (
+                sequence INTEGER PRIMARY KEY,
+                id TEXT NOT NULL UNIQUE,
+                timestamp INTEGER NOT NULL,
+                host TEXT NOT NULL,
+                method TEXT NOT NULL,
+                status INTEGER NOT NULL DEFAULT 0,
+                protocol TEXT NOT NULL,
+                url TEXT NOT NULL,
+                path TEXT NOT NULL,
+                content_type TEXT,
+                request_content_type TEXT,
+                request_size INTEGER NOT NULL DEFAULT 0,
+                response_size INTEGER NOT NULL DEFAULT 0,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                client_ip TEXT NOT NULL DEFAULT '',
+                client_app TEXT,
+                client_pid INTEGER,
+                client_path TEXT,
+                flags INTEGER NOT NULL DEFAULT 0,
+                frame_count INTEGER NOT NULL DEFAULT 0,
+                last_frame_id INTEGER NOT NULL DEFAULT 0,
+                socket_is_open INTEGER NOT NULL DEFAULT 0,
+                socket_send_count INTEGER NOT NULL DEFAULT 0,
+                socket_receive_count INTEGER NOT NULL DEFAULT 0,
+                socket_send_bytes INTEGER NOT NULL DEFAULT 0,
+                socket_receive_bytes INTEGER NOT NULL DEFAULT 0,
+                socket_frame_count INTEGER NOT NULL DEFAULT 0,
+                rule_count INTEGER NOT NULL DEFAULT 0,
+                rule_protocols TEXT NOT NULL DEFAULT '[]'
+            );
+            CREATE TABLE metadata (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            );
+            INSERT INTO metadata (key, value) VALUES ('schema_version', '10');
+            INSERT INTO traffic_records (
+                sequence, id, timestamp, host, method, status, protocol, url, path, client_ip
+            ) VALUES (
+                1, 'legacy-record', 123, 'example.test', 'GET', 200, 'http',
+                'http://example.test/path', '/path', '127.0.0.1'
+            );
+            "#,
+        )
+        .unwrap();
+    }
+
+    fn create_current_version_broken_traffic_db(db_path: &PathBuf) {
+        let conn = Connection::open(db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE traffic_records (
+                sequence INTEGER PRIMARY KEY,
+                id TEXT NOT NULL UNIQUE,
+                timestamp INTEGER NOT NULL,
+                host TEXT NOT NULL,
+                method TEXT NOT NULL,
+                status INTEGER NOT NULL DEFAULT 0,
+                protocol TEXT NOT NULL,
+                url TEXT NOT NULL,
+                path TEXT NOT NULL
+            );
+            CREATE TABLE metadata (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            );
+            INSERT INTO metadata (key, value) VALUES ('schema_version', '14');
+            INSERT INTO traffic_records (
+                sequence, id, timestamp, host, method, status, protocol, url, path
+            ) VALUES (
+                1, 'broken-record', 123, 'example.test', 'GET', 200, 'http',
+                'http://example.test/path', '/path'
+            );
+            "#,
+        )
+        .unwrap();
+    }
+
+    fn sqlite_object_exists(db_path: &PathBuf, object_type: &str, name: &str) -> bool {
+        let conn = Connection::open(db_path).unwrap();
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = ?1 AND name = ?2)",
+            [object_type, name],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+            != 0
+    }
+
+    fn sqlite_column_exists(db_path: &PathBuf, table: &str, column: &str) -> bool {
+        let conn = Connection::open(db_path).unwrap();
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({})", table))
+            .unwrap();
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+        for row in rows {
+            if row.unwrap() == column {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn test_incompatible_traffic_db_is_reset_instead_of_failing_startup() {
+        let dir = create_test_dir();
+        let db_path = dir.join("traffic.db");
+        create_legacy_v10_traffic_db(&db_path);
+
+        let store = TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap();
+
+        assert_eq!(store.record_count.load(Ordering::Relaxed), 0);
+        assert!(sqlite_column_exists(
+            &db_path,
+            "traffic_records",
+            "devtools_client_req_id"
+        ));
+        assert!(sqlite_object_exists(
+            &db_path,
+            "index",
+            "idx_devtools_client_req_id"
+        ));
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn test_broken_current_traffic_db_is_reset_instead_of_failing_startup() {
+        let dir = create_test_dir();
+        let db_path = dir.join("traffic.db");
+        create_current_version_broken_traffic_db(&db_path);
+
+        let store = TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap();
+
+        assert_eq!(store.record_count.load(Ordering::Relaxed), 0);
+        assert!(sqlite_column_exists(
+            &db_path,
+            "traffic_records",
+            "devtools_client_req_id"
+        ));
+        assert!(sqlite_object_exists(
+            &db_path,
+            "index",
+            "idx_devtools_client_req_id"
+        ));
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn test_reset_database_reports_remove_failure_for_directory_path() {
+        let dir = create_test_dir();
+        let db_path = dir.join("traffic.db");
+        fs::create_dir(&db_path).unwrap();
+
+        assert!(TrafficDbStore::reset_database(&db_path).is_err());
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_reset_database_reports_sqlite_init_failure_when_old_db_cannot_be_removed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = create_test_dir();
+        let db_path = dir.join("traffic.db");
+        create_current_version_broken_traffic_db(&db_path);
+
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = TrafficDbStore::reset_database(&db_path);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.is_err());
+
+        cleanup_test_dir(&dir);
     }
 
     #[test]
