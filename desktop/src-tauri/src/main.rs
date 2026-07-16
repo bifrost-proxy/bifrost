@@ -1594,15 +1594,13 @@ fn attempt_backend_recovery(app: &AppHandle, reason: &str) {
         *startup_error = None;
     }
 
-    if let Ok(mut child_guard) = state.child.lock() {
-        if let Some(child) = child_guard.take() {
-            if let Err(error) = terminate_child(child) {
-                append_desktop_bootstrap_log(
-                    &state.data_dir,
-                    format!("failed to terminate managed backend child during recovery: {error}"),
-                );
-            }
-        }
+    if let Err(error) = terminate_managed_backend(&state, "during watchdog recovery") {
+        let message = format!(
+            "failed to terminate managed backend child during recovery; refusing to start a replacement: {error}"
+        );
+        record_startup_error(&state, message);
+        try_start_native_handoff(app, "backend recovery failed");
+        return;
     }
 
     let preferred_port = match state.expected_port.lock() {
@@ -1791,15 +1789,13 @@ fn start_desktop_backend_now(app: &AppHandle, reason: &str) -> Result<DesktopRun
         *startup_error = None;
     }
 
-    if let Ok(mut child_guard) = state.child.lock() {
-        if let Some(child) = child_guard.take() {
-            if let Err(error) = terminate_child(child) {
-                append_desktop_bootstrap_log(
-                    &state.data_dir,
-                    format!("failed to terminate managed backend before manual start: {error}"),
-                );
-            }
-        }
+    if let Err(error) = terminate_managed_backend(&state, "before manual start") {
+        let message = format!(
+            "failed to terminate managed backend before manual start; refusing to start a replacement: {error}"
+        );
+        record_startup_error(&state, message.clone());
+        try_start_native_handoff(app, "backend manual start failed");
+        return Err(message);
     }
 
     let preferred_port = *state
@@ -1976,6 +1972,55 @@ fn cleanup_existing_backend(binary_path: &Path, data_dir: &Path) -> tauri::Resul
             )));
         }
     }
+    Ok(())
+}
+
+fn terminate_managed_backend(state: &BackendState, context: &str) -> tauri::Result<()> {
+    let child = state
+        .child
+        .lock()
+        .map_err(|_| anyhow(format!("failed to access managed backend child {context}")))?
+        .take();
+    if let Some(child) = child {
+        terminate_child(child).map_err(|error| {
+            anyhow(format!(
+                "managed backend termination failed {context}: {error}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn stop_backend_before_restart(
+    binary_path: &Path,
+    data_dir: &Path,
+    current_port: u16,
+    shutdown_timeout: Duration,
+) -> tauri::Result<()> {
+    if let Err(error) = stop_backend_with_binary(binary_path, data_dir) {
+        append_desktop_bootstrap_log(
+            data_dir,
+            format!(
+                "backend stop failed before restart; refusing to start a replacement for the same data directory: {error}"
+            ),
+        );
+        return Err(anyhow(format!(
+            "failed to stop the existing Bifrost service safely before restart: {error}. Refusing to start a replacement with the same data directory"
+        )));
+    }
+
+    if !wait_for_backend_shutdown(current_port, shutdown_timeout) {
+        append_desktop_bootstrap_log(
+            data_dir,
+            format!(
+                "backend remained healthy on port {current_port} after stop; refusing to start a replacement for the same data directory"
+            ),
+        );
+        return Err(anyhow(format!(
+            "the existing Bifrost service remained healthy on port {current_port} after stop. Refusing to start a replacement with the same data directory"
+        )));
+    }
+
     Ok(())
 }
 
@@ -2818,25 +2863,24 @@ fn restart_backend_on_port(
         *startup_error = None;
     }
 
-    if let Ok(mut child_guard) = state.child.lock() {
-        if let Some(child) = child_guard.take() {
-            if let Err(error) = terminate_child(child) {
-                append_desktop_bootstrap_log(
-                    &state.data_dir,
-                    format!("failed to terminate managed backend child before restart: {error}"),
-                );
-            }
-        }
-    }
-
-    if let Err(error) = stop_backend_with_binary(&state.binary_path, &state.data_dir) {
-        append_desktop_bootstrap_log(
-            &state.data_dir,
-            format!("backend stop helper returned before restart: {error}"),
+    if let Err(error) = terminate_managed_backend(state, "before port-change restart") {
+        let message = format!(
+            "failed to terminate managed backend child before restart; refusing to start a replacement: {error}"
         );
+        record_startup_error(state, message.clone());
+        return Err(anyhow(message));
     }
 
-    wait_for_backend_shutdown(current_port, Duration::from_secs(3));
+    if let Err(error) = stop_backend_before_restart(
+        &state.binary_path,
+        &state.data_dir,
+        current_port,
+        Duration::from_secs(3),
+    ) {
+        let message = error.to_string();
+        record_startup_error(state, message.clone());
+        return Err(anyhow(message));
+    }
 
     let (child, actual_port) = launch_backend_on_available_port(
         &state.binary_path,
@@ -3021,10 +3065,10 @@ mod tests {
         relaunch_command_for_target, resolve_bifrost_binary_from_env, resolve_desktop_config_path,
         resolve_desktop_data_dir, sanitize_desktop_upgrade_relaunch_command, save_desktop_config,
         should_allow_multiple_instances, should_handoff_to_main, should_retry_backend_candidate,
-        startup_deadline_disposition, uses_borderless_desktop_chrome_for_platform,
-        wait_for_backend, wait_for_child_exit, write_upgrade_relaunch_marker, BackendState,
-        BackendWaitFailureKind, DesktopConfig, DesktopUpgradeRelaunchMarker,
-        HostWindowCloseBehavior, StartupDeadlineDisposition,
+        startup_deadline_disposition, stop_backend_before_restart, terminate_managed_backend,
+        uses_borderless_desktop_chrome_for_platform, wait_for_backend, wait_for_child_exit,
+        write_upgrade_relaunch_marker, BackendState, BackendWaitFailureKind, DesktopConfig,
+        DesktopUpgradeRelaunchMarker, HostWindowCloseBehavior, StartupDeadlineDisposition,
         DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
     };
     use bifrost_storage::data_dir as shared_bifrost_data_dir;
@@ -3099,6 +3143,33 @@ mod tests {
             }
         });
         port
+    }
+
+    #[cfg(unix)]
+    fn spawn_persistent_health_server(stop: Arc<AtomicBool>) -> (u16, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind health server");
+        listener
+            .set_nonblocking(true)
+            .expect("set health server nonblocking");
+        let port = listener.local_addr().expect("health server addr").port();
+        let handle = thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buffer = [0_u8; 1024];
+                        let _ = stream.read(&mut buffer);
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",
+                        );
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("health server accept failed: {error}"),
+                }
+            }
+        });
+        (port, handle)
     }
 
     #[test]
@@ -3696,6 +3767,84 @@ mod tests {
         let log = fs::read_to_string(temp_dir.path().join("logs").join("desktop-bootstrap.log"))
             .expect("bootstrap log");
         assert!(log.contains("refusing to start a second backend"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_stop_failure_blocks_a_replacement_backend() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let stop_stub = temp_dir.path().join("failing-restart-stop");
+        fs::write(&stop_stub, "#!/bin/sh\nexit 23\n").expect("stop stub");
+        let mut permissions = fs::metadata(&stop_stub)
+            .expect("stub metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&stop_stub, permissions).expect("make stub executable");
+
+        let error = stop_backend_before_restart(
+            &stop_stub,
+            temp_dir.path(),
+            59998,
+            Duration::from_millis(50),
+        )
+        .expect_err("failed restart stop must block replacement");
+        assert!(error
+            .to_string()
+            .contains("Refusing to start a replacement"));
+        let log = fs::read_to_string(temp_dir.path().join("logs").join("desktop-bootstrap.log"))
+            .expect("bootstrap log");
+        assert!(log.contains("backend stop failed before restart"));
+        assert!(log.contains("refusing to start a replacement"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_requires_the_old_backend_to_be_observed_down() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let stop_stub = temp_dir.path().join("successful-restart-stop");
+        fs::write(&stop_stub, "#!/bin/sh\nexit 0\n").expect("stop stub");
+        let mut permissions = fs::metadata(&stop_stub)
+            .expect("stub metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&stop_stub, permissions).expect("make stub executable");
+
+        let server_stop = Arc::new(AtomicBool::new(false));
+        let (port, server) = spawn_persistent_health_server(Arc::clone(&server_stop));
+        let error = stop_backend_before_restart(
+            &stop_stub,
+            temp_dir.path(),
+            port,
+            Duration::from_millis(100),
+        )
+        .expect_err("healthy old backend must block replacement");
+        server_stop.store(true, Ordering::SeqCst);
+        server.join().expect("health server join");
+
+        assert!(error.to_string().contains("remained healthy"));
+        assert!(error
+            .to_string()
+            .contains("Refusing to start a replacement"));
+    }
+
+    #[test]
+    fn poisoned_managed_child_state_blocks_a_replacement_backend() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let state = test_backend_state(temp_dir.path().to_path_buf(), 59997, false, None);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = state.child.lock().expect("child lock");
+            panic!("poison child lock");
+        }));
+
+        let error = terminate_managed_backend(&state, "before test replacement")
+            .expect_err("poisoned child state must block replacement");
+        assert!(error
+            .to_string()
+            .contains("failed to access managed backend child"));
     }
 
     #[cfg(unix)]

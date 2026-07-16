@@ -194,6 +194,22 @@
 - bootstrap/watchdog/handoff 并发写入后，每行仍完整匹配单个 `[SystemTime ...] message`，没有两条日志拼接或半行。
 - 正常启动完成 handoff，测试 App 保持存活到观察窗口结束，正式 App 不受影响。
 
+### TC-DLS-12 恢复与端口切换不得在旧 Core 未确认退出时启动替代实例
+
+操作步骤：
+
+1. 执行 `SKIP_FRONTEND_BUILD=1 cargo test --manifest-path desktop/src-tauri/Cargo.toml restart_stop_failure_blocks_a_replacement_backend`。
+2. 执行 `SKIP_FRONTEND_BUILD=1 cargo test --manifest-path desktop/src-tauri/Cargo.toml restart_requires_the_old_backend_to_be_observed_down`。
+3. 执行 `SKIP_FRONTEND_BUILD=1 cargo test --manifest-path desktop/src-tauri/Cargo.toml poisoned_managed_child_state_blocks_a_replacement_backend`。
+4. 执行 `SKIP_BUILD=true e2e-tests/tests/test_desktop_stale_backend_stop_failure_handoff.sh`，复核真实桌面启动 handoff 链路仍保持 fail-closed。
+
+预期结果：
+
+- stop helper 非零退出时，端口切换回退返回明确错误，不进入 replacement core 启动阶段。
+- stop helper 成功但旧端口在期限后仍健康时，端口切换回退仍拒绝 replacement core。
+- managed child 状态不可读取或 child 无法终止时，watchdog、手动重试和端口切换均停止恢复，不吞错后继续启动。
+- 真实桌面 E2E 中 sidecar stub 只收到一次 `stop`，桌面完成 failure handoff 并保持可恢复，而不是启动第二实例。
+
 ## 清理步骤
 
 ```bash
@@ -218,3 +234,4 @@ rm -rf "$TEST_DATA_DIR"
 | 2026-07-15 | TC-DLS-09 | `SKIP_BUILD=true e2e-tests/tests/test_desktop_stale_backend_stop_failure_handoff.sh`；使用 stop exit 17 stub、runtime marker 与独立数据目录。 | 通过：stub 只收到一次 `stop`；bootstrap log 记录拒绝第二实例、startup error 与 handoff completed；桌面进程保持存活。 |
 | 2026-07-15 | TC-DLS-10 | 先记录正式 App PID `15260`，再依次执行 `SKIP_BUILD=true e2e-tests/tests/test_desktop_launcher_startup_failure_handoff.sh` 与 `SKIP_BUILD=true e2e-tests/tests/test_desktop_launcher_startup_deadline_handoff.sh`，最后复查正式 App PID。 | 通过：两条测试分别输出 failure handoff / deadline handoff PASS；debug App 在正式 App 同时运行时成功启动，bootstrap 与 sidecar stderr 的 session ID 断言通过；正式 App PID 前后均为 `15260`，未被测试终止。 |
 | 2026-07-15 | TC-DLS-11 | 正式 App PID `15260` 运行时执行 `RUST_LOG=warn SKIP_BUILD=true e2e-tests/tests/test_desktop_launcher_startup_no_crash.sh`，断言独立端口、session/phase 日志和 bootstrap 行格式。 | 通过：输出 `PASS: bifrost-desktop stayed alive through launcher handoff startup window`；`warn` 环境下仍保留 startup info，所有 bootstrap 行满足单行格式，正式 App PID 前后保持 `15260`。 |
+| 2026-07-16 | TC-DLS-12 | `cargo test` 定点执行 restart stop 失败、旧端口仍健康、managed child mutex poison 三个 fail-closed 用例；随后执行 `SKIP_BUILD=true e2e-tests/tests/test_desktop_stale_backend_stop_failure_handoff.sh`。 | 通过：三个定点单测各 1 passed；真实桌面 E2E 输出 `PASS: stale backend stop failure blocked a second backend and exposed recovery UI`，sidecar 未进入第二实例启动。 |

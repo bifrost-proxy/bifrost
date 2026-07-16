@@ -250,6 +250,8 @@ $BIFROST_DATA_DIR/
 - `schedule_desktop_startup_deadline` 在 30 秒后记录状态并强制 handoff，覆盖 child 未退出但也永不 ready、WebView load event 丢失等未知阻塞。
 - stale backend stop helper 使用 5 秒有界等待；超时后 kill + wait，避免 `.status()` 永久卡住 bootstrap。
 - kill 后只再等待 2 秒；stop 失败会记录可恢复错误并阻断新 core，避免同一数据目录双实例。
+- watchdog、手动重试和端口切换回退在 managed child 终止失败时同样 fail-closed；端口切换只有在 stop helper 成功且旧端口已确认不健康后才允许拉起 replacement core。
+- managed child mutex poison 也视为无法证明旧进程已停止，禁止继续启动 replacement core。
 - 端口顺延只覆盖启动前占用和确认的 bind 竞争；确定性的 child exit、检查失败与 readiness timeout 直接暴露原始错误。
 - deadline 仅在 WebView loaded 时 handoff；WebView 未加载时原生 launcher 进入错误态，避免用空白 parked WebView 替换 loading。
 - CI/release 在 DMG 打包前校验 app executable 与 bundled sidecar 架构。
