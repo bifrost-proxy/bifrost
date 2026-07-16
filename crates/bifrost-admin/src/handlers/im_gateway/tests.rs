@@ -1239,6 +1239,76 @@ pub(super) fn send_message_request_resolves_owner_target_from_provider() {
 }
 
 #[test]
+pub(super) fn owner_outbound_reconciliation_records_timeline_and_pending_runner_context() {
+    let _lock = IM_GATEWAY_TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = ImGatewayService::new(temp_dir.path());
+    let mut provider = test_provider();
+    provider.owner_open_id = Some("ou-owner".to_string());
+    service
+        .provider_store
+        .add(provider.clone())
+        .expect("provider should be saved");
+    service
+        .message_log_store
+        .add(ImMessageLog {
+            id: "daily-summary-message".to_string(),
+            provider_id: provider.id.clone(),
+            direction: MessageDirection::Outbound,
+            status: MessageStatus::Success,
+            timestamp: 10,
+            target_id: Some("__owner__".to_string()),
+            target_name: Some("Owner".to_string()),
+            message_id: Some("wx-message".to_string()),
+            msg_type: Some("text".to_string()),
+            content_preview: Some("2026-07-15 日报概要".to_string()),
+            content: Some("2026-07-15 日报概要\n今日进展".to_string()),
+            trigger: Some("api".to_string()),
+            error: None,
+            sender_open_id: None,
+            event_id: None,
+            reaction_added: None,
+        })
+        .expect("store outbound log");
+
+    reconcile_recent_owner_outbound_contexts(&service);
+
+    let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
+        &service.external_cli_config_store.load(),
+        Some(&provider.id),
+        None,
+    );
+    let session_key = build_session_key(&provider.id, provider.owner_open_id.as_deref());
+    let state = crate::im_gateway::session_state::load_session_state(
+        &session_key,
+        &effective.settings.adapter,
+        Some(&effective.runner_id),
+    )
+    .expect("reconciled session state");
+    assert_eq!(state.pending_imported_contexts.len(), 1);
+    assert_eq!(
+        state.imported_outbound_message_ids,
+        vec!["daily-summary-message"]
+    );
+    let history_path = state.history_path.expect("history path");
+    let history = std::fs::read_to_string(history_path).expect("read history");
+    assert!(history.contains("2026-07-15 日报概要"));
+
+    reconcile_recent_owner_outbound_contexts(&service);
+    let state = crate::im_gateway::session_state::load_session_state(
+        &session_key,
+        &effective.settings.adapter,
+        Some(&effective.runner_id),
+    )
+    .expect("reconciled session state after duplicate");
+    assert_eq!(state.pending_imported_contexts.len(), 1);
+}
+
+#[test]
 pub(super) fn send_message_request_rejects_owner_without_provider() {
     let temp_dir = tempfile::tempdir().expect("temp data dir");
     let service = ImGatewayService::new(temp_dir.path());

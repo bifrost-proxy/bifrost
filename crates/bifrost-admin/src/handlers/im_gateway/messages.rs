@@ -176,6 +176,8 @@ pub(super) async fn handle_messages_send(
             .unwrap_or_else(|| serde_json::to_string(&prepared).unwrap_or_default())
     });
     let log_msg_type = outbound_log_msg_type(&resolved.provider, &body.msg_type);
+    let context_provider = resolved.provider.clone();
+    let records_owner_context = resolved.target.id == "__owner__";
 
     // Send via the configured provider implementation.
     let client = service.provider_client(&resolved.provider);
@@ -211,17 +213,19 @@ pub(super) async fn handle_messages_send(
         Ok(r) => (MessageStatus::Success, r.message_id.clone(), None),
         Err(e) => (MessageStatus::Failed, None, Some(e.to_string())),
     };
+    let log_id = uuid_short();
+    let log_timestamp = now_ms();
     let log = ImMessageLog {
-        id: uuid_short(),
+        id: log_id.clone(),
         provider_id: resolved.provider.id.clone(),
         direction: MessageDirection::Outbound,
         status,
-        timestamp: now_ms(),
+        timestamp: log_timestamp,
         target_id: Some(resolved.log_target_id),
         target_name: Some(resolved.log_target_name),
         message_id,
         msg_type: Some(log_msg_type),
-        content: log_content,
+        content: log_content.clone(),
         content_preview,
         trigger: Some("api".to_string()),
         error: error_msg,
@@ -233,12 +237,180 @@ pub(super) async fn handle_messages_send(
         error!(error = %e, "failed to store outbound message log");
     }
 
+    if result.is_ok() && records_owner_context && body.msg_type == "text" {
+        if let Some(text) = log_content.as_deref() {
+            if let Err(error) = remember_owner_outbound_context(
+                service,
+                &context_provider,
+                &log_id,
+                log_timestamp,
+                text,
+            ) {
+                warn!(
+                    provider_id = %context_provider.id,
+                    message_log_id = %log_id,
+                    error = %error,
+                    "failed to persist successful owner outbound message into bot context"
+                );
+            }
+        }
+    }
+
     match result {
         Ok(result) => json_response(&result),
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("Failed to send message: {e}"),
         ),
+    }
+}
+
+fn remember_owner_outbound_context(
+    service: &ImGatewayService,
+    provider: &ImProviderConfig,
+    message_log_id: &str,
+    timestamp_ms: u64,
+    text: &str,
+) -> Result<(), String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(());
+    }
+    let owner_open_id = provider
+        .owner_open_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("provider '{}' has no owner_open_id", provider.id))?;
+    let provider_agent_config =
+        effective_agent_config_for_provider(&service.agent_config_store.load(), provider);
+    let runner_override = provider_agent_config
+        .runner
+        .as_ref()
+        .and_then(|runner| runner.custom_runner_id());
+    let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
+        &service.external_cli_config_store.load(),
+        Some(provider.id.as_str()),
+        runner_override,
+    );
+    let session_key = build_session_key(&provider.id, Some(owner_open_id));
+    let inserted = crate::im_gateway::session_state::push_outbound_context_if_unseen(
+        &session_key,
+        &effective.settings.adapter,
+        Some(&effective.runner_id),
+        message_log_id,
+        crate::im_gateway::session_state::ImImportedRunnerContext {
+            call_id: format!("outbound-{message_log_id}"),
+            source_session_key: session_key.clone(),
+            target_runner_id: effective.runner_id.clone(),
+            target_adapter: "proactive_outbound".to_string(),
+            user_message: "local automation sent a proactive message through this bot".to_string(),
+            response: text.to_string(),
+            created_at: timestamp_ms,
+        },
+    )?;
+    let Some(state) = inserted else {
+        return Ok(());
+    };
+
+    let data_dir = bifrost_agent::config::agent_home_dir();
+    let existing_history_path = state
+        .history_path
+        .as_deref()
+        .map(PathBuf::from)
+        .filter(|path| path.is_file());
+    let reused_history = existing_history_path.is_some();
+    let mut recorder = existing_history_path
+        .map(|path| {
+            bifrost_agent::persistence::ConversationRecorder::from_existing_file(path, None)
+        })
+        .unwrap_or_else(|| {
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, &session_key)
+        });
+    if !reused_history {
+        recorder.record_session_start(
+            &session_key,
+            serde_json::json!({
+                "source": "im_proactive_outbound",
+                "provider_id": provider.id.clone(),
+                "runner_id": effective.runner_id.clone(),
+                "adapter": effective.settings.adapter.clone(),
+            }),
+        )?;
+    }
+    recorder.record_assistant_message(&session_key, text)?;
+    let history_path = recorder.file_path().display().to_string();
+    crate::im_gateway::session_state::upsert_session_state(
+        &session_key,
+        &effective.settings.adapter,
+        Some(&effective.runner_id),
+        |state| {
+            state.history_path = Some(history_path.clone());
+            state.last_response = Some(text.to_string());
+        },
+    )?;
+    service.agent_session_manager.emit_timeline_changed(
+        &session_key,
+        &history_path,
+        None,
+        "proactive_outbound_recorded",
+    );
+    Ok(())
+}
+
+pub(super) fn reconcile_recent_owner_outbound_contexts(service: &ImGatewayService) {
+    const MAX_BACKFILL_MESSAGES_PER_PROVIDER: usize = 32;
+
+    for provider in service.provider_store.list() {
+        let Some(owner_open_id) = provider.owner_open_id.as_deref() else {
+            continue;
+        };
+        let mut messages = service
+            .message_log_store
+            .list_by_provider(&provider.id)
+            .into_iter()
+            .filter(|message| {
+                message.direction == MessageDirection::Outbound
+                    && message.status == MessageStatus::Success
+                    && message.msg_type.as_deref() == Some("text")
+                    && message.trigger.as_deref() == Some("api")
+                    && message
+                        .target_id
+                        .as_deref()
+                        .is_some_and(|target| target == "__owner__" || target == owner_open_id)
+            })
+            .filter_map(|message| {
+                let text = message
+                    .content
+                    .as_deref()
+                    .or(message.content_preview.as_deref())?
+                    .trim()
+                    .to_string();
+                let first_line = text.lines().next().unwrap_or_default();
+                let is_durable_proactive = first_line.contains("日报概要")
+                    || first_line.contains("研究摘要")
+                    || (first_line.starts_with('《') && first_line.contains('》'));
+                is_durable_proactive.then_some((message, text))
+            })
+            .take(MAX_BACKFILL_MESSAGES_PER_PROVIDER)
+            .collect::<Vec<_>>();
+        messages.reverse();
+        for (message, text) in messages {
+            if let Err(error) = remember_owner_outbound_context(
+                service,
+                &provider,
+                &message.id,
+                message.timestamp,
+                &text,
+            ) {
+                warn!(
+                    provider_id = %provider.id,
+                    message_log_id = %message.id,
+                    error = %error,
+                    "failed to reconcile historical owner outbound bot context"
+                );
+            }
+        }
     }
 }
 

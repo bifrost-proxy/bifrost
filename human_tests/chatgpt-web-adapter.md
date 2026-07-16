@@ -783,8 +783,29 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 - 普通首页正文出现“欢迎回来”，但没有账号选择文案且 composer 已可用时，不得继续误判为账号选择页。
 - 运行阶段不再因弹窗遮挡而报 `send button not actionable: not_found`。
 
+### TC-CWA-35：回归 - 新会话 SSE 先结束时等待页面交接完成
+
+**前置条件**：共享 ChatGPT Web profile 已登录；存在一份尚未成功生成的真实 Daily Agent 日报输入。
+
+**操作步骤**：
+1. 使用 headed ChatGPT Web runner 发起一个没有 `conversationId` 的新会话；输入使用真实长日报，确保走原生粘贴路径。
+2. 观察 `f/conversation` 已 `loadingFinished`、但响应体暂未解析出 conversation id 的场景。
+3. 检查日志、`conversation_handoff.json`、最终 `result.json` 与日报文件。
+4. 执行代码级回归和 E2E 哨兵：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin handoff_ --lib -- --nocapture
+   bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh
+   ```
+
+**预期结果**：
+- 发送层不会在 `f/conversation` 刚结束时立即报 `missing conversation id from ChatGPT Web handoff`，而是在最多 15 秒内等待 SPA 导航和消息 turn 渲染。
+- 只有页面 URL 含 `/c/<conversationId>` 且至少一个消息 turn 已渲染时才接受会话 id；仅有残留旧 URL 时仍返回空，不读取旧答案。
+- 从页面恢复成功时，`conversation_handoff.json.eventTypes` 包含 `browser_page_handoff_recovered`，随后继续等待最终回答并生成日报。
+- 真实 Daily Agent run 成功，日报标题和日期契约正确；本用例不发送额外测试微信消息，也不重新创建已有成功研究。
+
 ## 真实执行记录
 
+- 2026-07-16：执行 TC-CWA-35 正式 Daily Agent 回归。首次真实长日报暴露两个边界：`f/conversation` 已结束但 SPA 页面尚未完成新会话交接，以及旧的捕获 cookie 会覆盖共享 profile 中更新后的 cookie。修复并自动刷新登录后，`daily_report` run `1784154767997-c35d8c25-ff3f-4fdc-baab-c40508a49f7b` 成功，ChatGPT 子 run `1784154768053-be442c25-06a6-46e5-ad39-74f5149014ee` 恢复 conversation `6a580aa5-1840-83ea-a2ca-298300da1d8b`，完整报告落盘为 `2026-07-15-report.md`。回归同时确认只有 `/c/<id>` 且消息 turn 已渲染时才接收页面 handoff，cookie seed 仅补齐缺失 cookie，不覆盖 profile 中的新值。
 - 2026-07-15：补充执行日报研究真实长任务回归。`2026-07-09` 四个研究问题在 Project“日报研究”中以 Chat + Pro 启动独立会话；首个信贷问题先返回“我会先……”短 planning 段，随后页面继续处于 busy 并最终生成 31808 字节完整结果。通过同 conversation 的 Chat Gateway `get` 恢复最终回答，页面和产物均确认五个契约标题完整且有正文。四个 conversation id 分别为 `6a565a7b-9cac-83ea-8a50-e5f4bf1abe4a`、`6a565857-eeb4-83ea-820e-8431fcb24b27`、`6a56588d-9630-83ea-96f9-a7831578fbe7`、`6a5658b7-0384-83ea-b2e0-89f8c07687e3`。回归同时确认：新建下一题不能关闭仍在生成的前一题 tab；短 planning 回复需要额外等待；恢复 DOM 时只能读取精确 conversation URL；研究输出必须逐段满足独立标题、原问题和非空正文契约，不能把 Prompt 脚手架回显误判为完成。
 - 2026-07-12：使用真实 `2026-06-26` 日报做流水线演示时补充执行 TC-CWA-34 边界回归。隔离 Chrome 页面已无账号选择器、composer 可见可编辑，但首页正文仍包含普通“欢迎回来”，原整页 marker 判断导致登录请求持续等待。修复为“欢迎回来仅在可见 dialog 中算账号选择信号；整页正文只识别选择/切换账号文案”，并新增源码级回归测试。
 - 2026-07-12：执行 TC-CWA-34 通过。隔离服务首次登录在 `accounts/check` 已证明账号存在时提前返回 `logged_in`，随后真实 Daily Agent diagnostic screenshot 显示“欢迎回来 / 选择一个帐户以继续”弹窗遮挡 composer，run 失败为 `send button not actionable: not_found`，下游依赖正确跳过。修复后登录循环同时要求 composer 可见、可编辑且账号选择弹窗消失；`login_page_readiness_rejects_account_chooser_and_disabled_composer` 单测通过。使用同一隔离 profile 重新执行 `Open Login Browser` 返回 `loggedIn=true / identityComplete=true / accountCheckOk=true`，随后 ChatGPT Web 真实 `daily_report -> research_agent` 两段运行均为 `success`，并产出同日上游报告和研究报告。

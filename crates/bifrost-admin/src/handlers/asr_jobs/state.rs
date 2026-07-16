@@ -10,6 +10,10 @@ static BULK_CHUNK_RETRY_JOBS: Lazy<StdMutex<BTreeMap<String, BulkChunkRetryState
 static EXTERNAL_IMPORT_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
 static RUNNING_EXTERNAL_IMPORT_TASKS: Lazy<StdMutex<HashSet<String>>> =
     Lazy::new(|| StdMutex::new(HashSet::new()));
+static EXTERNAL_VOLUME_API_PROBE_GATE: Lazy<std::sync::Arc<Semaphore>> =
+    Lazy::new(|| std::sync::Arc::new(Semaphore::new(1)));
+static EXTERNAL_VOLUME_API_CACHE: Lazy<std::sync::Arc<StdMutex<Vec<ExternalVolumeInfo>>>> =
+    Lazy::new(|| std::sync::Arc::new(StdMutex::new(Vec::new())));
 static CONTENT_HASH_QUEUE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
 static FILE_STORE_WRITE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
 static RUN_PROGRESS_UPDATE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));

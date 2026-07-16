@@ -11,7 +11,8 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
 
     match (req.method(), path) {
         (&Method::GET, "/api/asr/external-volumes") => {
-            json_response(&serde_json::json!({ "volumes": list_external_volumes() }))
+            let volumes = list_external_volumes_for_api().await;
+            json_response(&serde_json::json!({ "volumes": volumes }))
         }
         (&Method::GET, "/api/asr/tasks/-/watch") => list_task_watch_response(),
         (&Method::GET, "/api/asr/tasks") => list_tasks_response(),
@@ -30,7 +31,7 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
                 .trim_start_matches("/api/asr/tasks/")
                 .trim_end_matches("/external-import")
                 .trim_end_matches('/');
-            get_external_import_response(id)
+            get_external_import_response(id).await
         }
         (&Method::PUT, _) if path.starts_with("/api/asr/tasks/") && path.ends_with("/external-import") => {
             let id = path
@@ -573,11 +574,11 @@ fn get_task_watch_response(id: &str) -> Response<BoxBody> {
     }
 }
 
-fn get_external_import_response(id: &str) -> Response<BoxBody> {
+async fn get_external_import_response(id: &str) -> Response<BoxBody> {
     let Some(task) = find_task(id) else {
         return error_response(StatusCode::NOT_FOUND, "ASR task not found");
     };
-    let volumes = list_external_volumes();
+    let volumes = list_external_volumes_for_api().await;
     let store = load_external_import_store(id);
     let devices = task
         .external_devices

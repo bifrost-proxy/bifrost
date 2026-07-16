@@ -253,9 +253,14 @@ async fn run_worker_stdio_async() -> Result<(), String> {
                 }
             }
             result = &mut run => {
+                // A transport may retain a progress sender in session state after the turn has
+                // completed. Waiting for the forwarding task to observe channel closure would
+                // then deadlock the worker before it can emit the terminal result. Progress is
+                // best-effort and the final result carries the complete event history, so stop
+                // the forwarder explicitly once the run itself is terminal.
+                stop_worker_progress_forwarder(progress_task).await;
                 match result {
                     Ok(Ok(result)) => {
-                        let _ = progress_task.await;
                         send_external_cli_worker_event(&ExternalCliWorkerEvent::Finished { result: Box::new(result) })?
                     },
                     Ok(Err(error)) => send_external_cli_worker_event(&ExternalCliWorkerEvent::Failed { error })?,
@@ -267,6 +272,11 @@ async fn run_worker_stdio_async() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+async fn stop_worker_progress_forwarder(progress_task: tokio::task::JoinHandle<()>) {
+    progress_task.abort();
+    let _ = progress_task.await;
 }
 
 mod app_server;

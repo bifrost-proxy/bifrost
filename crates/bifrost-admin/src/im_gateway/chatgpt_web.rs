@@ -2525,11 +2525,66 @@ pub(in crate::im_gateway::chatgpt_web) async fn seed_chatgpt_cookies(
     cdp: &CdpClient,
     auth: &AuthState,
 ) -> Result<(), String> {
-    let cookies: Vec<Value> = auth
-        .cookies
+    let existing_cookies = match get_all_chatgpt_cookies(cdp).await {
+        Ok(cookies) => cookies,
+        Err(error) => {
+            warn!(
+                %error,
+                "chatgpt_web: could not inspect persistent profile cookies before seeding captured auth"
+            );
+            Vec::new()
+        }
+    };
+    let cookies = chatgpt_cookie_values_to_seed(&auth.cookies, &existing_cookies);
+    if cookies.is_empty() && existing_cookies.iter().any(usable_chatgpt_cookie) {
+        debug!(
+            existing_cookie_count = existing_cookies.len(),
+            "chatgpt_web: persistent profile already has cookies; skipped stale captured-cookie overwrite"
+        );
+        return Ok(());
+    }
+    if cookies.is_empty() {
+        return Err(
+            "auth_required: no ChatGPT cookies available for browser execution".to_string(),
+        );
+    }
+    cdp.send("Network.setCookies", json!({ "cookies": cookies }))
+        .await
+        .map_err(|error| format!("seed ChatGPT cookies into browser failed: {error}"))?;
+    Ok(())
+}
+
+fn usable_chatgpt_cookie(cookie: &BrowserCookie) -> bool {
+    cookie.domain.ends_with("chatgpt.com") && !cookie.name.is_empty() && !cookie.value.is_empty()
+}
+
+fn chatgpt_cookie_values_to_seed(
+    captured: &[BrowserCookie],
+    existing: &[BrowserCookie],
+) -> Vec<Value> {
+    let existing_keys = existing
+        .iter()
+        .filter(|cookie| usable_chatgpt_cookie(cookie))
+        .map(|cookie| {
+            (
+                cookie.name.clone(),
+                cookie.domain.clone(),
+                cookie.path.clone().unwrap_or_else(|| "/".to_string()),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+
+    captured
         .iter()
         .filter(|cookie| cookie.domain.ends_with("chatgpt.com"))
         .filter(|cookie| !cookie.name.is_empty() && !cookie.value.is_empty())
+        .filter(|cookie| {
+            !existing_keys.contains(&(
+                cookie.name.clone(),
+                cookie.domain.clone(),
+                cookie.path.clone().unwrap_or_else(|| "/".to_string()),
+            ))
+        })
         .map(|cookie| {
             let mut item = serde_json::Map::new();
             item.insert("name".to_string(), Value::String(cookie.name.clone()));
@@ -2557,16 +2612,7 @@ pub(in crate::im_gateway::chatgpt_web) async fn seed_chatgpt_cookies(
             }
             Value::Object(item)
         })
-        .collect();
-    if cookies.is_empty() {
-        return Err(
-            "auth_required: no ChatGPT cookies available for browser execution".to_string(),
-        );
-    }
-    cdp.send("Network.setCookies", json!({ "cookies": cookies }))
-        .await
-        .map_err(|error| format!("seed ChatGPT cookies into browser failed: {error}"))?;
-    Ok(())
+        .collect()
 }
 
 fn collect_account_headers(
@@ -3557,6 +3603,43 @@ mod coverage_boost {
             logged_in: true,
         };
         assert!(!browser_account_check_proof_is_fresh(&proof));
+    }
+
+    #[test]
+    fn cookie_seed_preserves_newer_persistent_profile_cookie() {
+        let captured = vec![BrowserCookie {
+            name: "__Secure-next-auth.session-token.0".to_string(),
+            value: "captured-older".to_string(),
+            domain: ".chatgpt.com".to_string(),
+            path: Some("/".to_string()),
+            ..Default::default()
+        }];
+        let existing = vec![BrowserCookie {
+            name: "__Secure-next-auth.session-token.0".to_string(),
+            value: "profile-newer".to_string(),
+            domain: ".chatgpt.com".to_string(),
+            path: Some("/".to_string()),
+            ..Default::default()
+        }];
+
+        assert!(chatgpt_cookie_values_to_seed(&captured, &existing).is_empty());
+    }
+
+    #[test]
+    fn cookie_seed_fills_cookie_missing_from_persistent_profile() {
+        let captured = vec![BrowserCookie {
+            name: "session".to_string(),
+            value: "captured".to_string(),
+            domain: ".chatgpt.com".to_string(),
+            path: Some("/".to_string()),
+            ..Default::default()
+        }];
+
+        let seeded = chatgpt_cookie_values_to_seed(&captured, &[]);
+
+        assert_eq!(seeded.len(), 1);
+        assert_eq!(seeded[0]["name"], "session");
+        assert_eq!(seeded[0]["value"], "captured");
     }
 
     // --- decode_cdp_response_body & headers extraction ---

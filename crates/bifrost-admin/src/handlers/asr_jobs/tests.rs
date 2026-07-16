@@ -3375,6 +3375,74 @@ mod tests {
         assert!(external_volume_matches(&binding, &right));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn external_volume_api_probe_does_not_block_async_worker_or_duplicate_scans() {
+        let gate = std::sync::Arc::new(Semaphore::new(1));
+        let cached = ExternalVolumeInfo {
+            name: "cached".to_string(),
+            mount_path: PathBuf::from("/Volumes/cached"),
+            volume_uuid: None,
+            device_identifier: None,
+            kind: "external".to_string(),
+            read_only: false,
+            available_bytes: None,
+        };
+        let cache = std::sync::Arc::new(StdMutex::new(vec![cached]));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+        let first = tokio::spawn(list_external_volumes_for_api_with(
+            gate.clone(),
+            cache.clone(),
+            Duration::from_millis(50),
+            Duration::from_secs(2),
+            move || {
+                let _ = started_tx.send(());
+                release_rx.recv().unwrap();
+                vec![ExternalVolumeInfo {
+                    name: "fresh".to_string(),
+                    mount_path: PathBuf::from("/Volumes/fresh"),
+                    volume_uuid: None,
+                    device_identifier: None,
+                    kind: "external".to_string(),
+                    read_only: false,
+                    available_bytes: None,
+                }]
+            },
+        ));
+
+        tokio::time::timeout(Duration::from_millis(500), started_rx)
+            .await
+            .expect("blocking probe should start")
+            .expect("probe start signal should be delivered");
+        tokio::time::timeout(Duration::from_millis(100), tokio::task::yield_now())
+            .await
+            .expect("async worker should stay responsive while probe blocks");
+
+        let duplicate_probe_ran =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let duplicate_probe_flag = duplicate_probe_ran.clone();
+        let second = list_external_volumes_for_api_with(
+            gate,
+            cache,
+            Duration::from_millis(20),
+            Duration::from_secs(1),
+            move || {
+                duplicate_probe_flag.store(true, Ordering::SeqCst);
+                Vec::new()
+            },
+        )
+        .await;
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].name, "cached");
+        assert!(!duplicate_probe_ran.load(Ordering::SeqCst));
+
+        release_tx.send(()).unwrap();
+        let first = first.await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].name, "fresh");
+    }
+
     #[test]
     fn external_import_defers_recently_modified_files() {
         let now = now_ms();

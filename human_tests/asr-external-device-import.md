@@ -65,9 +65,9 @@
    ```bash
    rg -n "asr-external-device-import.md|ASR 外接设备自动导入" human_tests/readme.md
    ```
-2. 检查索引用例数量为 12：
+2. 检查索引用例数量为 13：
    ```bash
-   rg -n "asr-external-device-import.md.*\\| 12 \\|" human_tests/readme.md
+   rg -n "asr-external-device-import.md.*\\| 13 \\|" human_tests/readme.md
    ```
 
 预期结果：
@@ -77,7 +77,7 @@
 
 执行结果：
 
-- 已执行，`human_tests/readme.md` 包含本文件，索引用例数为 12。
+- 已执行，`human_tests/readme.md` 包含本文件，索引用例数为 13。
 
 ### TC-AEDI-03 macOS 真实挂载卷自动导入回归
 
@@ -420,6 +420,32 @@
 - 已更新导入流程和 WebUI 任务列表：后台先扫描候选音频文件总数再导入；Paused 任务仍允许外接设备事件和手动导入，只是不触发自动 ASR 转写；没有 ASR 成功/部分成功处理记录的缺失目标会重新导入；已有成功/部分成功处理记录的缺失目标会跳过并计入 `processed_record_skipped`；导入进度从 Actions 列移到行下方，主进度按 `processed_files / total_files_discovered` 计算；当前文件名、扫描总数、成功导入数、已有处理记录跳过数、已处理数和失败数由 `current_run` 展示；页面刷新后会重新读取已绑定外设任务的 `current_run` 恢复展示。
 - 本轮真实执行记录见下方执行记录表。
 
+### TC-AEDI-13 外接卷枚举阻塞不拖死管理 API
+
+操作步骤：
+
+1. 运行模拟底层卷探测永久等待的并发单元测试：
+   ```bash
+   cargo test -p bifrost-admin external_volume_api_probe_does_not_block_async_worker_or_duplicate_scans -- --nocapture
+   ```
+2. 检查卷枚举 API 具有阻塞线程隔离、单航班 gate、超时和缓存回退：
+   ```bash
+   rg -n "spawn_blocking|EXTERNAL_VOLUME_API_PROBE_GATE|wait_timeout|probe_timeout|cached_external_volumes" crates/bifrost-admin/src/handlers/asr_jobs/{state.rs,external_import.rs}
+   ```
+3. 使用最新正式构建启动本机 Bifrost，在不写入真实外接盘的前提下并发读取 `/api/asr/external-volumes`，同时连续请求 `/api/proxy/address`。
+
+预期结果：
+
+- 底层卷探测在 blocking worker 中等待时，单 worker Tokio runtime 仍能及时执行其他 async task。
+- 同一时刻最多一个真实卷枚举探测；重复请求超时后返回缓存，不继续堆积 `read_dir`、`diskutil` 或 `df` 调用。
+- 正式服务并发读取卷列表期间，健康/代理地址接口持续返回 HTTP 200；测试不向真实外接盘写入任何文件。
+
+执行结果：
+
+- 已执行并通过专门单元测试：阻塞探测运行期间单 worker Tokio runtime 仍可调度，第二个请求在 20ms gate 等待超时后返回缓存，且未执行重复 probe。
+- 已安装最新 release 构建并重启正式 9900 服务；并发发起 16 个只读卷列表请求，同时连续发起 24 个 `/api/proxy/address` 请求。卷列表 16/16 返回 HTTP 200，最慢 0.5920 秒；健康接口 24/24 返回 HTTP 200，最慢 0.1043 秒，无 curl 错误。
+- 测试仅读取 API 和进程状态，没有向 `/Volumes/TX1`、`/Volumes/TX2` 写入文件；服务重启后微信 provider 状态仍为 `connected`。
+
 ## 清理步骤
 
 1. 停止测试 Bifrost 服务。
@@ -448,3 +474,4 @@
 | 2026-05-21 | TC-AEDI-12 | `BIFROST_ASR_E2E_PORT=18882 BIFROST_ASR_E2E_DEVICES=RIGHT BIFROST_ASR_E2E_REQUIRE_DEVICES=1 tests/asr_external_device_import_e2e.sh`；`pnpm --dir web build` | PASS：真实 `RIGHT` 卷导入 `imported=2`，重复导入 `repeatImported=0`，`POST /external-import/run` 在 3ms 返回 202，导入期间 `/tasks` API 保持响应并可轮询 `current_run` 到完成；删除目标文件且任务 Paused 后重新导入 `reimportedAfterDelete=1`；写入成功处理记录后再次删除目标文件，重新导入不复制该文件且 `processedRecordSkipped=1`；WebUI 构建通过，进度 UI 使用行下方全宽展示和后端 `current_run` 恢复逻辑 |
 | 2026-05-22 | TC-AEDI-11 / TC-AEDI-12 真实端到端回归 | `bash tests/asr_external_device_import_e2e.sh`；临时数据目录启动 `./target/debug/bifrost start -p 18883 --unsafe-ssl --no-system-proxy --skip-cert-check --access-mode allow_all`，真实 `LEFT` 卷新增测试文件，API 触发导入，再手动复制重复文件到 `audio_dir` 后调用 `POST /tasks/{id}/run` | PASS：真实 `LEFT`/`RIGHT` 设备导入 `imported=4`、重复导入 `repeatImported=0`、删除后重新导入 `reimportedAfterDelete=1`、已处理记录跳过 `processedRecordSkipped=1`、导入启动 4ms 返回；ASR 前置去重真实服务验证中 `source_hashes["blake3"]` 写入成功，手动拷贝重复文件在 `/run` 后标记 `success`，设置 `duplicate_of_source_key` 并复用 canonical transcript，`/api/proxy/address` 同期保持响应 |
 | 2026-05-22 | TC-AEDI-11 扫描顺序回归 | `cargo test -p bifrost-admin content_hash_dedupe_hashes_manual_copy_when_candidate_exists --lib`；清理 `/Volumes/LEFT/codex-preflight*` 测试残留后，临时数据目录启动 `./target/debug/bifrost start -p 18887 --unsafe-ssl --no-system-proxy --skip-cert-check --access-mode allow_all`，真实 `LEFT` 卷导入 canonical 文件，再将同内容 `manual-copy.wav` 放在 `audio_dir` 根目录并调用 `POST /tasks/{id}/run` | PASS：单测覆盖 `manual-copy` 在扫描顺序中排在 canonical 之前的情况；真实服务验证 `manual-copy.wav` 在 ASR 前置阶段被标记为 `success`，`duplicate_of_source_key` 指向 canonical source key，复用 canonical transcript，`POST /run` 1ms 返回且代理 API 保持响应 |
+| 2026-07-16 | TC-AEDI-13 | `cargo test -p bifrost-admin external_volume_api_probe_does_not_block_async_worker_or_duplicate_scans -- --nocapture`；最新 release 正式服务上并发 16 次 `GET /api/asr/external-volumes`，同期连续 24 次 `GET /api/proxy/address` | PASS：阻塞探测与 async worker 隔离且重复 probe 被 gate 抑制；卷列表 16/16 HTTP 200，最慢 0.5920s；健康接口 24/24 HTTP 200，最慢 0.1043s；未写入真实外接盘；微信 provider 重启后仍 connected |

@@ -1005,6 +1005,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
         );
         request.images = std::mem::take(&mut current_images);
         apply_external_cli_resume_metadata(&mut request, &runner_metadata);
+        consume_imported_contexts_for_im_external_runner(&mut request, &effective.runner_id);
         if request.work_dir.is_none() {
             request.work_dir =
                 effective_agent_work_dir_for_provider(&ctx.agent_config_store.load(), ctx.provider);
@@ -1475,6 +1476,42 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
     );
     ctx.queue_manager.clear_session(&input.session_key);
     ctx.agent_session_manager.return_session(session);
+}
+
+fn consume_imported_contexts_for_im_external_runner(
+    request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+) {
+    let Some(session_key) = request.session_key.as_deref() else {
+        return;
+    };
+    let contexts = match crate::im_gateway::session_state::take_imported_contexts(
+        session_key,
+        &request.adapter,
+        Some(runner_id),
+    ) {
+        Ok(contexts) => contexts,
+        Err(error) => {
+            warn!(
+                session_key = %session_key,
+                adapter = %request.adapter,
+                runner_id = %runner_id,
+                error = %error,
+                "failed to consume imported contexts for IM external runner"
+            );
+            Vec::new()
+        }
+    };
+    let Some(rendered) = crate::im_gateway::session_state::render_imported_contexts(&contexts)
+    else {
+        return;
+    };
+    request.instructions = Some(match request.instructions.take() {
+        Some(existing) if !existing.trim().is_empty() => {
+            format!("{}\n\n{}", existing.trim(), rendered.trim())
+        }
+        _ => rendered,
+    });
 }
 
 fn external_cli_non_success_reply(
@@ -2119,5 +2156,55 @@ mod tests {
         assert!(reply.contains("timed out after 180 seconds"));
         assert!(reply.contains("run-timeout"));
         assert!(!reply.contains("early agent message"));
+    }
+
+    #[test]
+    fn im_external_runner_consumes_proactive_outbound_context_once() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        crate::im_gateway::session_state::push_outbound_context_if_unseen(
+            "weixin-main:owner",
+            "codex",
+            Some("codex"),
+            "message-1",
+            crate::im_gateway::session_state::ImImportedRunnerContext {
+                call_id: "outbound-message-1".to_string(),
+                source_session_key: "weixin-main:owner".to_string(),
+                target_runner_id: "codex".to_string(),
+                target_adapter: "proactive_outbound".to_string(),
+                user_message: "automation sent this".to_string(),
+                response: "2026-07-15 日报概要\n已完成日报。".to_string(),
+                created_at: 1,
+            },
+        )
+        .expect("push proactive context");
+        let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+            images: Vec::new(),
+            message: "日报里说了什么？".to_string(),
+            operation: "chat".to_string(),
+            params: serde_json::Value::Null,
+            provider_id: Some("weixin-main".to_string()),
+            runner_id: Some("codex".to_string()),
+            session_key: Some("weixin-main:owner".to_string()),
+            runtime: "external_cli".to_string(),
+            adapter: "codex".to_string(),
+            work_dir: None,
+            instructions: Some("base instructions".to_string()),
+            adapter_config: Default::default(),
+            allow_work_dirs: Vec::new(),
+            inject_bifrost_tools: false,
+            skill_paths: Vec::new(),
+        };
+
+        consume_imported_contexts_for_im_external_runner(&mut request, "codex");
+        let instructions = request.instructions.as_ref().expect("instructions");
+        assert!(instructions.contains("base instructions"));
+        assert!(instructions.contains("Proactive Messages Sent Through This Bot"));
+        assert!(instructions.contains("2026-07-15 日报概要"));
+
+        let mut second = request.clone();
+        second.instructions = None;
+        consume_imported_contexts_for_im_external_runner(&mut second, "codex");
+        assert!(second.instructions.is_none());
     }
 }

@@ -9,6 +9,21 @@ fn external_cli_env_guard() -> std::sync::MutexGuard<'static, ()> {
         .unwrap()
 }
 
+#[tokio::test]
+async fn worker_progress_forwarder_stops_even_when_channel_sender_is_retained() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let forwarder = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        stop_worker_progress_forwarder(forwarder),
+    )
+    .await
+    .expect("retained progress sender must not block terminal worker event");
+
+    drop(tx);
+}
+
 struct EnvGuard {
     key: &'static str,
     previous: Option<String>,

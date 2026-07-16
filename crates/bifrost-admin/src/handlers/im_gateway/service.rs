@@ -250,7 +250,7 @@ impl ImGatewayService {
         let schedule_store = Arc::new(ImScheduleStore::new(data_dir));
         let scheduler = Arc::new(ImScheduler::new());
         let target_store = Arc::new(ImTargetStore::new(data_dir));
-        Self {
+        let service = Self {
             data_dir: data_dir.to_path_buf(),
             provider_store: Arc::new(ImProviderStore::new(data_dir)),
             target_store,
@@ -273,7 +273,9 @@ impl ImGatewayService {
             mock_event_sinks: Arc::new(RwLock::new(HashMap::new())),
             weixin_login_pending: Arc::new(RwLock::new(HashMap::new())),
             feishu_setup_pending: Arc::new(RwLock::new(load_pending_feishu_setups(data_dir))),
-        }
+        };
+        super::messages::reconcile_recent_owner_outbound_contexts(&service);
+        service
     }
 
     pub(super) fn provider_client(&self, provider: &ImProviderConfig) -> ImProviderClient {

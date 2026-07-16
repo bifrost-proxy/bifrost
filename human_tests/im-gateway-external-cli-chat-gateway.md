@@ -1396,8 +1396,36 @@
 3. 两轮回复都不以 app-server 初始化 JSON（如 `{"id":1`）开头；原始 JSON-RPC stdout 只保存在 run artifact 中。
 4. 脚本输出 `[im-gateway-codex-retryable-error] PASS` 并清理其临时进程和数据。
 
+### TC-IEC-66: Worker 终态不等待被 session 持有的 progress sender
+
+操作步骤：
+1. 创建一个 progress channel，保留 sender，并启动等待 receiver 关闭的 forwarder task。
+2. 调用 worker 终态使用的 progress forwarder stop helper。
+3. 在正式 Daily Agent 中用 Codex app-server 生成日报概要，观察 runner result、worker 子进程、IM 投递和 Daily Agent 终态。
+
+预期结果：
+1. helper 在 100ms 内返回，保留 sender 不会造成等待。
+2. app-server 生成 result 后 worker 正常退出，不停留为长期 sleeping/zombie 子进程。
+3. Daily Agent 继续同步、发送微信并收敛为 `success`。
+
+### TC-IEC-67: Owner 主动纯文本进入 Bot 时间线和下一轮 Runner 上下文
+
+操作步骤：
+1. 通过 `/messages/send` 向 provider owner 发送一条纯文本，确认 provider 返回成功。
+2. 检查统一消息日志、该 provider/owner 的 canonical session JSONL 和 session state pending contexts。
+3. 使用相同消息日志 ID 再执行补录，然后构造该 IM session 的下一轮 external runner request。
+4. 再构造第二轮 request；重启服务检查最近日报概要、研究摘要和文章标题的历史补录。
+
+预期结果：
+1. 发送日志、canonical assistant message 与 pending proactive context 同时存在。
+2. 相同日志 ID 不重复写 timeline 或 pending，seen marker 保留且最多 256 条。
+3. 第一轮 instructions 包含 `Proactive Messages Sent Through This Bot` 和主动消息正文，第二轮不重复注入。
+4. 启动补录不会重新发送微信，在线通知、失败消息、非 owner 消息和测试内容不进入上下文。
+
 ## 最近执行记录
 
+- 2026-07-16：执行 TC-IEC-67 正式环境回归。服务启动时从持久化 owner 消息日志补录 6 条主动纯文本到 `jcc-reader-weixin:o9cq8088e6FVbFrKpl_h3oEWXz9k@im.wechat` 的 canonical timeline 和 pending runner context，覆盖工作日文章《这有点东西啊》、日报概要和两条历史研究摘要；补录没有重新发送微信。随后真实 `2026-07-15` 日报概要经 `/messages/send` 成功发送为 1 个纯文本 chunk，新研究摘要发送后其消息 ID `c7a29796` 进入 seen 集合和 pending context；session detail 可见这些 assistant 消息，下一轮 instructions 会消费 `Proactive Messages Sent Through This Bot`，相同 ID 不重复写入。
+- 2026-07-16：执行 TC-IEC-66。修复前真实 `daily_summary` 已产生正确 result，但 app-server session 仍持有 progress sender，worker 等待 forwarder 自然关闭而长期不退出，Daily Agent 无法进入同步和微信交付。修复后单测 `worker_progress_forwarder_stops_even_when_channel_sender_is_retained` 通过；正式 `daily_summary` run `1784155813794-23d78155-dc89-4a0a-9eba-865db07c415e` 正常退出、同步报告并于 `1784155943168` 成功发送 1 个纯文本 chunk，Agent 最终状态为 `success`。
 - 2026-07-13：合并微信默认排队/引用与 Daily Research 功能线后执行 TC-IEC-65。先以 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 构建当前源码，再以隔离临时数据目录和动态端口运行 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_codex_retryable_error.sh`，输出 `[im-gateway-codex-retryable-error] PASS`。可重试 error 继续同一 turn 至 `BIFROST_RETRY_RECOVERED`，不可重试 error 收敛为 `permanent request failure`，两条用户回复均未泄露 JSON-RPC 握手 stdout。
 - 2026-07-13：针对 PR #377 自动 Review 的 Claude 显式 exec stdin 兼容问题新增并立即执行 TC-IEC-64。单元回归输出 `1 passed`；真实临时 Bifrost E2E 输出 `[external-runner-live-guide] PASS`。mock 记录两次 `claude-exec` 均带 `--input-format text` 且不含 `--replay-user-messages`，首轮 guide 返回 `delivery=queued`，两轮均返回 `EXEC_claude-exec`。
 - 2026-07-13：针对 PR #377 Linux `E2E Shell` 失败新增并立即执行 TC-IEC-63。修复前同一命令稳定在 Python 第 246 行收到 `stream-json runner timed out after 30 seconds`；修复 mock Claude 从等待 stdin EOF 改为消费一条初始 user JSONL frame 后，`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_traex_model_slash.sh` 输出 `[im-gateway-model-slash] PASS`。Codex、Traex、Claude Code 的 model 与 effort 六次真实临时服务运行全部通过，Claude run 为 `1783925191553-f1ad8e07-13b0-44c3-b237-c05cedac9305`、effort run 为 `1783925198233-c9920e47-70ea-4976-bbae-d38932762e75`，无 30 秒超时。

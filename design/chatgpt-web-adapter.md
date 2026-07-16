@@ -219,7 +219,9 @@ WebUI 选择 `chatgpt_web` 后：隐藏 executable/args/env/sandbox/approval pol
 
 执行阶段由 `ExecutionBrowserController` 负责。真实 IM 稳定性验证期默认 headed，便于观察页面输入与发送；稳定后可切回 headless。主流程：headed 启动 Edge/Chromium 与 runner profile；等待可见 composer（非隐藏 textarea）；新会话通过发送无 `conversation_id` 的首条消息创建；续接会话打开 `/c/{conversation_id}`，等待可见 composer 后插入文本并点击发送；捕获 `/backend-api/f/conversation` SSE handoff 获取 `conversation_id` 与 `turn_exchange_id`；轮询 `GET /backend-api/conversation/{conversation_id}` 直到 assistant 状态 `finished_successfully`；每次 native read 使用有界超时，短暂失败按 heartbeat-visible 状态计；长时间不可读按 grace window 收敛为失败，不永久占住 IM 队列。
 
-心跳与恢复：handoff 等待期间检查浏览器进程、CDP WebSocket、页面 `Runtime.evaluate` probe；任一失败快速返回 `browser_unavailable`。短 SSE handoff 中断不能直接判失败：必须先从页面 URL、session 映射或显式 `conversationId` 恢复，再进入长轮询。
+心跳与恢复：handoff 等待期间检查浏览器进程、CDP WebSocket、页面 `Runtime.evaluate` probe；任一失败快速返回 `browser_unavailable`。短 SSE handoff 中断不能直接判失败：必须先从页面 URL、session 映射或显式 `conversationId` 恢复，再进入长轮询。新会话的 `f/conversation` 响应可能先于 SPA 跳转和消息 turn 渲染结束；SSE 未携带 conversation id 时，发送层必须在有界 15 秒窗口内轮询当前页面，只有 `/c/<conversation-id>` 与至少一个已渲染消息 turn 同时存在时才接受该 id，并记录 `browser_page_handoff_recovered`。这既吸收正常渲染竞态，也不把残留的旧 `/c/...` URL 当成本轮会话。
+
+共享浏览器 profile 是 UI 登录态的事实来源。`auth_state.json` 中捕获的 cookie 只用于补齐 profile 当前缺失的 cookie，不能覆盖 profile 中同名、同域、同 path 的现有值，避免旧捕获值把刚刷新的长期登录会话降级为访客。即使 native `accounts/check` 仍能凭 bearer token 返回 200，页面出现“登录以获取基于已保存聊天/对话的回答”等访客首页文案时，发送层仍必须返回 `auth_required`，禁止把长日报粘贴到匿名 composer 后等待一个永远不可用的发送按钮。
 
 失败例：
 

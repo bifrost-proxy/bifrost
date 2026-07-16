@@ -129,6 +129,76 @@ fn list_external_volumes() -> Vec<ExternalVolumeInfo> {
     volumes
 }
 
+fn cached_external_volumes(
+    cache: &std::sync::Arc<StdMutex<Vec<ExternalVolumeInfo>>>,
+) -> Vec<ExternalVolumeInfo> {
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+async fn list_external_volumes_for_api_with<F>(
+    gate: std::sync::Arc<Semaphore>,
+    cache: std::sync::Arc<StdMutex<Vec<ExternalVolumeInfo>>>,
+    wait_timeout: Duration,
+    probe_timeout: Duration,
+    probe: F,
+) -> Vec<ExternalVolumeInfo>
+where
+    F: FnOnce() -> Vec<ExternalVolumeInfo> + Send + 'static,
+{
+    let permit = match tokio::time::timeout(wait_timeout, gate.acquire_owned()).await {
+        Ok(Ok(permit)) => permit,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "external volume API probe gate closed; using cached volumes");
+            return cached_external_volumes(&cache);
+        }
+        Err(_) => {
+            tracing::debug!(
+                timeout_ms = wait_timeout.as_millis(),
+                "external volume API probe already running; using cached volumes"
+            );
+            return cached_external_volumes(&cache);
+        }
+    };
+
+    let cache_for_probe = cache.clone();
+    let join = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let volumes = probe();
+        *cache_for_probe
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = volumes.clone();
+        volumes
+    });
+    match tokio::time::timeout(probe_timeout, join).await {
+        Ok(Ok(volumes)) => volumes,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "external volume API probe worker failed; using cached volumes");
+            cached_external_volumes(&cache)
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_ms = probe_timeout.as_millis(),
+                "external volume API probe timed out; using cached volumes"
+            );
+            cached_external_volumes(&cache)
+        }
+    }
+}
+
+async fn list_external_volumes_for_api() -> Vec<ExternalVolumeInfo> {
+    list_external_volumes_for_api_with(
+        EXTERNAL_VOLUME_API_PROBE_GATE.clone(),
+        EXTERNAL_VOLUME_API_CACHE.clone(),
+        Duration::from_millis(500),
+        Duration::from_secs(2),
+        list_external_volumes,
+    )
+    .await
+}
+
 #[derive(Default)]
 struct DiskutilInfo {
     external: bool,

@@ -17,6 +17,8 @@ use super::{
 
 const HANDOFF_HEARTBEAT_INTERVAL_SECS: u64 = 5;
 const HANDOFF_PAGE_PROBE_TIMEOUT_SECS: u64 = 3;
+const HANDOFF_PAGE_CONVERSATION_SETTLE_SECS: u64 = 15;
+const HANDOFF_PAGE_CONVERSATION_POLL_MS: u64 = 250;
 const TARGET_PAGE_STABLE_MS: u64 = 1_000;
 const TARGET_PAGE_POLL_MS: u64 = 250;
 const COMPOSER_PASTE_THRESHOLD_CHARS: usize = 120;
@@ -1387,19 +1389,36 @@ async fn send_with_browser_once(
             match send_result {
                 Ok(mut send) => {
                     if send.conversation_id.is_none() {
-                        send.conversation_id = current_conversation_id(cdp)
-                            .await?
-                            .or_else(|| conversation_id.map(ToString::to_string));
+                        let recovered = wait_for_current_conversation_id(
+                            cdp,
+                            Duration::from_secs(HANDOFF_PAGE_CONVERSATION_SETTLE_SECS),
+                            Duration::from_millis(HANDOFF_PAGE_CONVERSATION_POLL_MS),
+                        )
+                        .await?;
+                        if recovered.is_some() {
+                            send.event_types
+                                .push("browser_page_handoff_recovered".to_string());
+                        }
+                        send.conversation_id =
+                            recovered.or_else(|| conversation_id.map(ToString::to_string));
                     }
                     send.event_types.push("browser_ui".to_string());
                     break send;
                 }
                 Err(error) if error.starts_with("sse_interrupted") || error.starts_with("timeout") => {
-                    let recovered = current_conversation_id(cdp).await?;
+                    let recovered = wait_for_current_conversation_id(
+                        cdp,
+                        Duration::from_secs(HANDOFF_PAGE_CONVERSATION_SETTLE_SECS),
+                        Duration::from_millis(HANDOFF_PAGE_CONVERSATION_POLL_MS),
+                    )
+                    .await?;
                     let mut event_types =
                         vec!["handoff_recovered_after_sse_interrupt".to_string()];
                     if !request_ids.is_empty() {
                         event_types.push("browser_post_captured".to_string());
+                    }
+                    if recovered.is_some() {
+                        event_types.push("browser_page_handoff_recovered".to_string());
                     }
                     break SendResult {
                         conversation_id: recovered.or_else(|| conversation_id.map(ToString::to_string)),
@@ -2290,6 +2309,59 @@ async fn current_conversation_id(cdp: &CdpClient) -> Result<Option<String>, Stri
         "chatgpt_web: current_conversation_id check"
     );
     Ok(url_cid)
+}
+
+/// Wait briefly for a newly submitted chat to finish its SPA navigation and
+/// render at least one message turn before trusting the `/c/<id>` URL.
+///
+/// The `f/conversation` response can finish before ChatGPT updates the page.
+/// A single immediate probe therefore creates a false missing-id failure even
+/// though the browser reaches the correct conversation moments later. Keeping
+/// the existing turn-element check prevents an old/stale `/c/<id>` URL from
+/// being accepted while this bounded poll absorbs the normal render race.
+async fn wait_for_current_conversation_id(
+    cdp: &CdpClient,
+    duration: Duration,
+    poll_interval: Duration,
+) -> Result<Option<String>, String> {
+    let started = tokio::time::Instant::now();
+    let deadline = tokio::time::Instant::now() + duration;
+    let mut observed_successful_probe = false;
+    let mut last_error = None;
+
+    loop {
+        match current_conversation_id(cdp).await {
+            Ok(Some(conversation_id)) => {
+                info!(
+                    %conversation_id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "chatgpt_web handoff: recovered conversation id after page render settled"
+                );
+                return Ok(Some(conversation_id));
+            }
+            Ok(None) => observed_successful_probe = true,
+            Err(error) => last_error = Some(error),
+        }
+
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        sleep(poll_interval.min(remaining)).await;
+    }
+
+    if observed_successful_probe {
+        warn!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "chatgpt_web handoff: page did not expose a rendered conversation before recovery deadline"
+        );
+        Ok(None)
+    } else {
+        Err(last_error.unwrap_or_else(|| {
+            "browser_unavailable: no ChatGPT page probe completed during handoff recovery"
+                .to_string()
+        }))
+    }
 }
 
 /// Detect and dismiss ChatGPT's rate-limit / error modal dialogs.
@@ -3267,6 +3339,8 @@ pub(in crate::im_gateway::chatgpt_web) fn page_state_is_auth_flow_page(state: &V
         || body.contains("sign up")
         || body.contains("continue with google")
         || body.contains("登录即可开始聊天")
+        || body.contains("登录以获取基于已保存聊天的回答")
+        || body.contains("登录以获取基于已保存对话的回答")
         || body.contains("使用 google 账号继续")
 }
 
@@ -4281,6 +4355,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handoff_waits_for_new_conversation_dom_after_sse_finishes() {
+        let cdp = mock_cdp(vec![
+            json!(r#"{"urlCid":"new-cid","turnCount":0,"href":"https://chatgpt.com/c/new-cid"}"#),
+            json!(r#"{"urlCid":"new-cid","turnCount":2,"href":"https://chatgpt.com/c/new-cid"}"#),
+        ])
+        .await;
+
+        let conversation_id = wait_for_current_conversation_id(
+            &cdp,
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(conversation_id.as_deref(), Some("new-cid"));
+        cdp.close();
+    }
+
+    #[tokio::test]
+    async fn handoff_does_not_trust_url_without_rendered_turns() {
+        let cdp = mock_cdp(vec![json!(
+            r#"{"urlCid":"stale-cid","turnCount":0,"href":"https://chatgpt.com/c/stale-cid"}"#
+        )])
+        .await;
+
+        let conversation_id =
+            wait_for_current_conversation_id(&cdp, Duration::ZERO, Duration::from_millis(1))
+                .await
+                .unwrap();
+
+        assert_eq!(conversation_id, None);
+        cdp.close();
+    }
+
+    #[tokio::test]
     async fn wait_chat_surface_value_polls_until_ready() {
         let cdp = mock_cdp(vec![json!({"ready": false}), json!({"ready": true})]).await;
         let value = wait_chat_surface_value(&cdp, "surface", Duration::from_secs(1), |value| {
@@ -4887,6 +4997,13 @@ mod coverage_boost {
 
         let body4 = json!({"bodyText": "使用 Google 账号继续"});
         assert!(page_state_is_auth_flow_page(&body4));
+
+        let guest_home = json!({
+            "url": "https://chatgpt.com/?bifrost_new_chat=1",
+            "title": "ChatGPT",
+            "bodyText": "获取为你量身定制的回复 登录以获取基于已保存聊天的回答，并可创建图片和上传文件。 登录 免费注册"
+        });
+        assert!(page_state_is_auth_flow_page(&guest_home));
     }
 
     #[test]

@@ -16,6 +16,8 @@ grep -q "stop_button_visible" crates/bifrost-admin/src/im_gateway/chatgpt_web/in
 grep -q "conversation_busy" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
 grep -q "conversation_busy_if_stop_button_visible" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
 grep -q "diagnostic_has_visible_stop_button" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
+grep -q "browser_page_handoff_recovered" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
+grep -q "skipped stale captured-cookie overwrite" crates/bifrost-admin/src/im_gateway/chatgpt_web.rs
 grep -q "recover_conversation_tab_from_browser" crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
 grep -q "wait_chatgpt_web_daily_agent_conversation" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
 grep -q "daily_agent_chatgpt_web_same_conversation_wait_timeout_ms" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
@@ -50,6 +52,22 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   diagnostic_has_visible_stop_button_is_the_busy_gate \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  handoff_waits_for_new_conversation_dom_after_sse_finishes \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  handoff_does_not_trust_url_without_rendered_turns \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  cookie_seed_preserves_newer_persistent_profile_cookie \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  page_state_is_auth_flow_page_matches_body_keywords \
   --lib -- --nocapture
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \

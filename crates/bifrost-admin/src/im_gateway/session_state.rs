@@ -47,6 +47,8 @@ pub struct ImAgentSessionState {
     pub messages: Vec<ImAgentSessionMessage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_imported_contexts: Vec<ImImportedRunnerContext>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imported_outbound_message_ids: Vec<String>,
     pub updated_at: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub updated_seq: u64,
@@ -301,6 +303,48 @@ pub fn push_imported_context(
     .map(|_| ())
 }
 
+pub fn push_outbound_context_if_unseen(
+    session_key: &str,
+    adapter: &str,
+    runner_id: Option<&str>,
+    message_id: &str,
+    context: ImImportedRunnerContext,
+) -> Result<Option<ImAgentSessionState>, String> {
+    const MAX_IMPORTED_OUTBOUND_IDS: usize = 256;
+
+    let message_id = message_id.trim();
+    if message_id.is_empty() {
+        return Err("outbound context message_id cannot be empty".to_string());
+    }
+    let mut context = normalize_imported_context(context)?;
+    let mut inserted = false;
+    let state = upsert_session_state(session_key, adapter, runner_id, |state| {
+        if state
+            .imported_outbound_message_ids
+            .iter()
+            .any(|existing| existing == message_id)
+        {
+            return;
+        }
+        if context.created_at == 0 {
+            context.created_at = now_millis();
+        }
+        state.pending_imported_contexts.push(context);
+        state
+            .imported_outbound_message_ids
+            .push(message_id.to_string());
+        if state.imported_outbound_message_ids.len() > MAX_IMPORTED_OUTBOUND_IDS {
+            let excess = state
+                .imported_outbound_message_ids
+                .len()
+                .saturating_sub(MAX_IMPORTED_OUTBOUND_IDS);
+            state.imported_outbound_message_ids.drain(..excess);
+        }
+        inserted = true;
+    })?;
+    Ok(inserted.then_some(state))
+}
+
 pub fn take_imported_contexts(
     session_key: &str,
     adapter: &str,
@@ -325,11 +369,32 @@ pub fn render_imported_contexts(contexts: &[ImImportedRunnerContext]) -> Option<
     if contexts.is_empty() {
         return None;
     }
-    let mut rendered = String::from("## Imported Runner Results\n\n");
-    rendered.push_str(
-        "The following results were produced by user-triggered slash Runner calls in this conversation. Use them as current conversation context.\n\n",
-    );
+    let mut rendered = String::new();
+    let mut runner_header_written = false;
+    let mut outbound_header_written = false;
     for context in contexts {
+        if context.target_adapter == "proactive_outbound" {
+            if !outbound_header_written {
+                rendered.push_str("## Proactive Messages Sent Through This Bot\n\n");
+                rendered.push_str(
+                    "The following messages were already sent to the user by local automation through this same bot. Treat them as part of the current conversation context; do not claim that you have not seen them.\n\n",
+                );
+                outbound_header_written = true;
+            }
+            rendered.push_str("### Sent Message ");
+            rendered.push_str(&context.call_id);
+            rendered.push_str("\n\n");
+            rendered.push_str(&context.response);
+            rendered.push_str("\n\n");
+            continue;
+        }
+        if !runner_header_written {
+            rendered.push_str("## Imported Runner Results\n\n");
+            rendered.push_str(
+                "The following results were produced by user-triggered slash Runner calls in this conversation. Use them as current conversation context.\n\n",
+            );
+            runner_header_written = true;
+        }
         rendered.push_str("### Runner Call ");
         rendered.push_str(&context.call_id);
         rendered.push('\n');
@@ -489,6 +554,11 @@ fn normalize_state(state: &mut ImAgentSessionState) -> Result<(), String> {
     state.pending_imported_contexts = std::mem::take(&mut state.pending_imported_contexts)
         .into_iter()
         .filter_map(|context| normalize_imported_context(context).ok())
+        .collect();
+    state.imported_outbound_message_ids = std::mem::take(&mut state.imported_outbound_message_ids)
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
         .collect();
     if state.updated_at == 0 {
         state.updated_at = now_millis();
@@ -868,5 +938,48 @@ mod tests {
                 .expect("take again")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn proactive_outbound_context_is_deduplicated_rendered_and_keeps_seen_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = EnvGuard::new(dir.path());
+        let context = ImImportedRunnerContext {
+            call_id: "outbound-message-1".to_string(),
+            source_session_key: "weixin:owner".to_string(),
+            target_runner_id: "codex".to_string(),
+            target_adapter: "proactive_outbound".to_string(),
+            user_message: "automation sent this".to_string(),
+            response: "2026-07-15 日报概要\n已完成日报。".to_string(),
+            created_at: 10,
+        };
+
+        assert!(push_outbound_context_if_unseen(
+            "weixin:owner",
+            "codex",
+            Some("codex"),
+            "message-1",
+            context.clone(),
+        )
+        .expect("first push")
+        .is_some());
+        assert!(push_outbound_context_if_unseen(
+            "weixin:owner",
+            "codex",
+            Some("codex"),
+            "message-1",
+            context,
+        )
+        .expect("duplicate push")
+        .is_none());
+
+        let contexts = take_imported_contexts("weixin:owner", "codex", Some("codex"))
+            .expect("take proactive context");
+        let rendered = render_imported_contexts(&contexts).expect("render proactive context");
+        assert!(rendered.contains("Proactive Messages Sent Through This Bot"));
+        assert!(rendered.contains("2026-07-15 日报概要"));
+        let state = load_session_state("weixin:owner", "codex", Some("codex")).expect("state");
+        assert_eq!(state.imported_outbound_message_ids, vec!["message-1"]);
+        assert!(state.pending_imported_contexts.is_empty());
     }
 }
