@@ -38,9 +38,9 @@ import {
   type SessionDetail,
 } from "./AgentChatSection.helpers";
 import {
+  appendProcessStepToTimeline,
   historyEventsToMessages,
   historyEventsToTelemetry,
-  mergeDetailMessagesWithTimeline,
 } from "./AgentChatSection.timeline";
 import {
   isRunStateActive,
@@ -71,7 +71,6 @@ import { buildRunnerOptions, selectDefaultRunner } from "./aiLayout";
 const { Text } = Typography;
 const { TextArea } = Input;
 const { useBreakpoint } = Grid;
-const HISTORY_EVENT_PAGE_SIZE = 300;
 const THREAD_RAIL_COLLAPSED_STORAGE_KEY = "bifrost.agentChat.threadRailCollapsed";
 
 type AgentSessionEventPayload = {
@@ -229,18 +228,9 @@ type HistoryPagePayload = {
 
 function historyPageUrl(
   historyPath: string,
-  params: { tail?: boolean; limit?: number; cursor?: number; since?: number } = {},
+  params: { since?: number } = {},
 ) {
   const query = new URLSearchParams();
-  if (params.tail) {
-    query.set("tail", "true");
-  }
-  if (params.limit !== undefined) {
-    query.set("limit", String(params.limit));
-  }
-  if (params.cursor !== undefined) {
-    query.set("cursor", String(params.cursor));
-  }
   if (params.since !== undefined) {
     query.set("since", String(params.since));
   }
@@ -252,7 +242,7 @@ function historyPageUrl(
 
 async function fetchHistoryPage(
   historyPath: string,
-  params: { tail?: boolean; limit?: number; cursor?: number; since?: number } = {},
+  params: { since?: number } = {},
 ) {
   const response = await apiFetch(historyPageUrl(historyPath, params));
   if (!response.ok) {
@@ -279,8 +269,6 @@ export default function AgentChatSection({
   const [sessionKey, setSessionKey] = useState(() => `admin-chat-${Date.now()}`);
   const [historyPath, setHistoryPath] = useState<string | undefined>();
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyLoadingOlder, setHistoryLoadingOlder] = useState(false);
-  const [historyHasOlder, setHistoryHasOlder] = useState(false);
   const [running, setRunning] = useState(false);
   const [supplementSubmitting, setSupplementSubmitting] = useState(false);
   const [runningInputMode, setRunningInputMode] = useState<"guide" | "queue">("guide");
@@ -321,11 +309,6 @@ export default function AgentChatSection({
   const historyEventsRef = useRef<HistoryEvent[]>([]);
   const historyEventStartIndexRef = useRef<number | undefined>(undefined);
   const historyEventEndIndexRef = useRef<number | undefined>(undefined);
-  const historyOlderCursorRef = useRef<number | undefined>(undefined);
-  const historyLoadingOlderRef = useRef(false);
-  const activeDetailMessagesRef = useRef<ChatMessage[]>([]);
-  const activeTimelineHasOlderRef = useRef(false);
-  const loadOlderHistoryPageRef = useRef<() => void>(() => {});
   const initialThreadAutoSelectRef = useRef(false);
   const streamAbortRef = useRef<AbortController | null>(null);
 
@@ -404,10 +387,6 @@ export default function AgentChatSection({
 
   const handleMessagesScroll = useCallback(() => {
     updateMessagesScrollState();
-    const element = messagesScrollRef.current;
-    if (element && element.scrollTop < 96) {
-      loadOlderHistoryPageRef.current();
-    }
   }, [updateMessagesScrollState]);
 
   useEffect(() => {
@@ -443,23 +422,10 @@ export default function AgentChatSection({
     });
   }, []);
 
-  const visibleActiveMessagesFromTimeline = useCallback((timelineMessages: ChatMessage[]) => {
-    const detailMessages = activeDetailMessagesRef.current;
-    if (detailMessages.length === 0) {
-      return { messages: timelineMessages, hasOlder: false };
-    }
-    const merged = mergeDetailMessagesWithTimeline(detailMessages, timelineMessages);
-    return { messages: merged, hasOlder: false };
-  }, []);
-
   const resetHistoryEventWindow = useCallback(() => {
     historyEventsRef.current = [];
     historyEventStartIndexRef.current = undefined;
     historyEventEndIndexRef.current = undefined;
-    historyOlderCursorRef.current = undefined;
-    activeDetailMessagesRef.current = [];
-    activeTimelineHasOlderRef.current = false;
-    setHistoryHasOlder(false);
   }, []);
 
   const applyHistoryEventWindow = useCallback(
@@ -473,11 +439,6 @@ export default function AgentChatSection({
       historyEventStartIndexRef.current = page.start_index ?? 0;
       historyEventEndIndexRef.current =
         page.end_index ?? (page.start_index ?? 0) + events.length;
-      historyOlderCursorRef.current =
-        typeof page.next_cursor === "number"
-          ? page.next_cursor
-          : historyEventStartIndexRef.current;
-      activeTimelineHasOlderRef.current = Boolean(page.has_more);
       const nextTelemetry = historyEventsToTelemetry(
         events,
         matchedThread,
@@ -495,14 +456,12 @@ export default function AgentChatSection({
           timelineRunning || (!terminalTimeline && isThreadActive(matchedThread)),
         runningState: matchedThread?.run_state || matchedThread?.state,
       });
-      const visible = visibleActiveMessagesFromTimeline(restored);
-      setHistoryHasOlder(activeTimelineHasOlderRef.current);
-      replaceLoadedMessages(visible.messages, shouldStickToBottom);
+      replaceLoadedMessages(restored, shouldStickToBottom);
       setTelemetry(nextTelemetry);
       setRunning(timelineRunning || (!terminalTimeline && isThreadActive(matchedThread)));
-      return { restored: visible.messages, nextTelemetry };
+      return { restored, nextTelemetry };
     },
-    [replaceLoadedMessages, visibleActiveMessagesFromTimeline],
+    [replaceLoadedMessages],
   );
 
   const querySessionKey = searchParams.get("session") || undefined;
@@ -529,70 +488,6 @@ export default function AgentChatSection({
   useEffect(() => {
     telemetryPhaseRef.current = telemetry.phase;
   }, [telemetry.phase]);
-
-  const loadOlderHistoryPage = useCallback(async () => {
-    const timelineHistoryPath = historyPath || selectedThread?.history_path;
-    const cursor = historyOlderCursorRef.current;
-    if (
-      !timelineHistoryPath ||
-      cursor === undefined ||
-      cursor <= 0 ||
-      historyLoadingOlderRef.current ||
-      historyLoadingOlder ||
-      !historyHasOlder
-    ) {
-      return;
-    }
-    const element = messagesScrollRef.current;
-    const previousScrollHeight = element?.scrollHeight ?? 0;
-    const previousScrollTop = element?.scrollTop ?? 0;
-    const previousEndIndex = historyEventEndIndexRef.current;
-    historyLoadingOlderRef.current = true;
-    setHistoryLoadingOlder(true);
-    try {
-      const page = await fetchHistoryPage(timelineHistoryPath, {
-        cursor,
-        limit: HISTORY_EVENT_PAGE_SIZE,
-      });
-      const olderEvents = page.events || [];
-      if (olderEvents.length === 0) {
-        setHistoryHasOlder(false);
-        historyOlderCursorRef.current = undefined;
-        return;
-      }
-      const mergedEvents = [...olderEvents, ...historyEventsRef.current];
-      applyHistoryEventWindow(mergedEvents, page, selectedThread, false);
-      historyEventEndIndexRef.current =
-        previousEndIndex ?? historyEventEndIndexRef.current ?? mergedEvents.length;
-      requestAnimationFrame(() => {
-        const nextElement = messagesScrollRef.current;
-        if (!nextElement) {
-          return;
-        }
-        const addedHeight = nextElement.scrollHeight - previousScrollHeight;
-        nextElement.scrollTop = previousScrollTop + addedHeight;
-      });
-    } catch (error) {
-      antdMessage.error(
-        error instanceof Error ? error.message : "Failed to load older Agent history",
-      );
-    } finally {
-      historyLoadingOlderRef.current = false;
-      setHistoryLoadingOlder(false);
-    }
-  }, [
-    applyHistoryEventWindow,
-    historyHasOlder,
-    historyLoadingOlder,
-    historyPath,
-    selectedThread,
-  ]);
-
-  useEffect(() => {
-    loadOlderHistoryPageRef.current = () => {
-      void loadOlderHistoryPage();
-    };
-  }, [loadOlderHistoryPage]);
 
   const conversationTitle =
     telemetry.title ||
@@ -643,7 +538,6 @@ export default function AgentChatSection({
     thread: selectedThread,
   });
   const currentStateTag = formatCurrentStateTag(telemetry, selectedThread, displayRunning);
-  const showLoadOlder = historyHasOlder;
   const currentRunnerAdapter = selectedRunnerAdapter(runnerOptions, runnerId);
   const modelCommandsSupported = supportsRunnerModelSlashCommand(currentRunnerAdapter);
   const guideSupported = supportsRunningGuide({
@@ -913,7 +807,6 @@ export default function AgentChatSection({
             return;
           }
           const restored = sessionDetailToMessages(detail);
-          activeDetailMessagesRef.current = restored;
           const timelineHistoryPath =
             detail.history_path ||
             matchedThread?.history_path ||
@@ -945,11 +838,6 @@ export default function AgentChatSection({
               historyEventEndIndexRef.current =
                 payload.end_index ??
                 (payload.start_index ?? 0) + timelineEvents.length;
-              historyOlderCursorRef.current =
-                typeof payload.next_cursor === "number"
-                  ? payload.next_cursor
-                  : historyEventStartIndexRef.current;
-              activeTimelineHasOlderRef.current = Boolean(payload.has_more);
               const timelineRunning = resolveRunningState({
                 fallbackRunning: detail.running === true,
                 state:
@@ -971,12 +859,10 @@ export default function AgentChatSection({
               // Keep the active detail fallback usable while timeline is being written.
             }
           }
-          const loadedWindow =
+          const loadedMessages =
             timelineMessages && timelineMessages.length > 0
-              ? visibleActiveMessagesFromTimeline(timelineMessages)
-              : { messages: restored, hasOlder: false };
-          const loadedMessages = loadedWindow.messages;
-          setHistoryHasOlder(activeTimelineHasOlderRef.current);
+              ? timelineMessages
+              : restored;
           if (loadedMessages.length > 0) {
             replaceLoadedMessages(loadedMessages, shouldStickToBottom);
           }
@@ -1130,19 +1016,20 @@ export default function AgentChatSection({
       cancelled = true;
     };
   }, [
+    defaultRunnerId,
     defaultWorkDir,
     applyHistoryEventWindow,
     queryHistoryPath,
     querySessionKey,
+    replaceLoadedMessages,
     resetHistoryEventWindow,
     setSearchParams,
-    visibleActiveMessagesFromTimeline,
   ]);
 
   const mergeTimelineEvents = useCallback(
     (
       events: HistoryEvent[],
-      page: Pick<HistoryPagePayload, "start_index" | "end_index" | "next_cursor" | "has_more">,
+      page: Pick<HistoryPagePayload, "start_index" | "end_index">,
       shouldStickToBottom: boolean,
       authoritativeThread?: AgentThreadSummary,
     ) => {
@@ -1160,7 +1047,6 @@ export default function AgentChatSection({
           ? [...historyEventsRef.current, ...events]
           : events;
       const previousStartIndex = historyEventStartIndexRef.current;
-      const previousOlderCursor = historyOlderCursorRef.current;
       const wasAppending =
         startIndex !== undefined && currentEnd !== undefined && startIndex >= currentEnd;
       const { nextTelemetry } = applyHistoryEventWindow(
@@ -1171,11 +1057,6 @@ export default function AgentChatSection({
       );
       if (wasAppending) {
         historyEventStartIndexRef.current = previousStartIndex ?? startIndex;
-        historyOlderCursorRef.current =
-          previousOlderCursor ?? historyEventStartIndexRef.current;
-        setHistoryHasOlder(
-          historyOlderCursorRef.current !== undefined && historyOlderCursorRef.current > 0,
-        );
       }
       return nextTelemetry;
     },
@@ -1409,7 +1290,6 @@ export default function AgentChatSection({
     loadedConversationKeyRef.current = "draft";
     selectedHistoryPathRef.current = undefined;
     selectedSessionKeyRef.current = nextSessionKey;
-    activeDetailMessagesRef.current = [];
     pendingInstantScrollRef.current = true;
     setMessages(STARTER_MESSAGES);
     setDraft("");
@@ -1885,7 +1765,7 @@ export default function AgentChatSection({
           prev.map((message) =>
             message.id === targetId
               ? (() => {
-                  const processSteps = [...(message.processSteps || [])];
+                  let processSteps = [...(message.processSteps || [])];
                   if (step.type === "compaction") {
                     const runningCompactionIndex = processSteps.findIndex(
                       (item) => item.type === "compaction" && item.status === "running",
@@ -1896,7 +1776,7 @@ export default function AgentChatSection({
                       processSteps.push(step);
                     }
                   } else {
-                    processSteps.push(step);
+                    processSteps = appendProcessStepToTimeline(processSteps, step);
                   }
                   return {
                     ...message,
@@ -2533,18 +2413,6 @@ export default function AgentChatSection({
             style={styles.conversation}
           >
             <div style={styles.conversationTrack} data-testid="agent-chat-message-track">
-              {showLoadOlder ? (
-                <div style={{ display: "flex", justifyContent: "center", padding: "4px 0 8px" }}>
-                  <Button
-                    size="small"
-                    loading={historyLoadingOlder}
-                    onClick={loadOlderHistoryPage}
-                    data-testid="agent-chat-load-older"
-                  >
-                    Load older
-                  </Button>
-                </div>
-              ) : null}
               {messages.length === 0 ? (
                 <div
                   data-testid="agent-chat-empty-state"

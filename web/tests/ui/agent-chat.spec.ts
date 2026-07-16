@@ -1830,7 +1830,7 @@ test("AI Agent Chat restores JSONL history and continues with history path", asy
   );
 });
 
-test("AI Agent Chat loads full history detail without progressive truncation", async ({ page }) => {
+test("AI Agent Chat loads full history without restoring obsolete pagination controls", async ({ page }) => {
   const historyPath = "/tmp/full-history.jsonl";
   const historyUrls: string[] = [];
   await page.route(
@@ -1846,6 +1846,12 @@ test("AI Agent Chat loads full history detail without progressive truncation", a
         contentType: "application/json",
         body: JSON.stringify({
           events: [
+            {
+              timestamp: 0,
+              event_type: "session_start",
+              session_key: "full-history",
+              content: { runtime: "external_cli", adapter: "codex" },
+            },
             {
               timestamp: 1,
               event_type: "user_message",
@@ -1872,17 +1878,35 @@ test("AI Agent Chat loads full history detail without progressive truncation", a
             },
             {
               timestamp: 5,
+              event_type: "assistant_delta",
+              session_key: "full-history",
+              content: { message: "token_usage: token usage updated" },
+            },
+            {
+              timestamp: 6,
+              event_type: "assistant_delta",
+              session_key: "full-history",
+              content: { message: "rate_limits: usage updated" },
+            },
+            ...["你", "说", "得", "对", "。"].map((message, index) => ({
+              timestamp: 7 + index,
+              event_type: "assistant_delta",
+              session_key: "full-history",
+              content: { message },
+            })),
+            {
+              timestamp: 12,
               event_type: "assistant_message",
               session_key: "full-history",
               content: { message: "Newest answer" },
             },
           ],
-          count: 5,
-          total_count: 5,
+          count: 13,
+          total_count: 13,
           start_index: 0,
-          end_index: 5,
-          next_cursor: null,
-          has_more: false,
+          end_index: 13,
+          next_cursor: 2,
+          has_more: true,
         }),
       });
     },
@@ -1902,10 +1926,25 @@ test("AI Agent Chat loads full history detail without progressive truncation", a
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Newest answer",
   );
+  const completedTurnToggles = page.getByTestId("agent-chat-turn-collapse-toggle");
+  await expect(completedTurnToggles).toHaveCount(2);
+  await completedTurnToggles.nth(1).click();
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "你说得对。",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).not.toContainText(
+    "token_usage",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).not.toContainText(
+    "rate_limits",
+  );
   await expect(page.getByTestId("agent-chat-load-older")).toHaveCount(0);
-  expect(new URL(historyUrls[0]).searchParams.has("tail")).toBe(false);
-  expect(new URL(historyUrls[0]).searchParams.has("cursor")).toBe(false);
-  expect(new URL(historyUrls[0]).searchParams.has("limit")).toBe(false);
+  expect(historyUrls.length).toBeGreaterThan(0);
+  for (const historyUrl of historyUrls) {
+    expect(new URL(historyUrl).searchParams.has("tail")).toBe(false);
+    expect(new URL(historyUrl).searchParams.has("cursor")).toBe(false);
+    expect(new URL(historyUrl).searchParams.has("limit")).toBe(false);
+  }
 });
 
 test("AI Agent Chat keeps running history token HUD synced with live status", async ({

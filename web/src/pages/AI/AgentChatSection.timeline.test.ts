@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  appendProcessStepToTimeline,
   historyEventsToMessages,
   historyEventsToTelemetry,
-  mergeDetailMessagesWithTimeline,
-  sliceRecentChatTurns,
 } from "./AgentChatSection.timeline";
 import { isThreadActive } from "./AgentChatSection.timelinePolling";
 import {
@@ -18,6 +17,194 @@ import {
   type HistoryEvent,
   type RunTelemetry,
 } from "./AgentChatSection.helpers";
+
+describe("external runner process rendering", () => {
+  it("coalesces adjacent assistant deltas without crossing tool boundaries", () => {
+    const first = appendProcessStepToTimeline([], {
+      type: "thinking",
+      summary: "你",
+      status: "success",
+      startedAt: 1,
+    });
+    const second = appendProcessStepToTimeline(first, {
+      type: "thinking",
+      summary: "说得对。",
+      status: "success",
+      startedAt: 2,
+    });
+    const withTool = appendProcessStepToTimeline(second, {
+      type: "tool",
+      summary: "exec_command",
+      status: "success",
+    });
+    const afterTool = appendProcessStepToTimeline(withTool, {
+      type: "thinking",
+      summary: "继续",
+      status: "success",
+      startedAt: 3,
+    });
+
+    expect(afterTool).toEqual([
+      {
+        type: "thinking",
+        summary: "你说得对。",
+        status: "success",
+        startedAt: 1,
+      },
+      { type: "tool", summary: "exec_command", status: "success" },
+      {
+        type: "thinking",
+        summary: "继续",
+        status: "success",
+        startedAt: 3,
+      },
+    ]);
+  });
+
+  it("replaces token deltas with a cumulative runner snapshot without duplicating it", () => {
+    const tokenized = [..."你说得对。这个问题需要修复。"].reduce(
+      (steps, summary, index) =>
+        appendProcessStepToTimeline(steps, {
+          type: "thinking",
+          summary,
+          status: "success",
+          startedAt: index,
+        }),
+      [] as ReturnType<typeof appendProcessStepToTimeline>,
+    );
+    const withSnapshot = appendProcessStepToTimeline(tokenized, {
+      type: "thinking",
+      summary: "你说得对。这个问题需要修复。",
+      status: "success",
+      startedAt: 30,
+    });
+    const repeatedShortToken = appendProcessStepToTimeline([], {
+      type: "thinking",
+      summary: "哈",
+      status: "success",
+    });
+
+    expect(withSnapshot).toHaveLength(1);
+    expect(withSnapshot[0]?.summary).toBe("你说得对。这个问题需要修复。");
+    expect(
+      appendProcessStepToTimeline(repeatedShortToken, {
+        type: "thinking",
+        summary: "哈",
+        status: "success",
+      })[0]?.summary,
+    ).toBe("哈哈");
+  });
+
+  it("renders streamed reasoning as paragraphs and hides usage refresh events", () => {
+    const messages = historyEventsToMessages([
+      {
+        timestamp: 1,
+        event_type: "session_start",
+        session_key: "stream-coalescing",
+        content: { runtime: "external_cli", adapter: "codex" },
+      },
+      {
+        timestamp: 2,
+        event_type: "user_message",
+        session_key: "stream-coalescing",
+        content: { message: "请修复" },
+      },
+      ...["你", "说", "得", "对", "。"].map((message, index) => ({
+        timestamp: 3 + index,
+        event_type: "assistant_delta",
+        session_key: "stream-coalescing",
+        content: { message },
+      })),
+      {
+        timestamp: 8,
+        event_type: "assistant_delta",
+        session_key: "stream-coalescing",
+        content: { message: "token_usage: token usage updated" },
+      },
+      {
+        timestamp: 9,
+        event_type: "assistant_delta",
+        session_key: "stream-coalescing",
+        content: { message: "rate_limits: usage updated" },
+      },
+      {
+        timestamp: 10,
+        event_type: "tool_call",
+        session_key: "stream-coalescing",
+        content: { tool_name: "exec_command", call_id: "tool-1" },
+      },
+      {
+        timestamp: 11,
+        event_type: "tool_result",
+        session_key: "stream-coalescing",
+        content: {
+          tool_name: "exec_command",
+          call_id: "tool-1",
+          result: "ok",
+          success: true,
+        },
+      },
+      ...["继续", "完成"].map((message, index) => ({
+        timestamp: 12 + index,
+        event_type: "assistant_delta",
+        session_key: "stream-coalescing",
+        content: { message },
+      })),
+      {
+        timestamp: 14,
+        event_type: "assistant_message",
+        session_key: "stream-coalescing",
+        content: { message: "最终结果" },
+      },
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[1].content).toBe("最终结果");
+    expect(messages[1].processSteps?.map((step) => step.summary)).toEqual([
+      "你说得对。",
+      "exec_command",
+      "继续完成",
+    ]);
+    expect(JSON.stringify(messages)).not.toContain("token_usage");
+    expect(JSON.stringify(messages)).not.toContain("rate_limits");
+  });
+
+  it("removes a coalesced delta paragraph when it duplicates the final answer", () => {
+    const messages = historyEventsToMessages([
+      {
+        timestamp: 1,
+        event_type: "session_start",
+        session_key: "stream-final-dedupe",
+        content: { runtime: "external_cli", adapter: "codex" },
+      },
+      {
+        timestamp: 2,
+        event_type: "user_message",
+        session_key: "stream-final-dedupe",
+        content: { message: "继续" },
+      },
+      ...["修复", "已经", "完成", "。"].map((message, index) => ({
+        timestamp: 3 + index,
+        event_type: "assistant_delta",
+        session_key: "stream-final-dedupe",
+        content: { message },
+      })),
+      {
+        timestamp: 7,
+        event_type: "assistant_message",
+        session_key: "stream-final-dedupe",
+        content: { message: "修复已经完成。" },
+      },
+    ]);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toMatchObject({
+      role: "assistant",
+      content: "修复已经完成。",
+    });
+    expect(messages[1].processSteps).toBeUndefined();
+  });
+});
 
 describe("historyEventsToTelemetry", () => {
   it("clears stale completed plans when a later turn records plan_cleared", () => {
@@ -384,105 +571,6 @@ describe("historyEventsToMessages", () => {
       type: "image_url",
       image_url: { url: "data:image/jpeg;base64,aW1hZ2U=", detail: "auto" },
     });
-  });
-
-  it("keeps detail chat turns when a noisy timeline tail only contains the latest run", () => {
-    const detailMessages = [
-      { id: "d1", role: "user" as const, content: "first question", meta: "You" },
-      { id: "d2", role: "assistant" as const, content: "first answer", meta: "Agent" },
-      { id: "d3", role: "user" as const, content: "second question", meta: "You" },
-      { id: "d4", role: "assistant" as const, content: "second answer", meta: "Agent" },
-      { id: "d5", role: "user" as const, content: "latest question", meta: "You" },
-      { id: "d6", role: "assistant" as const, content: "latest answer", meta: "Agent" },
-    ];
-    const timelineMessages = historyEventsToMessages([
-      {
-        timestamp: 10,
-        event_type: "session_start",
-        session_key: "noisy-tail",
-        content: { runtime: "external_cli", adapter: "traex" },
-      },
-      {
-        timestamp: 11,
-        event_type: "user_message",
-        session_key: "noisy-tail",
-        content: { message: "latest question" },
-      },
-      {
-        timestamp: 12,
-        event_type: "tool_call",
-        session_key: "noisy-tail",
-        content: { tool_name: "exec_command", call_id: "tool_1" },
-      },
-      {
-        timestamp: 13,
-        event_type: "tool_result",
-        session_key: "noisy-tail",
-        content: { tool_name: "exec_command", call_id: "tool_1", result: "ok" },
-      },
-      {
-        timestamp: 14,
-        event_type: "assistant_message",
-        session_key: "noisy-tail",
-        content: { message: "latest answer" },
-      },
-    ]);
-
-    const merged = mergeDetailMessagesWithTimeline(detailMessages, timelineMessages);
-    const visible = sliceRecentChatTurns(merged, 2);
-
-    expect(merged.map((message) => message.content)).toEqual([
-      "first question",
-      "first answer",
-      "second question",
-      "second answer",
-      "latest question",
-      "latest answer",
-    ]);
-    expect(visible.hasOlder).toBe(true);
-    expect(visible.messages.map((message) => message.content)).toEqual([
-      "second question",
-      "second answer",
-      "latest question",
-      "latest answer",
-    ]);
-    expect(visible.messages[3].processSteps).toHaveLength(1);
-  });
-
-  it("keeps merged detail and timeline messages available without forced recent-turn truncation", () => {
-    const detailMessages = [
-      { id: "d1", role: "user" as const, content: "first question", meta: "You" },
-      { id: "d2", role: "assistant" as const, content: "first answer", meta: "Agent" },
-      { id: "d3", role: "user" as const, content: "second question", meta: "You" },
-      { id: "d4", role: "assistant" as const, content: "second answer", meta: "Agent" },
-      { id: "d5", role: "user" as const, content: "latest question", meta: "You" },
-      { id: "d6", role: "assistant" as const, content: "latest answer", meta: "Agent" },
-    ];
-    const timelineMessages = historyEventsToMessages([
-      {
-        timestamp: 11,
-        event_type: "user_message",
-        session_key: "full-merge",
-        content: { message: "latest question" },
-      },
-      {
-        timestamp: 12,
-        event_type: "assistant_message",
-        session_key: "full-merge",
-        content: { message: "latest answer" },
-      },
-    ]);
-
-    const merged = mergeDetailMessagesWithTimeline(detailMessages, timelineMessages);
-
-    expect(merged.map((message) => message.content)).toEqual([
-      "first question",
-      "first answer",
-      "second question",
-      "second answer",
-      "latest question",
-      "latest answer",
-    ]);
   });
 
   it("renders persisted Plan Mode proposed plans as assistant results", () => {
