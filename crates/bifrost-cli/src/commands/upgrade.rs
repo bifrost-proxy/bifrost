@@ -1814,7 +1814,15 @@ fn finish_already_latest_upgrade(
         return Ok(());
     }
     let install_method = detect_install_method();
-    let restart_executable = match restart_executable_for_install_method(&install_method) {
+    finish_already_latest_upgrade_for_method(latest_version, behavior, &install_method)
+}
+
+fn finish_already_latest_upgrade_for_method(
+    latest_version: &str,
+    behavior: UpgradeBehavior,
+    install_method: &InstallMethod,
+) -> Result<(), BifrostError> {
+    let restart_executable = match restart_executable_for_install_method(install_method) {
         Ok(executable) => executable,
         Err(error) if behavior.require_desktop_app_update => return Err(error),
         Err(_) => return Ok(()),
@@ -2634,6 +2642,18 @@ mod tests {
         .expect("desktop-managed already-latest is a no-op");
         finish_already_latest_upgrade(env!("CARGO_PKG_VERSION"), UpgradeBehavior::background())
             .expect("background already-latest restarts when no app is installed");
+        assert!(finish_already_latest_upgrade_for_method(
+            env!("CARGO_PKG_VERSION"),
+            UpgradeBehavior::background(),
+            &InstallMethod::Unknown,
+        )
+        .is_err());
+        finish_already_latest_upgrade_for_method(
+            env!("CARGO_PKG_VERSION"),
+            UpgradeBehavior::interactive(false, true),
+            &InstallMethod::Unknown,
+        )
+        .expect("manual unknown install remains best effort");
         finish_installed_upgrade(
             &success,
             env!("CARGO_PKG_VERSION"),
@@ -2650,6 +2670,26 @@ mod tests {
         );
         write_runtime_info(&desktop_runtime).expect("write desktop runtime");
         maybe_restart_running_proxy(&success).expect("desktop owns restart handoff");
+        finish_installed_upgrade(
+            &success,
+            env!("CARGO_PKG_VERSION"),
+            UpgradeBehavior {
+                restart_if_already_latest: false,
+                update_desktop_app: false,
+                require_desktop_app_update: false,
+                restart_proxy: true,
+            },
+        )
+        .expect("installed desktop runtime leaves restart to app");
+
+        let free_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("free port");
+        let free_port = free_listener.local_addr().expect("local addr").port();
+        drop(free_listener);
+        assert!(prepare_running_proxy_marker(Some(RunningProxyHint {
+            pid: std::process::id(),
+            port: free_port,
+        }))
+        .is_err());
 
         std::env::set_var(DESKTOP_MANAGED_SKIP_APP_ENV, "yes");
         std::env::set_var(DESKTOP_MANAGED_SKIP_RESTART_ENV, "true");

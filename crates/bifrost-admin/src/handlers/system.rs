@@ -917,8 +917,8 @@ mod tests {
     use super::{
         build_cli_install_status, desktop_core_env_enabled, effective_upgrade_channel,
         install_binary_atomically, install_cli_from_current_exe, normalize_progress,
-        parse_upgrade_channel, upgrade_process_args, upgrade_request_plan, CliInstallRequest,
-        UpgradeChannel,
+        parse_upgrade_channel, spawn_upgrade_process, upgrade_process_args, upgrade_request_plan,
+        CliInstallRequest, UpgradeChannel,
     };
     use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS};
     use chrono::Utc;
@@ -1040,6 +1040,32 @@ mod tests {
                 "-y"
             ]
         );
+    }
+
+    #[test]
+    fn upgrade_process_spawn_runs_in_an_isolated_data_dir() {
+        const CHILD_ENV: &str = "BIFROST_TEST_ADMIN_UPGRADE_SPAWN_CHILD";
+        if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .args([
+                "--exact",
+                "handlers::system::tests::upgrade_process_spawn_runs_in_an_isolated_data_dir",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .status()
+            .expect("spawn isolated Admin upgrade test");
+            assert!(status.success(), "isolated Admin upgrade test failed");
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("BIFROST_DATA_DIR", dir.path());
+        spawn_upgrade_process(UpgradeChannel::Desktop, None, None)
+            .expect("spawn detached desktop upgrade command");
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
     #[cfg(target_os = "macos")]

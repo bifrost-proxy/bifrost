@@ -1273,6 +1273,21 @@ mod tests {
 
     #[test]
     fn desktop_managed_cli_upgrade_cannot_reenter_app_or_restart_its_core() {
+        const CHILD_ENV: &str = "BIFROST_TEST_DESKTOP_MANAGED_CLI_CHILD";
+        if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+            let status = Command::new(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "commands::app::tests::desktop_managed_cli_upgrade_cannot_reenter_app_or_restart_its_core",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .status()
+                .expect("spawn isolated desktop-managed CLI test");
+            assert!(status.success(), "isolated desktop-managed CLI test failed");
+            return;
+        }
+
         let command = desktop_managed_cli_upgrade_command(Path::new("/tmp/bifrost"));
         let args: Vec<_> = command
             .get_args()
@@ -1311,6 +1326,10 @@ mod tests {
             assert!(run_desktop_managed_cli_upgrade(&cli)
                 .expect("run fake cli")
                 .success());
+            std::env::set_var("PATH", dir.path());
+            std::env::set_var("BIFROST_INSTALL_DIR", dir.path());
+            upgrade_cli_if_present("desktop").expect("desktop orchestrator upgrades located CLI");
+            std::env::remove_var("BIFROST_INSTALL_DIR");
         }
     }
 
