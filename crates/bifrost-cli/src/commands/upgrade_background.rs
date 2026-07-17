@@ -15,11 +15,13 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use bifrost_core::upgrade_progress::{write_progress, UpgradePhase, UpgradeProgress};
+use bifrost_core::BifrostError;
 
 use super::upgrade::{
     download_progress_line, handle_background_upgrade, take_deferred_install_scheduled,
     RunningProxyHint,
 };
+use crate::cli::Commands;
 
 struct ProgressSink {
     data_dir: PathBuf,
@@ -91,7 +93,48 @@ pub fn handle_upgrade_background(
     running_proxy_pid: Option<u32>,
     running_proxy_port: Option<u16>,
 ) {
-    let data_dir = match crate::config::get_bifrost_dir() {
+    handle_upgrade_background_with(
+        target,
+        source,
+        running_proxy_pid,
+        running_proxy_port,
+        crate::config::get_bifrost_dir(),
+        handle_background_upgrade,
+    );
+}
+
+pub fn handle_upgrade_background_command(command: Commands) -> Result<(), BifrostError> {
+    handle_upgrade_background_command_with(command, handle_upgrade_background)
+}
+
+fn handle_upgrade_background_command_with(
+    command: Commands,
+    handler: impl FnOnce(Option<String>, String, Option<u32>, Option<u16>),
+) -> Result<(), BifrostError> {
+    let Commands::SelfUpdate {
+        target,
+        source,
+        running_proxy_pid,
+        running_proxy_port,
+    } = command
+    else {
+        return Err(BifrostError::Config(
+            "Expected hidden self-update command".to_string(),
+        ));
+    };
+    handler(target, source, running_proxy_pid, running_proxy_port);
+    Ok(())
+}
+
+fn handle_upgrade_background_with(
+    target: Option<String>,
+    source: String,
+    running_proxy_pid: Option<u32>,
+    running_proxy_port: Option<u16>,
+    data_dir: Result<PathBuf, BifrostError>,
+    engine: impl FnOnce(Option<RunningProxyHint>) -> Result<(), BifrostError>,
+) {
+    let data_dir = match data_dir {
         Ok(dir) => dir,
         Err(error) => {
             tracing::error!(error = %error, "background upgrade: cannot resolve data dir");
@@ -112,7 +155,7 @@ pub fn handle_upgrade_background(
     // on-disk binary is already current but the running daemon still serves an
     // older in-memory version.
     let restart_hint = RunningProxyHint::from_parts(running_proxy_pid, running_proxy_port);
-    let result = handle_background_upgrade(restart_hint);
+    let result = engine(restart_hint);
     let deferred_terminal_pending = take_deferred_install_scheduled();
 
     match &result {
@@ -174,9 +217,15 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    fn lock_tests() -> std::sync::MutexGuard<'static, ()> {
+        test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn download_report_writes_percent_and_phase() {
-        let _guard = test_lock().lock().unwrap();
+        let _guard = lock_tests();
         let dir = temp_dir();
         install_sink(ProgressSink {
             data_dir: dir.clone(),
@@ -197,7 +246,7 @@ mod tests {
 
     #[test]
     fn installing_and_restarting_report_phases() {
-        let _guard = test_lock().lock().unwrap();
+        let _guard = lock_tests();
         let dir = temp_dir();
         install_sink(ProgressSink {
             data_dir: dir.clone(),
@@ -216,12 +265,68 @@ mod tests {
 
     #[test]
     fn reporting_without_sink_is_noop() {
-        let _guard = test_lock().lock().unwrap();
+        let _guard = lock_tests();
         let _ = take_sink();
         // Must not panic and must not write anywhere.
         report_installing();
         report_download(1, Some(2), Instant::now());
         report_restarting();
+    }
+
+    #[test]
+    fn hidden_self_update_command_forwards_complete_restart_hint() {
+        let command = Commands::SelfUpdate {
+            target: Some("0.0.156".to_string()),
+            source: "admin".to_string(),
+            running_proxy_pid: Some(12345),
+            running_proxy_port: Some(9900),
+        };
+        let forwarded = std::cell::RefCell::new(None);
+        handle_upgrade_background_command_with(command, |target, source, pid, port| {
+            forwarded.replace(Some((target, source, pid, port)));
+        })
+        .unwrap();
+        assert_eq!(
+            forwarded.into_inner(),
+            Some((
+                Some("0.0.156".to_string()),
+                "admin".to_string(),
+                Some(12345),
+                Some(9900),
+            ))
+        );
+        assert!(handle_upgrade_background_command_with(
+            Commands::VersionCheck,
+            |_, _, _, _| panic!("non-self-update command must not be dispatched"),
+        )
+        .is_err());
+        assert!(handle_upgrade_background_command(Commands::VersionCheck).is_err());
+    }
+
+    #[test]
+    fn background_upgrade_wrapper_forwards_hint_and_writes_terminal_progress() {
+        let _guard = lock_tests();
+        let dir = temp_dir();
+        let seen_hint = std::cell::RefCell::new(None);
+        handle_upgrade_background_with(
+            Some("0.0.156".to_string()),
+            "admin".to_string(),
+            Some(12345),
+            Some(9900),
+            Ok(dir.clone()),
+            |hint| {
+                seen_hint.replace(hint);
+                Ok(())
+            },
+        );
+        assert_eq!(
+            seen_hint.into_inner(),
+            RunningProxyHint::from_parts(Some(12345), Some(9900))
+        );
+        let progress = read_progress(&dir);
+        assert_eq!(progress.phase, UpgradePhase::Completed);
+        assert_eq!(progress.source.as_deref(), Some("admin"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

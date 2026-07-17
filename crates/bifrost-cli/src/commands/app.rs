@@ -1244,6 +1244,14 @@ mod tests {
         assert!(!should_write_app_progress("cli-upgrade"));
         assert!(should_write_app_progress("desktop"));
         assert!(should_write_app_progress("cli"));
+        write_app_progress(
+            UpgradePhase::Completed,
+            "must be ignored",
+            Some("0.0.156".to_string()),
+            "cli-upgrade",
+            None,
+            None,
+        );
     }
 
     #[test]

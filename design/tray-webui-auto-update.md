@@ -64,7 +64,7 @@ Idle → Checking → Downloading → Installing → Restarting → Completed / 
 - `source ∈ { "tray", "admin", "cli" }`:仅用于诊断。
 - **stale active**:`updated_at` 超过 120 秒仍未更新且仍处 active,`GET /api/system/upgrade/progress` 归一化为 `Failed`,避免 UI 卡死在 Working。
 - **磁盘二进制已是 latest**:`upgrade` 交互路径会“already latest”直接退出;`self-update` 必须绕过该短路,始终对运行中的旧 daemon 触发 `maybe_restart_running_proxy`。
-- **runtime marker 缺失**:Admin 子进程参数携带发起请求的 PID/端口。`self-update` 只在进程仍存活且端口 owner 与 PID 完全一致时合成 daemon runtime snapshot;任一校验失败都忽略 hint,禁止按端口模糊匹配或误停其它服务。
+- **runtime marker 缺失**:Admin 子进程参数携带发起请求的 PID/端口。`self-update` 只在进程仍存活且端口 owner 与 PID 完全一致时合成 daemon runtime snapshot;任一校验失败都将本次更新标记为失败,禁止继续使用陈旧 marker、按端口模糊匹配或误停其它服务。
 - **进度所有权**:最外层 `self-update` 是 CLI channel 唯一 terminal progress writer。CLI 联动的 App 安装仍输出诊断日志,但 `source=cli-upgrade` 时不触碰 `upgrade-progress.json`,避免 Web UI 在 daemon 重启前提前观察到 `completed`。
 
 ### “立即更新” vs “稍后提示”
@@ -275,7 +275,7 @@ SelfUpdate {
 - **Admin 内嵌升级导致自杀重启**:强制走 detached `self-update` 子进程,admin 不承担二进制替换与重启,只做协议边界与进度可读。
 - **magic string `UPGRADE_PROGRESS:`**:早期方案用 stdout 信号解析,已被否决;改成文件通道,天然支持跨代理重启存活与多端并发读取。
 - **`bifrost upgrade` 交互路径“already latest”短路**:后台路径必须绕过,否则磁盘 latest 但旧 daemon 仍跑的场景下升级看似成功但服务未更新。
-- **runtime marker 被其它流程清理**:不能仅依赖 marker 判断“是否运行”。Admin 必须传递精确 PID/port,updater 必须先做 owner 校验再恢复 marker;校验失败时宁可不重启并保留诊断,不能误杀未知监听进程。
+- **runtime marker 被其它流程清理**:不能仅依赖 marker 判断“是否运行”。Admin 必须传递精确 PID/port,updater 必须先做 owner 校验再恢复 marker;校验失败时终止本次更新并保留诊断,不能回退到陈旧 marker 或误杀未知监听进程。
 - **嵌套 App 更新提前宣告成功**:CLI 联动 App 的子流程不拥有共享 terminal progress;外层 CLI 完成二进制替换、App best-effort 更新与 daemon 重启后才写 `completed`。
 - **skill 安装失败**:提示手动重试即可,不回滚新二进制,避免让升级变成“成功又不成功”的中间态。
 - **Windows / 无头 CI 上的原生 tray**:tray helper 无法长驻,继续保留“log-only 降级模式”,不把 tray 缺失误判为升级失败。

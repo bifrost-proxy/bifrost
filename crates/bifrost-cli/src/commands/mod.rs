@@ -71,7 +71,7 @@ pub use traffic::{
 };
 pub use update_check::*;
 pub use upgrade::*;
-pub use upgrade_background::handle_upgrade_background;
+pub use upgrade_background::handle_upgrade_background_command;
 pub use value::*;
 pub use whitelist::*;
 
