@@ -671,6 +671,37 @@ fn daily_agent_workspace_creates_per_agent_instruction_and_output_dirs() {
 }
 
 #[test]
+fn configured_daily_agent_instructions_replace_stale_workspace_file() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let mut task = test_directory_task("daily-agent-config-sync-task", temp.path().join("audio"));
+    ensure_asr_daily_workspace(&task).unwrap();
+
+    let mut agents = normalized_daily_agents(&task.daily_agent);
+    let custom = agents
+        .iter_mut()
+        .find(|agent| agent.id == DEFAULT_DAILY_AGENT_ID)
+        .unwrap();
+    custom.instructions_source = AsrDailyAgentInstructionsSource::Custom;
+    custom.instructions = Some("CUSTOM_PROMPT_FROM_CONFIG".to_string());
+    task.daily_agent.agents = agents;
+
+    let agent = normalized_daily_agents(&task.daily_agent)
+        .into_iter()
+        .find(|agent| agent.id == DEFAULT_DAILY_AGENT_ID)
+        .unwrap();
+    let path = daily_agent_instructions_path(&task_for_daily_agent(&task, &agent));
+    std::fs::write(&path, "STALE_WORKSPACE_PROMPT").unwrap();
+    sync_configured_daily_agent_instructions(&task).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        "CUSTOM_PROMPT_FROM_CONFIG"
+    );
+}
+
+#[test]
 fn daily_agent_source_copy_current_check_compares_content() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("2026-05-22.md");

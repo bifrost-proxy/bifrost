@@ -4,6 +4,12 @@
 > 实现入口：`crates/bifrost-admin/src/im_gateway/chatgpt_web.rs` 与 `chatgpt_web/{artifacts,browser,diagnostics,images,interaction,native,send,storage,tests}.rs`。
 > 命名注：文档使用 `AgentRunner*` 作为最终概念命名；实际代码当前仍沿用 `ExternalCli*`（`ExternalCliGatewayConfig / ExternalCliAgentSettings / ExternalCliChannelSettings / ExternalCliRunRequest`），Chat Gateway 公共前缀为 `/_bifrost/api/im-gateway/chat`；`/agent/runners` 独立命名空间 planned, not yet shipped as of 2026-06-16。
 
+## Pro 模型本地化识别
+
+- ChatGPT Web 在中文界面可能把 Pro 研究档位显示为 `极高`（繁体为 `極高`），而不是英文 `Pro`。
+- 发送前的模型硬校验同时识别 `Pro`、`极高` 和 `極高`；只有唯一模型选择器或唯一菜单项命中时才允许继续，避免误点同页其他菜单。
+- 模型选择失败必须发生在填入和发送 Prompt 之前，并保留诊断截图，因此恢复运行不会重复提交 Pro 研究。
+
 ## 背景
 
 Agent Chat runner 执行配置最终拆成两层：

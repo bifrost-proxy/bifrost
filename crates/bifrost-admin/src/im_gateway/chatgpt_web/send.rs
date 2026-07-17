@@ -376,9 +376,15 @@ async fn ensure_pro_model(cdp: &CdpClient) -> Result<(), String> {
             const style = getComputedStyle(el);
             return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
           };
+          const proLabels = new Set(['pro', '极高', '極高']);
           const items = Array.from(document.querySelectorAll('[role="menuitemradio"]'))
             .filter(visible)
-            .filter((el) => (el.textContent || '').replace(/\s+/g, ' ').trim() === 'Pro');
+            .filter((el) => (el.textContent || '')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .toLocaleLowerCase()
+              .split(' ')
+              .some((token) => proLabels.has(token)));
           if (items.length !== 1) return { ok: false, error: 'pro_model_option_not_unique', count: items.length };
           const rect = items[0].getBoundingClientRect();
           return { ok: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
@@ -434,10 +440,7 @@ fn select_pro_model_picker(value: &Value) -> Result<ProModelPicker, String> {
             candidate
                 .get("text")
                 .and_then(Value::as_str)
-                .is_some_and(|text| {
-                    text.split_whitespace()
-                        .any(|token| token.eq_ignore_ascii_case("pro"))
-                })
+                .is_some_and(model_picker_label_is_pro)
         })
         .collect::<Vec<_>>();
     if pro_candidates.len() == 1 {
@@ -465,6 +468,11 @@ fn select_pro_model_picker(value: &Value) -> Result<ProModelPicker, String> {
         hinted_candidates.len(),
         model_picker_labels(&candidates.iter().collect::<Vec<_>>())
     ))
+}
+
+fn model_picker_label_is_pro(text: &str) -> bool {
+    text.split_whitespace()
+        .any(|token| token.eq_ignore_ascii_case("pro") || matches!(token, "极高" | "極高"))
 }
 
 fn model_picker_candidate_has_hint(candidate: &Value) -> bool {
@@ -4561,6 +4569,22 @@ mod tests {
         assert!(!picker.selected);
         assert_eq!(picker.x, 3.0);
         assert_eq!(picker.y, 4.0);
+    }
+
+    #[test]
+    fn pro_model_picker_accepts_localized_extreme_label_as_selected() {
+        for label in ["极高", "極高", "极高 最强推理", "極高 最強推理"] {
+            let picker = select_pro_model_picker(&json!({
+                "candidates": [
+                    {"text": "", "ariaLabel": "More", "testId": "", "title": "", "x": 1.0, "y": 2.0},
+                    {"text": label, "ariaLabel": "", "testId": "model-switcher-dropdown-button", "title": "", "x": 3.0, "y": 4.0}
+                ]
+            }))
+            .unwrap();
+            assert!(picker.selected, "label={label}");
+            assert_eq!(picker.x, 3.0);
+            assert_eq!(picker.y, 4.0);
+        }
     }
 
     #[test]

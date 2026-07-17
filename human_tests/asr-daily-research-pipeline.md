@@ -23,7 +23,7 @@
 
 1. 将 ChatGPT Web Runner 配置为 `interfaceMode=chat`、`model=pro`。
 2. 分别使用免费账号和 Pro 账号执行新研究会话。
-3. 在 Pro 账号页面存在侧边栏、Project 操作等多个可见 `aria-haspopup="menu"` 按钮时，保持模型按钮显示 `Pro`，再从真实 Project 发起一次独立研究。
+3. 在 Pro 账号页面存在侧边栏、Project 操作等多个可见 `aria-haspopup="menu"` 按钮时，分别验证英文模型按钮 `Pro`、简体中文 `极高` 和繁体中文 `極高`，再从真实 Project 发起一次独立研究。
 4. Project 中预先保留其他历史研究会话；新研究 handoff 返回 conversation id 后，核对最终报告正文和链接均属于该 id，而不是历史会话内容。
 5. 让首条回复只返回“我会先检索……”一类规划句，再观察系统是否在同一 conversation id 内要求完整最终报告。
 6. 模拟深度研究刚开始时只出现没有 `data-message-id` 的 assistant 外壳，随后让原会话完成；再模拟 fan-out 因等待超时留下包含 conversation id 的失败元数据并重跑同一题。
@@ -31,7 +31,7 @@
 预期：
 
 - 免费账号缺少 Chat/Pro 控件时，Bifrost 在写入 Prompt 前失败，不发送问题。
-- Pro 账号从 Work 切换为 Chat，选择并验证 Pro 后才写入和发送 Prompt。
+- Pro 账号从 Work 切换为 Chat，选择并验证 Pro 后才写入和发送 Prompt；中文界面的 `极高` / `極高` 视为 Pro 已选中状态。
 - 页面存在多个无关菜单按钮时，系统从全部候选中识别唯一 `Pro` 模型按钮并继续发送；如果出现多个 Pro 或多个模型候选，则保持失败关闭，不猜测点击。
 - 创建下一题的新会话时，不关闭前一题的 Project conversation tab；前一题即使仍在后台深度研究，也能由后续 `wait` 重新 attach 并取回最终稿。
 - DOM fallback 只从本次 handoff 对应的普通或 Project conversation URL 取结果；页面仍处在其他会话或 Project 入口时继续等待，不返回历史会话的短计划前缀。
@@ -180,6 +180,7 @@
 
 | 日期 | 用例 | 结果 |
 | --- | --- | --- |
+| 2026-07-17 | TC-ADRP-02 中文 Pro 本地化回归与真实研究投递 | `pro_model_picker_` 4 个单测通过，确认英文 `Pro`、简体 `极高`、繁体 `極高` 均能唯一识别，多个 Pro 候选仍拒绝猜测。部署源码构建后，正式 `research_fanout` 在中文界面从“极高”模型成功创建 Project conversation `6a59f133-f9a4-83ea-8099-fecf79906b34`，子 run `1784279336082-eb8da578-4984-43da-93aa-be449ec5bea9` 用时 193739 ms 成功，实际返回 8434 个 assistant 字符；结果 JSON 同时记录 `github_connector_status=verified`、`context_profile=ibkr_runtime` 和 Project 完整链接。随后 `research_digest` run `1784279574729-dbf87e4d-9a4c-4a27-b0f0-39b2e5eb0d5b` 成功，微信出站消息 `a47fb4bd` 为纯文本且状态成功。失败的旧运行发生在填入 Prompt 前，没有重复提交 Pro 研究。 |
 | 2026-07-16 | TC-ADRP-11/12 | 官方 `daily-research` 模板 API、应用 API、Prompt 隔离、隐私 marker 扫描、Runner/terminology/report sync 保留和有界并发单测通过；隔离 Bifrost API E2E 通过，fan-out 使用 `max_concurrency=2` 且 custom 研究 Prompt 进入两个独立 ChatGPT mock run；Playwright 使用本机 Chrome 验证模板确认交互与并发配置。 |
 | 2026-07-16 | TC-ADRP-02/06 同会话恢复与真实微信投递 | `2026-07-14` 的播客研究曾因旧版把无 `data-message-id` 的规划外壳误判为完成，随后等待超时而失败。部署修复后，fan-out 从失败元数据恢复原 conversation `6a57becd-5cec-83ea-82c7-7ecdcac88da9`，只执行 `wait`，4.9 秒取回 37333 字节、五章齐全的最终稿；未新建 conversation、未重复发送 Pro Prompt。成功 JSON、fan-out 和 digest 保持 Project 内完整链接。研究摘要 run `1784137650213-afa516b8-56d0-4d67-b3c0-d341177825da` 与日报概要 run `1784137768366-049c2ff2-7459-4270-9903-bbb29005a479` 均成功；微信出站 `5691644c`、`5a66c73d` 均为 `msg_type=text`、`status=success`，研究摘要包含原始问题、核心概要与原 Project 链接。 |
 | 2026-07-15 | TC-ADRP-10 | 根据真实信贷研究 Prompt（19594 字节）确认其中误带整份“全天候私人助理整理指南”。修复后单题 Prompt 不再读取日报 `AGENTS.md`，并为背景、原始片段、单题要求和已核验上下文设置独立字符上限；`daily_agent_research_child_prompt_is_compact_and_excludes_daily_report_instructions` 与 `live_chatgpt_web_is_fail_closed_during_e2e_without_explicit_opt_in` 通过。mock 流水线 E2E task `dd2a3454d9154d96a3bf4c41f6662fae` 通过且未创建真实 Pro 会话；`local-ci.sh --skip-e2e` 的格式、clippy、全工作区测试和依赖审计全部通过。 |

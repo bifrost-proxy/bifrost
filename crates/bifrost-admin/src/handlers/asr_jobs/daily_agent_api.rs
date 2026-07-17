@@ -90,6 +90,7 @@ async fn put_daily_agent_config_response(
     if let Some(enabled) = update.enabled {
         task.daily_agent.enabled = enabled;
     }
+    let agents_updated = update.agents.is_some();
     if let Some(agents) = update.agents {
         task.daily_agent.agents = agents.into_iter().map(normalize_daily_agent_item).collect();
         if let Err(error) = validate_daily_agent_config(&task.daily_agent) {
@@ -143,13 +144,24 @@ async fn put_daily_agent_config_response(
 
     task.updated_at_ms = now_ms();
     let updated_config = task.daily_agent.clone();
+    let workspace_task = agents_updated.then(|| task.clone());
+
+    if let Some(workspace_task) = workspace_task.as_ref() {
+        if let Err(error) = ensure_asr_daily_workspace(workspace_task)
+            .and_then(|_| sync_configured_daily_agent_instructions(workspace_task))
+        {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+        }
+    }
 
     if let Err(e) = save_tasks(&store) {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e);
     }
 
-    if let Some(task) = find_task(task_id) {
-        let _ = ensure_asr_daily_workspace(&task);
+    if !agents_updated {
+        if let Some(task) = find_task(task_id) {
+            let _ = ensure_asr_daily_workspace(&task);
+        }
     }
 
     json_response(&serde_json::json!({

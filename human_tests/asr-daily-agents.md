@@ -348,8 +348,24 @@
 - WebUI 的亮色、暗色主题均可操作；修改字段需要明确保存，刷新后由后端配置回填。
 - 本用例不迁移、不读取、不重新生成任何历史日报，也不发送测试微信消息。
 
+### TC-ADA-22 回归：批量配置同步自定义 AGENTS.md
+
+操作步骤：
+1. 在临时数据目录创建 Daily Agent 任务，并通过单 Agent Prompt API 写入 `research_fanout` 自定义 Prompt。
+2. 直接把工作区 `agents/research_fanout/AGENTS.md` 改为 `STALE_PROMPT_BEFORE_CONFIG_PUT`，模拟配置与文件不一致。
+3. 调用 `PUT /_bifrost/api/asr/tasks/{task_id}/daily-agent`，在 `agents[]` 中提交 `instructions_source=custom` 和新的 `instructions`。
+4. 调用 `GET /_bifrost/api/asr/tasks/{task_id}/daily-agent/agents?agent_id=research_fanout` 读取实际工作区 Prompt。
+5. 运行 `configured_daily_agent_instructions_replace_stale_workspace_file` 单元测试和 `e2e-tests/tests/test_asr_daily_agents_api.sh` 隔离 E2E。
+
+预期结果：
+- 批量配置接口成功后，配置中的自定义 Prompt 与工作区 `AGENTS.md` 内容一致。
+- 读取结果包含新 Prompt，不包含 `STALE_PROMPT_BEFORE_CONFIG_PUT`。
+- 默认 Prompt Agent 的既有文件不被批量同步逻辑误覆盖。
+- 测试使用动态端口和临时数据目录，不触碰正式 9900、真实日报、ChatGPT Pro 或微信。
+
 ## 执行记录
 
+- 2026-07-17：执行 TC-ADA-22。`configured_daily_agent_instructions_replace_stale_workspace_file` 单测通过；隔离 API E2E 使用动态端口 `19217`、临时数据目录和禁用系统代理/托盘/登录弹窗护栏通过，临时 task 为 `58f6128c822441fca499a842f4afa659`。脚本先把 `research_fanout/AGENTS.md` 改成 stale marker，再通过批量 `PUT /daily-agent` 保存 custom instructions；随后 GET 实际文件包含新 Prompt 且不含 stale marker，正式 9900、真实日报、Pro 和微信均未被触碰。
 - 2026-07-17：执行 TC-ADA-20 / TC-ADA-21。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_automatic_ --lib -- --nocapture` 通过 2 个回归用例；`e2e-tests/tests/test_asr_daily_agents_api.sh` 在动态端口与临时数据目录通过，临时 task 为 `f4ed1078a1ca4199854cf86d9387082f`，确认日期下限、普通 Agent Project URL 规范化、无效日期 400、官方模板保留日期下限和完整五段研究链路。当前源码构建已安装到正式 9900，System Proxy 为 Disabled；正式任务持久化 `auto_process_from_date=2026-07-17` 且保持 paused。真实 WebUI 在 light/dark 两个主题下确认日期输入框值为 `2026-07-17`，普通 `daily_report` 详情存在独立 Project URL 输入框与“旧报告不迁移”说明；研究 fan-out 继续保留原 Project URL，普通日报 Project 尚未绑定时没有触发 Runner、Pro 研究或真实 IM。验证过程中未迁移、读取或重新生成历史日报，也未发送测试微信消息。
 - 2026-07-01：执行 TC-ADA-18 / TC-ADA-19 回归验证。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_chatgpt_web_tomorrow_todo_response_uses_todo_contract --lib -- --nocapture` 通过，确认 `tomorrow_todo` 接受 `# 明日 To Do List - 2026-06-15`、`## 明天必须完成`、`## 可选推进`、`## 需要确认`，拒绝 `# 2026-06-15 日报`，且 retry prompt 不包含 `今日概览`、`证据与不确定性` 或 `日报正文`。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin recovered_browser_mode_must_match_requested_execution_mode --lib -- --nocapture` 通过，确认 recovered browser 只有实际 headless/headed 与请求模式一致时才可复用，未知模式一律拒绝恢复。随后执行 `BIFROST_E2E_PORT=19197 BIFROST_DAILY_AGENT_MOCK_PORT=19198 SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_asr_daily_agents_api.sh` 通过，临时 task 为 `2e9972e09c1f45909a0b73835ea02715`，验证真实 Admin API + Runner 链路仍能生成 `daily_report` 与 `tomorrow_todo` 两个默认 Agent 的 report、processed records 和按 Agent 分目录 report sync；脚本源码哨兵确认 `daily_agent.rs` 包含 `validate_chatgpt_web_tomorrow_todo_response` 与 `上一条回复不是最终明日待办`，`browser.rs` 包含 `orphaned browser mode mismatch`。
 - 2026-06-18：执行 TC-ADA-17 真实运行服务回归验证。当前运行服务为 `/Users/eden_studio/.local/bin/bifrost 0.0.107`，`status --format json` 显示监听 `0.0.0.0:9900`，数据目录为 `/Users/eden_studio/.bifrost`；本轮按用户要求没有重启服务。任务 `c1c57318206c4f338f1267b7f37a81b8` 名称为 `work`，`daily_report.runner=chatgpt`，`timeout_ms=7200000`。先检查历史 run，发现同一 ChatGPT conversation `6a33f937-eaf0-83ec-9e44-9dd5b14b4336` 中 `1781791097556-6c4255ec-400f-47c9-a45f-de584021bed4` 返回约 14KB 且 tail 停在未完成表述，随后 `1781791307109-1c12c5d9-d314-40b5-9666-dfe8ab23a682` 从半句开头继续输出，证明旧问题不是输入粘贴失败，而是最终输出检查过早。日志还显示旧链路在 `stream_handoff` 后进入 `DOM-only mode`，遇到 `连接已中断。正在等待完整回复` 状态但未作为 in-progress 处理。随后触发真实 `2026-06-17` `daily_report`，外层 run `1781793348962-2a2bb9e1-cd66-48de-aff4-12f012372d62` 成功；ChatGPT Web 子 run `1781793348984-635cab44-13f5-4c92-be02-1dcb8aa3be3f` 的 `prompt.md` 为 114172 bytes，日志明确 `injection_mode=NativeClipboardPaste` 并走 native clipboard paste path，`conversationId=6a34025b-0158-83ec-90c4-6168fdb3f3a4`，`conversation_final.source=dom_fallback_outcome`。DOM fallback 文本从 41 持续增长到 39450 bytes，旧代码只等待 `required_stable_ms=3000` 后返回；本次代码修复把 12KB 以上长文本稳定窗口提升到 30 秒，并新增 `waitingForCompleteReply` 状态识别。最终报告保存到 `.daily/agents/daily_report/output/report/2026-06-17-report.md`，日志显示 `len=39450`、同步 `copied_files=1 failed_files=0`，`result.json.status=succeeded`，正文以 `# 2026-06-17 日报` 开头，包含 `## 今日概览` 与 `## 证据与不确定性`，tail 为完整不确定性列表。额外执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin chatgpt_web::interaction::tests --lib` 通过，覆盖长文本稳定窗口、`连接已中断。正在等待完整回复` pending 状态和 `waiting_for_complete_reply` in-progress 原因。

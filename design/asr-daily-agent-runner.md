@@ -234,6 +234,7 @@ ChatGPT Web plan 不包含 `unchanged`;文件型外部 runner 的 plan 不塞 da
 - `ensure_asr_daily_workspace` → 创建 `.daily/`、`agents/<id>/AGENTS.md`、`input/`、`output/<output_dir>/`、`.gitignore`,分发 daily markdown 副本。
 - 已存在 AGENTS.md 不覆盖;git 不存在返回 `git_available=false`。
 - `PUT /daily-agent/agents` 保存 custom instructions + 写文件。
+- `PUT /daily-agent` 批量保存 `agents[].instructions` 时也必须同步覆盖对应工作区的 `AGENTS.md`；后续运行以配置和文件一致后的 Prompt 为准，不能继续读取旧文件。
 - `maybe_enqueue_daily_agent_after_asr_run` 只在 ASR terminal + daily 刷新后排队。
 - ChangePlanner 四态(new_file / appended / rewritten / unchanged) + byte range 正确。
 - Runner 成功 → 更新 processed state;失败 → 不更新;同日多 Agent processed key 不覆盖。

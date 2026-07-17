@@ -180,24 +180,7 @@ fn write_official_daily_agent_template_instructions(
     task: &AsrDirectoryTask,
 ) -> Result<(), String> {
     ensure_asr_daily_workspace(task)?;
-    for agent in normalized_daily_agents(&task.daily_agent) {
-        if agent.instructions_source != AsrDailyAgentInstructionsSource::Custom {
-            continue;
-        }
-        let agent_task = task_for_daily_agent(task, &agent);
-        let content = ensure_daily_agent_terms_reference(
-            agent.instructions.as_deref().unwrap_or_default(),
-            normalize_daily_agent_terminology(task.daily_agent.terminology.clone()).is_some(),
-        );
-        let path = daily_agent_instructions_path(&agent_task);
-        std::fs::write(&path, content.as_bytes()).map_err(|error| {
-            format!(
-                "write Daily Agent template instructions {}: {error}",
-                path.display()
-            )
-        })?;
-    }
-    Ok(())
+    sync_configured_daily_agent_instructions(task)
 }
 
 fn get_daily_agent_templates_response() -> Response<BoxBody> {

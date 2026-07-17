@@ -332,6 +332,32 @@ fn sync_daily_agent_terms_file(task: &AsrDirectoryTask) -> Result<bool, String> 
     Ok(true)
 }
 
+fn sync_configured_daily_agent_instructions(task: &AsrDirectoryTask) -> Result<(), String> {
+    let has_terms =
+        normalize_daily_agent_terminology(task.daily_agent.terminology.clone()).is_some();
+    for agent in normalized_daily_agents(&task.daily_agent) {
+        if agent.instructions_source != AsrDailyAgentInstructionsSource::Custom {
+            continue;
+        }
+        let agent_task = task_for_daily_agent(task, &agent);
+        let path = daily_agent_instructions_path(&agent_task);
+        let content = ensure_daily_agent_terms_reference(
+            agent.instructions.as_deref().unwrap_or_default(),
+            has_terms,
+        );
+        if std::fs::read_to_string(&path).is_ok_and(|existing| existing == content) {
+            continue;
+        }
+        std::fs::write(&path, content.as_bytes()).map_err(|error| {
+            format!(
+                "write configured Daily Agent instructions {}: {error}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 fn ensure_asr_daily_workspace(
     task: &AsrDirectoryTask,
 ) -> Result<AsrDailyWorkspaceStatus, String> {

@@ -297,6 +297,10 @@ loaded_prompt = request(
 )
 assert custom_prompt in loaded_prompt["content"], loaded_prompt
 
+daily_dir = pathlib.Path(data_dir) / "asr" / "data" / "text" / task_id / ".daily"
+fanout_prompt_path = daily_dir / "agents" / "research_fanout" / "AGENTS.md"
+fanout_prompt_path.write_text("STALE_PROMPT_BEFORE_CONFIG_PUT", encoding="utf-8")
+
 def agent(agent_id, runner, output_dir, dependencies=None, fanout=None):
     value = {
         "id": agent_id,
@@ -360,6 +364,11 @@ assert stored["daily_report"]["chatgpt_project_url"] == (
 assert stored["research_fanout"]["research_fanout"]["chatgpt_interface_mode"] == "chat", stored
 assert stored["research_fanout"]["research_fanout"]["chatgpt_model"] == "pro", stored
 assert stored["research_fanout"]["research_fanout"]["max_concurrency"] == 2, stored
+loaded_prompt = request(
+    "GET", f"/asr/tasks/{task_id}/daily-agent/agents?agent_id=research_fanout"
+)
+assert custom_prompt in loaded_prompt["content"], loaded_prompt
+assert "STALE_PROMPT_BEFORE_CONFIG_PUT" not in loaded_prompt["content"], loaded_prompt
 
 invalid = list(agents)
 invalid[0] = dict(invalid[0], dependencies=[{"agent_id":"missing-agent","include_output":True}])
@@ -375,7 +384,6 @@ invalid_date = request(
 assert "valid YYYY-MM-DD" in json.dumps(invalid_date), invalid_date
 
 date = "2026-07-13"
-daily_dir = pathlib.Path(data_dir) / "asr" / "data" / "text" / task_id / ".daily"
 daily_dir.mkdir(parents=True, exist_ok=True)
 (daily_dir / f"{date}.md").write_text(
     "# 2026-07-13\n\n"
