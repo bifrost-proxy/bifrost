@@ -1,7 +1,7 @@
 // ─── Daily Agent Report Sync ─────────────────────────────────────────────────
 
 const DAILY_AGENT_REPORT_SYNC_TIMEOUT: Duration = Duration::from_secs(8);
-const DAILY_AGENT_ORIGINAL_SYNC_DIR_NAME: &str = "原始文件";
+const DAILY_AGENT_ORIGINAL_SYNC_DIR_NAME: &str = "original_text";
 
 static DAILY_AGENT_REPORT_SYNC_SEMAPHORE: Lazy<std::sync::Arc<tokio::sync::Semaphore>> =
     Lazy::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));

@@ -1318,13 +1318,13 @@ fn daily_agent_original_sync_copies_only_daily_markdown_and_skips_current_files(
     assert_eq!(first.copied_files, 1);
     assert_eq!(first.skipped_files, 0);
     assert_eq!(first.failed_files, 0);
-    let target = sync_dir
-        .join(DAILY_AGENT_ORIGINAL_SYNC_DIR_NAME)
-        .join("2026-05-14.md");
+    assert_eq!(DAILY_AGENT_ORIGINAL_SYNC_DIR_NAME, "original_text");
+    let target = sync_dir.join("original_text").join("2026-05-14.md");
     assert_eq!(
         std::fs::read_to_string(&target).unwrap(),
         "original transcript v1"
     );
+    assert!(!sync_dir.join("原始文件").exists());
 
     let second = sync_daily_agent_original_files(&task, &original_paths).unwrap();
     assert_eq!(second.copied_files, 0);
