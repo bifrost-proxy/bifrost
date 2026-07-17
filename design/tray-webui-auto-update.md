@@ -67,6 +67,15 @@ Idle → Checking → Downloading → Installing → Restarting → Completed / 
 - **runtime marker 缺失**:Admin 子进程参数携带发起请求的 PID/端口。`self-update` 只在进程仍存活且端口 owner 与 PID 完全一致时合成 daemon runtime snapshot;任一校验失败都将本次更新标记为失败,禁止继续使用陈旧 marker、按端口模糊匹配或误停其它服务。
 - **进度所有权**:最外层 `self-update` 是 CLI channel 唯一 terminal progress writer。CLI 联动的 App 安装仍输出诊断日志,但 `source=cli-upgrade` 时不触碰 `upgrade-progress.json`,避免 Web UI 在 daemon 重启前提前观察到 `completed`。
 
+### 运行时所有权与统一升级编排
+
+版本比较 channel 与执行 orchestrator 必须分离。Web UI query 决定展示/比较 CLI 版本还是 App bundle 版本,从而保留“CLI 已最新但 App 仍旧”的更新提示;真正执行更新和重启的 orchestrator 则必须由当前 core 的真实启动模式决定:
+
+- **CLI-owned**:`BIFROST_DESKTOP_CORE` 未启用。Admin 强制选择 CLI orchestrator,传递当前 PID/port 给 `self-update`;外层依次更新 CLI、已安装 App,最后重启 CLI core。原本由 `start -d` 启动的 daemon 直接按 runtime snapshot 重启；Web UI 位于 CLI 前台 core 时，精确 PID/port owner 校验通过后先把该 snapshot 转为 detached-daemon 接续契约，再停止旧前台进程并启动新 daemon。后台链路中 App 伴随更新是完成门禁,失败时整体 progress 为 `Failed`,禁止 CLI 已更新却向 UI 宣告整体完成。
+- **App-owned**:`BIFROST_DESKTOP_CORE=1`。Admin 强制选择 desktop orchestrator,即使客户端错误请求 `channel=cli` 也不允许切到 CLI restart。App orchestrator 先调用独立 CLI 的 `upgrade -y`,同时注入 `BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_APP=1` 与 `BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_RESTART=1`,保证 CLI 子流程只更新 CLI,不会递归安装 App、停止 desktop core 或抢占重启;随后 App orchestrator 安装 App,最终由 Tauri upgrade handoff 独占 App/core 重启。
+- **硬边界**:App-owned 编排不传 restart hint，CLI updater 读取到 `RuntimeStartMode::Desktop` 时直接跳过 proxy restart。CLI-owned Web UI 编排必须携带并校验当前 PID/port；验证通过的 foreground runtime 会被规范化为 restartable daemon，验证失败则终止升级。
+- **共同结果**:两种入口都以 CLI + 已安装 App 共同升级为目标,但重启所有权互斥。CLI-owned 由 CLI updater 重启 daemon;App-owned 由 Tauri handoff 重启 App/core,不允许两个重启器同时操作同一监听端口。
+
 ### “立即更新” vs “稍后提示”
 
 - `立即更新`:调 `POST /api/system/upgrade`,进入 Web UI 进度态。
@@ -142,10 +151,13 @@ SelfUpdate {
 `crates/bifrost-admin/src/handlers/system.rs`:
 
 - `POST /api/system/upgrade`
+  - 客户端 query channel 用于选择 CLI 或 App 当前版本并通过 `has_update` 门禁;根据当前进程 `BIFROST_DESKTOP_CORE` 另行确定真实 runtime owner,覆盖 query 中可能冲突的执行/重启 orchestrator。
   - 读 `read_progress`,若非 stale 的 active 升级 → 409。
   - 读 `VersionChecker` 最新结果,若无可用更新 → 409。
   - 写入初始 `UpgradeProgress { phase: Checking, source: "admin", target_version }`。
-  - Spawn detached `bifrost self-update --target <v> --source admin --running-proxy-pid <pid> --running-proxy-port <port>`,binary 定位:`std::env::current_exe()` 优先(admin 与 bifrost 同进程),fallback `PATH` 中 `bifrost`。PID/port 参数为隐藏内部协议,且必须成对出现。
+  - CLI-owned:spawn detached `bifrost self-update --target <v> --source admin --running-proxy-pid <pid> --running-proxy-port <port>`;PID/port 参数为隐藏内部协议且必须成对出现。
+  - App-owned:spawn detached `bifrost app upgrade --version <v> --source desktop -y`;App 命令内部联动独立 CLI,但 CLI 子流程带 skip-app/skip-restart 所有权标记。
+  - binary 定位:`std::env::current_exe()` 优先(admin 与 bifrost core 同进程),fallback `PATH` 中 `bifrost`。
   - stdout/stderr 追加到 `logs/upgrade-background.log`,父进程仍存活时 wait 子进程,避免下载 100% / 安装 0% 空档没日志。
   - 返回 `202 Accepted` + 当前进度快照。
 - `GET /api/system/upgrade/progress`
@@ -276,7 +288,8 @@ SelfUpdate {
 - **magic string `UPGRADE_PROGRESS:`**:早期方案用 stdout 信号解析,已被否决;改成文件通道,天然支持跨代理重启存活与多端并发读取。
 - **`bifrost upgrade` 交互路径“already latest”短路**:后台路径必须绕过,否则磁盘 latest 但旧 daemon 仍跑的场景下升级看似成功但服务未更新。
 - **runtime marker 被其它流程清理**:不能仅依赖 marker 判断“是否运行”。Admin 必须传递精确 PID/port,updater 必须先做 owner 校验再恢复 marker;校验失败时终止本次更新并保留诊断,不能回退到陈旧 marker 或误杀未知监听进程。
-- **嵌套 App 更新提前宣告成功**:CLI 联动 App 的子流程不拥有共享 terminal progress;外层 CLI 完成二进制替换、App best-effort 更新与 daemon 重启后才写 `completed`。
+- **嵌套 App 更新提前宣告成功**:CLI 联动 App 的子流程不拥有共享 terminal progress;外层 CLI 完成二进制替换、App 必须更新与 daemon 重启后才写 `completed`。
+- **App 与 CLI 相互递归/争抢重启**:App-owned 编排给独立 CLI 注入 skip-app/skip-restart,CLI updater同时拒绝接管 Desktop runtime;真实 runtime owner 覆盖客户端 channel,三层边界共同阻断双重安装和双重重启。
 - **skill 安装失败**:提示手动重试即可,不回滚新二进制,避免让升级变成“成功又不成功”的中间态。
 - **Windows / 无头 CI 上的原生 tray**:tray helper 无法长驻,继续保留“log-only 降级模式”,不把 tray 缺失误判为升级失败。
 - **`稍后提示` 覆盖范围**:仅本会话记住 `latest`,下次进程重启仍会弹;避免用户永久错过关键升级。

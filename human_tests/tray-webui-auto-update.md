@@ -143,6 +143,38 @@
 - 嵌套 App 更新不会在 daemon 重启前让 Web UI 观察到 terminal `completed`。
 - marker 恢复 E2E 最终仍得到 `phase=completed`，且新 daemon PID 与旧 PID 不同。
 
+### TC-TWA-08：CLI-owned 与 App-owned core 升级所有权互斥且都更新 CLI + App
+
+**操作步骤**：
+1. 构建当前 debug CLI：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo build -p bifrost-cli --bin bifrost
+   ```
+2. 执行双 runtime 所有权回归：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_upgrade_cli.sh --only-runtime-ownership
+   ```
+3. 在 macOS 执行 App-owned Admin 实链路：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_upgrade_app_owned_core_e2e.sh
+   ```
+4. 执行桌面重启 handoff 合约：
+   ```bash
+   bash e2e-tests/tests/test_desktop_upgrade_handoff_contract.sh
+   ```
+
+**预期结果**：
+- CLI-owned daemon 即使 runtime marker 丢失，也由 `self-update` 精确校验 PID/端口、恢复 marker 并从旧 PID 重启到新 PID。
+- CLI-owned foreground core 不会被误判成 App-owned；验证 PID/端口后接续为新版本 detached daemon。
+- App-owned core 的 runtime marker 保持 `runtime_start_mode=desktop`；CLI updater 即使被直接调用也不得停止或重启该 PID。
+- App-owned core 收到冲突的 `channel=cli` 请求时，Admin 按实际 runtime owner 改走 desktop orchestrator。
+- desktop orchestrator 先调用独立 CLI 的 `upgrade -y`，并设置内部 `skip_app=1`、`skip_restart=1`，禁止递归更新 App 或抢占 core 重启；随后真实替换 App bundle。
+- App-owned upgrade 达到 `completed` 时 core 仍存活，随后仅由 Tauri upgrade handoff 负责停止旧 App/core 并拉起新 App/core。
+- 任一路径只有在 CLI 与已安装 App 的伴随更新都成功后才写 `completed`；伴随更新失败必须写 `failed`，不得部分成功却对 UI 宣告完成。
+- CLI-owned 路径的 App 伴随更新失败时，旧 daemon 必须保持原 PID 和可用状态，不得在组件未齐备时提前重启。
+
 ## 清理步骤
 
 1. 停止测试数据目录中的 Bifrost 服务：
@@ -163,6 +195,7 @@
 - TC-TWA-05：通过。Admin E2E 断言 `logs/upgrade-background.log` 非空；测试结束后扫描未发现属于本次临时安装路径的残留 bifrost 或 defunct 子进程。
 - TC-TWA-06：通过。三个 tray 定向单元测试分别在 `src/lib.rs` 和 `src/main.rs` 目标中通过；执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_cli_tray_startup_ci.sh`，Darwin tray helper 在临时端口 13904 启动并完成断言，随后由脚本清理。
 - TC-TWA-07：通过。`nested_cli_upgrade_does_not_publish_terminal_app_progress` 在 `src/lib.rs` 和 `src/main.rs` 目标中通过；TC-TWA-02 的 marker 恢复 E2E 同时证明最终 `completed` 由外层 self-update 在 daemon 重启成功后写入。
+- TC-TWA-08：通过。`test_upgrade_cli.sh --only-runtime-ownership` 在 macOS 为 `4/4`，CLI-owned marker 恢复后旧 daemon PID 被替换、CLI foreground core 被接续为新 daemon、App 伴随更新失败时 progress 为 `failed` 且旧 daemon 保持原 PID 可用、App-owned core 在直接 self-update 后保持原 PID 与 `runtime_start_mode=desktop`；`test_upgrade_app_owned_core_e2e.sh` 为 `12/12`，CLI/App 版本比较仍按请求组件分别返回、冲突的 CLI 执行请求被实际 runtime owner 派发到 desktop orchestrator、独立 CLI 收到 `upgrade -y` 且 `skip_app=1/skip_restart=1`、App bundle 从 `0.0.1` 真实替换为 `99.0.1`、core 保持存活；准备 debug sidecar 与 `web/dist-desktop` 后，`test_desktop_upgrade_handoff_contract.sh` 为 `5/5 PASS`，验证 fresh/stale marker、禁止复用旧 backend 与 helper 环境清理。
 
 2026-06-17 本次修复已执行：
 

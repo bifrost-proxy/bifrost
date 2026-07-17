@@ -29,6 +29,7 @@ use crate::resource_alerts::build_resource_alerts;
 use crate::state::SharedAdminState;
 
 const DESKTOP_INSTALL_SKILL_TIMEOUT: Duration = Duration::from_secs(20);
+const DESKTOP_CORE_ENV: &str = "BIFROST_DESKTOP_CORE";
 
 pub async fn handle_system(
     req: Request<Incoming>,
@@ -242,16 +243,24 @@ async fn check_version(state: SharedAdminState, query: Option<&str>) -> Response
 /// upgrade is already in flight (non-stale active progress). On success it
 /// writes an initial `Checking` progress record, spawns a detached
 /// `bifrost self-update --source admin` subprocess and returns `202 Accepted`
-/// with the current progress snapshot.
+/// with the current progress snapshot. The server process owns channel
+/// selection: the UI channel selects which component version is compared, but
+/// a desktop-owned core always runs the App orchestrator and a CLI-owned core
+/// runs `self-update`, regardless of a conflicting UI query.
 ///
-/// The upgrade is never executed inside the admin process: the subprocess stops
-/// the old proxy, swaps the binary and restarts, which would otherwise kill the
-/// admin server mid-request. The progress file survives the restart so the
-/// Web UI can read the terminal state after reconnecting.
+/// The upgrade is never executed inside the admin process: a CLI-owned core is
+/// stopped and restarted by the detached subprocess, while a desktop-owned core
+/// remains alive until the App handoff replaces it. The progress file survives
+/// either handoff so the Web UI can read the terminal state after reconnecting.
 async fn start_upgrade(state: SharedAdminState, query: Option<&str>) -> Response<BoxBody> {
     let dir = data_dir();
-    let channel = parse_upgrade_channel(query);
-    let running_proxy = Some((std::process::id(), state.port()));
+    let requested_channel = parse_upgrade_channel(query);
+    let channel = effective_upgrade_channel(
+        requested_channel,
+        desktop_core_env_enabled(std::env::var_os(DESKTOP_CORE_ENV)),
+    );
+    let running_proxy =
+        (channel == UpgradeChannel::Cli).then(|| (std::process::id(), state.port()));
 
     // Refuse if an upgrade is already running and still alive.
     let current = read_progress(&dir);
@@ -260,7 +269,7 @@ async fn start_upgrade(state: SharedAdminState, query: Option<&str>) -> Response
     }
 
     // Confirm there is actually a newer version to upgrade to.
-    let version = check_version_for_channel(state, false, channel).await;
+    let version = check_version_for_channel(state, false, requested_channel).await;
     if !version.has_update {
         return error_response(StatusCode::CONFLICT, "No update available");
     }
@@ -622,7 +631,7 @@ fn normalize_progress(progress: UpgradeProgress) -> UpgradeProgress {
     progress
 }
 
-/// Spawn a detached `bifrost self-update` subprocess.
+/// Spawn the detached upgrade orchestrator selected for the current runtime.
 ///
 /// The binary is resolved via `current_exe()` (the admin server runs inside the
 /// bifrost process, so `current_exe` is bifrost itself), falling back to a bare
@@ -778,6 +787,20 @@ fn parse_upgrade_channel(query: Option<&str>) -> UpgradeChannel {
     }
 }
 
+fn desktop_core_env_enabled(value: Option<std::ffi::OsString>) -> bool {
+    value
+        .and_then(|value| value.into_string().ok())
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn effective_upgrade_channel(_requested: UpgradeChannel, desktop_core: bool) -> UpgradeChannel {
+    if desktop_core {
+        UpgradeChannel::Desktop
+    } else {
+        UpgradeChannel::Cli
+    }
+}
+
 fn spawn_upgrade_process(
     channel: UpgradeChannel,
     target_version: Option<&str>,
@@ -881,9 +904,9 @@ fn upgrade_log_stdio() -> Stdio {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cli_install_status, install_binary_atomically, install_cli_from_current_exe,
-        normalize_progress, parse_upgrade_channel, upgrade_process_args, CliInstallRequest,
-        UpgradeChannel,
+        build_cli_install_status, desktop_core_env_enabled, effective_upgrade_channel,
+        install_binary_atomically, install_cli_from_current_exe, normalize_progress,
+        parse_upgrade_channel, upgrade_process_args, CliInstallRequest, UpgradeChannel,
     };
     use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS};
     use chrono::Utc;
@@ -942,6 +965,22 @@ mod tests {
             parse_upgrade_channel(Some("source=desktop")),
             UpgradeChannel::Desktop
         );
+    }
+
+    #[test]
+    fn runtime_owner_overrides_the_request_channel() {
+        assert_eq!(
+            effective_upgrade_channel(UpgradeChannel::Desktop, false),
+            UpgradeChannel::Cli
+        );
+        assert_eq!(
+            effective_upgrade_channel(UpgradeChannel::Cli, true),
+            UpgradeChannel::Desktop
+        );
+        assert!(desktop_core_env_enabled(Some("true".into())));
+        assert!(desktop_core_env_enabled(Some("1".into())));
+        assert!(!desktop_core_env_enabled(Some("0".into())));
+        assert!(!desktop_core_env_enabled(None));
     }
 
     #[test]

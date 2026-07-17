@@ -18,7 +18,10 @@ use colored::Colorize;
 use crate::cli::AppCommands;
 
 use super::update_check::get_latest_version_fresh_with_diagnostics;
-use super::upgrade::{download_progress_line, handle_upgrade};
+use super::upgrade::{
+    download_progress_line, handle_upgrade, DESKTOP_MANAGED_SKIP_APP_ENV,
+    DESKTOP_MANAGED_SKIP_RESTART_ENV,
+};
 
 #[cfg(any(target_os = "windows", test))]
 const WINDOWS_APP_NAME: &str = "Bifrost";
@@ -307,10 +310,7 @@ fn upgrade_cli_if_present(progress_source: &str) -> Result<(), BifrostError> {
             "Upgrading installed CLI:".bright_cyan(),
             cli_path.display()
         );
-        let status = Command::new(&cli_path)
-            .arg("upgrade")
-            .arg("-y")
-            .stdin(Stdio::null())
+        let status = desktop_managed_cli_upgrade_command(&cli_path)
             .status()
             .map_err(BifrostError::Io)?;
         if !status.success() {
@@ -327,6 +327,17 @@ fn upgrade_cli_if_present(progress_source: &str) -> Result<(), BifrostError> {
     }
 
     Ok(())
+}
+
+fn desktop_managed_cli_upgrade_command(cli_path: &Path) -> Command {
+    let mut command = Command::new(cli_path);
+    command
+        .arg("upgrade")
+        .arg("-y")
+        .env(DESKTOP_MANAGED_SKIP_APP_ENV, "1")
+        .env(DESKTOP_MANAGED_SKIP_RESTART_ENV, "1")
+        .stdin(Stdio::null());
+    command
 }
 
 fn find_standalone_cli_install() -> Option<PathBuf> {
@@ -1251,6 +1262,36 @@ mod tests {
             "cli-upgrade",
             None,
             None,
+        );
+    }
+
+    #[test]
+    fn desktop_managed_cli_upgrade_cannot_reenter_app_or_restart_its_core() {
+        let command = desktop_managed_cli_upgrade_command(Path::new("/tmp/bifrost"));
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["upgrade", "-y"]);
+        let envs: std::collections::HashMap<_, _> = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(
+            envs.get(DESKTOP_MANAGED_SKIP_APP_ENV).map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            envs.get(DESKTOP_MANAGED_SKIP_RESTART_ENV)
+                .map(String::as_str),
+            Some("1")
         );
     }
 

@@ -38,6 +38,9 @@ const BINARY_VERIFY_TIMEOUT_SECS: u64 = 15;
 const POST_UPGRADE_SKILL_INSTALL_TIMEOUT_SECS: u64 = 120;
 const POST_UPGRADE_SKILL_INSTALL_ARGS: &[&str] = &["install-skill", "--tool", "all", "-y"];
 const POST_UPGRADE_APP_UPDATE_TIMEOUT_SECS: u64 = 600;
+pub(crate) const DESKTOP_MANAGED_SKIP_APP_ENV: &str = "BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_APP";
+pub(crate) const DESKTOP_MANAGED_SKIP_RESTART_ENV: &str =
+    "BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_RESTART";
 static DEFERRED_INSTALL_SCHEDULED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +65,34 @@ pub(crate) struct RunningProxyHint {
 impl RunningProxyHint {
     pub(crate) fn from_parts(pid: Option<u32>, port: Option<u16>) -> Option<Self> {
         pid.zip(port).map(|(pid, port)| Self { pid, port })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UpgradeBehavior {
+    restart_if_already_latest: bool,
+    update_desktop_app: bool,
+    require_desktop_app_update: bool,
+    restart_proxy: bool,
+}
+
+impl UpgradeBehavior {
+    fn background() -> Self {
+        Self {
+            restart_if_already_latest: true,
+            update_desktop_app: true,
+            require_desktop_app_update: true,
+            restart_proxy: true,
+        }
+    }
+
+    fn interactive(skip_app: bool, skip_restart: bool) -> Self {
+        Self {
+            restart_if_already_latest: false,
+            update_desktop_app: !skip_app,
+            require_desktop_app_update: false,
+            restart_proxy: !skip_restart,
+        }
     }
 }
 
@@ -591,8 +622,25 @@ fn post_upgrade_desktop_app_args(target_version: &str) -> Vec<String> {
 }
 
 fn update_desktop_app_after_upgrade_best_effort(executable: &Path, target_version: &str) {
+    if let Err(error) = update_desktop_app_after_upgrade(executable, target_version) {
+        eprintln!(
+            "{} {}",
+            "⚠ Bifrost desktop app update failed; continuing CLI upgrade.".bright_yellow(),
+            error.to_string().dimmed()
+        );
+        eprintln!(
+            "{}",
+            "  Retry manually with: bifrost app upgrade --no-cli -y".dimmed()
+        );
+    }
+}
+
+fn update_desktop_app_after_upgrade(
+    executable: &Path,
+    target_version: &str,
+) -> Result<(), BifrostError> {
     let Some(app_path) = installed_desktop_app_path() else {
-        return;
+        return Ok(());
     };
 
     println!();
@@ -614,31 +662,17 @@ fn update_desktop_app_after_upgrade_best_effort(executable: &Path, target_versio
                 "{}",
                 "✓ Bifrost desktop app updated successfully.".bright_green()
             );
+            Ok(())
         }
         Ok(output) => {
             let reason = summarize_command_output(&output);
-            eprintln!(
-                "{} {}",
-                "⚠ Bifrost desktop app update failed; continuing CLI upgrade.".bright_yellow(),
-                reason.dimmed()
-            );
-            eprintln!(
-                "{}",
-                "  Retry manually with: bifrost app upgrade --no-cli -y".dimmed()
-            );
+            Err(BifrostError::Config(format!(
+                "desktop app update command failed: {reason}"
+            )))
         }
-        Err(error) => {
-            eprintln!(
-                "{} {}",
-                "⚠ Could not run Bifrost desktop app update; continuing CLI upgrade:"
-                    .bright_yellow(),
-                error.to_string().dimmed()
-            );
-            eprintln!(
-                "{}",
-                "  Retry manually with: bifrost app upgrade --no-cli -y".dimmed()
-            );
-        }
+        Err(error) => Err(BifrostError::Config(format!(
+            "could not run desktop app update: {error}"
+        ))),
     }
 }
 
@@ -1625,14 +1659,23 @@ pub(crate) fn handle_background_upgrade(
     restart_hint: Option<RunningProxyHint>,
 ) -> Result<(), BifrostError> {
     prepare_running_proxy_marker(restart_hint)?;
-    handle_upgrade_inner(true)
+    handle_upgrade_inner(UpgradeBehavior::background())
 }
 
 pub fn handle_upgrade(_yes: bool) -> Result<(), BifrostError> {
-    handle_upgrade_inner(false)
+    handle_upgrade_inner(UpgradeBehavior::interactive(
+        env_flag(DESKTOP_MANAGED_SKIP_APP_ENV),
+        env_flag(DESKTOP_MANAGED_SKIP_RESTART_ENV),
+    ))
 }
 
-fn handle_upgrade_inner(restart_if_already_latest: bool) -> Result<(), BifrostError> {
+fn env_flag(name: &str) -> bool {
+    env::var(name)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+fn handle_upgrade_inner(behavior: UpgradeBehavior) -> Result<(), BifrostError> {
     let current_version = env!("CARGO_PKG_VERSION");
 
     println!(
@@ -1704,26 +1747,21 @@ fn handle_upgrade_inner(restart_if_already_latest: bool) -> Result<(), BifrostEr
             .bright_green()
             .bold()
         );
-        if should_restart_when_already_latest(restart_if_already_latest) {
+        if behavior.restart_if_already_latest || behavior.update_desktop_app {
             let install_method = detect_install_method();
-            let restart_executable = restart_executable_for_install_method(&install_method)?;
-            update_desktop_app_after_upgrade_best_effort(
-                &restart_executable,
-                &cache.latest_version,
-            );
-            println!(
-                "{}",
-                "  On-disk binary is current; restarting any running proxy so it adopts this version."
-                    .bright_cyan()
-            );
-            maybe_restart_running_proxy(&restart_executable)?;
-        } else {
-            let install_method = detect_install_method();
-            if let Ok(restart_executable) = restart_executable_for_install_method(&install_method) {
-                update_desktop_app_after_upgrade_best_effort(
-                    &restart_executable,
-                    &cache.latest_version,
+            let restart_executable = match restart_executable_for_install_method(&install_method) {
+                Ok(executable) => executable,
+                Err(error) if behavior.require_desktop_app_update => return Err(error),
+                Err(_) => return Ok(()),
+            };
+            update_desktop_companion(&restart_executable, &cache.latest_version, behavior)?;
+            if behavior.restart_if_already_latest && behavior.restart_proxy {
+                println!(
+                    "{}",
+                    "  On-disk binary is current; restarting any running proxy so it adopts this version."
+                        .bright_cyan()
                 );
+                maybe_restart_running_proxy(&restart_executable)?;
             }
         }
         return Ok(());
@@ -1771,23 +1809,37 @@ fn handle_upgrade_inner(restart_if_already_latest: bool) -> Result<(), BifrostEr
     match upgrade_outcome {
         UpgradeInstallOutcome::Installed => {
             install_skills_after_upgrade_best_effort(&restart_executable);
-            update_desktop_app_after_upgrade_best_effort(
-                &restart_executable,
-                &cache.latest_version,
-            );
-            maybe_restart_running_proxy(&restart_executable)?
+            update_desktop_companion(&restart_executable, &cache.latest_version, behavior)?;
+            if behavior.restart_proxy {
+                maybe_restart_running_proxy(&restart_executable)?;
+            }
         }
         #[cfg(windows)]
         UpgradeInstallOutcome::DeferredWindows(deferred_install) => {
-            maybe_restart_running_proxy_after_windows_deferred_install(deferred_install)?
+            maybe_restart_running_proxy_after_windows_deferred_install(
+                deferred_install,
+                behavior.restart_proxy,
+            )?
         }
     }
 
     Ok(())
 }
 
-fn should_restart_when_already_latest(restart_if_already_latest: bool) -> bool {
-    restart_if_already_latest
+fn update_desktop_companion(
+    executable: &Path,
+    target_version: &str,
+    behavior: UpgradeBehavior,
+) -> Result<(), BifrostError> {
+    if !behavior.update_desktop_app {
+        return Ok(());
+    }
+    if behavior.require_desktop_app_update {
+        update_desktop_app_after_upgrade(executable, target_version)
+    } else {
+        update_desktop_app_after_upgrade_best_effort(executable, target_version);
+        Ok(())
+    }
 }
 
 fn prepare_running_proxy_marker(
@@ -1818,22 +1870,34 @@ fn prepare_running_proxy_marker_with(
             hint.port
         )));
     }
-    if runtime_info
+    let matching_runtime = runtime_info
         .as_ref()
-        .is_some_and(|info| info.pid == hint.pid && info.port == hint.port)
-    {
-        return Ok(());
+        .filter(|info| info.pid == hint.pid && info.port == hint.port);
+    if let Some(info) = matching_runtime {
+        if info.restartable_daemon() {
+            return Ok(());
+        }
     }
 
+    // A Web UI request issued by a CLI-owned foreground core must survive the
+    // current terminal process exiting. Convert that exact, validated listener
+    // to the detached-daemon restart contract before the updater stops it. The
+    // desktop path never supplies a restart hint, so an App-owned core cannot be
+    // reclassified or taken over here.
     let mut recovered = RuntimeInfo::new(
         hint.pid,
         hint.port,
-        None,
-        Some("0.0.0.0".to_string()),
+        matching_runtime.and_then(|info| info.socks5_port),
+        matching_runtime
+            .and_then(|info| info.host.clone())
+            .or_else(|| Some("0.0.0.0".to_string())),
         RuntimeStartMode::Daemon,
     );
-    recovered.started_at_ms = None;
-    recovered.binary_path = None;
+    recovered.started_at_ms = matching_runtime.and_then(|info| info.started_at_ms);
+    recovered.binary_path = matching_runtime.and_then(|info| info.binary_path.clone());
+    recovered.system_proxy_enabled = matching_runtime.and_then(|info| info.system_proxy_enabled);
+    recovered.system_proxy_bypass =
+        matching_runtime.and_then(|info| info.system_proxy_bypass.clone());
     write_runtime(&recovered)?;
     println!(
         "{}",
@@ -1847,6 +1911,15 @@ fn prepare_running_proxy_marker_with(
 }
 
 fn maybe_restart_running_proxy(restart_executable: &Path) -> Result<(), BifrostError> {
+    let runtime_info = read_runtime_info();
+    if !cli_owns_runtime_restart(runtime_info.as_ref()) {
+        println!(
+            "{}",
+            "  Running proxy is owned by the desktop app; leaving restart to the app handoff."
+                .bright_cyan()
+        );
+        return Ok(());
+    }
     let pid = match read_pid() {
         Some(pid) if is_process_running(pid) => pid,
         _ => return Ok(()),
@@ -1862,7 +1935,6 @@ fn maybe_restart_running_proxy(restart_executable: &Path) -> Result<(), BifrostE
 
     println!("{}", "  Auto-restarting the running proxy...".bright_cyan());
 
-    let runtime_info = read_runtime_info();
     let system_proxy_snapshot = capture_runtime_system_proxy_snapshot(runtime_info.as_ref());
     let default_system_proxy = if runtime_info.is_none() {
         Some(default_restart_system_proxy_config()?)
@@ -1926,11 +1998,29 @@ fn maybe_restart_running_proxy(restart_executable: &Path) -> Result<(), BifrostE
     Ok(())
 }
 
+fn cli_owns_runtime_restart(runtime_info: Option<&RuntimeInfo>) -> bool {
+    runtime_info
+        .map(RuntimeInfo::restartable_daemon)
+        .unwrap_or(true)
+}
+
 #[cfg(windows)]
 fn maybe_restart_running_proxy_after_windows_deferred_install(
     deferred_install: WindowsDeferredInstall,
+    restart_proxy: bool,
 ) -> Result<(), BifrostError> {
     let data_dir = get_bifrost_dir()?;
+    let runtime_info = read_runtime_info();
+    if !restart_proxy || !cli_owns_runtime_restart(runtime_info.as_ref()) {
+        stop_tray_helper_before_windows_deferred_install(&data_dir);
+        schedule_windows_deferred_install(deferred_install, None)?;
+        println!(
+            "{}",
+            "✓ Upgrade replacement scheduled; runtime restart remains owned by the desktop app."
+                .bright_green()
+        );
+        return Ok(());
+    }
     let pid = match read_pid() {
         Some(pid) if is_process_running(pid) => Some(pid),
         _ => None,
@@ -1960,7 +2050,6 @@ fn maybe_restart_running_proxy_after_windows_deferred_install(
         "  Auto-restarting the running proxy so Windows can replace bifrost.exe...".bright_cyan()
     );
 
-    let runtime_info = read_runtime_info();
     let system_proxy_snapshot = capture_runtime_system_proxy_snapshot(runtime_info.as_ref());
     let default_system_proxy = if runtime_info.is_none() {
         Some(default_restart_system_proxy_config()?)
@@ -2409,8 +2498,52 @@ mod tests {
 
     #[test]
     fn background_upgrade_restarts_when_disk_binary_is_already_latest() {
-        assert!(!should_restart_when_already_latest(false));
-        assert!(should_restart_when_already_latest(true));
+        let background = UpgradeBehavior::background();
+        assert!(background.restart_if_already_latest);
+        assert!(background.update_desktop_app);
+        assert!(background.require_desktop_app_update);
+        assert!(background.restart_proxy);
+
+        let desktop_managed = UpgradeBehavior::interactive(true, true);
+        assert!(!desktop_managed.restart_if_already_latest);
+        assert!(!desktop_managed.update_desktop_app);
+        assert!(!desktop_managed.require_desktop_app_update);
+        assert!(!desktop_managed.restart_proxy);
+
+        let manual = UpgradeBehavior::interactive(false, false);
+        assert!(!manual.restart_if_already_latest);
+        assert!(manual.update_desktop_app);
+        assert!(!manual.require_desktop_app_update);
+        assert!(manual.restart_proxy);
+    }
+
+    #[test]
+    fn only_restartable_daemon_runtime_is_owned_by_cli_upgrade() {
+        assert!(cli_owns_runtime_restart(None));
+        let daemon = RuntimeInfo::new(
+            12345,
+            9900,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Daemon,
+        );
+        let desktop = RuntimeInfo::new(
+            12346,
+            9900,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Desktop,
+        );
+        let foreground = RuntimeInfo::new(
+            12347,
+            9900,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Foreground,
+        );
+        assert!(cli_owns_runtime_restart(Some(&daemon)));
+        assert!(!cli_owns_runtime_restart(Some(&desktop)));
+        assert!(!cli_owns_runtime_restart(Some(&foreground)));
     }
 
     #[test]
@@ -2494,6 +2627,35 @@ mod tests {
             |_| panic!("matching runtime marker must not be rewritten"),
         )
         .unwrap();
+
+        let foreground = RuntimeInfo::new(
+            hint.pid,
+            hint.port,
+            Some(18891),
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Foreground,
+        )
+        .with_system_proxy(true, "localhost");
+        let normalized = std::cell::RefCell::new(None);
+        prepare_running_proxy_marker_with(
+            Some(hint),
+            Some(foreground),
+            |_| true,
+            |_| Some(hint.pid),
+            |runtime| {
+                normalized.replace(Some(runtime.clone()));
+                Ok(())
+            },
+        )
+        .unwrap();
+        let normalized = normalized
+            .into_inner()
+            .expect("foreground marker normalized for detached restart");
+        assert_eq!(normalized.start_mode, RuntimeStartMode::Daemon);
+        assert_eq!(normalized.socks5_port, Some(18891));
+        assert_eq!(normalized.host.as_deref(), Some("127.0.0.1"));
+        assert_eq!(normalized.system_proxy_enabled, Some(true));
+        assert_eq!(normalized.system_proxy_bypass.as_deref(), Some("localhost"));
 
         let recovered = std::cell::RefCell::new(None);
         prepare_running_proxy_marker_with(
