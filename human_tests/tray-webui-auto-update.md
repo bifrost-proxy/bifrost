@@ -22,7 +22,7 @@
 **操作步骤**：
 1. 查询 9900 端口监听进程，记录 PID 和启动命令。
 2. 请求 `http://127.0.0.1:9900/_bifrost/api/system/overview`，记录运行中服务版本。
-3. 执行 `/Users/eden/.local/bin/bifrost --version`，记录磁盘二进制版本。
+3. 执行 `command -v bifrost` 确认实际安装路径，再执行 `bifrost --version` 记录磁盘二进制版本。
 4. 请求 `http://127.0.0.1:9900/_bifrost/api/system/version-check?refresh=true`，记录 `current_version`、`latest_version`、`has_update`。
 5. 查询 `http://127.0.0.1:9900/_bifrost/api/system/upgrade/progress`，并检查 `~/.bifrost/logs/bifrost.log` 中最近一次 `admin upgrade: spawned self-update subprocess` 记录和对应子进程状态。
 
@@ -44,19 +44,22 @@
    <tmp>/install/bifrost start -p <free-port> --host 127.0.0.1 --daemon --access-mode allow_all --skip-cert-check --no-system-proxy --no-intercept -y
    ```
 3. 记录旧 PID。
-4. 将 `BIFROST_UPGRADE_TEST_LATEST_VERSION` 设置为当前磁盘二进制版本，执行：
+4. 删除测试 data dir 中的 `runtime.json` 与 `bifrost.pid`，确认旧 PID 仍存活且 Admin API 仍可访问。
+5. 将 `BIFROST_UPGRADE_TEST_LATEST_VERSION` 设置为当前磁盘二进制版本，并把旧 PID 与真实监听端口作为成对的 Admin hint 执行：
    ```bash
    BIFROST_DATA_DIR=<tmp>/data \
    BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
    BIFROST_DISABLE_TRAY=1 \
    BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES=1 \
    BIFROST_UPGRADE_TEST_LATEST_VERSION=<current-version> \
-   <tmp>/install/bifrost self-update --target <current-version> --source admin
+   <tmp>/install/bifrost self-update --target <current-version> --source admin \
+     --running-proxy-pid <old-pid> --running-proxy-port <free-port>
    ```
-5. 等待 Admin API 恢复，读取新 PID 和 `<tmp>/data/upgrade-progress.json`。
+6. 等待 Admin API 恢复，读取新 PID、新的 runtime marker 和 `<tmp>/data/upgrade-progress.json`。
 
 **预期结果**：
 - `self-update` 命令退出码为 0。
+- updater 输出明确记录已从 live Admin listener 恢复缺失的 runtime marker。
 - 新 PID 与旧 PID 不同，且新 PID 存活。
 - `upgrade-progress.json` 的 `phase` 为 `completed`。
 - 测试服务可以正常 stop 并释放端口。
@@ -123,6 +126,23 @@
 - tray 对新鲜缓存不发起高频 GitHub 请求；过期或缺失缓存才会进入后台检查路径。
 - Windows CI 显式 log-only 降级模式只要求 `bifrost-tray starting` 启动标记，不要求后台线程日志，因为该模式表示无交互 runner 上 helper 可能无法长驻。
 
+### TC-TWA-07：CLI 联动 App 更新不得提前发布 completed
+
+**操作步骤**：
+1. 执行 `cargo test -p bifrost-cli nested_cli_upgrade_does_not_publish_terminal_app_progress`。
+2. 检查 `bifrost upgrade` 联动 App 时使用的内部 source 仍为 `cli-upgrade`。
+3. 检查 `write_app_progress` 对普通 `desktop` / `cli` source 仍写共享进度，但对 `cli-upgrade` source 不写入。
+4. 执行 marker 恢复 E2E，确认最终 `upgrade-progress.json` 由外层 self-update 写为 `completed`：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_upgrade_cli.sh --only-runtime-marker
+   ```
+
+**预期结果**：
+- 单元测试退出码为 0。
+- 嵌套 App 更新不会在 daemon 重启前让 Web UI 观察到 terminal `completed`。
+- marker 恢复 E2E 最终仍得到 `phase=completed`，且新 daemon PID 与旧 PID 不同。
+
 ## 清理步骤
 
 1. 停止测试数据目录中的 Bifrost 服务：
@@ -133,6 +153,16 @@
 3. 不清理、不停止、不重启用户正在运行的 9900 服务。
 
 ## 执行记录
+
+2026-07-17 本次修复已执行：
+
+- TC-TWA-01：通过。9900 监听进程为 PID 22956，Admin overview 返回运行版本 `0.0.155`；`command -v bifrost` 返回 `/Users/eden_studio/.local/bin/bifrost`，磁盘 CLI 返回 `0.0.156`；强制 version-check 返回 `current_version=0.0.155`、`latest_version=0.0.156`、`has_update=true`；upgrade progress 为 `idle`，且 `~/.bifrost/runtime.json`、`~/.bifrost/bifrost.pid` 均缺失。结论为磁盘 CLI 已完成替换，但旧 daemon 因运行时标记缺失没有重启。全程未修改 9900 服务状态。
+- TC-TWA-02：通过。执行 `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_upgrade_cli.sh --only-runtime-marker`，删除临时 daemon 的 runtime marker 后，updater 用 Admin 传入的精确 PID/端口恢复标记并完成重启；测试摘要 `Total: 1, Passed: 1, Failed: 0`。
+- TC-TWA-03：通过。执行 `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_upgrade_admin_api_restart_e2e.sh`；完整安装链路从 PID 96962 重启为 PID 97494，already-latest 链路从 PID 97754 重启为 PID 97891；测试摘要 `Total: 14, Passed: 14, Failed: 0`。
+- TC-TWA-04：通过。执行 `pnpm --dir web exec vitest run src/stores/useVersionStore.test.ts`，`1` 个测试文件、`2` 个用例全部通过。
+- TC-TWA-05：通过。Admin E2E 断言 `logs/upgrade-background.log` 非空；测试结束后扫描未发现属于本次临时安装路径的残留 bifrost 或 defunct 子进程。
+- TC-TWA-06：通过。三个 tray 定向单元测试分别在 `src/lib.rs` 和 `src/main.rs` 目标中通过；执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_cli_tray_startup_ci.sh`，Darwin tray helper 在临时端口 13904 启动并完成断言，随后由脚本清理。
+- TC-TWA-07：通过。`nested_cli_upgrade_does_not_publish_terminal_app_progress` 在 `src/lib.rs` 和 `src/main.rs` 目标中通过；TC-TWA-02 的 marker 恢复 E2E 同时证明最终 `completed` 由外层 self-update 在 daemon 重启成功后写入。
 
 2026-06-17 本次修复已执行：
 

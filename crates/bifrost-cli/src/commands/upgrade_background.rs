@@ -18,6 +18,7 @@ use bifrost_core::upgrade_progress::{write_progress, UpgradePhase, UpgradeProgre
 
 use super::upgrade::{
     download_progress_line, handle_background_upgrade, take_deferred_install_scheduled,
+    RunningProxyHint,
 };
 
 struct ProgressSink {
@@ -84,7 +85,12 @@ pub(crate) fn report_restarting() {
 ///
 /// `target` is informational (the engine always resolves the latest release);
 /// `source` records who initiated the upgrade (`"tray"` / `"admin"` / `"cli"`).
-pub fn handle_upgrade_background(target: Option<String>, source: String) {
+pub fn handle_upgrade_background(
+    target: Option<String>,
+    source: String,
+    running_proxy_pid: Option<u32>,
+    running_proxy_port: Option<u16>,
+) {
     let data_dir = match crate::config::get_bifrost_dir() {
         Ok(dir) => dir,
         Err(error) => {
@@ -105,7 +111,8 @@ pub fn handle_upgrade_background(target: Option<String>, source: String) {
     // prompt and auto-restarts the running proxy. It also restarts when the
     // on-disk binary is already current but the running daemon still serves an
     // older in-memory version.
-    let result = handle_background_upgrade();
+    let restart_hint = RunningProxyHint::from_parts(running_proxy_pid, running_proxy_port);
+    let result = handle_background_upgrade(restart_hint);
     let deferred_terminal_pending = take_deferred_install_scheduled();
 
     match &result {

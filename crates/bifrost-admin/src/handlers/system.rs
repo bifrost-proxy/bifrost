@@ -251,6 +251,7 @@ async fn check_version(state: SharedAdminState, query: Option<&str>) -> Response
 async fn start_upgrade(state: SharedAdminState, query: Option<&str>) -> Response<BoxBody> {
     let dir = data_dir();
     let channel = parse_upgrade_channel(query);
+    let running_proxy = Some((std::process::id(), state.port()));
 
     // Refuse if an upgrade is already running and still alive.
     let current = read_progress(&dir);
@@ -272,7 +273,7 @@ async fn start_upgrade(state: SharedAdminState, query: Option<&str>) -> Response
         .with_source(Some(channel.progress_source().to_string()));
     write_progress(&dir, &initial);
 
-    if let Err(error) = spawn_upgrade_process(channel, target_version.as_deref()) {
+    if let Err(error) = spawn_upgrade_process(channel, target_version.as_deref(), running_proxy) {
         warn!(error = %error, "[SYSTEM] failed to spawn self-update subprocess");
         let failed = UpgradeProgress::new(UpgradePhase::Failed, "Upgrade failed to start")
             .with_target(target_version)
@@ -780,11 +781,12 @@ fn parse_upgrade_channel(query: Option<&str>) -> UpgradeChannel {
 fn spawn_upgrade_process(
     channel: UpgradeChannel,
     target_version: Option<&str>,
+    running_proxy: Option<(u32, u16)>,
 ) -> std::io::Result<()> {
     let program = std::env::current_exe().unwrap_or_else(|_| "bifrost".into());
 
     let mut command = Command::new(&program);
-    command.args(upgrade_process_args(channel, target_version));
+    command.args(upgrade_process_args(channel, target_version, running_proxy));
     command
         .stdin(Stdio::null())
         .stdout(upgrade_log_stdio())
@@ -828,7 +830,11 @@ fn spawn_upgrade_process(
     Ok(())
 }
 
-fn upgrade_process_args(channel: UpgradeChannel, target_version: Option<&str>) -> Vec<String> {
+fn upgrade_process_args(
+    channel: UpgradeChannel,
+    target_version: Option<&str>,
+    running_proxy: Option<(u32, u16)>,
+) -> Vec<String> {
     let mut args = Vec::new();
     match channel {
         UpgradeChannel::Cli => {
@@ -839,6 +845,12 @@ fn upgrade_process_args(channel: UpgradeChannel, target_version: Option<&str>) -
             }
             args.push("--source".to_string());
             args.push("admin".to_string());
+            if let Some((pid, port)) = running_proxy {
+                args.push("--running-proxy-pid".to_string());
+                args.push(pid.to_string());
+                args.push("--running-proxy-port".to_string());
+                args.push(port.to_string());
+            }
         }
         UpgradeChannel::Desktop => {
             args.push("app".to_string());
@@ -935,11 +947,25 @@ mod tests {
     #[test]
     fn upgrade_process_args_separate_cli_and_desktop_channels() {
         assert_eq!(
-            upgrade_process_args(UpgradeChannel::Cli, Some("0.0.139")),
-            vec!["self-update", "--target", "0.0.139", "--source", "admin"]
+            upgrade_process_args(UpgradeChannel::Cli, Some("0.0.139"), Some((12345, 9900)),),
+            vec![
+                "self-update",
+                "--target",
+                "0.0.139",
+                "--source",
+                "admin",
+                "--running-proxy-pid",
+                "12345",
+                "--running-proxy-port",
+                "9900",
+            ]
         );
         assert_eq!(
-            upgrade_process_args(UpgradeChannel::Desktop, Some("0.0.139")),
+            upgrade_process_args(
+                UpgradeChannel::Desktop,
+                Some("0.0.139"),
+                Some((12345, 9900)),
+            ),
             vec![
                 "app",
                 "upgrade",

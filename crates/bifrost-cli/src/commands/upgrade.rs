@@ -16,7 +16,8 @@ use super::update_check::{get_latest_version, get_latest_version_fresh_with_diag
 use crate::config::get_bifrost_dir;
 use crate::process::{
     capture_runtime_system_proxy_snapshot, find_process_on_port, is_process_running, read_pid,
-    read_runtime_info, RuntimeInfo, RuntimeSystemProxySnapshot,
+    read_runtime_info, write_runtime_info, RuntimeInfo, RuntimeStartMode,
+    RuntimeSystemProxySnapshot,
 };
 use bifrost_core::version_check::{
     is_newer_version, make_release_tag, VersionCache, GITHUB_RELEASE_URL,
@@ -50,6 +51,25 @@ enum TimedCommandStatus {
 struct RestartSystemProxyConfig {
     enabled: bool,
     bypass: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RunningProxyHint {
+    pid: u32,
+    port: u16,
+}
+
+impl RunningProxyHint {
+    pub(crate) fn from_parts(pid: Option<u32>, port: Option<u16>) -> Option<Self> {
+        pid.zip(port).map(|(pid, port)| Self { pid, port })
+    }
+}
+
+#[derive(Debug)]
+struct ResolvedRunningProxy {
+    pid: u32,
+    runtime_info: Option<RuntimeInfo>,
+    recovered_from_hint: bool,
 }
 
 #[derive(Debug)]
@@ -1608,15 +1628,20 @@ fn upgrade_manual(
     Ok(install_outcome)
 }
 
-pub fn handle_background_upgrade() -> Result<(), BifrostError> {
-    handle_upgrade_inner(true)
+pub(crate) fn handle_background_upgrade(
+    restart_hint: Option<RunningProxyHint>,
+) -> Result<(), BifrostError> {
+    handle_upgrade_inner(true, restart_hint)
 }
 
 pub fn handle_upgrade(_yes: bool) -> Result<(), BifrostError> {
-    handle_upgrade_inner(false)
+    handle_upgrade_inner(false, None)
 }
 
-fn handle_upgrade_inner(restart_if_already_latest: bool) -> Result<(), BifrostError> {
+fn handle_upgrade_inner(
+    restart_if_already_latest: bool,
+    restart_hint: Option<RunningProxyHint>,
+) -> Result<(), BifrostError> {
     let current_version = env!("CARGO_PKG_VERSION");
 
     println!(
@@ -1700,7 +1725,7 @@ fn handle_upgrade_inner(restart_if_already_latest: bool) -> Result<(), BifrostEr
                 "  On-disk binary is current; restarting any running proxy so it adopts this version."
                     .bright_cyan()
             );
-            maybe_restart_running_proxy(&restart_executable)?;
+            maybe_restart_running_proxy(&restart_executable, restart_hint)?;
         } else {
             let install_method = detect_install_method();
             if let Ok(restart_executable) = restart_executable_for_install_method(&install_method) {
@@ -1759,11 +1784,14 @@ fn handle_upgrade_inner(restart_if_already_latest: bool) -> Result<(), BifrostEr
                 &restart_executable,
                 &cache.latest_version,
             );
-            maybe_restart_running_proxy(&restart_executable)?
+            maybe_restart_running_proxy(&restart_executable, restart_hint)?
         }
         #[cfg(windows)]
         UpgradeInstallOutcome::DeferredWindows(deferred_install) => {
-            maybe_restart_running_proxy_after_windows_deferred_install(deferred_install)?
+            maybe_restart_running_proxy_after_windows_deferred_install(
+                deferred_install,
+                restart_hint,
+            )?
         }
     }
 
@@ -1774,11 +1802,89 @@ fn should_restart_when_already_latest(restart_if_already_latest: bool) -> bool {
     restart_if_already_latest
 }
 
-fn maybe_restart_running_proxy(restart_executable: &Path) -> Result<(), BifrostError> {
-    let pid = match read_pid() {
-        Some(pid) if is_process_running(pid) => pid,
-        _ => return Ok(()),
+fn resolve_running_proxy(restart_hint: Option<RunningProxyHint>) -> Option<ResolvedRunningProxy> {
+    let runtime_info = read_runtime_info();
+
+    if let Some(hint) = restart_hint {
+        if !is_process_running(hint.pid) {
+            return None;
+        }
+        let listener = find_process_on_port(hint.port)?;
+        if listener.pid != hint.pid {
+            return None;
+        }
+
+        let runtime_matches_hint = runtime_info
+            .as_ref()
+            .is_some_and(|info| info.pid == hint.pid && info.port == hint.port);
+        if runtime_matches_hint {
+            return Some(ResolvedRunningProxy {
+                pid: hint.pid,
+                runtime_info,
+                recovered_from_hint: false,
+            });
+        }
+
+        let mut recovered = RuntimeInfo::new(
+            hint.pid,
+            hint.port,
+            None,
+            Some("0.0.0.0".to_string()),
+            RuntimeStartMode::Daemon,
+        );
+        recovered.started_at_ms = None;
+        recovered.binary_path = None;
+
+        return Some(ResolvedRunningProxy {
+            pid: hint.pid,
+            runtime_info: Some(recovered),
+            recovered_from_hint: true,
+        });
+    }
+
+    if let Some(pid) = read_pid().filter(|pid| is_process_running(*pid)) {
+        return Some(ResolvedRunningProxy {
+            pid,
+            runtime_info,
+            recovered_from_hint: false,
+        });
+    }
+
+    None
+}
+
+fn restore_runtime_marker_for_restart(
+    recovered_from_hint: bool,
+    runtime_info: Option<&RuntimeInfo>,
+) -> Result<(), BifrostError> {
+    if !recovered_from_hint {
+        return Ok(());
+    }
+    let runtime_info = runtime_info.ok_or_else(|| {
+        BifrostError::Config(
+            "Admin supplied a live proxy hint without restart runtime metadata".to_string(),
+        )
+    })?;
+    write_runtime_info(runtime_info)?;
+    println!(
+        "{}",
+        format!(
+            "  Recovered missing runtime markers from the live Admin listener on port {}.",
+            runtime_info.port
+        )
+        .bright_cyan()
+    );
+    Ok(())
+}
+
+fn maybe_restart_running_proxy(
+    restart_executable: &Path,
+    restart_hint: Option<RunningProxyHint>,
+) -> Result<(), BifrostError> {
+    let Some(resolved) = resolve_running_proxy(restart_hint) else {
+        return Ok(());
     };
+    let pid = resolved.pid;
 
     println!();
     println!(
@@ -1790,7 +1896,8 @@ fn maybe_restart_running_proxy(restart_executable: &Path) -> Result<(), BifrostE
 
     println!("{}", "  Auto-restarting the running proxy...".bright_cyan());
 
-    let runtime_info = read_runtime_info();
+    let recovered_from_hint = resolved.recovered_from_hint;
+    let runtime_info = resolved.runtime_info;
     let system_proxy_snapshot = capture_runtime_system_proxy_snapshot(runtime_info.as_ref());
     let default_system_proxy = if runtime_info.is_none() {
         Some(default_restart_system_proxy_config()?)
@@ -1800,6 +1907,7 @@ fn maybe_restart_running_proxy(restart_executable: &Path) -> Result<(), BifrostE
 
     println!("{}", "  Stopping current proxy...".bright_cyan());
     super::upgrade_background::report_restarting();
+    restore_runtime_marker_for_restart(recovered_from_hint, runtime_info.as_ref())?;
     super::stop::run_stop_for_restart()
         .map_err(|e| BifrostError::Config(format!("Failed to stop running proxy: {}", e)))?;
 
@@ -1857,14 +1965,10 @@ fn maybe_restart_running_proxy(restart_executable: &Path) -> Result<(), BifrostE
 #[cfg(windows)]
 fn maybe_restart_running_proxy_after_windows_deferred_install(
     deferred_install: WindowsDeferredInstall,
+    restart_hint: Option<RunningProxyHint>,
 ) -> Result<(), BifrostError> {
     let data_dir = get_bifrost_dir()?;
-    let pid = match read_pid() {
-        Some(pid) if is_process_running(pid) => Some(pid),
-        _ => None,
-    };
-
-    let Some(pid) = pid else {
+    let Some(resolved) = resolve_running_proxy(restart_hint) else {
         stop_tray_helper_before_windows_deferred_install(&data_dir);
         schedule_windows_deferred_install(deferred_install, None)?;
         println!(
@@ -1875,6 +1979,7 @@ fn maybe_restart_running_proxy_after_windows_deferred_install(
         );
         return Ok(());
     };
+    let pid = resolved.pid;
 
     println!();
     println!(
@@ -1889,7 +1994,8 @@ fn maybe_restart_running_proxy_after_windows_deferred_install(
         "  Auto-restarting the running proxy so Windows can replace bifrost.exe...".bright_cyan()
     );
 
-    let runtime_info = read_runtime_info();
+    let recovered_from_hint = resolved.recovered_from_hint;
+    let runtime_info = resolved.runtime_info;
     let system_proxy_snapshot = capture_runtime_system_proxy_snapshot(runtime_info.as_ref());
     let default_system_proxy = if runtime_info.is_none() {
         Some(default_restart_system_proxy_config()?)
@@ -1899,6 +2005,7 @@ fn maybe_restart_running_proxy_after_windows_deferred_install(
 
     println!("{}", "  Stopping current proxy...".bright_cyan());
     super::upgrade_background::report_restarting();
+    restore_runtime_marker_for_restart(recovered_from_hint, runtime_info.as_ref())?;
     super::stop::run_stop_for_restart()
         .map_err(|e| BifrostError::Config(format!("Failed to stop running proxy: {}", e)))?;
 
@@ -2340,6 +2447,47 @@ mod tests {
     fn background_upgrade_restarts_when_disk_binary_is_already_latest() {
         assert!(!should_restart_when_already_latest(false));
         assert!(should_restart_when_already_latest(true));
+    }
+
+    #[test]
+    fn self_update_accepts_admin_running_proxy_hint_as_a_complete_pair() {
+        use crate::cli::{Cli, Commands};
+        use clap::Parser;
+
+        let cli = Cli::parse_from([
+            "bifrost",
+            "self-update",
+            "--source",
+            "admin",
+            "--running-proxy-pid",
+            "12345",
+            "--running-proxy-port",
+            "18890",
+        ]);
+        match cli.command {
+            Some(Commands::SelfUpdate {
+                running_proxy_pid,
+                running_proxy_port,
+                ..
+            }) => {
+                assert_eq!(running_proxy_pid, Some(12345));
+                assert_eq!(running_proxy_port, Some(18890));
+            }
+            _ => panic!("Expected SelfUpdate command"),
+        }
+
+        assert!(
+            Cli::try_parse_from(["bifrost", "self-update", "--running-proxy-pid", "12345",])
+                .is_err()
+        );
+        assert_eq!(
+            RunningProxyHint::from_parts(Some(12345), Some(18890)),
+            Some(RunningProxyHint {
+                pid: 12345,
+                port: 18890,
+            })
+        );
+        assert_eq!(RunningProxyHint::from_parts(Some(12345), None), None);
     }
 
     #[test]

@@ -29,6 +29,7 @@ const WINDOWS_APP_EXE: &str = "bifrost-desktop.exe";
 const WINDOWS_LEGACY_APP_EXE: &str = "Bifrost.exe";
 const GITHUB_RELEASE_DOWNLOAD_URL: &str =
     "https://github.com/bifrost-proxy/bifrost/releases/download";
+const CALLER_MANAGED_PROGRESS_SOURCE: &str = "cli-upgrade";
 
 pub fn handle_app_command(action: AppCommands) -> Result<(), BifrostError> {
     match action {
@@ -1203,6 +1204,9 @@ fn write_app_progress(
     percent: Option<f64>,
     error: Option<String>,
 ) {
+    if !should_write_app_progress(source) {
+        return;
+    }
     let mut progress = UpgradeProgress::new(phase, message)
         .with_target(target_version)
         .with_source(Some(source.to_string()));
@@ -1213,6 +1217,10 @@ fn write_app_progress(
         progress = progress.with_error(Some(error));
     }
     write_progress(&data_dir(), &progress);
+}
+
+fn should_write_app_progress(source: &str) -> bool {
+    source != CALLER_MANAGED_PROGRESS_SOURCE
 }
 
 #[cfg(test)]
@@ -1229,6 +1237,13 @@ mod tests {
             release_asset_name("0.0.138", DesktopTarget::WindowsX64),
             "bifrost-desktop-v0.0.138-x86_64-pc-windows-msvc.msi"
         );
+    }
+
+    #[test]
+    fn nested_cli_upgrade_does_not_publish_terminal_app_progress() {
+        assert!(!should_write_app_progress("cli-upgrade"));
+        assert!(should_write_app_progress("desktop"));
+        assert!(should_write_app_progress("cli"));
     }
 
     #[test]

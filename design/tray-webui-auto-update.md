@@ -26,6 +26,8 @@ Bifrost 早期升级只有一条路径:用户在终端里手动跑 `bifrost upgr
 - 升级重启后前端 disconnect → reconnect,自动 `window.location.reload()` 一次,`sessionStorage` 标志位防止刷新风暴。
 - 隐藏 CLI `bifrost self-update --target <v> --source (tray|admin|cli)` 由托盘/admin spawn,不走用户可见 help。
 - Admin 端 `POST /api/system/upgrade` 只 spawn 子进程,不在自身进程里执行升级(避免自杀式重启)。
+- Admin 发起 CLI 更新时把当前 Admin 进程 PID 与真实监听端口作为隐藏 hint 交给 `self-update`;即使 `runtime.json` / `bifrost.pid` 丢失,updater 也必须在校验“PID 存活且确实持有该端口”后恢复 marker 并重启旧 daemon。
+- CLI 升级联动桌面 App 时,嵌套 `app upgrade --source cli-upgrade` 不得写共享终态;`completed` 只能由最外层 CLI 更新在 daemon 重启完成后发布。
 
 ### 必须不破坏
 
@@ -62,6 +64,8 @@ Idle → Checking → Downloading → Installing → Restarting → Completed / 
 - `source ∈ { "tray", "admin", "cli" }`:仅用于诊断。
 - **stale active**:`updated_at` 超过 120 秒仍未更新且仍处 active,`GET /api/system/upgrade/progress` 归一化为 `Failed`,避免 UI 卡死在 Working。
 - **磁盘二进制已是 latest**:`upgrade` 交互路径会“already latest”直接退出;`self-update` 必须绕过该短路,始终对运行中的旧 daemon 触发 `maybe_restart_running_proxy`。
+- **runtime marker 缺失**:Admin 子进程参数携带发起请求的 PID/端口。`self-update` 只在进程仍存活且端口 owner 与 PID 完全一致时合成 daemon runtime snapshot;任一校验失败都忽略 hint,禁止按端口模糊匹配或误停其它服务。
+- **进度所有权**:最外层 `self-update` 是 CLI channel 唯一 terminal progress writer。CLI 联动的 App 安装仍输出诊断日志,但 `source=cli-upgrade` 时不触碰 `upgrade-progress.json`,避免 Web UI 在 daemon 重启前提前观察到 `completed`。
 
 ### “立即更新” vs “稍后提示”
 
@@ -117,7 +121,7 @@ pub const DEFAULT_STALE_SECS: i64;
 - 全局 `SINK: OnceLock<Mutex<Option<ProgressSink>>>`;
 - `install_sink` / `take_sink` / `emit(build)`;
 - `report_download(u64, Option<u64>, Instant)` / `report_installing()` / `report_restarting()`;
-- `handle_upgrade_background(target, source)`:构造 sink,在 `Checking → Downloading → Installing → Restarting → Completed/Failed` 各阶段写入进度文件。
+- `handle_upgrade_background(target, source, running_proxy_pid, running_proxy_port)`:构造 sink 与可选的 Admin restart hint,在 `Checking → Downloading → Installing → Restarting → Completed/Failed` 各阶段写入进度文件。
 
 ### 隐藏 CLI 入口
 
@@ -131,7 +135,7 @@ SelfUpdate {
 }
 ```
 
-`main.rs` 路由到 `handle_upgrade_background(target, source)`。用户 `bifrost --help` 不可见。
+`main.rs` 路由到 `handle_upgrade_background(target, source, running_proxy_pid, running_proxy_port)`。两个 restart hint 参数隐藏且必须成对出现,用户 `bifrost --help` 不可见。
 
 ### Admin API
 
@@ -141,7 +145,7 @@ SelfUpdate {
   - 读 `read_progress`,若非 stale 的 active 升级 → 409。
   - 读 `VersionChecker` 最新结果,若无可用更新 → 409。
   - 写入初始 `UpgradeProgress { phase: Checking, source: "admin", target_version }`。
-  - Spawn detached `bifrost self-update --target <v> --source admin`,binary 定位:`std::env::current_exe()` 优先(admin 与 bifrost 同进程),fallback `PATH` 中 `bifrost`。
+  - Spawn detached `bifrost self-update --target <v> --source admin --running-proxy-pid <pid> --running-proxy-port <port>`,binary 定位:`std::env::current_exe()` 优先(admin 与 bifrost 同进程),fallback `PATH` 中 `bifrost`。PID/port 参数为隐藏内部协议,且必须成对出现。
   - stdout/stderr 追加到 `logs/upgrade-background.log`,父进程仍存活时 wait 子进程,避免下载 100% / 安装 0% 空档没日志。
   - 返回 `202 Accepted` + 当前进度快照。
 - `GET /api/system/upgrade/progress`
@@ -235,6 +239,7 @@ SelfUpdate {
 ### 接口化 E2E
 
 - `e2e-tests/tests/test_upgrade_admin_api_restart_e2e.sh`:构造 fake latest release,POST `/api/system/upgrade` → 轮询 progress → 断言 `Checking → Downloading → Installing → Restarting → Completed`;无更新时 409;直接 `bifrost self-update --source admin` 且磁盘 latest 时仍重启旧 daemon,进度文件 `completed`。
+- `e2e-tests/tests/test_upgrade_cli.sh`:在临时 data dir 拉起 daemon,删除 `runtime.json` / `bifrost.pid` 但保持监听存活,再用 Admin PID/port hint 执行 already-latest `self-update`;断言 marker 被恢复、PID 变化、Admin API 恢复、terminal progress 为 `completed`。
 - `test_cli_tray_startup_ci.sh`:预置新鲜 `version_cache.json`,压首次 check 延迟到 0,断言 tray 启动后从 `tray.log` 读到“缓存新鲜跳过联网”。
 - Web:`web/tests/ui` 补 VersionModal 双按钮 + 进度态 + 双主题快照。
 
@@ -270,6 +275,8 @@ SelfUpdate {
 - **Admin 内嵌升级导致自杀重启**:强制走 detached `self-update` 子进程,admin 不承担二进制替换与重启,只做协议边界与进度可读。
 - **magic string `UPGRADE_PROGRESS:`**:早期方案用 stdout 信号解析,已被否决;改成文件通道,天然支持跨代理重启存活与多端并发读取。
 - **`bifrost upgrade` 交互路径“already latest”短路**:后台路径必须绕过,否则磁盘 latest 但旧 daemon 仍跑的场景下升级看似成功但服务未更新。
+- **runtime marker 被其它流程清理**:不能仅依赖 marker 判断“是否运行”。Admin 必须传递精确 PID/port,updater 必须先做 owner 校验再恢复 marker;校验失败时宁可不重启并保留诊断,不能误杀未知监听进程。
+- **嵌套 App 更新提前宣告成功**:CLI 联动 App 的子流程不拥有共享 terminal progress;外层 CLI 完成二进制替换、App best-effort 更新与 daemon 重启后才写 `completed`。
 - **skill 安装失败**:提示手动重试即可,不回滚新二进制,避免让升级变成“成功又不成功”的中间态。
 - **Windows / 无头 CI 上的原生 tray**:tray helper 无法长驻,继续保留“log-only 降级模式”,不把 tray 缺失误判为升级失败。
 - **`稍后提示` 覆盖范围**:仅本会话记住 `latest`,下次进程重启仍会弹;避免用户永久错过关键升级。
