@@ -41,6 +41,9 @@ mod voice;
 mod voice_wake_worker;
 mod whitelist;
 
+#[cfg(test)]
+pub(crate) static UPGRADE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 use colored::Colorize;
 use serde_json::Value;
 use tracing::debug;

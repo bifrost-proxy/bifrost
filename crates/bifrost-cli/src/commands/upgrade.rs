@@ -1747,24 +1747,7 @@ fn handle_upgrade_inner(behavior: UpgradeBehavior) -> Result<(), BifrostError> {
             .bright_green()
             .bold()
         );
-        if behavior.restart_if_already_latest || behavior.update_desktop_app {
-            let install_method = detect_install_method();
-            let restart_executable = match restart_executable_for_install_method(&install_method) {
-                Ok(executable) => executable,
-                Err(error) if behavior.require_desktop_app_update => return Err(error),
-                Err(_) => return Ok(()),
-            };
-            update_desktop_companion(&restart_executable, &cache.latest_version, behavior)?;
-            if behavior.restart_if_already_latest && behavior.restart_proxy {
-                println!(
-                    "{}",
-                    "  On-disk binary is current; restarting any running proxy so it adopts this version."
-                        .bright_cyan()
-                );
-                maybe_restart_running_proxy(&restart_executable)?;
-            }
-        }
-        return Ok(());
+        return finish_already_latest_upgrade(&cache.latest_version, behavior);
     }
 
     print_update_info(current_version, &cache);
@@ -1809,10 +1792,7 @@ fn handle_upgrade_inner(behavior: UpgradeBehavior) -> Result<(), BifrostError> {
     match upgrade_outcome {
         UpgradeInstallOutcome::Installed => {
             install_skills_after_upgrade_best_effort(&restart_executable);
-            update_desktop_companion(&restart_executable, &cache.latest_version, behavior)?;
-            if behavior.restart_proxy {
-                maybe_restart_running_proxy(&restart_executable)?;
-            }
+            finish_installed_upgrade(&restart_executable, &cache.latest_version, behavior)?;
         }
         #[cfg(windows)]
         UpgradeInstallOutcome::DeferredWindows(deferred_install) => {
@@ -1823,6 +1803,43 @@ fn handle_upgrade_inner(behavior: UpgradeBehavior) -> Result<(), BifrostError> {
         }
     }
 
+    Ok(())
+}
+
+fn finish_already_latest_upgrade(
+    latest_version: &str,
+    behavior: UpgradeBehavior,
+) -> Result<(), BifrostError> {
+    if !behavior.restart_if_already_latest && !behavior.update_desktop_app {
+        return Ok(());
+    }
+    let install_method = detect_install_method();
+    let restart_executable = match restart_executable_for_install_method(&install_method) {
+        Ok(executable) => executable,
+        Err(error) if behavior.require_desktop_app_update => return Err(error),
+        Err(_) => return Ok(()),
+    };
+    update_desktop_companion(&restart_executable, latest_version, behavior)?;
+    if behavior.restart_if_already_latest && behavior.restart_proxy {
+        println!(
+            "{}",
+            "  On-disk binary is current; restarting any running proxy so it adopts this version."
+                .bright_cyan()
+        );
+        maybe_restart_running_proxy(&restart_executable)?;
+    }
+    Ok(())
+}
+
+fn finish_installed_upgrade(
+    restart_executable: &Path,
+    latest_version: &str,
+    behavior: UpgradeBehavior,
+) -> Result<(), BifrostError> {
+    update_desktop_companion(restart_executable, latest_version, behavior)?;
+    if behavior.restart_proxy {
+        maybe_restart_running_proxy(restart_executable)?;
+    }
     Ok(())
 }
 
@@ -2517,6 +2534,139 @@ mod tests {
         assert!(manual.restart_proxy);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn upgrade_behavior_executes_companion_and_runtime_ownership_branches() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD_ENV: &str = "BIFROST_TEST_UPGRADE_BEHAVIOR_CHILD";
+        if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+            let status = Command::new(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "commands::upgrade::tests::upgrade_behavior_executes_companion_and_runtime_ownership_branches",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .status()
+                .expect("spawn isolated upgrade behavior test");
+            assert!(status.success(), "isolated upgrade behavior test failed");
+            return;
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_dir = temp.path().join("apps");
+        let data_dir = temp.path().join("data");
+        std::fs::create_dir_all(&app_dir).expect("create app dir");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+
+        let env_keys = [
+            "BIFROST_APP_INSTALL_DIR",
+            "BIFROST_DATA_DIR",
+            DESKTOP_MANAGED_SKIP_APP_ENV,
+            DESKTOP_MANAGED_SKIP_RESTART_ENV,
+            "BIFROST_UPGRADE_TEST_LATEST_VERSION",
+        ];
+        let previous: Vec<_> = env_keys
+            .iter()
+            .map(|key| ((*key).to_string(), std::env::var_os(key)))
+            .collect();
+        std::env::set_var("BIFROST_APP_INSTALL_DIR", &app_dir);
+        std::env::set_var("BIFROST_DATA_DIR", &data_dir);
+        std::env::set_var(
+            "BIFROST_UPGRADE_TEST_LATEST_VERSION",
+            env!("CARGO_PKG_VERSION"),
+        );
+
+        let app_path = desktop_app_install_candidates()
+            .into_iter()
+            .next()
+            .expect("app install candidate");
+        if app_path
+            .extension()
+            .is_some_and(|extension| extension == "app")
+        {
+            std::fs::create_dir_all(&app_path).expect("create app bundle");
+        } else {
+            std::fs::write(&app_path, b"fixture").expect("write app fixture");
+        }
+
+        let success = temp.path().join("success-cli");
+        std::fs::write(&success, "#!/bin/sh\nexit 0\n").expect("write success helper");
+        std::fs::set_permissions(&success, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod success helper");
+        let failure = temp.path().join("failure-cli");
+        std::fs::write(&failure, "#!/bin/sh\necho app-failed >&2\nexit 7\n")
+            .expect("write failure helper");
+        std::fs::set_permissions(&failure, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod failure helper");
+
+        update_desktop_app_after_upgrade(&success, "99.0.1").expect("strict app success");
+        let error =
+            update_desktop_app_after_upgrade(&failure, "99.0.1").expect_err("strict app failure");
+        assert!(error.to_string().contains("app-failed"));
+        assert!(
+            update_desktop_app_after_upgrade(&temp.path().join("missing"), "99.0.1")
+                .expect_err("spawn error")
+                .to_string()
+                .contains("could not run")
+        );
+        update_desktop_app_after_upgrade_best_effort(&failure, "99.0.1");
+
+        update_desktop_companion(&failure, "99.0.1", UpgradeBehavior::interactive(true, true))
+            .expect("desktop-managed child skips app");
+        update_desktop_companion(&success, "99.0.1", UpgradeBehavior::background())
+            .expect("background requires successful app");
+        update_desktop_companion(
+            &failure,
+            "99.0.1",
+            UpgradeBehavior::interactive(false, true),
+        )
+        .expect("manual app update remains best effort");
+
+        std::fs::remove_file(&app_path)
+            .or_else(|_| std::fs::remove_dir_all(&app_path))
+            .ok();
+        finish_already_latest_upgrade(
+            env!("CARGO_PKG_VERSION"),
+            UpgradeBehavior::interactive(true, true),
+        )
+        .expect("desktop-managed already-latest is a no-op");
+        finish_already_latest_upgrade(env!("CARGO_PKG_VERSION"), UpgradeBehavior::background())
+            .expect("background already-latest restarts when no app is installed");
+        finish_installed_upgrade(
+            &success,
+            env!("CARGO_PKG_VERSION"),
+            UpgradeBehavior::interactive(true, true),
+        )
+        .expect("desktop-managed installed finish skips app and restart");
+
+        let desktop_runtime = RuntimeInfo::new(
+            std::process::id(),
+            9900,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Desktop,
+        );
+        write_runtime_info(&desktop_runtime).expect("write desktop runtime");
+        maybe_restart_running_proxy(&success).expect("desktop owns restart handoff");
+
+        std::env::set_var(DESKTOP_MANAGED_SKIP_APP_ENV, "yes");
+        std::env::set_var(DESKTOP_MANAGED_SKIP_RESTART_ENV, "true");
+        assert!(env_flag(DESKTOP_MANAGED_SKIP_APP_ENV));
+        assert!(env_flag(DESKTOP_MANAGED_SKIP_RESTART_ENV));
+        handle_upgrade(true).expect("desktop-managed CLI wrapper");
+        std::env::remove_var(DESKTOP_MANAGED_SKIP_APP_ENV);
+        assert!(!env_flag(DESKTOP_MANAGED_SKIP_APP_ENV));
+
+        for (key, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
     #[test]
     fn only_restartable_daemon_runtime_is_owned_by_cli_upgrade() {
         assert!(cli_owns_runtime_restart(None));
@@ -3156,7 +3306,7 @@ mod tests {
 
     #[test]
     fn upgrade_desktop_app_install_path_uses_override_dir() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().expect("tempdir");
         let previous = std::env::var_os("BIFROST_APP_INSTALL_DIR");
         std::env::set_var("BIFROST_APP_INSTALL_DIR", temp.path());
@@ -3324,10 +3474,8 @@ mod tests {
         assert!(!line.contains("%"));
     }
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn with_mirror_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
         let key = "BIFROST_GITHUB_MIRROR";
         let prev = std::env::var(key).ok();
         match value {

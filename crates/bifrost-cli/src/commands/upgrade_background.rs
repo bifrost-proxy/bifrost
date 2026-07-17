@@ -330,6 +330,65 @@ mod tests {
     }
 
     #[test]
+    fn public_background_upgrade_runs_real_already_latest_engine() {
+        const CHILD_ENV: &str = "BIFROST_TEST_PUBLIC_BACKGROUND_UPGRADE_CHILD";
+        if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .args([
+                "--exact",
+                "commands::upgrade_background::tests::public_background_upgrade_runs_real_already_latest_engine",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .status()
+            .expect("spawn isolated background upgrade test");
+            assert!(status.success(), "isolated background upgrade test failed");
+            return;
+        }
+
+        let _sink_guard = lock_tests();
+        let dir = temp_dir();
+        let app_dir = dir.join("apps");
+        std::fs::create_dir_all(&app_dir).expect("create empty app dir");
+        let keys = [
+            "BIFROST_DATA_DIR",
+            "BIFROST_APP_INSTALL_DIR",
+            "BIFROST_UPGRADE_TEST_LATEST_VERSION",
+        ];
+        let previous: Vec<_> = keys
+            .iter()
+            .map(|key| ((*key).to_string(), std::env::var_os(key)))
+            .collect();
+        std::env::set_var("BIFROST_DATA_DIR", &dir);
+        std::env::set_var("BIFROST_APP_INSTALL_DIR", &app_dir);
+        std::env::set_var(
+            "BIFROST_UPGRADE_TEST_LATEST_VERSION",
+            env!("CARGO_PKG_VERSION"),
+        );
+
+        handle_upgrade_background(
+            Some(env!("CARGO_PKG_VERSION").to_string()),
+            "admin".to_string(),
+            None,
+            None,
+        );
+
+        let progress = read_progress(&dir);
+        assert_eq!(progress.phase, UpgradePhase::Completed);
+        assert_eq!(progress.source.as_deref(), Some("admin"));
+        for (key, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        let _ = take_sink();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn background_upgrade_source_delegates_windows_deferred_terminal_progress() {
         let source = include_str!("upgrade_background.rs");
         assert!(source.contains("take_deferred_install_scheduled"));

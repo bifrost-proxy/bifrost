@@ -310,9 +310,7 @@ fn upgrade_cli_if_present(progress_source: &str) -> Result<(), BifrostError> {
             "Upgrading installed CLI:".bright_cyan(),
             cli_path.display()
         );
-        let status = desktop_managed_cli_upgrade_command(&cli_path)
-            .status()
-            .map_err(BifrostError::Io)?;
+        let status = run_desktop_managed_cli_upgrade(&cli_path)?;
         if !status.success() {
             return Err(BifrostError::Config(format!(
                 "installed CLI upgrade exited with status {status}"
@@ -338,6 +336,14 @@ fn desktop_managed_cli_upgrade_command(cli_path: &Path) -> Command {
         .env(DESKTOP_MANAGED_SKIP_RESTART_ENV, "1")
         .stdin(Stdio::null());
     command
+}
+
+fn run_desktop_managed_cli_upgrade(
+    cli_path: &Path,
+) -> Result<std::process::ExitStatus, BifrostError> {
+    desktop_managed_cli_upgrade_command(cli_path)
+        .status()
+        .map_err(BifrostError::Io)
 }
 
 fn find_standalone_cli_install() -> Option<PathBuf> {
@@ -1293,6 +1299,19 @@ mod tests {
                 .map(String::as_str),
             Some("1")
         );
+
+        #[cfg(unix)]
+        {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let cli = dir.path().join("bifrost");
+            std::fs::write(&cli, "#!/bin/sh\nexit 0\n").expect("write fake cli");
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod fake cli");
+            assert!(run_desktop_managed_cli_upgrade(&cli)
+                .expect("run fake cli")
+                .success());
+        }
     }
 
     #[test]

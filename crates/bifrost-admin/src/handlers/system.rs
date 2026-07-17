@@ -254,13 +254,12 @@ async fn check_version(state: SharedAdminState, query: Option<&str>) -> Response
 /// either handoff so the Web UI can read the terminal state after reconnecting.
 async fn start_upgrade(state: SharedAdminState, query: Option<&str>) -> Response<BoxBody> {
     let dir = data_dir();
-    let requested_channel = parse_upgrade_channel(query);
-    let channel = effective_upgrade_channel(
-        requested_channel,
+    let (requested_channel, channel, running_proxy) = upgrade_request_plan(
+        query,
         desktop_core_env_enabled(std::env::var_os(DESKTOP_CORE_ENV)),
+        std::process::id(),
+        state.port(),
     );
-    let running_proxy =
-        (channel == UpgradeChannel::Cli).then(|| (std::process::id(), state.port()));
 
     // Refuse if an upgrade is already running and still alive.
     let current = read_progress(&dir);
@@ -801,6 +800,18 @@ fn effective_upgrade_channel(_requested: UpgradeChannel, desktop_core: bool) -> 
     }
 }
 
+fn upgrade_request_plan(
+    query: Option<&str>,
+    desktop_core: bool,
+    pid: u32,
+    port: u16,
+) -> (UpgradeChannel, UpgradeChannel, Option<(u32, u16)>) {
+    let requested = parse_upgrade_channel(query);
+    let orchestrator = effective_upgrade_channel(requested, desktop_core);
+    let running_proxy = (orchestrator == UpgradeChannel::Cli).then_some((pid, port));
+    (requested, orchestrator, running_proxy)
+}
+
 fn spawn_upgrade_process(
     channel: UpgradeChannel,
     target_version: Option<&str>,
@@ -906,7 +917,8 @@ mod tests {
     use super::{
         build_cli_install_status, desktop_core_env_enabled, effective_upgrade_channel,
         install_binary_atomically, install_cli_from_current_exe, normalize_progress,
-        parse_upgrade_channel, upgrade_process_args, CliInstallRequest, UpgradeChannel,
+        parse_upgrade_channel, upgrade_process_args, upgrade_request_plan, CliInstallRequest,
+        UpgradeChannel,
     };
     use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS};
     use chrono::Utc;
@@ -981,6 +993,19 @@ mod tests {
         assert!(desktop_core_env_enabled(Some("1".into())));
         assert!(!desktop_core_env_enabled(Some("0".into())));
         assert!(!desktop_core_env_enabled(None));
+
+        assert_eq!(
+            upgrade_request_plan(Some("channel=desktop"), false, 12345, 9900),
+            (
+                UpgradeChannel::Desktop,
+                UpgradeChannel::Cli,
+                Some((12345, 9900))
+            )
+        );
+        assert_eq!(
+            upgrade_request_plan(Some("channel=cli"), true, 12345, 9900),
+            (UpgradeChannel::Cli, UpgradeChannel::Desktop, None)
+        );
     }
 
     #[test]
