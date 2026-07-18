@@ -108,7 +108,11 @@ main() {
     cat >"$cli_dir/bifrost" <<'SH'
 #!/bin/sh
 if [ "$1" = "--version" ]; then
-  printf 'bifrost %s\n' "$BIFROST_TEST_CLI_VERSION"
+  if [ -s "$BIFROST_TEST_CLI_VERSION_FILE" ]; then
+    printf 'bifrost %s\n' "$(cat "$BIFROST_TEST_CLI_VERSION_FILE")"
+  else
+    printf 'bifrost %s\n' "$BIFROST_TEST_CLI_VERSION"
+  fi
   exit 0
 fi
 printf 'args=%s\nskip_app=%s\nskip_restart=%s\ntarget=%s\n' "$*" \
@@ -116,6 +120,8 @@ printf 'args=%s\nskip_app=%s\nskip_restart=%s\ntarget=%s\n' "$*" \
   "$BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_RESTART" \
   "$BIFROST_DESKTOP_MANAGED_UPGRADE_TARGET_VERSION" \
   >"$BIFROST_TEST_CLI_LOG"
+printf '%s\n' "$BIFROST_DESKTOP_MANAGED_UPGRADE_TARGET_VERSION" \
+  >"$BIFROST_TEST_CLI_VERSION_FILE"
 exit 0
 SH
     chmod +x "$cli_dir/bifrost"
@@ -137,7 +143,8 @@ PY
     BIFROST_APP_INSTALL_DIR="$app_dir" \
     BIFROST_APP_UPGRADE_TEST_PACKAGE="$package" \
     BIFROST_TEST_CLI_LOG="$cli_log" \
-    BIFROST_TEST_CLI_VERSION="$target_version" \
+    BIFROST_TEST_CLI_VERSION_FILE="$ROOT/cli-version" \
+    BIFROST_TEST_CLI_VERSION="0.0.2" \
     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
     BIFROST_DISABLE_TRAY=1 \
     HOME="$home_dir" \
@@ -160,6 +167,14 @@ PY
     assert_equals "desktop" "$runtime_mode" "runtime marker records desktop ownership"
 
     local version_response current_version has_update
+    write_app_fixture "$old_app" "$target_version"
+    version_response="$(admin_curl GET '/api/system/version-check?channel=desktop')"
+    current_version="$(printf '%s' "$version_response" | json_field current_version)"
+    has_update="$(printf '%s' "$version_response" | json_field has_update)"
+    assert_equals "$target_version" "$current_version" "desktop primary version is already current"
+    assert_equals "True" "$has_update" "stale standalone CLI keeps desktop unified update available"
+
+    write_app_fixture "$old_app" "0.0.1"
     version_response="$(admin_curl GET '/api/system/version-check?channel=desktop')"
     current_version="$(printf '%s' "$version_response" | json_field current_version)"
     has_update="$(printf '%s' "$version_response" | json_field has_update)"

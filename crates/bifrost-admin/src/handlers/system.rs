@@ -29,6 +29,9 @@ use crate::metrics::SystemInfo;
 use crate::resource_alerts::build_resource_alerts;
 use crate::state::SharedAdminState;
 
+mod version_companion;
+use version_companion::standalone_cli_version_for_version_check;
+
 const DESKTOP_INSTALL_SKILL_TIMEOUT: Duration = Duration::from_secs(20);
 const DESKTOP_CORE_ENV: &str = "BIFROST_DESKTOP_CORE";
 const DESKTOP_UPGRADE_HANDOFF_ENV: &str = "BIFROST_DESKTOP_UPGRADE_HANDOFF";
@@ -690,11 +693,26 @@ async fn check_unified_version_for_channel(
     primary_channel: UpgradeChannel,
 ) -> crate::VersionCheckResponse {
     let primary = check_version_for_channel(state.clone(), force_refresh, primary_channel).await;
-    let companion_channel = match primary_channel {
-        UpgradeChannel::Cli => UpgradeChannel::Desktop,
-        UpgradeChannel::Desktop => UpgradeChannel::Cli,
+    let companion = match primary_channel {
+        UpgradeChannel::Cli => {
+            check_version_for_channel(state, false, UpgradeChannel::Desktop).await
+        }
+        UpgradeChannel::Desktop => {
+            let standalone_cli_version =
+                tokio::task::spawn_blocking(standalone_cli_version_for_version_check)
+                    .await
+                    .ok()
+                    .flatten();
+            if let Some(cli_version) = standalone_cli_version {
+                state
+                    .version_checker
+                    .check_with_current_version(false, cli_version)
+                    .await
+            } else {
+                check_version_for_channel(state, false, UpgradeChannel::Cli).await
+            }
+        }
     };
-    let companion = check_version_for_channel(state, false, companion_channel).await;
     merge_companion_update(primary, companion)
 }
 
