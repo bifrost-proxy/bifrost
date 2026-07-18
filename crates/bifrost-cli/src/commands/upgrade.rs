@@ -3616,6 +3616,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn upgrade_target_version_match_cleans_previous_binary_backup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("bifrost");
+        let backup = binary_backup_path(&target);
+        std::fs::write(&target, "#!/bin/sh\necho 'bifrost 0.0.156'\n")
+            .expect("write matching target");
+        std::fs::write(&backup, "#!/bin/sh\necho 'bifrost 0.0.155'\n")
+            .expect("write previous binary");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod target");
+
+        verify_installed_cli_target_version_or_restore(&target, "0.0.156")
+            .expect("matching target version must pass");
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read verified target"),
+            "#!/bin/sh\necho 'bifrost 0.0.156'\n"
+        );
+        assert!(!backup.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn upgrade_target_version_mismatch_restores_previous_binary() {
         use std::os::unix::fs::PermissionsExt;
 
