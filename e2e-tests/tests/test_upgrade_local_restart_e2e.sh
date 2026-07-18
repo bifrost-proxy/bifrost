@@ -175,6 +175,40 @@ assert_upgrade_log_contains() {
     return 1
 }
 
+dump_windows_upgrade_diagnostics() {
+    local install_dir="$1"
+    if ! is_windows; then
+        return 0
+    fi
+
+    _log_info "Windows deferred upgrade diagnostics"
+    find "$install_dir" -maxdepth 1 -type f -name '.bifrost-upgrade-*' \
+        -print 2>/dev/null || true
+    local helper_file
+    for helper_file in "$install_dir"/.bifrost-upgrade-*.log \
+        "$install_dir"/.bifrost-upgrade-*.args; do
+        if [[ -f "$helper_file" ]]; then
+            echo "--- $helper_file ---"
+            cat "$helper_file" 2>/dev/null || true
+        fi
+    done
+    if [[ -f "$TEST_DATA_DIR/upgrade-progress.json" ]]; then
+        echo "--- $TEST_DATA_DIR/upgrade-progress.json ---"
+        cat "$TEST_DATA_DIR/upgrade-progress.json" 2>/dev/null || true
+    fi
+    BIFROST_E2E_INSTALL_DIR_WIN="$(windows_path "$install_dir")" \
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '
+        Get-CimInstance Win32_Process |
+            Where-Object {
+                $_.Name -ieq "bifrost.exe" -and
+                $_.CommandLine -and
+                $_.CommandLine.Contains($env:BIFROST_E2E_INSTALL_DIR_WIN)
+            } |
+            Select-Object ProcessId, ExecutablePath, CommandLine |
+            Format-List
+    ' 2>/dev/null || true
+}
+
 find_old_bifrost_bin() {
     if [[ -n "$OLD_BIFROST_BIN" && -x "$OLD_BIFROST_BIN" ]]; then
         echo "$OLD_BIFROST_BIN"
@@ -265,10 +299,47 @@ create_local_release_archive() {
     local package_dir="${archive_root}/bifrost-v${version}-${target}"
     local bin_name
     bin_name="$(binary_name)"
+    local package_binary="${package_dir}/${bin_name}"
 
     mkdir -p "$package_dir"
-    cp "$binary" "${package_dir}/${bin_name}"
-    chmod +x "${package_dir}/${bin_name}" 2>/dev/null || true
+    cp "$binary" "$package_binary"
+    chmod +x "$package_binary" 2>/dev/null || true
+
+    # A release named v<target> must contain a binary that actually reports the
+    # pinned target. Otherwise the Windows deferred helper correctly rejects the
+    # fixture after replacement and never starts the daemon. Keep the production
+    # verification path intact by patching only this equal-length temporary copy.
+    local current_version py
+    current_version="$("$binary" --version 2>/dev/null | awk '{print $NF}' | sed 's/^v//' | tr -d '\r')"
+    if [[ "$current_version" != "$version" ]]; then
+        if [[ ${#current_version} -ne ${#version} ]]; then
+            echo "cannot patch E2E binary version with a different byte length" >&2
+            return 1
+        fi
+        py="$(python3_cmd 2>/dev/null || true)"
+        [[ -z "$py" ]] && return 1
+        "$py" - "$package_binary" "$current_version" "$version" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+old = sys.argv[2].encode()
+new = sys.argv[3].encode()
+data = path.read_bytes()
+if old not in data:
+    raise SystemExit(f"compiled version bytes {old!r} not found in {path}")
+path.write_bytes(data.replace(old, new))
+PY
+        if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
+            codesign --force --sign - "$package_binary" >/dev/null 2>&1
+        fi
+    fi
+    local packaged_version
+    packaged_version="$("$package_binary" --version 2>/dev/null | awk '{print $NF}' | sed 's/^v//' | tr -d '\r')"
+    if [[ "$packaged_version" != "$version" ]]; then
+        echo "temporary E2E binary reports ${packaged_version:-unknown}, expected $version" >&2
+        return 1
+    fi
 
     if is_windows; then
         local archive_path="${archive_root}/bifrost-v${version}-${target}.zip"
@@ -328,7 +399,10 @@ test_local_upgrade_restarts_old_daemon_with_new_binary() {
 
     local target archive_path
     target="$(host_triple)"
-    archive_path="$(create_local_release_archive "$archive_root" "$TEST_VERSION" "$target" "$BIFROST_BIN")"
+    if ! archive_path="$(create_local_release_archive "$archive_root" "$TEST_VERSION" "$target" "$BIFROST_BIN")"; then
+        _log_fail "target-version release archive created" "$TEST_VERSION" "fixture creation failed"
+        return 1
+    fi
 
     local bifrost_data_dir
     bifrost_data_dir="$(bifrost_process_path "$TEST_DATA_DIR")"
@@ -443,6 +517,7 @@ PY
     }
 
     wait_proxy_ready "$PROXY_PORT" || {
+        dump_windows_upgrade_diagnostics "$install_dir"
         _log_fail "new daemon admin ready after upgrade" "reachable" "unreachable"
         return 1
     }
