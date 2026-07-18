@@ -31,21 +31,28 @@ trap 'kill "$server_pid" 2>/dev/null || true; admin_cleanup_bifrost; rm -f "$MOC
 
 waited=0
 mock_ready=0
-while [ $waited -lt 20 ]; do
+while [ $waited -lt 120 ]; do
   if grep -q "READY" "$MOCK_LOG" 2>/dev/null; then
-    mock_ready=1
-    break
+    bound_line=$(grep -o "bound to [0-9]*" "$MOCK_LOG" 2>/dev/null | head -1 || true)
+    if [[ -n "$bound_line" ]]; then
+      HTTP_PORT="${bound_line##*bound to }"
+    fi
+    if env NO_PROXY="*" no_proxy="*" curl -fsS --connect-timeout 1 --max-time 3 \
+      "http://127.0.0.1:${HTTP_PORT}/health" >/dev/null 2>&1; then
+      mock_ready=1
+      break
+    fi
   fi
   if ! kill -0 "$server_pid" 2>/dev/null; then
     echo "ERROR: Mock server process exited unexpectedly" >&2
     cat "$MOCK_LOG" >&2
     exit 1
   fi
-  sleep 0.5
+  sleep 0.25
   waited=$((waited + 1))
 done
 if [ "$mock_ready" -eq 0 ]; then
-  echo "ERROR: Mock server on port $HTTP_PORT not ready after 10s" >&2
+  echo "ERROR: Mock server on port $HTTP_PORT not ready after 30s" >&2
   cat "$MOCK_LOG" >&2
   exit 1
 fi
@@ -55,6 +62,8 @@ if [[ -n "$bound_line" ]]; then
   HTTP_PORT="${bound_line##*bound to }"
   echo "NOTE: Mock server bound to port $HTTP_PORT" >&2
 fi
+ADMIN_PROXY_READY_URL="http://127.0.0.1:${HTTP_PORT}/health"
+export HTTP_PORT ADMIN_PROXY_READY_URL
 rm -f "$MOCK_LOG"
 
 if ! admin_ensure_bifrost; then

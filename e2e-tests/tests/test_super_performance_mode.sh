@@ -56,6 +56,29 @@ wait_for_http() {
     done
 }
 
+wait_for_http_process() {
+    local url="$1"
+    local timeout_secs="$2"
+    local pid="$3"
+    local log_file="$4"
+    local start_ts
+    start_ts="$(date +%s)"
+    while true; do
+        if env NO_PROXY="*" no_proxy="*" curl -fsS --connect-timeout 1 --max-time 3 "$url" >/dev/null 2>&1; then
+            return 0
+        fi
+        if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then
+            echo "[FAIL] fixture process ${pid} exited before becoming ready"
+            cat "$log_file" || true
+            return 1
+        fi
+        if (( $(date +%s) - start_ts >= timeout_secs )); then
+            return 1
+        fi
+        sleep 0.2
+    done
+}
+
 start_upstream() {
     local py
     py="$(python3_cmd)"
@@ -81,7 +104,8 @@ class Handler(BaseHTTPRequestHandler):
 ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 PY
     UPSTREAM_PID=$!
-    wait_for_http "http://127.0.0.1:${UPSTREAM_PORT}/ready" 20 || {
+    wait_for_http_process "http://127.0.0.1:${UPSTREAM_PORT}/ready" 45 \
+        "$UPSTREAM_PID" "${TEST_DATA_DIR}/upstream.log" || {
         echo "[FAIL] upstream did not become ready"
         cat "${TEST_DATA_DIR}/upstream.log" || true
         return 1

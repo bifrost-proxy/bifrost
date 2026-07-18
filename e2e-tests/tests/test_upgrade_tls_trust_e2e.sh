@@ -26,6 +26,7 @@ PASSED=0
 FAILED=0
 TMP_DIR=""
 SERVER_PID=""
+SERVER_LOG=""
 
 pass() {
     echo "  ✓ $1"
@@ -84,7 +85,8 @@ start_https_server() {
     local cert="$2"
     local key="$3"
     local port_file="$4"
-    python3 - "$root" "$cert" "$key" "$port_file" <<'PY' &
+    local server_log="$5"
+    python3 - "$root" "$cert" "$key" "$port_file" >"$server_log" 2>&1 <<'PY' &
 import functools
 import http.server
 import pathlib
@@ -123,6 +125,7 @@ require_tool rustc
 require_tool python3
 require_tool openssl
 require_tool tar
+require_tool curl
 
 if [[ "$SHOULD_BUILD" == "1" || ! -x "$BIFROST_BIN" ]]; then
     echo "building release bifrost binary..."
@@ -211,16 +214,28 @@ openssl x509 -req -days 1 \
     -extfile "$TMP_DIR/server.cnf" >/dev/null 2>&1
 
 PORT_FILE="$TMP_DIR/https-port"
-start_https_server "$TMP_DIR/mirror" "$TMP_DIR/server.pem" "$TMP_DIR/server.key" "$PORT_FILE"
-for _ in {1..50}; do
+SERVER_LOG="$TMP_DIR/https-server.log"
+start_https_server "$TMP_DIR/mirror" "$TMP_DIR/server.pem" "$TMP_DIR/server.key" "$PORT_FILE" "$SERVER_LOG"
+for _ in {1..300}; do
     [[ -s "$PORT_FILE" ]] && break
+    if [[ -n "$SERVER_PID" ]] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        break
+    fi
     sleep 0.1
 done
 if [[ ! -s "$PORT_FILE" ]]; then
     echo "HTTPS mirror did not start" >&2
+    cat "$SERVER_LOG" >&2 2>/dev/null || true
     exit 1
 fi
 MIRROR_URL="https://127.0.0.1:$(cat "$PORT_FILE")"
+if ! env NO_PROXY="*" no_proxy="*" curl --cacert "$TMP_DIR/ca.pem" \
+    -fsS --connect-timeout 1 --max-time 3 \
+    "$MIRROR_URL/" >/dev/null 2>&1; then
+    echo "HTTPS mirror bound a port but did not answer requests" >&2
+    cat "$SERVER_LOG" >&2 2>/dev/null || true
+    exit 1
+fi
 
 NO_CA_BIN="$TMP_DIR/bin/bifrost-no-ca"
 CA_BIN="$TMP_DIR/bin/bifrost-ca"

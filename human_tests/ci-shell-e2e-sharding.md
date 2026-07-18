@@ -1068,6 +1068,42 @@
 - 第 2 步 Windows 单测 job 通过，不再出现 `timeout after 10000ms` 或该测试的 panic。
 - 该回归不启动 Bifrost，不使用 9900，不修改系统代理。
 
+### TC-CS-52: macOS Python fixture 启动敏感用例串行与真实 readiness 回归
+
+**背景**：GitHub Actions run `29631904899` 在两次 attempt 中稳定失败。`agent-extensions` shard 的 upgrade TLS mirror 在 5 秒内没有写出端口文件，process-resolution 上游返回 502；`proxy-core` shard 的 body-cache echo server 与 super-performance upstream 在并行负载下没有及时 ready。四个脚本单独或在本机同入口并行执行均通过，失败条件集中在 hosted macOS runner 持续负载下的后台 Python fixture 冷启动。
+
+**操作步骤**：
+1. 检查调度器与四个 fixture 脚本语法：
+   ```bash
+   bash -n scripts/run_all_e2e.sh \
+     e2e-tests/tests/test_body_cache_sync_cleanup_admin_api.sh \
+     e2e-tests/tests/test_process_resolution_performance.sh \
+     e2e-tests/tests/test_super_performance_mode.sh \
+     e2e-tests/tests/test_upgrade_tls_trust_e2e.sh
+   ```
+2. 确认四个脚本都登记在 `STARTUP_SENSITIVE_TESTS`，且实际调度条件消费 `is_startup_sensitive`：
+   ```bash
+   rg -n 'STARTUP_SENSITIVE_TESTS|is_startup_sensitive|test_body_cache_sync_cleanup_admin_api|test_process_resolution_performance|test_super_performance_mode|test_upgrade_tls_trust_e2e' scripts/run_all_e2e.sh
+   ```
+3. 使用 CI 同一个调度入口、预构建 release binary 和 `BIFROST_E2E_SHELL_JOBS=2` 真实执行四个用例：
+   ```bash
+   BIFROST_BIN="$PWD/target/release/bifrost" \
+   BIFROST_E2E_SHELL_TESTS='test_upgrade_tls_trust_e2e.sh,test_body_cache_sync_cleanup_admin_api.sh,test_super_performance_mode.sh,test_process_resolution_performance.sh' \
+   BIFROST_E2E_SHELL_JOBS=2 \
+     bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build
+   ```
+4. 执行调度与 coverage contract：
+   ```bash
+   bash e2e-tests/tests/test_coverage_pipeline_contract.sh
+   ```
+
+**预期结果**：
+- 语法检查与 contract 均退出 0。
+- 调度器输出 `Running 4 lock-sensitive shell tests serially`，四个测试逐一进入 serial lane，不与同 shard 的 proxy-heavy 用例争抢冷启动资源。
+- body-cache 和 process-resolution fixture 必须真实请求 HTTP endpoint 后才视为 ready；super-performance 等待时检查 Python PID；upgrade TLS mirror 必须用临时 CA 完成真实 TLS 请求。
+- 四个 shell suite 全部通过，最终汇总 `Total suites : 4 / Passed : 4 / Failed : 0`。
+- 测试使用动态非 9900 端口和临时数据目录，不修改真实安装、真实 `~/.bifrost` 或系统代理。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -1110,6 +1146,7 @@
 | TC-CS-49 | 通过 | 2026-07-08 本轮执行：`bash -n scripts/run_all_e2e.sh scripts/ci/run-e2e-shell.sh` 通过；`BIFROST_E2E_SHELL_JOBS=2` 下 CI full-shell 全量列表与两个 shard 合并列表一致且无重叠；权重门禁输出 `pct_of_avg=0.1%`。GitHub Actions `CI` run `28881027276` attempt 2 全绿。全部本地命令只列出或静态校验 shell 测试，未启动 Bifrost，未使用 9900，未修改系统代理。 |
 | TC-CS-50 | 通过 | 2026-07-08 本轮执行：GitHub Actions `CI` run `28925523375` 的 `E2E Shell (Linux)` 失败套件为 `shell:test_cli_offline_commands_e2e.sh`，失败原因为 `CLI 快速开始缺少场景化说明: 场景 12：和 Agent 协作开发业务 Skill`。复核 `docs/cli-quick-start.md` 后确认新增 IM Gateway 快速开始后，`场景 12` 已变为 `添加飞书或微信 IM 通道`，Agent Skill 场景顺延为 `场景 13`，因此修复为同步 E2E 文档断言，并新增 IM provider 关键文案断言。执行 `bash -n e2e-tests/tests/test_cli_offline_commands_e2e.sh` 通过；执行 `rg -n '场景 12：添加飞书或微信 IM 通道|场景 13：和 Agent 协作开发业务 Skill|bifrost im provider add feishu-main --type feishu --runner traex|Feishu 会在终端显示授权 URL 和二维码' e2e-tests/tests/test_cli_offline_commands_e2e.sh docs/cli-quick-start.md` 均命中；随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_cli_offline_commands_e2e.sh`，确认 CLI offline help 与 quick-start 文档同步回归通过。该回归不启动 Bifrost，不使用 9900，不修改系统代理。 |
 | TC-CS-51 | 通过 | 2026-07-08 本轮执行：GitHub Actions main push `CI` run `28931733950` 的 `Windows Unit Tests (x86_64)` 失败，失败测试为 `schedule_agent_adapter_config_overrides_runner_without_dropping_command`，日志显示 `timeout after 10000ms`，`TaskRunStatus` 实际为 `Timeout`。第一版修复后 PR `CI` run `28933280470` 确认 timeout 消失，但 Windows `cmd.exe echo` 输出转义 JSON，导致 `agent_final_response` 为原始 JSON 字符串而不是 `OVERRIDE_OK`。第二版修复改为 PowerShell 不读取 stdin，直接用 `[char]34` 拼接合法 JSON 行。本机执行 `cargo test -p bifrost-admin schedule_agent_adapter_config_overrides_runner_without_dropping_command -- --nocapture` 多次通过，测试输出 `1 passed; 0 failed`。Windows 真实 job 由推送后的 GitHub Actions `CI` run 继续验证。该本地回归不启动 Bifrost，不使用 9900，不修改系统代理。 |
+| TC-CS-52 | 通过 | 2026-07-18 本轮执行：`bash -n` 对调度器和四个 fixture 脚本检查通过；`rg` 确认 `STARTUP_SENSITIVE_TESTS` 与 `is_startup_sensitive` 实际调度分支包含 body-cache、process-resolution、super-performance、upgrade TLS 四个脚本。随后以 `BIFROST_BIN=target/release/bifrost`、`BIFROST_E2E_SHELL_JOBS=2` 和 `BIFROST_E2E_SHELL_TESTS=<四脚本>` 运行 CI 同入口，调度器明确输出 `Running 4 lock-sensitive shell tests serially`；upgrade TLS 3/3、body-cache 2/2、super-performance 8/8、process-resolution 真实代理链路均通过，最终 `Total suites : 4 / Passed : 4 / Failed : 0`。`bash e2e-tests/tests/test_coverage_pipeline_contract.sh` 通过 24 个 coverage helper 测试、capability contract 和 3-shard balance 门禁（9.7% <= 15%）。全程使用动态非 9900 端口与临时 sandbox，未修改真实服务、真实安装或系统代理。 |
 
 ## 清理步骤
 

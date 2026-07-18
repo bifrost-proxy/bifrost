@@ -61,6 +61,12 @@ Bifrost 的 shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_a
 - `scripts/run_all_e2e.sh` 定义 `CARGO_HEAVY_TESTS`，包含 `test_chatgpt_web_behavior_artifacts.sh`、`test_asr_task_pause_resume.sh`、`test_voice_input_runtime.sh` 等触发 `cargo check/test/run` 的用例。
 - `run_shell_tests_parallel` 把 `is_cargo_heavy` 用例加入 `serial_tests`，串行执行，避免 Cargo artifact lock 竞争让业务已通过但被 900s per-test timeout 杀掉。
 
+**启动敏感 fixture 串行与真实 readiness**
+
+- `test_body_cache_sync_cleanup_admin_api.sh`、`test_process_resolution_performance.sh`、`test_super_performance_mode.sh`、`test_upgrade_tls_trust_e2e.sh` 都会启动长生命周期 Python fixture。macOS hosted runner 在并行代理压力下曾出现子进程仍存活、但 5–20 秒内未完成 import/bind/readiness 的稳定失败；这些脚本登记到 `STARTUP_SENSITIVE_TESTS`，进入 serial lane。
+- 串行化只改变测试调度，不减少任何断言或产品覆盖。分片估算中的 `shell_test_runs_serial_in_parallel_shell_job` 必须与实际 `STARTUP_SENSITIVE_TESTS` 保持一致。
+- readiness 不依赖固定 sleep：HTTP fixture 必须实际请求健康端点，HTTPS mirror 必须用测试 CA 发起 TLS 请求；等待期间持续检查 PID，子进程提前退出或超时必须输出 fixture 日志。
+
 **macOS 双分片负载均衡**
 
 - macOS `E2E Shell (aarch64-apple-darwin, shard N/2)` 使用 `shell_test_weight` 的实测秒级权重分片。权重来自近期 GitHub Actions job 日志里的 `[PASS] shell:<script> (<seconds>s)` 记录，而不是脚本数量。
