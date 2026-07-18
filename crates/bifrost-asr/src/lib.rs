@@ -9,6 +9,7 @@ pub mod runtime;
 pub mod speaker;
 pub mod subtitle;
 pub mod timeline;
+pub mod transcription;
 pub mod wake;
 
 #[cfg(all(

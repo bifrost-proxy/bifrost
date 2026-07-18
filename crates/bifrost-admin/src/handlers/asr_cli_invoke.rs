@@ -284,6 +284,7 @@ fn run_asr_cli_inner(
     Ok(WholeFileTranscription {
         text,
         segments: Vec::new(),
+        structured: Default::default(),
     })
 }
 

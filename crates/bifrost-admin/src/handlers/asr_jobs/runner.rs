@@ -1434,6 +1434,7 @@ async fn transcribe_file_for_task_with_wav(
         let result = WholeFileTranscription {
             text: diarized.text,
             segments: Vec::new(),
+            structured: Default::default(),
         };
         diarized_timeline_segments = Some(diarized.timeline_segments);
         diarized_speakers = Some(diarized.speakers);
@@ -2263,6 +2264,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: "  ".to_string(),
                 segments: Vec::new(),
+                structured: Default::default(),
             },
         );
 
@@ -2283,6 +2285,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: " hello world ".to_string(),
                 segments: Vec::new(),
+                structured: Default::default(),
             },
         );
 
@@ -2309,6 +2312,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: "second".to_string(),
                 segments: Vec::new(),
+                structured: Default::default(),
             },
         );
 
@@ -2329,6 +2333,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: String::new(),
                 segments: vec![(0, 500, "   ".to_string()), (500, 1_000, "ok".to_string())],
+                structured: Default::default(),
             },
         );
 
@@ -2352,6 +2357,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: String::new(),
                 segments: vec![(500, 2_500, "chunk".to_string())],
+                structured: Default::default(),
             },
         );
 
@@ -2374,6 +2380,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: String::new(),
                 segments: vec![(1_000, 1_000, "zero".to_string())],
+                structured: Default::default(),
             },
         );
 
@@ -2792,6 +2799,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: String::new(),
                 segments: vec![(0, 500, "new".to_string())],
+                structured: Default::default(),
             },
         );
 
@@ -2814,6 +2822,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: String::new(),
                 segments: vec![(0, 500, "  padded  ".to_string())],
+                structured: Default::default(),
             },
         );
 
@@ -2837,6 +2846,7 @@ mod coverage_boost {
                     (0, 500, "one".to_string()),
                     (500, 1_000, "two".to_string()),
                 ],
+                structured: Default::default(),
             },
         );
 
@@ -2858,6 +2868,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: String::new(),
                 segments: vec![(0, 200, "a".to_string()), (200, 400, "b".to_string())],
+                structured: Default::default(),
             },
         );
 
@@ -2881,6 +2892,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: String::new(),
                 segments: vec![(0, 500, "one".to_string())],
+                structured: Default::default(),
             },
         );
         append_diarized_segment_result(
@@ -2890,6 +2902,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: String::new(),
                 segments: vec![(500, 1_000, "two".to_string())],
+                structured: Default::default(),
             },
         );
 

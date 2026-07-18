@@ -819,6 +819,7 @@ mod tests {
         let ok = Ok(WholeFileTranscription {
             text: "hello".to_string(),
             segments: Vec::new(),
+            structured: Default::default(),
         });
         let metric = chunk_metric(
             2,
@@ -2359,6 +2360,7 @@ mod tests {
             WholeFileTranscription {
                 text: "hello world".to_string(),
                 segments: Vec::new(),
+                structured: Default::default(),
             },
             0,
             30,
@@ -2371,6 +2373,7 @@ mod tests {
             WholeFileTranscription {
                 text: "world again".to_string(),
                 segments: Vec::new(),
+                structured: Default::default(),
             },
             28,
             30,
@@ -2383,6 +2386,7 @@ mod tests {
             WholeFileTranscription {
                 text: "final words".to_string(),
                 segments: Vec::new(),
+                structured: Default::default(),
             },
             56,
             6,
