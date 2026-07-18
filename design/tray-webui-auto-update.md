@@ -73,9 +73,10 @@ Idle → Checking → Downloading → Installing → Restarting → Completed / 
 | 安装包可运行但版本不是 pinned target | 手动/script 路径清掉 backup 后留下错误 CLI | exact target 核验通过前保留 binary backup；不匹配时恢复旧 CLI 并写 `Failed` |
 | 浏览器连接 desktop-owned core 后点击更新 | App 安装完成但没有 Tauri handoff，页面 reload 后假成功 | desktop-owned core 只接受 `channel=desktop`；普通浏览器请求返回 409 并提示从桌面 App 发起 |
 | CLI-owned core 停止后新 daemon 启动失败 | 进度仍 completed 或端口被双重占用 | 精确 PID/port 所有权校验、等待端口释放、启动失败写 `Failed` |
-| App handoff 无法拉起新 App/新 core | WebView 普通 reload 掩盖失败 | Tauri/helper 写持久化 `Failed`；只有新 managed core ready 才写最终 `Completed` |
+| App handoff 无法拉起新 App/新 core | WebView 普通 reload 掩盖失败 | Tauri/helper 写持久化 `Failed`；只有新 managed core ready 且 deferred App 版本等于 pinned target 才写最终 `Completed` |
+| Desktop shell 复用 CLI-owned core | CLI 的 `Restarting` 被误当作 App handoff，两个 owner 相互抢重启 | Web UI 只对 `source=desktop` 的 `Restarting` 调用 Tauri handoff；`source=admin` 保持 CLI restart 轮询 |
 | macOS 同时安装系统级与用户级 App | Admin 选择第一个候选目录，更新非当前运行副本 | desktop Admin 不传 `--app-dir`；bundled core 从自身 executable 向上解析当前 `Bifrost.app` |
-| Windows App/sidecar 仍运行时执行 MSI/EXE | 安装器因已加载文件锁失败 | App updater 只下载并写 pending-install marker；Tauri handoff 等 App/core 退出后再有界运行安装器并拉起新 App |
+| Windows App/sidecar 仍运行时执行 MSI/EXE | 安装器因已加载文件锁失败，或清理用户传入的本地包 | App updater 写含 package ownership 的 pending-install marker；Tauri handoff 等 App/core 退出后再有界运行安装器，仅删除 updater 下载包并拉起新 App |
 
 ### 升级发起方与自恢复
 
@@ -92,7 +93,7 @@ Idle → Checking → Downloading → Installing → Restarting → Completed / 
 GET version-check 仍按 Web UI query 展示 CLI 或 App bundle 的 `current_version`,但 `has_update` 是 CLI 与已安装 App 的并集：主组件已到 target、伴随组件仍旧时也必须保留更新入口。POST upgrade 的版本门禁与实际 orchestrator 都由当前 core 的真实启动模式决定,避免过期或冲突 query 用错误组件做“无更新”判断:
 
 - **CLI-owned**:`BIFROST_DESKTOP_CORE` 未启用。Admin 强制选择 CLI orchestrator,传递当前 PID/port 给 `self-update`;外层依次更新 CLI、已安装 App,最后重启 CLI core。原本由 `start -d` 启动的 daemon 直接按 runtime snapshot 重启；直接执行 `bifrost upgrade` 遇到另一个 foreground CLI core 时也归 CLI updater 接续，不能因其不可 daemon-restart 就误判为 desktop-owned。Web UI 位于 CLI 前台 core 时，精确 PID/port owner 校验通过后先把该 snapshot 转为 detached-daemon 接续契约，再停止旧前台进程并启动新 daemon。后台链路中 App 伴随更新是完成门禁,失败时整体 progress 为 `Failed`,禁止 CLI 已更新却向 UI 宣告整体完成。
-- **App-owned**:`BIFROST_DESKTOP_CORE=1`。只有桌面 shell 发出的 `channel=desktop` 可以启动 desktop orchestrator；普通浏览器仍发送 `channel=cli`，Admin 返回 409，避免没有 Tauri handoff 的调用者安装 App 后无法重启。App orchestrator 先调用独立 CLI 的 `upgrade -y`,同时注入 `BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_APP=1`、`BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_RESTART=1` 与同一个目标版本,保证 CLI 子流程只更新精确目标 CLI,不会递归安装 App、停止 desktop core 或抢占重启；Windows deferred 替换完成前持续重试版本探针。desktop Admin 不覆盖 `--app-dir`，由 bundled core 的 `current_exe()` 解析正在运行的 App 副本。macOS 完成原子 App swap 后进入 `Restarting`；Windows 把 MSI/EXE 登记为 pending install，同样进入 `Restarting`。Web UI 在该阶段调用 Tauri handoff，helper 等旧 App/core 退出后执行 Windows installer，最终由新 managed core ready 写 `Completed`。
+- **App-owned**:`BIFROST_DESKTOP_CORE=1`。只有桌面 shell 发出的 `channel=desktop` 可以启动 desktop orchestrator；普通浏览器仍发送 `channel=cli`，Admin 返回 409，避免没有 Tauri handoff 的调用者安装 App 后无法重启。App orchestrator 先调用独立 CLI 的 `upgrade -y`,同时注入 `BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_APP=1`、`BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_RESTART=1` 与同一个目标版本,保证 CLI 子流程只更新精确目标 CLI,不会递归安装 App、停止 desktop core 或抢占重启；Windows deferred 替换完成前持续重试版本探针。desktop Admin 不覆盖 `--app-dir`，由 bundled core 的 `current_exe()` 解析正在运行的 App 副本。macOS 完成原子 App swap 后进入 `Restarting`；Windows 把 MSI/EXE 与“是否由 updater 下载”一起登记为 pending install，同样进入 `Restarting`。Web UI 只在 progress 同时满足 `source=desktop` 与 `phase=Restarting` 时调用 Tauri handoff；helper 等旧 App/core 退出后执行 Windows installer，仅清理 updater 自有包。新 App/core ready 后还要核对 App 编译版本与 pinned target，一致才写 `Completed`，不一致写 `Failed`。
 - **硬边界**:App-owned 编排不传 restart hint，CLI updater 读取到 `RuntimeStartMode::Desktop` 时直接跳过 proxy restart。CLI-owned Web UI 编排必须携带并校验当前 PID/port；验证通过的 foreground runtime 会被规范化为 restartable daemon，验证失败则终止升级。
 - **共同结果**:两种入口都以同一个 pinned target 同时升级 CLI + 已安装 App；直接 `app upgrade --version` 也把该 target 传给 CLI 引擎，不能重新观察 `latest` 后发生版本分叉。所有顶层 CLI/App updater 共用 `upgrade.lock`，只有 CLI updater 内部的 `source=cli-upgrade` companion 跳过重复加锁。重启所有权互斥：CLI-owned 由 CLI updater 重启 daemon，App-owned 由 Tauri handoff 重启 App/core，不允许两个重启器同时操作同一监听端口。
 

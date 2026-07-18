@@ -250,7 +250,11 @@ export const useVersionStore = create<VersionState>()(
               upgradeError: progress.error,
             });
 
-            if (progress.phase === "restarting" && isDesktopShell()) {
+            if (
+              progress.phase === "restarting" &&
+              progress.source === "desktop" &&
+              isDesktopShell()
+            ) {
               // App-owned installers must run only after the desktop shell and
               // bundled core have released their files. Stop polling before the
               // handoff exits this process; the relaunched core publishes the

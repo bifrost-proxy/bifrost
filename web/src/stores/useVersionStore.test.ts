@@ -202,4 +202,35 @@ describe("useVersionStore upgrade polling", () => {
     expect(apiMocks.startUpgrade).not.toHaveBeenCalled();
     expect(useVersionStore.getState().upgradePhase).toBe("restarting");
   });
+
+  it("does not hand off the desktop shell for a CLI-owned backend restart", async () => {
+    runtimeMocks.desktopShell = true;
+    const invoke = vi.fn();
+    Object.assign(window, {
+      __TAURI__: {
+        core: {
+          invoke,
+        },
+      },
+    });
+    useVersionStore.getState().stopPollUpgradeProgress();
+    useVersionStore = (await import("./useVersionStore")).useVersionStore;
+    useVersionStore.setState({ upgrading: true, upgradePhase: "installing" });
+    apiMocks.getUpgradeProgress.mockResolvedValue({
+      phase: "restarting",
+      percent: null,
+      message: "Restarting CLI-owned proxy…",
+      target_version: "0.0.105",
+      source: "admin",
+      error: null,
+      updated_at: new Date().toISOString(),
+    });
+
+    useVersionStore.getState().pollUpgradeProgress();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(invoke).not.toHaveBeenCalled();
+    expect(useVersionStore.getState().upgradePhase).toBe("restarting");
+    expect(useVersionStore.getState().upgrading).toBe(true);
+  });
 });

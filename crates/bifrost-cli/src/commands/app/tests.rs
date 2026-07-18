@@ -45,12 +45,18 @@ fn app_owned_windows_installers_are_deferred_until_desktop_shutdown() {
         created_at_ms: 123,
         package_path: "Bifrost.msi".to_string(),
         target_version: "0.0.156".to_string(),
+        package_owned_by_updater: true,
     };
     let encoded = serde_json::to_string(&pending).expect("encode pending installer");
     assert_eq!(
         serde_json::from_str::<PendingDesktopInstall>(&encoded).expect("decode pending installer"),
         pending
     );
+    let caller_owned = serde_json::from_str::<PendingDesktopInstall>(
+        r#"{"schema_version":1,"created_at_ms":123,"package_path":"Bifrost.msi","target_version":"0.0.156"}"#,
+    )
+    .expect("decode legacy caller-owned pending installer");
+    assert!(!caller_owned.package_owned_by_updater);
     assert_eq!(
         DESKTOP_PENDING_INSTALL_FILE,
         "desktop-upgrade-pending-install.json"

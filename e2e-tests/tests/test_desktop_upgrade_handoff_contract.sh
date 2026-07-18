@@ -28,6 +28,8 @@ CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
   cargo test --manifest-path desktop/src-tauri/Cargo.toml restart_handoff_setup_failure -- --nocapture
 CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
   cargo test --manifest-path desktop/src-tauri/Cargo.toml deferred_desktop_installer_marker -- --nocapture
+CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
+  cargo test --manifest-path desktop/src-tauri/Cargo.toml deferred_desktop_install_completion -- --nocapture
 
 if ! grep -Fq 'sanitize_desktop_upgrade_relaunch_command(&mut command)' \
   "$REPO_ROOT/desktop/src-tauri/src/main.rs"; then
@@ -44,6 +46,11 @@ fi
 if ! grep -Fq 'spawn_windows_desktop_upgrade_handoff(marker_path, target)' \
   "$REPO_ROOT/desktop/src-tauri/src/main.rs"; then
   echo "[desktop-upgrade-handoff] FAIL: deferred Windows installer is not owned by the post-exit handoff helper"
+  exit 1
+fi
+
+if ! grep -Fq 'package_owned_by_updater' "$REPO_ROOT/desktop/src-tauri/src/main.rs"; then
+  echo "[desktop-upgrade-handoff] FAIL: deferred handoff cannot distinguish updater downloads from caller-owned packages"
   exit 1
 fi
 

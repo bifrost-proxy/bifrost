@@ -59,6 +59,8 @@ pub(super) struct PendingDesktopInstall {
     pub(super) created_at_ms: u64,
     pub(super) package_path: String,
     pub(super) target_version: String,
+    #[serde(default)]
+    pub(super) package_owned_by_updater: bool,
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -80,6 +82,7 @@ pub(super) fn should_defer_desktop_install(
 pub(super) fn defer_desktop_install_to_handoff(
     package: &Path,
     target_version: &str,
+    package_owned_by_updater: bool,
 ) -> Result<(), BifrostError> {
     let dir = data_dir();
     fs::create_dir_all(&dir)?;
@@ -92,6 +95,7 @@ pub(super) fn defer_desktop_install_to_handoff(
         created_at_ms,
         package_path: package.to_string_lossy().into_owned(),
         target_version: target_version.to_string(),
+        package_owned_by_updater,
     };
     let content = serde_json::to_string_pretty(&pending).map_err(|error| {
         BifrostError::Config(format!(

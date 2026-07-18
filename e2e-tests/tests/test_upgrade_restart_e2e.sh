@@ -427,6 +427,7 @@ test_upgrade_review_feedback_contracts() {
     local background_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade_background.rs"
     local admin_src="${PROJECT_DIR}/crates/bifrost-admin/src/handlers/system.rs"
     local desktop_src="${PROJECT_DIR}/desktop/src-tauri/src/main.rs"
+    local web_store_src="${PROJECT_DIR}/web/src/stores/useVersionStore.ts"
 
     if [ "$(wc -l <"$app_src")" -le 1500 ] \
         && [ "$(wc -l <"$installer_src")" -le 1500 ] \
@@ -447,12 +448,15 @@ test_upgrade_review_feedback_contracts() {
         && grep -Fq 'try_acquire_upgrade_lock' "$installer_src" \
         && grep -Fq 'handle_upgrade_to_target(true, target_version.to_string())' "$app_src" \
         && grep -Fq 'spawn_windows_desktop_upgrade_handoff' "$desktop_src" \
+        && grep -Fq 'deferred_desktop_install_version_error' "$desktop_src" \
+        && grep -Fq 'package_owned_by_updater' "$installer_src" \
+        && grep -Fq 'progress.source === "desktop"' "$web_store_src" \
         && grep -Fq 'persist_desktop_upgrade_handoff_failure' "$desktop_src" \
         && grep -Fq 'read_installed_cli_version_with_timeout' "$app_src"; then
-        _log_pass "review feedback contracts cover recovery, ownership, rollback, shared locking, pinned targets, deferred desktop install, active app path, and module size"
+        _log_pass "review feedback contracts cover recovery, ownership, rollback, shared locking, pinned targets, verified deferred desktop install, active app path, and module size"
     else
         _log_fail "upgrade review feedback contracts" \
-            "stable backup + exact rollback + safe marker + shared App lock + pinned target + active app path + foreground restart + deferred desktop install + persisted handoff + bounded modules" \
+            "stable backup + exact rollback + safe marker + shared App lock + pinned target + active app path + foreground restart + verified deferred desktop install + source-gated handoff + caller package preservation + persisted handoff + bounded modules" \
             "one or more contracts are missing"
         return 1
     fi

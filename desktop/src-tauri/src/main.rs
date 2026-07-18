@@ -195,6 +195,8 @@ struct PendingDesktopInstall {
     created_at_ms: u64,
     package_path: String,
     target_version: String,
+    #[serde(default)]
+    package_owned_by_updater: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1014,6 +1016,20 @@ fn is_upgrade_relaunch_marker_active(marker: &DesktopUpgradeRelaunchMarker, now_
         .checked_sub(marker.created_at_ms)
         .map(|age_ms| age_ms <= DESKTOP_UPGRADE_RELAUNCH_STALE_AFTER_MS)
         .unwrap_or(true)
+}
+
+fn deferred_desktop_install_version_error(
+    marker: &DesktopUpgradeRelaunchMarker,
+    current_version: &str,
+) -> Option<String> {
+    let pending = marker.pending_install.as_ref()?;
+    let expected = pending.target_version.trim().trim_start_matches('v');
+    let installed = current_version.trim().trim_start_matches('v');
+    (installed != expected).then(|| {
+        format!(
+            "deferred desktop installer target mismatch: expected v{expected}, relaunched v{installed}"
+        )
+    })
 }
 
 fn write_upgrade_relaunch_marker(
@@ -1939,13 +1955,25 @@ fn start_desktop_backend_now(app: &AppHandle, reason: &str) -> Result<DesktopRun
                 &state.data_dir,
                 format!("desktop backend start succeeded; active_port={port} reason={reason}"),
             );
-            if upgrade_relaunch.is_some() {
-                write_desktop_upgrade_terminal_progress(
-                    &state.data_dir,
-                    UpgradePhase::Completed,
-                    "Desktop app and core update complete",
-                    None,
-                );
+            if let Some(marker) = upgrade_relaunch.as_ref() {
+                if let Some(error) =
+                    deferred_desktop_install_version_error(marker, env!("CARGO_PKG_VERSION"))
+                {
+                    write_desktop_upgrade_terminal_progress(
+                        &state.data_dir,
+                        UpgradePhase::Failed,
+                        "Desktop app restarted but version verification failed",
+                        Some(error.clone()),
+                    );
+                    append_desktop_bootstrap_log(&state.data_dir, error);
+                } else {
+                    write_desktop_upgrade_terminal_progress(
+                        &state.data_dir,
+                        UpgradePhase::Completed,
+                        "Desktop app and core update complete",
+                        None,
+                    );
+                }
                 clear_upgrade_relaunch_marker(&state.data_dir);
                 if let Ok(mut marker_guard) = state.upgrade_relaunch.lock() {
                     *marker_guard = None;
@@ -2916,7 +2944,9 @@ try {
       throw "desktop installer exited with code $($installer.ExitCode)"
     }
     Remove-Item -LiteralPath $pendingPath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
+    if ([bool]$marker.pending_install.package_owned_by_updater) {
+      Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
+    }
     Write-BootstrapLog "deferred desktop installer completed; target_version=$targetVersion"
   }
 
@@ -3377,15 +3407,16 @@ fn is_server_config_response(response_body: &str) -> bool {
 mod tests {
     use super::{
         append_desktop_bootstrap_log, begin_backend_recovery, clear_backend_unavailable_if_healthy,
-        desktop_backend_env, desktop_backend_start_args, desktop_pending_install_path,
-        desktop_sidecar_rust_log, desktop_startup_deadline, desktop_startup_session_id,
-        desktop_test_allows_multiple_instances, desktop_upgrade_relaunch_marker_path,
-        host_window_close_behavior_for_platform, is_server_config_response,
-        is_upgrade_relaunch_marker_active, main_interface_decorations_for_platform,
-        mark_backend_unavailable_for_manual_start, may_reuse_existing_backend,
-        parse_port_update_response, persist_desktop_upgrade_handoff_failure,
-        poll_managed_backend_exit, publish_startup_ready, read_active_upgrade_relaunch_marker,
-        read_pending_desktop_install, record_startup_deadline_error, relaunch_command_for_target,
+        deferred_desktop_install_version_error, desktop_backend_env, desktop_backend_start_args,
+        desktop_pending_install_path, desktop_sidecar_rust_log, desktop_startup_deadline,
+        desktop_startup_session_id, desktop_test_allows_multiple_instances,
+        desktop_upgrade_relaunch_marker_path, host_window_close_behavior_for_platform,
+        is_server_config_response, is_upgrade_relaunch_marker_active,
+        main_interface_decorations_for_platform, mark_backend_unavailable_for_manual_start,
+        may_reuse_existing_backend, parse_port_update_response,
+        persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit, publish_startup_ready,
+        read_active_upgrade_relaunch_marker, read_pending_desktop_install,
+        record_startup_deadline_error, relaunch_command_for_target,
         resolve_bifrost_binary_from_env, resolve_desktop_config_path, resolve_desktop_data_dir,
         sanitize_desktop_upgrade_relaunch_command, save_desktop_config,
         should_allow_multiple_instances, should_handoff_to_main, should_retry_backend_candidate,
@@ -3788,6 +3819,7 @@ mod tests {
             created_at_ms: super::current_time_millis(),
             package_path: package.to_string_lossy().into_owned(),
             target_version: "0.0.156".to_string(),
+            package_owned_by_updater: true,
         };
         fs::write(
             desktop_pending_install_path(temp_dir.path()),
@@ -3820,6 +3852,21 @@ mod tests {
         assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("WaitForExit(30000)"));
         assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("@(0, 1641, 3010)"));
         assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("Write-Progress \"failed\""));
+        assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
+            .contains("if ([bool]$marker.pending_install.package_owned_by_updater)"));
+        assert_eq!(
+            WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
+                .matches("Remove-Item -LiteralPath $packagePath")
+                .count(),
+            1,
+            "caller package cleanup must exist only inside the ownership guard"
+        );
+
+        let legacy_pending: PendingDesktopInstall = serde_json::from_str(
+            r#"{"schema_version":1,"created_at_ms":123,"package_path":"Bifrost.msi","target_version":"0.0.156"}"#,
+        )
+        .expect("decode legacy pending installer");
+        assert!(!legacy_pending.package_owned_by_updater);
 
         let stale = PendingDesktopInstall {
             created_at_ms: 1,
@@ -3833,6 +3880,44 @@ mod tests {
         assert!(read_pending_desktop_install(temp_dir.path())
             .expect_err("stale installer must be rejected")
             .contains("stale"));
+    }
+
+    #[test]
+    fn deferred_desktop_install_completion_requires_target_version() {
+        let pending = PendingDesktopInstall {
+            schema_version: 1,
+            created_at_ms: super::current_time_millis(),
+            package_path: "C:\\Temp\\Bifrost.msi".to_string(),
+            target_version: "0.0.156".to_string(),
+            package_owned_by_updater: false,
+        };
+        let marker = DesktopUpgradeRelaunchMarker {
+            schema_version: 1,
+            created_at_ms: super::current_time_millis(),
+            old_app_pid: 123,
+            old_core_pid: Some(124),
+            proxy_port: 9900,
+            app_target: "C:\\Program Files\\Bifrost\\bifrost-desktop.exe".to_string(),
+            pending_install: Some(pending),
+        };
+
+        assert_eq!(
+            deferred_desktop_install_version_error(&marker, "v0.0.156"),
+            None
+        );
+        let mismatch = deferred_desktop_install_version_error(&marker, "0.0.155")
+            .expect("wrong relaunched App version must fail the upgrade");
+        assert!(mismatch.contains("expected v0.0.156"));
+        assert!(mismatch.contains("relaunched v0.0.155"));
+
+        let non_deferred = DesktopUpgradeRelaunchMarker {
+            pending_install: None,
+            ..marker
+        };
+        assert_eq!(
+            deferred_desktop_install_version_error(&non_deferred, "0.0.155"),
+            None
+        );
     }
 
     #[test]

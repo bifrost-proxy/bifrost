@@ -236,7 +236,8 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
         );
         return Ok(());
     }
-
+    #[cfg(target_os = "windows")]
+    let package_owned_by_updater = package.is_none();
     let package_path = match package {
         Some(path) => path,
         None => {
@@ -256,9 +257,10 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
     );
     #[cfg(target_os = "windows")]
     if should_defer_desktop_install(&progress_source, &package_path, true) {
-        defer_desktop_install_to_handoff(&package_path, &target_version).inspect_err(|error| {
-            write_app_failed_progress(&target_version, &progress_source, error);
-        })?;
+        defer_desktop_install_to_handoff(&package_path, &target_version, package_owned_by_updater)
+            .inspect_err(|error| {
+                write_app_failed_progress(&target_version, &progress_source, error);
+            })?;
         write_app_progress(
             UpgradePhase::Restarting,
             "Waiting for desktop shell to stop before installing…",
