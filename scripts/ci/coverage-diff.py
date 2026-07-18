@@ -125,7 +125,9 @@ def exclude_inline_test_modules(
 
 
 def unchanged_moved_block_lines(
-    current_source: str, base_sources: list[tuple[str, str]]
+    current_source: str,
+    base_sources: list[tuple[str, str, str]],
+    current_path: str,
 ) -> set[int]:
     """Return current line numbers copied unchanged from substantial base blocks.
 
@@ -136,18 +138,22 @@ def unchanged_moved_block_lines(
     """
     current_lines = current_source.splitlines()
     moved: set[int] = set()
-    for base_source, original_current_source in base_sources:
+    for base_path, base_source, original_current_source in base_sources:
         base_lines = base_source.splitlines()
+        same_file = base_path == current_path
         retained_base_lines: set[int] = set()
-        retained_matcher = difflib.SequenceMatcher(
-            None,
-            base_lines,
-            original_current_source.splitlines(),
-            autojunk=False,
-        )
-        for retained in retained_matcher.get_matching_blocks():
-            if retained.size >= MOVED_BLOCK_MIN_LINES:
-                retained_base_lines.update(range(retained.a, retained.a + retained.size))
+        if not same_file:
+            retained_matcher = difflib.SequenceMatcher(
+                None,
+                base_lines,
+                original_current_source.splitlines(),
+                autojunk=False,
+            )
+            for retained in retained_matcher.get_matching_blocks():
+                if retained.size >= MOVED_BLOCK_MIN_LINES:
+                    retained_base_lines.update(
+                        range(retained.a, retained.a + retained.size)
+                    )
         matcher = difflib.SequenceMatcher(
             None, base_lines, current_lines, autojunk=False
         )
@@ -155,6 +161,10 @@ def unchanged_moved_block_lines(
             if block.size < MOVED_BLOCK_MIN_LINES:
                 continue
             matched = current_lines[block.b : block.b + block.size]
+            if same_file and sequence_occurrence_count(
+                current_lines, matched
+            ) > sequence_occurrence_count(base_lines, matched):
+                continue
             substantive = sum(
                 1
                 for line in matched
@@ -189,9 +199,19 @@ def unchanged_moved_block_lines(
     return moved
 
 
+def sequence_occurrence_count(lines: list[str], block: list[str]) -> int:
+    """Count exact, potentially overlapping occurrences of a line block."""
+    if not block or len(block) > len(lines):
+        return 0
+    return sum(
+        lines[index : index + len(block)] == block
+        for index in range(len(lines) - len(block) + 1)
+    )
+
+
 def exclude_unchanged_moved_blocks(
     changed: dict[str, set[int]],
-    base_sources: list[tuple[str, str]],
+    base_sources: list[tuple[str, str, str]],
     repo_root: Path = REPO_ROOT,
 ) -> tuple[dict[str, set[int]], int]:
     filtered: dict[str, set[int]] = {}
@@ -202,7 +222,7 @@ def exclude_unchanged_moved_blocks(
             filtered[path] = set(lines)
             continue
         moved = unchanged_moved_block_lines(
-            source_path.read_text(encoding="utf-8"), base_sources
+            source_path.read_text(encoding="utf-8"), base_sources, path
         )
         filtered[path] = set(lines).difference(moved)
         excluded_count += len(set(lines).intersection(moved))
@@ -257,7 +277,7 @@ def git_diff(base_ref: str) -> str:
     return result.stdout
 
 
-def changed_base_sources(base_ref: str) -> list[tuple[str, str]]:
+def changed_base_sources(base_ref: str) -> list[tuple[str, str, str]]:
     merge_base = subprocess.run(
         ["git", "merge-base", base_ref, "HEAD"],
         cwd=REPO_ROOT,
@@ -289,7 +309,7 @@ def changed_base_sources(base_ref: str) -> list[tuple[str, str]]:
     if names.returncode != 0:
         raise RuntimeError(names.stderr.strip() or "git diff --name-only failed")
 
-    sources: list[tuple[str, str]] = []
+    sources: list[tuple[str, str, str]] = []
     for path in names.stdout.splitlines():
         normalized = normalize_path(path)
         if not PRODUCTION_RUST_RE.match(normalized):
@@ -308,7 +328,7 @@ def changed_base_sources(base_ref: str) -> list[tuple[str, str]]:
                 if current_path.is_file()
                 else ""
             )
-            sources.append((content.stdout, current))
+            sources.append((normalized, content.stdout, current))
     return sources
 
 
