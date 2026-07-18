@@ -70,11 +70,11 @@ pub(super) fn probe_github_url(url: &str, tuning: DownloadTuning) -> bool {
         .unwrap_or(false)
 }
 
-pub(super) fn select_fastest_github_base(
+pub(super) fn select_fastest_github_base_from(
+    bases: Vec<String>,
     github_path: &str,
     tuning: DownloadTuning,
 ) -> Option<String> {
-    let bases = github_mirror_bases();
     if bases.is_empty() {
         return None;
     }
@@ -239,8 +239,15 @@ pub(super) fn download_file_once_with_progress(
 }
 
 pub(super) fn ordered_download_bases(github_path: &str, tuning: DownloadTuning) -> Vec<String> {
-    let bases = github_mirror_bases();
-    let selected = select_fastest_github_base(github_path, tuning);
+    ordered_download_bases_from(github_mirror_bases(), github_path, tuning)
+}
+
+pub(super) fn ordered_download_bases_from(
+    bases: Vec<String>,
+    github_path: &str,
+    tuning: DownloadTuning,
+) -> Vec<String> {
+    let selected = select_fastest_github_base_from(bases.clone(), github_path, tuning);
     let mut ordered = Vec::new();
 
     if let Some(selected) = selected {

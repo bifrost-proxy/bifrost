@@ -1405,7 +1405,6 @@ fn restart_and_download_helpers_cover_terminal_paths() {
 fn download_selection_success_and_free_restart_port_are_exercised() {
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().expect("tempdir");
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
     let address = listener.local_addr().expect("fixture address");
@@ -1430,11 +1429,7 @@ fn download_selection_success_and_free_restart_port_are_exercised() {
                 .expect("write fixture response");
         }
     });
-    let previous_mirror = std::env::var_os("BIFROST_GITHUB_MIRROR");
-    let previous_data_dir = std::env::var_os("BIFROST_DATA_DIR");
     let base = format!("http://{address}");
-    std::env::set_var("BIFROST_GITHUB_MIRROR", &base);
-    std::env::set_var("BIFROST_DATA_DIR", temp.path().join("data"));
     let tuning = DownloadTuning {
         connect_timeout_secs: 1,
         download_timeout_secs: 2,
@@ -1442,11 +1437,21 @@ fn download_selection_success_and_free_restart_port_are_exercised() {
         download_tries: 1,
     };
     assert_eq!(
-        select_fastest_github_base("fixture", tuning).as_deref(),
+        select_fastest_github_base_from(
+            vec!["http://127.0.0.1:9".to_string(), base.clone()],
+            "fixture",
+            tuning,
+        )
+        .as_deref(),
         Some(base.as_str())
     );
     assert_eq!(
-        ordered_download_bases("fixture", tuning).first(),
+        ordered_download_bases_from(
+            vec!["http://127.0.0.1:9".to_string(), base.clone()],
+            "fixture",
+            tuning,
+        )
+        .first(),
         Some(&base)
     );
     let output = temp.path().join("downloaded");
@@ -1458,13 +1463,4 @@ fn download_selection_success_and_free_restart_port_are_exercised() {
     let free_port = free_listener.local_addr().expect("free port").port();
     drop(free_listener);
     wait_for_restart_ports_release(&[free_port]).expect("released fixture port");
-
-    match previous_mirror {
-        Some(value) => std::env::set_var("BIFROST_GITHUB_MIRROR", value),
-        None => std::env::remove_var("BIFROST_GITHUB_MIRROR"),
-    }
-    match previous_data_dir {
-        Some(value) => std::env::set_var("BIFROST_DATA_DIR", value),
-        None => std::env::remove_var("BIFROST_DATA_DIR"),
-    }
 }
