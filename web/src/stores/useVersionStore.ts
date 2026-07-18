@@ -16,6 +16,8 @@ export const DESKTOP_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const UPGRADE_POLL_INTERVAL_MS = 1000;
 /** sessionStorage flag guarding the single post-upgrade auto-reload. */
 export const UPGRADE_RELOAD_PENDING_KEY = "bifrost-upgrade-reload-pending";
+const DESKTOP_RESTART_HANDOFF_FAILED_MESSAGE =
+  "Desktop update installed, but restart handoff failed";
 
 interface CheckVersionOptions {
   forceRefresh?: boolean;
@@ -81,7 +83,22 @@ function triggerUpgradeReloadOnce() {
   if (isDesktopShell()) {
     void import("../desktop/tauri")
       .then(({ restartDesktopAfterUpdate }) => restartDesktopAfterUpdate())
-      .catch(() => window.location.reload());
+      .catch((error) => {
+        try {
+          sessionStorage.removeItem(UPGRADE_RELOAD_PENDING_KEY);
+        } catch {
+          // ignore — sessionStorage may be unavailable.
+        }
+        useVersionStore.setState({
+          upgrading: false,
+          upgradePhase: "failed",
+          upgradeMessage: DESKTOP_RESTART_HANDOFF_FAILED_MESSAGE,
+          upgradeError:
+            error instanceof Error
+              ? error.message
+              : "Failed to restart the desktop app after update",
+        });
+      });
     return;
   }
   window.location.reload();
@@ -168,7 +185,22 @@ export const useVersionStore = create<VersionState>()(
       },
 
       startUpgrade: async () => {
-        if (get().upgrading) {
+        const state = get();
+        if (state.upgrading) {
+          return;
+        }
+        if (
+          isDesktopShell() &&
+          state.upgradePhase === "failed" &&
+          state.upgradeMessage === DESKTOP_RESTART_HANDOFF_FAILED_MESSAGE
+        ) {
+          set({
+            upgrading: true,
+            upgradePhase: "restarting",
+            upgradeMessage: "Retrying desktop restart handoff…",
+            upgradeError: null,
+          });
+          triggerUpgradeReloadOnce();
           return;
         }
         sawDisconnect = false;

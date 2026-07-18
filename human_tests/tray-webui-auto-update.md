@@ -175,6 +175,48 @@
 - 任一路径只有在 CLI 与已安装 App 的伴随更新都成功后才写 `completed`；伴随更新失败必须写 `failed`，不得部分成功却对 UI 宣告完成。
 - CLI-owned 路径的 App 伴随更新失败时，旧 daemon 必须保持原 PID 和可用状态，不得在组件未齐备时提前重启。
 
+### TC-TWA-09：升级状态机并发、版本漂移、软失败与超时回归
+
+**操作步骤**：
+1. 执行 Admin 实链路；脚本会同时发出两个 POST：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_upgrade_admin_api_restart_e2e.sh
+   ```
+2. 执行跨进程升级锁和 App-owned CLI 门禁单测：
+   ```bash
+   cargo test -p bifrost-cli cross_process_upgrade_lock_allows_only_one_owner --lib -- --nocapture
+   cargo test -p bifrost-cli desktop_managed_cli_upgrade_cannot_reenter_app_or_restart_its_core --lib -- --nocapture
+   cargo test -p bifrost-cli installed_cli_version_must_match_the_pinned_target --lib -- --nocapture
+   cargo test -p bifrost-cli script_installs_use_the_target_aware_atomic_upgrade_path --lib -- --nocapture
+   cargo test -p bifrost-cli homebrew_restart_uses_stable_launcher_outside_versioned_cellar --lib -- --nocapture
+   cargo test -p bifrost-cli homebrew_upgrade_commands_are_bounded_and_verify_formula_target --lib -- --nocapture
+   cargo test -p bifrost-cli macos_app_swap_preserves_old_bundle_when_staging_is_invalid --lib -- --nocapture
+   cargo test -p bifrost-cli windows_deferred_install_waits_for_tray_unlock_and_reports_terminal_progress --lib -- --nocapture
+   ```
+3. 执行 App-owned 实链路，检查独立 CLI 收到与 App 相同的 pinned target，并在 `--version` 核验后才安装 App：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_upgrade_app_owned_core_e2e.sh
+   ```
+4. 执行 Web UI 状态回归：
+   ```bash
+   pnpm --dir web exec vitest run src/stores/useVersionStore.test.ts
+   ```
+
+**预期结果**：
+- 两个并发 POST 中恰好一个返回 202，另一个返回 409；最终只发生一次安装与一次 daemon 重启。
+- 主组件已是 target、伴随组件仍旧时，version-check 仍返回 `has_update=true`，避免 CLI/App 部分升级后更新入口消失。
+- 跨进程 `upgrade.lock` 同时只允许一个 owner，释放后可再次获取。
+- App-owned 独立 CLI 同时收到 `skip_app=1`、`skip_restart=1` 和与 App 一致的 target；退出 0 但 `--version` 不等于 target 时整体失败。
+- CLI-owned 的 Script/Homebrew/Manual 非 deferred 安装也必须在 App 更新和 core 重启前核验实际 CLI target；Script 渠道不得重新追随变化后的 latest，Homebrew 重启不得依赖会被 reinstall 删除的 Cellar 路径。
+- 独立 CLI 卡住时在有界超时后被终止，等待期间持续写 Installing 心跳，不会跨过 120 秒 stale 门限。
+- App 包先在 staging 中完成复制和版本核验；staging 无版本或版本错误时旧 App bundle 仍保持原版本可启动。
+- 模拟 App 已被移到 backup 后中断时，下一次尝试先恢复旧 App；Windows deferred 路径在调度替换前完成 App 同版本门禁，并在 CLI target 核验失败时保留/恢复旧 exe。
+- Tauri restart invoke 失败时 Web UI 显示 `failed` 和真实错误，不执行普通 reload、不保留“已成功”状态。
+- 点击 Retry 只重试 Tauri handoff，不重新请求已经因 App 到达 target 而返回“无更新”的安装 API。
+- helper 无法打开新 App 或新 App 无法拉起 managed core 时，持久化 progress 必须从预完成状态改为 `failed`；只有新 core ready 后才刷新最终 `completed`。
+
 ## 清理步骤
 
 1. 停止测试数据目录中的 Bifrost 服务：
@@ -185,6 +227,10 @@
 3. 不清理、不停止、不重启用户正在运行的 9900 服务。
 
 ## 执行记录
+
+2026-07-18 本次状态机审计已执行（最终复测）：
+
+- TC-TWA-09：通过。最终构建后 `test_upgrade_admin_api_restart_e2e.sh` 为 `15/15`，两个并发 POST 得到 `202 + 409`，只启动一个 updater，临时 daemon 从 PID 40482 重启为 PID 41110；already-latest 从 PID 41351 重启为 PID 41489。`test_upgrade_cli.sh --only-runtime-ownership` 为 `4/4`，`test_upgrade_app_owned_core_e2e.sh` 为 `13/13`，`test_desktop_upgrade_handoff_contract.sh` 为 `5/5`。跨进程锁、desktop-managed CLI pinned target/版本门禁、macOS App staging 失败和 interrupted-backup 恢复、Windows deferred App 门禁/CLI target 核验/失败回滚的定向测试全部通过。独立 CLI 收到与 App 相同的 `target=99.0.1`，App bundle 真实替换且 core 在 Tauri handoff 前保持原 owner。`useVersionStore.test.ts` 为 `3/3`；全量 Web 单测 `173/173`、lint（仅 14 个既有 warning）和 production build 均通过。
 
 2026-07-17 本次修复已执行：
 

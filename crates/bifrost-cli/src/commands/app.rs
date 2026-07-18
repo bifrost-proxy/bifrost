@@ -4,9 +4,10 @@ use std::ffi::OsString;
 use std::fs;
 #[cfg(target_os = "windows")]
 use std::io::{self, Cursor};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use bifrost_core::upgrade_progress::{write_progress, UpgradePhase, UpgradeProgress};
@@ -20,7 +21,7 @@ use crate::cli::AppCommands;
 use super::update_check::get_latest_version_fresh_with_diagnostics;
 use super::upgrade::{
     download_progress_line, handle_upgrade, DESKTOP_MANAGED_SKIP_APP_ENV,
-    DESKTOP_MANAGED_SKIP_RESTART_ENV,
+    DESKTOP_MANAGED_SKIP_RESTART_ENV, DESKTOP_MANAGED_TARGET_ENV,
 };
 
 #[cfg(any(target_os = "windows", test))]
@@ -33,6 +34,11 @@ const WINDOWS_LEGACY_APP_EXE: &str = "Bifrost.exe";
 const GITHUB_RELEASE_DOWNLOAD_URL: &str =
     "https://github.com/bifrost-proxy/bifrost/releases/download";
 const CALLER_MANAGED_PROGRESS_SOURCE: &str = "cli-upgrade";
+const DESKTOP_MANAGED_CLI_TIMEOUT: Duration = Duration::from_secs(600);
+const DESKTOP_MANAGED_CLI_HEARTBEAT: Duration = Duration::from_secs(30);
+const DESKTOP_MANAGED_CLI_VERSION_TIMEOUT: Duration = Duration::from_secs(15);
+const DESKTOP_INSTALL_COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
+const DESKTOP_INSTALL_COMMAND_HEARTBEAT: Duration = Duration::from_secs(30);
 
 pub fn handle_app_command(action: AppCommands) -> Result<(), BifrostError> {
     match action {
@@ -195,7 +201,7 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
     );
 
     if include_cli {
-        upgrade_cli_if_present(&progress_source).inspect_err(|error| {
+        upgrade_cli_if_present(&progress_source, &target_version).inspect_err(|error| {
             write_app_failed_progress(&target_version, &progress_source, error);
         })?;
     }
@@ -241,7 +247,14 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
         None,
         None,
     );
-    install_desktop_package(&package_path, &install_dir, &install_path).inspect_err(|error| {
+    install_desktop_package(
+        &package_path,
+        &install_dir,
+        &install_path,
+        &target_version,
+        &progress_source,
+    )
+    .inspect_err(|error| {
         write_app_failed_progress(&target_version, &progress_source, error);
     })?;
     verify_installed_desktop_target_version(&install_path, &target_version).inspect_err(
@@ -291,7 +304,7 @@ fn write_app_failed_progress(target_version: &str, progress_source: &str, error:
     );
 }
 
-fn upgrade_cli_if_present(progress_source: &str) -> Result<(), BifrostError> {
+fn upgrade_cli_if_present(progress_source: &str, target_version: &str) -> Result<(), BifrostError> {
     println!(
         "{}",
         "Checking CLI install before desktop app install...".bright_cyan()
@@ -310,12 +323,18 @@ fn upgrade_cli_if_present(progress_source: &str) -> Result<(), BifrostError> {
             "Upgrading installed CLI:".bright_cyan(),
             cli_path.display()
         );
-        let status = run_desktop_managed_cli_upgrade(&cli_path)?;
+        let status = run_desktop_managed_cli_upgrade(
+            &cli_path,
+            target_version,
+            progress_source,
+            DESKTOP_MANAGED_CLI_TIMEOUT,
+        )?;
         if !status.success() {
             return Err(BifrostError::Config(format!(
                 "installed CLI upgrade exited with status {status}"
             )));
         }
+        verify_installed_cli_target_version(&cli_path, target_version)?;
     } else {
         println!(
             "{}",
@@ -327,23 +346,110 @@ fn upgrade_cli_if_present(progress_source: &str) -> Result<(), BifrostError> {
     Ok(())
 }
 
-fn desktop_managed_cli_upgrade_command(cli_path: &Path) -> Command {
+fn desktop_managed_cli_upgrade_command(cli_path: &Path, target_version: &str) -> Command {
     let mut command = Command::new(cli_path);
     command
         .arg("upgrade")
         .arg("-y")
         .env(DESKTOP_MANAGED_SKIP_APP_ENV, "1")
         .env(DESKTOP_MANAGED_SKIP_RESTART_ENV, "1")
+        .env(DESKTOP_MANAGED_TARGET_ENV, target_version)
         .stdin(Stdio::null());
     command
 }
 
 fn run_desktop_managed_cli_upgrade(
     cli_path: &Path,
+    target_version: &str,
+    progress_source: &str,
+    timeout: Duration,
 ) -> Result<std::process::ExitStatus, BifrostError> {
-    desktop_managed_cli_upgrade_command(cli_path)
-        .status()
-        .map_err(BifrostError::Io)
+    let mut child = desktop_managed_cli_upgrade_command(cli_path, target_version)
+        .spawn()
+        .map_err(BifrostError::Io)?;
+    let deadline = Instant::now() + timeout;
+    let mut next_heartbeat = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(BifrostError::Config(format!(
+                    "installed CLI upgrade timed out after {} seconds",
+                    timeout.as_secs()
+                )));
+            }
+            Ok(None) => {
+                if Instant::now() >= next_heartbeat {
+                    write_app_progress(
+                        UpgradePhase::Installing,
+                        "Upgrading installed CLI…",
+                        Some(target_version.to_string()),
+                        progress_source,
+                        None,
+                        None,
+                    );
+                    next_heartbeat = Instant::now() + DESKTOP_MANAGED_CLI_HEARTBEAT;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(BifrostError::Io(error)),
+        }
+    }
+}
+
+fn verify_installed_cli_target_version(
+    cli_path: &Path,
+    target_version: &str,
+) -> Result<(), BifrostError> {
+    let mut stdout =
+        tempfile::tempfile().map_err(|error| BifrostError::Io(std::io::Error::other(error)))?;
+    let mut child = Command::new(cli_path)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout.try_clone().map_err(|error| {
+            BifrostError::Io(std::io::Error::other(error))
+        })?))
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(BifrostError::Io)?;
+    let deadline = Instant::now() + DESKTOP_MANAGED_CLI_VERSION_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(BifrostError::Config(format!(
+                    "installed CLI version verification timed out after {} seconds",
+                    DESKTOP_MANAGED_CLI_VERSION_TIMEOUT.as_secs()
+                )));
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(25)),
+            Err(error) => return Err(BifrostError::Io(error)),
+        }
+    };
+    if !status.success() {
+        return Err(BifrostError::Config(format!(
+            "installed CLI version verification exited with status {status}"
+        )));
+    }
+    let _ = stdout.seek(SeekFrom::Start(0));
+    let mut output = String::new();
+    let _ = stdout.read_to_string(&mut output);
+    if output
+        .split_whitespace()
+        .any(|part| versions_equal(part, target_version))
+    {
+        return Ok(());
+    }
+    Err(BifrostError::Config(format!(
+        "installed CLI upgrade reported success but {} reports `{}` instead of target v{}",
+        cli_path.display(),
+        output.trim(),
+        normalize_version(target_version)
+    )))
 }
 
 fn find_standalone_cli_install() -> Option<PathBuf> {
@@ -556,7 +662,10 @@ fn verify_installed_desktop_target_version(
     target_version: &str,
 ) -> Result<(), BifrostError> {
     let Some(installed) = installed_desktop_app_version(install_path) else {
-        return Ok(());
+        return Err(BifrostError::Config(format!(
+            "desktop app install completed but {} does not report an installed version",
+            install_path.display()
+        )));
     };
     if versions_equal(&installed, target_version) {
         return Ok(());
@@ -760,13 +869,15 @@ fn install_desktop_package(
     package: &Path,
     install_dir: &Path,
     install_path: &Path,
+    target_version: &str,
+    progress_source: &str,
 ) -> Result<(), BifrostError> {
     fs::create_dir_all(install_dir)?;
 
     if package.is_dir()
         && package.file_name().and_then(|name| name.to_str()) == Some(MACOS_APP_BUNDLE)
     {
-        copy_dir_replace(package, install_path)?;
+        copy_dir_replace(package, install_path, target_version, progress_source)?;
         clear_macos_xattrs(install_path);
         return Ok(());
     }
@@ -778,9 +889,9 @@ fn install_desktop_package(
         .to_ascii_lowercase();
 
     match extension.as_str() {
-        "dmg" => install_macos_dmg(package, install_path),
-        "exe" => run_windows_installer(package, &["/S"]),
-        "msi" => run_windows_msi(package),
+        "dmg" => install_macos_dmg(package, install_path, target_version, progress_source),
+        "exe" => run_windows_installer(package, &["/S"], target_version, progress_source),
+        "msi" => run_windows_msi(package, target_version, progress_source),
         "zip" => install_windows_zip(package, install_path),
         _ => Err(BifrostError::Config(format!(
             "unsupported desktop package type: {}",
@@ -789,20 +900,159 @@ fn install_desktop_package(
     }
 }
 
-fn copy_dir_replace(source: &Path, target: &Path) -> Result<(), BifrostError> {
-    let _ = fs::remove_dir_all(target);
-    #[cfg(target_os = "macos")]
-    if Command::new("ditto")
-        .arg(source)
-        .arg(target)
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-    {
-        return Ok(());
+#[derive(Debug)]
+struct DesktopInstallCommandOutput {
+    status: std::process::ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_desktop_install_command(
+    command: Command,
+    target_version: &str,
+    progress_source: &str,
+) -> Result<std::process::ExitStatus, BifrostError> {
+    Ok(run_desktop_install_command_output(command, target_version, progress_source)?.status)
+}
+
+fn run_desktop_install_command_output(
+    command: Command,
+    target_version: &str,
+    progress_source: &str,
+) -> Result<DesktopInstallCommandOutput, BifrostError> {
+    run_desktop_install_command_output_with_timeout(
+        command,
+        target_version,
+        progress_source,
+        DESKTOP_INSTALL_COMMAND_TIMEOUT,
+        DESKTOP_INSTALL_COMMAND_HEARTBEAT,
+    )
+}
+
+fn run_desktop_install_command_output_with_timeout(
+    mut command: Command,
+    target_version: &str,
+    progress_source: &str,
+    timeout: Duration,
+    heartbeat: Duration,
+) -> Result<DesktopInstallCommandOutput, BifrostError> {
+    let mut stdout =
+        tempfile::tempfile().map_err(|error| BifrostError::Io(std::io::Error::other(error)))?;
+    let mut stderr =
+        tempfile::tempfile().map_err(|error| BifrostError::Io(std::io::Error::other(error)))?;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout.try_clone()?))
+        .stderr(Stdio::from(stderr.try_clone()?))
+        .spawn()
+        .map_err(BifrostError::Io)?;
+    let deadline = Instant::now() + timeout;
+    let mut next_heartbeat = Instant::now() + heartbeat;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(BifrostError::Config(format!(
+                    "desktop package installer timed out after {} seconds",
+                    timeout.as_secs_f64()
+                )));
+            }
+            Ok(None) => {
+                if Instant::now() >= next_heartbeat {
+                    write_app_progress(
+                        UpgradePhase::Installing,
+                        "Installing desktop app…",
+                        Some(target_version.to_string()),
+                        progress_source,
+                        None,
+                        None,
+                    );
+                    next_heartbeat = Instant::now() + heartbeat;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(BifrostError::Io(error)),
+        }
+    };
+    let _ = stdout.seek(SeekFrom::Start(0));
+    let _ = stderr.seek(SeekFrom::Start(0));
+    let mut stdout_text = String::new();
+    let mut stderr_text = String::new();
+    let _ = stdout.read_to_string(&mut stdout_text);
+    let _ = stderr.read_to_string(&mut stderr_text);
+    Ok(DesktopInstallCommandOutput {
+        status,
+        stdout: stdout_text,
+        stderr: stderr_text,
+    })
+}
+
+fn copy_dir_replace(
+    source: &Path,
+    target: &Path,
+    target_version: &str,
+    progress_source: &str,
+) -> Result<(), BifrostError> {
+    if fs::canonicalize(source).ok() == fs::canonicalize(target).ok() && target.exists() {
+        return verify_installed_desktop_target_version(target, target_version);
     }
 
-    copy_dir_recursive(source, target)
+    let parent = target.parent().ok_or_else(|| {
+        BifrostError::Config(format!(
+            "desktop app target has no parent: {}",
+            target.display()
+        ))
+    })?;
+    let name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Bifrost.app");
+    let staging = parent.join(format!(".{name}.upgrade-{}", std::process::id()));
+    let backup = parent.join(format!(".{name}.backup-{}", std::process::id()));
+
+    // Recover the only known-good bundle if a previous process was interrupted
+    // in the narrow rename window after target -> backup but before staging ->
+    // target. Deleting this backup on the next attempt would turn a recoverable
+    // interrupted update into a missing application.
+    if !target.exists() && backup.exists() {
+        fs::rename(&backup, target)?;
+    }
+    let _ = fs::remove_dir_all(&staging);
+    if target.exists() {
+        let _ = fs::remove_dir_all(&backup);
+    }
+
+    let mut copied = false;
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("ditto");
+        command.arg(source).arg(&staging);
+        if run_desktop_install_command(command, target_version, progress_source)?.success() {
+            copied = true;
+        }
+    }
+    if !copied {
+        let _ = fs::remove_dir_all(&staging);
+        copy_dir_recursive(source, &staging)?;
+    }
+    verify_installed_desktop_target_version(&staging, target_version).inspect_err(|_| {
+        let _ = fs::remove_dir_all(&staging);
+    })?;
+
+    if target.exists() {
+        fs::rename(target, &backup)?;
+    }
+    if let Err(error) = fs::rename(&staging, target) {
+        if backup.exists() {
+            let _ = fs::rename(&backup, target);
+        }
+        let _ = fs::remove_dir_all(&staging);
+        return Err(BifrostError::Io(error));
+    }
+    let _ = fs::remove_dir_all(&backup);
+    Ok(())
 }
 
 fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), BifrostError> {
@@ -821,19 +1071,24 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), BifrostError> 
 }
 
 #[cfg(target_os = "macos")]
-fn install_macos_dmg(package: &Path, install_path: &Path) -> Result<(), BifrostError> {
-    let output = Command::new("hdiutil")
+fn install_macos_dmg(
+    package: &Path,
+    install_path: &Path,
+    target_version: &str,
+    progress_source: &str,
+) -> Result<(), BifrostError> {
+    let mut command = Command::new("hdiutil");
+    command
         .args(["attach", "-nobrowse", "-readonly"])
-        .arg(package)
-        .output()
-        .map_err(BifrostError::Io)?;
+        .arg(package);
+    let output = run_desktop_install_command_output(command, target_version, progress_source)?;
     if !output.status.success() {
         return Err(BifrostError::Config(format!(
             "failed to attach dmg: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            output.stderr.trim()
         )));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = output.stdout;
     let mount = stdout
         .lines()
         .filter_map(|line| line.split('\t').next_back())
@@ -842,7 +1097,7 @@ fn install_macos_dmg(package: &Path, install_path: &Path) -> Result<(), BifrostE
         .map(PathBuf::from)
         .ok_or_else(|| BifrostError::Parse("failed to find mounted dmg volume".to_string()))?;
     let source_app = mount.join(MACOS_APP_BUNDLE);
-    let result = copy_dir_replace(&source_app, install_path);
+    let result = copy_dir_replace(&source_app, install_path, target_version, progress_source);
     let _ = Command::new("hdiutil").arg("detach").arg(&mount).status();
     result?;
     clear_macos_xattrs(install_path);
@@ -850,7 +1105,12 @@ fn install_macos_dmg(package: &Path, install_path: &Path) -> Result<(), BifrostE
 }
 
 #[cfg(not(target_os = "macos"))]
-fn install_macos_dmg(_package: &Path, _install_path: &Path) -> Result<(), BifrostError> {
+fn install_macos_dmg(
+    _package: &Path,
+    _install_path: &Path,
+    _target_version: &str,
+    _progress_source: &str,
+) -> Result<(), BifrostError> {
     Err(BifrostError::Config(
         "dmg desktop packages can only be installed on macOS".to_string(),
     ))
@@ -882,12 +1142,15 @@ fn clear_macos_xattrs(path: &Path) {
 fn clear_macos_xattrs(_path: &Path) {}
 
 #[cfg(target_os = "windows")]
-fn run_windows_installer(package: &Path, args: &[&str]) -> Result<(), BifrostError> {
-    let status = Command::new(package)
-        .args(args)
-        .stdin(Stdio::null())
-        .status()
-        .map_err(BifrostError::Io)?;
+fn run_windows_installer(
+    package: &Path,
+    args: &[&str],
+    target_version: &str,
+    progress_source: &str,
+) -> Result<(), BifrostError> {
+    let mut command = Command::new(package);
+    command.args(args);
+    let status = run_desktop_install_command(command, target_version, progress_source)?;
     if status.success() {
         Ok(())
     } else {
@@ -898,21 +1161,28 @@ fn run_windows_installer(package: &Path, args: &[&str]) -> Result<(), BifrostErr
 }
 
 #[cfg(not(target_os = "windows"))]
-fn run_windows_installer(_package: &Path, _args: &[&str]) -> Result<(), BifrostError> {
+fn run_windows_installer(
+    _package: &Path,
+    _args: &[&str],
+    _target_version: &str,
+    _progress_source: &str,
+) -> Result<(), BifrostError> {
     Err(BifrostError::Config(
         "Windows desktop packages can only be installed on Windows".to_string(),
     ))
 }
 
 #[cfg(target_os = "windows")]
-fn run_windows_msi(package: &Path) -> Result<(), BifrostError> {
+fn run_windows_msi(
+    package: &Path,
+    target_version: &str,
+    progress_source: &str,
+) -> Result<(), BifrostError> {
     let log_path = windows_msi_log_path(package);
     let args = windows_msi_install_args(package, &log_path);
-    let status = Command::new("msiexec")
-        .args(&args)
-        .stdin(Stdio::null())
-        .status()
-        .map_err(BifrostError::Io)?;
+    let mut command = Command::new("msiexec");
+    command.args(&args);
+    let status = run_desktop_install_command(command, target_version, progress_source)?;
     if status.success() {
         let _ = fs::remove_file(&log_path);
         Ok(())
@@ -957,7 +1227,11 @@ fn run_windows_msi_uninstall(product_code: &str) -> Result<(), BifrostError> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn run_windows_msi(_package: &Path) -> Result<(), BifrostError> {
+fn run_windows_msi(
+    _package: &Path,
+    _target_version: &str,
+    _progress_source: &str,
+) -> Result<(), BifrostError> {
     Err(BifrostError::Config(
         "MSI desktop packages can only be installed on Windows".to_string(),
     ))
@@ -1288,7 +1562,7 @@ mod tests {
             return;
         }
 
-        let command = desktop_managed_cli_upgrade_command(Path::new("/tmp/bifrost"));
+        let command = desktop_managed_cli_upgrade_command(Path::new("/tmp/bifrost"), "0.0.156");
         let args: Vec<_> = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -1314,23 +1588,82 @@ mod tests {
                 .map(String::as_str),
             Some("1")
         );
+        assert_eq!(
+            envs.get(DESKTOP_MANAGED_TARGET_ENV).map(String::as_str),
+            Some("0.0.156")
+        );
 
         #[cfg(unix)]
         {
             let dir = tempfile::tempdir().expect("tempdir");
             let cli = dir.path().join("bifrost");
-            std::fs::write(&cli, "#!/bin/sh\nexit 0\n").expect("write fake cli");
+            std::fs::write(
+                &cli,
+                "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'bifrost 0.0.156'; fi\nexit 0\n",
+            )
+            .expect("write fake cli");
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755))
                 .expect("chmod fake cli");
-            assert!(run_desktop_managed_cli_upgrade(&cli)
-                .expect("run fake cli")
-                .success());
+            assert!(run_desktop_managed_cli_upgrade(
+                &cli,
+                "0.0.156",
+                "desktop",
+                Duration::from_secs(2),
+            )
+            .expect("run fake cli")
+            .success());
+            verify_installed_cli_target_version(&cli, "0.0.156")
+                .expect("fake CLI reports pinned version");
+            assert!(verify_installed_cli_target_version(&cli, "0.0.157").is_err());
+            let slow_cli = dir.path().join("slow-bifrost");
+            std::fs::write(&slow_cli, "#!/bin/sh\nexec sleep 2\n").expect("write slow fake cli");
+            std::fs::set_permissions(&slow_cli, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod slow fake cli");
+            let timeout_error = run_desktop_managed_cli_upgrade(
+                &slow_cli,
+                "0.0.156",
+                "desktop",
+                Duration::from_millis(50),
+            )
+            .expect_err("hung desktop-managed CLI must time out");
+            assert!(timeout_error.to_string().contains("timed out"));
             std::env::set_var("PATH", dir.path());
             std::env::set_var("BIFROST_INSTALL_DIR", dir.path());
-            upgrade_cli_if_present("desktop").expect("desktop orchestrator upgrades located CLI");
+            upgrade_cli_if_present("desktop", "0.0.156")
+                .expect("desktop orchestrator upgrades located CLI");
             std::env::remove_var("BIFROST_INSTALL_DIR");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_installer_command_has_output_heartbeat_and_timeout() {
+        let mut success = Command::new("/bin/sh");
+        success.args(["-c", "printf 'mounted'; printf 'note' >&2"]);
+        let output = run_desktop_install_command_output_with_timeout(
+            success,
+            "0.0.156",
+            CALLER_MANAGED_PROGRESS_SOURCE,
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+        )
+        .expect("installer command succeeds");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, "mounted");
+        assert_eq!(output.stderr, "note");
+
+        let mut hung = Command::new("/bin/sh");
+        hung.args(["-c", "exec sleep 2"]);
+        let error = run_desktop_install_command_output_with_timeout(
+            hung,
+            "0.0.156",
+            CALLER_MANAGED_PROGRESS_SOURCE,
+            Duration::from_millis(50),
+            Duration::from_millis(10),
+        )
+        .expect_err("hung installer must be terminated");
+        assert!(error.to_string().contains("timed out"));
     }
 
     #[test]
@@ -1493,6 +1826,15 @@ HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7A327F4B
         let error = verify_installed_desktop_target_version(&app, "0.0.141")
             .expect_err("stale app bundle should be rejected");
         assert!(error.to_string().contains("reports version v0.0.140"));
+
+        let missing_version_app = temp.path().join("MissingVersion.app");
+        fs::create_dir_all(&missing_version_app).expect("create app without plist");
+        let missing_error =
+            verify_installed_desktop_target_version(&missing_version_app, "0.0.141")
+                .expect_err("unverifiable app bundle should be rejected");
+        assert!(missing_error
+            .to_string()
+            .contains("does not report an installed version"));
     }
 
     #[cfg(target_os = "macos")]
@@ -1521,5 +1863,58 @@ HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7A327F4B
             Some("0.0.139")
         );
         assert!(installed_desktop_app_is_target_version(&app, "v0.0.139"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_app_swap_preserves_old_bundle_when_staging_is_invalid() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = temp.path().join(MACOS_APP_BUNDLE);
+        let contents = target.join("Contents");
+        fs::create_dir_all(&contents).expect("create old Contents");
+        fs::write(
+            contents.join("Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleShortVersionString</key><string>0.0.155</string>
+</dict></plist>"#,
+        )
+        .expect("write old plist");
+        let invalid_package = temp.path().join("Package.app");
+        fs::create_dir_all(invalid_package.join("Contents"))
+            .expect("create invalid staged package");
+
+        assert!(copy_dir_replace(
+            &invalid_package,
+            &target,
+            "0.0.156",
+            CALLER_MANAGED_PROGRESS_SOURCE,
+        )
+        .is_err());
+        assert_eq!(
+            installed_desktop_app_version(&target).as_deref(),
+            Some("0.0.155"),
+            "the old App remains launchable until a staged target is verified"
+        );
+
+        let backup = temp.path().join(format!(
+            ".{}.backup-{}",
+            MACOS_APP_BUNDLE,
+            std::process::id()
+        ));
+        fs::rename(&target, &backup).expect("simulate interruption after backup rename");
+        assert!(!target.exists());
+        assert!(copy_dir_replace(
+            &invalid_package,
+            &target,
+            "0.0.156",
+            CALLER_MANAGED_PROGRESS_SOURCE,
+        )
+        .is_err());
+        assert_eq!(
+            installed_desktop_app_version(&target).as_deref(),
+            Some("0.0.155"),
+            "the next attempt restores an interrupted swap before staging"
+        );
     }
 }

@@ -38,9 +38,14 @@ const BINARY_VERIFY_TIMEOUT_SECS: u64 = 15;
 const POST_UPGRADE_SKILL_INSTALL_TIMEOUT_SECS: u64 = 120;
 const POST_UPGRADE_SKILL_INSTALL_ARGS: &[&str] = &["install-skill", "--tool", "all", "-y"];
 const POST_UPGRADE_APP_UPDATE_TIMEOUT_SECS: u64 = 600;
+const UPGRADE_CHILD_PROGRESS_HEARTBEAT_SECS: u64 = 30;
+const HOMEBREW_COMMAND_TIMEOUT_SECS: u64 = 600;
+const HOMEBREW_METADATA_TIMEOUT_SECS: u64 = 60;
 pub(crate) const DESKTOP_MANAGED_SKIP_APP_ENV: &str = "BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_APP";
 pub(crate) const DESKTOP_MANAGED_SKIP_RESTART_ENV: &str =
     "BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_RESTART";
+pub(crate) const DESKTOP_MANAGED_TARGET_ENV: &str =
+    "BIFROST_DESKTOP_MANAGED_UPGRADE_TARGET_VERSION";
 static DEFERRED_INSTALL_SCHEDULED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,12 +241,31 @@ fn detect_install_method() -> InstallMethod {
 
 fn restart_executable_for_install_method(method: &InstallMethod) -> Result<PathBuf, BifrostError> {
     match method {
-        InstallMethod::Homebrew => Ok(PathBuf::from("bifrost")),
+        InstallMethod::Homebrew => env::current_exe()
+            .map(|current| homebrew_launcher_for_executable(&current))
+            .map_err(BifrostError::Io),
         InstallMethod::Script => env::current_exe().map_err(BifrostError::Io),
         InstallMethod::Manual(path) => Ok(path.clone()),
         InstallMethod::Unknown => Err(BifrostError::Config(
             "Cannot determine restart executable for unknown install method".to_string(),
         )),
+    }
+}
+
+fn homebrew_launcher_for_executable(current: &Path) -> PathBuf {
+    let current_text = current.to_string_lossy();
+    if current_text.starts_with("/opt/homebrew/") {
+        PathBuf::from("/opt/homebrew/bin/bifrost")
+    } else if current_text.starts_with("/usr/local/") {
+        PathBuf::from("/usr/local/bin/bifrost")
+    } else if current_text.starts_with("/home/linuxbrew/") {
+        PathBuf::from("/home/linuxbrew/.linuxbrew/bin/bifrost")
+    } else {
+        // InstallMethod::Homebrew means the newly installed binary must be
+        // resolved through Homebrew's stable launcher. Reusing an arbitrary
+        // current executable here can restart the old, versioned binary (and
+        // is also wrong for wrappers/tests that explicitly select Homebrew).
+        PathBuf::from("bifrost")
     }
 }
 
@@ -401,6 +425,20 @@ fn command_status_with_timeout(
     args: &[&str],
     timeout: Duration,
 ) -> Result<TimedCommandStatus, BifrostError> {
+    command_status_with_timeout_and_heartbeat(
+        program,
+        args,
+        timeout,
+        Duration::from_secs(UPGRADE_CHILD_PROGRESS_HEARTBEAT_SECS),
+    )
+}
+
+fn command_status_with_timeout_and_heartbeat(
+    program: &Path,
+    args: &[&str],
+    timeout: Duration,
+    heartbeat: Duration,
+) -> Result<TimedCommandStatus, BifrostError> {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
@@ -409,6 +447,7 @@ fn command_status_with_timeout(
         .spawn()
         .map_err(BifrostError::Io)?;
     let deadline = Instant::now() + timeout;
+    let mut next_heartbeat = Instant::now() + heartbeat;
 
     loop {
         match child.try_wait() {
@@ -434,7 +473,13 @@ fn command_status_with_timeout(
                 );
                 return Ok(TimedCommandStatus::TimedOut);
             }
-            Ok(None) => thread::sleep(Duration::from_millis(25)),
+            Ok(None) => {
+                if Instant::now() >= next_heartbeat {
+                    super::upgrade_background::report_installing();
+                    next_heartbeat = Instant::now() + heartbeat;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
             Err(error) => return Err(BifrostError::Io(error)),
         }
     }
@@ -444,6 +489,20 @@ fn command_output_with_timeout(
     program: &Path,
     args: &[String],
     timeout: Duration,
+) -> Result<TimedCommandOutput, BifrostError> {
+    command_output_with_timeout_and_heartbeat(
+        program,
+        args,
+        timeout,
+        Duration::from_secs(UPGRADE_CHILD_PROGRESS_HEARTBEAT_SECS),
+    )
+}
+
+fn command_output_with_timeout_and_heartbeat(
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+    heartbeat: Duration,
 ) -> Result<TimedCommandOutput, BifrostError> {
     let mut stdout_file =
         tempfile::tempfile().map_err(|e| BifrostError::Io(std::io::Error::other(e)))?;
@@ -465,6 +524,7 @@ fn command_output_with_timeout(
         .spawn()
         .map_err(BifrostError::Io)?;
     let deadline = Instant::now() + timeout;
+    let mut next_heartbeat = Instant::now() + heartbeat;
     let status;
 
     loop {
@@ -483,7 +543,13 @@ fn command_output_with_timeout(
                 status = TimedCommandStatus::TimedOut;
                 break;
             }
-            Ok(None) => thread::sleep(Duration::from_millis(25)),
+            Ok(None) => {
+                if Instant::now() >= next_heartbeat {
+                    super::upgrade_background::report_installing();
+                    next_heartbeat = Instant::now() + heartbeat;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
             Err(error) => return Err(BifrostError::Io(error)),
         }
     }
@@ -500,6 +566,40 @@ fn read_temp_output(file: &mut fs::File) -> String {
     let _ = file.seek(SeekFrom::Start(0));
     let _ = file.read_to_string(&mut output);
     output
+}
+
+fn verify_installed_cli_target_version(
+    executable: &Path,
+    target_version: &str,
+) -> Result<(), BifrostError> {
+    if upgrade_test_overrides_enabled() && env::var_os("BIFROST_UPGRADE_TEST_ARCHIVE").is_some() {
+        return Ok(());
+    }
+    let output = command_output_with_timeout(
+        executable,
+        &["--version".to_string()],
+        Duration::from_secs(BINARY_VERIFY_TIMEOUT_SECS),
+    )?;
+    if output.status != TimedCommandStatus::Success {
+        return Err(BifrostError::Config(format!(
+            "installed CLI version verification failed: {}",
+            summarize_command_output(&output)
+        )));
+    }
+    let normalized_target = target_version.trim().trim_start_matches('v');
+    if output
+        .stdout
+        .split_whitespace()
+        .any(|part| part.trim().trim_start_matches('v') == normalized_target)
+    {
+        return Ok(());
+    }
+    Err(BifrostError::Config(format!(
+        "CLI install command reported success but {} reports `{}` instead of target v{}",
+        executable.display(),
+        output.stdout.trim(),
+        normalized_target
+    )))
 }
 
 fn verify_binary(path: &Path) -> bool {
@@ -1259,44 +1359,53 @@ const HOMEBREW_FORMULA_NAME: &str = "bifrost-proxy/bifrost/bifrost";
 fn upgrade_via_homebrew(target_version: &str) -> Result<(), BifrostError> {
     println!("{}", "Refreshing Homebrew tap...".bright_cyan());
 
-    let output = Command::new("brew")
-        .args(["--repository", "bifrost-proxy/bifrost"])
-        .output();
+    let output = command_output_with_timeout(
+        Path::new("brew"),
+        &[
+            "--repository".to_string(),
+            "bifrost-proxy/bifrost".to_string(),
+        ],
+        Duration::from_secs(HOMEBREW_METADATA_TIMEOUT_SECS),
+    );
 
     if let Ok(output) = output {
-        if output.status.success() {
-            if let Ok(tap_path) = String::from_utf8(output.stdout) {
-                let tap_path = tap_path.trim();
-                if !tap_path.is_empty() {
-                    let _ = Command::new("git")
-                        .args(["-C", tap_path, "fetch", "--all", "-q"])
-                        .status();
-                    let _ = Command::new("git")
-                        .args(["-C", tap_path, "reset", "--hard", "origin/main", "-q"])
-                        .status();
-                }
+        if output.status == TimedCommandStatus::Success {
+            let tap_path = output.stdout.trim();
+            if !tap_path.is_empty() {
+                let _ = command_status_with_timeout(
+                    Path::new("git"),
+                    &["-C", tap_path, "fetch", "--all", "-q"],
+                    Duration::from_secs(HOMEBREW_METADATA_TIMEOUT_SECS),
+                );
+                let _ = command_status_with_timeout(
+                    Path::new("git"),
+                    &["-C", tap_path, "reset", "--hard", "origin/main", "-q"],
+                    Duration::from_secs(HOMEBREW_METADATA_TIMEOUT_SECS),
+                );
             }
         }
     }
 
     println!("{}", "Upgrading via Homebrew...".bright_cyan());
 
-    let status = Command::new("brew")
-        .args(["reinstall", HOMEBREW_FORMULA_NAME])
-        .status();
+    let status = command_status_with_timeout(
+        Path::new("brew"),
+        &["reinstall", HOMEBREW_FORMULA_NAME],
+        Duration::from_secs(HOMEBREW_COMMAND_TIMEOUT_SECS),
+    );
 
     let success = match status {
-        Ok(s) if s.success() => true,
+        Ok(TimedCommandStatus::Success) => true,
         _ => {
             println!(
                 "{}",
                 "Standard install failed, trying --build-from-source...".bright_yellow()
             );
-            let fallback_status = Command::new("brew")
-                .args(["reinstall", "--build-from-source", HOMEBREW_FORMULA_NAME])
-                .status()
-                .map_err(BifrostError::Io)?;
-            fallback_status.success()
+            command_status_with_timeout(
+                Path::new("brew"),
+                &["reinstall", "--build-from-source", HOMEBREW_FORMULA_NAME],
+                Duration::from_secs(HOMEBREW_COMMAND_TIMEOUT_SECS),
+            )? == TimedCommandStatus::Success
         }
     };
 
@@ -1307,47 +1416,50 @@ fn upgrade_via_homebrew(target_version: &str) -> Result<(), BifrostError> {
         )));
     }
 
-    let output = Command::new("brew")
-        .args(["info", "--json=v2", HOMEBREW_FORMULA_NAME])
-        .output()
-        .map_err(BifrostError::Io)?;
+    let output = command_output_with_timeout(
+        Path::new("brew"),
+        &[
+            "info".to_string(),
+            "--json=v2".to_string(),
+            HOMEBREW_FORMULA_NAME.to_string(),
+        ],
+        Duration::from_secs(HOMEBREW_METADATA_TIMEOUT_SECS),
+    )?;
 
-    if output.status.success() {
-        if let Ok(json_str) = String::from_utf8(output.stdout) {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                if let Some(installed) = json["formulae"]
-                    .get(0)
-                    .and_then(|f| f["installed"].as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|i| i["version"].as_str())
-                {
-                    if installed == target_version {
-                        println!(
-                            "{}",
-                            "✓ Upgrade completed successfully!".bright_green().bold()
-                        );
-                        return Ok(());
-                    } else {
-                        println!(
-                            "{}",
-                            format!(
-                                "⚠ Installed version ({}) doesn't match target version ({}).",
-                                installed, target_version
-                            )
-                            .bright_yellow()
-                        );
-                        println!(
+    if output.status == TimedCommandStatus::Success {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&output.stdout) {
+            if let Some(installed) = json["formulae"]
+                .get(0)
+                .and_then(|f| f["installed"].as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|i| i["version"].as_str())
+            {
+                if installed == target_version {
+                    println!(
+                        "{}",
+                        "✓ Upgrade completed successfully!".bright_green().bold()
+                    );
+                    return Ok(());
+                } else {
+                    println!(
+                        "{}",
+                        format!(
+                            "⚠ Installed version ({}) doesn't match target version ({}).",
+                            installed, target_version
+                        )
+                        .bright_yellow()
+                    );
+                    println!(
                             "{}",
                             "  The Homebrew tap may not be updated yet. Please try again later or install manually:"
                                 .bright_yellow()
                         );
-                        println!(
+                    println!(
                             "  {}",
                             "curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash"
                                 .bright_cyan()
                         );
-                        return Ok(());
-                    }
+                    return Ok(());
                 }
             }
         }
@@ -1362,30 +1474,6 @@ fn upgrade_via_homebrew(target_version: &str) -> Result<(), BifrostError> {
         "  Run `bifrost --version` to confirm the upgrade succeeded.".dimmed()
     );
     Ok(())
-}
-
-fn upgrade_via_script() -> Result<(), BifrostError> {
-    println!("{}", "Upgrading via install script...".bright_cyan());
-
-    let status = Command::new("sh")
-        .args([
-            "-c",
-            "curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash",
-        ])
-        .status()
-        .map_err(BifrostError::Io)?;
-
-    if status.success() {
-        println!(
-            "{}",
-            "✓ Upgrade completed successfully!".bright_green().bold()
-        );
-        Ok(())
-    } else {
-        Err(BifrostError::Network(
-            "Install script failed — check network connection and try again".to_string(),
-        ))
-    }
 }
 
 fn download_and_install(
@@ -1657,16 +1745,20 @@ fn upgrade_manual(
 
 pub(crate) fn handle_background_upgrade(
     restart_hint: Option<RunningProxyHint>,
+    target_version: Option<String>,
 ) -> Result<(), BifrostError> {
     prepare_running_proxy_marker(restart_hint)?;
-    handle_upgrade_inner(UpgradeBehavior::background())
+    handle_upgrade_inner(UpgradeBehavior::background(), target_version)
 }
 
 pub fn handle_upgrade(_yes: bool) -> Result<(), BifrostError> {
-    handle_upgrade_inner(UpgradeBehavior::interactive(
-        env_flag(DESKTOP_MANAGED_SKIP_APP_ENV),
-        env_flag(DESKTOP_MANAGED_SKIP_RESTART_ENV),
-    ))
+    handle_upgrade_inner(
+        UpgradeBehavior::interactive(
+            env_flag(DESKTOP_MANAGED_SKIP_APP_ENV),
+            env_flag(DESKTOP_MANAGED_SKIP_RESTART_ENV),
+        ),
+        env::var(DESKTOP_MANAGED_TARGET_ENV).ok(),
+    )
 }
 
 fn env_flag(name: &str) -> bool {
@@ -1675,7 +1767,10 @@ fn env_flag(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn handle_upgrade_inner(behavior: UpgradeBehavior) -> Result<(), BifrostError> {
+fn handle_upgrade_inner(
+    behavior: UpgradeBehavior,
+    pinned_target: Option<String>,
+) -> Result<(), BifrostError> {
     let current_version = env!("CARGO_PKG_VERSION");
 
     println!(
@@ -1686,7 +1781,13 @@ fn handle_upgrade_inner(behavior: UpgradeBehavior) -> Result<(), BifrostError> {
 
     let test_latest = test_upgrade_latest_version_override();
 
-    let cache = if let Some(cache) = test_latest {
+    let cache = if let Some(target) = pinned_target {
+        VersionCache {
+            latest_version: target,
+            release_highlights: Vec::new(),
+            checked_at: chrono::Utc::now(),
+        }
+    } else if let Some(cache) = test_latest {
         cache
     } else {
         match get_latest_version_fresh_with_diagnostics() {
@@ -1703,6 +1804,11 @@ fn handle_upgrade_inner(behavior: UpgradeBehavior) -> Result<(), BifrostError> {
                     );
                     cached
                 } else {
+                    if behavior.require_desktop_app_update {
+                        return Err(BifrostError::Config(format!(
+                            "could not resolve the target release for background upgrade: {diagnostic}"
+                        )));
+                    }
                     println!(
                         "{}",
                         format!("⚠ Could not check for updates: {}", diagnostic).bright_yellow()
@@ -1766,9 +1872,19 @@ fn handle_upgrade_inner(behavior: UpgradeBehavior) -> Result<(), BifrostError> {
         InstallMethod::Homebrew => {
             upgrade_via_homebrew(&cache.latest_version).map(|()| UpgradeInstallOutcome::Installed)
         }
-        InstallMethod::Script => upgrade_via_script().map(|()| UpgradeInstallOutcome::Installed),
+        // Script installs live in a stable user-owned path. Use the built-in
+        // target-aware atomic installer here instead of re-running the online
+        // install script, which always follows a fresh `latest` and could drift
+        // away from the App target selected by this upgrade transaction.
+        InstallMethod::Script => upgrade_manual(&restart_executable, &cache.latest_version),
         InstallMethod::Manual(path) => upgrade_manual(&path, &cache.latest_version),
         InstallMethod::Unknown => {
+            if behavior.require_desktop_app_update {
+                return Err(BifrostError::Config(
+                    "could not detect the CLI installation method for background upgrade"
+                        .to_string(),
+                ));
+            }
             println!(
                 "{}",
                 "⚠ Could not detect installation method.".bright_yellow()
@@ -1791,11 +1907,18 @@ fn handle_upgrade_inner(behavior: UpgradeBehavior) -> Result<(), BifrostError> {
 
     match upgrade_outcome {
         UpgradeInstallOutcome::Installed => {
+            verify_installed_cli_target_version(&restart_executable, &cache.latest_version)?;
             install_skills_after_upgrade_best_effort(&restart_executable);
             finish_installed_upgrade(&restart_executable, &cache.latest_version, behavior)?;
         }
         #[cfg(windows)]
         UpgradeInstallOutcome::DeferredWindows(deferred_install) => {
+            // The helper cannot replace the running CLI until this process
+            // exits, but the installed App can and must be brought to the same
+            // pinned target before we schedule that handoff. Otherwise Windows
+            // would report a completed CLI update while silently leaving the
+            // App on the old version.
+            update_desktop_companion(&restart_executable, &cache.latest_version, behavior)?;
             maybe_restart_running_proxy_after_windows_deferred_install(
                 deferred_install,
                 behavior.restart_proxy,
@@ -2221,11 +2344,15 @@ function Wait-TargetPathWritable([string]$Path, [int]$TimeoutSeconds) {
       }
       return
     } catch {
+      Write-UpgradeProgress "restarting" "Waiting for the old CLI to exit..." $null
       Start-Sleep -Milliseconds 500
     }
   }
   throw "target binary is still locked: $Path"
 }
+
+$backupPath = "$TargetPath.upgrade-backup"
+$replacementVerified = $false
 
 try {
   Write-UpgradeLog "waiting for parent pid $ParentPid"
@@ -2241,11 +2368,33 @@ try {
   Write-UpgradeLog "waiting for target binary to become writable"
   Wait-TargetPathWritable $TargetPath 120
 
+  if (Test-Path -LiteralPath $backupPath) {
+    Write-UpgradeLog "recovering interrupted replacement from $backupPath"
+    if (Test-Path -LiteralPath $TargetPath) {
+      Remove-Item -LiteralPath $TargetPath -Force
+    }
+    Move-Item -LiteralPath $backupPath -Destination $TargetPath -Force
+  }
+
   Write-UpgradeLog "replacing $TargetPath"
   if (Test-Path -LiteralPath $TargetPath) {
+    Copy-Item -LiteralPath $TargetPath -Destination $backupPath -Force
     Remove-Item -LiteralPath $TargetPath -Force
   }
   Move-Item -LiteralPath $PendingPath -Destination $TargetPath -Force
+
+  $versionOutput = ((& $TargetPath --version 2>&1) | Out-String).Trim()
+  if ($LASTEXITCODE -ne 0) {
+    throw "installed CLI version check exited with code $LASTEXITCODE"
+  }
+  if ($TargetVersion) {
+    $normalizedTarget = $TargetVersion.TrimStart("v")
+    $targetPattern = "(^|\s)v?$([Regex]::Escape($normalizedTarget))(\s|$)"
+    if ($versionOutput -notmatch $targetPattern) {
+      throw "installed CLI reports '$versionOutput' instead of target v$normalizedTarget"
+    }
+  }
+  $replacementVerified = $true
 
   Write-UpgradeLog "installing Bifrost skills"
   $skillChild = Start-Process -FilePath $TargetPath -ArgumentList @("install-skill", "--tool", "all", "-y") -NoNewWindow -PassThru -Wait
@@ -2265,6 +2414,7 @@ try {
   }
 
   Set-Content -LiteralPath $ReadyPath -Value "ok"
+  Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
   Write-UpgradeProgress "completed" "Upgrade complete" $null
   Write-UpgradeLog "done"
   Remove-Item -LiteralPath $RestartArgsPath -Force -ErrorAction SilentlyContinue
@@ -2272,6 +2422,17 @@ try {
   exit 0
 } catch {
   $errorMessage = $_.Exception.Message
+  if (-not $replacementVerified -and (Test-Path -LiteralPath $backupPath)) {
+    try {
+      if (Test-Path -LiteralPath $TargetPath) {
+        Remove-Item -LiteralPath $TargetPath -Force
+      }
+      Move-Item -LiteralPath $backupPath -Destination $TargetPath -Force
+      Write-UpgradeLog "restored previous CLI after replacement failure"
+    } catch {
+      Write-UpgradeLog "ERROR: failed to restore previous CLI: $($_.Exception.Message)"
+    }
+  }
   Write-UpgradeProgress "failed" "Upgrade failed" $errorMessage
   Write-UpgradeLog "ERROR: $errorMessage"
   exit 1
@@ -2471,6 +2632,67 @@ mod tests {
             | InstallMethod::Manual(_)
             | InstallMethod::Unknown => {}
         }
+    }
+
+    #[test]
+    fn homebrew_restart_uses_stable_launcher_outside_versioned_cellar() {
+        assert_eq!(
+            homebrew_launcher_for_executable(Path::new(
+                "/opt/homebrew/Cellar/bifrost/0.0.155/bin/bifrost"
+            )),
+            PathBuf::from("/opt/homebrew/bin/bifrost")
+        );
+        assert_eq!(
+            homebrew_launcher_for_executable(Path::new(
+                "/usr/local/Cellar/bifrost/0.0.155/bin/bifrost"
+            )),
+            PathBuf::from("/usr/local/bin/bifrost")
+        );
+        assert_eq!(
+            homebrew_launcher_for_executable(Path::new(
+                "/home/linuxbrew/.linuxbrew/Cellar/bifrost/0.0.155/bin/bifrost"
+            )),
+            PathBuf::from("/home/linuxbrew/.linuxbrew/bin/bifrost")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn homebrew_upgrade_commands_are_bounded_and_verify_formula_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD_ENV: &str = "BIFROST_TEST_HOMEBREW_UPGRADE_CHILD";
+        if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+            let status = Command::new(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "commands::upgrade::tests::homebrew_upgrade_commands_are_bounded_and_verify_formula_target",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .status()
+                .expect("spawn isolated Homebrew upgrade test");
+            assert!(status.success());
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let brew = dir.path().join("brew");
+        let git = dir.path().join("git");
+        fs::write(
+            &brew,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  --repository) echo '{}' ;;\n  reinstall) exit 0 ;;\n  info) echo '{{\"formulae\":[{{\"installed\":[{{\"version\":\"0.0.156\"}}]}}]}}' ;;\nesac\n",
+                dir.path().display()
+            ),
+        )
+        .unwrap();
+        fs::write(&git, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&brew, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("PATH", dir.path());
+
+        upgrade_via_homebrew("0.0.156").expect("fake Homebrew target verified");
     }
 
     #[test]
@@ -2866,18 +3088,29 @@ mod tests {
         assert!(recovered.started_at_ms.is_none());
         assert!(recovered.binary_path.is_none());
 
-        assert!(handle_background_upgrade(Some(RunningProxyHint {
-            pid: i32::MAX as u32,
-            port: 1,
-        }))
+        assert!(handle_background_upgrade(
+            Some(RunningProxyHint {
+                pid: i32::MAX as u32,
+                port: 1,
+            }),
+            None,
+        )
         .is_err());
     }
 
     #[test]
     fn windows_deferred_install_waits_for_tray_unlock_and_reports_terminal_progress() {
         let source = include_str!("upgrade.rs");
+        assert!(source.contains(
+            "update_desktop_companion(&restart_executable, &cache.latest_version, behavior)?;"
+        ));
         assert!(source.contains("stop_tray_helper_before_windows_deferred_install(&data_dir);"));
         assert!(source.contains("Wait-TargetPathWritable $TargetPath 120"));
+        assert!(
+            source.contains("Copy-Item -LiteralPath $TargetPath -Destination $backupPath -Force")
+        );
+        assert!(source.contains("installed CLI reports '$versionOutput' instead of target"));
+        assert!(source.contains("restored previous CLI after replacement failure"));
         assert!(source.contains("[System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)"));
         assert!(source.contains("Get-Content -LiteralPath $ProgressPath -Raw -Encoding UTF8"));
         assert!(source.contains("target_version = if ($TargetVersion)"));
@@ -2891,12 +3124,12 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_via_script_source_keeps_terminal_output_visible() {
+    fn script_installs_use_the_target_aware_atomic_upgrade_path() {
         let source = include_str!("upgrade.rs");
 
-        assert!(source.contains("Command::new(\"sh\")"));
-        assert!(source.contains(".status()"));
-        assert!(!source.contains("let output = Command::new(\"sh\")"));
+        assert!(source.contains(
+            "InstallMethod::Script => upgrade_manual(&restart_executable, &cache.latest_version)"
+        ));
     }
 
     #[test]
@@ -3400,6 +3633,27 @@ mod tests {
             .unwrap(),
             TimedCommandStatus::Failure
         );
+
+        assert_eq!(
+            command_status_with_timeout_and_heartbeat(
+                Path::new("/bin/sh"),
+                &["-c", "sleep 0.08"],
+                Duration::from_secs(1),
+                Duration::from_millis(10),
+            )
+            .unwrap(),
+            TimedCommandStatus::Success
+        );
+
+        let output = command_output_with_timeout_and_heartbeat(
+            Path::new("/bin/sh"),
+            &["-c".to_string(), "sleep 0.08; echo ready".to_string()],
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+        )
+        .unwrap();
+        assert_eq!(output.status, TimedCommandStatus::Success);
+        assert_eq!(output.stdout.trim(), "ready");
     }
 
     #[test]
@@ -3418,6 +3672,31 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "timeout helper should return promptly"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn installed_cli_version_must_match_the_pinned_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+        let previous_archive = std::env::var_os("BIFROST_UPGRADE_TEST_ARCHIVE");
+        std::env::remove_var("BIFROST_UPGRADE_TEST_ARCHIVE");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let matching = temp.path().join("matching");
+        let stale = temp.path().join("stale");
+        fs::write(&matching, "#!/bin/sh\necho 'bifrost 0.0.156'\n").unwrap();
+        fs::write(&stale, "#!/bin/sh\necho 'bifrost 0.0.155'\n").unwrap();
+        fs::set_permissions(&matching, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&stale, fs::Permissions::from_mode(0o755)).unwrap();
+
+        verify_installed_cli_target_version(&matching, "0.0.156")
+            .expect("matching installed CLI version");
+        assert!(verify_installed_cli_target_version(&stale, "0.0.156").is_err());
+
+        if let Some(value) = previous_archive {
+            std::env::set_var("BIFROST_UPGRADE_TEST_ARCHIVE", value);
+        }
     }
 
     #[test]

@@ -74,6 +74,9 @@ the new App, which would make every new App enter helper mode, exit, and open an
    `runtime.json` marker whose `pid` and `port` match that child. A health response from another
    process on the same port is not enough to complete managed startup.
 6. After the backend becomes ready, the marker is removed.
+7. The new App is the final terminal-progress owner: it rewrites progress to `Completed` only after
+   the managed core is ready; helper relaunch failure or managed-core startup failure rewrites it to
+   `Failed` while preserving the selected target/source for diagnosis and retry.
 
 Expired or invalid markers are removed and normal startup continues.
 
@@ -92,6 +95,8 @@ stateDiagram-v2
     MarkerCleared --> NormalRunning
 
     HandoffBootstrap --> NormalBootstrap: marker expired or invalid
+    PortReleased --> HandoffFailed: helper cannot open new App
+    NewCoreManaged --> HandoffFailed: managed core fails readiness
 ```
 
 ## Testable Contracts
@@ -102,6 +107,8 @@ stateDiagram-v2
 - Managed startup does not accept a healthy response from an unrelated process on the same port.
 - Managed startup only accepts readiness when `runtime.json` belongs to the child it just spawned.
 - Successful handoff startup clears the marker.
+- Successful handoff refreshes terminal progress only after the new managed core is ready.
+- Relaunch/open or managed-core startup failures persist `Failed` progress with the original target.
 - Relaunch helper waits for process/port release before opening the App.
 - The command that opens the new App explicitly removes all helper-only environment variables, for
   both macOS `.app` targets and direct executable targets.
@@ -118,3 +125,9 @@ stateDiagram-v2
 - If the old backend never exits, the helper eventually relaunches the App; the new App still sees
   the active marker and performs the no-reuse cleanup path.
 - The marker is best-effort local coordination, not a security boundary.
+- The macOS bundle installer stages and verifies the target before rename swapping it. If the
+  process is interrupted after moving the old bundle to its PID-scoped backup, the next attempt
+  restores that backup before staging again; it must never delete the only known-good App.
+- Windows deferred CLI replacement updates the installed App to the same pinned target first,
+  keeps an executable backup during replacement, verifies `bifrost --version`, and restores the
+  previous executable before publishing `failed` when replacement verification fails.

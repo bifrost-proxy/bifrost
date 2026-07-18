@@ -162,4 +162,44 @@ describe("useVersionStore upgrade polling", () => {
     expect(apiMocks.checkVersion).toHaveBeenCalledWith(true, "desktop");
     expect(apiMocks.startUpgrade).toHaveBeenCalledWith("desktop");
   });
+
+  it("does not report success when the desktop restart handoff fails", async () => {
+    runtimeMocks.desktopShell = true;
+    const invoke = vi.fn().mockRejectedValueOnce(new Error("helper spawn failed"));
+    Object.assign(window, {
+      __TAURI__: {
+        core: {
+          invoke,
+        },
+      },
+    });
+    useVersionStore.getState().stopPollUpgradeProgress();
+    useVersionStore = (await import("./useVersionStore")).useVersionStore;
+    useVersionStore.setState({ upgrading: true, upgradePhase: "restarting" });
+    apiMocks.getUpgradeProgress.mockResolvedValue({
+      phase: "completed",
+      percent: null,
+      message: "Desktop app update complete",
+      target_version: "0.0.105",
+      source: "desktop",
+      error: null,
+      updated_at: new Date().toISOString(),
+    });
+
+    useVersionStore.getState().pollUpgradeProgress();
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.waitFor(() => {
+      expect(useVersionStore.getState().upgradePhase).toBe("failed");
+    });
+
+    expect(useVersionStore.getState().upgradeError).toBe("helper spawn failed");
+    expect(window.location.reload).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem("bifrost-upgrade-reload-pending")).toBeNull();
+
+    invoke.mockResolvedValueOnce(undefined);
+    await useVersionStore.getState().startUpgrade();
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+    expect(apiMocks.startUpgrade).not.toHaveBeenCalled();
+    expect(useVersionStore.getState().upgradePhase).toBe("restarting");
+  });
 });

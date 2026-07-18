@@ -10,12 +10,14 @@
 //! upgrade has installed a sink, so the normal interactive CLI path is
 //! completely unaffected.
 
-use std::path::PathBuf;
+use std::fs::{File, OpenOptions};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use bifrost_core::upgrade_progress::{write_progress, UpgradePhase, UpgradeProgress};
 use bifrost_core::BifrostError;
+use fs2::FileExt;
 
 use super::upgrade::{
     download_progress_line, handle_background_upgrade, take_deferred_install_scheduled,
@@ -30,6 +32,7 @@ struct ProgressSink {
 }
 
 static SINK: OnceLock<Mutex<Option<ProgressSink>>> = OnceLock::new();
+const UPGRADE_LOCK_FILE_NAME: &str = "upgrade.lock";
 
 fn sink_slot() -> &'static Mutex<Option<ProgressSink>> {
     SINK.get_or_init(|| Mutex::new(None))
@@ -43,6 +46,22 @@ fn install_sink(sink: ProgressSink) {
 
 fn take_sink() -> Option<ProgressSink> {
     sink_slot().lock().ok().and_then(|mut slot| slot.take())
+}
+
+fn try_acquire_upgrade_lock(data_dir: &Path) -> Result<Option<File>, BifrostError> {
+    std::fs::create_dir_all(data_dir).map_err(BifrostError::Io)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(data_dir.join(UPGRADE_LOCK_FILE_NAME))
+        .map_err(BifrostError::Io)?;
+    match lock.try_lock_exclusive() {
+        Ok(()) => Ok(Some(lock)),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(BifrostError::Io(error)),
+    }
 }
 
 /// Emit a progress record for the active sink (no-op when none is installed).
@@ -85,7 +104,8 @@ pub(crate) fn report_restarting() {
 
 /// Run an unattended upgrade, reporting progress to the shared file channel.
 ///
-/// `target` is informational (the engine always resolves the latest release);
+/// `target` pins the release selected by the initiating version check so CLI
+/// and App cannot diverge if `latest` changes while the upgrade is running.
 /// `source` records who initiated the upgrade (`"tray"` / `"admin"` / `"cli"`).
 pub fn handle_upgrade_background(
     target: Option<String>,
@@ -93,13 +113,14 @@ pub fn handle_upgrade_background(
     running_proxy_pid: Option<u32>,
     running_proxy_port: Option<u16>,
 ) {
+    let engine_target = target.clone();
     handle_upgrade_background_with(
         target,
         source,
         running_proxy_pid,
         running_proxy_port,
         crate::config::get_bifrost_dir(),
-        handle_background_upgrade,
+        move |restart_hint| handle_background_upgrade(restart_hint, engine_target),
     );
 }
 
@@ -138,6 +159,19 @@ fn handle_upgrade_background_with(
         Ok(dir) => dir,
         Err(error) => {
             tracing::error!(error = %error, "background upgrade: cannot resolve data dir");
+            return;
+        }
+    };
+    let _upgrade_lock = match try_acquire_upgrade_lock(&data_dir) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => {
+            tracing::warn!(
+                "background upgrade: another process owns the cross-process upgrade lock"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "background upgrade: cannot acquire upgrade lock");
             return;
         }
     };
@@ -271,6 +305,25 @@ mod tests {
         report_installing();
         report_download(1, Some(2), Instant::now());
         report_restarting();
+    }
+
+    #[test]
+    fn cross_process_upgrade_lock_allows_only_one_owner() {
+        let dir = temp_dir();
+        let first = try_acquire_upgrade_lock(&dir)
+            .expect("acquire first lock")
+            .expect("first owner");
+        assert!(
+            try_acquire_upgrade_lock(&dir)
+                .expect("contended lock is not an IO error")
+                .is_none(),
+            "a second updater must not install or restart concurrently"
+        );
+        drop(first);
+        assert!(try_acquire_upgrade_lock(&dir)
+            .expect("reacquire released lock")
+            .is_some());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

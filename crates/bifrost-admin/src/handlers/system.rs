@@ -1,6 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -30,6 +31,11 @@ use crate::state::SharedAdminState;
 
 const DESKTOP_INSTALL_SKILL_TIMEOUT: Duration = Duration::from_secs(20);
 const DESKTOP_CORE_ENV: &str = "BIFROST_DESKTOP_CORE";
+
+fn upgrade_start_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 pub async fn handle_system(
     req: Request<Incoming>,
@@ -233,7 +239,7 @@ async fn check_version(state: SharedAdminState, query: Option<&str>) -> Response
         .unwrap_or(false);
     let channel = parse_upgrade_channel(query);
 
-    let response = check_version_for_channel(state, force_refresh, channel).await;
+    let response = check_unified_version_for_channel(state, force_refresh, channel).await;
     json_response(&response)
 }
 
@@ -244,17 +250,20 @@ async fn check_version(state: SharedAdminState, query: Option<&str>) -> Response
 /// writes an initial `Checking` progress record, spawns a detached
 /// `bifrost self-update --source admin` subprocess and returns `202 Accepted`
 /// with the current progress snapshot. The server process owns channel
-/// selection: the UI channel selects which component version is compared, but
-/// a desktop-owned core always runs the App orchestrator and a CLI-owned core
-/// runs `self-update`, regardless of a conflicting UI query.
+/// selection: the runtime owner selects both the component version gate and the
+/// orchestrator, so a stale/conflicting UI query cannot start the wrong flow.
 ///
 /// The upgrade is never executed inside the admin process: a CLI-owned core is
 /// stopped and restarted by the detached subprocess, while a desktop-owned core
 /// remains alive until the App handoff replaces it. The progress file survives
 /// either handoff so the Web UI can read the terminal state after reconnecting.
 async fn start_upgrade(state: SharedAdminState, query: Option<&str>) -> Response<BoxBody> {
+    // Serialize check -> claim -> spawn. Without this process-local critical
+    // section, two simultaneous Web UI POSTs can both observe an idle progress
+    // file and launch competing installers/restarts.
+    let _start_guard = upgrade_start_lock().lock().await;
     let dir = data_dir();
-    let (requested_channel, channel, running_proxy) = upgrade_request_plan(
+    let (_requested_channel, channel, running_proxy) = upgrade_request_plan(
         query,
         desktop_core_env_enabled(std::env::var_os(DESKTOP_CORE_ENV)),
         std::process::id(),
@@ -268,23 +277,27 @@ async fn start_upgrade(state: SharedAdminState, query: Option<&str>) -> Response
     }
 
     // Confirm there is actually a newer version to upgrade to.
-    let version = check_version_for_channel(state, false, requested_channel).await;
+    let version = check_unified_version_for_channel(state, false, channel).await;
     if !version.has_update {
         return error_response(StatusCode::CONFLICT, "No update available");
     }
-    let target_version = version.latest_version.clone();
+    let target_version = match required_upgrade_target(&version) {
+        Ok(target) => target,
+        Err(message) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, message),
+    };
 
     // Seed the channel so the Web UI sees movement immediately, before the
     // subprocess has had a chance to start writing.
     let initial = UpgradeProgress::new(UpgradePhase::Checking, "Checking for updates…")
-        .with_target(target_version.clone())
+        .with_target(Some(target_version.clone()))
         .with_source(Some(channel.progress_source().to_string()));
     write_progress(&dir, &initial);
 
-    if let Err(error) = spawn_upgrade_process(channel, target_version.as_deref(), running_proxy) {
+    if let Err(error) = spawn_upgrade_process(channel, Some(target_version.as_str()), running_proxy)
+    {
         warn!(error = %error, "[SYSTEM] failed to spawn self-update subprocess");
         let failed = UpgradeProgress::new(UpgradePhase::Failed, "Upgrade failed to start")
-            .with_target(target_version)
+            .with_target(Some(target_version))
             .with_source(Some(channel.progress_source().to_string()))
             .with_error(Some(error.to_string()));
         write_progress(&dir, &failed);
@@ -666,6 +679,41 @@ async fn check_version_for_channel(
     state.version_checker.check(force_refresh).await
 }
 
+async fn check_unified_version_for_channel(
+    state: SharedAdminState,
+    force_refresh: bool,
+    primary_channel: UpgradeChannel,
+) -> crate::VersionCheckResponse {
+    let primary = check_version_for_channel(state.clone(), force_refresh, primary_channel).await;
+    let companion_channel = match primary_channel {
+        UpgradeChannel::Cli => UpgradeChannel::Desktop,
+        UpgradeChannel::Desktop => UpgradeChannel::Cli,
+    };
+    let companion = check_version_for_channel(state, false, companion_channel).await;
+    merge_companion_update(primary, companion)
+}
+
+fn merge_companion_update(
+    mut primary: crate::VersionCheckResponse,
+    companion: crate::VersionCheckResponse,
+) -> crate::VersionCheckResponse {
+    if !primary.has_update && companion.has_update {
+        primary.has_update = true;
+        primary.latest_version = companion.latest_version;
+        primary.release_highlights = companion.release_highlights;
+        primary.release_url = companion.release_url;
+        primary.checked_at = companion.checked_at;
+    }
+    primary
+}
+
+fn required_upgrade_target(version: &crate::VersionCheckResponse) -> Result<String, &'static str> {
+    version
+        .latest_version
+        .clone()
+        .ok_or("Update metadata did not include a target version")
+}
+
 fn desktop_app_version_for_version_check() -> Option<String> {
     desktop_app_install_candidates()
         .into_iter()
@@ -916,12 +964,60 @@ fn upgrade_log_stdio() -> Stdio {
 mod tests {
     use super::{
         build_cli_install_status, desktop_core_env_enabled, effective_upgrade_channel,
-        install_binary_atomically, install_cli_from_current_exe, normalize_progress,
-        parse_upgrade_channel, spawn_upgrade_process, upgrade_process_args, upgrade_request_plan,
-        CliInstallRequest, UpgradeChannel,
+        install_binary_atomically, install_cli_from_current_exe, merge_companion_update,
+        normalize_progress, parse_upgrade_channel, required_upgrade_target, spawn_upgrade_process,
+        upgrade_process_args, upgrade_request_plan, CliInstallRequest, UpgradeChannel,
     };
     use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS};
     use chrono::Utc;
+
+    fn version_response(
+        current: &str,
+        latest: &str,
+        has_update: bool,
+    ) -> crate::VersionCheckResponse {
+        crate::VersionCheckResponse {
+            has_update,
+            current_version: current.to_string(),
+            latest_version: Some(latest.to_string()),
+            release_highlights: vec![format!("release {latest}")],
+            release_url: Some(format!("https://example.test/v{latest}")),
+            checked_at: Some("2026-07-18T00:00:00Z".to_string()),
+        }
+    }
+
+    #[test]
+    fn companion_version_drift_keeps_the_unified_update_available() {
+        let primary = version_response("0.0.156", "0.0.156", false);
+        let companion = version_response("0.0.155", "0.0.156", true);
+        let merged = merge_companion_update(primary, companion);
+        assert!(merged.has_update);
+        assert_eq!(merged.current_version, "0.0.156");
+        assert_eq!(merged.latest_version.as_deref(), Some("0.0.156"));
+
+        let primary_update = version_response("0.0.154", "0.0.156", true);
+        let companion_update = version_response("0.0.155", "0.0.157", true);
+        assert_eq!(
+            merge_companion_update(primary_update, companion_update)
+                .latest_version
+                .as_deref(),
+            Some("0.0.156"),
+            "the primary target remains pinned when both components need an update"
+        );
+    }
+
+    #[test]
+    fn upgrade_requires_a_pinned_target_in_release_metadata() {
+        let valid = version_response("0.0.155", "0.0.156", true);
+        assert_eq!(required_upgrade_target(&valid).as_deref(), Ok("0.0.156"));
+
+        let mut missing = valid;
+        missing.latest_version = None;
+        assert_eq!(
+            required_upgrade_target(&missing),
+            Err("Update metadata did not include a target version")
+        );
+    }
 
     #[test]
     fn stale_active_progress_is_normalized_to_failed() {

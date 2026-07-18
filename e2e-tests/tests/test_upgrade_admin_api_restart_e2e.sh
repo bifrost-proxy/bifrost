@@ -272,9 +272,32 @@ test_admin_api_upgrade_restarts_daemon_with_new_binary() {
         return 1
     }
 
-    # Drive the NEW feature path: POST /api/system/upgrade.
-    local upgrade_resp phase source
-    upgrade_resp="$(admin_curl POST /api/system/upgrade)"
+    # Drive two simultaneous Web UI clicks. Exactly one request may claim and
+    # spawn the updater; the other must observe active progress and return 409.
+    local response_a="$TEST_ROOT/upgrade-a.json" response_b="$TEST_ROOT/upgrade-b.json"
+    local code_a_file="$TEST_ROOT/upgrade-a.code" code_b_file="$TEST_ROOT/upgrade-b.code"
+    env NO_PROXY='*' no_proxy='*' curl -sS -X POST --connect-timeout 2 --max-time 15 \
+        -o "$response_a" -w '%{http_code}' \
+        "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/system/upgrade" >"$code_a_file" &
+    local post_a_pid=$!
+    env NO_PROXY='*' no_proxy='*' curl -sS -X POST --connect-timeout 2 --max-time 15 \
+        -o "$response_b" -w '%{http_code}' \
+        "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/system/upgrade" >"$code_b_file" &
+    local post_b_pid=$!
+    wait "$post_a_pid" || true
+    wait "$post_b_pid" || true
+    local code_a code_b upgrade_resp phase source
+    code_a="$(cat "$code_a_file" 2>/dev/null)"
+    code_b="$(cat "$code_b_file" 2>/dev/null)"
+    if [[ "$code_a $code_b" == "202 409" ]]; then
+        upgrade_resp="$(cat "$response_a")"
+    elif [[ "$code_a $code_b" == "409 202" ]]; then
+        upgrade_resp="$(cat "$response_b")"
+    else
+        _log_fail "concurrent POSTs have one upgrade owner" "202 + 409" "$code_a + $code_b"
+        return 1
+    fi
+    _log_pass "concurrent POSTs serialized to one updater (HTTP $code_a + $code_b)"
     phase="$(json_field "$upgrade_resp" phase)"
     source="$(json_field "$upgrade_resp" source)"
     if [[ "$phase" != "checking" && "$phase" != "downloading" ]]; then
@@ -282,7 +305,7 @@ test_admin_api_upgrade_restarts_daemon_with_new_binary() {
         return 1
     fi
     assert_equals "admin" "$source" "POST upgrade records source=admin" || return 1
-    _log_pass "POST /api/system/upgrade accepted (phase=$phase, source=admin)"
+    _log_pass "POST /api/system/upgrade accepted once (phase=$phase, source=admin)"
 
     # Poll progress across the restart window. The admin endpoint goes down while
     # the proxy restarts, then comes back and reads terminal state from the file.

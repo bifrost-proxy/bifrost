@@ -3,6 +3,9 @@
 mod native_launcher;
 mod open_requests;
 
+use bifrost_core::upgrade_progress::{
+    read_progress, write_progress, UpgradePhase, UpgradeProgress,
+};
 use bifrost_core::{cleanup_bifrost_log_dir, direct_blocking_reqwest_client_builder};
 use bifrost_storage::data_dir as shared_bifrost_data_dir;
 use bifrost_tls::{ensure_valid_ca, generate_root_ca, save_root_ca, CertInstaller, CertStatus};
@@ -1008,6 +1011,22 @@ fn clear_upgrade_relaunch_marker(data_dir: &Path) {
     }
 }
 
+fn write_desktop_upgrade_terminal_progress(
+    data_dir: &Path,
+    phase: UpgradePhase,
+    message: &str,
+    error: Option<String>,
+) {
+    let previous = read_progress(data_dir);
+    let progress = UpgradeProgress::new(phase, message)
+        .with_target(previous.target_version)
+        .with_source(Some(
+            previous.source.unwrap_or_else(|| "desktop".to_string()),
+        ))
+        .with_error(error);
+    write_progress(data_dir, &progress);
+}
+
 fn may_reuse_existing_backend(upgrade_relaunch: Option<&DesktopUpgradeRelaunchMarker>) -> bool {
     upgrade_relaunch.is_none()
 }
@@ -1106,10 +1125,16 @@ fn run_desktop_upgrade_relaunch_helper_from_env() -> bool {
                 child.id()
             ),
         ),
-        Err(error) => append_desktop_bootstrap_log(
-            &data_dir,
-            format!("desktop upgrade relaunch helper failed to open target: {error}"),
-        ),
+        Err(error) => {
+            let message = format!("desktop upgrade relaunch helper failed to open target: {error}");
+            append_desktop_bootstrap_log(&data_dir, &message);
+            write_desktop_upgrade_terminal_progress(
+                &data_dir,
+                UpgradePhase::Failed,
+                "Desktop app restart failed",
+                Some(message),
+            );
+        }
     }
 
     true
@@ -1835,6 +1860,12 @@ fn start_desktop_backend_now(app: &AppHandle, reason: &str) -> Result<DesktopRun
                 format!("desktop backend start succeeded; active_port={port} reason={reason}"),
             );
             if upgrade_relaunch.is_some() {
+                write_desktop_upgrade_terminal_progress(
+                    &state.data_dir,
+                    UpgradePhase::Completed,
+                    "Desktop app and core update complete",
+                    None,
+                );
                 clear_upgrade_relaunch_marker(&state.data_dir);
                 if let Ok(mut marker_guard) = state.upgrade_relaunch.lock() {
                     *marker_guard = None;
@@ -1850,6 +1881,14 @@ fn start_desktop_backend_now(app: &AppHandle, reason: &str) -> Result<DesktopRun
         }
         Err(error) => {
             let message = error.to_string();
+            if upgrade_relaunch.is_some() {
+                write_desktop_upgrade_terminal_progress(
+                    &state.data_dir,
+                    UpgradePhase::Failed,
+                    "Desktop app updated but the new core failed to start",
+                    Some(message.clone()),
+                );
+            }
             record_startup_error(&state, message.clone());
             try_start_native_handoff(app, "backend startup failed");
             Err(message)
@@ -3087,8 +3126,9 @@ mod tests {
         should_allow_multiple_instances, should_handoff_to_main, should_retry_backend_candidate,
         startup_deadline_disposition, stop_backend_before_restart, terminate_managed_backend,
         uses_borderless_desktop_chrome_for_platform, wait_for_backend, wait_for_child_exit,
-        write_upgrade_relaunch_marker, BackendState, BackendWaitFailureKind, DesktopConfig,
-        DesktopUpgradeRelaunchMarker, HostWindowCloseBehavior, StartupDeadlineDisposition,
+        write_desktop_upgrade_terminal_progress, write_upgrade_relaunch_marker, BackendState,
+        BackendWaitFailureKind, DesktopConfig, DesktopUpgradeRelaunchMarker,
+        HostWindowCloseBehavior, StartupDeadlineDisposition,
         DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
     };
     use bifrost_storage::data_dir as shared_bifrost_data_dir;
@@ -3469,6 +3509,33 @@ mod tests {
             ..fresh
         };
         assert!(!is_upgrade_relaunch_marker_active(&missing_port, 10_001));
+    }
+
+    #[test]
+    fn upgrade_handoff_terminal_progress_preserves_target_and_reports_failure() {
+        use bifrost_core::upgrade_progress::{
+            read_progress, write_progress, UpgradePhase, UpgradeProgress,
+        };
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        write_progress(
+            temp_dir.path(),
+            &UpgradeProgress::new(UpgradePhase::Restarting, "Waiting for desktop shell")
+                .with_target(Some("0.0.156".to_string()))
+                .with_source(Some("desktop".to_string())),
+        );
+        write_desktop_upgrade_terminal_progress(
+            temp_dir.path(),
+            UpgradePhase::Failed,
+            "New core failed",
+            Some("port still occupied".to_string()),
+        );
+
+        let progress = read_progress(temp_dir.path());
+        assert_eq!(progress.phase, UpgradePhase::Failed);
+        assert_eq!(progress.target_version.as_deref(), Some("0.0.156"));
+        assert_eq!(progress.source.as_deref(), Some("desktop"));
+        assert_eq!(progress.error.as_deref(), Some("port still occupied"));
     }
 
     #[test]

@@ -107,9 +107,14 @@ main() {
 
     cat >"$cli_dir/bifrost" <<'SH'
 #!/bin/sh
-printf 'args=%s\nskip_app=%s\nskip_restart=%s\n' "$*" \
+if [ "$1" = "--version" ]; then
+  printf 'bifrost %s\n' "$BIFROST_TEST_CLI_VERSION"
+  exit 0
+fi
+printf 'args=%s\nskip_app=%s\nskip_restart=%s\ntarget=%s\n' "$*" \
   "$BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_APP" \
   "$BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_RESTART" \
+  "$BIFROST_DESKTOP_MANAGED_UPGRADE_TARGET_VERSION" \
   >"$BIFROST_TEST_CLI_LOG"
 exit 0
 SH
@@ -132,6 +137,7 @@ PY
     BIFROST_APP_INSTALL_DIR="$app_dir" \
     BIFROST_APP_UPGRADE_TEST_PACKAGE="$package" \
     BIFROST_TEST_CLI_LOG="$cli_log" \
+    BIFROST_TEST_CLI_VERSION="$target_version" \
     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
     BIFROST_DISABLE_TRAY=1 \
     HOME="$home_dir" \
@@ -197,6 +203,9 @@ PY
     [[ "$cli_invocation" == *"skip_app=1"* && "$cli_invocation" == *"skip_restart=1"* ]] \
         && _log_pass "desktop-managed CLI child cannot recurse or restart App core" \
         || _log_fail "desktop-managed CLI child is isolated" "both ownership flags" "$cli_invocation"
+    [[ "$cli_invocation" == *"target=$target_version"* ]] \
+        && _log_pass "desktop-managed CLI child is pinned to the App target version" \
+        || _log_fail "desktop-managed CLI child target is pinned" "$target_version" "$cli_invocation"
 
     if kill -0 "$CORE_PID" 2>/dev/null && wait_admin_ready; then
         _log_pass "App-owned core remains alive until the Tauri handoff owns restart"

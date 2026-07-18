@@ -483,7 +483,7 @@ previous runtime settings."
         about = "Run an unattended background upgrade (used by tray/admin)"
     )]
     SelfUpdate {
-        #[arg(long, help = "Target version (informational; engine resolves latest)")]
+        #[arg(long, help = "Target version selected by the initiating version check")]
         target: Option<String>,
         #[arg(
             long,
