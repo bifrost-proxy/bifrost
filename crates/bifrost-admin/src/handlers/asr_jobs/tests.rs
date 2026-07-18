@@ -16,10 +16,32 @@ mod tests {
         _guard: crate::test_env::BifrostDataDirGuard,
     }
 
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
     impl EnvGuard {
         fn set_data_dir(path: &Path) -> Self {
             Self {
                 _guard: crate::test_env::BifrostDataDirGuard::set(path),
+            }
+        }
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.as_ref() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
             }
         }
     }
@@ -1556,8 +1578,11 @@ mod tests {
             .is_some_and(|reason| reason.contains("switching remaining chunks to fork_per_chunk isolation")));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_server_chunk_and_bisect_empty_results_initialize_structured_view() {
+        use std::os::unix::fs::PermissionsExt;
+
         let state = ServerRunnerState {
             server_url: "test-empty".to_string(),
             baseline_rtf: None,
@@ -1637,6 +1662,24 @@ mod tests {
         .await
         .unwrap();
         assert!(empty_chunks.transcription.structured.segments.is_empty());
+
+        let fake_bin = temp.path().join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        let fake_ffmpeg = fake_bin.join("ffmpeg");
+        std::fs::write(
+            &fake_ffmpeg,
+            "#!/bin/sh\ninput=''\noutput=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '-i' ]; then\n    shift\n    input=\"$1\"\n  fi\n  output=\"$1\"\n  shift\ndone\ncp \"$input\" \"$output\"\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&fake_ffmpeg).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_ffmpeg, permissions).unwrap();
+        let mut path_entries = vec![fake_bin];
+        if let Some(path) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&path));
+        }
+        let fake_path = std::env::join_paths(path_entries).unwrap();
+        let _path_guard = EnvVarGuard::set("PATH", &fake_path);
 
         let silent_wav = temp.path().join("silent-four-seconds.wav");
         std::fs::write(&silent_wav, make_wav(&vec![0i16; 4 * 16_000])).unwrap();
