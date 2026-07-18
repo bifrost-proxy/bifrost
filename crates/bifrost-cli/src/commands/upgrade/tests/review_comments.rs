@@ -89,15 +89,20 @@ fn upgrade_post_install_desktop_app_args_disable_cli_recursion() {
     );
     assert_eq!(handoff[4], "desktop");
     assert_eq!(
-        desktop_companion_mode(true, true),
+        desktop_companion_mode(true, true, true),
         DesktopCompanionMode::DesktopHandoff
     );
     assert_eq!(
-        desktop_companion_mode(true, false),
+        desktop_companion_mode(true, true, false),
+        DesktopCompanionMode::CallerManaged,
+        "a running desktop shell must not take over a CLI-owned core"
+    );
+    assert_eq!(
+        desktop_companion_mode(true, false, true),
         DesktopCompanionMode::CallerManaged
     );
     assert_eq!(
-        desktop_companion_mode(false, true),
+        desktop_companion_mode(false, true, true),
         DesktopCompanionMode::CallerManaged
     );
     assert!(windows_paths_match(

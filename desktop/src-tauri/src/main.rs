@@ -76,7 +76,9 @@ const DESKTOP_UPGRADE_RELAUNCH_MARKER_FILE: &str = "desktop-upgrade-relaunch.jso
 const DESKTOP_PENDING_INSTALL_FILE: &str = "desktop-upgrade-pending-install.json";
 const DESKTOP_UPGRADE_RELAUNCH_SCHEMA_VERSION: u8 = 1;
 const DESKTOP_PENDING_INSTALL_SCHEMA_VERSION: u8 = 1;
-const DESKTOP_UPGRADE_RELAUNCH_STALE_AFTER_MS: u64 = 10 * 60 * 1000;
+// Must exceed the Windows helper's 30s App wait + 30s core wait + 10m
+// installer timeout so a valid handoff cannot expire before relaunch.
+const DESKTOP_UPGRADE_RELAUNCH_STALE_AFTER_MS: u64 = 15 * 60 * 1000;
 const DESKTOP_UPGRADE_RELAUNCH_PROCESS_WAIT: Duration = Duration::from_secs(30);
 const DESKTOP_UPGRADE_RELAUNCH_PORT_WAIT: Duration = Duration::from_secs(30);
 const SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV: &str =

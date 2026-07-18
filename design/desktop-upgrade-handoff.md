@@ -110,6 +110,12 @@ stateDiagram-v2
 - Successful handoff refreshes terminal progress only after the new managed core is ready.
 - Relaunch/open or managed-core startup failures persist `Failed` progress with the original target.
 - Relaunch helper waits for process/port release before opening the App.
+- A running Windows desktop process selects App-owned handoff only when the live runtime marker is
+  also `Desktop`; a desktop shell that is reusing a CLI-owned core must not change progress ownership
+  or cause the relaunched App to start a second bundled core.
+- Windows pending-install and relaunch markers remain active for 15 minutes. This exceeds the helper's
+  explicit maximum of 30 seconds waiting for the App, 30 seconds waiting for core, and 10 minutes
+  waiting for MSI/EXE installation, so a second updater cannot enter during a still-valid handoff.
 - Windows self-update CI builds the current and pinned target executables separately with the same
   `BIFROST_VERSION` injection used by release builds. Before exercising replacement, the target
   executable must pass both `bifrost --version` and a real `/api/system.version` core probe; CLI-only

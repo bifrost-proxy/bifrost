@@ -378,6 +378,10 @@ fn upgrade_relaunch_marker_activity_requires_fresh_supported_marker() {
         pending_install: None,
     };
     assert!(is_upgrade_relaunch_marker_active(&fresh, 10_001));
+    assert!(
+        is_upgrade_relaunch_marker_active(&fresh, 10_000 + 11 * 60 * 1000),
+        "the marker must outlive the Windows helper's 11-minute timeout budget"
+    );
 
     let stale = DesktopUpgradeRelaunchMarker {
         created_at_ms: 1,
@@ -406,9 +410,10 @@ fn deferred_desktop_installer_marker_is_validated_before_handoff() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let package = temp_dir.path().join("Bifrost.msi");
     fs::write(&package, b"test installer").expect("write installer fixture");
+    let now_ms = super::current_time_millis();
     let pending = PendingDesktopInstall {
         schema_version: 1,
-        created_at_ms: super::current_time_millis(),
+        created_at_ms: now_ms.saturating_sub(11 * 60 * 1000),
         package_path: package.to_string_lossy().into_owned(),
         target_version: "0.0.156".to_string(),
         package_owned_by_updater: true,
@@ -468,7 +473,7 @@ fn deferred_desktop_installer_marker_is_validated_before_handoff() {
     assert!(!legacy_pending.package_owned_by_updater);
 
     let stale = PendingDesktopInstall {
-        created_at_ms: 1,
+        created_at_ms: now_ms.saturating_sub(super::DESKTOP_UPGRADE_RELAUNCH_STALE_AFTER_MS + 1),
         ..pending
     };
     fs::write(

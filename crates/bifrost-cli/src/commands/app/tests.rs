@@ -75,10 +75,11 @@ fn app_owned_windows_installers_are_deferred_until_desktop_shutdown() {
 
     let temp = tempfile::tempdir().expect("tempdir");
     let mut active_pending = pending;
-    active_pending.created_at_ms = std::time::SystemTime::now()
+    let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_millis() as u64;
+    active_pending.created_at_ms = now_ms.saturating_sub(11 * 60 * 1000);
     fs::write(
         temp.path().join(DESKTOP_PENDING_INSTALL_FILE),
         serde_json::to_vec(&active_pending).expect("encode active marker"),
@@ -91,7 +92,8 @@ fn app_owned_windows_installers_are_deferred_until_desktop_shutdown() {
             .is_none(),
         "a CLI/tray updater must not race the deferred desktop installer"
     );
-    active_pending.created_at_ms = 1;
+    active_pending.created_at_ms =
+        now_ms.saturating_sub(DESKTOP_PENDING_INSTALL_STALE_AFTER_MS + 1);
     fs::write(
         temp.path().join(DESKTOP_PENDING_INSTALL_FILE),
         serde_json::to_vec(&active_pending).expect("encode stale marker"),

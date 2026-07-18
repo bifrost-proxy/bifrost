@@ -18,8 +18,9 @@ impl DesktopCompanionMode {
 pub(super) fn desktop_companion_mode(
     windows: bool,
     desktop_process_running: bool,
+    desktop_owns_runtime: bool,
 ) -> DesktopCompanionMode {
-    if windows && desktop_process_running {
+    if windows && desktop_process_running && desktop_owns_runtime {
         DesktopCompanionMode::DesktopHandoff
     } else {
         DesktopCompanionMode::CallerManaged
@@ -167,6 +168,9 @@ pub(super) fn update_desktop_app_after_upgrade(
     let mode = desktop_companion_mode(
         cfg!(target_os = "windows"),
         installed_desktop_app_is_running(&app_path),
+        read_runtime_info().as_ref().is_some_and(|runtime| {
+            runtime.start_mode == RuntimeStartMode::Desktop && is_process_running(runtime.pid)
+        }),
     );
     let args = post_upgrade_desktop_app_args(target_version, app_path.parent(), mode);
     let environment = match mode {

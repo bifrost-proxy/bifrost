@@ -123,7 +123,11 @@ pub(super) fn should_write_app_progress(source: &str) -> bool {
 }
 
 #[cfg(any(target_os = "windows", test))]
-const DESKTOP_PENDING_INSTALL_STALE_AFTER_MS: u64 = 10 * 60 * 1000;
+// The Windows helper may wait 30s for the App, 30s for its core, and 10m for
+// the installer. Keep both the cross-process guard and relaunch marker alive
+// beyond that 11-minute execution budget, with room for WebView polling and
+// process scheduling before the helper starts.
+pub(super) const DESKTOP_PENDING_INSTALL_STALE_AFTER_MS: u64 = 15 * 60 * 1000;
 
 #[cfg(any(target_os = "windows", test))]
 pub(crate) fn desktop_pending_install_guard_is_active(data_dir: &Path) -> bool {
