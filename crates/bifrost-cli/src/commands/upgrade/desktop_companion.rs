@@ -26,7 +26,7 @@ pub(super) fn desktop_companion_mode(
     }
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(target_os = "windows")]
 fn installed_desktop_app_is_running(app_path: &Path) -> bool {
     use sysinfo::{ProcessesToUpdate, System};
 
@@ -39,7 +39,7 @@ fn installed_desktop_app_is_running(app_path: &Path) -> bool {
     })
 }
 
-#[cfg(not(any(target_os = "windows", test)))]
+#[cfg(not(target_os = "windows"))]
 fn installed_desktop_app_is_running(_app_path: &Path) -> bool {
     false
 }

@@ -76,6 +76,7 @@ libc = "0.2"
 bifrost-asr = { path = "../bifrost-asr", default-features = false, features = ["full-local-asr"] }
 
 [target.'cfg(windows)'.dependencies]
+sysinfo = "0.31"
 windows-sys = { version = "0.59", features = [
     "Win32_System_Console",
     "Win32_Foundation",
