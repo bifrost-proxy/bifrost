@@ -136,7 +136,24 @@ TEST_VERSION="99.99.99-test"
 TARGET="$(target_triple)"
 ARCHIVE_DIR="$TMP_DIR/mirror/bifrost-proxy/bifrost/releases/download/v${TEST_VERSION}/bifrost-v${TEST_VERSION}-${TARGET}"
 mkdir -p "$ARCHIVE_DIR"
-cp "$BIFROST_BIN" "$ARCHIVE_DIR/bifrost"
+# The production upgrader verifies the installed binary reports the exact pinned
+# target. Build a fixture executable that reports TEST_VERSION for --version and
+# delegates every other command to the real release binary.
+python3 - "$ARCHIVE_DIR/bifrost" "$BIFROST_BIN" "$TEST_VERSION" <<'PY'
+import pathlib
+import shlex
+import sys
+
+fixture_path, source_binary, version = sys.argv[1:4]
+pathlib.Path(fixture_path).write_text(
+    "#!/bin/sh\n"
+    "if [ \"${1:-}\" = \"--version\" ]; then\n"
+    f"    printf '%s\\n' 'bifrost {version}'\n"
+    "    exit 0\n"
+    "fi\n"
+    f"exec {shlex.quote(source_binary)} \"$@\"\n"
+)
+PY
 chmod +x "$ARCHIVE_DIR/bifrost"
 tar -C "$(dirname "$ARCHIVE_DIR")" -czf "$(dirname "$ARCHIVE_DIR")/bifrost-v${TEST_VERSION}-${TARGET}.tar.gz" "$(basename "$ARCHIVE_DIR")"
 

@@ -151,6 +151,7 @@
 
 | 日期 | 用例 | 结果 | 证据 |
 | --- | --- | --- | --- |
+| 2026-07-18 | TC-UTT-01 / TC-UTT-02 / TC-UTT-03 | 通过 | 执行 `BIFROST_BIN=target/release/bifrost bash e2e-tests/tests/test_upgrade_tls_trust_e2e.sh`。私有 CA mirror 在随机端口 `50699` 启动；归档内 CLI 的 `--version` 精确报告目标 `99.99.99-test`。无 CA 路径因证书信任失败，`BIFROST_GITHUB_CA_BUNDLE` 与 `BIFROST_UPGRADE_UNSAFE_SSL=1` 均下载 tar.gz、完成安装并通过目标版本强校验；最终 `Passed: 3`、`Failed: 0`。 |
 | 2026-07-02 | TC-UTT-01 / TC-UTT-02 / TC-UTT-03 | 通过 | 执行 `bash e2e-tests/tests/test_upgrade_tls_trust_e2e.sh`。脚本构建当前 release binary，生成私有 CA HTTPS mirror `https://127.0.0.1:64244`，未配置 CA 的 upgrade 下载因证书信任失败；设置 `BIFROST_GITHUB_CA_BUNDLE=<ca.pem>` 后 upgrade 成功；设置 `BIFROST_UPGRADE_UNSAFE_SSL=1` 后 upgrade 成功。最终输出 `Passed: 3`、`Failed: 0`。 |
 | 2026-07-02 | TC-UTT-04 | 通过 | 执行 `rg -n "BIFROST_GITHUB_CA_BUNDLE\|BIFROST_UPGRADE_CA_BUNDLE\|BIFROST_CA_BUNDLE\|BIFROST_UNSAFE_SSL\|BIFROST_REMOTE_UNSAFE_SSL" README.md SKILL.md skill_remote.md design/upgrade-tls-trust.md`，README、SKILL、skill_remote 与 design 文档均包含 scoped/global CA 与 unsafe 说明。 |
 | 2026-07-02 | TC-UTT-05 | 通过 | 执行外部 HTTPS 调用点 builder 扫描，`install_skill.rs` 命中 GitHub builder，Sync、AI provider、MCP OAuth、ASR/voice/IM/script/rule value 等路径命中 outbound builder。 |
