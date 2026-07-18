@@ -141,6 +141,14 @@ async fn expected_moss_runtime_checksum(asset: &str) -> Result<String, String> {
     download_runtime_checksum(moss_runtime_checksums_url(), asset).await
 }
 
+async fn moss_runtime_source_for_asset(asset: String) -> Result<MossRuntimeSource, String> {
+    Ok(MossRuntimeSource {
+        url: moss_runtime_url(&asset),
+        sha256: expected_moss_runtime_checksum(&asset).await?,
+        asset,
+    })
+}
+
 fn moss_model_url() -> String {
     std::env::var("BIFROST_MOSS_MODEL_URL").unwrap_or_else(|_| MOSS_MODEL_URL.to_string())
 }
@@ -413,19 +421,21 @@ async fn initialize_moss_joint_runtime(
     Ok(())
 }
 
-async fn ensure_moss_joint_runtime(asr_home: &Path, task_id: &str) -> Result<MossRuntimePaths, String> {
+async fn ensure_moss_joint_runtime_with_spec(
+    asr_home: &Path,
+    task_id: &str,
+    model_spec: MossModelSpec,
+    runtime_source: Option<MossRuntimeSource>,
+) -> Result<MossRuntimePaths, String> {
     let _guard = MOSS_INIT_LOCK.lock().await;
     let paths = moss_runtime_paths(asr_home);
-    let model_spec = moss_model_spec();
     let (runtime_valid, model_valid) = moss_runtime_status(&paths, &model_spec).await;
     if runtime_valid && model_valid {
         return Ok(paths);
     }
-    let asset = moss_runtime_asset_name()?;
-    let runtime_source = MossRuntimeSource {
-        url: moss_runtime_url(&asset),
-        sha256: expected_moss_runtime_checksum(&asset).await?,
-        asset,
+    let runtime_source = match runtime_source {
+        Some(source) => source,
+        None => moss_runtime_source_for_asset(moss_runtime_asset_name()?).await?,
     };
     initialize_moss_joint_runtime(
         asr_home,
@@ -438,6 +448,10 @@ async fn ensure_moss_joint_runtime(asr_home: &Path, task_id: &str) -> Result<Mos
     )
     .await?;
     Ok(paths)
+}
+
+async fn ensure_moss_joint_runtime(asr_home: &Path, task_id: &str) -> Result<MossRuntimePaths, String> {
+    ensure_moss_joint_runtime_with_spec(asr_home, task_id, moss_model_spec(), None).await
 }
 
 fn parse_moss_json(

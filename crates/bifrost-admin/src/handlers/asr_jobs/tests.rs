@@ -266,6 +266,10 @@ mod tests {
         );
         assert_eq!(moss_runtime_url(&asset), custom_url.to_string_lossy());
         assert_eq!(expected_moss_runtime_checksum(&asset).await.unwrap().len(), 64);
+        let source = moss_runtime_source_for_asset(asset.clone()).await.unwrap();
+        assert_eq!(source.asset, asset);
+        assert_eq!(source.url, custom_url.to_string_lossy());
+        assert_eq!(source.sha256.len(), 64);
 
         drop(_sha_guard);
         assert!(expected_moss_runtime_checksum(&asset)
@@ -407,17 +411,15 @@ mod tests {
             sha256: sha256_file(&archive).unwrap(),
         };
 
-        initialize_moss_joint_runtime(
+        let installed_paths = ensure_moss_joint_runtime_with_spec(
             &asr_home,
             "moss-init-test",
-            &paths,
-            false,
-            false,
-            &runtime_source,
-            &model_spec,
+            model_spec.clone(),
+            Some(runtime_source.clone()),
         )
         .await
         .unwrap();
+        assert_eq!(installed_paths.binary, paths.binary);
         let (runtime_valid, model_valid) = moss_runtime_status(&paths, &model_spec).await;
         assert!(runtime_valid && model_valid);
         assert!(std::fs::read_dir(moss_runtime_dir(&asr_home))
@@ -425,36 +427,32 @@ mod tests {
             .filter_map(Result::ok)
             .any(|entry| entry.file_name().to_string_lossy().contains(".invalid-")));
 
-        initialize_moss_joint_runtime(
+        ensure_moss_joint_runtime_with_spec(
             &asr_home,
             "moss-reuse-test",
-            &paths,
-            true,
-            true,
-            &runtime_source,
-            &model_spec,
+            model_spec.clone(),
+            None,
         )
         .await
         .unwrap();
         assert!(verify_moss_runtime_binary(&paths.binary).await.is_ok());
+        let invalid_runtime = temp.path().join("invalid-runtime");
+        write_executable(&invalid_runtime, "#!/bin/sh\necho 'not moss usage' >&2\n");
+        assert!(verify_moss_runtime_binary(&invalid_runtime).await.is_err());
         assert!(verify_moss_runtime_binary(&temp.path().join("missing"))
             .await
             .is_err());
 
         let bad_home = temp.path().join("bad-home");
-        let bad_paths = moss_runtime_paths(&bad_home);
         let bad_source = MossRuntimeSource {
             sha256: "0".repeat(64),
-            ..runtime_source
+            ..runtime_source.clone()
         };
-        let error = initialize_moss_joint_runtime(
+        let error = ensure_moss_joint_runtime_with_spec(
             &bad_home,
             "moss-bad-checksum-test",
-            &bad_paths,
-            false,
-            false,
-            &bad_source,
-            &model_spec,
+            model_spec.clone(),
+            Some(bad_source),
         )
         .await
         .unwrap_err();
@@ -651,6 +649,60 @@ mod tests {
         assert_eq!(result.structured.segments[0].end_ms, 0);
         assert!(result.structured.segments[0].speaker.is_none());
         assert!(parse_moss_json(b"not-json").is_err());
+    }
+
+    #[test]
+    fn transcription_mode_helpers_select_runtime_diarization_progress_and_model() {
+        let temp = TempDir::new().unwrap();
+        let mut task = test_directory_task("mode-helpers", temp.path().to_path_buf());
+        task.runtime_strategy = AsrRuntimeStrategy::ForkPerChunk;
+        assert!(task_uses_standard_runtime(&task));
+        assert!(!task_uses_external_diarization(&task));
+        assert!(!task_uses_task_lifetime_server(&task));
+        assert!(!task_uses_file_lifetime_server(&task));
+        assert_eq!(task_initial_processing_stage(&task), ("asr", None));
+        assert_eq!(task_external_diarization_profile(&task), None);
+        assert_eq!(task_asr_stage_message(&task), "transcribing audio");
+        assert_eq!(effective_task_model(&task), task.model);
+
+        task.diarization.enabled = true;
+        assert!(task_uses_external_diarization(&task));
+        assert_eq!(
+            task_initial_processing_stage(&task),
+            (
+                "normalize",
+                Some(format!(
+                    "speaker diarization profile: {}",
+                    task.diarization.profile
+                ))
+            )
+        );
+        assert_eq!(
+            task_external_diarization_profile(&task),
+            Some(task.diarization.profile.clone())
+        );
+        assert_eq!(
+            task_asr_stage_message(&task),
+            "transcribing diarized audio segments"
+        );
+
+        task.runtime_strategy = AsrRuntimeStrategy::ReusePerFile;
+        assert!(task_uses_file_lifetime_server(&task));
+        task.runtime_strategy = AsrRuntimeStrategy::ReuseServer;
+        assert!(task_uses_task_lifetime_server(&task));
+
+        task.transcription_mode = AsrTranscriptionMode::MossJoint;
+        assert!(!task_uses_standard_runtime(&task));
+        assert!(!task_uses_external_diarization(&task));
+        assert!(!task_uses_task_lifetime_server(&task));
+        assert!(!task_uses_file_lifetime_server(&task));
+        assert_eq!(task_initial_processing_stage(&task), ("asr", None));
+        assert_eq!(task_external_diarization_profile(&task), None);
+        assert_eq!(
+            task_asr_stage_message(&task),
+            "jointly transcribing audio with native speaker labels"
+        );
+        assert_eq!(effective_task_model(&task), "MOSS-Transcribe-Diarize-Q5");
     }
 
     #[test]

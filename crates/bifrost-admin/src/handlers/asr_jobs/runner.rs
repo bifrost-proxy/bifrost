@@ -356,9 +356,7 @@ async fn run_directory_task(
             ));
         }
     }
-    if task.transcription_mode == AsrTranscriptionMode::Standard
-        && !model_path.join("tokenizer.json").is_file()
-    {
+    if task_uses_standard_runtime(&task) && !model_path.join("tokenizer.json").is_file() {
         return Err(format!(
             "ASR model not found at {} — run ASR initialization first",
             model_path.display()
@@ -368,9 +366,7 @@ async fn run_directory_task(
     let mut server_url = None::<String>;
     let mut startup_fallback_reason = None::<String>;
     let mut stop_task_server_after_use = false;
-    if task.transcription_mode == AsrTranscriptionMode::Standard
-        && task.runtime_strategy.uses_task_lifetime_server()
-    {
+    if task_uses_task_lifetime_server(&task) {
         match start_task_managed_server(&task, &target, "task").await {
             Ok(server) => {
                 server_url = Some(server.server_url);
@@ -882,6 +878,58 @@ async fn process_pending_files_parallel_fork(
     ))
 }
 
+fn task_uses_standard_runtime(task: &AsrDirectoryTask) -> bool {
+    task.transcription_mode == AsrTranscriptionMode::Standard
+}
+
+fn task_uses_external_diarization(task: &AsrDirectoryTask) -> bool {
+    task.diarization.enabled && !task.transcription_mode.uses_native_speakers()
+}
+
+fn task_uses_task_lifetime_server(task: &AsrDirectoryTask) -> bool {
+    task_uses_standard_runtime(task) && task.runtime_strategy.uses_task_lifetime_server()
+}
+
+fn task_uses_file_lifetime_server(task: &AsrDirectoryTask) -> bool {
+    task_uses_standard_runtime(task) && task.runtime_strategy == AsrRuntimeStrategy::ReusePerFile
+}
+
+fn task_initial_processing_stage(task: &AsrDirectoryTask) -> (&'static str, Option<String>) {
+    if task_uses_external_diarization(task) {
+        (
+            "normalize",
+            Some(format!(
+                "speaker diarization profile: {}",
+                task.diarization.profile
+            )),
+        )
+    } else {
+        ("asr", None)
+    }
+}
+
+fn task_external_diarization_profile(task: &AsrDirectoryTask) -> Option<String> {
+    task_uses_external_diarization(task).then(|| task.diarization.profile.clone())
+}
+
+fn task_asr_stage_message(task: &AsrDirectoryTask) -> &'static str {
+    if task.transcription_mode.uses_native_speakers() {
+        "jointly transcribing audio with native speaker labels"
+    } else if task.diarization.enabled {
+        "transcribing diarized audio segments"
+    } else {
+        "transcribing audio"
+    }
+}
+
+fn effective_task_model(task: &AsrDirectoryTask) -> String {
+    if task.transcription_mode == AsrTranscriptionMode::MossJoint {
+        "MOSS-Transcribe-Diarize-Q5".to_string()
+    } else {
+        task.model.clone()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_pending_files_sequential(
     task: &AsrDirectoryTask,
@@ -912,16 +960,9 @@ async fn process_pending_files_sequential(
             progress.current_chunk_total = 0;
             progress.processed_now = processed_now;
             progress.failed_now = failed_now;
-            progress.stage = if task.diarization.enabled
-                && !task.transcription_mode.uses_native_speakers()
-            {
-                "normalize".to_string()
-            } else {
-                "asr".to_string()
-            };
-            progress.stage_message = (task.diarization.enabled
-                && !task.transcription_mode.uses_native_speakers())
-            .then(|| format!("speaker diarization profile: {}", task.diarization.profile));
+            let (stage, stage_message) = task_initial_processing_stage(task);
+            progress.stage = stage.to_string();
+            progress.stage_message = stage_message;
             progress.message = Some(format!("processing {}", path.display()));
         });
         if pause_check() {
@@ -1009,7 +1050,7 @@ async fn process_pending_files_sequential(
             return Err(ASR_TASK_PAUSED_MESSAGE.to_string());
         }
 
-        if task.diarization.enabled && !task.transcription_mode.uses_native_speakers() {
+        if task_uses_external_diarization(task) {
             update_run_progress(&task.id, |progress| {
                 progress.stage = "diarize".to_string();
                 progress.stage_message = Some(format!(
@@ -1049,9 +1090,7 @@ async fn process_pending_files_sequential(
 
         let mut file_server_url = server_url.map(str::to_string);
         let mut stop_file_server_after_use = false;
-        if task.transcription_mode == AsrTranscriptionMode::Standard
-            && task.runtime_strategy == AsrRuntimeStrategy::ReusePerFile
-        {
+        if task_uses_file_lifetime_server(task) {
             match start_task_managed_server(task, target, "file").await {
                 Ok(server) => {
                     file_server_url = Some(server.server_url);
@@ -1185,8 +1224,7 @@ async fn process_pending_files_sequential(
             }
         };
 
-        let use_task_lifetime_server = task.transcription_mode == AsrTranscriptionMode::Standard
-            && task.runtime_strategy.uses_task_lifetime_server();
+        let use_task_lifetime_server = task_uses_task_lifetime_server(task);
         let partial_artifact_context = PartialArtifactContext {
             task_id: task.id.clone(),
             file_key: key.clone(),
@@ -1196,9 +1234,7 @@ async fn process_pending_files_sequential(
             runtime_strategy: task.runtime_strategy,
             source_path: path.clone(),
             source_info: source_info.clone(),
-            diarization_profile: (task.diarization.enabled
-                && !task.transcription_mode.uses_native_speakers())
-            .then(|| task.diarization.profile.clone()),
+            diarization_profile: task_external_diarization_profile(task),
             speakers: Vec::new(),
             text_path: partial_text_path.clone(),
             metadata_path: partial_metadata_path.clone(),
@@ -1207,13 +1243,7 @@ async fn process_pending_files_sequential(
         };
         update_run_progress(&task.id, |progress| {
             progress.stage = "asr".to_string();
-            progress.stage_message = Some(if task.transcription_mode.uses_native_speakers() {
-                "jointly transcribing audio with native speaker labels".to_string()
-            } else if task.diarization.enabled {
-                "transcribing diarized audio segments".to_string()
-            } else {
-                "transcribing audio".to_string()
-            });
+            progress.stage_message = Some(task_asr_stage_message(task).to_string());
         });
         let transcription_result = if use_task_lifetime_server {
             transcribe_file_for_task_with_wav(
@@ -1663,11 +1693,7 @@ async fn transcribe_file_for_task_with_wav(
             text: text.clone(),
         });
     }
-    let effective_model = if task.transcription_mode == AsrTranscriptionMode::MossJoint {
-        "MOSS-Transcribe-Diarize-Q5".to_string()
-    } else {
-        task.model.clone()
-    };
+    let effective_model = effective_task_model(task);
     let mut timeline = TranscriptTimeline {
         task_id: task.id.clone(),
         task_name: task.name.clone(),
