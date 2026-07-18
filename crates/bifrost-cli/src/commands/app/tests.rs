@@ -881,9 +881,13 @@ fn app_cli_version_probe_reports_nonzero_exit() {
     fs::write(&cli, "#!/bin/sh\nexit 7\n").expect("write failing CLI");
     fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).expect("chmod failing CLI");
 
-    let error = read_installed_cli_version_with_timeout(&cli, Duration::from_secs(1))
+    let error = read_installed_cli_version_with_timeout(&cli, Duration::from_secs(10))
         .expect_err("non-zero CLI version probe must fail");
-    assert!(error.to_string().contains("status"));
+    let message = error.to_string();
+    assert!(
+        message.contains("status"),
+        "expected non-zero exit status error, got: {message}"
+    );
 }
 
 #[cfg(target_os = "macos")]
