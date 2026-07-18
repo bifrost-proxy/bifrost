@@ -421,6 +421,7 @@ test_upgrade_review_feedback_contracts() {
     local installer_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/app/installer.rs"
     local app_tests="${PROJECT_DIR}/crates/bifrost-cli/src/commands/app/tests.rs"
     local upgrade_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade.rs"
+    local upgrade_desktop_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/desktop_companion.rs"
     local upgrade_download_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/download.rs"
     local upgrade_restart_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/restart.rs"
     local upgrade_tests="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/tests.rs"
@@ -428,16 +429,24 @@ test_upgrade_review_feedback_contracts() {
     local background_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade_background.rs"
     local admin_src="${PROJECT_DIR}/crates/bifrost-admin/src/handlers/system.rs"
     local desktop_src="${PROJECT_DIR}/desktop/src-tauri/src/main.rs"
+    local desktop_upgrade_src="${PROJECT_DIR}/desktop/src-tauri/src/upgrade_handoff.rs"
+    local desktop_backend_src="${PROJECT_DIR}/desktop/src-tauri/src/backend_runtime.rs"
+    local desktop_tests_src="${PROJECT_DIR}/desktop/src-tauri/src/tests.rs"
     local web_store_src="${PROJECT_DIR}/web/src/stores/useVersionStore.ts"
 
     if [ "$(wc -l <"$app_src")" -le 1500 ] \
         && [ "$(wc -l <"$installer_src")" -le 1500 ] \
         && [ "$(wc -l <"$app_tests")" -le 1500 ] \
         && [ "$(wc -l <"$upgrade_src")" -le 1500 ] \
+        && [ "$(wc -l <"$upgrade_desktop_src")" -le 1500 ] \
         && [ "$(wc -l <"$upgrade_download_src")" -le 1500 ] \
         && [ "$(wc -l <"$upgrade_restart_src")" -le 1500 ] \
         && [ "$(wc -l <"$upgrade_tests")" -le 1500 ] \
         && [ "$(wc -l <"$upgrade_review_tests")" -le 1500 ] \
+        && [ "$(wc -l <"$desktop_src")" -le 1500 ] \
+        && [ "$(wc -l <"$desktop_upgrade_src")" -le 1500 ] \
+        && [ "$(wc -l <"$desktop_backend_src")" -le 1500 ] \
+        && [ "$(wc -l <"$desktop_tests_src")" -le 1500 ] \
         && grep -Fq 'parent.join(format!(".{name}.backup"))' "$app_src" \
         && grep -Fq 'verify_installed_cli_target_version_or_restore' "$upgrade_src" \
         && grep -Fq 'or_else(|| Some("127.0.0.1".to_string()))' "$upgrade_restart_src" \
@@ -447,14 +456,17 @@ test_upgrade_review_feedback_contracts() {
         && grep -Fq 'macos_app_dir_from_exe_path' "$app_src" \
         && grep -Fq 'defer_desktop_install_to_handoff' "$installer_src" \
         && grep -Fq 'acquire_top_level_app_upgrade_lock' "$app_src" \
-        && grep -Fq 'try_acquire_upgrade_lock' "$installer_src" \
+        && grep -Fq 'try_acquire_upgrade_lock_attempt' "$installer_src" \
         && grep -Fq 'handle_app_managed_upgrade(target_version.to_string())' "$app_src" \
+        && grep -Fq 'app_managed_upgrade_behavior()' "$upgrade_src" \
+        && grep -Fq 'installed_desktop_app_is_running' "$upgrade_desktop_src" \
+        && grep -Fq 'DesktopCompanionMode::DesktopHandoff' "$upgrade_desktop_src" \
         && grep -Fq 'PARENT_UPGRADE_LOCK_HELD_ENV' "$app_src" \
-        && grep -Fq 'spawn_windows_desktop_upgrade_handoff' "$desktop_src" \
-        && grep -Fq 'deferred_desktop_install_version_error' "$desktop_src" \
+        && grep -Fq 'spawn_windows_desktop_upgrade_handoff' "$desktop_upgrade_src" \
+        && grep -Fq 'deferred_desktop_install_version_error' "$desktop_upgrade_src" \
         && grep -Fq 'package_owned_by_updater' "$installer_src" \
         && grep -Fq 'progress.source === "desktop"' "$web_store_src" \
-        && grep -Fq 'persist_desktop_upgrade_handoff_failure' "$desktop_src" \
+        && grep -Fq 'persist_desktop_upgrade_handoff_failure' "$desktop_upgrade_src" \
         && grep -Fq 'read_installed_cli_version_with_timeout' "$app_src"; then
         _log_pass "review feedback contracts cover recovery, ownership, rollback, shared locking, pinned targets, verified deferred desktop install, active app path, and module size"
     else

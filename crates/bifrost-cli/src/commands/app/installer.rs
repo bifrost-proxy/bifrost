@@ -1,7 +1,5 @@
 use super::*;
 
-pub(super) const DESKTOP_UPGRADE_HANDOFF_ENV: &str = "BIFROST_DESKTOP_UPGRADE_HANDOFF";
-
 fn parent_upgrade_lock_is_held() -> bool {
     env::var(PARENT_UPGRADE_LOCK_HELD_ENV)
         .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
@@ -12,13 +10,20 @@ pub(super) fn acquire_top_level_app_upgrade_lock(
     progress_source: &str,
     target_version: &str,
 ) -> Result<Option<fs::File>, BifrostError> {
-    if progress_source == CALLER_MANAGED_PROGRESS_SOURCE && parent_upgrade_lock_is_held() {
+    if parent_upgrade_lock_is_held()
+        && (progress_source == CALLER_MANAGED_PROGRESS_SOURCE
+            || desktop_upgrade_handoff_managed(progress_source))
+    {
         return Ok(None);
     }
     let dir = data_dir();
-    match crate::commands::upgrade_background::try_acquire_upgrade_lock(&dir) {
-        Ok(Some(lock)) => Ok(Some(lock)),
-        Ok(None) => {
+    use crate::commands::upgrade_background::UpgradeLockAttempt;
+    match crate::commands::upgrade_background::try_acquire_upgrade_lock_attempt(&dir) {
+        Ok(UpgradeLockAttempt::Acquired(lock)) => Ok(Some(lock)),
+        Ok(UpgradeLockAttempt::PendingDesktopHandoff) => Err(BifrostError::Config(
+            "Desktop app update handoff is already pending".to_string(),
+        )),
+        Ok(UpgradeLockAttempt::Contended) => {
             let error =
                 BifrostError::Config("Upgrade is already running in another process".to_string());
             write_app_failed_progress(target_version, progress_source, &error);

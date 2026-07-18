@@ -17,6 +17,7 @@ source "${PROJECT_DIR}/e2e-tests/test_utils/process.sh"
 BIFROST_BIN="${BIFROST_BIN:-${PROJECT_DIR}/target/debug/bifrost}"
 OLD_BIFROST_BIN="${OLD_BIFROST_BIN:-}"
 BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN="${BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN:-0}"
+BIFROST_UPGRADE_E2E_ENTRYPOINT="${BIFROST_UPGRADE_E2E_ENTRYPOINT:-upgrade}"
 # Derive the upgrade target version from the workspace version (patch + 1) so the
 # self-upgrade actually sees a newer release. A hardcoded value silently breaks
 # whenever the workspace version is bumped to match it (see the 0.0.101 collision).
@@ -291,26 +292,15 @@ assert_post_upgrade_skills_installed() {
     _log_pass "upgrade auto-installs Bifrost skills into isolated HOME"
 }
 
-create_local_release_archive() {
-    local archive_root="$1"
-    local version="$2"
-    local target="$3"
-    local binary="$4"
-    local package_dir="${archive_root}/bifrost-v${version}-${target}"
-    local bin_name
-    bin_name="$(binary_name)"
-    local package_binary="${package_dir}/${bin_name}"
-
-    mkdir -p "$package_dir"
-    cp "$binary" "$package_binary"
-    chmod +x "$package_binary" 2>/dev/null || true
-
-    # A release named v<target> must contain a binary that actually reports the
-    # pinned target. Otherwise the Windows deferred helper correctly rejects the
-    # fixture after replacement and never starts the daemon. Keep the production
-    # verification path intact by patching only this equal-length temporary copy.
+copy_binary_with_version() {
+    local binary="$1"
+    local output="$2"
+    local version="$3"
     local current_version py
     current_version="$("$binary" --version 2>/dev/null | awk '{print $NF}' | sed 's/^v//' | tr -d '\r')"
+    mkdir -p "$(dirname "$output")"
+    cp "$binary" "$output"
+    chmod +x "$output" 2>/dev/null || true
     if [[ "$current_version" != "$version" ]]; then
         if [[ ${#current_version} -ne ${#version} ]]; then
             echo "cannot patch E2E binary version with a different byte length" >&2
@@ -318,7 +308,7 @@ create_local_release_archive() {
         fi
         py="$(python3_cmd 2>/dev/null || true)"
         [[ -z "$py" ]] && return 1
-        "$py" - "$package_binary" "$current_version" "$version" <<'PY'
+        "$py" - "$output" "$current_version" "$version" <<'PY'
 import pathlib
 import sys
 
@@ -331,15 +321,31 @@ if old not in data:
 path.write_bytes(data.replace(old, new))
 PY
         if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
-            codesign --force --sign - "$package_binary" >/dev/null 2>&1
+            codesign --force --sign - "$output" >/dev/null 2>&1
         fi
     fi
     local packaged_version
-    packaged_version="$("$package_binary" --version 2>/dev/null | awk '{print $NF}' | sed 's/^v//' | tr -d '\r')"
+    packaged_version="$("$output" --version 2>/dev/null | awk '{print $NF}' | sed 's/^v//' | tr -d '\r')"
     if [[ "$packaged_version" != "$version" ]]; then
         echo "temporary E2E binary reports ${packaged_version:-unknown}, expected $version" >&2
         return 1
     fi
+}
+
+create_local_release_archive() {
+    local archive_root="$1"
+    local version="$2"
+    local target="$3"
+    local binary="$4"
+    local package_dir="${archive_root}/bifrost-v${version}-${target}"
+    local bin_name
+    bin_name="$(binary_name)"
+    local package_binary="${package_dir}/${bin_name}"
+
+    # A release named v<target> must contain a binary that actually reports the
+    # pinned target. Otherwise the Windows deferred helper correctly rejects the
+    # fixture after replacement and never starts the daemon.
+    copy_binary_with_version "$binary" "$package_binary" "$version" || return 1
 
     if is_windows; then
         local archive_path="${archive_root}/bifrost-v${version}-${target}.zip"
@@ -358,7 +364,7 @@ PY
 }
 
 test_local_upgrade_restarts_old_daemon_with_new_binary() {
-    _log_info "case: local archive upgrade restarts a running daemon"
+    _log_info "case: local archive ${BIFROST_UPGRADE_E2E_ENTRYPOINT} restarts a running daemon"
 
     if [[ ! -x "$BIFROST_BIN" ]]; then
         _log_fail "new bifrost binary exists" "$BIFROST_BIN" "missing"
@@ -378,7 +384,17 @@ test_local_upgrade_restarts_old_daemon_with_new_binary() {
     chmod +x "$INSTALL_BIN" 2>/dev/null || true
 
     local start_bin
-    if [[ "$BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN" == "1" ]]; then
+    if [[ "$BIFROST_UPGRADE_E2E_ENTRYPOINT" == "app-upgrade-stale-runtime" ]]; then
+        local old_version old_patch
+        old_patch="${TEST_VERSION##*.}"
+        old_version="${TEST_VERSION%.*}.$((old_patch - 1))"
+        start_bin="${TEST_ROOT}/old-start/$(binary_name)"
+        copy_binary_with_version "$BIFROST_BIN" "$start_bin" "$old_version" || {
+            _log_fail "stale runtime fixture" "$old_version" "could not build fixture"
+            return 1
+        }
+        _log_pass "stale runtime fixture selected: $old_version"
+    elif [[ "$BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN" == "1" ]]; then
         start_bin="$INSTALL_BIN"
         _log_pass "start binary selected: installed test binary $start_bin"
     else
@@ -461,7 +477,44 @@ PY
     _log_pass "old daemon runtime recorded port $PROXY_PORT"
 
     local upgrade_log="${TEST_ROOT}/upgrade.log"
+    local app_package=""
+    local -a upgrade_args=(upgrade)
+    if [[ "$BIFROST_UPGRADE_E2E_ENTRYPOINT" == "app-upgrade" \
+        || "$BIFROST_UPGRADE_E2E_ENTRYPOINT" == "app-upgrade-stale-runtime" ]]; then
+        if [[ "$(uname -s)" != "Darwin" ]]; then
+            _log_fail "direct app-upgrade real restart host" "Darwin" "$(uname -s)"
+            return 1
+        fi
+        app_package="${TEST_ROOT}/fixtures/Bifrost.app"
+        mkdir -p "$app_package/Contents/MacOS"
+        sed "s/__TEST_VERSION__/${TEST_VERSION}/g" >"$app_package/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>Bifrost</string>
+<key>CFBundleIdentifier</key><string>dev.bifrost.upgrade-e2e</string>
+<key>CFBundleShortVersionString</key><string>__TEST_VERSION__</string>
+<key>CFBundleVersion</key><string>1</string>
+</dict></plist>
+PLIST
+        printf '#!/bin/sh\nexit 0\n' >"$app_package/Contents/MacOS/Bifrost"
+        chmod +x "$app_package/Contents/MacOS/Bifrost"
+        upgrade_args=(
+            app upgrade
+            --package "$app_package"
+            --app-dir "${TEST_ROOT}/desktop-install"
+            --version "$TEST_VERSION"
+            -y
+        )
+    elif [[ "$BIFROST_UPGRADE_E2E_ENTRYPOINT" != "upgrade" ]]; then
+        _log_fail "upgrade E2E entrypoint" \
+            "upgrade, app-upgrade, or app-upgrade-stale-runtime" \
+            "$BIFROST_UPGRADE_E2E_ENTRYPOINT"
+        return 1
+    fi
     BIFROST_DATA_DIR="$bifrost_data_dir" \
+    BIFROST_APP_INSTALL_DIR="$(bifrost_process_path "${TEST_ROOT}/desktop-install")" \
+    BIFROST_APP_SKIP_RESTART=1 \
     HOME="$test_home_for_process" \
     USERPROFILE="$test_home_for_process" \
     BIFROST_INSTALL_SKILL_SOURCE=embedded \
@@ -469,14 +522,26 @@ PY
     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
     BIFROST_UPGRADE_TEST_LATEST_VERSION="$TEST_VERSION" \
     BIFROST_UPGRADE_TEST_ARCHIVE="$(bifrost_process_path "$archive_path")" \
-    "$INSTALL_BIN" upgrade >"$upgrade_log" 2>&1
+    "$INSTALL_BIN" "${upgrade_args[@]}" >"$upgrade_log" 2>&1
     local upgrade_status=$?
     if [[ $upgrade_status -ne 0 ]]; then
         _log_fail "upgrade command exits successfully" "0" "$(cat "$upgrade_log")"
         return 1
     fi
+    if [[ "$BIFROST_UPGRADE_E2E_ENTRYPOINT" == app-upgrade* ]]; then
+        local installed_app_plist="${TEST_ROOT}/desktop-install/Bifrost.app/Contents/Info.plist"
+        if [[ -x "${TEST_ROOT}/desktop-install/Bifrost.app/Contents/MacOS/Bifrost" ]] \
+            && grep -Fq "<string>${TEST_VERSION}</string>" "$installed_app_plist"; then
+            _log_pass "direct app upgrade installs the pinned desktop App target"
+        else
+            _log_fail "direct app upgrade installs the pinned desktop App target" \
+                "Bifrost.app v${TEST_VERSION}" \
+                "missing or wrong version"
+            return 1
+        fi
+    fi
 
-    if ! is_windows; then
+    if ! is_windows && [[ "$BIFROST_UPGRADE_E2E_ENTRYPOINT" != "app-upgrade-stale-runtime" ]]; then
         assert_upgrade_log_contains \
             "$upgrade_log" \
             'Installing latest Bifrost skills' \
@@ -486,7 +551,7 @@ PY
         "$upgrade_log" \
         'Detected running Bifrost proxy' \
         "upgrade output detects running proxy" || return 1
-    if ! is_windows; then
+    if ! is_windows && [[ "$BIFROST_UPGRADE_E2E_ENTRYPOINT" != "app-upgrade-stale-runtime" ]]; then
         assert_post_upgrade_skills_installed "$test_home" || return 1
     fi
     assert_upgrade_log_contains \
@@ -521,6 +586,20 @@ PY
         _log_fail "new daemon admin ready after upgrade" "reachable" "unreachable"
         return 1
     }
+    local installed_cli_version
+    installed_cli_version="$("$INSTALL_BIN" --version 2>/dev/null | awk '{print $NF}' | sed 's/^v//' | tr -d '\r')"
+    assert_equals "$TEST_VERSION" "$installed_cli_version" \
+        "installed CLI reports the pinned target version" || return 1
+
+    local core_version system_response
+    system_response="$(curl -fsS "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/system")"
+    if [[ -n "$py" ]]; then
+        core_version="$(printf '%s' "$system_response" | "$py" -c 'import json,sys; print(json.load(sys.stdin).get("version", ""))')"
+    else
+        core_version="$(BIFROST_E2E_SYSTEM_RESPONSE="$system_response" powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '(ConvertFrom-Json $env:BIFROST_E2E_SYSTEM_RESPONSE).version')"
+    fi
+    assert_equals "$TEST_VERSION" "$core_version" \
+        "restarted core reports the pinned target version" || return 1
     if is_windows; then
         # Windows self-replacement runs in a deferred helper after the upgrade
         # process exits. The helper installs skills before starting the new

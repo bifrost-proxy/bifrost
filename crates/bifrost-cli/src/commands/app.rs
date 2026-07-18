@@ -21,9 +21,9 @@ use crate::cli::AppCommands;
 use super::update_check::get_latest_version_fresh_with_diagnostics;
 use super::upgrade::{
     download_progress_line, handle_app_managed_upgrade, DESKTOP_MANAGED_SKIP_APP_ENV,
-    DESKTOP_MANAGED_SKIP_RESTART_ENV, DESKTOP_MANAGED_TARGET_ENV, PARENT_UPGRADE_LOCK_HELD_ENV,
+    DESKTOP_MANAGED_SKIP_RESTART_ENV, DESKTOP_MANAGED_TARGET_ENV, DESKTOP_UPGRADE_HANDOFF_ENV,
+    PARENT_UPGRADE_LOCK_HELD_ENV,
 };
-
 mod installer;
 pub(crate) use installer::desktop_pending_install_guard_is_active;
 use installer::*;

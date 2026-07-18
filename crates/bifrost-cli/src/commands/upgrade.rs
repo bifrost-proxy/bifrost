@@ -1,3 +1,6 @@
+mod desktop_companion;
+use desktop_companion::*;
+
 use bifrost_core::BifrostError;
 use colored::Colorize;
 use std::env;
@@ -48,7 +51,9 @@ pub(crate) const DESKTOP_MANAGED_SKIP_RESTART_ENV: &str =
 pub(crate) const DESKTOP_MANAGED_TARGET_ENV: &str =
     "BIFROST_DESKTOP_MANAGED_UPGRADE_TARGET_VERSION";
 pub(crate) const PARENT_UPGRADE_LOCK_HELD_ENV: &str = "BIFROST_PARENT_UPGRADE_LOCK_HELD_INTERNAL";
+pub(crate) const DESKTOP_UPGRADE_HANDOFF_ENV: &str = "BIFROST_DESKTOP_UPGRADE_HANDOFF";
 static DEFERRED_INSTALL_SCHEDULED: AtomicBool = AtomicBool::new(false);
+static DESKTOP_HANDOFF_SCHEDULED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TimedCommandStatus {
@@ -141,6 +146,14 @@ struct DownloadTuning {
 
 pub(crate) fn take_deferred_install_scheduled() -> bool {
     DEFERRED_INSTALL_SCHEDULED.swap(false, Ordering::SeqCst)
+}
+
+pub(crate) fn take_desktop_handoff_scheduled() -> bool {
+    DESKTOP_HANDOFF_SCHEDULED.swap(false, Ordering::SeqCst)
+}
+
+fn mark_desktop_handoff_scheduled() {
+    DESKTOP_HANDOFF_SCHEDULED.store(true, Ordering::SeqCst);
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -499,27 +512,41 @@ fn command_output_with_timeout(
     args: &[String],
     timeout: Duration,
 ) -> Result<TimedCommandOutput, BifrostError> {
-    command_output_with_timeout_and_heartbeat(
+    command_output_with_timeout_and_env(
         program,
         args,
         timeout,
         Duration::from_secs(UPGRADE_CHILD_PROGRESS_HEARTBEAT_SECS),
+        &[],
     )
 }
 
+#[cfg(test)]
 fn command_output_with_timeout_and_heartbeat(
     program: &Path,
     args: &[String],
     timeout: Duration,
     heartbeat: Duration,
 ) -> Result<TimedCommandOutput, BifrostError> {
+    command_output_with_timeout_and_env(program, args, timeout, heartbeat, &[])
+}
+
+fn command_output_with_timeout_and_env(
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+    heartbeat: Duration,
+    environment: &[(&str, &str)],
+) -> Result<TimedCommandOutput, BifrostError> {
     let mut stdout_file =
         tempfile::tempfile().map_err(|e| BifrostError::Io(std::io::Error::other(e)))?;
     let mut stderr_file =
         tempfile::tempfile().map_err(|e| BifrostError::Io(std::io::Error::other(e)))?;
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .env(PARENT_UPGRADE_LOCK_HELD_ENV, "1")
+        .envs(environment.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::from(
             stdout_file
@@ -530,9 +557,8 @@ fn command_output_with_timeout_and_heartbeat(
             stderr_file
                 .try_clone()
                 .map_err(|e| BifrostError::Io(std::io::Error::other(e)))?,
-        ))
-        .spawn()
-        .map_err(BifrostError::Io)?;
+        ));
+    let mut child = command.spawn().map_err(BifrostError::Io)?;
     let deadline = Instant::now() + timeout;
     let mut next_heartbeat = Instant::now() + heartbeat;
     let status;
@@ -658,133 +684,6 @@ fn install_skills_after_upgrade_best_effort(executable: &Path) {
                 "  Retry manually with: bifrost install-skill --tool all -y".dimmed()
             );
         }
-    }
-}
-
-fn installed_desktop_app_path() -> Option<PathBuf> {
-    desktop_app_install_candidates()
-        .into_iter()
-        .find(|path| path.exists())
-}
-
-fn desktop_app_install_candidates() -> Vec<PathBuf> {
-    if let Some(dir) = env::var_os("BIFROST_APP_INSTALL_DIR") {
-        return vec![resolve_desktop_app_path(&PathBuf::from(dir))];
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let mut candidates = Vec::new();
-        candidates.push(PathBuf::from("/Applications/Bifrost.app"));
-        if let Some(home) = env::var_os("HOME") {
-            candidates.push(PathBuf::from(home).join("Applications").join("Bifrost.app"));
-        }
-        candidates
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let mut candidates = Vec::new();
-        if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
-            candidates.push(
-                PathBuf::from(local_app_data)
-                    .join("Bifrost")
-                    .join("bifrost-desktop.exe"),
-            );
-        }
-        candidates
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        Vec::new()
-    }
-}
-
-fn resolve_desktop_app_path(app_dir: &Path) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        app_dir.join("Bifrost.app")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        app_dir.join("bifrost-desktop.exe")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        app_dir.join("Bifrost")
-    }
-}
-
-fn post_upgrade_desktop_app_args(target_version: &str, app_dir: Option<&Path>) -> Vec<String> {
-    let mut args = vec![
-        "app".to_string(),
-        "upgrade".to_string(),
-        "--no-cli".to_string(),
-        "--source".to_string(),
-        "cli-upgrade".to_string(),
-        "--version".to_string(),
-        target_version.to_string(),
-    ];
-    if let Some(app_dir) = app_dir {
-        args.push("--app-dir".to_string());
-        args.push(app_dir.to_string_lossy().into_owned());
-    }
-    args.push("-y".to_string());
-    args
-}
-
-fn update_desktop_app_after_upgrade_best_effort(executable: &Path, target_version: &str) {
-    if let Err(error) = update_desktop_app_after_upgrade(executable, target_version) {
-        eprintln!(
-            "{} {}",
-            "⚠ Bifrost desktop app update failed; continuing CLI upgrade.".bright_yellow(),
-            error.to_string().dimmed()
-        );
-        eprintln!(
-            "{}",
-            "  Retry manually with: bifrost app upgrade --no-cli -y".dimmed()
-        );
-    }
-}
-
-fn update_desktop_app_after_upgrade(
-    executable: &Path,
-    target_version: &str,
-) -> Result<(), BifrostError> {
-    let Some(app_path) = installed_desktop_app_path() else {
-        return Ok(());
-    };
-
-    println!();
-    println!(
-        "{} {}",
-        "Detected installed Bifrost desktop app:".bright_cyan(),
-        app_path.display()
-    );
-    println!("{}", "Updating Bifrost desktop app...".bright_cyan());
-
-    let args = post_upgrade_desktop_app_args(target_version, app_path.parent());
-    match command_output_with_timeout(
-        executable,
-        &args,
-        Duration::from_secs(POST_UPGRADE_APP_UPDATE_TIMEOUT_SECS),
-    ) {
-        Ok(output) if output.status == TimedCommandStatus::Success => {
-            println!(
-                "{}",
-                "✓ Bifrost desktop app updated successfully.".bright_green()
-            );
-            Ok(())
-        }
-        Ok(output) => {
-            let reason = summarize_command_output(&output);
-            Err(BifrostError::Config(format!(
-                "desktop app update command failed: {reason}"
-            )))
-        }
-        Err(error) => Err(BifrostError::Config(format!(
-            "could not run desktop app update: {error}"
-        ))),
     }
 }
 
@@ -1272,10 +1171,19 @@ pub fn handle_upgrade(_yes: bool) -> Result<(), BifrostError> {
 }
 
 pub(crate) fn handle_app_managed_upgrade(target_version: String) -> Result<(), BifrostError> {
-    handle_upgrade_inner(
-        UpgradeBehavior::interactive(true, true),
-        Some(target_version),
-    )
+    handle_upgrade_inner(app_managed_upgrade_behavior(), Some(target_version))
+}
+
+fn app_managed_upgrade_behavior() -> UpgradeBehavior {
+    // `bifrost app upgrade` suppresses the recursive App companion only. It is
+    // still the top-level CLI updater, so a CLI-owned running core must restart
+    // onto the newly installed executable.
+    let mut behavior = UpgradeBehavior::interactive(true, false);
+    // The on-disk CLI can already be at the pinned target while a daemon still
+    // serves the previous in-memory version. The App entrypoint must converge
+    // that stale runtime just like the Admin background updater does.
+    behavior.restart_if_already_latest = true;
+    behavior
 }
 
 fn env_flag(name: &str) -> bool {

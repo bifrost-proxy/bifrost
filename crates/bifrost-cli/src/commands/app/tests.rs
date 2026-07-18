@@ -128,6 +128,61 @@ fn non_windows_desktop_install_is_never_deferred() {
 }
 
 #[test]
+fn pending_desktop_handoff_lock_conflict_preserves_restarting_progress() {
+    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let previous_data_dir = std::env::var_os("BIFROST_DATA_DIR");
+    let previous_parent_lock = std::env::var_os(PARENT_UPGRADE_LOCK_HELD_ENV);
+    let previous_handoff = std::env::var_os(DESKTOP_UPGRADE_HANDOFF_ENV);
+    std::env::set_var("BIFROST_DATA_DIR", temp.path());
+    std::env::remove_var(PARENT_UPGRADE_LOCK_HELD_ENV);
+    std::env::remove_var(DESKTOP_UPGRADE_HANDOFF_ENV);
+
+    let pending = PendingDesktopInstall {
+        schema_version: DESKTOP_PENDING_INSTALL_SCHEMA_VERSION,
+        created_at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis() as u64,
+        package_path: "Bifrost.msi".to_string(),
+        target_version: "0.0.156".to_string(),
+        package_owned_by_updater: true,
+    };
+    fs::write(
+        temp.path().join(DESKTOP_PENDING_INSTALL_FILE),
+        serde_json::to_vec(&pending).expect("encode pending marker"),
+    )
+    .expect("write pending marker");
+    write_progress(
+        temp.path(),
+        &UpgradeProgress::new(UpgradePhase::Restarting, "Restart desktop to finish update")
+            .with_target(Some("0.0.156".to_string()))
+            .with_source(Some("desktop".to_string())),
+    );
+
+    let error = acquire_top_level_app_upgrade_lock("desktop", "0.0.156")
+        .expect_err("pending desktop handoff blocks a second App updater");
+    assert!(error.to_string().contains("handoff is already pending"));
+    let progress = bifrost_core::upgrade_progress::read_progress(temp.path());
+    assert_eq!(progress.phase, UpgradePhase::Restarting);
+    assert_eq!(progress.source.as_deref(), Some("desktop"));
+    assert_eq!(progress.target_version.as_deref(), Some("0.0.156"));
+
+    match previous_data_dir {
+        Some(value) => std::env::set_var("BIFROST_DATA_DIR", value),
+        None => std::env::remove_var("BIFROST_DATA_DIR"),
+    }
+    match previous_parent_lock {
+        Some(value) => std::env::set_var(PARENT_UPGRADE_LOCK_HELD_ENV, value),
+        None => std::env::remove_var(PARENT_UPGRADE_LOCK_HELD_ENV),
+    }
+    match previous_handoff {
+        Some(value) => std::env::set_var(DESKTOP_UPGRADE_HANDOFF_ENV, value),
+        None => std::env::remove_var(DESKTOP_UPGRADE_HANDOFF_ENV),
+    }
+}
+
+#[test]
 fn nested_cli_upgrade_does_not_publish_terminal_app_progress() {
     assert!(!should_write_app_progress("cli-upgrade"));
     assert!(should_write_app_progress("desktop"));
@@ -164,7 +219,9 @@ fn top_level_app_upgrade_owns_the_shared_lock_but_nested_companion_skips_it() {
     let temp = tempfile::tempdir().expect("tempdir");
     let previous_data_dir = std::env::var_os("BIFROST_DATA_DIR");
     let previous_parent_lock = std::env::var_os(PARENT_UPGRADE_LOCK_HELD_ENV);
+    let previous_handoff = std::env::var_os(DESKTOP_UPGRADE_HANDOFF_ENV);
     std::env::remove_var(PARENT_UPGRADE_LOCK_HELD_ENV);
+    std::env::remove_var(DESKTOP_UPGRADE_HANDOFF_ENV);
     std::env::set_var("BIFROST_DATA_DIR", temp.path());
     let owner = crate::commands::upgrade_background::try_acquire_upgrade_lock(temp.path())
         .expect("open upgrade lock")
@@ -190,6 +247,12 @@ fn top_level_app_upgrade_owns_the_shared_lock_but_nested_companion_skips_it() {
             .expect("private managed-child marker bypasses its parent's lock")
             .is_none()
     );
+    std::env::set_var(DESKTOP_UPGRADE_HANDOFF_ENV, "1");
+    assert!(acquire_top_level_app_upgrade_lock("desktop", "0.0.156")
+        .expect("private desktop handoff child bypasses its parent's lock")
+        .is_none());
+    std::env::remove_var(DESKTOP_UPGRADE_HANDOFF_ENV);
+    std::env::remove_var(PARENT_UPGRADE_LOCK_HELD_ENV);
     drop(owner);
     assert!(acquire_top_level_app_upgrade_lock("desktop", "0.0.156")
         .expect("top-level App upgrade acquires released lock")
@@ -202,6 +265,10 @@ fn top_level_app_upgrade_owns_the_shared_lock_but_nested_companion_skips_it() {
     match previous_parent_lock {
         Some(value) => std::env::set_var(PARENT_UPGRADE_LOCK_HELD_ENV, value),
         None => std::env::remove_var(PARENT_UPGRADE_LOCK_HELD_ENV),
+    }
+    match previous_handoff {
+        Some(value) => std::env::set_var(DESKTOP_UPGRADE_HANDOFF_ENV, value),
+        None => std::env::remove_var(DESKTOP_UPGRADE_HANDOFF_ENV),
     }
 }
 

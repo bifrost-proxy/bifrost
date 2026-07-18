@@ -172,27 +172,6 @@ fn test_cli_upgrade_no_flags() {
     }
 }
 
-#[test]
-fn background_upgrade_restarts_when_disk_binary_is_already_latest() {
-    let background = UpgradeBehavior::background();
-    assert!(background.restart_if_already_latest);
-    assert!(background.update_desktop_app);
-    assert!(background.require_desktop_app_update);
-    assert!(background.restart_proxy);
-
-    let desktop_managed = UpgradeBehavior::interactive(true, true);
-    assert!(!desktop_managed.restart_if_already_latest);
-    assert!(!desktop_managed.update_desktop_app);
-    assert!(!desktop_managed.require_desktop_app_update);
-    assert!(!desktop_managed.restart_proxy);
-
-    let manual = UpgradeBehavior::interactive(false, false);
-    assert!(!manual.restart_if_already_latest);
-    assert!(manual.update_desktop_app);
-    assert!(!manual.require_desktop_app_update);
-    assert!(manual.restart_proxy);
-}
-
 #[cfg(unix)]
 #[test]
 fn upgrade_behavior_executes_companion_and_runtime_ownership_branches() {
@@ -1027,25 +1006,6 @@ fn upgrade_post_install_skill_args_cover_all_supported_tools() {
 }
 
 #[test]
-fn upgrade_post_install_desktop_app_args_disable_cli_recursion() {
-    assert_eq!(
-        post_upgrade_desktop_app_args("0.0.145", Some(Path::new("/Users/test/Applications"))),
-        vec![
-            "app",
-            "upgrade",
-            "--no-cli",
-            "--source",
-            "cli-upgrade",
-            "--version",
-            "0.0.145",
-            "--app-dir",
-            "/Users/test/Applications",
-            "-y"
-        ]
-    );
-}
-
-#[test]
 fn upgrade_desktop_app_install_path_uses_override_dir() {
     let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().expect("tempdir");
@@ -1122,6 +1082,19 @@ fn upgrade_command_status_with_timeout_reports_success_and_failure() {
     .unwrap();
     assert_eq!(output.status, TimedCommandStatus::Success);
     assert_eq!(output.stdout.trim(), "ready");
+
+    let handoff_output = command_output_with_timeout_and_env(
+        Path::new("/bin/sh"),
+        &[
+            "-c".to_string(),
+            format!("test \"${DESKTOP_UPGRADE_HANDOFF_ENV}\" = 1"),
+        ],
+        Duration::from_secs(1),
+        Duration::from_millis(10),
+        &[(DESKTOP_UPGRADE_HANDOFF_ENV, "1")],
+    )
+    .unwrap();
+    assert_eq!(handoff_output.status, TimedCommandStatus::Success);
 }
 
 #[test]

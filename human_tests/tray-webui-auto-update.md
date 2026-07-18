@@ -247,6 +247,24 @@
      bash e2e-tests/tests/test_upgrade_restart_e2e.sh
    bash e2e-tests/tests/test_desktop_upgrade_handoff_contract.sh
    ```
+   再用独立临时安装目录和随机端口执行直接 App CLI 入口，确认它更新 CLI 后仍会重启 CLI-owned core：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+   BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN=1 \
+   BIFROST_UPGRADE_E2E_ENTRYPOINT=app-upgrade \
+   BIFROST_DISABLE_TRAY=1 \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+     bash e2e-tests/tests/test_upgrade_local_restart_e2e.sh
+   ```
+   最后构造“磁盘 CLI 已是目标版本，但运行中 core 仍是旧版本”的原始故障形态；例如当前目标 `0.0.156` 时，脚本从当前真实二进制生成临时 `0.0.155` core：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+   BIFROST_UPGRADE_E2E_VERSION=0.0.156 \
+   BIFROST_UPGRADE_E2E_ENTRYPOINT=app-upgrade-stale-runtime \
+   BIFROST_DISABLE_TRAY=1 \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+     bash e2e-tests/tests/test_upgrade_local_restart_e2e.sh
+   ```
 4. 执行 direct desktop CLI 终态和 WebView owner 分流回归：
    ```bash
    BIFROST_BIN="$PWD/target/debug/bifrost" \
@@ -259,9 +277,15 @@
    test "$(wc -l < crates/bifrost-cli/src/commands/app/installer.rs)" -le 1500
    test "$(wc -l < crates/bifrost-cli/src/commands/app/tests.rs)" -le 1500
    test "$(wc -l < crates/bifrost-cli/src/commands/upgrade.rs)" -le 1500
+   test "$(wc -l < crates/bifrost-cli/src/commands/upgrade/desktop_companion.rs)" -le 1500
    test "$(wc -l < crates/bifrost-cli/src/commands/upgrade/download.rs)" -le 1500
    test "$(wc -l < crates/bifrost-cli/src/commands/upgrade/restart.rs)" -le 1500
    test "$(wc -l < crates/bifrost-cli/src/commands/upgrade/tests.rs)" -le 1500
+   test "$(wc -l < crates/bifrost-cli/src/commands/upgrade/tests/review_comments.rs)" -le 1500
+   test "$(wc -l < desktop/src-tauri/src/main.rs)" -le 1500
+   test "$(wc -l < desktop/src-tauri/src/upgrade_handoff.rs)" -le 1500
+   test "$(wc -l < desktop/src-tauri/src/backend_runtime.rs)" -le 1500
+   test "$(wc -l < desktop/src-tauri/src/tests.rs)" -le 1500
    local_home='/Users/'eden_studio
    ! grep -q "$local_home" human_tests/tray-webui-auto-update.md
    ```
@@ -281,9 +305,11 @@
 - 只有 Admin/Tauri 发起且带 handoff 标记的 `source=desktop` 才停在 `Restarting` 交给当前 App；用户直接执行 `bifrost app upgrade --source desktop --no-cli` 会自行写 `Completed`。Desktop shell 观察到 CLI-owned `source=admin` 的 `Completed` 时只刷新 WebView，不重启 App。
 - changed-lines 95% 门禁只排除从原文件真实消失、至少 8 行且至少 4 行实质代码的机械搬移块；仍保留在原文件的 copy-paste 必须继续计入门禁，小样板和真实修改行也仍计入，报告显示排除行数。
 - 顶层 App updater 与 self-update 共用跨进程 `upgrade.lock`，并发 App/CLI updater 只能有一个 owner；`source=cli-upgrade` 只有同时携带父事务私有 marker 才能绕过父锁，用户仅伪造可见 source 不能绕过。App 管理的 CLI child 必须固定 target、禁止递归更新 App/重启 core；Windows deferred helper 直接使用该固定 target，且由 App 父事务收口时不得提前发布 `Completed`。
+- 直接执行 `bifrost app upgrade` 时只禁止 CLI updater 递归更新 App，不得禁止 CLI-owned core 重启；真实链路必须看到旧 PID 被替换、新 PID 使用升级后的临时 CLI，并且 App bundle 同时安装到隔离目录。
+- CLI-owned core 的 Windows companion 发现目标桌面进程仍在运行时必须改走 `source=desktop` deferred handoff，并携带私有 parent/handoff marker；没有运行桌面进程时继续使用 caller-managed 即时安装，避免无人接管 pending marker。
 - native desktop restart marker/helper 失败会持久化 `Failed`，刷新后不会重新显示旧 `Completed`。
 - 普通浏览器不能启动 desktop-owned 安装；桌面 shell 请求仍把 CLI 与 App 一起升级。
-- `app.rs`、`app/installer.rs`、`app/tests.rs` 以及 `upgrade.rs`、`upgrade/download.rs`、`upgrade/restart.rs`、`upgrade/tests.rs` 均不超过 1500 行，测试文档不包含本机绝对路径。
+- `app.rs`、`app/installer.rs`、`app/tests.rs`、`upgrade.rs`、`upgrade/desktop_companion.rs`、`upgrade/download.rs`、`upgrade/restart.rs`、`upgrade/tests*.rs` 以及 desktop `main.rs`、`upgrade_handoff.rs`、`backend_runtime.rs`、`tests.rs` 均不超过 1500 行，测试文档不包含本机绝对路径。
 
 ## 清理步骤
 
@@ -298,6 +324,7 @@
 
 2026-07-18 本次状态机审计已执行（最终复测）：
 
+- TC-TWA-10（PR comments 第六轮）：通过。desktop `main.rs` 按 upgrade handoff、backend runtime 和 tests 拆为 `1353/660/1430/1113` 行；CLI upgrade companion 独立为 `203` 行，upgrade tests 拆为 `1470/107` 行。锁竞争定向测试证明 fresh Windows pending marker 返回“handoff already pending”且保留原 `Restarting/source=desktop`；直接 App 行为测试证明只禁止 App 递归而保留 proxy restart；Windows companion 决策覆盖“桌面进程运行→desktop deferred handoff”和“未运行→caller-managed install”。升级 restart 契约修正拆分后的扫描范围并复跑 `21/21`。普通 CLI 本地归档真实升级最终为 `18/18`，旧 daemon `99783` 在随机端口 `57694` 被新 PID `285` 替换；直接 `app upgrade` 真实链路最终为 `19/19`，在隔离目录安装 pinned App target，并将旧 daemon `98290` 在随机端口 `57566` 替换为新 PID `98529`。针对用户原始 `155` 残留问题，额外构造磁盘/命令 CLI 已为 `0.0.156`、运行中 core 为临时真实 `0.0.155` 的 already-latest 场景，`app upgrade` 回归为 `17/17`：旧 PID `11975` 被新 PID `12172` 替换，App、CLI 与新 core 都收敛到 `0.0.156`。三条链路都额外从安装路径执行 `--version` 并读取新 core 的 `/api/system.version`，均精确等于 pinned target；同时保持 no-system-proxy、清理 tray helper 并释放端口。App-owned Admin 为 `17/17`，direct desktop CLI 为 `36/36`，native handoff 为 `5/5 + 1/1 + 1/1 + 1/1`。未操作 9900 或真实 `/Applications/Bifrost.app`。
 - TC-TWA-08/09/10（第五轮完整复测）：通过。App-owned 真实 Admin 链路 `17/17`，CLI runtime ownership `4/4`，CLI restart `21/21`，Admin 真实下载→安装→版本核验→daemon 重启 `15/15`，direct desktop CLI `36/36`，native handoff 为 `5/5 + 1/1 + 1/1 + 1/1`。CLI 全量 lib `1233 passed / 2 ignored`；strict clippy、all-targets build、fmt 全绿；workspace 首轮唯一失败是无关 rule-share 测试并发创建默认 RulesStorage 命中 `AlreadyExists`，精确复跑 `1/1` 后以 `--test-threads=1` 复跑整个 workspace 退出码 0。第 1 轮 review 修正 child marker 误加到错误 helper、pending handoff 二次检查竞态和 coverage 短片段误排除；第 2 轮将 CLI lock bypass 收紧为 marker + skip-App + skip-restart + pinned-target 缺一不可，并复跑定向单测、coverage 工具 `13/13` 与 restart E2E `21/21`。所有真实链路使用临时目录和随机端口，already-latest fixture 显式隔离本机 App 安装目录；未操作 9900 或真实 `/Applications/Bifrost.app`。
 - TC-TWA-09/10（PR comments 第五轮定向回归）：通过。父锁/私有 child marker、pending desktop handoff progress 保留、Windows deferred pinned target 与 progress owner、direct App 固定 target 四个定向单测均为 `1/1`；coverage-diff 工具测试为 `13/13`，新增断言证明跨文件原位置仍保留的 copy-paste 和同文件前插/后插 duplicate 都不会被 changed-lines 门禁误排除，而同文件真实机械搬移仍可排除；保留块切分出的短片段也不能伪装成搬移。使用失败 CI run `29654516618` 的原始 `lcov.info` 重放修复后的门禁，changed-lines 为 `95.42% (1021/1070)` 并通过 `95%` 阈值；coverage pipeline contract `31/31` 通过。App-managed child 只有同时携带 skip-App、skip-restart、pinned-target 和 parent-lock marker 才复用父锁；仅伪造 `source=cli-upgrade` 或 marker 会被共享锁拒绝。全部测试使用临时目录，未启动或修改 9900 服务。
 - TC-TWA-10（CI 高负载 CLI 探针回归）：通过。run `29655456923` 在 LLVM coverage 全量并发测试中暴露 non-zero CLI fixture 的 `1s` 超时过窄，瞬时脚本可能在 runner 高负载调度下先命中 timeout，导致用例未验证到预期的 exit-status 分支。fixture 超时调整为 `10s`，仍严格断言错误包含非零退出状态，并在失败信息中打印实际 error chain；精确用例与 CLI lib 全量并发测试均重新执行。该改动不放宽产品门禁或业务断言，未操作 9900 服务。

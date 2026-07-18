@@ -21,7 +21,7 @@ use fs2::FileExt;
 
 use super::upgrade::{
     download_progress_line, handle_background_upgrade, take_deferred_install_scheduled,
-    RunningProxyHint,
+    take_desktop_handoff_scheduled, RunningProxyHint,
 };
 use crate::cli::Commands;
 
@@ -39,7 +39,7 @@ struct ActiveProgressSink {
 static SINK: OnceLock<Mutex<Option<ActiveProgressSink>>> = OnceLock::new();
 const UPGRADE_LOCK_FILE_NAME: &str = "upgrade.lock";
 
-enum UpgradeLockAttempt {
+pub(crate) enum UpgradeLockAttempt {
     Acquired(File),
     Contended,
     PendingDesktopHandoff,
@@ -73,7 +73,9 @@ pub(crate) fn try_acquire_upgrade_lock(data_dir: &Path) -> Result<Option<File>, 
     }
 }
 
-fn try_acquire_upgrade_lock_attempt(data_dir: &Path) -> Result<UpgradeLockAttempt, BifrostError> {
+pub(crate) fn try_acquire_upgrade_lock_attempt(
+    data_dir: &Path,
+) -> Result<UpgradeLockAttempt, BifrostError> {
     std::fs::create_dir_all(data_dir).map_err(BifrostError::Io)?;
     if crate::commands::app::desktop_pending_install_guard_is_active(data_dir) {
         // The App updater has handed a Windows MSI/EXE to the desktop shell.
@@ -259,7 +261,8 @@ fn handle_upgrade_background_with(
     // older in-memory version.
     let restart_hint = RunningProxyHint::from_parts(running_proxy_pid, running_proxy_port);
     let result = engine(restart_hint);
-    let deferred_terminal_pending = take_deferred_install_scheduled();
+    let deferred_terminal_pending =
+        take_deferred_install_scheduled() || take_desktop_handoff_scheduled();
 
     match &result {
         Ok(()) if deferred_terminal_pending => {
