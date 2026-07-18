@@ -80,7 +80,7 @@ wait_upstream_ready() {
         attempts=$((attempts + 1))
     done
 
-    echo "Upstream did not become ready. Log:" >&2
+    echo "Upstream server did not become ready. Log:" >&2
     sed -n '1,160p' "${TEST_DATA_DIR}/upstream.log" >&2 2>/dev/null || true
     return 1
 }

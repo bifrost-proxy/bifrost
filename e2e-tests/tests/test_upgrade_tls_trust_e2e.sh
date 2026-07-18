@@ -225,6 +225,9 @@ for _ in {1..300}; do
 done
 if [[ ! -s "$PORT_FILE" ]]; then
     echo "HTTPS mirror did not start" >&2
+    if [[ -n "$SERVER_PID" ]] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "HTTPS mirror process exited before becoming ready" >&2
+    fi
     cat "$SERVER_LOG" >&2 2>/dev/null || true
     exit 1
 fi
