@@ -41,14 +41,16 @@
 操作步骤：
 
 1. 记录生产 9900 PID、预览 `files.json` 和真实 WAV 的 SHA-256。
-2. 使用独立 `BIFROST_DATA_DIR=/Users/eden_studio/.bifrost/moss-preview` 和端口 18997 启动当前分支 Bifrost，并通过 `BIFROST_MOSS_RUNTIME_URL=file://...zip` 模拟正式 release 资产。
-3. 通过 API 创建或读取 `moss_joint` 任务，确认 prompt 字段；触发 `/run`，轮询直到任务不再运行。
-4. 推理进程开始后记录 PID、命令行和 `started_at_ms`；若 1800.15 秒音频运行达到 900.075 秒仍未完成，立即调用 `pause?force=true` 并判失败。
+2. 执行 `bash e2e-tests/tests/test_asr_moss_release_contract.sh`，确认 release workflow 与 Rust 初始化器的固定源码、模型、元数据、资产名和 checksum 契约一致。
+3. 使用独立 `BIFROST_DATA_DIR=/Users/eden_studio/.bifrost/moss-preview` 和端口 18997 启动当前分支 Bifrost，并通过 `BIFROST_MOSS_RUNTIME_URL=file://...zip` 模拟正式 release 资产。
+4. 通过 API 创建或读取 `moss_joint` 任务，确认 prompt 字段；触发 `/run`，轮询直到任务不再运行。
+5. 推理进程开始后记录 PID、命令行和 `started_at_ms`；若 1800.15 秒音频运行达到 900.075 秒仍未完成，立即调用 `pause?force=true` 并判失败。
 
 预期结果：
 
 - 首次运行自动创建 `~/.bifrost/asr/moss_joint_mlx/runtime` 与 `model/model.safetensors`，不会写系统 Python。
 - 可重定位 Python/MLX runtime smoke check、模型大小和 SHA-256 校验通过；归档中的 macOS 元数据不得落盘。
+- PR CI 会在不下载模型权重的前提下检查 release metadata 至少覆盖运行时必需文件，且权重不会重复塞入 runtime zip。
 - 子进程命令必须是 `moss_joint_mlx/runtime/python/bin/python3.12 ... moss_mlx_runner.py`，不能再调用旧 GGML `moss-transcribe`。
 - 1800.15 秒真实音频成功转录，任务汇总为 `processed=1`、`failed=0`，推理耗时不超过 900.075 秒。
 
@@ -115,3 +117,4 @@
 | 2026-07-19 | TC-MOSS-03 | PASS：timeline 248 segments、9 speakers（S01-S09）、无空 speaker，首段 120 ms、末段 1,800,140 ms；metadata 模型为 `MOSS-Transcribe-Diarize-MLX-8bit` 且不含 prompt 正文。 |
 | 2026-07-19 | TC-MOSS-04 | PASS：真实打包首次发现 AppleDouble UTF-8 失败并在 2.58 秒停止；打包与安装双层过滤修复后，安装目录 metadata sidecar 数为 0。9900 保持 PID 22956；18997 按用户要求保留运行供体验。 |
 | 2026-07-19 | TC-MOSS-05 | PASS：1.2 秒慢 fixture 约 600 ms 返回 `moss_rtf_exceeded`；30 秒 2.05 秒、120 秒 4.07 秒、1800.15 秒 83.261 秒，均小于 0.5 RTF。120 秒 MLX/GGML 规范化文本均 319 字符，相似度 0.9969，speaker 数与时间线目视一致；未宣称 WER/DER。 |
+| 2026-07-19 | TC-MOSS-02 | PASS（发布门禁复核）：新增发布契约 E2E 通过，确认 MLX-Audio commit、模型 snapshot、12 个 metadata 文件、runtime 资产名与 checksum manifest 一致；仅保留发布清单文件的 30 秒真实音频推理 1.753 秒完成，RTF 0.05842，得到 9 段、3 个 speaker。 |

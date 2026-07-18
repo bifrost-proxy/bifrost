@@ -55,7 +55,7 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 2. 新增 `transcription_prompt` 字符串。空字符串表示未配置；创建、PATCH、GET 和 Web 表单均保留该值，最大 4000 个 Unicode 字符。
 3. `moss_joint` 走整文件联合转录，不执行 Qwen 30 秒分块，也不再叠加 Sherpa/Pyannote 分离；模型原生 speaker 直接进入 timeline。
 4. 首次运行时自动准备独立、可重定位的 Python 3.12 + MLX-Audio runtime，以及固定 snapshot 的 8-bit MLX 模型；准备完成后同一任务直接继续推理。
-5. 发布包为 Apple Silicon macOS 生成 `moss-joint-runtime` 资产。MLX-Audio 固定 commit `64e8416c303fb3b3463dab8eb4ebd78c55a87c1a`，8-bit 模型固定 snapshot `90c3a1ab78fa56e47e1493ddea48e3ababaf2f71`。初始化器从同版本 release checksum manifest 读取 runtime zip 的 SHA-256，校验后才解压；1,258,427,442-byte 权重固定 SHA-256 `469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190`，下载后必须校验。测试覆盖的自定义 runtime URL 必须同时提供 `BIFROST_MOSS_RUNTIME_SHA256`。
+5. 发布包为 Apple Silicon macOS 生成 `moss-joint-runtime` 资产。MLX-Audio 固定 commit `64e8416c303fb3b3463dab8eb4ebd78c55a87c1a`，8-bit 模型固定 snapshot `90c3a1ab78fa56e47e1493ddea48e3ababaf2f71`。初始化器从同版本 release checksum manifest 读取 runtime zip 的 SHA-256，校验后才解压；1,258,427,442-byte 权重固定 SHA-256 `469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190`，下载后必须校验。测试覆盖的自定义 runtime URL 必须同时提供 `BIFROST_MOSS_RUNTIME_SHA256`。`test_asr_moss_release_contract.sh` 在普通 PR CI 中校验 workflow 与初始化器的 commit、snapshot、metadata、资产名和 checksum 契约，避免只有真正发版时才发现配置漂移。
 6. 用户 Prompt 通过仅当前进程可读的临时文件传入。runtime 始终先使用官方时间戳/说话人协议 Prompt，再追加用户上下文，避免自定义 Prompt 破坏结构化输出协议。
 7. 整段推理采用硬 watchdog：耗时达到音频时长的 `0.5x` 时杀死子进程并返回 `moss_rtf_exceeded`，不会继续消耗资源或悄悄回退到不同模型。
 8. release 打包禁用 macOS resource fork，并扫描拒绝 `._*`、`.DS_Store`、`__MACOSX`；安装器也跳过这些元数据，避免 Python 模型加载器误读 AppleDouble 文件。
