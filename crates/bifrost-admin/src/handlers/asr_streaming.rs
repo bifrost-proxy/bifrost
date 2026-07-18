@@ -462,6 +462,8 @@ mod tests {
 #[cfg(test)]
 mod streaming_extra_tests {
     use super::*;
+    use tempfile::TempDir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn whole_file_text_fallback_builds_single_segment_when_text_present() {
@@ -550,6 +552,56 @@ mod streaming_extra_tests {
             assert_eq!(transcription.segments.len(), 1);
             assert_eq!(transcription.structured.finish_reason, expected);
         }
+    }
+
+    #[tokio::test]
+    async fn whole_file_endpoint_returns_structured_verbose_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 16 * 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            let body = serde_json::json!({
+                "text": "hello",
+                "segments": [{
+                    "start": 0.25,
+                    "end": 1.0,
+                    "text": "hello",
+                    "speaker": "speaker_01"
+                }],
+                "finish_reason": "completed"
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let temp = TempDir::new().unwrap();
+        let wav = temp.path().join("sample.wav");
+        std::fs::write(&wav, b"test wav payload").unwrap();
+        let transcription = call_asr_whole_file_endpoint(
+            &format!("http://{address}"),
+            "english",
+            &wav,
+            Some(1_000),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(transcription.segments[0].0, 250);
+        assert_eq!(
+            transcription.structured.segments[0].normalized_speaker(),
+            Some("speaker_01")
+        );
+        assert_eq!(
+            transcription.structured.finish_reason,
+            TranscriptionFinishReason::Completed
+        );
+        server.await.unwrap();
     }
 
     #[test]

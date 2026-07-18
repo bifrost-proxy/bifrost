@@ -1585,7 +1585,7 @@ mod tests {
             "chinese",
             Path::new("/nonexistent/chunk.wav"),
             0,
-            1,
+            0,
             0,
             temp.path(),
             None,
@@ -1610,6 +1610,33 @@ mod tests {
         .await
         .unwrap();
         assert!(silent.structured.segments.is_empty());
+
+        let empty_chunks = transcribe_in_chunks(
+            Path::new("/nonexistent/asr"),
+            Path::new("/nonexistent/model"),
+            "chinese",
+            Path::new("/nonexistent/input.wav"),
+            temp.path(),
+            0,
+            30,
+            5,
+            0,
+            None,
+            None,
+            None,
+            "Qwen3-ASR-0.6B",
+            &[],
+            AsrRuntimeStrategy::ForkPerChunk,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(empty_chunks.transcription.structured.segments.is_empty());
     }
 
     #[test]
