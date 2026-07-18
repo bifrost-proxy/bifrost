@@ -412,6 +412,37 @@ test_windows_upgrade_defers_self_replacement_in_source() {
     fi
 }
 
+test_upgrade_review_feedback_contracts() {
+    _log_info "case: upgrade review feedback contracts remain enforced"
+
+    local app_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/app.rs"
+    local installer_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/app/installer.rs"
+    local app_tests="${PROJECT_DIR}/crates/bifrost-cli/src/commands/app/tests.rs"
+    local upgrade_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade.rs"
+    local background_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade_background.rs"
+    local admin_src="${PROJECT_DIR}/crates/bifrost-admin/src/handlers/system.rs"
+    local desktop_src="${PROJECT_DIR}/desktop/src-tauri/src/main.rs"
+
+    if [ "$(wc -l <"$app_src")" -le 1500 ] \
+        && [ "$(wc -l <"$installer_src")" -le 1500 ] \
+        && [ "$(wc -l <"$app_tests")" -le 1500 ] \
+        && grep -Fq 'parent.join(format!(".{name}.backup"))' "$installer_src" \
+        && grep -Fq 'verify_installed_cli_target_version_or_restore' "$upgrade_src" \
+        && grep -Fq 'or_else(|| Some("127.0.0.1".to_string()))' "$upgrade_src" \
+        && grep -Fq 'Another updater owns the cross-process upgrade lock' "$background_src" \
+        && grep -Fq -- '"--app-dir".to_string()' "$admin_src" \
+        && grep -Fq -- '"--app-dir".to_string()' "$upgrade_src" \
+        && grep -Fq 'persist_desktop_upgrade_handoff_failure' "$desktop_src" \
+        && grep -Fq 'read_installed_cli_version_with_timeout' "$app_src"; then
+        _log_pass "review feedback contracts cover recovery, ownership, rollback, app-dir, and module size"
+    else
+        _log_fail "upgrade review feedback contracts" \
+            "stable backup + exact rollback + safe marker + lock failure + app-dir + persisted handoff + bounded modules" \
+            "one or more contracts are missing"
+        return 1
+    fi
+}
+
 main() {
     TEST_DATA_DIR="$(mktemp -d)"
 
@@ -421,6 +452,7 @@ main() {
     test_macos_daemon_start_uses_exec_child_guard || true
     test_upgrade_installs_binary_atomically_in_source || true
     test_windows_upgrade_defers_self_replacement_in_source || true
+    test_upgrade_review_feedback_contracts || true
     test_upgrade_no_daemon_no_error || true
     test_upgrade_with_daemon_version_current || true
     test_runtime_json_contains_correct_info || true

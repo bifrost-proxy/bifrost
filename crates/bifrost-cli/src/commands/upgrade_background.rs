@@ -197,10 +197,24 @@ fn handle_upgrade_background_with(
             tracing::warn!(
                 "background upgrade: another process owns the cross-process upgrade lock"
             );
+            write_upgrade_lock_failure(
+                &data_dir,
+                target.clone(),
+                source.clone(),
+                "Upgrade is already running in another process",
+                "Another updater owns the cross-process upgrade lock",
+            );
             return;
         }
         Err(error) => {
             tracing::error!(error = %error, "background upgrade: cannot acquire upgrade lock");
+            write_upgrade_lock_failure(
+                &data_dir,
+                target.clone(),
+                source.clone(),
+                "Upgrade lock could not be acquired",
+                &format!("Failed to acquire the cross-process upgrade lock: {error}"),
+            );
             return;
         }
     };
@@ -253,6 +267,22 @@ fn handle_upgrade_background_with(
     // terminal record (Completed/Failed) stays on disk for readers (tray/admin)
     // to consume after they refresh; they clear it on acknowledgement.
     let _ = take_sink();
+}
+
+fn write_upgrade_lock_failure(
+    data_dir: &Path,
+    target: Option<String>,
+    source: String,
+    message: &str,
+    error: &str,
+) {
+    write_progress(
+        data_dir,
+        &UpgradeProgress::new(UpgradePhase::Failed, message)
+            .with_target(target)
+            .with_source(Some(source))
+            .with_error(Some(error.to_string())),
+    );
 }
 
 #[cfg(test)]
@@ -416,16 +446,24 @@ mod tests {
         );
 
         assert!(!engine_called.get());
+        let progress = read_progress(&dir);
+        assert_eq!(progress.phase, UpgradePhase::Failed);
+        assert_eq!(progress.target_version.as_deref(), Some("0.0.156"));
+        assert_eq!(progress.source.as_deref(), Some("admin"));
+        assert!(progress
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("cross-process upgrade lock")));
         drop(owner);
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn background_upgrade_does_not_run_when_lock_directory_cannot_be_created() {
+    fn background_upgrade_writes_failed_progress_when_lock_file_cannot_be_opened() {
         let _guard = lock_tests();
-        let temp = tempfile::tempdir().expect("tempdir");
-        let file = temp.path().join("not-a-directory");
-        std::fs::write(&file, "occupied").expect("write blocking file");
+        let dir = temp_dir();
+        std::fs::create_dir(dir.join(UPGRADE_LOCK_FILE_NAME))
+            .expect("make lock path impossible to open as a file");
         let engine_called = std::cell::Cell::new(false);
 
         handle_upgrade_background_with(
@@ -433,7 +471,7 @@ mod tests {
             "admin".to_string(),
             None,
             None,
-            Ok(file),
+            Ok(dir.clone()),
             |_| {
                 engine_called.set(true);
                 Ok(())
@@ -441,6 +479,15 @@ mod tests {
         );
 
         assert!(!engine_called.get());
+        let progress = read_progress(&dir);
+        assert_eq!(progress.phase, UpgradePhase::Failed);
+        assert_eq!(progress.target_version.as_deref(), Some("0.0.156"));
+        assert_eq!(progress.source.as_deref(), Some("admin"));
+        assert!(progress
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("Failed to acquire")));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -263,12 +263,15 @@ async fn start_upgrade(state: SharedAdminState, query: Option<&str>) -> Response
     // file and launch competing installers/restarts.
     let _start_guard = upgrade_start_lock().lock().await;
     let dir = data_dir();
-    let (_requested_channel, channel, running_proxy) = upgrade_request_plan(
+    let (requested_channel, channel, running_proxy) = upgrade_request_plan(
         query,
         desktop_core_env_enabled(std::env::var_os(DESKTOP_CORE_ENV)),
         std::process::id(),
         state.port(),
     );
+    if let Err(message) = validate_upgrade_request_channel(requested_channel, channel) {
+        return error_response(StatusCode::CONFLICT, message);
+    }
 
     // Refuse if an upgrade is already running and still alive.
     let current = read_progress(&dir);
@@ -293,8 +296,15 @@ async fn start_upgrade(state: SharedAdminState, query: Option<&str>) -> Response
         .with_source(Some(channel.progress_source().to_string()));
     write_progress(&dir, &initial);
 
-    if let Err(error) = spawn_upgrade_process(channel, Some(target_version.as_str()), running_proxy)
-    {
+    let app_dir = (channel == UpgradeChannel::Desktop)
+        .then(desktop_app_install_dir_for_upgrade)
+        .flatten();
+    if let Err(error) = spawn_upgrade_process(
+        channel,
+        Some(target_version.as_str()),
+        running_proxy,
+        app_dir.as_deref(),
+    ) {
         warn!(error = %error, "[SYSTEM] failed to spawn self-update subprocess");
         let failed = UpgradeProgress::new(UpgradePhase::Failed, "Upgrade failed to start")
             .with_target(Some(target_version))
@@ -715,9 +725,18 @@ fn required_upgrade_target(version: &crate::VersionCheckResponse) -> Result<Stri
 }
 
 fn desktop_app_version_for_version_check() -> Option<String> {
+    desktop_app_installation_for_version_check().map(|(_, version)| version)
+}
+
+fn desktop_app_installation_for_version_check() -> Option<(PathBuf, String)> {
     desktop_app_install_candidates()
         .into_iter()
-        .find_map(|path| installed_desktop_app_version(&path))
+        .find_map(|path| installed_desktop_app_version(&path).map(|version| (path, version)))
+}
+
+fn desktop_app_install_dir_for_upgrade() -> Option<PathBuf> {
+    desktop_app_installation_for_version_check()
+        .and_then(|(path, _)| path.parent().map(Path::to_path_buf))
 }
 
 fn desktop_app_install_candidates() -> Vec<PathBuf> {
@@ -848,6 +867,16 @@ fn effective_upgrade_channel(_requested: UpgradeChannel, desktop_core: bool) -> 
     }
 }
 
+fn validate_upgrade_request_channel(
+    requested: UpgradeChannel,
+    orchestrator: UpgradeChannel,
+) -> Result<(), &'static str> {
+    if orchestrator == UpgradeChannel::Desktop && requested != UpgradeChannel::Desktop {
+        return Err("A desktop-owned core must be upgraded from the Bifrost desktop app");
+    }
+    Ok(())
+}
+
 fn upgrade_request_plan(
     query: Option<&str>,
     desktop_core: bool,
@@ -864,11 +893,17 @@ fn spawn_upgrade_process(
     channel: UpgradeChannel,
     target_version: Option<&str>,
     running_proxy: Option<(u32, u16)>,
+    app_dir: Option<&Path>,
 ) -> std::io::Result<()> {
     let program = std::env::current_exe().unwrap_or_else(|_| "bifrost".into());
 
     let mut command = Command::new(&program);
-    command.args(upgrade_process_args(channel, target_version, running_proxy));
+    command.args(upgrade_process_args(
+        channel,
+        target_version,
+        running_proxy,
+        app_dir,
+    ));
     command
         .stdin(Stdio::null())
         .stdout(upgrade_log_stdio())
@@ -916,6 +951,7 @@ fn upgrade_process_args(
     channel: UpgradeChannel,
     target_version: Option<&str>,
     running_proxy: Option<(u32, u16)>,
+    app_dir: Option<&Path>,
 ) -> Vec<String> {
     let mut args = Vec::new();
     match channel {
@@ -943,6 +979,10 @@ fn upgrade_process_args(
             }
             args.push("--source".to_string());
             args.push("desktop".to_string());
+            if let Some(app_dir) = app_dir {
+                args.push("--app-dir".to_string());
+                args.push(app_dir.to_string_lossy().into_owned());
+            }
             args.push("-y".to_string());
         }
     }
@@ -967,10 +1007,12 @@ mod tests {
         effective_upgrade_channel, install_binary_atomically, install_cli_from_current_exe,
         merge_companion_update, normalize_progress, parse_upgrade_channel, required_upgrade_target,
         spawn_upgrade_process, start_upgrade, upgrade_process_args, upgrade_request_plan,
-        upgrade_start_lock, CliInstallRequest, StatusCode, UpgradeChannel,
+        upgrade_start_lock, validate_upgrade_request_channel, CliInstallRequest, StatusCode,
+        UpgradeChannel,
     };
     use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS};
     use chrono::Utc;
+    use std::path::Path;
     use std::sync::Arc;
 
     fn version_response(
@@ -1104,6 +1146,15 @@ mod tests {
             upgrade_request_plan(Some("channel=cli"), true, 12345, 9900),
             (UpgradeChannel::Cli, UpgradeChannel::Desktop, None)
         );
+        assert_eq!(
+            validate_upgrade_request_channel(UpgradeChannel::Cli, UpgradeChannel::Desktop),
+            Err("A desktop-owned core must be upgraded from the Bifrost desktop app")
+        );
+        assert!(
+            validate_upgrade_request_channel(UpgradeChannel::Desktop, UpgradeChannel::Desktop)
+                .is_ok()
+        );
+        assert!(validate_upgrade_request_channel(UpgradeChannel::Cli, UpgradeChannel::Cli).is_ok());
     }
 
     #[tokio::test]
@@ -1163,7 +1214,12 @@ mod tests {
     #[test]
     fn upgrade_process_args_separate_cli_and_desktop_channels() {
         assert_eq!(
-            upgrade_process_args(UpgradeChannel::Cli, Some("0.0.139"), Some((12345, 9900)),),
+            upgrade_process_args(
+                UpgradeChannel::Cli,
+                Some("0.0.139"),
+                Some((12345, 9900)),
+                None,
+            ),
             vec![
                 "self-update",
                 "--target",
@@ -1181,6 +1237,7 @@ mod tests {
                 UpgradeChannel::Desktop,
                 Some("0.0.139"),
                 Some((12345, 9900)),
+                Some(Path::new("/Users/test/Applications")),
             ),
             vec![
                 "app",
@@ -1189,6 +1246,8 @@ mod tests {
                 "0.0.139",
                 "--source",
                 "desktop",
+                "--app-dir",
+                "/Users/test/Applications",
                 "-y"
             ]
         );
@@ -1215,7 +1274,7 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         std::env::set_var("BIFROST_DATA_DIR", dir.path());
-        spawn_upgrade_process(UpgradeChannel::Desktop, None, None)
+        spawn_upgrade_process(UpgradeChannel::Desktop, None, None, None)
             .expect("spawn detached desktop upgrade command");
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
@@ -1246,12 +1305,14 @@ mod tests {
         let previous = std::env::var_os("BIFROST_APP_INSTALL_DIR");
         std::env::set_var("BIFROST_APP_INSTALL_DIR", temp.path());
         let version = super::desktop_app_version_for_version_check();
+        let app_dir = super::desktop_app_install_dir_for_upgrade();
         match previous {
             Some(value) => std::env::set_var("BIFROST_APP_INSTALL_DIR", value),
             None => std::env::remove_var("BIFROST_APP_INSTALL_DIR"),
         }
 
         assert_eq!(version.as_deref(), Some("0.0.144"));
+        assert_eq!(app_dir.as_deref(), Some(temp.path()));
     }
 
     #[test]

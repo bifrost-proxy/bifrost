@@ -708,8 +708,8 @@ fn resolve_desktop_app_path(app_dir: &Path) -> PathBuf {
     }
 }
 
-fn post_upgrade_desktop_app_args(target_version: &str) -> Vec<String> {
-    vec![
+fn post_upgrade_desktop_app_args(target_version: &str, app_dir: Option<&Path>) -> Vec<String> {
+    let mut args = vec![
         "app".to_string(),
         "upgrade".to_string(),
         "--no-cli".to_string(),
@@ -717,8 +717,13 @@ fn post_upgrade_desktop_app_args(target_version: &str) -> Vec<String> {
         "cli-upgrade".to_string(),
         "--version".to_string(),
         target_version.to_string(),
-        "-y".to_string(),
-    ]
+    ];
+    if let Some(app_dir) = app_dir {
+        args.push("--app-dir".to_string());
+        args.push(app_dir.to_string_lossy().into_owned());
+    }
+    args.push("-y".to_string());
+    args
 }
 
 fn update_desktop_app_after_upgrade_best_effort(executable: &Path, target_version: &str) {
@@ -751,7 +756,7 @@ fn update_desktop_app_after_upgrade(
     );
     println!("{}", "Updating Bifrost desktop app...".bright_cyan());
 
-    let args = post_upgrade_desktop_app_args(target_version);
+    let args = post_upgrade_desktop_app_args(target_version, app_path.parent());
     match command_output_with_timeout(
         executable,
         &args,
@@ -858,6 +863,18 @@ fn restore_binary_backup_best_effort(target_path: &Path) {
             error
         ),
     }
+}
+
+fn verify_installed_cli_target_version_or_restore(
+    target_path: &Path,
+    target_version: &str,
+) -> Result<(), BifrostError> {
+    if let Err(error) = verify_installed_cli_target_version(target_path, target_version) {
+        restore_binary_backup_best_effort(target_path);
+        return Err(error);
+    }
+    cleanup_binary_backup(target_path);
+    Ok(())
 }
 
 fn install_binary_atomically(
@@ -1718,7 +1735,6 @@ fn upgrade_manual(
 
             effective_target = musl_target;
             println!("{}", "✓ musl fallback succeeded".bright_green());
-            cleanup_binary_backup(target_path);
             fallback_result
         } else if let Err(e) = install_result {
             restore_binary_backup_best_effort(target_path);
@@ -1730,7 +1746,6 @@ fn upgrade_manual(
             ));
         }
     } else {
-        cleanup_binary_backup(target_path);
         install_result?
     };
 
@@ -1907,7 +1922,10 @@ fn handle_upgrade_inner(
 
     match upgrade_outcome {
         UpgradeInstallOutcome::Installed => {
-            verify_installed_cli_target_version(&restart_executable, &cache.latest_version)?;
+            verify_installed_cli_target_version_or_restore(
+                &restart_executable,
+                &cache.latest_version,
+            )?;
             install_skills_after_upgrade_best_effort(&restart_executable);
             finish_installed_upgrade(&restart_executable, &cache.latest_version, behavior)?;
         }
@@ -2012,10 +2030,10 @@ fn prepare_running_proxy_marker_with(
     let Some(hint) = restart_hint else {
         return Ok(());
     };
-    if !is_running(hint.pid) || listener_pid(hint.port) != Some(hint.pid) {
+    if !is_running(hint.pid) {
         return Err(BifrostError::Config(format!(
-            "Admin restart hint no longer owns the live listener on port {}",
-            hint.port
+            "Admin restart hint process {} is no longer running",
+            hint.pid
         )));
     }
     let matching_runtime = runtime_info
@@ -2025,6 +2043,12 @@ fn prepare_running_proxy_marker_with(
         if info.restartable_daemon() {
             return Ok(());
         }
+    }
+    if listener_pid(hint.port) != Some(hint.pid) {
+        return Err(BifrostError::Config(format!(
+            "Admin restart hint no longer owns the live listener on port {}",
+            hint.port
+        )));
     }
 
     // A Web UI request issued by a CLI-owned foreground core must survive the
@@ -2038,7 +2062,7 @@ fn prepare_running_proxy_marker_with(
         matching_runtime.and_then(|info| info.socks5_port),
         matching_runtime
             .and_then(|info| info.host.clone())
-            .or_else(|| Some("0.0.0.0".to_string())),
+            .or_else(|| Some("127.0.0.1".to_string())),
         RuntimeStartMode::Daemon,
     );
     recovered.started_at_ms = matching_runtime.and_then(|info| info.started_at_ms);
@@ -3087,7 +3111,7 @@ mod tests {
             Some(hint),
             Some(existing),
             |_| true,
-            |_| Some(hint.pid),
+            |_| None,
             |_| panic!("matching runtime marker must not be rewritten"),
         )
         .unwrap();
@@ -3137,6 +3161,7 @@ mod tests {
         assert_eq!(recovered.pid, hint.pid);
         assert_eq!(recovered.port, hint.port);
         assert_eq!(recovered.start_mode, RuntimeStartMode::Daemon);
+        assert_eq!(recovered.host.as_deref(), Some("127.0.0.1"));
         assert!(recovered.started_at_ms.is_none());
         assert!(recovered.binary_path.is_none());
 
@@ -3589,6 +3614,33 @@ mod tests {
         assert!(!binary_backup_path(&target).exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn upgrade_target_version_mismatch_restores_previous_binary() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("bifrost");
+        let backup = binary_backup_path(&target);
+        std::fs::write(&target, "#!/bin/sh\necho 'bifrost 9.9.9'\n")
+            .expect("write mismatched target");
+        std::fs::write(&backup, "#!/bin/sh\necho 'bifrost 0.0.155'\n")
+            .expect("write previous binary");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod target");
+        std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod backup");
+
+        let error = verify_installed_cli_target_version_or_restore(&target, "0.0.156")
+            .expect_err("wrong target version must fail");
+        assert!(error.to_string().contains("instead of target v0.0.156"));
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("read restored target"),
+            "#!/bin/sh\necho 'bifrost 0.0.155'\n"
+        );
+        assert!(!backup.exists());
+    }
+
     #[test]
     fn upgrade_post_install_skill_messages_cover_all_statuses() {
         assert!(
@@ -3615,7 +3667,7 @@ mod tests {
     #[test]
     fn upgrade_post_install_desktop_app_args_disable_cli_recursion() {
         assert_eq!(
-            post_upgrade_desktop_app_args("0.0.145"),
+            post_upgrade_desktop_app_args("0.0.145", Some(Path::new("/Users/test/Applications"))),
             vec![
                 "app",
                 "upgrade",
@@ -3624,6 +3676,8 @@ mod tests {
                 "cli-upgrade",
                 "--version",
                 "0.0.145",
+                "--app-dir",
+                "/Users/test/Applications",
                 "-y"
             ]
         );

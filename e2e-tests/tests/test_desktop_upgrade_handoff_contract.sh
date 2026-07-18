@@ -24,10 +24,18 @@ fi
 
 CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
   cargo test --manifest-path desktop/src-tauri/Cargo.toml upgrade_relaunch -- --nocapture
+CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
+  cargo test --manifest-path desktop/src-tauri/Cargo.toml restart_handoff_setup_failure -- --nocapture
 
 if ! grep -Fq 'sanitize_desktop_upgrade_relaunch_command(&mut command)' \
   "$REPO_ROOT/desktop/src-tauri/src/main.rs"; then
   echo "[desktop-upgrade-handoff] FAIL: relaunch path does not sanitize helper-only environment"
+  exit 1
+fi
+
+if ! grep -Fq 'persist_desktop_upgrade_handoff_failure(' \
+  "$REPO_ROOT/desktop/src-tauri/src/main.rs"; then
+  echo "[desktop-upgrade-handoff] FAIL: relaunch setup errors are not persisted to shared progress"
   exit 1
 fi
 

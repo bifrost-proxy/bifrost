@@ -1027,6 +1027,20 @@ fn write_desktop_upgrade_terminal_progress(
     write_progress(data_dir, &progress);
 }
 
+fn persist_desktop_upgrade_handoff_failure(data_dir: &Path, message: String) -> String {
+    append_desktop_bootstrap_log(
+        data_dir,
+        format!("desktop upgrade restart handoff failed: {message}"),
+    );
+    write_desktop_upgrade_terminal_progress(
+        data_dir,
+        UpgradePhase::Failed,
+        "Desktop restart handoff failed",
+        Some(message.clone()),
+    );
+    message
+}
+
 fn may_reuse_existing_backend(upgrade_relaunch: Option<&DesktopUpgradeRelaunchMarker>) -> bool {
     upgrade_relaunch.is_none()
 }
@@ -2614,11 +2628,15 @@ fn save_desktop_config(config_path: &Path, config: &DesktopConfig) -> tauri::Res
 
 #[tauri::command]
 fn restart_desktop_after_update(app: AppHandle) -> Result<(), String> {
-    let exe = std::env::current_exe()
-        .map_err(|error| format!("failed to resolve current desktop executable: {error}"))?;
     let state = app
         .try_state::<BackendState>()
         .ok_or_else(|| "desktop backend state is not available".to_string())?;
+    let exe = std::env::current_exe().map_err(|error| {
+        persist_desktop_upgrade_handoff_failure(
+            &state.data_dir,
+            format!("failed to resolve current desktop executable: {error}"),
+        )
+    })?;
 
     let old_core_pid = state
         .child
@@ -2639,8 +2657,12 @@ fn restart_desktop_after_update(app: AppHandle) -> Result<(), String> {
         proxy_port,
         app_target: app_target.to_string_lossy().into_owned(),
     };
-    let marker_path = write_upgrade_relaunch_marker(&state.data_dir, &marker)
-        .map_err(|error| format!("failed to prepare desktop upgrade relaunch: {error}"))?;
+    let marker_path = write_upgrade_relaunch_marker(&state.data_dir, &marker).map_err(|error| {
+        persist_desktop_upgrade_handoff_failure(
+            &state.data_dir,
+            format!("failed to prepare desktop upgrade relaunch: {error}"),
+        )
+    })?;
     append_desktop_bootstrap_log(
         &state.data_dir,
         format!(
@@ -2651,8 +2673,15 @@ fn restart_desktop_after_update(app: AppHandle) -> Result<(), String> {
             marker.app_target
         ),
     );
-    let helper = spawn_desktop_upgrade_relaunch_helper(&exe, &marker_path, &app_target)
-        .map_err(|error| format!("failed to spawn desktop upgrade relaunch helper: {error}"))?;
+    let helper = spawn_desktop_upgrade_relaunch_helper(&exe, &marker_path, &app_target).map_err(
+        |error| {
+            clear_upgrade_relaunch_marker(&state.data_dir);
+            persist_desktop_upgrade_handoff_failure(
+                &state.data_dir,
+                format!("failed to spawn desktop upgrade relaunch helper: {error}"),
+            )
+        },
+    )?;
     append_desktop_bootstrap_log(
         &state.data_dir,
         format!(
@@ -3119,10 +3148,11 @@ mod tests {
         host_window_close_behavior_for_platform, is_server_config_response,
         is_upgrade_relaunch_marker_active, main_interface_decorations_for_platform,
         mark_backend_unavailable_for_manual_start, may_reuse_existing_backend,
-        parse_port_update_response, poll_managed_backend_exit, publish_startup_ready,
-        read_active_upgrade_relaunch_marker, record_startup_deadline_error,
-        relaunch_command_for_target, resolve_bifrost_binary_from_env, resolve_desktop_config_path,
-        resolve_desktop_data_dir, sanitize_desktop_upgrade_relaunch_command, save_desktop_config,
+        parse_port_update_response, persist_desktop_upgrade_handoff_failure,
+        poll_managed_backend_exit, publish_startup_ready, read_active_upgrade_relaunch_marker,
+        record_startup_deadline_error, relaunch_command_for_target,
+        resolve_bifrost_binary_from_env, resolve_desktop_config_path, resolve_desktop_data_dir,
+        sanitize_desktop_upgrade_relaunch_command, save_desktop_config,
         should_allow_multiple_instances, should_handoff_to_main, should_retry_backend_candidate,
         startup_deadline_disposition, stop_backend_before_restart, terminate_managed_backend,
         uses_borderless_desktop_chrome_for_platform, wait_for_backend, wait_for_child_exit,
@@ -3536,6 +3566,35 @@ mod tests {
         assert_eq!(progress.target_version.as_deref(), Some("0.0.156"));
         assert_eq!(progress.source.as_deref(), Some("desktop"));
         assert_eq!(progress.error.as_deref(), Some("port still occupied"));
+    }
+
+    #[test]
+    fn restart_handoff_setup_failure_overwrites_completed_progress() {
+        use bifrost_core::upgrade_progress::{
+            read_progress, write_progress, UpgradePhase, UpgradeProgress,
+        };
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        write_progress(
+            temp_dir.path(),
+            &UpgradeProgress::new(UpgradePhase::Completed, "Desktop app update complete")
+                .with_target(Some("0.0.156".to_string()))
+                .with_source(Some("desktop".to_string())),
+        );
+
+        let returned = persist_desktop_upgrade_handoff_failure(
+            temp_dir.path(),
+            "failed to spawn desktop upgrade relaunch helper: denied".to_string(),
+        );
+        assert!(returned.contains("denied"));
+        let progress = read_progress(temp_dir.path());
+        assert_eq!(progress.phase, UpgradePhase::Failed);
+        assert_eq!(progress.target_version.as_deref(), Some("0.0.156"));
+        assert_eq!(progress.source.as_deref(), Some("desktop"));
+        assert!(progress
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("denied")));
     }
 
     #[test]

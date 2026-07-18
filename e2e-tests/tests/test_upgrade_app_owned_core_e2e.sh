@@ -172,10 +172,26 @@ PY
     binary_version="$("$install_bin" --version | awk '{print $2}')"
     assert_equals "$binary_version" "$cli_current_version" "CLI version check remains component-specific"
 
+    local browser_status browser_body pre_upgrade_version
+    browser_status="$(env NO_PROXY='*' no_proxy='*' curl -sS \
+        -o "$ROOT/browser-upgrade.json" -w '%{http_code}' -X POST \
+        --connect-timeout 2 --max-time 15 \
+        "http://127.0.0.1:${PORT}/_bifrost/api/system/upgrade?channel=cli")"
+    browser_body="$(cat "$ROOT/browser-upgrade.json")"
+    assert_equals "409" "$browser_status" "browser caller cannot start a desktop-owned restart handoff"
+    [[ "$browser_body" == *"must be upgraded from the Bifrost desktop app"* ]] \
+        && _log_pass "browser rejection explains the desktop-shell ownership boundary" \
+        || _log_fail "browser rejection is actionable" "desktop app guidance" "$browser_body"
+    pre_upgrade_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$old_app/Contents/Info.plist")"
+    assert_equals "0.0.1" "$pre_upgrade_version" "rejected browser request does not mutate the App"
+    [[ ! -e "$cli_log" ]] \
+        && _log_pass "rejected browser request does not launch the standalone CLI" \
+        || _log_fail "rejected browser request does not launch CLI" "no invocation log" "$(cat "$cli_log")"
+
     local start_response source
-    start_response="$(admin_curl POST '/api/system/upgrade?channel=cli')"
+    start_response="$(admin_curl POST '/api/system/upgrade?channel=desktop')"
     source="$(printf '%s' "$start_response" | json_field source)"
-    assert_equals "desktop" "$source" "App-owned upgrade dispatches the desktop orchestrator"
+    assert_equals "desktop" "$source" "desktop shell dispatches the desktop orchestrator"
 
     local phase=""
     for _ in $(seq 1 200); do

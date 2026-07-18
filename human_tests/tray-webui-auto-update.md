@@ -169,7 +169,7 @@
 - CLI-owned daemon 即使 runtime marker 丢失，也由 `self-update` 精确校验 PID/端口、恢复 marker 并从旧 PID 重启到新 PID。
 - CLI-owned foreground core 不会被误判成 App-owned；验证 PID/端口后接续为新版本 detached daemon。
 - App-owned core 的 runtime marker 保持 `runtime_start_mode=desktop`；CLI updater 即使被直接调用也不得停止或重启该 PID。
-- App-owned core 收到冲突的 `channel=cli` 请求时，Admin 按实际 runtime owner 改走 desktop orchestrator。
+- App-owned core 收到普通浏览器的 `channel=cli` 请求时返回 409 和桌面 App 引导，不安装任何组件；只有桌面 shell 的 `channel=desktop` 才启动 desktop orchestrator。
 - desktop orchestrator 先调用独立 CLI 的 `upgrade -y`，并设置内部 `skip_app=1`、`skip_restart=1`，禁止递归更新 App 或抢占 core 重启；随后真实替换 App bundle。
 - App-owned upgrade 达到 `completed` 时 core 仍存活，随后仅由 Tauri upgrade handoff 负责停止旧 App/core 并拉起新 App/core。
 - 任一路径只有在 CLI 与已安装 App 的伴随更新都成功后才写 `completed`；伴随更新失败必须写 `failed`，不得部分成功却对 UI 宣告完成。
@@ -217,6 +217,47 @@
 - 点击 Retry 只重试 Tauri handoff，不重新请求已经因 App 到达 target 而返回“无更新”的安装 API。
 - helper 无法打开新 App 或新 App 无法拉起 managed core 时，持久化 progress 必须从预完成状态改为 `failed`；只有新 core ready 后才刷新最终 `completed`。
 
+### TC-TWA-10：PR review 升级恢复与调用边界回归
+
+**操作步骤**：
+1. 构建当前 CLI，并运行升级评论对应的定向单元测试：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo build -p bifrost-cli --bin bifrost
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib upgrade_ --no-fail-fast
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib commands::app::tests --no-fail-fast
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin handlers::system::tests --lib --no-fail-fast
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml restart_handoff_setup_failure -- --nocapture
+   ```
+2. 执行 App-owned 真实 Admin 链路，验证浏览器请求被拒绝、桌面请求仍完成 CLI + App 安装：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_upgrade_app_owned_core_e2e.sh
+   ```
+3. 执行升级恢复与 desktop handoff 合约：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_upgrade_restart_e2e.sh
+   bash e2e-tests/tests/test_desktop_upgrade_handoff_contract.sh
+   ```
+4. 检查模块行数和文档可移植性：
+   ```bash
+   test "$(wc -l < crates/bifrost-cli/src/commands/app.rs)" -le 1500
+   test "$(wc -l < crates/bifrost-cli/src/commands/app/installer.rs)" -le 1500
+   test "$(wc -l < crates/bifrost-cli/src/commands/app/tests.rs)" -le 1500
+   local_home='/Users/'eden_studio
+   ! grep -q "$local_home" human_tests/tray-webui-auto-update.md
+   ```
+
+**预期结果**：
+- 跨进程锁 loser 立即得到 `Failed` progress，不会停留在 Checking。
+- 匹配的 restartable runtime marker 在 `lsof` 不可用时仍可升级；marker 恢复的缺省 host 是 `127.0.0.1`。
+- macOS App 使用稳定 backup 名跨 updater PID 恢复；Windows App-owned CLI 版本探针等待 deferred replacement。
+- CLI 安装后的 exact target 不匹配时恢复旧 binary backup。
+- CLI-owned companion 和 Admin desktop orchestrator 都把实际检测到的 App parent 作为 `--app-dir` 传递。
+- native desktop restart marker/helper 失败会持久化 `Failed`，刷新后不会重新显示旧 `Completed`。
+- 普通浏览器不能启动 desktop-owned 安装；桌面 shell 请求仍把 CLI 与 App 一起升级。
+- `app.rs`、`app/installer.rs`、`app/tests.rs` 均不超过 1500 行，测试文档不包含本机绝对路径。
+
 ## 清理步骤
 
 1. 停止测试数据目录中的 Bifrost 服务：
@@ -230,12 +271,13 @@
 
 2026-07-18 本次状态机审计已执行（最终复测）：
 
+- TC-TWA-10：通过。定向单测为 CLI upgrade `51/51`、App installer `20/20`、Admin system handler `16/16`、native restart failure `1/1`；`test_upgrade_app_owned_core_e2e.sh` 为 `17/17`，证明普通浏览器请求 desktop-owned core 返回 409 且不修改 App/CLI，桌面 shell 请求随后同时完成 CLI 与 App 的 pinned-target 更新；`test_upgrade_restart_e2e.sh` 为 `21/21`，覆盖 lock loser 终态、无 `lsof` marker 复用、loopback 恢复、CLI mismatch 回滚、稳定 App backup 和 app-dir 传递合约；`test_desktop_upgrade_handoff_contract.sh` 的既有 handoff 测试 `5/5` 与新增失败持久化测试 `1/1` 均通过。三个 App 模块分别为 682、906、623 行，文档本机路径检查与三个 shell 语法检查均通过。所有服务均使用临时数据目录和随机端口，未操作用户正在运行的 9900 服务。
 - TC-TWA-09 progress owner 隔离回归：通过。执行 `SKIP_FRONTEND_BUILD=1 cargo build -p bifrost-cli --bin bifrost` 后，以 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_upgrade_admin_api_restart_e2e.sh` 真实验证；临时 daemon 在端口 52152 从 PID 17754 升级重启为 PID 18197，并发 POST 为 `409 + 202` 且只启动一个 updater，终态保持 `completed`；already-latest 从 PID 18433 重启为 PID 18570。最终 `15/15` 通过，证明非 owner 线程的 Installing/Restarting 事件不会覆盖当前 upgrade transaction 的终态。
 - TC-TWA-09：通过。最终构建后 `test_upgrade_admin_api_restart_e2e.sh` 为 `15/15`，两个并发 POST 得到 `202 + 409`，只启动一个 updater，临时 daemon 从 PID 40482 重启为 PID 41110；already-latest 从 PID 41351 重启为 PID 41489。`test_upgrade_cli.sh --only-runtime-ownership` 为 `4/4`，`test_upgrade_app_owned_core_e2e.sh` 为 `13/13`，`test_desktop_upgrade_handoff_contract.sh` 为 `5/5`。跨进程锁、desktop-managed CLI pinned target/版本门禁、macOS App staging 失败和 interrupted-backup 恢复、Windows deferred App 门禁/CLI target 核验/失败回滚的定向测试全部通过。独立 CLI 收到与 App 相同的 `target=99.0.1`，App bundle 真实替换且 core 在 Tauri handoff 前保持原 owner。`useVersionStore.test.ts` 为 `3/3`；全量 Web 单测 `173/173`、lint（仅 14 个既有 warning）和 production build 均通过。
 
 2026-07-17 本次修复已执行：
 
-- TC-TWA-01：通过。9900 监听进程为 PID 22956，Admin overview 返回运行版本 `0.0.155`；`command -v bifrost` 返回 `/Users/eden_studio/.local/bin/bifrost`，磁盘 CLI 返回 `0.0.156`；强制 version-check 返回 `current_version=0.0.155`、`latest_version=0.0.156`、`has_update=true`；upgrade progress 为 `idle`，且 `~/.bifrost/runtime.json`、`~/.bifrost/bifrost.pid` 均缺失。结论为磁盘 CLI 已完成替换，但旧 daemon 因运行时标记缺失没有重启。全程未修改 9900 服务状态。
+- TC-TWA-01：通过。9900 监听进程为 PID 22956，Admin overview 返回运行版本 `0.0.155`；`command -v bifrost` 返回 `~/.local/bin/bifrost`，磁盘 CLI 返回 `0.0.156`；强制 version-check 返回 `current_version=0.0.155`、`latest_version=0.0.156`、`has_update=true`；upgrade progress 为 `idle`，且 `~/.bifrost/runtime.json`、`~/.bifrost/bifrost.pid` 均缺失。结论为磁盘 CLI 已完成替换，但旧 daemon 因运行时标记缺失没有重启。全程未修改 9900 服务状态。
 - TC-TWA-02：通过。执行 `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_upgrade_cli.sh --only-runtime-marker`，删除临时 daemon 的 runtime marker 后，updater 用 Admin 传入的精确 PID/端口恢复标记并完成重启；测试摘要 `Total: 1, Passed: 1, Failed: 0`。
 - TC-TWA-03：通过。执行 `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_upgrade_admin_api_restart_e2e.sh`；完整安装链路从 PID 96962 重启为 PID 97494，already-latest 链路从 PID 97754 重启为 PID 97891；测试摘要 `Total: 14, Passed: 14, Failed: 0`。
 - TC-TWA-04：通过。执行 `pnpm --dir web exec vitest run src/stores/useVersionStore.test.ts`，`1` 个测试文件、`2` 个用例全部通过。
