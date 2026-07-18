@@ -426,7 +426,7 @@ test_upgrade_review_feedback_contracts() {
     if [ "$(wc -l <"$app_src")" -le 1500 ] \
         && [ "$(wc -l <"$installer_src")" -le 1500 ] \
         && [ "$(wc -l <"$app_tests")" -le 1500 ] \
-        && grep -Fq 'parent.join(format!(".{name}.backup"))' "$installer_src" \
+        && grep -Fq 'parent.join(format!(".{name}.backup"))' "$app_src" \
         && grep -Fq 'verify_installed_cli_target_version_or_restore' "$upgrade_src" \
         && grep -Fq 'or_else(|| Some("127.0.0.1".to_string()))' "$upgrade_src" \
         && grep -Fq 'Another updater owns the cross-process upgrade lock' "$background_src" \
