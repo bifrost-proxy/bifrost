@@ -113,6 +113,45 @@ create_local_release_archive() {
     mkdir -p "$package_dir"
     cp "$binary" "${package_dir}/bifrost"
     chmod +x "${package_dir}/bifrost" 2>/dev/null || true
+
+    # The checked-in workspace version cannot be bumped merely to manufacture
+    # a newer E2E release. Patch the equal-length version bytes in this temporary
+    # copy, then execute it before packaging. This keeps the real binary's
+    # install/restart behavior while making post-install version verification
+    # meaningful instead of relying on a test-only bypass.
+    local current_version py
+    current_version="$("$binary" --version 2>/dev/null | awk '{print $NF}' | sed 's/^v//')"
+    if [[ "$current_version" != "$version" ]]; then
+        if [[ ${#current_version} -ne ${#version} ]]; then
+            echo "cannot patch E2E binary version with a different byte length" >&2
+            return 1
+        fi
+        py="$(python3_cmd 2>/dev/null || true)"
+        [[ -z "$py" ]] && return 1
+        "$py" - "${package_dir}/bifrost" "$current_version" "$version" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+old = sys.argv[2].encode()
+new = sys.argv[3].encode()
+data = path.read_bytes()
+count = data.count(old)
+if count == 0:
+    raise SystemExit(f"compiled version bytes {old!r} not found in {path}")
+path.write_bytes(data.replace(old, new))
+PY
+        if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
+            codesign --force --sign - "${package_dir}/bifrost" >/dev/null 2>&1
+        fi
+    fi
+    local packaged_version
+    packaged_version="$("${package_dir}/bifrost" --version 2>/dev/null | awk '{print $NF}' | sed 's/^v//')"
+    if [[ "$packaged_version" != "$version" ]]; then
+        echo "temporary E2E binary reports ${packaged_version:-unknown}, expected $version" >&2
+        return 1
+    fi
+
     local archive_path="${archive_root}/bifrost-v${version}-${target}.tar.xz"
     tar -C "$archive_root" -cJf "$archive_path" "bifrost-v${version}-${target}"
     echo "$archive_path"
