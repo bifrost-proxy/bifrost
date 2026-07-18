@@ -66,6 +66,7 @@ unicode-normalization = "0.1"
 [dev-dependencies]
 tempfile.workspace = true
 wiremock = "0.6"
+plist = "1"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["signal", "process", "fs"] }

@@ -692,6 +692,7 @@ fn installed_desktop_app_version(install_path: &Path) -> Option<String> {
     // App bundles are ordinary directories containing an Info.plist. Keep this
     // parser available on every host so the atomic staging/swap contract can be
     // exercised in Linux CI as well as on macOS.
+    #[cfg(any(target_os = "macos", test))]
     if install_path.is_dir() {
         return read_macos_app_version(install_path);
     }
@@ -710,6 +711,7 @@ fn installed_desktop_app_version(install_path: &Path) -> Option<String> {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn read_macos_app_version(install_path: &Path) -> Option<String> {
     let plist_path = install_path.join("Contents").join("Info.plist");
     let plist = plist::Value::from_file(plist_path).ok()?;
