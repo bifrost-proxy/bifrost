@@ -465,6 +465,117 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn moss_initializer_reports_runtime_archive_and_model_quarantine_failures() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let asr_home = temp.path().join("asr-home");
+        let root = moss_runtime_dir(&asr_home);
+        let paths = moss_runtime_paths(&asr_home);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&paths.binary, b"invalid runtime").unwrap();
+        std::fs::write(&paths.model, b"invalid model").unwrap();
+        let model_source = temp.path().join("model-source.gguf");
+        let model_spec = moss_test_model_spec(&model_source, b"verified model fixture");
+        let runtime_source = MossRuntimeSource {
+            asset: "runtime.zip".to_string(),
+            url: "file:///unused/runtime.zip".to_string(),
+            sha256: "0".repeat(64),
+        };
+
+        write_executable(
+            &paths.binary,
+            "#!/bin/sh\necho 'usage: moss-transcribe <command>' >&2\n",
+        );
+        std::fs::copy(&model_source, &paths.model).unwrap();
+        initialize_moss_joint_runtime(
+            &asr_home,
+            "moss-valid-resources",
+            &paths,
+            true,
+            true,
+            &runtime_source,
+            &model_spec,
+        )
+        .await
+        .unwrap();
+        std::fs::write(&paths.binary, b"invalid runtime").unwrap();
+        std::fs::write(&paths.model, b"invalid model").unwrap();
+
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let runtime_error = initialize_moss_joint_runtime(
+            &asr_home,
+            "moss-runtime-quarantine-error",
+            &paths,
+            false,
+            true,
+            &runtime_source,
+            &model_spec,
+        )
+        .await
+        .unwrap_err();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(runtime_error.contains("quarantine invalid MOSS runtime"));
+
+        write_executable(
+            &paths.binary,
+            "#!/bin/sh\necho 'usage: moss-transcribe <command>' >&2\n",
+        );
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let model_error = initialize_moss_joint_runtime(
+            &asr_home,
+            "moss-model-quarantine-error",
+            &paths,
+            true,
+            false,
+            &runtime_source,
+            &model_spec,
+        )
+        .await
+        .unwrap_err();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(model_error.contains("quarantine invalid MOSS model"));
+
+        let archive_source = temp.path().join("large-bad-runtime.zip");
+        std::fs::File::create(&archive_source)
+            .unwrap()
+            .set_len(64 * 1024 * 1024)
+            .unwrap();
+        let archive_runtime_source = MossRuntimeSource {
+            asset: "runtime.zip".to_string(),
+            url: format!("file://{}", archive_source.display()),
+            sha256: "f".repeat(64),
+        };
+        let archive_path = root.join(&archive_runtime_source.asset);
+        let permissions_root = root.clone();
+        let permission_thread = std::thread::spawn(move || {
+            while !archive_path.exists() {
+                std::thread::yield_now();
+            }
+            std::fs::set_permissions(
+                permissions_root,
+                std::fs::Permissions::from_mode(0o555),
+            )
+            .unwrap();
+        });
+        let archive_error = initialize_moss_joint_runtime(
+            &asr_home,
+            "moss-archive-quarantine-error",
+            &paths,
+            false,
+            true,
+            &archive_runtime_source,
+            &model_spec,
+        )
+        .await
+        .unwrap_err();
+        permission_thread.join().unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(archive_error.contains("quarantine invalid MOSS runtime archive"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn moss_runtime_process_covers_prompt_success_failure_and_pause() {
         let temp = TempDir::new().unwrap();
         let binary = temp.path().join("moss-transcribe");
@@ -500,6 +611,24 @@ mod tests {
                 .await
                 .unwrap_err(),
             ASR_TASK_PAUSED_MESSAGE
+        );
+        write_executable(
+            &binary,
+            "#!/bin/sh\nsleep 1\nprintf '[{\"start\":0.0,\"end\":0.5,\"speaker\":\"S01\",\"text\":\"resumed\"}]'\n",
+        );
+        let keep_running = || false;
+        assert_eq!(
+            run_moss_joint_transcription(
+                &runtime,
+                &wav,
+                1_000,
+                "",
+                Some(&keep_running),
+            )
+            .await
+            .unwrap()
+            .text,
+            "resumed"
         );
         assert!(run_moss_joint_transcription(
             &runtime,
