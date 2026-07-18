@@ -869,7 +869,7 @@ fn app_cli_version_probe_reports_nonzero_exit() {
     assert!(error.to_string().contains("status"));
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[test]
 fn caller_managed_app_install_uses_copy_fallback_and_skips_desktop_restart() {
     use std::os::unix::fs::PermissionsExt;
