@@ -640,6 +640,64 @@ fn windows_desktop_install_transaction_keeps_verified_install() {
 }
 
 #[test]
+fn windows_desktop_install_snapshot_rejects_target_without_parent() {
+    let snapshot = WindowsDesktopInstallSnapshot {
+        install_dir: PathBuf::new(),
+        backup: tempfile::tempdir().expect("backup tempdir"),
+        had_previous_install: false,
+    };
+
+    let error = snapshot
+        .restore()
+        .expect_err("parentless install path cannot be restored");
+    assert!(error.to_string().contains("has no parent"));
+}
+
+#[test]
+fn windows_desktop_install_cleanup_removes_stale_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let stale = temp.path().join("failed-upgrade");
+    fs::write(&stale, "stale").expect("write stale file");
+
+    remove_path_if_exists(&stale).expect("remove stale file");
+    assert!(!stale.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn windows_desktop_install_transaction_reports_rollback_failure_and_restores_failed_tree() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let install_dir = temp.path().join("Bifrost");
+    fs::create_dir_all(&install_dir).expect("create install");
+    fs::write(install_dir.join("bifrost-desktop.exe"), "old-app").expect("write old app");
+    let backup = tempfile::tempdir().expect("backup tempdir");
+    symlink("missing-source", backup.path().join("broken-sidecar"))
+        .expect("create broken backup entry");
+    let snapshot = WindowsDesktopInstallSnapshot {
+        install_dir: install_dir.clone(),
+        backup,
+        had_previous_install: true,
+    };
+
+    let error = finish_windows_desktop_install_transaction::<()>(
+        snapshot,
+        Err(BifrostError::Config("wrong installed version".to_string())),
+    )
+    .expect_err("rollback copy failure must be reported");
+
+    assert!(error
+        .to_string()
+        .contains("failed to restore previous desktop app"));
+    assert_eq!(
+        fs::read_to_string(install_dir.join("bifrost-desktop.exe"))
+            .expect("failed tree restored after rollback error"),
+        "old-app"
+    );
+}
+
+#[test]
 fn macos_app_path_is_bundle_under_install_dir() {
     let dir = PathBuf::from("/Applications");
     let path = resolve_app_path(&dir);

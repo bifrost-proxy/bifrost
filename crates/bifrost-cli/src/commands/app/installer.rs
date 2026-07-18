@@ -1,10 +1,10 @@
 use super::*;
 
 #[cfg(any(target_os = "windows", test))]
-struct WindowsDesktopInstallSnapshot {
-    install_dir: PathBuf,
-    backup: tempfile::TempDir,
-    had_previous_install: bool,
+pub(super) struct WindowsDesktopInstallSnapshot {
+    pub(super) install_dir: PathBuf,
+    pub(super) backup: tempfile::TempDir,
+    pub(super) had_previous_install: bool,
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -23,7 +23,7 @@ impl WindowsDesktopInstallSnapshot {
         })
     }
 
-    fn restore(self) -> Result<(), BifrostError> {
+    pub(super) fn restore(self) -> Result<(), BifrostError> {
         let parent = self.install_dir.parent().ok_or_else(|| {
             BifrostError::Config(format!(
                 "desktop app install directory has no parent: {}",
@@ -54,7 +54,7 @@ impl WindowsDesktopInstallSnapshot {
 }
 
 #[cfg(any(target_os = "windows", test))]
-fn remove_path_if_exists(path: &Path) -> Result<(), BifrostError> {
+pub(super) fn remove_path_if_exists(path: &Path) -> Result<(), BifrostError> {
     if path.is_dir() {
         fs::remove_dir_all(path)?;
     } else if path.exists() {
@@ -69,8 +69,16 @@ pub(super) fn run_windows_desktop_install_transaction<T>(
     install_and_verify: impl FnOnce() -> Result<T, BifrostError>,
 ) -> Result<T, BifrostError> {
     let snapshot = WindowsDesktopInstallSnapshot::capture(install_dir)?;
+    finish_windows_desktop_install_transaction(snapshot, install_and_verify())
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub(super) fn finish_windows_desktop_install_transaction<T>(
+    snapshot: WindowsDesktopInstallSnapshot,
+    install_result: Result<T, BifrostError>,
+) -> Result<T, BifrostError> {
     let had_previous_install = snapshot.had_previous_install;
-    match install_and_verify() {
+    match install_result {
         Ok(value) => Ok(value),
         Err(install_error) => match snapshot.restore() {
             Ok(()) => Err(BifrostError::Config(format!(
