@@ -250,7 +250,14 @@ export const useVersionStore = create<VersionState>()(
               upgradeError: progress.error,
             });
 
-            if (progress.phase === "completed") {
+            if (progress.phase === "restarting" && isDesktopShell()) {
+              // App-owned installers must run only after the desktop shell and
+              // bundled core have released their files. Stop polling before the
+              // handoff exits this process; the relaunched core publishes the
+              // terminal completed/failed state.
+              get().stopPollUpgradeProgress();
+              triggerUpgradeReloadOnce();
+            } else if (progress.phase === "completed") {
               get().stopPollUpgradeProgress();
               set({ upgrading: false });
               triggerUpgradeReloadOnce();

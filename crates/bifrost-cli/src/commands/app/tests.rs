@@ -13,6 +13,51 @@ fn release_asset_name_uses_desktop_prefix_and_target() {
 }
 
 #[test]
+fn app_owned_windows_installers_are_deferred_until_desktop_shutdown() {
+    assert!(should_defer_desktop_install(
+        "desktop",
+        Path::new("Bifrost.msi"),
+        true
+    ));
+    assert!(should_defer_desktop_install(
+        "desktop",
+        Path::new("Bifrost.EXE"),
+        true
+    ));
+    assert!(!should_defer_desktop_install(
+        "cli",
+        Path::new("Bifrost.msi"),
+        true
+    ));
+    assert!(!should_defer_desktop_install(
+        "desktop",
+        Path::new("Bifrost.msi"),
+        false
+    ));
+    assert!(!should_defer_desktop_install(
+        "desktop",
+        Path::new("Bifrost.zip"),
+        true
+    ));
+
+    let pending = PendingDesktopInstall {
+        schema_version: DESKTOP_PENDING_INSTALL_SCHEMA_VERSION,
+        created_at_ms: 123,
+        package_path: "Bifrost.msi".to_string(),
+        target_version: "0.0.156".to_string(),
+    };
+    let encoded = serde_json::to_string(&pending).expect("encode pending installer");
+    assert_eq!(
+        serde_json::from_str::<PendingDesktopInstall>(&encoded).expect("decode pending installer"),
+        pending
+    );
+    assert_eq!(
+        DESKTOP_PENDING_INSTALL_FILE,
+        "desktop-upgrade-pending-install.json"
+    );
+}
+
+#[test]
 fn nested_cli_upgrade_does_not_publish_terminal_app_progress() {
     assert!(!should_write_app_progress("cli-upgrade"));
     assert!(should_write_app_progress("desktop"));
@@ -25,6 +70,72 @@ fn nested_cli_upgrade_does_not_publish_terminal_app_progress() {
         None,
         None,
     );
+}
+
+#[test]
+fn top_level_app_upgrade_owns_the_shared_lock_but_nested_companion_skips_it() {
+    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let previous_data_dir = std::env::var_os("BIFROST_DATA_DIR");
+    std::env::set_var("BIFROST_DATA_DIR", temp.path());
+    let owner = crate::commands::upgrade_background::try_acquire_upgrade_lock(temp.path())
+        .expect("open upgrade lock")
+        .expect("own upgrade lock");
+
+    let error = acquire_top_level_app_upgrade_lock("desktop", "0.0.156")
+        .expect_err("concurrent top-level App upgrade must be rejected");
+    assert!(error.to_string().contains("already running"));
+    let progress = bifrost_core::upgrade_progress::read_progress(temp.path());
+    assert_eq!(progress.phase, UpgradePhase::Failed);
+    assert_eq!(progress.source.as_deref(), Some("desktop"));
+    assert_eq!(progress.target_version.as_deref(), Some("0.0.156"));
+
+    assert!(
+        acquire_top_level_app_upgrade_lock(CALLER_MANAGED_PROGRESS_SOURCE, "0.0.156")
+            .expect("nested companion bypasses its parent's lock")
+            .is_none()
+    );
+    drop(owner);
+    assert!(acquire_top_level_app_upgrade_lock("desktop", "0.0.156")
+        .expect("top-level App upgrade acquires released lock")
+        .is_some());
+
+    match previous_data_dir {
+        Some(value) => std::env::set_var("BIFROST_DATA_DIR", value),
+        None => std::env::remove_var("BIFROST_DATA_DIR"),
+    }
+}
+
+#[test]
+fn direct_app_upgrade_pins_cli_to_the_resolved_app_target() {
+    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+    let keys = [
+        "BIFROST_UPGRADE_TEST_LATEST_VERSION",
+        "BIFROST_UPGRADE_TEST_ARCHIVE",
+        DESKTOP_MANAGED_SKIP_APP_ENV,
+        DESKTOP_MANAGED_SKIP_RESTART_ENV,
+    ];
+    let previous = keys
+        .iter()
+        .map(|key| ((*key).to_string(), std::env::var_os(key)))
+        .collect::<Vec<_>>();
+    std::env::set_var("BIFROST_UPGRADE_TEST_LATEST_VERSION", "99.0.0");
+    std::env::set_var(
+        "BIFROST_UPGRADE_TEST_ARCHIVE",
+        std::env::temp_dir().join("missing-pinned-app-upgrade.tar.xz"),
+    );
+    std::env::set_var(DESKTOP_MANAGED_SKIP_APP_ENV, "1");
+    std::env::set_var(DESKTOP_MANAGED_SKIP_RESTART_ENV, "1");
+
+    upgrade_cli_if_present("cli", env!("CARGO_PKG_VERSION"))
+        .expect("resolved App target overrides a later latest-version observation");
+
+    for (key, value) in previous {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
 }
 
 #[test]
@@ -526,8 +637,9 @@ fn app_owned_upgrade_runs_the_full_verified_package_transaction() {
     .expect("App-owned package transaction");
 
     let progress = bifrost_core::upgrade_progress::read_progress(&data_dir);
-    assert_eq!(progress.phase, UpgradePhase::Completed);
+    assert_eq!(progress.phase, UpgradePhase::Restarting);
     assert_eq!(progress.target_version.as_deref(), Some("0.0.156"));
+    assert_eq!(progress.source.as_deref(), Some("desktop"));
 }
 
 #[cfg(unix)]

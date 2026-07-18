@@ -296,15 +296,9 @@ async fn start_upgrade(state: SharedAdminState, query: Option<&str>) -> Response
         .with_source(Some(channel.progress_source().to_string()));
     write_progress(&dir, &initial);
 
-    let app_dir = (channel == UpgradeChannel::Desktop)
-        .then(desktop_app_install_dir_for_upgrade)
-        .flatten();
-    if let Err(error) = spawn_upgrade_process(
-        channel,
-        Some(target_version.as_str()),
-        running_proxy,
-        app_dir.as_deref(),
-    ) {
+    if let Err(error) =
+        spawn_upgrade_process(channel, Some(target_version.as_str()), running_proxy, None)
+    {
         warn!(error = %error, "[SYSTEM] failed to spawn self-update subprocess");
         let failed = UpgradeProgress::new(UpgradePhase::Failed, "Upgrade failed to start")
             .with_target(Some(target_version))
@@ -732,11 +726,6 @@ fn desktop_app_installation_for_version_check() -> Option<(PathBuf, String)> {
     desktop_app_install_candidates()
         .into_iter()
         .find_map(|path| installed_desktop_app_version(&path).map(|version| (path, version)))
-}
-
-fn desktop_app_install_dir_for_upgrade() -> Option<PathBuf> {
-    desktop_app_installation_for_version_check()
-        .and_then(|(path, _)| path.parent().map(Path::to_path_buf))
 }
 
 fn desktop_app_install_candidates() -> Vec<PathBuf> {
@@ -1251,6 +1240,19 @@ mod tests {
                 "-y"
             ]
         );
+        assert_eq!(
+            upgrade_process_args(UpgradeChannel::Desktop, Some("0.0.139"), None, None),
+            vec![
+                "app",
+                "upgrade",
+                "--version",
+                "0.0.139",
+                "--source",
+                "desktop",
+                "-y"
+            ],
+            "desktop-owned Admin dispatch must let the bundled core resolve its active App path"
+        );
     }
 
     #[test]
@@ -1305,14 +1307,12 @@ mod tests {
         let previous = std::env::var_os("BIFROST_APP_INSTALL_DIR");
         std::env::set_var("BIFROST_APP_INSTALL_DIR", temp.path());
         let version = super::desktop_app_version_for_version_check();
-        let app_dir = super::desktop_app_install_dir_for_upgrade();
         match previous {
             Some(value) => std::env::set_var("BIFROST_APP_INSTALL_DIR", value),
             None => std::env::remove_var("BIFROST_APP_INSTALL_DIR"),
         }
 
         assert_eq!(version.as_deref(), Some("0.0.144"));
-        assert_eq!(app_dir.as_deref(), Some(temp.path()));
     }
 
     #[test]

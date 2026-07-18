@@ -198,10 +198,10 @@ PY
         local progress
         progress="$(admin_curl GET /api/system/upgrade/progress || true)"
         phase="$(printf '%s' "$progress" | json_field phase 2>/dev/null || true)"
-        [[ "$phase" == "completed" || "$phase" == "failed" ]] && break
+        [[ "$phase" == "restarting" || "$phase" == "failed" ]] && break
         sleep 0.1
     done
-    assert_equals "completed" "$phase" "App-owned unified upgrade reaches completed"
+    assert_equals "restarting" "$phase" "App-owned unified upgrade waits for the Tauri handoff"
 
     local installed_version
     installed_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$old_app/Contents/Info.plist")"

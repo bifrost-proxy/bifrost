@@ -60,7 +60,7 @@ fn take_sink() -> Option<ProgressSink> {
         .map(|active| active.sink)
 }
 
-fn try_acquire_upgrade_lock(data_dir: &Path) -> Result<Option<File>, BifrostError> {
+pub(crate) fn try_acquire_upgrade_lock(data_dir: &Path) -> Result<Option<File>, BifrostError> {
     std::fs::create_dir_all(data_dir).map_err(BifrostError::Io)?;
     let lock = OpenOptions::new()
         .create(true)

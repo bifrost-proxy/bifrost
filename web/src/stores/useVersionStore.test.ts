@@ -177,9 +177,9 @@ describe("useVersionStore upgrade polling", () => {
     useVersionStore = (await import("./useVersionStore")).useVersionStore;
     useVersionStore.setState({ upgrading: true, upgradePhase: "restarting" });
     apiMocks.getUpgradeProgress.mockResolvedValue({
-      phase: "completed",
+      phase: "restarting",
       percent: null,
-      message: "Desktop app update complete",
+      message: "Waiting for desktop shell to stop before installing…",
       target_version: "0.0.105",
       source: "desktop",
       error: null,

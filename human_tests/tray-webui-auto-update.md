@@ -227,6 +227,8 @@
    SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib commands::app::tests --no-fail-fast
    SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin handlers::system::tests --lib --no-fail-fast
    cargo test --manifest-path desktop/src-tauri/Cargo.toml restart_handoff_setup_failure -- --nocapture
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml deferred_desktop_installer_marker -- --nocapture
+   pnpm --dir web exec vitest run src/stores/useVersionStore.test.ts
    ```
 2. 执行 App-owned 真实 Admin 链路，验证浏览器请求被拒绝、桌面请求仍完成 CLI + App 安装：
    ```bash
@@ -244,6 +246,10 @@
    test "$(wc -l < crates/bifrost-cli/src/commands/app.rs)" -le 1500
    test "$(wc -l < crates/bifrost-cli/src/commands/app/installer.rs)" -le 1500
    test "$(wc -l < crates/bifrost-cli/src/commands/app/tests.rs)" -le 1500
+   test "$(wc -l < crates/bifrost-cli/src/commands/upgrade.rs)" -le 1500
+   test "$(wc -l < crates/bifrost-cli/src/commands/upgrade/download.rs)" -le 1500
+   test "$(wc -l < crates/bifrost-cli/src/commands/upgrade/restart.rs)" -le 1500
+   test "$(wc -l < crates/bifrost-cli/src/commands/upgrade/tests.rs)" -le 1500
    local_home='/Users/'eden_studio
    ! grep -q "$local_home" human_tests/tray-webui-auto-update.md
    ```
@@ -253,10 +259,13 @@
 - 匹配的 restartable runtime marker 在 `lsof` 不可用时仍可升级；marker 恢复的缺省 host 是 `127.0.0.1`。
 - macOS App 使用稳定 backup 名跨 updater PID 恢复；Windows App-owned CLI 版本探针等待 deferred replacement。
 - CLI 安装后的 exact target 不匹配时恢复旧 binary backup。
-- CLI-owned companion 和 Admin desktop orchestrator 都把实际检测到的 App parent 作为 `--app-dir` 传递。
+- CLI-owned companion 可显式传递检测到的 App parent；Admin desktop orchestrator 不传 `--app-dir`，让 bundled core 从自身 executable 解析当前运行 App，避免多副本时更新错误副本。
+- foreground CLI runtime 与 daemon 一样归 CLI updater 重启，只有 `RuntimeStartMode::Desktop` 会交给 Tauri handoff。
+- Windows App-owned MSI/EXE 不在 App/sidecar 仍运行时执行；pending marker 交给 Tauri helper，在旧 App/core 退出后有界安装，失败写 `Failed`，成功才拉起新 App。
+- 顶层 App updater 与 self-update 共用跨进程 `upgrade.lock`，并发 App/CLI updater 只能有一个 owner；内部 `source=cli-upgrade` companion 不重复加锁。直接 `app upgrade --version` 把已解析 target 原样传给 CLI 引擎，即使 `latest` 随后变化也不会安装不同版本。
 - native desktop restart marker/helper 失败会持久化 `Failed`，刷新后不会重新显示旧 `Completed`。
 - 普通浏览器不能启动 desktop-owned 安装；桌面 shell 请求仍把 CLI 与 App 一起升级。
-- `app.rs`、`app/installer.rs`、`app/tests.rs` 均不超过 1500 行，测试文档不包含本机绝对路径。
+- `app.rs`、`app/installer.rs`、`app/tests.rs` 以及 `upgrade.rs`、`upgrade/download.rs`、`upgrade/restart.rs`、`upgrade/tests.rs` 均不超过 1500 行，测试文档不包含本机绝对路径。
 
 ## 清理步骤
 
@@ -271,6 +280,7 @@
 
 2026-07-18 本次状态机审计已执行（最终复测）：
 
+- TC-TWA-10（新增 review comments）：通过。CLI upgrade `53/53`、App 最终 `23/23`、Admin `16/16`、Tauri handoff 定向 `2/2`、Web 状态机 `3/3`；新增 App 单测证明顶层 App/self-update 争用同一个 lock 时只有一个 owner、内部 companion 不死锁，并用伪造的后续 `latest=99.0.0` 证明直接 App upgrade 的 CLI 仍严格使用已解析 target。App-owned Admin 实链路 `17/17`，终态在旧 App/core 仍存活时保持 `restarting`，等待 Tauri 独占 handoff；CLI restart E2E 首轮因模块拆分后的 shell 测试仍只扫描旧单文件而出现 3 个测试缺陷，修正为按职责扫描 root/restart 子模块后复跑 `21/21`；desktop handoff 为既有 `5/5` + failure `1/1` + deferred installer `1/1`。第一轮 review 还发现若复用第二个 desktop executable 作为 Windows helper，会继续持有 App 文件锁，现已改为独立 PowerShell handoff；其 MSI 参数显式引用含空格路径，并接受 0、1641、3010 成功码。macOS desktop Admin 不再传候选 `--app-dir`，foreground runtime 归 CLI updater，Windows pending MSI/EXE 由 helper 在旧 App/core 退出后执行。App 与 upgrade 的 7 个相关模块最终分别为 1500、199、735、1500、539、639、1332 行，均小于等于 1500；shell 语法和文档本机路径检查通过。所有实链路均使用临时数据目录与随机端口，未操作 9900。
 - TC-TWA-10：通过。定向单测为 CLI upgrade `51/51`、App installer `20/20`、Admin system handler `16/16`、native restart failure `1/1`；`test_upgrade_app_owned_core_e2e.sh` 为 `17/17`，证明普通浏览器请求 desktop-owned core 返回 409 且不修改 App/CLI，桌面 shell 请求随后同时完成 CLI 与 App 的 pinned-target 更新；`test_upgrade_restart_e2e.sh` 为 `21/21`，覆盖 lock loser 终态、无 `lsof` marker 复用、loopback 恢复、CLI mismatch 回滚、稳定 App backup 和 app-dir 传递合约；`test_desktop_upgrade_handoff_contract.sh` 的既有 handoff 测试 `5/5` 与新增失败持久化测试 `1/1` 均通过。覆盖率门禁反馈后将纯机械搬移收窄为 installer command 子模块，并为 Linux 非测试构建增加平台 cfg；三个 App 模块最终分别为 1485、94、623 行。定向 App 单测 `20/20`、CLI restart E2E `21/21`、fmt 与 bifrost-cli clippy 再次通过。文档本机路径检查与三个 shell 语法检查均通过。所有服务均使用临时数据目录和随机端口，未操作用户正在运行的 9900 服务。
 - TC-TWA-09 progress owner 隔离回归：通过。执行 `SKIP_FRONTEND_BUILD=1 cargo build -p bifrost-cli --bin bifrost` 后，以 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_upgrade_admin_api_restart_e2e.sh` 真实验证；临时 daemon 在端口 52152 从 PID 17754 升级重启为 PID 18197，并发 POST 为 `409 + 202` 且只启动一个 updater，终态保持 `completed`；already-latest 从 PID 18433 重启为 PID 18570。最终 `15/15` 通过，证明非 owner 线程的 Installing/Restarting 事件不会覆盖当前 upgrade transaction 的终态。
 - TC-TWA-09：通过。最终构建后 `test_upgrade_admin_api_restart_e2e.sh` 为 `15/15`，两个并发 POST 得到 `202 + 409`，只启动一个 updater，临时 daemon 从 PID 40482 重启为 PID 41110；already-latest 从 PID 41351 重启为 PID 41489。`test_upgrade_cli.sh --only-runtime-ownership` 为 `4/4`，`test_upgrade_app_owned_core_e2e.sh` 为 `13/13`，`test_desktop_upgrade_handoff_contract.sh` 为 `5/5`。跨进程锁、desktop-managed CLI pinned target/版本门禁、macOS App staging 失败和 interrupted-backup 恢复、Windows deferred App 门禁/CLI target 核验/失败回滚的定向测试全部通过。独立 CLI 收到与 App 相同的 `target=99.0.1`，App bundle 真实替换且 core 在 Tauri handoff 前保持原 owner。`useVersionStore.test.ts` 为 `3/3`；全量 Web 单测 `173/173`、lint（仅 14 个既有 warning）和 production build 均通过。

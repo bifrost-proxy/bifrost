@@ -68,7 +68,9 @@ const DESKTOP_UPGRADE_RELAUNCH_HELPER_ENV: &str = "BIFROST_DESKTOP_UPGRADE_RELAU
 const DESKTOP_UPGRADE_RELAUNCH_MARKER_ENV: &str = "BIFROST_DESKTOP_UPGRADE_RELAUNCH_MARKER";
 const DESKTOP_UPGRADE_RELAUNCH_TARGET_ENV: &str = "BIFROST_DESKTOP_UPGRADE_RELAUNCH_TARGET";
 const DESKTOP_UPGRADE_RELAUNCH_MARKER_FILE: &str = "desktop-upgrade-relaunch.json";
+const DESKTOP_PENDING_INSTALL_FILE: &str = "desktop-upgrade-pending-install.json";
 const DESKTOP_UPGRADE_RELAUNCH_SCHEMA_VERSION: u8 = 1;
+const DESKTOP_PENDING_INSTALL_SCHEMA_VERSION: u8 = 1;
 const DESKTOP_UPGRADE_RELAUNCH_STALE_AFTER_MS: u64 = 10 * 60 * 1000;
 const DESKTOP_UPGRADE_RELAUNCH_PROCESS_WAIT: Duration = Duration::from_secs(30);
 const DESKTOP_UPGRADE_RELAUNCH_PORT_WAIT: Duration = Duration::from_secs(30);
@@ -188,6 +190,14 @@ impl std::fmt::Display for BackendWaitFailure {
 impl std::error::Error for BackendWaitFailure {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PendingDesktopInstall {
+    schema_version: u8,
+    created_at_ms: u64,
+    package_path: String,
+    target_version: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct DesktopUpgradeRelaunchMarker {
     schema_version: u8,
     created_at_ms: u64,
@@ -195,6 +205,8 @@ struct DesktopUpgradeRelaunchMarker {
     old_core_pid: Option<u32>,
     proxy_port: u16,
     app_target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_install: Option<PendingDesktopInstall>,
 }
 
 fn main() {
@@ -932,11 +944,65 @@ fn desktop_upgrade_relaunch_marker_path(data_dir: &Path) -> PathBuf {
     data_dir.join(DESKTOP_UPGRADE_RELAUNCH_MARKER_FILE)
 }
 
+fn desktop_pending_install_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(DESKTOP_PENDING_INSTALL_FILE)
+}
+
 fn current_time_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
+}
+
+fn read_pending_desktop_install(data_dir: &Path) -> Result<Option<PendingDesktopInstall>, String> {
+    let marker_path = desktop_pending_install_path(data_dir);
+    let content = match fs::read_to_string(&marker_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "failed to read deferred desktop installer {}: {error}",
+                marker_path.display()
+            ))
+        }
+    };
+    let pending: PendingDesktopInstall = serde_json::from_str(&content)
+        .map_err(|error| format!("failed to parse deferred desktop installer: {error}"))?;
+    if pending.schema_version != DESKTOP_PENDING_INSTALL_SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported deferred desktop installer schema {}",
+            pending.schema_version
+        ));
+    }
+    let fresh = current_time_millis()
+        .checked_sub(pending.created_at_ms)
+        .map(|age_ms| age_ms <= DESKTOP_UPGRADE_RELAUNCH_STALE_AFTER_MS)
+        .unwrap_or(true);
+    if !fresh {
+        return Err("deferred desktop installer marker is stale".to_string());
+    }
+    let package = Path::new(&pending.package_path);
+    if !package.is_file() {
+        return Err(format!(
+            "deferred desktop installer is missing: {}",
+            package.display()
+        ));
+    }
+    let extension = package
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if !extension.eq_ignore_ascii_case("msi") && !extension.eq_ignore_ascii_case("exe") {
+        return Err(format!(
+            "unsupported deferred desktop installer type: {}",
+            package.display()
+        ));
+    }
+    if pending.target_version.trim().is_empty() {
+        return Err("deferred desktop installer target version is empty".to_string());
+    }
+    Ok(Some(pending))
 }
 
 fn is_upgrade_relaunch_marker_active(marker: &DesktopUpgradeRelaunchMarker, now_ms: u64) -> bool {
@@ -2648,6 +2714,12 @@ fn restart_desktop_after_update(app: AppHandle) -> Result<(), String> {
         .lock()
         .map(|guard| *guard)
         .unwrap_or(DEFAULT_BACKEND_PORT);
+    let pending_install = read_pending_desktop_install(&state.data_dir).map_err(|error| {
+        persist_desktop_upgrade_handoff_failure(
+            &state.data_dir,
+            format!("failed to prepare deferred desktop install: {error}"),
+        )
+    })?;
     let app_target = desktop_relaunch_target(&exe);
     let marker = DesktopUpgradeRelaunchMarker {
         schema_version: DESKTOP_UPGRADE_RELAUNCH_SCHEMA_VERSION,
@@ -2656,6 +2728,7 @@ fn restart_desktop_after_update(app: AppHandle) -> Result<(), String> {
         old_core_pid,
         proxy_port,
         app_target: app_target.to_string_lossy().into_owned(),
+        pending_install,
     };
     let marker_path = write_upgrade_relaunch_marker(&state.data_dir, &marker).map_err(|error| {
         persist_desktop_upgrade_handoff_failure(
@@ -2666,22 +2739,22 @@ fn restart_desktop_after_update(app: AppHandle) -> Result<(), String> {
     append_desktop_bootstrap_log(
         &state.data_dir,
         format!(
-            "desktop upgrade relaunch marker written; old_app_pid={} old_core_pid={:?} proxy_port={} target={}",
+            "desktop upgrade relaunch marker written; old_app_pid={} old_core_pid={:?} proxy_port={} target={} deferred_install={}",
             marker.old_app_pid,
             marker.old_core_pid,
             marker.proxy_port,
-            marker.app_target
+            marker.app_target,
+            marker.pending_install.is_some()
         ),
     );
-    let helper = spawn_desktop_upgrade_relaunch_helper(&exe, &marker_path, &app_target).map_err(
-        |error| {
+    let helper = spawn_desktop_upgrade_relaunch_helper(&exe, &marker_path, &app_target, &marker)
+        .map_err(|error| {
             clear_upgrade_relaunch_marker(&state.data_dir);
             persist_desktop_upgrade_handoff_failure(
                 &state.data_dir,
                 format!("failed to spawn desktop upgrade relaunch helper: {error}"),
             )
-        },
-    )?;
+        })?;
     append_desktop_bootstrap_log(
         &state.data_dir,
         format!(
@@ -2709,7 +2782,15 @@ fn spawn_desktop_upgrade_relaunch_helper(
     exe: &Path,
     marker_path: &Path,
     target: &Path,
+    marker: &DesktopUpgradeRelaunchMarker,
 ) -> tauri::Result<Child> {
+    #[cfg(target_os = "windows")]
+    if marker.pending_install.is_some() {
+        return spawn_windows_desktop_upgrade_handoff(marker_path, target);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    let _ = marker;
     let mut command = Command::new(exe);
     command
         .env(DESKTOP_UPGRADE_RELAUNCH_HELPER_ENV, "1")
@@ -2722,6 +2803,160 @@ fn spawn_desktop_upgrade_relaunch_helper(
     command
         .spawn()
         .map_err(|error| anyhow(format!("failed to spawn relaunch helper: {error}")))
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_windows_desktop_upgrade_handoff(
+    marker_path: &Path,
+    target: &Path,
+) -> tauri::Result<Child> {
+    let data_dir = marker_path
+        .parent()
+        .ok_or_else(|| anyhow("desktop upgrade marker has no parent directory".to_string()))?;
+    let script_path = data_dir.join(format!(
+        ".desktop-upgrade-handoff-{}.ps1",
+        std::process::id()
+    ));
+    fs::write(&script_path, WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT)
+        .map_err(|error| anyhow(format!("failed to write Windows upgrade handoff: {error}")))?;
+    let mut command = windows_desktop_upgrade_handoff_command(&script_path, marker_path, target);
+    hide_windows_child_console(&mut command);
+    let result = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| anyhow(format!("failed to spawn Windows upgrade handoff: {error}")));
+    if result.is_err() {
+        let _ = fs::remove_file(script_path);
+    }
+    result
+}
+
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT: &str = r#"
+param([string]$MarkerPath, [string]$TargetPath)
+$ErrorActionPreference = "Stop"
+$dataDir = Split-Path -Parent $MarkerPath
+$progressPath = Join-Path $dataDir "upgrade-progress.json"
+$pendingPath = Join-Path $dataDir "desktop-upgrade-pending-install.json"
+$bootstrapLog = Join-Path $dataDir "logs\desktop-bootstrap.log"
+
+function Write-BootstrapLog([string]$Message) {
+  $logDir = Split-Path -Parent $bootstrapLog
+  New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+  Add-Content -LiteralPath $bootstrapLog -Value "$(Get-Date -Format o) $Message" -Encoding UTF8
+}
+
+function Write-Progress([string]$Phase, [string]$Message, [string]$TargetVersion, [string]$ErrorMessage) {
+  $payload = [ordered]@{
+    phase = $Phase
+    percent = $null
+    message = $Message
+    target_version = $TargetVersion
+    source = "desktop"
+    error = if ($ErrorMessage) { $ErrorMessage } else { $null }
+    updated_at = (Get-Date).ToUniversalTime().ToString("o")
+  }
+  $tmpPath = "$progressPath.tmp.$PID"
+  $json = $payload | ConvertTo-Json -Compress
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)
+  Move-Item -LiteralPath $tmpPath -Destination $progressPath -Force
+}
+
+function Wait-ForProcessExit([uint32]$ProcessId, [string]$Label) {
+  if ($ProcessId -eq 0) { return }
+  $deadline = [DateTime]::UtcNow.AddSeconds(30)
+  while ([DateTime]::UtcNow -lt $deadline) {
+    if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { return }
+    Start-Sleep -Milliseconds 200
+  }
+  throw "$Label process $ProcessId did not exit within 30 seconds"
+}
+
+$targetVersion = $null
+try {
+  $marker = Get-Content -LiteralPath $MarkerPath -Raw -Encoding UTF8 | ConvertFrom-Json
+  if ($marker.pending_install) { $targetVersion = [string]$marker.pending_install.target_version }
+  Wait-ForProcessExit ([uint32]$marker.old_app_pid) "desktop app"
+  if ($null -ne $marker.old_core_pid) {
+    Wait-ForProcessExit ([uint32]$marker.old_core_pid) "desktop core"
+  }
+
+  if ($marker.pending_install) {
+    $packagePath = [string]$marker.pending_install.package_path
+    if (-not (Test-Path -LiteralPath $packagePath -PathType Leaf)) {
+      throw "deferred desktop installer is missing: $packagePath"
+    }
+    Write-Progress "installing" "Installing desktop app after shutdown..." $targetVersion $null
+    Write-BootstrapLog "starting deferred desktop installer; target_version=$targetVersion package=$packagePath"
+    $extension = [System.IO.Path]::GetExtension($packagePath).ToLowerInvariant()
+    if ($extension -eq ".msi") {
+      $installerLog = Join-Path $dataDir "logs\desktop-upgrade-installer.log"
+      $quotedPackagePath = '"' + $packagePath + '"'
+      $quotedInstallerLog = '"' + $installerLog + '"'
+      $installerArgs = @("/i", $quotedPackagePath, "/qn", "/norestart", "ALLUSERS=2", "MSIINSTALLPERUSER=1", "/l*v", $quotedInstallerLog)
+      $installer = Start-Process -FilePath "msiexec.exe" -ArgumentList $installerArgs -PassThru
+    } elseif ($extension -eq ".exe") {
+      $installer = Start-Process -FilePath $packagePath -ArgumentList @("/S") -PassThru
+    } else {
+      throw "unsupported deferred desktop installer type: $packagePath"
+    }
+
+    $deadline = [DateTime]::UtcNow.AddMinutes(10)
+    while (-not $installer.WaitForExit(30000)) {
+      if ([DateTime]::UtcNow -ge $deadline) {
+        try { $installer.Kill() } catch {}
+        throw "desktop installer timed out after 600 seconds"
+      }
+      Write-Progress "installing" "Installing desktop app after shutdown..." $targetVersion $null
+    }
+    if ($installer.ExitCode -notin @(0, 1641, 3010)) {
+      throw "desktop installer exited with code $($installer.ExitCode)"
+    }
+    Remove-Item -LiteralPath $pendingPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
+    Write-BootstrapLog "deferred desktop installer completed; target_version=$targetVersion"
+  }
+
+  Start-Process -FilePath $TargetPath | Out-Null
+  Write-BootstrapLog "desktop upgrade handoff opened target: $TargetPath"
+  Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+} catch {
+  $message = "desktop upgrade handoff failed: $($_.Exception.Message)"
+  Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue
+  Write-Progress "failed" "Desktop app install or restart failed" $targetVersion $message
+  Write-BootstrapLog $message
+  try { Start-Process -FilePath $TargetPath | Out-Null } catch {}
+  Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+  exit 1
+}
+"#;
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_desktop_upgrade_handoff_command(
+    script_path: &Path,
+    marker_path: &Path,
+    target: &Path,
+) -> Command {
+    let mut command = Command::new("powershell.exe");
+    command
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+        ])
+        .arg(script_path)
+        .args(["-MarkerPath"])
+        .arg(marker_path)
+        .arg("-TargetPath")
+        .arg(target);
+    command
 }
 
 #[cfg(target_os = "macos")]
@@ -3142,31 +3377,32 @@ fn is_server_config_response(response_body: &str) -> bool {
 mod tests {
     use super::{
         append_desktop_bootstrap_log, begin_backend_recovery, clear_backend_unavailable_if_healthy,
-        desktop_backend_env, desktop_backend_start_args, desktop_sidecar_rust_log,
-        desktop_startup_deadline, desktop_startup_session_id,
+        desktop_backend_env, desktop_backend_start_args, desktop_pending_install_path,
+        desktop_sidecar_rust_log, desktop_startup_deadline, desktop_startup_session_id,
         desktop_test_allows_multiple_instances, desktop_upgrade_relaunch_marker_path,
         host_window_close_behavior_for_platform, is_server_config_response,
         is_upgrade_relaunch_marker_active, main_interface_decorations_for_platform,
         mark_backend_unavailable_for_manual_start, may_reuse_existing_backend,
         parse_port_update_response, persist_desktop_upgrade_handoff_failure,
         poll_managed_backend_exit, publish_startup_ready, read_active_upgrade_relaunch_marker,
-        record_startup_deadline_error, relaunch_command_for_target,
+        read_pending_desktop_install, record_startup_deadline_error, relaunch_command_for_target,
         resolve_bifrost_binary_from_env, resolve_desktop_config_path, resolve_desktop_data_dir,
         sanitize_desktop_upgrade_relaunch_command, save_desktop_config,
         should_allow_multiple_instances, should_handoff_to_main, should_retry_backend_candidate,
         startup_deadline_disposition, stop_backend_before_restart, terminate_managed_backend,
         uses_borderless_desktop_chrome_for_platform, wait_for_backend, wait_for_child_exit,
-        write_desktop_upgrade_terminal_progress, write_upgrade_relaunch_marker, BackendState,
-        BackendWaitFailureKind, DesktopConfig, DesktopUpgradeRelaunchMarker,
-        HostWindowCloseBehavior, StartupDeadlineDisposition,
-        DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
+        windows_desktop_upgrade_handoff_command, write_desktop_upgrade_terminal_progress,
+        write_upgrade_relaunch_marker, BackendState, BackendWaitFailureKind, DesktopConfig,
+        DesktopUpgradeRelaunchMarker, HostWindowCloseBehavior, PendingDesktopInstall,
+        StartupDeadlineDisposition, DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
+        WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
     };
     use bifrost_storage::data_dir as shared_bifrost_data_dir;
     use std::ffi::OsStr;
     use std::fs;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Barrier, Mutex};
@@ -3516,6 +3752,7 @@ mod tests {
             old_core_pid: Some(43),
             proxy_port: 9900,
             app_target: "/Applications/Bifrost.app".to_string(),
+            pending_install: None,
         };
         assert!(is_upgrade_relaunch_marker_active(&fresh, 10_001));
 
@@ -3539,6 +3776,63 @@ mod tests {
             ..fresh
         };
         assert!(!is_upgrade_relaunch_marker_active(&missing_port, 10_001));
+    }
+
+    #[test]
+    fn deferred_desktop_installer_marker_is_validated_before_handoff() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let package = temp_dir.path().join("Bifrost.msi");
+        fs::write(&package, b"test installer").expect("write installer fixture");
+        let pending = PendingDesktopInstall {
+            schema_version: 1,
+            created_at_ms: super::current_time_millis(),
+            package_path: package.to_string_lossy().into_owned(),
+            target_version: "0.0.156".to_string(),
+        };
+        fs::write(
+            desktop_pending_install_path(temp_dir.path()),
+            serde_json::to_string(&pending).expect("encode pending installer"),
+        )
+        .expect("write pending installer marker");
+
+        assert_eq!(
+            read_pending_desktop_install(temp_dir.path()).expect("read pending installer"),
+            Some(pending.clone())
+        );
+        let marker_path = desktop_upgrade_relaunch_marker_path(temp_dir.path());
+        let command = windows_desktop_upgrade_handoff_command(
+            Path::new("C:\\Temp\\desktop-upgrade-handoff.ps1"),
+            &marker_path,
+            Path::new("C:\\Users\\test\\Bifrost\\bifrost-desktop.exe"),
+        );
+        assert_eq!(command.get_program(), "powershell.exe");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.iter().any(|arg| arg == "-File"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "C:\\Temp\\desktop-upgrade-handoff.ps1"));
+        assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("Wait-ForProcessExit"));
+        assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("msiexec.exe"));
+        assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("$quotedPackagePath"));
+        assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("WaitForExit(30000)"));
+        assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("@(0, 1641, 3010)"));
+        assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("Write-Progress \"failed\""));
+
+        let stale = PendingDesktopInstall {
+            created_at_ms: 1,
+            ..pending
+        };
+        fs::write(
+            desktop_pending_install_path(temp_dir.path()),
+            serde_json::to_string(&stale).expect("encode stale installer"),
+        )
+        .expect("write stale installer marker");
+        assert!(read_pending_desktop_install(temp_dir.path())
+            .expect_err("stale installer must be rejected")
+            .contains("stale"));
     }
 
     #[test]
@@ -3607,6 +3901,7 @@ mod tests {
             old_core_pid: None,
             proxy_port: 9900,
             app_target: "/tmp/Bifrost.app".to_string(),
+            pending_install: None,
         };
 
         let marker_path =
@@ -3627,6 +3922,7 @@ mod tests {
             old_core_pid: None,
             proxy_port: 9900,
             app_target: "/tmp/Bifrost.app".to_string(),
+            pending_install: None,
         };
         fs::write(
             desktop_upgrade_relaunch_marker_path(temp_dir.path()),
@@ -3650,6 +3946,7 @@ mod tests {
             old_core_pid: Some(124),
             proxy_port: 9900,
             app_target: "/tmp/Bifrost.app".to_string(),
+            pending_install: None,
         };
 
         assert!(may_reuse_existing_backend(None));

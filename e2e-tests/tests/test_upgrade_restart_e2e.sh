@@ -291,16 +291,17 @@ test_upgrade_restart_port_release_guard_in_source() {
     _log_info "case: upgrade restart path waits for port release before start"
 
     local source_file="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade.rs"
+    local restart_file="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/restart.rs"
 
-    if grep -q "wait_for_restart_ports_release(&restart_ports)" "$source_file" \
-        && grep -q "fn restart_ports_from_runtime" "$source_file" \
-        && grep -q "info.socks5_port" "$source_file" \
+    if grep -q "wait_for_restart_ports_release(&restart_ports)" "$restart_file" \
+        && grep -q "fn restart_ports_from_runtime" "$restart_file" \
+        && grep -q "info.socks5_port" "$restart_file" \
         && grep -q "restart_executable_for_install_method(&install_method)" "$source_file" \
         && grep -q "maybe_restart_running_proxy(&restart_executable)" "$source_file" \
-        && grep -q "Command::new(restart_executable)" "$source_file" \
-        && grep -q "Proxy port .*still occupied after" "$source_file" \
-        && grep -q "find_process_on_port(port)" "$source_file" \
-        && grep -q "recover_from_crash(&data_dir)" "$source_file"; then
+        && grep -q "Command::new(restart_executable)" "$restart_file" \
+        && grep -q "Proxy port .*still occupied after" "$restart_file" \
+        && grep -q "find_process_on_port(port)" "$restart_file" \
+        && grep -q "recover_from_crash(&data_dir)" "$restart_file"; then
         _log_pass "upgrade restart has multi-port release guard, fixed restart executable, listener diagnostics, and system proxy recovery"
     else
         _log_fail "upgrade restart port guard" \
@@ -313,7 +314,7 @@ test_upgrade_restart_port_release_guard_in_source() {
 test_upgrade_restart_port_guard_covers_windows() {
     _log_info "case: upgrade restart port-release guard is not unix-only"
 
-    local upgrade_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade.rs"
+    local upgrade_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/restart.rs"
     local process_src="${PROJECT_DIR}/crates/bifrost-cli/src/process.rs"
 
     # The active guard must compile on both Unix and Windows, and the only
@@ -395,14 +396,15 @@ test_windows_upgrade_defers_self_replacement_in_source() {
     _log_info "case: Windows upgrade defers self replacement until current exe exits"
 
     local source_file="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade.rs"
+    local restart_file="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/restart.rs"
 
     if grep -q "DeferredWindows" "$source_file" \
         && grep -q "unique_pending_binary_path" "$source_file" \
-        && grep -q "schedule_windows_deferred_install" "$source_file" \
-        && grep -q "Wait-Process -Timeout 120" "$source_file" \
-        && grep -Fq 'Move-Item -LiteralPath $PendingPath -Destination $TargetPath -Force' "$source_file" \
-        && grep -Fq 'Start-Process -FilePath $TargetPath -ArgumentList $restartArgs' "$source_file" \
-        && grep -q "Proxy restart scheduled with the new version" "$source_file"; then
+        && grep -q "schedule_windows_deferred_install" "$restart_file" \
+        && grep -q "Wait-Process -Timeout 120" "$restart_file" \
+        && grep -Fq 'Move-Item -LiteralPath $PendingPath -Destination $TargetPath -Force' "$restart_file" \
+        && grep -Fq 'Start-Process -FilePath $TargetPath -ArgumentList $restartArgs' "$restart_file" \
+        && grep -q "Proxy restart scheduled with the new version" "$restart_file"; then
         _log_pass "Windows upgrade stages self replacement and restarts after the upgrade process exits"
     else
         _log_fail "Windows deferred self replacement" \
@@ -419,6 +421,9 @@ test_upgrade_review_feedback_contracts() {
     local installer_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/app/installer.rs"
     local app_tests="${PROJECT_DIR}/crates/bifrost-cli/src/commands/app/tests.rs"
     local upgrade_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade.rs"
+    local upgrade_download_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/download.rs"
+    local upgrade_restart_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/restart.rs"
+    local upgrade_tests="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/tests.rs"
     local background_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade_background.rs"
     local admin_src="${PROJECT_DIR}/crates/bifrost-admin/src/handlers/system.rs"
     local desktop_src="${PROJECT_DIR}/desktop/src-tauri/src/main.rs"
@@ -426,18 +431,28 @@ test_upgrade_review_feedback_contracts() {
     if [ "$(wc -l <"$app_src")" -le 1500 ] \
         && [ "$(wc -l <"$installer_src")" -le 1500 ] \
         && [ "$(wc -l <"$app_tests")" -le 1500 ] \
+        && [ "$(wc -l <"$upgrade_src")" -le 1500 ] \
+        && [ "$(wc -l <"$upgrade_download_src")" -le 1500 ] \
+        && [ "$(wc -l <"$upgrade_restart_src")" -le 1500 ] \
+        && [ "$(wc -l <"$upgrade_tests")" -le 1500 ] \
         && grep -Fq 'parent.join(format!(".{name}.backup"))' "$app_src" \
         && grep -Fq 'verify_installed_cli_target_version_or_restore' "$upgrade_src" \
-        && grep -Fq 'or_else(|| Some("127.0.0.1".to_string()))' "$upgrade_src" \
+        && grep -Fq 'or_else(|| Some("127.0.0.1".to_string()))' "$upgrade_restart_src" \
+        && grep -Fq 'info.start_mode != RuntimeStartMode::Desktop' "$upgrade_restart_src" \
         && grep -Fq 'Another updater owns the cross-process upgrade lock' "$background_src" \
-        && grep -Fq -- '"--app-dir".to_string()' "$admin_src" \
-        && grep -Fq -- '"--app-dir".to_string()' "$upgrade_src" \
+        && ! grep -Fq 'desktop_app_install_dir_for_upgrade' "$admin_src" \
+        && grep -Fq 'macos_app_dir_from_exe_path' "$app_src" \
+        && grep -Fq 'defer_desktop_install_to_handoff' "$installer_src" \
+        && grep -Fq 'acquire_top_level_app_upgrade_lock' "$app_src" \
+        && grep -Fq 'try_acquire_upgrade_lock' "$installer_src" \
+        && grep -Fq 'handle_upgrade_to_target(true, target_version.to_string())' "$app_src" \
+        && grep -Fq 'spawn_windows_desktop_upgrade_handoff' "$desktop_src" \
         && grep -Fq 'persist_desktop_upgrade_handoff_failure' "$desktop_src" \
         && grep -Fq 'read_installed_cli_version_with_timeout' "$app_src"; then
-        _log_pass "review feedback contracts cover recovery, ownership, rollback, app-dir, and module size"
+        _log_pass "review feedback contracts cover recovery, ownership, rollback, shared locking, pinned targets, deferred desktop install, active app path, and module size"
     else
         _log_fail "upgrade review feedback contracts" \
-            "stable backup + exact rollback + safe marker + lock failure + app-dir + persisted handoff + bounded modules" \
+            "stable backup + exact rollback + safe marker + shared App lock + pinned target + active app path + foreground restart + deferred desktop install + persisted handoff + bounded modules" \
             "one or more contracts are missing"
         return 1
     fi

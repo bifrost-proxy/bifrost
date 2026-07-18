@@ -20,13 +20,11 @@ use crate::cli::AppCommands;
 
 use super::update_check::get_latest_version_fresh_with_diagnostics;
 use super::upgrade::{
-    download_progress_line, handle_upgrade, DESKTOP_MANAGED_SKIP_APP_ENV,
+    download_progress_line, handle_upgrade_to_target, DESKTOP_MANAGED_SKIP_APP_ENV,
     DESKTOP_MANAGED_SKIP_RESTART_ENV, DESKTOP_MANAGED_TARGET_ENV,
 };
 
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod installer;
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use installer::*;
 
 #[cfg(any(target_os = "windows", test))]
@@ -198,6 +196,8 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
         return Ok(());
     }
 
+    let _upgrade_lock = acquire_top_level_app_upgrade_lock(&progress_source, &target_version)?;
+
     write_app_progress(
         UpgradePhase::Checking,
         "Checking desktop app update…",
@@ -254,6 +254,27 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
         None,
         None,
     );
+    #[cfg(target_os = "windows")]
+    if should_defer_desktop_install(&progress_source, &package_path, true) {
+        defer_desktop_install_to_handoff(&package_path, &target_version).inspect_err(|error| {
+            write_app_failed_progress(&target_version, &progress_source, error);
+        })?;
+        write_app_progress(
+            UpgradePhase::Restarting,
+            "Waiting for desktop shell to stop before installing…",
+            Some(target_version.clone()),
+            &progress_source,
+            None,
+            None,
+        );
+        println!(
+            "{}",
+            "✓ Desktop installer is ready; the desktop restart handoff will apply it."
+                .bright_green()
+                .bold()
+        );
+        return Ok(());
+    }
     install_desktop_package(
         &package_path,
         &install_dir,
@@ -282,7 +303,16 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
         None,
         None,
     );
-    if progress_source != "desktop" && !skip_desktop_restart() {
+    if progress_source == "desktop" {
+        println!(
+            "{}",
+            "✓ Desktop update installed; waiting for the desktop restart handoff."
+                .bright_green()
+                .bold()
+        );
+        return Ok(());
+    }
+    if !skip_desktop_restart() {
         restart_desktop_app(&install_path).inspect_err(|error| {
             write_app_failed_progress(&target_version, &progress_source, error);
         })?;
@@ -300,17 +330,6 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
     Ok(())
 }
 
-fn write_app_failed_progress(target_version: &str, progress_source: &str, error: &BifrostError) {
-    write_app_progress(
-        UpgradePhase::Failed,
-        "Desktop app update failed",
-        Some(target_version.to_string()),
-        progress_source,
-        None,
-        Some(error.to_string()),
-    );
-}
-
 fn upgrade_cli_if_present(progress_source: &str, target_version: &str) -> Result<(), BifrostError> {
     println!(
         "{}",
@@ -320,7 +339,7 @@ fn upgrade_cli_if_present(progress_source: &str, target_version: &str) -> Result
     if progress_source != "desktop" {
         // The visible `bifrost app upgrade` command is itself the CLI install,
         // so the existing upgrade engine should update the current executable.
-        handle_upgrade(true)?;
+        handle_upgrade_to_target(true, target_version.to_string())?;
         return Ok(());
     }
 
@@ -556,12 +575,6 @@ fn cli_binary_name() -> &'static str {
     {
         "bifrost"
     }
-}
-
-fn skip_desktop_restart() -> bool {
-    env::var("BIFROST_APP_SKIP_RESTART")
-        .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
 }
 
 fn uninstall_app(app_dir: Option<PathBuf>, dry_run: bool, _yes: bool) -> Result<(), BifrostError> {
