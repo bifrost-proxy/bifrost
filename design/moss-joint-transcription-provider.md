@@ -1,4 +1,4 @@
-# MOSS 联合转录 Provider 第一阶段设计
+# MOSS 联合转录 Provider 与任务模式设计
 
 ## 1. 背景与目标
 
@@ -14,13 +14,17 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 - 结果能够表达完成、长度截断、取消、失败和未知结束原因。
 - Provider 能力通过注册信息表达，避免在业务逻辑中散落模型名判断。
 - 提供可重复执行的真实任务基准工具，从现有 ASR 任务中选择约 10 分钟和约 30 分钟音频并读取既有基线。
+- Directory Task 可以显式选择“标准转录”或“MOSS 联合转录”模式。
+- MOSS 模式允许配置任务级 Prompt；Prompt 随任务保存、读取、编辑和清空。
+- 首次运行 MOSS 任务时自动初始化专用 runtime 和固定版本模型，无需用户手工执行初始化命令。
 
 必须不破坏：
 
 - Qwen 及其他现有 OpenAI 兼容服务不返回说话人时，行为与旧版本一致。
 - 现有分块、重试、字幕、时间线和 CLI 流程继续接受无说话人结果。
 - 不修改现有任务源音频、`tasks.json`、`files.json` 或时间线产物。
-- MOSS 不进入实时默认路径，不自动下载大模型，不改系统 Python 环境。
+- MOSS 不进入实时默认路径；旧任务缺少模式字段时继续使用标准 Qwen 链路。
+- 自动初始化只写入 Bifrost ASR 数据目录，不改系统 Python 环境，也不覆盖现有 Qwen 资产。
 
 必须真实验证：
 
@@ -43,14 +47,28 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 4. 增加 Provider 能力注册信息，登记 Qwen 实时/纯转录和 MOSS 离线联合转录的差异。
 5. 增加只读基准工具，使用已有任务元数据选择真实样本并生成 JSON 报告。
 
-### 2.2 后续阶段
+### 2.2 第二阶段：Directory Task 可选择模式
 
-- 独立 MLX sidecar：固定模型与 API 契约、限制 CORS、支持 prompt、健康检查和显式资源回收。
-- 任务配置/API/WebUI：选择 Provider、prompt 模板、max tokens、并发和回退策略。
+本阶段把第一阶段契约接入真实 ASR Directory Task：
+
+1. 新增 `transcription_mode=standard|moss_joint`。Serde 默认值为 `standard`，保证历史 `tasks.json` 无迁移写回也能读取。
+2. 新增 `transcription_prompt` 字符串。空字符串表示未配置；创建、PATCH、GET 和 Web 表单均保留该值，最大 4000 个 Unicode 字符。
+3. `moss_joint` 走整文件联合转录，不执行 Qwen 30 秒分块，也不再叠加 Sherpa/Pyannote 分离；模型原生 speaker 直接进入 timeline。
+4. 首次运行时自动准备独立 runtime 和 Q5 模型；准备完成后同一任务直接继续推理。
+5. 发布包为 Apple Silicon macOS 生成独立 `moss-transcribe` runtime 资产。runtime 源码与 ggml 子模块固定到审核过的 commit；初始化器从同版本 release checksum manifest 读取 runtime zip 的 SHA-256，校验后才解压；模型固定文件名、大小和 SHA-256，下载后必须校验。测试覆盖的自定义 runtime URL 必须同时提供 `BIFROST_MOSS_RUNTIME_SHA256`。
+6. 用户 Prompt 通过仅当前进程可读的临时文件传入。runtime 始终先使用 GGUF 内置协议 Prompt，再追加用户上下文，避免自定义 Prompt 破坏时间戳和 speaker 输出协议。
+7. Bifrost 为原生子进程设置 `GGML_METAL_NO_RESIDENCY=1`，规避固定 GGML 版本在部分 Apple Silicon 上完成推理后的 residency-set 退出断言。该开关只关闭可选缓存，不改变模型和解码参数。
+
+`runtime_strategy` 只控制标准 Qwen 链路；MOSS 联合模式固定单文件串行整文件推理。WebUI 在 MOSS 模式下显示该约束，但保留原 Qwen 配置，切回标准模式后可继续使用。
+
+### 2.3 后续阶段
+
+- 长驻 sidecar：固定 API 契约、限制 CORS、健康检查、取消和显式资源回收。
+- 可选 MLX runtime：在有可稳定再分发的固定 harness 后，作为 Apple Silicon 高性能后端加入同一能力契约。
 - 长音频运行：按 VAD/静音边界切块、上下文衔接、断点恢复、进度和取消。
 - 质量评估：人工标注小集上的说话人错误率、转录错误率、时间戳偏移与重复/漏字。
 
-本阶段不把通用 `mlx-audio` server 直接嵌入 Bifrost，不承诺 MOSS 实时流式能力，也不将 `moss-transcribe.cpp` 作为默认后端。
+本阶段不把通用 `mlx-audio` server 直接嵌入 Bifrost，不承诺 MOSS 实时流式能力，也不把 MOSS 设为历史任务或新任务的默认模式。
 
 ## 3. 领域模型
 
@@ -94,8 +112,9 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 | --- | --- | --- | --- | --- | --- | --- |
 | `qwen-openai` | 实时/离线纯转录 | 是 | 否 | 依服务而定 | 否 | 是 |
 | `moss-mlx` | 离线联合转录 | 否 | 是 | 是 | 是 | 是 |
+| `moss-cpp` | 离线联合转录 | 否 | 是 | 是 | 是 | 是 |
 
-任务层后续根据能力匹配场景；本阶段只提供查询和测试，不改变默认 Provider。
+任务层通过 `transcription_mode` 匹配能力；`standard` 使用 `qwen-openai`，`moss_joint` 使用发布包中的 `moss-cpp` runtime。注册表仍保留 `moss-mlx`，供后续在不改变任务配置的前提下切换实现。
 
 真实样本验证发现，直接用自定义 prompt 替换 MOSS 默认 prompt 时，模型仍会生成 `[Sxx]` 标签，但不再生成可解析的时间戳，最终只能回退成整文件单片段。因此 MOSS sidecar 必须保留协议 prompt，只允许把词汇、语言或会议上下文追加到协议约束中。
 
@@ -163,7 +182,9 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 
 ## 8. 风险与回退
 
-- 新模型运行时快速演进：以独立 sidecar 隔离 Python/MLX 依赖，Bifrost 核心仅依赖稳定 JSON 契约。
+- 新模型运行时快速演进：发布 runtime 固定源 commit、子模块 commit 和模型哈希；Bifrost 核心只消费稳定 JSON 契约。
+- 自动初始化下载中断：使用可续传临时文件，哈希不匹配时拒绝安装并保留明确错误；不会回退成 Qwen 后悄悄产出不同语义的结果。
+- Prompt 泄露或协议破坏：Prompt 不放入命令行参数，临时文件随单次推理销毁；runtime 追加而非替换协议 Prompt。
 - 长音频 token 截断：保留结束原因和用量，后续结合 VAD 语音终点与分块重试。
 - 说话人标签跨块漂移：本阶段只保留单次响应标签，不宣称跨块身份稳定；后续接 voiceprint/聚类归并。
 - 资源占用：MOSS 仅离线串行启用，Qwen 实时默认链路不变。
@@ -173,4 +194,4 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 
 第 1 轮重点检查响应兼容、旧调用方行为、时间单位、空 speaker、真实任务只读性；运行相关 crate 单测与基准 E2E。
 
-第 2 轮基于最新 diff 复查新增字段初始化、错误路径、文档和 `human_tests` 一致性，并复跑失败路径、真实基准与项目校验。远端 CI 执行 coverage 90% gate，本地不运行全量 coverage。
+第 2 轮基于最新 diff 复查历史任务默认值、Prompt 保存/清空、发布资产生成、下载校验、原生 speaker timeline、错误路径、文档和 `human_tests` 一致性，并复跑失败路径、真实基准与项目校验。远端 CI 执行 coverage 90% gate，本地不运行全量 coverage。

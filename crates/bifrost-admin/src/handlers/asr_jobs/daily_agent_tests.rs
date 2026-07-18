@@ -137,6 +137,8 @@ fn daily_agent_terminology_survives_normalization_and_agent_task_projection() {
     assert_eq!(normalized.agents.len(), 2);
 
     let task = AsrDirectoryTask {
+        transcription_mode: AsrTranscriptionMode::Standard,
+        transcription_prompt: String::new(),
         id: "daily-agent-terms-config-task".to_string(),
         name: "Daily Agent Terms Config Task".to_string(),
         audio_dir: PathBuf::new(),
@@ -196,6 +198,8 @@ fn daily_agent_workspace_creates_per_agent_instruction_and_output_dirs() {
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
     let mut task = AsrDirectoryTask {
+        transcription_mode: AsrTranscriptionMode::Standard,
+        transcription_prompt: String::new(),
         id: "daily-agent-multi-workspace-task".to_string(),
         name: "Daily Agent Multi Workspace Task".to_string(),
         audio_dir: temp.path().join("audio"),
@@ -296,6 +300,8 @@ fn daily_agent_workspace_migrates_legacy_instruction_paths() {
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
     let task = AsrDirectoryTask {
+        transcription_mode: AsrTranscriptionMode::Standard,
+        transcription_prompt: String::new(),
         id: "daily-agent-legacy-instructions-task".to_string(),
         name: "Daily Agent Legacy Instructions Task".to_string(),
         audio_dir: temp.path().join("audio"),
@@ -355,6 +361,8 @@ fn daily_agent_processed_state_keys_do_not_collide_for_same_date() {
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
     let mut task = AsrDirectoryTask {
+        transcription_mode: AsrTranscriptionMode::Standard,
+        transcription_prompt: String::new(),
         id: "daily-agent-multi-records-task".to_string(),
         name: "Daily Agent Multi Records Task".to_string(),
         audio_dir: temp.path().join("audio"),
@@ -451,6 +459,8 @@ fn daily_agent_prompt_uses_file_list_for_file_capable_runners() {
     let audio_dir = temp.path().join("audio");
     std::fs::create_dir_all(&audio_dir).unwrap();
     let mut task = AsrDirectoryTask {
+        transcription_mode: AsrTranscriptionMode::Standard,
+        transcription_prompt: String::new(),
         id: "daily-agent-prompt-task".to_string(),
         name: "Daily Agent Prompt Task".to_string(),
         audio_dir,
@@ -514,6 +524,8 @@ fn daily_agent_chatgpt_web_tomorrow_todo_prompt_overrides_existing_source_date_h
     let audio_dir = temp.path().join("audio");
     std::fs::create_dir_all(&audio_dir).unwrap();
     let task = AsrDirectoryTask {
+        transcription_mode: AsrTranscriptionMode::Standard,
+        transcription_prompt: String::new(),
         id: "daily-agent-tomorrow-prompt-task".to_string(),
         name: "Daily Agent Tomorrow Prompt Task".to_string(),
         audio_dir,
@@ -733,6 +745,8 @@ fn daily_agent_change_plan_filters_to_requested_date() {
     let audio_dir = temp.path().join("audio");
     std::fs::create_dir_all(&audio_dir).unwrap();
     let task = AsrDirectoryTask {
+        transcription_mode: AsrTranscriptionMode::Standard,
+        transcription_prompt: String::new(),
         id: "daily-agent-date-filter-task".to_string(),
         name: "Daily Agent Date Filter Task".to_string(),
         audio_dir,
@@ -972,6 +986,8 @@ fn daily_agent_report_gate_requires_report_before_processed_state() {
     let audio_dir = temp.path().join("audio");
     std::fs::create_dir_all(&audio_dir).unwrap();
     let task = AsrDirectoryTask {
+        transcription_mode: AsrTranscriptionMode::Standard,
+        transcription_prompt: String::new(),
         id: "daily-agent-report-gate-task".to_string(),
         name: "Daily Agent Report Gate Task".to_string(),
         audio_dir,
@@ -1108,6 +1124,8 @@ fn daily_agent_records_for_task_use_configured_runner_for_unindexed_reports() {
     std::fs::write(report_dir.join("2026-05-18-report.md"), "# report").unwrap();
 
     let mut task = AsrDirectoryTask {
+        transcription_mode: AsrTranscriptionMode::Standard,
+        transcription_prompt: String::new(),
         id: task_id.to_string(),
         name: "Daily Agent Records Configured Runner Task".to_string(),
         audio_dir: temp.path().join("audio"),
@@ -1204,6 +1222,8 @@ fn daily_agent_report_sync_copies_reports_into_agent_subdirectories() {
     std::fs::create_dir_all(&sync_dir).unwrap();
 
     let mut task = AsrDirectoryTask {
+        transcription_mode: AsrTranscriptionMode::Standard,
+        transcription_prompt: String::new(),
         id: task_id.to_string(),
         name: "Daily Agent Report Sync Task".to_string(),
         audio_dir: temp.path().join("audio"),
@@ -1691,6 +1711,8 @@ fn daily_agent_report_sync_overwrites_unreadable_target_without_reading_target_h
     std::fs::create_dir_all(&sync_dir).unwrap();
 
     let mut task = AsrDirectoryTask {
+        transcription_mode: AsrTranscriptionMode::Standard,
+        transcription_prompt: String::new(),
         id: task_id.to_string(),
         name: "Daily Agent Report Sync Unreadable Target Task".to_string(),
         audio_dir: temp.path().join("audio"),
@@ -1812,6 +1834,8 @@ fn daily_agent_report_sync_auto_after_generation_uses_isolated_copy_path() {
 fn daily_agent_report_sync_requires_configured_directory() {
     let temp = TempDir::new().unwrap();
     let task = AsrDirectoryTask {
+        transcription_mode: AsrTranscriptionMode::Standard,
+        transcription_prompt: String::new(),
         id: "daily-agent-report-sync-missing-dir-task".to_string(),
         name: "Daily Agent Report Sync Missing Dir Task".to_string(),
         audio_dir: temp.path().join("audio"),
@@ -2008,6 +2032,8 @@ fn daily_agent_records_are_returned_newest_date_first() {
 #[test]
 fn daily_agent_runner_is_single_required_value() {
     let mut task = AsrDirectoryTask {
+        transcription_mode: AsrTranscriptionMode::Standard,
+        transcription_prompt: String::new(),
         id: "daily-agent-ready-task".to_string(),
         name: "Daily Agent Ready Task".to_string(),
         audio_dir: PathBuf::from("/tmp"),
@@ -2191,6 +2217,8 @@ fn daily_agent_after_asr_run_checks_all_agents_for_pending_markdown_changes() {
 fn daily_agent_effective_status_marks_stale_running_as_interrupted() {
     let task_id = "daily-agent-stale-running-task";
     let mut task = AsrDirectoryTask {
+        transcription_mode: AsrTranscriptionMode::Standard,
+        transcription_prompt: String::new(),
         id: task_id.to_string(),
         name: "Daily Agent Stale Running Task".to_string(),
         audio_dir: PathBuf::from("/tmp"),
@@ -2242,6 +2270,8 @@ fn daily_agent_effective_status_marks_stale_running_as_interrupted() {
 fn daily_agent_effective_status_uses_latest_agent_status() {
     let task_id = "daily-agent-latest-status-task";
     let mut task = AsrDirectoryTask {
+        transcription_mode: AsrTranscriptionMode::Standard,
+        transcription_prompt: String::new(),
         id: task_id.to_string(),
         name: "Daily Agent Latest Status Task".to_string(),
         audio_dir: PathBuf::from("/tmp"),

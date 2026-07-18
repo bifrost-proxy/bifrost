@@ -511,6 +511,8 @@ export type AsrTaskSchedule =
   | { kind: "weekly"; weekday: number; hour: number; minute: number }
   | { kind: "monthly"; day: number; hour: number; minute: number };
 
+export type AsrTranscriptionMode = "standard" | "moss_joint";
+
 export interface AsrDirectoryTask {
   id: string;
   name: string;
@@ -522,6 +524,8 @@ export interface AsrDirectoryTask {
   schedule: AsrTaskSchedule;
   language: string;
   model: string;
+  transcription_mode: AsrTranscriptionMode;
+  transcription_prompt: string;
   runtime_strategy: AsrRuntimeStrategy;
   max_concurrent_files: number;
   diarization?: {
@@ -589,6 +593,8 @@ export interface CreateAsrTaskRequest {
   schedule?: AsrTaskSchedule;
   language?: string;
   model?: string;
+  transcription_mode?: AsrTranscriptionMode;
+  transcription_prompt?: string;
   runtime_strategy?: AsrRuntimeStrategy;
   max_concurrent_files?: number;
   diarization?: AsrDirectoryTask["diarization"];

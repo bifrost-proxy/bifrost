@@ -258,6 +258,40 @@ jobs:
           CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"
         run: cross build -p bifrost-cli --release --target ${{ matrix.target }}
 
+      - name: Build MOSS joint transcription runtime
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_COMMIT="190a569c13b4b247450f2fb3b2a431244e84833e"
+          GGML_COMMIT="eced84c86f8b012c752c016f7fe789adea168e1e"
+          SOURCE_DIR="$RUNNER_TEMP/moss-transcribe.cpp"
+          git clone --filter=blob:none --no-checkout https://github.com/mudler/moss-transcribe.cpp "$SOURCE_DIR"
+          git -C "$SOURCE_DIR" fetch --depth 1 origin "$SOURCE_COMMIT"
+          git -C "$SOURCE_DIR" checkout --detach "$SOURCE_COMMIT"
+          git -C "$SOURCE_DIR" submodule update --init --recursive --depth 1
+          test "$(git -C "$SOURCE_DIR/third_party/ggml" rev-parse HEAD)" = "$GGML_COMMIT"
+          git -C "$SOURCE_DIR" apply --unidiff-zero "$GITHUB_WORKSPACE/scripts/asr/moss-transcribe-prompt.patch"
+          cmake -S "$SOURCE_DIR" -B "$SOURCE_DIR/build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_NATIVE=OFF \
+            -DMT_BUILD_TESTS=OFF
+          cmake --build "$SOURCE_DIR/build" --config Release --parallel 3
+          RUNTIME_HELP="$("$SOURCE_DIR/build/moss-transcribe" 2>&1 || true)"
+          grep -q "usage: moss-transcribe" <<<"$RUNTIME_HELP"
+          if otool -L "$SOURCE_DIR/build/moss-transcribe" | grep -Eq '@rpath/(libggml|libmt-runtime)'; then
+            echo "MOSS runtime unexpectedly depends on build-tree dynamic libraries"
+            otool -L "$SOURCE_DIR/build/moss-transcribe"
+            exit 1
+          fi
+          mkdir -p dist/moss-joint-runtime
+          cp "$SOURCE_DIR/build/moss-transcribe" dist/moss-joint-runtime/
+          strip dist/moss-joint-runtime/moss-transcribe 2>/dev/null || true
+          VERSION="${{ needs.prepare.outputs.version }}"
+          ditto -c -k --keepParent dist/moss-joint-runtime \
+            "dist/moss-joint-runtime-v${VERSION}-aarch64-apple-darwin.zip"
+
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
         shell: bash

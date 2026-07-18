@@ -852,6 +852,8 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
         schedule: buildTaskSchedule(values),
         language: values.language,
         model: values.model,
+        transcription_mode: values.transcription_mode,
+        transcription_prompt: values.transcription_prompt ?? "",
         runtime_strategy: values.runtime_strategy,
         max_concurrent_files: values.max_concurrent_files,
         diarization: {
@@ -900,6 +902,8 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
           schedule: buildTaskSchedule(values),
           language: values.language,
           model: values.model,
+          transcription_mode: values.transcription_mode,
+          transcription_prompt: values.transcription_prompt ?? "",
           runtime_strategy: values.runtime_strategy,
           max_concurrent_files: values.max_concurrent_files,
           diarization: {

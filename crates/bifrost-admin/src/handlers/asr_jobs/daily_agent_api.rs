@@ -467,6 +467,8 @@ fn build_daily_agent_records(
         .keys()
         .all(|key| !key.contains(':'));
     let task = find_task(task_id).unwrap_or_else(|| AsrDirectoryTask {
+        transcription_mode: AsrTranscriptionMode::Standard,
+        transcription_prompt: String::new(),
         id: task_id.to_string(),
         name: task_id.to_string(),
         audio_dir: PathBuf::new(),

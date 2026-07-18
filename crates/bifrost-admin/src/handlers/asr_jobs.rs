@@ -73,6 +73,7 @@ include!("asr_jobs/voiceprint.rs");
 include!("asr_jobs/external_import.rs");
 include!("asr_jobs/api.rs");
 include!("asr_jobs/retry.rs");
+include!("asr_jobs/moss_joint.rs");
 include!("asr_jobs/runner.rs");
 include!("asr_jobs/chunk_runtime.rs");
 include!("asr_jobs/memory_bisect.rs");

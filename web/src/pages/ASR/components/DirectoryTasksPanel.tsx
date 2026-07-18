@@ -34,6 +34,7 @@ import type {
   AsrExternalVolume,
   AsrPauseMode,
   AsrRuntimeStrategy,
+  AsrTranscriptionMode,
 } from "../../../api/asr";
 import { listAsrExternalVolumes } from "../../../api/asr";
 import { formatSchedule, formatTime } from "../asrUtils";
@@ -200,6 +201,8 @@ export default function DirectoryTasksPanel({
   const volumePromptOpenRef = useRef(false);
 
   const configOpen = createOpen || Boolean(editingTask);
+  const transcriptionMode = Form.useWatch<AsrTranscriptionMode>("transcription_mode", taskForm);
+  const mossJointMode = transcriptionMode === "moss_joint";
   const configTitle = editingTask
     ? `Edit Directory Task: ${editingTask.name}`
     : "New Directory Task";
@@ -376,6 +379,8 @@ export default function DirectoryTasksPanel({
             schedule_day: 1,
             schedule_minute: 0,
             runtime_strategy: "reuse_per_file",
+            transcription_mode: "standard",
+            transcription_prompt: "",
             max_concurrent_files: 1,
             diarization_enabled: true,
             diarization_profile: "sherpa-onnx-balanced",
@@ -463,9 +468,55 @@ export default function DirectoryTasksPanel({
                 </Col>
               </>
             ) : null}
+            <Col xs={24}>
+              <Form.Item name="transcription_mode" label="Transcription Mode">
+                <Select
+                  data-testid="asr-transcription-mode-select"
+                  options={[
+                    {
+                      value: "standard",
+                      label: "Standard ASR + speaker diarization",
+                    },
+                    {
+                      value: "moss_joint",
+                      label: "MOSS joint transcription (speaker-aware)",
+                    },
+                  ]}
+                />
+              </Form.Item>
+              <Text type="secondary" style={{ display: "block", marginTop: -16, marginBottom: 16 }}>
+                {mossJointMode
+                  ? "MOSS transcribes timestamps and speaker labels in one pass. The verified runtime and Q5 model are initialized automatically on first run."
+                  : "Uses the existing Qwen transcription pipeline and optional external speaker diarization."}
+              </Text>
+            </Col>
+            {mossJointMode ? (
+              <Col xs={24}>
+                <Form.Item
+                  name="transcription_prompt"
+                  label="MOSS Prompt"
+                  extra="Optional meeting context, names, and specialist terms. Bifrost appends it to the required MOSS protocol prompt and saves it with this task."
+                  rules={[
+                    {
+                      max: 4000,
+                      message: "Prompt must not exceed 4000 characters",
+                    },
+                  ]}
+                >
+                  <Input.TextArea
+                    data-testid="asr-transcription-prompt-input"
+                    rows={4}
+                    showCount
+                    maxLength={4000}
+                    placeholder="Example: This is a Bifrost and NextOnCall project meeting. Preserve product names and mixed Chinese/English terms."
+                  />
+                </Form.Item>
+              </Col>
+            ) : null}
             <Col xs={24} md={8}>
               <Form.Item name="runtime_strategy" label="Runtime">
                 <Select
+                  disabled={mossJointMode}
                   data-testid="asr-runtime-strategy-select"
                   listHeight={420}
                   optionLabelProp="label"
@@ -490,7 +541,7 @@ export default function DirectoryTasksPanel({
             </Col>
             <Col xs={24} md={8}>
               <Form.Item name="max_concurrent_files" label="File Concurrency">
-                <InputNumber min={1} max={16} style={{ width: "100%" }} />
+                <InputNumber disabled={mossJointMode} min={1} max={16} style={{ width: "100%" }} />
               </Form.Item>
             </Col>
             <Col xs={12} md={8}>
@@ -499,12 +550,13 @@ export default function DirectoryTasksPanel({
                 label="Speaker Diarization"
                 valuePropName="checked"
               >
-                <Switch />
+                <Switch disabled={mossJointMode} />
               </Form.Item>
             </Col>
             <Col xs={12} md={8}>
               <Form.Item name="diarization_profile" label="Diarization Profile">
                 <Select
+                  disabled={mossJointMode}
                   options={[
                     { value: "sherpa-onnx-balanced", label: "sherpa-onnx balanced" },
                     { value: "pyannote-community-quality", label: "pyannote community quality" },
@@ -514,7 +566,13 @@ export default function DirectoryTasksPanel({
             </Col>
             <Col xs={12} md={8}>
               <Form.Item name="diarization_known_speaker_count" label="Known Speakers">
-                <InputNumber min={1} max={8} placeholder="Auto" style={{ width: "100%" }} />
+                <InputNumber
+                  disabled={mossJointMode}
+                  min={1}
+                  max={8}
+                  placeholder="Auto"
+                  style={{ width: "100%" }}
+                />
               </Form.Item>
             </Col>
             <Col xs={12} md={8}>
@@ -523,12 +581,13 @@ export default function DirectoryTasksPanel({
                 label="Voiceprint Matching"
                 valuePropName="checked"
               >
-                <Switch />
+                <Switch disabled={mossJointMode} />
               </Form.Item>
             </Col>
             <Col xs={24} md={8}>
               <Form.Item name="model" label="Task Model">
                 <Select
+                  disabled={mossJointMode}
                   options={[
                     { value: "Qwen3-ASR-0.6B", label: "Qwen3-ASR-0.6B" },
                     { value: "Qwen3-ASR-1.7B", label: "Qwen3-ASR-1.7B" },
@@ -638,10 +697,13 @@ export default function DirectoryTasksPanel({
                   next {formatTime(record.next_run_at_ms)}
                 </Text>
                 <Tag>{record.runtime_strategy}</Tag>
+                <Tag color={record.transcription_mode === "moss_joint" ? "cyan" : "default"}>
+                  {record.transcription_mode === "moss_joint" ? "MOSS joint" : "standard"}
+                </Tag>
                 {record.summary.effective_max_concurrent_files !== record.max_concurrent_files ? (
                   <Tag color="warning">effective 1</Tag>
                 ) : null}
-                {record.diarization?.enabled ? (
+                {record.transcription_mode !== "moss_joint" && record.diarization?.enabled ? (
                   <Tag color={record.summary.diarization_ready ? "purple" : "warning"}>
                     {record.summary.diarization_ready ? "speakers ready" : "speakers setup"}
                   </Tag>
@@ -893,6 +955,8 @@ function defaultTaskFormValues() {
     schedule_day: 1,
     schedule_minute: 0,
     runtime_strategy: "reuse_per_file",
+    transcription_mode: "standard",
+    transcription_prompt: "",
     max_concurrent_files: 1,
     diarization_enabled: true,
     diarization_profile: "sherpa-onnx-balanced",
@@ -943,6 +1007,8 @@ function taskToFormValues(task: AsrDirectoryTask) {
     model: task.model,
     language: task.language,
     runtime_strategy: task.runtime_strategy,
+    transcription_mode: task.transcription_mode ?? "standard",
+    transcription_prompt: task.transcription_prompt ?? "",
     max_concurrent_files: task.max_concurrent_files ?? 1,
     diarization_enabled: task.diarization?.enabled ?? true,
     diarization_profile: task.diarization?.profile ?? "sherpa-onnx-balanced",

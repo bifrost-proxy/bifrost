@@ -1,0 +1,66 @@
+diff --git a/src/cli.cpp b/src/cli.cpp
+index af8e028..030f22c 100644
+--- a/src/cli.cpp
++++ b/src/cli.cpp
+@@ -10,0 +11,2 @@
++#include <fstream>
++#include <sstream>
+@@ -37 +39 @@ static int cmd_transcribe(int argc, char** argv) {
+-            "[--max-new N] [--format text|srt|ass|json]\n");
++            "[--max-new N] [--format text|srt|ass|json] [--prompt-file PATH]\n");
+@@ -43,0 +46 @@ static int cmd_transcribe(int argc, char** argv) {
++    std::string prompt_file;
+@@ -48,0 +52,5 @@ static int cmd_transcribe(int argc, char** argv) {
++        } else if (std::strcmp(argv[i], "--prompt-file") == 0 && i + 1 < argc) {
++            prompt_file = argv[++i];
++        } else {
++            std::fprintf(stderr, "unknown or incomplete option '%s'\n", argv[i]);
++            return 2;
+@@ -63 +71,12 @@ static int cmd_transcribe(int argc, char** argv) {
+-    std::string text = mt::transcribe_wav(m, wav, max_new);
++    std::string user_prompt;
++    if (!prompt_file.empty()) {
++        std::ifstream input(prompt_file, std::ios::binary);
++        if (!input) {
++            std::fprintf(stderr, "failed to open prompt file\n");
++            return 1;
++        }
++        std::ostringstream buffer;
++        buffer << input.rdbuf();
++        user_prompt = buffer.str();
++    }
++    std::string text = mt::transcribe_wav(m, wav, max_new, user_prompt);
+diff --git a/src/transcribe.cpp b/src/transcribe.cpp
+index e33d430..5f6064b 100644
+--- a/src/transcribe.cpp
++++ b/src/transcribe.cpp
+@@ -24 +24 @@ std::string transcribe_pcm16k(ModelLoader& m, const std::vector<float>& samples,
+-                              int max_new) {
++                              int max_new, const std::string& user_prompt) {
+@@ -40,2 +40,6 @@ std::string transcribe_pcm16k(ModelLoader& m, const std::vector<float>& samples,
+-    std::vector<int32_t> input_ids =
+-        build_input_ids(tok, c, c.default_prompt, n_tokens);
++    std::string prompt = c.default_prompt;
++    if (!user_prompt.empty()) {
++        prompt += "\n\nAdditional transcription context (preserve the required output format):\n";
++        prompt += user_prompt;
++    }
++    std::vector<int32_t> input_ids = build_input_ids(tok, c, prompt, n_tokens);
+@@ -62 +66,2 @@ std::string transcribe_pcm16k(ModelLoader& m, const std::string& wav_path, int max_new) {
+-std::string transcribe_wav(ModelLoader& m, const std::string& wav_path, int max_new) {
++std::string transcribe_wav(ModelLoader& m, const std::string& wav_path, int max_new,
++                           const std::string& user_prompt) {
+@@ -69 +74 @@ std::string transcribe_wav(ModelLoader& m, const std::string& wav_path, int max_new) {
+-    return transcribe_pcm16k(m, a.samples, max_new);
++    return transcribe_pcm16k(m, a.samples, max_new, user_prompt);
+diff --git a/src/transcribe.hpp b/src/transcribe.hpp
+index 02a68b0..99cf824 100644
+--- a/src/transcribe.hpp
++++ b/src/transcribe.hpp
+@@ -19 +19,2 @@ namespace mt {
+-std::string transcribe_wav(ModelLoader& m, const std::string& wav_path, int max_new);
++std::string transcribe_wav(ModelLoader& m, const std::string& wav_path, int max_new,
++                           const std::string& user_prompt = {});
+@@ -26 +27 @@ std::string transcribe_pcm16k(ModelLoader& m, const std::vector<float>& samples,
+-                              int max_new);
++                              int max_new, const std::string& user_prompt = {});

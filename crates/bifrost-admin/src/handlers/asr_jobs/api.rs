@@ -267,6 +267,24 @@ fn normalize_task_diarization_config(mut config: AsrDiarizationConfig) -> AsrDia
     config
 }
 
+const ASR_TRANSCRIPTION_PROMPT_MAX_CHARS: usize = 4_000;
+
+fn normalize_transcription_prompt(value: String) -> Result<String, String> {
+    let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
+    if normalized.chars().count() > ASR_TRANSCRIPTION_PROMPT_MAX_CHARS {
+        return Err(format!(
+            "transcription_prompt must not exceed {ASR_TRANSCRIPTION_PROMPT_MAX_CHARS} characters"
+        ));
+    }
+    if normalized
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+    {
+        return Err("transcription_prompt contains unsupported control characters".to_string());
+    }
+    Ok(normalized.trim().to_string())
+}
+
 async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
     let body = match req.into_body().collect().await {
         Ok(body) => body.to_bytes(),
@@ -321,6 +339,12 @@ async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
     if let Err(error) = validate_daily_agent_config(&daily_agent) {
         return error_response(StatusCode::BAD_REQUEST, &error);
     }
+    let transcription_prompt = match normalize_transcription_prompt(
+        create.transcription_prompt.unwrap_or_default(),
+    ) {
+        Ok(prompt) => prompt,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error),
+    };
     let task = AsrDirectoryTask {
         id: uuid::Uuid::new_v4().as_simple().to_string(),
         name: create
@@ -337,6 +361,8 @@ async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
         model: create
             .model
             .unwrap_or_else(|| bifrost_asr::runtime::DEFAULT_ASR_MODEL.to_string()),
+        transcription_mode: create.transcription_mode.unwrap_or_default(),
+        transcription_prompt,
         runtime_strategy: create.runtime_strategy.unwrap_or_default(),
         max_concurrent_files: normalize_max_concurrent_files(
             create
@@ -403,6 +429,8 @@ fn update_task_config(
         || update.recursive.is_some()
         || update.language.is_some()
         || update.model.is_some()
+        || update.transcription_mode.is_some()
+        || update.transcription_prompt.is_some()
         || update.runtime_strategy.is_some()
         || update.diarization.is_some()
         || update.external_devices.is_some()
@@ -451,6 +479,13 @@ fn update_task_config(
     }
     if let Some(model) = update.model {
         task.model = model;
+    }
+    if let Some(transcription_mode) = update.transcription_mode {
+        task.transcription_mode = transcription_mode;
+    }
+    if let Some(transcription_prompt) = update.transcription_prompt {
+        task.transcription_prompt = normalize_transcription_prompt(transcription_prompt)
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
     }
     if let Some(runtime_strategy) = update.runtime_strategy {
         task.runtime_strategy = runtime_strategy;
@@ -623,6 +658,8 @@ async fn put_external_import_response(id: &str, req: Request<Incoming>) -> Respo
         schedule: None,
         language: None,
         model: None,
+        transcription_mode: None,
+        transcription_prompt: None,
         runtime_strategy: None,
         max_concurrent_files: None,
         diarization: None,

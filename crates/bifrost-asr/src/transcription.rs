@@ -131,6 +131,14 @@ pub const TRANSCRIPTION_PROVIDERS: &[TranscriptionCapabilities] = &[
         protocol_prompt_required: true,
         structured_timestamps: true,
     },
+    TranscriptionCapabilities {
+        provider: "moss-cpp",
+        realtime: false,
+        native_speakers: true,
+        prompt: true,
+        protocol_prompt_required: true,
+        structured_timestamps: true,
+    },
 ];
 
 pub fn transcription_provider(provider: &str) -> Option<&'static TranscriptionCapabilities> {
@@ -172,6 +180,10 @@ mod tests {
         assert!(moss.native_speakers);
         assert!(moss.prompt);
         assert!(moss.protocol_prompt_required);
+        let moss_cpp = transcription_provider("moss-cpp").unwrap();
+        assert!(moss_cpp.native_speakers);
+        assert!(moss_cpp.prompt);
+        assert!(moss_cpp.protocol_prompt_required);
         assert!(transcription_provider("missing").is_none());
     }
 

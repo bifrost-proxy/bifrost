@@ -48,6 +48,8 @@ mod tests {
 
     fn test_directory_task(id: &str, audio_dir: PathBuf) -> AsrDirectoryTask {
         AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: id.to_string(),
             name: id.to_string(),
             audio_dir,
@@ -92,6 +94,74 @@ mod tests {
         let task: AsrDirectoryTask = serde_json::from_str(json).unwrap();
         assert_eq!(task.runtime_strategy, AsrRuntimeStrategy::ReusePerFile);
         assert_eq!(task.max_concurrent_files, 1);
+        assert_eq!(task.transcription_mode, AsrTranscriptionMode::Standard);
+        assert!(task.transcription_prompt.is_empty());
+    }
+
+    #[test]
+    fn transcription_prompt_normalization_preserves_lines_and_rejects_unsafe_input() {
+        assert_eq!(
+            normalize_transcription_prompt("  Bifrost\r\nNextOnCall  ".to_string()).unwrap(),
+            "Bifrost\nNextOnCall"
+        );
+        assert!(normalize_transcription_prompt("bad\0prompt".to_string()).is_err());
+        assert!(normalize_transcription_prompt("x".repeat(4_001)).is_err());
+    }
+
+    #[test]
+    fn moss_json_parser_preserves_native_speakers_and_timestamps() {
+        let result = parse_moss_json(
+            r#"[
+              {"id":"0","start":0.48,"end":3.12,"speaker":"S01","text":"你好"},
+              {"id":"1","start":3.5,"end":5.0,"speaker":"S02","text":"开始开会"}
+            ]"#
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(result.text, "你好\n开始开会");
+        assert_eq!(result.structured.segments.len(), 2);
+        assert_eq!(result.structured.segments[0].start_ms, 480);
+        assert_eq!(result.structured.segments[0].end_ms, 3_120);
+        assert_eq!(result.structured.segments[0].speaker.as_deref(), Some("S01"));
+        assert_eq!(
+            result.structured.finish_reason,
+            bifrost_asr::transcription::TranscriptionFinishReason::Completed
+        );
+    }
+
+    #[test]
+    fn moss_token_budget_scales_with_duration_and_rejects_oversized_whole_files() {
+        assert_eq!(moss_output_token_budget(30_000).unwrap(), 5_120);
+        assert_eq!(moss_output_token_budget(600_000).unwrap(), 12_000);
+        assert!(moss_output_token_budget((MOSS_MAX_WHOLE_FILE_SECONDS + 1) * 1_000).is_err());
+    }
+
+    #[test]
+    fn moss_runtime_smoke_accepts_usage_from_either_output_stream() {
+        assert!(moss_runtime_help_is_valid(
+            b"usage: moss-transcribe <command>",
+            b""
+        ));
+        assert!(moss_runtime_help_is_valid(
+            b"",
+            b"error\nusage: moss-transcribe <command>"
+        ));
+        assert!(!moss_runtime_help_is_valid(b"unexpected", b"failure"));
+    }
+
+    #[test]
+    fn moss_runtime_checksum_manifest_selects_exact_asset_and_rejects_bad_hashes() {
+        let asset = "moss-joint-runtime-v0.0.156-aarch64-apple-darwin.zip";
+        let expected = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let manifest = format!(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  other.zip\n{expected}  dist/{asset}\n"
+        );
+        assert_eq!(
+            parse_runtime_checksum_manifest(&manifest, asset).unwrap(),
+            expected
+        );
+        assert!(parse_runtime_checksum_manifest(&manifest, "missing.zip").is_err());
+        assert!(normalize_sha256("not-a-checksum", asset).is_err());
     }
 
     #[test]
@@ -142,6 +212,9 @@ mod tests {
         task.runtime_strategy = AsrRuntimeStrategy::ForkPerChunk;
         task.diarization.enabled = true;
         assert_eq!(effective_max_concurrent_files(&task), 16);
+
+        task.transcription_mode = AsrTranscriptionMode::MossJoint;
+        assert_eq!(effective_max_concurrent_files(&task), 1);
     }
 
     #[test]
@@ -156,6 +229,8 @@ mod tests {
         RUNNING_TASKS.lock().unwrap().insert(task.id.clone());
 
         let update = UpdateTaskRequest {
+            transcription_mode: None,
+            transcription_prompt: None,
             name: None,
             audio_dir: None,
             recursive: None,
@@ -175,6 +250,8 @@ mod tests {
         assert_eq!(updated.max_concurrent_files, 4);
 
         let risky_update = UpdateTaskRequest {
+            transcription_mode: None,
+            transcription_prompt: None,
             name: None,
             audio_dir: None,
             recursive: None,
@@ -194,6 +271,30 @@ mod tests {
         assert_eq!(error.0, StatusCode::CONFLICT);
 
         RUNNING_TASKS.lock().unwrap().remove(&task.id);
+
+        let prompt_update = UpdateTaskRequest {
+            transcription_mode: Some(AsrTranscriptionMode::MossJoint),
+            transcription_prompt: Some("  Bifrost 专有词  ".to_string()),
+            name: None,
+            audio_dir: None,
+            recursive: None,
+            enabled: None,
+            paused: None,
+            schedule: None,
+            language: None,
+            model: None,
+            runtime_strategy: None,
+            max_concurrent_files: None,
+            diarization: None,
+            daily_agent: None,
+            external_devices: None,
+            import_policy: None,
+        };
+        let updated = update_task_config(&task.id, prompt_update).unwrap();
+        assert_eq!(updated.transcription_mode, AsrTranscriptionMode::MossJoint);
+        assert_eq!(updated.transcription_prompt, "Bifrost 专有词");
+        let reloaded = find_task(&task.id).unwrap();
+        assert_eq!(reloaded.transcription_prompt, "Bifrost 专有词");
     }
 
     #[test]
@@ -1336,6 +1437,8 @@ mod tests {
         let audio_dir = temp.path().join("audio");
         std::fs::create_dir_all(&audio_dir).unwrap();
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "pause-task".to_string(),
             name: "Pause Task".to_string(),
             audio_dir,
@@ -1710,6 +1813,8 @@ mod tests {
         let audio_dir = temp.path().join("audio");
         std::fs::create_dir_all(&audio_dir).unwrap();
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "force-pause-task".to_string(),
             name: "Force Pause Task".to_string(),
             audio_dir,
@@ -1819,6 +1924,8 @@ mod tests {
         let audio = audio_dir.join("done.wav");
         std::fs::write(&audio, b"audio").unwrap();
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "task1".to_string(),
             name: "Task".to_string(),
             audio_dir: audio_dir.clone(),
@@ -1929,6 +2036,8 @@ mod tests {
         std::fs::write(&done, b"audio").unwrap();
         std::fs::write(&pending, b"pending-audio").unwrap();
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "task-cleanable-summary".to_string(),
             name: "Task".to_string(),
             audio_dir: audio_dir.clone(),
@@ -1993,6 +2102,8 @@ mod tests {
         std::fs::write(&partial, b"partial-audio").unwrap();
         std::fs::write(&outside, b"outside-audio").unwrap();
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "task-cleanup".to_string(),
             name: "Task".to_string(),
             audio_dir: audio_dir.clone(),
@@ -2059,6 +2170,8 @@ mod tests {
         let audio = audio_dir.join("bad.wav");
         std::fs::write(&audio, b"bad-audio").unwrap();
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "task1".to_string(),
             name: "Task".to_string(),
             audio_dir: audio_dir.clone(),
@@ -2108,6 +2221,8 @@ mod tests {
         let audio = audio_dir.join("same.wav");
         std::fs::write(&audio, b"old-audio").unwrap();
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "task1".to_string(),
             name: "Task".to_string(),
             audio_dir: audio_dir.clone(),
@@ -2158,6 +2273,8 @@ mod tests {
         let audio = audio_dir.join("done.wav");
         std::fs::write(&audio, b"audio").unwrap();
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "task-detail".to_string(),
             name: "Task detail".to_string(),
             audio_dir: audio_dir.clone(),
@@ -2212,6 +2329,8 @@ mod tests {
         let audio_dir = temp.path().join("audio");
         std::fs::create_dir_all(&audio_dir).unwrap();
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "task-detail-sort".to_string(),
             name: "Task detail sort".to_string(),
             audio_dir: audio_dir.clone(),
@@ -2345,6 +2464,8 @@ mod tests {
             .unwrap()
             .timestamp_millis() as u64;
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "task-daily-refresh".to_string(),
             name: "Daily Refresh".to_string(),
             audio_dir: audio_dir.clone(),
@@ -3638,6 +3759,8 @@ mod tests {
         std::fs::write(&second, b"same-audio").unwrap();
 
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "hash-task".to_string(),
             name: "Hash Task".to_string(),
             audio_dir: audio_dir.clone(),
@@ -3839,6 +3962,8 @@ mod tests {
         std::fs::write(&pending, b"new pending").unwrap();
 
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "hash-skip-task".to_string(),
             name: "Hash Skip Task".to_string(),
             audio_dir: audio_dir.clone(),
