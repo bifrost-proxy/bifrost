@@ -24,7 +24,9 @@ use super::upgrade::{
     DESKTOP_MANAGED_SKIP_RESTART_ENV, DESKTOP_MANAGED_TARGET_ENV,
 };
 
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 mod installer;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use installer::*;
 
 #[cfg(any(target_os = "windows", test))]
