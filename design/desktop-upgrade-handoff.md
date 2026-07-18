@@ -110,6 +110,10 @@ stateDiagram-v2
 - Successful handoff refreshes terminal progress only after the new managed core is ready.
 - Relaunch/open or managed-core startup failures persist `Failed` progress with the original target.
 - Relaunch helper waits for process/port release before opening the App.
+- Windows self-update CI builds the current and pinned target executables separately with the same
+  `BIFROST_VERSION` injection used by release builds. Before exercising replacement, the target
+  executable must pass both `bifrost --version` and a real `/api/system.version` core probe; CLI-only
+  byte rewriting is not accepted as proof that the upgrade package contains the requested core.
 - The command that opens the new App explicitly removes all helper-only environment variables, for
   both macOS `.app` targets and direct executable targets.
 - A real macOS update relaunch creates one new stable App process instead of a recursive Dock-icon

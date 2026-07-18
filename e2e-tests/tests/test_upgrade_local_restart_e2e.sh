@@ -15,6 +15,7 @@ source "${PROJECT_DIR}/e2e-tests/test_utils/assert.sh"
 source "${PROJECT_DIR}/e2e-tests/test_utils/process.sh"
 
 BIFROST_BIN="${BIFROST_BIN:-${PROJECT_DIR}/target/debug/bifrost}"
+TARGET_BIFROST_BIN="${BIFROST_UPGRADE_E2E_TARGET_BIN:-$BIFROST_BIN}"
 OLD_BIFROST_BIN="${OLD_BIFROST_BIN:-}"
 BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN="${BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN:-0}"
 BIFROST_UPGRADE_E2E_ENTRYPOINT="${BIFROST_UPGRADE_E2E_ENTRYPOINT:-upgrade}"
@@ -253,6 +254,59 @@ wait_proxy_ready() {
     return 1
 }
 
+core_version_on_port() {
+    local port="$1"
+    local py system_response
+    py="$(python3_cmd 2>/dev/null || true)"
+    system_response="$(curl -fsS "http://127.0.0.1:${port}/_bifrost/api/system")" || return 1
+    if [[ -n "$py" ]]; then
+        printf '%s' "$system_response" \
+            | "$py" -c 'import json,sys; print(json.load(sys.stdin).get("version", ""))'
+    else
+        BIFROST_E2E_SYSTEM_RESPONSE="$system_response" \
+            powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
+            '(ConvertFrom-Json $env:BIFROST_E2E_SYSTEM_RESPONSE).version' \
+            | tr -d '\r'
+    fi
+}
+
+assert_target_binary_core_version() {
+    local binary="$1"
+    local expected_version="$2"
+    local data_dir="${TEST_ROOT}/target-preflight-data"
+    local data_dir_for_process port start_log actual_version
+    mkdir -p "$data_dir"
+    data_dir_for_process="$(bifrost_process_path "$data_dir")"
+    port="$(allocate_free_port)"
+    start_log="${TEST_ROOT}/target-preflight-start.log"
+
+    BIFROST_DATA_DIR="$data_dir_for_process" \
+    BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+    "$binary" start -p "$port" --host 127.0.0.1 --daemon \
+        --skip-cert-check --no-system-proxy --no-intercept --no-tray -y \
+        >"$start_log" 2>&1 || {
+        _log_fail "target fixture core starts" "exit 0" "$(cat "$start_log" 2>/dev/null)"
+        kill_bifrost_on_port "$port"
+        return 1
+    }
+
+    if ! wait_proxy_ready "$port"; then
+        _log_fail "target fixture core admin ready" "reachable" "$(cat "$start_log" 2>/dev/null)"
+        BIFROST_DATA_DIR="$data_dir_for_process" "$binary" stop >/dev/null 2>&1 || true
+        kill_bifrost_on_port "$port"
+        return 1
+    fi
+
+    actual_version="$(core_version_on_port "$port" 2>/dev/null || true)"
+    BIFROST_DATA_DIR="$data_dir_for_process" "$binary" stop >/dev/null 2>&1 || true
+    kill_bifrost_on_port "$port"
+    if [[ "$actual_version" != "$expected_version" ]]; then
+        _log_fail "target fixture core reports pinned target" "$expected_version" "${actual_version:-missing}"
+        return 1
+    fi
+    _log_pass "target fixture CLI and core both report pinned target $expected_version"
+}
+
 assert_no_tray_helper_for_test_data_dir() {
     if is_windows; then
         return 0
@@ -342,9 +396,10 @@ create_local_release_archive() {
     bin_name="$(binary_name)"
     local package_binary="${package_dir}/${bin_name}"
 
-    # A release named v<target> must contain a binary that actually reports the
-    # pinned target. Otherwise the Windows deferred helper correctly rejects the
-    # fixture after replacement and never starts the daemon.
+    # Prefer a separately compiled target-version binary when the caller
+    # supplies one. This matters on Windows: --version comes from bifrost-cli,
+    # while /api/system.version comes from bifrost-admin, so byte-patching only
+    # the visible CLI version is not a trustworthy self-update fixture.
     copy_binary_with_version "$binary" "$package_binary" "$version" || return 1
 
     if is_windows; then
@@ -415,10 +470,12 @@ test_local_upgrade_restarts_old_daemon_with_new_binary() {
 
     local target archive_path
     target="$(host_triple)"
-    if ! archive_path="$(create_local_release_archive "$archive_root" "$TEST_VERSION" "$target" "$BIFROST_BIN")"; then
+    if ! archive_path="$(create_local_release_archive "$archive_root" "$TEST_VERSION" "$target" "$TARGET_BIFROST_BIN")"; then
         _log_fail "target-version release archive created" "$TEST_VERSION" "fixture creation failed"
         return 1
     fi
+    local target_package_binary="${archive_root}/bifrost-v${TEST_VERSION}-${target}/$(binary_name)"
+    assert_target_binary_core_version "$target_package_binary" "$TEST_VERSION" || return 1
 
     local bifrost_data_dir
     bifrost_data_dir="$(bifrost_process_path "$TEST_DATA_DIR")"
@@ -591,15 +648,14 @@ PLIST
     assert_equals "$TEST_VERSION" "$installed_cli_version" \
         "installed CLI reports the pinned target version" || return 1
 
-    local core_version system_response
-    system_response="$(curl -fsS "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/system")"
-    if [[ -n "$py" ]]; then
-        core_version="$(printf '%s' "$system_response" | "$py" -c 'import json,sys; print(json.load(sys.stdin).get("version", ""))')"
-    else
-        core_version="$(BIFROST_E2E_SYSTEM_RESPONSE="$system_response" powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '(ConvertFrom-Json $env:BIFROST_E2E_SYSTEM_RESPONSE).version')"
+    local core_version
+    core_version="$(core_version_on_port "$PROXY_PORT")"
+    if [[ "$core_version" != "$TEST_VERSION" ]]; then
+        dump_windows_upgrade_diagnostics "$install_dir"
+        _log_fail "restarted core reports the pinned target version" "$TEST_VERSION" "$core_version"
+        return 1
     fi
-    assert_equals "$TEST_VERSION" "$core_version" \
-        "restarted core reports the pinned target version" || return 1
+    _log_pass "restarted core reports the pinned target version"
     if is_windows; then
         # Windows self-replacement runs in a deferred helper after the upgrade
         # process exits. The helper installs skills before starting the new
