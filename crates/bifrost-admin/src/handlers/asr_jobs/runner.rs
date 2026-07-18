@@ -1239,6 +1239,7 @@ async fn process_pending_files_sequential(
                         stop_after_use: &mut *stop_task_server_after_use,
                     }),
                     partial_artifacts: Some(partial_artifact_context.clone()),
+                    moss_runtime: None,
                 },
             )
             .await
@@ -1266,6 +1267,7 @@ async fn process_pending_files_sequential(
                         stop_after_use: &mut stop_file_server_after_use,
                     }),
                     partial_artifacts: Some(partial_artifact_context),
+                    moss_runtime: None,
                 },
             )
             .await
@@ -1437,9 +1439,15 @@ async fn transcribe_file_for_task_with_wav(
         if hooks.pause_check.is_some_and(|check| check()) {
             return Err(ASR_TASK_PAUSED_MESSAGE.to_string());
         }
-        let runtime = moss_runtime_paths(&bifrost_asr::runtime::fixed_asr_home());
+        let default_runtime;
+        let runtime = if let Some(runtime) = hooks.moss_runtime {
+            runtime
+        } else {
+            default_runtime = moss_runtime_paths(&bifrost_asr::runtime::fixed_asr_home());
+            &default_runtime
+        };
         let result = run_moss_joint_transcription(
-            &runtime,
+            runtime,
             wav,
             duration_ms,
             &task.transcription_prompt,
@@ -2676,6 +2684,7 @@ mod coverage_boost {
             server_state: None,
             managed_server_restart: None,
             partial_artifacts: None,
+            moss_runtime: None,
         };
 
         let result = transcribe_file_for_task_with_wav(
@@ -2710,6 +2719,7 @@ mod coverage_boost {
             server_state: None,
             managed_server_restart: None,
             partial_artifacts: None,
+            moss_runtime: None,
         };
 
         let result = transcribe_file_for_task_with_wav(
@@ -2743,6 +2753,7 @@ mod coverage_boost {
             server_state: None,
             managed_server_restart: None,
             partial_artifacts: None,
+            moss_runtime: None,
         };
 
         let result = transcribe_diarized_segments_for_task(

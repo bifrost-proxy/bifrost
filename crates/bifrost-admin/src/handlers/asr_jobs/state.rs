@@ -1147,6 +1147,7 @@ struct TaskTranscribeHooks<'a> {
     server_state: Option<&'a mut Option<ServerRunnerState>>,
     managed_server_restart: Option<ManagedServerRestartContext<'a>>,
     partial_artifacts: Option<PartialArtifactContext>,
+    moss_runtime: Option<&'a MossRuntimePaths>,
 }
 
 #[derive(Debug, Deserialize)]

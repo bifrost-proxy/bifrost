@@ -29,6 +29,20 @@ struct MossRuntimePaths {
     model: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+struct MossRuntimeSource {
+    asset: String,
+    url: String,
+    sha256: String,
+}
+
+#[derive(Debug, Clone)]
+struct MossModelSpec {
+    url: String,
+    bytes: u64,
+    sha256: String,
+}
+
 fn moss_runtime_dir(asr_home: &Path) -> PathBuf {
     asr_home.join("moss_joint")
 }
@@ -41,8 +55,8 @@ fn moss_runtime_paths(asr_home: &Path) -> MossRuntimePaths {
     }
 }
 
-fn moss_runtime_asset_name() -> Result<String, String> {
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+fn moss_runtime_asset_name_for(os: &str, arch: &str) -> Result<String, String> {
+    if os == "macos" && arch == "aarch64" {
         Ok(format!(
             "{MOSS_RUNTIME_ASSET_STEM}-v{}-aarch64-apple-darwin.zip",
             env!("CARGO_PKG_VERSION")
@@ -50,10 +64,13 @@ fn moss_runtime_asset_name() -> Result<String, String> {
     } else {
         Err(format!(
             "MOSS joint transcription is currently supported only on Apple Silicon macOS; current platform is {}-{}",
-            std::env::consts::OS,
-            std::env::consts::ARCH
+            os, arch
         ))
     }
+}
+
+fn moss_runtime_asset_name() -> Result<String, String> {
+    moss_runtime_asset_name_for(std::env::consts::OS, std::env::consts::ARCH)
 }
 
 fn moss_runtime_url(asset: &str) -> String {
@@ -94,20 +111,12 @@ fn parse_runtime_checksum_manifest(manifest: &str, asset: &str) -> Result<String
         .and_then(|checksum| normalize_sha256(checksum, asset))
 }
 
-async fn expected_moss_runtime_checksum(asset: &str) -> Result<String, String> {
-    if let Ok(checksum) = std::env::var("BIFROST_MOSS_RUNTIME_SHA256") {
-        return normalize_sha256(&checksum, asset);
-    }
-    if std::env::var_os("BIFROST_MOSS_RUNTIME_URL").is_some() {
-        return Err(
-            "BIFROST_MOSS_RUNTIME_SHA256 is required with BIFROST_MOSS_RUNTIME_URL".to_string(),
-        );
-    }
+async fn download_runtime_checksum(url: String, asset: &str) -> Result<String, String> {
     let client = bifrost_core::outbound_reqwest_client_builder()
         .build()
         .map_err(|error| format!("build MOSS checksum client: {error}"))?;
     let response = client
-        .get(moss_runtime_checksums_url())
+        .get(url)
         .send()
         .await
         .map_err(|error| format!("download MOSS release checksums: {error}"))?
@@ -120,8 +129,28 @@ async fn expected_moss_runtime_checksum(asset: &str) -> Result<String, String> {
     parse_runtime_checksum_manifest(&manifest, asset)
 }
 
+async fn expected_moss_runtime_checksum(asset: &str) -> Result<String, String> {
+    if let Ok(checksum) = std::env::var("BIFROST_MOSS_RUNTIME_SHA256") {
+        return normalize_sha256(&checksum, asset);
+    }
+    if std::env::var_os("BIFROST_MOSS_RUNTIME_URL").is_some() {
+        return Err(
+            "BIFROST_MOSS_RUNTIME_SHA256 is required with BIFROST_MOSS_RUNTIME_URL".to_string(),
+        );
+    }
+    download_runtime_checksum(moss_runtime_checksums_url(), asset).await
+}
+
 fn moss_model_url() -> String {
     std::env::var("BIFROST_MOSS_MODEL_URL").unwrap_or_else(|_| MOSS_MODEL_URL.to_string())
+}
+
+fn moss_model_spec() -> MossModelSpec {
+    MossModelSpec {
+        url: moss_model_url(),
+        bytes: MOSS_MODEL_BYTES,
+        sha256: MOSS_MODEL_SHA256.to_string(),
+    }
 }
 
 fn moss_output_token_budget(duration_ms: u64) -> Result<u32, String> {
@@ -140,8 +169,7 @@ fn moss_output_token_budget(duration_ms: u64) -> Result<u32, String> {
     let available = MOSS_CONTEXT_TOKENS
         .saturating_sub(MOSS_CONTEXT_MARGIN_TOKENS)
         .saturating_sub(input);
-    u32::try_from(wanted.min(available).max(MOSS_MIN_OUTPUT_TOKENS))
-        .map_err(|_| "MOSS output token budget exceeds runtime limits".to_string())
+    Ok(wanted.min(available).max(MOSS_MIN_OUTPUT_TOKENS) as u32)
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -162,19 +190,20 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
-fn verify_moss_model(path: &Path) -> Result<(), String> {
+fn verify_moss_model(path: &Path, spec: &MossModelSpec) -> Result<(), String> {
     let metadata = std::fs::metadata(path)
         .map_err(|error| format!("stat MOSS model {}: {error}", path.display()))?;
-    if metadata.len() != MOSS_MODEL_BYTES {
+    if metadata.len() != spec.bytes {
         return Err(format!(
-            "MOSS model size mismatch: expected {MOSS_MODEL_BYTES}, got {}",
-            metadata.len()
+            "MOSS model size mismatch: expected {}, got {}",
+            spec.bytes, metadata.len()
         ));
     }
     let actual = sha256_file(path)?;
-    if actual != MOSS_MODEL_SHA256 {
+    if actual != spec.sha256 {
         return Err(format!(
-            "MOSS model checksum mismatch: expected {MOSS_MODEL_SHA256}, got {actual}"
+            "MOSS model checksum mismatch: expected {}, got {actual}",
+            spec.sha256
         ));
     }
     Ok(())
@@ -271,26 +300,39 @@ async fn verify_moss_runtime_binary(path: &Path) -> Result<(), String> {
     }
 }
 
-async fn ensure_moss_joint_runtime(asr_home: &Path, task_id: &str) -> Result<MossRuntimePaths, String> {
-    let _guard = MOSS_INIT_LOCK.lock().await;
-    let paths = moss_runtime_paths(asr_home);
+async fn moss_runtime_status(
+    paths: &MossRuntimePaths,
+    model_spec: &MossModelSpec,
+) -> (bool, bool) {
     let runtime_valid = paths.binary.is_file()
         && verify_moss_runtime_binary(&paths.binary).await.is_ok();
     let model_valid = paths.model.is_file()
         && tokio::task::spawn_blocking({
             let model = paths.model.clone();
-            move || verify_moss_model(&model).is_ok()
+            let model_spec = model_spec.clone();
+            move || verify_moss_model(&model, &model_spec).is_ok()
         })
         .await
         .unwrap_or(false);
-    if runtime_valid && model_valid {
-        return Ok(paths);
-    }
+    (runtime_valid, model_valid)
+}
+
+async fn initialize_moss_joint_runtime(
+    asr_home: &Path,
+    task_id: &str,
+    paths: &MossRuntimePaths,
+    runtime_valid: bool,
+    model_valid: bool,
+    runtime_source: &MossRuntimeSource,
+    model_spec: &MossModelSpec,
+) -> Result<(), String> {
     update_run_progress(task_id, |progress| {
         progress.stage = "initializing_moss".to_string();
         progress.stage_message =
             Some("Preparing MOSS joint transcription runtime".to_string());
-        progress.message = Some("Downloading the native runtime and verified Q5 model on first use".to_string());
+        progress.message = Some(
+            "Downloading the native runtime and verified Q5 model on first use".to_string(),
+        );
     });
     let root = moss_runtime_dir(asr_home);
     tokio::fs::create_dir_all(&root)
@@ -309,16 +351,19 @@ async fn ensure_moss_joint_runtime(asr_home: &Path, task_id: &str) -> Result<Mos
                     )
                 })?;
         }
-        let asset = moss_runtime_asset_name()?;
-        let archive = root.join(&asset);
-        let expected_checksum = expected_moss_runtime_checksum(&asset).await?;
-        download_moss_resource(moss_runtime_url(&asset), archive.clone(), "MOSS runtime").await?;
+        let archive = root.join(&runtime_source.asset);
+        download_moss_resource(
+            runtime_source.url.clone(),
+            archive.clone(),
+            "MOSS runtime",
+        )
+        .await?;
         let archive_for_hash = archive.clone();
         let actual_checksum = tokio::task::spawn_blocking(move || sha256_file(&archive_for_hash))
             .await
             .map_err(|error| format!("join MOSS runtime checksum verification: {error}"))??;
-        if actual_checksum != expected_checksum {
-            let invalid = root.join(format!("{asset}.invalid-{}", now_ms()));
+        if actual_checksum != runtime_source.sha256 {
+            let invalid = root.join(format!("{}.invalid-{}", runtime_source.asset, now_ms()));
             tokio::fs::rename(&archive, &invalid).await.map_err(|error| {
                 format!(
                     "quarantine invalid MOSS runtime archive {}: {error}",
@@ -326,7 +371,8 @@ async fn ensure_moss_joint_runtime(asr_home: &Path, task_id: &str) -> Result<Mos
                 )
             })?;
             return Err(format!(
-                "MOSS runtime checksum mismatch: expected {expected_checksum}, got {actual_checksum}"
+                "MOSS runtime checksum mismatch: expected {}, got {actual_checksum}",
+                runtime_source.sha256
             ));
         }
         let extract_root = root.clone();
@@ -343,16 +389,54 @@ async fn ensure_moss_joint_runtime(asr_home: &Path, task_id: &str) -> Result<Mos
     if !model_valid {
         if paths.model.exists() {
             let invalid = root.join(format!("{MOSS_MODEL_FILE}.invalid-{}", now_ms()));
-            tokio::fs::rename(&paths.model, &invalid).await.map_err(|error| {
-                format!("quarantine invalid MOSS model {}: {error}", paths.model.display())
-            })?;
+            tokio::fs::rename(&paths.model, &invalid)
+                .await
+                .map_err(|error| {
+                    format!(
+                        "quarantine invalid MOSS model {}: {error}",
+                        paths.model.display()
+                    )
+                })?;
         }
-        download_moss_resource(moss_model_url(), paths.model.clone(), "MOSS Q5 model").await?;
+        download_moss_resource(
+            model_spec.url.clone(),
+            paths.model.clone(),
+            "MOSS Q5 model",
+        )
+        .await?;
     }
     let model = paths.model.clone();
-    tokio::task::spawn_blocking(move || verify_moss_model(&model))
+    let model_spec = model_spec.clone();
+    tokio::task::spawn_blocking(move || verify_moss_model(&model, &model_spec))
         .await
         .map_err(|error| format!("join MOSS model verification: {error}"))??;
+    Ok(())
+}
+
+async fn ensure_moss_joint_runtime(asr_home: &Path, task_id: &str) -> Result<MossRuntimePaths, String> {
+    let _guard = MOSS_INIT_LOCK.lock().await;
+    let paths = moss_runtime_paths(asr_home);
+    let model_spec = moss_model_spec();
+    let (runtime_valid, model_valid) = moss_runtime_status(&paths, &model_spec).await;
+    if runtime_valid && model_valid {
+        return Ok(paths);
+    }
+    let asset = moss_runtime_asset_name()?;
+    let runtime_source = MossRuntimeSource {
+        url: moss_runtime_url(&asset),
+        sha256: expected_moss_runtime_checksum(&asset).await?,
+        asset,
+    };
+    initialize_moss_joint_runtime(
+        asr_home,
+        task_id,
+        &paths,
+        runtime_valid,
+        model_valid,
+        &runtime_source,
+        &model_spec,
+    )
+    .await?;
     Ok(paths)
 }
 
