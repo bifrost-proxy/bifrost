@@ -180,6 +180,13 @@ mod tests {
         let mut zip = zip::ZipWriter::new(file);
         let executable = zip::write::SimpleFileOptions::default().unix_permissions(0o755);
         let regular = zip::write::SimpleFileOptions::default().unix_permissions(0o644);
+        zip.add_directory("moss-joint-runtime/", regular).unwrap();
+        zip.add_directory("moss-joint-runtime/runtime/empty/", regular)
+            .unwrap();
+        zip.start_file("moss-joint-runtime/LICENSE", regular)
+            .unwrap();
+        zip.write_all(b"archive metadata outside installed roots")
+            .unwrap();
         zip.start_file(
             "moss-joint-runtime/runtime/python/bin/python3.12",
             executable,
@@ -427,6 +434,16 @@ mod tests {
             .contains("checksum mismatch"));
         assert!(sha256_file(&temp.path().join("missing")).is_err());
 
+        let snapshot_paths = moss_runtime_paths(&temp.path().join("snapshot"));
+        std::fs::create_dir_all(&snapshot_paths.model_dir).unwrap();
+        let snapshot_spec = moss_test_model_spec(&snapshot_paths.model, b"snapshot model");
+        for required in &MOSS_MODEL_REQUIRED_FILES[..MOSS_MODEL_REQUIRED_FILES.len() - 1] {
+            std::fs::write(snapshot_paths.model_dir.join(required), b"{}").unwrap();
+        }
+        assert!(verify_moss_model_snapshot(&snapshot_paths, &snapshot_spec)
+            .unwrap_err()
+            .contains("snapshot is missing"));
+
         let archive = temp.path().join("runtime.zip");
         write_moss_runtime_zip(&archive, "#!/bin/sh\necho 'moss-mlx-runtime ok'\n");
         let destination = temp.path().join("installed");
@@ -436,6 +453,8 @@ mod tests {
             .is_file());
         assert!(destination.join("runtime/moss_mlx_runner.py").is_file());
         assert!(destination.join("model/config.json").is_file());
+        assert!(destination.join("runtime/empty").is_dir());
+        assert!(!destination.join("LICENSE").exists());
         assert!(!destination
             .join("runtime/site-packages/._invalid.py")
             .exists());
@@ -455,6 +474,22 @@ mod tests {
         assert!(install_moss_runtime_archive(&missing_archive, &destination)
             .unwrap_err()
             .contains("does not contain"));
+        let unsafe_archive = temp.path().join("unsafe-runtime.zip");
+        {
+            use std::io::Write;
+            let file = std::fs::File::create(&unsafe_archive).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file(
+                "moss-joint-runtime/runtime/../../../escape",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(b"escape").unwrap();
+            zip.finish().unwrap();
+        }
+        assert!(install_moss_runtime_archive(&unsafe_archive, &destination)
+            .unwrap_err()
+            .contains("unsafe MOSS runtime archive entry"));
         let invalid_archive = temp.path().join("invalid.zip");
         std::fs::write(&invalid_archive, b"not a zip").unwrap();
         assert!(install_moss_runtime_archive(&invalid_archive, &destination).is_err());
@@ -619,6 +654,28 @@ mod tests {
         std::fs::set_permissions(&paths.model_dir, std::fs::Permissions::from_mode(0o755))
             .unwrap();
         assert!(model_error.contains("quarantine invalid MOSS model"));
+
+        let blocked_model_home = temp.path().join("blocked-model-home");
+        let blocked_paths = moss_runtime_paths(&blocked_model_home);
+        write_executable(
+            &blocked_paths.python,
+            "#!/bin/sh\necho 'moss-mlx-runtime ok'\n",
+        );
+        std::fs::write(&blocked_paths.runner, b"fixture runner").unwrap();
+        std::fs::create_dir_all(&blocked_paths.site_packages).unwrap();
+        std::fs::write(&blocked_paths.model_dir, b"not a directory").unwrap();
+        let blocked_model_error = initialize_moss_joint_runtime(
+            &blocked_model_home,
+            "moss-model-dir-error",
+            &blocked_paths,
+            true,
+            false,
+            &runtime_source,
+            &model_spec,
+        )
+        .await
+        .unwrap_err();
+        assert!(blocked_model_error.contains("create MOSS model directory"));
 
         let archive_source = temp.path().join("large-bad-runtime.zip");
         std::fs::File::create(&archive_source)
