@@ -963,11 +963,11 @@ fn upgrade_log_stdio() -> Stdio {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cli_install_status, desktop_core_env_enabled, effective_upgrade_channel,
-        install_binary_atomically, install_cli_from_current_exe, merge_companion_update,
-        normalize_progress, parse_upgrade_channel, required_upgrade_target, spawn_upgrade_process,
-        start_upgrade, upgrade_process_args, upgrade_request_plan, upgrade_start_lock,
-        CliInstallRequest, StatusCode, UpgradeChannel,
+        build_cli_install_status, check_version, desktop_core_env_enabled,
+        effective_upgrade_channel, install_binary_atomically, install_cli_from_current_exe,
+        merge_companion_update, normalize_progress, parse_upgrade_channel, required_upgrade_target,
+        spawn_upgrade_process, start_upgrade, upgrade_process_args, upgrade_request_plan,
+        upgrade_start_lock, CliInstallRequest, StatusCode, UpgradeChannel,
     };
     use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS};
     use chrono::Utc;
@@ -1146,6 +1146,9 @@ mod tests {
         )
         .expect("write fresh version cache");
         let state = Arc::new(crate::state::AdminState::new(19990));
+
+        let version = check_version(state.clone(), Some("channel=desktop")).await;
+        assert_eq!(version.status(), StatusCode::OK);
 
         let accepted = start_upgrade(state.clone(), Some("channel=desktop")).await;
         assert_eq!(accepted.status(), StatusCode::ACCEPTED);

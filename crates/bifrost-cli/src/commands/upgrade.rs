@@ -3733,8 +3733,16 @@ mod tests {
 
         let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
         let previous_archive = std::env::var_os("BIFROST_UPGRADE_TEST_ARCHIVE");
-        std::env::remove_var("BIFROST_UPGRADE_TEST_ARCHIVE");
         let temp = tempfile::tempdir().expect("tempdir");
+        let missing = temp.path().join("missing");
+        std::env::set_var(
+            "BIFROST_UPGRADE_TEST_ARCHIVE",
+            temp.path().join("fixture.tar.xz"),
+        );
+        verify_installed_cli_target_version(&missing, "0.0.156")
+            .expect("explicit test archive bypasses post-install probe");
+        std::env::remove_var("BIFROST_UPGRADE_TEST_ARCHIVE");
+        assert!(verify_installed_cli_target_version(&missing, "0.0.156").is_err());
         let matching = temp.path().join("matching");
         let stale = temp.path().join("stale");
         let failing = temp.path().join("failing");

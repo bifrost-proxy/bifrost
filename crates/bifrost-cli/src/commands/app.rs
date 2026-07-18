@@ -405,6 +405,18 @@ fn verify_installed_cli_target_version(
     cli_path: &Path,
     target_version: &str,
 ) -> Result<(), BifrostError> {
+    verify_installed_cli_target_version_with_timeout(
+        cli_path,
+        target_version,
+        DESKTOP_MANAGED_CLI_VERSION_TIMEOUT,
+    )
+}
+
+fn verify_installed_cli_target_version_with_timeout(
+    cli_path: &Path,
+    target_version: &str,
+    timeout: Duration,
+) -> Result<(), BifrostError> {
     let mut stdout =
         tempfile::tempfile().map_err(|error| BifrostError::Io(std::io::Error::other(error)))?;
     let mut child = Command::new(cli_path)
@@ -416,7 +428,7 @@ fn verify_installed_cli_target_version(
         .stderr(Stdio::null())
         .spawn()
         .map_err(BifrostError::Io)?;
-    let deadline = Instant::now() + DESKTOP_MANAGED_CLI_VERSION_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -425,7 +437,7 @@ fn verify_installed_cli_target_version(
                 let _ = child.wait();
                 return Err(BifrostError::Config(format!(
                     "installed CLI version verification timed out after {} seconds",
-                    DESKTOP_MANAGED_CLI_VERSION_TIMEOUT.as_secs()
+                    timeout.as_secs()
                 )));
             }
             Ok(None) => thread::sleep(Duration::from_millis(25)),
@@ -1643,6 +1655,13 @@ mod tests {
             )
             .expect_err("hung desktop-managed CLI must time out");
             assert!(timeout_error.to_string().contains("timed out"));
+            let version_timeout = verify_installed_cli_target_version_with_timeout(
+                &slow_cli,
+                "0.0.156",
+                Duration::from_millis(50),
+            )
+            .expect_err("hung CLI version probe must time out");
+            assert!(version_timeout.to_string().contains("timed out"));
             std::env::set_var("PATH", dir.path());
             std::env::set_var("BIFROST_INSTALL_DIR", dir.path());
             upgrade_cli_if_present("desktop", "0.0.156")
@@ -1984,6 +2003,15 @@ HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7A327F4B
         assert!(!backup.exists(), "successful swap must remove its backup");
         copy_dir_replace(&target, &target, "0.0.156", CALLER_MANAGED_PROGRESS_SOURCE)
             .expect("same verified source and target is already complete");
+
+        let no_parent = copy_dir_replace(
+            &target,
+            Path::new(""),
+            "0.0.156",
+            CALLER_MANAGED_PROGRESS_SOURCE,
+        )
+        .expect_err("empty target has no parent directory");
+        assert!(no_parent.to_string().contains("target has no parent"));
     }
 
     #[test]
