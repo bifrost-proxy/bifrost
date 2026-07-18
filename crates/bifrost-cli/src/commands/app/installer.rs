@@ -1,5 +1,120 @@
 use super::*;
 
+#[cfg(any(target_os = "windows", test))]
+struct WindowsDesktopInstallSnapshot {
+    install_dir: PathBuf,
+    backup: tempfile::TempDir,
+    had_previous_install: bool,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl WindowsDesktopInstallSnapshot {
+    fn capture(install_dir: &Path) -> Result<Self, BifrostError> {
+        let backup =
+            tempfile::tempdir().map_err(|error| BifrostError::Io(std::io::Error::other(error)))?;
+        let had_previous_install = install_dir.exists();
+        if had_previous_install {
+            copy_dir_recursive(install_dir, backup.path())?;
+        }
+        Ok(Self {
+            install_dir: install_dir.to_path_buf(),
+            backup,
+            had_previous_install,
+        })
+    }
+
+    fn restore(self) -> Result<(), BifrostError> {
+        let parent = self.install_dir.parent().ok_or_else(|| {
+            BifrostError::Config(format!(
+                "desktop app install directory has no parent: {}",
+                self.install_dir.display()
+            ))
+        })?;
+        fs::create_dir_all(parent)?;
+        let failed = parent.join(format!(".Bifrost.failed-upgrade-{}", std::process::id()));
+        remove_path_if_exists(&failed)?;
+        if self.install_dir.exists() {
+            fs::rename(&self.install_dir, &failed)?;
+        }
+
+        let restore_result = if self.had_previous_install {
+            copy_dir_recursive(self.backup.path(), &self.install_dir)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = restore_result {
+            let _ = remove_path_if_exists(&self.install_dir);
+            if failed.exists() {
+                let _ = fs::rename(&failed, &self.install_dir);
+            }
+            return Err(error);
+        }
+        remove_path_if_exists(&failed)
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn remove_path_if_exists(path: &Path) -> Result<(), BifrostError> {
+    if path.is_dir() {
+        fs::remove_dir_all(path)?;
+    } else if path.exists() {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub(super) fn run_windows_desktop_install_transaction<T>(
+    install_dir: &Path,
+    install_and_verify: impl FnOnce() -> Result<T, BifrostError>,
+) -> Result<T, BifrostError> {
+    let snapshot = WindowsDesktopInstallSnapshot::capture(install_dir)?;
+    let had_previous_install = snapshot.had_previous_install;
+    match install_and_verify() {
+        Ok(value) => Ok(value),
+        Err(install_error) => match snapshot.restore() {
+            Ok(()) => Err(BifrostError::Config(format!(
+                "{install_error}; {}",
+                if had_previous_install {
+                    "previous desktop app restored"
+                } else {
+                    "failed desktop install removed"
+                }
+            ))),
+            Err(rollback_error) => Err(BifrostError::Config(format!(
+                "{install_error}; failed to restore previous desktop app: {rollback_error}"
+            ))),
+        },
+    }
+}
+
+pub(super) fn install_desktop_package_verified(
+    package: &Path,
+    install_dir: &Path,
+    install_path: &Path,
+    target_version: &str,
+    progress_source: &str,
+) -> Result<(), BifrostError> {
+    let install_and_verify = || {
+        install_desktop_package(
+            package,
+            install_dir,
+            install_path,
+            target_version,
+            progress_source,
+        )?;
+        verify_installed_desktop_target_version(install_path, target_version)
+    };
+    #[cfg(target_os = "windows")]
+    {
+        run_windows_desktop_install_transaction(install_dir, install_and_verify)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        install_and_verify()
+    }
+}
+
 fn parent_upgrade_lock_is_held() -> bool {
     env::var(PARENT_UPGRADE_LOCK_HELD_ENV)
         .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))

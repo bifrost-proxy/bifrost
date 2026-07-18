@@ -572,6 +572,74 @@ fn windows_msi_log_summary_prefers_actionable_error() {
 }
 
 #[test]
+fn windows_desktop_install_transaction_restores_previous_install_on_verification_failure() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let install_dir = temp.path().join("Bifrost");
+    let app = install_dir.join("bifrost-desktop.exe");
+    fs::create_dir_all(&install_dir).expect("create old install");
+    fs::write(&app, "old-app").expect("write old app");
+    fs::write(install_dir.join("uninstall.exe"), "old-uninstaller").expect("write old uninstaller");
+
+    let error = run_windows_desktop_install_transaction(&install_dir, || {
+        fs::write(&app, "wrong-new-app")?;
+        fs::write(install_dir.join("new-sidecar.dll"), "new")?;
+        Err::<(), BifrostError>(BifrostError::Config(
+            "installed version v0.0.155 instead of v0.0.156".to_string(),
+        ))
+    })
+    .expect_err("wrong installed version must roll back");
+
+    assert!(error.to_string().contains("previous desktop app restored"));
+    assert_eq!(
+        fs::read_to_string(&app).expect("read restored app"),
+        "old-app"
+    );
+    assert_eq!(
+        fs::read_to_string(install_dir.join("uninstall.exe")).expect("read restored uninstaller"),
+        "old-uninstaller"
+    );
+    assert!(!install_dir.join("new-sidecar.dll").exists());
+}
+
+#[test]
+fn windows_desktop_install_transaction_removes_failed_first_install() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let install_dir = temp.path().join("Bifrost");
+
+    let error = run_windows_desktop_install_transaction(&install_dir, || {
+        fs::create_dir_all(&install_dir)?;
+        fs::write(install_dir.join("bifrost-desktop.exe"), "wrong-new-app")?;
+        Err::<(), BifrostError>(BifrostError::Config(
+            "installed package could not be verified".to_string(),
+        ))
+    })
+    .expect_err("unverified first install must be removed");
+
+    assert!(error.to_string().contains("failed desktop install removed"));
+    assert!(!install_dir.exists());
+}
+
+#[test]
+fn windows_desktop_install_transaction_keeps_verified_install() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let install_dir = temp.path().join("Bifrost");
+    let app = install_dir.join("bifrost-desktop.exe");
+    fs::create_dir_all(&install_dir).expect("create old install");
+    fs::write(&app, "old-app").expect("write old app");
+
+    run_windows_desktop_install_transaction(&install_dir, || {
+        fs::write(&app, "verified-new-app")?;
+        Ok::<(), BifrostError>(())
+    })
+    .expect("verified install commits");
+
+    assert_eq!(
+        fs::read_to_string(&app).expect("read committed app"),
+        "verified-new-app"
+    );
+}
+
+#[test]
 fn macos_app_path_is_bundle_under_install_dir() {
     let dir = PathBuf::from("/Applications");
     let path = resolve_app_path(&dir);

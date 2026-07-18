@@ -116,6 +116,11 @@ stateDiagram-v2
 - Windows pending-install and relaunch markers remain active for 15 minutes. This exceeds the helper's
   explicit maximum of 30 seconds waiting for the App, 30 seconds waiting for core, and 10 minutes
   waiting for MSI/EXE installation, so a second updater cannot enter during a still-valid handoff.
+- Before invoking a Windows MSI/EXE installer, the updater snapshots the existing desktop install
+  directory outside the install target. The install and pinned-target version probe form one
+  transaction: installer failure or post-install version mismatch restores the complete previous
+  directory; a failed first install is removed. Rollback failure is reported together with the
+  original install error instead of being hidden.
 - Windows self-update CI builds the current and pinned target executables separately with the same
   `BIFROST_VERSION` injection used by release builds. Before exercising replacement, the target
   executable must pass both `bifrost --version` and a real `/api/system.version` core probe; CLI-only
@@ -141,3 +146,5 @@ stateDiagram-v2
 - Windows deferred CLI replacement updates the installed App to the same pinned target first,
   keeps an executable backup during replacement, verifies `bifrost --version`, and restores the
   previous executable before publishing `failed` when replacement verification fails.
+- Windows Installer registration is still maintained by MSI/EXE itself; the updater transaction
+  guarantees that the previous launchable App files are restored when package verification fails.

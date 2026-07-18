@@ -279,7 +279,7 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
         );
         return Ok(());
     }
-    install_desktop_package(
+    install_desktop_package_verified(
         &package_path,
         &install_dir,
         &install_path,
@@ -289,11 +289,6 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
     .inspect_err(|error| {
         write_app_failed_progress(&target_version, &progress_source, error);
     })?;
-    verify_installed_desktop_target_version(&install_path, &target_version).inspect_err(
-        |error| {
-            write_app_failed_progress(&target_version, &progress_source, error);
-        },
-    )?;
 
     write_app_progress(
         UpgradePhase::Restarting,
