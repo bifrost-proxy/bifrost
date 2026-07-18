@@ -966,10 +966,12 @@ mod tests {
         build_cli_install_status, desktop_core_env_enabled, effective_upgrade_channel,
         install_binary_atomically, install_cli_from_current_exe, merge_companion_update,
         normalize_progress, parse_upgrade_channel, required_upgrade_target, spawn_upgrade_process,
-        upgrade_process_args, upgrade_request_plan, CliInstallRequest, UpgradeChannel,
+        start_upgrade, upgrade_process_args, upgrade_request_plan, upgrade_start_lock,
+        CliInstallRequest, StatusCode, UpgradeChannel,
     };
     use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS};
     use chrono::Utc;
+    use std::sync::Arc;
 
     fn version_response(
         current: &str,
@@ -1102,6 +1104,57 @@ mod tests {
             upgrade_request_plan(Some("channel=cli"), true, 12345, 9900),
             (UpgradeChannel::Cli, UpgradeChannel::Desktop, None)
         );
+    }
+
+    #[tokio::test]
+    async fn upgrade_start_lock_serializes_claims() {
+        let first = upgrade_start_lock().lock().await;
+        assert!(upgrade_start_lock().try_lock().is_err());
+        drop(first);
+        assert!(upgrade_start_lock().try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn admin_upgrade_claims_once_and_pins_the_cached_target() {
+        const CHILD_ENV: &str = "BIFROST_TEST_ADMIN_UPGRADE_HANDLER_CHILD";
+        if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .args([
+                "--exact",
+                "handlers::system::tests::admin_upgrade_claims_once_and_pins_the_cached_target",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .status()
+            .expect("spawn isolated Admin handler test");
+            assert!(status.success(), "isolated Admin handler test failed");
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("BIFROST_DATA_DIR", dir.path());
+        std::fs::write(
+            dir.path().join("version_cache.json"),
+            serde_json::json!({
+                "latest_version": "999.0.0",
+                "release_highlights": ["test release"],
+                "checked_at": Utc::now(),
+            })
+            .to_string(),
+        )
+        .expect("write fresh version cache");
+        let state = Arc::new(crate::state::AdminState::new(19990));
+
+        let accepted = start_upgrade(state.clone(), Some("channel=desktop")).await;
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        let progress = bifrost_core::upgrade_progress::read_progress(dir.path());
+        assert_eq!(progress.target_version.as_deref(), Some("999.0.0"));
+        assert_eq!(progress.source.as_deref(), Some("admin"));
+
+        let conflict = start_upgrade(state, Some("channel=cli")).await;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
     }
 
     #[test]

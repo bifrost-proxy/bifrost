@@ -327,6 +327,55 @@ mod tests {
     }
 
     #[test]
+    fn background_upgrade_does_not_run_when_another_process_owns_the_lock() {
+        let _guard = lock_tests();
+        let dir = temp_dir();
+        let owner = try_acquire_upgrade_lock(&dir)
+            .expect("acquire lock")
+            .expect("first owner");
+        let engine_called = std::cell::Cell::new(false);
+
+        handle_upgrade_background_with(
+            Some("0.0.156".to_string()),
+            "admin".to_string(),
+            Some(12345),
+            Some(9900),
+            Ok(dir.clone()),
+            |_| {
+                engine_called.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(!engine_called.get());
+        drop(owner);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn background_upgrade_does_not_run_when_lock_directory_cannot_be_created() {
+        let _guard = lock_tests();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let file = temp.path().join("not-a-directory");
+        std::fs::write(&file, "occupied").expect("write blocking file");
+        let engine_called = std::cell::Cell::new(false);
+
+        handle_upgrade_background_with(
+            Some("0.0.156".to_string()),
+            "admin".to_string(),
+            None,
+            None,
+            Ok(file),
+            |_| {
+                engine_called.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(!engine_called.get());
+    }
+
+    #[test]
     fn hidden_self_update_command_forwards_complete_restart_hint() {
         let command = Commands::SelfUpdate {
             target: Some("0.0.156".to_string()),

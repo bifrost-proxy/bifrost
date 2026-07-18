@@ -2695,6 +2695,58 @@ mod tests {
         upgrade_via_homebrew("0.0.156").expect("fake Homebrew target verified");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn homebrew_upgrade_fallback_and_verification_failures_are_bounded() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD_ENV: &str = "BIFROST_TEST_HOMEBREW_FAILURE_CHILD";
+        if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+            let status = Command::new(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "commands::upgrade::tests::homebrew_upgrade_fallback_and_verification_failures_are_bounded",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .status()
+                .expect("spawn isolated Homebrew failure test");
+            assert!(status.success());
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let brew = dir.path().join("brew");
+        let git = dir.path().join("git");
+        fs::write(
+            &brew,
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+               --repository) echo /missing/tap ;;\n\
+               reinstall)\n\
+                 if [ \"$BIFROST_TEST_BREW_MODE\" = fail-all ]; then exit 9; fi\n\
+                 if [ \"$2\" = --build-from-source ]; then exit 0; fi\n\
+                 exit 7 ;;\n\
+               info)\n\
+                 if [ \"$BIFROST_TEST_BREW_MODE\" = bad-info ]; then exit 8; fi\n\
+                 echo '{\"formulae\":[{\"installed\":[{\"version\":\"0.0.155\"}]}]}' ;;\n\
+             esac\n",
+        )
+        .expect("write fake brew");
+        fs::write(&git, "#!/bin/sh\nexit 1\n").expect("write fake git");
+        fs::set_permissions(&brew, fs::Permissions::from_mode(0o755)).expect("chmod brew");
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).expect("chmod git");
+        std::env::set_var("PATH", dir.path());
+
+        upgrade_via_homebrew("0.0.156")
+            .expect("source-build fallback completes before final CLI verification");
+        std::env::set_var("BIFROST_TEST_BREW_MODE", "bad-info");
+        upgrade_via_homebrew("0.0.156")
+            .expect("unreadable metadata is deferred to final CLI verification");
+        std::env::set_var("BIFROST_TEST_BREW_MODE", "fail-all");
+        assert!(upgrade_via_homebrew("0.0.156").is_err());
+    }
+
     #[test]
     fn test_install_method_display() {
         assert_eq!(InstallMethod::Homebrew.to_string(), "Homebrew");
@@ -3685,14 +3737,18 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let matching = temp.path().join("matching");
         let stale = temp.path().join("stale");
+        let failing = temp.path().join("failing");
         fs::write(&matching, "#!/bin/sh\necho 'bifrost 0.0.156'\n").unwrap();
         fs::write(&stale, "#!/bin/sh\necho 'bifrost 0.0.155'\n").unwrap();
+        fs::write(&failing, "#!/bin/sh\necho broken >&2\nexit 7\n").unwrap();
         fs::set_permissions(&matching, fs::Permissions::from_mode(0o755)).unwrap();
         fs::set_permissions(&stale, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&failing, fs::Permissions::from_mode(0o755)).unwrap();
 
         verify_installed_cli_target_version(&matching, "0.0.156")
             .expect("matching installed CLI version");
         assert!(verify_installed_cli_target_version(&stale, "0.0.156").is_err());
+        assert!(verify_installed_cli_target_version(&failing, "0.0.156").is_err());
 
         if let Some(value) = previous_archive {
             std::env::set_var("BIFROST_UPGRADE_TEST_ARCHIVE", value);

@@ -689,9 +689,15 @@ fn normalize_version(version: &str) -> &str {
 }
 
 fn installed_desktop_app_version(install_path: &Path) -> Option<String> {
+    // App bundles are ordinary directories containing an Info.plist. Keep this
+    // parser available on every host so the atomic staging/swap contract can be
+    // exercised in Linux CI as well as on macOS.
+    if install_path.is_dir() {
+        return read_macos_app_version(install_path);
+    }
     #[cfg(target_os = "macos")]
     {
-        read_macos_app_version(install_path)
+        None
     }
     #[cfg(target_os = "windows")]
     {
@@ -704,7 +710,6 @@ fn installed_desktop_app_version(install_path: &Path) -> Option<String> {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn read_macos_app_version(install_path: &Path) -> Option<String> {
     let plist_path = install_path.join("Contents").join("Info.plist");
     let plist = plist::Value::from_file(plist_path).ok()?;
@@ -1810,7 +1815,6 @@ HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7A327F4B
         assert!(!versions_equal("0.0.138", "0.0.139"));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn macos_post_install_version_verification_rejects_stale_bundle() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1845,7 +1849,6 @@ HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7A327F4B
             .contains("does not report an installed version"));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn macos_installed_app_version_reads_info_plist() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1873,7 +1876,6 @@ HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7A327F4B
         assert!(installed_desktop_app_is_target_version(&app, "v0.0.139"));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn macos_app_swap_preserves_old_bundle_when_staging_is_invalid() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1924,5 +1926,202 @@ HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7A327F4B
             Some("0.0.155"),
             "the next attempt restores an interrupted swap before staging"
         );
+    }
+
+    #[test]
+    fn app_bundle_install_atomically_replaces_verified_target_and_cleans_backup() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("package").join(MACOS_APP_BUNDLE);
+        let source_contents = source.join("Contents");
+        fs::create_dir_all(&source_contents).expect("create source Contents");
+        fs::write(
+            source_contents.join("Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleShortVersionString</key><string>0.0.156</string>
+</dict></plist>"#,
+        )
+        .expect("write source plist");
+        fs::write(source_contents.join("payload"), "new").expect("write source payload");
+
+        let install_dir = temp.path().join("install");
+        let target = install_dir.join(MACOS_APP_BUNDLE);
+        let target_contents = target.join("Contents");
+        fs::create_dir_all(&target_contents).expect("create old Contents");
+        fs::write(
+            target_contents.join("Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleShortVersionString</key><string>0.0.155</string>
+</dict></plist>"#,
+        )
+        .expect("write old plist");
+
+        install_desktop_package(
+            &source,
+            &install_dir,
+            &target,
+            "0.0.156",
+            CALLER_MANAGED_PROGRESS_SOURCE,
+        )
+        .expect("install verified app bundle");
+
+        assert_eq!(
+            installed_desktop_app_version(&target).as_deref(),
+            Some("0.0.156")
+        );
+        assert_eq!(
+            fs::read_to_string(target.join("Contents/payload")).expect("read payload"),
+            "new"
+        );
+        let backup = install_dir.join(format!(
+            ".{}.backup-{}",
+            MACOS_APP_BUNDLE,
+            std::process::id()
+        ));
+        assert!(!backup.exists(), "successful swap must remove its backup");
+        copy_dir_replace(&target, &target, "0.0.156", CALLER_MANAGED_PROGRESS_SOURCE)
+            .expect("same verified source and target is already complete");
+    }
+
+    #[test]
+    fn app_owned_upgrade_runs_the_full_verified_package_transaction() {
+        const CHILD_ENV: &str = "BIFROST_TEST_APP_PACKAGE_TRANSACTION_CHILD";
+        if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+            let status = Command::new(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "commands::app::tests::app_owned_upgrade_runs_the_full_verified_package_transaction",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .status()
+                .expect("spawn isolated App package transaction test");
+            assert!(status.success());
+            return;
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let data_dir = temp.path().join("data");
+        let source = temp.path().join("package").join(MACOS_APP_BUNDLE);
+        let contents = source.join("Contents");
+        fs::create_dir_all(&contents).expect("create package Contents");
+        fs::write(
+            contents.join("Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleShortVersionString</key><string>0.0.156</string>
+</dict></plist>"#,
+        )
+        .expect("write package plist");
+        std::env::set_var("BIFROST_DATA_DIR", &data_dir);
+
+        install_or_upgrade_app(AppInstallRequest {
+            operation: AppOperation::Upgrade,
+            package: Some(source),
+            app_dir: Some(temp.path().join("install")),
+            version: Some("0.0.156".to_string()),
+            include_cli: false,
+            source: Some("desktop".to_string()),
+            dry_run: false,
+            yes: true,
+        })
+        .expect("App-owned package transaction");
+
+        let progress = bifrost_core::upgrade_progress::read_progress(&data_dir);
+        assert_eq!(progress.phase, UpgradePhase::Completed);
+        assert_eq!(progress.target_version.as_deref(), Some("0.0.156"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn app_owned_upgrade_persists_cli_failure_before_touching_the_app() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD_ENV: &str = "BIFROST_TEST_APP_CLI_FAILURE_CHILD";
+        if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+            let status = Command::new(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "commands::app::tests::app_owned_upgrade_persists_cli_failure_before_touching_the_app",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .status()
+                .expect("spawn isolated App CLI failure test");
+            assert!(status.success());
+            return;
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let bin = temp.path().join("bin");
+        let data = temp.path().join("data");
+        fs::create_dir_all(&bin).expect("create bin");
+        let cli = bin.join("bifrost");
+        fs::write(&cli, "#!/bin/sh\nexit 7\n").expect("write failing CLI");
+        fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).expect("chmod CLI");
+        std::env::set_var("PATH", &bin);
+        std::env::set_var("BIFROST_INSTALL_DIR", &bin);
+        std::env::set_var("BIFROST_DATA_DIR", &data);
+
+        let error = install_or_upgrade_app(AppInstallRequest {
+            operation: AppOperation::Upgrade,
+            package: Some(temp.path().join(MACOS_APP_BUNDLE)),
+            app_dir: Some(temp.path().join("install")),
+            version: Some("0.0.156".to_string()),
+            include_cli: true,
+            source: Some("desktop".to_string()),
+            dry_run: false,
+            yes: true,
+        })
+        .expect_err("CLI failure aborts App-owned transaction");
+        assert!(error.to_string().contains("status"));
+        let progress = bifrost_core::upgrade_progress::read_progress(&data);
+        assert_eq!(progress.phase, UpgradePhase::Failed);
+        assert!(progress
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("status")));
+        assert!(!temp.path().join("install").exists());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn unsupported_native_installers_fail_without_mutating_the_target() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = temp.path().join(MACOS_APP_BUNDLE);
+        let dmg = temp.path().join("bifrost.dmg");
+        fs::write(&dmg, "fake").expect("write dmg");
+        let error = install_desktop_package(
+            &dmg,
+            temp.path(),
+            &target,
+            "0.0.156",
+            CALLER_MANAGED_PROGRESS_SOURCE,
+        )
+        .expect_err("non-macOS host rejects dmg");
+        assert!(error.to_string().contains("only be installed on macOS"));
+        assert!(!target.exists());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn unsupported_windows_installers_fail_without_mutating_the_target() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = temp.path().join("bifrost-desktop.exe");
+        for extension in ["exe", "msi"] {
+            let package = temp.path().join(format!("bifrost.{extension}"));
+            fs::write(&package, "fake").expect("write package");
+            let error = install_desktop_package(
+                &package,
+                temp.path(),
+                &target,
+                "0.0.156",
+                CALLER_MANAGED_PROGRESS_SOURCE,
+            )
+            .expect_err("non-Windows host rejects Windows installer");
+            assert!(error.to_string().contains("only be installed on Windows"));
+        }
+        assert!(!target.exists());
     }
 }
