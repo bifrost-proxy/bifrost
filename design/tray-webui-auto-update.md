@@ -97,6 +97,7 @@ GET version-check 仍按 Web UI query 展示 CLI 或 App bundle 的 `current_ver
 - desktop channel 的 unified version-check 以已安装 App 为 primary，并从与 CLI updater 相同的 PATH、`BIFROST_INSTALL_DIR`、用户安装目录和平台默认路径解析独立 CLI；通过有界 `bifrost --version` 探针比较 companion。即使 App/core 已到 target，只要独立 CLI 仍旧，WebUI 仍显示更新并进入同一个 pinned-target orchestrator；缺失、非零退出或超时才回退到 bundled core 版本。
 - **硬边界**:App-owned 编排不传 restart hint，CLI updater 读取到 `RuntimeStartMode::Desktop` 时直接跳过 proxy restart。CLI-owned Web UI 编排必须携带并校验当前 PID/port；验证通过的 foreground runtime 会被规范化为 restartable daemon，验证失败则终止升级。
 - **共同结果**:两种入口都以同一个 pinned target 同时升级 CLI + 已安装 App；直接 `app upgrade --version` 也以 skip-App/skip-restart 行为把该 target 传给 CLI 引擎，不能递归编排或重新观察 `latest` 后发生版本分叉。所有顶层 CLI/App updater 共用 `upgrade.lock`，只有携带 parent-lock marker 的内部 companion 跳过重复加锁。重启所有权互斥：CLI-owned 由 CLI updater 重启 daemon，App-owned 由 Tauri handoff 重启 App/core，不允许两个重启器同时操作同一监听端口。
+- progress 写权限跟随 `upgrade.lock` owner：任何 contended loser 都只记录诊断并退出，不能写共享 `Failed` 覆盖 owner 的 Checking/Downloading/Installing/Restarting；pending desktop handoff 同样由 marker owner 保留状态。只有成功持锁的 updater 或无法打开锁文件的独立启动失败路径可以发布自己的终态。
 
 ### “立即更新” vs “稍后提示”
 

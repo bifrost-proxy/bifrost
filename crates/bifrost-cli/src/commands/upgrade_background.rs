@@ -222,16 +222,7 @@ fn handle_upgrade_background_with(
             return;
         }
         Ok(UpgradeLockAttempt::Contended) => {
-            tracing::warn!(
-                "background upgrade: another process owns the cross-process upgrade lock"
-            );
-            write_upgrade_lock_failure(
-                &data_dir,
-                target.clone(),
-                source.clone(),
-                "Upgrade is already running in another process",
-                "Another updater owns the cross-process upgrade lock",
-            );
+            tracing::warn!("background upgrade: preserving progress owned by another updater");
             return;
         }
         Err(error) => {
@@ -454,12 +445,18 @@ mod tests {
     }
 
     #[test]
-    fn background_upgrade_does_not_run_when_another_process_owns_the_lock() {
+    fn background_upgrade_preserves_active_progress_when_another_process_owns_the_lock() {
         let _guard = lock_tests();
         let dir = temp_dir();
         let owner = try_acquire_upgrade_lock(&dir)
             .expect("acquire lock")
             .expect("first owner");
+        write_progress(
+            &dir,
+            &UpgradeProgress::new(UpgradePhase::Downloading, "Tray upgrade in progress")
+                .with_target(Some("0.0.155".to_string()))
+                .with_source(Some("tray".to_string())),
+        );
         let engine_called = std::cell::Cell::new(false);
 
         handle_upgrade_background_with(
@@ -476,13 +473,11 @@ mod tests {
 
         assert!(!engine_called.get());
         let progress = read_progress(&dir);
-        assert_eq!(progress.phase, UpgradePhase::Failed);
-        assert_eq!(progress.target_version.as_deref(), Some("0.0.156"));
-        assert_eq!(progress.source.as_deref(), Some("admin"));
-        assert!(progress
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("cross-process upgrade lock")));
+        assert_eq!(progress.phase, UpgradePhase::Downloading);
+        assert_eq!(progress.target_version.as_deref(), Some("0.0.155"));
+        assert_eq!(progress.source.as_deref(), Some("tray"));
+        assert_eq!(progress.message, "Tray upgrade in progress");
+        assert!(progress.error.is_none());
         drop(owner);
         std::fs::remove_dir_all(&dir).ok();
     }

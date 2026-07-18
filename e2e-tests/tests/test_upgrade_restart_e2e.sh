@@ -451,7 +451,7 @@ test_upgrade_review_feedback_contracts() {
         && grep -Fq 'verify_installed_cli_target_version_or_restore' "$upgrade_src" \
         && grep -Fq 'or_else(|| Some("127.0.0.1".to_string()))' "$upgrade_restart_src" \
         && grep -Fq 'info.start_mode != RuntimeStartMode::Desktop' "$upgrade_restart_src" \
-        && grep -Fq 'Another updater owns the cross-process upgrade lock' "$background_src" \
+        && grep -Fq 'preserving progress owned by another updater' "$background_src" \
         && ! grep -Fq 'desktop_app_install_dir_for_upgrade' "$admin_src" \
         && grep -Fq 'macos_app_dir_from_exe_path' "$app_src" \
         && grep -Fq 'defer_desktop_install_to_handoff' "$installer_src" \

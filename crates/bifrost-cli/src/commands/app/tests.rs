@@ -228,14 +228,21 @@ fn top_level_app_upgrade_owns_the_shared_lock_but_nested_companion_skips_it() {
     let owner = crate::commands::upgrade_background::try_acquire_upgrade_lock(temp.path())
         .expect("open upgrade lock")
         .expect("own upgrade lock");
+    bifrost_core::upgrade_progress::write_progress(
+        temp.path(),
+        &UpgradeProgress::new(UpgradePhase::Downloading, "Tray owner is downloading")
+            .with_target(Some("0.0.155".to_string()))
+            .with_source(Some("tray".to_string())),
+    );
 
     let error = acquire_top_level_app_upgrade_lock("desktop", "0.0.156")
         .expect_err("concurrent top-level App upgrade must be rejected");
     assert!(error.to_string().contains("already running"));
     let progress = bifrost_core::upgrade_progress::read_progress(temp.path());
-    assert_eq!(progress.phase, UpgradePhase::Failed);
-    assert_eq!(progress.source.as_deref(), Some("desktop"));
-    assert_eq!(progress.target_version.as_deref(), Some("0.0.156"));
+    assert_eq!(progress.phase, UpgradePhase::Downloading);
+    assert_eq!(progress.source.as_deref(), Some("tray"));
+    assert_eq!(progress.target_version.as_deref(), Some("0.0.155"));
+    assert_eq!(progress.message, "Tray owner is downloading");
 
     assert!(
         acquire_top_level_app_upgrade_lock(CALLER_MANAGED_PROGRESS_SOURCE, "0.0.156")

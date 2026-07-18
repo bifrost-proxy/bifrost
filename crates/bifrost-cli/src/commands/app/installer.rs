@@ -146,12 +146,9 @@ pub(super) fn acquire_top_level_app_upgrade_lock(
         Ok(UpgradeLockAttempt::PendingDesktopHandoff) => Err(BifrostError::Config(
             "Desktop app update handoff is already pending".to_string(),
         )),
-        Ok(UpgradeLockAttempt::Contended) => {
-            let error =
-                BifrostError::Config("Upgrade is already running in another process".to_string());
-            write_app_failed_progress(target_version, progress_source, &error);
-            Err(error)
-        }
+        Ok(UpgradeLockAttempt::Contended) => Err(BifrostError::Config(
+            "Upgrade is already running in another process".to_string(),
+        )),
         Err(error) => {
             let error = BifrostError::Config(format!(
                 "Failed to acquire the cross-process upgrade lock: {error}"
