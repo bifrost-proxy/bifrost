@@ -466,6 +466,22 @@ mod tests {
         assert!(install_moss_runtime_archive(&archive, &blocked_destination)
             .unwrap_err()
             .contains("create MOSS runtime directory"));
+        let parent_error_archive = temp.path().join("parent-error-runtime.zip");
+        {
+            use std::io::Write;
+            let file = std::fs::File::create(&parent_error_archive).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file(
+                "moss-joint-runtime/runtime/python/bin/python3.12",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(b"runtime").unwrap();
+            zip.finish().unwrap();
+        }
+        assert!(install_moss_runtime_archive(&parent_error_archive, &blocked_destination)
+            .unwrap_err()
+            .contains("create MOSS runtime directory"));
 
         let missing_archive = temp.path().join("missing-runtime.zip");
         {
