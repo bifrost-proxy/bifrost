@@ -1556,6 +1556,62 @@ mod tests {
             .is_some_and(|reason| reason.contains("switching remaining chunks to fork_per_chunk isolation")));
     }
 
+    #[tokio::test]
+    async fn test_server_chunk_and_bisect_empty_results_initialize_structured_view() {
+        let state = ServerRunnerState {
+            server_url: "test-empty".to_string(),
+            baseline_rtf: None,
+            baseline_samples: Vec::new(),
+            server_failures: 0,
+            force_fork_for_remaining: false,
+            restart_required: false,
+            current_chunk_failure_reason: None,
+            fallback_reason: None,
+        };
+        let server_result = run_server_chunk_request(
+            &state,
+            "chinese",
+            Path::new("/nonexistent/chunk.wav"),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(server_result.structured.segments.is_empty());
+
+        let temp = TempDir::new().unwrap();
+        let too_short = transcribe_single_chunk_with_bisect(
+            Path::new("/nonexistent/asr"),
+            Path::new("/nonexistent/model"),
+            "chinese",
+            Path::new("/nonexistent/chunk.wav"),
+            0,
+            1,
+            0,
+            temp.path(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(too_short.structured.segments.is_empty());
+
+        let silent = transcribe_single_chunk_with_bisect(
+            Path::new("/nonexistent/asr"),
+            Path::new("/nonexistent/model"),
+            "chinese",
+            Path::new("/nonexistent/chunk.wav"),
+            0,
+            MIN_CHUNK_SECS,
+            1,
+            temp.path(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(silent.structured.segments.is_empty());
+    }
+
     #[test]
     fn force_pause_requires_persisted_pause_state() {
         let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());

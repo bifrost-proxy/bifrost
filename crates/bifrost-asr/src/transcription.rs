@@ -204,6 +204,36 @@ mod tests {
     }
 
     #[test]
+    fn completeness_covers_completed_empty_and_truncated_boundaries() {
+        let completed = transcription(TranscriptionFinishReason::Completed, 2_000);
+        assert_eq!(
+            assess_completeness(&completed, None, 500),
+            TranscriptionCompleteness::Complete
+        );
+
+        let empty = StructuredTranscription::default();
+        assert_eq!(
+            assess_completeness(&empty, Some(500), 500),
+            TranscriptionCompleteness::Complete
+        );
+
+        let nonempty_without_segments = StructuredTranscription {
+            text: "unstructured output".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            assess_completeness(&nonempty_without_segments, Some(500), 500),
+            TranscriptionCompleteness::Incomplete
+        );
+
+        let truncated = transcription(TranscriptionFinishReason::Unknown, 1_000);
+        assert_eq!(
+            assess_completeness(&truncated, Some(2_000), 500),
+            TranscriptionCompleteness::Incomplete
+        );
+    }
+
+    #[test]
     fn structured_result_round_trips_speaker_and_usage() {
         let mut result = transcription(TranscriptionFinishReason::Completed, 2_000);
         result.usage = Some(TranscriptionUsage {

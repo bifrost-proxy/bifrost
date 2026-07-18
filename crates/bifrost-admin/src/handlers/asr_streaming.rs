@@ -531,6 +531,28 @@ mod streaming_extra_tests {
     }
 
     #[test]
+    fn verbose_response_filters_blank_segments_and_maps_terminal_failures() {
+        for (finish_reason, expected) in [
+            ("cancelled", TranscriptionFinishReason::Cancelled),
+            ("failed", TranscriptionFinishReason::Failed),
+        ] {
+            let verbose: VerboseTranscriptionResponse = serde_json::from_value(serde_json::json!({
+                "text": "usable",
+                "segments": [
+                    {"start": 0.0, "end": 0.5, "text": "   "},
+                    {"start": 0.5, "end": 1.0, "text": "usable"}
+                ],
+                "finish_reason": finish_reason
+            }))
+            .unwrap();
+
+            let transcription = whole_file_from_verbose(verbose);
+            assert_eq!(transcription.segments.len(), 1);
+            assert_eq!(transcription.structured.finish_reason, expected);
+        }
+    }
+
+    #[test]
     fn append_transcript_delta_inserts_spaces_between_ascii_words() {
         let mut committed = "hello".to_string();
         append_transcript_delta(&mut committed, "world");
