@@ -461,6 +461,12 @@ mod tests {
         assert!(!destination.join("model/._config.json").exists());
         assert!(!destination.join("model/.DS_Store").exists());
 
+        let blocked_destination = temp.path().join("blocked-install-destination");
+        std::fs::write(&blocked_destination, b"not a directory").unwrap();
+        assert!(install_moss_runtime_archive(&archive, &blocked_destination)
+            .unwrap_err()
+            .contains("create MOSS runtime directory"));
+
         let missing_archive = temp.path().join("missing-runtime.zip");
         {
             use std::io::Write;
