@@ -1637,6 +1637,26 @@ mod tests {
         .await
         .unwrap();
         assert!(empty_chunks.transcription.structured.segments.is_empty());
+
+        let silent_wav = temp.path().join("silent-four-seconds.wav");
+        std::fs::write(&silent_wav, make_wav(&vec![0i16; 4 * 16_000])).unwrap();
+        let hinted = transcribe_chunk_with_memory_hint(
+            Path::new("/nonexistent/asr"),
+            Path::new("/nonexistent/model"),
+            "chinese",
+            &silent_wav,
+            0,
+            4,
+            2,
+            temp.path(),
+            2,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(hinted.text.is_empty());
+        assert!(hinted.structured.segments.is_empty());
     }
 
     #[test]
