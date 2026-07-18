@@ -233,4 +233,35 @@ describe("useVersionStore upgrade polling", () => {
     expect(useVersionStore.getState().upgradePhase).toBe("restarting");
     expect(useVersionStore.getState().upgrading).toBe(true);
   });
+
+  it("reloads the WebView without an App handoff for completed CLI-owned progress", async () => {
+    runtimeMocks.desktopShell = true;
+    const invoke = vi.fn();
+    Object.assign(window, {
+      __TAURI__: {
+        core: {
+          invoke,
+        },
+      },
+    });
+    useVersionStore.getState().stopPollUpgradeProgress();
+    useVersionStore = (await import("./useVersionStore")).useVersionStore;
+    useVersionStore.setState({ upgrading: true, upgradePhase: "restarting" });
+    apiMocks.getUpgradeProgress.mockResolvedValue({
+      phase: "completed",
+      percent: null,
+      message: "CLI-owned upgrade complete",
+      target_version: "0.0.105",
+      source: "admin",
+      error: null,
+      updated_at: new Date().toISOString(),
+    });
+
+    useVersionStore.getState().pollUpgradeProgress();
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(invoke).not.toHaveBeenCalled();
+    expect(window.location.reload).toHaveBeenCalledTimes(1);
+    expect(useVersionStore.getState().upgrading).toBe(false);
+  });
 });

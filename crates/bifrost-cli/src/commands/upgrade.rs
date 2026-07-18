@@ -41,6 +41,7 @@ const POST_UPGRADE_APP_UPDATE_TIMEOUT_SECS: u64 = 600;
 const UPGRADE_CHILD_PROGRESS_HEARTBEAT_SECS: u64 = 30;
 const HOMEBREW_COMMAND_TIMEOUT_SECS: u64 = 600;
 const HOMEBREW_METADATA_TIMEOUT_SECS: u64 = 60;
+const UPGRADE_TEST_INSTALL_TARGET_ENV: &str = "BIFROST_UPGRADE_TEST_INSTALL_TARGET";
 pub(crate) const DESKTOP_MANAGED_SKIP_APP_ENV: &str = "BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_APP";
 pub(crate) const DESKTOP_MANAGED_SKIP_RESTART_ENV: &str =
     "BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_RESTART";
@@ -218,6 +219,12 @@ impl std::fmt::Display for InstallMethod {
 }
 
 fn detect_install_method() -> InstallMethod {
+    if upgrade_test_overrides_enabled() {
+        if let Some(path) = env::var_os(UPGRADE_TEST_INSTALL_TARGET_ENV) {
+            return InstallMethod::Manual(PathBuf::from(path));
+        }
+    }
+
     let exe_path = match env::current_exe() {
         Ok(path) => path,
         Err(_) => return InstallMethod::Unknown,
@@ -572,9 +579,6 @@ fn verify_installed_cli_target_version(
     executable: &Path,
     target_version: &str,
 ) -> Result<(), BifrostError> {
-    if upgrade_test_overrides_enabled() && env::var_os("BIFROST_UPGRADE_TEST_ARCHIVE").is_some() {
-        return Ok(());
-    }
     let output = command_output_with_timeout(
         executable,
         &["--version".to_string()],
@@ -1239,6 +1243,11 @@ pub(crate) fn handle_background_upgrade(
 }
 
 pub fn handle_upgrade(_yes: bool) -> Result<(), BifrostError> {
+    let data_dir = get_bifrost_dir()?;
+    let _upgrade_lock = super::upgrade_background::try_acquire_upgrade_lock(&data_dir)?
+        .ok_or_else(|| {
+            BifrostError::Config("Upgrade is already running in another process".to_string())
+        })?;
     handle_upgrade_inner(
         UpgradeBehavior::interactive(
             env_flag(DESKTOP_MANAGED_SKIP_APP_ENV),
@@ -1475,22 +1484,6 @@ fn finish_installed_upgrade(
         maybe_restart_running_proxy(restart_executable)?;
     }
     Ok(())
-}
-
-fn update_desktop_companion(
-    executable: &Path,
-    target_version: &str,
-    behavior: UpgradeBehavior,
-) -> Result<(), BifrostError> {
-    if !behavior.update_desktop_app {
-        return Ok(());
-    }
-    if behavior.require_desktop_app_update {
-        update_desktop_app_after_upgrade(executable, target_version)
-    } else {
-        update_desktop_app_after_upgrade_best_effort(executable, target_version);
-        Ok(())
-    }
 }
 
 mod restart;

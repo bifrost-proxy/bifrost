@@ -9,6 +9,7 @@ with instrumentable lines from LCOV and applies a stricter PR threshold.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import re
@@ -21,6 +22,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 PRODUCTION_RUST_RE = re.compile(r"^crates/[^/]+/src/.+\.rs$")
+MOVED_BLOCK_MIN_LINES = 8
+MOVED_BLOCK_MIN_SUBSTANTIVE_LINES = 4
 
 
 def normalize_path(path: str, repo_root: Path = REPO_ROOT) -> str:
@@ -121,6 +124,59 @@ def exclude_inline_test_modules(
     return filtered
 
 
+def unchanged_moved_block_lines(
+    current_source: str, base_sources: list[str]
+) -> set[int]:
+    """Return current line numbers copied unchanged from substantial base blocks.
+
+    File splits and module extraction should not turn already-existing production
+    code into "new" code for the changed-lines ratchet.  Only contiguous exact
+    matches of at least eight lines, containing at least four non-comment lines
+    with identifiers, qualify.  Small boilerplate matches remain gated.
+    """
+    current_lines = current_source.splitlines()
+    moved: set[int] = set()
+    for base_source in base_sources:
+        base_lines = base_source.splitlines()
+        matcher = difflib.SequenceMatcher(
+            None, base_lines, current_lines, autojunk=False
+        )
+        for block in matcher.get_matching_blocks():
+            if block.size < MOVED_BLOCK_MIN_LINES:
+                continue
+            matched = current_lines[block.b : block.b + block.size]
+            substantive = sum(
+                1
+                for line in matched
+                if not line.lstrip().startswith("//")
+                and re.search(r"[A-Za-z0-9_]", line)
+            )
+            if substantive < MOVED_BLOCK_MIN_SUBSTANTIVE_LINES:
+                continue
+            moved.update(range(block.b + 1, block.b + block.size + 1))
+    return moved
+
+
+def exclude_unchanged_moved_blocks(
+    changed: dict[str, set[int]],
+    base_sources: list[str],
+    repo_root: Path = REPO_ROOT,
+) -> tuple[dict[str, set[int]], int]:
+    filtered: dict[str, set[int]] = {}
+    excluded_count = 0
+    for path, lines in changed.items():
+        source_path = repo_root / path
+        if not PRODUCTION_RUST_RE.match(path) or not source_path.is_file():
+            filtered[path] = set(lines)
+            continue
+        moved = unchanged_moved_block_lines(
+            source_path.read_text(encoding="utf-8"), base_sources
+        )
+        filtered[path] = set(lines).difference(moved)
+        excluded_count += len(set(lines).intersection(moved))
+    return filtered, excluded_count
+
+
 def evaluate_changed_coverage(
     changed: dict[str, set[int]], coverage: dict[str, dict[int, int]]
 ) -> dict[str, object]:
@@ -169,6 +225,56 @@ def git_diff(base_ref: str) -> str:
     return result.stdout
 
 
+def changed_base_sources(base_ref: str) -> list[str]:
+    merge_base = subprocess.run(
+        ["git", "merge-base", base_ref, "HEAD"],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if merge_base.returncode != 0:
+        raise RuntimeError(
+            merge_base.stderr.strip() or f"git merge-base failed for {base_ref}"
+        )
+    base_commit = merge_base.stdout.strip()
+    names = subprocess.run(
+        [
+            "git",
+            "diff",
+            "--name-only",
+            "--diff-filter=DM",
+            base_commit,
+            "HEAD",
+            "--",
+            "crates/*/src/*.rs",
+            "crates/*/src/**/*.rs",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if names.returncode != 0:
+        raise RuntimeError(names.stderr.strip() or "git diff --name-only failed")
+
+    sources: list[str] = []
+    for path in names.stdout.splitlines():
+        normalized = normalize_path(path)
+        if not PRODUCTION_RUST_RE.match(normalized):
+            continue
+        content = subprocess.run(
+            ["git", "show", f"{base_commit}:{normalized}"],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if content.returncode == 0:
+            sources.append(content.stdout)
+    return sources
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("lcov")
@@ -183,13 +289,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: LCOV report not found: {lcov_path}", file=sys.stderr)
         return 2
     try:
-        changed = exclude_inline_test_modules(parse_diff(git_diff(args.base_ref)))
+        changed = parse_diff(git_diff(args.base_ref))
+        changed, moved_lines_excluded = exclude_unchanged_moved_blocks(
+            changed, changed_base_sources(args.base_ref)
+        )
+        changed = exclude_inline_test_modules(changed)
         coverage = parse_lcov(lcov_path.read_text(encoding="utf-8"))
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
     report = evaluate_changed_coverage(changed, coverage)
+    report["unchanged_moved_lines_excluded"] = moved_lines_excluded
     if args.json_output:
         output = Path(args.json_output)
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -199,6 +310,8 @@ def main(argv: list[str] | None = None) -> int:
         "Changed production Rust line coverage: "
         f"{report['percent']:.2f}% ({report['covered']}/{report['total']})"
     )
+    if moved_lines_excluded:
+        print(f"Unchanged moved/copied Rust lines excluded: {moved_lines_excluded}")
     for entry in report["files"]:
         missed = entry["missed_lines"]
         suffix = f" missed={','.join(map(str, missed))}" if missed else ""

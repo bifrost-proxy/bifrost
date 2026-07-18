@@ -62,6 +62,13 @@ fn take_sink() -> Option<ProgressSink> {
 
 pub(crate) fn try_acquire_upgrade_lock(data_dir: &Path) -> Result<Option<File>, BifrostError> {
     std::fs::create_dir_all(data_dir).map_err(BifrostError::Io)?;
+    if crate::commands::app::desktop_pending_install_guard_is_active(data_dir) {
+        // The App updater has handed a Windows MSI/EXE to the desktop shell.
+        // Its process-level file lock is necessarily released before the old
+        // App exits, so the fresh pending marker is the cross-process guard for
+        // the remainder of that deferred transaction.
+        return Ok(None);
+    }
     let lock = OpenOptions::new()
         .create(true)
         .read(true)
@@ -488,6 +495,23 @@ mod tests {
             .as_deref()
             .is_some_and(|error| error.contains("Failed to acquire")));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn background_upgrade_returns_without_running_when_data_dir_resolution_fails() {
+        let engine_called = std::cell::Cell::new(false);
+        handle_upgrade_background_with(
+            Some("0.0.156".to_string()),
+            "admin".to_string(),
+            None,
+            None,
+            Err(BifrostError::Config("data dir unavailable".to_string())),
+            |_| {
+                engine_called.set(true);
+                Ok(())
+            },
+        );
+        assert!(!engine_called.get());
     }
 
     #[test]

@@ -78,6 +78,53 @@ class CoverageDiffTests(unittest.TestCase):
             )
         self.assertEqual(filtered, {"crates/a/src/lib.rs": {1}})
 
+    def test_substantial_unchanged_moved_block_is_excluded(self) -> None:
+        base = """fn download() {
+    let client = client();
+    let response = client.send();
+    if response.is_ok() {
+        save(response);
+    } else {
+        retry(response);
+    }
+}
+"""
+        current = base + "new_behavior();\n"
+        moved = coverage_diff.unchanged_moved_block_lines(current, [base])
+        self.assertEqual(moved, set(range(1, 10)))
+        self.assertNotIn(10, moved)
+
+    def test_small_boilerplate_match_remains_changed(self) -> None:
+        source = """if ready {
+    return Ok(());
+}
+"""
+        self.assertEqual(
+            coverage_diff.unchanged_moved_block_lines(source, [source]), set()
+        )
+
+    def test_exclude_moved_blocks_reports_only_changed_intersection(self) -> None:
+        base = """fn restart() {
+    let runtime = read_runtime();
+    validate(runtime);
+    stop(runtime);
+    wait_for_exit(runtime);
+    install(runtime);
+    start(runtime);
+    verify(runtime);
+}
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "crates/a/src/restart.rs"
+            path.parent.mkdir(parents=True)
+            path.write_text(base + "new_behavior();\n", encoding="utf-8")
+            filtered, count = coverage_diff.exclude_unchanged_moved_blocks(
+                {"crates/a/src/restart.rs": set(range(1, 11))}, [base], root
+            )
+        self.assertEqual(filtered, {"crates/a/src/restart.rs": {10}})
+        self.assertEqual(count, 9)
+
 
 if __name__ == "__main__":
     unittest.main()

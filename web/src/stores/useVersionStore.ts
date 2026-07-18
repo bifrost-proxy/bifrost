@@ -71,7 +71,7 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 let sawDisconnect = false;
 
 /** Reload the page exactly once after an upgrade, guarded by sessionStorage. */
-function triggerUpgradeReloadOnce() {
+function triggerUpgradeReloadOnce(desktopHandoff = false) {
   try {
     if (sessionStorage.getItem(UPGRADE_RELOAD_PENDING_KEY) === "done") {
       return;
@@ -80,7 +80,7 @@ function triggerUpgradeReloadOnce() {
   } catch {
     // sessionStorage unavailable — fall through and reload anyway.
   }
-  if (isDesktopShell()) {
+  if (desktopHandoff && isDesktopShell()) {
     void import("../desktop/tauri")
       .then(({ restartDesktopAfterUpdate }) => restartDesktopAfterUpdate())
       .catch((error) => {
@@ -200,7 +200,7 @@ export const useVersionStore = create<VersionState>()(
             upgradeMessage: "Retrying desktop restart handoff…",
             upgradeError: null,
           });
-          triggerUpgradeReloadOnce();
+          triggerUpgradeReloadOnce(true);
           return;
         }
         sawDisconnect = false;
@@ -260,7 +260,7 @@ export const useVersionStore = create<VersionState>()(
               // handoff exits this process; the relaunched core publishes the
               // terminal completed/failed state.
               get().stopPollUpgradeProgress();
-              triggerUpgradeReloadOnce();
+              triggerUpgradeReloadOnce(true);
             } else if (progress.phase === "completed") {
               get().stopPollUpgradeProgress();
               set({ upgrading: false });

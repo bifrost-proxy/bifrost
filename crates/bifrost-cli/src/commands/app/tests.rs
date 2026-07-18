@@ -17,27 +17,38 @@ fn app_owned_windows_installers_are_deferred_until_desktop_shutdown() {
     assert!(should_defer_desktop_install(
         "desktop",
         Path::new("Bifrost.msi"),
-        true
+        true,
+        true,
     ));
     assert!(should_defer_desktop_install(
         "desktop",
         Path::new("Bifrost.EXE"),
-        true
+        true,
+        true,
     ));
     assert!(!should_defer_desktop_install(
         "cli",
         Path::new("Bifrost.msi"),
-        true
+        true,
+        true,
     ));
     assert!(!should_defer_desktop_install(
         "desktop",
         Path::new("Bifrost.msi"),
-        false
+        false,
+        true,
     ));
     assert!(!should_defer_desktop_install(
         "desktop",
         Path::new("Bifrost.zip"),
-        true
+        true,
+        true,
+    ));
+    assert!(!should_defer_desktop_install(
+        "desktop",
+        Path::new("Bifrost.msi"),
+        true,
+        false,
     ));
 
     let pending = PendingDesktopInstall {
@@ -61,6 +72,59 @@ fn app_owned_windows_installers_are_deferred_until_desktop_shutdown() {
         DESKTOP_PENDING_INSTALL_FILE,
         "desktop-upgrade-pending-install.json"
     );
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut active_pending = pending;
+    active_pending.created_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as u64;
+    fs::write(
+        temp.path().join(DESKTOP_PENDING_INSTALL_FILE),
+        serde_json::to_vec(&active_pending).expect("encode active marker"),
+    )
+    .expect("write active marker");
+    assert!(desktop_pending_install_guard_is_active(temp.path()));
+    assert!(
+        crate::commands::upgrade_background::try_acquire_upgrade_lock(temp.path())
+            .expect("pending handoff is normal contention")
+            .is_none(),
+        "a CLI/tray updater must not race the deferred desktop installer"
+    );
+    active_pending.created_at_ms = 1;
+    fs::write(
+        temp.path().join(DESKTOP_PENDING_INSTALL_FILE),
+        serde_json::to_vec(&active_pending).expect("encode stale marker"),
+    )
+    .expect("write stale marker");
+    assert!(!desktop_pending_install_guard_is_active(temp.path()));
+    assert!(
+        crate::commands::upgrade_background::try_acquire_upgrade_lock(temp.path())
+            .expect("stale marker does not error")
+            .is_some(),
+        "an abandoned marker must not block upgrades forever"
+    );
+
+    fs::write(temp.path().join(DESKTOP_PENDING_INSTALL_FILE), b"not-json")
+        .expect("write malformed marker");
+    assert!(!desktop_pending_install_guard_is_active(temp.path()));
+
+    active_pending.schema_version = DESKTOP_PENDING_INSTALL_SCHEMA_VERSION + 1;
+    fs::write(
+        temp.path().join(DESKTOP_PENDING_INSTALL_FILE),
+        serde_json::to_vec(&active_pending).expect("encode unsupported marker"),
+    )
+    .expect("write unsupported marker");
+    assert!(!desktop_pending_install_guard_is_active(temp.path()));
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn non_windows_desktop_install_is_never_deferred() {
+    assert!(!should_defer_current_desktop_install(
+        "desktop",
+        Path::new("Bifrost.msi"),
+    ));
 }
 
 #[test]
@@ -80,6 +144,22 @@ fn nested_cli_upgrade_does_not_publish_terminal_app_progress() {
 
 #[test]
 fn top_level_app_upgrade_owns_the_shared_lock_but_nested_companion_skips_it() {
+    const CHILD_ENV: &str = "BIFROST_TEST_APP_UPGRADE_LOCK_CHILD";
+    if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+        let status = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "commands::app::tests::top_level_app_upgrade_owns_the_shared_lock_but_nested_companion_skips_it",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .env_remove("BIFROST_DATA_DIR")
+            .status()
+            .expect("spawn isolated App upgrade lock test");
+        assert!(status.success(), "isolated App upgrade lock test failed");
+        return;
+    }
+
     let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().expect("tempdir");
     let previous_data_dir = std::env::var_os("BIFROST_DATA_DIR");
@@ -609,6 +689,7 @@ fn app_owned_upgrade_runs_the_full_verified_package_transaction() {
                     "--nocapture",
                 ])
                 .env(CHILD_ENV, "1")
+                .env(DESKTOP_UPGRADE_HANDOFF_ENV, "1")
                 .status()
                 .expect("spawn isolated App package transaction test");
         assert!(status.success());
@@ -737,5 +818,150 @@ fn unsupported_windows_installers_fail_without_mutating_the_target() {
         .expect_err("non-Windows host rejects Windows installer");
         assert!(error.to_string().contains("only be installed on Windows"));
     }
+    assert!(!target.exists());
+}
+
+#[test]
+fn app_upgrade_lock_errors_and_restart_override_are_reported() {
+    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let invalid_parent = temp.path().join("not-a-directory");
+    fs::write(&invalid_parent, "file").expect("write invalid data parent");
+    let previous_data_dir = std::env::var_os("BIFROST_DATA_DIR");
+    let previous_skip_restart = std::env::var_os("BIFROST_APP_SKIP_RESTART");
+    std::env::set_var("BIFROST_DATA_DIR", invalid_parent.join("data"));
+
+    let error = acquire_top_level_app_upgrade_lock("desktop", "0.0.156")
+        .expect_err("invalid data directory must reject App upgrade ownership");
+    assert!(error
+        .to_string()
+        .contains("Failed to acquire the cross-process upgrade lock"));
+
+    std::env::remove_var("BIFROST_APP_SKIP_RESTART");
+    assert!(!skip_desktop_restart());
+    std::env::set_var("BIFROST_APP_SKIP_RESTART", "yes");
+    assert!(skip_desktop_restart());
+    std::env::set_var("BIFROST_APP_SKIP_RESTART", "no");
+    assert!(!skip_desktop_restart());
+
+    match previous_data_dir {
+        Some(value) => std::env::set_var("BIFROST_DATA_DIR", value),
+        None => std::env::remove_var("BIFROST_DATA_DIR"),
+    }
+    match previous_skip_restart {
+        Some(value) => std::env::set_var("BIFROST_APP_SKIP_RESTART", value),
+        None => std::env::remove_var("BIFROST_APP_SKIP_RESTART"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn app_cli_version_probe_reports_nonzero_exit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let cli = temp.path().join("bifrost");
+    fs::write(&cli, "#!/bin/sh\nexit 7\n").expect("write failing CLI");
+    fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).expect("chmod failing CLI");
+
+    let error = read_installed_cli_version_with_timeout(&cli, Duration::from_secs(1))
+        .expect_err("non-zero CLI version probe must fail");
+    assert!(error.to_string().contains("status"));
+}
+
+#[cfg(unix)]
+#[test]
+fn caller_managed_app_install_uses_copy_fallback_and_skips_desktop_restart() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const CHILD_ENV: &str = "BIFROST_TEST_CALLER_MANAGED_APP_INSTALL_CHILD";
+    if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+        let status = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "commands::app::tests::caller_managed_app_install_uses_copy_fallback_and_skips_desktop_restart",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .status()
+            .expect("spawn isolated caller-managed App install test");
+        assert!(status.success(), "isolated App install test failed");
+        return;
+    }
+
+    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&bin).expect("create bin");
+    let ditto = bin.join("ditto");
+    fs::write(&ditto, "#!/bin/sh\nexit 1\n").expect("write failing ditto");
+    fs::set_permissions(&ditto, fs::Permissions::from_mode(0o755)).expect("chmod ditto");
+
+    let source = temp.path().join("package").join(MACOS_APP_BUNDLE);
+    let contents = source.join("Contents");
+    fs::create_dir_all(&contents).expect("create package Contents");
+    fs::write(
+        contents.join("Info.plist"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleShortVersionString</key><string>0.0.156</string>
+</dict></plist>"#,
+    )
+    .expect("write package plist");
+
+    let previous_path = std::env::var_os("PATH");
+    let previous_data_dir = std::env::var_os("BIFROST_DATA_DIR");
+    let previous_skip_restart = std::env::var_os("BIFROST_APP_SKIP_RESTART");
+    std::env::set_var("PATH", &bin);
+    std::env::set_var("BIFROST_DATA_DIR", temp.path().join("data"));
+    std::env::set_var("BIFROST_APP_SKIP_RESTART", "1");
+
+    let install_dir = temp.path().join("install");
+    install_or_upgrade_app(AppInstallRequest {
+        operation: AppOperation::Upgrade,
+        package: Some(source),
+        app_dir: Some(install_dir.clone()),
+        version: Some("0.0.156".to_string()),
+        include_cli: false,
+        source: Some(CALLER_MANAGED_PROGRESS_SOURCE.to_string()),
+        dry_run: false,
+        yes: true,
+    })
+    .expect("caller-managed App install");
+    assert!(installed_desktop_app_is_target_version(
+        &install_dir.join(MACOS_APP_BUNDLE),
+        "0.0.156"
+    ));
+
+    match previous_path {
+        Some(value) => std::env::set_var("PATH", value),
+        None => std::env::remove_var("PATH"),
+    }
+    match previous_data_dir {
+        Some(value) => std::env::set_var("BIFROST_DATA_DIR", value),
+        None => std::env::remove_var("BIFROST_DATA_DIR"),
+    }
+    match previous_skip_restart {
+        Some(value) => std::env::set_var("BIFROST_APP_SKIP_RESTART", value),
+        None => std::env::remove_var("BIFROST_APP_SKIP_RESTART"),
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn invalid_dmg_exercises_native_installer_failure_without_mutating_target() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let package = temp.path().join("invalid.dmg");
+    fs::write(&package, "not a dmg").expect("write invalid dmg");
+    let target = temp.path().join(MACOS_APP_BUNDLE);
+
+    let error = install_macos_dmg(
+        &package,
+        temp.path(),
+        "0.0.156",
+        CALLER_MANAGED_PROGRESS_SOURCE,
+    )
+    .expect_err("invalid dmg must fail to attach");
+    assert!(error.to_string().contains("failed to attach dmg"));
     assert!(!target.exists());
 }

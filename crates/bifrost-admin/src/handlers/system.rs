@@ -31,6 +31,7 @@ use crate::state::SharedAdminState;
 
 const DESKTOP_INSTALL_SKILL_TIMEOUT: Duration = Duration::from_secs(20);
 const DESKTOP_CORE_ENV: &str = "BIFROST_DESKTOP_CORE";
+const DESKTOP_UPGRADE_HANDOFF_ENV: &str = "BIFROST_DESKTOP_UPGRADE_HANDOFF";
 
 fn upgrade_start_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -893,6 +894,12 @@ fn spawn_upgrade_process(
         running_proxy,
         app_dir,
     ));
+    if channel == UpgradeChannel::Desktop {
+        // This distinguishes a WebUI/Tauri handoff from a direct
+        // `bifrost app upgrade --source desktop` invocation. Only the former
+        // may leave terminal progress and locked Windows files to the shell.
+        command.env(DESKTOP_UPGRADE_HANDOFF_ENV, "1");
+    }
     command
         .stdin(Stdio::null())
         .stdout(upgrade_log_stdio())

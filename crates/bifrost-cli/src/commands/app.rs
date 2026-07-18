@@ -25,6 +25,7 @@ use super::upgrade::{
 };
 
 mod installer;
+pub(crate) use installer::desktop_pending_install_guard_is_active;
 use installer::*;
 
 #[cfg(any(target_os = "windows", test))]
@@ -154,6 +155,7 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
         yes: _yes,
     } = request;
     let progress_source = source.unwrap_or_else(|| "cli".to_string());
+    let desktop_handoff_managed = desktop_upgrade_handoff_managed(&progress_source);
     let target_version = resolve_target_version(version)?;
     let install_dir = resolve_app_dir_for_source(app_dir, &progress_source)?;
     let install_path = resolve_app_path(&install_dir);
@@ -256,7 +258,7 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
         None,
     );
     #[cfg(target_os = "windows")]
-    if should_defer_desktop_install(&progress_source, &package_path, true) {
+    if should_defer_current_desktop_install(&progress_source, &package_path) {
         defer_desktop_install_to_handoff(&package_path, &target_version, package_owned_by_updater)
             .inspect_err(|error| {
                 write_app_failed_progress(&target_version, &progress_source, error);
@@ -305,7 +307,7 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
         None,
         None,
     );
-    if progress_source == "desktop" {
+    if desktop_handoff_managed {
         println!(
             "{}",
             "✓ Desktop update installed; waiting for the desktop restart handoff."
@@ -1493,8 +1495,5 @@ fn write_app_progress(
     write_progress(&data_dir(), &progress);
 }
 
-fn should_write_app_progress(source: &str) -> bool {
-    source != CALLER_MANAGED_PROGRESS_SOURCE
-}
 #[cfg(test)]
 mod tests;

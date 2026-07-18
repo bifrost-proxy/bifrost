@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) const DESKTOP_UPGRADE_HANDOFF_ENV: &str = "BIFROST_DESKTOP_UPGRADE_HANDOFF";
+
 pub(super) fn acquire_top_level_app_upgrade_lock(
     progress_source: &str,
     target_version: &str,
@@ -68,14 +70,75 @@ pub(super) fn should_defer_desktop_install(
     progress_source: &str,
     package: &Path,
     windows: bool,
+    handoff_managed: bool,
 ) -> bool {
-    if !windows || progress_source != "desktop" {
+    if !windows || progress_source != "desktop" || !handoff_managed {
         return false;
     }
     matches!(
         package.extension().and_then(|value| value.to_str()),
         Some(extension) if extension.eq_ignore_ascii_case("msi") || extension.eq_ignore_ascii_case("exe")
     )
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn should_defer_current_desktop_install(progress_source: &str, package: &Path) -> bool {
+    should_defer_desktop_install(
+        progress_source,
+        package,
+        true,
+        desktop_upgrade_handoff_managed(progress_source),
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+pub(super) fn should_defer_current_desktop_install(
+    _progress_source: &str,
+    _package: &Path,
+) -> bool {
+    false
+}
+
+pub(super) fn desktop_upgrade_handoff_managed(source: &str) -> bool {
+    source == "desktop"
+        && env::var(DESKTOP_UPGRADE_HANDOFF_ENV)
+            .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+}
+
+pub(super) fn should_write_app_progress(source: &str) -> bool {
+    source != CALLER_MANAGED_PROGRESS_SOURCE
+}
+
+#[cfg(any(target_os = "windows", test))]
+const DESKTOP_PENDING_INSTALL_STALE_AFTER_MS: u64 = 10 * 60 * 1000;
+
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn desktop_pending_install_guard_is_active(data_dir: &Path) -> bool {
+    let path = data_dir.join(DESKTOP_PENDING_INSTALL_FILE);
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(pending) = serde_json::from_str::<PendingDesktopInstall>(&content) else {
+        return false;
+    };
+    if pending.schema_version != DESKTOP_PENDING_INSTALL_SCHEMA_VERSION {
+        return false;
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0);
+    now_ms
+        .checked_sub(pending.created_at_ms)
+        .map(|age| age <= DESKTOP_PENDING_INSTALL_STALE_AFTER_MS)
+        .unwrap_or(true)
+}
+
+#[cfg(not(any(target_os = "windows", test)))]
+pub(crate) fn desktop_pending_install_guard_is_active(_data_dir: &Path) -> bool {
+    false
 }
 
 #[cfg(target_os = "windows")]

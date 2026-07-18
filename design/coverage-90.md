@@ -284,6 +284,10 @@ design/
 - PR coverage job 生成 LCOV 后执行 `coverage-diff.py`，只统计
   `crates/*/src/**/*.rs` 中发生变化且被 LLVM 标记为可插桩的生产行；内联
   `#[cfg(test)] mod tests` 必须从分子和分母中排除。
+- 模块拆分时，changed-lines 计算器会把当前文件与 merge-base 中本次修改/删除的
+  production Rust 文件做精确连续块比对；至少 8 行且包含至少 4 行实质代码的原样
+  搬移块不重复计入“新增行”。小段样板、任何被修改的行和真正新增逻辑仍受 95% 门禁，
+  报告必须打印被排除的搬移行数，避免用 copy detection 静默稀释门禁。
 - changed-lines 最低门禁为 95%，高于 workspace 和 crate 历史棘轮，避免大型 crate
   依靠既有已覆盖代码吸收未测试新增逻辑。
 - `e2e-tests/capabilities.json` 维护 P0/P1 代理能力的 owner、测试层、平台、失败模式和

@@ -637,3 +637,19 @@ pub(super) fn build_restart_args(
 
     args
 }
+
+pub(super) fn update_desktop_companion(
+    executable: &Path,
+    target_version: &str,
+    behavior: UpgradeBehavior,
+) -> Result<(), BifrostError> {
+    if !behavior.update_desktop_app {
+        return Ok(());
+    }
+    if behavior.require_desktop_app_update {
+        update_desktop_app_after_upgrade(executable, target_version)
+    } else {
+        update_desktop_app_after_upgrade_best_effort(executable, target_version);
+        Ok(())
+    }
+}

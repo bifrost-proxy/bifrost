@@ -2956,6 +2956,7 @@ try {
 } catch {
   $message = "desktop upgrade handoff failed: $($_.Exception.Message)"
   Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $pendingPath -Force -ErrorAction SilentlyContinue
   Write-Progress "failed" "Desktop app install or restart failed" $targetVersion $message
   Write-BootstrapLog $message
   try { Start-Process -FilePath $TargetPath | Out-Null } catch {}
@@ -3852,6 +3853,13 @@ mod tests {
         assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("WaitForExit(30000)"));
         assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("@(0, 1641, 3010)"));
         assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("Write-Progress \"failed\""));
+        assert_eq!(
+            WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
+                .matches("Remove-Item -LiteralPath $pendingPath")
+                .count(),
+            2,
+            "the deferred guard is released after either install success or failure"
+        );
         assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
             .contains("if ([bool]$marker.pending_install.package_owned_by_updater)"));
         assert_eq!(
