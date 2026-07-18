@@ -37,7 +37,9 @@ const CALLER_MANAGED_PROGRESS_SOURCE: &str = "cli-upgrade";
 const DESKTOP_MANAGED_CLI_TIMEOUT: Duration = Duration::from_secs(600);
 const DESKTOP_MANAGED_CLI_HEARTBEAT: Duration = Duration::from_secs(30);
 const DESKTOP_MANAGED_CLI_VERSION_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 const DESKTOP_INSTALL_COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 const DESKTOP_INSTALL_COMMAND_HEARTBEAT: Duration = Duration::from_secs(30);
 
 pub fn handle_app_command(action: AppCommands) -> Result<(), BifrostError> {
@@ -900,6 +902,7 @@ fn install_desktop_package(
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 #[derive(Debug)]
 struct DesktopInstallCommandOutput {
     status: std::process::ExitStatus,
@@ -907,6 +910,7 @@ struct DesktopInstallCommandOutput {
     stderr: String,
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn run_desktop_install_command(
     command: Command,
     target_version: &str,
@@ -915,6 +919,7 @@ fn run_desktop_install_command(
     Ok(run_desktop_install_command_output(command, target_version, progress_source)?.status)
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn run_desktop_install_command_output(
     command: Command,
     target_version: &str,
@@ -929,6 +934,7 @@ fn run_desktop_install_command_output(
     )
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn run_desktop_install_command_output_with_timeout(
     mut command: Command,
     target_version: &str,
@@ -1024,15 +1030,17 @@ fn copy_dir_replace(
         let _ = fs::remove_dir_all(&backup);
     }
 
-    let mut copied = false;
     #[cfg(target_os = "macos")]
-    {
+    let copied = {
         let mut command = Command::new("ditto");
         command.arg(source).arg(&staging);
-        if run_desktop_install_command(command, target_version, progress_source)?.success() {
-            copied = true;
-        }
-    }
+        run_desktop_install_command(command, target_version, progress_source)?.success()
+    };
+    #[cfg(not(target_os = "macos"))]
+    let copied = {
+        let _ = progress_source;
+        false
+    };
     if !copied {
         let _ = fs::remove_dir_all(&staging);
         copy_dir_recursive(source, &staging)?;
