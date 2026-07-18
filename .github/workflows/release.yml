@@ -258,39 +258,75 @@ jobs:
           CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"
         run: cross build -p bifrost-cli --release --target ${{ matrix.target }}
 
+      - name: Set up Python for MOSS MLX runtime
+        if: matrix.target == 'aarch64-apple-darwin'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.13"
+
       - name: Build MOSS joint transcription runtime
         if: matrix.target == 'aarch64-apple-darwin'
         shell: bash
         run: |
           set -euo pipefail
-          SOURCE_COMMIT="190a569c13b4b247450f2fb3b2a431244e84833e"
-          GGML_COMMIT="eced84c86f8b012c752c016f7fe789adea168e1e"
-          SOURCE_DIR="$RUNNER_TEMP/moss-transcribe.cpp"
-          git clone --filter=blob:none --no-checkout https://github.com/mudler/moss-transcribe.cpp "$SOURCE_DIR"
+          SOURCE_COMMIT="64e8416c303fb3b3463dab8eb4ebd78c55a87c1a"
+          MODEL_COMMIT="90c3a1ab78fa56e47e1493ddea48e3ababaf2f71"
+          SOURCE_DIR="$RUNNER_TEMP/mlx-audio"
+          VENV_DIR="$RUNNER_TEMP/moss-mlx-venv"
+          RUNTIME_ROOT="$GITHUB_WORKSPACE/dist/moss-joint-runtime"
+          git clone --filter=blob:none --no-checkout https://github.com/Blaizzy/mlx-audio.git "$SOURCE_DIR"
           git -C "$SOURCE_DIR" fetch --depth 1 origin "$SOURCE_COMMIT"
           git -C "$SOURCE_DIR" checkout --detach "$SOURCE_COMMIT"
-          git -C "$SOURCE_DIR" submodule update --init --recursive --depth 1
-          test "$(git -C "$SOURCE_DIR/third_party/ggml" rev-parse HEAD)" = "$GGML_COMMIT"
-          git -C "$SOURCE_DIR" apply --unidiff-zero "$GITHUB_WORKSPACE/scripts/asr/moss-transcribe-prompt.patch"
-          cmake -S "$SOURCE_DIR" -B "$SOURCE_DIR/build" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DGGML_NATIVE=OFF \
-            -DMT_BUILD_TESTS=OFF
-          cmake --build "$SOURCE_DIR/build" --config Release --parallel 3
-          RUNTIME_HELP="$("$SOURCE_DIR/build/moss-transcribe" 2>&1 || true)"
-          grep -q "usage: moss-transcribe" <<<"$RUNTIME_HELP"
-          if otool -L "$SOURCE_DIR/build/moss-transcribe" | grep -Eq '@rpath/(libggml|libmt-runtime)'; then
-            echo "MOSS runtime unexpectedly depends on build-tree dynamic libraries"
-            otool -L "$SOURCE_DIR/build/moss-transcribe"
+          git -C "$SOURCE_DIR" apply --unidiff-zero \
+            "$GITHUB_WORKSPACE/scripts/asr/mlx-audio-moss-quantized-conv.patch"
+
+          python3 -m venv "$VENV_DIR"
+          "$VENV_DIR/bin/python" -m pip install --disable-pip-version-check \
+            -r "$GITHUB_WORKSPACE/scripts/asr/moss-mlx-requirements.txt"
+          "$VENV_DIR/bin/python" -m pip install --disable-pip-version-check --no-deps "$SOURCE_DIR"
+
+          PYTHON_BASE="$(python3 -c 'import sys; print(sys.base_prefix)')"
+          SITE_PACKAGES="$("$VENV_DIR/bin/python" -c 'import site; print(site.getsitepackages()[0])')"
+          mkdir -p "$RUNTIME_ROOT/runtime" "$RUNTIME_ROOT/model"
+          ditto "$PYTHON_BASE" "$RUNTIME_ROOT/runtime/python"
+          ditto "$SITE_PACKAGES" "$RUNTIME_ROOT/runtime/site-packages"
+          cp "$GITHUB_WORKSPACE/scripts/asr/moss_mlx_runner.py" \
+            "$RUNTIME_ROOT/runtime/moss_mlx_runner.py"
+          cp "$SOURCE_DIR/LICENSE" "$RUNTIME_ROOT/MLX-AUDIO-LICENSE"
+
+          MODEL_BASE="https://huggingface.co/majentik/MOSS-Transcribe-Diarize-MLX-8bit/resolve/${MODEL_COMMIT}"
+          for file in \
+            added_tokens.json chat_template.jinja config.json generation_config.json \
+            merges.txt model.safetensors.index.json preprocessor_config.json \
+            processor_config.json special_tokens_map.json tokenizer.json \
+            tokenizer_config.json vocab.json; do
+            curl --fail --location --retry 5 --output "$RUNTIME_ROOT/model/$file" \
+              "$MODEL_BASE/$file"
+          done
+          cp "$GITHUB_WORKSPACE/scripts/asr/MOSS-MLX-MODEL-NOTICE.txt" \
+            "$RUNTIME_ROOT/MODEL-NOTICE.txt"
+
+          PYTHONHOME="$RUNTIME_ROOT/runtime/python" \
+          PYTHONPATH="$RUNTIME_ROOT/runtime/site-packages" \
+          PYTHONNOUSERSITE=1 \
+            "$RUNTIME_ROOT/runtime/python/bin/python3.12" \
+            "$RUNTIME_ROOT/runtime/moss_mlx_runner.py" --self-test | \
+            grep -q "moss-mlx-runtime ok"
+          if otool -L "$RUNTIME_ROOT/runtime/python/bin/python3.12" | \
+            grep -E '/Users/runner|/opt/hostedtoolcache'; then
+            echo "Packaged Python unexpectedly depends on the build host path"
             exit 1
           fi
-          mkdir -p dist/moss-joint-runtime
-          cp "$SOURCE_DIR/build/moss-transcribe" dist/moss-joint-runtime/
-          strip dist/moss-joint-runtime/moss-transcribe 2>/dev/null || true
           VERSION="${{ needs.prepare.outputs.version }}"
-          ditto -c -k --keepParent dist/moss-joint-runtime \
-            "dist/moss-joint-runtime-v${VERSION}-aarch64-apple-darwin.zip"
+          COPYFILE_DISABLE=1 ditto -c -k --keepParent --norsrc --noextattr --noqtn --noacl \
+            "$RUNTIME_ROOT" \
+            "$GITHUB_WORKSPACE/dist/moss-joint-runtime-v${VERSION}-aarch64-apple-darwin.zip"
+          if unzip -Z1 \
+            "$GITHUB_WORKSPACE/dist/moss-joint-runtime-v${VERSION}-aarch64-apple-darwin.zip" | \
+            grep -E '(^|/)(\._|\.DS_Store|__MACOSX)'; then
+            echo "Packaged MOSS runtime contains macOS metadata sidecars"
+            exit 1
+          fi
 
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'

@@ -486,7 +486,7 @@ export default function DirectoryTasksPanel({
               </Form.Item>
               <Text type="secondary" style={{ display: "block", marginTop: -16, marginBottom: 16 }}>
                 {mossJointMode
-                  ? "MOSS transcribes timestamps and speaker labels in one pass. The verified runtime and Q5 model are initialized automatically on first run."
+                  ? "MOSS uses one global MLX decode for timestamps and consistent speaker labels. The verified Apple Silicon runtime and 8-bit model initialize automatically; inference is stopped if it exceeds 0.5x the audio duration."
                   : "Uses the existing Qwen transcription pipeline and optional external speaker diarization."}
               </Text>
             </Col>

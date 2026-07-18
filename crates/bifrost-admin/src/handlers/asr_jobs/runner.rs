@@ -924,7 +924,7 @@ fn task_asr_stage_message(task: &AsrDirectoryTask) -> &'static str {
 
 fn effective_task_model(task: &AsrDirectoryTask) -> String {
     if task.transcription_mode == AsrTranscriptionMode::MossJoint {
-        "MOSS-Transcribe-Diarize-Q5".to_string()
+        "MOSS-Transcribe-Diarize-MLX-8bit".to_string()
     } else {
         task.model.clone()
     }

@@ -54,21 +54,21 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 1. 新增 `transcription_mode=standard|moss_joint`。Serde 默认值为 `standard`，保证历史 `tasks.json` 无迁移写回也能读取。
 2. 新增 `transcription_prompt` 字符串。空字符串表示未配置；创建、PATCH、GET 和 Web 表单均保留该值，最大 4000 个 Unicode 字符。
 3. `moss_joint` 走整文件联合转录，不执行 Qwen 30 秒分块，也不再叠加 Sherpa/Pyannote 分离；模型原生 speaker 直接进入 timeline。
-4. 首次运行时自动准备独立 runtime 和 Q5 模型；准备完成后同一任务直接继续推理。
-5. 发布包为 Apple Silicon macOS 生成独立 `moss-transcribe` runtime 资产。runtime 源码与 ggml 子模块固定到审核过的 commit；初始化器从同版本 release checksum manifest 读取 runtime zip 的 SHA-256，校验后才解压；模型固定文件名、大小和 SHA-256，下载后必须校验。测试覆盖的自定义 runtime URL 必须同时提供 `BIFROST_MOSS_RUNTIME_SHA256`。
-6. 用户 Prompt 通过仅当前进程可读的临时文件传入。runtime 始终先使用 GGUF 内置协议 Prompt，再追加用户上下文，避免自定义 Prompt 破坏时间戳和 speaker 输出协议。
-7. Bifrost 为原生子进程设置 `GGML_METAL_NO_RESIDENCY=1`，规避固定 GGML 版本在部分 Apple Silicon 上完成推理后的 residency-set 退出断言。该开关只关闭可选缓存，不改变模型和解码参数。
+4. 首次运行时自动准备独立、可重定位的 Python 3.12 + MLX-Audio runtime，以及固定 snapshot 的 8-bit MLX 模型；准备完成后同一任务直接继续推理。
+5. 发布包为 Apple Silicon macOS 生成 `moss-joint-runtime` 资产。MLX-Audio 固定 commit `64e8416c303fb3b3463dab8eb4ebd78c55a87c1a`，8-bit 模型固定 snapshot `90c3a1ab78fa56e47e1493ddea48e3ababaf2f71`。初始化器从同版本 release checksum manifest 读取 runtime zip 的 SHA-256，校验后才解压；1,258,427,442-byte 权重固定 SHA-256 `469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190`，下载后必须校验。测试覆盖的自定义 runtime URL 必须同时提供 `BIFROST_MOSS_RUNTIME_SHA256`。
+6. 用户 Prompt 通过仅当前进程可读的临时文件传入。runtime 始终先使用官方时间戳/说话人协议 Prompt，再追加用户上下文，避免自定义 Prompt 破坏结构化输出协议。
+7. 整段推理采用硬 watchdog：耗时达到音频时长的 `0.5x` 时杀死子进程并返回 `moss_rtf_exceeded`，不会继续消耗资源或悄悄回退到不同模型。
+8. release 打包禁用 macOS resource fork，并扫描拒绝 `._*`、`.DS_Store`、`__MACOSX`；安装器也跳过这些元数据，避免 Python 模型加载器误读 AppleDouble 文件。
 
 `runtime_strategy` 只控制标准 Qwen 链路；MOSS 联合模式固定单文件串行整文件推理。WebUI 在 MOSS 模式下显示该约束，但保留原 Qwen 配置，切回标准模式后可继续使用。
 
 ### 2.3 后续阶段
 
 - 长驻 sidecar：固定 API 契约、限制 CORS、健康检查、取消和显式资源回收。
-- 可选 MLX runtime：在有可稳定再分发的固定 harness 后，作为 Apple Silicon 高性能后端加入同一能力契约。
-- 长音频运行：按 VAD/静音边界切块、上下文衔接、断点恢复、进度和取消。
+- 长音频进度：在不改变单次全局解码语义的前提下增加可观测进度、断点恢复和显式资源回收。
 - 质量评估：人工标注小集上的说话人错误率、转录错误率、时间戳偏移与重复/漏字。
 
-本阶段不把通用 `mlx-audio` server 直接嵌入 Bifrost，不承诺 MOSS 实时流式能力，也不把 MOSS 设为历史任务或新任务的默认模式。
+本阶段不把通用 `mlx-audio` server 暴露成网络服务，不承诺 MOSS 实时流式能力，也不把 MOSS 设为历史任务或新任务的默认模式。不能仅为缩短耗时把一段会议拆成多个独立 MOSS 请求：官方长录音示例明确提示跨 clip 的 speaker label 会重置，缺少可靠的跨块身份归并时会损失多人识别一致性。
 
 ## 3. 领域模型
 
@@ -112,9 +112,9 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 | --- | --- | --- | --- | --- | --- | --- |
 | `qwen-openai` | 实时/离线纯转录 | 是 | 否 | 依服务而定 | 否 | 是 |
 | `moss-mlx` | 离线联合转录 | 否 | 是 | 是 | 是 | 是 |
-| `moss-cpp` | 离线联合转录 | 否 | 是 | 是 | 是 | 是 |
+| `moss-cpp` | 兼容登记（旧实验后端） | 否 | 是 | 是 | 是 | 是 |
 
-任务层通过 `transcription_mode` 匹配能力；`standard` 使用 `qwen-openai`，`moss_joint` 使用发布包中的 `moss-cpp` runtime。注册表仍保留 `moss-mlx`，供后续在不改变任务配置的前提下切换实现。
+任务层通过 `transcription_mode` 匹配能力；`standard` 使用 `qwen-openai`，`moss_joint` 使用发布包中的 `moss-mlx` runtime。`moss-cpp` 只保留能力兼容登记，不再用于正式任务执行。
 
 真实样本验证发现，直接用自定义 prompt 替换 MOSS 默认 prompt 时，模型仍会生成 `[Sxx]` 标签，但不再生成可解析的时间戳，最终只能回退成整文件单片段。因此 MOSS sidecar 必须保留协议 prompt，只允许把词汇、语言或会议上下文追加到协议约束中。
 
@@ -157,6 +157,29 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 
 该报告是后续 MOSS 实跑的可复现输入清单，也是 Qwen/MOSS 对比的参考；它不是 WER/DER 结论，也不能把既有 ASR 时间线当作完整性真值。真实 30 分钟样本中，MOSS 在 1784.84 秒发现了片段，而既有时间线结束于 1706.785 秒，末段波形也确认存在非静音信号。没有人工真值时，只比较耗时、稳定性、结构化输出和候选差异，不宣称模型质量优劣或单方完整。
 
+### 6.1 官方推荐与本机后端选择
+
+- OpenMOSS 官方模型卡将该模型定义为单次完成长音频转录、时间戳和说话人标注，最长支持 90 分钟；CUDA 服务端官方推荐 SGLang Omni，Transformers 作为直接调用示例。
+- 官方长录音脚本在超长输入上按约 55 分钟切分，同时明确 speaker label 会在 clip 之间重置。因此 Bifrost 对 55 分钟以内输入保持整段单次解码，不用短片段独立推理换速度。
+- Apple Silicon 没有官方 SGLang Omni/CUDA 路径。Bifrost 使用 MLX-Audio 的 Apple Silicon 移植，并固定 `majentik/MOSS-Transcribe-Diarize-MLX-8bit`；该模型卡报告其样例相对 MLX BF16 的 CER 为 0，而 4/6-bit 存在更明显差异。该结论只说明量化移植的一致性样例，不等于真实会议 WER/DER 真值。
+
+参考：
+
+- <https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize>
+- <https://huggingface.co/datasets/uv-scripts/transcription/blob/main/moss-transcribe-diarize-server.py>
+- <https://github.com/Blaizzy/mlx-audio>
+- <https://huggingface.co/majentik/MOSS-Transcribe-Diarize-MLX-8bit>
+
+### 6.2 2026-07-19 性能与质量代理验证
+
+| 样本 | MLX 8-bit 耗时 | RTF | 结果 |
+| --- | ---: | ---: | --- |
+| 30 秒 | 2.05 秒 | 0.068 | 11 segments，2 speakers |
+| 120 秒 | 4.07 秒 | 0.034 | 覆盖到 120.02 秒，25 segments，5 speakers |
+| 1800.15 秒真实会议 | 83.261 秒 | 0.04625 | 覆盖到 1800.14 秒，248 segments，9 speakers |
+
+120 秒同源样本与原 GGML Q5 输出规范化文本均为 319 字符，`SequenceMatcher` 相似度为 0.9969，speaker label 数量和时间线目视一致。该对比说明后端切换没有出现明显文本/多人结构退化，但没有人工标注，不能替代 WER、DER 或说话人身份真值评估。原 GGML 在整段 30 分钟输入上出现超过 1 小时的超线性退化，因此不再作为正式 Apple Silicon 后端。
+
 ## 7. 测试方案
 
 ### 7.1 单元测试
@@ -172,22 +195,24 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 - 使用临时任务 fixture 执行基准工具。
 - 断言按目标时长选择正确样本、报告包含说话人数与 RTF、源 fixture 哈希不变。
 - E2E 必须离线运行，不依赖模型下载。
+- 运行时归档含 AppleDouble 元数据时，安装器必须忽略且不得落盘。
+- 1.2 秒 fixture 推理达到 600 ms 时必须返回 `moss_rtf_exceeded`，并终止子进程。
 
 ### 7.3 `human_tests`
 
 - 对现有 `day` 任务运行只读基准，验证约 10 分钟与约 30 分钟样本。
 - 对比运行前后 `tasks.json`、`files.json` 与目标 WAV 哈希。
 - 验证 30 分钟稀疏语音样本不会仅因尾部静音被报告为截断。
-- 若本机隔离 MLX MOSS 运行时可成功安装，则对真实样本执行 MOSS；若上游运行时或模型在当前系统不可用，保留完整错误证据并将运行时接入列为明确阻塞，不能把基准选择误报为模型验证通过。
+- 对 30 分钟真实任务执行完整 MLX MOSS 链路；推理阶段超过 900.075 秒必须立即中断并判失败，不能为了等待结果继续消耗资源。
 
 ## 8. 风险与回退
 
-- 新模型运行时快速演进：发布 runtime 固定源 commit、子模块 commit 和模型哈希；Bifrost 核心只消费稳定 JSON 契约。
+- 新模型运行时快速演进：发布 runtime 固定 MLX-Audio commit、Python 依赖和模型 snapshot/hash；Bifrost 核心只消费稳定 JSON 契约。
 - 自动初始化下载中断：使用可续传临时文件，哈希不匹配时拒绝安装并保留明确错误；不会回退成 Qwen 后悄悄产出不同语义的结果。
 - Prompt 泄露或协议破坏：Prompt 不放入命令行参数，临时文件随单次推理销毁；runtime 追加而非替换协议 Prompt。
-- 长音频 token 截断：保留结束原因和用量，后续结合 VAD 语音终点与分块重试。
-- 说话人标签跨块漂移：本阶段只保留单次响应标签，不宣称跨块身份稳定；后续接 voiceprint/聚类归并。
-- 资源占用：MOSS 仅离线串行启用，Qwen 实时默认链路不变。
+- 长音频 token 截断：按音频时长计算输出 token budget，并保留完整性信息；超过 55 分钟在没有跨块 speaker 归并前拒绝处理。
+- 说话人标签跨块漂移：正式路径使用一次全局解码，不采用独立短块；未来若切块，必须先具备跨块 voiceprint/聚类归并和 DER 回归门禁。
+- 资源占用：MOSS 仅离线串行启用，Qwen 实时默认链路不变；0.5 RTF watchdog 是硬失败门禁。
 - 回退：Provider 不可用或能力不匹配时继续使用现有 Qwen + diarization 流程。
 
 ## 9. Review/Fix/Test 门禁

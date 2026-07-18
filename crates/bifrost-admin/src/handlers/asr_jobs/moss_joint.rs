@@ -1,17 +1,25 @@
 const MOSS_RUNTIME_ASSET_STEM: &str = "moss-joint-runtime";
-const MOSS_MODEL_FILE: &str = "moss-transcribe-q5_0.gguf";
+const MOSS_MODEL_FILE: &str = "model.safetensors";
 const MOSS_MODEL_URL: &str =
-    "https://huggingface.co/mudler/moss-transcribe.cpp-gguf/resolve/main/moss-transcribe-q5_0.gguf";
-const MOSS_MODEL_BYTES: u64 = 648_174_592;
+    "https://huggingface.co/majentik/MOSS-Transcribe-Diarize-MLX-8bit/resolve/90c3a1ab78fa56e47e1493ddea48e3ababaf2f71/model.safetensors";
+const MOSS_MODEL_BYTES: u64 = 1_258_427_442;
 const MOSS_MODEL_SHA256: &str =
-    "7e9ce1de5648ed49fc5c4f5e003d61a7421a63c14074f7275dc8a8cc664ff865";
+    "469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190";
+const MOSS_MODEL_REQUIRED_FILES: &[&str] = &[
+    "config.json",
+    "preprocessor_config.json",
+    "processor_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+];
 const MOSS_MAX_PROMPT_CHARS: usize = 4_000;
 const MOSS_CONTEXT_TOKENS: u64 = 131_072;
 const MOSS_CONTEXT_MARGIN_TOKENS: u64 = 2_048;
-const MOSS_AUDIO_TOKENS_PER_SECOND: u64 = 18;
+const MOSS_AUDIO_TOKENS_PER_SECOND: u64 = 13;
 const MOSS_OUTPUT_TOKENS_PER_SECOND: u64 = 20;
 const MOSS_MIN_OUTPUT_TOKENS: u64 = 5_120;
 const MOSS_MAX_WHOLE_FILE_SECONDS: u64 = 3_300;
+const MOSS_MAX_RUNTIME_RTF: f64 = 0.5;
 
 static MOSS_INIT_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -25,7 +33,11 @@ struct MossJsonSegment {
 
 #[derive(Debug, Clone)]
 struct MossRuntimePaths {
-    binary: PathBuf,
+    python_home: PathBuf,
+    python: PathBuf,
+    site_packages: PathBuf,
+    runner: PathBuf,
+    model_dir: PathBuf,
     model: PathBuf,
 }
 
@@ -44,14 +56,21 @@ struct MossModelSpec {
 }
 
 fn moss_runtime_dir(asr_home: &Path) -> PathBuf {
-    asr_home.join("moss_joint")
+    asr_home.join("moss_joint_mlx")
 }
 
 fn moss_runtime_paths(asr_home: &Path) -> MossRuntimePaths {
     let root = moss_runtime_dir(asr_home);
+    let runtime = root.join("runtime");
+    let python_home = runtime.join("python");
+    let model_dir = root.join("model");
     MossRuntimePaths {
-        binary: root.join("moss-transcribe"),
-        model: root.join(MOSS_MODEL_FILE),
+        python: python_home.join("bin/python3.12"),
+        python_home,
+        site_packages: runtime.join("site-packages"),
+        runner: runtime.join("moss_mlx_runner.py"),
+        model: model_dir.join(MOSS_MODEL_FILE),
+        model_dir,
     }
 }
 
@@ -217,47 +236,84 @@ fn verify_moss_model(path: &Path, spec: &MossModelSpec) -> Result<(), String> {
     Ok(())
 }
 
+fn verify_moss_model_snapshot(paths: &MossRuntimePaths, spec: &MossModelSpec) -> Result<(), String> {
+    verify_moss_model(&paths.model, spec)?;
+    for file in MOSS_MODEL_REQUIRED_FILES {
+        let required = paths.model_dir.join(file);
+        if !required.is_file() {
+            return Err(format!(
+                "MOSS model snapshot is missing {}",
+                required.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn install_moss_runtime_archive(archive: &Path, destination: &Path) -> Result<(), String> {
     let file = std::fs::File::open(archive)
         .map_err(|error| format!("open MOSS runtime archive {}: {error}", archive.display()))?;
     let mut zip = zip::ZipArchive::new(file)
         .map_err(|error| format!("read MOSS runtime archive {}: {error}", archive.display()))?;
-    let mut binary_entry = None;
+    let archive_root = Path::new("moss-joint-runtime");
+    let mut extracted_runner = false;
+    let mut extracted_python = false;
     for index in 0..zip.len() {
-        let entry = zip
+        let mut entry = zip
             .by_index(index)
             .map_err(|error| format!("read MOSS runtime archive entry: {error}"))?;
-        if entry.name().ends_with("/moss-transcribe") || entry.name() == "moss-transcribe" {
-            binary_entry = Some(index);
-            break;
+        let enclosed = entry.enclosed_name().ok_or_else(|| {
+            format!("unsafe MOSS runtime archive entry {}", entry.name())
+        })?;
+        let Ok(relative) = enclosed.strip_prefix(archive_root) else {
+            continue;
+        };
+        if relative.as_os_str().is_empty() {
+            continue;
         }
+        // macOS zip tools may encode resource forks as AppleDouble `._*`
+        // sidecars. They are not model/runtime inputs and some Python loaders
+        // will otherwise discover them as malformed JSON or source files.
+        if relative.components().any(|component| {
+            let name = component.as_os_str().to_string_lossy();
+            name.starts_with("._") || name == ".DS_Store" || name == "__MACOSX"
+        }) {
+            continue;
+        }
+        if !relative.starts_with("runtime") && !relative.starts_with("model") {
+            continue;
+        }
+        let target = destination.join(relative);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&target).map_err(|error| {
+                format!("create MOSS runtime directory {}: {error}", target.display())
+            })?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                format!("create MOSS runtime directory {}: {error}", parent.display())
+            })?;
+        }
+        let mut output = std::fs::File::create(&target)
+            .map_err(|error| format!("create MOSS runtime file {}: {error}", target.display()))?;
+        std::io::copy(&mut entry, &mut output)
+            .map_err(|error| format!("extract MOSS runtime file {}: {error}", target.display()))?;
+        #[cfg(unix)]
+        if let Some(mode) = entry.unix_mode() {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode)).map_err(
+                |error| format!("set MOSS runtime permissions {}: {error}", target.display()),
+            )?;
+        }
+        extracted_runner |= relative == Path::new("runtime/moss_mlx_runner.py");
+        extracted_python |= relative == Path::new("runtime/python/bin/python3.12");
     }
-    let index = binary_entry.ok_or_else(|| {
-        format!(
-            "MOSS runtime archive {} does not contain moss-transcribe",
+    if !extracted_runner || !extracted_python {
+        return Err(format!(
+            "MOSS runtime archive {} does not contain the packaged MLX runner",
             archive.display()
-        )
-    })?;
-    std::fs::create_dir_all(destination)
-        .map_err(|error| format!("create MOSS runtime dir {}: {error}", destination.display()))?;
-    let mut entry = zip
-        .by_index(index)
-        .map_err(|error| format!("read MOSS runtime binary: {error}"))?;
-    let binary = destination.join("moss-transcribe");
-    let mut output = std::fs::File::create(&binary)
-        .map_err(|error| format!("create MOSS runtime binary {}: {error}", binary.display()))?;
-    std::io::copy(&mut entry, &mut output)
-        .map_err(|error| format!("extract MOSS runtime binary {}: {error}", binary.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = output
-            .metadata()
-            .map_err(|error| format!("stat MOSS runtime binary: {error}"))?
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&binary, permissions)
-            .map_err(|error| format!("mark MOSS runtime executable: {error}"))?;
+        ));
     }
     Ok(())
 }
@@ -288,21 +344,38 @@ async fn download_moss_resource(url: String, dest: PathBuf, label: &str) -> Resu
 fn moss_runtime_help_is_valid(stdout: &[u8], stderr: &[u8]) -> bool {
     [stdout, stderr]
         .concat()
-        .windows(b"usage: moss-transcribe".len())
-        .any(|window| window == b"usage: moss-transcribe")
+        .windows(b"moss-mlx-runtime ok".len())
+        .any(|window| window == b"moss-mlx-runtime ok")
 }
 
-async fn verify_moss_runtime_binary(path: &Path) -> Result<(), String> {
-    let output = Command::new(path)
+fn configure_moss_python_command(command: &mut Command, paths: &MossRuntimePaths) {
+    command
+        .env("PYTHONHOME", &paths.python_home)
+        .env("PYTHONPATH", &paths.site_packages)
+        .env("PYTHONNOUSERSITE", "1")
+        .env("HF_HUB_OFFLINE", "1")
+        .env("TRANSFORMERS_OFFLINE", "1");
+}
+
+async fn verify_moss_runtime_binary(paths: &MossRuntimePaths) -> Result<(), String> {
+    let mut command = Command::new(&paths.python);
+    command.arg(&paths.runner).arg("--self-test");
+    configure_moss_python_command(&mut command, paths);
+    let output = command
         .output()
         .await
-        .map_err(|error| format!("run MOSS runtime smoke check {}: {error}", path.display()))?;
+        .map_err(|error| {
+            format!(
+                "run MOSS MLX runtime smoke check {}: {error}",
+                paths.python.display()
+            )
+        })?;
     if moss_runtime_help_is_valid(&output.stdout, &output.stderr) {
         Ok(())
     } else {
         Err(format!(
-            "MOSS runtime smoke check failed for {}: {}",
-            path.display(),
+            "MOSS MLX runtime smoke check failed for {}: {}",
+            paths.python.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         ))
     }
@@ -312,13 +385,15 @@ async fn moss_runtime_status(
     paths: &MossRuntimePaths,
     model_spec: &MossModelSpec,
 ) -> (bool, bool) {
-    let runtime_valid = paths.binary.is_file()
-        && verify_moss_runtime_binary(&paths.binary).await.is_ok();
+    let runtime_valid = paths.python.is_file()
+        && paths.runner.is_file()
+        && paths.site_packages.is_dir()
+        && verify_moss_runtime_binary(paths).await.is_ok();
     let model_valid = paths.model.is_file()
         && tokio::task::spawn_blocking({
-            let model = paths.model.clone();
+            let paths = paths.clone();
             let model_spec = model_spec.clone();
-            move || verify_moss_model(&model, &model_spec).is_ok()
+            move || verify_moss_model_snapshot(&paths, &model_spec).is_ok()
         })
         .await
         .unwrap_or(false);
@@ -339,7 +414,8 @@ async fn initialize_moss_joint_runtime(
         progress.stage_message =
             Some("Preparing MOSS joint transcription runtime".to_string());
         progress.message = Some(
-            "Downloading the native runtime and verified Q5 model on first use".to_string(),
+            "Downloading the self-contained MLX runtime and verified 8-bit model on first use"
+                .to_string(),
         );
     });
     let root = moss_runtime_dir(asr_home);
@@ -348,14 +424,15 @@ async fn initialize_moss_joint_runtime(
         .map_err(|error| format!("create MOSS runtime dir {}: {error}", root.display()))?;
 
     if !runtime_valid {
-        if paths.binary.exists() {
-            let invalid = root.join(format!("moss-transcribe.invalid-{}", now_ms()));
-            tokio::fs::rename(&paths.binary, &invalid)
+        let runtime_dir = root.join("runtime");
+        if runtime_dir.exists() {
+            let invalid = root.join(format!("runtime.invalid-{}", now_ms()));
+            tokio::fs::rename(&runtime_dir, &invalid)
                 .await
                 .map_err(|error| {
                     format!(
                         "quarantine invalid MOSS runtime {}: {error}",
-                        paths.binary.display()
+                        runtime_dir.display()
                     )
                 })?;
         }
@@ -392,11 +469,21 @@ async fn initialize_moss_joint_runtime(
         .map_err(|error| format!("join MOSS runtime install: {error}"))??;
         let _ = tokio::fs::remove_file(archive).await;
     }
-    verify_moss_runtime_binary(&paths.binary).await?;
+    verify_moss_runtime_binary(paths).await?;
 
     if !model_valid {
+        tokio::fs::create_dir_all(&paths.model_dir)
+            .await
+            .map_err(|error| {
+                format!(
+                    "create MOSS model directory {}: {error}",
+                    paths.model_dir.display()
+                )
+            })?;
         if paths.model.exists() {
-            let invalid = root.join(format!("{MOSS_MODEL_FILE}.invalid-{}", now_ms()));
+            let invalid = paths
+                .model_dir
+                .join(format!("{MOSS_MODEL_FILE}.invalid-{}", now_ms()));
             tokio::fs::rename(&paths.model, &invalid)
                 .await
                 .map_err(|error| {
@@ -409,13 +496,13 @@ async fn initialize_moss_joint_runtime(
         download_moss_resource(
             model_spec.url.clone(),
             paths.model.clone(),
-            "MOSS Q5 model",
+            "MOSS MLX 8-bit model",
         )
         .await?;
     }
-    let model = paths.model.clone();
+    let paths = paths.clone();
     let model_spec = model_spec.clone();
-    tokio::task::spawn_blocking(move || verify_moss_model(&model, &model_spec))
+    tokio::task::spawn_blocking(move || verify_moss_model_snapshot(&paths, &model_spec))
         .await
         .map_err(|error| format!("join MOSS model verification: {error}"))??;
     Ok(())
@@ -521,34 +608,42 @@ async fn run_moss_joint_transcription(
             .map_err(|error| format!("write MOSS prompt file: {error}"))?;
         Some(file)
     };
-    let mut command = Command::new(&runtime.binary);
+    let mut command = Command::new(&runtime.python);
     command
+        .arg(&runtime.runner)
         .arg("transcribe")
-        .arg(&runtime.model)
+        .arg(&runtime.model_dir)
         .arg(wav)
         .arg("--max-new")
         .arg(max_new.to_string())
         .arg("--format")
         .arg("json")
-        .env("MTD_THREADS", "8")
-        // The pinned GGML revision can leave a Metal residency set registered
-        // during process teardown and abort after otherwise successful
-        // inference. Disabling this optional cache keeps the native runtime
-        // stable across Apple Silicon generations without changing results.
-        .env("GGML_METAL_NO_RESIDENCY", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    configure_moss_python_command(&mut command, runtime);
     if let Some(prompt_file) = prompt_file.as_ref() {
         command.arg("--prompt-file").arg(prompt_file.path());
     }
     let child = command.spawn().map_err(|error| {
-        format!("start MOSS joint transcription runtime {}: {error}", runtime.binary.display())
+        format!(
+            "start MOSS MLX joint transcription runtime {}: {error}",
+            runtime.python.display()
+        )
     })?;
+    let started = Instant::now();
+    let max_runtime = Duration::from_secs_f64(
+        (duration_ms.max(1) as f64 / 1_000.0) * MOSS_MAX_RUNTIME_RTF,
+    );
     let output = child.wait_with_output();
     tokio::pin!(output);
+    let deadline = tokio::time::sleep_until(tokio::time::Instant::from_std(started + max_runtime));
+    tokio::pin!(deadline);
+    let mut pause_poll = tokio::time::interval(Duration::from_millis(500));
+    pause_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            biased;
             result = &mut output => {
                 let output = result.map_err(|error| format!("wait for MOSS runtime: {error}"))?;
                 if !output.status.success() {
@@ -560,7 +655,14 @@ async fn run_moss_joint_transcription(
                 }
                 return parse_moss_json(&output.stdout);
             }
-            _ = tokio::time::sleep(Duration::from_millis(500)) => {
+            _ = &mut deadline => {
+                return Err(format!(
+                    "moss_rtf_exceeded: inference exceeded {:.1}x audio duration (limit_ms={}, audio_ms={duration_ms})",
+                    MOSS_MAX_RUNTIME_RTF,
+                    max_runtime.as_millis()
+                ));
+            }
+            _ = pause_poll.tick() => {
                 if pause_check.is_some_and(|check| check()) {
                     return Err(ASR_TASK_PAUSED_MESSAGE.to_string());
                 }

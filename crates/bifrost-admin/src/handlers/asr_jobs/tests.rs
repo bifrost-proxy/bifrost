@@ -140,12 +140,12 @@ mod tests {
     #[test]
     fn moss_runtime_smoke_accepts_usage_from_either_output_stream() {
         assert!(moss_runtime_help_is_valid(
-            b"usage: moss-transcribe <command>",
+            b"moss-mlx-runtime ok",
             b""
         ));
         assert!(moss_runtime_help_is_valid(
             b"",
-            b"error\nusage: moss-transcribe <command>"
+            b"error\nmoss-mlx-runtime ok"
         ));
         assert!(!moss_runtime_help_is_valid(b"unexpected", b"failure"));
     }
@@ -178,18 +178,74 @@ mod tests {
         use std::io::Write;
         let file = std::fs::File::create(path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
+        let executable = zip::write::SimpleFileOptions::default().unix_permissions(0o755);
+        let regular = zip::write::SimpleFileOptions::default().unix_permissions(0o644);
         zip.start_file(
-            "moss-joint-runtime/moss-transcribe",
-            zip::write::SimpleFileOptions::default(),
+            "moss-joint-runtime/runtime/python/bin/python3.12",
+            executable,
         )
         .unwrap();
         zip.write_all(script.as_bytes()).unwrap();
+        zip.start_file("moss-joint-runtime/runtime/moss_mlx_runner.py", regular)
+            .unwrap();
+        zip.write_all(b"# fixture runner\n").unwrap();
+        zip.start_file("moss-joint-runtime/runtime/site-packages/.keep", regular)
+            .unwrap();
+        zip.write_all(b"fixture").unwrap();
+        zip.start_file(
+            "moss-joint-runtime/runtime/site-packages/._invalid.py",
+            regular,
+        )
+        .unwrap();
+        zip.write_all(b"\x00\x05\x16\x07appledouble").unwrap();
+        zip.start_file("moss-joint-runtime/model/._config.json", regular)
+            .unwrap();
+        zip.write_all(b"\x00\x05\x16\x07appledouble").unwrap();
+        zip.start_file("moss-joint-runtime/model/.DS_Store", regular)
+            .unwrap();
+        zip.write_all(b"metadata").unwrap();
+        for required in MOSS_MODEL_REQUIRED_FILES {
+            zip.start_file(format!("moss-joint-runtime/model/{required}"), regular)
+                .unwrap();
+            zip.write_all(b"{}").unwrap();
+        }
         zip.finish().unwrap();
+    }
+
+    fn prepare_moss_model_snapshot(paths: &MossRuntimePaths) {
+        std::fs::create_dir_all(&paths.model_dir).unwrap();
+        for required in MOSS_MODEL_REQUIRED_FILES {
+            std::fs::write(paths.model_dir.join(required), b"{}").unwrap();
+        }
+    }
+
+    fn moss_process_test_paths(root: &Path, python: PathBuf) -> MossRuntimePaths {
+        let python_home = root.join("python-home");
+        let site_packages = root.join("site-packages");
+        let runner = root.join("moss_mlx_runner.py");
+        let model_dir = root.join("model");
+        std::fs::create_dir_all(&python_home).unwrap();
+        std::fs::create_dir_all(&site_packages).unwrap();
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(&runner, b"fixture runner").unwrap();
+        let model = model_dir.join(MOSS_MODEL_FILE);
+        std::fs::write(&model, b"model").unwrap();
+        MossRuntimePaths {
+            python_home,
+            python,
+            site_packages,
+            runner,
+            model_dir,
+            model,
+        }
     }
 
     #[cfg(unix)]
     fn write_executable(path: &Path, script: &str) {
         use std::os::unix::fs::PermissionsExt;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
         std::fs::write(path, script).unwrap();
         let mut permissions = std::fs::metadata(path).unwrap().permissions();
         permissions.set_mode(0o755);
@@ -237,9 +293,19 @@ mod tests {
         let _lock = test_data_dir_lock();
         let temp = TempDir::new().unwrap();
         let paths = moss_runtime_paths(temp.path());
-        assert_eq!(moss_runtime_dir(temp.path()), temp.path().join("moss_joint"));
-        assert_eq!(paths.binary, temp.path().join("moss_joint/moss-transcribe"));
-        assert_eq!(paths.model, temp.path().join("moss_joint").join(MOSS_MODEL_FILE));
+        assert_eq!(
+            moss_runtime_dir(temp.path()),
+            temp.path().join("moss_joint_mlx")
+        );
+        assert_eq!(
+            paths.python,
+            temp.path()
+                .join("moss_joint_mlx/runtime/python/bin/python3.12")
+        );
+        assert_eq!(
+            paths.model,
+            temp.path().join("moss_joint_mlx/model").join(MOSS_MODEL_FILE)
+        );
         assert!(moss_runtime_asset_name_for("linux", "x86_64").is_err());
         let asset = moss_runtime_asset_name_for("macos", "aarch64").unwrap();
         assert!(asset.contains(env!("CARGO_PKG_VERSION")));
@@ -280,7 +346,7 @@ mod tests {
         let default_url = moss_runtime_url(&asset);
         assert!(default_url.contains("github.com/bifrost-proxy/bifrost/releases"));
 
-        let custom_model = std::ffi::OsStr::new("file:///tmp/moss-model.gguf");
+        let custom_model = std::ffi::OsStr::new("file:///tmp/model.safetensors");
         let _model_guard = EnvVarGuard::set("BIFROST_MOSS_MODEL_URL", custom_model);
         let spec = moss_model_spec();
         assert_eq!(spec.url, custom_model.to_string_lossy());
@@ -345,7 +411,7 @@ mod tests {
     #[test]
     fn moss_hash_model_and_archive_validation_cover_success_and_failures() {
         let temp = TempDir::new().unwrap();
-        let model = temp.path().join("model.gguf");
+        let model = temp.path().join("model.safetensors");
         let spec = moss_test_model_spec(&model, b"tiny verified model");
         assert!(verify_moss_model(&model, &spec).is_ok());
 
@@ -362,10 +428,19 @@ mod tests {
         assert!(sha256_file(&temp.path().join("missing")).is_err());
 
         let archive = temp.path().join("runtime.zip");
-        write_moss_runtime_zip(&archive, "#!/bin/sh\necho 'usage: moss-transcribe' >&2\n");
+        write_moss_runtime_zip(&archive, "#!/bin/sh\necho 'moss-mlx-runtime ok'\n");
         let destination = temp.path().join("installed");
         install_moss_runtime_archive(&archive, &destination).unwrap();
-        assert!(destination.join("moss-transcribe").is_file());
+        assert!(destination
+            .join("runtime/python/bin/python3.12")
+            .is_file());
+        assert!(destination.join("runtime/moss_mlx_runner.py").is_file());
+        assert!(destination.join("model/config.json").is_file());
+        assert!(!destination
+            .join("runtime/site-packages/._invalid.py")
+            .exists());
+        assert!(!destination.join("model/._config.json").exists());
+        assert!(!destination.join("model/.DS_Store").exists());
 
         let missing_archive = temp.path().join("missing-runtime.zip");
         {
@@ -395,15 +470,18 @@ mod tests {
         let asr_home = temp.path().join("asr-home");
         let paths = moss_runtime_paths(&asr_home);
         std::fs::create_dir_all(moss_runtime_dir(&asr_home)).unwrap();
-        std::fs::write(&paths.binary, b"invalid runtime").unwrap();
+        write_executable(&paths.python, "#!/bin/sh\necho 'invalid runtime' >&2\nexit 1\n");
+        std::fs::write(&paths.runner, b"fixture runner").unwrap();
+        std::fs::create_dir_all(&paths.site_packages).unwrap();
+        prepare_moss_model_snapshot(&paths);
         std::fs::write(&paths.model, b"invalid model").unwrap();
 
         let archive = temp.path().join("runtime-source.zip");
         write_moss_runtime_zip(
             &archive,
-            "#!/bin/sh\necho 'usage: moss-transcribe <command>' >&2\n",
+            "#!/bin/sh\necho 'moss-mlx-runtime ok'\n",
         );
-        let model_source = temp.path().join("model-source.gguf");
+        let model_source = temp.path().join("model-source.safetensors");
         let model_spec = moss_test_model_spec(&model_source, b"verified model fixture");
         let runtime_source = MossRuntimeSource {
             asset: "runtime.zip".to_string(),
@@ -419,7 +497,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(installed_paths.binary, paths.binary);
+        assert_eq!(installed_paths.python, paths.python);
         let (runtime_valid, model_valid) = moss_runtime_status(&paths, &model_spec).await;
         assert!(runtime_valid && model_valid);
         assert!(std::fs::read_dir(moss_runtime_dir(&asr_home))
@@ -435,13 +513,14 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(verify_moss_runtime_binary(&paths.binary).await.is_ok());
+        assert!(verify_moss_runtime_binary(&paths).await.is_ok());
         let invalid_runtime = temp.path().join("invalid-runtime");
         write_executable(&invalid_runtime, "#!/bin/sh\necho 'not moss usage' >&2\n");
-        assert!(verify_moss_runtime_binary(&invalid_runtime).await.is_err());
-        assert!(verify_moss_runtime_binary(&temp.path().join("missing"))
-            .await
-            .is_err());
+        let mut invalid_paths = paths.clone();
+        invalid_paths.python = invalid_runtime;
+        assert!(verify_moss_runtime_binary(&invalid_paths).await.is_err());
+        invalid_paths.python = temp.path().join("missing");
+        assert!(verify_moss_runtime_binary(&invalid_paths).await.is_err());
 
         let bad_home = temp.path().join("bad-home");
         let bad_source = MossRuntimeSource {
@@ -473,9 +552,12 @@ mod tests {
         let root = moss_runtime_dir(&asr_home);
         let paths = moss_runtime_paths(&asr_home);
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(&paths.binary, b"invalid runtime").unwrap();
+        write_executable(&paths.python, "#!/bin/sh\necho 'invalid runtime' >&2\nexit 1\n");
+        std::fs::write(&paths.runner, b"fixture runner").unwrap();
+        std::fs::create_dir_all(&paths.site_packages).unwrap();
+        prepare_moss_model_snapshot(&paths);
         std::fs::write(&paths.model, b"invalid model").unwrap();
-        let model_source = temp.path().join("model-source.gguf");
+        let model_source = temp.path().join("model-source.safetensors");
         let model_spec = moss_test_model_spec(&model_source, b"verified model fixture");
         let runtime_source = MossRuntimeSource {
             asset: "runtime.zip".to_string(),
@@ -484,8 +566,8 @@ mod tests {
         };
 
         write_executable(
-            &paths.binary,
-            "#!/bin/sh\necho 'usage: moss-transcribe <command>' >&2\n",
+            &paths.python,
+            "#!/bin/sh\necho 'moss-mlx-runtime ok'\n",
         );
         std::fs::copy(&model_source, &paths.model).unwrap();
         initialize_moss_joint_runtime(
@@ -499,7 +581,7 @@ mod tests {
         )
         .await
         .unwrap();
-        std::fs::write(&paths.binary, b"invalid runtime").unwrap();
+        std::fs::write(&paths.python, b"invalid runtime").unwrap();
         std::fs::write(&paths.model, b"invalid model").unwrap();
 
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
@@ -518,10 +600,11 @@ mod tests {
         assert!(runtime_error.contains("quarantine invalid MOSS runtime"));
 
         write_executable(
-            &paths.binary,
-            "#!/bin/sh\necho 'usage: moss-transcribe <command>' >&2\n",
+            &paths.python,
+            "#!/bin/sh\necho 'moss-mlx-runtime ok'\n",
         );
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        std::fs::set_permissions(&paths.model_dir, std::fs::Permissions::from_mode(0o555))
+            .unwrap();
         let model_error = initialize_moss_joint_runtime(
             &asr_home,
             "moss-model-quarantine-error",
@@ -533,7 +616,8 @@ mod tests {
         )
         .await
         .unwrap_err();
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&paths.model_dir, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
         assert!(model_error.contains("quarantine invalid MOSS model"));
 
         let archive_source = temp.path().join("large-bad-runtime.zip");
@@ -579,14 +663,9 @@ mod tests {
     async fn moss_runtime_process_covers_prompt_success_failure_and_pause() {
         let temp = TempDir::new().unwrap();
         let binary = temp.path().join("moss-transcribe");
-        let model = temp.path().join("model.gguf");
         let wav = temp.path().join("audio.wav");
-        std::fs::write(&model, b"model").unwrap();
         std::fs::write(&wav, b"wav").unwrap();
-        let runtime = MossRuntimePaths {
-            binary: binary.clone(),
-            model,
-        };
+        let runtime = moss_process_test_paths(temp.path(), binary.clone());
 
         write_executable(
             &binary,
@@ -621,7 +700,7 @@ mod tests {
             run_moss_joint_transcription(
                 &runtime,
                 &wav,
-                1_000,
+                3_000,
                 "",
                 Some(&keep_running),
             )
@@ -630,6 +709,15 @@ mod tests {
             .text,
             "resumed"
         );
+        write_executable(&binary, "#!/bin/sh\nsleep 2\n");
+        let watchdog_started = std::time::Instant::now();
+        assert!(run_moss_joint_transcription(&runtime, &wav, 1_200, "", None)
+            .await
+            .unwrap_err()
+            .contains("moss_rtf_exceeded"));
+        let watchdog_elapsed = watchdog_started.elapsed();
+        assert!(watchdog_elapsed >= std::time::Duration::from_millis(500));
+        assert!(watchdog_elapsed < std::time::Duration::from_millis(900));
         assert!(run_moss_joint_transcription(
             &runtime,
             &wav,
@@ -641,10 +729,8 @@ mod tests {
         .unwrap_err()
         .contains("prompt exceeds"));
 
-        let missing_runtime = MossRuntimePaths {
-            binary: temp.path().join("missing-runtime"),
-            model: runtime.model.clone(),
-        };
+        let mut missing_runtime = runtime.clone();
+        missing_runtime.python = temp.path().join("missing-runtime");
         assert!(run_moss_joint_transcription(&missing_runtime, &wav, 1_000, "", None)
             .await
             .unwrap_err()
@@ -668,9 +754,7 @@ mod tests {
             &binary,
             "#!/bin/sh\nprintf '[{\"start\":0.1,\"end\":1.2,\"speaker\":\" S01 \",\"text\":\"hello\"},{\"start\":1.2,\"end\":2.4,\"speaker\":\"S02\",\"text\":\"world\"},{\"start\":2.5,\"end\":2.0,\"speaker\":\"S03\",\"text\":\"invalid range\"}]'\n",
         );
-        let model = temp.path().join("model.gguf");
-        std::fs::write(&model, b"model").unwrap();
-        let runtime = MossRuntimePaths { binary, model };
+        let runtime = moss_process_test_paths(temp.path(), binary);
         let mut task = test_directory_task("moss-artifacts", audio_dir.clone());
         task.transcription_mode = AsrTranscriptionMode::MossJoint;
         task.transcription_prompt = "private prompt".to_string();
@@ -708,7 +792,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(output.text, "hello\nworld\ninvalid range");
-        assert_eq!(output.timeline.model, "MOSS-Transcribe-Diarize-Q5");
+        assert_eq!(output.timeline.model, "MOSS-Transcribe-Diarize-MLX-8bit");
         assert_eq!(
             output.timeline.diarization_profile.as_deref(),
             Some("moss_joint_native")
@@ -727,7 +811,7 @@ mod tests {
         );
         let metadata: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&output.metadata_path).unwrap()).unwrap();
-        assert_eq!(metadata["model"], "MOSS-Transcribe-Diarize-Q5");
+        assert_eq!(metadata["model"], "MOSS-Transcribe-Diarize-MLX-8bit");
         assert_eq!(metadata["transcription_mode"], "moss_joint");
         assert_eq!(metadata["transcription_prompt_configured"], true);
         assert!(!std::fs::read_to_string(&output.metadata_path)
@@ -831,7 +915,10 @@ mod tests {
             task_asr_stage_message(&task),
             "jointly transcribing audio with native speaker labels"
         );
-        assert_eq!(effective_task_model(&task), "MOSS-Transcribe-Diarize-Q5");
+        assert_eq!(
+            effective_task_model(&task),
+            "MOSS-Transcribe-Diarize-MLX-8bit"
+        );
     }
 
     #[test]
