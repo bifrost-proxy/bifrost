@@ -163,6 +163,8 @@ fn top_level_app_upgrade_owns_the_shared_lock_but_nested_companion_skips_it() {
     let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().expect("tempdir");
     let previous_data_dir = std::env::var_os("BIFROST_DATA_DIR");
+    let previous_parent_lock = std::env::var_os(PARENT_UPGRADE_LOCK_HELD_ENV);
+    std::env::remove_var(PARENT_UPGRADE_LOCK_HELD_ENV);
     std::env::set_var("BIFROST_DATA_DIR", temp.path());
     let owner = crate::commands::upgrade_background::try_acquire_upgrade_lock(temp.path())
         .expect("open upgrade lock")
@@ -178,7 +180,14 @@ fn top_level_app_upgrade_owns_the_shared_lock_but_nested_companion_skips_it() {
 
     assert!(
         acquire_top_level_app_upgrade_lock(CALLER_MANAGED_PROGRESS_SOURCE, "0.0.156")
-            .expect("nested companion bypasses its parent's lock")
+            .expect_err("visible source alone cannot bypass the lock")
+            .to_string()
+            .contains("already running")
+    );
+    std::env::set_var(PARENT_UPGRADE_LOCK_HELD_ENV, "1");
+    assert!(
+        acquire_top_level_app_upgrade_lock(CALLER_MANAGED_PROGRESS_SOURCE, "0.0.156")
+            .expect("private managed-child marker bypasses its parent's lock")
             .is_none()
     );
     drop(owner);
@@ -189,6 +198,10 @@ fn top_level_app_upgrade_owns_the_shared_lock_but_nested_companion_skips_it() {
     match previous_data_dir {
         Some(value) => std::env::set_var("BIFROST_DATA_DIR", value),
         None => std::env::remove_var("BIFROST_DATA_DIR"),
+    }
+    match previous_parent_lock {
+        Some(value) => std::env::set_var(PARENT_UPGRADE_LOCK_HELD_ENV, value),
+        None => std::env::remove_var(PARENT_UPGRADE_LOCK_HELD_ENV),
     }
 }
 
@@ -210,8 +223,8 @@ fn direct_app_upgrade_pins_cli_to_the_resolved_app_target() {
         "BIFROST_UPGRADE_TEST_ARCHIVE",
         std::env::temp_dir().join("missing-pinned-app-upgrade.tar.xz"),
     );
-    std::env::set_var(DESKTOP_MANAGED_SKIP_APP_ENV, "1");
-    std::env::set_var(DESKTOP_MANAGED_SKIP_RESTART_ENV, "1");
+    std::env::remove_var(DESKTOP_MANAGED_SKIP_APP_ENV);
+    std::env::remove_var(DESKTOP_MANAGED_SKIP_RESTART_ENV);
 
     upgrade_cli_if_present("cli", env!("CARGO_PKG_VERSION"))
         .expect("resolved App target overrides a later latest-version observation");
@@ -270,6 +283,10 @@ fn desktop_managed_cli_upgrade_cannot_reenter_app_or_restart_its_core() {
     assert_eq!(
         envs.get(DESKTOP_MANAGED_TARGET_ENV).map(String::as_str),
         Some("0.0.156")
+    );
+    assert_eq!(
+        envs.get(PARENT_UPGRADE_LOCK_HELD_ENV).map(String::as_str),
+        Some("1")
     );
 
     #[cfg(unix)]

@@ -125,7 +125,7 @@ def exclude_inline_test_modules(
 
 
 def unchanged_moved_block_lines(
-    current_source: str, base_sources: list[str]
+    current_source: str, base_sources: list[tuple[str, str]]
 ) -> set[int]:
     """Return current line numbers copied unchanged from substantial base blocks.
 
@@ -136,8 +136,18 @@ def unchanged_moved_block_lines(
     """
     current_lines = current_source.splitlines()
     moved: set[int] = set()
-    for base_source in base_sources:
+    for base_source, original_current_source in base_sources:
         base_lines = base_source.splitlines()
+        retained_base_lines: set[int] = set()
+        retained_matcher = difflib.SequenceMatcher(
+            None,
+            base_lines,
+            original_current_source.splitlines(),
+            autojunk=False,
+        )
+        for retained in retained_matcher.get_matching_blocks():
+            if retained.size >= MOVED_BLOCK_MIN_LINES:
+                retained_base_lines.update(range(retained.a, retained.a + retained.size))
         matcher = difflib.SequenceMatcher(
             None, base_lines, current_lines, autojunk=False
         )
@@ -153,13 +163,35 @@ def unchanged_moved_block_lines(
             )
             if substantive < MOVED_BLOCK_MIN_SUBSTANTIVE_LINES:
                 continue
-            moved.update(range(block.b + 1, block.b + block.size + 1))
+            run_start: int | None = None
+            for offset in range(block.size + 1):
+                unretained = (
+                    offset < block.size
+                    and block.a + offset not in retained_base_lines
+                )
+                if unretained and run_start is None:
+                    run_start = offset
+                if unretained or run_start is None:
+                    continue
+                run = current_lines[block.b + run_start : block.b + offset]
+                run_substantive = sum(
+                    1
+                    for line in run
+                    if not line.lstrip().startswith("//")
+                    and re.search(r"[A-Za-z0-9_]", line)
+                )
+                if (
+                    len(run) >= MOVED_BLOCK_MIN_LINES
+                    and run_substantive >= MOVED_BLOCK_MIN_SUBSTANTIVE_LINES
+                ):
+                    moved.update(range(block.b + run_start + 1, block.b + offset + 1))
+                run_start = None
     return moved
 
 
 def exclude_unchanged_moved_blocks(
     changed: dict[str, set[int]],
-    base_sources: list[str],
+    base_sources: list[tuple[str, str]],
     repo_root: Path = REPO_ROOT,
 ) -> tuple[dict[str, set[int]], int]:
     filtered: dict[str, set[int]] = {}
@@ -225,7 +257,7 @@ def git_diff(base_ref: str) -> str:
     return result.stdout
 
 
-def changed_base_sources(base_ref: str) -> list[str]:
+def changed_base_sources(base_ref: str) -> list[tuple[str, str]]:
     merge_base = subprocess.run(
         ["git", "merge-base", base_ref, "HEAD"],
         cwd=REPO_ROOT,
@@ -245,7 +277,6 @@ def changed_base_sources(base_ref: str) -> list[str]:
             "--name-only",
             "--diff-filter=DM",
             base_commit,
-            "HEAD",
             "--",
             "crates/*/src/*.rs",
             "crates/*/src/**/*.rs",
@@ -258,7 +289,7 @@ def changed_base_sources(base_ref: str) -> list[str]:
     if names.returncode != 0:
         raise RuntimeError(names.stderr.strip() or "git diff --name-only failed")
 
-    sources: list[str] = []
+    sources: list[tuple[str, str]] = []
     for path in names.stdout.splitlines():
         normalized = normalize_path(path)
         if not PRODUCTION_RUST_RE.match(normalized):
@@ -271,7 +302,13 @@ def changed_base_sources(base_ref: str) -> list[str]:
             check=False,
         )
         if content.returncode == 0:
-            sources.append(content.stdout)
+            current_path = REPO_ROOT / normalized
+            current = (
+                current_path.read_text(encoding="utf-8")
+                if current_path.is_file()
+                else ""
+            )
+            sources.append((content.stdout, current))
     return sources
 
 
@@ -311,7 +348,7 @@ def main(argv: list[str] | None = None) -> int:
         f"{report['percent']:.2f}% ({report['covered']}/{report['total']})"
     )
     if moved_lines_excluded:
-        print(f"Unchanged moved/copied Rust lines excluded: {moved_lines_excluded}")
+        print(f"Unchanged removed-and-moved Rust lines excluded: {moved_lines_excluded}")
     for entry in report["files"]:
         missed = entry["missed_lines"]
         suffix = f" missed={','.join(map(str, missed))}" if missed else ""

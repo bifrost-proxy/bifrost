@@ -291,8 +291,8 @@ pub(super) fn schedule_windows_deferred_install(
     let progress_dir = get_bifrost_dir()?;
     let progress_path = progress_dir.join(bifrost_core::upgrade_progress::PROGRESS_FILE_NAME);
     let progress_snapshot = bifrost_core::upgrade_progress::read_progress(&progress_dir);
-    let progress_target_version = progress_snapshot.target_version.unwrap_or_default();
     let progress_source = progress_snapshot.source.unwrap_or_default();
+    let publish_progress = !env_flag(PARENT_UPGRADE_LOCK_HELD_ENV);
 
     if let Some(args) = restart_args {
         fs::write(&args_path, args.join("\n")).map_err(BifrostError::Io)?;
@@ -312,7 +312,8 @@ param(
   [string]$LogPath,
   [string]$ProgressPath,
   [string]$TargetVersion,
-  [string]$Source
+  [string]$Source,
+  [int]$PublishProgress
 )
 
 $ErrorActionPreference = "Stop"
@@ -322,6 +323,9 @@ function Write-UpgradeLog([string]$Message) {
 }
 
 function Write-UpgradeProgress([string]$Phase, [string]$Message, [string]$ErrorMessage) {
+  if ($PublishProgress -eq 0) {
+    return
+  }
   try {
     $previous = $null
     if ($ProgressPath -and (Test-Path -LiteralPath $ProgressPath)) {
@@ -476,9 +480,11 @@ try {
         .arg("-ProgressPath")
         .arg(&progress_path)
         .arg("-TargetVersion")
-        .arg(progress_target_version)
+        .arg(&deferred_install.target_version)
         .arg("-Source")
         .arg(progress_source)
+        .arg("-PublishProgress")
+        .arg(if publish_progress { "1" } else { "0" })
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

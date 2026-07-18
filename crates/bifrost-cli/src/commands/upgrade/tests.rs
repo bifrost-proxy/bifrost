@@ -224,6 +224,8 @@ fn upgrade_behavior_executes_companion_and_runtime_ownership_branches() {
         "BIFROST_DATA_DIR",
         DESKTOP_MANAGED_SKIP_APP_ENV,
         DESKTOP_MANAGED_SKIP_RESTART_ENV,
+        DESKTOP_MANAGED_TARGET_ENV,
+        PARENT_UPGRADE_LOCK_HELD_ENV,
         "BIFROST_UPGRADE_TEST_LATEST_VERSION",
     ];
     let previous: Vec<_> = env_keys
@@ -251,7 +253,11 @@ fn upgrade_behavior_executes_companion_and_runtime_ownership_branches() {
     }
 
     let success = temp.path().join("success-cli");
-    std::fs::write(&success, "#!/bin/sh\nexit 0\n").expect("write success helper");
+    std::fs::write(
+        &success,
+        "#!/bin/sh\nif [ \"$1\" = app ] && [ \"$BIFROST_PARENT_UPGRADE_LOCK_HELD_INTERNAL\" != 1 ]; then exit 9; fi\nexit 0\n",
+    )
+    .expect("write success helper");
     std::fs::set_permissions(&success, std::fs::Permissions::from_mode(0o755))
         .expect("chmod success helper");
     let failure = temp.path().join("failure-cli");
@@ -342,11 +348,21 @@ fn upgrade_behavior_executes_companion_and_runtime_ownership_branches() {
     }))
     .is_err());
 
+    let parent_lock = super::super::upgrade_background::try_acquire_upgrade_lock(&data_dir)
+        .expect("open parent upgrade lock")
+        .expect("own parent upgrade lock");
+    std::env::set_var(PARENT_UPGRADE_LOCK_HELD_ENV, "1");
+    assert!(
+        handle_upgrade(true).is_err(),
+        "marker alone must not bypass lock"
+    );
     std::env::set_var(DESKTOP_MANAGED_SKIP_APP_ENV, "yes");
     std::env::set_var(DESKTOP_MANAGED_SKIP_RESTART_ENV, "true");
+    std::env::set_var(DESKTOP_MANAGED_TARGET_ENV, env!("CARGO_PKG_VERSION"));
     assert!(env_flag(DESKTOP_MANAGED_SKIP_APP_ENV));
     assert!(env_flag(DESKTOP_MANAGED_SKIP_RESTART_ENV));
     handle_upgrade(true).expect("desktop-managed CLI wrapper");
+    drop(parent_lock);
     std::env::remove_var(DESKTOP_MANAGED_SKIP_APP_ENV);
     assert!(!env_flag(DESKTOP_MANAGED_SKIP_APP_ENV));
 
@@ -528,27 +544,6 @@ fn running_proxy_hint_requires_exact_live_listener_before_recovering_marker() {
 }
 
 #[test]
-fn windows_deferred_install_waits_for_tray_unlock_and_reports_terminal_progress() {
-    let source = concat!(include_str!("../upgrade.rs"), include_str!("restart.rs"));
-    assert!(source.contains(
-        "update_desktop_companion(&restart_executable, &cache.latest_version, behavior)?;"
-    ));
-    assert!(source.contains("stop_tray_helper_before_windows_deferred_install(&data_dir);"));
-    assert!(source.contains("Wait-TargetPathWritable $TargetPath 120"));
-    assert!(source.contains("Copy-Item -LiteralPath $TargetPath -Destination $backupPath -Force"));
-    assert!(source.contains("installed CLI reports '$versionOutput' instead of target"));
-    assert!(source.contains("restored previous CLI after replacement failure"));
-    assert!(source.contains("[System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)"));
-    assert!(source.contains("Get-Content -LiteralPath $ProgressPath -Raw -Encoding UTF8"));
-    assert!(source.contains("target_version = if ($TargetVersion)"));
-    assert!(source.contains(".arg(\"-TargetVersion\")"));
-    assert!(source.contains(".arg(\"-Source\")"));
-    assert!(source.contains("mark_deferred_install_scheduled();"));
-    assert!(source.contains("Write-UpgradeProgress \"completed\" \"Upgrade complete\" $null"));
-    assert!(source.contains("Write-UpgradeProgress \"failed\" \"Upgrade failed\" $errorMessage"));
-}
-
-#[test]
 fn script_installs_use_the_target_aware_atomic_upgrade_path() {
     let source = include_str!("../upgrade.rs");
 
@@ -556,6 +551,8 @@ fn script_installs_use_the_target_aware_atomic_upgrade_path() {
         "InstallMethod::Script => upgrade_manual(&restart_executable, &cache.latest_version)"
     ));
 }
+
+mod review_comments;
 
 #[test]
 fn test_glibc_2_38_requires_musl_for_upgrade() {
@@ -933,7 +930,7 @@ fn upgrade_install_binary_atomically_replaces_existing_target() {
     std::fs::write(&source, b"new binary").expect("write source");
     std::fs::write(&target, b"old binary").expect("write target");
 
-    install_binary_atomically(&source, &target).expect("install atomically");
+    install_binary_atomically(&source, &target, "0.0.156").expect("install atomically");
 
     assert_eq!(std::fs::read(&target).expect("read target"), b"new binary");
     assert!(!unique_temp_binary_path(&target).exists());
@@ -954,7 +951,7 @@ fn upgrade_restore_binary_backup_restores_previous_target() {
     std::fs::write(&source, b"new binary").expect("write source");
     std::fs::write(&target, b"old binary").expect("write target");
 
-    install_binary_atomically(&source, &target).expect("install atomically");
+    install_binary_atomically(&source, &target, "0.0.156").expect("install atomically");
     assert_eq!(std::fs::read(&target).expect("read target"), b"new binary");
 
     assert!(restore_binary_backup(&target).expect("restore backup"));

@@ -464,6 +464,7 @@ test_background_self_update_restarts_when_disk_binary_already_latest() {
     BIFROST_DATA_DIR="$TEST_DATA_DIR" \
     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
     BIFROST_DISABLE_TRAY=1 \
+    BIFROST_APP_INSTALL_DIR="$TEST_ROOT/no-desktop-app" \
     "$INSTALL_BIN" start -p "$PROXY_PORT" --host 127.0.0.1 --daemon \
         --access-mode allow_all --skip-cert-check --no-system-proxy \
         --no-intercept "${tray_args[@]}" -y >/tmp/bifrost-admin-upgrade-already-latest-start.log 2>&1
@@ -495,6 +496,7 @@ test_background_self_update_restarts_when_disk_binary_already_latest() {
     BIFROST_DISABLE_TRAY=1 \
     BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES=1 \
     BIFROST_UPGRADE_TEST_LATEST_VERSION="$current_version" \
+    BIFROST_APP_INSTALL_DIR="$TEST_ROOT/no-desktop-app" \
     "$INSTALL_BIN" self-update --target "$current_version" --source admin \
         >/tmp/bifrost-admin-upgrade-already-latest-self-update.log 2>&1 || {
         _log_fail "background self-update exits 0" "success" "$(cat /tmp/bifrost-admin-upgrade-already-latest-self-update.log 2>/dev/null)"

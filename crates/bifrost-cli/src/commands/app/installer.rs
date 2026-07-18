@@ -2,11 +2,17 @@ use super::*;
 
 pub(super) const DESKTOP_UPGRADE_HANDOFF_ENV: &str = "BIFROST_DESKTOP_UPGRADE_HANDOFF";
 
+fn parent_upgrade_lock_is_held() -> bool {
+    env::var(PARENT_UPGRADE_LOCK_HELD_ENV)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
 pub(super) fn acquire_top_level_app_upgrade_lock(
     progress_source: &str,
     target_version: &str,
 ) -> Result<Option<fs::File>, BifrostError> {
-    if progress_source == CALLER_MANAGED_PROGRESS_SOURCE {
+    if progress_source == CALLER_MANAGED_PROGRESS_SOURCE && parent_upgrade_lock_is_held() {
         return Ok(None);
     }
     let dir = data_dir();

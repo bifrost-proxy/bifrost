@@ -90,7 +90,7 @@ class CoverageDiffTests(unittest.TestCase):
 }
 """
         current = base + "new_behavior();\n"
-        moved = coverage_diff.unchanged_moved_block_lines(current, [base])
+        moved = coverage_diff.unchanged_moved_block_lines(current, [(base, "")])
         self.assertEqual(moved, set(range(1, 10)))
         self.assertNotIn(10, moved)
 
@@ -100,7 +100,7 @@ class CoverageDiffTests(unittest.TestCase):
 }
 """
         self.assertEqual(
-            coverage_diff.unchanged_moved_block_lines(source, [source]), set()
+            coverage_diff.unchanged_moved_block_lines(source, [(source, "")]), set()
         )
 
     def test_exclude_moved_blocks_reports_only_changed_intersection(self) -> None:
@@ -120,10 +120,24 @@ class CoverageDiffTests(unittest.TestCase):
             path.parent.mkdir(parents=True)
             path.write_text(base + "new_behavior();\n", encoding="utf-8")
             filtered, count = coverage_diff.exclude_unchanged_moved_blocks(
-                {"crates/a/src/restart.rs": set(range(1, 11))}, [base], root
+                {"crates/a/src/restart.rs": set(range(1, 11))}, [(base, "")], root
             )
         self.assertEqual(filtered, {"crates/a/src/restart.rs": {10}})
         self.assertEqual(count, 9)
+
+    def test_copied_block_still_present_in_source_remains_changed(self) -> None:
+        base = "\n".join(f"let value_{index} = {index};" for index in range(12))
+        moved = coverage_diff.unchanged_moved_block_lines(base, [(base, base)])
+        self.assertEqual(moved, set())
+
+    def test_retained_middle_block_does_not_create_small_moved_fragments(self) -> None:
+        lines = [f"let value_{index} = {index};" for index in range(20)]
+        base = "\n".join(lines)
+        original_current = "\n".join(lines[6:14])
+        moved = coverage_diff.unchanged_moved_block_lines(
+            base, [(base, original_current)]
+        )
+        self.assertEqual(moved, set())
 
 
 if __name__ == "__main__":

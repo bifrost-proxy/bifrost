@@ -192,7 +192,7 @@
    cargo test -p bifrost-cli homebrew_restart_uses_stable_launcher_outside_versioned_cellar --lib -- --nocapture
    cargo test -p bifrost-cli homebrew_upgrade_commands_are_bounded_and_verify_formula_target --lib -- --nocapture
    cargo test -p bifrost-cli macos_app_swap_preserves_old_bundle_when_staging_is_invalid --lib -- --nocapture
-   cargo test -p bifrost-cli windows_deferred_install_waits_for_tray_unlock_and_reports_terminal_progress --lib -- --nocapture
+   cargo test -p bifrost-cli windows_deferred_install_pins_target_and_respects_parent_progress_ownership --lib -- --nocapture
    ```
 3. 执行 App-owned 实链路，检查独立 CLI 收到与 App 相同的 pinned target，并在 `--version` 核验后才安装 App：
    ```bash
@@ -231,6 +231,10 @@
    cargo test --manifest-path desktop/src-tauri/Cargo.toml deferred_desktop_installer_marker -- --nocapture
    cargo test --manifest-path desktop/src-tauri/Cargo.toml deferred_desktop_install_completion -- --nocapture
    pnpm --dir web exec vitest run src/stores/useVersionStore.test.ts
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli top_level_app_upgrade_owns_the_shared_lock_but_nested_companion_skips_it --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli background_upgrade_preserves_progress_owned_by_pending_desktop_handoff --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli windows_deferred_install_pins_target_and_respects_parent_progress_ownership --lib -- --nocapture
+   python3 -m unittest scripts/ci/tests/test_coverage_diff.py
    ```
 2. 执行 App-owned 真实 Admin 链路，验证浏览器请求被拒绝、桌面请求仍完成 CLI + App 安装：
    ```bash
@@ -269,14 +273,14 @@
 - CLI 安装后的 exact target 不匹配时恢复旧 binary backup。
 - CLI-owned companion 可显式传递检测到的 App parent；Admin desktop orchestrator 不传 `--app-dir`，让 bundled core 从自身 executable 解析当前运行 App，避免多副本时更新错误副本。
 - foreground CLI runtime 与 daemon 一样归 CLI updater 重启，只有 `RuntimeStartMode::Desktop` 会交给 Tauri handoff。
-- Windows App-owned MSI/EXE 不在 App/sidecar 仍运行时执行；pending marker 交给 Tauri helper，在旧 App/core 退出后有界安装，失败写 `Failed`，成功才拉起新 App。
+- Windows App-owned MSI/EXE 不在 App/sidecar 仍运行时执行；pending marker 交给 Tauri helper，在旧 App/core 退出后有界安装，失败写 `Failed`，成功才拉起新 App。pending handoff 拒绝后台竞争者时不得把原有 `Restarting/source=desktop` 覆盖成 `Failed/source=admin`。
 - Windows deferred 安装只在新 App 的编译版本等于 pinned target 时写 `Completed`；安装器成功但拉起旧/错误版本时写 `Failed`。
 - pending marker 区分 updater 下载包与调用者传入包；handoff 成功后只删除前者，保留用户的 `--package` 文件。
 - Desktop shell 复用 CLI-owned core 时，`source=admin` 的 `Restarting` 继续由 CLI owner 收口，不触发 Tauri App handoff。
 - Windows deferred installer 在旧 App/core 退出后的整个安装窗口继续持有 pending-marker guard，CLI、tray 与 App updater 都不能取得共享升级锁；成功或失败后 guard 都会释放，陈旧 marker 不会永久阻塞后续更新。
 - 只有 Admin/Tauri 发起且带 handoff 标记的 `source=desktop` 才停在 `Restarting` 交给当前 App；用户直接执行 `bifrost app upgrade --source desktop --no-cli` 会自行写 `Completed`。Desktop shell 观察到 CLI-owned `source=admin` 的 `Completed` 时只刷新 WebView，不重启 App。
-- changed-lines 95% 门禁排除至少 8 行、至少 4 行实质代码且与 merge-base 完全一致的机械搬移块；小样板和真实修改行仍计入门禁，报告显示排除行数。
-- 顶层 App updater 与 self-update 共用跨进程 `upgrade.lock`，并发 App/CLI updater 只能有一个 owner；内部 `source=cli-upgrade` companion 不重复加锁。直接 `app upgrade --version` 把已解析 target 原样传给 CLI 引擎，即使 `latest` 随后变化也不会安装不同版本。
+- changed-lines 95% 门禁只排除从原文件真实消失、至少 8 行且至少 4 行实质代码的机械搬移块；仍保留在原文件的 copy-paste 必须继续计入门禁，小样板和真实修改行也仍计入，报告显示排除行数。
+- 顶层 App updater 与 self-update 共用跨进程 `upgrade.lock`，并发 App/CLI updater 只能有一个 owner；`source=cli-upgrade` 只有同时携带父事务私有 marker 才能绕过父锁，用户仅伪造可见 source 不能绕过。App 管理的 CLI child 必须固定 target、禁止递归更新 App/重启 core；Windows deferred helper 直接使用该固定 target，且由 App 父事务收口时不得提前发布 `Completed`。
 - native desktop restart marker/helper 失败会持久化 `Failed`，刷新后不会重新显示旧 `Completed`。
 - 普通浏览器不能启动 desktop-owned 安装；桌面 shell 请求仍把 CLI 与 App 一起升级。
 - `app.rs`、`app/installer.rs`、`app/tests.rs` 以及 `upgrade.rs`、`upgrade/download.rs`、`upgrade/restart.rs`、`upgrade/tests.rs` 均不超过 1500 行，测试文档不包含本机绝对路径。
@@ -294,6 +298,8 @@
 
 2026-07-18 本次状态机审计已执行（最终复测）：
 
+- TC-TWA-08/09/10（第五轮完整复测）：通过。App-owned 真实 Admin 链路 `17/17`，CLI runtime ownership `4/4`，CLI restart `21/21`，Admin 真实下载→安装→版本核验→daemon 重启 `15/15`，direct desktop CLI `36/36`，native handoff 为 `5/5 + 1/1 + 1/1 + 1/1`。CLI 全量 lib `1233 passed / 2 ignored`；strict clippy、all-targets build、fmt 全绿；workspace 首轮唯一失败是无关 rule-share 测试并发创建默认 RulesStorage 命中 `AlreadyExists`，精确复跑 `1/1` 后以 `--test-threads=1` 复跑整个 workspace 退出码 0。第 1 轮 review 修正 child marker 误加到错误 helper、pending handoff 二次检查竞态和 coverage 短片段误排除；第 2 轮将 CLI lock bypass 收紧为 marker + skip-App + skip-restart + pinned-target 缺一不可，并复跑定向单测、coverage 工具 `11/11` 与 restart E2E `21/21`。所有真实链路使用临时目录和随机端口，already-latest fixture 显式隔离本机 App 安装目录；未操作 9900 或真实 `/Applications/Bifrost.app`。
+- TC-TWA-09/10（PR comments 第五轮定向回归）：通过。父锁/私有 child marker、pending desktop handoff progress 保留、Windows deferred pinned target 与 progress owner、direct App 固定 target 四个定向单测均为 `1/1`；coverage-diff 工具测试为 `11/11`，新增断言证明原位置仍保留的 copy-paste 代码不会被 changed-lines 门禁排除，保留块切分出的短片段也不能伪装成搬移。App-managed child 只有同时携带 skip-App、skip-restart、pinned-target 和 parent-lock marker 才复用父锁；仅伪造 `source=cli-upgrade` 或 marker 会被共享锁拒绝。全部测试使用临时目录，未启动或修改 9900 服务。
 - TC-TWA-10（CI fixture 版本核验）：通过。Linux Shell CI 首轮 158/159，唯一失败是 Admin API E2E 将当前 `0.0.156` 二进制直接放进命名为 `0.0.157` 的归档，新的安装后版本门禁正确拒绝该假 fixture。fixture 改为只在临时二进制副本中等长替换编译版本字节，打包前真实执行 `--version` 校验；macOS 临时副本重新 ad-hoc codesign。随后真实 Admin POST 升级、原子替换、版本核验、daemon 重启与 already-latest 路径复测为 `15/15`，使用临时目录和随机端口，未操作 9900。
 - TC-TWA-10（PR comments 第四轮）：通过。Windows deferred pending marker 的 active/stale guard 定向测试 `1/1`，App-owned handoff transaction `1/1`，CLI interactive wrapper/shared lock `1/1`，Web owner 分流 `5/5`，desktop PowerShell guard 清理合约 `1/1`。真实 `test_desktop_app_update_cli.sh` 为 `36/36`，证明 direct `app upgrade --source desktop --no-cli` 安装后写 `completed` 而非永久停在 `restarting`；CLI-owned `source=admin` 的 `completed` 在 desktop shell 中只 reload WebView，不调用 Tauri App handoff。pending marker 在 process lock 释放后继续拒绝 CLI/tray owner，成功与失败路径均移除 guard，10 分钟外的陈旧 marker 不再阻塞。全部使用临时目录和随机端口，未操作 9900。
 - TC-TWA-10（PR comments 第三轮）：通过。App 定向单测 `23/23`；Tauri deferred marker/版本核验 `2/2`，desktop handoff 合约为既有 marker `5/5` + setup failure `1/1` + deferred marker `1/1` + deferred target verification `1/1`；Web 状态机 `4/4`，证明 desktop shell 观察到 CLI-owned `source=admin` 的 `Restarting` 时不会调用 Tauri handoff。App-owned Admin 实链路 `17/17`，CLI restart E2E 首轮 `20/21` 暴露测试合约仍受 1500 行门禁和旧静态断言约束，收窄调用格式并补 package ownership、deferred target verification、source-gated handoff 断言后复跑 `21/21`。Windows pending marker 以 `package_owned_by_updater` 区分下载包和调用者 `--package`，PowerShell 只清理前者；新 managed core ready 后，Tauri 还会比较 relaunched App 编译版本与 pinned target，不一致时写 `Failed` 而不是假 `Completed`。全部实链路使用临时目录与随机端口，未操作 9900。

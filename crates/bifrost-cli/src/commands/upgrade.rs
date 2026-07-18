@@ -47,6 +47,7 @@ pub(crate) const DESKTOP_MANAGED_SKIP_RESTART_ENV: &str =
     "BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_RESTART";
 pub(crate) const DESKTOP_MANAGED_TARGET_ENV: &str =
     "BIFROST_DESKTOP_MANAGED_UPGRADE_TARGET_VERSION";
+pub(crate) const PARENT_UPGRADE_LOCK_HELD_ENV: &str = "BIFROST_PARENT_UPGRADE_LOCK_HELD_INTERNAL";
 static DEFERRED_INSTALL_SCHEDULED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +128,7 @@ enum UpgradeInstallOutcome {
 struct WindowsDeferredInstall {
     staged_binary: PathBuf,
     target_path: PathBuf,
+    target_version: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -517,6 +519,7 @@ fn command_output_with_timeout_and_heartbeat(
         tempfile::tempfile().map_err(|e| BifrostError::Io(std::io::Error::other(e)))?;
     let mut child = Command::new(program)
         .args(args)
+        .env(PARENT_UPGRADE_LOCK_HELD_ENV, "1")
         .stdin(Stdio::null())
         .stdout(Stdio::from(
             stdout_file
@@ -884,6 +887,7 @@ fn verify_installed_cli_target_version_or_restore(
 fn install_binary_atomically(
     new_binary: &Path,
     target_path: &Path,
+    _target_version: &str,
 ) -> Result<UpgradeInstallOutcome, BifrostError> {
     #[cfg(windows)]
     if is_current_exe_path(target_path)? {
@@ -894,6 +898,7 @@ fn install_binary_atomically(
             WindowsDeferredInstall {
                 staged_binary,
                 target_path: target_path.to_path_buf(),
+                target_version: _target_version.to_string(),
             },
         ));
     }
@@ -1151,7 +1156,7 @@ fn download_and_install(
         target_path.display()
     );
 
-    install_binary_atomically(&new_binary, target_path)
+    install_binary_atomically(&new_binary, target_path, version)
 }
 
 fn upgrade_manual(
@@ -1243,29 +1248,32 @@ pub(crate) fn handle_background_upgrade(
 }
 
 pub fn handle_upgrade(_yes: bool) -> Result<(), BifrostError> {
-    let data_dir = get_bifrost_dir()?;
-    let _upgrade_lock = super::upgrade_background::try_acquire_upgrade_lock(&data_dir)?
-        .ok_or_else(|| {
-            BifrostError::Config("Upgrade is already running in another process".to_string())
-        })?;
+    let skip_app = env_flag(DESKTOP_MANAGED_SKIP_APP_ENV);
+    let skip_restart = env_flag(DESKTOP_MANAGED_SKIP_RESTART_ENV);
+    let pinned_target = env::var(DESKTOP_MANAGED_TARGET_ENV).ok();
+    let managed_child = env_flag(PARENT_UPGRADE_LOCK_HELD_ENV)
+        && skip_app
+        && skip_restart
+        && pinned_target.is_some();
+    let _upgrade_lock = if managed_child {
+        None
+    } else {
+        let data_dir = get_bifrost_dir()?;
+        Some(
+            super::upgrade_background::try_acquire_upgrade_lock(&data_dir)?.ok_or_else(|| {
+                BifrostError::Config("Upgrade is already running in another process".to_string())
+            })?,
+        )
+    };
     handle_upgrade_inner(
-        UpgradeBehavior::interactive(
-            env_flag(DESKTOP_MANAGED_SKIP_APP_ENV),
-            env_flag(DESKTOP_MANAGED_SKIP_RESTART_ENV),
-        ),
-        env::var(DESKTOP_MANAGED_TARGET_ENV).ok(),
+        UpgradeBehavior::interactive(skip_app, skip_restart),
+        pinned_target,
     )
 }
 
-pub(crate) fn handle_upgrade_to_target(
-    _yes: bool,
-    target_version: String,
-) -> Result<(), BifrostError> {
+pub(crate) fn handle_app_managed_upgrade(target_version: String) -> Result<(), BifrostError> {
     handle_upgrade_inner(
-        UpgradeBehavior::interactive(
-            env_flag(DESKTOP_MANAGED_SKIP_APP_ENV),
-            env_flag(DESKTOP_MANAGED_SKIP_RESTART_ENV),
-        ),
+        UpgradeBehavior::interactive(true, true),
         Some(target_version),
     )
 }
@@ -1381,10 +1389,8 @@ fn handle_upgrade_inner(
         InstallMethod::Homebrew => {
             upgrade_via_homebrew(&cache.latest_version).map(|()| UpgradeInstallOutcome::Installed)
         }
-        // Script installs live in a stable user-owned path. Use the built-in
-        // target-aware atomic installer here instead of re-running the online
-        // install script, which always follows a fresh `latest` and could drift
-        // away from the App target selected by this upgrade transaction.
+        // Keep script installs on the selected target instead of re-running an
+        // online installer that can drift to a newer release mid-transaction.
         InstallMethod::Script => upgrade_manual(&restart_executable, &cache.latest_version),
         InstallMethod::Manual(path) => upgrade_manual(&path, &cache.latest_version),
         InstallMethod::Unknown => {

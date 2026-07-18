@@ -20,8 +20,8 @@ use crate::cli::AppCommands;
 
 use super::update_check::get_latest_version_fresh_with_diagnostics;
 use super::upgrade::{
-    download_progress_line, handle_upgrade_to_target, DESKTOP_MANAGED_SKIP_APP_ENV,
-    DESKTOP_MANAGED_SKIP_RESTART_ENV, DESKTOP_MANAGED_TARGET_ENV,
+    download_progress_line, handle_app_managed_upgrade, DESKTOP_MANAGED_SKIP_APP_ENV,
+    DESKTOP_MANAGED_SKIP_RESTART_ENV, DESKTOP_MANAGED_TARGET_ENV, PARENT_UPGRADE_LOCK_HELD_ENV,
 };
 
 mod installer;
@@ -343,7 +343,7 @@ fn upgrade_cli_if_present(progress_source: &str, target_version: &str) -> Result
     if progress_source != "desktop" {
         // The visible `bifrost app upgrade` command is itself the CLI install,
         // so the existing upgrade engine should update the current executable.
-        handle_upgrade_to_target(true, target_version.to_string())?;
+        handle_app_managed_upgrade(target_version.to_string())?;
         return Ok(());
     }
 
@@ -384,6 +384,7 @@ fn desktop_managed_cli_upgrade_command(cli_path: &Path, target_version: &str) ->
         .env(DESKTOP_MANAGED_SKIP_APP_ENV, "1")
         .env(DESKTOP_MANAGED_SKIP_RESTART_ENV, "1")
         .env(DESKTOP_MANAGED_TARGET_ENV, target_version)
+        .env(PARENT_UPGRADE_LOCK_HELD_ENV, "1")
         .stdin(Stdio::null());
     command
 }

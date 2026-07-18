@@ -39,6 +39,12 @@ struct ActiveProgressSink {
 static SINK: OnceLock<Mutex<Option<ActiveProgressSink>>> = OnceLock::new();
 const UPGRADE_LOCK_FILE_NAME: &str = "upgrade.lock";
 
+enum UpgradeLockAttempt {
+    Acquired(File),
+    Contended,
+    PendingDesktopHandoff,
+}
+
 fn sink_slot() -> &'static Mutex<Option<ActiveProgressSink>> {
     SINK.get_or_init(|| Mutex::new(None))
 }
@@ -61,13 +67,20 @@ fn take_sink() -> Option<ProgressSink> {
 }
 
 pub(crate) fn try_acquire_upgrade_lock(data_dir: &Path) -> Result<Option<File>, BifrostError> {
+    match try_acquire_upgrade_lock_attempt(data_dir)? {
+        UpgradeLockAttempt::Acquired(lock) => Ok(Some(lock)),
+        UpgradeLockAttempt::Contended | UpgradeLockAttempt::PendingDesktopHandoff => Ok(None),
+    }
+}
+
+fn try_acquire_upgrade_lock_attempt(data_dir: &Path) -> Result<UpgradeLockAttempt, BifrostError> {
     std::fs::create_dir_all(data_dir).map_err(BifrostError::Io)?;
     if crate::commands::app::desktop_pending_install_guard_is_active(data_dir) {
         // The App updater has handed a Windows MSI/EXE to the desktop shell.
         // Its process-level file lock is necessarily released before the old
         // App exits, so the fresh pending marker is the cross-process guard for
         // the remainder of that deferred transaction.
-        return Ok(None);
+        return Ok(UpgradeLockAttempt::PendingDesktopHandoff);
     }
     let lock = OpenOptions::new()
         .create(true)
@@ -77,8 +90,8 @@ pub(crate) fn try_acquire_upgrade_lock(data_dir: &Path) -> Result<Option<File>, 
         .open(data_dir.join(UPGRADE_LOCK_FILE_NAME))
         .map_err(BifrostError::Io)?;
     match lock.try_lock_exclusive() {
-        Ok(()) => Ok(Some(lock)),
-        Err(error) if upgrade_lock_is_contended(&error) => Ok(None),
+        Ok(()) => Ok(UpgradeLockAttempt::Acquired(lock)),
+        Err(error) if upgrade_lock_is_contended(&error) => Ok(UpgradeLockAttempt::Contended),
         Err(error) => Err(BifrostError::Io(error)),
     }
 }
@@ -198,9 +211,15 @@ fn handle_upgrade_background_with(
             return;
         }
     };
-    let _upgrade_lock = match try_acquire_upgrade_lock(&data_dir) {
-        Ok(Some(lock)) => lock,
-        Ok(None) => {
+    let _upgrade_lock = match try_acquire_upgrade_lock_attempt(&data_dir) {
+        Ok(UpgradeLockAttempt::Acquired(lock)) => lock,
+        Ok(UpgradeLockAttempt::PendingDesktopHandoff) => {
+            tracing::info!(
+                "background upgrade: preserving progress owned by pending desktop handoff"
+            );
+            return;
+        }
+        Ok(UpgradeLockAttempt::Contended) => {
             tracing::warn!(
                 "background upgrade: another process owns the cross-process upgrade lock"
             );
@@ -462,6 +481,49 @@ mod tests {
             .as_deref()
             .is_some_and(|error| error.contains("cross-process upgrade lock")));
         drop(owner);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn background_upgrade_preserves_progress_owned_by_pending_desktop_handoff() {
+        let _guard = lock_tests();
+        let dir = temp_dir();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis();
+        std::fs::write(
+            dir.join("desktop-upgrade-pending-install.json"),
+            format!(
+                r#"{{"schema_version":1,"created_at_ms":{now_ms},"package_path":"Bifrost.msi","target_version":"0.0.156"}}"#
+            ),
+        )
+        .expect("write pending desktop marker");
+        write_progress(
+            &dir,
+            &UpgradeProgress::new(UpgradePhase::Restarting, "Desktop handoff pending")
+                .with_target(Some("0.0.156".to_string()))
+                .with_source(Some("desktop".to_string())),
+        );
+        let engine_called = std::cell::Cell::new(false);
+
+        handle_upgrade_background_with(
+            Some("0.0.157".to_string()),
+            "admin".to_string(),
+            None,
+            None,
+            Ok(dir.clone()),
+            |_| {
+                engine_called.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(!engine_called.get());
+        let progress = read_progress(&dir);
+        assert_eq!(progress.phase, UpgradePhase::Restarting);
+        assert_eq!(progress.source.as_deref(), Some("desktop"));
+        assert_eq!(progress.target_version.as_deref(), Some("0.0.156"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
