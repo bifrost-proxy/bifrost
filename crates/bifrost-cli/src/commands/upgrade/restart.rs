@@ -222,8 +222,8 @@ pub(super) fn maybe_restart_running_proxy_after_windows_deferred_install(
     };
 
     println!("{}", "  Stopping current proxy...".bright_cyan());
-    super::upgrade_background::report_restarting();
-    super::stop::run_stop_for_restart()
+    crate::commands::upgrade_background::report_restarting();
+    crate::commands::stop::run_stop_for_restart()
         .map_err(|e| BifrostError::Config(format!("Failed to stop running proxy: {}", e)))?;
 
     let restart_source = runtime_info
@@ -264,7 +264,7 @@ pub(super) fn stop_tray_helper_before_windows_deferred_install(data_dir: &Path) 
         "{}",
         "  Stopping tray helper so Windows can replace bifrost.exe...".bright_cyan()
     );
-    super::tray_launcher::stop_tray_helper(data_dir);
+    crate::commands::tray_launcher::stop_tray_helper(data_dir);
 }
 
 #[cfg(windows)]
@@ -485,7 +485,7 @@ try {
         // The helper relaunches bifrost with `start -d`; strip the detached-daemon
         // marker so the relaunched proxy detaches properly instead of running in
         // the foreground (see the unix restart path for the full rationale).
-        .env_remove(super::start::DETACHED_DAEMON_CHILD_ENV);
+        .env_remove(crate::commands::start::DETACHED_DAEMON_CHILD_ENV);
 
     command.spawn().map_err(BifrostError::Io)?;
     mark_deferred_install_scheduled();
