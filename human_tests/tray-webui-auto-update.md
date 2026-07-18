@@ -230,6 +230,7 @@
 
 2026-07-18 本次状态机审计已执行（最终复测）：
 
+- TC-TWA-09 progress owner 隔离回归：通过。执行 `SKIP_FRONTEND_BUILD=1 cargo build -p bifrost-cli --bin bifrost` 后，以 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_upgrade_admin_api_restart_e2e.sh` 真实验证；临时 daemon 在端口 52152 从 PID 17754 升级重启为 PID 18197，并发 POST 为 `409 + 202` 且只启动一个 updater，终态保持 `completed`；already-latest 从 PID 18433 重启为 PID 18570。最终 `15/15` 通过，证明非 owner 线程的 Installing/Restarting 事件不会覆盖当前 upgrade transaction 的终态。
 - TC-TWA-09：通过。最终构建后 `test_upgrade_admin_api_restart_e2e.sh` 为 `15/15`，两个并发 POST 得到 `202 + 409`，只启动一个 updater，临时 daemon 从 PID 40482 重启为 PID 41110；already-latest 从 PID 41351 重启为 PID 41489。`test_upgrade_cli.sh --only-runtime-ownership` 为 `4/4`，`test_upgrade_app_owned_core_e2e.sh` 为 `13/13`，`test_desktop_upgrade_handoff_contract.sh` 为 `5/5`。跨进程锁、desktop-managed CLI pinned target/版本门禁、macOS App staging 失败和 interrupted-backup 恢复、Windows deferred App 门禁/CLI target 核验/失败回滚的定向测试全部通过。独立 CLI 收到与 App 相同的 `target=99.0.1`，App bundle 真实替换且 core 在 Tauri handoff 前保持原 owner。`useVersionStore.test.ts` 为 `3/3`；全量 Web 单测 `173/173`、lint（仅 14 个既有 warning）和 production build 均通过。
 
 2026-07-17 本次修复已执行：

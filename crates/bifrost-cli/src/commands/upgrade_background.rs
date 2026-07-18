@@ -31,21 +31,33 @@ struct ProgressSink {
     source: String,
 }
 
-static SINK: OnceLock<Mutex<Option<ProgressSink>>> = OnceLock::new();
+struct ActiveProgressSink {
+    sink: ProgressSink,
+    owner_thread: std::thread::ThreadId,
+}
+
+static SINK: OnceLock<Mutex<Option<ActiveProgressSink>>> = OnceLock::new();
 const UPGRADE_LOCK_FILE_NAME: &str = "upgrade.lock";
 
-fn sink_slot() -> &'static Mutex<Option<ProgressSink>> {
+fn sink_slot() -> &'static Mutex<Option<ActiveProgressSink>> {
     SINK.get_or_init(|| Mutex::new(None))
 }
 
 fn install_sink(sink: ProgressSink) {
     if let Ok(mut slot) = sink_slot().lock() {
-        *slot = Some(sink);
+        *slot = Some(ActiveProgressSink {
+            sink,
+            owner_thread: std::thread::current().id(),
+        });
     }
 }
 
 fn take_sink() -> Option<ProgressSink> {
-    sink_slot().lock().ok().and_then(|mut slot| slot.take())
+    sink_slot()
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+        .map(|active| active.sink)
 }
 
 fn try_acquire_upgrade_lock(data_dir: &Path) -> Result<Option<File>, BifrostError> {
@@ -80,7 +92,11 @@ fn upgrade_lock_is_contended(error: &std::io::Error) -> bool {
 /// Emit a progress record for the active sink (no-op when none is installed).
 fn emit(build: impl FnOnce(&ProgressSink) -> UpgradeProgress) {
     if let Ok(slot) = sink_slot().lock() {
-        if let Some(sink) = slot.as_ref() {
+        if let Some(active) = slot
+            .as_ref()
+            .filter(|active| active.owner_thread == std::thread::current().id())
+        {
+            let sink = &active.sink;
             let progress = build(sink);
             write_progress(&sink.data_dir, &progress);
         }
@@ -318,6 +334,26 @@ mod tests {
         report_installing();
         report_download(1, Some(2), Instant::now());
         report_restarting();
+    }
+
+    #[test]
+    fn progress_sink_ignores_reports_from_non_owner_thread() {
+        let _guard = lock_tests();
+        let dir = temp_dir();
+        install_sink(ProgressSink {
+            data_dir: dir.clone(),
+            target_version: Some("0.0.156".to_string()),
+            source: "admin".to_string(),
+        });
+
+        report_restarting();
+        std::thread::spawn(report_installing)
+            .join()
+            .expect("non-owner reporter thread");
+        assert_eq!(read_progress(&dir).phase, UpgradePhase::Restarting);
+
+        let _ = take_sink();
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
