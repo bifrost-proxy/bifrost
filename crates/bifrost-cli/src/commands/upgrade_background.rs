@@ -59,9 +59,22 @@ fn try_acquire_upgrade_lock(data_dir: &Path) -> Result<Option<File>, BifrostErro
         .map_err(BifrostError::Io)?;
     match lock.try_lock_exclusive() {
         Ok(()) => Ok(Some(lock)),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) if upgrade_lock_is_contended(&error) => Ok(None),
         Err(error) => Err(BifrostError::Io(error)),
     }
+}
+
+fn upgrade_lock_is_contended(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    if matches!(error.raw_os_error(), Some(32 | 33)) {
+        // LockFileEx reports ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION
+        // instead of mapping them to ErrorKind::WouldBlock.
+        return true;
+    }
+    false
 }
 
 /// Emit a progress record for the active sink (no-op when none is installed).
@@ -324,6 +337,25 @@ mod tests {
             .expect("reacquire released lock")
             .is_some());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn upgrade_lock_contention_normalizes_platform_error_kinds() {
+        assert!(upgrade_lock_is_contended(&std::io::Error::from(
+            std::io::ErrorKind::WouldBlock
+        )));
+        assert!(!upgrade_lock_is_contended(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+        #[cfg(windows)]
+        {
+            assert!(upgrade_lock_is_contended(
+                &std::io::Error::from_raw_os_error(32)
+            ));
+            assert!(upgrade_lock_is_contended(
+                &std::io::Error::from_raw_os_error(33)
+            ));
+        }
     }
 
     #[test]
