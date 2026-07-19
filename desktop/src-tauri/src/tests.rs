@@ -1,15 +1,14 @@
 use super::{
     append_desktop_bootstrap_log, begin_backend_recovery, clear_backend_unavailable_if_healthy,
     commit_deferred_desktop_install_artifacts, deferred_desktop_install_version_error,
-    desktop_backend_env, desktop_backend_start_args,
-    desktop_pending_install_path, desktop_sidecar_rust_log, desktop_startup_deadline,
-    desktop_startup_session_id, desktop_test_allows_multiple_instances,
-    desktop_upgrade_relaunch_marker_path, host_window_close_behavior_for_platform,
-    is_server_config_response, is_upgrade_relaunch_marker_active,
-    main_interface_decorations_for_platform, mark_backend_unavailable_for_manual_start,
-    may_reuse_existing_backend, parse_port_update_response,
-    persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit, publish_startup_ready,
-    read_active_upgrade_relaunch_marker, read_pending_desktop_install,
+    desktop_backend_env, desktop_backend_start_args, desktop_pending_install_path,
+    desktop_sidecar_rust_log, desktop_startup_deadline, desktop_startup_session_id,
+    desktop_test_allows_multiple_instances, desktop_upgrade_relaunch_marker_path,
+    host_window_close_behavior_for_platform, is_server_config_response,
+    is_upgrade_relaunch_marker_active, main_interface_decorations_for_platform,
+    mark_backend_unavailable_for_manual_start, may_reuse_existing_backend,
+    parse_port_update_response, persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit,
+    publish_startup_ready, read_active_upgrade_relaunch_marker, read_pending_desktop_install,
     record_startup_deadline_error, relaunch_command_for_target, resolve_bifrost_binary_from_env,
     resolve_desktop_config_path, resolve_desktop_data_dir,
     sanitize_desktop_upgrade_relaunch_command, save_desktop_config,
@@ -19,8 +18,7 @@ use super::{
     windows_desktop_upgrade_handoff_command, write_desktop_upgrade_terminal_progress,
     write_upgrade_relaunch_marker, BackendState, BackendWaitFailureKind, DesktopConfig,
     DesktopInstallRollback, DesktopUpgradeRelaunchMarker, HostWindowCloseBehavior,
-    PendingDesktopInstall,
-    StartupDeadlineDisposition, DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
+    PendingDesktopInstall, StartupDeadlineDisposition, DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
     WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
 };
 use bifrost_storage::data_dir as shared_bifrost_data_dir;
@@ -465,11 +463,9 @@ fn deferred_desktop_installer_marker_is_validated_before_handoff() {
     assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
         .contains("$terminal = Wait-ForDesktopVerification $startedApp"));
     assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains(".Bifrost.rollback-"));
+    assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("Restore-InstallSnapshot $rollback"));
     assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
-        .contains("Restore-InstallSnapshot $rollback"));
-    assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains(
-        "Desktop app verification failed; previous version restored"
-    ));
+        .contains("Desktop app verification failed; previous version restored"));
     assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
         .contains("deferred desktop install transaction committed"));
     assert_eq!(
@@ -569,15 +565,17 @@ fn deferred_desktop_install_commit_cleans_only_valid_transaction_artifacts() {
     fs::create_dir_all(&backup_dir).expect("rollback dir");
     fs::write(backup_dir.join("old.exe"), b"old").expect("old app snapshot");
     fs::write(&package, b"package").expect("owned package");
-    fs::write(desktop_pending_install_path(temp_dir.path()), b"pending")
-        .expect("pending marker");
+    fs::write(desktop_pending_install_path(temp_dir.path()), b"pending").expect("pending marker");
     let marker = DesktopUpgradeRelaunchMarker {
         schema_version: 1,
         created_at_ms: super::current_time_millis(),
         old_app_pid: 123,
         old_core_pid: Some(124),
         proxy_port: 9900,
-        app_target: install_dir.join("Bifrost.exe").to_string_lossy().into_owned(),
+        app_target: install_dir
+            .join("Bifrost.exe")
+            .to_string_lossy()
+            .into_owned(),
         pending_install: Some(PendingDesktopInstall {
             schema_version: 1,
             created_at_ms: super::current_time_millis(),
@@ -609,9 +607,11 @@ fn deferred_desktop_install_commit_cleans_only_valid_transaction_artifacts() {
         }),
         ..marker
     };
-    assert!(commit_deferred_desktop_install_artifacts(temp_dir.path(), &invalid)
-        .expect_err("arbitrary cleanup path must be rejected")
-        .contains("refusing"));
+    assert!(
+        commit_deferred_desktop_install_artifacts(temp_dir.path(), &invalid)
+            .expect_err("arbitrary cleanup path must be rejected")
+            .contains("refusing")
+    );
     assert!(unrelated.exists());
 }
 
