@@ -712,7 +712,10 @@ fn resolve_app_path(app_dir: &Path) -> PathBuf {
     }
 }
 
-fn installed_desktop_app_is_target_version(install_path: &Path, target_version: &str) -> bool {
+pub(crate) fn installed_desktop_app_is_target_version(
+    install_path: &Path,
+    target_version: &str,
+) -> bool {
     installed_desktop_app_version(install_path)
         .map(|installed| versions_equal(&installed, target_version))
         .unwrap_or(false)

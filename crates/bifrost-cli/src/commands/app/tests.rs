@@ -303,7 +303,9 @@ fn top_level_app_upgrade_owns_the_shared_lock_but_nested_companion_skips_it() {
 #[test]
 fn direct_app_upgrade_pins_cli_to_the_resolved_app_target() {
     let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+    let data_dir = tempfile::tempdir().expect("isolated upgrade data dir");
     let keys = [
+        "BIFROST_DATA_DIR",
         "BIFROST_UPGRADE_TEST_LATEST_VERSION",
         "BIFROST_UPGRADE_TEST_ARCHIVE",
         DESKTOP_MANAGED_SKIP_APP_ENV,
@@ -313,6 +315,7 @@ fn direct_app_upgrade_pins_cli_to_the_resolved_app_target() {
         .iter()
         .map(|key| ((*key).to_string(), std::env::var_os(key)))
         .collect::<Vec<_>>();
+    std::env::set_var("BIFROST_DATA_DIR", data_dir.path());
     std::env::set_var("BIFROST_UPGRADE_TEST_LATEST_VERSION", "99.0.0");
     std::env::set_var(
         "BIFROST_UPGRADE_TEST_ARCHIVE",

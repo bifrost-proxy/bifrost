@@ -302,6 +302,17 @@ pub(super) fn update_desktop_app_after_upgrade(
         "Detected installed Bifrost desktop app:".bright_cyan(),
         app_path.display()
     );
+    if crate::commands::app::installed_desktop_app_is_target_version(&app_path, target_version) {
+        println!(
+            "{}",
+            format!(
+                "✓ Bifrost desktop app is already on target version (v{}); leaving its installation and process state unchanged.",
+                target_version
+            )
+            .bright_green()
+        );
+        return Ok(());
+    }
     println!("{}", "Updating Bifrost desktop app...".bright_cyan());
 
     let desktop_process_running = installed_desktop_app_is_running(&app_path);
@@ -328,7 +339,9 @@ pub(super) fn update_desktop_app_after_upgrade(
         Some(&parent_lock_data_dir),
     ) {
         Ok(output) if output.status == TimedCommandStatus::Success => {
-            if mode == DesktopCompanionMode::DesktopHandoff {
+            if mode == DesktopCompanionMode::DesktopHandoff
+                && child_scheduled_desktop_handoff(&parent_lock_data_dir, target_version)
+            {
                 mark_desktop_handoff_scheduled();
             }
             println!(
@@ -347,4 +360,11 @@ pub(super) fn update_desktop_app_after_upgrade(
             "could not run desktop app update: {error}"
         ))),
     }
+}
+
+pub(super) fn child_scheduled_desktop_handoff(data_dir: &Path, target_version: &str) -> bool {
+    let progress = bifrost_core::upgrade_progress::read_progress(data_dir);
+    progress.phase == bifrost_core::upgrade_progress::UpgradePhase::Restarting
+        && progress.source.as_deref() == Some("desktop")
+        && progress.target_version.as_deref() == Some(target_version)
 }

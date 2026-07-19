@@ -1,5 +1,66 @@
 use super::*;
 
+#[test]
+fn already_current_desktop_companion_skips_child_and_handoff() {
+    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let app = resolve_desktop_app_path(temp.path());
+    let contents = app.join("Contents");
+    std::fs::create_dir_all(&contents).expect("create app Contents");
+    std::fs::write(
+        contents.join("Info.plist"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleShortVersionString</key><string>0.0.156</string>
+</dict></plist>"#,
+    )
+    .expect("write app version");
+
+    let previous_app_dir = std::env::var_os("BIFROST_APP_INSTALL_DIR");
+    let previous_origin = std::env::var_os(WEBVIEW_UPGRADE_ORIGIN_ENV);
+    std::env::set_var("BIFROST_APP_INSTALL_DIR", temp.path());
+    std::env::set_var(WEBVIEW_UPGRADE_ORIGIN_ENV, "1");
+    assert!(!take_desktop_handoff_scheduled());
+
+    update_desktop_app_after_upgrade(&temp.path().join("must-not-run"), "0.0.156")
+        .expect("already-current App skips missing companion executable");
+    assert!(!take_desktop_handoff_scheduled());
+
+    match previous_app_dir {
+        Some(value) => std::env::set_var("BIFROST_APP_INSTALL_DIR", value),
+        None => std::env::remove_var("BIFROST_APP_INSTALL_DIR"),
+    }
+    match previous_origin {
+        Some(value) => std::env::set_var(WEBVIEW_UPGRADE_ORIGIN_ENV, value),
+        None => std::env::remove_var(WEBVIEW_UPGRADE_ORIGIN_ENV),
+    }
+}
+
+#[test]
+fn desktop_handoff_flag_requires_matching_restarting_progress() {
+    use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress};
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    for (phase, source, target, expected) in [
+        (UpgradePhase::Completed, "desktop", "0.0.156", false),
+        (UpgradePhase::Restarting, "admin", "0.0.156", false),
+        (UpgradePhase::Restarting, "desktop", "0.0.155", false),
+        (UpgradePhase::Restarting, "desktop", "0.0.156", true),
+    ] {
+        bifrost_core::upgrade_progress::write_progress(
+            temp.path(),
+            &UpgradeProgress::new(phase, "child result")
+                .with_source(Some(source.to_string()))
+                .with_target(Some(target.to_string())),
+        );
+        assert_eq!(
+            child_scheduled_desktop_handoff(temp.path(), "0.0.156"),
+            expected,
+            "phase={phase:?} source={source} target={target}"
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn cli_restart_stops_live_process_and_strips_detached_marker() {
