@@ -360,6 +360,7 @@
 - CI changed-lines coverage 第 3 次追加轮次：run `29689340383` 证明预期 5 条已全部命中（download `112/122 → 115/122`、background `205/208 → 207/208`），但移动块计量后仍为 `94.71% < 95%`。新增隔离子测试启动真实临时 `sleep` 进程作为 CLI-owned proxy，写临时 runtime marker，调用生产重启链真实发送 SIGTERM、释放随机端口并执行 restart helper；helper 同时断言 detached-daemon-child 环境已被移除。按用例立即执行，临时 PID 被停止、随机端口释放、helper 成功，`1/1` 通过；未操作 9900 或真实 App。
 - PR comments already-current App 追加轮次：新增 P1/P2 指出已安装 App 已是 target 时，WebView 模式会误设 handoff flag 导致 terminal progress 被抑制，terminal 模式会先关闭 App 而 child 已是最新版早返回、无法重启。companion 现在在关机/启动 child 前读取已安装版本，命中 target 时直接保留 App；即使 child 成功，只有共享 progress 同时满足 `Restarting + source=desktop + matching target` 才设置 handoff flag。按用例立即执行：already-current 使用不存在的 companion executable 仍成功并保持 handoff=false，Completed/错误 source/错误 target 都不触发 handoff，匹配 Restarting 才触发；CLI core 对真实 desktop handoff progress 的保留回归仍通过，均为 `1/1`。
 - workspace 全量测试隔离回归：最新串行 all-features 暴露既有 `direct_app_upgrade_pins_cli_to_the_resolved_app_target` 未设置 `BIFROST_DATA_DIR`，误读默认 runtime 并停止真实 9900；测试日志保留原启动参数后，已使用 installed CLI `0.0.156` 按原参数恢复 detached daemon、system proxy 与 9900 健康监听。用例现将 `BIFROST_DATA_DIR` 纳入临时目录设置和原值恢复；按用例立即执行定向测试 `1/1`，并断言执行前后 `~/.bifrost/bifrost.pid` 相同且 9900 始终 LISTEN，防止测试再次越界。
+- PR module-size P1 追加轮次：`app.rs` 因暴露桌面版本判断给 companion 后达到 1501 行，超过仓库单文件 1500 行门禁。桌面安装版本读取、标准化和目标校验现整体拆入 `app/version.rs`，`app.rs` 降至门禁以下；立即执行 App 版本解析/目标校验、already-current companion/handoff、CLI/App ownership E2E 与严格 clippy，确保纯结构拆分未改变 macOS plist、Windows PowerShell version-info 或跨模式升级行为。
 
 2026-07-18 本次状态机审计已执行（最终复测）：
 
