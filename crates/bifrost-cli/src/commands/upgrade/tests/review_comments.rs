@@ -14,6 +14,8 @@ fn windows_deferred_install_pins_target_and_respects_parent_progress_ownership()
         "installed CLI reports '$versionOutput' instead of target",
         "restored previous CLI after replacement failure",
         "[System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)",
+        "$ProgressPath.tmp.$PID.$([Guid]::NewGuid().ToString('N'))",
+        "Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue",
         "Get-Content -LiteralPath $ProgressPath -Raw -Encoding UTF8",
         "target_version = if ($TargetVersion)",
         "target_version: _target_version.to_string()",

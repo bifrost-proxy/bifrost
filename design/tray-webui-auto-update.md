@@ -49,7 +49,7 @@ Bifrost 早期升级只有一条路径:用户在终端里手动跑 `bifrost upgr
 
 ### 升级进度是跨进程状态,不是 turn 内信号
 
-进度文件 `<data_dir>/upgrade-progress.json` 采用 `write tmp + rename` 原子写。读方(托盘/admin/web)对解析失败或缺文件一律退化为 `Idle`。文件天然跨代理重启存活,让 web 在重连后仍能读到 `Completed` 终态。
+进度文件 `<data_dir>/upgrade-progress.json` 采用“目标目录内唯一临时文件 + flush/sync + 平台原子 replace”写入。Admin、CLI、Windows helper 与重启后的 desktop core 在所有权交接窗口可能短暂并发，禁止共用固定 `.tmp` 文件名；否则一个 writer 会 rename 另一个 writer 的临时文件，令 Web UI 看到旧状态或误退化为 `Idle`。读方(托盘/admin/web)对解析失败或缺文件一律退化为 `Idle`。文件天然跨代理重启存活,让 web 在重连后仍能读到 `Completed` 终态。
 
 `UpgradePhase`:
 
@@ -65,6 +65,7 @@ Idle → Checking → Downloading → Installing → Restarting → Completed / 
 | --- | --- | --- |
 | version-check 声称可升级但没有 target | CLI/App 各自重新追随不同的 latest | Admin 拒绝启动；所有安装器只接受同一个 pinned target |
 | Web、Tray 或多个浏览器同时点击 | 两个安装器交叉替换、两个重启器争抢端口，loser 留在 Checking | Admin 进程锁保护 check→claim→spawn，`upgrade.lock` 保护跨进程安装与重启；锁竞争 loser 立即写 terminal `Failed` |
+| Admin、CLI、desktop helper 在 handoff 边界并发写 progress | 固定临时文件互相覆盖，状态停留旧 phase 或短暂读成 `Idle` | 每次写使用同目录唯一临时文件并原子替换目标；PowerShell helper 同样使用 PID + GUID 临时名并在 finally 清理 |
 | 下载、解包、安装器或 Homebrew 卡住 | progress 超过 stale 门限后先失败、随后又变成功 | 所有长等待有超时并每 30 秒写心跳；超时终止 child 并写 `Failed` |
 | 安装命令退出 0，但磁盘 CLI/App 仍是旧版 | UI 写 `Completed`，实际运行仍显示旧版本 | 在任何 companion 更新和重启前执行 `--version` / bundle version 精确 target 核验 |
 | CLI 成功但已安装 App 更新失败，或反之 | 两个组件永久漂移但整体宣告完成 | 后台统一升级把 companion 失败视为整体失败；部分成功仍保留更新入口供重试 |
@@ -138,7 +139,7 @@ impl UpgradeProgress {
 }
 pub fn progress_file_path(&Path) -> PathBuf;   // data_dir/upgrade-progress.json
 pub fn read_progress(&Path) -> UpgradeProgress; // 解析失败 → idle()
-pub fn write_progress(&Path, &UpgradeProgress); // 原子 tmp + rename
+pub fn write_progress(&Path, &UpgradeProgress); // 唯一同目录 tmp + sync + 原子 replace
 pub fn clear_progress(&Path);
 pub fn is_stale(&UpgradeProgress, max_age_secs) -> bool;
 pub const DEFAULT_STALE_SECS: i64;

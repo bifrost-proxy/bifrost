@@ -203,6 +203,9 @@
    ```bash
    pnpm --dir web exec vitest run src/stores/useVersionStore.test.ts
    python3 -m unittest scripts/ci/tests/test_coverage_diff.py
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-core \
+     concurrent_progress_writers_never_publish_partial_json_or_leave_temp_files \
+     --lib -- --nocapture
    ```
 
 **预期结果**：
@@ -306,6 +309,7 @@
 
 **预期结果**：
 - 跨进程锁 loser 立即得到 `Failed` progress，不会停留在 Checking。
+- Admin、CLI、Windows helper 与新 desktop core 即使在 handoff 窗口并发写进度，也只能发布完整 JSON；每个 writer 使用唯一临时文件，结束后不得残留 `.tmp`，不能因固定临时文件竞争把 UI 留在旧 phase 或误退化为 `Idle`。
 - 匹配的 restartable runtime marker 在 `lsof` 不可用时仍可升级；marker 恢复的缺省 host 是 `127.0.0.1`。
 - macOS App 使用稳定 backup 名跨 updater PID 恢复；Windows App-owned CLI 版本探针等待 deferred replacement。
 - CLI 安装后的 exact target 不匹配时恢复旧 binary backup。
@@ -338,6 +342,13 @@
 3. 不清理、不停止、不重启用户正在运行的 9900 服务。
 
 ## 执行记录
+
+2026-07-19 本次 PR comments 与上线风险审计已执行：
+
+- TC-TWA-10（跨进程 progress 原子发布回归）：通过。审计发现 Rust 共享 writer 使用固定 `upgrade-progress.json.tmp`，Admin、CLI、Windows helper 与重启后的 desktop core 在所有权交接窗口可能互相 rename/覆盖临时文件，导致 UI 停留旧 phase 或把缺失/损坏文件退化为 `Idle`。现改为目标目录内唯一临时文件、flush/sync 后平台原子 replace；两个 PowerShell helper 同步改为 PID + GUID 临时名并在 `finally` 清理。按用例立即执行 core 16 writer × 32 次并发写入回归 `1/1`、Windows CLI helper 静态契约 `1/1`、desktop deferred marker/handoff 契约 `1/1`，发布文件始终是完整 JSON 且没有临时文件残留。全部使用临时目录，未绑定、停止或修改 9900，也未操作真实 App 安装目录。
+- TC-TWA-08/09（两种 runtime owner 真实升级）：通过。CLI-owned Admin POST 链路 `15/15`，两个并发请求严格得到 `409 + 202`，临时 daemon 从 PID `14863` 交接为目标版本 PID `15670`，安装路径、终态 `completed/source=admin`、diagnostics log、端口释放与 already-latest 重启均真实验证；App-owned 链路 `20/20`，无 Tauri token 的浏览器请求被 409 拒绝且不修改组件，真实一次性 token 被原子消费后，独立 CLI 收到同一 pinned target 与 skip-App/skip-restart marker，App 包到达 target，旧 desktop core 保持存活并等待 Tauri handoff。两条链路均使用临时目录与随机端口，未操作 9900 或真实 App。
+- TC-TWA-10（restart 与 native handoff 完整契约）：通过。升级 restart E2E `21/21`，覆盖无 daemon、已有 daemon、runtime marker、端口释放、跨平台 deferred replacement 与全部 review contract；desktop handoff 为基础 marker `5/5`、setup failure `1/1`、deferred marker `1/1`、target verification `1/1`、commit cleanup `1/1`。新 progress 临时文件策略没有改变 App/core 终态所有权与失败覆盖行为。
+- Review/Fix/Test 两轮闭环：第 1 轮复核目标、最新 diff 与 lockfile 后，发现手工回退 workspace 版本行会使 `cargo test --locked` 拒绝执行，恢复 Cargo 解析后的必要 lockfile 更新并复跑定向测试；第 2 轮复查跨进程 writer、CLI/App owner 分流、Windows helper 清理、coverage changed-lines 工具与最新 diff，未发现新的阻塞问题。最终 `cargo fmt --all -- --check`、desktop fmt、workspace/desktop all-targets all-features strict clippy、workspace all-targets all-features build、`cargo test --locked --workspace --all-features -- --test-threads=1` 全部通过；本地不执行覆盖率脚本，由 PR CI 的 90% coverage gate 兜底。
 
 2026-07-18 本次状态机审计已执行（最终复测）：
 

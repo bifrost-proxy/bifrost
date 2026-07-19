@@ -167,11 +167,18 @@ pub fn write_progress(data_dir: &Path, progress: &UpgradeProgress) {
 fn write_progress_inner(data_dir: &Path, progress: &UpgradeProgress) -> std::io::Result<()> {
     std::fs::create_dir_all(data_dir)?;
     let path = progress_file_path(data_dir);
-    let tmp = path.with_extension("json.tmp");
     let content = serde_json::to_string_pretty(progress)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&tmp, content)?;
-    std::fs::rename(&tmp, &path)?;
+    // Admin, CLI, the Windows replacement helper, and the relaunched desktop
+    // core can briefly overlap while ownership is handed off. A fixed temp
+    // name lets one writer rename another writer's file (or makes the rename
+    // fail), leaving the Web UI with stale progress. NamedTempFile gives every
+    // writer a unique file in the destination directory and `persist` performs
+    // the platform-specific atomic replacement of an existing destination.
+    let mut tmp = tempfile::NamedTempFile::new_in(data_dir)?;
+    tmp.write_all(content.as_bytes())?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(&path).map_err(|error| error.error)?;
     Ok(())
 }
 
@@ -329,6 +336,44 @@ mod tests {
         assert!(progress_file_path(&dir).exists());
         clear_progress(&dir);
         assert!(!progress_file_path(&dir).exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn concurrent_progress_writers_never_publish_partial_json_or_leave_temp_files() {
+        let dir = temp_dir();
+        let mut writers = Vec::new();
+        for writer in 0..16usize {
+            let dir = dir.clone();
+            writers.push(std::thread::spawn(move || {
+                for iteration in 0..32usize {
+                    let progress = UpgradeProgress::new(
+                        UpgradePhase::Downloading,
+                        format!("writer-{writer}-iteration-{iteration}"),
+                    )
+                    .with_target(Some("0.0.156".to_string()))
+                    .with_source(Some(format!("writer-{writer}")));
+                    write_progress_inner(&dir, &progress).expect("write progress");
+                    let content = std::fs::read_to_string(progress_file_path(&dir))
+                        .expect("read published progress");
+                    serde_json::from_str::<UpgradeProgress>(&content)
+                        .expect("published progress must always be complete JSON");
+                }
+            }));
+        }
+        for writer in writers {
+            writer.join().expect("progress writer thread");
+        }
+
+        let persisted = read_progress(&dir);
+        assert_eq!(persisted.phase, UpgradePhase::Downloading);
+        assert_eq!(persisted.target_version.as_deref(), Some("0.0.156"));
+        let leftovers = std::fs::read_dir(&dir)
+            .expect("read temp directory")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path() != progress_file_path(&dir))
+            .collect::<Vec<_>>();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

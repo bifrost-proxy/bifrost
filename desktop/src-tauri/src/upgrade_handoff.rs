@@ -604,11 +604,15 @@ function Write-Progress([string]$Phase, [string]$Message, [string]$TargetVersion
     error = if ($ErrorMessage) { $ErrorMessage } else { $null }
     updated_at = (Get-Date).ToUniversalTime().ToString("o")
   }
-  $tmpPath = "$progressPath.tmp.$PID"
-  $json = $payload | ConvertTo-Json -Compress
-  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-  [System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)
-  Move-Item -LiteralPath $tmpPath -Destination $progressPath -Force
+  $tmpPath = "$progressPath.tmp.$PID.$([Guid]::NewGuid().ToString('N'))"
+  try {
+    $json = $payload | ConvertTo-Json -Compress
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)
+    Move-Item -LiteralPath $tmpPath -Destination $progressPath -Force
+  } finally {
+    Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function Wait-ForProcessExit([uint32]$ProcessId, [string]$Label) {
@@ -622,11 +626,15 @@ function Wait-ForProcessExit([uint32]$ProcessId, [string]$Label) {
 }
 
 function Write-Marker($Marker) {
-  $tmpPath = "$MarkerPath.tmp.$PID"
-  $json = $Marker | ConvertTo-Json -Depth 8
-  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-  [System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)
-  Move-Item -LiteralPath $tmpPath -Destination $MarkerPath -Force
+  $tmpPath = "$MarkerPath.tmp.$PID.$([Guid]::NewGuid().ToString('N'))"
+  try {
+    $json = $Marker | ConvertTo-Json -Depth 8
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)
+    Move-Item -LiteralPath $tmpPath -Destination $MarkerPath -Force
+  } finally {
+    Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function New-InstallSnapshot($Marker) {

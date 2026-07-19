@@ -344,11 +344,15 @@ function Write-UpgradeProgress([string]$Phase, [string]$Message, [string]$ErrorM
       error = if ($ErrorMessage) { $ErrorMessage } else { $null }
       updated_at = (Get-Date).ToUniversalTime().ToString("o")
     }
-    $tmpPath = "$ProgressPath.tmp"
-    $json = $progress | ConvertTo-Json -Depth 4
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)
-    Move-Item -LiteralPath $tmpPath -Destination $ProgressPath -Force
+    $tmpPath = "$ProgressPath.tmp.$PID.$([Guid]::NewGuid().ToString('N'))"
+    try {
+      $json = $progress | ConvertTo-Json -Depth 4
+      $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+      [System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)
+      Move-Item -LiteralPath $tmpPath -Destination $ProgressPath -Force
+    } finally {
+      Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
+    }
   } catch {
     Write-UpgradeLog "WARNING: failed to write progress: $($_.Exception.Message)"
   }

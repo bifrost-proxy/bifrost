@@ -463,6 +463,11 @@ fn deferred_desktop_installer_marker_is_validated_before_handoff() {
     assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("WaitForExit(30000)"));
     assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("@(0, 1641, 3010)"));
     assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("Write-Progress \"failed\""));
+    assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
+        .contains("$progressPath.tmp.$PID.$([Guid]::NewGuid().ToString('N'))"));
+    assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
+        .contains("$MarkerPath.tmp.$PID.$([Guid]::NewGuid().ToString('N'))"));
+    assert!(!WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("$progressPath.tmp.$PID\""));
     let snapshot_index = WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
         .find("$rollback = New-InstallSnapshot $marker")
         .expect("deferred install snapshots the current App");
