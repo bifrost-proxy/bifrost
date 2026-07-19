@@ -6,6 +6,13 @@ pub(super) enum DesktopCompanionMode {
     DesktopHandoff,
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(super) const DESKTOP_UPGRADE_SHUTDOWN_ARG: &str = "--bifrost-upgrade-shutdown";
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const DESKTOP_UPGRADE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const DESKTOP_UPGRADE_INTERNAL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
 impl DesktopCompanionMode {
     fn progress_source(self) -> &'static str {
         match self {
@@ -16,33 +23,142 @@ impl DesktopCompanionMode {
 }
 
 pub(super) fn desktop_companion_mode(
-    windows: bool,
+    desktop_handoff_supported: bool,
     desktop_process_running: bool,
-    desktop_owns_runtime: bool,
+    webview_origin: bool,
 ) -> DesktopCompanionMode {
-    if windows && desktop_process_running && desktop_owns_runtime {
+    if desktop_handoff_supported && desktop_process_running && webview_origin {
         DesktopCompanionMode::DesktopHandoff
     } else {
         DesktopCompanionMode::CallerManaged
     }
 }
 
-#[cfg(target_os = "windows")]
-fn installed_desktop_app_is_running(app_path: &Path) -> bool {
+pub(super) fn should_request_desktop_shutdown_before_update(
+    desktop_handoff_supported: bool,
+    desktop_process_running: bool,
+    webview_origin: bool,
+) -> bool {
+    desktop_handoff_supported && desktop_process_running && !webview_origin
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn running_desktop_process(app_path: &Path) -> Option<(u32, PathBuf)> {
     use sysinfo::{ProcessesToUpdate, System};
 
     let mut system = System::new();
     system.refresh_processes(ProcessesToUpdate::All);
-    system.processes().values().any(|process| {
-        process
-            .exe()
-            .is_some_and(|executable| windows_paths_match(executable, app_path))
+    system.processes().iter().find_map(|(pid, process)| {
+        let executable = process.exe()?;
+        #[cfg(target_os = "windows")]
+        let matches = windows_paths_match(executable, app_path);
+        #[cfg(target_os = "macos")]
+        let matches = executable.starts_with(app_path);
+        matches.then(|| (pid.as_u32(), executable.to_path_buf()))
     })
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn installed_desktop_app_is_running(app_path: &Path) -> bool {
+    running_desktop_process(app_path).is_some()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn installed_desktop_app_is_running(_app_path: &Path) -> bool {
     false
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn request_running_desktop_shutdown(app_path: &Path) -> Result<(), BifrostError> {
+    println!(
+        "{}",
+        "Requesting the running desktop shell to release its installed files...".bright_cyan()
+    );
+    let Some((pid, executable)) = running_desktop_process(app_path) else {
+        // The shell exited between discovery and the shutdown request, which
+        // already gives the installer the required released-file state.
+        return Ok(());
+    };
+    let internal_result = command_output_with_timeout(
+        &executable,
+        &[DESKTOP_UPGRADE_SHUTDOWN_ARG.to_string()],
+        DESKTOP_UPGRADE_INTERNAL_SHUTDOWN_TIMEOUT,
+    );
+    if let Ok(output) = &internal_result {
+        if output.status != TimedCommandStatus::Success {
+            eprintln!(
+                "{} {}",
+                "⚠ Desktop shell did not accept the internal shutdown request; trying the platform fallback."
+                    .bright_yellow(),
+                summarize_command_output(output).dimmed()
+            );
+        }
+    } else if let Err(error) = &internal_result {
+        eprintln!(
+            "{} {}",
+            "⚠ Could not send the internal desktop shutdown request; trying the platform fallback."
+                .bright_yellow(),
+            error.to_string().dimmed()
+        );
+    }
+
+    if wait_for_desktop_app_exit(app_path, DESKTOP_UPGRADE_INTERNAL_SHUTDOWN_TIMEOUT) {
+        return Ok(());
+    }
+
+    let legacy_result = request_legacy_desktop_shutdown(pid);
+    if wait_for_desktop_app_exit(app_path, DESKTOP_UPGRADE_SHUTDOWN_TIMEOUT) {
+        return Ok(());
+    }
+    let fallback_detail = legacy_result
+        .err()
+        .map(|error| format!("; platform fallback also reported: {error}"))
+        .unwrap_or_default();
+    Err(BifrostError::Config(format!(
+        "desktop shell did not exit within {} seconds; refusing to replace files that may still be locked{}",
+        DESKTOP_UPGRADE_SHUTDOWN_TIMEOUT.as_secs(),
+        fallback_detail
+    )))
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn wait_for_desktop_app_exit(app_path: &Path, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !installed_desktop_app_is_running(app_path) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+    !installed_desktop_app_is_running(app_path)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn request_legacy_desktop_shutdown(pid: u32) -> Result<(), BifrostError> {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("osascript");
+        command.args(["-e", "tell application \"Bifrost\" to quit"]);
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("taskkill");
+        command.args(["/PID", &pid.to_string(), "/T"]);
+        command
+    };
+    let status = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(BifrostError::Io)?;
+    if !status.success() {
+        return Err(BifrostError::Config(format!(
+            "platform desktop shutdown request for PID {pid} failed with status {status}"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -57,9 +173,21 @@ pub(super) fn windows_paths_match(left: &Path, right: &Path) -> bool {
 }
 
 pub(super) fn installed_desktop_app_path() -> Option<PathBuf> {
-    desktop_app_install_candidates()
-        .into_iter()
-        .find(|path| path.exists())
+    select_installed_desktop_app_path(desktop_app_install_candidates(), |path| {
+        installed_desktop_app_is_running(path)
+    })
+}
+
+pub(super) fn select_installed_desktop_app_path(
+    candidates: impl IntoIterator<Item = PathBuf>,
+    is_running: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let candidates: Vec<_> = candidates.into_iter().collect();
+    candidates
+        .iter()
+        .find(|path| is_running(path))
+        .cloned()
+        .or_else(|| candidates.into_iter().find(|path| path.exists()))
 }
 
 pub(super) fn desktop_app_install_candidates() -> Vec<PathBuf> {
@@ -175,13 +303,18 @@ pub(super) fn update_desktop_app_after_upgrade(
     );
     println!("{}", "Updating Bifrost desktop app...".bright_cyan());
 
+    let desktop_process_running = installed_desktop_app_is_running(&app_path);
+    let webview_origin = env_flag(WEBVIEW_UPGRADE_ORIGIN_ENV);
     let mode = desktop_companion_mode(
-        cfg!(target_os = "windows"),
-        installed_desktop_app_is_running(&app_path),
-        read_runtime_info().as_ref().is_some_and(|runtime| {
-            runtime.start_mode == RuntimeStartMode::Desktop && is_process_running(runtime.pid)
-        }),
+        cfg!(any(target_os = "macos", target_os = "windows")),
+        desktop_process_running,
+        webview_origin,
     );
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if should_request_desktop_shutdown_before_update(true, desktop_process_running, webview_origin)
+    {
+        request_running_desktop_shutdown(&app_path)?;
+    }
     let args = post_upgrade_desktop_app_args(target_version, app_path.parent(), mode);
     let environment = desktop_companion_environment(mode);
     match command_output_with_timeout_and_env(

@@ -37,6 +37,7 @@ use version_companion::{
 const DESKTOP_INSTALL_SKILL_TIMEOUT: Duration = Duration::from_secs(20);
 const DESKTOP_CORE_ENV: &str = "BIFROST_DESKTOP_CORE";
 const DESKTOP_UPGRADE_HANDOFF_ENV: &str = "BIFROST_DESKTOP_UPGRADE_HANDOFF";
+const WEBVIEW_UPGRADE_ORIGIN_ENV: &str = "BIFROST_WEBVIEW_UPGRADE_ORIGIN_INTERNAL";
 
 fn upgrade_start_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -302,9 +303,13 @@ async fn start_upgrade(state: SharedAdminState, query: Option<&str>) -> Response
         .with_source(Some(channel.progress_source().to_string()));
     write_progress(&dir, &initial);
 
-    if let Err(error) =
-        spawn_upgrade_process(channel, Some(target_version.as_str()), running_proxy, None)
-    {
+    if let Err(error) = spawn_upgrade_process(
+        channel,
+        Some(target_version.as_str()),
+        running_proxy,
+        None,
+        requested_channel == UpgradeChannel::Desktop,
+    ) {
         warn!(error = %error, "[SYSTEM] failed to spawn self-update subprocess");
         let failed = UpgradeProgress::new(UpgradePhase::Failed, "Upgrade failed to start")
             .with_target(Some(target_version))
@@ -793,6 +798,7 @@ fn spawn_upgrade_process(
     target_version: Option<&str>,
     running_proxy: Option<(u32, u16)>,
     app_dir: Option<&Path>,
+    webview_origin: bool,
 ) -> std::io::Result<()> {
     let program = std::env::current_exe().unwrap_or_else(|_| "bifrost".into());
 
@@ -803,11 +809,8 @@ fn spawn_upgrade_process(
         running_proxy,
         app_dir,
     ));
-    if channel == UpgradeChannel::Desktop {
-        // This distinguishes a WebUI/Tauri handoff from a direct
-        // `bifrost app upgrade --source desktop` invocation. Only the former
-        // may leave terminal progress and locked Windows files to the shell.
-        command.env(DESKTOP_UPGRADE_HANDOFF_ENV, "1");
+    for (key, value) in upgrade_process_environment(channel, webview_origin) {
+        command.env(key, value);
     }
     command
         .stdin(Stdio::null())
@@ -850,6 +853,25 @@ fn spawn_upgrade_process(
         ),
     });
     Ok(())
+}
+
+fn upgrade_process_environment(
+    channel: UpgradeChannel,
+    webview_origin: bool,
+) -> Vec<(&'static str, &'static str)> {
+    let mut environment = Vec::new();
+    if webview_origin {
+        // Preserve the initiating surface independently from runtime owner.
+        // A CLI-owned core can still be controlled by the desktop WebView.
+        environment.push((WEBVIEW_UPGRADE_ORIGIN_ENV, "1"));
+    }
+    if channel == UpgradeChannel::Desktop {
+        // Only the App-owned orchestrator itself leaves installation/restart
+        // work for the Tauri shell. CLI-owned orchestration decides this later
+        // after it has also checked whether the installed shell is running.
+        environment.push((DESKTOP_UPGRADE_HANDOFF_ENV, "1"));
+    }
+    environment
 }
 
 fn upgrade_process_args(
@@ -911,9 +933,9 @@ mod tests {
         build_cli_install_status, check_version, desktop_core_env_enabled,
         effective_upgrade_channel, install_binary_atomically, install_cli_from_current_exe,
         merge_companion_update, normalize_progress, parse_upgrade_channel, required_upgrade_target,
-        spawn_upgrade_process, start_upgrade, upgrade_process_args, upgrade_request_plan,
-        upgrade_start_lock, validate_upgrade_request_channel, CliInstallRequest, StatusCode,
-        UpgradeChannel,
+        spawn_upgrade_process, start_upgrade, upgrade_process_args, upgrade_process_environment,
+        upgrade_request_plan, upgrade_start_lock, validate_upgrade_request_channel,
+        CliInstallRequest, StatusCode, UpgradeChannel,
     };
     use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS};
     use chrono::Utc;
@@ -1122,7 +1144,7 @@ mod tests {
             upgrade_process_args(
                 UpgradeChannel::Cli,
                 Some("0.0.139"),
-                Some((12345, 9900)),
+                Some((12345, 19900)),
                 None,
             ),
             vec![
@@ -1134,14 +1156,14 @@ mod tests {
                 "--running-proxy-pid",
                 "12345",
                 "--running-proxy-port",
-                "9900",
+                "19900",
             ]
         );
         assert_eq!(
             upgrade_process_args(
                 UpgradeChannel::Desktop,
                 Some("0.0.139"),
-                Some((12345, 9900)),
+                Some((12345, 19900)),
                 Some(Path::new("/Users/test/Applications")),
             ),
             vec![
@@ -1169,6 +1191,19 @@ mod tests {
             ],
             "desktop-owned Admin dispatch must let the bundled core resolve its active App path"
         );
+        assert_eq!(
+            upgrade_process_environment(UpgradeChannel::Cli, true),
+            vec![(super::WEBVIEW_UPGRADE_ORIGIN_ENV, "1")],
+            "a desktop WebView can initiate the CLI-owned orchestrator"
+        );
+        assert!(upgrade_process_environment(UpgradeChannel::Cli, false).is_empty());
+        assert_eq!(
+            upgrade_process_environment(UpgradeChannel::Desktop, true),
+            vec![
+                (super::WEBVIEW_UPGRADE_ORIGIN_ENV, "1"),
+                (super::DESKTOP_UPGRADE_HANDOFF_ENV, "1")
+            ]
+        );
     }
 
     #[test]
@@ -1192,7 +1227,7 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         std::env::set_var("BIFROST_DATA_DIR", dir.path());
-        spawn_upgrade_process(UpgradeChannel::Desktop, None, None, None)
+        spawn_upgrade_process(UpgradeChannel::Desktop, None, None, None, true)
             .expect("spawn detached desktop upgrade command");
         std::thread::sleep(std::time::Duration::from_millis(100));
     }

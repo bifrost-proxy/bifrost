@@ -466,7 +466,13 @@ test_upgrade_review_feedback_contracts() {
         && grep -Fq 'DesktopCompanionMode::DesktopHandoff' "$upgrade_desktop_src" \
         && grep -Fq 'desktop_companion_environment' "$upgrade_desktop_src" \
         && grep -Fq 'PARENT_UPGRADE_LOCK_HELD_ENV' "$upgrade_desktop_src" \
+        && grep -Fq 'WEBVIEW_UPGRADE_ORIGIN_ENV' "$upgrade_desktop_src" \
+        && grep -Fq 'should_request_desktop_shutdown_before_update' "$upgrade_desktop_src" \
+        && grep -Fq 'DESKTOP_UPGRADE_SHUTDOWN_ARG' "$upgrade_desktop_src" \
+        && grep -Fq 'request_legacy_desktop_shutdown' "$upgrade_desktop_src" \
         && grep -Fq 'PARENT_UPGRADE_LOCK_HELD_ENV' "$app_src" \
+        && grep -Fq 'WEBVIEW_UPGRADE_ORIGIN_ENV' "$admin_src" \
+        && grep -Fq 'desktop_upgrade_shutdown_requested' "$desktop_src" \
         && grep -Fq 'macos_app_bundle_from_executable' "$admin_version_src" \
         && grep -Fq 'spawn_windows_desktop_upgrade_handoff' "$desktop_upgrade_src" \
         && grep -Fq 'deferred_desktop_install_version_error' "$desktop_upgrade_src" \

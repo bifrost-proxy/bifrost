@@ -205,6 +205,7 @@ fn upgrade_behavior_executes_companion_and_runtime_ownership_branches() {
         DESKTOP_MANAGED_SKIP_RESTART_ENV,
         DESKTOP_MANAGED_TARGET_ENV,
         PARENT_UPGRADE_LOCK_HELD_ENV,
+        WEBVIEW_UPGRADE_ORIGIN_ENV,
         "BIFROST_UPGRADE_TEST_LATEST_VERSION",
     ];
     let previous: Vec<_> = env_keys

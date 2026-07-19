@@ -16,6 +16,7 @@ use bifrost_storage::data_dir as shared_bifrost_data_dir;
 use bifrost_tls::{ensure_valid_ca, generate_root_ca, save_root_ca, CertInstaller, CertStatus};
 use open_requests::{parse_open_url, DesktopOpenRequest, OpenRequestParseError};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsStr;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -87,6 +88,7 @@ const DESKTOP_STARTUP_DEADLINE_MS_ENV: &str = "BIFROST_DESKTOP_STARTUP_DEADLINE_
 const DESKTOP_STARTUP_SESSION_ENV: &str = "BIFROST_DESKTOP_STARTUP_SESSION_ID";
 const DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV: &str =
     "BIFROST_DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES";
+const DESKTOP_UPGRADE_SHUTDOWN_ARG: &str = "--bifrost-upgrade-shutdown";
 static DESKTOP_BOOTSTRAP_LOG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -342,7 +344,15 @@ fn main() {
         builder
     } else {
         builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
-            handle_cli_file_open_arguments(app, args.into_iter().skip(1), Some(PathBuf::from(cwd)));
+            if desktop_upgrade_shutdown_requested(args.iter().skip(1)) {
+                request_desktop_shutdown(app);
+            } else {
+                handle_cli_file_open_arguments(
+                    app,
+                    args.into_iter().skip(1),
+                    Some(PathBuf::from(cwd)),
+                );
+            }
         }))
     };
 
@@ -359,6 +369,8 @@ fn main() {
             write_clipboard
         ])
         .setup(|app| {
+            let upgrade_shutdown_requested =
+                desktop_upgrade_shutdown_requested(std::env::args_os().skip(1));
             let host_window = create_host_window(app.handle())?;
             host_window.set_icon(load_app_icon()?)?;
             if !supports_native_launcher() {
@@ -443,6 +455,11 @@ fn main() {
                 pending_open_requests: Mutex::new(Vec::new()),
                 upgrade_relaunch: Mutex::new(upgrade_relaunch),
             });
+
+            if upgrade_shutdown_requested {
+                request_desktop_shutdown(app.handle());
+                return Ok(());
+            }
 
             install_open_request_handlers(app.handle());
 
@@ -956,6 +973,15 @@ fn env_flag_enabled(key: &str) -> bool {
     std::env::var(key)
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
         .unwrap_or(false)
+}
+
+fn desktop_upgrade_shutdown_requested<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    args.into_iter()
+        .any(|arg| arg.as_ref() == OsStr::new(DESKTOP_UPGRADE_SHUTDOWN_ARG))
 }
 
 fn request_desktop_shutdown(app: &AppHandle) {

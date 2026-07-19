@@ -62,6 +62,17 @@ fn background_upgrade_restarts_when_disk_binary_is_already_latest() {
 
 #[test]
 fn upgrade_post_install_desktop_app_args_disable_cli_recursion() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let first = temp.path().join("first-app");
+    let active = temp.path().join("active-app");
+    std::fs::write(&first, b"first").expect("write first app");
+    std::fs::write(&active, b"active").expect("write active app");
+    assert_eq!(
+        select_installed_desktop_app_path([first, active.clone()], |path| path == active),
+        Some(active),
+        "the running App copy wins over the first global install candidate"
+    );
+
     assert_eq!(
         post_upgrade_desktop_app_args(
             "0.0.145",
@@ -101,12 +112,13 @@ fn upgrade_post_install_desktop_app_args_disable_cli_recursion() {
     );
     assert_eq!(
         desktop_companion_mode(true, true, true),
-        DesktopCompanionMode::DesktopHandoff
+        DesktopCompanionMode::DesktopHandoff,
+        "a WebView-originated Windows update delegates a running shell to Tauri"
     );
     assert_eq!(
         desktop_companion_mode(true, true, false),
         DesktopCompanionMode::CallerManaged,
-        "a running desktop shell must not take over a CLI-owned core"
+        "a terminal-originated update must not wait for a nonexistent WebView handoff"
     );
     assert_eq!(
         desktop_companion_mode(true, false, true),
@@ -116,6 +128,18 @@ fn upgrade_post_install_desktop_app_args_disable_cli_recursion() {
         desktop_companion_mode(false, true, true),
         DesktopCompanionMode::CallerManaged
     );
+    assert!(should_request_desktop_shutdown_before_update(
+        true, true, false
+    ));
+    assert!(!should_request_desktop_shutdown_before_update(
+        true, true, true
+    ));
+    assert!(!should_request_desktop_shutdown_before_update(
+        true, false, false
+    ));
+    assert!(!should_request_desktop_shutdown_before_update(
+        false, true, false
+    ));
     assert!(windows_paths_match(
         Path::new(r"C:\Users\Eden\Bifrost.exe"),
         Path::new("c:/users/eden/bifrost.exe"),

@@ -4,11 +4,12 @@ use super::{
     desktop_backend_env, desktop_backend_start_args, desktop_pending_install_path,
     desktop_sidecar_rust_log, desktop_startup_deadline, desktop_startup_session_id,
     desktop_test_allows_multiple_instances, desktop_upgrade_relaunch_marker_path,
-    host_window_close_behavior_for_platform, is_server_config_response,
-    is_upgrade_relaunch_marker_active, main_interface_decorations_for_platform,
-    mark_backend_unavailable_for_manual_start, may_reuse_existing_backend,
-    parse_port_update_response, persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit,
-    publish_startup_ready, read_active_upgrade_relaunch_marker, read_pending_desktop_install,
+    desktop_upgrade_shutdown_requested, host_window_close_behavior_for_platform,
+    is_server_config_response, is_upgrade_relaunch_marker_active,
+    main_interface_decorations_for_platform, mark_backend_unavailable_for_manual_start,
+    may_reuse_existing_backend, parse_port_update_response,
+    persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit, publish_startup_ready,
+    read_active_upgrade_relaunch_marker, read_pending_desktop_install,
     record_startup_deadline_error, relaunch_command_for_target, resolve_bifrost_binary_from_env,
     resolve_desktop_config_path, resolve_desktop_data_dir,
     sanitize_desktop_upgrade_relaunch_command, save_desktop_config,
@@ -19,7 +20,7 @@ use super::{
     write_upgrade_relaunch_marker, BackendState, BackendWaitFailureKind, DesktopConfig,
     DesktopInstallRollback, DesktopUpgradeRelaunchMarker, HostWindowCloseBehavior,
     PendingDesktopInstall, StartupDeadlineDisposition, DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
-    WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
+    DESKTOP_UPGRADE_SHUTDOWN_ARG, WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
 };
 use bifrost_storage::data_dir as shared_bifrost_data_dir;
 use std::ffi::OsStr;
@@ -255,6 +256,18 @@ fn release_build_never_allows_multiple_instances() {
     assert!(!should_allow_multiple_instances(false, true));
     assert!(!should_allow_multiple_instances(true, false));
     assert!(should_allow_multiple_instances(true, true));
+}
+
+#[test]
+fn internal_upgrade_shutdown_argument_is_detected_without_consuming_other_open_requests() {
+    assert!(desktop_upgrade_shutdown_requested([
+        OsStr::new("--unrelated"),
+        OsStr::new(DESKTOP_UPGRADE_SHUTDOWN_ARG),
+    ]));
+    assert!(!desktop_upgrade_shutdown_requested([
+        OsStr::new("bifrost://rules"),
+        OsStr::new("example.bifrost"),
+    ]));
 }
 
 #[test]
