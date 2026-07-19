@@ -594,6 +594,18 @@ function Write-BootstrapLog([string]$Message) {
   Add-Content -LiteralPath $bootstrapLog -Value "$(Get-Date -Format o) $Message" -Encoding UTF8
 }
 
+function Read-JsonWithRetry([string]$Path) {
+  for ($attempt = 0; $attempt -lt 100; $attempt++) {
+    try {
+      return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+      $win32Code = $_.Exception.HResult -band 0xFFFF
+      if (($win32Code -notin @(5, 32, 33)) -or $attempt -eq 99) { throw }
+      Start-Sleep -Milliseconds (2 + ($attempt % 7))
+    }
+  }
+}
+
 function Write-Progress([string]$Phase, [string]$Message, [string]$TargetVersion, [string]$ErrorMessage) {
   $payload = [ordered]@{
     phase = $Phase
@@ -741,7 +753,7 @@ function Restore-InstallSnapshot($Rollback) {
 function Read-TerminalProgress() {
   if (-not (Test-Path -LiteralPath $progressPath -PathType Leaf)) { return $null }
   try {
-    $progress = Get-Content -LiteralPath $progressPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $progress = Read-JsonWithRetry $progressPath
     if ($progress.phase -in @("completed", "failed")) { return $progress }
   } catch {}
   return $null
@@ -771,7 +783,7 @@ $targetVersion = $null
 $packagePath = $null
 $rollback = $null
 try {
-  $marker = Get-Content -LiteralPath $MarkerPath -Raw -Encoding UTF8 | ConvertFrom-Json
+  $marker = Read-JsonWithRetry $MarkerPath
   if ($marker.pending_install) { $targetVersion = [string]$marker.pending_install.target_version }
   Wait-ForProcessExit ([uint32]$marker.old_app_pid) "desktop app"
   if ($null -ne $marker.old_core_pid) {

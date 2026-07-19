@@ -319,7 +319,7 @@ SelfUpdate {
 - **嵌套 App 更新提前宣告成功**:CLI 联动 App 的子流程不拥有共享 terminal progress;外层 CLI 完成二进制替换、App 必须更新与 daemon 重启后才写 `completed`。
 - **App 与 CLI 相互递归/争抢重启**:App-owned 编排给独立 CLI 注入 skip-app/skip-restart,CLI updater同时拒绝接管 Desktop runtime；desktop-owned core 拒绝普通浏览器 channel，三层边界共同阻断双重安装和无 handoff 安装。
 - **同时点击或 Tray/Web UI 并发升级**:Admin 请求锁只解决同一服务内的并发,`upgrade.lock` 再覆盖不同入口/进程；竞争失败方不安装、不停止服务，并立即把自己预写的 Checking 收敛为 terminal failure。
-- **Windows progress/marker 并发 replace 返回 AccessDenied**:`tempfile::persist` 的 `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` 与 PowerShell `Move-Item -Force` 在 Rust writer、replacement helper 和新 desktop core 的交接窗口可能返回 Win32 5/32/33；三个 writer 都保留唯一 source temp，仅对 access/sharing/lock violation 做 100 次有界退避重试，永久权限/路径错误立即失败，`finally` 继续清理未发布 temp。
+- **Windows progress/marker 并发 replace/read 返回 AccessDenied**:`tempfile::persist` 的 `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`、PowerShell `Move-Item -Force` 以及同时打开最终文件的 reader，在 Rust writer、replacement helper 和新 desktop core 的交接窗口可能返回 Win32 5/32/33；writer 保留唯一 source temp，Rust/WebUI reader 与两个 helper 的 JSON reader 同样仅对 access/sharing/lock violation 做 100 次有界退避重试，永久权限/路径错误立即失败，`finally` 继续清理未发布 temp。缺失/损坏 JSON 仍按原契约降级为 `Idle`，瞬态共享冲突不再伪装成 `Idle`。
 - **latest 在升级中变化**:Admin 选定的 target 是本次事务的一致性边界,CLI 和 App 都必须使用该 target,不得在子流程重新解析新的 latest。
 - **安装渠道绕过 target**:`~/.bifrost/bin` 的 script 安装改走内置 target-aware 原子替换,不再重新执行永远跟随最新版本的在线脚本；Homebrew 命令有心跳/超时,重启与核验使用稳定的 `bin/bifrost` launcher 而不是可能被 reinstall 删除的 Cellar 版本路径。所有非 deferred CLI 安装完成后都执行 `--version == target` 门禁。
 - **子命令退出 0 但没有升级**:App-owned 路径以 `bifrost --version == target` 作为 CLI 完成门禁；CLI-owned 后台无法识别安装方式或无法解析目标时返回失败,不得沿用交互命令“提示手动安装后返回 0”的软失败语义。

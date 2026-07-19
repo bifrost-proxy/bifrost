@@ -322,6 +322,18 @@ function Write-UpgradeLog([string]$Message) {
   Add-Content -LiteralPath $LogPath -Value "$timestamp $Message"
 }
 
+function Read-JsonWithRetry([string]$Path) {
+  for ($attempt = 0; $attempt -lt 100; $attempt++) {
+    try {
+      return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+      $win32Code = $_.Exception.HResult -band 0xFFFF
+      if (($win32Code -notin @(5, 32, 33)) -or $attempt -eq 99) { throw }
+      Start-Sleep -Milliseconds (2 + ($attempt % 7))
+    }
+  }
+}
+
 function Write-UpgradeProgress([string]$Phase, [string]$Message, [string]$ErrorMessage) {
   if ($PublishProgress -eq 0) {
     return
@@ -330,7 +342,7 @@ function Write-UpgradeProgress([string]$Phase, [string]$Message, [string]$ErrorM
     $previous = $null
     if ($ProgressPath -and (Test-Path -LiteralPath $ProgressPath)) {
       try {
-        $previous = Get-Content -LiteralPath $ProgressPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $previous = Read-JsonWithRetry $ProgressPath
       } catch {
         Write-UpgradeLog "WARNING: ignoring unreadable previous progress: $($_.Exception.Message)"
       }

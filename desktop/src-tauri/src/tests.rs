@@ -480,6 +480,13 @@ fn deferred_desktop_installer_marker_is_validated_before_handoff() {
     assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
         .contains("Start-Sleep -Milliseconds (2 + ($attempt % 7))"));
     assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
+        .contains("function Read-JsonWithRetry([string]$Path)"));
+    assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
+        .contains("$progress = Read-JsonWithRetry $progressPath"));
+    assert!(
+        WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("$marker = Read-JsonWithRetry $MarkerPath")
+    );
+    assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
         .contains("$MarkerPath.tmp.$PID.$([Guid]::NewGuid().ToString('N'))"));
     assert!(!WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("$progressPath.tmp.$PID\""));
     let snapshot_index = WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT

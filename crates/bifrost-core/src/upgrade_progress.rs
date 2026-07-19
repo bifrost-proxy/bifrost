@@ -148,11 +148,36 @@ pub fn progress_file_path(data_dir: &Path) -> PathBuf {
 /// Read the current progress. Missing or corrupt files degrade to
 /// [`UpgradeProgress::idle`].
 pub fn read_progress(data_dir: &Path) -> UpgradeProgress {
-    let path = progress_file_path(data_dir);
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return UpgradeProgress::idle();
-    };
-    serde_json::from_str(&content).unwrap_or_else(|_| UpgradeProgress::idle())
+    read_progress_inner(data_dir).unwrap_or_else(|_| UpgradeProgress::idle())
+}
+
+fn read_progress_inner(data_dir: &Path) -> std::io::Result<UpgradeProgress> {
+    let content = read_progress_content(&progress_file_path(data_dir))?;
+    serde_json::from_str(&content)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+#[cfg(not(windows))]
+fn read_progress_content(path: &Path) -> std::io::Result<String> {
+    std::fs::read_to_string(path)
+}
+
+#[cfg(windows)]
+fn read_progress_content(path: &Path) -> std::io::Result<String> {
+    for attempt in 0..WINDOWS_FILE_CONFLICT_MAX_ATTEMPTS {
+        match std::fs::read_to_string(path) {
+            Ok(content) => return Ok(content),
+            Err(error) => {
+                if !is_transient_windows_file_conflict(&error)
+                    || attempt + 1 == WINDOWS_FILE_CONFLICT_MAX_ATTEMPTS
+                {
+                    return Err(error);
+                }
+                sleep_for_windows_file_conflict(attempt);
+            }
+        }
+    }
+    unreachable!("bounded Windows progress read loop must return")
 }
 
 /// Atomically write progress to `<data_dir>/upgrade-progress.json`.
@@ -193,21 +218,34 @@ fn persist_progress_temp(mut tmp: tempfile::NamedTempFile, path: &Path) -> std::
     // transiently fail while another process is replacing or opening the same
     // progress file. Keep the unique source file and retry only Windows sharing
     // conflicts; permanent permission/path failures still surface immediately.
-    const MAX_ATTEMPTS: usize = 100;
-    for attempt in 0..MAX_ATTEMPTS {
+    for attempt in 0..WINDOWS_FILE_CONFLICT_MAX_ATTEMPTS {
         match tmp.persist(path) {
             Ok(_) => return Ok(()),
             Err(error) => {
-                let retryable = matches!(error.error.raw_os_error(), Some(5 | 32 | 33));
-                if !retryable || attempt + 1 == MAX_ATTEMPTS {
+                if !is_transient_windows_file_conflict(&error.error)
+                    || attempt + 1 == WINDOWS_FILE_CONFLICT_MAX_ATTEMPTS
+                {
                     return Err(error.error);
                 }
                 tmp = error.file;
-                std::thread::sleep(std::time::Duration::from_millis(2 + (attempt as u64 % 7)));
+                sleep_for_windows_file_conflict(attempt);
             }
         }
     }
     unreachable!("bounded Windows progress replacement loop must return")
+}
+
+#[cfg(windows)]
+const WINDOWS_FILE_CONFLICT_MAX_ATTEMPTS: usize = 100;
+
+#[cfg(windows)]
+fn is_transient_windows_file_conflict(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5 | 32 | 33))
+}
+
+#[cfg(windows)]
+fn sleep_for_windows_file_conflict(attempt: usize) {
+    std::thread::sleep(std::time::Duration::from_millis(2 + (attempt as u64 % 7)));
 }
 
 /// Remove the progress file (best-effort).
@@ -382,10 +420,9 @@ mod tests {
                     .with_target(Some("0.0.156".to_string()))
                     .with_source(Some(format!("writer-{writer}")));
                     write_progress_inner(&dir, &progress).expect("write progress");
-                    let content = std::fs::read_to_string(progress_file_path(&dir))
-                        .expect("read published progress");
-                    serde_json::from_str::<UpgradeProgress>(&content)
-                        .expect("published progress must always be complete JSON");
+                    let published = read_progress_inner(&dir).expect("read published progress");
+                    assert_eq!(published.phase, UpgradePhase::Downloading);
+                    assert_eq!(published.target_version.as_deref(), Some("0.0.156"));
                 }
             }));
         }
