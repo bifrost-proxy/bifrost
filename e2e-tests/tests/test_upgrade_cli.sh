@@ -325,8 +325,8 @@ EOF
     chmod +x "$app_path/Contents/MacOS/Bifrost"
 }
 
-test_upgrade_updates_installed_desktop_app_best_effort() {
-    header "测试 upgrade 已是最新 CLI 时仍 best-effort 更新已安装桌面 App"
+test_upgrade_preserves_already_current_desktop_app() {
+    header "测试 upgrade 保留已是目标版本的桌面 App"
 
     if [[ "$(uname -s)" != "Darwin" ]]; then
         skip "桌面 App 自动更新 best-effort 回归当前仅在 macOS 临时 .app 上执行"
@@ -359,10 +359,12 @@ test_upgrade_updates_installed_desktop_app_best_effort() {
     fi
 
     if echo "$result" | grep -q "Detected installed Bifrost desktop app" \
-        && echo "$result" | grep -q "Bifrost desktop app updated successfully"; then
-        pass "upgrade 已最新 CLI 时会发现并处理已安装桌面 App"
+        && echo "$result" | grep -q "already on target version" \
+        && echo "$result" | grep -q "installation and process state unchanged" \
+        && ! echo "$result" | grep -q "Bifrost desktop app updated successfully"; then
+        pass "upgrade 发现已是目标版本的 App 后不启动伴随更新"
     else
-        fail "upgrade 未发现或未更新已安装桌面 App: $result"
+        fail "upgrade 未正确保留已是目标版本的桌面 App: $result"
     fi
 }
 
@@ -912,7 +914,7 @@ main() {
     test_version_cache_content
     test_new_version_notice
     test_no_notice_when_current
-    test_upgrade_updates_installed_desktop_app_best_effort
+    test_upgrade_preserves_already_current_desktop_app
     test_upgrade_desktop_app_failure_does_not_fail_cli_flow
     test_admin_self_update_recovers_missing_runtime_markers
     test_admin_self_update_converts_cli_foreground_to_restarted_daemon
