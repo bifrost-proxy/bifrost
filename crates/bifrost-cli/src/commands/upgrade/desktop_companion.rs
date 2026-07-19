@@ -34,6 +34,7 @@ pub(super) fn desktop_companion_mode(
     }
 }
 
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
 pub(super) fn should_request_desktop_shutdown_before_update(
     desktop_handoff_supported: bool,
     desktop_process_running: bool,
