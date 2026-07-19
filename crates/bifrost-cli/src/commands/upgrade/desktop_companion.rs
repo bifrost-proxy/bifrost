@@ -132,6 +132,16 @@ pub(super) fn post_upgrade_desktop_app_args(
     args
 }
 
+pub(super) fn desktop_companion_environment(
+    mode: DesktopCompanionMode,
+) -> Vec<(&'static str, &'static str)> {
+    let mut environment = vec![(PARENT_UPGRADE_LOCK_HELD_ENV, "1")];
+    if mode == DesktopCompanionMode::DesktopHandoff {
+        environment.push((DESKTOP_UPGRADE_HANDOFF_ENV, "1"));
+    }
+    environment
+}
+
 pub(super) fn update_desktop_app_after_upgrade_best_effort(
     executable: &Path,
     target_version: &str,
@@ -173,10 +183,7 @@ pub(super) fn update_desktop_app_after_upgrade(
         }),
     );
     let args = post_upgrade_desktop_app_args(target_version, app_path.parent(), mode);
-    let environment = match mode {
-        DesktopCompanionMode::CallerManaged => Vec::new(),
-        DesktopCompanionMode::DesktopHandoff => vec![(DESKTOP_UPGRADE_HANDOFF_ENV, "1")],
-    };
+    let environment = desktop_companion_environment(mode);
     match command_output_with_timeout_and_env(
         executable,
         &args,

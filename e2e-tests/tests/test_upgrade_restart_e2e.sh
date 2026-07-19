@@ -428,6 +428,7 @@ test_upgrade_review_feedback_contracts() {
     local upgrade_review_tests="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/tests/review_comments.rs"
     local background_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade_background.rs"
     local admin_src="${PROJECT_DIR}/crates/bifrost-admin/src/handlers/system.rs"
+    local admin_version_src="${PROJECT_DIR}/crates/bifrost-admin/src/handlers/system/version_companion.rs"
     local desktop_src="${PROJECT_DIR}/desktop/src-tauri/src/main.rs"
     local desktop_upgrade_src="${PROJECT_DIR}/desktop/src-tauri/src/upgrade_handoff.rs"
     local desktop_backend_src="${PROJECT_DIR}/desktop/src-tauri/src/backend_runtime.rs"
@@ -443,6 +444,8 @@ test_upgrade_review_feedback_contracts() {
         && [ "$(wc -l <"$upgrade_restart_src")" -le 1500 ] \
         && [ "$(wc -l <"$upgrade_tests")" -le 1500 ] \
         && [ "$(wc -l <"$upgrade_review_tests")" -le 1500 ] \
+        && [ "$(wc -l <"$admin_src")" -le 1500 ] \
+        && [ "$(wc -l <"$admin_version_src")" -le 1500 ] \
         && [ "$(wc -l <"$desktop_src")" -le 1500 ] \
         && [ "$(wc -l <"$desktop_upgrade_src")" -le 1500 ] \
         && [ "$(wc -l <"$desktop_backend_src")" -le 1500 ] \
@@ -461,7 +464,10 @@ test_upgrade_review_feedback_contracts() {
         && grep -Fq 'app_managed_upgrade_behavior()' "$upgrade_src" \
         && grep -Fq 'installed_desktop_app_is_running' "$upgrade_desktop_src" \
         && grep -Fq 'DesktopCompanionMode::DesktopHandoff' "$upgrade_desktop_src" \
+        && grep -Fq 'desktop_companion_environment' "$upgrade_desktop_src" \
+        && grep -Fq 'PARENT_UPGRADE_LOCK_HELD_ENV' "$upgrade_desktop_src" \
         && grep -Fq 'PARENT_UPGRADE_LOCK_HELD_ENV' "$app_src" \
+        && grep -Fq 'macos_app_bundle_from_executable' "$admin_version_src" \
         && grep -Fq 'spawn_windows_desktop_upgrade_handoff' "$desktop_upgrade_src" \
         && grep -Fq 'deferred_desktop_install_version_error' "$desktop_upgrade_src" \
         && grep -Fq 'package_owned_by_updater' "$installer_src" \

@@ -89,6 +89,17 @@ fn upgrade_post_install_desktop_app_args_disable_cli_recursion() {
     );
     assert_eq!(handoff[4], "desktop");
     assert_eq!(
+        desktop_companion_environment(DesktopCompanionMode::CallerManaged),
+        vec![(PARENT_UPGRADE_LOCK_HELD_ENV, "1")]
+    );
+    assert_eq!(
+        desktop_companion_environment(DesktopCompanionMode::DesktopHandoff),
+        vec![
+            (PARENT_UPGRADE_LOCK_HELD_ENV, "1"),
+            (DESKTOP_UPGRADE_HANDOFF_ENV, "1")
+        ]
+    );
+    assert_eq!(
         desktop_companion_mode(true, true, true),
         DesktopCompanionMode::DesktopHandoff
     );

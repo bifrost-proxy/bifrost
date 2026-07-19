@@ -288,8 +288,7 @@
    test "$(wc -l < desktop/src-tauri/src/upgrade_handoff.rs)" -le 1500
    test "$(wc -l < desktop/src-tauri/src/backend_runtime.rs)" -le 1500
    test "$(wc -l < desktop/src-tauri/src/tests.rs)" -le 1500
-   local_home='/Users/'eden_studio
-   ! grep -q "$local_home" human_tests/tray-webui-auto-update.md
+   ! grep -Eq '/Users/[^/]+/' human_tests/tray-webui-auto-update.md
    ```
 
 **预期结果**：
@@ -308,6 +307,7 @@
 - 只有 Admin/Tauri 发起且带 handoff 标记的 `source=desktop` 才停在 `Restarting` 交给当前 App；用户直接执行 `bifrost app upgrade --source desktop --no-cli` 会自行写 `Completed`。Desktop shell 观察到 CLI-owned `source=admin` 的 `Completed` 时只刷新 WebView，不重启 App。
 - changed-lines 95% 门禁只排除从原文件真实消失、至少 8 行且至少 4 行实质代码的机械搬移块；仍保留在原文件的 copy-paste 必须继续计入门禁，小样板和真实修改行也仍计入，报告显示排除行数。
 - 顶层 App updater 与 self-update 共用跨进程 `upgrade.lock`，并发 App/CLI updater 只能有一个 owner；`source=cli-upgrade` 只有同时携带父事务私有 marker 才能绕过父锁，用户仅伪造可见 source 不能绕过。App 管理的 CLI child 必须固定 target、禁止递归更新 App/重启 core；Windows deferred helper 直接使用该固定 target，且由 App 父事务收口时不得提前发布 `Completed`。
+- CLI-owned orchestrator 的 caller-managed 与 desktop-handoff App companion 都必须显式继承 parent-lock marker，child 在同一父事务内安装 App 而不争用父锁；macOS desktop version-check 必须优先实际启动 bundled core 的 `Bifrost.app`，系统级与用户级副本并存时不能被另一个已是 target 的副本掩盖更新入口。
 - 直接执行 `bifrost app upgrade` 时只禁止 CLI updater 递归更新 App，不得禁止 CLI-owned core 重启；真实链路必须看到旧 PID 被替换、新 PID 使用升级后的临时 CLI，并且 App bundle 同时安装到隔离目录。
 - CLI-owned core 的 Windows companion 发现目标桌面进程仍在运行时必须改走 `source=desktop` deferred handoff，并携带私有 parent/handoff marker；没有运行桌面进程时继续使用 caller-managed 即时安装，避免无人接管 pending marker。
 - native desktop restart marker/helper 失败会持久化 `Failed`，刷新后不会重新显示旧 `Completed`。
@@ -327,6 +327,7 @@
 
 2026-07-18 本次状态机审计已执行（最终复测）：
 
+- TC-TWA-10（PR comments 第十二轮）：通过。CLI-owned orchestrator 现在对 caller-managed 与 Windows desktop-handoff 两类 App companion 都显式注入 parent-lock marker，child 继续携带 `--no-cli`、固定 target 和 owner source，在父事务内更新 App 而不与父进程争用 `upgrade.lock`；macOS desktop version-check 从当前 bundled core executable 向上解析实际 `Bifrost.app` 并置于全局候选之前，多副本测试证明 active `0.0.143` 不会被另一个 `0.0.144` App 掩盖。Admin owner fixture 改用隔离端口 `19900`，文档可移植性检查改为项目相对文件上的通用 macOS home-path 正则，不再嵌入本机路径。按文档立即执行 companion 参数/真实 child 环境测试各 `1/1`、active/override App 版本测试 `2/2`、Admin owner 测试 `1/1`、restart E2E `21/21` 与文档路径检查，全部通过；未绑定、停止或修改 9900。
 - TC-TWA-10（PR comments 第十一轮，Windows deferred 跨进程回滚）：通过。helper 在旧 App/core 退出后、MSI/EXE 执行前把完整安装目录快照到目标目录之外，并把 rollback metadata 原子写回 relaunch marker；installer 返回成功后仍保留 pending guard、快照和 updater 自有包，等待新 App 编译版本与 managed core 共同确认。版本不匹配、App 提前退出、120 秒验证超时或 core 启动失败会让新 App 走正常 shutdown，helper 仅清理安装目录内残留进程、恢复旧目录、保留 `Failed` 并重启旧 App；只有 `Completed` 才提交清理。第 1 轮 review 发现新 App 写 `Completed` 后 helper 若在清理前崩溃会残留 guard/快照，补充了 App 侧受路径校验保护的幂等提交清理，任意非 `.Bifrost.rollback-*` 同级目录会拒绝删除；第 2 轮复跑 desktop 全量单测 `52/52`、handoff contract `5/5 + 1/1 + 1/1 + 1/1 + 1/1`、restart E2E `21/21` 与 desktop strict clippy 全绿。新 CI run `29667989074` fail-fast 只发现独立 desktop manifest 的 rustfmt 差异，根 workspace fmt 不会覆盖该 manifest；第 3 轮按 CI 精确命令格式化后，desktop fmt check、commit cleanup 定向测试与完整 handoff contract 再次通过。静态合约额外断言 snapshot 发生在 installer 之前、验证失败必经 restore、pending/package 不会提前清理。测试只使用临时目录、随机端口与构建 sidecar，未操作 9900 或真实 Windows/macOS App。
 - TC-TWA-10（并发升级单测隔离回归）：run `29661719290` 的 Unit & Integration Tests 首个失败是下载镜像测试把“最快候选”断言为本地 fixture，但并行 runner 上真实 `github.com` 探针可能更早返回成功；该 panic 持锁退出后又让四个环境隔离测试因 poisoned mutex 连锁失败。现将候选列表注入下载选择核心，测试只使用本地成功/失败端点，不访问真实公共镜像；mutex 继续保持严格 poison 语义，不在可能残留环境修改时掩盖前序 panic。默认并发 CLI lib 两轮复跑均为 `1234 passed / 2 ignored`，原 5 个失败路径全部通过。
 - TC-TWA-10（Linux CI 依赖边界回归）：run `29661465065` 的 Rust Clippy 首次在 Linux lib-test 编译阶段发现 Windows 进程探针被 `cfg(test)` 错误带入，而 `sysinfo` 原本只属于 macOS target dependency。现将真实进程探针严格限定为 Windows 编译，并为 Windows target 显式声明 `sysinfo`；非 Windows 测试继续覆盖无依赖的路径归一化和 owner 决策。修复后本机 all-targets/all-features strict clippy 通过，后续 Linux 与 Windows 原生编译由新 CI run 继续门禁。
