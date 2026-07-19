@@ -1,6 +1,7 @@
 use super::{
     append_desktop_bootstrap_log, begin_backend_recovery, clear_backend_unavailable_if_healthy,
-    deferred_desktop_install_version_error, desktop_backend_env, desktop_backend_start_args,
+    commit_deferred_desktop_install_artifacts, deferred_desktop_install_version_error,
+    desktop_backend_env, desktop_backend_start_args,
     desktop_pending_install_path, desktop_sidecar_rust_log, desktop_startup_deadline,
     desktop_startup_session_id, desktop_test_allows_multiple_instances,
     desktop_upgrade_relaunch_marker_path, host_window_close_behavior_for_platform,
@@ -17,7 +18,8 @@ use super::{
     uses_borderless_desktop_chrome_for_platform, wait_for_backend, wait_for_child_exit,
     windows_desktop_upgrade_handoff_command, write_desktop_upgrade_terminal_progress,
     write_upgrade_relaunch_marker, BackendState, BackendWaitFailureKind, DesktopConfig,
-    DesktopUpgradeRelaunchMarker, HostWindowCloseBehavior, PendingDesktopInstall,
+    DesktopInstallRollback, DesktopUpgradeRelaunchMarker, HostWindowCloseBehavior,
+    PendingDesktopInstall,
     StartupDeadlineDisposition, DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
     WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
 };
@@ -376,6 +378,7 @@ fn upgrade_relaunch_marker_activity_requires_fresh_supported_marker() {
         proxy_port: 9900,
         app_target: "/Applications/Bifrost.app".to_string(),
         pending_install: None,
+        rollback: None,
     };
     assert!(is_upgrade_relaunch_marker_active(&fresh, 10_001));
     assert!(
@@ -449,12 +452,32 @@ fn deferred_desktop_installer_marker_is_validated_before_handoff() {
     assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("WaitForExit(30000)"));
     assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("@(0, 1641, 3010)"));
     assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("Write-Progress \"failed\""));
+    let snapshot_index = WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
+        .find("$rollback = New-InstallSnapshot $marker")
+        .expect("deferred install snapshots the current App");
+    let installer_index = WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
+        .find("$installer = Start-Process")
+        .expect("deferred installer launch");
+    assert!(
+        snapshot_index < installer_index,
+        "the old App must be snapshotted before MSI/EXE execution"
+    );
+    assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
+        .contains("$terminal = Wait-ForDesktopVerification $startedApp"));
+    assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains(".Bifrost.rollback-"));
+    assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
+        .contains("Restore-InstallSnapshot $rollback"));
+    assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains(
+        "Desktop app verification failed; previous version restored"
+    ));
+    assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
+        .contains("deferred desktop install transaction committed"));
     assert_eq!(
         WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
             .matches("Remove-Item -LiteralPath $pendingPath")
             .count(),
-        2,
-        "the deferred guard is released after either install success or failure"
+        3,
+        "the deferred guard is released after commit, verified rollback, or setup failure"
     );
     assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
         .contains("if ([bool]$marker.pending_install.package_owned_by_updater)"));
@@ -462,8 +485,8 @@ fn deferred_desktop_installer_marker_is_validated_before_handoff() {
         WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
             .matches("Remove-Item -LiteralPath $packagePath")
             .count(),
-        1,
-        "caller package cleanup must exist only inside the ownership guard"
+        3,
+        "each terminal path cleans the package only inside the ownership guard"
     );
 
     let legacy_pending: PendingDesktopInstall = serde_json::from_str(
@@ -495,6 +518,11 @@ fn deferred_desktop_install_completion_requires_target_version() {
         target_version: "0.0.156".to_string(),
         package_owned_by_updater: false,
     };
+    let rollback = DesktopInstallRollback {
+        install_dir: "C:\\Program Files\\Bifrost".to_string(),
+        backup_dir: "C:\\Temp\\bifrost-rollback".to_string(),
+        had_previous_install: true,
+    };
     let marker = DesktopUpgradeRelaunchMarker {
         schema_version: 1,
         created_at_ms: super::current_time_millis(),
@@ -503,6 +531,7 @@ fn deferred_desktop_install_completion_requires_target_version() {
         proxy_port: 9900,
         app_target: "C:\\Program Files\\Bifrost\\bifrost-desktop.exe".to_string(),
         pending_install: Some(pending),
+        rollback: Some(rollback),
     };
 
     assert_eq!(
@@ -522,6 +551,68 @@ fn deferred_desktop_install_completion_requires_target_version() {
         deferred_desktop_install_version_error(&non_deferred, "0.0.155"),
         None
     );
+
+    let legacy_marker: DesktopUpgradeRelaunchMarker = serde_json::from_str(
+        r#"{"schema_version":1,"created_at_ms":1,"old_app_pid":2,"old_core_pid":3,"proxy_port":9900,"app_target":"Bifrost.exe","pending_install":null}"#,
+    )
+    .expect("legacy relaunch marker without rollback metadata remains readable");
+    assert_eq!(legacy_marker.rollback, None);
+}
+
+#[test]
+fn deferred_desktop_install_commit_cleans_only_valid_transaction_artifacts() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let install_dir = temp_dir.path().join("Bifrost");
+    let backup_dir = temp_dir.path().join(".Bifrost.rollback-test");
+    let package = temp_dir.path().join("Bifrost.msi");
+    fs::create_dir_all(&install_dir).expect("install dir");
+    fs::create_dir_all(&backup_dir).expect("rollback dir");
+    fs::write(backup_dir.join("old.exe"), b"old").expect("old app snapshot");
+    fs::write(&package, b"package").expect("owned package");
+    fs::write(desktop_pending_install_path(temp_dir.path()), b"pending")
+        .expect("pending marker");
+    let marker = DesktopUpgradeRelaunchMarker {
+        schema_version: 1,
+        created_at_ms: super::current_time_millis(),
+        old_app_pid: 123,
+        old_core_pid: Some(124),
+        proxy_port: 9900,
+        app_target: install_dir.join("Bifrost.exe").to_string_lossy().into_owned(),
+        pending_install: Some(PendingDesktopInstall {
+            schema_version: 1,
+            created_at_ms: super::current_time_millis(),
+            package_path: package.to_string_lossy().into_owned(),
+            target_version: "0.0.156".to_string(),
+            package_owned_by_updater: true,
+        }),
+        rollback: Some(DesktopInstallRollback {
+            install_dir: install_dir.to_string_lossy().into_owned(),
+            backup_dir: backup_dir.to_string_lossy().into_owned(),
+            had_previous_install: true,
+        }),
+    };
+
+    commit_deferred_desktop_install_artifacts(temp_dir.path(), &marker)
+        .expect("commit transaction artifacts");
+    assert!(!backup_dir.exists());
+    assert!(!desktop_pending_install_path(temp_dir.path()).exists());
+    assert!(!package.exists());
+    assert!(install_dir.exists(), "the committed App is never removed");
+
+    let unrelated = temp_dir.path().join("unrelated");
+    fs::create_dir_all(&unrelated).expect("unrelated dir");
+    let invalid = DesktopUpgradeRelaunchMarker {
+        rollback: Some(DesktopInstallRollback {
+            install_dir: install_dir.to_string_lossy().into_owned(),
+            backup_dir: unrelated.to_string_lossy().into_owned(),
+            had_previous_install: true,
+        }),
+        ..marker
+    };
+    assert!(commit_deferred_desktop_install_artifacts(temp_dir.path(), &invalid)
+        .expect_err("arbitrary cleanup path must be rejected")
+        .contains("refusing"));
+    assert!(unrelated.exists());
 }
 
 #[test]
@@ -591,6 +682,7 @@ fn upgrade_relaunch_marker_round_trips_and_stale_marker_is_removed() {
         proxy_port: 9900,
         app_target: "/tmp/Bifrost.app".to_string(),
         pending_install: None,
+        rollback: None,
     };
 
     let marker_path =
@@ -612,6 +704,7 @@ fn upgrade_relaunch_marker_round_trips_and_stale_marker_is_removed() {
         proxy_port: 9900,
         app_target: "/tmp/Bifrost.app".to_string(),
         pending_install: None,
+        rollback: None,
     };
     fs::write(
         desktop_upgrade_relaunch_marker_path(temp_dir.path()),
@@ -636,6 +729,7 @@ fn active_upgrade_relaunch_marker_disables_existing_backend_reuse() {
         proxy_port: 9900,
         app_target: "/tmp/Bifrost.app".to_string(),
         pending_install: None,
+        rollback: None,
     };
 
     assert!(may_reuse_existing_backend(None));

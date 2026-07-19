@@ -230,6 +230,8 @@
    cargo test --manifest-path desktop/src-tauri/Cargo.toml restart_handoff_setup_failure -- --nocapture
    cargo test --manifest-path desktop/src-tauri/Cargo.toml deferred_desktop_installer_marker -- --nocapture
    cargo test --manifest-path desktop/src-tauri/Cargo.toml deferred_desktop_install_completion -- --nocapture
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml deferred_desktop_install_commit -- --nocapture
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml -- --nocapture
    pnpm --dir web exec vitest run src/stores/useVersionStore.test.ts
    SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli top_level_app_upgrade_owns_the_shared_lock_but_nested_companion_skips_it --lib -- --nocapture
    SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli background_upgrade_preserves_progress_owned_by_pending_desktop_handoff --lib -- --nocapture
@@ -299,6 +301,7 @@
 - foreground CLI runtime 与 daemon 一样归 CLI updater 重启，只有 `RuntimeStartMode::Desktop` 会交给 Tauri handoff。
 - Windows App-owned MSI/EXE 不在 App/sidecar 仍运行时执行；pending marker 交给 Tauri helper，在旧 App/core 退出后有界安装，失败写 `Failed`，成功才拉起新 App。pending handoff 拒绝后台竞争者时不得把原有 `Restarting/source=desktop` 覆盖成 `Failed/source=admin`。
 - Windows deferred 安装只在新 App 的编译版本等于 pinned target 时写 `Completed`；安装器成功但拉起旧/错误版本时写 `Failed`。
+- Windows deferred helper 必须在安装前把完整目录快照到安装目标之外，并在新 App 编译版本与 managed core 都确认前保留 pending guard、快照和 updater 自有包；版本不匹配、App 提前退出、验证超时或 core 启动失败时，新 App 正常释放文件，helper 恢复旧目录、保留 `Failed` 并重新拉起旧 App。安装器退出 0 本身不能提交事务。
 - pending marker 区分 updater 下载包与调用者传入包；handoff 成功后只删除前者，保留用户的 `--package` 文件。
 - Desktop shell 复用 CLI-owned core 时，`source=admin` 的 `Restarting` 继续由 CLI owner 收口，不触发 Tauri App handoff。
 - Windows deferred installer 在旧 App/core 退出后的整个安装窗口继续持有 pending-marker guard，CLI、tray 与 App updater 都不能取得共享升级锁；成功或失败后 guard 都会释放，陈旧 marker 不会永久阻塞后续更新。
@@ -324,6 +327,7 @@
 
 2026-07-18 本次状态机审计已执行（最终复测）：
 
+- TC-TWA-10（PR comments 第十一轮，Windows deferred 跨进程回滚）：通过。helper 在旧 App/core 退出后、MSI/EXE 执行前把完整安装目录快照到目标目录之外，并把 rollback metadata 原子写回 relaunch marker；installer 返回成功后仍保留 pending guard、快照和 updater 自有包，等待新 App 编译版本与 managed core 共同确认。版本不匹配、App 提前退出、120 秒验证超时或 core 启动失败会让新 App 走正常 shutdown，helper 仅清理安装目录内残留进程、恢复旧目录、保留 `Failed` 并重启旧 App；只有 `Completed` 才提交清理。第 1 轮 review 发现新 App 写 `Completed` 后 helper 若在清理前崩溃会残留 guard/快照，补充了 App 侧受路径校验保护的幂等提交清理，任意非 `.Bifrost.rollback-*` 同级目录会拒绝删除；第 2 轮复跑 desktop 全量单测 `52/52`、handoff contract `5/5 + 1/1 + 1/1 + 1/1 + 1/1`、restart E2E `21/21` 与 desktop strict clippy 全绿。静态合约额外断言 snapshot 发生在 installer 之前、验证失败必经 restore、pending/package 不会提前清理。测试只使用临时目录、随机端口与构建 sidecar，未操作 9900 或真实 Windows/macOS App。
 - TC-TWA-10（并发升级单测隔离回归）：run `29661719290` 的 Unit & Integration Tests 首个失败是下载镜像测试把“最快候选”断言为本地 fixture，但并行 runner 上真实 `github.com` 探针可能更早返回成功；该 panic 持锁退出后又让四个环境隔离测试因 poisoned mutex 连锁失败。现将候选列表注入下载选择核心，测试只使用本地成功/失败端点，不访问真实公共镜像；mutex 继续保持严格 poison 语义，不在可能残留环境修改时掩盖前序 panic。默认并发 CLI lib 两轮复跑均为 `1234 passed / 2 ignored`，原 5 个失败路径全部通过。
 - TC-TWA-10（Linux CI 依赖边界回归）：run `29661465065` 的 Rust Clippy 首次在 Linux lib-test 编译阶段发现 Windows 进程探针被 `cfg(test)` 错误带入，而 `sysinfo` 原本只属于 macOS target dependency。现将真实进程探针严格限定为 Windows 编译，并为 Windows target 显式声明 `sysinfo`；非 Windows 测试继续覆盖无依赖的路径归一化和 owner 决策。修复后本机 all-targets/all-features strict clippy 通过，后续 Linux 与 Windows 原生编译由新 CI run 继续门禁。
 - TC-TWA-10（PR comments 第六轮）：通过。desktop `main.rs` 按 upgrade handoff、backend runtime 和 tests 拆为 `1353/660/1430/1113` 行；CLI upgrade companion 独立为 `203` 行，upgrade tests 拆为 `1470/107` 行。锁竞争定向测试证明 fresh Windows pending marker 返回“handoff already pending”且保留原 `Restarting/source=desktop`；直接 App 行为测试证明只禁止 App 递归而保留 proxy restart；Windows companion 决策覆盖“桌面进程运行→desktop deferred handoff”和“未运行→caller-managed install”。升级 restart 契约修正拆分后的扫描范围并复跑 `21/21`。普通 CLI 本地归档真实升级最终为 `18/18`，旧 daemon `99783` 在随机端口 `57694` 被新 PID `285` 替换；直接 `app upgrade` 真实链路最终为 `19/19`，在隔离目录安装 pinned App target，并将旧 daemon `98290` 在随机端口 `57566` 替换为新 PID `98529`。针对用户原始 `155` 残留问题，额外构造磁盘/命令 CLI 已为 `0.0.156`、运行中 core 为临时真实 `0.0.155` 的 already-latest 场景，`app upgrade` 回归为 `17/17`：旧 PID `11975` 被新 PID `12172` 替换，App、CLI 与新 core 都收敛到 `0.0.156`。三条链路都额外从安装路径执行 `--version` 并读取新 core 的 `/api/system.version`，均精确等于 pinned target；同时保持 no-system-proxy、清理 tray helper 并释放端口。App-owned Admin 为 `17/17`，direct desktop CLI 为 `36/36`，native handoff 为 `5/5 + 1/1 + 1/1 + 1/1`。未操作 9900 或真实 `/Applications/Bifrost.app`。

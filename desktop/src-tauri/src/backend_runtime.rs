@@ -660,7 +660,28 @@ pub(super) fn start_desktop_backend_now(
                         Some(error.clone()),
                     );
                     append_desktop_bootstrap_log(&state.data_dir, error);
+                    if marker.rollback.is_some() {
+                        append_desktop_bootstrap_log(
+                            &state.data_dir,
+                            "requesting desktop shutdown so the deferred installer can roll back",
+                        );
+                        request_desktop_shutdown(app);
+                        return Err(
+                            "deferred desktop install verification failed; rollback requested"
+                                .to_string(),
+                        );
+                    }
                 } else {
+                    if let Err(error) =
+                        commit_deferred_desktop_install_artifacts(&state.data_dir, marker)
+                    {
+                        append_desktop_bootstrap_log(
+                            &state.data_dir,
+                            format!(
+                                "deferred desktop install committed but artifact cleanup is pending in helper: {error}"
+                            ),
+                        );
+                    }
                     write_desktop_upgrade_terminal_progress(
                         &state.data_dir,
                         UpgradePhase::Completed,
@@ -683,13 +704,20 @@ pub(super) fn start_desktop_backend_now(
         }
         Err(error) => {
             let message = error.to_string();
-            if upgrade_relaunch.is_some() {
+            if let Some(marker) = upgrade_relaunch.as_ref() {
                 write_desktop_upgrade_terminal_progress(
                     &state.data_dir,
                     UpgradePhase::Failed,
                     "Desktop app updated but the new core failed to start",
                     Some(message.clone()),
                 );
+                if marker.rollback.is_some() {
+                    append_desktop_bootstrap_log(
+                        &state.data_dir,
+                        "requesting desktop shutdown so the failed deferred install can roll back",
+                    );
+                    request_desktop_shutdown(app);
+                }
             }
             record_startup_error(&state, message.clone());
             try_start_native_handoff(app, "backend startup failed");

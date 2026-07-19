@@ -95,6 +95,59 @@ pub(super) fn deferred_desktop_install_version_error(
     })
 }
 
+pub(super) fn commit_deferred_desktop_install_artifacts(
+    data_dir: &Path,
+    marker: &DesktopUpgradeRelaunchMarker,
+) -> Result<(), String> {
+    let Some(rollback) = marker.rollback.as_ref() else {
+        return Ok(());
+    };
+    let install_dir = Path::new(&rollback.install_dir);
+    let backup_dir = Path::new(&rollback.backup_dir);
+    let backup_name = backup_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if Path::new(&marker.app_target).parent() != Some(install_dir)
+        || install_dir.parent().is_none()
+        || backup_dir.parent() != install_dir.parent()
+        || !backup_name.starts_with(".Bifrost.rollback-")
+    {
+        return Err(format!(
+            "refusing to clean invalid desktop rollback path: {}",
+            backup_dir.display()
+        ));
+    }
+    if let Err(error) = fs::remove_dir_all(backup_dir) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!(
+                "failed to remove desktop rollback snapshot {}: {error}",
+                backup_dir.display()
+            ));
+        }
+    }
+    for path in [desktop_pending_install_path(data_dir)]
+        .into_iter()
+        .chain(
+            marker
+                .pending_install
+                .as_ref()
+                .filter(|pending| pending.package_owned_by_updater)
+                .map(|pending| PathBuf::from(&pending.package_path)),
+        )
+    {
+        if let Err(error) = fs::remove_file(&path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!(
+                    "failed to clean deferred desktop install artifact {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn write_upgrade_relaunch_marker(
     data_dir: &Path,
     marker: &DesktopUpgradeRelaunchMarker,
@@ -418,6 +471,7 @@ pub(super) fn restart_desktop_after_update(app: AppHandle) -> Result<(), String>
         proxy_port,
         app_target: app_target.to_string_lossy().into_owned(),
         pending_install,
+        rollback: None,
     };
     let marker_path = write_upgrade_relaunch_marker(&state.data_dir, &marker).map_err(|error| {
         persist_desktop_upgrade_handoff_failure(
@@ -564,7 +618,129 @@ function Wait-ForProcessExit([uint32]$ProcessId, [string]$Label) {
   throw "$Label process $ProcessId did not exit within 30 seconds"
 }
 
+function Write-Marker($Marker) {
+  $tmpPath = "$MarkerPath.tmp.$PID"
+  $json = $Marker | ConvertTo-Json -Depth 8
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)
+  Move-Item -LiteralPath $tmpPath -Destination $MarkerPath -Force
+}
+
+function New-InstallSnapshot($Marker) {
+  $installDir = Split-Path -Parent $TargetPath
+  if (-not $installDir) { throw "desktop app target has no install directory: $TargetPath" }
+  $installParent = Split-Path -Parent $installDir
+  if (-not $installParent) { throw "desktop app install directory has no parent: $installDir" }
+  $backupDir = Join-Path $installParent (".Bifrost.rollback-" + [Guid]::NewGuid().ToString("N"))
+  $hadPreviousInstall = Test-Path -LiteralPath $installDir -PathType Container
+  New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+  try {
+    if ($hadPreviousInstall) {
+      Get-ChildItem -LiteralPath $installDir -Force | Copy-Item -Destination $backupDir -Recurse -Force
+    }
+    $rollback = [ordered]@{
+      install_dir = $installDir
+      backup_dir = $backupDir
+      had_previous_install = $hadPreviousInstall
+    }
+    $Marker | Add-Member -NotePropertyName rollback -NotePropertyValue $rollback -Force
+    Write-Marker $Marker
+  } catch {
+    Remove-Item -LiteralPath $backupDir -Recurse -Force -ErrorAction SilentlyContinue
+    throw
+  }
+  Write-BootstrapLog "deferred desktop install snapshot created; install_dir=$installDir backup_dir=$backupDir had_previous_install=$hadPreviousInstall"
+  return $rollback
+}
+
+function Remove-InstallSnapshot($Rollback) {
+  if ($null -ne $Rollback -and $Rollback.backup_dir) {
+    Remove-Item -LiteralPath ([string]$Rollback.backup_dir) -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Stop-InstallDirectoryProcesses([string]$InstallDir) {
+  try {
+    $prefix = [System.IO.Path]::GetFullPath($InstallDir).TrimEnd('\') + '\'
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+      $_.ExecutablePath -and [System.IO.Path]::GetFullPath([string]$_.ExecutablePath).StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)
+    } | ForEach-Object {
+      Stop-Process -Id ([uint32]$_.ProcessId) -Force -ErrorAction SilentlyContinue
+    }
+  } catch {}
+}
+
+function Restore-InstallSnapshot($Rollback) {
+  if ($null -eq $Rollback) { throw "desktop install rollback metadata is missing" }
+  $installDir = [string]$Rollback.install_dir
+  $backupDir = [string]$Rollback.backup_dir
+  $hadPreviousInstall = [bool]$Rollback.had_previous_install
+  if ($hadPreviousInstall -and -not (Test-Path -LiteralPath $backupDir -PathType Container)) {
+    throw "desktop install rollback snapshot is missing: $backupDir"
+  }
+  Stop-InstallDirectoryProcesses $installDir
+  $failedDir = "$installDir.failed-upgrade-$PID"
+  Remove-Item -LiteralPath $failedDir -Recurse -Force -ErrorAction SilentlyContinue
+  $deadline = [DateTime]::UtcNow.AddSeconds(30)
+  while (Test-Path -LiteralPath $installDir) {
+    try {
+      Move-Item -LiteralPath $installDir -Destination $failedDir -Force
+      break
+    } catch {
+      if ([DateTime]::UtcNow -ge $deadline) { throw }
+      Stop-InstallDirectoryProcesses $installDir
+      Start-Sleep -Milliseconds 250
+    }
+  }
+  try {
+    if ($hadPreviousInstall) {
+      New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+      Get-ChildItem -LiteralPath $backupDir -Force | Copy-Item -Destination $installDir -Recurse -Force
+    }
+  } catch {
+    Remove-Item -LiteralPath $installDir -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $failedDir) {
+      Move-Item -LiteralPath $failedDir -Destination $installDir -Force -ErrorAction SilentlyContinue
+    }
+    throw
+  }
+  Remove-Item -LiteralPath $failedDir -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-InstallSnapshot $Rollback
+  Write-BootstrapLog "previous desktop install restored; install_dir=$installDir"
+}
+
+function Read-TerminalProgress() {
+  if (-not (Test-Path -LiteralPath $progressPath -PathType Leaf)) { return $null }
+  try {
+    $progress = Get-Content -LiteralPath $progressPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($progress.phase -in @("completed", "failed")) { return $progress }
+  } catch {}
+  return $null
+}
+
+function Wait-ForDesktopVerification($StartedApp) {
+  $deadline = [DateTime]::UtcNow.AddMinutes(2)
+  while ([DateTime]::UtcNow -lt $deadline) {
+    $terminal = Read-TerminalProgress
+    if ($null -ne $terminal) { return $terminal }
+    if ($StartedApp.HasExited) {
+      return [pscustomobject]@{
+        phase = "failed"
+        error = "restarted desktop app exited before completing version and core verification"
+      }
+    }
+    Start-Sleep -Milliseconds 250
+    $StartedApp.Refresh()
+  }
+  return [pscustomobject]@{
+    phase = "failed"
+    error = "restarted desktop app did not complete version and core verification within 120 seconds"
+  }
+}
+
 $targetVersion = $null
+$packagePath = $null
+$rollback = $null
 try {
   $marker = Get-Content -LiteralPath $MarkerPath -Raw -Encoding UTF8 | ConvertFrom-Json
   if ($marker.pending_install) { $targetVersion = [string]$marker.pending_install.target_version }
@@ -578,6 +754,7 @@ try {
     if (-not (Test-Path -LiteralPath $packagePath -PathType Leaf)) {
       throw "deferred desktop installer is missing: $packagePath"
     }
+    $rollback = New-InstallSnapshot $marker
     Write-Progress "installing" "Installing desktop app after shutdown..." $targetVersion $null
     Write-BootstrapLog "starting deferred desktop installer; target_version=$targetVersion package=$packagePath"
     $extension = [System.IO.Path]::GetExtension($packagePath).ToLowerInvariant()
@@ -604,20 +781,57 @@ try {
     if ($installer.ExitCode -notin @(0, 1641, 3010)) {
       throw "desktop installer exited with code $($installer.ExitCode)"
     }
+    Write-BootstrapLog "deferred desktop installer completed; target_version=$targetVersion"
+  }
+
+  $startedApp = Start-Process -FilePath $TargetPath -PassThru
+  Write-BootstrapLog "desktop upgrade handoff opened target: $TargetPath"
+  if ($null -ne $rollback) {
+    $terminal = Wait-ForDesktopVerification $startedApp
+    if ([string]$terminal.phase -ne "completed") {
+      $failure = if ($terminal.error) { [string]$terminal.error } else { "restarted desktop app reported upgrade failure" }
+      if (-not $startedApp.HasExited) {
+        try { Wait-ForProcessExit ([uint32]$startedApp.Id) "replacement desktop app" } catch {
+          Stop-Process -Id ([uint32]$startedApp.Id) -Force -ErrorAction SilentlyContinue
+        }
+      }
+      Restore-InstallSnapshot $rollback
+      Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath $pendingPath -Force -ErrorAction SilentlyContinue
+      if ([bool]$marker.pending_install.package_owned_by_updater) {
+        Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
+      }
+      $message = "$failure; previous desktop app restored"
+      Write-Progress "failed" "Desktop app verification failed; previous version restored" $targetVersion $message
+      Write-BootstrapLog $message
+      Start-Process -FilePath $TargetPath | Out-Null
+      Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+      exit 1
+    }
+    Remove-InstallSnapshot $rollback
+    Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $pendingPath -Force -ErrorAction SilentlyContinue
     if ([bool]$marker.pending_install.package_owned_by_updater) {
       Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
     }
-    Write-BootstrapLog "deferred desktop installer completed; target_version=$targetVersion"
+    Write-BootstrapLog "deferred desktop install transaction committed; target_version=$targetVersion"
   }
-
-  Start-Process -FilePath $TargetPath | Out-Null
-  Write-BootstrapLog "desktop upgrade handoff opened target: $TargetPath"
   Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 } catch {
   $message = "desktop upgrade handoff failed: $($_.Exception.Message)"
+  if ($null -ne $rollback) {
+    try {
+      Restore-InstallSnapshot $rollback
+      $message = "$message; previous desktop app restored"
+    } catch {
+      $message = "$message; failed to restore previous desktop app: $($_.Exception.Message)"
+    }
+  }
   Remove-Item -LiteralPath $MarkerPath -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $pendingPath -Force -ErrorAction SilentlyContinue
+  if ($null -ne $packagePath -and [bool]$marker.pending_install.package_owned_by_updater) {
+    Remove-Item -LiteralPath $packagePath -Force -ErrorAction SilentlyContinue
+  }
   Write-Progress "failed" "Desktop app install or restart failed" $targetVersion $message
   Write-BootstrapLog $message
   try { Start-Process -FilePath $TargetPath | Out-Null } catch {}

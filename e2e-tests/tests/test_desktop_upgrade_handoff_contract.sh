@@ -30,6 +30,8 @@ CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
   cargo test --manifest-path desktop/src-tauri/Cargo.toml deferred_desktop_installer_marker -- --nocapture
 CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
   cargo test --manifest-path desktop/src-tauri/Cargo.toml deferred_desktop_install_completion -- --nocapture
+CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
+  cargo test --manifest-path desktop/src-tauri/Cargo.toml deferred_desktop_install_commit -- --nocapture
 
 DESKTOP_MAIN="$REPO_ROOT/desktop/src-tauri/src/main.rs"
 DESKTOP_HANDOFF="$REPO_ROOT/desktop/src-tauri/src/upgrade_handoff.rs"
@@ -60,6 +62,18 @@ fi
 
 if ! grep -Fq 'package_owned_by_updater' "$DESKTOP_MAIN"; then
   echo "[desktop-upgrade-handoff] FAIL: deferred handoff cannot distinguish updater downloads from caller-owned packages"
+  exit 1
+fi
+
+if ! grep -Fq '$rollback = New-InstallSnapshot $marker' "$DESKTOP_HANDOFF" ||
+  ! grep -Fq '$terminal = Wait-ForDesktopVerification $startedApp' "$DESKTOP_HANDOFF" ||
+  ! grep -Fq 'Restore-InstallSnapshot $rollback' "$DESKTOP_HANDOFF"; then
+  echo "[desktop-upgrade-handoff] FAIL: deferred Windows install is not a verified rollback transaction"
+  exit 1
+fi
+
+if ! grep -Fq 'request_desktop_shutdown(app)' "$DESKTOP_BACKEND"; then
+  echo "[desktop-upgrade-handoff] FAIL: failed relaunched App/core cannot release Windows files for rollback"
   exit 1
 fi
 

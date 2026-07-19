@@ -73,8 +73,13 @@ the new App, which would make every new App enter helper mode, exit, and open an
 5. Readiness for the newly launched child requires both a healthy backend response and a
    `runtime.json` marker whose `pid` and `port` match that child. A health response from another
    process on the same port is not enough to complete managed startup.
-6. After the backend becomes ready, the marker is removed.
-7. The new App is the final terminal-progress owner: it rewrites progress to `Completed` only after
+6. For a deferred Windows MSI/EXE, the helper keeps the pre-install directory snapshot and pending
+   guard until the relaunched App verifies both its compiled version and its managed core. A version
+   mismatch or managed-core startup failure writes `Failed` and asks the App to shut down normally;
+   the still-running helper then restores the complete previous install and relaunches it.
+7. After the backend becomes ready, the marker is removed and the Windows helper commits the
+   transaction by deleting the snapshot, pending guard, and updater-owned package.
+8. The new App is the final terminal-progress owner: it rewrites progress to `Completed` only after
    the managed core is ready; helper relaunch failure or managed-core startup failure rewrites it to
    `Failed` while preserving the selected target/source for diagnosis and retry.
 
@@ -96,7 +101,9 @@ stateDiagram-v2
 
     HandoffBootstrap --> NormalBootstrap: marker expired or invalid
     PortReleased --> HandoffFailed: helper cannot open new App
-    NewCoreManaged --> HandoffFailed: managed core fails readiness
+    NewCoreManaged --> RollbackRequested: version mismatch or managed core fails readiness
+    RollbackRequested --> PreviousAppRestored: new App/core release files
+    PreviousAppRestored --> HandoffFailed: preserve failure and relaunch previous App
 ```
 
 ## Testable Contracts
@@ -121,6 +128,11 @@ stateDiagram-v2
   transaction: installer failure or post-install version mismatch restores the complete previous
   directory; a failed first install is removed. Rollback failure is reported together with the
   original install error instead of being hidden.
+- The deferred Windows helper owns the same transaction across App processes: it must not remove the
+  pending guard, updater package, or install snapshot merely because the installer exits successfully.
+  It commits only after the relaunched App/core reports `Completed`; on version mismatch, early App
+  exit, verification timeout, or managed-core failure it releases scoped install processes, restores
+  the snapshot, preserves `Failed`, and relaunches the previous App.
 - Windows self-update CI builds the current and pinned target executables separately with the same
   `BIFROST_VERSION` injection used by release builds. Before exercising replacement, the target
   executable must pass both `bifrost --version` and a real `/api/system.version` core probe; CLI-only

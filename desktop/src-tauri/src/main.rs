@@ -207,6 +207,13 @@ struct PendingDesktopInstall {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DesktopInstallRollback {
+    install_dir: String,
+    backup_dir: String,
+    had_previous_install: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct DesktopUpgradeRelaunchMarker {
     schema_version: u8,
     created_at_ms: u64,
@@ -216,6 +223,8 @@ struct DesktopUpgradeRelaunchMarker {
     app_target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_install: Option<PendingDesktopInstall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rollback: Option<DesktopInstallRollback>,
 }
 
 fn main() {
