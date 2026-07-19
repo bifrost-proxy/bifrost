@@ -323,14 +323,28 @@ pub(super) fn update_desktop_app_after_upgrade(
         webview_origin,
     );
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    if should_request_desktop_shutdown_before_update(true, desktop_process_running, webview_origin)
-    {
+    let desktop_was_shut_down = should_request_desktop_shutdown_before_update(
+        true,
+        desktop_process_running,
+        webview_origin,
+    );
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let desktop_was_shut_down = false;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if desktop_was_shut_down {
         request_running_desktop_shutdown(&app_path)?;
     }
     let args = post_upgrade_desktop_app_args(target_version, app_path.parent(), mode);
     let environment = desktop_companion_environment(mode);
-    let parent_lock_data_dir = get_bifrost_dir()?;
-    match command_output_with_timeout_and_env(
+    let parent_lock_data_dir = get_bifrost_dir().map_err(|error| {
+        restore_desktop_after_failed_companion(
+            &app_path,
+            desktop_was_shut_down,
+            error,
+            crate::commands::app::restart_desktop_app,
+        )
+    })?;
+    let result = match command_output_with_timeout_and_env(
         executable,
         &args,
         Duration::from_secs(POST_UPGRADE_APP_UPDATE_TIMEOUT_SECS),
@@ -359,6 +373,42 @@ pub(super) fn update_desktop_app_after_upgrade(
         Err(error) => Err(BifrostError::Config(format!(
             "could not run desktop app update: {error}"
         ))),
+    };
+    result.map_err(|error| {
+        restore_desktop_after_failed_companion(
+            &app_path,
+            desktop_was_shut_down,
+            error,
+            crate::commands::app::restart_desktop_app,
+        )
+    })
+}
+
+pub(super) fn restore_desktop_after_failed_companion(
+    app_path: &Path,
+    desktop_was_shut_down: bool,
+    original_error: BifrostError,
+    relaunch: impl FnOnce(&Path) -> Result<(), BifrostError>,
+) -> BifrostError {
+    if !desktop_was_shut_down {
+        return original_error;
+    }
+    eprintln!(
+        "{}",
+        "⚠ Desktop app update failed after shutdown; relaunching the previous shell."
+            .bright_yellow()
+    );
+    match relaunch(app_path) {
+        Ok(()) => {
+            eprintln!(
+                "{}",
+                "✓ Previous Bifrost desktop shell relaunched.".bright_green()
+            );
+            original_error
+        }
+        Err(relaunch_error) => BifrostError::Config(format!(
+            "{original_error}; previous desktop shell relaunch also failed: {relaunch_error}"
+        )),
     }
 }
 

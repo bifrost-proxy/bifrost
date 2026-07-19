@@ -715,7 +715,7 @@ mod tests {
             Some("0.0.156".to_string()),
             "admin".to_string(),
             Some(12345),
-            Some(9900),
+            Some(19900),
             Ok(dir.clone()),
             |_| {
                 engine_called.set(true);
@@ -832,7 +832,7 @@ mod tests {
             target: Some("0.0.156".to_string()),
             source: "admin".to_string(),
             running_proxy_pid: Some(12345),
-            running_proxy_port: Some(9900),
+            running_proxy_port: Some(19900),
         };
         let forwarded = std::cell::RefCell::new(None);
         handle_upgrade_background_command_with(command, |target, source, pid, port| {
@@ -845,7 +845,7 @@ mod tests {
                 Some("0.0.156".to_string()),
                 "admin".to_string(),
                 Some(12345),
-                Some(9900),
+                Some(19900),
             ))
         );
         assert!(handle_upgrade_background_command_with(
@@ -865,7 +865,7 @@ mod tests {
             Some("0.0.156".to_string()),
             "admin".to_string(),
             Some(12345),
-            Some(9900),
+            Some(19900),
             Ok(dir.clone()),
             |hint| {
                 seen_hint.replace(hint);
@@ -874,7 +874,7 @@ mod tests {
         );
         assert_eq!(
             seen_hint.into_inner(),
-            RunningProxyHint::from_parts(Some(12345), Some(9900))
+            RunningProxyHint::from_parts(Some(12345), Some(19900))
         );
         let progress = read_progress(&dir);
         assert_eq!(progress.phase, UpgradePhase::Completed);

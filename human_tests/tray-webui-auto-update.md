@@ -362,6 +362,7 @@
 - workspace 全量测试隔离回归：最新串行 all-features 暴露既有 `direct_app_upgrade_pins_cli_to_the_resolved_app_target` 未设置 `BIFROST_DATA_DIR`，误读默认 runtime 并停止真实 9900；测试日志保留原启动参数后，已使用 installed CLI `0.0.156` 按原参数恢复 detached daemon、system proxy 与 9900 健康监听。用例现将 `BIFROST_DATA_DIR` 纳入临时目录设置和原值恢复；按用例立即执行定向测试 `1/1`，并断言执行前后 `~/.bifrost/bifrost.pid` 相同且 9900 始终 LISTEN，防止测试再次越界。
 - PR module-size P1 追加轮次：`app.rs` 因暴露桌面版本判断给 companion 后达到 1501 行，超过仓库单文件 1500 行门禁。桌面安装版本读取、标准化和目标校验现整体拆入 `app/version.rs`，`app.rs` 降至门禁以下；立即执行 App 版本解析/目标校验、already-current companion/handoff、CLI/App ownership E2E 与严格 clippy，确保纯结构拆分未改变 macOS plist、Windows PowerShell version-info 或跨模式升级行为。
 - CI already-current App E2E 追加轮次：run `29694230657` 的 macOS agent-extensions 分片中，旧 `test_upgrade_updates_installed_desktop_app_best_effort` 把 App 构造为与 target 同版却断言必须执行 child 并打印 updated-success，与本轮 P1/P2 修复后的无副作用短路契约冲突。用例改名为 `test_upgrade_preserves_already_current_desktop_app`，同时断言发现 App、输出 already-target/installation-and-process-state-unchanged，且不得输出 updated-success；立即在 macOS 本机执行完整 `test_upgrade_cli.sh`，避免只验证单一函数。
+- PR final snapshot P1/P2 追加轮次：新评论指出 lock-contention 单测仍把生产端口 `9900` 作为 runtime hint，以及 terminal 模式在已关闭旧 App 后若 companion 失败不会恢复 shell。fixture 端口改为隔离值 `19900`；companion 记录本次是否真实进入 pre-shutdown 路径，数据目录解析、child 非零退出、timeout/spawn error 任一失败都会尝试重启旧 App，重启自身失败时把 primary 与 recovery 两个错误合并返回；WebView handoff/未运行 App 不触发恢复。立即执行恢复决策单测、lock contention 单测、companion 成败分支、完整 upgrade CLI E2E 与 workspace clippy。
 
 2026-07-18 本次状态机审计已执行（最终复测）：
 

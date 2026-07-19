@@ -61,6 +61,104 @@ fn desktop_handoff_flag_requires_matching_restarting_progress() {
     }
 }
 
+#[test]
+fn failed_companion_restores_only_a_shell_that_was_shut_down() {
+    let app = Path::new("/tmp/Bifrost.app");
+    let relaunches = std::cell::Cell::new(0);
+    let untouched = restore_desktop_after_failed_companion(
+        app,
+        false,
+        BifrostError::Config("companion failed".to_string()),
+        |_| {
+            relaunches.set(relaunches.get() + 1);
+            Ok(())
+        },
+    );
+    assert_eq!(untouched.to_string(), "Config error: companion failed");
+    assert_eq!(relaunches.get(), 0);
+
+    let restored = restore_desktop_after_failed_companion(
+        app,
+        true,
+        BifrostError::Config("companion failed".to_string()),
+        |path| {
+            assert_eq!(path, app);
+            relaunches.set(relaunches.get() + 1);
+            Ok(())
+        },
+    );
+    assert_eq!(restored.to_string(), "Config error: companion failed");
+    assert_eq!(relaunches.get(), 1);
+
+    let combined = restore_desktop_after_failed_companion(
+        app,
+        true,
+        BifrostError::Config("companion failed".to_string()),
+        |_| {
+            relaunches.set(relaunches.get() + 1);
+            Err(BifrostError::Config("open failed".to_string()))
+        },
+    );
+    assert_eq!(relaunches.get(), 2);
+    assert!(combined.to_string().contains("companion failed"));
+    assert!(combined
+        .to_string()
+        .contains("previous desktop shell relaunch also failed"));
+    assert!(combined.to_string().contains("open failed"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn failed_companion_uses_production_macos_relaunch_command() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let bin = temp.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("create bin");
+    let marker = temp.path().join("relaunch-marker");
+    let fake_open = bin.join("open");
+    std::fs::write(
+        &fake_open,
+        "#!/bin/sh\nprintf '%s' \"$1\" > \"$BIFROST_TEST_RELAUNCH_MARKER\"\n",
+    )
+    .expect("write fake open");
+    std::fs::set_permissions(&fake_open, std::fs::Permissions::from_mode(0o755))
+        .expect("make fake open executable");
+
+    let previous_path = std::env::var_os("PATH");
+    let previous_marker = std::env::var_os("BIFROST_TEST_RELAUNCH_MARKER");
+    std::env::set_var("PATH", &bin);
+    std::env::set_var("BIFROST_TEST_RELAUNCH_MARKER", &marker);
+    let app = temp.path().join("Bifrost.app");
+    let error = restore_desktop_after_failed_companion(
+        &app,
+        true,
+        BifrostError::Config("companion failed".to_string()),
+        crate::commands::app::restart_desktop_app,
+    );
+    assert_eq!(error.to_string(), "Config error: companion failed");
+    for _ in 0..100 {
+        if marker.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        std::fs::read_to_string(&marker).expect("fake open records App path"),
+        app.to_string_lossy()
+    );
+
+    match previous_path {
+        Some(value) => std::env::set_var("PATH", value),
+        None => std::env::remove_var("PATH"),
+    }
+    match previous_marker {
+        Some(value) => std::env::set_var("BIFROST_TEST_RELAUNCH_MARKER", value),
+        None => std::env::remove_var("BIFROST_TEST_RELAUNCH_MARKER"),
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn cli_restart_stops_live_process_and_strips_detached_marker() {

@@ -297,7 +297,7 @@ fn upgrade_behavior_executes_companion_and_runtime_ownership_branches() {
 
     let desktop_runtime = RuntimeInfo::new(
         std::process::id(),
-        9900,
+        19900,
         None,
         Some("127.0.0.1".to_string()),
         RuntimeStartMode::Desktop,
@@ -366,21 +366,21 @@ fn cli_upgrade_restarts_foreground_and_daemon_but_not_desktop_runtime() {
     assert!(cli_owns_runtime_restart(None));
     let daemon = RuntimeInfo::new(
         12345,
-        9900,
+        19900,
         None,
         Some("127.0.0.1".to_string()),
         RuntimeStartMode::Daemon,
     );
     let desktop = RuntimeInfo::new(
         12346,
-        9900,
+        19900,
         None,
         Some("127.0.0.1".to_string()),
         RuntimeStartMode::Desktop,
     );
     let foreground = RuntimeInfo::new(
         12347,
-        9900,
+        19900,
         None,
         Some("127.0.0.1".to_string()),
         RuntimeStartMode::Foreground,
@@ -594,7 +594,7 @@ fn test_build_restart_args_with_runtime_info() {
 fn test_build_restart_args_default_host_skipped() {
     let info = crate::process::RuntimeInfo {
         pid: 12345,
-        port: 9900,
+        port: 19900,
         socks5_port: None,
         host: Some("127.0.0.1".to_string()),
         started_at_ms: None,
@@ -614,7 +614,7 @@ fn test_build_restart_args_default_host_skipped() {
             "-y",
             "--skip-cert-check",
             "-p",
-            "9900",
+            "19900",
             "--no-system-proxy"
         ]
     );
@@ -745,7 +745,7 @@ fn test_build_restart_args_no_host() {
 fn test_build_restart_args_preserves_system_proxy_snapshot() {
     let info = crate::process::RuntimeInfo {
         pid: 12345,
-        port: 9900,
+        port: 19900,
         socks5_port: None,
         host: Some("127.0.0.1".to_string()),
         started_at_ms: None,
@@ -769,7 +769,7 @@ fn test_build_restart_args_preserves_system_proxy_snapshot() {
             "-y",
             "--skip-cert-check",
             "-p",
-            "9900",
+            "19900",
             "--system-proxy",
             "--proxy-bypass",
             "localhost,127.0.0.1,*.local"
@@ -781,7 +781,7 @@ fn test_build_restart_args_preserves_system_proxy_snapshot() {
 fn test_build_restart_args_preserves_runtime_system_proxy_request() {
     let info = crate::process::RuntimeInfo {
         pid: 12345,
-        port: 9900,
+        port: 19900,
         socks5_port: None,
         host: Some("127.0.0.1".to_string()),
         started_at_ms: None,
@@ -802,7 +802,7 @@ fn test_build_restart_args_preserves_runtime_system_proxy_request() {
             "-y",
             "--skip-cert-check",
             "-p",
-            "9900",
+            "19900",
             "--system-proxy",
             "--proxy-bypass",
             "localhost,127.0.0.1,*.local"
@@ -814,7 +814,7 @@ fn test_build_restart_args_preserves_runtime_system_proxy_request() {
 fn test_build_restart_args_defaults_to_no_system_proxy_for_legacy_runtime() {
     let info = crate::process::RuntimeInfo {
         pid: 12345,
-        port: 9900,
+        port: 19900,
         socks5_port: None,
         host: Some("127.0.0.1".to_string()),
         started_at_ms: None,
@@ -835,7 +835,7 @@ fn test_build_restart_args_defaults_to_no_system_proxy_for_legacy_runtime() {
             "-y",
             "--skip-cert-check",
             "-p",
-            "9900",
+            "19900",
             "--no-system-proxy"
         ]
     );

@@ -386,7 +386,7 @@ fn upgrade_relaunch_marker_activity_requires_fresh_supported_marker() {
         created_at_ms: 10_000,
         old_app_pid: 42,
         old_core_pid: Some(43),
-        proxy_port: 9900,
+        proxy_port: 19900,
         app_target: "/Applications/Bifrost.app".to_string(),
         pending_install: None,
         rollback: None,
@@ -563,7 +563,7 @@ fn deferred_desktop_install_completion_requires_target_version() {
         created_at_ms: super::current_time_millis(),
         old_app_pid: 123,
         old_core_pid: Some(124),
-        proxy_port: 9900,
+        proxy_port: 19900,
         app_target: "C:\\Program Files\\Bifrost\\bifrost-desktop.exe".to_string(),
         pending_install: Some(pending),
         rollback: Some(rollback),
@@ -588,7 +588,7 @@ fn deferred_desktop_install_completion_requires_target_version() {
     );
 
     let legacy_marker: DesktopUpgradeRelaunchMarker = serde_json::from_str(
-        r#"{"schema_version":1,"created_at_ms":1,"old_app_pid":2,"old_core_pid":3,"proxy_port":9900,"app_target":"Bifrost.exe","pending_install":null}"#,
+        r#"{"schema_version":1,"created_at_ms":1,"old_app_pid":2,"old_core_pid":3,"proxy_port":19900,"app_target":"Bifrost.exe","pending_install":null}"#,
     )
     .expect("legacy relaunch marker without rollback metadata remains readable");
     assert_eq!(legacy_marker.rollback, None);
@@ -610,7 +610,7 @@ fn deferred_desktop_install_commit_cleans_only_valid_transaction_artifacts() {
         created_at_ms: super::current_time_millis(),
         old_app_pid: 123,
         old_core_pid: Some(124),
-        proxy_port: 9900,
+        proxy_port: 19900,
         app_target: install_dir
             .join("Bifrost.exe")
             .to_string_lossy()
@@ -718,7 +718,7 @@ fn upgrade_relaunch_marker_round_trips_and_stale_marker_is_removed() {
         created_at_ms: super::current_time_millis(),
         old_app_pid: 123,
         old_core_pid: None,
-        proxy_port: 9900,
+        proxy_port: 19900,
         app_target: "/tmp/Bifrost.app".to_string(),
         pending_install: None,
         rollback: None,
@@ -740,7 +740,7 @@ fn upgrade_relaunch_marker_round_trips_and_stale_marker_is_removed() {
         created_at_ms: 1,
         old_app_pid: 123,
         old_core_pid: None,
-        proxy_port: 9900,
+        proxy_port: 19900,
         app_target: "/tmp/Bifrost.app".to_string(),
         pending_install: None,
         rollback: None,
@@ -765,7 +765,7 @@ fn active_upgrade_relaunch_marker_disables_existing_backend_reuse() {
         created_at_ms: super::current_time_millis(),
         old_app_pid: 123,
         old_core_pid: Some(124),
-        proxy_port: 9900,
+        proxy_port: 19900,
         app_target: "/tmp/Bifrost.app".to_string(),
         pending_install: None,
         rollback: None,

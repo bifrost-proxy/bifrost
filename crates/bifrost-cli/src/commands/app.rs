@@ -1344,7 +1344,7 @@ fn find_file_named(root: &Path, file_name: &str) -> Option<PathBuf> {
     None
 }
 
-fn restart_desktop_app(install_path: &Path) -> Result<(), BifrostError> {
+pub(crate) fn restart_desktop_app(install_path: &Path) -> Result<(), BifrostError> {
     #[cfg(target_os = "macos")]
     {
         Command::new("open")
