@@ -465,6 +465,20 @@ fn deferred_desktop_installer_marker_is_validated_before_handoff() {
     assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("Write-Progress \"failed\""));
     assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
         .contains("$progressPath.tmp.$PID.$([Guid]::NewGuid().ToString('N'))"));
+    assert!(
+        WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
+            .matches("for ($attempt = 0; $attempt -lt 100; $attempt++)")
+            .count()
+            >= 2
+    );
+    assert!(
+        WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
+            .matches("$win32Code -notin @(5, 32, 33)")
+            .count()
+            >= 2
+    );
+    assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
+        .contains("Start-Sleep -Milliseconds (2 + ($attempt % 7))"));
     assert!(WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT
         .contains("$MarkerPath.tmp.$PID.$([Guid]::NewGuid().ToString('N'))"));
     assert!(!WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT.contains("$progressPath.tmp.$PID\""));

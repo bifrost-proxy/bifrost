@@ -178,8 +178,36 @@ fn write_progress_inner(data_dir: &Path, progress: &UpgradeProgress) -> std::io:
     let mut tmp = tempfile::NamedTempFile::new_in(data_dir)?;
     tmp.write_all(content.as_bytes())?;
     tmp.as_file().sync_all()?;
-    tmp.persist(&path).map_err(|error| error.error)?;
+    persist_progress_temp(tmp, &path)?;
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn persist_progress_temp(tmp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()> {
+    tmp.persist(path).map(|_| ()).map_err(|error| error.error)
+}
+
+#[cfg(windows)]
+fn persist_progress_temp(mut tmp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()> {
+    // MoveFileExW(MOVEFILE_REPLACE_EXISTING), used by tempfile::persist, can
+    // transiently fail while another process is replacing or opening the same
+    // progress file. Keep the unique source file and retry only Windows sharing
+    // conflicts; permanent permission/path failures still surface immediately.
+    const MAX_ATTEMPTS: usize = 100;
+    for attempt in 0..MAX_ATTEMPTS {
+        match tmp.persist(path) {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                let retryable = matches!(error.error.raw_os_error(), Some(5 | 32 | 33));
+                if !retryable || attempt + 1 == MAX_ATTEMPTS {
+                    return Err(error.error);
+                }
+                tmp = error.file;
+                std::thread::sleep(std::time::Duration::from_millis(2 + (attempt as u64 % 7)));
+            }
+        }
+    }
+    unreachable!("bounded Windows progress replacement loop must return")
 }
 
 /// Remove the progress file (best-effort).

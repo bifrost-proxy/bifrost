@@ -349,7 +349,16 @@ function Write-UpgradeProgress([string]$Phase, [string]$Message, [string]$ErrorM
       $json = $progress | ConvertTo-Json -Depth 4
       $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
       [System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)
-      Move-Item -LiteralPath $tmpPath -Destination $ProgressPath -Force
+      for ($attempt = 0; $attempt -lt 100; $attempt++) {
+        try {
+          Move-Item -LiteralPath $tmpPath -Destination $ProgressPath -Force
+          break
+        } catch {
+          $win32Code = $_.Exception.HResult -band 0xFFFF
+          if (($win32Code -notin @(5, 32, 33)) -or $attempt -eq 99) { throw }
+          Start-Sleep -Milliseconds (2 + ($attempt % 7))
+        }
+      }
     } finally {
       Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
     }
