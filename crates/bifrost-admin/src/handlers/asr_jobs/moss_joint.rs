@@ -22,6 +22,7 @@ const MOSS_OUTPUT_TOKENS_PER_SECOND: u64 = 20;
 const MOSS_MIN_OUTPUT_TOKENS: u64 = 5_120;
 const MOSS_MAX_WHOLE_FILE_SECONDS: u64 = 3_300;
 const MOSS_MAX_RUNTIME_RTF: f64 = 0.5;
+const MOSS_MIN_AUDIO_DURATION_MS: u64 = 10_000;
 
 static MOSS_INIT_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -233,6 +234,91 @@ fn moss_output_token_budget(duration_ms: u64) -> Result<u32, String> {
         .saturating_sub(MOSS_CONTEXT_MARGIN_TOKENS)
         .saturating_sub(input);
     Ok(wanted.min(available).max(MOSS_MIN_OUTPUT_TOKENS) as u32)
+}
+
+fn validate_moss_audio_input(wav: &Path, duration_ms: u64) -> Result<(), String> {
+    if duration_ms == 0 {
+        return Err(moss_non_retryable_runtime_error(
+            "moss_duration_unavailable: audio duration is required for the 0.5x runtime guard"
+        ));
+    }
+    if duration_ms < MOSS_MIN_AUDIO_DURATION_MS {
+        return Err(moss_non_retryable_runtime_error(&format!(
+            "moss_audio_too_short: joint speaker-aware transcription requires at least {:.1} seconds under the 0.5x runtime SLA; audio_ms={duration_ms}",
+            MOSS_MIN_AUDIO_DURATION_MS as f64 / 1_000.0
+        )));
+    }
+    match compute_wav_rms_energy(wav) {
+        Some(rms) if rms < SILENCE_RMS_THRESHOLD => Err(moss_non_retryable_runtime_error(&format!(
+            "moss_audio_silent: normalized audio RMS {rms:.2} is below the safe speech threshold {SILENCE_RMS_THRESHOLD:.2}"
+        ))),
+        Some(_) => Ok(()),
+        None => Err(moss_non_retryable_runtime_error(
+            "moss_audio_invalid: normalized WAV energy could not be measured",
+        )),
+    }
+}
+
+fn moss_remaining_runtime_budget(
+    duration_ms: u64,
+    file_started_at_ms: Option<u64>,
+) -> Result<Duration, String> {
+    let limit_ms = ((duration_ms as f64) * MOSS_MAX_RUNTIME_RTF).floor() as u64;
+    let elapsed_ms = file_started_at_ms
+        .map(|started_at_ms| now_ms().saturating_sub(started_at_ms))
+        .unwrap_or(0);
+    let remaining_ms = limit_ms.saturating_sub(elapsed_ms);
+    if remaining_ms == 0 {
+        return Err(format!(
+            "moss_rtf_exceeded: end-to-end processing exhausted {:.1}x audio duration before inference (limit_ms={limit_ms}, elapsed_ms={elapsed_ms}, audio_ms={duration_ms})",
+            MOSS_MAX_RUNTIME_RTF
+        ));
+    }
+    Ok(Duration::from_millis(remaining_ms))
+}
+
+fn moss_non_retryable_runtime_error(error: &str) -> String {
+    format!(
+        "moss_non_retryable_v{}: {error}",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+fn moss_runtime_error_is_deterministic(error: &str) -> bool {
+    error.contains("no complete speaker-aware segment before")
+        || error.contains("degenerate repetitive transcription")
+        || error.contains("no positive-duration speaker-aware segments")
+}
+
+fn moss_failure_is_non_retryable_for_unchanged_source(
+    task: &AsrDirectoryTask,
+    path: &Path,
+    record: &FileRecord,
+) -> bool {
+    if task.transcription_mode != AsrTranscriptionMode::MossJoint
+        || record.status != FileStatus::Failed
+    {
+        return false;
+    }
+    let Some(error) = record.error.as_deref() else {
+        return false;
+    };
+    let versioned_prefix = format!("moss_non_retryable_v{}:", env!("CARGO_PKG_VERSION"));
+    // The unversioned forms only existed in the local 0.0.156 pre-release
+    // validation. Do not carry this compatibility forward: a later runtime
+    // version must be allowed to retry the source with improved decoding.
+    let legacy_unversioned = env!("CARGO_PKG_VERSION") == "0.0.156"
+        && (error.contains("moss_duration_unavailable:")
+            || error.contains("moss_audio_too_short:")
+            || error.contains("moss_audio_silent:")
+            || error.contains("moss_audio_invalid:")
+            || moss_runtime_error_is_deterministic(error));
+    let deterministic = error.starts_with(&versioned_prefix) || legacy_unversioned;
+    deterministic
+        && record.source_size.is_some()
+        && record.source_modified_ms.is_some()
+        && record.source_size == source_size(path)
+        && record.source_modified_ms == source_modified_ms(path)
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -882,20 +968,34 @@ fn parse_moss_json(
         .into_iter()
         .filter_map(|segment| {
             let text = segment.text.trim().to_string();
-            if text.is_empty() || !segment.start.is_finite() || !segment.end.is_finite() {
+            let speaker = segment.speaker.trim().to_string();
+            if text.is_empty()
+                || speaker.is_empty()
+                || !segment.start.is_finite()
+                || !segment.end.is_finite()
+                || segment.end <= segment.start
+            {
                 return None;
             }
             let start_ms = (segment.start.max(0.0) * 1_000.0).round() as u64;
             let end_ms = (segment.end.max(segment.start).max(0.0) * 1_000.0).round() as u64;
+            if end_ms <= start_ms {
+                return None;
+            }
             Some(bifrost_asr::transcription::TranscriptionSegment {
                 start_ms,
                 end_ms,
                 text,
-                speaker: Some(segment.speaker.trim().to_string()).filter(|speaker| !speaker.is_empty()),
+                speaker: Some(speaker),
                 overlap: false,
             })
         })
         .collect::<Vec<_>>();
+    if structured_segments.is_empty() {
+        return Err(
+            "MOSS runtime returned no positive-duration speaker-aware segments".to_string(),
+        );
+    }
     let text = structured_segments
         .iter()
         .map(|segment| segment.text.as_str())
@@ -923,11 +1023,14 @@ async fn run_moss_joint_transcription(
     duration_ms: u64,
     prompt: &str,
     pause_check: Option<&PauseCheckCallback<'_>>,
+    file_started_at_ms: Option<u64>,
 ) -> Result<crate::handlers::asr_streaming::WholeFileTranscription, String> {
     if prompt.chars().count() > MOSS_MAX_PROMPT_CHARS {
         return Err(format!("MOSS prompt exceeds {MOSS_MAX_PROMPT_CHARS} characters"));
     }
     let max_new = moss_output_token_budget(duration_ms)?;
+    let budget_started = Instant::now();
+    let max_runtime = moss_remaining_runtime_budget(duration_ms, file_started_at_ms)?;
     let prompt_file = if prompt.is_empty() {
         None
     } else {
@@ -963,13 +1066,11 @@ async fn run_moss_joint_transcription(
             runtime.python.display()
         )
     })?;
-    let started = Instant::now();
-    let max_runtime = Duration::from_secs_f64(
-        (duration_ms.max(1) as f64 / 1_000.0) * MOSS_MAX_RUNTIME_RTF,
-    );
     let output = child.wait_with_output();
     tokio::pin!(output);
-    let deadline = tokio::time::sleep_until(tokio::time::Instant::from_std(started + max_runtime));
+    let deadline = tokio::time::sleep_until(tokio::time::Instant::from_std(
+        budget_started + max_runtime,
+    ));
     tokio::pin!(deadline);
     let mut pause_poll = tokio::time::interval(Duration::from_millis(500));
     pause_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -979,17 +1080,28 @@ async fn run_moss_joint_transcription(
             result = &mut output => {
                 let output = result.map_err(|error| format!("wait for MOSS runtime: {error}"))?;
                 if !output.status.success() {
-                    return Err(format!(
+                    let error = format!(
                         "MOSS runtime failed with {}: {}",
                         output.status,
                         String::from_utf8_lossy(&output.stderr).trim()
-                    ));
+                    );
+                    return Err(if moss_runtime_error_is_deterministic(&error) {
+                        moss_non_retryable_runtime_error(&error)
+                    } else {
+                        error
+                    });
                 }
-                return parse_moss_json(&output.stdout);
+                return parse_moss_json(&output.stdout).map_err(|error| {
+                    if moss_runtime_error_is_deterministic(&error) {
+                        moss_non_retryable_runtime_error(&error)
+                    } else {
+                        error
+                    }
+                });
             }
             _ = &mut deadline => {
                 return Err(format!(
-                    "moss_rtf_exceeded: inference exceeded {:.1}x audio duration (limit_ms={}, audio_ms={duration_ms})",
+                    "moss_rtf_exceeded: end-to-end processing exceeded {:.1}x audio duration (remaining_limit_ms={}, audio_ms={duration_ms})",
                     MOSS_MAX_RUNTIME_RTF,
                     max_runtime.as_millis()
                 ));

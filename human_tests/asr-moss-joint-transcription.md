@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证用户可在 ASR 目录任务中选择 `moss_joint` 模式、配置并持久化自定义 prompt，并在首次运行时自动安装可重定位 MLX runtime 和校验固定 8-bit 模型。测试使用既有 ASR 任务目标中的真实音频和 18997 预览数据目录，不修改 9900 生产服务、源音频或生产转录结果。性能验收硬门限为推理 RTF `<= 0.5`；超过门限必须杀死子进程并判失败。
+验证用户可在 ASR 目录任务中选择 `moss_joint` 模式、配置并持久化自定义 prompt，并在首次运行时自动安装可重定位 MLX runtime 和校验固定 8-bit 模型。隔离功能验证使用 18997/临时数据目录；TC-MOSS-09 按用户明确要求重启 9900 默认服务并继续 `~/.bifrost` 中的既有任务。性能验收硬门限为文件进入 Processing 到完成的端到端 RTF `<= 0.5`；达到门限必须杀死子进程并判失败。任何真实续跑都不得重新解码已成功资源。
 
 ## 前置条件
 
@@ -145,11 +145,32 @@
 - macOS CLI 主 archive 与 Desktop DMG 不携带 MOSS runtime、依赖或权重；用户选择初始化或首次运行时才动态下发到 `~/.bifrost/asr/moss_joint_mlx`。
 - 正式 tag release 仍负责完整 MLX/Python 安装、自检和真实 runtime 产物；如果共享打包器或资源契约漂移，PR 阶段即失败。
 
+### TC-MOSS-09：默认 9900 服务只续跑未完成资源与资源保护回归
+
+操作步骤：
+
+1. 确认任务 `735775510b384fff8903d9c6fc54f1a3` 为 `moss_joint` 且已强制暂停。读取默认 `~/.bifrost/asr/tasks/<task-id>/files.json`，列出磁盘仍存在的 Pending/Failed 文件；确认 Success/PartialSuccess 不在待执行集合。
+2. 对已成功 MOSS 样本 `TX01_MIC052_20260624_123014_orig.wav` 记录 record status、`started_at_ms`、`finished_at_ms`、`text_chars`，并计算 source、text、metadata、timeline 四个文件的 SHA-256，保存快照。
+3. 构建当前源码的 release CLI；备份并替换 `~/.local/bin/bifrost`。备份现有 `~/.bifrost/asr/moss_joint_mlx/runtime/moss_mlx_runner.py` 后安装当前 runner，保留已验证的 1.2 GB 权重，不重复下载或复制模型。
+4. 使用默认 `BIFROST_DATA_DIR=$HOME/.bifrost` 停止旧 9900 服务，以原 host/port/system-proxy 语义启动新的 detached 9900 服务；确认 PID 更新、API ready、任务仍暂停、模型管理状态 Ready。
+5. 恢复该任务。按来源时间排序观察前三条未完成资源：旧版耗时 530.363 秒的稀疏 1800.15 秒文件、缺时长文件、2.533 秒短文件。稀疏文件必须由 256-token 协议保护快速停止；后两条必须在 MLX 启动前分别返回 `moss_duration_unavailable` 与 `moss_audio_too_short`。
+6. 继续到下一条正常 1800.15 秒待处理文件成功，记录端到端耗时、RTF、segment 数和 speaker 数。若任何文件从 `started_at_ms` 到 `finished_at_ms` 的 RTF `> 0.5`，立即调用 `pause?force=true`，终止测试并判失败。
+7. 得到稀疏早停和一条正常成功证据后立即再次强制暂停，避免继续消费剩余队列。重新生成已完成样本快照并逐字段、逐哈希比较。
+8. 检查 MOSS 子进程已退出，9900 服务仍可用，任务队列只减少本次实际处理的未完成资源；不调用任何强制重跑 Success 文件的 API。
+
+预期结果：
+
+- 默认 9900 服务确实运行当前修复版本，仍使用 `~/.bifrost` 和同一个任务/模型目录；权重不重复下载，macOS 发布主包也不增加模型体积。
+- 稀疏/无合法协议输出不再消耗数分钟，缺时长、短音频和数字静音不会启动约 2 GiB MLX 子进程。
+- 正常多人长音频继续一次全局联合解码，不做会重置 speaker label 的独立短块；端到端 RTF `<= 0.5`。
+- 已成功 MOSS 样本的状态、开始/结束时间、文本长度和四个 SHA-256 全部不变，证明服务重启和任务恢复没有重复解码完成资源。
+- 验证结束时任务为 paused、无 MOSS 子进程，9900 保持可体验；剩余未完成资源留在原队列供后续显式恢复。
+
 ## 清理步骤
 
-1. 用户要求继续体验时保留 18997；否则停止且仅停止本测试启动的预览 PID。
+1. 用户要求继续体验时保留 18997；否则停止且仅停止本测试启动的预览 PID。TC-MOSS-09 的 9900 服务按用户要求保留运行，但任务在取得有限验证证据后重新暂停。
 2. 不得删除 `$ASR_TASK_DIR`、转录产物或 `$MOSS_AUDIO`。失败资源只移动到带时间戳 quarantine，确认无需回滚后再清理。
-3. 再次检查 9900 PID，确认生产服务未被重启或停止。
+3. 对 TC-MOSS-01 至 TC-MOSS-08 再次检查 9900 PID 未变化；TC-MOSS-09 必须确认 PID 已按计划更新、默认数据目录不变且成功记录快照不变。
 
 ## 执行记录
 
@@ -169,3 +190,4 @@
 | 2026-07-19 | TC-MOSS-07 | PASS（性能修复后复测）：当前源码服务以临时数据目录在 18998 启动。首次真实状态读取发现全量权重哈希与 MLX 自检超过 30 秒，改为初始化时写入包含固定模型 SHA-256/大小/mtime 及 Python/runner 哈希的 schema v2 `verification.json`；修复后未初始化状态 0.002771 秒返回，真实资产完整校验生成 v2 标记后 Ready 状态 0.599707 秒返回。真实 Chrome 选择 MOSS 后显示 Ready、On demand / whole file、Automatic multilingual、Runtime/Model verified、1.17 GB / 1.17 GB 和 `~/.bifrost/asr/moss_joint_mlx`，Model Management 不再显示 Qwen Host/Service Port。9900/PID 22956 与 18997/PID 56155 未变化，18998 已停止且临时目录已清理。 |
 | 2026-07-19 | TC-MOSS-08 | PASS：静态发布契约确认 MLX-Audio/model 固定 commit、12 个 metadata、1,258,427,442-byte 权重 SHA-256、共享 packager 与 macOS PR CI job 一致；真实 macOS fixture 先因 `._config.json` 被拒绝，清理后生成 zip 和可复算 `.sha256`，runtime 入口、metadata、license/notice 齐全。 |
 | 2026-07-19 | TC-MOSS-08 | PASS（动态下发边界复测）：CLI tar.gz/tar.xz、Desktop `.app` 与实际挂载的 fixture DMG 均通过轻量核心包检查；混入 `moss-joint-runtime`、`model.safetensors` 或超过配置上限均被拒绝。runtime packager 同时拒绝权重，只允许 runtime、固定 metadata 与 license/notice，权重继续由初始化器单独下载。 |
+| 2026-07-19 | TC-MOSS-09 | PASS（两次发现并修复真实质量/资源缺口后复测）：使用 release CLI 重启默认 `~/.bifrost:9900`，真实队列验证 daemon PID `98617`；最终源码重新构建安装后 daemon PID `36918`，模型仍在 `~/.bifrost/asr/moss_joint_mlx` 且 `installed_model_bytes=1258427442`，未重复下载。初始 20 个磁盘仍存在的未完成资源中，旧版稀疏 1800.15 秒文件从 530363 ms/RTF 0.2946 降至 16293 ms/RTF 0.00905；缺时长 335 ms 返回 `moss_duration_unavailable`，2.533 秒文件 342 ms 返回 `moss_audio_too_short`。首次协议保护只检查前缀仍让稀疏文件运行 219 秒，立即 force-pause 后收紧为 256 token 内必须形成完整正时长片段；随后发现一个 462966 ms 的重复“嗯”零时长输出被错误包装为 success，立即隔离该轮新产物、恢复为未完成并增加 Python/Rust 双层退化拒绝，复测 16199 ms 正确失败。增加同版本确定性失败去重后，新一轮待执行总数由 20 降到 11，不再重复加载上述坏输入；正常 1800.15 秒未完成文件 `TX02_MIC027_20260714_135743_orig.wav` 最终 150771 ms/RTF 0.08375 成功，11001 字、353 segments、9 speakers，时间轴 10–1799740 ms。每次发现无价值路径都 force-pause，所有完成/失败 RTF 均未超过 0.5。最终服务确认任务 `paused=true/running=false`、无 MOSS 子进程，9900 继续运行。重启前已成功样本 `TX01_MIC052_20260624_123014_orig.wav` 的 status、started/finished、5217 字及 source/text/metadata/timeline 四个 SHA-256 前后完全一致，证明没有重跑已完成资源。 |

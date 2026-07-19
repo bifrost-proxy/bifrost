@@ -931,6 +931,7 @@ mod tests {
             process_fixture_audio_ms,
             "Bifrost prompt",
             None,
+            None,
         )
         .await
         .unwrap();
@@ -938,7 +939,7 @@ mod tests {
 
         write_executable(&binary, "#!/bin/sh\necho 'runtime failed' >&2\nexit 7\n");
         assert!(
-            run_moss_joint_transcription(&runtime, &wav, process_fixture_audio_ms, "", None)
+            run_moss_joint_transcription(&runtime, &wav, process_fixture_audio_ms, "", None, None)
                 .await
                 .unwrap_err()
                 .contains("runtime failed")
@@ -947,7 +948,7 @@ mod tests {
         write_executable(&binary, "#!/bin/sh\nsleep 5\n");
         let pause = || true;
         assert_eq!(
-            run_moss_joint_transcription(&runtime, &wav, 1_000, "", Some(&pause))
+            run_moss_joint_transcription(&runtime, &wav, 1_000, "", Some(&pause), None)
                 .await
                 .unwrap_err(),
             ASR_TASK_PAUSED_MESSAGE
@@ -964,6 +965,7 @@ mod tests {
                 3_000,
                 "",
                 Some(&keep_running),
+                None,
             )
             .await
             .unwrap()
@@ -972,7 +974,7 @@ mod tests {
         );
         write_executable(&binary, "#!/bin/sh\nsleep 2\n");
         let watchdog_started = std::time::Instant::now();
-        assert!(run_moss_joint_transcription(&runtime, &wav, 1_200, "", None)
+        assert!(run_moss_joint_transcription(&runtime, &wav, 1_200, "", None, None)
             .await
             .unwrap_err()
             .contains("moss_rtf_exceeded"));
@@ -985,6 +987,7 @@ mod tests {
             1_000,
             &"x".repeat(MOSS_MAX_PROMPT_CHARS + 1),
             None,
+            None,
         )
         .await
         .unwrap_err()
@@ -992,10 +995,54 @@ mod tests {
 
         let mut missing_runtime = runtime.clone();
         missing_runtime.python = temp.path().join("missing-runtime");
-        assert!(run_moss_joint_transcription(&missing_runtime, &wav, 1_000, "", None)
+        assert!(run_moss_joint_transcription(&missing_runtime, &wav, 1_000, "", None, None)
             .await
             .unwrap_err()
             .contains("start MOSS"));
+
+        let marker = temp.path().join("unexpected-spawn");
+        write_executable(
+            &binary,
+            &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        );
+        let exhausted_started_at = now_ms().saturating_sub(600);
+        assert!(run_moss_joint_transcription(
+            &runtime,
+            &wav,
+            1_000,
+            "",
+            None,
+            Some(exhausted_started_at),
+        )
+        .await
+        .unwrap_err()
+        .contains("before inference"));
+        assert!(!marker.exists(), "exhausted budget must not spawn MOSS");
+    }
+
+    #[test]
+    fn moss_input_guard_rejects_unknown_short_silent_and_invalid_audio() {
+        let temp = TempDir::new().unwrap();
+        let speech = temp.path().join("speech.wav");
+        let silence = temp.path().join("silence.wav");
+        let invalid = temp.path().join("invalid.wav");
+        std::fs::write(&speech, make_wav(&[500i16; 100])).unwrap();
+        std::fs::write(&silence, make_wav(&[0i16; 100])).unwrap();
+        std::fs::write(&invalid, b"not wav").unwrap();
+
+        assert!(validate_moss_audio_input(&speech, 0)
+            .unwrap_err()
+            .contains("moss_duration_unavailable"));
+        assert!(validate_moss_audio_input(&speech, MOSS_MIN_AUDIO_DURATION_MS - 1)
+            .unwrap_err()
+            .contains("moss_audio_too_short"));
+        assert!(validate_moss_audio_input(&silence, MOSS_MIN_AUDIO_DURATION_MS)
+            .unwrap_err()
+            .contains("moss_audio_silent"));
+        assert!(validate_moss_audio_input(&invalid, MOSS_MIN_AUDIO_DURATION_MS)
+            .unwrap_err()
+            .contains("moss_audio_invalid"));
+        validate_moss_audio_input(&speech, MOSS_MIN_AUDIO_DURATION_MS).unwrap();
     }
 
     #[cfg(unix)]
@@ -1008,7 +1055,8 @@ mod tests {
         let audio_dir = temp.path().join("audio");
         std::fs::create_dir_all(&audio_dir).unwrap();
         let source = audio_dir.join("meeting.wav");
-        std::fs::write(&source, b"wav").unwrap();
+        let source_wav = make_wav(&[500i16; 100]);
+        std::fs::write(&source, &source_wav).unwrap();
 
         let binary = temp.path().join("moss-transcribe");
         write_executable(
@@ -1021,11 +1069,11 @@ mod tests {
         task.transcription_prompt = "private prompt".to_string();
         task.diarization.enabled = true;
         let source_info = SourceAudioInfo {
-            source_size: Some(3),
+            source_size: Some(source_wav.len() as u64),
             source_modified_ms: Some(9_000),
             source_created_at_ms: Some(10_000),
             source_created_at_source: Some("fixture".to_string()),
-            media_duration_ms: Some(3_000),
+            media_duration_ms: Some(12_000),
         };
         let hooks = TaskTranscribeHooks {
             on_chunk_progress: None,
@@ -1052,7 +1100,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.text, "hello\nworld\ninvalid range");
+        assert_eq!(output.text, "hello\nworld");
         assert_eq!(output.timeline.model, "MOSS-Transcribe-Diarize-MLX-8bit");
         assert_eq!(
             output.timeline.diarization_profile.as_deref(),
@@ -1111,17 +1159,15 @@ mod tests {
 
     #[test]
     fn moss_json_parser_filters_empty_segments_and_reports_invalid_json() {
-        let result = parse_moss_json(
+        let error = parse_moss_json(
             br#"[
               {"start":-1.0,"end":-2.0,"speaker":"","text":" kept "},
+              {"start":-2.0,"end":-1.0,"speaker":"S01","text":" clamps to zero "},
               {"start":1.0,"end":2.0,"speaker":"S02","text":"   "}
             ]"#,
         )
-        .unwrap();
-        assert_eq!(result.text, "kept");
-        assert_eq!(result.structured.segments[0].start_ms, 0);
-        assert_eq!(result.structured.segments[0].end_ms, 0);
-        assert!(result.structured.segments[0].speaker.is_none());
+        .unwrap_err();
+        assert!(error.contains("no positive-duration speaker-aware segments"));
         assert!(parse_moss_json(b"not-json").is_err());
     }
 
@@ -2314,6 +2360,45 @@ mod tests {
         let final_scan =
             discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
         assert!(final_scan.pending.is_empty());
+    }
+
+    #[test]
+    fn moss_pending_batch_skips_deterministic_failure_until_source_changes() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("sparse.wav");
+        std::fs::write(&source, b"audio").unwrap();
+
+        let mut task = test_directory_task("moss-terminal", audio_dir);
+        task.transcription_mode = AsrTranscriptionMode::MossJoint;
+        let attempted = HashSet::new();
+        let mut files = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        let initial = discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+        assert_eq!(initial.pending, vec![source.clone()]);
+
+        let key = source_key(&source);
+        let record = files.files.get_mut(&key).unwrap();
+        record.status = FileStatus::Failed;
+        record.error = Some(format!(
+            "moss_non_retryable_v{}: MOSS output has no complete speaker-aware segment before 256 generated tokens",
+            env!("CARGO_PKG_VERSION")
+        ));
+        let unchanged = discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+        assert!(unchanged.pending.is_empty());
+
+        std::fs::write(&source, b"audio changed").unwrap();
+        let changed = discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+        assert_eq!(changed.pending, vec![source.clone()]);
+
+        task.transcription_mode = AsrTranscriptionMode::Standard;
+        let standard = discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+        assert_eq!(standard.pending, vec![source]);
     }
 
     #[test]
@@ -4249,6 +4334,15 @@ mod tests {
     }
 
     #[test]
+    fn rms_energy_streams_across_internal_buffer_boundaries() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("long.wav");
+        std::fs::write(&path, make_wav(&[750i16; 40_000])).unwrap();
+        let rms = compute_wav_rms_energy(&path).unwrap();
+        assert!((rms - 750.0).abs() < 0.01, "expected 750, got {rms}");
+    }
+
+    #[test]
     fn rms_energy_empty_data_chunk() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("empty.wav");
@@ -4329,6 +4423,16 @@ mod tests {
         buf.extend_from_slice(&[2, 0, 16, 0]); // block_align, bits
                                                // No data chunk follows
         std::fs::write(&path, &buf).unwrap();
+        assert!(compute_wav_rms_energy(&path).is_none());
+    }
+
+    #[test]
+    fn rms_energy_rejects_truncated_data_chunk() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("truncated-data.wav");
+        let mut wav = make_wav(&[100, -100, 200, -200]);
+        wav.truncate(wav.len() - 2);
+        std::fs::write(&path, wav).unwrap();
         assert!(compute_wav_rms_energy(&path).is_none());
     }
 

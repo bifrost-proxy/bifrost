@@ -213,8 +213,12 @@ fn discover_and_prepare_pending_batch(
                     .map(|record| {
                         matches!(
                             record.status,
-                            FileStatus::Pending | FileStatus::Processing | FileStatus::Failed
+                            FileStatus::Pending | FileStatus::Processing
                         )
+                            || (record.status == FileStatus::Failed
+                                && !moss_failure_is_non_retryable_for_unchanged_source(
+                                    task, path, record,
+                                ))
                     })
                     .unwrap_or(true)
         })
@@ -989,10 +993,11 @@ async fn process_pending_files_sequential(
             .get(&key)
             .map(|record| record.memory_limit_hints.clone())
             .unwrap_or_default();
-        // Cache source audio metadata once per file. This calls ffprobe under
-        // the hood, so we avoid re-running it for every FileRecord construction.
-        let source_info = inspect_source_audio(path);
         let file_started_at_ms = now_ms();
+        // Cache source audio metadata once per file. The end-to-end MOSS RTF
+        // budget starts before this ffprobe call, so probing and normalization
+        // cannot consume unbounded time outside the 0.5x guard.
+        let source_info = inspect_source_audio(path);
         let mut record = file_record_from_info(&task.id, path, &source_info);
         record.memory_limit_hints = existing_memory_limit_hints.clone();
         record.runtime_strategy = task.runtime_strategy;
@@ -1476,12 +1481,18 @@ async fn transcribe_file_for_task_with_wav(
             default_runtime = moss_runtime_paths(&bifrost_asr::runtime::fixed_asr_home());
             &default_runtime
         };
+        validate_moss_audio_input(wav, duration_ms)?;
+        let file_started_at_ms = hooks
+            .partial_artifacts
+            .as_ref()
+            .map(|context| context.started_at_ms);
         let result = run_moss_joint_transcription(
             runtime,
             wav,
             duration_ms,
             &task.transcription_prompt,
             hooks.pause_check,
+            file_started_at_ms,
         )
         .await?;
         (result, Vec::new(), Vec::new(), Vec::new(), None)

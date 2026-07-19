@@ -19,6 +19,12 @@ DEFAULT_PROTOCOL_PROMPT = (
     "并在段末标注结束时间戳，以清晰标明该段语音范围。"
 )
 SPEAKER_PREFIX_RE = re.compile(r"^\[(S\d+)\]\s*")
+TRANSCRIPT_SEGMENT_RE = re.compile(
+    r"\[(?P<start>\d+(?:\.\d+)?)\]\[(?P<speaker>S\d+)\]"
+    r"(?P<text>.*?)\[(?P<end>\d+(?:\.\d+)?)\]",
+    re.DOTALL,
+)
+EARLY_PROTOCOL_TOKEN_LIMIT = 256
 
 
 def compose_prompt(user_prompt: str) -> str:
@@ -40,7 +46,7 @@ def normalize_segments(raw_segments: list[dict[str, Any]]) -> list[dict[str, Any
             end = float(raw["end"])
         except (KeyError, TypeError, ValueError):
             continue
-        if not math.isfinite(start) or not math.isfinite(end) or end < start:
+        if not math.isfinite(start) or not math.isfinite(end) or end <= start:
             continue
 
         text = str(raw.get("text") or "").strip()
@@ -60,6 +66,99 @@ def normalize_segments(raw_segments: list[dict[str, Any]]) -> list[dict[str, Any
                 "text": text,
             }
         )
+    return segments
+
+
+def transcript_is_degenerate(segments: list[dict[str, Any]]) -> bool:
+    """Reject obvious autoregressive loops without filtering normal speech."""
+    texts = [str(segment.get("text") or "").strip() for segment in segments]
+    combined = "".join(texts)
+    non_space = [character for character in combined if not character.isspace()]
+    if len(non_space) >= 100 and len(set(non_space)) <= 2:
+        return True
+    if len(texts) >= 20:
+        counts: dict[str, int] = {}
+        for text in texts:
+            counts[text] = counts.get(text, 0) + 1
+        if max(counts.values(), default=0) / len(texts) >= 0.9:
+            return True
+    return False
+
+
+def parse_protocol_segments(text: str) -> list[dict[str, Any]]:
+    """Parse the exact timestamp/speaker protocol required by Bifrost."""
+    return normalize_segments(
+        [
+            {
+                "start": match.group("start"),
+                "end": match.group("end"),
+                "speaker_id": match.group("speaker"),
+                "text": match.group("text"),
+            }
+            for match in TRANSCRIPT_SEGMENT_RE.finditer(text)
+        ]
+    )
+
+
+def protocol_output_has_complete_segment(text: str) -> bool:
+    """Return whether generation produced one complete speaker-aware segment."""
+    return bool(parse_protocol_segments(text))
+
+
+def generate_protocol_segments(
+    model: Any,
+    audio: Path,
+    *,
+    max_tokens: int,
+    prompt: str,
+) -> list[dict[str, Any]]:
+    """Generate with an early guard against long malformed/no-speech output.
+
+    A valid MOSS response must produce a complete positive-duration
+    ``[start][Sxx]text[end]`` segment. Waiting for the complete autoregressive
+    budget when that contract never appears can waste several minutes on
+    sparse/noisy recordings. The pinned MLX model exposes
+    ``stream_generate``; collecting its token ids preserves the same final
+    decode as ``generate`` while allowing a bounded protocol check.
+    """
+    from mlx_lm.sample_utils import make_sampler
+
+    generated_tokens: list[int] = []
+    first_segment_complete = False
+    for token, _ in model.stream_generate(
+        str(audio),
+        max_tokens=max_tokens,
+        sampler=make_sampler(0.0),
+        prompt=prompt,
+        prefill_step_size=2048,
+        verbose=False,
+    ):
+        generated_tokens.append(int(token))
+        if first_segment_complete:
+            continue
+        token_count = len(generated_tokens)
+        if token_count % 16 != 0 and token_count < EARLY_PROTOCOL_TOKEN_LIMIT:
+            continue
+        tokenizer = getattr(model, "_tokenizer", None)
+        if tokenizer is None:
+            raise RuntimeError("MOSS MLX tokenizer is unavailable during generation")
+        prefix = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+        first_segment_complete = protocol_output_has_complete_segment(prefix)
+        if token_count >= EARLY_PROTOCOL_TOKEN_LIMIT and not first_segment_complete:
+            raise RuntimeError(
+                "MOSS output has no complete speaker-aware segment before "
+                f"{EARLY_PROTOCOL_TOKEN_LIMIT} generated tokens"
+            )
+
+    tokenizer = getattr(model, "_tokenizer", None)
+    if tokenizer is None:
+        raise RuntimeError("MOSS MLX tokenizer is unavailable after generation")
+    text = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
+    segments = parse_protocol_segments(text)
+    if not segments:
+        raise RuntimeError("MOSS MLX returned no valid speaker-aware segments")
+    if transcript_is_degenerate(segments):
+        raise RuntimeError("MOSS MLX returned degenerate repetitive transcription")
     return segments
 
 
@@ -91,6 +190,19 @@ def self_test() -> int:
     assert segments == [
         {"start": 0.1, "end": 1.2, "speaker": "S01", "text": "测试"}
     ]
+    assert protocol_output_has_complete_segment("[0.10][S01]测试[1.20]")
+    assert not protocol_output_has_complete_segment("[0.10][S01]尚未结束")
+    assert not protocol_output_has_complete_segment("[S01] 测试")
+    assert parse_protocol_segments("[0.10][S01]测试[1.20]") == [
+        {"start": 0.1, "end": 1.2, "speaker": "S01", "text": "测试"}
+    ]
+    assert parse_protocol_segments("[0.10][S01]零时长[0.10]") == []
+    assert transcript_is_degenerate(
+        [{"text": "嗯" * 100, "start": 0.0, "end": 1.0, "speaker": "S01"}]
+    )
+    assert not transcript_is_degenerate(
+        [{"text": "正常的会议转录内容", "start": 0.0, "end": 1.0, "speaker": "S01"}]
+    )
     print("moss-mlx-runtime ok")
     return 0
 
@@ -112,17 +224,12 @@ def transcribe(args: argparse.Namespace) -> int:
     from mlx_audio.stt import load
 
     model = load(model_dir)
-    result = model.generate(
-        str(audio),
+    segments = generate_protocol_segments(
+        model,
+        audio,
         max_tokens=args.max_new,
-        temperature=0.0,
         prompt=compose_prompt(read_prompt(args.prompt_file)),
-        prefill_step_size=2048,
-        verbose=False,
     )
-    segments = normalize_segments(list(result.segments or []))
-    if not segments:
-        raise RuntimeError("MOSS MLX returned no valid speaker-aware segments")
     json.dump(segments, sys.stdout, ensure_ascii=False, separators=(",", ":"))
     sys.stdout.write("\n")
     return 0

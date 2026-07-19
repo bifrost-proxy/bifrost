@@ -7,7 +7,10 @@ cd "$ROOT_DIR"
 
 python3 - <<'PY'
 from pathlib import Path
+import importlib.util
 import re
+import sys
+import types
 
 release_path = Path(".github/workflows/release.yml")
 runtime_path = Path("crates/bifrost-admin/src/handlers/asr_jobs/moss_joint.rs")
@@ -83,6 +86,74 @@ require('git -C "$SOURCE_DIR" apply --unidiff-zero' in release, "release does no
 require('scripts/ci/package-moss-release-runtime.sh' in release, "release does not use the shared MOSS packager")
 require('moss_mlx_runner.py" --self-test' in packager, "shared packager does not smoke-test the runtime")
 require("PYTHONNOUSERSITE=1" in packager and "HF_HUB_OFFLINE" in runner, "packaged runtime is not isolated from user/network state")
+require("stream_generate(" in runner, "runner does not inspect generation before spending the full token budget")
+require("EARLY_PROTOCOL_TOKEN_LIMIT = 256" in runner, "runner early protocol guard drifted")
+require("moss_remaining_runtime_budget" in runtime, "runtime no longer applies the end-to-end 0.5x budget")
+require("validate_moss_audio_input" in runtime, "runtime no longer rejects wasteful audio before MLX startup")
+require("moss_failure_is_non_retryable_for_unchanged_source" in runtime, "deterministic MOSS failures will be retried forever")
+require("transcript_is_degenerate" in runner, "runner no longer rejects obvious autoregressive loops")
+
+spec = importlib.util.spec_from_file_location("moss_mlx_runner_contract", runner_path)
+require(spec is not None and spec.loader is not None, "cannot load MOSS runner module")
+runner_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(runner_module)
+require(
+    runner_module.parse_protocol_segments("[0.10][S01]hello[1.20]")
+    == [{"start": 0.1, "end": 1.2, "speaker": "S01", "text": "hello"}],
+    "runner protocol parser lost timestamps or speaker labels",
+)
+require(
+    runner_module.parse_protocol_segments("[0.10][S01]zero duration[0.10]") == [],
+    "runner accepts zero-duration speaker segments",
+)
+require(
+    runner_module.transcript_is_degenerate(
+        [{"start": 0.0, "end": 1.0, "speaker": "S01", "text": "嗯" * 100}]
+    ),
+    "runner accepts an obvious repetitive decoding loop",
+)
+
+sample_utils = types.ModuleType("mlx_lm.sample_utils")
+sample_utils.make_sampler = lambda _temperature: object()
+mlx_lm = types.ModuleType("mlx_lm")
+mlx_lm.sample_utils = sample_utils
+sys.modules["mlx_lm"] = mlx_lm
+sys.modules["mlx_lm.sample_utils"] = sample_utils
+
+class FakeTokenizer:
+    def __init__(self, text):
+        self.text = text
+
+    def decode(self, _tokens, **_kwargs):
+        return self.text
+
+class FakeModel:
+    def __init__(self, text, token_count):
+        self._tokenizer = FakeTokenizer(text)
+        self.token_count = token_count
+
+    def stream_generate(self, *_args, **_kwargs):
+        for token in range(self.token_count):
+            yield token, None
+
+valid = runner_module.generate_protocol_segments(
+    FakeModel("[0.10][S01]hello[1.20]", 32),
+    Path("fixture.wav"),
+    max_tokens=100,
+    prompt="protocol",
+)
+require(valid[0]["speaker"] == "S01", "valid streaming protocol output was rejected")
+try:
+    runner_module.generate_protocol_segments(
+        FakeModel("unstructured output", 512),
+        Path("fixture.wav"),
+        max_tokens=512,
+        prompt="protocol",
+    )
+except RuntimeError as error:
+    require("before 256 generated tokens" in str(error), "invalid protocol did not use bounded early abort")
+else:
+    require(False, "invalid protocol consumed the unbounded generation path")
 
 asset_template = 'moss-joint-runtime-v${VERSION}-aarch64-apple-darwin.zip'
 require(asset_template in release, "release archive name drifted")
