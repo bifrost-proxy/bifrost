@@ -945,6 +945,41 @@ mod tests {
                 .contains("runtime failed")
         );
 
+        write_executable(
+            &binary,
+            "#!/bin/sh\necho 'MOSS output has no complete speaker-aware segment before 256 generated tokens' >&2\nexit 7\n",
+        );
+        let deterministic_process_error = run_moss_joint_transcription(
+            &runtime,
+            &wav,
+            process_fixture_audio_ms,
+            "",
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(deterministic_process_error.starts_with(&format!(
+            "moss_non_retryable_v{}:",
+            env!("CARGO_PKG_VERSION")
+        )));
+
+        write_executable(&binary, "#!/bin/sh\nprintf '[]'\n");
+        let deterministic_parse_error = run_moss_joint_transcription(
+            &runtime,
+            &wav,
+            process_fixture_audio_ms,
+            "",
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(deterministic_parse_error.starts_with(&format!(
+            "moss_non_retryable_v{}:",
+            env!("CARGO_PKG_VERSION")
+        )));
+
         write_executable(&binary, "#!/bin/sh\nsleep 5\n");
         let pause = || true;
         assert_eq!(
@@ -2384,7 +2419,13 @@ mod tests {
 
         let key = source_key(&source);
         let record = files.files.get_mut(&key).unwrap();
+        assert!(!moss_failure_is_non_retryable_for_unchanged_source(
+            &task, &source, record,
+        ));
         record.status = FileStatus::Failed;
+        assert!(!moss_failure_is_non_retryable_for_unchanged_source(
+            &task, &source, record,
+        ));
         record.error = Some(format!(
             "moss_non_retryable_v{}: MOSS output has no complete speaker-aware segment before 256 generated tokens",
             env!("CARGO_PKG_VERSION")
