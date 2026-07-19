@@ -969,7 +969,13 @@ fn upgrade_target_version_mismatch_restores_previous_binary() {
     let dir = tempfile::tempdir().expect("tempdir");
     let target = dir.path().join("bifrost");
     let backup = binary_backup_path(&target);
-    std::fs::write(&target, "#!/bin/sh\necho 'bifrost 9.9.9'\n").expect("write mismatched target");
+    // Use a native executable instead of a shell-script fixture. Under LLVM
+    // coverage's parallel test load, the script occasionally failed before it
+    // could print its version, so the test exercised the generic command-error
+    // rollback branch rather than the intended successful-command mismatch.
+    // `/usr/bin/true --version` exits successfully on both macOS and Linux and
+    // can never report the pinned Bifrost target version.
+    std::fs::copy("/usr/bin/true", &target).expect("copy mismatched executable");
     std::fs::write(&backup, "#!/bin/sh\necho 'bifrost 0.0.155'\n").expect("write previous binary");
     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
         .expect("chmod target");
@@ -978,7 +984,10 @@ fn upgrade_target_version_mismatch_restores_previous_binary() {
 
     let error = verify_installed_cli_target_version_or_restore(&target, "0.0.156")
         .expect_err("wrong target version must fail");
-    assert!(error.to_string().contains("instead of target v0.0.156"));
+    assert!(
+        error.to_string().contains("instead of target v0.0.156"),
+        "unexpected verification error: {error:#}"
+    );
     assert_eq!(
         std::fs::read_to_string(&target).expect("read restored target"),
         "#!/bin/sh\necho 'bifrost 0.0.155'\n"
