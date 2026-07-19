@@ -49,6 +49,25 @@ admin_curl() {
         "http://127.0.0.1:${PORT}/_bifrost${path}" 2>/dev/null
 }
 
+issue_desktop_upgrade_origin_token() {
+    local data_dir="$1"
+    python3 - "$data_dir" <<'PY'
+import datetime
+import os
+import pathlib
+import sys
+import uuid
+
+data_dir = pathlib.Path(sys.argv[1])
+token = str(uuid.uuid4())
+path = data_dir / f".desktop-upgrade-origin-{token}.json"
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w") as file:
+    file.write(datetime.datetime.now(datetime.timezone.utc).isoformat())
+print(token)
+PY
+}
+
 wait_admin_ready() {
     local attempt
     for attempt in $(seq 1 100); do
@@ -203,10 +222,20 @@ PY
         && _log_pass "rejected browser request does not launch the standalone CLI" \
         || _log_fail "rejected browser request does not launch CLI" "no invocation log" "$(cat "$cli_log")"
 
-    local start_response source
-    start_response="$(admin_curl POST '/api/system/upgrade?channel=desktop')"
+    local start_response source desktop_origin_token desktop_origin_file
+    desktop_origin_token="$(issue_desktop_upgrade_origin_token "$data_dir")"
+    desktop_origin_file="$data_dir/.desktop-upgrade-origin-${desktop_origin_token}.json"
+    start_response="$(env NO_PROXY='*' no_proxy='*' curl -fsS -X POST \
+        --connect-timeout 2 --max-time 15 \
+        -H "X-Bifrost-Desktop-Upgrade-Origin: ${desktop_origin_token}" \
+        "http://127.0.0.1:${PORT}/_bifrost/api/system/upgrade?channel=desktop" 2>/dev/null)"
     source="$(printf '%s' "$start_response" | json_field source)"
     assert_equals "desktop" "$source" "desktop shell dispatches the desktop orchestrator"
+    if [[ ! -e "$desktop_origin_file" ]]; then
+        _log_pass "desktop origin credential is atomically consumed"
+    else
+        _log_fail "desktop origin credential is one-time" "consumed token file" "$desktop_origin_file"
+    fi
 
     local phase=""
     for _ in $(seq 1 200); do

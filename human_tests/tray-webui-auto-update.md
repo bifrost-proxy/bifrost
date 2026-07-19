@@ -238,7 +238,7 @@
    SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli windows_deferred_install_pins_target_and_respects_parent_progress_ownership --lib -- --nocapture
    python3 -m unittest scripts/ci/tests/test_coverage_diff.py
    ```
-2. 执行 App-owned 真实 Admin 链路，验证浏览器请求被拒绝、桌面请求仍完成 CLI + App 安装：
+2. 执行 App-owned 真实 Admin 链路，验证浏览器请求被拒绝、测试夹具按生产格式签发短时一次性 UUID origin token 并通过专用 header 模拟 Tauri 桌面请求、Admin 原子消费凭证后仍完成 CLI + App 安装：
    ```bash
    BIFROST_BIN="$PWD/target/debug/bifrost" \
      bash e2e-tests/tests/test_upgrade_app_owned_core_e2e.sh
@@ -325,6 +325,7 @@
 - CLI-owned core 的 macOS/Windows companion 只有在“目标桌面进程运行 + 已原子消费 Tauri 签发的短时一次性 origin token”同时成立时才改走 `source=desktop` handoff；只伪造 `channel=desktop` 或 header 的 REST/自动化请求不能得到私有 marker，必须走 caller-managed 安装。终端或普通浏览器发起时先通过 single-instance 内部 shutdown 参数让当前 App 安全退出，旧版本不支持该参数时回退 macOS 系统 Quit 或 Windows process-tree termination request；确认 executable 已释放后再 caller-managed 安装并重启，不能留下无人接管的 pending marker，也不能在运行中覆盖 Windows MSI/EXE 资源。
 - native desktop restart marker/helper 失败会持久化 `Failed`，刷新后不会重新显示旧 `Completed`。
 - 普通浏览器不能启动 desktop-owned 安装；桌面 shell 请求仍把 CLI 与 App 一起升级。
+- App-owned E2E 的合法桌面请求必须携带共享数据目录中真实存在的短时 UUID origin token，不能仅靠 `channel=desktop` 绕过来源认证；请求受理后 token 文件必须已被原子消费。
 - `app.rs`、`app/installer.rs`、`app/tests.rs`、`upgrade.rs`、`upgrade/desktop_companion.rs`、`upgrade/download.rs`、`upgrade/restart.rs`、`upgrade/tests*.rs` 以及 desktop `main.rs`、`upgrade_handoff.rs`、`backend_runtime.rs`、`tests.rs` 均不超过 1500 行，测试文档不包含本机绝对路径。
 
 ## 清理步骤
@@ -340,6 +341,7 @@
 
 2026-07-18 本次状态机审计已执行（最终复测）：
 
+- TC-TWA-10（PR comment 凭证回归的 CI 夹具修复）：通过。最终头提交的 macOS `agent-extensions` E2E 暴露出 App-owned 脚本仍只传 `channel=desktop`，因此被新增的真实 WebView origin 校验正确拒绝，后续 CLI child 与 pinned target 断言均为空。脚本现按生产 token 文件格式在隔离数据目录签发 UUID、以 `0600` 创建、通过 `X-Bifrost-Desktop-Upgrade-Origin` 发起合法桌面请求，并断言 Admin 已原子消费凭证；无凭证浏览器请求仍为 409 且不修改 App/CLI。按文档立即执行后 App-owned Admin 实链路为 `20/20`，CLI 与 App 同时更新到 `99.0.1`、core 保持原 owner 等待 Tauri handoff；未绑定、停止或修改 9900。
 - TC-TWA-10（PR comments 第十四轮，真实 WebView origin 凭证）：通过。`channel=desktop` 不再被当成 WebView 存在证明；桌面进程通过 Tauri command 在共享数据目录签发 UUID token，Web API 只在 desktop channel 上把 token 放入专用 header，Admin 对请求 channel、30 秒有效期和一次性文件做原子校验/消费。CLI-owned core 的无 token REST 调用继续由 CLI owner 收口并走 caller-managed App 安装，不会留下无人消费的 `Restarting`；desktop-owned core 的无 token 请求返回 409。第 1 轮 review 将“后签发 token 清除前一个 token”修正为每个 token 独立一次性消费，避免多个合法桌面窗口相互误伤；第 2 轮把 Unix token 文件权限收紧为 `0600`，避免同机其他用户从共享数据目录读取短时凭证。按文档立即执行 core token 正常/错误/过期/重复消费及权限 `3/3`、Admin owner/origin `1/1`、Web 全量 `178/178`、workspace 与 desktop strict clippy、Web lint/build，以及 restart E2E `21/21`，全部通过；未绑定、停止或修改 9900。
 - TC-TWA-10（PR comments 第十三轮，WebView origin 与 shell 运行状态解耦）：通过。Admin 现在把原始 `channel=desktop` 独立编码为私有 WebView-origin marker，即使 effective orchestrator 因 CLI-owned core 变为 CLI 也不会丢失发起界面；CLI companion 不再用 `RuntimeStartMode::Desktop` 猜测是否有人消费 handoff。目标 App 正在运行且有 WebView marker 时才交给 Tauri；终端/普通浏览器路径先通过 `--bifrost-upgrade-shutdown` 触发 desktop single-instance graceful shutdown，旧 App 不支持时再走平台退出回退，确认 executable 退出后才安装和重启，超时则拒绝覆盖。macOS/Windows 多副本候选优先实际运行的 App。第 1 轮 review 修复 shell 在检测后自行退出会被误报失败的 race；第 2 轮补上 v155 等旧 App 不认识新 shutdown 参数的兼容回退。按文档立即执行 CLI owner/mode/active-candidate 测试 `1/1`、Admin origin 环境测试 `1/1`、desktop shutdown 参数测试 `1/1`、desktop 全量 `53/53`、strict clippy、restart E2E `21/21` 和基于 `id -un` 的当前用户路径检查，全部通过；未绑定、停止或修改 9900。
 - TC-TWA-10（PR comments 第十二轮）：通过。CLI-owned orchestrator 现在对 caller-managed 与 Windows desktop-handoff 两类 App companion 都显式注入 parent-lock marker，child 继续携带 `--no-cli`、固定 target 和 owner source，在父事务内更新 App 而不与父进程争用 `upgrade.lock`；macOS desktop version-check 从当前 bundled core executable 向上解析实际 `Bifrost.app` 并置于全局候选之前，多副本测试证明 active `0.0.143` 不会被另一个 `0.0.144` App 掩盖。Admin owner fixture 改用隔离端口 `19900`，文档可移植性检查改为项目相对文件上的通用 macOS home-path 正则，不再嵌入本机路径。按文档立即执行 companion 参数/真实 child 环境测试各 `1/1`、active/override App 版本测试 `2/2`、Admin owner 测试 `1/1`、restart E2E `21/21` 与文档路径检查，全部通过；未绑定、停止或修改 9900。
