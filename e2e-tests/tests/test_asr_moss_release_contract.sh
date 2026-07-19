@@ -16,6 +16,8 @@ runner_path = Path("scripts/asr/moss_mlx_runner.py")
 patch_path = Path("scripts/asr/mlx-audio-moss-quantized-conv.patch")
 packager_path = Path("scripts/ci/package-moss-release-runtime.sh")
 packager_test_path = Path("scripts/ci/test-package-moss-release-runtime.sh")
+core_guard_path = Path("scripts/ci/check-macos-release-core-payload.sh")
+core_guard_test_path = Path("scripts/ci/test-macos-release-core-payload.sh")
 ci_path = Path(".github/workflows/ci.yml")
 
 release = release_path.read_text(encoding="utf-8")
@@ -66,6 +68,7 @@ require(model_bytes.replace("_", "") == "1258427442", "model byte-length guard d
 require(model_sha == "469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190", "model checksum guard drifted")
 require(required_files <= download_files, "release archive omits required model metadata")
 require("model.safetensors" not in download_files, "runtime archive must not duplicate the separately verified 1.2 GB weight")
+require("model weights must be downloaded on demand" in packager, "runtime packager does not reject bundled model weights")
 
 requirements_lines = [
     line.strip()
@@ -90,8 +93,16 @@ require('cat *.sha256 > "bifrost-v${VERSION}-checksums.txt"' in release, "combin
 require("parse_runtime_checksum_manifest" in runtime, "runtime no longer verifies the release checksum manifest")
 require("BIFROST_MOSS_RUNTIME_SHA256 is required with BIFROST_MOSS_RUNTIME_URL" in runtime, "custom runtime URL can bypass checksum verification")
 require(packager_test_path.is_file(), "release packaging fixture test is missing")
+require(core_guard_path.is_file(), "macOS core package guard is missing")
+require(core_guard_test_path.is_file(), "macOS core package guard fixture is missing")
+require("Verify macOS CLI core package stays lightweight" in release, "release does not gate the macOS CLI core package")
+require('check-macos-release-core-payload.sh "${APP_PATH}"' in release, "release does not gate the macOS desktop app bundle")
+require('check-macos-release-core-payload.sh "${DMG_PATH}"' in release, "release does not inspect the final macOS DMG")
 require("Release Workflow Contract (MOSS macOS)" in ci, "PR CI does not gate the MOSS release workflow")
 require("test-package-moss-release-runtime.sh" in ci, "PR CI does not execute the shared MOSS packager")
+require("test-macos-release-core-payload.sh" in ci, "PR CI does not exercise the macOS core package guard")
+require(ci.count("Verify macOS CLI binary stays lightweight") == 2, "PR CI does not gate both macOS CLI architectures")
+require(ci.count('check-macos-release-core-payload.sh "${DMG_PATH}"') >= 1, "PR CI does not inspect its actual macOS DMG")
 
 print(
     "PASS: MOSS release/runtime contract is aligned "

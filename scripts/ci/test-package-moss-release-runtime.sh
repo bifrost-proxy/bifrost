@@ -13,6 +13,8 @@ mkdir -p "$RUNTIME_ROOT/runtime/python/bin" "$RUNTIME_ROOT/runtime/site-packages
 printf 'fixture\n' >"$RUNTIME_ROOT/runtime/site-packages/.fixture"
 
 printf '%s\n' '#!/bin/sh' 'exec "$@"' >"$RUNTIME_ROOT/runtime/python/bin/python3.12"
+# The generated fixture must evaluate $1 at runtime.
+# shellcheck disable=SC2016
 printf '%s\n' '#!/bin/sh' 'test "${1:-}" = "--self-test"' \
   'echo "moss-mlx-runtime ok"' >"$RUNTIME_ROOT/runtime/moss_mlx_runner.py"
 chmod +x "$RUNTIME_ROOT/runtime/python/bin/python3.12" \
@@ -27,6 +29,14 @@ for file in \
 done
 printf 'fixture license\n' >"$RUNTIME_ROOT/MLX-AUDIO-LICENSE"
 printf 'fixture model notice\n' >"$RUNTIME_ROOT/MODEL-NOTICE.txt"
+printf 'forbidden weight\n' >"$RUNTIME_ROOT/model/model.safetensors"
+
+if bash "$ROOT_DIR/scripts/ci/package-moss-release-runtime.sh" "$RUNTIME_ROOT" "$OUTPUT_ZIP"; then
+  echo "Packager accepted a model weight that must be downloaded on demand" >&2
+  exit 1
+fi
+rm "$RUNTIME_ROOT/model/model.safetensors"
+
 printf 'forbidden sidecar\n' >"$RUNTIME_ROOT/model/._config.json"
 
 if bash "$ROOT_DIR/scripts/ci/package-moss-release-runtime.sh" "$RUNTIME_ROOT" "$OUTPUT_ZIP"; then

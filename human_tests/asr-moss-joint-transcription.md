@@ -136,10 +136,13 @@
 2. 在 macOS 执行 `bash scripts/ci/test-package-moss-release-runtime.sh`。fixture 首先带一个 `._config.json`，断言共享打包器拒绝该产物；删除 sidecar 后再次打包。
 3. 确认生成的 `moss-joint-runtime-v0.0.0-aarch64-apple-darwin.zip` 包含 runtime 入口、12 个模型 metadata、license/notice，不包含 AppleDouble/DS_Store/__MACOSX，并且 `.sha256` 可复算。
 4. 检查 `.github/workflows/ci.yml` 存在 macOS `Release Workflow Contract (MOSS macOS)` job，同时执行上述静态契约和共享打包器 fixture。
+5. 执行 `bash scripts/ci/test-macos-release-core-payload.sh`，确认正常 CLI tar.gz/tar.xz、Desktop `.app` 与最终 DMG fixture 通过；混入 MOSS runtime、`.safetensors` 权重或超过 512 MiB 的主包必须失败。
+6. 检查普通 PR CI 的两种 macOS CLI build 与两种 Desktop bundle jobs 均对实际 binary、`.app` 和 DMG 调用同一门禁，而不只运行 fixture。
 
 预期结果：
 
 - PR CI 无需下载 1.2 GB 权重即可真实执行与正式 release 相同的确定性打包和 checksum 逻辑。
+- macOS CLI 主 archive 与 Desktop DMG 不携带 MOSS runtime、依赖或权重；用户选择初始化或首次运行时才动态下发到 `~/.bifrost/asr/moss_joint_mlx`。
 - 正式 tag release 仍负责完整 MLX/Python 安装、自检和真实 runtime 产物；如果共享打包器或资源契约漂移，PR 阶段即失败。
 
 ## 清理步骤
@@ -165,3 +168,4 @@
 | 2026-07-19 | TC-MOSS-06 | PASS（修复后复测）：使用当前源码与隔离数据目录在 18998 启动真实服务；Standard 的 8 个 Qwen pipeline 字段均显示且 MOSS Prompt 隐藏，MOSS 下 8 个字段均从 DOM 移除且 Prompt、Recursive、Enabled、External Devices 保持可用。模式往返保留 Prompt 与 `Qwen3-ASR-1.7B`；首次真实保存发现隐藏字段未进入 `validateFields()` 导致模型回落，改用校验后读取完整表单状态并复测，保存 MOSS、重开 Edit、切回 Standard 后仍为 1.7B。Prompt API 回显原文，字符计数无重叠，亮色与暗色布局均无空白占位、遮挡或水平溢出。9900 保持 PID 22956，18997 保持 PID 56155。 |
 | 2026-07-19 | TC-MOSS-07 | PASS（性能修复后复测）：当前源码服务以临时数据目录在 18998 启动。首次真实状态读取发现全量权重哈希与 MLX 自检超过 30 秒，改为初始化时写入包含固定模型 SHA-256/大小/mtime 及 Python/runner 哈希的 schema v2 `verification.json`；修复后未初始化状态 0.002771 秒返回，真实资产完整校验生成 v2 标记后 Ready 状态 0.599707 秒返回。真实 Chrome 选择 MOSS 后显示 Ready、On demand / whole file、Automatic multilingual、Runtime/Model verified、1.17 GB / 1.17 GB 和 `~/.bifrost/asr/moss_joint_mlx`，Model Management 不再显示 Qwen Host/Service Port。9900/PID 22956 与 18997/PID 56155 未变化，18998 已停止且临时目录已清理。 |
 | 2026-07-19 | TC-MOSS-08 | PASS：静态发布契约确认 MLX-Audio/model 固定 commit、12 个 metadata、1,258,427,442-byte 权重 SHA-256、共享 packager 与 macOS PR CI job 一致；真实 macOS fixture 先因 `._config.json` 被拒绝，清理后生成 zip 和可复算 `.sha256`，runtime 入口、metadata、license/notice 齐全。 |
+| 2026-07-19 | TC-MOSS-08 | PASS（动态下发边界复测）：CLI tar.gz/tar.xz、Desktop `.app` 与实际挂载的 fixture DMG 均通过轻量核心包检查；混入 `moss-joint-runtime`、`model.safetensors` 或超过配置上限均被拒绝。runtime packager 同时拒绝权重，只允许 runtime、固定 metadata 与 license/notice，权重继续由初始化器单独下载。 |

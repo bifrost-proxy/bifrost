@@ -325,6 +325,15 @@ jobs:
           tar -czvf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
           tar -cJvf "${ARCHIVE_NAME}.tar.xz" "${ARCHIVE_NAME}"
 
+      - name: Verify macOS CLI core package stays lightweight
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          ARCHIVE_NAME="bifrost-v${VERSION}-${{ matrix.target }}"
+          bash scripts/ci/check-macos-release-core-payload.sh "dist/${ARCHIVE_NAME}.tar.gz"
+          bash scripts/ci/check-macos-release-core-payload.sh "dist/${ARCHIVE_NAME}.tar.xz"
+
       - name: Package (Windows)
         if: matrix.archive == 'zip'
         shell: pwsh
@@ -509,9 +518,12 @@ jobs:
             exit 1
           fi
 
+          bash scripts/ci/check-macos-release-core-payload.sh "${APP_PATH}"
+
           ARCH_SUFFIX=$( [[ "${{ matrix.target }}" == "x86_64-apple-darwin" ]] && echo x64 || echo aarch64 )
           DMG_PATH="desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/Bifrost_${BIFROST_VERSION}_${ARCH_SUFFIX}.dmg"
           bash scripts/package-macos-dmg.sh "${APP_PATH}" "${DMG_PATH}"
+          bash scripts/ci/check-macos-release-core-payload.sh "${DMG_PATH}"
 
       - name: Package desktop artifact
         shell: bash

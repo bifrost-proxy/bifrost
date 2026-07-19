@@ -32,6 +32,11 @@ for relative in "${required_paths[@]}"; do
   fi
 done
 
+if find "$RUNTIME_ROOT/model" -type f -name '*.safetensors' -print -quit | grep -q .; then
+  echo "MOSS model weights must be downloaded on demand, not bundled in the runtime asset" >&2
+  exit 1
+fi
+
 PYTHONHOME="$RUNTIME_ROOT/runtime/python" \
   PYTHONPATH="$RUNTIME_ROOT/runtime/site-packages" \
   PYTHONNOUSERSITE=1 \
@@ -60,6 +65,10 @@ COPYFILE_DISABLE=1 ditto -c -k --keepParent --norsrc --noextattr --noqtn --noacl
 archive_listing="$(unzip -Z1 "$OUTPUT_ZIP")"
 if grep -E '(^|/)(\._|\.DS_Store|__MACOSX)' <<<"$archive_listing"; then
   echo "Packaged MOSS runtime contains macOS metadata sidecars" >&2
+  exit 1
+fi
+if grep -E '\.safetensors$' <<<"$archive_listing"; then
+  echo "Packaged MOSS runtime contains model weights that must be downloaded on demand" >&2
   exit 1
 fi
 

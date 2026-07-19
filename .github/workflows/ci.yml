@@ -55,6 +55,9 @@ jobs:
       - name: Exercise shared MOSS release packager
         shell: bash
         run: bash scripts/ci/test-package-moss-release-runtime.sh
+      - name: Verify macOS core release payload stays lightweight
+        shell: bash
+        run: bash scripts/ci/test-macos-release-core-payload.sh
 
   fmt:
     name: Rust Format Check
@@ -695,6 +698,9 @@ jobs:
         run: bash scripts/ci/prepare-sherpa-onnx-archive.sh aarch64-apple-darwin
       - name: Build CLI
         run: cargo build -p bifrost-cli --release --target aarch64-apple-darwin
+      - name: Verify macOS CLI binary stays lightweight
+        shell: bash
+        run: bash scripts/ci/check-macos-release-core-payload.sh target/aarch64-apple-darwin/release/bifrost
       - name: Upload release binary
         uses: actions/upload-artifact@v4
         with:
@@ -741,6 +747,9 @@ jobs:
         env:
           SKIP_FRONTEND_BUILD: "1"
         run: cargo build -p bifrost-cli --release --target x86_64-apple-darwin
+      - name: Verify macOS CLI binary stays lightweight
+        shell: bash
+        run: bash scripts/ci/check-macos-release-core-payload.sh target/x86_64-apple-darwin/release/bifrost
       - name: Upload release binary
         uses: actions/upload-artifact@v4
         with:
@@ -1101,6 +1110,8 @@ jobs:
           ARCH_SUFFIX=$( [[ "${{ matrix.target }}" == "x86_64-apple-darwin" ]] && echo x64 || echo aarch64 )
           DMG_PATH="desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/Bifrost_ci_${ARCH_SUFFIX}.dmg"
           bash scripts/package-macos-dmg.sh "${APP_PATH}" "${DMG_PATH}"
+          bash scripts/ci/check-macos-release-core-payload.sh "${APP_PATH}"
+          bash scripts/ci/check-macos-release-core-payload.sh "${DMG_PATH}"
       - name: Validate macOS desktop bundle
         shell: bash
         run: |
