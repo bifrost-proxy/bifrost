@@ -22,8 +22,9 @@ use super::update_check::get_latest_version_fresh_with_diagnostics;
 use super::upgrade::{
     download_progress_line, handle_app_managed_upgrade, DESKTOP_MANAGED_SKIP_APP_ENV,
     DESKTOP_MANAGED_SKIP_RESTART_ENV, DESKTOP_MANAGED_TARGET_ENV, DESKTOP_UPGRADE_HANDOFF_ENV,
-    PARENT_UPGRADE_LOCK_HELD_ENV,
 };
+#[cfg(test)]
+use super::upgrade_background::{PARENT_UPGRADE_LOCK_OWNER_PID_ENV, PARENT_UPGRADE_LOCK_TOKEN_ENV};
 mod installer;
 pub(crate) use installer::desktop_pending_install_guard_is_active;
 use installer::*;
@@ -379,7 +380,9 @@ fn desktop_managed_cli_upgrade_command(cli_path: &Path, target_version: &str) ->
         .env(DESKTOP_MANAGED_SKIP_APP_ENV, "1")
         .env(DESKTOP_MANAGED_SKIP_RESTART_ENV, "1")
         .env(DESKTOP_MANAGED_TARGET_ENV, target_version)
-        .env(PARENT_UPGRADE_LOCK_HELD_ENV, "1")
+        .envs(
+            crate::commands::upgrade_background::parent_upgrade_lock_child_environment(&data_dir()),
+        )
         .stdin(Stdio::null());
     command
 }

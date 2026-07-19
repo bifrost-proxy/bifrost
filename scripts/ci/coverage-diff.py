@@ -150,10 +150,12 @@ def unchanged_moved_block_lines(
                 autojunk=False,
             )
             for retained in retained_matcher.get_matching_blocks():
-                if retained.size >= MOVED_BLOCK_MIN_LINES:
-                    retained_base_lines.update(
-                        range(retained.a, retained.a + retained.size)
-                    )
+                # Every exact line still present at the source prevents that
+                # line from qualifying as deleted-and-moved.  The substantial
+                # block threshold belongs only to the destination candidate;
+                # applying it here lets one edited middle line split retained
+                # source code into smaller runs and hide a copied suffix.
+                retained_base_lines.update(range(retained.a, retained.a + retained.size))
         matcher = difflib.SequenceMatcher(
             None, base_lines, current_lines, autojunk=False
         )

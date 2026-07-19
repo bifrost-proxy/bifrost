@@ -152,6 +152,19 @@ class CoverageDiffTests(unittest.TestCase):
         )
         self.assertEqual(moved, set())
 
+    def test_edited_middle_source_line_does_not_hide_copied_suffix(self) -> None:
+        lines = [f"let value_{index} = {index};" for index in range(16)]
+        base = "\n".join(lines)
+        retained_source = "\n".join(
+            [*lines[:8], "let value_8 = changed();", *lines[9:]]
+        )
+        moved = coverage_diff.unchanged_moved_block_lines(
+            base,
+            [("crates/a/src/source.rs", base, retained_source)],
+            "crates/a/src/copied.rs",
+        )
+        self.assertEqual(moved, set())
+
     def test_same_file_copy_keeps_new_duplicate_lines_in_gate(self) -> None:
         base = "\n".join(f"let value_{index} = {index};" for index in range(12))
         for placement in ("before", "after"):

@@ -264,7 +264,7 @@ pub(super) fn post_upgrade_desktop_app_args(
 pub(super) fn desktop_companion_environment(
     mode: DesktopCompanionMode,
 ) -> Vec<(&'static str, &'static str)> {
-    let mut environment = vec![(PARENT_UPGRADE_LOCK_HELD_ENV, "1")];
+    let mut environment = Vec::new();
     if mode == DesktopCompanionMode::DesktopHandoff {
         environment.push((DESKTOP_UPGRADE_HANDOFF_ENV, "1"));
     }
@@ -318,12 +318,14 @@ pub(super) fn update_desktop_app_after_upgrade(
     }
     let args = post_upgrade_desktop_app_args(target_version, app_path.parent(), mode);
     let environment = desktop_companion_environment(mode);
+    let parent_lock_data_dir = get_bifrost_dir()?;
     match command_output_with_timeout_and_env(
         executable,
         &args,
         Duration::from_secs(POST_UPGRADE_APP_UPDATE_TIMEOUT_SECS),
         Duration::from_secs(UPGRADE_CHILD_PROGRESS_HEARTBEAT_SECS),
         &environment,
+        Some(&parent_lock_data_dir),
     ) {
         Ok(output) if output.status == TimedCommandStatus::Success => {
             if mode == DesktopCompanionMode::DesktopHandoff {

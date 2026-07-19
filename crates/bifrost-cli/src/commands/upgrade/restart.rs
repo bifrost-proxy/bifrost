@@ -107,7 +107,9 @@ pub(super) fn maybe_restart_running_proxy(restart_executable: &Path) -> Result<(
     };
 
     println!("{}", "  Stopping current proxy...".bright_cyan());
-    crate::commands::upgrade_background::report_restarting();
+    crate::commands::upgrade_background::report_restarting_preserving_desktop_handoff(
+        desktop_handoff_scheduled(),
+    );
     crate::commands::stop::run_stop_for_restart()
         .map_err(|e| BifrostError::Config(format!("Failed to stop running proxy: {}", e)))?;
 
@@ -222,7 +224,9 @@ pub(super) fn maybe_restart_running_proxy_after_windows_deferred_install(
     };
 
     println!("{}", "  Stopping current proxy...".bright_cyan());
-    crate::commands::upgrade_background::report_restarting();
+    crate::commands::upgrade_background::report_restarting_preserving_desktop_handoff(
+        desktop_handoff_scheduled(),
+    );
     crate::commands::stop::run_stop_for_restart()
         .map_err(|e| BifrostError::Config(format!("Failed to stop running proxy: {}", e)))?;
 
@@ -292,7 +296,8 @@ pub(super) fn schedule_windows_deferred_install(
     let progress_path = progress_dir.join(bifrost_core::upgrade_progress::PROGRESS_FILE_NAME);
     let progress_snapshot = bifrost_core::upgrade_progress::read_progress(&progress_dir);
     let progress_source = progress_snapshot.source.unwrap_or_default();
-    let publish_progress = !env_flag(PARENT_UPGRADE_LOCK_HELD_ENV);
+    let publish_progress =
+        !crate::commands::upgrade_background::parent_upgrade_lock_is_valid(&progress_dir);
 
     if let Some(args) = restart_args {
         fs::write(&args_path, args.join("\n")).map_err(BifrostError::Io)?;

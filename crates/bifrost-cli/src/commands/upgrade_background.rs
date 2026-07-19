@@ -10,6 +10,7 @@
 //! upgrade has installed a sink, so the normal interactive CLI path is
 //! completely unaffected.
 
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -38,6 +39,18 @@ struct ActiveProgressSink {
 
 static SINK: OnceLock<Mutex<Option<ActiveProgressSink>>> = OnceLock::new();
 const UPGRADE_LOCK_FILE_NAME: &str = "upgrade.lock";
+const UPGRADE_LOCK_OWNER_FILE_NAME: &str = "upgrade.lock.owner.json";
+pub(crate) const PARENT_UPGRADE_LOCK_TOKEN_ENV: &str = "BIFROST_PARENT_UPGRADE_LOCK_TOKEN_INTERNAL";
+pub(crate) const PARENT_UPGRADE_LOCK_OWNER_PID_ENV: &str =
+    "BIFROST_PARENT_UPGRADE_LOCK_OWNER_PID_INTERNAL";
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct UpgradeLockOwner {
+    pid: u32,
+    token: String,
+}
+
+static OWNED_UPGRADE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, UpgradeLockOwner>>> = OnceLock::new();
 
 pub(crate) enum UpgradeLockAttempt {
     Acquired(File),
@@ -47,6 +60,95 @@ pub(crate) enum UpgradeLockAttempt {
 
 fn sink_slot() -> &'static Mutex<Option<ActiveProgressSink>> {
     SINK.get_or_init(|| Mutex::new(None))
+}
+
+fn owned_upgrade_lock_slot() -> &'static Mutex<HashMap<PathBuf, UpgradeLockOwner>> {
+    OWNED_UPGRADE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn publish_upgrade_lock_owner(data_dir: &Path) -> Result<(), BifrostError> {
+    let owner = UpgradeLockOwner {
+        pid: std::process::id(),
+        token: uuid::Uuid::new_v4().as_simple().to_string(),
+    };
+    let content = serde_json::to_vec(&owner)
+        .map_err(|error| BifrostError::Config(format!("encode upgrade lock owner: {error}")))?;
+    std::fs::write(data_dir.join(UPGRADE_LOCK_OWNER_FILE_NAME), content)
+        .map_err(BifrostError::Io)?;
+    if let Ok(mut slot) = owned_upgrade_lock_slot().lock() {
+        slot.insert(data_dir.to_path_buf(), owner);
+    }
+    Ok(())
+}
+
+pub(crate) fn parent_upgrade_lock_child_environment(data_dir: &Path) -> Vec<(String, String)> {
+    owned_upgrade_lock_slot()
+        .lock()
+        .ok()
+        .and_then(|slot| slot.get(data_dir).cloned())
+        .map(|owner| {
+            vec![
+                (PARENT_UPGRADE_LOCK_TOKEN_ENV.to_string(), owner.token),
+                (
+                    PARENT_UPGRADE_LOCK_OWNER_PID_ENV.to_string(),
+                    owner.pid.to_string(),
+                ),
+            ]
+        })
+        .unwrap_or_default()
+}
+
+fn current_parent_pid() -> Option<u32> {
+    let system = sysinfo::System::new_all();
+    let current = sysinfo::get_current_pid().ok()?;
+    system
+        .process(current)
+        .and_then(|process| process.parent())
+        .map(|pid| pid.as_u32())
+}
+
+fn parent_upgrade_lock_credential_matches(data_dir: &Path, actual_parent_pid: u32) -> bool {
+    let Ok(token) = std::env::var(PARENT_UPGRADE_LOCK_TOKEN_ENV) else {
+        return false;
+    };
+    let Some(owner_pid) = std::env::var(PARENT_UPGRADE_LOCK_OWNER_PID_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+    else {
+        return false;
+    };
+    if owner_pid != actual_parent_pid {
+        return false;
+    }
+    let Some(owner) = std::fs::read(data_dir.join(UPGRADE_LOCK_OWNER_FILE_NAME))
+        .ok()
+        .and_then(|content| serde_json::from_slice::<UpgradeLockOwner>(&content).ok())
+    else {
+        return false;
+    };
+    if owner.pid != owner_pid || owner.token != token {
+        return false;
+    }
+    let Ok(probe) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(data_dir.join(UPGRADE_LOCK_FILE_NAME))
+    else {
+        return false;
+    };
+    match probe.try_lock_exclusive() {
+        Err(error) => upgrade_lock_is_contended(&error),
+        Ok(()) => {
+            let _ = FileExt::unlock(&probe);
+            false
+        }
+    }
+}
+
+pub(crate) fn parent_upgrade_lock_is_valid(data_dir: &Path) -> bool {
+    current_parent_pid()
+        .map(|pid| parent_upgrade_lock_credential_matches(data_dir, pid))
+        .unwrap_or(false)
 }
 
 fn install_sink(sink: ProgressSink) {
@@ -92,7 +194,10 @@ pub(crate) fn try_acquire_upgrade_lock_attempt(
         .open(data_dir.join(UPGRADE_LOCK_FILE_NAME))
         .map_err(BifrostError::Io)?;
     match lock.try_lock_exclusive() {
-        Ok(()) => Ok(UpgradeLockAttempt::Acquired(lock)),
+        Ok(()) => {
+            publish_upgrade_lock_owner(data_dir)?;
+            Ok(UpgradeLockAttempt::Acquired(lock))
+        }
         Err(error) if upgrade_lock_is_contended(&error) => Ok(UpgradeLockAttempt::Contended),
         Err(error) => Err(BifrostError::Io(error)),
     }
@@ -151,6 +256,33 @@ pub(crate) fn report_installing() {
 /// Reported from `upgrade.rs` right before restarting the running proxy.
 pub(crate) fn report_restarting() {
     emit(|sink| base(sink, UpgradePhase::Restarting, "Restarting proxy…"));
+}
+
+/// Preserve a desktop-owned handoff record while the CLI-owned core restarts.
+///
+/// In the hybrid WebView flow the companion updater has already delegated the
+/// terminal transition to the desktop shell. Replacing its `source=desktop`
+/// record with the background sink's source would prevent the WebView from
+/// invoking that handoff and leave the upgrade stuck at `restarting`.
+pub(crate) fn report_restarting_preserving_desktop_handoff(preserve: bool) {
+    let preserve_existing = preserve
+        && sink_slot()
+            .lock()
+            .ok()
+            .and_then(|slot| {
+                slot.as_ref()
+                    .filter(|active| active.owner_thread == std::thread::current().id())
+                    .map(|active| active.sink.data_dir.clone())
+            })
+            .map(|data_dir| {
+                let progress = bifrost_core::upgrade_progress::read_progress(&data_dir);
+                progress.phase == UpgradePhase::Restarting
+                    && progress.source.as_deref() == Some("desktop")
+            })
+            .unwrap_or(false);
+    if !preserve_existing {
+        report_restarting();
+    }
 }
 
 /// Run an unattended upgrade, reporting progress to the shared file channel.
@@ -377,6 +509,36 @@ mod tests {
     }
 
     #[test]
+    fn cli_core_restart_preserves_desktop_handoff_progress() {
+        let _guard = lock_tests();
+        let dir = temp_dir();
+        install_sink(ProgressSink {
+            data_dir: dir.clone(),
+            target_version: Some("0.0.156".to_string()),
+            source: "admin".to_string(),
+        });
+        write_progress(
+            &dir,
+            &UpgradeProgress::new(UpgradePhase::Restarting, "Restart desktop to finish update")
+                .with_target(Some("0.0.156".to_string()))
+                .with_source(Some("desktop".to_string())),
+        );
+
+        report_restarting_preserving_desktop_handoff(true);
+        let preserved = read_progress(&dir);
+        assert_eq!(preserved.source.as_deref(), Some("desktop"));
+        assert_eq!(preserved.message, "Restart desktop to finish update");
+
+        report_restarting_preserving_desktop_handoff(false);
+        let ordinary_restart = read_progress(&dir);
+        assert_eq!(ordinary_restart.source.as_deref(), Some("admin"));
+        assert_eq!(ordinary_restart.message, "Restarting proxy…");
+
+        let _ = take_sink();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn reporting_without_sink_is_noop() {
         let _guard = lock_tests();
         let _ = take_sink();
@@ -422,6 +584,52 @@ mod tests {
         assert!(try_acquire_upgrade_lock(&dir)
             .expect("reacquire released lock")
             .is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn managed_child_credential_requires_token_owner_pid_and_live_lock() {
+        let _guard = lock_tests();
+        let dir = temp_dir();
+        let owner = try_acquire_upgrade_lock(&dir)
+            .expect("acquire parent lock")
+            .expect("parent owns lock");
+        let previous_token = std::env::var_os(PARENT_UPGRADE_LOCK_TOKEN_ENV);
+        let previous_pid = std::env::var_os(PARENT_UPGRADE_LOCK_OWNER_PID_ENV);
+        for (key, value) in parent_upgrade_lock_child_environment(&dir) {
+            std::env::set_var(key, value);
+        }
+
+        assert!(parent_upgrade_lock_credential_matches(
+            &dir,
+            std::process::id()
+        ));
+        assert!(!parent_upgrade_lock_credential_matches(
+            &dir,
+            std::process::id().saturating_add(1)
+        ));
+        std::env::set_var(PARENT_UPGRADE_LOCK_TOKEN_ENV, "forged-token");
+        assert!(!parent_upgrade_lock_credential_matches(
+            &dir,
+            std::process::id()
+        ));
+        for (key, value) in parent_upgrade_lock_child_environment(&dir) {
+            std::env::set_var(key, value);
+        }
+        drop(owner);
+        assert!(!parent_upgrade_lock_credential_matches(
+            &dir,
+            std::process::id()
+        ));
+
+        match previous_token {
+            Some(value) => std::env::set_var(PARENT_UPGRADE_LOCK_TOKEN_ENV, value),
+            None => std::env::remove_var(PARENT_UPGRADE_LOCK_TOKEN_ENV),
+        }
+        match previous_pid {
+            Some(value) => std::env::set_var(PARENT_UPGRADE_LOCK_OWNER_PID_ENV, value),
+            None => std::env::remove_var(PARENT_UPGRADE_LOCK_OWNER_PID_ENV),
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

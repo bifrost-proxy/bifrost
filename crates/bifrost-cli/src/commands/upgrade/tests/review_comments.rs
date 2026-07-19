@@ -1,6 +1,38 @@
 use super::*;
 
 #[test]
+#[cfg(unix)]
+fn parent_lock_credential_is_only_inherited_by_managed_companion() {
+    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let _owner = crate::commands::upgrade_background::try_acquire_upgrade_lock(temp.path())
+        .expect("open parent lock")
+        .expect("own parent lock");
+    let token_env = crate::commands::upgrade_background::PARENT_UPGRADE_LOCK_TOKEN_ENV;
+    let owner_pid_env = crate::commands::upgrade_background::PARENT_UPGRADE_LOCK_OWNER_PID_ENV;
+    let assertion = format!("test -n \"${token_env}\" && test -n \"${owner_pid_env}\"");
+
+    let ordinary = command_output_with_timeout(
+        Path::new("/bin/sh"),
+        &["-c".to_string(), assertion.clone()],
+        Duration::from_secs(1),
+    )
+    .expect("ordinary helper exits");
+    assert_eq!(ordinary.status, TimedCommandStatus::Failure);
+
+    let managed = command_output_with_timeout_and_env(
+        Path::new("/bin/sh"),
+        &["-c".to_string(), assertion],
+        Duration::from_secs(1),
+        Duration::from_millis(10),
+        &[],
+        Some(temp.path()),
+    )
+    .expect("managed helper exits");
+    assert_eq!(managed.status, TimedCommandStatus::Success);
+}
+
+#[test]
 fn windows_deferred_install_pins_target_and_respects_parent_progress_ownership() {
     let source = concat!(
         include_str!("../../upgrade.rs"),
@@ -107,14 +139,11 @@ fn upgrade_post_install_desktop_app_args_disable_cli_recursion() {
     assert_eq!(handoff[4], "desktop");
     assert_eq!(
         desktop_companion_environment(DesktopCompanionMode::CallerManaged),
-        vec![(PARENT_UPGRADE_LOCK_HELD_ENV, "1")]
+        Vec::<(&str, &str)>::new()
     );
     assert_eq!(
         desktop_companion_environment(DesktopCompanionMode::DesktopHandoff),
-        vec![
-            (PARENT_UPGRADE_LOCK_HELD_ENV, "1"),
-            (DESKTOP_UPGRADE_HANDOFF_ENV, "1")
-        ]
+        vec![(DESKTOP_UPGRADE_HANDOFF_ENV, "1")]
     );
     assert_eq!(
         desktop_companion_mode(true, true, true),

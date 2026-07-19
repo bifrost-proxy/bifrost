@@ -204,7 +204,8 @@ fn upgrade_behavior_executes_companion_and_runtime_ownership_branches() {
         DESKTOP_MANAGED_SKIP_APP_ENV,
         DESKTOP_MANAGED_SKIP_RESTART_ENV,
         DESKTOP_MANAGED_TARGET_ENV,
-        PARENT_UPGRADE_LOCK_HELD_ENV,
+        super::super::upgrade_background::PARENT_UPGRADE_LOCK_TOKEN_ENV,
+        super::super::upgrade_background::PARENT_UPGRADE_LOCK_OWNER_PID_ENV,
         WEBVIEW_UPGRADE_ORIGIN_ENV,
         "BIFROST_UPGRADE_TEST_LATEST_VERSION",
     ];
@@ -233,11 +234,7 @@ fn upgrade_behavior_executes_companion_and_runtime_ownership_branches() {
     }
 
     let success = temp.path().join("success-cli");
-    std::fs::write(
-        &success,
-        "#!/bin/sh\nif [ \"$1\" = app ] && [ \"$BIFROST_PARENT_UPGRADE_LOCK_HELD_INTERNAL\" != 1 ]; then exit 9; fi\nexit 0\n",
-    )
-    .expect("write success helper");
+    std::fs::write(&success, "#!/bin/sh\nexit 0\n").expect("write success helper");
     std::fs::set_permissions(&success, std::fs::Permissions::from_mode(0o755))
         .expect("chmod success helper");
     let failure = temp.path().join("failure-cli");
@@ -331,17 +328,27 @@ fn upgrade_behavior_executes_companion_and_runtime_ownership_branches() {
     let parent_lock = super::super::upgrade_background::try_acquire_upgrade_lock(&data_dir)
         .expect("open parent upgrade lock")
         .expect("own parent upgrade lock");
-    std::env::set_var(PARENT_UPGRADE_LOCK_HELD_ENV, "1");
+    std::env::set_var(
+        super::super::upgrade_background::PARENT_UPGRADE_LOCK_TOKEN_ENV,
+        "forged-token",
+    );
+    std::env::set_var(
+        super::super::upgrade_background::PARENT_UPGRADE_LOCK_OWNER_PID_ENV,
+        std::process::id().to_string(),
+    );
     assert!(
         handle_upgrade(true).is_err(),
-        "marker alone must not bypass lock"
+        "forged owner credentials must not bypass lock"
     );
     std::env::set_var(DESKTOP_MANAGED_SKIP_APP_ENV, "yes");
     std::env::set_var(DESKTOP_MANAGED_SKIP_RESTART_ENV, "true");
     std::env::set_var(DESKTOP_MANAGED_TARGET_ENV, env!("CARGO_PKG_VERSION"));
     assert!(env_flag(DESKTOP_MANAGED_SKIP_APP_ENV));
     assert!(env_flag(DESKTOP_MANAGED_SKIP_RESTART_ENV));
-    handle_upgrade(true).expect("desktop-managed CLI wrapper");
+    assert!(
+        handle_upgrade(true).is_err(),
+        "managed flags plus forged credentials must not bypass lock"
+    );
     drop(parent_lock);
     std::env::remove_var(DESKTOP_MANAGED_SKIP_APP_ENV);
     assert!(!env_flag(DESKTOP_MANAGED_SKIP_APP_ENV));
@@ -1102,6 +1109,7 @@ fn upgrade_command_status_with_timeout_reports_success_and_failure() {
         Duration::from_secs(1),
         Duration::from_millis(10),
         &[(DESKTOP_UPGRADE_HANDOFF_ENV, "1")],
+        None,
     )
     .unwrap();
     assert_eq!(handoff_output.status, TimedCommandStatus::Success);

@@ -123,23 +123,17 @@ pub(super) fn install_desktop_package_verified(
     }
 }
 
-fn parent_upgrade_lock_is_held() -> bool {
-    env::var(PARENT_UPGRADE_LOCK_HELD_ENV)
-        .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false)
-}
-
 pub(super) fn acquire_top_level_app_upgrade_lock(
     progress_source: &str,
     target_version: &str,
 ) -> Result<Option<fs::File>, BifrostError> {
-    if parent_upgrade_lock_is_held()
+    let dir = data_dir();
+    if crate::commands::upgrade_background::parent_upgrade_lock_is_valid(&dir)
         && (progress_source == CALLER_MANAGED_PROGRESS_SOURCE
             || desktop_upgrade_handoff_managed(progress_source))
     {
         return Ok(None);
     }
-    let dir = data_dir();
     use crate::commands::upgrade_background::UpgradeLockAttempt;
     match crate::commands::upgrade_background::try_acquire_upgrade_lock_attempt(&dir) {
         Ok(UpgradeLockAttempt::Acquired(lock)) => Ok(Some(lock)),

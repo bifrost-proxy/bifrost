@@ -134,10 +134,12 @@ fn pending_desktop_handoff_lock_conflict_preserves_restarting_progress() {
     let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().expect("tempdir");
     let previous_data_dir = std::env::var_os("BIFROST_DATA_DIR");
-    let previous_parent_lock = std::env::var_os(PARENT_UPGRADE_LOCK_HELD_ENV);
+    let previous_parent_token = std::env::var_os(PARENT_UPGRADE_LOCK_TOKEN_ENV);
+    let previous_parent_pid = std::env::var_os(PARENT_UPGRADE_LOCK_OWNER_PID_ENV);
     let previous_handoff = std::env::var_os(DESKTOP_UPGRADE_HANDOFF_ENV);
     std::env::set_var("BIFROST_DATA_DIR", temp.path());
-    std::env::remove_var(PARENT_UPGRADE_LOCK_HELD_ENV);
+    std::env::remove_var(PARENT_UPGRADE_LOCK_TOKEN_ENV);
+    std::env::remove_var(PARENT_UPGRADE_LOCK_OWNER_PID_ENV);
     std::env::remove_var(DESKTOP_UPGRADE_HANDOFF_ENV);
 
     let pending = PendingDesktopInstall {
@@ -174,9 +176,13 @@ fn pending_desktop_handoff_lock_conflict_preserves_restarting_progress() {
         Some(value) => std::env::set_var("BIFROST_DATA_DIR", value),
         None => std::env::remove_var("BIFROST_DATA_DIR"),
     }
-    match previous_parent_lock {
-        Some(value) => std::env::set_var(PARENT_UPGRADE_LOCK_HELD_ENV, value),
-        None => std::env::remove_var(PARENT_UPGRADE_LOCK_HELD_ENV),
+    match previous_parent_token {
+        Some(value) => std::env::set_var(PARENT_UPGRADE_LOCK_TOKEN_ENV, value),
+        None => std::env::remove_var(PARENT_UPGRADE_LOCK_TOKEN_ENV),
+    }
+    match previous_parent_pid {
+        Some(value) => std::env::set_var(PARENT_UPGRADE_LOCK_OWNER_PID_ENV, value),
+        None => std::env::remove_var(PARENT_UPGRADE_LOCK_OWNER_PID_ENV),
     }
     match previous_handoff {
         Some(value) => std::env::set_var(DESKTOP_UPGRADE_HANDOFF_ENV, value),
@@ -202,27 +208,40 @@ fn nested_cli_upgrade_does_not_publish_terminal_app_progress() {
 #[test]
 fn top_level_app_upgrade_owns_the_shared_lock_but_nested_companion_skips_it() {
     const CHILD_ENV: &str = "BIFROST_TEST_APP_UPGRADE_LOCK_CHILD";
-    if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+    const TEST_NAME: &str = "commands::app::tests::top_level_app_upgrade_owns_the_shared_lock_but_nested_companion_skips_it";
+    let role = std::env::var(CHILD_ENV).ok();
+    if role.is_none() {
         let status = Command::new(std::env::current_exe().expect("current test executable"))
-            .args([
-                "--exact",
-                "commands::app::tests::top_level_app_upgrade_owns_the_shared_lock_but_nested_companion_skips_it",
-                "--nocapture",
-            ])
-            .env(CHILD_ENV, "1")
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_ENV, "owner")
             .env_remove("BIFROST_DATA_DIR")
             .status()
             .expect("spawn isolated App upgrade lock test");
         assert!(status.success(), "isolated App upgrade lock test failed");
         return;
     }
+    if role.as_deref() == Some("managed-child") {
+        assert!(
+            crate::commands::upgrade_background::parent_upgrade_lock_is_valid(
+                &bifrost_storage::data_dir()
+            )
+        );
+        assert!(
+            acquire_top_level_app_upgrade_lock(CALLER_MANAGED_PROGRESS_SOURCE, "0.0.156")
+                .expect("validated managed child reuses parent lock")
+                .is_none()
+        );
+        std::env::set_var(DESKTOP_UPGRADE_HANDOFF_ENV, "1");
+        assert!(acquire_top_level_app_upgrade_lock("desktop", "0.0.156")
+            .expect("validated desktop handoff child reuses parent lock")
+            .is_none());
+        return;
+    }
 
     let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().expect("tempdir");
-    let previous_data_dir = std::env::var_os("BIFROST_DATA_DIR");
-    let previous_parent_lock = std::env::var_os(PARENT_UPGRADE_LOCK_HELD_ENV);
-    let previous_handoff = std::env::var_os(DESKTOP_UPGRADE_HANDOFF_ENV);
-    std::env::remove_var(PARENT_UPGRADE_LOCK_HELD_ENV);
+    std::env::remove_var(PARENT_UPGRADE_LOCK_TOKEN_ENV);
+    std::env::remove_var(PARENT_UPGRADE_LOCK_OWNER_PID_ENV);
     std::env::remove_var(DESKTOP_UPGRADE_HANDOFF_ENV);
     std::env::set_var("BIFROST_DATA_DIR", temp.path());
     let owner = crate::commands::upgrade_background::try_acquire_upgrade_lock(temp.path())
@@ -250,35 +269,35 @@ fn top_level_app_upgrade_owns_the_shared_lock_but_nested_companion_skips_it() {
             .to_string()
             .contains("already running")
     );
-    std::env::set_var(PARENT_UPGRADE_LOCK_HELD_ENV, "1");
+    std::env::set_var(PARENT_UPGRADE_LOCK_TOKEN_ENV, "forged-token");
+    std::env::set_var(
+        PARENT_UPGRADE_LOCK_OWNER_PID_ENV,
+        std::process::id().to_string(),
+    );
     assert!(
         acquire_top_level_app_upgrade_lock(CALLER_MANAGED_PROGRESS_SOURCE, "0.0.156")
-            .expect("private managed-child marker bypasses its parent's lock")
-            .is_none()
+            .expect_err("forged credentials cannot reuse another process's lock")
+            .to_string()
+            .contains("already running")
     );
-    std::env::set_var(DESKTOP_UPGRADE_HANDOFF_ENV, "1");
-    assert!(acquire_top_level_app_upgrade_lock("desktop", "0.0.156")
-        .expect("private desktop handoff child bypasses its parent's lock")
-        .is_none());
-    std::env::remove_var(DESKTOP_UPGRADE_HANDOFF_ENV);
-    std::env::remove_var(PARENT_UPGRADE_LOCK_HELD_ENV);
+    std::env::remove_var(PARENT_UPGRADE_LOCK_TOKEN_ENV);
+    std::env::remove_var(PARENT_UPGRADE_LOCK_OWNER_PID_ENV);
+
+    let status = Command::new(std::env::current_exe().expect("current test executable"))
+        .args(["--exact", TEST_NAME, "--nocapture"])
+        .env(CHILD_ENV, "managed-child")
+        .env("BIFROST_DATA_DIR", temp.path())
+        .envs(
+            crate::commands::upgrade_background::parent_upgrade_lock_child_environment(temp.path()),
+        )
+        .status()
+        .expect("spawn validated managed child");
+    assert!(status.success(), "validated managed child failed");
+
     drop(owner);
     assert!(acquire_top_level_app_upgrade_lock("desktop", "0.0.156")
         .expect("top-level App upgrade acquires released lock")
         .is_some());
-
-    match previous_data_dir {
-        Some(value) => std::env::set_var("BIFROST_DATA_DIR", value),
-        None => std::env::remove_var("BIFROST_DATA_DIR"),
-    }
-    match previous_parent_lock {
-        Some(value) => std::env::set_var(PARENT_UPGRADE_LOCK_HELD_ENV, value),
-        None => std::env::remove_var(PARENT_UPGRADE_LOCK_HELD_ENV),
-    }
-    match previous_handoff {
-        Some(value) => std::env::set_var(DESKTOP_UPGRADE_HANDOFF_ENV, value),
-        None => std::env::remove_var(DESKTOP_UPGRADE_HANDOFF_ENV),
-    }
 }
 
 #[test]
@@ -330,6 +349,11 @@ fn desktop_managed_cli_upgrade_cannot_reenter_app_or_restart_its_core() {
         return;
     }
 
+    let lock_dir = tempfile::tempdir().expect("lock tempdir");
+    std::env::set_var("BIFROST_DATA_DIR", lock_dir.path());
+    let _owner = crate::commands::upgrade_background::try_acquire_upgrade_lock(lock_dir.path())
+        .expect("open parent lock")
+        .expect("own parent lock");
     let command = desktop_managed_cli_upgrade_command(Path::new("/tmp/bifrost"), "0.0.156");
     let args: Vec<_> = command
         .get_args()
@@ -360,10 +384,15 @@ fn desktop_managed_cli_upgrade_cannot_reenter_app_or_restart_its_core() {
         envs.get(DESKTOP_MANAGED_TARGET_ENV).map(String::as_str),
         Some("0.0.156")
     );
+    let expected_owner_pid = std::process::id().to_string();
     assert_eq!(
-        envs.get(PARENT_UPGRADE_LOCK_HELD_ENV).map(String::as_str),
-        Some("1")
+        envs.get(PARENT_UPGRADE_LOCK_OWNER_PID_ENV)
+            .map(String::as_str),
+        Some(expected_owner_pid.as_str())
     );
+    assert!(envs
+        .get(PARENT_UPGRADE_LOCK_TOKEN_ENV)
+        .is_some_and(|token| !token.is_empty()));
 
     #[cfg(unix)]
     {

@@ -468,12 +468,17 @@ test_upgrade_review_feedback_contracts() {
         && grep -Fq 'installed_desktop_app_is_running' "$upgrade_desktop_src" \
         && grep -Fq 'DesktopCompanionMode::DesktopHandoff' "$upgrade_desktop_src" \
         && grep -Fq 'desktop_companion_environment' "$upgrade_desktop_src" \
-        && grep -Fq 'PARENT_UPGRADE_LOCK_HELD_ENV' "$upgrade_desktop_src" \
+        && grep -Fq 'parent_upgrade_lock_child_environment' "$background_src" \
+        && grep -Fq 'parent_upgrade_lock_is_valid' "$installer_src" \
+        && grep -Fq 'PARENT_UPGRADE_LOCK_TOKEN_ENV' "$background_src" \
+        && grep -Fq 'PARENT_UPGRADE_LOCK_OWNER_PID_ENV' "$background_src" \
+        && ! grep -Fq 'PARENT_UPGRADE_LOCK_HELD_ENV' "$upgrade_desktop_src" \
         && grep -Fq 'WEBVIEW_UPGRADE_ORIGIN_ENV' "$upgrade_desktop_src" \
         && grep -Fq 'should_request_desktop_shutdown_before_update' "$upgrade_desktop_src" \
         && grep -Fq 'DESKTOP_UPGRADE_SHUTDOWN_ARG' "$upgrade_desktop_src" \
         && grep -Fq 'request_legacy_desktop_shutdown' "$upgrade_desktop_src" \
-        && grep -Fq 'PARENT_UPGRADE_LOCK_HELD_ENV' "$app_src" \
+        && grep -Fq 'parent_upgrade_lock_child_environment' "$app_src" \
+        && grep -Fq 'report_restarting_preserving_desktop_handoff' "$upgrade_restart_src" \
         && grep -Fq 'WEBVIEW_UPGRADE_ORIGIN_ENV' "$admin_src" \
         && grep -Fq 'validated_webview_upgrade_origin' "$admin_src" \
         && grep -Fq 'consume_desktop_upgrade_origin_token' "$admin_src" \

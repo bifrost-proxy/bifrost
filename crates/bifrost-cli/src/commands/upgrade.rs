@@ -50,7 +50,6 @@ pub(crate) const DESKTOP_MANAGED_SKIP_RESTART_ENV: &str =
     "BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_RESTART";
 pub(crate) const DESKTOP_MANAGED_TARGET_ENV: &str =
     "BIFROST_DESKTOP_MANAGED_UPGRADE_TARGET_VERSION";
-pub(crate) const PARENT_UPGRADE_LOCK_HELD_ENV: &str = "BIFROST_PARENT_UPGRADE_LOCK_HELD_INTERNAL";
 pub(crate) const DESKTOP_UPGRADE_HANDOFF_ENV: &str = "BIFROST_DESKTOP_UPGRADE_HANDOFF";
 pub(crate) const WEBVIEW_UPGRADE_ORIGIN_ENV: &str = "BIFROST_WEBVIEW_UPGRADE_ORIGIN_INTERNAL";
 static DEFERRED_INSTALL_SCHEDULED: AtomicBool = AtomicBool::new(false);
@@ -151,6 +150,10 @@ pub(crate) fn take_deferred_install_scheduled() -> bool {
 
 pub(crate) fn take_desktop_handoff_scheduled() -> bool {
     DESKTOP_HANDOFF_SCHEDULED.swap(false, Ordering::SeqCst)
+}
+
+pub(crate) fn desktop_handoff_scheduled() -> bool {
+    DESKTOP_HANDOFF_SCHEDULED.load(Ordering::SeqCst)
 }
 
 fn mark_desktop_handoff_scheduled() {
@@ -519,6 +522,7 @@ fn command_output_with_timeout(
         timeout,
         Duration::from_secs(UPGRADE_CHILD_PROGRESS_HEARTBEAT_SECS),
         &[],
+        None,
     )
 }
 
@@ -529,7 +533,7 @@ fn command_output_with_timeout_and_heartbeat(
     timeout: Duration,
     heartbeat: Duration,
 ) -> Result<TimedCommandOutput, BifrostError> {
-    command_output_with_timeout_and_env(program, args, timeout, heartbeat, &[])
+    command_output_with_timeout_and_env(program, args, timeout, heartbeat, &[], None)
 }
 
 fn command_output_with_timeout_and_env(
@@ -538,7 +542,11 @@ fn command_output_with_timeout_and_env(
     timeout: Duration,
     heartbeat: Duration,
     environment: &[(&str, &str)],
+    parent_upgrade_lock_data_dir: Option<&Path>,
 ) -> Result<TimedCommandOutput, BifrostError> {
+    let parent_lock_environment = parent_upgrade_lock_data_dir
+        .map(super::upgrade_background::parent_upgrade_lock_child_environment)
+        .unwrap_or_default();
     let mut stdout_file =
         tempfile::tempfile().map_err(|e| BifrostError::Io(std::io::Error::other(e)))?;
     let mut stderr_file =
@@ -546,7 +554,7 @@ fn command_output_with_timeout_and_env(
     let mut command = Command::new(program);
     command
         .args(args)
-        .env(PARENT_UPGRADE_LOCK_HELD_ENV, "1")
+        .envs(parent_lock_environment)
         .envs(environment.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::from(
@@ -1151,14 +1159,14 @@ pub fn handle_upgrade(_yes: bool) -> Result<(), BifrostError> {
     let skip_app = env_flag(DESKTOP_MANAGED_SKIP_APP_ENV);
     let skip_restart = env_flag(DESKTOP_MANAGED_SKIP_RESTART_ENV);
     let pinned_target = env::var(DESKTOP_MANAGED_TARGET_ENV).ok();
-    let managed_child = env_flag(PARENT_UPGRADE_LOCK_HELD_ENV)
+    let data_dir = get_bifrost_dir()?;
+    let managed_child = super::upgrade_background::parent_upgrade_lock_is_valid(&data_dir)
         && skip_app
         && skip_restart
         && pinned_target.is_some();
     let _upgrade_lock = if managed_child {
         None
     } else {
-        let data_dir = get_bifrost_dir()?;
         Some(
             super::upgrade_background::try_acquire_upgrade_lock(&data_dir)?.ok_or_else(|| {
                 BifrostError::Config("Upgrade is already running in another process".to_string())
