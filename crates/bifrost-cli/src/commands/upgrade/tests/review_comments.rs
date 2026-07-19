@@ -1,5 +1,62 @@
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn cli_restart_stops_live_process_and_strips_detached_marker() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const CHILD_ENV: &str = "BIFROST_TEST_CLI_RESTART_CHILD";
+    const TEST_NAME: &str = "commands::upgrade::tests::review_comments::cli_restart_stops_live_process_and_strips_detached_marker";
+    if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+        let status = Command::new(std::env::current_exe().expect("current test executable"))
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_ENV, "1")
+            .env_remove("BIFROST_DATA_DIR")
+            .status()
+            .expect("spawn isolated CLI restart test");
+        assert!(status.success(), "isolated CLI restart test failed");
+        return;
+    }
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    std::env::set_var("BIFROST_DATA_DIR", temp.path());
+    std::env::set_var(crate::commands::start::DETACHED_DAEMON_CHILD_ENV, "1");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve restart port");
+    let port = listener.local_addr().expect("restart port").port();
+    drop(listener);
+
+    let mut proxy = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn temporary proxy process");
+    let runtime = RuntimeInfo::new(
+        proxy.id(),
+        port,
+        None,
+        Some("127.0.0.1".to_string()),
+        RuntimeStartMode::Daemon,
+    );
+    write_runtime_info(&runtime).expect("write temporary runtime marker");
+
+    let restart = temp.path().join("restart-success");
+    std::fs::write(
+        &restart,
+        "#!/bin/sh\n[ -z \"$BIFROST_DETACHED_DAEMON_CHILD\" ] || exit 9\nexit 0\n",
+    )
+    .expect("write restart helper");
+    std::fs::set_permissions(&restart, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod restart helper");
+
+    let result = maybe_restart_running_proxy(&restart);
+    if result.is_err() {
+        let _ = proxy.kill();
+    }
+    let _ = proxy.wait();
+    result.expect("CLI-owned runtime restarts through detached helper");
+    assert!(!is_process_running(runtime.pid));
+}
+
 #[test]
 #[cfg(unix)]
 fn parent_lock_credential_is_only_inherited_by_managed_companion() {
