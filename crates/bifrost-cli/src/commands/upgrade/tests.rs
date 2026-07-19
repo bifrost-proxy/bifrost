@@ -1423,11 +1423,13 @@ fn restart_and_download_helpers_cover_terminal_paths() {
 fn download_selection_success_and_free_restart_port_are_exercised() {
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
     let temp = tempfile::tempdir().expect("tempdir");
+    let previous_mirror = std::env::var_os("BIFROST_GITHUB_MIRROR");
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
     let address = listener.local_addr().expect("fixture address");
     let server = std::thread::spawn(move || {
-        for _ in 0..3 {
+        for _ in 0..4 {
             let (mut stream, _) = listener.accept().expect("accept fixture request");
             let mut request = [0_u8; 2048];
             let read = stream.read(&mut request).expect("read fixture request");
@@ -1448,6 +1450,7 @@ fn download_selection_success_and_free_restart_port_are_exercised() {
         }
     });
     let base = format!("http://{address}");
+    std::env::set_var("BIFROST_GITHUB_MIRROR", &base);
     let tuning = DownloadTuning {
         connect_timeout_secs: 1,
         download_timeout_secs: 2,
@@ -1472,6 +1475,10 @@ fn download_selection_success_and_free_restart_port_are_exercised() {
         .first(),
         Some(&base)
     );
+    assert_eq!(
+        ordered_download_bases("fixture", tuning).first(),
+        Some(&base)
+    );
     let output = temp.path().join("downloaded");
     download_file_with_progress(&format!("{base}/fixture"), &output, tuning)
         .expect("download fixture");
@@ -1481,4 +1488,8 @@ fn download_selection_success_and_free_restart_port_are_exercised() {
     let free_port = free_listener.local_addr().expect("free port").port();
     drop(free_listener);
     wait_for_restart_ports_release(&[free_port]).expect("released fixture port");
+    match previous_mirror {
+        Some(value) => std::env::set_var("BIFROST_GITHUB_MIRROR", value),
+        None => std::env::remove_var("BIFROST_GITHUB_MIRROR"),
+    }
 }

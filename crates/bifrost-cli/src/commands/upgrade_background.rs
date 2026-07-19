@@ -647,7 +647,13 @@ mod tests {
 
         #[cfg(unix)]
         {
-            std::fs::remove_file(dir.join(UPGRADE_LOCK_FILE_NAME)).expect("unlink live lock path");
+            let lock_path = dir.join(UPGRADE_LOCK_FILE_NAME);
+            std::fs::remove_file(&lock_path).expect("unlink live lock path");
+            assert!(!parent_upgrade_lock_credential_matches(
+                &dir,
+                std::process::id()
+            ));
+            std::fs::write(&lock_path, b"").expect("replace live lock path");
             assert!(!parent_upgrade_lock_credential_matches(
                 &dir,
                 std::process::id()
