@@ -13,7 +13,8 @@ use std::os::unix::process::CommandExt;
 use std::os::windows::process::CommandExt;
 
 use bifrost_core::upgrade_progress::{
-    is_stale, read_progress, write_progress, UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS,
+    consume_desktop_upgrade_origin_token, is_stale, read_progress, write_progress, UpgradePhase,
+    UpgradeProgress, DEFAULT_STALE_SECS,
 };
 use bifrost_storage::data_dir;
 use http_body_util::BodyExt;
@@ -38,6 +39,7 @@ const DESKTOP_INSTALL_SKILL_TIMEOUT: Duration = Duration::from_secs(20);
 const DESKTOP_CORE_ENV: &str = "BIFROST_DESKTOP_CORE";
 const DESKTOP_UPGRADE_HANDOFF_ENV: &str = "BIFROST_DESKTOP_UPGRADE_HANDOFF";
 const WEBVIEW_UPGRADE_ORIGIN_ENV: &str = "BIFROST_WEBVIEW_UPGRADE_ORIGIN_INTERNAL";
+const DESKTOP_UPGRADE_ORIGIN_HEADER: &str = "x-bifrost-desktop-upgrade-origin";
 
 fn upgrade_start_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -50,7 +52,12 @@ pub async fn handle_system(
     path: &str,
 ) -> Response<BoxBody> {
     let method = req.method().clone();
-    let query = req.uri().query();
+    let query = req.uri().query().map(str::to_owned);
+    let desktop_origin_token = req
+        .headers()
+        .get(DESKTOP_UPGRADE_ORIGIN_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
 
     match path {
         "/api/system" | "/api/system/" => match method {
@@ -66,11 +73,13 @@ pub async fn handle_system(
             _ => method_not_allowed(),
         },
         "/api/system/version-check" => match method {
-            Method::GET => check_version(state, query).await,
+            Method::GET => check_version(state, query.as_deref()).await,
             _ => method_not_allowed(),
         },
         "/api/system/upgrade" => match method {
-            Method::POST => start_upgrade(state, query).await,
+            Method::POST => {
+                start_upgrade(state, query.as_deref(), desktop_origin_token.as_deref()).await
+            }
             _ => method_not_allowed(),
         },
         "/api/system/upgrade/progress" => match method {
@@ -264,7 +273,11 @@ async fn check_version(state: SharedAdminState, query: Option<&str>) -> Response
 /// stopped and restarted by the detached subprocess, while a desktop-owned core
 /// remains alive until the App handoff replaces it. The progress file survives
 /// either handoff so the Web UI can read the terminal state after reconnecting.
-async fn start_upgrade(state: SharedAdminState, query: Option<&str>) -> Response<BoxBody> {
+async fn start_upgrade(
+    state: SharedAdminState,
+    query: Option<&str>,
+    desktop_origin_token: Option<&str>,
+) -> Response<BoxBody> {
     // Serialize check -> claim -> spawn. Without this process-local critical
     // section, two simultaneous Web UI POSTs can both observe an idle progress
     // file and launch competing installers/restarts.
@@ -276,7 +289,11 @@ async fn start_upgrade(state: SharedAdminState, query: Option<&str>) -> Response
         std::process::id(),
         state.port(),
     );
-    if let Err(message) = validate_upgrade_request_channel(requested_channel, channel) {
+    let webview_origin =
+        validated_webview_upgrade_origin(&dir, requested_channel, desktop_origin_token);
+    if let Err(message) =
+        validate_upgrade_request_channel(requested_channel, channel, webview_origin)
+    {
         return error_response(StatusCode::CONFLICT, message);
     }
 
@@ -308,7 +325,7 @@ async fn start_upgrade(state: SharedAdminState, query: Option<&str>) -> Response
         Some(target_version.as_str()),
         running_proxy,
         None,
-        requested_channel == UpgradeChannel::Desktop,
+        webview_origin,
     ) {
         warn!(error = %error, "[SYSTEM] failed to spawn self-update subprocess");
         let failed = UpgradeProgress::new(UpgradePhase::Failed, "Upgrade failed to start")
@@ -774,11 +791,23 @@ fn effective_upgrade_channel(_requested: UpgradeChannel, desktop_core: bool) -> 
 fn validate_upgrade_request_channel(
     requested: UpgradeChannel,
     orchestrator: UpgradeChannel,
+    webview_origin: bool,
 ) -> Result<(), &'static str> {
-    if orchestrator == UpgradeChannel::Desktop && requested != UpgradeChannel::Desktop {
+    if orchestrator == UpgradeChannel::Desktop
+        && (requested != UpgradeChannel::Desktop || !webview_origin)
+    {
         return Err("A desktop-owned core must be upgraded from the Bifrost desktop app");
     }
     Ok(())
+}
+
+fn validated_webview_upgrade_origin(
+    data_dir: &Path,
+    requested: UpgradeChannel,
+    token: Option<&str>,
+) -> bool {
+    requested == UpgradeChannel::Desktop
+        && token.is_some_and(|token| consume_desktop_upgrade_origin_token(data_dir, token))
 }
 
 fn upgrade_request_plan(
@@ -935,7 +964,7 @@ mod tests {
         merge_companion_update, normalize_progress, parse_upgrade_channel, required_upgrade_target,
         spawn_upgrade_process, start_upgrade, upgrade_process_args, upgrade_process_environment,
         upgrade_request_plan, upgrade_start_lock, validate_upgrade_request_channel,
-        CliInstallRequest, StatusCode, UpgradeChannel,
+        validated_webview_upgrade_origin, CliInstallRequest, StatusCode, UpgradeChannel,
     };
     use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS};
     use chrono::Utc;
@@ -1074,14 +1103,57 @@ mod tests {
             (UpgradeChannel::Cli, UpgradeChannel::Desktop, None)
         );
         assert_eq!(
-            validate_upgrade_request_channel(UpgradeChannel::Cli, UpgradeChannel::Desktop),
+            validate_upgrade_request_channel(UpgradeChannel::Cli, UpgradeChannel::Desktop, false,),
             Err("A desktop-owned core must be upgraded from the Bifrost desktop app")
         );
+        assert_eq!(
+            validate_upgrade_request_channel(
+                UpgradeChannel::Desktop,
+                UpgradeChannel::Desktop,
+                false,
+            ),
+            Err("A desktop-owned core must be upgraded from the Bifrost desktop app")
+        );
+        assert!(validate_upgrade_request_channel(
+            UpgradeChannel::Desktop,
+            UpgradeChannel::Desktop,
+            true,
+        )
+        .is_ok());
         assert!(
-            validate_upgrade_request_channel(UpgradeChannel::Desktop, UpgradeChannel::Desktop)
+            validate_upgrade_request_channel(UpgradeChannel::Cli, UpgradeChannel::Cli, false,)
                 .is_ok()
         );
-        assert!(validate_upgrade_request_channel(UpgradeChannel::Cli, UpgradeChannel::Cli).is_ok());
+        assert!(validate_upgrade_request_channel(
+            UpgradeChannel::Desktop,
+            UpgradeChannel::Cli,
+            false,
+        )
+        .is_ok());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!validated_webview_upgrade_origin(
+            dir.path(),
+            UpgradeChannel::Desktop,
+            None,
+        ));
+        let token = bifrost_core::upgrade_progress::issue_desktop_upgrade_origin_token(dir.path())
+            .expect("issue desktop origin");
+        assert!(!validated_webview_upgrade_origin(
+            dir.path(),
+            UpgradeChannel::Cli,
+            Some(&token),
+        ));
+        assert!(validated_webview_upgrade_origin(
+            dir.path(),
+            UpgradeChannel::Desktop,
+            Some(&token),
+        ));
+        assert!(!validated_webview_upgrade_origin(
+            dir.path(),
+            UpgradeChannel::Desktop,
+            Some(&token),
+        ));
     }
 
     #[tokio::test]
@@ -1128,13 +1200,16 @@ mod tests {
         let version = check_version(state.clone(), Some("channel=desktop")).await;
         assert_eq!(version.status(), StatusCode::OK);
 
-        let accepted = start_upgrade(state.clone(), Some("channel=desktop")).await;
+        let token = bifrost_core::upgrade_progress::issue_desktop_upgrade_origin_token(dir.path())
+            .expect("issue desktop origin");
+        let accepted =
+            start_upgrade(state.clone(), Some("channel=desktop"), Some(token.as_str())).await;
         assert_eq!(accepted.status(), StatusCode::ACCEPTED);
         let progress = bifrost_core::upgrade_progress::read_progress(dir.path());
         assert_eq!(progress.target_version.as_deref(), Some("999.0.0"));
         assert_eq!(progress.source.as_deref(), Some("admin"));
 
-        let conflict = start_upgrade(state, Some("channel=cli")).await;
+        let conflict = start_upgrade(state, Some("channel=cli"), None).await;
         assert_eq!(conflict.status(), StatusCode::CONFLICT);
     }
 

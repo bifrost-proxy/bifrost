@@ -427,12 +427,15 @@ test_upgrade_review_feedback_contracts() {
     local upgrade_tests="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/tests.rs"
     local upgrade_review_tests="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/tests/review_comments.rs"
     local background_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade_background.rs"
+    local upgrade_progress_src="${PROJECT_DIR}/crates/bifrost-core/src/upgrade_progress.rs"
     local admin_src="${PROJECT_DIR}/crates/bifrost-admin/src/handlers/system.rs"
     local admin_version_src="${PROJECT_DIR}/crates/bifrost-admin/src/handlers/system/version_companion.rs"
     local desktop_src="${PROJECT_DIR}/desktop/src-tauri/src/main.rs"
     local desktop_upgrade_src="${PROJECT_DIR}/desktop/src-tauri/src/upgrade_handoff.rs"
     local desktop_backend_src="${PROJECT_DIR}/desktop/src-tauri/src/backend_runtime.rs"
     local desktop_tests_src="${PROJECT_DIR}/desktop/src-tauri/src/tests.rs"
+    local web_version_src="${PROJECT_DIR}/web/src/api/version.ts"
+    local web_tauri_src="${PROJECT_DIR}/web/src/desktop/tauri.ts"
     local web_store_src="${PROJECT_DIR}/web/src/stores/useVersionStore.ts"
 
     if [ "$(wc -l <"$app_src")" -le 1500 ] \
@@ -472,12 +475,20 @@ test_upgrade_review_feedback_contracts() {
         && grep -Fq 'request_legacy_desktop_shutdown' "$upgrade_desktop_src" \
         && grep -Fq 'PARENT_UPGRADE_LOCK_HELD_ENV' "$app_src" \
         && grep -Fq 'WEBVIEW_UPGRADE_ORIGIN_ENV' "$admin_src" \
+        && grep -Fq 'validated_webview_upgrade_origin' "$admin_src" \
+        && grep -Fq 'consume_desktop_upgrade_origin_token' "$admin_src" \
+        && grep -Fq 'issue_desktop_upgrade_origin_token' "$upgrade_progress_src" \
+        && grep -Fq 'consume_desktop_upgrade_origin_token' "$upgrade_progress_src" \
         && grep -Fq 'desktop_upgrade_shutdown_requested' "$desktop_src" \
+        && grep -Fq 'issue_desktop_upgrade_origin_token' "$desktop_upgrade_src" \
         && grep -Fq 'macos_app_bundle_from_executable' "$admin_version_src" \
         && grep -Fq 'spawn_windows_desktop_upgrade_handoff' "$desktop_upgrade_src" \
         && grep -Fq 'deferred_desktop_install_version_error' "$desktop_upgrade_src" \
         && grep -Fq 'package_owned_by_updater' "$installer_src" \
         && grep -Fq 'progress.source === "desktop"' "$web_store_src" \
+        && grep -Fq 'issueDesktopUpgradeOriginToken' "$web_version_src" \
+        && grep -Fq 'DESKTOP_UPGRADE_ORIGIN_HEADER' "$web_version_src" \
+        && grep -Fq 'issue_desktop_upgrade_origin_token' "$web_tauri_src" \
         && grep -Fq 'persist_desktop_upgrade_handoff_failure' "$desktop_upgrade_src" \
         && grep -Fq 'read_installed_cli_version_with_timeout' "$app_src"; then
         _log_pass "review feedback contracts cover recovery, ownership, rollback, shared locking, pinned targets, verified deferred desktop install, active app path, and module size"

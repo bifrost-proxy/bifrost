@@ -361,6 +361,7 @@ fn main() {
             get_desktop_runtime,
             start_desktop_core,
             update_desktop_proxy_port,
+            issue_desktop_upgrade_origin_token,
             restart_desktop_after_update,
             notify_main_window_ready,
             get_pending_desktop_open_requests,

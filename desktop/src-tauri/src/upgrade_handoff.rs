@@ -1,5 +1,11 @@
 use super::*;
 
+#[tauri::command]
+pub(super) fn issue_desktop_upgrade_origin_token() -> Result<String, String> {
+    bifrost_core::upgrade_progress::issue_desktop_upgrade_origin_token(&shared_bifrost_data_dir())
+        .map_err(|error| format!("failed to issue desktop upgrade origin: {error}"))
+}
+
 pub(super) fn desktop_upgrade_relaunch_marker_path(data_dir: &Path) -> PathBuf {
     data_dir.join(DESKTOP_UPGRADE_RELAUNCH_MARKER_FILE)
 }
