@@ -126,16 +126,13 @@ pub(super) fn commit_deferred_desktop_install_artifacts(
             ));
         }
     }
-    for path in [desktop_pending_install_path(data_dir)]
-        .into_iter()
-        .chain(
-            marker
-                .pending_install
-                .as_ref()
-                .filter(|pending| pending.package_owned_by_updater)
-                .map(|pending| PathBuf::from(&pending.package_path)),
-        )
-    {
+    for path in [desktop_pending_install_path(data_dir)].into_iter().chain(
+        marker
+            .pending_install
+            .as_ref()
+            .filter(|pending| pending.package_owned_by_updater)
+            .map(|pending| PathBuf::from(&pending.package_path)),
+    ) {
         if let Err(error) = fs::remove_file(&path) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 return Err(format!(
