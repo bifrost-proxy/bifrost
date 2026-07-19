@@ -33,7 +33,8 @@ use crate::handlers::asr_cli_invoke::{
     default_footprint_limit_bytes, physical_footprint_sample_interval, read_process_footprint_bytes,
 };
 use crate::handlers::asr_jobs::{
-    handle_asr_tasks, transcribe_uploaded_wav_with_voiceprint_speakers,
+    handle_asr_tasks, handle_moss_model_status, stream_moss_model_initialization,
+    transcribe_uploaded_wav_with_voiceprint_speakers,
 };
 use crate::handlers::asr_streaming::{
     append_transcript_delta, call_asr_whole_file_endpoint, dedupe_increment,
@@ -254,6 +255,10 @@ pub async fn handle_asr(req: Request<Incoming>, path: &str) -> Response<BoxBody>
         (&Method::GET, "/api/asr/capabilities") => handle_capabilities(),
         (&Method::GET, "/api/asr/status") => handle_status(req).await,
         (&Method::GET, "/api/asr/init-stream") => handle_init_stream(req).await,
+        (&Method::GET, "/api/asr/moss/status") => handle_moss_model_status().await,
+        (&Method::GET, "/api/asr/moss/init-stream") => {
+            sse_response(stream_moss_model_initialization)
+        }
         (&Method::POST, "/api/asr/service/start") => handle_service_start(req).await,
         (&Method::POST, "/api/asr/service/stop") => handle_service_stop(req).await,
         (&Method::POST, "/api/asr/offline-jobs") => offline_jobs::handle_create(req).await,
@@ -991,7 +996,7 @@ async fn ffmpeg_split_upload_chunk(
     }
 }
 
-fn sse_response<F, Fut>(run: F) -> Response<BoxBody>
+pub(crate) fn sse_response<F, Fut>(run: F) -> Response<BoxBody>
 where
     F: FnOnce(tokio::sync::mpsc::Sender<Bytes>) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
@@ -2344,7 +2349,10 @@ pub(crate) async fn probe_asr_health(target: &AsrTarget) -> Result<(), String> {
     }
 }
 
-async fn send_progress(tx: &tokio::sync::mpsc::Sender<Bytes>, payload: AsrStreamPayload<'_>) {
+pub(crate) async fn send_progress(
+    tx: &tokio::sync::mpsc::Sender<Bytes>,
+    payload: AsrStreamPayload<'_>,
+) {
     send_event(tx, "progress", &payload).await;
 }
 
@@ -2360,11 +2368,15 @@ pub(crate) async fn send_asr_segment(
     send_event(tx, event, &payload).await;
 }
 
-async fn send_error(tx: &tokio::sync::mpsc::Sender<Bytes>, message: &str, detail: Option<&str>) {
+pub(crate) async fn send_error(
+    tx: &tokio::sync::mpsc::Sender<Bytes>,
+    message: &str,
+    detail: Option<&str>,
+) {
     send_event(tx, "error", &AsrErrorPayload { message, detail }).await;
 }
 
-async fn send_done(tx: &tokio::sync::mpsc::Sender<Bytes>) {
+pub(crate) async fn send_done(tx: &tokio::sync::mpsc::Sender<Bytes>) {
     send_event(tx, "done", &serde_json::json!({ "ok": true })).await;
 }
 

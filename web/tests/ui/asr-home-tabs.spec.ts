@@ -37,6 +37,26 @@ async function installAsrHomeTabMocks(page: Page) {
       },
     });
   });
+  await page.route("**/_bifrost/api/asr/moss/status", async (route) => {
+    await route.fulfill({
+      json: {
+        status: "missing",
+        ready: false,
+        installed: false,
+        platform_supported: true,
+        runtime_ready: true,
+        model_ready: false,
+        model: "MOSS-Transcribe-Diarize-MLX-8bit",
+        runtime_asset: "moss-joint-runtime-v0.0.0-aarch64-apple-darwin.zip",
+        install_dir: "/tmp/bifrost-asr-test/moss_joint_mlx",
+        runtime_dir: "/tmp/bifrost-asr-test/moss_joint_mlx/runtime",
+        model_dir: "/tmp/bifrost-asr-test/moss_joint_mlx/model",
+        expected_model_bytes: 1258427442,
+        installed_model_bytes: 0,
+        message: "model missing",
+      },
+    });
+  });
   await page.route("**/_bifrost/api/asr/tasks", async (route) => {
     await route.fulfill({ json: { tasks: [] } });
   });
@@ -148,6 +168,25 @@ test("ASR 首页按定时任务、ASR 管理、声纹识别与唤醒三 Tab 分�
   await expect(page.getByText("Model Management", { exact: true })).toBeVisible();
   await expect(page.getByTestId("asr-workbench-card")).toBeVisible();
   await expect(page.getByTestId("asr-home-tab-scheduled")).toHaveCount(0);
+
+  await page.getByRole("combobox", { name: "Managed ASR model" }).click();
+  await page
+    .locator(".ant-select-dropdown:visible")
+    .getByText("MOSS joint transcription (MLX 8-bit)", { exact: true })
+    .click();
+  await expect(page.getByLabel("MOSS execution")).toHaveValue("On demand / whole file");
+  await expect(page.getByLabel("MOSS language")).toHaveValue("Automatic multilingual");
+  await expect(page.getByLabel("MOSS components")).toHaveValue(
+    "Runtime ready / Model missing",
+  );
+  await expect(page.getByLabel("Managed ASR storage")).toHaveValue(
+    "~/.bifrost/asr/moss_joint_mlx",
+  );
+  await expect(page.getByTestId("moss-managed-asset-status")).toContainText(
+    "Runtime verified",
+  );
+  await expect(page.getByTestId("moss-managed-asset-status")).toContainText("Model missing");
+  await expect(page.getByRole("button", { name: "Initialize" })).toBeVisible();
 
   await page.getByRole("tab", { name: "Voiceprint & Wake" }).click();
   await expect(page).toHaveURL(/asrTab=voice/);

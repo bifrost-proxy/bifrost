@@ -89,6 +89,24 @@ export interface AsrStatus {
   message: string;
 }
 
+export interface MossModelStatus {
+  status: "unsupported" | "missing" | "partial" | "ready";
+  ready: boolean;
+  installed: boolean;
+  platform_supported: boolean;
+  unsupported_reason?: string;
+  runtime_ready: boolean;
+  model_ready: boolean;
+  model: "MOSS-Transcribe-Diarize-MLX-8bit";
+  runtime_asset?: string;
+  install_dir: string;
+  runtime_dir: string;
+  model_dir: string;
+  expected_model_bytes: number;
+  installed_model_bytes: number;
+  message: string;
+}
+
 export interface AsrCapabilityFlag {
   enabled: boolean;
   hidden: boolean;
@@ -906,6 +924,10 @@ export async function getAsrStatus(
   return get<AsrStatus>(`/asr/status?${buildAsrQuery(params)}`);
 }
 
+export async function getMossModelStatus(): Promise<MossModelStatus> {
+  return get<MossModelStatus>("/asr/moss/status");
+}
+
 export async function getAsrCapabilities(): Promise<AsrCapabilities> {
   return get<AsrCapabilities>("/asr/capabilities");
 }
@@ -1350,6 +1372,18 @@ export async function streamAsrInitialization(
   signal?: AbortSignal,
 ): Promise<void> {
   const response = await asrFetch(`/asr/init-stream?${buildAsrQuery(params)}`, {
+    method: "GET",
+    headers: buildStreamHeaders(),
+    signal,
+  });
+  await readSseResponse(response, onEvent);
+}
+
+export async function streamMossInitialization(
+  onEvent: (event: AsrStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await asrFetch("/asr/moss/init-stream", {
     method: "GET",
     headers: buildStreamHeaders(),
     signal,

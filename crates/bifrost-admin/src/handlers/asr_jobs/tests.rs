@@ -226,6 +226,76 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn moss_model_management_status_reports_missing_ready_and_unsupported_assets() {
+        let temp = TempDir::new().unwrap();
+        let asr_home = temp.path().join("asr-home");
+        let paths = moss_runtime_paths(&asr_home);
+        let model_source = temp.path().join("model-source.safetensors");
+        let model_spec = moss_test_model_spec(&model_source, b"verified model fixture");
+
+        let missing = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert_eq!(missing.status, "missing");
+        assert!(!missing.ready);
+        assert!(!missing.runtime_ready);
+        assert!(!missing.model_ready);
+        assert_eq!(missing.expected_model_bytes, 22);
+
+        write_executable(
+            &paths.python,
+            "#!/bin/sh\necho 'moss-mlx-runtime ok'\n",
+        );
+        std::fs::write(&paths.runner, b"fixture runner").unwrap();
+        std::fs::create_dir_all(&paths.site_packages).unwrap();
+        prepare_moss_model_snapshot(&paths);
+        std::fs::copy(&model_source, &paths.model).unwrap();
+        write_moss_verification_marker(&asr_home, &paths, &model_spec).unwrap();
+
+        let ready = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert_eq!(ready.status, "ready");
+        assert!(ready.ready && ready.installed);
+        assert!(ready.runtime_ready && ready.model_ready);
+        assert_eq!(ready.installed_model_bytes, model_spec.bytes);
+        assert_eq!(ready.model, MOSS_MODEL_ID);
+
+        std::thread::sleep(Duration::from_millis(5));
+        std::fs::write(&paths.model, b"tampered model fixture").unwrap();
+        let tampered = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert_eq!(tampered.status, "partial");
+        assert!(tampered.runtime_ready);
+        assert!(!tampered.model_ready);
+
+        let unsupported = moss_management_status_with_spec(
+            &asr_home,
+            "linux",
+            "x86_64",
+            &model_spec,
+        )
+        .await;
+        assert_eq!(unsupported.status, "unsupported");
+        assert!(!unsupported.platform_supported);
+        assert!(unsupported.unsupported_reason.is_some());
+    }
+
     fn moss_process_test_paths(root: &Path, python: PathBuf) -> MossRuntimePaths {
         let python_home = root.join("python-home");
         let site_packages = root.join("site-packages");
@@ -382,6 +452,7 @@ mod tests {
             format!("file://{}", source.display()),
             file_dest.clone(),
             "test file",
+            None,
         )
         .await
         .unwrap();
@@ -389,7 +460,7 @@ mod tests {
 
         let http_dest = temp.path().join("http-dest.bin");
         let resource_url = spawn_moss_http_server(b"http-resource".to_vec());
-        download_moss_resource(resource_url, http_dest.clone(), "test HTTP")
+        download_moss_resource(resource_url, http_dest.clone(), "test HTTP", None)
             .await
             .unwrap();
         assert_eq!(std::fs::read(http_dest).unwrap(), b"http-resource");
@@ -397,6 +468,7 @@ mod tests {
             "file:///missing/moss-resource".to_string(),
             temp.path().join("missing.bin"),
             "missing",
+            None,
         )
         .await
         .is_err());
@@ -631,10 +703,10 @@ mod tests {
             &asr_home,
             "moss-valid-resources",
             &paths,
-            true,
-            true,
+            (true, true),
             &runtime_source,
             &model_spec,
+            None,
         )
         .await
         .unwrap();
@@ -646,10 +718,10 @@ mod tests {
             &asr_home,
             "moss-runtime-quarantine-error",
             &paths,
-            false,
-            true,
+            (false, true),
             &runtime_source,
             &model_spec,
+            None,
         )
         .await
         .unwrap_err();
@@ -666,10 +738,10 @@ mod tests {
             &asr_home,
             "moss-model-quarantine-error",
             &paths,
-            true,
-            false,
+            (true, false),
             &runtime_source,
             &model_spec,
+            None,
         )
         .await
         .unwrap_err();
@@ -690,10 +762,10 @@ mod tests {
             &blocked_model_home,
             "moss-model-dir-error",
             &blocked_paths,
-            true,
-            false,
+            (true, false),
             &runtime_source,
             &model_spec,
+            None,
         )
         .await
         .unwrap_err();
@@ -725,10 +797,10 @@ mod tests {
             &asr_home,
             "moss-archive-quarantine-error",
             &paths,
-            false,
-            true,
+            (false, true),
             &archive_runtime_source,
             &model_spec,
+            None,
         )
         .await
         .unwrap_err();

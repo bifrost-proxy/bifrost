@@ -1,4 +1,6 @@
 const MOSS_RUNTIME_ASSET_STEM: &str = "moss-joint-runtime";
+const MOSS_MODEL_ID: &str = "MOSS-Transcribe-Diarize-MLX-8bit";
+const MOSS_VERIFICATION_FILE: &str = "verification.json";
 const MOSS_MODEL_FILE: &str = "model.safetensors";
 const MOSS_MODEL_URL: &str =
     "https://huggingface.co/majentik/MOSS-Transcribe-Diarize-MLX-8bit/resolve/90c3a1ab78fa56e47e1493ddea48e3ababaf2f71/model.safetensors";
@@ -55,6 +57,36 @@ struct MossModelSpec {
     sha256: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct MossVerificationMarker {
+    schema_version: u8,
+    model_bytes: u64,
+    model_sha256: String,
+    model_modified_ms: u64,
+    python_sha256: String,
+    runner_sha256: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct MossModelManagementStatus {
+    status: &'static str,
+    ready: bool,
+    installed: bool,
+    platform_supported: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unsupported_reason: Option<String>,
+    runtime_ready: bool,
+    model_ready: bool,
+    model: &'static str,
+    runtime_asset: Option<String>,
+    install_dir: String,
+    runtime_dir: String,
+    model_dir: String,
+    expected_model_bytes: u64,
+    installed_model_bytes: u64,
+    message: String,
+}
+
 fn moss_runtime_dir(asr_home: &Path) -> PathBuf {
     asr_home.join("moss_joint_mlx")
 }
@@ -72,6 +104,10 @@ fn moss_runtime_paths(asr_home: &Path) -> MossRuntimePaths {
         model: model_dir.join(MOSS_MODEL_FILE),
         model_dir,
     }
+}
+
+fn moss_verification_path(asr_home: &Path) -> PathBuf {
+    moss_runtime_dir(asr_home).join(MOSS_VERIFICATION_FILE)
 }
 
 fn moss_runtime_asset_name_for(os: &str, arch: &str) -> Result<String, String> {
@@ -250,6 +286,70 @@ fn verify_moss_model_snapshot(paths: &MossRuntimePaths, spec: &MossModelSpec) ->
     Ok(())
 }
 
+fn moss_model_layout_is_complete(paths: &MossRuntimePaths, spec: &MossModelSpec) -> bool {
+    std::fs::metadata(&paths.model)
+        .is_ok_and(|metadata| metadata.len() == spec.bytes)
+        && MOSS_MODEL_REQUIRED_FILES
+            .iter()
+            .all(|file| paths.model_dir.join(file).is_file())
+}
+
+fn write_moss_verification_marker(
+    asr_home: &Path,
+    paths: &MossRuntimePaths,
+    spec: &MossModelSpec,
+) -> Result<(), String> {
+    let model_modified_ms = std::fs::metadata(&paths.model)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64)
+        .ok_or_else(|| format!("read MOSS model mtime {}", paths.model.display()))?;
+    let marker = MossVerificationMarker {
+        schema_version: 2,
+        model_bytes: spec.bytes,
+        model_sha256: spec.sha256.clone(),
+        model_modified_ms,
+        python_sha256: sha256_file(&paths.python)?,
+        runner_sha256: sha256_file(&paths.runner)?,
+    };
+    let encoded = serde_json::to_vec_pretty(&marker)
+        .map_err(|error| format!("serialize MOSS verification marker: {error}"))?;
+    let path = moss_verification_path(asr_home);
+    std::fs::write(&path, encoded)
+        .map_err(|error| format!("write MOSS verification marker {}: {error}", path.display()))
+}
+
+fn moss_verified_component_status(
+    asr_home: &Path,
+    paths: &MossRuntimePaths,
+    spec: &MossModelSpec,
+) -> (bool, bool) {
+    let marker = std::fs::read(moss_verification_path(asr_home))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<MossVerificationMarker>(&bytes).ok());
+    let Some(marker) = marker.filter(|marker| {
+        marker.schema_version == 2
+            && marker.model_bytes == spec.bytes
+            && marker.model_sha256 == spec.sha256
+    }) else {
+        return (false, false);
+    };
+    let runtime_ready = paths.python.is_file()
+        && paths.runner.is_file()
+        && paths.site_packages.is_dir()
+        && sha256_file(&paths.python).is_ok_and(|sha| sha == marker.python_sha256)
+        && sha256_file(&paths.runner).is_ok_and(|sha| sha == marker.runner_sha256);
+    let model_modified_ms = std::fs::metadata(&paths.model)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64);
+    let model_ready = moss_model_layout_is_complete(paths, spec)
+        && model_modified_ms == Some(marker.model_modified_ms);
+    (runtime_ready, model_ready)
+}
+
 fn install_moss_runtime_archive(archive: &Path, destination: &Path) -> Result<(), String> {
     let file = std::fs::File::open(archive)
         .map_err(|error| format!("open MOSS runtime archive {}: {error}", archive.display()))?;
@@ -318,7 +418,12 @@ fn install_moss_runtime_archive(archive: &Path, destination: &Path) -> Result<()
     Ok(())
 }
 
-async fn download_moss_resource(url: String, dest: PathBuf, label: &str) -> Result<(), String> {
+async fn download_moss_resource(
+    url: String,
+    dest: PathBuf,
+    label: &str,
+    progress_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::resource_download::DownloadProgress>>,
+) -> Result<(), String> {
     if let Some(path) = url.strip_prefix("file://") {
         tokio::fs::copy(path, &dest)
             .await
@@ -335,7 +440,7 @@ async fn download_moss_resource(url: String, dest: PathBuf, label: &str) -> Resu
             dest,
             label: label.to_string(),
         },
-        None,
+        progress_tx,
     )
     .await
     .map(|_| ())
@@ -404,20 +509,23 @@ async fn initialize_moss_joint_runtime(
     asr_home: &Path,
     task_id: &str,
     paths: &MossRuntimePaths,
-    runtime_valid: bool,
-    model_valid: bool,
+    component_status: (bool, bool),
     runtime_source: &MossRuntimeSource,
     model_spec: &MossModelSpec,
+    progress_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::resource_download::DownloadProgress>>,
 ) -> Result<(), String> {
-    update_run_progress(task_id, |progress| {
-        progress.stage = "initializing_moss".to_string();
-        progress.stage_message =
-            Some("Preparing MOSS joint transcription runtime".to_string());
-        progress.message = Some(
-            "Downloading the self-contained MLX runtime and verified 8-bit model on first use"
-                .to_string(),
-        );
-    });
+    let (runtime_valid, model_valid) = component_status;
+    if !task_id.is_empty() {
+        update_run_progress(task_id, |progress| {
+            progress.stage = "initializing_moss".to_string();
+            progress.stage_message =
+                Some("Preparing MOSS joint transcription runtime".to_string());
+            progress.message = Some(
+                "Downloading the self-contained MLX runtime and verified 8-bit model on first use"
+                    .to_string(),
+            );
+        });
+    }
     let root = moss_runtime_dir(asr_home);
     tokio::fs::create_dir_all(&root)
         .await
@@ -441,6 +549,7 @@ async fn initialize_moss_joint_runtime(
             runtime_source.url.clone(),
             archive.clone(),
             "MOSS runtime",
+            progress_tx.clone(),
         )
         .await?;
         let archive_for_hash = archive.clone();
@@ -497,6 +606,7 @@ async fn initialize_moss_joint_runtime(
             model_spec.url.clone(),
             paths.model.clone(),
             "MOSS MLX 8-bit model",
+            progress_tx,
         )
         .await?;
     }
@@ -514,10 +624,28 @@ async fn ensure_moss_joint_runtime_with_spec(
     model_spec: MossModelSpec,
     runtime_source: Option<MossRuntimeSource>,
 ) -> Result<MossRuntimePaths, String> {
+    ensure_moss_joint_runtime_with_spec_and_progress(
+        asr_home,
+        task_id,
+        model_spec,
+        runtime_source,
+        None,
+    )
+    .await
+}
+
+async fn ensure_moss_joint_runtime_with_spec_and_progress(
+    asr_home: &Path,
+    task_id: &str,
+    model_spec: MossModelSpec,
+    runtime_source: Option<MossRuntimeSource>,
+    progress_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::resource_download::DownloadProgress>>,
+) -> Result<MossRuntimePaths, String> {
     let _guard = MOSS_INIT_LOCK.lock().await;
     let paths = moss_runtime_paths(asr_home);
     let (runtime_valid, model_valid) = moss_runtime_status(&paths, &model_spec).await;
     if runtime_valid && model_valid {
+        write_moss_verification_marker(asr_home, &paths, &model_spec)?;
         return Ok(paths);
     }
     let runtime_source = match runtime_source {
@@ -528,17 +656,189 @@ async fn ensure_moss_joint_runtime_with_spec(
         asr_home,
         task_id,
         &paths,
-        runtime_valid,
-        model_valid,
+        (runtime_valid, model_valid),
         &runtime_source,
         &model_spec,
+        progress_tx,
     )
     .await?;
+    write_moss_verification_marker(asr_home, &paths, &model_spec)?;
     Ok(paths)
 }
 
 async fn ensure_moss_joint_runtime(asr_home: &Path, task_id: &str) -> Result<MossRuntimePaths, String> {
     ensure_moss_joint_runtime_with_spec(asr_home, task_id, moss_model_spec(), None).await
+}
+
+async fn moss_management_status_with_spec(
+    asr_home: &Path,
+    os: &str,
+    arch: &str,
+    model_spec: &MossModelSpec,
+) -> MossModelManagementStatus {
+    let paths = moss_runtime_paths(asr_home);
+    let install_dir = moss_runtime_dir(asr_home);
+    let runtime_dir = install_dir.join("runtime");
+    let installed_model_bytes = tokio::fs::metadata(&paths.model)
+        .await
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let runtime_asset = match moss_runtime_asset_name_for(os, arch) {
+        Ok(asset) => asset,
+        Err(reason) => {
+            return MossModelManagementStatus {
+                status: "unsupported",
+                ready: false,
+                installed: false,
+                platform_supported: false,
+                unsupported_reason: Some(reason.clone()),
+                runtime_ready: false,
+                model_ready: false,
+                model: MOSS_MODEL_ID,
+                runtime_asset: None,
+                install_dir: install_dir.display().to_string(),
+                runtime_dir: runtime_dir.display().to_string(),
+                model_dir: paths.model_dir.display().to_string(),
+                expected_model_bytes: model_spec.bytes,
+                installed_model_bytes,
+                message: reason,
+            };
+        }
+    };
+    let (runtime_ready, model_ready) = moss_verified_component_status(asr_home, &paths, model_spec);
+    let ready = runtime_ready && model_ready;
+    let status = if ready {
+        "ready"
+    } else if runtime_ready || model_ready {
+        "partial"
+    } else {
+        "missing"
+    };
+    MossModelManagementStatus {
+        status,
+        ready,
+        installed: ready,
+        platform_supported: true,
+        unsupported_reason: None,
+        runtime_ready,
+        model_ready,
+        model: MOSS_MODEL_ID,
+        runtime_asset: Some(runtime_asset),
+        install_dir: install_dir.display().to_string(),
+        runtime_dir: runtime_dir.display().to_string(),
+        model_dir: paths.model_dir.display().to_string(),
+        expected_model_bytes: model_spec.bytes,
+        installed_model_bytes,
+        message: if ready {
+            "MOSS joint transcription runtime and verified 8-bit model are ready.".to_string()
+        } else if runtime_ready {
+            "MOSS runtime is ready, but the verified 8-bit model is missing or invalid."
+                .to_string()
+        } else if model_ready {
+            "MOSS model is verified, but the packaged MLX runtime is missing or invalid."
+                .to_string()
+        } else {
+            "MOSS runtime and verified 8-bit model are not initialized yet.".to_string()
+        },
+    }
+}
+
+pub(crate) async fn handle_moss_model_status() -> Response<BoxBody> {
+    json_response(
+        &moss_management_status_with_spec(
+            &fixed_asr_home(),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            &moss_model_spec(),
+        )
+        .await,
+    )
+}
+
+pub(crate) async fn stream_moss_model_initialization(
+    tx: tokio::sync::mpsc::Sender<bytes::Bytes>,
+) {
+    use crate::handlers::asr::{send_done, send_error, send_progress, AsrStreamPayload};
+
+    let asset = match moss_runtime_asset_name() {
+        Ok(asset) => asset,
+        Err(error) => {
+            send_error(&tx, "MOSS initialization is not supported on this computer.", Some(&error))
+                .await;
+            return;
+        }
+    };
+    send_progress(
+        &tx,
+        AsrStreamPayload {
+            phase: "preflight",
+            status: "running",
+            progress: 5,
+            message: "Checking MOSS runtime and model assets.",
+            detail: Some(&asset),
+            file: None,
+            server_url: None,
+        },
+    )
+    .await;
+
+    let (progress_tx, mut progress_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::resource_download::DownloadProgress>();
+    let event_tx = tx.clone();
+    let forward = tokio::spawn(async move {
+        while let Some(progress) = progress_rx.recv().await {
+            let download_percent = progress.percent.unwrap_or(0);
+            let overall = if progress.label == "MOSS runtime" {
+                10_u8.saturating_add(download_percent.saturating_mul(25) / 100)
+            } else {
+                40_u8.saturating_add(download_percent.saturating_mul(55) / 100)
+            };
+            send_progress(
+                &event_tx,
+                AsrStreamPayload {
+                    phase: "download",
+                    status: "running",
+                    progress: overall,
+                    message: "Downloading verified MOSS assets.",
+                    detail: Some(&progress.label),
+                    file: Some(&progress.label),
+                    server_url: None,
+                },
+            )
+            .await;
+        }
+    });
+
+    let result = ensure_moss_joint_runtime_with_spec_and_progress(
+        &fixed_asr_home(),
+        "",
+        moss_model_spec(),
+        None,
+        Some(progress_tx),
+    )
+    .await;
+    let _ = forward.await;
+    match result {
+        Ok(_) => {
+            send_progress(
+                &tx,
+                AsrStreamPayload {
+                    phase: "installed",
+                    status: "ready",
+                    progress: 100,
+                    message: "MOSS runtime and verified 8-bit model are ready.",
+                    detail: None,
+                    file: None,
+                    server_url: None,
+                },
+            )
+            .await;
+            send_done(&tx).await;
+        }
+        Err(error) => {
+            send_error(&tx, "MOSS initialization failed.", Some(&error)).await;
+        }
+    }
 }
 
 fn parse_moss_json(

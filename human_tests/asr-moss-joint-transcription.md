@@ -116,6 +116,32 @@
 - 名称、音频目录、调度、Recursive、Enabled 和 External Devices 等任务级公共字段在两种模式下始终可用。
 - 模式往返和保存重开不会丢失各自配置；亮色、暗色与窄窗口布局均可正常操作。
 
+### TC-MOSS-07：统一模型管理页初始化入口与真实资产状态
+
+1. 使用当前源码构建 `target/debug/bifrost`，以临时 `BIFROST_DATA_DIR`、端口 18998、`--no-system-proxy --no-intercept` 启动隔离服务；不得停止或重启 9900、18997。
+2. 请求 `GET /_bifrost/api/asr/moss/status`，记录 platform、runtime/model 校验状态、安装目录和预期权重大小。
+3. 使用 Chrome 打开 `http://127.0.0.1:18998/_bifrost/ai?aiSection=tools-asr&asrTab=management`，在 Model Management 的 Model 中选择 `MOSS joint transcription (MLX 8-bit)`。
+4. 检查页面只展示 MOSS 实际生效的 Execution、自动语言、Runtime/Model 组件状态和 `~/.bifrost/asr/moss_joint_mlx`；不展示 Qwen Host、Service Port 或可租约服务含义。
+5. 若真实资产已 Ready，确认 Runtime/Model 均为 verified 且不重复下载；若缺失，确认 Initialize 可见。任务执行侧的首次运行自动初始化仍作为兜底，不产生第二套目录。
+
+预期结果：
+
+- API 只在打包 Python/runner/site-packages 自检与固定 snapshot 权重校验均通过时返回 `status=ready`、`installed=true`。
+- MOSS 与 Qwen 共用 Model Management 入口，但页面字段和说明按模型执行方式切换。
+- 管理页、任务自动初始化和真实推理都使用 `~/.bifrost/asr/moss_joint_mlx`，不会写系统 Python。
+
+### TC-MOSS-08：release.yml 的 PR CI 打包与 checksum 门禁
+
+1. 执行 `bash e2e-tests/tests/test_asr_moss_release_contract.sh`，校验 `release.yml`、Rust 初始化器、固定源码/模型、metadata、requirements、资产名和共享打包脚本引用。
+2. 在 macOS 执行 `bash scripts/ci/test-package-moss-release-runtime.sh`。fixture 首先带一个 `._config.json`，断言共享打包器拒绝该产物；删除 sidecar 后再次打包。
+3. 确认生成的 `moss-joint-runtime-v0.0.0-aarch64-apple-darwin.zip` 包含 runtime 入口、12 个模型 metadata、license/notice，不包含 AppleDouble/DS_Store/__MACOSX，并且 `.sha256` 可复算。
+4. 检查 `.github/workflows/ci.yml` 存在 macOS `Release Workflow Contract (MOSS macOS)` job，同时执行上述静态契约和共享打包器 fixture。
+
+预期结果：
+
+- PR CI 无需下载 1.2 GB 权重即可真实执行与正式 release 相同的确定性打包和 checksum 逻辑。
+- 正式 tag release 仍负责完整 MLX/Python 安装、自检和真实 runtime 产物；如果共享打包器或资源契约漂移，PR 阶段即失败。
+
 ## 清理步骤
 
 1. 用户要求继续体验时保留 18997；否则停止且仅停止本测试启动的预览 PID。
@@ -137,3 +163,5 @@
 | 2026-07-19 | TC-MOSS-05 | PASS：1.2 秒慢 fixture 约 600 ms 返回 `moss_rtf_exceeded`；30 秒 2.05 秒、120 秒 4.07 秒、1800.15 秒 83.261 秒，均小于 0.5 RTF。120 秒 MLX/GGML 规范化文本均 319 字符，相似度 0.9969，speaker 数与时间线目视一致；未宣称 WER/DER。 |
 | 2026-07-19 | TC-MOSS-02 | PASS（发布门禁复核）：新增发布契约 E2E 通过，确认 MLX-Audio commit、模型 snapshot、12 个 metadata 文件、runtime 资产名与 checksum manifest 一致；仅保留发布清单文件的 30 秒真实音频推理 1.753 秒完成，RTF 0.05842，得到 9 段、3 个 speaker。 |
 | 2026-07-19 | TC-MOSS-06 | PASS（修复后复测）：使用当前源码与隔离数据目录在 18998 启动真实服务；Standard 的 8 个 Qwen pipeline 字段均显示且 MOSS Prompt 隐藏，MOSS 下 8 个字段均从 DOM 移除且 Prompt、Recursive、Enabled、External Devices 保持可用。模式往返保留 Prompt 与 `Qwen3-ASR-1.7B`；首次真实保存发现隐藏字段未进入 `validateFields()` 导致模型回落，改用校验后读取完整表单状态并复测，保存 MOSS、重开 Edit、切回 Standard 后仍为 1.7B。Prompt API 回显原文，字符计数无重叠，亮色与暗色布局均无空白占位、遮挡或水平溢出。9900 保持 PID 22956，18997 保持 PID 56155。 |
+| 2026-07-19 | TC-MOSS-07 | PASS（性能修复后复测）：当前源码服务以临时数据目录在 18998 启动。首次真实状态读取发现全量权重哈希与 MLX 自检超过 30 秒，改为初始化时写入包含固定模型 SHA-256/大小/mtime 及 Python/runner 哈希的 schema v2 `verification.json`；修复后未初始化状态 0.002771 秒返回，真实资产完整校验生成 v2 标记后 Ready 状态 0.599707 秒返回。真实 Chrome 选择 MOSS 后显示 Ready、On demand / whole file、Automatic multilingual、Runtime/Model verified、1.17 GB / 1.17 GB 和 `~/.bifrost/asr/moss_joint_mlx`，Model Management 不再显示 Qwen Host/Service Port。9900/PID 22956 与 18997/PID 56155 未变化，18998 已停止且临时目录已清理。 |
+| 2026-07-19 | TC-MOSS-08 | PASS：静态发布契约确认 MLX-Audio/model 固定 commit、12 个 metadata、1,258,427,442-byte 权重 SHA-256、共享 packager 与 macOS PR CI job 一致；真实 macOS fixture 先因 `._config.json` 被拒绝，清理后生成 zip 和可复算 `.sha256`，runtime 入口、metadata、license/notice 齐全。 |

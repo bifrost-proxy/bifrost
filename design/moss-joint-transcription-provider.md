@@ -16,7 +16,7 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 - 提供可重复执行的真实任务基准工具，从现有 ASR 任务中选择约 10 分钟和约 30 分钟音频并读取既有基线。
 - Directory Task 可以显式选择“标准转录”或“MOSS 联合转录”模式。
 - MOSS 模式允许配置任务级 Prompt；Prompt 随任务保存、读取、编辑和清空。
-- 首次运行 MOSS 任务时自动初始化专用 runtime 和固定版本模型，无需用户手工执行初始化命令。
+- ASR Management 的 Model Management 统一展示并初始化 MOSS 专用 runtime、Python 依赖和固定版本模型；首次运行 MOSS 任务时仍保留同一初始化器作为兜底。
 
 必须不破坏：
 
@@ -56,6 +56,19 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 3. `moss_joint` 走整文件联合转录，不执行 Qwen 30 秒分块，也不再叠加 Sherpa/Pyannote 分离；模型原生 speaker 直接进入 timeline。
 4. 首次运行时自动准备独立、可重定位的 Python 3.12 + MLX-Audio runtime，以及固定 snapshot 的 8-bit MLX 模型；准备完成后同一任务直接继续推理。
 5. 发布包为 Apple Silicon macOS 生成 `moss-joint-runtime` 资产。MLX-Audio 固定 commit `64e8416c303fb3b3463dab8eb4ebd78c55a87c1a`，8-bit 模型固定 snapshot `90c3a1ab78fa56e47e1493ddea48e3ababaf2f71`。初始化器从同版本 release checksum manifest 读取 runtime zip 的 SHA-256，校验后才解压；1,258,427,442-byte 权重固定 SHA-256 `469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190`，下载后必须校验。测试覆盖的自定义 runtime URL 必须同时提供 `BIFROST_MOSS_RUNTIME_SHA256`。`test_asr_moss_release_contract.sh` 在普通 PR CI 中校验 workflow 与初始化器的 commit、snapshot、metadata、资产名和 checksum 契约，避免只有真正发版时才发现配置漂移。
+
+### 统一模型管理
+
+- Model Management 的模型选择同时列出 Qwen3-ASR 和 `MOSS-Transcribe-Diarize-MLX-8bit`。Qwen 继续管理可租约的本地 ASR service；MOSS 是任务按需执行的端到端 runtime，不展示 Host、Service Port 等无效服务配置。
+- MOSS 状态接口分别报告 runtime 自检、模型 snapshot 校验、安装目录和预期权重大小。初始化时执行完整 runtime self-test 与 1.2 GB 权重 SHA-256，成功后写入带固定模型 SHA/大小/mtime 和 Python/runner 哈希的验证标记；日常状态读取复核标记与小文件哈希，避免每次打开页面重新扫描 1.2 GB。权重被同大小替换后 mtime 变化也会撤销 Ready。
+- 用户可在管理页主动初始化或修复 `~/.bifrost/asr/moss_joint_mlx`。下载复用断点续传和同一进程内初始化锁，管理页与同一服务中的任务同时触发时不会并行写入同一资源。
+- Directory Task 不保存另一份模型路径或依赖配置；它只保存 `transcription_mode` 与任务 Prompt。运行时若发现资产尚未准备好，调用与管理页完全相同的校验和初始化函数作为自动兜底。
+
+### 发布前 CI 门禁
+
+- `release.yml` 与 PR CI 必须调用同一个 MOSS runtime 打包脚本。正式发布传入真实 runtime 目录；PR CI 在 Apple Silicon macOS runner 上构造最小 fixture，真实生成 zip 和 `.sha256`，并验证入口、metadata、notice/license、无 AppleDouble sidecar 以及 checksum 可复算。
+- 普通 PR 不下载 1.2 GB 权重，也不重复安装完整 MLX Python 环境；`test_asr_moss_release_contract.sh` 负责固定 commit、requirements、模型 metadata、权重 URL/大小/SHA-256、release 资产名和共享打包脚本调用的静态契约。
+- 正式 tag release 仍执行完整 Python/MLX 安装、runner self-test、host-path 动态依赖检查、真实 runtime 打包、checksum 汇总和 release asset 上传。PR 的轻量门禁不能替代 tag release，但保证 workflow 语法引用和确定性打包结果不会到发版时才首次执行。
 6. 用户 Prompt 通过仅当前进程可读的临时文件传入。runtime 始终先使用官方时间戳/说话人协议 Prompt，再追加用户上下文，避免自定义 Prompt 破坏结构化输出协议。
 7. 整段推理采用硬 watchdog：耗时达到音频时长的 `0.5x` 时杀死子进程并返回 `moss_rtf_exceeded`，不会继续消耗资源或悄悄回退到不同模型。
 8. release 打包禁用 macOS resource fork，并扫描拒绝 `._*`、`.DS_Store`、`__MACOSX`；安装器也跳过这些元数据，避免 Python 模型加载器误读 AppleDouble 文件。

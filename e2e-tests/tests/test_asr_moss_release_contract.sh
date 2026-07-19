@@ -14,11 +14,16 @@ runtime_path = Path("crates/bifrost-admin/src/handlers/asr_jobs/moss_joint.rs")
 requirements_path = Path("scripts/asr/moss-mlx-requirements.txt")
 runner_path = Path("scripts/asr/moss_mlx_runner.py")
 patch_path = Path("scripts/asr/mlx-audio-moss-quantized-conv.patch")
+packager_path = Path("scripts/ci/package-moss-release-runtime.sh")
+packager_test_path = Path("scripts/ci/test-package-moss-release-runtime.sh")
+ci_path = Path(".github/workflows/ci.yml")
 
 release = release_path.read_text(encoding="utf-8")
 runtime = runtime_path.read_text(encoding="utf-8")
 requirements = requirements_path.read_text(encoding="utf-8")
 runner = runner_path.read_text(encoding="utf-8")
+packager = packager_path.read_text(encoding="utf-8")
+ci = ci_path.read_text(encoding="utf-8")
 
 
 def require(condition: bool, message: str) -> None:
@@ -72,8 +77,9 @@ require(all(re.fullmatch(r"[A-Za-z0-9_.-]+==[^=\s]+", line) for line in requirem
 require(patch_path.is_file(), "pinned MLX-Audio compatibility patch is missing")
 require(f'git -C "$SOURCE_DIR" fetch --depth 1 origin "$SOURCE_COMMIT"' in release, "release does not fetch the pinned source commit")
 require('git -C "$SOURCE_DIR" apply --unidiff-zero' in release, "release does not apply the compatibility patch")
-require('moss_mlx_runner.py" --self-test' in release, "release does not smoke-test the packaged runtime")
-require("PYTHONNOUSERSITE=1" in release and "HF_HUB_OFFLINE" in runner, "packaged runtime is not isolated from user/network state")
+require('scripts/ci/package-moss-release-runtime.sh' in release, "release does not use the shared MOSS packager")
+require('moss_mlx_runner.py" --self-test' in packager, "shared packager does not smoke-test the runtime")
+require("PYTHONNOUSERSITE=1" in packager and "HF_HUB_OFFLINE" in runner, "packaged runtime is not isolated from user/network state")
 
 asset_template = 'moss-joint-runtime-v${VERSION}-aarch64-apple-darwin.zip'
 require(asset_template in release, "release archive name drifted")
@@ -83,6 +89,9 @@ require('-name "*.zip"' in release and '-name "*.sha256"' in release, "release a
 require('cat *.sha256 > "bifrost-v${VERSION}-checksums.txt"' in release, "combined release checksum manifest is missing")
 require("parse_runtime_checksum_manifest" in runtime, "runtime no longer verifies the release checksum manifest")
 require("BIFROST_MOSS_RUNTIME_SHA256 is required with BIFROST_MOSS_RUNTIME_URL" in runtime, "custom runtime URL can bypass checksum verification")
+require(packager_test_path.is_file(), "release packaging fixture test is missing")
+require("Release Workflow Contract (MOSS macOS)" in ci, "PR CI does not gate the MOSS release workflow")
+require("test-package-moss-release-runtime.sh" in ci, "PR CI does not execute the shared MOSS packager")
 
 print(
     "PASS: MOSS release/runtime contract is aligned "
