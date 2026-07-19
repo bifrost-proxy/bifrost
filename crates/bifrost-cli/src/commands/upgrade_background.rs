@@ -617,6 +617,25 @@ mod tests {
             &dir,
             std::process::id().saturating_add(1)
         ));
+
+        std::env::set_var(PARENT_UPGRADE_LOCK_OWNER_PID_ENV, "not-a-pid");
+        assert!(!parent_upgrade_lock_credential_matches(
+            &dir,
+            std::process::id()
+        ));
+        for (key, value) in parent_upgrade_lock_child_environment(&dir) {
+            std::env::set_var(key, value);
+        }
+
+        let owner_path = dir.join(UPGRADE_LOCK_OWNER_FILE_NAME);
+        let owner_content = std::fs::read(&owner_path).expect("read owner sidecar");
+        std::fs::remove_file(&owner_path).expect("remove owner sidecar");
+        assert!(!parent_upgrade_lock_credential_matches(
+            &dir,
+            std::process::id()
+        ));
+        std::fs::write(&owner_path, owner_content).expect("restore owner sidecar");
+
         std::env::set_var(PARENT_UPGRADE_LOCK_TOKEN_ENV, "forged-token");
         assert!(!parent_upgrade_lock_credential_matches(
             &dir,
@@ -625,6 +644,16 @@ mod tests {
         for (key, value) in parent_upgrade_lock_child_environment(&dir) {
             std::env::set_var(key, value);
         }
+
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(dir.join(UPGRADE_LOCK_FILE_NAME)).expect("unlink live lock path");
+            assert!(!parent_upgrade_lock_credential_matches(
+                &dir,
+                std::process::id()
+            ));
+        }
+
         drop(owner);
         assert!(!parent_upgrade_lock_credential_matches(
             &dir,

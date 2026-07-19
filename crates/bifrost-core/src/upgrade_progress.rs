@@ -495,6 +495,40 @@ mod tests {
     }
 
     #[test]
+    fn malformed_desktop_upgrade_origin_artifacts_are_rejected_and_cleaned() {
+        let dir = temp_dir();
+
+        let directory_token = uuid::Uuid::new_v4().to_string();
+        std::fs::create_dir(desktop_upgrade_origin_token_path(&dir, &directory_token))
+            .expect("create directory-shaped token");
+        assert!(!consume_desktop_upgrade_origin_token(
+            &dir,
+            &directory_token
+        ));
+
+        let malformed_token = uuid::Uuid::new_v4().to_string();
+        std::fs::write(
+            desktop_upgrade_origin_token_path(&dir, &malformed_token),
+            "not-an-rfc3339-timestamp",
+        )
+        .expect("write malformed token");
+        assert!(!consume_desktop_upgrade_origin_token(
+            &dir,
+            &malformed_token
+        ));
+
+        clear_expired_desktop_upgrade_origin_tokens(&dir.join("missing"));
+
+        let stale_token = uuid::Uuid::new_v4().to_string();
+        let stale_path = desktop_upgrade_origin_token_path(&dir, &stale_token);
+        std::fs::write(&stale_path, "invalid timestamp").expect("write stale token");
+        clear_expired_desktop_upgrade_origin_tokens(&dir);
+        assert!(!stale_path.exists(), "invalid token must be removed");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn is_active_covers_phases() {
         for (phase, active) in [
             (UpgradePhase::Idle, false),
