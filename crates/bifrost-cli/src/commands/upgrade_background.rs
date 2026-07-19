@@ -98,6 +98,7 @@ pub(crate) fn parent_upgrade_lock_child_environment(data_dir: &Path) -> Vec<(Str
         .unwrap_or_default()
 }
 
+#[cfg(windows)]
 fn current_parent_pid() -> Option<u32> {
     let system = sysinfo::System::new_all();
     let current = sysinfo::get_current_pid().ok()?;
@@ -105,6 +106,14 @@ fn current_parent_pid() -> Option<u32> {
         .process(current)
         .and_then(|process| process.parent())
         .map(|pid| pid.as_u32())
+}
+
+#[cfg(unix)]
+fn current_parent_pid() -> Option<u32> {
+    // SAFETY: getppid has no pointer arguments and does not mutate Rust-owned
+    // memory. A positive PID is the kernel-observed direct parent.
+    let pid = unsafe { libc::getppid() };
+    (pid > 0).then_some(pid as u32)
 }
 
 fn parent_upgrade_lock_credential_matches(data_dir: &Path, actual_parent_pid: u32) -> bool {
