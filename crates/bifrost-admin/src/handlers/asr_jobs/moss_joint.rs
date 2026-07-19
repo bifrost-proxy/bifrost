@@ -425,9 +425,24 @@ async fn download_moss_resource(
     progress_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::resource_download::DownloadProgress>>,
 ) -> Result<(), String> {
     if let Some(path) = url.strip_prefix("file://") {
-        tokio::fs::copy(path, &dest)
+        let bytes = tokio::fs::copy(path, &dest)
             .await
             .map_err(|error| format!("copy {label} from {path}: {error}"))?;
+        if let Some(tx) = progress_tx {
+            let _ = tx.send(crate::resource_download::DownloadProgress {
+                label: label.to_string(),
+                url,
+                dest: dest.display().to_string(),
+                downloaded_bytes: bytes,
+                total_bytes: Some(bytes),
+                percent: Some(100),
+                bytes_per_second: None,
+                eta_seconds: Some(0),
+                elapsed_ms: 0,
+                resumed: false,
+                complete: true,
+            });
+        }
         return Ok(());
     }
     let client = bifrost_core::outbound_reqwest_client_builder()
@@ -758,9 +773,26 @@ pub(crate) async fn handle_moss_model_status() -> Response<BoxBody> {
 pub(crate) async fn stream_moss_model_initialization(
     tx: tokio::sync::mpsc::Sender<bytes::Bytes>,
 ) {
+    stream_moss_model_initialization_with_spec(
+        tx,
+        fixed_asr_home(),
+        moss_runtime_asset_name(),
+        moss_model_spec(),
+        None,
+    )
+    .await;
+}
+
+async fn stream_moss_model_initialization_with_spec(
+    tx: tokio::sync::mpsc::Sender<bytes::Bytes>,
+    asr_home: PathBuf,
+    asset: Result<String, String>,
+    model_spec: MossModelSpec,
+    runtime_source: Option<MossRuntimeSource>,
+) {
     use crate::handlers::asr::{send_done, send_error, send_progress, AsrStreamPayload};
 
-    let asset = match moss_runtime_asset_name() {
+    let asset = match asset {
         Ok(asset) => asset,
         Err(error) => {
             send_error(&tx, "MOSS initialization is not supported on this computer.", Some(&error))
@@ -810,10 +842,10 @@ pub(crate) async fn stream_moss_model_initialization(
     });
 
     let result = ensure_moss_joint_runtime_with_spec_and_progress(
-        &fixed_asr_home(),
+        &asr_home,
         "",
-        moss_model_spec(),
-        None,
+        model_spec,
+        runtime_source,
         Some(progress_tx),
     )
     .await;

@@ -284,6 +284,21 @@ mod tests {
         assert!(tampered.runtime_ready);
         assert!(!tampered.model_ready);
 
+        std::fs::copy(&model_source, &paths.model).unwrap();
+        write_moss_verification_marker(&asr_home, &paths, &model_spec).unwrap();
+        std::fs::remove_file(&paths.python).unwrap();
+        let model_only = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert_eq!(model_only.status, "partial");
+        assert!(!model_only.runtime_ready);
+        assert!(model_only.model_ready);
+        assert!(model_only.message.contains("runtime is missing"));
+
         let unsupported = moss_management_status_with_spec(
             &asr_home,
             "linux",
@@ -294,6 +309,90 @@ mod tests {
         assert_eq!(unsupported.status, "unsupported");
         assert!(!unsupported.platform_supported);
         assert!(unsupported.unsupported_reason.is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn moss_management_handlers_stream_success_and_failures() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path().join("data").as_path());
+
+        let status_response = handle_moss_model_status().await;
+        assert_eq!(status_response.status(), hyper::StatusCode::OK);
+        let status_body = http_body_util::BodyExt::collect(status_response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let status_json: serde_json::Value = serde_json::from_slice(&status_body).unwrap();
+        assert!(status_json.get("status").is_some());
+
+        let archive = temp.path().join("runtime-source.zip");
+        write_moss_runtime_zip(&archive, "#!/bin/sh\necho 'moss-mlx-runtime ok'\n");
+        let model_source = temp.path().join("model-source.safetensors");
+        let model_spec = moss_test_model_spec(&model_source, b"verified model fixture");
+        let runtime_source = MossRuntimeSource {
+            asset: "runtime.zip".to_string(),
+            url: format!("file://{}", archive.display()),
+            sha256: sha256_file(&archive).unwrap(),
+        };
+
+        let success_home = temp.path().join("success-home");
+        let (success_tx, mut success_rx) = tokio::sync::mpsc::channel(32);
+        stream_moss_model_initialization_with_spec(
+            success_tx,
+            success_home.clone(),
+            Ok(runtime_source.asset.clone()),
+            model_spec.clone(),
+            Some(runtime_source.clone()),
+        )
+        .await;
+        let mut success_events = String::new();
+        while let Some(frame) = success_rx.recv().await {
+            success_events.push_str(&String::from_utf8_lossy(&frame));
+        }
+        assert!(success_events.contains("event: progress"));
+        assert!(success_events.contains("Checking MOSS runtime"));
+        assert!(success_events.contains("Downloading verified MOSS assets"));
+        assert!(success_events.contains("MOSS runtime and verified 8-bit model are ready"));
+        assert!(success_events.contains("event: done"));
+        assert!(moss_verification_path(&success_home).is_file());
+
+        let (unsupported_tx, mut unsupported_rx) = tokio::sync::mpsc::channel(4);
+        stream_moss_model_initialization_with_spec(
+            unsupported_tx,
+            temp.path().join("unsupported-home"),
+            Err("unsupported fixture".to_string()),
+            model_spec.clone(),
+            None,
+        )
+        .await;
+        let unsupported_event = unsupported_rx.recv().await.unwrap();
+        let unsupported_event = String::from_utf8_lossy(&unsupported_event);
+        assert!(unsupported_event.contains("event: error"));
+        assert!(unsupported_event.contains("not supported"));
+
+        let (failure_tx, mut failure_rx) = tokio::sync::mpsc::channel(16);
+        let invalid_runtime = MossRuntimeSource {
+            sha256: "0".repeat(64),
+            ..runtime_source
+        };
+        stream_moss_model_initialization_with_spec(
+            failure_tx,
+            temp.path().join("failure-home"),
+            Ok(invalid_runtime.asset.clone()),
+            model_spec,
+            Some(invalid_runtime),
+        )
+        .await;
+        let mut failure_events = String::new();
+        while let Some(frame) = failure_rx.recv().await {
+            failure_events.push_str(&String::from_utf8_lossy(&frame));
+        }
+        assert!(failure_events.contains("event: error"));
+        assert!(failure_events.contains("MOSS initialization failed"));
+        assert!(failure_events.contains("checksum mismatch"));
     }
 
     fn moss_process_test_paths(root: &Path, python: PathBuf) -> MossRuntimePaths {
