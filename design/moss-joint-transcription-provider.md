@@ -60,7 +60,7 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 7. 整段推理采用硬 watchdog：耗时达到音频时长的 `0.5x` 时杀死子进程并返回 `moss_rtf_exceeded`，不会继续消耗资源或悄悄回退到不同模型。
 8. release 打包禁用 macOS resource fork，并扫描拒绝 `._*`、`.DS_Store`、`__MACOSX`；安装器也跳过这些元数据，避免 Python 模型加载器误读 AppleDouble 文件。
 
-`runtime_strategy` 只控制标准 Qwen 链路；MOSS 联合模式固定单文件串行整文件推理。WebUI 在 MOSS 模式下显示该约束，但保留原 Qwen 配置，切回标准模式后可继续使用。
+`runtime_strategy`、文件并发、任务模型、任务语言、外部说话人分离与声纹匹配只控制标准 Qwen 链路；MOSS 联合模式固定模型、自动识别语言，并以单文件串行方式执行整文件推理。WebUI 必须按当前模式只展示真实生效的配置：标准模式展示 Qwen pipeline 配置并隐藏 MOSS Prompt，MOSS 模式只展示 MOSS Prompt 和模式说明，并隐藏整组 Qwen pipeline 配置。名称、音频目录、调度、递归扫描、启用状态和外接设备导入属于任务级公共配置，两种模式都展示。被隐藏的标准模式配置保留在表单状态和任务中，切回标准模式后继续使用，不因切换或保存 MOSS Prompt 被重置。
 
 ### 2.3 后续阶段
 

@@ -842,7 +842,8 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
 
   const createDirectoryTask = useCallback(async () => {
     try {
-      const values = await taskForm.validateFields();
+      await taskForm.validateFields();
+      const values = taskForm.getFieldsValue(true);
       const externalDevices = parseExternalDeviceBindings(values.external_devices);
       await createAsrTask({
         name: values.name,
@@ -892,7 +893,8 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
   const updateDirectoryTask = useCallback(
     async (id: string) => {
       try {
-        const values = await taskForm.validateFields();
+        await taskForm.validateFields();
+        const values = taskForm.getFieldsValue(true);
         const externalDevices = parseExternalDeviceBindings(values.external_devices);
         const updated = await updateAsrTask(id, {
           name: values.name,

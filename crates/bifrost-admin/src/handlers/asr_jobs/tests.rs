@@ -743,6 +743,10 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let binary = temp.path().join("moss-transcribe");
         let wav = temp.path().join("audio.wav");
+        // Leave enough watchdog headroom for process startup while the full workspace test suite
+        // is running thousands of tests in parallel. Dedicated watchdog coverage uses a slow
+        // fixture and a deliberately short duration below.
+        let process_fixture_audio_ms = 10_000;
         std::fs::write(&wav, b"wav").unwrap();
         let runtime = moss_process_test_paths(temp.path(), binary.clone());
 
@@ -750,17 +754,24 @@ mod tests {
             &binary,
             "#!/bin/sh\nprompt=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--prompt-file' ]; then shift; prompt=$(cat \"$1\"); fi\n  shift\ndone\n[ \"$prompt\" = 'Bifrost prompt' ] || { echo 'prompt mismatch' >&2; exit 9; }\nprintf '[{\"start\":0.1,\"end\":1.2,\"speaker\":\"S01\",\"text\":\" hello \"}]'\n",
         );
-        let result =
-            run_moss_joint_transcription(&runtime, &wav, 1_000, "Bifrost prompt", None)
-                .await
-                .unwrap();
+        let result = run_moss_joint_transcription(
+            &runtime,
+            &wav,
+            process_fixture_audio_ms,
+            "Bifrost prompt",
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(result.text, "hello");
 
         write_executable(&binary, "#!/bin/sh\necho 'runtime failed' >&2\nexit 7\n");
-        assert!(run_moss_joint_transcription(&runtime, &wav, 1_000, "", None)
-            .await
-            .unwrap_err()
-            .contains("runtime failed"));
+        assert!(
+            run_moss_joint_transcription(&runtime, &wav, process_fixture_audio_ms, "", None)
+                .await
+                .unwrap_err()
+                .contains("runtime failed")
+        );
 
         write_executable(&binary, "#!/bin/sh\nsleep 5\n");
         let pause = || true;

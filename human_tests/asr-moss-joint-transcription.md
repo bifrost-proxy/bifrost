@@ -34,7 +34,7 @@
 - `transcription_mode=moss_joint` 和规范化后的 prompt 写入任务；空字符串可清除 prompt。
 - 4001 字符 prompt 返回 HTTP 400；旧格式任务默认为 `standard` 和空 prompt。
 - 服务重启后配置不丢失；MOSS 模式的有效文件并发数固定为 1。
-- WebUI 选择 MOSS 后展示自动初始化说明和 prompt 输入框，禁用不适用的 Qwen runtime/model/外部分轨控件；重开编辑框后 prompt 原文仍存在。
+- WebUI 选择 MOSS 后展示自动初始化说明和 prompt 输入框，并完全隐藏不适用的 Qwen runtime/model/language/并发/外部分轨控件；重开编辑框后 prompt 原文仍存在。
 
 ### TC-MOSS-02：首次运行自动初始化与真实任务音频转录
 
@@ -98,6 +98,24 @@
 - 每个 segment 都有非空 speaker，整段使用同一次解码维持全局 speaker label。
 - MLX 与 GGML 的短样本结果没有明显文本或多人结构退化；最终准确率仍需人工标注 WER/DER 数据集确认。
 
+### TC-MOSS-06：处理模式驱动的表单字段与配置保留
+
+操作步骤：
+
+1. 使用当前源码构建的 Bifrost 和隔离 `BIFROST_DATA_DIR` 启动非正式端口；记录 9900 与 18997 现有服务 PID，测试期间不得停止或重启它们。
+2. 在浏览器打开 ASR Scheduled Tasks，点击 New；Standard 模式下检查 Runtime、File Concurrency、Speaker Diarization、Diarization Profile、Known Speakers、Voiceprint Matching、Task Model 和 Task Language。
+3. 把 Task Model 改为 `Qwen3-ASR-1.7B`，再把 Transcription Mode 改为 `MOSS joint transcription (speaker-aware)`，填写自定义 MOSS Prompt。
+4. 检查上述 Standard 专属字段已从表单移除；Recursive、Enabled 和 External Devices 仍可见。切回 Standard，确认模型仍为 `Qwen3-ASR-1.7B`；再次切回 MOSS，确认 Prompt 原文仍在。
+5. 填写隔离音频目录并保存任务，重开 Edit，确认当前模式和 Prompt；切回 Standard，确认原标准模式配置没有被 MOSS 保存动作重置。
+6. 分别在亮色和暗色主题检查弹窗，确认字段切换后没有空白占位、文字重叠、底部按钮遮挡或水平溢出。
+
+预期结果：
+
+- Standard 模式只显示 Qwen pipeline 专属字段，不显示 MOSS Prompt。
+- MOSS 模式只显示 MOSS Prompt 和模式说明，不显示任何不会生效的 Qwen pipeline 字段。
+- 名称、音频目录、调度、Recursive、Enabled 和 External Devices 等任务级公共字段在两种模式下始终可用。
+- 模式往返和保存重开不会丢失各自配置；亮色、暗色与窄窗口布局均可正常操作。
+
 ## 清理步骤
 
 1. 用户要求继续体验时保留 18997；否则停止且仅停止本测试启动的预览 PID。
@@ -118,3 +136,4 @@
 | 2026-07-19 | TC-MOSS-04 | PASS：真实打包首次发现 AppleDouble UTF-8 失败并在 2.58 秒停止；打包与安装双层过滤修复后，安装目录 metadata sidecar 数为 0。9900 保持 PID 22956；18997 按用户要求保留运行供体验。 |
 | 2026-07-19 | TC-MOSS-05 | PASS：1.2 秒慢 fixture 约 600 ms 返回 `moss_rtf_exceeded`；30 秒 2.05 秒、120 秒 4.07 秒、1800.15 秒 83.261 秒，均小于 0.5 RTF。120 秒 MLX/GGML 规范化文本均 319 字符，相似度 0.9969，speaker 数与时间线目视一致；未宣称 WER/DER。 |
 | 2026-07-19 | TC-MOSS-02 | PASS（发布门禁复核）：新增发布契约 E2E 通过，确认 MLX-Audio commit、模型 snapshot、12 个 metadata 文件、runtime 资产名与 checksum manifest 一致；仅保留发布清单文件的 30 秒真实音频推理 1.753 秒完成，RTF 0.05842，得到 9 段、3 个 speaker。 |
+| 2026-07-19 | TC-MOSS-06 | PASS（修复后复测）：使用当前源码与隔离数据目录在 18998 启动真实服务；Standard 的 8 个 Qwen pipeline 字段均显示且 MOSS Prompt 隐藏，MOSS 下 8 个字段均从 DOM 移除且 Prompt、Recursive、Enabled、External Devices 保持可用。模式往返保留 Prompt 与 `Qwen3-ASR-1.7B`；首次真实保存发现隐藏字段未进入 `validateFields()` 导致模型回落，改用校验后读取完整表单状态并复测，保存 MOSS、重开 Edit、切回 Standard 后仍为 1.7B。Prompt API 回显原文，字符计数无重叠，亮色与暗色布局均无空白占位、遮挡或水平溢出。9900 保持 PID 22956，18997 保持 PID 56155。 |

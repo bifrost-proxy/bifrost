@@ -38,6 +38,7 @@ import type {
 } from "../../../api/asr";
 import { listAsrExternalVolumes } from "../../../api/asr";
 import { formatSchedule, formatTime } from "../asrUtils";
+import { directoryTaskModeFields } from "../directoryTaskMode";
 
 const { Text } = Typography;
 
@@ -202,7 +203,8 @@ export default function DirectoryTasksPanel({
 
   const configOpen = createOpen || Boolean(editingTask);
   const transcriptionMode = Form.useWatch<AsrTranscriptionMode>("transcription_mode", taskForm);
-  const mossJointMode = transcriptionMode === "moss_joint";
+  const transcriptionPrompt = Form.useWatch<string>("transcription_prompt", taskForm) ?? "";
+  const { showMossPrompt, showStandardPipeline } = directoryTaskModeFields(transcriptionMode);
   const configTitle = editingTask
     ? `Edit Directory Task: ${editingTask.name}`
     : "New Directory Task";
@@ -485,17 +487,34 @@ export default function DirectoryTasksPanel({
                 />
               </Form.Item>
               <Text type="secondary" style={{ display: "block", marginTop: -16, marginBottom: 16 }}>
-                {mossJointMode
+                {showMossPrompt
                   ? "MOSS uses one global MLX decode for timestamps and consistent speaker labels. The verified Apple Silicon runtime and 8-bit model initialize automatically; inference is stopped if it exceeds 0.5x the audio duration."
                   : "Uses the existing Qwen transcription pipeline and optional external speaker diarization."}
               </Text>
             </Col>
-            {mossJointMode ? (
+            {showMossPrompt ? (
               <Col xs={24}>
                 <Form.Item
                   name="transcription_prompt"
                   label="MOSS Prompt"
-                  extra="Optional meeting context, names, and specialist terms. Bifrost appends it to the required MOSS protocol prompt and saves it with this task."
+                  extra={
+                    <span
+                      style={{
+                        display: "flex",
+                        alignItems: "flex-start",
+                        justifyContent: "space-between",
+                        gap: 12,
+                      }}
+                    >
+                      <span>
+                        Optional meeting context, names, and specialist terms. Bifrost appends it to
+                        the required MOSS protocol prompt and saves it with this task.
+                      </span>
+                      <span data-testid="asr-transcription-prompt-count" style={{ whiteSpace: "nowrap" }}>
+                        {Array.from(transcriptionPrompt).length} / 4000
+                      </span>
+                    </span>
+                  }
                   rules={[
                     {
                       max: 4000,
@@ -506,106 +525,106 @@ export default function DirectoryTasksPanel({
                   <Input.TextArea
                     data-testid="asr-transcription-prompt-input"
                     rows={4}
-                    showCount
                     maxLength={4000}
                     placeholder="Example: This is a Bifrost and NextOnCall project meeting. Preserve product names and mixed Chinese/English terms."
                   />
                 </Form.Item>
               </Col>
             ) : null}
-            <Col xs={24} md={8}>
-              <Form.Item name="runtime_strategy" label="Runtime">
-                <Select
-                  disabled={mossJointMode}
-                  data-testid="asr-runtime-strategy-select"
-                  listHeight={420}
-                  optionLabelProp="label"
-                  popupMatchSelectWidth={false}
-                >
-                  {RUNTIME_STRATEGY_OPTIONS.map((option) => (
-                    <Select.Option key={option.value} value={option.value} label={option.label}>
-                      <Space
-                        direction="vertical"
-                        size={2}
-                        style={{ maxWidth: 420, whiteSpace: "normal" }}
-                      >
-                        <Text strong>{option.label}</Text>
-                        <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.4 }}>
-                          {option.description}
-                        </Text>
-                      </Space>
-                    </Select.Option>
-                  ))}
-                </Select>
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="max_concurrent_files" label="File Concurrency">
-                <InputNumber disabled={mossJointMode} min={1} max={16} style={{ width: "100%" }} />
-              </Form.Item>
-            </Col>
-            <Col xs={12} md={8}>
-              <Form.Item
-                name="diarization_enabled"
-                label="Speaker Diarization"
-                valuePropName="checked"
-              >
-                <Switch disabled={mossJointMode} />
-              </Form.Item>
-            </Col>
-            <Col xs={12} md={8}>
-              <Form.Item name="diarization_profile" label="Diarization Profile">
-                <Select
-                  disabled={mossJointMode}
-                  options={[
-                    { value: "sherpa-onnx-balanced", label: "sherpa-onnx balanced" },
-                    { value: "pyannote-community-quality", label: "pyannote community quality" },
-                  ]}
-                />
-              </Form.Item>
-            </Col>
-            <Col xs={12} md={8}>
-              <Form.Item name="diarization_known_speaker_count" label="Known Speakers">
-                <InputNumber
-                  disabled={mossJointMode}
-                  min={1}
-                  max={8}
-                  placeholder="Auto"
-                  style={{ width: "100%" }}
-                />
-              </Form.Item>
-            </Col>
-            <Col xs={12} md={8}>
-              <Form.Item
-                name="voiceprint_matching"
-                label="Voiceprint Matching"
-                valuePropName="checked"
-              >
-                <Switch disabled={mossJointMode} />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="model" label="Task Model">
-                <Select
-                  disabled={mossJointMode}
-                  options={[
-                    { value: "Qwen3-ASR-0.6B", label: "Qwen3-ASR-0.6B" },
-                    { value: "Qwen3-ASR-1.7B", label: "Qwen3-ASR-1.7B" },
-                  ]}
-                />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="language" label="Task Language">
-                <Select
-                  options={[
-                    { value: "chinese", label: "Chinese" },
-                    { value: "english", label: "English" },
-                    { value: "auto", label: "Auto" },
-                  ]}
-                />
-              </Form.Item>
-            </Col>
+            {showStandardPipeline ? (
+              <>
+                <Col xs={24} md={8}>
+                  <Form.Item name="runtime_strategy" label="Runtime">
+                    <Select
+                      data-testid="asr-runtime-strategy-select"
+                      listHeight={420}
+                      optionLabelProp="label"
+                      popupMatchSelectWidth={false}
+                    >
+                      {RUNTIME_STRATEGY_OPTIONS.map((option) => (
+                        <Select.Option key={option.value} value={option.value} label={option.label}>
+                          <Space
+                            direction="vertical"
+                            size={2}
+                            style={{ maxWidth: 420, whiteSpace: "normal" }}
+                          >
+                            <Text strong>{option.label}</Text>
+                            <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.4 }}>
+                              {option.description}
+                            </Text>
+                          </Space>
+                        </Select.Option>
+                      ))}
+                    </Select>
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={8}>
+                  <Form.Item name="max_concurrent_files" label="File Concurrency">
+                    <InputNumber min={1} max={16} style={{ width: "100%" }} />
+                  </Form.Item>
+                </Col>
+                <Col xs={12} md={8}>
+                  <Form.Item
+                    name="diarization_enabled"
+                    label="Speaker Diarization"
+                    valuePropName="checked"
+                  >
+                    <Switch />
+                  </Form.Item>
+                </Col>
+                <Col xs={12} md={8}>
+                  <Form.Item name="diarization_profile" label="Diarization Profile">
+                    <Select
+                      options={[
+                        { value: "sherpa-onnx-balanced", label: "sherpa-onnx balanced" },
+                        { value: "pyannote-community-quality", label: "pyannote community quality" },
+                      ]}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col xs={12} md={8}>
+                  <Form.Item name="diarization_known_speaker_count" label="Known Speakers">
+                    <InputNumber
+                      min={1}
+                      max={8}
+                      placeholder="Auto"
+                      style={{ width: "100%" }}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col xs={12} md={8}>
+                  <Form.Item
+                    name="voiceprint_matching"
+                    label="Voiceprint Matching"
+                    valuePropName="checked"
+                  >
+                    <Switch />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={8}>
+                  <Form.Item name="model" label="Task Model">
+                    <Select
+                      data-testid="asr-task-model-select"
+                      options={[
+                        { value: "Qwen3-ASR-0.6B", label: "Qwen3-ASR-0.6B" },
+                        { value: "Qwen3-ASR-1.7B", label: "Qwen3-ASR-1.7B" },
+                      ]}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={8}>
+                  <Form.Item name="language" label="Task Language">
+                    <Select
+                      options={[
+                        { value: "chinese", label: "Chinese" },
+                        { value: "english", label: "English" },
+                        { value: "auto", label: "Auto" },
+                      ]}
+                    />
+                  </Form.Item>
+                </Col>
+              </>
+            ) : null}
             <Col xs={12} md={8}>
               <Form.Item name="recursive" label="Recursive" valuePropName="checked">
                 <Switch />
