@@ -85,6 +85,17 @@ for relative in "${required_paths[@]}"; do
   fi
 done
 
+VERIFY_ROOT="$(mktemp -d)"
+trap 'rm -rf "$VERIFY_ROOT"' EXIT
+ditto -x -k "$OUTPUT_ZIP" "$VERIFY_ROOT"
+EXTRACTED_RUNTIME_ROOT="$VERIFY_ROOT/$archive_root"
+PYTHONHOME="$EXTRACTED_RUNTIME_ROOT/runtime/python" \
+  PYTHONPATH="$EXTRACTED_RUNTIME_ROOT/runtime/site-packages" \
+  PYTHONNOUSERSITE=1 \
+  "$EXTRACTED_RUNTIME_ROOT/runtime/python/bin/python3.12" \
+  "$EXTRACTED_RUNTIME_ROOT/runtime/moss_mlx_runner.py" --self-test |
+  grep -q "moss-mlx-runtime ok"
+
 (
   cd "$(dirname "$OUTPUT_ZIP")"
   shasum -a 256 "$(basename "$OUTPUT_ZIP")" >"$(basename "$OUTPUT_ZIP").sha256"

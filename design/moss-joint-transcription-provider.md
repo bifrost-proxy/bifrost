@@ -248,6 +248,7 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 - Python runner 返回“无有效 speaker-aware segment”时必须标记同版本确定性失败，避免零温度解码反复加载模型。
 - 超过整文件处理上限的输入必须标记为同版本确定性失败，源文件未变化时不得在定时或手动运行中重复归一化。
 - MOSS 原生连续 speaker turn 写入产物前必须按既有 timeline 契约拆成最长 30 秒的 segment，并保留 speaker、绝对时间和完整文本。
+- runtime ZIP 解压必须保留独立 CPython framework/library 的相对符号链接，拒绝绝对路径或逃逸出 `runtime`/`model` 的链接；release 打包完成后必须重新解压归档并从解压目录执行 `--self-test`。
 
 ### 7.3 `human_tests`
 

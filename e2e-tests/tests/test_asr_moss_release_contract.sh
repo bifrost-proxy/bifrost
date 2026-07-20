@@ -87,6 +87,8 @@ require(f'git -C "$SOURCE_DIR" fetch --depth 1 origin "$SOURCE_COMMIT"' in relea
 require('git -C "$SOURCE_DIR" apply --unidiff-zero' in release, "release does not apply the compatibility patch")
 require('scripts/ci/package-moss-release-runtime.sh' in release, "release does not use the shared MOSS packager")
 require('moss_mlx_runner.py" --self-test' in packager, "shared packager does not smoke-test the runtime")
+require('ditto -x -k "$OUTPUT_ZIP"' in packager, "shared packager does not extract the completed archive")
+require('EXTRACTED_RUNTIME_ROOT/runtime/moss_mlx_runner.py" --self-test' in packager, "shared packager does not self-test the extracted runtime")
 require("PYTHONNOUSERSITE=1" in packager and "HF_HUB_OFFLINE" in runner, "packaged runtime is not isolated from user/network state")
 require("stream_generate(" in runner, "runner does not inspect generation before spending the full token budget")
 require("EARLY_PROTOCOL_TOKEN_LIMIT = 256" in runner, "runner early protocol guard drifted")

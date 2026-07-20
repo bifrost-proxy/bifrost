@@ -579,6 +579,7 @@ fn install_moss_runtime_archive(archive: &Path, destination: &Path) -> Result<()
     let archive_root = Path::new("moss-joint-runtime");
     let mut extracted_runner = false;
     let mut extracted_python = false;
+    let mut symlinks = Vec::new();
     for index in 0..zip.len() {
         let mut entry = zip
             .by_index(index)
@@ -605,6 +606,17 @@ fn install_moss_runtime_archive(archive: &Path, destination: &Path) -> Result<()
             continue;
         }
         let target = destination.join(relative);
+        if entry.is_symlink() {
+            let mut link_target = String::new();
+            std::io::Read::read_to_string(&mut entry, &mut link_target).map_err(|error| {
+                format!("read MOSS runtime symlink {}: {error}", relative.display())
+            })?;
+            let link_target = PathBuf::from(link_target);
+            validate_moss_runtime_symlink(relative, &link_target)?;
+            symlinks.push((target, link_target));
+            extracted_python |= relative == Path::new("runtime/python/bin/python3.12");
+            continue;
+        }
         if entry.is_dir() {
             std::fs::create_dir_all(&target).map_err(|error| {
                 format!("create MOSS runtime directory {}: {error}", target.display())
@@ -630,10 +642,93 @@ fn install_moss_runtime_archive(archive: &Path, destination: &Path) -> Result<()
         extracted_runner |= relative == Path::new("runtime/moss_mlx_runner.py");
         extracted_python |= relative == Path::new("runtime/python/bin/python3.12");
     }
+    for (target, link_target) in symlinks {
+        #[cfg(unix)]
+        {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    format!("create MOSS runtime directory {}: {error}", parent.display())
+                })?;
+            }
+            match std::fs::symlink_metadata(&target) {
+                Ok(metadata) if metadata.file_type().is_dir() => {
+                    return Err(format!(
+                        "refuse to replace MOSS runtime directory {} with a symlink",
+                        target.display()
+                    ));
+                }
+                Ok(_) => std::fs::remove_file(&target).map_err(|error| {
+                    format!("replace MOSS runtime symlink {}: {error}", target.display())
+                })?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "inspect MOSS runtime symlink target {}: {error}",
+                        target.display()
+                    ));
+                }
+            }
+            std::os::unix::fs::symlink(&link_target, &target).map_err(|error| {
+                format!(
+                    "create MOSS runtime symlink {} -> {}: {error}",
+                    target.display(),
+                    link_target.display()
+                )
+            })?;
+        }
+        #[cfg(not(unix))]
+        return Err(format!(
+            "MOSS runtime archive symlink {} -> {} is unsupported on this platform",
+            target.display(),
+            link_target.display()
+        ));
+    }
     if !extracted_runner || !extracted_python {
         return Err(format!(
             "MOSS runtime archive {} does not contain the packaged MLX runner",
             archive.display()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_moss_runtime_symlink(relative: &Path, link_target: &Path) -> Result<(), String> {
+    if link_target.is_absolute() {
+        return Err(format!(
+            "unsafe absolute MOSS runtime symlink {} -> {}",
+            relative.display(),
+            link_target.display()
+        ));
+    }
+    let mut resolved = PathBuf::new();
+    let combined = relative.parent().unwrap_or_else(|| Path::new("")).join(link_target);
+    for component in combined.components() {
+        match component {
+            std::path::Component::Normal(part) => resolved.push(part),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !resolved.pop() {
+                    return Err(format!(
+                        "unsafe escaping MOSS runtime symlink {} -> {}",
+                        relative.display(),
+                        link_target.display()
+                    ));
+                }
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err(format!(
+                    "unsafe MOSS runtime symlink {} -> {}",
+                    relative.display(),
+                    link_target.display()
+                ));
+            }
+        }
+    }
+    if !resolved.starts_with("runtime") && !resolved.starts_with("model") {
+        return Err(format!(
+            "unsafe escaping MOSS runtime symlink {} -> {}",
+            relative.display(),
+            link_target.display()
         ));
     }
     Ok(())

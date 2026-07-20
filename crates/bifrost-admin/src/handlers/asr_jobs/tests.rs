@@ -194,11 +194,17 @@ mod tests {
         zip.write_all(b"archive metadata outside installed roots")
             .unwrap();
         zip.start_file(
-            "moss-joint-runtime/runtime/python/bin/python3.12",
+            "moss-joint-runtime/runtime/python/bin/python3.12-real",
             executable,
         )
         .unwrap();
         zip.write_all(script.as_bytes()).unwrap();
+        zip.add_symlink(
+            "moss-joint-runtime/runtime/python/bin/python3.12",
+            "python3.12-real",
+            executable,
+        )
+        .unwrap();
         zip.start_file("moss-joint-runtime/runtime/moss_mlx_runner.py", regular)
             .unwrap();
         zip.write_all(b"# fixture runner\n").unwrap();
@@ -668,6 +674,14 @@ mod tests {
         assert!(destination
             .join("runtime/python/bin/python3.12")
             .is_file());
+        assert!(std::fs::symlink_metadata(destination.join("runtime/python/bin/python3.12"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_link(destination.join("runtime/python/bin/python3.12")).unwrap(),
+            PathBuf::from("python3.12-real")
+        );
         assert!(destination.join("runtime/moss_mlx_runner.py").is_file());
         assert!(destination.join("model/config.json").is_file());
         assert!(destination.join("runtime/empty").is_dir());
@@ -729,6 +743,21 @@ mod tests {
         assert!(install_moss_runtime_archive(&unsafe_archive, &destination)
             .unwrap_err()
             .contains("unsafe MOSS runtime archive entry"));
+        let unsafe_symlink_archive = temp.path().join("unsafe-symlink-runtime.zip");
+        {
+            let file = std::fs::File::create(&unsafe_symlink_archive).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.add_symlink(
+                "moss-joint-runtime/runtime/python/escape",
+                "../../../escape",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.finish().unwrap();
+        }
+        assert!(install_moss_runtime_archive(&unsafe_symlink_archive, &destination)
+            .unwrap_err()
+            .contains("unsafe escaping MOSS runtime symlink"));
         let invalid_archive = temp.path().join("invalid.zip");
         std::fs::write(&invalid_archive, b"not a zip").unwrap();
         assert!(install_moss_runtime_archive(&invalid_archive, &destination).is_err());
