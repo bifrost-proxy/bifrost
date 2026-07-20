@@ -213,11 +213,13 @@ fn moss_runtime_url(asset: &str) -> String {
 }
 
 fn moss_runtime_checksum_url(asset: &str) -> String {
-    format!(
-        "https://github.com/bifrost-proxy/bifrost/releases/download/{}/{}.sha256",
-        moss_runtime_release_tag(),
-        asset
-    )
+    std::env::var("BIFROST_MOSS_RUNTIME_CHECKSUM_URL").unwrap_or_else(|_| {
+        format!(
+            "https://github.com/bifrost-proxy/bifrost/releases/download/{}/{}.sha256",
+            moss_runtime_release_tag(),
+            asset
+        )
+    })
 }
 
 fn normalize_sha256(value: &str, label: &str) -> Result<String, String> {

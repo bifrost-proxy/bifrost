@@ -658,6 +658,17 @@ mod tests {
         assert!(default_url.contains(
             "github.com/bifrost-proxy/bifrost/releases/download/moss-runtime-v1.0.0"
         ));
+        let checksum = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let manifest_url = spawn_moss_http_server(format!("{checksum}  {asset}\n").into_bytes());
+        let _checksum_url_guard = EnvVarGuard::set(
+            "BIFROST_MOSS_RUNTIME_CHECKSUM_URL",
+            std::ffi::OsStr::new(&manifest_url),
+        );
+        assert_eq!(
+            expected_moss_runtime_checksum(&asset).await.unwrap(),
+            checksum
+        );
+        drop(_checksum_url_guard);
 
         let custom_model = std::ffi::OsStr::new("file:///tmp/model.safetensors");
         let _model_guard = EnvVarGuard::set("BIFROST_MOSS_MODEL_URL", custom_model);
