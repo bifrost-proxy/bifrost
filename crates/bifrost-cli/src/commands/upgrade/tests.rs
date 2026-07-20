@@ -1429,7 +1429,7 @@ fn download_selection_success_and_free_restart_port_are_exercised() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
     let address = listener.local_addr().expect("fixture address");
     let server = std::thread::spawn(move || {
-        for _ in 0..4 {
+        for _ in 0..3 {
             let (mut stream, _) = listener.accept().expect("accept fixture request");
             let mut request = [0_u8; 2048];
             let read = stream.read(&mut request).expect("read fixture request");

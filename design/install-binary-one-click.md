@@ -166,6 +166,7 @@ Admin API 与 Web UI 不参与安装本身；`bifrost upgrade` 期间会通过�
 ### Phase 3：`bifrost upgrade` 与 daemon exec-child
 
 - upgrade 复用镜像探测与进度输出。
+- 显式设置 `BIFROST_GITHUB_MIRROR` 时，该地址始终保持第一优先级，不参与内置候选的延迟竞速；内置候选只作为确定性 fallback，并行 coverage 负载不得改变顺序。
 - 二进制 `--version` 校验带硬超时。
 - runtime.json 精确重启：端口、host、系统代理策略；缺失时按默认配置回退，legacy 缺字段显式 `--no-system-proxy`。
 - `stop_for_restart` -> `wait_for_restart_port_release` -> `start -d`；端口仍被占用时系统代理 crash recovery + shutdown marker 清理 + 明确诊断错误。

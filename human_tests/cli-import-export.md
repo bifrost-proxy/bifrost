@@ -539,6 +539,25 @@
 
 ---
 
+### TC-CIE-29：显式 GitHub mirror 在并行测试负载下保持第一优先级
+
+**操作步骤**：
+1. 连续 5 轮并行运行 CLI upgrade 回归：
+   ```bash
+   for round in 1 2 3 4 5; do
+     SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib upgrade_ -- --test-threads=16 || exit 1
+   done
+   ```
+2. 确认 `download_selection_success_and_free_restart_port_are_exercised` 每轮均通过，且未出现 mutex poison 连锁失败。
+
+**预期结果**：
+- `BIFROST_GITHUB_MIRROR` 指向随机端口 fixture 时，`ordered_download_bases` 的首项始终是该显式地址，不受内置 GitHub 探测线程调度影响。
+- 5 轮 upgrade 回归全部通过；fixture 使用系统分配的随机端口，不与并发用例碰撞，环境变量在互斥区内恢复。
+
+**2026-07-20 执行结果**：5 轮均为 61/61 通过；显式 mirror 每轮保持首项，随机端口 fixture 无碰撞，未出现环境变量断言失败或 mutex poison 连锁失败。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据和测试文件：

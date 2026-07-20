@@ -239,7 +239,18 @@ pub(super) fn download_file_once_with_progress(
 }
 
 pub(super) fn ordered_download_bases(github_path: &str, tuning: DownloadTuning) -> Vec<String> {
-    ordered_download_bases_from(github_mirror_bases(), github_path, tuning)
+    let bases = github_mirror_bases();
+    let has_preferred_mirror = env::var("BIFROST_GITHUB_MIRROR")
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty());
+    if has_preferred_mirror {
+        // An explicit mirror is an ordering override, not merely another
+        // candidate in the latency race. Keep it first and retain the built-in
+        // mirrors as deterministic fallbacks.
+        bases
+    } else {
+        ordered_download_bases_from(bases, github_path, tuning)
+    }
 }
 
 pub(super) fn ordered_download_bases_from(
