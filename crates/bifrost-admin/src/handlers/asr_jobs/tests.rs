@@ -135,7 +135,12 @@ mod tests {
     fn moss_token_budget_scales_with_duration_and_rejects_oversized_whole_files() {
         assert_eq!(moss_output_token_budget(30_000).unwrap(), 5_120);
         assert_eq!(moss_output_token_budget(600_000).unwrap(), 12_000);
-        assert!(moss_output_token_budget((MOSS_MAX_WHOLE_FILE_SECONDS + 1) * 1_000).is_err());
+        let error =
+            moss_output_token_budget((MOSS_MAX_WHOLE_FILE_SECONDS + 1) * 1_000).unwrap_err();
+        assert!(error.starts_with(&format!(
+            "moss_non_retryable_v{}: moss_audio_too_long:",
+            env!("CARGO_PKG_VERSION")
+        )));
     }
 
     #[test]

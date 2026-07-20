@@ -246,6 +246,7 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 - 零时长 speaker segment、长文本单字符循环和 90% 以上相同片段必须判为退化失败；Rust 接收端在没有正时长且非空 speaker 的 segment 时再次拒绝，禁止包装成无 speaker 的整文件“成功”。
 - 同版本确定性失败且源文件未变化时，下一次 pending scan 必须跳过；修改源文件后必须重新进入待处理集合。
 - Python runner 返回“无有效 speaker-aware segment”时必须标记同版本确定性失败，避免零温度解码反复加载模型。
+- 超过整文件处理上限的输入必须标记为同版本确定性失败，源文件未变化时不得在定时或手动运行中重复归一化。
 - MOSS 原生连续 speaker turn 写入产物前必须按既有 timeline 契约拆成最长 30 秒的 segment，并保留 speaker、绝对时间和完整文本。
 
 ### 7.3 `human_tests`

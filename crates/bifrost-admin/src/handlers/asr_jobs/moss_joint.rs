@@ -280,11 +280,11 @@ fn moss_model_spec() -> MossModelSpec {
 fn moss_output_token_budget(duration_ms: u64) -> Result<u32, String> {
     let duration_seconds = duration_ms.div_ceil(1_000).max(1);
     if duration_seconds > MOSS_MAX_WHOLE_FILE_SECONDS {
-        return Err(format!(
+        return Err(moss_non_retryable_runtime_error(&format!(
             "moss_audio_too_long: whole-file joint transcription currently supports at most {} minutes; audio is {} minutes",
             MOSS_MAX_WHOLE_FILE_SECONDS / 60,
             duration_seconds.div_ceil(60)
-        ));
+        )));
     }
     let wanted = duration_seconds
         .saturating_mul(MOSS_OUTPUT_TOKENS_PER_SECOND)

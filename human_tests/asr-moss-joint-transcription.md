@@ -218,12 +218,14 @@
 操作步骤：
 
 1. 执行 `cargo test -p bifrost-admin moss_ --lib -- --nocapture`，让 fixture 返回 `MOSS MLX returned no valid speaker-aware segments`，确认错误带当前版本 `moss_non_retryable_v*` 前缀。
-2. 在同一回归中让 MOSS fixture 返回一个 63.8 秒的 S02 连续片段，确认产物 timeline 拆成最长 30 秒的片段，所有拆分片段保留 S02，末端绝对时间为 75000 ms，拼接文本仍为完整字母串。
-3. 执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_asr_moss_task_mode.sh`，确认配置变更 E2E 仍通过且临时服务/目录被清理。
+2. 让 token-budget 回归传入超过 `MOSS_MAX_WHOLE_FILE_SECONDS` 的时长，确认 `moss_audio_too_long` 同样带当前版本 `moss_non_retryable_v*` 前缀。
+3. 在同一回归中让 MOSS fixture 返回一个 63.8 秒的 S02 连续片段，确认产物 timeline 拆成最长 30 秒的片段，所有拆分片段保留 S02，末端绝对时间为 75000 ms，拼接文本仍为完整字母串。
+4. 执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_asr_moss_task_mode.sh`，确认配置变更 E2E 仍通过且临时服务/目录被清理。
 
 预期结果：
 
 - 无有效 timestamp/speaker segment 的确定性结果不会在源文件和版本未变化时重复加载模型。
+- 超出整文件上限的确定性输入不会在源文件和版本未变化时重复归一化。
 - MOSS timeline、SRT/VTT 不产生超过 30 秒的单 cue；拆分不丢 speaker、绝对时间或文本。
 
 ## 清理步骤
@@ -254,4 +256,4 @@
 | 2026-07-20 | TC-MOSS-10 | PASS：路径可移植性检查无命中；Rust MOSS 回归 20/20、Web 模式选项 3/3、release 契约和真实 task-mode E2E 均通过。隔离服务运行在 18996 且系统代理保持关闭；Puppeteer Chrome 在 1280×900 下逐项验证亮色和暗色主题，New Directory Task 的 MOSS 选项在 Apple Silicon 上均可见、可选，19/19 浏览器步骤通过、59 个 API 请求无失败。测试服务、临时数据目录和临时场景文件均已清理。 |
 | 2026-07-20 | TC-MOSS-11 | PASS：Rust MOSS 回归确认 `site-packages` 内容损坏撤销 Ready，成功 MOSS task 生成一条非零整文件耗时 metric；benchmark E2E 正常选择不同录音，并在 4 个目标只有 3 个不同成功源文件时明确失败且不写报告。 |
 | 2026-07-20 | TC-MOSS-12 | PASS：Rust MOSS 回归 20/20 覆盖完整 12 个发布 metadata，配置重排状态矩阵/幂等单测 1/1；release contract E2E 确认下载、打包、Rust 校验列表一致；真实 task-mode API E2E 在修改 MOSS prompt 后把成功记录重置为 pending 并清空旧产物引用/metrics。 |
-| 2026-07-20 | TC-MOSS-13 | PASS：Rust MOSS 回归把无有效 speaker segment 标为带版本的确定性失败；65 秒 fixture 的 63.8 秒 S02 turn 被拆为 3 段，加上 S01 共 4 段，所有段不超过 30 秒，speaker、75000 ms 绝对终点和完整文本均保留；task-mode API E2E 继续通过。 |
+| 2026-07-20 | TC-MOSS-13 | PASS：Rust MOSS 回归把无有效 speaker segment 和超出整文件上限都标为带版本的确定性失败；65 秒 fixture 的 63.8 秒 S02 turn 被拆为 3 段，加上 S01 共 4 段，所有段不超过 30 秒，speaker、75000 ms 绝对终点和完整文本均保留；task-mode API E2E 继续通过。 |
