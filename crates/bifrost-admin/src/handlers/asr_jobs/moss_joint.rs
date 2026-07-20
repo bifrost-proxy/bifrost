@@ -863,7 +863,7 @@ async fn moss_runtime_status(
         && tokio::task::spawn_blocking({
             let paths = paths.clone();
             let model_spec = model_spec.clone();
-            move || verify_moss_model_snapshot(&paths, &model_spec).is_ok()
+            move || verify_moss_model(&paths.model, &model_spec).is_ok()
         })
         .await
         .unwrap_or(false);

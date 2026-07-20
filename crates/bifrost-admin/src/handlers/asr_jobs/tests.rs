@@ -1029,6 +1029,10 @@ mod tests {
         )
         .await;
         assert!(!corrupted.model_ready);
+        let corrupted_status = moss_runtime_status(&asr_home, &paths, &model_spec).await;
+        assert!(corrupted_status.model_weight_valid);
+        assert!(!corrupted_status.model_metadata_valid);
+        std::fs::remove_file(&model_source).unwrap();
         ensure_moss_joint_runtime_with_spec(
             &asr_home,
             "moss-repair-corrupt-metadata",
