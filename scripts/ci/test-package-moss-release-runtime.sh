@@ -45,7 +45,38 @@ if bash "$ROOT_DIR/scripts/ci/package-moss-release-runtime.sh" "$RUNTIME_ROOT" "
   exit 1
 fi
 rm "$RUNTIME_ROOT/model/._config.json"
-bash "$ROOT_DIR/scripts/ci/package-moss-release-runtime.sh" "$RUNTIME_ROOT" "$OUTPUT_ZIP"
+
+FAKE_BIN="$TEMP_DIR/fake-bin"
+mkdir -p "$FAKE_BIN"
+cat >"$FAKE_BIN/file" <<'SH'
+#!/bin/sh
+echo "$1: Mach-O 64-bit universal binary with 2 architectures"
+SH
+cat >"$FAKE_BIN/otool" <<'SH'
+#!/bin/sh
+binary="${2:?missing binary}"
+echo "/Users/runner/work/bifrost/bifrost/dist/moss-joint-runtime/runtime/python/bin/python3.12 (architecture x86_64):"
+echo "/Users/runner/work/bifrost/bifrost/dist/moss-joint-runtime/runtime/python/bin/python3.12 (architecture arm64):"
+if [ "${FAKE_OTOOL_HOST_DEPENDENCY:-0}" = "1" ]; then
+  printf '\t/Users/runner/hostedtoolcache/Python/3.12.10/arm64/lib/libpython3.12.dylib\n'
+else
+  printf '\t@rpath/Python3.framework/Versions/3.12/Python3\n'
+fi
+test -n "$binary"
+SH
+chmod +x "$FAKE_BIN/file" "$FAKE_BIN/otool"
+
+PATH="$FAKE_BIN:$PATH" \
+  bash "$ROOT_DIR/scripts/ci/package-moss-release-runtime.sh" "$RUNTIME_ROOT" "$OUTPUT_ZIP"
+
+if FAKE_OTOOL_HOST_DEPENDENCY=1 PATH="$FAKE_BIN:$PATH" \
+  bash "$ROOT_DIR/scripts/ci/package-moss-release-runtime.sh" "$RUNTIME_ROOT" "$OUTPUT_ZIP"; then
+  echo "Packager accepted a build-host dylib dependency" >&2
+  exit 1
+fi
+
+PATH="$FAKE_BIN:$PATH" \
+  bash "$ROOT_DIR/scripts/ci/package-moss-release-runtime.sh" "$RUNTIME_ROOT" "$OUTPUT_ZIP"
 
 test -s "$OUTPUT_ZIP"
 test -s "$OUTPUT_ZIP.sha256"

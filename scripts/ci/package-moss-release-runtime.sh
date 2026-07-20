@@ -47,7 +47,7 @@ PYTHONHOME="$RUNTIME_ROOT/runtime/python" \
 if command -v otool >/dev/null 2>&1 &&
   file "$RUNTIME_ROOT/runtime/python/bin/python3.12" | grep -q 'Mach-O' &&
   otool -L "$RUNTIME_ROOT/runtime/python/bin/python3.12" |
-  grep -E '/Users/runner|/opt/hostedtoolcache'; then
+  grep -E '^[[:space:]]+.*(/Users/runner|/opt/hostedtoolcache)'; then
   echo "Packaged Python unexpectedly depends on the build host path" >&2
   exit 1
 fi

@@ -237,12 +237,14 @@
 
 1. 执行 `bash e2e-tests/tests/test_asr_moss_release_contract.sh`，确认 MOSS release job 使用 `python-version: "3.12"` minor selector，不再固定 GitHub macOS arm64 工具缓存未提供的 patch 版本。
 2. 查询 `actions/python-versions` 官方 `versions-manifest.json`，确认 Python 3.12 至少存在一个 `darwin` / `arm64` 构建；同时确认原失败版本 3.12.13 没有该构建，根因与 release 日志一致。
-3. 从修复分支创建唯一的 `v0.0.157-beta.*` tag，触发真实 `Release` workflow；看护所有 CLI、Desktop、checksum、MOSS runtime 和 GitHub prerelease job 到成功。
-4. 检查 beta release 包含 `moss-joint-runtime-v0.0.157-beta.*-aarch64-apple-darwin.zip` 及其 `.sha256`，下载后复算 checksum，并确认 runtime zip 能通过共享 packager 的 extract-then-self-test 契约。
+3. 执行 `bash scripts/ci/test-package-moss-release-runtime.sh`，确认 universal Mach-O 的每个 architecture 绝对文件名 header 不会被误判成 dylib 依赖，同时真实指向 runner/toolcache 的缩进依赖项仍被拒绝。
+4. 从修复分支创建唯一的 `v0.0.157-beta.*` tag，触发真实 `Release` workflow；看护所有 CLI、Desktop、checksum、MOSS runtime 和 GitHub prerelease job 到成功。
+5. 检查 beta release 包含 `moss-joint-runtime-v0.0.157-beta.*-aarch64-apple-darwin.zip` 及其 `.sha256`，下载后复算 checksum，并确认 runtime zip 能通过共享 packager 的 extract-then-self-test 契约。
 
 预期结果：
 
 - `setup-python` 在 macOS arm64 runner 上解析并安装可用的 Python 3.12 patch，不再出现 `version ... with architecture arm64 was not found`。
+- universal Mach-O 的 header 不触发 build-host 依赖误报，真实的绝对 dylib 依赖仍被安全门禁拦截。
 - beta Release 全部 job 成功，MOSS runtime zip、checksum 和其余跨平台正式产物均生成；失败的正式 `v0.0.157` tag 只在修复合入主干后重建。
 
 ## 清理步骤
