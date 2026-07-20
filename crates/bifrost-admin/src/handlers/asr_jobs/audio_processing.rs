@@ -183,37 +183,52 @@ const SILENCE_RMS_THRESHOLD: f64 = 30.0;
 /// Compute RMS energy of a 16-bit PCM WAV file (16 kHz mono expected).
 /// Returns `None` if the file cannot be read or is not a valid RIFF/WAVE.
 fn compute_wav_rms_energy(wav_path: &Path) -> Option<f64> {
-    let data = std::fs::read(wav_path).ok()?;
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(wav_path).ok()?;
+    let mut riff_header = [0_u8; 12];
+    file.read_exact(&mut riff_header).ok()?;
     // Validate RIFF/WAVE header (12 bytes minimum).
-    if data.len() < 12 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
+    if &riff_header[0..4] != b"RIFF" || &riff_header[8..12] != b"WAVE" {
         return None;
     }
-    // Walk sub-chunks to find the "data" sub-chunk containing PCM samples.
-    let mut pos = 12usize;
-    while pos + 8 <= data.len() {
-        let chunk_id = &data[pos..pos + 4];
-        let chunk_size =
-            u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
-                as usize;
-        if chunk_id == b"data" {
-            let pcm_start = pos + 8;
-            let pcm_end = (pcm_start + chunk_size).min(data.len());
-            let pcm_data = &data[pcm_start..pcm_end];
-            let sample_count = pcm_data.len() / 2;
-            if sample_count == 0 {
-                return Some(0.0);
+
+    // Stream the data chunk instead of loading an entire long recording into
+    // memory merely to decide whether inference should start.
+    loop {
+        let mut chunk_header = [0_u8; 8];
+        file.read_exact(&mut chunk_header).ok()?;
+        let chunk_size = u32::from_le_bytes([
+            chunk_header[4],
+            chunk_header[5],
+            chunk_header[6],
+            chunk_header[7],
+        ]) as u64;
+        if &chunk_header[0..4] == b"data" {
+            let mut remaining = chunk_size;
+            let mut sample_count = 0_u64;
+            let mut sum_sq = 0.0_f64;
+            let mut buffer = [0_u8; 64 * 1024];
+            while remaining >= 2 {
+                let wanted = (remaining.min(buffer.len() as u64) as usize) & !1;
+                file.read_exact(&mut buffer[..wanted]).ok()?;
+                for sample in buffer[..wanted].chunks_exact(2) {
+                    let value = i16::from_le_bytes([sample[0], sample[1]]) as f64;
+                    sum_sq += value * value;
+                }
+                sample_count += (wanted / 2) as u64;
+                remaining -= wanted as u64;
             }
-            let mut sum_sq: f64 = 0.0;
-            for i in 0..sample_count {
-                let sample = i16::from_le_bytes([pcm_data[i * 2], pcm_data[i * 2 + 1]]) as f64;
-                sum_sq += sample * sample;
-            }
-            return Some((sum_sq / sample_count as f64).sqrt());
+            return if sample_count == 0 {
+                Some(0.0)
+            } else {
+                Some((sum_sq / sample_count as f64).sqrt())
+            };
         }
-        // Advance past this sub-chunk. Payloads are word-aligned (pad if odd).
-        pos += 8 + chunk_size + (chunk_size & 1);
+        // WAV payloads are word-aligned (one pad byte for odd-sized chunks).
+        file.seek(SeekFrom::Current((chunk_size + (chunk_size & 1)) as i64))
+            .ok()?;
     }
-    None // "data" sub-chunk not found
 }
 
 /// Check if input is already 16kHz mono 16-bit PCM WAV.

@@ -9,6 +9,10 @@ use std::time::{Duration, Instant};
 use super::cli_binary_name;
 
 const CLI_VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+const CLI_VERSION_SPAWN_MAX_ATTEMPTS: u32 = 8;
+const CLI_VERSION_SPAWN_RETRY_BASE_DELAY_MS: u64 = 5;
+#[cfg(unix)]
+const TEXT_FILE_BUSY_RAW_OS_ERROR: i32 = 26;
 
 pub(super) fn desktop_app_version_for_version_check() -> Option<String> {
     desktop_app_installation_from_candidates(desktop_app_install_candidates())
@@ -218,13 +222,13 @@ fn read_cli_version_for_version_check(cli_path: &Path, timeout: Duration) -> Opt
         return None;
     }
     let mut stdout = tempfile::tempfile().ok()?;
-    let mut child = Command::new(cli_path)
+    let mut command = Command::new(cli_path);
+    command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout.try_clone().ok()?))
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    let mut child = spawn_cli_version_probe_with_retry(|| command.spawn()).ok()?;
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
@@ -244,11 +248,48 @@ fn read_cli_version_for_version_check(cli_path: &Path, timeout: Duration) -> Opt
     let _ = stdout.seek(SeekFrom::Start(0));
     let mut output = String::new();
     stdout.read_to_string(&mut output).ok()?;
+    parse_cli_version_output(&output)
+}
+
+fn parse_cli_version_output(output: &str) -> Option<String> {
     let version = output
         .lines()
         .find_map(|line| line.trim().strip_prefix("bifrost "))?
         .trim();
     (!version.is_empty()).then(|| version.trim_start_matches('v').to_string())
+}
+
+fn is_retryable_cli_version_spawn_error(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(TEXT_FILE_BUSY_RAW_OS_ERROR)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+fn spawn_cli_version_probe_with_retry<T>(
+    mut spawn: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let mut attempt = 1;
+    loop {
+        match spawn() {
+            Ok(child) => return Ok(child),
+            Err(error)
+                if is_retryable_cli_version_spawn_error(&error)
+                    && attempt < CLI_VERSION_SPAWN_MAX_ATTEMPTS =>
+            {
+                thread::sleep(Duration::from_millis(
+                    CLI_VERSION_SPAWN_RETRY_BASE_DELAY_MS.saturating_mul(u64::from(attempt)),
+                ));
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -319,24 +360,80 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn cli_version_probe_reads_real_binary_and_rejects_failure_or_timeout() {
+    fn cli_version_probe_parses_output_and_rejects_failure_or_timeout() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let cli = temp.path().join("bifrost");
-        write_cli(&cli, "#!/bin/sh\nprintf 'bifrost 0.0.155\\n'\n");
         assert_eq!(
-            read_cli_version_for_version_check(&cli, Duration::from_secs(1)).as_deref(),
+            parse_cli_version_output("diagnostic\nbifrost 0.0.155\n").as_deref(),
             Some("0.0.155")
         );
+        assert_eq!(
+            parse_cli_version_output("bifrost v0.0.156\n").as_deref(),
+            Some("0.0.156")
+        );
+        assert!(parse_cli_version_output("unrelated output\n").is_none());
 
-        write_cli(&cli, "#!/bin/sh\nexit 7\n");
-        assert!(read_cli_version_for_version_check(&cli, Duration::from_secs(1)).is_none());
-        write_cli(&cli, "#!/bin/sh\nexec sleep 2\n");
-        assert!(read_cli_version_for_version_check(&cli, Duration::from_millis(50)).is_none());
+        let failing = temp.path().join("failing-bifrost");
+        write_cli(&failing, "#!/bin/sh\nexit 7\n");
+        assert!(read_cli_version_for_version_check(&failing, Duration::from_secs(1)).is_none());
+        let hanging = temp.path().join("hanging-bifrost");
+        write_cli(&hanging, "#!/bin/sh\nexec sleep 2\n");
+        assert!(read_cli_version_for_version_check(&hanging, Duration::from_millis(50)).is_none());
         assert!(read_cli_version_for_version_check(
             &temp.path().join("missing"),
             Duration::from_secs(1)
         )
         .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_version_probe_spawn_retries_text_file_busy_then_succeeds() {
+        let mut attempts = 0;
+        let result = spawn_cli_version_probe_with_retry(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(std::io::Error::from_raw_os_error(
+                    TEXT_FILE_BUSY_RAW_OS_ERROR,
+                ))
+            } else {
+                Ok("spawned")
+            }
+        });
+
+        assert_eq!(result.unwrap(), "spawned");
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn cli_version_probe_spawn_does_not_retry_non_transient_error() {
+        let mut attempts = 0;
+        let error = spawn_cli_version_probe_with_retry(|| -> std::io::Result<()> {
+            attempts += 1;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "missing CLI",
+            ))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(attempts, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_version_probe_spawn_stops_after_text_file_busy_retry_limit() {
+        let mut attempts = 0;
+        let error = spawn_cli_version_probe_with_retry(|| -> std::io::Result<()> {
+            attempts += 1;
+            Err(std::io::Error::from_raw_os_error(
+                TEXT_FILE_BUSY_RAW_OS_ERROR,
+            ))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.raw_os_error(), Some(TEXT_FILE_BUSY_RAW_OS_ERROR));
+        assert_eq!(attempts, CLI_VERSION_SPAWN_MAX_ATTEMPTS);
     }
 
     #[test]

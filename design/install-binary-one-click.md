@@ -166,7 +166,8 @@ Admin API 与 Web UI 不参与安装本身；`bifrost upgrade` 期间会通过�
 ### Phase 3：`bifrost upgrade` 与 daemon exec-child
 
 - upgrade 复用镜像探测与进度输出。
-- 二进制 `--version` 校验带硬超时。
+- 显式设置 `BIFROST_GITHUB_MIRROR` 时，该地址始终保持第一优先级，不参与内置候选的延迟竞速；内置候选只作为确定性 fallback，并行 coverage 负载不得改变顺序。
+- 二进制 `--version` 校验带硬超时；Linux 刚完成二进制替换后若 spawn 瞬态返回 `ETXTBSY`，仅对该错误执行最多 8 次、总退避不超过 140ms 的有界重试，其他启动错误立即返回。
 - runtime.json 精确重启：端口、host、系统代理策略；缺失时按默认配置回退，legacy 缺字段显式 `--no-system-proxy`。
 - `stop_for_restart` -> `wait_for_restart_port_release` -> `start -d`；端口仍被占用时系统代理 crash recovery + shutdown marker 清理 + 明确诊断错误。
 - macOS / Windows `start --daemon` 走 exec-child 模型。
@@ -273,5 +274,5 @@ Admin API 与 Web UI 不参与安装本身；`bifrost upgrade` 期间会通过�
 - macOS `objc_initializeAfterForkError` 是 Apple 平台层限制，因此 `start --daemon` 走 exec-child 而非 fork-and-init；这一改动同时把 Windows daemon 从 `unsupported` 升级为一等公民。
 - Windows 上无法在同一进程替换当前运行的 `bifrost.exe`；提前给出明确错误，避免用户在 `remove_file` 阶段看到模糊的 permission denied。
 - 镜像自适应对企业内 SNI 阻断、TLS 中间人策略下的默认路径影响未知；用户可通过 `BIFROST_GITHUB_MIRROR` 强制指定源。
-- 二进制 `--version` 硬超时是安全默认；若新二进制真的启动极慢（如首次触发 macOS Gatekeeper 网络校验），可通过重试路径继续。
+- 二进制 `--version` 硬超时是安全默认；Linux `ETXTBSY` 只做短时有界重试，持续占用与其他错误仍会触发旧二进制回滚；若新二进制真的启动极慢（如首次触发 macOS Gatekeeper 网络校验），可通过完整 upgrade 重试路径继续。
 - `bifrost upgrade` 的 restart 端口等待 10 秒硬编码；若未来有系统内核层面延迟释放的场景，可参数化，但不会默认放大。

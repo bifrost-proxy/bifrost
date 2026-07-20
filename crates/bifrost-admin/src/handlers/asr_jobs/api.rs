@@ -267,6 +267,24 @@ fn normalize_task_diarization_config(mut config: AsrDiarizationConfig) -> AsrDia
     config
 }
 
+const ASR_TRANSCRIPTION_PROMPT_MAX_CHARS: usize = 4_000;
+
+fn normalize_transcription_prompt(value: String) -> Result<String, String> {
+    let normalized = value.replace("\r\n", "\n").replace('\r', "\n");
+    if normalized.chars().count() > ASR_TRANSCRIPTION_PROMPT_MAX_CHARS {
+        return Err(format!(
+            "transcription_prompt must not exceed {ASR_TRANSCRIPTION_PROMPT_MAX_CHARS} characters"
+        ));
+    }
+    if normalized
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+    {
+        return Err("transcription_prompt contains unsupported control characters".to_string());
+    }
+    Ok(normalized.trim().to_string())
+}
+
 async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
     let body = match req.into_body().collect().await {
         Ok(body) => body.to_bytes(),
@@ -321,6 +339,16 @@ async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
     if let Err(error) = validate_daily_agent_config(&daily_agent) {
         return error_response(StatusCode::BAD_REQUEST, &error);
     }
+    let transcription_prompt = match normalize_transcription_prompt(
+        create.transcription_prompt.unwrap_or_default(),
+    ) {
+        Ok(prompt) => prompt,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error),
+    };
+    let transcription_mode = create.transcription_mode.unwrap_or_default();
+    if let Err(error) = validate_moss_transcription_mode(transcription_mode) {
+        return error_response(StatusCode::BAD_REQUEST, &error);
+    }
     let task = AsrDirectoryTask {
         id: uuid::Uuid::new_v4().as_simple().to_string(),
         name: create
@@ -337,6 +365,8 @@ async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
         model: create
             .model
             .unwrap_or_else(|| bifrost_asr::runtime::DEFAULT_ASR_MODEL.to_string()),
+        transcription_mode,
+        transcription_prompt,
         runtime_strategy: create.runtime_strategy.unwrap_or_default(),
         max_concurrent_files: normalize_max_concurrent_files(
             create
@@ -388,6 +418,11 @@ async fn update_task_response(id: &str, req: Request<Incoming>) -> Response<BoxB
             );
         }
     };
+    if let Some(transcription_mode) = update.transcription_mode {
+        if let Err(error) = validate_moss_transcription_mode(transcription_mode) {
+            return error_response(StatusCode::BAD_REQUEST, &error);
+        }
+    }
     match update_task_config(id, update) {
         Ok(task) => json_response(&task_with_summary(task)),
         Err((status, error)) => error_response(status, &error),
@@ -403,6 +438,8 @@ fn update_task_config(
         || update.recursive.is_some()
         || update.language.is_some()
         || update.model.is_some()
+        || update.transcription_mode.is_some()
+        || update.transcription_prompt.is_some()
         || update.runtime_strategy.is_some()
         || update.diarization.is_some()
         || update.external_devices.is_some()
@@ -414,6 +451,7 @@ fn update_task_config(
         ));
     }
     let mut store = load_tasks();
+    let original_store = store.clone();
     let now = now_ms();
     let Some(task) = store.tasks.iter_mut().find(|task| task.id == id) else {
         return Err((StatusCode::NOT_FOUND, "ASR task not found".to_string()));
@@ -452,6 +490,18 @@ fn update_task_config(
     if let Some(model) = update.model {
         task.model = model;
     }
+    let mut transcription_mode_changed = false;
+    if let Some(transcription_mode) = update.transcription_mode {
+        transcription_mode_changed = task.transcription_mode != transcription_mode;
+        task.transcription_mode = transcription_mode;
+    }
+    let mut transcription_prompt_changed = false;
+    if let Some(transcription_prompt) = update.transcription_prompt {
+        let transcription_prompt = normalize_transcription_prompt(transcription_prompt)
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+        transcription_prompt_changed = task.transcription_prompt != transcription_prompt;
+        task.transcription_prompt = transcription_prompt;
+    }
     if let Some(runtime_strategy) = update.runtime_strategy {
         task.runtime_strategy = runtime_strategy;
     }
@@ -480,6 +530,23 @@ fn update_task_config(
         .and_then(|_| task.schedule.next_run_at_ms(now.saturating_add(60_000), false));
     let updated = task.clone();
     save_tasks(&store).map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    let transcription_output_changed = transcription_mode_changed
+        || transcription_prompt_changed
+            && updated.transcription_mode == AsrTranscriptionMode::MossJoint;
+    if transcription_output_changed {
+        if let Err(error) = requeue_files_for_transcription_config_change(id) {
+            let rollback = save_tasks(&original_store);
+            let message = match rollback {
+                Ok(()) => format!(
+                    "update ASR task file records after transcription configuration change: {error}"
+                ),
+                Err(rollback_error) => format!(
+                    "update ASR task file records after transcription configuration change: {error}; rollback task configuration: {rollback_error}"
+                ),
+            };
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
+        }
+    }
     Ok(updated)
 }
 
@@ -623,6 +690,8 @@ async fn put_external_import_response(id: &str, req: Request<Incoming>) -> Respo
         schedule: None,
         language: None,
         model: None,
+        transcription_mode: None,
+        transcription_prompt: None,
         runtime_strategy: None,
         max_concurrent_files: None,
         diarization: None,

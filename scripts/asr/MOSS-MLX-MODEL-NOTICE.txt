@@ -1,0 +1,5 @@
+Model: majentik/MOSS-Transcribe-Diarize-MLX-8bit
+Revision: 90c3a1ab78fa56e47e1493ddea48e3ababaf2f71
+Source model: OpenMOSS-Team/MOSS-Transcribe-Diarize
+License: Apache-2.0
+The separately downloaded model.safetensors is verified by Bifrost SHA-256.

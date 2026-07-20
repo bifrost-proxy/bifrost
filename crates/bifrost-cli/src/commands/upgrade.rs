@@ -38,6 +38,10 @@ const MIRROR_PROBE_TIMEOUT_SECS: u64 = 5;
 const DOWNLOAD_TRIES: usize = 2;
 const UPGRADE_RESTART_PORT_RELEASE_TIMEOUT_SECS: u64 = 30;
 const BINARY_VERIFY_TIMEOUT_SECS: u64 = 15;
+const UPGRADE_COMMAND_SPAWN_MAX_ATTEMPTS: u32 = 8;
+const UPGRADE_COMMAND_SPAWN_RETRY_BASE_DELAY_MS: u64 = 5;
+#[cfg(unix)]
+const TEXT_FILE_BUSY_RAW_OS_ERROR: i32 = 26;
 const POST_UPGRADE_SKILL_INSTALL_TIMEOUT_SECS: u64 = 120;
 const POST_UPGRADE_SKILL_INSTALL_ARGS: &[&str] = &["install-skill", "--tool", "all", "-y"];
 const POST_UPGRADE_APP_UPDATE_TIMEOUT_SECS: u64 = 600;
@@ -567,7 +571,8 @@ fn command_output_with_timeout_and_env(
                 .try_clone()
                 .map_err(|e| BifrostError::Io(std::io::Error::other(e)))?,
         ));
-    let mut child = command.spawn().map_err(BifrostError::Io)?;
+    let mut child =
+        spawn_upgrade_command_with_retry(|| command.spawn()).map_err(BifrostError::Io)?;
     let deadline = Instant::now() + timeout;
     let mut next_heartbeat = Instant::now() + heartbeat;
     let status;
@@ -604,6 +609,37 @@ fn command_output_with_timeout_and_env(
         stdout: read_temp_output(&mut stdout_file),
         stderr: read_temp_output(&mut stderr_file),
     })
+}
+
+fn is_retryable_upgrade_command_spawn_error(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(TEXT_FILE_BUSY_RAW_OS_ERROR)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+fn spawn_upgrade_command_with_retry<T>(mut spawn: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut attempt = 1;
+    loop {
+        match spawn() {
+            Ok(child) => return Ok(child),
+            Err(error)
+                if is_retryable_upgrade_command_spawn_error(&error)
+                    && attempt < UPGRADE_COMMAND_SPAWN_MAX_ATTEMPTS =>
+            {
+                thread::sleep(Duration::from_millis(
+                    UPGRADE_COMMAND_SPAWN_RETRY_BASE_DELAY_MS.saturating_mul(u64::from(attempt)),
+                ));
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn read_temp_output(file: &mut fs::File) -> String {

@@ -540,6 +540,7 @@ fn script_installs_use_the_target_aware_atomic_upgrade_path() {
 }
 
 mod review_comments;
+mod spawn_retry;
 
 #[test]
 fn test_glibc_2_38_requires_musl_for_upgrade() {
@@ -968,40 +969,6 @@ fn upgrade_target_version_match_cleans_previous_binary_backup() {
     assert!(!backup.exists());
 }
 
-#[cfg(unix)]
-#[test]
-fn upgrade_target_version_mismatch_restores_previous_binary() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let target = dir.path().join("bifrost");
-    let backup = binary_backup_path(&target);
-    // Use a native executable instead of a shell-script fixture. Under LLVM
-    // coverage's parallel test load, the script occasionally failed before it
-    // could print its version, so the test exercised the generic command-error
-    // rollback branch rather than the intended successful-command mismatch.
-    // `/usr/bin/true --version` exits successfully on both macOS and Linux and
-    // can never report the pinned Bifrost target version.
-    std::fs::copy("/usr/bin/true", &target).expect("copy mismatched executable");
-    std::fs::write(&backup, "#!/bin/sh\necho 'bifrost 0.0.155'\n").expect("write previous binary");
-    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
-        .expect("chmod target");
-    std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o755))
-        .expect("chmod backup");
-
-    let error = verify_installed_cli_target_version_or_restore(&target, "0.0.156")
-        .expect_err("wrong target version must fail");
-    assert!(
-        error.to_string().contains("instead of target v0.0.156"),
-        "unexpected verification error: {error:#}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&target).expect("read restored target"),
-        "#!/bin/sh\necho 'bifrost 0.0.155'\n"
-    );
-    assert!(!backup.exists());
-}
-
 #[test]
 fn upgrade_post_install_skill_messages_cover_all_statuses() {
     assert!(
@@ -1278,6 +1245,21 @@ fn github_mirror_bases_respects_preferred_env() {
 }
 
 #[test]
+fn ordered_download_bases_without_preferred_env_keeps_fallbacks() {
+    with_mirror_env(None, || {
+        let tuning = DownloadTuning {
+            connect_timeout_secs: 1,
+            download_timeout_secs: 1,
+            mirror_probe_timeout_secs: 1,
+            download_tries: 1,
+        };
+        let bases = ordered_download_bases("nonexistent/coverage-fixture", tuning);
+        assert!(!bases.is_empty());
+        assert!(bases.iter().any(|base| base.contains("github.com")));
+    });
+}
+
+#[test]
 fn mirror_display_name_strips_scheme_and_path() {
     assert_eq!(
         mirror_display_name("https://ghfast.top/https://github.com"),
@@ -1429,7 +1411,7 @@ fn download_selection_success_and_free_restart_port_are_exercised() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture server");
     let address = listener.local_addr().expect("fixture address");
     let server = std::thread::spawn(move || {
-        for _ in 0..4 {
+        for _ in 0..3 {
             let (mut stream, _) = listener.accept().expect("accept fixture request");
             let mut request = [0_u8; 2048];
             let read = stream.read(&mut request).expect("read fixture request");

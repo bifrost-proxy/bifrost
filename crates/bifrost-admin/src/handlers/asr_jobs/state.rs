@@ -107,6 +107,10 @@ pub(crate) struct AsrDirectoryTask {
     pub language: String,
     pub model: String,
     #[serde(default)]
+    pub transcription_mode: AsrTranscriptionMode,
+    #[serde(default)]
+    pub transcription_prompt: String,
+    #[serde(default)]
     pub runtime_strategy: AsrRuntimeStrategy,
     #[serde(default = "default_max_concurrent_files")]
     pub max_concurrent_files: u8,
@@ -123,6 +127,27 @@ pub(crate) struct AsrDirectoryTask {
     pub external_devices: Vec<AsrExternalDeviceBinding>,
     #[serde(default)]
     pub import_policy: AsrExternalImportPolicy,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AsrTranscriptionMode {
+    #[default]
+    Standard,
+    MossJoint,
+}
+
+impl AsrTranscriptionMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::MossJoint => "moss_joint",
+        }
+    }
+
+    fn uses_native_speakers(self) -> bool {
+        self == Self::MossJoint
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,7 +260,9 @@ fn normalize_max_concurrent_files(value: u8) -> u8 {
 }
 
 fn effective_max_concurrent_files(task: &AsrDirectoryTask) -> u8 {
-    if task.runtime_strategy != AsrRuntimeStrategy::ForkPerChunk {
+    if task.transcription_mode == AsrTranscriptionMode::MossJoint
+        || task.runtime_strategy != AsrRuntimeStrategy::ForkPerChunk
+    {
         1
     } else {
         normalize_max_concurrent_files(task.max_concurrent_files)
@@ -1120,6 +1147,7 @@ struct TaskTranscribeHooks<'a> {
     server_state: Option<&'a mut Option<ServerRunnerState>>,
     managed_server_restart: Option<ManagedServerRestartContext<'a>>,
     partial_artifacts: Option<PartialArtifactContext>,
+    moss_runtime: Option<&'a MossRuntimePaths>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1131,6 +1159,8 @@ struct CreateTaskRequest {
     schedule: Option<AsrTaskSchedule>,
     language: Option<String>,
     model: Option<String>,
+    transcription_mode: Option<AsrTranscriptionMode>,
+    transcription_prompt: Option<String>,
     runtime_strategy: Option<AsrRuntimeStrategy>,
     max_concurrent_files: Option<u8>,
     diarization: Option<AsrDiarizationConfig>,
@@ -1149,6 +1179,8 @@ struct UpdateTaskRequest {
     schedule: Option<AsrTaskSchedule>,
     language: Option<String>,
     model: Option<String>,
+    transcription_mode: Option<AsrTranscriptionMode>,
+    transcription_prompt: Option<String>,
     runtime_strategy: Option<AsrRuntimeStrategy>,
     max_concurrent_files: Option<u8>,
     diarization: Option<AsrDiarizationConfig>,

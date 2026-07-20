@@ -16,6 +16,11 @@ mod tests {
         _guard: crate::test_env::BifrostDataDirGuard,
     }
 
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
     impl EnvGuard {
         fn set_data_dir(path: &Path) -> Self {
             Self {
@@ -24,8 +29,28 @@ mod tests {
         }
     }
 
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.as_ref() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     fn test_directory_task(id: &str, audio_dir: PathBuf) -> AsrDirectoryTask {
         AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: id.to_string(),
             name: id.to_string(),
             audio_dir,
@@ -70,6 +95,1659 @@ mod tests {
         let task: AsrDirectoryTask = serde_json::from_str(json).unwrap();
         assert_eq!(task.runtime_strategy, AsrRuntimeStrategy::ReusePerFile);
         assert_eq!(task.max_concurrent_files, 1);
+        assert_eq!(task.transcription_mode, AsrTranscriptionMode::Standard);
+        assert!(task.transcription_prompt.is_empty());
+    }
+
+    #[test]
+    fn transcription_prompt_normalization_preserves_lines_and_rejects_unsafe_input() {
+        assert_eq!(
+            normalize_transcription_prompt("  Bifrost\r\nNextOnCall  ".to_string()).unwrap(),
+            "Bifrost\nNextOnCall"
+        );
+        assert!(normalize_transcription_prompt("bad\0prompt".to_string()).is_err());
+        assert!(normalize_transcription_prompt("x".repeat(4_001)).is_err());
+    }
+
+    #[test]
+    fn moss_json_parser_preserves_native_speakers_and_timestamps() {
+        let result = parse_moss_json(
+            r#"[
+              {"id":"0","start":0.48,"end":3.12,"speaker":"S01","text":"你好"},
+              {"id":"1","start":3.5,"end":5.0,"speaker":"S02","text":"开始开会"}
+            ]"#
+                .as_bytes(),
+            6_000,
+        )
+        .unwrap();
+        assert_eq!(result.text, "你好\n开始开会");
+        assert_eq!(result.structured.segments.len(), 2);
+        assert_eq!(result.structured.segments[0].start_ms, 480);
+        assert_eq!(result.structured.segments[0].end_ms, 3_120);
+        assert_eq!(result.structured.segments[0].speaker.as_deref(), Some("S01"));
+        assert_eq!(
+            result.structured.finish_reason,
+            bifrost_asr::transcription::TranscriptionFinishReason::Completed
+        );
+
+        let unsupported_finish_reason = parse_moss_json(
+            br#"{"segments":[],"finish_reason":"stopped"}"#,
+            6_000,
+        )
+        .unwrap_err();
+        assert!(unsupported_finish_reason.contains("unsupported finish reason stopped"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn moss_site_packages_hash_skips_cache_artifacts_and_non_files() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let paths = moss_runtime_paths(temp.path());
+        let package = paths.site_packages.join("fixture");
+        std::fs::create_dir_all(package.join("__pycache__")).unwrap();
+        std::fs::write(package.join("module.py"), b"print('fixture')\n").unwrap();
+        std::fs::write(package.join("module.pyc"), b"cached").unwrap();
+        std::fs::write(package.join("__pycache__/module.pyc"), b"cached").unwrap();
+        symlink("module.py", package.join("module-link.py")).unwrap();
+
+        let checksums = moss_site_packages_sha256(&paths).unwrap();
+        assert_eq!(checksums.len(), 1);
+        assert!(checksums.contains_key("fixture/module.py"));
+
+        let invalid_paths = moss_runtime_paths(&temp.path().join("invalid"));
+        std::fs::create_dir_all(invalid_paths.site_packages.parent().unwrap()).unwrap();
+        std::fs::write(&invalid_paths.site_packages, b"not a directory").unwrap();
+        assert!(moss_site_packages_sha256(&invalid_paths)
+            .unwrap_err()
+            .contains("read MOSS site-packages directory"));
+    }
+
+    #[test]
+    fn moss_token_budget_scales_with_duration_and_rejects_oversized_whole_files() {
+        assert_eq!(moss_output_token_budget(30_000).unwrap(), 5_120);
+        assert_eq!(moss_output_token_budget(600_000).unwrap(), 12_000);
+        let error =
+            moss_output_token_budget((MOSS_MAX_WHOLE_FILE_SECONDS + 1) * 1_000).unwrap_err();
+        assert!(error.starts_with(&format!(
+            "moss_non_retryable_v{}: moss_audio_too_long:",
+            env!("CARGO_PKG_VERSION")
+        )));
+    }
+
+    #[test]
+    fn moss_runtime_smoke_accepts_usage_from_either_output_stream() {
+        assert!(moss_runtime_help_is_valid(
+            b"moss-mlx-runtime ok",
+            b""
+        ));
+        assert!(moss_runtime_help_is_valid(
+            b"",
+            b"error\nmoss-mlx-runtime ok"
+        ));
+        assert!(!moss_runtime_help_is_valid(b"unexpected", b"failure"));
+    }
+
+    #[test]
+    fn moss_runtime_checksum_manifest_selects_exact_asset_and_rejects_bad_hashes() {
+        let asset = "moss-joint-runtime-v0.0.156-aarch64-apple-darwin.zip";
+        let expected = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let manifest = format!(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  other.zip\n{expected}  dist/{asset}\n"
+        );
+        assert_eq!(
+            parse_runtime_checksum_manifest(&manifest, asset).unwrap(),
+            expected
+        );
+        assert!(parse_runtime_checksum_manifest(&manifest, "missing.zip").is_err());
+        assert!(normalize_sha256("not-a-checksum", asset).is_err());
+    }
+
+    fn moss_test_model_spec(path: &Path, contents: &[u8]) -> MossModelSpec {
+        std::fs::write(path, contents).unwrap();
+        MossModelSpec {
+            url: format!("file://{}", path.display()),
+            bytes: contents.len() as u64,
+            sha256: sha256_file(path).unwrap(),
+        }
+    }
+
+    fn write_moss_runtime_zip(path: &Path, script: &str) {
+        use std::io::Write;
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let executable = zip::write::SimpleFileOptions::default().unix_permissions(0o755);
+        let regular = zip::write::SimpleFileOptions::default().unix_permissions(0o644);
+        zip.add_directory("moss-joint-runtime/", regular).unwrap();
+        zip.add_directory("moss-joint-runtime/runtime/empty/", regular)
+            .unwrap();
+        zip.start_file("moss-joint-runtime/LICENSE", regular)
+            .unwrap();
+        zip.write_all(b"archive metadata outside installed roots")
+            .unwrap();
+        zip.start_file(
+            "moss-joint-runtime/runtime/python/bin/python3.12-real",
+            executable,
+        )
+        .unwrap();
+        zip.write_all(script.as_bytes()).unwrap();
+        zip.add_symlink(
+            "moss-joint-runtime/runtime/python/bin/python3.12",
+            "python3.12-real",
+            executable,
+        )
+        .unwrap();
+        zip.start_file("moss-joint-runtime/runtime/moss_mlx_runner.py", regular)
+            .unwrap();
+        zip.write_all(b"# fixture runner\n").unwrap();
+        zip.start_file("moss-joint-runtime/runtime/site-packages/.keep", regular)
+            .unwrap();
+        zip.write_all(b"fixture").unwrap();
+        zip.start_file(
+            "moss-joint-runtime/runtime/site-packages/._invalid.py",
+            regular,
+        )
+        .unwrap();
+        zip.write_all(b"\x00\x05\x16\x07appledouble").unwrap();
+        zip.start_file("moss-joint-runtime/model/._config.json", regular)
+            .unwrap();
+        zip.write_all(b"\x00\x05\x16\x07appledouble").unwrap();
+        zip.start_file("moss-joint-runtime/model/.DS_Store", regular)
+            .unwrap();
+        zip.write_all(b"metadata").unwrap();
+        for required in MOSS_MODEL_REQUIRED_FILES {
+            zip.start_file(format!("moss-joint-runtime/model/{required}"), regular)
+                .unwrap();
+            zip.write_all(b"{}").unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    fn prepare_moss_model_snapshot(paths: &MossRuntimePaths) {
+        std::fs::create_dir_all(&paths.model_dir).unwrap();
+        for required in MOSS_MODEL_REQUIRED_FILES {
+            std::fs::write(paths.model_dir.join(required), b"{}").unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn moss_model_management_status_reports_missing_ready_and_unsupported_assets() {
+        let temp = TempDir::new().unwrap();
+        let asr_home = temp.path().join("asr-home");
+        let paths = moss_runtime_paths(&asr_home);
+        let model_source = temp.path().join("model-source.safetensors");
+        let model_spec = moss_test_model_spec(&model_source, b"verified model fixture");
+
+        let missing = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert_eq!(missing.status, "missing");
+        assert!(!missing.ready);
+        assert!(!missing.runtime_ready);
+        assert!(!missing.model_ready);
+        assert_eq!(missing.expected_model_bytes, 22);
+
+        let runtime_framework = paths.python_home.join("lib/framework.fixture");
+        write_executable(
+            &paths.python,
+            "#!/bin/sh\nframework=\"$(dirname \"$0\")/../lib/framework.fixture\"\nif [ \"$(cat \"$framework\" 2>/dev/null)\" = 'verified framework' ]; then echo 'moss-mlx-runtime ok'; else echo 'framework missing or corrupt' >&2; exit 1; fi\n",
+        );
+        std::fs::create_dir_all(runtime_framework.parent().unwrap()).unwrap();
+        std::fs::write(&runtime_framework, b"verified framework\n").unwrap();
+        std::fs::write(&paths.runner, b"fixture runner").unwrap();
+        std::fs::create_dir_all(&paths.site_packages).unwrap();
+        std::fs::write(paths.site_packages.join("mlx.fixture"), b"verified package").unwrap();
+        prepare_moss_model_snapshot(&paths);
+        std::fs::copy(&model_source, &paths.model).unwrap();
+        write_moss_verification_marker(&asr_home, &paths, &model_spec).unwrap();
+
+        let ready = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert_eq!(ready.status, "ready");
+        assert!(ready.ready && ready.installed);
+        assert!(ready.runtime_ready && ready.model_ready);
+        assert_eq!(ready.installed_model_bytes, model_spec.bytes);
+        assert_eq!(ready.model, MOSS_MODEL_ID);
+
+        std::fs::remove_file(&runtime_framework).unwrap();
+        let missing_runtime_framework = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert_eq!(missing_runtime_framework.status, "partial");
+        assert!(!missing_runtime_framework.runtime_ready);
+        assert!(missing_runtime_framework.model_ready);
+
+        std::fs::write(&runtime_framework, b"corrupt framework\n").unwrap();
+        let corrupt_runtime_framework = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert!(!corrupt_runtime_framework.runtime_ready);
+        assert!(corrupt_runtime_framework.model_ready);
+        std::fs::write(&runtime_framework, b"verified framework\n").unwrap();
+
+        std::fs::remove_file(paths.site_packages.join("mlx.fixture")).unwrap();
+        let missing_runtime_dependency = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert!(!missing_runtime_dependency.runtime_ready);
+        assert!(missing_runtime_dependency.model_ready);
+        std::fs::write(paths.site_packages.join("mlx.fixture"), b"verified package").unwrap();
+
+        std::fs::write(paths.site_packages.join("mlx.fixture"), b"corrupt package").unwrap();
+        let corrupt_runtime = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert_eq!(corrupt_runtime.status, "partial");
+        assert!(!corrupt_runtime.runtime_ready);
+        assert!(corrupt_runtime.model_ready);
+        std::fs::write(paths.site_packages.join("mlx.fixture"), b"verified package").unwrap();
+
+        std::fs::write(paths.site_packages.join("unexpected.fixture"), b"unexpected package")
+            .unwrap();
+        let unexpected_runtime_dependency = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert!(!unexpected_runtime_dependency.runtime_ready);
+        assert!(unexpected_runtime_dependency.model_ready);
+        std::fs::remove_file(paths.site_packages.join("unexpected.fixture")).unwrap();
+
+        std::thread::sleep(Duration::from_millis(5));
+        std::fs::write(&paths.model, b"tampered model fixture").unwrap();
+        let tampered = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert_eq!(tampered.status, "partial");
+        assert!(tampered.runtime_ready);
+        assert!(!tampered.model_ready);
+
+        std::fs::copy(&model_source, &paths.model).unwrap();
+        write_moss_verification_marker(&asr_home, &paths, &model_spec).unwrap();
+        std::fs::remove_file(&paths.python).unwrap();
+        let model_only = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert_eq!(model_only.status, "partial");
+        assert!(!model_only.runtime_ready);
+        assert!(model_only.model_ready);
+        assert!(model_only.message.contains("runtime is missing"));
+
+        let unsupported = moss_management_status_with_spec(
+            &asr_home,
+            "linux",
+            "x86_64",
+            &model_spec,
+        )
+        .await;
+        assert_eq!(unsupported.status, "unsupported");
+        assert!(!unsupported.platform_supported);
+        assert!(unsupported.unsupported_reason.is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn moss_management_handlers_stream_success_and_failures() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path().join("data").as_path());
+
+        let status_response = handle_moss_model_status().await;
+        assert_eq!(status_response.status(), hyper::StatusCode::OK);
+        let status_body = http_body_util::BodyExt::collect(status_response.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        let status_json: serde_json::Value = serde_json::from_slice(&status_body).unwrap();
+        assert!(status_json.get("status").is_some());
+
+        let archive = temp.path().join("runtime-source.zip");
+        write_moss_runtime_zip(&archive, "#!/bin/sh\necho 'moss-mlx-runtime ok'\n");
+        let model_source = temp.path().join("model-source.safetensors");
+        let model_spec = moss_test_model_spec(&model_source, b"verified model fixture");
+        let runtime_source = MossRuntimeSource {
+            asset: "runtime.zip".to_string(),
+            url: format!("file://{}", archive.display()),
+            sha256: sha256_file(&archive).unwrap(),
+        };
+
+        let success_home = temp.path().join("success-home");
+        let (success_tx, mut success_rx) = tokio::sync::mpsc::channel(32);
+        stream_moss_model_initialization_with_spec(
+            success_tx,
+            success_home.clone(),
+            Ok(runtime_source.asset.clone()),
+            model_spec.clone(),
+            Some(runtime_source.clone()),
+        )
+        .await;
+        let mut success_events = String::new();
+        while let Some(frame) = success_rx.recv().await {
+            success_events.push_str(&String::from_utf8_lossy(&frame));
+        }
+        assert!(success_events.contains("event: progress"));
+        assert!(success_events.contains("Checking MOSS runtime"));
+        assert!(success_events.contains("Downloading verified MOSS assets"));
+        assert!(success_events.contains("MOSS runtime and verified 8-bit model are ready"));
+        assert!(success_events.contains("event: done"));
+        assert!(moss_verification_path(&success_home).is_file());
+
+        let (unsupported_tx, mut unsupported_rx) = tokio::sync::mpsc::channel(4);
+        stream_moss_model_initialization_with_spec(
+            unsupported_tx,
+            temp.path().join("unsupported-home"),
+            Err("unsupported fixture".to_string()),
+            model_spec.clone(),
+            None,
+        )
+        .await;
+        let unsupported_event = unsupported_rx.recv().await.unwrap();
+        let unsupported_event = String::from_utf8_lossy(&unsupported_event);
+        assert!(unsupported_event.contains("event: error"));
+        assert!(unsupported_event.contains("not supported"));
+
+        let (failure_tx, mut failure_rx) = tokio::sync::mpsc::channel(16);
+        let invalid_runtime = MossRuntimeSource {
+            sha256: "0".repeat(64),
+            ..runtime_source
+        };
+        stream_moss_model_initialization_with_spec(
+            failure_tx,
+            temp.path().join("failure-home"),
+            Ok(invalid_runtime.asset.clone()),
+            model_spec,
+            Some(invalid_runtime),
+        )
+        .await;
+        let mut failure_events = String::new();
+        while let Some(frame) = failure_rx.recv().await {
+            failure_events.push_str(&String::from_utf8_lossy(&frame));
+        }
+        assert!(failure_events.contains("event: error"));
+        assert!(failure_events.contains("MOSS initialization failed"));
+        assert!(failure_events.contains("checksum mismatch"));
+    }
+
+    fn moss_process_test_paths(root: &Path, python: PathBuf) -> MossRuntimePaths {
+        let python_home = root.join("python-home");
+        let site_packages = root.join("site-packages");
+        let runner = root.join("moss_mlx_runner.py");
+        let model_dir = root.join("model");
+        std::fs::create_dir_all(&python_home).unwrap();
+        std::fs::create_dir_all(&site_packages).unwrap();
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(&runner, b"fixture runner").unwrap();
+        let model = model_dir.join(MOSS_MODEL_FILE);
+        std::fs::write(&model, b"model").unwrap();
+        MossRuntimePaths {
+            python_home,
+            python,
+            site_packages,
+            runner,
+            model_dir,
+            model,
+        }
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, script).unwrap();
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+
+    fn spawn_moss_http_server(body: Vec<u8>) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = [0_u8; 4096];
+                        let read = stream.read(&mut request).unwrap_or(0);
+                        let is_head = request[..read].starts_with(b"HEAD ");
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        stream.write_all(header.as_bytes()).unwrap();
+                        if !is_head {
+                            stream.write_all(&body).unwrap();
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        format!("http://{address}/resource")
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn moss_runtime_configuration_and_checksum_sources_cover_supported_paths() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let paths = moss_runtime_paths(temp.path());
+        assert_eq!(
+            moss_runtime_dir(temp.path()),
+            temp.path().join("moss_joint_mlx")
+        );
+        assert_eq!(
+            paths.python,
+            temp.path()
+                .join("moss_joint_mlx/runtime/python/bin/python3.12")
+        );
+        assert_eq!(
+            paths.model,
+            temp.path().join("moss_joint_mlx/model").join(MOSS_MODEL_FILE)
+        );
+        assert!(moss_runtime_asset_name_for("linux", "x86_64").is_err());
+        let asset = moss_runtime_asset_name_for("macos", "aarch64").unwrap();
+        assert!(asset.contains(env!("CARGO_PKG_VERSION")));
+        assert_eq!(
+            moss_runtime_asset_name().is_ok(),
+            cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        );
+        assert_eq!(AsrTranscriptionMode::Standard.as_str(), "standard");
+        assert_eq!(AsrTranscriptionMode::MossJoint.as_str(), "moss_joint");
+        assert!(validate_moss_transcription_mode(AsrTranscriptionMode::Standard).is_ok());
+        assert!(!AsrTranscriptionMode::Standard.uses_native_speakers());
+        assert!(AsrTranscriptionMode::MossJoint.uses_native_speakers());
+        assert!(moss_runtime_checksums_url().ends_with(&format!(
+            "bifrost-v{}-checksums.txt",
+            env!("CARGO_PKG_VERSION")
+        )));
+
+        let custom_url = std::ffi::OsStr::new("file:///tmp/moss-runtime.zip");
+        let _url_guard = EnvVarGuard::set("BIFROST_MOSS_RUNTIME_URL", custom_url);
+        let _sha_guard = EnvVarGuard::set(
+            "BIFROST_MOSS_RUNTIME_SHA256",
+            std::ffi::OsStr::new(
+                "ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD",
+            ),
+        );
+        assert_eq!(moss_runtime_url(&asset), custom_url.to_string_lossy());
+        assert_eq!(expected_moss_runtime_checksum(&asset).await.unwrap().len(), 64);
+        let source = moss_runtime_source_for_asset(asset.clone()).await.unwrap();
+        assert_eq!(source.asset, asset);
+        assert_eq!(source.url, custom_url.to_string_lossy());
+        assert_eq!(source.sha256.len(), 64);
+
+        drop(_sha_guard);
+        assert!(expected_moss_runtime_checksum(&asset)
+            .await
+            .unwrap_err()
+            .contains("required"));
+        drop(_url_guard);
+        let default_url = moss_runtime_url(&asset);
+        assert!(default_url.contains("github.com/bifrost-proxy/bifrost/releases"));
+
+        let custom_model = std::ffi::OsStr::new("file:///tmp/model.safetensors");
+        let _model_guard = EnvVarGuard::set("BIFROST_MOSS_MODEL_URL", custom_model);
+        let spec = moss_model_spec();
+        assert_eq!(spec.url, custom_model.to_string_lossy());
+        assert_eq!(spec.bytes, MOSS_MODEL_BYTES);
+        assert_eq!(spec.sha256, MOSS_MODEL_SHA256);
+        drop(_model_guard);
+        assert_eq!(moss_model_url(), MOSS_MODEL_URL);
+    }
+
+    #[tokio::test]
+    async fn moss_checksum_and_resource_download_support_http_and_file_urls() {
+        let temp = TempDir::new().unwrap();
+        let asset = "moss-runtime.zip";
+        let checksum = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let manifest = format!("{checksum}  dist/{asset}\n").into_bytes();
+        let manifest_url = spawn_moss_http_server(manifest);
+        assert_eq!(
+            download_runtime_checksum(manifest_url, asset).await.unwrap(),
+            checksum
+        );
+
+        let source = temp.path().join("source.bin");
+        let file_dest = temp.path().join("file-dest.bin");
+        std::fs::write(&source, b"file-resource").unwrap();
+        download_moss_resource(
+            format!("file://{}", source.display()),
+            file_dest.clone(),
+            "test file",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read(file_dest).unwrap(), b"file-resource");
+
+        let http_dest = temp.path().join("http-dest.bin");
+        let resource_url = spawn_moss_http_server(b"http-resource".to_vec());
+        download_moss_resource(resource_url, http_dest.clone(), "test HTTP", None)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(http_dest).unwrap(), b"http-resource");
+        assert!(download_moss_resource(
+            "file:///missing/moss-resource".to_string(),
+            temp.path().join("missing.bin"),
+            "missing",
+            None,
+        )
+        .await
+        .is_err());
+    }
+
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    #[tokio::test]
+    async fn moss_initializer_reports_unsupported_platform_before_download() {
+        let temp = TempDir::new().unwrap();
+        let paths = moss_runtime_paths(temp.path());
+        let status = moss_runtime_status(temp.path(), &paths, &moss_model_spec()).await;
+        assert!(!status.runtime_valid);
+        assert!(!status.model_valid());
+        assert!(ensure_moss_joint_runtime(temp.path(), "unsupported-platform")
+            .await
+            .unwrap_err()
+            .contains("only on Apple Silicon macOS"));
+    }
+
+    #[test]
+    fn moss_hash_model_and_archive_validation_cover_success_and_failures() {
+        let temp = TempDir::new().unwrap();
+        let model = temp.path().join("model.safetensors");
+        let spec = moss_test_model_spec(&model, b"tiny verified model");
+        assert!(verify_moss_model(&model, &spec).is_ok());
+
+        let mut wrong_size = spec.clone();
+        wrong_size.bytes += 1;
+        assert!(verify_moss_model(&model, &wrong_size)
+            .unwrap_err()
+            .contains("size mismatch"));
+        let mut wrong_hash = spec.clone();
+        wrong_hash.sha256 = "0".repeat(64);
+        assert!(verify_moss_model(&model, &wrong_hash)
+            .unwrap_err()
+            .contains("checksum mismatch"));
+        assert!(sha256_file(&temp.path().join("missing")).is_err());
+
+        let snapshot_paths = moss_runtime_paths(&temp.path().join("snapshot"));
+        std::fs::create_dir_all(&snapshot_paths.model_dir).unwrap();
+        let snapshot_spec = moss_test_model_spec(&snapshot_paths.model, b"snapshot model");
+        for required in &MOSS_MODEL_REQUIRED_FILES[..MOSS_MODEL_REQUIRED_FILES.len() - 1] {
+            std::fs::write(snapshot_paths.model_dir.join(required), b"{}").unwrap();
+        }
+        assert!(verify_moss_model_snapshot(&snapshot_paths, &snapshot_spec)
+            .unwrap_err()
+            .contains("snapshot is missing"));
+
+        let archive = temp.path().join("runtime.zip");
+        write_moss_runtime_zip(&archive, "#!/bin/sh\necho 'moss-mlx-runtime ok'\n");
+        let destination = temp.path().join("installed");
+        #[cfg(unix)]
+        {
+            install_moss_runtime_archive(&archive, &destination).unwrap();
+            install_moss_runtime_archive(&archive, &destination).unwrap();
+            assert!(destination
+                .join("runtime/python/bin/python3.12")
+                .is_file());
+            assert!(std::fs::symlink_metadata(
+                destination.join("runtime/python/bin/python3.12")
+            )
+            .unwrap()
+            .file_type()
+            .is_symlink());
+            assert_eq!(
+                std::fs::read_link(destination.join("runtime/python/bin/python3.12")).unwrap(),
+                PathBuf::from("python3.12-real")
+            );
+            assert!(destination.join("runtime/moss_mlx_runner.py").is_file());
+            assert!(destination.join("model/config.json").is_file());
+            assert!(destination.join("runtime/empty").is_dir());
+            assert!(!destination.join("LICENSE").exists());
+            assert!(!destination
+                .join("runtime/site-packages/._invalid.py")
+                .exists());
+            assert!(!destination.join("model/._config.json").exists());
+            assert!(!destination.join("model/.DS_Store").exists());
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(install_moss_runtime_archive(&archive, &destination)
+                .unwrap_err()
+                .contains("unsupported on this platform"));
+            std::fs::create_dir_all(&destination).unwrap();
+        }
+
+        let blocked_destination = temp.path().join("blocked-install-destination");
+        std::fs::write(&blocked_destination, b"not a directory").unwrap();
+        assert!(install_moss_runtime_archive(&archive, &blocked_destination)
+            .unwrap_err()
+            .contains("create MOSS runtime directory"));
+        let parent_error_archive = temp.path().join("parent-error-runtime.zip");
+        {
+            use std::io::Write;
+            let file = std::fs::File::create(&parent_error_archive).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file(
+                "moss-joint-runtime/runtime/python/bin/python3.12",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(b"runtime").unwrap();
+            zip.finish().unwrap();
+        }
+        assert!(install_moss_runtime_archive(&parent_error_archive, &blocked_destination)
+            .unwrap_err()
+            .contains("create MOSS runtime directory"));
+
+        let missing_archive = temp.path().join("missing-runtime.zip");
+        {
+            use std::io::Write;
+            let file = std::fs::File::create(&missing_archive).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file("README", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"no binary").unwrap();
+            zip.finish().unwrap();
+        }
+        assert!(install_moss_runtime_archive(&missing_archive, &destination)
+            .unwrap_err()
+            .contains("does not contain"));
+        let unsafe_archive = temp.path().join("unsafe-runtime.zip");
+        {
+            use std::io::Write;
+            let file = std::fs::File::create(&unsafe_archive).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.start_file(
+                "moss-joint-runtime/runtime/../../../escape",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.write_all(b"escape").unwrap();
+            zip.finish().unwrap();
+        }
+        assert!(install_moss_runtime_archive(&unsafe_archive, &destination)
+            .unwrap_err()
+            .contains("unsafe MOSS runtime archive entry"));
+        let unsafe_symlink_archive = temp.path().join("unsafe-symlink-runtime.zip");
+        {
+            let file = std::fs::File::create(&unsafe_symlink_archive).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            zip.add_symlink(
+                "moss-joint-runtime/runtime/python/escape",
+                "../../../escape",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            zip.finish().unwrap();
+        }
+        assert!(install_moss_runtime_archive(&unsafe_symlink_archive, &destination)
+            .unwrap_err()
+            .contains("unsafe escaping MOSS runtime symlink"));
+        assert!(validate_moss_runtime_symlink(
+            Path::new("runtime/python/bin/python3.12"),
+            Path::new("./python3.12-real")
+        )
+        .is_ok());
+        let absolute_symlink_target = if cfg!(windows) {
+            Path::new(r"C:\tmp\python3.12")
+        } else {
+            Path::new("/tmp/python3.12")
+        };
+        assert!(validate_moss_runtime_symlink(
+            Path::new("runtime/python/bin/python3.12"),
+            absolute_symlink_target
+        )
+        .unwrap_err()
+        .contains("unsafe absolute"));
+        assert!(validate_moss_runtime_symlink(
+            Path::new("runtime/escape"),
+            Path::new("../../escape")
+        )
+        .unwrap_err()
+        .contains("unsafe escaping"));
+        assert!(validate_moss_runtime_symlink(
+            Path::new("runtime/escape"),
+            Path::new("../escape")
+        )
+        .unwrap_err()
+        .contains("unsafe escaping"));
+
+        let directory_conflict = temp.path().join("symlink-directory-conflict");
+        std::fs::create_dir_all(
+            directory_conflict.join("runtime/python/bin/python3.12"),
+        )
+        .unwrap();
+        let directory_conflict_error =
+            install_moss_runtime_archive(&archive, &directory_conflict).unwrap_err();
+        #[cfg(unix)]
+        assert!(directory_conflict_error.contains("refuse to replace MOSS runtime directory"));
+        #[cfg(not(unix))]
+        assert!(directory_conflict_error.contains("unsupported on this platform"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let write_symlink_archive = |path: &Path, entry: String| {
+                let file = std::fs::File::create(path).unwrap();
+                let mut zip = zip::ZipWriter::new(file);
+                zip.add_symlink(
+                    entry,
+                    "target",
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+                zip.finish().unwrap();
+            };
+
+            let parent_error_archive = temp.path().join("symlink-parent-error.zip");
+            write_symlink_archive(
+                &parent_error_archive,
+                "moss-joint-runtime/runtime/blocked/link".to_string(),
+            );
+            let parent_error_destination = temp.path().join("symlink-parent-error");
+            std::fs::create_dir_all(parent_error_destination.join("runtime")).unwrap();
+            std::fs::write(parent_error_destination.join("runtime/blocked"), b"file").unwrap();
+            assert!(install_moss_runtime_archive(
+                &parent_error_archive,
+                &parent_error_destination,
+            )
+            .unwrap_err()
+            .contains("create MOSS runtime directory"));
+
+            let metadata_error_archive = temp.path().join("symlink-metadata-error.zip");
+            write_symlink_archive(
+                &metadata_error_archive,
+                format!("moss-joint-runtime/runtime/{}", "x".repeat(300)),
+            );
+            let metadata_error_destination = temp.path().join("symlink-metadata-error");
+            std::fs::create_dir_all(metadata_error_destination.join("runtime")).unwrap();
+            assert!(install_moss_runtime_archive(
+                &metadata_error_archive,
+                &metadata_error_destination,
+            )
+            .unwrap_err()
+            .contains("inspect MOSS runtime symlink target"));
+
+            let invalid_utf8_archive = temp.path().join("symlink-invalid-utf8.zip");
+            write_symlink_archive(
+                &invalid_utf8_archive,
+                "moss-joint-runtime/runtime/invalid-utf8".to_string(),
+            );
+            let mut archive_bytes = std::fs::read(&invalid_utf8_archive).unwrap();
+            let target_offset = archive_bytes
+                .windows(b"target".len())
+                .position(|window| window == b"target")
+                .expect("symlink payload");
+            archive_bytes[target_offset] = 0xff;
+            std::fs::write(&invalid_utf8_archive, archive_bytes).unwrap();
+            assert!(install_moss_runtime_archive(
+                &invalid_utf8_archive,
+                &temp.path().join("symlink-invalid-utf8"),
+            )
+            .unwrap_err()
+            .contains("read MOSS runtime symlink"));
+
+            for (case, existing, expected) in [
+                ("remove", true, "replace MOSS runtime symlink"),
+                ("create", false, "create MOSS runtime symlink"),
+            ] {
+                let archive = temp.path().join(format!("symlink-{case}-error.zip"));
+                write_symlink_archive(
+                    &archive,
+                    format!("moss-joint-runtime/runtime/readonly/{case}"),
+                );
+                let destination = temp.path().join(format!("symlink-{case}-error"));
+                let readonly = destination.join("runtime/readonly");
+                std::fs::create_dir_all(&readonly).unwrap();
+                if existing {
+                    std::fs::write(readonly.join(case), b"existing").unwrap();
+                }
+                std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555))
+                    .unwrap();
+                let error = install_moss_runtime_archive(&archive, &destination).unwrap_err();
+                std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+                assert!(error.contains(expected), "unexpected error: {error}");
+            }
+        }
+        let invalid_archive = temp.path().join("invalid.zip");
+        std::fs::write(&invalid_archive, b"not a zip").unwrap();
+        assert!(install_moss_runtime_archive(&invalid_archive, &destination).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn moss_initializer_installs_quarantines_and_reuses_verified_resources() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path().join("data").as_path());
+        let asr_home = temp.path().join("asr-home");
+        let paths = moss_runtime_paths(&asr_home);
+        std::fs::create_dir_all(moss_runtime_dir(&asr_home)).unwrap();
+        write_executable(&paths.python, "#!/bin/sh\necho 'invalid runtime' >&2\nexit 1\n");
+        std::fs::write(&paths.runner, b"fixture runner").unwrap();
+        std::fs::create_dir_all(&paths.site_packages).unwrap();
+        prepare_moss_model_snapshot(&paths);
+        std::fs::write(&paths.model, b"invalid model").unwrap();
+
+        let archive = temp.path().join("runtime-source.zip");
+        write_moss_runtime_zip(
+            &archive,
+            "#!/bin/sh\necho 'moss-mlx-runtime ok'\n",
+        );
+        let model_source = temp.path().join("model-source.safetensors");
+        let model_spec = moss_test_model_spec(&model_source, b"verified model fixture");
+        let runtime_source = MossRuntimeSource {
+            asset: "runtime.zip".to_string(),
+            url: format!("file://{}", archive.display()),
+            sha256: sha256_file(&archive).unwrap(),
+        };
+
+        let installed_paths = ensure_moss_joint_runtime_with_spec(
+            &asr_home,
+            "moss-init-test",
+            model_spec.clone(),
+            Some(runtime_source.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(installed_paths.python, paths.python);
+        let status = moss_runtime_status(&asr_home, &paths, &model_spec).await;
+        assert!(status.all_valid());
+        assert!(std::fs::read_dir(moss_runtime_dir(&asr_home))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".invalid-")));
+
+        ensure_moss_joint_runtime_with_spec(
+            &asr_home,
+            "moss-reuse-test",
+            model_spec.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(verify_moss_runtime_binary(&paths).await.is_ok());
+
+        std::fs::write(paths.model_dir.join("config.json"), b"corrupted metadata").unwrap();
+        let corrupted = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert!(!corrupted.model_ready);
+        let corrupted_status = moss_runtime_status(&asr_home, &paths, &model_spec).await;
+        assert!(corrupted_status.model_weight_valid);
+        assert!(!corrupted_status.model_metadata_valid);
+        std::fs::remove_file(&model_source).unwrap();
+        ensure_moss_joint_runtime_with_spec(
+            &asr_home,
+            "moss-repair-corrupt-metadata",
+            model_spec.clone(),
+            Some(runtime_source.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(paths.model_dir.join("config.json")).unwrap(),
+            b"{}"
+        );
+
+        std::fs::remove_file(paths.model_dir.join("tokenizer.json")).unwrap();
+        ensure_moss_joint_runtime_with_spec(
+            &asr_home,
+            "moss-repair-missing-metadata",
+            model_spec.clone(),
+            Some(runtime_source.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(paths.model_dir.join("tokenizer.json").is_file());
+        let invalid_runtime = temp.path().join("invalid-runtime");
+        write_executable(&invalid_runtime, "#!/bin/sh\necho 'not moss usage' >&2\n");
+        let mut invalid_paths = paths.clone();
+        invalid_paths.python = invalid_runtime;
+        assert!(verify_moss_runtime_binary(&invalid_paths).await.is_err());
+        invalid_paths.python = temp.path().join("missing");
+        assert!(verify_moss_runtime_binary(&invalid_paths).await.is_err());
+        let hanging_runtime = temp.path().join("hanging-runtime");
+        write_executable(&hanging_runtime, "#!/bin/sh\nsleep 2\n");
+        invalid_paths.python = hanging_runtime;
+        assert!(
+            verify_moss_runtime_binary_with_timeout(&invalid_paths, Duration::from_millis(100))
+                .await
+                .unwrap_err()
+                .contains("smoke check timed out")
+        );
+
+        let bad_home = temp.path().join("bad-home");
+        let bad_source = MossRuntimeSource {
+            sha256: "0".repeat(64),
+            ..runtime_source.clone()
+        };
+        let error = ensure_moss_joint_runtime_with_spec(
+            &bad_home,
+            "moss-bad-checksum-test",
+            model_spec.clone(),
+            Some(bad_source),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("checksum mismatch"));
+        assert!(std::fs::read_dir(moss_runtime_dir(&bad_home))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".invalid-")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn moss_initializer_reports_runtime_archive_and_model_quarantine_failures() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let asr_home = temp.path().join("asr-home");
+        let root = moss_runtime_dir(&asr_home);
+        let paths = moss_runtime_paths(&asr_home);
+        std::fs::create_dir_all(&root).unwrap();
+        write_executable(&paths.python, "#!/bin/sh\necho 'invalid runtime' >&2\nexit 1\n");
+        std::fs::write(&paths.runner, b"fixture runner").unwrap();
+        std::fs::create_dir_all(&paths.site_packages).unwrap();
+        prepare_moss_model_snapshot(&paths);
+        std::fs::write(&paths.model, b"invalid model").unwrap();
+        let model_source = temp.path().join("model-source.safetensors");
+        let model_spec = moss_test_model_spec(&model_source, b"verified model fixture");
+        let runtime_source = MossRuntimeSource {
+            asset: "runtime.zip".to_string(),
+            url: "file:///unused/runtime.zip".to_string(),
+            sha256: "0".repeat(64),
+        };
+
+        write_executable(
+            &paths.python,
+            "#!/bin/sh\necho 'moss-mlx-runtime ok'\n",
+        );
+        std::fs::copy(&model_source, &paths.model).unwrap();
+        initialize_moss_joint_runtime(
+            &asr_home,
+            "moss-valid-resources",
+            &paths,
+            MossComponentStatus {
+                runtime_valid: true,
+                model_weight_valid: true,
+                model_metadata_valid: true,
+            },
+            &runtime_source,
+            &model_spec,
+            None,
+        )
+        .await
+        .unwrap();
+        std::fs::write(&paths.python, b"invalid runtime").unwrap();
+        std::fs::write(&paths.model, b"invalid model").unwrap();
+
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let runtime_error = initialize_moss_joint_runtime(
+            &asr_home,
+            "moss-runtime-quarantine-error",
+            &paths,
+            MossComponentStatus {
+                runtime_valid: false,
+                model_weight_valid: true,
+                model_metadata_valid: true,
+            },
+            &runtime_source,
+            &model_spec,
+            None,
+        )
+        .await
+        .unwrap_err();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(runtime_error.contains("quarantine invalid MOSS runtime"));
+
+        write_executable(
+            &paths.python,
+            "#!/bin/sh\necho 'moss-mlx-runtime ok'\n",
+        );
+        std::fs::set_permissions(&paths.model_dir, std::fs::Permissions::from_mode(0o555))
+            .unwrap();
+        let model_error = initialize_moss_joint_runtime(
+            &asr_home,
+            "moss-model-quarantine-error",
+            &paths,
+            MossComponentStatus {
+                runtime_valid: true,
+                model_weight_valid: false,
+                model_metadata_valid: true,
+            },
+            &runtime_source,
+            &model_spec,
+            None,
+        )
+        .await
+        .unwrap_err();
+        std::fs::set_permissions(&paths.model_dir, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        assert!(model_error.contains("quarantine invalid MOSS model"));
+
+        let blocked_model_home = temp.path().join("blocked-model-home");
+        let blocked_paths = moss_runtime_paths(&blocked_model_home);
+        write_executable(
+            &blocked_paths.python,
+            "#!/bin/sh\necho 'moss-mlx-runtime ok'\n",
+        );
+        std::fs::write(&blocked_paths.runner, b"fixture runner").unwrap();
+        std::fs::create_dir_all(&blocked_paths.site_packages).unwrap();
+        std::fs::write(&blocked_paths.model_dir, b"not a directory").unwrap();
+        let blocked_model_error = initialize_moss_joint_runtime(
+            &blocked_model_home,
+            "moss-model-dir-error",
+            &blocked_paths,
+            MossComponentStatus {
+                runtime_valid: true,
+                model_weight_valid: false,
+                model_metadata_valid: true,
+            },
+            &runtime_source,
+            &model_spec,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(blocked_model_error.contains("create MOSS model directory"));
+
+        let archive_source = temp.path().join("large-bad-runtime.zip");
+        std::fs::File::create(&archive_source)
+            .unwrap()
+            .set_len(64 * 1024 * 1024)
+            .unwrap();
+        let archive_runtime_source = MossRuntimeSource {
+            asset: "runtime.zip".to_string(),
+            url: format!("file://{}", archive_source.display()),
+            sha256: "f".repeat(64),
+        };
+        let archive_path = root.join(&archive_runtime_source.asset);
+        let permissions_root = root.clone();
+        let permission_thread = std::thread::spawn(move || {
+            while !archive_path.exists() {
+                std::thread::yield_now();
+            }
+            std::fs::set_permissions(
+                permissions_root,
+                std::fs::Permissions::from_mode(0o555),
+            )
+            .unwrap();
+        });
+        let archive_error = initialize_moss_joint_runtime(
+            &asr_home,
+            "moss-archive-quarantine-error",
+            &paths,
+            MossComponentStatus {
+                runtime_valid: false,
+                model_weight_valid: true,
+                model_metadata_valid: true,
+            },
+            &archive_runtime_source,
+            &model_spec,
+            None,
+        )
+        .await
+        .unwrap_err();
+        permission_thread.join().unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(archive_error.contains("quarantine invalid MOSS runtime archive"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn moss_runtime_process_covers_prompt_success_failure_and_pause() {
+        let temp = TempDir::new().unwrap();
+        let binary = temp.path().join("moss-transcribe");
+        let wav = temp.path().join("audio.wav");
+        // Leave enough watchdog headroom for process startup while the full workspace test suite
+        // is running thousands of tests in parallel. Dedicated watchdog coverage uses a slow
+        // fixture and a deliberately short duration below.
+        let process_fixture_audio_ms = 10_000;
+        std::fs::write(&wav, b"wav").unwrap();
+        let runtime = moss_process_test_paths(temp.path(), binary.clone());
+
+        write_executable(
+            &binary,
+            "#!/bin/sh\nprompt=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '--prompt-file' ]; then shift; prompt=$(cat \"$1\"); fi\n  shift\ndone\n[ \"$prompt\" = 'Bifrost prompt' ] || { echo 'prompt mismatch' >&2; exit 9; }\nprintf '[{\"start\":0.1,\"end\":1.2,\"speaker\":\"S01\",\"text\":\" hello \"}]'\n",
+        );
+        let result = run_moss_joint_transcription(
+            &runtime,
+            &wav,
+            process_fixture_audio_ms,
+            "Bifrost prompt",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.text, "hello");
+
+        write_executable(&binary, "#!/bin/sh\necho 'runtime failed' >&2\nexit 7\n");
+        assert!(
+            run_moss_joint_transcription(&runtime, &wav, process_fixture_audio_ms, "", None, None)
+                .await
+                .unwrap_err()
+                .contains("runtime failed")
+        );
+
+        write_executable(
+            &binary,
+            "#!/bin/sh\necho 'MOSS output has no complete speaker-aware segment before 256 generated tokens' >&2\nexit 7\n",
+        );
+        let deterministic_process_error = run_moss_joint_transcription(
+            &runtime,
+            &wav,
+            process_fixture_audio_ms,
+            "",
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(deterministic_process_error.starts_with(&format!(
+            "moss_non_retryable_v{}:",
+            env!("CARGO_PKG_VERSION")
+        )));
+
+        write_executable(
+            &binary,
+            "#!/bin/sh\necho 'MOSS MLX returned no valid speaker-aware segments' >&2\nexit 7\n",
+        );
+        let no_valid_segments_error = run_moss_joint_transcription(
+            &runtime,
+            &wav,
+            process_fixture_audio_ms,
+            "",
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(no_valid_segments_error.starts_with(&format!(
+            "moss_non_retryable_v{}:",
+            env!("CARGO_PKG_VERSION")
+        )));
+
+        write_executable(&binary, "#!/bin/sh\nprintf '[]'\n");
+        let deterministic_parse_error = run_moss_joint_transcription(
+            &runtime,
+            &wav,
+            process_fixture_audio_ms,
+            "",
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(deterministic_parse_error.starts_with(&format!(
+            "moss_non_retryable_v{}:",
+            env!("CARGO_PKG_VERSION")
+        )));
+
+        write_executable(&binary, "#!/bin/sh\nprintf '{'\n");
+        let malformed_json_error = run_moss_joint_transcription(
+            &runtime,
+            &wav,
+            process_fixture_audio_ms,
+            "",
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(malformed_json_error.starts_with("parse MOSS runtime JSON:"));
+        assert!(!malformed_json_error.starts_with("moss_non_retryable_"));
+
+        write_executable(&binary, "#!/bin/sh\nsleep 5\n");
+        let pause = || true;
+        assert_eq!(
+            run_moss_joint_transcription(&runtime, &wav, 1_000, "", Some(&pause), None)
+                .await
+                .unwrap_err(),
+            ASR_TASK_PAUSED_MESSAGE
+        );
+        write_executable(
+            &binary,
+            "#!/bin/sh\nsleep 1\nprintf '[{\"start\":0.0,\"end\":0.5,\"speaker\":\"S01\",\"text\":\"resumed\"}]'\n",
+        );
+        let keep_running = || false;
+        assert_eq!(
+            run_moss_joint_transcription(
+                &runtime,
+                &wav,
+                3_000,
+                "",
+                Some(&keep_running),
+                None,
+            )
+            .await
+            .unwrap()
+            .text,
+            "resumed"
+        );
+        write_executable(&binary, "#!/bin/sh\nsleep 2\n");
+        let watchdog_started = std::time::Instant::now();
+        assert!(run_moss_joint_transcription(&runtime, &wav, 1_200, "", None, None)
+            .await
+            .unwrap_err()
+            .contains("moss_rtf_exceeded"));
+        let watchdog_elapsed = watchdog_started.elapsed();
+        assert!(watchdog_elapsed >= std::time::Duration::from_millis(500));
+        assert!(watchdog_elapsed < std::time::Duration::from_millis(900));
+        assert!(run_moss_joint_transcription(
+            &runtime,
+            &wav,
+            1_000,
+            &"x".repeat(MOSS_MAX_PROMPT_CHARS + 1),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err()
+        .contains("prompt exceeds"));
+
+        let mut missing_runtime = runtime.clone();
+        missing_runtime.python = temp.path().join("missing-runtime");
+        assert!(run_moss_joint_transcription(&missing_runtime, &wav, 1_000, "", None, None)
+            .await
+            .unwrap_err()
+            .contains("start MOSS"));
+
+        let marker = temp.path().join("unexpected-spawn");
+        write_executable(
+            &binary,
+            &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        );
+        let exhausted_started_at = now_ms().saturating_sub(600);
+        assert!(run_moss_joint_transcription(
+            &runtime,
+            &wav,
+            1_000,
+            "",
+            None,
+            Some(exhausted_started_at),
+        )
+        .await
+        .unwrap_err()
+        .contains("before inference"));
+        assert!(!marker.exists(), "exhausted budget must not spawn MOSS");
+    }
+
+    #[test]
+    fn moss_input_guard_rejects_unknown_short_silent_and_invalid_audio() {
+        let temp = TempDir::new().unwrap();
+        let speech = temp.path().join("speech.wav");
+        let silence = temp.path().join("silence.wav");
+        let invalid = temp.path().join("invalid.wav");
+        std::fs::write(&speech, make_wav(&[500i16; 100])).unwrap();
+        std::fs::write(&silence, make_wav(&[0i16; 100])).unwrap();
+        std::fs::write(&invalid, b"not wav").unwrap();
+
+        assert!(validate_moss_audio_input(&speech, 0)
+            .unwrap_err()
+            .contains("moss_duration_unavailable"));
+        assert!(validate_moss_audio_input(&speech, MOSS_MIN_AUDIO_DURATION_MS - 1)
+            .unwrap_err()
+            .contains("moss_audio_too_short"));
+        assert!(validate_moss_audio_input(&silence, MOSS_MIN_AUDIO_DURATION_MS)
+            .unwrap_err()
+            .contains("moss_audio_silent"));
+        assert!(validate_moss_audio_input(&invalid, MOSS_MIN_AUDIO_DURATION_MS)
+            .unwrap_err()
+            .contains("moss_audio_invalid"));
+        validate_moss_audio_input(&speech, MOSS_MIN_AUDIO_DURATION_MS).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn moss_task_transcription_writes_native_speaker_timeline_and_safe_metadata() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("meeting.wav");
+        let source_wav = make_wav(&[500i16; 100]);
+        std::fs::write(&source, &source_wav).unwrap();
+
+        let binary = temp.path().join("moss-transcribe");
+        write_executable(
+            &binary,
+            "#!/bin/sh\nprintf '[{\"start\":0.1,\"end\":1.2,\"speaker\":\" S01 \",\"text\":\"hello\"},{\"start\":1.2,\"end\":65.0,\"speaker\":\"S02\",\"text\":\"abcdefghijklmnopqrstuvwxyz\"},{\"start\":2.5,\"end\":2.0,\"speaker\":\"S03\",\"text\":\"invalid range\"}]'\n",
+        );
+        let runtime = moss_process_test_paths(temp.path(), binary);
+        let mut task = test_directory_task("moss-artifacts", audio_dir.clone());
+        task.transcription_mode = AsrTranscriptionMode::MossJoint;
+        task.transcription_prompt = "private prompt".to_string();
+        task.diarization.enabled = true;
+        let source_info = SourceAudioInfo {
+            source_size: Some(source_wav.len() as u64),
+            source_modified_ms: Some(9_000),
+            source_created_at_ms: Some(10_000),
+            source_created_at_source: Some("fixture".to_string()),
+            media_duration_ms: Some(65_000),
+        };
+        let observed_metrics = StdMutex::new(Vec::new());
+        let metric_callback = |metric| observed_metrics.lock().unwrap().push(metric);
+        let hooks = TaskTranscribeHooks {
+            on_chunk_progress: None,
+            on_chunk_metric: Some(&metric_callback),
+            pause_check: None,
+            force_pause_task_id: None,
+            memory_limit_hints: &[],
+            server_url: None,
+            startup_fallback_reason: None,
+            server_state: None,
+            managed_server_restart: None,
+            partial_artifacts: None,
+            moss_runtime: Some(&runtime),
+        };
+
+        let output = transcribe_file_for_task_with_wav(
+            &task,
+            Path::new("/unused/asr"),
+            Path::new("/unused/model"),
+            &source,
+            &source,
+            &source_info,
+            hooks,
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.text, "hello\nabcdefghijklmnopqrstuvwxyz");
+        assert_eq!(output.timeline.model, "MOSS-Transcribe-Diarize-MLX-8bit");
+        assert_eq!(
+            output.timeline.diarization_profile.as_deref(),
+            Some("moss_joint_native")
+        );
+        assert_eq!(output.timeline.segments.len(), 4);
+        assert!(output.timeline.segments.iter().all(|segment| {
+            segment.audio_end_ms.saturating_sub(segment.audio_start_ms)
+                <= ASR_TASK_SEGMENT_MAX_MS
+        }));
+        assert_eq!(output.timeline.segments[1].speaker.as_deref(), Some("S02"));
+        assert_eq!(output.timeline.segments[2].speaker.as_deref(), Some("S02"));
+        assert_eq!(output.timeline.segments[3].speaker.as_deref(), Some("S02"));
+        assert_eq!(output.chunk_metrics.len(), 1);
+        assert_eq!(output.chunk_metrics[0].runner, "moss_joint");
+        assert_eq!(observed_metrics.lock().unwrap().len(), 1);
+        assert_eq!(output.chunk_metrics[0].status, "ok");
+        assert_eq!(output.chunk_metrics[0].duration_secs, 65);
+        assert!(output.chunk_metrics[0].elapsed_ms >= 1);
+        assert_eq!(output.chunk_metrics[0].text_chars, 32);
+        assert_eq!(
+            output.chunk_metrics[0].text_sha1,
+            sha1_hex(b"hello\nabcdefghijklmnopqrstuvwxyz")
+        );
+        assert_eq!(output.timeline.segments[0].absolute_start_ms, Some(10_100));
+        assert_eq!(output.timeline.segments[3].absolute_end_ms, Some(75_000));
+        assert_eq!(
+            output
+                .timeline
+                .segments
+                .iter()
+                .skip(1)
+                .map(|segment| segment.text.as_str())
+                .collect::<String>(),
+            "abcdefghijklmnopqrstuvwxyz"
+        );
+        assert_eq!(
+            output
+                .timeline
+                .speakers
+                .iter()
+                .map(|speaker| speaker.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["S01", "S02"]
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&output.metadata_path).unwrap()).unwrap();
+        assert_eq!(metadata["model"], "MOSS-Transcribe-Diarize-MLX-8bit");
+        assert_eq!(metadata["transcription_mode"], "moss_joint");
+        assert_eq!(metadata["transcription_prompt_configured"], true);
+        assert_eq!(metadata["chunk_metrics"][0]["runner"], "moss_joint");
+        assert_eq!(metadata["chunk_metrics"][0]["status"], "ok");
+        assert!(metadata["chunk_metrics"][0]["elapsed_ms"]
+            .as_u64()
+            .is_some_and(|elapsed_ms| elapsed_ms >= 1));
+        assert!(!std::fs::read_to_string(&output.metadata_path)
+            .unwrap()
+            .contains("private prompt"));
+
+        let default_runtime_result = transcribe_file_for_task_with_wav(
+            &task,
+            Path::new("/unused/asr"),
+            Path::new("/unused/model"),
+            &source,
+            &source,
+            &source_info,
+            TaskTranscribeHooks {
+                on_chunk_progress: None,
+                on_chunk_metric: None,
+                pause_check: None,
+                force_pause_task_id: None,
+                memory_limit_hints: &[],
+                server_url: None,
+                startup_fallback_reason: None,
+                server_state: None,
+                managed_server_restart: None,
+                partial_artifacts: None,
+                moss_runtime: None,
+            },
+        )
+        .await;
+        match default_runtime_result {
+            Ok(output) => assert_eq!(output.chunk_metrics[0].runner, "moss_joint"),
+            Err(error) => {
+                assert!(error.contains("start MOSS MLX joint transcription runtime"))
+            }
+        }
+
+        let pause = || true;
+        let paused = match transcribe_file_for_task_with_wav(
+            &task,
+            Path::new("/unused/asr"),
+            Path::new("/unused/model"),
+            &source,
+            &source,
+            &source_info,
+            TaskTranscribeHooks {
+                on_chunk_progress: None,
+                on_chunk_metric: None,
+                pause_check: Some(&pause),
+                force_pause_task_id: None,
+                memory_limit_hints: &[],
+                server_url: None,
+                startup_fallback_reason: None,
+                server_state: None,
+                managed_server_restart: None,
+                partial_artifacts: None,
+                moss_runtime: Some(&runtime),
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("paused MOSS task unexpectedly completed"),
+            Err(error) => error,
+        };
+        assert_eq!(paused, ASR_TASK_PAUSED_MESSAGE);
+    }
+
+    #[test]
+    fn moss_json_parser_filters_empty_segments_and_reports_invalid_json() {
+        let error = parse_moss_json(
+            br#"[
+              {"start":-1.0,"end":-2.0,"speaker":"","text":" kept "},
+              {"start":-2.0,"end":-1.0,"speaker":"S01","text":" clamps to zero "},
+              {"start":1.0,"end":2.0,"speaker":"S02","text":"   "}
+            ]"#,
+            2_000,
+        )
+        .unwrap_err();
+        assert!(error.contains("no positive-duration speaker-aware segments"));
+        assert!(parse_moss_json(b"not-json", 2_000).is_err());
+    }
+
+    #[test]
+    fn moss_json_parser_rejects_length_stop_and_bounds_segments_to_audio() {
+        let length_error = parse_moss_json(
+            br#"{"segments":[{"start":0.0,"end":1.0,"speaker":"S01","text":"partial"}],"finish_reason":"length"}"#,
+            2_000,
+        )
+        .unwrap_err();
+        assert!(length_error.contains("max-new token limit"));
+
+        let result = parse_moss_json(
+            br#"{"segments":[
+              {"start":0.5,"end":3.0,"speaker":"S01","text":"clamped"},
+              {"start":2.5,"end":3.0,"speaker":"S02","text":"outside"},
+              {"start":1.5,"end":1.0,"speaker":"S03","text":"inverted"}
+            ],"finish_reason":"completed"}"#,
+            2_000,
+        )
+        .unwrap();
+        assert_eq!(result.text, "clamped");
+        assert_eq!(result.structured.segments.len(), 1);
+        assert_eq!(result.structured.segments[0].end_ms, 2_000);
+    }
+
+    #[test]
+    fn moss_platform_validation_rejects_unsupported_hosts_only_for_moss() {
+        assert!(validate_moss_transcription_mode_for_platform(
+            AsrTranscriptionMode::Standard,
+            "linux",
+            "x86_64"
+        )
+        .is_ok());
+        assert!(validate_moss_transcription_mode_for_platform(
+            AsrTranscriptionMode::MossJoint,
+            "macos",
+            "aarch64"
+        )
+        .is_ok());
+        assert!(validate_moss_transcription_mode_for_platform(
+            AsrTranscriptionMode::MossJoint,
+            "linux",
+            "x86_64"
+        )
+        .unwrap_err()
+        .contains("only on Apple Silicon macOS"));
+    }
+
+    #[test]
+    fn transcription_mode_helpers_select_runtime_diarization_progress_and_model() {
+        let temp = TempDir::new().unwrap();
+        let mut task = test_directory_task("mode-helpers", temp.path().to_path_buf());
+        task.runtime_strategy = AsrRuntimeStrategy::ForkPerChunk;
+        assert!(task_uses_standard_runtime(&task));
+        assert!(!task_uses_external_diarization(&task));
+        assert!(!task_uses_task_lifetime_server(&task));
+        assert!(!task_uses_file_lifetime_server(&task));
+        assert_eq!(task_initial_processing_stage(&task), ("asr", None));
+        assert_eq!(task_external_diarization_profile(&task), None);
+        assert_eq!(task_asr_stage_message(&task), "transcribing audio");
+        assert_eq!(effective_task_model(&task), task.model);
+
+        task.diarization.enabled = true;
+        assert!(task_uses_external_diarization(&task));
+        assert_eq!(
+            task_initial_processing_stage(&task),
+            (
+                "normalize",
+                Some(format!(
+                    "speaker diarization profile: {}",
+                    task.diarization.profile
+                ))
+            )
+        );
+        assert_eq!(
+            task_external_diarization_profile(&task),
+            Some(task.diarization.profile.clone())
+        );
+        assert_eq!(
+            task_asr_stage_message(&task),
+            "transcribing diarized audio segments"
+        );
+
+        task.runtime_strategy = AsrRuntimeStrategy::ReusePerFile;
+        assert!(task_uses_file_lifetime_server(&task));
+        task.runtime_strategy = AsrRuntimeStrategy::ReuseServer;
+        assert!(task_uses_task_lifetime_server(&task));
+
+        task.transcription_mode = AsrTranscriptionMode::MossJoint;
+        assert!(!task_uses_standard_runtime(&task));
+        assert!(!task_uses_external_diarization(&task));
+        assert!(!task_uses_task_lifetime_server(&task));
+        assert!(!task_uses_file_lifetime_server(&task));
+        assert_eq!(task_initial_processing_stage(&task), ("asr", None));
+        assert_eq!(task_external_diarization_profile(&task), None);
+        assert_eq!(
+            task_asr_stage_message(&task),
+            "jointly transcribing audio with native speaker labels"
+        );
+        assert_eq!(
+            effective_task_model(&task),
+            "MOSS-Transcribe-Diarize-MLX-8bit"
+        );
     }
 
     #[test]
@@ -120,6 +1798,27 @@ mod tests {
         task.runtime_strategy = AsrRuntimeStrategy::ForkPerChunk;
         task.diarization.enabled = true;
         assert_eq!(effective_max_concurrent_files(&task), 16);
+
+        task.transcription_mode = AsrTranscriptionMode::MossJoint;
+        assert_eq!(effective_max_concurrent_files(&task), 1);
+    }
+
+    #[test]
+    fn moss_summary_reports_native_diarization_ready_without_external_assets() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut task = test_directory_task("moss-diarization-summary", temp.path().join("audio"));
+        task.diarization.enabled = true;
+        task.diarization.profile = "missing-external-profile".to_string();
+        let files = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+
+        task.transcription_mode = AsrTranscriptionMode::Standard;
+        assert!(!summarize_diarization(&task, &files).0);
+
+        task.transcription_mode = AsrTranscriptionMode::MossJoint;
+        assert!(summarize_diarization(&task, &files).0);
     }
 
     #[test]
@@ -129,11 +1828,59 @@ mod tests {
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
         std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("completed.wav");
+        std::fs::write(&source, make_wav(&[500i16; 100])).unwrap();
         let task = test_directory_task("running-concurrency-task", audio_dir);
         add_task(task.clone()).unwrap();
+        let mut completed = pending_record(&task.id, &source);
+        completed.status = FileStatus::Success;
+        completed.output_text_path = Some(temp.path().join("old.txt"));
+        completed.output_metadata_path = Some(temp.path().join("old.json"));
+        completed.output_timeline_path = Some(temp.path().join("old.timeline.json"));
+        completed.text_chars = 8;
+        completed.chunk_metrics.push(AsrChunkMetric {
+            chunk_index: 0,
+            offset_secs: 0,
+            duration_secs: 1,
+            runner: "fork_per_chunk".to_string(),
+            status: "ok".to_string(),
+            elapsed_ms: 1,
+            rtf: 0.001,
+            text_chars: 8,
+            text_sha1: sha1_hex(b"old text"),
+            server_url: None,
+            fallback_reason: None,
+            error: None,
+            recorded_at_ms: now_ms(),
+        });
+        let completed_key = "success".to_string();
+        let files = [
+            (completed_key.clone(), FileStatus::Success),
+            ("partial".to_string(), FileStatus::PartialSuccess),
+            ("failed".to_string(), FileStatus::Failed),
+            ("processing".to_string(), FileStatus::Processing),
+            ("pending".to_string(), FileStatus::Pending),
+        ]
+        .into_iter()
+        .map(|(key, status)| {
+            let mut record = completed.clone();
+            record.status = status;
+            (key, record)
+        })
+        .collect();
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files,
+            },
+        )
+        .unwrap();
         RUNNING_TASKS.lock().unwrap().insert(task.id.clone());
 
         let update = UpdateTaskRequest {
+            transcription_mode: None,
+            transcription_prompt: None,
             name: None,
             audio_dir: None,
             recursive: None,
@@ -153,6 +1900,8 @@ mod tests {
         assert_eq!(updated.max_concurrent_files, 4);
 
         let risky_update = UpdateTaskRequest {
+            transcription_mode: None,
+            transcription_prompt: None,
             name: None,
             audio_dir: None,
             recursive: None,
@@ -172,6 +1921,177 @@ mod tests {
         assert_eq!(error.0, StatusCode::CONFLICT);
 
         RUNNING_TASKS.lock().unwrap().remove(&task.id);
+
+        let prompt_update = UpdateTaskRequest {
+            transcription_mode: Some(AsrTranscriptionMode::MossJoint),
+            transcription_prompt: Some("  Bifrost 专有词  ".to_string()),
+            name: None,
+            audio_dir: None,
+            recursive: None,
+            enabled: None,
+            paused: None,
+            schedule: None,
+            language: None,
+            model: None,
+            runtime_strategy: None,
+            max_concurrent_files: None,
+            diarization: None,
+            daily_agent: None,
+            external_devices: None,
+            import_policy: None,
+        };
+        let updated = update_task_config(&task.id, prompt_update).unwrap();
+        assert_eq!(updated.transcription_mode, AsrTranscriptionMode::MossJoint);
+        assert_eq!(updated.transcription_prompt, "Bifrost 专有词");
+        let reloaded = find_task(&task.id).unwrap();
+        assert_eq!(reloaded.transcription_prompt, "Bifrost 专有词");
+        let requeued = load_file_store(&task.id);
+        assert_eq!(requeued.files.len(), 5);
+        for (key, record) in &requeued.files {
+            assert_eq!(record.status, FileStatus::Pending);
+            if key == "pending" {
+                assert!(record.output_text_path.is_some());
+                assert_eq!(record.text_chars, 8);
+                continue;
+            }
+            assert!(record.output_text_path.is_none());
+            assert!(record.output_metadata_path.is_none());
+            assert!(record.output_timeline_path.is_none());
+            assert!(record.chunk_metrics.is_empty());
+            assert_eq!(record.text_chars, 0);
+        }
+
+        let mut completed_again = requeued.files.get(&completed_key).unwrap().clone();
+        completed_again.status = FileStatus::Success;
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(completed_key.clone(), completed_again)]),
+            },
+        )
+        .unwrap();
+        let idempotent_update = UpdateTaskRequest {
+            transcription_mode: Some(AsrTranscriptionMode::MossJoint),
+            transcription_prompt: Some("Bifrost 专有词".to_string()),
+            name: None,
+            audio_dir: None,
+            recursive: None,
+            enabled: None,
+            paused: None,
+            schedule: None,
+            language: None,
+            model: None,
+            runtime_strategy: None,
+            max_concurrent_files: None,
+            diarization: None,
+            daily_agent: None,
+            external_devices: None,
+            import_policy: None,
+        };
+        update_task_config(&task.id, idempotent_update).unwrap();
+        assert_eq!(
+            load_file_store(&task.id)
+                .files
+                .get(&completed_key)
+                .unwrap()
+                .status,
+            FileStatus::Success
+        );
+
+        let prompt_only_update = UpdateTaskRequest {
+            transcription_mode: None,
+            transcription_prompt: Some("Bifrost 新专有词".to_string()),
+            name: None,
+            audio_dir: None,
+            recursive: None,
+            enabled: None,
+            paused: None,
+            schedule: None,
+            language: None,
+            model: None,
+            runtime_strategy: None,
+            max_concurrent_files: None,
+            diarization: None,
+            daily_agent: None,
+            external_devices: None,
+            import_policy: None,
+        };
+        update_task_config(&task.id, prompt_only_update).unwrap();
+        assert_eq!(
+            find_task(&task.id).unwrap().transcription_prompt,
+            "Bifrost 新专有词"
+        );
+        assert_eq!(
+            load_file_store(&task.id)
+                .files
+                .get(&completed_key)
+                .unwrap()
+                .status,
+            FileStatus::Pending
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn create_task_http_endpoint_normalizes_prompt_and_persists_defaults() {
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+        use tokio::net::TcpListener;
+
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service_fn(|req: Request<Incoming>| async move {
+                Ok::<_, hyper::Error>(create_task_response(req).await)
+            });
+            http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await
+                .unwrap();
+        });
+
+        // This request targets the listener owned by this test. Ignore process-wide
+        // proxy variables so parallel proxy-environment tests cannot redirect it.
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .post(format!("http://{address}/api/asr/tasks"))
+            .header(reqwest::header::CONNECTION, "close")
+            .json(&serde_json::json!({
+                "name": "HTTP coverage task",
+                "audio_dir": audio_dir,
+                "transcription_mode": "standard",
+                "transcription_prompt": "  Bifrost\r\nAPI  "
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["name"], "HTTP coverage task");
+        assert_eq!(body["transcription_mode"], "standard");
+        assert_eq!(body["transcription_prompt"], "Bifrost\nAPI");
+        assert_eq!(body["recursive"], true);
+        assert_eq!(body["enabled"], true);
+        assert!(audio_dir.is_dir());
+
+        let task_id = body["id"].as_str().unwrap();
+        let persisted = find_task(task_id).unwrap();
+        assert_eq!(persisted.audio_dir, audio_dir);
+        assert_eq!(persisted.transcription_prompt, "Bifrost\nAPI");
+        server.abort();
+        if let Err(error) = server.await {
+            assert!(error.is_cancelled());
+        }
     }
 
     #[test]
@@ -819,6 +2739,7 @@ mod tests {
         let ok = Ok(WholeFileTranscription {
             text: "hello".to_string(),
             segments: Vec::new(),
+            structured: Default::default(),
         });
         let metric = chunk_metric(
             2,
@@ -1175,6 +3096,51 @@ mod tests {
     }
 
     #[test]
+    fn moss_pending_batch_skips_deterministic_failure_until_source_changes() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("sparse.wav");
+        std::fs::write(&source, b"audio").unwrap();
+
+        let mut task = test_directory_task("moss-terminal", audio_dir);
+        task.transcription_mode = AsrTranscriptionMode::MossJoint;
+        let attempted = HashSet::new();
+        let mut files = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        let initial = discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+        assert_eq!(initial.pending, vec![source.clone()]);
+
+        let key = source_key(&source);
+        let record = files.files.get_mut(&key).unwrap();
+        assert!(!moss_failure_is_non_retryable_for_unchanged_source(
+            &task, &source, record,
+        ));
+        record.status = FileStatus::Failed;
+        assert!(!moss_failure_is_non_retryable_for_unchanged_source(
+            &task, &source, record,
+        ));
+        record.error = Some(format!(
+            "moss_non_retryable_v{}: MOSS output has no complete speaker-aware segment before 256 generated tokens",
+            env!("CARGO_PKG_VERSION")
+        ));
+        let unchanged = discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+        assert!(unchanged.pending.is_empty());
+
+        std::fs::write(&source, b"audio changed").unwrap();
+        let changed = discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+        assert_eq!(changed.pending, vec![source.clone()]);
+
+        task.transcription_mode = AsrTranscriptionMode::Standard;
+        let standard = discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+        assert_eq!(standard.pending, vec![source]);
+    }
+
+    #[test]
     fn pending_batch_sorts_older_source_time_first() {
         let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
@@ -1313,6 +3279,8 @@ mod tests {
         let audio_dir = temp.path().join("audio");
         std::fs::create_dir_all(&audio_dir).unwrap();
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "pause-task".to_string(),
             name: "Pause Task".to_string(),
             audio_dir,
@@ -1555,6 +3523,174 @@ mod tests {
             .is_some_and(|reason| reason.contains("switching remaining chunks to fork_per_chunk isolation")));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_server_chunk_and_bisect_empty_results_initialize_structured_view() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let state = ServerRunnerState {
+            server_url: "test-empty".to_string(),
+            baseline_rtf: None,
+            baseline_samples: Vec::new(),
+            server_failures: 0,
+            force_fork_for_remaining: false,
+            restart_required: false,
+            current_chunk_failure_reason: None,
+            fallback_reason: None,
+        };
+        let server_result = run_server_chunk_request(
+            &state,
+            "chinese",
+            Path::new("/nonexistent/chunk.wav"),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(server_result.structured.segments.is_empty());
+
+        let temp = TempDir::new().unwrap();
+        let too_short = transcribe_single_chunk_with_bisect(
+            Path::new("/nonexistent/asr"),
+            Path::new("/nonexistent/model"),
+            "chinese",
+            Path::new("/nonexistent/chunk.wav"),
+            0,
+            0,
+            0,
+            temp.path(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(too_short.structured.segments.is_empty());
+
+        let silent = transcribe_single_chunk_with_bisect(
+            Path::new("/nonexistent/asr"),
+            Path::new("/nonexistent/model"),
+            "chinese",
+            Path::new("/nonexistent/chunk.wav"),
+            0,
+            MIN_CHUNK_SECS,
+            1,
+            temp.path(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(silent.structured.segments.is_empty());
+
+        let empty_chunks = transcribe_in_chunks(
+            Path::new("/nonexistent/asr"),
+            Path::new("/nonexistent/model"),
+            "chinese",
+            Path::new("/nonexistent/input.wav"),
+            temp.path(),
+            0,
+            30,
+            5,
+            0,
+            None,
+            None,
+            None,
+            "Qwen3-ASR-0.6B",
+            &[],
+            AsrRuntimeStrategy::ForkPerChunk,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(empty_chunks.transcription.structured.segments.is_empty());
+
+        let fake_bin = temp.path().join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        let fake_ffmpeg = fake_bin.join("ffmpeg");
+        std::fs::write(
+            &fake_ffmpeg,
+            "#!/bin/sh\ninput=''\noutput=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '-i' ]; then\n    shift\n    input=\"$1\"\n  fi\n  output=\"$1\"\n  shift\ndone\ncp \"$input\" \"$output\"\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&fake_ffmpeg).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_ffmpeg, permissions).unwrap();
+        let mut path_entries = vec![fake_bin];
+        if let Some(path) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&path));
+        }
+        let fake_path = std::env::join_paths(path_entries).unwrap();
+        let _path_guard = EnvVarGuard::set("PATH", &fake_path);
+
+        let silent_wav = temp.path().join("silent-four-seconds.wav");
+        std::fs::write(&silent_wav, make_wav(&vec![0i16; 4 * 16_000])).unwrap();
+        let hinted = transcribe_chunk_with_memory_hint(
+            Path::new("/nonexistent/asr"),
+            Path::new("/nonexistent/model"),
+            "chinese",
+            &silent_wav,
+            0,
+            4,
+            2,
+            temp.path(),
+            2,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(hinted.text.is_empty());
+        assert!(hinted.structured.segments.is_empty());
+
+        let speech_wav = temp.path().join("speech-four-seconds.wav");
+        std::fs::write(&speech_wav, make_wav(&vec![500i16; 4 * 16_000])).unwrap();
+        let fake_asr = temp.path().join("fake-asr");
+        write_executable(
+            &fake_asr,
+            "#!/bin/sh\necho 'asr cli exceeded memory footprint limit' >&2\nexit 1\n",
+        );
+        let both_halves_failed = transcribe_single_chunk_with_bisect(
+            &fake_asr,
+            Path::new("/nonexistent/model"),
+            "chinese",
+            &speech_wav,
+            0,
+            4,
+            3,
+            temp.path(),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(both_halves_failed.contains("both halves produced no output"));
+
+        write_executable(
+            &fake_asr,
+            "#!/bin/sh\ncase \"$2\" in *-d0-a.wav) printf '<asr_text>left half</asr_text>' ;; *) echo 'asr cli exceeded memory footprint limit' >&2; exit 1 ;; esac\n",
+        );
+        let one_half_recovered = transcribe_single_chunk_with_bisect(
+            &fake_asr,
+            Path::new("/nonexistent/model"),
+            "chinese",
+            &speech_wav,
+            0,
+            4,
+            4,
+            temp.path(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(one_half_recovered.text, "left half");
+        assert!(one_half_recovered.structured.segments.is_empty());
+    }
+
     #[test]
     fn force_pause_requires_persisted_pause_state() {
         let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1563,6 +3699,8 @@ mod tests {
         let audio_dir = temp.path().join("audio");
         std::fs::create_dir_all(&audio_dir).unwrap();
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "force-pause-task".to_string(),
             name: "Force Pause Task".to_string(),
             audio_dir,
@@ -1672,6 +3810,8 @@ mod tests {
         let audio = audio_dir.join("done.wav");
         std::fs::write(&audio, b"audio").unwrap();
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "task1".to_string(),
             name: "Task".to_string(),
             audio_dir: audio_dir.clone(),
@@ -1782,6 +3922,8 @@ mod tests {
         std::fs::write(&done, b"audio").unwrap();
         std::fs::write(&pending, b"pending-audio").unwrap();
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "task-cleanable-summary".to_string(),
             name: "Task".to_string(),
             audio_dir: audio_dir.clone(),
@@ -1846,6 +3988,8 @@ mod tests {
         std::fs::write(&partial, b"partial-audio").unwrap();
         std::fs::write(&outside, b"outside-audio").unwrap();
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "task-cleanup".to_string(),
             name: "Task".to_string(),
             audio_dir: audio_dir.clone(),
@@ -1912,6 +4056,8 @@ mod tests {
         let audio = audio_dir.join("bad.wav");
         std::fs::write(&audio, b"bad-audio").unwrap();
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "task1".to_string(),
             name: "Task".to_string(),
             audio_dir: audio_dir.clone(),
@@ -1961,6 +4107,8 @@ mod tests {
         let audio = audio_dir.join("same.wav");
         std::fs::write(&audio, b"old-audio").unwrap();
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "task1".to_string(),
             name: "Task".to_string(),
             audio_dir: audio_dir.clone(),
@@ -2011,6 +4159,8 @@ mod tests {
         let audio = audio_dir.join("done.wav");
         std::fs::write(&audio, b"audio").unwrap();
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "task-detail".to_string(),
             name: "Task detail".to_string(),
             audio_dir: audio_dir.clone(),
@@ -2065,6 +4215,8 @@ mod tests {
         let audio_dir = temp.path().join("audio");
         std::fs::create_dir_all(&audio_dir).unwrap();
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "task-detail-sort".to_string(),
             name: "Task detail sort".to_string(),
             audio_dir: audio_dir.clone(),
@@ -2198,6 +4350,8 @@ mod tests {
             .unwrap()
             .timestamp_millis() as u64;
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "task-daily-refresh".to_string(),
             name: "Daily Refresh".to_string(),
             audio_dir: audio_dir.clone(),
@@ -2359,6 +4513,7 @@ mod tests {
             WholeFileTranscription {
                 text: "hello world".to_string(),
                 segments: Vec::new(),
+                structured: Default::default(),
             },
             0,
             30,
@@ -2371,6 +4526,7 @@ mod tests {
             WholeFileTranscription {
                 text: "world again".to_string(),
                 segments: Vec::new(),
+                structured: Default::default(),
             },
             28,
             30,
@@ -2383,6 +4539,7 @@ mod tests {
             WholeFileTranscription {
                 text: "final words".to_string(),
                 segments: Vec::new(),
+                structured: Default::default(),
             },
             56,
             6,
@@ -2960,6 +5117,15 @@ mod tests {
     }
 
     #[test]
+    fn rms_energy_streams_across_internal_buffer_boundaries() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("long.wav");
+        std::fs::write(&path, make_wav(&[750i16; 40_000])).unwrap();
+        let rms = compute_wav_rms_energy(&path).unwrap();
+        assert!((rms - 750.0).abs() < 0.01, "expected 750, got {rms}");
+    }
+
+    #[test]
     fn rms_energy_empty_data_chunk() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("empty.wav");
@@ -3040,6 +5206,16 @@ mod tests {
         buf.extend_from_slice(&[2, 0, 16, 0]); // block_align, bits
                                                // No data chunk follows
         std::fs::write(&path, &buf).unwrap();
+        assert!(compute_wav_rms_energy(&path).is_none());
+    }
+
+    #[test]
+    fn rms_energy_rejects_truncated_data_chunk() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("truncated-data.wav");
+        let mut wav = make_wav(&[100, -100, 200, -200]);
+        wav.truncate(wav.len() - 2);
+        std::fs::write(&path, wav).unwrap();
         assert!(compute_wav_rms_energy(&path).is_none());
     }
 
@@ -3488,6 +5664,8 @@ mod tests {
         std::fs::write(&second, b"same-audio").unwrap();
 
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "hash-task".to_string(),
             name: "Hash Task".to_string(),
             audio_dir: audio_dir.clone(),
@@ -3689,6 +5867,8 @@ mod tests {
         std::fs::write(&pending, b"new pending").unwrap();
 
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "hash-skip-task".to_string(),
             name: "Hash Skip Task".to_string(),
             audio_dir: audio_dir.clone(),

@@ -842,7 +842,8 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
 
   const createDirectoryTask = useCallback(async () => {
     try {
-      const values = await taskForm.validateFields();
+      await taskForm.validateFields();
+      const values = taskForm.getFieldsValue(true);
       const externalDevices = parseExternalDeviceBindings(values.external_devices);
       await createAsrTask({
         name: values.name,
@@ -852,6 +853,8 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
         schedule: buildTaskSchedule(values),
         language: values.language,
         model: values.model,
+        transcription_mode: values.transcription_mode,
+        transcription_prompt: values.transcription_prompt ?? "",
         runtime_strategy: values.runtime_strategy,
         max_concurrent_files: values.max_concurrent_files,
         diarization: {
@@ -890,7 +893,8 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
   const updateDirectoryTask = useCallback(
     async (id: string) => {
       try {
-        const values = await taskForm.validateFields();
+        await taskForm.validateFields();
+        const values = taskForm.getFieldsValue(true);
         const externalDevices = parseExternalDeviceBindings(values.external_devices);
         const updated = await updateAsrTask(id, {
           name: values.name,
@@ -900,6 +904,8 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
           schedule: buildTaskSchedule(values),
           language: values.language,
           model: values.model,
+          transcription_mode: values.transcription_mode,
+          transcription_prompt: values.transcription_prompt ?? "",
           runtime_strategy: values.runtime_strategy,
           max_concurrent_files: values.max_concurrent_files,
           diarization: {
