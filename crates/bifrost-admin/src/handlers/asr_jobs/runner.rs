@@ -1486,6 +1486,7 @@ async fn transcribe_file_for_task_with_wav(
             .partial_artifacts
             .as_ref()
             .map(|context| context.started_at_ms);
+        let moss_started = Instant::now();
         let result = run_moss_joint_transcription(
             runtime,
             wav,
@@ -1494,8 +1495,26 @@ async fn transcribe_file_for_task_with_wav(
             hooks.pause_check,
             file_started_at_ms,
         )
-        .await?;
-        (result, Vec::new(), Vec::new(), Vec::new(), None)
+        .await;
+        let elapsed_ms = moss_started
+            .elapsed()
+            .as_millis()
+            .clamp(1, u128::from(u64::MAX)) as u64;
+        let metric = chunk_metric(
+            0,
+            0,
+            duration_secs.max(1),
+            "moss_joint",
+            &result,
+            elapsed_ms,
+            None,
+            None,
+        );
+        let result = result?;
+        if let Some(callback) = hooks.on_chunk_metric {
+            callback(metric.clone());
+        }
+        (result, Vec::new(), Vec::new(), vec![metric], None)
     } else if task.diarization.enabled {
         let diarized = transcribe_diarized_segments_for_task(
             task,

@@ -255,6 +255,7 @@ mod tests {
         );
         std::fs::write(&paths.runner, b"fixture runner").unwrap();
         std::fs::create_dir_all(&paths.site_packages).unwrap();
+        std::fs::write(paths.site_packages.join("mlx.fixture"), b"verified package").unwrap();
         prepare_moss_model_snapshot(&paths);
         std::fs::copy(&model_source, &paths.model).unwrap();
         write_moss_verification_marker(&asr_home, &paths, &model_spec).unwrap();
@@ -271,6 +272,44 @@ mod tests {
         assert!(ready.runtime_ready && ready.model_ready);
         assert_eq!(ready.installed_model_bytes, model_spec.bytes);
         assert_eq!(ready.model, MOSS_MODEL_ID);
+
+        std::fs::remove_file(paths.site_packages.join("mlx.fixture")).unwrap();
+        let missing_runtime_dependency = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert!(!missing_runtime_dependency.runtime_ready);
+        assert!(missing_runtime_dependency.model_ready);
+        std::fs::write(paths.site_packages.join("mlx.fixture"), b"verified package").unwrap();
+
+        std::fs::write(paths.site_packages.join("mlx.fixture"), b"corrupt package").unwrap();
+        let corrupt_runtime = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert_eq!(corrupt_runtime.status, "partial");
+        assert!(!corrupt_runtime.runtime_ready);
+        assert!(corrupt_runtime.model_ready);
+        std::fs::write(paths.site_packages.join("mlx.fixture"), b"verified package").unwrap();
+
+        std::fs::write(paths.site_packages.join("unexpected.fixture"), b"unexpected package")
+            .unwrap();
+        let unexpected_runtime_dependency = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert!(!unexpected_runtime_dependency.runtime_ready);
+        assert!(unexpected_runtime_dependency.model_ready);
+        std::fs::remove_file(paths.site_packages.join("unexpected.fixture")).unwrap();
 
         std::thread::sleep(Duration::from_millis(5));
         std::fs::write(&paths.model, b"tampered model fixture").unwrap();
@@ -1197,6 +1236,13 @@ mod tests {
             Some("moss_joint_native")
         );
         assert_eq!(output.timeline.segments.len(), 2);
+        assert_eq!(output.chunk_metrics.len(), 1);
+        assert_eq!(output.chunk_metrics[0].runner, "moss_joint");
+        assert_eq!(output.chunk_metrics[0].status, "ok");
+        assert_eq!(output.chunk_metrics[0].duration_secs, 12);
+        assert!(output.chunk_metrics[0].elapsed_ms >= 1);
+        assert_eq!(output.chunk_metrics[0].text_chars, 11);
+        assert_eq!(output.chunk_metrics[0].text_sha1, sha1_hex(b"hello\nworld"));
         assert_eq!(output.timeline.segments[0].absolute_start_ms, Some(10_100));
         assert_eq!(output.timeline.segments[1].absolute_end_ms, Some(12_400));
         assert_eq!(
@@ -1213,6 +1259,11 @@ mod tests {
         assert_eq!(metadata["model"], "MOSS-Transcribe-Diarize-MLX-8bit");
         assert_eq!(metadata["transcription_mode"], "moss_joint");
         assert_eq!(metadata["transcription_prompt_configured"], true);
+        assert_eq!(metadata["chunk_metrics"][0]["runner"], "moss_joint");
+        assert_eq!(metadata["chunk_metrics"][0]["status"], "ok");
+        assert!(metadata["chunk_metrics"][0]["elapsed_ms"]
+            .as_u64()
+            .is_some_and(|elapsed_ms| elapsed_ms >= 1));
         assert!(!std::fs::read_to_string(&output.metadata_path)
             .unwrap()
             .contains("private prompt"));

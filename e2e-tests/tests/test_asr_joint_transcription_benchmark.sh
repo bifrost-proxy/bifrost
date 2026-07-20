@@ -137,6 +137,18 @@ if python3 "$TOOL" \
 fi
 grep -q "refusing to write benchmark output over ASR task input" "$TMP_DIR/overwrite-timeline.log"
 
+# Every target must resolve to a different successful recording. Reusing the
+# nearest sample under multiple target labels would make the report misleading.
+if python3 "$TOOL" \
+  --task-dir "$TASK_DIR" \
+  --target-seconds 600 1800 60 90 \
+  --output "$TMP_DIR/insufficient.json" > "$TMP_DIR/insufficient.log" 2>&1; then
+  echo "benchmark tool unexpectedly reused a source for multiple targets" >&2
+  exit 1
+fi
+grep -q "not enough distinct successful source files" "$TMP_DIR/insufficient.log"
+test ! -e "$TMP_DIR/insufficient.json"
+
 FINAL_HASH="$(shasum -a 256 "$TASK_DIR/files.json" "$DATA_DIR/ten.wav" "$DATA_DIR/thirty.wav")"
 test "$BEFORE_HASH" = "$FINAL_HASH"
 

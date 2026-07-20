@@ -148,8 +148,14 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         )
         selected = next(
             (record for record in ordered if record["source_path"] not in used_sources),
-            ordered[0],
+            None,
         )
+        if selected is None:
+            raise ValueError(
+                "not enough distinct successful source files for requested "
+                f"benchmark targets: need {len(args.target_seconds)}, "
+                f"found {len(used_sources)}"
+            )
         used_sources.add(selected["source_path"])
         samples.append(sample_report(selected, target_seconds, args.hash_inputs))
 

@@ -1,7 +1,7 @@
 const MOSS_RUNTIME_ASSET_STEM: &str = "moss-joint-runtime";
 const MOSS_MODEL_ID: &str = "MOSS-Transcribe-Diarize-MLX-8bit";
 const MOSS_VERIFICATION_FILE: &str = "verification.json";
-const MOSS_VERIFICATION_SCHEMA_VERSION: u8 = 3;
+const MOSS_VERIFICATION_SCHEMA_VERSION: u8 = 4;
 const MOSS_MODEL_FILE: &str = "model.safetensors";
 const MOSS_MODEL_URL: &str =
     "https://huggingface.co/majentik/MOSS-Transcribe-Diarize-MLX-8bit/resolve/90c3a1ab78fa56e47e1493ddea48e3ababaf2f71/model.safetensors";
@@ -80,6 +80,7 @@ struct MossVerificationMarker {
     model_modified_ms: u64,
     python_sha256: String,
     runner_sha256: String,
+    runtime_site_packages_sha256: BTreeMap<String, String>,
     #[serde(default)]
     model_metadata_sha256: BTreeMap<String, String>,
 }
@@ -445,6 +446,61 @@ fn moss_model_layout_is_complete(paths: &MossRuntimePaths, spec: &MossModelSpec)
             .all(|file| paths.model_dir.join(file).is_file())
 }
 
+fn moss_site_packages_sha256(paths: &MossRuntimePaths) -> Result<BTreeMap<String, String>, String> {
+    fn collect(
+        root: &Path,
+        directory: &Path,
+        checksums: &mut BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        let entries = std::fs::read_dir(directory).map_err(|error| {
+            format!(
+                "read MOSS site-packages directory {}: {error}",
+                directory.display()
+            )
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                format!(
+                    "read MOSS site-packages entry in {}: {error}",
+                    directory.display()
+                )
+            })?;
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|error| {
+                format!("inspect MOSS site-packages entry {}: {error}", path.display())
+            })?;
+            if file_type.is_dir() {
+                if entry.file_name() != "__pycache__" {
+                    collect(root, &path, checksums)?;
+                }
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let extension = path.extension().and_then(|value| value.to_str());
+            if matches!(extension, Some("pyc" | "pyo")) {
+                continue;
+            }
+            let relative = path.strip_prefix(root).map_err(|error| {
+                format!("resolve MOSS site-packages path {}: {error}", path.display())
+            })?;
+            checksums.insert(relative.to_string_lossy().into_owned(), sha256_file(&path)?);
+        }
+        Ok(())
+    }
+
+    let mut checksums = BTreeMap::new();
+    collect(&paths.site_packages, &paths.site_packages, &mut checksums)?;
+    if checksums.is_empty() {
+        return Err(format!(
+            "MOSS site-packages directory {} contains no packaged dependencies",
+            paths.site_packages.display()
+        ));
+    }
+    Ok(checksums)
+}
+
 fn write_moss_verification_marker(
     asr_home: &Path,
     paths: &MossRuntimePaths,
@@ -463,6 +519,7 @@ fn write_moss_verification_marker(
         model_modified_ms,
         python_sha256: sha256_file(&paths.python)?,
         runner_sha256: sha256_file(&paths.runner)?,
+        runtime_site_packages_sha256: moss_site_packages_sha256(paths)?,
         model_metadata_sha256: moss_model_metadata_sha256(paths)?,
     };
     let encoded = serde_json::to_vec_pretty(&marker)
@@ -491,7 +548,9 @@ fn moss_verified_component_status(
         && paths.runner.is_file()
         && paths.site_packages.is_dir()
         && sha256_file(&paths.python).is_ok_and(|sha| sha == marker.python_sha256)
-        && sha256_file(&paths.runner).is_ok_and(|sha| sha == marker.runner_sha256);
+        && sha256_file(&paths.runner).is_ok_and(|sha| sha == marker.runner_sha256)
+        && moss_site_packages_sha256(paths)
+            .is_ok_and(|checksums| checksums == marker.runtime_site_packages_sha256);
     let model_modified_ms = std::fs::metadata(&paths.model)
         .and_then(|metadata| metadata.modified())
         .ok()
@@ -675,6 +734,10 @@ async fn moss_runtime_status(
     let runtime_valid = paths.python.is_file()
         && paths.runner.is_file()
         && paths.site_packages.is_dir()
+        && marker.as_ref().is_some_and(|marker| {
+            moss_site_packages_sha256(paths)
+                .is_ok_and(|checksums| checksums == marker.runtime_site_packages_sha256)
+        })
         && verify_moss_runtime_binary(paths).await.is_ok();
     let model_weight_valid = paths.model.is_file()
         && tokio::task::spawn_blocking({
