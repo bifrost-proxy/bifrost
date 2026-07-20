@@ -866,9 +866,12 @@ mod tests {
             directory_conflict.join("runtime/python/bin/python3.12"),
         )
         .unwrap();
-        assert!(install_moss_runtime_archive(&archive, &directory_conflict)
-            .unwrap_err()
-            .contains("refuse to replace MOSS runtime directory"));
+        let directory_conflict_error =
+            install_moss_runtime_archive(&archive, &directory_conflict).unwrap_err();
+        #[cfg(unix)]
+        assert!(directory_conflict_error.contains("refuse to replace MOSS runtime directory"));
+        #[cfg(not(unix))]
+        assert!(directory_conflict_error.contains("unsupported on this platform"));
 
         #[cfg(unix)]
         {
