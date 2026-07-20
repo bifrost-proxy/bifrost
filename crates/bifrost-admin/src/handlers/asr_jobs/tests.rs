@@ -704,28 +704,40 @@ mod tests {
         let archive = temp.path().join("runtime.zip");
         write_moss_runtime_zip(&archive, "#!/bin/sh\necho 'moss-mlx-runtime ok'\n");
         let destination = temp.path().join("installed");
-        install_moss_runtime_archive(&archive, &destination).unwrap();
-        install_moss_runtime_archive(&archive, &destination).unwrap();
-        assert!(destination
-            .join("runtime/python/bin/python3.12")
-            .is_file());
-        assert!(std::fs::symlink_metadata(destination.join("runtime/python/bin/python3.12"))
+        #[cfg(unix)]
+        {
+            install_moss_runtime_archive(&archive, &destination).unwrap();
+            install_moss_runtime_archive(&archive, &destination).unwrap();
+            assert!(destination
+                .join("runtime/python/bin/python3.12")
+                .is_file());
+            assert!(std::fs::symlink_metadata(
+                destination.join("runtime/python/bin/python3.12")
+            )
             .unwrap()
             .file_type()
             .is_symlink());
-        assert_eq!(
-            std::fs::read_link(destination.join("runtime/python/bin/python3.12")).unwrap(),
-            PathBuf::from("python3.12-real")
-        );
-        assert!(destination.join("runtime/moss_mlx_runner.py").is_file());
-        assert!(destination.join("model/config.json").is_file());
-        assert!(destination.join("runtime/empty").is_dir());
-        assert!(!destination.join("LICENSE").exists());
-        assert!(!destination
-            .join("runtime/site-packages/._invalid.py")
-            .exists());
-        assert!(!destination.join("model/._config.json").exists());
-        assert!(!destination.join("model/.DS_Store").exists());
+            assert_eq!(
+                std::fs::read_link(destination.join("runtime/python/bin/python3.12")).unwrap(),
+                PathBuf::from("python3.12-real")
+            );
+            assert!(destination.join("runtime/moss_mlx_runner.py").is_file());
+            assert!(destination.join("model/config.json").is_file());
+            assert!(destination.join("runtime/empty").is_dir());
+            assert!(!destination.join("LICENSE").exists());
+            assert!(!destination
+                .join("runtime/site-packages/._invalid.py")
+                .exists());
+            assert!(!destination.join("model/._config.json").exists());
+            assert!(!destination.join("model/.DS_Store").exists());
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(install_moss_runtime_archive(&archive, &destination)
+                .unwrap_err()
+                .contains("unsupported on this platform"));
+            std::fs::create_dir_all(&destination).unwrap();
+        }
 
         let blocked_destination = temp.path().join("blocked-install-destination");
         std::fs::write(&blocked_destination, b"not a directory").unwrap();
