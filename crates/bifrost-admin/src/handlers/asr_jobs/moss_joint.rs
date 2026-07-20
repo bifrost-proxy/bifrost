@@ -31,6 +31,7 @@ const MOSS_MIN_OUTPUT_TOKENS: u64 = 5_120;
 const MOSS_MAX_WHOLE_FILE_SECONDS: u64 = 3_300;
 const MOSS_MAX_RUNTIME_RTF: f64 = 0.5;
 const MOSS_MIN_AUDIO_DURATION_MS: u64 = 10_000;
+const MOSS_RUNTIME_SELF_TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 static MOSS_INIT_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -794,12 +795,28 @@ fn configure_moss_python_command(command: &mut Command, paths: &MossRuntimePaths
 }
 
 async fn verify_moss_runtime_binary(paths: &MossRuntimePaths) -> Result<(), String> {
+    verify_moss_runtime_binary_with_timeout(paths, MOSS_RUNTIME_SELF_TEST_TIMEOUT).await
+}
+
+async fn verify_moss_runtime_binary_with_timeout(
+    paths: &MossRuntimePaths,
+    timeout: Duration,
+) -> Result<(), String> {
     let mut command = Command::new(&paths.python);
-    command.arg(&paths.runner).arg("--self-test");
+    command
+        .arg(&paths.runner)
+        .arg("--self-test")
+        .kill_on_drop(true);
     configure_moss_python_command(&mut command, paths);
-    let output = command
-        .output()
+    let output = tokio::time::timeout(timeout, command.output())
         .await
+        .map_err(|_| {
+            format!(
+                "MOSS MLX runtime smoke check timed out after {}ms for {}",
+                timeout.as_millis(),
+                paths.python.display()
+            )
+        })?
         .map_err(|error| {
             format!(
                 "run MOSS MLX runtime smoke check {}: {error}",
@@ -1056,7 +1073,9 @@ async fn moss_management_status_with_spec(
             };
         }
     };
-    let (runtime_ready, model_ready) = moss_verified_component_status(asr_home, &paths, model_spec);
+    let (runtime_marker_valid, model_ready) =
+        moss_verified_component_status(asr_home, &paths, model_spec);
+    let runtime_ready = runtime_marker_valid && verify_moss_runtime_binary(&paths).await.is_ok();
     let ready = runtime_ready && model_ready;
     let status = if ready {
         "ready"

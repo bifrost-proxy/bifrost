@@ -293,10 +293,13 @@ mod tests {
         assert!(!missing.model_ready);
         assert_eq!(missing.expected_model_bytes, 22);
 
+        let runtime_framework = paths.python_home.join("lib/framework.fixture");
         write_executable(
             &paths.python,
-            "#!/bin/sh\necho 'moss-mlx-runtime ok'\n",
+            "#!/bin/sh\nframework=\"$(dirname \"$0\")/../lib/framework.fixture\"\nif [ \"$(cat \"$framework\" 2>/dev/null)\" = 'verified framework' ]; then echo 'moss-mlx-runtime ok'; else echo 'framework missing or corrupt' >&2; exit 1; fi\n",
         );
+        std::fs::create_dir_all(runtime_framework.parent().unwrap()).unwrap();
+        std::fs::write(&runtime_framework, b"verified framework\n").unwrap();
         std::fs::write(&paths.runner, b"fixture runner").unwrap();
         std::fs::create_dir_all(&paths.site_packages).unwrap();
         std::fs::write(paths.site_packages.join("mlx.fixture"), b"verified package").unwrap();
@@ -316,6 +319,30 @@ mod tests {
         assert!(ready.runtime_ready && ready.model_ready);
         assert_eq!(ready.installed_model_bytes, model_spec.bytes);
         assert_eq!(ready.model, MOSS_MODEL_ID);
+
+        std::fs::remove_file(&runtime_framework).unwrap();
+        let missing_runtime_framework = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert_eq!(missing_runtime_framework.status, "partial");
+        assert!(!missing_runtime_framework.runtime_ready);
+        assert!(missing_runtime_framework.model_ready);
+
+        std::fs::write(&runtime_framework, b"corrupt framework\n").unwrap();
+        let corrupt_runtime_framework = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert!(!corrupt_runtime_framework.runtime_ready);
+        assert!(corrupt_runtime_framework.model_ready);
+        std::fs::write(&runtime_framework, b"verified framework\n").unwrap();
 
         std::fs::remove_file(paths.site_packages.join("mlx.fixture")).unwrap();
         let missing_runtime_dependency = moss_management_status_with_spec(
@@ -1024,6 +1051,15 @@ mod tests {
         assert!(verify_moss_runtime_binary(&invalid_paths).await.is_err());
         invalid_paths.python = temp.path().join("missing");
         assert!(verify_moss_runtime_binary(&invalid_paths).await.is_err());
+        let hanging_runtime = temp.path().join("hanging-runtime");
+        write_executable(&hanging_runtime, "#!/bin/sh\nsleep 2\n");
+        invalid_paths.python = hanging_runtime;
+        assert!(
+            verify_moss_runtime_binary_with_timeout(&invalid_paths, Duration::from_millis(100))
+                .await
+                .unwrap_err()
+                .contains("smoke check timed out")
+        );
 
         let bad_home = temp.path().join("bad-home");
         let bad_source = MossRuntimeSource {
