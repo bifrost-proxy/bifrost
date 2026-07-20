@@ -12,8 +12,8 @@
 
    ```bash
    export ASR_TASK_ID=2a3e44aeee494d8682ac404e36cc746f
-   export ASR_TASK_DIR=/Users/eden_studio/.bifrost/moss-preview/asr/tasks/$ASR_TASK_ID
-   export MOSS_AUDIO=/Users/eden_studio/demo/TX02_MIC005_20260707_171914_orig.wav
+   export ASR_TASK_DIR="$HOME/.bifrost/moss-preview/asr/tasks/$ASR_TASK_ID"
+   export MOSS_AUDIO=~/path/to/a/real-long-recording.wav
    ```
 
 4. 已按 `.github/workflows/release.yml` 固定 MLX-Audio commit `64e8416c303fb3b3463dab8eb4ebd78c55a87c1a`、Python requirements 和模型 snapshot。模拟 release URL 时同时设置 runtime zip 的 `BIFROST_MOSS_RUNTIME_SHA256`。模型权重按 1,258,427,442 bytes 与 SHA-256 `469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190` 校验。
@@ -42,7 +42,7 @@
 
 1. 记录生产 9900 PID、预览 `files.json` 和真实 WAV 的 SHA-256。
 2. 执行 `bash e2e-tests/tests/test_asr_moss_release_contract.sh`，确认 release workflow 与 Rust 初始化器的固定源码、模型、元数据、资产名和 checksum 契约一致。
-3. 使用独立 `BIFROST_DATA_DIR=/Users/eden_studio/.bifrost/moss-preview` 和端口 18997 启动当前分支 Bifrost，并通过 `BIFROST_MOSS_RUNTIME_URL=file://...zip` 模拟正式 release 资产。
+3. 使用独立 `BIFROST_DATA_DIR="$HOME/.bifrost/moss-preview"` 和端口 18997 启动当前分支 Bifrost，并通过 `BIFROST_MOSS_RUNTIME_URL=file://...zip` 模拟正式 release 资产。
 4. 通过 API 创建或读取 `moss_joint` 任务，确认 prompt 字段；触发 `/run`，轮询直到任务不再运行。
 5. 推理进程开始后记录 PID、命令行和 `started_at_ms`；若 1800.15 秒音频运行达到 900.075 秒仍未完成，立即调用 `pause?force=true` 并判失败。
 
@@ -166,6 +166,25 @@
 - 已成功 MOSS 样本的状态、开始/结束时间、文本长度和四个 SHA-256 全部不变，证明服务重启和任务恢复没有重复解码完成资源。
 - 验证结束时任务为 paused、无 MOSS 子进程，9900 保持可体验；剩余未完成资源留在原队列供后续显式恢复。
 
+### TC-MOSS-10：Review 评论回归、平台能力与资产自修复
+
+操作步骤：
+
+1. 执行 `! rg -n '/(Users|home)/[^/]+/' human_tests/asr-moss-joint-transcription.md`，确认测试说明不依赖开发者机器路径。
+2. 执行 `cargo test -p bifrost-admin moss_ --lib -- --nocapture`，覆盖 MOSS 原生 diarization ready、平台门禁、metadata 缺失/损坏修复、生成长度终止、倒置和越界时间戳、缺时长与严格 watchdog。
+3. 执行 `pnpm --dir web exec vitest run src/pages/ASR/directoryTaskMode.test.ts`，确认 MOSS 选项在能力确认前及不支持的平台禁用，只在 Apple Silicon macOS 启用。
+4. 执行 `bash e2e-tests/tests/test_asr_moss_release_contract.sh`，确认 runner 保留 `completed|length`、release tag 版本经 `BIFROST_VERSION` 注入资产 URL，并继续执行固定 snapshot/打包契约。
+5. 执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_asr_moss_task_mode.sh`。Apple Silicon 上验证创建、PATCH、重启持久化；不支持的平台验证创建和切换均返回 HTTP 400。
+6. 用当前二进制在临时数据目录和非正式端口启动服务，浏览器进入 ASR Scheduled Tasks 并打开 New Directory Task。确认平台支持时 MOSS 选项可选；切换亮色和暗色主题，检查 disabled/说明文字、表单尺寸和可读性。
+
+预期结果：
+
+- MOSS 任务摘要把模型原生 speaker 视为 ready，不要求外部 diarization 资产。
+- runtime/model metadata 缺失或内容改变会撤销 Ready，并从已校验 runtime archive 恢复；有效权重不会重复下载。
+- 达到生成 token 上限时任务失败且不发布截断全文；倒置时间戳被拒绝，超出音频的片段被丢弃或裁剪。
+- 严格端到端 `0.5x` watchdog 不增加启动宽限；短于 10 秒和缺时长输入在 MLX 启动前明确失败。
+- WebUI 与 API 使用同一平台边界，亮色和暗色下状态表达清晰且不依赖硬编码颜色。
+
 ## 清理步骤
 
 1. 用户要求继续体验时保留 18997；否则停止且仅停止本测试启动的预览 PID。TC-MOSS-09 的 9900 服务按用户要求保留运行，但任务在取得有限验证证据后重新暂停。
@@ -191,3 +210,4 @@
 | 2026-07-19 | TC-MOSS-08 | PASS：静态发布契约确认 MLX-Audio/model 固定 commit、12 个 metadata、1,258,427,442-byte 权重 SHA-256、共享 packager 与 macOS PR CI job 一致；真实 macOS fixture 先因 `._config.json` 被拒绝，清理后生成 zip 和可复算 `.sha256`，runtime 入口、metadata、license/notice 齐全。 |
 | 2026-07-19 | TC-MOSS-08 | PASS（动态下发边界复测）：CLI tar.gz/tar.xz、Desktop `.app` 与实际挂载的 fixture DMG 均通过轻量核心包检查；混入 `moss-joint-runtime`、`model.safetensors` 或超过配置上限均被拒绝。runtime packager 同时拒绝权重，只允许 runtime、固定 metadata 与 license/notice，权重继续由初始化器单独下载。 |
 | 2026-07-19 | TC-MOSS-09 | PASS（两次发现并修复真实质量/资源缺口后复测）：使用 release CLI 重启默认 `~/.bifrost:9900`，真实队列验证 daemon PID `98617`；最终源码重新构建安装后 daemon PID `36918`，模型仍在 `~/.bifrost/asr/moss_joint_mlx` 且 `installed_model_bytes=1258427442`，未重复下载。初始 20 个磁盘仍存在的未完成资源中，旧版稀疏 1800.15 秒文件从 530363 ms/RTF 0.2946 降至 16293 ms/RTF 0.00905；缺时长 335 ms 返回 `moss_duration_unavailable`，2.533 秒文件 342 ms 返回 `moss_audio_too_short`。首次协议保护只检查前缀仍让稀疏文件运行 219 秒，立即 force-pause 后收紧为 256 token 内必须形成完整正时长片段；随后发现一个 462966 ms 的重复“嗯”零时长输出被错误包装为 success，立即隔离该轮新产物、恢复为未完成并增加 Python/Rust 双层退化拒绝，复测 16199 ms 正确失败。增加同版本确定性失败去重后，新一轮待执行总数由 20 降到 11，不再重复加载上述坏输入；正常 1800.15 秒未完成文件 `TX02_MIC027_20260714_135743_orig.wav` 最终 150771 ms/RTF 0.08375 成功，11001 字、353 segments、9 speakers，时间轴 10–1799740 ms。每次发现无价值路径都 force-pause，所有完成/失败 RTF 均未超过 0.5。最终服务确认任务 `paused=true/running=false`、无 MOSS 子进程，9900 继续运行。重启前已成功样本 `TX01_MIC052_20260624_123014_orig.wav` 的 status、started/finished、5217 字及 source/text/metadata/timeline 四个 SHA-256 前后完全一致，证明没有重跑已完成资源。 |
+| 2026-07-20 | TC-MOSS-10 | PASS：路径可移植性检查无命中；Rust MOSS 回归 20/20、Web 模式选项 3/3、release 契约和真实 task-mode E2E 均通过。隔离服务运行在 18996 且系统代理保持关闭；Puppeteer Chrome 在 1280×900 下逐项验证亮色和暗色主题，New Directory Task 的 MOSS 选项在 Apple Silicon 上均可见、可选，19/19 浏览器步骤通过、59 个 API 请求无失败。测试服务、临时数据目录和临时场景文件均已清理。 |

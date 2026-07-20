@@ -14,6 +14,7 @@ import types
 
 release_path = Path(".github/workflows/release.yml")
 runtime_path = Path("crates/bifrost-admin/src/handlers/asr_jobs/moss_joint.rs")
+build_path = Path("crates/bifrost-admin/build.rs")
 requirements_path = Path("scripts/asr/moss-mlx-requirements.txt")
 runner_path = Path("scripts/asr/moss_mlx_runner.py")
 patch_path = Path("scripts/asr/mlx-audio-moss-quantized-conv.patch")
@@ -25,6 +26,7 @@ ci_path = Path(".github/workflows/ci.yml")
 
 release = release_path.read_text(encoding="utf-8")
 runtime = runtime_path.read_text(encoding="utf-8")
+build_script = build_path.read_text(encoding="utf-8")
 requirements = requirements_path.read_text(encoding="utf-8")
 runner = runner_path.read_text(encoding="utf-8")
 packager = packager_path.read_text(encoding="utf-8")
@@ -136,13 +138,22 @@ class FakeModel:
         for token in range(self.token_count):
             yield token, None
 
-valid = runner_module.generate_protocol_segments(
+valid, valid_finish_reason = runner_module.generate_protocol_segments(
     FakeModel("[0.10][S01]hello[1.20]", 32),
     Path("fixture.wav"),
     max_tokens=100,
     prompt="protocol",
 )
 require(valid[0]["speaker"] == "S01", "valid streaming protocol output was rejected")
+require(valid_finish_reason == "completed", "short valid output did not report completion")
+limited, limited_finish_reason = runner_module.generate_protocol_segments(
+    FakeModel("[0.10][S01]partial[1.20]", 32),
+    Path("fixture.wav"),
+    max_tokens=32,
+    prompt="protocol",
+)
+require(limited[0]["speaker"] == "S01", "length-limited fixture lost its segment")
+require(limited_finish_reason == "length", "max-token termination was not preserved")
 try:
     runner_module.generate_protocol_segments(
         FakeModel("unstructured output", 512),
@@ -158,6 +169,8 @@ else:
 asset_template = 'moss-joint-runtime-v${VERSION}-aarch64-apple-darwin.zip'
 require(asset_template in release, "release archive name drifted")
 require('"{MOSS_RUNTIME_ASSET_STEM}-v{}-aarch64-apple-darwin.zip"' in runtime, "runtime asset name drifted")
+require('cargo:rerun-if-env-changed=BIFROST_VERSION' in build_script, "release version changes do not invalidate the admin build")
+require('cargo:rustc-env=CARGO_PKG_VERSION={}' in build_script, "BIFROST_VERSION is not injected into runtime release URLs")
 require('dist/*.zip' in release and 'dist/*.sha256' in release, "CLI artifact upload omits runtime archive or checksum")
 require('-name "*.zip"' in release and '-name "*.sha256"' in release, "release asset collection omits runtime archive or checksum")
 require('cat *.sha256 > "bifrost-v${VERSION}-checksums.txt"' in release, "combined release checksum manifest is missing")

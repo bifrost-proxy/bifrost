@@ -117,6 +117,7 @@ mod tests {
               {"id":"1","start":3.5,"end":5.0,"speaker":"S02","text":"开始开会"}
             ]"#
                 .as_bytes(),
+            6_000,
         )
         .unwrap();
         assert_eq!(result.text, "你好\n开始开会");
@@ -578,8 +579,9 @@ mod tests {
     async fn moss_initializer_reports_unsupported_platform_before_download() {
         let temp = TempDir::new().unwrap();
         let paths = moss_runtime_paths(temp.path());
-        let status = moss_runtime_status(&paths, &moss_model_spec()).await;
-        assert_eq!(status, (false, false));
+        let status = moss_runtime_status(temp.path(), &paths, &moss_model_spec()).await;
+        assert!(!status.runtime_valid);
+        assert!(!status.model_valid());
         assert!(ensure_moss_joint_runtime(temp.path(), "unsupported-platform")
             .await
             .unwrap_err()
@@ -726,8 +728,8 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(installed_paths.python, paths.python);
-        let (runtime_valid, model_valid) = moss_runtime_status(&paths, &model_spec).await;
-        assert!(runtime_valid && model_valid);
+        let status = moss_runtime_status(&asr_home, &paths, &model_spec).await;
+        assert!(status.all_valid());
         assert!(std::fs::read_dir(moss_runtime_dir(&asr_home))
             .unwrap()
             .filter_map(Result::ok)
@@ -742,6 +744,39 @@ mod tests {
         .await
         .unwrap();
         assert!(verify_moss_runtime_binary(&paths).await.is_ok());
+
+        std::fs::write(paths.model_dir.join("config.json"), b"corrupted metadata").unwrap();
+        let corrupted = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert!(!corrupted.model_ready);
+        ensure_moss_joint_runtime_with_spec(
+            &asr_home,
+            "moss-repair-corrupt-metadata",
+            model_spec.clone(),
+            Some(runtime_source.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(paths.model_dir.join("config.json")).unwrap(),
+            b"{}"
+        );
+
+        std::fs::remove_file(paths.model_dir.join("tokenizer.json")).unwrap();
+        ensure_moss_joint_runtime_with_spec(
+            &asr_home,
+            "moss-repair-missing-metadata",
+            model_spec.clone(),
+            Some(runtime_source.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(paths.model_dir.join("tokenizer.json").is_file());
         let invalid_runtime = temp.path().join("invalid-runtime");
         write_executable(&invalid_runtime, "#!/bin/sh\necho 'not moss usage' >&2\n");
         let mut invalid_paths = paths.clone();
@@ -802,7 +837,11 @@ mod tests {
             &asr_home,
             "moss-valid-resources",
             &paths,
-            (true, true),
+            MossComponentStatus {
+                runtime_valid: true,
+                model_weight_valid: true,
+                model_metadata_valid: true,
+            },
             &runtime_source,
             &model_spec,
             None,
@@ -817,7 +856,11 @@ mod tests {
             &asr_home,
             "moss-runtime-quarantine-error",
             &paths,
-            (false, true),
+            MossComponentStatus {
+                runtime_valid: false,
+                model_weight_valid: true,
+                model_metadata_valid: true,
+            },
             &runtime_source,
             &model_spec,
             None,
@@ -837,7 +880,11 @@ mod tests {
             &asr_home,
             "moss-model-quarantine-error",
             &paths,
-            (true, false),
+            MossComponentStatus {
+                runtime_valid: true,
+                model_weight_valid: false,
+                model_metadata_valid: true,
+            },
             &runtime_source,
             &model_spec,
             None,
@@ -861,7 +908,11 @@ mod tests {
             &blocked_model_home,
             "moss-model-dir-error",
             &blocked_paths,
-            (true, false),
+            MossComponentStatus {
+                runtime_valid: true,
+                model_weight_valid: false,
+                model_metadata_valid: true,
+            },
             &runtime_source,
             &model_spec,
             None,
@@ -896,7 +947,11 @@ mod tests {
             &asr_home,
             "moss-archive-quarantine-error",
             &paths,
-            (false, true),
+            MossComponentStatus {
+                runtime_valid: false,
+                model_weight_valid: true,
+                model_metadata_valid: true,
+            },
             &archive_runtime_source,
             &model_spec,
             None,
@@ -1200,10 +1255,57 @@ mod tests {
               {"start":-2.0,"end":-1.0,"speaker":"S01","text":" clamps to zero "},
               {"start":1.0,"end":2.0,"speaker":"S02","text":"   "}
             ]"#,
+            2_000,
         )
         .unwrap_err();
         assert!(error.contains("no positive-duration speaker-aware segments"));
-        assert!(parse_moss_json(b"not-json").is_err());
+        assert!(parse_moss_json(b"not-json", 2_000).is_err());
+    }
+
+    #[test]
+    fn moss_json_parser_rejects_length_stop_and_bounds_segments_to_audio() {
+        let length_error = parse_moss_json(
+            br#"{"segments":[{"start":0.0,"end":1.0,"speaker":"S01","text":"partial"}],"finish_reason":"length"}"#,
+            2_000,
+        )
+        .unwrap_err();
+        assert!(length_error.contains("max-new token limit"));
+
+        let result = parse_moss_json(
+            br#"{"segments":[
+              {"start":0.5,"end":3.0,"speaker":"S01","text":"clamped"},
+              {"start":2.5,"end":3.0,"speaker":"S02","text":"outside"},
+              {"start":1.5,"end":1.0,"speaker":"S03","text":"inverted"}
+            ],"finish_reason":"completed"}"#,
+            2_000,
+        )
+        .unwrap();
+        assert_eq!(result.text, "clamped");
+        assert_eq!(result.structured.segments.len(), 1);
+        assert_eq!(result.structured.segments[0].end_ms, 2_000);
+    }
+
+    #[test]
+    fn moss_platform_validation_rejects_unsupported_hosts_only_for_moss() {
+        assert!(validate_moss_transcription_mode_for_platform(
+            AsrTranscriptionMode::Standard,
+            "linux",
+            "x86_64"
+        )
+        .is_ok());
+        assert!(validate_moss_transcription_mode_for_platform(
+            AsrTranscriptionMode::MossJoint,
+            "macos",
+            "aarch64"
+        )
+        .is_ok());
+        assert!(validate_moss_transcription_mode_for_platform(
+            AsrTranscriptionMode::MossJoint,
+            "linux",
+            "x86_64"
+        )
+        .unwrap_err()
+        .contains("only on Apple Silicon macOS"));
     }
 
     #[test]
@@ -1314,6 +1416,24 @@ mod tests {
 
         task.transcription_mode = AsrTranscriptionMode::MossJoint;
         assert_eq!(effective_max_concurrent_files(&task), 1);
+    }
+
+    #[test]
+    fn moss_summary_reports_native_diarization_ready_without_external_assets() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut task = test_directory_task("moss-diarization-summary", temp.path().join("audio"));
+        task.diarization.enabled = true;
+        task.diarization.profile = "missing-external-profile".to_string();
+        let files = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+
+        task.transcription_mode = AsrTranscriptionMode::Standard;
+        assert!(!summarize_diarization(&task, &files).0);
+
+        task.transcription_mode = AsrTranscriptionMode::MossJoint;
+        assert!(summarize_diarization(&task, &files).0);
     }
 
     #[test]

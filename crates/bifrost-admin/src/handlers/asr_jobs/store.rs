@@ -1102,7 +1102,9 @@ fn summarize_diarization(
     task: &AsrDirectoryTask,
     file_store: &FileStore,
 ) -> (bool, bool, usize, usize) {
-    let ready = !task.diarization.enabled || diarization_profile_ready(&task.diarization.profile);
+    let ready = task.transcription_mode.uses_native_speakers()
+        || !task.diarization.enabled
+        || diarization_profile_ready(&task.diarization.profile);
     let running = file_store
         .files
         .values()

@@ -61,7 +61,7 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 ### 统一模型管理
 
 - Model Management 的模型选择同时列出 Qwen3-ASR 和 `MOSS-Transcribe-Diarize-MLX-8bit`。Qwen 继续管理可租约的本地 ASR service；MOSS 是任务按需执行的端到端 runtime，不展示 Host、Service Port 等无效服务配置。
-- MOSS 状态接口分别报告 runtime 自检、模型 snapshot 校验、安装目录和预期权重大小。初始化时执行完整 runtime self-test 与 1.2 GB 权重 SHA-256，成功后写入带固定模型 SHA/大小/mtime 和 Python/runner 哈希的验证标记；日常状态读取复核标记与小文件哈希，避免每次打开页面重新扫描 1.2 GB。权重被同大小替换后 mtime 变化也会撤销 Ready。
+- MOSS 状态接口分别报告 runtime 自检、模型 snapshot 校验、安装目录和预期权重大小。初始化时执行完整 runtime self-test 与 1.2 GB 权重 SHA-256，成功后写入带固定模型 SHA/大小/mtime、Python/runner 哈希和所有必需 metadata SHA-256 的验证标记；日常状态读取复核标记与小文件哈希，避免每次打开页面重新扫描 1.2 GB。权重被同大小替换后 mtime 变化、metadata 缺失或内容损坏都会撤销 Ready；修复时从已校验的 runtime archive 恢复 metadata，不重复下载仍通过完整校验的权重。
 - 用户可在管理页主动初始化或修复 `~/.bifrost/asr/moss_joint_mlx`。下载复用断点续传和同一进程内初始化锁，管理页与同一服务中的任务同时触发时不会并行写入同一资源。
 - Directory Task 不保存另一份模型路径或依赖配置；它只保存 `transcription_mode` 与任务 Prompt。运行时若发现资产尚未准备好，调用与管理页完全相同的校验和初始化函数作为自动兜底。
 
@@ -71,11 +71,15 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 - runtime 打包器必须拒绝任何 `.safetensors` 权重；权重始终由初始化器单独动态下载。macOS CLI binary/archive 与 Desktop `.app`/DMG 必须通过核心包门禁：禁止出现 MOSS runtime、Python site-packages、runner 或权重路径，并以 512 MiB 上限拦截灾难性包体膨胀。PR CI 必须扫描两种 macOS 架构的真实 CLI binary 和真实 Desktop bundle，不能只验证最小 fixture。这个上限不是日常体积目标，正常主包应显著低于该值。
 - 普通 PR 不下载 1.2 GB 权重，也不重复安装完整 MLX Python 环境；`test_asr_moss_release_contract.sh` 负责固定 commit、requirements、模型 metadata、权重 URL/大小/SHA-256、release 资产名和共享打包脚本调用的静态契约。
 - 正式 tag release 仍执行完整 Python/MLX 安装、runner self-test、host-path 动态依赖检查、真实 runtime 打包、checksum 汇总和 release asset 上传。PR 的轻量门禁不能替代 tag release，但保证 workflow 语法引用和确定性打包结果不会到发版时才首次执行。
+- 正式 release 的 `BIFROST_VERSION` 由 `crates/bifrost-admin/build.rs` 注入编译期 `CARGO_PKG_VERSION`，因此 runtime asset 与 checksum URL 使用 tag/release 版本而不是静态 Cargo.toml 版本；release-contract E2E 固定验证这条注入链路。
 6. 用户 Prompt 通过仅当前进程可读的临时文件传入。runtime 始终先使用官方时间戳/说话人协议 Prompt，再追加用户上下文，避免自定义 Prompt 破坏结构化输出协议。
 7. 整段推理采用端到端硬 watchdog：预算从文件进入 Processing 时开始，包含媒体探测和 WAV 规范化；启动 MLX 子进程前先扣除已经消耗的时间，只把剩余预算交给推理。总耗时达到音频时长的 `0.5x` 时杀死子进程并返回 `moss_rtf_exceeded`，不会继续消耗资源或悄悄回退到不同模型。
 8. release 打包禁用 macOS resource fork，并扫描拒绝 `._*`、`.DS_Store`、`__MACOSX`；安装器也跳过这些元数据，避免 Python 模型加载器误读 AppleDouble 文件。
 9. 在启动约 2 GiB MLX 进程前执行廉价保护：无法取得时长时返回 `moss_duration_unavailable`；短于 10 秒的音频在严格 `0.5x` SLA 下返回 `moss_audio_too_short`；规范化 WAV 为数字静音/近零信号时返回 `moss_audio_silent`。RMS 以流式扫描计算，不把长 WAV 整体读入内存。阈值约为 -60 dBFS，只过滤数字静音，不用激进 VAD 剪掉低音量说话。
 10. MLX 仍按官方建议对 55 分钟以内会议执行一次全局联合解码，不切成独立短块。runner 改用固定版本模型提供的 `stream_generate` 收集同一批 token；若前 256 个生成 token 内始终没有形成一条完整的 `[start][Sxx]text[end]` 协议片段，立即停止该稀疏/无语音输入。只出现未闭合的时间戳/说话人前缀不能绕过保护。合法输出继续完成原始全局解码和同一解析规则，因此正常多人录音的模型输入、采样温度、token 预算和 speaker 一致性不变。
+11. MOSS 任务只允许在 Apple Silicon macOS 创建或切换。WebUI 在状态接口确认平台能力前禁用 MOSS 选项，不支持的平台展示原因；服务端对创建和 PATCH 独立执行同一门禁，不能依赖前端隐藏。标准模式和历史任务读取保持兼容。
+12. MOSS 原生 speaker 是有效的 diarization 结果：任务摘要不再依赖 Sherpa/Pyannote 资产判断 `diarization_ready`。
+13. runner 输出 `segments + finish_reason` envelope；达到 `--max-new` 必须报告 `length` 并判为不完整，不能发布为成功。Rust 仍兼容旧 array payload。所有片段先拒绝倒置范围，再按已知音频时长裁剪或丢弃越界范围，确保全文、timeline 与字幕使用同一组内容。
 
 `runtime_strategy`、文件并发、任务模型、任务语言、外部说话人分离与声纹匹配只控制标准 Qwen 链路；MOSS 联合模式固定模型、自动识别语言，并以单文件串行方式执行整文件推理。WebUI 必须按当前模式只展示真实生效的配置：标准模式展示 Qwen pipeline 配置并隐藏 MOSS Prompt，MOSS 模式只展示 MOSS Prompt 和模式说明，并隐藏整组 Qwen pipeline 配置。名称、音频目录、调度、递归扫描、启用状态和外接设备导入属于任务级公共配置，两种模式都展示。被隐藏的标准模式配置保留在表单状态和任务中，切回标准模式后继续使用，不因切换或保存 MOSS Prompt 被重置。
 

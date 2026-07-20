@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { directoryTaskModeFields } from "./directoryTaskMode";
+import { directoryTaskModeFields, directoryTaskModeOptions } from "./directoryTaskMode";
 
 describe("directoryTaskModeFields", () => {
   it("shows only the standard pipeline fields for standard and initial forms", () => {
@@ -17,6 +17,23 @@ describe("directoryTaskModeFields", () => {
     expect(directoryTaskModeFields("moss_joint")).toEqual({
       showMossPrompt: true,
       showStandardPipeline: false,
+    });
+  });
+
+  it("enables MOSS only after the backend confirms Apple Silicon support", () => {
+    expect(directoryTaskModeOptions(true)[1]).toMatchObject({
+      value: "moss_joint",
+      disabled: false,
+    });
+    expect(directoryTaskModeOptions(false)[1]).toMatchObject({
+      value: "moss_joint",
+      disabled: true,
+      label: expect.stringContaining("requires Apple Silicon macOS"),
+    });
+    expect(directoryTaskModeOptions(null)[1]).toMatchObject({
+      value: "moss_joint",
+      disabled: true,
+      label: expect.stringContaining("checking platform support"),
     });
   });
 });

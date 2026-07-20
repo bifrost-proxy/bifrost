@@ -36,9 +36,9 @@ import type {
   AsrRuntimeStrategy,
   AsrTranscriptionMode,
 } from "../../../api/asr";
-import { listAsrExternalVolumes } from "../../../api/asr";
+import { getMossModelStatus, listAsrExternalVolumes } from "../../../api/asr";
 import { formatSchedule, formatTime } from "../asrUtils";
-import { directoryTaskModeFields } from "../directoryTaskMode";
+import { directoryTaskModeFields, directoryTaskModeOptions } from "../directoryTaskMode";
 
 const { Text } = Typography;
 
@@ -198,6 +198,8 @@ export default function DirectoryTasksPanel({
     volumes: AsrExternalVolume[];
   } | null>(null);
   const [volumePromptLoading, setVolumePromptLoading] = useState(false);
+  const [mossPlatformSupported, setMossPlatformSupported] = useState<boolean | null>(null);
+  const [mossUnsupportedReason, setMossUnsupportedReason] = useState<string | null>(null);
   const promptedVolumeKeysRef = useRef(new Set<string>());
   const volumePromptOpenRef = useRef(false);
 
@@ -214,6 +216,29 @@ export default function DirectoryTasksPanel({
       return progress ? shouldShowExternalImportProgress(progress) : false;
     })
     .map((task) => task.id);
+
+  useEffect(() => {
+    if (!configOpen) {
+      return;
+    }
+    let cancelled = false;
+    setMossPlatformSupported(null);
+    setMossUnsupportedReason(null);
+    void getMossModelStatus()
+      .then((status) => {
+        if (cancelled) return;
+        setMossPlatformSupported(status.platform_supported);
+        setMossUnsupportedReason(status.unsupported_reason ?? null);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setMossPlatformSupported(false);
+        setMossUnsupportedReason("MOSS platform availability could not be verified.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [configOpen]);
 
   const openCreate = () => {
     setEditingTask(null);
@@ -474,16 +499,7 @@ export default function DirectoryTasksPanel({
               <Form.Item name="transcription_mode" label="Transcription Mode">
                 <Select
                   data-testid="asr-transcription-mode-select"
-                  options={[
-                    {
-                      value: "standard",
-                      label: "Standard ASR + speaker diarization",
-                    },
-                    {
-                      value: "moss_joint",
-                      label: "MOSS joint transcription (speaker-aware)",
-                    },
-                  ]}
+                  options={directoryTaskModeOptions(mossPlatformSupported)}
                 />
               </Form.Item>
               <Text type="secondary" style={{ display: "block", marginTop: -16, marginBottom: 16 }}>
@@ -491,6 +507,12 @@ export default function DirectoryTasksPanel({
                   ? "MOSS uses one global MLX decode for timestamps and consistent speaker labels. The verified Apple Silicon runtime and 8-bit model initialize automatically; inference is stopped if it exceeds 0.5x the audio duration."
                   : "Uses the existing Qwen transcription pipeline and optional external speaker diarization."}
               </Text>
+              {showMossPrompt && mossPlatformSupported === false ? (
+                <Text type="warning" style={{ display: "block", marginTop: -12, marginBottom: 16 }}>
+                  {mossUnsupportedReason ??
+                    "MOSS joint transcription requires Apple Silicon macOS."}
+                </Text>
+              ) : null}
             </Col>
             {showMossPrompt ? (
               <Col xs={24}>

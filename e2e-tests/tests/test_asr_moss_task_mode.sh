@@ -79,6 +79,31 @@ print(json.dumps({
 PY
 )"
 
+if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
+  CREATE_STATUS="$(curl -sS -o "$DATA_DIR/unsupported-create.json" -w '%{http_code}' \
+    -X POST "$api" -H 'Content-Type: application/json' --data "$CREATE_JSON")"
+  [[ "$CREATE_STATUS" == "400" ]] || fail "expected unsupported MOSS create status 400, got $CREATE_STATUS"
+  grep -q 'only on Apple Silicon macOS' "$DATA_DIR/unsupported-create.json"
+
+  curl -fsS -X POST "$api" -H 'Content-Type: application/json' --data "$(python3 - "$AUDIO_DIR" <<'PY'
+import json, sys
+print(json.dumps({"name":"standard platform gate","audio_dir":sys.argv[1],"enabled":False}))
+PY
+)" >"$DATA_DIR/standard.json"
+  STANDARD_TASK_ID="$(python3 - "$DATA_DIR/standard.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["id"])
+PY
+)"
+  UPDATE_STATUS="$(curl -sS -o "$DATA_DIR/unsupported-update.json" -w '%{http_code}' \
+    -X PATCH "$api/$STANDARD_TASK_ID" -H 'Content-Type: application/json' \
+    --data '{"transcription_mode":"moss_joint"}')"
+  [[ "$UPDATE_STATUS" == "400" ]] || fail "expected unsupported MOSS update status 400, got $UPDATE_STATUS"
+  grep -q 'only on Apple Silicon macOS' "$DATA_DIR/unsupported-update.json"
+  echo "PASS: unsupported hosts reject MOSS task creation and updates"
+  exit 0
+fi
+
 curl -fsS -X POST "$api" -H 'Content-Type: application/json' --data "$CREATE_JSON" \
   >"$DATA_DIR/create.json"
 TASK_ID="$(python3 - "$DATA_DIR/create.json" <<'PY'

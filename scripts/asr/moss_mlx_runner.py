@@ -111,7 +111,7 @@ def generate_protocol_segments(
     *,
     max_tokens: int,
     prompt: str,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], str]:
     """Generate with an early guard against long malformed/no-speech output.
 
     A valid MOSS response must produce a complete positive-duration
@@ -159,7 +159,8 @@ def generate_protocol_segments(
         raise RuntimeError("MOSS MLX returned no valid speaker-aware segments")
     if transcript_is_degenerate(segments):
         raise RuntimeError("MOSS MLX returned degenerate repetitive transcription")
-    return segments
+    finish_reason = "length" if len(generated_tokens) >= max_tokens else "completed"
+    return segments, finish_reason
 
 
 def read_prompt(path: str | None) -> str:
@@ -224,13 +225,18 @@ def transcribe(args: argparse.Namespace) -> int:
     from mlx_audio.stt import load
 
     model = load(model_dir)
-    segments = generate_protocol_segments(
+    segments, finish_reason = generate_protocol_segments(
         model,
         audio,
         max_tokens=args.max_new,
         prompt=compose_prompt(read_prompt(args.prompt_file)),
     )
-    json.dump(segments, sys.stdout, ensure_ascii=False, separators=(",", ":"))
+    json.dump(
+        {"segments": segments, "finish_reason": finish_reason},
+        sys.stdout,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     sys.stdout.write("\n")
     return 0
 

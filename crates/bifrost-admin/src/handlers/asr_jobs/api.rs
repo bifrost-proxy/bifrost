@@ -345,6 +345,10 @@ async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
         Ok(prompt) => prompt,
         Err(error) => return error_response(StatusCode::BAD_REQUEST, &error),
     };
+    let transcription_mode = create.transcription_mode.unwrap_or_default();
+    if let Err(error) = validate_moss_transcription_mode(transcription_mode) {
+        return error_response(StatusCode::BAD_REQUEST, &error);
+    }
     let task = AsrDirectoryTask {
         id: uuid::Uuid::new_v4().as_simple().to_string(),
         name: create
@@ -361,7 +365,7 @@ async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
         model: create
             .model
             .unwrap_or_else(|| bifrost_asr::runtime::DEFAULT_ASR_MODEL.to_string()),
-        transcription_mode: create.transcription_mode.unwrap_or_default(),
+        transcription_mode,
         transcription_prompt,
         runtime_strategy: create.runtime_strategy.unwrap_or_default(),
         max_concurrent_files: normalize_max_concurrent_files(
@@ -414,6 +418,11 @@ async fn update_task_response(id: &str, req: Request<Incoming>) -> Response<BoxB
             );
         }
     };
+    if let Some(transcription_mode) = update.transcription_mode {
+        if let Err(error) = validate_moss_transcription_mode(transcription_mode) {
+            return error_response(StatusCode::BAD_REQUEST, &error);
+        }
+    }
     match update_task_config(id, update) {
         Ok(task) => json_response(&task_with_summary(task)),
         Err((status, error)) => error_response(status, &error),

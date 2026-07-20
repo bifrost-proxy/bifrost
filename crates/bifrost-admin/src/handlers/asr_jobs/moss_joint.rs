@@ -1,6 +1,7 @@
 const MOSS_RUNTIME_ASSET_STEM: &str = "moss-joint-runtime";
 const MOSS_MODEL_ID: &str = "MOSS-Transcribe-Diarize-MLX-8bit";
 const MOSS_VERIFICATION_FILE: &str = "verification.json";
+const MOSS_VERIFICATION_SCHEMA_VERSION: u8 = 3;
 const MOSS_MODEL_FILE: &str = "model.safetensors";
 const MOSS_MODEL_URL: &str =
     "https://huggingface.co/majentik/MOSS-Transcribe-Diarize-MLX-8bit/resolve/90c3a1ab78fa56e47e1493ddea48e3ababaf2f71/model.safetensors";
@@ -32,6 +33,19 @@ struct MossJsonSegment {
     end: f64,
     speaker: String,
     text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MossJsonEnvelope {
+    segments: Vec<MossJsonSegment>,
+    finish_reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum MossJsonPayload {
+    Envelope(MossJsonEnvelope),
+    Legacy(Vec<MossJsonSegment>),
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +80,25 @@ struct MossVerificationMarker {
     model_modified_ms: u64,
     python_sha256: String,
     runner_sha256: String,
+    #[serde(default)]
+    model_metadata_sha256: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MossComponentStatus {
+    runtime_valid: bool,
+    model_weight_valid: bool,
+    model_metadata_valid: bool,
+}
+
+impl MossComponentStatus {
+    fn model_valid(self) -> bool {
+        self.model_weight_valid && self.model_metadata_valid
+    }
+
+    fn all_valid(self) -> bool {
+        self.runtime_valid && self.model_valid()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -123,6 +156,25 @@ fn moss_runtime_asset_name_for(os: &str, arch: &str) -> Result<String, String> {
             os, arch
         ))
     }
+}
+
+fn validate_moss_transcription_mode_for_platform(
+    mode: AsrTranscriptionMode,
+    os: &str,
+    arch: &str,
+) -> Result<(), String> {
+    if mode != AsrTranscriptionMode::MossJoint {
+        return Ok(());
+    }
+    moss_runtime_asset_name_for(os, arch).map(|_| ())
+}
+
+fn validate_moss_transcription_mode(mode: AsrTranscriptionMode) -> Result<(), String> {
+    validate_moss_transcription_mode_for_platform(
+        mode,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    )
 }
 
 fn moss_runtime_asset_name() -> Result<String, String> {
@@ -288,6 +340,7 @@ fn moss_runtime_error_is_deterministic(error: &str) -> bool {
     error.contains("no complete speaker-aware segment before")
         || error.contains("degenerate repetitive transcription")
         || error.contains("no positive-duration speaker-aware segments")
+        || error.contains("max-new token limit before completion")
 }
 
 fn moss_failure_is_non_retryable_for_unchanged_source(
@@ -372,6 +425,18 @@ fn verify_moss_model_snapshot(paths: &MossRuntimePaths, spec: &MossModelSpec) ->
     Ok(())
 }
 
+fn moss_model_metadata_sha256(
+    paths: &MossRuntimePaths,
+) -> Result<BTreeMap<String, String>, String> {
+    MOSS_MODEL_REQUIRED_FILES
+        .iter()
+        .map(|file| {
+            let path = paths.model_dir.join(file);
+            sha256_file(&path).map(|sha256| ((*file).to_string(), sha256))
+        })
+        .collect()
+}
+
 fn moss_model_layout_is_complete(paths: &MossRuntimePaths, spec: &MossModelSpec) -> bool {
     std::fs::metadata(&paths.model)
         .is_ok_and(|metadata| metadata.len() == spec.bytes)
@@ -392,12 +457,13 @@ fn write_moss_verification_marker(
         .map(|duration| duration.as_millis() as u64)
         .ok_or_else(|| format!("read MOSS model mtime {}", paths.model.display()))?;
     let marker = MossVerificationMarker {
-        schema_version: 2,
+        schema_version: MOSS_VERIFICATION_SCHEMA_VERSION,
         model_bytes: spec.bytes,
         model_sha256: spec.sha256.clone(),
         model_modified_ms,
         python_sha256: sha256_file(&paths.python)?,
         runner_sha256: sha256_file(&paths.runner)?,
+        model_metadata_sha256: moss_model_metadata_sha256(paths)?,
     };
     let encoded = serde_json::to_vec_pretty(&marker)
         .map_err(|error| format!("serialize MOSS verification marker: {error}"))?;
@@ -415,7 +481,7 @@ fn moss_verified_component_status(
         .ok()
         .and_then(|bytes| serde_json::from_slice::<MossVerificationMarker>(&bytes).ok());
     let Some(marker) = marker.filter(|marker| {
-        marker.schema_version == 2
+        marker.schema_version == MOSS_VERIFICATION_SCHEMA_VERSION
             && marker.model_bytes == spec.bytes
             && marker.model_sha256 == spec.sha256
     }) else {
@@ -432,7 +498,9 @@ fn moss_verified_component_status(
         .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis() as u64);
     let model_ready = moss_model_layout_is_complete(paths, spec)
-        && model_modified_ms == Some(marker.model_modified_ms);
+        && model_modified_ms == Some(marker.model_modified_ms)
+        && moss_model_metadata_sha256(paths)
+            .is_ok_and(|metadata| metadata == marker.model_metadata_sha256);
     (runtime_ready, model_ready)
 }
 
@@ -588,14 +656,27 @@ async fn verify_moss_runtime_binary(paths: &MossRuntimePaths) -> Result<(), Stri
 }
 
 async fn moss_runtime_status(
+    asr_home: &Path,
     paths: &MossRuntimePaths,
     model_spec: &MossModelSpec,
-) -> (bool, bool) {
+) -> MossComponentStatus {
+    let marker = std::fs::read(moss_verification_path(asr_home))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<MossVerificationMarker>(&bytes).ok())
+        .filter(|marker| {
+            marker.schema_version == MOSS_VERIFICATION_SCHEMA_VERSION
+                && marker.model_bytes == model_spec.bytes
+                && marker.model_sha256 == model_spec.sha256
+        });
+    let model_metadata_valid = marker.as_ref().is_some_and(|marker| {
+        moss_model_metadata_sha256(paths)
+            .is_ok_and(|metadata| metadata == marker.model_metadata_sha256)
+    });
     let runtime_valid = paths.python.is_file()
         && paths.runner.is_file()
         && paths.site_packages.is_dir()
         && verify_moss_runtime_binary(paths).await.is_ok();
-    let model_valid = paths.model.is_file()
+    let model_weight_valid = paths.model.is_file()
         && tokio::task::spawn_blocking({
             let paths = paths.clone();
             let model_spec = model_spec.clone();
@@ -603,19 +684,22 @@ async fn moss_runtime_status(
         })
         .await
         .unwrap_or(false);
-    (runtime_valid, model_valid)
+    MossComponentStatus {
+        runtime_valid,
+        model_weight_valid,
+        model_metadata_valid,
+    }
 }
 
 async fn initialize_moss_joint_runtime(
     asr_home: &Path,
     task_id: &str,
     paths: &MossRuntimePaths,
-    component_status: (bool, bool),
+    component_status: MossComponentStatus,
     runtime_source: &MossRuntimeSource,
     model_spec: &MossModelSpec,
     progress_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::resource_download::DownloadProgress>>,
 ) -> Result<(), String> {
-    let (runtime_valid, model_valid) = component_status;
     if !task_id.is_empty() {
         update_run_progress(task_id, |progress| {
             progress.stage = "initializing_moss".to_string();
@@ -632,9 +716,9 @@ async fn initialize_moss_joint_runtime(
         .await
         .map_err(|error| format!("create MOSS runtime dir {}: {error}", root.display()))?;
 
-    if !runtime_valid {
+    if !component_status.runtime_valid || !component_status.model_metadata_valid {
         let runtime_dir = root.join("runtime");
-        if runtime_dir.exists() {
+        if !component_status.runtime_valid && runtime_dir.exists() {
             let invalid = root.join(format!("runtime.invalid-{}", now_ms()));
             tokio::fs::rename(&runtime_dir, &invalid)
                 .await
@@ -681,7 +765,7 @@ async fn initialize_moss_joint_runtime(
     }
     verify_moss_runtime_binary(paths).await?;
 
-    if !model_valid {
+    if !component_status.model_weight_valid {
         tokio::fs::create_dir_all(&paths.model_dir)
             .await
             .map_err(|error| {
@@ -744,8 +828,8 @@ async fn ensure_moss_joint_runtime_with_spec_and_progress(
 ) -> Result<MossRuntimePaths, String> {
     let _guard = MOSS_INIT_LOCK.lock().await;
     let paths = moss_runtime_paths(asr_home);
-    let (runtime_valid, model_valid) = moss_runtime_status(&paths, &model_spec).await;
-    if runtime_valid && model_valid {
+    let component_status = moss_runtime_status(asr_home, &paths, &model_spec).await;
+    if component_status.all_valid() {
         write_moss_verification_marker(asr_home, &paths, &model_spec)?;
         return Ok(paths);
     }
@@ -757,7 +841,7 @@ async fn ensure_moss_joint_runtime_with_spec_and_progress(
         asr_home,
         task_id,
         &paths,
-        (runtime_valid, model_valid),
+        component_status,
         &runtime_source,
         &model_spec,
         progress_tx,
@@ -961,9 +1045,23 @@ async fn stream_moss_model_initialization_with_spec(
 
 fn parse_moss_json(
     stdout: &[u8],
+    duration_ms: u64,
 ) -> Result<crate::handlers::asr_streaming::WholeFileTranscription, String> {
-    let segments: Vec<MossJsonSegment> = serde_json::from_slice(stdout)
+    let payload: MossJsonPayload = serde_json::from_slice(stdout)
         .map_err(|error| format!("parse MOSS runtime JSON: {error}"))?;
+    let (segments, finish_reason) = match payload {
+        MossJsonPayload::Envelope(envelope) => (envelope.segments, envelope.finish_reason),
+        MossJsonPayload::Legacy(segments) => (segments, "completed".to_string()),
+    };
+    if finish_reason == "length" {
+        return Err("MOSS generation reached the max-new token limit before completion".to_string());
+    }
+    if finish_reason != "completed" {
+        return Err(format!(
+            "MOSS runtime returned unsupported finish reason {finish_reason}"
+        ));
+    }
+    let duration_seconds = duration_ms as f64 / 1_000.0;
     let structured_segments = segments
         .into_iter()
         .filter_map(|segment| {
@@ -977,8 +1075,11 @@ fn parse_moss_json(
             {
                 return None;
             }
+            if segment.start >= duration_seconds {
+                return None;
+            }
             let start_ms = (segment.start.max(0.0) * 1_000.0).round() as u64;
-            let end_ms = (segment.end.max(segment.start).max(0.0) * 1_000.0).round() as u64;
+            let end_ms = (segment.end.min(duration_seconds).max(0.0) * 1_000.0).round() as u64;
             if end_ms <= start_ms {
                 return None;
             }
@@ -1091,7 +1192,7 @@ async fn run_moss_joint_transcription(
                         error
                     });
                 }
-                return parse_moss_json(&output.stdout).map_err(|error| {
+                return parse_moss_json(&output.stdout, duration_ms).map_err(|error| {
                     if moss_runtime_error_is_deterministic(&error) {
                         moss_non_retryable_runtime_error(&error)
                     } else {

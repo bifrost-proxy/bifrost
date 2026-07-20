@@ -5,6 +5,35 @@ export interface DirectoryTaskModeFields {
   showStandardPipeline: boolean;
 }
 
+export interface DirectoryTaskModeOption {
+  value: AsrTranscriptionMode;
+  label: string;
+  disabled?: boolean;
+}
+
+export function directoryTaskModeOptions(
+  mossPlatformSupported: boolean | null,
+): DirectoryTaskModeOption[] {
+  const unavailableLabel =
+    mossPlatformSupported === null
+      ? "MOSS joint transcription (checking platform support)"
+      : "MOSS joint transcription (requires Apple Silicon macOS)";
+  return [
+    {
+      value: "standard",
+      label: "Standard ASR + speaker diarization",
+    },
+    {
+      value: "moss_joint",
+      label:
+        mossPlatformSupported === true
+          ? "MOSS joint transcription (speaker-aware)"
+          : unavailableLabel,
+      disabled: mossPlatformSupported !== true,
+    },
+  ];
+}
+
 export function directoryTaskModeFields(
   mode: AsrTranscriptionMode | undefined,
 ): DirectoryTaskModeFields {
