@@ -5,7 +5,7 @@ use std::collections::BTreeMap as DailyAgentBTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-const DEFAULT_DAILY_AGENT_TIMEOUT_MS: u64 = 7_200_000; // 2 hours
+const DEFAULT_DAILY_AGENT_TIMEOUT_MS: u64 = 3_600_000; // 1 hour
 const DEFAULT_ASR_DAILY_AGENTS_MD: &str = include_str!("daily_agent_template.md");
 const DEFAULT_ASR_TOMORROW_TODO_AGENT_MD: &str = include_str!("daily_agent_tomorrow_todo_template.md");
 const PROCESSED_STATE_VERSION: u32 = 1;

@@ -763,7 +763,7 @@ async fn wait_for_stop_marker(path: PathBuf) {
 fn mock_run_adapter_for_e2e(request: &ExternalCliRunRequest, prompt: &str) -> ChatGptWebRunOutput {
     let conversation_id = conversation_id_hint_from_request(request)
         .unwrap_or_else(|| format!("mock-conversation-{}", uuid::Uuid::new_v4()));
-    let response = format!("chatgpt_web_e2e_mock: {}", prompt.trim());
+    let response = mock_chatgpt_web_response_for_e2e(prompt);
     let mut metadata = BTreeMap::new();
     metadata.insert("conversationId".to_string(), conversation_id.clone());
     ChatGptWebRunOutput {
@@ -793,6 +793,72 @@ fn mock_run_adapter_for_e2e(request: &ExternalCliRunRequest, prompt: &str) -> Ch
         ],
         metadata,
     }
+}
+
+fn mock_chatgpt_web_response_for_e2e(prompt: &str) -> String {
+    if let Some(date) = mock_daily_report_date_for_e2e(prompt) {
+        if std::env::var("BIFROST_CHATGPT_WEB_E2E_FAIL_DATES")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .any(|candidate| candidate == date)
+            })
+            .unwrap_or(false)
+        {
+            return "assistant_message_not_committed".to_string();
+        }
+        return mock_daily_report_response_for_e2e(&date);
+    }
+    format!("chatgpt_web_e2e_mock: {}", prompt.trim())
+}
+
+fn mock_daily_report_date_for_e2e(prompt: &str) -> Option<String> {
+    for line in prompt.lines() {
+        let Some(rest) = line.trim().strip_prefix("### ") else {
+            continue;
+        };
+        let Some(date) = rest.strip_suffix(".md (NewFile):") else {
+            continue;
+        };
+        if is_mock_daily_report_date_for_e2e(date) {
+            return Some(date.to_string());
+        }
+    }
+    None
+}
+
+fn is_mock_daily_report_date_for_e2e(date: &str) -> bool {
+    date.len() == 10
+        && date.chars().enumerate().all(|(idx, ch)| {
+            if matches!(idx, 4 | 7) {
+                ch == '-'
+            } else {
+                ch.is_ascii_digit()
+            }
+        })
+}
+
+fn mock_daily_report_response_for_e2e(date: &str) -> String {
+    let repeated = "本段用于模拟 ChatGPT Web 生成的完整日报正文，包含足够长度以通过最终报告校验，并保持内容稳定可断言。";
+    format!(
+        "# {date} 日报\n\n\
+## 今日概览\n\
+- {date} 的日报已由 ChatGPT Web E2E mock 生成。\n\
+- {repeated}\n\
+- {repeated}\n\
+- {repeated}\n\
+- {repeated}\n\n\
+## 关键进展\n\
+- 已完成跨日期隔离验证，单日失败不会阻断后续日期。\n\
+- {repeated}\n\
+- {repeated}\n\n\
+## 证据与不确定性\n\
+- 证据来自测试 mock 的稳定输出和 Daily Agent 主流程断言。\n\
+- 不确定性记录为空；后续真实运行仍由外部 runner 日志归因。\n\
+- {repeated}\n"
+    )
 }
 
 fn chatgpt_web_response_events(
