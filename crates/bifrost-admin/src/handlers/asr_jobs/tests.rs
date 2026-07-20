@@ -129,6 +129,39 @@ mod tests {
             result.structured.finish_reason,
             bifrost_asr::transcription::TranscriptionFinishReason::Completed
         );
+
+        let unsupported_finish_reason = parse_moss_json(
+            br#"{"segments":[],"finish_reason":"stopped"}"#,
+            6_000,
+        )
+        .unwrap_err();
+        assert!(unsupported_finish_reason.contains("unsupported finish reason stopped"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn moss_site_packages_hash_skips_cache_artifacts_and_non_files() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let paths = moss_runtime_paths(temp.path());
+        let package = paths.site_packages.join("fixture");
+        std::fs::create_dir_all(package.join("__pycache__")).unwrap();
+        std::fs::write(package.join("module.py"), b"print('fixture')\n").unwrap();
+        std::fs::write(package.join("module.pyc"), b"cached").unwrap();
+        std::fs::write(package.join("__pycache__/module.pyc"), b"cached").unwrap();
+        symlink("module.py", package.join("module-link.py")).unwrap();
+
+        let checksums = moss_site_packages_sha256(&paths).unwrap();
+        assert_eq!(checksums.len(), 1);
+        assert!(checksums.contains_key("fixture/module.py"));
+
+        let invalid_paths = moss_runtime_paths(&temp.path().join("invalid"));
+        std::fs::create_dir_all(invalid_paths.site_packages.parent().unwrap()).unwrap();
+        std::fs::write(&invalid_paths.site_packages, b"not a directory").unwrap();
+        assert!(moss_site_packages_sha256(&invalid_paths)
+            .unwrap_err()
+            .contains("read MOSS site-packages directory"));
     }
 
     #[test]
@@ -542,6 +575,7 @@ mod tests {
         );
         assert_eq!(AsrTranscriptionMode::Standard.as_str(), "standard");
         assert_eq!(AsrTranscriptionMode::MossJoint.as_str(), "moss_joint");
+        assert!(validate_moss_transcription_mode(AsrTranscriptionMode::Standard).is_ok());
         assert!(!AsrTranscriptionMode::Standard.uses_native_speakers());
         assert!(AsrTranscriptionMode::MossJoint.uses_native_speakers());
         assert!(moss_runtime_checksums_url().ends_with(&format!(
@@ -671,6 +705,7 @@ mod tests {
         write_moss_runtime_zip(&archive, "#!/bin/sh\necho 'moss-mlx-runtime ok'\n");
         let destination = temp.path().join("installed");
         install_moss_runtime_archive(&archive, &destination).unwrap();
+        install_moss_runtime_archive(&archive, &destination).unwrap();
         assert!(destination
             .join("runtime/python/bin/python3.12")
             .is_file());
@@ -758,6 +793,126 @@ mod tests {
         assert!(install_moss_runtime_archive(&unsafe_symlink_archive, &destination)
             .unwrap_err()
             .contains("unsafe escaping MOSS runtime symlink"));
+        assert!(validate_moss_runtime_symlink(
+            Path::new("runtime/python/bin/python3.12"),
+            Path::new("./python3.12-real")
+        )
+        .is_ok());
+        assert!(validate_moss_runtime_symlink(
+            Path::new("runtime/python/bin/python3.12"),
+            Path::new("/tmp/python3.12")
+        )
+        .unwrap_err()
+        .contains("unsafe absolute"));
+        assert!(validate_moss_runtime_symlink(
+            Path::new("runtime/escape"),
+            Path::new("../../escape")
+        )
+        .unwrap_err()
+        .contains("unsafe escaping"));
+        assert!(validate_moss_runtime_symlink(
+            Path::new("runtime/escape"),
+            Path::new("../escape")
+        )
+        .unwrap_err()
+        .contains("unsafe escaping"));
+
+        let directory_conflict = temp.path().join("symlink-directory-conflict");
+        std::fs::create_dir_all(
+            directory_conflict.join("runtime/python/bin/python3.12"),
+        )
+        .unwrap();
+        assert!(install_moss_runtime_archive(&archive, &directory_conflict)
+            .unwrap_err()
+            .contains("refuse to replace MOSS runtime directory"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let write_symlink_archive = |path: &Path, entry: String| {
+                let file = std::fs::File::create(path).unwrap();
+                let mut zip = zip::ZipWriter::new(file);
+                zip.add_symlink(
+                    entry,
+                    "target",
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+                zip.finish().unwrap();
+            };
+
+            let parent_error_archive = temp.path().join("symlink-parent-error.zip");
+            write_symlink_archive(
+                &parent_error_archive,
+                "moss-joint-runtime/runtime/blocked/link".to_string(),
+            );
+            let parent_error_destination = temp.path().join("symlink-parent-error");
+            std::fs::create_dir_all(parent_error_destination.join("runtime")).unwrap();
+            std::fs::write(parent_error_destination.join("runtime/blocked"), b"file").unwrap();
+            assert!(install_moss_runtime_archive(
+                &parent_error_archive,
+                &parent_error_destination,
+            )
+            .unwrap_err()
+            .contains("create MOSS runtime directory"));
+
+            let metadata_error_archive = temp.path().join("symlink-metadata-error.zip");
+            write_symlink_archive(
+                &metadata_error_archive,
+                format!("moss-joint-runtime/runtime/{}", "x".repeat(300)),
+            );
+            let metadata_error_destination = temp.path().join("symlink-metadata-error");
+            std::fs::create_dir_all(metadata_error_destination.join("runtime")).unwrap();
+            assert!(install_moss_runtime_archive(
+                &metadata_error_archive,
+                &metadata_error_destination,
+            )
+            .unwrap_err()
+            .contains("inspect MOSS runtime symlink target"));
+
+            let invalid_utf8_archive = temp.path().join("symlink-invalid-utf8.zip");
+            write_symlink_archive(
+                &invalid_utf8_archive,
+                "moss-joint-runtime/runtime/invalid-utf8".to_string(),
+            );
+            let mut archive_bytes = std::fs::read(&invalid_utf8_archive).unwrap();
+            let target_offset = archive_bytes
+                .windows(b"target".len())
+                .position(|window| window == b"target")
+                .expect("symlink payload");
+            archive_bytes[target_offset] = 0xff;
+            std::fs::write(&invalid_utf8_archive, archive_bytes).unwrap();
+            assert!(install_moss_runtime_archive(
+                &invalid_utf8_archive,
+                &temp.path().join("symlink-invalid-utf8"),
+            )
+            .unwrap_err()
+            .contains("read MOSS runtime symlink"));
+
+            for (case, existing, expected) in [
+                ("remove", true, "replace MOSS runtime symlink"),
+                ("create", false, "create MOSS runtime symlink"),
+            ] {
+                let archive = temp.path().join(format!("symlink-{case}-error.zip"));
+                write_symlink_archive(
+                    &archive,
+                    format!("moss-joint-runtime/runtime/readonly/{case}"),
+                );
+                let destination = temp.path().join(format!("symlink-{case}-error"));
+                let readonly = destination.join("runtime/readonly");
+                std::fs::create_dir_all(&readonly).unwrap();
+                if existing {
+                    std::fs::write(readonly.join(case), b"existing").unwrap();
+                }
+                std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o555))
+                    .unwrap();
+                let error = install_moss_runtime_archive(&archive, &destination).unwrap_err();
+                std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+                assert!(error.contains(expected), "unexpected error: {error}");
+            }
+        }
         let invalid_archive = temp.path().join("invalid.zip");
         std::fs::write(&invalid_archive, b"not a zip").unwrap();
         assert!(install_moss_runtime_archive(&invalid_archive, &destination).is_err());
@@ -1127,6 +1282,20 @@ mod tests {
             env!("CARGO_PKG_VERSION")
         )));
 
+        write_executable(&binary, "#!/bin/sh\nprintf '{'\n");
+        let malformed_json_error = run_moss_joint_transcription(
+            &runtime,
+            &wav,
+            process_fixture_audio_ms,
+            "",
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(malformed_json_error.starts_with("parse MOSS runtime JSON:"));
+        assert!(!malformed_json_error.starts_with("moss_non_retryable_"));
+
         write_executable(&binary, "#!/bin/sh\nsleep 5\n");
         let pause = || true;
         assert_eq!(
@@ -1257,9 +1426,11 @@ mod tests {
             source_created_at_source: Some("fixture".to_string()),
             media_duration_ms: Some(65_000),
         };
+        let observed_metrics = StdMutex::new(Vec::new());
+        let metric_callback = |metric| observed_metrics.lock().unwrap().push(metric);
         let hooks = TaskTranscribeHooks {
             on_chunk_progress: None,
-            on_chunk_metric: None,
+            on_chunk_metric: Some(&metric_callback),
             pause_check: None,
             force_pause_task_id: None,
             memory_limit_hints: &[],
@@ -1298,6 +1469,7 @@ mod tests {
         assert_eq!(output.timeline.segments[3].speaker.as_deref(), Some("S02"));
         assert_eq!(output.chunk_metrics.len(), 1);
         assert_eq!(output.chunk_metrics[0].runner, "moss_joint");
+        assert_eq!(observed_metrics.lock().unwrap().len(), 1);
         assert_eq!(output.chunk_metrics[0].status, "ok");
         assert_eq!(output.chunk_metrics[0].duration_secs, 65);
         assert!(output.chunk_metrics[0].elapsed_ms >= 1);
@@ -1340,6 +1512,35 @@ mod tests {
         assert!(!std::fs::read_to_string(&output.metadata_path)
             .unwrap()
             .contains("private prompt"));
+
+        let default_runtime_result = transcribe_file_for_task_with_wav(
+            &task,
+            Path::new("/unused/asr"),
+            Path::new("/unused/model"),
+            &source,
+            &source,
+            &source_info,
+            TaskTranscribeHooks {
+                on_chunk_progress: None,
+                on_chunk_metric: None,
+                pause_check: None,
+                force_pause_task_id: None,
+                memory_limit_hints: &[],
+                server_url: None,
+                startup_fallback_reason: None,
+                server_state: None,
+                managed_server_restart: None,
+                partial_artifacts: None,
+                moss_runtime: None,
+            },
+        )
+        .await;
+        match default_runtime_result {
+            Ok(output) => assert_eq!(output.chunk_metrics[0].runner, "moss_joint"),
+            Err(error) => {
+                assert!(error.contains("start MOSS MLX joint transcription runtime"))
+            }
+        }
 
         let pause = || true;
         let paused = match transcribe_file_for_task_with_wav(
@@ -1598,6 +1799,7 @@ mod tests {
             ("partial".to_string(), FileStatus::PartialSuccess),
             ("failed".to_string(), FileStatus::Failed),
             ("processing".to_string(), FileStatus::Processing),
+            ("pending".to_string(), FileStatus::Pending),
         ]
         .into_iter()
         .map(|(key, status)| {
@@ -1684,9 +1886,14 @@ mod tests {
         let reloaded = find_task(&task.id).unwrap();
         assert_eq!(reloaded.transcription_prompt, "Bifrost 专有词");
         let requeued = load_file_store(&task.id);
-        assert_eq!(requeued.files.len(), 4);
-        for record in requeued.files.values() {
+        assert_eq!(requeued.files.len(), 5);
+        for (key, record) in &requeued.files {
             assert_eq!(record.status, FileStatus::Pending);
+            if key == "pending" {
+                assert!(record.output_text_path.is_some());
+                assert_eq!(record.text_chars, 8);
+                continue;
+            }
             assert!(record.output_text_path.is_none());
             assert!(record.output_metadata_path.is_none());
             assert!(record.output_timeline_path.is_none());
@@ -1731,6 +1938,95 @@ mod tests {
                 .status,
             FileStatus::Success
         );
+
+        let prompt_only_update = UpdateTaskRequest {
+            transcription_mode: None,
+            transcription_prompt: Some("Bifrost 新专有词".to_string()),
+            name: None,
+            audio_dir: None,
+            recursive: None,
+            enabled: None,
+            paused: None,
+            schedule: None,
+            language: None,
+            model: None,
+            runtime_strategy: None,
+            max_concurrent_files: None,
+            diarization: None,
+            daily_agent: None,
+            external_devices: None,
+            import_policy: None,
+        };
+        update_task_config(&task.id, prompt_only_update).unwrap();
+        assert_eq!(
+            find_task(&task.id).unwrap().transcription_prompt,
+            "Bifrost 新专有词"
+        );
+        assert_eq!(
+            load_file_store(&task.id)
+                .files
+                .get(&completed_key)
+                .unwrap()
+                .status,
+            FileStatus::Pending
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn create_task_http_endpoint_normalizes_prompt_and_persists_defaults() {
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+        use tokio::net::TcpListener;
+
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let service = service_fn(|req: Request<Incoming>| async move {
+                Ok::<_, hyper::Error>(create_task_response(req).await)
+            });
+            http1::Builder::new()
+                .serve_connection(TokioIo::new(stream), service)
+                .await
+                .unwrap();
+        });
+
+        let response = reqwest::Client::new()
+            .post(format!("http://{address}/api/asr/tasks"))
+            .header(reqwest::header::CONNECTION, "close")
+            .json(&serde_json::json!({
+                "name": "HTTP coverage task",
+                "audio_dir": audio_dir,
+                "transcription_mode": "standard",
+                "transcription_prompt": "  Bifrost\r\nAPI  "
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["name"], "HTTP coverage task");
+        assert_eq!(body["transcription_mode"], "standard");
+        assert_eq!(body["transcription_prompt"], "Bifrost\nAPI");
+        assert_eq!(body["recursive"], true);
+        assert_eq!(body["enabled"], true);
+        assert!(audio_dir.is_dir());
+
+        let task_id = body["id"].as_str().unwrap();
+        let persisted = find_task(task_id).unwrap();
+        assert_eq!(persisted.audio_dir, audio_dir);
+        assert_eq!(persisted.transcription_prompt, "Bifrost\nAPI");
+        server.abort();
+        if let Err(error) = server.await {
+            assert!(error.is_cancelled());
+        }
     }
 
     #[test]
@@ -3284,6 +3580,50 @@ mod tests {
         .unwrap();
         assert!(hinted.text.is_empty());
         assert!(hinted.structured.segments.is_empty());
+
+        let speech_wav = temp.path().join("speech-four-seconds.wav");
+        std::fs::write(&speech_wav, make_wav(&vec![500i16; 4 * 16_000])).unwrap();
+        let fake_asr = temp.path().join("fake-asr");
+        write_executable(
+            &fake_asr,
+            "#!/bin/sh\necho 'asr cli exceeded memory footprint limit' >&2\nexit 1\n",
+        );
+        let both_halves_failed = transcribe_single_chunk_with_bisect(
+            &fake_asr,
+            Path::new("/nonexistent/model"),
+            "chinese",
+            &speech_wav,
+            0,
+            4,
+            3,
+            temp.path(),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(both_halves_failed.contains("both halves produced no output"));
+
+        write_executable(
+            &fake_asr,
+            "#!/bin/sh\ncase \"$2\" in *-d0-a.wav) printf '<asr_text>left half</asr_text>' ;; *) echo 'asr cli exceeded memory footprint limit' >&2; exit 1 ;; esac\n",
+        );
+        let one_half_recovered = transcribe_single_chunk_with_bisect(
+            &fake_asr,
+            Path::new("/nonexistent/model"),
+            "chinese",
+            &speech_wav,
+            0,
+            4,
+            4,
+            temp.path(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(one_half_recovered.text, "left half");
+        assert!(one_half_recovered.structured.segments.is_empty());
     }
 
     #[test]

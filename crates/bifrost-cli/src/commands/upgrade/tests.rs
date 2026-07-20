@@ -1278,6 +1278,21 @@ fn github_mirror_bases_respects_preferred_env() {
 }
 
 #[test]
+fn ordered_download_bases_without_preferred_env_keeps_fallbacks() {
+    with_mirror_env(None, || {
+        let tuning = DownloadTuning {
+            connect_timeout_secs: 1,
+            download_timeout_secs: 1,
+            mirror_probe_timeout_secs: 1,
+            download_tries: 1,
+        };
+        let bases = ordered_download_bases("nonexistent/coverage-fixture", tuning);
+        assert!(!bases.is_empty());
+        assert!(bases.iter().any(|base| base.contains("github.com")));
+    });
+}
+
+#[test]
 fn mirror_display_name_strips_scheme_and_path() {
     assert_eq!(
         mirror_display_name("https://ghfast.top/https://github.com"),
