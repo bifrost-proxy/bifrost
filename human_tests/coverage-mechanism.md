@@ -211,7 +211,9 @@ grep -n 'coverage-diff.py' .github/workflows/ci.yml
 ```
 
 **预期**：工具单测全部通过；PR coverage job 在 LCOV 生成后执行 changed-lines 95%
-门禁；`#[cfg(test)] mod tests` 中的测试代码不计入生产增量覆盖率。
+门禁；`#[cfg(test)] mod tests` 中的测试代码不计入生产增量覆盖率；源文件仍保留的
+copy-paste 不得排除，尤其 16 行源块仅修改中间一行形成 8+7 精确匹配时，目的端完整
+副本仍全部留在 changed-lines 门禁中。
 
 ### TC-COV-12 Shell 静态质量门禁
 

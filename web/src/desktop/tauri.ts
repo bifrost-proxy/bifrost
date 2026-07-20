@@ -114,6 +114,10 @@ export async function updateDesktopProxyPort(
   });
 }
 
+export async function issueDesktopUpgradeOriginToken(): Promise<string> {
+  return invokeDesktop<string>("issue_desktop_upgrade_origin_token");
+}
+
 export async function notifyMainWindowReady(): Promise<void> {
   await invokeDesktop<void>("notify_main_window_ready");
 }

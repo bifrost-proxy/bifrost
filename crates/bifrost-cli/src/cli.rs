@@ -483,7 +483,7 @@ previous runtime settings."
         about = "Run an unattended background upgrade (used by tray/admin)"
     )]
     SelfUpdate {
-        #[arg(long, help = "Target version (informational; engine resolves latest)")]
+        #[arg(long, help = "Target version selected by the initiating version check")]
         target: Option<String>,
         #[arg(
             long,
@@ -491,6 +491,10 @@ previous runtime settings."
             help = "Who initiated the upgrade: tray/admin/cli"
         )]
         source: String,
+        #[arg(long, hide = true, requires = "running_proxy_port")]
+        running_proxy_pid: Option<u32>,
+        #[arg(long, hide = true, requires = "running_proxy_pid")]
+        running_proxy_port: Option<u16>,
     },
     #[command(visible_alias = "cfg", about = "Manage runtime configuration")]
     Config {

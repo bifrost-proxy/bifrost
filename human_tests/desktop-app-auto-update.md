@@ -281,23 +281,24 @@
 - 桌面状态栏的启动检查能看到桌面 App 更新，不会因为 CLI/core 已经最新而静默。
 - 如果无法读取 App bundle 版本，接口才回退到 CLI/core 版本并保持原有兼容行为。
 
-### TC-DAU-05 Admin API 桌面 channel 与 CLI channel 分离
+### TC-DAU-05 Admin API 以真实 runtime owner 决定桌面/CLI 编排
 
 操作步骤：
 
 1. 执行：
    ```bash
-   cargo test -p bifrost-admin handlers::system::tests::parse_upgrade_channel_defaults_to_cli_and_accepts_desktop_aliases --lib
+   cargo test -p bifrost-admin handlers::system::tests::runtime_owner_overrides_the_request_channel --lib
+   cargo test -p bifrost-admin handlers::system::tests::upgrade_process_args_separate_cli_and_desktop_channels --lib
    ```
 2. 检查测试通过。
 
 预期结果：
 
-- 默认 query 使用 CLI channel。
-- `channel=desktop`、`target=desktop`、`source=desktop` 均解析为桌面 channel。
-- desktop channel 派发 `app upgrade --version <v> --source desktop -y`，CLI channel 派发 `self-update --target <v> --source admin`。
+- CLI-owned core 即使收到 desktop query 也派发 `self-update --source admin`，并携带精确 PID/port。
+- App-owned core 即使收到 CLI query 也派发 `app upgrade --source desktop -y`，不携带 CLI restart hint。
+- desktop orchestrator 调用独立 CLI 时注入 skip-app/skip-restart，避免递归安装与双重重启。
 
-### TC-DAU-06 Web UI 桌面 channel 参数不回退到 CLI，CLI Web UI 不展示桌面按钮
+### TC-DAU-06 Web UI 标记所在 shell，服务端仍以 runtime owner 为准
 
 操作步骤：
 
@@ -311,8 +312,8 @@
 
 预期结果：
 
-- 普通 Web UI 不误触发桌面更新。
-- 桌面 shell 会把 version-check/start-upgrade 请求标记为 desktop channel。
+- 普通 Web UI 仍发送 CLI 标记，桌面 shell 仍发送 desktop 标记。
+- 服务端不把客户端标记当作重启所有权；最终以实际 core 是 CLI-owned 还是 App-owned 为准。
 - 浏览器打开的 CLI Web UI 不展示 App -> CLI / AI Skills 按钮。
 
 ### TC-DAU-06B App 一键安装 CLI 与 AI skills

@@ -348,9 +348,8 @@ fn run_cli_main() {
         Some(Commands::Script { action }) => handle_script_command(action),
         Some(Commands::Upgrade { yes }) => handle_upgrade(yes),
         Some(Commands::App { action }) => handle_app_command(action),
-        Some(Commands::SelfUpdate { target, source }) => {
-            commands::handle_upgrade_background(target, source);
-            Ok(())
+        Some(command @ Commands::SelfUpdate { .. }) => {
+            commands::handle_upgrade_background_command(command)
         }
         Some(Commands::InstallSkill {
             tool,

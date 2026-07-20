@@ -1,6 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,7 +13,8 @@ use std::os::unix::process::CommandExt;
 use std::os::windows::process::CommandExt;
 
 use bifrost_core::upgrade_progress::{
-    is_stale, read_progress, write_progress, UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS,
+    consume_desktop_upgrade_origin_token, is_stale, read_progress, write_progress, UpgradePhase,
+    UpgradeProgress, DEFAULT_STALE_SECS,
 };
 use bifrost_storage::data_dir;
 use http_body_util::BodyExt;
@@ -28,7 +30,21 @@ use crate::metrics::SystemInfo;
 use crate::resource_alerts::build_resource_alerts;
 use crate::state::SharedAdminState;
 
+mod version_companion;
+use version_companion::{
+    desktop_app_version_for_version_check, standalone_cli_version_for_version_check,
+};
+
 const DESKTOP_INSTALL_SKILL_TIMEOUT: Duration = Duration::from_secs(20);
+const DESKTOP_CORE_ENV: &str = "BIFROST_DESKTOP_CORE";
+const DESKTOP_UPGRADE_HANDOFF_ENV: &str = "BIFROST_DESKTOP_UPGRADE_HANDOFF";
+const WEBVIEW_UPGRADE_ORIGIN_ENV: &str = "BIFROST_WEBVIEW_UPGRADE_ORIGIN_INTERNAL";
+const DESKTOP_UPGRADE_ORIGIN_HEADER: &str = "x-bifrost-desktop-upgrade-origin";
+
+fn upgrade_start_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 pub async fn handle_system(
     req: Request<Incoming>,
@@ -36,7 +52,12 @@ pub async fn handle_system(
     path: &str,
 ) -> Response<BoxBody> {
     let method = req.method().clone();
-    let query = req.uri().query();
+    let query = req.uri().query().map(str::to_owned);
+    let desktop_origin_token = req
+        .headers()
+        .get(DESKTOP_UPGRADE_ORIGIN_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
 
     match path {
         "/api/system" | "/api/system/" => match method {
@@ -52,11 +73,13 @@ pub async fn handle_system(
             _ => method_not_allowed(),
         },
         "/api/system/version-check" => match method {
-            Method::GET => check_version(state, query).await,
+            Method::GET => check_version(state, query.as_deref()).await,
             _ => method_not_allowed(),
         },
         "/api/system/upgrade" => match method {
-            Method::POST => start_upgrade(state, query).await,
+            Method::POST => {
+                start_upgrade(state, query.as_deref(), desktop_origin_token.as_deref()).await
+            }
             _ => method_not_allowed(),
         },
         "/api/system/upgrade/progress" => match method {
@@ -232,7 +255,7 @@ async fn check_version(state: SharedAdminState, query: Option<&str>) -> Response
         .unwrap_or(false);
     let channel = parse_upgrade_channel(query);
 
-    let response = check_version_for_channel(state, force_refresh, channel).await;
+    let response = check_unified_version_for_channel(state, force_refresh, channel).await;
     json_response(&response)
 }
 
@@ -242,15 +265,37 @@ async fn check_version(state: SharedAdminState, query: Option<&str>) -> Response
 /// upgrade is already in flight (non-stale active progress). On success it
 /// writes an initial `Checking` progress record, spawns a detached
 /// `bifrost self-update --source admin` subprocess and returns `202 Accepted`
-/// with the current progress snapshot.
+/// with the current progress snapshot. The server process owns channel
+/// selection: the runtime owner selects both the component version gate and the
+/// orchestrator, so a stale/conflicting UI query cannot start the wrong flow.
 ///
-/// The upgrade is never executed inside the admin process: the subprocess stops
-/// the old proxy, swaps the binary and restarts, which would otherwise kill the
-/// admin server mid-request. The progress file survives the restart so the
-/// Web UI can read the terminal state after reconnecting.
-async fn start_upgrade(state: SharedAdminState, query: Option<&str>) -> Response<BoxBody> {
+/// The upgrade is never executed inside the admin process: a CLI-owned core is
+/// stopped and restarted by the detached subprocess, while a desktop-owned core
+/// remains alive until the App handoff replaces it. The progress file survives
+/// either handoff so the Web UI can read the terminal state after reconnecting.
+async fn start_upgrade(
+    state: SharedAdminState,
+    query: Option<&str>,
+    desktop_origin_token: Option<&str>,
+) -> Response<BoxBody> {
+    // Serialize check -> claim -> spawn. Without this process-local critical
+    // section, two simultaneous Web UI POSTs can both observe an idle progress
+    // file and launch competing installers/restarts.
+    let _start_guard = upgrade_start_lock().lock().await;
     let dir = data_dir();
-    let channel = parse_upgrade_channel(query);
+    let (requested_channel, channel, running_proxy) = upgrade_request_plan(
+        query,
+        desktop_core_env_enabled(std::env::var_os(DESKTOP_CORE_ENV)),
+        std::process::id(),
+        state.port(),
+    );
+    let webview_origin =
+        validated_webview_upgrade_origin(&dir, requested_channel, desktop_origin_token);
+    if let Err(message) =
+        validate_upgrade_request_channel(requested_channel, channel, webview_origin)
+    {
+        return error_response(StatusCode::CONFLICT, message);
+    }
 
     // Refuse if an upgrade is already running and still alive.
     let current = read_progress(&dir);
@@ -259,23 +304,32 @@ async fn start_upgrade(state: SharedAdminState, query: Option<&str>) -> Response
     }
 
     // Confirm there is actually a newer version to upgrade to.
-    let version = check_version_for_channel(state, false, channel).await;
+    let version = check_unified_version_for_channel(state, false, channel).await;
     if !version.has_update {
         return error_response(StatusCode::CONFLICT, "No update available");
     }
-    let target_version = version.latest_version.clone();
+    let target_version = match required_upgrade_target(&version) {
+        Ok(target) => target,
+        Err(message) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, message),
+    };
 
     // Seed the channel so the Web UI sees movement immediately, before the
     // subprocess has had a chance to start writing.
     let initial = UpgradeProgress::new(UpgradePhase::Checking, "Checking for updates…")
-        .with_target(target_version.clone())
+        .with_target(Some(target_version.clone()))
         .with_source(Some(channel.progress_source().to_string()));
     write_progress(&dir, &initial);
 
-    if let Err(error) = spawn_upgrade_process(channel, target_version.as_deref()) {
+    if let Err(error) = spawn_upgrade_process(
+        channel,
+        Some(target_version.as_str()),
+        running_proxy,
+        None,
+        webview_origin,
+    ) {
         warn!(error = %error, "[SYSTEM] failed to spawn self-update subprocess");
         let failed = UpgradeProgress::new(UpgradePhase::Failed, "Upgrade failed to start")
-            .with_target(target_version)
+            .with_target(Some(target_version))
             .with_source(Some(channel.progress_source().to_string()))
             .with_error(Some(error.to_string()));
         write_progress(&dir, &failed);
@@ -621,7 +675,7 @@ fn normalize_progress(progress: UpgradeProgress) -> UpgradeProgress {
     progress
 }
 
-/// Spawn a detached `bifrost self-update` subprocess.
+/// Spawn the detached upgrade orchestrator selected for the current runtime.
 ///
 /// The binary is resolved via `current_exe()` (the admin server runs inside the
 /// bifrost process, so `current_exe` is bifrost itself), falling back to a bare
@@ -657,111 +711,54 @@ async fn check_version_for_channel(
     state.version_checker.check(force_refresh).await
 }
 
-fn desktop_app_version_for_version_check() -> Option<String> {
-    desktop_app_install_candidates()
-        .into_iter()
-        .find_map(|path| installed_desktop_app_version(&path))
+async fn check_unified_version_for_channel(
+    state: SharedAdminState,
+    force_refresh: bool,
+    primary_channel: UpgradeChannel,
+) -> crate::VersionCheckResponse {
+    let primary = check_version_for_channel(state.clone(), force_refresh, primary_channel).await;
+    let companion = match primary_channel {
+        UpgradeChannel::Cli => {
+            check_version_for_channel(state, false, UpgradeChannel::Desktop).await
+        }
+        UpgradeChannel::Desktop => {
+            let standalone_cli_version =
+                tokio::task::spawn_blocking(standalone_cli_version_for_version_check)
+                    .await
+                    .ok()
+                    .flatten();
+            if let Some(cli_version) = standalone_cli_version {
+                state
+                    .version_checker
+                    .check_with_current_version(false, cli_version)
+                    .await
+            } else {
+                check_version_for_channel(state, false, UpgradeChannel::Cli).await
+            }
+        }
+    };
+    merge_companion_update(primary, companion)
 }
 
-fn desktop_app_install_candidates() -> Vec<PathBuf> {
-    if let Some(dir) = std::env::var_os("BIFROST_APP_INSTALL_DIR") {
-        return vec![resolve_desktop_app_path(&PathBuf::from(dir))];
+fn merge_companion_update(
+    mut primary: crate::VersionCheckResponse,
+    companion: crate::VersionCheckResponse,
+) -> crate::VersionCheckResponse {
+    if !primary.has_update && companion.has_update {
+        primary.has_update = true;
+        primary.latest_version = companion.latest_version;
+        primary.release_highlights = companion.release_highlights;
+        primary.release_url = companion.release_url;
+        primary.checked_at = companion.checked_at;
     }
-
-    #[cfg(target_os = "macos")]
-    {
-        let mut candidates = Vec::new();
-        candidates.push(PathBuf::from("/Applications/Bifrost.app"));
-        if let Some(home) = std::env::var_os("HOME") {
-            candidates.push(PathBuf::from(home).join("Applications").join("Bifrost.app"));
-        }
-        candidates
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let mut candidates = Vec::new();
-        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-            candidates.push(
-                PathBuf::from(local_app_data)
-                    .join("Bifrost")
-                    .join("bifrost-desktop.exe"),
-            );
-        }
-        candidates
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        Vec::new()
-    }
+    primary
 }
 
-fn resolve_desktop_app_path(app_dir: &Path) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        app_dir.join("Bifrost.app")
-    }
-    #[cfg(target_os = "windows")]
-    {
-        app_dir.join("bifrost-desktop.exe")
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        app_dir.join("Bifrost")
-    }
-}
-
-fn installed_desktop_app_version(install_path: &Path) -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        let plist_path = install_path.join("Contents").join("Info.plist");
-        let plist = plist::Value::from_file(plist_path).ok()?;
-        let dict = plist.as_dictionary()?;
-        ["CFBundleShortVersionString", "CFBundleVersion"]
-            .into_iter()
-            .find_map(|key| dict.get(key).and_then(|value| value.as_string()))
-            .map(str::to_string)
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if !install_path.is_file() {
-            return None;
-        }
-        let script = r#"
-param([string]$Path)
-$info = (Get-Item -LiteralPath $Path).VersionInfo
-if ($info.ProductVersion) { $info.ProductVersion } elseif ($info.FileVersion) { $info.FileVersion }
-"#;
-        let powershell = if Command::new("powershell.exe")
-            .args(["-NoProfile", "-Command", "$PSVersionTable.PSVersion"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-        {
-            "powershell.exe"
-        } else {
-            "pwsh"
-        };
-        let output = Command::new(powershell)
-            .arg("-NoProfile")
-            .arg("-Command")
-            .arg(script)
-            .arg(install_path)
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        (!version.is_empty()).then_some(version)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = install_path;
-        None
-    }
+fn required_upgrade_target(version: &crate::VersionCheckResponse) -> Result<String, &'static str> {
+    version
+        .latest_version
+        .clone()
+        .ok_or("Update metadata did not include a target version")
 }
 
 fn parse_upgrade_channel(query: Option<&str>) -> UpgradeChannel {
@@ -777,14 +774,73 @@ fn parse_upgrade_channel(query: Option<&str>) -> UpgradeChannel {
     }
 }
 
+fn desktop_core_env_enabled(value: Option<std::ffi::OsString>) -> bool {
+    value
+        .and_then(|value| value.into_string().ok())
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn effective_upgrade_channel(_requested: UpgradeChannel, desktop_core: bool) -> UpgradeChannel {
+    if desktop_core {
+        UpgradeChannel::Desktop
+    } else {
+        UpgradeChannel::Cli
+    }
+}
+
+fn validate_upgrade_request_channel(
+    requested: UpgradeChannel,
+    orchestrator: UpgradeChannel,
+    webview_origin: bool,
+) -> Result<(), &'static str> {
+    if orchestrator == UpgradeChannel::Desktop
+        && (requested != UpgradeChannel::Desktop || !webview_origin)
+    {
+        return Err("A desktop-owned core must be upgraded from the Bifrost desktop app");
+    }
+    Ok(())
+}
+
+fn validated_webview_upgrade_origin(
+    data_dir: &Path,
+    requested: UpgradeChannel,
+    token: Option<&str>,
+) -> bool {
+    requested == UpgradeChannel::Desktop
+        && token.is_some_and(|token| consume_desktop_upgrade_origin_token(data_dir, token))
+}
+
+fn upgrade_request_plan(
+    query: Option<&str>,
+    desktop_core: bool,
+    pid: u32,
+    port: u16,
+) -> (UpgradeChannel, UpgradeChannel, Option<(u32, u16)>) {
+    let requested = parse_upgrade_channel(query);
+    let orchestrator = effective_upgrade_channel(requested, desktop_core);
+    let running_proxy = (orchestrator == UpgradeChannel::Cli).then_some((pid, port));
+    (requested, orchestrator, running_proxy)
+}
+
 fn spawn_upgrade_process(
     channel: UpgradeChannel,
     target_version: Option<&str>,
+    running_proxy: Option<(u32, u16)>,
+    app_dir: Option<&Path>,
+    webview_origin: bool,
 ) -> std::io::Result<()> {
     let program = std::env::current_exe().unwrap_or_else(|_| "bifrost".into());
 
     let mut command = Command::new(&program);
-    command.args(upgrade_process_args(channel, target_version));
+    command.args(upgrade_process_args(
+        channel,
+        target_version,
+        running_proxy,
+        app_dir,
+    ));
+    for (key, value) in upgrade_process_environment(channel, webview_origin) {
+        command.env(key, value);
+    }
     command
         .stdin(Stdio::null())
         .stdout(upgrade_log_stdio())
@@ -828,7 +884,31 @@ fn spawn_upgrade_process(
     Ok(())
 }
 
-fn upgrade_process_args(channel: UpgradeChannel, target_version: Option<&str>) -> Vec<String> {
+fn upgrade_process_environment(
+    channel: UpgradeChannel,
+    webview_origin: bool,
+) -> Vec<(&'static str, &'static str)> {
+    let mut environment = Vec::new();
+    if webview_origin {
+        // Preserve the initiating surface independently from runtime owner.
+        // A CLI-owned core can still be controlled by the desktop WebView.
+        environment.push((WEBVIEW_UPGRADE_ORIGIN_ENV, "1"));
+    }
+    if channel == UpgradeChannel::Desktop {
+        // Only the App-owned orchestrator itself leaves installation/restart
+        // work for the Tauri shell. CLI-owned orchestration decides this later
+        // after it has also checked whether the installed shell is running.
+        environment.push((DESKTOP_UPGRADE_HANDOFF_ENV, "1"));
+    }
+    environment
+}
+
+fn upgrade_process_args(
+    channel: UpgradeChannel,
+    target_version: Option<&str>,
+    running_proxy: Option<(u32, u16)>,
+    app_dir: Option<&Path>,
+) -> Vec<String> {
     let mut args = Vec::new();
     match channel {
         UpgradeChannel::Cli => {
@@ -839,6 +919,12 @@ fn upgrade_process_args(channel: UpgradeChannel, target_version: Option<&str>) -
             }
             args.push("--source".to_string());
             args.push("admin".to_string());
+            if let Some((pid, port)) = running_proxy {
+                args.push("--running-proxy-pid".to_string());
+                args.push(pid.to_string());
+                args.push("--running-proxy-port".to_string());
+                args.push(port.to_string());
+            }
         }
         UpgradeChannel::Desktop => {
             args.push("app".to_string());
@@ -849,6 +935,10 @@ fn upgrade_process_args(channel: UpgradeChannel, target_version: Option<&str>) -
             }
             args.push("--source".to_string());
             args.push("desktop".to_string());
+            if let Some(app_dir) = app_dir {
+                args.push("--app-dir".to_string());
+                args.push(app_dir.to_string_lossy().into_owned());
+            }
             args.push("-y".to_string());
         }
     }
@@ -869,12 +959,65 @@ fn upgrade_log_stdio() -> Stdio {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cli_install_status, install_binary_atomically, install_cli_from_current_exe,
-        normalize_progress, parse_upgrade_channel, upgrade_process_args, CliInstallRequest,
-        UpgradeChannel,
+        build_cli_install_status, check_version, desktop_core_env_enabled,
+        effective_upgrade_channel, install_binary_atomically, install_cli_from_current_exe,
+        merge_companion_update, normalize_progress, parse_upgrade_channel, required_upgrade_target,
+        spawn_upgrade_process, start_upgrade, upgrade_process_args, upgrade_process_environment,
+        upgrade_request_plan, upgrade_start_lock, validate_upgrade_request_channel,
+        validated_webview_upgrade_origin, CliInstallRequest, StatusCode, UpgradeChannel,
     };
     use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS};
     use chrono::Utc;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    fn version_response(
+        current: &str,
+        latest: &str,
+        has_update: bool,
+    ) -> crate::VersionCheckResponse {
+        crate::VersionCheckResponse {
+            has_update,
+            current_version: current.to_string(),
+            latest_version: Some(latest.to_string()),
+            release_highlights: vec![format!("release {latest}")],
+            release_url: Some(format!("https://example.test/v{latest}")),
+            checked_at: Some("2026-07-18T00:00:00Z".to_string()),
+        }
+    }
+
+    #[test]
+    fn companion_version_drift_keeps_the_unified_update_available() {
+        let primary = version_response("0.0.156", "0.0.156", false);
+        let companion = version_response("0.0.155", "0.0.156", true);
+        let merged = merge_companion_update(primary, companion);
+        assert!(merged.has_update);
+        assert_eq!(merged.current_version, "0.0.156");
+        assert_eq!(merged.latest_version.as_deref(), Some("0.0.156"));
+
+        let primary_update = version_response("0.0.154", "0.0.156", true);
+        let companion_update = version_response("0.0.155", "0.0.157", true);
+        assert_eq!(
+            merge_companion_update(primary_update, companion_update)
+                .latest_version
+                .as_deref(),
+            Some("0.0.156"),
+            "the primary target remains pinned when both components need an update"
+        );
+    }
+
+    #[test]
+    fn upgrade_requires_a_pinned_target_in_release_metadata() {
+        let valid = version_response("0.0.155", "0.0.156", true);
+        assert_eq!(required_upgrade_target(&valid).as_deref(), Ok("0.0.156"));
+
+        let mut missing = valid;
+        missing.latest_version = None;
+        assert_eq!(
+            required_upgrade_target(&missing),
+            Err("Update metadata did not include a target version")
+        );
+    }
 
     #[test]
     fn stale_active_progress_is_normalized_to_failed() {
@@ -933,13 +1076,185 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_process_args_separate_cli_and_desktop_channels() {
+    fn runtime_owner_overrides_the_request_channel() {
         assert_eq!(
-            upgrade_process_args(UpgradeChannel::Cli, Some("0.0.139")),
-            vec!["self-update", "--target", "0.0.139", "--source", "admin"]
+            effective_upgrade_channel(UpgradeChannel::Desktop, false),
+            UpgradeChannel::Cli
         );
         assert_eq!(
-            upgrade_process_args(UpgradeChannel::Desktop, Some("0.0.139")),
+            effective_upgrade_channel(UpgradeChannel::Cli, true),
+            UpgradeChannel::Desktop
+        );
+        assert!(desktop_core_env_enabled(Some("true".into())));
+        assert!(desktop_core_env_enabled(Some("1".into())));
+        assert!(!desktop_core_env_enabled(Some("0".into())));
+        assert!(!desktop_core_env_enabled(None));
+
+        assert_eq!(
+            upgrade_request_plan(Some("channel=desktop"), false, 12345, 19900),
+            (
+                UpgradeChannel::Desktop,
+                UpgradeChannel::Cli,
+                Some((12345, 19900))
+            )
+        );
+        assert_eq!(
+            upgrade_request_plan(Some("channel=cli"), true, 12345, 19900),
+            (UpgradeChannel::Cli, UpgradeChannel::Desktop, None)
+        );
+        assert_eq!(
+            validate_upgrade_request_channel(UpgradeChannel::Cli, UpgradeChannel::Desktop, false,),
+            Err("A desktop-owned core must be upgraded from the Bifrost desktop app")
+        );
+        assert_eq!(
+            validate_upgrade_request_channel(
+                UpgradeChannel::Desktop,
+                UpgradeChannel::Desktop,
+                false,
+            ),
+            Err("A desktop-owned core must be upgraded from the Bifrost desktop app")
+        );
+        assert!(validate_upgrade_request_channel(
+            UpgradeChannel::Desktop,
+            UpgradeChannel::Desktop,
+            true,
+        )
+        .is_ok());
+        assert!(
+            validate_upgrade_request_channel(UpgradeChannel::Cli, UpgradeChannel::Cli, false,)
+                .is_ok()
+        );
+        assert!(validate_upgrade_request_channel(
+            UpgradeChannel::Desktop,
+            UpgradeChannel::Cli,
+            false,
+        )
+        .is_ok());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!validated_webview_upgrade_origin(
+            dir.path(),
+            UpgradeChannel::Desktop,
+            None,
+        ));
+        let token = bifrost_core::upgrade_progress::issue_desktop_upgrade_origin_token(dir.path())
+            .expect("issue desktop origin");
+        assert!(!validated_webview_upgrade_origin(
+            dir.path(),
+            UpgradeChannel::Cli,
+            Some(&token),
+        ));
+        assert!(validated_webview_upgrade_origin(
+            dir.path(),
+            UpgradeChannel::Desktop,
+            Some(&token),
+        ));
+        assert!(!validated_webview_upgrade_origin(
+            dir.path(),
+            UpgradeChannel::Desktop,
+            Some(&token),
+        ));
+    }
+
+    #[tokio::test]
+    async fn upgrade_start_lock_serializes_claims() {
+        let first = upgrade_start_lock().lock().await;
+        assert!(upgrade_start_lock().try_lock().is_err());
+        drop(first);
+        assert!(upgrade_start_lock().try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn admin_upgrade_claims_once_and_pins_the_cached_target() {
+        const CHILD_ENV: &str = "BIFROST_TEST_ADMIN_UPGRADE_HANDLER_CHILD";
+        if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .args([
+                "--exact",
+                "handlers::system::tests::admin_upgrade_claims_once_and_pins_the_cached_target",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .status()
+            .expect("spawn isolated Admin handler test");
+            assert!(status.success(), "isolated Admin handler test failed");
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("BIFROST_DATA_DIR", dir.path());
+        std::fs::write(
+            dir.path().join("version_cache.json"),
+            serde_json::json!({
+                "latest_version": "999.0.0",
+                "release_highlights": ["test release"],
+                "checked_at": Utc::now(),
+            })
+            .to_string(),
+        )
+        .expect("write fresh version cache");
+        let state = Arc::new(crate::state::AdminState::new(19990));
+
+        let version = check_version(state.clone(), Some("channel=desktop")).await;
+        assert_eq!(version.status(), StatusCode::OK);
+
+        let token = bifrost_core::upgrade_progress::issue_desktop_upgrade_origin_token(dir.path())
+            .expect("issue desktop origin");
+        let accepted =
+            start_upgrade(state.clone(), Some("channel=desktop"), Some(token.as_str())).await;
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        let progress = bifrost_core::upgrade_progress::read_progress(dir.path());
+        assert_eq!(progress.target_version.as_deref(), Some("999.0.0"));
+        assert_eq!(progress.source.as_deref(), Some("admin"));
+
+        let conflict = start_upgrade(state, Some("channel=cli"), None).await;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn upgrade_process_args_separate_cli_and_desktop_channels() {
+        assert_eq!(
+            upgrade_process_args(
+                UpgradeChannel::Cli,
+                Some("0.0.139"),
+                Some((12345, 19900)),
+                None,
+            ),
+            vec![
+                "self-update",
+                "--target",
+                "0.0.139",
+                "--source",
+                "admin",
+                "--running-proxy-pid",
+                "12345",
+                "--running-proxy-port",
+                "19900",
+            ]
+        );
+        assert_eq!(
+            upgrade_process_args(
+                UpgradeChannel::Desktop,
+                Some("0.0.139"),
+                Some((12345, 19900)),
+                Some(Path::new("/Users/test/Applications")),
+            ),
+            vec![
+                "app",
+                "upgrade",
+                "--version",
+                "0.0.139",
+                "--source",
+                "desktop",
+                "--app-dir",
+                "/Users/test/Applications",
+                "-y"
+            ]
+        );
+        assert_eq!(
+            upgrade_process_args(UpgradeChannel::Desktop, Some("0.0.139"), None, None),
             vec![
                 "app",
                 "upgrade",
@@ -948,42 +1263,48 @@ mod tests {
                 "--source",
                 "desktop",
                 "-y"
+            ],
+            "desktop-owned Admin dispatch must let the bundled core resolve its active App path"
+        );
+        assert_eq!(
+            upgrade_process_environment(UpgradeChannel::Cli, true),
+            vec![(super::WEBVIEW_UPGRADE_ORIGIN_ENV, "1")],
+            "a desktop WebView can initiate the CLI-owned orchestrator"
+        );
+        assert!(upgrade_process_environment(UpgradeChannel::Cli, false).is_empty());
+        assert_eq!(
+            upgrade_process_environment(UpgradeChannel::Desktop, true),
+            vec![
+                (super::WEBVIEW_UPGRADE_ORIGIN_ENV, "1"),
+                (super::DESKTOP_UPGRADE_HANDOFF_ENV, "1")
             ]
         );
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn desktop_version_check_reads_installed_app_version_from_override_dir() {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().expect("tempdir");
-        let app = temp.path().join("Bifrost.app");
-        let contents = app.join("Contents");
-        std::fs::create_dir_all(&contents).expect("create Contents");
-        std::fs::write(
-            contents.join("Info.plist"),
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleShortVersionString</key><string>0.0.144</string>
-  <key>CFBundleVersion</key><string>144</string>
-</dict>
-</plist>
-"#,
-        )
-        .expect("write plist");
-
-        let previous = std::env::var_os("BIFROST_APP_INSTALL_DIR");
-        std::env::set_var("BIFROST_APP_INSTALL_DIR", temp.path());
-        let version = super::desktop_app_version_for_version_check();
-        match previous {
-            Some(value) => std::env::set_var("BIFROST_APP_INSTALL_DIR", value),
-            None => std::env::remove_var("BIFROST_APP_INSTALL_DIR"),
+    fn upgrade_process_spawn_runs_in_an_isolated_data_dir() {
+        const CHILD_ENV: &str = "BIFROST_TEST_ADMIN_UPGRADE_SPAWN_CHILD";
+        if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .args([
+                "--exact",
+                "handlers::system::tests::upgrade_process_spawn_runs_in_an_isolated_data_dir",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .status()
+            .expect("spawn isolated Admin upgrade test");
+            assert!(status.success(), "isolated Admin upgrade test failed");
+            return;
         }
 
-        assert_eq!(version.as_deref(), Some("0.0.144"));
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("BIFROST_DATA_DIR", dir.path());
+        spawn_upgrade_process(UpgradeChannel::Desktop, None, None, None, true)
+            .expect("spawn detached desktop upgrade command");
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
     #[test]

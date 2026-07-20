@@ -16,6 +16,8 @@ export const DESKTOP_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const UPGRADE_POLL_INTERVAL_MS = 1000;
 /** sessionStorage flag guarding the single post-upgrade auto-reload. */
 export const UPGRADE_RELOAD_PENDING_KEY = "bifrost-upgrade-reload-pending";
+const DESKTOP_RESTART_HANDOFF_FAILED_MESSAGE =
+  "Desktop update installed, but restart handoff failed";
 
 interface CheckVersionOptions {
   forceRefresh?: boolean;
@@ -69,7 +71,7 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 let sawDisconnect = false;
 
 /** Reload the page exactly once after an upgrade, guarded by sessionStorage. */
-function triggerUpgradeReloadOnce() {
+function triggerUpgradeReloadOnce(desktopHandoff = false) {
   try {
     if (sessionStorage.getItem(UPGRADE_RELOAD_PENDING_KEY) === "done") {
       return;
@@ -78,10 +80,25 @@ function triggerUpgradeReloadOnce() {
   } catch {
     // sessionStorage unavailable — fall through and reload anyway.
   }
-  if (isDesktopShell()) {
+  if (desktopHandoff && isDesktopShell()) {
     void import("../desktop/tauri")
       .then(({ restartDesktopAfterUpdate }) => restartDesktopAfterUpdate())
-      .catch(() => window.location.reload());
+      .catch((error) => {
+        try {
+          sessionStorage.removeItem(UPGRADE_RELOAD_PENDING_KEY);
+        } catch {
+          // ignore — sessionStorage may be unavailable.
+        }
+        useVersionStore.setState({
+          upgrading: false,
+          upgradePhase: "failed",
+          upgradeMessage: DESKTOP_RESTART_HANDOFF_FAILED_MESSAGE,
+          upgradeError:
+            error instanceof Error
+              ? error.message
+              : "Failed to restart the desktop app after update",
+        });
+      });
     return;
   }
   window.location.reload();
@@ -168,7 +185,22 @@ export const useVersionStore = create<VersionState>()(
       },
 
       startUpgrade: async () => {
-        if (get().upgrading) {
+        const state = get();
+        if (state.upgrading) {
+          return;
+        }
+        if (
+          isDesktopShell() &&
+          state.upgradePhase === "failed" &&
+          state.upgradeMessage === DESKTOP_RESTART_HANDOFF_FAILED_MESSAGE
+        ) {
+          set({
+            upgrading: true,
+            upgradePhase: "restarting",
+            upgradeMessage: "Retrying desktop restart handoff…",
+            upgradeError: null,
+          });
+          triggerUpgradeReloadOnce(true);
           return;
         }
         sawDisconnect = false;
@@ -218,7 +250,18 @@ export const useVersionStore = create<VersionState>()(
               upgradeError: progress.error,
             });
 
-            if (progress.phase === "completed") {
+            if (
+              progress.phase === "restarting" &&
+              progress.source === "desktop" &&
+              isDesktopShell()
+            ) {
+              // App-owned installers must run only after the desktop shell and
+              // bundled core have released their files. Stop polling before the
+              // handoff exits this process; the relaunched core publishes the
+              // terminal completed/failed state.
+              get().stopPollUpgradeProgress();
+              triggerUpgradeReloadOnce(true);
+            } else if (progress.phase === "completed") {
               get().stopPollUpgradeProgress();
               set({ upgrading: false });
               triggerUpgradeReloadOnce();

@@ -66,6 +66,25 @@ wait_admin_ready() {
     return 1
 }
 
+wait_upstream_ready() {
+    local attempts=0
+    while [[ "$attempts" -lt 120 ]]; do
+        if env NO_PROXY="*" no_proxy="*" curl -fsS --connect-timeout 1 --max-time 3 \
+            "http://127.0.0.1:${UPSTREAM_PORT}/" >/dev/null 2>&1; then
+            return 0
+        fi
+        if [[ -n "$UPSTREAM_PID" ]] && ! kill -0 "$UPSTREAM_PID" 2>/dev/null; then
+            break
+        fi
+        sleep 0.25
+        attempts=$((attempts + 1))
+    done
+
+    echo "Upstream did not become ready. Log:" >&2
+    sed -n '1,160p' "${TEST_DATA_DIR}/upstream.log" >&2 2>/dev/null || true
+    return 1
+}
+
 start_fixture() {
     TEST_DATA_DIR="$(mktemp -d)"
     mark_e2e_data_root "$TEST_DATA_DIR"
@@ -73,6 +92,7 @@ start_fixture() {
     python3 -m http.server "$UPSTREAM_PORT" --bind 127.0.0.1 \
         --directory "$TEST_DATA_DIR" >"${TEST_DATA_DIR}/upstream.log" 2>&1 &
     UPSTREAM_PID=$!
+    wait_upstream_ready
 
     BIFROST_DATA_DIR="$TEST_DATA_DIR" "$BIFROST_BIN" -H 127.0.0.1 -p "$PROXY_PORT" start \
         -y \
