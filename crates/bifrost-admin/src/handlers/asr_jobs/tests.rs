@@ -837,9 +837,14 @@ mod tests {
             Path::new("./python3.12-real")
         )
         .is_ok());
+        let absolute_symlink_target = if cfg!(windows) {
+            Path::new(r"C:\tmp\python3.12")
+        } else {
+            Path::new("/tmp/python3.12")
+        };
         assert!(validate_moss_runtime_symlink(
             Path::new("runtime/python/bin/python3.12"),
-            Path::new("/tmp/python3.12")
+            absolute_symlink_target
         )
         .unwrap_err()
         .contains("unsafe absolute"));
