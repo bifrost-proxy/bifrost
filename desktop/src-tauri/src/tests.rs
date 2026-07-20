@@ -1,13 +1,12 @@
 use super::{
     append_desktop_bootstrap_log, begin_backend_recovery, clear_backend_unavailable_if_healthy,
-    commit_deferred_desktop_install_artifacts, deferred_desktop_install_version_error,
-    desktop_backend_env, desktop_backend_start_args, desktop_pending_install_path,
-    desktop_sidecar_rust_log, desktop_startup_deadline, desktop_startup_session_id,
-    desktop_test_allows_multiple_instances, desktop_upgrade_relaunch_marker_path,
-    desktop_upgrade_shutdown_requested, host_window_close_behavior_for_platform,
-    is_server_config_response, is_upgrade_relaunch_marker_active,
-    main_interface_decorations_for_platform, mark_backend_unavailable_for_manual_start,
-    may_reuse_existing_backend, parse_port_update_response,
+    deferred_desktop_install_version_error, desktop_backend_env, desktop_backend_start_args,
+    desktop_pending_install_path, desktop_sidecar_rust_log, desktop_startup_deadline,
+    desktop_startup_session_id, desktop_test_allows_multiple_instances,
+    desktop_upgrade_relaunch_marker_path, desktop_upgrade_shutdown_requested,
+    ensure_backend_running, host_window_close_behavior_for_platform, is_server_config_response,
+    is_upgrade_relaunch_marker_active, main_interface_decorations_for_platform,
+    mark_backend_unavailable_for_manual_start, parse_port_update_response,
     persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit, publish_startup_ready,
     read_active_upgrade_relaunch_marker, read_pending_desktop_install,
     record_startup_deadline_error, relaunch_command_for_target, resolve_bifrost_binary_from_env,
@@ -15,7 +14,8 @@ use super::{
     sanitize_desktop_upgrade_relaunch_command, save_desktop_config,
     should_allow_multiple_instances, should_handoff_to_main, should_retry_backend_candidate,
     startup_deadline_disposition, stop_backend_before_restart, terminate_managed_backend,
-    uses_borderless_desktop_chrome_for_platform, wait_for_backend, wait_for_child_exit,
+    upgrade_relaunch_uses_external_cli_backend, uses_borderless_desktop_chrome_for_platform,
+    wait_for_backend, wait_for_child_exit, wait_for_external_cli_backend,
     windows_desktop_upgrade_handoff_command, write_desktop_upgrade_terminal_progress,
     write_upgrade_relaunch_marker, BackendState, BackendWaitFailureKind, DesktopConfig,
     DesktopInstallRollback, DesktopUpgradeRelaunchMarker, HostWindowCloseBehavior,
@@ -90,6 +90,24 @@ fn spawn_one_shot_health_server() -> u16 {
             let _ = stream.read(&mut buffer);
             let _ = stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK");
+        }
+    });
+    port
+}
+
+fn spawn_one_shot_system_server(pid: u32, version: &str) -> u16 {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind system server");
+    let port = listener.local_addr().expect("system server addr").port();
+    let body = format!(r#"{{"version":"{version}","pid":{pid}}}"#);
+    thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buffer = [0_u8; 1024];
+            let _ = stream.read(&mut buffer);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(), body
+            );
+            let _ = stream.write_all(response.as_bytes());
         }
     });
     port
@@ -386,8 +404,10 @@ fn upgrade_relaunch_marker_activity_requires_fresh_supported_marker() {
         created_at_ms: 10_000,
         old_app_pid: 42,
         old_core_pid: Some(43),
+        observed_external_core_pid: None,
         proxy_port: 19900,
         app_target: "/Applications/Bifrost.app".to_string(),
+        target_version: Some("0.0.156".to_string()),
         pending_install: None,
         rollback: None,
     };
@@ -563,8 +583,10 @@ fn deferred_desktop_install_completion_requires_target_version() {
         created_at_ms: super::current_time_millis(),
         old_app_pid: 123,
         old_core_pid: Some(124),
+        observed_external_core_pid: None,
         proxy_port: 19900,
         app_target: "C:\\Program Files\\Bifrost\\bifrost-desktop.exe".to_string(),
+        target_version: Some("0.0.156".to_string()),
         pending_install: Some(pending),
         rollback: Some(rollback),
     };
@@ -595,63 +617,42 @@ fn deferred_desktop_install_completion_requires_target_version() {
 }
 
 #[test]
-fn deferred_desktop_install_commit_cleans_only_valid_transaction_artifacts() {
+fn deferred_desktop_completion_preserves_transaction_artifacts_for_helper_commit() {
+    use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress};
+
     let temp_dir = tempfile::tempdir().expect("temp dir");
-    let install_dir = temp_dir.path().join("Bifrost");
     let backup_dir = temp_dir.path().join(".Bifrost.rollback-test");
     let package = temp_dir.path().join("Bifrost.msi");
-    fs::create_dir_all(&install_dir).expect("install dir");
     fs::create_dir_all(&backup_dir).expect("rollback dir");
     fs::write(backup_dir.join("old.exe"), b"old").expect("old app snapshot");
     fs::write(&package, b"package").expect("owned package");
     fs::write(desktop_pending_install_path(temp_dir.path()), b"pending").expect("pending marker");
-    let marker = DesktopUpgradeRelaunchMarker {
-        schema_version: 1,
-        created_at_ms: super::current_time_millis(),
-        old_app_pid: 123,
-        old_core_pid: Some(124),
-        proxy_port: 19900,
-        app_target: install_dir
-            .join("Bifrost.exe")
-            .to_string_lossy()
-            .into_owned(),
-        pending_install: Some(PendingDesktopInstall {
-            schema_version: 1,
-            created_at_ms: super::current_time_millis(),
-            package_path: package.to_string_lossy().into_owned(),
-            target_version: "0.0.156".to_string(),
-            package_owned_by_updater: true,
-        }),
-        rollback: Some(DesktopInstallRollback {
-            install_dir: install_dir.to_string_lossy().into_owned(),
-            backup_dir: backup_dir.to_string_lossy().into_owned(),
-            had_previous_install: true,
-        }),
-    };
-
-    commit_deferred_desktop_install_artifacts(temp_dir.path(), &marker)
-        .expect("commit transaction artifacts");
-    assert!(!backup_dir.exists());
-    assert!(!desktop_pending_install_path(temp_dir.path()).exists());
-    assert!(!package.exists());
-    assert!(install_dir.exists(), "the committed App is never removed");
-
-    let unrelated = temp_dir.path().join("unrelated");
-    fs::create_dir_all(&unrelated).expect("unrelated dir");
-    let invalid = DesktopUpgradeRelaunchMarker {
-        rollback: Some(DesktopInstallRollback {
-            install_dir: install_dir.to_string_lossy().into_owned(),
-            backup_dir: unrelated.to_string_lossy().into_owned(),
-            had_previous_install: true,
-        }),
-        ..marker
-    };
-    assert!(
-        commit_deferred_desktop_install_artifacts(temp_dir.path(), &invalid)
-            .expect_err("arbitrary cleanup path must be rejected")
-            .contains("refusing")
+    bifrost_core::upgrade_progress::write_progress(
+        temp_dir.path(),
+        &UpgradeProgress::new(UpgradePhase::Restarting, "Waiting for desktop verification")
+            .with_target(Some("0.0.156".to_string()))
+            .with_source(Some("desktop".to_string())),
     );
-    assert!(unrelated.exists());
+
+    write_desktop_upgrade_terminal_progress(
+        temp_dir.path(),
+        UpgradePhase::Completed,
+        "Desktop app and core update complete",
+        None,
+    );
+
+    assert!(
+        backup_dir.exists(),
+        "only the waiting helper commits rollback cleanup"
+    );
+    assert!(
+        desktop_pending_install_path(temp_dir.path()).exists(),
+        "the cross-process guard survives until the helper observes Completed"
+    );
+    assert!(
+        package.exists(),
+        "the helper retains ownership of its package"
+    );
 }
 
 #[test]
@@ -718,8 +719,10 @@ fn upgrade_relaunch_marker_round_trips_and_stale_marker_is_removed() {
         created_at_ms: super::current_time_millis(),
         old_app_pid: 123,
         old_core_pid: None,
+        observed_external_core_pid: Some(122),
         proxy_port: 19900,
         app_target: "/tmp/Bifrost.app".to_string(),
+        target_version: Some("0.0.156".to_string()),
         pending_install: None,
         rollback: None,
     };
@@ -740,8 +743,10 @@ fn upgrade_relaunch_marker_round_trips_and_stale_marker_is_removed() {
         created_at_ms: 1,
         old_app_pid: 123,
         old_core_pid: None,
+        observed_external_core_pid: Some(122),
         proxy_port: 19900,
         app_target: "/tmp/Bifrost.app".to_string(),
+        target_version: Some("0.0.156".to_string()),
         pending_install: None,
         rollback: None,
     };
@@ -759,20 +764,63 @@ fn upgrade_relaunch_marker_round_trips_and_stale_marker_is_removed() {
 }
 
 #[test]
-fn active_upgrade_relaunch_marker_disables_existing_backend_reuse() {
+fn cli_owned_upgrade_relaunch_reuses_only_the_restarted_target_backend() {
+    let target_port = spawn_one_shot_system_server(456, "0.0.156");
     let marker = DesktopUpgradeRelaunchMarker {
         schema_version: 1,
         created_at_ms: super::current_time_millis(),
         old_app_pid: 123,
-        old_core_pid: Some(124),
-        proxy_port: 19900,
+        old_core_pid: None,
+        observed_external_core_pid: Some(124),
+        proxy_port: target_port,
         app_target: "/tmp/Bifrost.app".to_string(),
+        target_version: Some("0.0.156".to_string()),
         pending_install: None,
         rollback: None,
     };
 
-    assert!(may_reuse_existing_backend(None));
-    assert!(!may_reuse_existing_backend(Some(&marker)));
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let (child, port) = ensure_backend_running(
+        Path::new("/must-not-launch-a-second-core"),
+        temp_dir.path(),
+        "hybrid-upgrade-test",
+        target_port,
+        Some(&marker),
+    )
+    .expect("the relaunched App reuses the restarted CLI-owned core");
+    assert!(child.is_none());
+    assert_eq!(port, target_port);
+    assert!(upgrade_relaunch_uses_external_cli_backend(&marker));
+
+    let managed_marker = DesktopUpgradeRelaunchMarker {
+        old_core_pid: Some(124),
+        observed_external_core_pid: None,
+        ..marker.clone()
+    };
+    assert!(
+        !upgrade_relaunch_uses_external_cli_backend(&managed_marker),
+        "an App-managed core still requires release and a fresh bundled child"
+    );
+
+    let old_pid_port = spawn_one_shot_system_server(124, "0.0.156");
+    let old_pid_marker = DesktopUpgradeRelaunchMarker {
+        proxy_port: old_pid_port,
+        ..marker.clone()
+    };
+    assert!(!wait_for_external_cli_backend(
+        &old_pid_marker,
+        Duration::ZERO
+    ));
+
+    let old_version_port = spawn_one_shot_system_server(457, "0.0.155");
+    let old_version_marker = DesktopUpgradeRelaunchMarker {
+        proxy_port: old_version_port,
+        ..marker
+    };
+    assert!(!wait_for_external_cli_backend(
+        &old_version_marker,
+        Duration::ZERO
+    ));
 }
 
 #[cfg(target_os = "macos")]

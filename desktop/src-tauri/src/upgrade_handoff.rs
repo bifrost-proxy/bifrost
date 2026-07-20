@@ -101,54 +101,51 @@ pub(super) fn deferred_desktop_install_version_error(
     })
 }
 
-pub(super) fn commit_deferred_desktop_install_artifacts(
-    data_dir: &Path,
+#[derive(Debug, Deserialize)]
+pub(super) struct BackendSystemIdentity {
+    pub(super) version: String,
+    pub(super) pid: u32,
+}
+
+pub(super) fn probe_backend_identity(port: u16) -> Option<BackendSystemIdentity> {
+    let client = direct_blocking_reqwest_client_builder()
+        .timeout(Duration::from_millis(450))
+        .build()
+        .ok()?;
+    let url = format!("http://{BACKEND_ADMIN_HOST}:{port}/_bifrost/api/system");
+    let response = client.get(url).send().ok()?.error_for_status().ok()?;
+    response.json().ok()
+}
+
+pub(super) fn wait_for_external_cli_backend(
     marker: &DesktopUpgradeRelaunchMarker,
-) -> Result<(), String> {
-    let Some(rollback) = marker.rollback.as_ref() else {
-        return Ok(());
-    };
-    let install_dir = Path::new(&rollback.install_dir);
-    let backup_dir = Path::new(&rollback.backup_dir);
-    let backup_name = backup_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    if Path::new(&marker.app_target).parent() != Some(install_dir)
-        || install_dir.parent().is_none()
-        || backup_dir.parent() != install_dir.parent()
-        || !backup_name.starts_with(".Bifrost.rollback-")
-    {
-        return Err(format!(
-            "refusing to clean invalid desktop rollback path: {}",
-            backup_dir.display()
-        ));
-    }
-    if let Err(error) = fs::remove_dir_all(backup_dir) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            return Err(format!(
-                "failed to remove desktop rollback snapshot {}: {error}",
-                backup_dir.display()
-            ));
-        }
-    }
-    for path in [desktop_pending_install_path(data_dir)].into_iter().chain(
-        marker
-            .pending_install
-            .as_ref()
-            .filter(|pending| pending.package_owned_by_updater)
-            .map(|pending| PathBuf::from(&pending.package_path)),
-    ) {
-        if let Err(error) = fs::remove_file(&path) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                return Err(format!(
-                    "failed to clean deferred desktop install artifact {}: {error}",
-                    path.display()
-                ));
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(identity) = probe_backend_identity(marker.proxy_port) {
+            let version_matches = marker.target_version.as_deref().is_none_or(|target| {
+                identity.version.trim().trim_start_matches('v')
+                    == target.trim().trim_start_matches('v')
+            });
+            let process_restarted = marker
+                .observed_external_core_pid
+                .is_none_or(|old_pid| identity.pid != old_pid);
+            if version_matches && process_restarted {
+                return true;
             }
         }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(150));
     }
-    Ok(())
+}
+
+pub(super) fn upgrade_relaunch_uses_external_cli_backend(
+    marker: &DesktopUpgradeRelaunchMarker,
+) -> bool {
+    marker.old_core_pid.is_none()
 }
 
 pub(super) fn write_upgrade_relaunch_marker(
@@ -242,12 +239,6 @@ pub(super) fn persist_desktop_upgrade_handoff_failure(data_dir: &Path, message: 
         Some(message.clone()),
     );
     message
-}
-
-pub(super) fn may_reuse_existing_backend(
-    upgrade_relaunch: Option<&DesktopUpgradeRelaunchMarker>,
-) -> bool {
-    upgrade_relaunch.is_none()
 }
 
 pub(super) fn wait_for_upgrade_handoff_release(
@@ -459,20 +450,31 @@ pub(super) fn restart_desktop_after_update(app: AppHandle) -> Result<(), String>
         .lock()
         .map(|guard| *guard)
         .unwrap_or(DEFAULT_BACKEND_PORT);
+    let observed_external_core_pid = old_core_pid
+        .is_none()
+        .then(|| probe_backend_identity(proxy_port).map(|identity| identity.pid))
+        .flatten();
     let pending_install = read_pending_desktop_install(&state.data_dir).map_err(|error| {
         persist_desktop_upgrade_handoff_failure(
             &state.data_dir,
             format!("failed to prepare deferred desktop install: {error}"),
         )
     })?;
+    let target_version = read_progress(&state.data_dir).target_version.or_else(|| {
+        pending_install
+            .as_ref()
+            .map(|pending| pending.target_version.clone())
+    });
     let app_target = desktop_relaunch_target(&exe);
     let marker = DesktopUpgradeRelaunchMarker {
         schema_version: DESKTOP_UPGRADE_RELAUNCH_SCHEMA_VERSION,
         created_at_ms: current_time_millis(),
         old_app_pid: std::process::id(),
         old_core_pid,
+        observed_external_core_pid,
         proxy_port,
         app_target: app_target.to_string_lossy().into_owned(),
+        target_version,
         pending_install,
         rollback: None,
     };
@@ -485,11 +487,13 @@ pub(super) fn restart_desktop_after_update(app: AppHandle) -> Result<(), String>
     append_desktop_bootstrap_log(
         &state.data_dir,
         format!(
-            "desktop upgrade relaunch marker written; old_app_pid={} old_core_pid={:?} proxy_port={} target={} deferred_install={}",
+            "desktop upgrade relaunch marker written; old_app_pid={} old_core_pid={:?} observed_external_core_pid={:?} proxy_port={} target={} target_version={:?} deferred_install={}",
             marker.old_app_pid,
             marker.old_core_pid,
+            marker.observed_external_core_pid,
             marker.proxy_port,
             marker.app_target,
+            marker.target_version,
             marker.pending_install.is_some()
         ),
     );

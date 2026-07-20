@@ -110,11 +110,18 @@ stateDiagram-v2
 
 - A fresh marker is considered active.
 - A stale marker is ignored and deleted.
-- Startup with an active marker disables existing backend reuse.
+- Startup with an active marker for a managed core disables existing backend reuse.
+- A marker with no managed `old_core_pid` records the observed external CLI PID and pinned target.
+  The relaunched App waits for a different PID serving that target version, reuses it as an
+  unmanaged backend, and fails instead of starting a second bundled core when it never appears.
 - Managed startup does not accept a healthy response from an unrelated process on the same port.
 - Managed startup only accepts readiness when `runtime.json` belongs to the child it just spawned.
 - Successful handoff startup clears the marker.
 - Successful handoff refreshes terminal progress only after the new managed core is ready.
+- The relaunched App never deletes a Windows rollback snapshot, pending guard, or updater-owned
+  package. It only publishes `Completed`; the waiting helper durably observes that terminal state
+  before it commits cleanup. A crash or progress write failure therefore still leaves rollback
+  material available to the helper.
 - Relaunch/open or managed-core startup failures persist `Failed` progress with the original target.
 - Relaunch helper waits for process/port release before opening the App.
 - A running Windows desktop process selects App-owned handoff only when the live runtime marker is

@@ -221,8 +221,12 @@ struct DesktopUpgradeRelaunchMarker {
     created_at_ms: u64,
     old_app_pid: u32,
     old_core_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observed_external_core_pid: Option<u32>,
     proxy_port: u16,
     app_target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_install: Option<PendingDesktopInstall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

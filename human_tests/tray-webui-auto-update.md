@@ -332,6 +332,23 @@
 - App-owned E2E 的合法桌面请求必须携带共享数据目录中真实存在的短时 UUID origin token，不能仅靠 `channel=desktop` 绕过来源认证；请求受理后 token 文件必须已被原子消费。
 - `app.rs`、`app/installer.rs`、`app/tests.rs`、`upgrade.rs`、`upgrade/desktop_companion.rs`、`upgrade/download.rs`、`upgrade/restart.rs`、`upgrade/tests*.rs` 以及 desktop `main.rs`、`upgrade_handoff.rs`、`backend_runtime.rs`、`tests.rs` 均不超过 1500 行，测试文档不包含本机绝对路径。
 
+### TC-TWA-11：Windows durable commit 与 CLI-owned WebView 单 core 回归
+
+**操作步骤**：
+
+1. 执行 `cargo test --manifest-path desktop/src-tauri/Cargo.toml deferred_desktop_completion_preserves_transaction_artifacts_for_helper_commit -- --test-threads=1`。
+2. 执行 `cargo test --manifest-path desktop/src-tauri/Cargo.toml cli_owned_upgrade_relaunch_reuses_only_the_restarted_target_backend -- --test-threads=1`。
+3. 执行 `bash e2e-tests/tests/test_desktop_upgrade_handoff_contract.sh`。
+4. 检查测试使用临时目录和随机端口，确认 9900 健康接口仍返回成功且本次测试没有残留进程。
+
+**预期结果**：
+
+- 新 App 写入 `Completed` 后，Windows rollback snapshot、pending guard 和 updater-owned package 仍存在；只有等待进度的 helper 观察到 `Completed` 后才提交清理。
+- `Completed` 写盘失败、App 提前退出或 helper 验证超时时，rollback snapshot 仍可用于恢复旧 App。
+- CLI-owned WebView relaunch marker 保持 `old_core_pid=None`，并记录观察到的外部 core PID 与 pinned target。
+- 新 App 只接受 PID 已变化且版本命中 target 的 CLI core；旧 PID 或旧版本均不得被当作升级完成。
+- 等待目标 CLI core 超时时返回失败，不能调用 bundled binary 启动第二个 desktop-managed core。
+
 ## 清理步骤
 
 1. 停止测试数据目录中的 Bifrost 服务：
@@ -342,6 +359,10 @@
 3. 不清理、不停止、不重启用户正在运行的 9900 服务。
 
 ## 执行记录
+
+2026-07-20 本次 P1 修复已执行：
+
+- TC-TWA-11（Windows durable commit 与 CLI-owned WebView 单 core 回归）：通过。`deferred_desktop_completion_preserves_transaction_artifacts_for_helper_commit` 验证新 App 发布 `Completed` 后 rollback snapshot、pending guard 与 updater-owned package 仍全部存在，由等待进度的 Windows helper 观察 durable terminal state 后再清理；`cli_owned_upgrade_relaunch_reuses_only_the_restarted_target_backend` 使用随机端口真实 HTTP `/api/system` fixture，验证新 App 只复用 PID 已从 124 变化且版本为 target `0.0.156` 的 CLI core，旧 PID 或旧版本均拒绝，传入不存在的 bundled binary 仍返回 unmanaged child，证明没有启动第二个 core。`test_desktop_upgrade_handoff_contract.sh` 全部通过并增加两条源码顺序门禁；首次执行发现 `backend_runtime.rs` 超过 1500 行，已将外部身份探测归回 `upgrade_handoff.rs` 后重跑通过。9900 健康接口保持 `version=0.0.156`、PID `31641`，未发现测试占位 binary 残留；全部测试使用临时目录和随机端口，未停止或修改真实服务。
 
 2026-07-19 本次 PR comments 与上线风险审计已执行：
 

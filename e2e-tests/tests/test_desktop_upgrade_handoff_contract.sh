@@ -31,7 +31,9 @@ CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
 CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
   cargo test --manifest-path desktop/src-tauri/Cargo.toml deferred_desktop_install_completion -- --nocapture
 CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
-  cargo test --manifest-path desktop/src-tauri/Cargo.toml deferred_desktop_install_commit -- --nocapture
+  cargo test --manifest-path desktop/src-tauri/Cargo.toml deferred_desktop_completion_preserves_transaction_artifacts_for_helper_commit -- --nocapture
+CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
+  cargo test --manifest-path desktop/src-tauri/Cargo.toml cli_owned_upgrade_relaunch_reuses_only_the_restarted_target_backend -- --nocapture
 
 DESKTOP_MAIN="$REPO_ROOT/desktop/src-tauri/src/main.rs"
 DESKTOP_HANDOFF="$REPO_ROOT/desktop/src-tauri/src/upgrade_handoff.rs"
@@ -74,6 +76,20 @@ fi
 
 if ! grep -Fq 'request_desktop_shutdown(app)' "$DESKTOP_BACKEND"; then
   echo "[desktop-upgrade-handoff] FAIL: failed relaunched App/core cannot release Windows files for rollback"
+  exit 1
+fi
+
+if grep -Fq 'commit_deferred_desktop_install_artifacts' "$DESKTOP_BACKEND" ||
+  ! grep -Fq '$terminal = Wait-ForDesktopVerification $startedApp' "$DESKTOP_HANDOFF" ||
+  ! grep -Fq 'Remove-InstallSnapshot $rollback' "$DESKTOP_HANDOFF"; then
+  echo "[desktop-upgrade-handoff] FAIL: the relaunched App can clean rollback artifacts before the helper observes Completed"
+  exit 1
+fi
+
+if ! grep -Fq 'wait_for_external_cli_backend(marker, DESKTOP_UPGRADE_RELAUNCH_PORT_WAIT)' "$DESKTOP_BACKEND" ||
+  ! grep -Fq 'refusing to launch a second desktop-managed core' "$DESKTOP_BACKEND" ||
+  ! grep -Fq 'observed_external_core_pid' "$DESKTOP_HANDOFF"; then
+  echo "[desktop-upgrade-handoff] FAIL: CLI-owned WebView relaunch can start a second bundled core"
   exit 1
 fi
 

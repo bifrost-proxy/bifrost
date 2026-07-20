@@ -16,7 +16,33 @@ pub(super) fn ensure_backend_running(
         ),
     );
 
-    if may_reuse_existing_backend(upgrade_relaunch) {
+    if let Some(marker) =
+        upgrade_relaunch.filter(|marker| upgrade_relaunch_uses_external_cli_backend(marker))
+    {
+        append_desktop_bootstrap_log(
+            data_dir,
+            format!(
+                "desktop upgrade handoff is waiting for the CLI-owned backend; old_external_pid={:?} proxy_port={} target_version={:?}",
+                marker.observed_external_core_pid, marker.proxy_port, marker.target_version
+            ),
+        );
+        if wait_for_external_cli_backend(marker, DESKTOP_UPGRADE_RELAUNCH_PORT_WAIT) {
+            append_desktop_bootstrap_log(
+                data_dir,
+                format!(
+                    "reusing restarted CLI-owned backend on port {}",
+                    marker.proxy_port
+                ),
+            );
+            return Ok((None, marker.proxy_port));
+        }
+        return Err(anyhow(format!(
+            "CLI-owned backend did not restart on port {} with target version {:?}; refusing to launch a second desktop-managed core",
+            marker.proxy_port, marker.target_version
+        )));
+    }
+
+    if upgrade_relaunch.is_none() {
         if let Some(port) = find_existing_backend_port(data_dir, preferred_port) {
             append_desktop_bootstrap_log(
                 data_dir,
@@ -672,16 +698,6 @@ pub(super) fn start_desktop_backend_now(
                         );
                     }
                 } else {
-                    if let Err(error) =
-                        commit_deferred_desktop_install_artifacts(&state.data_dir, marker)
-                    {
-                        append_desktop_bootstrap_log(
-                            &state.data_dir,
-                            format!(
-                                "deferred desktop install committed but artifact cleanup is pending in helper: {error}"
-                            ),
-                        );
-                    }
                     write_desktop_upgrade_terminal_progress(
                         &state.data_dir,
                         UpgradePhase::Completed,
