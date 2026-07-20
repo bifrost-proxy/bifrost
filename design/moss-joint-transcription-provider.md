@@ -57,7 +57,7 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 2. 新增 `transcription_prompt` 字符串。空字符串表示未配置；创建、PATCH、GET 和 Web 表单均保留该值，最大 4000 个 Unicode 字符。
 3. `moss_joint` 走整文件联合转录，不执行 Qwen 30 秒分块，也不再叠加 Sherpa/Pyannote 分离；模型原生 speaker 直接进入 timeline。
 4. 首次运行时自动准备独立、可重定位的 Python 3.12 + MLX-Audio runtime，以及固定 snapshot 的 8-bit MLX 模型；准备完成后同一任务直接继续推理。
-5. macOS CLI 主 archive 与 Desktop DMG 只发布 Bifrost 核心，不内置 MOSS Python/MLX runtime、依赖或模型权重。Apple Silicon 用户在 Model Management 主动初始化或首次运行任务时，才动态下载独立的同版本 `moss-joint-runtime` release asset 与固定模型权重。MLX-Audio 固定 commit `64e8416c303fb3b3463dab8eb4ebd78c55a87c1a`，8-bit 模型固定 snapshot `90c3a1ab78fa56e47e1493ddea48e3ababaf2f71`。release workflow 固定 Python `3.12` ABI minor，由 `setup-python` 按 macOS arm64 host 选择可用的最新 patch；不得固定官方 arm64 工具缓存未提供的 patch 版本。runtime 的 `otool -L` 可重定位检查只检查缩进的依赖项行，忽略 universal binary 每个 architecture 的绝对文件名 header，同时仍拒绝任何指向 runner 或 hosted toolcache 的 dylib 依赖。初始化器从同版本 release checksum manifest 读取 runtime zip 的 SHA-256，校验后才解压；1,258,427,442-byte 权重固定 SHA-256 `469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190`，下载后必须校验。测试覆盖的自定义 runtime URL 必须同时提供 `BIFROST_MOSS_RUNTIME_SHA256`。`test_asr_moss_release_contract.sh` 在普通 PR CI 中校验 workflow 与初始化器的 Python minor、commit、snapshot、metadata、资产名和 checksum 契约，避免只有真正发版时才发现配置漂移。
+5. macOS CLI 主 archive 与 Desktop DMG 只发布 Bifrost 核心，不内置 MOSS Python/MLX runtime、依赖或模型权重。MOSS runtime 使用 `scripts/asr/moss-runtime-version.txt` 中的独立版本和 `moss-runtime-v<version>` 独立 GitHub Release，不再跟随每个 Bifrost CLI/App 版本重复构建。Apple Silicon 用户在 Model Management 主动初始化或首次运行任务时，才动态下载该独立 runtime asset 与固定模型权重。MLX-Audio 固定 commit `64e8416c303fb3b3463dab8eb4ebd78c55a87c1a`，8-bit 模型固定 snapshot `90c3a1ab78fa56e47e1493ddea48e3ababaf2f71`。runtime 使用固定 SHA-256 的 `python-build-standalone` CPython 3.12 arm64 归档，不复制 `actions/setup-python` 的 hosted toolcache；`otool -L` 可重定位检查仍拒绝任何指向 runner 或 hosted toolcache 的 dylib 依赖。初始化器从独立 Release 的 `<asset>.sha256` 校验文件读取 runtime zip 的 SHA-256，校验后才解压；1,258,427,442-byte 权重固定 SHA-256 `469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190`，下载后必须校验。测试覆盖的自定义 runtime URL 必须同时提供 `BIFROST_MOSS_RUNTIME_SHA256`。`test_asr_moss_release_contract.sh` 在普通 PR CI 中校验核心 Release 隔离、独立 workflow、Python 归档、commit、snapshot、metadata、资产名和 checksum 契约。
 
 ### 统一模型管理
 
@@ -66,13 +66,15 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 - 用户可在管理页主动初始化或修复 `~/.bifrost/asr/moss_joint_mlx`。下载复用断点续传和同一进程内初始化锁，管理页与同一服务中的任务同时触发时不会并行写入同一资源。
 - Directory Task 不保存另一份模型路径或依赖配置；它只保存 `transcription_mode` 与任务 Prompt。运行时若发现资产尚未准备好，调用与管理页完全相同的校验和初始化函数作为自动兜底。
 
-### 发布前 CI 门禁
+### 独立 Runtime 发布与 CI 门禁
 
-- `release.yml` 与 PR CI 必须调用同一个 MOSS runtime 打包脚本。正式发布传入真实 runtime 目录；PR CI 在 Apple Silicon macOS runner 上构造最小 fixture，真实生成 zip 和 `.sha256`，并验证入口、metadata、notice/license、无 AppleDouble sidecar 以及 checksum 可复算。
+- `.github/workflows/moss-runtime-release.yml` 是 MOSS runtime 的唯一正式构建/发布入口，由 `moss-runtime-v*` tag 或手动 dispatch 触发。它调用共享 builder 和 packager，发布独立 runtime zip 与同名 `.sha256`；核心 `.github/workflows/release.yml` 不安装 Python/MLX、不下载模型 metadata，也不生成或上传 MOSS runtime。
+- Runtime 版本独立于 Bifrost 版本。只有 Python、MLX-Audio commit/patch、requirements、runner 或模型 metadata snapshot 变化时才提升 `scripts/asr/moss-runtime-version.txt`；普通 Bifrost patch/minor release 继续复用已验证的 runtime asset。
+- PR CI 在 Apple Silicon macOS runner 上构造最小 fixture，真实生成 zip 和 `.sha256`，并验证入口、metadata、notice/license、无 AppleDouble sidecar 以及 checksum 可复算；静态契约同时禁止 MOSS builder 回流核心 Release。
 - runtime 打包器必须拒绝任何 `.safetensors` 权重；权重始终由初始化器单独动态下载。macOS CLI binary/archive 与 Desktop `.app`/DMG 必须通过核心包门禁：禁止出现 MOSS runtime、Python site-packages、runner 或权重路径，并以 512 MiB 上限拦截灾难性包体膨胀。PR CI 必须扫描两种 macOS 架构的真实 CLI binary 和真实 Desktop bundle，不能只验证最小 fixture。这个上限不是日常体积目标，正常主包应显著低于该值。
 - 普通 PR 不下载 1.2 GB 权重，也不重复安装完整 MLX Python 环境；`test_asr_moss_release_contract.sh` 负责固定 commit、requirements、模型 metadata、权重 URL/大小/SHA-256、release 资产名和共享打包脚本调用的静态契约。
-- 正式 tag release 仍执行完整 Python/MLX 安装、runner self-test、host-path 动态依赖检查、真实 runtime 打包、checksum 汇总和 release asset 上传。PR 的轻量门禁不能替代 tag release，但保证 workflow 语法引用和确定性打包结果不会到发版时才首次执行。
-- 正式 release 的 `BIFROST_VERSION` 由 `crates/bifrost-admin/build.rs` 注入编译期 `CARGO_PKG_VERSION`，因此 runtime asset 与 checksum URL 使用 tag/release 版本而不是静态 Cargo.toml 版本；release-contract E2E 固定验证这条注入链路。
+- 独立 runtime tag release 才执行完整 Python/MLX 安装、runner self-test、host-path 动态依赖检查、真实 runtime 打包、checksum 和 asset 上传。PR 的轻量门禁不能替代该真实 tag 演练，但保证 workflow 语法引用和确定性打包结果不会到正式 runtime 发布时才首次执行。
+- 核心 Bifrost beta tag 必须单独验证 CLI/App Release 在完全不构建 MOSS runtime 的情况下全绿；Runtime beta tag 必须验证独立资产可发布、可复算 checksum，并在稳定 runtime 发布前完成。
 6. 用户 Prompt 通过仅当前进程可读的临时文件传入。runtime 始终先使用官方时间戳/说话人协议 Prompt，再追加用户上下文，避免自定义 Prompt 破坏结构化输出协议。
 7. 整段推理采用端到端硬 watchdog：预算从文件进入 Processing 时开始，包含媒体探测和 WAV 规范化；启动 MLX 子进程前先扣除已经消耗的时间，只把剩余预算交给推理。总耗时达到音频时长的 `0.5x` 时杀死子进程并返回 `moss_rtf_exceeded`，不会继续消耗资源或悄悄回退到不同模型。
 8. release 打包禁用 macOS resource fork，并扫描拒绝 `._*`、`.DS_Store`、`__MACOSX`；安装器也跳过这些元数据，避免 Python 模型加载器误读 AppleDouble 文件。

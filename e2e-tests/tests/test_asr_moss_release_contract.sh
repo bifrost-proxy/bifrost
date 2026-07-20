@@ -13,8 +13,10 @@ import sys
 import types
 
 release_path = Path(".github/workflows/release.yml")
+runtime_release_path = Path(".github/workflows/moss-runtime-release.yml")
 runtime_path = Path("crates/bifrost-admin/src/handlers/asr_jobs/moss_joint.rs")
-build_path = Path("crates/bifrost-admin/build.rs")
+runtime_version_path = Path("scripts/asr/moss-runtime-version.txt")
+runtime_builder_path = Path("scripts/ci/build-moss-release-runtime.sh")
 requirements_path = Path("scripts/asr/moss-mlx-requirements.txt")
 runner_path = Path("scripts/asr/moss_mlx_runner.py")
 patch_path = Path("scripts/asr/mlx-audio-moss-quantized-conv.patch")
@@ -25,8 +27,10 @@ core_guard_test_path = Path("scripts/ci/test-macos-release-core-payload.sh")
 ci_path = Path(".github/workflows/ci.yml")
 
 release = release_path.read_text(encoding="utf-8")
+runtime_release = runtime_release_path.read_text(encoding="utf-8")
 runtime = runtime_path.read_text(encoding="utf-8")
-build_script = build_path.read_text(encoding="utf-8")
+runtime_version = runtime_version_path.read_text(encoding="utf-8").strip()
+runtime_builder = runtime_builder_path.read_text(encoding="utf-8")
 requirements = requirements_path.read_text(encoding="utf-8")
 runner = runner_path.read_text(encoding="utf-8")
 packager = packager_path.read_text(encoding="utf-8")
@@ -44,12 +48,17 @@ def capture(text: str, pattern: str, label: str) -> str:
     return match.group(1)
 
 
-source_commit = capture(release, r'SOURCE_COMMIT="([0-9a-f]{40})"', "MLX-Audio source commit")
-model_commit = capture(release, r'MODEL_COMMIT="([0-9a-f]{40})"', "model snapshot commit")
-moss_python_version = capture(
-    release,
-    r'name: Set up Python for MOSS MLX runtime.*?python-version:\s*"([^"]+)"',
-    "MOSS runtime Python version",
+source_commit = capture(runtime_builder, r'SOURCE_COMMIT="([0-9a-f]{40})"', "MLX-Audio source commit")
+model_commit = capture(runtime_builder, r'MODEL_COMMIT="([0-9a-f]{40})"', "model snapshot commit")
+python_archive = capture(
+    runtime_builder,
+    r'PYTHON_ARCHIVE="([^"]+)"',
+    "standalone Python archive",
+)
+python_sha = capture(
+    runtime_builder,
+    r'PYTHON_SHA256="([0-9a-f]{64})"',
+    "standalone Python checksum",
 )
 model_url = capture(runtime, r'const MOSS_MODEL_URL: &str =\s*"([^"]+)";', "model URL")
 model_bytes = capture(runtime, r'const MOSS_MODEL_BYTES: u64 = ([0-9_]+);', "model byte length")
@@ -65,7 +74,7 @@ required_block = capture(
 )
 required_files = set(re.findall(r'"([^"]+)"', required_block))
 download_block = capture(
-    release,
+    runtime_builder,
     r'for file in \\\s*(.*?)\s*; do\s*\n\s*curl --fail',
     "release model metadata download list",
 )
@@ -73,9 +82,10 @@ download_files = set(download_block.replace("\\", " ").split())
 
 require(source_commit == "64e8416c303fb3b3463dab8eb4ebd78c55a87c1a", "MLX-Audio commit drifted")
 require(
-    moss_python_version == "3.12",
-    "MOSS runtime must select an available Python 3.12 patch for the macOS arm64 host",
+    python_archive == "cpython-3.12.13+20260510-aarch64-apple-darwin-install_only_stripped.tar.gz",
+    "MOSS runtime must use the pinned relocatable Python 3.12 arm64 archive",
 )
+require(python_sha == "55bc1a5edbc8ac4da0081f4f5731ed2d1ed10c57cb37a820b2a0dbc7cad742e9", "standalone Python checksum drifted")
 require(model_commit in model_url, "runtime model URL and release snapshot disagree")
 require(model_url.endswith("/model.safetensors"), "runtime no longer downloads the pinned weight")
 require(model_bytes.replace("_", "") == "1258427442", "model byte-length guard drifted")
@@ -92,9 +102,9 @@ requirements_lines = [
 require(requirements_lines, "pinned Python requirements are empty")
 require(all(re.fullmatch(r"[A-Za-z0-9_.-]+==[^=\s]+", line) for line in requirements_lines), "every Python requirement must use an exact version")
 require(patch_path.is_file(), "pinned MLX-Audio compatibility patch is missing")
-require(f'git -C "$SOURCE_DIR" fetch --depth 1 origin "$SOURCE_COMMIT"' in release, "release does not fetch the pinned source commit")
-require('git -C "$SOURCE_DIR" apply --unidiff-zero' in release, "release does not apply the compatibility patch")
-require('scripts/ci/package-moss-release-runtime.sh' in release, "release does not use the shared MOSS packager")
+require(f'git -C "$SOURCE_DIR" fetch --depth 1 origin "$SOURCE_COMMIT"' in runtime_builder, "runtime builder does not fetch the pinned source commit")
+require('git -C "$SOURCE_DIR" apply --unidiff-zero' in runtime_builder, "runtime builder does not apply the compatibility patch")
+require('scripts/ci/package-moss-release-runtime.sh' in runtime_builder, "runtime builder does not use the shared MOSS packager")
 require('moss_mlx_runner.py" --self-test' in packager, "shared packager does not smoke-test the runtime")
 require('ditto -x -k "$OUTPUT_ZIP"' in packager, "shared packager does not extract the completed archive")
 require('EXTRACTED_RUNTIME_ROOT/runtime/moss_mlx_runner.py" --self-test' in packager, "shared packager does not self-test the extracted runtime")
@@ -177,14 +187,22 @@ except RuntimeError as error:
 else:
     require(False, "invalid protocol consumed the unbounded generation path")
 
-asset_template = 'moss-joint-runtime-v${VERSION}-aarch64-apple-darwin.zip'
-require(asset_template in release, "release archive name drifted")
+require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", runtime_version) is not None, "independent runtime version is not stable semver")
+require('tags:\n      - "moss-runtime-v*"' in runtime_release, "independent runtime tag trigger is missing")
+require('bash scripts/ci/build-moss-release-runtime.sh' in runtime_release, "independent workflow does not call the runtime builder")
+require('Publish independent runtime release' in runtime_release, "independent workflow does not publish a GitHub Release")
+require('model weights are intentionally excluded' in runtime_release.lower(), "runtime release does not document dynamic model delivery")
+require('actions/setup-python' not in runtime_release, "runtime workflow must not copy a hosted-toolcache Python")
+require('DISPATCH_RUNTIME_VERSION: ${{ inputs.runtime_version }}' in runtime_release, "workflow dispatch input is interpolated directly into the shell")
+require('Build MOSS joint transcription runtime' not in release, "core release still builds the MOSS runtime")
+require('build-moss-release-runtime.sh' not in release, "core release still invokes the MOSS runtime builder")
+require('moss-joint-runtime-v' not in release, "core release still names or uploads a MOSS runtime asset")
 require('"{MOSS_RUNTIME_ASSET_STEM}-v{}-aarch64-apple-darwin.zip"' in runtime, "runtime asset name drifted")
-require('cargo:rerun-if-env-changed=BIFROST_VERSION' in build_script, "release version changes do not invalidate the admin build")
-require('cargo:rustc-env=CARGO_PKG_VERSION={}' in build_script, "BIFROST_VERSION is not injected into runtime release URLs")
-require('dist/*.zip' in release and 'dist/*.sha256' in release, "CLI artifact upload omits runtime archive or checksum")
-require('-name "*.zip"' in release and '-name "*.sha256"' in release, "release asset collection omits runtime archive or checksum")
-require('cat *.sha256 > "bifrost-v${VERSION}-checksums.txt"' in release, "combined release checksum manifest is missing")
+require('moss_runtime_version()' in runtime, "initializer does not use the independent runtime version")
+require('moss-runtime-v{}' in runtime, "initializer does not use the independent runtime release tag")
+require('.sha256' in runtime and 'moss_runtime_checksum_url' in runtime, "initializer does not use the independent checksum asset")
+require('runtime_version: moss_runtime_version().to_string()' in runtime, "verification marker does not record the installed runtime version")
+require('marker.runtime_version == moss_runtime_version()' in runtime, "runtime version changes do not invalidate stale installed assets")
 require("parse_runtime_checksum_manifest" in runtime, "runtime no longer verifies the release checksum manifest")
 require("BIFROST_MOSS_RUNTIME_SHA256 is required with BIFROST_MOSS_RUNTIME_URL" in runtime, "custom runtime URL can bypass checksum verification")
 require(packager_test_path.is_file(), "release packaging fixture test is missing")
@@ -193,7 +211,7 @@ require(core_guard_test_path.is_file(), "macOS core package guard fixture is mis
 require("Verify macOS CLI core package stays lightweight" in release, "release does not gate the macOS CLI core package")
 require('check-macos-release-core-payload.sh "${APP_PATH}"' in release, "release does not gate the macOS desktop app bundle")
 require('check-macos-release-core-payload.sh "${DMG_PATH}"' in release, "release does not inspect the final macOS DMG")
-require("Release Workflow Contract (MOSS macOS)" in ci, "PR CI does not gate the MOSS release workflow")
+require("MOSS Runtime Release Contract (macOS)" in ci, "PR CI does not gate the independent MOSS runtime workflow")
 require("test-package-moss-release-runtime.sh" in ci, "PR CI does not execute the shared MOSS packager")
 require("test-macos-release-core-payload.sh" in ci, "PR CI does not exercise the macOS core package guard")
 require(ci.count("Verify macOS CLI binary stays lightweight") == 2, "PR CI does not gate both macOS CLI architectures")
@@ -201,7 +219,7 @@ require(ci.count('check-macos-release-core-payload.sh "${DMG_PATH}"') >= 1, "PR 
 
 print(
     "PASS: MOSS release/runtime contract is aligned "
-    f"(python={moss_python_version}, source={source_commit[:12]}, "
-    f"model={model_commit[:12]}, metadata={len(download_files)})"
+    f"(runtime={runtime_version}, python={python_archive.split('+')[0]}, "
+    f"source={source_commit[:12]}, model={model_commit[:12]}, metadata={len(download_files)})"
 )
 PY

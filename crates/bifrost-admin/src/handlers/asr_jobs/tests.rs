@@ -320,6 +320,27 @@ mod tests {
         assert_eq!(ready.installed_model_bytes, model_spec.bytes);
         assert_eq!(ready.model, MOSS_MODEL_ID);
 
+        let verification_path = moss_verification_path(&asr_home);
+        let mut marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&verification_path).unwrap()).unwrap();
+        assert_eq!(marker["runtime_version"], moss_runtime_version());
+        marker["runtime_version"] = serde_json::Value::String("0.9.0".to_string());
+        std::fs::write(
+            &verification_path,
+            serde_json::to_vec_pretty(&marker).unwrap(),
+        )
+        .unwrap();
+        let stale_runtime = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert!(!stale_runtime.runtime_ready);
+        assert!(!stale_runtime.model_ready);
+        write_moss_verification_marker(&asr_home, &paths, &model_spec).unwrap();
+
         std::fs::remove_file(&runtime_framework).unwrap();
         let missing_runtime_framework = moss_management_status_with_spec(
             &asr_home,
@@ -595,7 +616,12 @@ mod tests {
         );
         assert!(moss_runtime_asset_name_for("linux", "x86_64").is_err());
         let asset = moss_runtime_asset_name_for("macos", "aarch64").unwrap();
-        assert!(asset.contains(env!("CARGO_PKG_VERSION")));
+        assert_eq!(moss_runtime_version(), "1.0.0");
+        assert_eq!(moss_runtime_release_tag(), "moss-runtime-v1.0.0");
+        assert_eq!(
+            asset,
+            "moss-joint-runtime-v1.0.0-aarch64-apple-darwin.zip"
+        );
         assert_eq!(
             moss_runtime_asset_name().is_ok(),
             cfg!(all(target_os = "macos", target_arch = "aarch64"))
@@ -605,10 +631,7 @@ mod tests {
         assert!(validate_moss_transcription_mode(AsrTranscriptionMode::Standard).is_ok());
         assert!(!AsrTranscriptionMode::Standard.uses_native_speakers());
         assert!(AsrTranscriptionMode::MossJoint.uses_native_speakers());
-        assert!(moss_runtime_checksums_url().ends_with(&format!(
-            "bifrost-v{}-checksums.txt",
-            env!("CARGO_PKG_VERSION")
-        )));
+        assert!(moss_runtime_checksum_url(&asset).ends_with(&format!("{asset}.sha256")));
 
         let custom_url = std::ffi::OsStr::new("file:///tmp/moss-runtime.zip");
         let _url_guard = EnvVarGuard::set("BIFROST_MOSS_RUNTIME_URL", custom_url);
@@ -632,7 +655,9 @@ mod tests {
             .contains("required"));
         drop(_url_guard);
         let default_url = moss_runtime_url(&asset);
-        assert!(default_url.contains("github.com/bifrost-proxy/bifrost/releases"));
+        assert!(default_url.contains(
+            "github.com/bifrost-proxy/bifrost/releases/download/moss-runtime-v1.0.0"
+        ));
 
         let custom_model = std::ffi::OsStr::new("file:///tmp/model.safetensors");
         let _model_guard = EnvVarGuard::set("BIFROST_MOSS_MODEL_URL", custom_model);

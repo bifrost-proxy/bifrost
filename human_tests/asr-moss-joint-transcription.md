@@ -231,21 +231,21 @@
 - 独立 CPython runtime 解压后仍保留 framework/library 相对符号链接；恶意逃逸链接不会写出安装根目录，发布归档通过 extract-then-self-test。
 - Unix 上已有目录不会被 runtime symlink 替换；Windows 不尝试物化 archive symlink，即使目标路径已存在目录也稳定返回 `unsupported on this platform`，两种平台都保持安全拒绝。
 
-### TC-MOSS-14：macOS arm64 Python 可用性与 beta Release 演练
+### TC-MOSS-14：独立 Runtime 与核心 beta Release 隔离演练
 
 操作步骤：
 
-1. 执行 `bash e2e-tests/tests/test_asr_moss_release_contract.sh`，确认 MOSS release job 使用 `python-version: "3.12"` minor selector，不再固定 GitHub macOS arm64 工具缓存未提供的 patch 版本。
-2. 查询 `actions/python-versions` 官方 `versions-manifest.json`，确认 Python 3.12 至少存在一个 `darwin` / `arm64` 构建；同时确认原失败版本 3.12.13 没有该构建，根因与 release 日志一致。
-3. 执行 `bash scripts/ci/test-package-moss-release-runtime.sh`，确认 universal Mach-O 的每个 architecture 绝对文件名 header 不会被误判成 dylib 依赖，同时真实指向 runner/toolcache 的缩进依赖项仍被拒绝。
-4. 从修复分支创建唯一的 `v0.0.157-beta.*` tag，触发真实 `Release` workflow；看护所有 CLI、Desktop、checksum、MOSS runtime 和 GitHub prerelease job 到成功。
-5. 检查 beta release 包含 `moss-joint-runtime-v0.0.157-beta.*-aarch64-apple-darwin.zip` 及其 `.sha256`，下载后复算 checksum，并确认 runtime zip 能通过共享 packager 的 extract-then-self-test 契约。
+1. 执行 `bash e2e-tests/tests/test_asr_moss_release_contract.sh`，确认核心 `release.yml` 不包含 MOSS builder、Python/MLX 安装或 runtime asset，独立 `moss-runtime-release.yml` 固定调用共享 builder/packager。
+2. 下载并复算 builder 固定的 `python-build-standalone` CPython 3.12 arm64 SHA-256；把归档移动到另一目录后执行 `python3.12 -c 'import ssl, sqlite3'`，并用 `otool -L` 确认没有 runner/toolcache 绝对依赖。
+3. 执行 `bash scripts/ci/test-package-moss-release-runtime.sh`，确认 universal Mach-O 的 architecture header 不会被误判成 dylib 依赖，同时真实指向 runner/toolcache 的缩进依赖项仍被拒绝。
+4. 从修复分支创建唯一的 `moss-runtime-v1.0.0-beta.*` tag，触发真实独立 Runtime workflow；看护 build、checksum、GitHub prerelease 到成功，并下载资产复算 checksum。
+5. 发布稳定 `moss-runtime-v1.0.0` 后，从同一修复分支创建唯一的 `v0.0.157-beta.*` tag；看护核心 CLI、Desktop、combined checksum 和 prerelease 到成功，确认核心 Release 不包含 MOSS runtime asset。
 
 预期结果：
 
-- `setup-python` 在 macOS arm64 runner 上解析并安装可用的 Python 3.12 patch，不再出现 `version ... with architecture arm64 was not found`。
-- universal Mach-O 的 header 不触发 build-host 依赖误报，真实的绝对 dylib 依赖仍被安全门禁拦截。
-- beta Release 全部 job 成功，MOSS runtime zip、checksum 和其余跨平台正式产物均生成；失败的正式 `v0.0.157` tag 只在修复合入主干后重建。
+- 独立 Runtime workflow 使用经过 SHA-256 固定、可重定位的 Python，不依赖 GitHub hosted toolcache 路径。
+- Runtime beta/stable Release 分别生成独立 zip 和 `.sha256`，不包含 `model.safetensors`；模型权重继续在用户初始化时下载。
+- 核心 beta Release 全部 job 成功且不下载/构建/上传 MOSS runtime；CLI、App、DMG 的包体轻量门禁继续生效。
 
 ## 清理步骤
 
