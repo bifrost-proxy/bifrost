@@ -4,7 +4,7 @@
 
 ASR 定时任务(`AsrDirectoryTask`)按目录批量转写音频后,会在 `<BIFROST_DATA_DIR>/asr/data/text/<task_id>/.daily/YYYY-MM-DD.md` 生成每日转写汇总 Markdown。这些原始 daily markdown 只是转写产物,不承担业务表达:用户实际想要的是"日报"、"明日 To Do"、"复盘"、"重点摘录"等二次整理。旧方案只把 daily markdown 存盘,用户需要手动喂给外部工具生成日报,链路断裂。
 
-Daily Agent Runner 是 ASR 定时任务的后处理阶段:ASR 音频转写成功、daily markdown 有增量后,自动为该 task 排队一个 Daily Agent 队列,按稳定依赖拓扑把每个 enabled Agent 交给对应外部 Runner(ChatGPT Web / Codex / Claude Code / Trae X / 自定义)执行,输出 report 到 `.daily/agents/<agent_id>/output/<output_dir>/YYYY-MM-DD-report.md`,可选把同日上游产物注入下游 Agent,可选 IM 通道发送 summary 或 full report,可选把 report 复制到用户指定的外部目录(iCloud、企业网盘)。没有依赖配置时继续保留原数组顺序。
+Daily Agent Runner 是 ASR 定时任务的后处理阶段:ASR 音频转写成功、daily markdown 有增量后,自动为该 task 排队一个 Daily Agent 队列,按稳定依赖拓扑把每个 enabled Agent 交给对应外部 Runner(ChatGPT Web / Codex / Claude Code / Trae X / 自定义)执行,输出 report 到 `.daily/agents/<agent_id>/output/<output_dir>/YYYY-MM-DD-report.md`,可选把同日上游产物注入下游 Agent,可选 IM 通道发送 summary 或 full report,可选把 report 复制到用户指定的外部目录(iCloud、企业网盘)。配置 `report_sync_dir` 后,Agent report 按 Agent 子目录复制,原始 daily markdown 统一复制到目标根目录的 `original_text/` 子目录。没有依赖配置时继续保留原数组顺序。
 
 本方案不改动 ASR 音频转写主链路(chunk retry、diarization、daily markdown 生成不变);只在 ASR run terminal 后接一个后处理队列,并在 WebUI/CLI 上提供管理入口。
 
@@ -22,7 +22,7 @@ Daily Agent Runner 是 ASR 定时任务的后处理阶段:ASR 音频转写成功
 - ChatGPT Web 契约输出:`daily_report` 必须含 `# YYYY-MM-DD 日报` / `## 今日概览` / `## 证据与不确定性`;`tomorrow_todo` 必须含 `# 明日 To Do List - YYYY-MM-DD` / `## 明天必须完成` / `## 可选推进` / `## 需要确认`;重试续写按 Agent 契约分流。
 - ChatGPT Web browser 恢复只恢复与当前 `execution_mode` 一致的 orphan;headed 不复用 headless,反之亦然。
 - Admin API 与 CLI 提供列表、增改、run、send、sync、reports 详情等入口;WebUI 提供 Daily Agent 管理列表页 + 单 Agent 详情页 + Daily Docs 行级 Run(All / 单 Agent) + report 全屏详情。
-- `report_sync_dir` 自动同步:Runner 成功生成 report 后复制到目标目录,`last_report_sync` 记录 copied/skipped/failed;外部目录超时不影响 report 成功状态。
+- `report_sync_dir` 自动同步:Runner 成功生成 report 后复制到 Agent 子目录;ASR daily markdown 刷新后复制到目标根目录的 `original_text/`;`last_report_sync` 与 `last_original_sync` 分别记录 copied/skipped/failed;外部目录超时不影响 ASR 或 report 成功状态。
 - Daily Agent Records 数据源:`daily_agent_processed.json` + 磁盘 `.daily/agents/<agent_id>/output/<output_dir>/`;兼容旧路径 `daily/<output_dir>/`、`.daily/agents/<agent_id>/<output_dir>/`、`daily/Report/`;processed state 缺失时仍展示磁盘已有报告。
 - IM delivery 单字段 `channel = owner:<provider_id> | target:<target_id>`;`mode=summary|full_report`;超长 full_report 按固定大小拆分为多条,不降级 summary。
 
@@ -42,7 +42,7 @@ Daily Agent Runner 是 ASR 定时任务的后处理阶段:ASR 音频转写成功
 - Daily Docs 行级 `Run All Agents` 按行 date 串行运行所有 enabled Agent;单 Agent 下拉只运行指定 agent_id。
 - 多 Agent 共用同一 ChatGPT Web runner 时按 task-level 锁串行;单 Agent 失败只写自身 `last_status/last_error/last_run_id`,不阻断队列。
 - 手动 Run Now + IM 绑定通道 → 成功发送 summary 或 full_report;超长 full_report 分多条。
-- `report_sync_dir` 设置后 report 复制到目标目录;iCloud 卡住时同步失败但 report 生成成功。
+- `report_sync_dir` 设置后 report 复制到 Agent 子目录,原始 daily markdown 复制到 `original_text/`;iCloud 卡住时同步失败但 ASR 与 report 生成成功。
 - Daily Agent Records 与 report 详情 `/daily-agent/reports/{date}` 数据一致,列表可见的 report 详情必须能打开(不能列表存在、详情 404)。
 - 服务重启后 orphan browser 仅恢复与当前 execution_mode 匹配的实例。
 
@@ -79,7 +79,7 @@ adapter 不允许把 `tomorrow_todo` 输出误导为日报格式。ChatGPT Web b
 
 ### `report_sync_dir` 与 IM 是两条独立分发通道
 
-- `report_sync_dir`:本地目录复制,面向 iCloud、企业网盘等异步同步;失败只影响同步状态,不影响 report 生成成功。
+- `report_sync_dir`:本地目录复制,面向 iCloud、企业网盘等异步同步;Agent report 写入 `<root>/<agent_id>/`,ASR daily markdown 写入 `<root>/original_text/`;失败只影响同步状态,不影响 ASR 或 report 生成成功。
 - IM `im_delivery.channel`:主动推送到飞书 owner/target;`mode=summary` 只发摘要,`mode=full_report` 发完整 report(超长按固定大小拆多条)。
 
 两条通道解耦,便于用户按 Agent 独立配置。
@@ -179,7 +179,7 @@ ChatGPT Web plan 不包含 `unchanged`;文件型外部 runner 的 plan 不塞 da
 - `GET/PUT /_bifrost/api/asr/tasks/{id}/daily-agent/agents`:agent 列表增改。
 - `POST /_bifrost/api/asr/tasks/{id}/daily-agent/run`:body `{date?, agent_id?, force?}`;省略 `agent_id` = 全部;省略 `date` = 最新 daily。
 - `POST /_bifrost/api/asr/tasks/{id}/daily-agent/send`:重新触发 IM 发送。
-- `POST /_bifrost/api/asr/tasks/{id}/daily-agent/sync`:手动同步全部现有 report 到 `report_sync_dir`。
+- `POST /_bifrost/api/asr/tasks/{id}/daily-agent/sync`:手动同步全部现有 report 与原始 daily markdown 到 `report_sync_dir`。
 - `GET /_bifrost/api/asr/tasks/{id}/daily-agent/reports/{date}`:返回 report Markdown 全文;非法日期拒绝,缺失 404。
 - `GET /_bifrost/api/asr/tasks/{id}/daily-agent/runs`:合并 processed json + 磁盘 fallback,按 date 倒序。
 
@@ -251,7 +251,7 @@ ChatGPT Web plan 不包含 `unchanged`;文件型外部 runner 的 plan 不塞 da
 - daily markdown unchanged → skipped;追加内容后 ChatGPT Web 只收新增 tail。
 - 手动 Run Now → `report/` 生成文件。
 - Daily Docs 行级 `Run All Agents` → 请求只带 `date`,后端串行运行全部 enabled Agent;单 Agent 下拉 → 带 `agent_id` 只运行指定 Agent。
-- `report_sync_dir` 自动同步 + 手动同步;iCloud 卡住时同步失败但 report 成功;`last_report_sync` 记录 copied/skipped/failed。
+- `report_sync_dir` 自动同步 + 手动同步;`original_text/` 只接收合法的 `YYYY-MM-DD.md`;iCloud 卡住时同步失败但 ASR 与 report 成功;`last_report_sync` 和 `last_original_sync` 记录 copied/skipped/failed。
 - CLI `daily set-sync-dir` / `daily sync` 输出 target/total/copied/skipped/failed。
 - `/daily-agent/reports/{date}` 返回 report Markdown 全文;非法日期拒绝;缺失 404。
 - `/daily-agent/runs` 合并 processed + 磁盘 fallback,兼容旧路径,按日期倒序。

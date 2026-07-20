@@ -34,9 +34,11 @@ import type {
   AsrExternalVolume,
   AsrPauseMode,
   AsrRuntimeStrategy,
+  AsrTranscriptionMode,
 } from "../../../api/asr";
-import { listAsrExternalVolumes } from "../../../api/asr";
+import { getMossModelStatus, listAsrExternalVolumes } from "../../../api/asr";
 import { formatSchedule, formatTime } from "../asrUtils";
+import { directoryTaskModeFields, directoryTaskModeOptions } from "../directoryTaskMode";
 
 const { Text } = Typography;
 
@@ -196,10 +198,15 @@ export default function DirectoryTasksPanel({
     volumes: AsrExternalVolume[];
   } | null>(null);
   const [volumePromptLoading, setVolumePromptLoading] = useState(false);
+  const [mossPlatformSupported, setMossPlatformSupported] = useState<boolean | null>(null);
+  const [mossUnsupportedReason, setMossUnsupportedReason] = useState<string | null>(null);
   const promptedVolumeKeysRef = useRef(new Set<string>());
   const volumePromptOpenRef = useRef(false);
 
   const configOpen = createOpen || Boolean(editingTask);
+  const transcriptionMode = Form.useWatch<AsrTranscriptionMode>("transcription_mode", taskForm);
+  const transcriptionPrompt = Form.useWatch<string>("transcription_prompt", taskForm) ?? "";
+  const { showMossPrompt, showStandardPipeline } = directoryTaskModeFields(transcriptionMode);
   const configTitle = editingTask
     ? `Edit Directory Task: ${editingTask.name}`
     : "New Directory Task";
@@ -209,6 +216,29 @@ export default function DirectoryTasksPanel({
       return progress ? shouldShowExternalImportProgress(progress) : false;
     })
     .map((task) => task.id);
+
+  useEffect(() => {
+    if (!configOpen) {
+      return;
+    }
+    let cancelled = false;
+    setMossPlatformSupported(null);
+    setMossUnsupportedReason(null);
+    void getMossModelStatus()
+      .then((status) => {
+        if (cancelled) return;
+        setMossPlatformSupported(status.platform_supported);
+        setMossUnsupportedReason(status.unsupported_reason ?? null);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setMossPlatformSupported(false);
+        setMossUnsupportedReason("MOSS platform availability could not be verified.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [configOpen]);
 
   const openCreate = () => {
     setEditingTask(null);
@@ -376,6 +406,8 @@ export default function DirectoryTasksPanel({
             schedule_day: 1,
             schedule_minute: 0,
             runtime_strategy: "reuse_per_file",
+            transcription_mode: "standard",
+            transcription_prompt: "",
             max_concurrent_files: 1,
             diarization_enabled: true,
             diarization_profile: "sherpa-onnx-balanced",
@@ -463,90 +495,158 @@ export default function DirectoryTasksPanel({
                 </Col>
               </>
             ) : null}
-            <Col xs={24} md={8}>
-              <Form.Item name="runtime_strategy" label="Runtime">
+            <Col xs={24}>
+              <Form.Item name="transcription_mode" label="Transcription Mode">
                 <Select
-                  data-testid="asr-runtime-strategy-select"
-                  listHeight={420}
-                  optionLabelProp="label"
-                  popupMatchSelectWidth={false}
+                  data-testid="asr-transcription-mode-select"
+                  options={directoryTaskModeOptions(mossPlatformSupported)}
+                />
+              </Form.Item>
+              <Text type="secondary" style={{ display: "block", marginTop: -16, marginBottom: 16 }}>
+                {showMossPrompt
+                  ? "MOSS uses one global MLX decode for timestamps and consistent speaker labels. The verified Apple Silicon runtime and 8-bit model initialize automatically; inference is stopped if it exceeds 0.5x the audio duration."
+                  : "Uses the existing Qwen transcription pipeline and optional external speaker diarization."}
+              </Text>
+              {showMossPrompt && mossPlatformSupported === false ? (
+                <Text type="warning" style={{ display: "block", marginTop: -12, marginBottom: 16 }}>
+                  {mossUnsupportedReason ??
+                    "MOSS joint transcription requires Apple Silicon macOS."}
+                </Text>
+              ) : null}
+            </Col>
+            {showMossPrompt ? (
+              <Col xs={24}>
+                <Form.Item
+                  name="transcription_prompt"
+                  label="MOSS Prompt"
+                  extra={
+                    <span
+                      style={{
+                        display: "flex",
+                        alignItems: "flex-start",
+                        justifyContent: "space-between",
+                        gap: 12,
+                      }}
+                    >
+                      <span>
+                        Optional meeting context, names, and specialist terms. Bifrost appends it to
+                        the required MOSS protocol prompt and saves it with this task.
+                      </span>
+                      <span data-testid="asr-transcription-prompt-count" style={{ whiteSpace: "nowrap" }}>
+                        {Array.from(transcriptionPrompt).length} / 4000
+                      </span>
+                    </span>
+                  }
+                  rules={[
+                    {
+                      max: 4000,
+                      message: "Prompt must not exceed 4000 characters",
+                    },
+                  ]}
                 >
-                  {RUNTIME_STRATEGY_OPTIONS.map((option) => (
-                    <Select.Option key={option.value} value={option.value} label={option.label}>
-                      <Space
-                        direction="vertical"
-                        size={2}
-                        style={{ maxWidth: 420, whiteSpace: "normal" }}
-                      >
-                        <Text strong>{option.label}</Text>
-                        <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.4 }}>
-                          {option.description}
-                        </Text>
-                      </Space>
-                    </Select.Option>
-                  ))}
-                </Select>
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="max_concurrent_files" label="File Concurrency">
-                <InputNumber min={1} max={16} style={{ width: "100%" }} />
-              </Form.Item>
-            </Col>
-            <Col xs={12} md={8}>
-              <Form.Item
-                name="diarization_enabled"
-                label="Speaker Diarization"
-                valuePropName="checked"
-              >
-                <Switch />
-              </Form.Item>
-            </Col>
-            <Col xs={12} md={8}>
-              <Form.Item name="diarization_profile" label="Diarization Profile">
-                <Select
-                  options={[
-                    { value: "sherpa-onnx-balanced", label: "sherpa-onnx balanced" },
-                    { value: "pyannote-community-quality", label: "pyannote community quality" },
-                  ]}
-                />
-              </Form.Item>
-            </Col>
-            <Col xs={12} md={8}>
-              <Form.Item name="diarization_known_speaker_count" label="Known Speakers">
-                <InputNumber min={1} max={8} placeholder="Auto" style={{ width: "100%" }} />
-              </Form.Item>
-            </Col>
-            <Col xs={12} md={8}>
-              <Form.Item
-                name="voiceprint_matching"
-                label="Voiceprint Matching"
-                valuePropName="checked"
-              >
-                <Switch />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="model" label="Task Model">
-                <Select
-                  options={[
-                    { value: "Qwen3-ASR-0.6B", label: "Qwen3-ASR-0.6B" },
-                    { value: "Qwen3-ASR-1.7B", label: "Qwen3-ASR-1.7B" },
-                  ]}
-                />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={8}>
-              <Form.Item name="language" label="Task Language">
-                <Select
-                  options={[
-                    { value: "chinese", label: "Chinese" },
-                    { value: "english", label: "English" },
-                    { value: "auto", label: "Auto" },
-                  ]}
-                />
-              </Form.Item>
-            </Col>
+                  <Input.TextArea
+                    data-testid="asr-transcription-prompt-input"
+                    rows={4}
+                    maxLength={4000}
+                    placeholder="Example: This is a Bifrost and NextOnCall project meeting. Preserve product names and mixed Chinese/English terms."
+                  />
+                </Form.Item>
+              </Col>
+            ) : null}
+            {showStandardPipeline ? (
+              <>
+                <Col xs={24} md={8}>
+                  <Form.Item name="runtime_strategy" label="Runtime">
+                    <Select
+                      data-testid="asr-runtime-strategy-select"
+                      listHeight={420}
+                      optionLabelProp="label"
+                      popupMatchSelectWidth={false}
+                    >
+                      {RUNTIME_STRATEGY_OPTIONS.map((option) => (
+                        <Select.Option key={option.value} value={option.value} label={option.label}>
+                          <Space
+                            direction="vertical"
+                            size={2}
+                            style={{ maxWidth: 420, whiteSpace: "normal" }}
+                          >
+                            <Text strong>{option.label}</Text>
+                            <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.4 }}>
+                              {option.description}
+                            </Text>
+                          </Space>
+                        </Select.Option>
+                      ))}
+                    </Select>
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={8}>
+                  <Form.Item name="max_concurrent_files" label="File Concurrency">
+                    <InputNumber min={1} max={16} style={{ width: "100%" }} />
+                  </Form.Item>
+                </Col>
+                <Col xs={12} md={8}>
+                  <Form.Item
+                    name="diarization_enabled"
+                    label="Speaker Diarization"
+                    valuePropName="checked"
+                  >
+                    <Switch />
+                  </Form.Item>
+                </Col>
+                <Col xs={12} md={8}>
+                  <Form.Item name="diarization_profile" label="Diarization Profile">
+                    <Select
+                      options={[
+                        { value: "sherpa-onnx-balanced", label: "sherpa-onnx balanced" },
+                        { value: "pyannote-community-quality", label: "pyannote community quality" },
+                      ]}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col xs={12} md={8}>
+                  <Form.Item name="diarization_known_speaker_count" label="Known Speakers">
+                    <InputNumber
+                      min={1}
+                      max={8}
+                      placeholder="Auto"
+                      style={{ width: "100%" }}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col xs={12} md={8}>
+                  <Form.Item
+                    name="voiceprint_matching"
+                    label="Voiceprint Matching"
+                    valuePropName="checked"
+                  >
+                    <Switch />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={8}>
+                  <Form.Item name="model" label="Task Model">
+                    <Select
+                      data-testid="asr-task-model-select"
+                      options={[
+                        { value: "Qwen3-ASR-0.6B", label: "Qwen3-ASR-0.6B" },
+                        { value: "Qwen3-ASR-1.7B", label: "Qwen3-ASR-1.7B" },
+                      ]}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col xs={24} md={8}>
+                  <Form.Item name="language" label="Task Language">
+                    <Select
+                      options={[
+                        { value: "chinese", label: "Chinese" },
+                        { value: "english", label: "English" },
+                        { value: "auto", label: "Auto" },
+                      ]}
+                    />
+                  </Form.Item>
+                </Col>
+              </>
+            ) : null}
             <Col xs={12} md={8}>
               <Form.Item name="recursive" label="Recursive" valuePropName="checked">
                 <Switch />
@@ -638,10 +738,13 @@ export default function DirectoryTasksPanel({
                   next {formatTime(record.next_run_at_ms)}
                 </Text>
                 <Tag>{record.runtime_strategy}</Tag>
+                <Tag color={record.transcription_mode === "moss_joint" ? "cyan" : "default"}>
+                  {record.transcription_mode === "moss_joint" ? "MOSS joint" : "standard"}
+                </Tag>
                 {record.summary.effective_max_concurrent_files !== record.max_concurrent_files ? (
                   <Tag color="warning">effective 1</Tag>
                 ) : null}
-                {record.diarization?.enabled ? (
+                {record.transcription_mode !== "moss_joint" && record.diarization?.enabled ? (
                   <Tag color={record.summary.diarization_ready ? "purple" : "warning"}>
                     {record.summary.diarization_ready ? "speakers ready" : "speakers setup"}
                   </Tag>
@@ -893,6 +996,8 @@ function defaultTaskFormValues() {
     schedule_day: 1,
     schedule_minute: 0,
     runtime_strategy: "reuse_per_file",
+    transcription_mode: "standard",
+    transcription_prompt: "",
     max_concurrent_files: 1,
     diarization_enabled: true,
     diarization_profile: "sherpa-onnx-balanced",
@@ -943,6 +1048,8 @@ function taskToFormValues(task: AsrDirectoryTask) {
     model: task.model,
     language: task.language,
     runtime_strategy: task.runtime_strategy,
+    transcription_mode: task.transcription_mode ?? "standard",
+    transcription_prompt: task.transcription_prompt ?? "",
     max_concurrent_files: task.max_concurrent_files ?? 1,
     diarization_enabled: task.diarization?.enabled ?? true,
     diarization_profile: task.diarization?.profile ?? "sherpa-onnx-balanced",

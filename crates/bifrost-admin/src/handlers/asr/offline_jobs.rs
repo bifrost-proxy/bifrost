@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::asr_runtime::now_ms;
 use crate::handlers::asr_jobs::transcribe_uploaded_wav_with_voiceprint_speakers;
-use crate::handlers::asr_streaming::call_asr_whole_file_endpoint;
+use crate::handlers::asr_streaming::{call_asr_whole_file_endpoint, WholeFileTranscription};
 use crate::handlers::{
     error_response, full_body, json_response, json_response_with_status, BoxBody,
 };
@@ -393,24 +393,48 @@ async fn transcribe_offline_plain(
         source_info.media_duration_ms,
     )
     .await?;
-    let mut segments = result
-        .segments
+    let (speakers, segments) = whole_file_to_timeline(&result, source_info);
+    Ok((result.text, speakers, segments))
+}
+
+fn whole_file_to_timeline(
+    result: &WholeFileTranscription,
+    source_info: &bifrost_asr::timeline::SourceAudioInfo,
+) -> (Vec<TimelineSpeaker>, Vec<TimelineSegment>) {
+    let structured_segments = if result.structured.segments.is_empty() {
+        result
+            .segments
+            .iter()
+            .map(
+                |(start_ms, end_ms, text)| bifrost_asr::transcription::TranscriptionSegment {
+                    start_ms: *start_ms,
+                    end_ms: *end_ms,
+                    text: text.clone(),
+                    speaker: None,
+                    overlap: false,
+                },
+            )
+            .collect::<Vec<_>>()
+    } else {
+        result.structured.segments.clone()
+    };
+    let mut segments = structured_segments
         .iter()
         .enumerate()
-        .map(|(index, (start_ms, end_ms, text))| TimelineSegment {
+        .map(|(index, segment)| TimelineSegment {
             index,
-            audio_start_ms: *start_ms,
-            audio_end_ms: *end_ms,
+            audio_start_ms: segment.start_ms,
+            audio_end_ms: segment.end_ms,
             absolute_start_ms: source_info
                 .source_created_at_ms
-                .map(|start| start.saturating_add(*start_ms)),
+                .map(|start| start.saturating_add(segment.start_ms)),
             absolute_end_ms: source_info
                 .source_created_at_ms
-                .map(|start| start.saturating_add(*end_ms)),
-            speaker: None,
-            speaker_display_name: None,
-            overlap: false,
-            text: text.clone(),
+                .map(|start| start.saturating_add(segment.end_ms)),
+            speaker: segment.normalized_speaker().map(str::to_string),
+            speaker_display_name: segment.normalized_speaker().map(str::to_string),
+            overlap: segment.overlap,
+            text: segment.text.clone(),
         })
         .collect::<Vec<_>>();
     if segments.is_empty() && !result.text.trim().is_empty() {
@@ -429,7 +453,29 @@ async fn transcribe_offline_plain(
             text: result.text.clone(),
         });
     }
-    Ok((result.text, Vec::new(), segments))
+    let speakers = segments
+        .iter()
+        .filter_map(|segment| segment.speaker.as_ref())
+        .fold(
+            std::collections::BTreeMap::<String, TimelineSpeaker>::new(),
+            |mut speakers, speaker| {
+                speakers
+                    .entry(speaker.clone())
+                    .or_insert_with(|| TimelineSpeaker {
+                        id: speaker.clone(),
+                        display_name: speaker.clone(),
+                        mapped_profile_id: None,
+                        confidence: None,
+                        candidate_profile_id: None,
+                        candidate_display_name: None,
+                        candidate_confidence: None,
+                    });
+                speakers
+            },
+        )
+        .into_values()
+        .collect();
+    (speakers, segments)
 }
 
 fn get_offline_job(job_id: &str) -> Option<OfflineAsrJob> {
@@ -530,5 +576,83 @@ fn artifact_content_type(format: &str) -> &'static str {
             "application/json; charset=utf-8"
         }
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bifrost_asr::transcription::{StructuredTranscription, TranscriptionSegment};
+
+    #[test]
+    fn joint_transcription_speakers_are_preserved_in_offline_timeline() {
+        let result = WholeFileTranscription {
+            text: "hello world".to_string(),
+            segments: vec![
+                (100, 500, "hello".to_string()),
+                (500, 900, "world".to_string()),
+            ],
+            structured: StructuredTranscription {
+                text: "hello world".to_string(),
+                segments: vec![
+                    TranscriptionSegment {
+                        start_ms: 100,
+                        end_ms: 500,
+                        text: "hello".to_string(),
+                        speaker: Some(" S02 ".to_string()),
+                        overlap: false,
+                    },
+                    TranscriptionSegment {
+                        start_ms: 500,
+                        end_ms: 900,
+                        text: "world".to_string(),
+                        speaker: Some("S01".to_string()),
+                        overlap: true,
+                    },
+                ],
+                ..Default::default()
+            },
+        };
+        let source_info = bifrost_asr::timeline::SourceAudioInfo {
+            source_size: None,
+            source_modified_ms: None,
+            source_created_at_ms: Some(10_000),
+            source_created_at_source: None,
+            media_duration_ms: Some(1_000),
+        };
+
+        let (speakers, segments) = whole_file_to_timeline(&result, &source_info);
+        assert_eq!(
+            speakers
+                .iter()
+                .map(|speaker| speaker.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["S01", "S02"]
+        );
+        assert_eq!(segments[0].speaker.as_deref(), Some("S02"));
+        assert_eq!(segments[0].absolute_start_ms, Some(10_100));
+        assert_eq!(segments[1].speaker_display_name.as_deref(), Some("S01"));
+        assert!(segments[1].overlap);
+    }
+
+    #[test]
+    fn legacy_transcription_still_builds_speakerless_timeline() {
+        let result = WholeFileTranscription {
+            text: "legacy".to_string(),
+            segments: vec![(0, 1_000, "legacy".to_string())],
+            structured: Default::default(),
+        };
+        let source_info = bifrost_asr::timeline::SourceAudioInfo {
+            source_size: None,
+            source_modified_ms: None,
+            source_created_at_ms: None,
+            source_created_at_source: None,
+            media_duration_ms: Some(1_000),
+        };
+
+        let (speakers, segments) = whole_file_to_timeline(&result, &source_info);
+        assert!(speakers.is_empty());
+        assert_eq!(segments.len(), 1);
+        assert!(segments[0].speaker.is_none());
     }
 }

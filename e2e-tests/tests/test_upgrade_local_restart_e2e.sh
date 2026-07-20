@@ -15,8 +15,10 @@ source "${PROJECT_DIR}/e2e-tests/test_utils/assert.sh"
 source "${PROJECT_DIR}/e2e-tests/test_utils/process.sh"
 
 BIFROST_BIN="${BIFROST_BIN:-${PROJECT_DIR}/target/debug/bifrost}"
+TARGET_BIFROST_BIN="${BIFROST_UPGRADE_E2E_TARGET_BIN:-$BIFROST_BIN}"
 OLD_BIFROST_BIN="${OLD_BIFROST_BIN:-}"
 BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN="${BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN:-0}"
+BIFROST_UPGRADE_E2E_ENTRYPOINT="${BIFROST_UPGRADE_E2E_ENTRYPOINT:-upgrade}"
 # Derive the upgrade target version from the workspace version (patch + 1) so the
 # self-upgrade actually sees a newer release. A hardcoded value silently breaks
 # whenever the workspace version is bumped to match it (see the 0.0.101 collision).
@@ -175,6 +177,40 @@ assert_upgrade_log_contains() {
     return 1
 }
 
+dump_windows_upgrade_diagnostics() {
+    local install_dir="$1"
+    if ! is_windows; then
+        return 0
+    fi
+
+    _log_info "Windows deferred upgrade diagnostics"
+    find "$install_dir" -maxdepth 1 -type f -name '.bifrost-upgrade-*' \
+        -print 2>/dev/null || true
+    local helper_file
+    for helper_file in "$install_dir"/.bifrost-upgrade-*.log \
+        "$install_dir"/.bifrost-upgrade-*.args; do
+        if [[ -f "$helper_file" ]]; then
+            echo "--- $helper_file ---"
+            cat "$helper_file" 2>/dev/null || true
+        fi
+    done
+    if [[ -f "$TEST_DATA_DIR/upgrade-progress.json" ]]; then
+        echo "--- $TEST_DATA_DIR/upgrade-progress.json ---"
+        cat "$TEST_DATA_DIR/upgrade-progress.json" 2>/dev/null || true
+    fi
+    BIFROST_E2E_INSTALL_DIR_WIN="$(windows_path "$install_dir")" \
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '
+        Get-CimInstance Win32_Process |
+            Where-Object {
+                $_.Name -ieq "bifrost.exe" -and
+                $_.CommandLine -and
+                $_.CommandLine.Contains($env:BIFROST_E2E_INSTALL_DIR_WIN)
+            } |
+            Select-Object ProcessId, ExecutablePath, CommandLine |
+            Format-List
+    ' 2>/dev/null || true
+}
+
 find_old_bifrost_bin() {
     if [[ -n "$OLD_BIFROST_BIN" && -x "$OLD_BIFROST_BIN" ]]; then
         echo "$OLD_BIFROST_BIN"
@@ -218,6 +254,59 @@ wait_proxy_ready() {
     return 1
 }
 
+core_version_on_port() {
+    local port="$1"
+    local py system_response
+    py="$(python3_cmd 2>/dev/null || true)"
+    system_response="$(curl -fsS "http://127.0.0.1:${port}/_bifrost/api/system")" || return 1
+    if [[ -n "$py" ]]; then
+        printf '%s' "$system_response" \
+            | "$py" -c 'import json,sys; print(json.load(sys.stdin).get("version", ""))'
+    else
+        BIFROST_E2E_SYSTEM_RESPONSE="$system_response" \
+            powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
+            '(ConvertFrom-Json $env:BIFROST_E2E_SYSTEM_RESPONSE).version' \
+            | tr -d '\r'
+    fi
+}
+
+assert_target_binary_core_version() {
+    local binary="$1"
+    local expected_version="$2"
+    local data_dir="${TEST_ROOT}/target-preflight-data"
+    local data_dir_for_process port start_log actual_version
+    mkdir -p "$data_dir"
+    data_dir_for_process="$(bifrost_process_path "$data_dir")"
+    port="$(allocate_free_port)"
+    start_log="${TEST_ROOT}/target-preflight-start.log"
+
+    BIFROST_DATA_DIR="$data_dir_for_process" \
+    BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+    "$binary" start -p "$port" --host 127.0.0.1 --daemon \
+        --skip-cert-check --no-system-proxy --no-intercept --no-tray -y \
+        >"$start_log" 2>&1 || {
+        _log_fail "target fixture core starts" "exit 0" "$(cat "$start_log" 2>/dev/null)"
+        kill_bifrost_on_port "$port"
+        return 1
+    }
+
+    if ! wait_proxy_ready "$port"; then
+        _log_fail "target fixture core admin ready" "reachable" "$(cat "$start_log" 2>/dev/null)"
+        BIFROST_DATA_DIR="$data_dir_for_process" "$binary" stop >/dev/null 2>&1 || true
+        kill_bifrost_on_port "$port"
+        return 1
+    fi
+
+    actual_version="$(core_version_on_port "$port" 2>/dev/null || true)"
+    BIFROST_DATA_DIR="$data_dir_for_process" "$binary" stop >/dev/null 2>&1 || true
+    kill_bifrost_on_port "$port"
+    if [[ "$actual_version" != "$expected_version" ]]; then
+        _log_fail "target fixture core reports pinned target" "$expected_version" "${actual_version:-missing}"
+        return 1
+    fi
+    _log_pass "target fixture CLI and core both report pinned target $expected_version"
+}
+
 assert_no_tray_helper_for_test_data_dir() {
     if is_windows; then
         return 0
@@ -257,6 +346,46 @@ assert_post_upgrade_skills_installed() {
     _log_pass "upgrade auto-installs Bifrost skills into isolated HOME"
 }
 
+copy_binary_with_version() {
+    local binary="$1"
+    local output="$2"
+    local version="$3"
+    local current_version py
+    current_version="$("$binary" --version 2>/dev/null | awk '{print $NF}' | sed 's/^v//' | tr -d '\r')"
+    mkdir -p "$(dirname "$output")"
+    cp "$binary" "$output"
+    chmod +x "$output" 2>/dev/null || true
+    if [[ "$current_version" != "$version" ]]; then
+        if [[ ${#current_version} -ne ${#version} ]]; then
+            echo "cannot patch E2E binary version with a different byte length" >&2
+            return 1
+        fi
+        py="$(python3_cmd 2>/dev/null || true)"
+        [[ -z "$py" ]] && return 1
+        "$py" - "$output" "$current_version" "$version" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+old = sys.argv[2].encode()
+new = sys.argv[3].encode()
+data = path.read_bytes()
+if old not in data:
+    raise SystemExit(f"compiled version bytes {old!r} not found in {path}")
+path.write_bytes(data.replace(old, new))
+PY
+        if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
+            codesign --force --sign - "$output" >/dev/null 2>&1
+        fi
+    fi
+    local packaged_version
+    packaged_version="$("$output" --version 2>/dev/null | awk '{print $NF}' | sed 's/^v//' | tr -d '\r')"
+    if [[ "$packaged_version" != "$version" ]]; then
+        echo "temporary E2E binary reports ${packaged_version:-unknown}, expected $version" >&2
+        return 1
+    fi
+}
+
 create_local_release_archive() {
     local archive_root="$1"
     local version="$2"
@@ -265,10 +394,13 @@ create_local_release_archive() {
     local package_dir="${archive_root}/bifrost-v${version}-${target}"
     local bin_name
     bin_name="$(binary_name)"
+    local package_binary="${package_dir}/${bin_name}"
 
-    mkdir -p "$package_dir"
-    cp "$binary" "${package_dir}/${bin_name}"
-    chmod +x "${package_dir}/${bin_name}" 2>/dev/null || true
+    # Prefer a separately compiled target-version binary when the caller
+    # supplies one. This matters on Windows: --version comes from bifrost-cli,
+    # while /api/system.version comes from bifrost-admin, so byte-patching only
+    # the visible CLI version is not a trustworthy self-update fixture.
+    copy_binary_with_version "$binary" "$package_binary" "$version" || return 1
 
     if is_windows; then
         local archive_path="${archive_root}/bifrost-v${version}-${target}.zip"
@@ -287,7 +419,7 @@ create_local_release_archive() {
 }
 
 test_local_upgrade_restarts_old_daemon_with_new_binary() {
-    _log_info "case: local archive upgrade restarts a running daemon"
+    _log_info "case: local archive ${BIFROST_UPGRADE_E2E_ENTRYPOINT} restarts a running daemon"
 
     if [[ ! -x "$BIFROST_BIN" ]]; then
         _log_fail "new bifrost binary exists" "$BIFROST_BIN" "missing"
@@ -307,7 +439,17 @@ test_local_upgrade_restarts_old_daemon_with_new_binary() {
     chmod +x "$INSTALL_BIN" 2>/dev/null || true
 
     local start_bin
-    if [[ "$BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN" == "1" ]]; then
+    if [[ "$BIFROST_UPGRADE_E2E_ENTRYPOINT" == "app-upgrade-stale-runtime" ]]; then
+        local old_version old_patch
+        old_patch="${TEST_VERSION##*.}"
+        old_version="${TEST_VERSION%.*}.$((old_patch - 1))"
+        start_bin="${TEST_ROOT}/old-start/$(binary_name)"
+        copy_binary_with_version "$BIFROST_BIN" "$start_bin" "$old_version" || {
+            _log_fail "stale runtime fixture" "$old_version" "could not build fixture"
+            return 1
+        }
+        _log_pass "stale runtime fixture selected: $old_version"
+    elif [[ "$BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN" == "1" ]]; then
         start_bin="$INSTALL_BIN"
         _log_pass "start binary selected: installed test binary $start_bin"
     else
@@ -328,7 +470,12 @@ test_local_upgrade_restarts_old_daemon_with_new_binary() {
 
     local target archive_path
     target="$(host_triple)"
-    archive_path="$(create_local_release_archive "$archive_root" "$TEST_VERSION" "$target" "$BIFROST_BIN")"
+    if ! archive_path="$(create_local_release_archive "$archive_root" "$TEST_VERSION" "$target" "$TARGET_BIFROST_BIN")"; then
+        _log_fail "target-version release archive created" "$TEST_VERSION" "fixture creation failed"
+        return 1
+    fi
+    local target_package_binary="${archive_root}/bifrost-v${TEST_VERSION}-${target}/$(binary_name)"
+    assert_target_binary_core_version "$target_package_binary" "$TEST_VERSION" || return 1
 
     local bifrost_data_dir
     bifrost_data_dir="$(bifrost_process_path "$TEST_DATA_DIR")"
@@ -387,7 +534,44 @@ PY
     _log_pass "old daemon runtime recorded port $PROXY_PORT"
 
     local upgrade_log="${TEST_ROOT}/upgrade.log"
+    local app_package=""
+    local -a upgrade_args=(upgrade)
+    if [[ "$BIFROST_UPGRADE_E2E_ENTRYPOINT" == "app-upgrade" \
+        || "$BIFROST_UPGRADE_E2E_ENTRYPOINT" == "app-upgrade-stale-runtime" ]]; then
+        if [[ "$(uname -s)" != "Darwin" ]]; then
+            _log_fail "direct app-upgrade real restart host" "Darwin" "$(uname -s)"
+            return 1
+        fi
+        app_package="${TEST_ROOT}/fixtures/Bifrost.app"
+        mkdir -p "$app_package/Contents/MacOS"
+        sed "s/__TEST_VERSION__/${TEST_VERSION}/g" >"$app_package/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>Bifrost</string>
+<key>CFBundleIdentifier</key><string>dev.bifrost.upgrade-e2e</string>
+<key>CFBundleShortVersionString</key><string>__TEST_VERSION__</string>
+<key>CFBundleVersion</key><string>1</string>
+</dict></plist>
+PLIST
+        printf '#!/bin/sh\nexit 0\n' >"$app_package/Contents/MacOS/Bifrost"
+        chmod +x "$app_package/Contents/MacOS/Bifrost"
+        upgrade_args=(
+            app upgrade
+            --package "$app_package"
+            --app-dir "${TEST_ROOT}/desktop-install"
+            --version "$TEST_VERSION"
+            -y
+        )
+    elif [[ "$BIFROST_UPGRADE_E2E_ENTRYPOINT" != "upgrade" ]]; then
+        _log_fail "upgrade E2E entrypoint" \
+            "upgrade, app-upgrade, or app-upgrade-stale-runtime" \
+            "$BIFROST_UPGRADE_E2E_ENTRYPOINT"
+        return 1
+    fi
     BIFROST_DATA_DIR="$bifrost_data_dir" \
+    BIFROST_APP_INSTALL_DIR="$(bifrost_process_path "${TEST_ROOT}/desktop-install")" \
+    BIFROST_APP_SKIP_RESTART=1 \
     HOME="$test_home_for_process" \
     USERPROFILE="$test_home_for_process" \
     BIFROST_INSTALL_SKILL_SOURCE=embedded \
@@ -395,14 +579,26 @@ PY
     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
     BIFROST_UPGRADE_TEST_LATEST_VERSION="$TEST_VERSION" \
     BIFROST_UPGRADE_TEST_ARCHIVE="$(bifrost_process_path "$archive_path")" \
-    "$INSTALL_BIN" upgrade >"$upgrade_log" 2>&1
+    "$INSTALL_BIN" "${upgrade_args[@]}" >"$upgrade_log" 2>&1
     local upgrade_status=$?
     if [[ $upgrade_status -ne 0 ]]; then
         _log_fail "upgrade command exits successfully" "0" "$(cat "$upgrade_log")"
         return 1
     fi
+    if [[ "$BIFROST_UPGRADE_E2E_ENTRYPOINT" == app-upgrade* ]]; then
+        local installed_app_plist="${TEST_ROOT}/desktop-install/Bifrost.app/Contents/Info.plist"
+        if [[ -x "${TEST_ROOT}/desktop-install/Bifrost.app/Contents/MacOS/Bifrost" ]] \
+            && grep -Fq "<string>${TEST_VERSION}</string>" "$installed_app_plist"; then
+            _log_pass "direct app upgrade installs the pinned desktop App target"
+        else
+            _log_fail "direct app upgrade installs the pinned desktop App target" \
+                "Bifrost.app v${TEST_VERSION}" \
+                "missing or wrong version"
+            return 1
+        fi
+    fi
 
-    if ! is_windows; then
+    if ! is_windows && [[ "$BIFROST_UPGRADE_E2E_ENTRYPOINT" != "app-upgrade-stale-runtime" ]]; then
         assert_upgrade_log_contains \
             "$upgrade_log" \
             'Installing latest Bifrost skills' \
@@ -412,7 +608,7 @@ PY
         "$upgrade_log" \
         'Detected running Bifrost proxy' \
         "upgrade output detects running proxy" || return 1
-    if ! is_windows; then
+    if ! is_windows && [[ "$BIFROST_UPGRADE_E2E_ENTRYPOINT" != "app-upgrade-stale-runtime" ]]; then
         assert_post_upgrade_skills_installed "$test_home" || return 1
     fi
     assert_upgrade_log_contains \
@@ -443,9 +639,23 @@ PY
     }
 
     wait_proxy_ready "$PROXY_PORT" || {
+        dump_windows_upgrade_diagnostics "$install_dir"
         _log_fail "new daemon admin ready after upgrade" "reachable" "unreachable"
         return 1
     }
+    local installed_cli_version
+    installed_cli_version="$("$INSTALL_BIN" --version 2>/dev/null | awk '{print $NF}' | sed 's/^v//' | tr -d '\r')"
+    assert_equals "$TEST_VERSION" "$installed_cli_version" \
+        "installed CLI reports the pinned target version" || return 1
+
+    local core_version
+    core_version="$(core_version_on_port "$PROXY_PORT")"
+    if [[ "$core_version" != "$TEST_VERSION" ]]; then
+        dump_windows_upgrade_diagnostics "$install_dir"
+        _log_fail "restarted core reports the pinned target version" "$TEST_VERSION" "$core_version"
+        return 1
+    fi
+    _log_pass "restarted core reports the pinned target version"
     if is_windows; then
         # Windows self-replacement runs in a deferred helper after the upgrade
         # process exits. The helper installs skills before starting the new

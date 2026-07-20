@@ -1,6 +1,6 @@
 [package]
 name = "bifrost-admin"
-version = "0.0.152"
+version = "0.0.157"
 edition = "2021"
 description = "Admin API and web interface for Bifrost proxy"
 
@@ -71,7 +71,6 @@ reqwest = { version = "0.12", default-features = false, features = [
 ureq.workspace = true
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-native-certs = "0.8"
 once_cell.workspace = true
 jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"] }
 bcrypt = "0.17"

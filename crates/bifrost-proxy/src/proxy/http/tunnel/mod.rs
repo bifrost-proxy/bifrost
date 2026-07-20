@@ -57,10 +57,11 @@ use super::devtools::{
 use super::handler::decode::{apply_decode_scripts_for_storage, DecodeForStorageResult};
 use super::handler::{
     apply_immediate_response_body_rules, apply_websocket_request_header_rules,
-    apply_websocket_response_header_rules, build_connection_error_response, build_error_body,
-    build_overridden_error_response, connect_via_upstream_http_proxy_tunnel,
-    merge_websocket_header_rule_candidates, needs_body_processing, needs_request_body_processing,
-    needs_response_override, needs_response_phase_resolve, parse_and_record_sse_events,
+    apply_websocket_response_header_rules, build_connection_error_body,
+    build_connection_error_response_from_body, build_overridden_error_response_from_body,
+    connect_via_upstream_http_proxy_tunnel, merge_websocket_header_rule_candidates,
+    needs_body_processing, needs_request_body_processing, needs_response_override,
+    needs_response_phase_resolve, parse_and_record_sse_events, request_explicitly_accepts_html,
     ConnectionErrorInfo,
 };
 use super::scripts::{
@@ -91,7 +92,9 @@ use crate::utils::http_size::{
     calculate_request_size, calculate_response_headers_size, calculate_response_size,
 };
 use crate::utils::logging::{format_rules_summary, RequestContext};
-use crate::utils::process_info::spawn_async_process_resolver;
+use crate::utils::process_info::{
+    spawn_async_process_resolver_with_finish, ClientProcess, ConnectionProcessState,
+};
 use crate::utils::tee::{
     create_metrics_body, create_request_tee_body, create_sse_tee_body, create_tee_body_with_store,
     store_request_body, store_response_body, BodyCaptureHandle, TeeBodyCaptureOptions,
@@ -127,20 +130,43 @@ async fn get_values_from_state(admin_state: &Option<Arc<AdminState>>) -> HashMap
     HashMap::new()
 }
 
+fn apply_tunnel_client_process_backfill(
+    state: &AdminState,
+    connection_process_state: &ConnectionProcessState,
+    req_id: String,
+    process: ClientProcess,
+) {
+    let process = connection_process_state.store(Arc::new(process));
+    info!(
+        req_id,
+        client_app = %process.name,
+        client_pid = process.pid,
+        client_path = ?process.path,
+        "Applying tunnel client process backfill to traffic record"
+    );
+    state.update_client_process(
+        &req_id,
+        process.name.clone(),
+        process.pid,
+        process.path.clone(),
+    );
+    state
+        .connection_registry
+        .update_client_app(&req_id, process.name.clone());
+}
+
 fn maybe_backfill_tunnel_client_process(
     state: &Arc<AdminState>,
+    connection_process_state: &Arc<ConnectionProcessState>,
     req_id: &str,
-    client_app: Option<&str>,
-    client_pid: Option<u32>,
+    has_client_process: bool,
     peer_addr: SocketAddr,
     local_addr: SocketAddr,
     skip_unknown_backfill: bool,
 ) {
-    if client_app.is_some() && client_pid.is_some() {
+    if has_client_process {
         debug!(
             req_id,
-            client_app = ?client_app,
-            client_pid = ?client_pid,
             "Skipping tunnel client process backfill because client metadata is already present"
         );
         return;
@@ -170,29 +196,30 @@ fn maybe_backfill_tunnel_client_process(
         req_id,
         peer_addr = %peer_addr,
         local_addr = %local_addr,
-        existing_client_app = ?client_app,
-        existing_client_pid = ?client_pid,
         "Scheduling tunnel client process backfill"
     );
 
+    if !connection_process_state.try_start_background_resolution() {
+        debug!(
+            req_id,
+            peer_addr = %peer_addr,
+            local_addr = %local_addr,
+            "Skipping tunnel client process backfill because this connection already has a resolver in flight"
+        );
+        return;
+    }
+
     let state = Arc::clone(state);
-    spawn_async_process_resolver(
+    let state_for_success = Arc::clone(connection_process_state);
+    let state_for_finish = Arc::clone(connection_process_state);
+    spawn_async_process_resolver_with_finish(
         peer_addr,
         local_addr,
         req_id.to_string(),
         move |id, process| {
-            info!(
-                req_id = %id,
-                client_app = %process.name,
-                client_pid = process.pid,
-                client_path = ?process.path,
-                "Applying tunnel client process backfill to traffic record"
-            );
-            state.update_client_process(&id, process.name.clone(), process.pid, process.path);
-            state
-                .connection_registry
-                .update_client_app(&id, process.name.clone());
+            apply_tunnel_client_process_backfill(&state, &state_for_success, id, process);
         },
+        move || state_for_finish.finish_background_resolution(),
     );
 }
 
@@ -618,6 +645,40 @@ pub async fn handle_connect(
     dns_resolver: Option<Arc<DnsResolver>>,
     push_manager: Option<SharedPushManager>,
 ) -> Result<Response<BoxBody>> {
+    handle_connect_with_process_state(
+        req,
+        peer_addr,
+        local_addr,
+        rules,
+        tls_config,
+        tls_intercept_config,
+        proxy_config,
+        verbose_logging,
+        ctx,
+        admin_state,
+        dns_resolver,
+        push_manager,
+        Arc::new(ConnectionProcessState::default()),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_connect_with_process_state(
+    req: Request<Incoming>,
+    peer_addr: SocketAddr,
+    local_addr: SocketAddr,
+    rules: Arc<dyn RulesResolver>,
+    tls_config: Arc<TlsConfig>,
+    tls_intercept_config: &TlsInterceptConfig,
+    proxy_config: &ProxyConfig,
+    verbose_logging: bool,
+    ctx: &RequestContext,
+    admin_state: Option<Arc<AdminState>>,
+    dns_resolver: Option<Arc<DnsResolver>>,
+    push_manager: Option<SharedPushManager>,
+    connection_process_state: Arc<ConnectionProcessState>,
+) -> Result<Response<BoxBody>> {
     let uri = req.uri().clone();
     let authority = uri
         .authority()
@@ -1025,9 +1086,9 @@ pub async fn handle_connect(
         state.record_traffic(record);
         maybe_backfill_tunnel_client_process(
             state,
+            &connection_process_state,
             &req_id,
-            client_app.as_deref(),
-            client_pid,
+            client_app.is_some() && client_pid.is_some(),
             peer_addr,
             local_addr,
             requires_client_app,
@@ -2206,6 +2267,7 @@ async fn handle_intercepted_request_with_protocol(
         method
     };
 
+    let accepts_html_error = request_explicitly_accepts_html(&parts.headers);
     let original_req_headers: Vec<(String, String)> = super::headers_to_pairs(&parts.headers);
 
     let req_headers = original_req_headers.clone();
@@ -2913,14 +2975,41 @@ async fn handle_intercepted_request_with_protocol(
     // Pre-resolving here only adds duplicate lookup cost and stretches H2 tail latency.
     let dns_ms = None;
 
+    let error_badge_rules_json = if inject_bifrost_badge && accepts_html_error {
+        Some(super::handler::build_badge_rules_json(admin_state.as_deref(), listener_port).await)
+    } else {
+        None
+    };
     let build_conn_error_record_and_response =
         |error_type: &'static str, error_msg: String, tls_ms: Option<u64>| {
             let error_info = ConnectionErrorInfo {
                 error_type,
                 error_message: error_msg.clone(),
-                host: actual_target_host.clone(),
+                host: super::handler::format_connection_endpoint(
+                    &actual_target_host,
+                    actual_target_port,
+                ),
                 request_url: original_uri.clone(),
             };
+            let response_status = if needs_response_override(&resolved_rules) {
+                resolved_rules
+                    .status_code
+                    .or(resolved_rules.replace_status)
+                    .unwrap_or(502)
+            } else {
+                502
+            };
+            let (response_body, default_content_type) =
+                if let Some(ref res_body) = resolved_rules.res_body {
+                    (res_body.clone(), None)
+                } else {
+                    let (body, content_type) = build_connection_error_body(
+                        response_status,
+                        &error_info,
+                        error_badge_rules_json.as_deref(),
+                    );
+                    (body, Some(content_type))
+                };
             let total_ms = start_time.elapsed().as_millis() as u64;
             if let Some(ref state) = admin_state {
                 let mut record = TrafficRecord::new(
@@ -2929,14 +3018,7 @@ async fn handle_intercepted_request_with_protocol(
                     original_uri.clone(),
                 );
                 attach_devtools_client_req_id(&mut record, &devtools_client_req_id);
-                record.status = if needs_response_override(&resolved_rules) {
-                    resolved_rules
-                        .status_code
-                        .or(resolved_rules.replace_status)
-                        .unwrap_or(502)
-                } else {
-                    502
-                };
+                record.status = response_status;
                 record.duration_ms = total_ms;
                 record.host = original_host.to_string();
                 apply_listener_context(
@@ -2981,15 +3063,6 @@ async fn handle_intercepted_request_with_protocol(
                     None
                 };
 
-                let response_body = if needs_response_override(&resolved_rules) {
-                    if let Some(ref res_body) = resolved_rules.res_body {
-                        res_body.clone()
-                    } else {
-                        build_error_body(record.status, &error_info)
-                    }
-                } else {
-                    build_error_body(502, &error_info)
-                };
                 record.response_body_ref = if state.get_super_performance_mode() {
                     None
                 } else if let Some(ref body_store) = state.body_store {
@@ -3005,18 +3078,18 @@ async fn handle_intercepted_request_with_protocol(
                         for (name, value) in &resolved_rules.res_headers {
                             res_header_pairs.push((name.clone(), value.clone()));
                         }
-                        if resolved_rules.res_body.is_none() {
-                            res_header_pairs.push((
-                                "content-type".to_string(),
-                                "text/plain; charset=utf-8".to_string(),
-                            ));
+                        if let Some(content_type) = default_content_type {
+                            res_header_pairs
+                                .push(("content-type".to_string(), content_type.to_string()));
                             res_header_pairs
                                 .push(("x-bifrost-error".to_string(), error_type.to_string()));
                         }
                     } else {
                         res_header_pairs.push((
                             "content-type".to_string(),
-                            "text/plain; charset=utf-8".to_string(),
+                            default_content_type
+                                .unwrap_or("text/plain; charset=utf-8")
+                                .to_string(),
                         ));
                         res_header_pairs
                             .push(("x-bifrost-error".to_string(), error_type.to_string()));
@@ -3042,11 +3115,23 @@ async fn handle_intercepted_request_with_protocol(
                         req_id, error_type
                     );
                 }
-                build_overridden_error_response(&resolved_rules, 502, &error_info)
+                build_overridden_error_response_from_body(
+                    &resolved_rules,
+                    response_status,
+                    &error_info,
+                    response_body,
+                    default_content_type,
+                )
             } else {
-                build_connection_error_response(502, &error_info)
+                build_connection_error_response_from_body(
+                    502,
+                    &error_info,
+                    response_body,
+                    default_content_type.unwrap_or("text/plain; charset=utf-8"),
+                )
             }
         };
+
     let (mut upstream_parts, upstream_body) = outgoing_req.into_parts();
     upstream_parts.uri = upstream_uri.clone();
     upstream_parts.headers.remove(hyper::header::HOST);
@@ -4547,8 +4632,12 @@ async fn handle_intercepted_request_with_protocol(
     };
 
     let mut final_body = if inject_bifrost_badge {
-        let badge_rules_json =
-            super::handler::build_badge_rules_json(admin_state.as_deref(), listener_port).await;
+        let badge_rules_json = match error_badge_rules_json.as_ref() {
+            Some(rules_json) => rules_json.clone(),
+            None => {
+                super::handler::build_badge_rules_json(admin_state.as_deref(), listener_port).await
+            }
+        };
         let final_res_content_type = res_parts
             .headers
             .get(hyper::header::CONTENT_TYPE)
@@ -8818,6 +8907,7 @@ mod coverage_boost_v2 {
 mod coverage_boost_v3 {
     use super::*;
 
+    use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
 
@@ -8841,6 +8931,21 @@ mod coverage_boost_v3 {
 
     use crate::server::{ResolvedRules, TlsInterceptConfig};
 
+    #[derive(Clone)]
+    struct EmptyRulesResolver;
+
+    impl RulesResolver for EmptyRulesResolver {
+        fn resolve_with_context(
+            &self,
+            _url: &str,
+            _method: &str,
+            _req_headers: &HashMap<String, String>,
+            _req_cookies: &HashMap<String, String>,
+        ) -> ResolvedRules {
+            ResolvedRules::default()
+        }
+    }
+
     // ---------------- maybe_backfill_tunnel_client_process ----------------
 
     #[test]
@@ -8852,9 +8957,9 @@ mod coverage_boost_v3 {
         // Should early-return without spawning background resolver
         maybe_backfill_tunnel_client_process(
             &state,
+            &Arc::new(ConnectionProcessState::default()),
             "req-meta",
-            Some("Browser"),
-            Some(42),
+            true,
             peer_addr,
             local_addr,
             false,
@@ -8868,7 +8973,13 @@ mod coverage_boost_v3 {
         let local_addr = SocketAddr::from((IpAddr::V4(Ipv4Addr::LOCALHOST), 443));
 
         maybe_backfill_tunnel_client_process(
-            &state, "req-skip", None, None, peer_addr, local_addr, true,
+            &state,
+            &Arc::new(ConnectionProcessState::default()),
+            "req-skip",
+            false,
+            peer_addr,
+            local_addr,
+            true,
         );
     }
 
@@ -8880,13 +8991,134 @@ mod coverage_boost_v3 {
 
         maybe_backfill_tunnel_client_process(
             &state,
+            &Arc::new(ConnectionProcessState::default()),
             "req-nonloop",
-            None,
-            None,
+            false,
             peer_addr,
             local_addr,
             false,
         );
+    }
+
+    #[test]
+    fn test_maybe_backfill_joins_existing_connection_resolution() {
+        let state = Arc::new(AdminState::new(0));
+        let process_state = Arc::new(ConnectionProcessState::default());
+        let peer_addr = SocketAddr::from((IpAddr::V4(Ipv4Addr::LOCALHOST), 12346));
+        let local_addr = SocketAddr::from((IpAddr::V4(Ipv4Addr::LOCALHOST), 443));
+        assert!(process_state.try_start_background_resolution());
+
+        maybe_backfill_tunnel_client_process(
+            &state,
+            &process_state,
+            "req-inflight",
+            false,
+            peer_addr,
+            local_addr,
+            false,
+        );
+
+        assert!(!process_state.try_start_background_resolution());
+        process_state.finish_background_resolution();
+        assert!(process_state.try_start_background_resolution());
+        process_state.finish_background_resolution();
+    }
+
+    #[test]
+    fn test_apply_tunnel_client_process_backfill_updates_connection_state_and_registry() {
+        let state = AdminState::new(0);
+        let process_state = ConnectionProcessState::default();
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+        state.connection_registry.register(ConnectionInfo::new(
+            "req-backfill".to_string(),
+            "example.com".to_string(),
+            443,
+            false,
+            None,
+            cancel_tx,
+        ));
+
+        apply_tunnel_client_process_backfill(
+            &state,
+            &process_state,
+            "req-backfill".to_string(),
+            ClientProcess {
+                pid: 4242,
+                name: "coverage-client".to_string(),
+                path: Some("/tmp/coverage-client".to_string()),
+            },
+        );
+
+        let cached = process_state
+            .cached()
+            .expect("process state must be filled");
+        assert_eq!(cached.pid, 4242);
+        assert_eq!(cached.name, "coverage-client");
+        assert_eq!(
+            state.connection_registry.list_connections_full()[0].4,
+            Some("coverage-client".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_connect_public_wrapper_rejects_missing_authority() {
+        let (client_side, server_side) = duplex(16 * 1024);
+
+        let server_task = tokio::spawn(async move {
+            let io = TokioIo::new(server_side);
+            let service = service_fn(|req: Request<Incoming>| async move {
+                let proxy_config = ProxyConfig::default();
+                let tls_intercept_config = TlsInterceptConfig::from_proxy_config(&proxy_config);
+                let result = handle_connect(
+                    req,
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, 12347)),
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, 9900)),
+                    Arc::new(EmptyRulesResolver),
+                    Arc::new(TlsConfig {
+                        ca_cert: None,
+                        ca_key: None,
+                        cert_generator: None,
+                        sni_resolver: None,
+                    }),
+                    &tls_intercept_config,
+                    &proxy_config,
+                    false,
+                    &RequestContext::new(),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+                assert!(result
+                    .expect_err("origin-form URI must not be accepted as CONNECT")
+                    .to_string()
+                    .contains("missing authority"));
+                Ok::<_, hyper::Error>(Response::new(Full::new(Bytes::from_static(b"ok"))))
+            });
+            server_http1::Builder::new()
+                .serve_connection(io, service)
+                .await
+                .unwrap();
+        });
+
+        let io = TokioIo::new(client_side);
+        let (mut sender, conn) = client_http1::handshake(io).await.unwrap();
+        let client_task = tokio::spawn(conn);
+        let response = sender
+            .send_request(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/")
+                    .body(Empty::<Bytes>::new())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        drop(sender);
+        client_task.await.unwrap().unwrap();
+        server_task.await.unwrap();
     }
 
     // ---------------- domain / app / ip matching helpers ----------------

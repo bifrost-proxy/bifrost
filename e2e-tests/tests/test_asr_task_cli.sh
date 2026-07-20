@@ -299,14 +299,17 @@ grep -q "完整内容整理" "$ADMIN_DATA_DIR/daily-show.out"
 BIFROST_DATA_DIR="$ADMIN_DATA_DIR" "$BIFROST_BIN" ai asr task daily show "$TASK_ID" 2026-05-17 --output "$OUTPUT_DOC" >/dev/null
 grep -q "ASR CLI E2E task" "$OUTPUT_DOC"
 
-echo "[asr-task-cli-e2e] daily set-sync-dir and sync copy report files"
+echo "[asr-task-cli-e2e] daily set-sync-dir and sync copy reports plus original transcripts"
 BIFROST_DATA_DIR="$ADMIN_DATA_DIR" "$BIFROST_BIN" ai asr task daily set-sync-dir "$TASK_ID" --dir "$SYNC_DIR" >"$ADMIN_DATA_DIR/daily-set-sync-dir.out"
 grep -q "$SYNC_DIR" "$ADMIN_DATA_DIR/daily-set-sync-dir.out"
 BIFROST_DATA_DIR="$ADMIN_DATA_DIR" "$BIFROST_BIN" ai asr task daily sync "$TASK_ID" >"$ADMIN_DATA_DIR/daily-sync.out"
-grep -q "Copied:  *1" "$ADMIN_DATA_DIR/daily-sync.out"
+grep -q "Copied:  *2" "$ADMIN_DATA_DIR/daily-sync.out"
 grep -q "Skipped:  *0" "$ADMIN_DATA_DIR/daily-sync.out"
 test -f "$SYNC_DIR/daily_report/2026-05-17-report.md"
 grep -q "报告同步目录验证内容" "$SYNC_DIR/daily_report/2026-05-17-report.md"
+test -f "$SYNC_DIR/original_text/2026-05-17.md"
+grep -q "完整内容整理" "$SYNC_DIR/original_text/2026-05-17.md"
+test ! -e "$SYNC_DIR/原始文件"
 test ! -f "$SYNC_DIR/2026-05-17-report.md"
 BIFROST_DATA_DIR="$ADMIN_DATA_DIR" "$BIFROST_BIN" ai asr task daily sync "$TASK_ID" --json >"$ADMIN_DATA_DIR/daily-sync-second.json"
 python3 - "$ADMIN_DATA_DIR/daily-sync-second.json" "$SYNC_DIR" <<'PY'
@@ -316,16 +319,46 @@ with open(sys.argv[1], "r", encoding="utf-8") as f:
     result = json.load(f)
 sync = result["sync"]
 assert sync["target_dir"] == sys.argv[2], sync
-assert sync["total_files"] == 1, sync
+assert sync["total_files"] == 2, sync
 assert sync["copied_files"] == 1, sync
-assert sync["skipped_files"] == 0, sync
+assert sync["skipped_files"] == 1, sync
 assert sync["failed_files"] == 0, sync
 PY
 
 echo "[asr-task-cli-e2e] run --wait refreshes daily documents without requiring ASR model when no files are pending"
+rm "$SYNC_DIR/original_text/2026-05-17.md"
 BIFROST_DATA_DIR="$ADMIN_DATA_DIR" "$BIFROST_BIN" ai asr task run "$TASK_ID" --wait >"$ADMIN_DATA_DIR/task-run.out"
 grep -q "ASR task completed" "$ADMIN_DATA_DIR/task-run.out"
 BIFROST_DATA_DIR="$ADMIN_DATA_DIR" "$BIFROST_BIN" ai asr task daily list "$TASK_ID" >"$ADMIN_DATA_DIR/daily-list-after-run.out"
 grep -q "2026-05-17" "$ADMIN_DATA_DIR/daily-list-after-run.out"
+for _ in $(seq 1 100); do
+  test -f "$SYNC_DIR/original_text/2026-05-17.md" && break
+  sleep 0.1
+done
+test -f "$SYNC_DIR/original_text/2026-05-17.md"
+for _ in $(seq 1 100); do
+  curl -fsS "http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/asr/tasks/${TASK_ID}/daily-agent" \
+    >"$ADMIN_DATA_DIR/daily-agent-after-auto-original-sync.json"
+  python3 - "$ADMIN_DATA_DIR/daily-agent-after-auto-original-sync.json" <<'PY' && break
+import json
+import sys
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    result = json.load(f)
+assert result["config"].get("last_original_sync")
+PY
+  sleep 0.1
+done
+python3 - "$ADMIN_DATA_DIR/daily-agent-after-auto-original-sync.json" "$SYNC_DIR/original_text" <<'PY'
+import json
+import os
+import sys
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    result = json.load(f)
+sync = result["config"]["last_original_sync"]
+assert os.path.normpath(sync["target_dir"]) == os.path.normpath(sys.argv[2]), sync
+assert sync["total_files"] == 1, sync
+assert sync["copied_files"] == 1, sync
+assert sync["failed_files"] == 0, sync
+PY
 
 echo "[asr-task-cli-e2e] PASS"

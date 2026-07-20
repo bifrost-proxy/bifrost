@@ -10,7 +10,7 @@ const BADGE_STYLE: &str = concat!(
     "height:30px;width:30px;border-radius:9999px;",
     "background:linear-gradient(135deg,#7BEBC0,#6CBFCF);",
     "box-shadow:0 0 10px 2px rgba(123,235,192,0.35),0 0 0 2px rgba(255,255,255,0.9);",
-    "cursor:pointer;overflow:visible;white-space:nowrap;",
+    "cursor:pointer;overflow:hidden;white-space:nowrap;",
     "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;",
     "user-select:none;-webkit-user-select:none;",
     "transition:width .4s cubic-bezier(.4,0,.2,1),border-radius .4s cubic-bezier(.4,0,.2,1),box-shadow .3s;",
@@ -34,7 +34,7 @@ const BADGE_STYLE: &str = concat!(
     "animation:__bb_share_pulse 1.8s ease-in-out infinite;",
     "}",
     "#__bifrost_badge__ .__bb_share_dot{",
-    "display:none;position:absolute;right:-2px;top:-2px;",
+    "display:none;position:absolute;right:2px;top:2px;",
     "width:8px;height:8px;border-radius:9999px;background:#ff4d4f;",
     "border:2px solid #fff;box-shadow:0 2px 7px rgba(255,77,79,.45);",
     "}",
@@ -469,6 +469,15 @@ mod tests {
     }
 
     #[test]
+    fn test_badge_clips_hidden_label_without_clipping_share_indicator() {
+        let snippet = build_badge_snippet(SHARE_RULES);
+
+        assert!(snippet.contains("cursor:pointer;overflow:hidden;white-space:nowrap"));
+        assert!(!snippet.contains("cursor:pointer;overflow:visible;white-space:nowrap"));
+        assert!(snippet.contains("display:none;position:absolute;right:2px;top:2px;"));
+    }
+
+    #[test]
     fn test_inject_badge_case_insensitive_body_end() {
         let html = Bytes::from_static(b"<html><body>Hello</BODY></html>");
         let (out, changed) = maybe_inject_bifrost_badge_html(html, EMPTY_RULES);
@@ -493,7 +502,7 @@ mod tests {
 
     #[test]
     fn test_badge_inline_rules_data_escapes_script_close_tag() {
-        let rules = r#"{"rules":[{"name":"debug","rule_count":1,"group_id":null,"group_name":null}],"merged_content":"https://nextoncall.bytedance.net/ htmlAppend://{vconsole-inject}\n``` vconsole-inject\n<script src=\"https://unpkg.com/vconsole/dist/vconsole.min.js\"></script>\n<script>new VConsole();</script>\n```","admin_port":8800}"#;
+        let rules = r#"{"rules":[{"name":"debug","rule_count":1,"group_id":null,"group_name":null}],"merged_content":"https://app.example.com/ htmlAppend://{vconsole-inject}\n``` vconsole-inject\n<script src=\"https://unpkg.com/vconsole/dist/vconsole.min.js\"></script>\n<script>new VConsole();</script>\n```","admin_port":8800}"#;
         let snippet = build_badge_snippet(rules);
 
         assert!(snippet.contains(r#"\u003C/script\u003E"#));

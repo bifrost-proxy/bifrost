@@ -53,6 +53,7 @@ import {
 import { isConnectionIssueError, normalizeApiErrorMessage } from "../../api/client";
 import { copyToClipboard } from "../../utils/clipboard";
 import { useSyncStore } from "../../stores/useSyncStore";
+import { usePerformanceModeStore } from "../../stores/usePerformanceModeStore";
 import {
   getCertInfo,
   getCertDownloadUrl,
@@ -661,6 +662,11 @@ export default function Settings() {
         setPerformanceConfig(result);
         setPerfDraft(result.traffic);
         setBreakpointPerfDraft(result.breakpoint);
+        if (typeof result.traffic.super_performance_mode === "boolean") {
+          usePerformanceModeStore
+            .getState()
+            .setSuperPerformanceMode(result.traffic.super_performance_mode);
+        }
         message.success(successMessage);
       } catch {
         message.error(errorMessage);

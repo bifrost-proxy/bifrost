@@ -1,6 +1,9 @@
 use std::path::Path;
 use std::time::Duration;
 
+use bifrost_asr::transcription::{
+    StructuredTranscription, TranscriptionFinishReason, TranscriptionSegment, TranscriptionUsage,
+};
 use serde::Deserialize;
 
 /// Response from the ASR server when using `response_format=verbose_json`.
@@ -9,6 +12,10 @@ struct VerboseTranscriptionResponse {
     text: String,
     #[serde(default)]
     segments: Vec<VerboseSegment>,
+    #[serde(default)]
+    finish_reason: Option<String>,
+    #[serde(default)]
+    usage: Option<TranscriptionUsage>,
 }
 
 /// A single segment from the verbose_json response, with start/end in seconds.
@@ -17,14 +24,24 @@ struct VerboseSegment {
     start: f64,
     end: f64,
     text: String,
+    #[serde(default)]
+    speaker: Option<String>,
+    #[serde(default)]
+    speaker_id: Option<String>,
+    #[serde(default)]
+    speaker_label: Option<String>,
+    #[serde(default)]
+    overlap: bool,
 }
 
 /// Result of a whole-file transcription request.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct WholeFileTranscription {
     pub text: String,
     /// Segments with (audio_start_ms, audio_end_ms, text).
     pub segments: Vec<(u64, u64, String)>,
+    /// Extended segment view for providers that return speakers or overlap.
+    pub structured: StructuredTranscription,
 }
 
 #[allow(dead_code)]
@@ -175,19 +192,7 @@ pub async fn call_asr_whole_file_endpoint(
                     // Try parsing as verbose_json.
                     if let Ok(verbose) = serde_json::from_str::<VerboseTranscriptionResponse>(&body)
                     {
-                        let text = normalize_asr_text(&verbose.text);
-                        let segments = verbose
-                            .segments
-                            .into_iter()
-                            .filter(|seg| !seg.text.trim().is_empty())
-                            .map(|seg| {
-                                let start_ms = (seg.start * 1000.0) as u64;
-                                let end_ms = (seg.end * 1000.0) as u64;
-                                let text = normalize_asr_text(&seg.text);
-                                (start_ms, end_ms, text)
-                            })
-                            .collect();
-                        return Ok(WholeFileTranscription { text, segments });
+                        return Ok(whole_file_from_verbose(verbose));
                     }
                     // Server returned success but not JSON — treat body as plain text.
                     return Ok(whole_file_text_fallback(&body, media_duration_ms));
@@ -271,12 +276,89 @@ pub(crate) fn asr_text_request_timeout() -> Duration {
 /// Build a single-segment transcription from plain text.
 fn whole_file_text_fallback(body: &str, media_duration_ms: Option<u64>) -> WholeFileTranscription {
     let text = normalize_asr_text(body);
-    let segments = if text.is_empty() {
+    let structured_segments = if text.is_empty() {
         vec![]
     } else {
-        vec![(0, media_duration_ms.unwrap_or(0), text.clone())]
+        vec![TranscriptionSegment {
+            start_ms: 0,
+            end_ms: media_duration_ms.unwrap_or(0),
+            text: text.clone(),
+            speaker: None,
+            overlap: false,
+        }]
     };
-    WholeFileTranscription { text, segments }
+    let segments = structured_segments
+        .iter()
+        .map(|segment| (segment.start_ms, segment.end_ms, segment.text.clone()))
+        .collect();
+    WholeFileTranscription {
+        text: text.clone(),
+        segments,
+        structured: StructuredTranscription {
+            text,
+            segments: structured_segments,
+            finish_reason: TranscriptionFinishReason::Unknown,
+            usage: None,
+        },
+    }
+}
+
+fn whole_file_from_verbose(verbose: VerboseTranscriptionResponse) -> WholeFileTranscription {
+    let text = normalize_asr_text(&verbose.text);
+    let structured_segments = verbose
+        .segments
+        .into_iter()
+        .filter_map(|segment| {
+            let text = normalize_asr_text(&segment.text);
+            if text.is_empty() {
+                return None;
+            }
+            let start_ms = seconds_to_millis(segment.start);
+            let end_ms = seconds_to_millis(segment.end).max(start_ms);
+            let speaker = segment
+                .speaker
+                .or(segment.speaker_id)
+                .or(segment.speaker_label)
+                .map(|speaker| speaker.trim().to_string())
+                .filter(|speaker| !speaker.is_empty());
+            Some(TranscriptionSegment {
+                start_ms,
+                end_ms,
+                text,
+                speaker,
+                overlap: segment.overlap,
+            })
+        })
+        .collect::<Vec<_>>();
+    let segments = structured_segments
+        .iter()
+        .map(|segment| (segment.start_ms, segment.end_ms, segment.text.clone()))
+        .collect();
+    let finish_reason = match verbose.finish_reason.as_deref() {
+        Some("stop" | "completed" | "complete") => TranscriptionFinishReason::Completed,
+        Some("length" | "max_tokens") => TranscriptionFinishReason::Length,
+        Some("cancelled" | "canceled") => TranscriptionFinishReason::Cancelled,
+        Some("failed" | "error") => TranscriptionFinishReason::Failed,
+        _ => TranscriptionFinishReason::Unknown,
+    };
+    WholeFileTranscription {
+        text: text.clone(),
+        segments,
+        structured: StructuredTranscription {
+            text,
+            segments: structured_segments,
+            finish_reason,
+            usage: verbose.usage,
+        },
+    }
+}
+
+fn seconds_to_millis(seconds: f64) -> u64 {
+    if seconds.is_finite() && seconds > 0.0 {
+        (seconds * 1000.0).round() as u64
+    } else {
+        0
+    }
 }
 
 pub(crate) fn normalize_asr_text(text: &str) -> String {
@@ -380,6 +462,8 @@ mod tests {
 #[cfg(test)]
 mod streaming_extra_tests {
     use super::*;
+    use tempfile::TempDir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn whole_file_text_fallback_builds_single_segment_when_text_present() {
@@ -394,6 +478,130 @@ mod streaming_extra_tests {
         let transcription = whole_file_text_fallback("   \n", Some(10_000));
         assert!(transcription.text.is_empty());
         assert!(transcription.segments.is_empty());
+    }
+
+    #[test]
+    fn verbose_response_preserves_moss_speaker_and_usage() {
+        let verbose: VerboseTranscriptionResponse = serde_json::from_value(serde_json::json!({
+            "text": "你好，开始开会。",
+            "segments": [{
+                "start": 0.125,
+                "end": 2.4,
+                "text": "你好，开始开会。",
+                "speaker_id": " speaker_00 ",
+                "overlap": true
+            }],
+            "finish_reason": "length",
+            "usage": {
+                "prompt_tokens": 128,
+                "completion_tokens": 42,
+                "total_tokens": 170
+            }
+        }))
+        .unwrap();
+        let transcription = whole_file_from_verbose(verbose);
+        assert_eq!(
+            transcription.segments[0],
+            (125, 2_400, "你好，开始开会。".to_string())
+        );
+        assert_eq!(
+            transcription.structured.segments[0].speaker.as_deref(),
+            Some("speaker_00")
+        );
+        assert!(transcription.structured.segments[0].overlap);
+        assert_eq!(
+            transcription.structured.finish_reason,
+            TranscriptionFinishReason::Length
+        );
+        assert_eq!(transcription.structured.usage.unwrap().total_tokens, 170);
+    }
+
+    #[test]
+    fn verbose_response_remains_compatible_without_speaker_fields() {
+        let verbose: VerboseTranscriptionResponse = serde_json::from_value(serde_json::json!({
+            "text": "hello",
+            "segments": [{"start": -1.0, "end": 1.25, "text": "hello"}]
+        }))
+        .unwrap();
+        let transcription = whole_file_from_verbose(verbose);
+        assert_eq!(transcription.segments[0], (0, 1_250, "hello".to_string()));
+        assert!(transcription.structured.segments[0].speaker.is_none());
+        assert_eq!(
+            transcription.structured.finish_reason,
+            TranscriptionFinishReason::Unknown
+        );
+    }
+
+    #[test]
+    fn verbose_response_filters_blank_segments_and_maps_terminal_failures() {
+        for (finish_reason, expected) in [
+            ("cancelled", TranscriptionFinishReason::Cancelled),
+            ("failed", TranscriptionFinishReason::Failed),
+        ] {
+            let verbose: VerboseTranscriptionResponse = serde_json::from_value(serde_json::json!({
+                "text": "usable",
+                "segments": [
+                    {"start": 0.0, "end": 0.5, "text": "   "},
+                    {"start": 0.5, "end": 1.0, "text": "usable"}
+                ],
+                "finish_reason": finish_reason
+            }))
+            .unwrap();
+
+            let transcription = whole_file_from_verbose(verbose);
+            assert_eq!(transcription.segments.len(), 1);
+            assert_eq!(transcription.structured.finish_reason, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn whole_file_endpoint_returns_structured_verbose_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 16 * 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            let body = serde_json::json!({
+                "text": "hello",
+                "segments": [{
+                    "start": 0.25,
+                    "end": 1.0,
+                    "text": "hello",
+                    "speaker": "speaker_01"
+                }],
+                "finish_reason": "completed"
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let temp = TempDir::new().unwrap();
+        let wav = temp.path().join("sample.wav");
+        std::fs::write(&wav, b"test wav payload").unwrap();
+        let transcription = call_asr_whole_file_endpoint(
+            &format!("http://{address}"),
+            "english",
+            &wav,
+            Some(1_000),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(transcription.segments[0].0, 250);
+        assert_eq!(
+            transcription.structured.segments[0].normalized_speaker(),
+            Some("speaker_01")
+        );
+        assert_eq!(
+            transcription.structured.finish_reason,
+            TranscriptionFinishReason::Completed
+        );
+        server.await.unwrap();
     }
 
     #[test]

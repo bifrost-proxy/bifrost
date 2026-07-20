@@ -1,19 +1,28 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod backend_runtime;
 mod native_launcher;
 mod open_requests;
+mod upgrade_handoff;
 
+use backend_runtime::*;
+use upgrade_handoff::*;
+
+use bifrost_core::upgrade_progress::{
+    read_progress, write_progress, UpgradePhase, UpgradeProgress,
+};
 use bifrost_core::{cleanup_bifrost_log_dir, direct_blocking_reqwest_client_builder};
 use bifrost_storage::data_dir as shared_bifrost_data_dir;
 use bifrost_tls::{ensure_valid_ca, generate_root_ca, save_root_ca, CertInstaller, CertStatus};
 use open_requests::{parse_open_url, DesktopOpenRequest, OpenRequestParseError};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsStr;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Mutex, OnceLock,
@@ -53,6 +62,9 @@ const OVERLAY_FADE_STEP_DELAY: Duration = Duration::from_millis(14);
 const BACKEND_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const BACKEND_WATCHDOG_RECOVERY_RETRY_DELAY: Duration = Duration::from_secs(3);
 const BACKEND_WATCHDOG_FAILURE_THRESHOLD: u8 = 2;
+const BACKEND_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const BACKEND_KILL_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+const DEFAULT_DESKTOP_STARTUP_DEADLINE: Duration = Duration::from_secs(30);
 const WEBVIEW_PARK_OFFSET: f64 = 2000.0;
 const WEBVIEW_REVEAL_SETTLE_DELAY: Duration = Duration::from_millis(90);
 const HANDOFF_COMPLETE_EVENT: &str = "desktop://handoff-complete";
@@ -62,12 +74,22 @@ const DESKTOP_UPGRADE_RELAUNCH_HELPER_ENV: &str = "BIFROST_DESKTOP_UPGRADE_RELAU
 const DESKTOP_UPGRADE_RELAUNCH_MARKER_ENV: &str = "BIFROST_DESKTOP_UPGRADE_RELAUNCH_MARKER";
 const DESKTOP_UPGRADE_RELAUNCH_TARGET_ENV: &str = "BIFROST_DESKTOP_UPGRADE_RELAUNCH_TARGET";
 const DESKTOP_UPGRADE_RELAUNCH_MARKER_FILE: &str = "desktop-upgrade-relaunch.json";
+const DESKTOP_PENDING_INSTALL_FILE: &str = "desktop-upgrade-pending-install.json";
 const DESKTOP_UPGRADE_RELAUNCH_SCHEMA_VERSION: u8 = 1;
-const DESKTOP_UPGRADE_RELAUNCH_STALE_AFTER_MS: u64 = 10 * 60 * 1000;
+const DESKTOP_PENDING_INSTALL_SCHEMA_VERSION: u8 = 1;
+// Must exceed the Windows helper's 30s App wait + 30s core wait + 10m
+// installer timeout so a valid handoff cannot expire before relaunch.
+const DESKTOP_UPGRADE_RELAUNCH_STALE_AFTER_MS: u64 = 15 * 60 * 1000;
 const DESKTOP_UPGRADE_RELAUNCH_PROCESS_WAIT: Duration = Duration::from_secs(30);
 const DESKTOP_UPGRADE_RELAUNCH_PORT_WAIT: Duration = Duration::from_secs(30);
 const SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV: &str =
     "BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL";
+const DESKTOP_STARTUP_DEADLINE_MS_ENV: &str = "BIFROST_DESKTOP_STARTUP_DEADLINE_MS";
+const DESKTOP_STARTUP_SESSION_ENV: &str = "BIFROST_DESKTOP_STARTUP_SESSION_ID";
+const DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV: &str =
+    "BIFROST_DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES";
+const DESKTOP_UPGRADE_SHUTDOWN_ARG: &str = "--bifrost-upgrade-shutdown";
+static DESKTOP_BOOTSTRAP_LOG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DesktopConfig {
@@ -109,6 +131,12 @@ struct DesktopServerConfigResponse {
     websocket_handshake_max_header_size: usize,
 }
 
+#[derive(Debug, Deserialize)]
+struct DesktopRuntimeMarker {
+    pid: u32,
+    port: u16,
+}
+
 enum BackendPortTransition {
     Rebound(DesktopPortUpdateResponse),
     RestartRequired,
@@ -118,6 +146,7 @@ struct BackendState {
     binary_path: PathBuf,
     data_dir: PathBuf,
     config_path: PathBuf,
+    startup_session_id: String,
     launcher_only: bool,
     expected_port: Mutex<u16>,
     port: Mutex<u16>,
@@ -142,14 +171,66 @@ enum HostWindowCloseBehavior {
     ShutdownApp,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackendWaitFailureKind {
+    ChildExited,
+    ChildInspection,
+    TimedOut,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupDeadlineDisposition {
+    HandoffToWebview,
+    ShowNativeError,
+}
+
+#[derive(Debug)]
+struct BackendWaitFailure {
+    kind: BackendWaitFailureKind,
+    message: String,
+}
+
+impl std::fmt::Display for BackendWaitFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for BackendWaitFailure {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PendingDesktopInstall {
+    schema_version: u8,
+    created_at_ms: u64,
+    package_path: String,
+    target_version: String,
+    #[serde(default)]
+    package_owned_by_updater: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DesktopInstallRollback {
+    install_dir: String,
+    backup_dir: String,
+    had_previous_install: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct DesktopUpgradeRelaunchMarker {
     schema_version: u8,
     created_at_ms: u64,
     old_app_pid: u32,
     old_core_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observed_external_core_pid: Option<u32>,
     proxy_port: u16,
     app_target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_install: Option<PendingDesktopInstall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rollback: Option<DesktopInstallRollback>,
 }
 
 fn main() {
@@ -262,17 +343,29 @@ fn main() {
             }
         });
 
+    let builder = builder.plugin(tauri_plugin_deep_link::init());
+    let builder = if desktop_test_allows_multiple_instances() {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            if desktop_upgrade_shutdown_requested(args.iter().skip(1)) {
+                request_desktop_shutdown(app);
+            } else {
+                handle_cli_file_open_arguments(
+                    app,
+                    args.into_iter().skip(1),
+                    Some(PathBuf::from(cwd)),
+                );
+            }
+        }))
+    };
+
     builder
-        .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_single_instance::init(
-            |app, args, cwd| {
-                handle_cli_file_open_arguments(app, args.into_iter().skip(1), Some(PathBuf::from(cwd)));
-            },
-        ))
         .invoke_handler(tauri::generate_handler![
             get_desktop_runtime,
             start_desktop_core,
             update_desktop_proxy_port,
+            issue_desktop_upgrade_origin_token,
             restart_desktop_after_update,
             notify_main_window_ready,
             get_pending_desktop_open_requests,
@@ -281,6 +374,8 @@ fn main() {
             write_clipboard
         ])
         .setup(|app| {
+            let upgrade_shutdown_requested =
+                desktop_upgrade_shutdown_requested(std::env::args_os().skip(1));
             let host_window = create_host_window(app.handle())?;
             host_window.set_icon(load_app_icon()?)?;
             if !supports_native_launcher() {
@@ -290,6 +385,7 @@ fn main() {
             let binary_path = resolve_bifrost_binary(app.handle())?;
             let app_data_dir = resolve_desktop_data_dir()?;
             let config_path = resolve_desktop_config_path(&app_data_dir);
+            let startup_session_id = desktop_startup_session_id();
             let app_config_dir = config_path
                 .parent()
                 .map(Path::to_path_buf)
@@ -302,12 +398,30 @@ fn main() {
             append_desktop_bootstrap_log(
                 &app_data_dir,
                 format!(
-                    "desktop setup started; binary_path={} data_dir={} config_dir={}",
+                    "desktop startup session started; session_id={} desktop_pid={} app_version={} target_os={} target_arch={}",
+                    startup_session_id,
+                    std::process::id(),
+                    env!("CARGO_PKG_VERSION"),
+                    std::env::consts::OS,
+                    std::env::consts::ARCH,
+                ),
+            );
+            append_desktop_bootstrap_log(
+                &app_data_dir,
+                format!(
+                    "desktop setup started; session_id={} binary_path={} data_dir={} config_dir={}",
+                    startup_session_id,
                     binary_path.display(),
                     app_data_dir.display(),
                     app_config_dir.display()
                 ),
             );
+            if desktop_test_allows_multiple_instances() {
+                append_desktop_bootstrap_log(
+                    &app_data_dir,
+                    "debug E2E mode enabled; single-instance plugin intentionally disabled",
+                );
+            }
             let config = load_desktop_config(&config_path)?;
             let launcher_only = is_launcher_only_mode();
             let upgrade_relaunch = read_active_upgrade_relaunch_marker(&app_data_dir);
@@ -328,6 +442,7 @@ fn main() {
                 binary_path,
                 data_dir: app_data_dir,
                 config_path,
+                startup_session_id,
                 launcher_only,
                 expected_port: Mutex::new(config.proxy_port),
                 port: Mutex::new(config.proxy_port),
@@ -345,6 +460,11 @@ fn main() {
                 pending_open_requests: Mutex::new(Vec::new()),
                 upgrade_relaunch: Mutex::new(upgrade_relaunch),
             });
+
+            if upgrade_shutdown_requested {
+                request_desktop_shutdown(app.handle());
+                return Ok(());
+            }
 
             install_open_request_handlers(app.handle());
 
@@ -387,6 +507,7 @@ fn main() {
                     monitor_desktop_backend(&app_handle);
                 });
 
+                schedule_desktop_startup_deadline(app.handle());
             }
 
             Ok(())
@@ -742,14 +863,20 @@ fn prepare_desktop_certificates(data_dir: &Path) -> Result<CertStatus, String> {
         .map_err(|error| format!("failed to re-check CA trust status: {error}"))
 }
 
-fn start_backend(binary_path: &Path, data_dir: &Path, port: u16) -> tauri::Result<Child> {
+fn start_backend(
+    binary_path: &Path,
+    data_dir: &Path,
+    startup_session_id: &str,
+    port: u16,
+) -> tauri::Result<Child> {
     let stdout_log = open_sidecar_log_file(data_dir, "desktop-sidecar.out.log")?;
     let stderr_log = open_sidecar_log_file(data_dir, "desktop-sidecar.err.log")?;
 
     append_desktop_bootstrap_log(
         data_dir,
         format!(
-            "starting sidecar; binary_path={} data_dir={} port={} stdout_log={} stderr_log={}",
+            "starting sidecar; session_id={} binary_path={} data_dir={} port={} stdout_log={} stderr_log={}",
+            startup_session_id,
             binary_path.display(),
             data_dir.display(),
             port,
@@ -761,13 +888,23 @@ fn start_backend(binary_path: &Path, data_dir: &Path, port: u16) -> tauri::Resul
     let mut command = Command::new(binary_path);
     command
         .args(desktop_backend_start_args(port))
-        .envs(desktop_backend_env(data_dir))
+        .envs(desktop_backend_env(data_dir, startup_session_id))
         .stdout(Stdio::from(stdout_log))
         .stderr(Stdio::from(stderr_log));
     hide_windows_child_console(&mut command);
-    command
+    let child = command
         .spawn()
-        .map_err(|error| anyhow(format!("failed to start backend: {error}")))
+        .map_err(|error| anyhow(format!("failed to start backend: {error}")))?;
+    append_desktop_bootstrap_log(
+        data_dir,
+        format!(
+            "sidecar spawned; session_id={} pid={} port={}",
+            startup_session_id,
+            child.id(),
+            port
+        ),
+    );
+    Ok(child)
 }
 
 fn desktop_backend_start_args(port: u16) -> Vec<String> {
@@ -785,12 +922,48 @@ fn desktop_backend_start_args(port: u16) -> Vec<String> {
     args
 }
 
-fn desktop_backend_env(data_dir: &Path) -> Vec<(&'static str, String)> {
+fn desktop_startup_session_id() -> String {
+    let started_at_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    format!("{started_at_ms}-{}", std::process::id())
+}
+
+fn desktop_backend_env(data_dir: &Path, startup_session_id: &str) -> Vec<(&'static str, String)> {
     vec![
         ("BIFROST_DATA_DIR", data_dir.to_string_lossy().into_owned()),
         (DESKTOP_CORE_ENV, "1".to_string()),
+        (DESKTOP_STARTUP_SESSION_ENV, startup_session_id.to_string()),
+        ("RUST_LOG", desktop_sidecar_rust_log()),
         (SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV, "1".to_string()),
     ]
+}
+
+fn desktop_sidecar_rust_log() -> String {
+    let inherited = std::env::var("RUST_LOG")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "info".to_string());
+    if inherited
+        .split(',')
+        .any(|directive| directive.trim().starts_with("bifrost_cli::startup="))
+    {
+        inherited
+    } else {
+        format!("{inherited},bifrost_cli::startup=info")
+    }
+}
+
+fn desktop_test_allows_multiple_instances() -> bool {
+    should_allow_multiple_instances(
+        cfg!(debug_assertions),
+        env_flag_enabled(DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV),
+    )
+}
+
+fn should_allow_multiple_instances(debug_build: bool, requested: bool) -> bool {
+    debug_build && requested
 }
 
 fn desktop_no_system_proxy_requested() -> bool {
@@ -807,928 +980,13 @@ fn env_flag_enabled(key: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn desktop_upgrade_relaunch_marker_path(data_dir: &Path) -> PathBuf {
-    data_dir.join(DESKTOP_UPGRADE_RELAUNCH_MARKER_FILE)
-}
-
-fn current_time_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or(0)
-}
-
-fn is_upgrade_relaunch_marker_active(marker: &DesktopUpgradeRelaunchMarker, now_ms: u64) -> bool {
-    if marker.schema_version != DESKTOP_UPGRADE_RELAUNCH_SCHEMA_VERSION || marker.proxy_port == 0 {
-        return false;
-    }
-
-    now_ms
-        .checked_sub(marker.created_at_ms)
-        .map(|age_ms| age_ms <= DESKTOP_UPGRADE_RELAUNCH_STALE_AFTER_MS)
-        .unwrap_or(true)
-}
-
-fn write_upgrade_relaunch_marker(
-    data_dir: &Path,
-    marker: &DesktopUpgradeRelaunchMarker,
-) -> tauri::Result<PathBuf> {
-    fs::create_dir_all(data_dir)
-        .map_err(|error| anyhow(format!("failed to create desktop data dir: {error}")))?;
-    let marker_path = desktop_upgrade_relaunch_marker_path(data_dir);
-    let content = serde_json::to_string_pretty(marker)
-        .map_err(|error| anyhow(format!("failed to encode upgrade relaunch marker: {error}")))?;
-    fs::write(&marker_path, format!("{content}\n"))
-        .map_err(|error| anyhow(format!("failed to write upgrade relaunch marker: {error}")))?;
-    Ok(marker_path)
-}
-
-fn read_active_upgrade_relaunch_marker(data_dir: &Path) -> Option<DesktopUpgradeRelaunchMarker> {
-    let marker_path = desktop_upgrade_relaunch_marker_path(data_dir);
-    let content = match fs::read_to_string(&marker_path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(error) => {
-            append_desktop_bootstrap_log(
-                data_dir,
-                format!("failed to read desktop upgrade relaunch marker: {error}"),
-            );
-            return None;
-        }
-    };
-
-    let marker = match serde_json::from_str::<DesktopUpgradeRelaunchMarker>(&content) {
-        Ok(marker) => marker,
-        Err(error) => {
-            append_desktop_bootstrap_log(
-                data_dir,
-                format!("discarding invalid desktop upgrade relaunch marker: {error}"),
-            );
-            let _ = fs::remove_file(&marker_path);
-            return None;
-        }
-    };
-
-    if is_upgrade_relaunch_marker_active(&marker, current_time_millis()) {
-        Some(marker)
-    } else {
-        append_desktop_bootstrap_log(data_dir, "discarding stale desktop upgrade relaunch marker");
-        let _ = fs::remove_file(&marker_path);
-        None
-    }
-}
-
-fn clear_upgrade_relaunch_marker(data_dir: &Path) {
-    let marker_path = desktop_upgrade_relaunch_marker_path(data_dir);
-    if let Err(error) = fs::remove_file(&marker_path) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            append_desktop_bootstrap_log(
-                data_dir,
-                format!("failed to clear desktop upgrade relaunch marker: {error}"),
-            );
-        }
-    }
-}
-
-fn may_reuse_existing_backend(upgrade_relaunch: Option<&DesktopUpgradeRelaunchMarker>) -> bool {
-    upgrade_relaunch.is_none()
-}
-
-fn wait_for_upgrade_handoff_release(data_dir: &Path, marker: &DesktopUpgradeRelaunchMarker) {
-    append_desktop_bootstrap_log(
-        data_dir,
-        format!(
-            "waiting for desktop upgrade handoff release; old_app_pid={} old_core_pid={:?} proxy_port={}",
-            marker.old_app_pid, marker.old_core_pid, marker.proxy_port
-        ),
-    );
-    let app_exited =
-        wait_for_process_exit(marker.old_app_pid, DESKTOP_UPGRADE_RELAUNCH_PROCESS_WAIT);
-    if let Some(old_core_pid) = marker.old_core_pid {
-        let core_exited =
-            wait_for_process_exit(old_core_pid, DESKTOP_UPGRADE_RELAUNCH_PROCESS_WAIT);
-        append_desktop_bootstrap_log(
-            data_dir,
-            format!(
-                "desktop upgrade process wait complete; app_exited={} core_exited={}",
-                app_exited, core_exited
-            ),
-        );
-    } else {
-        append_desktop_bootstrap_log(
-            data_dir,
-            format!(
-                "desktop upgrade process wait complete; app_exited={} core_exited=unknown",
-                app_exited
-            ),
-        );
-    }
-    let port_released =
-        wait_for_backend_shutdown(marker.proxy_port, DESKTOP_UPGRADE_RELAUNCH_PORT_WAIT);
-    append_desktop_bootstrap_log(
-        data_dir,
-        format!(
-            "desktop upgrade port wait complete; proxy_port={} released={}",
-            marker.proxy_port, port_released
-        ),
-    );
-}
-
-fn run_desktop_upgrade_relaunch_helper_from_env() -> bool {
-    if !env_flag_enabled(DESKTOP_UPGRADE_RELAUNCH_HELPER_ENV) {
-        return false;
-    }
-
-    let marker_path = match std::env::var_os(DESKTOP_UPGRADE_RELAUNCH_MARKER_ENV) {
-        Some(path) => PathBuf::from(path),
-        None => return true,
-    };
-    let target = match std::env::var_os(DESKTOP_UPGRADE_RELAUNCH_TARGET_ENV) {
-        Some(target) => PathBuf::from(target),
-        None => return true,
-    };
-    let data_dir = marker_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-
-    let marker = match fs::read_to_string(&marker_path)
-        .ok()
-        .and_then(|content| serde_json::from_str::<DesktopUpgradeRelaunchMarker>(&content).ok())
-    {
-        Some(marker) => marker,
-        None => return true,
-    };
-
-    append_desktop_bootstrap_log(
-        &data_dir,
-        format!(
-            "desktop upgrade relaunch helper started; old_app_pid={} old_core_pid={:?} proxy_port={} target={}",
-            marker.old_app_pid,
-            marker.old_core_pid,
-            marker.proxy_port,
-            target.display()
-        ),
-    );
-    wait_for_upgrade_handoff_release(&data_dir, &marker);
-
-    let mut command = relaunch_command_for_target(&target);
-    hide_windows_child_console(&mut command);
-    match command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(child) => append_desktop_bootstrap_log(
-            &data_dir,
-            format!(
-                "desktop upgrade relaunch helper opened target; pid={}",
-                child.id()
-            ),
-        ),
-        Err(error) => append_desktop_bootstrap_log(
-            &data_dir,
-            format!("desktop upgrade relaunch helper failed to open target: {error}"),
-        ),
-    }
-
-    true
-}
-
-fn relaunch_command_for_target(target: &Path) -> Command {
-    #[cfg(target_os = "macos")]
-    {
-        if target.extension().and_then(|extension| extension.to_str()) == Some("app") {
-            let mut command = Command::new("open");
-            command.arg("-n").arg(target);
-            return command;
-        }
-    }
-
-    Command::new(target)
-}
-
-fn wait_for_process_exit(pid: u32, timeout: Duration) -> bool {
-    if pid == 0 {
-        return true;
-    }
-
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if !process_is_running(pid) {
-            return true;
-        }
-
-        std::thread::sleep(Duration::from_millis(150));
-    }
-
-    !process_is_running(pid)
-}
-
-fn process_is_running(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-
-    #[cfg(unix)]
-    {
-        Command::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-    }
-
-    #[cfg(windows)]
-    {
-        let filter = format!("PID eq {pid}");
-        Command::new("tasklist")
-            .args(["/FI", &filter, "/NH"])
-            .stdin(Stdio::null())
-            .output()
-            .map(|output| {
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout).contains(&pid.to_string())
-            })
-            .unwrap_or(false)
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        false
-    }
-}
-
-fn ensure_backend_running(
-    binary_path: &Path,
-    data_dir: &Path,
-    preferred_port: u16,
-    upgrade_relaunch: Option<&DesktopUpgradeRelaunchMarker>,
-) -> tauri::Result<(Option<Child>, u16)> {
-    append_desktop_bootstrap_log(
-        data_dir,
-        format!(
-            "ensuring backend is running; preferred_port={} data_dir={}",
-            preferred_port,
-            data_dir.display()
-        ),
-    );
-
-    if may_reuse_existing_backend(upgrade_relaunch) {
-        if let Some(port) = find_existing_backend_port(data_dir, preferred_port) {
-            append_desktop_bootstrap_log(
-                data_dir,
-                format!("reusing existing backend instance already serving on port {port}"),
-            );
-            return Ok((None, port));
-        }
-    } else if let Some(marker) = upgrade_relaunch {
-        append_desktop_bootstrap_log(
-            data_dir,
-            format!(
-                "desktop upgrade handoff is active; skipping existing backend reuse on port {}",
-                marker.proxy_port
-            ),
-        );
-        wait_for_upgrade_handoff_release(data_dir, marker);
-    }
-
-    cleanup_existing_backend(binary_path, data_dir);
-
-    let (child, port) = launch_backend_on_available_port(binary_path, data_dir, preferred_port)?;
-    Ok((Some(child), port))
-}
-
-fn launch_backend_on_available_port(
-    binary_path: &Path,
-    data_dir: &Path,
-    preferred_port: u16,
-) -> tauri::Result<(Child, u16)> {
-    for offset in 0..=MAX_PORT_INCREMENT_ATTEMPTS {
-        let port = preferred_port.saturating_add(offset);
-        if port == 0 {
-            continue;
-        }
-        if !is_port_available(port) {
-            continue;
-        }
-
-        let child = start_backend(binary_path, data_dir, port)?;
-        match wait_for_backend(port, Duration::from_secs(20)) {
-            Ok(()) => {
-                append_desktop_bootstrap_log(
-                    data_dir,
-                    format!("backend became ready at http://{BACKEND_ADMIN_HOST}:{port}"),
-                );
-                return Ok((child, port));
-            }
-            Err(error) => {
-                append_desktop_bootstrap_log(
-                    data_dir,
-                    format!("backend failed to become ready on port {port}: {error}"),
-                );
-                let _ = stop_backend_with_binary(binary_path, data_dir);
-                let _ = terminate_child(child);
-                if offset == MAX_PORT_INCREMENT_ATTEMPTS {
-                    return Err(error);
-                }
-            }
-        }
-    }
-
-    Err(anyhow(format!(
-        "failed to find an available backend port starting from {preferred_port}"
-    )))
-}
-
-fn bootstrap_desktop_backend(app: &AppHandle) {
-    let Some(state) = app.try_state::<BackendState>() else {
-        return;
-    };
-
-    append_desktop_bootstrap_log(
-        &state.data_dir,
-        "desktop backend bootstrap started asynchronously",
-    );
-
-    let _ = start_desktop_backend_now(app, "startup");
-}
-
-struct BackendRecoveryGuard<'a> {
-    flag: &'a AtomicBool,
-}
-
-impl Drop for BackendRecoveryGuard<'_> {
-    fn drop(&mut self) {
-        self.flag.store(false, Ordering::SeqCst);
-    }
-}
-
-fn begin_backend_recovery(state: &BackendState) -> Option<BackendRecoveryGuard<'_>> {
-    if state
-        .backend_recovery_in_progress
-        .swap(true, Ordering::SeqCst)
-    {
-        return None;
-    }
-
-    Some(BackendRecoveryGuard {
-        flag: &state.backend_recovery_in_progress,
-    })
-}
-
-fn monitor_desktop_backend(app: &AppHandle) {
-    let Some(state) = app.try_state::<BackendState>() else {
-        return;
-    };
-
-    append_desktop_bootstrap_log(&state.data_dir, "desktop backend watchdog started");
-
-    let mut consecutive_health_failures = 0u8;
-    loop {
-        std::thread::sleep(BACKEND_WATCHDOG_POLL_INTERVAL);
-
-        let Some(state) = app.try_state::<BackendState>() else {
-            return;
-        };
-
-        if state.shutdown_started.load(Ordering::SeqCst) || state.force_exit.load(Ordering::SeqCst)
-        {
-            append_desktop_bootstrap_log(
-                &state.data_dir,
-                "desktop backend watchdog stopped because desktop shutdown is in progress",
-            );
-            return;
-        }
-
-        if state.backend_recovery_in_progress.load(Ordering::SeqCst) {
-            consecutive_health_failures = 0;
-            continue;
-        }
-
-        if let Some(reason) = poll_managed_backend_exit(&state) {
-            consecutive_health_failures = 0;
-            attempt_backend_recovery(app, &reason);
-            continue;
-        }
-
-        let current_port = match state.port.lock() {
-            Ok(port) => *port,
-            Err(_) => continue,
-        };
-
-        if current_port == 0 {
-            consecutive_health_failures = 0;
-            continue;
-        }
-
-        if probe_backend_health(current_port) {
-            clear_backend_unavailable_after_healthy_probe(
-                &state,
-                current_port,
-                "desktop backend watchdog observed healthy backend",
-            );
-            consecutive_health_failures = 0;
-            continue;
-        }
-
-        consecutive_health_failures = consecutive_health_failures.saturating_add(1);
-        if consecutive_health_failures < BACKEND_WATCHDOG_FAILURE_THRESHOLD {
-            append_desktop_bootstrap_log(
-                &state.data_dir,
-                format!(
-                    "desktop backend health probe failed on port {current_port}; waiting for confirmation ({consecutive_health_failures}/{BACKEND_WATCHDOG_FAILURE_THRESHOLD})"
-                ),
-            );
-            continue;
-        }
-        consecutive_health_failures = 0;
-        let managed_backend = state
-            .child
-            .lock()
-            .map(|child| child.is_some())
-            .unwrap_or(false);
-        let reason = format!("backend health probe failed on port {current_port}");
-        if managed_backend {
-            attempt_backend_recovery(app, &reason);
-        } else {
-            mark_backend_unavailable_for_manual_start(&state, &reason);
-        }
-    }
-}
-
-fn poll_managed_backend_exit(state: &BackendState) -> Option<String> {
-    let mut child_guard = state.child.lock().ok()?;
-    let child = child_guard.as_mut()?;
-
-    match child.try_wait() {
-        Ok(Some(status)) => {
-            let pid = child.id();
-            let _ = child_guard.take();
-            Some(format!(
-                "managed backend child pid={pid} exited with status {status}"
-            ))
-        }
-        Ok(None) => None,
-        Err(error) => {
-            let pid = child.id();
-            let _ = child_guard.take();
-            Some(format!(
-                "failed to poll managed backend child pid={pid}: {error}"
-            ))
-        }
-    }
-}
-
-fn attempt_backend_recovery(app: &AppHandle, reason: &str) {
-    let Some(state) = app.try_state::<BackendState>() else {
-        return;
-    };
-
-    if state.shutdown_started.load(Ordering::SeqCst) || state.force_exit.load(Ordering::SeqCst) {
-        return;
-    }
-
-    let Some(_recovery_guard) = begin_backend_recovery(&state) else {
-        return;
-    };
-
-    append_desktop_bootstrap_log(
-        &state.data_dir,
-        format!("desktop backend watchdog triggering recovery; reason={reason}"),
-    );
-    state.startup_ready.store(false, Ordering::SeqCst);
-
-    if let Ok(mut startup_error) = state.startup_error.lock() {
-        *startup_error = None;
-    }
-
-    if let Ok(mut child_guard) = state.child.lock() {
-        if let Some(child) = child_guard.take() {
-            if let Err(error) = terminate_child(child) {
-                append_desktop_bootstrap_log(
-                    &state.data_dir,
-                    format!("failed to terminate managed backend child during recovery: {error}"),
-                );
-            }
-        }
-    }
-
-    let preferred_port = match state.expected_port.lock() {
-        Ok(port) => *port,
-        Err(_) => {
-            record_startup_error(
-                &state,
-                "failed to read desktop expected proxy port during watchdog recovery".to_string(),
-            );
-            return;
-        }
-    };
-
-    match ensure_backend_running(&state.binary_path, &state.data_dir, preferred_port, None) {
-        Ok((child, port)) => {
-            if let Ok(mut child_guard) = state.child.lock() {
-                *child_guard = child;
-            }
-
-            if let Ok(mut current_port) = state.port.lock() {
-                *current_port = port;
-            }
-
-            if let Ok(mut startup_error) = state.startup_error.lock() {
-                *startup_error = None;
-            }
-
-            state.startup_ready.store(true, Ordering::SeqCst);
-            append_desktop_bootstrap_log(
-                &state.data_dir,
-                format!("desktop backend watchdog recovery succeeded; active_port={port}"),
-            );
-            try_start_native_handoff(app, "backend watchdog recovery");
-        }
-        Err(error) => {
-            record_startup_error(&state, format!("desktop watchdog recovery failed: {error}"));
-            append_desktop_bootstrap_log(
-                &state.data_dir,
-                format!(
-                    "desktop backend watchdog recovery failed; will retry after {:?}",
-                    BACKEND_WATCHDOG_RECOVERY_RETRY_DELAY
-                ),
-            );
-            std::thread::sleep(BACKEND_WATCHDOG_RECOVERY_RETRY_DELAY);
-        }
-    }
-}
-
-fn schedule_desktop_cert_ready(data_dir: &Path) {
-    let data_dir = data_dir.to_path_buf();
-    std::thread::spawn(move || {
-        // Wait briefly so the window and embedded core can settle before any
-        // macOS trust prompt interrupts the startup flow.
-        std::thread::sleep(Duration::from_secs(2));
-        append_desktop_bootstrap_log(
-            &data_dir,
-            "starting deferred desktop certificate preflight after startup",
-        );
-        ensure_desktop_cert_ready(&data_dir);
-    });
-}
-
-fn record_startup_error(state: &BackendState, error: String) {
-    append_desktop_bootstrap_log(
-        &state.data_dir,
-        format!("desktop backend bootstrap failed: {error}"),
-    );
-
-    if let Ok(mut startup_error) = state.startup_error.lock() {
-        *startup_error = Some(error);
-    }
-}
-
-fn mark_backend_unavailable_for_manual_start(state: &BackendState, reason: &str) {
-    let was_ready = state.startup_ready.swap(false, Ordering::SeqCst);
-    let mut should_log = was_ready;
-    if let Ok(mut startup_error) = state.startup_error.lock() {
-        if startup_error.is_none() {
-            should_log = true;
-        }
-        *startup_error = Some(
-            "Bifrost service is not running. Start the service from Bifrost Desktop to continue."
-                .to_string(),
-        );
-    }
-
-    if should_log {
-        append_desktop_bootstrap_log(
-            &state.data_dir,
-            format!("desktop backend requires manual start; reason={reason}"),
-        );
-    }
-}
-
-fn clear_backend_unavailable_if_healthy(state: &BackendState, reason: &str) -> bool {
-    let Ok(current_port) = state.port.lock().map(|port| *port) else {
-        return false;
-    };
-
-    if current_port == 0 || !probe_backend_health(current_port) {
-        return false;
-    }
-
-    clear_backend_unavailable_after_healthy_probe(state, current_port, reason)
-}
-
-fn clear_backend_unavailable_after_healthy_probe(
-    state: &BackendState,
-    current_port: u16,
-    reason: &str,
-) -> bool {
-    let was_ready = state.startup_ready.swap(true, Ordering::SeqCst);
-    let mut should_log = !was_ready;
-    if let Ok(mut startup_error) = state.startup_error.lock() {
-        if startup_error.is_some() {
-            should_log = true;
-        }
-        *startup_error = None;
-    }
-
-    if should_log {
-        append_desktop_bootstrap_log(
-            &state.data_dir,
-            format!("desktop backend recovered from manual-start state; reason={reason}; active_port={current_port}"),
-        );
-    }
-
-    true
-}
-
-fn desktop_runtime_snapshot(state: &BackendState) -> Result<DesktopRuntimeInfo, String> {
-    if !state.startup_ready.load(Ordering::SeqCst)
-        || state
-            .startup_error
-            .lock()
-            .map_err(|_| "failed to read desktop startup error".to_string())?
-            .is_some()
-    {
-        clear_backend_unavailable_if_healthy(
-            state,
-            "desktop runtime snapshot observed healthy backend",
-        );
-    }
-
-    let expected_port = *state
-        .expected_port
-        .lock()
-        .map_err(|_| "failed to read desktop expected proxy port".to_string())?;
-    let port = *state
-        .port
-        .lock()
-        .map_err(|_| "failed to read desktop proxy port".to_string())?;
-    let startup_error = state
-        .startup_error
-        .lock()
-        .map_err(|_| "failed to read desktop startup error".to_string())?
-        .clone();
-
-    Ok(DesktopRuntimeInfo {
-        expected_proxy_port: expected_port,
-        proxy_port: port,
-        platform: std::env::consts::OS,
-        startup_ready: state.startup_ready.load(Ordering::SeqCst),
-        startup_error,
-        handoff_completed: state.handoff_completed.load(Ordering::SeqCst),
-    })
-}
-
-fn start_desktop_backend_now(app: &AppHandle, reason: &str) -> Result<DesktopRuntimeInfo, String> {
-    let Some(state) = app.try_state::<BackendState>() else {
-        return Err("desktop backend state is not available".to_string());
-    };
-
-    let _recovery_guard = begin_backend_recovery(&state)
-        .ok_or_else(|| "desktop backend start is already in progress".to_string())?;
-
-    append_desktop_bootstrap_log(
-        &state.data_dir,
-        format!("desktop backend start requested; reason={reason}"),
-    );
-
-    state.startup_ready.store(false, Ordering::SeqCst);
-    if let Ok(mut startup_error) = state.startup_error.lock() {
-        *startup_error = None;
-    }
-
-    if let Ok(mut child_guard) = state.child.lock() {
-        if let Some(child) = child_guard.take() {
-            if let Err(error) = terminate_child(child) {
-                append_desktop_bootstrap_log(
-                    &state.data_dir,
-                    format!("failed to terminate managed backend before manual start: {error}"),
-                );
-            }
-        }
-    }
-
-    let preferred_port = *state
-        .expected_port
-        .lock()
-        .map_err(|_| "failed to read desktop expected proxy port".to_string())?;
-
-    let upgrade_relaunch = state
-        .upgrade_relaunch
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone());
-
-    match ensure_backend_running(
-        &state.binary_path,
-        &state.data_dir,
-        preferred_port,
-        upgrade_relaunch.as_ref(),
-    ) {
-        Ok((child, port)) => {
-            if let Ok(mut child_guard) = state.child.lock() {
-                *child_guard = child;
-            }
-            if let Ok(mut current_port) = state.port.lock() {
-                *current_port = port;
-            }
-            if let Ok(mut startup_error) = state.startup_error.lock() {
-                *startup_error = None;
-            }
-
-            state.startup_ready.store(true, Ordering::SeqCst);
-            append_desktop_bootstrap_log(
-                &state.data_dir,
-                format!("desktop backend start succeeded; active_port={port} reason={reason}"),
-            );
-            if upgrade_relaunch.is_some() {
-                clear_upgrade_relaunch_marker(&state.data_dir);
-                if let Ok(mut marker_guard) = state.upgrade_relaunch.lock() {
-                    *marker_guard = None;
-                }
-                append_desktop_bootstrap_log(
-                    &state.data_dir,
-                    "desktop upgrade relaunch marker cleared after managed backend start",
-                );
-            }
-            try_start_native_handoff(app, "backend ready");
-            schedule_desktop_cert_ready(&state.data_dir);
-            desktop_runtime_snapshot(&state)
-        }
-        Err(error) => {
-            let message = error.to_string();
-            record_startup_error(&state, message.clone());
-            Err(message)
-        }
-    }
-}
-
-fn wait_for_backend(port: u16, timeout: Duration) -> tauri::Result<()> {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if is_backend_ready(port) {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-
-    Err(anyhow(format!(
-        "backend did not become ready at http://{BACKEND_ADMIN_HOST}:{port}"
-    )))
-}
-
-fn is_backend_ready(port: u16) -> bool {
-    probe_backend_health(port)
-}
-
-fn find_existing_backend_port(data_dir: &Path, preferred_port: u16) -> Option<u16> {
-    for offset in 0..=MAX_PORT_INCREMENT_ATTEMPTS {
-        let port = preferred_port.saturating_add(offset);
-        if port == 0 {
-            continue;
-        }
-
-        if probe_backend_health(port) {
-            append_desktop_bootstrap_log(
-                data_dir,
-                format!("detected healthy backend candidate on port {port} before spawning"),
-            );
-            return Some(port);
-        }
-    }
-
-    None
-}
-
-fn probe_backend_health(port: u16) -> bool {
-    let Ok(client) = direct_blocking_reqwest_client_builder()
-        .timeout(Duration::from_millis(450))
-        .build()
-    else {
-        return false;
-    };
-
-    let url = format!("http://{BACKEND_ADMIN_HOST}:{port}/_bifrost/api/proxy/system/support");
-    let Ok(response) = client.get(url).send() else {
-        return false;
-    };
-
-    response.status().is_success()
-}
-
-fn wait_for_backend_shutdown(port: u16, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if !probe_backend_health(port) {
-            return true;
-        }
-
-        std::thread::sleep(Duration::from_millis(150));
-    }
-
-    !probe_backend_health(port)
-}
-
-fn is_port_available(port: u16) -> bool {
-    TcpListener::bind((BACKEND_BIND_HOST, port)).is_ok()
-}
-
-fn has_runtime_marker(data_dir: &Path) -> bool {
-    data_dir.join("bifrost.pid").exists() || data_dir.join("runtime.json").exists()
-}
-
-fn cleanup_existing_backend(binary_path: &Path, data_dir: &Path) {
-    if has_runtime_marker(data_dir) {
-        append_desktop_bootstrap_log(
-            data_dir,
-            format!(
-                "found existing backend runtime markers under {}; stopping stale backend",
-                data_dir.display()
-            ),
-        );
-        let _ = stop_backend_with_binary(binary_path, data_dir);
-    }
-}
-
-fn stop_backend_with_binary(binary_path: &Path, data_dir: &Path) -> tauri::Result<()> {
-    append_desktop_bootstrap_log(
-        data_dir,
-        format!(
-            "running synchronous backend stop; binary_path={} data_dir={}",
-            binary_path.display(),
-            data_dir.display()
-        ),
-    );
-    let mut command = Command::new(binary_path);
-    command
-        .arg("stop")
-        .env("BIFROST_DATA_DIR", data_dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    hide_windows_child_console(&mut command);
-    let status = command
-        .status()
-        .map_err(|error| anyhow(format!("failed to stop backend: {error}")))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(anyhow(format!(
-            "backend stop command exited with status {status}"
-        )))
-    }
-}
-
-fn spawn_backend_stop(binary_path: &Path, data_dir: &Path) -> tauri::Result<Child> {
-    append_desktop_bootstrap_log(
-        data_dir,
-        format!(
-            "spawning asynchronous backend stop; binary_path={} data_dir={}",
-            binary_path.display(),
-            data_dir.display()
-        ),
-    );
-    let stdout_log = open_sidecar_log_file(data_dir, "desktop-sidecar.out.log")?;
-    let stderr_log = open_sidecar_log_file(data_dir, "desktop-sidecar.err.log")?;
-
-    let mut command = Command::new(binary_path);
-    command
-        .arg("stop")
-        .env("BIFROST_DATA_DIR", data_dir)
-        .stdout(Stdio::from(stdout_log))
-        .stderr(Stdio::from(stderr_log));
-    hide_windows_child_console(&mut command);
-    command
-        .spawn()
-        .map_err(|error| anyhow(format!("failed to spawn backend stop: {error}")))
-}
-
-fn hide_windows_child_console(command: &mut Command) {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = command;
-    }
-}
-
-fn terminate_child(mut child: Child) -> tauri::Result<()> {
-    let _ = child.kill();
-    child
-        .wait()
-        .map_err(|error| anyhow(format!("failed to wait for backend child: {error}")))?;
-    Ok(())
+fn desktop_upgrade_shutdown_requested<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    args.into_iter()
+        .any(|arg| arg.as_ref() == OsStr::new(DESKTOP_UPGRADE_SHUTDOWN_ARG))
 }
 
 fn request_desktop_shutdown(app: &AppHandle) {
@@ -1814,6 +1072,9 @@ fn start_main_window_handoff(app: &AppHandle, reason: &str) -> tauri::Result<()>
         return Ok(());
     }
 
+    let host_window = app
+        .get_window(HOST_WINDOW_LABEL)
+        .ok_or_else(|| anyhow("missing host window during embedded handoff".to_string()))?;
     if state.handoff_started.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
@@ -1823,15 +1084,20 @@ fn start_main_window_handoff(app: &AppHandle, reason: &str) -> tauri::Result<()>
         format!("starting embedded webview handoff; reason={reason}"),
     );
 
-    let host_window = app
-        .get_window(HOST_WINDOW_LABEL)
-        .ok_or_else(|| anyhow("missing host window during embedded handoff".to_string()))?;
     let overlay_ptr = state
         .launcher_overlay
         .lock()
         .ok()
         .and_then(|mut overlay| overlay.take());
-    animate_host_window_to_main_size(&host_window, overlay_ptr)?;
+    if let Err(error) = animate_host_window_to_main_size(&host_window, overlay_ptr) {
+        state.handoff_started.store(false, Ordering::SeqCst);
+        if let Ok(mut overlay) = state.launcher_overlay.lock() {
+            if overlay.is_none() {
+                *overlay = overlay_ptr;
+            }
+        }
+        return Err(error);
+    }
     let _ = host_window.set_background_color(Some(Color(8, 17, 23, 255)));
     let _ = host_window.set_decorations(main_interface_decorations());
     #[cfg(target_os = "macos")]
@@ -1879,15 +1145,28 @@ fn try_start_native_handoff(app: &AppHandle, reason: &str) {
         return;
     };
 
-    if !state.startup_ready.load(Ordering::SeqCst) {
-        return;
-    }
-
-    if !state.main_webview_loaded.load(Ordering::SeqCst) {
+    let startup_error_present = state
+        .startup_error
+        .lock()
+        .map(|error| error.is_some())
+        .unwrap_or(true);
+    if !should_handoff_to_main(
+        state.startup_ready.load(Ordering::SeqCst),
+        startup_error_present,
+        state.main_webview_loaded.load(Ordering::SeqCst),
+    ) {
         return;
     }
 
     let _ = start_main_window_handoff(app, reason);
+}
+
+fn should_handoff_to_main(
+    startup_ready: bool,
+    startup_error_present: bool,
+    main_webview_loaded: bool,
+) -> bool {
+    main_webview_loaded && (startup_ready || startup_error_present)
 }
 
 fn restore_host_window(app: &AppHandle) {
@@ -2112,947 +1391,5 @@ fn save_desktop_config(config_path: &Path, config: &DesktopConfig) -> tauri::Res
         .map_err(|error| anyhow(format!("failed to write desktop config: {error}")))
 }
 
-#[tauri::command]
-fn restart_desktop_after_update(app: AppHandle) -> Result<(), String> {
-    let exe = std::env::current_exe()
-        .map_err(|error| format!("failed to resolve current desktop executable: {error}"))?;
-    let state = app
-        .try_state::<BackendState>()
-        .ok_or_else(|| "desktop backend state is not available".to_string())?;
-
-    let old_core_pid = state
-        .child
-        .lock()
-        .ok()
-        .and_then(|guard| guard.as_ref().map(|child| child.id()));
-    let proxy_port = state
-        .port
-        .lock()
-        .map(|guard| *guard)
-        .unwrap_or(DEFAULT_BACKEND_PORT);
-    let app_target = desktop_relaunch_target(&exe);
-    let marker = DesktopUpgradeRelaunchMarker {
-        schema_version: DESKTOP_UPGRADE_RELAUNCH_SCHEMA_VERSION,
-        created_at_ms: current_time_millis(),
-        old_app_pid: std::process::id(),
-        old_core_pid,
-        proxy_port,
-        app_target: app_target.to_string_lossy().into_owned(),
-    };
-    let marker_path = write_upgrade_relaunch_marker(&state.data_dir, &marker)
-        .map_err(|error| format!("failed to prepare desktop upgrade relaunch: {error}"))?;
-    append_desktop_bootstrap_log(
-        &state.data_dir,
-        format!(
-            "desktop upgrade relaunch marker written; old_app_pid={} old_core_pid={:?} proxy_port={} target={}",
-            marker.old_app_pid,
-            marker.old_core_pid,
-            marker.proxy_port,
-            marker.app_target
-        ),
-    );
-    let helper = spawn_desktop_upgrade_relaunch_helper(&exe, &marker_path, &app_target)
-        .map_err(|error| format!("failed to spawn desktop upgrade relaunch helper: {error}"))?;
-    append_desktop_bootstrap_log(
-        &state.data_dir,
-        format!(
-            "desktop upgrade relaunch helper spawned; pid={} target={}",
-            helper.id(),
-            marker.app_target
-        ),
-    );
-    app.exit(0);
-    Ok(())
-}
-
-fn desktop_relaunch_target(exe: &Path) -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(app_bundle) = macos_app_bundle_from_exe_path(&exe) {
-            return app_bundle;
-        }
-    }
-
-    exe.to_path_buf()
-}
-
-fn spawn_desktop_upgrade_relaunch_helper(
-    exe: &Path,
-    marker_path: &Path,
-    target: &Path,
-) -> tauri::Result<Child> {
-    let mut command = Command::new(exe);
-    command
-        .env(DESKTOP_UPGRADE_RELAUNCH_HELPER_ENV, "1")
-        .env(DESKTOP_UPGRADE_RELAUNCH_MARKER_ENV, marker_path)
-        .env(DESKTOP_UPGRADE_RELAUNCH_TARGET_ENV, target)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    hide_windows_child_console(&mut command);
-    command
-        .spawn()
-        .map_err(|error| anyhow(format!("failed to spawn relaunch helper: {error}")))
-}
-
-#[cfg(target_os = "macos")]
-fn macos_app_bundle_from_exe_path(exe_path: &Path) -> Option<PathBuf> {
-    exe_path
-        .ancestors()
-        .find(|path| path.file_name().and_then(|name| name.to_str()) == Some("Bifrost.app"))
-        .map(Path::to_path_buf)
-}
-
-#[tauri::command]
-fn get_desktop_runtime(state: State<'_, BackendState>) -> Result<DesktopRuntimeInfo, String> {
-    desktop_runtime_snapshot(&state)
-}
-
-#[tauri::command]
-fn start_desktop_core(app: AppHandle) -> Result<DesktopRuntimeInfo, String> {
-    start_desktop_backend_now(&app, "frontend request")
-}
-
-#[tauri::command]
-fn update_desktop_proxy_port(
-    state: State<'_, BackendState>,
-    port: u16,
-) -> Result<DesktopRuntimeInfo, String> {
-    if port == 0 {
-        return Err("proxy port must be greater than 0".to_string());
-    }
-
-    {
-        let current_expected_port = state
-            .expected_port
-            .lock()
-            .map_err(|_| "failed to access current desktop expected port".to_string())?;
-        if *current_expected_port == port {
-            let current_port = *state
-                .port
-                .lock()
-                .map_err(|_| "failed to access current desktop port".to_string())?;
-            return Ok(DesktopRuntimeInfo {
-                expected_proxy_port: port,
-                proxy_port: current_port,
-                platform: std::env::consts::OS,
-                startup_ready: state.startup_ready.load(Ordering::SeqCst),
-                startup_error: state
-                    .startup_error
-                    .lock()
-                    .map_err(|_| "failed to read desktop startup error".to_string())?
-                    .clone(),
-                handoff_completed: state.handoff_completed.load(Ordering::SeqCst),
-            });
-        }
-    }
-
-    let current_port = *state
-        .port
-        .lock()
-        .map_err(|_| "failed to access current desktop port".to_string())?;
-    let updated_runtime = match request_backend_port_transition(current_port, port)
-        .map_err(|error| error.to_string())?
-    {
-        BackendPortTransition::Rebound(runtime) => runtime,
-        BackendPortTransition::RestartRequired => {
-            restart_backend_on_port(&state, current_port, port)
-                .map_err(|error| error.to_string())?
-        }
-    };
-    save_desktop_config(&state.config_path, &DesktopConfig { proxy_port: port })
-        .map_err(|error| error.to_string())?;
-
-    {
-        let mut expected_port = state
-            .expected_port
-            .lock()
-            .map_err(|_| "failed to update desktop expected proxy port".to_string())?;
-        *expected_port = port;
-    }
-    {
-        let mut current_port = state
-            .port
-            .lock()
-            .map_err(|_| "failed to update desktop proxy port".to_string())?;
-        *current_port = updated_runtime.actual_port;
-    }
-
-    Ok(DesktopRuntimeInfo {
-        expected_proxy_port: port,
-        proxy_port: updated_runtime.actual_port,
-        platform: std::env::consts::OS,
-        startup_ready: state.startup_ready.load(Ordering::SeqCst),
-        startup_error: state
-            .startup_error
-            .lock()
-            .map_err(|_| "failed to read desktop startup error".to_string())?
-            .clone(),
-        handoff_completed: state.handoff_completed.load(Ordering::SeqCst),
-    })
-}
-
-#[tauri::command]
-fn notify_main_window_ready(app: AppHandle) -> Result<(), String> {
-    if !supports_native_launcher() {
-        return Ok(());
-    }
-
-    let Some(state) = app.try_state::<BackendState>() else {
-        return Ok(());
-    };
-
-    state.main_window_ready.store(true, Ordering::SeqCst);
-    append_desktop_bootstrap_log(
-        &state.data_dir,
-        "received embedded webview ready handshake from frontend shell",
-    );
-
-    start_main_window_handoff(&app, "frontend ready handshake").map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn get_pending_desktop_open_requests(
-    state: State<'_, BackendState>,
-) -> Result<Vec<DesktopOpenRequest>, String> {
-    let mut pending = state
-        .pending_open_requests
-        .lock()
-        .map_err(|_| "failed to read pending desktop open requests".to_string())?;
-    Ok(pending.drain(..).collect())
-}
-
-#[tauri::command]
-fn set_document_edited(app: AppHandle, edited: bool) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        let window = app
-            .get_window(HOST_WINDOW_LABEL)
-            .ok_or_else(|| "host window not found".to_string())?;
-        let window_for_main_thread = window.clone();
-        let run_result = window.run_on_main_thread(move || unsafe {
-            let ns_window: &NSWindow = &*window_for_main_thread
-                .ns_window()
-                .expect("failed to get ns_window for host window")
-                .cast();
-            ns_window.setDocumentEdited(edited);
-        });
-        run_result.map_err(|error| error.to_string())
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = app;
-        let _ = edited;
-        Ok(())
-    }
-}
-
-#[tauri::command]
-fn open_external_url(url: String) -> Result<(), String> {
-    let parsed = tauri::Url::parse(&url).map_err(|error| format!("invalid URL: {error}"))?;
-    match parsed.scheme() {
-        "http" | "https" | "mailto" | "bifrost" | "macappstore" => {}
-        scheme => return Err(format!("unsupported URL scheme: {scheme}")),
-    }
-
-    open::that(parsed.as_str()).map_err(|error| format!("failed to open URL: {error}"))
-}
-
-#[tauri::command]
-fn write_clipboard(text: String) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_app_kit::NSPasteboard;
-        use objc2_foundation::NSString;
-
-        let pb = NSPasteboard::generalPasteboard();
-        pb.clearContents();
-        let ns_string = NSString::from_str(&text);
-        let ok = unsafe { pb.setString_forType(&ns_string, objc2_app_kit::NSPasteboardTypeString) };
-        if !ok {
-            return Err("NSPasteboard setString failed".into());
-        }
-        Ok(())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        use std::io::Write as _;
-        #[cfg(target_os = "windows")]
-        let mut child = std::process::Command::new("clip")
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("failed to spawn clip: {e}"))?;
-        #[cfg(target_os = "linux")]
-        let mut child = std::process::Command::new("xclip")
-            .args(["-selection", "clipboard"])
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("failed to spawn xclip: {e}"))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(text.as_bytes())
-                .map_err(|e| format!("failed to write to clipboard process: {e}"))?;
-        }
-        child
-            .wait()
-            .map_err(|e| format!("clipboard process failed: {e}"))?;
-        Ok(())
-    }
-}
-
-fn restart_backend_on_port(
-    state: &BackendState,
-    current_port: u16,
-    expected_port: u16,
-) -> tauri::Result<DesktopPortUpdateResponse> {
-    let _recovery_guard = begin_backend_recovery(state)
-        .ok_or_else(|| anyhow("desktop backend recovery is already in progress".to_string()))?;
-
-    append_desktop_bootstrap_log(
-        &state.data_dir,
-        format!(
-            "backend did not confirm dynamic port rebind; restarting embedded core on preferred port {expected_port}"
-        ),
-    );
-
-    state.startup_ready.store(false, Ordering::SeqCst);
-
-    if let Ok(mut startup_error) = state.startup_error.lock() {
-        *startup_error = None;
-    }
-
-    if let Ok(mut child_guard) = state.child.lock() {
-        if let Some(child) = child_guard.take() {
-            if let Err(error) = terminate_child(child) {
-                append_desktop_bootstrap_log(
-                    &state.data_dir,
-                    format!("failed to terminate managed backend child before restart: {error}"),
-                );
-            }
-        }
-    }
-
-    if let Err(error) = stop_backend_with_binary(&state.binary_path, &state.data_dir) {
-        append_desktop_bootstrap_log(
-            &state.data_dir,
-            format!("backend stop helper returned before restart: {error}"),
-        );
-    }
-
-    wait_for_backend_shutdown(current_port, Duration::from_secs(3));
-
-    let (child, actual_port) =
-        launch_backend_on_available_port(&state.binary_path, &state.data_dir, expected_port)?;
-
-    if let Ok(mut child_guard) = state.child.lock() {
-        *child_guard = Some(child);
-    }
-
-    state.startup_ready.store(true, Ordering::SeqCst);
-
-    Ok(DesktopPortUpdateResponse {
-        expected_port,
-        actual_port,
-    })
-}
-
-fn anyhow(message: String) -> tauri::Error {
-    let error: Box<dyn std::error::Error> = Box::new(std::io::Error::other(message));
-    tauri::Error::Setup(error.into())
-}
-
-fn log_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("logs")
-}
-
-fn cleanup_desktop_logs_once(data_dir: &Path) {
-    static CLEANED_DIRS: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
-    let log_dir = log_dir(data_dir);
-    let should_cleanup = CLEANED_DIRS
-        .get_or_init(|| Mutex::new(Vec::new()))
-        .lock()
-        .map(|mut dirs| {
-            if dirs.iter().any(|dir| dir == &log_dir) {
-                false
-            } else {
-                dirs.push(log_dir.clone());
-                true
-            }
-        })
-        .unwrap_or(true);
-    if should_cleanup {
-        let _ = cleanup_bifrost_log_dir(&log_dir, DESKTOP_LOG_RETENTION_DAYS);
-    }
-}
-
-fn append_desktop_bootstrap_log(data_dir: &Path, message: impl AsRef<str>) {
-    let log_dir = log_dir(data_dir);
-    if fs::create_dir_all(&log_dir).is_err() {
-        return;
-    }
-    cleanup_desktop_logs_once(data_dir);
-
-    let log_path = log_dir.join("desktop-bootstrap.log");
-    let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) else {
-        return;
-    };
-
-    let _ = writeln!(file, "[{:?}] {}", SystemTime::now(), message.as_ref());
-}
-
-fn open_sidecar_log_file(data_dir: &Path, file_name: &str) -> tauri::Result<fs::File> {
-    let log_dir = log_dir(data_dir);
-    fs::create_dir_all(&log_dir)
-        .map_err(|error| anyhow(format!("failed to create log dir: {error}")))?;
-    cleanup_desktop_logs_once(data_dir);
-
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_dir.join(file_name))
-        .map_err(|error| anyhow(format!("failed to open {file_name}: {error}")))
-}
-
-fn request_backend_port_transition(
-    current_port: u16,
-    expected_port: u16,
-) -> tauri::Result<BackendPortTransition> {
-    let client = direct_blocking_reqwest_client_builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|error| anyhow(format!("failed to build backend rebind client: {error}")))?;
-    let url = format!("http://{BACKEND_ADMIN_HOST}:{current_port}/_bifrost/api/config/server");
-    let response = client
-        .put(url)
-        .json(&serde_json::json!({ "port": expected_port }))
-        .send()
-        .map_err(|error| anyhow(format!("failed to call backend port rebind API: {error}")))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().unwrap_or_default();
-        return Err(anyhow(format!(
-            "backend port rebind API failed with status {}: {}",
-            status, body
-        )));
-    }
-
-    let response_body = response.text().map_err(|error| {
-        anyhow(format!(
-            "failed to read backend port rebind response: {error}"
-        ))
-    })?;
-
-    if let Some(runtime) = parse_port_update_response(&response_body) {
-        return Ok(BackendPortTransition::Rebound(runtime));
-    }
-
-    if is_server_config_response(&response_body) {
-        return Ok(BackendPortTransition::RestartRequired);
-    }
-
-    let actual_port = wait_for_rebound_backend_port(expected_port, Duration::from_secs(2))
-        .map_err(|probe_error| {
-            anyhow(format!(
-                "failed to decode backend port rebind response; fallback probe failed: {probe_error}; body={response_body}"
-            ))
-        })?;
-
-    Ok(BackendPortTransition::Rebound(DesktopPortUpdateResponse {
-        expected_port,
-        actual_port,
-    }))
-}
-
-fn wait_for_rebound_backend_port(expected_port: u16, timeout: Duration) -> tauri::Result<u16> {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        for offset in 0..=MAX_PORT_INCREMENT_ATTEMPTS {
-            let port = expected_port.saturating_add(offset);
-            if port == 0 {
-                continue;
-            }
-
-            if probe_backend_health(port) {
-                return Ok(port);
-            }
-        }
-
-        std::thread::sleep(Duration::from_millis(200));
-    }
-
-    Err(anyhow(format!(
-        "backend did not become healthy on any port starting from {expected_port}"
-    )))
-}
-
-fn parse_port_update_response(response_body: &str) -> Option<DesktopPortUpdateResponse> {
-    serde_json::from_str::<DesktopPortUpdateResponse>(response_body).ok()
-}
-
-fn is_server_config_response(response_body: &str) -> bool {
-    serde_json::from_str::<DesktopServerConfigResponse>(response_body)
-        .map(|response| {
-            response.timeout_secs > 0
-                && response.http1_max_header_size > 0
-                && response.http2_max_header_list_size > 0
-                && response.websocket_handshake_max_header_size > 0
-        })
-        .unwrap_or(false)
-}
-
 #[cfg(test)]
-mod tests {
-    use super::{
-        begin_backend_recovery, clear_backend_unavailable_if_healthy, desktop_backend_env,
-        desktop_backend_start_args, desktop_upgrade_relaunch_marker_path,
-        host_window_close_behavior_for_platform, is_server_config_response,
-        is_upgrade_relaunch_marker_active, main_interface_decorations_for_platform,
-        mark_backend_unavailable_for_manual_start, may_reuse_existing_backend,
-        parse_port_update_response, poll_managed_backend_exit, read_active_upgrade_relaunch_marker,
-        resolve_bifrost_binary_from_env, resolve_desktop_config_path, resolve_desktop_data_dir,
-        save_desktop_config, uses_borderless_desktop_chrome_for_platform,
-        write_upgrade_relaunch_marker, BackendState, DesktopConfig, DesktopUpgradeRelaunchMarker,
-        HostWindowCloseBehavior,
-    };
-    use bifrost_storage::data_dir as shared_bifrost_data_dir;
-    use std::fs;
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::path::PathBuf;
-    use std::process::Command;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Mutex;
-    use std::thread;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn test_backend_state(
-        data_dir: PathBuf,
-        port: u16,
-        startup_ready: bool,
-        startup_error: Option<String>,
-    ) -> BackendState {
-        BackendState {
-            binary_path: PathBuf::new(),
-            data_dir: data_dir.clone(),
-            config_path: data_dir.join("desktop-config.json"),
-            launcher_only: false,
-            expected_port: Mutex::new(port),
-            port: Mutex::new(port),
-            child: Mutex::new(None),
-            shutdown_started: AtomicBool::new(false),
-            force_exit: AtomicBool::new(false),
-            backend_recovery_in_progress: AtomicBool::new(false),
-            startup_ready: AtomicBool::new(startup_ready),
-            startup_error: Mutex::new(startup_error),
-            main_webview_loaded: AtomicBool::new(false),
-            main_window_ready: AtomicBool::new(false),
-            handoff_started: AtomicBool::new(false),
-            handoff_completed: AtomicBool::new(false),
-            launcher_overlay: Mutex::new(None),
-            pending_open_requests: Mutex::new(Vec::new()),
-            upgrade_relaunch: Mutex::new(None),
-        }
-    }
-
-    fn spawn_one_shot_health_server() -> u16 {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind health server");
-        let port = listener.local_addr().expect("health server addr").port();
-        thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut buffer = [0_u8; 1024];
-                let _ = stream.read(&mut buffer);
-                let _ = stream.write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",
-                );
-            }
-        });
-        port
-    }
-
-    #[test]
-    fn desktop_config_uses_shared_data_dir() {
-        let target = resolve_desktop_config_path(&PathBuf::from("/tmp/shared-bifrost"));
-        assert_eq!(
-            target,
-            PathBuf::from("/tmp/shared-bifrost/desktop-config.json")
-        );
-    }
-
-    #[test]
-    fn desktop_data_dir_matches_shared_cli_dir() {
-        assert_eq!(
-            resolve_desktop_data_dir().unwrap(),
-            shared_bifrost_data_dir()
-        );
-    }
-
-    #[test]
-    fn save_desktop_config_creates_parent_dir() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config_path = temp_dir
-            .path()
-            .join("missing")
-            .join("nested")
-            .join("desktop-config.json");
-
-        save_desktop_config(&config_path, &DesktopConfig { proxy_port: 19945 }).unwrap();
-
-        let content = fs::read_to_string(config_path).unwrap();
-        assert!(content.contains("\"proxy_port\": 19945"));
-    }
-
-    #[test]
-    fn parses_snake_case_port_update_response() {
-        let response =
-            parse_port_update_response(r#"{"expected_port":9901,"actual_port":9901}"#).unwrap();
-        assert_eq!(response.expected_port, 9901);
-        assert_eq!(response.actual_port, 9901);
-    }
-
-    #[test]
-    fn parses_camel_case_port_update_response() {
-        let response =
-            parse_port_update_response(r#"{"expectedPort":9901,"actualPort":9902}"#).unwrap();
-        assert_eq!(response.expected_port, 9901);
-        assert_eq!(response.actual_port, 9902);
-    }
-
-    #[test]
-    fn detects_legacy_server_config_response() {
-        assert!(is_server_config_response(
-            r#"{"timeout_secs":30,"http1_max_header_size":65536,"http2_max_header_list_size":262144,"websocket_handshake_max_header_size":65536}"#
-        ));
-    }
-
-    #[test]
-    fn macos_close_request_hides_window() {
-        assert_eq!(
-            host_window_close_behavior_for_platform(true),
-            HostWindowCloseBehavior::HideWindow
-        );
-    }
-
-    #[test]
-    fn non_macos_close_request_shuts_down_app() {
-        assert_eq!(
-            host_window_close_behavior_for_platform(false),
-            HostWindowCloseBehavior::ShutdownApp
-        );
-    }
-
-    #[test]
-    fn windows_desktop_chrome_is_borderless() {
-        assert!(uses_borderless_desktop_chrome_for_platform(true));
-        assert!(!uses_borderless_desktop_chrome_for_platform(false));
-    }
-
-    #[test]
-    fn windows_main_interface_handoff_keeps_native_decorations_disabled() {
-        assert!(!main_interface_decorations_for_platform(true));
-        assert!(main_interface_decorations_for_platform(false));
-    }
-
-    #[test]
-    fn desktop_binary_path_can_be_overridden_for_debug_verification() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
-        let previous = std::env::var_os("BIFROST_DESKTOP_BIN");
-        std::env::set_var("BIFROST_DESKTOP_BIN", "/tmp/bifrost-debug");
-        assert_eq!(
-            resolve_bifrost_binary_from_env(),
-            Some(PathBuf::from("/tmp/bifrost-debug"))
-        );
-        match previous {
-            Some(value) => std::env::set_var("BIFROST_DESKTOP_BIN", value),
-            None => std::env::remove_var("BIFROST_DESKTOP_BIN"),
-        }
-    }
-
-    #[test]
-    fn desktop_sidecar_disables_launchd_cleanup_registration() {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let env = desktop_backend_env(temp_dir.path());
-        let expected_data_dir = temp_dir.path().to_string_lossy().into_owned();
-
-        assert!(env.iter().any(|(key, value)| {
-            *key == "BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL" && value == "1"
-        }));
-        assert!(env
-            .iter()
-            .any(|(key, value)| *key == "BIFROST_DESKTOP_CORE" && value == "1"));
-        assert!(env
-            .iter()
-            .any(|(key, value)| { *key == "BIFROST_DATA_DIR" && value == &expected_data_dir }));
-    }
-
-    #[test]
-    fn desktop_sidecar_start_args_keep_system_proxy_policy_separate_from_launchd_registration() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
-        let previous = std::env::var_os("BIFROST_DESKTOP_NO_SYSTEM_PROXY");
-        std::env::remove_var("BIFROST_DESKTOP_NO_SYSTEM_PROXY");
-        assert_eq!(
-            desktop_backend_start_args(19990),
-            vec![
-                "start".to_string(),
-                "--host".to_string(),
-                "0.0.0.0".to_string(),
-                "--port".to_string(),
-                "19990".to_string(),
-                "--skip-cert-check".to_string(),
-            ]
-        );
-
-        std::env::set_var("BIFROST_DESKTOP_NO_SYSTEM_PROXY", "1");
-        assert!(desktop_backend_start_args(19990)
-            .iter()
-            .any(|arg| arg == "--no-system-proxy"));
-
-        match previous {
-            Some(value) => std::env::set_var("BIFROST_DESKTOP_NO_SYSTEM_PROXY", value),
-            None => std::env::remove_var("BIFROST_DESKTOP_NO_SYSTEM_PROXY"),
-        }
-    }
-
-    #[test]
-    fn upgrade_relaunch_marker_activity_requires_fresh_supported_marker() {
-        let fresh = DesktopUpgradeRelaunchMarker {
-            schema_version: 1,
-            created_at_ms: 10_000,
-            old_app_pid: 42,
-            old_core_pid: Some(43),
-            proxy_port: 9900,
-            app_target: "/Applications/Bifrost.app".to_string(),
-        };
-        assert!(is_upgrade_relaunch_marker_active(&fresh, 10_001));
-
-        let stale = DesktopUpgradeRelaunchMarker {
-            created_at_ms: 1,
-            ..fresh.clone()
-        };
-        assert!(!is_upgrade_relaunch_marker_active(
-            &stale,
-            1 + super::DESKTOP_UPGRADE_RELAUNCH_STALE_AFTER_MS + 1
-        ));
-
-        let unsupported = DesktopUpgradeRelaunchMarker {
-            schema_version: 99,
-            ..fresh.clone()
-        };
-        assert!(!is_upgrade_relaunch_marker_active(&unsupported, 10_001));
-
-        let missing_port = DesktopUpgradeRelaunchMarker {
-            proxy_port: 0,
-            ..fresh
-        };
-        assert!(!is_upgrade_relaunch_marker_active(&missing_port, 10_001));
-    }
-
-    #[test]
-    fn upgrade_relaunch_marker_round_trips_and_stale_marker_is_removed() {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let marker = DesktopUpgradeRelaunchMarker {
-            schema_version: 1,
-            created_at_ms: super::current_time_millis(),
-            old_app_pid: 123,
-            old_core_pid: None,
-            proxy_port: 9900,
-            app_target: "/tmp/Bifrost.app".to_string(),
-        };
-
-        let marker_path =
-            write_upgrade_relaunch_marker(temp_dir.path(), &marker).expect("write marker");
-        assert_eq!(
-            marker_path,
-            desktop_upgrade_relaunch_marker_path(temp_dir.path())
-        );
-        assert_eq!(
-            read_active_upgrade_relaunch_marker(temp_dir.path()),
-            Some(marker)
-        );
-
-        let stale_marker = DesktopUpgradeRelaunchMarker {
-            schema_version: 1,
-            created_at_ms: 1,
-            old_app_pid: 123,
-            old_core_pid: None,
-            proxy_port: 9900,
-            app_target: "/tmp/Bifrost.app".to_string(),
-        };
-        fs::write(
-            desktop_upgrade_relaunch_marker_path(temp_dir.path()),
-            serde_json::to_string(&stale_marker).expect("encode stale marker"),
-        )
-        .expect("write stale marker");
-
-        assert_eq!(read_active_upgrade_relaunch_marker(temp_dir.path()), None);
-        assert!(
-            !desktop_upgrade_relaunch_marker_path(temp_dir.path()).exists(),
-            "stale marker should be removed so normal startup is not blocked"
-        );
-    }
-
-    #[test]
-    fn active_upgrade_relaunch_marker_disables_existing_backend_reuse() {
-        let marker = DesktopUpgradeRelaunchMarker {
-            schema_version: 1,
-            created_at_ms: super::current_time_millis(),
-            old_app_pid: 123,
-            old_core_pid: Some(124),
-            proxy_port: 9900,
-            app_target: "/tmp/Bifrost.app".to_string(),
-        };
-
-        assert!(may_reuse_existing_backend(None));
-        assert!(!may_reuse_existing_backend(Some(&marker)));
-    }
-
-    #[test]
-    fn backend_recovery_guard_prevents_parallel_recovery() {
-        let flag = AtomicBool::new(false);
-        let state = BackendState {
-            backend_recovery_in_progress: flag,
-            ..test_backend_state(PathBuf::new(), 0, false, None)
-        };
-
-        let guard = begin_backend_recovery(&state).expect("first recovery guard");
-        assert!(
-            begin_backend_recovery(&state).is_none(),
-            "second recovery must be rejected while the first one is active"
-        );
-        drop(guard);
-        assert!(
-            begin_backend_recovery(&state).is_some(),
-            "recovery flag should be released after guard drop"
-        );
-    }
-
-    #[test]
-    fn external_backend_health_failure_requires_manual_start() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("bifrost-desktop-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&temp_dir);
-        fs::create_dir_all(&temp_dir).expect("create temp dir");
-        let state = test_backend_state(temp_dir.clone(), 19900, true, None);
-
-        mark_backend_unavailable_for_manual_start(
-            &state,
-            "backend health probe failed on port 19900",
-        );
-
-        assert!(!state.startup_ready.load(Ordering::SeqCst));
-        assert!(state
-            .startup_error
-            .lock()
-            .expect("startup error lock")
-            .as_deref()
-            .expect("startup error")
-            .contains("Start the service from Bifrost Desktop"));
-        assert!(state.child.lock().expect("child lock").is_none());
-        let _ = fs::remove_dir_all(&temp_dir);
-    }
-
-    #[test]
-    fn healthy_external_backend_clears_manual_start_gate() {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let port = spawn_one_shot_health_server();
-        let state = test_backend_state(
-            temp_dir.path().to_path_buf(),
-            port,
-            false,
-            Some(
-                "Bifrost service is not running. Start the service from Bifrost Desktop to continue."
-                    .to_string(),
-            ),
-        );
-
-        assert!(clear_backend_unavailable_if_healthy(
-            &state,
-            "test observed recovered backend",
-        ));
-        assert!(state.startup_ready.load(Ordering::SeqCst));
-        assert!(state
-            .startup_error
-            .lock()
-            .expect("startup error lock")
-            .is_none());
-    }
-
-    #[test]
-    fn unhealthy_external_backend_keeps_manual_start_gate() {
-        let temp_dir = tempfile::tempdir().expect("temp dir");
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("reserve port");
-        let port = listener.local_addr().expect("reserved addr").port();
-        drop(listener);
-        let state = test_backend_state(
-            temp_dir.path().to_path_buf(),
-            port,
-            false,
-            Some("Bifrost service is not running.".to_string()),
-        );
-
-        assert!(!clear_backend_unavailable_if_healthy(
-            &state,
-            "test observed missing backend",
-        ));
-        assert!(!state.startup_ready.load(Ordering::SeqCst));
-        assert_eq!(
-            state
-                .startup_error
-                .lock()
-                .expect("startup error lock")
-                .as_deref(),
-            Some("Bifrost service is not running.")
-        );
-    }
-
-    #[test]
-    fn poll_managed_backend_exit_reports_exited_child() {
-        let child = Command::new("sh")
-            .arg("-c")
-            .arg("exit 0")
-            .spawn()
-            .expect("spawn test child");
-        let _ = child.wait_with_output();
-
-        let state = BackendState {
-            binary_path: PathBuf::new(),
-            data_dir: PathBuf::new(),
-            config_path: PathBuf::new(),
-            launcher_only: false,
-            expected_port: Mutex::new(0),
-            port: Mutex::new(0),
-            child: Mutex::new(Some(
-                Command::new("sh")
-                    .arg("-c")
-                    .arg("exit 0")
-                    .spawn()
-                    .expect("spawn managed child"),
-            )),
-            shutdown_started: AtomicBool::new(false),
-            force_exit: AtomicBool::new(false),
-            backend_recovery_in_progress: AtomicBool::new(false),
-            startup_ready: AtomicBool::new(false),
-            startup_error: Mutex::new(None),
-            main_webview_loaded: AtomicBool::new(false),
-            main_window_ready: AtomicBool::new(false),
-            handoff_started: AtomicBool::new(false),
-            handoff_completed: AtomicBool::new(false),
-            launcher_overlay: Mutex::new(None),
-            pending_open_requests: Mutex::new(Vec::new()),
-            upgrade_relaunch: Mutex::new(None),
-        };
-
-        {
-            let mut child_guard = state.child.lock().expect("child lock");
-            let child = child_guard.as_mut().expect("child");
-            let _ = child.wait();
-        }
-
-        let reason = poll_managed_backend_exit(&state).expect("exited child reason");
-        assert!(reason.contains("exited with status"));
-        assert!(state.child.lock().expect("child lock").is_none());
-        assert!(!state.backend_recovery_in_progress.load(Ordering::SeqCst));
-    }
-}
+mod tests;

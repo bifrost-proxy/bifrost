@@ -46,4 +46,14 @@ describe("desktop tauri window bridge", () => {
 
     expect(getCurrentDesktopWindow()).toBe(webviewWindow);
   });
+
+  it("issues upgrade origin credentials through the Tauri command bridge", async () => {
+    const invoke = vi.fn().mockResolvedValue("desktop-token");
+    window.__TAURI__ = { core: { invoke } };
+
+    const { issueDesktopUpgradeOriginToken } = await import("./tauri");
+
+    await expect(issueDesktopUpgradeOriginToken()).resolves.toBe("desktop-token");
+    expect(invoke).toHaveBeenCalledWith("issue_desktop_upgrade_origin_token", undefined);
+  });
 });

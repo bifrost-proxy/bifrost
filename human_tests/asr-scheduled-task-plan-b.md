@@ -1046,6 +1046,30 @@
 - `asrTask=<task_id>` 详情深链继续直接进入任务详情页，不被首页 Tab 包裹或拦截。
 - 亮色和暗色主题下 Tab 文案、选中态和各卡片内容均清晰可读，没有硬编码颜色导致的对比度问题。
 
+### TC-ASPB-43 按录音日期定向重跑历史文件
+
+操作步骤：
+
+1. 在临时目录放入文件名时间分别属于两个日期的 WAV，并执行：
+   ```bash
+   cargo test -p bifrost-admin pending_batch_can_filter_failed_files_by_recording_date --lib
+   cargo test -p bifrost-admin recording_date_query_is_optional_and_strict --lib
+   ```
+2. 对包含多个日期失败文件的真实或临时任务调用：
+   ```bash
+   curl -sS -X POST 'http://127.0.0.1:9900/_bifrost/api/asr/tasks/<task_id>/run?date=2026-07-10'
+   ```
+3. 轮询任务 watch API，检查本轮 `current_source_path` 和最终文件状态。
+4. 使用 `date=2026-7-10` 或非法日期再次请求，检查错误响应。
+
+预期结果：
+
+- `date=YYYY-MM-DD` 只把本地录音日期匹配的 pending/processing/failed 文件加入本轮队列，其他日期文件的状态和产物保持不变。
+- 过滤依据为文件记录的 `source_created_at_ms` 本地日期；无法确定录音日期的文件在定向运行中 fail closed，不会误跑。
+- 不带 `date` 时维持原有全量目录任务行为。
+- 非严格 `YYYY-MM-DD` 日期返回 400，不启动后台任务。
+- 定向重跑结束后仍刷新 Daily Docs；是否触发 Daily Agent 继续由任务配置决定，便于先补完整历史转写、再对指定日期只运行一次日报研究流水线。
+
 ## 清理步骤
 
 ```bash
@@ -1059,6 +1083,7 @@ rm -rf ./.bifrost-test-planb
 | 日期 | 用例 | 命令 / 操作 | 结果 |
 | --- | --- | --- | --- |
 | 2026-06-03 | TC-ASPB-42 ASR 首页三 Tab 交互改造 | `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_UI_TEST_RUN_ID=manual-asr-tabs BIFROST_UI_TEST_PORT=18898 BACKEND_PORT=18898 WEB_PORT=53991 ... pnpm --dir web exec playwright test tests/ui/asr-home-tabs.spec.ts --reporter=line` | PASS：真实浏览器打开 `/_bifrost/ai?aiSection=tools-asr` 默认选中 `定时任务`，仅展示 Directory Tasks；切到 `ASR 管理` 后 URL 写入 `asrTab=management` 且展示 `Model Management` 和 `Speech to Text`；切到 `声纹识别与唤醒` 后 URL 写入 `asrTab=voice` 且展示 `Speaker Diarization` 和 `Voice Wake Actions`；刷新后仍保持 voice Tab；`asrTask=<task_id>&asrTab=voice` 直接进入任务详情页，不渲染首页 Tab；测试使用临时数据目录、`--no-system-proxy` 和禁用 Sync 自动登录弹窗。 |
+| 2026-07-21 | TC-ASPB-43 按录音日期定向重跑历史文件 | `cargo test -p bifrost-admin pending_batch_can_filter_failed_files_by_recording_date --lib -- --nocapture`；`cargo test -p bifrost-admin recording_date_query_is_optional_and_strict --lib -- --nocapture`；生产 9900 请求非法 `date=bad` | PASS：两个日期 fixture 只选择目标本地录音日期，指定日期可覆盖 MOSS 非重试 marker，非目标日期不入队；不带参数维持默认行为；生产服务对非法日期返回 HTTP 400 `invalid recording date; use YYYY-MM-DD` 且未启动任务。为避免重复生成/投递历史日报，本轮没有对生产历史日期执行有效定向重跑。 |
 | 2026-05-26 | TC-ASPB-41 运行中追加音频文件继续纳入同一 run | `cargo test -p bifrost-admin pending_batch_rescan_picks_up_appended_files_without_retrying_same_run_failures --lib`；`cargo test -p bifrost-admin pending_batch_sorts_older_source_time_first --lib`；`bash e2e-tests/tests/test_asr_task_append_during_run.sh` | PASS：单测证明运行中第二轮扫描会发现追加文件且同一 run 已尝试失败的文件不会无限重试，pending 队列按录音时间早到晚排序；E2E 使用临时 Bifrost 服务和 fake ASR runtime，手动 run 启动时只有第一个音频，running 后追加第二个音频，最终两个文件均为 success，详情文件顺序为 09:00 后 10:00，Daily Docs 生成 `2026-05-25`。 |
 | 2026-05-22 | TC-ASPB-21C watchdog 不因 physical footprint unavailable 误杀 asr-server | `cargo test -p bifrost-admin service_watchdog_kills_only_on_reliable_physical_footprint_over_limit --lib` | PASS：测试断言只有 `reliable=true` 且 footprint 超过阈值才触发 kill；RSS-only fallback 即使数值高于阈值也不触发 kill，等于阈值也不触发 kill。代码复核确认连续 `physical footprint unavailable` 或 sampler error 只写 warning 并继续，不清理 managed service state。 |
 | 2026-05-22 | TC-ASPB-21 reuse_per_file 服务死亡后当前 chunk 降级并自动重启 server | `cargo test -p bifrost-admin restart_failure_forks_only_current_chunk_and_keeps_retry_pending --lib` | PASS：测试模拟 managed server restart 失败后设置一次性 fork reason，即使 `server_url` 指向可成功的 test server，本 chunk 仍只走 `fork_per_chunk` 且没有 shadow server metric；状态保持 `restart_required=true`、`force_fork_for_remaining=false`，证明不会在 native/fork fallback 同时尝试 server 请求或重启，下一次 server-eligible chunk 才继续重启。 |

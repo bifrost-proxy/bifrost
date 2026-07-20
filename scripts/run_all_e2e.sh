@@ -719,6 +719,10 @@ shell_test_runs_serial_in_parallel_shell_job() {
   case "$1" in
     test_memory_pressure_e2e.sh|\
     test_large_body_protection.sh|\
+    test_body_cache_sync_cleanup_admin_api.sh|\
+    test_process_resolution_performance.sh|\
+    test_super_performance_mode.sh|\
+    test_upgrade_tls_trust_e2e.sh|\
     test_remote_connect_overload_retry_e2e.sh|\
     test_client_process_transport_attribution.sh|\
     test_remote_job_real_e2e.sh|\
@@ -1218,6 +1222,18 @@ run_shell_tests_parallel() {
     "test_large_body_protection.sh"
   )
 
+  # These tests own a long-lived Python fixture and wait for it during a
+  # hosted-runner cold start. macOS CI showed that starting them beside another
+  # proxy-heavy suite can leave the child alive but unscheduled long enough to
+  # miss its readiness deadline. Keep them in the serial lane so readiness
+  # measures the fixture itself rather than sibling resource contention.
+  local STARTUP_SENSITIVE_TESTS=(
+    "test_body_cache_sync_cleanup_admin_api.sh"
+    "test_process_resolution_performance.sh"
+    "test_super_performance_mode.sh"
+    "test_upgrade_tls_trust_e2e.sh"
+  )
+
   # PR-G-CI-FIX: isolated-after tests
   # These tests spawn long-lived bifrost/python children that escape the
   # per-test subshell trap. Run serially and clean only Bifrost PIDs recorded
@@ -1272,6 +1288,14 @@ run_shell_tests_parallel() {
       fi
     done
 
+    local is_startup_sensitive=0
+    for st in "${STARTUP_SENSITIVE_TESTS[@]}"; do
+      if [[ "$script_name" == "$st" ]]; then
+        is_startup_sensitive=1
+        break
+      fi
+    done
+
     # PR-G-CI-FIX: isolated-after tests
     local is_isolated_after=0
     for it in "${ISOLATED_AFTER_TESTS[@]}"; do
@@ -1289,7 +1313,7 @@ run_shell_tests_parallel() {
       fi
     done
 
-    if [[ "$is_mock_managing" -eq 1 || "$is_resource_heavy" -eq 1 || "$is_isolated_after" -eq 1 || "$is_cargo_heavy" -eq 1 ]]; then
+    if [[ "$is_mock_managing" -eq 1 || "$is_resource_heavy" -eq 1 || "$is_startup_sensitive" -eq 1 || "$is_isolated_after" -eq 1 || "$is_cargo_heavy" -eq 1 ]]; then
       serial_tests+=("$script_name")
     else
       parallel_tests+=("$script_name")

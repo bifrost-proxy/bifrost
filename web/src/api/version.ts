@@ -3,6 +3,8 @@ import type { UpgradeProgress, VersionCheckResponse } from '../types';
 
 export type UpgradeChannel = 'cli' | 'desktop';
 
+export const DESKTOP_UPGRADE_ORIGIN_HEADER = 'X-Bifrost-Desktop-Upgrade-Origin';
+
 function versionQuery(forceRefresh: boolean, channel: UpgradeChannel): string {
   const params = new URLSearchParams();
   if (forceRefresh) {
@@ -25,7 +27,15 @@ export async function checkVersion(
 
 export async function startUpgrade(channel: UpgradeChannel = 'cli'): Promise<UpgradeProgress> {
   const query = channel === 'desktop' ? '?channel=desktop' : '';
-  return post<UpgradeProgress>(`/system/upgrade${query}`);
+  if (channel !== 'desktop') {
+    return post<UpgradeProgress>(`/system/upgrade${query}`);
+  }
+
+  const { issueDesktopUpgradeOriginToken } = await import('../desktop/tauri');
+  const originToken = await issueDesktopUpgradeOriginToken();
+  return post<UpgradeProgress>(`/system/upgrade${query}`, undefined, {
+    headers: { [DESKTOP_UPGRADE_ORIGIN_HEADER]: originToken },
+  });
 }
 
 export async function getUpgradeProgress(): Promise<UpgradeProgress> {

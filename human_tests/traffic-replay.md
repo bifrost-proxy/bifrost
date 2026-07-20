@@ -1,6 +1,6 @@
 # 人工测试：traffic export & replay (P2-6)
 
-前置：本机 `bifrost start` 运行中，已有若干捕获流量；记下一个目标 record 的 sequence 后缀（如 `42`）和一个 host（如 `bits.bytedance.net`）。
+前置：本机 `bifrost start` 运行中，已有若干捕获流量；记下一个目标 record 的 sequence 后缀（如 `42`）和一个 host（如 `api.example.com`）。
 
 ## 用例 1：export curl
 ```

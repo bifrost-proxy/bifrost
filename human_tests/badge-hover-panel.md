@@ -354,12 +354,110 @@ curl -x http://127.0.0.1:8800 http://httpbin.org/html -s | grep "__bb_panel__"
 
 ---
 
+### TC-BHP-15：回归 - HTTPS 上游连接失败的 502 页面保留 Badge 与操作面板
+
+**操作步骤**：
+1. 使用临时数据目录、非正式端口和当前源码构建的二进制启动 Bifrost，禁止修改系统代理：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-human-error-page \
+     BIFROST_DISABLE_TRAY=1 \
+     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+     target/debug/bifrost start -p 18894 --skip-cert-check --unsafe-ssl --no-system-proxy --enable-badge-injection
+   ```
+2. 创建规则，将 HTTPS 测试域名直连到本地未监听端口：
+   ```bash
+   curl -X POST http://127.0.0.1:18894/_bifrost/api/rules \
+     -H 'Content-Type: application/json' \
+     -d '{"name":"badge-error-page-human","content":"badge-error-page.test host://127.0.0.1:18895","enabled":true}'
+   ```
+3. 通过代理请求测试域名并保存真实 502 响应：
+   ```bash
+   curl -k -x http://127.0.0.1:18894 \
+     https://badge-error-page.test/connection-error \
+     -D /tmp/bifrost-error-page.headers \
+     -o /tmp/bifrost-error-page.html
+   ```
+4. 使用 Chrome 打开 `/tmp/bifrost-error-page.html`，确认 502 状态卡片在视口中水平、垂直居中，视觉层级清晰；页面展示错误摘要、Status、Request target（`badge-error-page.test:443`）、Upstream target（`127.0.0.1:18895`）、Time、Request URL 和 `What you can do` 分步引导。
+5. 确认页面提供 `Open Bifrost rules` 与 `Try again` 操作，并在窄屏尺寸下没有横向溢出；切换浏览器深色模式后文字、边框和错误状态仍清晰可辨。
+6. 鼠标悬浮 Badge，确认面板展开并显示 `badge-error-page-human`、Merged Rules 和 Copy；检查规则行链接指向 `http://127.0.0.1:18894/_bifrost/rules?...`。
+7. 点击 Copy，确认剪贴板含测试规则且按钮显示 `Copied`；再关闭 Badge 注入后重试同一路径。
+8. 保持 Badge 开启，分别以浏览器导航风格 `Accept: text/html,application/xhtml+xml,...` 和通用 `Accept: */*` 重试；再发起一个不带 `Accept` 的请求。
+
+**预期结果**：
+- 代理响应状态为 502，`Content-Type` 为 `text/html; charset=utf-8`；居中状态卡片保留 Status、错误类型/消息、Request target、Upstream target、Time、Request URL；请求域名和规则改写后的实际 IP/域名及端口不能混淆，并给出上游服务、规则目标和重试三步引导。
+- Rules 与重试入口可用，长 URL 可自动折行，窄屏与深色模式下布局和对比度正常。
+- 明确接受 HTML 的请求返回美化 HTML + Badge；只有 `*/*` 或缺失 `Accept` 时返回原始 `text/plain; charset=utf-8`，不会把 HTML 页面强加给 CLI/SDK。
+- Chrome 左下角显示与普通代理 HTML 页面相同的 Bifrost Badge；hover 面板可展开，规则列表、Merged Rules、Copy 和规则跳转功能存在。
+- 错误页面在亮色与暗色系统主题下都保持可读，Badge 面板沿用现有双主题样式。
+- 使用 `--disable-badge-injection` 启动时，同一路径恢复 `text/plain; charset=utf-8`，不包含 `__bifrost_badge__` 或 `__bb_panel__`。
+
+**回归目的**：覆盖连接错误在普通响应注入阶段之前提前返回，导致截图同类 502 页面缺失左下角 Bifrost 操作入口的问题。
+
+---
+
+### TC-BHP-16：回归 - 收起态透明文案不遮挡页面 hover / click
+
+**操作步骤**：
+1. 使用当前源码构建的二进制、临时数据目录和非正式端口启动 Bifrost，禁止修改系统代理：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-human-badge-overflow \
+     BIFROST_DISABLE_TRAY=1 \
+     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+     target/release/bifrost start -p 18896 --unsafe-ssl --no-system-proxy --enable-badge-injection
+   ```
+2. 启动测试页面服务：
+   ```bash
+   python3 -m http.server 18897 --bind 127.0.0.1 --directory e2e-tests/test_data/badge_injection
+   ```
+3. 通过代理取得真实注入页，再使用 Chrome 打开该页面：
+   ```bash
+   NO_PROXY='' no_proxy='' curl -sS -x http://127.0.0.1:18896 \
+     http://127.0.0.1:18897/index.html \
+     -o e2e-tests/test_data/badge_injection/proxied.html
+   ```
+   Chrome 打开 `http://127.0.0.1:18897/proxied.html`。
+4. 不触碰左下角 30px Badge 圆点，将鼠标移动到其右侧的 `Page action behind collapsed badge label` 按钮；检查按钮 `data-hovered`，点击一次并检查 `data-clicks`；移开后确认 `data-hovered` 恢复为 `false`。
+5. 将鼠标移到 Badge 圆点本体，等待宽度动画完成；检查 `Bifrost proxy is working` 文案与上方面板。
+6. 将鼠标移开，等待 Badge 收回；再次把鼠标移到按钮并点击，确认页面交互仍可命中。
+
+**预期结果**：
+- Badge 收起时计算样式为 `overflow: hidden`，实际边界为 30px × 30px。
+- 鼠标位于圆点右侧、原透明 `.__bb_txt` 占位区域时，按钮收到 hover：`data-hovered="true"`；点击后 `data-clicks` 递增，Badge 不展开且不隐藏。
+- 鼠标进入 30px 圆点本体后 Badge 才展开到 220px，`Bifrost proxy is working` 文案可见，上方规则面板正常出现。
+- 移出后 Badge 正常收回，按钮可继续收到 hover / click；修复不破坏可见 Badge 的展开与面板交互。
+- Share 环境红点定位在圆点裁剪边界内，不因 `overflow: hidden` 消失。
+
+**回归目的**：覆盖透明 `.__bb_txt` 溢出到 30px 圆点之外并参与 hit testing，导致不可见区域消费 hover / click、遮挡页面内容的问题。
+
+## TC-BHP-16 执行记录
+
+| 日期 | 执行范围 | 实际结果 | 结论 |
+| --- | --- | --- | --- |
+| 2026-07-15 | 使用当前 `target/release/bifrost`、隔离数据目录、18896 代理端口和 18897 本地页面服务生成真实注入页；在 Chrome 中分别移动到透明文案原覆盖区、点击背后按钮、hover 30px Badge 本体、移出收回后再次点击 | 收起态 Badge 边界为 30×30，计算样式 `overflow: hidden`；按钮中心 `elementFromPoint` 为 `badge-hit-target`，hover 后 `data-hovered=true`、Badge 仍为 30px 且面板未展开，两次点击令 `data-clicks` 从 0 增至 2，Badge 始终可见；进入圆点本体后 Badge 展开到 220px、文案 opacity 为 1、面板可见；移出后重新收回；Share 红点计算位置为 `right: 2px; top: 2px` | 通过 |
+
+---
+
+## TC-BHP-15 执行记录
+
+| 日期 | 执行范围 | 实际结果 | 结论 |
+| --- | --- | --- | --- |
+| 2026-07-14 | 使用 `target/debug/bifrost`、临时数据目录、18894 代理端口和未监听的 18895 上游端口执行 HTTPS `host://` 连接失败；真实响应保存为 `/tmp/bifrost-error-page.html`，并用 Chrome 打开、hover Badge、展开 Merged Rules、点击 Copy；随后通过 Performance API 关闭 Badge 并复请求同一路径 | 502 响应为 `text/html; charset=utf-8`，保留完整诊断文本；Chrome 左下角显示 Badge，hover 面板显示 `Default` 与 `badge-error-page-human`，规则链接指向 18894，Merged Rules 可展开，Copy 后剪贴板包含 `badge-error-page.test host://127.0.0.1:18895` 且按钮显示 `Copied`；关闭开关后响应恢复 `text/plain; charset=utf-8`，Badge/面板标记均不存在。当前系统亮色主题真实截图可读；暗色契约由错误页 `color-scheme: light dark` 与复用 Badge 的 `prefers-color-scheme: dark` 样式单元断言覆盖 | 通过 |
+| 2026-07-14 | 美化 UI 与内容协商追加复测：用当前源码重新构建二进制，在相同隔离端口生成真实 HTTP/HTTPS 502；分别发送浏览器导航风格 `Accept` 与通用 `*/*`，检查响应状态、DOM/CSS、引导与操作入口，再关闭 Badge 复请求；尝试用 Chrome 打开本机测试页 | 浏览器风格 `Accept` 返回 502 HTML，包含居中卡片、错误摘要、Status/Host/Time/Request URL、三步引导、Rules/重试入口、窄屏与深色样式、Badge/面板；`*/*` 返回原始纯文本，无 Badge；关闭 Badge 后即使接受 HTML 也保持纯文本。HTTP/HTTPS 自动 E2E 140/140，临时实例与文件已清理。Chrome 自动化访问本机测试 URL 被浏览器安全策略 `ERR_BLOCKED_BY_CLIENT` 明确阻断，因此本轮新增 UI 的真实 Chrome 视觉、窄屏和深色交互未完成；上一轮 Badge hover/Copy 的真实 Chrome 结果仍有效 | 部分通过（Chrome 环境阻塞） |
+| 2026-07-14 | 地址信息增强复测：用当前源码重建 CLI，通过隔离代理分别触发 HTTP 直连和 HTTPS `host://` 改写后的未监听端口错误；检查 HTML 明细与纯文本原始诊断 | HTTP/HTTPS HTML 均明确显示 `Request target`（原请求域名/IP + 端口）和 `Upstream target`（实际连接 IP + 端口）；HTTPS 用例验证请求域名与 `127.0.0.1:<port>` 不再混为 Host；纯文本 `Host` 同样包含实际上游端口。Badge 开关、浏览器 Accept、`*/*` 回退及既有交互回归共 144/144 通过，临时实例已清理 | 通过 |
+
+---
+
 ## 清理步骤
 
 ```bash
+# TC-BHP-15 的隔离实例在启动终端按 Ctrl+C 停止后执行：
+rm -rf ./.bifrost-human-error-page
 curl -X DELETE http://127.0.0.1:8800/_bifrost/api/rules/test-badge-rule -s
 curl -X DELETE http://127.0.0.1:18880/_bifrost/api/rules/badge-html-tag-escaping-regression -s
 curl -X PUT http://127.0.0.1:8800/_bifrost/api/config/performance \
   -H "Content-Type: application/json" -d '{"inject_bifrost_badge":true}' -s
 rm -f /tmp/bifrost-badge-escape-rule.json /tmp/bifrost-badge-escape.html /tmp/bifrost-badge-mislabeled-json.txt /tmp/bifrost-badge-group-cache.html /tmp/bifrost-badge-rapid-toggle-enabled.txt /tmp/bifrost-badge-group-sync-cache.html
+rm -f /tmp/bifrost-error-page.headers /tmp/bifrost-error-page.html
+rm -f e2e-tests/test_data/badge_injection/proxied.html
+rm -rf ./.bifrost-human-badge-overflow
 ```

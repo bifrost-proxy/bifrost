@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use base64::Engine;
 use bifrost_command::CanonicalQueryCommand;
 use bifrost_core::{BifrostError, Result};
+use bifrost_storage::DEFAULT_REMOTE_BASE_URL;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305};
 use ring::hkdf::{Salt, HKDF_SHA256};
 use ring::rand::SecureRandom;
@@ -347,7 +348,7 @@ impl Default for RemoteInvokeConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            relay_url: "https://bifrost.bytedance.net".to_string(),
+            relay_url: DEFAULT_REMOTE_BASE_URL.to_string(),
             sse_keepalive_ms: default_sse_keepalive_ms(),
             pair_code_ttl_secs: default_pair_code_ttl_secs(),
             max_active_calls: default_max_active_calls(),

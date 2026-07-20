@@ -1176,13 +1176,11 @@ fn feishu_setup_brand_label(brand: FeishuSetupBrand) -> &'static str {
 async fn request_feishu_app_registration(
     brand: FeishuSetupBrand,
 ) -> Result<FeishuAppRegistrationStart, String> {
-    let client = bifrost_core::outbound_reqwest_client_builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(feishu_setup_reqwest_error)?;
+    let client = bifrost_core::outbound_reqwest_client().map_err(feishu_setup_reqwest_error)?;
     let endpoint = format!("{}/oauth/v1/app/registration", brand.accounts_base());
     let response = client
         .post(endpoint)
+        .timeout(std::time::Duration::from_secs(20))
         .form(&[
             ("action", "begin"),
             ("archetype", "PersonalAgent"),
@@ -1226,13 +1224,11 @@ async fn poll_feishu_app_registration_once(
     brand: FeishuSetupBrand,
     device_code: &str,
 ) -> Result<FeishuAppRegistrationPoll, String> {
-    let client = bifrost_core::outbound_reqwest_client_builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(feishu_setup_reqwest_error)?;
+    let client = bifrost_core::outbound_reqwest_client().map_err(feishu_setup_reqwest_error)?;
     let endpoint = format!("{}/oauth/v1/app/registration", brand.accounts_base());
     let response = client
         .post(endpoint)
+        .timeout(std::time::Duration::from_secs(20))
         .form(&[("action", "poll"), ("device_code", device_code)])
         .send()
         .await

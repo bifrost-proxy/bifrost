@@ -1,4 +1,5 @@
 import { test, expect, type Route } from "@playwright/test";
+import { getDefaultRemoteBaseUrl } from "../../src/api/sync";
 import {
   apiBase,
   backendPort,
@@ -9,6 +10,8 @@ import {
   waitForToast,
   uniqueName,
 } from "./helpers/admin-helpers";
+
+const DEFAULT_REMOTE_BASE_URL = getDefaultRemoteBaseUrl();
 
 test.describe.configure({ mode: "serial" });
 
@@ -376,7 +379,7 @@ test("Settings 性能配置在第二个页面主动刷新后可见", async ({
   }
 });
 
-test("Network 超级性能模式浮层可跳转并高亮 Performance 开关", async ({
+test("Network 超级性能模式覆盖整个工作区并可跳转高亮 Performance 开关", async ({
   page,
   request,
 }) => {
@@ -391,10 +394,81 @@ test("Network 超级性能模式浮层可跳转并高亮 Performance 开关", as
       data: { super_performance_mode: true },
     });
 
-    await openPage(page, "traffic");
+    let releasePerformanceRequest!: () => void;
+    const performanceRequestGate = new Promise<void>((resolve) => {
+      releasePerformanceRequest = resolve;
+    });
+    await page.route("**/_bifrost/api/config/performance", async (route) => {
+      await performanceRequestGate;
+      await route.continue();
+    });
+
+    const navigation = openPage(page, "traffic");
+    const loading = page.getByTestId("traffic-performance-loading");
     const overlay = page.getByTestId("traffic-super-performance-overlay");
+    await expect(loading).toBeVisible();
+    await expect(loading).toContainText("Loading Network...");
+    await expect(overlay).toHaveCount(0);
+    releasePerformanceRequest();
+    await navigation;
+    await expect(loading).toHaveCount(0);
+    const trafficPage = page.getByTestId("traffic-page");
+    const detailPane = page.getByTestId("traffic-detail-pane");
+    const trafficTable = page.getByTestId("traffic-table");
+    const filterSearch = page.getByPlaceholder("Search filters...");
+    const toolbarControl = page.getByTestId("toolbar-clear-all");
+    const globalMenuControl = page.getByTestId("theme-toggle");
     await expect(overlay).toBeVisible();
     await expect(overlay).toContainText("Super performance mode is enabled");
+    await expect(overlay.locator(".ant-alert")).toHaveCount(0);
+
+    const [overlayBox, pageBox, detailBox, tableBox, filterBox, toolbarBox, menuBox] =
+      await Promise.all([
+      overlay.boundingBox(),
+      trafficPage.boundingBox(),
+      detailPane.boundingBox(),
+      trafficTable.boundingBox(),
+      filterSearch.boundingBox(),
+      toolbarControl.boundingBox(),
+      globalMenuControl.boundingBox(),
+    ]);
+    expect(overlayBox).not.toBeNull();
+    expect(pageBox).not.toBeNull();
+    expect(detailBox).not.toBeNull();
+    expect(tableBox).not.toBeNull();
+    expect(filterBox).not.toBeNull();
+    expect(toolbarBox).not.toBeNull();
+    expect(menuBox).not.toBeNull();
+    expect(Math.abs(overlayBox!.x - pageBox!.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(overlayBox!.y - pageBox!.y)).toBeLessThanOrEqual(1);
+    expect(Math.abs(overlayBox!.width - pageBox!.width)).toBeLessThanOrEqual(1);
+    expect(Math.abs(overlayBox!.height - pageBox!.height)).toBeLessThanOrEqual(1);
+
+    for (const coveredBox of [toolbarBox!, filterBox!, tableBox!, detailBox!]) {
+      expect(coveredBox.x).toBeGreaterThanOrEqual(overlayBox!.x);
+      expect(coveredBox.y).toBeGreaterThanOrEqual(overlayBox!.y);
+      expect(coveredBox.x + coveredBox.width).toBeLessThanOrEqual(
+        overlayBox!.x + overlayBox!.width,
+      );
+      expect(coveredBox.y + coveredBox.height).toBeLessThanOrEqual(
+        overlayBox!.y + overlayBox!.height,
+      );
+    }
+    expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(overlayBox!.x);
+
+    const lightColors = await overlay.evaluate((element) => {
+      const style = window.getComputedStyle(element);
+      return { background: style.backgroundColor, color: style.color };
+    });
+    expect(lightColors.background).not.toBe("rgb(255, 251, 230)");
+
+    await page.getByTestId("theme-toggle").click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    const darkColors = await overlay.evaluate((element) => {
+      const style = window.getComputedStyle(element);
+      return { background: style.backgroundColor, color: style.color };
+    });
+    expect(darkColors.background).not.toBe(lightColors.background);
 
     await page.getByTestId("traffic-super-performance-disable-button").click();
     await expect(page).toHaveURL(
@@ -997,7 +1071,7 @@ test("Settings Sync 状态信息支持 connected、syncing 与 unreachable", asy
       await request.put(`${apiBase}/sync/config`, {
         data: {
           enabled: false,
-          remote_base_url: "https://bifrost.bytedance.net",
+          remote_base_url: DEFAULT_REMOTE_BASE_URL,
         },
       });
     } catch {
@@ -1123,7 +1197,7 @@ test("Settings Sync 轮询刷新不会覆盖正在编辑的 Bifrost Cloud URL", 
       id: "bytedance_internal",
       name: "ByteDance Internal",
       description: "Internal trusted sync and Remote Invoke provider.",
-      remote_base_url: "https://bifrost.bytedance.net",
+      remote_base_url: DEFAULT_REMOTE_BASE_URL,
       connected: signedIn,
       enabled: true,
       reachable: true,
@@ -1253,7 +1327,7 @@ test("Settings Sync Bifrost Cloud URL 必须先通过基础校验再连接", asy
       body: JSON.stringify({
         enabled: true,
         auto_sync: true,
-        remote_base_url: "https://bifrost.bytedance.net",
+        remote_base_url: DEFAULT_REMOTE_BASE_URL,
         has_session: false,
         reachable: true,
         authorized: false,
@@ -1269,7 +1343,7 @@ test("Settings Sync Bifrost Cloud URL 必须先通过基础校验再连接", asy
             id: "bytedance_internal",
             name: "ByteDance Internal",
             description: "Internal trusted sync and Remote Invoke provider.",
-            remote_base_url: "https://bifrost.bytedance.net",
+            remote_base_url: DEFAULT_REMOTE_BASE_URL,
             connected: false,
             enabled: true,
             reachable: true,
@@ -1351,7 +1425,7 @@ test("Settings Sync 展示三类 Provider 卡片并支持首登弹窗关闭与�
   const statusBody = {
     enabled: true,
     auto_sync: true,
-    remote_base_url: "https://bifrost.bytedance.net",
+    remote_base_url: DEFAULT_REMOTE_BASE_URL,
     has_session: false,
     reachable: true,
     authorized: false,
@@ -1367,7 +1441,7 @@ test("Settings Sync 展示三类 Provider 卡片并支持首登弹窗关闭与�
         id: "bytedance_internal",
         name: "ByteDance Internal",
         description: "Internal trusted sync and Remote Invoke provider.",
-        remote_base_url: "https://bifrost.bytedance.net",
+        remote_base_url: DEFAULT_REMOTE_BASE_URL,
         connected: false,
         enabled: true,
         reachable: true,
@@ -1457,7 +1531,7 @@ test("Settings Sync GitHub Gist 支持 token 登录", async ({ page }) => {
   const baseStatus = {
     enabled: true,
     auto_sync: true,
-    remote_base_url: "https://bifrost.bytedance.net",
+    remote_base_url: DEFAULT_REMOTE_BASE_URL,
     has_session: false,
     reachable: true,
     authorized: false,
@@ -1473,7 +1547,7 @@ test("Settings Sync GitHub Gist 支持 token 登录", async ({ page }) => {
         id: "bytedance_internal",
         name: "ByteDance Internal",
         description: "Internal trusted sync and Remote Invoke provider.",
-        remote_base_url: "https://bifrost.bytedance.net",
+        remote_base_url: DEFAULT_REMOTE_BASE_URL,
         connected: false,
         enabled: true,
         reachable: true,
@@ -1582,7 +1656,7 @@ test("Settings Sync GitHub Gist token 失效时显示卡片级重连提示", asy
       body: JSON.stringify({
         enabled: true,
         auto_sync: true,
-        remote_base_url: "https://bifrost.bytedance.net",
+        remote_base_url: DEFAULT_REMOTE_BASE_URL,
         has_session: true,
         reachable: true,
         authorized: false,
@@ -1598,7 +1672,7 @@ test("Settings Sync GitHub Gist token 失效时显示卡片级重连提示", asy
             id: "bytedance_internal",
             name: "ByteDance Internal",
             description: "Internal trusted sync and Remote Invoke provider.",
-            remote_base_url: "https://bifrost.bytedance.net",
+            remote_base_url: DEFAULT_REMOTE_BASE_URL,
             connected: false,
             enabled: true,
             reachable: true,
@@ -1684,7 +1758,7 @@ test("Settings Sync provider 退出登录只影响当前卡片", async ({ page }
       id: "bytedance_internal",
       name: "ByteDance Internal",
       description: "Internal trusted sync and Remote Invoke provider.",
-      remote_base_url: "https://bifrost.bytedance.net",
+      remote_base_url: DEFAULT_REMOTE_BASE_URL,
       connected: true,
       enabled: true,
       reachable: true,
@@ -1750,7 +1824,7 @@ test("Settings Sync provider 退出登录只影响当前卡片", async ({ page }
   const statusBody = () => ({
     enabled: true,
     auto_sync: true,
-    remote_base_url: "https://bifrost.bytedance.net",
+    remote_base_url: DEFAULT_REMOTE_BASE_URL,
     has_session: providers.some((provider) => provider.connected),
     reachable: true,
     authorized: providers.some((provider) => provider.connected),
@@ -1828,7 +1902,7 @@ test("Settings Sync Remote Invoke 支持 ByteDance、Bifrost Cloud 与双通道�
       body: JSON.stringify({
         enabled: true,
         auto_sync: true,
-        remote_base_url: "https://bifrost.bytedance.net",
+        remote_base_url: DEFAULT_REMOTE_BASE_URL,
         has_session: true,
         reachable: true,
         authorized: true,
@@ -1849,7 +1923,7 @@ test("Settings Sync Remote Invoke 支持 ByteDance、Bifrost Cloud 与双通道�
             id: "bytedance_internal",
             name: "ByteDance Internal",
             description: "Internal trusted sync and Remote Invoke provider.",
-            remote_base_url: "https://bifrost.bytedance.net",
+            remote_base_url: DEFAULT_REMOTE_BASE_URL,
             connected: true,
             enabled: true,
             reachable: true,
@@ -3411,7 +3485,7 @@ test("Settings Sync 支持登录、同步、更新覆盖与断网重连", async 
       await request.put(`${apiBase}/sync/config`, {
         data: {
           enabled: false,
-          remote_base_url: "https://bifrost.bytedance.net",
+          remote_base_url: DEFAULT_REMOTE_BASE_URL,
         },
       });
     } catch {

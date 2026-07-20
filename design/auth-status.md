@@ -174,7 +174,7 @@ bifrost traffic auth-status <ID> [--format human|json|json-pretty]
 human 示例：
 
 ```text
-host: bits.bytedance.net
+host: api.example.com
 jwt: present (user_id=12345, exp=2026-06-17T20:00:00Z, valid)
 cookie: present (exp=2026-06-18T00:00:00Z, valid)
 overall: valid for 1h23m

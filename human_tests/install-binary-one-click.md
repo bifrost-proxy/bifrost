@@ -740,6 +740,30 @@
 - 桌面安装失败只 warning，已安装且校验通过的 CLI 保留，并给出手动重试命令。
 - README、安装指南、设计文档、站点同步产物和 Release quick install 文案对平台边界的表述一致。
 
+### TC-IBOC-26 upgrade 新二进制校验可恢复 Linux ETXTBSY 瞬态碰撞
+
+操作步骤：
+
+1. 执行确定性单元回归：
+   ```bash
+   source ~/.zshrc
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib upgrade_command_spawn_ -- --nocapture
+   ```
+2. 连续执行原 CI 失败用例，确认版本不匹配后每次都恢复旧二进制：
+   ```bash
+   source ~/.zshrc
+   for run in {1..20}; do
+     SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib upgrade_target_version_mismatch_restores_previous_binary
+   done
+   ```
+
+预期结果：
+
+- Unix `ETXTBSY` 前两次失败、第三次成功时返回成功；持续 `ETXTBSY` 时恰好尝试 8 次后返回；总线性退避不超过 140ms。
+- 非 `ETXTBSY` 错误只尝试一次，不掩盖路径缺失、权限或配置错误。
+- 原 CI 失败用例连续 20 轮通过，每轮都确认目标版本不匹配并从 backup 恢复旧二进制。
+- GitHub Actions coverage job 继续执行 90% coverage gate，不再因并行 lib/bin 测试启动刚写入的临时可执行文件而中断。
+
 ## 清理步骤
 
 - 本用例只 source shell 函数、执行 dry-run 或使用 `mktemp -d` 临时数据目录，不产生持久化测试数据。
@@ -795,3 +819,4 @@
 | 2026-06-20 | TC-IBOC-22 | 按 TC-IBOC-22 的三条 `rg` 文档断言执行 | PASS：中文/英文 README 的脚本安装段落均包含 Bash 与 Windows PowerShell 入口，指定版本示例覆盖 PowerShell `-Version`，并说明 Windows installer 会写入 Windows User `Path` 以支持新 PowerShell/CMD 直接执行 `bifrost`。 |
 | 2026-06-20 | TC-IBOC-23 | Parallels `Windows 11` VM：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File e2e-tests\tests\test_install_binary_windows_adaptive_download.ps1`；`install-binary.ps1 -Version v0.0.110`；raw branch `Invoke-RestMethod https://raw.githubusercontent.com/bifrost-proxy/bifrost/codex/windows-installer-path/install-binary.ps1` 后以 `eden_studio` 当前用户执行 `-Version v0.0.110`；验证 `%LOCALAPPDATA%\bifrost\bin\bifrost.exe --version`、`(Get-Command bifrost).Source`、`bifrost --version` | PASS：Windows PowerShell 5.1 回归 31/31 通过；真实安装输出 `Architecture: aarch64`、`Target: aarch64-pc-windows-msvc`，成功下载 release zip 与 checksums、完成 checksum verified、extracting、installation completed；raw branch 当前用户验证输出 `edenstudio175f\eden_studio`，安装目录 `C:\Users\eden_studio\AppData\Local\bifrost\bin\bifrost.exe` 输出 `bifrost 0.0.110`；当前 PowerShell 会话 `Get-Command bifrost` 指向同一安装目录并输出 `bifrost 0.0.110`。 |
 | 2026-07-10 | TC-IBOC-25 | `bash e2e-tests/tests/test_install_binary_post_install.sh`；`bash install-binary.sh --help | rg ...`；PowerShell 源码门禁与中英文文档 `rg` 断言 | PASS：安装编排回归 33/33 通过，覆盖 macOS / Windows Git Bash 默认同版本 App 安装、`BIFROST_APP_SKIP_RESTART=1`、既有 post-install dry-run 不产生桌面变更、桌面安装失败保留 CLI 并输出重试命令、Linux CLI-only、参数与环境变量 opt-out；Bash help、PowerShell `-NoDesktop`/环境变量/不自动拉起 App 源码门禁，以及中英文 README、安装指南、设计文档和 Release quick-install 文案断言全部命中。当前 Mac 无 `pwsh`，PowerShell 5.1 脚本执行由 Windows E2E Shell CI 补充验证。 |
+| 2026-07-20 | TC-IBOC-26 | `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib upgrade_command_spawn_ -- --nocapture`；连续 20 轮 `upgrade_target_version_mismatch_restores_previous_binary` | PASS：3 个确定性回归覆盖 `ETXTBSY` 第三次恢复、非瞬态错误不重试、持续占用恰好 8 次停止；原 CI 失败用例连续 20/20 轮通过，每轮完成版本不匹配诊断和旧二进制恢复。 |

@@ -1489,7 +1489,7 @@ export function eventToProcessStep(event: Record<string, unknown>): ProcessStep 
   const eventType = typeof event.eventType === "string" ? event.eventType : "";
   if (eventType === "status") {
     const content = stringFrom(event.content);
-    if (!isReadableProgressStatus(content)) {
+    if (!content || !isReadableProgressStatus(content)) {
       return null;
     }
     const readableContent = content ?? "";
@@ -1503,7 +1503,7 @@ export function eventToProcessStep(event: Record<string, unknown>): ProcessStep 
   }
   if (eventType === "assistant_final" || eventType === "assistant_delta") {
     const content = stringFrom(event.content);
-    if (!content) {
+    if (!content || !isReadableProgressStatus(content)) {
       return null;
     }
     return {
@@ -2075,19 +2075,25 @@ function ProcessCommandGroupItem({
   );
 }
 
-function isReadableProgressStatus(value?: string) {
+export function isReadableProgressStatus(value?: string) {
   const content = value?.trim();
   if (!content) {
     return false;
   }
   const lower = content.toLowerCase();
+  const machineStatus = lower
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
   if (
     lower === "running" ||
     lower === "turn started" ||
     lower === "turn completed" ||
     lower === "run started" ||
     lower === "run completed" ||
-    lower.startsWith("model rerouted:")
+    lower.startsWith("model rerouted:") ||
+    machineStatus === "usage_updated" ||
+    (machineStatus.startsWith("token_usage") && machineStatus.endsWith("updated")) ||
+    (machineStatus.startsWith("rate_limit") && machineStatus.endsWith("usage_updated"))
   ) {
     return false;
   }

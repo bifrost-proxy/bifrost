@@ -113,6 +113,8 @@ pub(crate) struct AsrDailyAgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_report_sync: Option<AsrDailyAgentReportSyncResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_original_sync: Option<AsrDailyAgentReportSyncResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_status: Option<String>,
@@ -143,6 +145,7 @@ impl Default for AsrDailyAgentConfig {
             terminology: None,
             report_sync_dir: None,
             last_report_sync: None,
+            last_original_sync: None,
             last_run_at_ms: None,
             last_status: None,
             last_error: None,
@@ -328,6 +331,7 @@ fn daily_agent_config_from_item(item: &AsrDailyAgentItem) -> AsrDailyAgentConfig
         terminology: None,
         report_sync_dir: item.report_sync_dir.clone(),
         last_report_sync: item.last_report_sync.clone(),
+        last_original_sync: None,
         last_run_at_ms: item.last_run_at_ms,
         last_status: item.last_status.clone(),
         last_error: item.last_error.clone(),
@@ -471,6 +475,7 @@ fn normalize_daily_agent_config(config: &AsrDailyAgentConfig) -> AsrDailyAgentCo
     normalized.enabled = enabled;
     normalized.agents = agents;
     normalized.terminology = normalize_daily_agent_terminology(config.terminology.clone());
+    normalized.last_original_sync = config.last_original_sync.clone();
     normalized
 }
 

@@ -783,12 +783,38 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 - 普通首页正文出现“欢迎回来”，但没有账号选择文案且 composer 已可用时，不得继续误判为账号选择页。
 - 运行阶段不再因弹窗遮挡而报 `send button not actionable: not_found`。
 
-## 真实执行记录
+### TC-CWA-34 执行记录
 
 - 2026-07-15：补充执行日报研究真实长任务回归。`2026-07-09` 四个研究问题在 Project“日报研究”中以 Chat + Pro 启动独立会话；首个信贷问题先返回“我会先……”短 planning 段，随后页面继续处于 busy 并最终生成 31808 字节完整结果。通过同 conversation 的 Chat Gateway `get` 恢复最终回答，页面和产物均确认五个契约标题完整且有正文。四个 conversation id 分别为 `6a565a7b-9cac-83ea-8a50-e5f4bf1abe4a`、`6a565857-eeb4-83ea-820e-8431fcb24b27`、`6a56588d-9630-83ea-96f9-a7831578fbe7`、`6a5658b7-0384-83ea-b2e0-89f8c07687e3`。回归同时确认：新建下一题不能关闭仍在生成的前一题 tab；短 planning 回复需要额外等待；恢复 DOM 时只能读取精确 conversation URL；研究输出必须逐段满足独立标题、原问题和非空正文契约，不能把 Prompt 脚手架回显误判为完成。
 - 2026-07-12：使用真实 `2026-06-26` 日报做流水线演示时补充执行 TC-CWA-34 边界回归。隔离 Chrome 页面已无账号选择器、composer 可见可编辑，但首页正文仍包含普通“欢迎回来”，原整页 marker 判断导致登录请求持续等待。修复为“欢迎回来仅在可见 dialog 中算账号选择信号；整页正文只识别选择/切换账号文案”，并新增源码级回归测试。
 - 2026-07-12：执行 TC-CWA-34 通过。隔离服务首次登录在 `accounts/check` 已证明账号存在时提前返回 `logged_in`，随后真实 Daily Agent diagnostic screenshot 显示“欢迎回来 / 选择一个帐户以继续”弹窗遮挡 composer，run 失败为 `send button not actionable: not_found`，下游依赖正确跳过。修复后登录循环同时要求 composer 可见、可编辑且账号选择弹窗消失；`login_page_readiness_rejects_account_chooser_and_disabled_composer` 单测通过。使用同一隔离 profile 重新执行 `Open Login Browser` 返回 `loggedIn=true / identityComplete=true / accountCheckOk=true`，随后 ChatGPT Web 真实 `daily_report -> research_agent` 两段运行均为 `success`，并产出同日上游报告和研究报告。
 
+### TC-CWA-35：回归 - stream_handoff 按钮瞬时窗口不得把临时 assistant shell 当成最终结果
+
+**前置条件**：已登录的 `chatgpt_web` runner 可用；使用 headed 模式和共享 browser profile；使用会触发联网检索、`stream_handoff` 和多阶段生成的 prompt。
+
+**操作步骤**：
+1. 用当前源码构建 `bifrost-cli`，在隔离端口启动 Bifrost，并将 runner 的 `browser.profileDir` 显式指向已登录的共享 profile，避免影响正式服务上正在执行的其他任务。
+2. 执行会触发联网检索的真实 Runner，例如：
+   ```bash
+   bifrost -p <isolated-port> agent run --runner gpt --new --json '请联网检索最新的两条 AI 行业新闻；先完成检索，最终一次性输出完整结果。'
+   ```
+3. 通过共享浏览器的 DevTools target 连续观察 DOM：记录 `data-testid="stop-button"` / Stop-Cancel aria-label、`section[data-turn="assistant"]`、`data-turn-id="request-WEB:..."` 以及 `[data-message-author-role="assistant"][data-message-id]` 的出现顺序。
+4. 如果 `stream_handoff` 后 stop button 短暂消失又重新出现，确认 Runner 仍保持 running；正式 assistant message 出现但 stop button 仍可见时，再次确认 Runner 仍保持 running。
+5. 等待 run 完成，检查 `result.json`、`last_message.md`、`conversation_final.json` 和日志中的 DOM 终态记录；执行 `bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh`。
+
+**预期结果**：
+- stop button 可见仍是“正在生成”的一阶硬信号，但单次采样未看到 stop button 不再是充分的完成条件。
+- 最后一个正式 user message 之后尚未出现带 `data-message-id` 的正式 assistant message 时，`request-WEB:*` 或其他 role-less text-only assistant section 只能返回 `Streaming(assistant_message_not_committed)`，不得返回 planning/search 文案。
+- 正式 assistant message 已出现但 stop button 仍可见时，仍继续等待；不得因为正文已经很长就提前返回。
+- stop button 消失后，按最终文本、message/turn id、图片和 artifacts 的内容签名进行稳定确认；同长度替换也必须重置稳定窗口。
+- 纯图片的 role-less assistant section 继续使用生成图片完成规则，不被 text-only 临时 shell 门禁误伤。
+- `result.json.response` 和 `last_message.md` 必须是正式 assistant 的完整结果，不是“正在搜索…”或“我先按…筛选…”这类过渡内容。
+
+## 真实执行记录
+
+- 2026-07-15：按用户要求追加执行 TC-CWA-34 正式 9900 服务验证。先用任务 API 将正在运行的 ASR 任务 `735775510b384fff8903d9c6fc54f1a3` 安全暂停，安装当前 `target/debug/bifrost` 到 `~/.local/bin/bifrost`（安装前后 SHA-256 与构建产物一致），重启正式服务为 PID `61485` 后恢复 ASR；恢复后进度重新进入 `running`，未把后台任务遗留为 paused。随后在正式端口执行 runner `gpt` 新会话，prompt 为“晚上好，给我整理下今日要闻”，并要求联网检索、按国内/国际/科技 AI/财经四板块输出完整结果。正式 run `1784046993864-e65176e7-a1a2-4cf9-9359-fe5b60c88b98`、conversation `6a56659f-9ad4-83ec-a437-39fdc87efe01` 命中 `eventTypes=["patch","resume_conversation_token","stream_handoff","browser_ui"]`；运行约 31 秒时仍保持 running，没有复现旧版的 planning 提前返回。最终 `durationMs=187949`、`status=succeeded`，`conversation_final.json.source=dom_fallback_outcome`、正式 `turnId=3f7270ef-4719-4313-a6d0-c02b356d00c6`，`result.response` 为 13277 个字符 / 19731 字节，`last_message.md` 同为 19731 字节并包含“国内、国际、科技／AI、财经、今日最重要的三条主线”全部章节。
+- 2026-07-15：执行 TC-CWA-34 通过。先检查用户提供的真实失败 run `1784043878390-67b0e366-4edc-476c-b78f-ca52647564e6`：`durationMs=31673`，`result.response` 只有“我先按…四个板块筛选…”的 52 个字符，`conversation_final.json.turnId=request-6a558072-d5c0-83ec-950a-6dd96050b3e1-0`；但同一 conversation 的 WebSocket frame 仍继续到 23:47:29，最终页面出现带 `data-message-id=8e9d3c81-a8af-418e-b83e-3427a29b3548` 的 2919 字正式 assistant message。随后在正式 9900 服务复现了 `stream_handoff` 后 `request-WEB:*` 临时 assistant section 与 `data-testid=stop-button, aria-label=停止回答` 重新出现的时序，证明 selector 未失效，失效的是“单次无 stop 即完成”的充分条件。修复后构建当前源码，在隔离数据目录 `/tmp/bifrost-chatgpt-finality-live` 和端口 `19910` 启动服务，显式复用正式共享 browser profile，执行真实联网检索 run `1784045777481-3666c349-1ae6-4c43-a920-69b3e316670e`。该 run 的 `conversation_handoff.json.eventTypes=["patch","resume_conversation_token","stream_handoff","browser_ui"]`，持续 `122831ms` 后才成功返回；`conversation_final.json.source=dom_fallback_outcome`、`turnId=cb601a5b-553a-46cb-828b-c3c5bff2906a`，`result.response` 为 4985 个字符，`last_message.md` 为 6883 字节，完整包含两条新闻的事件、来源、进展和影响，没有在临时搜索/planning section 阶段提前结束。为不打断正式 9900 服务上正在执行的 ASR 任务，本次未重启正式服务。
 - 2026-07-01：补充执行 TC-CWA-33 真实失败样本回归。全量补跑 Daily Agent 矩阵时，`2026-06-15 daily_report` run `1782928234093-1e821cdd-0c0a-43fa-9f1c-6c477670e1b4` 失败于 `send button not actionable after native clipboard paste upload wait`，diagnostic screenshot `/var/folders/xw/55z6437s54d6pgr93j2ztz2h0000gn/T/bifrost-diagnostic-screenshots/diag-1782928476064.png` 显示上一条 assistant 长回复仍在生成、右下角 stop button 可见，同时 composer 已残留 `上一条回复不是最终日报...` retry prompt。修复后 send 层在 composer 注入前和 send button 不可点击后都以 stop button 为硬 busy gate；stop 可见时清空 composer，等待 stop button 消失后继续同一次 send 流程；只有等待超时才返回不可整轮重试的 `conversation_busy`。代码级哨兵新增 `diagnostic_has_visible_stop_button_is_the_busy_gate`。
 - 2026-07-01：补充执行 TC-CWA-33 / Daily Agent 全量真实矩阵。使用默认数据目录任务 `895233666de34b2399fa5f10e60c07e8`，串行强制运行 17 个 Daily Docs 的 `daily_report` 与 `tomorrow_todo` 共 34 个 agent 格子。执行中 `2026-06-11 tomorrow_todo` 首次命中 stop button 可见的 retry busy 场景；修复并安装后重跑通过。最终 `daily_agent_processed.json` 包含 34 条 `<agent_id>:<date>` 记录，文件系统校验 34/34 个输出标题匹配：`daily_report` 为 `# YYYY-MM-DD 日报`，`tomorrow_todo` 为源日期 + 1 天的 `# 明日 To Do List - YYYY-MM-DD`。最后一个真实 run 为 `2026-06-30 tomorrow_todo`，run id `1782941957290-a3ce6175-395f-4d28-8471-96c81ff0bf28`，落盘标题 `# 明日 To Do List - 2026-07-01`。
 - 2026-07-01：补充执行 TC-CWA-33 的跨 worker wait 恢复回归。继续补跑 Daily Agent 矩阵时，`2026-06-15 daily_report` run `1782930304728-f5bf6aa0-9c35-4468-8979-bbdd18a20286` 的 send 子 run `1782930304769-d4466928-3e67-42d2-a373-10a9fe6cdfbf` 返回 138 字短 planning 段并携带 `conversationId=6a455b91-9a9c-83ec-a464-ae06ce7a9a1f`；same-conversation wait 子 run `1782930351432-1b2379b6-cf07-4b02-aab7-b500dd585791` 只写入 `runtime_snapshot.json`、`prompt.md`、`auth_probe.json`，没有 `result.json` 或 `last_message.md`。手动检查 Edge DevTools `127.0.0.1:50672/json/list` 发现真实 tab 仍在 `https://chatgpt.com/c/6a455b91-9a9c-83ec-a464-ae06ce7a9a1f`，stop button 已消失，最新 assistant Markdown 约 12377 字且以 `2026-06-15 日报` 开头。确认根因不是继续等待不足，而是 `send` 与 `wait` 分属不同短生命周期 worker，`wait` 进程内的 `ConversationTab` 池为空。修复后 `wait` DOM fallback 会从共享浏览器 DevTools target 恢复既有 conversation tab 并重新注册，再提取最终 assistant；代码级执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin chatgpt_web --lib -- --nocapture` 通过 248 项，`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_chatgpt_web --lib -- --nocapture` 通过 8 项。

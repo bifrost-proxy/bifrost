@@ -24,7 +24,9 @@ use nix::sys::signal::{killpg, Signal};
 #[cfg(unix)]
 use nix::unistd::Pid as NixPid;
 
-use crate::asr_runtime::{now_ms, read_service_state, text_output_dir, AsrServiceState};
+use crate::asr_runtime::{
+    fixed_asr_home, now_ms, read_service_state, text_output_dir, AsrServiceState,
+};
 use crate::handlers::asr::{
     resolve_managed_target, start_managed_service, stop_managed_service_for_target,
     target_from_query, AsrTarget,
@@ -73,6 +75,7 @@ include!("asr_jobs/voiceprint.rs");
 include!("asr_jobs/external_import.rs");
 include!("asr_jobs/api.rs");
 include!("asr_jobs/retry.rs");
+include!("asr_jobs/moss_joint.rs");
 include!("asr_jobs/runner.rs");
 include!("asr_jobs/chunk_runtime.rs");
 include!("asr_jobs/memory_bisect.rs");

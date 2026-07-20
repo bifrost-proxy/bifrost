@@ -453,15 +453,14 @@ mod tests {
 
     #[test]
     fn test_find_process_on_port_returns_none_for_free_port() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-
-        let result = find_process_on_port(port);
+        // Port zero asks the OS to allocate a real ephemeral port when binding;
+        // it is never itself a listening port. Avoid releasing an ephemeral
+        // port and racing another parallel test or process that can immediately
+        // claim the same number before lsof/netstat runs.
+        let result = find_process_on_port(0);
         assert!(
             result.is_none(),
-            "should not find any process on a freed port {}",
-            port
+            "should not find any process listening on reserved port zero"
         );
     }
 

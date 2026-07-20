@@ -58,6 +58,11 @@ button {
   background: #5a5a5a;
 }
 
+.app-sidebar-nav-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
 mark {
   background-color: #ffe58f;
   color: inherit;
@@ -515,6 +520,54 @@ img[data-agent-chat-image-id] {
   min-height: 90px;
   border: 1px solid var(--ant-color-border-secondary, #f0f0f0);
   background: var(--ant-color-fill-quaternary, rgba(0, 0, 0, 0.02));
+}
+
+.agent-chat-markdown .agent-chat-citation {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  margin: 0 2px;
+  padding: 1px 6px;
+  border: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+  border-radius: 999px;
+  background: var(--ant-color-fill-quaternary, rgba(0, 0, 0, 0.02));
+  font-size: 12px;
+  line-height: 20px;
+  text-decoration: none;
+  vertical-align: middle;
+}
+
+.agent-chat-markdown .agent-chat-citation:hover,
+.agent-chat-markdown .agent-chat-citation:focus-visible {
+  border-color: var(--ant-color-primary-border, #91caff);
+  background: var(--ant-color-primary-bg, #e6f4ff);
+}
+
+.agent-chat-markdown .agent-chat-citation-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.agent-chat-markdown .agent-chat-citation-source + .agent-chat-citation-source {
+  padding-left: 5px;
+  border-left: 1px solid var(--ant-color-border-secondary, #f0f0f0);
+}
+
+.agent-chat-markdown .agent-chat-citation-icon {
+  display: inline-block;
+  width: 14px;
+  min-width: 14px;
+  height: 14px;
+  min-height: 14px;
+  margin: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  object-fit: contain;
 }
 
 .agent-chat-image-lightbox {

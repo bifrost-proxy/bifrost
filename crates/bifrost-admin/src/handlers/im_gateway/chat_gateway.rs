@@ -2500,7 +2500,11 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
         }
         EventType::Status => {
             let content = event.content.trim();
-            if !content.is_empty() && content != "turn started" && content != "turn completed" {
+            if !content.is_empty()
+                && content != "turn started"
+                && content != "turn completed"
+                && !crate::im_gateway::progress_card::is_token_usage_machine_status(content)
+            {
                 let message = if let Some(title) = event
                     .title
                     .as_deref()
@@ -3137,6 +3141,25 @@ mod tests {
                 raw: serde_json::json!({"type":"item.completed"}),
             },
         );
+        for (title, content) in [
+            ("token_usage", "token usage updated"),
+            ("rate_limits", "usage updated"),
+        ] {
+            record_external_cli_progress_event_to_timeline(
+                &mut recorder,
+                session_key,
+                "web",
+                "traex",
+                "traex",
+                &crate::im_gateway::external_cli::ExternalCliProgressEvent {
+                    event_type:
+                        crate::im_gateway::external_cli::ExternalCliProgressEventType::Status,
+                    content: content.to_string(),
+                    title: Some(title.to_string()),
+                    raw: serde_json::json!({"type": title}),
+                },
+            );
+        }
         record_external_cli_progress_event_to_timeline(
             &mut recorder,
             session_key,
@@ -3180,6 +3203,16 @@ mod tests {
             event.event_type == bifrost_agent::persistence::event_types::ASSISTANT_DELTA
                 && event.content.get("message").and_then(|v| v.as_str())
                     == Some("status: model rerouted")
+        }));
+        assert!(!events.iter().any(|event| {
+            event.event_type == bifrost_agent::persistence::event_types::ASSISTANT_DELTA
+                && event
+                    .content
+                    .get("message")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|message| {
+                        message.contains("token_usage") || message.contains("rate_limits")
+                    })
         }));
         assert!(events.iter().any(|event| {
             event.event_type == bifrost_agent::persistence::event_types::ASSISTANT_DELTA

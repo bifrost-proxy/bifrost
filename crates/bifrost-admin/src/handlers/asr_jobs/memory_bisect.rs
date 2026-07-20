@@ -195,6 +195,7 @@ async fn transcribe_chunk_with_memory_hint(
     Ok(WholeFileTranscription {
         text: merged_text,
         segments: merged_segments,
+        structured: Default::default(),
     })
 }
 
@@ -265,6 +266,7 @@ fn transcribe_chunk_bisect_inner<'a>(
             return Ok(WholeFileTranscription {
                 text: String::new(),
                 segments: Vec::new(),
+                structured: Default::default(),
             });
         }
         let sub_rms = compute_wav_rms_energy(chunk_wav);
@@ -282,6 +284,7 @@ fn transcribe_chunk_bisect_inner<'a>(
             return Ok(WholeFileTranscription {
                 text: String::new(),
                 segments: Vec::new(),
+                structured: Default::default(),
             });
         }
 
@@ -417,6 +420,7 @@ fn transcribe_chunk_bisect_inner<'a>(
                 WholeFileTranscription {
                     text: String::new(),
                     segments: Vec::new(),
+                    structured: Default::default(),
                 }
             }
         };
@@ -452,6 +456,7 @@ fn transcribe_chunk_bisect_inner<'a>(
                 WholeFileTranscription {
                     text: String::new(),
                     segments: Vec::new(),
+                    structured: Default::default(),
                 }
             }
         };
@@ -503,6 +508,7 @@ fn transcribe_chunk_bisect_inner<'a>(
         Ok(WholeFileTranscription {
             text: merged_text,
             segments: merged_segments,
+            structured: Default::default(),
         })
     }) // Box::pin(async move { ... })
 }

@@ -1830,7 +1830,7 @@ test("AI Agent Chat restores JSONL history and continues with history path", asy
   );
 });
 
-test("AI Agent Chat loads full history detail without progressive truncation", async ({ page }) => {
+test("AI Agent Chat loads full history without restoring obsolete pagination controls", async ({ page }) => {
   const historyPath = "/tmp/full-history.jsonl";
   const historyUrls: string[] = [];
   await page.route(
@@ -1846,6 +1846,12 @@ test("AI Agent Chat loads full history detail without progressive truncation", a
         contentType: "application/json",
         body: JSON.stringify({
           events: [
+            {
+              timestamp: 0,
+              event_type: "session_start",
+              session_key: "full-history",
+              content: { runtime: "external_cli", adapter: "codex" },
+            },
             {
               timestamp: 1,
               event_type: "user_message",
@@ -1872,17 +1878,35 @@ test("AI Agent Chat loads full history detail without progressive truncation", a
             },
             {
               timestamp: 5,
+              event_type: "assistant_delta",
+              session_key: "full-history",
+              content: { message: "token_usage: token usage updated" },
+            },
+            {
+              timestamp: 6,
+              event_type: "assistant_delta",
+              session_key: "full-history",
+              content: { message: "rate_limits: usage updated" },
+            },
+            ...["你", "说", "得", "对", "。"].map((message, index) => ({
+              timestamp: 7 + index,
+              event_type: "assistant_delta",
+              session_key: "full-history",
+              content: { message },
+            })),
+            {
+              timestamp: 12,
               event_type: "assistant_message",
               session_key: "full-history",
               content: { message: "Newest answer" },
             },
           ],
-          count: 5,
-          total_count: 5,
+          count: 13,
+          total_count: 13,
           start_index: 0,
-          end_index: 5,
-          next_cursor: null,
-          has_more: false,
+          end_index: 13,
+          next_cursor: 2,
+          has_more: true,
         }),
       });
     },
@@ -1902,10 +1926,25 @@ test("AI Agent Chat loads full history detail without progressive truncation", a
   await expect(page.getByTestId("agent-chat-messages")).toContainText(
     "Newest answer",
   );
+  const completedTurnToggles = page.getByTestId("agent-chat-turn-collapse-toggle");
+  await expect(completedTurnToggles).toHaveCount(2);
+  await completedTurnToggles.nth(1).click();
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "你说得对。",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).not.toContainText(
+    "token_usage",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).not.toContainText(
+    "rate_limits",
+  );
   await expect(page.getByTestId("agent-chat-load-older")).toHaveCount(0);
-  expect(new URL(historyUrls[0]).searchParams.has("tail")).toBe(false);
-  expect(new URL(historyUrls[0]).searchParams.has("cursor")).toBe(false);
-  expect(new URL(historyUrls[0]).searchParams.has("limit")).toBe(false);
+  expect(historyUrls.length).toBeGreaterThan(0);
+  for (const historyUrl of historyUrls) {
+    expect(new URL(historyUrl).searchParams.has("tail")).toBe(false);
+    expect(new URL(historyUrl).searchParams.has("cursor")).toBe(false);
+    expect(new URL(historyUrl).searchParams.has("limit")).toBe(false);
+  }
 });
 
 test("AI Agent Chat keeps running history token HUD synced with live status", async ({
@@ -4097,6 +4136,109 @@ test("AI Agent Chat uses detail runner metadata instead of source for selected r
   await expect(
     page.getByRole("button", { name: /Tr Runner: 你好/ }),
   ).toBeVisible();
+});
+
+test("AI Agent Chat renders GPT Web source favicons as compact citations", async ({ page }) => {
+  const reutersIcon =
+    "https://www.google.com/s2/favicons?domain=https://www.reuters.com&sz=128";
+  const apIcon =
+    "https://www.google.com/s2/favicons?domain=https://apnews.com&sz=128";
+  const articleUrl = "https://www.reuters.com/world/china/example?utm_source=chatgpt.com";
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessions: [
+          {
+            session_key: "gpt-web-citation-session",
+            status: "ended",
+            title: "GPT Web citations",
+            source: "admin-api",
+            runner_type: "chatgpt_web",
+            runner_id: "web",
+          },
+        ],
+      }),
+    });
+  });
+  await page.route(
+    "**/_bifrost/api/im-gateway/agent/sessions/gpt-web-citation-session",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          session_key: "gpt-web-citation-session",
+          title: "GPT Web citations",
+          source: "admin-api",
+          runner_type: "chatgpt_web",
+          runner_id: "web",
+          messages: [
+            { role: "user", content: "今日国内外要闻。" },
+            {
+              role: "assistant",
+              content: [
+                "中国经济仍呈现生产和出口较强、消费和地产较弱的分化格局。" +
+                  `[![](${reutersIcon})Reuters+2![](${apIcon})AP News+2](${articleUrl})`,
+                "![Generated chart](https://example.test/chart.png)",
+              ].join("\n\n"),
+            },
+          ],
+        }),
+      });
+    },
+  );
+  await page.route("https://www.google.com/s2/favicons?**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "image/png",
+      body: Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lZ0fWQAAAABJRU5ErkJggg==",
+        "base64",
+      ),
+    });
+  });
+  await page.route("https://example.test/chart.png", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "image/png",
+      body: Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVR42mP8z8BQz0AEYBxVSFIBAC03A/0fR0gCAAAAAElFTkSuQmCC",
+        "base64",
+      ),
+    });
+  });
+
+  await openPage(
+    page,
+    "ai?aiSection=agent-chat&agentSection=chat&session=gpt-web-citation-session&view=active",
+  );
+
+  const citation = page.getByTestId("agent-chat-citation");
+  await expect(citation).toHaveCount(1);
+  await expect(citation).toHaveAttribute("href", articleUrl);
+  await expect(citation).toHaveText("Reuters+2AP News+2");
+  await expect(citation).toHaveAttribute("aria-label", "Sources: Reuters+2, AP News+2");
+  const citationIcons = page.getByTestId("agent-chat-citation-icon");
+  await expect(citationIcons).toHaveCount(2);
+  for (const icon of await citationIcons.all()) {
+    await expect(icon).toHaveCSS("width", "14px");
+    await expect(icon).toHaveCSS("height", "14px");
+    await expect(icon).not.toHaveAttribute("data-agent-chat-image-id");
+  }
+  await expect(page.getByTestId("agent-chat-previewable-image")).toHaveCount(1);
+  await expect(page.getByRole("img", { name: "Generated chart" })).toBeVisible();
+
+  await page.getByRole("img", { name: "Generated chart" }).click();
+  await expect(page.getByTestId("agent-chat-image-lightbox")).toBeVisible();
+  await expect(page.getByTestId("agent-chat-image-lightbox-count")).toHaveCount(0);
+  await page.getByTestId("agent-chat-image-lightbox-close").click();
+
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(citation).toBeVisible();
+  await expect(citationIcons).toHaveCount(2);
 });
 
 test("AI Agent Chat renders local generated image attachments", async ({ page }) => {

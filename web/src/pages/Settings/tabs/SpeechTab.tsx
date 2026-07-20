@@ -20,16 +20,20 @@ import {
 import {
   ASR_STATUS_CHANGED_EVENT,
   getAsrStatus,
+  getMossModelStatus,
   loadModelManagementParams,
   saveModelManagementParams,
   streamAsrInitialization,
+  streamMossInitialization,
   type AsrConnectionParams,
+  type MossModelStatus,
   type AsrProgressEvent,
   type AsrStatus,
   type AsrStreamEvent,
 } from "../../../api/asr";
 
 const { Text } = Typography;
+const MOSS_MODEL_ID = "MOSS-Transcribe-Diarize-MLX-8bit";
 
 type RuntimePhase = "idle" | "checking" | "running" | "ready" | "error";
 
@@ -47,17 +51,23 @@ export default function SpeechTab() {
   const defaults = useMemo(() => loadModelManagementParams(), []);
   const [params, setParams] = useState<AsrConnectionParams>(() => loadModelManagementParams());
   const [status, setStatus] = useState<AsrStatus | null>(null);
+  const [mossStatus, setMossStatus] = useState<MossModelStatus | null>(null);
   const [phase, setPhase] = useState<RuntimePhase>("idle");
   const [download, setDownload] = useState<DownloadState | null>(null);
   const [errorText, setErrorText] = useState("");
   const [errorDetail, setErrorDetail] = useState("");
   const initAbortRef = useRef<AbortController | null>(null);
+  const mossSelected = params.model === MOSS_MODEL_ID;
 
   const refreshStatus = useCallback(async () => {
     setPhase((prev) => (prev === "running" ? prev : "checking"));
     try {
-      const next = await getAsrStatus(params);
-      setStatus(next);
+      const next = mossSelected ? await getMossModelStatus() : await getAsrStatus(params);
+      if (mossSelected) {
+        setMossStatus(next as MossModelStatus);
+      } else {
+        setStatus(next as AsrStatus);
+      }
       setErrorText("");
       setErrorDetail("");
       if (next.ready) {
@@ -73,7 +83,7 @@ export default function SpeechTab() {
       setErrorText("Failed to read speech converter status.");
       setErrorDetail(text);
     }
-  }, [params]);
+  }, [mossSelected, params]);
 
   useEffect(() => {
     void refreshStatus();
@@ -126,7 +136,11 @@ export default function SpeechTab() {
     setErrorDetail("");
 
     try {
-      await streamAsrInitialization(params, handleStreamEvent, controller.signal);
+      if (mossSelected) {
+        await streamMossInitialization(handleStreamEvent, controller.signal);
+      } else {
+        await streamAsrInitialization(params, handleStreamEvent, controller.signal);
+      }
     } catch (error) {
       if (controller.signal.aborted) {
         return;
@@ -136,7 +150,9 @@ export default function SpeechTab() {
       setErrorText("Speech converter initialization stream failed.");
       setErrorDetail(text);
     }
-  }, [handleStreamEvent, params]);
+  }, [handleStreamEvent, mossSelected, params]);
+
+  const selectedStatus = mossSelected ? mossStatus : status;
 
   const statusTag = useMemo(() => {
     if (phase === "running" || phase === "checking") {
@@ -145,21 +161,25 @@ export default function SpeechTab() {
     if (phase === "error") {
       return <Tag color="error">Error</Tag>;
     }
-    if (status?.platform_supported === false || status?.status === "unsupported") {
+    if (
+      selectedStatus?.platform_supported === false ||
+      selectedStatus?.status === "unsupported"
+    ) {
       return <Tag color="error">Unsupported</Tag>;
     }
-    if (phase === "ready" || status?.ready) {
+    if (phase === "ready" || selectedStatus?.ready) {
       return <Tag color="success">Ready</Tag>;
     }
-    if (status?.installed) {
+    if (selectedStatus?.installed) {
       return <Tag color="warning">Installed</Tag>;
     }
     return <Tag>Missing</Tag>;
-  }, [phase, status]);
+  }, [phase, selectedStatus]);
 
-  const unsupported = status?.platform_supported === false || status?.status === "unsupported";
+  const unsupported =
+    selectedStatus?.platform_supported === false || selectedStatus?.status === "unsupported";
   const showInitialization =
-    !unsupported && (phase === "running" || phase === "error" || !status?.installed);
+    !unsupported && (phase === "running" || phase === "error" || !selectedStatus?.installed);
   const progressPercent = Math.max(0, Math.min(100, Math.round(download?.percent ?? 0)));
   const downloadMeta = formatDownloadMeta(download);
 
@@ -200,18 +220,22 @@ export default function SpeechTab() {
           showIcon
           style={{ marginBottom: 16 }}
           message="ASR model assets are shared by all ASR entry points."
-          description="Initialization prepares files under ~/.bifrost/asr. This panel only downloads and initializes model assets; the Speech Workbench, Directory Tasks, and CLI each choose their own model and lease the shared ASR service independently."
+          description={
+            mossSelected
+              ? "Initialization verifies and installs the self-contained MLX/Python runtime, pinned dependencies, model metadata, and 8-bit weights. Directory Tasks use these assets on demand and retain automatic initialization as a fallback."
+              : "Initialization prepares Qwen assets under ~/.bifrost/asr. The Speech Workbench, Directory Tasks, and CLI each choose their own model and lease the shared ASR service independently."
+          }
         />
         {unsupported ? (
           <Alert
             type="error"
             showIcon
             style={{ marginBottom: 16 }}
-            message="Qwen3-ASR is not supported on this computer."
-            description={status?.unsupported_reason || status?.message}
+            message={`${mossSelected ? "MOSS joint transcription" : "Qwen3-ASR"} is not supported on this computer.`}
+            description={selectedStatus?.unsupported_reason || selectedStatus?.message}
           />
         ) : null}
-        {status && status.platform_supported && !status.ffmpeg_available ? (
+        {!mossSelected && status && status.platform_supported && !status.ffmpeg_available ? (
           <Alert
             type="warning"
             showIcon
@@ -221,40 +245,66 @@ export default function SpeechTab() {
           />
         ) : null}
         <Row gutter={[16, 16]}>
-          <Col xs={24} md={8}>
-            <Text type="secondary">Host</Text>
-            <Input value={params.host || defaults.host} disabled />
-          </Col>
-          <Col xs={24} md={8}>
-            <Text type="secondary">Service Port</Text>
-            <Input
-              value={status?.ready ? status.server_url : "No service leased by model management"}
-              disabled
-            />
-          </Col>
-          <Col xs={24} md={8}>
-            <Text type="secondary">Language</Text>
-            <Select
-              value={params.language || defaults.language}
-              style={{ width: "100%" }}
-              options={[
-                { value: "chinese", label: "Chinese" },
-                { value: "english", label: "English" },
-                { value: "auto", label: "Auto" },
-              ]}
-              onChange={(value) =>
-                setParams((prev) => ({ ...prev, language: value }))
-              }
-            />
-          </Col>
+          {mossSelected ? (
+            <>
+              <Col xs={24} md={8}>
+                <Text type="secondary">Execution</Text>
+                <Input aria-label="MOSS execution" value="On demand / whole file" disabled />
+              </Col>
+              <Col xs={24} md={8}>
+                <Text type="secondary">Language</Text>
+                <Input aria-label="MOSS language" value="Automatic multilingual" disabled />
+              </Col>
+              <Col xs={24} md={8}>
+                <Text type="secondary">Components</Text>
+                <Input
+                  aria-label="MOSS components"
+                  value={`Runtime ${mossStatus?.runtime_ready ? "ready" : "missing"} / Model ${mossStatus?.model_ready ? "ready" : "missing"}`}
+                  disabled
+                />
+              </Col>
+            </>
+          ) : (
+            <>
+              <Col xs={24} md={8}>
+                <Text type="secondary">Host</Text>
+                <Input value={params.host || defaults.host} disabled />
+              </Col>
+              <Col xs={24} md={8}>
+                <Text type="secondary">Service Port</Text>
+                <Input
+                  value={status?.ready ? status.server_url : "No service leased by model management"}
+                  disabled
+                />
+              </Col>
+              <Col xs={24} md={8}>
+                <Text type="secondary">Language</Text>
+                <Select
+                  value={params.language || defaults.language}
+                  style={{ width: "100%" }}
+                  options={[
+                    { value: "chinese", label: "Chinese" },
+                    { value: "english", label: "English" },
+                    { value: "auto", label: "Auto" },
+                  ]}
+                  onChange={(value) =>
+                    setParams((prev) => ({ ...prev, language: value }))
+                  }
+                />
+              </Col>
+            </>
+          )}
           <Col xs={24} md={12}>
             <Text type="secondary">Model</Text>
             <Select
+              aria-label="Managed ASR model"
+              data-testid="asr-managed-model-select"
               value={params.model || defaults.model}
               style={{ width: "100%" }}
               options={[
                 { value: "Qwen3-ASR-0.6B", label: "Qwen3-ASR-0.6B" },
                 { value: "Qwen3-ASR-1.7B", label: "Qwen3-ASR-1.7B" },
+                { value: MOSS_MODEL_ID, label: "MOSS joint transcription (MLX 8-bit)" },
               ]}
               onChange={(value) =>
                 setParams((prev) => ({ ...prev, model: value }))
@@ -263,9 +313,27 @@ export default function SpeechTab() {
           </Col>
           <Col xs={24} md={12}>
             <Text type="secondary">Storage</Text>
-            <Input value="~/.bifrost/asr" disabled />
+            <Input
+              aria-label="Managed ASR storage"
+              value={mossSelected ? "~/.bifrost/asr/moss_joint_mlx" : "~/.bifrost/asr"}
+              disabled
+            />
           </Col>
         </Row>
+
+        {mossSelected && mossStatus ? (
+          <Space wrap style={{ marginTop: 12 }} data-testid="moss-managed-asset-status">
+            <Tag color={mossStatus.runtime_ready ? "success" : "warning"}>
+              Runtime {mossStatus.runtime_ready ? "verified" : "missing"}
+            </Tag>
+            <Tag color={mossStatus.model_ready ? "success" : "warning"}>
+              Model {mossStatus.model_ready ? "verified" : "missing"}
+            </Tag>
+            <Text type="secondary">
+              {formatBytes(mossStatus.installed_model_bytes)} / {formatBytes(mossStatus.expected_model_bytes)}
+            </Text>
+          </Space>
+        ) : null}
 
         {showInitialization ? (
           <div style={{ marginTop: 20 }}>

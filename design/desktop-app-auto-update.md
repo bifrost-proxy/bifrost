@@ -165,6 +165,7 @@ Tauri 官方 updater plugin 支持静态 JSON endpoint、签名和 install mode�
 - macOS `restart_desktop_after_update` 从当前 executable 反推 `Bifrost.app` bundle，并用 `open -n <bundle>` 通过 LaunchServices 重启；找不到 bundle 时保留原可执行文件启动 fallback。
 - 桌面包下载改为流式读取 response，每 250ms 写入 `phase=downloading`、下载字节和百分比，避免 UI 0% 假死。
 - 独立 CLI 搜索增加 `~/.cargo/bin/bifrost`，覆盖 Finder 启动时缺少用户 PATH 的常见安装方式。
+- 独立 CLI 版本探测启动刚写入的可执行文件时，Unix `ETXTBSY` 仅做最多 8 次、总退避不超过 140ms 的有界重试；持续占用或其他启动错误继续按探测失败处理，避免并行检查把可用 CLI 瞬态误判为缺失。
 - 桌面包安装后，如果能读取目标 app 版本，必须与目标版本一致；否则写 `phase=failed` 和可操作错误，不允许写 `completed`。
 
 ### 回归覆盖

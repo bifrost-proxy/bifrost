@@ -131,12 +131,12 @@
 
 1. 启用包含以下内容的规则组合：
    ```text
-   https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_old","x-use-ppe":"1"}
-   https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://
-   https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_new","x-use-ppe":"1"}
-   https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://
-   https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_narrow"}
-   https://nextoncall.bytedance.net/api/v1/ reqHeaders://{"x-tt-env":"ppe_broad","x-use-ppe":"1"}
+   https://app.example.com/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_old","x-use-ppe":"1"}
+   https://app.example.com/api/v1/oncall/ passthrough://
+   https://app.example.com/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_new","x-use-ppe":"1"}
+   https://app.example.com/api/v1/oncall/ passthrough://
+   https://app.example.com/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_narrow"}
+   https://app.example.com/api/v1/ reqHeaders://{"x-tt-env":"ppe_broad","x-use-ppe":"1"}
    ```
 2. 打开 Activity 页面。
 3. 在 `Active Rule Analysis` 的 `Merged Rules` 顶部观察 active rule sets 标签区。

@@ -691,11 +691,13 @@ async fn run_server_chunk_request(
         return Ok(WholeFileTranscription {
             text: format!("server:{}:{chunk_duration_secs}", state.server_url),
             segments: Vec::new(),
+            structured: Default::default(),
         });
     }
     Ok(WholeFileTranscription {
         text: String::new(),
         segments: Vec::new(),
+        structured: Default::default(),
     })
 }
 
@@ -1065,6 +1067,7 @@ async fn transcribe_in_chunks(
         transcription: WholeFileTranscription {
             text: all_text,
             segments: all_segments,
+            structured: Default::default(),
         },
         failed_chunks,
         memory_limit_hints,

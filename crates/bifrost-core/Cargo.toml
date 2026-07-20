@@ -33,6 +33,8 @@ tokio = { workspace = true, features = ["sync"] }
 ureq.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json"] }
 openssl-probe.workspace = true
+rustls-native-certs = "0.8"
+tempfile.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -46,4 +48,3 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 filetime = "0.2"
-tempfile.workspace = true

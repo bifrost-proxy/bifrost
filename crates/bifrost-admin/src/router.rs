@@ -21,6 +21,7 @@ use crate::handlers::{
     config::handle_config,
     cors_preflight,
     devtools::handle_devtools,
+    diagnostics::handle_diagnostics,
     env::handle_env,
     error_response, frames,
     group::handle_group,
@@ -272,6 +273,8 @@ impl AdminRouter {
             handle_traffic(req, state, push_manager.clone(), path).await
         } else if path.starts_with("/api/metrics") {
             handle_metrics(req, state, path).await
+        } else if path.starts_with("/api/diagnostics") {
+            handle_diagnostics(req, state, path).await
         } else if path.starts_with("/api/mobile-devices") {
             handle_mobile_devices(req, state, path, peer_addr).await
         } else if path.starts_with("/api/trust-probe") {

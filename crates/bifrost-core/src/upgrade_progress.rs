@@ -11,6 +11,10 @@
 //! Readers degrade to [`UpgradeProgress::idle`] on any missing/corrupt file so
 //! the channel can never deadlock the UI.
 
+use std::fs::OpenOptions;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -18,6 +22,9 @@ use serde::{Deserialize, Serialize};
 
 /// Name of the progress file written under the data directory.
 pub const PROGRESS_FILE_NAME: &str = "upgrade-progress.json";
+
+const DESKTOP_UPGRADE_ORIGIN_PREFIX: &str = ".desktop-upgrade-origin-";
+const DESKTOP_UPGRADE_ORIGIN_MAX_AGE_SECS: i64 = 30;
 
 /// Default staleness threshold (seconds). An active progress whose `updated_at`
 /// is older than this is considered an abandoned/crashed upgrade.
@@ -141,11 +148,36 @@ pub fn progress_file_path(data_dir: &Path) -> PathBuf {
 /// Read the current progress. Missing or corrupt files degrade to
 /// [`UpgradeProgress::idle`].
 pub fn read_progress(data_dir: &Path) -> UpgradeProgress {
-    let path = progress_file_path(data_dir);
-    let Ok(content) = std::fs::read_to_string(&path) else {
-        return UpgradeProgress::idle();
-    };
-    serde_json::from_str(&content).unwrap_or_else(|_| UpgradeProgress::idle())
+    read_progress_inner(data_dir).unwrap_or_else(|_| UpgradeProgress::idle())
+}
+
+fn read_progress_inner(data_dir: &Path) -> std::io::Result<UpgradeProgress> {
+    let content = read_progress_content(&progress_file_path(data_dir))?;
+    serde_json::from_str(&content)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+#[cfg(not(windows))]
+fn read_progress_content(path: &Path) -> std::io::Result<String> {
+    std::fs::read_to_string(path)
+}
+
+#[cfg(windows)]
+fn read_progress_content(path: &Path) -> std::io::Result<String> {
+    for attempt in 0..WINDOWS_FILE_CONFLICT_MAX_ATTEMPTS {
+        match std::fs::read_to_string(path) {
+            Ok(content) => return Ok(content),
+            Err(error) => {
+                if !is_transient_windows_file_conflict(&error)
+                    || attempt + 1 == WINDOWS_FILE_CONFLICT_MAX_ATTEMPTS
+                {
+                    return Err(error);
+                }
+                sleep_for_windows_file_conflict(attempt);
+            }
+        }
+    }
+    unreachable!("bounded Windows progress read loop must return")
 }
 
 /// Atomically write progress to `<data_dir>/upgrade-progress.json`.
@@ -160,17 +192,134 @@ pub fn write_progress(data_dir: &Path, progress: &UpgradeProgress) {
 fn write_progress_inner(data_dir: &Path, progress: &UpgradeProgress) -> std::io::Result<()> {
     std::fs::create_dir_all(data_dir)?;
     let path = progress_file_path(data_dir);
-    let tmp = path.with_extension("json.tmp");
     let content = serde_json::to_string_pretty(progress)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&tmp, content)?;
-    std::fs::rename(&tmp, &path)?;
+    // Admin, CLI, the Windows replacement helper, and the relaunched desktop
+    // core can briefly overlap while ownership is handed off. A fixed temp
+    // name lets one writer rename another writer's file (or makes the rename
+    // fail), leaving the Web UI with stale progress. NamedTempFile gives every
+    // writer a unique file in the destination directory and `persist` performs
+    // the platform-specific atomic replacement of an existing destination.
+    let mut tmp = tempfile::NamedTempFile::new_in(data_dir)?;
+    tmp.write_all(content.as_bytes())?;
+    tmp.as_file().sync_all()?;
+    persist_progress_temp(tmp, &path)?;
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn persist_progress_temp(tmp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()> {
+    tmp.persist(path).map(|_| ()).map_err(|error| error.error)
+}
+
+#[cfg(windows)]
+fn persist_progress_temp(mut tmp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()> {
+    // MoveFileExW(MOVEFILE_REPLACE_EXISTING), used by tempfile::persist, can
+    // transiently fail while another process is replacing or opening the same
+    // progress file. Keep the unique source file and retry only Windows sharing
+    // conflicts; permanent permission/path failures still surface immediately.
+    for attempt in 0..WINDOWS_FILE_CONFLICT_MAX_ATTEMPTS {
+        match tmp.persist(path) {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                if !is_transient_windows_file_conflict(&error.error)
+                    || attempt + 1 == WINDOWS_FILE_CONFLICT_MAX_ATTEMPTS
+                {
+                    return Err(error.error);
+                }
+                tmp = error.file;
+                sleep_for_windows_file_conflict(attempt);
+            }
+        }
+    }
+    unreachable!("bounded Windows progress replacement loop must return")
+}
+
+#[cfg(windows)]
+const WINDOWS_FILE_CONFLICT_MAX_ATTEMPTS: usize = 100;
+
+#[cfg(windows)]
+fn is_transient_windows_file_conflict(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5 | 32 | 33))
+}
+
+#[cfg(windows)]
+fn sleep_for_windows_file_conflict(attempt: usize) {
+    std::thread::sleep(std::time::Duration::from_millis(2 + (attempt as u64 % 7)));
 }
 
 /// Remove the progress file (best-effort).
 pub fn clear_progress(data_dir: &Path) {
     let _ = std::fs::remove_file(progress_file_path(data_dir));
+}
+
+/// Issue a short-lived, one-time credential proving that a desktop Tauri
+/// command initiated the next Admin upgrade request.
+pub fn issue_desktop_upgrade_origin_token(data_dir: &Path) -> std::io::Result<String> {
+    std::fs::create_dir_all(data_dir)?;
+    clear_expired_desktop_upgrade_origin_tokens(data_dir);
+
+    let token = uuid::Uuid::new_v4().to_string();
+    let path = desktop_upgrade_origin_token_path(data_dir, &token);
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path)?;
+    file.write_all(Utc::now().to_rfc3339().as_bytes())?;
+    file.sync_all()?;
+    Ok(token)
+}
+
+/// Atomically consume a desktop-issued origin credential. Invalid, expired,
+/// or already-consumed credentials are rejected.
+pub fn consume_desktop_upgrade_origin_token(data_dir: &Path, token: &str) -> bool {
+    let Ok(token) = uuid::Uuid::parse_str(token) else {
+        return false;
+    };
+    let token = token.to_string();
+    let path = desktop_upgrade_origin_token_path(data_dir, &token);
+    let claimed = path.with_extension(format!("claimed-{}", uuid::Uuid::new_v4()));
+    if std::fs::rename(&path, &claimed).is_err() {
+        return false;
+    }
+
+    let content = std::fs::read_to_string(&claimed);
+    let _ = std::fs::remove_file(&claimed);
+    let Ok(content) = content else {
+        return false;
+    };
+    let Ok(issued_at) = chrono::DateTime::parse_from_rfc3339(content.trim()) else {
+        return false;
+    };
+    let age = Utc::now().signed_duration_since(issued_at.with_timezone(&Utc));
+    (0..=DESKTOP_UPGRADE_ORIGIN_MAX_AGE_SECS).contains(&age.num_seconds())
+}
+
+fn desktop_upgrade_origin_token_path(data_dir: &Path, token: &str) -> PathBuf {
+    data_dir.join(format!("{DESKTOP_UPGRADE_ORIGIN_PREFIX}{token}.json"))
+}
+
+fn clear_expired_desktop_upgrade_origin_tokens(data_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(data_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(DESKTOP_UPGRADE_ORIGIN_PREFIX) && name.ends_with(".json") {
+            let valid = std::fs::read_to_string(entry.path())
+                .ok()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value.trim()).ok())
+                .is_some_and(|issued_at| {
+                    let age = Utc::now().signed_duration_since(issued_at.with_timezone(&Utc));
+                    (0..=DESKTOP_UPGRADE_ORIGIN_MAX_AGE_SECS).contains(&age.num_seconds())
+                });
+            if !valid {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 /// True when an active progress has not advanced within `max_age_secs`,
@@ -253,6 +402,129 @@ mod tests {
         assert!(progress_file_path(&dir).exists());
         clear_progress(&dir);
         assert!(!progress_file_path(&dir).exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn concurrent_progress_writers_never_publish_partial_json_or_leave_temp_files() {
+        let dir = temp_dir();
+        let mut writers = Vec::new();
+        for writer in 0..16usize {
+            let dir = dir.clone();
+            writers.push(std::thread::spawn(move || {
+                for iteration in 0..32usize {
+                    let progress = UpgradeProgress::new(
+                        UpgradePhase::Downloading,
+                        format!("writer-{writer}-iteration-{iteration}"),
+                    )
+                    .with_target(Some("0.0.156".to_string()))
+                    .with_source(Some(format!("writer-{writer}")));
+                    write_progress_inner(&dir, &progress).expect("write progress");
+                    let published = read_progress_inner(&dir).expect("read published progress");
+                    assert_eq!(published.phase, UpgradePhase::Downloading);
+                    assert_eq!(published.target_version.as_deref(), Some("0.0.156"));
+                }
+            }));
+        }
+        for writer in writers {
+            writer.join().expect("progress writer thread");
+        }
+
+        let persisted = read_progress(&dir);
+        assert_eq!(persisted.phase, UpgradePhase::Downloading);
+        assert_eq!(persisted.target_version.as_deref(), Some("0.0.156"));
+        let leftovers = std::fs::read_dir(&dir)
+            .expect("read temp directory")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path() != progress_file_path(&dir))
+            .collect::<Vec<_>>();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn desktop_upgrade_origin_token_is_one_time_and_rejects_wrong_values() {
+        let dir = temp_dir();
+        let token = issue_desktop_upgrade_origin_token(&dir).expect("issue desktop token");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(desktop_upgrade_origin_token_path(&dir, &token))
+                .expect("origin token metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        assert!(!consume_desktop_upgrade_origin_token(
+            &dir,
+            "not-a-valid-token"
+        ));
+        assert!(consume_desktop_upgrade_origin_token(&dir, &token));
+        assert!(!consume_desktop_upgrade_origin_token(&dir, &token));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn each_desktop_upgrade_origin_token_can_be_consumed_once() {
+        let dir = temp_dir();
+        let old = issue_desktop_upgrade_origin_token(&dir).expect("issue old token");
+        let current = issue_desktop_upgrade_origin_token(&dir).expect("issue current token");
+
+        assert!(consume_desktop_upgrade_origin_token(&dir, &old));
+        assert!(consume_desktop_upgrade_origin_token(&dir, &current));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn expired_desktop_upgrade_origin_is_rejected_and_consumed() {
+        let dir = temp_dir();
+        let token = uuid::Uuid::new_v4().to_string();
+        let path = desktop_upgrade_origin_token_path(&dir, &token);
+        std::fs::write(
+            path,
+            (Utc::now() - chrono::Duration::seconds(60)).to_rfc3339(),
+        )
+        .expect("write expired token");
+
+        assert!(!consume_desktop_upgrade_origin_token(&dir, &token));
+        assert!(!consume_desktop_upgrade_origin_token(&dir, &token));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn malformed_desktop_upgrade_origin_artifacts_are_rejected_and_cleaned() {
+        let dir = temp_dir();
+
+        let directory_token = uuid::Uuid::new_v4().to_string();
+        std::fs::create_dir(desktop_upgrade_origin_token_path(&dir, &directory_token))
+            .expect("create directory-shaped token");
+        assert!(!consume_desktop_upgrade_origin_token(
+            &dir,
+            &directory_token
+        ));
+
+        let malformed_token = uuid::Uuid::new_v4().to_string();
+        std::fs::write(
+            desktop_upgrade_origin_token_path(&dir, &malformed_token),
+            "not-an-rfc3339-timestamp",
+        )
+        .expect("write malformed token");
+        assert!(!consume_desktop_upgrade_origin_token(
+            &dir,
+            &malformed_token
+        ));
+
+        clear_expired_desktop_upgrade_origin_tokens(&dir.join("missing"));
+
+        let stale_token = uuid::Uuid::new_v4().to_string();
+        let stale_path = desktop_upgrade_origin_token_path(&dir, &stale_token);
+        std::fs::write(&stale_path, "invalid timestamp").expect("write stale token");
+        clear_expired_desktop_upgrade_origin_tokens(&dir);
+        assert!(!stale_path.exists(), "invalid token must be removed");
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

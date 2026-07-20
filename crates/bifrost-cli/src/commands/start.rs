@@ -97,6 +97,7 @@ const SYSTEM_PROXY_WAKE_GAP_THRESHOLD: Duration = Duration::from_secs(10);
 const SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV: &str =
     "BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL";
 const DESKTOP_CORE_ENV: &str = "BIFROST_DESKTOP_CORE";
+const DESKTOP_STARTUP_SESSION_ENV: &str = "BIFROST_DESKTOP_STARTUP_SESSION_ID";
 pub(crate) const DETACHED_DAEMON_CHILD_ENV: &str = "BIFROST_DETACHED_DAEMON_CHILD";
 const RULES_FILESYSTEM_FALLBACK_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 const RULES_FILESYSTEM_DEBOUNCE_DELAY: Duration = Duration::from_millis(150);
@@ -436,6 +437,15 @@ fn prompt_yes_no() -> bifrost_core::Result<bool> {
     }
 
     Ok(false)
+}
+
+fn begin_startup_phase(phase: &'static str) -> Instant {
+    tracing::info!(
+        target: "bifrost_cli::startup",
+        phase,
+        "startup phase started"
+    );
+    Instant::now()
 }
 
 fn log_startup_phase(phase: &'static str, started_at: Instant) {
@@ -1378,6 +1388,20 @@ pub fn run_start(
 ) -> bifrost_core::Result<()> {
     let bifrost_dir = get_bifrost_dir()?;
     set_data_dir(bifrost_dir.clone());
+    let desktop_startup_session_id = std::env::var(DESKTOP_STARTUP_SESSION_ENV).unwrap_or_default();
+    tracing::info!(
+        target: "bifrost_cli::startup",
+        startup_session_id = %desktop_startup_session_id,
+        pid = std::process::id(),
+        version = env!("CARGO_PKG_VERSION"),
+        target_os = std::env::consts::OS,
+        target_arch = std::env::consts::ARCH,
+        data_dir = %bifrost_dir.display(),
+        host = %host,
+        port,
+        desktop_core = is_desktop_core_process(),
+        "start command entered"
+    );
     let preserve_restart_runtime = matches!(
         bifrost_core::read_system_proxy_shutdown_mode(&bifrost_dir),
         Some(bifrost_core::SystemProxyShutdownMode::PreserveForRestart)
@@ -1413,22 +1437,30 @@ pub fn run_start(
         }
     }
 
+    let phase_started_at = begin_startup_phase("certificate.preflight");
     if !skip_cert_check {
         check_and_install_certificate(CertificateCheckOptions {
             auto_yes: yes,
             allow_prompt: io::stdin().is_terminal(),
         })?;
     }
+    log_startup_phase("certificate.preflight", phase_started_at);
 
+    let phase_started_at = begin_startup_phase("port_conflict.preflight");
     check_and_resolve_port_conflict(&host, port, yes)?;
+    log_startup_phase("port_conflict.preflight", phase_started_at);
 
+    let phase_started_at = begin_startup_phase("shell_completions.install");
     super::completions::install_completions_silently();
+    log_startup_phase("shell_completions.install", phase_started_at);
 
     #[cfg(not(unix))]
     let _ = (&log_dir, log_retention_days);
 
+    let phase_started_at = begin_startup_phase("config_manager.open");
     let config_manager = ConfigManager::new(bifrost_dir.clone())?;
     let stored_config = futures::executor::block_on(config_manager.config());
+    log_startup_phase("config_manager.open", phase_started_at);
 
     let parsed_access_mode = match &access_mode {
         Some(mode) => mode
@@ -1954,11 +1986,11 @@ pub fn run_foreground(
                 "starting foreground runtime initialization"
             );
 
-            let phase_started_at = Instant::now();
+            let phase_started_at = begin_startup_phase("config_manager.config");
             let stored_config = config_manager.config().await;
             log_startup_phase("config_manager.config", phase_started_at);
 
-            let phase_started_at = Instant::now();
+            let phase_started_at = begin_startup_phase("body_store.init");
             let body_temp_dir = bifrost_dir.join("body_cache");
             let body_store = Arc::new(ParkingRwLock::new(BodyStore::new(
                 body_temp_dir,
@@ -1970,7 +2002,7 @@ pub fn run_foreground(
             let body_cleanup_task = bifrost_admin::start_body_cleanup_task(body_store.clone());
             log_startup_phase("body_store.init", phase_started_at);
 
-            let phase_started_at = Instant::now();
+            let phase_started_at = begin_startup_phase("ws_payload_store.init");
             let ws_payload_store = Arc::new(WsPayloadStore::new(
                 bifrost_dir.clone(),
                 stored_config.traffic.ws_payload_flush_bytes,
@@ -1981,7 +2013,7 @@ pub fn run_foreground(
             let ws_payload_cleanup_task = start_ws_payload_cleanup_task(ws_payload_store.clone());
             log_startup_phase("ws_payload_store.init", phase_started_at);
 
-            let phase_started_at = Instant::now();
+            let phase_started_at = begin_startup_phase("traffic_db_store.init");
             let traffic_dir = bifrost_dir.join("traffic");
             let traffic_db_store = Arc::new(
                 bifrost_admin::TrafficDbStore::new(
@@ -1994,7 +2026,7 @@ pub fn run_foreground(
             );
             log_startup_phase("traffic_db_store.init", phase_started_at);
 
-            let phase_started_at = Instant::now();
+            let phase_started_at = begin_startup_phase("async_traffic.init");
             let (async_traffic_writer, async_traffic_rx) =
                 AsyncTrafficWriter::new(ASYNC_TRAFFIC_BUFFER_SIZE);
             let async_traffic_writer = Arc::new(async_traffic_writer);
@@ -2002,7 +2034,7 @@ pub fn run_foreground(
                 start_async_traffic_processor(async_traffic_rx, traffic_db_store.clone());
             log_startup_phase("async_traffic.init", phase_started_at);
 
-            let phase_started_at = Instant::now();
+            let phase_started_at = begin_startup_phase("frame_store.init");
             let frame_store = Arc::new(bifrost_admin::FrameStore::new(
                 bifrost_dir.clone(),
                 Some(stored_config.traffic.file_retention_days * 24),
@@ -2019,7 +2051,7 @@ pub fn run_foreground(
                 let _ = cleanup_ws_payload_store.delete_by_ids(ids);
             }));
 
-            let phase_started_at = Instant::now();
+            let phase_started_at = begin_startup_phase("config_storage.load");
             let values_storage = config_manager.values_storage().await;
             let rules_storage = config_manager.rules_storage().await;
             let auth_db = match bifrost_admin::admin_auth_db::auth_db_path_in(&bifrost_dir)
@@ -2060,11 +2092,11 @@ pub fn run_foreground(
             let connection_registry =
                 bifrost_admin::ConnectionRegistry::new(disconnect_on_config_change);
 
-            let phase_started_at = Instant::now();
+            let phase_started_at = begin_startup_phase("app_icon_cache.init");
             let app_icon_cache = bifrost_admin::create_app_icon_cache(&bifrost_dir);
             log_startup_phase("app_icon_cache.init", phase_started_at);
 
-            let phase_started_at = Instant::now();
+            let phase_started_at = begin_startup_phase("script_manager.init");
             let scripts_dir = bifrost_dir.join("scripts");
             let script_manager = bifrost_admin::ScriptManager::new(scripts_dir);
             if let Err(e) = script_manager.init().await {
@@ -2072,7 +2104,7 @@ pub fn run_foreground(
             }
             log_startup_phase("script_manager.init", phase_started_at);
 
-            let phase_started_at = Instant::now();
+            let phase_started_at = begin_startup_phase("replay_db_store.init");
             let replay_db_store = match ReplayDbStore::new(bifrost_dir.join("replay")) {
                 Ok(store) => Some(Arc::new(store)),
                 Err(e) => {
@@ -2108,7 +2140,7 @@ pub fn run_foreground(
                 yes,
             );
 
-            let phase_started_at = Instant::now();
+            let phase_started_at = begin_startup_phase("admin_state.build");
             let mut admin_state = AdminState::new(config.port)
                 .with_access_control(access_control.clone())
                 .with_body_store(body_store)
@@ -2213,7 +2245,7 @@ pub fn run_foreground(
             admin_state.load_group_name_cache();
             admin_state.refresh_badge_rules_cache();
 
-            let phase_started_at = Instant::now();
+            let phase_started_at = begin_startup_phase("rules_resolver.init");
             let valid_dirs = resolve_valid_group_dirs(&admin_state);
             let (stored_rules, inline_values) = load_stored_rules(&rules_storage_for_resolver, Some(&valid_dirs));
             let mut merged_values = values.clone();
@@ -2234,7 +2266,7 @@ pub fn run_foreground(
             let _total_disk_cleanup_task =
                 bifrost_admin::start_total_disk_cleanup_task(admin_state_arc.clone());
 
-            let phase_started_at = Instant::now();
+            let phase_started_at = begin_startup_phase("replay_executor.init");
             let replay_executor = Arc::new(bifrost_admin::ReplayExecutor::new(
                 admin_state_arc.clone(),
                 unsafe_ssl,
@@ -2242,7 +2274,7 @@ pub fn run_foreground(
             admin_state_arc.set_replay_executor(replay_executor);
             log_startup_phase("replay_executor.init", phase_started_at);
 
-            let phase_started_at = Instant::now();
+            let phase_started_at = begin_startup_phase("push_manager.init");
             let push_manager = Arc::new(PushManager::new(admin_state_arc.clone()));
             let push_tasks = start_push_tasks(push_manager.clone());
             let admin_push_watcher_task = spawn_admin_push_watcher_task(
@@ -2261,11 +2293,11 @@ pub fn run_foreground(
             admin_state_arc.set_temporary_port_manager(temporary_port_manager.clone());
             log_startup_phase("push_manager.init", phase_started_at);
 
-            let phase_started_at = Instant::now();
+            let phase_started_at = begin_startup_phase("metrics_task.start");
             let metrics_tasks = start_metrics_collector_task(metrics_collector, 1);
             log_startup_phase("metrics_task.start", phase_started_at);
 
-            let phase_started_at = Instant::now();
+            let phase_started_at = begin_startup_phase("rules_watcher.start");
             let rules_watcher_task = spawn_rules_watcher_task(
                 config_manager_for_resolver,
                 rules_storage_for_resolver,
@@ -2284,7 +2316,7 @@ pub fn run_foreground(
 
             let mut current_port = config.port;
             let base_config = config.clone();
-            let phase_started_at = Instant::now();
+            let phase_started_at = begin_startup_phase("proxy_listener.bind");
             let mut listener_task = spawn_managed_proxy_task(
                 config.clone(),
                 resolver.clone(),
@@ -4946,10 +4978,12 @@ mod tests {
     #[test]
     fn is_port_in_use_uses_fallback_socketaddr_on_parse_failure() {
         // Force parse(...) to fail by using an invalid host literal; this should
-        // fall back to 127.0.0.1 without panicking.
-        let port = allocate_loopback_port();
+        // fall back to 127.0.0.1 without panicking. Keep the listener alive so
+        // the assertion cannot race another process for a released port.
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
 
-        assert!(!is_port_in_use("256.256.256.256", port));
+        assert!(is_port_in_use("256.256.256.256", port));
     }
 
     #[cfg(unix)]
@@ -5210,8 +5244,8 @@ mod coverage_boost {
     }
 
     #[test]
-    fn log_startup_phase_executes_without_panic() {
-        let started = Instant::now();
+    fn startup_phase_begin_and_complete_execute_without_panic() {
+        let started = begin_startup_phase("coverage_boost");
         log_startup_phase("coverage_boost", started);
     }
 

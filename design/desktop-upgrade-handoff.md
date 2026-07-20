@@ -54,10 +54,14 @@ The helper is a small process mode of the desktop executable:
 2. Wait for the old App PID to disappear.
 3. Wait for the recorded core PID to disappear when available.
 4. Wait for the recorded proxy port to stop answering health checks.
-5. Relaunch the App bundle.
+5. Remove the helper-only `HELPER`, `MARKER`, and `TARGET` environment variables from the relaunch
+   command.
+6. Relaunch the App bundle.
 
 The helper does not start core itself. Its only responsibility is to avoid opening the new App while
-the old App still owns the shutdown operation.
+the old App still owns the shutdown operation. Clearing the helper-only environment is a hard
+one-shot boundary: on macOS, LaunchServices otherwise propagates the environment of `open -n` into
+the new App, which would make every new App enter helper mode, exit, and open another App forever.
 
 ### New App
 
@@ -66,7 +70,18 @@ the old App still owns the shutdown operation.
 3. In upgrade handoff mode, `ensure_backend_running` skips health-based reuse entirely.
 4. It waits briefly for the recorded port to release, then runs the existing stale-marker cleanup and
    launches the bundled backend as a managed child.
-5. After the backend becomes ready, the marker is removed.
+5. Readiness for the newly launched child requires both a healthy backend response and a
+   `runtime.json` marker whose `pid` and `port` match that child. A health response from another
+   process on the same port is not enough to complete managed startup.
+6. For a deferred Windows MSI/EXE, the helper keeps the pre-install directory snapshot and pending
+   guard until the relaunched App verifies both its compiled version and its managed core. A version
+   mismatch or managed-core startup failure writes `Failed` and asks the App to shut down normally;
+   the still-running helper then restores the complete previous install and relaunches it.
+7. After the backend becomes ready, the marker is removed and the Windows helper commits the
+   transaction by deleting the snapshot, pending guard, and updater-owned package.
+8. The new App is the final terminal-progress owner: it rewrites progress to `Completed` only after
+   the managed core is ready; helper relaunch failure or managed-core startup failure rewrites it to
+   `Failed` while preserving the selected target/source for diagnosis and retry.
 
 Expired or invalid markers are removed and normal startup continues.
 
@@ -85,15 +100,54 @@ stateDiagram-v2
     MarkerCleared --> NormalRunning
 
     HandoffBootstrap --> NormalBootstrap: marker expired or invalid
+    PortReleased --> HandoffFailed: helper cannot open new App
+    NewCoreManaged --> RollbackRequested: version mismatch or managed core fails readiness
+    RollbackRequested --> PreviousAppRestored: new App/core release files
+    PreviousAppRestored --> HandoffFailed: preserve failure and relaunch previous App
 ```
 
 ## Testable Contracts
 
 - A fresh marker is considered active.
 - A stale marker is ignored and deleted.
-- Startup with an active marker disables existing backend reuse.
+- Startup with an active marker for a managed core disables existing backend reuse.
+- A marker with no managed `old_core_pid` records the observed external CLI PID and pinned target.
+  The relaunched App waits for a different PID serving that target version, reuses it as an
+  unmanaged backend, and fails instead of starting a second bundled core when it never appears.
+- Managed startup does not accept a healthy response from an unrelated process on the same port.
+- Managed startup only accepts readiness when `runtime.json` belongs to the child it just spawned.
 - Successful handoff startup clears the marker.
+- Successful handoff refreshes terminal progress only after the new managed core is ready.
+- The relaunched App never deletes a Windows rollback snapshot, pending guard, or updater-owned
+  package. It only publishes `Completed`; the waiting helper durably observes that terminal state
+  before it commits cleanup. A crash or progress write failure therefore still leaves rollback
+  material available to the helper.
+- Relaunch/open or managed-core startup failures persist `Failed` progress with the original target.
 - Relaunch helper waits for process/port release before opening the App.
+- A running Windows desktop process selects App-owned handoff only when the live runtime marker is
+  also `Desktop`; a desktop shell that is reusing a CLI-owned core must not change progress ownership
+  or cause the relaunched App to start a second bundled core.
+- Windows pending-install and relaunch markers remain active for 15 minutes. This exceeds the helper's
+  explicit maximum of 30 seconds waiting for the App, 30 seconds waiting for core, and 10 minutes
+  waiting for MSI/EXE installation, so a second updater cannot enter during a still-valid handoff.
+- Before invoking a Windows MSI/EXE installer, the updater snapshots the existing desktop install
+  directory outside the install target. The install and pinned-target version probe form one
+  transaction: installer failure or post-install version mismatch restores the complete previous
+  directory; a failed first install is removed. Rollback failure is reported together with the
+  original install error instead of being hidden.
+- The deferred Windows helper owns the same transaction across App processes: it must not remove the
+  pending guard, updater package, or install snapshot merely because the installer exits successfully.
+  It commits only after the relaunched App/core reports `Completed`; on version mismatch, early App
+  exit, verification timeout, or managed-core failure it releases scoped install processes, restores
+  the snapshot, preserves `Failed`, and relaunches the previous App.
+- Windows self-update CI builds the current and pinned target executables separately with the same
+  `BIFROST_VERSION` injection used by release builds. Before exercising replacement, the target
+  executable must pass both `bifrost --version` and a real `/api/system.version` core probe; CLI-only
+  byte rewriting is not accepted as proof that the upgrade package contains the requested core.
+- The command that opens the new App explicitly removes all helper-only environment variables, for
+  both macOS `.app` targets and direct executable targets.
+- A real macOS update relaunch creates one new stable App process instead of a recursive Dock-icon
+  launch/exit loop.
 - CLI install reconnect errors trigger runtime/status recheck instead of permanently entering
   install-error state.
 - The shell contract is executable when desktop system dependencies and sidecar resources are
@@ -105,3 +159,11 @@ stateDiagram-v2
 - If the old backend never exits, the helper eventually relaunches the App; the new App still sees
   the active marker and performs the no-reuse cleanup path.
 - The marker is best-effort local coordination, not a security boundary.
+- The macOS bundle installer stages and verifies the target before rename swapping it. If the
+  process is interrupted after moving the old bundle to its PID-scoped backup, the next attempt
+  restores that backup before staging again; it must never delete the only known-good App.
+- Windows deferred CLI replacement updates the installed App to the same pinned target first,
+  keeps an executable backup during replacement, verifies `bifrost --version`, and restores the
+  previous executable before publishing `failed` when replacement verification fails.
+- Windows Installer registration is still maintained by MSI/EXE itself; the updater transaction
+  guarantees that the previous launchable App files are restored when package verification fails.

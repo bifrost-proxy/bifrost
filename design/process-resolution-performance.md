@@ -78,7 +78,7 @@
 
 ## CLI / Web / Admin API
 
-本方案不新增用户可见 API 字段，只落地环境变量与内部行为：
+前序方案不新增用户可见 API 字段，只落地环境变量与内部行为；本次增量新增一个按需读取、无历史和无推送的诊断 API，见文末 Phase 5：
 
 | 入口 | 作用 |
 | --- | --- |
@@ -180,3 +180,190 @@
 - `human_tests/webui-traffic.md` 保留高并发 CONNECT 真实回归。
 - `human_tests/readme.md` 同步 Web UI Traffic 用例数量。
 - 本方案与 `design/proxy-performance-stress-test.md` 中“macOS 应用识别怎么测”一节双向引用，保证性能压测框架能验证本次优化的功能等价与热路径开销门禁。
+
+## Phase 5 —— 管理请求硬跳过、按需诊断与原生证书缓存
+
+### 管理请求硬跳过
+
+请求进入 `handle_request` 后先复用现有 Admin 路由判定生成 `AdminRoutingDecision`：
+
+- `SkipAdmin`：请求会被路由到本机 `AdminRouter`，包括本机 Admin path、`bifrost.local` 虚拟主机和 DevTools bridge；
+- `SyncAppPolicy`：CONNECT 且存在应用级 TLS include/exclude；
+- `Normal`：其他流量。
+
+`AdminRoutingDecision` 由 `is_admin_virtual_host_request` 与 `is_proxy_request_to_other_for_admin_routing` 的既有结果构成，进程识别和后续 Admin 分发共用同一个判定。不能仅按 path 跳过：例如代理到外部 upstream 的绝对 URI `http://example.com/_bifrost/...` 必须继续按普通代理流量识别进程。`SkipAdmin` 必须在读取连接级进程缓存之前返回 `client_process=None`，不得访问正负缓存、socket snapshot，不得创建阻塞任务、后台任务或重试。管理请求仍保留 client IP、client port、Admin 认证和审计信息。
+
+### 诊断数据边界
+
+`bifrost-core::ProcessResolverDiagnostics` 使用 relaxed 原子计数器，由 resolver 持有并在实际 cache/lookup/scan 位置更新。`AdminState` 只保存共享句柄并提供按需快照：
+
+```text
+GET /_bifrost/api/diagnostics/process-resolver
+```
+
+接口包含 lookup/resolved/unresolved、正负缓存命中、snapshot hit/miss/refresh/failure、累计与最大扫描耗时、扫描 PID/FD 总数。它不进入 `/api/metrics`、metrics history、数据库或 WebSocket 周期推送。已有 `client_process_resolution_failures` 与 `client_process_policy_unknown_decisions` 作为用户可感知的策略降级指标继续保留。
+
+### 原生证书缓存
+
+`bifrost-core::NativeCertCache` 缓存 `Arc<[Vec<u8>]>` DER：
+
+1. TTL 10 分钟，未过期直接克隆 Arc；
+2. miss/过期通过 refresh mutex + double-check 保证并发只加载一次；
+3. 部分成功时发布可用证书并记录 warning；
+4. 刷新完全失败时保留最后一份可用快照；首次失败缓存空结果至 TTL，避免每次 client build 重复读取 TrustSettings；
+5. Admin API 成功安装本地 CA 后显式失效；外部 Keychain 变更通过 TTL 最终收敛。
+
+reqwest 保留 WebPKI roots，关闭 reqwest 内建 native roots 自动加载，再添加缓存 DER。HTTP Replay 和 WebSocket Replay 使用同一 DER 快照构建 rustls `RootCertStore`；unsafe SSL 分支不读取缓存。
+
+### Phase 5 验证
+
+- 单元测试：Admin 路由决策、外部 Admin-like path 防误伤、诊断计数、证书缓存并发/失效/失败回退；
+- E2E：隔离端口大量访问管理 API，断言 `snapshot_refreshes_total` 增量为 0；代理到外部 upstream 的 `/_bifrost/...` 必须正常转发并增加 lookup；普通代理请求仍可转发；
+- human test：隔离实例执行 10,000 次管理请求，核对诊断快照和扫描增量；
+- 远端 CI：workspace、E2E、changed-lines 与 `coverage-all.sh --json --gate` 全绿。
+
+## Phase 6 —— 准确性无损的 Client 与扫描合并
+
+本阶段只消除重复工作，不缩短应用策略进程识别的等待窗口、不延长策略关键路径的
+negative cache，也不复用跨连接的最终进程结论。TLS 应用 include/exclude 的 PID、名称、
+路径和 unknown passthrough 语义保持不变。
+
+### 长期共享 outbound HTTP Client
+
+`bifrost-core` 为通用 outbound 请求提供 generation-aware 共享 Client：
+
+1. Client 与 native certificate snapshot generation 绑定；同一 generation 返回同一个
+   `Arc<reqwest::Client>`，复用连接池和已经解析的证书；
+2. native certificate TTL 到期或安装本地 CA 触发 invalidation 后，下一次获取 Client
+   会基于新 generation 原子重建；
+3. 仍需要独立 proxy、unsafe SSL、redirect 或超时策略的 Replay/下载器保留专用 Builder；
+   普通请求改用 request-level timeout，不为每个附件或轮询重新构建 Client。
+
+### 连接生命周期解析状态
+
+每个 accept 后的 TCP 连接持有一个 `ConnectionProcessState`：
+
+- `OnceLock<ClientProcess>` 只缓存成功结果，因此同一连接的 CONNECT、Traffic、TLS policy
+  和 keep-alive 请求共享完全相同的 PID/name/path；
+- 前台与后台解析共用连接级 CAS in-flight 状态和 `Notify`，等待同一个解析 future，避免
+  同一连接重复启动系统扫描；前台 future 被取消时由 RAII guard 释放状态并唤醒等待者；
+- unknown 不写入 `OnceLock`，后续请求仍可等待新的 socket snapshot generation
+  再尝试；
+- 后台 backfill 成功时也写入同一个 cell，连接关闭后 cell 随连接一起释放，避免端口复用
+  导致跨连接误归因。
+
+### Snapshot generation 协调器
+
+系统 socket 扫描由 `SnapshotRefreshCoordinator { generation, refreshing } + Condvar` 协调：
+
+1. 一个请求成为当前 generation 的 refresh leader，并在锁外执行系统扫描；
+2. 其他连接等待 generation 变化，不再排队后各自扫描；
+3. leader 发布完整 snapshot、递增 generation 并唤醒所有等待者；
+4. 等待者只消费刚发布的 generation；若仍 miss，沿用原有 retry delay 等待后续 generation；
+5. TTL、miss refresh interval、最大重试次数和 unknown TLS 决策本阶段不变。
+
+### Phase 6 验证
+
+- 单元测试：同 generation 共享 HTTP Client、证书 generation 变化后重建 Client；
+- 单元测试：同连接并发解析只执行一个 initializer、成功结果稳定、unknown 不缓存；
+- 单元测试：多连接并发 snapshot miss 只执行一次 scanner，全部读取同一 generation；
+- E2E/human test：高并发 CONNECT 下扫描次数受控，同时 Chrome/Edge include 仍解包、
+  exclude 仍透传、unknown 仍按既有安全语义透传；
+- CI：changed-lines 95% 与 `coverage-all.sh --json --gate` 90% 门禁保持全绿。
+
+## Phase 7 —— 消除 10k cache 悬崖与跨协议连接级归因
+
+### 问题与目标
+
+旧连接缓存超过 10,000 项后，每次插入都会在独占写锁内对整张 `HashMap` 执行
+`retain`。如果 30 秒 positive TTL 内条目都仍有效，清理不会删除任何项目，随后每个新连接
+都重复执行 O(N) 扫描。这是确定性的吞吐悬崖，也会放大 Tokio blocking pool 等待和尾延迟。
+
+本阶段必须同时满足：
+
+- 新连接插入的均摊复杂度为 O(1)，不再存在阈值触发的全表扫描；
+- 内存有硬上限，过期项和高基数 live 项都有确定性淘汰路径；
+- HTTP、SOCKS、SOCKS TLS intercepted request 与 CONNECT tunnel backfill 共享一个连接级
+  解析结果和一个 in-flight 状态；
+- 新连接不复用旧连接的 positive 归因，避免本地临时端口快速复用时把旧应用归给新应用；
+- 公开同步/异步 resolver API 仍返回 owned `ClientProcess`，不破坏调用方源码兼容性；
+- app policy 的 retry、500ms negative TTL 与 unknown passthrough 安全语义不改变。
+
+### L0：连接拥有的 `Arc<ClientProcess>`
+
+`ConnectionProcessState` 下沉到 `utils::process_info`，作为 HTTP 与 SOCKS 的共同连接状态：
+
+```text
+accepted TCP connection
+  -> OnceLock<Arc<ClientProcess>>
+  -> AtomicBool resolution_in_flight
+  -> Notify resolution_finished
+```
+
+成功结果只构造一次，后续 request、Traffic、TLS policy、SOCKS relay 和后台 backfill 只克隆
+`Arc`。miss 不写入 `OnceLock`，OS socket table 尚未发布连接时仍可由下一 generation 重试。
+RAII guard 在 future 取消、panic unwind 或普通返回时释放 in-flight 并唤醒等待者。
+
+SOCKS 的状态由 `SocksHandler` 从 accept 持有到连接关闭；TLS interception 内部 keep-alive
+请求通过 `service_fn` 克隆同一个状态。HTTP CONNECT 把相同状态传入 tunnel，tunnel 只有成功
+取得该状态的 CAS 后才能启动 backfill，因此不会和 server 层后台任务重复扫描。
+
+### L1：有界分片 TTL cache
+
+跨连接兼容缓存实现为 `BoundedTtlCache<K, V>`：
+
+- 32 个 `std::sync::RwLock` shard，读请求只持有目标 shard 的共享锁；
+- 连接缓存硬容量 16,384，PID metadata 缓存硬容量 2,048；容量按 shard 确定性分配，所有
+  shard 容量之和等于全局硬上限；
+- 每个 entry 带单调 generation；替换 key 时旧 marker 自动失效，无需搜索或删除队列中间项；
+- `BinaryHeap<Reverse<expiry marker>>` 同时承担 TTL 清理和超容量淘汰；短 negative TTL 会先于
+  30 秒 positive TTL 淘汰；
+- insert 仅弹出已经过期或为本次超容量所需的 marker，均摊 O(log shard_capacity)，不做
+  O(N) `retain`；get 为一次 hash + shard read lock + `Arc` clone；
+- `entry_count`、eviction、expiry 使用 relaxed atomic，诊断读取不需要遍历 shard。
+
+这里选择 TTL-aware eviction 而不是通用 LRU：连接 tuple 基数高且绝大多数只访问一次，LRU
+每次 hit 写 recency 会制造新的锁竞争；连接级 L0 已承接真正有复用价值的热数据。
+
+### 跨连接 positive cache 的兼容边界
+
+旧公开 resolver API 继续读取 positive cache 并返回 owned clone，避免一次性破坏外部调用方。
+代理内部的新连接链路只读取短 negative cache，明确忽略跨连接 positive：第一次归因必须使用
+当前 socket snapshot/PID 结果，成功后只写入本连接 L0。这样兼顾兼容层性能与代理内部端口复用
+准确性；后续可在公开 API deprecation 周期结束后删除跨连接 positive。
+
+### 诊断与门禁
+
+专用诊断接口新增：
+
+- `connection_cache_entries` / `connection_cache_peak_entries`；
+- `connection_cache_evictions_total` / `connection_cache_expired_total`；
+- `pid_cache_entries` / `pid_cache_peak_entries`；
+- `pid_cache_evictions_total` / `pid_cache_expired_total`。
+
+主 metrics 边界保持不变。真实压力测试在隔离实例创建超过 16,384 个普通代理连接，必须断言
+当前值和峰值不超过硬容量，且 eviction 或 TTL expiry 有增长；同时确认 upstream 成功、管理
+请求仍完全跳过归因、snapshot refresh 数显著小于 lookup 数。
+
+### 风险控制与回滚
+
+- 功能风险：只改变缓存所有权和复用边界，不改变 PID/name/path 生成、规则匹配或 TLS decision；
+- 稳定性风险：没有常驻清理 task，也没有跨 await 持有 shard lock；锁 poison 时恢复 inner state；
+- 内存风险：entry 数有硬上限，heap 中替换产生的 stale marker 最迟在其 TTL 到期时被弹出；
+- 准确性风险：内部连接忽略 positive 只会增加一次当前连接 lookup，不会把 known 降级为旧应用；
+  negative 仍仅保留 500ms，保持既有短时防抖；
+- 回滚边界：连接状态、内部 cache policy 和有界容器均为独立层，可单独回滚；公开 API 与 JSON
+  诊断字段只做向后兼容的新增。
+
+### Phase 7 验证
+
+- 单元测试：10,000/16,000 项 live insert 硬容量、并发插入、TTL、replacement stale marker、
+  positive 兼容与连接级忽略、negative 防抖；
+- 单元测试：HTTP connection singleflight、SOCKS `Arc::ptr_eq`、tunnel 已有 in-flight 时不再
+  启动第二个 backfill；
+- E2E：隔离 Bifrost + Python upstream，普通代理高基数连接压力、容量/eviction/expiry 诊断、
+  转发成功与 snapshot generation 合并；
+- human test：以 `CACHE_STRESS_COUNT=18000` 执行真实进程、真实 socket table、真实 Admin API
+  链路，并保留诊断快照；
+- CI：E2E shell、workspace all-features、changed-lines 与 `coverage-all.sh --json --gate` 90%
+  门禁全部通过。

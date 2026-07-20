@@ -1,7 +1,54 @@
 use std::path::PathBuf;
 
+use bifrost_storage::DEFAULT_REMOTE_BASE_URL;
 use clap::{ArgAction, Parser, Subcommand, ValueEnum, ValueHint};
 use clap_complete::Shell;
+
+fn sync_token_login_url() -> String {
+    format!(
+        "{}/v4/sso/token-login",
+        DEFAULT_REMOTE_BASE_URL.trim_end_matches('/')
+    )
+}
+
+fn sync_login_token_help() -> String {
+    format!(
+        "Sync session token for non-interactive login; get one at {}",
+        sync_token_login_url()
+    )
+}
+
+fn top_level_login_long_about() -> String {
+    let remote = DEFAULT_REMOTE_BASE_URL.as_str();
+    let token_url = sync_token_login_url();
+    format!(
+        "Login to the sync service.\n\n\
+Equivalent to `bifrost sync login`. Without options, opens the\n\
+browser login flow. For CI or headless environments, pass a token\n\
+directly. If --url is omitted, Bifrost uses the configured sync\n\
+remote URL, which defaults to the built-in Bifrost provider.\n\n\
+Get a token from:\n  {token_url}\n\n\
+EXAMPLES:\n  bifrost login\n\
+  bifrost login --token \"$BIFROST_SYNC_TOKEN\"\n\
+  bifrost login --token \"$BIFROST_SYNC_TOKEN\" --url {remote}"
+    )
+}
+
+fn nested_sync_login_long_about() -> String {
+    let remote = DEFAULT_REMOTE_BASE_URL.as_str();
+    let token_url = sync_token_login_url();
+    format!(
+        "Login to the sync service.\n\n\
+Without options, opens the browser login flow. For CI or headless\n\
+environments, pass a token directly. If --url is omitted, Bifrost\n\
+uses the configured sync remote URL, which defaults to the built-in\n\
+Bifrost provider.\n\n\
+Get a token from:\n  {token_url}\n\n\
+EXAMPLES:\n  bifrost sync login\n\
+  bifrost sync login --token \"$BIFROST_SYNC_TOKEN\"\n\
+  bifrost sync login --token \"$BIFROST_SYNC_TOKEN\" --url {remote}"
+    )
+}
 
 #[derive(ValueEnum, Copy, Clone, Debug, PartialEq, Eq)]
 pub enum StatusFormat {
@@ -436,7 +483,7 @@ previous runtime settings."
         about = "Run an unattended background upgrade (used by tray/admin)"
     )]
     SelfUpdate {
-        #[arg(long, help = "Target version (informational; engine resolves latest)")]
+        #[arg(long, help = "Target version selected by the initiating version check")]
         target: Option<String>,
         #[arg(
             long,
@@ -444,6 +491,10 @@ previous runtime settings."
             help = "Who initiated the upgrade: tray/admin/cli"
         )]
         source: String,
+        #[arg(long, hide = true, requires = "running_proxy_port")]
+        running_proxy_pid: Option<u32>,
+        #[arg(long, hide = true, requires = "running_proxy_pid")]
+        running_proxy_port: Option<u16>,
     },
     #[command(visible_alias = "cfg", about = "Manage runtime configuration")]
     Config {
@@ -639,22 +690,7 @@ previous runtime settings."
     },
     #[command(
         about = "Login to sync service",
-        long_about = concat!(
-            "Login to the sync service.\n",
-            "\n",
-            "Equivalent to `bifrost sync login`. Without options, opens the\n",
-            "browser login flow. For CI or headless environments, pass a token\n",
-            "directly. If --url is omitted, Bifrost uses the configured sync\n",
-            "remote URL, which defaults to the built-in Bifrost provider.\n",
-            "\n",
-            "Get a token from:\n",
-            "  https://bifrost.bytedance.net/v4/sso/token-login\n",
-            "\n",
-            "EXAMPLES:\n",
-            "  bifrost login\n",
-            "  bifrost login --token \"$BIFROST_SYNC_TOKEN\"\n",
-            "  bifrost login --token \"$BIFROST_SYNC_TOKEN\" --url https://bifrost.bytedance.net",
-        )
+        long_about = top_level_login_long_about()
     )]
     Login {
         #[arg(
@@ -662,7 +698,7 @@ previous runtime settings."
             value_name = "TOKEN",
             num_args = 0..=1,
             default_missing_value = "",
-            help = "Sync session token for non-interactive login; get one at https://bifrost.bytedance.net/v4/sso/token-login"
+            help = sync_login_token_help()
         )]
         token: Option<String>,
         #[arg(
@@ -2582,22 +2618,7 @@ pub enum SyncCommands {
     Status,
     #[command(
         about = "Login to sync service",
-        long_about = concat!(
-            "Login to the sync service.\n",
-            "\n",
-            "Without options, opens the browser login flow. For CI or headless\n",
-            "environments, pass a token directly. If --url is omitted, Bifrost\n",
-            "uses the configured sync remote URL, which defaults to the built-in\n",
-            "Bifrost provider.\n",
-            "\n",
-            "Get a token from:\n",
-            "  https://bifrost.bytedance.net/v4/sso/token-login\n",
-            "\n",
-            "EXAMPLES:\n",
-            "  bifrost sync login\n",
-            "  bifrost sync login --token \"$BIFROST_SYNC_TOKEN\"\n",
-            "  bifrost sync login --token \"$BIFROST_SYNC_TOKEN\" --url https://bifrost.bytedance.net",
-        )
+        long_about = nested_sync_login_long_about()
     )]
     Login {
         #[arg(
@@ -2605,7 +2626,7 @@ pub enum SyncCommands {
             value_name = "TOKEN",
             num_args = 0..=1,
             default_missing_value = "",
-            help = "Sync session token for non-interactive login; get one at https://bifrost.bytedance.net/v4/sso/token-login"
+            help = sync_login_token_help()
         )]
         token: Option<String>,
         #[arg(

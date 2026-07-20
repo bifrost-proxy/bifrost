@@ -1271,11 +1271,188 @@ pub fn build_error_body(status_code: u16, error_info: &ConnectionErrorInfo) -> B
     Bytes::from(build_error_body_text(status_code, error_info))
 }
 
+fn escape_html_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+pub(crate) fn format_connection_endpoint(host: &str, port: u16) -> String {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+fn request_endpoint(request_url: &str) -> Option<String> {
+    let url = Url::parse(request_url).ok()?;
+    Some(format_connection_endpoint(
+        url.host_str()?,
+        url.port_or_known_default()?,
+    ))
+}
+
+/// Returns true only when the request explicitly advertises an HTML-capable media range.
+/// A missing `Accept` header or the generic `*/*` range is intentionally treated as plain text.
+pub(crate) fn request_explicitly_accepts_html(headers: &HeaderMap) -> bool {
+    let mut best_html_quality: Option<(u8, f32)> = None;
+
+    for value in headers.get_all(hyper::header::ACCEPT) {
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        for item in value.split(',') {
+            let mut segments = item.split(';');
+            let media_range = segments.next().unwrap_or("").trim().to_ascii_lowercase();
+            let mut quality = 1.0;
+            for (name, value) in segments.filter_map(|parameter| parameter.trim().split_once('=')) {
+                if name.trim().eq_ignore_ascii_case("q") {
+                    quality = value
+                        .trim()
+                        .parse::<f32>()
+                        .ok()
+                        .filter(|quality| (0.0..=1.0).contains(quality))
+                        .unwrap_or(0.0);
+                    break;
+                }
+            }
+            let specificity = match media_range.as_str() {
+                "text/html" | "application/xhtml+xml" => 2,
+                "text/*" => 1,
+                _ => continue,
+            };
+            if best_html_quality
+                .map(|(best_specificity, best_quality)| {
+                    specificity > best_specificity
+                        || (specificity == best_specificity && quality > best_quality)
+                })
+                .unwrap_or(true)
+            {
+                best_html_quality = Some((specificity, quality));
+            }
+        }
+    }
+
+    best_html_quality
+        .map(|(_, quality)| quality > 0.0)
+        .unwrap_or(false)
+}
+
+pub(crate) fn build_connection_error_body(
+    status_code: u16,
+    error_info: &ConnectionErrorInfo,
+    badge_rules_json: Option<&str>,
+) -> (Bytes, &'static str) {
+    let hostname = gethostname::gethostname().to_string_lossy().to_string();
+    let date = chrono::Local::now()
+        .format("%m/%d/%Y, %I:%M:%S %p")
+        .to_string();
+    let text = build_error_body_text_at(status_code, error_info, &hostname, &date);
+    let Some(rules_json) = badge_rules_json else {
+        return (Bytes::from(text), "text/plain; charset=utf-8");
+    };
+
+    let status = escape_html_text(&status_code.to_string());
+    let error_type = escape_html_text(error_info.error_type);
+    let error_message = escape_html_text(&error_info.error_message);
+    let upstream_target = escape_html_text(&error_info.host);
+    let request_target = request_endpoint(&error_info.request_url)
+        .map(|endpoint| escape_html_text(&endpoint))
+        .unwrap_or_else(|| "Unknown".to_string());
+    let request_url = escape_html_text(&error_info.request_url);
+    let rules_url = serde_json::from_str::<serde_json::Value>(rules_json)
+        .ok()
+        .and_then(|value| value.get("admin_port")?.as_u64())
+        .map(|port| format!("http://127.0.0.1:{port}/_bifrost/rules"));
+    let rules_action = rules_url.map_or_else(
+        || "<span class=\"hint\">Hover the Bifrost badge in the lower-left corner to inspect active rules.</span>".to_string(),
+        |url| format!("<a class=\"button primary\" href=\"{}\">Open Bifrost rules</a>", escape_html_text(&url)),
+    );
+    let suggestion = connection_error_suggestion(error_info).map_or_else(String::new, |value| {
+        format!(
+            "<div class=\"notice\"><strong>Certificate hint</strong><span>{}</span></div>",
+            escape_html_text(value)
+        )
+    });
+
+    let html = format!(
+        concat!(
+            "<!doctype html><html><head><meta charset=\"utf-8\">",
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
+            "<title>{status} · Upstream unavailable · Bifrost</title>",
+            "<style>",
+            ":root{{color-scheme:light dark;--bg:#f4f7fb;--glow:#dceaff;--card:rgba(255,255,255,.92);--text:#172033;--muted:#637089;--line:#dde4ef;--soft:#f7f9fc;--accent:#2563eb;--accent2:#1d4ed8;--danger:#dc2626;--shadow:0 24px 70px rgba(44,62,96,.16)}}",
+            "*{{box-sizing:border-box}}html,body{{min-height:100%}}body{{margin:0;background:radial-gradient(circle at 50% 8%,var(--glow),transparent 40%),var(--bg);color:var(--text);font:14px/1.5 Inter,-apple-system,BlinkMacSystemFont,\"Segoe UI\",sans-serif}}",
+            "main{{min-height:100vh;display:grid;place-items:center;padding:48px 24px 80px}}",
+            ".page{{width:min(760px,100%)}}.card{{overflow:hidden;border:1px solid var(--line);border-radius:24px;background:var(--card);box-shadow:var(--shadow);backdrop-filter:blur(12px)}}",
+            ".hero{{display:flex;gap:18px;align-items:flex-start;padding:30px 32px 24px;border-bottom:1px solid var(--line)}}",
+            ".icon{{display:grid;flex:0 0 48px;height:48px;place-items:center;border-radius:14px;background:#fee2e2;color:var(--danger);font-size:24px;font-weight:800}}",
+            ".eyebrow{{display:flex;align-items:center;gap:9px;margin:1px 0 7px;color:var(--muted);font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}}",
+            ".status{{padding:2px 8px;border-radius:999px;background:#fee2e2;color:#b91c1c;letter-spacing:0}}h1{{margin:0 0 7px;font-size:26px;line-height:1.2;letter-spacing:-.025em}}",
+            ".summary{{margin:0;color:var(--muted);font-size:15px}}.content{{display:grid;gap:20px;padding:24px 32px 30px}}",
+            ".error{{padding:15px 17px;border:1px solid #fecaca;border-radius:14px;background:#fff7f7;color:#991b1b;overflow-wrap:anywhere}}.error code{{font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;opacity:.72}}",
+            ".details{{display:grid;grid-template-columns:110px minmax(0,1fr);margin:0;border:1px solid var(--line);border-radius:14px;background:var(--soft);overflow:hidden}}",
+            ".details dt,.details dd{{margin:0;padding:10px 14px;border-bottom:1px solid var(--line)}}.details dt{{color:var(--muted);font-weight:600}}.details dd{{overflow-wrap:anywhere;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}}.details :nth-last-child(-n+2){{border-bottom:0}}",
+            ".guide h2{{margin:0 0 10px;font-size:15px}}.guide ol{{display:grid;gap:7px;margin:0;padding-left:22px;color:var(--muted)}}.guide strong{{color:var(--text)}}",
+            ".notice{{display:flex;gap:6px;flex-direction:column;padding:13px 15px;border:1px solid #fde68a;border-radius:12px;background:#fffbeb;color:#92400e}}",
+            ".actions{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-top:2px}}.button{{display:inline-flex;align-items:center;justify-content:center;min-height:38px;padding:0 15px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--text);font-weight:650;text-decoration:none;cursor:pointer}}",
+            ".button.primary{{border-color:var(--accent);background:var(--accent);color:#fff}}.button.primary:hover{{background:var(--accent2)}}.hint{{color:var(--muted);font-size:13px}}",
+            "details{{border-top:1px solid var(--line);padding-top:14px}}summary{{cursor:pointer}}pre{{margin:12px 0 0;padding:13px;border-radius:10px;background:var(--soft);white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}}",
+            "@media(max-width:600px){{main{{place-items:start center;padding:20px 12px 76px}}.card{{border-radius:18px}}.hero{{padding:23px 20px 19px}}.content{{padding:20px}}.icon{{flex-basis:42px;height:42px}}h1{{font-size:22px}}.details{{grid-template-columns:82px minmax(0,1fr)}}}}",
+            "@media(prefers-color-scheme:dark){{:root{{--bg:#0d1320;--glow:#172d55;--card:rgba(20,28,43,.94);--text:#edf3ff;--muted:#9ba9bf;--line:#2a3548;--soft:#151e2d;--accent:#3b82f6;--accent2:#60a5fa;--shadow:0 28px 80px rgba(0,0,0,.38)}}.icon,.status{{background:#451a1a;color:#fca5a5}}.error{{border-color:#632626;background:#291719;color:#fecaca}}.notice{{border-color:#644d18;background:#292414;color:#fde68a}}}}",
+            "</style></head><body><main><section class=\"page\" aria-labelledby=\"error-title\"><article class=\"card\">",
+            "<header class=\"hero\"><div class=\"icon\" aria-hidden=\"true\">!</div><div><div class=\"eyebrow\"><span class=\"status\">{status}</span> Bifrost proxy</div><h1 id=\"error-title\">Unable to reach the upstream service</h1><p class=\"summary\">Bifrost received your request, but could not connect to its destination.</p></div></header>",
+            "<div class=\"content\"><div class=\"error\"><code>{error_type}</code><br>{error_message}</div>",
+            "<dl class=\"details\"><dt>Status</dt><dd>{status}</dd><dt>Request target</dt><dd>{request_target}</dd><dt>Upstream target</dt><dd>{upstream_target}</dd><dt>Time</dt><dd>{date}</dd><dt>Request URL</dt><dd>{request_url}</dd></dl>",
+            "<section class=\"guide\"><h2>What you can do</h2><ol><li>Check that the target service is running and reachable.</li><li>Confirm the matched Bifrost rule points to the correct host and port.</li><li>After fixing the upstream or rule, retry this request.</li></ol></section>",
+            "{suggestion}<div class=\"actions\">{rules_action}<button class=\"button\" type=\"button\" onclick=\"location.reload()\">Try again</button></div>",
+            "<details><summary class=\"hint\">Raw diagnostics</summary><pre>{diagnostics}</pre></details>",
+            "</div></article></section></main></body></html>"
+        ),
+        status = status,
+        error_type = error_type,
+        error_message = error_message,
+        request_target = request_target,
+        upstream_target = upstream_target,
+        date = date,
+        request_url = request_url,
+        suggestion = suggestion,
+        rules_action = rules_action,
+        diagnostics = escape_html_text(&text),
+    );
+    let (body, injected) = maybe_inject_bifrost_badge_html(Bytes::from(html), rules_json);
+    debug_assert!(
+        injected,
+        "Bifrost connection error HTML must accept badge injection"
+    );
+    (body, "text/html; charset=utf-8")
+}
+
 fn build_error_body_text(status_code: u16, error_info: &ConnectionErrorInfo) -> String {
     let hostname = gethostname::gethostname().to_string_lossy().to_string();
     let now = chrono::Local::now();
     let date_str = now.format("%m/%d/%Y, %I:%M:%S %p").to_string();
 
+    build_error_body_text_at(status_code, error_info, &hostname, &date_str)
+}
+
+fn build_error_body_text_at(
+    status_code: u16,
+    error_info: &ConnectionErrorInfo,
+    hostname: &str,
+    date_str: &str,
+) -> String {
     let mut body = format!(
         "Status: {}\nError: {}\nFrom: Bifrost@{}\nHost: {}\nDate: {}\nURL: {}",
         status_code,
@@ -1306,13 +1483,30 @@ pub fn build_connection_error_response(
     status_code: u16,
     error_info: &ConnectionErrorInfo,
 ) -> Response<BoxBody> {
-    let body = build_error_body_text(status_code, error_info);
+    build_connection_error_response_with_badge(status_code, error_info, None)
+}
 
+pub(crate) fn build_connection_error_response_with_badge(
+    status_code: u16,
+    error_info: &ConnectionErrorInfo,
+    badge_rules_json: Option<&str>,
+) -> Response<BoxBody> {
+    let (body, content_type) =
+        build_connection_error_body(status_code, error_info, badge_rules_json);
+    build_connection_error_response_from_body(status_code, error_info, body, content_type)
+}
+
+pub(crate) fn build_connection_error_response_from_body(
+    status_code: u16,
+    error_info: &ConnectionErrorInfo,
+    body: Bytes,
+    content_type: &'static str,
+) -> Response<BoxBody> {
     Response::builder()
         .status(hyper::StatusCode::from_u16(status_code).unwrap_or(hyper::StatusCode::BAD_GATEWAY))
-        .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(hyper::header::CONTENT_TYPE, content_type)
         .header("X-Bifrost-Error", error_info.error_type)
-        .body(full_body(body.into_bytes()))
+        .body(full_body(body))
         .unwrap()
 }
 
@@ -1321,17 +1515,44 @@ pub fn build_overridden_error_response(
     default_status: u16,
     error_info: &ConnectionErrorInfo,
 ) -> Response<BoxBody> {
+    build_overridden_error_response_with_badge(rules, default_status, error_info, None)
+}
+
+pub(crate) fn build_overridden_error_response_with_badge(
+    rules: &ResolvedRules,
+    default_status: u16,
+    error_info: &ConnectionErrorInfo,
+    badge_rules_json: Option<&str>,
+) -> Response<BoxBody> {
     let status_code = rules
         .status_code
         .or(rules.replace_status)
         .unwrap_or(default_status);
 
-    let body = if let Some(ref res_body) = rules.res_body {
-        res_body.clone()
+    let (body, default_content_type) = if let Some(ref res_body) = rules.res_body {
+        (res_body.clone(), None)
     } else {
-        Bytes::from(build_error_body_text(status_code, error_info))
+        let (body, content_type) =
+            build_connection_error_body(status_code, error_info, badge_rules_json);
+        (body, Some(content_type))
     };
 
+    build_overridden_error_response_from_body(
+        rules,
+        status_code,
+        error_info,
+        body,
+        default_content_type,
+    )
+}
+
+pub(crate) fn build_overridden_error_response_from_body(
+    rules: &ResolvedRules,
+    status_code: u16,
+    error_info: &ConnectionErrorInfo,
+    body: Bytes,
+    default_content_type: Option<&'static str>,
+) -> Response<BoxBody> {
     let mut response = Response::builder()
         .status(hyper::StatusCode::from_u16(status_code).unwrap_or(hyper::StatusCode::BAD_GATEWAY));
 
@@ -1344,8 +1565,8 @@ pub fn build_overridden_error_response(
         }
     }
 
-    if rules.res_body.is_none() {
-        response = response.header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8");
+    if let Some(content_type) = default_content_type {
+        response = response.header(hyper::header::CONTENT_TYPE, content_type);
         response = response.header("X-Bifrost-Error", error_info.error_type);
     }
 
@@ -1877,6 +2098,7 @@ pub async fn handle_http_request(
     }
 
     let (mut parts, body) = req.into_parts();
+    let accepts_html_error = request_explicitly_accepts_html(&parts.headers);
     let request_origin = parts
         .headers
         .get(hyper::header::ORIGIN)
@@ -2352,14 +2574,38 @@ pub async fn handle_http_request(
             _ => is_https,
         }
     };
+    let error_badge_rules_json = if inject_bifrost_badge && accepts_html_error {
+        Some(build_badge_rules_json(admin_state.as_deref(), ctx.port).await)
+    } else {
+        None
+    };
     let build_conn_error_and_record =
         |error_type: &'static str, error_msg: String, err_tls_ms: Option<u64>| {
             let error_info = ConnectionErrorInfo {
                 error_type,
                 error_message: error_msg.clone(),
-                host: host.clone(),
+                host: format_connection_endpoint(&host, port),
                 request_url: url.clone(),
             };
+            let response_status = if needs_response_override(&resolved_rules) {
+                resolved_rules
+                    .status_code
+                    .or(resolved_rules.replace_status)
+                    .unwrap_or(502)
+            } else {
+                502
+            };
+            let (response_body, default_content_type) =
+                if let Some(ref res_body) = resolved_rules.res_body {
+                    (res_body.clone(), None)
+                } else {
+                    let (body, content_type) = build_connection_error_body(
+                        response_status,
+                        &error_info,
+                        error_badge_rules_json.as_deref(),
+                    );
+                    (body, Some(content_type))
+                };
             let total_ms = start_time.elapsed().as_millis() as u64;
             if let Some(ref state) = admin_state {
                 let mut record = TrafficRecord::new(
@@ -2368,14 +2614,7 @@ pub async fn handle_http_request(
                     record_url.clone(),
                 );
                 attach_devtools_client_req_id(&mut record, &devtools_client_req_id);
-                record.status = if needs_response_override(&resolved_rules) {
-                    resolved_rules
-                        .status_code
-                        .or(resolved_rules.replace_status)
-                        .unwrap_or(502)
-                } else {
-                    502
-                };
+                record.status = response_status;
                 record.duration_ms = total_ms;
                 record.host = original_host.clone();
                 record.timing = Some(RequestTiming {
@@ -2430,15 +2669,6 @@ pub async fn handle_http_request(
                     )
                 };
 
-                let response_body = if needs_response_override(&resolved_rules) {
-                    if let Some(ref res_body) = resolved_rules.res_body {
-                        res_body.clone()
-                    } else {
-                        build_error_body(record.status, &error_info)
-                    }
-                } else {
-                    build_error_body(502, &error_info)
-                };
                 record.response_body_ref = if state.get_super_performance_mode() {
                     None
                 } else if let Some(ref body_store) = state.body_store {
@@ -2454,18 +2684,18 @@ pub async fn handle_http_request(
                         for (name, value) in &resolved_rules.res_headers {
                             res_header_pairs.push((name.clone(), value.clone()));
                         }
-                        if resolved_rules.res_body.is_none() {
-                            res_header_pairs.push((
-                                "content-type".to_string(),
-                                "text/plain; charset=utf-8".to_string(),
-                            ));
+                        if let Some(content_type) = default_content_type {
+                            res_header_pairs
+                                .push(("content-type".to_string(), content_type.to_string()));
                             res_header_pairs
                                 .push(("x-bifrost-error".to_string(), error_type.to_string()));
                         }
                     } else {
                         res_header_pairs.push((
                             "content-type".to_string(),
-                            "text/plain; charset=utf-8".to_string(),
+                            default_content_type
+                                .unwrap_or("text/plain; charset=utf-8")
+                                .to_string(),
                         ));
                         res_header_pairs
                             .push(("x-bifrost-error".to_string(), error_type.to_string()));
@@ -2493,9 +2723,20 @@ pub async fn handle_http_request(
                         error_type
                     );
                 }
-                build_overridden_error_response(&resolved_rules, 502, &error_info)
+                build_overridden_error_response_from_body(
+                    &resolved_rules,
+                    response_status,
+                    &error_info,
+                    response_body,
+                    default_content_type,
+                )
             } else {
-                build_connection_error_response(502, &error_info)
+                build_connection_error_response_from_body(
+                    502,
+                    &error_info,
+                    response_body,
+                    default_content_type.unwrap_or("text/plain; charset=utf-8"),
+                )
             }
         };
 
@@ -3657,7 +3898,10 @@ pub async fn handle_http_request(
     };
 
     if inject_bifrost_badge {
-        let badge_rules_json = build_badge_rules_json(admin_state.as_deref(), ctx.port).await;
+        let badge_rules_json = match error_badge_rules_json.as_ref() {
+            Some(rules_json) => rules_json.clone(),
+            None => build_badge_rules_json(admin_state.as_deref(), ctx.port).await,
+        };
         let final_res_content_type = get_content_type(&res_parts);
         if final_res_content_type.starts_with("text/html") {
             if let Some(content_encoding) = response_content_encoding(&res_parts) {
@@ -6102,6 +6346,164 @@ mod coverage_boost {
         let overridden2 = build_overridden_error_response(&rules_with_body, 502, &info);
         assert_eq!(overridden2.status(), StatusCode::from_u16(504).unwrap());
         assert!(overridden2.headers().get("X-Bifrost-Error").is_none());
+    }
+
+    #[tokio::test]
+    async fn build_connection_error_response_with_badge_wraps_and_escapes_diagnostics() {
+        let info = ConnectionErrorInfo {
+            error_type: "REQUEST_FAILED",
+            error_message: "connect <script>alert(\"x\')</script> & failed".to_string(),
+            host: "<upstream.example>".to_string(),
+            request_url: "http://example.test/?q=<img>".to_string(),
+        };
+        let rules_json = r#"{"rules":[{"name":"active-rule","rule_count":1,"group_id":null,"group_name":null}],"merged_content":"example.test host://127.0.0.1:1","admin_port":18880}"#;
+
+        let response = build_connection_error_response_with_badge(502, &info, Some(rules_json));
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect error page")
+            .to_bytes();
+        let html = String::from_utf8(body.to_vec()).expect("utf-8 error page");
+
+        assert!(html.starts_with("<!doctype html>"));
+        assert!(html.contains("min-height:100vh;display:grid;place-items:center"));
+        assert!(html.contains("@media(prefers-color-scheme:dark)"));
+        assert!(html.contains("@media(max-width:600px)"));
+        assert!(html.contains("Unable to reach the upstream service"));
+        assert!(html.contains("What you can do"));
+        assert!(html.contains("Open Bifrost rules"));
+        assert!(html.contains("http://127.0.0.1:18880/_bifrost/rules"));
+        assert!(html.contains("Try again"));
+        assert!(html.contains("Raw diagnostics"));
+        assert!(html.contains("Status: 502"));
+        assert!(html.contains("<dt>Request target</dt><dd>example.test:80</dd>"));
+        assert!(html.contains("<dt>Upstream target</dt><dd>&lt;upstream.example&gt;</dd>"));
+        assert!(html.contains("Host: &lt;upstream.example&gt;"));
+        assert!(html.contains("q=&lt;img&gt;"));
+        assert!(
+            html.contains("connect &lt;script&gt;alert(&quot;x&#39;)&lt;/script&gt; &amp; failed")
+        );
+        assert!(!html.contains("Host: <upstream.example>"));
+        assert!(html.contains("__bifrost_badge__"));
+        assert!(html.contains("__bb_panel__"));
+        assert!(html.contains("active-rule"));
+        assert!(html.contains("Copy merged rules"));
+
+        let tls_info = ConnectionErrorInfo {
+            error_type: "REQUEST_TLS_FAILED",
+            error_message: "certificate verify failed".to_string(),
+            host: "tls.example".to_string(),
+            request_url: "https://tls.example/".to_string(),
+        };
+        let (hint_body, hint_content_type) =
+            build_connection_error_body(502, &tls_info, Some(r#"{"rules":[]}"#));
+        let hint_html = String::from_utf8(hint_body.to_vec()).expect("utf-8 hint page");
+        assert_eq!(hint_content_type, "text/html; charset=utf-8");
+        assert!(hint_html.contains("Certificate hint"));
+        assert!(hint_html.contains("upstreamUnsafeSsl://true"));
+        assert!(hint_html.contains("Hover the Bifrost badge"));
+
+        assert_eq!(
+            format_connection_endpoint("2001:db8::1", 8443),
+            "[2001:db8::1]:8443"
+        );
+        assert_eq!(
+            request_endpoint("https://example.test/path").as_deref(),
+            Some("example.test:443")
+        );
+        assert!(request_endpoint("not a URL").is_none());
+    }
+
+    #[test]
+    fn connection_error_html_requires_explicit_acceptable_media_range() {
+        let mut headers = HeaderMap::new();
+        assert!(!request_explicitly_accepts_html(&headers));
+
+        headers.insert(header::ACCEPT, HeaderValue::from_static("*/*"));
+        assert!(!request_explicitly_accepts_html(&headers));
+
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("application/json, text/plain;q=0.9"),
+        );
+        assert!(!request_explicitly_accepts_html(&headers));
+
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static(
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            ),
+        );
+        assert!(request_explicitly_accepts_html(&headers));
+
+        headers.insert(header::ACCEPT, HeaderValue::from_static("text/*;q=0.4"));
+        assert!(request_explicitly_accepts_html(&headers));
+
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("text/*;q=0.8, text/html;q=0"),
+        );
+        assert!(!request_explicitly_accepts_html(&headers));
+
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("text/html;q=0, text/html;q=0.7"),
+        );
+        assert!(request_explicitly_accepts_html(&headers));
+
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("text/html;q=invalid, */*"),
+        );
+        assert!(!request_explicitly_accepts_html(&headers));
+
+        headers.clear();
+        headers.append(
+            header::ACCEPT,
+            HeaderValue::from_bytes(b"\xff").expect("opaque header value"),
+        );
+        assert!(!request_explicitly_accepts_html(&headers));
+    }
+
+    #[tokio::test]
+    async fn overridden_connection_error_body_is_not_replaced_by_badge_page() {
+        let info = ConnectionErrorInfo {
+            error_type: "REQUEST_FAILED",
+            error_message: "connect failed".to_string(),
+            host: "upstream.example".to_string(),
+            request_url: "http://upstream.example/".to_string(),
+        };
+        let rules = ResolvedRules {
+            replace_status: Some(503),
+            res_body: Some(Bytes::from_static(b"custom error body")),
+            ..Default::default()
+        };
+
+        let response = build_overridden_error_response_with_badge(
+            &rules,
+            502,
+            &info,
+            Some(r#"{"rules":[],"merged_content":"","admin_port":18880}"#),
+        );
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(response.headers().get("X-Bifrost-Error").is_none());
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect custom error body")
+            .to_bytes();
+        assert_eq!(body, Bytes::from_static(b"custom error body"));
+        assert!(!body
+            .windows("__bifrost_badge__".len())
+            .any(|window| window == b"__bifrost_badge__"));
     }
 
     #[test]

@@ -281,23 +281,24 @@
 - 桌面状态栏的启动检查能看到桌面 App 更新，不会因为 CLI/core 已经最新而静默。
 - 如果无法读取 App bundle 版本，接口才回退到 CLI/core 版本并保持原有兼容行为。
 
-### TC-DAU-05 Admin API 桌面 channel 与 CLI channel 分离
+### TC-DAU-05 Admin API 以真实 runtime owner 决定桌面/CLI 编排
 
 操作步骤：
 
 1. 执行：
    ```bash
-   cargo test -p bifrost-admin handlers::system::tests::parse_upgrade_channel_defaults_to_cli_and_accepts_desktop_aliases --lib
+   cargo test -p bifrost-admin handlers::system::tests::runtime_owner_overrides_the_request_channel --lib
+   cargo test -p bifrost-admin handlers::system::tests::upgrade_process_args_separate_cli_and_desktop_channels --lib
    ```
 2. 检查测试通过。
 
 预期结果：
 
-- 默认 query 使用 CLI channel。
-- `channel=desktop`、`target=desktop`、`source=desktop` 均解析为桌面 channel。
-- desktop channel 派发 `app upgrade --version <v> --source desktop -y`，CLI channel 派发 `self-update --target <v> --source admin`。
+- CLI-owned core 即使收到 desktop query 也派发 `self-update --source admin`，并携带精确 PID/port。
+- App-owned core 即使收到 CLI query 也派发 `app upgrade --source desktop -y`，不携带 CLI restart hint。
+- desktop orchestrator 调用独立 CLI 时注入 skip-app/skip-restart，避免递归安装与双重重启。
 
-### TC-DAU-06 Web UI 桌面 channel 参数不回退到 CLI，CLI Web UI 不展示桌面按钮
+### TC-DAU-06 Web UI 标记所在 shell，服务端仍以 runtime owner 为准
 
 操作步骤：
 
@@ -311,8 +312,8 @@
 
 预期结果：
 
-- 普通 Web UI 不误触发桌面更新。
-- 桌面 shell 会把 version-check/start-upgrade 请求标记为 desktop channel。
+- 普通 Web UI 仍发送 CLI 标记，桌面 shell 仍发送 desktop 标记。
+- 服务端不把客户端标记当作重启所有权；最终以实际 core 是 CLI-owned 还是 App-owned 为准。
 - 浏览器打开的 CLI Web UI 不展示 App -> CLI / AI Skills 按钮。
 
 ### TC-DAU-06B App 一键安装 CLI 与 AI skills
@@ -612,6 +613,85 @@
 - CLI 安装请求期间发生 transient network error 时，前端不会直接把一次连接中断判定为最终安装失败。
 - core ready 后前端会重新读取 CLI install status；若已安装成功，用户看到成功态。
 
+### TC-DAU-14 macOS 更新 helper 只能 relaunch 一次
+
+操作步骤：
+
+1. 构建当前源码的真实 macOS App bundle：
+   ```bash
+   BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 pnpm run desktop:build:app
+   ```
+2. 记录当前桌面 App PID，然后受控退出旧 App；使用 `BIFROST_APP_SKIP_RESTART=1`
+   将构建产物安装到 `/Applications/Bifrost.app`，避免安装命令额外触发一次启动。
+3. 写入一次性 `desktop-upgrade-relaunch.json`，以修复后的
+   `/Applications/Bifrost.app/Contents/MacOS/bifrost-desktop` 进入 helper 模式。
+4. 等待日志出现 `desktop upgrade relaunch helper started` 后删除测试 marker，再结束步骤 2
+   记录的旧 App PID；测试 marker 使用未监听的临时端口，避免影响正式 `9900` core。
+5. 等待 helper 通过 LaunchServices 打开新 App，记录新 PID；连续观察至少 10 秒。
+6. 检查新 PID 的 launchd 环境不包含
+   `BIFROST_DESKTOP_UPGRADE_RELAUNCH_HELPER`、`BIFROST_DESKTOP_UPGRADE_RELAUNCH_MARKER`、
+   `BIFROST_DESKTOP_UPGRADE_RELAUNCH_TARGET`，并检查 `desktop-bootstrap.log` 完成 WebView handoff。
+
+预期结果：
+
+- helper 只打开一次目标 App，不产生 `helper -> open -> helper` 递归链。
+- 新 App 在观察窗口内保持同一个 PID，Dock 图标不再反复弹跳、退出和重启。
+- 测试 marker 不残留；正式 `9900` core 不被停止或替换。
+- 新 App 正常进入桌面启动路径，日志出现 `embedded webview handoff completed`。
+
+### TC-DAU-15 App 更新 handoff 不误认同端口外部健康服务
+
+操作步骤：
+
+1. 复核现场日志 `~/.bifrost/logs/desktop-bootstrap.log` 中的更新 handoff 片段，确认存在以下顺序：
+   - `desktop upgrade relaunch marker written`
+   - `desktop upgrade handoff is active; skipping existing backend reuse on port 9900`
+   - `starting desktop backend attempt ... port=9900`
+   - `desktop backend ready on 127.0.0.1:9900`
+   - `managed backend child ... exited with status`
+   - `watchdog reusing healthy backend on port 9900`
+2. 执行 desktop handoff shell 合约：
+   ```bash
+   node scripts/prepare-tauri-sidecar.mjs
+   bash e2e-tests/tests/test_desktop_upgrade_handoff_contract.sh
+   ```
+3. 执行 managed child ready 身份校验单测：
+   ```bash
+   CARGO_TARGET_DIR="$PWD/target/desktop-upgrade-handoff-contract" \
+     cargo test --manifest-path desktop/src-tauri/Cargo.toml wait_for_backend -- --nocapture
+   ```
+4. 代码复核 `desktop/src-tauri/src/main.rs` 中 `wait_for_backend` 先检查 child 是否已退出，再要求 `is_backend_ready(port)` 与 `runtime_marker_matches_child(data_dir, child_pid, port)` 同时为真。
+5. 代码复核 `runtime_marker_matches_child` 只接受 `runtime.json` 中 `pid` 与 `port` 同时匹配新拉起 child 的情况。
+
+预期结果：
+
+- App 更新 handoff 期间，即使 `127.0.0.1:9900` 已有其他健康 Bifrost 进程响应，新 App 也不会把该响应当作新 sidecar ready。
+- 如果新 sidecar 因端口竞争或启动失败提前退出，`wait_for_backend` 返回 child exited 错误，保留可诊断失败，而不是提前清理 handoff marker 并进入错误的 managed-ready 状态。
+- 当 `runtime.json` 的 `pid` 与 `port` 属于新拉起 child 时，managed startup 正常接受 ready，避免误伤正常启动路径。
+
+### TC-DAU-16 独立 CLI 版本探测可恢复 Unix ETXTBSY 瞬态碰撞
+
+操作步骤：
+
+1. 执行确定性 spawn 重试、版本输出解析与独立失败/超时 fixture 回归：
+   ```bash
+   source ~/.zshrc
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin cli_version_probe_ --lib -- --nocapture
+   ```
+2. 连续执行原 workspace 失败用例：
+   ```bash
+   source ~/.zshrc
+   for run in {1..20}; do
+     SKIP_FRONTEND_BUILD=1 cargo test -q -p bifrost-admin cli_version_probe_parses_output_and_rejects_failure_or_timeout --lib || exit 1
+   done
+   ```
+
+预期结果：
+
+- Unix `ETXTBSY` 前两次失败、第三次成功时恢复；持续 `ETXTBSY` 时恰好尝试 8 次后停止，总线性退避不超过 140ms。
+- 非 `ETXTBSY` 启动错误只尝试一次；版本命令失败、超时和路径缺失仍返回不可用。
+- 版本解析能从输出读取 `0.0.155` / `v0.0.156`，无关输出返回空；失败、超时使用不同的临时 fixture，连续 20 轮均通过，不再因覆写后立即执行同一路径而产生测试竞争。
+
 ## 清理步骤
 
 ```bash
@@ -643,3 +723,6 @@ bifrost app uninstall
 | 2026-07-07 | TC-DAU-08E / 08F | `pnpm --dir web run test:unit -- src/pages/Settings/tabs/ProxyTab.test.ts`; `pnpm --dir web run lint`; `pnpm --dir web run build`; 代码 review `web/src/pages/Settings/tabs/ProxyTab.tsx` | PASS：CLI 缺失时只展示 `Install CLI` 且请求 `install_skills=false`；CLI 已安装后隐藏 CLI 安装按钮并展示独立 AI Skills 按钮；Skills 已安装时文案为 `Reinstall AI Skills`。端口行改为 `Row align="bottom"`，输入框与 `Apply & Restart` 位于同一 test id 行，便于后续像素/坐标回归 |
 | 2026-07-10 | TC-DAU-11 | `bash e2e-tests/tests/test_desktop_upgrade_handoff_contract.sh` | PASS：macOS 本地 3/3 通过，覆盖 fresh/stale/unsupported marker 判定、stale marker 自动删除、active upgrade marker 禁止复用既有 backend；Linux CI runner 缺 `glib-2.0.pc` 或通用 shell shard 缺 `desktop/src-tauri/resources/bin/*` 时预期输出 SKIP，避免桌面编译前置条件缺失误伤 shell E2E |
 | 2026-07-10 | TC-DAU-12 / 13 | 代码 review `desktop/src-tauri/src/main.rs`、`web/src/App.tsx`，真实 App 更新 GUI 路径需发布包/桌面会话补跑 | 待复测：本轮新增日志可追踪 handoff 生命周期与 CLI install transient reconnect 后自动复查状态 |
+| 2026-07-14 | TC-DAU-14 | 构建并 ad-hoc 签名真实 `Bifrost.app`，安装到 `/Applications`；以 one-shot marker 启动修复后的 helper，helper 读取 marker 后删除测试 marker 并释放 hold PID；检查新 App PID、launchd 环境、正式 core PID 与 `desktop-bootstrap.log` | PASS：helper 只打开一次 App；新 PID `75504` 连续 10 秒稳定；三项 `BIFROST_DESKTOP_UPGRADE_RELAUNCH_*` 环境变量均未继承；marker 不残留；正式 core PID `19574` 未变化；WebView handoff 与证书预检完成。首次安装准备因同版本跳过覆盖而失败，改为先卸载旧 bundle、签名并恢复安装后完整重跑通过 |
+| 2026-07-16 | TC-DAU-15 | 现场日志复核 `desktop-bootstrap.log:14374-14410`；`node scripts/prepare-tauri-sidecar.mjs && bash e2e-tests/tests/test_desktop_upgrade_handoff_contract.sh`；`CARGO_TARGET_DIR="$PWD/target/desktop-upgrade-handoff-contract" cargo test --manifest-path desktop/src-tauri/Cargo.toml wait_for_backend -- --nocapture` | PASS：日志确认 App 更新后新进程跳过复用、在 9900 上误读健康响应、随后 managed child 退出并由 watchdog 复用健康后端；handoff 合约 5/5 通过；`wait_for_backend` 3/3 通过，覆盖外部健康服务不能满足 managed child ready 与匹配 runtime marker 正常 ready |
+| 2026-07-20 | TC-DAU-16 | `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin cli_version_probe_ --lib -- --nocapture`；连续 20 轮版本解析与独立失败/超时 fixture | PASS：4 个版本探测回归通过，覆盖 `ETXTBSY` 第三次恢复、持续占用 8 次停止、非瞬态错误不重试、版本输出解析以及独立失败/超时/缺失路径；原 workspace 失败用例连续 20/20 轮通过。 |

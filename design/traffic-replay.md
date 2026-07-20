@@ -110,7 +110,7 @@ Content-Type: application/json
   ],
   "refresh_auth": true,
   "refresh_auth_from": "latest",
-  "auth_source_host": "bits.bytedance.net",
+  "auth_source_host": "api.example.com",
   "timeout_ms": 30000
 }
 ```

@@ -1,0 +1,14 @@
+diff --git a/mlx_audio/stt/models/moss_transcribe_diarize/moss_transcribe_diarize.py b/mlx_audio/stt/models/moss_transcribe_diarize/moss_transcribe_diarize.py
+index 7567468..bb72500 100644
+--- a/mlx_audio/stt/models/moss_transcribe_diarize/moss_transcribe_diarize.py
++++ b/mlx_audio/stt/models/moss_transcribe_diarize/moss_transcribe_diarize.py
+@@ -278,2 +277,0 @@ class Model(nn.Module):
+-        already_converted = any("scales" in k for k in weights)
+-
+@@ -301,2 +299 @@ class Model(nn.Module):
+-                not already_converted
+-                and new_key.startswith("model.whisper_encoder.")
++                new_key.startswith("model.whisper_encoder.")
+@@ -305,0 +303,2 @@ class Model(nn.Module):
++                and v.shape[1] != 3
++                and v.shape[2] == 3

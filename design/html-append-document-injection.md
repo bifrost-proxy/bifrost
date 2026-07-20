@@ -5,7 +5,7 @@
 Bifrost 的 `htmlAppend://` / `htmlPrepend://` / `htmlBody://`、`jsAppend://` / `jsPrepend://` / `jsBody://`、`cssAppend://` / `cssPrepend://` / `cssBody://` 用于在响应体上按 Content-Type 分类做前置/追加/整段替换。这一族协议在实际使用中是前端 debug、灰度注入、A/B 埋点、vConsole 分发等场景的核心工具。真实规则示例：
 
 ```text
-https://nextoncall.bytedance.net/ htmlAppend://{vconsole-inject}
+https://app.example.com/ htmlAppend://{vconsole-inject}
 *.qq.com/ htmlAppend://{vconsole-inject}
 ```
 
@@ -14,7 +14,7 @@ https://nextoncall.bytedance.net/ htmlAppend://{vconsole-inject}
 1. `htmlAppend` 直接把注入内容拼到整个 HTML 字符串末尾，导致内容落在 `</html>` 之后，浏览器解析大型前端页面可能产生 DOM 位置错乱或渲染异常。
 2. Badge 注入把 Merged Rules 作为 JSON 内联到 `<script>`；规则文本自身包含 `</script>` 时会提前闭合 Badge 脚本，规则文本被浏览器当成真实 HTML 解析。
 3. `WildcardMatcher` 对带尾部 `/` 的通配域名（如 `*.qq.com/`）编译成“域名后已有 `/`，再追加 `(/.*)?`”，导致子路径请求需要两个连续斜杠才匹配；无尾斜杠 URL 漏匹配。
-4. HTTPS 解包后的 tunnel 响应链路没有执行 `apply_content_injection`，`nextoncall.bytedance.net/assistant -> http://localhost:5173/assistant` 命中 `HtmlAppend + Http` 只记录规则命中，不改写响应体。
+4. HTTPS 解包后的 tunnel 响应链路没有执行 `apply_content_injection`，`app.example.com/assistant -> http://localhost:5173/assistant` 命中 `HtmlAppend + Http` 只记录规则命中，不改写响应体。
 5. `mock/file/rawfile/template/status` 立即响应绕过响应体处理链，规则命中但生成资源未被注入。
 6. 带 `Content-Encoding: gzip/deflate/br/zstd` 的响应被直接当作 UTF-8 HTML 拼接，生成“gzip 数据 + 明文脚本”的损坏响应。
 7. HTTPS MITM tunnel 上游 HTTP/2 拉取 3.4MB PNG（`h5.news.qq.com/static/culture.shtml` 背景图 `mat1.gtimg.com/.../202309061523.png`）在约 180KB 后 `INTERNAL_ERROR`，浏览器报 `net::ERR_HTTP2_PROTOCOL_ERROR`，页面加载完成但白屏。

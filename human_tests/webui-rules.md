@@ -912,10 +912,10 @@
 **前置条件**：
 1. 至少启用两段同 matcher 的规则，内容包含：
    ```text
-   https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_old","x-use-ppe":"1"}
-   https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://
-   https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_new","x-use-ppe":"1"}
-   https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://
+   https://app.example.com/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_old","x-use-ppe":"1"}
+   https://app.example.com/api/v1/oncall/ passthrough://
+   https://app.example.com/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_new","x-use-ppe":"1"}
+   https://app.example.com/api/v1/oncall/ passthrough://
    https://partial.example.test/api/internal/ reqHeaders://{"x-env":"narrow"}
    https://partial.example.test/api/ reqHeaders://{"x-env":"broad","x-stable":"keep"}
    ```

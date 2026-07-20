@@ -377,21 +377,21 @@ mod tests {
     #[test]
     fn test_explicit_https_path_wildcard_support() {
         let matcher = PathWildcardMatcher::new(
-            "^https://cdn-tos-cn.bytedance.net/obj/archi/obj/okrx-web/approvals-web/1.0.0.*/index.html",
+            "^https://cdn.example.com/obj/archi/obj/okrx-web/approvals-web/1.0.0.*/index.html",
         )
         .unwrap();
 
         let result = matcher.matches(
-            "https://cdn-tos-cn.bytedance.net/obj/archi/obj/okrx-web/approvals-web/1.0.0.3505/index.html",
-            "cdn-tos-cn.bytedance.net",
+            "https://cdn.example.com/obj/archi/obj/okrx-web/approvals-web/1.0.0.3505/index.html",
+            "cdn.example.com",
             "/obj/archi/obj/okrx-web/approvals-web/1.0.0.3505/index.html",
         );
         assert!(result.matched);
         assert_eq!(result.captures, Some(vec!["3505".to_string()]));
 
         let result = matcher.matches(
-            "http://cdn-tos-cn.bytedance.net/obj/archi/obj/okrx-web/approvals-web/1.0.0.3505/index.html",
-            "cdn-tos-cn.bytedance.net",
+            "http://cdn.example.com/obj/archi/obj/okrx-web/approvals-web/1.0.0.3505/index.html",
+            "cdn.example.com",
             "/obj/archi/obj/okrx-web/approvals-web/1.0.0.3505/index.html",
         );
         assert!(!result.matched);

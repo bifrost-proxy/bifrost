@@ -189,6 +189,15 @@ filtered_shell_tests="$(
     --list-shell-tests
 )"
 [[ "$filtered_shell_tests" == $'test_trustworthy_traffic_metrics.sh\ntest_socks5_tls_rules.sh' ]]
+for startup_sensitive_test in \
+  test_body_cache_sync_cleanup_admin_api.sh \
+  test_process_resolution_performance.sh \
+  test_super_performance_mode.sh \
+  test_upgrade_tls_trust_e2e.sh; do
+  grep -Fq "\"$startup_sensitive_test\"" "$runner"
+done
+grep -Fq 'local STARTUP_SENSITIVE_TESTS=(' "$runner"
+grep -Fq '"$is_startup_sensitive" -eq 1' "$runner"
 BIFROST_E2E_CAPABILITY_SHARDS=1 BIFROST_E2E_SHELL_JOBS=2 bash "$runner" \
   --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build \
   --shard 1/3 --check-shell-shard-balance

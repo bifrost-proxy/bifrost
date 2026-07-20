@@ -44,6 +44,21 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  release-contract:
+    name: Release Workflow Contract (MOSS macOS)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate MOSS release and initializer contract
+        shell: bash
+        run: bash e2e-tests/tests/test_asr_moss_release_contract.sh
+      - name: Exercise shared MOSS release packager
+        shell: bash
+        run: bash scripts/ci/test-package-moss-release-runtime.sh
+      - name: Verify macOS core release payload stays lightweight
+        shell: bash
+        run: bash scripts/ci/test-macos-release-core-payload.sh
+
   fmt:
     name: Rust Format Check
     runs-on: ubuntu-latest
@@ -683,6 +698,9 @@ jobs:
         run: bash scripts/ci/prepare-sherpa-onnx-archive.sh aarch64-apple-darwin
       - name: Build CLI
         run: cargo build -p bifrost-cli --release --target aarch64-apple-darwin
+      - name: Verify macOS CLI binary stays lightweight
+        shell: bash
+        run: bash scripts/ci/check-macos-release-core-payload.sh target/aarch64-apple-darwin/release/bifrost
       - name: Upload release binary
         uses: actions/upload-artifact@v4
         with:
@@ -729,6 +747,9 @@ jobs:
         env:
           SKIP_FRONTEND_BUILD: "1"
         run: cargo build -p bifrost-cli --release --target x86_64-apple-darwin
+      - name: Verify macOS CLI binary stays lightweight
+        shell: bash
+        run: bash scripts/ci/check-macos-release-core-payload.sh target/x86_64-apple-darwin/release/bifrost
       - name: Upload release binary
         uses: actions/upload-artifact@v4
         with:
@@ -1076,6 +1097,7 @@ jobs:
           fi
 
           bash scripts/resign-macos-app.sh "${APP_PATH}"
+          bash scripts/validate-macos-desktop-architectures.sh "${APP_PATH}" "${{ matrix.target }}"
       - name: Package macOS desktop dmg
         shell: bash
         run: |
@@ -1088,6 +1110,8 @@ jobs:
           ARCH_SUFFIX=$( [[ "${{ matrix.target }}" == "x86_64-apple-darwin" ]] && echo x64 || echo aarch64 )
           DMG_PATH="desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/Bifrost_ci_${ARCH_SUFFIX}.dmg"
           bash scripts/package-macos-dmg.sh "${APP_PATH}" "${DMG_PATH}"
+          bash scripts/ci/check-macos-release-core-payload.sh "${APP_PATH}"
+          bash scripts/ci/check-macos-release-core-payload.sh "${DMG_PATH}"
       - name: Validate macOS desktop bundle
         shell: bash
         run: |
@@ -1156,6 +1180,24 @@ jobs:
           name: bifrost-release-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/bifrost.exe
           retention-days: 1
+      - name: Build pinned upgrade target fixture
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: bash
+        run: |
+          workspace_version="$(sed -nE 's/^version = "([0-9]+\.[0-9]+\.)([0-9]+)"/\1\2/p' Cargo.toml | head -n1)"
+          if [[ ! "$workspace_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Could not derive the workspace version for the upgrade fixture" >&2
+            exit 1
+          fi
+          target_version="${workspace_version%.*}.$((${workspace_version##*.} + 1))"
+          BIFROST_VERSION="$target_version" cargo build -p bifrost-cli --release --target "${{ matrix.target }}"
+      - name: Upload pinned upgrade target fixture
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bifrost-upgrade-target-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/bifrost.exe
+          retention-days: 1
 
   build-desktop-windows:
     name: Build Windows (${{ matrix.target }})
@@ -1222,10 +1264,16 @@ jobs:
         with:
           name: bifrost-release-x86_64-pc-windows-msvc
           path: target/release
+      - name: Download pinned upgrade target fixture
+        uses: actions/download-artifact@v4
+        with:
+          name: bifrost-upgrade-target-x86_64-pc-windows-msvc
+          path: target/upgrade-fixture
       - name: E2E upgrade restart with Windows self-update replacement
         shell: bash
         env:
           BIFROST_BIN: ${{ github.workspace }}/target/release/bifrost.exe
+          BIFROST_UPGRADE_E2E_TARGET_BIN: ${{ github.workspace }}/target/upgrade-fixture/bifrost.exe
           BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN: "1"
           BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES: "1"
           # No BIFROST_UPGRADE_E2E_VERSION override: the test derives the upgrade

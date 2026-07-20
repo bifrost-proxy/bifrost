@@ -54,7 +54,6 @@ pub fn init_database(conn: &mut Connection) -> Result<(), InitError> {
         ",
     )?;
 
-    run_migrations(conn)?;
     check_schema_version(conn)?;
     conn.execute_batch(SCHEMA_SQL)?;
 
@@ -76,80 +75,6 @@ fn get_schema_version(conn: &Connection) -> u32 {
         },
     )
     .unwrap_or(0)
-}
-
-fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, InitError> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    for row in rows {
-        if row? == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn add_column_if_missing(
-    conn: &Connection,
-    table: &str,
-    column: &str,
-    definition: &str,
-) -> Result<(), InitError> {
-    if !column_exists(conn, table, column)? {
-        conn.execute_batch(&format!(
-            "ALTER TABLE {} ADD COLUMN {} {}",
-            table, column, definition
-        ))?;
-    }
-    Ok(())
-}
-
-fn run_migrations(conn: &Connection) -> Result<(), InitError> {
-    let current_version = get_schema_version(conn);
-    if current_version == 0 {
-        return Ok(());
-    }
-    if current_version > SCHEMA_VERSION {
-        return Err(InitError::VersionMismatch {
-            current: current_version,
-            expected: SCHEMA_VERSION,
-        });
-    }
-
-    if current_version < 13 {
-        add_column_if_missing(
-            conn,
-            "traffic_records",
-            "upload_bytes",
-            "INTEGER NOT NULL DEFAULT 0",
-        )?;
-        add_column_if_missing(
-            conn,
-            "traffic_records",
-            "download_bytes",
-            "INTEGER NOT NULL DEFAULT 0",
-        )?;
-        conn.execute_batch(
-            "UPDATE traffic_records \
-             SET upload_bytes = CASE WHEN upload_bytes = 0 THEN request_size ELSE upload_bytes END, \
-                 download_bytes = CASE WHEN download_bytes = 0 THEN response_size ELSE download_bytes END",
-        )?;
-    }
-
-    if current_version < 14 {
-        add_column_if_missing(conn, "traffic_records", "account_name", "TEXT")?;
-        conn.execute_batch(
-            "CREATE INDEX IF NOT EXISTS idx_account_name \
-             ON traffic_records(account_name) WHERE account_name IS NOT NULL;",
-        )?;
-    }
-
-    conn.execute(
-        "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', ?)",
-        [SCHEMA_VERSION.to_string()],
-    )?;
-
-    Ok(())
 }
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS traffic_records (

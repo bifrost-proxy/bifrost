@@ -113,6 +113,45 @@ create_local_release_archive() {
     mkdir -p "$package_dir"
     cp "$binary" "${package_dir}/bifrost"
     chmod +x "${package_dir}/bifrost" 2>/dev/null || true
+
+    # The checked-in workspace version cannot be bumped merely to manufacture
+    # a newer E2E release. Patch the equal-length version bytes in this temporary
+    # copy, then execute it before packaging. This keeps the real binary's
+    # install/restart behavior while making post-install version verification
+    # meaningful instead of relying on a test-only bypass.
+    local current_version py
+    current_version="$("$binary" --version 2>/dev/null | awk '{print $NF}' | sed 's/^v//')"
+    if [[ "$current_version" != "$version" ]]; then
+        if [[ ${#current_version} -ne ${#version} ]]; then
+            echo "cannot patch E2E binary version with a different byte length" >&2
+            return 1
+        fi
+        py="$(python3_cmd 2>/dev/null || true)"
+        [[ -z "$py" ]] && return 1
+        "$py" - "${package_dir}/bifrost" "$current_version" "$version" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+old = sys.argv[2].encode()
+new = sys.argv[3].encode()
+data = path.read_bytes()
+count = data.count(old)
+if count == 0:
+    raise SystemExit(f"compiled version bytes {old!r} not found in {path}")
+path.write_bytes(data.replace(old, new))
+PY
+        if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
+            codesign --force --sign - "${package_dir}/bifrost" >/dev/null 2>&1
+        fi
+    fi
+    local packaged_version
+    packaged_version="$("${package_dir}/bifrost" --version 2>/dev/null | awk '{print $NF}' | sed 's/^v//')"
+    if [[ "$packaged_version" != "$version" ]]; then
+        echo "temporary E2E binary reports ${packaged_version:-unknown}, expected $version" >&2
+        return 1
+    fi
+
     local archive_path="${archive_root}/bifrost-v${version}-${target}.tar.xz"
     tar -C "$archive_root" -cJf "$archive_path" "bifrost-v${version}-${target}"
     echo "$archive_path"
@@ -272,9 +311,32 @@ test_admin_api_upgrade_restarts_daemon_with_new_binary() {
         return 1
     }
 
-    # Drive the NEW feature path: POST /api/system/upgrade.
-    local upgrade_resp phase source
-    upgrade_resp="$(admin_curl POST /api/system/upgrade)"
+    # Drive two simultaneous Web UI clicks. Exactly one request may claim and
+    # spawn the updater; the other must observe active progress and return 409.
+    local response_a="$TEST_ROOT/upgrade-a.json" response_b="$TEST_ROOT/upgrade-b.json"
+    local code_a_file="$TEST_ROOT/upgrade-a.code" code_b_file="$TEST_ROOT/upgrade-b.code"
+    env NO_PROXY='*' no_proxy='*' curl -sS -X POST --connect-timeout 2 --max-time 15 \
+        -o "$response_a" -w '%{http_code}' \
+        "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/system/upgrade" >"$code_a_file" &
+    local post_a_pid=$!
+    env NO_PROXY='*' no_proxy='*' curl -sS -X POST --connect-timeout 2 --max-time 15 \
+        -o "$response_b" -w '%{http_code}' \
+        "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/system/upgrade" >"$code_b_file" &
+    local post_b_pid=$!
+    wait "$post_a_pid" || true
+    wait "$post_b_pid" || true
+    local code_a code_b upgrade_resp phase source
+    code_a="$(cat "$code_a_file" 2>/dev/null)"
+    code_b="$(cat "$code_b_file" 2>/dev/null)"
+    if [[ "$code_a $code_b" == "202 409" ]]; then
+        upgrade_resp="$(cat "$response_a")"
+    elif [[ "$code_a $code_b" == "409 202" ]]; then
+        upgrade_resp="$(cat "$response_b")"
+    else
+        _log_fail "concurrent POSTs have one upgrade owner" "202 + 409" "$code_a + $code_b"
+        return 1
+    fi
+    _log_pass "concurrent POSTs serialized to one updater (HTTP $code_a + $code_b)"
     phase="$(json_field "$upgrade_resp" phase)"
     source="$(json_field "$upgrade_resp" source)"
     if [[ "$phase" != "checking" && "$phase" != "downloading" ]]; then
@@ -282,7 +344,7 @@ test_admin_api_upgrade_restarts_daemon_with_new_binary() {
         return 1
     fi
     assert_equals "admin" "$source" "POST upgrade records source=admin" || return 1
-    _log_pass "POST /api/system/upgrade accepted (phase=$phase, source=admin)"
+    _log_pass "POST /api/system/upgrade accepted once (phase=$phase, source=admin)"
 
     # Poll progress across the restart window. The admin endpoint goes down while
     # the proxy restarts, then comes back and reads terminal state from the file.
@@ -402,6 +464,7 @@ test_background_self_update_restarts_when_disk_binary_already_latest() {
     BIFROST_DATA_DIR="$TEST_DATA_DIR" \
     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
     BIFROST_DISABLE_TRAY=1 \
+    BIFROST_APP_INSTALL_DIR="$TEST_ROOT/no-desktop-app" \
     "$INSTALL_BIN" start -p "$PROXY_PORT" --host 127.0.0.1 --daemon \
         --access-mode allow_all --skip-cert-check --no-system-proxy \
         --no-intercept "${tray_args[@]}" -y >/tmp/bifrost-admin-upgrade-already-latest-start.log 2>&1
@@ -433,6 +496,7 @@ test_background_self_update_restarts_when_disk_binary_already_latest() {
     BIFROST_DISABLE_TRAY=1 \
     BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES=1 \
     BIFROST_UPGRADE_TEST_LATEST_VERSION="$current_version" \
+    BIFROST_APP_INSTALL_DIR="$TEST_ROOT/no-desktop-app" \
     "$INSTALL_BIN" self-update --target "$current_version" --source admin \
         >/tmp/bifrost-admin-upgrade-already-latest-self-update.log 2>&1 || {
         _log_fail "background self-update exits 0" "success" "$(cat /tmp/bifrost-admin-upgrade-already-latest-self-update.log 2>/dev/null)"

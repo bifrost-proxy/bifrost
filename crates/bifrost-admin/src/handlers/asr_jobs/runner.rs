@@ -186,6 +186,7 @@ fn discover_and_prepare_pending_batch(
     task: &AsrDirectoryTask,
     files: &mut FileStore,
     attempted_keys: &HashSet<String>,
+    recording_date: Option<NaiveDate>,
 ) -> Result<PendingBatchScan, String> {
     let discovered = discover_audio_files(&task.audio_dir, task.recursive)?;
     for path in &discovered {
@@ -211,10 +212,17 @@ fn discover_and_prepare_pending_batch(
                     .files
                     .get(&key)
                     .map(|record| {
-                        matches!(
-                            record.status,
-                            FileStatus::Pending | FileStatus::Processing | FileStatus::Failed
-                        )
+                        recording_date.is_none_or(|date| {
+                            file_record_local_date(record).is_some_and(|candidate| candidate == date)
+                        })
+                            && (matches!(
+                                record.status,
+                                FileStatus::Pending | FileStatus::Processing
+                            ) || (record.status == FileStatus::Failed
+                                && (recording_date.is_some()
+                                    || !moss_failure_is_non_retryable_for_unchanged_source(
+                                        task, path, record,
+                                    ))))
                     })
                     .unwrap_or(true)
         })
@@ -222,6 +230,14 @@ fn discover_and_prepare_pending_batch(
         .collect::<Vec<_>>();
     sort_pending_paths_by_source_time(files, &mut pending);
     Ok(PendingBatchScan { pending })
+}
+
+fn file_record_local_date(record: &FileRecord) -> Option<NaiveDate> {
+    let timestamp_ms = i64::try_from(record.source_created_at_ms?).ok()?;
+    Local
+        .timestamp_millis_opt(timestamp_ms)
+        .earliest()
+        .map(|timestamp| timestamp.date_naive())
 }
 
 fn sort_pending_paths_by_source_time(files: &FileStore, pending: &mut [PathBuf]) {
@@ -249,8 +265,9 @@ fn pending_modified_time_ms(record: Option<&FileRecord>) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-async fn run_directory_task(
+async fn run_directory_task_for_date(
     task: AsrDirectoryTask,
+    recording_date: Option<NaiveDate>,
 ) -> Result<(AsrDirectoryTask, usize, usize), String> {
     let _guard = ASR_JOB_RUN_LOCK.lock().await;
     let _task_lock = TaskRunFileLock::acquire(&task.id)?;
@@ -273,8 +290,12 @@ async fn run_directory_task(
         );
     }
     let mut attempted_keys = HashSet::new();
-    let mut pending_scan =
-        discover_and_prepare_pending_batch(&task, &mut files, &attempted_keys)?;
+    let mut pending_scan = discover_and_prepare_pending_batch(
+        &task,
+        &mut files,
+        &attempted_keys,
+        recording_date,
+    )?;
     update_run_progress(&task.id, |progress| {
         progress.current_file_total = pending_scan.pending.len();
         progress.current_file_index = 0;
@@ -298,6 +319,7 @@ async fn run_directory_task(
                 task
             }
         };
+        spawn_daily_agent_original_files_after_refresh(&updated);
         return Ok((updated, 0, 0));
     }
 
@@ -328,6 +350,7 @@ async fn run_directory_task(
     tracing::info!(
         task_id = %task.id,
         model = %task.model,
+        transcription_mode = task.transcription_mode.as_str(),
         language = %task.language,
         runtime_strategy = task.runtime_strategy.as_str(),
         pending_files = pending_scan.pending.len(),
@@ -340,7 +363,9 @@ async fn run_directory_task(
     // degradation that makes Plan A ~2× slower on batch workloads.
     let asr_bin = target.install_dir().join("asr");
     let model_path = target.model_dir();
-    if !asr_bin.is_file() {
+    if task.transcription_mode == AsrTranscriptionMode::MossJoint {
+        ensure_moss_joint_runtime(&target.home, &task.id).await?;
+    } else if !asr_bin.is_file() {
         // Attempt asset repair before giving up.
         crate::handlers::asr::run_initializer_silent_pub(target.clone())
             .await
@@ -352,7 +377,7 @@ async fn run_directory_task(
             ));
         }
     }
-    if !model_path.join("tokenizer.json").is_file() {
+    if task_uses_standard_runtime(&task) && !model_path.join("tokenizer.json").is_file() {
         return Err(format!(
             "ASR model not found at {} — run ASR initialization first",
             model_path.display()
@@ -362,7 +387,7 @@ async fn run_directory_task(
     let mut server_url = None::<String>;
     let mut startup_fallback_reason = None::<String>;
     let mut stop_task_server_after_use = false;
-    if task.runtime_strategy.uses_task_lifetime_server() {
+    if task_uses_task_lifetime_server(&task) {
         match start_task_managed_server(&task, &target, "task").await {
             Ok(server) => {
                 server_url = Some(server.server_url);
@@ -425,11 +450,15 @@ async fn run_directory_task(
         failed_now += batch_failed;
 
         files = load_file_store(&task.id);
-        pending_scan =
-            match discover_and_prepare_pending_batch(&task, &mut files, &attempted_keys) {
-                Ok(scan) => scan,
-                Err(error) => break Err(error),
-            };
+        pending_scan = match discover_and_prepare_pending_batch(
+            &task,
+            &mut files,
+            &attempted_keys,
+            recording_date,
+        ) {
+            Ok(scan) => scan,
+            Err(error) => break Err(error),
+        };
         update_run_progress(&task.id, |progress| {
             progress.current_file_index = 0;
             progress.current_file_total = pending_scan.pending.len();
@@ -488,6 +517,7 @@ async fn run_directory_task(
             task
         }
     };
+    spawn_daily_agent_original_files_after_refresh(&updated);
     // Hook: trigger Daily Agent if configured
     maybe_enqueue_daily_agent_after_asr_run(&updated).await;
 
@@ -505,6 +535,13 @@ impl Drop for SpeechResourceLeaseGuard {
 }
 
 fn spawn_directory_task_run_background(task: AsrDirectoryTask) -> Result<(), String> {
+    spawn_directory_task_run_background_for_date(task, None)
+}
+
+fn spawn_directory_task_run_background_for_date(
+    task: AsrDirectoryTask,
+    recording_date: Option<NaiveDate>,
+) -> Result<(), String> {
     FORCE_PAUSED_TASKS.lock().unwrap().remove(&task.id);
     let running_guard = RunningTaskGuard::acquire(&task.id)
         .map_err(|_| "ASR task is already running".to_string())?;
@@ -513,7 +550,7 @@ fn spawn_directory_task_run_background(task: AsrDirectoryTask) -> Result<(), Str
     let task_clone = task.clone();
     tokio::spawn(async move {
         let running_guard = running_guard;
-        let result = run_directory_task(task_clone.clone()).await;
+        let result = run_directory_task_for_date(task_clone.clone(), recording_date).await;
         match &result {
             Ok((_updated, processed, failed)) => {
                 finish_run_progress(
@@ -873,6 +910,58 @@ async fn process_pending_files_parallel_fork(
     ))
 }
 
+fn task_uses_standard_runtime(task: &AsrDirectoryTask) -> bool {
+    task.transcription_mode == AsrTranscriptionMode::Standard
+}
+
+fn task_uses_external_diarization(task: &AsrDirectoryTask) -> bool {
+    task.diarization.enabled && !task.transcription_mode.uses_native_speakers()
+}
+
+fn task_uses_task_lifetime_server(task: &AsrDirectoryTask) -> bool {
+    task_uses_standard_runtime(task) && task.runtime_strategy.uses_task_lifetime_server()
+}
+
+fn task_uses_file_lifetime_server(task: &AsrDirectoryTask) -> bool {
+    task_uses_standard_runtime(task) && task.runtime_strategy == AsrRuntimeStrategy::ReusePerFile
+}
+
+fn task_initial_processing_stage(task: &AsrDirectoryTask) -> (&'static str, Option<String>) {
+    if task_uses_external_diarization(task) {
+        (
+            "normalize",
+            Some(format!(
+                "speaker diarization profile: {}",
+                task.diarization.profile
+            )),
+        )
+    } else {
+        ("asr", None)
+    }
+}
+
+fn task_external_diarization_profile(task: &AsrDirectoryTask) -> Option<String> {
+    task_uses_external_diarization(task).then(|| task.diarization.profile.clone())
+}
+
+fn task_asr_stage_message(task: &AsrDirectoryTask) -> &'static str {
+    if task.transcription_mode.uses_native_speakers() {
+        "jointly transcribing audio with native speaker labels"
+    } else if task.diarization.enabled {
+        "transcribing diarized audio segments"
+    } else {
+        "transcribing audio"
+    }
+}
+
+fn effective_task_model(task: &AsrDirectoryTask) -> String {
+    if task.transcription_mode == AsrTranscriptionMode::MossJoint {
+        "MOSS-Transcribe-Diarize-MLX-8bit".to_string()
+    } else {
+        task.model.clone()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_pending_files_sequential(
     task: &AsrDirectoryTask,
@@ -903,15 +992,9 @@ async fn process_pending_files_sequential(
             progress.current_chunk_total = 0;
             progress.processed_now = processed_now;
             progress.failed_now = failed_now;
-            progress.stage = if task.diarization.enabled {
-                "normalize".to_string()
-            } else {
-                "asr".to_string()
-            };
-            progress.stage_message = task
-                .diarization
-                .enabled
-                .then(|| format!("speaker diarization profile: {}", task.diarization.profile));
+            let (stage, stage_message) = task_initial_processing_stage(task);
+            progress.stage = stage.to_string();
+            progress.stage_message = stage_message;
             progress.message = Some(format!("processing {}", path.display()));
         });
         if pause_check() {
@@ -938,10 +1021,11 @@ async fn process_pending_files_sequential(
             .get(&key)
             .map(|record| record.memory_limit_hints.clone())
             .unwrap_or_default();
-        // Cache source audio metadata once per file. This calls ffprobe under
-        // the hood, so we avoid re-running it for every FileRecord construction.
-        let source_info = inspect_source_audio(path);
         let file_started_at_ms = now_ms();
+        // Cache source audio metadata once per file. The end-to-end MOSS RTF
+        // budget starts before this ffprobe call, so probing and normalization
+        // cannot consume unbounded time outside the 0.5x guard.
+        let source_info = inspect_source_audio(path);
         let mut record = file_record_from_info(&task.id, path, &source_info);
         record.memory_limit_hints = existing_memory_limit_hints.clone();
         record.runtime_strategy = task.runtime_strategy;
@@ -999,7 +1083,7 @@ async fn process_pending_files_sequential(
             return Err(ASR_TASK_PAUSED_MESSAGE.to_string());
         }
 
-        if task.diarization.enabled {
+        if task_uses_external_diarization(task) {
             update_run_progress(&task.id, |progress| {
                 progress.stage = "diarize".to_string();
                 progress.stage_message = Some(format!(
@@ -1039,7 +1123,7 @@ async fn process_pending_files_sequential(
 
         let mut file_server_url = server_url.map(str::to_string);
         let mut stop_file_server_after_use = false;
-        if task.runtime_strategy == AsrRuntimeStrategy::ReusePerFile {
+        if task_uses_file_lifetime_server(task) {
             match start_task_managed_server(task, target, "file").await {
                 Ok(server) => {
                     file_server_url = Some(server.server_url);
@@ -1173,7 +1257,7 @@ async fn process_pending_files_sequential(
             }
         };
 
-        let use_task_lifetime_server = task.runtime_strategy.uses_task_lifetime_server();
+        let use_task_lifetime_server = task_uses_task_lifetime_server(task);
         let partial_artifact_context = PartialArtifactContext {
             task_id: task.id.clone(),
             file_key: key.clone(),
@@ -1183,10 +1267,7 @@ async fn process_pending_files_sequential(
             runtime_strategy: task.runtime_strategy,
             source_path: path.clone(),
             source_info: source_info.clone(),
-            diarization_profile: task
-                .diarization
-                .enabled
-                .then(|| task.diarization.profile.clone()),
+            diarization_profile: task_external_diarization_profile(task),
             speakers: Vec::new(),
             text_path: partial_text_path.clone(),
             metadata_path: partial_metadata_path.clone(),
@@ -1195,11 +1276,7 @@ async fn process_pending_files_sequential(
         };
         update_run_progress(&task.id, |progress| {
             progress.stage = "asr".to_string();
-            progress.stage_message = Some(if task.diarization.enabled {
-                "transcribing diarized audio segments".to_string()
-            } else {
-                "transcribing audio".to_string()
-            });
+            progress.stage_message = Some(task_asr_stage_message(task).to_string());
         });
         let transcription_result = if use_task_lifetime_server {
             transcribe_file_for_task_with_wav(
@@ -1225,6 +1302,7 @@ async fn process_pending_files_sequential(
                         stop_after_use: &mut *stop_task_server_after_use,
                     }),
                     partial_artifacts: Some(partial_artifact_context.clone()),
+                    moss_runtime: None,
                 },
             )
             .await
@@ -1252,6 +1330,7 @@ async fn process_pending_files_sequential(
                         stop_after_use: &mut stop_file_server_after_use,
                     }),
                     partial_artifacts: Some(partial_artifact_context),
+                    moss_runtime: None,
                 },
             )
             .await
@@ -1419,7 +1498,52 @@ async fn transcribe_file_for_task_with_wav(
         result_memory_limit_hints,
         result_chunk_metrics,
         result_fallback_reason,
-    ) = if task.diarization.enabled {
+    ) = if task.transcription_mode == AsrTranscriptionMode::MossJoint {
+        if hooks.pause_check.is_some_and(|check| check()) {
+            return Err(ASR_TASK_PAUSED_MESSAGE.to_string());
+        }
+        let default_runtime;
+        let runtime = if let Some(runtime) = hooks.moss_runtime {
+            runtime
+        } else {
+            default_runtime = moss_runtime_paths(&bifrost_asr::runtime::fixed_asr_home());
+            &default_runtime
+        };
+        validate_moss_audio_input(wav, duration_ms)?;
+        let file_started_at_ms = hooks
+            .partial_artifacts
+            .as_ref()
+            .map(|context| context.started_at_ms);
+        let moss_started = Instant::now();
+        let result = run_moss_joint_transcription(
+            runtime,
+            wav,
+            duration_ms,
+            &task.transcription_prompt,
+            hooks.pause_check,
+            file_started_at_ms,
+        )
+        .await;
+        let elapsed_ms = moss_started
+            .elapsed()
+            .as_millis()
+            .clamp(1, u128::from(u64::MAX)) as u64;
+        let metric = chunk_metric(
+            0,
+            0,
+            duration_secs.max(1),
+            "moss_joint",
+            &result,
+            elapsed_ms,
+            None,
+            None,
+        );
+        let result = result?;
+        if let Some(callback) = hooks.on_chunk_metric {
+            callback(metric.clone());
+        }
+        (result, Vec::new(), Vec::new(), vec![metric], None)
+    } else if task.diarization.enabled {
         let diarized = transcribe_diarized_segments_for_task(
             task,
             asr_bin,
@@ -1432,6 +1556,7 @@ async fn transcribe_file_for_task_with_wav(
         let result = WholeFileTranscription {
             text: diarized.text,
             segments: Vec::new(),
+            structured: Default::default(),
         };
         diarized_timeline_segments = Some(diarized.timeline_segments);
         diarized_speakers = Some(diarized.speakers);
@@ -1539,6 +1664,7 @@ async fn transcribe_file_for_task_with_wav(
         )
     };
 
+    let native_joint_segments = result.structured.segments.clone();
     let mut segments: Vec<TimelineSegment> =
         if let Some(diarized_segments) = diarized_timeline_segments.take() {
             diarized_segments
@@ -1553,6 +1679,31 @@ async fn transcribe_file_for_task_with_wav(
                         .source_created_at_ms
                         .map(|start| start.saturating_add(segment.audio_end_ms));
                     segment
+                })
+                .collect()
+        } else if !native_joint_segments.is_empty() {
+            native_joint_segments
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, segment)| {
+                    if segment.text.trim().is_empty() || segment.end_ms <= segment.start_ms {
+                        return None;
+                    }
+                    Some(TimelineSegment {
+                        index,
+                        audio_start_ms: segment.start_ms,
+                        audio_end_ms: segment.end_ms,
+                        absolute_start_ms: source_info
+                            .source_created_at_ms
+                            .map(|start| start.saturating_add(segment.start_ms)),
+                        absolute_end_ms: source_info
+                            .source_created_at_ms
+                            .map(|start| start.saturating_add(segment.end_ms)),
+                        speaker: segment.normalized_speaker().map(str::to_string),
+                        speaker_display_name: segment.normalized_speaker().map(str::to_string),
+                        overlap: segment.overlap,
+                        text: segment.text,
+                    })
                 })
                 .collect()
         } else {
@@ -1600,6 +1751,7 @@ async fn transcribe_file_for_task_with_wav(
             text: text.clone(),
         });
     }
+    let effective_model = effective_task_model(task);
     let mut timeline = TranscriptTimeline {
         task_id: task.id.clone(),
         task_name: task.name.clone(),
@@ -1609,14 +1761,34 @@ async fn transcribe_file_for_task_with_wav(
         source_created_at_ms: source_info.source_created_at_ms,
         source_created_at_source: source_info.source_created_at_source.clone(),
         media_duration_ms: source_info.media_duration_ms,
-        model: task.model.clone(),
+        model: effective_model.clone(),
         language: task.language.clone(),
         diarization_profile: None,
         speakers: Vec::new(),
         processed_at_ms: now_ms(),
         segments,
     };
-    if let Some(diarization_segments) = diarization_segments_for_manifest.as_deref() {
+    if task.transcription_mode.uses_native_speakers() {
+        normalize_timeline_segments(&mut timeline);
+        let speaker_ids = timeline
+            .segments
+            .iter()
+            .filter_map(|segment| segment.speaker.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        timeline.diarization_profile = Some("moss_joint_native".to_string());
+        timeline.speakers = speaker_ids
+            .into_iter()
+            .map(|id| TimelineSpeaker {
+                display_name: id.clone(),
+                id,
+                mapped_profile_id: None,
+                confidence: None,
+                candidate_profile_id: None,
+                candidate_display_name: None,
+                candidate_confidence: None,
+            })
+            .collect();
+    } else if let Some(diarization_segments) = diarization_segments_for_manifest.as_deref() {
         timeline.diarization_profile = Some(task.diarization.profile.clone());
         timeline.speakers = diarized_speakers.unwrap_or_default();
         write_diarization_manifest(
@@ -1637,7 +1809,9 @@ async fn transcribe_file_for_task_with_wav(
         "source_created_at_ms": timeline.source_created_at_ms,
         "source_created_at_source": timeline.source_created_at_source,
         "media_duration_ms": timeline.media_duration_ms,
-        "model": task.model,
+        "model": effective_model,
+        "transcription_mode": task.transcription_mode,
+        "transcription_prompt_configured": !task.transcription_prompt.is_empty(),
         "language": task.language,
         "runtime_strategy": task.runtime_strategy,
         "fallback_reason": result_fallback_reason.clone(),
@@ -2261,6 +2435,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: "  ".to_string(),
                 segments: Vec::new(),
+                structured: Default::default(),
             },
         );
 
@@ -2281,6 +2456,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: " hello world ".to_string(),
                 segments: Vec::new(),
+                structured: Default::default(),
             },
         );
 
@@ -2307,6 +2483,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: "second".to_string(),
                 segments: Vec::new(),
+                structured: Default::default(),
             },
         );
 
@@ -2327,6 +2504,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: String::new(),
                 segments: vec![(0, 500, "   ".to_string()), (500, 1_000, "ok".to_string())],
+                structured: Default::default(),
             },
         );
 
@@ -2350,6 +2528,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: String::new(),
                 segments: vec![(500, 2_500, "chunk".to_string())],
+                structured: Default::default(),
             },
         );
 
@@ -2372,6 +2551,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: String::new(),
                 segments: vec![(1_000, 1_000, "zero".to_string())],
+                structured: Default::default(),
             },
         );
 
@@ -2547,6 +2727,8 @@ mod coverage_boost {
 
     fn minimal_task(id: &str) -> AsrDirectoryTask {
         AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: id.to_string(),
             name: id.to_string(),
             audio_dir: PathBuf::from("/tmp"),
@@ -2587,6 +2769,7 @@ mod coverage_boost {
             server_state: None,
             managed_server_restart: None,
             partial_artifacts: None,
+            moss_runtime: None,
         };
 
         let result = transcribe_file_for_task_with_wav(
@@ -2621,6 +2804,7 @@ mod coverage_boost {
             server_state: None,
             managed_server_restart: None,
             partial_artifacts: None,
+            moss_runtime: None,
         };
 
         let result = transcribe_file_for_task_with_wav(
@@ -2654,6 +2838,7 @@ mod coverage_boost {
             server_state: None,
             managed_server_restart: None,
             partial_artifacts: None,
+            moss_runtime: None,
         };
 
         let result = transcribe_diarized_segments_for_task(
@@ -2790,6 +2975,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: String::new(),
                 segments: vec![(0, 500, "new".to_string())],
+                structured: Default::default(),
             },
         );
 
@@ -2812,6 +2998,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: String::new(),
                 segments: vec![(0, 500, "  padded  ".to_string())],
+                structured: Default::default(),
             },
         );
 
@@ -2835,6 +3022,7 @@ mod coverage_boost {
                     (0, 500, "one".to_string()),
                     (500, 1_000, "two".to_string()),
                 ],
+                structured: Default::default(),
             },
         );
 
@@ -2856,6 +3044,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: String::new(),
                 segments: vec![(0, 200, "a".to_string()), (200, 400, "b".to_string())],
+                structured: Default::default(),
             },
         );
 
@@ -2879,6 +3068,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: String::new(),
                 segments: vec![(0, 500, "one".to_string())],
+                structured: Default::default(),
             },
         );
         append_diarized_segment_result(
@@ -2888,6 +3078,7 @@ mod coverage_boost {
             WholeFileTranscription {
                 text: String::new(),
                 segments: vec![(500, 1_000, "two".to_string())],
+                structured: Default::default(),
             },
         );
 
@@ -3102,6 +3293,8 @@ mod coverage_boost_v2 {
 
     fn minimal_task(id: &str) -> AsrDirectoryTask {
         AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: id.to_string(),
             name: id.to_string(),
             audio_dir: PathBuf::from("/tmp"),
@@ -3148,6 +3341,8 @@ mod coverage_boost_v2 {
     #[test]
     fn task_allows_external_device_event_import_requires_enabled_and_devices() {
         let mut task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "t".to_string(),
             name: "t".to_string(),
             audio_dir: PathBuf::from("/tmp"),
@@ -3179,6 +3374,8 @@ mod coverage_boost_v2 {
     #[test]
     fn task_allows_external_device_event_import_false_when_no_devices() {
         let task = AsrDirectoryTask {
+            transcription_mode: AsrTranscriptionMode::Standard,
+            transcription_prompt: String::new(),
             id: "t2".to_string(),
             name: "t2".to_string(),
             audio_dir: PathBuf::from("/tmp"),

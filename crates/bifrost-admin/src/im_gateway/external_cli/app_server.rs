@@ -3,6 +3,49 @@ use super::*;
 const HANDSHAKE_TIMEOUT_SECS: u64 = 30;
 const CAPACITY_MAX_RETRIES: u32 = 3;
 const CAPACITY_RETRY_BASE_DELAY_MS: u64 = 1_000;
+const APP_SERVER_SPAWN_MAX_ATTEMPTS: u32 = 8;
+const APP_SERVER_SPAWN_RETRY_BASE_DELAY_MS: u64 = 5;
+#[cfg(unix)]
+const TEXT_FILE_BUSY_RAW_OS_ERROR: i32 = 26;
+
+fn is_retryable_app_server_spawn_error(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(TEXT_FILE_BUSY_RAW_OS_ERROR)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
+async fn spawn_app_server_with_retry<T>(
+    mut spawn: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let mut attempt = 1;
+    loop {
+        match spawn() {
+            Ok(child) => return Ok(child),
+            Err(error)
+                if is_retryable_app_server_spawn_error(&error)
+                    && attempt < APP_SERVER_SPAWN_MAX_ATTEMPTS =>
+            {
+                let delay = Duration::from_millis(
+                    APP_SERVER_SPAWN_RETRY_BASE_DELAY_MS.saturating_mul(u64::from(attempt)),
+                );
+                tracing::warn!(
+                    attempt,
+                    max_attempts = APP_SERVER_SPAWN_MAX_ATTEMPTS,
+                    "app-server executable is temporarily busy; retrying spawn"
+                );
+                sleep(delay).await;
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
 
 struct AppServerRunCleanup {
     run_id: String,
@@ -161,16 +204,7 @@ fn rejected_guide(
     live_guide::rejected_guide(guide_id, thread_id, turn_id, reason)
 }
 
-pub(super) async fn run_command(
-    run_id: &str,
-    session_key: Option<&str>,
-    request: &ExternalCliRunRequest,
-    prompt: String,
-    stop_marker_path: PathBuf,
-    progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
-) -> Result<CommandOutput, String> {
-    validate_app_server_transport(request)?;
-    let spec = build_command_spec(request);
+fn app_server_command(spec: &CommandSpec) -> Command {
     let mut command = Command::new(&spec.executable);
     command
         .args(&spec.args)
@@ -186,10 +220,29 @@ pub(super) async fn run_command(
     for (key, value) in &spec.env {
         command.env(key, value);
     }
+    command
+}
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("spawn {} app-server failed: {error}", request.adapter))?;
+async fn spawn_app_server(spec: &CommandSpec) -> std::io::Result<tokio::process::Child> {
+    spawn_app_server_with_retry(|| app_server_command(spec).spawn()).await
+}
+
+pub(super) async fn run_command(
+    run_id: &str,
+    session_key: Option<&str>,
+    request: &ExternalCliRunRequest,
+    prompt: String,
+    stop_marker_path: PathBuf,
+    progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
+) -> Result<CommandOutput, String> {
+    validate_app_server_transport(request)?;
+    let spec = build_command_spec(request);
+    let mut child = spawn_app_server(&spec).await.map_err(|error| {
+        format!(
+            "spawn {} app-server failed for executable '{}': {error}",
+            request.adapter, spec.executable
+        )
+    })?;
     let pid = child.id().unwrap_or(0);
     if pid != 0 {
         ACTIVE_RUNS.insert(run_id.to_string(), pid);
@@ -300,6 +353,16 @@ pub(super) async fn run_command(
             },
         );
     }
+    const RATE_LIMIT_REQUEST_ID: u64 = 90;
+    if request.adapter == DEFAULT_ADAPTER {
+        send_jsonrpc_request(
+            &mut stdin,
+            RATE_LIMIT_REQUEST_ID,
+            "account/rateLimits/read",
+            serde_json::Value::Null,
+        )
+        .await?;
+    }
 
     let timeout_secs = request.adapter_config.timeout_secs;
     let timeout_sleep = async move {
@@ -329,6 +392,21 @@ pub(super) async fn run_command(
                 let frame: serde_json::Value = serde_json::from_str(&line)
                     .map_err(|error| format!("parse app-server frame failed: {error}; line={line}"))?;
                 if let Some(id) = frame.get("id").and_then(serde_json::Value::as_u64) {
+                    if id == RATE_LIMIT_REQUEST_ID {
+                        if let Some(response) = frame.get("result").cloned() {
+                            let event = account_rate_limits_event(response);
+                            if let Some(progress_tx) = progress_tx.as_ref() {
+                                let _ = progress_tx.send(event.clone());
+                            }
+                            events.push(event);
+                        } else if let Some(error) = frame.get("error") {
+                            tracing::debug!(
+                                error = %jsonrpc_error_message(error),
+                                "Codex app-server does not provide an account rate-limit snapshot"
+                            );
+                        }
+                        continue;
+                    }
                     if let Some(command) = pending_guides.remove(&id) {
                         let result = guide_result_from_response(
                             command.guide_id,
@@ -1085,6 +1163,7 @@ fn progress_event_from_app_server_frame(
                 raw,
             })
         }
+        "account/rateLimits/updated" => Some(account_rate_limits_event(params)),
         "item/started" | "item/completed" => {
             progress_event_from_app_server_item(method, &params, raw)
         }
@@ -1120,6 +1199,44 @@ fn progress_event_from_app_server_frame(
 #[cfg(test)]
 #[path = "app_server_retry_tests.rs"]
 mod retry_tests;
+
+fn account_rate_limits_event(response: serde_json::Value) -> ExternalCliProgressEvent {
+    let weekly = codex_weekly_rate_limit_window(&response)
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::Status,
+        content: "usage updated".to_string(),
+        title: Some("rate_limits".to_string()),
+        raw: serde_json::json!({
+            "type": "account_rate_limits",
+            "weekly": weekly,
+        }),
+    }
+}
+
+fn codex_weekly_rate_limit_window(value: &serde_json::Value) -> Option<&serde_json::Value> {
+    const WEEKLY_WINDOW_MINUTES: u64 = 7 * 24 * 60;
+    let snapshots = [
+        value
+            .get("rateLimitsByLimitId")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|limits| limits.get("codex")),
+        value.get("rateLimits"),
+        Some(value),
+    ];
+    snapshots.into_iter().flatten().find_map(|snapshot| {
+        [snapshot.get("primary"), snapshot.get("secondary")]
+            .into_iter()
+            .flatten()
+            .find(|window| {
+                window
+                    .get("windowDurationMins")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(WEEKLY_WINDOW_MINUTES)
+            })
+    })
+}
 
 fn progress_event_from_app_server_item(
     method: &str,
@@ -1264,6 +1381,84 @@ fn string_or_string_array(value: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn app_server_spawn_retries_text_file_busy_and_then_succeeds() {
+        let mut attempts = 0;
+        let result = spawn_app_server_with_retry(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(std::io::Error::from_raw_os_error(
+                    TEXT_FILE_BUSY_RAW_OS_ERROR,
+                ))
+            } else {
+                Ok("spawned")
+            }
+        })
+        .await;
+
+        assert_eq!(result.unwrap(), "spawned");
+        assert_eq!(attempts, 3);
+    }
+
+    #[tokio::test]
+    async fn app_server_spawn_does_not_retry_non_transient_errors() {
+        let mut attempts = 0;
+        let error = spawn_app_server_with_retry(|| -> std::io::Result<()> {
+            attempts += 1;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "missing app-server executable",
+            ))
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(attempts, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn app_server_spawn_stops_after_retry_limit() {
+        let mut attempts = 0;
+        let error = spawn_app_server_with_retry(|| -> std::io::Result<()> {
+            attempts += 1;
+            Err(std::io::Error::from_raw_os_error(
+                TEXT_FILE_BUSY_RAW_OS_ERROR,
+            ))
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.raw_os_error(), Some(TEXT_FILE_BUSY_RAW_OS_ERROR));
+        assert_eq!(attempts, APP_SERVER_SPAWN_MAX_ATTEMPTS);
+    }
+
+    #[tokio::test]
+    async fn app_server_run_reports_spawn_executable_context() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let executable = temp_dir.path().join("missing").join("codex");
+        let mut request = request(DEFAULT_ADAPTER);
+        request.adapter_config.executable = Some(executable.display().to_string());
+
+        let error = run_command(
+            "spawn-error-run",
+            Some("spawn-error-session"),
+            &request,
+            "hello".to_string(),
+            temp_dir.path().join("stop"),
+            None,
+        )
+        .await
+        .expect_err("missing executable should fail before creating app-server state");
+
+        assert!(error.contains("spawn codex app-server failed for executable"));
+        assert!(error.contains(executable.to_string_lossy().as_ref()));
+        assert!(!ACTIVE_RUNS.contains_key("spawn-error-run"));
+        assert!(!ACTIVE_SESSIONS.contains_key("spawn-error-session"));
+    }
 
     fn request(adapter: &str) -> ExternalCliRunRequest {
         ExternalCliRunRequest {
@@ -1430,6 +1625,38 @@ mod tests {
         assert_eq!(command_event.title.as_deref(), Some("exec_command"));
         assert_eq!(command_event.raw["success"], true);
         assert_eq!(command_event.raw["durationMs"], 12);
+    }
+
+    #[test]
+    fn app_server_rate_limit_notification_keeps_only_weekly_display_fields() {
+        let notification = serde_json::json!({
+            "method": "account/rateLimits/updated",
+            "params": {
+                "rateLimits": {
+                    "limitId": "codex",
+                    "credits": {"hasCredits": true, "balance": "private"},
+                    "primary": {
+                        "usedPercent": 64,
+                        "windowDurationMins": 10080,
+                        "resetsAt": 1784490086
+                    },
+                    "secondary": {
+                        "usedPercent": 5,
+                        "windowDurationMins": 300,
+                        "resetsAt": 1784000000
+                    }
+                }
+            }
+        });
+
+        let event = progress_event_from_app_server_frame(&notification).expect("rate limit event");
+
+        assert_eq!(event.title.as_deref(), Some("rate_limits"));
+        assert_eq!(event.raw["weekly"]["usedPercent"], 64);
+        assert_eq!(event.raw["weekly"]["windowDurationMins"], 10_080);
+        assert_eq!(event.raw["weekly"]["resetsAt"], 1_784_490_086u64);
+        assert!(event.raw.get("rateLimits").is_none());
+        assert!(!event.raw.to_string().contains("private"));
     }
 
     #[test]
@@ -1625,6 +1852,44 @@ mod tests {
         ACTIVE_SESSIONS.remove(&session_key);
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn app_server_spawn_retries_linux_text_file_busy() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let executable = temp_dir.path().join("mock-busy-app-server");
+        std::fs::write(&executable, "#!/bin/sh\nexit 0\n").expect("write mock executable");
+        let mut permissions = std::fs::metadata(&executable)
+            .expect("mock executable metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).expect("chmod mock executable");
+
+        let writable_handle = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&executable)
+            .expect("hold mock executable open for writing");
+        let release_handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(writable_handle);
+        });
+        let spec = CommandSpec {
+            executable: executable.display().to_string(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            work_dir: None,
+            timeout_secs: None,
+        };
+
+        let mut child = spawn_app_server(&spec)
+            .await
+            .expect("ETXTBSY should clear within the bounded retry window");
+        let status = child.wait().await.expect("wait for mock app-server");
+        release_handle.join().expect("release writable handle");
+        assert!(status.success());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn mock_app_server_accepts_live_guide_and_completes_same_turn() {
@@ -1652,6 +1917,9 @@ for line in sys.stdin:
         send({"jsonrpc":"2.0","id":request_id,"result":{"thread":{"id":"thread-mock"}}})
     elif method == "turn/start":
         send({"jsonrpc":"2.0","id":request_id,"result":{"turn":{"id":"turn-mock"}}})
+    elif method == "account/rateLimits/read":
+        send({"jsonrpc":"2.0","id":request_id,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":63,"windowDurationMins":10080,"resetsAt":1784490086},"secondary":None}}})
+        send({"jsonrpc":"2.0","id":request_id,"error":{"code":-32601,"message":"method not found after snapshot"}})
     elif method == "turn/steer":
         assert frame["params"]["expectedTurnId"] == "turn-mock"
         assert frame["params"]["input"][0]["text"] == "focus on tests"
@@ -1669,6 +1937,7 @@ for line in sys.stdin:
         request.adapter_config.transport = Some(ExternalCliTransport::AppServer);
         request.adapter_config.executable = Some(executable.display().to_string());
         let session_key = "mock-app-server-session";
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
         let run_task = tokio::spawn({
             let stop_marker = temp_dir.path().join("stop");
             async move {
@@ -1678,7 +1947,7 @@ for line in sys.stdin:
                     &request,
                     "initial prompt".to_string(),
                     stop_marker,
-                    None,
+                    Some(progress_tx),
                 )
                 .await
             }
@@ -1709,6 +1978,19 @@ for line in sys.stdin:
         assert!(output.events.iter().any(|event| {
             event.event_type == ExternalCliProgressEventType::AssistantFinal
                 && event.content == "guided result"
+        }));
+        assert!(output.events.iter().any(|event| {
+            event.title.as_deref() == Some("rate_limits")
+                && event.raw["weekly"]["windowDurationMins"] == 10_080
+                && event.raw.get("rateLimits").is_none()
+        }));
+        let mut streamed_events = Vec::new();
+        while let Ok(event) = progress_rx.try_recv() {
+            streamed_events.push(event);
+        }
+        assert!(streamed_events.iter().any(|event| {
+            event.title.as_deref() == Some("rate_limits")
+                && event.raw["weekly"]["windowDurationMins"] == 10_080
         }));
         assert!(!ACTIVE_RUNS.contains_key("mock-app-server-run"));
         assert!(!ACTIVE_SESSIONS.contains_key(session_key));

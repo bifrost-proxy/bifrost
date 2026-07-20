@@ -1017,7 +1017,7 @@
 
 **背景**：
 - 已知失败请求：`REQ-69f08a65-002153` / sequence `1016158`
-- 请求：`GET https://nextoncall.bytedance.net/assistant`
+- 请求：`GET https://app.example.com/assistant`
 - 命中规则：`HtmlAppend` + `Http`
 - 实际上游：`http://localhost:5173/assistant`
 - 修复前现象：Traffic 记录显示命中 `HtmlAppend`，但响应体仍为原始 HTML，未插入 vConsole 脚本。
@@ -1088,7 +1088,7 @@
 
 **背景**：
 - 已知失败请求：sequence `278778` / traffic id `REQ-69f0dc94-000857`
-- 请求：`GET https://nextoncall.bytedance.net/?appType=all&page=1`
+- 请求：`GET https://app.example.com/?appType=all&page=1`
 - 命中规则：`HtmlAppend` + `DevTools`
 - 原始响应头：`Content-Encoding: gzip`、`Content-Type: text/html; charset=utf-8`
 - 修复前现象：Traffic 缓存体表现为 gzip/二进制内容后直接拼接明文 vConsole 脚本，`gzip -t` 无法校验，浏览器也无法把响应作为正常 HTML 解析。

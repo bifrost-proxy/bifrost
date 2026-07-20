@@ -37,8 +37,31 @@ async function installAsrHomeTabMocks(page: Page) {
       },
     });
   });
+  await page.route("**/_bifrost/api/asr/moss/status", async (route) => {
+    await route.fulfill({
+      json: {
+        status: "missing",
+        ready: false,
+        installed: false,
+        platform_supported: true,
+        runtime_ready: true,
+        model_ready: false,
+        model: "MOSS-Transcribe-Diarize-MLX-8bit",
+        runtime_asset: "moss-joint-runtime-v0.0.0-aarch64-apple-darwin.zip",
+        install_dir: "/tmp/bifrost-asr-test/moss_joint_mlx",
+        runtime_dir: "/tmp/bifrost-asr-test/moss_joint_mlx/runtime",
+        model_dir: "/tmp/bifrost-asr-test/moss_joint_mlx/model",
+        expected_model_bytes: 1258427442,
+        installed_model_bytes: 0,
+        message: "model missing",
+      },
+    });
+  });
   await page.route("**/_bifrost/api/asr/tasks", async (route) => {
     await route.fulfill({ json: { tasks: [] } });
+  });
+  await page.route("**/_bifrost/api/asr/external-volumes", async (route) => {
+    await route.fulfill({ json: { volumes: [] } });
   });
   await page.route("**/_bifrost/api/speech/pipelines/status", async (route) => {
     await route.fulfill({
@@ -146,6 +169,25 @@ test("ASR 首页按定时任务、ASR 管理、声纹识别与唤醒三 Tab 分�
   await expect(page.getByTestId("asr-workbench-card")).toBeVisible();
   await expect(page.getByTestId("asr-home-tab-scheduled")).toHaveCount(0);
 
+  await page.getByRole("combobox", { name: "Managed ASR model" }).click();
+  await page
+    .locator(".ant-select-dropdown:visible")
+    .getByText("MOSS joint transcription (MLX 8-bit)", { exact: true })
+    .click();
+  await expect(page.getByLabel("MOSS execution")).toHaveValue("On demand / whole file");
+  await expect(page.getByLabel("MOSS language")).toHaveValue("Automatic multilingual");
+  await expect(page.getByLabel("MOSS components")).toHaveValue(
+    "Runtime ready / Model missing",
+  );
+  await expect(page.getByLabel("Managed ASR storage")).toHaveValue(
+    "~/.bifrost/asr/moss_joint_mlx",
+  );
+  await expect(page.getByTestId("moss-managed-asset-status")).toContainText(
+    "Runtime verified",
+  );
+  await expect(page.getByTestId("moss-managed-asset-status")).toContainText("Model missing");
+  await expect(page.getByRole("button", { name: "Initialize" })).toBeVisible();
+
   await page.getByRole("tab", { name: "Voiceprint & Wake" }).click();
   await expect(page).toHaveURL(/asrTab=voice/);
   await expect(page.getByTestId("asr-home-tab-voice")).toBeVisible();
@@ -159,6 +201,112 @@ test("ASR 首页按定时任务、ASR 管理、声纹识别与唤醒三 Tab 分�
     "true",
   );
   await expect(page.getByTestId("voice-wake-actions-card")).toBeVisible();
+});
+
+test("ASR 目录任务按转录模式只展示实际生效的配置", async ({ page }) => {
+  await installAsrHomeTabMocks(page);
+  let submittedTask: Record<string, unknown> | undefined;
+  await page.route("**/_bifrost/api/asr/tasks", async (route) => {
+    if (route.request().method() === "POST") {
+      submittedTask = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({ json: {} });
+      return;
+    }
+    await route.fulfill({ json: { tasks: [] } });
+  });
+  await openPage(page, "ai?aiSection=tools-asr");
+
+  await page
+    .getByTestId("asr-home-tab-scheduled")
+    .getByRole("button", { name: "New" })
+    .click();
+  await expect(page.getByRole("dialog", { name: "New Directory Task" })).toBeVisible();
+
+  for (const label of [
+    "Runtime",
+    "File Concurrency",
+    "Speaker Diarization",
+    "Diarization Profile",
+    "Known Speakers",
+    "Voiceprint Matching",
+    "Task Model",
+    "Task Language",
+  ]) {
+    await expect(page.getByLabel(label, { exact: true })).toHaveCount(1);
+  }
+  await expect(page.getByLabel("MOSS Prompt", { exact: true })).toHaveCount(0);
+  await page.getByRole("combobox", { name: "Task Model" }).click({ force: true });
+  await page
+    .locator(".ant-select-dropdown:visible .ant-select-item-option-content")
+    .filter({ hasText: "Qwen3-ASR-1.7B" })
+    .click();
+  await expect(page.getByTestId("asr-task-model-select")).toContainText("Qwen3-ASR-1.7B");
+
+  await page.getByRole("combobox", { name: "Transcription Mode" }).click({ force: true });
+  await page
+    .locator(".ant-select-dropdown:visible")
+    .getByText("MOSS joint transcription (speaker-aware)", { exact: true })
+    .click();
+
+  await expect(page.getByLabel("MOSS Prompt", { exact: true })).toBeVisible();
+  await page.getByLabel("MOSS Prompt", { exact: true }).fill("Preserve Bifrost terminology.");
+  await expect(page.getByTestId("asr-transcription-prompt-count")).toHaveText("29 / 4000");
+  for (const label of [
+    "Runtime",
+    "File Concurrency",
+    "Speaker Diarization",
+    "Diarization Profile",
+    "Known Speakers",
+    "Voiceprint Matching",
+    "Task Model",
+    "Task Language",
+  ]) {
+    await expect(page.getByLabel(label, { exact: true })).toHaveCount(0);
+  }
+  for (const label of ["Recursive", "Enabled", "External Devices"]) {
+    await expect(page.getByLabel(label, { exact: true })).toHaveCount(1);
+  }
+
+  await page.getByRole("combobox", { name: "Transcription Mode" }).click({ force: true });
+  await page
+    .locator(".ant-select-dropdown:visible")
+    .getByText("Standard ASR + speaker diarization", { exact: true })
+    .click();
+
+  await expect(page.getByLabel("MOSS Prompt", { exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("Runtime", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Task Model", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Task Language", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("asr-task-model-select")).toContainText("Qwen3-ASR-1.7B");
+
+  await page.getByRole("combobox", { name: "Transcription Mode" }).click({ force: true });
+  await page
+    .locator(".ant-select-dropdown:visible")
+    .getByText("MOSS joint transcription (speaker-aware)", { exact: true })
+    .click();
+  await expect(page.getByLabel("MOSS Prompt", { exact: true })).toHaveValue(
+    "Preserve Bifrost terminology.",
+  );
+
+  await page.getByLabel("Name", { exact: true }).fill("MOSS field visibility test");
+  await page.getByLabel("Audio Directory", { exact: true }).fill("/tmp/moss-field-visibility");
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+  await expect.poll(() => submittedTask).toBeTruthy();
+  expect(submittedTask).toMatchObject({
+    name: "MOSS field visibility test",
+    audio_dir: "/tmp/moss-field-visibility",
+    model: "Qwen3-ASR-1.7B",
+    language: "chinese",
+    runtime_strategy: "reuse_per_file",
+    max_concurrent_files: 1,
+    transcription_mode: "moss_joint",
+    transcription_prompt: "Preserve Bifrost terminology.",
+    diarization: {
+      enabled: true,
+      profile: "sherpa-onnx-balanced",
+      voiceprint_matching: true,
+    },
+  });
 });
 
 test("ASR 任务详情深链继续绕过首页 Tab", async ({ page }) => {

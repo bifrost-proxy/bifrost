@@ -9,16 +9,16 @@ const nextOncallSample = `# Global default rules.
 # abc
 
 # * dns://10.71.128.1
-https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_billing_skip_app_tcc","x-use-ppe":"1"}
-https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://
+https://app.example.com/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_billing_skip_app_tcc","x-use-ppe":"1"}
+https://app.example.com/api/v1/oncall/ passthrough://
 https://nextoncall-bd.byteintl.net/api/v1/oncall/feature_extract/evaluation/ reqHeaders://{"x-tt-env":"ppe_feature_wxeb9i","x-use-ppe":"1"}
 https://nextoncall-bd.byteintl.net/api/v1/oncall/feature_extract/evaluation/ passthrough://
 # === nextoncall_local ===
 
-https://nextoncall.bytedance.net/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_ticket_system","x-use-ppe":"1"}
-https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://
-https://nextoncall.bytedance.net/api/v1/summary/ reqHeaders://{"x-tt-env":"ppe_ticket_system","x-use-ppe":"1"}
-https://nextoncall.bytedance.net/api/v1/summary/ passthrough://`;
+https://app.example.com/api/v1/oncall/ reqHeaders://{"x-tt-env":"ppe_ticket_system","x-use-ppe":"1"}
+https://app.example.com/api/v1/oncall/ passthrough://
+https://app.example.com/api/v1/summary/ reqHeaders://{"x-tt-env":"ppe_ticket_system","x-use-ppe":"1"}
+https://app.example.com/api/v1/summary/ passthrough://`;
 
 describe("analyzeRuleEffectiveness", () => {
   test("marks comments and blank lines as neutral", () => {
@@ -34,12 +34,12 @@ describe("analyzeRuleEffectiveness", () => {
 
     const firstPassthrough = effects.find(
       (effect) =>
-        effect.text === "https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://",
+        effect.text === "https://app.example.com/api/v1/oncall/ passthrough://",
     );
     const laterPassthrough = effects.find(
       (effect) =>
         effect.lineNumber > (firstPassthrough?.lineNumber ?? 0) &&
-        effect.text === "https://nextoncall.bytedance.net/api/v1/oncall/ passthrough://",
+        effect.text === "https://app.example.com/api/v1/oncall/ passthrough://",
     );
 
     expect(firstPassthrough).toMatchObject({ status: "active" });

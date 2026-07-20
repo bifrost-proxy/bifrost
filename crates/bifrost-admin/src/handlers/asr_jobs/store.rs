@@ -1044,6 +1044,70 @@ fn reset_retryable_failed_records(task_id: &str, files: &mut FileStore) -> usize
     reset_count
 }
 
+fn requeue_files_for_transcription_config_change(task_id: &str) -> Result<usize, String> {
+    let mut files = load_file_store(task_id);
+    let mut reset_count = 0usize;
+    for record in files.files.values_mut() {
+        if record.status == FileStatus::Pending {
+            continue;
+        }
+        record.status = FileStatus::Pending;
+        record.output_text_path = None;
+        record.output_metadata_path = None;
+        record.output_timeline_path = None;
+        record.text_chars = 0;
+        record.error = None;
+        record.duplicate_of_source_key = None;
+        record.transcript_alias = None;
+        record.chunk_metrics.clear();
+        record.fallback_reason = None;
+        record.started_at_ms = None;
+        record.finished_at_ms = None;
+        record.progress_current = None;
+        record.progress_total = None;
+        record.failed_chunks.clear();
+        record.memory_limit_hints.clear();
+        reset_count += 1;
+    }
+    if reset_count > 0 {
+        save_file_store(task_id, &files)?;
+        tracing::info!(
+            task_id = %task_id,
+            reset_count,
+            "requeued ASR files after transcription mode or MOSS prompt changed"
+        );
+    }
+    Ok(reset_count)
+}
+
+fn suppress_pre_migration_failed_records(task_id: &str) -> Result<usize, String> {
+    let mut files = load_file_store(task_id);
+    let marker = format!("moss_non_retryable_v{}:", env!("CARGO_PKG_VERSION"));
+    let mut suppressed_count = 0usize;
+    for record in files.files.values_mut() {
+        if record.status != FileStatus::Failed {
+            continue;
+        }
+        let previous_error = record.error.as_deref().unwrap_or("unknown pre-migration failure");
+        if previous_error.starts_with(&marker) {
+            continue;
+        }
+        record.error = Some(moss_non_retryable_runtime_error(&format!(
+            "preserved pre-migration failure: {previous_error}"
+        )));
+        suppressed_count += 1;
+    }
+    if suppressed_count > 0 {
+        save_file_store(task_id, &files)?;
+        tracing::info!(
+            task_id = %task_id,
+            suppressed_count,
+            "preserved and suppressed pre-migration ASR failures for MOSS mode"
+        );
+    }
+    Ok(suppressed_count)
+}
+
 fn is_retryable_asr_server_acquire_error(error: &str) -> bool {
     error.trim() == "ASR diarization worker failed:"
         || error.contains("managed ASR server start failed")
@@ -1102,7 +1166,9 @@ fn summarize_diarization(
     task: &AsrDirectoryTask,
     file_store: &FileStore,
 ) -> (bool, bool, usize, usize) {
-    let ready = !task.diarization.enabled || diarization_profile_ready(&task.diarization.profile);
+    let ready = task.transcription_mode.uses_native_speakers()
+        || !task.diarization.enabled
+        || diarization_profile_ready(&task.diarization.profile);
     let running = file_store
         .files
         .values()

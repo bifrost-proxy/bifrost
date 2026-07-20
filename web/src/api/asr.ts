@@ -89,6 +89,24 @@ export interface AsrStatus {
   message: string;
 }
 
+export interface MossModelStatus {
+  status: "unsupported" | "missing" | "partial" | "ready";
+  ready: boolean;
+  installed: boolean;
+  platform_supported: boolean;
+  unsupported_reason?: string;
+  runtime_ready: boolean;
+  model_ready: boolean;
+  model: "MOSS-Transcribe-Diarize-MLX-8bit";
+  runtime_asset?: string;
+  install_dir: string;
+  runtime_dir: string;
+  model_dir: string;
+  expected_model_bytes: number;
+  installed_model_bytes: number;
+  message: string;
+}
+
 export interface AsrCapabilityFlag {
   enabled: boolean;
   hidden: boolean;
@@ -511,6 +529,8 @@ export type AsrTaskSchedule =
   | { kind: "weekly"; weekday: number; hour: number; minute: number }
   | { kind: "monthly"; day: number; hour: number; minute: number };
 
+export type AsrTranscriptionMode = "standard" | "moss_joint";
+
 export interface AsrDirectoryTask {
   id: string;
   name: string;
@@ -522,6 +542,8 @@ export interface AsrDirectoryTask {
   schedule: AsrTaskSchedule;
   language: string;
   model: string;
+  transcription_mode: AsrTranscriptionMode;
+  transcription_prompt: string;
   runtime_strategy: AsrRuntimeStrategy;
   max_concurrent_files: number;
   diarization?: {
@@ -589,6 +611,8 @@ export interface CreateAsrTaskRequest {
   schedule?: AsrTaskSchedule;
   language?: string;
   model?: string;
+  transcription_mode?: AsrTranscriptionMode;
+  transcription_prompt?: string;
   runtime_strategy?: AsrRuntimeStrategy;
   max_concurrent_files?: number;
   diarization?: AsrDirectoryTask["diarization"];
@@ -898,6 +922,10 @@ export async function getAsrStatus(
   params: AsrConnectionParams = {},
 ): Promise<AsrStatus> {
   return get<AsrStatus>(`/asr/status?${buildAsrQuery(params)}`);
+}
+
+export async function getMossModelStatus(): Promise<MossModelStatus> {
+  return get<MossModelStatus>("/asr/moss/status");
 }
 
 export async function getAsrCapabilities(): Promise<AsrCapabilities> {
@@ -1351,6 +1379,18 @@ export async function streamAsrInitialization(
   await readSseResponse(response, onEvent);
 }
 
+export async function streamMossInitialization(
+  onEvent: (event: AsrStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await asrFetch("/asr/moss/init-stream", {
+    method: "GET",
+    headers: buildStreamHeaders(),
+    signal,
+  });
+  await readSseResponse(response, onEvent);
+}
+
 export async function streamAsrTranscription(
   file: Blob,
   fileName: string,
@@ -1595,6 +1635,7 @@ export interface AsrDailyAgentConfig {
   terminology?: string;
   report_sync_dir?: string;
   last_report_sync?: AsrDailyAgentReportSyncResult;
+  last_original_sync?: AsrDailyAgentReportSyncResult;
   last_run_at_ms?: number;
   last_status?: string;
   last_error?: string;

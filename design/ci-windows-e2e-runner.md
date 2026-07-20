@@ -270,3 +270,39 @@ CI workflow YAML + bash 脚本，无 Rust 逻辑变更。
 
 - 更新 `human_tests/ci-windows-e2e-runner.md`
 - 更新 `human_tests/readme.md`
+
+## 2026-07-14 retry worker 栈稳定性补充
+
+### 失败证据与根因
+
+- PR #386 在 rebase 最新主干后的 CI run `29304684646` 中，
+  `E2E Runner (x86_64-pc-windows-msvc)` 首轮执行失败用例后进入
+  `BIFROST_E2E_RETRY_FAILED_ONCE`，日志在重试
+  `remote_shell_exec_unix_shell_path_fallback` 时出现 `STATUS_STACK_OVERFLOW`。
+- 首轮并发用例通过 `tokio::spawn` 在 runtime worker task 中执行；旧 retry loop 却直接在
+  `Runtime::block_on(run_e2e())` 的调用线程上 await `run_single_test()`。Windows 主线程栈更小，
+  因而同一用例可能首轮正常、重试才栈溢出。
+
+### 修复约束
+
+- retry attempt 必须通过独立 Tokio task 执行，保持与首轮并发执行相同的 worker 栈模型。
+- spawned retry task panic 必须转换成具名 `TestResult::Failed`，不能丢失用例名或让 runner
+  静默漏记结果。
+- retry 仍然逐个执行、仍然只补跑一次，不扩大并发度，不改变原失败判定和端口分配规则。
+
+### 验证
+
+- `runner_tests::retry_test_runs_on_runtime_worker_instead_of_block_on_thread`：断言 retry 的线程
+  与 `block_on` 调用线程不同。
+- `runner_tests::retry_test_converts_spawned_task_panic_to_failed_result`：断言 task panic 被收敛为
+  带原用例名的失败结果。
+- `runner_tests::runner_retries_failed_test_once_and_replaces_the_result`：通过完整 `run_all()`
+  制造首轮失败、重试通过，断言执行两次且最终结果被重试结果替换；同时覆盖 retry loop 的
+  TestCase clone、端口等待和 worker helper 调用。
+- runner 单测使用 synthetic standalone 用例验证 worker 隔离与 panic 收敛，确认 retry helper
+  不在 `block_on` 线程内联执行；Windows x86_64 的完整 retry 路径由 GitHub Actions 最终补验。
+
+CI run `29311063590` 的 changed-lines coverage gate 报告 retry loop 变更行仅覆盖 13/15
+（86.67%），缺少第 256、260 行的完整路径覆盖。上述 full-run retry 回归用例专门关闭该缺口，
+不降低 95% 变更行门禁，也不对生产代码增加覆盖率排除。本地使用单 crate instrumentation 报告
+和 CI 同款 `coverage-diff.py` 复核后，`runner.rs` 变更生产行覆盖率为 15/15（100%）。

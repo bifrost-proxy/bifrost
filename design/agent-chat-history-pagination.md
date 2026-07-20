@@ -1,222 +1,100 @@
-# Agent Chat History Pagination
+# Agent Chat 全量历史加载与过程渲染
 
 ## 背景
 
-Agent Chat 的会话历史以 JSONL append-only 事件流形式落盘（`ConversationRecorder`）。早期 WebUI Agent Chat History 打开一个 session 时，一次性 `GET` 全量事件并整体渲染，随着单个 session 越写越长，出现以下问题：
+Agent Chat 的会话历史以 append-only JSONL 保存。后端曾提供 `tail`、`cursor`、`since` 分页语义，WebUI 也曾显示 `Load older`。产品交互现已明确收敛：用户打开会话时必须默认看到全部对话记录，不出现 loader、`Load older` 或 modal 式历史补载；运行中的会话仍可用 `since` 仅拉新增事件。
 
-- 首屏时间线性增长，长会话首屏加载几百 KB 甚至几 MB JSON。
-- 前端一次性反序列化并 mount 上千条 timeline items，首屏帧率抖动。
-- 后端读取 JSONL 时把整个文件解析成事件数组，占用 Tokio async worker、拖慢主代理链路。
-- 运行中的会话轮询也每次请求全量事件，浪费网络与解析成本。
-- 会话列表接口 `/agent/sessions/all` 顺带返回详情字段时，浏览器打开设置页要拉几十 MB。
-
-本模块把 Agent Chat 历史读取拆成 `sessions/all`（列表摘要）与 `sessions/history/{path}`（详情分页），使详情按需分页、运行中轮询按增量拉取，同时保持无参数全量读取的历史兼容行为。
+真实长会话还暴露了第二类问题：外部 Runner 会逐 token 输出 `assistant_delta`，并周期性发送 `token_usage` / `rate_limits` 刷新。若每条 delta 都映射成独立过程步骤，中文会逐字换行、DOM 节点数量与 token 数量线性增长，内部 usage 元事件也会泄露到用户界面。
 
 ## 用户目标验证清单
 
 ### 必须实现
 
-- `GET /api/im-gateway/agent/sessions/all` 只返回摘要字段（session key、work_dir、title、last_ts、total_count、running 状态等），不携带 events。
-- `GET /api/im-gateway/agent/sessions/history/{path}` 支持三种分页语义：
-  - `tail=true&limit=N`：返回最新 N 条事件。
-  - `cursor=K&limit=N`：把 `K` 作为 end-exclusive cursor，返回 `[K-N, K)` 的旧事件页。
-  - `since=K`：返回 `[K, total_count)` 的增量事件，供 running 会话轮询。
-- 分页响应统一带 `start_index`、`end_index`、`next_cursor`、`has_more`、`total_count`。
-- WebUI 首屏只请求 `tail=true&limit=HISTORY_EVENT_PAGE_SIZE`，向上滚动或点击「加载更多」触发 `cursor` 请求上一页。
-- 运行中 timeline 轮询按 `since=<last_end_index>` 请求增量事件，不重复拉尾页。
-- 后端 JSONL 读取放入 `spawn_blocking`，不阻塞代理主线程。
-- 分页读取只对被选中窗口的 JSONL 行做完整反序列化，未选中的旧行只做行计数。
-- 保留无参数 `GET .../history/{path}` 的兼容行为：仍全量返回，供旧客户端与脚本使用。
+- WebUI 打开历史会话时使用无分页参数的 history detail 请求，一次加载全部事件。
+- 删除 WebUI 的 `Load older` 按钮、顶部滚动自动加载、分页 loading 状态和旧页 cursor 状态。
+- 运行中会话保留 `since=<end_index>` 增量同步，索引不连续时回退为一次全量刷新。
+- 相邻 `assistant_delta` 合并为同一 thinking 段落；工具、计划或其他过程步骤形成明确边界，不能跨边界合并。
+- 聚合后的 delta 若与随后落盘的最终回答等价，只保留最终回答，避免整段重复。
+- `token_usage`、`rate_limits` 及等价的 `usage updated` 内部刷新不得渲染为 thinking 文本。
+- 历史恢复与实时 SSE 使用同一套过滤和相邻 thinking 合并语义。
 
 ### 必须不破坏
 
-- 现有 `/agent/sessions/all` 消费方（Agent 设置页、Session Detail 页、IM 卡片 session 概览）继续可用。
-- 已存在的 JSONL 文件格式不变，`ConversationRecorder` 追加语义不变。
-- Long task preview、会话删除、Session Detail 等相邻改动不因分页字段扩展而回归。
-- CLI `bifrost agent session` 视图（如果通过同一 admin API 读取）在无参数路径继续拿到完整历史。
+- 后端无参数 history API 继续返回完整事件；已有 `tail` / `cursor` 参数保留给兼容客户端和诊断脚本。
+- 会话列表仍只返回摘要，不把完整 `events` 塞进列表接口。
+- 最终回答、工具调用、计划胶囊、运行状态、时间戳与滚动到底部行为保持不变。
+- 明暗主题继续使用 Ant Design token，不新增硬编码颜色。
 
 ### 必须真实验证
 
-- Rust 单元测试覆盖 tail / cursor / since 三种分页语义，包括边界（`limit=0`、`cursor` 越界、`since` 超过 `total_count`）。
-- Rust 单元测试证明未选中行不会被完整反序列化。
-- Shell E2E 用真实 JSONL 文件走完整 HTTP 路径，覆盖 summary / list / tail / cursor / since 四种响应。
-- WebUI Playwright 用例验证首屏只发一个 tail 请求，向上滚动多次后能拼出完整线程。
-- human_tests 覆盖“真人操作 Agent Chat 打开长会话并连续加载”场景。
+- 使用用户指定的真实 JSONL 长会话验证全部历史一次加载、无 `Load older`、usage 元事件不可见、逐 token 文本合并成段。
+- Vitest 覆盖 usage 过滤、delta 合并和工具边界。
+- Playwright 覆盖无分页请求、即使响应携带旧 `has_more=true` 也不恢复旧按钮、长会话过程文本成段展示。
+- human_tests 同时验证亮色和暗色主题。
 
 ## 产品语义
 
-### 列表与详情双入口
+### 历史默认完整
 
-- `sessions/all`：session 摘要列表，用于 Agent Chat 会话选择器、Settings > Agent > Sessions 列表以及 IM 卡片。摘要不含 events。
-- `sessions/history/{path}`：详情接口。`path` 是 URL-encoded session key（通常是 JSONL 相对路径）。默认返回完整历史；追加分页参数后返回窗口切片。
+Agent Chat 是会话审阅界面，不是无限信息流。历史完整性优先于渐进加载交互。后端读取 JSONL 已在 blocking worker 中执行；前端收到完整事件后应先归一化，再渲染为数量受过程语义约束的消息和步骤节点。
 
-### 分页语义
+### Delta 是文本片段，不是步骤
 
-- `tail=true&limit=N`：首屏。返回 `[max(0, total_count - N), total_count)`。
-- `cursor=K&limit=N`：向上翻页。返回 `[max(0, K - N), K)`，`next_cursor` 为窗口起点。`K=0` 意味着已到达文件头，`has_more=false`。
-- `since=K`：增量轮询。返回 `[K, total_count)`。用于运行中的 session 追加事件。
-- 未提供任何参数：兼容路径，返回全量事件。
+`assistant_delta` 表示同一段过程文本的增量片段。只有工具调用、计划更新、压缩、显式状态边界或新的用户轮次才会切断段落。字符、词或短句 delta 都不能各自占一个步骤。
 
-### 前端窗口维护
+### Usage 是遥测，不是对话
 
-- 首屏 fetch tail，把窗口写入 `visibleEvents` 状态。
-- 向上滚动到阈值：以当前 `visibleEvents[0].event_index` 为 `cursor` 请求上一页，prepend 到窗口。使用 ref 级 in-flight 标记防止 React state 尚未更新时重复触发。
-- 恢复滚动位置：prepend 后按 prepend 前后 `scrollHeight` 差补偿 `scrollTop`。
-- 运行中轮询：每 tick 以 `visibleEvents.at(-1).event_index + 1` 作为 `since` 请求增量。若 `total_count > end_index`，追加新事件。
-- 切换 session：清空窗口并重新 tail。
+`token_usage` 与 `rate_limits` 更新只服务 token HUD、限额或状态统计，不属于模型对用户可见的思考过程。前端在实时事件映射与历史恢复两条路径都必须过滤这些机器状态。
 
-## 技术细节
+## 技术方案
 
-### 后端
+### WebUI 历史加载
 
-- 关键文件：
-  - `crates/agent/src/persistence.rs`：JSONL 追加与分页读取基础能力。新增（或已存在的）`load_conversation_events_page(path, spec)` 支持 `tail` / `cursor` / `since` spec，并只对选中行调用 `serde_json::from_str`。
-  - `crates/bifrost-admin/src/handlers/im_gateway/agent_api.rs`：解析 query params，调用 persistence，把 `spawn_blocking` 结果封装成响应。
-- 响应结构（示例）：
+- `fetchHistoryPage(historyPath)`：首屏和强制刷新均不带 `tail`、`cursor`、`limit`。
+- `fetchHistoryPage(historyPath, { since })`：仅用于运行中的增量同步。
+- 删除 `historyHasOlder`、`historyLoadingOlder`、`historyOlderCursorRef`、`loadOlderHistoryPage` 及 `agent-chat-load-older`。
+- 增量合并后保留最初 `start_index`，更新 `end_index`；出现索引断层时重新全量加载。
 
-```json
-{
-  "events": [ ... ],
-  "start_index": 1200,
-  "end_index": 1500,
-  "next_cursor": 1200,
-  "has_more": true,
-  "total_count": 1500
-}
-```
+### 过程事件归一化
 
-- 参数校验：`limit` 上限固定为一个安全常量（例如 500），超出裁剪并在响应中反映真实窗口。
-- Query 冲突处理：`tail=true` 与 `cursor` 同时出现时优先 `tail`；`since` 与 `tail`/`cursor` 同时出现时返回 400。
-- 所有 JSONL 读取通过 `tokio::task::spawn_blocking` 执行，避免占用 async worker。
-- `sessions/all` 摘要字段：`session_key`、`work_dir`、`title`、`updated_at`、`created_at`、`total_events`、`running`、`runner_id` 等；显式排除 events。
-
-### 前端
-
-- 关键文件：
-  - `web/src/pages/AI/AgentChatSection.tsx`：分页 fetch helper、`HISTORY_EVENT_PAGE_SIZE = 300`、tail/cursor/since 三条调用路径、in-flight ref 防重。
-  - `web/src/pages/AI/AgentChatSection.timelinePolling.ts`：`isRunStateActive` / `isThreadActive` 辅助，用于判断是否继续轮询。
-- 状态：`visibleEvents`、`windowStartIndex`、`windowEndIndex`、`totalCount`、`hasMoreOlder`、`isLoadingOlder`、`nextPollSince`。
-- 滚动位置补偿逻辑集中在 `prependEvents(newEvents)`，保证用户视觉锚点不跳动。
-- Long task preview 与 timeline polling 复用同一份 `visibleEvents`，polling 只追加新事件。
-
-### Admin API 表格
-
-| Method | Path | 语义 |
-| --- | --- | --- |
-| GET | `/api/im-gateway/agent/sessions/all` | 列表摘要 |
-| GET | `/api/im-gateway/agent/sessions/history/{path}` | 详情，兼容全量或分页 |
-| GET | `/api/im-gateway/agent/sessions/history/{path}?tail=true&limit=N` | 尾页 |
-| GET | `/api/im-gateway/agent/sessions/history/{path}?cursor=K&limit=N` | 旧页 |
-| GET | `/api/im-gateway/agent/sessions/history/{path}?since=K` | 增量 |
-
-## CLI 交互
-
-分页参数当前仅服务 WebUI。CLI 如果通过同一 admin API 读取，仍用无参数路径拿到完整历史。若后续新增 CLI 分页命令，应复用相同 query 语义（tail/cursor/since）。
-
-## Web UI 交互
-
-- Agent Chat 打开一个 session：右侧详情区先展示 skeleton，收到 tail 响应后渲染最近 N 条并把视图滚到最下方。
-- 向上滚动到阈值：显示「加载更早内容...」loading indicator；请求成功后 prepend。
-- 到达文件头：indicator 变为「已到最早」。
-- Running session：底部持续追加，滚动条自动跟随最新事件除非用户手动向上滚动。
-- 顶部展示 `total_events` 与当前窗口范围（可选调试信息）。
-
-## Sync / 导入导出 / 分享边界
-
-- 历史分页只作用于本地 JSONL 读取，不参与 rule/group sync。
-- 导出 session：使用 `sessions/history/{path}` 无参数路径拿全量，保持导出完整。
-- 分享/协作：不在本轮范围。
-
-## 实现切分
-
-### Phase 1：后端分页与摘要拆分
-
-- `persistence` 新增分页读取 API，支持 tail/cursor/since。
-- `agent_api` 解析 query params 并封装响应，含 `start_index`、`end_index`、`next_cursor`、`has_more`、`total_count`。
-- `sessions/all` 剥离 events。
-- 单元测试覆盖三种语义与懒解析。
-
-### Phase 2：`spawn_blocking` 化
-
-- 所有 JSONL 读取（`sessions/all`、`sessions/history`、分页 detail）迁移到 `spawn_blocking`。
-- 增加对文件不存在、权限错误、损坏行的容错。
-
-### Phase 3：WebUI 首屏与旧页加载
-
-- `AgentChatSection.tsx` 首屏改为 tail 请求。
-- 加载旧页交互与滚动补偿。
-- in-flight ref 防重。
-
-### Phase 4：轮询增量与联调
-
-- Running session 轮询改为 `since` 增量。
-- Long task preview / IM 卡片链路回归。
-- 更新 human_tests 与 readme。
+- `isReadableProgressStatus()` 过滤内部 usage refresh 的稳定变体。
+- `appendProcessStepToTimeline()` 负责过程步骤追加：相邻 thinking 合并 `summary`，保留第一片段的 `startedAt`；非 thinking 直接形成边界。
+- 写入 `assistant_message` 前比较聚合 thinking 与最终回答的规范化文本，删除等价的重复过程段。
+- 历史 `historyEventsToMessages()` 与实时 `AgentChatSection` 都调用同一 helper，避免实时正确但刷新后回归，或反之。
 
 ## 测试方案
 
 ### 单元测试
 
-- `test_load_conversation_events_page_supports_tail_cursor_and_since`：验证 tail、cursor、since 三种分页语义和响应元数据。
-- `test_load_conversation_events_page_does_not_parse_unselected_lines`：写入包含无效 JSON 的旧行，尾页请求成功，说明未选中行不会被 `serde_json::from_str`。
-- `test_load_conversation_events_page_rejects_conflicting_params`：`since` 与 `tail`/`cursor` 同时出现返回 400。
-- `test_sessions_all_omits_events`：`sessions/all` 响应中不含 `events` 字段。
+- 相邻中文 delta 合并为 `你说得对。`。
+- 工具步骤前后的 thinking 不跨边界合并。
+- `token_usage: token usage updated`、`rate_limits: usage updated` 在历史和实时映射中均返回空/不可见。
 
-### E2E 测试
+### E2E / UI
 
-- `e2e-tests/tests/test_agent_history_pagination_api.sh`：用独立 `BIFROST_DATA_DIR` 写入固定 JSONL，启动 Bifrost（非 9900 端口、`--no-system-proxy`、`BIFROST_DISABLE_TRAY=1`），依次验证：
-  1. `sessions/all` 只返回摘要。
-  2. `history/{path}` 无参数返回全量。
-  3. `tail=true&limit=50` 只返回最后 50 条，元数据正确。
-  4. `cursor=<start_index>&limit=50` 返回上一页，`has_more` 边界正确。
-  5. `since=<end_index>` 追加事件后能拿到增量。
+- `web/tests/ui/agent-chat.spec.ts` 使用完整历史响应，断言请求无 `tail` / `cursor` / `limit`。
+- 响应故意携带旧 `has_more=true` 与 `next_cursor`，断言页面仍不存在 `agent-chat-load-older`。
+- 断言完整旧消息、最新消息与合并后的过程段落同时可见，usage 文本不可见。
 
-### WebUI 测试
+### 真实场景
 
-- `web/tests/ui/agent-chat.spec.ts` 的 `AI Agent Chat loads history detail progressively`：验证首屏只发 tail 请求，向上滚动多次后能看到完整线程，滚动位置保持在锚点附近。
-- 结合 `AgentChatSection.timelinePolling.ts` 辅助，验证 running session polling 使用 `since`。
+- 更新 `human_tests/agent-chat-history-pagination.md` 为全量历史与过程渲染回归，创建/更新后立即执行。
+- 真实 9900 页面分别验证亮色和暗色主题；不修改用户会话数据。
 
-### 真实场景测试 human_tests
-
-- `human_tests/agent-chat-history-pagination.md`：
-  - TC-CHP-01：列表摘要不携带 events。
-  - TC-CHP-02：详情首屏只加载尾页。
-  - TC-CHP-03：连续向上加载旧页，可回溯到文件头。
-  - TC-CHP-04：running session 轮询按 `since` 追加。
-  - TC-CHP-05：分页读取不解析未选中旧行（观察进程 CPU / 日志）。
-  - TC-CHP-06：WebUI 多页加载后能看到完整线程。
-
-所有 human_tests 使用临时 `BIFROST_DATA_DIR`、非 9900 端口、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1` 与 `--no-system-proxy`。
-
-### 覆盖率与项目校验
-
-- `pnpm --dir web exec tsc -b`
-- `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "loads history detail progressively"`
-- `cargo test -p bifrost-agent test_load_conversation_events_page_supports_tail_cursor_and_since`
-- `cargo test -p bifrost-agent test_load_conversation_events_page_does_not_parse_unselected_lines`
-- `cargo test -p bifrost-admin agent_history`
-- `bash e2e-tests/tests/test_agent_history_pagination_api.sh`
-- 收尾按项目规则执行 `rust-project-validate`，并至少执行一次 `cargo test --workspace --all-features`。
-- 本机存在 no-local-coverage 约定时，不运行 `make coverage` / `make coverage-unit`；交付时说明豁免并依赖远端 CI。
-
-## Review/Fix/Test 闭环方案
+## Review/Fix/Test 闭环
 
 ### 第 1 轮
 
-- 复核用户目标：摘要/详情拆分、tail/cursor/since 三种分页、`spawn_blocking`、首屏与轮询降载。
-- 复核 diff：persistence、admin handler、AgentChatSection、Playwright、human_tests、readme。
-- 重点 review：query 参数校验、越界边界、in-flight ref 是否覆盖 React 双重渲染、无参数兼容路径是否仍全量、long task preview 未回归。
-- 复测：targeted Rust 单测、agent_history admin 测试、E2E shell、Playwright 用例、human_tests。
+- 复核全量加载、增量 since、usage 过滤、delta 合并与工具边界。
+- 执行 `git status --short`、`git diff`、聚焦 Vitest 与 Playwright。
 
 ### 第 2 轮
 
-- 复核第 1 轮修复后的 diff、readme 索引、design 文档字段同步。
-- 重点 review：分页元数据在真实浏览器上是否与后端一致；滚动补偿在快速连续加载时是否稳定；running polling 不重复解析已加载事件。
-- 复测：失败路径重跑，必要时补充真实浏览器操作截图或日志。
+- 基于最新 diff 复核长历史性能、明暗主题、最终回答/计划/工具未回归、文档和 human_tests 对齐。
+- 复跑聚焦测试与真实指定会话。
 
-## 风险与决策点
+## 风险与边界
 
-- 无参数兼容路径长期保留还是逐步收敛：本轮保留，避免破坏脚本消费。若后续 CLI/脚本迁移完成再考虑弃用。
-- 分页 API 是否公开：当前仅服务 WebUI 内部渐进加载，参数不进入公开 API 文档。如果后续开放，需要补齐鉴权、限流与稳定字段说明。
-- JSONL 损坏行的容错策略：分页读取遇到无法反序列化的行时应跳过并计入 warning，而不是整体失败。
-- 未来若允许在 Agent Chat 内做全文搜索，需要新增倒排索引或数据库层，本轮不实现。
+- 长会话网络响应会增大，但这是明确的产品完整性选择；通过 delta 合并和内部事件过滤控制 DOM 规模。
+- 后端分页 API 暂不删除，以免破坏 CLI 或外部脚本；WebUI 不再消费旧页分页语义。
+- 本机不运行高成本 coverage；90% 覆盖率由远端 `coverage-all.sh --json --gate` 兜底。
