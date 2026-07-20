@@ -159,9 +159,27 @@
 - workspace 兜底测试全部通过；如出现端口 bind 竞态，应由 helper 重试而不是直接失败。
 - 测试不使用 9900，不修改系统代理。
 
+### TC-EPA-07: TLS intercept mode coverage 端口 bind 竞态重试
+
+**操作步骤**：
+1. 执行 coverage job 失败的单用例：
+   ```bash
+   cargo test -p bifrost-e2e tests::tls_intercept_mode::tests::test_passthrough_rule -- --exact --nocapture
+   ```
+2. 执行 TLS intercept mode 模块并发回归：
+   ```bash
+   cargo test -p bifrost-e2e --lib tls_intercept_mode -- --nocapture
+   ```
+3. 检查该模块的三个代理启动点都通过同一 retry helper 选择端口，且只重试明确的 bind-race 错误。
+
+**预期结果**：
+- 单用例和模块 3 个用例全部通过，不再因 `another process is already listening on this port` 偶发失败。
+- 每次 bind 碰撞都会重新选择端口，最多重试 10 次；非 bind 错误立即返回，不被吞掉。
+- 测试不使用 9900，不修改系统代理。
+
 ## 本轮执行记录
 
-测试日期：2026-05-26；追加记录：2026-06-04
+测试日期：2026-05-26；追加记录：2026-06-04、2026-07-20
 
 | 用例 | 结果 | 实际结果 |
 |------|------|----------|
@@ -171,6 +189,7 @@
 | TC-EPA-04 | 通过 | 2026-06-04 `cargo test -p bifrost-e2e --lib` 复测暴露 `tests::routing::tests::test_proxy_chain_upstream_auth_correct` 启动 upstream proxy 时端口 `127.0.0.1:22671` 被抢占；修复后执行 `cargo test -p bifrost-e2e tests::routing::tests::test_proxy_chain_upstream_auth_correct -- --exact --nocapture`，单用例通过；执行 `cargo test -p bifrost-e2e --lib routing -- --nocapture`，8 个 routing lib 用例通过；执行 `cargo run -p bifrost-e2e -- --category routing --jobs 2 --verbose`，19 个 category 用例通过；隔离 target 的 `cargo test -p bifrost-e2e --lib` 通过。完整 `cargo test --workspace --all-features` 本机兜底曾触发非本修复路径阻塞：一次在 `bifrost-admin` 出现可单跑通过的 unrelated timeout/共享状态失败；一次隔离 target 在链接阶段因 `/tmp` 空间不足失败；一次默认 target 被其它 worktree 并发构建污染，出现依赖 dylib 丢失。因此本轮以受影响 e2e 单元、模块和 `bifrost-e2e --lib` 作为真实场景通过证据，workspace 全量留给远端 CI 兜底。 |
 | TC-EPA-05 | 通过 | 2026-06-04 `cargo test --workspace --all-features` 复测暴露 `tests::response_modification::tests::test_combined` 启动 proxy 时端口 `127.0.0.1:21525` 被抢占；修复后执行 `cargo test -p bifrost-e2e tests::response_modification::tests::test_combined -- --nocapture`，单用例通过；执行 `cargo test -p bifrost-e2e --lib response_modification -- --nocapture`，5 个 response modification 用例全部通过；执行 `cargo test -p bifrost-e2e --lib`，67 个 bifrost-e2e lib 用例通过、2 个 ignored。完整 workspace 全量继续由远端 CI 兜底。 |
 | TC-EPA-06 | 通过 | 2026-06-04 `cargo test --workspace --all-features` 复测暴露 `tests::rule_priority::tests::test_xhost_over_host` 启动 proxy 时端口 `127.0.0.1:19103` 被抢占；修复后执行 `cargo test -p bifrost-e2e tests::rule_priority::tests::test_xhost_over_host -- --nocapture`，单用例通过；执行 `cargo test -p bifrost-e2e --lib rule_priority -- --nocapture`，5 个 rule priority 用例全部通过；执行 `cargo test -p bifrost-e2e --lib`，67 个 bifrost-e2e lib 用例通过、2 个 ignored。完整 workspace 全量继续由远端 CI 兜底。 |
+| TC-EPA-07 | 通过 | 2026-07-20 coverage job `88274432478` 暴露 `tests::tls_intercept_mode::tests::test_passthrough_rule` 在端口 `127.0.0.1:19293` 上发生 bind 竞态；三个 TLS intercept mode 启动点统一改为 bind-race 最多 10 次重新选端口，非 bind 错误立即返回。定向单用例 1/1、模块回归 3/3 通过，未使用 9900 或修改系统代理。 |
 
 ## 清理步骤
 

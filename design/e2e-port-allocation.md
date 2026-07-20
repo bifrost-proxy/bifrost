@@ -160,6 +160,7 @@ for attempt in 1..=START_PROXY_MAX_ATTEMPTS {
 - TC-EPA-04：routing 普通 proxy 与 upstream userpass proxy 端口 bind 竞态重试。
 - TC-EPA-05：response modification `test_combined` 端口 bind 竞态重试。
 - TC-EPA-06：rule priority `test_xhost_over_host` 端口 bind 竞态重试。
+- TC-EPA-07：coverage job 中 TLS intercept mode `test_passthrough_rule` 端口 bind 竞态重试，并覆盖该模块三个代理启动点。
 
 每个用例记录真实执行命令、真实执行结果、失败重试次数（若有）。
 
@@ -233,6 +234,7 @@ for attempt in 1..=START_PROXY_MAX_ATTEMPTS {
 - `crates/bifrost-e2e/src/tests/rule_merge_strategy.rs`
 - `crates/bifrost-e2e/src/tests/response_modification.rs`
 - `crates/bifrost-e2e/src/tests/rule_priority.rs`
+- `crates/bifrost-e2e/src/tests/tls_intercept_mode.rs`
 - `crates/bifrost-e2e/src/proxy.rs`（提供 `ProxyInstance::start` / `start_with_rules_text` / `start_with_values` / `start_with_userpass` 启动入口；端口探测/重试 helper 仍内联在各测试文件，未抽到此模块）
 - `portpicker` crate（探测空闲端口）
 
