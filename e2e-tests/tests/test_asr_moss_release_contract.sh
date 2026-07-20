@@ -46,6 +46,11 @@ def capture(text: str, pattern: str, label: str) -> str:
 
 source_commit = capture(release, r'SOURCE_COMMIT="([0-9a-f]{40})"', "MLX-Audio source commit")
 model_commit = capture(release, r'MODEL_COMMIT="([0-9a-f]{40})"', "model snapshot commit")
+moss_python_version = capture(
+    release,
+    r'name: Set up Python for MOSS MLX runtime.*?python-version:\s*"([^"]+)"',
+    "MOSS runtime Python version",
+)
 model_url = capture(runtime, r'const MOSS_MODEL_URL: &str =\s*"([^"]+)";', "model URL")
 model_bytes = capture(runtime, r'const MOSS_MODEL_BYTES: u64 = ([0-9_]+);', "model byte length")
 model_sha = capture(
@@ -67,6 +72,10 @@ download_block = capture(
 download_files = set(download_block.replace("\\", " ").split())
 
 require(source_commit == "64e8416c303fb3b3463dab8eb4ebd78c55a87c1a", "MLX-Audio commit drifted")
+require(
+    moss_python_version == "3.12",
+    "MOSS runtime must select an available Python 3.12 patch for the macOS arm64 host",
+)
 require(model_commit in model_url, "runtime model URL and release snapshot disagree")
 require(model_url.endswith("/model.safetensors"), "runtime no longer downloads the pinned weight")
 require(model_bytes.replace("_", "") == "1258427442", "model byte-length guard drifted")
@@ -192,6 +201,7 @@ require(ci.count('check-macos-release-core-payload.sh "${DMG_PATH}"') >= 1, "PR 
 
 print(
     "PASS: MOSS release/runtime contract is aligned "
-    f"(source={source_commit[:12]}, model={model_commit[:12]}, metadata={len(download_files)})"
+    f"(python={moss_python_version}, source={source_commit[:12]}, "
+    f"model={model_commit[:12]}, metadata={len(download_files)})"
 )
 PY

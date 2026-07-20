@@ -231,6 +231,20 @@
 - 独立 CPython runtime 解压后仍保留 framework/library 相对符号链接；恶意逃逸链接不会写出安装根目录，发布归档通过 extract-then-self-test。
 - Unix 上已有目录不会被 runtime symlink 替换；Windows 不尝试物化 archive symlink，即使目标路径已存在目录也稳定返回 `unsupported on this platform`，两种平台都保持安全拒绝。
 
+### TC-MOSS-14：macOS arm64 Python 可用性与 beta Release 演练
+
+操作步骤：
+
+1. 执行 `bash e2e-tests/tests/test_asr_moss_release_contract.sh`，确认 MOSS release job 使用 `python-version: "3.12"` minor selector，不再固定 GitHub macOS arm64 工具缓存未提供的 patch 版本。
+2. 查询 `actions/python-versions` 官方 `versions-manifest.json`，确认 Python 3.12 至少存在一个 `darwin` / `arm64` 构建；同时确认原失败版本 3.12.13 没有该构建，根因与 release 日志一致。
+3. 从修复分支创建唯一的 `v0.0.157-beta.*` tag，触发真实 `Release` workflow；看护所有 CLI、Desktop、checksum、MOSS runtime 和 GitHub prerelease job 到成功。
+4. 检查 beta release 包含 `moss-joint-runtime-v0.0.157-beta.*-aarch64-apple-darwin.zip` 及其 `.sha256`，下载后复算 checksum，并确认 runtime zip 能通过共享 packager 的 extract-then-self-test 契约。
+
+预期结果：
+
+- `setup-python` 在 macOS arm64 runner 上解析并安装可用的 Python 3.12 patch，不再出现 `version ... with architecture arm64 was not found`。
+- beta Release 全部 job 成功，MOSS runtime zip、checksum 和其余跨平台正式产物均生成；失败的正式 `v0.0.157` tag 只在修复合入主干后重建。
+
 ## 清理步骤
 
 1. 用户要求继续体验时保留 18997；否则停止且仅停止本测试启动的预览 PID。TC-MOSS-09 的 9900 服务按用户要求保留运行，但任务在取得有限验证证据后重新暂停。

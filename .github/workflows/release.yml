@@ -262,7 +262,9 @@ jobs:
         if: matrix.target == 'aarch64-apple-darwin'
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12.13"
+          # Hosted macOS arm64 runners only publish selected patch releases.
+          # Keep the runtime on the 3.12 ABI while selecting an available patch.
+          python-version: "3.12"
 
       - name: Build MOSS joint transcription runtime
         if: matrix.target == 'aarch64-apple-darwin'
