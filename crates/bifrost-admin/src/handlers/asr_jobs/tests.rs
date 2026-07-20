@@ -2051,7 +2051,12 @@ mod tests {
                 .unwrap();
         });
 
-        let response = reqwest::Client::new()
+        // This request targets the listener owned by this test. Ignore process-wide
+        // proxy variables so parallel proxy-environment tests cannot redirect it.
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
             .post(format!("http://{address}/api/asr/tasks"))
             .header(reqwest::header::CONNECTION, "close")
             .json(&serde_json::json!({

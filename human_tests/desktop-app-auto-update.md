@@ -669,6 +669,29 @@
 - 如果新 sidecar 因端口竞争或启动失败提前退出，`wait_for_backend` 返回 child exited 错误，保留可诊断失败，而不是提前清理 handoff marker 并进入错误的 managed-ready 状态。
 - 当 `runtime.json` 的 `pid` 与 `port` 属于新拉起 child 时，managed startup 正常接受 ready，避免误伤正常启动路径。
 
+### TC-DAU-16 独立 CLI 版本探测可恢复 Unix ETXTBSY 瞬态碰撞
+
+操作步骤：
+
+1. 执行确定性 spawn 重试、版本输出解析与独立失败/超时 fixture 回归：
+   ```bash
+   source ~/.zshrc
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin cli_version_probe_ --lib -- --nocapture
+   ```
+2. 连续执行原 workspace 失败用例：
+   ```bash
+   source ~/.zshrc
+   for run in {1..20}; do
+     SKIP_FRONTEND_BUILD=1 cargo test -q -p bifrost-admin cli_version_probe_parses_output_and_rejects_failure_or_timeout --lib || exit 1
+   done
+   ```
+
+预期结果：
+
+- Unix `ETXTBSY` 前两次失败、第三次成功时恢复；持续 `ETXTBSY` 时恰好尝试 8 次后停止，总线性退避不超过 140ms。
+- 非 `ETXTBSY` 启动错误只尝试一次；版本命令失败、超时和路径缺失仍返回不可用。
+- 版本解析能从输出读取 `0.0.155` / `v0.0.156`，无关输出返回空；失败、超时使用不同的临时 fixture，连续 20 轮均通过，不再因覆写后立即执行同一路径而产生测试竞争。
+
 ## 清理步骤
 
 ```bash
@@ -702,3 +725,4 @@ bifrost app uninstall
 | 2026-07-10 | TC-DAU-12 / 13 | 代码 review `desktop/src-tauri/src/main.rs`、`web/src/App.tsx`，真实 App 更新 GUI 路径需发布包/桌面会话补跑 | 待复测：本轮新增日志可追踪 handoff 生命周期与 CLI install transient reconnect 后自动复查状态 |
 | 2026-07-14 | TC-DAU-14 | 构建并 ad-hoc 签名真实 `Bifrost.app`，安装到 `/Applications`；以 one-shot marker 启动修复后的 helper，helper 读取 marker 后删除测试 marker 并释放 hold PID；检查新 App PID、launchd 环境、正式 core PID 与 `desktop-bootstrap.log` | PASS：helper 只打开一次 App；新 PID `75504` 连续 10 秒稳定；三项 `BIFROST_DESKTOP_UPGRADE_RELAUNCH_*` 环境变量均未继承；marker 不残留；正式 core PID `19574` 未变化；WebView handoff 与证书预检完成。首次安装准备因同版本跳过覆盖而失败，改为先卸载旧 bundle、签名并恢复安装后完整重跑通过 |
 | 2026-07-16 | TC-DAU-15 | 现场日志复核 `desktop-bootstrap.log:14374-14410`；`node scripts/prepare-tauri-sidecar.mjs && bash e2e-tests/tests/test_desktop_upgrade_handoff_contract.sh`；`CARGO_TARGET_DIR="$PWD/target/desktop-upgrade-handoff-contract" cargo test --manifest-path desktop/src-tauri/Cargo.toml wait_for_backend -- --nocapture` | PASS：日志确认 App 更新后新进程跳过复用、在 9900 上误读健康响应、随后 managed child 退出并由 watchdog 复用健康后端；handoff 合约 5/5 通过；`wait_for_backend` 3/3 通过，覆盖外部健康服务不能满足 managed child ready 与匹配 runtime marker 正常 ready |
+| 2026-07-20 | TC-DAU-16 | `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin cli_version_probe_ --lib -- --nocapture`；连续 20 轮版本解析与独立失败/超时 fixture | PASS：4 个版本探测回归通过，覆盖 `ETXTBSY` 第三次恢复、持续占用 8 次停止、非瞬态错误不重试、版本输出解析以及独立失败/超时/缺失路径；原 workspace 失败用例连续 20/20 轮通过。 |

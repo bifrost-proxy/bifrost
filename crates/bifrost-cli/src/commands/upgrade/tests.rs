@@ -540,6 +540,7 @@ fn script_installs_use_the_target_aware_atomic_upgrade_path() {
 }
 
 mod review_comments;
+mod spawn_retry;
 
 #[test]
 fn test_glibc_2_38_requires_musl_for_upgrade() {
@@ -964,40 +965,6 @@ fn upgrade_target_version_match_cleans_previous_binary_backup() {
     assert_eq!(
         std::fs::read_to_string(&target).expect("read verified target"),
         "#!/bin/sh\necho 'bifrost 0.0.156'\n"
-    );
-    assert!(!backup.exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn upgrade_target_version_mismatch_restores_previous_binary() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let dir = tempfile::tempdir().expect("tempdir");
-    let target = dir.path().join("bifrost");
-    let backup = binary_backup_path(&target);
-    // Use a native executable instead of a shell-script fixture. Under LLVM
-    // coverage's parallel test load, the script occasionally failed before it
-    // could print its version, so the test exercised the generic command-error
-    // rollback branch rather than the intended successful-command mismatch.
-    // `/usr/bin/true --version` exits successfully on both macOS and Linux and
-    // can never report the pinned Bifrost target version.
-    std::fs::copy("/usr/bin/true", &target).expect("copy mismatched executable");
-    std::fs::write(&backup, "#!/bin/sh\necho 'bifrost 0.0.155'\n").expect("write previous binary");
-    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
-        .expect("chmod target");
-    std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o755))
-        .expect("chmod backup");
-
-    let error = verify_installed_cli_target_version_or_restore(&target, "0.0.156")
-        .expect_err("wrong target version must fail");
-    assert!(
-        error.to_string().contains("instead of target v0.0.156"),
-        "unexpected verification error: {error:#}"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&target).expect("read restored target"),
-        "#!/bin/sh\necho 'bifrost 0.0.155'\n"
     );
     assert!(!backup.exists());
 }
