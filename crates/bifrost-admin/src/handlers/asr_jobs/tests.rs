@@ -1494,8 +1494,53 @@ mod tests {
         let _guard = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
         std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("completed.wav");
+        std::fs::write(&source, make_wav(&[500i16; 100])).unwrap();
         let task = test_directory_task("running-concurrency-task", audio_dir);
         add_task(task.clone()).unwrap();
+        let mut completed = pending_record(&task.id, &source);
+        completed.status = FileStatus::Success;
+        completed.output_text_path = Some(temp.path().join("old.txt"));
+        completed.output_metadata_path = Some(temp.path().join("old.json"));
+        completed.output_timeline_path = Some(temp.path().join("old.timeline.json"));
+        completed.text_chars = 8;
+        completed.chunk_metrics.push(AsrChunkMetric {
+            chunk_index: 0,
+            offset_secs: 0,
+            duration_secs: 1,
+            runner: "fork_per_chunk".to_string(),
+            status: "ok".to_string(),
+            elapsed_ms: 1,
+            rtf: 0.001,
+            text_chars: 8,
+            text_sha1: sha1_hex(b"old text"),
+            server_url: None,
+            fallback_reason: None,
+            error: None,
+            recorded_at_ms: now_ms(),
+        });
+        let completed_key = "success".to_string();
+        let files = [
+            (completed_key.clone(), FileStatus::Success),
+            ("partial".to_string(), FileStatus::PartialSuccess),
+            ("failed".to_string(), FileStatus::Failed),
+            ("processing".to_string(), FileStatus::Processing),
+        ]
+        .into_iter()
+        .map(|(key, status)| {
+            let mut record = completed.clone();
+            record.status = status;
+            (key, record)
+        })
+        .collect();
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files,
+            },
+        )
+        .unwrap();
         RUNNING_TASKS.lock().unwrap().insert(task.id.clone());
 
         let update = UpdateTaskRequest {
@@ -1565,6 +1610,54 @@ mod tests {
         assert_eq!(updated.transcription_prompt, "Bifrost 专有词");
         let reloaded = find_task(&task.id).unwrap();
         assert_eq!(reloaded.transcription_prompt, "Bifrost 专有词");
+        let requeued = load_file_store(&task.id);
+        assert_eq!(requeued.files.len(), 4);
+        for record in requeued.files.values() {
+            assert_eq!(record.status, FileStatus::Pending);
+            assert!(record.output_text_path.is_none());
+            assert!(record.output_metadata_path.is_none());
+            assert!(record.output_timeline_path.is_none());
+            assert!(record.chunk_metrics.is_empty());
+            assert_eq!(record.text_chars, 0);
+        }
+
+        let mut completed_again = requeued.files.get(&completed_key).unwrap().clone();
+        completed_again.status = FileStatus::Success;
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(completed_key.clone(), completed_again)]),
+            },
+        )
+        .unwrap();
+        let idempotent_update = UpdateTaskRequest {
+            transcription_mode: Some(AsrTranscriptionMode::MossJoint),
+            transcription_prompt: Some("Bifrost 专有词".to_string()),
+            name: None,
+            audio_dir: None,
+            recursive: None,
+            enabled: None,
+            paused: None,
+            schedule: None,
+            language: None,
+            model: None,
+            runtime_strategy: None,
+            max_concurrent_files: None,
+            diarization: None,
+            daily_agent: None,
+            external_devices: None,
+            import_policy: None,
+        };
+        update_task_config(&task.id, idempotent_update).unwrap();
+        assert_eq!(
+            load_file_store(&task.id)
+                .files
+                .get(&completed_key)
+                .unwrap()
+                .status,
+            FileStatus::Success
+        );
     }
 
     #[test]

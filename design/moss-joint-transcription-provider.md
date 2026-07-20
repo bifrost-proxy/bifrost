@@ -26,6 +26,7 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 - 不修改现有任务源音频、`tasks.json`、`files.json` 或时间线产物。
 - MOSS 不进入实时默认路径；旧任务缺少模式字段时继续使用标准 Qwen 链路。
 - 自动初始化只写入 Bifrost ASR 数据目录，不改系统 Python 环境，也不覆盖现有 Qwen 资产。
+- 实际切换转录模式或修改生效中的 MOSS prompt 时，已完成/失败的文件记录必须回到 pending，旧产物引用不得继续冒充新配置结果；相同值 PATCH 不触发重跑。
 
 必须真实验证：
 
@@ -235,7 +236,9 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 - benchmark 请求的目标数超过不同成功源文件数时必须失败，不得复用样本。
 - 运行时归档含 AppleDouble 元数据时，安装器必须忽略且不得落盘。
 - verification marker 必须覆盖 `site-packages` 非缓存文件；依赖删除、增加或内容损坏必须撤销 Ready。
+- 模型 metadata 校验列表必须与 release packager 的完整 12 文件集合一致，缺失或损坏任一文件都撤销 Ready 并触发恢复。
 - MOSS 成功转录必须持久化整文件耗时 metric，benchmark 的 elapsed/RTF 不得恒为零。
+- API 修改转录模式或生效中的 MOSS prompt 后必须把旧结果重置为 pending；相同配置 PATCH 保持幂等。
 - 1.2 秒 fixture 推理达到 600 ms 时必须返回 `moss_rtf_exceeded`，并终止子进程。
 - 缺时长、短音频、数字静音必须在 MLX 子进程启动前返回稳定错误；正常低音量 WAV 不得被静音阈值误杀。
 - 已消耗完端到端预算时不得创建子进程；剩余预算而非完整音频预算控制 watchdog。

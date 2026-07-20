@@ -116,6 +116,49 @@ print(data["id"])
 PY
 )"
 
+FILES_JSON="$DATA_DIR/asr/tasks/$TASK_ID/files.json"
+mkdir -p "$(dirname "$FILES_JSON")"
+printf 'fixture audio' > "$AUDIO_DIR/completed.wav"
+python3 - "$FILES_JSON" "$TASK_ID" "$AUDIO_DIR/completed.wav" "$DATA_DIR" <<'PY'
+import json, sys
+from pathlib import Path
+
+files_json = Path(sys.argv[1])
+task_id = sys.argv[2]
+source = sys.argv[3]
+data_dir = Path(sys.argv[4])
+record = {
+    "task_id": task_id,
+    "source_path": source,
+    "source_size": 13,
+    "source_modified_ms": 1,
+    "source_created_at_ms": None,
+    "source_created_at_source": None,
+    "media_duration_ms": 10_000,
+    "status": "success",
+    "output_text_path": str(data_dir / "old.txt"),
+    "output_metadata_path": str(data_dir / "old.json"),
+    "output_timeline_path": str(data_dir / "old.timeline.json"),
+    "text_chars": 8,
+    "error": None,
+    "chunk_metrics": [{
+        "chunk_index": 0,
+        "offset_secs": 0,
+        "duration_secs": 10,
+        "runner": "moss_joint",
+        "status": "ok",
+        "elapsed_ms": 100,
+        "rtf": 0.01,
+        "text_chars": 8,
+        "text_sha1": "fixture",
+        "recorded_at_ms": 1,
+    }],
+    "started_at_ms": 1,
+    "finished_at_ms": 2,
+}
+files_json.write_text(json.dumps({"version": 1, "files": {"completed": record}}), encoding="utf-8")
+PY
+
 curl -fsS -X PATCH "$api/$TASK_ID" -H 'Content-Type: application/json' \
   --data '{"transcription_prompt":""}' >"$DATA_DIR/cleared.json"
 python3 - "$DATA_DIR/cleared.json" <<'PY'
@@ -123,6 +166,16 @@ import json, sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 assert data["transcription_mode"] == "moss_joint", data
 assert data["transcription_prompt"] == "", data
+PY
+python3 - "$FILES_JSON" <<'PY'
+import json, sys
+record = json.load(open(sys.argv[1], encoding="utf-8"))["files"]["completed"]
+assert record["status"] == "pending", record
+assert record["output_text_path"] is None, record
+assert record["output_metadata_path"] is None, record
+assert record["output_timeline_path"] is None, record
+assert record.get("chunk_metrics", []) == [], record
+assert record["text_chars"] == 0, record
 PY
 
 TOO_LONG="$(python3 - <<'PY'

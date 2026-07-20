@@ -451,6 +451,7 @@ fn update_task_config(
         ));
     }
     let mut store = load_tasks();
+    let original_store = store.clone();
     let now = now_ms();
     let Some(task) = store.tasks.iter_mut().find(|task| task.id == id) else {
         return Err((StatusCode::NOT_FOUND, "ASR task not found".to_string()));
@@ -489,12 +490,17 @@ fn update_task_config(
     if let Some(model) = update.model {
         task.model = model;
     }
+    let mut transcription_mode_changed = false;
     if let Some(transcription_mode) = update.transcription_mode {
+        transcription_mode_changed = task.transcription_mode != transcription_mode;
         task.transcription_mode = transcription_mode;
     }
+    let mut transcription_prompt_changed = false;
     if let Some(transcription_prompt) = update.transcription_prompt {
-        task.transcription_prompt = normalize_transcription_prompt(transcription_prompt)
+        let transcription_prompt = normalize_transcription_prompt(transcription_prompt)
             .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
+        transcription_prompt_changed = task.transcription_prompt != transcription_prompt;
+        task.transcription_prompt = transcription_prompt;
     }
     if let Some(runtime_strategy) = update.runtime_strategy {
         task.runtime_strategy = runtime_strategy;
@@ -524,6 +530,23 @@ fn update_task_config(
         .and_then(|_| task.schedule.next_run_at_ms(now.saturating_add(60_000), false));
     let updated = task.clone();
     save_tasks(&store).map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    let transcription_output_changed = transcription_mode_changed
+        || transcription_prompt_changed
+            && updated.transcription_mode == AsrTranscriptionMode::MossJoint;
+    if transcription_output_changed {
+        if let Err(error) = requeue_files_for_transcription_config_change(id) {
+            let rollback = save_tasks(&original_store);
+            let message = match rollback {
+                Ok(()) => format!(
+                    "update ASR task file records after transcription configuration change: {error}"
+                ),
+                Err(rollback_error) => format!(
+                    "update ASR task file records after transcription configuration change: {error}; rollback task configuration: {rollback_error}"
+                ),
+            };
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
+        }
+    }
     Ok(updated)
 }
 

@@ -199,6 +199,20 @@
 - 每个成功 MOSS 文件的 `files.json` 都有可供 benchmark 汇总的真实整文件 elapsed metric，RTF 不再因空 metrics 固定为零。
 - benchmark 不会让同一 `source_path` 同时代表多个目标时长；不同成功源文件不足时 fail closed。
 
+### TC-MOSS-12：完整模型 metadata 与配置变更重处理
+
+操作步骤：
+
+1. 执行 `cargo test -p bifrost-admin moss_ --lib -- --nocapture`，确认模型 verification marker 覆盖 release packager 要求的 12 个 metadata 文件，任一文件缺失或损坏都会撤销 model Ready。
+2. 执行 `bash e2e-tests/tests/test_asr_moss_release_contract.sh`，确认 Rust 校验列表、release workflow 下载列表和 runtime packager 必需列表保持一致。
+3. 执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_asr_moss_task_mode.sh`。在 Apple Silicon 上先写入成功文件记录，再修改 MOSS prompt，确认记录变为 pending，旧产物引用和 metrics 被清空；不支持平台继续验证 MOSS 创建/PATCH 返回 400。
+
+预期结果：
+
+- `added_tokens.json`、`chat_template.jinja`、`merges.txt`、`vocab.json` 等全部发布 metadata 与原有文件一样受 checksum 保护和自动修复。
+- 实际切换转录模式或修改生效中的 MOSS prompt 后，成功、部分成功、失败或遗留 processing 记录都会重新排队，下一次运行不会 merge-only 保留旧转录。
+- 相同值 PATCH 不制造无意义的重复转录；任务运行中仍拒绝高风险配置变更。
+
 ## 清理步骤
 
 1. 用户要求继续体验时保留 18997；否则停止且仅停止本测试启动的预览 PID。TC-MOSS-09 的 9900 服务按用户要求保留运行，但任务在取得有限验证证据后重新暂停。
@@ -226,3 +240,4 @@
 | 2026-07-19 | TC-MOSS-09 | PASS（两次发现并修复真实质量/资源缺口后复测）：使用 release CLI 重启默认 `~/.bifrost:9900`，真实队列验证 daemon PID `98617`；最终源码重新构建安装后 daemon PID `36918`，模型仍在 `~/.bifrost/asr/moss_joint_mlx` 且 `installed_model_bytes=1258427442`，未重复下载。初始 20 个磁盘仍存在的未完成资源中，旧版稀疏 1800.15 秒文件从 530363 ms/RTF 0.2946 降至 16293 ms/RTF 0.00905；缺时长 335 ms 返回 `moss_duration_unavailable`，2.533 秒文件 342 ms 返回 `moss_audio_too_short`。首次协议保护只检查前缀仍让稀疏文件运行 219 秒，立即 force-pause 后收紧为 256 token 内必须形成完整正时长片段；随后发现一个 462966 ms 的重复“嗯”零时长输出被错误包装为 success，立即隔离该轮新产物、恢复为未完成并增加 Python/Rust 双层退化拒绝，复测 16199 ms 正确失败。增加同版本确定性失败去重后，新一轮待执行总数由 20 降到 11，不再重复加载上述坏输入；正常 1800.15 秒未完成文件 `TX02_MIC027_20260714_135743_orig.wav` 最终 150771 ms/RTF 0.08375 成功，11001 字、353 segments、9 speakers，时间轴 10–1799740 ms。每次发现无价值路径都 force-pause，所有完成/失败 RTF 均未超过 0.5。最终服务确认任务 `paused=true/running=false`、无 MOSS 子进程，9900 继续运行。重启前已成功样本 `TX01_MIC052_20260624_123014_orig.wav` 的 status、started/finished、5217 字及 source/text/metadata/timeline 四个 SHA-256 前后完全一致，证明没有重跑已完成资源。 |
 | 2026-07-20 | TC-MOSS-10 | PASS：路径可移植性检查无命中；Rust MOSS 回归 20/20、Web 模式选项 3/3、release 契约和真实 task-mode E2E 均通过。隔离服务运行在 18996 且系统代理保持关闭；Puppeteer Chrome 在 1280×900 下逐项验证亮色和暗色主题，New Directory Task 的 MOSS 选项在 Apple Silicon 上均可见、可选，19/19 浏览器步骤通过、59 个 API 请求无失败。测试服务、临时数据目录和临时场景文件均已清理。 |
 | 2026-07-20 | TC-MOSS-11 | PASS：Rust MOSS 回归确认 `site-packages` 内容损坏撤销 Ready，成功 MOSS task 生成一条非零整文件耗时 metric；benchmark E2E 正常选择不同录音，并在 4 个目标只有 3 个不同成功源文件时明确失败且不写报告。 |
+| 2026-07-20 | TC-MOSS-12 | PASS：Rust MOSS 回归 20/20 覆盖完整 12 个发布 metadata，配置重排状态矩阵/幂等单测 1/1；release contract E2E 确认下载、打包、Rust 校验列表一致；真实 task-mode API E2E 在修改 MOSS prompt 后把成功记录重置为 pending 并清空旧产物引用/metrics。 |

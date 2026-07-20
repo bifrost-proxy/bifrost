@@ -9,11 +9,18 @@ const MOSS_MODEL_BYTES: u64 = 1_258_427_442;
 const MOSS_MODEL_SHA256: &str =
     "469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190";
 const MOSS_MODEL_REQUIRED_FILES: &[&str] = &[
+    "added_tokens.json",
+    "chat_template.jinja",
     "config.json",
+    "generation_config.json",
+    "merges.txt",
+    "model.safetensors.index.json",
     "preprocessor_config.json",
     "processor_config.json",
+    "special_tokens_map.json",
     "tokenizer.json",
     "tokenizer_config.json",
+    "vocab.json",
 ];
 const MOSS_MAX_PROMPT_CHARS: usize = 4_000;
 const MOSS_CONTEXT_TOKENS: u64 = 131_072;
