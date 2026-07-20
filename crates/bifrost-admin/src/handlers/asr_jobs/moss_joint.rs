@@ -346,6 +346,7 @@ fn moss_non_retryable_runtime_error(error: &str) -> String {
 
 fn moss_runtime_error_is_deterministic(error: &str) -> bool {
     error.contains("no complete speaker-aware segment before")
+        || error.contains("no valid speaker-aware segments")
         || error.contains("degenerate repetitive transcription")
         || error.contains("no positive-duration speaker-aware segments")
         || error.contains("max-new token limit before completion")

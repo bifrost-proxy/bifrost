@@ -1058,6 +1058,25 @@ mod tests {
             env!("CARGO_PKG_VERSION")
         )));
 
+        write_executable(
+            &binary,
+            "#!/bin/sh\necho 'MOSS MLX returned no valid speaker-aware segments' >&2\nexit 7\n",
+        );
+        let no_valid_segments_error = run_moss_joint_transcription(
+            &runtime,
+            &wav,
+            process_fixture_audio_ms,
+            "",
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(no_valid_segments_error.starts_with(&format!(
+            "moss_non_retryable_v{}:",
+            env!("CARGO_PKG_VERSION")
+        )));
+
         write_executable(&binary, "#!/bin/sh\nprintf '[]'\n");
         let deterministic_parse_error = run_moss_joint_transcription(
             &runtime,
@@ -1190,7 +1209,7 @@ mod tests {
         let binary = temp.path().join("moss-transcribe");
         write_executable(
             &binary,
-            "#!/bin/sh\nprintf '[{\"start\":0.1,\"end\":1.2,\"speaker\":\" S01 \",\"text\":\"hello\"},{\"start\":1.2,\"end\":2.4,\"speaker\":\"S02\",\"text\":\"world\"},{\"start\":2.5,\"end\":2.0,\"speaker\":\"S03\",\"text\":\"invalid range\"}]'\n",
+            "#!/bin/sh\nprintf '[{\"start\":0.1,\"end\":1.2,\"speaker\":\" S01 \",\"text\":\"hello\"},{\"start\":1.2,\"end\":65.0,\"speaker\":\"S02\",\"text\":\"abcdefghijklmnopqrstuvwxyz\"},{\"start\":2.5,\"end\":2.0,\"speaker\":\"S03\",\"text\":\"invalid range\"}]'\n",
         );
         let runtime = moss_process_test_paths(temp.path(), binary);
         let mut task = test_directory_task("moss-artifacts", audio_dir.clone());
@@ -1202,7 +1221,7 @@ mod tests {
             source_modified_ms: Some(9_000),
             source_created_at_ms: Some(10_000),
             source_created_at_source: Some("fixture".to_string()),
-            media_duration_ms: Some(12_000),
+            media_duration_ms: Some(65_000),
         };
         let hooks = TaskTranscribeHooks {
             on_chunk_progress: None,
@@ -1229,22 +1248,42 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.text, "hello\nworld");
+        assert_eq!(output.text, "hello\nabcdefghijklmnopqrstuvwxyz");
         assert_eq!(output.timeline.model, "MOSS-Transcribe-Diarize-MLX-8bit");
         assert_eq!(
             output.timeline.diarization_profile.as_deref(),
             Some("moss_joint_native")
         );
-        assert_eq!(output.timeline.segments.len(), 2);
+        assert_eq!(output.timeline.segments.len(), 4);
+        assert!(output.timeline.segments.iter().all(|segment| {
+            segment.audio_end_ms.saturating_sub(segment.audio_start_ms)
+                <= ASR_TASK_SEGMENT_MAX_MS
+        }));
+        assert_eq!(output.timeline.segments[1].speaker.as_deref(), Some("S02"));
+        assert_eq!(output.timeline.segments[2].speaker.as_deref(), Some("S02"));
+        assert_eq!(output.timeline.segments[3].speaker.as_deref(), Some("S02"));
         assert_eq!(output.chunk_metrics.len(), 1);
         assert_eq!(output.chunk_metrics[0].runner, "moss_joint");
         assert_eq!(output.chunk_metrics[0].status, "ok");
-        assert_eq!(output.chunk_metrics[0].duration_secs, 12);
+        assert_eq!(output.chunk_metrics[0].duration_secs, 65);
         assert!(output.chunk_metrics[0].elapsed_ms >= 1);
-        assert_eq!(output.chunk_metrics[0].text_chars, 11);
-        assert_eq!(output.chunk_metrics[0].text_sha1, sha1_hex(b"hello\nworld"));
+        assert_eq!(output.chunk_metrics[0].text_chars, 32);
+        assert_eq!(
+            output.chunk_metrics[0].text_sha1,
+            sha1_hex(b"hello\nabcdefghijklmnopqrstuvwxyz")
+        );
         assert_eq!(output.timeline.segments[0].absolute_start_ms, Some(10_100));
-        assert_eq!(output.timeline.segments[1].absolute_end_ms, Some(12_400));
+        assert_eq!(output.timeline.segments[3].absolute_end_ms, Some(75_000));
+        assert_eq!(
+            output
+                .timeline
+                .segments
+                .iter()
+                .skip(1)
+                .map(|segment| segment.text.as_str())
+                .collect::<String>(),
+            "abcdefghijklmnopqrstuvwxyz"
+        );
         assert_eq!(
             output
                 .timeline

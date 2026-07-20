@@ -1741,6 +1741,7 @@ async fn transcribe_file_for_task_with_wav(
         segments,
     };
     if task.transcription_mode.uses_native_speakers() {
+        normalize_timeline_segments(&mut timeline);
         let speaker_ids = timeline
             .segments
             .iter()
