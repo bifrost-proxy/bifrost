@@ -637,6 +637,33 @@ mod tests {
         (format!("http://{address}/resource"), requests)
     }
 
+    fn spawn_failing_moss_http_server(
+        attempts: usize,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = std::sync::Arc::new(AtomicUsize::new(0));
+        let recorded = requests.clone();
+        std::thread::spawn(move || {
+            for _ in 0..attempts {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request);
+                recorded.fetch_add(1, Ordering::SeqCst);
+                stream
+                    .write_all(
+                        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .unwrap();
+            }
+        });
+        (format!("http://{address}/resource"), requests)
+    }
+
     #[tokio::test]
     async fn moss_resource_download_retries_and_resumes_transient_body_failure() {
         let temp = TempDir::new().unwrap();
@@ -656,6 +683,29 @@ mod tests {
         assert!(requests[1]
             .to_ascii_lowercase()
             .contains(&format!("range: bytes={split}-")));
+    }
+
+    #[tokio::test]
+    async fn moss_resource_download_stops_after_bounded_failures() {
+        use std::sync::atomic::Ordering;
+
+        let temp = TempDir::new().unwrap();
+        let (url, requests) =
+            spawn_failing_moss_http_server(MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS);
+        let error = download_moss_resource(
+            url,
+            temp.path().join("unavailable.bin"),
+            "unavailable MOSS test resource",
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("failed after 3 attempts"));
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS
+        );
     }
 
     #[tokio::test]

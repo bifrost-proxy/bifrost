@@ -112,10 +112,102 @@ pub fn pick_latest_bifrost_release(releases: Vec<GitHubRelease>) -> Option<GitHu
 }
 
 pub fn github_releases_api_list_url(page: usize) -> String {
+    github_releases_api_list_url_from(GITHUB_RELEASES_API_LIST_URL, page)
+}
+
+fn github_releases_api_list_url_from(base_url: &str, page: usize) -> String {
     format!(
-        "{GITHUB_RELEASES_API_LIST_URL}?per_page={GITHUB_RELEASES_PER_PAGE}&page={}",
+        "{base_url}?per_page={GITHUB_RELEASES_PER_PAGE}&page={}",
         page.max(1)
     )
+}
+
+fn published_release_request_error(error: &GithubRequestError) -> FetchError {
+    if matches!(error, GithubRequestError::Status(status) if *status == reqwest::StatusCode::FORBIDDEN)
+    {
+        FetchError::Network(
+            "all release-based version detection methods failed (redirect + GitHub API rate limited). Check your network connection to github.com".to_string(),
+        )
+    } else {
+        let reason = classify_github_request_error(error);
+        FetchError::Network(format!("{reason}: {error}"))
+    }
+}
+
+fn fetch_latest_published_release_sync(
+    client: &reqwest::blocking::Client,
+    base_url: &str,
+) -> Result<(String, Vec<String>), FetchError> {
+    let mut published_releases = Vec::new();
+    let mut page = 1;
+    loop {
+        let url = github_releases_api_list_url_from(base_url, page);
+        let page_releases = fetch_with_retry(client, &url)
+            .map_err(|error| published_release_request_error(&error))
+            .and_then(|response| {
+                response.json::<Vec<GitHubRelease>>().map_err(|error| {
+                    FetchError::Parse(format!("failed to parse releases page {page}: {error}"))
+                })
+            });
+        match page_releases {
+            Ok(releases) if releases.is_empty() => break,
+            Ok(releases) => published_releases.extend(releases),
+            Err(error) if !published_releases.is_empty() => {
+                debug!(
+                    page,
+                    error = %error,
+                    "stopping published release pagination after a later page failed"
+                );
+                break;
+            }
+            Err(error) => return Err(error),
+        }
+        page += 1;
+    }
+
+    let release = pick_latest_bifrost_release(published_releases).ok_or_else(|| {
+        FetchError::Parse("no published stable Bifrost releases found".to_string())
+    })?;
+    let version = stable_bifrost_release_version(&release)
+        .expect("published release picker only returns stable Bifrost releases");
+    let highlights = parse_release_highlights(release.body.as_deref());
+    Ok((version, highlights))
+}
+
+async fn fetch_latest_published_release_async(
+    client: &reqwest::Client,
+    base_url: &str,
+) -> Option<(String, Vec<String>)> {
+    let mut published_releases = Vec::new();
+    let mut page = 1;
+    loop {
+        let response = match client
+            .get(github_releases_api_list_url_from(base_url, page))
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(_) if !published_releases.is_empty() => break,
+            Err(_) => return None,
+        };
+        if !response.status().is_success() {
+            break;
+        }
+        let page_releases: Vec<GitHubRelease> = match response.json().await {
+            Ok(releases) => releases,
+            Err(_) => break,
+        };
+        if page_releases.is_empty() {
+            break;
+        }
+        published_releases.extend(page_releases);
+        page += 1;
+    }
+
+    let release = pick_latest_bifrost_release(published_releases)?;
+    let version = stable_bifrost_release_version(&release)?;
+    let highlights = parse_release_highlights(release.body.as_deref());
+    Some((version, highlights))
 }
 
 pub fn make_release_tag(version: &str) -> String {
@@ -538,64 +630,7 @@ pub fn fetch_latest_release_sync() -> Result<(String, Vec<String>), FetchError> 
         }
     }
 
-    let mut published_releases = Vec::new();
-    let mut page = 1;
-    loop {
-        let url = github_releases_api_list_url(page);
-        let response = match fetch_with_retry(&client, &url) {
-            Ok(response) => response,
-            Err(error) if !published_releases.is_empty() => {
-                debug!(
-                    page,
-                    error = %error,
-                    "stopping published release pagination after a later page failed"
-                );
-                break;
-            }
-            Err(error) => {
-                let is_rate_limit = matches!(&*error, GithubRequestError::Status(status) if *status == reqwest::StatusCode::FORBIDDEN);
-                return Err(if is_rate_limit {
-                    FetchError::Network(
-                        "all release-based version detection methods failed (redirect + GitHub API rate limited). Check your network connection to github.com".to_string()
-                    )
-                } else {
-                    let reason = classify_github_request_error(&error);
-                    FetchError::Network(format!("{}: {}", reason, error))
-                });
-            }
-        };
-
-        let page_releases: Vec<GitHubRelease> = match response.json() {
-            Ok(releases) => releases,
-            Err(error) if !published_releases.is_empty() => {
-                debug!(
-                    page,
-                    error = %error,
-                    "stopping published release pagination after a later page could not be parsed"
-                );
-                break;
-            }
-            Err(error) => {
-                return Err(FetchError::Parse(format!(
-                    "failed to parse releases page {page}: {error}"
-                )));
-            }
-        };
-        if page_releases.is_empty() {
-            break;
-        }
-        published_releases.extend(page_releases);
-        page += 1;
-    }
-
-    let release = pick_latest_bifrost_release(published_releases).ok_or_else(|| {
-        FetchError::Parse("no published stable Bifrost releases found".to_string())
-    })?;
-    let version = stable_bifrost_release_version(&release).ok_or_else(|| {
-        FetchError::Parse("selected release did not contain a stable Bifrost version".to_string())
-    })?;
-    let highlights = parse_release_highlights(release.body.as_deref());
-    Ok((version, highlights))
+    fetch_latest_published_release_sync(&client, GITHUB_RELEASES_API_LIST_URL)
 }
 
 pub async fn fetch_version_via_redirect_async() -> Option<String> {
@@ -709,28 +744,7 @@ pub async fn fetch_latest_release_async() -> Option<(String, Vec<String>)> {
         }
     }
 
-    let mut published_releases = Vec::new();
-    let mut page = 1;
-    loop {
-        let response = match client.get(github_releases_api_list_url(page)).send().await {
-            Ok(response) if response.status().is_success() => response,
-            _ => break,
-        };
-        let page_releases: Vec<GitHubRelease> = match response.json().await {
-            Ok(releases) => releases,
-            Err(_) => break,
-        };
-        if page_releases.is_empty() {
-            break;
-        }
-        published_releases.extend(page_releases);
-        page += 1;
-    }
-
-    let release = pick_latest_bifrost_release(published_releases)?;
-    let version = stable_bifrost_release_version(&release)?;
-    let highlights = parse_release_highlights(release.body.as_deref());
-    Some((version, highlights))
+    fetch_latest_published_release_async(&client, GITHUB_RELEASES_API_LIST_URL).await
 }
 
 pub fn parse_release_highlights(body: Option<&str>) -> Vec<String> {
@@ -1022,6 +1036,45 @@ pub fn extract_any_commit_message(line: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn spawn_release_page_server(responses: Vec<(u16, String)>) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request);
+                let reason = if status == 200 { "OK" } else { "Error" };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        format!("http://{address}/releases")
+    }
+
+    fn release_page_json(releases: &[(&str, bool, bool, &str)]) -> String {
+        serde_json::to_string(
+            &releases
+                .iter()
+                .map(|(tag_name, draft, prerelease, body)| {
+                    serde_json::json!({
+                        "tag_name": tag_name,
+                        "body": body,
+                        "draft": draft,
+                        "prerelease": prerelease,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn test_extract_version_from_redirect_url() {
         assert_eq!(
@@ -1109,6 +1162,139 @@ mod tests {
             github_releases_api_list_url(10_001),
             "https://api.github.com/repos/bifrost-proxy/bifrost/releases?per_page=100&page=10001"
         );
+    }
+
+    #[test]
+    fn published_release_sync_fallback_scans_all_pages_and_keeps_earlier_candidates() {
+        let client = crate::github_blocking_reqwest_client_builder()
+            .build()
+            .unwrap();
+        let base_url = spawn_release_page_server(vec![
+            (
+                200,
+                release_page_json(&[
+                    ("moss-runtime-v9.0.0", false, false, "resource"),
+                    ("v1.2.3", false, false, "## Highlights\n- first"),
+                ]),
+            ),
+            (
+                200,
+                release_page_json(&[("v2.0.0", false, false, "## Highlights\n- second")]),
+            ),
+            (200, "[]".to_string()),
+        ]);
+        let selected = fetch_latest_published_release_sync(&client, &base_url).unwrap();
+        assert_eq!(selected, ("2.0.0".to_string(), vec!["second".to_string()]));
+
+        let late_parse_failure = spawn_release_page_server(vec![
+            (
+                200,
+                release_page_json(&[("v1.2.3", false, false, "## Highlights\n- kept")]),
+            ),
+            (200, "not-json".to_string()),
+        ]);
+        let selected = fetch_latest_published_release_sync(&client, &late_parse_failure).unwrap();
+        assert_eq!(selected, ("1.2.3".to_string(), vec!["kept".to_string()]));
+
+        let first_parse_failure = spawn_release_page_server(vec![(200, "not-json".to_string())]);
+        assert!(matches!(
+            fetch_latest_published_release_sync(&client, &first_parse_failure),
+            Err(FetchError::Parse(message)) if message.contains("page 1")
+        ));
+
+        let empty = spawn_release_page_server(vec![(200, "[]".to_string())]);
+        assert!(matches!(
+            fetch_latest_published_release_sync(&client, &empty),
+            Err(FetchError::Parse(message)) if message.contains("no published stable")
+        ));
+    }
+
+    #[tokio::test]
+    async fn published_release_async_fallback_scans_pages_and_tolerates_late_failures() {
+        let client = crate::github_reqwest_client_builder().build().unwrap();
+        let base_url = spawn_release_page_server(vec![
+            (
+                200,
+                release_page_json(&[("v1.2.3", false, false, "## Highlights\n- first")]),
+            ),
+            (
+                200,
+                release_page_json(&[("v2.0.0", false, false, "## Highlights\n- second")]),
+            ),
+            (200, "[]".to_string()),
+        ]);
+        let selected = fetch_latest_published_release_async(&client, &base_url)
+            .await
+            .unwrap();
+        assert_eq!(selected, ("2.0.0".to_string(), vec!["second".to_string()]));
+
+        let late_status_failure = spawn_release_page_server(vec![
+            (
+                200,
+                release_page_json(&[("v1.2.3", false, false, "## Highlights\n- kept")]),
+            ),
+            (500, "server error".to_string()),
+        ]);
+        let selected = fetch_latest_published_release_async(&client, &late_status_failure)
+            .await
+            .unwrap();
+        assert_eq!(selected, ("1.2.3".to_string(), vec!["kept".to_string()]));
+
+        let late_parse_failure = spawn_release_page_server(vec![
+            (
+                200,
+                release_page_json(&[("v1.2.3", false, false, "## Highlights\n- kept")]),
+            ),
+            (200, "not-json".to_string()),
+        ]);
+        assert_eq!(
+            fetch_latest_published_release_async(&client, &late_parse_failure)
+                .await
+                .unwrap()
+                .0,
+            "1.2.3"
+        );
+
+        let late_transport_failure = spawn_release_page_server(vec![(
+            200,
+            release_page_json(&[("v1.2.3", false, false, "kept")]),
+        )]);
+        assert_eq!(
+            fetch_latest_published_release_async(&client, &late_transport_failure)
+                .await
+                .unwrap()
+                .0,
+            "1.2.3"
+        );
+
+        let first_status_failure =
+            spawn_release_page_server(vec![(500, "server error".to_string())]);
+        assert!(
+            fetch_latest_published_release_async(&client, &first_status_failure)
+                .await
+                .is_none()
+        );
+        assert!(
+            fetch_latest_published_release_async(&client, "http://127.0.0.1:1/releases")
+                .await
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn published_release_request_errors_preserve_rate_limit_and_http_diagnostics() {
+        assert!(matches!(
+            published_release_request_error(&GithubRequestError::Status(
+                reqwest::StatusCode::FORBIDDEN
+            )),
+            FetchError::Network(message) if message.contains("rate limited")
+        ));
+        assert!(matches!(
+            published_release_request_error(&GithubRequestError::Status(
+                reqwest::StatusCode::NOT_FOUND
+            )),
+            FetchError::Network(message) if message.contains("endpoint not found")
+        ));
     }
 
     #[test]

@@ -583,6 +583,7 @@
 - 已安装的 `bifrost v0.0.156` 执行 `bifrost upgrade -y` 后使用 `v0.0.158` 产品 Release 的 CLI tarball 完成升级，并正确更新 `/Applications/Bifrost.app`；输出中没有 `moss-runtime` 或 `vmoss-runtime`，升级后正式服务按原端口重新启动。
 - npm dist-tag 探针分别返回稳定版 `latest`、beta 版 `next`；Release contract 验证 prerelease Homebrew job 被条件跳过，预发布验证不会覆盖稳定安装渠道。
 - PR 两条 P2 review 均纳入回归：fallback 已显式分页，并移除 10 页固定上限；高页码 URL 单测与 Release contract 通过。
+- 首轮远端 changed-lines gate 暴露 sync/async 分页网络分支覆盖不足（48.89%）；补充多页/空页/首屏错误/后续错误本地 HTTP fixture 与 MOSS 连续失败测试后，本地同源 `coverage-diff.py --threshold 95` 为 100.00%（24/24，118 行不变移动代码按门禁规则排除）。
 
 ---
 
