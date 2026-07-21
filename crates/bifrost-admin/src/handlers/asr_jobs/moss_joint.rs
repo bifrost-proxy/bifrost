@@ -36,6 +36,8 @@ const MOSS_MAX_WHOLE_FILE_SECONDS: u64 = 3_300;
 const MOSS_MAX_RUNTIME_RTF: f64 = 0.5;
 const MOSS_MIN_AUDIO_DURATION_MS: u64 = 10_000;
 const MOSS_RUNTIME_SELF_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS: usize = 3;
+const MOSS_RESOURCE_DOWNLOAD_RETRY_DELAY_MS: u64 = 500;
 
 static MOSS_INIT_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -782,17 +784,43 @@ async fn download_moss_resource(
     let client = bifrost_core::outbound_reqwest_client_builder()
         .build()
         .map_err(|error| format!("build MOSS download client: {error}"))?;
-    crate::resource_download::download_with_resume(
-        &client,
-        crate::resource_download::DownloadRequest {
-            url,
-            dest,
-            label: label.to_string(),
-        },
-        progress_tx,
-    )
-    .await
-    .map(|_| ())
+    let request = crate::resource_download::DownloadRequest {
+        url,
+        dest,
+        label: label.to_string(),
+    };
+    let mut last_error = None;
+    for attempt in 1..=MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS {
+        match crate::resource_download::download_with_resume(
+            &client,
+            request.clone(),
+            progress_tx.clone(),
+        )
+        .await
+        {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                warn!(
+                    label,
+                    attempt,
+                    max_attempts = MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS,
+                    error,
+                    "MOSS resource download attempt failed"
+                );
+                last_error = Some(error);
+            }
+        }
+        if attempt < MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS {
+            tokio::time::sleep(Duration::from_millis(
+                MOSS_RESOURCE_DOWNLOAD_RETRY_DELAY_MS * attempt as u64,
+            ))
+            .await;
+        }
+    }
+    Err(format!(
+        "download {label} failed after {MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS} attempts: {}",
+        last_error.unwrap_or_else(|| "unknown download error".to_string())
+    ))
 }
 
 fn moss_runtime_help_is_valid(stdout: &[u8], stderr: &[u8]) -> bool {

@@ -247,6 +247,23 @@
 - Runtime beta/stable Release 分别生成独立 zip 和 `.sha256`，不包含 `model.safetensors`；模型权重继续在用户初始化时下载。
 - 核心 beta Release 全部 job 成功且不下载/构建/上传 MOSS runtime；CLI、App、DMG 的包体轻量门禁继续生效。
 
+### TC-MOSS-15：首次初始化大文件中断自动续传与启动器实跑
+
+操作步骤：
+
+1. 使用独立 `HOME`、`BIFROST_DATA_DIR` 和 18999 端口启动当前分支服务；确认 `GET /_bifrost/api/asr/moss/status` 的安装目录位于临时 home，runtime/model 初始均为 missing，正式 9900 PID 与系统代理不变。
+2. 请求 `GET /_bifrost/api/asr/moss/init-stream`，从 0 下载独立 Runtime Release 和固定 1,258,427,442-byte 模型。若服务端在响应体结束前断开，确认 `.part` 保留，初始化器在同一请求内最多重试 3 次且后续请求带 `Range: bytes=<已有大小>-`。
+3. 执行 `cargo test -p bifrost-admin moss_resource_download_retries_and_resumes_transient_body_failure --lib -- --nocapture`，fixture 首次只发送一半响应体后断开，第二次必须从断点续传并原子发布完整文件。
+4. 初始化成功后再次读取 status，确认 `ready=true`、runtime/model verified、模型大小与固定值一致，并检查安装目录没有 `._*`、`.DS_Store` 或残留 `.part`。
+5. 使用打包 Python 的 `PYTHONHOME/PYTHONPATH` 执行 `moss_mlx_runner.py --self-test`；再对 10 秒以上、16 kHz 单声道 PCM 语音执行 `transcribe`，断言退出码为 0、JSON 至少包含一条正时长且 speaker 非空的 segment。
+6. 停止 18999 并清理唯一的临时目录；确认正式 9900 PID、版本和系统代理仍保持不变。
+
+预期结果：
+
+- 首次初始化不复用正式 `~/.bifrost/asr` 资源，独立 Runtime 与模型都从真实发布源下载并完成 checksum/marker 校验。
+- 单次传输中断不要求用户重新点击 Initialize，也不从 0 重下 1.2 GB 模型；自动重试有上限，连续失败仍返回明确错误。
+- 打包启动器的自检和真实推理均使用隔离资源成功运行；测试结束不残留服务、临时资源或对正式代理的状态修改。
+
 ## 清理步骤
 
 1. 用户要求继续体验时保留 18997；否则停止且仅停止本测试启动的预览 PID。TC-MOSS-09 的 9900 服务按用户要求保留运行，但任务在取得有限验证证据后重新暂停。
@@ -276,3 +293,4 @@
 | 2026-07-20 | TC-MOSS-11 | PASS：Rust MOSS 回归确认 `site-packages` 内容损坏，以及 `runtime/python/lib` framework 缺失或损坏都会撤销 Ready；成功 MOSS task 生成一条非零整文件耗时 metric。benchmark E2E 正常选择不同录音，并在 4 个目标只有 3 个不同成功源文件时明确失败且不写报告。 |
 | 2026-07-20 | TC-MOSS-12 | PASS：Rust MOSS 回归 20/20 覆盖完整 12 个发布 metadata，配置重排状态矩阵/幂等单测 1/1；release contract E2E 确认下载、打包、Rust 校验列表一致；真实 task-mode API E2E 在修改 MOSS prompt 后把成功记录重置为 pending 并清空旧产物引用/metrics。 |
 | 2026-07-20 | TC-MOSS-13 | PASS：Rust MOSS 回归把无有效 speaker segment 和超出整文件上限都标为带版本的确定性失败；65 秒 fixture 的 63.8 秒 S02 turn 被拆为 3 段，加上 S01 共 4 段，所有段不超过 30 秒，speaker、75000 ms 绝对终点和完整文本均保留；runtime ZIP 的 Python 相对 symlink 保留且逃逸 symlink 被拒绝，Unix 目录冲突与 Windows symlink 不支持均保持安全拒绝，release contract 强制 extract-then-self-test；task-mode API E2E 继续通过。 |
+| 2026-07-21 | TC-MOSS-15 | PASS（发现真实中断并修复后复测）：当前分支服务以独立 HOME/数据目录在 18999 启动，初始 install_dir 位于临时 home 且 model bytes=0。真实下载 170 MB runtime 和 1,258,427,442-byte 模型时，Hugging Face 在 1,207,909,964 bytes 处返回 `error decoding response body`，`.part` 被保留；再次请求通过 Range 补齐模型并完成 schema v5 marker。针对该真实缺口，初始化器增加最多 3 次有界自动重试；fixture 首次只发一半响应后断开、第二次从 524288 bytes 续传，聚焦回归通过。最终 status 为 ready/runtime_ready/model_ready，模型 SHA-256=`469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190`，无 AppleDouble/`.part` 残留；打包 Python self-test 输出 `moss-mlx-runtime ok`，20.495 秒 16 kHz 单声道真实启动器推理 3.57 秒完成，输出 3 个 S01 正时长 segments。18999 已停止，正式 `v0.0.158` 服务保持 PID 21664/9900/系统代理开启；隔离目录已移动到废纸篓，可恢复。 |

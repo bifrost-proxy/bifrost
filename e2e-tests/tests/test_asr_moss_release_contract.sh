@@ -17,6 +17,8 @@ runtime_release_path = Path(".github/workflows/moss-runtime-release.yml")
 runtime_path = Path("crates/bifrost-admin/src/handlers/asr_jobs/moss_joint.rs")
 runtime_version_path = Path("scripts/asr/moss-runtime-version.txt")
 runtime_builder_path = Path("scripts/ci/build-moss-release-runtime.sh")
+version_check_path = Path("crates/bifrost-core/src/version_check.rs")
+npm_publish_path = Path("scripts/npm-publish.mjs")
 requirements_path = Path("scripts/asr/moss-mlx-requirements.txt")
 runner_path = Path("scripts/asr/moss_mlx_runner.py")
 patch_path = Path("scripts/asr/mlx-audio-moss-quantized-conv.patch")
@@ -31,6 +33,8 @@ runtime_release = runtime_release_path.read_text(encoding="utf-8")
 runtime = runtime_path.read_text(encoding="utf-8")
 runtime_version = runtime_version_path.read_text(encoding="utf-8").strip()
 runtime_builder = runtime_builder_path.read_text(encoding="utf-8")
+version_check = version_check_path.read_text(encoding="utf-8")
+npm_publish = npm_publish_path.read_text(encoding="utf-8")
 requirements = requirements_path.read_text(encoding="utf-8")
 runner = runner_path.read_text(encoding="utf-8")
 packager = packager_path.read_text(encoding="utf-8")
@@ -191,12 +195,15 @@ require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", runtime_version) is not None, "i
 require('tags:\n      - "moss-runtime-v*"' in runtime_release, "independent runtime tag trigger is missing")
 require('bash scripts/ci/build-moss-release-runtime.sh' in runtime_release, "independent workflow does not call the runtime builder")
 require('Publish independent runtime release' in runtime_release, "independent workflow does not publish a GitHub Release")
+require('make_latest: false' in runtime_release, "independent runtime release can replace the Bifrost Latest release")
 require('model weights are intentionally excluded' in runtime_release.lower(), "runtime release does not document dynamic model delivery")
 require('actions/setup-python' not in runtime_release, "runtime workflow must not copy a hosted-toolcache Python")
 require('DISPATCH_RUNTIME_VERSION: ${{ inputs.runtime_version }}' in runtime_release, "workflow dispatch input is interpolated directly into the shell")
 require('Build MOSS joint transcription runtime' not in release, "core release still builds the MOSS runtime")
 require('build-moss-release-runtime.sh' not in release, "core release still invokes the MOSS runtime builder")
 require('moss-joint-runtime-v' not in release, "core release still names or uploads a MOSS runtime asset")
+require("if: needs.prepare.outputs.is_prerelease != 'true'" in release, "prerelease can overwrite stable Homebrew formula or cask")
+require('VERSION.includes("-") ? "next" : "latest"' in npm_publish, "prerelease can overwrite npm latest dist-tag")
 require('"{MOSS_RUNTIME_ASSET_STEM}-v{}-aarch64-apple-darwin.zip"' in runtime, "runtime asset name drifted")
 require('moss_runtime_version()' in runtime, "initializer does not use the independent runtime version")
 require('moss-runtime-v{}' in runtime, "initializer does not use the independent runtime release tag")
@@ -212,6 +219,14 @@ require("Verify macOS CLI core package stays lightweight" in release, "release d
 require('check-macos-release-core-payload.sh "${APP_PATH}"' in release, "release does not gate the macOS desktop app bundle")
 require('check-macos-release-core-payload.sh "${DMG_PATH}"' in release, "release does not inspect the final macOS DMG")
 require("MOSS Runtime Release Contract (macOS)" in ci, "PR CI does not gate the independent MOSS runtime workflow")
+require("stable_bifrost_release_version" in version_check, "version check does not reject independent resource release tags")
+require("GITHUB_RELEASES_API_LIST_URL" in version_check, "version check cannot recover from a polluted Latest release")
+require("GITHUB_RELEASES_MAX_PAGES" not in version_check, "published release fallback still has a fixed page cap")
+require("github_releases_api_list_url_from(base_url, page)" in version_check, "published release fallback does not request explicit pages")
+require(
+    "fetch_with_retry(&client, GITHUB_TAGS_API_URL)" not in version_check,
+    "version check can still upgrade to an unpublished raw tag",
+)
 require("test-package-moss-release-runtime.sh" in ci, "PR CI does not execute the shared MOSS packager")
 require("test-macos-release-core-payload.sh" in ci, "PR CI does not exercise the macOS core package guard")
 require(ci.count("Verify macOS CLI binary stays lightweight") == 2, "PR CI does not gate both macOS CLI architectures")
@@ -223,3 +238,6 @@ print(
     f"source={source_commit[:12]}, model={model_commit[:12]}, metadata={len(download_files)})"
 )
 PY
+
+test "$(node scripts/npm-publish.mjs 0.0.159 --print-tag)" = "latest"
+test "$(node scripts/npm-publish.mjs 0.0.159-beta.1 --print-tag)" = "next"

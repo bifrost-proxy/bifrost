@@ -112,6 +112,7 @@ jobs:
           tag_name: ${{ needs.prepare.outputs.tag }}
           name: MOSS Runtime ${{ needs.prepare.outputs.runtime_version }}
           prerelease: ${{ needs.prepare.outputs.prerelease == 'true' }}
+          make_latest: false
           generate_release_notes: true
           files: |
             dist/moss-joint-runtime-v${{ needs.prepare.outputs.runtime_version }}-aarch64-apple-darwin.zip
