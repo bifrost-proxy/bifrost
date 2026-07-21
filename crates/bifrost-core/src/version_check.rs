@@ -8,6 +8,8 @@ pub const GITHUB_RELEASES_API_URL: &str =
     "https://api.github.com/repos/bifrost-proxy/bifrost/releases/latest";
 pub const GITHUB_RELEASES_API_LIST_URL: &str =
     "https://api.github.com/repos/bifrost-proxy/bifrost/releases";
+const GITHUB_RELEASE_API_URLS: (&str, &str) =
+    (GITHUB_RELEASES_API_URL, GITHUB_RELEASES_API_LIST_URL);
 pub const GITHUB_TAGS_API_URL: &str = "https://api.github.com/repos/bifrost-proxy/bifrost/tags";
 pub const GITHUB_RELEASE_URL: &str = "https://github.com/bifrost-proxy/bifrost/releases/tag";
 pub const REQUEST_TIMEOUT_SECS: u64 = 10;
@@ -607,17 +609,12 @@ pub fn fetch_latest_release_sync() -> Result<(String, Vec<String>), FetchError> 
         }
     }
 
-    fetch_latest_release_from_api_sync(
-        &client,
-        GITHUB_RELEASES_API_URL,
-        GITHUB_RELEASES_API_LIST_URL,
-    )
+    fetch_latest_release_from_api_sync(&client, GITHUB_RELEASE_API_URLS)
 }
 
 fn fetch_latest_release_from_api_sync(
     client: &reqwest::blocking::Client,
-    latest_url: &str,
-    releases_url: &str,
+    (latest_url, releases_url): (&str, &str),
 ) -> Result<(String, Vec<String>), FetchError> {
     match fetch_with_retry(client, latest_url) {
         Ok(response) => match response.json::<GitHubRelease>() {
@@ -746,18 +743,12 @@ pub async fn fetch_latest_release_async() -> Option<(String, Vec<String>)> {
 
     debug!("redirect-based version detection failed, falling back to GitHub API");
 
-    fetch_latest_release_from_api_async(
-        &client,
-        GITHUB_RELEASES_API_URL,
-        GITHUB_RELEASES_API_LIST_URL,
-    )
-    .await
+    fetch_latest_release_from_api_async(&client, GITHUB_RELEASE_API_URLS).await
 }
 
 async fn fetch_latest_release_from_api_async(
     client: &reqwest::Client,
-    latest_url: &str,
-    releases_url: &str,
+    (latest_url, releases_url): (&str, &str),
 ) -> Option<(String, Vec<String>)> {
     if let Ok(response) = client.get(latest_url).send().await {
         if let Ok(release) = response.json::<GitHubRelease>().await {
@@ -1255,7 +1246,7 @@ mod tests {
             release_json("v3.2.1", false, false, "## Highlights\n- stable latest"),
         )]);
         assert_eq!(
-            fetch_latest_release_from_api_sync(&client, &stable, &stable).unwrap(),
+            fetch_latest_release_from_api_sync(&client, (&stable, &stable)).unwrap(),
             ("3.2.1".to_string(), vec!["stable latest".to_string()])
         );
 
@@ -1272,7 +1263,7 @@ mod tests {
                 (200, "[]".to_string()),
             ]);
             assert_eq!(
-                fetch_latest_release_from_api_sync(&client, &fallback, &fallback).unwrap(),
+                fetch_latest_release_from_api_sync(&client, (&fallback, &fallback)).unwrap(),
                 ("2.4.0".to_string(), vec!["fallback".to_string()])
             );
         }
@@ -1288,7 +1279,7 @@ mod tests {
             (200, "[]".to_string()),
         ]);
         assert_eq!(
-            fetch_latest_release_from_api_sync(&client, &failed_latest, &failed_latest)
+            fetch_latest_release_from_api_sync(&client, (&failed_latest, &failed_latest))
                 .unwrap()
                 .0,
             "2.5.0"
@@ -1376,7 +1367,7 @@ mod tests {
             release_json("v3.2.1", false, false, "## Highlights\n- stable latest"),
         )]);
         assert_eq!(
-            fetch_latest_release_from_api_async(&client, &stable, &stable).await,
+            fetch_latest_release_from_api_async(&client, (&stable, &stable)).await,
             Some(("3.2.1".to_string(), vec!["stable latest".to_string()]))
         );
 
@@ -1393,7 +1384,7 @@ mod tests {
                 (200, "[]".to_string()),
             ]);
             assert_eq!(
-                fetch_latest_release_from_api_async(&client, &fallback, &fallback).await,
+                fetch_latest_release_from_api_async(&client, (&fallback, &fallback)).await,
                 Some(("2.4.0".to_string(), vec!["fallback".to_string()]))
             );
         }
@@ -1408,8 +1399,7 @@ mod tests {
         assert_eq!(
             fetch_latest_release_from_api_async(
                 &client,
-                "http://127.0.0.1:1/releases/latest",
-                &fallback,
+                ("http://127.0.0.1:1/releases/latest", &fallback),
             )
             .await
             .unwrap()
