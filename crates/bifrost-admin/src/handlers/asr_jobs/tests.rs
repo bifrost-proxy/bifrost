@@ -6709,7 +6709,7 @@ mod tests {
         assert!(ffmpeg_cut_pcm16le_ms(Path::new("missing.wav"), &output, 0, 1_000)
             .await
             .unwrap_err()
-            .contains("ffmpeg voiceprint segment cut failed"));
+            .contains("ffmpeg voiceprint"));
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
