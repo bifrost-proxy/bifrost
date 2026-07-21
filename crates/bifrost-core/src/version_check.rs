@@ -15,7 +15,6 @@ const HIGHLIGHTS_TIMEOUT_SECS: u64 = 5;
 pub const MAX_RETRIES: u32 = 2;
 pub const RETRY_DELAY_MS: u64 = 500;
 pub const GITHUB_RELEASES_PER_PAGE: usize = 100;
-pub const GITHUB_RELEASES_MAX_PAGES: usize = 10;
 const MAX_RELEASE_HIGHLIGHTS: usize = 50;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -540,7 +539,8 @@ pub fn fetch_latest_release_sync() -> Result<(String, Vec<String>), FetchError> 
     }
 
     let mut published_releases = Vec::new();
-    for page in 1..=GITHUB_RELEASES_MAX_PAGES {
+    let mut page = 1;
+    loop {
         let url = github_releases_api_list_url(page);
         let response = match fetch_with_retry(&client, &url) {
             Ok(response) => response,
@@ -585,12 +585,11 @@ pub fn fetch_latest_release_sync() -> Result<(String, Vec<String>), FetchError> 
             break;
         }
         published_releases.extend(page_releases);
+        page += 1;
     }
 
     let release = pick_latest_bifrost_release(published_releases).ok_or_else(|| {
-        FetchError::Parse(format!(
-        "no published stable Bifrost releases found in the first {GITHUB_RELEASES_MAX_PAGES} pages"
-    ))
+        FetchError::Parse("no published stable Bifrost releases found".to_string())
     })?;
     let version = stable_bifrost_release_version(&release).ok_or_else(|| {
         FetchError::Parse("selected release did not contain a stable Bifrost version".to_string())
@@ -711,7 +710,8 @@ pub async fn fetch_latest_release_async() -> Option<(String, Vec<String>)> {
     }
 
     let mut published_releases = Vec::new();
-    for page in 1..=GITHUB_RELEASES_MAX_PAGES {
+    let mut page = 1;
+    loop {
         let response = match client.get(github_releases_api_list_url(page)).send().await {
             Ok(response) if response.status().is_success() => response,
             _ => break,
@@ -724,6 +724,7 @@ pub async fn fetch_latest_release_async() -> Option<(String, Vec<String>)> {
             break;
         }
         published_releases.extend(page_releases);
+        page += 1;
     }
 
     let release = pick_latest_bifrost_release(published_releases)?;
@@ -1095,7 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn test_github_releases_api_list_url_is_bounded_and_paginated() {
+    fn test_github_releases_api_list_url_is_explicitly_paginated_without_a_fixed_cap() {
         assert_eq!(
             github_releases_api_list_url(0),
             "https://api.github.com/repos/bifrost-proxy/bifrost/releases?per_page=100&page=1"
@@ -1105,8 +1106,8 @@ mod tests {
             "https://api.github.com/repos/bifrost-proxy/bifrost/releases?per_page=100&page=1"
         );
         assert_eq!(
-            github_releases_api_list_url(GITHUB_RELEASES_MAX_PAGES),
-            "https://api.github.com/repos/bifrost-proxy/bifrost/releases?per_page=100&page=10"
+            github_releases_api_list_url(10_001),
+            "https://api.github.com/repos/bifrost-proxy/bifrost/releases?per_page=100&page=10001"
         );
     }
 
