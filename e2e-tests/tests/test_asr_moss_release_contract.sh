@@ -210,6 +210,16 @@ require('moss-runtime-v{}' in runtime, "initializer does not use the independent
 require('.sha256' in runtime and 'moss_runtime_checksum_url' in runtime, "initializer does not use the independent checksum asset")
 require('runtime_version: moss_runtime_version().to_string()' in runtime, "verification marker does not record the installed runtime version")
 require('marker.runtime_version == moss_runtime_version()' in runtime, "runtime version changes do not invalidate stale installed assets")
+ensure_start = runtime.index("async fn ensure_moss_joint_runtime_with_spec_and_progress(")
+ensure_end = runtime.index("\nasync fn ensure_moss_joint_runtime(", ensure_start)
+ensure_body = runtime[ensure_start:ensure_end]
+marker_write = ensure_body.index("write_moss_verification_marker(asr_home, &paths, &model_spec)?;")
+quarantine_cleanup = ensure_body.index("cleanup_moss_quarantined_resources(asr_home).await;")
+require(marker_write < quarantine_cleanup, "obsolete MOSS quarantines are removed before the new marker is durable")
+initializer_start = runtime.index("async fn initialize_moss_joint_runtime(")
+initializer_body = runtime[initializer_start:ensure_start]
+require("cleanup_moss_quarantined_resources" not in initializer_body, "failed MOSS initialization can delete rollback quarantines")
+require("moss_quarantine_timestamp_is_valid" in runtime, "quarantine cleanup can match unowned user paths")
 require("parse_runtime_checksum_manifest" in runtime, "runtime no longer verifies the release checksum manifest")
 require("BIFROST_MOSS_RUNTIME_SHA256 is required with BIFROST_MOSS_RUNTIME_URL" in runtime, "custom runtime URL can bypass checksum verification")
 require(packager_test_path.is_file(), "release packaging fixture test is missing")

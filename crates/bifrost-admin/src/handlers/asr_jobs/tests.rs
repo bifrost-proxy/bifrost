@@ -1117,6 +1117,107 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
+    async fn moss_quarantine_cleanup_removes_only_managed_timestamped_entries() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::fs::PermissionsExt;
+
+        assert!(!moss_quarantine_timestamp_is_valid(""));
+        assert!(!moss_root_quarantine_name_is_managed(
+            "moss-joint-runtime-v1.0.0+local-aarch64-apple-darwin.zip.invalid-1"
+        ));
+
+        let temp = TempDir::new().unwrap();
+        let asr_home = temp.path().join("asr-home");
+        let root = moss_runtime_dir(&asr_home);
+        let model_dir = root.join("model");
+        std::fs::create_dir_all(&model_dir).unwrap();
+
+        let obsolete_runtime = root.join("runtime.invalid-100");
+        std::fs::create_dir_all(&obsolete_runtime).unwrap();
+        std::fs::write(obsolete_runtime.join("old-runtime"), b"old").unwrap();
+        let obsolete_archive =
+            root.join("moss-joint-runtime-v0.9.0-aarch64-apple-darwin.zip.invalid-101");
+        std::fs::write(&obsolete_archive, b"bad archive").unwrap();
+        let obsolete_model = model_dir.join("model.safetensors.invalid-102");
+        std::fs::write(&obsolete_model, b"old model").unwrap();
+        let external = temp.path().join("outside-quarantine");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("keep"), b"keep").unwrap();
+        let quarantined_symlink = root.join("runtime.invalid-103");
+        symlink(&external, &quarantined_symlink).unwrap();
+
+        let unmanaged = [
+            root.join("runtime.invalid-latest"),
+            root.join("moss-joint-runtime-custom.zip.invalid-104"),
+            root.join("unrelated.invalid-105"),
+            model_dir.join("model.safetensors.invalid-latest"),
+        ];
+        for path in &unmanaged {
+            std::fs::write(path, b"keep").unwrap();
+        }
+        cleanup_moss_quarantined_resources(&asr_home).await;
+
+        assert!(!obsolete_runtime.exists());
+        assert!(!obsolete_archive.exists());
+        assert!(!obsolete_model.exists());
+        assert!(!quarantined_symlink.exists());
+        assert!(external.join("keep").is_file());
+        assert!(unmanaged.iter().all(|path| path.is_file()));
+
+        let linked_home = temp.path().join("linked-home");
+        let linked_root = moss_runtime_dir(&linked_home);
+        std::fs::create_dir_all(&linked_root).unwrap();
+        let external_model = temp.path().join("external-model");
+        std::fs::create_dir_all(&external_model).unwrap();
+        let external_quarantine = external_model.join("model.safetensors.invalid-200");
+        std::fs::write(&external_quarantine, b"outside").unwrap();
+        symlink(&external_model, linked_root.join("model")).unwrap();
+        let linked_cleanup = cleanup_moss_quarantined_resources_sync(&linked_home);
+        assert_eq!(linked_cleanup.removed, 0);
+        assert_eq!(linked_cleanup.errors.len(), 1);
+        assert!(linked_cleanup.errors[0].contains("refuse to scan non-directory"));
+        assert!(external_quarantine.is_file());
+        cleanup_moss_quarantined_resources(&linked_home).await;
+        assert!(external_quarantine.is_file());
+
+        let readonly_home = temp.path().join("readonly-home");
+        let readonly_root = moss_runtime_dir(&readonly_home);
+        std::fs::create_dir_all(&readonly_root).unwrap();
+        let retry_quarantine = readonly_root.join("runtime.invalid-300");
+        std::fs::write(&retry_quarantine, b"retry").unwrap();
+        std::fs::set_permissions(&readonly_root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let failed_cleanup = cleanup_moss_quarantined_resources_sync(&readonly_home);
+        std::fs::set_permissions(&readonly_root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(failed_cleanup.removed, 0);
+        assert_eq!(failed_cleanup.errors.len(), 1);
+        assert!(failed_cleanup.errors[0].contains("remove obsolete MOSS quarantine"));
+        assert!(retry_quarantine.is_file());
+        let retried_cleanup = cleanup_moss_quarantined_resources_sync(&readonly_home);
+        assert_eq!(retried_cleanup.removed, 1);
+        assert!(retried_cleanup.errors.is_empty());
+        assert!(!retry_quarantine.exists());
+
+        let unreadable_home = temp.path().join("unreadable-home");
+        let unreadable_root = moss_runtime_dir(&unreadable_home);
+        std::fs::create_dir_all(&unreadable_root).unwrap();
+        std::fs::set_permissions(&unreadable_root, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable_cleanup = cleanup_moss_quarantined_resources_sync(&unreadable_home);
+        std::fs::set_permissions(&unreadable_root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(unreadable_cleanup.removed, 0);
+        assert!(unreadable_cleanup
+            .errors
+            .iter()
+            .any(|error| error.contains("read MOSS quarantine directory")));
+
+        let missing_cleanup =
+            cleanup_moss_quarantined_resources_sync(&temp.path().join("missing-home"));
+        assert_eq!(missing_cleanup.removed, 0);
+        assert!(missing_cleanup.errors.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn moss_initializer_installs_quarantines_and_reuses_verified_resources() {
         let _lock = test_data_dir_lock();
         let temp = TempDir::new().unwrap();
@@ -1154,7 +1255,11 @@ mod tests {
         assert_eq!(installed_paths.python, paths.python);
         let status = moss_runtime_status(&asr_home, &paths, &model_spec).await;
         assert!(status.all_valid());
-        assert!(std::fs::read_dir(moss_runtime_dir(&asr_home))
+        assert!(!std::fs::read_dir(moss_runtime_dir(&asr_home))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".invalid-")));
+        assert!(!std::fs::read_dir(&paths.model_dir)
             .unwrap()
             .filter_map(Result::ok)
             .any(|entry| entry.file_name().to_string_lossy().contains(".invalid-")));

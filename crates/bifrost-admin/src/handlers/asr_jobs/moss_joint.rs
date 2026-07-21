@@ -107,6 +107,12 @@ struct MossComponentStatus {
     model_metadata_valid: bool,
 }
 
+#[derive(Debug, Default)]
+struct MossQuarantineCleanup {
+    removed: usize,
+    errors: Vec<String>,
+}
+
 impl MossComponentStatus {
     fn model_valid(self) -> bool {
         self.model_weight_valid && self.model_metadata_valid
@@ -158,6 +164,138 @@ fn moss_runtime_paths(asr_home: &Path) -> MossRuntimePaths {
 
 fn moss_verification_path(asr_home: &Path) -> PathBuf {
     moss_runtime_dir(asr_home).join(MOSS_VERIFICATION_FILE)
+}
+
+fn moss_quarantine_timestamp_is_valid(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn moss_root_quarantine_name_is_managed(name: &str) -> bool {
+    name.strip_prefix("runtime.invalid-")
+        .is_some_and(moss_quarantine_timestamp_is_valid)
+        || name
+            .strip_prefix(&format!("{MOSS_RUNTIME_ASSET_STEM}-v"))
+            .and_then(|suffix| suffix.rsplit_once(".zip.invalid-"))
+            .is_some_and(|(asset, timestamp)| {
+                asset
+                    .strip_suffix("-aarch64-apple-darwin")
+                    .is_some_and(|version| {
+                        !version.is_empty()
+                            && version.bytes().all(|byte| {
+                                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')
+                            })
+                    })
+                    && moss_quarantine_timestamp_is_valid(timestamp)
+            })
+}
+
+fn moss_model_quarantine_name_is_managed(name: &str) -> bool {
+    name.strip_prefix(&format!("{MOSS_MODEL_FILE}.invalid-"))
+        .is_some_and(moss_quarantine_timestamp_is_valid)
+}
+
+fn remove_moss_quarantine_entries(
+    directory: &Path,
+    is_managed: fn(&str) -> bool,
+    cleanup: &mut MossQuarantineCleanup,
+) {
+    match std::fs::symlink_metadata(directory) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => {
+            cleanup.errors.push(format!(
+                "refuse to scan non-directory MOSS quarantine root {}",
+                directory.display()
+            ));
+            return;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            cleanup.errors.push(format!(
+                "inspect MOSS quarantine directory {}: {error}",
+                directory.display()
+            ));
+            return;
+        }
+    }
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) => {
+            cleanup.errors.push(format!(
+                "read MOSS quarantine directory {}: {error}",
+                directory.display()
+            ));
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                cleanup.errors.push(format!(
+                    "read MOSS quarantine entry in {}: {error}",
+                    directory.display()
+                ));
+                continue;
+            }
+        };
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !is_managed(&name) {
+            continue;
+        }
+        let path = entry.path();
+        let result = std::fs::symlink_metadata(&path).and_then(|metadata| {
+            if metadata.file_type().is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            }
+        });
+        match result {
+            Ok(()) => cleanup.removed += 1,
+            Err(error) => cleanup.errors.push(format!(
+                "remove obsolete MOSS quarantine {}: {error}",
+                path.display()
+            )),
+        }
+    }
+}
+
+fn cleanup_moss_quarantined_resources_sync(asr_home: &Path) -> MossQuarantineCleanup {
+    let root = moss_runtime_dir(asr_home);
+    let mut cleanup = MossQuarantineCleanup::default();
+    remove_moss_quarantine_entries(
+        &root,
+        moss_root_quarantine_name_is_managed,
+        &mut cleanup,
+    );
+    remove_moss_quarantine_entries(
+        &root.join("model"),
+        moss_model_quarantine_name_is_managed,
+        &mut cleanup,
+    );
+    cleanup
+}
+
+async fn cleanup_moss_quarantined_resources(asr_home: &Path) {
+    let asr_home = asr_home.to_path_buf();
+    match tokio::task::spawn_blocking(move || cleanup_moss_quarantined_resources_sync(&asr_home))
+        .await
+    {
+        Ok(cleanup) => {
+            if cleanup.removed > 0 {
+                tracing::info!(
+                    removed = cleanup.removed,
+                    "removed obsolete MOSS quarantined resources"
+                );
+            }
+            for error in cleanup.errors {
+                warn!(error, "MOSS quarantine cleanup will be retried later");
+            }
+        }
+        Err(error) => warn!(%error, "join MOSS quarantine cleanup task failed"),
+    }
 }
 
 fn moss_runtime_version() -> &'static str {
@@ -1058,25 +1196,24 @@ async fn ensure_moss_joint_runtime_with_spec_and_progress(
     let _guard = MOSS_INIT_LOCK.lock().await;
     let paths = moss_runtime_paths(asr_home);
     let component_status = moss_runtime_status(asr_home, &paths, &model_spec).await;
-    if component_status.all_valid() {
-        write_moss_verification_marker(asr_home, &paths, &model_spec)?;
-        return Ok(paths);
+    if !component_status.all_valid() {
+        let runtime_source = match runtime_source {
+            Some(source) => source,
+            None => moss_runtime_source_for_asset(moss_runtime_asset_name()?).await?,
+        };
+        initialize_moss_joint_runtime(
+            asr_home,
+            task_id,
+            &paths,
+            component_status,
+            &runtime_source,
+            &model_spec,
+            progress_tx,
+        )
+        .await?;
     }
-    let runtime_source = match runtime_source {
-        Some(source) => source,
-        None => moss_runtime_source_for_asset(moss_runtime_asset_name()?).await?,
-    };
-    initialize_moss_joint_runtime(
-        asr_home,
-        task_id,
-        &paths,
-        component_status,
-        &runtime_source,
-        &model_spec,
-        progress_tx,
-    )
-    .await?;
     write_moss_verification_marker(asr_home, &paths, &model_spec)?;
+    cleanup_moss_quarantined_resources(asr_home).await;
     Ok(paths)
 }
 

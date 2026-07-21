@@ -64,6 +64,7 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 - Model Management 的模型选择同时列出 Qwen3-ASR 和 `MOSS-Transcribe-Diarize-MLX-8bit`。Qwen 继续管理可租约的本地 ASR service；MOSS 是任务按需执行的端到端 runtime，不展示 Host、Service Port 等无效服务配置。
 - MOSS 状态接口分别报告 runtime 自检、模型 snapshot 校验、安装目录和预期权重大小。初始化时执行完整 runtime self-test 与 1.2 GB 权重 SHA-256，成功后写入带固定模型 SHA/大小/mtime、Python/runner 哈希和所有必需 metadata SHA-256 的验证标记；日常状态读取先复核标记与小文件哈希，再运行带 30 秒硬超时的打包 Python `--self-test`，确认 `runtime/python/lib` 等 marker 未逐文件记录的框架依赖仍可加载，同时避免每次打开页面重新扫描 1.2 GB 权重。权重被同大小替换后 mtime 变化、metadata 缺失或内容损坏、Python framework 缺失、损坏或自检卡死都会撤销 Ready；修复时从已校验的 runtime archive 恢复 runtime 与 metadata，不重复下载仍通过完整校验的权重。
 - 用户可在管理页主动初始化或修复 `~/.bifrost/asr/moss_joint_mlx`。下载复用 `.part` 断点续传并对响应体中断做最多 3 次有界自动重试，后续尝试通过 HTTP Range 只请求剩余字节；同一进程内初始化锁保证管理页与同一服务中的任务同时触发时不会并行写入同一资源。
+- runtime、模型与 metadata 全部校验通过并成功写入新 `verification.json` 后，初始化器自动删除历次由 Bifrost 生成的 `runtime.invalid-<timestamp>`、runtime zip quarantine 和 `model.safetensors.invalid-<timestamp>`。初始化或 marker 写入失败时保留这些隔离件，保证失败恢复边界；清理仅接受固定前缀和纯数字时间戳，不跟随目录符号链接。清理本身失败时不撤销已经 Ready 的新 runtime，而是记录告警并在下一次 ensure 时重试。
 - Directory Task 不保存另一份模型路径或依赖配置；它只保存 `transcription_mode` 与任务 Prompt。运行时若发现资产尚未准备好，调用与管理页完全相同的校验和初始化函数作为自动兜底。
 
 ### 独立 Runtime 发布与 CI 门禁
@@ -251,6 +252,7 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 - 超过整文件处理上限的输入必须标记为同版本确定性失败，源文件未变化时不得在定时或手动运行中重复归一化。
 - MOSS 原生连续 speaker turn 写入产物前必须按既有 timeline 契约拆成最长 30 秒的 segment，并保留 speaker、绝对时间和完整文本。
 - runtime ZIP 解压必须保留独立 CPython framework/library 的相对符号链接，拒绝绝对路径或逃逸出 `runtime`/`model` 的链接；release 打包完成后必须重新解压归档并从解压目录执行 `--self-test`。
+- 旧 runtime/model 被隔离后，成功安装必须回收所有受管的时间戳 quarantine；下载、校验、自检或 marker 写入失败时必须保留隔离件，且近似命名的用户文件和符号链接目标不得被递归删除。
 
 ### 7.3 `human_tests`
 
@@ -264,7 +266,7 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 ## 8. 风险与回退
 
 - 新模型运行时快速演进：发布 runtime 固定 MLX-Audio commit、Python 依赖和模型 snapshot/hash；Bifrost 核心只消费稳定 JSON 契约。
-- 自动初始化下载中断：使用可续传临时文件，哈希不匹配时拒绝安装并保留明确错误；不会回退成 Qwen 后悄悄产出不同语义的结果。
+- 自动初始化下载中断：使用可续传临时文件，哈希不匹配时拒绝安装并保留明确错误；失败隔离件保留到后续一次完整成功并落盘 marker 后再自动回收，不会回退成 Qwen 后悄悄产出不同语义的结果。
 - Prompt 泄露或协议破坏：Prompt 不放入命令行参数，临时文件随单次推理销毁；runtime 追加而非替换协议 Prompt。
 - 长音频 token 截断：按音频时长计算输出 token budget，并保留完整性信息；超过 55 分钟在没有跨块 speaker 归并前拒绝处理。
 - 说话人标签跨块漂移：正式路径使用一次全局解码，不采用独立短块；未来若切块，必须先具备跨块 voiceprint/聚类归并和 DER 回归门禁。
