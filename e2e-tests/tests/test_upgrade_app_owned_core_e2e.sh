@@ -190,7 +190,7 @@ PY
     version_response="$(admin_curl GET '/api/system/version-check?channel=desktop')"
     current_version="$(printf '%s' "$version_response" | json_field current_version)"
     has_update="$(printf '%s' "$version_response" | json_field has_update)"
-    assert_equals "$target_version" "$current_version" "desktop primary version is already current"
+    assert_equals "0.0.2" "$current_version" "companion-only update reports the stale CLI version"
     assert_equals "True" "$has_update" "stale standalone CLI keeps desktop unified update available"
 
     write_app_fixture "$old_app" "0.0.1"

@@ -722,17 +722,27 @@ async fn check_unified_version_for_channel(
             check_version_for_channel(state, false, UpgradeChannel::Desktop).await
         }
         UpgradeChannel::Desktop => {
-            let standalone_cli_version =
-                tokio::task::spawn_blocking(standalone_cli_version_for_version_check)
-                    .await
-                    .ok()
-                    .flatten();
-            if let Some(cli_version) = standalone_cli_version {
-                state
-                    .version_checker
-                    .check_with_current_version(false, cli_version)
-                    .await
+            if desktop_version_check_uses_standalone_cli(desktop_core_env_enabled(
+                std::env::var_os(DESKTOP_CORE_ENV),
+            )) {
+                let standalone_cli_version =
+                    tokio::task::spawn_blocking(standalone_cli_version_for_version_check)
+                        .await
+                        .ok()
+                        .flatten();
+                if let Some(cli_version) = standalone_cli_version {
+                    state
+                        .version_checker
+                        .check_with_current_version(false, cli_version)
+                        .await
+                } else {
+                    check_version_for_channel(state, false, UpgradeChannel::Cli).await
+                }
             } else {
+                // A desktop WebView can reuse a CLI-owned core. In that mode
+                // the serving executable is the effective CLI companion; do
+                // not skip it and accidentally select an inactive old copy
+                // elsewhere on PATH (for example ~/.cargo/bin/bifrost).
                 check_version_for_channel(state, false, UpgradeChannel::Cli).await
             }
         }
@@ -746,12 +756,17 @@ fn merge_companion_update(
 ) -> crate::VersionCheckResponse {
     if !primary.has_update && companion.has_update {
         primary.has_update = true;
+        primary.current_version = companion.current_version;
         primary.latest_version = companion.latest_version;
         primary.release_highlights = companion.release_highlights;
         primary.release_url = companion.release_url;
         primary.checked_at = companion.checked_at;
     }
     primary
+}
+
+fn desktop_version_check_uses_standalone_cli(desktop_core: bool) -> bool {
+    desktop_core
 }
 
 fn required_upgrade_target(version: &crate::VersionCheckResponse) -> Result<String, &'static str> {
@@ -960,11 +975,12 @@ fn upgrade_log_stdio() -> Stdio {
 mod tests {
     use super::{
         build_cli_install_status, check_version, desktop_core_env_enabled,
-        effective_upgrade_channel, install_binary_atomically, install_cli_from_current_exe,
-        merge_companion_update, normalize_progress, parse_upgrade_channel, required_upgrade_target,
-        spawn_upgrade_process, start_upgrade, upgrade_process_args, upgrade_process_environment,
-        upgrade_request_plan, upgrade_start_lock, validate_upgrade_request_channel,
-        validated_webview_upgrade_origin, CliInstallRequest, StatusCode, UpgradeChannel,
+        desktop_version_check_uses_standalone_cli, effective_upgrade_channel,
+        install_binary_atomically, install_cli_from_current_exe, merge_companion_update,
+        normalize_progress, parse_upgrade_channel, required_upgrade_target, spawn_upgrade_process,
+        start_upgrade, upgrade_process_args, upgrade_process_environment, upgrade_request_plan,
+        upgrade_start_lock, validate_upgrade_request_channel, validated_webview_upgrade_origin,
+        CliInstallRequest, StatusCode, UpgradeChannel,
     };
     use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS};
     use chrono::Utc;
@@ -992,7 +1008,7 @@ mod tests {
         let companion = version_response("0.0.155", "0.0.156", true);
         let merged = merge_companion_update(primary, companion);
         assert!(merged.has_update);
-        assert_eq!(merged.current_version, "0.0.156");
+        assert_eq!(merged.current_version, "0.0.155");
         assert_eq!(merged.latest_version.as_deref(), Some("0.0.156"));
 
         let primary_update = version_response("0.0.154", "0.0.156", true);
@@ -1004,6 +1020,12 @@ mod tests {
             Some("0.0.156"),
             "the primary target remains pinned when both components need an update"
         );
+    }
+
+    #[test]
+    fn desktop_version_check_only_probes_standalone_cli_for_desktop_owned_core() {
+        assert!(desktop_version_check_uses_standalone_cli(true));
+        assert!(!desktop_version_check_uses_standalone_cli(false));
     }
 
     #[test]

@@ -349,6 +349,46 @@
 - 新 App 只接受 PID 已变化且版本命中 target 的 CLI core；旧 PID 或旧版本均不得被当作升级完成。
 - 等待目标 CLI core 超时时返回失败，不能调用 bundled binary 启动第二个 desktop-managed core。
 
+### TC-TWA-12：桌面版本检查按 runtime owner 选择 CLI companion
+
+**回归目标**：
+
+- 复现桌面 App、当前 CLI core 与 latest 都是同一版本，但 PATH 里还残留另一个旧 CLI 副本的场景。
+- CLI-owned core 必须使用当前正在服务的 CLI 版本，返回 `has_update=false`，不得因为无效旧副本弹出 `vX → vX` 更新框。
+- App-owned core 仍必须探测真正独立的 CLI；只有 companion CLI 落后时，返回的 `current_version` 必须是 CLI 的旧版本，与 `latest_version` 不同。
+- 桌面更新弹窗使用通用 Bifrost 更新文案，不把 CLI companion 更新误报成“新桌面 App”。
+
+**操作步骤**：
+
+1. 执行 runtime owner 与 companion merge 单元回归：
+   ```bash
+   cargo test -p bifrost-admin desktop_version_check_only_probes_standalone_cli_for_desktop_owned_core --lib -- --nocapture
+   cargo test -p bifrost-admin companion_version_drift_keeps_the_unified_update_available --lib -- --nocapture
+   ```
+2. 构建最新调试二进制，在临时 App、HOME、data dir 和随机端口中执行 runtime-owner 实链路：
+   ```bash
+   cargo build --bin bifrost
+   BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_version_check_runtime_owner_e2e.sh
+   ```
+3. 复跑 App-owned 统一升级链路，确认独立 CLI 落后时更新入口仍然存在：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_upgrade_app_owned_core_e2e.sh
+   ```
+4. 构建 desktop Web 产物并检查弹窗文案契约：
+   ```bash
+   pnpm --dir web run build:desktop
+   rg -F "A Bifrost update is ready to install" web/src/components/VersionModal/index.tsx
+   ! rg -F "A newer Bifrost desktop app is ready to install" web/src/components/VersionModal/index.tsx
+   ```
+
+**预期结果**：
+
+- 两个单元回归均通过。
+- CLI-owned 场景返回 `current_version == latest_version` 且 `has_update=false`；旧副本不影响结果。
+- App-owned 场景返回 `current_version=<stale CLI>`、`latest_version=<release>` 且 `has_update=true`。
+- App-owned 原升级 E2E 全部通过，CLI/App pinned target 和 Tauri handoff 语义未被破坏。
+- desktop Web 构建通过，旧的误导文案不再存在。
+
 ## 清理步骤
 
 1. 停止测试数据目录中的 Bifrost 服务：
@@ -359,6 +399,10 @@
 3. 不清理、不停止、不重启用户正在运行的 9900 服务。
 
 ## 执行记录
+
+2026-07-21 桌面版本检查 runtime-owner 回归已执行：
+
+- TC-TWA-12：通过。两个 `bifrost-admin` 定向单测均为 `1/1`；新增 runtime-owner 真实 Admin API E2E 为 `8/8`，确认 CLI-owned core 忽略 PATH 中不生效的旧 CLI 副本并返回 `has_update=false`，App-owned core 仍报告真正落后的 standalone CLI，且响应展示旧 CLI 版本而非同版本对比。原 App-owned 统一升级 E2E `20/20` 通过；`pnpm --dir web run build:desktop` 通过，桌面弹窗已改为通用 Bifrost 更新文案，旧的 desktop-app-only 误导文案不存在。全部服务使用临时数据目录和随机端口，未停止或修改用户的 9900 服务。
 
 2026-07-20 本次 P1 修复已执行：
 

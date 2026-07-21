@@ -208,7 +208,7 @@ export default function VersionModal() {
           <p style={styles.headerTitle}>New Version Available</p>
           <p style={styles.headerSubtitle}>
             {desktopMode
-              ? "A newer Bifrost desktop app is ready to install"
+              ? "A Bifrost update is ready to install"
               : "A newer version of Bifrost is ready to install"}
           </p>
         </div>
