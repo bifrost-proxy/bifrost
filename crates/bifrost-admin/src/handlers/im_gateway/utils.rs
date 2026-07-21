@@ -1298,6 +1298,7 @@ pub(super) fn restore_session_from_history_path(
     let path = bifrost_agent::persistence::validate_conversation_path(&data_dir, history_path)?;
     let canonical =
         bifrost_agent::persistence::canonical_conversation_path(&data_dir, expected_session_key);
+    let canonical = std::fs::canonicalize(&canonical).unwrap_or(canonical);
     if path != canonical {
         let _ = std::fs::remove_file(&path);
         return Err("history path does not use the canonical session_key layout".to_string());
@@ -1356,24 +1357,12 @@ pub(super) fn restore_session_from_history_path(
     Ok(path)
 }
 
-/// Parse a session filename like `session-{key}-{timestamp}.jsonl`
-/// into (session_key, timestamp).
-pub(super) fn parse_session_filename(filename: &str) -> (String, u64) {
-    let name = filename.strip_suffix(".jsonl").unwrap_or(filename);
-    let name = name.strip_prefix("session-").unwrap_or(name);
-    // Last segment after '-' is the timestamp
-    if let Some(last_dash) = name.rfind('-') {
-        let key = &name[..last_dash];
-        let ts = name[last_dash + 1..].parse::<u64>().unwrap_or(0);
-        (key.to_string(), ts)
-    } else {
-        (name.to_string(), 0)
-    }
-}
-
 #[cfg(test)]
 mod attachment_tests {
-    use super::{resolve_attachment_path, status_context_from_agent_runner};
+    use super::{
+        latest_history_path_for_session, resolve_attachment_path,
+        restore_session_from_history_path, status_context_from_agent_runner,
+    };
 
     #[test]
     fn attachment_path_resolution_stays_inside_attachment_root() {
@@ -1387,5 +1376,71 @@ mod attachment_tests {
         let context = status_context_from_agent_runner(None);
         assert_eq!(context.runner_id.as_deref(), Some("Codex"));
         assert_eq!(context.runner_type.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn latest_history_path_returns_only_the_canonical_session_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, "canonical-latest");
+        recorder
+            .record_user_message("canonical-latest", "hello")
+            .unwrap();
+        let expected = recorder.file_path().to_path_buf();
+        drop(recorder);
+
+        assert_eq!(
+            latest_history_path_for_session("canonical-latest"),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn restore_discards_a_noncanonical_history_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let legacy = data_dir.join("sessions/2026/07/21/session-restore-legacy.jsonl");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(
+            &legacy,
+            r#"{"timestamp":1,"event_type":"user_message","session_key":"restore-key","content":{"message":"old"}}
+"#,
+        )
+        .unwrap();
+        let mut session = bifrost_agent::AgentSession::new("restore-key");
+
+        let error = restore_session_from_history_path(&mut session, &legacy, "restore-key", None)
+            .unwrap_err();
+
+        assert!(error.contains("canonical session_key layout"));
+        assert!(!legacy.exists());
+    }
+
+    #[test]
+    fn restore_accepts_the_canonical_history_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, "restore-canonical");
+        recorder
+            .record_user_message("restore-canonical", "question")
+            .unwrap();
+        recorder
+            .record_assistant_message("restore-canonical", "answer")
+            .unwrap();
+        let path = recorder.file_path().to_path_buf();
+        drop(recorder);
+        let mut session = bifrost_agent::AgentSession::new("restore-canonical");
+
+        let restored =
+            restore_session_from_history_path(&mut session, &path, "restore-canonical", None)
+                .unwrap();
+
+        assert_eq!(restored, std::fs::canonicalize(path).unwrap());
+        assert_eq!(session.history.len(), 2);
     }
 }

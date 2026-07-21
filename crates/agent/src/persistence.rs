@@ -1359,6 +1359,26 @@ mod tests {
     }
 
     #[test]
+    fn open_or_create_discards_a_canonical_path_owned_by_another_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = canonical_conversation_path(dir.path(), "expected-key");
+        write_events(&path, &[user_event("wrong-key", 1, "discarded")]);
+
+        let (mut recorder, created) =
+            ConversationRecorder::open_or_create(dir.path(), "expected-key", None).unwrap();
+
+        assert!(created);
+        recorder
+            .record_user_message("expected-key", "kept")
+            .unwrap();
+        drop(recorder);
+        let events = load_conversation_events(&path).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].session_key, "expected-key");
+        assert_eq!(events[0].content["message"], "kept");
+    }
+
+    #[test]
     fn cleanup_discards_legacy_turn_files_before_new_canonical_session() {
         let dir = tempfile::tempdir().unwrap();
         let first = dir
@@ -1457,6 +1477,25 @@ mod tests {
         assert!(report.failures.is_empty());
         assert!(attachment.exists());
         assert!(list_conversations(dir.path(), None).is_empty());
+    }
+
+    #[test]
+    fn cleanup_accepts_blank_lines_and_discards_empty_session_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let valid = canonical_conversation_path(dir.path(), "blank-lines");
+        std::fs::create_dir_all(valid.parent().unwrap()).unwrap();
+        let event = serde_json::to_string(&user_event("blank-lines", 1, "kept")).unwrap();
+        std::fs::write(&valid, format!("\n{event}\n\n")).unwrap();
+
+        let empty_key = canonical_conversation_path(dir.path(), "empty-key-file");
+        write_events(&empty_key, &[user_event("", 2, "discarded")]);
+
+        let report = clean_noncanonical_conversations(dir.path());
+
+        assert_eq!(report.files_removed, 1);
+        assert!(report.failures.is_empty());
+        assert!(valid.exists());
+        assert!(!empty_key.exists());
     }
 
     #[test]

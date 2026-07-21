@@ -768,6 +768,18 @@ pub(super) fn should_run_provider_event_connection(provider: &ImProviderConfig) 
 mod provider_event_connection_tests {
     use super::*;
 
+    fn write_legacy_history(data_dir: &Path, filename: &str) -> PathBuf {
+        let path = data_dir.join("agent/sessions/2026/07/21").join(filename);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"timestamp":1,"event_type":"user_message","session_key":"legacy","content":{"message":"old"}}
+"#,
+        )
+        .unwrap();
+        path
+    }
+
     fn provider_with_secret() -> ImProviderConfig {
         ImProviderConfig {
             id: "provider-main".to_string(),
@@ -804,5 +816,32 @@ mod provider_event_connection_tests {
 
         provider.secret_ref = None;
         assert!(!should_run_provider_event_connection(&provider));
+    }
+
+    #[test]
+    fn service_startup_discards_noncanonical_session_history() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let legacy = write_legacy_history(temp_dir.path(), "session-legacy-1.jsonl");
+
+        let _service = ImGatewayService::new(temp_dir.path());
+
+        assert!(!legacy.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_startup_reports_noncanonical_cleanup_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let legacy = write_legacy_history(temp_dir.path(), "session-legacy-locked.jsonl");
+        let parent = legacy.parent().unwrap();
+        let original_mode = std::fs::metadata(parent).unwrap().permissions().mode();
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let _service = ImGatewayService::new(temp_dir.path());
+
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(original_mode)).unwrap();
+        assert!(legacy.exists());
     }
 }

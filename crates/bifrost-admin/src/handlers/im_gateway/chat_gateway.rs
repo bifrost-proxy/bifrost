@@ -2813,6 +2813,68 @@ mod tests {
     use super::*;
     use http_body_util::BodyExt;
 
+    fn timeline_test_request(
+        session_key: &str,
+    ) -> crate::im_gateway::external_cli::ExternalCliRunRequest {
+        crate::im_gateway::external_cli::ExternalCliRunRequest {
+            message: "timeline".to_string(),
+            images: Vec::new(),
+            operation: "chat".to_string(),
+            params: serde_json::Value::Null,
+            provider_id: None,
+            runner_id: Some("codex".to_string()),
+            session_key: Some(session_key.to_string()),
+            runtime: "external_cli".to_string(),
+            adapter: "codex".to_string(),
+            work_dir: None,
+            instructions: None,
+            adapter_config: Default::default(),
+            allow_work_dirs: Vec::new(),
+            inject_bifrost_tools: false,
+            skill_paths: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn external_timeline_recorder_rejects_an_unremovable_canonical_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let session_key = "web-recorder-invalid-path";
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let canonical =
+            bifrost_agent::persistence::canonical_conversation_path(&data_dir, session_key);
+        std::fs::create_dir_all(canonical).unwrap();
+
+        assert!(
+            external_cli_timeline_recorder(&timeline_test_request(session_key), "codex").is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_timeline_recorder_handles_session_start_write_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let session_key = "web-recorder-readonly";
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let parent =
+            bifrost_agent::persistence::canonical_conversation_path(&data_dir, session_key)
+                .parent()
+                .unwrap()
+                .to_path_buf();
+        std::fs::create_dir_all(&parent).unwrap();
+        let original_mode = std::fs::metadata(&parent).unwrap().permissions().mode();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let recorder = external_cli_timeline_recorder(&timeline_test_request(session_key), "codex")
+            .expect("recorder allocation is lazy");
+
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(original_mode)).unwrap();
+        assert!(!recorder.file_path().exists());
+    }
+
     async fn response_json(response: Response<BoxBody>) -> serde_json::Value {
         let body = response
             .into_body()

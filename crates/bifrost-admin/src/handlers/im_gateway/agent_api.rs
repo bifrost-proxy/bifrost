@@ -78,14 +78,10 @@ async fn load_history_entries_blocking(
             bifrost_agent::persistence::list_conversations(&data_dir, session_key.as_deref());
         let mut entries = files
             .into_iter()
-            .map(|path| {
-                let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            .filter_map(|path| {
                 let summary = bifrost_agent::persistence::scan_session_summary(&path);
-                let parsed_key = summary.session_key.clone().unwrap_or_else(|| {
-                    let (parsed_key, _timestamp) = parse_session_filename(filename);
-                    parsed_key
-                });
-                (path, parsed_key, summary)
+                let parsed_key = summary.session_key.clone()?;
+                Some((path, parsed_key, summary))
             })
             .collect::<Vec<_>>();
         if session_key.is_none() {
