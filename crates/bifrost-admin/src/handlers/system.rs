@@ -1050,9 +1050,7 @@ mod tests {
             );
             return;
         }
-
         use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().expect("tempdir");
         let cli_dir = dir.path().join("bin");
         std::fs::create_dir_all(&cli_dir).expect("create CLI dir");
@@ -1064,7 +1062,6 @@ mod tests {
             .permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&cli_path, permissions).expect("make stale CLI executable");
-
         std::env::set_var("BIFROST_DATA_DIR", dir.path());
         std::env::set_var("BIFROST_APP_INSTALL_DIR", dir.path().join("missing-app"));
         std::env::set_var("PATH", &cli_dir);
@@ -1079,13 +1076,11 @@ mod tests {
         )
         .expect("write fresh version cache");
         let state = Arc::new(crate::state::AdminState::new(0));
-
         std::env::remove_var(super::DESKTOP_CORE_ENV);
         let cli_owned =
             check_unified_version_for_channel(state.clone(), false, UpgradeChannel::Desktop).await;
         assert!(!cli_owned.has_update);
         assert_eq!(cli_owned.current_version, env!("CARGO_PKG_VERSION"));
-
         std::env::set_var(super::DESKTOP_CORE_ENV, "1");
         let app_owned =
             check_unified_version_for_channel(state.clone(), false, UpgradeChannel::Desktop).await;
@@ -1095,7 +1090,6 @@ mod tests {
             app_owned.latest_version.as_deref(),
             Some(env!("CARGO_PKG_VERSION"))
         );
-
         std::fs::write(&cli_path, "#!/bin/sh\nexit 1\n").expect("break CLI version fixture");
         let app_owned_without_cli_version =
             check_unified_version_for_channel(state, false, UpgradeChannel::Desktop).await;
