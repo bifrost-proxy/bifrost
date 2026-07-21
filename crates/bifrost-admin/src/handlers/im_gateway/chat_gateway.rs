@@ -1165,34 +1165,24 @@ fn append_runner_call_started_to_parent_history(
     running_message: &str,
     target_runner_id: &str,
 ) {
-    let Some(state) = crate::im_gateway::session_state::load_session_state(
-        source_session_key,
-        caller_adapter,
-        caller_runner_id,
-    ) else {
-        return;
-    };
-    let Some(history_path) = state.history_path.as_deref() else {
-        return;
-    };
+    let _ = (caller_adapter, caller_runner_id);
     let data_dir = bifrost_agent::config::agent_home_dir();
-    let path = match bifrost_agent::persistence::validate_conversation_path(
+    let mut recorder = match bifrost_agent::persistence::ConversationRecorder::open_or_create(
         &data_dir,
-        std::path::Path::new(history_path),
+        source_session_key,
+        None,
     ) {
-        Ok(path) => path,
+        Ok((recorder, false)) => recorder,
+        Ok((_recorder, true)) => return,
         Err(error) => {
             tracing::warn!(
                 session_key = %source_session_key,
-                history_path = %history_path,
                 error = %error,
-                "runner call parent history path is invalid"
+                "runner call parent canonical history is unavailable"
             );
             return;
         }
     };
-    let mut recorder =
-        bifrost_agent::persistence::ConversationRecorder::from_existing_file(path, None);
     if let Err(error) = recorder.record_run_state(
         source_session_key,
         "running",
@@ -1216,34 +1206,24 @@ fn append_runner_call_result_to_parent_history(
     visible: &str,
     target_runner_id: &str,
 ) {
-    let Some(state) = crate::im_gateway::session_state::load_session_state(
-        source_session_key,
-        caller_adapter,
-        caller_runner_id,
-    ) else {
-        return;
-    };
-    let Some(history_path) = state.history_path.as_deref() else {
-        return;
-    };
+    let _ = (caller_adapter, caller_runner_id);
     let data_dir = bifrost_agent::config::agent_home_dir();
-    let path = match bifrost_agent::persistence::validate_conversation_path(
+    let mut recorder = match bifrost_agent::persistence::ConversationRecorder::open_or_create(
         &data_dir,
-        std::path::Path::new(history_path),
+        source_session_key,
+        None,
     ) {
-        Ok(path) => path,
+        Ok((recorder, false)) => recorder,
+        Ok((_recorder, true)) => return,
         Err(error) => {
             tracing::warn!(
                 session_key = %source_session_key,
-                history_path = %history_path,
                 error = %error,
-                "runner call parent history path is invalid"
+                "runner call parent canonical history is unavailable"
             );
             return;
         }
     };
-    let mut recorder =
-        bifrost_agent::persistence::ConversationRecorder::from_existing_file(path, None);
     if let Err(error) = recorder.record_run_state(
         source_session_key,
         "completed",
@@ -2319,37 +2299,24 @@ fn external_cli_timeline_recorder(
 ) -> Option<bifrost_agent::persistence::ConversationRecorder> {
     let session_key = request.session_key.as_deref()?;
     let data_dir = bifrost_agent::config::agent_home_dir();
-    let history_paths = [
-        request_history_path(request),
-        persisted_history_path_for_request(request, runner_id),
-    ];
-    for history_path in history_paths.into_iter().flatten() {
-        match bifrost_agent::persistence::validate_conversation_path(
+    let (mut recorder, created) =
+        match bifrost_agent::persistence::ConversationRecorder::open_or_create(
             &data_dir,
-            std::path::Path::new(&history_path),
+            session_key,
+            None,
         ) {
-            Ok(path) => {
-                return Some(
-                    bifrost_agent::persistence::ConversationRecorder::from_existing_file(
-                        path, None,
-                    ),
-                );
-            }
+            Ok(opened) => opened,
             Err(error) => {
                 tracing::warn!(
                     session_key = %session_key,
                     adapter = %request.adapter,
                     runner_id = %runner_id,
-                    history_path = %history_path,
                     error = %error,
-                    "external runner history path is invalid; creating a new timeline"
+                    "failed to open canonical external runner timeline"
                 );
+                return None;
             }
-        }
-    }
-
-    let mut recorder =
-        bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
+        };
     let path = recorder.file_path().display().to_string();
     remember_session_state_values(
         session_key,
@@ -2363,24 +2330,26 @@ fn external_cli_timeline_recorder(
             .as_ref()
             .map(|work_dir| work_dir.display().to_string()),
     );
-    if let Err(error) = recorder.record_session_start(
-        session_key,
-        serde_json::json!({
-            "source": "admin-api",
-            "runtime": request.runtime,
-            "adapter": request.adapter,
-            "runner_id": runner_id,
-            "provider_id": request.provider_id,
-            "work_dir": request.work_dir.as_ref().map(|path| path.display().to_string()),
-        }),
-    ) {
-        tracing::warn!(
-            session_key = %session_key,
-            adapter = %request.adapter,
-            runner_id = %runner_id,
-            error = %error,
-            "failed to record external runner session start"
-        );
+    if created {
+        if let Err(error) = recorder.record_session_start(
+            session_key,
+            serde_json::json!({
+                "source": "admin-api",
+                "runtime": request.runtime,
+                "adapter": request.adapter,
+                "runner_id": runner_id,
+                "provider_id": request.provider_id,
+                "work_dir": request.work_dir.as_ref().map(|path| path.display().to_string()),
+            }),
+        ) {
+            tracing::warn!(
+                session_key = %session_key,
+                adapter = %request.adapter,
+                runner_id = %runner_id,
+                error = %error,
+                "failed to record external runner session start"
+            );
+        }
     }
     Some(recorder)
 }
@@ -3767,6 +3736,28 @@ mod tests {
     }
 
     #[test]
+    fn runner_call_visibility_does_not_create_a_parent_history_from_nothing() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let session_key = "missing-parent-history";
+
+        append_runner_call_started_to_parent_history(
+            session_key,
+            "codex",
+            Some("codex"),
+            "run child",
+            "running child",
+            "traex",
+        );
+
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        assert!(
+            !bifrost_agent::persistence::canonical_conversation_path(&data_dir, session_key)
+                .exists()
+        );
+    }
+
+    #[test]
     fn runner_call_visible_messages_are_recorded_in_parent_history() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
@@ -4092,15 +4083,15 @@ mod coverage_boost {
     #[test]
     fn session_attachment_base_dir_uses_history_file_stem() {
         let base = session_attachment_base_dir_from_history_path(
-            "/tmp/bifrost/agent/sessions/2026/06/25/session-web-image-1782377498.jsonl",
+            "/tmp/bifrost/agent/sessions/by-key/session-abc123.jsonl",
         )
         .expect("attachment base dir");
 
         assert_eq!(
             base,
-            std::path::PathBuf::from("/tmp/bifrost/agent/sessions/2026/06/25")
+            std::path::PathBuf::from("/tmp/bifrost/agent/sessions/by-key")
                 .join("attachments")
-                .join("session-web-image-1782377498")
+                .join("session-abc123")
                 .display()
                 .to_string()
         );

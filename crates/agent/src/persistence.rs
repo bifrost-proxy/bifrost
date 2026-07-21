@@ -1,13 +1,14 @@
 //! Conversation persistence: recording and replaying conversation events.
 //!
-//! Events are stored in JSONL files organized by date and session key:
-//! `{data_dir}/sessions/YYYY/MM/DD/session-{session_key}-{timestamp}.jsonl`
+//! Events are stored in one append-only JSONL file per session key:
+//! `{data_dir}/sessions/by-key/session-{sha256(session_key)}.jsonl`.
 
 use crate::history;
 use crate::tools::goal::GoalState;
 use crate::tools::update_plan::PlanStep;
 use crate::types::{ChatImageInput, ChatMessage, ToolCallMessage};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -60,23 +61,10 @@ pub struct ConversationRecorder {
 }
 
 impl ConversationRecorder {
-    /// Create a new recorder. File path is:
-    /// `{data_dir}/sessions/YYYY/MM/DD/session-{session_key}-{timestamp}.jsonl`
+    /// Create a recorder at the stable path owned by this session key.
     pub fn new(data_dir: &Path, session_key: &str) -> Self {
-        let now = current_time_secs();
-        let (year, month, day) = date_from_timestamp(now);
-
-        let sessions_dir = data_dir
-            .join("sessions")
-            .join(year.to_string())
-            .join(format!("{:02}", month))
-            .join(format!("{:02}", day));
-
-        let filename = format!("session-{}-{}.jsonl", sanitize_key(session_key), now);
-        let file_path = sessions_dir.join(filename);
-
         Self {
-            file_path,
+            file_path: canonical_conversation_path(data_dir, session_key),
             writer: None,
             max_bytes: None,
             event_count: Some(0),
@@ -92,6 +80,46 @@ impl ConversationRecorder {
         let mut recorder = Self::new(data_dir, session_key);
         recorder.max_bytes = max_bytes.filter(|value| *value > 0);
         recorder
+    }
+
+    /// Open the single JSONL owned by `session_key`, creating it only when the
+    /// session has never been persisted. The boolean is true only for a newly
+    /// allocated path, so callers can avoid recording duplicate session_start
+    /// metadata when resuming an existing session.
+    pub fn open_or_create(
+        data_dir: &Path,
+        session_key: &str,
+        max_bytes: Option<usize>,
+    ) -> Result<(Self, bool), String> {
+        let path = canonical_conversation_path(data_dir, session_key);
+        if path.exists() {
+            match validate_conversation_file_session_key(&path) {
+                Ok(stored_key) if stored_key == session_key => {
+                    return Ok((Self::from_existing_file(path, max_bytes), false));
+                }
+                Ok(stored_key) => {
+                    std::fs::remove_file(&path).map_err(|error| {
+                        format!(
+                            "discard canonical session {} containing key {:?}: {error}",
+                            path.display(),
+                            stored_key
+                        )
+                    })?;
+                }
+                Err(validation_error) => {
+                    std::fs::remove_file(&path).map_err(|error| {
+                        format!(
+                            "discard invalid canonical session {} after {validation_error}: {error}",
+                            path.display()
+                        )
+                    })?;
+                }
+            }
+        }
+        Ok((
+            Self::new_with_max_bytes(data_dir, session_key, max_bytes),
+            true,
+        ))
     }
 
     /// Continue recording into an existing, already-validated JSONL file.
@@ -1118,20 +1146,48 @@ pub fn list_conversations(data_dir: &Path, session_key: Option<&str>) -> Vec<Pat
     let mut files = Vec::new();
     collect_jsonl_files(&sessions_dir, &mut files);
 
-    // Filter by session key if provided
+    // Filter by the original key stored in events. Filename-only matching is
+    // unsafe because legacy sanitized keys can collide.
     if let Some(key) = session_key {
-        let sanitized = sanitize_key(key);
-        let prefix = format!("session-{sanitized}-");
-        files.retain(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.starts_with(&prefix) && n.ends_with(".jsonl"))
+        files.retain(|path| {
+            validate_conversation_file_session_key(path)
+                .map(|stored| stored == key)
                 .unwrap_or(false)
         });
     }
 
     files.sort();
     files
+}
+
+/// Result of enforcing the canonical single-file session store at startup.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConversationStorageCleanupReport {
+    pub files_removed: usize,
+    pub failures: Vec<String>,
+}
+
+/// Delete every JSONL that is not a valid canonical file for its embedded
+/// session_key. Legacy timestamped shards are intentionally discarded rather
+/// than imported into the new store.
+pub fn clean_noncanonical_conversations(data_dir: &Path) -> ConversationStorageCleanupReport {
+    let mut report = ConversationStorageCleanupReport::default();
+    for path in list_conversations(data_dir, None) {
+        let keep = validate_conversation_file_session_key(&path)
+            .map(|session_key| path == canonical_conversation_path(data_dir, &session_key))
+            .unwrap_or(false);
+        if keep {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => report.files_removed += 1,
+            Err(error) => report.failures.push(format!(
+                "remove noncanonical session {}: {error}",
+                path.display()
+            )),
+        }
+    }
+    report
 }
 
 /// Remove session JSONL files whose last activity is older than `cutoff_secs`
@@ -1174,6 +1230,9 @@ fn collect_jsonl_files_depth(dir: &Path, files: &mut Vec<PathBuf>, depth: usize)
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
+            if entry.file_name() == "attachments" {
+                continue;
+            }
             collect_jsonl_files_depth(&path, files, depth + 1);
         } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
             files.push(path);
@@ -1185,6 +1244,61 @@ fn collect_jsonl_files_depth(dir: &Path, files: &mut Vec<PathBuf>, depth: usize)
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Stable, collision-resistant storage path for one logical session.
+pub fn canonical_conversation_path(data_dir: &Path, session_key: &str) -> PathBuf {
+    let digest = Sha256::digest(session_key.as_bytes());
+    data_dir
+        .join("sessions")
+        .join("by-key")
+        .join(format!("session-{digest:x}.jsonl"))
+}
+
+fn validate_conversation_file_session_key(path: &Path) -> Result<String, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("open conversation file {}: {error}", path.display()))?;
+    let reader = std::io::BufReader::new(file);
+    let mut expected_key: Option<String> = None;
+    for (line_no, line) in reader.lines().enumerate() {
+        let line = line.map_err(|error| {
+            format!(
+                "read conversation file {} line {}: {error}",
+                path.display(),
+                line_no + 1
+            )
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event = serde_json::from_str::<ConversationEvent>(&line).map_err(|error| {
+            format!(
+                "parse conversation file {} line {}: {error}",
+                path.display(),
+                line_no + 1
+            )
+        })?;
+        if event.session_key.is_empty() {
+            return Err(format!(
+                "conversation file {} line {} has an empty session_key",
+                path.display(),
+                line_no + 1
+            ));
+        }
+        if let Some(expected) = expected_key.as_deref() {
+            if expected != event.session_key {
+                return Err(format!(
+                    "conversation file {} mixes session keys {:?} and {:?}",
+                    path.display(),
+                    expected,
+                    event.session_key
+                ));
+            }
+        } else {
+            expected_key = Some(event.session_key);
+        }
+    }
+    expected_key.ok_or_else(|| format!("conversation file {} is empty", path.display()))
+}
+
 fn current_time_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1192,47 +1306,158 @@ fn current_time_secs() -> u64 {
         .as_secs()
 }
 
-/// Extract (year, month, day) from a unix timestamp.
-fn date_from_timestamp(timestamp: u64) -> (u32, u32, u32) {
-    // Simple date calculation without chrono
-    let days = timestamp / 86400;
-    let (year, month, day) = days_to_ymd(days as i64);
-    (year as u32, month as u32, day as u32)
-}
-
-/// Convert days since epoch to (year, month, day).
-fn days_to_ymd(days: i64) -> (i32, i32, i32) {
-    // Civil calendar algorithm from http://howardhinnant.github.io/date_algorithms.html
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y as i32, m as i32, d as i32)
-}
-
-/// Sanitize a session key for use in filenames.
-fn sanitize_key(key: &str) -> String {
-    key.chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use event_types::*;
+
+    fn write_events(path: &Path, events: &[ConversationEvent]) {
+        std::fs::create_dir_all(path.parent().expect("event parent")).expect("create parent");
+        let content = events
+            .iter()
+            .map(|event| serde_json::to_string(event).expect("serialize event"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(path, format!("{content}\n")).expect("write events");
+    }
+
+    fn user_event(session_key: &str, timestamp: u64, message: &str) -> ConversationEvent {
+        ConversationEvent {
+            timestamp,
+            event_type: USER_MESSAGE.to_string(),
+            session_key: session_key.to_string(),
+            content: serde_json::json!({ "message": message }),
+        }
+    }
+
+    #[test]
+    fn open_or_create_reuses_one_file_across_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut first, created) =
+            ConversationRecorder::open_or_create(dir.path(), "one-session", None).unwrap();
+        assert!(created);
+        first
+            .record_user_message("one-session", "first turn")
+            .unwrap();
+        let first_path = first.file_path().to_path_buf();
+        drop(first);
+
+        let (mut second, created) =
+            ConversationRecorder::open_or_create(dir.path(), "one-session", None).unwrap();
+        assert!(!created);
+        assert_eq!(second.file_path(), first_path);
+        second
+            .record_user_message("one-session", "second turn")
+            .unwrap();
+        drop(second);
+
+        assert_eq!(list_conversations(dir.path(), Some("one-session")).len(), 1);
+        let events = load_conversation_events(&first_path).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].content["message"], "first turn");
+        assert_eq!(events[1].content["message"], "second turn");
+    }
+
+    #[test]
+    fn cleanup_discards_legacy_turn_files_before_new_canonical_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir
+            .path()
+            .join("sessions/2026/07/20/session-legacy-key-100.jsonl");
+        let second = dir
+            .path()
+            .join("sessions/2026/07/21/session-legacy-key-200.jsonl");
+        write_events(&first, &[user_event("legacy-key", 100, "old turn")]);
+        write_events(&second, &[user_event("legacy-key", 200, "new turn")]);
+
+        let report = clean_noncanonical_conversations(dir.path());
+        assert_eq!(report.files_removed, 2);
+        assert!(report.failures.is_empty());
+        assert!(!first.exists());
+        assert!(!second.exists());
+
+        let (mut recorder, created) =
+            ConversationRecorder::open_or_create(dir.path(), "legacy-key", None).unwrap();
+        assert!(created);
+        recorder
+            .record_user_message("legacy-key", "future turn")
+            .unwrap();
+        let canonical = recorder.file_path().to_path_buf();
+        drop(recorder);
+        assert_eq!(
+            canonical,
+            canonical_conversation_path(dir.path(), "legacy-key")
+        );
+        let events = load_conversation_events(&canonical).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].content["message"], "future turn");
+    }
+
+    #[test]
+    fn hashed_canonical_paths_keep_previously_colliding_keys_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut first = ConversationRecorder::new(dir.path(), "same:key");
+        first.record_user_message("same:key", "colon").unwrap();
+        let first_path = first.file_path().to_path_buf();
+        drop(first);
+        let mut second = ConversationRecorder::new(dir.path(), "same/key");
+        second.record_user_message("same/key", "slash").unwrap();
+        let second_path = second.file_path().to_path_buf();
+        drop(second);
+
+        assert_ne!(first_path, second_path);
+        let report = clean_noncanonical_conversations(dir.path());
+        assert_eq!(report.files_removed, 0);
+        assert!(report.failures.is_empty());
+        assert_eq!(
+            list_conversations(dir.path(), Some("same:key")),
+            vec![first_path]
+        );
+        assert_eq!(
+            list_conversations(dir.path(), Some("same/key")),
+            vec![second_path]
+        );
+    }
+
+    #[test]
+    fn cleanup_discards_malformed_and_mixed_key_canonical_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let malformed = canonical_conversation_path(dir.path(), "malformed");
+        std::fs::create_dir_all(malformed.parent().unwrap()).unwrap();
+        std::fs::write(&malformed, "not-json\n").unwrap();
+
+        let mixed = canonical_conversation_path(dir.path(), "mixed-a");
+        write_events(
+            &mixed,
+            &[
+                user_event("mixed-a", 1, "first"),
+                user_event("mixed-b", 2, "wrong key"),
+            ],
+        );
+
+        let report = clean_noncanonical_conversations(dir.path());
+        assert_eq!(report.files_removed, 2);
+        assert!(report.failures.is_empty());
+        assert!(!malformed.exists());
+        assert!(!mixed.exists());
+    }
+
+    #[test]
+    fn cleanup_never_treats_jsonl_attachments_as_conversation_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let attachment = dir
+            .path()
+            .join("sessions/by-key/attachments/session-demo/run-1/input.jsonl");
+        std::fs::create_dir_all(attachment.parent().unwrap()).unwrap();
+        std::fs::write(&attachment, "not a conversation event\n").unwrap();
+
+        let report = clean_noncanonical_conversations(dir.path());
+
+        assert_eq!(report.files_removed, 0);
+        assert!(report.failures.is_empty());
+        assert!(attachment.exists());
+        assert!(list_conversations(dir.path(), None).is_empty());
+    }
 
     #[test]
     fn test_conversation_recorder_basic() {
@@ -1506,7 +1731,7 @@ mod tests {
     }
 
     #[test]
-    fn test_list_conversations_uses_exact_session_prefix() {
+    fn test_list_conversations_uses_exact_embedded_session_key() {
         let dir = tempfile::tempdir().unwrap();
         let mut exact = ConversationRecorder::new(dir.path(), "abc");
         exact.record_user_message("abc", "exact").unwrap();
@@ -1517,11 +1742,7 @@ mod tests {
 
         let files = list_conversations(dir.path(), Some("abc"));
 
-        assert_eq!(files.len(), 1);
-        assert!(files[0]
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("session-abc-")));
+        assert_eq!(files, vec![canonical_conversation_path(dir.path(), "abc")]);
     }
 
     #[test]
@@ -1529,31 +1750,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let files = list_conversations(dir.path(), None);
         assert!(files.is_empty());
-    }
-
-    #[test]
-    fn test_sanitize_key() {
-        assert_eq!(sanitize_key("hello-world"), "hello-world");
-        assert_eq!(sanitize_key("user@email.com"), "user_email_com");
-        assert_eq!(sanitize_key("path/to/thing"), "path_to_thing");
-    }
-
-    #[test]
-    fn test_date_from_timestamp() {
-        // 2024-01-01 00:00:00 UTC = 1704067200
-        let (y, m, d) = date_from_timestamp(1704067200);
-        assert_eq!(y, 2024);
-        assert_eq!(m, 1);
-        assert_eq!(d, 1);
-    }
-
-    #[test]
-    fn test_date_from_timestamp_mid_year() {
-        // 2024-06-15 12:00:00 UTC = 1718452800
-        let (y, m, d) = date_from_timestamp(1718452800);
-        assert_eq!(y, 2024);
-        assert_eq!(m, 6);
-        assert_eq!(d, 15);
     }
 
     #[test]

@@ -245,6 +245,16 @@ impl ImGatewayService {
         // Store agent config under data_dir/agent/ for unified directory structure
         let agent_data_dir = data_dir.join("agent");
         let _ = std::fs::create_dir_all(&agent_data_dir);
+        let cleanup = bifrost_agent::persistence::clean_noncanonical_conversations(&agent_data_dir);
+        if cleanup.files_removed > 0 {
+            info!(
+                files_removed = cleanup.files_removed,
+                "discarded noncanonical agent session histories"
+            );
+        }
+        for error in cleanup.failures {
+            warn!(error = %error, "failed to discard noncanonical agent session history");
+        }
         let agent_config_store = Arc::new(ImAgentConfigStore::new(&agent_data_dir));
         let agent_config = agent_config_store.load();
         let schedule_store = Arc::new(ImScheduleStore::new(data_dir));

@@ -1624,27 +1624,35 @@ fn ensure_external_cli_session_recorder(
 
     if recorder.is_none() {
         let data_dir = bifrost_agent::config::agent_home_dir();
-        let mut rec = ConversationRecorder::new(&data_dir, session_key);
-        if let Err(error) = rec.record_session_start(
-            session_key,
-            serde_json::json!({
-                "source": request.adapter,
-                "runtime": request.runtime,
-                "adapter": request.adapter,
-                "runner_id": runner_id,
-                "provider_id": provider.id,
-                "provider_type": format!("{:?}", provider.provider_type).to_lowercase(),
-                "work_dir": request.work_dir.as_ref().map(|path| path.display().to_string()),
-            }),
-        ) {
-            warn!(error = %error, "failed to record external cli session start");
-        }
-        if let Some(title) = session.title.as_deref() {
-            if let Err(error) = rec.record_title_updated(session_key, title) {
-                warn!(error = %error, "failed to record external cli session title");
+        match ConversationRecorder::open_or_create(&data_dir, session_key, None) {
+            Ok((mut rec, created)) => {
+                if created {
+                    if let Err(error) = rec.record_session_start(
+                        session_key,
+                        serde_json::json!({
+                            "source": request.adapter,
+                            "runtime": request.runtime,
+                            "adapter": request.adapter,
+                            "runner_id": runner_id,
+                            "provider_id": provider.id,
+                            "provider_type": format!("{:?}", provider.provider_type).to_lowercase(),
+                            "work_dir": request.work_dir.as_ref().map(|path| path.display().to_string()),
+                        }),
+                    ) {
+                        warn!(error = %error, "failed to record external cli session start");
+                    }
+                    if let Some(title) = session.title.as_deref() {
+                        if let Err(error) = rec.record_title_updated(session_key, title) {
+                            warn!(error = %error, "failed to record external cli session title");
+                        }
+                    }
+                }
+                *recorder = Some(rec);
+            }
+            Err(error) => {
+                warn!(session_key = %session_key, error = %error, "failed to open the canonical external cli session history");
             }
         }
-        *recorder = Some(rec);
     }
     if let Some(rec) = recorder.as_mut() {
         if let Err(error) =

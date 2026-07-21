@@ -1059,11 +1059,7 @@ pub(super) fn restore_session_from_persisted_history(
         .map(PathBuf::from);
     let candidates = state_history_path
         .into_iter()
-        .chain(if runner_id.is_none() {
-            latest_history_path_for_session(session_key)
-        } else {
-            None
-        })
+        .chain(latest_history_path_for_session(session_key))
         .collect::<Vec<_>>();
 
     for candidate in candidates {
@@ -1237,17 +1233,11 @@ pub(super) fn clear_persisted_agent_session_state(
 
 fn latest_history_path_for_session(session_key: &str) -> Option<PathBuf> {
     let data_dir = bifrost_agent::config::agent_home_dir();
-    let mut candidates =
-        bifrost_agent::persistence::list_conversations(&data_dir, Some(session_key));
-    candidates.sort_by_key(|path| {
-        let summary = bifrost_agent::persistence::scan_session_summary(path);
-        if summary.end_time > 0 {
-            summary.end_time
-        } else {
-            summary.start_time
-        }
-    });
-    candidates.pop()
+    bifrost_agent::persistence::list_conversations(&data_dir, Some(session_key))
+        .into_iter()
+        .find(|path| {
+            path == &bifrost_agent::persistence::canonical_conversation_path(&data_dir, session_key)
+        })
 }
 
 fn clear_persisted_session_histories(
@@ -1306,6 +1296,12 @@ pub(super) fn restore_session_from_history_path(
 ) -> Result<PathBuf, String> {
     let data_dir = bifrost_agent::config::agent_home_dir();
     let path = bifrost_agent::persistence::validate_conversation_path(&data_dir, history_path)?;
+    let canonical =
+        bifrost_agent::persistence::canonical_conversation_path(&data_dir, expected_session_key);
+    if path != canonical {
+        let _ = std::fs::remove_file(&path);
+        return Err("history path does not use the canonical session_key layout".to_string());
+    }
     let report = bifrost_agent::persistence::load_conversation_lossy(&path)?;
     if let Some(restored_key) = report.session_key.as_deref() {
         if restored_key != expected_session_key {

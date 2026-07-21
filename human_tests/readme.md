@@ -238,7 +238,7 @@
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
 | [feishu-progress-card.md](./feishu-progress-card.md) | Feishu Progress Card | 8 | 飞书 Agent progress card 归并逐字符 assistant stream 并保留模型思考、工具、计划与可读状态，最终答案仅展示一次，同时过滤 token usage 机器态状态；覆盖文件变更详情、Codex session 累计 Token、7 天额度余额、任务耗时，以及长卡片工具输入/输出 300 字符上限、最近 5 轮思考优先、UTF-8 字节/组件预算、200860/300305 同卡收缩重试和精简降级，通过本地 CardKit JSON 2.0 renderer 与 mock API 验证 payload |
-| [agent-chat-history-pagination.md](./agent-chat-history-pagination.md) | Agent Chat 全量历史与过程渲染 | 7 | 历史默认一次完整加载且无 Load older/loader/modal，逐 token delta 合并，usage 元事件过滤，完整 timeline 权威恢复，真实长会话 DOM 收敛，亮暗主题一致，新 usage refresh 不再写入 timeline |
+| [agent-chat-history-pagination.md](./agent-chat-history-pagination.md) | Agent Chat 单会话日志与全量历史渲染 | 8 | 单 key 固定 SHA-256 JSONL，非规范历史直接清理；历史默认完整加载，重复/重叠 SSE 不覆盖首轮，delta 合并、usage 过滤与亮暗主题一致 |
 | [remove-builtin-bifrost-agent.md](./remove-builtin-bifrost-agent.md) | Remove built-in Bifrost Agent | 4 | 内置 runtime HTTP/worker/CLI/UI 入口已删除、Agent Chat 只走 external runner stream、专属代码文档测试资产已删除、Codex/Trae X/Claude Code/ChatGPT Web 与自定义 Runner 保留 |
 | [asr-scheduled-task-plan-b.md](./asr-scheduled-task-plan-b.md) | ASR 定时任务 Runtime 策略 | 42 | ASR runtime 策略、Daily Agent 外部 Runner、ChatGPT Web、IM delivery、恢复与性能回归 |
 | [im-gateway.md](./im-gateway.md) | IM Gateway 网关模块 | 69 | IM Provider、Target、Route、外部 Runner Schedule、消息投递与 WebUI 回归 |
