@@ -6,6 +6,8 @@ pub const GITHUB_RELEASES_LATEST_URL: &str =
     "https://github.com/bifrost-proxy/bifrost/releases/latest";
 pub const GITHUB_RELEASES_API_URL: &str =
     "https://api.github.com/repos/bifrost-proxy/bifrost/releases/latest";
+pub const GITHUB_RELEASES_API_LIST_URL: &str =
+    "https://api.github.com/repos/bifrost-proxy/bifrost/releases?per_page=100";
 pub const GITHUB_TAGS_API_URL: &str = "https://api.github.com/repos/bifrost-proxy/bifrost/tags";
 pub const GITHUB_RELEASE_URL: &str = "https://github.com/bifrost-proxy/bifrost/releases/tag";
 pub const REQUEST_TIMEOUT_SECS: u64 = 10;
@@ -25,6 +27,10 @@ pub struct VersionCache {
 pub struct GitHubRelease {
     pub tag_name: String,
     pub body: Option<String>,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub prerelease: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,22 +57,57 @@ pub fn extract_version_from_redirect_url(url: &str) -> Result<String, FetchError
     if let Some(idx) = url.rfind("/tag/") {
         let tag = &url[idx + 5..];
         let tag = tag.trim_end_matches('/');
-        let version = tag.strip_prefix('v').unwrap_or(tag).to_string();
-        if version.is_empty() {
-            Err(FetchError::Parse(format!(
-                "empty version tag in URL: {}",
-                url
-            )))
-        } else {
-            debug!(version = %version, url = %url, "extracted version from redirect");
-            Ok(version)
-        }
+        let version = bifrost_version_from_release_tag(tag).ok_or_else(|| {
+            FetchError::Parse(format!("not a Bifrost release tag in URL: {}", url))
+        })?;
+        debug!(version = %version, url = %url, "extracted version from redirect");
+        Ok(version)
     } else {
         Err(FetchError::Parse(format!(
             "no /tag/ found in redirect URL: {}",
             url
         )))
     }
+}
+
+pub fn bifrost_version_from_release_tag(tag: &str) -> Option<String> {
+    let version = tag.strip_prefix('v')?;
+    let (core, prerelease) = match version.split_once('-') {
+        Some((core, prerelease)) => (core, Some(prerelease)),
+        None => (version, None),
+    };
+    let mut parts = core.split('.');
+    let valid_core = (0..3).all(|_| {
+        parts
+            .next()
+            .is_some_and(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+    }) && parts.next().is_none();
+    let valid_prerelease = prerelease.is_none_or(|value| {
+        !value.is_empty()
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+            && value.chars().any(|c| c.is_ascii_alphanumeric())
+    });
+    (valid_core && valid_prerelease).then(|| version.to_string())
+}
+
+pub fn stable_bifrost_release_version(release: &GitHubRelease) -> Option<String> {
+    if release.draft || release.prerelease {
+        return None;
+    }
+    let version = bifrost_version_from_release_tag(&release.tag_name)?;
+    (!version.contains('-')).then_some(version)
+}
+
+pub fn pick_latest_bifrost_release(releases: Vec<GitHubRelease>) -> Option<GitHubRelease> {
+    releases
+        .into_iter()
+        .filter_map(|release| {
+            stable_bifrost_release_version(&release).map(|version| (release, version))
+        })
+        .max_by(|(_, a), (_, b)| compare_versions(a, b))
+        .map(|(release, _)| release)
 }
 
 pub fn make_release_tag(version: &str) -> String {
@@ -90,9 +131,7 @@ pub fn strip_tag_prefix(tag: &str) -> String {
 
 pub fn pick_latest_tag(tags: Vec<GitHubTag>) -> Option<String> {
     tags.into_iter()
-        .map(|t| t.name)
-        .filter(|name| name.starts_with('v'))
-        .map(|name| name.trim_start_matches('v').to_string())
+        .filter_map(|tag| bifrost_version_from_release_tag(&tag.name))
         .max_by(|a, b| compare_versions(a, b))
 }
 
@@ -471,12 +510,14 @@ pub fn fetch_latest_release_sync() -> Result<(String, Vec<String>), FetchError> 
     match fetch_with_retry(&client, GITHUB_RELEASES_API_URL) {
         Ok(response) => match response.json::<GitHubRelease>() {
             Ok(release) => {
-                let version = strip_tag_prefix(&release.tag_name);
-                let highlights = parse_release_highlights(release.body.as_deref());
-                return Ok((version, highlights));
+                if let Some(version) = stable_bifrost_release_version(&release) {
+                    let highlights = parse_release_highlights(release.body.as_deref());
+                    return Ok((version, highlights));
+                }
+                debug!(tag = %release.tag_name, "latest GitHub release is not a stable Bifrost release; scanning published releases");
             }
             Err(e) => {
-                debug!(error = %e, "failed to parse GitHub release JSON, falling back to tags API");
+                debug!(error = %e, "failed to parse latest GitHub release JSON, scanning published releases");
             }
         },
         Err(e) => {
@@ -484,16 +525,16 @@ pub fn fetch_latest_release_sync() -> Result<(String, Vec<String>), FetchError> 
             debug!(
                 error = %e,
                 reason,
-                "releases API failed, falling back to tags API"
+                "latest release API failed, scanning published releases"
             );
         }
     }
 
-    let response = fetch_with_retry(&client, GITHUB_TAGS_API_URL).map_err(|e| {
+    let response = fetch_with_retry(&client, GITHUB_RELEASES_API_LIST_URL).map_err(|e| {
         let is_rate_limit = matches!(&*e, GithubRequestError::Status(status) if *status == reqwest::StatusCode::FORBIDDEN);
         if is_rate_limit {
             FetchError::Network(
-                "all version detection methods failed (redirect + GitHub API rate limited). Check your network connection to github.com".to_string()
+                "all release-based version detection methods failed (redirect + GitHub API rate limited). Check your network connection to github.com".to_string()
             )
         } else {
             let reason = classify_github_request_error(&e);
@@ -501,14 +542,19 @@ pub fn fetch_latest_release_sync() -> Result<(String, Vec<String>), FetchError> 
         }
     })?;
 
-    let tags: Vec<GitHubTag> = response
+    let releases: Vec<GitHubRelease> = response
         .json()
-        .map_err(|e| FetchError::Parse(format!("failed to parse tags response: {}", e)))?;
+        .map_err(|e| FetchError::Parse(format!("failed to parse releases response: {}", e)))?;
 
-    let version = pick_latest_tag(tags)
-        .ok_or_else(|| FetchError::Parse("no valid version tags found".to_string()))?;
+    let release = pick_latest_bifrost_release(releases).ok_or_else(|| {
+        FetchError::Parse("no published stable Bifrost releases found".to_string())
+    })?;
+    let version = stable_bifrost_release_version(&release).ok_or_else(|| {
+        FetchError::Parse("selected release did not contain a stable Bifrost version".to_string())
+    })?;
+    let highlights = parse_release_highlights(release.body.as_deref());
 
-    Ok((version, Vec::new()))
+    Ok((version, highlights))
 }
 
 pub async fn fetch_version_via_redirect_async() -> Option<String> {
@@ -614,18 +660,21 @@ pub async fn fetch_latest_release_async() -> Option<(String, Vec<String>)> {
 
     if let Ok(response) = client.get(GITHUB_RELEASES_API_URL).send().await {
         if let Ok(release) = response.json::<GitHubRelease>().await {
-            let version = strip_tag_prefix(&release.tag_name);
-            let highlights = parse_release_highlights(release.body.as_deref());
-            return Some((version, highlights));
+            if let Some(version) = stable_bifrost_release_version(&release) {
+                let highlights = parse_release_highlights(release.body.as_deref());
+                return Some((version, highlights));
+            }
+            debug!(tag = %release.tag_name, "latest GitHub release is not a stable Bifrost release; scanning published releases (async)");
         }
     }
 
-    let response = client.get(GITHUB_TAGS_API_URL).send().await.ok()?;
-    let tags: Vec<GitHubTag> = response.json().await.ok()?;
+    let response = client.get(GITHUB_RELEASES_API_LIST_URL).send().await.ok()?;
+    let releases: Vec<GitHubRelease> = response.json().await.ok()?;
+    let release = pick_latest_bifrost_release(releases)?;
+    let version = stable_bifrost_release_version(&release)?;
+    let highlights = parse_release_highlights(release.body.as_deref());
 
-    let version = pick_latest_tag(tags)?;
-
-    Some((version, Vec::new()))
+    Some((version, highlights))
 }
 
 pub fn parse_release_highlights(body: Option<&str>) -> Vec<String> {
@@ -933,7 +982,61 @@ mod tests {
             .unwrap(),
             "1.0.0"
         );
+        assert!(extract_version_from_redirect_url(
+            "https://github.com/bifrost-proxy/bifrost/releases/tag/moss-runtime-v1.0.0"
+        )
+        .is_err());
         assert!(extract_version_from_redirect_url("https://github.com/").is_err());
+    }
+
+    #[test]
+    fn test_bifrost_release_tag_validation() {
+        assert_eq!(
+            bifrost_version_from_release_tag("v0.0.156"),
+            Some("0.0.156".to_string())
+        );
+        assert_eq!(
+            bifrost_version_from_release_tag("v0.0.157-beta.3"),
+            Some("0.0.157-beta.3".to_string())
+        );
+        for tag in [
+            "moss-runtime-v1.0.0",
+            "vmoss-runtime-v1.0.0",
+            "0.0.156",
+            "v0.0",
+            "v0.0.156.1",
+            "v0.0.x",
+            "v0.0.156-",
+        ] {
+            assert_eq!(
+                bifrost_version_from_release_tag(tag),
+                None,
+                "unexpected valid Bifrost release tag: {tag}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pick_latest_bifrost_release_ignores_resource_and_unpublished_channels() {
+        let release = |tag_name: &str, draft: bool, prerelease: bool| GitHubRelease {
+            tag_name: tag_name.to_string(),
+            body: Some(format!("notes for {tag_name}")),
+            draft,
+            prerelease,
+        };
+        let picked = pick_latest_bifrost_release(vec![
+            release("moss-runtime-v9.0.0", false, false),
+            release("v9.0.0", true, false),
+            release("v2.0.0-beta.1", false, true),
+            release("v0.0.156", false, false),
+            release("v1.2.3", false, false),
+        ])
+        .expect("stable Bifrost release");
+        assert_eq!(picked.tag_name, "v1.2.3");
+        assert_eq!(
+            stable_bifrost_release_version(&picked),
+            Some("1.2.3".to_string())
+        );
     }
 
     #[test]
@@ -1336,14 +1439,16 @@ without proper structure
             .unwrap(),
             "2.3.4"
         );
-        // No v-prefix preserved as-is.
-        assert_eq!(
-            extract_version_from_redirect_url(
-                "https://github.com/bifrost-proxy/bifrost/releases/tag/2.3.4"
-            )
-            .unwrap(),
-            "2.3.4"
-        );
+        // Bifrost releases always require the v-prefix.
+        assert!(extract_version_from_redirect_url(
+            "https://github.com/bifrost-proxy/bifrost/releases/tag/2.3.4"
+        )
+        .is_err());
+        // Independent resource releases must never become upgrade targets.
+        assert!(extract_version_from_redirect_url(
+            "https://github.com/bifrost-proxy/bifrost/releases/tag/moss-runtime-v1.0.0"
+        )
+        .is_err());
         // Empty tag -> Parse error.
         assert!(extract_version_from_redirect_url(
             "https://github.com/bifrost-proxy/bifrost/releases/tag/"
@@ -1389,6 +1494,9 @@ without proper structure
             },
             GitHubTag {
                 name: "not-a-version".to_string(), // no 'v' prefix -> filtered out
+            },
+            GitHubTag {
+                name: "vmoss-runtime-v9.0.0".to_string(),
             },
         ];
         assert_eq!(pick_latest_tag(tags), Some("0.2.0".to_string()));

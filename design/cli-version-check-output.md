@@ -16,6 +16,8 @@
 
 本方案的核心是把 CLI 与服务端的字段协议对齐，并给缺失最新版本的场景一个明确的提示行，避免再出现“成功却空白”的现象。同时，为无运行代理场景补一条 standalone fallback：直接查 GitHub。
 
+仓库同时发布独立资源 release 后，版本选择还必须隔离产品版本与资源版本：`moss-runtime-v1.0.0` 之类的 tag 即使被 GitHub 标成 `Latest`，也不能进入 CLI、Admin、Tray 或 Desktop upgrade。只有严格匹配 `v<major>.<minor>.<patch>` 的非 draft、非 prerelease Bifrost release 才能成为稳定更新目标；若 `/releases/latest` 被资源 release 污染，则扫描已发布 release 列表，禁止回退到可能尚无安装资产的裸 git tag。
+
 ## 用户目标验证清单
 
 ### 必须实现
@@ -25,6 +27,9 @@
 - `has_update=false` 时输出 `You are running the latest version.`（含 checkmark emoji）。
 - 服务端返回但 `latest_version=null` 时输出 `Could not determine the latest version. Check your network connection.`（含警告 emoji）。
 - 无运行中的代理时，回落到 `handle_version_check_standalone`：直接调用 `update_check::get_latest_version_fresh_with_diagnostics` 查 GitHub，组装成同样字段名的 JSON，交给同一个输出函数渲染。
+- `/releases/latest` 的 redirect/API 结果必须通过严格 Bifrost release tag 校验；`moss-runtime-v*`、`vmoss-runtime-v*`、draft、prerelease 和非三段数字版本均拒绝。
+- Latest 被其它 release 污染时，从 published releases API 选择最新稳定 Bifrost release；不得使用裸 tags API 作为 upgrade 目标来源。
+- 独立 MOSS runtime workflow 必须设置 `make_latest: false`，不能改变仓库产品 Latest。
 - 整段输出上下加黄色 `─` 分隔线，方便终端识别。
 - 单元测试直接验证不同 JSON 返回下的行文本，不依赖 stdout 捕获。
 - E2E 断言不再把 “空输出” 视为成功。
@@ -34,6 +39,7 @@
 - 服务端 `/_bifrost/api/system/version-check` 返回契约与其它调用方（Web Settings, `bifrost upgrade`）一致。
 - `bifrost upgrade` 的前置流程不变。
 - 缓存策略、GitHub 请求频率不变。
+- 辅助资源 release 的发布与升级检查互不影响；资源版本仍可由 MOSS 初始化器按独立 tag 下载。
 - 断网 / GitHub 5xx / rate-limit 场景，`version-check` 不 panic、不写坏本地缓存。
 - CLI 其它子命令的输出格式不变。
 - Exit code 语义：命令成功执行退出 0；GitHub / API 拉取失败但仍成功打印 fallback 提示，也退出 0；只有 CLI 本身内部错误退出非零。

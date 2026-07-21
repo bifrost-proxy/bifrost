@@ -558,6 +558,26 @@
 
 ---
 
+### TC-CIE-30：独立资源 release 不得成为 Bifrost upgrade 目标
+
+**操作步骤**：
+1. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-core version_check::tests:: --lib -- --test-threads=1`。
+2. 执行 `bash e2e-tests/tests/test_asr_moss_release_contract.sh`，确认 MOSS runtime workflow 固定 `make_latest: false`，version-check 使用 published releases 而不是裸 tags 回退。
+3. 查询 GitHub `releases/latest` API 与 redirect，确认两者都指向严格的 `v<major>.<minor>.<patch>` Bifrost release，而不是 `moss-runtime-v*`。
+4. 执行已安装的 `bifrost upgrade`，观察 latest/current 与 desktop 后置更新目标。
+
+**预期结果**：
+- `moss-runtime-v1.0.0`、`vmoss-runtime-v1.0.0`、draft、prerelease、非三段数字 tag 都不能成为稳定 Bifrost update target。
+- `/releases/latest` 被资源 release 污染时，sync/async 检查均从 published release 列表选择最新稳定 Bifrost release；不会回退到可能没有安装资产的裸 git tag。
+- `bifrost upgrade` 不再拼接 `bifrost-desktop-vmoss-runtime-*.dmg`，当前稳定版用户不会因 MOSS runtime release 收到虚假桌面更新。
+
+**2026-07-21 执行记录**：
+- 41 个 version-check 单元测试全部通过，MOSS release contract 与 runtime packager fixture 通过。
+- GitHub latest API 与 redirect 均返回稳定产品 release `v0.0.156`，且 `draft=false`、`prerelease=false`。
+- 已安装的 `bifrost v0.0.156` 执行 `bifrost upgrade` 后报告当前已是最新版，随后从 `v0.0.156` 正确更新 `/Applications/Bifrost.app`；输出中没有 `moss-runtime` 或 `vmoss-runtime`。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据和测试文件：
