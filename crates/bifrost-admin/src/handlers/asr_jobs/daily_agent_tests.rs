@@ -1117,6 +1117,26 @@ fn daily_agent_entry_failure_summary_lists_failed_dates_and_targets() {
 }
 
 #[test]
+fn daily_agent_entry_failure_summary_handles_empty_and_truncated_lists() {
+    assert!(daily_agent_entry_failure_summary(&[]).is_none());
+
+    let failures = (1..=6)
+        .map(|day| DailyAgentEntryFailure {
+            date: format!("2026-06-{day:02}"),
+            report_target: format!("/tmp/2026-06-{day:02}-report.md"),
+            error: format!("error-{day}"),
+        })
+        .collect::<Vec<_>>();
+
+    let summary = daily_agent_entry_failure_summary(&failures).unwrap();
+    assert!(summary.contains("6 daily agent entries failed"));
+    assert!(summary.contains("2026-06-01"));
+    assert!(summary.contains("2026-06-05"));
+    assert!(summary.contains("... and 1 more"));
+    assert!(!summary.contains("2026-06-06 (/tmp/2026-06-06-report.md): error-6"));
+}
+
+#[test]
 fn daily_agent_entry_failure_recorder_preserves_retry_target() {
     let temp = TempDir::new().unwrap();
     let task = test_directory_task(
@@ -1218,6 +1238,208 @@ async fn daily_agent_chatgpt_web_entry_failure_continues_and_keeps_failed_date_r
     assert!(processed
         .documents
         .contains_key(&daily_agent_processed_key(&task, "2026-06-25")));
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn daily_agent_locked_partial_success_persists_status_and_error_summary() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let _mock = EnvVarGuard::set("BIFROST_CHATGPT_WEB_E2E_MOCK", std::ffi::OsStr::new("1"));
+    let _e2e = EnvVarGuard::set("BIFROST_E2E", std::ffi::OsStr::new("1"));
+    let _fail_dates = EnvVarGuard::set(
+        "BIFROST_CHATGPT_WEB_E2E_FAIL_DATES",
+        std::ffi::OsStr::new("2026-06-24"),
+    );
+
+    let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    config.runners.insert(
+        "daily-chatgpt-web-partial".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            enabled: true,
+            adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
+            adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
+                timeout_secs: Some(5),
+                ..Default::default()
+            },
+            inject_bifrost_tools: false,
+            ..Default::default()
+        },
+    );
+    crate::im_gateway::external_cli::ExternalCliConfigStore::new(temp.path())
+        .save(config)
+        .unwrap();
+
+    let mut task = test_directory_task(
+        "daily-agent-locked-partial-task",
+        temp.path().join("audio"),
+    );
+    task.daily_agent.runner = "daily-chatgpt-web-partial".to_string();
+    task.daily_agent.im_delivery.enabled = false;
+    ensure_asr_daily_workspace(&task).unwrap();
+    let daily_dir = daily_dir_for_task(&task.id);
+    std::fs::write(daily_dir.join("2026-06-24.md"), "# 2026-06-24 转写\n\n失败日期").unwrap();
+    std::fs::write(daily_dir.join("2026-06-25.md"), "# 2026-06-25 转写\n\n成功日期").unwrap();
+    save_tasks(&TaskStore {
+        version: TASK_STORE_VERSION,
+        tasks: vec![task.clone()],
+    })
+    .unwrap();
+
+    let run = run_daily_agent_locked(&task, "manual", None, false).await;
+
+    assert_eq!(run.status, "partial_success");
+    assert_eq!(run.reports_generated.len(), 1);
+    let error = run.error.as_deref().unwrap();
+    assert!(error.contains("1 daily agent entry failed"));
+    assert!(error.contains("2026-06-24"));
+
+    let stored = load_tasks()
+        .tasks
+        .into_iter()
+        .find(|stored| stored.id == task.id)
+        .unwrap();
+    assert_eq!(
+        stored.daily_agent.last_status.as_deref(),
+        Some("partial_success")
+    );
+    assert!(stored
+        .daily_agent
+        .last_error
+        .as_deref()
+        .is_some_and(|stored_error| stored_error.contains("2026-06-24")));
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn daily_agent_locked_success_persists_success_status_without_error() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let _mock = EnvVarGuard::set("BIFROST_CHATGPT_WEB_E2E_MOCK", std::ffi::OsStr::new("1"));
+    let _e2e = EnvVarGuard::set("BIFROST_E2E", std::ffi::OsStr::new("1"));
+
+    let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    config.runners.insert(
+        "daily-chatgpt-web-success".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            enabled: true,
+            adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
+            adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
+                timeout_secs: Some(5),
+                ..Default::default()
+            },
+            inject_bifrost_tools: false,
+            ..Default::default()
+        },
+    );
+    crate::im_gateway::external_cli::ExternalCliConfigStore::new(temp.path())
+        .save(config)
+        .unwrap();
+
+    let mut task = test_directory_task(
+        "daily-agent-locked-success-task",
+        temp.path().join("audio"),
+    );
+    task.daily_agent.runner = "daily-chatgpt-web-success".to_string();
+    task.daily_agent.im_delivery.enabled = false;
+    ensure_asr_daily_workspace(&task).unwrap();
+    std::fs::write(
+        daily_dir_for_task(&task.id).join("2026-06-25.md"),
+        "# 2026-06-25 转写\n\n成功日期",
+    )
+    .unwrap();
+    save_tasks(&TaskStore {
+        version: TASK_STORE_VERSION,
+        tasks: vec![task.clone()],
+    })
+    .unwrap();
+
+    let run = run_daily_agent_locked(&task, "manual", None, false).await;
+
+    assert_eq!(run.status, "success");
+    assert_eq!(run.reports_generated.len(), 1);
+    assert!(run.error.is_none());
+
+    let stored = load_tasks()
+        .tasks
+        .into_iter()
+        .find(|stored| stored.id == task.id)
+        .unwrap();
+    assert_eq!(stored.daily_agent.last_status.as_deref(), Some("success"));
+    assert!(stored.daily_agent.last_error.is_none());
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn daily_agent_locked_all_entries_failed_persists_failed_status() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let _mock = EnvVarGuard::set("BIFROST_CHATGPT_WEB_E2E_MOCK", std::ffi::OsStr::new("1"));
+    let _e2e = EnvVarGuard::set("BIFROST_E2E", std::ffi::OsStr::new("1"));
+    let _fail_dates = EnvVarGuard::set(
+        "BIFROST_CHATGPT_WEB_E2E_FAIL_DATES",
+        std::ffi::OsStr::new("2026-06-24"),
+    );
+
+    let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    config.runners.insert(
+        "daily-chatgpt-web-failed".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            enabled: true,
+            adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
+            adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
+                timeout_secs: Some(5),
+                ..Default::default()
+            },
+            inject_bifrost_tools: false,
+            ..Default::default()
+        },
+    );
+    crate::im_gateway::external_cli::ExternalCliConfigStore::new(temp.path())
+        .save(config)
+        .unwrap();
+
+    let mut task = test_directory_task(
+        "daily-agent-locked-failed-task",
+        temp.path().join("audio"),
+    );
+    task.daily_agent.runner = "daily-chatgpt-web-failed".to_string();
+    task.daily_agent.im_delivery.enabled = false;
+    ensure_asr_daily_workspace(&task).unwrap();
+    std::fs::write(
+        daily_dir_for_task(&task.id).join("2026-06-24.md"),
+        "# 2026-06-24 转写\n\n失败日期",
+    )
+    .unwrap();
+    save_tasks(&TaskStore {
+        version: TASK_STORE_VERSION,
+        tasks: vec![task.clone()],
+    })
+    .unwrap();
+
+    let run = run_daily_agent_locked(&task, "manual", None, false).await;
+
+    assert_eq!(run.status, "failed");
+    assert!(run.reports_generated.is_empty());
+    assert!(run
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("2026-06-24")));
+
+    let stored = load_tasks()
+        .tasks
+        .into_iter()
+        .find(|stored| stored.id == task.id)
+        .unwrap();
+    assert_eq!(stored.daily_agent.last_status.as_deref(), Some("failed"));
+    assert!(stored
+        .daily_agent
+        .last_error
+        .as_deref()
+        .is_some_and(|stored_error| stored_error.contains("2026-06-24")));
 }
 
 #[test]

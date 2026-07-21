@@ -4113,4 +4113,25 @@ mod coverage_boost_v3 {
         let updated = with_phase(&raw, "final", 0);
         assert!(updated.is_null());
     }
+
+    #[test]
+    fn mock_daily_report_date_for_e2e_extracts_valid_new_file_heading() {
+        let prompt = "\
+请生成日报
+
+### 2026-06-25.md (NewFile):
+正文";
+
+        assert_eq!(
+            mock_daily_report_date_for_e2e(prompt).as_deref(),
+            Some("2026-06-25")
+        );
+    }
+
+    #[test]
+    fn mock_daily_report_date_for_e2e_rejects_invalid_headings() {
+        assert!(mock_daily_report_date_for_e2e("### 2026-6-25.md (NewFile):").is_none());
+        assert!(mock_daily_report_date_for_e2e("### 2026-06-25.md (Modified):").is_none());
+        assert!(mock_daily_report_date_for_e2e("### 2026-06-aa.md (NewFile):").is_none());
+    }
 }
