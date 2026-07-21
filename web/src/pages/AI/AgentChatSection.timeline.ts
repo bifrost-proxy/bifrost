@@ -18,6 +18,66 @@ export type HistoryMessagesOptions = {
   runningState?: string;
 };
 
+export type HistoryEventWindow = {
+  events: HistoryEvent[];
+  startIndex: number | undefined;
+  endIndex: number | undefined;
+  gap: boolean;
+  changed: boolean;
+};
+
+/**
+ * Merge an append-only timeline page against the window that is visible now.
+ * The live refs may have advanced while this request was in flight, so an
+ * older duplicate response must never replace the complete window with a tail.
+ */
+export function mergeHistoryEventWindow(
+  currentEvents: HistoryEvent[],
+  currentStart: number | undefined,
+  currentEnd: number | undefined,
+  incomingEvents: HistoryEvent[],
+  incomingStart: number | undefined,
+  incomingEnd: number | undefined,
+): HistoryEventWindow {
+  if (currentEnd === undefined || incomingStart === undefined) {
+    return {
+      events: incomingEvents,
+      startIndex: incomingStart,
+      endIndex: incomingEnd,
+      gap: false,
+      changed: true,
+    };
+  }
+  if (incomingStart > currentEnd) {
+    return {
+      events: currentEvents,
+      startIndex: currentStart,
+      endIndex: currentEnd,
+      gap: true,
+      changed: false,
+    };
+  }
+  if (incomingEnd !== undefined && incomingEnd <= currentEnd) {
+    return {
+      events: currentEvents,
+      startIndex: currentStart,
+      endIndex: currentEnd,
+      gap: false,
+      changed: false,
+    };
+  }
+
+  const overlap = Math.max(0, currentEnd - incomingStart);
+  const unseen = incomingEvents.slice(overlap);
+  return {
+    events: [...currentEvents, ...unseen],
+    startIndex: currentStart ?? incomingStart,
+    endIndex: incomingEnd ?? currentEnd + unseen.length,
+    gap: false,
+    changed: unseen.length > 0,
+  };
+}
+
 export function historyEventsToMessages(
   events: HistoryEvent[],
   options: HistoryMessagesOptions = {},

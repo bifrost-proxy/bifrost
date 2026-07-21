@@ -3,6 +3,7 @@ import {
   appendProcessStepToTimeline,
   historyEventsToMessages,
   historyEventsToTelemetry,
+  mergeHistoryEventWindow,
 } from "./AgentChatSection.timeline";
 import { isThreadActive } from "./AgentChatSection.timelinePolling";
 import {
@@ -17,6 +18,57 @@ import {
   type HistoryEvent,
   type RunTelemetry,
 } from "./AgentChatSection.helpers";
+
+describe("mergeHistoryEventWindow", () => {
+  const event = (timestamp: number): HistoryEvent => ({
+    timestamp,
+    event_type: "assistant_delta",
+    session_key: "stable-window",
+    content: { message: String(timestamp) },
+  });
+
+  it("ignores a duplicate response instead of replacing full history with its tail", () => {
+    const current = [event(1), event(2), event(3), event(4)];
+    const merged = mergeHistoryEventWindow(
+      current,
+      0,
+      4,
+      [event(3), event(4)],
+      2,
+      4,
+    );
+
+    expect(merged.changed).toBe(false);
+    expect(merged.events).toBe(current);
+    expect(merged.startIndex).toBe(0);
+    expect(merged.endIndex).toBe(4);
+  });
+
+  it("appends only the unseen suffix of an overlapping out-of-order response", () => {
+    const merged = mergeHistoryEventWindow(
+      [event(1), event(2), event(3), event(4)],
+      0,
+      4,
+      [event(3), event(4), event(5), event(6)],
+      2,
+      6,
+    );
+
+    expect(merged.gap).toBe(false);
+    expect(merged.events.map((item) => item.timestamp)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(merged.startIndex).toBe(0);
+    expect(merged.endIndex).toBe(6);
+  });
+
+  it("reports a real index gap without mutating the visible window", () => {
+    const current = [event(1), event(2)];
+    const merged = mergeHistoryEventWindow(current, 0, 2, [event(4)], 3, 4);
+
+    expect(merged.gap).toBe(true);
+    expect(merged.changed).toBe(false);
+    expect(merged.events).toBe(current);
+  });
+});
 
 describe("external runner process rendering", () => {
   it("coalesces adjacent assistant deltas without crossing tool boundaries", () => {

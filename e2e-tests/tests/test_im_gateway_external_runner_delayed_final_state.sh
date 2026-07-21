@@ -216,7 +216,7 @@ curl -fsS --noproxy '*' \
   >"$FINAL_SESSIONS_JSON"
 
 python3 - "$FINAL_SESSIONS_JSON" "$SESSION_KEY" "$FINAL_MARKER" "$TEST_DIR" <<'PY'
-import glob
+import hashlib
 import json
 import os
 import sys
@@ -231,11 +231,11 @@ assert item.get("status") == "ended", item
 assert item.get("state") == "ended", item
 assert item.get("run_state") == "completed", item
 
-session_paths = glob.glob(
-    os.path.join(test_dir, "agent", "sessions", "**", f"session-{session_key}-*.jsonl"),
-    recursive=True,
-)
-assert session_paths, "session timeline should be persisted"
+digest = hashlib.sha256(session_key.encode("utf-8")).hexdigest()
+session_paths = [
+    os.path.join(test_dir, "agent", "sessions", "by-key", f"session-{digest}.jsonl")
+]
+assert os.path.isfile(session_paths[0]), "canonical session timeline should be persisted"
 events = []
 for path in session_paths:
     with open(path, encoding="utf-8") as handle:

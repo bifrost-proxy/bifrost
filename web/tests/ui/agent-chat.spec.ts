@@ -1939,6 +1939,15 @@ test("AI Agent Chat loads full history without restoring obsolete pagination con
     "rate_limits",
   );
   await expect(page.getByTestId("agent-chat-load-older")).toHaveCount(0);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Oldest question",
+  );
+  await expect(page.getByTestId("agent-chat-messages")).toContainText(
+    "Newest answer",
+  );
   expect(historyUrls.length).toBeGreaterThan(0);
   for (const historyUrl of historyUrls) {
     expect(new URL(historyUrl).searchParams.has("tail")).toBe(false);
@@ -2661,17 +2670,10 @@ test("AI Agent Chat updates running history timeline from SSE without cross-thre
   const otherHistoryPath = "/tmp/other-running-session.jsonl";
   const runningStartedAt = Math.floor(Date.now() / 1000) - 3;
   let historyCalls = 0;
-  await routeAgentSessionEvents(
-    page,
-    [
-      'event: timeline_changed',
-      `data: ${JSON.stringify({
-        eventType: "timeline_changed",
-        sessionKey: "other-running-refresh",
-        historyPath: otherHistoryPath,
-        endIndex: 99,
-      })}`,
-      '',
+  await page.unroute(AGENT_SESSION_EVENTS_ROUTE).catch(() => {});
+  await page.route(AGENT_SESSION_EVENTS_ROUTE, async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const matchingEvent = [
       'event: timeline_changed',
       `data: ${JSON.stringify({
         eventType: "timeline_changed",
@@ -2680,8 +2682,24 @@ test("AI Agent Chat updates running history timeline from SSE without cross-thre
         endIndex: 7,
       })}`,
       '',
-    ].join("\n"),
-  );
+    ].join("\n");
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body: [
+        'event: timeline_changed',
+        `data: ${JSON.stringify({
+          eventType: "timeline_changed",
+          sessionKey: "other-running-refresh",
+          historyPath: otherHistoryPath,
+          endIndex: 99,
+        })}`,
+        '',
+        matchingEvent,
+        matchingEvent,
+      ].join("\n"),
+    });
+  });
   await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
     await route.fulfill({
       status: 200,
@@ -2781,14 +2799,17 @@ test("AI Agent Chat updates running history timeline from SSE without cross-thre
         },
       ];
       const isIncremental = requestUrl.searchParams.has("since");
-      const events = isIncremental ? incrementalEvents : [...initialEvents, ...incrementalEvents];
+      if (isIncremental) {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+      const events = isIncremental ? incrementalEvents : initialEvents;
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
           events,
           start_index: isIncremental ? 3 : 0,
-          end_index: 7,
+          end_index: isIncremental ? 7 : 3,
           has_more: false,
         }),
       });
@@ -2863,7 +2884,7 @@ test("AI Agent Chat updates running history timeline from SSE without cross-thre
   await expect(processBlock).toContainText("cargo test");
   await expect(processBlock).toContainText("still running output");
   expect(historyCalls).toBeGreaterThan(0);
-  expect(historyCalls).toBeLessThanOrEqual(3);
+  expect(historyCalls).toBeLessThanOrEqual(4);
 });
 
 test("AI Agent Chat lets completed history override stale running thread summary", async ({

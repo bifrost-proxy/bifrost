@@ -74,44 +74,25 @@ async fn load_history_entries_blocking(
     max_files: Option<usize>,
 ) -> Result<Vec<HistorySessionEntry>, String> {
     tokio::task::spawn_blocking(move || {
-        let mut files =
+        let files =
             bifrost_agent::persistence::list_conversations(&data_dir, session_key.as_deref());
+        let mut entries = files
+            .into_iter()
+            .filter_map(|path| {
+                let summary = bifrost_agent::persistence::scan_session_summary(&path);
+                let parsed_key = summary.session_key.clone()?;
+                Some((path, parsed_key, summary))
+            })
+            .collect::<Vec<_>>();
         if session_key.is_none() {
-            if max_files.is_some() {
-                let mut latest_by_parsed_key: std::collections::HashMap<String, PathBuf> =
-                    std::collections::HashMap::new();
-                for path in files {
-                    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    let (parsed_key, _timestamp) = parse_session_filename(filename);
-                    latest_by_parsed_key
-                        .entry(parsed_key)
-                        .and_modify(|existing| {
-                            if path > *existing {
-                                *existing = path.clone();
-                            }
-                        })
-                        .or_insert(path);
-                }
-                files = latest_by_parsed_key.into_values().collect();
-                files.sort();
-            }
+            entries.sort_by_key(|(_, _, summary)| summary.end_time.max(summary.start_time));
             if let Some(max_files) = max_files {
-                if files.len() > max_files {
-                    files.drain(0..files.len() - max_files);
+                if entries.len() > max_files {
+                    entries.drain(0..entries.len() - max_files);
                 }
             }
         }
-        Ok::<Vec<HistorySessionEntry>, String>(
-            files
-                .into_iter()
-                .map(|path| {
-                    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    let (parsed_key, _timestamp) = parse_session_filename(filename);
-                    let summary = bifrost_agent::persistence::scan_session_summary(&path);
-                    (path, parsed_key, summary)
-                })
-                .collect(),
-        )
+        Ok::<Vec<HistorySessionEntry>, String>(entries)
     })
     .await
     .map_err(|error| format!("history scan task failed: {error}"))?
@@ -628,7 +609,7 @@ pub(super) async fn handle_agent(
             .iter()
             .map(|(p, parsed_key, summary)| {
                 let filename = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let (_filename_key, timestamp) = parse_session_filename(filename);
+                let timestamp = summary.start_time;
                 let session_key = summary
                     .session_key
                     .as_deref()

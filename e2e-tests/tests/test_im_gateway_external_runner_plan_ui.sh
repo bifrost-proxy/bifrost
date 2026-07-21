@@ -169,7 +169,7 @@ PY
 RUN_ID="$(tail -n 1 "$STREAM_LOG" | python3 -c 'import json,sys; print(json.load(sys.stdin)["runId"])')"
 
 python3 - "$BIFROST_PORT" "$RUN_ID" "$TEST_DIR" <<'PY'
-import glob
+import hashlib
 import json
 import os
 import sys
@@ -183,11 +183,11 @@ with urllib.request.urlopen(
     detail = json.loads(resp.read().decode("utf-8"))
 
 assert any(event.get("eventType") == "plan_updated" for event in detail.get("events") or []), detail
-session_paths = glob.glob(
-    os.path.join(test_dir, "agent", "sessions", "**", "session-external-plan-ui-e2e-*.jsonl"),
-    recursive=True,
-)
-assert session_paths, "session timeline should be persisted"
+digest = hashlib.sha256(b"external-plan-ui-e2e").hexdigest()
+session_paths = [
+    os.path.join(test_dir, "agent", "sessions", "by-key", f"session-{digest}.jsonl")
+]
+assert os.path.isfile(session_paths[0]), "canonical session timeline should be persisted"
 timeline = "\n".join(open(path, encoding="utf-8").read() for path in session_paths)
 assert '"event_type":"plan_updated"' in timeline or '"event_type": "plan_updated"' in timeline, timeline
 assert "inspect output" in timeline and "map parser" in timeline and "verify UI" in timeline, timeline
