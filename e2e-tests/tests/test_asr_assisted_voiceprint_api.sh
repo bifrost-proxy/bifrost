@@ -28,6 +28,13 @@ TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-asr-assisted-voiceprint.XXXXXX")
 ADMIN_PID=""
 BASE_URL="http://127.0.0.1:${ADMIN_PORT}/_bifrost/api"
 
+if [[ "${BIFROST_ASR_ASSISTED_VOICEPRINT_FORCE_FAKE_FFMPEG:-false}" == "true" ]] || \
+  ! command -v ffmpeg >/dev/null 2>&1; then
+  mkdir -p "$TEST_ROOT/bin"
+  ln -s "$ROOT_DIR/e2e-tests/test_utils/fake_ffmpeg_voiceprint.py" "$TEST_ROOT/bin/ffmpeg"
+  export PATH="$TEST_ROOT/bin:$PATH"
+fi
+
 cleanup() {
   if [[ -n "$ADMIN_PID" ]]; then
     kill "$ADMIN_PID" >/dev/null 2>&1 || true
@@ -49,8 +56,21 @@ AUDIO_DIR="$TEST_ROOT/audio"
 DATA_DIR="$TEST_ROOT/data"
 mkdir -p "$AUDIO_DIR" "$DATA_DIR"
 SOURCE_WAV="$AUDIO_DIR/meeting.wav"
-ffmpeg -nostdin -hide_banner -loglevel error -f lavfi -i "sine=frequency=440:duration=40" \
-  -ar 16000 -ac 1 "$SOURCE_WAV"
+python3 - "$SOURCE_WAV" <<'PY'
+import math
+import struct
+import sys
+import wave
+
+sample_rate = 16000
+with wave.open(sys.argv[1], "wb") as output:
+    output.setnchannels(1)
+    output.setsampwidth(2)
+    output.setframerate(sample_rate)
+    for index in range(sample_rate * 40):
+        sample = int(12000 * math.sin(2 * math.pi * 440 * index / sample_rate))
+        output.writeframesraw(struct.pack("<h", sample))
+PY
 
 PROFILE_DIR="$DATA_DIR/asr/diarization/profiles/sherpa-onnx-balanced"
 mkdir -p "$PROFILE_DIR/segmentation" "$PROFILE_DIR/embedding" \
