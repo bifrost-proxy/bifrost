@@ -607,7 +607,19 @@ pub fn fetch_latest_release_sync() -> Result<(String, Vec<String>), FetchError> 
         }
     }
 
-    match fetch_with_retry(&client, GITHUB_RELEASES_API_URL) {
+    fetch_latest_release_from_api_sync(
+        &client,
+        GITHUB_RELEASES_API_URL,
+        GITHUB_RELEASES_API_LIST_URL,
+    )
+}
+
+fn fetch_latest_release_from_api_sync(
+    client: &reqwest::blocking::Client,
+    latest_url: &str,
+    releases_url: &str,
+) -> Result<(String, Vec<String>), FetchError> {
+    match fetch_with_retry(client, latest_url) {
         Ok(response) => match response.json::<GitHubRelease>() {
             Ok(release) => {
                 if let Some(version) = stable_bifrost_release_version(&release) {
@@ -630,7 +642,7 @@ pub fn fetch_latest_release_sync() -> Result<(String, Vec<String>), FetchError> 
         }
     }
 
-    fetch_latest_published_release_sync(&client, GITHUB_RELEASES_API_LIST_URL)
+    fetch_latest_published_release_sync(client, releases_url)
 }
 
 pub async fn fetch_version_via_redirect_async() -> Option<String> {
@@ -734,7 +746,20 @@ pub async fn fetch_latest_release_async() -> Option<(String, Vec<String>)> {
 
     debug!("redirect-based version detection failed, falling back to GitHub API");
 
-    if let Ok(response) = client.get(GITHUB_RELEASES_API_URL).send().await {
+    fetch_latest_release_from_api_async(
+        &client,
+        GITHUB_RELEASES_API_URL,
+        GITHUB_RELEASES_API_LIST_URL,
+    )
+    .await
+}
+
+async fn fetch_latest_release_from_api_async(
+    client: &reqwest::Client,
+    latest_url: &str,
+    releases_url: &str,
+) -> Option<(String, Vec<String>)> {
+    if let Ok(response) = client.get(latest_url).send().await {
         if let Ok(release) = response.json::<GitHubRelease>().await {
             if let Some(version) = stable_bifrost_release_version(&release) {
                 let highlights = parse_release_highlights(release.body.as_deref());
@@ -744,7 +769,7 @@ pub async fn fetch_latest_release_async() -> Option<(String, Vec<String>)> {
         }
     }
 
-    fetch_latest_published_release_async(&client, GITHUB_RELEASES_API_LIST_URL).await
+    fetch_latest_published_release_async(client, releases_url).await
 }
 
 pub fn parse_release_highlights(body: Option<&str>) -> Vec<String> {
@@ -1075,6 +1100,16 @@ mod tests {
         .unwrap()
     }
 
+    fn release_json(tag_name: &str, draft: bool, prerelease: bool, body: &str) -> String {
+        serde_json::json!({
+            "tag_name": tag_name,
+            "body": body,
+            "draft": draft,
+            "prerelease": prerelease,
+        })
+        .to_string()
+    }
+
     #[test]
     fn test_extract_version_from_redirect_url() {
         assert_eq!(
@@ -1209,6 +1244,57 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn latest_release_sync_api_path_accepts_stable_and_falls_back_from_invalid_latest() {
+        let client = crate::github_blocking_reqwest_client_builder()
+            .build()
+            .unwrap();
+
+        let stable = spawn_release_page_server(vec![(
+            200,
+            release_json("v3.2.1", false, false, "## Highlights\n- stable latest"),
+        )]);
+        assert_eq!(
+            fetch_latest_release_from_api_sync(&client, &stable, &stable).unwrap(),
+            ("3.2.1".to_string(), vec!["stable latest".to_string()])
+        );
+
+        for latest_body in [
+            release_json("moss-runtime-v9.0.0", false, false, "resource"),
+            "not-json".to_string(),
+        ] {
+            let fallback = spawn_release_page_server(vec![
+                (200, latest_body),
+                (
+                    200,
+                    release_page_json(&[("v2.4.0", false, false, "## Highlights\n- fallback")]),
+                ),
+                (200, "[]".to_string()),
+            ]);
+            assert_eq!(
+                fetch_latest_release_from_api_sync(&client, &fallback, &fallback).unwrap(),
+                ("2.4.0".to_string(), vec!["fallback".to_string()])
+            );
+        }
+
+        let failed_latest = spawn_release_page_server(vec![
+            (500, "failure 1".to_string()),
+            (500, "failure 2".to_string()),
+            (500, "failure 3".to_string()),
+            (
+                200,
+                release_page_json(&[("v2.5.0", false, false, "fallback after error")]),
+            ),
+            (200, "[]".to_string()),
+        ]);
+        assert_eq!(
+            fetch_latest_release_from_api_sync(&client, &failed_latest, &failed_latest)
+                .unwrap()
+                .0,
+            "2.5.0"
+        );
+    }
+
     #[tokio::test]
     async fn published_release_async_fallback_scans_pages_and_tolerates_late_failures() {
         let client = crate::github_reqwest_client_builder().build().unwrap();
@@ -1278,6 +1364,57 @@ mod tests {
             fetch_latest_published_release_async(&client, "http://127.0.0.1:1/releases")
                 .await
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn latest_release_async_api_path_accepts_stable_and_falls_back_from_invalid_latest() {
+        let client = crate::github_reqwest_client_builder().build().unwrap();
+
+        let stable = spawn_release_page_server(vec![(
+            200,
+            release_json("v3.2.1", false, false, "## Highlights\n- stable latest"),
+        )]);
+        assert_eq!(
+            fetch_latest_release_from_api_async(&client, &stable, &stable).await,
+            Some(("3.2.1".to_string(), vec!["stable latest".to_string()]))
+        );
+
+        for latest_body in [
+            release_json("moss-runtime-v9.0.0", false, false, "resource"),
+            "not-json".to_string(),
+        ] {
+            let fallback = spawn_release_page_server(vec![
+                (200, latest_body),
+                (
+                    200,
+                    release_page_json(&[("v2.4.0", false, false, "## Highlights\n- fallback")]),
+                ),
+                (200, "[]".to_string()),
+            ]);
+            assert_eq!(
+                fetch_latest_release_from_api_async(&client, &fallback, &fallback).await,
+                Some(("2.4.0".to_string(), vec!["fallback".to_string()]))
+            );
+        }
+
+        let fallback = spawn_release_page_server(vec![
+            (
+                200,
+                release_page_json(&[("v2.5.0", false, false, "transport fallback")]),
+            ),
+            (200, "[]".to_string()),
+        ]);
+        assert_eq!(
+            fetch_latest_release_from_api_async(
+                &client,
+                "http://127.0.0.1:1/releases/latest",
+                &fallback,
+            )
+            .await
+            .unwrap()
+            .0,
+            "2.5.0"
         );
     }
 
