@@ -217,6 +217,8 @@ require('check-macos-release-core-payload.sh "${DMG_PATH}"' in release, "release
 require("MOSS Runtime Release Contract (macOS)" in ci, "PR CI does not gate the independent MOSS runtime workflow")
 require("stable_bifrost_release_version" in version_check, "version check does not reject independent resource release tags")
 require("GITHUB_RELEASES_API_LIST_URL" in version_check, "version check cannot recover from a polluted Latest release")
+require("GITHUB_RELEASES_MAX_PAGES" in version_check, "published release fallback is not paginated")
+require("github_releases_api_list_url(page)" in version_check, "published release fallback does not request explicit pages")
 require(
     "fetch_with_retry(&client, GITHUB_TAGS_API_URL)" not in version_check,
     "version check can still upgrade to an unpublished raw tag",

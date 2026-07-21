@@ -7,13 +7,15 @@ pub const GITHUB_RELEASES_LATEST_URL: &str =
 pub const GITHUB_RELEASES_API_URL: &str =
     "https://api.github.com/repos/bifrost-proxy/bifrost/releases/latest";
 pub const GITHUB_RELEASES_API_LIST_URL: &str =
-    "https://api.github.com/repos/bifrost-proxy/bifrost/releases?per_page=100";
+    "https://api.github.com/repos/bifrost-proxy/bifrost/releases";
 pub const GITHUB_TAGS_API_URL: &str = "https://api.github.com/repos/bifrost-proxy/bifrost/tags";
 pub const GITHUB_RELEASE_URL: &str = "https://github.com/bifrost-proxy/bifrost/releases/tag";
 pub const REQUEST_TIMEOUT_SECS: u64 = 10;
 const HIGHLIGHTS_TIMEOUT_SECS: u64 = 5;
 pub const MAX_RETRIES: u32 = 2;
 pub const RETRY_DELAY_MS: u64 = 500;
+pub const GITHUB_RELEASES_PER_PAGE: usize = 100;
+pub const GITHUB_RELEASES_MAX_PAGES: usize = 10;
 const MAX_RELEASE_HIGHLIGHTS: usize = 50;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -108,6 +110,13 @@ pub fn pick_latest_bifrost_release(releases: Vec<GitHubRelease>) -> Option<GitHu
         })
         .max_by(|(_, a), (_, b)| compare_versions(a, b))
         .map(|(release, _)| release)
+}
+
+pub fn github_releases_api_list_url(page: usize) -> String {
+    format!(
+        "{GITHUB_RELEASES_API_LIST_URL}?per_page={GITHUB_RELEASES_PER_PAGE}&page={}",
+        page.max(1)
+    )
 }
 
 pub fn make_release_tag(version: &str) -> String {
@@ -530,30 +539,63 @@ pub fn fetch_latest_release_sync() -> Result<(String, Vec<String>), FetchError> 
         }
     }
 
-    let response = fetch_with_retry(&client, GITHUB_RELEASES_API_LIST_URL).map_err(|e| {
-        let is_rate_limit = matches!(&*e, GithubRequestError::Status(status) if *status == reqwest::StatusCode::FORBIDDEN);
-        if is_rate_limit {
-            FetchError::Network(
-                "all release-based version detection methods failed (redirect + GitHub API rate limited). Check your network connection to github.com".to_string()
-            )
-        } else {
-            let reason = classify_github_request_error(&e);
-            FetchError::Network(format!("{}: {}", reason, e))
+    let mut published_releases = Vec::new();
+    for page in 1..=GITHUB_RELEASES_MAX_PAGES {
+        let url = github_releases_api_list_url(page);
+        let response = match fetch_with_retry(&client, &url) {
+            Ok(response) => response,
+            Err(error) if !published_releases.is_empty() => {
+                debug!(
+                    page,
+                    error = %error,
+                    "stopping published release pagination after a later page failed"
+                );
+                break;
+            }
+            Err(error) => {
+                let is_rate_limit = matches!(&*error, GithubRequestError::Status(status) if *status == reqwest::StatusCode::FORBIDDEN);
+                return Err(if is_rate_limit {
+                    FetchError::Network(
+                        "all release-based version detection methods failed (redirect + GitHub API rate limited). Check your network connection to github.com".to_string()
+                    )
+                } else {
+                    let reason = classify_github_request_error(&error);
+                    FetchError::Network(format!("{}: {}", reason, error))
+                });
+            }
+        };
+
+        let page_releases: Vec<GitHubRelease> = match response.json() {
+            Ok(releases) => releases,
+            Err(error) if !published_releases.is_empty() => {
+                debug!(
+                    page,
+                    error = %error,
+                    "stopping published release pagination after a later page could not be parsed"
+                );
+                break;
+            }
+            Err(error) => {
+                return Err(FetchError::Parse(format!(
+                    "failed to parse releases page {page}: {error}"
+                )));
+            }
+        };
+        if page_releases.is_empty() {
+            break;
         }
-    })?;
+        published_releases.extend(page_releases);
+    }
 
-    let releases: Vec<GitHubRelease> = response
-        .json()
-        .map_err(|e| FetchError::Parse(format!("failed to parse releases response: {}", e)))?;
-
-    let release = pick_latest_bifrost_release(releases).ok_or_else(|| {
-        FetchError::Parse("no published stable Bifrost releases found".to_string())
+    let release = pick_latest_bifrost_release(published_releases).ok_or_else(|| {
+        FetchError::Parse(format!(
+        "no published stable Bifrost releases found in the first {GITHUB_RELEASES_MAX_PAGES} pages"
+    ))
     })?;
     let version = stable_bifrost_release_version(&release).ok_or_else(|| {
         FetchError::Parse("selected release did not contain a stable Bifrost version".to_string())
     })?;
     let highlights = parse_release_highlights(release.body.as_deref());
-
     Ok((version, highlights))
 }
 
@@ -668,12 +710,25 @@ pub async fn fetch_latest_release_async() -> Option<(String, Vec<String>)> {
         }
     }
 
-    let response = client.get(GITHUB_RELEASES_API_LIST_URL).send().await.ok()?;
-    let releases: Vec<GitHubRelease> = response.json().await.ok()?;
-    let release = pick_latest_bifrost_release(releases)?;
+    let mut published_releases = Vec::new();
+    for page in 1..=GITHUB_RELEASES_MAX_PAGES {
+        let response = match client.get(github_releases_api_list_url(page)).send().await {
+            Ok(response) if response.status().is_success() => response,
+            _ => break,
+        };
+        let page_releases: Vec<GitHubRelease> = match response.json().await {
+            Ok(releases) => releases,
+            Err(_) => break,
+        };
+        if page_releases.is_empty() {
+            break;
+        }
+        published_releases.extend(page_releases);
+    }
+
+    let release = pick_latest_bifrost_release(published_releases)?;
     let version = stable_bifrost_release_version(&release)?;
     let highlights = parse_release_highlights(release.body.as_deref());
-
     Some((version, highlights))
 }
 
@@ -1036,6 +1091,22 @@ mod tests {
         assert_eq!(
             stable_bifrost_release_version(&picked),
             Some("1.2.3".to_string())
+        );
+    }
+
+    #[test]
+    fn test_github_releases_api_list_url_is_bounded_and_paginated() {
+        assert_eq!(
+            github_releases_api_list_url(0),
+            "https://api.github.com/repos/bifrost-proxy/bifrost/releases?per_page=100&page=1"
+        );
+        assert_eq!(
+            github_releases_api_list_url(1),
+            "https://api.github.com/repos/bifrost-proxy/bifrost/releases?per_page=100&page=1"
+        );
+        assert_eq!(
+            github_releases_api_list_url(GITHUB_RELEASES_MAX_PAGES),
+            "https://api.github.com/repos/bifrost-proxy/bifrost/releases?per_page=100&page=10"
         );
     }
 

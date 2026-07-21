@@ -213,6 +213,13 @@ Admin API 不可达（服务未启动 / 无网络到本机）时，`handle_versi
 
 这一路不共享服务端缓存，是有意的：CLI standalone 使用场景本来就少，避免为它维护第二个缓存文件。
 
+### 产品 Release 与独立资源 Release 的隔离
+
+- 稳定更新目标只接受 `v<major>.<minor>.<patch>`，并同时排除 GitHub 标记为 draft / prerelease 的条目；`moss-runtime-v*`、`vmoss-runtime-v*` 和带后缀的 beta/alpha tag 都不能进入稳定升级路径。
+- `releases/latest` redirect 与 API 仍是首选，以保持现有检查延迟和 GitHub 语义；若 Latest 被独立资源 Release 污染，则从 published Releases 列表恢复，不使用可能没有安装资产的裸 Git tag。
+- Published Releases fallback 每页请求 100 条，最多扫描 10 页（1000 条），在所有已取回页面中选择最大稳定 semver，遇空页结束；后续页偶发失败时保留此前页面的最佳候选。这样既覆盖长期累积或乱序补发的资源/产品 Release，也限制异常情况下的请求量。
+- 2026-07-21 对仓库现有 159 个 Release 做过全量审计：第 1 页含 97 个稳定产品 Release、2 个 prerelease 与 1 个 MOSS runtime Release；第 2 页是历史 alpha/beta，产品稳定 tag 均符合严格三段版本格式。当前 `v0.0.158` 的 macOS/Linux/Windows CLI、desktop 与 `bifrost-v0.0.158-checksums.txt` 资产矩阵完整。
+
 ## CLI / Web / Admin API 呈现
 
 ### CLI

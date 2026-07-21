@@ -595,6 +595,69 @@ mod tests {
         format!("http://{address}/resource")
     }
 
+    fn spawn_flaky_resumable_moss_http_server(
+        body: Vec<u8>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        use std::net::{Shutdown, TcpListener};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        std::thread::spawn(move || {
+            let split = body.len() / 2;
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let read = stream.read(&mut request).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..read]).into_owned();
+                recorded.lock().unwrap().push(request);
+                if attempt == 0 {
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream.write_all(header.as_bytes()).unwrap();
+                    stream.write_all(&body[..split]).unwrap();
+                    let _ = stream.shutdown(Shutdown::Both);
+                } else {
+                    let header = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        body.len() - split,
+                        split,
+                        body.len() - 1,
+                        body.len()
+                    );
+                    stream.write_all(header.as_bytes()).unwrap();
+                    stream.write_all(&body[split..]).unwrap();
+                }
+            }
+        });
+        (format!("http://{address}/resource"), requests)
+    }
+
+    #[tokio::test]
+    async fn moss_resource_download_retries_and_resumes_transient_body_failure() {
+        let temp = TempDir::new().unwrap();
+        let body = vec![0x5a; 1024 * 1024];
+        let split = body.len() / 2;
+        let (url, requests) = spawn_flaky_resumable_moss_http_server(body.clone());
+        let destination = temp.path().join("model.safetensors");
+
+        download_moss_resource(url, destination.clone(), "MOSS test model", None)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(destination).unwrap(), body);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(!requests[0].to_ascii_lowercase().contains("range:"));
+        assert!(requests[1]
+            .to_ascii_lowercase()
+            .contains(&format!("range: bytes={split}-")));
+    }
+
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn moss_runtime_configuration_and_checksum_sources_cover_supported_paths() {

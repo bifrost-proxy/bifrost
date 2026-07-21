@@ -63,7 +63,7 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 
 - Model Management 的模型选择同时列出 Qwen3-ASR 和 `MOSS-Transcribe-Diarize-MLX-8bit`。Qwen 继续管理可租约的本地 ASR service；MOSS 是任务按需执行的端到端 runtime，不展示 Host、Service Port 等无效服务配置。
 - MOSS 状态接口分别报告 runtime 自检、模型 snapshot 校验、安装目录和预期权重大小。初始化时执行完整 runtime self-test 与 1.2 GB 权重 SHA-256，成功后写入带固定模型 SHA/大小/mtime、Python/runner 哈希和所有必需 metadata SHA-256 的验证标记；日常状态读取先复核标记与小文件哈希，再运行带 30 秒硬超时的打包 Python `--self-test`，确认 `runtime/python/lib` 等 marker 未逐文件记录的框架依赖仍可加载，同时避免每次打开页面重新扫描 1.2 GB 权重。权重被同大小替换后 mtime 变化、metadata 缺失或内容损坏、Python framework 缺失、损坏或自检卡死都会撤销 Ready；修复时从已校验的 runtime archive 恢复 runtime 与 metadata，不重复下载仍通过完整校验的权重。
-- 用户可在管理页主动初始化或修复 `~/.bifrost/asr/moss_joint_mlx`。下载复用断点续传和同一进程内初始化锁，管理页与同一服务中的任务同时触发时不会并行写入同一资源。
+- 用户可在管理页主动初始化或修复 `~/.bifrost/asr/moss_joint_mlx`。下载复用 `.part` 断点续传并对响应体中断做最多 3 次有界自动重试，后续尝试通过 HTTP Range 只请求剩余字节；同一进程内初始化锁保证管理页与同一服务中的任务同时触发时不会并行写入同一资源。
 - Directory Task 不保存另一份模型路径或依赖配置；它只保存 `transcription_mode` 与任务 Prompt。运行时若发现资产尚未准备好，调用与管理页完全相同的校验和初始化函数作为自动兜底。
 
 ### 独立 Runtime 发布与 CI 门禁
