@@ -45,7 +45,7 @@ env:
 
 jobs:
   release-contract:
-    name: Release Workflow Contract (MOSS macOS)
+    name: MOSS Runtime Release Contract (macOS)
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4

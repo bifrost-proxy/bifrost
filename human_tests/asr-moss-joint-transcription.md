@@ -231,6 +231,22 @@
 - 独立 CPython runtime 解压后仍保留 framework/library 相对符号链接；恶意逃逸链接不会写出安装根目录，发布归档通过 extract-then-self-test。
 - Unix 上已有目录不会被 runtime symlink 替换；Windows 不尝试物化 archive symlink，即使目标路径已存在目录也稳定返回 `unsupported on this platform`，两种平台都保持安全拒绝。
 
+### TC-MOSS-14：独立 Runtime 与核心 beta Release 隔离演练
+
+操作步骤：
+
+1. 执行 `bash e2e-tests/tests/test_asr_moss_release_contract.sh`，确认核心 `release.yml` 不包含 MOSS builder、Python/MLX 安装或 runtime asset，独立 `moss-runtime-release.yml` 固定调用共享 builder/packager。
+2. 下载并复算 builder 固定的 `python-build-standalone` CPython 3.12 arm64 SHA-256；把归档移动到另一目录后执行 `python3.12 -c 'import ssl, sqlite3'`，并用 `otool -L` 确认没有 runner/toolcache 绝对依赖。
+3. 执行 `bash scripts/ci/test-package-moss-release-runtime.sh`，确认 universal Mach-O 的 architecture header 不会被误判成 dylib 依赖，同时真实指向 runner/toolcache 的缩进依赖项仍被拒绝。
+4. 从修复分支创建唯一的 `moss-runtime-v1.0.0-beta.*` tag，触发真实独立 Runtime workflow；看护 build、checksum、GitHub prerelease 到成功，并下载资产复算 checksum。
+5. 发布稳定 `moss-runtime-v1.0.0` 后，从同一修复分支创建唯一的 `v0.0.157-beta.*` tag；看护核心 CLI、Desktop、combined checksum 和 prerelease 到成功，确认核心 Release 不包含 MOSS runtime asset。
+
+预期结果：
+
+- 独立 Runtime workflow 使用经过 SHA-256 固定、可重定位的 Python，不依赖 GitHub hosted toolcache 路径。
+- Runtime beta/stable Release 分别生成独立 zip 和 `.sha256`，不包含 `model.safetensors`；模型权重继续在用户初始化时下载。
+- 核心 beta Release 全部 job 成功且不下载/构建/上传 MOSS runtime；CLI、App、DMG 的包体轻量门禁继续生效。
+
 ## 清理步骤
 
 1. 用户要求继续体验时保留 18997；否则停止且仅停止本测试启动的预览 PID。TC-MOSS-09 的 9900 服务按用户要求保留运行，但任务在取得有限验证证据后重新暂停。

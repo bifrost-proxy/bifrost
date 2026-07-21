@@ -1,0 +1,122 @@
+name: MOSS Runtime Release
+
+on:
+  push:
+    tags:
+      - "moss-runtime-v*"
+  workflow_dispatch:
+    inputs:
+      runtime_version:
+        description: "Runtime version (for example 1.0.0 or 1.0.0-beta.1)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: moss-runtime-release-${{ github.ref }}-${{ inputs.runtime_version }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare MOSS Runtime Release
+    runs-on: ubuntu-latest
+    outputs:
+      runtime_version: ${{ steps.version.outputs.runtime_version }}
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate independent runtime version
+        id: version
+        shell: bash
+        env:
+          DISPATCH_RUNTIME_VERSION: ${{ inputs.runtime_version }}
+        run: |
+          set -euo pipefail
+          BASE_VERSION="$(tr -d '[:space:]' < scripts/asr/moss-runtime-version.txt)"
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            RUNTIME_VERSION="${TAG#moss-runtime-v}"
+          else
+            RUNTIME_VERSION="$DISPATCH_RUNTIME_VERSION"
+            TAG="moss-runtime-v${RUNTIME_VERSION}"
+          fi
+
+          if [[ "$RUNTIME_VERSION" != "$BASE_VERSION" &&
+            "$RUNTIME_VERSION" != "$BASE_VERSION"-* ]]; then
+            echo "Runtime version $RUNTIME_VERSION must match $BASE_VERSION or its prerelease suffix" >&2
+            exit 1
+          fi
+          if [[ ! "$RUNTIME_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid runtime version: $RUNTIME_VERSION" >&2
+            exit 1
+          fi
+
+          PRERELEASE=$([[ "$RUNTIME_VERSION" == *-* ]] && echo true || echo false)
+          echo "runtime_version=$RUNTIME_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build MOSS Runtime (aarch64-apple-darwin)
+    needs: prepare
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache immutable runtime downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            .ci-cache/moss-runtime
+            ~/Library/Caches/pip
+          key: moss-runtime-${{ hashFiles('scripts/asr/moss-runtime-version.txt', 'scripts/asr/moss-mlx-requirements.txt', 'scripts/asr/mlx-audio-moss-quantized-conv.patch', 'scripts/ci/build-moss-release-runtime.sh') }}
+
+      - name: Build and verify relocatable runtime
+        shell: bash
+        run: |
+          bash scripts/ci/build-moss-release-runtime.sh \
+            "${{ needs.prepare.outputs.runtime_version }}" \
+            "$GITHUB_WORKSPACE/dist"
+
+      - name: Upload runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: moss-runtime-${{ needs.prepare.outputs.runtime_version }}-aarch64-apple-darwin
+          path: |
+            dist/moss-joint-runtime-v${{ needs.prepare.outputs.runtime_version }}-aarch64-apple-darwin.zip
+            dist/moss-joint-runtime-v${{ needs.prepare.outputs.runtime_version }}-aarch64-apple-darwin.zip.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish MOSS Runtime Release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: moss-runtime-${{ needs.prepare.outputs.runtime_version }}-aarch64-apple-darwin
+          path: dist
+
+      - name: Verify downloaded checksums
+        shell: bash
+        working-directory: dist
+        run: shasum -a 256 --check *.sha256
+
+      - name: Publish independent runtime release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: MOSS Runtime ${{ needs.prepare.outputs.runtime_version }}
+          prerelease: ${{ needs.prepare.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          files: |
+            dist/moss-joint-runtime-v${{ needs.prepare.outputs.runtime_version }}-aarch64-apple-darwin.zip
+            dist/moss-joint-runtime-v${{ needs.prepare.outputs.runtime_version }}-aarch64-apple-darwin.zip.sha256
+          body: |
+            Independent Apple Silicon runtime for Bifrost MOSS joint transcription.
+
+            Model weights are intentionally excluded and are downloaded only when the user initializes MOSS.

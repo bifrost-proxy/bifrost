@@ -258,59 +258,6 @@ jobs:
           CROSS_CONTAINER_ENGINE_NO_BUILDKIT: "1"
         run: cross build -p bifrost-cli --release --target ${{ matrix.target }}
 
-      - name: Set up Python for MOSS MLX runtime
-        if: matrix.target == 'aarch64-apple-darwin'
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12.13"
-
-      - name: Build MOSS joint transcription runtime
-        if: matrix.target == 'aarch64-apple-darwin'
-        shell: bash
-        run: |
-          set -euo pipefail
-          SOURCE_COMMIT="64e8416c303fb3b3463dab8eb4ebd78c55a87c1a"
-          MODEL_COMMIT="90c3a1ab78fa56e47e1493ddea48e3ababaf2f71"
-          SOURCE_DIR="$RUNNER_TEMP/mlx-audio"
-          VENV_DIR="$RUNNER_TEMP/moss-mlx-venv"
-          RUNTIME_ROOT="$GITHUB_WORKSPACE/dist/moss-joint-runtime"
-          git clone --filter=blob:none --no-checkout https://github.com/Blaizzy/mlx-audio.git "$SOURCE_DIR"
-          git -C "$SOURCE_DIR" fetch --depth 1 origin "$SOURCE_COMMIT"
-          git -C "$SOURCE_DIR" checkout --detach "$SOURCE_COMMIT"
-          git -C "$SOURCE_DIR" apply --unidiff-zero \
-            "$GITHUB_WORKSPACE/scripts/asr/mlx-audio-moss-quantized-conv.patch"
-
-          python3 -m venv "$VENV_DIR"
-          "$VENV_DIR/bin/python" -m pip install --disable-pip-version-check \
-            -r "$GITHUB_WORKSPACE/scripts/asr/moss-mlx-requirements.txt"
-          "$VENV_DIR/bin/python" -m pip install --disable-pip-version-check --no-deps "$SOURCE_DIR"
-
-          PYTHON_BASE="$(python3 -c 'import sys; print(sys.base_prefix)')"
-          SITE_PACKAGES="$("$VENV_DIR/bin/python" -c 'import site; print(site.getsitepackages()[0])')"
-          mkdir -p "$RUNTIME_ROOT/runtime" "$RUNTIME_ROOT/model"
-          ditto "$PYTHON_BASE" "$RUNTIME_ROOT/runtime/python"
-          ditto "$SITE_PACKAGES" "$RUNTIME_ROOT/runtime/site-packages"
-          cp "$GITHUB_WORKSPACE/scripts/asr/moss_mlx_runner.py" \
-            "$RUNTIME_ROOT/runtime/moss_mlx_runner.py"
-          cp "$SOURCE_DIR/LICENSE" "$RUNTIME_ROOT/MLX-AUDIO-LICENSE"
-
-          MODEL_BASE="https://huggingface.co/majentik/MOSS-Transcribe-Diarize-MLX-8bit/resolve/${MODEL_COMMIT}"
-          for file in \
-            added_tokens.json chat_template.jinja config.json generation_config.json \
-            merges.txt model.safetensors.index.json preprocessor_config.json \
-            processor_config.json special_tokens_map.json tokenizer.json \
-            tokenizer_config.json vocab.json; do
-            curl --fail --location --retry 5 --output "$RUNTIME_ROOT/model/$file" \
-              "$MODEL_BASE/$file"
-          done
-          cp "$GITHUB_WORKSPACE/scripts/asr/MOSS-MLX-MODEL-NOTICE.txt" \
-            "$RUNTIME_ROOT/MODEL-NOTICE.txt"
-
-          VERSION="${{ needs.prepare.outputs.version }}"
-          bash "$GITHUB_WORKSPACE/scripts/ci/package-moss-release-runtime.sh" \
-            "$RUNTIME_ROOT" \
-            "$GITHUB_WORKSPACE/dist/moss-joint-runtime-v${VERSION}-aarch64-apple-darwin.zip"
-
       - name: Package (Unix)
         if: matrix.archive == 'tar.gz'
         shell: bash

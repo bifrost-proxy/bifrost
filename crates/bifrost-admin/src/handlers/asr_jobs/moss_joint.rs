@@ -1,7 +1,11 @@
 const MOSS_RUNTIME_ASSET_STEM: &str = "moss-joint-runtime";
+const MOSS_RUNTIME_VERSION_RAW: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../scripts/asr/moss-runtime-version.txt"
+));
 const MOSS_MODEL_ID: &str = "MOSS-Transcribe-Diarize-MLX-8bit";
 const MOSS_VERIFICATION_FILE: &str = "verification.json";
-const MOSS_VERIFICATION_SCHEMA_VERSION: u8 = 4;
+const MOSS_VERIFICATION_SCHEMA_VERSION: u8 = 5;
 const MOSS_MODEL_FILE: &str = "model.safetensors";
 const MOSS_MODEL_URL: &str =
     "https://huggingface.co/majentik/MOSS-Transcribe-Diarize-MLX-8bit/resolve/90c3a1ab78fa56e47e1493ddea48e3ababaf2f71/model.safetensors";
@@ -83,6 +87,7 @@ struct MossModelSpec {
 #[derive(Debug, Deserialize, Serialize)]
 struct MossVerificationMarker {
     schema_version: u8,
+    runtime_version: String,
     model_bytes: u64,
     model_sha256: String,
     model_modified_ms: u64,
@@ -153,11 +158,19 @@ fn moss_verification_path(asr_home: &Path) -> PathBuf {
     moss_runtime_dir(asr_home).join(MOSS_VERIFICATION_FILE)
 }
 
+fn moss_runtime_version() -> &'static str {
+    MOSS_RUNTIME_VERSION_RAW.trim()
+}
+
+fn moss_runtime_release_tag() -> String {
+    format!("moss-runtime-v{}", moss_runtime_version())
+}
+
 fn moss_runtime_asset_name_for(os: &str, arch: &str) -> Result<String, String> {
     if os == "macos" && arch == "aarch64" {
         Ok(format!(
             "{MOSS_RUNTIME_ASSET_STEM}-v{}-aarch64-apple-darwin.zip",
-            env!("CARGO_PKG_VERSION")
+            moss_runtime_version()
         ))
     } else {
         Err(format!(
@@ -193,18 +206,20 @@ fn moss_runtime_asset_name() -> Result<String, String> {
 fn moss_runtime_url(asset: &str) -> String {
     std::env::var("BIFROST_MOSS_RUNTIME_URL").unwrap_or_else(|_| {
         format!(
-            "https://github.com/bifrost-proxy/bifrost/releases/download/v{}/{asset}",
-            env!("CARGO_PKG_VERSION")
+            "https://github.com/bifrost-proxy/bifrost/releases/download/{}/{asset}",
+            moss_runtime_release_tag()
         )
     })
 }
 
-fn moss_runtime_checksums_url() -> String {
-    format!(
-        "https://github.com/bifrost-proxy/bifrost/releases/download/v{}/bifrost-v{}-checksums.txt",
-        env!("CARGO_PKG_VERSION"),
-        env!("CARGO_PKG_VERSION")
-    )
+fn moss_runtime_checksum_url(asset: &str) -> String {
+    std::env::var("BIFROST_MOSS_RUNTIME_CHECKSUM_URL").unwrap_or_else(|_| {
+        format!(
+            "https://github.com/bifrost-proxy/bifrost/releases/download/{}/{}.sha256",
+            moss_runtime_release_tag(),
+            asset
+        )
+    })
 }
 
 fn normalize_sha256(value: &str, label: &str) -> Result<String, String> {
@@ -255,7 +270,7 @@ async fn expected_moss_runtime_checksum(asset: &str) -> Result<String, String> {
             "BIFROST_MOSS_RUNTIME_SHA256 is required with BIFROST_MOSS_RUNTIME_URL".to_string(),
         );
     }
-    download_runtime_checksum(moss_runtime_checksums_url(), asset).await
+    download_runtime_checksum(moss_runtime_checksum_url(asset), asset).await
 }
 
 async fn moss_runtime_source_for_asset(asset: String) -> Result<MossRuntimeSource, String> {
@@ -523,6 +538,7 @@ fn write_moss_verification_marker(
         .ok_or_else(|| format!("read MOSS model mtime {}", paths.model.display()))?;
     let marker = MossVerificationMarker {
         schema_version: MOSS_VERIFICATION_SCHEMA_VERSION,
+        runtime_version: moss_runtime_version().to_string(),
         model_bytes: spec.bytes,
         model_sha256: spec.sha256.clone(),
         model_modified_ms,
@@ -548,6 +564,7 @@ fn moss_verified_component_status(
         .and_then(|bytes| serde_json::from_slice::<MossVerificationMarker>(&bytes).ok());
     let Some(marker) = marker.filter(|marker| {
         marker.schema_version == MOSS_VERIFICATION_SCHEMA_VERSION
+            && marker.runtime_version == moss_runtime_version()
             && marker.model_bytes == spec.bytes
             && marker.model_sha256 == spec.sha256
     }) else {
@@ -844,6 +861,7 @@ async fn moss_runtime_status(
         .and_then(|bytes| serde_json::from_slice::<MossVerificationMarker>(&bytes).ok())
         .filter(|marker| {
             marker.schema_version == MOSS_VERIFICATION_SCHEMA_VERSION
+                && marker.runtime_version == moss_runtime_version()
                 && marker.model_bytes == model_spec.bytes
                 && marker.model_sha256 == model_spec.sha256
         });
