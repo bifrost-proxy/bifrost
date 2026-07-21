@@ -2271,7 +2271,6 @@ mod tests {
         assert!(diarization_manifest_path(&task.id, &source_path, &audio_dir).is_file());
     }
 
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn live_voiceprint_enrollment_writes_named_profile() {
         let _lock = test_data_dir_lock();
