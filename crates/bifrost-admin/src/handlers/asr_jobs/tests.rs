@@ -2131,15 +2131,12 @@ mod tests {
     }
 
     #[test]
-    fn diarization_cluster_count_prefers_known_then_max_then_default_cap() {
+    fn diarization_cluster_count_is_fixed_only_when_known() {
         let mut config = AsrDiarizationConfig::default();
-        assert_eq!(
-            resolved_diarization_cluster_count(&config),
-            i32::from(DEFAULT_AUTO_MAX_SPEAKERS)
-        );
+        assert_eq!(resolved_diarization_cluster_count(&config), -1);
 
         config.max_speakers = Some(3);
-        assert_eq!(resolved_diarization_cluster_count(&config), 3);
+        assert_eq!(resolved_diarization_cluster_count(&config), -1);
 
         config.known_speaker_count = Some(2);
         assert_eq!(resolved_diarization_cluster_count(&config), 2);
@@ -2320,6 +2317,7 @@ mod tests {
         let _guard = EnvGuard::set_data_dir(temp.path());
         std::fs::create_dir_all(voiceprint_dir()).unwrap();
         let profile = SpeakerVoiceprintProfile {
+            schema_version: 1,
             id: "spk-eden".to_string(),
             display_name: "Eden".to_string(),
             source: "live_enrollment".to_string(),
@@ -2330,6 +2328,8 @@ mod tests {
             sample_rate: VOICEPRINT_SAMPLE_RATE,
             total_duration_ms: 3_000,
             samples: Vec::new(),
+            templates: Vec::new(),
+            prototypes: Vec::new(),
             created_at_ms: now_ms(),
             updated_at_ms: now_ms(),
         };
@@ -2373,6 +2373,7 @@ mod tests {
         let _guard = EnvGuard::set_data_dir(temp.path());
         std::fs::create_dir_all(voiceprint_dir()).unwrap();
         let profile = SpeakerVoiceprintProfile {
+            schema_version: 1,
             id: "spk-eden".to_string(),
             display_name: "Eden".to_string(),
             source: "live_enrollment".to_string(),
@@ -2383,6 +2384,8 @@ mod tests {
             sample_rate: VOICEPRINT_SAMPLE_RATE,
             total_duration_ms: 3_000,
             samples: Vec::new(),
+            templates: Vec::new(),
+            prototypes: Vec::new(),
             created_at_ms: now_ms(),
             updated_at_ms: now_ms(),
         };
@@ -2424,6 +2427,7 @@ mod tests {
         let _guard = EnvGuard::set_data_dir(temp.path());
         std::fs::create_dir_all(voiceprint_dir()).unwrap();
         let profile = SpeakerVoiceprintProfile {
+            schema_version: 1,
             id: "spk-eden".to_string(),
             display_name: "Eden".to_string(),
             source: "live_enrollment".to_string(),
@@ -2434,6 +2438,8 @@ mod tests {
             sample_rate: VOICEPRINT_SAMPLE_RATE,
             total_duration_ms: 3_000,
             samples: Vec::new(),
+            templates: Vec::new(),
+            prototypes: Vec::new(),
             created_at_ms: now_ms(),
             updated_at_ms: now_ms(),
         };
@@ -2556,6 +2562,7 @@ mod tests {
         let waveform = pcm16le_to_f32(&audio).unwrap();
         let embedding = compute_speaker_embedding(DEFAULT_DIARIZATION_PROFILE, &waveform).unwrap();
         let profile = SpeakerVoiceprintProfile {
+            schema_version: 1,
             id: "spk-eden".to_string(),
             display_name: "Eden".to_string(),
             source: "live_enrollment".to_string(),
@@ -2566,6 +2573,8 @@ mod tests {
             sample_rate: VOICEPRINT_SAMPLE_RATE,
             total_duration_ms: 2_000,
             samples: Vec::new(),
+            templates: Vec::new(),
+            prototypes: Vec::new(),
             created_at_ms: now_ms(),
             updated_at_ms: now_ms(),
         };
@@ -2633,6 +2642,7 @@ mod tests {
         let waveform = pcm16le_to_f32(&speech).unwrap();
         let embedding = compute_speaker_embedding(DEFAULT_DIARIZATION_PROFILE, &waveform).unwrap();
         let profile = SpeakerVoiceprintProfile {
+            schema_version: 1,
             id: "spk-eden".to_string(),
             display_name: "Eden".to_string(),
             source: "live_enrollment".to_string(),
@@ -2643,6 +2653,8 @@ mod tests {
             sample_rate: VOICEPRINT_SAMPLE_RATE,
             total_duration_ms: 2_000,
             samples: Vec::new(),
+            templates: Vec::new(),
+            prototypes: Vec::new(),
             created_at_ms: now_ms(),
             updated_at_ms: now_ms(),
         };
@@ -2679,6 +2691,7 @@ mod tests {
         let _guard = EnvGuard::set_data_dir(temp.path());
         std::fs::create_dir_all(voiceprint_dir()).unwrap();
         let profile = SpeakerVoiceprintProfile {
+            schema_version: 1,
             id: "spk-eden".to_string(),
             display_name: "Eden".to_string(),
             source: "live_enrollment".to_string(),
@@ -2694,6 +2707,8 @@ mod tests {
             sample_rate: VOICEPRINT_SAMPLE_RATE,
             total_duration_ms: 2_000,
             samples: Vec::new(),
+            templates: Vec::new(),
+            prototypes: Vec::new(),
             created_at_ms: now_ms(),
             updated_at_ms: now_ms(),
         };
@@ -2714,6 +2729,7 @@ mod tests {
         let _guard = EnvGuard::set_data_dir(temp.path());
         std::fs::create_dir_all(voiceprint_dir()).unwrap();
         let profile = SpeakerVoiceprintProfile {
+            schema_version: 1,
             id: "spk-eden".to_string(),
             display_name: "Eden".to_string(),
             source: "live_enrollment".to_string(),
@@ -2729,6 +2745,8 @@ mod tests {
             sample_rate: VOICEPRINT_SAMPLE_RATE,
             total_duration_ms: 2_000,
             samples: Vec::new(),
+            templates: Vec::new(),
+            prototypes: Vec::new(),
             created_at_ms: now_ms(),
             updated_at_ms: now_ms(),
         };
@@ -5949,5 +5967,784 @@ mod tests {
         assert_eq!(pending_record.status, FileStatus::Pending);
         assert!(pending_record.content_hash.is_none());
         assert!(pending_record.content_hash_algorithm.is_none());
+    }
+
+    fn assisted_test_timeline(segments: Vec<TimelineSegment>) -> TranscriptTimeline {
+        TranscriptTimeline {
+            task_id: "task-assisted".to_string(),
+            task_name: "Assisted".to_string(),
+            source_path: PathBuf::from("meeting.wav"),
+            source_size: None,
+            source_modified_ms: None,
+            source_created_at_ms: None,
+            source_created_at_source: None,
+            media_duration_ms: Some(60_000),
+            model: "test".to_string(),
+            language: "chinese".to_string(),
+            diarization_profile: Some(DEFAULT_DIARIZATION_PROFILE.to_string()),
+            speakers: Vec::new(),
+            processed_at_ms: 1,
+            segments,
+        }
+    }
+
+    fn assisted_test_segment(
+        index: usize,
+        speaker: Option<&str>,
+        start_ms: u64,
+        end_ms: u64,
+        overlap: bool,
+    ) -> TimelineSegment {
+        TimelineSegment {
+            index,
+            audio_start_ms: start_ms,
+            audio_end_ms: end_ms,
+            absolute_start_ms: None,
+            absolute_end_ms: None,
+            speaker: speaker.map(str::to_string),
+            speaker_display_name: None,
+            overlap,
+            text: format!("segment {index}"),
+        }
+    }
+
+    fn assisted_test_candidate(index: usize) -> AssistedVoiceprintCandidate {
+        AssistedVoiceprintCandidate {
+            id: format!("candidate-{index}"),
+            speaker: "speaker_00".to_string(),
+            start_ms: index as u64 * 4_000,
+            end_ms: index as u64 * 4_000 + 4_000,
+            duration_ms: 4_000,
+            text: format!("candidate {index}"),
+            quality: 1.0,
+            overlap: false,
+            label: AssistedCandidateLabel::Mine,
+        }
+    }
+
+    fn assisted_test_pcm() -> Vec<u8> {
+        (0..VOICEPRINT_SAMPLE_RATE * 4)
+            .flat_map(|index| {
+                let sample = if index % 2 == 0 { 8_000i16 } else { -8_000i16 };
+                sample.to_le_bytes()
+            })
+            .collect()
+    }
+
+    fn assisted_test_session(id: &str) -> AssistedVoiceprintSession {
+        AssistedVoiceprintSession {
+            id: id.to_string(),
+            state: AssistedVoiceprintSessionState::Open,
+            speaker_name: "Eden".to_string(),
+            profile_id: None,
+            task_id: "task-assisted".to_string(),
+            file_key: "file-a".to_string(),
+            source_path: PathBuf::from("meeting.wav"),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            candidates: (0..3).map(assisted_test_candidate).collect(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        }
+    }
+
+    fn assisted_test_template(id: &str, embedding: Vec<f32>) -> SpeakerVoiceprintTemplate {
+        SpeakerVoiceprintTemplate {
+            id: id.to_string(),
+            source_kind: "test".to_string(),
+            prompt_id: None,
+            task_id: None,
+            file_key: None,
+            speaker: None,
+            start_ms: None,
+            end_ms: None,
+            duration_ms: 4_000,
+            quality: 1.0,
+            overlap: false,
+            embedding,
+            created_at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn assisted_candidates_exclude_overlap_short_and_anonymous_segments() {
+        let timeline = assisted_test_timeline(vec![
+            assisted_test_segment(0, Some("speaker_00"), 0, 2_999, false),
+            assisted_test_segment(1, Some("speaker_00"), 3_000, 9_000, true),
+            assisted_test_segment(2, None, 9_000, 15_000, false),
+            assisted_test_segment(3, Some("speaker_00"), 15_000, 30_000, false),
+        ]);
+
+        let candidates = assisted_voiceprint_candidates(&timeline);
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].start_ms, 15_000);
+        assert_eq!(candidates[0].end_ms, 27_000);
+        assert_eq!(candidates[1].start_ms, 27_000);
+        assert_eq!(candidates[1].end_ms, 30_000);
+        assert!(candidates.iter().all(|candidate| !candidate.overlap));
+    }
+
+    #[test]
+    fn assisted_candidates_cap_each_speaker_at_eight() {
+        let segments = (0..10)
+            .map(|index| {
+                assisted_test_segment(
+                    index,
+                    Some("speaker_00"),
+                    index as u64 * 4_000,
+                    index as u64 * 4_000 + 4_000,
+                    false,
+                )
+            })
+            .collect();
+
+        let candidates = assisted_voiceprint_candidates(&assisted_test_timeline(segments));
+
+        assert_eq!(candidates.len(), ASSISTED_CANDIDATES_PER_SPEAKER);
+    }
+
+    #[test]
+    fn assisted_candidates_drop_a_trailing_chunk_below_minimum_duration() {
+        let timeline = assisted_test_timeline(vec![assisted_test_segment(
+            0,
+            Some("speaker_00"),
+            0,
+            ASSISTED_CANDIDATE_MAX_MS + ASSISTED_CANDIDATE_MIN_MS - 1,
+            false,
+        )]);
+
+        let candidates = assisted_voiceprint_candidates(&timeline);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].duration_ms, ASSISTED_CANDIDATE_MAX_MS);
+    }
+
+    #[test]
+    fn assisted_session_legacy_json_defaults_to_open() {
+        let mut value = serde_json::to_value(assisted_test_session("assisted-legacy")).unwrap();
+        value.as_object_mut().unwrap().remove("state");
+
+        let session: AssistedVoiceprintSession = serde_json::from_value(value).unwrap();
+
+        assert_eq!(session.state, AssistedVoiceprintSessionState::Open);
+    }
+
+    #[test]
+    fn legacy_voiceprint_profile_reads_without_v2_fields() {
+        let raw = r#"{
+            "id":"spk-legacy","display_name":"Legacy","source":"live_enrollment",
+            "diarization_profile":"sherpa-onnx-balanced","embedding_model":"test",
+            "embedding_dim":2,"embedding":[1.0,0.0],"sample_rate":16000,
+            "total_duration_ms":3000,"samples":[],"created_at_ms":1,"updated_at_ms":1
+        }"#;
+
+        let profile: SpeakerVoiceprintProfile = serde_json::from_str(raw).unwrap();
+
+        assert_eq!(profile.schema_version, 1);
+        assert!(profile.templates.is_empty());
+        assert!(profile.prototypes.is_empty());
+        assert_eq!(profile.embedding, vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn voiceprint_prototypes_preserve_distinct_acoustic_domains() {
+        let templates = vec![
+            SpeakerVoiceprintTemplate {
+                id: "near-1".to_string(),
+                source_kind: "test".to_string(),
+                prompt_id: None,
+                task_id: None,
+                file_key: None,
+                speaker: None,
+                start_ms: None,
+                end_ms: None,
+                duration_ms: 4_000,
+                quality: 1.0,
+                overlap: false,
+                embedding: vec![1.0, 0.0],
+                created_at_ms: 1,
+            },
+            SpeakerVoiceprintTemplate {
+                id: "near-2".to_string(),
+                source_kind: "test".to_string(),
+                prompt_id: None,
+                task_id: None,
+                file_key: None,
+                speaker: None,
+                start_ms: None,
+                end_ms: None,
+                duration_ms: 4_000,
+                quality: 1.0,
+                overlap: false,
+                embedding: vec![0.99, 0.01],
+                created_at_ms: 1,
+            },
+            SpeakerVoiceprintTemplate {
+                id: "far".to_string(),
+                source_kind: "test".to_string(),
+                prompt_id: None,
+                task_id: None,
+                file_key: None,
+                speaker: None,
+                start_ms: None,
+                end_ms: None,
+                duration_ms: 4_000,
+                quality: 1.0,
+                overlap: false,
+                embedding: vec![0.0, 1.0],
+                created_at_ms: 1,
+            },
+        ];
+
+        let prototypes = build_voiceprint_prototypes(&templates).unwrap();
+
+        assert_eq!(prototypes.len(), 2);
+        assert_eq!(prototypes[0].template_ids, vec!["near-1", "near-2"]);
+        assert_eq!(prototypes[1].template_ids, vec!["far"]);
+    }
+
+    #[test]
+    fn assisted_finish_appends_templates_and_sample_delete_rebuilds_profile() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let pcm = assisted_test_pcm();
+        let first_session = AssistedVoiceprintSession {
+            id: "assisted-first".to_string(),
+            state: AssistedVoiceprintSessionState::Open,
+            speaker_name: "Eden".to_string(),
+            profile_id: None,
+            task_id: "task-assisted".to_string(),
+            file_key: "file-a".to_string(),
+            source_path: temp.path().join("meeting.wav"),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            candidates: (0..3).map(assisted_test_candidate).collect(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        std::fs::create_dir_all(assisted_voiceprint_session_dir(&first_session.id)).unwrap();
+        for candidate in &first_session.candidates {
+            std::fs::write(
+                assisted_voiceprint_candidate_audio_path(&first_session.id, &candidate.id),
+                &pcm,
+            )
+            .unwrap();
+        }
+
+        let first = finish_assisted_voiceprint_enrollment_in_process(&first_session).unwrap();
+
+        assert_eq!(first.profile.schema_version, VOICEPRINT_PROFILE_SCHEMA_VERSION);
+        assert_eq!(first.profile.templates.len(), 3);
+        assert!(!first.profile.prototypes.is_empty());
+        assert!(!assisted_voiceprint_session_dir(&first_session.id).exists());
+
+        let second_session = AssistedVoiceprintSession {
+            id: "assisted-second".to_string(),
+            profile_id: Some(first.profile.id.clone()),
+            file_key: "file-b".to_string(),
+            ..first_session
+        };
+        std::fs::create_dir_all(assisted_voiceprint_session_dir(&second_session.id)).unwrap();
+        for candidate in &second_session.candidates {
+            std::fs::write(
+                assisted_voiceprint_candidate_audio_path(&second_session.id, &candidate.id),
+                &pcm,
+            )
+            .unwrap();
+        }
+
+        let second = finish_assisted_voiceprint_enrollment_in_process(&second_session).unwrap();
+        assert_eq!(second.profile.templates.len(), 6);
+        let deleted_id = second.profile.templates[0].id.clone();
+        let response = delete_speaker_profile_sample_response(&second.profile.id, &deleted_id);
+        assert_eq!(response.status(), StatusCode::OK);
+        let rebuilt = read_speaker_voiceprint_profile(&second.profile.id).unwrap();
+        assert_eq!(rebuilt.templates.len(), 5);
+        assert_eq!(rebuilt.total_duration_ms, 20_000);
+    }
+
+    #[test]
+    fn deleting_live_template_removes_its_legacy_prompt_metadata() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        std::fs::create_dir_all(voiceprint_dir()).unwrap();
+        let template = |id: &str, prompt_id: &str, embedding: Vec<f32>| {
+            SpeakerVoiceprintTemplate {
+                id: id.to_string(),
+                source_kind: "live_prompt".to_string(),
+                prompt_id: Some(prompt_id.to_string()),
+                task_id: None,
+                file_key: None,
+                speaker: None,
+                start_ms: None,
+                end_ms: None,
+                duration_ms: 4_000,
+                quality: 1.0,
+                overlap: false,
+                embedding,
+                created_at_ms: 1,
+            }
+        };
+        let mut profile = SpeakerVoiceprintProfile {
+            schema_version: VOICEPRINT_PROFILE_SCHEMA_VERSION,
+            id: "spk-live-delete".to_string(),
+            display_name: "Eden".to_string(),
+            source: "live_enrollment".to_string(),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            embedding_model: "test".to_string(),
+            embedding_dim: 2,
+            embedding: vec![1.0, 0.0],
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            total_duration_ms: 8_000,
+            samples: vec![
+                SpeakerVoiceprintSample {
+                    prompt_id: "prompt-1".to_string(),
+                    text: "one".to_string(),
+                    duration_ms: 4_000,
+                    rms: 0.5,
+                    clipped_ratio: 0.0,
+                },
+                SpeakerVoiceprintSample {
+                    prompt_id: "prompt-2".to_string(),
+                    text: "two".to_string(),
+                    duration_ms: 4_000,
+                    rms: 0.5,
+                    clipped_ratio: 0.0,
+                },
+            ],
+            templates: vec![
+                template("sample-1", "prompt-1", vec![1.0, 0.0]),
+                template("sample-2", "prompt-2", vec![0.9, 0.1]),
+            ],
+            prototypes: Vec::new(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        rebuild_voiceprint_profile(&mut profile).unwrap();
+        atomic_json_write(&speaker_profile_path(&profile.id), &profile).unwrap();
+
+        let response = delete_speaker_profile_sample_response(&profile.id, "sample-1");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let rebuilt = read_speaker_voiceprint_profile(&profile.id).unwrap();
+        assert_eq!(rebuilt.templates.len(), 1);
+        assert_eq!(rebuilt.samples.len(), 1);
+        assert_eq!(rebuilt.samples[0].prompt_id, "prompt-2");
+        assert_eq!(rebuilt.total_duration_ms, 4_000);
+    }
+
+    #[test]
+    fn legacy_profile_append_migrates_centroid_and_validates_compatibility() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        std::fs::create_dir_all(voiceprint_dir()).unwrap();
+        let legacy = SpeakerVoiceprintProfile {
+            schema_version: 1,
+            id: "spk-legacy-append".to_string(),
+            display_name: "Eden".to_string(),
+            source: "live_enrollment".to_string(),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            embedding_model: "test".to_string(),
+            embedding_dim: 2,
+            embedding: vec![1.0, 0.0],
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            total_duration_ms: 4_000,
+            samples: Vec::new(),
+            templates: Vec::new(),
+            prototypes: Vec::new(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        atomic_json_write(&speaker_profile_path(&legacy.id), &legacy).unwrap();
+        let session = AssistedVoiceprintSession {
+            profile_id: Some(legacy.id.clone()),
+            ..assisted_test_session("assisted-legacy-append")
+        };
+
+        let response = persist_assisted_voiceprint_templates(
+            &session,
+            vec![assisted_test_template("new", vec![0.9, 0.1])],
+        )
+        .unwrap();
+
+        assert_eq!(response.profile.schema_version, VOICEPRINT_PROFILE_SCHEMA_VERSION);
+        assert_eq!(response.profile.templates.len(), 2);
+        assert_eq!(response.profile.templates[0].id, "legacy-spk-legacy-append");
+
+        for (field, altered_session, template) in [
+            (
+                "speaker name",
+                AssistedVoiceprintSession {
+                    speaker_name: "Other".to_string(),
+                    ..session.clone()
+                },
+                assisted_test_template("name", vec![1.0, 0.0]),
+            ),
+            (
+                "diarization profile",
+                AssistedVoiceprintSession {
+                    diarization_profile: "other-profile".to_string(),
+                    ..session.clone()
+                },
+                assisted_test_template("profile", vec![1.0, 0.0]),
+            ),
+            (
+                "sample rate",
+                AssistedVoiceprintSession {
+                    sample_rate: 8_000,
+                    ..session.clone()
+                },
+                assisted_test_template("rate", vec![1.0, 0.0]),
+            ),
+            (
+                "embedding dimension",
+                session.clone(),
+                assisted_test_template("dimension", vec![1.0, 0.0, 0.0]),
+            ),
+        ] {
+            let error = persist_assisted_voiceprint_templates(&altered_session, vec![template])
+                .unwrap_err();
+            assert!(error.contains(field), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn assisted_template_quality_failures_are_rejected_before_embedding() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let mut session = assisted_test_session("assisted-quality");
+        std::fs::create_dir_all(assisted_voiceprint_session_dir(&session.id)).unwrap();
+
+        session.candidates[0].overlap = true;
+        assert!(compute_assisted_voiceprint_templates(&session)
+            .unwrap_err()
+            .contains("quality gate"));
+        session.candidates[0].overlap = false;
+
+        for candidate in &session.candidates {
+            std::fs::write(
+                assisted_voiceprint_candidate_audio_path(&session.id, &candidate.id),
+                assisted_test_pcm(),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            assisted_voiceprint_candidate_audio_path(&session.id, &session.candidates[0].id),
+            vec![0_u8; VOICEPRINT_SAMPLE_RATE as usize * 2],
+        )
+        .unwrap();
+        assert!(compute_assisted_voiceprint_templates(&session)
+            .unwrap_err()
+            .contains("too short"));
+
+        std::fs::write(
+            assisted_voiceprint_candidate_audio_path(&session.id, &session.candidates[0].id),
+            vec![0_u8; VOICEPRINT_SAMPLE_RATE as usize * 2 * 4],
+        )
+        .unwrap();
+        assert!(compute_assisted_voiceprint_templates(&session)
+            .unwrap_err()
+            .contains("insufficient speech energy"));
+    }
+
+    #[test]
+    fn voiceprint_rebuild_rejects_empty_templates_and_embeddings() {
+        let mut profile = SpeakerVoiceprintProfile {
+            schema_version: 1,
+            id: "spk-invalid".to_string(),
+            display_name: "Invalid".to_string(),
+            source: "test".to_string(),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            embedding_model: "test".to_string(),
+            embedding_dim: 0,
+            embedding: Vec::new(),
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            total_duration_ms: 0,
+            samples: Vec::new(),
+            templates: Vec::new(),
+            prototypes: Vec::new(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        assert!(rebuild_voiceprint_profile(&mut profile)
+            .unwrap_err()
+            .contains("at least one template"));
+        assert!(build_voiceprint_prototypes(&[assisted_test_template("empty", Vec::new())])
+            .unwrap_err()
+            .contains("empty embedding"));
+    }
+
+    #[test]
+    fn deleting_the_last_voiceprint_template_is_rejected() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        std::fs::create_dir_all(voiceprint_dir()).unwrap();
+        let profile = SpeakerVoiceprintProfile {
+            schema_version: VOICEPRINT_PROFILE_SCHEMA_VERSION,
+            id: "spk-last-template".to_string(),
+            display_name: "Eden".to_string(),
+            source: "assisted_recording".to_string(),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            embedding_model: "test".to_string(),
+            embedding_dim: 2,
+            embedding: vec![1.0, 0.0],
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            total_duration_ms: 4_000,
+            samples: Vec::new(),
+            templates: vec![assisted_test_template("only", vec![1.0, 0.0])],
+            prototypes: Vec::new(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        atomic_json_write(&speaker_profile_path(&profile.id), &profile).unwrap();
+
+        let response = delete_speaker_profile_sample_response(&profile.id, "only");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn assisted_finish_rejects_selection_below_gate() {
+        let session = AssistedVoiceprintSession {
+            id: "assisted-short".to_string(),
+            state: AssistedVoiceprintSessionState::Open,
+            speaker_name: "Eden".to_string(),
+            profile_id: None,
+            task_id: "task-assisted".to_string(),
+            file_key: "file-a".to_string(),
+            source_path: PathBuf::from("meeting.wav"),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            candidates: vec![assisted_test_candidate(0), assisted_test_candidate(1)],
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+
+        let error = finish_assisted_voiceprint_enrollment_in_process(&session).unwrap_err();
+
+        assert!(error.contains("select at least 3 clips"));
+    }
+
+    #[test]
+    fn assisted_session_finish_state_blocks_duplicate_finish_and_delete() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let session = AssistedVoiceprintSession {
+            id: "assisted-state".to_string(),
+            state: AssistedVoiceprintSessionState::Open,
+            speaker_name: "Eden".to_string(),
+            profile_id: None,
+            task_id: "task-assisted".to_string(),
+            file_key: "file-a".to_string(),
+            source_path: PathBuf::from("meeting.wav"),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            candidates: (0..3).map(assisted_test_candidate).collect(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        std::fs::create_dir_all(assisted_voiceprint_session_dir(&session.id)).unwrap();
+        atomic_json_write(&assisted_voiceprint_session_path(&session.id), &session).unwrap();
+        let candidate_audio = assisted_voiceprint_candidate_audio_path(
+            &session.id,
+            &session.candidates[0].id,
+        );
+        std::fs::write(&candidate_audio, assisted_test_pcm()).unwrap();
+
+        let finishing = begin_assisted_voiceprint_finish(&session.id).unwrap();
+
+        assert_eq!(finishing.state, AssistedVoiceprintSessionState::Finishing);
+        let duplicate = begin_assisted_voiceprint_finish(&session.id).unwrap_err();
+        assert_eq!(duplicate.0, StatusCode::CONFLICT);
+        assert_eq!(
+            delete_assisted_voiceprint_session_response(&session.id).status(),
+            StatusCode::CONFLICT
+        );
+
+        restore_assisted_voiceprint_session(&finishing);
+        assert_eq!(
+            read_assisted_voiceprint_session(&session.id).unwrap().state,
+            AssistedVoiceprintSessionState::Open
+        );
+        assert!(!candidate_audio.exists());
+    }
+
+    #[test]
+    fn assisted_session_cleanup_removes_expired_sessions_and_keeps_fresh_ones() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        for (id, state, updated_at_ms) in [
+            ("expired-open", AssistedVoiceprintSessionState::Open, 1),
+            ("expired-finishing", AssistedVoiceprintSessionState::Finishing, 1),
+            ("fresh-open", AssistedVoiceprintSessionState::Open, now_ms()),
+        ] {
+            let session = AssistedVoiceprintSession {
+                id: id.to_string(),
+                state,
+                speaker_name: "Eden".to_string(),
+                profile_id: None,
+                task_id: "task-assisted".to_string(),
+                file_key: "file-a".to_string(),
+                source_path: PathBuf::from("meeting.wav"),
+                diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+                sample_rate: VOICEPRINT_SAMPLE_RATE,
+                candidates: Vec::new(),
+                created_at_ms: 1,
+                updated_at_ms,
+            };
+            std::fs::create_dir_all(assisted_voiceprint_session_dir(id)).unwrap();
+            atomic_json_write(&assisted_voiceprint_session_path(id), &session).unwrap();
+        }
+
+        cleanup_expired_assisted_voiceprint_sessions();
+
+        assert!(!assisted_voiceprint_session_dir("expired-open").exists());
+        assert!(!assisted_voiceprint_session_dir("expired-finishing").exists());
+        assert!(assisted_voiceprint_session_dir("fresh-open").exists());
+    }
+
+    #[test]
+    fn close_voiceprint_profiles_remain_ambiguous_instead_of_auto_matching() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        std::fs::create_dir_all(voiceprint_dir()).unwrap();
+        for (id, name, embedding) in [
+            ("spk-a", "Alice", vec![1.0, 0.0]),
+            ("spk-b", "Bob", vec![0.999, 0.001]),
+        ] {
+            let profile = SpeakerVoiceprintProfile {
+                schema_version: 1,
+                id: id.to_string(),
+                display_name: name.to_string(),
+                source: "live_enrollment".to_string(),
+                diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+                embedding_model: "test".to_string(),
+                embedding_dim: 2,
+                embedding,
+                sample_rate: VOICEPRINT_SAMPLE_RATE,
+                total_duration_ms: 3_000,
+                samples: Vec::new(),
+                templates: Vec::new(),
+                prototypes: Vec::new(),
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            };
+            atomic_json_write(&speaker_profile_path(id), &profile).unwrap();
+        }
+
+        let candidate = best_registered_voiceprint_match(&[1.0, 0.0]).unwrap();
+
+        assert_eq!(candidate.profile_id, "spk-a");
+        assert!(!candidate.unambiguous);
+    }
+
+    #[test]
+    fn diarization_mapping_marks_close_multi_profile_candidates_as_conflicted() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        std::fs::create_dir_all(voiceprint_dir()).unwrap();
+        for (id, name, embedding) in [
+            ("spk-a", "Alice", vec![1.0, 0.0]),
+            ("spk-b", "Bob", vec![0.999, 0.001]),
+        ] {
+            let profile = SpeakerVoiceprintProfile {
+                schema_version: 1,
+                id: id.to_string(),
+                display_name: name.to_string(),
+                source: "test".to_string(),
+                diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+                embedding_model: "test".to_string(),
+                embedding_dim: 2,
+                embedding,
+                sample_rate: VOICEPRINT_SAMPLE_RATE,
+                total_duration_ms: 4_000,
+                samples: Vec::new(),
+                templates: Vec::new(),
+                prototypes: Vec::new(),
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            };
+            atomic_json_write(&speaker_profile_path(id), &profile).unwrap();
+        }
+        let mut segments = vec![DiarizationSegment {
+            speaker: "speaker_00".to_string(),
+            display_name: "User A".to_string(),
+            mapped_profile_id: None,
+            confidence: None,
+            candidate_profile_id: None,
+            candidate_display_name: None,
+            candidate_confidence: None,
+            start_ms: 0,
+            end_ms: 6_000,
+            overlap: false,
+        }];
+        let embeddings = BTreeMap::from([("speaker_00".to_string(), vec![1.0, 0.0])]);
+
+        map_speakers_with_registered_voiceprints(&mut segments, &embeddings);
+
+        assert_eq!(segments[0].display_name, "User A");
+        assert_eq!(segments[0].mapped_profile_id, None);
+        assert_eq!(segments[0].candidate_profile_id.as_deref(), Some("spk-a"));
+    }
+
+    #[tokio::test]
+    async fn voiceprint_ffmpeg_cut_rejects_empty_duration_and_invalid_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("output.pcm16le");
+
+        assert!(ffmpeg_cut_pcm16le_ms(Path::new("missing.wav"), &output, 1_000, 1_000)
+            .await
+            .unwrap_err()
+            .contains("empty duration"));
+        assert!(ffmpeg_cut_pcm16le_ms(Path::new("missing.wav"), &output, 0, 1_000)
+            .await
+            .unwrap_err()
+            .contains("ffmpeg voiceprint segment cut failed"));
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn diarization_embedding_waveforms_exclude_overlap_segments() {
+        let waveform = vec![1.0; 16_000];
+        let segments = vec![
+            DiarizationSegment {
+                speaker: "speaker_00".to_string(),
+                display_name: "User A".to_string(),
+                mapped_profile_id: None,
+                confidence: None,
+                candidate_profile_id: None,
+                candidate_display_name: None,
+                candidate_confidence: None,
+                start_ms: 0,
+                end_ms: 500,
+                overlap: false,
+            },
+            DiarizationSegment {
+                speaker: "speaker_00".to_string(),
+                display_name: "User A".to_string(),
+                mapped_profile_id: None,
+                confidence: None,
+                candidate_profile_id: None,
+                candidate_display_name: None,
+                candidate_confidence: None,
+                start_ms: 500,
+                end_ms: 1_000,
+                overlap: true,
+            },
+        ];
+
+        let by_speaker = collect_diarization_speaker_waveforms(&waveform, 16_000, &segments);
+
+        assert_eq!(by_speaker["speaker_00"].len(), 8_000);
     }
 }

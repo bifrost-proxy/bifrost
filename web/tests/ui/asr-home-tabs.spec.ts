@@ -203,6 +203,132 @@ test("ASR 首页按定时任务、ASR 管理、声纹识别与唤醒三 Tab 分�
   await expect(page.getByTestId("voice-wake-actions-card")).toBeVisible();
 });
 
+test("历史录音声纹初始化可试听标注并在亮暗主题完成门禁", async ({ page }) => {
+  await installAsrHomeTabMocks(page);
+  const candidates = Array.from({ length: 4 }, (_, index) => ({
+    id: `candidate-${index}`,
+    speaker: index < 3 ? "speaker_00" : "speaker_01",
+    start_ms: index * 4000,
+    end_ms: index * 4000 + 4000,
+    duration_ms: 4000,
+    text: `meeting segment ${index}`,
+    quality: 0.92,
+    overlap: false,
+    label: "unsure",
+  }));
+  const sessionPayload = () => {
+    const selected = candidates.filter((candidate) => candidate.label === "mine");
+    return {
+      session: {
+        id: "assisted-ui",
+        speaker_name: "Eden",
+        task_id: "task-assisted-ui",
+        file_key: "meeting",
+        candidates,
+      },
+      selected_count: selected.length,
+      selected_duration_ms: selected.length * 4000,
+      minimum_clips: 3,
+      minimum_duration_ms: 12000,
+      ready_to_finish: selected.length >= 3,
+    };
+  };
+  await page.route("**/_bifrost/api/asr/tasks", async (route) => {
+    await route.fulfill({
+      json: {
+        tasks: [{
+          id: "task-assisted-ui",
+          name: "Weekly Meeting",
+          audio_dir: "/tmp/meeting",
+          summary: {},
+        }],
+      },
+    });
+  });
+  await page.route("**/_bifrost/api/asr/tasks/task-assisted-ui", async (route) => {
+    await route.fulfill({
+      json: {
+        id: "task-assisted-ui",
+        name: "Weekly Meeting",
+        audio_dir: "/tmp/meeting",
+        summary: {},
+        files: [{
+          key: "meeting",
+          task_id: "task-assisted-ui",
+          source_path: "/tmp/meeting/weekly.wav",
+          status: "success",
+          output_timeline_path: "/tmp/meeting/weekly.timeline.json",
+          text_chars: 128,
+          speaker_count: 2,
+        }],
+      },
+    });
+  });
+  await page.route("**/_bifrost/api/asr/speaker-profiles/assisted-sessions", async (route) => {
+    expect(route.request().postDataJSON()).toEqual({
+      name: "Eden",
+      task_id: "task-assisted-ui",
+      file_key: "meeting",
+    });
+    await route.fulfill({ status: 201, json: sessionPayload() });
+  });
+  await page.route("**/_bifrost/api/asr/speaker-profiles/assisted-sessions/assisted-ui/labels", async (route) => {
+    const body = route.request().postDataJSON() as {
+      labels: Array<{ candidate_id: string; label: "mine" | "not_mine" | "unsure" }>;
+    };
+    for (const update of body.labels) {
+      const candidate = candidates.find((item) => item.id === update.candidate_id);
+      if (candidate) candidate.label = update.label;
+    }
+    await route.fulfill({ json: sessionPayload() });
+  });
+  await page.route("**/_bifrost/api/asr/speaker-profiles/assisted-sessions/assisted-ui/finish", async (route) => {
+    await route.fulfill({
+      json: {
+        profile: {
+          id: "spk-eden",
+          display_name: "Eden",
+          source: "assisted_recording",
+          diarization_profile: "sherpa-onnx-balanced",
+          embedding_dim: 16,
+          total_duration_ms: 12000,
+        },
+        profile_path: "/tmp/spk-eden.json",
+      },
+    });
+  });
+
+  await openPage(page, "ai?aiSection=tools-asr&asrTab=voice");
+  await page.getByTestId("asr-assisted-enroll-button").click();
+  await expect(page.getByRole("dialog", { name: "Initialize Voiceprint from Recording" })).toBeVisible();
+  await page.getByTestId("asr-assisted-speaker-name").fill("Eden");
+  await page.getByTestId("asr-assisted-task-select").click();
+  await page.locator(".ant-select-dropdown:visible").getByText("Weekly Meeting", { exact: true }).click();
+  await page.getByTestId("asr-assisted-file-select").click();
+  await page.locator(".ant-select-dropdown:visible").getByText(/weekly\.wav/).click();
+  await page.getByRole("button", { name: "Find Speaker Segments" }).click();
+
+  await expect(page.getByTestId("asr-assisted-audio-player")).toHaveAttribute(
+    "src",
+    /tasks\/task-assisted-ui\/files\/meeting\/source/,
+  );
+  await expect(page.getByTestId("asr-assisted-candidate-list")).toContainText("speaker_00");
+  await expect(page.getByTestId("asr-assisted-finish-button")).toBeDisabled();
+  for (let index = 0; index < 3; index += 1) {
+    await page.getByTestId("asr-assisted-candidate-list").getByText("Mine", { exact: true }).nth(index).click();
+  }
+  await expect(page.getByText("3 segments selected · 12s")).toBeVisible();
+  await expect(page.getByTestId("asr-assisted-finish-button")).toBeEnabled();
+
+  await page.getByTestId("asr-assisted-finish-button").click();
+  await expect(page.getByRole("dialog", { name: "Initialize Voiceprint from Recording" })).toHaveCount(0);
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.getByTestId("asr-assisted-enroll-button").click();
+  await expect(page.getByRole("dialog", { name: "Initialize Voiceprint from Recording" })).toBeVisible();
+  await expect(page.getByText("Choose a real meeting recording, then confirm only the segments spoken by you.")).toBeVisible();
+});
+
 test("ASR 目录任务按转录模式只展示实际生效的配置", async ({ page }) => {
   await installAsrHomeTabMocks(page);
   let submittedTask: Record<string, unknown> | undefined;
