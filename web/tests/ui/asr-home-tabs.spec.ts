@@ -347,6 +347,11 @@ test("ASR 目录任务按转录模式只展示实际生效的配置", async ({ p
     .getByRole("button", { name: "New" })
     .click();
   await expect(page.getByRole("dialog", { name: "New Directory Task" })).toBeVisible();
+  await expect(
+    page.getByText(
+      /Changing this setting applies to untranscribed and new files; existing transcript files are preserved\./,
+    ),
+  ).toBeVisible();
 
   for (const label of [
     "Runtime",

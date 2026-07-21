@@ -2091,6 +2091,9 @@ mod tests {
         completed.output_text_path = Some(temp.path().join("old.txt"));
         completed.output_metadata_path = Some(temp.path().join("old.json"));
         completed.output_timeline_path = Some(temp.path().join("old.timeline.json"));
+        std::fs::write(completed.output_text_path.as_ref().unwrap(), "old text").unwrap();
+        std::fs::write(completed.output_metadata_path.as_ref().unwrap(), "{}").unwrap();
+        std::fs::write(completed.output_timeline_path.as_ref().unwrap(), "{}").unwrap();
         completed.text_chars = 8;
         completed.chunk_metrics.push(AsrChunkMetric {
             chunk_index: 0,
@@ -2199,23 +2202,29 @@ mod tests {
         assert_eq!(updated.transcription_prompt, "Bifrost 专有词");
         let reloaded = find_task(&task.id).unwrap();
         assert_eq!(reloaded.transcription_prompt, "Bifrost 专有词");
-        let requeued = load_file_store(&task.id);
-        assert_eq!(requeued.files.len(), 5);
-        for (key, record) in &requeued.files {
-            assert_eq!(record.status, FileStatus::Pending);
-            if key == "pending" {
-                assert!(record.output_text_path.is_some());
-                assert_eq!(record.text_chars, 8);
-                continue;
-            }
-            assert!(record.output_text_path.is_none());
-            assert!(record.output_metadata_path.is_none());
-            assert!(record.output_timeline_path.is_none());
-            assert!(record.chunk_metrics.is_empty());
-            assert_eq!(record.text_chars, 0);
+        let preserved = load_file_store(&task.id);
+        assert_eq!(preserved.files.len(), 5);
+        for (key, record) in &preserved.files {
+            let expected_status = if key == &completed_key {
+                FileStatus::Success
+            } else {
+                FileStatus::PartialSuccess
+            };
+            assert_eq!(record.status, expected_status);
+            assert!(record.output_text_path.as_ref().is_some_and(|path| path.is_file()));
+            assert!(record
+                .output_metadata_path
+                .as_ref()
+                .is_some_and(|path| path.is_file()));
+            assert!(record
+                .output_timeline_path
+                .as_ref()
+                .is_some_and(|path| path.is_file()));
+            assert_eq!(record.chunk_metrics.len(), 1);
+            assert_eq!(record.text_chars, 8);
         }
 
-        let mut completed_again = requeued.files.get(&completed_key).unwrap().clone();
+        let mut completed_again = preserved.files.get(&completed_key).unwrap().clone();
         completed_again.status = FileStatus::Success;
         save_file_store(
             &task.id,
@@ -2282,7 +2291,112 @@ mod tests {
                 .get(&completed_key)
                 .unwrap()
                 .status,
-            FileStatus::Pending
+            FileStatus::Success
+        );
+    }
+
+    #[test]
+    fn transcription_config_change_restores_canonical_transcript_and_requeues_missing_artifact() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let recovered_source = audio_dir.join("recovered.wav");
+        let missing_source = audio_dir.join("missing.wav");
+        let orphaned_source = audio_dir.join("removed.wav");
+        std::fs::write(&recovered_source, make_wav(&[500i16; 100])).unwrap();
+        std::fs::write(&missing_source, make_wav(&[500i16; 100])).unwrap();
+        let task = test_directory_task("artifact-reconcile-task", audio_dir);
+        add_task(task.clone()).unwrap();
+
+        let mut recovered = pending_record(&task.id, &recovered_source);
+        recovered.status = FileStatus::Processing;
+        recovered.error = Some("interrupted".to_string());
+        let (text_path, metadata_path, timeline_path) = bifrost_asr::artifacts::output_paths_in(
+            temp.path(),
+            &task.id,
+            &recovered_source,
+            &task.audio_dir,
+        );
+        std::fs::create_dir_all(text_path.parent().unwrap()).unwrap();
+        std::fs::write(&text_path, "restored transcript").unwrap();
+        std::fs::write(&metadata_path, "{}").unwrap();
+        std::fs::write(&timeline_path, "{}").unwrap();
+
+        let mut missing = pending_record(&task.id, &missing_source);
+        missing.status = FileStatus::Success;
+        missing.output_text_path = Some(temp.path().join("gone.txt"));
+        missing.output_metadata_path = Some(temp.path().join("gone.json"));
+        missing.text_chars = 99;
+        missing.error = Some("stale".to_string());
+        let mut orphaned = FileRecord {
+            source_path: orphaned_source.clone(),
+            ..pending_record(&task.id, &missing_source)
+        };
+        orphaned.status = FileStatus::Success;
+
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([
+                    (source_key(&recovered_source), recovered),
+                    (source_key(&missing_source), missing),
+                    ("orphaned-pending".to_string(), orphaned),
+                ]),
+            },
+        )
+        .unwrap();
+        assert!(!orphaned_source.is_file());
+        let orphaned_text = bifrost_asr::artifacts::output_paths_in(
+            temp.path(),
+            &task.id,
+            &orphaned_source,
+            &task.audio_dir,
+        )
+        .0;
+        assert!(!orphaned_text.is_file());
+
+        let update = UpdateTaskRequest {
+            transcription_mode: Some(AsrTranscriptionMode::MossJoint),
+            transcription_prompt: Some("new mode".to_string()),
+            name: None,
+            audio_dir: None,
+            recursive: None,
+            enabled: None,
+            paused: None,
+            schedule: None,
+            language: None,
+            model: None,
+            runtime_strategy: None,
+            max_concurrent_files: None,
+            diarization: None,
+            daily_agent: None,
+            external_devices: None,
+            import_policy: None,
+        };
+        update_task_config(&task.id, update).unwrap();
+
+        let files = load_file_store(&task.id);
+        let recovered = files.files.get(&source_key(&recovered_source)).unwrap();
+        assert_eq!(recovered.status, FileStatus::PartialSuccess);
+        assert_eq!(recovered.output_text_path.as_ref(), Some(&text_path));
+        assert_eq!(recovered.output_metadata_path.as_ref(), Some(&metadata_path));
+        assert_eq!(recovered.output_timeline_path.as_ref(), Some(&timeline_path));
+        assert_eq!(recovered.text_chars, "restored transcript".chars().count());
+        assert!(recovered.error.is_none());
+
+        let missing = files.files.get(&source_key(&missing_source)).unwrap();
+        assert_eq!(missing.status, FileStatus::Pending);
+        assert!(missing.output_text_path.is_none());
+        assert!(missing.output_metadata_path.is_none());
+        assert_eq!(missing.text_chars, 0);
+        assert!(missing.error.is_none());
+        assert!(
+            !files.files.contains_key("orphaned-pending"),
+            "orphaned record was retained: {:?}",
+            files.files.get("orphaned-pending")
         );
     }
 
@@ -3364,6 +3478,49 @@ mod tests {
         let final_scan =
             discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
         assert!(final_scan.pending.is_empty());
+    }
+
+    #[test]
+    fn pending_batch_preserves_existing_transcript_and_prunes_missing_source() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("preserved.wav");
+        let removed_source = audio_dir.join("removed.wav");
+        std::fs::write(&source, b"audio").unwrap();
+        let transcript = temp.path().join("preserved.txt");
+        std::fs::write(&transcript, "usable transcript").unwrap();
+
+        let task = test_directory_task("pending-artifact-reconcile", audio_dir);
+        let mut preserved = pending_record(&task.id, &source);
+        preserved.output_text_path = Some(transcript.clone());
+        let removed = FileRecord {
+            source_path: removed_source,
+            ..pending_record(&task.id, &source)
+        };
+        let preserved_key = source_key(&source);
+        let mut files = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::from([
+                (preserved_key.clone(), preserved),
+                ("removed-pending".to_string(), removed),
+            ]),
+        };
+        save_file_store(&task.id, &files).unwrap();
+
+        let scan =
+            discover_and_prepare_pending_batch(&task, &mut files, &HashSet::new()).unwrap();
+        assert!(scan.pending.is_empty());
+        let preserved = files.files.get(&preserved_key).unwrap();
+        assert_eq!(preserved.status, FileStatus::PartialSuccess);
+        assert_eq!(preserved.output_text_path.as_ref(), Some(&transcript));
+        assert_eq!(preserved.text_chars, "usable transcript".chars().count());
+        assert!(!files.files.contains_key("removed-pending"));
+        assert!(!load_file_store(&task.id)
+            .files
+            .contains_key("removed-pending"));
     }
 
     #[test]

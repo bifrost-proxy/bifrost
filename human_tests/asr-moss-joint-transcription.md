@@ -199,18 +199,20 @@
 - 每个成功 MOSS 文件的 `files.json` 都有可供 benchmark 汇总的真实整文件 elapsed metric，RTF 不再因空 metrics 固定为零。
 - benchmark 不会让同一 `source_path` 同时代表多个目标时长；不同成功源文件不足时 fail closed。
 
-### TC-MOSS-12：完整模型 metadata 与配置变更重处理
+### TC-MOSS-12：完整模型 metadata 与配置变更产物保留
 
 操作步骤：
 
 1. 执行 `cargo test -p bifrost-admin moss_ --lib -- --nocapture`，确认模型 verification marker 覆盖 release packager 要求的 12 个 metadata 文件，任一文件缺失或损坏都会撤销 model Ready。
 2. 执行 `bash e2e-tests/tests/test_asr_moss_release_contract.sh`，确认 Rust 校验列表、release workflow 下载列表和 runtime packager 必需列表保持一致。
-3. 执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_asr_moss_task_mode.sh`。在 Apple Silicon 上先写入成功文件记录，再修改 MOSS prompt，确认记录变为 pending，旧产物引用和 metrics 被清空；不支持平台继续验证 MOSS 创建/PATCH 返回 400。
+3. 执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_asr_moss_task_mode.sh`。在 Apple Silicon 上先写入三类记录再修改 MOSS prompt：已有 `.txt` 的成功记录、源文件仍存在但 `.txt` 缺失的成功记录，以及源文件和 `.txt` 都不存在的成功记录；不支持平台继续验证 MOSS 创建/PATCH 返回 400。
+4. 对真实任务调用 `GET /_bifrost/api/asr/tasks/<task-id>`，确认 Files 列表里的 pending/processing 数与 summary 当前待处理数一致；逐条检查 pending/processing 的 `source_path` 都仍是文件，success 的 `output_text_path` 都仍是文件。
 
 预期结果：
 
 - `added_tokens.json`、`chat_template.jinja`、`merges.txt`、`vocab.json` 等全部发布 metadata 与原有文件一样受 checksum 保护和自动修复。
-- 实际切换转录模式或修改生效中的 MOSS prompt 后，成功、部分成功、失败或遗留 processing 记录都会重新排队，下一次运行不会 merge-only 保留旧转录。
+- 实际切换转录模式或修改生效中的 MOSS prompt 后，已有 `.txt` 的历史记录及 metrics 保持不变，不进入整文件待处理队列；记录引用丢失但标准目录仍有 `.txt` 时恢复引用并归一为可用的 `partial_success`。
+- 源文件仍存在但找不到 `.txt` 的记录回到 pending；源文件与 `.txt` 都不存在的 pending 记录从持久化状态原子清理，且不会因 merge-only 保存重新出现。
 - 相同值 PATCH 不制造无意义的重复转录；任务运行中仍拒绝高风险配置变更。
 
 ### TC-MOSS-13：无有效协议结果去重与原生长片段规范化
@@ -309,3 +311,4 @@
 | 2026-07-20 | TC-MOSS-13 | PASS：Rust MOSS 回归把无有效 speaker segment 和超出整文件上限都标为带版本的确定性失败；65 秒 fixture 的 63.8 秒 S02 turn 被拆为 3 段，加上 S01 共 4 段，所有段不超过 30 秒，speaker、75000 ms 绝对终点和完整文本均保留；runtime ZIP 的 Python 相对 symlink 保留且逃逸 symlink 被拒绝，Unix 目录冲突与 Windows symlink 不支持均保持安全拒绝，release contract 强制 extract-then-self-test；task-mode API E2E 继续通过。 |
 | 2026-07-21 | TC-MOSS-16 | PASS：三个定向 Rust 用例与 release/runtime contract E2E 全部通过。升级成功并写入 marker 后，旧 runtime 目录、runtime zip 和旧模型隔离件均被回收；失败路径继续保留 quarantine。纯数字时间戳与固定资产名门禁拒绝近似命名，目录 symlink 仅删除链接且外部目标文件保持不变。 |
 | 2026-07-21 | TC-MOSS-15 | PASS（发现真实中断并修复后复测）：当前分支服务以独立 HOME/数据目录在 18999 启动，初始 install_dir 位于临时 home 且 model bytes=0。真实下载 170 MB runtime 和 1,258,427,442-byte 模型时，Hugging Face 在 1,207,909,964 bytes 处返回 `error decoding response body`，`.part` 被保留；再次请求通过 Range 补齐模型并完成 schema v5 marker。针对该真实缺口，初始化器增加最多 3 次有界自动重试；fixture 首次只发一半响应后断开、第二次从 524288 bytes 续传，聚焦回归通过。最终 status 为 ready/runtime_ready/model_ready，模型 SHA-256=`469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190`，无 AppleDouble/`.part` 残留；打包 Python self-test 输出 `moss-mlx-runtime ok`，20.495 秒 16 kHz 单声道真实启动器推理 3.57 秒完成，输出 3 个 S01 正时长 segments。18999 已停止，正式 `v0.0.158` 服务保持 PID 21664/9900/系统代理开启；隔离目录已移动到废纸篓，可恢复。 |
+| 2026-07-22 | TC-MOSS-12 | PASS（模式切换重跑回归）：两条聚焦 Rust 回归通过；18995 隔离 API E2E 验证修改 MOSS prompt 后已有 `.txt` 的 success 记录及 metric 原样保留，源文件存在但转录缺失的记录回到 pending，源文件与转录都不存在的 success 记录在同一次 PATCH 中被持久化删除且重启后不再出现。真实 9900 任务修复并清理陈旧状态后为 623 success、26 pending、8 failed；26 条 pending 的源文件全部存在，623 条 success 的转录文件全部存在，Files 与 summary 待处理数一致。 |
