@@ -2,13 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildAsrQueryForTest,
   buildVoiceRealtimeUrl,
+  createAsrAssistedVoiceprintSession,
   createAsrTask,
+  deleteAsrAssistedVoiceprintSession,
+  deleteAsrSpeakerProfileSample,
   defaultAsrParams,
   defaultModelManagementParams,
   defaultVoiceRealtimeParams,
   loadVoiceRealtimeParams,
   saveAsrParams,
+  finishAsrAssistedVoiceprintSession,
   streamAsrTranscription,
+  updateAsrAssistedVoiceprintLabels,
   updateDailyAgentConfig,
 } from "./asr";
 import { clearAdminCsrfToken } from "./csrf";
@@ -176,5 +181,58 @@ describe("ASR admin API CSRF headers", () => {
 
     expect(csrfRequestCount).toBe(2);
     expect(updateRequestCount).toBe(2);
+  });
+
+  it("sends assisted voiceprint mutations to encoded endpoints with server-owned labels", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/security/csrf")) {
+        return new Response(
+          JSON.stringify({
+            csrf_token: "voiceprint-csrf",
+            header_name: "X-Bifrost-CSRF",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ ok: true, session: {}, profile: {} }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createAsrAssistedVoiceprintSession({
+      name: "Eden",
+      task_id: "task/one",
+      file_key: "meeting.wav",
+    });
+    await updateAsrAssistedVoiceprintLabels("session/one", [
+      { candidate_id: "candidate-1", label: "mine" },
+    ]);
+    await finishAsrAssistedVoiceprintSession("session/one");
+    await deleteAsrAssistedVoiceprintSession("session/one");
+    await deleteAsrSpeakerProfileSample("profile/one", "sample/one");
+
+    const calls = fetchMock.mock.calls.filter(
+      ([input]) => !String(input).includes("/security/csrf"),
+    );
+    expect(calls).toHaveLength(5);
+    expect(String(calls[0][0])).toContain("/asr/speaker-profiles/assisted-sessions");
+    expect(JSON.parse(String(calls[0][1]?.body))).toEqual({
+      name: "Eden",
+      task_id: "task/one",
+      file_key: "meeting.wav",
+    });
+    expect(String(calls[1][0])).toContain("session%2Fone/labels");
+    expect(JSON.parse(String(calls[1][1]?.body))).toEqual({
+      labels: [{ candidate_id: "candidate-1", label: "mine" }],
+    });
+    expect(String(calls[2][0])).toContain("session%2Fone/finish");
+    expect(String(calls[3][0])).toContain("assisted-sessions/session%2Fone");
+    expect(String(calls[4][0])).toContain("profile%2Fone/samples/sample%2Fone");
+    calls.forEach(([, init]) => {
+      expect(new Headers(init?.headers).get("X-Bifrost-CSRF")).toBe("voiceprint-csrf");
+    });
   });
 });

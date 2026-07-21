@@ -85,6 +85,55 @@ async fn ffmpeg_cut_wav_ms(
     }
 }
 
+async fn ffmpeg_cut_pcm16le_ms(
+    source: &Path,
+    output: &Path,
+    start_ms: u64,
+    end_ms: u64,
+) -> Result<(), String> {
+    let duration_ms = end_ms.saturating_sub(start_ms);
+    if duration_ms == 0 {
+        return Err("ffmpeg voiceprint cut: empty duration".to_string());
+    }
+    let mut command = Command::new("ffmpeg");
+    command
+        .arg("-nostdin")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-y")
+        .arg("-ss")
+        .arg(format!("{:.3}", start_ms as f64 / 1000.0))
+        .arg("-t")
+        .arg(format!("{:.3}", duration_ms as f64 / 1000.0))
+        .arg("-i")
+        .arg(source)
+        .arg("-ar")
+        .arg(VOICEPRINT_SAMPLE_RATE.to_string())
+        .arg("-ac")
+        .arg("1")
+        .arg("-acodec")
+        .arg("pcm_s16le")
+        .arg("-f")
+        .arg("s16le")
+        .arg(output);
+    let result = run_abortable_command(
+        command,
+        "ffmpeg voiceprint segment cut",
+        None,
+        ffmpeg_chunk_split_timeout(duration_ms.div_ceil(1000).max(1)),
+    )
+    .await?;
+    if result.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "ffmpeg voiceprint segment cut failed: {}",
+            String::from_utf8_lossy(&result.stderr).trim()
+        ))
+    }
+}
+
 async fn run_abortable_command(
     mut command: Command,
     label: &str,

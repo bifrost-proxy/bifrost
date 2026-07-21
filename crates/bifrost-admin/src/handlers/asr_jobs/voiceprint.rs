@@ -2,6 +2,13 @@ fn default_mono_channels() -> u8 {
     1
 }
 
+fn default_voiceprint_profile_schema_version() -> u32 {
+    1
+}
+
+static SPEAKER_PROFILE_MUTATION_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
+static ASSISTED_SESSION_MUTATION_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
+
 async fn read_json_body<T: serde::de::DeserializeOwned>(
     req: Request<Incoming>,
 ) -> Result<T, Response<BoxBody>> {
@@ -28,6 +35,22 @@ fn speaker_enrollment_session_dir(session_id: &str) -> PathBuf {
     speaker_enrollment_sessions_dir().join(session_id)
 }
 
+fn assisted_voiceprint_sessions_dir() -> PathBuf {
+    voiceprint_dir().join("assisted-sessions")
+}
+
+fn assisted_voiceprint_session_dir(session_id: &str) -> PathBuf {
+    assisted_voiceprint_sessions_dir().join(session_id)
+}
+
+fn assisted_voiceprint_session_path(session_id: &str) -> PathBuf {
+    assisted_voiceprint_session_dir(session_id).join("session.json")
+}
+
+fn assisted_voiceprint_candidate_audio_path(session_id: &str, candidate_id: &str) -> PathBuf {
+    assisted_voiceprint_session_dir(session_id).join(format!("{candidate_id}.pcm16le"))
+}
+
 fn speaker_profile_path(profile_id: &str) -> PathBuf {
     voiceprint_dir().join(format!("{profile_id}.json"))
 }
@@ -45,6 +68,364 @@ fn voiceprint_prompts() -> Vec<SpeakerEnrollmentPrompt> {
             text: (*text).to_string(),
         })
         .collect()
+}
+
+fn assisted_voiceprint_candidates(timeline: &TranscriptTimeline) -> Vec<AssistedVoiceprintCandidate> {
+    let mut per_speaker = BTreeMap::<String, usize>::new();
+    let mut candidates = Vec::new();
+    for (segment_position, segment) in timeline.segments.iter().enumerate() {
+        let Some(speaker) = segment.speaker.as_deref() else {
+            continue;
+        };
+        if segment.overlap {
+            continue;
+        }
+        let duration_ms = segment.audio_end_ms.saturating_sub(segment.audio_start_ms);
+        if duration_ms < ASSISTED_CANDIDATE_MIN_MS {
+            continue;
+        }
+        let mut start_ms = segment.audio_start_ms;
+        let mut chunk_index = 0usize;
+        while start_ms < segment.audio_end_ms {
+            let end_ms = (start_ms + ASSISTED_CANDIDATE_MAX_MS).min(segment.audio_end_ms);
+            let chunk_duration_ms = end_ms.saturating_sub(start_ms);
+            if chunk_duration_ms < ASSISTED_CANDIDATE_MIN_MS {
+                break;
+            }
+            let count = per_speaker.entry(speaker.to_string()).or_default();
+            if *count >= ASSISTED_CANDIDATES_PER_SPEAKER {
+                break;
+            }
+            let quality = (chunk_duration_ms as f32 / ASSISTED_CANDIDATE_MAX_MS as f32)
+                .clamp(0.0, 1.0);
+            candidates.push(AssistedVoiceprintCandidate {
+                id: format!("candidate-{segment_position}-{chunk_index}"),
+                speaker: speaker.to_string(),
+                start_ms,
+                end_ms,
+                duration_ms: chunk_duration_ms,
+                text: segment.text.clone(),
+                quality,
+                overlap: false,
+                label: AssistedCandidateLabel::Unsure,
+            });
+            *count += 1;
+            chunk_index += 1;
+            start_ms = end_ms;
+        }
+    }
+    candidates
+}
+
+fn read_assisted_voiceprint_session(session_id: &str) -> Result<AssistedVoiceprintSession, String> {
+    validate_profile_id(session_id).map_err(|_| "invalid assisted session id".to_string())?;
+    let raw = std::fs::read_to_string(assisted_voiceprint_session_path(session_id))
+        .map_err(|error| format!("assisted voiceprint session not found: {error}"))?;
+    serde_json::from_str(&raw)
+        .map_err(|error| format!("read assisted voiceprint session: {error}"))
+}
+
+fn assisted_voiceprint_selection(session: &AssistedVoiceprintSession) -> (usize, u64) {
+    session
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.label == AssistedCandidateLabel::Mine)
+        .fold((0usize, 0u64), |(count, duration), candidate| {
+            (count + 1, duration.saturating_add(candidate.duration_ms))
+        })
+}
+
+fn assisted_voiceprint_session_payload(session: &AssistedVoiceprintSession) -> serde_json::Value {
+    let (selected_count, selected_duration_ms) = assisted_voiceprint_selection(session);
+    serde_json::json!({
+        "session": session,
+        "selected_count": selected_count,
+        "selected_duration_ms": selected_duration_ms,
+        "minimum_clips": ASSISTED_ENROLLMENT_MIN_CLIPS,
+        "minimum_duration_ms": ASSISTED_ENROLLMENT_MIN_TOTAL_MS,
+        "ready_to_finish": selected_count >= ASSISTED_ENROLLMENT_MIN_CLIPS
+            && selected_duration_ms >= ASSISTED_ENROLLMENT_MIN_TOTAL_MS,
+    })
+}
+
+async fn post_assisted_voiceprint_session_response(req: Request<Incoming>) -> Response<BoxBody> {
+    cleanup_expired_assisted_voiceprint_sessions();
+    let request = match read_json_body::<AssistedVoiceprintSessionCreateRequest>(req).await {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    let requested_name = request.name.trim();
+    if requested_name.is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "speaker name is required");
+    }
+    let speaker_name = if let Some(profile_id) = request.profile_id.as_deref() {
+        if let Err(error) = validate_profile_id(profile_id) {
+            return error_response(StatusCode::BAD_REQUEST, &error);
+        }
+        let profile = match read_speaker_voiceprint_profile(profile_id) {
+            Ok(profile) => profile,
+            Err(error) => return error_response(StatusCode::NOT_FOUND, &error),
+        };
+        if profile.display_name != requested_name {
+            return error_response(
+                StatusCode::CONFLICT,
+                "speaker name must match the existing profile display name",
+            );
+        }
+        profile.display_name
+    } else {
+        requested_name.to_string()
+    };
+    if find_task(&request.task_id).is_none() {
+        return error_response(StatusCode::NOT_FOUND, "ASR task not found");
+    }
+    let files = load_file_store(&request.task_id);
+    let Some(record) = files.files.get(&request.file_key) else {
+        return error_response(StatusCode::NOT_FOUND, "ASR task file not found");
+    };
+    if !matches!(record.status, FileStatus::Success | FileStatus::PartialSuccess) {
+        return error_response(StatusCode::CONFLICT, "ASR task file is not completed");
+    }
+    if !record.source_path.is_file() {
+        return error_response(StatusCode::CONFLICT, "ASR task source audio is no longer available");
+    }
+    let Some(timeline_path) = record.output_timeline_path.as_ref() else {
+        return error_response(StatusCode::CONFLICT, "ASR task file has no transcript timeline");
+    };
+    let timeline = match std::fs::read_to_string(timeline_path)
+        .map_err(|error| format!("read transcript timeline: {error}"))
+        .and_then(|raw| {
+            serde_json::from_str::<TranscriptTimeline>(&raw)
+                .map_err(|error| format!("parse transcript timeline: {error}"))
+        }) {
+        Ok(timeline) => timeline,
+        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    };
+    if timeline.diarization_profile.is_none() {
+        return error_response(StatusCode::CONFLICT, "ASR task file has no speaker-aware timeline");
+    }
+    let deterministic_test_embedding =
+        std::env::var("BIFROST_ASR_VOICEPRINT_TEST_EMBEDDING").as_deref() == Ok("1");
+    if !deterministic_test_embedding && !diarization_profile_ready(DEFAULT_DIARIZATION_PROFILE) {
+        return error_response(
+            StatusCode::CONFLICT,
+            "speaker embedding profile is not initialized",
+        );
+    }
+    let candidates = assisted_voiceprint_candidates(&timeline);
+    if candidates.is_empty() {
+        return error_response(
+            StatusCode::CONFLICT,
+            "no non-overlapping speaker candidate is at least 3 seconds long",
+        );
+    }
+    let session_id = format!("assisted-{}", uuid::Uuid::new_v4());
+    let now = now_ms();
+    let session = AssistedVoiceprintSession {
+        id: session_id.clone(),
+        state: AssistedVoiceprintSessionState::Open,
+        speaker_name,
+        profile_id: request.profile_id,
+        task_id: request.task_id,
+        file_key: request.file_key,
+        source_path: record.source_path.clone(),
+        diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+        sample_rate: VOICEPRINT_SAMPLE_RATE,
+        candidates,
+        created_at_ms: now,
+        updated_at_ms: now,
+    };
+    if let Err(error) = std::fs::create_dir_all(assisted_voiceprint_session_dir(&session_id)) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("create assisted session: {error}"));
+    }
+    if let Err(error) = atomic_json_write(&assisted_voiceprint_session_path(&session_id), &session) {
+        let _ = std::fs::remove_dir_all(assisted_voiceprint_session_dir(&session_id));
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+    }
+    json_response_with_status(StatusCode::CREATED, &assisted_voiceprint_session_payload(&session))
+}
+
+fn get_assisted_voiceprint_session_response(session_id: &str) -> Response<BoxBody> {
+    match read_assisted_voiceprint_session(session_id) {
+        Ok(session) => json_response(&assisted_voiceprint_session_payload(&session)),
+        Err(error) if error.starts_with("invalid") => error_response(StatusCode::BAD_REQUEST, &error),
+        Err(error) => error_response(StatusCode::NOT_FOUND, &error),
+    }
+}
+
+async fn post_assisted_voiceprint_labels_response(
+    session_id: &str,
+    req: Request<Incoming>,
+) -> Response<BoxBody> {
+    let request = match read_json_body::<AssistedVoiceprintLabelsRequest>(req).await {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    let _guard = match ASSISTED_SESSION_MUTATION_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "assisted session mutation lock is poisoned",
+            )
+        }
+    };
+    let mut session = match read_assisted_voiceprint_session(session_id) {
+        Ok(session) => session,
+        Err(error) => return error_response(StatusCode::NOT_FOUND, &error),
+    };
+    if session.state != AssistedVoiceprintSessionState::Open {
+        return error_response(StatusCode::CONFLICT, "assisted voiceprint session is finishing");
+    }
+    let candidate_ids = session
+        .candidates
+        .iter()
+        .map(|candidate| candidate.id.as_str())
+        .collect::<HashSet<_>>();
+    if request
+        .labels
+        .iter()
+        .any(|update| !candidate_ids.contains(update.candidate_id.as_str()))
+    {
+        return error_response(StatusCode::BAD_REQUEST, "unknown assisted candidate_id");
+    }
+    for update in request.labels {
+        if let Some(candidate) = session
+            .candidates
+            .iter_mut()
+            .find(|candidate| candidate.id == update.candidate_id)
+        {
+            candidate.label = update.label;
+        }
+    }
+    session.updated_at_ms = now_ms();
+    if let Err(error) = atomic_json_write(&assisted_voiceprint_session_path(session_id), &session) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+    }
+    json_response(&assisted_voiceprint_session_payload(&session))
+}
+
+fn delete_assisted_voiceprint_session_response(session_id: &str) -> Response<BoxBody> {
+    if validate_profile_id(session_id).is_err() {
+        return error_response(StatusCode::BAD_REQUEST, "invalid assisted session id");
+    }
+    let _guard = match ASSISTED_SESSION_MUTATION_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "assisted session mutation lock is poisoned",
+            )
+        }
+    };
+    let path = assisted_voiceprint_session_dir(session_id);
+    if !path.exists() {
+        return error_response(StatusCode::NOT_FOUND, "assisted voiceprint session not found");
+    }
+    if read_assisted_voiceprint_session(session_id)
+        .is_ok_and(|session| session.state == AssistedVoiceprintSessionState::Finishing)
+    {
+        return error_response(StatusCode::CONFLICT, "assisted voiceprint session is finishing");
+    }
+    match std::fs::remove_dir_all(path) {
+        Ok(()) => json_response(&serde_json::json!({ "deleted": true, "session_id": session_id })),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("delete assisted session: {error}")),
+    }
+}
+
+async fn post_assisted_voiceprint_finish_response(session_id: &str) -> Response<BoxBody> {
+    let session = match begin_assisted_voiceprint_finish(session_id) {
+        Ok(session) => session,
+        Err((status, error)) => return error_response(status, &error),
+    };
+    if !session.source_path.is_file() {
+        restore_assisted_voiceprint_session(&session);
+        return error_response(StatusCode::CONFLICT, "ASR task source audio is no longer available");
+    }
+    for candidate in session
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.label == AssistedCandidateLabel::Mine)
+    {
+        let audio_path = assisted_voiceprint_candidate_audio_path(session_id, &candidate.id);
+        if let Err(error) = ffmpeg_cut_pcm16le_ms(
+            &session.source_path,
+            &audio_path,
+            candidate.start_ms,
+            candidate.end_ms,
+        )
+        .await
+        {
+            restore_assisted_voiceprint_session(&session);
+            return error_response(StatusCode::CONFLICT, &error);
+        }
+    }
+    match finish_assisted_voiceprint_enrollment(&session) {
+        Ok(response) => json_response(&response),
+        Err(error) => {
+            restore_assisted_voiceprint_session(&session);
+            error_response(StatusCode::BAD_REQUEST, &error)
+        }
+    }
+}
+
+fn begin_assisted_voiceprint_finish(
+    session_id: &str,
+) -> Result<AssistedVoiceprintSession, (StatusCode, String)> {
+    let _guard = ASSISTED_SESSION_MUTATION_LOCK.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "assisted session mutation lock is poisoned".to_string(),
+        )
+    })?;
+    let mut session = read_assisted_voiceprint_session(session_id)
+        .map_err(|error| (StatusCode::NOT_FOUND, error))?;
+    if session.state != AssistedVoiceprintSessionState::Open {
+        return Err((
+            StatusCode::CONFLICT,
+            "assisted voiceprint session is already finishing".to_string(),
+        ));
+    }
+    let (selected_count, selected_duration_ms) = assisted_voiceprint_selection(&session);
+    if selected_count < ASSISTED_ENROLLMENT_MIN_CLIPS
+        || selected_duration_ms < ASSISTED_ENROLLMENT_MIN_TOTAL_MS
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "select at least {ASSISTED_ENROLLMENT_MIN_CLIPS} clips and {ASSISTED_ENROLLMENT_MIN_TOTAL_MS}ms of speech"
+            ),
+        ));
+    }
+    session.state = AssistedVoiceprintSessionState::Finishing;
+    session.updated_at_ms = now_ms();
+    atomic_json_write(&assisted_voiceprint_session_path(session_id), &session)
+        .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error))?;
+    Ok(session)
+}
+
+fn restore_assisted_voiceprint_session(session: &AssistedVoiceprintSession) {
+    let Ok(_guard) = ASSISTED_SESSION_MUTATION_LOCK.lock() else {
+        return;
+    };
+    let Ok(mut current) = read_assisted_voiceprint_session(&session.id) else {
+        return;
+    };
+    current.state = AssistedVoiceprintSessionState::Open;
+    current.updated_at_ms = now_ms();
+    if let Err(error) = atomic_json_write(&assisted_voiceprint_session_path(&session.id), &current) {
+        tracing::warn!(
+            session_id = %session.id,
+            error = %error,
+            "failed to restore assisted voiceprint session after finish error"
+        );
+    }
+    for candidate in current.candidates {
+        let _ = std::fs::remove_file(assisted_voiceprint_candidate_audio_path(
+            &session.id,
+            &candidate.id,
+        ));
+    }
 }
 
 async fn post_speaker_enrollment_session_response(req: Request<Incoming>) -> Response<BoxBody> {
@@ -251,30 +632,118 @@ async fn post_speaker_enrollment_finish_response(session_id: &str) -> Response<B
 }
 
 fn list_speaker_profiles_response() -> Response<BoxBody> {
-    let profiles = load_registered_speaker_profiles()
+    cleanup_expired_assisted_voiceprint_sessions();
+    let profiles = load_speaker_voiceprint_profiles()
         .into_iter()
         .map(|profile| {
             serde_json::json!({
                 "id": profile.id,
                 "display_name": profile.display_name,
-                "embedding_dim": profile.embedding.len()
+                "embedding_dim": profile.embedding_dim,
+                "template_count": profile.templates.len().max((!profile.embedding.is_empty()) as usize),
+                "prototype_count": profile.prototypes.len().max((!profile.embedding.is_empty()) as usize),
+                "total_duration_ms": profile.total_duration_ms,
+                "source": profile.source,
             })
         })
         .collect::<Vec<_>>();
     json_response(&serde_json::json!({ "profiles": profiles }))
 }
 
+fn cleanup_expired_assisted_voiceprint_sessions() {
+    let Ok(_guard) = ASSISTED_SESSION_MUTATION_LOCK.lock() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(assisted_voiceprint_sessions_dir()) else {
+        return;
+    };
+    let now = now_ms();
+    for entry in entries.filter_map(Result::ok).filter(|entry| entry.path().is_dir()) {
+        let session_path = entry.path().join("session.json");
+        let Some(session) = std::fs::read_to_string(&session_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<AssistedVoiceprintSession>(&raw).ok())
+        else {
+            continue;
+        };
+        if now.saturating_sub(session.updated_at_ms) >= ASSISTED_SESSION_TTL_MS {
+            if let Err(error) = std::fs::remove_dir_all(entry.path()) {
+                tracing::warn!(
+                    session_id = %session.id,
+                    error = %error,
+                    "failed to clean expired assisted voiceprint session"
+                );
+            }
+        }
+    }
+}
+
+fn read_speaker_voiceprint_profile(profile_id: &str) -> Result<SpeakerVoiceprintProfile, String> {
+    validate_profile_id(profile_id)?;
+    let path = speaker_profile_path(profile_id);
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|error| format!("speaker profile not found: {error}"))?;
+    serde_json::from_str(&raw).map_err(|error| format!("read speaker profile: {error}"))
+}
+
 fn get_speaker_profile_response(profile_id: &str) -> Response<BoxBody> {
     if validate_profile_id(profile_id).is_err() {
         return error_response(StatusCode::BAD_REQUEST, "invalid speaker profile id");
     }
-    let path = speaker_profile_path(profile_id);
-    match std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<SpeakerVoiceprintProfile>(&raw).ok())
-    {
-        Some(profile) => json_response(&profile),
-        None => error_response(StatusCode::NOT_FOUND, "speaker profile not found"),
+    match read_speaker_voiceprint_profile(profile_id) {
+        Ok(profile) => json_response(&profile),
+        Err(error) => error_response(StatusCode::NOT_FOUND, &error),
+    }
+}
+
+fn delete_speaker_profile_sample_response(
+    profile_id: &str,
+    sample_id: &str,
+) -> Response<BoxBody> {
+    if validate_profile_id(profile_id).is_err() || validate_profile_id(sample_id).is_err() {
+        return error_response(StatusCode::BAD_REQUEST, "invalid speaker profile or sample id");
+    }
+    let _guard = match SPEAKER_PROFILE_MUTATION_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "speaker profile mutation lock is poisoned",
+            )
+        }
+    };
+    let mut profile = match read_speaker_voiceprint_profile(profile_id) {
+        Ok(profile) => profile,
+        Err(error) => return error_response(StatusCode::NOT_FOUND, &error),
+    };
+    migrate_legacy_profile_templates(&mut profile);
+    let Some(index) = profile
+        .templates
+        .iter()
+        .position(|template| template.id == sample_id)
+    else {
+        return error_response(StatusCode::NOT_FOUND, "speaker profile sample not found");
+    };
+    if profile.templates.len() == 1 {
+        return error_response(
+            StatusCode::CONFLICT,
+            "cannot delete the last speaker profile sample",
+        );
+    }
+    let removed = profile.templates.remove(index);
+    if let Some(prompt_id) = removed.prompt_id.as_deref() {
+        profile.samples.retain(|sample| sample.prompt_id != prompt_id);
+    }
+    if let Err(error) = rebuild_voiceprint_profile(&mut profile) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error);
+    }
+    match atomic_json_write(&speaker_profile_path(profile_id), &profile) {
+        Ok(()) => json_response(&serde_json::json!({
+            "deleted": true,
+            "sample_id": sample_id,
+            "profile": profile,
+        })),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
     }
 }
 
@@ -286,6 +755,15 @@ fn delete_speaker_profile_response(profile_id: &str) -> Response<BoxBody> {
     if !path.exists() {
         return error_response(StatusCode::NOT_FOUND, "speaker profile not found");
     }
+    let _guard = match SPEAKER_PROFILE_MUTATION_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "speaker profile mutation lock is poisoned",
+            )
+        }
+    };
     match std::fs::remove_file(&path) {
         Ok(()) => json_response(&serde_json::json!({
             "deleted": true,
@@ -524,7 +1002,7 @@ fn finish_speaker_enrollment_in_process(
     session: &SpeakerEnrollmentSession,
 ) -> Result<SpeakerEnrollmentFinishResponse, String> {
     let mut samples = Vec::new();
-    let mut embeddings = Vec::<Vec<f32>>::new();
+    let mut templates = Vec::new();
     for prompt in &session.prompts {
         let audio_path = speaker_audio_path(&session.id, &prompt.id);
         let bytes = std::fs::read(&audio_path).unwrap_or_default();
@@ -533,10 +1011,26 @@ fn finish_speaker_enrollment_in_process(
         }
         let prompt_waveform = pcm16le_to_f32(&bytes)?;
         let stats = voiceprint_sample_stats(&prompt_waveform, session.sample_rate);
-        embeddings.push(compute_speaker_embedding(
+        let embedding = compute_speaker_embedding(
             &session.diarization_profile,
             &prompt_waveform,
-        )?);
+        )?;
+        let now = now_ms();
+        templates.push(SpeakerVoiceprintTemplate {
+            id: format!("sample-{}", uuid::Uuid::new_v4()),
+            source_kind: "live_prompt".to_string(),
+            prompt_id: Some(prompt.id.clone()),
+            task_id: None,
+            file_key: None,
+            speaker: None,
+            start_ms: None,
+            end_ms: None,
+            duration_ms: pcm16_duration_ms(bytes.len() as u64, session.sample_rate),
+            quality: (1.0 - stats.1).clamp(0.0, 1.0),
+            overlap: false,
+            embedding,
+            created_at_ms: now,
+        });
         samples.push(SpeakerVoiceprintSample {
             prompt_id: prompt.id.clone(),
             text: prompt.text.clone(),
@@ -551,7 +1045,12 @@ fn finish_speaker_enrollment_in_process(
             "voiceprint audio is too short: {total_duration_ms}ms, expected at least {VOICEPRINT_MIN_TOTAL_MS}ms"
         ));
     }
-    let embedding = average_speaker_embeddings(&embeddings)
+    let embedding = average_speaker_embeddings(
+        &templates
+            .iter()
+            .map(|template| template.embedding.clone())
+            .collect::<Vec<_>>(),
+    )
         .ok_or_else(|| "voiceprint enrollment has no speaker embedding".to_string())?;
     let profile_id = format!("spk-{}", uuid::Uuid::new_v4());
     let now = now_ms();
@@ -560,6 +1059,7 @@ fn finish_speaker_enrollment_in_process(
         .to_string_lossy()
         .into_owned();
     let profile = SpeakerVoiceprintProfile {
+        schema_version: VOICEPRINT_PROFILE_SCHEMA_VERSION,
         id: profile_id.clone(),
         display_name: session.speaker_name.clone(),
         source: "live_enrollment".to_string(),
@@ -570,6 +1070,8 @@ fn finish_speaker_enrollment_in_process(
         sample_rate: session.sample_rate,
         total_duration_ms,
         samples,
+        prototypes: build_voiceprint_prototypes(&templates)?,
+        templates,
         created_at_ms: now,
         updated_at_ms: now,
     };
@@ -582,6 +1084,254 @@ fn finish_speaker_enrollment_in_process(
         profile,
         profile_path,
     })
+}
+
+fn finish_assisted_voiceprint_enrollment(
+    session: &AssistedVoiceprintSession,
+) -> Result<SpeakerEnrollmentFinishResponse, String> {
+    #[cfg(test)]
+    {
+        let templates = compute_assisted_voiceprint_templates(session)?;
+        persist_assisted_voiceprint_templates(session, templates)
+    }
+    #[cfg(not(test))]
+    {
+        let templates = run_asr_diarization_worker_request(
+            AsrDiarizationWorkerRequest::FinishAssistedEnrollment {
+                session_id: session.id.clone(),
+            },
+        )
+        .and_then(|response| match response {
+            AsrDiarizationWorkerResponse::AssistedEnrollmentTemplates { templates } => {
+                Ok(templates)
+            }
+            other => Err(format!("unexpected ASR diarization worker response: {other:?}")),
+        })?;
+        persist_assisted_voiceprint_templates(session, templates)
+    }
+}
+
+#[cfg(test)]
+fn finish_assisted_voiceprint_enrollment_in_process(
+    session: &AssistedVoiceprintSession,
+) -> Result<SpeakerEnrollmentFinishResponse, String> {
+    let templates = compute_assisted_voiceprint_templates(session)?;
+    persist_assisted_voiceprint_templates(session, templates)
+}
+
+fn compute_assisted_voiceprint_templates(
+    session: &AssistedVoiceprintSession,
+) -> Result<Vec<SpeakerVoiceprintTemplate>, String> {
+    let selected = session
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.label == AssistedCandidateLabel::Mine)
+        .collect::<Vec<_>>();
+    let selected_duration_ms = selected
+        .iter()
+        .map(|candidate| candidate.duration_ms)
+        .sum::<u64>();
+    if selected.len() < ASSISTED_ENROLLMENT_MIN_CLIPS
+        || selected_duration_ms < ASSISTED_ENROLLMENT_MIN_TOTAL_MS
+    {
+        return Err(format!(
+            "select at least {ASSISTED_ENROLLMENT_MIN_CLIPS} clips and {ASSISTED_ENROLLMENT_MIN_TOTAL_MS}ms of speech"
+        ));
+    }
+    let now = now_ms();
+    let mut templates = Vec::with_capacity(selected.len());
+    for candidate in selected {
+        if candidate.overlap || candidate.duration_ms < ASSISTED_CANDIDATE_MIN_MS {
+            return Err(format!("candidate {} does not pass the quality gate", candidate.id));
+        }
+        let audio_path = assisted_voiceprint_candidate_audio_path(&session.id, &candidate.id);
+        let bytes = std::fs::read(&audio_path)
+            .map_err(|error| format!("read assisted candidate {}: {error}", candidate.id))?;
+        let waveform = pcm16le_to_f32(&bytes)?;
+        let actual_duration_ms = pcm16_duration_ms(bytes.len() as u64, session.sample_rate);
+        if actual_duration_ms < ASSISTED_CANDIDATE_MIN_MS {
+            return Err(format!("candidate {} audio is too short", candidate.id));
+        }
+        let (rms, clipped_ratio) = voiceprint_sample_stats(&waveform, session.sample_rate);
+        if rms < VOICEPRINT_MIN_PROMPT_RMS {
+            return Err(format!("candidate {} has insufficient speech energy", candidate.id));
+        }
+        let embedding = compute_speaker_embedding(&session.diarization_profile, &waveform)?;
+        templates.push(SpeakerVoiceprintTemplate {
+            id: format!("sample-{}", uuid::Uuid::new_v4()),
+            source_kind: "task_segment".to_string(),
+            prompt_id: None,
+            task_id: Some(session.task_id.clone()),
+            file_key: Some(session.file_key.clone()),
+            speaker: Some(candidate.speaker.clone()),
+            start_ms: Some(candidate.start_ms),
+            end_ms: Some(candidate.end_ms),
+            duration_ms: actual_duration_ms,
+            quality: (candidate.quality * (1.0 - clipped_ratio)).clamp(0.0, 1.0),
+            overlap: false,
+            embedding,
+            created_at_ms: now,
+        });
+    }
+    Ok(templates)
+}
+
+fn persist_assisted_voiceprint_templates(
+    session: &AssistedVoiceprintSession,
+    templates: Vec<SpeakerVoiceprintTemplate>,
+) -> Result<SpeakerEnrollmentFinishResponse, String> {
+    let _guard = SPEAKER_PROFILE_MUTATION_LOCK
+        .lock()
+        .map_err(|_| "speaker profile mutation lock is poisoned".to_string())?;
+    let now = now_ms();
+    let mut profile = if let Some(profile_id) = session.profile_id.as_deref() {
+        let mut profile = read_speaker_voiceprint_profile(profile_id)?;
+        if profile.display_name != session.speaker_name {
+            return Err("speaker name does not match existing profile".to_string());
+        }
+        if profile.diarization_profile != session.diarization_profile {
+            return Err("diarization profile does not match existing speaker profile".to_string());
+        }
+        if profile.sample_rate != session.sample_rate {
+            return Err("sample rate does not match existing speaker profile".to_string());
+        }
+        if profile.embedding_dim != 0
+            && templates
+                .iter()
+                .any(|template| template.embedding.len() != profile.embedding_dim)
+        {
+            return Err("embedding dimension does not match existing speaker profile".to_string());
+        }
+        migrate_legacy_profile_templates(&mut profile);
+        profile.templates.extend(templates);
+        profile
+    } else {
+        let profile_id = format!("spk-{}", uuid::Uuid::new_v4());
+        SpeakerVoiceprintProfile {
+            schema_version: VOICEPRINT_PROFILE_SCHEMA_VERSION,
+            id: profile_id,
+            display_name: session.speaker_name.clone(),
+            source: "assisted_recording".to_string(),
+            diarization_profile: session.diarization_profile.clone(),
+            embedding_model: sherpa_model_pack_paths(&session.diarization_profile)
+                .embedding_model
+                .to_string_lossy()
+                .into_owned(),
+            embedding_dim: 0,
+            embedding: Vec::new(),
+            sample_rate: session.sample_rate,
+            total_duration_ms: 0,
+            samples: Vec::new(),
+            templates,
+            prototypes: Vec::new(),
+            created_at_ms: now,
+            updated_at_ms: now,
+        }
+    };
+    rebuild_voiceprint_profile(&mut profile)?;
+    let profile_path = speaker_profile_path(&profile.id);
+    std::fs::create_dir_all(voiceprint_dir())
+        .map_err(|error| format!("create speaker profile dir: {error}"))?;
+    atomic_json_write(&profile_path, &profile)?;
+    drop(_guard);
+    if let Err(error) = std::fs::remove_dir_all(assisted_voiceprint_session_dir(&session.id)) {
+        tracing::warn!(
+            session_id = %session.id,
+            error = %error,
+            "speaker profile saved but assisted session cleanup failed"
+        );
+    }
+    Ok(SpeakerEnrollmentFinishResponse { profile, profile_path })
+}
+
+fn migrate_legacy_profile_templates(profile: &mut SpeakerVoiceprintProfile) {
+    if profile.templates.is_empty() && !profile.embedding.is_empty() {
+        profile.templates.push(SpeakerVoiceprintTemplate {
+            id: format!("legacy-{}", profile.id),
+            source_kind: "legacy_centroid".to_string(),
+            prompt_id: None,
+            task_id: None,
+            file_key: None,
+            speaker: None,
+            start_ms: None,
+            end_ms: None,
+            duration_ms: profile.total_duration_ms,
+            quality: 1.0,
+            overlap: false,
+            embedding: profile.embedding.clone(),
+            created_at_ms: profile.created_at_ms,
+        });
+    }
+}
+
+fn rebuild_voiceprint_profile(profile: &mut SpeakerVoiceprintProfile) -> Result<(), String> {
+    if profile.templates.is_empty() {
+        return Err("speaker profile must retain at least one template".to_string());
+    }
+    let embeddings = profile
+        .templates
+        .iter()
+        .map(|template| template.embedding.clone())
+        .collect::<Vec<_>>();
+    let embedding = average_speaker_embeddings(&embeddings)
+        .ok_or_else(|| "speaker profile templates have incompatible embeddings".to_string())?;
+    profile.schema_version = VOICEPRINT_PROFILE_SCHEMA_VERSION;
+    profile.embedding_dim = embedding.len();
+    profile.embedding = embedding;
+    profile.total_duration_ms = profile
+        .templates
+        .iter()
+        .map(|template| template.duration_ms)
+        .sum();
+    profile.prototypes = build_voiceprint_prototypes(&profile.templates)?;
+    profile.updated_at_ms = now_ms();
+    Ok(())
+}
+
+fn build_voiceprint_prototypes(
+    templates: &[SpeakerVoiceprintTemplate],
+) -> Result<Vec<SpeakerVoiceprintPrototype>, String> {
+    let mut clusters = Vec::<(Vec<String>, Vec<Vec<f32>>, Vec<f32>)>::new();
+    for template in templates {
+        if template.embedding.is_empty() {
+            return Err(format!("template {} has an empty embedding", template.id));
+        }
+        let best = clusters
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (_, _, centroid))| {
+                cosine_similarity(&template.embedding, centroid).map(|score| (index, score))
+            })
+            .max_by(|(_, left), (_, right)| {
+                left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        if let Some((index, _score)) = best.filter(|(_, score)| {
+            *score >= VOICEPRINT_PROTOTYPE_CLUSTER_THRESHOLD
+        }) {
+            let cluster = &mut clusters[index];
+            cluster.0.push(template.id.clone());
+            cluster.1.push(template.embedding.clone());
+            cluster.2 = average_speaker_embeddings(&cluster.1)
+                .ok_or_else(|| "prototype embeddings have incompatible dimensions".to_string())?;
+        } else {
+            let mut normalized = template.embedding.clone();
+            normalize_embedding(&mut normalized);
+            clusters.push((
+                vec![template.id.clone()],
+                vec![template.embedding.clone()],
+                normalized,
+            ));
+        }
+    }
+    Ok(clusters
+        .into_iter()
+        .enumerate()
+        .map(|(index, (template_ids, _, embedding))| SpeakerVoiceprintPrototype {
+            id: format!("prototype-{}", index + 1),
+            template_ids,
+            embedding,
+        })
+        .collect())
 }
 
 fn identify_speaker_voice_pcm16(
@@ -782,6 +1532,9 @@ fn collect_diarization_speaker_waveforms(
     let mut by_speaker = BTreeMap::<String, Vec<f32>>::new();
     let sample_rate = sample_rate.max(1) as u64;
     for segment in segments {
+        if segment.overlap {
+            continue;
+        }
         let start = (segment.start_ms.saturating_mul(sample_rate) / 1_000) as usize;
         let end = (segment.end_ms.saturating_mul(sample_rate) / 1_000) as usize;
         if start >= waveform.len() || end <= start {
@@ -943,7 +1696,7 @@ fn speaker_enrollment_total_duration_ms(session_id: &str, sample_rate: u32) -> u
         .sum()
 }
 
-fn load_registered_speaker_profiles() -> Vec<RegisteredSpeakerProfile> {
+fn load_speaker_voiceprint_profiles() -> Vec<SpeakerVoiceprintProfile> {
     std::fs::read_dir(voiceprint_dir())
         .map(|entries| {
             entries
@@ -951,15 +1704,41 @@ fn load_registered_speaker_profiles() -> Vec<RegisteredSpeakerProfile> {
                 .filter(|entry| entry.path().is_file())
                 .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
                 .filter_map(|raw| serde_json::from_str::<SpeakerVoiceprintProfile>(&raw).ok())
-                .filter(|profile| !profile.embedding.is_empty())
-                .map(|profile| RegisteredSpeakerProfile {
-                    id: profile.id,
-                    display_name: profile.display_name,
-                    embedding: profile.embedding,
-                })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn load_registered_speaker_profiles() -> Vec<RegisteredSpeakerProfile> {
+    load_speaker_voiceprint_profiles()
+        .into_iter()
+        .filter_map(|profile| {
+            let mut embeddings = profile
+                .prototypes
+                .into_iter()
+                .filter_map(|prototype| (!prototype.embedding.is_empty()).then_some(prototype.embedding))
+                .collect::<Vec<_>>();
+            if !profile.embedding.is_empty() {
+                embeddings.push(profile.embedding);
+            }
+            (!embeddings.is_empty()).then_some(RegisteredSpeakerProfile {
+                id: profile.id,
+                display_name: profile.display_name,
+                embeddings,
+            })
+        })
+        .collect()
+}
+
+fn registered_speaker_profile_score(
+    embedding: &[f32],
+    profile: &RegisteredSpeakerProfile,
+) -> Option<f32> {
+    profile
+        .embeddings
+        .iter()
+        .filter_map(|prototype| cosine_similarity(embedding, prototype))
+        .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
 }
 
 pub(crate) fn registered_speaker_profile_exists(profile_id: &str) -> bool {
@@ -978,6 +1757,7 @@ struct DiarizationVoiceprintCandidate {
     profile_id: String,
     display_name: String,
     score: f32,
+    conflicted: bool,
 }
 
 #[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
@@ -991,23 +1771,31 @@ fn map_speakers_with_registered_voiceprints(
     }
     let mut candidates = BTreeMap::<String, DiarizationVoiceprintCandidate>::new();
     for (speaker, embedding) in speaker_embeddings {
-        let Some((profile, score)) = profiles
+        let mut ranked = profiles
             .iter()
             .filter_map(|profile| {
-                cosine_similarity(embedding, &profile.embedding).map(|score| (profile, score))
+                registered_speaker_profile_score(embedding, profile).map(|score| (profile, score))
             })
-            .max_by(|(_, left), (_, right)| {
-                left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
-            })
-        else {
+            .collect::<Vec<_>>();
+        ranked.sort_by(|(left_profile, left), (right_profile, right)| {
+            right
+                .partial_cmp(left)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left_profile.id.cmp(&right_profile.id))
+        });
+        let Some((profile, score)) = ranked.first().copied() else {
             continue;
         };
+        let conflicted = ranked.get(1).is_some_and(|(_, runner_up)| {
+            score - *runner_up < VOICEPRINT_PROFILE_CONFLICT_MARGIN
+        });
         candidates.insert(
             speaker.clone(),
             DiarizationVoiceprintCandidate {
                 profile_id: profile.id.clone(),
                 display_name: profile.display_name.clone(),
                 score,
+                conflicted,
             },
         );
     }
@@ -1017,6 +1805,7 @@ fn map_speakers_with_registered_voiceprints(
             .iter()
             .filter(|(speaker, candidate)| {
                 candidate.score >= VOICEPRINT_SELF_PRIORITY_THRESHOLD
+                    && !candidate.conflicted
                     && durations.get(*speaker).is_some_and(|duration| {
                         *duration >= VOICEPRINT_SELF_PRIORITY_MIN_DURATION_MS
                     })
@@ -1040,7 +1829,8 @@ fn map_speakers_with_registered_voiceprints(
             profile_id = %candidate.profile_id,
             profile_name = %candidate.display_name,
             confidence = candidate.score,
-            matched = candidate.score >= VOICEPRINT_SPEAKER_MATCH_THRESHOLD || self_priority_matched,
+            matched = !candidate.conflicted && (candidate.score >= VOICEPRINT_SPEAKER_MATCH_THRESHOLD || self_priority_matched),
+            conflicted = candidate.conflicted,
             self_priority_matched = self_priority_matched,
             threshold = VOICEPRINT_SPEAKER_MATCH_THRESHOLD,
             "evaluated diarization speaker voiceprint candidate"
@@ -1056,7 +1846,9 @@ fn map_speakers_with_registered_voiceprints(
         let self_priority_matched = self_priority_speaker
             .as_ref()
             .is_some_and(|speaker| speaker == &segment.speaker);
-        if candidate.score >= VOICEPRINT_SPEAKER_MATCH_THRESHOLD || self_priority_matched {
+        if !candidate.conflicted
+            && (candidate.score >= VOICEPRINT_SPEAKER_MATCH_THRESHOLD || self_priority_matched)
+        {
             segment.display_name = candidate.display_name.clone();
             segment.mapped_profile_id = Some(candidate.profile_id.clone());
             segment.confidence = Some(candidate.score);
@@ -1081,7 +1873,7 @@ fn identify_speaker_voice(
 ) -> Result<SpeakerVoiceIdentifyResponse, String> {
     ensure_diarization_profile_ready_for_voiceprint(DEFAULT_DIARIZATION_PROFILE)?;
     let embedding = compute_speaker_embedding(DEFAULT_DIARIZATION_PROFILE, waveform)?;
-    let Some((profile, confidence)) = best_registered_speaker_match(&embedding) else {
+    let Some((profile, confidence, conflicted)) = best_registered_speaker_match(&embedding) else {
         return Ok(unknown_speaker_identify_response(
             0.0,
             audio_duration_ms,
@@ -1089,13 +1881,15 @@ fn identify_speaker_voice(
         ));
     };
     Ok(SpeakerVoiceIdentifyResponse {
-        matched: confidence >= VOICEPRINT_SPEAKER_MATCH_THRESHOLD,
+        matched: confidence >= VOICEPRINT_SPEAKER_MATCH_THRESHOLD && !conflicted,
         profile_id: Some(profile.id),
         display_name: profile.display_name,
         speaker: "speaker_00".to_string(),
         confidence,
-        status: if confidence >= VOICEPRINT_SPEAKER_MATCH_THRESHOLD {
+        status: if confidence >= VOICEPRINT_SPEAKER_MATCH_THRESHOLD && !conflicted {
             "matched".to_string()
+        } else if conflicted {
+            "ambiguous".to_string()
         } else {
             "unmatched".to_string()
         },
@@ -1213,6 +2007,7 @@ pub(crate) struct VoiceprintMatchResult {
     pub(crate) profile_id: String,
     pub(crate) display_name: String,
     pub(crate) confidence: f32,
+    pub(crate) unambiguous: bool,
 }
 
 pub(crate) fn voiceprint_registered_profile_count() -> usize {
@@ -1265,22 +2060,34 @@ pub(crate) fn compute_voiceprint_embedding_from_pcm16le(
 pub(crate) fn best_registered_voiceprint_match(
     embedding: &[f32],
 ) -> Option<VoiceprintMatchResult> {
-    best_registered_speaker_match(embedding).map(|(profile, confidence)| VoiceprintMatchResult {
+    best_registered_speaker_match(embedding).map(|(profile, confidence, conflicted)| VoiceprintMatchResult {
         profile_id: profile.id,
         display_name: profile.display_name,
         confidence,
+        unambiguous: !conflicted,
     })
 }
 
-fn best_registered_speaker_match(embedding: &[f32]) -> Option<(RegisteredSpeakerProfile, f32)> {
-    load_registered_speaker_profiles()
+fn best_registered_speaker_match(
+    embedding: &[f32],
+) -> Option<(RegisteredSpeakerProfile, f32, bool)> {
+    let mut ranked = load_registered_speaker_profiles()
         .into_iter()
         .filter_map(|profile| {
-            cosine_similarity(embedding, &profile.embedding).map(|score| (profile, score))
+            registered_speaker_profile_score(embedding, &profile).map(|score| (profile, score))
         })
-        .max_by(|(_, left), (_, right)| {
-            left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
-        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|(left_profile, left), (right_profile, right)| {
+        right
+            .partial_cmp(left)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left_profile.id.cmp(&right_profile.id))
+    });
+    let runner_up = ranked.get(1).map(|(_, score)| *score);
+    let (profile, score) = ranked.into_iter().next()?;
+    let conflicted = runner_up
+        .is_some_and(|runner_up| score - runner_up < VOICEPRINT_PROFILE_CONFLICT_MARGIN);
+    Some((profile, score, conflicted))
 }
 
 fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {

@@ -5,8 +5,6 @@ use bifrost_asr::native::sherpa_onnx::{
     OfflineSpeakerSegmentationModelConfig, OfflineSpeakerSegmentationPyannoteModelConfig,
     SpeakerEmbeddingExtractor, SpeakerEmbeddingExtractorConfig, Wave,
 };
-#[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
-use bifrost_asr::profiles::DEFAULT_AUTO_MAX_SPEAKERS;
 
 const SHERPA_SEGMENTATION_MODEL_URL: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.int8.onnx";
@@ -22,6 +20,15 @@ const VOICEPRINT_MIN_IDENTIFY_SPEECH_MS: u64 = 800;
 const VOICEPRINT_IDENTIFY_SPEECH_RMS: f32 = 0.006;
 const VOICEPRINT_PROMPT_MATCH_THRESHOLD: f32 = 0.72;
 pub(crate) const VOICEPRINT_SPEAKER_MATCH_THRESHOLD: f32 = 0.60;
+const VOICEPRINT_PROFILE_SCHEMA_VERSION: u32 = 2;
+const VOICEPRINT_PROTOTYPE_CLUSTER_THRESHOLD: f32 = 0.72;
+const VOICEPRINT_PROFILE_CONFLICT_MARGIN: f32 = 0.08;
+const ASSISTED_CANDIDATE_MIN_MS: u64 = 3_000;
+const ASSISTED_CANDIDATE_MAX_MS: u64 = 12_000;
+const ASSISTED_CANDIDATES_PER_SPEAKER: usize = 8;
+const ASSISTED_ENROLLMENT_MIN_CLIPS: usize = 3;
+const ASSISTED_ENROLLMENT_MIN_TOTAL_MS: u64 = 12_000;
+const ASSISTED_SESSION_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
 const UPLOAD_SPEAKER_ASR_CHUNK_DURATION_SECS: u64 = 30;
 const UPLOAD_SPEAKER_ASR_CHUNK_OVERLAP_SECS: u64 = 2;
 
@@ -216,8 +223,40 @@ struct SpeakerVoiceprintSample {
     clipped_ratio: f32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SpeakerVoiceprintTemplate {
+    id: String,
+    source_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    speaker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    start_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    end_ms: Option<u64>,
+    duration_ms: u64,
+    quality: f32,
+    overlap: bool,
+    embedding: Vec<f32>,
+    created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SpeakerVoiceprintPrototype {
+    id: String,
+    template_ids: Vec<String>,
+    embedding: Vec<f32>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct SpeakerVoiceprintProfile {
+    #[serde(default = "default_voiceprint_profile_schema_version")]
+    schema_version: u32,
     id: String,
     display_name: String,
     source: String,
@@ -228,6 +267,10 @@ struct SpeakerVoiceprintProfile {
     sample_rate: u32,
     total_duration_ms: u64,
     samples: Vec<SpeakerVoiceprintSample>,
+    #[serde(default)]
+    templates: Vec<SpeakerVoiceprintTemplate>,
+    #[serde(default)]
+    prototypes: Vec<SpeakerVoiceprintPrototype>,
     created_at_ms: u64,
     updated_at_ms: u64,
 }
@@ -236,7 +279,78 @@ struct SpeakerVoiceprintProfile {
 struct RegisteredSpeakerProfile {
     id: String,
     display_name: String,
-    embedding: Vec<f32>,
+    embeddings: Vec<Vec<f32>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AssistedCandidateLabel {
+    Mine,
+    NotMine,
+    Unsure,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AssistedVoiceprintSessionState {
+    Open,
+    Finishing,
+}
+
+fn default_assisted_voiceprint_session_state() -> AssistedVoiceprintSessionState {
+    AssistedVoiceprintSessionState::Open
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AssistedVoiceprintCandidate {
+    id: String,
+    speaker: String,
+    start_ms: u64,
+    end_ms: u64,
+    duration_ms: u64,
+    text: String,
+    quality: f32,
+    overlap: bool,
+    label: AssistedCandidateLabel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AssistedVoiceprintSession {
+    id: String,
+    #[serde(default = "default_assisted_voiceprint_session_state")]
+    state: AssistedVoiceprintSessionState,
+    speaker_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile_id: Option<String>,
+    task_id: String,
+    file_key: String,
+    source_path: PathBuf,
+    diarization_profile: String,
+    sample_rate: u32,
+    candidates: Vec<AssistedVoiceprintCandidate>,
+    created_at_ms: u64,
+    updated_at_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AssistedVoiceprintSessionCreateRequest {
+    name: String,
+    #[serde(default)]
+    profile_id: Option<String>,
+    task_id: String,
+    file_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AssistedVoiceprintLabelUpdate {
+    candidate_id: String,
+    label: AssistedCandidateLabel,
+}
+
+#[derive(Debug, Deserialize)]
+struct AssistedVoiceprintLabelsRequest {
+    labels: Vec<AssistedVoiceprintLabelUpdate>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -260,6 +374,9 @@ enum AsrDiarizationWorkerRequest {
     FinishEnrollment {
         session_id: String,
     },
+    FinishAssistedEnrollment {
+        session_id: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -268,6 +385,7 @@ enum AsrDiarizationWorkerResponse {
     Diarize { segments: Vec<DiarizationSegment> },
     Identify { response: SpeakerVoiceIdentifyResponse },
     FinishEnrollment { response: SpeakerEnrollmentFinishResponse },
+    AssistedEnrollmentTemplates { templates: Vec<SpeakerVoiceprintTemplate> },
 }
 
 async fn handle_diarization_api(req: Request<Incoming>, path: &str) -> Response<BoxBody> {
@@ -311,16 +429,69 @@ async fn handle_diarization_api(req: Request<Incoming>, path: &str) -> Response<
         (&Method::POST, "/api/asr/speaker-profiles/identify") => {
             post_speaker_voice_identify_response(req).await
         }
+        (&Method::POST, "/api/asr/speaker-profiles/assisted-sessions") => {
+            post_assisted_voiceprint_session_response(req).await
+        }
+        (&Method::GET, _)
+            if path.starts_with("/api/asr/speaker-profiles/assisted-sessions/") =>
+        {
+            let session_id = path
+                .trim_start_matches("/api/asr/speaker-profiles/assisted-sessions/")
+                .trim_matches('/');
+            get_assisted_voiceprint_session_response(session_id)
+        }
+        (&Method::POST, _)
+            if path.starts_with("/api/asr/speaker-profiles/assisted-sessions/")
+                && path.ends_with("/labels") =>
+        {
+            let session_id = path
+                .trim_start_matches("/api/asr/speaker-profiles/assisted-sessions/")
+                .trim_end_matches("/labels")
+                .trim_matches('/');
+            post_assisted_voiceprint_labels_response(session_id, req).await
+        }
+        (&Method::POST, _)
+            if path.starts_with("/api/asr/speaker-profiles/assisted-sessions/")
+                && path.ends_with("/finish") =>
+        {
+            let session_id = path
+                .trim_start_matches("/api/asr/speaker-profiles/assisted-sessions/")
+                .trim_end_matches("/finish")
+                .trim_matches('/');
+            post_assisted_voiceprint_finish_response(session_id).await
+        }
+        (&Method::DELETE, _)
+            if path.starts_with("/api/asr/speaker-profiles/assisted-sessions/") =>
+        {
+            let session_id = path
+                .trim_start_matches("/api/asr/speaker-profiles/assisted-sessions/")
+                .trim_matches('/');
+            delete_assisted_voiceprint_session_response(session_id)
+        }
+        (&Method::DELETE, _)
+            if path.starts_with("/api/asr/speaker-profiles/") && path.contains("/samples/") =>
+        {
+            let parts = path
+                .trim_start_matches("/api/asr/speaker-profiles/")
+                .split('/')
+                .collect::<Vec<_>>();
+            if parts.len() != 3 || parts[1] != "samples" {
+                return error_response(StatusCode::NOT_FOUND, "speaker sample endpoint not found");
+            }
+            delete_speaker_profile_sample_response(parts[0], parts[2])
+        }
         (&Method::DELETE, _)
             if path.starts_with("/api/asr/speaker-profiles/")
-                && !path.contains("/enrollment-sessions/") =>
+                && !path.contains("/enrollment-sessions/")
+                && !path.contains("/assisted-sessions/") =>
         {
             let profile_id = path.trim_start_matches("/api/asr/speaker-profiles/");
             delete_speaker_profile_response(profile_id)
         }
         (&Method::GET, _)
             if path.starts_with("/api/asr/speaker-profiles/")
-                && !path.contains("/enrollment-sessions/") =>
+                && !path.contains("/enrollment-sessions/")
+                && !path.contains("/assisted-sessions/") =>
         {
             let profile_id = path.trim_start_matches("/api/asr/speaker-profiles/");
             get_speaker_profile_response(profile_id)
@@ -646,11 +817,10 @@ fn count_speaker_profiles() -> usize {
 
 #[cfg(any(test, all(target_os = "macos", target_arch = "aarch64")))]
 fn resolved_diarization_cluster_count(config: &AsrDiarizationConfig) -> i32 {
-    let count = config
+    config
         .known_speaker_count
-        .or(config.max_speakers)
-        .unwrap_or(DEFAULT_AUTO_MAX_SPEAKERS);
-    i32::from(count.max(1))
+        .map(|count| i32::from(count.max(1)))
+        .unwrap_or(-1)
 }
 
 fn apply_diarization_to_timeline(
@@ -773,6 +943,12 @@ fn run_asr_diarization_worker_request_in_process(
             let session = read_speaker_enrollment_session(&session_id)?;
             finish_speaker_enrollment_in_process(&session)
                 .map(|response| AsrDiarizationWorkerResponse::FinishEnrollment { response })
+        }
+        AsrDiarizationWorkerRequest::FinishAssistedEnrollment { session_id } => {
+            let session = read_assisted_voiceprint_session(&session_id)?;
+            compute_assisted_voiceprint_templates(&session).map(|templates| {
+                AsrDiarizationWorkerResponse::AssistedEnrollmentTemplates { templates }
+            })
         }
     }
 }

@@ -1,21 +1,35 @@
-import { useEffect, useState } from "react";
-import { Button, Card, Descriptions, Input, List, Modal, Popconfirm, Progress, Space, Tag, Typography, message } from "antd";
-import { AudioOutlined, DeleteOutlined, ReloadOutlined, SafetyCertificateOutlined, ToolOutlined, UserAddOutlined } from "@ant-design/icons";
+import { useEffect, useRef, useState } from "react";
+import { Alert, Button, Card, Descriptions, Divider, Input, List, Modal, Popconfirm, Progress, Segmented, Select, Space, Tag, Typography, message } from "antd";
+import { AudioOutlined, DeleteOutlined, FolderOpenOutlined, PlayCircleOutlined, ReloadOutlined, SafetyCertificateOutlined, ToolOutlined, UserAddOutlined } from "@ant-design/icons";
 import type {
+  AsrAssistedCandidateLabel,
+  AsrAssistedVoiceprintSessionPayload,
+  AsrDirectoryTask,
+  AsrDirectoryTaskDetail,
   AsrDiarizationStatus,
   AsrSpeakerIdentifyResult,
   AsrSpeakerEnrollmentPrompt,
+  AsrSpeakerProfileDetail,
   AsrSpeakerProfileSummary,
 } from "../../../api/asr";
 import {
   appendAsrSpeakerEnrollmentAudio,
+  buildAsrTaskFileSourceUrl,
+  createAsrAssistedVoiceprintSession,
   createAsrSpeakerEnrollmentSession,
+  deleteAsrAssistedVoiceprintSession,
   deleteAsrSpeakerProfile,
+  deleteAsrSpeakerProfileSample,
+  finishAsrAssistedVoiceprintSession,
   finishAsrSpeakerEnrollment,
+  getAsrSpeakerProfile,
+  getAsrTask,
   getAsrDiarizationStatus,
   identifyAsrSpeakerVoice,
   initAsrDiarizationProfile,
+  listAsrTasks,
   listAsrSpeakerProfiles,
+  updateAsrAssistedVoiceprintLabels,
   verifyAsrSpeakerEnrollmentPrompt,
 } from "../../../api/asr";
 
@@ -44,6 +58,18 @@ export default function DiarizationSetupCard() {
   const [activeMatchScore, setActiveMatchScore] = useState(0);
   const [identifying, setIdentifying] = useState(false);
   const [identityResult, setIdentityResult] = useState<AsrSpeakerIdentifyResult | null>(null);
+  const [assistedOpen, setAssistedOpen] = useState(false);
+  const [assistedBusy, setAssistedBusy] = useState(false);
+  const [assistedProfileId, setAssistedProfileId] = useState<string | undefined>();
+  const [assistedTaskId, setAssistedTaskId] = useState<string>();
+  const [assistedFileKey, setAssistedFileKey] = useState<string>();
+  const [assistedTasks, setAssistedTasks] = useState<AsrDirectoryTask[]>([]);
+  const [assistedTask, setAssistedTask] = useState<AsrDirectoryTaskDetail | null>(null);
+  const [assistedSession, setAssistedSession] = useState<AsrAssistedVoiceprintSessionPayload | null>(null);
+  const [profileDetail, setProfileDetail] = useState<AsrSpeakerProfileDetail | null>(null);
+  const [profileDetailOpen, setProfileDetailOpen] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioStopTimerRef = useRef<number | undefined>(undefined);
 
   const refresh = async () => {
     setLoading(true);
@@ -161,6 +187,131 @@ export default function DiarizationSetupCard() {
     }
   };
 
+  const openAssistedEnrollment = async (profile?: AsrSpeakerProfileSummary) => {
+    setAssistedOpen(true);
+    setAssistedProfileId(profile?.id);
+    setSpeakerName(profile?.display_name ?? "");
+    setAssistedTaskId(undefined);
+    setAssistedFileKey(undefined);
+    setAssistedTask(null);
+    setAssistedSession(null);
+    try {
+      setAssistedTasks(await listAsrTasks());
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "Failed to load ASR tasks");
+    }
+  };
+
+  const selectAssistedTask = async (taskId: string) => {
+    setAssistedTaskId(taskId);
+    setAssistedFileKey(undefined);
+    setAssistedTask(null);
+    try {
+      setAssistedTask(await getAsrTask(taskId));
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "Failed to load task recordings");
+    }
+  };
+
+  const createAssistedSession = async () => {
+    if (!speakerName.trim() || !assistedTaskId || !assistedFileKey) return;
+    setAssistedBusy(true);
+    try {
+      const payload = await createAsrAssistedVoiceprintSession({
+        name: speakerName.trim(),
+        profile_id: assistedProfileId,
+        task_id: assistedTaskId,
+        file_key: assistedFileKey,
+      });
+      setAssistedSession(payload);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "Failed to prepare voiceprint candidates");
+    } finally {
+      setAssistedBusy(false);
+    }
+  };
+
+  const labelAssistedCandidate = async (candidateId: string, label: AsrAssistedCandidateLabel) => {
+    if (!assistedSession) return;
+    try {
+      const payload = await updateAsrAssistedVoiceprintLabels(assistedSession.session.id, [
+        { candidate_id: candidateId, label },
+      ]);
+      setAssistedSession(payload);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "Failed to save candidate label");
+    }
+  };
+
+  const playAssistedCandidate = (startMs: number, endMs: number) => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (audioStopTimerRef.current !== undefined) {
+      window.clearTimeout(audioStopTimerRef.current);
+    }
+    audio.currentTime = startMs / 1000;
+    void audio.play();
+    audioStopTimerRef.current = window.setTimeout(() => {
+      audio.pause();
+      audioStopTimerRef.current = undefined;
+    }, Math.max(0, endMs - startMs));
+  };
+
+  const finishAssistedSession = async () => {
+    if (!assistedSession?.ready_to_finish) return;
+    setAssistedBusy(true);
+    try {
+      const result = await finishAsrAssistedVoiceprintSession(assistedSession.session.id);
+      message.success(`Voiceprint samples saved for ${result.profile.display_name}`);
+      setAssistedOpen(false);
+      setAssistedSession(null);
+      await refresh();
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "Failed to finish voiceprint enrollment");
+    } finally {
+      setAssistedBusy(false);
+    }
+  };
+
+  const closeAssistedEnrollment = async () => {
+    if (assistedBusy) return;
+    if (audioStopTimerRef.current !== undefined) {
+      window.clearTimeout(audioStopTimerRef.current);
+      audioStopTimerRef.current = undefined;
+    }
+    const sessionId = assistedSession?.session.id;
+    setAssistedOpen(false);
+    setAssistedSession(null);
+    setSpeakerName("");
+    if (sessionId) {
+      try {
+        await deleteAsrAssistedVoiceprintSession(sessionId);
+      } catch {
+        // Expiry cleanup is a server-side fallback; closing the UI should stay responsive.
+      }
+    }
+  };
+
+  const showProfileDetail = async (profileId: string) => {
+    try {
+      setProfileDetail(await getAsrSpeakerProfile(profileId));
+      setProfileDetailOpen(true);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "Failed to load voiceprint samples");
+    }
+  };
+
+  const deleteProfileSample = async (profileId: string, sampleId: string) => {
+    try {
+      await deleteAsrSpeakerProfileSample(profileId, sampleId);
+      setProfileDetail(await getAsrSpeakerProfile(profileId));
+      await refresh();
+      message.success("Voiceprint sample deleted and profile rebuilt");
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "Failed to delete voiceprint sample");
+    }
+  };
+
   return (
     <>
       <Card
@@ -180,12 +331,22 @@ export default function DiarizationSetupCard() {
             <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void refresh()} />
             <Button
               size="small"
+              type="primary"
+              icon={<FolderOpenOutlined />}
+              data-testid="asr-assisted-enroll-button"
+              disabled={!status?.profile.ready}
+              onClick={() => void openAssistedEnrollment()}
+            >
+              Add from Recording
+            </Button>
+            <Button
+              size="small"
               icon={<UserAddOutlined />}
               data-testid="asr-enroll-voiceprint-button"
               disabled={!status?.profile.ready}
               onClick={() => setEnrollOpen(true)}
             >
-              Enroll Voiceprint
+              Record Voice
             </Button>
             <Button
               size="small"
@@ -233,6 +394,12 @@ export default function DiarizationSetupCard() {
             renderItem={(profile) => (
               <List.Item
                 actions={[
+                  <Button key="samples" size="small" onClick={() => void showProfileDetail(profile.id)}>
+                    Samples
+                  </Button>,
+                  <Button key="append" size="small" onClick={() => void openAssistedEnrollment(profile)}>
+                    Add samples
+                  </Button>,
                   <Popconfirm
                     key="delete"
                     title="Delete this voiceprint?"
@@ -254,6 +421,9 @@ export default function DiarizationSetupCard() {
                   <Tag color="blue">{profile.display_name}</Tag>
                   <Text type="secondary">{profile.id}</Text>
                   <Text type="secondary">{profile.embedding_dim}d</Text>
+                  <Text type="secondary">
+                    {profile.template_count} samples · {profile.prototype_count} prototypes · {Math.round(profile.total_duration_ms / 100) / 10}s
+                  </Text>
                 </Space>
               </List.Item>
             )}
@@ -322,6 +492,175 @@ export default function DiarizationSetupCard() {
             </Card>
           ) : null}
         </Space>
+      </Modal>
+      <Modal
+        title={assistedProfileId ? "Add Voiceprint Samples" : "Initialize Voiceprint from Recording"}
+        open={assistedOpen}
+        width={860}
+        confirmLoading={assistedBusy}
+        okText={assistedSession ? "Save Voiceprint" : "Find Speaker Segments"}
+        onOk={() => void (assistedSession ? finishAssistedSession() : createAssistedSession())}
+        onCancel={() => void closeAssistedEnrollment()}
+        okButtonProps={{
+          disabled: assistedSession
+            ? !assistedSession.ready_to_finish
+            : !speakerName.trim() || !assistedTaskId || !assistedFileKey,
+          "data-testid": "asr-assisted-finish-button",
+        }}
+        cancelButtonProps={{ disabled: assistedBusy }}
+        destroyOnClose
+      >
+        {!assistedSession ? (
+          <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+            <Alert
+              type="info"
+              showIcon
+              message="Choose a real meeting recording, then confirm only the segments spoken by you."
+              description="Bifrost excludes overlapping and short segments. Nothing is added permanently until you save the voiceprint."
+            />
+            <Input
+              data-testid="asr-assisted-speaker-name"
+              placeholder="Speaker name"
+              value={speakerName}
+              disabled={Boolean(assistedProfileId)}
+              onChange={(event) => setSpeakerName(event.target.value)}
+            />
+            <Select
+              data-testid="asr-assisted-task-select"
+              style={{ width: "100%" }}
+              placeholder="Select an ASR task"
+              value={assistedTaskId}
+              options={assistedTasks.map((task) => ({ label: task.name, value: task.id }))}
+              onChange={(value) => void selectAssistedTask(value)}
+            />
+            <Select
+              data-testid="asr-assisted-file-select"
+              style={{ width: "100%" }}
+              placeholder="Select a completed speaker-aware recording"
+              value={assistedFileKey}
+              disabled={!assistedTask}
+              options={(assistedTask?.files ?? [])
+                .filter((file) => ["success", "partial_success"].includes(file.status) && file.output_timeline_path)
+                .map((file) => ({
+                  label: `${file.source_path.split("/").at(-1) ?? file.source_path}${file.speaker_count ? ` · ${file.speaker_count} speakers` : ""}`,
+                  value: file.key,
+                }))}
+              onChange={setAssistedFileKey}
+            />
+          </Space>
+        ) : (
+          <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+            <audio
+              ref={audioRef}
+              controls
+              preload="metadata"
+              src={buildAsrTaskFileSourceUrl(
+                assistedSession.session.task_id,
+                assistedSession.session.file_key,
+              )}
+              style={{ width: "100%" }}
+              data-testid="asr-assisted-audio-player"
+            />
+            <Alert
+              type={assistedSession.ready_to_finish ? "success" : "warning"}
+              showIcon
+              message={`${assistedSession.selected_count} segments selected · ${Math.round(assistedSession.selected_duration_ms / 100) / 10}s`}
+              description={assistedSession.ready_to_finish
+                ? "Enough confirmed speech is selected. More varied, clean segments can improve cross-device recognition."
+                : `Select at least ${assistedSession.minimum_clips} segments and ${assistedSession.minimum_duration_ms / 1000}s of your speech.`}
+            />
+            <List
+              size="small"
+              data-testid="asr-assisted-candidate-list"
+              dataSource={assistedSession.session.candidates}
+              renderItem={(candidate) => (
+                <List.Item
+                  actions={[
+                    <Button
+                      key="play"
+                      size="small"
+                      icon={<PlayCircleOutlined />}
+                      onClick={() => playAssistedCandidate(candidate.start_ms, candidate.end_ms)}
+                    >
+                      Play
+                    </Button>,
+                    <Segmented<AsrAssistedCandidateLabel>
+                      key="label"
+                      size="small"
+                      value={candidate.label}
+                      options={[
+                        { label: "Mine", value: "mine" },
+                        { label: "Not mine", value: "not_mine" },
+                        { label: "Skip", value: "unsure" },
+                      ]}
+                      onChange={(value) => void labelAssistedCandidate(candidate.id, value)}
+                    />,
+                  ]}
+                >
+                  <Space direction="vertical" size={2} style={{ minWidth: 0 }}>
+                    <Space>
+                      <Tag>{candidate.speaker}</Tag>
+                      <Text type="secondary">
+                        {(candidate.start_ms / 1000).toFixed(1)}–{(candidate.end_ms / 1000).toFixed(1)}s · {(candidate.duration_ms / 1000).toFixed(1)}s
+                      </Text>
+                      <Tag color={candidate.quality >= 0.8 ? "success" : "processing"}>
+                        {Math.round(candidate.quality * 100)}% quality
+                      </Tag>
+                    </Space>
+                    <Text ellipsis={{ tooltip: candidate.text }}>{candidate.text || "No transcript text"}</Text>
+                  </Space>
+                </List.Item>
+              )}
+            />
+          </Space>
+        )}
+      </Modal>
+      <Modal
+        title={profileDetail ? `${profileDetail.display_name} Voiceprint Samples` : "Voiceprint Samples"}
+        open={profileDetailOpen}
+        footer={null}
+        onCancel={() => setProfileDetailOpen(false)}
+        destroyOnClose
+      >
+        {profileDetail ? (
+          <>
+            <Descriptions size="small" column={2}>
+              <Descriptions.Item label="Templates">{profileDetail.templates.length}</Descriptions.Item>
+              <Descriptions.Item label="Total speech">{Math.round(profileDetail.total_duration_ms / 100) / 10}s</Descriptions.Item>
+            </Descriptions>
+            <Divider />
+            {profileDetail.templates.length ? (
+              <List
+                size="small"
+                dataSource={profileDetail.templates}
+                renderItem={(sample) => (
+                  <List.Item
+                    actions={[
+                      <Popconfirm
+                        key="delete"
+                        title="Delete this sample and rebuild the profile?"
+                        onConfirm={() => void deleteProfileSample(profileDetail.id, sample.id)}
+                      >
+                        <Button danger size="small" icon={<DeleteOutlined />} disabled={profileDetail.templates.length <= 1} />
+                      </Popconfirm>,
+                    ]}
+                  >
+                    <Space direction="vertical" size={2}>
+                      <Space>
+                        <Tag>{sample.source_kind}</Tag>
+                        <Text>{(sample.duration_ms / 1000).toFixed(1)}s</Text>
+                        {sample.speaker ? <Text type="secondary">{sample.speaker}</Text> : null}
+                      </Space>
+                      <Text type="secondary">{sample.id}</Text>
+                    </Space>
+                  </List.Item>
+                )}
+              />
+            ) : (
+              <Alert type="info" message="Legacy centroid profile" description="Add recording samples to migrate this profile to editable multi-template format." />
+            )}
+          </>
+        ) : null}
       </Modal>
     </>
   );
