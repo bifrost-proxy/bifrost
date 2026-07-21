@@ -160,7 +160,12 @@ grep -Fq 'shell_test_capability_group()' "$runner"
 grep -Fq 'BIFROST_E2E_SHELL_TESTS' "$runner"
 grep -Fq 'PROXY_COVERAGE_SHELL_MANIFEST' "$coverage_all"
 grep -Fq 'rules | shell | runner | proxy' "$coverage_all"
-[[ "$(wc -l <"$proxy_coverage_shell_manifest" | tr -d ' ')" -eq 13 ]]
+expected_proxy_coverage_shell_tests=14
+actual_proxy_coverage_shell_tests="$(wc -l <"$proxy_coverage_shell_manifest" | tr -d ' ')"
+if [[ "$actual_proxy_coverage_shell_tests" -ne "$expected_proxy_coverage_shell_tests" ]]; then
+  echo "proxy coverage shell manifest count mismatch: expected $expected_proxy_coverage_shell_tests, got $actual_proxy_coverage_shell_tests" >&2
+  exit 1
+fi
 while IFS= read -r proxy_shell_test; do
   [[ -f "e2e-tests/tests/$proxy_shell_test" ]]
 done <"$proxy_coverage_shell_manifest"

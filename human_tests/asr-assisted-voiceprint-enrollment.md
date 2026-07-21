@@ -124,6 +124,21 @@
 - 上线门禁包含 precision/误认率黄金集目标、changed-lines 和 workspace coverage CI。
 - PR 的 proxy coverage 使用 instrumented Bifrost 二进制执行本功能真实 API E2E，而不是只依赖 mock。
 
+### TC-AVA-09：Proxy coverage manifest 契约包含新增 ASR E2E
+
+操作步骤：
+
+1. 执行 `test "$(wc -l < scripts/ci/proxy-coverage-shell-tests.txt | tr -d ' ')" -eq 14`。
+2. 执行 `tail -n 1 scripts/ci/proxy-coverage-shell-tests.txt`。
+3. 执行 `bash e2e-tests/tests/test_coverage_pipeline_contract.sh`。
+4. 执行 `rg -n "expected_proxy_coverage_shell_tests=14|manifest count mismatch" e2e-tests/tests/test_coverage_pipeline_contract.sh`。
+
+预期结果：
+
+- manifest 恰好包含 14 项，最后一项是 `test_asr_assisted_voiceprint_api.sh`。
+- coverage pipeline contract 输出 `Coverage pipeline contract: PASS` 并以 0 退出。
+- 契约脚本包含显式 expected/actual mismatch 诊断；manifest 数量再次漂移时不会把前一条成功日志误报为失败原因。
+
 ## 清理步骤
 
 1. 两个测试脚本/Playwright 配置自动终止它们记录的独立进程。
