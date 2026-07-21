@@ -722,17 +722,27 @@ async fn check_unified_version_for_channel(
             check_version_for_channel(state, false, UpgradeChannel::Desktop).await
         }
         UpgradeChannel::Desktop => {
-            let standalone_cli_version =
-                tokio::task::spawn_blocking(standalone_cli_version_for_version_check)
-                    .await
-                    .ok()
-                    .flatten();
-            if let Some(cli_version) = standalone_cli_version {
-                state
-                    .version_checker
-                    .check_with_current_version(false, cli_version)
-                    .await
+            if desktop_version_check_uses_standalone_cli(desktop_core_env_enabled(
+                std::env::var_os(DESKTOP_CORE_ENV),
+            )) {
+                let standalone_cli_version =
+                    tokio::task::spawn_blocking(standalone_cli_version_for_version_check)
+                        .await
+                        .ok()
+                        .flatten();
+                if let Some(cli_version) = standalone_cli_version {
+                    state
+                        .version_checker
+                        .check_with_current_version(false, cli_version)
+                        .await
+                } else {
+                    check_version_for_channel(state, false, UpgradeChannel::Cli).await
+                }
             } else {
+                // A desktop WebView can reuse a CLI-owned core. In that mode
+                // the serving executable is the effective CLI companion; do
+                // not skip it and accidentally select an inactive old copy
+                // elsewhere on PATH (for example ~/.cargo/bin/bifrost).
                 check_version_for_channel(state, false, UpgradeChannel::Cli).await
             }
         }
@@ -746,12 +756,17 @@ fn merge_companion_update(
 ) -> crate::VersionCheckResponse {
     if !primary.has_update && companion.has_update {
         primary.has_update = true;
+        primary.current_version = companion.current_version;
         primary.latest_version = companion.latest_version;
         primary.release_highlights = companion.release_highlights;
         primary.release_url = companion.release_url;
         primary.checked_at = companion.checked_at;
     }
     primary
+}
+
+fn desktop_version_check_uses_standalone_cli(desktop_core: bool) -> bool {
+    desktop_core
 }
 
 fn required_upgrade_target(version: &crate::VersionCheckResponse) -> Result<String, &'static str> {
@@ -959,7 +974,8 @@ fn upgrade_log_stdio() -> Stdio {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cli_install_status, check_version, desktop_core_env_enabled,
+        build_cli_install_status, check_unified_version_for_channel, check_version,
+        desktop_core_env_enabled, desktop_version_check_uses_standalone_cli,
         effective_upgrade_channel, install_binary_atomically, install_cli_from_current_exe,
         merge_companion_update, normalize_progress, parse_upgrade_channel, required_upgrade_target,
         spawn_upgrade_process, start_upgrade, upgrade_process_args, upgrade_process_environment,
@@ -992,7 +1008,7 @@ mod tests {
         let companion = version_response("0.0.155", "0.0.156", true);
         let merged = merge_companion_update(primary, companion);
         assert!(merged.has_update);
-        assert_eq!(merged.current_version, "0.0.156");
+        assert_eq!(merged.current_version, "0.0.155");
         assert_eq!(merged.latest_version.as_deref(), Some("0.0.156"));
 
         let primary_update = version_response("0.0.154", "0.0.156", true);
@@ -1003,6 +1019,84 @@ mod tests {
                 .as_deref(),
             Some("0.0.156"),
             "the primary target remains pinned when both components need an update"
+        );
+    }
+
+    #[test]
+    fn desktop_version_check_only_probes_standalone_cli_for_desktop_owned_core() {
+        assert!(desktop_version_check_uses_standalone_cli(true));
+        assert!(!desktop_version_check_uses_standalone_cli(false));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn desktop_unified_version_check_executes_both_runtime_owner_paths() {
+        const CHILD_ENV: &str = "BIFROST_TEST_DESKTOP_VERSION_OWNER_CHILD";
+        if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .args([
+                "--exact",
+                "handlers::system::tests::desktop_unified_version_check_executes_both_runtime_owner_paths",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .status()
+            .expect("spawn isolated desktop version owner test");
+            assert!(
+                status.success(),
+                "isolated desktop version owner test failed"
+            );
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cli_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&cli_dir).expect("create CLI dir");
+        let cli_path = cli_dir.join("bifrost");
+        std::fs::write(&cli_path, "#!/bin/sh\nprintf 'bifrost 0.0.1\\n'\n")
+            .expect("write stale CLI fixture");
+        let mut permissions = std::fs::metadata(&cli_path)
+            .expect("stale CLI metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&cli_path, permissions).expect("make stale CLI executable");
+        std::env::set_var("BIFROST_DATA_DIR", dir.path());
+        std::env::set_var("BIFROST_APP_INSTALL_DIR", dir.path().join("missing-app"));
+        std::env::set_var("PATH", &cli_dir);
+        std::fs::write(
+            dir.path().join("version_cache.json"),
+            serde_json::json!({
+                "latest_version": env!("CARGO_PKG_VERSION"),
+                "release_highlights": ["runtime owner test"],
+                "checked_at": Utc::now(),
+            })
+            .to_string(),
+        )
+        .expect("write fresh version cache");
+        let state = Arc::new(crate::state::AdminState::new(0));
+        std::env::remove_var(super::DESKTOP_CORE_ENV);
+        let cli_owned =
+            check_unified_version_for_channel(state.clone(), false, UpgradeChannel::Desktop).await;
+        assert!(!cli_owned.has_update);
+        assert_eq!(cli_owned.current_version, env!("CARGO_PKG_VERSION"));
+        std::env::set_var(super::DESKTOP_CORE_ENV, "1");
+        let app_owned =
+            check_unified_version_for_channel(state.clone(), false, UpgradeChannel::Desktop).await;
+        assert!(app_owned.has_update);
+        assert_eq!(app_owned.current_version, "0.0.1");
+        assert_eq!(
+            app_owned.latest_version.as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        std::fs::write(&cli_path, "#!/bin/sh\nexit 1\n").expect("break CLI version fixture");
+        let app_owned_without_cli_version =
+            check_unified_version_for_channel(state, false, UpgradeChannel::Desktop).await;
+        assert!(!app_owned_without_cli_version.has_update);
+        assert_eq!(
+            app_owned_without_cli_version.current_version,
+            env!("CARGO_PKG_VERSION")
         );
     }
 
