@@ -127,6 +127,19 @@ struct DailyAgentRunResult {
     reports_generated: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct DailyAgentEntryFailure {
+    date: String,
+    report_target: String,
+    error: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DailyAgentInnerResult {
+    reports_generated: Vec<String>,
+    failed_entries: Vec<DailyAgentEntryFailure>,
+}
+
 // ─── Core Functions ───────────────────────────────────────────────────────────
 
 fn daily_agent_processed_state_path(task_id: &str) -> PathBuf {
@@ -613,16 +626,26 @@ async fn run_daily_agent_locked(
 
     // Determine success/failure
     let (status_str, error, reports_generated) = match &result {
-        Ok(reports) => {
+        Ok(inner) => {
+            let reports = inner.reports_generated.clone();
+            let entry_error = daily_agent_entry_failure_summary(&inner.failed_entries);
+            let status = if inner.failed_entries.is_empty() {
+                "success"
+            } else if reports.is_empty() {
+                "failed"
+            } else {
+                "partial_success"
+            };
             // Git commit after successful run
             let commit_msg = format!(
-                "daily agent run {} ({}): {} report(s)",
+                "daily agent run {} ({}): {} report(s), {} failure(s)",
                 &run_id[..8.min(run_id.len())],
                 trigger_source,
-                reports.len()
+                reports.len(),
+                inner.failed_entries.len()
             );
             let _commit_hash = try_git_commit(&daily_dir, &commit_msg);
-            ("success".to_string(), None, reports.clone())
+            (status.to_string(), entry_error, reports)
         }
         Err(e) => ("failed".to_string(), Some(e.clone()), Vec::new()),
     };
@@ -631,19 +654,19 @@ async fn run_daily_agent_locked(
     let _ = update_daily_agent_status(task, &status_str, error.as_deref(), &run_id);
 
     // IM delivery based on send_policy
-    let success = error.is_none();
+    let success = status_str == "success";
+    let has_sendable_reports =
+        daily_agent_run_has_sendable_reports(&status_str, &reports_generated);
     let should_send_im = task.daily_agent.im_delivery.enabled
         && daily_agent_im_channel(task).is_some()
         && match task.daily_agent.im_delivery.send_policy {
             AsrDailyAgentImSendPolicy::Always => true,
             AsrDailyAgentImSendPolicy::OnSuccess => success,
-            AsrDailyAgentImSendPolicy::OnSuccessWithReport => {
-                success && !reports_generated.is_empty()
-            }
+            AsrDailyAgentImSendPolicy::OnSuccessWithReport => has_sendable_reports,
         };
 
     if should_send_im {
-        let im_content = if success {
+        let im_content = if has_sendable_reports {
             build_im_content_for_reports(task, &reports_generated)
         } else {
             // For Always policy on failure, send error notification
@@ -674,6 +697,7 @@ async fn run_daily_agent_locked(
         run_id = %run_id,
         status = %status_str,
         reports = reports_generated.len(),
+        error = error.as_deref(),
         duration_ms = finished_at_ms - started_at_ms,
         "ASR daily agent run completed"
     );
@@ -809,8 +833,9 @@ fn daily_agent_external_runner_id(task: &AsrDirectoryTask) -> Option<&str> {
     (!runner.is_empty()).then_some(runner)
 }
 
-fn collect_report_outputs_for_plan(
+fn collect_report_outputs_for_plan_excluding_targets(
     plan: &AsrDailyAgentChangePlan,
+    excluded_targets: &HashSet<String>,
 ) -> (Vec<String>, Vec<String>) {
     let mut reports_generated = Vec::new();
     let mut missing_reports = Vec::new();
@@ -819,6 +844,9 @@ fn collect_report_outputs_for_plan(
         .iter()
         .filter(|entry| entry.change_kind != DailyAgentChangeKind::Unchanged)
     {
+        if excluded_targets.contains(&entry.report_target) {
+            continue;
+        }
         let report_path = PathBuf::from(&entry.report_target);
         if report_path.exists() {
             reports_generated.push(entry.report_target.clone());
@@ -827,6 +855,57 @@ fn collect_report_outputs_for_plan(
         }
     }
     (reports_generated, missing_reports)
+}
+
+fn daily_agent_entry_failure_summary(failures: &[DailyAgentEntryFailure]) -> Option<String> {
+    if failures.is_empty() {
+        return None;
+    }
+    let mut parts = failures
+        .iter()
+        .take(5)
+        .map(|failure| {
+            format!(
+                "{} ({}): {}",
+                failure.date, failure.report_target, failure.error
+            )
+        })
+        .collect::<Vec<_>>();
+    if failures.len() > parts.len() {
+        parts.push(format!("... and {} more", failures.len() - parts.len()));
+    }
+    Some(format!(
+        "{} daily agent entr{} failed: {}",
+        failures.len(),
+        if failures.len() == 1 { "y" } else { "ies" },
+        parts.join("; ")
+    ))
+}
+
+fn daily_agent_run_has_sendable_reports(status: &str, reports_generated: &[String]) -> bool {
+    matches!(status, "success" | "partial_success") && !reports_generated.is_empty()
+}
+
+fn record_daily_agent_entry_failure(
+    failed_entries: &mut Vec<DailyAgentEntryFailure>,
+    task: &AsrDirectoryTask,
+    entry: DailyAgentChangePlanEntry,
+    error: impl Into<String>,
+) {
+    let error = error.into();
+    tracing::warn!(
+        task_id = %task.id,
+        agent_id = %task.daily_agent.agent_id,
+        date = %entry.date,
+        report_target = %entry.report_target,
+        error = %error,
+        "ASR daily agent entry failed; continuing with remaining entries"
+    );
+    failed_entries.push(DailyAgentEntryFailure {
+        date: entry.date,
+        report_target: entry.report_target,
+        error,
+    });
 }
 
 fn single_entry_change_plan(
@@ -1355,7 +1434,7 @@ async fn run_daily_agent_inner(
     requested_date: Option<&str>,
     force: bool,
     run_id: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<DailyAgentInnerResult, String> {
     // 1. Ensure workspace
     ensure_asr_daily_workspace(task)?;
 
@@ -1370,7 +1449,7 @@ async fn run_daily_agent_inner(
             reason = plan.skip_reason.as_deref().unwrap_or("unknown"),
             "skipped ASR daily agent run"
         );
-        return Ok(Vec::new());
+        return Ok(DailyAgentInnerResult::default());
     }
 
     // 3. Determine adapter for prompt construction
@@ -1400,6 +1479,7 @@ async fn run_daily_agent_inner(
 
     // 5. Dispatch to runner
     let conversation_success: Option<(String, Option<DailyAgentBTreeMap<String, String>>)>;
+    let mut failed_entries = Vec::new();
 
     if let Some(runner_id) = daily_agent_external_runner_id(task) {
             let runner_id = runner_id.to_string();
@@ -1427,10 +1507,25 @@ async fn run_daily_agent_inner(
                     .filter(|e| e.change_kind != DailyAgentChangeKind::Unchanged)
                     .cloned()
                     .collect();
-                for entry in changed_entries {
+                'entry_loop: for entry in changed_entries {
+                    macro_rules! fail_entry {
+                        ($error:expr) => {{
+                            record_daily_agent_entry_failure(
+                                &mut failed_entries,
+                                task,
+                                entry,
+                                $error,
+                            );
+                            continue 'entry_loop;
+                        }};
+                    }
                     let entry_plan = single_entry_change_plan(&plan, entry.clone());
-                    let prompt = build_daily_agent_prompt(task, &entry_plan, &adapter, true)?;
-                    let run_result = run_external_daily_agent_prompt(
+                    let prompt = match build_daily_agent_prompt(task, &entry_plan, &adapter, true)
+                    {
+                        Ok(prompt) => prompt,
+                        Err(error) => fail_entry!(error),
+                    };
+                    let run_result = match run_external_daily_agent_prompt(
                         task,
                         &runner_id,
                         prompt,
@@ -1439,11 +1534,15 @@ async fn run_daily_agent_inner(
                         &conversation_state,
                         &effective,
                     )
-                    .await?;
-                    last_metadata = Some(run_result.metadata.clone());
+                    .await
+                    {
+                        Ok(run_result) => run_result,
+                        Err(error) => fail_entry!(error),
+                    };
+                    let mut entry_last_metadata = Some(run_result.metadata.clone());
                     let response = run_result.response.trim();
                     if response.is_empty() {
-                        continue;
+                        fail_entry!("chatgpt_web daily agent returned an empty response");
                     }
                     let response = match validate_chatgpt_web_daily_agent_response(
                         response,
@@ -1456,7 +1555,7 @@ async fn run_daily_agent_inner(
                             let Some(conversation_id) =
                                 metadata_value(&run_result.metadata, &["conversationId", "conversation_id"])
                             else {
-                                return Err(first_error);
+                                fail_entry!(first_error);
                             };
                             tracing::warn!(
                                 date = %entry.date,
@@ -1475,7 +1574,7 @@ async fn run_daily_agent_inner(
                             )
                             .await;
                             if let Ok(waited_result) = waited_result {
-                                last_metadata = Some(waited_result.metadata.clone());
+                                entry_last_metadata = Some(waited_result.metadata.clone());
                                 let waited_response = waited_result.response.trim().to_string();
                                 if validate_chatgpt_web_daily_agent_response(
                                     &waited_response,
@@ -1524,7 +1623,7 @@ async fn run_daily_agent_inner(
                                 &entry.date,
                                 response_contract,
                             );
-                            let retry_result = run_external_daily_agent_prompt_with_params(
+                            let retry_result = match run_external_daily_agent_prompt_with_params(
                                 task,
                                 &runner_id,
                                 retry_prompt,
@@ -1533,8 +1632,12 @@ async fn run_daily_agent_inner(
                                 serde_json::json!({ "conversationId": conversation_id }),
                                 &effective,
                             )
-                            .await?;
-                            last_metadata = Some(retry_result.metadata.clone());
+                            .await
+                            {
+                                Ok(retry_result) => retry_result,
+                                Err(error) => fail_entry!(error),
+                            };
+                            entry_last_metadata = Some(retry_result.metadata.clone());
                             let mut retry_response = retry_result.response.trim().to_string();
                             if validate_chatgpt_web_daily_agent_response(
                                 &retry_response,
@@ -1565,7 +1668,7 @@ async fn run_daily_agent_inner(
                                             &tail,
                                         );
                                     let continuation_result =
-                                        run_external_daily_agent_prompt_with_params(
+                                        match run_external_daily_agent_prompt_with_params(
                                             task,
                                             &runner_id,
                                             continuation_prompt,
@@ -1576,8 +1679,13 @@ async fn run_daily_agent_inner(
                                             }),
                                             &effective,
                                         )
-                                        .await?;
-                                    last_metadata = Some(continuation_result.metadata.clone());
+                                        .await
+                                        {
+                                            Ok(continuation_result) => continuation_result,
+                                            Err(error) => fail_entry!(error),
+                                        };
+                                    entry_last_metadata =
+                                        Some(continuation_result.metadata.clone());
                                     retry_response = merge_chatgpt_web_daily_agent_continuation(
                                         &retry_response,
                                         &continuation_result.response,
@@ -1597,12 +1705,14 @@ async fn run_daily_agent_inner(
                                     }
                                 }
                             }
-                            validate_chatgpt_web_daily_agent_response(
+                            if let Err(error) = validate_chatgpt_web_daily_agent_response(
                                 &retry_response,
                                 &entry.date,
                                 agent_id,
                                 output_dir,
-                            )?;
+                            ) {
+                                fail_entry!(error);
+                            }
                             retry_response
                             }
                         }
@@ -1612,11 +1722,10 @@ async fn run_daily_agent_inner(
                         std::fs::create_dir_all(parent).ok();
                     }
                     if let Err(e) = std::fs::write(&report_path, &response) {
-                        tracing::warn!(
-                            report_path = %report_path.display(),
-                            error = %e,
-                            "failed to save chatgpt_web response as report"
-                        );
+                        fail_entry!(format!(
+                            "failed to save chatgpt_web response as report {}: {e}",
+                            report_path.display()
+                        ));
                     } else {
                         tracing::info!(
                             report_path = %report_path.display(),
@@ -1624,6 +1733,7 @@ async fn run_daily_agent_inner(
                             "saved chatgpt_web response as report"
                         );
                     }
+                    last_metadata = entry_last_metadata;
                 }
             } else {
                 let prompt = build_daily_agent_prompt(task, &plan, &adapter, false)?;
@@ -1646,7 +1756,12 @@ async fn run_daily_agent_inner(
         }
 
     // 6. Validate reports before marking source documents processed.
-    let (reports_generated, missing_reports) = collect_report_outputs_for_plan(&plan);
+    let failed_report_targets = failed_entries
+        .iter()
+        .map(|failure| failure.report_target.clone())
+        .collect::<HashSet<_>>();
+    let (reports_generated, missing_reports) =
+        collect_report_outputs_for_plan_excluding_targets(&plan, &failed_report_targets);
     if !missing_reports.is_empty() {
         tracing::warn!(
             task_id = %task.id,
@@ -1671,11 +1786,15 @@ async fn run_daily_agent_inner(
 
     // 7. Update processed state
     let mut processed = load_daily_agent_processed_state(&task.id);
+    let generated_report_targets = reports_generated.iter().cloned().collect::<HashSet<_>>();
 
     for entry in plan
         .entries
         .iter()
-        .filter(|entry| entry.change_kind != DailyAgentChangeKind::Unchanged)
+        .filter(|entry| {
+            entry.change_kind != DailyAgentChangeKind::Unchanged
+                && generated_report_targets.contains(&entry.report_target)
+        })
     {
         processed.documents.insert(
             daily_agent_processed_key(task, &entry.date),
@@ -1705,7 +1824,10 @@ async fn run_daily_agent_inner(
         "updated ASR daily agent processed state"
     );
 
-    Ok(reports_generated)
+    Ok(DailyAgentInnerResult {
+        reports_generated,
+        failed_entries,
+    })
 }
 
 fn sync_daily_agent_item_status(

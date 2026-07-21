@@ -23,6 +23,38 @@ fn adb_test_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+#[cfg(all(test, unix))]
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(all(test, unix))]
+impl EnvVarGuard {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::remove_var(key);
+        Self { key, previous }
+    }
+}
+
+#[cfg(all(test, unix))]
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = &self.previous {
+            std::env::set_var(self.key, previous);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdbDiscovery {
     pub adb_available: bool,
@@ -700,9 +732,8 @@ List of devices attached
 esac"#,
         );
 
-        std::env::set_var("BIFROST_ADB_PATH", &fake.adb_path);
+        let _adb_env = EnvVarGuard::set("BIFROST_ADB_PATH", &fake.adb_path);
         let discovery = discover_android_devices_with_ca(Some(&fake.cert_path));
-        std::env::remove_var("BIFROST_ADB_PATH");
 
         assert!(discovery.adb_available);
         assert_eq!(discovery.devices.len(), 1);
@@ -721,9 +752,8 @@ esac"#,
   *) exit 0 ;;
 esac"#,
         );
-        std::env::set_var("BIFROST_ADB_PATH", &fake.adb_path);
+        let _adb_env = EnvVarGuard::set("BIFROST_ADB_PATH", &fake.adb_path);
         let discovery = discover_android_devices_with_ca(None);
-        std::env::remove_var("BIFROST_ADB_PATH");
 
         assert!(discovery.adb_available);
         assert!(discovery.devices.is_empty());
@@ -740,9 +770,8 @@ esac"#,
   *) exit 0 ;;
 esac"#,
         );
-        std::env::set_var("BIFROST_ADB_PATH", &fake.adb_path);
+        let _adb_env = EnvVarGuard::set("BIFROST_ADB_PATH", &fake.adb_path);
         let discovery = discover_android_devices_with_ca(None);
-        std::env::remove_var("BIFROST_ADB_PATH");
 
         assert!(discovery.adb_available);
         assert!(discovery.devices.is_empty());
@@ -756,14 +785,9 @@ esac"#,
         // Point BIFROST_ADB_PATH at a nonexistent file and clear PATH so no
         // real adb is found.
         let missing = std::env::temp_dir().join(format!("no-adb-{}", Uuid::new_v4()));
-        std::env::set_var("BIFROST_ADB_PATH", &missing);
-        let saved_path = std::env::var_os("PATH");
-        std::env::set_var("PATH", "");
+        let _adb_env = EnvVarGuard::set("BIFROST_ADB_PATH", &missing);
+        let _path_env = EnvVarGuard::set("PATH", "");
         let discovery = discover_android_devices();
-        if let Some(p) = saved_path {
-            std::env::set_var("PATH", p);
-        }
-        std::env::remove_var("BIFROST_ADB_PATH");
 
         assert!(!discovery.adb_available);
         assert!(discovery.adb_path.is_none());
@@ -1065,27 +1089,29 @@ esac
         perms.set_mode(0o755);
         fs::set_permissions(&adb_path, perms).expect("chmod fake adb installer");
 
-        // Successful installer flow: push + VIEW succeed, no fallback.
-        std::env::remove_var("BIFROST_ADB_VIEW_FAIL");
-        let session = install_android_ca(AndroidInstallOptions {
-            adb_path: adb_path.clone(),
-            device_id: "android-1".to_string(),
-            ca_cert_path: cert_path.clone(),
-        })
-        .expect("install_android_ca should succeed");
+        {
+            // Successful installer flow: push + VIEW succeed, no fallback.
+            let _view_fail_env = EnvVarGuard::remove("BIFROST_ADB_VIEW_FAIL");
+            let session = install_android_ca(AndroidInstallOptions {
+                adb_path: adb_path.clone(),
+                device_id: "android-1".to_string(),
+                ca_cert_path: cert_path.clone(),
+            })
+            .expect("install_android_ca should succeed");
 
-        assert_eq!(session.platform, MobilePlatform::Android);
-        assert!(session.completed);
-        assert!(session.requires_user_confirmation);
-        assert_eq!(session.steps.len(), 2);
-        assert_eq!(session.steps[0].name, "push_certificate");
-        assert!(session.steps[0].success);
-        assert_eq!(session.steps[1].name, "open_certificate_installer");
-        assert!(session.steps[1].success);
-        assert!(session.summary.contains("pushed the CA certificate"));
+            assert_eq!(session.platform, MobilePlatform::Android);
+            assert!(session.completed);
+            assert!(session.requires_user_confirmation);
+            assert_eq!(session.steps.len(), 2);
+            assert_eq!(session.steps[0].name, "push_certificate");
+            assert!(session.steps[0].success);
+            assert_eq!(session.steps[1].name, "open_certificate_installer");
+            assert!(session.steps[1].success);
+            assert!(session.summary.contains("pushed the CA certificate"));
+        }
 
         // Fallback flow: VIEW fails so SECURITY_SETTINGS is opened.
-        std::env::set_var("BIFROST_ADB_VIEW_FAIL", "1");
+        let _view_fail_env = EnvVarGuard::set("BIFROST_ADB_VIEW_FAIL", "1");
         let fallback_session = install_android_ca(AndroidInstallOptions {
             adb_path: adb_path.clone(),
             device_id: "android-2".to_string(),
@@ -1146,7 +1172,7 @@ exit 1
         perms.set_mode(0o755);
         fs::set_permissions(&adb_path, perms).expect("chmod fake adb discover");
 
-        std::env::set_var("BIFROST_ADB_PATH", &adb_path);
+        let _adb_env = EnvVarGuard::set("BIFROST_ADB_PATH", &adb_path);
 
         // find_adb should return the same path
         let found = find_adb().expect("expected find_adb to use BIFROST_ADB_PATH");
@@ -1164,7 +1190,6 @@ exit 1
         assert_eq!(discovery.devices[0].status, DeviceStatus::Connected);
         assert_eq!(discovery.devices[1].status, DeviceStatus::Unauthorized);
 
-        std::env::remove_var("BIFROST_ADB_PATH");
         let _ = fs::remove_dir_all(&test_dir);
     }
 }

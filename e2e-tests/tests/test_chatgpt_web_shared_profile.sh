@@ -20,6 +20,8 @@ grep -q "diagnostic_has_visible_stop_button" crates/bifrost-admin/src/im_gateway
 grep -q "recover_conversation_tab_from_browser" crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
 grep -q "wait_chatgpt_web_daily_agent_conversation" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
 grep -q "daily_agent_chatgpt_web_same_conversation_wait_timeout_ms" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
+grep -q "ASR daily agent entry failed; continuing with remaining entries" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
+grep -q "partial_success" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
 grep -q "tomorrow_todo_target_date" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
 grep -q "Tomorrow ToDo 日期规则" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent_prompt.rs
 
@@ -57,6 +59,14 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   daily_agent_chatgpt_web_same_conversation_wait_uses_daily_timeout_with_headroom \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  daily_agent_report_gate_excludes_known_failed_entries_from_missing_reports \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  daily_agent_entry_failure_summary_lists_failed_dates_and_targets \
   --lib -- --nocapture
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
