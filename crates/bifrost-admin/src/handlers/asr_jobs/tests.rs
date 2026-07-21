@@ -149,6 +149,7 @@ mod tests {
         std::fs::create_dir_all(package.join("__pycache__")).unwrap();
         std::fs::write(package.join("module.py"), b"print('fixture')\n").unwrap();
         std::fs::write(package.join("module.pyc"), b"cached").unwrap();
+        std::fs::write(package.join(".DS_Store"), b"finder metadata").unwrap();
         std::fs::write(package.join("__pycache__/module.pyc"), b"cached").unwrap();
         symlink("module.py", package.join("module-link.py")).unwrap();
 
@@ -292,6 +293,52 @@ mod tests {
         assert!(!missing.runtime_ready);
         assert!(!missing.model_ready);
         assert_eq!(missing.expected_model_bytes, 22);
+        assert!(!missing.initializing);
+        assert!(missing.initialization.is_none());
+
+        let initialization_guard = begin_moss_initialization(&asr_home, "");
+        publish_moss_initialization_progress(
+            &asr_home,
+            crate::resource_download::DownloadProgress {
+                label: "MOSS runtime".to_string(),
+                url: "https://example.invalid/runtime.zip".to_string(),
+                dest: paths
+                    .python_home
+                    .parent()
+                    .unwrap()
+                    .join("runtime.zip")
+                    .display()
+                    .to_string(),
+                downloaded_bytes: 68,
+                total_bytes: Some(100),
+                percent: Some(68),
+                bytes_per_second: Some(10),
+                eta_seconds: Some(4),
+                elapsed_ms: 6_800,
+                resumed: true,
+                complete: false,
+            },
+        );
+        let initializing = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert!(initializing.initializing);
+        let serialized = serde_json::to_value(&initializing).unwrap();
+        assert!(serialized["initialization"].get("url").is_none());
+        assert!(serialized["initialization"].get("dest").is_none());
+        let initialization = initializing.initialization.unwrap();
+        assert_eq!(initialization.downloaded_bytes, 68);
+        assert_eq!(initialization.percent, Some(68));
+        assert!(initialization.resumed);
+        drop(initialization_guard);
+        let completed =
+            moss_management_status_with_spec(&asr_home, "macos", "aarch64", &model_spec).await;
+        assert!(!completed.initializing);
+        assert!(completed.initialization.is_none());
 
         let runtime_framework = paths.python_home.join("lib/framework.fixture");
         write_executable(
@@ -491,6 +538,23 @@ mod tests {
         assert!(success_events.contains("event: done"));
         assert!(moss_verification_path(&success_home).is_file());
 
+        let (ready_tx, mut ready_rx) = tokio::sync::mpsc::channel(8);
+        stream_moss_model_initialization_with_spec(
+            ready_tx,
+            success_home,
+            Ok(runtime_source.asset.clone()),
+            model_spec.clone(),
+            Some(runtime_source.clone()),
+        )
+        .await;
+        let mut ready_events = String::new();
+        while let Some(frame) = ready_rx.recv().await {
+            ready_events.push_str(&String::from_utf8_lossy(&frame));
+        }
+        assert!(!ready_events.contains("Downloading verified MOSS assets"));
+        assert!(ready_events.contains("MOSS runtime and verified 8-bit model are ready"));
+        assert!(ready_events.contains("event: done"));
+
         let (unsupported_tx, mut unsupported_rx) = tokio::sync::mpsc::channel(4);
         stream_moss_model_initialization_with_spec(
             unsupported_tx,
@@ -672,7 +736,7 @@ mod tests {
         let (url, requests) = spawn_flaky_resumable_moss_http_server(body.clone());
         let destination = temp.path().join("model.safetensors");
 
-        download_moss_resource(url, destination.clone(), "MOSS test model", None)
+        download_moss_resource(temp.path(), url, destination.clone(), "MOSS test model", None)
             .await
             .unwrap();
 
@@ -693,6 +757,7 @@ mod tests {
         let (url, requests) =
             spawn_failing_moss_http_server(MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS);
         let error = download_moss_resource(
+            temp.path(),
             url,
             temp.path().join("unavailable.bin"),
             "unavailable MOSS test resource",
@@ -809,6 +874,7 @@ mod tests {
         let file_dest = temp.path().join("file-dest.bin");
         std::fs::write(&source, b"file-resource").unwrap();
         download_moss_resource(
+            temp.path(),
             format!("file://{}", source.display()),
             file_dest.clone(),
             "test file",
@@ -820,11 +886,12 @@ mod tests {
 
         let http_dest = temp.path().join("http-dest.bin");
         let resource_url = spawn_moss_http_server(b"http-resource".to_vec());
-        download_moss_resource(resource_url, http_dest.clone(), "test HTTP", None)
+        download_moss_resource(temp.path(), resource_url, http_dest.clone(), "test HTTP", None)
             .await
             .unwrap();
         assert_eq!(std::fs::read(http_dest).unwrap(), b"http-resource");
         assert!(download_moss_resource(
+            temp.path(),
             "file:///missing/moss-resource".to_string(),
             temp.path().join("missing.bin"),
             "missing",

@@ -64,6 +64,9 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 - Model Management 的模型选择同时列出 Qwen3-ASR 和 `MOSS-Transcribe-Diarize-MLX-8bit`。Qwen 继续管理可租约的本地 ASR service；MOSS 是任务按需执行的端到端 runtime，不展示 Host、Service Port 等无效服务配置。
 - MOSS 状态接口分别报告 runtime 自检、模型 snapshot 校验、安装目录和预期权重大小。初始化时执行完整 runtime self-test 与 1.2 GB 权重 SHA-256，成功后写入带固定模型 SHA/大小/mtime、Python/runner 哈希和所有必需 metadata SHA-256 的验证标记；日常状态读取先复核标记与小文件哈希，再运行带 30 秒硬超时的打包 Python `--self-test`，确认 `runtime/python/lib` 等 marker 未逐文件记录的框架依赖仍可加载，同时避免每次打开页面重新扫描 1.2 GB 权重。权重被同大小替换后 mtime 变化、metadata 缺失或内容损坏、Python framework 缺失、损坏或自检卡死都会撤销 Ready；修复时从已校验的 runtime archive 恢复 runtime 与 metadata，不重复下载仍通过完整校验的权重。
 - 用户可在管理页主动初始化或修复 `~/.bifrost/asr/moss_joint_mlx`。下载复用 `.part` 断点续传并对响应体中断做最多 3 次有界自动重试，后续尝试通过 HTTP Range 只请求剩余字节；同一进程内初始化锁保证管理页与同一服务中的任务同时触发时不会并行写入同一资源。
+- runtime 依赖完整性校验忽略 Finder 自动生成的精确文件名 `.DS_Store`，避免用户浏览安装目录后把已经通过 self-test 的 runtime 误判为损坏并触发完整重下。该例外不扩展到其他隐藏文件、Python 源码、动态库或依赖 metadata；任何其他依赖文件的新增、删除或内容变化仍撤销 Ready。
+- MOSS 初始化在进程内发布一份共享的 owner/progress 状态。第一个调用方持有初始化锁并负责下载、校验和安装；Directory Task、Model Management status 与后续 `init-stream` 调用只观察同一 owner，不创建第二个下载。共享状态包含资源标签、已下载/总字节、百分比、速率、ETA、断点续传标记与完成标记，并在 owner 成功或失败后退出 active 状态。
+- Directory Task 自动初始化把共享下载快照写入任务进度消息；Model Management 状态接口在后台任务已开始初始化时返回同一下载快照。管理页检测到 active 初始化后显示真实百分比并定时刷新，用户点击 Initialize 加入已有 SSE 时也立即收到最近快照，不再长期显示 `0% / Waiting for download`。下载完成后状态重新以 runtime self-test 与 marker 校验结果为准。
 - runtime、模型与 metadata 全部校验通过并成功写入新 `verification.json` 后，初始化器自动删除历次由 Bifrost 生成的 `runtime.invalid-<timestamp>`、runtime zip quarantine 和 `model.safetensors.invalid-<timestamp>`。初始化或 marker 写入失败时保留这些隔离件，保证失败恢复边界；清理仅接受固定前缀和纯数字时间戳，不跟随目录符号链接。清理本身失败时不撤销已经 Ready 的新 runtime，而是记录告警并在下一次 ensure 时重试。
 - Directory Task 不保存另一份模型路径或依赖配置；它只保存 `transcription_mode` 与任务 Prompt。运行时若发现资产尚未准备好，调用与管理页完全相同的校验和初始化函数作为自动兜底。
 
