@@ -74,7 +74,7 @@
 
 1. 比较测试前后的线上 `files.json` 与真实 WAV SHA-256。
 2. 用 `otool -L` 检查被自动安装的 Python，执行 runner `--self-test`，扫描安装目录中的 `._*` / `.DS_Store`。
-3. 测试完成后按用户体验要求保留 18997 服务；只清理由失败归档生成的可恢复 quarantine，或在交付后征得用户同意再清理。
+3. 测试完成后按用户体验要求保留 18997 服务；初始化失败时确认 quarantine 仍保留，后续一次完整成功并写入 marker 后确认受管 quarantine 自动清理。
 
 预期结果：
 
@@ -264,10 +264,24 @@
 - 单次传输中断不要求用户重新点击 Initialize，也不从 0 重下 1.2 GB 模型；自动重试有上限，连续失败仍返回明确错误。
 - 打包启动器的自检和真实推理均使用隔离资源成功运行；测试结束不残留服务、临时资源或对正式代理的状态修改。
 
+### TC-MOSS-16：Runtime 升级成功后回收旧隔离资源
+
+操作步骤：
+
+1. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin moss_quarantine_cleanup_removes_only_managed_timestamped_entries --lib -- --nocapture`。fixture 创建旧 runtime 目录、旧 runtime zip、旧模型、指向外部目录的受管 symlink，以及多个近似命名的非受管文件。
+2. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin moss_initializer_installs_quarantines_and_reuses_verified_resources --lib -- --nocapture`。fixture 从无效 runtime/model 原地升级到已验证资源，并检查新 marker 写入后的安装目录。
+3. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin moss_initializer_reports_runtime_archive_and_model_quarantine_failures --lib -- --nocapture`，再执行 `bash e2e-tests/tests/test_asr_moss_release_contract.sh`，确认隔离失败仍报错且清理调用严格位于 marker 写入之后。
+
+预期结果：
+
+- 完整初始化成功并写入 `verification.json` 后，`runtime.invalid-<timestamp>`、`moss-joint-runtime-v*.zip.invalid-<timestamp>` 和 `model.safetensors.invalid-<timestamp>` 均被删除，不随版本升级持续累积。
+- 下载、checksum、解压、自检、模型验证或 marker 写入失败时不执行成功清理，已有 quarantine 继续保留用于排障/恢复。
+- 只有固定 Bifrost 命名且时间戳为纯数字的直接子项会被删除；近似命名文件保持不变，受管 symlink 只删除链接本身，外部目标内容保持不变。
+
 ## 清理步骤
 
 1. 用户要求继续体验时保留 18997；否则停止且仅停止本测试启动的预览 PID。TC-MOSS-09 的 9900 服务按用户要求保留运行，但任务在取得有限验证证据后重新暂停。
-2. 不得删除 `$ASR_TASK_DIR`、转录产物或 `$MOSS_AUDIO`。失败资源只移动到带时间戳 quarantine，确认无需回滚后再清理。
+2. 不得删除 `$ASR_TASK_DIR`、转录产物或 `$MOSS_AUDIO`。失败资源先移动到带时间戳 quarantine；只有后续 runtime/model 全部验证并成功写入 marker 后才自动清理受管隔离件。
 3. 对 TC-MOSS-01 至 TC-MOSS-08 再次检查 9900 PID 未变化；TC-MOSS-09 必须确认 PID 已按计划更新、默认数据目录不变且成功记录快照不变。
 
 ## 执行记录
@@ -293,4 +307,5 @@
 | 2026-07-20 | TC-MOSS-11 | PASS：Rust MOSS 回归确认 `site-packages` 内容损坏，以及 `runtime/python/lib` framework 缺失或损坏都会撤销 Ready；成功 MOSS task 生成一条非零整文件耗时 metric。benchmark E2E 正常选择不同录音，并在 4 个目标只有 3 个不同成功源文件时明确失败且不写报告。 |
 | 2026-07-20 | TC-MOSS-12 | PASS：Rust MOSS 回归 20/20 覆盖完整 12 个发布 metadata，配置重排状态矩阵/幂等单测 1/1；release contract E2E 确认下载、打包、Rust 校验列表一致；真实 task-mode API E2E 在修改 MOSS prompt 后把成功记录重置为 pending 并清空旧产物引用/metrics。 |
 | 2026-07-20 | TC-MOSS-13 | PASS：Rust MOSS 回归把无有效 speaker segment 和超出整文件上限都标为带版本的确定性失败；65 秒 fixture 的 63.8 秒 S02 turn 被拆为 3 段，加上 S01 共 4 段，所有段不超过 30 秒，speaker、75000 ms 绝对终点和完整文本均保留；runtime ZIP 的 Python 相对 symlink 保留且逃逸 symlink 被拒绝，Unix 目录冲突与 Windows symlink 不支持均保持安全拒绝，release contract 强制 extract-then-self-test；task-mode API E2E 继续通过。 |
+| 2026-07-21 | TC-MOSS-16 | PASS：三个定向 Rust 用例与 release/runtime contract E2E 全部通过。升级成功并写入 marker 后，旧 runtime 目录、runtime zip 和旧模型隔离件均被回收；失败路径继续保留 quarantine。纯数字时间戳与固定资产名门禁拒绝近似命名，目录 symlink 仅删除链接且外部目标文件保持不变。 |
 | 2026-07-21 | TC-MOSS-15 | PASS（发现真实中断并修复后复测）：当前分支服务以独立 HOME/数据目录在 18999 启动，初始 install_dir 位于临时 home 且 model bytes=0。真实下载 170 MB runtime 和 1,258,427,442-byte 模型时，Hugging Face 在 1,207,909,964 bytes 处返回 `error decoding response body`，`.part` 被保留；再次请求通过 Range 补齐模型并完成 schema v5 marker。针对该真实缺口，初始化器增加最多 3 次有界自动重试；fixture 首次只发一半响应后断开、第二次从 524288 bytes 续传，聚焦回归通过。最终 status 为 ready/runtime_ready/model_ready，模型 SHA-256=`469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190`，无 AppleDouble/`.part` 残留；打包 Python self-test 输出 `moss-mlx-runtime ok`，20.495 秒 16 kHz 单声道真实启动器推理 3.57 秒完成，输出 3 个 S01 正时长 segments。18999 已停止，正式 `v0.0.158` 服务保持 PID 21664/9900/系统代理开启；隔离目录已移动到废纸篓，可恢复。 |
