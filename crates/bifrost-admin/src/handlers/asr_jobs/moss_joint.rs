@@ -227,17 +227,7 @@ fn remove_moss_quarantine_entries(
             return;
         }
     };
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                cleanup.errors.push(format!(
-                    "read MOSS quarantine entry in {}: {error}",
-                    directory.display()
-                ));
-                continue;
-            }
-        };
+    for entry in entries.filter_map(Result::ok) {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
