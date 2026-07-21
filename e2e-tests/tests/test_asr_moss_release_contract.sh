@@ -18,6 +18,7 @@ runtime_path = Path("crates/bifrost-admin/src/handlers/asr_jobs/moss_joint.rs")
 runtime_version_path = Path("scripts/asr/moss-runtime-version.txt")
 runtime_builder_path = Path("scripts/ci/build-moss-release-runtime.sh")
 version_check_path = Path("crates/bifrost-core/src/version_check.rs")
+npm_publish_path = Path("scripts/npm-publish.mjs")
 requirements_path = Path("scripts/asr/moss-mlx-requirements.txt")
 runner_path = Path("scripts/asr/moss_mlx_runner.py")
 patch_path = Path("scripts/asr/mlx-audio-moss-quantized-conv.patch")
@@ -33,6 +34,7 @@ runtime = runtime_path.read_text(encoding="utf-8")
 runtime_version = runtime_version_path.read_text(encoding="utf-8").strip()
 runtime_builder = runtime_builder_path.read_text(encoding="utf-8")
 version_check = version_check_path.read_text(encoding="utf-8")
+npm_publish = npm_publish_path.read_text(encoding="utf-8")
 requirements = requirements_path.read_text(encoding="utf-8")
 runner = runner_path.read_text(encoding="utf-8")
 packager = packager_path.read_text(encoding="utf-8")
@@ -200,6 +202,8 @@ require('DISPATCH_RUNTIME_VERSION: ${{ inputs.runtime_version }}' in runtime_rel
 require('Build MOSS joint transcription runtime' not in release, "core release still builds the MOSS runtime")
 require('build-moss-release-runtime.sh' not in release, "core release still invokes the MOSS runtime builder")
 require('moss-joint-runtime-v' not in release, "core release still names or uploads a MOSS runtime asset")
+require("if: needs.prepare.outputs.is_prerelease != 'true'" in release, "prerelease can overwrite stable Homebrew formula or cask")
+require('VERSION.includes("-") ? "next" : "latest"' in npm_publish, "prerelease can overwrite npm latest dist-tag")
 require('"{MOSS_RUNTIME_ASSET_STEM}-v{}-aarch64-apple-darwin.zip"' in runtime, "runtime asset name drifted")
 require('moss_runtime_version()' in runtime, "initializer does not use the independent runtime version")
 require('moss-runtime-v{}' in runtime, "initializer does not use the independent runtime release tag")
@@ -234,3 +238,6 @@ print(
     f"source={source_commit[:12]}, model={model_commit[:12]}, metadata={len(download_files)})"
 )
 PY
+
+test "$(node scripts/npm-publish.mjs 0.0.159 --print-tag)" = "latest"
+test "$(node scripts/npm-publish.mjs 0.0.159-beta.1 --print-tag)" = "next"

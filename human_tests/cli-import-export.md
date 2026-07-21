@@ -566,12 +566,14 @@
 3. 查询 GitHub `releases/latest` API 与 redirect，确认两者都指向严格的 `v<major>.<minor>.<patch>` Bifrost release，而不是 `moss-runtime-v*`。
 4. 按 `per_page=100` 遍历 GitHub published Releases API 直到空页，统计稳定产品、prerelease、draft、独立资源 Release，并抽查当前稳定版 CLI、desktop、`bifrost-v<version>-checksums.txt` 和 MOSS runtime 资产下载返回 HTTP 200。
 5. 执行已安装的 `bifrost upgrade -y`，观察 latest/current、CLI 下载资产与 desktop 后置更新目标。
+6. 执行 `node scripts/npm-publish.mjs 0.0.159 --print-tag` 与 `node scripts/npm-publish.mjs 0.0.159-beta.1 --print-tag`，并检查 Release workflow 的 Homebrew job 条件。
 
 **预期结果**：
 - `moss-runtime-v1.0.0`、`vmoss-runtime-v1.0.0`、draft、prerelease、非三段数字 tag 都不能成为稳定 Bifrost update target。
 - `/releases/latest` 被资源 release 污染时，sync/async 检查均从 published release 列表选择最新稳定 Bifrost release；不会回退到可能没有安装资产的裸 git tag。
 - published release fallback 显式分页，每页 100 条、最多 10 页；即使未来累计超过 100 个独立资源 Release，也能继续找到稳定产品 Release，同时不会无界请求 GitHub API。
 - `bifrost upgrade` 不再拼接 `bifrost-desktop-vmoss-runtime-*.dmg`，当前稳定版用户不会因 MOSS runtime release 收到虚假桌面更新。
+- 稳定 npm 版本使用 `latest` dist-tag，prerelease 使用 `next`；prerelease Release 跳过 Homebrew 默认 formula/cask 更新，因此 beta 演练不会改变稳定渠道的默认安装目标。
 
 **2026-07-21 执行记录**：
 - 42 个 version-check 单元测试全部通过，MOSS release contract 与 runtime packager fixture 通过。
@@ -579,6 +581,7 @@
 - 全量遍历到 159 个 published Releases：第 1 页 100 条（97 个稳定产品、2 个 prerelease、1 个 `moss-runtime-v1.0.0`），第 2 页 59 条历史 alpha/beta，第 3 页为空；当前稳定产品资产矩阵完整。
 - `v0.0.158` macOS ARM64 CLI、desktop DMG、`bifrost-v0.0.158-checksums.txt`，以及 MOSS runtime zip / sha256 的真实下载请求均返回 HTTP 200。
 - 已安装的 `bifrost v0.0.156` 执行 `bifrost upgrade -y` 后使用 `v0.0.158` 产品 Release 的 CLI tarball 完成升级，并正确更新 `/Applications/Bifrost.app`；输出中没有 `moss-runtime` 或 `vmoss-runtime`，升级后正式服务按原端口重新启动。
+- npm dist-tag 探针分别返回稳定版 `latest`、beta 版 `next`；Release contract 验证 prerelease Homebrew job 被条件跳过，预发布验证不会覆盖稳定安装渠道。
 
 ---
 

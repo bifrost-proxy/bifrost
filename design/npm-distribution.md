@@ -123,12 +123,12 @@ npm/bifrost/
 
 ### `scripts/npm-publish.mjs`
 
-- **入参**：`BIFROST_VERSION` 环境变量或第一个 positional 参数；可选 `--dry-run` / `--local` / `--token <NPM_TOKEN>` / `--otp <CODE>`；CI 模式可用 `ARTIFACTS_DIR` 覆盖产物目录。
+- **入参**：`BIFROST_VERSION` 环境变量或第一个 positional 参数；可选 `--dry-run` / `--local` / `--print-tag`（只输出该版本将使用的 dist-tag）/ `--token <NPM_TOKEN>` / `--otp <CODE>`；CI 模式可用 `ARTIFACTS_DIR` 覆盖产物目录。
 - **CI 模式（默认）**：
   1. 同步 9 个平台包 + 主包 `package.json` 的 `version`；改写主包 `optionalDependencies` 中所有 `@bifrost-proxy/*` 条目为 `BIFROST_VERSION`。
   2. 在 `artifacts/cli-<rustTarget>/` 按 `tar.gz` → `tar.xz` → `zip` → 裸二进制 顺序找产物，解压到对应平台包 `bin/`；先试 `--strip-components=1`，找不到目标文件名再全量解压 + `find` 兜底；非 Windows 二进制 `chmod 0o755`。
   3. 根 `README.md` 复制到每个平台包与主包目录。
-  4. 依次 `npm publish --access public --tag latest --registry https://registry.npmjs.org/`（`--dry-run` 透传），平台包之间间隔 `PUBLISH_INTERVAL_MS`（5 s）；平台包失败收集到 `failedPlatforms`，全部完成后若有失败 `exit 1` 不再发主包；主包发布前再等 5 s 让平台包传播。
+  4. 依次执行 `npm publish --access public --tag <dist-tag> --registry https://registry.npmjs.org/`（`--dry-run` 透传）：稳定版本使用 `latest`，带 prerelease 后缀的版本使用 `next`，避免 beta/alpha/rc 覆盖存量用户的默认安装目标。平台包之间间隔 `PUBLISH_INTERVAL_MS`（5 s）；平台包失败收集到 `failedPlatforms`，全部完成后若有失败 `exit 1` 不再发主包；主包发布前再等 5 s 让平台包传播。
   5. 单包最多 3 次重试（`PUBLISH_RETRY_COUNT`），仅在 `E409` 冲突时按 15 s 间隔（`PUBLISH_RETRY_DELAY_MS`）重试；其它错误立即抛出。
   6. `--token` 传入时，每个包目录写临时 `.npmrc`（`//registry.npmjs.org/:_authToken=${npm_token}`），同时设置 `npm_token` 与 `NODE_AUTH_TOKEN`。
 - **`--local` 模式**：按本机 `platform`/`arch` 选一个平台包，从 `target/release/<binary>` 或 `target/debug/<binary>` 注入二进制，其余平台包写入空 stub（保证主包 `optionalDependencies` 解析成功），最后发主包；README 复制 / 版本同步 / 重试 / 节流与 CI 模式共用。CI 入口不触发 `--local`。
@@ -180,6 +180,7 @@ npm/bifrost/
 
 - `publish-npm` job 的 Verify artifacts 步骤：任一 target 缺 `.tar.gz` / `.tar.xz` / `.zip` 即 `exit 1`。
 - 解包后 `existsSync(binDir/binary)` 缺失则中止发布。
+- beta/alpha/rc 等 prerelease 的 npm 包发布到 `next` dist-tag；Release workflow 跳过 Homebrew 默认 formula/cask 更新，稳定 `latest` 和 Homebrew 用户不受预发布演练影响。
 - `npx @bifrost-proxy/bifrost --version` 与 `--local` 模式 dry-run。
 
 ### 真实场景测试

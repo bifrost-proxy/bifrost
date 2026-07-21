@@ -680,6 +680,7 @@ jobs:
   update-homebrew:
     name: Update Homebrew Formula
     needs: [prepare, release, build-desktop]
+    if: needs.prepare.outputs.is_prerelease != 'true'
     runs-on: ubuntu-latest
     env:
       MAX_VERSIONED_FORMULAS: 5
