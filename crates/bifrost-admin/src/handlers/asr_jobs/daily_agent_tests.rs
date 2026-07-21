@@ -1242,6 +1242,23 @@ async fn daily_agent_chatgpt_web_entry_failure_continues_and_keeps_failed_date_r
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn daily_agent_inner_skips_when_no_daily_markdown_files_exist() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let task = test_directory_task("daily-agent-inner-skip-task", temp.path().join("audio"));
+    ensure_asr_daily_workspace(&task).unwrap();
+
+    let result = run_daily_agent_inner(&task, "manual", None, false, "run-skip")
+        .await
+        .unwrap();
+
+    assert!(result.reports_generated.is_empty());
+    assert!(result.failed_entries.is_empty());
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn daily_agent_locked_partial_success_persists_status_and_error_summary() {
     let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();
@@ -1313,6 +1330,86 @@ async fn daily_agent_locked_partial_success_persists_status_and_error_summary() 
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn daily_agent_locked_success_sends_im_for_success_with_report_policy() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let _mock = EnvVarGuard::set("BIFROST_CHATGPT_WEB_E2E_MOCK", std::ffi::OsStr::new("1"));
+    let _e2e = EnvVarGuard::set("BIFROST_E2E", std::ffi::OsStr::new("1"));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let _port_guard = EnvVarGuard::set(
+        "BIFROST_ADMIN_PORT",
+        std::ffi::OsString::from(port.to_string()).as_os_str(),
+    );
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0_u8; 4096];
+        let n = stream.read(&mut buf).await.unwrap();
+        let request = String::from_utf8_lossy(&buf[..n]);
+        assert!(request.starts_with("POST /_bifrost/api/im-gateway/messages/send "));
+        assert!(request.contains("\"target_id\":\"owner\""));
+        assert!(request.contains("2026-06-25 日报"));
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+            .await
+            .unwrap();
+    });
+
+    let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    config.runners.insert(
+        "daily-chatgpt-web-im".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            enabled: true,
+            adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
+            adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
+                timeout_secs: Some(5),
+                ..Default::default()
+            },
+            inject_bifrost_tools: false,
+            ..Default::default()
+        },
+    );
+    crate::im_gateway::external_cli::ExternalCliConfigStore::new(temp.path())
+        .save(config)
+        .unwrap();
+
+    let mut task = test_directory_task("daily-agent-locked-im-task", temp.path().join("audio"));
+    task.daily_agent.runner = "daily-chatgpt-web-im".to_string();
+    task.daily_agent.im_delivery.enabled = true;
+    task.daily_agent.im_delivery.channel = Some("owner:daily-agent-test".to_string());
+    task.daily_agent.im_delivery.send_policy = AsrDailyAgentImSendPolicy::OnSuccessWithReport;
+    ensure_asr_daily_workspace(&task).unwrap();
+    std::fs::write(
+        daily_dir_for_task(&task.id).join("2026-06-25.md"),
+        "# 2026-06-25 转写\n\n成功日期",
+    )
+    .unwrap();
+    save_tasks(&TaskStore {
+        version: TASK_STORE_VERSION,
+        tasks: vec![task.clone()],
+    })
+    .unwrap();
+
+    let run = run_daily_agent_locked(&task, "manual", None, false).await;
+    server.await.unwrap();
+
+    assert_eq!(run.status, "success");
+    assert_eq!(run.reports_generated.len(), 1);
+    let stored = load_tasks()
+        .tasks
+        .into_iter()
+        .find(|stored| stored.id == task.id)
+        .unwrap();
+    assert!(stored.daily_agent.im_delivery.last_sent_at_ms.is_some());
+    assert!(stored.daily_agent.im_delivery.last_send_error.is_none());
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn daily_agent_locked_success_persists_success_status_without_error() {
     let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();
@@ -1369,6 +1466,60 @@ async fn daily_agent_locked_success_persists_success_status_without_error() {
         .unwrap();
     assert_eq!(stored.daily_agent.last_status.as_deref(), Some("success"));
     assert!(stored.daily_agent.last_error.is_none());
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn daily_agent_chatgpt_web_report_write_failure_records_entry_failure() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let _mock = EnvVarGuard::set("BIFROST_CHATGPT_WEB_E2E_MOCK", std::ffi::OsStr::new("1"));
+    let _e2e = EnvVarGuard::set("BIFROST_E2E", std::ffi::OsStr::new("1"));
+
+    let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    config.runners.insert(
+        "daily-chatgpt-web-write-fail".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            enabled: true,
+            adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
+            adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
+                timeout_secs: Some(5),
+                ..Default::default()
+            },
+            inject_bifrost_tools: false,
+            ..Default::default()
+        },
+    );
+    crate::im_gateway::external_cli::ExternalCliConfigStore::new(temp.path())
+        .save(config)
+        .unwrap();
+
+    let mut task = test_directory_task(
+        "daily-agent-chatgpt-web-write-fail-task",
+        temp.path().join("audio"),
+    );
+    task.daily_agent.runner = "daily-chatgpt-web-write-fail".to_string();
+    task.daily_agent.im_delivery.enabled = false;
+    ensure_asr_daily_workspace(&task).unwrap();
+    std::fs::write(
+        daily_dir_for_task(&task.id).join("2026-06-25.md"),
+        "# 2026-06-25 转写\n\n成功日期",
+    )
+    .unwrap();
+    let report_path = daily_agent_output_dir(&task).join("2026-06-25-report.md");
+    std::fs::create_dir_all(&report_path).unwrap();
+
+    let result = run_daily_agent_inner(&task, "manual", None, false, "run-write-fail")
+        .await
+        .unwrap();
+
+    assert!(result.reports_generated.is_empty());
+    assert_eq!(result.failed_entries.len(), 1);
+    assert_eq!(result.failed_entries[0].date, "2026-06-25");
+    assert!(result.failed_entries[0]
+        .error
+        .contains("failed to save chatgpt_web response as report"));
 }
 
 #[tokio::test]
