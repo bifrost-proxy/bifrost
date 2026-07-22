@@ -6,6 +6,7 @@ pub(super) struct IdleImCommandContext<'a> {
     pub(super) client: &'a ImProviderClient,
     pub(super) provider: &'a ImProviderConfig,
     pub(super) provider_store: &'a Arc<ImProviderStore>,
+    pub(super) group_context_store: &'a Arc<ImGroupContextStore>,
     pub(super) external_cli_config_store:
         &'a Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
     pub(super) event: &'a ImEvent,
@@ -17,6 +18,7 @@ struct ImCwdCommandContext<'a> {
     client: &'a ImProviderClient,
     provider: &'a ImProviderConfig,
     provider_store: &'a Arc<ImProviderStore>,
+    group_context_store: &'a Arc<ImGroupContextStore>,
     event: &'a ImEvent,
     message_log_store: &'a Arc<ImMessageLogStore>,
     session_manager: &'a Arc<ImAgentSessionManager>,
@@ -26,6 +28,7 @@ struct ImRunnerCommandContext<'a> {
     client: &'a ImProviderClient,
     provider: &'a ImProviderConfig,
     provider_store: &'a Arc<ImProviderStore>,
+    group_context_store: &'a Arc<ImGroupContextStore>,
     external_cli_config_store: &'a Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
     event: &'a ImEvent,
     message_log_store: &'a Arc<ImMessageLogStore>,
@@ -81,7 +84,14 @@ pub(super) async fn handle_idle_im_command(
     if trimmed == "/status" {
         let detail = ctx.agent_session_manager.get_session_detail(session_key);
         let status_context = status_context_from_agent_config(agent_config);
-        let default_work_dir = agent_config.resolve_work_dir().display().to_string();
+        let default_work_dir = ctx
+            .group_context_store
+            .work_dir_by_session(session_key)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| agent_config.resolve_work_dir())
+            .display()
+            .to_string();
         let reply = build_im_status_text(
             detail.as_ref(),
             &status_context,
@@ -123,6 +133,7 @@ pub(super) async fn handle_idle_im_command(
             client: ctx.client,
             provider: ctx.provider,
             provider_store: ctx.provider_store,
+            group_context_store: ctx.group_context_store,
             event: ctx.event,
             message_log_store: ctx.message_log_store,
             session_manager: ctx.agent_session_manager,
@@ -140,6 +151,7 @@ pub(super) async fn handle_idle_im_command(
             client: ctx.client,
             provider: ctx.provider,
             provider_store: ctx.provider_store,
+            group_context_store: ctx.group_context_store,
             external_cli_config_store: ctx.external_cli_config_store,
             event: ctx.event,
             message_log_store: ctx.message_log_store,
@@ -383,12 +395,23 @@ pub(super) fn resolve_im_runner_selection(
 
 pub(super) fn apply_im_runner_switch_to_session(
     provider_store: &Arc<ImProviderStore>,
+    group_context_store: &Arc<ImGroupContextStore>,
     provider_id: &str,
     session_key: &str,
     session: &mut bifrost_agent::AgentSession,
     selection: &ImRunnerSelection,
 ) -> String {
-    persist_provider_agent_runner(provider_store, provider_id, selection.runner.clone());
+    match group_context_store.set_runner_id_by_session(session_key, &selection.runner_id) {
+        Ok(true) => {}
+        Ok(false) => {
+            persist_provider_agent_runner(provider_store, provider_id, selection.runner.clone())
+        }
+        Err(error) => warn!(
+            session_key = %session_key,
+            error = %error,
+            "failed to persist group runner binding"
+        ),
+    }
     clear_persisted_agent_session_state(session_key, None, None);
     session.clear();
     match &selection.runner {
@@ -405,6 +428,7 @@ pub(super) fn apply_im_runner_switch_to_session(
 
 pub(super) fn apply_im_runner_switch(
     provider_store: &Arc<ImProviderStore>,
+    group_context_store: &Arc<ImGroupContextStore>,
     session_manager: &Arc<ImAgentSessionManager>,
     provider_id: &str,
     session_key: &str,
@@ -418,6 +442,7 @@ pub(super) fn apply_im_runner_switch(
     };
     let reply = apply_im_runner_switch_to_session(
         provider_store,
+        group_context_store,
         provider_id,
         session_key,
         &mut session,
@@ -448,6 +473,7 @@ async fn handle_im_runner_command(
         ImRunnerCommand::List => format_im_runner_list(&config),
         ImRunnerCommand::Switch(runner_id) => match apply_im_runner_switch(
             ctx.provider_store,
+            ctx.group_context_store,
             ctx.session_manager,
             &ctx.provider.id,
             session_key,
@@ -936,6 +962,7 @@ fn persist_im_reasoning_effort_override(
 
 pub(super) fn apply_im_cwd_switch_to_session(
     provider_store: &Arc<ImProviderStore>,
+    group_context_store: &Arc<ImGroupContextStore>,
     provider_id: &str,
     session_key: &str,
     session: &mut bifrost_agent::AgentSession,
@@ -944,7 +971,15 @@ pub(super) fn apply_im_cwd_switch_to_session(
     let canonical_work_dir =
         std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
     let work_dir = canonical_work_dir.display().to_string();
-    persist_provider_agent_work_dir(provider_store, provider_id, &work_dir);
+    match group_context_store.set_work_dir_by_session(session_key, &work_dir) {
+        Ok(true) => {}
+        Ok(false) => persist_provider_agent_work_dir(provider_store, provider_id, &work_dir),
+        Err(error) => warn!(
+            session_key = %session_key,
+            error = %error,
+            "failed to persist group work directory"
+        ),
+    }
     clear_persisted_agent_session_state(session_key, None, None);
     session.reinitialize_work_dir(work_dir.clone());
     format!("已切换工作目录到:\n`{work_dir}`\n\n下一条消息将使用新的工作目录。")
@@ -952,6 +987,7 @@ pub(super) fn apply_im_cwd_switch_to_session(
 
 pub(super) fn apply_im_cwd_switch(
     provider_store: &Arc<ImProviderStore>,
+    group_context_store: &Arc<ImGroupContextStore>,
     session_manager: &Arc<ImAgentSessionManager>,
     provider_id: &str,
     session_key: &str,
@@ -967,6 +1003,7 @@ pub(super) fn apply_im_cwd_switch(
     };
     let reply = apply_im_cwd_switch_to_session(
         provider_store,
+        group_context_store,
         provider_id,
         session_key,
         &mut session,
@@ -987,6 +1024,7 @@ async fn handle_im_cwd_command(
     let reply = match command {
         Ok(path) => match apply_im_cwd_switch(
             ctx.provider_store,
+            ctx.group_context_store,
             ctx.session_manager,
             &ctx.provider.id,
             session_key,
@@ -1479,6 +1517,7 @@ pub(super) async fn handle_concurrent_event_during_chat(
     agent_config_store: &Arc<ImAgentConfigStore>,
     provider_store: &Arc<ImProviderStore>,
     event_store: &Arc<ImEventStore>,
+    group_context_store: &Arc<ImGroupContextStore>,
     external_cli_config_store: &Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
     active_session_default_mode: BusyMessageDefaultMode,
 ) {
@@ -1488,7 +1527,8 @@ pub(super) async fn handle_concurrent_event_during_chat(
     if !provider.enabled {
         return;
     }
-    if provider.provider_type == ImProviderType::Feishu {
+    let is_group_event = crate::im_gateway::group_context::is_feishu_group_event(event);
+    if provider.provider_type == ImProviderType::Feishu && !is_group_event {
         if let Some(ref owner_id) = provider.owner_open_id {
             if event.source.user_id.as_deref().unwrap_or("") != owner_id {
                 return;
@@ -1502,8 +1542,44 @@ pub(super) async fn handle_concurrent_event_during_chat(
         Some(message) if !message.text.trim().is_empty() || !message.images.is_empty() => message,
         _ => return,
     };
-    let message_text = agent_message_text(message);
-    let session_key = build_session_key(&event.provider_id, event.source.user_id.as_deref());
+    let dispatch = if is_group_event {
+        match prepare_group_inbound_dispatch(
+            client,
+            &provider,
+            event,
+            group_context_store,
+            agent_session_manager.is_session_active(
+                &crate::im_gateway::group_context::build_group_session_key(
+                    &event.provider_id,
+                    event.source.chat_id.as_deref().unwrap_or_default(),
+                ),
+            ),
+        )
+        .await
+        {
+            Ok(Some(dispatch)) => dispatch,
+            Ok(None) => return,
+            Err(error) => {
+                send_agent_reply(
+                    client,
+                    &provider,
+                    event,
+                    &format!("无法准备本次群聊上下文：{error}"),
+                    message_log_store,
+                )
+                .await;
+                return;
+            }
+        }
+    } else {
+        PreparedInboundDispatch {
+            message_text: agent_message_text(message),
+            session_key: build_session_key(&event.provider_id, event.source.user_id.as_deref()),
+            group_turn_id: None,
+        }
+    };
+    let message_text = dispatch.message_text;
+    let session_key = dispatch.session_key;
     let agent_config = effective_agent_config_for_provider(&agent_config_store.load(), &provider);
     if session_key == active_session_key {
         if message_text.trim() == "/help" {
@@ -1531,7 +1607,12 @@ pub(super) async fn handle_concurrent_event_during_chat(
                 agent_config: &agent_config,
                 default_mode: active_session_default_mode,
                 status_context: status_context_from_agent_config(&agent_config),
-                default_work_dir: Some(agent_config.resolve_work_dir().display().to_string()),
+                default_work_dir: group_context_store
+                    .work_dir_by_session(&session_key)
+                    .ok()
+                    .flatten()
+                    .map(|path| path.display().to_string())
+                    .or_else(|| Some(agent_config.resolve_work_dir().display().to_string())),
             },
         )
         .await;
@@ -1556,7 +1637,12 @@ pub(super) async fn handle_concurrent_event_during_chat(
                 agent_config: &agent_config,
                 default_mode: busy_default_mode,
                 status_context: status_context_from_agent_config(&agent_config),
-                default_work_dir: Some(agent_config.resolve_work_dir().display().to_string()),
+                default_work_dir: group_context_store
+                    .work_dir_by_session(&session_key)
+                    .ok()
+                    .flatten()
+                    .map(|path| path.display().to_string())
+                    .or_else(|| Some(agent_config.resolve_work_dir().display().to_string())),
             },
         )
         .await;

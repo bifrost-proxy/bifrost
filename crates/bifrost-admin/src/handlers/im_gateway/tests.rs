@@ -469,6 +469,7 @@ pub(super) fn agent_reply_target_uses_weixin_sender_instead_of_owner() {
             chat_id: Some("sender@im.wechat".to_string()),
             user_id: Some("sender@im.wechat".to_string()),
             message_id: Some("msg-1".to_string()),
+            ..Default::default()
         },
         message: None,
         received_at: 0,
@@ -588,6 +589,7 @@ pub(super) fn agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt
             aes_key: None,
         }],
         raw_type: Some("text".to_string()),
+        ..Default::default()
     };
     assert_eq!(agent_message_text(&text_message), "请分析这张图");
 
@@ -604,6 +606,7 @@ pub(super) fn agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt
             aes_key: None,
         }],
         raw_type: Some("image".to_string()),
+        ..Default::default()
     };
     assert_eq!(
         agent_message_text(&image_only_message),
@@ -615,6 +618,7 @@ pub(super) fn agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt
         mentions: Vec::new(),
         images: Vec::new(),
         raw_type: None,
+        ..Default::default()
     };
     assert!(agent_message_text(&empty_message).is_empty());
 }
@@ -645,6 +649,7 @@ pub(super) fn inbound_message_preview_summarizes_image_only_and_truncates_text()
             },
         ],
         raw_type: Some("image".to_string()),
+        ..Default::default()
     };
     assert_eq!(inbound_message_preview(&image_message), "[图片消息: 2 张]");
 
@@ -654,6 +659,7 @@ pub(super) fn inbound_message_preview_summarizes_image_only_and_truncates_text()
         mentions: Vec::new(),
         images: Vec::new(),
         raw_type: Some("text".to_string()),
+        ..Default::default()
     };
     let preview = inbound_message_preview(&text_message);
     assert_eq!(preview.chars().count(), 203);
@@ -849,6 +855,7 @@ pub(super) fn agent_reply_target_uses_feishu_chat_id_for_event_channel() {
             chat_id: Some("chat-1".to_string()),
             user_id: Some("sender-ou".to_string()),
             message_id: Some("msg-1".to_string()),
+            ..Default::default()
         },
         message: None,
         received_at: 0,
@@ -897,6 +904,7 @@ pub(super) fn agent_reply_target_uses_feishu_open_id_without_chat_id() {
             chat_id: None,
             user_id: Some("sender-ou".to_string()),
             message_id: Some("msg-1".to_string()),
+            ..Default::default()
         },
         message: None,
         received_at: 0,
@@ -1197,6 +1205,7 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
         provider.clone(),
         Arc::clone(&service.event_store),
         Arc::clone(&service.message_log_store),
+        Arc::clone(&service.group_context_store),
         Arc::clone(&service.route_store),
         Arc::clone(&service.provider_store),
         Arc::clone(&service.agent_config_store),
@@ -1219,12 +1228,14 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
             chat_id: Some("chat-id".to_string()),
             user_id: Some("owner-open-id".to_string()),
             message_id: None,
+            ..Default::default()
         },
         message: Some(crate::im_gateway::types::ImEventMessage {
             text: "run external cli".to_string(),
             mentions: Vec::new(),
             images: Vec::new(),
             raw_type: Some("text".to_string()),
+            ..Default::default()
         }),
         received_at: now_ms(),
         raw_digest: None,
@@ -1438,6 +1449,7 @@ pub(super) async fn im_event_loop_external_cli_route_processes_image_only_messag
         provider.clone(),
         Arc::clone(&service.event_store),
         Arc::clone(&service.message_log_store),
+        Arc::clone(&service.group_context_store),
         Arc::clone(&service.route_store),
         Arc::clone(&service.provider_store),
         Arc::clone(&service.agent_config_store),
@@ -1460,6 +1472,7 @@ pub(super) async fn im_event_loop_external_cli_route_processes_image_only_messag
             chat_id: Some("chat-id".to_string()),
             user_id: Some("owner-open-id".to_string()),
             message_id: Some("om-route-image".to_string()),
+            ..Default::default()
         },
         message: Some(crate::im_gateway::types::ImEventMessage {
             text: String::new(),
@@ -1485,6 +1498,7 @@ pub(super) async fn im_event_loop_external_cli_route_processes_image_only_messag
                 },
             ],
             raw_type: Some("image".to_string()),
+            ..Default::default()
         }),
         received_at: now_ms(),
         raw_digest: None,
@@ -1574,6 +1588,7 @@ pub(super) async fn im_event_loop_external_cli_session_records_runner_failure() 
         provider.clone(),
         Arc::clone(&service.event_store),
         Arc::clone(&service.message_log_store),
+        Arc::clone(&service.group_context_store),
         Arc::clone(&service.route_store),
         Arc::clone(&service.provider_store),
         Arc::clone(&service.agent_config_store),
@@ -1596,12 +1611,14 @@ pub(super) async fn im_event_loop_external_cli_session_records_runner_failure() 
             chat_id: Some("chat-id".to_string()),
             user_id: Some("owner-open-id".to_string()),
             message_id: None,
+            ..Default::default()
         },
         message: Some(crate::im_gateway::types::ImEventMessage {
             text: "trigger broken external cli".to_string(),
             mentions: Vec::new(),
             images: Vec::new(),
             raw_type: Some("text".to_string()),
+            ..Default::default()
         }),
         received_at: now_ms(),
         raw_digest: None,
@@ -1695,6 +1712,7 @@ pub(super) fn external_help_and_runner_switch_use_external_configuration() {
     let mut session = bifrost_agent::AgentSession::new("runner-switch-session");
     let reply = apply_im_runner_switch_to_session(
         &service.provider_store,
+        &service.group_context_store,
         &provider.id,
         "runner-switch-session",
         &mut session,
@@ -1750,12 +1768,14 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
             chat_id: Some("chat-id".to_string()),
             user_id: Some(user_id.to_string()),
             message_id: Some(format!("message-{event_id}")),
+            ..Default::default()
         },
         message: Some(crate::im_gateway::types::ImEventMessage {
             text: text.to_string(),
             mentions: Vec::new(),
             images: Vec::new(),
             raw_type: Some("text".to_string()),
+            ..Default::default()
         }),
         received_at: now_ms(),
         raw_digest: None,
@@ -1778,6 +1798,7 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
         &service.agent_config_store,
         &service.provider_store,
         &service.event_store,
+        &service.group_context_store,
         &service.external_cli_config_store,
         BusyMessageDefaultMode::Queue,
     )
@@ -1808,6 +1829,7 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
         &service.agent_config_store,
         &service.provider_store,
         &service.event_store,
+        &service.group_context_store,
         &service.external_cli_config_store,
         BusyMessageDefaultMode::Queue,
     )
@@ -1832,6 +1854,7 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
         &service.agent_config_store,
         &service.provider_store,
         &service.event_store,
+        &service.group_context_store,
         &service.external_cli_config_store,
         BusyMessageDefaultMode::Queue,
     )
@@ -1863,6 +1886,7 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
         &service.agent_config_store,
         &service.provider_store,
         &service.event_store,
+        &service.group_context_store,
         &service.external_cli_config_store,
         BusyMessageDefaultMode::Queue,
     )

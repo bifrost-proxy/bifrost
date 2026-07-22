@@ -10,6 +10,14 @@ struct MockInboundRequest {
     #[serde(default)]
     chat_id: Option<String>,
     #[serde(default)]
+    chat_type: Option<String>,
+    #[serde(default)]
+    chat_name: Option<String>,
+    #[serde(default)]
+    user_name: Option<String>,
+    #[serde(default)]
+    mention_bot: bool,
+    #[serde(default)]
     message_id: Option<String>,
     #[serde(default)]
     event_id: Option<String>,
@@ -90,12 +98,36 @@ async fn handle_mock_inbound(
             chat_id: Some(chat_id.clone()),
             user_id: Some(sender_id.clone()),
             message_id: Some(message_id.clone()),
+            chat_type: body.chat_type,
+            user_name: body.user_name,
+            sender_type: Some("user".to_string()),
         },
         message: Some(crate::im_gateway::types::ImEventMessage {
             text: body.text,
-            mentions: Vec::new(),
+            mentions: if body.mention_bot {
+                vec![crate::im_gateway::types::ImMention {
+                    key: "@_user_1".to_string(),
+                    open_id: Some("mock-bot".to_string()),
+                    name: Some("Bifrost".to_string()),
+                    tenant_key: None,
+                    is_bot: true,
+                }]
+            } else {
+                Vec::new()
+            },
             images: Vec::new(),
             raw_type: Some("text".to_string()),
+            raw_content: body
+                .chat_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|chat_name| serde_json::json!({"_bifrost_debug_chat_name": chat_name})),
+            create_time: Some(now_ms()),
+            update_time: None,
+            root_id: None,
+            parent_id: None,
+            thread_id: None,
         }),
         received_at: now_ms(),
         raw_digest: Some("mock_inbound".to_string()),
@@ -146,6 +178,7 @@ fn ensure_mock_event_sink(
     let provider_for_loop = provider.clone();
     let event_store = service.event_store.clone();
     let message_log_store = service.message_log_store.clone();
+    let group_context_store = service.group_context_store.clone();
     let route_store = service.route_store.clone();
     let provider_store = service.provider_store.clone();
     let agent_config_store = service.agent_config_store.clone();
@@ -164,6 +197,7 @@ fn ensure_mock_event_sink(
             provider_for_loop,
             event_store,
             message_log_store,
+            group_context_store,
             route_store,
             provider_store,
             agent_config_store,

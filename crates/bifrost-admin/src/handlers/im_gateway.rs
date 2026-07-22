@@ -23,8 +23,8 @@ use crate::im_gateway::types::{
 use crate::im_gateway::weixin::WeixinProvider;
 use crate::im_gateway::{
     ImAgentConfigStore, ImAgentSessionManager, ImConnectionManager, ImEventStore,
-    ImMessageLogStore, ImProviderStore, ImRouteStore, ImRunStore, ImScheduleStore, ImScheduler,
-    ImTargetStore, SessionQueueManager,
+    ImGroupContextStore, ImMessageLogStore, ImProviderStore, ImRouteStore, ImRunStore,
+    ImScheduleStore, ImScheduler, ImTargetStore, SessionQueueManager,
 };
 use bifrost_agent::persistence::ConversationRecorder;
 use bifrost_agent::{PlanStep, SessionDetail, ToolCallLog};

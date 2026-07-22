@@ -631,26 +631,61 @@ pub struct ImTaskRun {
 // Event
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ImEventSource {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImMention {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_key: Option<String>,
+    /// Set by trusted adapters/tests when the mention is known to target the
+    /// current application bot. Raw Feishu events are verified against the
+    /// bot identity before this flag is relied upon.
+    #[serde(default)]
+    pub is_bot: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ImEventMessage {
     #[serde(default)]
     pub text: String,
     #[serde(default)]
-    pub mentions: Vec<String>,
+    pub mentions: Vec<ImMention>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImImageAttachment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_content: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_time: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_time: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

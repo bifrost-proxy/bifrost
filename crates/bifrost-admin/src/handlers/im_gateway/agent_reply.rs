@@ -1019,7 +1019,8 @@ pub(super) fn build_agent_reply_target(
     })
 }
 
-/// Send an agent reply with a custom card title.
+/// Send an agent reply card. The Feishu provider strips the root title before
+/// delivery, while other providers keep their existing card semantics.
 pub(super) async fn send_agent_reply_with_title(
     client: &ImProviderClient,
     provider: &ImProviderConfig,
@@ -1044,7 +1045,6 @@ pub(super) async fn send_agent_reply_with_title(
         return;
     };
 
-    let card_title = title.unwrap_or("Bifrost AI");
     let rendered_text = if let Some(feishu) = client.feishu() {
         render_agent_markdown_for_feishu(
             &feishu,
@@ -1058,6 +1058,7 @@ pub(super) async fn send_agent_reply_with_title(
     };
     let converted_text =
         crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&rendered_text);
+    let card_title = title.unwrap_or("Bifrost AI");
     let card = serde_json::json!({
         "schema": "2.0",
         "config": {
@@ -1083,9 +1084,10 @@ pub(super) async fn send_agent_reply_with_title(
     });
 
     let send_result = client
-        .send_card(
+        .send_reply_card(
             provider,
             &reply_target,
+            event.source.message_id.as_deref(),
             card,
             crate::im_gateway::types::SendOptions::default(),
         )
@@ -1328,9 +1330,10 @@ pub(super) async fn send_agent_reply_with_plan(
     });
 
     let send_result = client
-        .send_card(
+        .send_reply_card(
             provider,
             &reply_target,
+            event.source.message_id.as_deref(),
             card,
             crate::im_gateway::types::SendOptions::default(),
         )

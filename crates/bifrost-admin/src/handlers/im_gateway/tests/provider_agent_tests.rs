@@ -597,6 +597,7 @@ pub(super) fn im_cwd_command_persists_provider_and_reinitializes_idle_session() 
     let new_work_dir = tempfile::tempdir().expect("new work dir");
     let reply = apply_im_cwd_switch(
         &store,
+        &Arc::new(ImGroupContextStore::new(temp_dir.path())),
         &manager,
         "im-cwd-provider",
         "feishu-main:ou_owner",

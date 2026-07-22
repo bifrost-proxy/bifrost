@@ -649,6 +649,7 @@ pub struct FeishuProgressCardSession {
     generation: u64,
     compact_card_mode: bool,
     card_budget: FeishuCardBudget,
+    reply_to_message_id: Option<String>,
 }
 
 impl FeishuProgressCardSession {
@@ -667,7 +668,20 @@ impl FeishuProgressCardSession {
             generation: 0,
             compact_card_mode: false,
             card_budget: FEISHU_CARD_STANDARD_BUDGET,
+            reply_to_message_id: None,
         }
+    }
+
+    pub fn new_replying_to(
+        feishu: Arc<FeishuProvider>,
+        provider: ImProviderConfig,
+        target: ImTarget,
+        snapshot: ImAgentProgressSnapshot,
+        reply_to_message_id: Option<&str>,
+    ) -> Self {
+        let mut session = Self::new(feishu, provider, target, snapshot);
+        session.reply_to_message_id = normalized_message_id(reply_to_message_id);
+        session
     }
 
     pub fn snapshot(&self) -> &ImAgentProgressSnapshot {
@@ -737,6 +751,16 @@ impl FeishuProgressCardSession {
     }
 
     pub async fn rollover_turn(&mut self, initial_message: &str) -> Result<bool> {
+        let reply_to_message_id = self.reply_to_message_id.clone();
+        self.rollover_turn_replying_to(initial_message, reply_to_message_id.as_deref())
+            .await
+    }
+
+    pub async fn rollover_turn_replying_to(
+        &mut self,
+        initial_message: &str,
+        reply_to_message_id: Option<&str>,
+    ) -> Result<bool> {
         if !self.can_rollover_current_card() {
             return Ok(false);
         }
@@ -745,14 +769,17 @@ impl FeishuProgressCardSession {
         let previous_generation = self.generation;
         let previous_compact_card_mode = self.compact_card_mode;
         let previous_card_budget = self.card_budget;
+        let previous_reply_to_message_id = self.reply_to_message_id.clone();
         let session_key = self.snapshot.session_key.clone();
         self.snapshot = ImAgentProgressSnapshot::new(session_key, initial_message);
+        self.reply_to_message_id = normalized_message_id(reply_to_message_id);
         if let Err(error) = self.send_initial_card().await {
             self.snapshot = previous_snapshot;
             self.handle = previous_handle;
             self.generation = previous_generation;
             self.compact_card_mode = previous_compact_card_mode;
             self.card_budget = previous_card_budget;
+            self.reply_to_message_id = previous_reply_to_message_id;
             return Err(error);
         }
         self.freeze_previous_card_after_rollover(
@@ -884,11 +911,35 @@ impl FeishuProgressCardSession {
         let (card_id, compact_card_mode, send_result) = loop {
             let (card_id, compact_card_mode) = self.create_initial_card_entity().await?;
             let send_uuid = format!("progress_send_{}", uuid::Uuid::new_v4().simple());
-            match self
-                .feishu
-                .send_card_entity(&self.provider, &self.target, &card_id, Some(&send_uuid))
-                .await
-            {
+            let send_result = if let Some(message_id) = self.reply_to_message_id.as_deref() {
+                match self
+                    .feishu
+                    .reply_card_entity(&self.provider, message_id, &card_id, Some(&send_uuid))
+                    .await
+                {
+                    Ok(result) => Ok(result),
+                    Err(reply_error) => {
+                        warn!(
+                            message_id,
+                            error = %reply_error,
+                            "Feishu native progress-card reply failed; falling back to direct send"
+                        );
+                        self.feishu
+                            .send_card_entity(
+                                &self.provider,
+                                &self.target,
+                                &card_id,
+                                Some(&send_uuid),
+                            )
+                            .await
+                    }
+                }
+            } else {
+                self.feishu
+                    .send_card_entity(&self.provider, &self.target, &card_id, Some(&send_uuid))
+                    .await
+            };
+            match send_result {
                 Ok(send_result) => break (card_id, compact_card_mode, send_result),
                 Err(error)
                     if !invalid_card_id_retried && is_feishu_card_id_invalid_error(&error) =>
@@ -1312,8 +1363,27 @@ impl ImAgentProgressRegistry {
         target: ImTarget,
         initial_message: &str,
     ) -> Result<Arc<Mutex<FeishuProgressCardSession>>> {
+        self.start_feishu_replying_to(session_key, feishu, provider, target, initial_message, None)
+            .await
+    }
+
+    pub async fn start_feishu_replying_to(
+        &self,
+        session_key: &str,
+        feishu: Arc<FeishuProvider>,
+        provider: ImProviderConfig,
+        target: ImTarget,
+        initial_message: &str,
+        reply_to_message_id: Option<&str>,
+    ) -> Result<Arc<Mutex<FeishuProgressCardSession>>> {
         let snapshot = ImAgentProgressSnapshot::new(session_key, initial_message);
-        let mut session = FeishuProgressCardSession::new(feishu, provider, target, snapshot);
+        let mut session = FeishuProgressCardSession::new_replying_to(
+            feishu,
+            provider,
+            target,
+            snapshot,
+            reply_to_message_id,
+        );
         session.start().await?;
         let session = Arc::new(Mutex::new(session));
         self.sessions
@@ -1442,11 +1512,25 @@ impl ImAgentProgressRegistry {
     }
 
     pub async fn rollover_existing(&self, session_key: &str, initial_message: &str) -> bool {
+        self.rollover_existing_replying_to(session_key, initial_message, None)
+            .await
+    }
+
+    pub async fn rollover_existing_replying_to(
+        &self,
+        session_key: &str,
+        initial_message: &str,
+        reply_to_message_id: Option<&str>,
+    ) -> bool {
         let Some(session) = self.sessions.get(session_key) else {
             return false;
         };
         let session = Arc::clone(session.value());
-        let result = session.lock().await.rollover_turn(initial_message).await;
+        let result = session
+            .lock()
+            .await
+            .rollover_turn_replying_to(initial_message, reply_to_message_id)
+            .await;
         match result {
             Ok(rolled_over) => rolled_over,
             Err(error) => {
@@ -1459,6 +1543,13 @@ impl ImAgentProgressRegistry {
             }
         }
     }
+}
+
+fn normalized_message_id(message_id: Option<&str>) -> Option<String> {
+    message_id
+        .map(str::trim)
+        .filter(|message_id| !message_id.is_empty())
+        .map(str::to_string)
 }
 
 pub fn build_feishu_progress_card(
@@ -1510,17 +1601,6 @@ fn build_feishu_progress_card_unchecked(
                 "print_strategy": "fast"
             }
         },
-        "header": {
-            "template": match snapshot.phase {
-                ImProgressPhase::Running => "blue",
-                ImProgressPhase::Finished => "green",
-                ImProgressPhase::Failed => "red",
-            },
-            "title": {
-                "tag": "plain_text",
-                "content": header_title(snapshot)
-            }
-        },
         "body": {
             "elements": elements
         }
@@ -1554,17 +1634,6 @@ pub fn build_feishu_compact_progress_card(
                 "print_frequency_ms": { "default": 70 },
                 "print_step": { "default": 1 },
                 "print_strategy": "fast"
-            }
-        },
-        "header": {
-            "template": match snapshot.phase {
-                ImProgressPhase::Running => "blue",
-                ImProgressPhase::Finished => "green",
-                ImProgressPhase::Failed => "red",
-            },
-            "title": {
-                "tag": "plain_text",
-                "content": header_title(snapshot)
             }
         },
         "body": {

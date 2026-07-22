@@ -807,6 +807,10 @@ Runner 选择规则：交互式终端中未传 `--runner` 时会展示启用 Run
 
 IM 通道建立后，Bifrost 会先推送上线通知和可用命令帮助。所有外部 Runner 都显示 `/help`、`/status`、`/cwd`、`/runner`、`/q`、`/rq`、`/stop` 等 IM 通道命令；Codex / Traex / Claude Code 等 Runner 只在适配器支持时显示 `/models`、`/model`、`/efforts`、`/effort`。
 
+飞书机器人加入群聊后，每个群使用独立 Session Key、上下文游标、Runner 和工作目录。普通群消息只写入群上下文账本，不调用模型；`@机器人`、`/g`、`/q` 或现有 slash 指令才触发处理。模型触发时会收到从上一次执行之后到本次触发之前的有效多人对话，最后一条触发消息只出现一次。每行都采用 `<at id=发送者 open_id>显示名</at>：消息内容`，方便 Agent 准确 @ 原发送人；事件没有显示名时使用 `<at id=发送者 open_id></at>`，不把冗长 open_id 重复到可见文本中。第一次启动该群的模型 Session 时，Prompt 只额外带群名称和群 ID；后续不重复群信息，也不注入 provider、Session Key、消息 ID、序号、时间戳、mentions 等工程字段。没有累积消息时完全省略背景区域，只发送最后一条触发消息。可用工具由运行环境安装的 Skill 注入，Bifrost 不在业务 Prompt 中指定工具。群聊与单聊使用同一套 slash 命令；群内 `/cwd` 和 `/runner` 只修改当前群绑定。要接收未 @ 的普通群消息，飞书应用必须订阅 `im.message.receive_v1`，申请敏感权限 `im:message.group_msg` 并重新发布版本；只有 `im:message.group_at_msg:readonly` 时，飞书不会把普通群消息推送给 Bifrost，因此模型输入也不会出现未投递的群聊背景。群名解析还需要“获取群组信息”（如 `im:chat:readonly`）能力。
+
+Bifrost 生成的飞书卡片不再显示占空间的顶部标题栏。由群消息或单聊消息触发的回复使用飞书原生消息回复关系，因此客户端会在卡片上方显示简洁引用；任务计划、工具记录等卡片内部折叠区标题仍保留。上线通知、定时任务和管理端主动发送没有可引用的来源消息，仍直接发送到目标会话，但卡片同样保持无顶部标题。
+
 `bifrost im schedule add/update` 创建 Agent schedule 时可用 `--agent-runner-id` 选择 Runner，并通过 `--agent-model`、`--agent-profile`、`--agent-profile-v2`、`--agent-sandbox`、`--agent-reasoning-effort`、`--agent-reasoning-summary`、`--agent-approval-policy`、`--agent-danger-full-access`、`--agent-bypass-hook-trust`、`--agent-skip-git-repo-check`、`--agent-ignore-user-config`、`--agent-ignore-rules`、`--agent-add-dir`、`--agent-config`、`--agent-enable`、`--agent-disable` 等参数写入 `agent.adapter_config`。这些 schedule 级参数会在运行时覆盖 Runner 默认 Codex adapter 配置；历史 `--agent-search` 仅作为兼容入口映射为 `--enable web_search`，不再生成当前 Codex CLI 不支持的 `--search`。
 
 ### 本地语音输入（ai voice）
