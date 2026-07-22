@@ -104,6 +104,18 @@ export interface MossModelStatus {
   model_dir: string;
   expected_model_bytes: number;
   installed_model_bytes: number;
+  initializing: boolean;
+  initialization?: {
+    label: string;
+    downloaded_bytes: number;
+    total_bytes?: number;
+    percent?: number;
+    bytes_per_second?: number;
+    eta_seconds?: number;
+    elapsed_ms: number;
+    resumed: boolean;
+    complete: boolean;
+  };
   message: string;
 }
 
