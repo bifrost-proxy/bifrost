@@ -81,6 +81,18 @@ fn read_complete_output(file: &mut File) -> String {
 mod tests {
     use super::*;
 
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("intentional writer failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn forwards_only_new_bytes_and_retains_complete_output() {
         let mut capture = StreamedOutputCapture::new().expect("capture");
@@ -112,5 +124,30 @@ mod tests {
         let (captured_stdout, captured_stderr) = capture.read_all();
         assert_eq!(captured_stdout, "download 10%\rdownload 100%\n");
         assert_eq!(captured_stderr, "installer note\n");
+    }
+
+    #[test]
+    fn forwarding_propagates_stdout_and_stderr_write_failures() {
+        let mut stdout_capture = StreamedOutputCapture::new().expect("stdout capture");
+        stdout_capture
+            .stdout
+            .as_file_mut()
+            .write_all(b"stdout")
+            .unwrap();
+        let stdout_error = stdout_capture
+            .forward_available_to(&mut FailingWriter, &mut Vec::new())
+            .expect_err("stdout target failure must propagate");
+        assert_eq!(stdout_error.kind(), io::ErrorKind::Other);
+
+        let mut stderr_capture = StreamedOutputCapture::new().expect("stderr capture");
+        stderr_capture
+            .stderr
+            .as_file_mut()
+            .write_all(b"stderr")
+            .unwrap();
+        let stderr_error = stderr_capture
+            .forward_available_to(&mut Vec::new(), &mut FailingWriter)
+            .expect_err("stderr target failure must propagate");
+        assert_eq!(stderr_error.kind(), io::ErrorKind::Other);
     }
 }
