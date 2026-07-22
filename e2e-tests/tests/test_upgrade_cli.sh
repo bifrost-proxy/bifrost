@@ -425,7 +425,7 @@ test_upgrade_streams_desktop_installer_progress() {
     fi
 
     local current_version root app_dir package_dir dmg_path fake_bin log_file upgrade_pid status
-    local http_port http_pid
+    local http_port http_pid http_server_log server_error
     local observed_download_while_running="false"
     local observed_installer_while_running="false"
     current_version=$("$BIFROST_BIN" --version 2>&1 \
@@ -438,6 +438,7 @@ test_upgrade_streams_desktop_installer_progress() {
     dmg_path="$root/bifrost-desktop-fixture.dmg"
     fake_bin="$root/bin"
     log_file="$root/upgrade.log"
+    http_server_log="$root/http-server.log"
     mkdir -p "$fake_bin" "$root/data"
     create_fake_macos_app "$app_dir/Bifrost.app" "0.0.1"
     create_fake_macos_app "$package_dir" "$current_version"
@@ -459,17 +460,16 @@ exec /usr/bin/ditto "$@"
 EOF
     chmod +x "$fake_bin/ditto"
 
-    http_port=$(get_free_tcp_port)
-    python3 - "$dmg_path" "$http_port" "$root/http-ready" "$root/http-done" <<'PY' &
+    python3 - "$dmg_path" "$root/http-ready" "$root/http-done" \
+        >"$http_server_log" 2>&1 <<'PY' &
 import http.server
 import pathlib
 import sys
 import time
 
 payload_path = pathlib.Path(sys.argv[1])
-port = int(sys.argv[2])
-ready_path = pathlib.Path(sys.argv[3])
-done_path = pathlib.Path(sys.argv[4])
+ready_path = pathlib.Path(sys.argv[2])
+done_path = pathlib.Path(sys.argv[3])
 payload = payload_path.read_bytes()
 
 class SlowDownload(http.server.BaseHTTPRequestHandler):
@@ -487,25 +487,37 @@ class SlowDownload(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_args):
         pass
 
-server = http.server.HTTPServer(("127.0.0.1", port), SlowDownload)
-ready_path.write_text("ready", encoding="utf-8")
+server = http.server.HTTPServer(("127.0.0.1", 0), SlowDownload)
+ready_path.write_text(str(server.server_address[1]), encoding="utf-8")
 server.handle_request()
 server.server_close()
 PY
     http_pid=$!
     TEST_HTTP_PID="$http_pid"
     local attempt
-    for ((attempt = 0; attempt < 100; attempt++)); do
-        [[ -f "$root/http-ready" ]] && break
+    for ((attempt = 0; attempt < 600; attempt++)); do
+        [[ -s "$root/http-ready" ]] && break
+        kill -0 "$http_pid" 2>/dev/null || break
         sleep 0.05
     done
-    if [[ ! -f "$root/http-ready" ]]; then
+    if [[ ! -s "$root/http-ready" ]]; then
+        server_error=$(tail -20 "$http_server_log" 2>/dev/null || true)
         kill -TERM "$http_pid" 2>/dev/null || true
         wait "$http_pid" 2>/dev/null || true
         TEST_HTTP_PID=""
         rm -rf "$root"
         TEST_DATA_DIR=""
-        fail "本地 Desktop 慢速下载服务未就绪"
+        fail "本地 Desktop 慢速下载服务未就绪${server_error:+: $server_error}"
+        return
+    fi
+    http_port=$(tr -d '[:space:]' < "$root/http-ready")
+    if [[ ! "$http_port" =~ ^[0-9]+$ ]]; then
+        kill -TERM "$http_pid" 2>/dev/null || true
+        wait "$http_pid" 2>/dev/null || true
+        TEST_HTTP_PID=""
+        rm -rf "$root"
+        TEST_DATA_DIR=""
+        fail "本地 Desktop 慢速下载服务返回无效端口: $http_port"
         return
     fi
 
