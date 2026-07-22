@@ -412,6 +412,79 @@ test_upgrade_desktop_app_failure_does_not_fail_cli_flow() {
     fi
 }
 
+test_upgrade_streams_desktop_installer_progress() {
+    header "测试 upgrade 实时转发桌面安装进度"
+
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+        skip "桌面安装器实时转发回归当前使用 macOS 临时 .app 与 ditto"
+        return
+    fi
+
+    local current_version root app_dir package_dir fake_bin log_file upgrade_pid status
+    local observed_while_running="false"
+    current_version=$("$BIFROST_BIN" --version 2>&1 \
+        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?' \
+        | head -1)
+    root=$(mktemp -d)
+    TEST_DATA_DIR="$root"
+    app_dir="$root/app-dir"
+    package_dir="$root/package/Bifrost.app"
+    fake_bin="$root/bin"
+    log_file="$root/upgrade.log"
+    mkdir -p "$fake_bin" "$root/data"
+    create_fake_macos_app "$app_dir/Bifrost.app" "0.0.1"
+    create_fake_macos_app "$package_dir" "$current_version"
+    cat > "$fake_bin/ditto" <<'EOF'
+#!/bin/sh
+echo "BIFROST_TEST_INSTALLER_PROGRESS 10%"
+sleep 2
+exec /usr/bin/ditto "$@"
+EOF
+    chmod +x "$fake_bin/ditto"
+
+    PATH="$fake_bin:$PATH" \
+    BIFROST_DATA_DIR="$root/data" \
+    BIFROST_APP_INSTALL_DIR="$app_dir" \
+    BIFROST_APP_UPGRADE_TEST_PACKAGE="$package_dir" \
+    BIFROST_APP_SKIP_RESTART=1 \
+    BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES=1 \
+    BIFROST_UPGRADE_TEST_LATEST_VERSION="$current_version" \
+        "$BIFROST_BIN" upgrade >"$log_file" 2>&1 &
+    upgrade_pid=$!
+    TEST_PROXY_PID="$upgrade_pid"
+
+    local attempt
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        if grep -q "BIFROST_TEST_INSTALLER_PROGRESS 10%" "$log_file" 2>/dev/null; then
+            if kill -0 "$upgrade_pid" 2>/dev/null; then
+                observed_while_running="true"
+            fi
+            break
+        fi
+        sleep 0.05
+    done
+
+    set +e
+    wait "$upgrade_pid"
+    status=$?
+    TEST_PROXY_PID=""
+    local output
+    output=$(cat "$log_file")
+    rm -rf "$root"
+    TEST_DATA_DIR=""
+
+    if [[ $status -eq 0 \
+        && "$observed_while_running" == "true" \
+        && "$output" == *"Installing desktop app..."* \
+        && "$output" == *"BIFROST_TEST_INSTALLER_PROGRESS 10%"* \
+        && "$output" == *"Desktop app installed successfully"* \
+        && "$output" == *"Bifrost desktop app updated successfully"* ]]; then
+        pass "父 upgrade 在子安装仍运行时已显示桌面安装器进度，并保留完整完成阶段"
+    else
+        fail "桌面安装进度未实时转发: status=$status live=$observed_while_running output=$output"
+    fi
+}
+
 get_free_tcp_port() {
     python3 - <<'PY'
 import socket
@@ -835,6 +908,8 @@ Bifrost Upgrade CLI 端到端测试
                   只执行 Admin runtime marker 恢复回归
   --only-runtime-ownership
                   只执行 CLI-owned / App-owned 重启所有权回归
+  --only-progress-streaming
+                  只执行 Desktop 子升级进度实时转发回归
   --verbose       详细输出
 
 环境变量:
@@ -849,6 +924,7 @@ EOF
 SKIP_BUILD="false"
 ONLY_RUNTIME_MARKER="false"
 ONLY_RUNTIME_OWNERSHIP="false"
+ONLY_PROGRESS_STREAMING="false"
 VERBOSE="false"
 
 while [[ $# -gt 0 ]]; do
@@ -867,6 +943,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --only-runtime-ownership)
             ONLY_RUNTIME_OWNERSHIP="true"
+            shift
+            ;;
+        --only-progress-streaming)
+            ONLY_PROGRESS_STREAMING="true"
             shift
             ;;
         --verbose)
@@ -905,6 +985,12 @@ main() {
         return
     fi
 
+    if [[ "$ONLY_PROGRESS_STREAMING" == "true" ]]; then
+        test_upgrade_streams_desktop_installer_progress
+        print_summary
+        return
+    fi
+
     test_upgrade_help
     test_upgrade_check_output
     test_upgrade_restart_flag_removed
@@ -916,6 +1002,7 @@ main() {
     test_no_notice_when_current
     test_upgrade_preserves_already_current_desktop_app
     test_upgrade_desktop_app_failure_does_not_fail_cli_flow
+    test_upgrade_streams_desktop_installer_progress
     test_admin_self_update_recovers_missing_runtime_markers
     test_admin_self_update_converts_cli_foreground_to_restarted_daemon
     test_admin_self_update_requires_companion_app_before_restart

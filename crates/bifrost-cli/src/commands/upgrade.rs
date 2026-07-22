@@ -5,7 +5,7 @@ use bifrost_core::BifrostError;
 use colored::Colorize;
 use std::env;
 use std::fs;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -15,6 +15,7 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::streamed_output::StreamedOutputCapture;
 use super::update_check::{get_latest_version, get_latest_version_fresh_with_diagnostics};
 use crate::config::get_bifrost_dir;
 use crate::process::{
@@ -460,6 +461,21 @@ fn command_status_with_timeout(
         args,
         timeout,
         Duration::from_secs(UPGRADE_CHILD_PROGRESS_HEARTBEAT_SECS),
+        false,
+    )
+}
+
+fn command_status_with_timeout_streaming(
+    program: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<TimedCommandStatus, BifrostError> {
+    command_status_with_timeout_and_heartbeat(
+        program,
+        args,
+        timeout,
+        Duration::from_secs(UPGRADE_CHILD_PROGRESS_HEARTBEAT_SECS),
+        true,
     )
 }
 
@@ -468,14 +484,16 @@ fn command_status_with_timeout_and_heartbeat(
     args: &[&str],
     timeout: Duration,
     heartbeat: Duration,
+    stream_output: bool,
 ) -> Result<TimedCommandStatus, BifrostError> {
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(BifrostError::Io)?;
+    let mut command = Command::new(program);
+    command.args(args).stdin(Stdio::null());
+    if stream_output {
+        command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else {
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let mut child = command.spawn().map_err(BifrostError::Io)?;
     let deadline = Instant::now() + timeout;
     let mut next_heartbeat = Instant::now() + heartbeat;
 
@@ -540,6 +558,25 @@ fn command_output_with_timeout_and_heartbeat(
     command_output_with_timeout_and_env(program, args, timeout, heartbeat, &[], None)
 }
 
+fn command_output_with_timeout_and_env_streaming(
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+    heartbeat: Duration,
+    environment: &[(&str, &str)],
+    parent_upgrade_lock_data_dir: Option<&Path>,
+) -> Result<TimedCommandOutput, BifrostError> {
+    command_output_with_timeout_and_env_inner(
+        program,
+        args,
+        timeout,
+        heartbeat,
+        environment,
+        parent_upgrade_lock_data_dir,
+        true,
+    )
+}
+
 fn command_output_with_timeout_and_env(
     program: &Path,
     args: &[String],
@@ -548,29 +585,38 @@ fn command_output_with_timeout_and_env(
     environment: &[(&str, &str)],
     parent_upgrade_lock_data_dir: Option<&Path>,
 ) -> Result<TimedCommandOutput, BifrostError> {
+    command_output_with_timeout_and_env_inner(
+        program,
+        args,
+        timeout,
+        heartbeat,
+        environment,
+        parent_upgrade_lock_data_dir,
+        false,
+    )
+}
+
+fn command_output_with_timeout_and_env_inner(
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+    heartbeat: Duration,
+    environment: &[(&str, &str)],
+    parent_upgrade_lock_data_dir: Option<&Path>,
+    stream_output: bool,
+) -> Result<TimedCommandOutput, BifrostError> {
     let parent_lock_environment = parent_upgrade_lock_data_dir
         .map(super::upgrade_background::parent_upgrade_lock_child_environment)
         .unwrap_or_default();
-    let mut stdout_file =
-        tempfile::tempfile().map_err(|e| BifrostError::Io(std::io::Error::other(e)))?;
-    let mut stderr_file =
-        tempfile::tempfile().map_err(|e| BifrostError::Io(std::io::Error::other(e)))?;
+    let mut output_capture = StreamedOutputCapture::new().map_err(BifrostError::Io)?;
     let mut command = Command::new(program);
     command
         .args(args)
         .envs(parent_lock_environment)
         .envs(environment.iter().copied())
         .stdin(Stdio::null())
-        .stdout(Stdio::from(
-            stdout_file
-                .try_clone()
-                .map_err(|e| BifrostError::Io(std::io::Error::other(e)))?,
-        ))
-        .stderr(Stdio::from(
-            stderr_file
-                .try_clone()
-                .map_err(|e| BifrostError::Io(std::io::Error::other(e)))?,
-        ));
+        .stdout(output_capture.stdout_stdio().map_err(BifrostError::Io)?)
+        .stderr(output_capture.stderr_stdio().map_err(BifrostError::Io)?);
     let mut child =
         spawn_upgrade_command_with_retry(|| command.spawn()).map_err(BifrostError::Io)?;
     let deadline = Instant::now() + timeout;
@@ -578,6 +624,9 @@ fn command_output_with_timeout_and_env(
     let status;
 
     loop {
+        if stream_output {
+            output_capture.forward_available();
+        }
         match child.try_wait() {
             Ok(Some(exit_status)) => {
                 status = if exit_status.success() {
@@ -604,10 +653,15 @@ fn command_output_with_timeout_and_env(
         }
     }
 
+    if stream_output {
+        output_capture.forward_available();
+    }
+    let (stdout, stderr) = output_capture.read_all();
+
     Ok(TimedCommandOutput {
         status,
-        stdout: read_temp_output(&mut stdout_file),
-        stderr: read_temp_output(&mut stderr_file),
+        stdout,
+        stderr,
     })
 }
 
@@ -640,13 +694,6 @@ fn spawn_upgrade_command_with_retry<T>(mut spawn: impl FnMut() -> io::Result<T>)
             Err(error) => return Err(error),
         }
     }
-}
-
-fn read_temp_output(file: &mut fs::File) -> String {
-    let mut output = String::new();
-    let _ = file.seek(SeekFrom::Start(0));
-    let _ = file.read_to_string(&mut output);
-    output
 }
 
 fn verify_installed_cli_target_version(
@@ -705,7 +752,7 @@ fn post_upgrade_skill_install_message(status: TimedCommandStatus) -> &'static st
 
 fn install_skills_after_upgrade_best_effort(executable: &Path) {
     println!("{}", "Installing latest Bifrost skills...".bright_cyan());
-    match command_status_with_timeout(
+    match command_status_with_timeout_streaming(
         executable,
         POST_UPGRADE_SKILL_INSTALL_ARGS,
         Duration::from_secs(POST_UPGRADE_SKILL_INSTALL_TIMEOUT_SECS),

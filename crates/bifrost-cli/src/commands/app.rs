@@ -3,8 +3,8 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 #[cfg(target_os = "windows")]
-use std::io::{self, Cursor};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::Cursor;
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -47,6 +47,7 @@ const CALLER_MANAGED_PROGRESS_SOURCE: &str = "cli-upgrade";
 const DESKTOP_MANAGED_CLI_TIMEOUT: Duration = Duration::from_secs(600);
 const DESKTOP_MANAGED_CLI_HEARTBEAT: Duration = Duration::from_secs(30);
 const DESKTOP_MANAGED_CLI_VERSION_TIMEOUT: Duration = Duration::from_secs(60);
+const DESKTOP_INSTALL_TERMINAL_HEARTBEAT: Duration = Duration::from_secs(5);
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const DESKTOP_INSTALL_COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -263,6 +264,7 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
         None,
         None,
     );
+    println!("{}", "Installing desktop app...".bright_cyan());
     #[cfg(target_os = "windows")]
     if should_defer_current_desktop_install(&progress_source, &package_path) {
         defer_desktop_install_to_handoff(&package_path, &target_version, package_owned_by_updater)
@@ -295,6 +297,7 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
     .inspect_err(|error| {
         write_app_failed_progress(&target_version, &progress_source, error);
     })?;
+    println!("{}", "✓ Desktop app installed successfully.".bright_green());
 
     write_app_progress(
         UpgradePhase::Restarting,
@@ -307,6 +310,15 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
         &progress_source,
         None,
         None,
+    );
+    println!(
+        "{}",
+        if progress_source == "desktop" {
+            "Waiting for desktop shell to restart..."
+        } else {
+            "Restarting desktop app..."
+        }
+        .bright_cyan()
     );
     if desktop_handoff_managed {
         println!(
@@ -803,9 +815,11 @@ fn download_desktop_package(version: &str, progress_source: &str) -> Result<Path
             let percent = total
                 .filter(|total| *total > 0)
                 .map(|total| ((downloaded as f64 / total as f64) * 100.0).clamp(0.0, 100.0));
+            let progress_line = download_progress_line(downloaded, total, started);
+            let _ = write_terminal_download_progress(&progress_line, false, &mut io::stdout());
             write_app_progress(
                 UpgradePhase::Downloading,
-                download_progress_line(downloaded, total, started),
+                progress_line,
                 Some(version.to_string()),
                 progress_source,
                 percent,
@@ -815,6 +829,9 @@ fn download_desktop_package(version: &str, progress_source: &str) -> Result<Path
         }
     }
     file.flush().map_err(BifrostError::Io)?;
+
+    let progress_line = download_progress_line(downloaded, total, started);
+    let _ = write_terminal_download_progress(&progress_line, true, &mut io::stdout());
 
     if downloaded == 0 {
         return Err(BifrostError::Network(format!(
@@ -831,6 +848,19 @@ fn download_desktop_package(version: &str, progress_source: &str) -> Result<Path
         None,
     );
     Ok(package_path)
+}
+
+fn write_terminal_download_progress(
+    progress_line: &str,
+    finish_line: bool,
+    output: &mut impl Write,
+) -> io::Result<()> {
+    if finish_line {
+        writeln!(output, "\r{progress_line}")?;
+    } else {
+        write!(output, "\r{progress_line}")?;
+    }
+    output.flush()
 }
 
 fn install_desktop_package(

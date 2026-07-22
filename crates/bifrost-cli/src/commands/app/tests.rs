@@ -501,6 +501,19 @@ fn desktop_installer_command_has_output_heartbeat_and_timeout() {
 }
 
 #[test]
+fn desktop_download_progress_writes_refresh_and_final_line() {
+    let mut output = Vec::new();
+    write_terminal_download_progress("Downloading… 50.0%", false, &mut output)
+        .expect("write refresh");
+    write_terminal_download_progress("Downloading… 100.0%", true, &mut output)
+        .expect("write final line");
+    assert_eq!(
+        output,
+        b"\rDownloading\xe2\x80\xa6 50.0%\rDownloading\xe2\x80\xa6 100.0%\n"
+    );
+}
+
+#[test]
 fn windows_msi_args_force_per_user_install_and_write_log() {
     let package = PathBuf::from(r"C:\Users\eden\AppData\Local\Temp\bifrost desktop.msi");
     let log = PathBuf::from(r"C:\Users\eden\AppData\Local\Temp\bifrost-msi.log");
