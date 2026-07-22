@@ -189,6 +189,56 @@ inject chat-alpha user-bob Bob a5 "/runner group-mock"
 inject chat-alpha user-bob Bob a6 "/status"
 sleep 1
 wait_prompt_count 1
+
+# Inject the raw Feishu bot-menu event shape through the debug adapter. This
+# exercises normalization, owner filtering, direct-session command routing and
+# provider-level Runner persistence without weakening the fixed Feishu API host.
+python3 - "$BIFROST_PORT" <<'PY'
+import json
+import sys
+import urllib.request
+
+port = sys.argv[1]
+payload = {
+    "providerId": "feishu-group-e2e",
+    "rawFeishuEvent": {
+        "header": {
+            "event_id": "event-menu-runner",
+            "event_type": "application.bot.menu_v6",
+        },
+        "event": {
+            "operator": {
+                "operator_name": "Owner",
+                "operator_id": {"open_id": "owner-only-in-p2p"},
+            },
+            "event_key": "bf_runner:group-mock",
+            "timestamp": 1710000000,
+        },
+    },
+}
+request = urllib.request.Request(
+    f"http://127.0.0.1:{port}/_bifrost/api/im-gateway/debug/mock-inbound",
+    data=json.dumps(payload).encode(),
+    headers={"content-type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(request, timeout=30) as response:
+    result = json.load(response)
+    assert response.status == 200 and result["rawFeishuEvent"] is True, result
+PY
+for _ in $(seq 1 80); do
+  if curl -fsS --noproxy '*' \
+    "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/providers" \
+    | python3 -c 'import json,sys; providers=json.load(sys.stdin); provider=next(item for item in providers if item["id"] == "feishu-group-e2e"); raise SystemExit(0 if provider.get("agent_config", {}).get("runner") == "group-mock" else 1)' \
+    >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.25
+done
+curl -fsS --noproxy '*' \
+  "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/providers" \
+  | python3 -c 'import json,sys; providers=json.load(sys.stdin); provider=next(item for item in providers if item["id"] == "feishu-group-e2e"); assert provider["agent_config"]["runner"] == "group-mock", provider'
+
 inject chat-alpha user-bob Bob a7 "补充：需要回滚预案"
 inject chat-alpha user-bob Bob a8 "/g 继续给出行动项"
 wait_prompt_count 2

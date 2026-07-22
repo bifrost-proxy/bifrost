@@ -13,6 +13,10 @@ use tracing::{debug, error, info, warn};
 
 use bifrost_core::Result;
 
+use crate::im_gateway::feishu_menu::{
+    parse_feishu_bot_menu_event_key, UpdateFeishuApplicationAbilityRequest,
+    FEISHU_BOT_MENU_EVENT_TYPE,
+};
 use crate::im_gateway::provider::{EventSink, ImProvider};
 use crate::im_gateway::types::{
     ConnectionHandle, ConnectionState, ImEvent, ImEventMessage, ImEventSource, ImImageAttachment,
@@ -226,6 +230,64 @@ impl FeishuProvider {
         cache.insert(cache_key, TokenCache { token, expires_at });
 
         Ok(result)
+    }
+
+    /// Replace the application bot's global custom menu tree.
+    pub async fn set_bot_menu(
+        &self,
+        config: &ImProviderConfig,
+        app_secret: &str,
+        request: &UpdateFeishuApplicationAbilityRequest,
+    ) -> Result<()> {
+        let base_url = Self::base_url(config);
+        let app_id = config
+            .app_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                bifrost_core::BifrostError::Config(
+                    "Feishu app_id is required for bot menu sync".to_string(),
+                )
+            })?;
+        let token = self.get_tenant_token(config, app_secret).await?;
+        let url = format!("{base_url}/application/v7/applications/{app_id}/ability");
+        let response = self
+            .http
+            .patch(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .json(request)
+            .send()
+            .await
+            .map_err(|error| {
+                bifrost_core::BifrostError::Network(format!(
+                    "set Feishu bot menu request failed: {}",
+                    reqwest_error_with_sources(error)
+                ))
+            })?;
+        let status = response.status();
+        let response_text = response.text().await.map_err(|error| {
+            bifrost_core::BifrostError::Network(format!(
+                "read Feishu bot menu response failed: {error}"
+            ))
+        })?;
+        let body: serde_json::Value = serde_json::from_str(&response_text).map_err(|error| {
+            bifrost_core::BifrostError::Network(format!(
+                "parse Feishu bot menu response failed: {error}"
+            ))
+        })?;
+        let code = body.get("code").and_then(serde_json::Value::as_i64);
+        if !status.is_success() || code.is_some_and(|code| code != 0) {
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "set Feishu bot menu failed: status={}, code={}, msg={}",
+                status.as_u16(),
+                code.unwrap_or_default(),
+                body.get("msg")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+            )));
+        }
+        Ok(())
     }
 
     /// Refresh token from Feishu API.
@@ -2069,13 +2131,16 @@ fn handle_ws_message(text: &str, provider_id: &str, sink: &EventSink) {
 
 /// Normalize a raw Feishu event into the unified ImEvent model.
 ///
-/// Handles `im.message.receive_v1` events.
+/// Handles `im.message.receive_v1` and `application.bot.menu_v6` events.
 pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Option<ImEvent> {
     let header = raw.get("header")?;
     let event_id = header.get("event_id").and_then(|v| v.as_str())?.to_string();
     let event_type_raw = header.get("event_type").and_then(|v| v.as_str())?;
 
-    // Only handle im.message.receive_v1 for V1
+    if event_type_raw == FEISHU_BOT_MENU_EVENT_TYPE {
+        return normalize_feishu_bot_menu_event(raw, provider_id, event_id);
+    }
+
     let normalized_event_type = match event_type_raw {
         "im.message.receive_v1" => "message.receive",
         _ => {
@@ -2238,6 +2303,72 @@ pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Opt
         }),
         received_at: now,
         raw_digest: Some(raw_digest),
+    })
+}
+
+fn normalize_feishu_bot_menu_event(
+    raw: &serde_json::Value,
+    provider_id: &str,
+    event_id: String,
+) -> Option<ImEvent> {
+    let event = raw.get("event")?;
+    let event_key = event.get("event_key").and_then(serde_json::Value::as_str)?;
+    let command = parse_feishu_bot_menu_event_key(event_key)?;
+    let operator = event.get("operator")?;
+    let operator_id = operator.get("operator_id")?;
+    let user_id = operator_id
+        .get("open_id")
+        .or_else(|| operator_id.get("user_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)?;
+    let user_name = operator
+        .get("operator_name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let create_time = event
+        .get("timestamp")
+        .and_then(json_u64_from_string_or_number)
+        .map(|timestamp| {
+            if timestamp < 1_000_000_000_000 {
+                timestamp.saturating_mul(1000)
+            } else {
+                timestamp
+            }
+        });
+    let raw_bytes = raw.to_string();
+    let digest_value = digest(&SHA256, raw_bytes.as_bytes());
+
+    Some(ImEvent {
+        event_id,
+        provider_id: provider_id.to_string(),
+        provider_type: ImProviderType::Feishu,
+        event_type: "message.receive".to_string(),
+        source: ImEventSource {
+            chat_id: None,
+            chat_type: Some("p2p".to_string()),
+            user_id: Some(user_id),
+            user_name,
+            sender_type: Some("user".to_string()),
+            message_id: None,
+        },
+        message: Some(ImEventMessage {
+            text: command.slash_command(),
+            mentions: Vec::new(),
+            images: Vec::new(),
+            raw_type: Some("bot_menu".to_string()),
+            raw_content: Some(event.clone()),
+            create_time,
+            update_time: None,
+            root_id: None,
+            parent_id: None,
+            thread_id: None,
+        }),
+        received_at: current_timestamp_ms(),
+        raw_digest: Some(format!("sha256:{}", hex_encode(digest_value.as_ref()))),
     })
 }
 
@@ -2515,7 +2646,7 @@ fn json_object_keys(value: &serde_json::Value) -> Vec<&str> {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use http_body_util::Full;
+    use http_body_util::{BodyExt, Full};
     use hyper::body::Incoming;
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
@@ -2569,6 +2700,77 @@ mod tests {
             }
         });
         (format!("http://{address}"), task)
+    }
+
+    async fn spawn_feishu_menu_api_server(
+        menu_status: StatusCode,
+        menu_body: &'static str,
+    ) -> (
+        String,
+        tokio::task::JoinHandle<()>,
+        tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Feishu menu API fixture");
+        let address = listener.local_addr().expect("Feishu menu fixture address");
+        let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let request_tx = request_tx.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |request: Request<Incoming>| {
+                        let request_tx = request_tx.clone();
+                        async move {
+                            let path = request.uri().path().to_string();
+                            let method = request.method().to_string();
+                            let authorization = request
+                                .headers()
+                                .get("authorization")
+                                .and_then(|value| value.to_str().ok())
+                                .map(str::to_string);
+                            let body = request.into_body().collect().await?.to_bytes();
+                            let (status, response_body) = if path
+                                .ends_with("/auth/v3/tenant_access_token/internal")
+                            {
+                                (
+                                    StatusCode::OK,
+                                    r#"{"code":0,"tenant_access_token":"token","expire":7200}"#,
+                                )
+                            } else if path
+                                .ends_with("/application/v7/applications/cli_test/ability")
+                            {
+                                let payload = serde_json::from_slice::<serde_json::Value>(&body)
+                                    .unwrap_or(serde_json::Value::Null);
+                                let _ = request_tx.send(serde_json::json!({
+                                        "path": path,
+                                        "method": method,
+                                        "authorization": authorization,
+                                    "payload": payload,
+                                }));
+                                (menu_status, menu_body)
+                            } else {
+                                (StatusCode::NOT_FOUND, r#"{"code":404}"#)
+                            };
+                            Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(status)
+                                    .header("Content-Type", "application/json")
+                                    .body(Full::new(Bytes::from_static(response_body.as_bytes())))
+                                    .unwrap(),
+                            )
+                        }
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        (format!("http://{address}"), task, request_rx)
     }
 
     #[test]
@@ -2789,6 +2991,73 @@ mod tests {
             .contains("reply request failed"));
     }
 
+    #[tokio::test]
+    async fn set_bot_menu_posts_tree_with_tenant_token_and_handles_api_errors() {
+        let menu = crate::im_gateway::feishu_menu::build_feishu_bot_menu(
+            vec!["Codex".to_string()],
+            vec![crate::im_gateway::feishu_menu::FeishuBotMenuModelOption {
+                slug: "gpt-5.3-codex".to_string(),
+                display_name: Some("GPT-5.3 Codex".to_string()),
+            }],
+        );
+        let (base_url, server, mut requests) =
+            spawn_feishu_menu_api_server(StatusCode::OK, r#"{"code":0,"msg":"success"}"#).await;
+        let config = provider_with_base_url(Some(&base_url));
+        FeishuProvider::new()
+            .set_bot_menu(&config, "secret", &menu)
+            .await
+            .unwrap();
+        let request = requests.recv().await.unwrap();
+        assert_eq!(request["authorization"], "Bearer token");
+        assert_eq!(request["method"], "PATCH");
+        assert_eq!(
+            request["path"],
+            "/application/v7/applications/cli_test/ability"
+        );
+        assert_eq!(
+            request["payload"]["bot"]["bot_menus"][1]["event_key"],
+            "bf_status"
+        );
+        server.abort();
+
+        let mut missing_app_id = provider_with_base_url(Some(&base_url));
+        missing_app_id.app_id = None;
+        assert!(FeishuProvider::new()
+            .set_bot_menu(&missing_app_id, "secret", &menu)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("app_id is required"));
+
+        for (status, body, expected) in [
+            (
+                StatusCode::OK,
+                r#"{"code":99991672,"msg":"Access denied"}"#,
+                "code=99991672",
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                r#"{"code":403,"msg":"forbidden"}"#,
+                "status=403",
+            ),
+            (
+                StatusCode::OK,
+                "not-json",
+                "parse Feishu bot menu response failed",
+            ),
+        ] {
+            let (base_url, server, _) = spawn_feishu_menu_api_server(status, body).await;
+            let config = provider_with_base_url(Some(&base_url));
+            let error = FeishuProvider::new()
+                .set_bot_menu(&config, "secret", &menu)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            server.abort();
+        }
+    }
+
     #[test]
     fn test_normalize_feishu_message_receive_event() {
         let raw = serde_json::json!({
@@ -2827,6 +3096,56 @@ mod tests {
         assert_eq!(msg.text, "/check bifrost");
         assert_eq!(msg.raw_type.as_deref(), Some("text"));
         assert!(event.raw_digest.unwrap().starts_with("sha256:"));
+    }
+
+    #[test]
+    fn normalize_feishu_bot_menu_event_routes_allowlisted_action_to_direct_user() {
+        let raw = serde_json::json!({
+            "header": {
+                "event_id": "evt_menu",
+                "event_type": "application.bot.menu_v6",
+                "create_time": "1710000000000"
+            },
+            "event": {
+                "operator": {
+                    "operator_name": "Alice",
+                    "operator_id": {"open_id": "ou_alice", "user_id": "u_alice"}
+                },
+                "event_key": "bf_model:gpt-5.3-codex",
+                "timestamp": 1710000000
+            }
+        });
+
+        let event = normalize_feishu_event(&raw, "feishu-main").unwrap();
+        assert_eq!(event.event_type, "message.receive");
+        assert_eq!(event.source.chat_id, None);
+        assert_eq!(event.source.chat_type.as_deref(), Some("p2p"));
+        assert_eq!(event.source.user_id.as_deref(), Some("ou_alice"));
+        assert_eq!(event.source.user_name.as_deref(), Some("Alice"));
+        assert_eq!(event.source.message_id, None);
+        let message = event.message.unwrap();
+        assert_eq!(message.text, "/model gpt-5.3-codex");
+        assert_eq!(message.raw_type.as_deref(), Some("bot_menu"));
+        assert_eq!(message.create_time, Some(1_710_000_000_000));
+    }
+
+    #[test]
+    fn normalize_feishu_bot_menu_event_rejects_unknown_or_unattributed_actions() {
+        let mut raw = serde_json::json!({
+            "header": {
+                "event_id": "evt_menu",
+                "event_type": "application.bot.menu_v6"
+            },
+            "event": {
+                "operator": {"operator_id": {"open_id": "ou_alice"}},
+                "event_key": "run arbitrary command"
+            }
+        });
+        assert!(normalize_feishu_event(&raw, "feishu-main").is_none());
+
+        raw["event"]["event_key"] = serde_json::Value::String("bf_help".to_string());
+        raw["event"]["operator"]["operator_id"] = serde_json::json!({"open_id": " "});
+        assert!(normalize_feishu_event(&raw, "feishu-main").is_none());
     }
 
     #[test]

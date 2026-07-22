@@ -33,6 +33,7 @@ struct ImRunnerCommandContext<'a> {
     event: &'a ImEvent,
     message_log_store: &'a Arc<ImMessageLogStore>,
     session_manager: &'a Arc<ImAgentSessionManager>,
+    agent_config: &'a crate::im_gateway::agent::ImAgentConfig,
 }
 
 struct ImModelCommandContext<'a> {
@@ -156,6 +157,7 @@ pub(super) async fn handle_idle_im_command(
             event: ctx.event,
             message_log_store: ctx.message_log_store,
             session_manager: ctx.agent_session_manager,
+            agent_config,
         },
     )
     .await
@@ -469,6 +471,14 @@ async fn handle_im_runner_command(
         return false;
     };
     let config = ctx.external_cli_config_store.load();
+    let previous_provider_runner = ctx
+        .provider
+        .agent_config
+        .as_ref()
+        .and_then(|config| config.runner.as_ref())
+        .and_then(|runner| runner.custom_runner_id())
+        .map(str::to_string);
+    let mut updated_provider = None;
     let reply = match command {
         ImRunnerCommand::List => format_im_runner_list(&config),
         ImRunnerCommand::Switch(runner_id) => match apply_im_runner_switch(
@@ -480,10 +490,30 @@ async fn handle_im_runner_command(
             &config,
             &runner_id,
         ) {
-            Ok(reply) => reply,
+            Ok(reply) => {
+                updated_provider = ctx.provider_store.get(&ctx.provider.id).filter(|provider| {
+                    provider
+                        .agent_config
+                        .as_ref()
+                        .and_then(|config| config.runner.as_ref())
+                        .and_then(|runner| runner.custom_runner_id())
+                        != previous_provider_runner.as_deref()
+                });
+                reply
+            }
             Err(reason) => format_im_runner_error(&reason),
         },
     };
+    if let Some(updated_provider) = updated_provider {
+        if let Some(feishu) = ctx.client.feishu() {
+            spawn_feishu_bot_menu_sync(
+                feishu,
+                updated_provider,
+                ctx.agent_config.clone(),
+                ctx.external_cli_config_store.clone(),
+            );
+        }
+    }
     send_agent_reply(
         ctx.client,
         ctx.provider,

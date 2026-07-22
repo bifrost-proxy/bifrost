@@ -1001,6 +1001,14 @@ async fn start_provider_event_connection(
     {
         Ok(()) => {
             info!(provider_id = id, "provider event connection started");
+            if provider.provider_type == crate::im_gateway::types::ImProviderType::Feishu {
+                spawn_feishu_bot_menu_sync(
+                    feishu,
+                    provider.clone(),
+                    service.agent_config_store.load(),
+                    service.external_cli_config_store.clone(),
+                );
+            }
             Ok(())
         }
         Err(e) => {
@@ -1008,6 +1016,115 @@ async fn start_provider_event_connection(
             Err(e.to_string())
         }
     }
+}
+
+pub(super) fn spawn_feishu_bot_menu_sync(
+    feishu: Arc<crate::im_gateway::feishu::FeishuProvider>,
+    provider: ImProviderConfig,
+    base_agent_config: crate::im_gateway::agent::ImAgentConfig,
+    external_cli_config_store: Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
+) {
+    tokio::spawn(async move {
+        if let Err(error) = sync_feishu_bot_menu(
+            &feishu,
+            &provider,
+            &base_agent_config,
+            &external_cli_config_store,
+        )
+        .await
+        {
+            warn!(
+                provider_id = %provider.id,
+                error = %error,
+                "failed to sync Feishu bot menu; provider connection remains active"
+            );
+        }
+    });
+}
+
+async fn sync_feishu_bot_menu(
+    feishu: &crate::im_gateway::feishu::FeishuProvider,
+    provider: &ImProviderConfig,
+    base_agent_config: &crate::im_gateway::agent::ImAgentConfig,
+    external_cli_config_store: &crate::im_gateway::external_cli::ExternalCliConfigStore,
+) -> Result<(), String> {
+    let app_secret = provider
+        .secret_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "provider has no app secret for bot menu sync".to_string())?;
+    let external_config = external_cli_config_store.load();
+    let agent_config = effective_agent_config_for_provider(base_agent_config, provider);
+    let runner_override = agent_config
+        .runner
+        .as_ref()
+        .and_then(|runner| runner.custom_runner_id());
+    let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
+        &external_config,
+        Some(provider.id.as_str()),
+        runner_override,
+    );
+
+    let mut runner_ids = external_config
+        .runners
+        .iter()
+        .filter(|(_, settings)| settings.enabled)
+        .map(|(runner_id, _)| runner_id.clone())
+        .collect::<Vec<_>>();
+    runner_ids.sort();
+    if let Some(index) = runner_ids
+        .iter()
+        .position(|runner_id| runner_id == &effective.runner_id)
+    {
+        runner_ids.remove(index);
+    }
+    runner_ids.insert(0, effective.runner_id.clone());
+
+    let work_dir = agent_config.resolve_work_dir();
+    let models = if crate::im_gateway::external_cli::supports_external_cli_model_slash(
+        &effective.settings.adapter,
+    ) {
+        match crate::im_gateway::external_cli::load_external_cli_model_catalog(
+            &effective.settings.adapter,
+            &effective.settings.adapter_config,
+            Some(&work_dir),
+        )
+        .await
+        {
+            Ok(models) => models
+                .into_iter()
+                .map(
+                    |model| crate::im_gateway::feishu_menu::FeishuBotMenuModelOption {
+                        slug: model.slug,
+                        display_name: model.display_name,
+                    },
+                )
+                .collect(),
+            Err(error) => {
+                warn!(
+                    provider_id = %provider.id,
+                    runner_id = %effective.runner_id,
+                    error = %error,
+                    "failed to load model catalog for Feishu bot menu; using model list fallback"
+                );
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let menu = crate::im_gateway::feishu_menu::build_feishu_bot_menu(runner_ids, models);
+    feishu
+        .set_bot_menu(provider, app_secret, &menu)
+        .await
+        .map_err(|error| error.to_string())?;
+    info!(
+        provider_id = %provider.id,
+        runner_id = %effective.runner_id,
+        "Feishu bot menu synchronized"
+    );
+    Ok(())
 }
 
 /// POST /providers/:id/disconnect — stop event long connection.

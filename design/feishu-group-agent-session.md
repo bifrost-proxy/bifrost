@@ -83,6 +83,31 @@ SQLite Turn 仍保存完整的消息 ID、序号、时间、mentions、游标和
 - 上线通知、定时任务、管理端主动发送等没有来源消息的卡片继续按目标会话发送，但同样移除根级标题。
 - Feishu Provider 在普通发送、消息 PATCH、CardKit 创建和 CardKit 更新边界统一移除根级 `header`，作为全链路样式兜底。
 
+## 机器人自定义菜单
+
+Feishu Provider 的事件长连接启动成功后，Bifrost 以 tenant access token 调用
+`PATCH /open-apis/application/v7/applications/{app_id}/ability`，通过 `bot.bot_menus` 同步机器人菜单。应用需开通 `application:application:patch`；缺少权限时飞书返回 `99991672`，Bifrost 只记录告警，不能把已经可用的消息长连接标记为失败。
+
+菜单使用三组紧凑入口，并复用现有单聊 slash 命令：
+
+- `常用`：`状态` → `/status`，`帮助` → `/help`；
+- `切 Agent`：每个可用 Runner 生成一个叶子，点击后执行 `/runner <runner_id>`；无可用叶子时退化为 `/runner`；
+- `切换模型`：按当前 Provider 的有效 Runner 加载模型目录，每个模型生成一个叶子，点击后执行 `/model <slug>`；模型目录不可用时退化为 `/models`。
+
+飞书 v7 能力接口对整棵菜单最多接受 10 个节点。固定的 3 个一级菜单与“状态/帮助”占用 5 个节点，剩余 5 个动态叶子默认分配为当前优先的 3 个 Runner 和优先级最高的 2 个模型；某一类没有选项时，另一类最多使用 5 个叶子。每个父菜单仍不超过 5 个子项。
+
+菜单事件订阅类型为 `application.bot.menu_v6`。事件只携带点击用户和 `event_key`，不携带 `chat_id` 或来源消息，因此菜单点击固定路由到 `{provider_id}:{operator_open_id}` 单聊 Session，不能猜测或复用用户最近访问的群 Session。多个机器人仍由不同 `provider_id` 隔离。
+
+`event_key` 是 Bifrost 控制的短协议，只接受以下 allowlist，不把任意事件值当成用户命令执行：
+
+- `bf_status`、`bf_help`、`bf_runner`、`bf_models`；
+- `bf_runner:<runner_id>`；
+- `bf_model:<model_slug>`。
+
+动态值必须非空、不能包含空白或控制字符，且完整 `event_key` 不超过飞书规定的 30 个字符；超限选项不进入菜单。菜单事件经标准化后进入现有 IM event loop、owner 过滤、命令处理和回复链路。Runner 切换成功后异步重建菜单，使模型子菜单与新的 Provider Runner 保持一致；刷新失败不回滚已完成的 Runner 切换。
+
+菜单是飞书应用级全局配置，不是每个用户一份。菜单点击沿用 Feishu 单聊的 provider owner 安全边界：配置了 owner 的 Provider 会拒绝其他用户的菜单事件；未配置 owner 时，模型 override 仍由点击用户自己的 Session Key 隔离。应用必须在开发者后台订阅 `application.bot.menu_v6`；事件订阅本身不要求权限，若需要 `operator_name` 则另申请 `application:application.bot.operator_name:readonly`，Bifrost 不依赖该名称权限即可工作。
+
 ## 权限与安全
 
 - 全部群成员的消息都可进入账本，不能再在接收入口按 owner 丢弃。

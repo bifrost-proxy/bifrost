@@ -2,13 +2,14 @@
 
 ## 功能模块说明
 
-验证飞书机器人进入群聊后持续接收并保存群消息，但默认只有 `@机器人`、`/g`、`/q` 或既有 slash 命令会触发处理；模型收到的是从上一次触发之后到本次触发为止的结构化多人对话。每个群使用独立 Session Key、上下文游标、Runner 和工作目录绑定。
+验证飞书机器人进入群聊后持续接收并保存群消息，但默认只有 `@机器人`、`/g`、`/q` 或既有 slash 命令会触发处理；模型收到的是从上一次触发之后到本次触发为止的结构化多人对话。每个群使用独立 Session Key、上下文游标、Runner 和工作目录绑定。同时验证 Feishu Provider 连接后自动同步机器人菜单，以及菜单点击复用单聊 Session 与 slash 指令。
 
 ## 前置条件
 
 - macOS 或 Linux，已安装 Rust、Python 3、curl。
 - 在仓库根目录执行。
 - 测试使用临时 `BIFROST_DATA_DIR`、mock Feishu provider 和本地 mock Runner，不需要真实飞书凭证。
+- 真实菜单同步需要自建应用开通 `application:application:patch`，并在事件订阅中添加 `application.bot.menu_v6`。
 
 ## 测试用例列表
 
@@ -74,6 +75,46 @@
 
 预期结果：所有 Bifrost 生成的飞书卡片都不包含根级 `header`，不显示大块彩色顶部标题；任务计划和工具记录等内部折叠面板标题仍可见。存在来源消息时，请求路径为 `/im/v1/messages/{触发 message_id}/reply`，请求体不携带 `receive_id`，飞书客户端显示轻量原生引用；后续 Turn 的进度卡片引用本轮最新触发消息。上线通知、定时任务等无来源消息场景可直接发送，但也没有顶部标题。
 
+### TC-FGS-09：Provider 连接后自动同步机器人菜单
+
+1. 为 Feishu Provider 配置有效 app ID/app secret、可用 Runner，并连接事件长连接。
+2. 记录飞书 OpenAPI 请求，或在真实应用中观察机器人菜单。
+3. 检查 `PATCH /open-apis/application/v7/applications/{app_id}/ability` 请求体。
+
+预期结果：连接成功后异步请求一次 v7 ability API；`bot_menu_enable=true`，整棵树不超过 10 个节点，包含“常用”“切 Agent”“切换模型”三个一级项。“常用”下有状态和帮助；默认最多展示当前优先的 3 个 Runner 与 2 个模型。所有动态 `event_key` 不超过 30 字符。
+
+### TC-FGS-10：状态和帮助菜单直接执行
+
+1. 在真实飞书客户端点击“常用 → 状态”。
+2. 再点击“常用 → 帮助”。
+3. 检查机器人回复和 IM 消息日志。
+
+预期结果：分别等价执行 `/status` 与 `/help`，不调用模型，不需要向机器人再发送一条文本消息；回复目标是点击用户，使用 `{provider_id}:{operator_open_id}` 单聊 Session。
+
+### TC-FGS-11：Agent 和模型菜单直接切换
+
+1. 点击“切 Agent”下的任意 Runner 叶子，随后点击“切换模型”下的任意模型叶子。
+2. 执行 `/status` 和 `/model` 检查结果。
+3. 检查点击用户的 session state，并用非 owner 用户点击一次验证安全边界。
+
+预期结果：Runner 叶子等价执行 `/runner <runner_id>` 并清理当前 owner Session 的旧运行态；模型叶子等价执行 `/model <slug>`。Provider 级 Runner 持久化成功后异步刷新模型菜单；配置了 owner 的 Provider 拒绝其他用户的菜单事件。未配置 owner 的测试 Provider 仍按点击用户 Session 隔离模型 override。
+
+### TC-FGS-12：未知菜单事件和菜单 API 失败安全降级
+
+1. 注入未知 `event_key`、超过 30 字符的动态 key、带空白的 Runner key，以及缺少 operator open ID 的菜单事件。
+2. 让菜单 API 分别返回业务错误、HTTP 403 和非 JSON 响应。
+3. 检查事件路由和 Provider 连接状态。
+
+预期结果：非法事件均被丢弃，不能变成任意 slash 命令；菜单 API 错误被记录为告警，但 Provider `/connect` 已成功的消息长连接不回滚、不被菜单错误标记为失败。
+
+### TC-FGS-13：同群多机器人和菜单单聊 Session 不串线
+
+1. 在同一群加入两个不同 Provider 的机器人，分别点击两个机器人的状态菜单。
+2. 分别向两个机器人发单聊消息并检查 Session Key。
+3. 在群里只 @ 其中一个机器人。
+
+预期结果：菜单事件没有 `chat_id`，因此只进入各自 `{provider_id}:{operator_open_id}` 单聊 Session，并继续接受各 Provider 的 owner 校验；不会猜测最近群聊。群内 @ 仍进入各自 `im:{provider_id}:group:{chat_id}` Session，两个机器人之间上下文、Runner、模型状态均隔离。
+
 ## 执行方式
 
 TC-FGS-01 至 TC-FGS-05 由以下真实服务脚本逐条执行：
@@ -95,6 +136,17 @@ TC-FGS-08 的普通卡片、CardKit 进度回复路径和 Provider 根级标题�
 ```bash
 cargo test -p bifrost-admin feishu_message_cards_use_native_reply_paths_and_strip_root_headers -- --nocapture
 ```
+
+TC-FGS-09 至 TC-FGS-12 的 payload、API 错误、allowlist、事件标准化和原始事件 E2E 执行：
+
+```bash
+cargo test -p bifrost-admin feishu_menu -- --nocapture
+cargo test -p bifrost-admin set_bot_menu_posts_tree_with_tenant_token_and_handles_api_errors -- --nocapture
+cargo test -p bifrost-admin normalize_feishu_bot_menu_event -- --nocapture
+bash e2e-tests/tests/test_feishu_group_session_context.sh
+```
+
+TC-FGS-09 至 TC-FGS-13 的真实客户端部分使用隔离服务绑定真实 Feishu Provider；确认权限与事件订阅后重连 Provider，逐项点击菜单并检查回复与 Session 隔离。
 
 ## 清理步骤
 
