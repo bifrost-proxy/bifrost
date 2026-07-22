@@ -24,16 +24,17 @@ struct ImCwdCommandContext<'a> {
     session_manager: &'a Arc<ImAgentSessionManager>,
 }
 
-struct ImRunnerCommandContext<'a> {
-    client: &'a ImProviderClient,
-    provider: &'a ImProviderConfig,
-    provider_store: &'a Arc<ImProviderStore>,
-    group_context_store: &'a Arc<ImGroupContextStore>,
-    external_cli_config_store: &'a Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
-    event: &'a ImEvent,
-    message_log_store: &'a Arc<ImMessageLogStore>,
-    session_manager: &'a Arc<ImAgentSessionManager>,
-    agent_config: &'a crate::im_gateway::agent::ImAgentConfig,
+pub(super) struct ImRunnerCommandContext<'a> {
+    pub(super) client: &'a ImProviderClient,
+    pub(super) provider: &'a ImProviderConfig,
+    pub(super) provider_store: &'a Arc<ImProviderStore>,
+    pub(super) group_context_store: &'a Arc<ImGroupContextStore>,
+    pub(super) external_cli_config_store:
+        &'a Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
+    pub(super) event: &'a ImEvent,
+    pub(super) message_log_store: &'a Arc<ImMessageLogStore>,
+    pub(super) session_manager: &'a Arc<ImAgentSessionManager>,
+    pub(super) agent_config: &'a crate::im_gateway::agent::ImAgentConfig,
 }
 
 struct ImModelCommandContext<'a> {
@@ -480,7 +481,7 @@ pub(super) fn provider_after_runner_change(
         .filter(|provider| provider_custom_runner_id(provider) != previous_runner_id)
 }
 
-async fn handle_im_runner_command(
+pub(super) async fn handle_im_runner_command(
     message: &str,
     session_key: &str,
     ctx: ImRunnerCommandContext<'_>,
