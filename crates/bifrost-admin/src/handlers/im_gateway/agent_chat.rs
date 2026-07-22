@@ -462,6 +462,24 @@ pub(super) fn format_im_cwd_error(reason: &str) -> String {
     format!("❌ 无法切换工作目录：{reason}\n\n用法: /cwd <绝对路径>")
 }
 
+fn provider_custom_runner_id(provider: &ImProviderConfig) -> Option<&str> {
+    provider
+        .agent_config
+        .as_ref()
+        .and_then(|config| config.runner.as_ref())
+        .and_then(|runner| runner.custom_runner_id())
+}
+
+pub(super) fn provider_after_runner_change(
+    provider_store: &Arc<ImProviderStore>,
+    provider_id: &str,
+    previous_runner_id: Option<&str>,
+) -> Option<ImProviderConfig> {
+    provider_store
+        .get(provider_id)
+        .filter(|provider| provider_custom_runner_id(provider) != previous_runner_id)
+}
+
 async fn handle_im_runner_command(
     message: &str,
     session_key: &str,
@@ -471,13 +489,7 @@ async fn handle_im_runner_command(
         return false;
     };
     let config = ctx.external_cli_config_store.load();
-    let previous_provider_runner = ctx
-        .provider
-        .agent_config
-        .as_ref()
-        .and_then(|config| config.runner.as_ref())
-        .and_then(|runner| runner.custom_runner_id())
-        .map(str::to_string);
+    let previous_provider_runner = provider_custom_runner_id(ctx.provider).map(str::to_string);
     let mut updated_provider = None;
     let reply = match command {
         ImRunnerCommand::List => format_im_runner_list(&config),
@@ -491,14 +503,11 @@ async fn handle_im_runner_command(
             &runner_id,
         ) {
             Ok(reply) => {
-                updated_provider = ctx.provider_store.get(&ctx.provider.id).filter(|provider| {
-                    provider
-                        .agent_config
-                        .as_ref()
-                        .and_then(|config| config.runner.as_ref())
-                        .and_then(|runner| runner.custom_runner_id())
-                        != previous_provider_runner.as_deref()
-                });
+                updated_provider = provider_after_runner_change(
+                    ctx.provider_store,
+                    &ctx.provider.id,
+                    previous_provider_runner.as_deref(),
+                );
                 reply
             }
             Err(reason) => format_im_runner_error(&reason),

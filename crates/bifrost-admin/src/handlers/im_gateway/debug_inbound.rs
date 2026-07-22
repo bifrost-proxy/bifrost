@@ -398,6 +398,22 @@ mod tests {
             inject_mock_inbound(invalid, &service).await.status(),
             StatusCode::BAD_REQUEST
         );
+
+        let mut weixin = provider("raw-weixin");
+        weixin.provider_type = ImProviderType::Weixin;
+        service.provider_store.add(weixin).unwrap();
+        let mut wrong_provider = request("raw-weixin", "");
+        wrong_provider.raw_feishu_event = Some(serde_json::json!({
+            "header": {"event_type": "application.bot.menu_v6"},
+            "event": {
+                "operator": {"operator_id": {"open_id": "ou_owner"}},
+                "event_key": "bf_help"
+            }
+        }));
+        assert_eq!(
+            inject_mock_inbound(wrong_provider, &service).await.status(),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[tokio::test]

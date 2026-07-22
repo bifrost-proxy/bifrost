@@ -716,9 +716,7 @@ impl FeishuProvider {
         let app_secret = config.secret_ref.as_deref().unwrap_or_default();
         let token = self.get_tenant_token(config, app_secret).await?;
         let card = without_root_card_header(card);
-        let content = serde_json::to_string(&card).map_err(|e| {
-            bifrost_core::BifrostError::Parse(format!("failed to serialize reply card: {}", e))
-        })?;
+        let content = card.to_string();
         self.reply_message_internal(base_url, &token, message_id, "interactive", &content, uuid)
             .await
     }
@@ -2989,6 +2987,16 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("reply request failed"));
+        let menu = crate::im_gateway::feishu_menu::build_feishu_bot_menu(
+            Vec::new(),
+            Vec::<crate::im_gateway::feishu_menu::FeishuBotMenuModelOption>::new(),
+        );
+        assert!(provider
+            .set_bot_menu(&unreachable, "secret", &menu)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("set Feishu bot menu request failed"));
     }
 
     #[tokio::test]
@@ -3127,6 +3135,14 @@ mod tests {
         assert_eq!(message.text, "/model gpt-5.3-codex");
         assert_eq!(message.raw_type.as_deref(), Some("bot_menu"));
         assert_eq!(message.create_time, Some(1_710_000_000_000));
+
+        let mut millisecond_raw = raw;
+        millisecond_raw["event"]["timestamp"] = serde_json::json!(1_710_000_000_123_u64);
+        let millisecond_event = normalize_feishu_event(&millisecond_raw, "feishu-main").unwrap();
+        assert_eq!(
+            millisecond_event.message.unwrap().create_time,
+            Some(1_710_000_000_123)
+        );
     }
 
     #[test]

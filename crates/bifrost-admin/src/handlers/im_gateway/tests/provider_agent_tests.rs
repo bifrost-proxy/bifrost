@@ -571,6 +571,63 @@ pub(super) fn im_runner_command_rejects_unknown_runner() {
 }
 
 #[test]
+pub(super) fn runner_change_detection_only_returns_a_provider_for_global_changes() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let store = Arc::new(ImProviderStore::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "runner-change-provider".to_string();
+    provider.agent_config = Some(ImProviderAgentConfig {
+        runner: Some(bifrost_agent::AgentRunnerMode::Custom("codex".to_string())),
+        work_dir: None,
+        base_instructions: None,
+        developer_instructions: None,
+        user_instructions: None,
+    });
+    store.add(provider.clone()).expect("add provider");
+
+    assert!(provider_after_runner_change(&store, &provider.id, Some("codex")).is_none());
+
+    provider.agent_config.as_mut().unwrap().runner = Some(bifrost_agent::AgentRunnerMode::Custom(
+        "claude-code".to_string(),
+    ));
+    store.update(provider.clone()).expect("update runner");
+    let changed = provider_after_runner_change(&store, &provider.id, Some("codex"))
+        .expect("global provider runner changed");
+    assert_eq!(
+        changed
+            .agent_config
+            .as_ref()
+            .and_then(|config| config.runner.as_ref())
+            .and_then(|runner| runner.custom_runner_id()),
+        Some("claude-code")
+    );
+    assert!(provider_after_runner_change(&store, "missing", Some("codex")).is_none());
+
+    let group_store = Arc::new(ImGroupContextStore::new(temp_dir.path()));
+    let session_manager = Arc::new(ImAgentSessionManager::new(3600));
+    let mut external = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    external.runners.insert(
+        "claude-code".to_string(),
+        crate::im_gateway::external_cli::ExternalCliAgentSettings {
+            enabled: true,
+            adapter: "claude_code".to_string(),
+            ..Default::default()
+        },
+    );
+    let reply = apply_im_runner_switch(
+        &store,
+        &group_store,
+        &session_manager,
+        &provider.id,
+        "runner-change-provider:ou_owner",
+        &external,
+        "claude-code",
+    )
+    .expect("switch idle direct session runner");
+    assert!(reply.contains("claude-code"));
+}
+
+#[test]
 pub(super) fn im_cwd_command_persists_provider_and_reinitializes_idle_session() {
     let temp_dir = tempfile::tempdir().expect("temp data dir");
     let store = Arc::new(ImProviderStore::new(temp_dir.path()));

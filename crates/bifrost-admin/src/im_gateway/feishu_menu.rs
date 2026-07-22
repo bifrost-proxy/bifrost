@@ -251,6 +251,14 @@ mod tests {
             Some("/runner Codex".to_string())
         );
         assert_eq!(
+            parse_feishu_bot_menu_event_key("bf_runner").map(|command| command.slash_command()),
+            Some("/runner".to_string())
+        );
+        assert_eq!(
+            parse_feishu_bot_menu_event_key("bf_models").map(|command| command.slash_command()),
+            Some("/models".to_string())
+        );
+        assert_eq!(
             parse_feishu_bot_menu_event_key("bf_model:gpt-5.3-codex")
                 .map(|command| command.slash_command()),
             Some("/model gpt-5.3-codex".to_string())
@@ -258,6 +266,7 @@ mod tests {
         assert!(parse_feishu_bot_menu_event_key("/status").is_none());
         assert!(parse_feishu_bot_menu_event_key("bf_runner:bad runner").is_none());
         assert!(parse_feishu_bot_menu_event_key("bf_model:").is_none());
+        assert!(parse_feishu_bot_menu_event_key("bf_unknown:value").is_none());
         assert!(parse_feishu_bot_menu_event_key(&format!("bf_model:{}", "x".repeat(30))).is_none());
     }
 

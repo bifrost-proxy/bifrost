@@ -166,9 +166,97 @@ fn disables_provider_connection(patch: &serde_json::Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_weixin_login_account_to_provider, disables_provider_connection};
-    use crate::im_gateway::types::{ImProviderConfig, ImProviderType};
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full};
+    use hyper::body::Incoming;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response, StatusCode};
+    use hyper_util::rt::TokioIo;
+
+    use super::{
+        apply_weixin_login_account_to_provider, disables_provider_connection,
+        spawn_feishu_bot_menu_sync, sync_feishu_bot_menu,
+    };
+    use crate::im_gateway::external_cli::{
+        ExternalCliAgentSettings, ExternalCliConfigStore, ExternalCliGatewayConfig,
+    };
+    use crate::im_gateway::types::{ImProviderAgentConfig, ImProviderConfig, ImProviderType};
     use crate::im_gateway::weixin::WeixinLoginAccount;
+
+    async fn spawn_feishu_menu_api_server() -> (
+        String,
+        tokio::task::JoinHandle<()>,
+        tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Feishu menu fixture");
+        let address = listener.local_addr().expect("Feishu menu fixture address");
+        let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let request_tx = request_tx.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |request: Request<Incoming>| {
+                        let request_tx = request_tx.clone();
+                        async move {
+                            let path = request.uri().path().to_string();
+                            let body = request.into_body().collect().await?.to_bytes();
+                            let response_body = if path
+                                .ends_with("/auth/v3/tenant_access_token/internal")
+                            {
+                                r#"{"code":0,"tenant_access_token":"token","expire":7200}"#
+                            } else if path
+                                .ends_with("/application/v7/applications/cli_test/ability")
+                            {
+                                let payload = serde_json::from_slice::<serde_json::Value>(&body)
+                                    .expect("menu JSON payload");
+                                let _ = request_tx.send(payload);
+                                r#"{"code":0,"msg":"success"}"#
+                            } else {
+                                r#"{"code":404,"msg":"not found"}"#
+                            };
+                            Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header("Content-Type", "application/json")
+                                    .body(Full::new(Bytes::from_static(response_body.as_bytes())))
+                                    .unwrap(),
+                            )
+                        }
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        (format!("http://{address}"), task, request_rx)
+    }
+
+    fn feishu_menu_provider(base_url: &str) -> ImProviderConfig {
+        ImProviderConfig {
+            id: "feishu-main".to_string(),
+            provider_type: ImProviderType::Feishu,
+            display_name: "Feishu Main".to_string(),
+            enabled: true,
+            base_url: Some(base_url.to_string()),
+            app_id: Some("cli_test".to_string()),
+            secret_ref: Some("secret".to_string()),
+            owner_open_id: Some("ou_owner".to_string()),
+            event_connection_enabled: true,
+            event_types: vec!["message.receive".to_string()],
+            agent_config: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
 
     #[test]
     fn provider_patch_detects_connection_disabling_changes() {
@@ -223,6 +311,108 @@ mod tests {
         assert!(provider.enabled);
         assert!(provider.event_connection_enabled);
         assert_eq!(provider.event_types, vec!["message.receive"]);
+    }
+
+    #[tokio::test]
+    async fn feishu_menu_sync_covers_runner_model_fallback_and_spawn_paths() {
+        let (base_url, server, mut requests) = spawn_feishu_menu_api_server().await;
+        let temp = tempfile::tempdir().expect("temp data dir");
+        let store = Arc::new(ExternalCliConfigStore::new(temp.path()));
+        let mut external = ExternalCliGatewayConfig::default();
+        external.runners.insert(
+            "menu-mock".to_string(),
+            ExternalCliAgentSettings {
+                enabled: true,
+                adapter: "mock".to_string(),
+                ..Default::default()
+            },
+        );
+        store.save(external.clone()).expect("save mock runner");
+
+        let mut provider = feishu_menu_provider(&base_url);
+        provider.agent_config = Some(ImProviderAgentConfig {
+            runner: Some(bifrost_agent::AgentRunnerMode::Custom(
+                "menu-mock".to_string(),
+            )),
+            work_dir: Some(temp.path().display().to_string()),
+            base_instructions: None,
+            developer_instructions: None,
+            user_instructions: None,
+        });
+        let base_agent_config = crate::im_gateway::agent::ImAgentConfig::default();
+        let feishu = Arc::new(crate::im_gateway::feishu::FeishuProvider::new());
+
+        sync_feishu_bot_menu(&feishu, &provider, &base_agent_config, &store)
+            .await
+            .expect("sync menu for unsupported model adapter");
+        let fallback_payload = requests.recv().await.expect("fallback menu payload");
+        assert!(fallback_payload["bot"]["bot_menus"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["event_key"] == "bf_models"));
+
+        external.runners.insert(
+            "menu-claude".to_string(),
+            ExternalCliAgentSettings {
+                enabled: true,
+                adapter: "claude_code".to_string(),
+                ..Default::default()
+            },
+        );
+        store.save(external.clone()).expect("save Claude runner");
+        provider.agent_config.as_mut().unwrap().runner = Some(
+            bifrost_agent::AgentRunnerMode::Custom("menu-claude".to_string()),
+        );
+        sync_feishu_bot_menu(&feishu, &provider, &base_agent_config, &store)
+            .await
+            .expect("sync menu with built-in model catalog");
+        let model_payload = requests.recv().await.expect("model menu payload");
+        assert!(model_payload["bot"]["bot_menus"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["event_key"].as_str())
+            .any(|event_key| event_key.starts_with("bf_model:")));
+
+        let mut failing_codex = ExternalCliAgentSettings {
+            enabled: true,
+            adapter: "codex".to_string(),
+            ..Default::default()
+        };
+        failing_codex.adapter_config.executable = Some("missing-bifrost-menu-codex".to_string());
+        external
+            .runners
+            .insert("menu-codex".to_string(), failing_codex);
+        store.save(external).expect("save failing Codex runner");
+        provider.agent_config.as_mut().unwrap().runner = Some(
+            bifrost_agent::AgentRunnerMode::Custom("menu-codex".to_string()),
+        );
+        sync_feishu_bot_menu(&feishu, &provider, &base_agent_config, &store)
+            .await
+            .expect("catalog failure falls back to list command");
+        let catalog_fallback_payload = requests.recv().await.expect("catalog fallback payload");
+        assert!(catalog_fallback_payload["bot"]["bot_menus"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["event_key"] == "bf_models"));
+
+        let mut missing_secret = provider.clone();
+        missing_secret.secret_ref = Some(" ".to_string());
+        assert!(
+            sync_feishu_bot_menu(&feishu, &missing_secret, &base_agent_config, &store)
+                .await
+                .unwrap_err()
+                .contains("no app secret")
+        );
+
+        spawn_feishu_bot_menu_sync(feishu, provider, base_agent_config, store);
+        tokio::time::timeout(std::time::Duration::from_secs(2), requests.recv())
+            .await
+            .expect("spawned menu sync timed out")
+            .expect("spawned menu payload");
+        server.abort();
     }
 }
 
