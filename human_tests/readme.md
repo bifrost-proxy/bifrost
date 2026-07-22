@@ -204,6 +204,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
+| [git-history-report.md](./git-history-report.md) | Git 历史统计报告 | 3 | 基于主线可达历史、author date 与 Asia/Shanghai 时区生成月度报告，覆盖 2026 年 2 月每日 commit、零提交日、merge/non-merge、完整 revision SHA 和独立 Git 口径核对 |
 | [internal-domain-sanitization.md](./internal-domain-sanitization.md) | 内部域名脱敏与回归门禁 | 4 | tracked 文件内部域名明文零命中、必需默认 host Base64 按需解码、RFC 2606 中性 fixture 完整性、受管 Provider 精确 URL 分类与 Shell E2E 防回归门禁 |
 | [ci-cross-build.md](./ci-cross-build.md) | CI Cross Build | 5 | PR CI 与 release workflow 的 Linux cross build 禁用 Docker buildkit，armv7 pre-build 使用 HTTPS Ubuntu 源和 apt retry，aarch64-musl cross build 对 GHCR 临时超时进行有限重试，避免 buildx/buildkit、HTTP apt mirror 或容器镜像拉取波动导致失败，并由远端 CI 验证 |
 | [coverage-mechanism.md](./coverage-mechanism.md) | Coverage Gate 机制 | 21 | unit + integration / E2E / union / production 分层覆盖、核心代理 production 90% 与 PR changed-lines 95% 门禁、PR 轻量 proxy coverage 与每周完整审计、仓库与 CI 移除 Go 工具链且由 Rust/Shell 测试保持 HTTP/3、SOCKS5 能力、删除未实现真实 transport 的旧 Python 演示客户端、测试 helper 不进入生产二进制与 production coverage 分母、ShellCheck/shfmt、机器可读能力矩阵与 E2E summary、完整 Playwright、WebSocket 双向转发、TLS 动态切换、生产 `~/.bifrost` 与 9900 硬隔离，以及 AGENTS.md / design 文档对齐 |
