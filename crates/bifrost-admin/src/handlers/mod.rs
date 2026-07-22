@@ -57,7 +57,7 @@ use serde::Serialize;
 
 pub type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 pub const ADMIN_CORS_ALLOW_HEADERS: &str =
-    "Content-Type, Authorization, X-Client-Id, X-Bifrost-CSRF";
+    "Content-Type, Authorization, X-Client-Id, X-Bifrost-CSRF, X-Bifrost-Desktop-Upgrade-Origin";
 pub const ADMIN_CORS_ALLOW_METHODS: &str = "GET, POST, PUT, PATCH, DELETE, OPTIONS";
 pub const PUBLIC_CORS_ALLOW_METHODS: &str = "GET, HEAD, OPTIONS";
 
@@ -171,6 +171,12 @@ mod tests {
                 .map(|value| value.contains("X-Client-Id"))
                 .unwrap_or(false),
             "desktop requests require X-Client-Id to pass CORS preflight"
+        );
+        assert!(
+            allow_headers
+                .map(|value| value.contains("X-Bifrost-Desktop-Upgrade-Origin"))
+                .unwrap_or(false),
+            "desktop upgrades require their one-time origin credential to pass CORS preflight"
         );
     }
 

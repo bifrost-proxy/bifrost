@@ -222,11 +222,31 @@ PY
         && _log_pass "rejected browser request does not launch the standalone CLI" \
         || _log_fail "rejected browser request does not launch CLI" "no invocation log" "$(cat "$cli_log")"
 
+    local preflight_status preflight_headers preflight_allow_headers csrf_token
+    csrf_token="$(admin_curl GET '/api/security/csrf' | json_field csrf_token)"
+    preflight_headers="$ROOT/desktop-upgrade-preflight.headers"
+    preflight_status="$(env NO_PROXY='*' no_proxy='*' curl -sS \
+        -D "$preflight_headers" -o /dev/null -w '%{http_code}' -X OPTIONS \
+        --connect-timeout 2 --max-time 15 \
+        -H 'Origin: tauri://localhost' \
+        -H 'Access-Control-Request-Method: POST' \
+        -H 'Access-Control-Request-Headers: X-Bifrost-CSRF, X-Bifrost-Desktop-Upgrade-Origin' \
+        "http://127.0.0.1:${PORT}/_bifrost/api/system/upgrade?channel=desktop")"
+    assert_equals "204" "$preflight_status" "desktop WebView upgrade preflight is accepted"
+    preflight_allow_headers="$(awk 'BEGIN { IGNORECASE=1 } /^Access-Control-Allow-Headers:/ { sub(/^[^:]*:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit }' "$preflight_headers")"
+    [[ ",${preflight_allow_headers// /}," == *",X-Bifrost-Desktop-Upgrade-Origin,"* ]] \
+        && _log_pass "desktop WebView origin credential is allowed by CORS" \
+        || _log_fail "desktop WebView origin credential passes CORS" \
+            "X-Bifrost-Desktop-Upgrade-Origin in Access-Control-Allow-Headers" \
+            "$preflight_allow_headers"
+
     local start_response source desktop_origin_token desktop_origin_file
     desktop_origin_token="$(issue_desktop_upgrade_origin_token "$data_dir")"
     desktop_origin_file="$data_dir/.desktop-upgrade-origin-${desktop_origin_token}.json"
     start_response="$(env NO_PROXY='*' no_proxy='*' curl -fsS -X POST \
         --connect-timeout 2 --max-time 15 \
+        -H 'Origin: tauri://localhost' \
+        -H "X-Bifrost-CSRF: ${csrf_token}" \
         -H "X-Bifrost-Desktop-Upgrade-Origin: ${desktop_origin_token}" \
         "http://127.0.0.1:${PORT}/_bifrost/api/system/upgrade?channel=desktop" 2>/dev/null)"
     source="$(printf '%s' "$start_response" | json_field source)"

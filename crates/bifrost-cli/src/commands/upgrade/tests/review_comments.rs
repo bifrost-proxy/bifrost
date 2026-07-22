@@ -37,6 +37,59 @@ fn already_current_desktop_companion_skips_child_and_handoff() {
 }
 
 #[test]
+fn desktop_shutdown_targets_shell_instead_of_bundled_core() {
+    let app_path = Path::new("/Applications/Bifrost.app");
+    let bundled_core = app_path.join("Contents/Resources/resources/bin/bifrost");
+    let desktop_shell = app_path.join("Contents/MacOS/bifrost-desktop");
+
+    #[cfg(target_os = "macos")]
+    assert_eq!(desktop_shell_executable(app_path), desktop_shell);
+
+    assert_eq!(
+        select_running_desktop_shell_process(
+            &desktop_shell,
+            [
+                (79401, bundled_core.clone()),
+                (79399, desktop_shell.clone()),
+            ],
+        ),
+        Some((79399, desktop_shell.clone())),
+        "the internal shutdown argument must be sent to the desktop shell even when the bundled core is discovered first"
+    );
+    assert_eq!(
+        select_running_desktop_shell_process(&desktop_shell, [(79401, bundled_core)]),
+        None,
+        "the bundled CLI core must never receive the desktop-only shutdown argument"
+    );
+}
+
+#[test]
+fn macos_legacy_shutdown_targets_exact_app_path() {
+    use std::ffi::OsString;
+
+    assert_eq!(
+        macos_desktop_quit_args(Path::new("/Users/test/Applications/Bifrost \"Canary\".app",)),
+        vec![
+            OsString::from("-e"),
+            OsString::from("on run argv"),
+            OsString::from("-e"),
+            OsString::from("set appPath to item 1 of argv"),
+            OsString::from("-e"),
+            OsString::from("using terms from application \"Finder\""),
+            OsString::from("-e"),
+            OsString::from("tell application appPath to quit"),
+            OsString::from("-e"),
+            OsString::from("end using terms from"),
+            OsString::from("-e"),
+            OsString::from("end run"),
+            OsString::from("--"),
+            OsString::from("/Users/test/Applications/Bifrost \"Canary\".app"),
+        ],
+        "legacy App versions must be quit by exact bundle path without ambiguous name lookup"
+    );
+}
+
+#[test]
 fn desktop_handoff_flag_requires_matching_restarting_progress() {
     use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress};
 
@@ -164,6 +217,7 @@ fn failed_companion_uses_production_macos_relaunch_command() {
 fn cli_restart_stops_live_process_and_strips_detached_marker() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
     const CHILD_ENV: &str = "BIFROST_TEST_CLI_RESTART_CHILD";
     const TEST_NAME: &str = "commands::upgrade::tests::review_comments::cli_restart_stops_live_process_and_strips_detached_marker";
     if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
