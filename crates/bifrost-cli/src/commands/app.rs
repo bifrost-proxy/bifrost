@@ -47,7 +47,7 @@ const CALLER_MANAGED_PROGRESS_SOURCE: &str = "cli-upgrade";
 const DESKTOP_MANAGED_CLI_TIMEOUT: Duration = Duration::from_secs(600);
 const DESKTOP_MANAGED_CLI_HEARTBEAT: Duration = Duration::from_secs(30);
 const DESKTOP_MANAGED_CLI_VERSION_TIMEOUT: Duration = Duration::from_secs(60);
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 const DESKTOP_INSTALL_TERMINAL_HEARTBEAT: Duration = Duration::from_secs(5);
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const DESKTOP_INSTALL_COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
