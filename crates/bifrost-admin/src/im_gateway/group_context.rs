@@ -1182,6 +1182,14 @@ mod tests {
                 reset_context: false,
             }
         );
+        let cwd = group_event("m5", "c1", "u1", "/cwd /tmp", Vec::new(), 5);
+        assert_eq!(
+            classify_group_message(cwd.message.as_ref().unwrap(), None, false),
+            GroupMessageDisposition::SystemCommand {
+                command: "/cwd /tmp".to_string(),
+                reset_context: false,
+            }
+        );
     }
 
     #[test]
@@ -1329,7 +1337,18 @@ mod tests {
         }
 
         let status = group_event("m4", "c1", "u2", "@_all /status", Vec::new(), 4);
-        let next_context = group_event("m5", "c1", "u2", "new context", Vec::new(), 5);
+        let mut next_context = group_event("m5", "c1", "u2", "new context", Vec::new(), 5);
+        next_context.message.as_mut().unwrap().images.push(
+            crate::im_gateway::types::ImImageAttachment {
+                file_key: "img_1".to_string(),
+                source: Default::default(),
+                mime_type: None,
+                data_base64: None,
+                download_url: None,
+                encrypted_query_param: None,
+                aes_key: None,
+            },
+        );
         let next_trigger = group_event(
             "m6",
             "c1",
@@ -1348,6 +1367,7 @@ mod tests {
         assert!(!next.prompt.contains("first context"));
         assert!(!next.prompt.contains("/status"));
         assert!(next.prompt.contains("new context"));
+        assert!(next.prompt.contains("new context [附件 1 个]"));
         assert!(next.prompt.contains("<at id=u1></at>：continue"));
         assert!(!next.prompt.contains("群名称："));
         assert!(!next.prompt.contains("群 ID："));
@@ -1445,5 +1465,248 @@ mod tests {
             store.runner_id_by_session(&second).unwrap().as_deref(),
             Some("codex-b")
         );
+    }
+
+    #[test]
+    fn group_store_turn_lifecycle_and_baseline_are_persisted() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ImGroupContextStore::new(temp.path());
+        assert_eq!(
+            store.file_path(),
+            temp.path().join("admin").join(STORE_FILENAME)
+        );
+        assert_eq!(store.chat_name("missing", "missing").unwrap(), None);
+        assert_eq!(store.work_dir_by_session("missing").unwrap(), None);
+        assert_eq!(store.runner_id_by_session("missing").unwrap(), None);
+        assert!(!store
+            .set_work_dir_by_session("missing", "/tmp/missing")
+            .unwrap());
+        assert!(!store
+            .set_runner_id_by_session("missing", "missing-runner")
+            .unwrap());
+        assert!(!store.set_chat_name("missing", "missing", " ", 1).unwrap());
+        assert!(store.mark_turn_dispatched("missing", 1).is_err());
+        assert!(store.mark_turn_failed("missing", "boom", 1).is_err());
+        assert!(store.mark_turn_completed("missing", 1).is_err());
+        assert!(store.release_turn("missing", "boom", 1).is_err());
+
+        let ambient = group_event("m1", "c1", "u1", "ambient", Vec::new(), 1);
+        let first_trigger = group_event("m2", "c1", "u1", "/g inspect", Vec::new(), 2);
+        store.record_event(&ambient, "event").unwrap();
+        store.record_event(&first_trigger, "event").unwrap();
+        let first = store
+            .prepare_turn(&first_trigger, GroupTriggerKind::Guide, "inspect")
+            .unwrap();
+        assert_eq!(
+            first.delivery_message(Some("/g")),
+            format!("/g {}", first.prompt)
+        );
+        assert_eq!(first.delivery_message(None), first.prompt);
+        store.mark_turn_dispatched(&first.turn_id, 3).unwrap();
+        store.mark_turn_failed(&first.turn_id, "retry", 4).unwrap();
+
+        let second_trigger = group_event("m3", "c1", "u1", "/q continue", Vec::new(), 5);
+        store.record_event(&second_trigger, "event").unwrap();
+        let second = store
+            .prepare_turn(&second_trigger, GroupTriggerKind::Queue, "continue")
+            .unwrap();
+        assert!(!store.release_turn(&first.turn_id, "superseded", 6).unwrap());
+        assert!(store
+            .release_turn(&second.turn_id, "agent disabled", 7)
+            .unwrap());
+
+        let final_trigger = group_event("m4", "c1", "u1", "/custom", Vec::new(), 8);
+        store.record_event(&final_trigger, "event").unwrap();
+        let final_turn = store
+            .prepare_turn(&final_trigger, GroupTriggerKind::Slash, "/custom")
+            .unwrap();
+        store.mark_turn_completed(&final_turn.turn_id, 9).unwrap();
+
+        let reset = group_event("m5", "c1", "u1", "/clear", Vec::new(), 10);
+        store.record_event(&reset, "event").unwrap();
+        store.advance_context_baseline(&reset).unwrap();
+        let after_reset = group_event("m6", "c1", "u1", "@_user_1 after", vec![bot_mention()], 11);
+        store.record_event(&after_reset, "event").unwrap();
+        let after = store
+            .prepare_turn(&after_reset, GroupTriggerKind::Mention, "after")
+            .unwrap();
+        assert_eq!(after.message_count, 1);
+        assert!(!after.prompt.contains("/clear"));
+    }
+
+    #[test]
+    fn group_store_rejects_stale_and_oversized_ranges_without_advancing_cursor() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ImGroupContextStore::new(temp.path());
+        let old = group_event("old", "stale", "u1", "old", Vec::new(), 1);
+        let trigger = group_event("trigger", "stale", "u1", "run", Vec::new(), 2);
+        store.record_event(&old, "event").unwrap();
+        store.record_event(&trigger, "event").unwrap();
+        store
+            .prepare_turn(&trigger, GroupTriggerKind::Mention, "run")
+            .unwrap();
+        let stale_error = store
+            .prepare_turn(&old, GroupTriggerKind::Mention, "old")
+            .unwrap_err();
+        assert!(stale_error.contains("is not after cursor"));
+
+        for index in 0..=MAX_INLINE_GROUP_MESSAGES {
+            let event = group_event(
+                &format!("many-{index}"),
+                "many",
+                "u1",
+                "context",
+                Vec::new(),
+                index as u64 + 10,
+            );
+            store.record_event(&event, "event").unwrap();
+        }
+        let too_many = group_event("many-trigger", "many", "u1", "run", Vec::new(), 1_000);
+        store.record_event(&too_many, "event").unwrap();
+        let count_error = store
+            .prepare_turn(&too_many, GroupTriggerKind::Mention, "run")
+            .unwrap_err();
+        assert!(count_error.contains("超过当前单次上限"));
+
+        let huge = "x".repeat(MAX_INLINE_GROUP_CONTEXT_BYTES + 1);
+        let huge_context = group_event("huge", "bytes", "u1", &huge, Vec::new(), 2_000);
+        let huge_trigger = group_event("huge-trigger", "bytes", "u1", "run", Vec::new(), 2_001);
+        store.record_event(&huge_context, "event").unwrap();
+        store.record_event(&huge_trigger, "event").unwrap();
+        let bytes_error = store
+            .prepare_turn(&huge_trigger, GroupTriggerKind::Mention, "run")
+            .unwrap_err();
+        assert!(bytes_error.contains("字节"));
+    }
+
+    #[test]
+    fn group_prompt_renders_mentions_attachments_and_empty_content_safely() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ImGroupContextStore::new(temp.path());
+        let mut attachment = group_event("a1", "render", "u1", "", Vec::new(), 1);
+        attachment.message.as_mut().unwrap().images.push(
+            crate::im_gateway::types::ImImageAttachment {
+                file_key: "img-1".to_string(),
+                source: crate::im_gateway::types::ImImageSource::MessageResource,
+                mime_type: None,
+                data_base64: None,
+                download_url: None,
+                encrypted_query_param: None,
+                aes_key: None,
+            },
+        );
+        let empty = group_event("a2", "render", "u2", "", Vec::new(), 2);
+        let mentions = vec![
+            ImMention {
+                key: "".to_string(),
+                open_id: Some("ignored".to_string()),
+                name: None,
+                tenant_key: None,
+                is_bot: false,
+            },
+            ImMention {
+                key: "@missing".to_string(),
+                open_id: None,
+                name: Some("Missing".to_string()),
+                tenant_key: None,
+                is_bot: false,
+            },
+            ImMention {
+                key: "@alice".to_string(),
+                open_id: Some("ou_alice".to_string()),
+                name: Some("Alice".to_string()),
+                tenant_key: None,
+                is_bot: false,
+            },
+        ];
+        let mention_context = group_event("a3", "render", "u3", "@missing and @alice", mentions, 3);
+        let trigger = group_event("a4", "render", "u4", "run", Vec::new(), 4);
+        for event in [&attachment, &empty, &mention_context, &trigger] {
+            store.record_event(event, "event").unwrap();
+        }
+        let turn = store
+            .prepare_turn(&trigger, GroupTriggerKind::Mention, "run")
+            .unwrap();
+        assert!(turn.prompt.contains("[附件 1 个]"));
+        assert!(!turn.prompt.contains("<at id=u2></at>："));
+        assert!(turn
+            .prompt
+            .contains("@missing and <at id=ou_alice>Alice</at>"));
+
+        let bot_by_name = FeishuBotIdentity {
+            open_id: "ou_bot".to_string(),
+            name: Some("Bifrost".to_string()),
+        };
+        let name_only_mention = ImMention {
+            key: "@name".to_string(),
+            open_id: None,
+            name: Some("Bifrost".to_string()),
+            tenant_key: None,
+            is_bot: false,
+        };
+        let name_only = group_event(
+            "name-only",
+            "render",
+            "u1",
+            "@name",
+            vec![name_only_mention],
+            5,
+        );
+        assert_eq!(
+            classify_group_message(
+                name_only.message.as_ref().unwrap(),
+                Some(&bot_by_name),
+                false
+            ),
+            GroupMessageDisposition::SystemCommand {
+                command: "/help".to_string(),
+                reset_context: false,
+            }
+        );
+        assert!(matches!(
+            classify_group_message(
+                group_event("guide", "render", "u1", "/g go", Vec::new(), 6)
+                    .message
+                    .as_ref()
+                    .unwrap(),
+                None,
+                false
+            ),
+            GroupMessageDisposition::AgentTrigger {
+                kind: GroupTriggerKind::Guide,
+                ..
+            }
+        ));
+        assert!(matches!(
+            classify_group_message(
+                group_event("queue", "render", "u1", "/q later", Vec::new(), 7)
+                    .message
+                    .as_ref()
+                    .unwrap(),
+                None,
+                false
+            ),
+            GroupMessageDisposition::AgentTrigger {
+                kind: GroupTriggerKind::Queue,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn group_store_rejects_non_group_and_missing_message_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ImGroupContextStore::new(temp.path());
+        let mut direct = group_event("direct", "c1", "u1", "hi", Vec::new(), 1);
+        direct.source.chat_type = Some("p2p".to_string());
+        assert!(store.record_event(&direct, "event").is_err());
+
+        let mut missing = group_event("missing", "c1", "u1", "hi", Vec::new(), 2);
+        missing.message = None;
+        assert!(store.record_event(&missing, "event").is_err());
+
+        let mut event_id_fallback = group_event("fallback", "c1", "u1", "hi", Vec::new(), 3);
+        event_id_fallback.source.message_id = None;
+        assert_eq!(store.record_event(&event_id_fallback, "event").unwrap(), 1);
     }
 }

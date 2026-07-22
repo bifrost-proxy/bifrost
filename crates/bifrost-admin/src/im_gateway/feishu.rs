@@ -2514,6 +2514,62 @@ fn json_object_keys(value: &serde_json::Value) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use http_body_util::Full;
+    use hyper::body::Incoming;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response, StatusCode};
+    use hyper_util::rt::TokioIo;
+
+    async fn spawn_feishu_api_server(
+        bot_body: &'static str,
+        chat_body: &'static str,
+        reply_body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Feishu API fixture");
+        let address = listener.local_addr().expect("Feishu API fixture address");
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let service = service_fn(move |request: Request<Incoming>| async move {
+                        let path = request.uri().path();
+                        let (status, body) =
+                            if path.ends_with("/auth/v3/tenant_access_token/internal") {
+                                (
+                                    StatusCode::OK,
+                                    r#"{"code":0,"tenant_access_token":"token","expire":7200}"#,
+                                )
+                            } else if path.ends_with("/bot/v3/info") {
+                                (StatusCode::OK, bot_body)
+                            } else if path.contains("/im/v1/chats/") {
+                                (StatusCode::OK, chat_body)
+                            } else if path.contains("/im/v1/messages/") {
+                                (StatusCode::OK, reply_body)
+                            } else {
+                                (StatusCode::NOT_FOUND, r#"{"code":404}"#)
+                            };
+                        Ok::<_, hyper::Error>(
+                            Response::builder()
+                                .status(status)
+                                .header("Content-Type", "application/json")
+                                .body(Full::new(Bytes::from_static(body.as_bytes())))
+                                .unwrap(),
+                        )
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        (format!("http://{address}"), task)
+    }
 
     #[test]
     fn test_default_text_card_wraps_plain_text_as_markdown_card() {
@@ -2579,6 +2635,158 @@ mod tests {
         }))
         .unwrap_err()
         .contains("missing data.name"));
+    }
+
+    #[tokio::test]
+    async fn fetch_group_identity_and_chat_name_use_api_and_cache_successfully() {
+        let (base_url, server) = spawn_feishu_api_server(
+            r#"{"code":0,"bot":{"open_id":"ou_bot","app_name":"Bifrost"}}"#,
+            r#"{"code":0,"data":{"name":" Engineering "}}"#,
+            r#"{"code":0,"data":{"message_id":"om_reply"}}"#,
+        )
+        .await;
+        let mut config = provider_with_base_url(Some(&base_url));
+        config.secret_ref = Some("secret".to_string());
+        let provider = FeishuProvider::new();
+
+        let identity = provider.fetch_bot_identity(&config).await.unwrap();
+        assert_eq!(identity.open_id, "ou_bot");
+        assert_eq!(identity.name.as_deref(), Some("Bifrost"));
+        assert_eq!(
+            provider.fetch_bot_identity(&config).await.unwrap(),
+            identity
+        );
+        assert_eq!(
+            provider.fetch_chat_name(&config, "oc_group").await.unwrap(),
+            "Engineering"
+        );
+        let reply = provider
+            .reply_card(
+                &config,
+                "om_source",
+                serde_json::json!({"header":{"title":{"content":"remove"}},"elements":[]}),
+                Some("reply-uuid"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.message_id.as_deref(), Some("om_reply"));
+        provider
+            .patch_card(
+                &config,
+                "om_reply",
+                serde_json::json!({"header":{"title":{"content":"remove"}},"elements":[]}),
+            )
+            .await
+            .unwrap();
+        server.abort();
+
+        let (base_url, server) = spawn_feishu_api_server(
+            r#"{"code":0,"bot":{"open_id":"ou_bot"}}"#,
+            r#"{"code":0,"data":{"name":"Engineering"}}"#,
+            "not-json",
+        )
+        .await;
+        let mut config = provider_with_base_url(Some(&base_url));
+        config.secret_ref = Some("secret".to_string());
+        assert!(FeishuProvider::new()
+            .reply_card(
+                &config,
+                "om_source",
+                serde_json::json!({"elements":[]}),
+                None,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("reply response parse failed"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_group_identity_reports_api_shape_parse_and_network_errors() {
+        for (bot_body, expected) in [
+            (r#"{"code":999,"msg":"denied"}"#, "code=999"),
+            (r#"{"code":0,"data":{}}"#, "missing bot"),
+            (
+                r#"{"code":0,"bot":{"open_id":" ","bot_name":"Bifrost"}}"#,
+                "missing bot.open_id",
+            ),
+            ("not-json", "response parse failed"),
+        ] {
+            let (base_url, server) = spawn_feishu_api_server(
+                bot_body,
+                r#"{"code":0,"data":{"name":"Group"}}"#,
+                r#"{"code":0}"#,
+            )
+            .await;
+            let mut config = provider_with_base_url(Some(&base_url));
+            config.secret_ref = Some("secret".to_string());
+            let error = FeishuProvider::new()
+                .fetch_bot_identity(&config)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            server.abort();
+        }
+
+        let (base_url, server) = spawn_feishu_api_server(
+            r#"{"code":0,"bot":{"open_id":"ou_bot","bot_name":"Fallback Name"}}"#,
+            "not-json",
+            r#"{"code":0}"#,
+        )
+        .await;
+        let mut config = provider_with_base_url(Some(&base_url));
+        config.secret_ref = Some("secret".to_string());
+        let provider = FeishuProvider::new();
+        let identity = provider.fetch_bot_identity(&config).await.unwrap();
+        assert_eq!(identity.name.as_deref(), Some("Fallback Name"));
+        assert!(provider
+            .fetch_chat_name(&config, "oc_group")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("response parse failed"));
+        server.abort();
+
+        let mut unreachable = provider_with_base_url(Some("http://127.0.0.1:9"));
+        unreachable.secret_ref = Some("secret".to_string());
+        let provider = FeishuProvider::new();
+        let cache_key = FeishuProvider::token_cache_key(
+            FeishuProvider::base_url(&unreachable),
+            unreachable.app_id.as_deref().unwrap(),
+            "secret",
+        );
+        provider.token_cache.write().insert(
+            cache_key,
+            TokenCache {
+                token: "cached".to_string(),
+                expires_at: u64::MAX,
+            },
+        );
+        assert!(provider
+            .fetch_bot_identity(&unreachable)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("request failed"));
+        assert!(provider
+            .fetch_chat_name(&unreachable, "oc_group")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("request failed"));
+        assert!(provider
+            .reply_card(
+                &unreachable,
+                "om_source",
+                serde_json::json!({"elements":[]}),
+                None,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("reply request failed"));
     }
 
     #[test]

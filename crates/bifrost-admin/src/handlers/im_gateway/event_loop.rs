@@ -2340,6 +2340,735 @@ fn session_key_for_event(event: &ImEvent) -> String {
 mod tests {
     use super::*;
 
+    async fn spawn_group_lookup_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let service = hyper::service::service_fn(
+                        |request: hyper::Request<hyper::body::Incoming>| async move {
+                            let body = if request
+                                .uri()
+                                .path()
+                                .ends_with("/auth/v3/tenant_access_token/internal")
+                            {
+                                r#"{"code":0,"tenant_access_token":"token","expire":7200}"#
+                            } else if request.uri().path().ends_with("/bot/v3/info") {
+                                r#"{"code":0,"bot":{"open_id":"ou_bot","app_name":"Bifrost"}}"#
+                            } else {
+                                r#"{"code":0,"data":{"name":"API Engineering"}}"#
+                            };
+                            Ok::<_, hyper::Error>(
+                                hyper::Response::builder()
+                                    .header("Content-Type", "application/json")
+                                    .body(http_body_util::Full::new(bytes::Bytes::from_static(
+                                        body.as_bytes(),
+                                    )))
+                                    .unwrap(),
+                            )
+                        },
+                    );
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        (format!("http://{address}"), task)
+    }
+
+    fn group_test_event(
+        provider_id: &str,
+        message_id: &str,
+        text: &str,
+        mention_bot: bool,
+        received_at: u64,
+    ) -> ImEvent {
+        ImEvent {
+            event_id: format!("event-{message_id}"),
+            provider_id: provider_id.to_string(),
+            provider_type: crate::im_gateway::types::ImProviderType::Feishu,
+            event_type: "message.receive".to_string(),
+            source: crate::im_gateway::types::ImEventSource {
+                chat_id: Some("oc_group".to_string()),
+                chat_type: Some("group".to_string()),
+                user_id: Some("ou_sender".to_string()),
+                user_name: Some("Alice".to_string()),
+                sender_type: Some("user".to_string()),
+                message_id: Some(message_id.to_string()),
+            },
+            message: Some(crate::im_gateway::types::ImEventMessage {
+                text: text.to_string(),
+                mentions: mention_bot
+                    .then(|| crate::im_gateway::types::ImMention {
+                        key: "@_user_1".to_string(),
+                        open_id: Some("ou_bot".to_string()),
+                        name: Some("Bifrost".to_string()),
+                        tenant_key: None,
+                        is_bot: true,
+                    })
+                    .into_iter()
+                    .collect(),
+                images: Vec::new(),
+                raw_type: Some("text".to_string()),
+                raw_content: Some(serde_json::json!({
+                    "text": text,
+                    "_bifrost_debug_chat_name": "Engineering"
+                })),
+                create_time: Some(received_at),
+                update_time: None,
+                root_id: None,
+                parent_id: None,
+                thread_id: None,
+            }),
+            received_at,
+            raw_digest: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_group_dispatch_covers_ambient_commands_triggers_and_duplicates() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ImGroupContextStore::new(temp.path());
+        let client =
+            ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+        let mut provider = recorder_test_provider();
+        provider.id = "feishu-group-dispatch".to_string();
+        provider.base_url = Some("http://127.0.0.1:9".to_string());
+
+        let ambient = group_test_event(&provider.id, "m1", "hello", false, 1);
+        assert!(
+            prepare_group_inbound_dispatch(&client, &provider, &ambient, &store, false)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .chat_name(&provider.id, "oc_group")
+                .unwrap()
+                .as_deref(),
+            Some("Engineering")
+        );
+
+        let clear = group_test_event(&provider.id, "m2", "/clear", false, 2);
+        let clear_dispatch =
+            prepare_group_inbound_dispatch(&client, &provider, &clear, &store, false)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(clear_dispatch.message_text, "/clear");
+        assert!(clear_dispatch.group_turn_id.is_none());
+
+        let trigger = group_test_event(&provider.id, "m3", "@_user_1 investigate", true, 3);
+        let dispatch = prepare_group_inbound_dispatch(&client, &provider, &trigger, &store, false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            dispatch.session_key,
+            crate::im_gateway::group_context::build_group_session_key(&provider.id, "oc_group")
+        );
+        assert!(dispatch.message_text.contains("investigate"));
+        let turn_id = dispatch.group_turn_id.unwrap();
+        store.mark_turn_completed(&turn_id, 4).unwrap();
+        assert!(
+            prepare_group_inbound_dispatch(&client, &provider, &trigger, &store, false)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_group_dispatch_resolves_chat_and_bot_from_feishu_api() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ImGroupContextStore::new(temp.path());
+        let (base_url, server) = spawn_group_lookup_server().await;
+        let client =
+            ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+        let mut provider = recorder_test_provider();
+        provider.id = "feishu-group-api".to_string();
+        provider.base_url = Some(base_url);
+        let mut event = group_test_event(&provider.id, "api-trigger", "@_user_1 inspect", true, 1);
+        let message = event.message.as_mut().unwrap();
+        message.raw_content = Some(serde_json::json!({"text":"@_user_1 inspect"}));
+        message.mentions[0].is_bot = false;
+
+        let dispatch = prepare_group_inbound_dispatch(&client, &provider, &event, &store, false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(dispatch.message_text.contains("API Engineering"));
+        assert_eq!(
+            store
+                .chat_name(&provider.id, "oc_group")
+                .unwrap()
+                .as_deref(),
+            Some("API Engineering")
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn prepare_group_dispatch_tolerates_feishu_lookup_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ImGroupContextStore::new(temp.path());
+        let client =
+            ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+        let mut provider = recorder_test_provider();
+        provider.id = "feishu-group-api-error".to_string();
+        provider.base_url = Some("http://127.0.0.1:9".to_string());
+        let mut event = group_test_event(&provider.id, "api-error", "@_user_1 inspect", true, 1);
+        let message = event.message.as_mut().unwrap();
+        message.raw_content = Some(serde_json::json!({"text":"@_user_1 inspect"}));
+        message.mentions[0].is_bot = false;
+
+        assert!(
+            prepare_group_inbound_dispatch(&client, &provider, &event, &store, false)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_group_dispatch_reports_malformed_group_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+        let (base_url, server) = spawn_group_lookup_server().await;
+        let mut provider = recorder_test_provider();
+        provider.id = "feishu-concurrent-malformed".to_string();
+        provider.base_url = Some(base_url);
+        service.provider_store.add(provider.clone()).unwrap();
+        rusqlite::Connection::open(service.group_context_store.file_path())
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_concurrent_group_message
+                 BEFORE INSERT ON im_group_messages
+                 BEGIN SELECT RAISE(FAIL, 'test insert failure'); END;",
+            )
+            .unwrap();
+        let event = group_test_event(
+            &provider.id,
+            "concurrent-malformed",
+            "@_user_1 continue",
+            true,
+            1,
+        );
+
+        handle_concurrent_event_during_chat(
+            &event,
+            &provider,
+            "active-session",
+            &service.queue_manager,
+            &ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider())),
+            &service.message_log_store,
+            &service.agent_session_manager,
+            &service.progress_registry,
+            &service.agent_config_store,
+            &service.provider_store,
+            &service.event_store,
+            &service.group_context_store,
+            &service.external_cli_config_store,
+            BusyMessageDefaultMode::Guide,
+        )
+        .await;
+        assert_eq!(service.event_store.list().len(), 1);
+        server.abort();
+    }
+
+    #[test]
+    fn event_session_keys_separate_group_and_direct_conversations() {
+        let group = group_test_event("provider-a", "group-message", "hello", false, 1);
+        assert_eq!(
+            session_key_for_event(&group),
+            crate::im_gateway::group_context::build_group_session_key("provider-a", "oc_group")
+        );
+
+        let mut direct = group;
+        direct.source.chat_type = Some("p2p".to_string());
+        assert_eq!(
+            session_key_for_event(&direct),
+            build_session_key("provider-a", Some("ou_sender"))
+        );
+    }
+
+    #[tokio::test]
+    async fn group_event_loop_records_ambient_and_releases_turn_when_agent_is_disabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+        let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+        let mut provider = recorder_test_provider();
+        provider.id = "feishu-group-loop".to_string();
+        provider.base_url = Some("http://127.0.0.1:9".to_string());
+        service.provider_store.add(provider.clone()).unwrap();
+        let mut agent_config = service.agent_config_store.load();
+        agent_config.enabled = false;
+        service.agent_config_store.save(&agent_config).unwrap();
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(run_event_loop_with_options(
+            rx,
+            ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider())),
+            provider.clone(),
+            Arc::clone(&service.event_store),
+            Arc::clone(&service.message_log_store),
+            Arc::clone(&service.group_context_store),
+            Arc::clone(&service.route_store),
+            Arc::clone(&service.provider_store),
+            Arc::clone(&service.agent_config_store),
+            Arc::clone(&service.schedule_store),
+            Arc::clone(&service.scheduler),
+            Arc::clone(&service.target_store),
+            Arc::clone(&service.connection_manager),
+            Arc::clone(&service.agent_session_manager),
+            Arc::clone(&service.external_cli_config_store),
+            Arc::clone(&service.queue_manager),
+            Arc::clone(&service.progress_registry),
+            EventLoopOptions {
+                send_online_notification: false,
+            },
+        ));
+        let mut malformed = group_test_event(&provider.id, "malformed", "ignored", false, 0);
+        malformed.message = None;
+        tx.send(malformed).unwrap();
+        tx.send(group_test_event(&provider.id, "ambient", "hello", false, 1))
+            .unwrap();
+        tx.send(group_test_event(
+            &provider.id,
+            "trigger",
+            "@_user_1 run",
+            true,
+            2,
+        ))
+        .unwrap();
+        drop(tx);
+        tokio::time::timeout(std::time::Duration::from_secs(30), handle)
+            .await
+            .expect("group event loop timed out")
+            .expect("group event loop panicked");
+
+        assert_eq!(
+            service
+                .group_context_store
+                .message_count(&provider.id, "oc_group")
+                .unwrap(),
+            2
+        );
+        let retry = group_test_event(&provider.id, "retry", "@_user_1 retry", true, 3);
+        service
+            .group_context_store
+            .record_event(&retry, "test")
+            .unwrap();
+        let turn = service
+            .group_context_store
+            .prepare_turn(
+                &retry,
+                crate::im_gateway::group_context::GroupTriggerKind::Mention,
+                "retry",
+            )
+            .unwrap();
+        assert_eq!(turn.message_count, 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn group_event_loop_uses_group_workdir_for_busy_default_and_route_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+        let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+        let (base_url, server) = spawn_group_lookup_server().await;
+        let mut provider = recorder_test_provider();
+        provider.id = "feishu-group-busy-workdir".to_string();
+        provider.base_url = Some(base_url);
+        service.provider_store.add(provider.clone()).unwrap();
+        service
+            .route_store
+            .add(crate::im_gateway::types::ImRoute {
+                id: "busy-group-agent-route".to_string(),
+                provider_id: provider.id.clone(),
+                name: "Busy group agent route".to_string(),
+                enabled: true,
+                event_type: crate::im_gateway::types::ImEventType::MessageReceive,
+                matcher: crate::im_gateway::types::ImEventMatcher {
+                    chat_ids: vec!["oc_group".to_string()],
+                    user_ids: Vec::new(),
+                    keyword: Some("route".to_string()),
+                    regex: None,
+                },
+                action: crate::im_gateway::types::ImRouteAction::AgentChat {
+                    system_prompt: None,
+                    model: None,
+                    reply_target: crate::im_gateway::types::ReplyTarget::OriginalChat,
+                },
+                timeout_ms: 30_000,
+                max_output_bytes: 1_048_576,
+                created_at: now_ms(),
+                updated_at: now_ms(),
+            })
+            .unwrap();
+        let mut agent = service.agent_config_store.load();
+        agent.enabled = true;
+        agent.runner = Some(bifrost_agent::AgentRunnerMode::Custom("codex".to_string()));
+        service.agent_config_store.save(&agent).unwrap();
+        let session_key =
+            crate::im_gateway::group_context::build_group_session_key(&provider.id, "oc_group");
+        let bootstrap = group_test_event(
+            &provider.id,
+            "status-bootstrap",
+            "@_user_1 bootstrap",
+            true,
+            0,
+        );
+        service
+            .group_context_store
+            .record_event(&bootstrap, "test")
+            .unwrap();
+        let bootstrap_turn = service
+            .group_context_store
+            .prepare_turn(
+                &bootstrap,
+                crate::im_gateway::group_context::GroupTriggerKind::Mention,
+                "bootstrap",
+            )
+            .unwrap();
+        service
+            .group_context_store
+            .release_turn(&bootstrap_turn.turn_id, "test setup", 0)
+            .unwrap();
+        assert!(service
+            .group_context_store
+            .set_work_dir_by_session(&session_key, temp.path().to_str().unwrap())
+            .unwrap());
+        let active_session = service
+            .agent_session_manager
+            .try_take_session_with_work_dir(&session_key, None)
+            .unwrap();
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(run_event_loop_with_options(
+            rx,
+            ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider())),
+            provider.clone(),
+            Arc::clone(&service.event_store),
+            Arc::clone(&service.message_log_store),
+            Arc::clone(&service.group_context_store),
+            Arc::clone(&service.route_store),
+            Arc::clone(&service.provider_store),
+            Arc::clone(&service.agent_config_store),
+            Arc::clone(&service.schedule_store),
+            Arc::clone(&service.scheduler),
+            Arc::clone(&service.target_store),
+            Arc::clone(&service.connection_manager),
+            Arc::clone(&service.agent_session_manager),
+            Arc::clone(&service.external_cli_config_store),
+            Arc::clone(&service.queue_manager),
+            Arc::clone(&service.progress_registry),
+            EventLoopOptions {
+                send_online_notification: false,
+            },
+        ));
+        tx.send(group_test_event(
+            &provider.id,
+            "busy-default",
+            "@_user_1 first busy message",
+            true,
+            1,
+        ))
+        .unwrap();
+        tx.send(group_test_event(
+            &provider.id,
+            "busy-route",
+            "@_user_1 route busy message",
+            true,
+            2,
+        ))
+        .unwrap();
+        drop(tx);
+        tokio::time::timeout(std::time::Duration::from_secs(20), handle)
+            .await
+            .expect("busy group event loop timed out")
+            .expect("busy group event loop panicked");
+        service.agent_session_manager.return_session(active_session);
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn group_event_loop_busy_session_falls_back_to_agent_workdir() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+        let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+        let (base_url, server) = spawn_group_lookup_server().await;
+        let mut provider = recorder_test_provider();
+        provider.id = "feishu-group-busy-fallback".to_string();
+        provider.base_url = Some(base_url);
+        service.provider_store.add(provider.clone()).unwrap();
+        let mut agent = service.agent_config_store.load();
+        agent.enabled = true;
+        agent.runner = Some(bifrost_agent::AgentRunnerMode::Custom("codex".to_string()));
+        agent.work_dir = Some(temp.path().display().to_string());
+        service.agent_config_store.save(&agent).unwrap();
+        let session_key =
+            crate::im_gateway::group_context::build_group_session_key(&provider.id, "oc_group");
+        let active_session = service
+            .agent_session_manager
+            .try_take_session_with_work_dir(&session_key, None)
+            .unwrap();
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(run_event_loop_with_options(
+            rx,
+            ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider())),
+            provider.clone(),
+            Arc::clone(&service.event_store),
+            Arc::clone(&service.message_log_store),
+            Arc::clone(&service.group_context_store),
+            Arc::clone(&service.route_store),
+            Arc::clone(&service.provider_store),
+            Arc::clone(&service.agent_config_store),
+            Arc::clone(&service.schedule_store),
+            Arc::clone(&service.scheduler),
+            Arc::clone(&service.target_store),
+            Arc::clone(&service.connection_manager),
+            Arc::clone(&service.agent_session_manager),
+            Arc::clone(&service.external_cli_config_store),
+            Arc::clone(&service.queue_manager),
+            Arc::clone(&service.progress_registry),
+            EventLoopOptions {
+                send_online_notification: false,
+            },
+        ));
+        tx.send(group_test_event(
+            &provider.id,
+            "busy-fallback",
+            "@_user_1 busy fallback",
+            true,
+            1,
+        ))
+        .unwrap();
+        drop(tx);
+        tokio::time::timeout(std::time::Duration::from_secs(30), handle)
+            .await
+            .expect("busy fallback event loop timed out")
+            .expect("busy fallback event loop panicked");
+        service.agent_session_manager.return_session(active_session);
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn group_event_loop_status_uses_bound_group_workdir() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+        let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+        let (base_url, server) = spawn_group_lookup_server().await;
+        let mut provider = recorder_test_provider();
+        provider.id = "feishu-group-status".to_string();
+        provider.base_url = Some(base_url);
+        service.provider_store.add(provider.clone()).unwrap();
+        let session_key =
+            crate::im_gateway::group_context::build_group_session_key(&provider.id, "oc_group");
+        let bootstrap = group_test_event(
+            &provider.id,
+            "status-bootstrap",
+            "@_user_1 bootstrap",
+            true,
+            0,
+        );
+        service
+            .group_context_store
+            .record_event(&bootstrap, "test")
+            .unwrap();
+        let bootstrap_turn = service
+            .group_context_store
+            .prepare_turn(
+                &bootstrap,
+                crate::im_gateway::group_context::GroupTriggerKind::Mention,
+                "bootstrap",
+            )
+            .unwrap();
+        service
+            .group_context_store
+            .release_turn(&bootstrap_turn.turn_id, "test setup", 0)
+            .unwrap();
+        assert!(service
+            .group_context_store
+            .set_work_dir_by_session(&session_key, temp.path().to_str().unwrap())
+            .unwrap());
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(run_event_loop_with_options(
+            rx,
+            ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider())),
+            provider.clone(),
+            Arc::clone(&service.event_store),
+            Arc::clone(&service.message_log_store),
+            Arc::clone(&service.group_context_store),
+            Arc::clone(&service.route_store),
+            Arc::clone(&service.provider_store),
+            Arc::clone(&service.agent_config_store),
+            Arc::clone(&service.schedule_store),
+            Arc::clone(&service.scheduler),
+            Arc::clone(&service.target_store),
+            Arc::clone(&service.connection_manager),
+            Arc::clone(&service.agent_session_manager),
+            Arc::clone(&service.external_cli_config_store),
+            Arc::clone(&service.queue_manager),
+            Arc::clone(&service.progress_registry),
+            EventLoopOptions {
+                send_online_notification: false,
+            },
+        ));
+        tx.send(group_test_event(
+            &provider.id,
+            "group-status",
+            "/status",
+            false,
+            1,
+        ))
+        .unwrap();
+        drop(tx);
+        tokio::time::timeout(std::time::Duration::from_secs(30), handle)
+            .await
+            .expect("group status event loop timed out")
+            .expect("group status event loop panicked");
+        assert_eq!(
+            service
+                .group_context_store
+                .message_count(&provider.id, "oc_group")
+                .unwrap(),
+            2
+        );
+        server.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn group_event_loop_routes_concurrent_context_to_the_active_external_session() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+        let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+        let runner_path = temp.path().join("slow-traex");
+        std::fs::write(
+            &runner_path,
+            "#!/usr/bin/env sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"group-thread\"}'\nsleep 2\nprintf '%s\\n' '{\"type\":\"assistant_final\",\"content\":\"GROUP_RUNNER_OK\"}'\nprintf '%s\\n' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&runner_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&runner_path, permissions).unwrap();
+
+        let mut agent = service.agent_config_store.load();
+        agent.enabled = true;
+        agent.runner = Some(bifrost_agent::AgentRunnerMode::Custom("codex".to_string()));
+        service.agent_config_store.save(&agent).unwrap();
+        let mut cli = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+        let runner = cli
+            .runners
+            .get_mut(crate::im_gateway::external_cli::DEFAULT_CODEX_RUNNER_ID)
+            .unwrap();
+        runner.enabled = true;
+        runner.adapter = crate::im_gateway::external_cli::TRAEX_ADAPTER.to_string();
+        runner.inject_bifrost_tools = false;
+        runner.adapter_config.executable = Some(runner_path.display().to_string());
+        service.external_cli_config_store.save(cli).unwrap();
+
+        let mut provider = recorder_test_provider();
+        provider.id = "feishu-group-concurrent".to_string();
+        provider.base_url = Some("http://127.0.0.1:9".to_string());
+        service.provider_store.add(provider.clone()).unwrap();
+        let session_key =
+            crate::im_gateway::group_context::build_group_session_key(&provider.id, "oc_group");
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(run_event_loop_with_options(
+            rx,
+            ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider())),
+            provider.clone(),
+            Arc::clone(&service.event_store),
+            Arc::clone(&service.message_log_store),
+            Arc::clone(&service.group_context_store),
+            Arc::clone(&service.route_store),
+            Arc::clone(&service.provider_store),
+            Arc::clone(&service.agent_config_store),
+            Arc::clone(&service.schedule_store),
+            Arc::clone(&service.scheduler),
+            Arc::clone(&service.target_store),
+            Arc::clone(&service.connection_manager),
+            Arc::clone(&service.agent_session_manager),
+            Arc::clone(&service.external_cli_config_store),
+            Arc::clone(&service.queue_manager),
+            Arc::clone(&service.progress_registry),
+            EventLoopOptions {
+                send_online_notification: false,
+            },
+        ));
+        tx.send(group_test_event(
+            &provider.id,
+            "first-trigger",
+            "@_user_1 start",
+            true,
+            1,
+        ))
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if service
+                    .agent_session_manager
+                    .is_session_active(&session_key)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("group runner did not become active");
+
+        tx.send(group_test_event(
+            &provider.id,
+            "ambient-during-run",
+            "the deployment is red",
+            false,
+            2,
+        ))
+        .unwrap();
+        tx.send(group_test_event(
+            &provider.id,
+            "guide-during-run",
+            "/g include the deployment failure",
+            false,
+            3,
+        ))
+        .unwrap();
+        drop(tx);
+        tokio::time::timeout(std::time::Duration::from_secs(20), handle)
+            .await
+            .expect("group runner event loop timed out")
+            .expect("group runner event loop panicked");
+
+        assert_eq!(
+            service
+                .group_context_store
+                .message_count(&provider.id, "oc_group")
+                .unwrap(),
+            3
+        );
+        let detail = service
+            .agent_session_manager
+            .get_session_detail(&session_key)
+            .expect("group external runner session");
+        assert!(detail
+            .messages
+            .iter()
+            .any(|message| message.content == "GROUP_RUNNER_OK"));
+    }
+
     fn recorder_test_provider() -> ImProviderConfig {
         ImProviderConfig {
             id: "feishu-recorder".to_string(),

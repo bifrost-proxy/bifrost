@@ -47,6 +47,13 @@ async fn handle_mock_inbound(
         Ok(body) => body,
         Err(response) => return response,
     };
+    inject_mock_inbound(body, service).await
+}
+
+async fn inject_mock_inbound(
+    body: MockInboundRequest,
+    service: &SharedImGatewayService,
+) -> Response<BoxBody> {
     if body.provider_id.trim().is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "providerId is required");
     }
@@ -216,4 +223,126 @@ fn ensure_mock_event_sink(
         .await;
     });
     tx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(provider_id: &str, text: &str) -> MockInboundRequest {
+        MockInboundRequest {
+            provider_id: provider_id.to_string(),
+            text: text.to_string(),
+            user_id: Some(" ou_alice ".to_string()),
+            chat_id: Some(" oc_engineering ".to_string()),
+            chat_type: Some("group".to_string()),
+            chat_name: Some(" Engineering ".to_string()),
+            user_name: Some("Alice".to_string()),
+            mention_bot: true,
+            message_id: Some(" om_debug ".to_string()),
+            event_id: Some(" evt_debug ".to_string()),
+        }
+    }
+
+    fn provider(id: &str) -> ImProviderConfig {
+        ImProviderConfig {
+            id: id.to_string(),
+            provider_type: ImProviderType::Feishu,
+            display_name: "Debug Feishu".to_string(),
+            enabled: true,
+            base_url: None,
+            app_id: Some("app".to_string()),
+            secret_ref: Some("secret".to_string()),
+            owner_open_id: None,
+            event_connection_enabled: true,
+            event_types: Vec::new(),
+            agent_config: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_inbound_validates_and_injects_group_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+        let service = Arc::new(ImGatewayService::new(temp.path()));
+        let mut provider = provider("debug-provider");
+        provider.base_url = Some("http://127.0.0.1:9".to_string());
+        service.provider_store.add(provider).unwrap();
+        let mut config = service.agent_config_store.load();
+        config.enabled = false;
+        service.agent_config_store.save(&config).unwrap();
+
+        assert_eq!(
+            inject_mock_inbound(request("", "hello"), &service)
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            inject_mock_inbound(request("missing", "hello"), &service)
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            inject_mock_inbound(request("debug-provider", "  "), &service)
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            inject_mock_inbound(request("debug-provider", "please run"), &service)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if service
+                    .group_context_store
+                    .message_count("debug-provider", "oc_engineering")
+                    .unwrap_or_default()
+                    == 1
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("mock inbound event was not consumed");
+        assert_eq!(
+            service
+                .group_context_store
+                .chat_name("debug-provider", "oc_engineering")
+                .unwrap()
+                .as_deref(),
+            Some("Engineering")
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_inbound_applies_identity_fallbacks() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+        let service = Arc::new(ImGatewayService::new(temp.path()));
+        let mut provider = provider("debug-fallback-provider");
+        provider.owner_open_id = Some("owner".to_string());
+        service.provider_store.add(provider).unwrap();
+
+        let mut body = request("debug-fallback-provider", "ambient");
+        body.user_id = Some(" ".to_string());
+        body.chat_id = Some(" ".to_string());
+        body.event_id = Some(" ".to_string());
+        body.message_id = Some(" ".to_string());
+        body.chat_name = None;
+        body.mention_bot = false;
+        assert_eq!(
+            inject_mock_inbound(body, &service).await.status(),
+            StatusCode::OK
+        );
+    }
 }
