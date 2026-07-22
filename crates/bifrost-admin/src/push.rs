@@ -2267,7 +2267,11 @@ mod tests {
     async fn send_initial_traffic_without_last_sequence_uses_latest_window() {
         let dir = create_test_dir();
         let store = Arc::new(TrafficDbStore::new(dir.clone(), 2000, 0, None).unwrap());
-        let state = Arc::new(AdminState::new(9914).with_traffic_db_store_shared(store.clone()));
+        let rules_storage = bifrost_storage::RulesStorage::with_dir(dir.join("rules")).unwrap();
+        let state = Arc::new(
+            AdminState::new_for_test(9914, rules_storage)
+                .with_traffic_db_store_shared(store.clone()),
+        );
         let manager = Arc::new(PushManager::new(state));
 
         for i in 0..520 {

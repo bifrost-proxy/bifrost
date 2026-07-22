@@ -534,7 +534,7 @@ fn update_task_config(
         || transcription_prompt_changed
             && updated.transcription_mode == AsrTranscriptionMode::MossJoint;
     if transcription_output_changed {
-        if let Err(error) = requeue_files_for_transcription_config_change(id) {
+        if let Err(error) = reconcile_files_for_transcription_config_change(&updated) {
             let rollback = save_tasks(&original_store);
             let message = match rollback {
                 Ok(()) => format!(

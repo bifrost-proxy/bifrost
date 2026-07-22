@@ -23,10 +23,10 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 
 - Qwen 及其他现有 OpenAI 兼容服务不返回说话人时，行为与旧版本一致。
 - 现有分块、重试、字幕、时间线和 CLI 流程继续接受无说话人结果。
-- 不修改现有任务源音频、`tasks.json`、`files.json` 或时间线产物。
+- 只读基准不得修改现有任务源音频、`tasks.json`、`files.json` 或时间线产物；配置变更只允许按本设计校正文件状态与失效引用，不得改写已有转录和时间线内容。
 - MOSS 不进入实时默认路径；旧任务缺少模式字段时继续使用标准 Qwen 链路。
 - 自动初始化只写入 Bifrost ASR 数据目录，不改系统 Python 环境，也不覆盖现有 Qwen 资产。
-- 实际切换转录模式或修改生效中的 MOSS prompt 时，已完成/失败的文件记录必须回到 pending，旧产物引用不得继续冒充新配置结果；相同值 PATCH 不触发重跑。
+- 实际切换转录模式或修改生效中的 MOSS prompt 时，只影响尚无可用转录产物的文件和后续新发现文件；磁盘上仍能找到 `.txt` 转录产物的历史记录必须保留，不得仅因配置变化批量重跑。旧记录继续表达生成它时的历史结果，不能冒充由新模式生成；相同值 PATCH 保持幂等。
 
 必须真实验证：
 
@@ -58,6 +58,7 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 3. `moss_joint` 走整文件联合转录，不执行 Qwen 30 秒分块，也不再叠加 Sherpa/Pyannote 分离；模型原生 speaker 直接进入 timeline。
 4. 首次运行时自动准备独立、可重定位的 Python 3.12 + MLX-Audio runtime，以及固定 snapshot 的 8-bit MLX 模型；准备完成后同一任务直接继续推理。
 5. macOS CLI 主 archive 与 Desktop DMG 只发布 Bifrost 核心，不内置 MOSS Python/MLX runtime、依赖或模型权重。MOSS runtime 使用 `scripts/asr/moss-runtime-version.txt` 中的独立版本和 `moss-runtime-v<version>` 独立 GitHub Release，不再跟随每个 Bifrost CLI/App 版本重复构建。Apple Silicon 用户在 Model Management 主动初始化或首次运行任务时，才动态下载该独立 runtime asset 与固定模型权重。MLX-Audio 固定 commit `64e8416c303fb3b3463dab8eb4ebd78c55a87c1a`，8-bit 模型固定 snapshot `90c3a1ab78fa56e47e1493ddea48e3ababaf2f71`。runtime 使用固定 SHA-256 的 `python-build-standalone` CPython 3.12 arm64 归档，不复制 `actions/setup-python` 的 hosted toolcache；`otool -L` 可重定位检查仍拒绝任何指向 runner 或 hosted toolcache 的 dylib 依赖。初始化器从独立 Release 的 `<asset>.sha256` 校验文件读取 runtime zip 的 SHA-256，校验后才解压；1,258,427,442-byte 权重固定 SHA-256 `469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190`，下载后必须校验。测试覆盖的自定义 runtime URL 必须同时提供 `BIFROST_MOSS_RUNTIME_SHA256`。`test_asr_moss_release_contract.sh` 在普通 PR CI 中校验核心 Release 隔离、独立 workflow、Python 归档、commit、snapshot、metadata、资产名和 checksum 契约。
+6. 模式或 MOSS Prompt 更新后，文件记录以转录产物是否存在为重处理边界：优先保留记录中仍有效的 `output_text_path`，也会从任务标准产物目录恢复被旧版本清空的路径。已有 `.txt` 的 pending/processing/failed 遗留记录归一为 `partial_success`，避免整文件重跑；源文件仍存在但没有 `.txt` 的非 pending 记录才清理失效引用并回到 pending。源文件与转录产物都不存在的 pending 记录直接从任务状态清理，后续每次扫描也执行同样的无效记录回收。新文件始终使用任务当前配置。
 
 ### 统一模型管理
 
@@ -244,7 +245,7 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 - verification marker 必须覆盖 `site-packages` 非缓存文件；依赖删除、增加或内容损坏必须撤销 Ready。
 - 模型 metadata 校验列表必须与 release packager 的完整 12 文件集合一致，缺失或损坏任一文件都撤销 Ready 并触发恢复。
 - MOSS 成功转录必须持久化整文件耗时 metric，benchmark 的 elapsed/RTF 不得恒为零。
-- API 修改转录模式或生效中的 MOSS prompt 后必须把旧结果重置为 pending；相同配置 PATCH 保持幂等。
+- API 修改转录模式或生效中的 MOSS prompt 后，仍存在 `.txt` 的旧结果必须保留且不得进入整文件待处理队列；标准产物存在但记录引用已丢失时必须恢复引用。仅缺少转录产物的记录回到 pending；相同配置 PATCH 保持幂等。
 - 1.2 秒 fixture 推理达到 600 ms 时必须返回 `moss_rtf_exceeded`，并终止子进程。
 - 缺时长、短音频、数字静音必须在 MLX 子进程启动前返回稳定错误；正常低音量 WAV 不得被静音阈值误杀。
 - 已消耗完端到端预算时不得创建子进程；剩余预算而非完整音频预算控制 watchdog。

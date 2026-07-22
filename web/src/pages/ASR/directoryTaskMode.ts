@@ -1,5 +1,8 @@
 import type { AsrTranscriptionMode } from "../../api/asr";
 
+export const DIRECTORY_TASK_MODE_HISTORY_NOTE =
+  "Changing this setting applies to untranscribed and new files; existing transcript files are preserved.";
+
 export interface DirectoryTaskModeFields {
   showMossPrompt: boolean;
   showStandardPipeline: boolean;

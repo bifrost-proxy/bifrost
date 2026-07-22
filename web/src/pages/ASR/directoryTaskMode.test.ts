@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { directoryTaskModeFields, directoryTaskModeOptions } from "./directoryTaskMode";
+import {
+  DIRECTORY_TASK_MODE_HISTORY_NOTE,
+  directoryTaskModeFields,
+  directoryTaskModeOptions,
+} from "./directoryTaskMode";
 
 describe("directoryTaskModeFields", () => {
   it("shows only the standard pipeline fields for standard and initial forms", () => {
@@ -35,5 +39,9 @@ describe("directoryTaskModeFields", () => {
       disabled: true,
       label: expect.stringContaining("checking platform support"),
     });
+  });
+
+  it("explains that mode changes preserve historical transcripts", () => {
+    expect(DIRECTORY_TASK_MODE_HISTORY_NOTE).toContain("existing transcript files are preserved");
   });
 });

@@ -276,6 +276,14 @@ fn load_file_store(task_id: &str) -> FileStore {
 }
 
 fn save_file_store(task_id: &str, store: &FileStore) -> Result<(), String> {
+    save_file_store_with_removals(task_id, store, &[])
+}
+
+fn save_file_store_with_removals(
+    task_id: &str,
+    store: &FileStore,
+    removed_keys: &[String],
+) -> Result<(), String> {
     let _guard = FILE_STORE_WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = file_store_path(task_id);
     let mut merged = match std::fs::read_to_string(&path) {
@@ -294,6 +302,9 @@ fn save_file_store(task_id: &str, store: &FileStore) -> Result<(), String> {
     if merged.version != TASK_STORE_VERSION {
         merged.version = TASK_STORE_VERSION;
         merged.files.clear();
+    }
+    for key in removed_keys {
+        merged.files.remove(key);
     }
     for (key, record) in store.files.iter() {
         merged.files.insert(key.clone(), record.clone());
@@ -1044,10 +1055,20 @@ fn reset_retryable_failed_records(task_id: &str, files: &mut FileStore) -> usize
     reset_count
 }
 
-fn requeue_files_for_transcription_config_change(task_id: &str) -> Result<usize, String> {
-    let mut files = load_file_store(task_id);
+fn reconcile_files_for_transcription_config_change(
+    task: &AsrDirectoryTask,
+) -> Result<usize, String> {
+    let mut files = load_file_store(&task.id);
+    let preserved_count = preserve_existing_transcript_records(task, &mut files);
     let mut reset_count = 0usize;
     for record in files.files.values_mut() {
+        if record
+            .output_text_path
+            .as_ref()
+            .is_some_and(|path| path.is_file())
+        {
+            continue;
+        }
         if record.status == FileStatus::Pending {
             continue;
         }
@@ -1069,15 +1090,123 @@ fn requeue_files_for_transcription_config_change(task_id: &str) -> Result<usize,
         record.memory_limit_hints.clear();
         reset_count += 1;
     }
-    if reset_count > 0 {
-        save_file_store(task_id, &files)?;
+    let pruned_keys = prune_missing_pending_records(task, &mut files);
+    let pruned_count = pruned_keys.len();
+    let changed_count = pruned_count
+        .saturating_add(preserved_count)
+        .saturating_add(reset_count);
+    if changed_count > 0 {
+        if pruned_count > 0 {
+            save_file_store_with_removals(&task.id, &files, &pruned_keys)?;
+        } else {
+            save_file_store(&task.id, &files)?;
+        }
         tracing::info!(
-            task_id = %task_id,
+            task_id = %task.id,
+            pruned_count,
+            preserved_count,
             reset_count,
-            "requeued ASR files after transcription mode or MOSS prompt changed"
+            "reconciled ASR files after transcription mode or MOSS prompt changed"
         );
     }
-    Ok(reset_count)
+    Ok(changed_count)
+}
+
+fn preserve_existing_transcript_records(
+    task: &AsrDirectoryTask,
+    files: &mut FileStore,
+) -> usize {
+    let data_dir = bifrost_storage::data_dir();
+    let mut preserved_count = 0usize;
+    for record in files.files.values_mut() {
+        if matches!(
+            record.status,
+            FileStatus::Success | FileStatus::PartialSuccess
+        ) && record
+            .output_text_path
+            .as_ref()
+            .is_some_and(|path| path.is_file())
+        {
+            continue;
+        }
+        let (canonical_text, canonical_metadata, canonical_timeline) =
+            bifrost_asr::artifacts::output_paths_in(
+                &data_dir,
+                &task.id,
+                &record.source_path,
+                &task.audio_dir,
+            );
+        let Some(text_path) =
+            existing_artifact_path(record.output_text_path.as_ref(), &canonical_text)
+        else {
+            continue;
+        };
+        record.output_text_path = Some(text_path.clone());
+        record.output_metadata_path = existing_artifact_path(
+            record.output_metadata_path.as_ref(),
+            &canonical_metadata,
+        );
+        record.output_timeline_path = existing_artifact_path(
+            record.output_timeline_path.as_ref(),
+            &canonical_timeline,
+        );
+        if matches!(
+            record.status,
+            FileStatus::Pending | FileStatus::Processing | FileStatus::Failed
+        ) {
+            record.status = FileStatus::PartialSuccess;
+            record.error = None;
+            record.finished_at_ms.get_or_insert_with(now_ms);
+        }
+        if record.text_chars == 0 {
+            if let Ok(text) = std::fs::read_to_string(&text_path) {
+                record.text_chars = text.chars().count();
+            }
+        }
+        preserved_count += 1;
+    }
+    preserved_count
+}
+
+fn prune_missing_pending_records(task: &AsrDirectoryTask, files: &mut FileStore) -> Vec<String> {
+    let data_dir = bifrost_storage::data_dir();
+    let removed_keys = files
+        .files
+        .iter()
+        .filter_map(|(key, record)| {
+            if record.status != FileStatus::Pending || record.source_path.is_file() {
+                return None;
+            }
+            let canonical_text = bifrost_asr::artifacts::output_paths_in(
+                &data_dir,
+                &task.id,
+                &record.source_path,
+                &task.audio_dir,
+            )
+            .0;
+            existing_artifact_path(record.output_text_path.as_ref(), &canonical_text)
+                .is_none()
+                .then(|| key.clone())
+        })
+        .collect::<Vec<_>>();
+    for key in &removed_keys {
+        files.files.remove(key);
+    }
+    if !removed_keys.is_empty() {
+        tracing::info!(
+            task_id = %task.id,
+            pruned_count = removed_keys.len(),
+            "pruned pending ASR records whose source and transcript artifacts no longer exist"
+        );
+    }
+    removed_keys
+}
+
+fn existing_artifact_path(recorded: Option<&PathBuf>, canonical: &Path) -> Option<PathBuf> {
+    recorded
+        .filter(|path| path.is_file())
+        .cloned()
+        .or_else(|| canonical.is_file().then(|| canonical.to_path_buf()))
 }
 
 fn is_retryable_asr_server_acquire_error(error: &str) -> bool {
