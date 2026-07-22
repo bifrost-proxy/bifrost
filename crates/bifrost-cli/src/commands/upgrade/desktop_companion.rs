@@ -421,7 +421,7 @@ pub(super) fn update_desktop_app_after_upgrade(
             crate::commands::app::restart_desktop_app,
         )
     })?;
-    let result = match command_output_with_timeout_and_env(
+    let result = match command_output_with_timeout_and_env_streaming(
         executable,
         &args,
         Duration::from_secs(POST_UPGRADE_APP_UPDATE_TIMEOUT_SECS),

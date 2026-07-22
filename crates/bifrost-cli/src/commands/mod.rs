@@ -28,6 +28,7 @@ mod start;
 mod status;
 mod status_tui;
 mod stop;
+mod streamed_output;
 mod sync_cmd;
 mod system_proxy;
 mod traffic;

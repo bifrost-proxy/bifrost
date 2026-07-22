@@ -468,7 +468,7 @@ pub(super) fn upgrade_via_homebrew(target_version: &str) -> Result<(), BifrostEr
 
     println!("{}", "Upgrading via Homebrew...".bright_cyan());
 
-    let status = command_status_with_timeout(
+    let status = command_status_with_timeout_streaming(
         Path::new("brew"),
         &["reinstall", HOMEBREW_FORMULA_NAME],
         Duration::from_secs(HOMEBREW_COMMAND_TIMEOUT_SECS),
@@ -481,7 +481,7 @@ pub(super) fn upgrade_via_homebrew(target_version: &str) -> Result<(), BifrostEr
                 "{}",
                 "Standard install failed, trying --build-from-source...".bright_yellow()
             );
-            command_status_with_timeout(
+            command_status_with_timeout_streaming(
                 Path::new("brew"),
                 &["reinstall", "--build-from-source", HOMEBREW_FORMULA_NAME],
                 Duration::from_secs(HOMEBREW_COMMAND_TIMEOUT_SECS),

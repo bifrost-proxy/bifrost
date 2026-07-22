@@ -13,6 +13,33 @@ fn release_asset_name_uses_desktop_prefix_and_target() {
 }
 
 #[test]
+fn desktop_release_url_test_override_requires_explicit_guard() {
+    let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+    let previous_allow = std::env::var_os("BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES");
+    let previous_url = std::env::var_os("BIFROST_APP_UPGRADE_TEST_URL");
+    let override_url = "http://127.0.0.1:12345/desktop.dmg";
+
+    std::env::set_var("BIFROST_APP_UPGRADE_TEST_URL", override_url);
+    std::env::remove_var("BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES");
+    match release_asset_url("0.0.161") {
+        Ok(url) => assert_ne!(url, override_url),
+        Err(error) => assert!(error.to_string().contains("supported on macOS and Windows")),
+    }
+
+    std::env::set_var("BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES", "1");
+    assert_eq!(release_asset_url("0.0.161").unwrap(), override_url);
+
+    match previous_allow {
+        Some(value) => std::env::set_var("BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES", value),
+        None => std::env::remove_var("BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES"),
+    }
+    match previous_url {
+        Some(value) => std::env::set_var("BIFROST_APP_UPGRADE_TEST_URL", value),
+        None => std::env::remove_var("BIFROST_APP_UPGRADE_TEST_URL"),
+    }
+}
+
+#[test]
 fn app_owned_windows_installers_are_deferred_until_desktop_shutdown() {
     assert!(should_defer_desktop_install(
         "desktop",
@@ -481,6 +508,7 @@ fn desktop_installer_command_has_output_heartbeat_and_timeout() {
         CALLER_MANAGED_PROGRESS_SOURCE,
         Duration::from_secs(1),
         Duration::from_millis(10),
+        Duration::from_secs(5),
     )
     .expect("installer command succeeds");
     assert!(output.status.success());
@@ -495,9 +523,23 @@ fn desktop_installer_command_has_output_heartbeat_and_timeout() {
         CALLER_MANAGED_PROGRESS_SOURCE,
         Duration::from_millis(50),
         Duration::from_millis(10),
+        Duration::from_millis(10),
     )
     .expect_err("hung installer must be terminated");
     assert!(error.to_string().contains("timed out"));
+}
+
+#[test]
+fn desktop_download_progress_writes_refresh_and_final_line() {
+    let mut output = Vec::new();
+    write_terminal_download_progress("Downloading… 50.0%", false, &mut output)
+        .expect("write refresh");
+    write_terminal_download_progress("Downloading… 100.0%", true, &mut output)
+        .expect("write final line");
+    assert_eq!(
+        output,
+        b"\rDownloading\xe2\x80\xa6 50.0%\rDownloading\xe2\x80\xa6 100.0%\n"
+    );
 }
 
 #[test]
