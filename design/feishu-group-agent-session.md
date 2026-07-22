@@ -78,7 +78,7 @@ SQLite Turn 仍保存完整的消息 ID、序号、时间、mentions、游标和
 ## 卡片响应样式
 
 - Bifrost 生成的飞书交互卡片统一不使用根级 `header`，避免占据大块空间的彩色标题栏；任务计划、工具记录、执行过程等卡片内部的折叠面板标题继续保留。
-- 由用户消息触发的普通回复卡片和 CardKit 进度卡片使用 `POST /open-apis/im/v1/messages/{message_id}/reply` 发送。飞书客户端以原生轻量引用展示触发消息，不在卡片正文中重复人工引用文本。
+- 由用户消息触发的普通回复卡片和 CardKit 进度卡片使用 `POST /open-apis/im/v1/messages/{message_id}/reply` 发送。飞书客户端以原生轻量引用展示触发消息；点击引用条可定位并打开原始消息，不在卡片正文中重复人工引用文本或伪造跳转链接。
 - 同一 Session 后续 Turn 的新进度卡片回复各自最新的触发消息；卡片大小回退产生的续卡仍引用当前 Turn 的触发消息。
 - 上线通知、定时任务、管理端主动发送等没有来源消息的卡片继续按目标会话发送，但同样移除根级标题。
 - Feishu Provider 在普通发送、消息 PATCH、CardKit 创建和 CardKit 更新边界统一移除根级 `header`，作为全链路样式兜底。
