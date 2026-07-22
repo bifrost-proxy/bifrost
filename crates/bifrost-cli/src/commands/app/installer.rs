@@ -330,6 +330,7 @@ pub(super) fn run_desktop_install_command_output(
         progress_source,
         DESKTOP_INSTALL_COMMAND_TIMEOUT,
         DESKTOP_INSTALL_COMMAND_HEARTBEAT,
+        DESKTOP_INSTALL_TERMINAL_HEARTBEAT,
     )
 }
 
@@ -340,6 +341,7 @@ pub(super) fn run_desktop_install_command_output_with_timeout(
     progress_source: &str,
     timeout: Duration,
     heartbeat: Duration,
+    terminal_heartbeat: Duration,
 ) -> Result<DesktopInstallCommandOutput, BifrostError> {
     let mut output_capture =
         crate::commands::streamed_output::StreamedOutputCapture::new().map_err(BifrostError::Io)?;
@@ -352,7 +354,7 @@ pub(super) fn run_desktop_install_command_output_with_timeout(
     let deadline = Instant::now() + timeout;
     let mut next_heartbeat = Instant::now() + heartbeat;
     let started = Instant::now();
-    let mut next_terminal_heartbeat = Instant::now() + DESKTOP_INSTALL_TERMINAL_HEARTBEAT;
+    let mut next_terminal_heartbeat = Instant::now() + terminal_heartbeat;
     let status = loop {
         output_capture.forward_available();
         match child.try_wait() {
@@ -383,7 +385,7 @@ pub(super) fn run_desktop_install_command_output_with_timeout(
                         "  Installing desktop app... ({}s elapsed)",
                         started.elapsed().as_secs()
                     );
-                    next_terminal_heartbeat = Instant::now() + DESKTOP_INSTALL_TERMINAL_HEARTBEAT;
+                    next_terminal_heartbeat = Instant::now() + terminal_heartbeat;
                 }
                 thread::sleep(Duration::from_millis(25));
             }

@@ -47,10 +47,8 @@ const CALLER_MANAGED_PROGRESS_SOURCE: &str = "cli-upgrade";
 const DESKTOP_MANAGED_CLI_TIMEOUT: Duration = Duration::from_secs(600);
 const DESKTOP_MANAGED_CLI_HEARTBEAT: Duration = Duration::from_secs(30);
 const DESKTOP_MANAGED_CLI_VERSION_TIMEOUT: Duration = Duration::from_secs(60);
-#[cfg(all(not(test), any(target_os = "macos", target_os = "windows")))]
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 const DESKTOP_INSTALL_TERMINAL_HEARTBEAT: Duration = Duration::from_secs(5);
-#[cfg(test)]
-const DESKTOP_INSTALL_TERMINAL_HEARTBEAT: Duration = Duration::from_millis(10);
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const DESKTOP_INSTALL_COMMAND_TIMEOUT: Duration = Duration::from_secs(600);
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -742,6 +740,14 @@ fn release_asset_name(version: &str, target: DesktopTarget) -> String {
 }
 
 fn release_asset_url(version: &str) -> Result<String, BifrostError> {
+    let allow_test_override = env::var("BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES")
+        .map(|value| value == "1")
+        .unwrap_or(false);
+    if allow_test_override {
+        if let Ok(url) = env::var("BIFROST_APP_UPGRADE_TEST_URL") {
+            return Ok(url);
+        }
+    }
     let target = DesktopTarget::current().ok_or_else(|| {
         BifrostError::Config(
             "desktop app update is supported on macOS and Windows only".to_string(),

@@ -54,16 +54,21 @@ stdout/stderr，而不是等子进程退出后一次性显示。
      bash e2e-tests/tests/test_upgrade_cli.sh --only-progress-streaming
    ```
 
-2. 测试会创建旧版本临时 `Bifrost.app`、目标版本临时 package 和 PATH-scoped `ditto`
-   包装器；包装器先输出 `BIFROST_TEST_INSTALLER_PROGRESS 10%`，等待 2 秒，再执行系统
-   `ditto`。
-3. 测试在父 `bifrost upgrade` 仍存活时轮询父日志，然后等待完整升级流程结束。
+2. 测试会创建旧版本临时 `Bifrost.app`，并用新版临时 App + 512 KiB 随机 payload 构建
+   真实 DMG；本地 HTTP 服务按 4 KiB 分块并每块等待 20ms 后发送该 DMG。
+3. PATH-scoped `ditto` 包装器先输出 `BIFROST_TEST_INSTALLER_PROGRESS 10%`，等待 2 秒，
+   再执行系统 `ditto`。
+4. 测试分别在 HTTP 响应尚未发送完成、Desktop 子安装尚未退出时轮询父日志，最后读取
+   临时安装目标的 `Info.plist` 验证版本替换。
 
 预期结果：
 
+- HTTP 响应尚未发送完成时，父日志已包含带百分比、字节和 `/s` 速度的
+  `Downloading…` 行。
 - 父进程仍运行时，父日志已经包含 `BIFROST_TEST_INSTALLER_PROGRESS 10%`。
 - 完整输出包含 `Installing desktop app...`、`Desktop app installed successfully` 和
   `Bifrost desktop app updated successfully`。
+- 临时安装目标的 `CFBundleShortVersionString` 从 `0.0.1` 变为当前 CLI 版本。
 - E2E 汇总为 1 passed、0 failed、0 skipped。
 
 ### TC-CUP-03 子进程错误实时可见且失败摘要仍保留 stderr
@@ -103,5 +108,5 @@ stdout/stderr，而不是等子进程退出后一次性显示。
 | 日期 | 用例 | 结果 | 实际观察 |
 | --- | --- | --- | --- |
 | 2026-07-22 | TC-CUP-01 | PASS | 本地 7-byte HTTP fixture 输出 `Downloading… 100.0% (7 B/7 B, 6.8 KiB/s)`，测试 1 passed；未访问 release、未替换 CLI。 |
-| 2026-07-22 | TC-CUP-02 | PASS | 父进程仍存活时已观察到 `BIFROST_TEST_INSTALLER_PROGRESS 10%`；E2E 汇总 1 passed、0 failed、0 skipped，并完整出现安装和 Desktop 更新成功阶段。 |
+| 2026-07-22 | TC-CUP-02 | PASS | 本地 HTTP 分块下载真实 528.5 KiB DMG；响应未结束时父终端已显示下载进度，最终为 `Downloading… 100.0% (528.5 KiB/528.5 KiB, 145.7 KiB/s)`；安装未结束时已显示 installer marker，临时 App 从 0.0.1 更新到 0.0.161；E2E 汇总 1 passed、0 failed、0 skipped。 |
 | 2026-07-22 | TC-CUP-03 | PASS | 控制台实时出现 `app-failed`，父 warning 保留 `desktop app update command failed: app-failed`；目标测试 1 passed。 |

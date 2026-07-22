@@ -26,6 +26,7 @@ if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
 fi
 TEST_DATA_DIR=""
 TEST_PROXY_PID=""
+TEST_HTTP_PID=""
 
 PASSED=0
 FAILED=0
@@ -68,6 +69,9 @@ skip() {
 cleanup() {
     if [[ -n "$TEST_PROXY_PID" ]] && kill -0 "$TEST_PROXY_PID" 2>/dev/null; then
         kill -TERM "$TEST_PROXY_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$TEST_HTTP_PID" ]] && kill -0 "$TEST_HTTP_PID" 2>/dev/null; then
+        kill -TERM "$TEST_HTTP_PID" 2>/dev/null || true
     fi
     if [[ -n "$TEST_DATA_DIR" ]] && [[ -d "$TEST_DATA_DIR" ]]; then
         rm -rf "$TEST_DATA_DIR"
@@ -413,15 +417,17 @@ test_upgrade_desktop_app_failure_does_not_fail_cli_flow() {
 }
 
 test_upgrade_streams_desktop_installer_progress() {
-    header "测试 upgrade 实时转发桌面安装进度"
+    header "测试 upgrade 实时展示桌面下载和安装进度"
 
     if [[ "$(uname -s)" != "Darwin" ]]; then
-        skip "桌面安装器实时转发回归当前使用 macOS 临时 .app 与 ditto"
+        skip "桌面下载/安装进度回归当前使用 macOS 临时 DMG、.app 与 ditto"
         return
     fi
 
-    local current_version root app_dir package_dir fake_bin log_file upgrade_pid status
-    local observed_while_running="false"
+    local current_version root app_dir package_dir dmg_path fake_bin log_file upgrade_pid status
+    local http_port http_pid
+    local observed_download_while_running="false"
+    local observed_installer_while_running="false"
     current_version=$("$BIFROST_BIN" --version 2>&1 \
         | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?' \
         | head -1)
@@ -429,11 +435,22 @@ test_upgrade_streams_desktop_installer_progress() {
     TEST_DATA_DIR="$root"
     app_dir="$root/app-dir"
     package_dir="$root/package/Bifrost.app"
+    dmg_path="$root/bifrost-desktop-fixture.dmg"
     fake_bin="$root/bin"
     log_file="$root/upgrade.log"
     mkdir -p "$fake_bin" "$root/data"
     create_fake_macos_app "$app_dir/Bifrost.app" "0.0.1"
     create_fake_macos_app "$package_dir" "$current_version"
+    mkdir -p "$package_dir/Contents/Resources"
+    dd if=/dev/urandom of="$package_dir/Contents/Resources/download-fixture.bin" \
+        bs=1024 count=512 >/dev/null 2>&1
+    if ! hdiutil create -quiet -volname BifrostUpgradeFixture -srcfolder "$root/package" \
+        -ov -format UDZO "$dmg_path"; then
+        rm -rf "$root"
+        TEST_DATA_DIR=""
+        fail "无法创建本地 Desktop DMG 下载 fixture"
+        return
+    fi
     cat > "$fake_bin/ditto" <<'EOF'
 #!/bin/sh
 echo "BIFROST_TEST_INSTALLER_PROGRESS 10%"
@@ -442,22 +459,84 @@ exec /usr/bin/ditto "$@"
 EOF
     chmod +x "$fake_bin/ditto"
 
+    http_port=$(get_free_tcp_port)
+    python3 - "$dmg_path" "$http_port" "$root/http-ready" "$root/http-done" <<'PY' &
+import http.server
+import pathlib
+import sys
+import time
+
+payload_path = pathlib.Path(sys.argv[1])
+port = int(sys.argv[2])
+ready_path = pathlib.Path(sys.argv[3])
+done_path = pathlib.Path(sys.argv[4])
+payload = payload_path.read_bytes()
+
+class SlowDownload(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-apple-diskimage")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        for offset in range(0, len(payload), 4096):
+            self.wfile.write(payload[offset:offset + 4096])
+            self.wfile.flush()
+            time.sleep(0.02)
+        done_path.write_text("done", encoding="utf-8")
+
+    def log_message(self, *_args):
+        pass
+
+server = http.server.HTTPServer(("127.0.0.1", port), SlowDownload)
+ready_path.write_text("ready", encoding="utf-8")
+server.handle_request()
+server.server_close()
+PY
+    http_pid=$!
+    TEST_HTTP_PID="$http_pid"
+    local attempt
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        [[ -f "$root/http-ready" ]] && break
+        sleep 0.05
+    done
+    if [[ ! -f "$root/http-ready" ]]; then
+        kill -TERM "$http_pid" 2>/dev/null || true
+        wait "$http_pid" 2>/dev/null || true
+        TEST_HTTP_PID=""
+        rm -rf "$root"
+        TEST_DATA_DIR=""
+        fail "本地 Desktop 慢速下载服务未就绪"
+        return
+    fi
+
     PATH="$fake_bin:$PATH" \
     BIFROST_DATA_DIR="$root/data" \
     BIFROST_APP_INSTALL_DIR="$app_dir" \
-    BIFROST_APP_UPGRADE_TEST_PACKAGE="$package_dir" \
+    BIFROST_APP_UPGRADE_TEST_URL="http://127.0.0.1:$http_port/bifrost-desktop.dmg" \
     BIFROST_APP_SKIP_RESTART=1 \
     BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES=1 \
     BIFROST_UPGRADE_TEST_LATEST_VERSION="$current_version" \
+    NO_PROXY="127.0.0.1,localhost" \
+    no_proxy="127.0.0.1,localhost" \
+    HTTPS_PROXY= HTTP_PROXY= ALL_PROXY= \
+    https_proxy= http_proxy= all_proxy= \
         "$BIFROST_BIN" upgrade >"$log_file" 2>&1 &
     upgrade_pid=$!
     TEST_PROXY_PID="$upgrade_pid"
 
-    local attempt
-    for ((attempt = 0; attempt < 100; attempt++)); do
+    for ((attempt = 0; attempt < 200; attempt++)); do
+        if grep -q "Downloading…" "$log_file" 2>/dev/null; then
+            if kill -0 "$upgrade_pid" 2>/dev/null && [[ ! -f "$root/http-done" ]]; then
+                observed_download_while_running="true"
+            fi
+            break
+        fi
+        sleep 0.05
+    done
+    for ((attempt = 0; attempt < 200; attempt++)); do
         if grep -q "BIFROST_TEST_INSTALLER_PROGRESS 10%" "$log_file" 2>/dev/null; then
             if kill -0 "$upgrade_pid" 2>/dev/null; then
-                observed_while_running="true"
+                observed_installer_while_running="true"
             fi
             break
         fi
@@ -468,20 +547,32 @@ EOF
     wait "$upgrade_pid"
     status=$?
     TEST_PROXY_PID=""
-    local output
+    if kill -0 "$http_pid" 2>/dev/null; then
+        kill -TERM "$http_pid" 2>/dev/null || true
+    fi
+    wait "$http_pid" 2>/dev/null || true
+    TEST_HTTP_PID=""
+    local output installed_version download_line
     output=$(cat "$log_file")
+    installed_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+        "$app_dir/Bifrost.app/Contents/Info.plist" 2>/dev/null || true)
+    download_line=$(printf '%s' "$output" | tr '\r' '\n' | grep 'Downloading…' | tail -1 || true)
     rm -rf "$root"
     TEST_DATA_DIR=""
 
     if [[ $status -eq 0 \
-        && "$observed_while_running" == "true" \
+        && "$observed_download_while_running" == "true" \
+        && "$observed_installer_while_running" == "true" \
+        && "$installed_version" == "$current_version" \
+        && "$output" == *"Downloading…"* \
+        && "$output" == *"/s)"* \
         && "$output" == *"Installing desktop app..."* \
         && "$output" == *"BIFROST_TEST_INSTALLER_PROGRESS 10%"* \
         && "$output" == *"Desktop app installed successfully"* \
         && "$output" == *"Bifrost desktop app updated successfully"* ]]; then
-        pass "父 upgrade 在子安装仍运行时已显示桌面安装器进度，并保留完整完成阶段"
+        pass "父 upgrade 在本地 DMG 下载和子安装仍运行时已实时显示进度，并把临时 App 更新到 v${current_version}；$download_line"
     else
-        fail "桌面安装进度未实时转发: status=$status live=$observed_while_running output=$output"
+        fail "桌面下载/安装进度未实时转发: status=$status download_live=$observed_download_while_running installer_live=$observed_installer_while_running installed=$installed_version expected=$current_version output=$output"
     fi
 }
 
@@ -909,7 +1000,7 @@ Bifrost Upgrade CLI 端到端测试
   --only-runtime-ownership
                   只执行 CLI-owned / App-owned 重启所有权回归
   --only-progress-streaming
-                  只执行 Desktop 子升级进度实时转发回归
+                  只执行 Desktop 下载/安装进度实时转发回归
   --verbose       详细输出
 
 环境变量:

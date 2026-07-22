@@ -72,8 +72,10 @@ replace the child result.
 
 ## Test boundary
 
-The temporal E2E uses a temporary fake `.app`, a temporary install target, and a PATH-scoped `ditto`
-wrapper that prints a marker and sleeps before invoking the system `ditto`. The test starts
-`bifrost upgrade` in the background, observes the marker in the redirected parent log while the
-parent PID is still alive, then waits for successful completion. No real Desktop bundle, daemon,
-port, certificate, or system proxy is modified.
+The temporal E2E builds a real DMG containing a temporary fake `.app` plus an incompressible payload,
+serves it from a loopback HTTP server in 4 KiB chunks with delays, and installs it into a temporary
+target. A PATH-scoped `ditto` wrapper also prints a marker and sleeps before invoking the system
+`ditto`. The test starts `bifrost upgrade` in the background and separately proves that download
+progress appears before the HTTP response completes and installer progress appears before the
+parent exits. It finally reads the installed app's `Info.plist` and verifies the target version. No
+real Desktop bundle, daemon, certificate, system proxy, or port 9900 state is modified.
