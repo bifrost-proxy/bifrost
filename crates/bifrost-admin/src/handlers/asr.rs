@@ -2034,6 +2034,37 @@ async fn send_download_progress(
     .await;
 }
 
+pub(crate) async fn send_resource_download_progress(
+    tx: &tokio::sync::mpsc::Sender<Bytes>,
+    progress: &DownloadProgress,
+    overall_progress: u8,
+    message: &'static str,
+) {
+    let detail = download_detail(progress);
+    send_event(
+        tx,
+        "progress",
+        &AsrDownloadProgressPayload {
+            phase: "download",
+            status: "running",
+            progress: overall_progress,
+            message,
+            detail: detail.as_deref(),
+            file: Some(progress.label.as_str()),
+            server_url: None,
+            downloaded_bytes: progress.downloaded_bytes,
+            total_bytes: progress.total_bytes,
+            download_percent: progress.percent,
+            bytes_per_second: progress.bytes_per_second,
+            eta_seconds: progress.eta_seconds,
+            elapsed_ms: progress.elapsed_ms,
+            resumed: progress.resumed,
+            complete: progress.complete,
+        },
+    )
+    .await;
+}
+
 fn download_detail(progress: &DownloadProgress) -> Option<String> {
     let total = progress.total_bytes?;
     let percent = progress.percent.unwrap_or(0);

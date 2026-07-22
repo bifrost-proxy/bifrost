@@ -280,6 +280,23 @@
 - 下载、checksum、解压、自检、模型验证或 marker 写入失败时不执行成功清理，已有 quarantine 继续保留用于排障/恢复。
 - 只有固定 Bifrost 命名且时间戳为纯数字的直接子项会被删除；近似命名文件保持不变，受管 symlink 只删除链接本身，外部目标内容保持不变。
 
+### TC-MOSS-17：后台初始化共享真实进度与 Finder 元数据回归
+
+操作步骤：
+
+1. 执行 `cargo test -p bifrost-admin moss_site_packages_hash_skips_cache_artifacts_and_non_files --lib -- --nocapture`。fixture 在 `site-packages` 同时写入真实依赖、`.DS_Store`、`.pyc`、`__pycache__` 和符号链接，检查参与校验的文件集合。
+2. 执行 `cargo test -p bifrost-admin moss_model_management_status_reports_missing_ready_and_unsupported_assets --lib -- --nocapture`、`cargo test -p bifrost-admin moss_management_handlers_stream_success_and_failures --lib -- --nocapture`、`cargo test -p bifrost-admin moss_shared_progress_updates_directory_task_and_throttles_fast_events --lib -- --nocapture`、`cargo test -p bifrost-admin moss_management_stream_forwards_runtime_and_model_progress_from_active_owner --lib -- --nocapture` 与 `cargo test -p bifrost-admin moss_resource_download_retries_and_resumes_transient_body_failure --lib -- --nocapture`。检查后台拥有者发布的字节进度可由状态接口和后加入的初始化流读取，目录任务更新被节流但最新快照不丢失，下载 relay 仍向原调用者转发事件；完成后再次初始化不得重放陈旧下载事件，状态 JSON 不得返回下载 URL 或本地目标路径。
+3. 执行 `cd web && pnpm exec playwright test tests/ui/asr-home-tabs.spec.ts --grep "后台目录任务初始化 MOSS"`。fixture 让后台任务持有初始化并把进度从 69% 更新到 74%，不点击 Initialize，检查管理页自动轮询、已下载/总字节、速度、剩余时间、续传标记和亮暗主题。
+4. 对当前 9900 服务请求 `GET /_bifrost/api/asr/moss/status` 和任务 `735775510b384fff8903d9c6fc54f1a3`；记录 runtime/model Ready、任务 running、processed/pending/failed，并确认服务无需重启即可继续原队列。
+5. 检查 `~/.bifrost/asr/moss_joint_mlx` 不再有 `.part`，`verification.json` 存在；不得删除或重跑已成功转录文件，不得重启 9900。
+
+预期结果：
+
+- 文件名精确为 `.DS_Store` 的 Finder 元数据以及既有 Python 缓存不参与 runtime 依赖哈希；任意其他新增、删除或篡改依赖仍会撤销 Ready。
+- 同一进程只有一个初始化拥有者；目录任务、状态 API 和后加入的管理页 SSE 观察同一份真实字节进度，管理页不会长期停在 `0% / Waiting for download`。
+- 状态 API 只公开展示所需的标签、字节、百分比、速率、ETA、续传和完成状态，不泄露资源 URL 或本地下载目标；初始化结束后不再返回或重放陈旧进度。
+- 管理页无需用户再次点击即可从后台进度继续更新，亮色和暗色主题均可读；真实 9900 runtime/model Ready，原任务继续处理未完成队列且不触碰已成功资源。
+
 ## 清理步骤
 
 1. 用户要求继续体验时保留 18997；否则停止且仅停止本测试启动的预览 PID。TC-MOSS-09 的 9900 服务按用户要求保留运行，但任务在取得有限验证证据后重新暂停。
@@ -312,3 +329,5 @@
 | 2026-07-21 | TC-MOSS-16 | PASS：三个定向 Rust 用例与 release/runtime contract E2E 全部通过。升级成功并写入 marker 后，旧 runtime 目录、runtime zip 和旧模型隔离件均被回收；失败路径继续保留 quarantine。纯数字时间戳与固定资产名门禁拒绝近似命名，目录 symlink 仅删除链接且外部目标文件保持不变。 |
 | 2026-07-21 | TC-MOSS-15 | PASS（发现真实中断并修复后复测）：当前分支服务以独立 HOME/数据目录在 18999 启动，初始 install_dir 位于临时 home 且 model bytes=0。真实下载 170 MB runtime 和 1,258,427,442-byte 模型时，Hugging Face 在 1,207,909,964 bytes 处返回 `error decoding response body`，`.part` 被保留；再次请求通过 Range 补齐模型并完成 schema v5 marker。针对该真实缺口，初始化器增加最多 3 次有界自动重试；fixture 首次只发一半响应后断开、第二次从 524288 bytes 续传，聚焦回归通过。最终 status 为 ready/runtime_ready/model_ready，模型 SHA-256=`469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190`，无 AppleDouble/`.part` 残留；打包 Python self-test 输出 `moss-mlx-runtime ok`，20.495 秒 16 kHz 单声道真实启动器推理 3.57 秒完成，输出 3 个 S01 正时长 segments。18999 已停止，正式 `v0.0.158` 服务保持 PID 21664/9900/系统代理开启；隔离目录已移动到废纸篓，可恢复。 |
 | 2026-07-22 | TC-MOSS-12 | PASS（模式切换重跑回归）：两条聚焦 Rust 回归通过；18995 隔离 API E2E 验证修改 MOSS prompt 后已有 `.txt` 的 success 记录及 metric 原样保留，源文件存在但转录缺失的记录回到 pending，源文件与转录都不存在的 success 记录在同一次 PATCH 中被持久化删除且重启后不再出现。真实 9900 任务修复并清理陈旧状态后为 623 success、26 pending、8 failed；26 条 pending 的源文件全部存在，623 条 success 的转录文件全部存在，Files 与 summary 待处理数一致。 |
+| 2026-07-22 | TC-MOSS-17 | PASS：定向 Rust 回归确认 `.DS_Store` 不再撤销有效 runtime，后台初始化状态可共享真实字节进度且结束后不泄露 URL、目标路径或陈旧进度；目录任务节流、晚加入 SSE 的 runtime/model 两阶段进度、下载 relay 三条边界回归均通过，本地变更行覆盖率为 99.52%（206/207），超过 95% 门禁。Playwright 验证管理页在未点击 Initialize 时自动从 69% 轮询至 74%，显示字节、速率、ETA 和续传标记。真实 9900 服务无需重启即完成 runtime/model 初始化，`.part` 清零且 marker 存在；原任务继续处理，最新检查为 `processed=641`、`pending=5`、`failed=11`、`running=true`。 |
+| 2026-07-22 | TC-MOSS-12 | PASS（合并 #413 后复测）：当前合并树的 MOSS Rust 回归 26/26、release/runtime contract 与 18995 隔离 task-mode API E2E 均通过；真实 9900 任务只读核验为 646 success、0 pending、11 failed，pending/processing 缺失源文件为 0，success 缺失转录为 0，Files 与 summary 一致。 |

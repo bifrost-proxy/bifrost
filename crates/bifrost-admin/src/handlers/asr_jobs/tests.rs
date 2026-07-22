@@ -149,6 +149,7 @@ mod tests {
         std::fs::create_dir_all(package.join("__pycache__")).unwrap();
         std::fs::write(package.join("module.py"), b"print('fixture')\n").unwrap();
         std::fs::write(package.join("module.pyc"), b"cached").unwrap();
+        std::fs::write(package.join(".DS_Store"), b"finder metadata").unwrap();
         std::fs::write(package.join("__pycache__/module.pyc"), b"cached").unwrap();
         symlink("module.py", package.join("module-link.py")).unwrap();
 
@@ -273,7 +274,9 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn moss_model_management_status_reports_missing_ready_and_unsupported_assets() {
+        let _lock = test_data_dir_lock();
         let temp = TempDir::new().unwrap();
         let asr_home = temp.path().join("asr-home");
         let paths = moss_runtime_paths(&asr_home);
@@ -292,6 +295,52 @@ mod tests {
         assert!(!missing.runtime_ready);
         assert!(!missing.model_ready);
         assert_eq!(missing.expected_model_bytes, 22);
+        assert!(!missing.initializing);
+        assert!(missing.initialization.is_none());
+
+        let initialization_guard = begin_moss_initialization(&asr_home, "");
+        publish_moss_initialization_progress(
+            &asr_home,
+            crate::resource_download::DownloadProgress {
+                label: "MOSS runtime".to_string(),
+                url: "https://example.invalid/runtime.zip".to_string(),
+                dest: paths
+                    .python_home
+                    .parent()
+                    .unwrap()
+                    .join("runtime.zip")
+                    .display()
+                    .to_string(),
+                downloaded_bytes: 68,
+                total_bytes: Some(100),
+                percent: Some(68),
+                bytes_per_second: Some(10),
+                eta_seconds: Some(4),
+                elapsed_ms: 6_800,
+                resumed: true,
+                complete: false,
+            },
+        );
+        let initializing = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert!(initializing.initializing);
+        let serialized = serde_json::to_value(&initializing).unwrap();
+        assert!(serialized["initialization"].get("url").is_none());
+        assert!(serialized["initialization"].get("dest").is_none());
+        let initialization = initializing.initialization.unwrap();
+        assert_eq!(initialization.downloaded_bytes, 68);
+        assert_eq!(initialization.percent, Some(68));
+        assert!(initialization.resumed);
+        drop(initialization_guard);
+        let completed =
+            moss_management_status_with_spec(&asr_home, "macos", "aarch64", &model_spec).await;
+        assert!(!completed.initializing);
+        assert!(completed.initialization.is_none());
 
         let runtime_framework = paths.python_home.join("lib/framework.fixture");
         write_executable(
@@ -443,6 +492,66 @@ mod tests {
         assert!(unsupported.unsupported_reason.is_some());
     }
 
+    #[test]
+    fn moss_shared_progress_updates_directory_task_and_throttles_fast_events() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path().join("data").as_path());
+        let asr_home = temp.path().join("asr-home");
+        let initialization = begin_moss_initialization(&asr_home, "moss-progress-task");
+
+        publish_moss_initialization_progress(
+            &asr_home,
+            crate::resource_download::DownloadProgress {
+                label: "MOSS runtime".to_string(),
+                url: "https://example.invalid/runtime.zip".to_string(),
+                dest: "/tmp/runtime.zip".to_string(),
+                downloaded_bytes: 12,
+                total_bytes: None,
+                percent: None,
+                bytes_per_second: None,
+                eta_seconds: None,
+                elapsed_ms: 10,
+                resumed: false,
+                complete: false,
+            },
+        );
+        let (first, warning) = load_run_progress("moss-progress-task");
+        assert!(warning.is_none());
+        let first = first.unwrap();
+        assert_eq!(first.stage, "initializing_moss");
+        assert_eq!(first.message.as_deref(), Some("Downloaded 12 bytes"));
+
+        publish_moss_initialization_progress(
+            &asr_home,
+            crate::resource_download::DownloadProgress {
+                label: "MOSS runtime".to_string(),
+                url: "https://example.invalid/runtime.zip".to_string(),
+                dest: "/tmp/runtime.zip".to_string(),
+                downloaded_bytes: 13,
+                total_bytes: Some(100),
+                percent: Some(13),
+                bytes_per_second: Some(1),
+                eta_seconds: Some(87),
+                elapsed_ms: 20,
+                resumed: false,
+                complete: false,
+            },
+        );
+        let (throttled, warning) = load_run_progress("moss-progress-task");
+        assert!(warning.is_none());
+        assert_eq!(throttled.unwrap().message, first.message);
+        assert_eq!(
+            moss_initialization_state(&asr_home)
+                .progress
+                .unwrap()
+                .downloaded_bytes,
+            13
+        );
+
+        drop(initialization);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
@@ -491,6 +600,23 @@ mod tests {
         assert!(success_events.contains("event: done"));
         assert!(moss_verification_path(&success_home).is_file());
 
+        let (ready_tx, mut ready_rx) = tokio::sync::mpsc::channel(8);
+        stream_moss_model_initialization_with_spec(
+            ready_tx,
+            success_home,
+            Ok(runtime_source.asset.clone()),
+            model_spec.clone(),
+            Some(runtime_source.clone()),
+        )
+        .await;
+        let mut ready_events = String::new();
+        while let Some(frame) = ready_rx.recv().await {
+            ready_events.push_str(&String::from_utf8_lossy(&frame));
+        }
+        assert!(!ready_events.contains("Downloading verified MOSS assets"));
+        assert!(ready_events.contains("MOSS runtime and verified 8-bit model are ready"));
+        assert!(ready_events.contains("event: done"));
+
         let (unsupported_tx, mut unsupported_rx) = tokio::sync::mpsc::channel(4);
         stream_moss_model_initialization_with_spec(
             unsupported_tx,
@@ -525,6 +651,97 @@ mod tests {
         assert!(failure_events.contains("event: error"));
         assert!(failure_events.contains("MOSS initialization failed"));
         assert!(failure_events.contains("checksum mismatch"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn moss_management_stream_forwards_runtime_and_model_progress_from_active_owner() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path().join("data").as_path());
+        let archive = temp.path().join("runtime-source.zip");
+        write_moss_runtime_zip(&archive, "#!/bin/sh\necho 'moss-mlx-runtime ok'\n");
+        let model_source = temp.path().join("model-source.safetensors");
+        let model_spec = moss_test_model_spec(&model_source, b"verified model fixture");
+        let runtime_source = MossRuntimeSource {
+            asset: "runtime.zip".to_string(),
+            url: format!("file://{}", archive.display()),
+            sha256: sha256_file(&archive).unwrap(),
+        };
+        let asr_home = temp.path().join("shared-progress-home");
+
+        let init_lock = MOSS_INIT_LOCK.lock().await;
+        let owner = begin_moss_initialization(&asr_home, "");
+        publish_moss_initialization_progress(
+            &asr_home,
+            crate::resource_download::DownloadProgress {
+                label: "MOSS runtime".to_string(),
+                url: "https://example.invalid/runtime.zip".to_string(),
+                dest: "/tmp/runtime.zip".to_string(),
+                downloaded_bytes: 25,
+                total_bytes: Some(100),
+                percent: Some(25),
+                bytes_per_second: Some(5),
+                eta_seconds: Some(15),
+                elapsed_ms: 5_000,
+                resumed: true,
+                complete: false,
+            },
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let stream = tokio::spawn(stream_moss_model_initialization_with_spec(
+            tx,
+            asr_home.clone(),
+            Ok(runtime_source.asset.clone()),
+            model_spec,
+            Some(runtime_source),
+        ));
+        let mut events = String::new();
+        while !events.contains("\"file\":\"MOSS runtime\"") {
+            let frame = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("runtime progress event timed out")
+                .expect("runtime progress stream closed early");
+            events.push_str(&String::from_utf8_lossy(&frame));
+        }
+        publish_moss_initialization_progress(
+            &asr_home,
+            crate::resource_download::DownloadProgress {
+                label: "MOSS 8-bit model".to_string(),
+                url: "https://example.invalid/model.safetensors".to_string(),
+                dest: "/tmp/model.safetensors".to_string(),
+                downloaded_bytes: 60,
+                total_bytes: Some(100),
+                percent: Some(60),
+                bytes_per_second: Some(6),
+                eta_seconds: Some(7),
+                elapsed_ms: 10_000,
+                resumed: false,
+                complete: false,
+            },
+        );
+        while !events.contains("\"file\":\"MOSS 8-bit model\"") {
+            let frame = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("model progress event timed out")
+                .expect("model progress stream closed early");
+            events.push_str(&String::from_utf8_lossy(&frame));
+        }
+        drop(owner);
+        drop(init_lock);
+        stream.await.unwrap();
+
+        while let Some(frame) = rx.recv().await {
+            events.push_str(&String::from_utf8_lossy(&frame));
+        }
+        assert!(events.contains("\"file\":\"MOSS runtime\""));
+        assert!(events.contains("\"download_percent\":25"));
+        assert!(events.contains("\"file\":\"MOSS 8-bit model\""));
+        assert!(events.contains("\"download_percent\":60"));
+        assert!(events.contains("\"resumed\":true"));
+        assert!(events.contains("event: done"));
     }
 
     fn moss_process_test_paths(root: &Path, python: PathBuf) -> MossRuntimePaths {
@@ -562,7 +779,7 @@ mod tests {
 
     fn spawn_moss_http_server(body: Vec<u8>) -> String {
         use std::io::{Read, Write};
-        use std::net::TcpListener;
+        use std::net::{Shutdown, TcpListener};
         use std::time::{Duration, Instant};
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -584,6 +801,8 @@ mod tests {
                         if !is_head {
                             stream.write_all(&body).unwrap();
                         }
+                        let _ = stream.flush();
+                        let _ = stream.shutdown(Shutdown::Write);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(10));
@@ -672,11 +891,23 @@ mod tests {
         let (url, requests) = spawn_flaky_resumable_moss_http_server(body.clone());
         let destination = temp.path().join("model.safetensors");
 
-        download_moss_resource(url, destination.clone(), "MOSS test model", None)
-            .await
-            .unwrap();
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        download_moss_resource(
+            temp.path(),
+            url,
+            destination.clone(),
+            "MOSS test model",
+            Some(progress_tx),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(std::fs::read(destination).unwrap(), body);
+        let mut observed_progress = false;
+        while let Ok(progress) = progress_rx.try_recv() {
+            observed_progress |= progress.downloaded_bytes > 0;
+        }
+        assert!(observed_progress);
         let requests = requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
         assert!(!requests[0].to_ascii_lowercase().contains("range:"));
@@ -693,6 +924,7 @@ mod tests {
         let (url, requests) =
             spawn_failing_moss_http_server(MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS);
         let error = download_moss_resource(
+            temp.path(),
             url,
             temp.path().join("unavailable.bin"),
             "unavailable MOSS test resource",
@@ -809,6 +1041,7 @@ mod tests {
         let file_dest = temp.path().join("file-dest.bin");
         std::fs::write(&source, b"file-resource").unwrap();
         download_moss_resource(
+            temp.path(),
             format!("file://{}", source.display()),
             file_dest.clone(),
             "test file",
@@ -820,11 +1053,12 @@ mod tests {
 
         let http_dest = temp.path().join("http-dest.bin");
         let resource_url = spawn_moss_http_server(b"http-resource".to_vec());
-        download_moss_resource(resource_url, http_dest.clone(), "test HTTP", None)
+        download_moss_resource(temp.path(), resource_url, http_dest.clone(), "test HTTP", None)
             .await
             .unwrap();
         assert_eq!(std::fs::read(http_dest).unwrap(), b"http-resource");
         assert!(download_moss_resource(
+            temp.path(),
             "file:///missing/moss-resource".to_string(),
             temp.path().join("missing.bin"),
             "missing",
@@ -1349,9 +1583,11 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn moss_initializer_reports_runtime_archive_and_model_quarantine_failures() {
         use std::os::unix::fs::PermissionsExt;
 
+        let _lock = test_data_dir_lock();
         let temp = TempDir::new().unwrap();
         let asr_home = temp.path().join("asr-home");
         let root = moss_runtime_dir(&asr_home);

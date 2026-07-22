@@ -64,19 +64,43 @@ export default function SpeechTab() {
     try {
       const next = mossSelected ? await getMossModelStatus() : await getAsrStatus(params);
       if (mossSelected) {
-        setMossStatus(next as MossModelStatus);
+        const mossNext = next as MossModelStatus;
+        setMossStatus(mossNext);
+        if (mossNext.initializing) {
+          const progress = mossNext.initialization;
+          setPhase("running");
+          setDownload(
+            progress
+              ? {
+                  file: progress.label,
+                  percent: progress.percent ?? 0,
+                  downloadedBytes: progress.downloaded_bytes,
+                  totalBytes: progress.total_bytes,
+                  bytesPerSecond: progress.bytes_per_second,
+                  etaSeconds: progress.eta_seconds,
+                  resumed: progress.resumed,
+                }
+              : { file: "Preparing MOSS runtime", percent: 0 },
+          );
+        } else if (mossNext.ready) {
+          setPhase("ready");
+          setDownload(null);
+        } else {
+          setPhase("idle");
+          setDownload(null);
+        }
       } else {
         setStatus(next as AsrStatus);
+        if (next.ready) {
+          setPhase("ready");
+          setDownload(null);
+        } else {
+          setPhase("idle");
+          setDownload(null);
+        }
       }
       setErrorText("");
       setErrorDetail("");
-      if (next.ready) {
-        setPhase("ready");
-        setDownload(null);
-      } else {
-        setPhase("idle");
-        setDownload(null);
-      }
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);
       setPhase("error");
@@ -95,6 +119,16 @@ export default function SpeechTab() {
   useEffect(() => {
     saveModelManagementParams(params);
   }, [params]);
+
+  useEffect(() => {
+    if (!mossSelected || !mossStatus?.initializing) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void refreshStatus();
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [mossSelected, mossStatus?.initializing, refreshStatus]);
 
   const handleStreamEvent = useCallback(
     (event: AsrStreamEvent) => {
