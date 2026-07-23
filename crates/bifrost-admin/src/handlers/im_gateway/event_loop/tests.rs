@@ -386,6 +386,12 @@ async fn group_event_loop_records_ambient_and_releases_turn_when_agent_is_disabl
         .expect("group event loop timed out")
         .expect("group event loop panicked");
 
+    let remaining_turns: i64 = rusqlite::Connection::open(service.group_context_store.file_path())
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM im_group_turns", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(remaining_turns, 0);
+
     assert_eq!(
         service
             .group_context_store

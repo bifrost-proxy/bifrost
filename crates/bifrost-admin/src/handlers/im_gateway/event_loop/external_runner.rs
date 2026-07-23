@@ -769,12 +769,13 @@ pub(super) async fn run_external_cli_agent_chat(
                         } else {
                             reply_text.clone()
                         };
-                        send_agent_reply(
+                        send_agent_reply_from_work_dir(
                             ctx.client,
                             ctx.provider,
                             &current_event,
                             &reply,
                             ctx.message_log_store,
+                            request.work_dir.as_deref(),
                         )
                         .await;
                     }

@@ -574,6 +574,37 @@ pub(super) fn agent_reply_prepare_text_and_images_splits_markdown_local_images()
     assert!(text.contains("![remote](https://example.com/favicon.png)"));
 }
 
+#[tokio::test]
+pub(super) async fn group_reply_assets_use_the_session_work_dir_before_provider_default() {
+    let temp = tempfile::tempdir().unwrap();
+    let group_dir = temp.path().join("group-project");
+    let provider_dir = temp.path().join("provider-project");
+    std::fs::create_dir_all(&group_dir).unwrap();
+    std::fs::create_dir_all(&provider_dir).unwrap();
+    std::fs::write(group_dir.join("report.txt"), "group report").unwrap();
+    let mut provider = test_provider();
+    provider.agent_config = Some(crate::im_gateway::types::ImProviderAgentConfig {
+        runner: None,
+        work_dir: Some(provider_dir.display().to_string()),
+        base_instructions: None,
+        developer_instructions: None,
+        user_instructions: None,
+    });
+
+    let base_dir = agent_reply_base_dir(&provider, Some(&group_dir)).unwrap();
+    assert_eq!(base_dir, group_dir);
+    let (_text, images, attachments) = prepare_agent_reply_text_and_images_with_downloads(
+        "[报告附件](./report.txt)",
+        Some(&base_dir),
+    )
+    .await;
+    assert!(images.is_empty());
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].path, group_dir.join("report.txt"));
+
+    assert_eq!(agent_reply_base_dir(&provider, None), Some(provider_dir));
+}
+
 #[test]
 pub(super) fn agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt_fallback() {
     let text_message = crate::im_gateway::types::ImEventMessage {

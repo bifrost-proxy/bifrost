@@ -115,6 +115,14 @@
 
 预期结果：旧历史能正常加载，`key` 保留为 `@_user_1`，其余新字段使用安全默认值；事件历史文件不会因格式升级被删除。
 
+### TC-FGS-14：群工作目录解析 Runner 回复中的相对附件
+
+1. 为群 binding 执行 `/cwd <群项目绝对路径>`，同时保留一个不同的 Provider 默认工作目录。
+2. 让 Runner 在群项目目录生成 `report.txt`，并返回 Markdown 链接 `[报告附件](./report.txt)`。
+3. 检查回复资产解析结果和飞书附件上传路径。
+
+预期结果：相对附件解析到群 binding 的工作目录，不读取 Provider 默认目录中的同名文件；回复卡片发送后附件可正常上传。没有群工作目录时仍回退到 Provider 默认目录。
+
 ## 执行方式
 
 TC-FGS-01 至 TC-FGS-05 由以下真实服务脚本逐条执行：
@@ -157,6 +165,14 @@ cargo test -p bifrost-admin group_session_work_dir_overrides_runner_and_provider
 cargo test -p bifrost-admin model_commands_resolve_the_group_selected_runner_first -- --nocapture
 cargo test -p bifrost-admin prepare_group_dispatch -- --nocapture
 cargo test -p bifrost-admin loads_legacy_string_mentions_without_deleting_history -- --nocapture
+```
+
+TC-FGS-13 与 TC-FGS-14 的升级兼容、禁用 Agent Turn 清理和群目录相对附件执行：
+
+```bash
+cargo test -p bifrost-admin loads_legacy_string_mentions_without_deleting_history -- --nocapture
+cargo test -p bifrost-admin group_event_loop_records_ambient_and_releases_turn_when_agent_is_disabled -- --nocapture
+cargo test -p bifrost-admin group_reply_assets_use_the_session_work_dir_before_provider_default -- --nocapture
 ```
 
 ## 清理步骤
