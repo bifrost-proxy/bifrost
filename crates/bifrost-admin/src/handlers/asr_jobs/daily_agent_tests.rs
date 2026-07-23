@@ -3781,13 +3781,18 @@ fn daily_agent_research_child_prompt_is_compact_and_excludes_daily_report_instru
         research_prompt: Some("单题要求".repeat(10_000)),
     };
 
-    let prompt = build_daily_research_child_prompt(&question, None, false);
+    let prompt = build_daily_research_child_prompt(&question, None, None);
 
     assert!(prompt.contains(&question.original_question));
     assert!(prompt.contains("优先使用一手、权威和可复查来源"));
     assert!(prompt.contains("[上下文已截断；请以原始问题为准。]"));
     assert!(!prompt.contains("全天候私人助理整理指南"));
     assert!(prompt.chars().count() < 15_000, "prompt was too large");
+
+    let direct_prompt =
+        build_daily_research_child_prompt(&question, None, Some("查询真实交易表并核对成交时间"));
+    assert!(direct_prompt.contains("你可以直接读取当前工作目录中的真实数据"));
+    assert!(direct_prompt.contains("查询真实交易表并核对成交时间"));
 }
 
 #[test]
@@ -4623,6 +4628,16 @@ fn daily_agent_research_manifest_validation_covers_error_matrix() {
         .unwrap_err()
         .contains("exceeding max_questions"));
 
+    assert!(validate_daily_research_manifest(
+        &AsrDailyResearchManifest {
+            questions: vec![question("missing-runner")],
+        },
+        &fanout,
+        "not-allowlisted",
+    )
+    .unwrap_err()
+    .contains("outside the configured allowlist"));
+
     for (mut item, expected) in [
         (question("bad id"), "must use English"),
         ({
@@ -4980,6 +4995,66 @@ async fn daily_agent_orchestrator_skips_or_continues_after_dependency_failure() 
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn daily_agent_orchestrator_handles_a_dependency_that_was_not_run() {
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    save_daily_agent_mock_runners(
+        temp.path(),
+        [(
+            "mock-not-run-child",
+            daily_agent_mock_file_runner_settings(
+                "continued after not-run dependency",
+                Some("output/continued/2026-07-18-report.md"),
+            ),
+        )],
+    );
+
+    let mut disabled = AsrDailyAgentItem::daily_report();
+    disabled.id = "disabled_upstream".to_string();
+    disabled.name = disabled.id.clone();
+    disabled.output_dir = disabled.id.clone();
+    disabled.enabled = false;
+
+    let mut child = AsrDailyAgentItem::daily_report();
+    child.id = "not_run_child".to_string();
+    child.name = child.id.clone();
+    child.runner = "mock-not-run-child".to_string();
+    child.output_dir = "continued".to_string();
+    child.dependencies = vec![AsrDailyAgentDependency {
+        agent_id: disabled.id.clone(),
+        include_output: true,
+    }];
+    child.im_delivery.enabled = false;
+
+    let mut task = test_directory_task(
+        "daily-agent-orchestrator-not-run",
+        temp.path().join("audio"),
+    );
+    task.daily_agent.enabled = true;
+    task.daily_agent.agents = vec![disabled, child.clone()];
+    ensure_asr_daily_workspace(&task).unwrap();
+    std::fs::write(
+        daily_dir_for_task(&task.id).join("2026-07-18.md"),
+        "dependency not-run source",
+    )
+    .unwrap();
+
+    let skipped = run_daily_agents(&task, "manual", Some("2026-07-18"), false).await;
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].status, "skipped_dependency_failed");
+    assert!(skipped[0]
+        .skipped_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("disabled_upstream=not_run")));
+
+    child.dependency_failure_policy = AsrDailyAgentDependencyFailurePolicy::Continue;
+    task.daily_agent.agents[1] = child;
+    let continued = run_daily_agents(&task, "manual", Some("2026-07-18"), false).await;
+    assert_eq!(continued.len(), 1);
+    assert_eq!(continued[0].status, "success", "{continued:?}");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn daily_agent_orchestrator_filters_triggers_and_handles_invalid_graph() {
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
@@ -5184,6 +5259,37 @@ async fn selected_daily_agent_honors_persisted_dependency_policy() {
     .await;
     assert_eq!(continued.status, "success", "{continued:?}");
     assert_eq!(continued.dependency_run_ids, vec!["persisted-run"]);
+
+    let upstream_task = task_for_daily_agent(&task, &task.daily_agent.agents[0]);
+    let upstream_output = daily_agent_output_dir(&upstream_task);
+    std::fs::remove_dir_all(&upstream_output).unwrap();
+    std::fs::write(&upstream_output, "not a directory").unwrap();
+
+    selected.dependency_failure_policy = AsrDailyAgentDependencyFailurePolicy::Skip;
+    let sync_skipped = run_selected_daily_agent_with_dependencies(
+        &task,
+        &selected,
+        "manual",
+        Some("2026-07-19"),
+        false,
+    )
+    .await;
+    assert_eq!(sync_skipped.status, "skipped_dependency_failed");
+    assert!(sync_skipped
+        .skipped_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("read Daily Agent dependency output dir")));
+
+    selected.dependency_failure_policy = AsrDailyAgentDependencyFailurePolicy::Continue;
+    let sync_continued = run_selected_daily_agent_with_dependencies(
+        &task,
+        &selected,
+        "manual",
+        Some("2026-07-19"),
+        false,
+    )
+    .await;
+    assert_eq!(sync_continued.status, "success", "{sync_continued:?}");
 }
 
 #[tokio::test(flavor = "current_thread")]

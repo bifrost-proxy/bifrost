@@ -195,11 +195,10 @@ fn validate_daily_research_manifest(
             }
         }
         let runner = question.runner.as_deref().unwrap_or(default_runner).trim();
-        let allowed = runner == default_runner
-            || fanout
-                .allowed_runners
-                .iter()
-                .any(|allowed| allowed.trim() == runner);
+        let allowed = fanout
+            .allowed_runners
+            .iter()
+            .any(|allowed| allowed.trim() == runner);
         if !allowed {
             return Err(format!(
                 "research question '{}' selected runner '{}' outside the configured allowlist",
@@ -280,7 +279,7 @@ fn compact_daily_research_prompt_field(value: &str, max_chars: usize) -> String 
 fn build_daily_research_child_prompt(
     question: &AsrDailyResearchQuestion,
     context: Option<&str>,
-    research_runner_can_read_context_repo: bool,
+    direct_context_instructions: Option<&str>,
 ) -> String {
     let mut prompt = format!(
         "你正在独立研究一个问题。必须直接回答原始问题，不要给问题打优先级分数，也不要把它改写成另一个问题。优先使用一手、权威和可复查来源；区分事实、推断与未知，标注数据时点并提供可访问链接。\n\n## 原始问题\n{}\n",
@@ -326,8 +325,15 @@ fn build_daily_research_child_prompt(
             DAILY_RESEARCH_CONTEXT_PROMPT_CHARS,
         ));
         prompt.push('\n');
-    } else if research_runner_can_read_context_repo {
-        prompt.push_str("\n你可以直接读取当前工作目录中的真实数据；先核验事实，再完成研究。\n");
+    } else if let Some(instructions) = direct_context_instructions {
+        prompt.push_str(
+            "\n你可以直接读取当前工作目录中的真实数据；先核验事实，再完成研究。上下文配置要求：\n",
+        );
+        prompt.push_str(&compact_daily_research_prompt_field(
+            instructions,
+            DAILY_RESEARCH_CUSTOM_PROMPT_CHARS,
+        ));
+        prompt.push('\n');
     }
     prompt.push_str(
         "\n最终输出 Markdown，必须包含：`## 原始问题`、`## 核心结论`、`## 事实与证据`、`## 推断与不确定性`、`## 对原始问题的直接回答`。保留原始问题全文。",
@@ -843,7 +849,11 @@ async fn run_daily_agent_research_fanout(
                 let prompt = build_daily_research_child_prompt(
                     question,
                     context_content.as_deref(),
-                    direct_context_access,
+                    direct_context_access.then(|| {
+                        context_profile
+                            .and_then(|(_, profile)| profile.instructions.as_deref())
+                            .unwrap_or("按当前仓库的真实数据和说明文件核验")
+                    }),
                 );
                 let child_session = format!(
                     "asr-research:{}:{}:{}:{}:research",
