@@ -1933,6 +1933,20 @@ mod tests {
         std::fs::write(&wav, make_wav(&samples)).unwrap();
         std::fs::write(&silent_wav, make_wav(&vec![0_i16; 70 * 16_000])).unwrap();
 
+        let fake_bin = temp.path().join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        let fake_ffmpeg = fake_bin.join("ffmpeg");
+        write_executable(
+            &fake_ffmpeg,
+            "#!/bin/sh\ninput=''\noutput=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '-i' ]; then\n    shift\n    input=\"$1\"\n  fi\n  output=\"$1\"\n  shift\ndone\ncp \"$input\" \"$output\"\n",
+        );
+        let mut path_entries = vec![fake_bin];
+        if let Some(path) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&path));
+        }
+        let fake_path = std::env::join_paths(path_entries).unwrap();
+        let _path_guard = EnvVarGuard::set("PATH", &fake_path);
+
         let binary = temp.path().join("moss-transcribe");
         let runtime = moss_process_test_paths(temp.path(), binary.clone());
         write_executable(
