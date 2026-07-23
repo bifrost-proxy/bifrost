@@ -1054,6 +1054,7 @@ fn upgrade_command_status_with_timeout_reports_success_and_failure() {
             &["-c", "/bin/sleep 0.08"],
             Duration::from_secs(1),
             Duration::from_millis(10),
+            false,
         )
         .unwrap(),
         TimedCommandStatus::Success

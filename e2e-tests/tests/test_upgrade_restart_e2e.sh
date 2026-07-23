@@ -477,6 +477,9 @@ test_upgrade_review_feedback_contracts() {
         && grep -Fq 'should_request_desktop_shutdown_before_update' "$upgrade_desktop_src" \
         && grep -Fq 'DESKTOP_UPGRADE_SHUTDOWN_ARG' "$upgrade_desktop_src" \
         && grep -Fq 'request_legacy_desktop_shutdown' "$upgrade_desktop_src" \
+        && grep -Fq 'desktop_shell_executable(app_path)' "$upgrade_desktop_src" \
+        && grep -Fq 'request_legacy_desktop_shutdown(pid, app_path)' "$upgrade_desktop_src" \
+        && grep -Fq 'macos_desktop_quit_args(app_path)' "$upgrade_desktop_src" \
         && grep -Fq 'parent_upgrade_lock_child_environment' "$app_src" \
         && grep -Fq 'report_restarting_preserving_desktop_handoff' "$upgrade_restart_src" \
         && grep -Fq 'WEBVIEW_UPGRADE_ORIGIN_ENV' "$admin_src" \

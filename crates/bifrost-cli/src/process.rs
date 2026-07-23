@@ -437,7 +437,17 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        let result = find_process_on_port(port);
+        // macOS can take a short moment to expose a newly bound listener to
+        // lsof, especially while the full workspace suite is spawning many
+        // child processes. Poll within a small bound instead of assuming the
+        // first process-table snapshot is immediately consistent.
+        let result = (0..20).find_map(|_| {
+            let result = find_process_on_port(port);
+            if result.is_none() {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            result
+        });
         assert!(
             result.is_some(),
             "should find the current process listening on port {}",

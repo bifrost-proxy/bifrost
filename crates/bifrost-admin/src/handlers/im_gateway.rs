@@ -23,16 +23,19 @@ use crate::im_gateway::types::{
 use crate::im_gateway::weixin::WeixinProvider;
 use crate::im_gateway::{
     ImAgentConfigStore, ImAgentSessionManager, ImConnectionManager, ImEventStore,
-    ImMessageLogStore, ImProviderStore, ImRouteStore, ImRunStore, ImScheduleStore, ImScheduler,
-    ImTargetStore, SessionQueueManager,
+    ImGroupContextStore, ImMessageLogStore, ImProviderStore, ImRouteStore, ImRunStore,
+    ImScheduleStore, ImScheduler, ImTargetStore, SessionQueueManager,
 };
 use bifrost_agent::persistence::ConversationRecorder;
 use bifrost_agent::{PlanStep, SessionDetail, ToolCallLog};
 
 mod agent_api;
 mod agent_chat;
+mod agent_chat_concurrent;
+mod agent_chat_progress;
 mod agent_reply;
 mod agent_reply_attachments;
+mod agent_reply_target;
 mod busy_message_mode;
 mod chat_gateway;
 mod debug_inbound;
@@ -49,8 +52,12 @@ mod tests;
 #[allow(unused_imports)]
 use agent_api::*;
 use agent_chat::*;
+use agent_chat_concurrent::*;
+#[cfg(test)]
+use agent_chat_progress::*;
 use agent_reply::*;
 use agent_reply_attachments::*;
+use agent_reply_target::*;
 use busy_message_mode::*;
 use event_loop::*;
 #[allow(unused_imports)]

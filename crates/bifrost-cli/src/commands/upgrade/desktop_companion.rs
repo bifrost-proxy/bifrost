@@ -60,6 +60,50 @@ fn running_desktop_process(app_path: &Path) -> Option<(u32, PathBuf)> {
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
+fn running_desktop_shell_process(app_path: &Path) -> Option<(u32, PathBuf)> {
+    use sysinfo::{ProcessesToUpdate, System};
+
+    let expected_executable = desktop_shell_executable(app_path);
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::All);
+    select_running_desktop_shell_process(
+        &expected_executable,
+        system.processes().iter().filter_map(|(pid, process)| {
+            process
+                .exe()
+                .map(|executable| (pid.as_u32(), executable.to_path_buf()))
+        }),
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn desktop_shell_executable(app_path: &Path) -> PathBuf {
+    app_path.join("Contents/MacOS/bifrost-desktop")
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn desktop_shell_executable(app_path: &Path) -> PathBuf {
+    app_path.to_path_buf()
+}
+
+#[cfg(any(test, target_os = "macos", target_os = "windows"))]
+pub(super) fn select_running_desktop_shell_process(
+    expected_executable: &Path,
+    processes: impl IntoIterator<Item = (u32, PathBuf)>,
+) -> Option<(u32, PathBuf)> {
+    processes.into_iter().find(|(_, executable)| {
+        #[cfg(target_os = "windows")]
+        {
+            windows_paths_match(executable, expected_executable)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            executable == expected_executable
+        }
+    })
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn installed_desktop_app_is_running(app_path: &Path) -> bool {
     running_desktop_process(app_path).is_some()
 }
@@ -75,31 +119,40 @@ fn request_running_desktop_shutdown(app_path: &Path) -> Result<(), BifrostError>
         "{}",
         "Requesting the running desktop shell to release its installed files...".bright_cyan()
     );
-    let Some((pid, executable)) = running_desktop_process(app_path) else {
+    let Some((pid, _)) = running_desktop_process(app_path) else {
         // The shell exited between discovery and the shutdown request, which
         // already gives the installer the required released-file state.
         return Ok(());
     };
-    let internal_result = command_output_with_timeout(
-        &executable,
-        &[DESKTOP_UPGRADE_SHUTDOWN_ARG.to_string()],
-        DESKTOP_UPGRADE_INTERNAL_SHUTDOWN_TIMEOUT,
-    );
-    if let Ok(output) = &internal_result {
-        if output.status != TimedCommandStatus::Success {
+
+    if let Some((_, executable)) = running_desktop_shell_process(app_path) {
+        let internal_result = command_output_with_timeout(
+            &executable,
+            &[DESKTOP_UPGRADE_SHUTDOWN_ARG.to_string()],
+            DESKTOP_UPGRADE_INTERNAL_SHUTDOWN_TIMEOUT,
+        );
+        if let Ok(output) = &internal_result {
+            if output.status != TimedCommandStatus::Success {
+                eprintln!(
+                    "{} {}",
+                    "⚠ Desktop shell did not accept the internal shutdown request; trying the platform fallback."
+                        .bright_yellow(),
+                    summarize_command_output(output).dimmed()
+                );
+            }
+        } else if let Err(error) = &internal_result {
             eprintln!(
                 "{} {}",
-                "⚠ Desktop shell did not accept the internal shutdown request; trying the platform fallback."
+                "⚠ Could not send the internal desktop shutdown request; trying the platform fallback."
                     .bright_yellow(),
-                summarize_command_output(output).dimmed()
+                error.to_string().dimmed()
             );
         }
-    } else if let Err(error) = &internal_result {
+    } else {
         eprintln!(
-            "{} {}",
-            "⚠ Could not send the internal desktop shutdown request; trying the platform fallback."
-                .bright_yellow(),
-            error.to_string().dimmed()
+            "{}",
+            "⚠ Could not locate the running desktop shell; trying the platform fallback."
+                .bright_yellow()
         );
     }
 
@@ -107,7 +160,7 @@ fn request_running_desktop_shutdown(app_path: &Path) -> Result<(), BifrostError>
         return Ok(());
     }
 
-    let legacy_result = request_legacy_desktop_shutdown(pid);
+    let legacy_result = request_legacy_desktop_shutdown(pid, app_path);
     if wait_for_desktop_app_exit(app_path, DESKTOP_UPGRADE_SHUTDOWN_TIMEOUT) {
         return Ok(());
     }
@@ -135,15 +188,16 @@ fn wait_for_desktop_app_exit(app_path: &Path, timeout: Duration) -> bool {
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn request_legacy_desktop_shutdown(pid: u32) -> Result<(), BifrostError> {
+fn request_legacy_desktop_shutdown(pid: u32, app_path: &Path) -> Result<(), BifrostError> {
     #[cfg(target_os = "macos")]
     let mut command = {
         let mut command = Command::new("osascript");
-        command.args(["-e", "tell application \"Bifrost\" to quit"]);
+        command.args(macos_desktop_quit_args(app_path));
         command
     };
     #[cfg(target_os = "windows")]
     let mut command = {
+        let _ = app_path;
         let mut command = Command::new("taskkill");
         command.args(["/PID", &pid.to_string(), "/T"]);
         command
@@ -160,6 +214,29 @@ fn request_legacy_desktop_shutdown(pid: u32) -> Result<(), BifrostError> {
         )));
     }
     Ok(())
+}
+
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn macos_desktop_quit_args(app_path: &Path) -> Vec<std::ffi::OsString> {
+    [
+        "-e",
+        "on run argv",
+        "-e",
+        "set appPath to item 1 of argv",
+        "-e",
+        "using terms from application \"Finder\"",
+        "-e",
+        "tell application appPath to quit",
+        "-e",
+        "end using terms from",
+        "-e",
+        "end run",
+        "--",
+    ]
+    .into_iter()
+    .map(std::ffi::OsString::from)
+    .chain(std::iter::once(app_path.as_os_str().to_owned()))
+    .collect()
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -344,7 +421,7 @@ pub(super) fn update_desktop_app_after_upgrade(
             crate::commands::app::restart_desktop_app,
         )
     })?;
-    let result = match command_output_with_timeout_and_env(
+    let result = match command_output_with_timeout_and_env_streaming(
         executable,
         &args,
         Duration::from_secs(POST_UPGRADE_APP_UPDATE_TIMEOUT_SECS),

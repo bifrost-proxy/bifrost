@@ -199,18 +199,20 @@
 - 每个成功 MOSS 文件的 `files.json` 都有可供 benchmark 汇总的真实整文件 elapsed metric，RTF 不再因空 metrics 固定为零。
 - benchmark 不会让同一 `source_path` 同时代表多个目标时长；不同成功源文件不足时 fail closed。
 
-### TC-MOSS-12：完整模型 metadata 与配置变更重处理
+### TC-MOSS-12：完整模型 metadata 与配置变更产物保留
 
 操作步骤：
 
 1. 执行 `cargo test -p bifrost-admin moss_ --lib -- --nocapture`，确认模型 verification marker 覆盖 release packager 要求的 12 个 metadata 文件，任一文件缺失或损坏都会撤销 model Ready。
 2. 执行 `bash e2e-tests/tests/test_asr_moss_release_contract.sh`，确认 Rust 校验列表、release workflow 下载列表和 runtime packager 必需列表保持一致。
-3. 执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_asr_moss_task_mode.sh`。在 Apple Silicon 上先写入成功文件记录，再修改 MOSS prompt，确认记录变为 pending，旧产物引用和 metrics 被清空；不支持平台继续验证 MOSS 创建/PATCH 返回 400。
+3. 执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_asr_moss_task_mode.sh`。在 Apple Silicon 上先写入三类记录再修改 MOSS prompt：已有 `.txt` 的成功记录、源文件仍存在但 `.txt` 缺失的成功记录，以及源文件和 `.txt` 都不存在的成功记录；不支持平台继续验证 MOSS 创建/PATCH 返回 400。
+4. 对真实任务调用 `GET /_bifrost/api/asr/tasks/<task-id>`，确认 Files 列表里的 pending/processing 数与 summary 当前待处理数一致；逐条检查 pending/processing 的 `source_path` 都仍是文件，success 的 `output_text_path` 都仍是文件。
 
 预期结果：
 
 - `added_tokens.json`、`chat_template.jinja`、`merges.txt`、`vocab.json` 等全部发布 metadata 与原有文件一样受 checksum 保护和自动修复。
-- 实际切换转录模式或修改生效中的 MOSS prompt 后，成功、部分成功、失败或遗留 processing 记录都会重新排队，下一次运行不会 merge-only 保留旧转录。
+- 实际切换转录模式或修改生效中的 MOSS prompt 后，已有 `.txt` 的历史记录及 metrics 保持不变，不进入整文件待处理队列；记录引用丢失但标准目录仍有 `.txt` 时恢复引用并归一为可用的 `partial_success`。
+- 源文件仍存在但找不到 `.txt` 的记录回到 pending；源文件与 `.txt` 都不存在的 pending 记录从持久化状态原子清理，且不会因 merge-only 保存重新出现。
 - 相同值 PATCH 不制造无意义的重复转录；任务运行中仍拒绝高风险配置变更。
 
 ### TC-MOSS-13：无有效协议结果去重与原生长片段规范化
@@ -231,24 +233,7 @@
 - 独立 CPython runtime 解压后仍保留 framework/library 相对符号链接；恶意逃逸链接不会写出安装根目录，发布归档通过 extract-then-self-test。
 - Unix 上已有目录不会被 runtime symlink 替换；Windows 不尝试物化 archive symlink，即使目标路径已存在目录也稳定返回 `unsupported on this platform`，两种平台都保持安全拒绝。
 
-### TC-MOSS-14：模式迁移可显式保留历史成功结果
-
-操作步骤：
-
-1. 执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_asr_moss_task_mode.sh`。
-2. 在隔离任务写入一条带旧转录产物路径的 `success` 文件记录。
-3. 省略 `requeue_existing_files` 修改生效中的 MOSS prompt，确认既有默认行为仍把记录重排为 `pending` 并清空旧产物引用。
-4. 恢复该成功记录，分别 PATCH 到 `standard`、再 PATCH 回 `moss_joint`，两次都显式传入 `requeue_existing_files=false`。
-5. 对已暂停的真实任务执行同样的 `standard -> moss_joint` PATCH；切换前后比较 success/partial/failed/pending 数量及历史产物路径，随后只恢复原 pending 和新发现文件。
-
-预期结果：
-
-- 未传字段时维持原兼容语义，配置变化仍会重排历史文件。
-- 显式传入 `false` 时任务模式更新成功，历史状态、产物路径、字数和 metrics 不变；迁移前 failed 的原错误保留在带当前 MOSS 版本号的非重试 marker 后，避免普通调度反复处理，`run?date=YYYY-MM-DD` 仍可定向覆盖；该一次性控制字段不会写入任务 GET 响应或持久化配置。
-- 运行中的任务仍拒绝模式切换；真实迁移必须先暂停。
-- 恢复任务后只有迁移前已是 pending 的文件和新录音使用 MOSS，旧日报及已成功转录不会重复生成。
-
-### TC-MOSS-15：独立 Runtime 与核心 beta Release 隔离演练
+### TC-MOSS-14：独立 Runtime 与核心 beta Release 隔离演练
 
 操作步骤：
 
@@ -264,7 +249,7 @@
 - Runtime beta/stable Release 分别生成独立 zip 和 `.sha256`，不包含 `model.safetensors`；模型权重继续在用户初始化时下载。
 - 核心 beta Release 全部 job 成功且不下载/构建/上传 MOSS runtime；CLI、App、DMG 的包体轻量门禁继续生效。
 
-### TC-MOSS-16：首次初始化大文件中断自动续传与启动器实跑
+### TC-MOSS-15：首次初始化大文件中断自动续传与启动器实跑
 
 操作步骤：
 
@@ -281,7 +266,7 @@
 - 单次传输中断不要求用户重新点击 Initialize，也不从 0 重下 1.2 GB 模型；自动重试有上限，连续失败仍返回明确错误。
 - 打包启动器的自检和真实推理均使用隔离资源成功运行；测试结束不残留服务、临时资源或对正式代理的状态修改。
 
-### TC-MOSS-17：Runtime 升级成功后回收旧隔离资源
+### TC-MOSS-16：Runtime 升级成功后回收旧隔离资源
 
 操作步骤：
 
@@ -295,23 +280,36 @@
 - 下载、checksum、解压、自检、模型验证或 marker 写入失败时不执行成功清理，已有 quarantine 继续保留用于排障/恢复。
 - 只有固定 Bifrost 命名且时间戳为纯数字的直接子项会被删除；近似命名文件保持不变，受管 symlink 只删除链接本身，外部目标内容保持不变。
 
-### TC-MOSS-18：官方版本发布后的个人流水线集成升级
+### TC-MOSS-17：后台初始化共享真实进度与 Finder 元数据回归
 
 操作步骤：
 
-1. 将最新稳定 tag 所在的 `origin/main` 合并到个人 MOSS 日报集成分支，解决版本锁、ChatGPT Web mock 与 human test 索引冲突，构建 release CLI。
-2. 执行 MOSS 单元回归、按录音日期过滤、Daily Agent 单日期失败隔离、runtime owner 和 MOSS release/task-mode E2E；验证纯无协议输出仍在 256 token 失败，已出现合法时间戳/说话人开头的长首段可等待到 1024 token。
-3. 暂停正式 ASR 任务，安装集成 release CLI 并重启正式服务；核对服务版本、MOSS Ready、任务配置、历史成功产物和待处理计数。
-4. 分别调用 `run?date=2026-07-19`、`run?date=2026-07-20` 和 `run?date=2026-07-21`，确认每轮只选择对应本地录音日期，旧日期成功记录和旧日报不被重跑；普通批次保持 0.5 RTF/每秒 20 个输出 token。只有已有同一文件失败证据时才允许依次使用 `BIFROST_MOSS_MAX_RUNTIME_RTF=1.0/2.0/3.0`；只有该文件返回 `finish_reason=length` 后才允许增加 `BIFROST_MOSS_OUTPUT_TOKENS_PER_SECOND=30`；只有整文件补救仍出现确定性退化输出时才允许使用 `BIFROST_MOSS_SEGMENT_SECONDS=600/300/60`，必要时以 `BIFROST_MOSS_ALLOW_GAP_MARKERS=1` 显式保留总计不超过 60 秒的未解析区间。确认非默认补救配置写入确定性失败缓存签名，因此配置升级能重试该文件，默认配置仍跳过已有确定性失败；短音频、静音、无时长等固定输入错误在所有补救配置下仍跳过。
-5. 每日 ASR 完成后核对日报、Tomorrow To Do、研究摘要、原始研究链接和微信投递；最后恢复自动导入并确认外接盘无打开文件。
+1. 执行 `cargo test -p bifrost-admin moss_site_packages_hash_skips_cache_artifacts_and_non_files --lib -- --nocapture`。fixture 在 `site-packages` 同时写入真实依赖、`.DS_Store`、`.pyc`、`__pycache__` 和符号链接，检查参与校验的文件集合。
+2. 执行 `cargo test -p bifrost-admin moss_model_management_status_reports_missing_ready_and_unsupported_assets --lib -- --nocapture`、`cargo test -p bifrost-admin moss_management_handlers_stream_success_and_failures --lib -- --nocapture`、`cargo test -p bifrost-admin moss_shared_progress_updates_directory_task_and_throttles_fast_events --lib -- --nocapture`、`cargo test -p bifrost-admin moss_management_stream_forwards_runtime_and_model_progress_from_active_owner --lib -- --nocapture` 与 `cargo test -p bifrost-admin moss_resource_download_retries_and_resumes_transient_body_failure --lib -- --nocapture`。检查后台拥有者发布的字节进度可由状态接口和后加入的初始化流读取，目录任务更新被节流但最新快照不丢失，下载 relay 仍向原调用者转发事件；完成后再次初始化不得重放陈旧下载事件，状态 JSON 不得返回下载 URL 或本地目标路径。
+3. 执行 `cd web && pnpm exec playwright test tests/ui/asr-home-tabs.spec.ts --grep "后台目录任务初始化 MOSS"`。fixture 让后台任务持有初始化并把进度从 69% 更新到 74%，不点击 Initialize，检查管理页自动轮询、已下载/总字节、速度、剩余时间、续传标记和亮暗主题。
+4. 对当前 9900 服务请求 `GET /_bifrost/api/asr/moss/status` 和任务 `735775510b384fff8903d9c6fc54f1a3`；记录 runtime/model Ready、任务 running、processed/pending/failed，并确认服务无需重启即可继续原队列。
+5. 检查 `~/.bifrost/asr/moss_joint_mlx` 不再有 `.part`，`verification.json` 存在；不得删除或重跑已成功转录文件，不得重启 9900。
 
 预期结果：
 
-- 正式服务使用包含最新稳定版修复与个人日报能力的同版本集成 binary，桌面版本检查不会再把 CLI-owned core 覆盖为缺少个人功能的包。
-- MOSS 不会把已开始合法协议但首段较长的录音误判为无协议；真正无结构输出仍有 256 token 快速失败保护。
-- RTF 补救开关只接受精确的 1.0、2.0 或 3.0；输出 token 补救只接受精确的 30；分段补救只接受 600、300 或 60 秒，并自适应降到 60/30/10 秒。更高档位必须有同一文件上一级超时、长度触顶或确定性退化证据；未解析标记累计超过 60 秒仍失败，不会静默跳过。其他空值、非法值和未列出的值分别回退默认 0.5、20 与整文件路径；补救完成后必须去掉环境变量并恢复普通服务。
-- 三个日期彼此隔离；中断恢复和单文件失败不扩大为全量历史重跑，旧日报不重复生成。
-- 新日报、待办和研究产物落盘并按个人配置投递；任务最终未暂停、未运行，自动导入恢复，外接盘可以安全拔出。
+- 文件名精确为 `.DS_Store` 的 Finder 元数据以及既有 Python 缓存不参与 runtime 依赖哈希；任意其他新增、删除或篡改依赖仍会撤销 Ready。
+- 同一进程只有一个初始化拥有者；目录任务、状态 API 和后加入的管理页 SSE 观察同一份真实字节进度，管理页不会长期停在 `0% / Waiting for download`。
+- 状态 API 只公开展示所需的标签、字节、百分比、速率、ETA、续传和完成状态，不泄露资源 URL 或本地下载目标；初始化结束后不再返回或重放陈旧进度。
+- 管理页无需用户再次点击即可从后台进度继续更新，亮色和暗色主题均可读；真实 9900 runtime/model Ready，原任务继续处理未完成队列且不触碰已成功资源。
+
+### TC-MOSS-18：受控长音频补救与日报闭环
+
+操作步骤：
+
+1. 只对已有确定性失败证据的指定日期和指定文件运行补救；成功文件不得重跑。依次验证 `BIFROST_MOSS_MAX_RUNTIME_RTF=1.0/2.0/3.0`、`BIFROST_MOSS_OUTPUT_TOKENS_PER_SECOND=30`、`BIFROST_MOSS_SEGMENT_SECONDS=600/300/60` 与最多 60 秒显式 gap marker 的边界。
+2. 核对非默认补救配置进入确定性失败缓存签名，因此升级配置可以重试动态失败；短音频、静音和无时长等固定输入错误在所有补救配置下仍跳过。
+3. 补救完成后移除全部 `BIFROST_MOSS_*` 环境变量并恢复正式服务默认模式；核对日报、Tomorrow Todo 与精确唤起研究产物，不重复已经成功的 Pro 研究。
+
+预期结果：
+
+- 只有指定失败文件被补救，成功文件和旧日报均不重跑。
+- 分段结果明确说明 speaker 只在片段内有效；超过 60 秒的未解析区间仍失败，不静默漏字。
+- 最终正式服务无救援变量，日报流水线和纯文本投递均可继续运行。
 
 ## 清理步骤
 
@@ -342,7 +340,9 @@
 | 2026-07-20 | TC-MOSS-11 | PASS：Rust MOSS 回归确认 `site-packages` 内容损坏，以及 `runtime/python/lib` framework 缺失或损坏都会撤销 Ready；成功 MOSS task 生成一条非零整文件耗时 metric。benchmark E2E 正常选择不同录音，并在 4 个目标只有 3 个不同成功源文件时明确失败且不写报告。 |
 | 2026-07-20 | TC-MOSS-12 | PASS：Rust MOSS 回归 20/20 覆盖完整 12 个发布 metadata，配置重排状态矩阵/幂等单测 1/1；release contract E2E 确认下载、打包、Rust 校验列表一致；真实 task-mode API E2E 在修改 MOSS prompt 后把成功记录重置为 pending 并清空旧产物引用/metrics。 |
 | 2026-07-20 | TC-MOSS-13 | PASS：Rust MOSS 回归把无有效 speaker segment 和超出整文件上限都标为带版本的确定性失败；65 秒 fixture 的 63.8 秒 S02 turn 被拆为 3 段，加上 S01 共 4 段，所有段不超过 30 秒，speaker、75000 ms 绝对终点和完整文本均保留；runtime ZIP 的 Python 相对 symlink 保留且逃逸 symlink 被拒绝，Unix 目录冲突与 Windows symlink 不支持均保持安全拒绝，release contract 强制 extract-then-self-test；task-mode API E2E 继续通过。 |
-| 2026-07-21 | TC-MOSS-14 | PASS：release 构建运行 `test_asr_moss_task_mode.sh` 通过；默认模式/Prompt 变化仍重排历史记录，显式 `requeue_existing_files=false` 的 `standard -> moss_joint` 往返保留 success 状态、旧产物路径和字数，且一次性字段不出现在响应中。真实任务迁移前后保持 success=683、partial_success=1、failed=19、pending=0；旧 failed 被保留并标记为当前版本非重试项，恢复后空跑 processed=0/failed=0，未重新生成旧日报。 |
-| 2026-07-21 | TC-MOSS-17 | PASS：三个定向 Rust 用例与 release/runtime contract E2E 全部通过。升级成功并写入 marker 后，旧 runtime 目录、runtime zip 和旧模型隔离件均被回收；失败路径继续保留 quarantine。纯数字时间戳与固定资产名门禁拒绝近似命名，目录 symlink 仅删除链接且外部目标文件保持不变。 |
-| 2026-07-21 | TC-MOSS-16 | PASS（发现真实中断并修复后复测）：当前分支服务以独立 HOME/数据目录在 18999 启动，初始 install_dir 位于临时 home 且 model bytes=0。真实下载 170 MB runtime 和 1,258,427,442-byte 模型时，Hugging Face 在 1,207,909,964 bytes 处返回 `error decoding response body`，`.part` 被保留；再次请求通过 Range 补齐模型并完成 schema v5 marker。针对该真实缺口，初始化器增加最多 3 次有界自动重试；fixture 首次只发一半响应后断开、第二次从 524288 bytes 续传，聚焦回归通过。最终 status 为 ready/runtime_ready/model_ready，模型 SHA-256=`469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190`，无 AppleDouble/`.part` 残留；打包 Python self-test 输出 `moss-mlx-runtime ok`，20.495 秒 16 kHz 单声道真实启动器推理 3.57 秒完成，输出 3 个 S01 正时长 segments。18999 已停止，正式 `v0.0.158` 服务保持 PID 21664/9900/系统代理开启；隔离目录已移动到废纸篓，可恢复。 |
-| 2026-07-24 | TC-MOSS-18 | PASS（正式任务补救与日报闭环）：任务 `71190c695b3040b38bee465579cd4d10` 的 2026-07-18、2026-07-22 缺失录音按日期定向补救，成功文件未重跑；暂存的 11 个 7 月 20–21 日文件在主队列结束后按原相对路径恢复，未丢失或重复导入。2026-07-23 外接盘 28/28 文件导入，本地 MOSS 得到 23 条有效录音 success；5 条 5.72s/8.58s/0.22s 碎片、1800s 近静音和 duration=N/A 空壳按固定输入门禁保留为明确失败且未重试。三日合并转录和后续 Daily Agent 均完成，正式服务最后恢复为无 `BIFROST_MOSS_*` 环境变量的默认模式。定向缓存单测证明救援配置可以重试默认的长度触顶失败，而短音频等固定输入失败仍跳过；MOSS release contract E2E 通过。 |
+| 2026-07-21 | TC-MOSS-16 | PASS：三个定向 Rust 用例与 release/runtime contract E2E 全部通过。升级成功并写入 marker 后，旧 runtime 目录、runtime zip 和旧模型隔离件均被回收；失败路径继续保留 quarantine。纯数字时间戳与固定资产名门禁拒绝近似命名，目录 symlink 仅删除链接且外部目标文件保持不变。 |
+| 2026-07-21 | TC-MOSS-15 | PASS（发现真实中断并修复后复测）：当前分支服务以独立 HOME/数据目录在 18999 启动，初始 install_dir 位于临时 home 且 model bytes=0。真实下载 170 MB runtime 和 1,258,427,442-byte 模型时，Hugging Face 在 1,207,909,964 bytes 处返回 `error decoding response body`，`.part` 被保留；再次请求通过 Range 补齐模型并完成 schema v5 marker。针对该真实缺口，初始化器增加最多 3 次有界自动重试；fixture 首次只发一半响应后断开、第二次从 524288 bytes 续传，聚焦回归通过。最终 status 为 ready/runtime_ready/model_ready，模型 SHA-256=`469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190`，无 AppleDouble/`.part` 残留；打包 Python self-test 输出 `moss-mlx-runtime ok`，20.495 秒 16 kHz 单声道真实启动器推理 3.57 秒完成，输出 3 个 S01 正时长 segments。18999 已停止，正式 `v0.0.158` 服务保持 PID 21664/9900/系统代理开启；隔离目录已移动到废纸篓，可恢复。 |
+| 2026-07-22 | TC-MOSS-12 | PASS（模式切换重跑回归）：两条聚焦 Rust 回归通过；18995 隔离 API E2E 验证修改 MOSS prompt 后已有 `.txt` 的 success 记录及 metric 原样保留，源文件存在但转录缺失的记录回到 pending，源文件与转录都不存在的 success 记录在同一次 PATCH 中被持久化删除且重启后不再出现。真实 9900 任务修复并清理陈旧状态后为 623 success、26 pending、8 failed；26 条 pending 的源文件全部存在，623 条 success 的转录文件全部存在，Files 与 summary 待处理数一致。 |
+| 2026-07-22 | TC-MOSS-17 | PASS：定向 Rust 回归确认 `.DS_Store` 不再撤销有效 runtime，后台初始化状态可共享真实字节进度且结束后不泄露 URL、目标路径或陈旧进度；目录任务节流、晚加入 SSE 的 runtime/model 两阶段进度、下载 relay 三条边界回归均通过，本地变更行覆盖率为 99.52%（206/207），超过 95% 门禁。Playwright 验证管理页在未点击 Initialize 时自动从 69% 轮询至 74%，显示字节、速率、ETA 和续传标记。真实 9900 服务无需重启即完成 runtime/model 初始化，`.part` 清零且 marker 存在；原任务继续处理，最新检查为 `processed=641`、`pending=5`、`failed=11`、`running=true`。 |
+| 2026-07-22 | TC-MOSS-12 | PASS（合并 #413 后复测）：当前合并树的 MOSS Rust 回归 26/26、release/runtime contract 与 18995 隔离 task-mode API E2E 均通过；真实 9900 任务只读核验为 646 success、0 pending、11 failed，pending/processing 缺失源文件为 0，success 缺失转录为 0，Files 与 summary 一致。 |
+| 2026-07-24 | TC-MOSS-18 | PASS（正式任务补救与日报闭环）：任务 `71190c695b3040b38bee465579cd4d10` 的 2026-07-18、2026-07-22 缺失录音按日期定向补救，成功文件未重跑；暂存的 11 个 7 月 20–21 日文件在主队列结束后按原相对路径恢复。2026-07-23 外接盘 28/28 文件导入，本地 MOSS 得到 23 条有效录音 success；5 条短碎片、近静音和空壳按固定输入门禁保留为明确失败且未重试。三日合并转录和 Daily Agent 均完成，正式服务最后恢复为无 `BIFROST_MOSS_*` 环境变量的默认模式。定向缓存单测证明救援配置可以重试默认的长度触顶失败，而短音频等固定输入失败仍跳过；MOSS release contract E2E 通过。 |

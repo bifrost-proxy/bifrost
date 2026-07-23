@@ -161,7 +161,7 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
             else {
                 return error_response(StatusCode::NOT_FOUND, "ASR task endpoint not found");
             };
-            get_task_response(id).await
+            get_task_response(id)
         }
         (&Method::DELETE, _) if path.starts_with("/api/asr/tasks/") => {
             let Some(id) = path
@@ -186,7 +186,7 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
                 .trim_start_matches("/api/asr/tasks/")
                 .trim_end_matches("/run")
                 .trim_end_matches('/');
-            run_task_response(id, req.uri().query()).await
+            run_task_response(id).await
         }
         (&Method::POST, _) if path.starts_with("/api/asr/tasks/") && path.ends_with("/pause") => {
             let id = path
@@ -258,18 +258,6 @@ fn pause_mode_from_query(query: &str) -> Result<AsrTaskPauseMode, &'static str> 
     };
     AsrTaskPauseMode::from_query(&value)
         .ok_or("invalid pause mode; use temporary or long_term")
-}
-
-fn recording_date_from_query(query: &str) -> Result<Option<NaiveDate>, &'static str> {
-    let Some(value) = query_param_value(query, "date") else {
-        return Ok(None);
-    };
-    let date = NaiveDate::parse_from_str(&value, "%Y-%m-%d")
-        .map_err(|_| "invalid recording date; use YYYY-MM-DD")?;
-    if date.format("%Y-%m-%d").to_string() != value {
-        return Err("invalid recording date; use YYYY-MM-DD");
-    }
-    Ok(Some(date))
 }
 
 fn normalize_task_diarization_config(mut config: AsrDiarizationConfig) -> AsrDiarizationConfig {
@@ -548,7 +536,7 @@ fn update_task_config(
             && updated.transcription_mode == AsrTranscriptionMode::MossJoint;
     if transcription_output_changed {
         let file_update = if requeue_existing_files {
-            requeue_files_for_transcription_config_change(id)
+            reconcile_files_for_transcription_config_change(&updated)
         } else if updated.transcription_mode == AsrTranscriptionMode::MossJoint {
             suppress_pre_migration_failed_records(id)
         } else {
@@ -622,22 +610,10 @@ fn list_tasks_response() -> Response<BoxBody> {
     json_response(&serde_json::json!({ "tasks": tasks }))
 }
 
-async fn task_detail_in_blocking_worker<F>(work: F) -> Result<Option<TaskDetail>, tokio::task::JoinError>
-where
-    F: FnOnce() -> Option<TaskDetail> + Send + 'static,
-{
-    tokio::task::spawn_blocking(work).await
-}
-
-async fn get_task_response(id: &str) -> Response<BoxBody> {
-    let id = id.to_string();
-    match task_detail_in_blocking_worker(move || find_task(&id).map(task_detail)).await {
-        Ok(Some(detail)) => json_response(&detail),
-        Ok(None) => error_response(StatusCode::NOT_FOUND, "ASR task not found"),
-        Err(error) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("load ASR task detail: {error}"),
-        ),
+fn get_task_response(id: &str) -> Response<BoxBody> {
+    match find_task(id) {
+        Some(task) => json_response(&task_detail(task)),
+        None => error_response(StatusCode::NOT_FOUND, "ASR task not found"),
     }
 }
 
@@ -976,14 +952,10 @@ fn cleanup_task_source_audio_response(id: &str) -> Response<BoxBody> {
     json_response(&cleanup_task_source_audio(&task))
 }
 
-async fn run_task_response(id: &str, query: Option<&str>) -> Response<BoxBody> {
+async fn run_task_response(id: &str) -> Response<BoxBody> {
     let task = match load_tasks().tasks.into_iter().find(|task| task.id == id) {
         Some(task) => task,
         None => return error_response(StatusCode::NOT_FOUND, "ASR task not found"),
-    };
-    let recording_date = match recording_date_from_query(query.unwrap_or_default()) {
-        Ok(date) => date,
-        Err(message) => return error_response(StatusCode::BAD_REQUEST, message),
     };
     if task.paused {
         return json_response_with_status(
@@ -996,19 +968,12 @@ async fn run_task_response(id: &str, query: Option<&str>) -> Response<BoxBody> {
         );
     }
 
-    match spawn_directory_task_run_for_date(task.clone(), recording_date) {
+    match spawn_directory_task_run(task.clone()) {
         Ok(()) => json_response(&RunTaskResponse {
             task: task_with_control_summary(task),
             processed_now: 0,
             failed_now: 0,
-            message: recording_date.map_or_else(
-                || "ASR directory task started in background.".to_string(),
-                |date| {
-                    format!(
-                        "ASR directory task started in background for recording date {date}."
-                    )
-                },
-            ),
+            message: "ASR directory task started in background.".to_string(),
         }),
         Err(response) => *response,
     }
@@ -1078,14 +1043,7 @@ async fn resume_task_response(id: &str) -> Response<BoxBody> {
 }
 
 fn spawn_directory_task_run(task: AsrDirectoryTask) -> Result<(), Box<Response<BoxBody>>> {
-    spawn_directory_task_run_for_date(task, None)
-}
-
-fn spawn_directory_task_run_for_date(
-    task: AsrDirectoryTask,
-    recording_date: Option<NaiveDate>,
-) -> Result<(), Box<Response<BoxBody>>> {
-    match spawn_directory_task_run_background_for_date(task, recording_date) {
+    match spawn_directory_task_run_background(task) {
         Ok(()) => Ok(()),
         Err(error) if error == "ASR task is already running" => {
             Err(Box::new(json_response_with_status(
@@ -1126,19 +1084,6 @@ mod api_tests {
 
         let err = pause_mode_from_query("mode=unsupported").unwrap_err();
         assert!(err.contains("invalid pause mode"));
-    }
-
-    #[test]
-    fn recording_date_query_is_optional_and_strict() {
-        assert_eq!(recording_date_from_query("").unwrap(), None);
-        assert_eq!(
-            recording_date_from_query("date=2026-07-10").unwrap(),
-            NaiveDate::from_ymd_opt(2026, 7, 10)
-        );
-        assert_eq!(
-            recording_date_from_query("date=2026-7-10").unwrap_err(),
-            "invalid recording date; use YYYY-MM-DD"
-        );
     }
 
     #[test]

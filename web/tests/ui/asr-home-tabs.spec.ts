@@ -203,6 +203,65 @@ test("ASR 首页按定时任务、ASR 管理、声纹识别与唤醒三 Tab 分�
   await expect(page.getByTestId("voice-wake-actions-card")).toBeVisible();
 });
 
+test("后台目录任务初始化 MOSS 时管理页持续显示共享下载进度", async ({ page }) => {
+  await installAsrHomeTabMocks(page);
+  await page.unroute("**/_bifrost/api/asr/moss/status");
+  let statusRequests = 0;
+  await page.route("**/_bifrost/api/asr/moss/status", async (route) => {
+    statusRequests += 1;
+    const percent = statusRequests > 5 ? 74 : 69;
+    await route.fulfill({
+      json: {
+        status: "partial",
+        ready: false,
+        installed: false,
+        platform_supported: true,
+        runtime_ready: false,
+        model_ready: true,
+        model: "MOSS-Transcribe-Diarize-MLX-8bit",
+        runtime_asset: "moss-joint-runtime-v1.0.0-aarch64-apple-darwin.zip",
+        install_dir: "/tmp/bifrost-asr-test/moss_joint_mlx",
+        runtime_dir: "/tmp/bifrost-asr-test/moss_joint_mlx/runtime",
+        model_dir: "/tmp/bifrost-asr-test/moss_joint_mlx/model",
+        expected_model_bytes: 1258427442,
+        installed_model_bytes: 1258427442,
+        initializing: true,
+        initialization: {
+          label: "MOSS runtime",
+          downloaded_bytes: percent === 69 ? 122000000 : 132000000,
+          total_bytes: 177799774,
+          percent,
+          bytes_per_second: 85000,
+          eta_seconds: 540,
+          elapsed_ms: 120000,
+          resumed: true,
+          complete: false,
+        },
+        message: "MOSS model is verified, but the packaged MLX runtime is missing or invalid.",
+      },
+    });
+  });
+
+  await openPage(page, "ai?aiSection=tools-asr&asrTab=management");
+  await page.getByRole("combobox", { name: "Managed ASR model" }).click();
+  await page
+    .locator(".ant-select-dropdown:visible")
+    .getByText("MOSS joint transcription (MLX 8-bit)", { exact: true })
+    .click();
+
+  await expect(page.getByRole("button", { name: "Initializing" })).toBeVisible();
+  await expect(page.getByText("MOSS runtime", { exact: true })).toBeVisible();
+  await expect(page.getByText("Resumed", { exact: true })).toBeVisible();
+  await expect(page.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "69");
+  await expect(page.getByText(/116\.3 MB \/ 169\.6 MB/)).toBeVisible();
+  await expect.poll(() => statusRequests).toBeGreaterThan(5);
+  await expect(page.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "74");
+
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "74");
+});
+
 test("历史录音声纹初始化可试听标注并在亮暗主题完成门禁", async ({ page }) => {
   await installAsrHomeTabMocks(page);
   const candidates = Array.from({ length: 4 }, (_, index) => ({
@@ -347,6 +406,11 @@ test("ASR 目录任务按转录模式只展示实际生效的配置", async ({ p
     .getByRole("button", { name: "New" })
     .click();
   await expect(page.getByRole("dialog", { name: "New Directory Task" })).toBeVisible();
+  await expect(
+    page.getByText(
+      /Changing this setting applies to untranscribed and new files; existing transcript files are preserved\./,
+    ),
+  ).toBeVisible();
 
   for (const label of [
     "Runtime",
