@@ -4733,6 +4733,125 @@ fn daily_agent_research_manifest_loader_and_conversation_link_cover_edges() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+#[allow(clippy::await_holding_lock)]
+async fn daily_research_completion_reuses_same_chatgpt_conversation_before_retrying() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let _e2e = EnvVarGuard::set("BIFROST_E2E", std::ffi::OsStr::new("1"));
+    let _mock = EnvVarGuard::set(
+        "BIFROST_CHATGPT_WEB_E2E_MOCK",
+        std::ffi::OsStr::new("1"),
+    );
+    let _planning = EnvVarGuard::set(
+        "BIFROST_CHATGPT_WEB_E2E_MOCK_PLANNING_FIRST",
+        std::ffi::OsStr::new("1"),
+    );
+    save_daily_agent_mock_runners(
+        temp.path(),
+        [(
+            "chatgpt-web",
+            crate::im_gateway::external_cli::ExternalCliAgentSettings {
+                enabled: true,
+                adapter: "chatgpt_web".to_string(),
+                ..Default::default()
+            },
+        )],
+    );
+
+    let mut task = test_directory_task("research-completion", temp.path().join("audio"));
+    let mut agent = AsrDailyAgentItem::daily_report();
+    agent.runner = "chatgpt-web".to_string();
+    agent.timeout_ms = 30_000;
+    agent.research_fanout = Some(AsrDailyAgentResearchFanoutConfig {
+        allowed_runners: vec!["chatgpt-web".to_string()],
+        ..Default::default()
+    });
+    task.daily_agent.agents = vec![agent.clone()];
+    let task = task_for_daily_agent(&task, &agent);
+    let work_dir = temp.path().join("work");
+    std::fs::create_dir_all(&work_dir).unwrap();
+    let question = AsrDailyResearchQuestion {
+        id: "retry-question".to_string(),
+        original_question: "请直接回答这个研究问题".to_string(),
+        source_excerpt: String::new(),
+        background: String::new(),
+        runner: Some("chatgpt-web".to_string()),
+        github_repositories: Vec::new(),
+        context_profile: None,
+        research_prompt: None,
+    };
+
+    let non_web_error = match ensure_complete_daily_research_execution(
+        &task,
+        "chatgpt-web",
+        &question,
+        &work_dir,
+        "research-session",
+        AsrDailyResearchExecution {
+            run_id: "non-web".to_string(),
+            response: "still planning".to_string(),
+            adapter: "mock".to_string(),
+            metadata: DailyAgentBTreeMap::new(),
+        },
+    )
+    .await
+    {
+        Ok(_) => panic!("non-web placeholder unexpectedly passed validation"),
+        Err(error) => error,
+    };
+    assert!(!non_web_error.trim().is_empty());
+
+    let missing_id_error = match ensure_complete_daily_research_execution(
+        &task,
+        "chatgpt-web",
+        &question,
+        &work_dir,
+        "research-session",
+        AsrDailyResearchExecution {
+            run_id: "missing-id".to_string(),
+            response: "still planning".to_string(),
+            adapter: "chatgpt_web".to_string(),
+            metadata: DailyAgentBTreeMap::new(),
+        },
+    )
+    .await
+    {
+        Ok(_) => panic!("ChatGPT placeholder without conversation id unexpectedly passed"),
+        Err(error) => error,
+    };
+    assert!(missing_id_error.contains("did not return a conversation id"));
+
+    let completed = ensure_complete_daily_research_execution(
+        &task,
+        "chatgpt-web",
+        &question,
+        &work_dir,
+        "research-session",
+        AsrDailyResearchExecution {
+            run_id: "initial".to_string(),
+            response: "我会先检索，再给你研究结果。".to_string(),
+            adapter: "chatgpt_web".to_string(),
+            metadata: DailyAgentBTreeMap::from([(
+                "conversationId".to_string(),
+                "conversation-retry".to_string(),
+            )]),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(completed.response.contains("## 对原始问题的直接回答"));
+    assert_eq!(
+        metadata_value(
+            &completed.metadata,
+            &["conversationId", "conversation_id"]
+        )
+        .as_deref(),
+        Some("conversation-retry")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn daily_agent_orchestrator_runs_dependency_chain_and_tracks_run_ids() {
     let temp = TempDir::new().unwrap();
     let _guard = EnvGuard::set_data_dir(temp.path());
@@ -4879,6 +4998,96 @@ async fn daily_agent_orchestrator_filters_triggers_and_handles_invalid_graph() {
     }];
     task.daily_agent.agents = vec![manual_only];
     assert!(run_daily_agents(&task, "manual", None, false).await.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn after_asr_daily_agent_enqueue_filters_dates_readiness_changes_and_running_tasks() {
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    save_daily_agent_mock_runners(
+        temp.path(),
+        [(
+            "mock-after-asr",
+            daily_agent_mock_file_runner_settings(
+                "after ASR complete",
+                Some("output/report/2026-07-23-report.md"),
+            ),
+        )],
+    );
+
+    let mut task = test_directory_task("daily-agent-after-asr", temp.path().join("audio"));
+    let mut agent = AsrDailyAgentItem::daily_report();
+    agent.runner = "mock-after-asr".to_string();
+    agent.trigger_policy = AsrDailyAgentTriggerPolicy::AfterAsrRun;
+    agent.im_delivery.enabled = false;
+    task.daily_agent.agents = vec![agent.clone()];
+
+    maybe_enqueue_daily_agent_after_asr_run(&task, &["2026-07-23".to_string()]).await;
+    assert!(!DAILY_AGENT_RUNNING_TASKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .contains(&task.id));
+
+    task.daily_agent.enabled = true;
+    maybe_enqueue_daily_agent_after_asr_run(&task, &["not-a-date".to_string()]).await;
+
+    task.daily_agent.agents[0].trigger_policy = AsrDailyAgentTriggerPolicy::ManualOnly;
+    maybe_enqueue_daily_agent_after_asr_run(&task, &["2026-07-23".to_string()]).await;
+
+    task.daily_agent.agents[0].trigger_policy = AsrDailyAgentTriggerPolicy::AfterAsrRun;
+    task.daily_agent.agents[0].runner = "missing-runner".to_string();
+    maybe_enqueue_daily_agent_after_asr_run(&task, &["2026-07-23".to_string()]).await;
+
+    task.daily_agent.agents[0] = agent;
+    ensure_asr_daily_workspace(&task).unwrap();
+    maybe_enqueue_daily_agent_after_asr_run(&task, &["2026-07-23".to_string()]).await;
+
+    std::fs::write(
+        daily_dir_for_task(&task.id).join("2026-07-23.md"),
+        "new transcript",
+    )
+    .unwrap();
+    DAILY_AGENT_RUNNING_TASKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(task.id.clone());
+    maybe_enqueue_daily_agent_after_asr_run(
+        &task,
+        &[
+            "2026-07-23".to_string(),
+            "2026-07-23".to_string(),
+            "invalid".to_string(),
+        ],
+    )
+    .await;
+    let report = daily_agent_output_dir(&task_for_daily_agent(
+        &task,
+        &task.daily_agent.agents[0],
+    ))
+    .join("2026-07-23-report.md");
+    assert!(!report.is_file());
+    DAILY_AGENT_RUNNING_TASKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(&task.id);
+
+    maybe_enqueue_daily_agent_after_asr_run(
+        &task,
+        &[
+            "2026-07-23".to_string(),
+            "2026-07-23".to_string(),
+            "invalid".to_string(),
+        ],
+    )
+    .await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !report.is_file() {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("after-ASR daily agent did not produce its report");
+    assert!(!std::fs::read_to_string(report).unwrap().trim().is_empty());
 }
 
 #[tokio::test(flavor = "current_thread")]

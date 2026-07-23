@@ -1921,6 +1921,109 @@ mod tests {
         assert!(!marker.exists(), "exhausted budget must not spawn MOSS");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn segmented_moss_rescue_covers_success_adaptive_split_gap_and_failures() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let wav = temp.path().join("audio.wav");
+        let silent_wav = temp.path().join("silent.wav");
+        let samples = vec![500_i16; 70 * 16_000];
+        std::fs::write(&wav, make_wav(&samples)).unwrap();
+        std::fs::write(&silent_wav, make_wav(&vec![0_i16; 70 * 16_000])).unwrap();
+
+        let binary = temp.path().join("moss-transcribe");
+        let runtime = moss_process_test_paths(temp.path(), binary.clone());
+        write_executable(
+            &binary,
+            "#!/bin/sh\nprintf '[{\"start\":0.1,\"end\":0.5,\"speaker\":\"S01\",\"text\":\"segment\"}]'\n",
+        );
+
+        let direct =
+            run_segmented_moss_joint_transcription(&runtime, &wav, 10_000, "", None, 60)
+                .await
+                .unwrap();
+        assert_eq!(direct.text, "segment");
+
+        let segmented =
+            run_segmented_moss_joint_transcription(&runtime, &wav, 70_000, "", None, 60)
+                .await
+                .unwrap();
+        assert_eq!(segmented.structured.segments.len(), 2);
+        assert_eq!(segmented.structured.segments[0].start_ms, 100);
+        assert_eq!(segmented.structured.segments[1].start_ms, 60_100);
+        assert_eq!(segmented.text, "segment\nsegment");
+
+        let pause = || true;
+        assert_eq!(
+            run_segmented_moss_joint_transcription(
+                &runtime,
+                &wav,
+                70_000,
+                "",
+                Some(&pause),
+                60,
+            )
+            .await
+            .unwrap_err(),
+            ASR_TASK_PAUSED_MESSAGE
+        );
+
+        let silent_error =
+            run_segmented_moss_joint_transcription(&runtime, &silent_wav, 70_000, "", None, 60)
+                .await
+                .unwrap_err();
+        assert!(silent_error.contains("returned no positive-duration"));
+
+        write_executable(&binary, "#!/bin/sh\necho 'runtime transport failed' >&2\nexit 7\n");
+        let runtime_error =
+            run_segmented_moss_joint_transcription(&runtime, &wav, 70_000, "", None, 60)
+                .await
+                .unwrap_err();
+        assert!(runtime_error.contains("MOSS segmented rescue chunk 1"));
+        assert!(runtime_error.contains("runtime transport failed"));
+
+        let state = temp.path().join("adaptive-count");
+        write_executable(
+            &binary,
+            &format!(
+                "#!/bin/sh\nstate='{}'\ncount=$(cat \"$state\" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$state\"\nif [ \"$count\" -le 3 ]; then\n  echo 'MOSS output has no complete speaker-aware segment before 256 generated tokens' >&2\n  exit 7\nfi\nprintf '[{{\"start\":0.1,\"end\":0.5,\"speaker\":\"S01\",\"text\":\"recovered\"}}]'\n",
+                state.display()
+            ),
+        );
+        let _gap_guard = EnvVarGuard::set(
+            "BIFROST_MOSS_ALLOW_GAP_MARKERS",
+            std::ffi::OsStr::new("1"),
+        );
+        let recovered =
+            run_segmented_moss_joint_transcription(&runtime, &wav, 70_000, "", None, 60)
+                .await
+                .unwrap();
+        assert!(recovered.text.contains("[MOSS 无法可靠转录："));
+        assert!(recovered.text.contains("recovered"));
+        assert_eq!(
+            recovered.structured.segments[0].speaker.as_deref(),
+            Some("UNRESOLVED")
+        );
+        assert!(recovered
+            .structured
+            .segments
+            .windows(2)
+            .all(|segments| segments[0].start_ms <= segments[1].start_ms));
+
+        drop(_gap_guard);
+        write_executable(
+            &binary,
+            "#!/bin/sh\necho 'MOSS output has no complete speaker-aware segment before 256 generated tokens' >&2\nexit 7\n",
+        );
+        let minimum_interval_error =
+            run_segmented_moss_joint_transcription(&runtime, &wav, 70_000, "", None, 60)
+                .await
+                .unwrap_err();
+        assert!(minimum_interval_error.contains("MOSS adaptive rescue minimum interval"));
+    }
+
     #[test]
     fn moss_input_guard_rejects_unknown_short_silent_and_invalid_audio() {
         let temp = TempDir::new().unwrap();
@@ -3970,6 +4073,54 @@ mod tests {
                 env!("CARGO_PKG_VERSION")
             )
         );
+    }
+
+    #[test]
+    fn pre_migration_moss_failures_are_suppressed_once_without_touching_other_records() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let task_id = "suppress-pre-migration";
+        let source = temp.path().join("legacy.wav");
+        std::fs::write(&source, b"audio").unwrap();
+
+        let mut legacy = pending_record(task_id, &source);
+        legacy.status = FileStatus::Failed;
+        legacy.error = Some("legacy runtime failure".to_string());
+        let mut already_suppressed = pending_record(task_id, &source);
+        already_suppressed.status = FileStatus::Failed;
+        already_suppressed.error = Some(format!(
+            "{} already suppressed",
+            moss_non_retryable_marker_prefix()
+        ));
+        let mut success = pending_record(task_id, &source);
+        success.status = FileStatus::Success;
+        success.error = Some("historical warning".to_string());
+        let files = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::from([
+                ("legacy".to_string(), legacy),
+                ("suppressed".to_string(), already_suppressed),
+                ("success".to_string(), success),
+            ]),
+        };
+        save_file_store(task_id, &files).unwrap();
+
+        assert_eq!(suppress_pre_migration_failed_records(task_id).unwrap(), 1);
+        let persisted = load_file_store(task_id);
+        assert!(persisted.files["legacy"]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("preserved pre-migration failure")));
+        assert!(persisted.files["suppressed"]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("already suppressed")));
+        assert_eq!(
+            persisted.files["success"].error.as_deref(),
+            Some("historical warning")
+        );
+        assert_eq!(suppress_pre_migration_failed_records(task_id).unwrap(), 0);
     }
 
     #[test]

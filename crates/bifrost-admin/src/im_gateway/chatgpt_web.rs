@@ -866,6 +866,18 @@ async fn wait_for_stop_marker(path: PathBuf) {
 }
 
 fn mock_run_adapter_for_e2e(request: &ExternalCliRunRequest, prompt: &str) -> ChatGptWebRunOutput {
+    let planning_first = std::env::var("BIFROST_CHATGPT_WEB_E2E_MOCK_PLANNING_FIRST")
+        .ok()
+        .as_deref()
+        == Some("1");
+    mock_run_adapter_for_e2e_with_planning(request, prompt, planning_first)
+}
+
+fn mock_run_adapter_for_e2e_with_planning(
+    request: &ExternalCliRunRequest,
+    prompt: &str,
+    planning_first: bool,
+) -> ChatGptWebRunOutput {
     let conversation_id = conversation_id_hint_from_request(request)
         .unwrap_or_else(|| format!("mock-conversation-{}", uuid::Uuid::new_v4()));
     let project_url = request
@@ -875,10 +887,6 @@ fn mock_run_adapter_for_e2e(request: &ExternalCliRunRequest, prompt: &str) -> Ch
         .and_then(Value::as_object)
         .and_then(|chatgpt| chatgpt.get("projectUrl"))
         .and_then(Value::as_str);
-    let planning_first = std::env::var("BIFROST_CHATGPT_WEB_E2E_MOCK_PLANNING_FIRST")
-        .ok()
-        .as_deref()
-        == Some("1");
     let initial_research_turn = planning_first
         && request.operation != "wait"
         && prompt.contains("你正在独立研究一个问题")
@@ -4229,6 +4237,65 @@ mod coverage_boost_v3 {
         assert!(!chatgpt_web_operation_can_access_live_service(
             "unsupported-test-operation"
         ));
+    }
+
+    #[test]
+    fn planning_first_mock_covers_initial_wait_retry_and_project_fallbacks() {
+        let mut request = ExternalCliRunRequest {
+            images: Vec::new(),
+            message: String::new(),
+            operation: "send".to_string(),
+            params: json!({"conversationId": "coverage-conversation"}),
+            provider_id: None,
+            runner_id: None,
+            session_key: None,
+            runtime: "external_cli".to_string(),
+            adapter: ADAPTER_ID.to_string(),
+            work_dir: None,
+            instructions: None,
+            adapter_config: ExternalCliAdapterConfig {
+                extra: BTreeMap::from([(
+                    "chatgpt".to_string(),
+                    json!({"projectUrl": "https://chatgpt.com/g/g-p-coverage/project"}),
+                )]),
+                ..ExternalCliAdapterConfig::default()
+            },
+            allow_work_dirs: Vec::new(),
+            inject_bifrost_tools: false,
+            skill_paths: Vec::new(),
+        };
+        let initial = mock_run_adapter_for_e2e_with_planning(
+            &request,
+            "你正在独立研究一个问题\n原始问题",
+            true,
+        );
+        assert!(initial.response.contains("先检索和核验资料"));
+        assert_eq!(
+            initial.metadata.get("conversationId").map(String::as_str),
+            Some("coverage-conversation")
+        );
+
+        request.operation = "wait".to_string();
+        let waited = mock_run_adapter_for_e2e_with_planning(
+            &request,
+            "你正在独立研究一个问题\n原始问题",
+            true,
+        );
+        assert!(!waited.response.contains("先检索和核验资料"));
+
+        request.operation = "send".to_string();
+        let retry = mock_run_adapter_for_e2e_with_planning(
+            &request,
+            "上一条回复不是最终研究报告\n原始问题：\n覆盖率研究问题\n\n必须逐字保留原始问题",
+            true,
+        );
+        assert!(retry.response.contains("## 原始问题\n覆盖率研究问题"));
+        assert!(retry.response.contains("## 对原始问题的直接回答"));
+
+        let fallback = mock_run_adapter_for_e2e_with_planning(&request, "普通问题", false);
+        assert!(fallback
+            .response
+            .contains("CHATGPT_PROJECT_URL: https://chatgpt.com/g/g-p-coverage/project"));
     }
 
     #[test]
