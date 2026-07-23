@@ -10,6 +10,7 @@ REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TEST_DIR="$(mktemp -d)"
 BIFROST_LOG="$TEST_DIR/bifrost.log"
 PROMPT_LOG="$TEST_DIR/group-prompts.jsonl"
+RUN_LOG="$TEST_DIR/runner-events.jsonl"
 BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
 BIFROST_PORT="${BIFROST_PORT:-$(python3 - <<'PY'
 import socket
@@ -82,12 +83,12 @@ BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
 BIFROST_PID=$!
 wait_http
 
-python3 - "$BIFROST_PORT" "$REPO_DIR" "$PROMPT_LOG" <<'PY'
+python3 - "$BIFROST_PORT" "$REPO_DIR" "$PROMPT_LOG" "$RUN_LOG" <<'PY'
 import json
 import sys
 import urllib.request
 
-port, repo_dir, prompt_log = sys.argv[1:4]
+port, repo_dir, prompt_log, run_log = sys.argv[1:5]
 base = f"http://127.0.0.1:{port}/_bifrost/api/im-gateway"
 
 def request(path, payload, method="POST"):
@@ -101,10 +102,12 @@ def request(path, payload, method="POST"):
         assert response.status == 200, response.read().decode()
 
 runner_code = (
-    "import json,sys,time; "
+    "import json,os,sys,time; "
     "prompt=sys.stdin.read(); "
     f"open({prompt_log!r},'a',encoding='utf-8').write(json.dumps(prompt,ensure_ascii=False)+'\\n'); "
+    f"open({run_log!r},'a',encoding='utf-8').write(json.dumps({{'phase':'start','pid':os.getpid(),'at':time.time()}})+'\\n'); "
     "time.sleep(1); "
+    f"open({run_log!r},'a',encoding='utf-8').write(json.dumps({{'phase':'finish','pid':os.getpid(),'at':time.time()}})+'\\n'); "
     "print(json.dumps({'type':'assistant_final','content':'GROUP_OK'}))"
 )
 request("/chat/config", {
@@ -150,16 +153,17 @@ inject() {
   local message_id="$4"
   local text="$5"
   local mention_bot="${6:-false}"
-  python3 - "$BIFROST_PORT" "$chat_id" "$user_id" "$user_name" "$message_id" "$text" "$mention_bot" <<'PY'
+  local chat_type="${7:-group}"
+  python3 - "$BIFROST_PORT" "$chat_id" "$user_id" "$user_name" "$message_id" "$text" "$mention_bot" "$chat_type" <<'PY'
 import json
 import sys
 import urllib.request
 
-port, chat_id, user_id, user_name, message_id, text, mention_bot = sys.argv[1:8]
+port, chat_id, user_id, user_name, message_id, text, mention_bot, chat_type = sys.argv[1:9]
 payload = {
     "providerId": "feishu-group-e2e",
     "chatId": chat_id,
-    "chatType": "group",
+    "chatType": chat_type,
     "chatName": {"chat-alpha": "Alpha 发布群", "chat-beta": "Beta 讨论群"}.get(chat_id),
     "userId": user_id,
     "userName": user_name,
@@ -216,16 +220,33 @@ inject chat-beta user-carol Carol b5 "/q 排队后的结论"
 wait_prompt_count 5
 sleep 1.25
 
-python3 - "$PROMPT_LOG" "$TEST_DIR/admin/im_group_context.db" "$REPO_DIR" <<'PY'
+# A long-running group task must not own the provider receiver. Two groups and
+# the provider owner's direct-message session start separate worker processes
+# before any of the three workers finishes.
+inject chat-alpha user-alice Alice a10 "@_user_1 并发检查 Alpha" true
+inject chat-beta user-carol Carol b6 "@_user_1 并发检查 Beta" true
+inject direct-owner owner-only-in-p2p Owner p1 "并发检查私聊" false p2p
+wait_prompt_count 8
+for _ in $(seq 1 160); do
+  if [[ -f "$RUN_LOG" ]] && [[ "$(wc -l <"$RUN_LOG" | tr -d ' ')" == "16" ]]; then
+    break
+  fi
+  sleep 0.25
+done
+[[ -f "$RUN_LOG" ]]
+[[ "$(wc -l <"$RUN_LOG" | tr -d ' ')" == "16" ]]
+
+python3 - "$PROMPT_LOG" "$RUN_LOG" "$TEST_DIR/admin/im_group_context.db" "$REPO_DIR" <<'PY'
 import json
 import pathlib
 import sqlite3
 import sys
 
-prompt_path, db_path, repo_dir = sys.argv[1:4]
+prompt_path, run_path, db_path, repo_dir = sys.argv[1:5]
 prompts = [json.loads(line) for line in open(prompt_path, encoding="utf-8") if line.strip()]
-assert len(prompts) == 5, prompts
-first, second, slash_fallback, third, queued = prompts
+assert len(prompts) == 8, prompts
+first, second, slash_fallback, third, queued = prompts[:5]
+concurrent_prompts = prompts[5:]
 
 assert "群名称：Alpha 发布群" in first, first
 assert "群 ID：chat-alpha" in first, first
@@ -260,6 +281,16 @@ assert "<at id=user-carol>Carol</at>：排队后的结论" in queued, queued
 assert "/clear" not in queued, queued
 assert "群名称：" not in queued and "群 ID：" not in queued, queued
 
+for expected in ("并发检查 Alpha", "并发检查 Beta", "并发检查私聊"):
+    assert sum(expected in prompt for prompt in concurrent_prompts) == 1, concurrent_prompts
+
+runner_events = [json.loads(line) for line in open(run_path, encoding="utf-8") if line.strip()]
+assert len(runner_events) == 16, runner_events
+concurrent_events = runner_events[-6:]
+assert [event["phase"] for event in concurrent_events[:3]] == ["start"] * 3, concurrent_events
+assert len({event["pid"] for event in concurrent_events[:3]}) == 3, concurrent_events
+assert all(event["phase"] == "finish" for event in concurrent_events[3:]), concurrent_events
+
 connection = sqlite3.connect(db_path)
 bindings = connection.execute(
     "SELECT chat_id, session_key, last_assigned_seq, chat_name, work_dir, runner_id "
@@ -274,11 +305,11 @@ assert bindings[0][5] == "group-mock", bindings
 messages = connection.execute(
     "SELECT chat_id, COUNT(*) FROM im_group_messages GROUP BY chat_id ORDER BY chat_id"
 ).fetchall()
-assert messages == [("chat-alpha", 9), ("chat-beta", 5)], messages
+assert messages == [("chat-alpha", 10), ("chat-beta", 6)], messages
 beta_turns = connection.execute(
     "SELECT status FROM im_group_turns WHERE chat_id = 'chat-beta' ORDER BY created_at"
 ).fetchall()
-assert beta_turns == [("completed",), ("completed",)], beta_turns
+assert beta_turns == [("completed",), ("completed",), ("completed",)], beta_turns
 PY
 
 echo "[feishu-group-session] PASS"

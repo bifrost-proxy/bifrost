@@ -228,15 +228,42 @@ pub(super) async fn run_event_loop_with_options(
     }
 
     let mut dedup = EventDedup::new();
-    let mut pending_events = VecDeque::new();
+    let mut session_mailboxes = SessionMailboxRegistry::new();
+    let mut recovered_session_events = VecDeque::new();
+    let mut inbound_open = true;
 
     loop {
-        let event = match pending_events.pop_front() {
+        if !inbound_open && session_mailboxes.is_empty() && recovered_session_events.is_empty() {
+            break;
+        }
+        let event = match recovered_session_events.pop_front() {
             Some(event) => event,
-            None => match rx.recv().await {
-                Some(event) => event,
-                None => break,
-            },
+            None if inbound_open => {
+                tokio::select! {
+                    event = rx.recv() => match event {
+                        Some(event) => event,
+                        None => {
+                            inbound_open = false;
+                            continue;
+                        },
+                    },
+                    completion = session_mailboxes.recv_completion() => {
+                        if let Some(completion) = completion {
+                            recovered_session_events.extend(session_mailboxes.finish(completion));
+                        }
+                        continue;
+                    }
+                }
+            }
+            None => {
+                if let Some(completion) = session_mailboxes.recv_completion().await {
+                    recovered_session_events.extend(session_mailboxes.finish(completion));
+                }
+                continue;
+            }
+        };
+        let Some(event) = session_mailboxes.dispatch(event) else {
+            continue;
         };
         let provider = provider_store
             .get(&event.provider_id)
@@ -536,22 +563,21 @@ pub(super) async fn run_event_loop_with_options(
                                     .and_then(|runner| runner.custom_runner_id())
                                     .map(ToString::to_string)
                             });
-                        run_external_cli_agent_chat(
-                            ExternalCliChatContext {
-                                rx: &mut rx,
-                                client: &client,
-                                provider: &provider,
-                                provider_store: &provider_store,
-                                event: &event,
-                                message_log_store: &message_log_store,
-                                agent_config_store: &agent_config_store,
-                                external_cli_config_store: &external_cli_config_store,
-                                agent_session_manager: &agent_session_manager,
-                                queue_manager: &queue_manager,
-                                progress_registry: &progress_registry,
-                                event_store: &event_store,
-                                group_context_store: &group_context_store,
-                                pending_events: &mut pending_events,
+                        spawn_external_cli_agent_chat(
+                            &mut session_mailboxes,
+                            ExternalCliChatTaskContext {
+                                client: client.clone(),
+                                provider: provider.clone(),
+                                provider_store: Arc::clone(&provider_store),
+                                event: event.clone(),
+                                message_log_store: Arc::clone(&message_log_store),
+                                agent_config_store: Arc::clone(&agent_config_store),
+                                external_cli_config_store: Arc::clone(&external_cli_config_store),
+                                agent_session_manager: Arc::clone(&agent_session_manager),
+                                queue_manager: Arc::clone(&queue_manager),
+                                progress_registry: Arc::clone(&progress_registry),
+                                event_store: Arc::clone(&event_store),
+                                group_context_store: Arc::clone(&group_context_store),
                             },
                             ExternalCliChatInput {
                                 message_text: agent_message,
@@ -568,8 +594,7 @@ pub(super) async fn run_event_loop_with_options(
                                 group_turn_id: inbound_dispatch.group_turn_id.clone(),
                                 reset_group_context: inbound_dispatch.reset_group_context,
                             },
-                        )
-                        .await;
+                        );
                         continue;
                     }
                 }
@@ -687,22 +712,21 @@ pub(super) async fn run_event_loop_with_options(
                             .and_then(|runner| runner.custom_runner_id())
                             .map(ToString::to_string)
                     });
-                run_external_cli_agent_chat(
-                    ExternalCliChatContext {
-                        rx: &mut rx,
-                        client: &client,
-                        provider: &provider,
-                        provider_store: &provider_store,
-                        event: &event,
-                        message_log_store: &message_log_store,
-                        agent_config_store: &agent_config_store,
-                        external_cli_config_store: &external_cli_config_store,
-                        agent_session_manager: &agent_session_manager,
-                        queue_manager: &queue_manager,
-                        progress_registry: &progress_registry,
-                        event_store: &event_store,
-                        group_context_store: &group_context_store,
-                        pending_events: &mut pending_events,
+                spawn_external_cli_agent_chat(
+                    &mut session_mailboxes,
+                    ExternalCliChatTaskContext {
+                        client: client.clone(),
+                        provider: provider.clone(),
+                        provider_store: Arc::clone(&provider_store),
+                        event: event.clone(),
+                        message_log_store: Arc::clone(&message_log_store),
+                        agent_config_store: Arc::clone(&agent_config_store),
+                        external_cli_config_store: Arc::clone(&external_cli_config_store),
+                        agent_session_manager: Arc::clone(&agent_session_manager),
+                        queue_manager: Arc::clone(&queue_manager),
+                        progress_registry: Arc::clone(&progress_registry),
+                        event_store: Arc::clone(&event_store),
+                        group_context_store: Arc::clone(&group_context_store),
                     },
                     ExternalCliChatInput {
                         message_text,
@@ -722,8 +746,7 @@ pub(super) async fn run_event_loop_with_options(
                         group_turn_id: inbound_dispatch.group_turn_id.clone(),
                         reset_group_context: inbound_dispatch.reset_group_context,
                     },
-                )
-                .await;
+                );
                 continue;
             }
             ImRouteAction::ExternalCliAgentChat {
@@ -775,22 +798,21 @@ pub(super) async fn run_event_loop_with_options(
                     }
                 }
 
-                run_external_cli_agent_chat(
-                    ExternalCliChatContext {
-                        rx: &mut rx,
-                        client: &client,
-                        provider: &provider,
-                        provider_store: &provider_store,
-                        event: &event,
-                        message_log_store: &message_log_store,
-                        agent_config_store: &agent_config_store,
-                        external_cli_config_store: &external_cli_config_store,
-                        agent_session_manager: &agent_session_manager,
-                        queue_manager: &queue_manager,
-                        progress_registry: &progress_registry,
-                        event_store: &event_store,
-                        group_context_store: &group_context_store,
-                        pending_events: &mut pending_events,
+                spawn_external_cli_agent_chat(
+                    &mut session_mailboxes,
+                    ExternalCliChatTaskContext {
+                        client: client.clone(),
+                        provider: provider.clone(),
+                        provider_store: Arc::clone(&provider_store),
+                        event: event.clone(),
+                        message_log_store: Arc::clone(&message_log_store),
+                        agent_config_store: Arc::clone(&agent_config_store),
+                        external_cli_config_store: Arc::clone(&external_cli_config_store),
+                        agent_session_manager: Arc::clone(&agent_session_manager),
+                        queue_manager: Arc::clone(&queue_manager),
+                        progress_registry: Arc::clone(&progress_registry),
+                        event_store: Arc::clone(&event_store),
+                        group_context_store: Arc::clone(&group_context_store),
                     },
                     ExternalCliChatInput {
                         message_text,
@@ -810,8 +832,7 @@ pub(super) async fn run_event_loop_with_options(
                         group_turn_id: inbound_dispatch.group_turn_id.clone(),
                         reset_group_context: inbound_dispatch.reset_group_context,
                     },
-                )
-                .await;
+                );
             }
         }
     }
@@ -838,7 +859,6 @@ struct ExternalCliChatContext<'a> {
     progress_registry: &'a Arc<ImAgentProgressRegistry>,
     event_store: &'a Arc<ImEventStore>,
     group_context_store: &'a Arc<ImGroupContextStore>,
-    pending_events: &'a mut VecDeque<ImEvent>,
 }
 
 struct ExternalCliChatInput {
@@ -983,11 +1003,13 @@ pub(super) async fn prepare_group_inbound_dispatch(
 
 mod external_runner;
 use external_runner::*;
+mod session_dispatch;
 #[allow(unused_imports)]
 pub(super) use external_runner::{
     apply_external_cli_resume_metadata, finalize_live_guide_group_turns,
     resolve_external_cli_delivery_mode,
 };
+use session_dispatch::*;
 #[cfg(test)]
 #[path = "event_loop/tests.rs"]
 mod tests;

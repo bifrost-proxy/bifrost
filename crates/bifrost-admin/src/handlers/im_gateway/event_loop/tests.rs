@@ -855,8 +855,12 @@ async fn group_event_loop_routes_concurrent_context_to_the_active_external_sessi
     provider.id = "feishu-group-concurrent".to_string();
     provider.base_url = Some("http://127.0.0.1:9".to_string());
     service.provider_store.add(provider.clone()).unwrap();
-    let session_key =
+    let group_a_session =
         crate::im_gateway::group_context::build_group_session_key(&provider.id, "oc_group");
+    let group_b_session =
+        crate::im_gateway::group_context::build_group_session_key(&provider.id, "oc_group_b");
+    let direct_a_session = build_session_key(&provider.id, Some("ou_direct_a"));
+    let direct_b_session = build_session_key(&provider.id, Some("ou_direct_b"));
 
     let (tx, rx) = mpsc::unbounded_channel();
     let handle = tokio::spawn(run_event_loop_with_options(
@@ -893,7 +897,7 @@ async fn group_event_loop_routes_concurrent_context_to_the_active_external_sessi
         loop {
             if service
                 .agent_session_manager
-                .is_session_active(&session_key)
+                .is_session_active(&group_a_session)
             {
                 break;
             }
@@ -903,12 +907,56 @@ async fn group_event_loop_routes_concurrent_context_to_the_active_external_sessi
     .await
     .expect("group runner did not become active");
 
+    let mut group_b = group_test_event(
+        &provider.id,
+        "second-group-trigger",
+        "@_user_1 start group B",
+        true,
+        2,
+    );
+    group_b.source.chat_id = Some("oc_group_b".to_string());
+    tx.send(group_b).unwrap();
+
+    let mut direct_a =
+        group_test_event(&provider.id, "direct-a-trigger", "start direct A", false, 3);
+    direct_a.source.chat_type = Some("p2p".to_string());
+    direct_a.source.user_id = Some("ou_direct_a".to_string());
+    tx.send(direct_a).unwrap();
+
+    let mut direct_b =
+        group_test_event(&provider.id, "direct-b-trigger", "start direct B", false, 4);
+    direct_b.source.chat_type = Some("p2p".to_string());
+    direct_b.source.user_id = Some("ou_direct_b".to_string());
+    tx.send(direct_b).unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let all_active = [
+                &group_a_session,
+                &group_b_session,
+                &direct_a_session,
+                &direct_b_session,
+            ]
+            .into_iter()
+            .all(|session_key| service.agent_session_manager.is_session_active(session_key));
+            if all_active {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("group and direct runners did not become active independently");
+    assert!(service
+        .agent_session_manager
+        .is_session_active(&group_a_session));
+
     tx.send(group_test_event(
         &provider.id,
         "ambient-during-run",
         "the deployment is red",
         false,
-        2,
+        5,
     ))
     .unwrap();
     tx.send(group_test_event(
@@ -916,7 +964,7 @@ async fn group_event_loop_routes_concurrent_context_to_the_active_external_sessi
         "guide-during-run",
         "/g include the deployment failure",
         false,
-        3,
+        6,
     ))
     .unwrap();
     tx.send(group_test_event(
@@ -924,7 +972,7 @@ async fn group_event_loop_routes_concurrent_context_to_the_active_external_sessi
         "cwd-during-run",
         &format!("/cwd {}", temp.path().display()),
         false,
-        4,
+        7,
     ))
     .unwrap();
     tx.send(group_test_event(
@@ -932,7 +980,7 @@ async fn group_event_loop_routes_concurrent_context_to_the_active_external_sessi
         "queue-during-run",
         "/q verify the queued follow-up",
         false,
-        5,
+        8,
     ))
     .unwrap();
     tx.send(group_test_event(
@@ -940,9 +988,28 @@ async fn group_event_loop_routes_concurrent_context_to_the_active_external_sessi
         "remove-queue-during-run",
         "/rq 1",
         false,
-        6,
+        9,
     ))
     .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let any_active = [
+                &group_a_session,
+                &group_b_session,
+                &direct_a_session,
+                &direct_b_session,
+            ]
+            .into_iter()
+            .any(|session_key| service.agent_session_manager.is_session_active(session_key));
+            if !any_active {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("independent runners did not finish");
     drop(tx);
     tokio::time::timeout(std::time::Duration::from_secs(20), handle)
         .await
@@ -959,20 +1026,30 @@ async fn group_event_loop_routes_concurrent_context_to_the_active_external_sessi
     assert_eq!(
         service
             .group_context_store
-            .work_dir_by_session(&session_key)
+            .work_dir_by_session(&group_a_session)
             .unwrap()
             .as_deref(),
         Some(std::fs::canonicalize(temp.path()).unwrap().as_path())
     );
-    assert!(service.queue_manager.queue_status(&session_key).is_empty());
-    let detail = service
-        .agent_session_manager
-        .get_session_detail(&session_key)
-        .expect("group external runner session");
-    assert!(detail
-        .messages
-        .iter()
-        .any(|message| message.content == "GROUP_RUNNER_OK"));
+    assert!(service
+        .queue_manager
+        .queue_status(&group_a_session)
+        .is_empty());
+    for session_key in [
+        group_a_session,
+        group_b_session,
+        direct_a_session,
+        direct_b_session,
+    ] {
+        let detail = service
+            .agent_session_manager
+            .get_session_detail(&session_key)
+            .expect("independent external runner session");
+        assert!(detail
+            .messages
+            .iter()
+            .any(|message| message.content == "GROUP_RUNNER_OK"));
+    }
 }
 
 #[tokio::test]
@@ -1020,8 +1097,6 @@ async fn disabled_and_busy_external_runner_paths_preserve_group_queue_state() {
     reply_event.source.user_id = None;
     let client = ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider()));
     let (_tx, mut rx) = mpsc::unbounded_channel();
-    let mut pending_events = VecDeque::new();
-
     run_external_cli_agent_chat(
         ExternalCliChatContext {
             rx: &mut rx,
@@ -1037,7 +1112,6 @@ async fn disabled_and_busy_external_runner_paths_preserve_group_queue_state() {
             progress_registry: &service.progress_registry,
             event_store: &service.event_store,
             group_context_store: &service.group_context_store,
-            pending_events: &mut pending_events,
         },
         ExternalCliChatInput {
             message_text: "investigate".to_string(),
@@ -1096,7 +1170,6 @@ async fn disabled_and_busy_external_runner_paths_preserve_group_queue_state() {
             progress_registry: &service.progress_registry,
             event_store: &service.event_store,
             group_context_store: &service.group_context_store,
-            pending_events: &mut pending_events,
         },
         ExternalCliChatInput {
             message_text: "queued while busy".to_string(),

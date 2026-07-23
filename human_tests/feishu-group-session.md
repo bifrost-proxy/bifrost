@@ -154,6 +154,17 @@
 
 预期结果：每个生产 Rust 文件不超过 1500 行；群 Session 并发分发不再继续堆入 `agent_chat.rs`，行为测试保持通过。
 
+### TC-FGS-19：群聊与私聊使用独立进程且跨 Session 不等待
+
+1. 为同一个飞书 Provider 配置会休眠 1 秒并记录 PID、开始时间和结束时间的本地 mock Runner。
+2. 先在 `chat-alpha` 启动长任务；在它仍为 active 时，连续向 `chat-beta` 和 Provider owner 私聊发送触发消息。
+3. 检查三个 Session 的 active 状态、mock Runner PID 和开始/结束事件顺序。
+4. 在单元场景中再同时建立两个群 Session 与两个私聊 Session，并向第一个群发送普通背景、Guide、`/cwd`、Queue 和取消排队命令。
+5. 模拟同一 Session 的 receiver 已关闭但 completion 尚未处理，此时再到达新消息；随后模拟旧任务延迟完成后已建立新 mailbox，处理旧 generation 完成通知。
+6. 发送触发消息后正常关闭 Provider 输入通道，并等待已启动 Runner 收尾。
+
+预期结果：两个群和私聊在第一个任务完成前都启动，三个 Runner PID 各不相同；群聊按 `provider_id + chat_id`、私聊按 `provider_id + user_id` 使用独立 mailbox、异步任务、外部进程和会话历史，任一长任务不会阻塞其他会话接收、启动或回复。同一群的后续消息仍只进入该群 Guide/Queue 通道并保持顺序；receiver 关闭前后的消息按原顺序回放，旧 generation 完成通知不能移除替代 mailbox。Provider 输入正常关闭会排空已启动任务，不会截断结果；只有 event-loop 被显式取消时才终止任务。
+
 ## 执行方式
 
 TC-FGS-01 至 TC-FGS-05 由以下真实服务脚本逐条执行：
@@ -216,6 +227,14 @@ test "$(wc -l < crates/bifrost-admin/src/handlers/im_gateway/agent_chat.rs)" -le
 test "$(wc -l < crates/bifrost-admin/src/handlers/im_gateway/agent_chat_concurrent.rs)" -le 1500
 test "$(wc -l < crates/bifrost-admin/src/handlers/im_gateway/agent_chat_progress.rs)" -le 1500
 cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
+```
+
+TC-FGS-19 的多群、私聊并发进程隔离与 mailbox 竞态执行：
+
+```bash
+cargo test -p bifrost-admin session_dispatch --all-features -- --nocapture
+cargo test -p bifrost-admin group_event_loop_routes_concurrent_context_to_the_active_external_session --all-features -- --nocapture
+bash e2e-tests/tests/test_feishu_group_session_context.sh
 ```
 
 ## 清理步骤

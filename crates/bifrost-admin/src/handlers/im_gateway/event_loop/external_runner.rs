@@ -593,23 +593,6 @@ pub(super) async fn run_external_cli_agent_chat(
                     }
                 }
                 Some(next_event) = ctx.rx.recv() => {
-                    if session_key_for_event(&next_event) != input.session_key {
-                        if crate::im_gateway::group_context::is_feishu_group_event(&next_event) {
-                            if let Err(error) = ctx.group_context_store.record_event(
-                                &next_event,
-                                "deferred_during_active_session",
-                            ) {
-                                warn!(
-                                    provider_id = %next_event.provider_id,
-                                    event_id = %next_event.event_id,
-                                    error = %error,
-                                    "failed to persist deferred Feishu group event"
-                                );
-                            }
-                        }
-                        ctx.pending_events.push_back(next_event);
-                        continue;
-                    }
                     maybe_stop_external_cli_for_event(&next_event, &input.session_key).await;
                     handle_concurrent_event_during_chat(
                         &next_event,

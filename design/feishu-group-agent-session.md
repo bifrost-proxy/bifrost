@@ -14,7 +14,7 @@
 
 - 群聊 Session Key：`im:{provider_id}:group:{chat_id}`。
 - 同一个飞书群加入多个机器人时，每个机器人对应独立 Provider，因此即使 `chat_id` 相同，也由 `provider_id` 隔离 Session、上下文游标、Runner 和工作目录。
-- 单聊 Session Key 保持原兼容格式 `{provider_id}:{user_id}`。
+- 单聊 Session Key 保持原兼容格式 `{provider_id}:{user_id}`，同一 Provider 下不同私聊用户也各自隔离。
 - 第一条群消息创建逻辑会话和消息账本，但不启动 Runner。
 - 每个模型触发区间为 `(last_assigned_seq, trigger_seq]`：排除上一次已分配的触发消息，包含本次触发消息。
 - 普通管理 slash（例如 `/help`、`/status`、`/cwd`）不消耗增量上下文；`/clear` 和 `/reset` 同时建立新的上下文基线。
@@ -40,6 +40,17 @@
 6. Session 空闲时启动 Turn；Session 运行中时复用现有 live Guide，失败时复用现有 queue fallback。
 7. 直接启动 Runner 的 Turn 在完成后更新状态和 `last_success_seq`；运行中 Guide/Queue 的 Turn 保持 `dispatched`。live Guide 被外部 Runner 接受后也必须等当前 Runner 成功或失败再同步完成或失败，不能在控制通道仅返回 `accepted` 时提前记为成功。
 8. 进程重启会丢失内存队列和事件去重缓存，但 SQLite 中 `prepared` / `dispatched` Turn 保留冻结输入。飞书重投同一触发消息且对应 Session 当前空闲时，复用原 Turn 继续执行；同进程 Session 仍繁忙时继续按重复消息丢弃，避免双跑。
+
+## 并发分发与进程隔离
+
+Provider 长连接只负责接收事件，不把全局接收器借给任何一个 Runner。事件进入后先计算统一 Session Key，再由 Provider 分发器直接投递到对应 mailbox：群聊按 `(provider_id, chat_id)`，私聊按 `(provider_id, user_id)`。
+
+- 每个活跃 Session 拥有独立 mailbox、异步控制任务和外部 Runner 进程；群 A、群 B、私聊 A、私聊 B 不共享接收器，也不互相等待。
+- 同一 Session 的后续消息仍按到达顺序进入同一 mailbox，并复用 Guide、Queue、`/stop` 和进度控制语义。
+- Provider 主循环始终继续接收新事件；启动 Runner 只注册 mailbox 并派生 Session 任务，不在主循环内等待 Runner 完成。
+- Session 任务完成通知携带单调 generation。旧任务延迟完成时只能移除同 generation 的 mailbox，不能误删已经重建的新任务。
+- Provider 输入通道正常关闭时停止接收新消息，但等待已启动的 Session 任务完成并排空收尾消息；event-loop 被显式取消时才终止仍活跃的任务。异常取消或 panic 会释放 Session active 标记，避免永久 busy。
+- mailbox receiver 关闭后的消息暂存在同 generation 的收尾队列；completion 先回放 receiver 中更早的缓冲消息，再回放关闭后消息并创建替代任务，不能因完成通知竞态而丢失或打乱同 Session 顺序。
 
 ## 模型输入
 
@@ -107,8 +118,8 @@ Bifrost 不创建、更新或同步飞书机器人自定义菜单，也不订阅
 - 已接收的原始消息全量保存在账本中，结构化输入不得静默裁剪；输入超过 200 条或 64 KiB 时返回可观察错误且不推进游标，后续可扩展摘要/附件能力。
 - 首版以长连接持续订阅为主，不主动调用历史消息 API。飞书具备历史读取能力，但自动断线补偿会额外扩大敏感权限和数据读取范围，应作为显式开关实现；当前断线窗口是已知边界。
 - Turn 创建和游标推进必须在同一事务中完成，避免崩溃后重复或跳过区间。
-- 一个 Runner 活跃期间收到的其他群消息先写入账本，再进入跨 Session 待处理队列，避免长任务期间进程异常造成已接收群消息丢失。
-- 同一群内顺序执行；不同群拥有独立 Session Key，不共享对话历史、队列或工作目录。
+- 一个 Runner 活跃期间收到的其他群或私聊消息直接投递到各自 Session mailbox，并立即启动各自外部进程，不进入跨 Session 待处理队列。
+- 同一群或同一私聊内顺序执行；不同群、不同私聊以及群聊与私聊之间拥有独立 Session Key，不共享进程、对话历史、队列或工作目录。
 
 ## 验证清单
 
@@ -117,6 +128,7 @@ Bifrost 不创建、更新或同步飞书机器人自定义菜单，也不订阅
 - 第二次 @ 只包含上次触发后的增量；
 - 运行中 @ 和 `/g` 携带新增上下文进入 Guide；
 - 两个群的 Session、游标和 `/cwd` 互不影响；
+- 两个群与两个私聊可同时保持 Runner active，任一长任务不阻塞其他会话接收、启动或回复；
 - slash 解析及响应与单聊一致；
 - 重复事件不会产生重复消息或重复 Turn；
 - 非 owner 群成员消息能入账并可通过 @ 触发；
