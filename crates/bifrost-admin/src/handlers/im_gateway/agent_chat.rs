@@ -24,17 +24,15 @@ struct ImCwdCommandContext<'a> {
     session_manager: &'a Arc<ImAgentSessionManager>,
 }
 
-pub(super) struct ImRunnerCommandContext<'a> {
-    pub(super) client: &'a ImProviderClient,
-    pub(super) provider: &'a ImProviderConfig,
-    pub(super) provider_store: &'a Arc<ImProviderStore>,
-    pub(super) group_context_store: &'a Arc<ImGroupContextStore>,
-    pub(super) external_cli_config_store:
-        &'a Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
-    pub(super) event: &'a ImEvent,
-    pub(super) message_log_store: &'a Arc<ImMessageLogStore>,
-    pub(super) session_manager: &'a Arc<ImAgentSessionManager>,
-    pub(super) agent_config: &'a crate::im_gateway::agent::ImAgentConfig,
+struct ImRunnerCommandContext<'a> {
+    client: &'a ImProviderClient,
+    provider: &'a ImProviderConfig,
+    provider_store: &'a Arc<ImProviderStore>,
+    group_context_store: &'a Arc<ImGroupContextStore>,
+    external_cli_config_store: &'a Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
+    event: &'a ImEvent,
+    message_log_store: &'a Arc<ImMessageLogStore>,
+    session_manager: &'a Arc<ImAgentSessionManager>,
 }
 
 struct ImModelCommandContext<'a> {
@@ -158,7 +156,6 @@ pub(super) async fn handle_idle_im_command(
             event: ctx.event,
             message_log_store: ctx.message_log_store,
             session_manager: ctx.agent_session_manager,
-            agent_config,
         },
     )
     .await
@@ -463,25 +460,7 @@ pub(super) fn format_im_cwd_error(reason: &str) -> String {
     format!("❌ 无法切换工作目录：{reason}\n\n用法: /cwd <绝对路径>")
 }
 
-fn provider_custom_runner_id(provider: &ImProviderConfig) -> Option<&str> {
-    provider
-        .agent_config
-        .as_ref()
-        .and_then(|config| config.runner.as_ref())
-        .and_then(|runner| runner.custom_runner_id())
-}
-
-pub(super) fn provider_after_runner_change(
-    provider_store: &Arc<ImProviderStore>,
-    provider_id: &str,
-    previous_runner_id: Option<&str>,
-) -> Option<ImProviderConfig> {
-    provider_store
-        .get(provider_id)
-        .filter(|provider| provider_custom_runner_id(provider) != previous_runner_id)
-}
-
-pub(super) async fn handle_im_runner_command(
+async fn handle_im_runner_command(
     message: &str,
     session_key: &str,
     ctx: ImRunnerCommandContext<'_>,
@@ -490,8 +469,6 @@ pub(super) async fn handle_im_runner_command(
         return false;
     };
     let config = ctx.external_cli_config_store.load();
-    let previous_provider_runner = provider_custom_runner_id(ctx.provider).map(str::to_string);
-    let mut updated_provider = None;
     let reply = match command {
         ImRunnerCommand::List => format_im_runner_list(&config),
         ImRunnerCommand::Switch(runner_id) => match apply_im_runner_switch(
@@ -503,27 +480,10 @@ pub(super) async fn handle_im_runner_command(
             &config,
             &runner_id,
         ) {
-            Ok(reply) => {
-                updated_provider = provider_after_runner_change(
-                    ctx.provider_store,
-                    &ctx.provider.id,
-                    previous_provider_runner.as_deref(),
-                );
-                reply
-            }
+            Ok(reply) => reply,
             Err(reason) => format_im_runner_error(&reason),
         },
     };
-    if let Some(updated_provider) = updated_provider {
-        if let Some(feishu) = ctx.client.feishu() {
-            spawn_feishu_bot_menu_sync(
-                feishu,
-                updated_provider,
-                ctx.agent_config.clone(),
-                ctx.external_cli_config_store.clone(),
-            );
-        }
-    }
     send_agent_reply(
         ctx.client,
         ctx.provider,

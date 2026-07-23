@@ -4,10 +4,7 @@ use super::*;
 #[serde(rename_all = "camelCase")]
 struct MockInboundRequest {
     provider_id: String,
-    #[serde(default)]
     text: String,
-    #[serde(default)]
-    raw_feishu_event: Option<serde_json::Value>,
     #[serde(default)]
     user_id: Option<String>,
     #[serde(default)]
@@ -60,50 +57,13 @@ async fn inject_mock_inbound(
     if body.provider_id.trim().is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "providerId is required");
     }
-    if body.text.trim().is_empty() && body.raw_feishu_event.is_none() {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "text or rawFeishuEvent is required",
-        );
+    if body.text.trim().is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "text is required");
     }
 
     let Some(provider) = service.provider_store.get(&body.provider_id) else {
         return error_response(StatusCode::NOT_FOUND, "provider not found");
     };
-
-    if let Some(raw_event) = body.raw_feishu_event {
-        if provider.provider_type != ImProviderType::Feishu {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "rawFeishuEvent requires a Feishu provider",
-            );
-        }
-        let Some(event) =
-            crate::im_gateway::feishu::normalize_feishu_event(&raw_event, provider.id.as_str())
-        else {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "rawFeishuEvent is unsupported or invalid",
-            );
-        };
-        let event_id = event.event_id.clone();
-        let sender_id = event.source.user_id.clone();
-        let tx = ensure_mock_event_sink(service, &provider);
-        if tx.send(event).is_err() {
-            service.mock_event_sinks.write().remove(&provider.id);
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "mock inbound sink is closed",
-            );
-        }
-        return json_response(&serde_json::json!({
-            "success": true,
-            "providerId": provider.id,
-            "eventId": event_id,
-            "senderId": sender_id,
-            "rawFeishuEvent": true
-        }));
-    }
 
     let sender_id = body
         .user_id
@@ -273,7 +233,6 @@ mod tests {
         MockInboundRequest {
             provider_id: provider_id.to_string(),
             text: text.to_string(),
-            raw_feishu_event: None,
             user_id: Some(" ou_alice ".to_string()),
             chat_id: Some(" oc_engineering ".to_string()),
             chat_type: Some("group".to_string()),
@@ -362,57 +321,6 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("Engineering")
-        );
-    }
-
-    #[tokio::test]
-    async fn mock_inbound_accepts_only_valid_raw_feishu_events() {
-        let temp = tempfile::tempdir().unwrap();
-        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
-        let service = Arc::new(ImGatewayService::new(temp.path()));
-        let mut feishu = provider("raw-feishu");
-        feishu.owner_open_id = Some("ou_owner".to_string());
-        service.provider_store.add(feishu).unwrap();
-
-        let raw_event = serde_json::json!({
-            "header": {
-                "event_id": "evt_menu_help",
-                "event_type": "application.bot.menu_v6"
-            },
-            "event": {
-                "operator": {"operator_id": {"open_id": "ou_owner"}},
-                "event_key": "bf_help",
-                "timestamp": 1710000000
-            }
-        });
-        let mut body = request("raw-feishu", "");
-        body.raw_feishu_event = Some(raw_event);
-        assert_eq!(
-            inject_mock_inbound(body, &service).await.status(),
-            StatusCode::OK
-        );
-
-        let mut invalid = request("raw-feishu", "");
-        invalid.raw_feishu_event = Some(serde_json::json!({"unsupported": true}));
-        assert_eq!(
-            inject_mock_inbound(invalid, &service).await.status(),
-            StatusCode::BAD_REQUEST
-        );
-
-        let mut weixin = provider("raw-weixin");
-        weixin.provider_type = ImProviderType::Weixin;
-        service.provider_store.add(weixin).unwrap();
-        let mut wrong_provider = request("raw-weixin", "");
-        wrong_provider.raw_feishu_event = Some(serde_json::json!({
-            "header": {"event_type": "application.bot.menu_v6"},
-            "event": {
-                "operator": {"operator_id": {"open_id": "ou_owner"}},
-                "event_key": "bf_help"
-            }
-        }));
-        assert_eq!(
-            inject_mock_inbound(wrong_provider, &service).await.status(),
-            StatusCode::BAD_REQUEST
         );
     }
 
