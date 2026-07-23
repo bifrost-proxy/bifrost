@@ -194,6 +194,14 @@
 
 预期结果：可见消息的纯引用 + @ 会创建 Agent Turn 并实际启动 Runner，不会被视为空消息或返回 `/help`；同一 Provider、同一群中的被引用消息作为“本轮主要处理对象”进入 Prompt，即使它早于当前游标也能读取，且全文只出现一次。当前用户没有附加文字时，Prompt 明确要求直接理解并回应被引用消息。跨群或缺失引用不泄露消息内容、不隐式扩大权限补拉；网关直接回复“我无法看到你引用的这条消息内容，请重新发送这条消息，或把内容补充到 @ 后面”，不启动 Runner、不让模型猜测，并把该 Turn 标记为 `completed` 以保持游标和重投幂等。
 
+### TC-FGS-23：并发审计验证不依赖固定 Runner 时间窗口
+
+1. 启动群会话真实服务脚本，并让包含“并发检查”的三个 mock Runner 等待显式 release 文件。
+2. 确认三个 Runner 已启动后，向仍活跃的 `chat-alpha` 重投两次相同 `/status`，再发送普通背景消息 `a12`。
+3. 等待 `a12` 已进入 SQLite 群消息账本后释放三个 Runner，再检查 inbound 审计日志。
+
+预期结果：测试在任意 CI 调度速度下都先验证活跃态再释放 Runner；重复 `/status` 只有一条 inbound 审计且不添加 reaction，普通背景消息只进入群上下文、不产生 inbound trigger 审计。断言不靠增加固定 sleep 或放宽日志数量来通过。
+
 ## 执行方式
 
 TC-FGS-01 至 TC-FGS-05 由以下真实服务脚本逐条执行：
@@ -289,6 +297,13 @@ TC-FGS-22 的纯引用触发、旧游标查询、区间去重与跨群隔离执�
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin mention_only_reply_uses_quoted_message_instead_of_help --all-features -- --nocapture
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin quoted_message --all-features -- --nocapture
 SKIP_BUILD=true bash e2e-tests/tests/test_feishu_group_session_context.sh
+```
+
+TC-FGS-23 的确定性并发审计时序执行：
+
+```bash
+CONCURRENT_INJECT_DELAY_SECONDS=3 SKIP_BUILD=true \
+  bash e2e-tests/tests/test_feishu_group_session_context.sh
 ```
 
 ## 清理步骤
