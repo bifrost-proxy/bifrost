@@ -41,17 +41,14 @@ pub(super) fn busy_default_mode_for_agent_config(
     external_cli_config: &crate::im_gateway::external_cli::ExternalCliGatewayConfig,
     provider_id: Option<&str>,
 ) -> BusyMessageDefaultMode {
-    let Some(runner_id) = agent_config
+    let runner_id = agent_config
         .runner
         .as_ref()
-        .and_then(|runner| runner.custom_runner_id())
-    else {
-        return BusyMessageDefaultMode::Guide;
-    };
+        .and_then(|runner| runner.custom_runner_id());
     let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
         external_cli_config,
         provider_id,
-        Some(runner_id),
+        runner_id,
     );
     busy_default_mode_for_external_adapter(&effective.settings.adapter)
 }
@@ -64,6 +61,7 @@ pub(super) fn busy_default_mode_for_external_adapter(adapter: &str) -> BusyMessa
     }
 }
 
+#[cfg(test)]
 pub(super) fn apply_busy_message_default(
     queue_manager: &SessionQueueManager,
     session_key: &str,
@@ -86,6 +84,25 @@ fn apply_busy_message_default_with_context(
     }
 
     match mode {
+        // A persisted group turn cannot be considered complete merely because
+        // its guide entered this process's in-memory channel. Keep its reply
+        // context and turn ID on the deferred queue so the eventual run owns
+        // the terminal status transition.
+        BusyMessageDefaultMode::Guide
+            if context
+                .as_ref()
+                .and_then(|context| context.group_turn_id.as_deref())
+                .is_some() =>
+        {
+            queue_manager
+                .push_queue_with_images_and_context(
+                    session_key,
+                    message.to_string(),
+                    Vec::new(),
+                    context,
+                )
+                .map(|items| BusyMessageDefaultResult::Queue { items })
+        }
         BusyMessageDefaultMode::Guide => {
             let pending_count = queue_manager.inject_guide(session_key, message.to_string());
             Ok(BusyMessageDefaultResult::Guide { pending_count })
@@ -110,18 +127,6 @@ pub(super) fn queue_item_context(
         user_id: ctx.event.source.user_id.clone(),
         user_name: ctx.event.source.user_name.clone(),
         group_turn_id: ctx.group_turn_id.map(ToString::to_string),
-    }
-}
-
-fn complete_busy_group_turn(ctx: &BusyMessageContext<'_>) {
-    let Some(turn_id) = ctx.group_turn_id else {
-        return;
-    };
-    if let Err(error) = ctx
-        .group_context_store
-        .mark_turn_completed(turn_id, now_ms())
-    {
-        warn!(turn_id = %turn_id, error = %error, "failed to complete busy group turn");
     }
 }
 
@@ -211,7 +216,6 @@ pub(super) async fn handle_busy_guide_command(
         Ok(BusyMessageDefaultResult::Guide {
             pending_count: pending_guide_count,
         }) => {
-            complete_busy_group_turn(ctx);
             let reply = if pending_guide_count > 1 {
                 format!(
                     "🔀 已追加引导消息（当前 {} 条尚未进入 loop，将合并后生效）",
@@ -396,9 +400,14 @@ pub(super) async fn handle_busy_default_message(
         return;
     }
 
-    match apply_busy_message_default(ctx.queue_manager, session_key, message, ctx.default_mode) {
+    match apply_busy_message_default_with_context(
+        ctx.queue_manager,
+        session_key,
+        message,
+        ctx.default_mode,
+        Some(queue_item_context(ctx)),
+    ) {
         Ok(BusyMessageDefaultResult::Guide { pending_count }) => {
-            complete_busy_group_turn(ctx);
             let reply = if pending_count > 1 {
                 format!(
                     "🔀 已追加引导消息（当前 {} 条尚未进入 loop，将合并后生效）",

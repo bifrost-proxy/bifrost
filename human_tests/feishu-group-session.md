@@ -175,6 +175,15 @@
 
 预期结果：群聊和私聊的每个重投消息都只处理、入账和审计一次；关闭中 mailbox 的消息不会因过早记入 dedup 而在回放时丢失。活跃 Session 中被接受的触发消息仍尝试添加 `OK` reaction，并生成一条 inbound audit log；普通背景消息只进入群上下文，不产生触发 reaction 或 inbound trigger audit。
 
+### TC-FGS-21：默认 Runner 的忙时 Guide 保留可恢复 Turn
+
+1. 配置一个支持 live Guide 的默认外部 Runner，但不在 Provider Agent 配置中显式填写 `runner`。
+2. 验证 busy mode 根据默认 Runner 的真实 adapter 选择 `ExternalGuide`，而不是退回仅存在于主进程内存中的旧 `Guide` 通道。
+3. 构造一个已标记为 `dispatched` 的群 Guide Turn，模拟无法在当前活跃进程内消费、需要延后执行的路径。
+4. 检查 SQLite Turn 状态与排队项上下文，并检查 event-loop 测试模块行数。
+
+预期结果：隐式默认 Codex/Traex/Claude Code Runner 使用 live Guide，ChatGPT Web 使用 Queue；延后执行的群 Guide Turn 仍为 `dispatched`，排队项保留相同 `group_turn_id`，只有延后 Runner 成功或失败后才进入终态。event-loop 主测试模块与拆分出的恢复测试模块均不超过 1500 行。
+
 ## 执行方式
 
 TC-FGS-01 至 TC-FGS-05 由以下真实服务脚本逐条执行：
@@ -253,6 +262,15 @@ TC-FGS-20 的活跃 Session 去重、确认和审计回归执行：
 cargo test -p bifrost-admin session_dispatch --all-features -- --nocapture
 cargo test -p bifrost-admin group_event_loop_routes_concurrent_context_to_the_active_external_session --all-features -- --nocapture
 bash e2e-tests/tests/test_feishu_group_session_context.sh
+```
+
+TC-FGS-21 的默认 Runner Guide 恢复语义和测试模块边界执行：
+
+```bash
+cargo test -p bifrost-admin busy_default_mode_guides_external_runners_except_chatgpt_web --all-features -- --nocapture
+cargo test -p bifrost-admin busy_group_turns_complete_or_release_with_their_queue_outcome --all-features -- --nocapture
+test "$(wc -l < crates/bifrost-admin/src/handlers/im_gateway/event_loop/tests.rs)" -le 1500
+test "$(wc -l < crates/bifrost-admin/src/handlers/im_gateway/event_loop/tests/recovery_tests.rs)" -le 1500
 ```
 
 ## 清理步骤

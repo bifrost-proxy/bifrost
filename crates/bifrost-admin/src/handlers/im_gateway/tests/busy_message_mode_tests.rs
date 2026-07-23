@@ -92,6 +92,35 @@ fn busy_default_mode_guides_external_runners_except_chatgpt_web() {
         ),
         BusyMessageDefaultMode::Queue
     );
+
+    let mut default_config = runner_config("codex-main", "codex");
+    default_config.default_runner_id = "codex-main".to_string();
+    let implicit_agent_config = bifrost_agent::AgentConfig {
+        runner: None,
+        ..Default::default()
+    };
+    assert_eq!(
+        busy_default_mode_for_agent_config(
+            &implicit_agent_config,
+            &default_config,
+            Some("feishu-main"),
+        ),
+        BusyMessageDefaultMode::ExternalGuide,
+        "an implicit default runner must use the same live-guide semantics as an explicit runner",
+    );
+
+    let mut default_chatgpt =
+        runner_config("chatgpt-web", crate::im_gateway::chatgpt_web::ADAPTER_ID);
+    default_chatgpt.default_runner_id = "chatgpt-web".to_string();
+    assert_eq!(
+        busy_default_mode_for_agent_config(
+            &implicit_agent_config,
+            &default_chatgpt,
+            Some("feishu-main"),
+        ),
+        BusyMessageDefaultMode::Queue,
+        "an implicit ChatGPT Web default must retain queue semantics",
+    );
 }
 
 #[test]
@@ -180,6 +209,10 @@ async fn busy_group_turns_complete_or_release_with_their_queue_outcome() {
             "guide",
         )
         .unwrap();
+    service
+        .group_context_store
+        .mark_turn_dispatched(&completed_turn.turn_id, 1)
+        .unwrap();
     handle_busy_default_message(
         "guide",
         &session_key,
@@ -203,7 +236,16 @@ async fn busy_group_turns_complete_or_release_with_their_queue_outcome() {
     .await;
     assert_eq!(
         persisted_group_turn_status(&service.group_context_store, &completed_turn.turn_id),
-        Some("completed".to_string())
+        Some("dispatched".to_string())
+    );
+    let deferred = service
+        .queue_manager
+        .pop_queue_item(&session_key)
+        .expect("busy group guide should retain its turn in the queue");
+    assert_eq!(deferred.message, "guide");
+    assert_eq!(
+        deferred.context.and_then(|context| context.group_turn_id),
+        Some(completed_turn.turn_id.clone())
     );
 
     for index in 0..10 {

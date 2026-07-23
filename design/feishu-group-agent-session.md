@@ -38,7 +38,7 @@
 4. 系统 slash 原样交给现有单聊命令处理器。
 5. Agent 触发在 SQLite 事务内冻结消息区间、生成 Turn 并推进 `last_assigned_seq`。
 6. Session 空闲时启动 Turn；Session 运行中时复用现有 live Guide，失败时复用现有 queue fallback。
-7. 直接启动 Runner 的 Turn 在完成后更新状态和 `last_success_seq`；运行中 Guide/Queue 的 Turn 保持 `dispatched`。live Guide 被外部 Runner 接受后也必须等当前 Runner 成功或失败再同步完成或失败，不能在控制通道仅返回 `accepted` 时提前记为成功。
+7. 直接启动 Runner 的 Turn 在完成后更新状态和 `last_success_seq`；运行中 Guide/Queue 的 Turn 保持 `dispatched`。live Guide 被外部 Runner 接受后也必须等当前 Runner 成功或失败再同步完成或失败，不能在控制通道仅返回 `accepted` 时提前记为成功。未显式绑定 Runner 时仍按实际默认 Runner adapter 选择 live Guide 或 Queue；若 Guide 不能在当前进程内被消费而转为延后执行，队列项必须保留原 `group_turn_id`，由延后 Turn 的最终结果收尾。
 8. 进程重启会丢失内存队列和事件去重缓存，但 SQLite 中 `prepared` / `dispatched` Turn 保留冻结输入。飞书重投同一触发消息且对应 Session 当前空闲时，复用原 Turn 继续执行；同进程 Session 仍繁忙时继续按重复消息丢弃，避免双跑。
 
 ## 并发分发与进程隔离
