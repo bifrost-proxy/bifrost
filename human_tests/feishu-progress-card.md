@@ -149,7 +149,7 @@
 
 ## 执行记录
 
-- 2026-07-23：PASS — 更新 TC-FPC-08 后立即逐条执行，并在 Review/Fix/Test 修复纯状态/思考退化边界后再次执行。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib progress_card -- --nocapture` 共 63 项全部通过，覆盖旧工具步骤摘要、最近 5 次工具可展开详情、旧思考/状态与对应工具按完整执行段裁剪、无工具时先删状态并保留最近 5 轮思考、30 工具窗口、UTF-8 字节/组件预算和限制错误降级；`im_gateway_progress_card_budget_and_codex_resources` E2E 1 项通过，最终 CardKit JSON 小于 24KB，至少保留一条无参数/输出详情的旧工具步骤及其对应思考，首个保留段之前不残留孤立思考或工具，最近 5 次工具输入/输出详情完整。当前未使用用户另一台设备的运行数据，也未向真实飞书租户发送测试卡片；本轮真实场景证据来自当前源码生成的完整 CardKit payload。
+- 2026-07-23：PASS — 更新 TC-FPC-08 后立即逐条执行，并在 Review/Fix/Test 修复纯状态/思考退化边界及 CI 变更行覆盖率缺口后再次执行。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib progress_card -- --nocapture` 共 64 项全部通过，覆盖旧工具步骤摘要的完成/失败/执行中三态、最近 5 次工具可展开详情、旧思考/状态与对应工具按完整执行段裁剪、无工具时先删状态并保留最近 5 轮思考、30 工具窗口、UTF-8 字节/组件预算和限制错误降级；`im_gateway_progress_card_budget_and_codex_resources` E2E 1 项通过，最终 CardKit JSON 小于 24KB，至少保留一条无参数/输出详情的旧工具步骤及其对应思考，首个保留段之前不残留孤立思考或工具，最近 5 次工具输入/输出详情完整。专项 `coverage-diff.py` 验证变更生产 Rust 行覆盖率为 100%（71/71），通过 95% 门禁。当前未使用用户另一台设备的运行数据，也未向真实飞书租户发送测试卡片；本轮真实场景证据来自当前源码生成的完整 CardKit payload。
 
 - 2026-07-14：PASS — 更新 TC-FPC-08 后立即逐条执行。`cargo test -p bifrost-admin --lib progress_card` 共 59 项全部通过，覆盖工具输入/输出 300 字符截断、30 工具窗口不连带删除前置思考、16KB 压力下优先删除旧工具并保留最近 5 轮思考、`200860`/`300305` 同卡收缩和精简降级；独立 `im_gateway_progress_card_budget_and_codex_resources` E2E 通过，真实 CardKit JSON 小于 24KB，包含 `THINKING_ROUND_35..39` 与最新工具 marker，不包含最旧思考或最新工具 300 字符之后的尾部 marker。
 

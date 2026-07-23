@@ -1698,10 +1698,8 @@ fn oldest_budget_removable_timeline_range(
                 .iter()
                 .rposition(|item| item.kind == ProgressTimelineKind::Tool)
                 .map(|index| index + 1)
-                .unwrap_or(0);
-            if visible_start > 0 {
-                return Some(0..visible_start);
-            }
+                .expect("more than the visible tool limit guarantees an earlier tool");
+            return Some(0..visible_start);
         }
         if tool_indexes.len() <= PROCESS_TIMELINE_DETAILED_TOOL_LIMIT {
             return None;
@@ -1712,14 +1710,12 @@ fn oldest_budget_removable_timeline_range(
             .iter()
             .rposition(|item| item.kind == ProgressTimelineKind::Tool)
             .map(|index| index + 1)
-            .unwrap_or(0);
-        if protected_start == 0 {
-            return None;
-        }
+            .expect("more than the detailed tool limit guarantees an earlier tool");
 
         let first_tool_index = timeline[..protected_start]
             .iter()
-            .position(|item| item.kind == ProgressTimelineKind::Tool)?;
+            .position(|item| item.kind == ProgressTimelineKind::Tool)
+            .expect("protected prefix ends after an earlier tool");
         let mut end = first_tool_index + 1;
         while end < protected_start && timeline[end].kind == ProgressTimelineKind::Tool {
             end += 1;

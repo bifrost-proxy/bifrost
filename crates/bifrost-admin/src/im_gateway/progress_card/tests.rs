@@ -701,6 +701,52 @@ fn budget_removal_without_tools_drops_status_before_preserving_five_thinking_ite
 }
 
 #[test]
+fn budget_removal_tool_boundaries_and_step_statuses_cover_all_states() {
+    let running =
+        ProgressTimelineItem::tool_started("running_tool".to_string(), "RUNNING_INPUT".to_string());
+    assert_eq!(
+        format_process_tool_step_line(&running),
+        "步骤：`running_tool` · 执行中"
+    );
+    assert_eq!(
+        oldest_budget_removable_timeline_range(std::slice::from_ref(&running)),
+        None
+    );
+
+    let failed = ProgressTimelineItem::tool_finished(
+        &ToolCallLog {
+            tool_name: "failed_tool".to_string(),
+            arguments: "FAILED_INPUT".to_string(),
+            result: "FAILED_OUTPUT".to_string(),
+            success: false,
+        },
+        12,
+    );
+    assert_eq!(
+        format_process_tool_step_line(&failed),
+        "步骤：`failed_tool` · 失败 · 12ms"
+    );
+
+    let consecutive_tools = (0..7)
+        .map(|index| {
+            ProgressTimelineItem::tool_finished(
+                &ToolCallLog {
+                    tool_name: format!("tool_{index}"),
+                    arguments: String::new(),
+                    result: String::new(),
+                    success: true,
+                },
+                10,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        oldest_budget_removable_timeline_range(&consecutive_tools),
+        Some(0..2)
+    );
+}
+
+#[test]
 fn old_tools_render_as_steps_while_latest_five_keep_expandable_details() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "balanced tool history");
     for index in 0..8 {
