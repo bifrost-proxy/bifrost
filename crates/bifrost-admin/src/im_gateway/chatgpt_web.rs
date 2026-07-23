@@ -702,6 +702,19 @@ pub async fn run_adapter(
     prompt: &str,
     run_dir: &Path,
 ) -> Result<ChatGptWebRunOutput, String> {
+    let config = match runtime_config(&request.adapter_config) {
+        Ok(config) => config,
+        Err(error) => {
+            write_run_failure_manifest(run_dir, "configure", None, &error, Vec::new()).await;
+            return Err(error);
+        }
+    };
+    let operation = request.operation.trim();
+    let operation = if operation.is_empty() {
+        "ask"
+    } else {
+        operation
+    };
     let e2e_mock_requested = std::env::var("BIFROST_CHATGPT_WEB_E2E_MOCK")
         .ok()
         .as_deref()
@@ -715,27 +728,16 @@ pub async fn run_adapter(
         .ok()
         .as_deref()
         == Some("1");
-    if live_adapter_forbidden_in_e2e(explicit_e2e, e2e_mock_requested, live_e2e_requested) {
+    if chatgpt_web_operation_can_access_live_service(operation)
+        && live_adapter_forbidden_in_e2e(explicit_e2e, e2e_mock_requested, live_e2e_requested)
+    {
         return Err(
             "live ChatGPT Web is disabled during tests; set BIFROST_CHATGPT_WEB_E2E_MOCK=1, or explicitly opt in with BIFROST_CHATGPT_WEB_LIVE_E2E=1"
                 .to_string(),
         );
     }
 
-    let config = match runtime_config(&request.adapter_config) {
-        Ok(config) => config,
-        Err(error) => {
-            write_run_failure_manifest(run_dir, "configure", None, &error, Vec::new()).await;
-            return Err(error);
-        }
-    };
     let _profile_permit = acquire_profile_lock(&config.profile_dir).await;
-    let operation = request.operation.trim();
-    let operation = if operation.is_empty() {
-        "ask"
-    } else {
-        operation
-    };
     let stop_marker_path = run_dir.join("stop_requested");
 
     let mut events = vec![event(
@@ -845,6 +847,13 @@ fn live_adapter_forbidden_in_e2e(
     live_e2e_requested: bool,
 ) -> bool {
     explicit_e2e && !e2e_mock_requested && !live_e2e_requested
+}
+
+fn chatgpt_web_operation_can_access_live_service(operation: &str) -> bool {
+    matches!(
+        operation,
+        "list" | "get" | "wait" | "create" | "send" | "ask"
+    )
 }
 
 async fn wait_for_stop_marker(path: PathBuf) {
@@ -4214,6 +4223,12 @@ mod coverage_boost_v3 {
         assert!(!live_adapter_forbidden_in_e2e(true, true, false));
         assert!(!live_adapter_forbidden_in_e2e(true, false, true));
         assert!(!live_adapter_forbidden_in_e2e(false, false, false));
+        for operation in ["list", "get", "wait", "create", "send", "ask"] {
+            assert!(chatgpt_web_operation_can_access_live_service(operation));
+        }
+        assert!(!chatgpt_web_operation_can_access_live_service(
+            "unsupported-test-operation"
+        ));
     }
 
     #[test]

@@ -4017,22 +4017,30 @@ fn daily_agent_mock_file_runner_settings(
     let escaped = serde_json::to_string(content).unwrap();
     let event = format!(r#"{{"type":"assistant_final","content":{escaped}}}"#);
     let (executable, args) = if cfg!(windows) {
+        let powershell_escape = |value: &str| value.replace('\'', "''");
         let write_report = report_path.map_or_else(String::new, |path| {
-            let path = path.replace('/', "\\");
             let parent = Path::new(&path)
                 .parent()
                 .map(|value| value.to_string_lossy().to_string())
                 .unwrap_or_default();
             format!(
-                "if not exist \"{parent}\" mkdir \"{parent}\" & >\"{path}\" echo # mock report & "
+                "New-Item -ItemType Directory -Force -Path '{}' | Out-Null; \
+                 Set-Content -LiteralPath '{}' -Value '# mock report' -Encoding utf8; ",
+                powershell_escape(&parent),
+                powershell_escape(path),
             )
         });
         (
-            "cmd.exe".to_string(),
+            "powershell.exe".to_string(),
             vec![
-                "/D".to_string(),
-                "/C".to_string(),
-                format!("{write_report}more >nul & echo {event}"),
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-Command".to_string(),
+                format!(
+                    "$input | Out-Null; {write_report}[Console]::Out.WriteLine('{}')",
+                    powershell_escape(&event)
+                ),
             ],
         )
     } else {
