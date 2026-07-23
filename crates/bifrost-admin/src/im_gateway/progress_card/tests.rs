@@ -1,4 +1,5 @@
 use super::*;
+use crate::im_gateway::provider::ImProvider;
 use bifrost_agent::PlanStepStatus;
 
 #[test]
@@ -98,6 +99,7 @@ fn progress_snapshot_tracks_tool_plan_queue_and_final_output() {
             seq: 1,
             message: "next".to_string(),
             images: Vec::new(),
+            context: None,
         }],
         true,
         Some("已收到引导：prioritize logs".to_string()),
@@ -652,14 +654,14 @@ fn budgeted_card_drops_oldest_process_items_and_keeps_latest() {
         &snapshot,
         true,
         FeishuCardBudget {
-            max_bytes: 6 * 1024,
+            max_bytes: 5 * 1024,
             max_components: 180,
         },
     );
     let serialized = serde_json::to_string(&rendered.card).unwrap();
     assert!(!rendered.compact);
     assert!(rendered.omitted_timeline_items > 0);
-    assert!(serialized.len() <= 6 * 1024);
+    assert!(serialized.len() <= 5 * 1024);
     assert!(serialized.contains("RESULT_MARKER_7"));
     assert!(!serialized.contains("RESULT_MARKER_0"));
     assert!(serialized.contains("已省略前面"));
@@ -882,6 +884,7 @@ fn external_runner_status_footer_uses_runner_metadata_instead_of_agent_metrics()
         seq: 1,
         message: "queued message".to_string(),
         images: Vec::new(),
+        context: None,
     });
     snapshot.guide_pending = true;
     snapshot.phase = ImProgressPhase::Finished;
@@ -1152,7 +1155,7 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
     ] {
         assert!(!serialized.contains(id), "unexpected empty module id {id}");
     }
-    assert_eq!(card["header"]["title"]["content"], "initial task");
+    assert!(card.get("header").is_none());
 
     let mut populated = snapshot.clone();
     populated.apply_event(AgentTurnProgressEvent::AssistantDelta {
@@ -1186,6 +1189,7 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
             seq: 7,
             message: "queued".to_string(),
             images: Vec::new(),
+            context: None,
         }],
         true,
         Some("已收到引导：rerun failed path".to_string()),
@@ -1215,7 +1219,7 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
             "process timeline should replace legacy module id {id}"
         );
     }
-    assert_eq!(populated_card["header"]["title"]["content"], "Build");
+    assert!(populated_card.get("header").is_none());
     assert_eq!(populated_body[0]["element_id"], STATUS_PANEL_ELEMENT_ID);
     assert_eq!(
         populated_body[1]["header"]["title"]["content"],
@@ -1338,6 +1342,8 @@ struct MockFeishuProgressServer {
     settings_update_counter: Arc<std::sync::atomic::AtomicUsize>,
     card_create_payloads: Arc<std::sync::Mutex<Vec<String>>>,
     card_update_payloads: Arc<std::sync::Mutex<Vec<String>>>,
+    message_paths: Arc<std::sync::Mutex<Vec<String>>>,
+    message_payloads: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
 }
 
 async fn spawn_mock_feishu_progress_server() -> MockFeishuProgressServer {
@@ -1467,6 +1473,8 @@ async fn spawn_mock_feishu_progress_server_with_failures(
     let settings_update_counter = Arc::new(AtomicUsize::new(0));
     let card_create_payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
     let card_update_payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let message_paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let message_payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
     let fail_card_update_codes = Arc::new(
         fail_card_update_codes
             .into_iter()
@@ -1488,6 +1496,8 @@ async fn spawn_mock_feishu_progress_server_with_failures(
     let settings_update_counter_for_server = Arc::clone(&settings_update_counter);
     let card_create_payloads_for_server = Arc::clone(&card_create_payloads);
     let card_update_payloads_for_server = Arc::clone(&card_update_payloads);
+    let message_paths_for_server = Arc::clone(&message_paths);
+    let message_payloads_for_server = Arc::clone(&message_payloads);
     let fail_card_update_codes_for_server = Arc::clone(&fail_card_update_codes);
     let fail_card_create_codes_for_server = Arc::clone(&fail_card_create_codes);
     tokio::spawn(async move {
@@ -1503,6 +1513,8 @@ async fn spawn_mock_feishu_progress_server_with_failures(
             let settings_update_counter = Arc::clone(&settings_update_counter_for_server);
             let card_create_payloads = Arc::clone(&card_create_payloads_for_server);
             let card_update_payloads = Arc::clone(&card_update_payloads_for_server);
+            let message_paths = Arc::clone(&message_paths_for_server);
+            let message_payloads = Arc::clone(&message_payloads_for_server);
             let fail_card_update_codes = Arc::clone(&fail_card_update_codes_for_server);
             let fail_card_create_codes = Arc::clone(&fail_card_create_codes_for_server);
             tokio::spawn(async move {
@@ -1514,6 +1526,8 @@ async fn spawn_mock_feishu_progress_server_with_failures(
                     let settings_update_counter = Arc::clone(&settings_update_counter);
                     let card_create_payloads = Arc::clone(&card_create_payloads);
                     let card_update_payloads = Arc::clone(&card_update_payloads);
+                    let message_paths = Arc::clone(&message_paths);
+                    let message_payloads = Arc::clone(&message_payloads);
                     let fail_card_update_codes = Arc::clone(&fail_card_update_codes);
                     let fail_card_create_codes = Arc::clone(&fail_card_create_codes);
                     async move {
@@ -1621,11 +1635,23 @@ async fn spawn_mock_feishu_progress_server_with_failures(
                                     .unwrap(),
                             );
                         }
-                        if method == Method::POST && path == "/open-apis/im/v1/messages" {
+                        if method == Method::POST
+                            && (path == "/open-apis/im/v1/messages"
+                                || (path.starts_with("/open-apis/im/v1/messages/")
+                                    && path.ends_with("/reply")))
+                        {
                             let body: serde_json::Value =
                                 serde_json::from_slice(&body).expect("send card json");
+                            message_paths
+                                .lock()
+                                .expect("message paths lock")
+                                .push(path.clone());
+                            message_payloads
+                                .lock()
+                                .expect("message payloads lock")
+                                .push(body.clone());
                             let content = body["content"].as_str().unwrap_or_default();
-                            assert!(content.contains("card_"));
+                            assert!(!content.is_empty());
                             let idx = message_counter.fetch_add(1, Ordering::SeqCst) + 1;
                             if fail_message_send_number == Some(idx) {
                                 return Ok::<_, hyper::Error>(
@@ -1689,6 +1715,8 @@ async fn spawn_mock_feishu_progress_server_with_failures(
         settings_update_counter,
         card_create_payloads,
         card_update_payloads,
+        message_paths,
+        message_payloads,
     }
 }
 
@@ -1990,6 +2018,7 @@ async fn queue_state_update_rolls_over_card_and_freezes_previous_snapshot() {
                     seq: 2,
                     message: "follow-up".to_string(),
                     images: Vec::new(),
+                    context: None,
                 }],
                 true,
                 Some("已收到引导：follow-up".to_string()),
@@ -2498,6 +2527,7 @@ async fn queue_state_rollover_sends_new_card_without_recall() {
                     seq: 1,
                     message: "queued after rollover".to_string(),
                     images: Vec::new(),
+                    context: None,
                 }],
                 false,
                 Some("消息已排队：queued after rollover".to_string()),
@@ -2584,6 +2614,7 @@ async fn queue_state_rollover_send_failure_keeps_previous_running_handle() {
                     seq: 1,
                     message: "queued after send failure".to_string(),
                     images: Vec::new(),
+                    context: None,
                 }],
                 false,
                 Some("消息已排队：queued after send failure".to_string()),
@@ -2632,6 +2663,7 @@ async fn finished_card_queue_state_update_does_not_rollover_or_freeze() {
                     seq: 1,
                     message: "late message".to_string(),
                     images: Vec::new(),
+                    context: None,
                 }],
                 true,
                 Some("已收到引导：late message".to_string()),
@@ -2833,6 +2865,147 @@ async fn rollover_existing_freezes_old_card_and_sends_new_card() {
     assert_eq!(server.settings_update_counter.load(Ordering::SeqCst), 1);
     assert_eq!(server.recall_counter.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn feishu_message_cards_use_native_reply_paths_and_strip_root_headers() {
+    use std::sync::atomic::Ordering;
+
+    let server = spawn_mock_feishu_progress_server().await;
+    let feishu = Arc::new(FeishuProvider::new());
+    let provider = mock_feishu_provider(&server.base_url);
+    feishu
+        .reply_card(
+            &provider,
+            "om_trigger_plain",
+            serde_json::json!({
+                "schema": "2.0",
+                "header": { "title": { "tag": "plain_text", "content": "remove me" } },
+                "body": { "elements": [{ "tag": "markdown", "content": "hello" }] }
+            }),
+            Some("reply_plain_uuid"),
+        )
+        .await
+        .expect("reply with ordinary card");
+    feishu
+        .send_card(
+            &provider,
+            &mock_progress_target(),
+            serde_json::json!({
+                "schema": "2.0",
+                "header": { "title": { "tag": "plain_text", "content": "remove me too" } },
+                "body": { "elements": [{ "tag": "markdown", "content": "proactive" }] }
+            }),
+            super::super::types::SendOptions::default(),
+        )
+        .await
+        .expect("send proactive ordinary card");
+
+    let registry = ImAgentProgressRegistry::new();
+    registry
+        .start_feishu_replying_to(
+            "s-reply",
+            Arc::clone(&feishu),
+            provider,
+            mock_progress_target(),
+            "first turn",
+            Some("om_trigger_progress_1"),
+        )
+        .await
+        .expect("start replied progress card");
+    assert!(
+        registry
+            .rollover_existing_replying_to("s-reply", "second turn", Some("om_trigger_progress_2"),)
+            .await
+    );
+
+    assert_eq!(server.message_counter.load(Ordering::SeqCst), 4);
+    let paths = server.message_paths.lock().expect("message paths").clone();
+    assert_eq!(
+        paths,
+        vec![
+            "/open-apis/im/v1/messages/om_trigger_plain/reply",
+            "/open-apis/im/v1/messages",
+            "/open-apis/im/v1/messages/om_trigger_progress_1/reply",
+            "/open-apis/im/v1/messages/om_trigger_progress_2/reply",
+        ]
+    );
+
+    let payloads = server
+        .message_payloads
+        .lock()
+        .expect("message payloads")
+        .clone();
+    assert_eq!(payloads[0]["msg_type"], "interactive");
+    assert_eq!(payloads[0]["uuid"], "reply_plain_uuid");
+    assert!(payloads[0].get("receive_id").is_none());
+    let ordinary_card: serde_json::Value = serde_json::from_str(
+        payloads[0]["content"]
+            .as_str()
+            .expect("ordinary card content"),
+    )
+    .expect("ordinary card json");
+    assert!(ordinary_card.get("header").is_none());
+    let proactive_card: serde_json::Value = serde_json::from_str(
+        payloads[1]["content"]
+            .as_str()
+            .expect("proactive card content"),
+    )
+    .expect("proactive card json");
+    assert!(proactive_card.get("header").is_none());
+
+    let created_cards = server
+        .card_create_payloads
+        .lock()
+        .expect("created cards")
+        .clone();
+    assert_eq!(created_cards.len(), 2);
+    for created_card in created_cards {
+        let card: serde_json::Value =
+            serde_json::from_str(&created_card).expect("created progress card json");
+        assert!(card.get("header").is_none());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn progress_card_falls_back_to_direct_send_when_native_reply_fails() {
+    use std::sync::atomic::Ordering;
+
+    let server = spawn_mock_feishu_progress_server_with_send_failure(Some(1)).await;
+    let registry = ImAgentProgressRegistry::new();
+    let session = registry
+        .start_feishu_replying_to(
+            "s-reply-fallback",
+            Arc::new(FeishuProvider::new()),
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
+            "first turn",
+            Some("om_trigger"),
+        )
+        .await
+        .expect("fallback direct progress-card send");
+
+    assert_eq!(server.message_counter.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        server
+            .message_paths
+            .lock()
+            .expect("message paths")
+            .as_slice(),
+        [
+            "/open-apis/im/v1/messages/om_trigger/reply",
+            "/open-apis/im/v1/messages",
+        ]
+    );
+    assert_eq!(
+        session
+            .lock()
+            .await
+            .message_info()
+            .and_then(|info| info.message_id),
+        Some("om_2".to_string())
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn recall_message_sends_delete_with_tenant_token() {
     use bytes::Bytes;

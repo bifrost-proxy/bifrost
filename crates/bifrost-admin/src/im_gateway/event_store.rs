@@ -108,3 +108,53 @@ impl ImEventStore {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loads_legacy_string_mentions_without_deleting_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let admin_dir = temp.path().join("admin");
+        std::fs::create_dir_all(&admin_dir).unwrap();
+        let file_path = admin_dir.join(STORE_FILENAME);
+        std::fs::write(
+            &file_path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "version": STORE_VERSION,
+                "events": [{
+                    "event_id": "legacy-event",
+                    "provider_id": "feishu-main",
+                    "provider_type": "feishu",
+                    "event_type": "message.receive",
+                    "source": {
+                        "chat_id": "oc_group",
+                        "chat_type": "group",
+                        "message_id": "om_legacy"
+                    },
+                    "message": {
+                        "text": "@_user_1 hello",
+                        "mentions": ["@_user_1"]
+                    },
+                    "received_at": 1
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let store = ImEventStore::new(temp.path());
+        let events = store.list();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].message.as_ref().unwrap().mentions.len(), 1);
+        assert_eq!(
+            events[0].message.as_ref().unwrap().mentions[0],
+            crate::im_gateway::types::ImMention {
+                key: "@_user_1".to_string(),
+                ..Default::default()
+            }
+        );
+        assert!(file_path.exists(), "legacy history must not be deleted");
+    }
+}

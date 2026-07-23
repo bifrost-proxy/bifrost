@@ -958,6 +958,7 @@ async fn start_provider_event_connection(
     let provider_for_loop = provider.clone();
     let event_store = service.event_store.clone();
     let message_log_store = service.message_log_store.clone();
+    let group_context_store = service.group_context_store.clone();
     let route_store = service.route_store.clone();
     let provider_store = service.provider_store.clone();
     let agent_config_store = service.agent_config_store.clone();
@@ -976,6 +977,7 @@ async fn start_provider_event_connection(
             provider_for_loop,
             event_store,
             message_log_store,
+            group_context_store,
             route_store,
             provider_store,
             agent_config_store,

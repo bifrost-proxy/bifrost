@@ -6,6 +6,7 @@ pub(super) struct IdleImCommandContext<'a> {
     pub(super) client: &'a ImProviderClient,
     pub(super) provider: &'a ImProviderConfig,
     pub(super) provider_store: &'a Arc<ImProviderStore>,
+    pub(super) group_context_store: &'a Arc<ImGroupContextStore>,
     pub(super) external_cli_config_store:
         &'a Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
     pub(super) event: &'a ImEvent,
@@ -17,6 +18,7 @@ struct ImCwdCommandContext<'a> {
     client: &'a ImProviderClient,
     provider: &'a ImProviderConfig,
     provider_store: &'a Arc<ImProviderStore>,
+    group_context_store: &'a Arc<ImGroupContextStore>,
     event: &'a ImEvent,
     message_log_store: &'a Arc<ImMessageLogStore>,
     session_manager: &'a Arc<ImAgentSessionManager>,
@@ -26,6 +28,7 @@ struct ImRunnerCommandContext<'a> {
     client: &'a ImProviderClient,
     provider: &'a ImProviderConfig,
     provider_store: &'a Arc<ImProviderStore>,
+    group_context_store: &'a Arc<ImGroupContextStore>,
     external_cli_config_store: &'a Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
     event: &'a ImEvent,
     message_log_store: &'a Arc<ImMessageLogStore>,
@@ -36,6 +39,7 @@ struct ImModelCommandContext<'a> {
     client: &'a ImProviderClient,
     provider: &'a ImProviderConfig,
     external_cli_config_store: &'a Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
+    group_context_store: &'a Arc<ImGroupContextStore>,
     event: &'a ImEvent,
     message_log_store: &'a Arc<ImMessageLogStore>,
 }
@@ -81,7 +85,14 @@ pub(super) async fn handle_idle_im_command(
     if trimmed == "/status" {
         let detail = ctx.agent_session_manager.get_session_detail(session_key);
         let status_context = status_context_from_agent_config(agent_config);
-        let default_work_dir = agent_config.resolve_work_dir().display().to_string();
+        let default_work_dir = ctx
+            .group_context_store
+            .work_dir_by_session(session_key)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| agent_config.resolve_work_dir())
+            .display()
+            .to_string();
         let reply = build_im_status_text(
             detail.as_ref(),
             &status_context,
@@ -123,6 +134,7 @@ pub(super) async fn handle_idle_im_command(
             client: ctx.client,
             provider: ctx.provider,
             provider_store: ctx.provider_store,
+            group_context_store: ctx.group_context_store,
             event: ctx.event,
             message_log_store: ctx.message_log_store,
             session_manager: ctx.agent_session_manager,
@@ -140,6 +152,7 @@ pub(super) async fn handle_idle_im_command(
             client: ctx.client,
             provider: ctx.provider,
             provider_store: ctx.provider_store,
+            group_context_store: ctx.group_context_store,
             external_cli_config_store: ctx.external_cli_config_store,
             event: ctx.event,
             message_log_store: ctx.message_log_store,
@@ -159,6 +172,7 @@ pub(super) async fn handle_idle_im_command(
             client: ctx.client,
             provider: ctx.provider,
             external_cli_config_store: ctx.external_cli_config_store,
+            group_context_store: ctx.group_context_store,
             event: ctx.event,
             message_log_store: ctx.message_log_store,
         },
@@ -176,6 +190,7 @@ pub(super) async fn handle_idle_im_command(
             client: ctx.client,
             provider: ctx.provider,
             external_cli_config_store: ctx.external_cli_config_store,
+            group_context_store: ctx.group_context_store,
             event: ctx.event,
             message_log_store: ctx.message_log_store,
         },
@@ -383,12 +398,23 @@ pub(super) fn resolve_im_runner_selection(
 
 pub(super) fn apply_im_runner_switch_to_session(
     provider_store: &Arc<ImProviderStore>,
+    group_context_store: &Arc<ImGroupContextStore>,
     provider_id: &str,
     session_key: &str,
     session: &mut bifrost_agent::AgentSession,
     selection: &ImRunnerSelection,
 ) -> String {
-    persist_provider_agent_runner(provider_store, provider_id, selection.runner.clone());
+    match group_context_store.set_runner_id_by_session(session_key, &selection.runner_id) {
+        Ok(true) => {}
+        Ok(false) => {
+            persist_provider_agent_runner(provider_store, provider_id, selection.runner.clone())
+        }
+        Err(error) => warn!(
+            session_key = %session_key,
+            error = %error,
+            "failed to persist group runner binding"
+        ),
+    }
     clear_persisted_agent_session_state(session_key, None, None);
     session.clear();
     match &selection.runner {
@@ -405,6 +431,7 @@ pub(super) fn apply_im_runner_switch_to_session(
 
 pub(super) fn apply_im_runner_switch(
     provider_store: &Arc<ImProviderStore>,
+    group_context_store: &Arc<ImGroupContextStore>,
     session_manager: &Arc<ImAgentSessionManager>,
     provider_id: &str,
     session_key: &str,
@@ -418,6 +445,7 @@ pub(super) fn apply_im_runner_switch(
     };
     let reply = apply_im_runner_switch_to_session(
         provider_store,
+        group_context_store,
         provider_id,
         session_key,
         &mut session,
@@ -448,6 +476,7 @@ async fn handle_im_runner_command(
         ImRunnerCommand::List => format_im_runner_list(&config),
         ImRunnerCommand::Switch(runner_id) => match apply_im_runner_switch(
             ctx.provider_store,
+            ctx.group_context_store,
             ctx.session_manager,
             &ctx.provider.id,
             session_key,
@@ -467,6 +496,24 @@ async fn handle_im_runner_command(
     )
     .await;
     true
+}
+
+pub(super) fn configured_runner_id_for_im_session(
+    group_context_store: &ImGroupContextStore,
+    session_key: &str,
+    agent_config: &crate::im_gateway::agent::ImAgentConfig,
+) -> Option<String> {
+    group_context_store
+        .runner_id_by_session(session_key)
+        .ok()
+        .flatten()
+        .or_else(|| {
+            agent_config
+                .runner
+                .as_ref()
+                .and_then(|runner| runner.custom_runner_id())
+                .map(ToString::to_string)
+        })
 }
 
 async fn handle_im_model_command(
@@ -495,11 +542,8 @@ async fn handle_im_model_command(
         }
     };
     let config = ctx.external_cli_config_store.load();
-    let Some(configured_runner_id) = agent_config
-        .runner
-        .as_ref()
-        .and_then(|runner| runner.custom_runner_id())
-        .map(ToString::to_string)
+    let Some(configured_runner_id) =
+        configured_runner_id_for_im_session(ctx.group_context_store, session_key, agent_config)
     else {
         send_agent_reply(
             ctx.client,
@@ -674,11 +718,8 @@ async fn handle_im_effort_command(
         }
     };
     let config = ctx.external_cli_config_store.load();
-    let Some(configured_runner_id) = agent_config
-        .runner
-        .as_ref()
-        .and_then(|runner| runner.custom_runner_id())
-        .map(ToString::to_string)
+    let Some(configured_runner_id) =
+        configured_runner_id_for_im_session(ctx.group_context_store, session_key, agent_config)
     else {
         send_agent_reply(
             ctx.client,
@@ -936,6 +977,7 @@ fn persist_im_reasoning_effort_override(
 
 pub(super) fn apply_im_cwd_switch_to_session(
     provider_store: &Arc<ImProviderStore>,
+    group_context_store: &Arc<ImGroupContextStore>,
     provider_id: &str,
     session_key: &str,
     session: &mut bifrost_agent::AgentSession,
@@ -944,7 +986,15 @@ pub(super) fn apply_im_cwd_switch_to_session(
     let canonical_work_dir =
         std::fs::canonicalize(work_dir).unwrap_or_else(|_| work_dir.to_path_buf());
     let work_dir = canonical_work_dir.display().to_string();
-    persist_provider_agent_work_dir(provider_store, provider_id, &work_dir);
+    match group_context_store.set_work_dir_by_session(session_key, &work_dir) {
+        Ok(true) => {}
+        Ok(false) => persist_provider_agent_work_dir(provider_store, provider_id, &work_dir),
+        Err(error) => warn!(
+            session_key = %session_key,
+            error = %error,
+            "failed to persist group work directory"
+        ),
+    }
     clear_persisted_agent_session_state(session_key, None, None);
     session.reinitialize_work_dir(work_dir.clone());
     format!("已切换工作目录到:\n`{work_dir}`\n\n下一条消息将使用新的工作目录。")
@@ -952,6 +1002,7 @@ pub(super) fn apply_im_cwd_switch_to_session(
 
 pub(super) fn apply_im_cwd_switch(
     provider_store: &Arc<ImProviderStore>,
+    group_context_store: &Arc<ImGroupContextStore>,
     session_manager: &Arc<ImAgentSessionManager>,
     provider_id: &str,
     session_key: &str,
@@ -967,6 +1018,7 @@ pub(super) fn apply_im_cwd_switch(
     };
     let reply = apply_im_cwd_switch_to_session(
         provider_store,
+        group_context_store,
         provider_id,
         session_key,
         &mut session,
@@ -987,6 +1039,7 @@ async fn handle_im_cwd_command(
     let reply = match command {
         Ok(path) => match apply_im_cwd_switch(
             ctx.provider_store,
+            ctx.group_context_store,
             ctx.session_manager,
             &ctx.provider.id,
             session_key,
@@ -1201,6 +1254,7 @@ pub(super) async fn handle_busy_message(
             client,
             provider,
             external_cli_config_store: ctx.external_cli_config_store,
+            group_context_store: ctx.group_context_store,
             event,
             message_log_store,
         },
@@ -1214,7 +1268,12 @@ pub(super) async fn handle_busy_message(
         match command {
             Ok(path) => {
                 let queued_command = format!("/cwd {}", path.display());
-                match queue_manager.push_queue(session_key, queued_command) {
+                match queue_manager.push_queue_with_images_and_context(
+                    session_key,
+                    queued_command,
+                    Vec::new(),
+                    Some(queue_item_context(&ctx)),
+                ) {
                     Ok(items) => {
                         let guide_pending = !queue_manager.guide_status(session_key).is_empty();
                         let updated = progress_registry
@@ -1235,6 +1294,7 @@ pub(super) async fn handle_busy_message(
                         }
                     }
                     Err(err) => {
+                        release_busy_group_turn(&ctx, err);
                         send_agent_reply(
                             client,
                             provider,
@@ -1264,6 +1324,7 @@ pub(super) async fn handle_busy_message(
     if let Some(rest) = trimmed.strip_prefix("/q ") {
         let queue_text = rest.trim();
         if queue_text.is_empty() {
+            release_busy_group_turn(&ctx, "queued message is empty");
             send_agent_reply(
                 client,
                 provider,
@@ -1280,7 +1341,12 @@ pub(super) async fn handle_busy_message(
             }
             _ => Vec::new(),
         };
-        match queue_manager.push_queue_with_images(session_key, queue_text.to_string(), images) {
+        match queue_manager.push_queue_with_images_and_context(
+            session_key,
+            queue_text.to_string(),
+            images,
+            Some(queue_item_context(&ctx)),
+        ) {
             Ok(items) => {
                 let guide_pending = !queue_manager.guide_status(session_key).is_empty();
                 let updated = progress_registry
@@ -1297,6 +1363,7 @@ pub(super) async fn handle_busy_message(
                 }
             }
             Err(err) => {
+                release_busy_group_turn(&ctx, err);
                 send_agent_reply(
                     client,
                     provider,
@@ -1315,7 +1382,20 @@ pub(super) async fn handle_busy_message(
         let rest = rest.trim();
         match rest.parse::<u64>() {
             Ok(seq) => {
-                if queue_manager.remove_queue(session_key, seq) {
+                if let Some(removed) = queue_manager.remove_queue_item(session_key, seq) {
+                    if let Some(turn_id) = removed
+                        .context
+                        .as_ref()
+                        .and_then(|context| context.group_turn_id.as_deref())
+                    {
+                        if let Err(error) = ctx.group_context_store.release_turn(
+                            turn_id,
+                            "queued message was removed",
+                            now_ms(),
+                        ) {
+                            warn!(turn_id = %turn_id, error = %error, "failed to release removed queued group turn");
+                        }
+                    }
                     let items = queue_manager.queue_status(session_key);
                     let guide_pending = !queue_manager.guide_status(session_key).is_empty();
                     let updated = progress_registry
@@ -1375,6 +1455,7 @@ pub(super) async fn handle_busy_message(
     if let Some(rest) = trimmed.strip_prefix("/g ") {
         let guide_text = rest.trim();
         if guide_text.is_empty() {
+            release_busy_group_turn(&ctx, "guide message is empty");
             send_agent_reply(
                 client,
                 provider,
@@ -1401,174 +1482,4 @@ pub(super) async fn handle_busy_message(
 
     // External runners try live guide except ChatGPT Web, which keeps queue semantics.
     handle_busy_default_message(trimmed, session_key, &ctx).await;
-}
-
-pub(super) async fn run_progress_event_coalescer(
-    progress_registry: Arc<ImAgentProgressRegistry>,
-    session_key: String,
-    rx: &mut mpsc::UnboundedReceiver<bifrost_agent::AgentTurnProgressEvent>,
-) {
-    const STATUS_COALESCE_MS: u64 = 300;
-    while let Some(first) = rx.recv().await {
-        let mut immediate = progress_event_needs_immediate_flush(&first);
-        let mut events = vec![first];
-        while let Ok(event) = rx.try_recv() {
-            immediate |= progress_event_needs_immediate_flush(&event);
-            events.push(event);
-        }
-        if !immediate {
-            let deadline = tokio::time::sleep(std::time::Duration::from_millis(STATUS_COALESCE_MS));
-            tokio::pin!(deadline);
-            loop {
-                tokio::select! {
-                    _ = &mut deadline => break,
-                    maybe_event = rx.recv() => {
-                        let Some(event) = maybe_event else {
-                            break;
-                        };
-                        let mut batch_is_immediate = progress_event_needs_immediate_flush(&event);
-                        events.push(event);
-                        while let Ok(event) = rx.try_recv() {
-                            let drained_is_immediate = progress_event_needs_immediate_flush(&event);
-                            events.push(event);
-                            if drained_is_immediate {
-                                batch_is_immediate = true;
-                                break;
-                            }
-                        }
-                        if batch_is_immediate {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        progress_registry.apply_events(&session_key, events).await;
-    }
-}
-
-pub(super) fn progress_event_needs_immediate_flush(
-    event: &bifrost_agent::AgentTurnProgressEvent,
-) -> bool {
-    matches!(
-        event,
-        bifrost_agent::AgentTurnProgressEvent::ToolStarted { .. }
-            | bifrost_agent::AgentTurnProgressEvent::ToolFinished { .. }
-            | bifrost_agent::AgentTurnProgressEvent::LongTaskStatus { .. }
-            | bifrost_agent::AgentTurnProgressEvent::PlanUpdated { .. }
-            | bifrost_agent::AgentTurnProgressEvent::ProposedPlan { .. }
-            | bifrost_agent::AgentTurnProgressEvent::TitleUpdated { .. }
-            | bifrost_agent::AgentTurnProgressEvent::AssistantDelta { .. }
-            | bifrost_agent::AgentTurnProgressEvent::AssistantFinal { .. }
-            | bifrost_agent::AgentTurnProgressEvent::TurnFinished { .. }
-            | bifrost_agent::AgentTurnProgressEvent::TurnFailed { .. }
-    )
-}
-
-/// Handle an inbound event while an external runner is active.
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn handle_concurrent_event_during_chat(
-    event: &ImEvent,
-    provider: &ImProviderConfig,
-    active_session_key: &str,
-    queue_manager: &Arc<SessionQueueManager>,
-    client: &ImProviderClient,
-    message_log_store: &Arc<ImMessageLogStore>,
-    agent_session_manager: &Arc<ImAgentSessionManager>,
-    progress_registry: &Arc<ImAgentProgressRegistry>,
-    agent_config_store: &Arc<ImAgentConfigStore>,
-    provider_store: &Arc<ImProviderStore>,
-    event_store: &Arc<ImEventStore>,
-    external_cli_config_store: &Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
-    active_session_default_mode: BusyMessageDefaultMode,
-) {
-    let provider = provider_store
-        .get(&event.provider_id)
-        .unwrap_or_else(|| provider.clone());
-    if !provider.enabled {
-        return;
-    }
-    if provider.provider_type == ImProviderType::Feishu {
-        if let Some(ref owner_id) = provider.owner_open_id {
-            if event.source.user_id.as_deref().unwrap_or("") != owner_id {
-                return;
-            }
-        }
-    }
-    if let Err(error) = event_store.add(event.clone()) {
-        error!(error = %error, "failed to store concurrent event");
-    }
-    let message = match event.message.as_ref() {
-        Some(message) if !message.text.trim().is_empty() || !message.images.is_empty() => message,
-        _ => return,
-    };
-    let message_text = agent_message_text(message);
-    let session_key = build_session_key(&event.provider_id, event.source.user_id.as_deref());
-    let agent_config = effective_agent_config_for_provider(&agent_config_store.load(), &provider);
-    if session_key == active_session_key {
-        if message_text.trim() == "/help" {
-            let config = external_cli_config_store.load();
-            let response = build_im_help_text_for_agent_config(
-                &agent_config,
-                &config,
-                Some(provider.id.as_str()),
-            );
-            send_agent_reply(client, &provider, event, &response, message_log_store).await;
-            return;
-        }
-        handle_busy_message(
-            &message_text,
-            &session_key,
-            BusyMessageContext {
-                queue_manager,
-                client,
-                provider: &provider,
-                event,
-                message_log_store,
-                agent_session_manager,
-                progress_registry,
-                external_cli_config_store,
-                agent_config: &agent_config,
-                default_mode: active_session_default_mode,
-                status_context: status_context_from_agent_config(&agent_config),
-                default_work_dir: Some(agent_config.resolve_work_dir().display().to_string()),
-            },
-        )
-        .await;
-    } else if agent_session_manager.is_session_active(&session_key) {
-        let busy_default_mode = busy_default_mode_for_agent_config(
-            &agent_config,
-            &external_cli_config_store.load(),
-            Some(provider.id.as_str()),
-        );
-        handle_busy_message(
-            &message_text,
-            &session_key,
-            BusyMessageContext {
-                queue_manager,
-                client,
-                provider: &provider,
-                event,
-                message_log_store,
-                agent_session_manager,
-                progress_registry,
-                external_cli_config_store,
-                agent_config: &agent_config,
-                default_mode: busy_default_mode,
-                status_context: status_context_from_agent_config(&agent_config),
-                default_work_dir: Some(agent_config.resolve_work_dir().display().to_string()),
-            },
-        )
-        .await;
-    } else {
-        let _ = queue_manager.push_queue(&session_key, message_text);
-        send_agent_reply(
-            client,
-            &provider,
-            event,
-            "⏳ 消息已排队，将在当前任务完成后处理。",
-            message_log_store,
-        )
-        .await;
-    }
 }

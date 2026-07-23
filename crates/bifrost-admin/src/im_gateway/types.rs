@@ -631,26 +631,103 @@ pub struct ImTaskRun {
 // Event
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ImEventSource {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ImMention {
+    #[serde(default)]
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_key: Option<String>,
+    /// Set by trusted adapters/tests when the mention is known to target the
+    /// current application bot. Raw Feishu events are verified against the
+    /// bot identity before this flag is relied upon.
+    #[serde(default)]
+    pub is_bot: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ImMentionRepr {
+    Legacy(String),
+    Structured(ImMentionFields),
+}
+
+#[derive(Default, Deserialize)]
+struct ImMentionFields {
+    #[serde(default)]
+    key: String,
+    #[serde(default)]
+    open_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    tenant_key: Option<String>,
+    #[serde(default)]
+    is_bot: bool,
+}
+
+impl<'de> Deserialize<'de> for ImMention {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match ImMentionRepr::deserialize(deserializer)? {
+            ImMentionRepr::Legacy(key) => Self {
+                key,
+                ..Default::default()
+            },
+            ImMentionRepr::Structured(fields) => Self {
+                key: fields.key,
+                open_id: fields.open_id,
+                name: fields.name,
+                tenant_key: fields.tenant_key,
+                is_bot: fields.is_bot,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ImEventMessage {
     #[serde(default)]
     pub text: String,
     #[serde(default)]
-    pub mentions: Vec<String>,
+    pub mentions: Vec<ImMention>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImImageAttachment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_content: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_time: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_time: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
