@@ -11,6 +11,7 @@ TEST_DIR="$(mktemp -d)"
 BIFROST_LOG="$TEST_DIR/bifrost.log"
 PROMPT_LOG="$TEST_DIR/group-prompts.jsonl"
 RUN_LOG="$TEST_DIR/runner-events.jsonl"
+CONCURRENT_RELEASE="$TEST_DIR/concurrent-release"
 BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
 BIFROST_PORT="${BIFROST_PORT:-$(python3 - <<'PY'
 import socket
@@ -105,6 +106,33 @@ raise SystemExit(1 if any(item.get("session_key") == session_key and item.get("r
   return 1
 }
 
+wait_group_message_recorded() {
+  local message_id="$1"
+  for _ in $(seq 1 160); do
+    if python3 - "$TEST_DIR/admin/im_group_context.db" "$message_id" <<'PY'
+import pathlib
+import sqlite3
+import sys
+
+db_path, message_id = sys.argv[1:3]
+if not pathlib.Path(db_path).exists():
+    raise SystemExit(1)
+connection = sqlite3.connect(db_path)
+recorded = connection.execute(
+    "SELECT 1 FROM im_group_messages WHERE message_id = ? LIMIT 1",
+    (message_id,),
+).fetchone()
+raise SystemExit(0 if recorded else 1)
+PY
+    then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "group message was not recorded: $message_id" >&2
+  return 1
+}
+
 if [[ "${SKIP_BUILD:-false}" != "true" ]]; then
   SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
 fi
@@ -120,12 +148,12 @@ BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
 BIFROST_PID=$!
 wait_http
 
-python3 - "$BIFROST_PORT" "$REPO_DIR" "$PROMPT_LOG" "$RUN_LOG" <<'PY'
+python3 - "$BIFROST_PORT" "$REPO_DIR" "$PROMPT_LOG" "$RUN_LOG" "$CONCURRENT_RELEASE" <<'PY'
 import json
 import sys
 import urllib.request
 
-port, repo_dir, prompt_log, run_log = sys.argv[1:5]
+port, repo_dir, prompt_log, run_log, concurrent_release = sys.argv[1:6]
 base = f"http://127.0.0.1:{port}/_bifrost/api/im-gateway"
 
 def request(path, payload, method="POST"):
@@ -138,15 +166,32 @@ def request(path, payload, method="POST"):
     with urllib.request.urlopen(req, timeout=30) as response:
         assert response.status == 200, response.read().decode()
 
-runner_code = (
-    "import json,os,sys,time; "
-    "prompt=sys.stdin.read(); "
-    f"open({prompt_log!r},'a',encoding='utf-8').write(json.dumps(prompt,ensure_ascii=False)+'\\n'); "
-    f"open({run_log!r},'a',encoding='utf-8').write(json.dumps({{'phase':'start','pid':os.getpid(),'at':time.time()}})+'\\n'); "
-    "time.sleep(1); "
-    f"open({run_log!r},'a',encoding='utf-8').write(json.dumps({{'phase':'finish','pid':os.getpid(),'at':time.time()}})+'\\n'); "
-    "print(json.dumps({'type':'assistant_final','content':'GROUP_OK'}))"
+runner_code = f"""
+import json
+import os
+import sys
+import time
+
+prompt = sys.stdin.read()
+open({prompt_log!r}, "a", encoding="utf-8").write(
+    json.dumps(prompt, ensure_ascii=False) + "\\n"
 )
+open({run_log!r}, "a", encoding="utf-8").write(
+    json.dumps({{"phase": "start", "pid": os.getpid(), "at": time.time()}}) + "\\n"
+)
+if "并发检查" in prompt:
+    deadline = time.time() + 30
+    while not os.path.exists({concurrent_release!r}):
+        if time.time() >= deadline:
+            raise RuntimeError("timed out waiting for concurrent test release")
+        time.sleep(0.05)
+else:
+    time.sleep(1)
+open({run_log!r}, "a", encoding="utf-8").write(
+    json.dumps({{"phase": "finish", "pid": os.getpid(), "at": time.time()}}) + "\\n"
+)
+print(json.dumps({{"type": "assistant_final", "content": "GROUP_OK"}}))
+"""
 request("/chat/config", {
     "version": 1,
     "defaultRunnerId": "group-mock",
@@ -271,12 +316,17 @@ inject chat-alpha user-alice Alice a10 "@_user_1 并发检查 Alpha" true
 inject chat-beta user-carol Carol b6 "@_user_1 并发检查 Beta" true
 inject direct-owner owner-only-in-p2p Owner p1 "并发检查私聊" false p2p
 wait_prompt_count 8
+if [[ -n "${CONCURRENT_INJECT_DELAY_SECONDS:-}" ]]; then
+  sleep "$CONCURRENT_INJECT_DELAY_SECONDS"
+fi
 # A trigger redelivered while Alpha's runner is active must be acknowledged and
 # audited once, without being executed twice. The ambient message is retained
 # as group context but must not receive trigger acknowledgement side effects.
 inject chat-alpha user-alice Alice a11 "/status"
 inject chat-alpha user-alice Alice a11 "/status"
 inject chat-alpha user-bob Bob a12 "并发期间的普通背景消息"
+wait_group_message_recorded a12
+touch "$CONCURRENT_RELEASE"
 for _ in $(seq 1 160); do
   if [[ -f "$RUN_LOG" ]] && [[ "$(wc -l <"$RUN_LOG" | tr -d ' ')" == "16" ]]; then
     break
