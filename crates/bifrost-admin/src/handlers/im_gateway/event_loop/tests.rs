@@ -17,6 +17,15 @@ fn queued_event_restores_the_triggering_reply_target() {
     assert_eq!(queued.source.user_id.as_deref(), Some("ou_second"));
     assert_eq!(queued.source.user_name.as_deref(), Some("Bob"));
     assert_eq!(queued.source.chat_id, base.source.chat_id);
+
+    let unchanged = event_for_queue_item(&base, None);
+    assert_eq!(unchanged.event_id, base.event_id);
+    let empty_event_id = crate::im_gateway::queue_manager::QueueItemContext {
+        event_id: String::new(),
+        ..context
+    };
+    let unchanged_id = event_for_queue_item(&base, Some(&empty_event_id));
+    assert_eq!(unchanged_id.event_id, base.event_id);
 }
 
 #[test]
@@ -37,6 +46,29 @@ fn group_session_work_dir_overrides_runner_and_provider_defaults() {
     assert_eq!(
         request.work_dir.as_deref(),
         Some(std::path::Path::new("/group/bound"))
+    );
+
+    let mut runner_request = recorder_test_request("runner-workdir");
+    runner_request.work_dir = Some(std::path::PathBuf::from("/runner/default"));
+    apply_session_bound_work_dir(
+        &mut runner_request,
+        None,
+        Some(std::path::PathBuf::from("/provider/default")),
+    );
+    assert_eq!(
+        runner_request.work_dir.as_deref(),
+        Some(std::path::Path::new("/runner/default"))
+    );
+
+    let mut provider_request = recorder_test_request("provider-workdir");
+    apply_session_bound_work_dir(
+        &mut provider_request,
+        None,
+        Some(std::path::PathBuf::from("/provider/default")),
+    );
+    assert_eq!(
+        provider_request.work_dir.as_deref(),
+        Some(std::path::Path::new("/provider/default"))
     );
 }
 
@@ -375,6 +407,95 @@ async fn group_event_loop_records_ambient_and_releases_turn_when_agent_is_disabl
         )
         .unwrap();
     assert_eq!(turn.message_count, 3);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn group_clear_reports_baseline_persistence_failure_after_runtime_reset() {
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let (base_url, server) = spawn_group_lookup_server().await;
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-group-clear-failure".to_string();
+    provider.base_url = Some(base_url);
+    service.provider_store.add(provider.clone()).unwrap();
+
+    let mut agent = service.agent_config_store.load();
+    agent.enabled = true;
+    agent.runner = Some(bifrost_agent::AgentRunnerMode::Custom("codex".to_string()));
+    service.agent_config_store.save(&agent).unwrap();
+    let mut cli = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    let runner = cli
+        .runners
+        .get_mut(crate::im_gateway::external_cli::DEFAULT_CODEX_RUNNER_ID)
+        .unwrap();
+    runner.enabled = true;
+    runner.adapter = crate::im_gateway::external_cli::TRAEX_ADAPTER.to_string();
+    service.external_cli_config_store.save(cli).unwrap();
+    rusqlite::Connection::open(service.group_context_store.file_path())
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_group_baseline
+             BEFORE UPDATE OF last_assigned_seq ON im_group_bindings
+             BEGIN SELECT RAISE(FAIL, 'test baseline failure'); END;",
+        )
+        .unwrap();
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    let handle = tokio::spawn(run_event_loop_with_options(
+        rx,
+        ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider())),
+        provider.clone(),
+        Arc::clone(&service.event_store),
+        Arc::clone(&service.message_log_store),
+        Arc::clone(&service.group_context_store),
+        Arc::clone(&service.route_store),
+        Arc::clone(&service.provider_store),
+        Arc::clone(&service.agent_config_store),
+        Arc::clone(&service.schedule_store),
+        Arc::clone(&service.scheduler),
+        Arc::clone(&service.target_store),
+        Arc::clone(&service.connection_manager),
+        Arc::clone(&service.agent_session_manager),
+        Arc::clone(&service.external_cli_config_store),
+        Arc::clone(&service.queue_manager),
+        Arc::clone(&service.progress_registry),
+        EventLoopOptions {
+            send_online_notification: false,
+        },
+    ));
+    tx.send(group_test_event(
+        &provider.id,
+        "before-clear",
+        "keep this context",
+        false,
+        1,
+    ))
+    .unwrap();
+    tx.send(group_test_event(
+        &provider.id,
+        "clear-failure",
+        "/clear",
+        false,
+        2,
+    ))
+    .unwrap();
+    drop(tx);
+    tokio::time::timeout(std::time::Duration::from_secs(20), handle)
+        .await
+        .expect("group clear event loop timed out")
+        .expect("group clear event loop panicked");
+
+    let last_assigned_seq: u64 = rusqlite::Connection::open(service.group_context_store.file_path())
+        .unwrap()
+        .query_row(
+            "SELECT last_assigned_seq FROM im_group_bindings WHERE provider_id = ?1 AND chat_id = 'oc_group'",
+            rusqlite::params![provider.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(last_assigned_seq, 0);
+    server.abort();
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -747,6 +868,30 @@ async fn group_event_loop_routes_concurrent_context_to_the_active_external_sessi
         3,
     ))
     .unwrap();
+    tx.send(group_test_event(
+        &provider.id,
+        "cwd-during-run",
+        &format!("/cwd {}", temp.path().display()),
+        false,
+        4,
+    ))
+    .unwrap();
+    tx.send(group_test_event(
+        &provider.id,
+        "queue-during-run",
+        "/q verify the queued follow-up",
+        false,
+        5,
+    ))
+    .unwrap();
+    tx.send(group_test_event(
+        &provider.id,
+        "remove-queue-during-run",
+        "/rq 1",
+        false,
+        6,
+    ))
+    .unwrap();
     drop(tx);
     tokio::time::timeout(std::time::Duration::from_secs(20), handle)
         .await
@@ -758,8 +903,17 @@ async fn group_event_loop_routes_concurrent_context_to_the_active_external_sessi
             .group_context_store
             .message_count(&provider.id, "oc_group")
             .unwrap(),
-        3
+        6
     );
+    assert_eq!(
+        service
+            .group_context_store
+            .work_dir_by_session(&session_key)
+            .unwrap()
+            .as_deref(),
+        Some(std::fs::canonicalize(temp.path()).unwrap().as_path())
+    );
+    assert!(service.queue_manager.queue_status(&session_key).is_empty());
     let detail = service
         .agent_session_manager
         .get_session_detail(&session_key)
@@ -768,6 +922,148 @@ async fn group_event_loop_routes_concurrent_context_to_the_active_external_sessi
         .messages
         .iter()
         .any(|message| message.content == "GROUP_RUNNER_OK"));
+}
+
+#[tokio::test]
+async fn disabled_and_busy_external_runner_paths_preserve_group_queue_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-disabled-runner".to_string();
+    service.provider_store.add(provider.clone()).unwrap();
+    let mut external_cli_config = service.external_cli_config_store.load();
+    let default_runner_id = external_cli_config.default_runner_id.clone();
+    external_cli_config
+        .runners
+        .get_mut(&default_runner_id)
+        .unwrap()
+        .enabled = false;
+    service
+        .external_cli_config_store
+        .save(external_cli_config)
+        .unwrap();
+    let event = group_test_event(
+        &provider.id,
+        "disabled-runner-trigger",
+        "@_user_1 investigate",
+        true,
+        1,
+    );
+    service
+        .group_context_store
+        .record_event(&event, "test")
+        .unwrap();
+    let turn = service
+        .group_context_store
+        .prepare_turn(
+            &event,
+            crate::im_gateway::group_context::GroupTriggerKind::Mention,
+            "investigate",
+        )
+        .unwrap();
+    let session_key =
+        crate::im_gateway::group_context::build_group_session_key(&provider.id, "oc_group");
+    let mut reply_event = event.clone();
+    reply_event.source.chat_id = None;
+    reply_event.source.user_id = None;
+    let client = ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider()));
+    let (_tx, mut rx) = mpsc::unbounded_channel();
+    let mut pending_events = VecDeque::new();
+
+    run_external_cli_agent_chat(
+        ExternalCliChatContext {
+            rx: &mut rx,
+            client: &client,
+            provider: &provider,
+            provider_store: &service.provider_store,
+            event: &reply_event,
+            message_log_store: &service.message_log_store,
+            agent_config_store: &service.agent_config_store,
+            external_cli_config_store: &service.external_cli_config_store,
+            agent_session_manager: &service.agent_session_manager,
+            queue_manager: &service.queue_manager,
+            progress_registry: &service.progress_registry,
+            event_store: &service.event_store,
+            group_context_store: &service.group_context_store,
+            pending_events: &mut pending_events,
+        },
+        ExternalCliChatInput {
+            message_text: "investigate".to_string(),
+            images: Vec::new(),
+            session_key: session_key.clone(),
+            adapter_override: None,
+            instructions_override: None,
+            delivery_override: None,
+            runner_id_override: None,
+            runner_selected: false,
+            group_turn_id: Some(turn.turn_id.clone()),
+            reset_group_context: false,
+        },
+    )
+    .await;
+
+    let remaining: i64 = rusqlite::Connection::open(service.group_context_store.file_path())
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM im_group_turns WHERE turn_id = ?1",
+            rusqlite::params![turn.turn_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0);
+
+    let mut external_cli_config = service.external_cli_config_store.load();
+    let default_runner_id = external_cli_config.default_runner_id.clone();
+    let default_runner = external_cli_config
+        .runners
+        .get_mut(&default_runner_id)
+        .unwrap();
+    default_runner.enabled = true;
+    default_runner.adapter = crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string();
+    service
+        .external_cli_config_store
+        .save(external_cli_config)
+        .unwrap();
+    let held_session = service
+        .agent_session_manager
+        .try_take_session(&session_key)
+        .unwrap();
+
+    run_external_cli_agent_chat(
+        ExternalCliChatContext {
+            rx: &mut rx,
+            client: &client,
+            provider: &provider,
+            provider_store: &service.provider_store,
+            event: &reply_event,
+            message_log_store: &service.message_log_store,
+            agent_config_store: &service.agent_config_store,
+            external_cli_config_store: &service.external_cli_config_store,
+            agent_session_manager: &service.agent_session_manager,
+            queue_manager: &service.queue_manager,
+            progress_registry: &service.progress_registry,
+            event_store: &service.event_store,
+            group_context_store: &service.group_context_store,
+            pending_events: &mut pending_events,
+        },
+        ExternalCliChatInput {
+            message_text: "queued while busy".to_string(),
+            images: Vec::new(),
+            session_key: session_key.clone(),
+            adapter_override: None,
+            instructions_override: None,
+            delivery_override: None,
+            runner_id_override: None,
+            runner_selected: false,
+            group_turn_id: None,
+            reset_group_context: false,
+        },
+    )
+    .await;
+
+    assert_eq!(service.queue_manager.queue_status(&session_key).len(), 1);
+    service.agent_session_manager.return_session(held_session);
 }
 
 fn recorder_test_provider() -> ImProviderConfig {
@@ -1040,4 +1336,23 @@ fn timed_out_external_cli_result_reports_failure_reply() {
     assert!(reply.contains("timed out after 180 seconds"));
     assert!(reply.contains("run-timeout"));
     assert!(!reply.contains("early agent message"));
+}
+
+#[tokio::test]
+async fn external_runner_small_branches_keep_safe_defaults() {
+    assert_eq!(
+        external_cli_adapter_label(crate::im_gateway::chatgpt_web::ADAPTER_ID),
+        "ChatGPT Web"
+    );
+    assert_eq!(external_cli_adapter_label("traex"), "Runner");
+
+    let mut without_message = group_test_event("provider", "missing", "", false, 1);
+    without_message.message = None;
+    maybe_stop_external_cli_for_event(&without_message, "unrelated").await;
+
+    let non_stop = group_test_event("provider", "continue", "continue", false, 2);
+    maybe_stop_external_cli_for_event(&non_stop, "unrelated").await;
+
+    let other_session = group_test_event("provider", "stop", "/stop", false, 3);
+    maybe_stop_external_cli_for_event(&other_session, "unrelated").await;
 }

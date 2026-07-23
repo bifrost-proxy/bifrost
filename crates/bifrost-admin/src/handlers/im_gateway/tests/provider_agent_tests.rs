@@ -409,6 +409,19 @@ pub(super) fn model_commands_resolve_the_group_selected_runner_first() {
         configured_runner_id_for_im_session(&store, &session_key, &agent_config).as_deref(),
         Some("traex-group")
     );
+    assert_eq!(
+        configured_runner_id_for_im_session(&store, "missing-session", &agent_config).as_deref(),
+        Some("codex-provider")
+    );
+    assert!(configured_runner_id_for_im_session(
+        &store,
+        "missing-session",
+        &crate::im_gateway::agent::ImAgentConfig {
+            runner: None,
+            ..Default::default()
+        },
+    )
+    .is_none());
 }
 
 #[test]

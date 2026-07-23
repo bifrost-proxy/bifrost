@@ -565,6 +565,70 @@ fn group_store_rejects_stale_and_oversized_ranges_without_advancing_cursor() {
 }
 
 #[test]
+fn prepare_turn_propagates_group_range_query_errors() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let trigger = group_event("broken-range", "c1", "u1", "run", Vec::new(), 1);
+    store.record_event(&trigger, "event").unwrap();
+    {
+        let connection = store.connection.lock();
+        connection
+            .execute_batch(
+                "DROP TABLE im_group_messages;
+                 CREATE TABLE im_group_messages (
+                    seq INTEGER PRIMARY KEY,
+                    provider_id TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL
+                 );
+                 INSERT INTO im_group_messages (seq, provider_id, chat_id, message_id)
+                 VALUES (1, 'feishu-main', 'c1', 'broken-range');",
+            )
+            .unwrap();
+    }
+
+    let error = store
+        .prepare_turn(&trigger, GroupTriggerKind::Mention, "run")
+        .unwrap_err();
+    assert!(
+        error.contains("prepare group context range query"),
+        "{error}"
+    );
+}
+
+#[test]
+fn prepare_turn_rejects_a_trigger_missing_from_the_selected_chat_range() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let trigger = group_event("moved-trigger", "c1", "u1", "run", Vec::new(), 1);
+    store.record_event(&trigger, "event").unwrap();
+    store
+        .connection
+        .lock()
+        .execute(
+            "UPDATE im_group_messages SET chat_id = 'other-chat' WHERE message_id = 'moved-trigger'",
+            [],
+        )
+        .unwrap();
+
+    let error = store
+        .prepare_turn(&trigger, GroupTriggerKind::Mention, "run")
+        .unwrap_err();
+    assert_eq!(error, "trigger message missing from selected group context");
+}
+
+#[test]
+fn schema_init_reports_non_duplicate_runner_migration_errors() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch("CREATE VIEW im_group_bindings AS SELECT 1 AS runner_id;")
+        .unwrap();
+
+    let error = init_schema(&connection).unwrap_err();
+    assert!(error.contains("migrate group runner binding"), "{error}");
+}
+
+#[test]
 fn group_prompt_renders_mentions_attachments_and_empty_content_safely() {
     let temp = tempfile::tempdir().unwrap();
     let store = ImGroupContextStore::new(temp.path());
