@@ -62,6 +62,10 @@ pub struct SessionQueueManager {
     /// are still part of the current active turn from the main process view.
     handed_off_guides: DashMap<String, VecDeque<String>>,
 
+    /// Persisted group turn IDs accepted as live guides by the active external
+    /// runner. They remain nonterminal until that runner reports its outcome.
+    live_guide_turns: DashMap<String, VecDeque<String>>,
+
     /// Queue-mode FIFO: processed sequentially after each turn completes.
     queues: DashMap<String, SessionQueue>,
 }
@@ -74,6 +78,7 @@ impl SessionQueueManager {
         Self {
             guide_slots: DashMap::new(),
             handed_off_guides: DashMap::new(),
+            live_guide_turns: DashMap::new(),
             queues: DashMap::new(),
         }
     }
@@ -159,6 +164,26 @@ impl SessionQueueManager {
             }
         }
         unconsumed
+    }
+
+    pub fn track_live_guide_turn(&self, session_key: &str, turn_id: String) {
+        if turn_id.trim().is_empty() {
+            return;
+        }
+        let mut entry = self
+            .live_guide_turns
+            .entry(session_key.to_string())
+            .or_default();
+        if !entry.iter().any(|existing| existing == &turn_id) {
+            entry.push_back(turn_id);
+        }
+    }
+
+    pub fn take_live_guide_turns(&self, session_key: &str) -> Vec<String> {
+        self.live_guide_turns
+            .remove(session_key)
+            .map(|(_, turns)| turns.into_iter().collect())
+            .unwrap_or_default()
     }
 
     // ── Queue mode ───────────────────────────────────────────────────────
@@ -248,7 +273,9 @@ impl SessionQueueManager {
             .unwrap_or_default()
     }
 
-    /// Clear all state (guide + queue) for a session.
+    /// Clear user-visible guide and queue state for a session. Live group-turn
+    /// tracking deliberately survives until the active runner reports its
+    /// terminal outcome, including when an API request stops/deletes a session.
     pub fn clear_session(&self, session_key: &str) {
         self.guide_slots.remove(session_key);
         self.handed_off_guides.remove(session_key);
@@ -341,6 +368,20 @@ mod tests {
         let mgr = SessionQueueManager::new();
         let unconsumed = mgr.reconcile_handed_off_guides("s1", &["x".into()]);
         assert!(unconsumed.is_empty());
+    }
+
+    #[test]
+    fn live_guide_turns_are_deduplicated_and_drained_per_session() {
+        let mgr = SessionQueueManager::new();
+        mgr.track_live_guide_turn("s1", "turn-1".into());
+        mgr.track_live_guide_turn("s1", "turn-1".into());
+        mgr.track_live_guide_turn("s1", "turn-2".into());
+        mgr.track_live_guide_turn("s2", "turn-other".into());
+
+        assert_eq!(mgr.take_live_guide_turns("s1"), vec!["turn-1", "turn-2"]);
+        assert!(mgr.take_live_guide_turns("s1").is_empty());
+        mgr.clear_session("s2");
+        assert_eq!(mgr.take_live_guide_turns("s2"), vec!["turn-other"]);
     }
 
     #[test]

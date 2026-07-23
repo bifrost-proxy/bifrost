@@ -84,6 +84,7 @@ pub struct PreparedGroupTurn {
     pub to_inclusive_seq: u64,
     pub message_count: usize,
     pub prompt: String,
+    pub status: String,
     pub duplicate: bool,
 }
 
@@ -331,6 +332,7 @@ impl ImGroupContextStore {
             to_inclusive_seq: trigger_seq,
             message_count: messages.len(),
             prompt,
+            status: "prepared".to_string(),
             duplicate: false,
         })
     }
@@ -916,7 +918,7 @@ fn load_existing_turn(
     transaction
         .query_row(
             "SELECT turn_id, session_key, trigger_message_id, from_exclusive_seq,
-                    to_inclusive_seq, context_count, context_json
+                    to_inclusive_seq, context_count, context_json, status
              FROM im_group_turns WHERE provider_id = ?1 AND trigger_message_id = ?2",
             params![provider_id, trigger_message_id],
             |row| {
@@ -928,6 +930,7 @@ fn load_existing_turn(
                     to_inclusive_seq: row.get(4)?,
                     message_count: row.get::<_, u64>(5)? as usize,
                     prompt: row.get(6)?,
+                    status: row.get(7)?,
                     duplicate: false,
                 })
             },

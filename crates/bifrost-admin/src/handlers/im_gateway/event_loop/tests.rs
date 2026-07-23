@@ -218,6 +218,51 @@ async fn prepare_group_dispatch_covers_ambient_commands_triggers_and_duplicates(
 }
 
 #[tokio::test]
+async fn prepare_group_dispatch_recovers_nonterminal_turn_after_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = recorder_test_provider();
+    provider.id = "feishu-group-recovery".to_string();
+    provider.base_url = Some("http://127.0.0.1:9".to_string());
+    let trigger = group_test_event(
+        &provider.id,
+        "recover-trigger",
+        "@_user_1 resume this",
+        true,
+        1,
+    );
+
+    let first_turn_id = {
+        let store = ImGroupContextStore::new(temp.path());
+        let dispatch = prepare_group_inbound_dispatch(&client, &provider, &trigger, &store, false)
+            .await
+            .unwrap()
+            .unwrap();
+        let turn_id = dispatch.group_turn_id.unwrap();
+        assert!(
+            prepare_group_inbound_dispatch(&client, &provider, &trigger, &store, true)
+                .await
+                .unwrap()
+                .is_none(),
+            "an active process must still deduplicate its in-flight turn"
+        );
+        turn_id
+    };
+
+    let reopened = ImGroupContextStore::new(temp.path());
+    let recovered = prepare_group_inbound_dispatch(&client, &provider, &trigger, &reopened, false)
+        .await
+        .unwrap()
+        .expect("a redelivered nonterminal turn should resume after restart");
+    assert_eq!(
+        recovered.group_turn_id.as_deref(),
+        Some(first_turn_id.as_str())
+    );
+    assert!(recovered.message_text.contains("resume this"));
+}
+
+#[tokio::test]
 async fn prepare_group_dispatch_resolves_chat_and_bot_from_feishu_api() {
     let temp = tempfile::tempdir().unwrap();
     let store = ImGroupContextStore::new(temp.path());

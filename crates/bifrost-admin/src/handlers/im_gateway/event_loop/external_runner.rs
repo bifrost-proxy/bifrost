@@ -79,6 +79,23 @@ pub(super) fn is_im_progress_card_external_adapter(adapter: &str) -> bool {
     )
 }
 
+pub(in crate::handlers::im_gateway) fn finalize_live_guide_group_turns(
+    queue_manager: &SessionQueueManager,
+    group_context_store: &ImGroupContextStore,
+    session_key: &str,
+    result: Result<(), &str>,
+) {
+    for turn_id in queue_manager.take_live_guide_turns(session_key) {
+        let status_result = match result {
+            Ok(()) => group_context_store.mark_turn_completed(&turn_id, now_ms()),
+            Err(error) => group_context_store.mark_turn_failed(&turn_id, error, now_ms()),
+        };
+        if let Err(error) = status_result {
+            warn!(turn_id = %turn_id, error = %error, "failed to finalize live guide group turn");
+        }
+    }
+}
+
 pub(super) async fn run_external_cli_agent_chat(
     ctx: ExternalCliChatContext<'_>,
     input: ExternalCliChatInput,
@@ -464,7 +481,7 @@ pub(super) async fn run_external_cli_agent_chat(
                         let progress_registry = Arc::clone(ctx.progress_registry);
                         let session_key_for_progress = input.session_key.clone();
                         progress_task = Some(tokio::spawn(async move {
-                            super::super::agent_chat::run_progress_event_coalescer(
+                            super::super::agent_chat_progress::run_progress_event_coalescer(
                                 progress_registry,
                                 session_key_for_progress,
                                 &mut progress_rx,
@@ -683,6 +700,16 @@ pub(super) async fn run_external_cli_agent_chat(
                         warn!(turn_id = %turn_id, error = %error, "failed to finalize group turn");
                     }
                 }
+                finalize_live_guide_group_turns(
+                    ctx.queue_manager,
+                    ctx.group_context_store,
+                    &input.session_key,
+                    if run_succeeded {
+                        Ok(())
+                    } else {
+                        Err(result.response.as_str())
+                    },
+                );
                 remember_external_cli_result_metadata(&mut runner_metadata, &result.metadata);
                 record_external_cli_result(
                     &mut session,
@@ -790,6 +817,12 @@ pub(super) async fn run_external_cli_agent_chat(
                         warn!(turn_id = %turn_id, error = %status_error, "failed to mark group turn failed");
                     }
                 }
+                finalize_live_guide_group_turns(
+                    ctx.queue_manager,
+                    ctx.group_context_store,
+                    &input.session_key,
+                    Err(error.as_str()),
+                );
                 // Extract diagnostic screenshot path if present.
                 let (clean_error, screenshot_path) = extract_diagnostic_screenshot_path(&error);
                 let reply = format!("Runner failed: {}", truncate_str(&clean_error, 300));

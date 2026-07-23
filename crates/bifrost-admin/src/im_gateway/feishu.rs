@@ -2124,26 +2124,6 @@ pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Opt
         .and_then(|content_str| serde_json::from_str::<serde_json::Value>(content_str).ok())
         .unwrap_or_else(|| serde_json::json!({}));
 
-    // Extract text content from message.content. Feishu rich text (`post`)
-    // stores plain text in nested `content` arrays rather than top-level text.
-    let text = extract_feishu_message_text(&content_obj);
-
-    let mut images = Vec::new();
-    if message_type.as_deref() == Some("image") {
-        if let Some(image_key) = content_obj.get("image_key").and_then(|v| v.as_str()) {
-            images.push(ImImageAttachment {
-                file_key: image_key.to_string(),
-                source: ImImageSource::MessageResource,
-                mime_type: None,
-                data_base64: None,
-                download_url: None,
-                encrypted_query_param: None,
-                aes_key: None,
-            });
-        }
-    }
-    collect_rich_text_image_keys(&content_obj, &mut images);
-
     let mentions = message
         .get("mentions")
         .and_then(serde_json::Value::as_array)
@@ -2171,6 +2151,29 @@ pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Opt
             is_bot: false,
         })
         .collect::<Vec<_>>();
+
+    // Extract text content from message.content. Feishu rich text (`post`)
+    // stores plain text in nested `content` arrays rather than top-level text.
+    // Its `at` nodes contain display names/IDs instead of the stable mention
+    // placeholders supplied alongside the message, so normalize them back to
+    // those placeholders before group classification and prompt rendering.
+    let text = extract_feishu_message_text(&content_obj, &mentions);
+
+    let mut images = Vec::new();
+    if message_type.as_deref() == Some("image") {
+        if let Some(image_key) = content_obj.get("image_key").and_then(|v| v.as_str()) {
+            images.push(ImImageAttachment {
+                file_key: image_key.to_string(),
+                source: ImImageSource::MessageResource,
+                mime_type: None,
+                data_base64: None,
+                download_url: None,
+                encrypted_query_param: None,
+                aes_key: None,
+            });
+        }
+    }
+    collect_rich_text_image_keys(&content_obj, &mut images);
 
     info!(
         provider_id = %provider_id,
@@ -2461,16 +2464,20 @@ fn collect_rich_text_image_keys(value: &serde_json::Value, images: &mut Vec<ImIm
     }
 }
 
-fn extract_feishu_message_text(value: &serde_json::Value) -> String {
+fn extract_feishu_message_text(value: &serde_json::Value, mentions: &[ImMention]) -> String {
     if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
         return text.to_string();
     }
     let mut parts = Vec::new();
-    collect_feishu_text_nodes(value, &mut parts);
+    collect_feishu_text_nodes(value, mentions, &mut parts);
     parts.join("").trim().to_string()
 }
 
-fn collect_feishu_text_nodes(value: &serde_json::Value, parts: &mut Vec<String>) {
+fn collect_feishu_text_nodes(
+    value: &serde_json::Value,
+    mentions: &[ImMention],
+    parts: &mut Vec<String>,
+) {
     match value {
         serde_json::Value::Object(map) => {
             let tag = map.get("tag").and_then(|v| v.as_str());
@@ -2480,11 +2487,11 @@ fn collect_feishu_text_nodes(value: &serde_json::Value, parts: &mut Vec<String>)
                 }
             }
             if tag == Some("at") {
-                if let Some(text) = map
-                    .get("user_name")
-                    .or_else(|| map.get("user_id"))
-                    .and_then(|v| v.as_str())
-                {
+                if let Some(text) = rich_text_mention_placeholder(map, mentions).or_else(|| {
+                    map.get("user_name")
+                        .or_else(|| map.get("user_id"))
+                        .and_then(|v| v.as_str())
+                }) {
                     parts.push(text.to_string());
                 }
             }
@@ -2492,16 +2499,47 @@ fn collect_feishu_text_nodes(value: &serde_json::Value, parts: &mut Vec<String>)
                 parts.push("\n".to_string());
             }
             for child in map.values() {
-                collect_feishu_text_nodes(child, parts);
+                collect_feishu_text_nodes(child, mentions, parts);
             }
         }
         serde_json::Value::Array(items) => {
             for item in items {
-                collect_feishu_text_nodes(item, parts);
+                collect_feishu_text_nodes(item, mentions, parts);
             }
         }
         _ => {}
     }
+}
+
+fn rich_text_mention_placeholder<'a>(
+    node: &serde_json::Map<String, serde_json::Value>,
+    mentions: &'a [ImMention],
+) -> Option<&'a str> {
+    let user_id = node
+        .get("open_id")
+        .or_else(|| node.get("user_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let user_name = node
+        .get("user_name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    user_id
+        .and_then(|id| {
+            mentions.iter().find(|mention| {
+                !mention.key.trim().is_empty() && mention.open_id.as_deref() == Some(id)
+            })
+        })
+        .or_else(|| {
+            user_name.and_then(|name| {
+                mentions.iter().find(|mention| {
+                    !mention.key.trim().is_empty() && mention.name.as_deref() == Some(name)
+                })
+            })
+        })
+        .map(|mention| mention.key.as_str())
 }
 
 fn json_object_keys(value: &serde_json::Value) -> Vec<&str> {
@@ -2880,6 +2918,53 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_feishu_post_restores_stable_mention_placeholders() {
+        let raw = serde_json::json!({
+            "header": {
+                "event_id": "evt_group_post",
+                "event_type": "im.message.receive_v1",
+                "create_time": "1710000000999"
+            },
+            "event": {
+                "message": {
+                    "chat_id": "oc_group",
+                    "chat_type": "group",
+                    "message_id": "om_group_post",
+                    "message_type": "post",
+                    "content": serde_json::json!({
+                        "content": [[
+                            {"tag": "at", "user_id": "ou_bot", "user_name": "Bifrost"},
+                            {"tag": "text", "text": " inspect this"},
+                            {"tag": "at", "user_id": "ou_alice", "user_name": "Alice"}
+                        ]]
+                    }).to_string(),
+                    "mentions": [
+                        {
+                            "key": "@_user_1",
+                            "id": {"open_id": "ou_bot"},
+                            "name": "Bifrost"
+                        },
+                        {
+                            "key": "@_user_2",
+                            "id": {"open_id": "ou_alice"},
+                            "name": "Alice"
+                        }
+                    ]
+                },
+                "sender": {
+                    "sender_type": "user",
+                    "sender_id": {"open_id": "ou_alice"}
+                }
+            }
+        });
+
+        let event = normalize_feishu_event(&raw, "feishu-main").unwrap();
+        let message = event.message.unwrap();
+        assert_eq!(message.text, "@_user_1 inspect this@_user_2");
+        assert_eq!(message.mentions.len(), 2);
+    }
+
+    #[test]
     fn test_normalize_feishu_image_message_extracts_resource_key() {
         let raw = serde_json::json!({
             "header": {
@@ -3050,11 +3135,39 @@ mod tests {
                 {"tag": "at", "user_name": "Alice"}
             ]]
         });
-        let text = extract_feishu_message_text(&rich);
-        assert_eq!(text, "Hello world\nAlice");
+        let mentions = vec![ImMention {
+            key: "@_user_1".to_string(),
+            open_id: Some("ou_alice".to_string()),
+            name: Some("Alice".to_string()),
+            tenant_key: None,
+            is_bot: false,
+        }];
+        let text = extract_feishu_message_text(&rich, &mentions);
+        assert_eq!(text, "Hello world\n@_user_1");
+
+        let unmatched = extract_feishu_message_text(&rich, &[]);
+        assert_eq!(unmatched, "Hello world\nAlice");
+
+        let duplicate_name_mentions = vec![
+            ImMention {
+                key: "@_wrong_name_match".to_string(),
+                open_id: Some("ou_other".to_string()),
+                name: Some("Alice".to_string()),
+                tenant_key: None,
+                is_bot: false,
+            },
+            mentions[0].clone(),
+        ];
+        let rich_with_id = serde_json::json!({
+            "content": [[{"tag": "at", "user_id": "ou_alice", "user_name": "Alice"}]]
+        });
+        assert_eq!(
+            extract_feishu_message_text(&rich_with_id, &duplicate_name_mentions),
+            "@_user_1"
+        );
 
         let plain = serde_json::json!({"text": "plain text"});
-        assert_eq!(extract_feishu_message_text(&plain), "plain text");
+        assert_eq!(extract_feishu_message_text(&plain, &mentions), "plain text");
     }
 
     #[test]

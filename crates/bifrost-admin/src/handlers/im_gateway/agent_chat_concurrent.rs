@@ -1,0 +1,163 @@
+use super::*;
+
+/// Handle an inbound event while an external runner is active.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn handle_concurrent_event_during_chat(
+    event: &ImEvent,
+    provider: &ImProviderConfig,
+    active_session_key: &str,
+    queue_manager: &Arc<SessionQueueManager>,
+    client: &ImProviderClient,
+    message_log_store: &Arc<ImMessageLogStore>,
+    agent_session_manager: &Arc<ImAgentSessionManager>,
+    progress_registry: &Arc<ImAgentProgressRegistry>,
+    agent_config_store: &Arc<ImAgentConfigStore>,
+    provider_store: &Arc<ImProviderStore>,
+    event_store: &Arc<ImEventStore>,
+    group_context_store: &Arc<ImGroupContextStore>,
+    external_cli_config_store: &Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
+    active_session_default_mode: BusyMessageDefaultMode,
+) {
+    let provider = provider_store
+        .get(&event.provider_id)
+        .unwrap_or_else(|| provider.clone());
+    if !provider.enabled {
+        return;
+    }
+    let is_group_event = crate::im_gateway::group_context::is_feishu_group_event(event);
+    if provider.provider_type == ImProviderType::Feishu && !is_group_event {
+        if let Some(ref owner_id) = provider.owner_open_id {
+            if event.source.user_id.as_deref().unwrap_or("") != owner_id {
+                return;
+            }
+        }
+    }
+    if let Err(error) = event_store.add(event.clone()) {
+        error!(error = %error, "failed to store concurrent event");
+    }
+    let message = match event.message.as_ref() {
+        Some(message) if !message.text.trim().is_empty() || !message.images.is_empty() => message,
+        _ => return,
+    };
+    let dispatch = if is_group_event {
+        match prepare_group_inbound_dispatch(
+            client,
+            &provider,
+            event,
+            group_context_store,
+            agent_session_manager.is_session_active(
+                &crate::im_gateway::group_context::build_group_session_key(
+                    &event.provider_id,
+                    event.source.chat_id.as_deref().unwrap_or_default(),
+                ),
+            ),
+        )
+        .await
+        {
+            Ok(Some(dispatch)) => dispatch,
+            Ok(None) => return,
+            Err(error) => {
+                send_agent_reply(
+                    client,
+                    &provider,
+                    event,
+                    &format!("无法准备本次群聊上下文：{error}"),
+                    message_log_store,
+                )
+                .await;
+                return;
+            }
+        }
+    } else {
+        PreparedInboundDispatch {
+            message_text: agent_message_text(message),
+            session_key: build_session_key(&event.provider_id, event.source.user_id.as_deref()),
+            group_turn_id: None,
+            reset_group_context: false,
+        }
+    };
+    let message_text = dispatch.message_text;
+    let session_key = dispatch.session_key;
+    let group_turn_id = dispatch.group_turn_id;
+    let agent_config = effective_agent_config_for_provider(&agent_config_store.load(), &provider);
+    if session_key == active_session_key {
+        if message_text.trim() == "/help" {
+            let config = external_cli_config_store.load();
+            let response = build_im_help_text_for_agent_config(
+                &agent_config,
+                &config,
+                Some(provider.id.as_str()),
+            );
+            send_agent_reply(client, &provider, event, &response, message_log_store).await;
+            return;
+        }
+        handle_busy_message(
+            &message_text,
+            &session_key,
+            BusyMessageContext {
+                queue_manager,
+                client,
+                provider: &provider,
+                event,
+                message_log_store,
+                agent_session_manager,
+                progress_registry,
+                external_cli_config_store,
+                agent_config: &agent_config,
+                group_context_store,
+                group_turn_id: group_turn_id.as_deref(),
+                default_mode: active_session_default_mode,
+                status_context: status_context_from_agent_config(&agent_config),
+                default_work_dir: group_context_store
+                    .work_dir_by_session(&session_key)
+                    .ok()
+                    .flatten()
+                    .map(|path| path.display().to_string())
+                    .or_else(|| Some(agent_config.resolve_work_dir().display().to_string())),
+            },
+        )
+        .await;
+    } else if agent_session_manager.is_session_active(&session_key) {
+        let busy_default_mode = busy_default_mode_for_agent_config(
+            &agent_config,
+            &external_cli_config_store.load(),
+            Some(provider.id.as_str()),
+        );
+        handle_busy_message(
+            &message_text,
+            &session_key,
+            BusyMessageContext {
+                queue_manager,
+                client,
+                provider: &provider,
+                event,
+                message_log_store,
+                agent_session_manager,
+                progress_registry,
+                external_cli_config_store,
+                agent_config: &agent_config,
+                group_context_store,
+                group_turn_id: group_turn_id.as_deref(),
+                default_mode: busy_default_mode,
+                status_context: status_context_from_agent_config(&agent_config),
+                default_work_dir: group_context_store
+                    .work_dir_by_session(&session_key)
+                    .ok()
+                    .flatten()
+                    .map(|path| path.display().to_string())
+                    .or_else(|| Some(agent_config.resolve_work_dir().display().to_string())),
+            },
+        )
+        .await;
+    } else {
+        let _ = queue_manager.push_queue(&session_key, message_text);
+        send_agent_reply(
+            client,
+            &provider,
+            event,
+            "⏳ 消息已排队，将在当前任务完成后处理。",
+            message_log_store,
+        )
+        .await;
+    }
+}

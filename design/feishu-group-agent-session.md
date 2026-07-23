@@ -38,7 +38,8 @@
 4. 系统 slash 原样交给现有单聊命令处理器。
 5. Agent 触发在 SQLite 事务内冻结消息区间、生成 Turn 并推进 `last_assigned_seq`。
 6. Session 空闲时启动 Turn；Session 运行中时复用现有 live Guide，失败时复用现有 queue fallback。
-7. 直接启动 Runner 的 Turn 在完成后更新状态和 `last_success_seq`；运行中 Guide/Queue 的 Turn 保持 `dispatched`，其消息区间已由 `last_assigned_seq` 消费，冻结输入仍可审计。
+7. 直接启动 Runner 的 Turn 在完成后更新状态和 `last_success_seq`；运行中 Guide/Queue 的 Turn 保持 `dispatched`。live Guide 被外部 Runner 接受后也必须等当前 Runner 成功或失败再同步完成或失败，不能在控制通道仅返回 `accepted` 时提前记为成功。
+8. 进程重启会丢失内存队列和事件去重缓存，但 SQLite 中 `prepared` / `dispatched` Turn 保留冻结输入。飞书重投同一触发消息且对应 Session 当前空闲时，复用原 Turn 继续执行；同进程 Session 仍繁忙时继续按重复消息丢弃，避免双跑。
 
 ## 模型输入
 
@@ -51,6 +52,8 @@ SQLite Turn 仍保存完整的消息 ID、序号、时间、mentions、游标和
 - 最后一条触发消息只出现一次，格式同样是 `<at id=发送者 open_id>显示名</at>：消息内容`。
 
 `<at>` 是模型后续准确 @ 原发送人的稳定标识。飞书消息事件不保证携带发送者显示名；有名称时使用 `<at id=open_id>名称</at>`，没有名称时使用飞书最简形式 `<at id=open_id></at>`，不把冗长 open_id 复制到可见文本中。标签的 `id` 始终保持发送者 open_id；id 和显示名在序列化前进行转义，避免破坏结构或注入伪造标签。
+
+飞书富文本 `post` 的 `at` 节点只携带用户 ID/显示名，正文里不一定包含事件 `mentions[].key`。归一化阶段必须先按用户 ID、再按显示名把 `at` 节点恢复成稳定 placeholder，之后再统一执行 bot mention 移除和 `<at>` 渲染；不能把易变显示名直接送入群 Prompt。
 
 ## slash 一致性
 

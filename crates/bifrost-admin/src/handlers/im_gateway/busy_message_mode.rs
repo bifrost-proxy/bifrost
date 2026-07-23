@@ -152,7 +152,10 @@ pub(super) async fn handle_busy_guide_command(
         .await
         {
             Ok(result) if result.accepted => {
-                complete_busy_group_turn(ctx);
+                if let Some(turn_id) = ctx.group_turn_id {
+                    ctx.queue_manager
+                        .track_live_guide_turn(session_key, turn_id.to_string());
+                }
                 info!(
                     session_key = %session_key,
                     thread_id = ?result.thread_id,

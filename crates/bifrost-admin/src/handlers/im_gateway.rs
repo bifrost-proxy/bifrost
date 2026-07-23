@@ -31,6 +31,8 @@ use bifrost_agent::{PlanStep, SessionDetail, ToolCallLog};
 
 mod agent_api;
 mod agent_chat;
+mod agent_chat_concurrent;
+mod agent_chat_progress;
 mod agent_reply;
 mod agent_reply_attachments;
 mod agent_reply_target;
@@ -50,6 +52,9 @@ mod tests;
 #[allow(unused_imports)]
 use agent_api::*;
 use agent_chat::*;
+use agent_chat_concurrent::*;
+#[cfg(test)]
+use agent_chat_progress::*;
 use agent_reply::*;
 use agent_reply_attachments::*;
 use agent_reply_target::*;

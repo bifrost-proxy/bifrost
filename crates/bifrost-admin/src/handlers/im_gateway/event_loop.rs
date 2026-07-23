@@ -960,7 +960,15 @@ pub(super) async fn prepare_group_inbound_dispatch(
         } => {
             let prepared = store.prepare_turn(event, kind, &active_request)?;
             if prepared.duplicate {
-                return Ok(None);
+                let recoverable = matches!(prepared.status.as_str(), "prepared" | "dispatched");
+                if session_busy || !recoverable {
+                    return Ok(None);
+                }
+                warn!(
+                    turn_id = %prepared.turn_id,
+                    status = %prepared.status,
+                    "recovering nonterminal group turn from a redelivered event"
+                );
             }
             store.mark_turn_dispatched(&prepared.turn_id, now_ms())?;
             Ok(Some(PreparedInboundDispatch {
@@ -977,7 +985,8 @@ mod external_runner;
 use external_runner::*;
 #[allow(unused_imports)]
 pub(super) use external_runner::{
-    apply_external_cli_resume_metadata, resolve_external_cli_delivery_mode,
+    apply_external_cli_resume_metadata, finalize_live_guide_group_turns,
+    resolve_external_cli_delivery_mode,
 };
 #[cfg(test)]
 #[path = "event_loop/tests.rs"]

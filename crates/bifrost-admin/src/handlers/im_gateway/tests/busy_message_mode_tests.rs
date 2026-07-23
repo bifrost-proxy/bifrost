@@ -261,6 +261,55 @@ async fn busy_group_turns_complete_or_release_with_their_queue_outcome() {
 }
 
 #[test]
+fn live_guide_group_turns_follow_the_external_run_outcome() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let queue_manager = SessionQueueManager::new();
+    let session_key =
+        crate::im_gateway::group_context::build_group_session_key("feishu-main", "busy-group");
+
+    let success_event = busy_group_event("live-guide-success", "/g continue", 1);
+    store.record_event(&success_event, "test").unwrap();
+    let success_turn = store
+        .prepare_turn(
+            &success_event,
+            crate::im_gateway::group_context::GroupTriggerKind::Guide,
+            "continue",
+        )
+        .unwrap();
+    store
+        .mark_turn_dispatched(&success_turn.turn_id, 2)
+        .unwrap();
+    queue_manager.track_live_guide_turn(&session_key, success_turn.turn_id.clone());
+    assert_eq!(
+        persisted_group_turn_status(&store, &success_turn.turn_id).as_deref(),
+        Some("dispatched")
+    );
+    finalize_live_guide_group_turns(&queue_manager, &store, &session_key, Ok(()));
+    assert_eq!(
+        persisted_group_turn_status(&store, &success_turn.turn_id).as_deref(),
+        Some("completed")
+    );
+
+    let failed_event = busy_group_event("live-guide-failed", "/g fail", 3);
+    store.record_event(&failed_event, "test").unwrap();
+    let failed_turn = store
+        .prepare_turn(
+            &failed_event,
+            crate::im_gateway::group_context::GroupTriggerKind::Guide,
+            "fail",
+        )
+        .unwrap();
+    store.mark_turn_dispatched(&failed_turn.turn_id, 4).unwrap();
+    queue_manager.track_live_guide_turn(&session_key, failed_turn.turn_id.clone());
+    finalize_live_guide_group_turns(&queue_manager, &store, &session_key, Err("runner failed"));
+    assert_eq!(
+        persisted_group_turn_status(&store, &failed_turn.turn_id).as_deref(),
+        Some("failed")
+    );
+}
+
+#[test]
 fn codex_runner_metadata_resumes_queued_messages_after_current_run() {
     let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         images: Vec::new(),

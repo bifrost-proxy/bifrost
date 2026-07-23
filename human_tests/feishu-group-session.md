@@ -123,6 +123,37 @@
 
 预期结果：相对附件解析到群 binding 的工作目录，不读取 Provider 默认目录中的同名文件；回复卡片发送后附件可正常上传。没有群工作目录时仍回退到 Provider 默认目录。
 
+### TC-FGS-15：富文本 Post 的 At 节点保留稳定 Mention
+
+1. 构造包含机器人和普通成员 `at` 节点的飞书 `post` 事件，并同时提供对应 `mentions[].key/open_id/name`。
+2. 执行飞书事件归一化和群 Prompt mention 渲染。
+3. 检查机器人 placeholder 可被分类器移除，普通成员 placeholder 可渲染为稳定 `<at id=...>`。
+
+预期结果：归一化正文使用 `@_user_N` 稳定 placeholder，不直接保留易变显示名；机器人 mention 不污染 active request，普通成员身份不丢失。
+
+### TC-FGS-16：Live Guide Turn 等待 Runner 最终结果
+
+1. 创建并标记一个群 Guide Turn 为 `dispatched`，模拟外部 Runner 接受 live guide。
+2. 在 Runner 尚未结束时检查 SQLite Turn 状态。
+3. 分别模拟 Runner 成功与失败并执行收尾。
+
+预期结果：控制通道返回 accepted 后 Turn 仍为 `dispatched`；Runner 成功后变为 `completed`，Runner 失败后变为 `failed`，不会提前记录成功。
+
+### TC-FGS-17：进程重启后恢复非终态群 Turn
+
+1. 准备并 dispatch 一个群触发 Turn，不执行 Runner，关闭并重新打开 `ImGroupContextStore` 模拟进程重启。
+2. 重新投递同一飞书触发事件，并声明对应 Session 当前空闲。
+3. 对比恢复前后的 Turn ID、冻结 Prompt 和状态。
+
+预期结果：复用同一个 `prepared`/`dispatched` Turn 并重新进入执行路径；若 Session 仍繁忙则重复投递继续被抑制，已完成或失败 Turn 不会重跑。
+
+### TC-FGS-18：群并发分发模块保持单文件上限
+
+1. 检查 `agent_chat.rs`、并发事件模块、进度事件模块和 event loop 相关文件行数。
+2. 执行格式与 clippy 检查，确认拆分后的 sibling module 可见性和调用路径。
+
+预期结果：每个生产 Rust 文件不超过 1500 行；群 Session 并发分发不再继续堆入 `agent_chat.rs`，行为测试保持通过。
+
 ## 执行方式
 
 TC-FGS-01 至 TC-FGS-05 由以下真实服务脚本逐条执行：
@@ -173,6 +204,18 @@ TC-FGS-13 与 TC-FGS-14 的升级兼容、禁用 Agent Turn 清理和群目录�
 cargo test -p bifrost-admin loads_legacy_string_mentions_without_deleting_history -- --nocapture
 cargo test -p bifrost-admin group_event_loop_records_ambient_and_releases_turn_when_agent_is_disabled -- --nocapture
 cargo test -p bifrost-admin group_reply_assets_use_the_session_work_dir_before_provider_default -- --nocapture
+```
+
+TC-FGS-15 至 TC-FGS-18 的富文本 mention、live Guide 生命周期、重启恢复和模块边界执行：
+
+```bash
+cargo test -p bifrost-admin test_normalize_feishu_post_restores_stable_mention_placeholders -- --nocapture
+cargo test -p bifrost-admin live_guide_group_turns_follow_the_external_run_outcome -- --nocapture
+cargo test -p bifrost-admin prepare_group_dispatch_recovers_nonterminal_turn_after_restart -- --nocapture
+test "$(wc -l < crates/bifrost-admin/src/handlers/im_gateway/agent_chat.rs)" -le 1500
+test "$(wc -l < crates/bifrost-admin/src/handlers/im_gateway/agent_chat_concurrent.rs)" -le 1500
+test "$(wc -l < crates/bifrost-admin/src/handlers/im_gateway/agent_chat_progress.rs)" -le 1500
+cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 ```
 
 ## 清理步骤
