@@ -88,7 +88,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
         ),
         TestCase::standalone(
         "im_gateway_progress_card_budget_and_codex_resources",
-        "Validate a long progress card caps tool details at 300 characters, preserves the latest five model-thinking rounds, and stays inside the local byte budget while its top status exposes Codex session tokens, weekly balance, and elapsed time",
+        "Validate a long progress card keeps old tools as readable steps, preserves expandable details for the latest five tools, removes old thinking and tools together, and stays inside the local byte budget while its top status exposes Codex session tokens, weekly balance, and elapsed time",
         "admin",
         || async move {
             use bifrost_admin::im_gateway::progress_card::{
@@ -138,13 +138,13 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 });
                 snapshot.apply_event(bifrost_agent::AgentTurnProgressEvent::ToolFinished {
                     log: bifrost_agent::ToolCallLog {
-                        tool_name: "exec_command".to_string(),
+                        tool_name: format!("tool_{index}"),
                         arguments: format!(
-                            "MARKER_{index}_{}INPUT_HIDDEN_{index}",
+                            "INPUT_MARKER_{index}_{}INPUT_HIDDEN_{index}",
                             "input".repeat(220),
                         ),
                         result: format!(
-                            "{}_{}OUTPUT_HIDDEN_{index}",
+                            "{}_OUTPUT_MARKER_{index}_{}OUTPUT_HIDDEN_{index}",
                             if index == 39 { "LATEST_MARKER" } else { "OLD_MARKER" },
                             "output".repeat(520),
                         ),
@@ -177,6 +177,51 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     return Err(format!("resource-aware card missing {needle}: {serialized}"));
                 }
             }
+            let summarized_indexes = (0..35)
+                .filter(|index| {
+                    serialized.contains(&format!("步骤：`tool_{index}` · 完成"))
+                })
+                .collect::<Vec<_>>();
+            let first_summarized_index = summarized_indexes.first().copied().ok_or_else(|| {
+                format!("long progress card did not retain any old tool steps: {serialized}")
+            })?;
+            for summarized_index in summarized_indexes {
+                for needle in [
+                    format!("THINKING_ROUND_{summarized_index}"),
+                    format!("步骤：`tool_{summarized_index}` · 完成"),
+                ] {
+                    if !serialized.contains(&needle) {
+                        return Err(format!(
+                            "retained execution step missing {needle}: {serialized}"
+                        ));
+                    }
+                }
+                for forbidden in [
+                    format!("INPUT_MARKER_{summarized_index}"),
+                    format!("OUTPUT_MARKER_{summarized_index}"),
+                ] {
+                    if serialized.contains(&forbidden) {
+                        return Err(format!(
+                            "old tool step unexpectedly retained detail {forbidden}"
+                        ));
+                    }
+                }
+            }
+            if first_summarized_index > 0 {
+                let omitted_index = first_summarized_index - 1;
+                for forbidden in [
+                    format!("THINKING_ROUND_{omitted_index}"),
+                    format!("步骤：`tool_{omitted_index}`"),
+                    format!("INPUT_MARKER_{omitted_index}"),
+                    format!("OUTPUT_MARKER_{omitted_index}"),
+                ] {
+                    if serialized.contains(&forbidden) {
+                        return Err(format!(
+                            "budget boundary retained an orphaned execution item {forbidden}"
+                        ));
+                    }
+                }
+            }
             if serialized.contains("MARKER_0_") {
                 return Err("oldest process record was not removed from the card view".to_string());
             }
@@ -187,6 +232,18 @@ pub fn get_all_tests() -> Vec<TestCase> {
             ] {
                 if serialized.contains(forbidden) {
                     return Err(format!("budgeted card unexpectedly retained {forbidden}"));
+                }
+            }
+            for recent_index in 35..40 {
+                for needle in [
+                    format!("INPUT_MARKER_{recent_index}"),
+                    format!("OUTPUT_MARKER_{recent_index}"),
+                ] {
+                    if !serialized.contains(&needle) {
+                        return Err(format!(
+                            "recent tool detail missing {needle}: {serialized}"
+                        ));
+                    }
                 }
             }
             Ok(())

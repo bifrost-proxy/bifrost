@@ -539,13 +539,13 @@ fn consecutive_process_tools_are_grouped_by_default() {
 #[test]
 fn process_timeline_keeps_latest_thirty_tool_calls_with_omission_notice() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "long task");
-    snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
-        content: "THINKING_BEFORE_OMITTED_TOOLS".to_string(),
-    });
     for index in 0..35 {
+        snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
+            content: format!("THINKING_ROUND_{index}"),
+        });
         snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
             log: ToolCallLog {
-                tool_name: "exec_command".to_string(),
+                tool_name: format!("tool_{index}"),
                 arguments: format!(r#"{{"cmd":"echo tool-{index}"}}"#),
                 result: format!("result-{index}"),
                 success: true,
@@ -573,19 +573,20 @@ fn process_timeline_keeps_latest_thirty_tool_calls_with_omission_notice() {
         .as_str()
         .unwrap()
         .contains("已省略前面 5 次工具调用，仅显示最新 30 次。"));
-    assert_eq!(process_elements[1]["element_id"], "ap_tg_6");
-
-    let grouped_tools = process_elements[1]["elements"].as_array().unwrap();
-    assert_eq!(grouped_tools.len(), 30);
-    assert_eq!(grouped_tools[0]["element_id"], "ap_t_6");
-    assert_eq!(grouped_tools[29]["element_id"], "ap_t_35");
 
     let serialized = serde_json::to_string(&card).unwrap();
     assert!(!serialized.contains("tool-0"));
     assert!(!serialized.contains("result-4"));
-    assert!(serialized.contains("tool-5"));
+    assert!(!serialized.contains("THINKING_ROUND_0"));
+    assert!(serialized.contains("THINKING_ROUND_5"));
+    assert!(serialized.contains("步骤：`tool_5` · 完成"));
+    assert!(!serialized.contains("result-5"));
+    assert!(serialized.contains("ap_t_61"));
     assert!(serialized.contains("result-34"));
-    assert!(serialized.contains("THINKING_BEFORE_OMITTED_TOOLS"));
+    assert_eq!(
+        oldest_budget_removable_timeline_range(&snapshot.timeline),
+        Some(0..10)
+    );
 }
 
 #[test]
@@ -639,6 +640,11 @@ fn process_tool_detail_caps_input_and_output_previews_at_three_hundred_chars() {
 fn budgeted_card_drops_oldest_process_items_and_keeps_latest() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "budget tool history");
     for index in 0..8 {
+        if index < 3 {
+            snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
+                content: format!("OLD_THINKING_MARKER_{index}\n{}", "t".repeat(600)),
+            });
+        }
         snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
             log: ToolCallLog {
                 tool_name: "exec_command".to_string(),
@@ -654,22 +660,82 @@ fn budgeted_card_drops_oldest_process_items_and_keeps_latest() {
         &snapshot,
         true,
         FeishuCardBudget {
-            max_bytes: 5 * 1024,
+            max_bytes: 5_000,
             max_components: 180,
         },
     );
     let serialized = serde_json::to_string(&rendered.card).unwrap();
     assert!(!rendered.compact);
     assert!(rendered.omitted_timeline_items > 0);
-    assert!(serialized.len() <= 5 * 1024);
+    assert!(serialized.len() <= 5_000);
     assert!(serialized.contains("RESULT_MARKER_7"));
     assert!(!serialized.contains("RESULT_MARKER_0"));
+    assert!(!serialized.contains("OLD_THINKING_MARKER_0"));
     assert!(serialized.contains("已省略前面"));
-    assert!(serialized.contains("优先保留最近思考与工具"));
+    assert!(serialized.contains("保留最近执行脉络"));
 }
 
 #[test]
-fn budgeted_card_removes_old_tools_before_preserving_latest_five_thinking_rounds() {
+fn budget_removal_without_tools_drops_status_before_preserving_five_thinking_items() {
+    let statuses = vec![
+        ProgressTimelineItem::status("old status".to_string()),
+        ProgressTimelineItem::status("latest status".to_string()),
+    ];
+    assert_eq!(
+        oldest_budget_removable_timeline_range(&statuses),
+        Some(0..1)
+    );
+    assert_eq!(
+        oldest_budget_removable_timeline_range(&statuses[1..]),
+        Some(0..1)
+    );
+
+    let thinking = (0..6)
+        .map(|index| ProgressTimelineItem::thinking(format!("thinking-{index}")))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        oldest_budget_removable_timeline_range(&thinking),
+        Some(0..1)
+    );
+    assert_eq!(oldest_budget_removable_timeline_range(&thinking[1..]), None);
+}
+
+#[test]
+fn old_tools_render_as_steps_while_latest_five_keep_expandable_details() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "balanced tool history");
+    for index in 0..8 {
+        snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
+            content: format!("THINKING_ROUND_{index}"),
+        });
+        snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
+            log: ToolCallLog {
+                tool_name: format!("tool_{index}"),
+                arguments: format!("TOOL_INPUT_{index}"),
+                result: format!("TOOL_OUTPUT_{index}"),
+                success: true,
+            },
+            duration_ms: 10 + index,
+        });
+    }
+
+    let serialized = serde_json::to_string(&build_feishu_progress_card(&snapshot, true)).unwrap();
+    for index in 0..3 {
+        assert!(serialized.contains(&format!("步骤：`tool_{index}` · 完成")));
+        assert!(!serialized.contains(&format!("TOOL_INPUT_{index}")));
+        assert!(!serialized.contains(&format!("TOOL_OUTPUT_{index}")));
+    }
+    for index in 3..8 {
+        assert!(serialized.contains(&format!("TOOL_INPUT_{index}")));
+        assert!(serialized.contains(&format!("TOOL_OUTPUT_{index}")));
+    }
+    assert_eq!(
+        serialized.matches(r#""tag":"collapsible_panel""#).count(),
+        7
+    );
+}
+
+#[test]
+fn budgeted_card_removes_old_execution_segments_before_preserving_latest_five_rounds() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "thinking-first budget");
     for index in 0..8 {
         snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
@@ -677,7 +743,7 @@ fn budgeted_card_removes_old_tools_before_preserving_latest_five_thinking_rounds
         });
         snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
             log: ToolCallLog {
-                tool_name: "exec_command".to_string(),
+                tool_name: format!("tool_{index}"),
                 arguments: format!("TOOL_INPUT_{index}_{}", "i".repeat(500)),
                 result: format!("TOOL_OUTPUT_{index}_{}", "o".repeat(500)),
                 success: true,
@@ -705,6 +771,8 @@ fn budgeted_card_removes_old_tools_before_preserving_latest_five_thinking_rounds
         );
     }
     assert!(serialized.contains("TOOL_OUTPUT_7"));
+    assert!(serialized.contains("TOOL_OUTPUT_3"));
+    assert!(!serialized.contains("THINKING_ROUND_0"));
     assert!(!serialized.contains("TOOL_OUTPUT_0"));
 }
 
@@ -2117,6 +2185,11 @@ async fn content_size_limit_retries_same_card_with_less_old_history() {
         for index in 0..30 {
             session
                 .snapshot
+                .apply_event(AgentTurnProgressEvent::AssistantFinal {
+                    content: format!("THINKING_HISTORY_{index}_{}", "思考".repeat(100)),
+                });
+            session
+                .snapshot
                 .apply_event(AgentTurnProgressEvent::ToolFinished {
                     log: ToolCallLog {
                         tool_name: "exec_command".to_string(),
@@ -2165,7 +2238,7 @@ async fn content_size_limit_retries_same_card_with_less_old_history() {
     assert!(payloads[1].contains("已省略前面"));
     assert!(payloads[1].len() < payloads[0].len());
     assert!((0..30).any(|index| {
-        let marker = format!("HISTORY_MARKER_{index}");
+        let marker = format!("THINKING_HISTORY_{index}");
         payloads[0].contains(&marker) && !payloads[1].contains(&marker)
     }));
 }

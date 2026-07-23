@@ -34,6 +34,7 @@ const PROCESS_TOOL_GROUP_ELEMENT_PREFIX: &str = "ap_tg";
 const PROCESS_TOOL_INPUT_PREVIEW_CHARS: usize = 300;
 const PROCESS_TOOL_OUTPUT_PREVIEW_CHARS: usize = 300;
 const PROCESS_TIMELINE_VISIBLE_TOOL_LIMIT: usize = 30;
+const PROCESS_TIMELINE_DETAILED_TOOL_LIMIT: usize = 5;
 const PROCESS_TIMELINE_MIN_VISIBLE_THINKING: usize = 5;
 const FEISHU_CARD_STANDARD_MAX_BYTES: usize = 24 * 1024;
 const FEISHU_CARD_STANDARD_MAX_COMPONENTS: usize = 180;
@@ -1656,7 +1657,7 @@ fn build_budgeted_feishu_progress_card(
             candidate.timeline.insert(
                 0,
                 ProgressTimelineItem::status(format!(
-                    "为适配飞书卡片大小，已省略前面 {omitted_timeline_items} 条过程记录，优先保留最近思考与工具。"
+                    "为适配飞书卡片大小，已省略前面 {omitted_timeline_items} 条过程记录，保留最近执行脉络。"
                 )),
             );
         }
@@ -1668,45 +1669,79 @@ fn build_budgeted_feishu_progress_card(
                 omitted_timeline_items,
             };
         }
-        let Some(remove_index) = oldest_budget_removable_timeline_index(&view.timeline) else {
+        let Some(remove_range) = oldest_budget_removable_timeline_range(&view.timeline) else {
             return BudgetedProgressCard {
                 card: build_feishu_compact_progress_card(snapshot, streaming_mode),
                 compact: true,
                 omitted_timeline_items: snapshot.timeline.len(),
             };
         };
-        view.timeline.remove(remove_index);
-        omitted_timeline_items += 1;
+        let removed_items = remove_range.end - remove_range.start;
+        view.timeline.drain(remove_range);
+        omitted_timeline_items += removed_items;
     }
 }
 
-fn oldest_budget_removable_timeline_index(timeline: &[ProgressTimelineItem]) -> Option<usize> {
-    let latest_tool_index = timeline
+fn oldest_budget_removable_timeline_range(
+    timeline: &[ProgressTimelineItem],
+) -> Option<std::ops::Range<usize>> {
+    let tool_indexes = timeline
         .iter()
-        .rposition(|item| item.kind == ProgressTimelineKind::Tool);
+        .enumerate()
+        .filter_map(|(index, item)| (item.kind == ProgressTimelineKind::Tool).then_some(index))
+        .collect::<Vec<_>>();
+    if !tool_indexes.is_empty() {
+        if tool_indexes.len() > PROCESS_TIMELINE_VISIBLE_TOOL_LIMIT {
+            let first_visible_tool =
+                tool_indexes[tool_indexes.len() - PROCESS_TIMELINE_VISIBLE_TOOL_LIMIT];
+            let visible_start = timeline[..first_visible_tool]
+                .iter()
+                .rposition(|item| item.kind == ProgressTimelineKind::Tool)
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            if visible_start > 0 {
+                return Some(0..visible_start);
+            }
+        }
+        if tool_indexes.len() <= PROCESS_TIMELINE_DETAILED_TOOL_LIMIT {
+            return None;
+        }
+        let first_protected_tool =
+            tool_indexes[tool_indexes.len() - PROCESS_TIMELINE_DETAILED_TOOL_LIMIT];
+        let protected_start = timeline[..first_protected_tool]
+            .iter()
+            .rposition(|item| item.kind == ProgressTimelineKind::Tool)
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        if protected_start == 0 {
+            return None;
+        }
 
-    if let Some(index) = timeline.iter().enumerate().find_map(|(index, item)| {
-        (item.kind == ProgressTimelineKind::Tool && Some(index) != latest_tool_index)
-            .then_some(index)
-    }) {
-        return Some(index);
+        let first_tool_index = timeline[..protected_start]
+            .iter()
+            .position(|item| item.kind == ProgressTimelineKind::Tool)?;
+        let mut end = first_tool_index + 1;
+        while end < protected_start && timeline[end].kind == ProgressTimelineKind::Tool {
+            end += 1;
+        }
+        return Some(0..end);
     }
 
-    if let Some(index) = timeline
+    if let Some(status_index) = timeline
         .iter()
         .position(|item| item.kind == ProgressTimelineKind::Status)
     {
-        return Some(index);
+        return Some(status_index..status_index + 1);
     }
-
     let thinking_count = timeline
         .iter()
         .filter(|item| item.kind == ProgressTimelineKind::Thinking)
         .count();
     if thinking_count > PROCESS_TIMELINE_MIN_VISIBLE_THINKING {
-        return timeline
+        let thinking_index = timeline
             .iter()
-            .position(|item| item.kind == ProgressTimelineKind::Thinking);
+            .position(|item| item.kind == ProgressTimelineKind::Thinking)?;
+        return Some(thinking_index..thinking_index + 1);
     }
 
     None
@@ -2086,6 +2121,15 @@ fn build_process_loop_elements(snapshot: &ImAgentProgressSnapshot) -> Vec<serde_
     let mut markdown_lines = Vec::<String>::new();
     let mut markdown_element_count = 0;
     let (omitted_tool_count, visible_timeline) = visible_process_timeline(snapshot);
+    let visible_tool_count = visible_timeline
+        .iter()
+        .filter(|(_, item)| item.kind == ProgressTimelineKind::Tool)
+        .count();
+    let first_detailed_tool_index = visible_timeline
+        .iter()
+        .filter(|(_, item)| item.kind == ProgressTimelineKind::Tool)
+        .nth(visible_tool_count.saturating_sub(PROCESS_TIMELINE_DETAILED_TOOL_LIMIT))
+        .map(|(item_index, _)| *item_index);
     if omitted_tool_count > 0 {
         markdown_lines.push(format!(
             "已省略前面 {omitted_tool_count} 次工具调用，仅显示最新 {PROCESS_TIMELINE_VISIBLE_TOOL_LIMIT} 次。"
@@ -2101,6 +2145,11 @@ fn build_process_loop_elements(snapshot: &ImAgentProgressSnapshot) -> Vec<serde_
                 timeline_index += 1;
             }
             ProgressTimelineKind::Tool => {
+                if first_detailed_tool_index.is_some_and(|start| item_index < start) {
+                    markdown_lines.push(format_process_tool_step_line(item));
+                    timeline_index += 1;
+                    continue;
+                }
                 flush_process_markdown(
                     &mut elements,
                     &mut markdown_lines,
@@ -2110,6 +2159,8 @@ fn build_process_loop_elements(snapshot: &ImAgentProgressSnapshot) -> Vec<serde_
                 let mut batch = Vec::new();
                 while timeline_index < visible_timeline.len()
                     && visible_timeline[timeline_index].1.kind == ProgressTimelineKind::Tool
+                    && first_detailed_tool_index
+                        .is_none_or(|start| visible_timeline[timeline_index].0 >= start)
                 {
                     batch.push(visible_timeline[timeline_index]);
                     timeline_index += 1;
@@ -2140,19 +2191,24 @@ fn visible_process_timeline(
     }
 
     let omitted_tool_count = total_tool_count - PROCESS_TIMELINE_VISIBLE_TOOL_LIMIT;
-    let mut remaining_omitted_tools = omitted_tool_count;
+    let first_visible_tool_index = snapshot
+        .timeline
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.kind == ProgressTimelineKind::Tool)
+        .nth(omitted_tool_count)
+        .map(|(index, _)| index)
+        .expect("tool count already checked");
+    let start_index = snapshot.timeline[..first_visible_tool_index]
+        .iter()
+        .rposition(|item| item.kind == ProgressTimelineKind::Tool)
+        .map(|index| index + 1)
+        .unwrap_or(0);
     let visible_timeline = snapshot
         .timeline
         .iter()
         .enumerate()
-        .filter(|(_, item)| {
-            if item.kind == ProgressTimelineKind::Tool && remaining_omitted_tools > 0 {
-                remaining_omitted_tools -= 1;
-                false
-            } else {
-                true
-            }
-        })
+        .skip(start_index)
         .collect();
 
     (omitted_tool_count, visible_timeline)
@@ -2333,6 +2389,21 @@ fn format_process_timeline_line(item: &ProgressTimelineItem) -> String {
             )
         }
     }
+}
+
+fn format_process_tool_step_line(item: &ProgressTimelineItem) -> String {
+    let status = match item.success {
+        Some(true) => "完成",
+        Some(false) => "失败",
+        None => "执行中",
+    };
+    let duration = process_tool_duration_label(item)
+        .map(|value| format!(" · {value}"))
+        .unwrap_or_default();
+    format!(
+        "步骤：`{}` · {status}{duration}",
+        truncate_one_line(&item.title, 32)
+    )
 }
 
 fn build_tool_panel_element(snapshot: &ImAgentProgressSnapshot) -> serde_json::Value {
