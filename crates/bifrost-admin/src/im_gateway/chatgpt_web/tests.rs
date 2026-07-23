@@ -1,8 +1,41 @@
 use super::*;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::{BTreeMap, VecDeque};
+use std::ffi::{OsStr, OsString};
+use std::sync::{Mutex, OnceLock};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
+
+static CHATGPT_WEB_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &OsStr) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe { std::env::set_var(key, value) };
+        Self { key, previous }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe { std::env::remove_var(key) };
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = &self.previous {
+            unsafe { std::env::set_var(self.key, previous) };
+        } else {
+            unsafe { std::env::remove_var(self.key) };
+        }
+    }
+}
 
 async fn test_cdp(values: Vec<Value>) -> CdpClient {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -495,6 +528,50 @@ async fn run_adapter_writes_failure_diagnostics_on_authenticated_error() {
     assert_eq!(manifest["artifacts"][0]["status"], "skipped");
     assert_eq!(manifest["artifacts"][1]["name"], "page_dom");
     assert_eq!(manifest["artifacts"][1]["status"], "capture_failed");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn run_adapter_blocks_live_chatgpt_during_e2e_without_explicit_opt_in() {
+    let _lock = CHATGPT_WEB_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap();
+    let _e2e = EnvVarGuard::set("BIFROST_E2E", OsStr::new("1"));
+    let _mock = EnvVarGuard::remove("BIFROST_CHATGPT_WEB_E2E_MOCK");
+    let _live = EnvVarGuard::remove("BIFROST_CHATGPT_WEB_LIVE_E2E");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello".to_string(),
+        operation: "ask".to_string(),
+        params: Value::Null,
+        provider_id: None,
+        runner_id: None,
+        session_key: None,
+        runtime: "external_cli".to_string(),
+        adapter: ADAPTER_ID.to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig::default(),
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let error = run_adapter(&request, "hello", temp.path())
+        .await
+        .expect_err("live ChatGPT must be blocked during E2E");
+    assert!(error.contains("live ChatGPT Web is disabled during tests"));
+}
+
+#[test]
+fn conversation_url_falls_back_from_custom_base_to_default_base() {
+    assert!(browser::page_url_matches_conversation(
+        "https://chatgpt.com/c/conversation-42",
+        "https://custom.example.com",
+        "conversation-42",
+    ));
 }
 
 #[test]

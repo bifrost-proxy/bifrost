@@ -100,6 +100,47 @@ async fn complete_login_uses_the_long_login_http_timeout() {
     assert_eq!(account.user_id, "user-1@im.wechat");
 }
 
+#[tokio::test]
+async fn start_login_accepts_qrcode_image_content_url() {
+    use bytes::Bytes;
+    use http_body_util::Full;
+    use hyper::body::Incoming;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response};
+    use hyper_util::rt::TokioIo;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind qr server");
+    let port = listener.local_addr().expect("mock local addr").port();
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let io = TokioIo::new(stream);
+        let service = service_fn(|_req: Request<Incoming>| async move {
+            Ok::<_, hyper::Error>(
+                Response::builder()
+                    .status(200)
+                    .body(Full::new(Bytes::from_static(
+                        br#"{"qrcode":"poll-key","qrcode_img_content":"https://example.com/qr.png"}"#,
+                    )))
+                    .unwrap(),
+            )
+        });
+        let _ = http1::Builder::new().serve_connection(io, service).await;
+    });
+
+    let login = WeixinProvider::new()
+        .start_login(Some(&format!("http://127.0.0.1:{port}")))
+        .await
+        .expect("start login");
+    assert_eq!(login.poll_key, "poll-key");
+    assert_eq!(login.scan_url, "https://example.com/qr.png");
+    assert_eq!(login.expires_in_seconds, LOGIN_QR_EXPIRES_IN_SECONDS);
+}
+
 #[test]
 fn normalize_update_converts_weixin_message_to_im_event() {
     let provider = test_provider();

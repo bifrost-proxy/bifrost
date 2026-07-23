@@ -2180,6 +2180,51 @@ mod tests {
             .unwrap()
             .contains("private prompt"));
 
+        let fake_bin = temp.path().join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        write_executable(
+            &fake_bin.join("ffmpeg"),
+            "#!/bin/sh\ninput=''\noutput=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '-i' ]; then\n    shift\n    input=\"$1\"\n  fi\n  output=\"$1\"\n  shift\ndone\ncp \"$input\" \"$output\"\n",
+        );
+        let mut path_entries = vec![fake_bin];
+        if let Some(path) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&path));
+        }
+        let fake_path = std::env::join_paths(path_entries).unwrap();
+        let _path_guard = EnvVarGuard::set("PATH", &fake_path);
+        let _segment_guard = EnvVarGuard::set(
+            "BIFROST_MOSS_SEGMENT_SECONDS",
+            std::ffi::OsStr::new("60"),
+        );
+        let segmented_output = transcribe_file_for_task_with_wav(
+            &task,
+            Path::new("/unused/asr"),
+            Path::new("/unused/model"),
+            &source,
+            &source,
+            &source_info,
+            TaskTranscribeHooks {
+                on_chunk_progress: None,
+                on_chunk_metric: None,
+                pause_check: None,
+                force_pause_task_id: None,
+                memory_limit_hints: &[],
+                server_url: None,
+                startup_fallback_reason: None,
+                server_state: None,
+                managed_server_restart: None,
+                partial_artifacts: None,
+                moss_runtime: Some(&runtime),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(segmented_output.text.contains("hello"));
+        assert!(segmented_output.text.contains("abcdefghijklmnopqrstuvwxyz"));
+        assert_eq!(segmented_output.chunk_metrics.len(), 1);
+        drop(_segment_guard);
+        drop(_path_guard);
+
         let default_runtime_result = transcribe_file_for_task_with_wav(
             &task,
             Path::new("/unused/asr"),

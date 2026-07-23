@@ -1128,6 +1128,19 @@ fn daily_agent_dependency_output_must_match_current_source_hash() {
     )
     .unwrap();
     assert!(fresh.is_empty(), "fresh upstream should be accepted: {fresh:?}");
+
+    let mut unknown_dependency = agents[1].clone();
+    unknown_dependency.dependencies[0].agent_id = "unknown_upstream".to_string();
+    let unknown = missing_daily_agent_dependency_outputs(
+        &task,
+        &unknown_dependency,
+        &HashMap::new(),
+        "manual",
+        Some(date),
+        false,
+    )
+    .unwrap();
+    assert_eq!(unknown, vec!["unknown_upstream=not_configured"]);
 }
 
 #[test]
@@ -3722,6 +3735,11 @@ fn daily_agent_research_response_requires_complete_report_contract() {
         .unwrap_err()
         .contains("empty section"));
 
+    let placeholder = valid.replace("证据\n\n", "上传的文件包含证据\n\n");
+    assert!(validate_daily_research_response(&placeholder, &question)
+        .unwrap_err()
+        .contains("status/error placeholder"));
+
     let prompt_echo = format!(
         "## 原始问题\n{}\n\n## 提出问题时的背景\n背景\n\n{}",
         question.original_question, valid
@@ -5047,6 +5065,11 @@ async fn daily_agent_orchestrator_handles_a_dependency_that_was_not_run() {
         .as_deref()
         .is_some_and(|reason| reason.contains("disabled_upstream=not_run")));
 
+    let disabled_task = task_for_daily_agent(&task, &task.daily_agent.agents[0]);
+    let disabled_output = daily_agent_output_dir(&disabled_task);
+    std::fs::remove_dir_all(&disabled_output).unwrap();
+    std::fs::write(&disabled_output, "not a directory").unwrap();
+
     child.dependency_failure_policy = AsrDailyAgentDependencyFailurePolicy::Continue;
     task.daily_agent.agents[1] = child;
     let continued = run_daily_agents(&task, "manual", Some("2026-07-18"), false).await;
@@ -5290,6 +5313,31 @@ async fn selected_daily_agent_honors_persisted_dependency_policy() {
     )
     .await;
     assert_eq!(sync_continued.status, "success", "{sync_continued:?}");
+
+    #[cfg(unix)]
+    {
+        std::fs::remove_file(&upstream_output).unwrap();
+        std::fs::create_dir_all(&upstream_output).unwrap();
+        let daily_source = daily_dir_for_task(&task.id).join("2026-07-19.md");
+        std::fs::remove_file(&daily_source).unwrap();
+        std::os::unix::fs::symlink(
+            daily_dir_for_task(&task.id).join("missing-source.md"),
+            &daily_source,
+        )
+        .unwrap();
+
+        selected.dependency_failure_policy = AsrDailyAgentDependencyFailurePolicy::Skip;
+        let invalid_source = run_selected_daily_agent_with_dependencies(
+            &task,
+            &selected,
+            "manual",
+            Some("2026-07-19"),
+            false,
+        )
+        .await;
+        assert_eq!(invalid_source.status, "skipped_dependency_failed");
+        assert!(invalid_source.skipped_reason.is_some());
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
