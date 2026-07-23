@@ -647,7 +647,7 @@ pub struct ImEventSource {
     pub message_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ImMention {
     #[serde(default)]
     pub key: String,
@@ -662,6 +662,48 @@ pub struct ImMention {
     /// bot identity before this flag is relied upon.
     #[serde(default)]
     pub is_bot: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ImMentionRepr {
+    Legacy(String),
+    Structured(ImMentionFields),
+}
+
+#[derive(Default, Deserialize)]
+struct ImMentionFields {
+    #[serde(default)]
+    key: String,
+    #[serde(default)]
+    open_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    tenant_key: Option<String>,
+    #[serde(default)]
+    is_bot: bool,
+}
+
+impl<'de> Deserialize<'de> for ImMention {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match ImMentionRepr::deserialize(deserializer)? {
+            ImMentionRepr::Legacy(key) => Self {
+                key,
+                ..Default::default()
+            },
+            ImMentionRepr::Structured(fields) => Self {
+                key: fields.key,
+                open_id: fields.open_id,
+                name: fields.name,
+                tenant_key: fields.tenant_key,
+                is_bot: fields.is_bot,
+            },
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -11,6 +11,19 @@ use std::sync::Arc;
 
 use bifrost_agent::session::{GuideChannel, GuideMessageChannel};
 
+/// IM reply and group-turn state that must follow a queued message.
+///
+/// This state is intentionally not serialized into progress cards. It only
+/// exists while the in-memory queue owns the message.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueueItemContext {
+    pub event_id: String,
+    pub message_id: Option<String>,
+    pub user_id: Option<String>,
+    pub user_name: Option<String>,
+    pub group_turn_id: Option<String>,
+}
+
 /// A queued message with a sequence number.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct QueueItem {
@@ -18,6 +31,8 @@ pub struct QueueItem {
     pub message: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<bifrost_agent::ChatImageInput>,
+    #[serde(skip)]
+    pub context: Option<QueueItemContext>,
 }
 
 /// Per-session queue state.
@@ -166,6 +181,17 @@ impl SessionQueueManager {
         msg: String,
         images: Vec<bifrost_agent::ChatImageInput>,
     ) -> Result<Vec<QueueItem>, &'static str> {
+        self.push_queue_with_images_and_context(session_key, msg, images, None)
+    }
+
+    /// Push a message, attachments, and the originating IM reply context.
+    pub fn push_queue_with_images_and_context(
+        &self,
+        session_key: &str,
+        msg: String,
+        images: Vec<bifrost_agent::ChatImageInput>,
+        context: Option<QueueItemContext>,
+    ) -> Result<Vec<QueueItem>, &'static str> {
         let mut entry = self.queues.entry(session_key.to_string()).or_default();
         let queue = entry.value_mut();
 
@@ -179,6 +205,7 @@ impl SessionQueueManager {
             seq,
             message: msg,
             images,
+            context,
         });
 
         Ok(queue.items.iter().cloned().collect())
@@ -187,13 +214,17 @@ impl SessionQueueManager {
     /// Remove a queued message by sequence number.
     /// Returns `true` if found and removed.
     pub fn remove_queue(&self, session_key: &str, seq: u64) -> bool {
+        self.remove_queue_item(session_key, seq).is_some()
+    }
+
+    /// Remove and return a queued message by sequence number.
+    pub fn remove_queue_item(&self, session_key: &str, seq: u64) -> Option<QueueItem> {
         if let Some(mut entry) = self.queues.get_mut(session_key) {
             let queue = entry.value_mut();
-            let before = queue.items.len();
-            queue.items.retain(|item| item.seq != seq);
-            return queue.items.len() < before;
+            let position = queue.items.iter().position(|item| item.seq == seq)?;
+            return queue.items.remove(position);
         }
-        false
+        None
     }
 
     /// Pop the next queued message (FIFO).
@@ -490,6 +521,31 @@ mod tests {
 
         assert!(!mgr.remove_queue("s1", 999));
         assert!(!mgr.remove_queue("nonexistent_session", 1));
+    }
+
+    #[test]
+    fn queued_item_preserves_and_returns_im_context() {
+        let mgr = SessionQueueManager::new();
+        let context = QueueItemContext {
+            event_id: "event-2".to_string(),
+            message_id: Some("message-2".to_string()),
+            user_id: Some("user-2".to_string()),
+            user_name: Some("Bob".to_string()),
+            group_turn_id: Some("turn-2".to_string()),
+        };
+        mgr.push_queue_with_images_and_context(
+            "s1",
+            "second".to_string(),
+            Vec::new(),
+            Some(context.clone()),
+        )
+        .unwrap();
+
+        let queued = mgr.queue_status("s1");
+        assert_eq!(queued[0].context.as_ref(), Some(&context));
+        let removed = mgr.remove_queue_item("s1", queued[0].seq).unwrap();
+        assert_eq!(removed.context, Some(context));
+        assert!(mgr.queue_status("s1").is_empty());
     }
 
     /// Test fix for guide message loss at turn end:

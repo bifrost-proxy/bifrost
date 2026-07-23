@@ -71,9 +71,9 @@
 1. 通过本地 mock Feishu OpenAPI 调用普通回复卡片和 CardKit 进度卡片发送链路，记录每次请求的路径和请求体。
 2. 检查普通回复、进度卡片首次发送和后续 Turn rollover 的卡片 JSON。
 3. 在真实飞书群中 @ 机器人并执行 slash 指令，观察返回卡片的视觉样式和引用关系。
-4. 点击卡片上方的原生引用条，确认飞书定位并打开本轮触发机器人的原始消息，而不是打开普通网页链接或停留在当前卡片。
+4. 确认发送回复不依赖、也不测试飞书客户端自动打开悬浮窗、话题窗或侧边回复面板；需要定位时可由用户手动点击原生引用条。
 
-预期结果：所有 Bifrost 生成的飞书卡片都不包含根级 `header`，不显示大块彩色顶部标题；任务计划和工具记录等内部折叠面板标题仍可见。存在来源消息时，请求路径为 `/im/v1/messages/{触发 message_id}/reply`，请求体不携带 `receive_id`，飞书客户端显示轻量原生引用；点击引用条可定位并打开对应的原始消息。后续 Turn 的进度卡片引用本轮最新触发消息。上线通知、定时任务等无来源消息场景可直接发送，但也没有顶部标题。
+预期结果：所有 Bifrost 生成的飞书卡片都不包含根级 `header`，不显示大块彩色顶部标题；任务计划和工具记录等内部折叠面板标题仍可见。存在来源消息时，请求路径为 `/im/v1/messages/{触发 message_id}/reply`，请求体不携带 `receive_id`，飞书客户端显示轻量原生引用；不要求飞书自动打开任何悬浮或话题面板。后续 Turn 的进度卡片引用本轮最新触发消息。上线通知、定时任务等无来源消息场景可直接发送，但也没有顶部标题。
 
 ### TC-FGS-09：菜单撤销后群会话不依赖菜单能力
 
@@ -82,6 +82,38 @@
 3. 检查 Bifrost IM Gateway 源码与运行日志，确认没有机器人菜单 API 请求、菜单事件订阅或菜单事件键解析。
 
 预期结果：群会话和现有 slash 命令全部正常工作；Bifrost 不请求飞书机器人菜单 API，不要求菜单权限，不处理机器人菜单事件，也不向用户展示由 Bifrost 同步的自定义菜单。
+
+### TC-FGS-10：忙时排队保留各自回复目标且拒绝的清理不推进上下文
+
+1. 启动群会话真实服务脚本，让 `chat-beta` 的首轮 Runner 保持执行中。
+2. 依次注入一条普通背景消息、`/clear` 和 `/q 排队后的结论`。
+3. 等待首轮结束并检查自动执行的排队 Turn、SQLite Turn 状态以及队列上下文单元测试。
+
+预期结果：忙时 `/clear` 被拒绝且不会提前推进群上下文基线；排队 Turn 包含 `/clear` 前的普通背景，不把 `/clear` 注入模型，并最终标记为 `completed`。每个排队项保留自己的触发 `message_id`、发送人和群 `turn_id`，出队回复不会错误引用第一轮消息；队列满或取消排队时释放对应群 Turn。
+
+### TC-FGS-11：图片艾特和重叠 mention 占位符
+
+1. 构造只包含 `@机器人` 和一张图片的群消息，不提供额外文本。
+2. 构造同时包含 `@_user_1` 与 `@_user_10` 的群消息，并让短占位符先出现在 mentions 数组中。
+3. 执行群上下文分类与 mention 渲染测试。
+
+预期结果：图片消息触发 Agent 图片理解，不回落到 `/help`；渲染时先替换较长占位符，`@_user_10` 不会被短占位符破坏，两个发送者都生成正确的 `<at>`。
+
+### TC-FGS-12：群级 Runner、模型命令、工作目录和群名失败退避保持隔离
+
+1. 为群 binding 设置与 Provider 默认值不同的 Runner 和工作目录。
+2. 验证 `/model`、`/models`、`/effort` 的 Runner 解析，以及连续 Runner 请求的工作目录。
+3. 模拟群名查询失败并在 60 秒退避窗口内重复准备群消息，再模拟查询成功。
+
+预期结果：模型命令优先使用当前群选择的 Runner；每次 Runner 调用都使用群 binding 的工作目录，不能回退串用 Provider/Runner 默认目录；群名首次查询失败后相同群在退避窗口内不重复发起慢请求，成功写入群名后清除退避。
+
+### TC-FGS-13：升级时兼容旧版 mention 字符串历史
+
+1. 在临时数据目录写入旧版 `admin/im_gateway_events.json`，其中 `mentions` 为字符串数组 `['@_user_1']`。
+2. 初始化 `ImEventStore` 并读取事件列表。
+3. 检查旧历史文件仍然存在，mention 已转换为结构化对象的 `key`。
+
+预期结果：旧历史能正常加载，`key` 保留为 `@_user_1`，其余新字段使用安全默认值；事件历史文件不会因格式升级被删除。
 
 ## 执行方式
 
@@ -113,6 +145,18 @@ if rg -n -i 'feishu_menu|bot_menu|menu_v6|application/v7/applications/.*/ability
   echo '发现飞书机器人菜单能力残留' >&2
   exit 1
 fi
+```
+
+TC-FGS-10 至 TC-FGS-12 的排队、图片 mention、Runner/workdir 隔离和群名退避边界执行：
+
+```bash
+cargo test -p bifrost-admin queue_manager -- --nocapture
+cargo test -p bifrost-admin group_context -- --nocapture
+cargo test -p bifrost-admin queued_event_restores_the_triggering_reply_target -- --nocapture
+cargo test -p bifrost-admin group_session_work_dir_overrides_runner_and_provider_defaults -- --nocapture
+cargo test -p bifrost-admin model_commands_resolve_the_group_selected_runner_first -- --nocapture
+cargo test -p bifrost-admin prepare_group_dispatch -- --nocapture
+cargo test -p bifrost-admin loads_legacy_string_mentions_without_deleting_history -- --nocapture
 ```
 
 ## 清理步骤

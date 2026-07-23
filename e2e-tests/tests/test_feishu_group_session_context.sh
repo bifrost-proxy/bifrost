@@ -4,7 +4,6 @@ set -euo pipefail
 unset BIFROST_DETACHED_DAEMON_CHILD
 unset BIFROST_EXTERNAL_CLI_WORKER
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
-export BIFROST_DISABLE_TRAY=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -19,6 +18,10 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
     print(sock.getsockname()[1])
 PY
 )}"
+START_EXTRA_ARGS=()
+if [[ "$(uname -s)" != "Linux" ]]; then
+  START_EXTRA_ARGS+=(--no-tray)
+fi
 
 cleanup() {
   if [[ -n "${BIFROST_PID:-}" ]]; then
@@ -74,6 +77,7 @@ BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
   --unsafe-ssl \
   --skip-cert-check \
   --no-system-proxy \
+  "${START_EXTRA_ARGS[@]}" \
   >"$BIFROST_LOG" 2>&1 &
 BIFROST_PID=$!
 wait_http
@@ -204,6 +208,14 @@ inject chat-beta user-carol Carol b1 "另一个群的背景"
 inject chat-beta user-carol Carol b2 "@_user_1 给出一句结论" true
 wait_prompt_count 4
 
+# While the first Beta turn is still running, an ambient message must survive
+# a rejected /clear and be included in the subsequently accepted queued turn.
+inject chat-beta user-dave Dave b3 "忙时补充：保留这条背景"
+inject chat-beta user-carol Carol b4 "/clear"
+inject chat-beta user-carol Carol b5 "/q 排队后的结论"
+wait_prompt_count 5
+sleep 1.25
+
 python3 - "$PROMPT_LOG" "$TEST_DIR/admin/im_group_context.db" "$REPO_DIR" <<'PY'
 import json
 import pathlib
@@ -212,8 +224,8 @@ import sys
 
 prompt_path, db_path, repo_dir = sys.argv[1:4]
 prompts = [json.loads(line) for line in open(prompt_path, encoding="utf-8") if line.strip()]
-assert len(prompts) == 4, prompts
-first, second, slash_fallback, third = prompts
+assert len(prompts) == 5, prompts
+first, second, slash_fallback, third, queued = prompts
 
 assert "群名称：Alpha 发布群" in first, first
 assert "群 ID：chat-alpha" in first, first
@@ -243,6 +255,11 @@ assert "群 ID：chat-beta" in third, third
 assert "另一个群的背景" in third, third
 assert "chat-alpha" not in third, third
 
+assert "忙时补充：保留这条背景" in queued, queued
+assert "<at id=user-carol>Carol</at>：排队后的结论" in queued, queued
+assert "/clear" not in queued, queued
+assert "群名称：" not in queued and "群 ID：" not in queued, queued
+
 connection = sqlite3.connect(db_path)
 bindings = connection.execute(
     "SELECT chat_id, session_key, last_assigned_seq, chat_name, work_dir, runner_id "
@@ -257,7 +274,11 @@ assert bindings[0][5] == "group-mock", bindings
 messages = connection.execute(
     "SELECT chat_id, COUNT(*) FROM im_group_messages GROUP BY chat_id ORDER BY chat_id"
 ).fetchall()
-assert messages == [("chat-alpha", 9), ("chat-beta", 2)], messages
+assert messages == [("chat-alpha", 9), ("chat-beta", 5)], messages
+beta_turns = connection.execute(
+    "SELECT status FROM im_group_turns WHERE chat_id = 'chat-beta' ORDER BY created_at"
+).fetchall()
+assert beta_turns == [("completed",), ("completed",)], beta_turns
 PY
 
 echo "[feishu-group-session] PASS"

@@ -39,6 +39,7 @@ struct ImModelCommandContext<'a> {
     client: &'a ImProviderClient,
     provider: &'a ImProviderConfig,
     external_cli_config_store: &'a Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
+    group_context_store: &'a Arc<ImGroupContextStore>,
     event: &'a ImEvent,
     message_log_store: &'a Arc<ImMessageLogStore>,
 }
@@ -171,6 +172,7 @@ pub(super) async fn handle_idle_im_command(
             client: ctx.client,
             provider: ctx.provider,
             external_cli_config_store: ctx.external_cli_config_store,
+            group_context_store: ctx.group_context_store,
             event: ctx.event,
             message_log_store: ctx.message_log_store,
         },
@@ -188,6 +190,7 @@ pub(super) async fn handle_idle_im_command(
             client: ctx.client,
             provider: ctx.provider,
             external_cli_config_store: ctx.external_cli_config_store,
+            group_context_store: ctx.group_context_store,
             event: ctx.event,
             message_log_store: ctx.message_log_store,
         },
@@ -495,6 +498,24 @@ async fn handle_im_runner_command(
     true
 }
 
+pub(super) fn configured_runner_id_for_im_session(
+    group_context_store: &ImGroupContextStore,
+    session_key: &str,
+    agent_config: &crate::im_gateway::agent::ImAgentConfig,
+) -> Option<String> {
+    group_context_store
+        .runner_id_by_session(session_key)
+        .ok()
+        .flatten()
+        .or_else(|| {
+            agent_config
+                .runner
+                .as_ref()
+                .and_then(|runner| runner.custom_runner_id())
+                .map(ToString::to_string)
+        })
+}
+
 async fn handle_im_model_command(
     message: &str,
     session_key: &str,
@@ -521,11 +542,8 @@ async fn handle_im_model_command(
         }
     };
     let config = ctx.external_cli_config_store.load();
-    let Some(configured_runner_id) = agent_config
-        .runner
-        .as_ref()
-        .and_then(|runner| runner.custom_runner_id())
-        .map(ToString::to_string)
+    let Some(configured_runner_id) =
+        configured_runner_id_for_im_session(ctx.group_context_store, session_key, agent_config)
     else {
         send_agent_reply(
             ctx.client,
@@ -700,11 +718,8 @@ async fn handle_im_effort_command(
         }
     };
     let config = ctx.external_cli_config_store.load();
-    let Some(configured_runner_id) = agent_config
-        .runner
-        .as_ref()
-        .and_then(|runner| runner.custom_runner_id())
-        .map(ToString::to_string)
+    let Some(configured_runner_id) =
+        configured_runner_id_for_im_session(ctx.group_context_store, session_key, agent_config)
     else {
         send_agent_reply(
             ctx.client,
@@ -1239,6 +1254,7 @@ pub(super) async fn handle_busy_message(
             client,
             provider,
             external_cli_config_store: ctx.external_cli_config_store,
+            group_context_store: ctx.group_context_store,
             event,
             message_log_store,
         },
@@ -1252,7 +1268,12 @@ pub(super) async fn handle_busy_message(
         match command {
             Ok(path) => {
                 let queued_command = format!("/cwd {}", path.display());
-                match queue_manager.push_queue(session_key, queued_command) {
+                match queue_manager.push_queue_with_images_and_context(
+                    session_key,
+                    queued_command,
+                    Vec::new(),
+                    Some(queue_item_context(&ctx)),
+                ) {
                     Ok(items) => {
                         let guide_pending = !queue_manager.guide_status(session_key).is_empty();
                         let updated = progress_registry
@@ -1273,6 +1294,7 @@ pub(super) async fn handle_busy_message(
                         }
                     }
                     Err(err) => {
+                        release_busy_group_turn(&ctx, err);
                         send_agent_reply(
                             client,
                             provider,
@@ -1302,6 +1324,7 @@ pub(super) async fn handle_busy_message(
     if let Some(rest) = trimmed.strip_prefix("/q ") {
         let queue_text = rest.trim();
         if queue_text.is_empty() {
+            release_busy_group_turn(&ctx, "queued message is empty");
             send_agent_reply(
                 client,
                 provider,
@@ -1318,7 +1341,12 @@ pub(super) async fn handle_busy_message(
             }
             _ => Vec::new(),
         };
-        match queue_manager.push_queue_with_images(session_key, queue_text.to_string(), images) {
+        match queue_manager.push_queue_with_images_and_context(
+            session_key,
+            queue_text.to_string(),
+            images,
+            Some(queue_item_context(&ctx)),
+        ) {
             Ok(items) => {
                 let guide_pending = !queue_manager.guide_status(session_key).is_empty();
                 let updated = progress_registry
@@ -1335,6 +1363,7 @@ pub(super) async fn handle_busy_message(
                 }
             }
             Err(err) => {
+                release_busy_group_turn(&ctx, err);
                 send_agent_reply(
                     client,
                     provider,
@@ -1353,7 +1382,20 @@ pub(super) async fn handle_busy_message(
         let rest = rest.trim();
         match rest.parse::<u64>() {
             Ok(seq) => {
-                if queue_manager.remove_queue(session_key, seq) {
+                if let Some(removed) = queue_manager.remove_queue_item(session_key, seq) {
+                    if let Some(turn_id) = removed
+                        .context
+                        .as_ref()
+                        .and_then(|context| context.group_turn_id.as_deref())
+                    {
+                        if let Err(error) = ctx.group_context_store.release_turn(
+                            turn_id,
+                            "queued message was removed",
+                            now_ms(),
+                        ) {
+                            warn!(turn_id = %turn_id, error = %error, "failed to release removed queued group turn");
+                        }
+                    }
                     let items = queue_manager.queue_status(session_key);
                     let guide_pending = !queue_manager.guide_status(session_key).is_empty();
                     let updated = progress_registry
@@ -1413,6 +1455,7 @@ pub(super) async fn handle_busy_message(
     if let Some(rest) = trimmed.strip_prefix("/g ") {
         let guide_text = rest.trim();
         if guide_text.is_empty() {
+            release_busy_group_turn(&ctx, "guide message is empty");
             send_agent_reply(
                 client,
                 provider,
@@ -1576,10 +1619,12 @@ pub(super) async fn handle_concurrent_event_during_chat(
             message_text: agent_message_text(message),
             session_key: build_session_key(&event.provider_id, event.source.user_id.as_deref()),
             group_turn_id: None,
+            reset_group_context: false,
         }
     };
     let message_text = dispatch.message_text;
     let session_key = dispatch.session_key;
+    let group_turn_id = dispatch.group_turn_id;
     let agent_config = effective_agent_config_for_provider(&agent_config_store.load(), &provider);
     if session_key == active_session_key {
         if message_text.trim() == "/help" {
@@ -1605,6 +1650,8 @@ pub(super) async fn handle_concurrent_event_during_chat(
                 progress_registry,
                 external_cli_config_store,
                 agent_config: &agent_config,
+                group_context_store,
+                group_turn_id: group_turn_id.as_deref(),
                 default_mode: active_session_default_mode,
                 status_context: status_context_from_agent_config(&agent_config),
                 default_work_dir: group_context_store
@@ -1635,6 +1682,8 @@ pub(super) async fn handle_concurrent_event_during_chat(
                 progress_registry,
                 external_cli_config_store,
                 agent_config: &agent_config,
+                group_context_store,
+                group_turn_id: group_turn_id.as_deref(),
                 default_mode: busy_default_mode,
                 status_context: status_context_from_agent_config(&agent_config),
                 default_work_dir: group_context_store

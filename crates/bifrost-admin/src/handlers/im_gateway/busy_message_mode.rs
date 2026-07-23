@@ -12,6 +12,8 @@ pub(super) struct BusyMessageContext<'a> {
     pub(super) external_cli_config_store:
         &'a Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
     pub(super) agent_config: &'a crate::im_gateway::agent::ImAgentConfig,
+    pub(super) group_context_store: &'a Arc<ImGroupContextStore>,
+    pub(super) group_turn_id: Option<&'a str>,
     pub(super) default_mode: BusyMessageDefaultMode,
     pub(super) status_context: bifrost_agent::StatusRuntimeContext,
     pub(super) default_work_dir: Option<String>,
@@ -68,6 +70,16 @@ pub(super) fn apply_busy_message_default(
     message: &str,
     mode: BusyMessageDefaultMode,
 ) -> Result<BusyMessageDefaultResult, &'static str> {
+    apply_busy_message_default_with_context(queue_manager, session_key, message, mode, None)
+}
+
+fn apply_busy_message_default_with_context(
+    queue_manager: &SessionQueueManager,
+    session_key: &str,
+    message: &str,
+    mode: BusyMessageDefaultMode,
+    context: Option<crate::im_gateway::queue_manager::QueueItemContext>,
+) -> Result<BusyMessageDefaultResult, &'static str> {
     let message = message.trim();
     if message.is_empty() {
         return Err("消息内容不能为空");
@@ -79,8 +91,49 @@ pub(super) fn apply_busy_message_default(
             Ok(BusyMessageDefaultResult::Guide { pending_count })
         }
         BusyMessageDefaultMode::ExternalGuide | BusyMessageDefaultMode::Queue => queue_manager
-            .push_queue(session_key, message.to_string())
+            .push_queue_with_images_and_context(
+                session_key,
+                message.to_string(),
+                Vec::new(),
+                context,
+            )
             .map(|items| BusyMessageDefaultResult::Queue { items }),
+    }
+}
+
+pub(super) fn queue_item_context(
+    ctx: &BusyMessageContext<'_>,
+) -> crate::im_gateway::queue_manager::QueueItemContext {
+    crate::im_gateway::queue_manager::QueueItemContext {
+        event_id: ctx.event.event_id.clone(),
+        message_id: ctx.event.source.message_id.clone(),
+        user_id: ctx.event.source.user_id.clone(),
+        user_name: ctx.event.source.user_name.clone(),
+        group_turn_id: ctx.group_turn_id.map(ToString::to_string),
+    }
+}
+
+fn complete_busy_group_turn(ctx: &BusyMessageContext<'_>) {
+    let Some(turn_id) = ctx.group_turn_id else {
+        return;
+    };
+    if let Err(error) = ctx
+        .group_context_store
+        .mark_turn_completed(turn_id, now_ms())
+    {
+        warn!(turn_id = %turn_id, error = %error, "failed to complete busy group turn");
+    }
+}
+
+pub(super) fn release_busy_group_turn(ctx: &BusyMessageContext<'_>, reason: &str) {
+    let Some(turn_id) = ctx.group_turn_id else {
+        return;
+    };
+    if let Err(error) = ctx
+        .group_context_store
+        .release_turn(turn_id, reason, now_ms())
+    {
+        warn!(turn_id = %turn_id, error = %error, "failed to release rejected busy group turn");
     }
 }
 
@@ -99,6 +152,7 @@ pub(super) async fn handle_busy_guide_command(
         .await
         {
             Ok(result) if result.accepted => {
+                complete_busy_group_turn(ctx);
                 info!(
                     session_key = %session_key,
                     thread_id = ?result.thread_id,
@@ -144,10 +198,17 @@ pub(super) async fn handle_busy_guide_command(
             }
         }
     }
-    match apply_busy_message_default(ctx.queue_manager, session_key, guide_text, ctx.default_mode) {
+    match apply_busy_message_default_with_context(
+        ctx.queue_manager,
+        session_key,
+        guide_text,
+        ctx.default_mode,
+        Some(queue_item_context(ctx)),
+    ) {
         Ok(BusyMessageDefaultResult::Guide {
             pending_count: pending_guide_count,
         }) => {
+            complete_busy_group_turn(ctx);
             let reply = if pending_guide_count > 1 {
                 format!(
                     "🔀 已追加引导消息（当前 {} 条尚未进入 loop，将合并后生效）",
@@ -218,6 +279,7 @@ pub(super) async fn handle_busy_guide_command(
             }
         }
         Err(err) => {
+            release_busy_group_turn(ctx, err);
             send_agent_reply(
                 ctx.client,
                 ctx.provider,
@@ -237,6 +299,7 @@ pub(super) async fn handle_busy_default_message(
 ) {
     let message = message.trim();
     if message.is_empty() {
+        release_busy_group_turn(ctx, "queued message is empty");
         send_agent_reply(
             ctx.client,
             ctx.provider,
@@ -268,10 +331,12 @@ pub(super) async fn handle_busy_default_message(
             }
             _ => Vec::new(),
         };
-        match ctx
-            .queue_manager
-            .push_queue_with_images(session_key, message.to_string(), images)
-        {
+        match ctx.queue_manager.push_queue_with_images_and_context(
+            session_key,
+            message.to_string(),
+            images,
+            Some(queue_item_context(ctx)),
+        ) {
             Ok(items) => {
                 let guide_pending = !ctx.queue_manager.guide_status(session_key).is_empty();
                 let status_message = if ctx.default_mode == BusyMessageDefaultMode::ExternalGuide {
@@ -314,6 +379,7 @@ pub(super) async fn handle_busy_default_message(
                 }
             }
             Err(err) => {
+                release_busy_group_turn(ctx, err);
                 send_agent_reply(
                     ctx.client,
                     ctx.provider,
@@ -329,6 +395,7 @@ pub(super) async fn handle_busy_default_message(
 
     match apply_busy_message_default(ctx.queue_manager, session_key, message, ctx.default_mode) {
         Ok(BusyMessageDefaultResult::Guide { pending_count }) => {
+            complete_busy_group_turn(ctx);
             let reply = if pending_count > 1 {
                 format!(
                     "🔀 已追加引导消息（当前 {} 条尚未进入 loop，将合并后生效）",
@@ -384,6 +451,7 @@ pub(super) async fn handle_busy_default_message(
             }
         }
         Err(err) => {
+            release_busy_group_turn(ctx, err);
             send_agent_reply(
                 ctx.client,
                 ctx.provider,

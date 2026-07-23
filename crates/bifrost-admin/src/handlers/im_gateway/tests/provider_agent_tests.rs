@@ -370,6 +370,48 @@ pub(super) fn provider_agent_config_overrides_base_agent_config() {
 }
 
 #[test]
+pub(super) fn model_commands_resolve_the_group_selected_runner_first() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let event = ImEvent {
+        event_id: "group-runner-event".to_string(),
+        provider_id: "feishu-main".to_string(),
+        provider_type: ImProviderType::Feishu,
+        event_type: "message.receive".to_string(),
+        source: crate::im_gateway::types::ImEventSource {
+            chat_id: Some("oc_group".to_string()),
+            chat_type: Some("group".to_string()),
+            user_id: Some("ou_user".to_string()),
+            message_id: Some("group-runner-message".to_string()),
+            ..Default::default()
+        },
+        message: Some(crate::im_gateway::types::ImEventMessage {
+            text: "hello".to_string(),
+            ..Default::default()
+        }),
+        received_at: 1,
+        raw_digest: None,
+    };
+    store.record_event(&event, "event").unwrap();
+    let session_key =
+        crate::im_gateway::group_context::build_group_session_key("feishu-main", "oc_group");
+    store
+        .set_runner_id_by_session(&session_key, "traex-group")
+        .unwrap();
+    let agent_config = crate::im_gateway::agent::ImAgentConfig {
+        runner: Some(bifrost_agent::AgentRunnerMode::Custom(
+            "codex-provider".to_string(),
+        )),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        configured_runner_id_for_im_session(&store, &session_key, &agent_config).as_deref(),
+        Some("traex-group")
+    );
+}
+
+#[test]
 pub(super) fn provider_agent_work_dir_resolves_global_default_directory() {
     let base = crate::im_gateway::agent::ImAgentConfig {
         work_dir: None,
