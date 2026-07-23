@@ -38,23 +38,21 @@ impl EventDedup {
         }
     }
 
-    /// Returns `true` if this event_id is a duplicate (already seen within the
-    /// TTL window). If not a duplicate, records it for future checks.
-    pub(super) fn is_duplicate(&mut self, event_id: &str) -> bool {
+    pub(super) fn contains(&mut self, event_id: &str) -> bool {
         self.evict_expired();
+        self.window.iter().any(|(id, _)| id == event_id)
+    }
 
-        // Check if already seen
-        if self.window.iter().any(|(id, _)| id == event_id) {
-            return true;
-        }
-
-        // Record new event
+    pub(super) fn record(&mut self, event_id: &str) {
         if self.window.len() >= self.max_entries {
             self.window.pop_front();
         }
         self.window
             .push_back((event_id.to_string(), Instant::now()));
-        false
+    }
+
+    pub(super) fn remove(&mut self, event_id: &str) {
+        self.window.retain(|(id, _)| id != event_id);
     }
 
     pub(super) fn evict_expired(&mut self) {
@@ -249,7 +247,12 @@ pub(super) async fn run_event_loop_with_options(
                     },
                     completion = session_mailboxes.recv_completion() => {
                         if let Some(completion) = completion {
-                            recovered_session_events.extend(session_mailboxes.finish(completion));
+                            recover_session_completion(
+                                &mut session_mailboxes,
+                                &mut dedup,
+                                &mut recovered_session_events,
+                                completion,
+                            );
                         }
                         continue;
                     }
@@ -257,13 +260,15 @@ pub(super) async fn run_event_loop_with_options(
             }
             None => {
                 if let Some(completion) = session_mailboxes.recv_completion().await {
-                    recovered_session_events.extend(session_mailboxes.finish(completion));
+                    recover_session_completion(
+                        &mut session_mailboxes,
+                        &mut dedup,
+                        &mut recovered_session_events,
+                        completion,
+                    );
                 }
                 continue;
             }
-        };
-        let Some(event) = session_mailboxes.dispatch(event) else {
-            continue;
         };
         let provider = provider_store
             .get(&event.provider_id)
@@ -281,14 +286,8 @@ pub(super) async fn run_event_loop_with_options(
         // Deduplication: per Feishu docs, use message_id for idempotency
         // ("如有幂等需求请使用 message_id 去重，不要依赖 event_id").
         // Falls back to event_id for non-message events.
-        let dedup_key = event
-            .source
-            .message_id
-            .as_deref()
-            .filter(|id| !id.is_empty())
-            .unwrap_or(&event.event_id);
-
-        if !dedup_key.is_empty() && dedup.is_duplicate(dedup_key) {
+        let dedup_key = event_dedup_key(&event).to_string();
+        if !dedup_key.is_empty() && dedup.contains(&dedup_key) {
             debug!(
                 provider_id = %event.provider_id,
                 event_id = %event.event_id,
@@ -296,6 +295,17 @@ pub(super) async fn run_event_loop_with_options(
                 "dropping duplicate event"
             );
             continue;
+        }
+
+        let dispatch_result = session_mailboxes.dispatch(event);
+        let Some(event) = dispatch_result.unrouted_event else {
+            if dispatch_result.delivered && !dedup_key.is_empty() {
+                dedup.record(&dedup_key);
+            }
+            continue;
+        };
+        if !dedup_key.is_empty() {
+            dedup.record(&dedup_key);
         }
 
         // Feishu bots use owner_open_id as a safety boundary. Weixin ClawBot is
@@ -425,45 +435,7 @@ pub(super) async fn run_event_loop_with_options(
             }
         };
 
-        // Add "OK" reaction to acknowledge receipt
-        let mut reaction_added = None;
-        if let Some(ref message_id) = event.source.message_id {
-            match client.add_reaction(&provider, message_id, "OK").await {
-                Ok(true) => {
-                    info!(message_id = %message_id, "added OK reaction to message");
-                    reaction_added = Some(true);
-                }
-                Ok(false) => {
-                    reaction_added = None;
-                }
-                Err(e) => {
-                    error!(message_id = %message_id, error = %e, "failed to add OK reaction");
-                    reaction_added = Some(false);
-                }
-            }
-        }
-
-        // Record inbound message log
-        let log = ImMessageLog {
-            id: uuid_short(),
-            provider_id: event.provider_id.clone(),
-            direction: MessageDirection::Inbound,
-            status: MessageStatus::Success,
-            timestamp: now_ms(),
-            target_id: None,
-            target_name: None,
-            message_id: event.source.message_id.clone(),
-            msg_type: event.message.as_ref().and_then(|m| m.raw_type.clone()),
-            content_preview: event.message.as_ref().map(inbound_message_preview),
-            trigger: Some("websocket".to_string()),
-            error: None,
-            sender_open_id: event.source.user_id.clone(),
-            event_id: Some(event.event_id.clone()),
-            reaction_added,
-        };
-        if let Err(e) = message_log_store.add(log) {
-            error!(error = %e, "failed to store inbound message log");
-        }
+        acknowledge_and_log_inbound_event(&client, &provider, &event, &message_log_store).await;
 
         // --- Route matching & action execution ---
         let routes = route_store.list();
@@ -841,6 +813,78 @@ pub(super) async fn run_event_loop_with_options(
         provider_id = %provider.id,
         "event processing loop ended"
     );
+}
+
+fn event_dedup_key(event: &ImEvent) -> &str {
+    event
+        .source
+        .message_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .unwrap_or(&event.event_id)
+}
+
+fn recover_session_completion(
+    session_mailboxes: &mut SessionMailboxRegistry,
+    dedup: &mut EventDedup,
+    recovered_session_events: &mut VecDeque<ImEvent>,
+    completion: SessionTaskCompletion,
+) {
+    for event in session_mailboxes.finish(completion) {
+        let dedup_key = event_dedup_key(&event).to_string();
+        if !dedup_key.is_empty() {
+            dedup.remove(&dedup_key);
+        }
+        recovered_session_events.push_back(event);
+    }
+}
+
+pub(super) async fn acknowledge_and_log_inbound_event(
+    client: &ImProviderClient,
+    provider: &ImProviderConfig,
+    event: &ImEvent,
+    message_log_store: &Arc<ImMessageLogStore>,
+) {
+    let mut reaction_added = None;
+    if let Some(ref message_id) = event.source.message_id {
+        match client.add_reaction(provider, message_id, "OK").await {
+            Ok(true) => {
+                info!(message_id = %message_id, "added OK reaction to message");
+                reaction_added = Some(true);
+            }
+            Ok(false) => {
+                reaction_added = None;
+            }
+            Err(error) => {
+                error!(message_id = %message_id, error = %error, "failed to add OK reaction");
+                reaction_added = Some(false);
+            }
+        }
+    }
+
+    let log = ImMessageLog {
+        id: uuid_short(),
+        provider_id: event.provider_id.clone(),
+        direction: MessageDirection::Inbound,
+        status: MessageStatus::Success,
+        timestamp: now_ms(),
+        target_id: None,
+        target_name: None,
+        message_id: event.source.message_id.clone(),
+        msg_type: event
+            .message
+            .as_ref()
+            .and_then(|message| message.raw_type.clone()),
+        content_preview: event.message.as_ref().map(inbound_message_preview),
+        trigger: Some("websocket".to_string()),
+        error: None,
+        sender_open_id: event.source.user_id.clone(),
+        event_id: Some(event.event_id.clone()),
+        reaction_added,
+    };
+    if let Err(error) = message_log_store.add(log) {
+        error!(error = %error, "failed to store inbound message log");
+    }
 }
 
 // ---------------------------------------------------------------------------

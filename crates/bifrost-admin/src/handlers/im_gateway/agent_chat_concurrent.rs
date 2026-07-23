@@ -79,6 +79,10 @@ pub(super) async fn handle_concurrent_event_during_chat(
     let message_text = dispatch.message_text;
     let session_key = dispatch.session_key;
     let group_turn_id = dispatch.group_turn_id;
+    // Ambient group messages return above. Accepted triggers retain the same
+    // acknowledgement and inbound audit side effects as the normal path even
+    // though their session mailbox already has a runner in flight.
+    acknowledge_and_log_inbound_event(client, &provider, event, message_log_store).await;
     let agent_config = effective_agent_config_for_provider(&agent_config_store.load(), &provider);
     if session_key == active_session_key {
         if message_text.trim() == "/help" {

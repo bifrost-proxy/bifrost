@@ -165,6 +165,16 @@
 
 预期结果：两个群和私聊在第一个任务完成前都启动，三个 Runner PID 各不相同；群聊按 `provider_id + chat_id`、私聊按 `provider_id + user_id` 使用独立 mailbox、异步任务、外部进程和会话历史，任一长任务不会阻塞其他会话接收、启动或回复。同一群的后续消息仍只进入该群 Guide/Queue 通道并保持顺序；receiver 关闭前后的消息按原顺序回放，旧 generation 完成通知不能移除替代 mailbox。Provider 输入正常关闭会排空已启动任务，不会截断结果；只有 event-loop 被显式取消时才终止任务。
 
+### TC-FGS-20：活跃 Session 重投去重并保留触发确认与审计
+
+1. 在同一个飞书 Provider 下同时启动两个群 Session 和两个私聊 Session，使四个外部 Runner 都保持 active。
+2. 向其中一个群发送 Guide、`/cwd`、`/q`、`/rq`，并以相同 `message_id`、不同 `event_id` 重投 Guide；向一个活跃私聊发送 Guide 并以相同方式重投。
+3. 在同一活跃群发送一条不触发 Agent 的普通背景消息。
+4. 检查群上下文账本、event history、inbound message log 和 `reaction_added`。
+5. 模拟 mailbox receiver 已关闭但 completion 尚未处理，确认该消息回放到正常路径后才写入 dedup window。
+
+预期结果：群聊和私聊的每个重投消息都只处理、入账和审计一次；关闭中 mailbox 的消息不会因过早记入 dedup 而在回放时丢失。活跃 Session 中被接受的触发消息仍尝试添加 `OK` reaction，并生成一条 inbound audit log；普通背景消息只进入群上下文，不产生触发 reaction 或 inbound trigger audit。
+
 ## 执行方式
 
 TC-FGS-01 至 TC-FGS-05 由以下真实服务脚本逐条执行：
@@ -230,6 +240,14 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 ```
 
 TC-FGS-19 的多群、私聊并发进程隔离与 mailbox 竞态执行：
+
+```bash
+cargo test -p bifrost-admin session_dispatch --all-features -- --nocapture
+cargo test -p bifrost-admin group_event_loop_routes_concurrent_context_to_the_active_external_session --all-features -- --nocapture
+bash e2e-tests/tests/test_feishu_group_session_context.sh
+```
+
+TC-FGS-20 的活跃 Session 去重、确认和审计回归执行：
 
 ```bash
 cargo test -p bifrost-admin session_dispatch --all-features -- --nocapture

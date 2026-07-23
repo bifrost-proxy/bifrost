@@ -68,6 +68,43 @@ wait_prompt_count() {
   return 1
 }
 
+wait_run_count() {
+  local expected="$1"
+  for _ in $(seq 1 160); do
+    local actual=0
+    if [[ -f "$RUN_LOG" ]]; then
+      actual="$(wc -l <"$RUN_LOG" | tr -d ' ')"
+    fi
+    if [[ "$actual" == "$expected" ]]; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "expected $expected runner lifecycle events" >&2
+  [[ -f "$RUN_LOG" ]] && sed -n '1,40p' "$RUN_LOG" >&2 || true
+  tail -160 "$BIFROST_LOG" >&2 || true
+  return 1
+}
+
+wait_session_idle() {
+  local session_key="$1"
+  for _ in $(seq 1 160); do
+    if curl -fsS --noproxy '*' \
+      "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/agent/sessions/all?limit=80" \
+      | python3 -c '
+import json, sys
+session_key = sys.argv[1]
+sessions = json.load(sys.stdin).get("sessions", [])
+raise SystemExit(1 if any(item.get("session_key") == session_key and item.get("running") is True for item in sessions) else 0)
+' "$session_key"; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "session remained active: $session_key" >&2
+  return 1
+}
+
 if [[ "${SKIP_BUILD:-false}" != "true" ]]; then
   SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
 fi
@@ -190,7 +227,8 @@ sleep 1
 
 inject chat-alpha user-alice Alice a3 "@_user_1 请总结刚才的讨论" true
 wait_prompt_count 1
-sleep 1.25
+wait_run_count 2
+wait_session_idle "im:feishu-group-e2e:group:chat-alpha"
 
 inject chat-alpha user-bob Bob a4 "/cwd $REPO_DIR"
 inject chat-alpha user-bob Bob a5 "/runner group-mock"
@@ -200,13 +238,15 @@ wait_prompt_count 1
 inject chat-alpha user-bob Bob a7 "补充：需要回滚预案"
 inject chat-alpha user-bob Bob a8 "/g 继续给出行动项"
 wait_prompt_count 2
-sleep 1.25
+wait_run_count 4
+wait_session_idle "im:feishu-group-e2e:group:chat-alpha"
 
 # Exact command boundaries match direct messages: /help is a command, while
 # `/help extra` falls through to the model and therefore receives group context.
 inject chat-alpha user-bob Bob a9 "/help extra"
 wait_prompt_count 3
-sleep 1.25
+wait_run_count 6
+wait_session_idle "im:feishu-group-e2e:group:chat-alpha"
 
 inject chat-beta user-carol Carol b1 "另一个群的背景"
 inject chat-beta user-carol Carol b2 "@_user_1 给出一句结论" true
@@ -218,7 +258,8 @@ inject chat-beta user-dave Dave b3 "忙时补充：保留这条背景"
 inject chat-beta user-carol Carol b4 "/clear"
 inject chat-beta user-carol Carol b5 "/q 排队后的结论"
 wait_prompt_count 5
-sleep 1.25
+wait_run_count 10
+wait_session_idle "im:feishu-group-e2e:group:chat-beta"
 
 # A long-running group task must not own the provider receiver. Two groups and
 # the provider owner's direct-message session start separate worker processes
@@ -227,6 +268,12 @@ inject chat-alpha user-alice Alice a10 "@_user_1 并发检查 Alpha" true
 inject chat-beta user-carol Carol b6 "@_user_1 并发检查 Beta" true
 inject direct-owner owner-only-in-p2p Owner p1 "并发检查私聊" false p2p
 wait_prompt_count 8
+# A trigger redelivered while Alpha's runner is active must be acknowledged and
+# audited once, without being executed twice. The ambient message is retained
+# as group context but must not receive trigger acknowledgement side effects.
+inject chat-alpha user-alice Alice a11 "/status"
+inject chat-alpha user-alice Alice a11 "/status"
+inject chat-alpha user-bob Bob a12 "并发期间的普通背景消息"
 for _ in $(seq 1 160); do
   if [[ -f "$RUN_LOG" ]] && [[ "$(wc -l <"$RUN_LOG" | tr -d ' ')" == "16" ]]; then
     break
@@ -236,13 +283,13 @@ done
 [[ -f "$RUN_LOG" ]]
 [[ "$(wc -l <"$RUN_LOG" | tr -d ' ')" == "16" ]]
 
-python3 - "$PROMPT_LOG" "$RUN_LOG" "$TEST_DIR/admin/im_group_context.db" "$REPO_DIR" <<'PY'
+python3 - "$PROMPT_LOG" "$RUN_LOG" "$TEST_DIR/admin/im_group_context.db" "$REPO_DIR" "$TEST_DIR/admin/im_gateway_message_logs.json" <<'PY'
 import json
 import pathlib
 import sqlite3
 import sys
 
-prompt_path, run_path, db_path, repo_dir = sys.argv[1:5]
+prompt_path, run_path, db_path, repo_dir, message_log_path = sys.argv[1:6]
 prompts = [json.loads(line) for line in open(prompt_path, encoding="utf-8") if line.strip()]
 assert len(prompts) == 8, prompts
 first, second, slash_fallback, third, queued = prompts[:5]
@@ -305,11 +352,24 @@ assert bindings[0][5] == "group-mock", bindings
 messages = connection.execute(
     "SELECT chat_id, COUNT(*) FROM im_group_messages GROUP BY chat_id ORDER BY chat_id"
 ).fetchall()
-assert messages == [("chat-alpha", 10), ("chat-beta", 6)], messages
+assert messages == [("chat-alpha", 12), ("chat-beta", 6)], messages
 beta_turns = connection.execute(
     "SELECT status FROM im_group_turns WHERE chat_id = 'chat-beta' ORDER BY created_at"
 ).fetchall()
 assert beta_turns == [("completed",), ("completed",), ("completed",)], beta_turns
+
+message_logs = json.load(open(message_log_path, encoding="utf-8"))["messages"]
+status_logs = [
+    entry for entry in message_logs
+    if entry.get("direction") == "inbound" and entry.get("message_id") == "a11"
+]
+assert len(status_logs) == 1, status_logs
+assert status_logs[0].get("reaction_added") is False, status_logs
+ambient_logs = [
+    entry for entry in message_logs
+    if entry.get("direction") == "inbound" and entry.get("message_id") == "a12"
+]
+assert ambient_logs == [], ambient_logs
 PY
 
 echo "[feishu-group-session] PASS"

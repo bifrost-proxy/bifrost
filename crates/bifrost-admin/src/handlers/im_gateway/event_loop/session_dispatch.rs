@@ -9,9 +9,9 @@ struct ActiveSessionMailbox {
 
 #[derive(Debug)]
 pub(super) struct SessionTaskCompletion {
-    session_key: String,
-    generation: u64,
-    recovered_events: VecDeque<ImEvent>,
+    pub(super) session_key: String,
+    pub(super) generation: u64,
+    pub(super) recovered_events: VecDeque<ImEvent>,
 }
 
 pub(super) struct SessionMailboxRegistry {
@@ -19,6 +19,11 @@ pub(super) struct SessionMailboxRegistry {
     next_generation: u64,
     completion_tx: mpsc::UnboundedSender<SessionTaskCompletion>,
     completion_rx: mpsc::UnboundedReceiver<SessionTaskCompletion>,
+}
+
+pub(super) struct SessionDispatchResult {
+    pub(super) unrouted_event: Option<ImEvent>,
+    pub(super) delivered: bool,
 }
 
 impl SessionMailboxRegistry {
@@ -65,18 +70,29 @@ impl SessionMailboxRegistry {
         }
     }
 
-    /// Returns `None` when an active or closing session accepted the event.
-    /// A returned event has no mailbox and must use the normal provider path.
-    pub(super) fn dispatch(&mut self, event: ImEvent) -> Option<ImEvent> {
+    /// Distinguishes events delivered to a live mailbox from events buffered
+    /// after its receiver closed. The provider loop records deduplication only
+    /// for delivered events; buffered events must be replayed through the
+    /// normal path before they become visible to the deduplication window.
+    pub(super) fn dispatch(&mut self, event: ImEvent) -> SessionDispatchResult {
         let session_key = session_key_for_event(&event);
         let Some(mailbox) = self.active.get_mut(&session_key) else {
-            return Some(event);
+            return SessionDispatchResult {
+                unrouted_event: Some(event),
+                delivered: false,
+            };
         };
         match mailbox.sender.send(event) {
-            Ok(()) => None,
+            Ok(()) => SessionDispatchResult {
+                unrouted_event: None,
+                delivered: true,
+            },
             Err(error) => {
                 mailbox.after_close_events.push_back(error.0);
-                None
+                SessionDispatchResult {
+                    unrouted_event: None,
+                    delivered: false,
+                }
             }
         }
     }
@@ -266,12 +282,14 @@ mod tests {
             pending_abort_handle(),
         );
 
-        assert!(registry
-            .dispatch(test_event("group", "group-a", "sender", "group-event"))
-            .is_none());
-        assert!(registry
-            .dispatch(test_event("p2p", "direct-chat", "user-a", "direct-event"))
-            .is_none());
+        let group_result =
+            registry.dispatch(test_event("group", "group-a", "sender", "group-event"));
+        assert!(group_result.delivered);
+        assert!(group_result.unrouted_event.is_none());
+        let direct_result =
+            registry.dispatch(test_event("p2p", "direct-chat", "user-a", "direct-event"));
+        assert!(direct_result.delivered);
+        assert!(direct_result.unrouted_event.is_none());
         assert_eq!(group_rx.recv().await.unwrap().event_id, "group-event");
         assert_eq!(direct_rx.recv().await.unwrap().event_id, "direct-event");
         assert!(registry.contains(&group_key));
@@ -329,7 +347,9 @@ mod tests {
         receiver.close();
         let event = test_event("p2p", "direct-chat", "user-a", "after-close-event");
 
-        assert!(registry.dispatch(event).is_none());
+        let result = registry.dispatch(event);
+        assert!(!result.delivered);
+        assert!(result.unrouted_event.is_none());
         assert!(registry.contains(&session_key));
         let buffered = test_event("p2p", "direct-chat", "user-a", "buffered-event");
         let recovered = registry.finish(SessionTaskCompletion {

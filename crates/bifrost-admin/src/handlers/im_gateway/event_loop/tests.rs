@@ -959,14 +959,17 @@ async fn group_event_loop_routes_concurrent_context_to_the_active_external_sessi
         5,
     ))
     .unwrap();
-    tx.send(group_test_event(
+    let guide_during_run = group_test_event(
         &provider.id,
         "guide-during-run",
         "/g include the deployment failure",
         false,
         6,
-    ))
-    .unwrap();
+    );
+    tx.send(guide_during_run.clone()).unwrap();
+    let mut duplicate_guide = guide_during_run;
+    duplicate_guide.event_id = "redelivery-guide-during-run".to_string();
+    tx.send(duplicate_guide).unwrap();
     tx.send(group_test_event(
         &provider.id,
         "cwd-during-run",
@@ -991,6 +994,19 @@ async fn group_event_loop_routes_concurrent_context_to_the_active_external_sessi
         9,
     ))
     .unwrap();
+    let mut direct_follow_up = group_test_event(
+        &provider.id,
+        "direct-a-guide-during-run",
+        "/g include the direct follow-up",
+        false,
+        10,
+    );
+    direct_follow_up.source.chat_type = Some("p2p".to_string());
+    direct_follow_up.source.user_id = Some("ou_direct_a".to_string());
+    tx.send(direct_follow_up.clone()).unwrap();
+    let mut duplicate_direct_follow_up = direct_follow_up;
+    duplicate_direct_follow_up.event_id = "redelivery-direct-a-guide-during-run".to_string();
+    tx.send(duplicate_direct_follow_up).unwrap();
 
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
@@ -1035,6 +1051,41 @@ async fn group_event_loop_routes_concurrent_context_to_the_active_external_sessi
         .queue_manager
         .queue_status(&group_a_session)
         .is_empty());
+    let inbound_logs: Vec<_> = service
+        .message_log_store
+        .list_by_provider(&provider.id)
+        .into_iter()
+        .filter(|log| log.direction == MessageDirection::Inbound)
+        .collect();
+    for message_id in [
+        "guide-during-run",
+        "cwd-during-run",
+        "queue-during-run",
+        "remove-queue-during-run",
+        "direct-a-guide-during-run",
+    ] {
+        let matching: Vec<_> = inbound_logs
+            .iter()
+            .filter(|log| log.message_id.as_deref() == Some(message_id))
+            .collect();
+        assert_eq!(matching.len(), 1, "inbound log for {message_id}");
+        assert_eq!(matching[0].reaction_added, Some(false));
+    }
+    assert!(inbound_logs
+        .iter()
+        .all(|log| log.message_id.as_deref() != Some("ambient-during-run")));
+    for message_id in ["guide-during-run", "direct-a-guide-during-run"] {
+        assert_eq!(
+            service
+                .event_store
+                .list()
+                .iter()
+                .filter(|event| event.source.message_id.as_deref() == Some(message_id))
+                .count(),
+            1,
+            "deduplicated event history for {message_id}"
+        );
+    }
     for session_key in [
         group_a_session,
         group_b_session,
@@ -1337,6 +1388,47 @@ fn event_dedup_evict_expired_handles_large_ttl() {
     dedup.evict_expired();
 
     assert_eq!(dedup.window.len(), 1);
+}
+
+#[tokio::test]
+async fn completion_replay_removes_unconsumed_event_from_dedup_window() {
+    let event = group_test_event("provider", "recovered-message", "/status", false, 1);
+    let session_key =
+        crate::im_gateway::group_context::build_group_session_key("provider", "oc_group");
+    let mut registry = SessionMailboxRegistry::new();
+    let (sender, _receiver) = mpsc::unbounded_channel();
+    let generation = registry.reserve_generation();
+    let pending_task = tokio::spawn(std::future::pending::<()>());
+    registry.register(
+        session_key.clone(),
+        generation,
+        sender,
+        pending_task.abort_handle(),
+    );
+    let dispatch_result = registry.dispatch(event.clone());
+    assert!(dispatch_result.delivered);
+    assert!(dispatch_result.unrouted_event.is_none());
+
+    let mut dedup = EventDedup::new();
+    dedup.record("recovered-message");
+    let mut recovered = VecDeque::new();
+    recover_session_completion(
+        &mut registry,
+        &mut dedup,
+        &mut recovered,
+        SessionTaskCompletion {
+            session_key,
+            generation,
+            recovered_events: VecDeque::from([event]),
+        },
+    );
+
+    assert!(!dedup.contains("recovered-message"));
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(
+        recovered.front().unwrap().source.message_id.as_deref(),
+        Some("recovered-message")
+    );
 }
 
 #[test]

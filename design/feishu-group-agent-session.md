@@ -120,6 +120,8 @@ Bifrost 不创建、更新或同步飞书机器人自定义菜单，也不订阅
 - Turn 创建和游标推进必须在同一事务中完成，避免崩溃后重复或跳过区间。
 - 一个 Runner 活跃期间收到的其他群或私聊消息直接投递到各自 Session mailbox，并立即启动各自外部进程，不进入跨 Session 待处理队列。
 - 同一群或同一私聊内顺序执行；不同群、不同私聊以及群聊与私聊之间拥有独立 Session Key，不共享进程、对话历史、队列或工作目录。
+- Provider 入口在查找 Session mailbox 之前按 `message_id`（缺失时回退 `event_id`）去重；成功投递到 live mailbox 后才记录 dedup。receiver 已关闭但 completion 未处理的消息先缓冲回放，避免过早记录导致回放被误删。
+- 活跃 Session 的消息在 Session 任务内完成触发分类：被接受的群触发和私聊消息保留 `OK` reaction 与 inbound audit，普通群背景消息只进入上下文账本，不产生触发确认副作用。
 
 ## 验证清单
 
@@ -134,6 +136,7 @@ Bifrost 不创建、更新或同步飞书机器人自定义菜单，也不订阅
 - 非 owner 群成员消息能入账并可通过 @ 触发；
 - 历史消息和主动请求都包含发送者 `sender_at`，且恶意名称不能逃逸标签结构；
 - 普通消息不产生 reaction；
+- 活跃 Session 的重复触发只执行、确认和审计一次，mailbox 关闭竞态中的回放消息不丢失；
 - 首轮 Prompt 只额外包含群名称和群 ID，后续 Prompt 不重复基本信息；
 - 无背景消息时 Prompt 只有最后一条带发送者 `<at>` 的当前消息；
 - 完整审计字段不泄露到模型 Prompt。
