@@ -129,7 +129,7 @@ thread 内重新发起 turn：
 
 ### 图片附件桥接
 
-Feishu/Weixin 入站图片先由 provider resolver 下载为 `ChatImageInput`；命中自定义 runner 时，event loop 转换为 `ExternalCliImageInput` 放入首轮 external CLI request；排队后续文本消息不复用上一轮图片。Web Chat 走 `/chat/stream` request 的 `images[]`。runtime 在执行前把图片落盘到 `sessions/YYYY/MM/DD/attachments/<session-file-stem>/<run-id>/images/image-N.<ext>`，prompt 前追加 `## Attached Images` 列出绝对路径、mime、大小。`attachmentBaseDir` 只能由服务端基于已验证的 session recorder 生成，禁止调用方指定任意根目录。
+Feishu/Weixin 入站图片先由 provider resolver 下载为 `ChatImageInput`；命中自定义 runner 时，event loop 转换为 `ExternalCliImageInput` 放入首轮 external CLI request；排队后续文本消息不复用上一轮图片。Web Chat 走 `/chat/stream` request 的 `images[]`。runtime 在执行前把图片落盘到 `sessions/by-key/attachments/<session-file-stem>/<run-id>/images/image-N.<ext>`，prompt 前追加 `## Attached Images` 列出绝对路径、mime、大小。`attachmentBaseDir` 只能由服务端基于已验证的 session recorder 生成，禁止调用方指定任意根目录。
 
 ### 能力声明与降级
 

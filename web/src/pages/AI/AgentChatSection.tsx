@@ -40,6 +40,7 @@ import {
 import {
   appendProcessStepToTimeline,
   historyEventsToMessages,
+  mergeHistoryEventWindow,
   historyEventsToTelemetry,
 } from "./AgentChatSection.timeline";
 import {
@@ -1033,31 +1034,27 @@ export default function AgentChatSection({
       shouldStickToBottom: boolean,
       authoritativeThread?: AgentThreadSummary,
     ) => {
-      if (events.length === 0) {
-        historyEventEndIndexRef.current =
-          page.end_index ?? historyEventEndIndexRef.current;
+      const merged = mergeHistoryEventWindow(
+        historyEventsRef.current,
+        historyEventStartIndexRef.current,
+        historyEventEndIndexRef.current,
+        events,
+        page.start_index,
+        page.end_index,
+      );
+      if (merged.gap || !merged.changed) {
         return undefined;
       }
-      const startIndex = page.start_index;
-      const currentEnd = historyEventEndIndexRef.current;
-      const mergedEvents =
-        startIndex !== undefined &&
-        currentEnd !== undefined &&
-        startIndex >= currentEnd
-          ? [...historyEventsRef.current, ...events]
-          : events;
-      const previousStartIndex = historyEventStartIndexRef.current;
-      const wasAppending =
-        startIndex !== undefined && currentEnd !== undefined && startIndex >= currentEnd;
       const { nextTelemetry } = applyHistoryEventWindow(
-        mergedEvents,
-        page,
+        merged.events,
+        {
+          ...page,
+          start_index: merged.startIndex,
+          end_index: merged.endIndex,
+        },
         authoritativeThread,
         shouldStickToBottom,
       );
-      if (wasAppending) {
-        historyEventStartIndexRef.current = previousStartIndex ?? startIndex;
-      }
       return nextTelemetry;
     },
     [applyHistoryEventWindow],
@@ -1110,11 +1107,12 @@ export default function AgentChatSection({
       ) {
         return false;
       }
+      const liveEndIndex = historyEventEndIndexRef.current;
       if (
         !fetchFull &&
-        currentEndIndex !== undefined &&
+        liveEndIndex !== undefined &&
         page.start_index !== undefined &&
-        page.start_index !== currentEndIndex
+        page.start_index > liveEndIndex
       ) {
         await refreshThreads();
         page = await fetchHistoryPage(currentHistoryPath);

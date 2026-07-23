@@ -148,6 +148,70 @@ export interface AsrSpeakerProfileSummary {
   id: string;
   display_name: string;
   embedding_dim: number;
+  template_count: number;
+  prototype_count: number;
+  total_duration_ms: number;
+  source: string;
+}
+
+export type AsrAssistedCandidateLabel = "mine" | "not_mine" | "unsure";
+
+export interface AsrVoiceprintTemplate {
+  id: string;
+  source_kind: string;
+  prompt_id?: string;
+  task_id?: string;
+  file_key?: string;
+  speaker?: string;
+  start_ms?: number;
+  end_ms?: number;
+  duration_ms: number;
+  quality: number;
+  overlap: boolean;
+  created_at_ms: number;
+}
+
+export interface AsrSpeakerProfileDetail {
+  schema_version: number;
+  id: string;
+  display_name: string;
+  source: string;
+  diarization_profile: string;
+  embedding_dim: number;
+  sample_rate: number;
+  total_duration_ms: number;
+  templates: AsrVoiceprintTemplate[];
+}
+
+export interface AsrAssistedVoiceprintCandidate {
+  id: string;
+  speaker: string;
+  start_ms: number;
+  end_ms: number;
+  duration_ms: number;
+  text: string;
+  quality: number;
+  overlap: boolean;
+  label: AsrAssistedCandidateLabel;
+}
+
+export interface AsrAssistedVoiceprintSession {
+  id: string;
+  state: "open" | "finishing";
+  speaker_name: string;
+  profile_id?: string;
+  task_id: string;
+  file_key: string;
+  candidates: AsrAssistedVoiceprintCandidate[];
+}
+
+export interface AsrAssistedVoiceprintSessionPayload {
+  session: AsrAssistedVoiceprintSession;
+  selected_count: number;
+  selected_duration_ms: number;
+  minimum_clips: number;
+  minimum_duration_ms: number;
+  ready_to_finish: boolean;
 }
 
 export interface AsrSpeakerEnrollmentPrompt {
@@ -1039,13 +1103,81 @@ export async function deleteAsrSpeakerProfile(profileId: string): Promise<void> 
   await readJsonResponse<unknown>(response);
 }
 
+export async function getAsrSpeakerProfile(
+  profileId: string,
+): Promise<AsrSpeakerProfileDetail> {
+  return get<AsrSpeakerProfileDetail>(
+    `/asr/speaker-profiles/${encodeURIComponent(profileId)}`,
+  );
+}
+
+export async function createAsrAssistedVoiceprintSession(payload: {
+  name: string;
+  profile_id?: string;
+  task_id: string;
+  file_key: string;
+}): Promise<AsrAssistedVoiceprintSessionPayload> {
+  const response = await asrFetch("/asr/speaker-profiles/assisted-sessions", {
+    method: "POST",
+    headers: buildJsonHeaders(),
+    body: JSON.stringify(payload),
+  });
+  return readJsonResponse<AsrAssistedVoiceprintSessionPayload>(response);
+}
+
+export async function updateAsrAssistedVoiceprintLabels(
+  sessionId: string,
+  labels: Array<{ candidate_id: string; label: AsrAssistedCandidateLabel }>,
+): Promise<AsrAssistedVoiceprintSessionPayload> {
+  const response = await asrFetch(
+    `/asr/speaker-profiles/assisted-sessions/${encodeURIComponent(sessionId)}/labels`,
+    {
+      method: "POST",
+      headers: buildJsonHeaders(),
+      body: JSON.stringify({ labels }),
+    },
+  );
+  return readJsonResponse<AsrAssistedVoiceprintSessionPayload>(response);
+}
+
+export async function finishAsrAssistedVoiceprintSession(
+  sessionId: string,
+): Promise<AsrSpeakerEnrollmentResult> {
+  const response = await asrFetch(
+    `/asr/speaker-profiles/assisted-sessions/${encodeURIComponent(sessionId)}/finish`,
+    { method: "POST", headers: buildJsonHeaders(), body: "{}" },
+  );
+  return readJsonResponse<AsrSpeakerEnrollmentResult>(response);
+}
+
+export async function deleteAsrAssistedVoiceprintSession(
+  sessionId: string,
+): Promise<void> {
+  const response = await asrFetch(
+    `/asr/speaker-profiles/assisted-sessions/${encodeURIComponent(sessionId)}`,
+    { method: "DELETE", headers: buildJsonHeaders() },
+  );
+  await readJsonResponse<unknown>(response);
+}
+
+export async function deleteAsrSpeakerProfileSample(
+  profileId: string,
+  sampleId: string,
+): Promise<void> {
+  const response = await asrFetch(
+    `/asr/speaker-profiles/${encodeURIComponent(profileId)}/samples/${encodeURIComponent(sampleId)}`,
+    { method: "DELETE", headers: buildJsonHeaders() },
+  );
+  await readJsonResponse<unknown>(response);
+}
+
 export type AsrSpeakerIdentifyResult = {
   matched: boolean;
   profile_id: string | null;
   display_name: string;
   speaker: string;
   confidence: number;
-  status?: "matched" | "unmatched" | "insufficient_audio";
+  status?: "matched" | "unmatched" | "ambiguous" | "insufficient_audio";
   reason?: string | null;
   audio_duration_ms?: number;
   speech_duration_ms?: number;

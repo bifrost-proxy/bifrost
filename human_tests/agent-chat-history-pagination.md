@@ -1,14 +1,14 @@
-# Agent Chat 全量历史与过程渲染真实场景测试
+# Agent Chat 单会话日志与全量历史渲染真实场景测试
 
 ## 功能模块说明
 
-验证 Agent Chat 默认一次加载完整对话历史，不出现 `Load older`、loader 或 modal 式补载；外部 Runner 的逐 token `assistant_delta` 必须合并成连续段落，`token_usage` / `rate_limits` 内部刷新不得显示。完整 timeline 是页面的权威来源，session detail 仅在 timeline 请求失败时兜底。
+验证一个 `session_key` 只使用 `sessions/by-key/session-{sha256}.jsonl` 这一份规范日志，旧日期/时间戳分片和损坏数据直接删除；Agent Chat 默认一次加载规范文件内的完整对话历史，并确保并发增量响应不会用尾段覆盖首轮消息。
 
 ## 前置条件
 
 1. 在仓库根目录执行命令。
-2. WebUI 自动化使用 Playwright 的独立测试服务；真实会话验证使用本地 Vite 开发服务代理到 9900，不能修改会话数据。
-3. 将待验证 JSONL 绝对路径设为 `HISTORY_PATH`，并确认文件可读。
+2. WebUI 自动化使用 Playwright 的独立测试服务；不得使用或修改 9900 下旧格式的用户历史。
+3. 将待验证的规范 JSONL 绝对路径设为 `HISTORY_PATH`，并确认路径位于 `sessions/by-key/` 且文件名为完整 SHA-256。
 4. 涉及独立 Bifrost 进程时必须使用临时 `BIFROST_DATA_DIR`、非 9900 端口和 `--no-system-proxy`。
 
 ## 测试用例列表
@@ -75,7 +75,7 @@
 
 操作步骤：
 
-1. 使用用户报告问题的长 JSONL 会话打开本地开发页面。
+1. 使用包含多轮消息的规范路径长 JSONL，在隔离测试服务打开本地开发页面。
 2. 统计 `agent-chat-process-text` 节点数、单字符节点数和最长段落长度。
 3. 检查报告中的中文过程句是否作为单个合并节点出现。
 
@@ -112,6 +112,24 @@
 - usage refresh 不生成 `assistant_delta`。
 - 普通可读状态、assistant 内容和工具记录仍正常持久化。
 
+### TC-ACH-08 单 key 单文件与非规范数据清理回归
+
+操作步骤：
+
+1. 在临时 `BIFROST_DATA_DIR/agent/sessions/YYYY/MM/DD/` 写入同一 key 的旧时间戳 JSONL。
+2. 在 `agent/sessions/by-key/` 写入该 key 的规范 SHA-256 JSONL，并另建空文件、损坏 JSONL、混合两个 key 的文件；同时在 `sessions/by-key/attachments/.../input.jsonl` 放置一个普通附件。
+3. 启动隔离 Bifrost，再统计 `sessions` 下剩余 JSONL 并请求 session/history API。
+4. 连续两次通过 `ConversationRecorder::open_or_create` 写入同一 key，比较两个 recorder 路径和最终事件顺序。
+5. 在 macOS 临时目录中通过 `/var/...` 路径创建规范文件，再按 `canonicalize` 后的 `/private/var/...` 路径恢复会话。
+
+预期结果：
+
+- 旧时间戳、空、损坏、混 key、路径/key 不匹配的 JSONL 全部删除，不做合并或导入。
+- 合法规范文件保留，history API 只返回该文件已有事件，不包含旧分片内容。
+- `attachments/` 下的 `.jsonl` 附件保持原样，既不被删除，也不进入 session/history API。
+- 两次 `open_or_create` 路径完全相同，第二次 `created=false`，最终目录只有一个 JSONL 且两轮按写入顺序存在。
+- macOS `/var` 与 `/private/var` 指向同一规范文件时能够正常恢复，不会被误判为非规范路径并删除。
+
 ## 清理步骤
 
 1. 停止本次启动的 Vite / 临时 Bifrost 进程。
@@ -119,6 +137,13 @@
 3. 不删除或修改用户原始 JSONL 会话。
 
 ## 本次执行记录
+
+- 通过。2026-07-21 执行 TC-ACH-01、TC-ACH-08：`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_agent_history_pagination_api.sh` 通过；隔离服务启动后旧日期分片已删除，会话扫描只保留 1 个规范 SHA-256 JSONL，7 个规范事件完整返回，`attachments/.../input.jsonl` 附件仍存在且未进入 history API。
+- 通过。2026-07-21 执行 TC-ACH-08 单元边界：`cargo test -p bifrost-agent persistence::tests:: -- --nocapture` 为 43/43 通过；覆盖跨轮复用、规范路径错 key 重建、旧分片丢弃、空行、空 key、损坏/混 key 清理、`.jsonl` 附件保护及哈希碰撞隔离。
+- 通过。2026-07-21 执行 TC-ACH-08 macOS 路径别名边界：`cargo test -p bifrost-admin restore_accepts_the_canonical_history_path -- --nocapture` 为 1/1 通过；规范文件经 `/var` 到 `/private/var` 的真实路径归一化后仍可恢复，且两条历史消息完整保留。
+- 通过。2026-07-21 执行 TC-ACH-02 至 TC-ACH-06：聚焦 Playwright 的完整历史用例和重复并发 SSE 用例均通过；两份相同 `since=3` 响应乱序返回后，`Previous question`、`Previous answer` 与最新过程仍同时可见。
+- 通过。2026-07-21 执行 TC-ACH-03 与 TC-ACH-04 单元边界：Web Vitest 38 文件、184 用例全通过，包含重复窗口忽略、部分重叠只追加未见后缀、真实断层识别。
+- 通过。2026-07-21 执行 TC-ACH-07：`cargo test -p bifrost-admin external_runner_progress_events_are_recorded_as_visible_timeline_steps -- --nocapture` 通过。
 
 - 通过。2026-07-15 执行 TC-ACH-01：用户指定的运行中 JSONL 当时为 12,155 条 / 6,456,544 bytes；无参数 API 在 0.045s 内返回全部 12,155 条，`start_index=0`、`end_index=12155`、`has_more=false`、`next_cursor=null`。
 - 通过。2026-07-15 执行 TC-ACH-02 至 TC-ACH-04：`pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "loads full history without restoring obsolete pagination controls"` 为 1/1 通过；所有 history 请求均无 `tail` / `cursor` / `limit`，fixture 即使返回 `has_more=true` 也无 `Load older`，展开完成回合后可见合并句且 usage 文本不可见。

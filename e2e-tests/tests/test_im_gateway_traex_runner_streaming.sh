@@ -178,7 +178,7 @@ PY
 RUN_ID="$(tail -n 1 "$STREAM_LOG" | python3 -c 'import json,sys; print(json.load(sys.stdin)["runId"])')"
 
 python3 - "$BIFROST_PORT" "$RUN_ID" "$TEST_DIR" <<'PY'
-import glob
+import hashlib
 import json
 import os
 import sys
@@ -211,11 +211,11 @@ for key in ("usageInputTokens", "usageOutputTokens", "usageTotalTokens"):
     value = metadata.get(key)
     assert value and int(value) > 0, metadata
 
-session_paths = glob.glob(
-    os.path.join(test_dir, "agent", "sessions", "**", "session-traex-e2e-streaming-*.jsonl"),
-    recursive=True,
-)
-assert session_paths, "session timeline should be persisted"
+digest = hashlib.sha256(b"traex-e2e-streaming").hexdigest()
+session_paths = [
+    os.path.join(test_dir, "agent", "sessions", "by-key", f"session-{digest}.jsonl")
+]
+assert os.path.isfile(session_paths[0]), "canonical session timeline should be persisted"
 timeline = "\n".join(open(path, encoding="utf-8").read() for path in session_paths)
 assert '"adapter":"traex"' in timeline or '"adapter": "traex"' in timeline, timeline
 assert '"runner_id":"traex"' in timeline or '"runner_id": "traex"' in timeline, timeline

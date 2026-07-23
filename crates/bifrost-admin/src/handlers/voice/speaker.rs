@@ -72,10 +72,11 @@ impl RealtimeVoiceSpeakerTracker {
         let registered = best_registered_voiceprint_match(&embedding.embedding);
         let registered_count = voiceprint_registered_profile_count();
         let matched_registered = registered.as_ref().filter(|candidate| {
-            candidate.confidence >= voiceprint_match_threshold()
-                || (registered_count == 1
-                    && embedding.speech_duration_ms >= REALTIME_MIN_SELF_PRIORITY_SPEECH_MS
-                    && candidate.confidence >= voiceprint_self_priority_threshold())
+            candidate.unambiguous
+                && (candidate.confidence >= voiceprint_match_threshold()
+                    || (registered_count == 1
+                        && embedding.speech_duration_ms >= REALTIME_MIN_SELF_PRIORITY_SPEECH_MS
+                        && candidate.confidence >= voiceprint_self_priority_threshold()))
         });
 
         let cluster_index = if let Some(candidate) = matched_registered {
@@ -251,6 +252,7 @@ fn normalize_embedding(embedding: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::BifrostDataDirGuard;
 
     #[test]
     fn best_cluster_requires_similarity_threshold() {
@@ -268,5 +270,68 @@ mod tests {
         });
         assert_eq!(tracker.find_best_cluster(&[0.98, 0.1]), Some(0));
         assert_eq!(tracker.find_best_cluster(&[0.0, 1.0]), None);
+    }
+
+    #[test]
+    fn registered_profile_self_priority_is_considered_for_realtime_assignment() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = BifrostDataDirGuard::set(temp.path());
+        let pcm16le = (0..16_000 * 2)
+            .flat_map(|index| {
+                let sample = if index % 2 == 0 { 8_000i16 } else { -8_000i16 };
+                sample.to_le_bytes()
+            })
+            .collect::<Vec<_>>();
+        let utterance_embedding = compute_voiceprint_embedding_from_pcm16le(&pcm16le, 16_000)
+            .unwrap()
+            .unwrap()
+            .embedding;
+        let mut orthogonal = vec![0.0; utterance_embedding.len()];
+        orthogonal[0] = -utterance_embedding[1];
+        orthogonal[1] = utterance_embedding[0];
+        normalize_embedding(&mut orthogonal);
+        let confidence = 0.55_f32;
+        let orthogonal_weight = (1.0 - confidence * confidence).sqrt();
+        let embedding = utterance_embedding
+            .iter()
+            .zip(&orthogonal)
+            .map(|(voice, other)| confidence * voice + orthogonal_weight * other)
+            .collect::<Vec<_>>();
+        let profile_dir = temp
+            .path()
+            .join("asr")
+            .join("diarization")
+            .join("speaker-profiles");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        std::fs::write(
+            profile_dir.join("spk-realtime.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "id": "spk-realtime",
+                "display_name": "Eden",
+                "source": "test",
+                "diarization_profile": "sherpa-onnx-balanced",
+                "embedding_model": "test",
+                "embedding_dim": embedding.len(),
+                "embedding": embedding,
+                "sample_rate": 16000,
+                "total_duration_ms": 2000,
+                "samples": [],
+                "created_at_ms": 1,
+                "updated_at_ms": 1
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut tracker = RealtimeVoiceSpeakerTracker::default();
+
+        let assignment = tracker
+            .classify_utterance(&pcm16le, 16_000, "voice-test")
+            .unwrap();
+
+        assert_eq!(assignment.display_name, "Eden");
+        assert_eq!(
+            assignment.mapped_profile_id.as_deref(),
+            Some("spk-realtime")
+        );
     }
 }

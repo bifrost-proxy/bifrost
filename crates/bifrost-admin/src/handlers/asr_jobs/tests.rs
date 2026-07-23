@@ -320,6 +320,27 @@ mod tests {
         assert_eq!(ready.installed_model_bytes, model_spec.bytes);
         assert_eq!(ready.model, MOSS_MODEL_ID);
 
+        let verification_path = moss_verification_path(&asr_home);
+        let mut marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&verification_path).unwrap()).unwrap();
+        assert_eq!(marker["runtime_version"], moss_runtime_version());
+        marker["runtime_version"] = serde_json::Value::String("0.9.0".to_string());
+        std::fs::write(
+            &verification_path,
+            serde_json::to_vec_pretty(&marker).unwrap(),
+        )
+        .unwrap();
+        let stale_runtime = moss_management_status_with_spec(
+            &asr_home,
+            "macos",
+            "aarch64",
+            &model_spec,
+        )
+        .await;
+        assert!(!stale_runtime.runtime_ready);
+        assert!(!stale_runtime.model_ready);
+        write_moss_verification_marker(&asr_home, &paths, &model_spec).unwrap();
+
         std::fs::remove_file(&runtime_framework).unwrap();
         let missing_runtime_framework = moss_management_status_with_spec(
             &asr_home,
@@ -574,6 +595,119 @@ mod tests {
         format!("http://{address}/resource")
     }
 
+    fn spawn_flaky_resumable_moss_http_server(
+        body: Vec<u8>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        use std::net::{Shutdown, TcpListener};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        std::thread::spawn(move || {
+            let split = body.len() / 2;
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let read = stream.read(&mut request).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..read]).into_owned();
+                recorded.lock().unwrap().push(request);
+                if attempt == 0 {
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream.write_all(header.as_bytes()).unwrap();
+                    stream.write_all(&body[..split]).unwrap();
+                    let _ = stream.shutdown(Shutdown::Both);
+                } else {
+                    let header = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        body.len() - split,
+                        split,
+                        body.len() - 1,
+                        body.len()
+                    );
+                    stream.write_all(header.as_bytes()).unwrap();
+                    stream.write_all(&body[split..]).unwrap();
+                }
+            }
+        });
+        (format!("http://{address}/resource"), requests)
+    }
+
+    fn spawn_failing_moss_http_server(
+        attempts: usize,
+    ) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = std::sync::Arc::new(AtomicUsize::new(0));
+        let recorded = requests.clone();
+        std::thread::spawn(move || {
+            for _ in 0..attempts {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request);
+                recorded.fetch_add(1, Ordering::SeqCst);
+                stream
+                    .write_all(
+                        b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .unwrap();
+            }
+        });
+        (format!("http://{address}/resource"), requests)
+    }
+
+    #[tokio::test]
+    async fn moss_resource_download_retries_and_resumes_transient_body_failure() {
+        let temp = TempDir::new().unwrap();
+        let body = vec![0x5a; 1024 * 1024];
+        let split = body.len() / 2;
+        let (url, requests) = spawn_flaky_resumable_moss_http_server(body.clone());
+        let destination = temp.path().join("model.safetensors");
+
+        download_moss_resource(url, destination.clone(), "MOSS test model", None)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(destination).unwrap(), body);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(!requests[0].to_ascii_lowercase().contains("range:"));
+        assert!(requests[1]
+            .to_ascii_lowercase()
+            .contains(&format!("range: bytes={split}-")));
+    }
+
+    #[tokio::test]
+    async fn moss_resource_download_stops_after_bounded_failures() {
+        use std::sync::atomic::Ordering;
+
+        let temp = TempDir::new().unwrap();
+        let (url, requests) =
+            spawn_failing_moss_http_server(MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS);
+        let error = download_moss_resource(
+            url,
+            temp.path().join("unavailable.bin"),
+            "unavailable MOSS test resource",
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("failed after 3 attempts"));
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS
+        );
+    }
+
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn moss_runtime_configuration_and_checksum_sources_cover_supported_paths() {
@@ -595,7 +729,12 @@ mod tests {
         );
         assert!(moss_runtime_asset_name_for("linux", "x86_64").is_err());
         let asset = moss_runtime_asset_name_for("macos", "aarch64").unwrap();
-        assert!(asset.contains(env!("CARGO_PKG_VERSION")));
+        assert_eq!(moss_runtime_version(), "1.0.0");
+        assert_eq!(moss_runtime_release_tag(), "moss-runtime-v1.0.0");
+        assert_eq!(
+            asset,
+            "moss-joint-runtime-v1.0.0-aarch64-apple-darwin.zip"
+        );
         assert_eq!(
             moss_runtime_asset_name().is_ok(),
             cfg!(all(target_os = "macos", target_arch = "aarch64"))
@@ -605,10 +744,7 @@ mod tests {
         assert!(validate_moss_transcription_mode(AsrTranscriptionMode::Standard).is_ok());
         assert!(!AsrTranscriptionMode::Standard.uses_native_speakers());
         assert!(AsrTranscriptionMode::MossJoint.uses_native_speakers());
-        assert!(moss_runtime_checksums_url().ends_with(&format!(
-            "bifrost-v{}-checksums.txt",
-            env!("CARGO_PKG_VERSION")
-        )));
+        assert!(moss_runtime_checksum_url(&asset).ends_with(&format!("{asset}.sha256")));
 
         let custom_url = std::ffi::OsStr::new("file:///tmp/moss-runtime.zip");
         let _url_guard = EnvVarGuard::set("BIFROST_MOSS_RUNTIME_URL", custom_url);
@@ -632,7 +768,20 @@ mod tests {
             .contains("required"));
         drop(_url_guard);
         let default_url = moss_runtime_url(&asset);
-        assert!(default_url.contains("github.com/bifrost-proxy/bifrost/releases"));
+        assert!(default_url.contains(
+            "github.com/bifrost-proxy/bifrost/releases/download/moss-runtime-v1.0.0"
+        ));
+        let checksum = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let manifest_url = spawn_moss_http_server(format!("{checksum}  {asset}\n").into_bytes());
+        let _checksum_url_guard = EnvVarGuard::set(
+            "BIFROST_MOSS_RUNTIME_CHECKSUM_URL",
+            std::ffi::OsStr::new(&manifest_url),
+        );
+        assert_eq!(
+            expected_moss_runtime_checksum(&asset).await.unwrap(),
+            checksum
+        );
+        drop(_checksum_url_guard);
 
         let custom_model = std::ffi::OsStr::new("file:///tmp/model.safetensors");
         let _model_guard = EnvVarGuard::set("BIFROST_MOSS_MODEL_URL", custom_model);
@@ -968,6 +1117,107 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
+    async fn moss_quarantine_cleanup_removes_only_managed_timestamped_entries() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::fs::PermissionsExt;
+
+        assert!(!moss_quarantine_timestamp_is_valid(""));
+        assert!(!moss_root_quarantine_name_is_managed(
+            "moss-joint-runtime-v1.0.0+local-aarch64-apple-darwin.zip.invalid-1"
+        ));
+
+        let temp = TempDir::new().unwrap();
+        let asr_home = temp.path().join("asr-home");
+        let root = moss_runtime_dir(&asr_home);
+        let model_dir = root.join("model");
+        std::fs::create_dir_all(&model_dir).unwrap();
+
+        let obsolete_runtime = root.join("runtime.invalid-100");
+        std::fs::create_dir_all(&obsolete_runtime).unwrap();
+        std::fs::write(obsolete_runtime.join("old-runtime"), b"old").unwrap();
+        let obsolete_archive =
+            root.join("moss-joint-runtime-v0.9.0-aarch64-apple-darwin.zip.invalid-101");
+        std::fs::write(&obsolete_archive, b"bad archive").unwrap();
+        let obsolete_model = model_dir.join("model.safetensors.invalid-102");
+        std::fs::write(&obsolete_model, b"old model").unwrap();
+        let external = temp.path().join("outside-quarantine");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("keep"), b"keep").unwrap();
+        let quarantined_symlink = root.join("runtime.invalid-103");
+        symlink(&external, &quarantined_symlink).unwrap();
+
+        let unmanaged = [
+            root.join("runtime.invalid-latest"),
+            root.join("moss-joint-runtime-custom.zip.invalid-104"),
+            root.join("unrelated.invalid-105"),
+            model_dir.join("model.safetensors.invalid-latest"),
+        ];
+        for path in &unmanaged {
+            std::fs::write(path, b"keep").unwrap();
+        }
+        cleanup_moss_quarantined_resources(&asr_home).await;
+
+        assert!(!obsolete_runtime.exists());
+        assert!(!obsolete_archive.exists());
+        assert!(!obsolete_model.exists());
+        assert!(!quarantined_symlink.exists());
+        assert!(external.join("keep").is_file());
+        assert!(unmanaged.iter().all(|path| path.is_file()));
+
+        let linked_home = temp.path().join("linked-home");
+        let linked_root = moss_runtime_dir(&linked_home);
+        std::fs::create_dir_all(&linked_root).unwrap();
+        let external_model = temp.path().join("external-model");
+        std::fs::create_dir_all(&external_model).unwrap();
+        let external_quarantine = external_model.join("model.safetensors.invalid-200");
+        std::fs::write(&external_quarantine, b"outside").unwrap();
+        symlink(&external_model, linked_root.join("model")).unwrap();
+        let linked_cleanup = cleanup_moss_quarantined_resources_sync(&linked_home);
+        assert_eq!(linked_cleanup.removed, 0);
+        assert_eq!(linked_cleanup.errors.len(), 1);
+        assert!(linked_cleanup.errors[0].contains("refuse to scan non-directory"));
+        assert!(external_quarantine.is_file());
+        cleanup_moss_quarantined_resources(&linked_home).await;
+        assert!(external_quarantine.is_file());
+
+        let readonly_home = temp.path().join("readonly-home");
+        let readonly_root = moss_runtime_dir(&readonly_home);
+        std::fs::create_dir_all(&readonly_root).unwrap();
+        let retry_quarantine = readonly_root.join("runtime.invalid-300");
+        std::fs::write(&retry_quarantine, b"retry").unwrap();
+        std::fs::set_permissions(&readonly_root, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let failed_cleanup = cleanup_moss_quarantined_resources_sync(&readonly_home);
+        std::fs::set_permissions(&readonly_root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(failed_cleanup.removed, 0);
+        assert_eq!(failed_cleanup.errors.len(), 1);
+        assert!(failed_cleanup.errors[0].contains("remove obsolete MOSS quarantine"));
+        assert!(retry_quarantine.is_file());
+        let retried_cleanup = cleanup_moss_quarantined_resources_sync(&readonly_home);
+        assert_eq!(retried_cleanup.removed, 1);
+        assert!(retried_cleanup.errors.is_empty());
+        assert!(!retry_quarantine.exists());
+
+        let unreadable_home = temp.path().join("unreadable-home");
+        let unreadable_root = moss_runtime_dir(&unreadable_home);
+        std::fs::create_dir_all(&unreadable_root).unwrap();
+        std::fs::set_permissions(&unreadable_root, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable_cleanup = cleanup_moss_quarantined_resources_sync(&unreadable_home);
+        std::fs::set_permissions(&unreadable_root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(unreadable_cleanup.removed, 0);
+        assert!(unreadable_cleanup
+            .errors
+            .iter()
+            .any(|error| error.contains("read MOSS quarantine directory")));
+
+        let missing_cleanup =
+            cleanup_moss_quarantined_resources_sync(&temp.path().join("missing-home"));
+        assert_eq!(missing_cleanup.removed, 0);
+        assert!(missing_cleanup.errors.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn moss_initializer_installs_quarantines_and_reuses_verified_resources() {
         let _lock = test_data_dir_lock();
         let temp = TempDir::new().unwrap();
@@ -1005,7 +1255,11 @@ mod tests {
         assert_eq!(installed_paths.python, paths.python);
         let status = moss_runtime_status(&asr_home, &paths, &model_spec).await;
         assert!(status.all_valid());
-        assert!(std::fs::read_dir(moss_runtime_dir(&asr_home))
+        assert!(!std::fs::read_dir(moss_runtime_dir(&asr_home))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".invalid-")));
+        assert!(!std::fs::read_dir(&paths.model_dir)
             .unwrap()
             .filter_map(Result::ok)
             .any(|entry| entry.file_name().to_string_lossy().contains(".invalid-")));
@@ -2182,15 +2436,12 @@ mod tests {
     }
 
     #[test]
-    fn diarization_cluster_count_prefers_known_then_max_then_default_cap() {
+    fn diarization_cluster_count_is_fixed_only_when_known() {
         let mut config = AsrDiarizationConfig::default();
-        assert_eq!(
-            resolved_diarization_cluster_count(&config),
-            i32::from(DEFAULT_AUTO_MAX_SPEAKERS)
-        );
+        assert_eq!(resolved_diarization_cluster_count(&config), -1);
 
         config.max_speakers = Some(3);
-        assert_eq!(resolved_diarization_cluster_count(&config), 3);
+        assert_eq!(resolved_diarization_cluster_count(&config), -1);
 
         config.known_speaker_count = Some(2);
         assert_eq!(resolved_diarization_cluster_count(&config), 2);
@@ -2325,7 +2576,6 @@ mod tests {
         assert!(diarization_manifest_path(&task.id, &source_path, &audio_dir).is_file());
     }
 
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn live_voiceprint_enrollment_writes_named_profile() {
         let _lock = test_data_dir_lock();
@@ -2371,6 +2621,7 @@ mod tests {
         let _guard = EnvGuard::set_data_dir(temp.path());
         std::fs::create_dir_all(voiceprint_dir()).unwrap();
         let profile = SpeakerVoiceprintProfile {
+            schema_version: 1,
             id: "spk-eden".to_string(),
             display_name: "Eden".to_string(),
             source: "live_enrollment".to_string(),
@@ -2381,6 +2632,8 @@ mod tests {
             sample_rate: VOICEPRINT_SAMPLE_RATE,
             total_duration_ms: 3_000,
             samples: Vec::new(),
+            templates: Vec::new(),
+            prototypes: Vec::new(),
             created_at_ms: now_ms(),
             updated_at_ms: now_ms(),
         };
@@ -2424,6 +2677,7 @@ mod tests {
         let _guard = EnvGuard::set_data_dir(temp.path());
         std::fs::create_dir_all(voiceprint_dir()).unwrap();
         let profile = SpeakerVoiceprintProfile {
+            schema_version: 1,
             id: "spk-eden".to_string(),
             display_name: "Eden".to_string(),
             source: "live_enrollment".to_string(),
@@ -2434,6 +2688,8 @@ mod tests {
             sample_rate: VOICEPRINT_SAMPLE_RATE,
             total_duration_ms: 3_000,
             samples: Vec::new(),
+            templates: Vec::new(),
+            prototypes: Vec::new(),
             created_at_ms: now_ms(),
             updated_at_ms: now_ms(),
         };
@@ -2475,6 +2731,7 @@ mod tests {
         let _guard = EnvGuard::set_data_dir(temp.path());
         std::fs::create_dir_all(voiceprint_dir()).unwrap();
         let profile = SpeakerVoiceprintProfile {
+            schema_version: 1,
             id: "spk-eden".to_string(),
             display_name: "Eden".to_string(),
             source: "live_enrollment".to_string(),
@@ -2485,6 +2742,8 @@ mod tests {
             sample_rate: VOICEPRINT_SAMPLE_RATE,
             total_duration_ms: 3_000,
             samples: Vec::new(),
+            templates: Vec::new(),
+            prototypes: Vec::new(),
             created_at_ms: now_ms(),
             updated_at_ms: now_ms(),
         };
@@ -2607,6 +2866,7 @@ mod tests {
         let waveform = pcm16le_to_f32(&audio).unwrap();
         let embedding = compute_speaker_embedding(DEFAULT_DIARIZATION_PROFILE, &waveform).unwrap();
         let profile = SpeakerVoiceprintProfile {
+            schema_version: 1,
             id: "spk-eden".to_string(),
             display_name: "Eden".to_string(),
             source: "live_enrollment".to_string(),
@@ -2617,6 +2877,8 @@ mod tests {
             sample_rate: VOICEPRINT_SAMPLE_RATE,
             total_duration_ms: 2_000,
             samples: Vec::new(),
+            templates: Vec::new(),
+            prototypes: Vec::new(),
             created_at_ms: now_ms(),
             updated_at_ms: now_ms(),
         };
@@ -2684,6 +2946,7 @@ mod tests {
         let waveform = pcm16le_to_f32(&speech).unwrap();
         let embedding = compute_speaker_embedding(DEFAULT_DIARIZATION_PROFILE, &waveform).unwrap();
         let profile = SpeakerVoiceprintProfile {
+            schema_version: 1,
             id: "spk-eden".to_string(),
             display_name: "Eden".to_string(),
             source: "live_enrollment".to_string(),
@@ -2694,6 +2957,8 @@ mod tests {
             sample_rate: VOICEPRINT_SAMPLE_RATE,
             total_duration_ms: 2_000,
             samples: Vec::new(),
+            templates: Vec::new(),
+            prototypes: Vec::new(),
             created_at_ms: now_ms(),
             updated_at_ms: now_ms(),
         };
@@ -2730,6 +2995,7 @@ mod tests {
         let _guard = EnvGuard::set_data_dir(temp.path());
         std::fs::create_dir_all(voiceprint_dir()).unwrap();
         let profile = SpeakerVoiceprintProfile {
+            schema_version: 1,
             id: "spk-eden".to_string(),
             display_name: "Eden".to_string(),
             source: "live_enrollment".to_string(),
@@ -2745,6 +3011,8 @@ mod tests {
             sample_rate: VOICEPRINT_SAMPLE_RATE,
             total_duration_ms: 2_000,
             samples: Vec::new(),
+            templates: Vec::new(),
+            prototypes: Vec::new(),
             created_at_ms: now_ms(),
             updated_at_ms: now_ms(),
         };
@@ -2765,6 +3033,7 @@ mod tests {
         let _guard = EnvGuard::set_data_dir(temp.path());
         std::fs::create_dir_all(voiceprint_dir()).unwrap();
         let profile = SpeakerVoiceprintProfile {
+            schema_version: 1,
             id: "spk-eden".to_string(),
             display_name: "Eden".to_string(),
             source: "live_enrollment".to_string(),
@@ -2780,6 +3049,8 @@ mod tests {
             sample_rate: VOICEPRINT_SAMPLE_RATE,
             total_duration_ms: 2_000,
             samples: Vec::new(),
+            templates: Vec::new(),
+            prototypes: Vec::new(),
             created_at_ms: now_ms(),
             updated_at_ms: now_ms(),
         };
@@ -3267,6 +3538,149 @@ mod tests {
         task.transcription_mode = AsrTranscriptionMode::Standard;
         let standard = discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
         assert_eq!(standard.pending, vec![source]);
+    }
+
+    #[test]
+    fn moss_default_profile_does_not_retry_unchanged_rescue_failure() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("rescue-failed.wav");
+        std::fs::write(&source, b"audio").unwrap();
+
+        let mut task = test_directory_task("moss-rescue-terminal", audio_dir);
+        task.transcription_mode = AsrTranscriptionMode::MossJoint;
+        let attempted = HashSet::new();
+        let mut files = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+
+        let record = files.files.get_mut(&source_key(&source)).unwrap();
+        record.status = FileStatus::Failed;
+        record.error = Some(format!(
+            "moss_non_retryable_v{}_rtf3.0_tps30: MOSS adaptive rescue failed",
+            env!("CARGO_PKG_VERSION")
+        ));
+
+        let default_scan =
+            discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+        assert!(default_scan.pending.is_empty());
+    }
+
+    #[test]
+    fn moss_rescue_profile_retries_default_dynamic_failure_but_not_fixed_input_failure() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let _rtf_guard =
+            EnvVarGuard::set("BIFROST_MOSS_MAX_RUNTIME_RTF", std::ffi::OsStr::new("1.0"));
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let dynamic_source = audio_dir.join("length-limited.wav");
+        let fixed_source = audio_dir.join("too-short.wav");
+        std::fs::write(&dynamic_source, b"dynamic").unwrap();
+        std::fs::write(&fixed_source, b"fixed").unwrap();
+
+        let mut task = test_directory_task("moss-rescue-escalation", audio_dir);
+        task.transcription_mode = AsrTranscriptionMode::MossJoint;
+        let attempted = HashSet::new();
+        let mut files = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+
+        let dynamic_record = files.files.get_mut(&source_key(&dynamic_source)).unwrap();
+        dynamic_record.status = FileStatus::Failed;
+        dynamic_record.error = Some(format!(
+            "{} MOSS generation reached the max-new token limit before completion",
+            moss_base_non_retryable_marker_prefix()
+        ));
+        let fixed_record = files.files.get_mut(&source_key(&fixed_source)).unwrap();
+        fixed_record.status = FileStatus::Failed;
+        fixed_record.error = Some(format!(
+            "{} moss_audio_too_short: audio_ms=5000",
+            moss_base_non_retryable_marker_prefix()
+        ));
+
+        let rescue_scan =
+            discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+        assert_eq!(rescue_scan.pending, vec![dynamic_source]);
+        assert_eq!(
+            files.files.get(&source_key(&fixed_source)).unwrap().status,
+            FileStatus::Failed
+        );
+    }
+
+    #[test]
+    fn moss_runtime_rtf_override_only_accepts_bounded_rescue_values() {
+        assert_eq!(moss_max_runtime_rtf(None), MOSS_MAX_RUNTIME_RTF);
+        assert_eq!(moss_max_runtime_rtf(Some("")), MOSS_MAX_RUNTIME_RTF);
+        assert_eq!(moss_max_runtime_rtf(Some("0.75")), MOSS_MAX_RUNTIME_RTF);
+        assert_eq!(moss_max_runtime_rtf(Some("1.0")), 1.0);
+        assert_eq!(moss_max_runtime_rtf(Some("2.0")), 2.0);
+        assert_eq!(moss_max_runtime_rtf(Some("3.0")), 3.0);
+        assert_eq!(moss_max_runtime_rtf(Some("1.5")), MOSS_MAX_RUNTIME_RTF);
+        assert_eq!(moss_max_runtime_rtf(Some("4.0")), MOSS_MAX_RUNTIME_RTF);
+        assert_eq!(moss_max_runtime_rtf(Some("invalid")), MOSS_MAX_RUNTIME_RTF);
+    }
+
+    #[test]
+    fn moss_output_tps_override_and_failure_marker_are_bounded_and_profiled() {
+        assert_eq!(
+            moss_output_tokens_per_second(None),
+            MOSS_OUTPUT_TOKENS_PER_SECOND
+        );
+        assert_eq!(
+            moss_output_tokens_per_second(Some("20")),
+            MOSS_OUTPUT_TOKENS_PER_SECOND
+        );
+        assert_eq!(
+            moss_output_tokens_per_second(Some("30")),
+            MOSS_RESCUE_OUTPUT_TOKENS_PER_SECOND
+        );
+        assert_eq!(
+            moss_output_tokens_per_second(Some("40")),
+            MOSS_OUTPUT_TOKENS_PER_SECOND
+        );
+        assert_eq!(
+            moss_non_retryable_marker_prefix_for(0.5, 20, None, false),
+            format!("moss_non_retryable_v{}:", env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(
+            moss_non_retryable_marker_prefix_for(3.0, 30, None, false),
+            format!(
+                "moss_non_retryable_v{}_rtf3.0_tps30:",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        assert_eq!(moss_segment_seconds(None), None);
+        assert_eq!(moss_segment_seconds(Some("60")), Some(60));
+        assert_eq!(moss_segment_seconds(Some("300")), Some(300));
+        assert_eq!(moss_segment_seconds(Some("600")), Some(600));
+        assert_eq!(moss_segment_seconds(Some("900")), None);
+        assert_eq!(moss_segment_seconds(Some("invalid")), None);
+        assert_eq!(
+            moss_non_retryable_marker_prefix_for(3.0, 30, Some(300), false),
+            format!(
+                "moss_non_retryable_v{}_rtf3.0_tps30_seg300adaptive60to30to10:",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        assert!(!moss_allow_gap_markers(None));
+        assert!(!moss_allow_gap_markers(Some("true")));
+        assert!(moss_allow_gap_markers(Some("1")));
+        assert_eq!(
+            moss_non_retryable_marker_prefix_for(3.0, 30, Some(300), true),
+            format!(
+                "moss_non_retryable_v{}_rtf3.0_tps30_seg300adaptive60to30to10_gaps60:",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
     }
 
     #[test]
@@ -6079,5 +6493,784 @@ mod tests {
         assert_eq!(pending_record.status, FileStatus::Pending);
         assert!(pending_record.content_hash.is_none());
         assert!(pending_record.content_hash_algorithm.is_none());
+    }
+
+    fn assisted_test_timeline(segments: Vec<TimelineSegment>) -> TranscriptTimeline {
+        TranscriptTimeline {
+            task_id: "task-assisted".to_string(),
+            task_name: "Assisted".to_string(),
+            source_path: PathBuf::from("meeting.wav"),
+            source_size: None,
+            source_modified_ms: None,
+            source_created_at_ms: None,
+            source_created_at_source: None,
+            media_duration_ms: Some(60_000),
+            model: "test".to_string(),
+            language: "chinese".to_string(),
+            diarization_profile: Some(DEFAULT_DIARIZATION_PROFILE.to_string()),
+            speakers: Vec::new(),
+            processed_at_ms: 1,
+            segments,
+        }
+    }
+
+    fn assisted_test_segment(
+        index: usize,
+        speaker: Option<&str>,
+        start_ms: u64,
+        end_ms: u64,
+        overlap: bool,
+    ) -> TimelineSegment {
+        TimelineSegment {
+            index,
+            audio_start_ms: start_ms,
+            audio_end_ms: end_ms,
+            absolute_start_ms: None,
+            absolute_end_ms: None,
+            speaker: speaker.map(str::to_string),
+            speaker_display_name: None,
+            overlap,
+            text: format!("segment {index}"),
+        }
+    }
+
+    fn assisted_test_candidate(index: usize) -> AssistedVoiceprintCandidate {
+        AssistedVoiceprintCandidate {
+            id: format!("candidate-{index}"),
+            speaker: "speaker_00".to_string(),
+            start_ms: index as u64 * 4_000,
+            end_ms: index as u64 * 4_000 + 4_000,
+            duration_ms: 4_000,
+            text: format!("candidate {index}"),
+            quality: 1.0,
+            overlap: false,
+            label: AssistedCandidateLabel::Mine,
+        }
+    }
+
+    fn assisted_test_pcm() -> Vec<u8> {
+        (0..VOICEPRINT_SAMPLE_RATE * 4)
+            .flat_map(|index| {
+                let sample = if index % 2 == 0 { 8_000i16 } else { -8_000i16 };
+                sample.to_le_bytes()
+            })
+            .collect()
+    }
+
+    fn assisted_test_session(id: &str) -> AssistedVoiceprintSession {
+        AssistedVoiceprintSession {
+            id: id.to_string(),
+            state: AssistedVoiceprintSessionState::Open,
+            speaker_name: "Eden".to_string(),
+            profile_id: None,
+            task_id: "task-assisted".to_string(),
+            file_key: "file-a".to_string(),
+            source_path: PathBuf::from("meeting.wav"),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            candidates: (0..3).map(assisted_test_candidate).collect(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        }
+    }
+
+    fn assisted_test_template(id: &str, embedding: Vec<f32>) -> SpeakerVoiceprintTemplate {
+        SpeakerVoiceprintTemplate {
+            id: id.to_string(),
+            source_kind: "test".to_string(),
+            prompt_id: None,
+            task_id: None,
+            file_key: None,
+            speaker: None,
+            start_ms: None,
+            end_ms: None,
+            duration_ms: 4_000,
+            quality: 1.0,
+            overlap: false,
+            embedding,
+            created_at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn assisted_candidates_exclude_overlap_short_and_anonymous_segments() {
+        let timeline = assisted_test_timeline(vec![
+            assisted_test_segment(0, Some("speaker_00"), 0, 2_999, false),
+            assisted_test_segment(1, Some("speaker_00"), 3_000, 9_000, true),
+            assisted_test_segment(2, None, 9_000, 15_000, false),
+            assisted_test_segment(3, Some("speaker_00"), 15_000, 30_000, false),
+        ]);
+
+        let candidates = assisted_voiceprint_candidates(&timeline);
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].start_ms, 15_000);
+        assert_eq!(candidates[0].end_ms, 27_000);
+        assert_eq!(candidates[1].start_ms, 27_000);
+        assert_eq!(candidates[1].end_ms, 30_000);
+        assert!(candidates.iter().all(|candidate| !candidate.overlap));
+    }
+
+    #[test]
+    fn assisted_candidates_cap_each_speaker_at_eight() {
+        let segments = (0..10)
+            .map(|index| {
+                assisted_test_segment(
+                    index,
+                    Some("speaker_00"),
+                    index as u64 * 4_000,
+                    index as u64 * 4_000 + 4_000,
+                    false,
+                )
+            })
+            .collect();
+
+        let candidates = assisted_voiceprint_candidates(&assisted_test_timeline(segments));
+
+        assert_eq!(candidates.len(), ASSISTED_CANDIDATES_PER_SPEAKER);
+    }
+
+    #[test]
+    fn assisted_candidates_drop_a_trailing_chunk_below_minimum_duration() {
+        let timeline = assisted_test_timeline(vec![assisted_test_segment(
+            0,
+            Some("speaker_00"),
+            0,
+            ASSISTED_CANDIDATE_MAX_MS + ASSISTED_CANDIDATE_MIN_MS - 1,
+            false,
+        )]);
+
+        let candidates = assisted_voiceprint_candidates(&timeline);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].duration_ms, ASSISTED_CANDIDATE_MAX_MS);
+    }
+
+    #[test]
+    fn assisted_session_legacy_json_defaults_to_open() {
+        let mut value = serde_json::to_value(assisted_test_session("assisted-legacy")).unwrap();
+        value.as_object_mut().unwrap().remove("state");
+
+        let session: AssistedVoiceprintSession = serde_json::from_value(value).unwrap();
+
+        assert_eq!(session.state, AssistedVoiceprintSessionState::Open);
+    }
+
+    #[test]
+    fn legacy_voiceprint_profile_reads_without_v2_fields() {
+        let raw = r#"{
+            "id":"spk-legacy","display_name":"Legacy","source":"live_enrollment",
+            "diarization_profile":"sherpa-onnx-balanced","embedding_model":"test",
+            "embedding_dim":2,"embedding":[1.0,0.0],"sample_rate":16000,
+            "total_duration_ms":3000,"samples":[],"created_at_ms":1,"updated_at_ms":1
+        }"#;
+
+        let profile: SpeakerVoiceprintProfile = serde_json::from_str(raw).unwrap();
+
+        assert_eq!(profile.schema_version, 1);
+        assert!(profile.templates.is_empty());
+        assert!(profile.prototypes.is_empty());
+        assert_eq!(profile.embedding, vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn voiceprint_prototypes_preserve_distinct_acoustic_domains() {
+        let templates = vec![
+            SpeakerVoiceprintTemplate {
+                id: "near-1".to_string(),
+                source_kind: "test".to_string(),
+                prompt_id: None,
+                task_id: None,
+                file_key: None,
+                speaker: None,
+                start_ms: None,
+                end_ms: None,
+                duration_ms: 4_000,
+                quality: 1.0,
+                overlap: false,
+                embedding: vec![1.0, 0.0],
+                created_at_ms: 1,
+            },
+            SpeakerVoiceprintTemplate {
+                id: "near-2".to_string(),
+                source_kind: "test".to_string(),
+                prompt_id: None,
+                task_id: None,
+                file_key: None,
+                speaker: None,
+                start_ms: None,
+                end_ms: None,
+                duration_ms: 4_000,
+                quality: 1.0,
+                overlap: false,
+                embedding: vec![0.99, 0.01],
+                created_at_ms: 1,
+            },
+            SpeakerVoiceprintTemplate {
+                id: "far".to_string(),
+                source_kind: "test".to_string(),
+                prompt_id: None,
+                task_id: None,
+                file_key: None,
+                speaker: None,
+                start_ms: None,
+                end_ms: None,
+                duration_ms: 4_000,
+                quality: 1.0,
+                overlap: false,
+                embedding: vec![0.0, 1.0],
+                created_at_ms: 1,
+            },
+        ];
+
+        let prototypes = build_voiceprint_prototypes(&templates).unwrap();
+
+        assert_eq!(prototypes.len(), 2);
+        assert_eq!(prototypes[0].template_ids, vec!["near-1", "near-2"]);
+        assert_eq!(prototypes[1].template_ids, vec!["far"]);
+    }
+
+    #[test]
+    fn assisted_finish_appends_templates_and_sample_delete_rebuilds_profile() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let pcm = assisted_test_pcm();
+        let first_session = AssistedVoiceprintSession {
+            id: "assisted-first".to_string(),
+            state: AssistedVoiceprintSessionState::Open,
+            speaker_name: "Eden".to_string(),
+            profile_id: None,
+            task_id: "task-assisted".to_string(),
+            file_key: "file-a".to_string(),
+            source_path: temp.path().join("meeting.wav"),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            candidates: (0..3).map(assisted_test_candidate).collect(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        std::fs::create_dir_all(assisted_voiceprint_session_dir(&first_session.id)).unwrap();
+        for candidate in &first_session.candidates {
+            std::fs::write(
+                assisted_voiceprint_candidate_audio_path(&first_session.id, &candidate.id),
+                &pcm,
+            )
+            .unwrap();
+        }
+
+        let first = finish_assisted_voiceprint_enrollment_in_process(&first_session).unwrap();
+
+        assert_eq!(first.profile.schema_version, VOICEPRINT_PROFILE_SCHEMA_VERSION);
+        assert_eq!(first.profile.templates.len(), 3);
+        assert!(!first.profile.prototypes.is_empty());
+        assert!(!assisted_voiceprint_session_dir(&first_session.id).exists());
+
+        let second_session = AssistedVoiceprintSession {
+            id: "assisted-second".to_string(),
+            profile_id: Some(first.profile.id.clone()),
+            file_key: "file-b".to_string(),
+            ..first_session
+        };
+        std::fs::create_dir_all(assisted_voiceprint_session_dir(&second_session.id)).unwrap();
+        for candidate in &second_session.candidates {
+            std::fs::write(
+                assisted_voiceprint_candidate_audio_path(&second_session.id, &candidate.id),
+                &pcm,
+            )
+            .unwrap();
+        }
+
+        let second = finish_assisted_voiceprint_enrollment_in_process(&second_session).unwrap();
+        assert_eq!(second.profile.templates.len(), 6);
+        let deleted_id = second.profile.templates[0].id.clone();
+        let response = delete_speaker_profile_sample_response(&second.profile.id, &deleted_id);
+        assert_eq!(response.status(), StatusCode::OK);
+        let rebuilt = read_speaker_voiceprint_profile(&second.profile.id).unwrap();
+        assert_eq!(rebuilt.templates.len(), 5);
+        assert_eq!(rebuilt.total_duration_ms, 20_000);
+    }
+
+    #[test]
+    fn deleting_live_template_removes_its_legacy_prompt_metadata() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        std::fs::create_dir_all(voiceprint_dir()).unwrap();
+        let template = |id: &str, prompt_id: &str, embedding: Vec<f32>| {
+            SpeakerVoiceprintTemplate {
+                id: id.to_string(),
+                source_kind: "live_prompt".to_string(),
+                prompt_id: Some(prompt_id.to_string()),
+                task_id: None,
+                file_key: None,
+                speaker: None,
+                start_ms: None,
+                end_ms: None,
+                duration_ms: 4_000,
+                quality: 1.0,
+                overlap: false,
+                embedding,
+                created_at_ms: 1,
+            }
+        };
+        let mut profile = SpeakerVoiceprintProfile {
+            schema_version: VOICEPRINT_PROFILE_SCHEMA_VERSION,
+            id: "spk-live-delete".to_string(),
+            display_name: "Eden".to_string(),
+            source: "live_enrollment".to_string(),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            embedding_model: "test".to_string(),
+            embedding_dim: 2,
+            embedding: vec![1.0, 0.0],
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            total_duration_ms: 8_000,
+            samples: vec![
+                SpeakerVoiceprintSample {
+                    prompt_id: "prompt-1".to_string(),
+                    text: "one".to_string(),
+                    duration_ms: 4_000,
+                    rms: 0.5,
+                    clipped_ratio: 0.0,
+                },
+                SpeakerVoiceprintSample {
+                    prompt_id: "prompt-2".to_string(),
+                    text: "two".to_string(),
+                    duration_ms: 4_000,
+                    rms: 0.5,
+                    clipped_ratio: 0.0,
+                },
+            ],
+            templates: vec![
+                template("sample-1", "prompt-1", vec![1.0, 0.0]),
+                template("sample-2", "prompt-2", vec![0.9, 0.1]),
+            ],
+            prototypes: Vec::new(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        rebuild_voiceprint_profile(&mut profile).unwrap();
+        atomic_json_write(&speaker_profile_path(&profile.id), &profile).unwrap();
+
+        let response = delete_speaker_profile_sample_response(&profile.id, "sample-1");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let rebuilt = read_speaker_voiceprint_profile(&profile.id).unwrap();
+        assert_eq!(rebuilt.templates.len(), 1);
+        assert_eq!(rebuilt.samples.len(), 1);
+        assert_eq!(rebuilt.samples[0].prompt_id, "prompt-2");
+        assert_eq!(rebuilt.total_duration_ms, 4_000);
+    }
+
+    #[test]
+    fn legacy_profile_append_migrates_centroid_and_validates_compatibility() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        std::fs::create_dir_all(voiceprint_dir()).unwrap();
+        let legacy = SpeakerVoiceprintProfile {
+            schema_version: 1,
+            id: "spk-legacy-append".to_string(),
+            display_name: "Eden".to_string(),
+            source: "live_enrollment".to_string(),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            embedding_model: "test".to_string(),
+            embedding_dim: 2,
+            embedding: vec![1.0, 0.0],
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            total_duration_ms: 4_000,
+            samples: Vec::new(),
+            templates: Vec::new(),
+            prototypes: Vec::new(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        atomic_json_write(&speaker_profile_path(&legacy.id), &legacy).unwrap();
+        let session = AssistedVoiceprintSession {
+            profile_id: Some(legacy.id.clone()),
+            ..assisted_test_session("assisted-legacy-append")
+        };
+
+        let response = persist_assisted_voiceprint_templates(
+            &session,
+            vec![assisted_test_template("new", vec![0.9, 0.1])],
+        )
+        .unwrap();
+
+        assert_eq!(response.profile.schema_version, VOICEPRINT_PROFILE_SCHEMA_VERSION);
+        assert_eq!(response.profile.templates.len(), 2);
+        assert_eq!(response.profile.templates[0].id, "legacy-spk-legacy-append");
+
+        for (field, altered_session, template) in [
+            (
+                "speaker name",
+                AssistedVoiceprintSession {
+                    speaker_name: "Other".to_string(),
+                    ..session.clone()
+                },
+                assisted_test_template("name", vec![1.0, 0.0]),
+            ),
+            (
+                "diarization profile",
+                AssistedVoiceprintSession {
+                    diarization_profile: "other-profile".to_string(),
+                    ..session.clone()
+                },
+                assisted_test_template("profile", vec![1.0, 0.0]),
+            ),
+            (
+                "sample rate",
+                AssistedVoiceprintSession {
+                    sample_rate: 8_000,
+                    ..session.clone()
+                },
+                assisted_test_template("rate", vec![1.0, 0.0]),
+            ),
+            (
+                "embedding dimension",
+                session.clone(),
+                assisted_test_template("dimension", vec![1.0, 0.0, 0.0]),
+            ),
+        ] {
+            let error = persist_assisted_voiceprint_templates(&altered_session, vec![template])
+                .unwrap_err();
+            assert!(error.contains(field), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn assisted_template_quality_failures_are_rejected_before_embedding() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let mut session = assisted_test_session("assisted-quality");
+        std::fs::create_dir_all(assisted_voiceprint_session_dir(&session.id)).unwrap();
+
+        session.candidates[0].overlap = true;
+        assert!(compute_assisted_voiceprint_templates(&session)
+            .unwrap_err()
+            .contains("quality gate"));
+        session.candidates[0].overlap = false;
+
+        for candidate in &session.candidates {
+            std::fs::write(
+                assisted_voiceprint_candidate_audio_path(&session.id, &candidate.id),
+                assisted_test_pcm(),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            assisted_voiceprint_candidate_audio_path(&session.id, &session.candidates[0].id),
+            vec![0_u8; VOICEPRINT_SAMPLE_RATE as usize * 2],
+        )
+        .unwrap();
+        assert!(compute_assisted_voiceprint_templates(&session)
+            .unwrap_err()
+            .contains("too short"));
+
+        std::fs::write(
+            assisted_voiceprint_candidate_audio_path(&session.id, &session.candidates[0].id),
+            vec![0_u8; VOICEPRINT_SAMPLE_RATE as usize * 2 * 4],
+        )
+        .unwrap();
+        assert!(compute_assisted_voiceprint_templates(&session)
+            .unwrap_err()
+            .contains("insufficient speech energy"));
+    }
+
+    #[test]
+    fn voiceprint_rebuild_rejects_empty_templates_and_embeddings() {
+        let mut profile = SpeakerVoiceprintProfile {
+            schema_version: 1,
+            id: "spk-invalid".to_string(),
+            display_name: "Invalid".to_string(),
+            source: "test".to_string(),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            embedding_model: "test".to_string(),
+            embedding_dim: 0,
+            embedding: Vec::new(),
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            total_duration_ms: 0,
+            samples: Vec::new(),
+            templates: Vec::new(),
+            prototypes: Vec::new(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        assert!(rebuild_voiceprint_profile(&mut profile)
+            .unwrap_err()
+            .contains("at least one template"));
+        assert!(build_voiceprint_prototypes(&[assisted_test_template("empty", Vec::new())])
+            .unwrap_err()
+            .contains("empty embedding"));
+    }
+
+    #[test]
+    fn deleting_the_last_voiceprint_template_is_rejected() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        std::fs::create_dir_all(voiceprint_dir()).unwrap();
+        let profile = SpeakerVoiceprintProfile {
+            schema_version: VOICEPRINT_PROFILE_SCHEMA_VERSION,
+            id: "spk-last-template".to_string(),
+            display_name: "Eden".to_string(),
+            source: "assisted_recording".to_string(),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            embedding_model: "test".to_string(),
+            embedding_dim: 2,
+            embedding: vec![1.0, 0.0],
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            total_duration_ms: 4_000,
+            samples: Vec::new(),
+            templates: vec![assisted_test_template("only", vec![1.0, 0.0])],
+            prototypes: Vec::new(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        atomic_json_write(&speaker_profile_path(&profile.id), &profile).unwrap();
+
+        let response = delete_speaker_profile_sample_response(&profile.id, "only");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn assisted_finish_rejects_selection_below_gate() {
+        let session = AssistedVoiceprintSession {
+            id: "assisted-short".to_string(),
+            state: AssistedVoiceprintSessionState::Open,
+            speaker_name: "Eden".to_string(),
+            profile_id: None,
+            task_id: "task-assisted".to_string(),
+            file_key: "file-a".to_string(),
+            source_path: PathBuf::from("meeting.wav"),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            candidates: vec![assisted_test_candidate(0), assisted_test_candidate(1)],
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+
+        let error = finish_assisted_voiceprint_enrollment_in_process(&session).unwrap_err();
+
+        assert!(error.contains("select at least 3 clips"));
+    }
+
+    #[test]
+    fn assisted_session_finish_state_blocks_duplicate_finish_and_delete() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let session = AssistedVoiceprintSession {
+            id: "assisted-state".to_string(),
+            state: AssistedVoiceprintSessionState::Open,
+            speaker_name: "Eden".to_string(),
+            profile_id: None,
+            task_id: "task-assisted".to_string(),
+            file_key: "file-a".to_string(),
+            source_path: PathBuf::from("meeting.wav"),
+            diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+            sample_rate: VOICEPRINT_SAMPLE_RATE,
+            candidates: (0..3).map(assisted_test_candidate).collect(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+        };
+        std::fs::create_dir_all(assisted_voiceprint_session_dir(&session.id)).unwrap();
+        atomic_json_write(&assisted_voiceprint_session_path(&session.id), &session).unwrap();
+        let candidate_audio = assisted_voiceprint_candidate_audio_path(
+            &session.id,
+            &session.candidates[0].id,
+        );
+        std::fs::write(&candidate_audio, assisted_test_pcm()).unwrap();
+
+        let finishing = begin_assisted_voiceprint_finish(&session.id).unwrap();
+
+        assert_eq!(finishing.state, AssistedVoiceprintSessionState::Finishing);
+        let duplicate = begin_assisted_voiceprint_finish(&session.id).unwrap_err();
+        assert_eq!(duplicate.0, StatusCode::CONFLICT);
+        assert_eq!(
+            delete_assisted_voiceprint_session_response(&session.id).status(),
+            StatusCode::CONFLICT
+        );
+
+        restore_assisted_voiceprint_session(&finishing);
+        assert_eq!(
+            read_assisted_voiceprint_session(&session.id).unwrap().state,
+            AssistedVoiceprintSessionState::Open
+        );
+        assert!(!candidate_audio.exists());
+    }
+
+    #[test]
+    fn assisted_session_cleanup_removes_expired_sessions_and_keeps_fresh_ones() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        for (id, state, updated_at_ms) in [
+            ("expired-open", AssistedVoiceprintSessionState::Open, 1),
+            ("expired-finishing", AssistedVoiceprintSessionState::Finishing, 1),
+            ("fresh-open", AssistedVoiceprintSessionState::Open, now_ms()),
+        ] {
+            let session = AssistedVoiceprintSession {
+                id: id.to_string(),
+                state,
+                speaker_name: "Eden".to_string(),
+                profile_id: None,
+                task_id: "task-assisted".to_string(),
+                file_key: "file-a".to_string(),
+                source_path: PathBuf::from("meeting.wav"),
+                diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+                sample_rate: VOICEPRINT_SAMPLE_RATE,
+                candidates: Vec::new(),
+                created_at_ms: 1,
+                updated_at_ms,
+            };
+            std::fs::create_dir_all(assisted_voiceprint_session_dir(id)).unwrap();
+            atomic_json_write(&assisted_voiceprint_session_path(id), &session).unwrap();
+        }
+
+        cleanup_expired_assisted_voiceprint_sessions();
+
+        assert!(!assisted_voiceprint_session_dir("expired-open").exists());
+        assert!(!assisted_voiceprint_session_dir("expired-finishing").exists());
+        assert!(assisted_voiceprint_session_dir("fresh-open").exists());
+    }
+
+    #[test]
+    fn close_voiceprint_profiles_remain_ambiguous_instead_of_auto_matching() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        std::fs::create_dir_all(voiceprint_dir()).unwrap();
+        for (id, name, embedding) in [
+            ("spk-a", "Alice", vec![1.0, 0.0]),
+            ("spk-b", "Bob", vec![0.999, 0.001]),
+        ] {
+            let profile = SpeakerVoiceprintProfile {
+                schema_version: 1,
+                id: id.to_string(),
+                display_name: name.to_string(),
+                source: "live_enrollment".to_string(),
+                diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+                embedding_model: "test".to_string(),
+                embedding_dim: 2,
+                embedding,
+                sample_rate: VOICEPRINT_SAMPLE_RATE,
+                total_duration_ms: 3_000,
+                samples: Vec::new(),
+                templates: Vec::new(),
+                prototypes: Vec::new(),
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            };
+            atomic_json_write(&speaker_profile_path(id), &profile).unwrap();
+        }
+
+        let candidate = best_registered_voiceprint_match(&[1.0, 0.0]).unwrap();
+
+        assert_eq!(candidate.profile_id, "spk-a");
+        assert!(!candidate.unambiguous);
+    }
+
+    #[test]
+    fn diarization_mapping_marks_close_multi_profile_candidates_as_conflicted() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        std::fs::create_dir_all(voiceprint_dir()).unwrap();
+        for (id, name, embedding) in [
+            ("spk-a", "Alice", vec![1.0, 0.0]),
+            ("spk-b", "Bob", vec![0.999, 0.001]),
+        ] {
+            let profile = SpeakerVoiceprintProfile {
+                schema_version: 1,
+                id: id.to_string(),
+                display_name: name.to_string(),
+                source: "test".to_string(),
+                diarization_profile: DEFAULT_DIARIZATION_PROFILE.to_string(),
+                embedding_model: "test".to_string(),
+                embedding_dim: 2,
+                embedding,
+                sample_rate: VOICEPRINT_SAMPLE_RATE,
+                total_duration_ms: 4_000,
+                samples: Vec::new(),
+                templates: Vec::new(),
+                prototypes: Vec::new(),
+                created_at_ms: 1,
+                updated_at_ms: 1,
+            };
+            atomic_json_write(&speaker_profile_path(id), &profile).unwrap();
+        }
+        let mut segments = vec![DiarizationSegment {
+            speaker: "speaker_00".to_string(),
+            display_name: "User A".to_string(),
+            mapped_profile_id: None,
+            confidence: None,
+            candidate_profile_id: None,
+            candidate_display_name: None,
+            candidate_confidence: None,
+            start_ms: 0,
+            end_ms: 6_000,
+            overlap: false,
+        }];
+        let embeddings = BTreeMap::from([("speaker_00".to_string(), vec![1.0, 0.0])]);
+
+        map_speakers_with_registered_voiceprints(&mut segments, &embeddings);
+
+        assert_eq!(segments[0].display_name, "User A");
+        assert_eq!(segments[0].mapped_profile_id, None);
+        assert_eq!(segments[0].candidate_profile_id.as_deref(), Some("spk-a"));
+    }
+
+    #[tokio::test]
+    async fn voiceprint_ffmpeg_cut_rejects_empty_duration_and_invalid_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("output.pcm16le");
+
+        assert!(ffmpeg_cut_pcm16le_ms(Path::new("missing.wav"), &output, 1_000, 1_000)
+            .await
+            .unwrap_err()
+            .contains("empty duration"));
+        assert!(ffmpeg_cut_pcm16le_ms(Path::new("missing.wav"), &output, 0, 1_000)
+            .await
+            .unwrap_err()
+            .contains("ffmpeg voiceprint"));
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn diarization_embedding_waveforms_exclude_overlap_segments() {
+        let waveform = vec![1.0; 16_000];
+        let segments = vec![
+            DiarizationSegment {
+                speaker: "speaker_00".to_string(),
+                display_name: "User A".to_string(),
+                mapped_profile_id: None,
+                confidence: None,
+                candidate_profile_id: None,
+                candidate_display_name: None,
+                candidate_confidence: None,
+                start_ms: 0,
+                end_ms: 500,
+                overlap: false,
+            },
+            DiarizationSegment {
+                speaker: "speaker_00".to_string(),
+                display_name: "User A".to_string(),
+                mapped_profile_id: None,
+                confidence: None,
+                candidate_profile_id: None,
+                candidate_display_name: None,
+                candidate_confidence: None,
+                start_ms: 500,
+                end_ms: 1_000,
+                overlap: true,
+            },
+        ];
+
+        let by_speaker = collect_diarization_speaker_waveforms(&waveform, 16_000, &segments);
+
+        assert_eq!(by_speaker["speaker_00"].len(), 8_000);
     }
 }

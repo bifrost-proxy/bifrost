@@ -58,27 +58,30 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
    任务 PATCH 另接受一次性迁移参数 `requeue_existing_files`。字段省略或为 `true` 时保持既有行为：模式或生效中的 MOSS Prompt 变化会重排历史文件；显式设为 `false` 时更新任务配置并保留已有状态与产物，供已暂停任务从标准模式迁移到 MOSS、但只希望新文件和原 pending 文件使用新模式的场景。切到 MOSS 时，迁移前已有的 failed 记录保留 failed 状态和产物引用，并在 error 前加当前版本的非重试 marker，避免后续定时运行反复处理旧失败；显式 `run?date=YYYY-MM-DD` 可覆盖该抑制并定向重试。该参数不持久化到任务配置。
 3. `moss_joint` 走整文件联合转录，不执行 Qwen 30 秒分块，也不再叠加 Sherpa/Pyannote 分离；模型原生 speaker 直接进入 timeline。
 4. 首次运行时自动准备独立、可重定位的 Python 3.12 + MLX-Audio runtime，以及固定 snapshot 的 8-bit MLX 模型；准备完成后同一任务直接继续推理。
-5. macOS CLI 主 archive 与 Desktop DMG 只发布 Bifrost 核心，不内置 MOSS Python/MLX runtime、依赖或模型权重。Apple Silicon 用户在 Model Management 主动初始化或首次运行任务时，才动态下载独立的同版本 `moss-joint-runtime` release asset 与固定模型权重。MLX-Audio 固定 commit `64e8416c303fb3b3463dab8eb4ebd78c55a87c1a`，8-bit 模型固定 snapshot `90c3a1ab78fa56e47e1493ddea48e3ababaf2f71`。初始化器从同版本 release checksum manifest 读取 runtime zip 的 SHA-256，校验后才解压；1,258,427,442-byte 权重固定 SHA-256 `469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190`，下载后必须校验。测试覆盖的自定义 runtime URL 必须同时提供 `BIFROST_MOSS_RUNTIME_SHA256`。`test_asr_moss_release_contract.sh` 在普通 PR CI 中校验 workflow 与初始化器的 commit、snapshot、metadata、资产名和 checksum 契约，避免只有真正发版时才发现配置漂移。
+5. macOS CLI 主 archive 与 Desktop DMG 只发布 Bifrost 核心，不内置 MOSS Python/MLX runtime、依赖或模型权重。MOSS runtime 使用 `scripts/asr/moss-runtime-version.txt` 中的独立版本和 `moss-runtime-v<version>` 独立 GitHub Release，不再跟随每个 Bifrost CLI/App 版本重复构建。Apple Silicon 用户在 Model Management 主动初始化或首次运行任务时，才动态下载该独立 runtime asset 与固定模型权重。MLX-Audio 固定 commit `64e8416c303fb3b3463dab8eb4ebd78c55a87c1a`，8-bit 模型固定 snapshot `90c3a1ab78fa56e47e1493ddea48e3ababaf2f71`。runtime 使用固定 SHA-256 的 `python-build-standalone` CPython 3.12 arm64 归档，不复制 `actions/setup-python` 的 hosted toolcache；`otool -L` 可重定位检查仍拒绝任何指向 runner 或 hosted toolcache 的 dylib 依赖。初始化器从独立 Release 的 `<asset>.sha256` 校验文件读取 runtime zip 的 SHA-256，校验后才解压；1,258,427,442-byte 权重固定 SHA-256 `469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190`，下载后必须校验。测试覆盖的自定义 runtime URL 必须同时提供 `BIFROST_MOSS_RUNTIME_SHA256`。`test_asr_moss_release_contract.sh` 在普通 PR CI 中校验核心 Release 隔离、独立 workflow、Python 归档、commit、snapshot、metadata、资产名和 checksum 契约。
 
 ### 统一模型管理
 
 - Model Management 的模型选择同时列出 Qwen3-ASR 和 `MOSS-Transcribe-Diarize-MLX-8bit`。Qwen 继续管理可租约的本地 ASR service；MOSS 是任务按需执行的端到端 runtime，不展示 Host、Service Port 等无效服务配置。
 - MOSS 状态接口分别报告 runtime 自检、模型 snapshot 校验、安装目录和预期权重大小。初始化时执行完整 runtime self-test 与 1.2 GB 权重 SHA-256，成功后写入带固定模型 SHA/大小/mtime、Python/runner 哈希和所有必需 metadata SHA-256 的验证标记；日常状态读取先复核标记与小文件哈希，再运行带 30 秒硬超时的打包 Python `--self-test`，确认 `runtime/python/lib` 等 marker 未逐文件记录的框架依赖仍可加载，同时避免每次打开页面重新扫描 1.2 GB 权重。权重被同大小替换后 mtime 变化、metadata 缺失或内容损坏、Python framework 缺失、损坏或自检卡死都会撤销 Ready；修复时从已校验的 runtime archive 恢复 runtime 与 metadata，不重复下载仍通过完整校验的权重。
-- 用户可在管理页主动初始化或修复 `~/.bifrost/asr/moss_joint_mlx`。下载复用断点续传和同一进程内初始化锁，管理页与同一服务中的任务同时触发时不会并行写入同一资源。
+- 用户可在管理页主动初始化或修复 `~/.bifrost/asr/moss_joint_mlx`。下载复用 `.part` 断点续传并对响应体中断做最多 3 次有界自动重试，后续尝试通过 HTTP Range 只请求剩余字节；同一进程内初始化锁保证管理页与同一服务中的任务同时触发时不会并行写入同一资源。
+- runtime、模型与 metadata 全部校验通过并成功写入新 `verification.json` 后，初始化器自动删除历次由 Bifrost 生成的 `runtime.invalid-<timestamp>`、runtime zip quarantine 和 `model.safetensors.invalid-<timestamp>`。初始化或 marker 写入失败时保留这些隔离件，保证失败恢复边界；清理仅接受固定前缀和纯数字时间戳，不跟随目录符号链接。清理本身失败时不撤销已经 Ready 的新 runtime，而是记录告警并在下一次 ensure 时重试。
 - Directory Task 不保存另一份模型路径或依赖配置；它只保存 `transcription_mode` 与任务 Prompt。运行时若发现资产尚未准备好，调用与管理页完全相同的校验和初始化函数作为自动兜底。
 
-### 发布前 CI 门禁
+### 独立 Runtime 发布与 CI 门禁
 
-- `release.yml` 与 PR CI 必须调用同一个 MOSS runtime 打包脚本。正式发布传入真实 runtime 目录；PR CI 在 Apple Silicon macOS runner 上构造最小 fixture，真实生成 zip 和 `.sha256`，并验证入口、metadata、notice/license、无 AppleDouble sidecar 以及 checksum 可复算。
+- `.github/workflows/moss-runtime-release.yml` 是 MOSS runtime 的唯一正式构建/发布入口，由 `moss-runtime-v*` tag 或手动 dispatch 触发。它调用共享 builder 和 packager，发布独立 runtime zip 与同名 `.sha256`；核心 `.github/workflows/release.yml` 不安装 Python/MLX、不下载模型 metadata，也不生成或上传 MOSS runtime。
+- Runtime 版本独立于 Bifrost 版本。只有 Python、MLX-Audio commit/patch、requirements、runner 或模型 metadata snapshot 变化时才提升 `scripts/asr/moss-runtime-version.txt`；普通 Bifrost patch/minor release 继续复用已验证的 runtime asset。
+- PR CI 在 Apple Silicon macOS runner 上构造最小 fixture，真实生成 zip 和 `.sha256`，并验证入口、metadata、notice/license、无 AppleDouble sidecar 以及 checksum 可复算；静态契约同时禁止 MOSS builder 回流核心 Release。
 - runtime 打包器必须拒绝任何 `.safetensors` 权重；权重始终由初始化器单独动态下载。macOS CLI binary/archive 与 Desktop `.app`/DMG 必须通过核心包门禁：禁止出现 MOSS runtime、Python site-packages、runner 或权重路径，并以 512 MiB 上限拦截灾难性包体膨胀。PR CI 必须扫描两种 macOS 架构的真实 CLI binary 和真实 Desktop bundle，不能只验证最小 fixture。这个上限不是日常体积目标，正常主包应显著低于该值。
 - 普通 PR 不下载 1.2 GB 权重，也不重复安装完整 MLX Python 环境；`test_asr_moss_release_contract.sh` 负责固定 commit、requirements、模型 metadata、权重 URL/大小/SHA-256、release 资产名和共享打包脚本调用的静态契约。
-- 正式 tag release 仍执行完整 Python/MLX 安装、runner self-test、host-path 动态依赖检查、真实 runtime 打包、checksum 汇总和 release asset 上传。PR 的轻量门禁不能替代 tag release，但保证 workflow 语法引用和确定性打包结果不会到发版时才首次执行。
-- 正式 release 的 `BIFROST_VERSION` 由 `crates/bifrost-admin/build.rs` 注入编译期 `CARGO_PKG_VERSION`，因此 runtime asset 与 checksum URL 使用 tag/release 版本而不是静态 Cargo.toml 版本；release-contract E2E 固定验证这条注入链路。
+- 独立 runtime tag release 才执行完整 Python/MLX 安装、runner self-test、host-path 动态依赖检查、真实 runtime 打包、checksum 和 asset 上传。PR 的轻量门禁不能替代该真实 tag 演练，但保证 workflow 语法引用和确定性打包结果不会到正式 runtime 发布时才首次执行。
+- 核心 Bifrost beta tag 必须单独验证 CLI/App Release 在完全不构建 MOSS runtime 的情况下全绿；Runtime beta tag 必须验证独立资产可发布、可复算 checksum，并在稳定 runtime 发布前完成。
 6. 用户 Prompt 通过仅当前进程可读的临时文件传入。runtime 始终先使用官方时间戳/说话人协议 Prompt，再追加用户上下文，避免自定义 Prompt 破坏结构化输出协议。
-7. 整段推理采用端到端硬 watchdog：预算从文件进入 Processing 时开始，包含媒体探测和 WAV 规范化；启动 MLX 子进程前先扣除已经消耗的时间，只把剩余预算交给推理。总耗时达到音频时长的 `0.5x` 时杀死子进程并返回 `moss_rtf_exceeded`，不会继续消耗资源或悄悄回退到不同模型。
+7. 整段推理采用端到端硬 watchdog：预算从文件进入 Processing 时开始，包含媒体探测和 WAV 规范化；启动 MLX 子进程前先扣除已经消耗的时间，只把剩余预算交给推理。默认总耗时达到音频时长的 `0.5x` 时杀死子进程并返回 `moss_rtf_exceeded`，不会继续消耗资源或悄悄回退到不同模型。已经真实命中该错误的单文件可在人工监控的定向补救运行中使用 `BIFROST_MOSS_MAX_RUNTIME_RTF=1.0`；若同一文件继续超时，才允许依次升级为 `2.0`、`3.0`。只接受精确的 `1.0`、`2.0` 或 `3.0`，其他值回退 `0.5`。若文件在默认每秒 20 个输出 token 下触顶，可在已有 `finish_reason=length` 证据后额外设置 `BIFROST_MOSS_OUTPUT_TOKENS_PER_SECOND=30`；只接受精确的 `30`，其他值回退 `20`。只有整文件补救仍出现确定性退化输出时，才允许对该单文件设置 `BIFROST_MOSS_SEGMENT_SECONDS=600/300/60`，并按 `60 → 30 → 10` 秒自适应细分失败区间；默认路径仍保持整文件联合解码。分段后 speaker 标签仅在片段内有效，不能宣称具备跨片段全局说话人一致性。`BIFROST_MOSS_ALLOW_GAP_MARKERS=1` 仅允许最多 60 秒确定性失败区间以显式 `UNRESOLVED` 标记保留，超过上限继续失败，不得静默漏字。确定性失败缓存包含非默认补救配置签名，使配置升级能重试同一文件，同时不扩大为历史队列重跑；固定的短音频、静音、无时长等输入错误在任何补救配置下仍不重试；补救后必须去掉全部环境变量。
 8. release 打包禁用 macOS resource fork，并扫描拒绝 `._*`、`.DS_Store`、`__MACOSX`；安装器也跳过这些元数据，避免 Python 模型加载器误读 AppleDouble 文件。
 9. 在启动约 2 GiB MLX 进程前执行廉价保护：无法取得时长时返回 `moss_duration_unavailable`；短于 10 秒的音频在严格 `0.5x` SLA 下返回 `moss_audio_too_short`；规范化 WAV 为数字静音/近零信号时返回 `moss_audio_silent`。RMS 以流式扫描计算，不把长 WAV 整体读入内存。阈值约为 -60 dBFS，只过滤数字静音，不用激进 VAD 剪掉低音量说话。
-10. MLX 仍按官方建议对 55 分钟以内会议执行一次全局联合解码，不切成独立短块。runner 改用固定版本模型提供的 `stream_generate` 收集同一批 token；若前 256 个生成 token 内始终没有形成一条完整的 `[start][Sxx]text[end]` 协议片段，立即停止该稀疏/无语音输入。只出现未闭合的时间戳/说话人前缀不能绕过保护。合法输出继续完成原始全局解码和同一解析规则，因此正常多人录音的模型输入、采样温度、token 预算和 speaker 一致性不变。
+10. MLX 仍按官方建议对 55 分钟以内会议执行一次全局联合解码，不切成独立短块。runner 改用固定版本模型提供的 `stream_generate` 收集同一批 token；纯无结构输出在 256 个生成 token 内仍无法形成完整片段时立即停止。若已出现合法的 `[start][Sxx]` 开头，说明模型正在生成可用的较长首段，则将首段闭合保护上限放宽到 1024 token；只有 speaker 或残缺时间戳等非法前缀仍保持 256 token 上限。完成一条片段后继续原始全局解码和同一解析规则，因此正常多人录音的模型输入、采样温度、token 预算和 speaker 一致性不变。
 11. MOSS 任务只允许在 Apple Silicon macOS 创建或切换。WebUI 在状态接口确认平台能力前禁用 MOSS 选项，不支持的平台展示原因；服务端对创建和 PATCH 独立执行同一门禁，不能依赖前端隐藏。标准模式和历史任务读取保持兼容。
 12. MOSS 原生 speaker 是有效的 diarization 结果：任务摘要不再依赖 Sherpa/Pyannote 资产判断 `diarization_ready`。
 13. runner 输出 `segments + finish_reason` envelope；达到 `--max-new` 必须报告 `length` 并判为不完整，不能发布为成功。Rust 仍兼容旧 array payload。所有片段先拒绝倒置范围，再按已知音频时长裁剪或丢弃越界范围，确保全文、timeline 与字幕使用同一组内容。
@@ -102,7 +105,7 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 1. 任务选择器只取 Pending/Failed 等未完成状态；Success/PartialSuccess 及其产物不会因服务重启或恢复任务而重新解码。
 2. 探测不到时长、短于 10 秒、数字静音的文件在 MLX 启动前快速失败，并保留明确错误码。
 3. 规范化完成后，若全链路 `0.5x` 预算已耗尽，不创建 MLX 子进程。
-4. 模型生成阶段在 256 token 内验证至少一条完整时间戳/说话人片段；正常输出一旦命中即继续完整的整段生成，只有协议前缀但没有闭合片段的异常输出立即退出。
+4. 模型生成阶段对纯无结构或非法前缀保留 256-token 快速失败；已出现合法时间戳/说话人开头时允许首段在 1024 token 内闭合。一旦得到完整片段即继续完整的整段生成。
 5. 子进程仍受剩余端到端预算和强制暂停轮询双重约束。
 6. 当前版本已经确定失败的协议退化、重复循环、缺时长、过短、静音和无效 WAV 会写入 `moss_non_retryable_v<version>`；同一版本且源文件大小/mtime 未变化时，后续调度不再加载模型重试。源文件变化、切回标准模式或升级到新 Bifrost 版本时重新评估，避免永久锁死可恢复资源。
 
@@ -243,13 +246,14 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 - 1.2 秒 fixture 推理达到 600 ms 时必须返回 `moss_rtf_exceeded`，并终止子进程。
 - 缺时长、短音频、数字静音必须在 MLX 子进程启动前返回稳定错误；正常低音量 WAV 不得被静音阈值误杀。
 - 已消耗完端到端预算时不得创建子进程；剩余预算而非完整音频预算控制 watchdog。
-- Python runner 必须验证协议解析和 256-token 非法输出早停；正常协议片段继续保留时间戳和 speaker。
+- Python runner 必须验证协议解析、256-token 非法输出早停和已开始合法协议的 1024-token 首段上限；正常协议片段继续保留时间戳和 speaker。
 - 零时长 speaker segment、长文本单字符循环和 90% 以上相同片段必须判为退化失败；Rust 接收端在没有正时长且非空 speaker 的 segment 时再次拒绝，禁止包装成无 speaker 的整文件“成功”。
 - 同版本确定性失败且源文件未变化时，下一次 pending scan 必须跳过；修改源文件后必须重新进入待处理集合。
 - Python runner 返回“无有效 speaker-aware segment”时必须标记同版本确定性失败，避免零温度解码反复加载模型。
 - 超过整文件处理上限的输入必须标记为同版本确定性失败，源文件未变化时不得在定时或手动运行中重复归一化。
 - MOSS 原生连续 speaker turn 写入产物前必须按既有 timeline 契约拆成最长 30 秒的 segment，并保留 speaker、绝对时间和完整文本。
 - runtime ZIP 解压必须保留独立 CPython framework/library 的相对符号链接，拒绝绝对路径或逃逸出 `runtime`/`model` 的链接；release 打包完成后必须重新解压归档并从解压目录执行 `--self-test`。
+- 旧 runtime/model 被隔离后，成功安装必须回收所有受管的时间戳 quarantine；下载、校验、自检或 marker 写入失败时必须保留隔离件，且近似命名的用户文件和符号链接目标不得被递归删除。
 
 ### 7.3 `human_tests`
 
@@ -258,16 +262,16 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 - 验证 30 分钟稀疏语音样本不会仅因尾部静音被报告为截断。
 - 对 30 分钟真实任务执行完整 MLX MOSS 链路；推理阶段超过 900.075 秒必须立即中断并判失败，不能为了等待结果继续消耗资源。
 - 重启默认 9900 服务后继续现有任务 `735775510b384fff8903d9c6fc54f1a3`，只运行未完成资源；成功文件在重启前后的状态、时间戳和产物 SHA-256 必须完全一致，证明没有重复解码。
-- 对旧版耗时 530.363 秒仍无输出的稀疏样本验证协议早停；任何验证样本端到端 RTF 超过 `0.5` 时立即强制暂停任务并终止后续验证。
+- 对旧版耗时 530.363 秒仍无输出的稀疏样本验证协议早停；任何普通验证样本端到端 RTF 超过 `0.5` 时立即强制暂停任务。只对已有失败证据的同一文件允许分级升级到 `1.0`、`2.0`、`3.0`；只有 `finish_reason=length` 才允许把输出预算从每秒 20 token 提升到 30，不得扩大到整个历史队列。
 
 ## 8. 风险与回退
 
 - 新模型运行时快速演进：发布 runtime 固定 MLX-Audio commit、Python 依赖和模型 snapshot/hash；Bifrost 核心只消费稳定 JSON 契约。
-- 自动初始化下载中断：使用可续传临时文件，哈希不匹配时拒绝安装并保留明确错误；不会回退成 Qwen 后悄悄产出不同语义的结果。
+- 自动初始化下载中断：使用可续传临时文件，哈希不匹配时拒绝安装并保留明确错误；失败隔离件保留到后续一次完整成功并落盘 marker 后再自动回收，不会回退成 Qwen 后悄悄产出不同语义的结果。
 - Prompt 泄露或协议破坏：Prompt 不放入命令行参数，临时文件随单次推理销毁；runtime 追加而非替换协议 Prompt。
 - 长音频 token 截断：按音频时长计算输出 token budget，并保留完整性信息；超过 55 分钟在没有跨块 speaker 归并前拒绝处理。
-- 说话人标签跨块漂移：正式路径使用一次全局解码，不采用独立短块；未来若切块，必须先具备跨块 voiceprint/聚类归并和 DER 回归门禁。
-- 资源占用：MOSS 仅离线串行启用，Qwen 实时默认链路不变；短音频/静音前置拒绝、完整片段早停、退化输出拒绝、确定性失败去重和端到端 0.5 RTF watchdog 是硬失败门禁。单次有效联合解码仍需约 2 GiB MLX 工作集，这是当前 8-bit 模型本身的运行要求，不通过降低模型精度规避。
+- 说话人标签跨块漂移：正式路径使用一次全局解码，不采用独立短块；受控单文件救援分段只用于恢复文本与片段内 speaker，必须明确不保证跨片段 speaker 一致性。若把切块升级为正式路径，必须先具备跨块 voiceprint/聚类归并和 DER 回归门禁。
+- 资源占用：MOSS 仅离线串行启用，Qwen 实时默认链路不变；短音频/静音前置拒绝、协议分级早停、退化输出拒绝、确定性失败去重和默认端到端 0.5 RTF/20 token 每秒门禁是硬默认。受控的 1.0/2.0/3.0 RTF 与 30 token 每秒单文件分级补救只是运维逃生口，不改变产品默认值，并且必须逐级具备同一文件的超时或长度触顶证据。单次有效联合解码仍需约 2 GiB MLX 工作集，这是当前 8-bit 模型本身的运行要求，不通过降低模型精度规避。
 - 回退：Provider 不可用或能力不匹配时继续使用现有 Qwen + diarization 流程。
 
 ## 9. Review/Fix/Test 门禁

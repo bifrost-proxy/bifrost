@@ -52,6 +52,8 @@ async function installVoiceWakeMocks(page: Page, options: VoiceWakeMockOptions =
           diarization_profile: "sherpa-onnx-balanced",
           embedding_model: "sherpa-onnx",
           embedding_dim: 16,
+          template_count: 1,
+          prototype_count: 1,
           total_duration_ms: 3200,
           created_at_ms: Date.now(),
           updated_at_ms: Date.now(),

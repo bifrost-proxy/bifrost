@@ -74,7 +74,7 @@
 
 1. 比较测试前后的线上 `files.json` 与真实 WAV SHA-256。
 2. 用 `otool -L` 检查被自动安装的 Python，执行 runner `--self-test`，扫描安装目录中的 `._*` / `.DS_Store`。
-3. 测试完成后按用户体验要求保留 18997 服务；只清理由失败归档生成的可恢复 quarantine，或在交付后征得用户同意再清理。
+3. 测试完成后按用户体验要求保留 18997 服务；初始化失败时确认 quarantine 仍保留，后续一次完整成功并写入 marker 后确认受管 quarantine 自动清理。
 
 预期结果：
 
@@ -248,10 +248,75 @@
 - 运行中的任务仍拒绝模式切换；真实迁移必须先暂停。
 - 恢复任务后只有迁移前已是 pending 的文件和新录音使用 MOSS，旧日报及已成功转录不会重复生成。
 
+### TC-MOSS-15：独立 Runtime 与核心 beta Release 隔离演练
+
+操作步骤：
+
+1. 执行 `bash e2e-tests/tests/test_asr_moss_release_contract.sh`，确认核心 `release.yml` 不包含 MOSS builder、Python/MLX 安装或 runtime asset，独立 `moss-runtime-release.yml` 固定调用共享 builder/packager。
+2. 下载并复算 builder 固定的 `python-build-standalone` CPython 3.12 arm64 SHA-256；把归档移动到另一目录后执行 `python3.12 -c 'import ssl, sqlite3'`，并用 `otool -L` 确认没有 runner/toolcache 绝对依赖。
+3. 执行 `bash scripts/ci/test-package-moss-release-runtime.sh`，确认 universal Mach-O 的 architecture header 不会被误判成 dylib 依赖，同时真实指向 runner/toolcache 的缩进依赖项仍被拒绝。
+4. 从修复分支创建唯一的 `moss-runtime-v1.0.0-beta.*` tag，触发真实独立 Runtime workflow；看护 build、checksum、GitHub prerelease 到成功，并下载资产复算 checksum。
+5. 发布稳定 `moss-runtime-v1.0.0` 后，从同一修复分支创建唯一的 `v0.0.157-beta.*` tag；看护核心 CLI、Desktop、combined checksum 和 prerelease 到成功，确认核心 Release 不包含 MOSS runtime asset。
+
+预期结果：
+
+- 独立 Runtime workflow 使用经过 SHA-256 固定、可重定位的 Python，不依赖 GitHub hosted toolcache 路径。
+- Runtime beta/stable Release 分别生成独立 zip 和 `.sha256`，不包含 `model.safetensors`；模型权重继续在用户初始化时下载。
+- 核心 beta Release 全部 job 成功且不下载/构建/上传 MOSS runtime；CLI、App、DMG 的包体轻量门禁继续生效。
+
+### TC-MOSS-16：首次初始化大文件中断自动续传与启动器实跑
+
+操作步骤：
+
+1. 使用独立 `HOME`、`BIFROST_DATA_DIR` 和 18999 端口启动当前分支服务；确认 `GET /_bifrost/api/asr/moss/status` 的安装目录位于临时 home，runtime/model 初始均为 missing，正式 9900 PID 与系统代理不变。
+2. 请求 `GET /_bifrost/api/asr/moss/init-stream`，从 0 下载独立 Runtime Release 和固定 1,258,427,442-byte 模型。若服务端在响应体结束前断开，确认 `.part` 保留，初始化器在同一请求内最多重试 3 次且后续请求带 `Range: bytes=<已有大小>-`。
+3. 执行 `cargo test -p bifrost-admin moss_resource_download_retries_and_resumes_transient_body_failure --lib -- --nocapture`，fixture 首次只发送一半响应体后断开，第二次必须从断点续传并原子发布完整文件。
+4. 初始化成功后再次读取 status，确认 `ready=true`、runtime/model verified、模型大小与固定值一致，并检查安装目录没有 `._*`、`.DS_Store` 或残留 `.part`。
+5. 使用打包 Python 的 `PYTHONHOME/PYTHONPATH` 执行 `moss_mlx_runner.py --self-test`；再对 10 秒以上、16 kHz 单声道 PCM 语音执行 `transcribe`，断言退出码为 0、JSON 至少包含一条正时长且 speaker 非空的 segment。
+6. 停止 18999 并清理唯一的临时目录；确认正式 9900 PID、版本和系统代理仍保持不变。
+
+预期结果：
+
+- 首次初始化不复用正式 `~/.bifrost/asr` 资源，独立 Runtime 与模型都从真实发布源下载并完成 checksum/marker 校验。
+- 单次传输中断不要求用户重新点击 Initialize，也不从 0 重下 1.2 GB 模型；自动重试有上限，连续失败仍返回明确错误。
+- 打包启动器的自检和真实推理均使用隔离资源成功运行；测试结束不残留服务、临时资源或对正式代理的状态修改。
+
+### TC-MOSS-17：Runtime 升级成功后回收旧隔离资源
+
+操作步骤：
+
+1. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin moss_quarantine_cleanup_removes_only_managed_timestamped_entries --lib -- --nocapture`。fixture 创建旧 runtime 目录、旧 runtime zip、旧模型、指向外部目录的受管 symlink，以及多个近似命名的非受管文件。
+2. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin moss_initializer_installs_quarantines_and_reuses_verified_resources --lib -- --nocapture`。fixture 从无效 runtime/model 原地升级到已验证资源，并检查新 marker 写入后的安装目录。
+3. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin moss_initializer_reports_runtime_archive_and_model_quarantine_failures --lib -- --nocapture`，再执行 `bash e2e-tests/tests/test_asr_moss_release_contract.sh`，确认隔离失败仍报错且清理调用严格位于 marker 写入之后。
+
+预期结果：
+
+- 完整初始化成功并写入 `verification.json` 后，`runtime.invalid-<timestamp>`、`moss-joint-runtime-v*.zip.invalid-<timestamp>` 和 `model.safetensors.invalid-<timestamp>` 均被删除，不随版本升级持续累积。
+- 下载、checksum、解压、自检、模型验证或 marker 写入失败时不执行成功清理，已有 quarantine 继续保留用于排障/恢复。
+- 只有固定 Bifrost 命名且时间戳为纯数字的直接子项会被删除；近似命名文件保持不变，受管 symlink 只删除链接本身，外部目标内容保持不变。
+
+### TC-MOSS-18：官方版本发布后的个人流水线集成升级
+
+操作步骤：
+
+1. 将最新稳定 tag 所在的 `origin/main` 合并到个人 MOSS 日报集成分支，解决版本锁、ChatGPT Web mock 与 human test 索引冲突，构建 release CLI。
+2. 执行 MOSS 单元回归、按录音日期过滤、Daily Agent 单日期失败隔离、runtime owner 和 MOSS release/task-mode E2E；验证纯无协议输出仍在 256 token 失败，已出现合法时间戳/说话人开头的长首段可等待到 1024 token。
+3. 暂停正式 ASR 任务，安装集成 release CLI 并重启正式服务；核对服务版本、MOSS Ready、任务配置、历史成功产物和待处理计数。
+4. 分别调用 `run?date=2026-07-19`、`run?date=2026-07-20` 和 `run?date=2026-07-21`，确认每轮只选择对应本地录音日期，旧日期成功记录和旧日报不被重跑；普通批次保持 0.5 RTF/每秒 20 个输出 token。只有已有同一文件失败证据时才允许依次使用 `BIFROST_MOSS_MAX_RUNTIME_RTF=1.0/2.0/3.0`；只有该文件返回 `finish_reason=length` 后才允许增加 `BIFROST_MOSS_OUTPUT_TOKENS_PER_SECOND=30`；只有整文件补救仍出现确定性退化输出时才允许使用 `BIFROST_MOSS_SEGMENT_SECONDS=600/300/60`，必要时以 `BIFROST_MOSS_ALLOW_GAP_MARKERS=1` 显式保留总计不超过 60 秒的未解析区间。确认非默认补救配置写入确定性失败缓存签名，因此配置升级能重试该文件，默认配置仍跳过已有确定性失败；短音频、静音、无时长等固定输入错误在所有补救配置下仍跳过。
+5. 每日 ASR 完成后核对日报、Tomorrow To Do、研究摘要、原始研究链接和微信投递；最后恢复自动导入并确认外接盘无打开文件。
+
+预期结果：
+
+- 正式服务使用包含最新稳定版修复与个人日报能力的同版本集成 binary，桌面版本检查不会再把 CLI-owned core 覆盖为缺少个人功能的包。
+- MOSS 不会把已开始合法协议但首段较长的录音误判为无协议；真正无结构输出仍有 256 token 快速失败保护。
+- RTF 补救开关只接受精确的 1.0、2.0 或 3.0；输出 token 补救只接受精确的 30；分段补救只接受 600、300 或 60 秒，并自适应降到 60/30/10 秒。更高档位必须有同一文件上一级超时、长度触顶或确定性退化证据；未解析标记累计超过 60 秒仍失败，不会静默跳过。其他空值、非法值和未列出的值分别回退默认 0.5、20 与整文件路径；补救完成后必须去掉环境变量并恢复普通服务。
+- 三个日期彼此隔离；中断恢复和单文件失败不扩大为全量历史重跑，旧日报不重复生成。
+- 新日报、待办和研究产物落盘并按个人配置投递；任务最终未暂停、未运行，自动导入恢复，外接盘可以安全拔出。
+
 ## 清理步骤
 
 1. 用户要求继续体验时保留 18997；否则停止且仅停止本测试启动的预览 PID。TC-MOSS-09 的 9900 服务按用户要求保留运行，但任务在取得有限验证证据后重新暂停。
-2. 不得删除 `$ASR_TASK_DIR`、转录产物或 `$MOSS_AUDIO`。失败资源只移动到带时间戳 quarantine，确认无需回滚后再清理。
+2. 不得删除 `$ASR_TASK_DIR`、转录产物或 `$MOSS_AUDIO`。失败资源先移动到带时间戳 quarantine；只有后续 runtime/model 全部验证并成功写入 marker 后才自动清理受管隔离件。
 3. 对 TC-MOSS-01 至 TC-MOSS-08 再次检查 9900 PID 未变化；TC-MOSS-09 必须确认 PID 已按计划更新、默认数据目录不变且成功记录快照不变。
 
 ## 执行记录
@@ -278,3 +343,6 @@
 | 2026-07-20 | TC-MOSS-12 | PASS：Rust MOSS 回归 20/20 覆盖完整 12 个发布 metadata，配置重排状态矩阵/幂等单测 1/1；release contract E2E 确认下载、打包、Rust 校验列表一致；真实 task-mode API E2E 在修改 MOSS prompt 后把成功记录重置为 pending 并清空旧产物引用/metrics。 |
 | 2026-07-20 | TC-MOSS-13 | PASS：Rust MOSS 回归把无有效 speaker segment 和超出整文件上限都标为带版本的确定性失败；65 秒 fixture 的 63.8 秒 S02 turn 被拆为 3 段，加上 S01 共 4 段，所有段不超过 30 秒，speaker、75000 ms 绝对终点和完整文本均保留；runtime ZIP 的 Python 相对 symlink 保留且逃逸 symlink 被拒绝，Unix 目录冲突与 Windows symlink 不支持均保持安全拒绝，release contract 强制 extract-then-self-test；task-mode API E2E 继续通过。 |
 | 2026-07-21 | TC-MOSS-14 | PASS：release 构建运行 `test_asr_moss_task_mode.sh` 通过；默认模式/Prompt 变化仍重排历史记录，显式 `requeue_existing_files=false` 的 `standard -> moss_joint` 往返保留 success 状态、旧产物路径和字数，且一次性字段不出现在响应中。真实任务迁移前后保持 success=683、partial_success=1、failed=19、pending=0；旧 failed 被保留并标记为当前版本非重试项，恢复后空跑 processed=0/failed=0，未重新生成旧日报。 |
+| 2026-07-21 | TC-MOSS-17 | PASS：三个定向 Rust 用例与 release/runtime contract E2E 全部通过。升级成功并写入 marker 后，旧 runtime 目录、runtime zip 和旧模型隔离件均被回收；失败路径继续保留 quarantine。纯数字时间戳与固定资产名门禁拒绝近似命名，目录 symlink 仅删除链接且外部目标文件保持不变。 |
+| 2026-07-21 | TC-MOSS-16 | PASS（发现真实中断并修复后复测）：当前分支服务以独立 HOME/数据目录在 18999 启动，初始 install_dir 位于临时 home 且 model bytes=0。真实下载 170 MB runtime 和 1,258,427,442-byte 模型时，Hugging Face 在 1,207,909,964 bytes 处返回 `error decoding response body`，`.part` 被保留；再次请求通过 Range 补齐模型并完成 schema v5 marker。针对该真实缺口，初始化器增加最多 3 次有界自动重试；fixture 首次只发一半响应后断开、第二次从 524288 bytes 续传，聚焦回归通过。最终 status 为 ready/runtime_ready/model_ready，模型 SHA-256=`469a8969e6b70c8b276411eca54a355a27de9ed6794f738dab53f4ffd3c83190`，无 AppleDouble/`.part` 残留；打包 Python self-test 输出 `moss-mlx-runtime ok`，20.495 秒 16 kHz 单声道真实启动器推理 3.57 秒完成，输出 3 个 S01 正时长 segments。18999 已停止，正式 `v0.0.158` 服务保持 PID 21664/9900/系统代理开启；隔离目录已移动到废纸篓，可恢复。 |
+| 2026-07-24 | TC-MOSS-18 | PASS（正式任务补救与日报闭环）：任务 `71190c695b3040b38bee465579cd4d10` 的 2026-07-18、2026-07-22 缺失录音按日期定向补救，成功文件未重跑；暂存的 11 个 7 月 20–21 日文件在主队列结束后按原相对路径恢复，未丢失或重复导入。2026-07-23 外接盘 28/28 文件导入，本地 MOSS 得到 23 条有效录音 success；5 条 5.72s/8.58s/0.22s 碎片、1800s 近静音和 duration=N/A 空壳按固定输入门禁保留为明确失败且未重试。三日合并转录和后续 Daily Agent 均完成，正式服务最后恢复为无 `BIFROST_MOSS_*` 环境变量的默认模式。定向缓存单测证明救援配置可以重试默认的长度触顶失败，而短音频等固定输入失败仍跳过；MOSS release contract E2E 通过。 |

@@ -22,14 +22,20 @@ for (let i = 0; i < rawArgs.length; i++) {
 const VERSION = process.env.BIFROST_VERSION || positionalArgs[0];
 if (!VERSION) {
   console.error("Missing version. Set BIFROST_VERSION env or pass as argument.");
-  console.error("Usage: node npm-publish.mjs <version> [--dry-run] [--local] [--token <NPM_TOKEN>]");
+  console.error("Usage: node npm-publish.mjs <version> [--dry-run] [--local] [--print-tag] [--token <NPM_TOKEN>]");
   process.exit(1);
 }
 
 const ARTIFACTS_DIR = process.env.ARTIFACTS_DIR || join(ROOT, "artifacts");
 const DRY_RUN = process.argv.includes("--dry-run");
 const LOCAL_MODE = process.argv.includes("--local");
-const NPM_TAG = "latest";
+const NPM_TAG = VERSION.includes("-") ? "next" : "latest";
+const PRINT_TAG = process.argv.includes("--print-tag");
+
+if (PRINT_TAG) {
+  console.log(NPM_TAG);
+  process.exit(0);
+}
 
 const tokenIdx = process.argv.indexOf("--token");
 const NPM_TOKEN_ARG = tokenIdx !== -1 ? process.argv[tokenIdx + 1] : null;

@@ -15,6 +15,7 @@
 - Daily Agent 可以声明一个或多个上游依赖。
 - 执行顺序由依赖关系决定，不依赖 UI 数组顺序。
 - 依赖产物按同一日期提供给下游 Agent。
+- ASR 自动触发只携带本轮实际产出可用转写的录音日期；工作区里历史未处理输入不能被顺带加入本轮。
 - 文件型 Runner 通过 `input/upstream/<agent_id>/<date>-report.md` 读取上游产物。
 - ChatGPT Web Runner 每次消息内直接获得上游产物正文。
 - 上游失败时，下游默认跳过；用户可配置为继续执行。
@@ -65,7 +66,8 @@ dependency_failure_policy: skip
    - 全部成功：继续。
    - 失败、跳过、未运行：按 `dependency_failure_policy` 处理。
 5. 对 `include_output=true` 的依赖，把上游输出同步到下游工作区。
-6. 下游照常生成自己的 change plan、执行 Runner、保存报告和发送 IM。
+6. ASR completion hook 从本轮 attempted file 中筛出已成功或部分成功且确有文本产物的录音日期，去重后逐日调用整条 DAG；失败文件和未参与本轮的历史文件不提供日期。
+7. 下游照常为当前日期生成 change plan、执行 Runner、保存报告和发送 IM。
 
 跳过状态使用 `skipped_dependency_failed`，错误信息包含依赖 Agent ID 和状态，便于 WebUI 与 API 诊断。
 
@@ -86,6 +88,7 @@ Prompt 规则：
 - Codex、Bifrost Agent 等文件型 Runner 收到上游路径说明。
 - ChatGPT Web 收到与本轮变更日期匹配的上游文件完整正文。
 - 缺失或陈旧的产物由执行层按 `skip` / `continue` 策略处理。
+- 依赖同步目录可以保留其他日期的历史文件，但 change plan 与 Runner entry 必须始终按 completion hook 的目标日期过滤；不能因为历史 fan-out 没有 processed state 就重启六月研究。
 
 ## 日报研究工作流（本地配置，不进入默认值）
 

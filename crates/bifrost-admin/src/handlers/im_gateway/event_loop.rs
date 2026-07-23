@@ -1649,27 +1649,35 @@ fn ensure_external_cli_session_recorder(
 
     if recorder.is_none() {
         let data_dir = bifrost_agent::config::agent_home_dir();
-        let mut rec = ConversationRecorder::new(&data_dir, session_key);
-        if let Err(error) = rec.record_session_start(
-            session_key,
-            serde_json::json!({
-                "source": request.adapter,
-                "runtime": request.runtime,
-                "adapter": request.adapter,
-                "runner_id": runner_id,
-                "provider_id": provider.id,
-                "provider_type": format!("{:?}", provider.provider_type).to_lowercase(),
-                "work_dir": request.work_dir.as_ref().map(|path| path.display().to_string()),
-            }),
-        ) {
-            warn!(error = %error, "failed to record external cli session start");
-        }
-        if let Some(title) = session.title.as_deref() {
-            if let Err(error) = rec.record_title_updated(session_key, title) {
-                warn!(error = %error, "failed to record external cli session title");
+        match ConversationRecorder::open_or_create(&data_dir, session_key, None) {
+            Ok((mut rec, created)) => {
+                if created {
+                    if let Err(error) = rec.record_session_start(
+                        session_key,
+                        serde_json::json!({
+                            "source": request.adapter,
+                            "runtime": request.runtime,
+                            "adapter": request.adapter,
+                            "runner_id": runner_id,
+                            "provider_id": provider.id,
+                            "provider_type": format!("{:?}", provider.provider_type).to_lowercase(),
+                            "work_dir": request.work_dir.as_ref().map(|path| path.display().to_string()),
+                        }),
+                    ) {
+                        warn!(error = %error, "failed to record external cli session start");
+                    }
+                    if let Some(title) = session.title.as_deref() {
+                        if let Err(error) = rec.record_title_updated(session_key, title) {
+                            warn!(error = %error, "failed to record external cli session title");
+                        }
+                    }
+                }
+                *recorder = Some(rec);
+            }
+            Err(error) => {
+                warn!(session_key = %session_key, error = %error, "failed to open the canonical external cli session history");
             }
         }
-        *recorder = Some(rec);
     }
     if let Some(rec) = recorder.as_mut() {
         if let Err(error) =
@@ -2022,6 +2030,133 @@ async fn maybe_stop_external_cli_for_event(event: &ImEvent, active_session_key: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn recorder_test_provider() -> ImProviderConfig {
+        ImProviderConfig {
+            id: "feishu-recorder".to_string(),
+            provider_type: crate::im_gateway::types::ImProviderType::Feishu,
+            display_name: "Feishu Recorder".to_string(),
+            enabled: true,
+            base_url: None,
+            app_id: Some("app".to_string()),
+            secret_ref: Some("secret".to_string()),
+            owner_open_id: None,
+            event_connection_enabled: true,
+            event_types: Vec::new(),
+            agent_config: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn recorder_test_request(
+        session_key: &str,
+    ) -> crate::im_gateway::external_cli::ExternalCliRunRequest {
+        crate::im_gateway::external_cli::ExternalCliRunRequest {
+            message: "record this turn".to_string(),
+            images: Vec::new(),
+            operation: "chat".to_string(),
+            params: serde_json::Value::Null,
+            provider_id: Some("feishu-recorder".to_string()),
+            runner_id: Some("codex".to_string()),
+            session_key: Some(session_key.to_string()),
+            runtime: "external_cli".to_string(),
+            adapter: "codex".to_string(),
+            work_dir: None,
+            instructions: None,
+            adapter_config: Default::default(),
+            allow_work_dirs: Vec::new(),
+            inject_bifrost_tools: false,
+            skill_paths: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ensure_external_cli_recorder_creates_metadata_once() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let session_key = "im-recorder-created";
+        let mut session = bifrost_agent::AgentSession::new(session_key);
+        let mut recorder = None;
+
+        ensure_external_cli_session_recorder(
+            &mut session,
+            &mut recorder,
+            session_key,
+            &recorder_test_provider(),
+            "codex",
+            &recorder_test_request(session_key),
+        );
+
+        let path = recorder.as_ref().unwrap().file_path().to_path_buf();
+        drop(recorder);
+        let events = bifrost_agent::persistence::load_conversation_events(&path).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["session_start", "title_updated", "run_state_changed"]
+        );
+    }
+
+    #[test]
+    fn ensure_external_cli_recorder_rejects_an_unremovable_canonical_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let session_key = "im-recorder-invalid-path";
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let canonical =
+            bifrost_agent::persistence::canonical_conversation_path(&data_dir, session_key);
+        std::fs::create_dir_all(&canonical).unwrap();
+        let mut session = bifrost_agent::AgentSession::new(session_key);
+        let mut recorder = None;
+
+        ensure_external_cli_session_recorder(
+            &mut session,
+            &mut recorder,
+            session_key,
+            &recorder_test_provider(),
+            "codex",
+            &recorder_test_request(session_key),
+        );
+
+        assert!(recorder.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_external_cli_recorder_handles_metadata_write_failures() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let session_key = "im-recorder-readonly";
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let parent =
+            bifrost_agent::persistence::canonical_conversation_path(&data_dir, session_key)
+                .parent()
+                .unwrap()
+                .to_path_buf();
+        std::fs::create_dir_all(&parent).unwrap();
+        let original_mode = std::fs::metadata(&parent).unwrap().permissions().mode();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let mut session = bifrost_agent::AgentSession::new(session_key);
+        let mut recorder = None;
+
+        ensure_external_cli_session_recorder(
+            &mut session,
+            &mut recorder,
+            session_key,
+            &recorder_test_provider(),
+            "codex",
+            &recorder_test_request(session_key),
+        );
+
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(original_mode)).unwrap();
+        assert!(recorder.is_some());
+        assert!(!recorder.unwrap().file_path().exists());
+    }
 
     #[tokio::test]
     async fn abort_task_on_drop_cancels_spawned_runner_task() {

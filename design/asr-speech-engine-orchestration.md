@@ -427,7 +427,7 @@ Daily Docs 应直接消费 speaker-aware timeline，不再重新猜 speaker。
 
 ### 实时朗读录入
 
-声纹录入的主路径必须是实时朗读指定文本，不是上传或选择一段现成音频。Bifrost 负责生成提示文本、采集用户朗读、检查录音质量、提取 embedding，再创建或追加 speaker profile。
+声纹初始化的推荐主路径是从已转录的多人会议录音中生成无重叠、足够长的 speaker 候选片段，让用户通过试听标注「是我 / 不是我 / 跳过」，然后将多个确认片段保存为同一 identity 的多模板、多原型 profile。实时朗读指定文本保留为无历史录音时的备选路径。完整数据模型、API、质量门禁和匹配策略见 [历史录音辅助声纹初始化与多原型识别](./asr-assisted-voiceprint-enrollment.md)。
 
 推荐录入流程：
 

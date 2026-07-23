@@ -874,7 +874,7 @@
 预期结果：
 1. stream 返回 `eventType:"run_finished"`、`status:"succeeded"`，response 为 `BIFROST_IMAGE_PATH_OK`。
 2. `prompt.md` 包含 `## Attached Images`，并列出本地绝对图片路径。
-3. 图片文件位于 `agent/sessions/YYYY/MM/DD/attachments/<session-file-stem>/<runId>/images/image-1.png`，文件字节与请求图片一致。
+3. 图片文件位于 `agent/sessions/by-key/attachments/<session-file-stem>/<runId>/images/image-1.png`，文件字节与请求图片一致。
 4. `result.json.metadata["attachments.images"]` 记录图片 path、mimeType、sizeBytes 和 name。
 5. session timeline 中该 user message 带图片内容，Web History 回放能感知这一轮包含图片。
 6. 同一个 `sessionKey` 的第二轮图片路径与第一轮不同，第一轮 `result.json.metadata["attachments.images"]` 中记录的旧路径仍存在且文件字节未被第二轮覆盖。
@@ -1466,6 +1466,7 @@
 
 ## 最近执行记录
 
+- 2026-07-21：PASS — 按更新后的 TC-IEC-43/44 执行 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_external_runner_image_input.sh`；同 key 两轮 Web Chat、Trae 及 runner-call 图片均写入 `agent/sessions/by-key/attachments/session-{sha256}/<runId>/images/`，不同 run 目录隔离且旧图片未被覆盖。
 - 2026-07-15：针对 PR #394 coverage job 的 Linux `Text file busy (os error 26)` 新增并立即执行 TC-IEC-66。注入回归验证 Unix `ETXTBSY` 前两次失败后第三次成功、持续占用恰好尝试 8 次后返回、`NotFound` 仅尝试一次，并验证缺失 executable 的用户错误保留 adapter 与实际路径；本机 macOS 按平台预期过滤 Linux 真实 spawn 用例，原失败用例 `mock_app_server_accepts_live_guide_and_completes_same_turn` 输出 `1 passed`；重新构建当前源码二进制后，`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh` 输出 `[external-runner-live-guide] PASS`。Linux 持有写句柄的真实回归与 95% changed-lines / 90% workspace coverage gate 由 PR CI 在目标平台执行并作为本用例最终门禁。
 - 2026-07-15：新增并立即执行 TC-IEC-66。引用结构单元回归 `6/6` 通过，覆盖双来源、单来源、非法/混合节点、普通图片，以及独立/描述性 favicon 仍可预览；Playwright focused E2E `1/1` 通过，确认双来源 favicon 均为 `14px × 14px`、无图片预览 ID，普通正文图片仍是唯一灯箱图片，暗色主题可见。随后以 `BACKEND_PORT=9900 WEB_PORT=3015 pnpm --dir web exec vite --host 127.0.0.1 --port 3015` 代理现有正式后端，在 Codex 内置浏览器打开用户真实 session/history；当前 canonical Agent Chat 参数下共识别 14 组来源引用、15 个 favicon，首组 `Reuters+2AP News+2` 高度 24px、两个图标均为 `14px × 14px`，页面没有正文预览图片。暗色主题下引用背景为 `rgba(255, 255, 255, 0.04)`、边框为 `rgb(48, 48, 48)`，组件持续可见。未停止或替换 9900 服务，未修改系统代理。
 - 2026-07-13：针对 PR #377 自动 Review 的 Claude 显式 exec stdin 兼容问题新增并立即执行 TC-IEC-64。单元回归输出 `1 passed`；真实临时 Bifrost E2E 输出 `[external-runner-live-guide] PASS`。mock 记录两次 `claude-exec` 均带 `--input-format text` 且不含 `--replay-user-messages`，首轮 guide 返回 `delivery=queued`，两轮均返回 `EXEC_claude-exec`。

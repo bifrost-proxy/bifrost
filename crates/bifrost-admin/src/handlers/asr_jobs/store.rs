@@ -1082,7 +1082,7 @@ fn requeue_files_for_transcription_config_change(task_id: &str) -> Result<usize,
 
 fn suppress_pre_migration_failed_records(task_id: &str) -> Result<usize, String> {
     let mut files = load_file_store(task_id);
-    let marker = format!("moss_non_retryable_v{}:", env!("CARGO_PKG_VERSION"));
+    let marker = moss_non_retryable_marker_prefix();
     let mut suppressed_count = 0usize;
     for record in files.files.values_mut() {
         if record.status != FileStatus::Failed {

@@ -499,6 +499,7 @@ async fn run_directory_task_for_date(
     if let Err(error) = refresh_task_daily_summaries(&task) {
         warn!(task_id = %task.id, error = %error, "failed to generate daily summaries");
     }
+    let daily_agent_dates = completed_recording_dates_for_attempted_files(&files, &attempted_keys);
 
     // update_task_after_run persists scheduling metadata (next_run_at_ms,
     // last_error).  If it fails, the per-file results in FileStore are
@@ -519,9 +520,28 @@ async fn run_directory_task_for_date(
     };
     spawn_daily_agent_original_files_after_refresh(&updated);
     // Hook: trigger Daily Agent if configured
-    maybe_enqueue_daily_agent_after_asr_run(&updated).await;
+    maybe_enqueue_daily_agent_after_asr_run(&updated, &daily_agent_dates).await;
 
     Ok((updated, processed_now, failed_now))
+}
+
+fn completed_recording_dates_for_attempted_files(
+    files: &FileStore,
+    attempted_keys: &HashSet<String>,
+) -> Vec<String> {
+    let mut dates = attempted_keys
+        .iter()
+        .filter_map(|key| files.files.get(key))
+        .filter(|record| {
+            matches!(record.status, FileStatus::Success | FileStatus::PartialSuccess)
+                && record.output_text_path.as_ref().is_some_and(|path| path.is_file())
+        })
+        .filter_map(file_record_local_date)
+        .map(|date| date.format("%Y-%m-%d").to_string())
+        .collect::<Vec<_>>();
+    dates.sort();
+    dates.dedup();
+    dates
 }
 
 struct SpeechResourceLeaseGuard {
@@ -1515,15 +1535,29 @@ async fn transcribe_file_for_task_with_wav(
             .as_ref()
             .map(|context| context.started_at_ms);
         let moss_started = Instant::now();
-        let result = run_moss_joint_transcription(
-            runtime,
-            wav,
-            duration_ms,
-            &task.transcription_prompt,
-            hooks.pause_check,
-            file_started_at_ms,
-        )
-        .await;
+        let result = if let Some(segment_seconds) = moss_segment_seconds_from_env()
+            .filter(|seconds| duration_secs > *seconds)
+        {
+            run_segmented_moss_joint_transcription(
+                runtime,
+                wav,
+                duration_ms,
+                &task.transcription_prompt,
+                hooks.pause_check,
+                segment_seconds,
+            )
+            .await
+        } else {
+            run_moss_joint_transcription(
+                runtime,
+                wav,
+                duration_ms,
+                &task.transcription_prompt,
+                hooks.pause_check,
+                file_started_at_ms,
+            )
+            .await
+        };
         let elapsed_ms = moss_started
             .elapsed()
             .as_millis()

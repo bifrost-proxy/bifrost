@@ -56,9 +56,21 @@ PY
 )"
 
 SESSION_KEY="pagination-session"
-HISTORY_DIR="$DATA_DIR/agent/sessions/2026/05/29"
-HISTORY_FILE="$HISTORY_DIR/session-pagination-session-1780017999.jsonl"
-mkdir -p "$HISTORY_DIR"
+LEGACY_HISTORY_DIR="$DATA_DIR/agent/sessions/2026/05/29"
+LEGACY_HISTORY_FILE="$LEGACY_HISTORY_DIR/session-pagination-session-1780017999.jsonl"
+CANONICAL_HASH="$(python3 - <<PY
+import hashlib
+print(hashlib.sha256(b"$SESSION_KEY").hexdigest())
+PY
+)"
+HISTORY_DIR="$DATA_DIR/agent/sessions/by-key"
+HISTORY_FILE="$HISTORY_DIR/session-$CANONICAL_HASH.jsonl"
+ATTACHMENT_FILE="$HISTORY_DIR/attachments/session-$CANONICAL_HASH/run-1/input.jsonl"
+mkdir -p "$LEGACY_HISTORY_DIR" "$HISTORY_DIR" "$(dirname "$ATTACHMENT_FILE")"
+cat > "$LEGACY_HISTORY_FILE" <<'JSONL'
+{"timestamp":1780017800,"event_type":"user_message","session_key":"pagination-session","content":{"message":"legacy data must be discarded"}}
+JSONL
+printf '%s\n' 'jsonl attachment must survive session cleanup' > "$ATTACHMENT_FILE"
 cat > "$HISTORY_FILE" <<'JSONL'
 {"timestamp":1780017900,"event_type":"session_start","session_key":"pagination-session","content":{"source":"admin-api","work_dir":"/tmp/pagination"}}
 {"timestamp":1780017901,"event_type":"user_message","session_key":"pagination-session","content":{"message":"first user"}}
@@ -86,6 +98,23 @@ for _ in $(seq 1 80); do
 done
 
 curl --noproxy '*' -fsS "http://127.0.0.1:$PORT/_bifrost/api/system/overview" >/dev/null
+
+if [[ -e "$LEGACY_HISTORY_FILE" ]]; then
+  echo "legacy per-turn history shard still exists after startup cleanup" >&2
+  exit 1
+fi
+if [[ "$(find "$DATA_DIR/agent/sessions" -path '*/attachments' -prune -o -name '*.jsonl' -print | wc -l | tr -d ' ')" != "1" ]]; then
+  echo "session key does not own exactly one JSONL after startup migration" >&2
+  exit 1
+fi
+if [[ ! -f "$ATTACHMENT_FILE" ]]; then
+  echo "jsonl attachment was incorrectly deleted as session history" >&2
+  exit 1
+fi
+if [[ "$(wc -l < "$HISTORY_FILE" | tr -d ' ')" != "7" ]]; then
+  echo "canonical JSONL did not retain its existing events" >&2
+  exit 1
+fi
 
 BASE="http://127.0.0.1:$PORT/_bifrost/api/im-gateway/agent"
 HISTORY_PATH_ENCODED="$(python3 - <<PY

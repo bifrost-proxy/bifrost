@@ -354,7 +354,7 @@ fn native_clipboard_paste_scales_send_button_waits_for_large_prompts() {
     assert!(send_button_ready_max_wait(&large_prompt) > Duration::from_secs(30));
     assert_eq!(
         send_button_ready_retry_max_wait(&large_prompt),
-        Duration::from_secs(60)
+        Duration::from_secs(180)
     );
     assert!(native_clipboard_paste_followup_instruction().contains("刚刚粘贴或上传"));
     assert!(native_clipboard_paste_followup_instruction().contains("最终结果正文"));

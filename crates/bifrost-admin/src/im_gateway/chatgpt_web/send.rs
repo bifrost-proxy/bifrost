@@ -291,14 +291,26 @@ async fn ensure_chat_mode(cdp: &CdpClient) -> Result<(), String> {
         const style = getComputedStyle(el);
         return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
       };
-      const item = Array.from(document.querySelectorAll('[role="radio"]'))
-        .filter(visible)
-        .find((el) => (el.textContent || '').replace(/\s+/g, ' ').trim() === 'Chat');
+      const label = (el) => (el.textContent || '').replace(/\s+/g, ' ').trim();
+      const chatLabels = new Set(['Chat', '聊天']);
+      const workLabels = new Set(['Work', '工作']);
+      const radios = Array.from(document.querySelectorAll('[role="radio"]')).filter(visible);
+      const item = radios.find((el) => {
+        if (!chatLabels.has(label(el))) return false;
+        const group = el.closest('[role="group"]');
+        return !!group && radios.some((peer) =>
+          peer !== el && group.contains(peer) && workLabels.has(label(peer))
+        );
+      });
       if (!item) return { ok: false, error: 'chat_mode_control_not_found', url: location.href };
       const rect = item.getBoundingClientRect();
+      const dataState = (item.getAttribute('data-state') || '').toLowerCase();
       return {
         ok: true,
-        checked: item.getAttribute('aria-checked') === 'true',
+        checked:
+          item.getAttribute('aria-checked') === 'true' ||
+          item.getAttribute('aria-selected') === 'true' ||
+          ['on', 'checked', 'active'].includes(dataState),
         x: rect.left + rect.width / 2,
         y: rect.top + rect.height / 2
       };
@@ -537,7 +549,12 @@ pub(in crate::im_gateway::chatgpt_web) fn composer_text_injection_mode(
 pub(in crate::im_gateway::chatgpt_web) fn send_button_ready_max_wait(text: &str) -> Duration {
     if composer_text_injection_mode(text) == ComposerTextInjectionMode::NativeClipboardPaste {
         let chars = text.chars().count() as u64;
-        Duration::from_secs((30 + chars / 10_000).clamp(30, 180))
+        // ChatGPT converts very large clipboard pastes into an uploaded text
+        // attachment. The upload itself is small, but server-side parsing can
+        // keep the send button disabled for several minutes. Scale in roughly
+        // one-second-per-1k-character steps and keep a hard upper bound so a
+        // genuinely stuck upload still fails closed.
+        Duration::from_secs((30 + chars / 1_000).clamp(30, 600))
     } else {
         Duration::from_secs(10)
     }
@@ -545,7 +562,8 @@ pub(in crate::im_gateway::chatgpt_web) fn send_button_ready_max_wait(text: &str)
 
 pub(in crate::im_gateway::chatgpt_web) fn send_button_ready_retry_max_wait(text: &str) -> Duration {
     if composer_text_injection_mode(text) == ComposerTextInjectionMode::NativeClipboardPaste {
-        Duration::from_secs(60)
+        let chars = text.chars().count();
+        Duration::from_secs(if chars > 200_000 { 180 } else { 60 })
     } else {
         Duration::from_secs(15)
     }
@@ -4151,14 +4169,14 @@ mod tests {
         assert_eq!(send_button_ready_max_wait(&short), Duration::from_secs(10));
 
         let long = "a".repeat(121);
-        // chars / 10_000 = 0 here, but mode switches to paste path with min 30s
+        // chars / 1_000 = 0 here, but mode switches to paste path with min 30s
         assert_eq!(send_button_ready_max_wait(&long), Duration::from_secs(30),);
 
         let very_long = "a".repeat(2_000_000);
-        // 30 + 2000000/10000 = 230, clamped to 180
+        // 30 + 2000000/1000 exceeds the bounded upload wait.
         assert_eq!(
             send_button_ready_max_wait(&very_long),
-            Duration::from_secs(180),
+            Duration::from_secs(600),
         );
     }
 
@@ -4189,6 +4207,11 @@ mod tests {
         assert_eq!(
             send_button_ready_retry_max_wait(&long),
             Duration::from_secs(60),
+        );
+        let attachment_sized = "x".repeat(200_001);
+        assert_eq!(
+            send_button_ready_retry_max_wait(&attachment_sized),
+            Duration::from_secs(180),
         );
     }
 
@@ -5312,7 +5335,7 @@ mod coverage_boost_v2 {
     #[test]
     fn send_button_ready_max_wait_clamps_very_large_prompts() {
         let text = "x".repeat(5_000_000);
-        assert_eq!(send_button_ready_max_wait(&text), Duration::from_secs(180));
+        assert_eq!(send_button_ready_max_wait(&text), Duration::from_secs(600));
     }
 
     #[test]
@@ -5334,6 +5357,11 @@ mod coverage_boost_v2 {
         assert_eq!(
             send_button_ready_retry_max_wait(long),
             Duration::from_secs(60)
+        );
+        let attachment_sized = "x".repeat(200_001);
+        assert_eq!(
+            send_button_ready_retry_max_wait(&attachment_sized),
+            Duration::from_secs(180)
         );
     }
 

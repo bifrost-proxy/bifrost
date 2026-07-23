@@ -1049,7 +1049,9 @@ fn upgrade_command_status_with_timeout_reports_success_and_failure() {
     assert_eq!(
         command_status_with_timeout_and_heartbeat(
             Path::new("/bin/sh"),
-            &["-c", "sleep 0.08"],
+            // Other tests temporarily replace the process-wide PATH. Use an
+            // absolute executable so parallel runs cannot make this probe fail.
+            &["-c", "/bin/sleep 0.08"],
             Duration::from_secs(1),
             Duration::from_millis(10),
         )
@@ -1059,7 +1061,7 @@ fn upgrade_command_status_with_timeout_reports_success_and_failure() {
 
     let output = command_output_with_timeout_and_heartbeat(
         Path::new("/bin/sh"),
-        &["-c".to_string(), "sleep 0.08; echo ready".to_string()],
+        &["-c".to_string(), "/bin/sleep 0.08; echo ready".to_string()],
         Duration::from_secs(1),
         Duration::from_millis(10),
     )
@@ -1088,7 +1090,7 @@ fn upgrade_command_status_with_timeout_does_not_block_on_hung_child() {
     let started = Instant::now();
     let status = command_status_with_timeout(
         Path::new("/bin/sh"),
-        &["-c", "sleep 5"],
+        &["-c", "/bin/sleep 5"],
         Duration::from_millis(50),
     )
     .unwrap();

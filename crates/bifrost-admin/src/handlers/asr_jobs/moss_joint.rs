@@ -1,7 +1,11 @@
 const MOSS_RUNTIME_ASSET_STEM: &str = "moss-joint-runtime";
+const MOSS_RUNTIME_VERSION_RAW: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../scripts/asr/moss-runtime-version.txt"
+));
 const MOSS_MODEL_ID: &str = "MOSS-Transcribe-Diarize-MLX-8bit";
 const MOSS_VERIFICATION_FILE: &str = "verification.json";
-const MOSS_VERIFICATION_SCHEMA_VERSION: u8 = 4;
+const MOSS_VERIFICATION_SCHEMA_VERSION: u8 = 5;
 const MOSS_MODEL_FILE: &str = "model.safetensors";
 const MOSS_MODEL_URL: &str =
     "https://huggingface.co/majentik/MOSS-Transcribe-Diarize-MLX-8bit/resolve/90c3a1ab78fa56e47e1493ddea48e3ababaf2f71/model.safetensors";
@@ -27,11 +31,18 @@ const MOSS_CONTEXT_TOKENS: u64 = 131_072;
 const MOSS_CONTEXT_MARGIN_TOKENS: u64 = 2_048;
 const MOSS_AUDIO_TOKENS_PER_SECOND: u64 = 13;
 const MOSS_OUTPUT_TOKENS_PER_SECOND: u64 = 20;
+const MOSS_RESCUE_OUTPUT_TOKENS_PER_SECOND: u64 = 30;
+const MOSS_RESCUE_SEGMENT_SECONDS: [u64; 3] = [60, 300, 600];
+const MOSS_RESCUE_FALLBACK_SEGMENT_SECONDS: [u64; 3] = [60, 30, 10];
+const MOSS_RESCUE_MAX_GAP_MS: u64 = 60_000;
 const MOSS_MIN_OUTPUT_TOKENS: u64 = 5_120;
 const MOSS_MAX_WHOLE_FILE_SECONDS: u64 = 3_300;
 const MOSS_MAX_RUNTIME_RTF: f64 = 0.5;
+const MOSS_RESCUE_RUNTIME_RTFS: [f64; 3] = [1.0, 2.0, 3.0];
 const MOSS_MIN_AUDIO_DURATION_MS: u64 = 10_000;
 const MOSS_RUNTIME_SELF_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS: usize = 3;
+const MOSS_RESOURCE_DOWNLOAD_RETRY_DELAY_MS: u64 = 500;
 
 static MOSS_INIT_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -83,6 +94,7 @@ struct MossModelSpec {
 #[derive(Debug, Deserialize, Serialize)]
 struct MossVerificationMarker {
     schema_version: u8,
+    runtime_version: String,
     model_bytes: u64,
     model_sha256: String,
     model_modified_ms: u64,
@@ -98,6 +110,12 @@ struct MossComponentStatus {
     runtime_valid: bool,
     model_weight_valid: bool,
     model_metadata_valid: bool,
+}
+
+#[derive(Debug, Default)]
+struct MossQuarantineCleanup {
+    removed: usize,
+    errors: Vec<String>,
 }
 
 impl MossComponentStatus {
@@ -153,11 +171,141 @@ fn moss_verification_path(asr_home: &Path) -> PathBuf {
     moss_runtime_dir(asr_home).join(MOSS_VERIFICATION_FILE)
 }
 
+fn moss_quarantine_timestamp_is_valid(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn moss_root_quarantine_name_is_managed(name: &str) -> bool {
+    name.strip_prefix("runtime.invalid-")
+        .is_some_and(moss_quarantine_timestamp_is_valid)
+        || name
+            .strip_prefix(&format!("{MOSS_RUNTIME_ASSET_STEM}-v"))
+            .and_then(|suffix| suffix.rsplit_once(".zip.invalid-"))
+            .is_some_and(|(asset, timestamp)| {
+                asset
+                    .strip_suffix("-aarch64-apple-darwin")
+                    .is_some_and(|version| {
+                        !version.is_empty()
+                            && version.bytes().all(|byte| {
+                                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-')
+                            })
+                    })
+                    && moss_quarantine_timestamp_is_valid(timestamp)
+            })
+}
+
+fn moss_model_quarantine_name_is_managed(name: &str) -> bool {
+    name.strip_prefix(&format!("{MOSS_MODEL_FILE}.invalid-"))
+        .is_some_and(moss_quarantine_timestamp_is_valid)
+}
+
+fn remove_moss_quarantine_entries(
+    directory: &Path,
+    is_managed: fn(&str) -> bool,
+    cleanup: &mut MossQuarantineCleanup,
+) {
+    match std::fs::symlink_metadata(directory) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => {
+            cleanup.errors.push(format!(
+                "refuse to scan non-directory MOSS quarantine root {}",
+                directory.display()
+            ));
+            return;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            cleanup.errors.push(format!(
+                "inspect MOSS quarantine directory {}: {error}",
+                directory.display()
+            ));
+            return;
+        }
+    }
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) => {
+            cleanup.errors.push(format!(
+                "read MOSS quarantine directory {}: {error}",
+                directory.display()
+            ));
+            return;
+        }
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !is_managed(&name) {
+            continue;
+        }
+        let path = entry.path();
+        let result = std::fs::symlink_metadata(&path).and_then(|metadata| {
+            if metadata.file_type().is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            }
+        });
+        match result {
+            Ok(()) => cleanup.removed += 1,
+            Err(error) => cleanup.errors.push(format!(
+                "remove obsolete MOSS quarantine {}: {error}",
+                path.display()
+            )),
+        }
+    }
+}
+
+fn cleanup_moss_quarantined_resources_sync(asr_home: &Path) -> MossQuarantineCleanup {
+    let root = moss_runtime_dir(asr_home);
+    let mut cleanup = MossQuarantineCleanup::default();
+    remove_moss_quarantine_entries(
+        &root,
+        moss_root_quarantine_name_is_managed,
+        &mut cleanup,
+    );
+    remove_moss_quarantine_entries(
+        &root.join("model"),
+        moss_model_quarantine_name_is_managed,
+        &mut cleanup,
+    );
+    cleanup
+}
+
+async fn cleanup_moss_quarantined_resources(asr_home: &Path) {
+    let asr_home = asr_home.to_path_buf();
+    match tokio::task::spawn_blocking(move || cleanup_moss_quarantined_resources_sync(&asr_home))
+        .await
+    {
+        Ok(cleanup) => {
+            if cleanup.removed > 0 {
+                tracing::info!(
+                    removed = cleanup.removed,
+                    "removed obsolete MOSS quarantined resources"
+                );
+            }
+            for error in cleanup.errors {
+                warn!(error, "MOSS quarantine cleanup will be retried later");
+            }
+        }
+        Err(error) => warn!(%error, "join MOSS quarantine cleanup task failed"),
+    }
+}
+
+fn moss_runtime_version() -> &'static str {
+    MOSS_RUNTIME_VERSION_RAW.trim()
+}
+
+fn moss_runtime_release_tag() -> String {
+    format!("moss-runtime-v{}", moss_runtime_version())
+}
+
 fn moss_runtime_asset_name_for(os: &str, arch: &str) -> Result<String, String> {
     if os == "macos" && arch == "aarch64" {
         Ok(format!(
             "{MOSS_RUNTIME_ASSET_STEM}-v{}-aarch64-apple-darwin.zip",
-            env!("CARGO_PKG_VERSION")
+            moss_runtime_version()
         ))
     } else {
         Err(format!(
@@ -193,18 +341,20 @@ fn moss_runtime_asset_name() -> Result<String, String> {
 fn moss_runtime_url(asset: &str) -> String {
     std::env::var("BIFROST_MOSS_RUNTIME_URL").unwrap_or_else(|_| {
         format!(
-            "https://github.com/bifrost-proxy/bifrost/releases/download/v{}/{asset}",
-            env!("CARGO_PKG_VERSION")
+            "https://github.com/bifrost-proxy/bifrost/releases/download/{}/{asset}",
+            moss_runtime_release_tag()
         )
     })
 }
 
-fn moss_runtime_checksums_url() -> String {
-    format!(
-        "https://github.com/bifrost-proxy/bifrost/releases/download/v{}/bifrost-v{}-checksums.txt",
-        env!("CARGO_PKG_VERSION"),
-        env!("CARGO_PKG_VERSION")
-    )
+fn moss_runtime_checksum_url(asset: &str) -> String {
+    std::env::var("BIFROST_MOSS_RUNTIME_CHECKSUM_URL").unwrap_or_else(|_| {
+        format!(
+            "https://github.com/bifrost-proxy/bifrost/releases/download/{}/{}.sha256",
+            moss_runtime_release_tag(),
+            asset
+        )
+    })
 }
 
 fn normalize_sha256(value: &str, label: &str) -> Result<String, String> {
@@ -255,7 +405,7 @@ async fn expected_moss_runtime_checksum(asset: &str) -> Result<String, String> {
             "BIFROST_MOSS_RUNTIME_SHA256 is required with BIFROST_MOSS_RUNTIME_URL".to_string(),
         );
     }
-    download_runtime_checksum(moss_runtime_checksums_url(), asset).await
+    download_runtime_checksum(moss_runtime_checksum_url(asset), asset).await
 }
 
 async fn moss_runtime_source_for_asset(asset: String) -> Result<MossRuntimeSource, String> {
@@ -281,14 +431,15 @@ fn moss_model_spec() -> MossModelSpec {
 fn moss_output_token_budget(duration_ms: u64) -> Result<u32, String> {
     let duration_seconds = duration_ms.div_ceil(1_000).max(1);
     if duration_seconds > MOSS_MAX_WHOLE_FILE_SECONDS {
-        return Err(moss_non_retryable_runtime_error(&format!(
+        return Err(moss_fixed_non_retryable_runtime_error(&format!(
             "moss_audio_too_long: whole-file joint transcription currently supports at most {} minutes; audio is {} minutes",
             MOSS_MAX_WHOLE_FILE_SECONDS / 60,
             duration_seconds.div_ceil(60)
         )));
     }
+    let output_tokens_per_second = moss_output_tokens_per_second_from_env();
     let wanted = duration_seconds
-        .saturating_mul(MOSS_OUTPUT_TOKENS_PER_SECOND)
+        .saturating_mul(output_tokens_per_second)
         .max(MOSS_MIN_OUTPUT_TOKENS);
     let input = duration_seconds.saturating_mul(MOSS_AUDIO_TOKENS_PER_SECOND);
     let available = MOSS_CONTEXT_TOKENS
@@ -299,22 +450,22 @@ fn moss_output_token_budget(duration_ms: u64) -> Result<u32, String> {
 
 fn validate_moss_audio_input(wav: &Path, duration_ms: u64) -> Result<(), String> {
     if duration_ms == 0 {
-        return Err(moss_non_retryable_runtime_error(
+        return Err(moss_fixed_non_retryable_runtime_error(
             "moss_duration_unavailable: audio duration is required for the 0.5x runtime guard"
         ));
     }
     if duration_ms < MOSS_MIN_AUDIO_DURATION_MS {
-        return Err(moss_non_retryable_runtime_error(&format!(
+        return Err(moss_fixed_non_retryable_runtime_error(&format!(
             "moss_audio_too_short: joint speaker-aware transcription requires at least {:.1} seconds under the 0.5x runtime SLA; audio_ms={duration_ms}",
             MOSS_MIN_AUDIO_DURATION_MS as f64 / 1_000.0
         )));
     }
     match compute_wav_rms_energy(wav) {
-        Some(rms) if rms < SILENCE_RMS_THRESHOLD => Err(moss_non_retryable_runtime_error(&format!(
+        Some(rms) if rms < SILENCE_RMS_THRESHOLD => Err(moss_fixed_non_retryable_runtime_error(&format!(
             "moss_audio_silent: normalized audio RMS {rms:.2} is below the safe speech threshold {SILENCE_RMS_THRESHOLD:.2}"
         ))),
         Some(_) => Ok(()),
-        None => Err(moss_non_retryable_runtime_error(
+        None => Err(moss_fixed_non_retryable_runtime_error(
             "moss_audio_invalid: normalized WAV energy could not be measured",
         )),
     }
@@ -324,7 +475,8 @@ fn moss_remaining_runtime_budget(
     duration_ms: u64,
     file_started_at_ms: Option<u64>,
 ) -> Result<Duration, String> {
-    let limit_ms = ((duration_ms as f64) * MOSS_MAX_RUNTIME_RTF).floor() as u64;
+    let max_runtime_rtf = moss_max_runtime_rtf_from_env();
+    let limit_ms = ((duration_ms as f64) * max_runtime_rtf).floor() as u64;
     let elapsed_ms = file_started_at_ms
         .map(|started_at_ms| now_ms().saturating_sub(started_at_ms))
         .unwrap_or(0);
@@ -332,17 +484,118 @@ fn moss_remaining_runtime_budget(
     if remaining_ms == 0 {
         return Err(format!(
             "moss_rtf_exceeded: end-to-end processing exhausted {:.1}x audio duration before inference (limit_ms={limit_ms}, elapsed_ms={elapsed_ms}, audio_ms={duration_ms})",
-            MOSS_MAX_RUNTIME_RTF
+            max_runtime_rtf
         ));
     }
     Ok(Duration::from_millis(remaining_ms))
 }
 
-fn moss_non_retryable_runtime_error(error: &str) -> String {
-    format!(
-        "moss_non_retryable_v{}: {error}",
-        env!("CARGO_PKG_VERSION")
+fn moss_max_runtime_rtf(value: Option<&str>) -> f64 {
+    value
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .filter(|value| {
+            MOSS_RESCUE_RUNTIME_RTFS
+                .iter()
+                .any(|allowed| (*value - allowed).abs() < f64::EPSILON)
+        })
+        .unwrap_or(MOSS_MAX_RUNTIME_RTF)
+}
+
+fn moss_max_runtime_rtf_from_env() -> f64 {
+    moss_max_runtime_rtf(std::env::var("BIFROST_MOSS_MAX_RUNTIME_RTF").ok().as_deref())
+}
+
+fn moss_output_tokens_per_second(value: Option<&str>) -> u64 {
+    value
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| *value == MOSS_RESCUE_OUTPUT_TOKENS_PER_SECOND)
+        .unwrap_or(MOSS_OUTPUT_TOKENS_PER_SECOND)
+}
+
+fn moss_output_tokens_per_second_from_env() -> u64 {
+    moss_output_tokens_per_second(
+        std::env::var("BIFROST_MOSS_OUTPUT_TOKENS_PER_SECOND")
+            .ok()
+            .as_deref(),
     )
+}
+
+fn moss_segment_seconds(value: Option<&str>) -> Option<u64> {
+    value
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| MOSS_RESCUE_SEGMENT_SECONDS.contains(value))
+}
+
+fn moss_segment_seconds_from_env() -> Option<u64> {
+    moss_segment_seconds(
+        std::env::var("BIFROST_MOSS_SEGMENT_SECONDS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn moss_allow_gap_markers(value: Option<&str>) -> bool {
+    value.is_some_and(|raw| raw.trim() == "1")
+}
+
+fn moss_allow_gap_markers_from_env() -> bool {
+    moss_allow_gap_markers(
+        std::env::var("BIFROST_MOSS_ALLOW_GAP_MARKERS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn moss_base_non_retryable_marker_prefix() -> String {
+    format!("moss_non_retryable_v{}:", env!("CARGO_PKG_VERSION"))
+}
+
+fn moss_non_retryable_marker_prefix_for(
+    max_runtime_rtf: f64,
+    output_tps: u64,
+    segment_seconds: Option<u64>,
+    allow_gap_markers: bool,
+) -> String {
+    if (max_runtime_rtf - MOSS_MAX_RUNTIME_RTF).abs() < f64::EPSILON
+        && output_tps == MOSS_OUTPUT_TOKENS_PER_SECOND
+        && segment_seconds.is_none()
+        && !allow_gap_markers
+    {
+        moss_base_non_retryable_marker_prefix()
+    } else {
+        let segment = segment_seconds
+            .map(|seconds| {
+                format!(
+                    "_seg{seconds}adaptive{}to{}to{}",
+                    MOSS_RESCUE_FALLBACK_SEGMENT_SECONDS[0],
+                    MOSS_RESCUE_FALLBACK_SEGMENT_SECONDS[1],
+                    MOSS_RESCUE_FALLBACK_SEGMENT_SECONDS[2]
+                )
+            })
+            .unwrap_or_default();
+        let gap = if allow_gap_markers { "_gaps60" } else { "" };
+        format!(
+            "moss_non_retryable_v{}_rtf{max_runtime_rtf:.1}_tps{output_tps}{segment}{gap}:",
+            env!("CARGO_PKG_VERSION")
+        )
+    }
+}
+
+fn moss_non_retryable_marker_prefix() -> String {
+    moss_non_retryable_marker_prefix_for(
+        moss_max_runtime_rtf_from_env(),
+        moss_output_tokens_per_second_from_env(),
+        moss_segment_seconds_from_env(),
+        moss_allow_gap_markers_from_env(),
+    )
+}
+
+fn moss_non_retryable_runtime_error(error: &str) -> String {
+    format!("{} {error}", moss_non_retryable_marker_prefix())
+}
+
+fn moss_fixed_non_retryable_runtime_error(error: &str) -> String {
+    format!("{} {error}", moss_base_non_retryable_marker_prefix())
 }
 
 fn moss_runtime_error_is_deterministic(error: &str) -> bool {
@@ -366,7 +619,10 @@ fn moss_failure_is_non_retryable_for_unchanged_source(
     let Some(error) = record.error.as_deref() else {
         return false;
     };
-    let versioned_prefix = format!("moss_non_retryable_v{}:", env!("CARGO_PKG_VERSION"));
+    let versioned_prefix = moss_non_retryable_marker_prefix();
+    let base_prefix = moss_base_non_retryable_marker_prefix();
+    let same_version_rescue_prefix =
+        format!("moss_non_retryable_v{}_", env!("CARGO_PKG_VERSION"));
     // The unversioned forms only existed in the local 0.0.156 pre-release
     // validation. Do not carry this compatibility forward: a later runtime
     // version must be allowed to retry the source with improved decoding.
@@ -376,7 +632,22 @@ fn moss_failure_is_non_retryable_for_unchanged_source(
             || error.contains("moss_audio_silent:")
             || error.contains("moss_audio_invalid:")
             || moss_runtime_error_is_deterministic(error));
-    let deterministic = error.starts_with(&versioned_prefix) || legacy_unversioned;
+    let fixed_source_error = error.starts_with(&base_prefix)
+        && (error.contains("moss_duration_unavailable:")
+            || error.contains("moss_audio_too_long:")
+            || error.contains("moss_audio_too_short:")
+            || error.contains("moss_audio_silent:")
+            || error.contains("moss_audio_invalid:")
+            || error.contains("preserved pre-migration failure:"));
+    let deterministic = error.starts_with(&versioned_prefix)
+        || fixed_source_error
+        // Scheduled runs return to the default profile after a supervised
+        // rescue. Do not let that downgrade retry the same unchanged source
+        // forever. A non-default profile still matches only its exact
+        // signature, so intentional rescue escalation remains possible.
+        || (versioned_prefix == base_prefix
+            && error.starts_with(&same_version_rescue_prefix))
+        || legacy_unversioned;
     deterministic
         && record.source_size.is_some()
         && record.source_modified_ms.is_some()
@@ -523,6 +794,7 @@ fn write_moss_verification_marker(
         .ok_or_else(|| format!("read MOSS model mtime {}", paths.model.display()))?;
     let marker = MossVerificationMarker {
         schema_version: MOSS_VERIFICATION_SCHEMA_VERSION,
+        runtime_version: moss_runtime_version().to_string(),
         model_bytes: spec.bytes,
         model_sha256: spec.sha256.clone(),
         model_modified_ms,
@@ -548,6 +820,7 @@ fn moss_verified_component_status(
         .and_then(|bytes| serde_json::from_slice::<MossVerificationMarker>(&bytes).ok());
     let Some(marker) = marker.filter(|marker| {
         marker.schema_version == MOSS_VERIFICATION_SCHEMA_VERSION
+            && marker.runtime_version == moss_runtime_version()
             && marker.model_bytes == spec.bytes
             && marker.model_sha256 == spec.sha256
     }) else {
@@ -765,17 +1038,43 @@ async fn download_moss_resource(
     let client = bifrost_core::outbound_reqwest_client_builder()
         .build()
         .map_err(|error| format!("build MOSS download client: {error}"))?;
-    crate::resource_download::download_with_resume(
-        &client,
-        crate::resource_download::DownloadRequest {
-            url,
-            dest,
-            label: label.to_string(),
-        },
-        progress_tx,
-    )
-    .await
-    .map(|_| ())
+    let request = crate::resource_download::DownloadRequest {
+        url,
+        dest,
+        label: label.to_string(),
+    };
+    let mut last_error = None;
+    for attempt in 1..=MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS {
+        match crate::resource_download::download_with_resume(
+            &client,
+            request.clone(),
+            progress_tx.clone(),
+        )
+        .await
+        {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                warn!(
+                    label,
+                    attempt,
+                    max_attempts = MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS,
+                    error,
+                    "MOSS resource download attempt failed"
+                );
+                last_error = Some(error);
+            }
+        }
+        if attempt < MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS {
+            tokio::time::sleep(Duration::from_millis(
+                MOSS_RESOURCE_DOWNLOAD_RETRY_DELAY_MS * attempt as u64,
+            ))
+            .await;
+        }
+    }
+    Err(format!(
+        "download {label} failed after {MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS} attempts: {}",
+        last_error.unwrap_or_else(|| "unknown download error".to_string())
+    ))
 }
 
 fn moss_runtime_help_is_valid(stdout: &[u8], stderr: &[u8]) -> bool {
@@ -844,6 +1143,7 @@ async fn moss_runtime_status(
         .and_then(|bytes| serde_json::from_slice::<MossVerificationMarker>(&bytes).ok())
         .filter(|marker| {
             marker.schema_version == MOSS_VERIFICATION_SCHEMA_VERSION
+                && marker.runtime_version == moss_runtime_version()
                 && marker.model_bytes == model_spec.bytes
                 && marker.model_sha256 == model_spec.sha256
         });
@@ -1012,25 +1312,24 @@ async fn ensure_moss_joint_runtime_with_spec_and_progress(
     let _guard = MOSS_INIT_LOCK.lock().await;
     let paths = moss_runtime_paths(asr_home);
     let component_status = moss_runtime_status(asr_home, &paths, &model_spec).await;
-    if component_status.all_valid() {
-        write_moss_verification_marker(asr_home, &paths, &model_spec)?;
-        return Ok(paths);
+    if !component_status.all_valid() {
+        let runtime_source = match runtime_source {
+            Some(source) => source,
+            None => moss_runtime_source_for_asset(moss_runtime_asset_name()?).await?,
+        };
+        initialize_moss_joint_runtime(
+            asr_home,
+            task_id,
+            &paths,
+            component_status,
+            &runtime_source,
+            &model_spec,
+            progress_tx,
+        )
+        .await?;
     }
-    let runtime_source = match runtime_source {
-        Some(source) => source,
-        None => moss_runtime_source_for_asset(moss_runtime_asset_name()?).await?,
-    };
-    initialize_moss_joint_runtime(
-        asr_home,
-        task_id,
-        &paths,
-        component_status,
-        &runtime_source,
-        &model_spec,
-        progress_tx,
-    )
-    .await?;
     write_moss_verification_marker(asr_home, &paths, &model_spec)?;
+    cleanup_moss_quarantined_resources(asr_home).await;
     Ok(paths)
 }
 
@@ -1386,9 +1685,10 @@ async fn run_moss_joint_transcription(
                 });
             }
             _ = &mut deadline => {
+                let max_runtime_rtf = moss_max_runtime_rtf_from_env();
                 return Err(format!(
                     "moss_rtf_exceeded: end-to-end processing exceeded {:.1}x audio duration (remaining_limit_ms={}, audio_ms={duration_ms})",
-                    MOSS_MAX_RUNTIME_RTF,
+                    max_runtime_rtf,
                     max_runtime.as_millis()
                 ));
             }
@@ -1399,4 +1699,193 @@ async fn run_moss_joint_transcription(
             }
         }
     }
+}
+
+async fn run_moss_rescue_interval(
+    runtime: &MossRuntimePaths,
+    source_wav: &Path,
+    interval_wav: &Path,
+    start_ms: u64,
+    end_ms: u64,
+    prompt: &str,
+    pause_check: Option<&PauseCheckCallback<'_>>,
+) -> Result<Option<crate::handlers::asr_streaming::WholeFileTranscription>, String> {
+    ffmpeg_cut_wav_ms(source_wav, interval_wav, start_ms, end_ms, pause_check).await?;
+    if compute_wav_rms_energy(interval_wav).is_some_and(|rms| rms < SILENCE_RMS_THRESHOLD) {
+        return Ok(None);
+    }
+    run_moss_joint_transcription(
+        runtime,
+        interval_wav,
+        end_ms.saturating_sub(start_ms),
+        prompt,
+        pause_check,
+        None,
+    )
+    .await
+    .map(Some)
+}
+
+fn append_offset_moss_segments(
+    output: &mut Vec<bifrost_asr::transcription::TranscriptionSegment>,
+    result: crate::handlers::asr_streaming::WholeFileTranscription,
+    offset_ms: u64,
+) {
+    output.extend(result.structured.segments.into_iter().map(|mut segment| {
+        segment.start_ms = segment.start_ms.saturating_add(offset_ms);
+        segment.end_ms = segment.end_ms.saturating_add(offset_ms);
+        segment
+    }));
+}
+
+async fn run_segmented_moss_joint_transcription(
+    runtime: &MossRuntimePaths,
+    wav: &Path,
+    duration_ms: u64,
+    prompt: &str,
+    pause_check: Option<&PauseCheckCallback<'_>>,
+    segment_seconds: u64,
+) -> Result<crate::handlers::asr_streaming::WholeFileTranscription, String> {
+    let segment_ms = segment_seconds.saturating_mul(1_000);
+    if segment_ms == 0 || duration_ms <= segment_ms {
+        return run_moss_joint_transcription(
+            runtime,
+            wav,
+            duration_ms,
+            prompt,
+            pause_check,
+            None,
+        )
+        .await;
+    }
+
+    let temp = tempfile::tempdir()
+        .map_err(|error| format!("create MOSS segmented rescue temp dir: {error}"))?;
+    let mut structured_segments = Vec::new();
+    let mut unresolved_gap_ms = 0_u64;
+    let mut intervals = VecDeque::new();
+    let mut planned_start_ms = 0_u64;
+    while planned_start_ms < duration_ms {
+        let mut planned_end_ms = planned_start_ms.saturating_add(segment_ms).min(duration_ms);
+        if duration_ms.saturating_sub(planned_end_ms) < MOSS_MIN_AUDIO_DURATION_MS {
+            planned_end_ms = duration_ms;
+        }
+        intervals.push_back((planned_start_ms, planned_end_ms));
+        planned_start_ms = planned_end_ms;
+    }
+
+    let mut interval_index = 0_usize;
+    while let Some((segment_start_ms, segment_end_ms)) = intervals.pop_front() {
+        if pause_check.is_some_and(|check| check()) {
+            return Err(ASR_TASK_PAUSED_MESSAGE.to_string());
+        }
+        let segment_wav = temp.path().join(format!("segment-{interval_index:04}.wav"));
+        let result = run_moss_rescue_interval(
+            runtime,
+            wav,
+            &segment_wav,
+            segment_start_ms,
+            segment_end_ms,
+            prompt,
+            pause_check,
+        )
+        .await;
+
+        match result {
+            Ok(Some(result)) => {
+                append_offset_moss_segments(&mut structured_segments, result, segment_start_ms)
+            }
+            Ok(None) => {}
+            Err(error) if moss_runtime_error_is_deterministic(&error) => {
+                let interval_duration_ms = segment_end_ms.saturating_sub(segment_start_ms);
+                let next_seconds = MOSS_RESCUE_FALLBACK_SEGMENT_SECONDS
+                    .iter()
+                    .copied()
+                    .find(|seconds| {
+                        interval_duration_ms
+                            >= seconds
+                                .saturating_mul(1_000)
+                                .saturating_add(MOSS_MIN_AUDIO_DURATION_MS)
+                    });
+                let Some(next_seconds) = next_seconds else {
+                    if moss_allow_gap_markers_from_env()
+                        && unresolved_gap_ms.saturating_add(interval_duration_ms)
+                            <= MOSS_RESCUE_MAX_GAP_MS
+                    {
+                        unresolved_gap_ms = unresolved_gap_ms.saturating_add(interval_duration_ms);
+                        structured_segments.push(
+                            bifrost_asr::transcription::TranscriptionSegment {
+                                start_ms: segment_start_ms,
+                                end_ms: segment_end_ms,
+                                text: format!(
+                                    "[MOSS 无法可靠转录：{:.3}-{:.3} 秒片段触发确定性退化输出]",
+                                    segment_start_ms as f64 / 1_000.0,
+                                    segment_end_ms as f64 / 1_000.0
+                                ),
+                                speaker: Some("UNRESOLVED".to_string()),
+                                overlap: false,
+                            },
+                        );
+                        interval_index += 1;
+                        continue;
+                    }
+                    return Err(format!(
+                        "MOSS adaptive rescue minimum interval ({:.3}-{:.3}s): {error}",
+                        segment_start_ms as f64 / 1_000.0,
+                        segment_end_ms as f64 / 1_000.0
+                    ));
+                };
+                let next_ms = next_seconds.saturating_mul(1_000);
+                let mut children = Vec::new();
+                let mut child_start_ms = segment_start_ms;
+                while child_start_ms < segment_end_ms {
+                    let mut child_end_ms = child_start_ms
+                        .saturating_add(next_ms)
+                        .min(segment_end_ms);
+                    if segment_end_ms.saturating_sub(child_end_ms) < MOSS_MIN_AUDIO_DURATION_MS {
+                        child_end_ms = segment_end_ms;
+                    }
+                    children.push((child_start_ms, child_end_ms));
+                    child_start_ms = child_end_ms;
+                }
+                for child in children.into_iter().rev() {
+                    intervals.push_front(child);
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "MOSS segmented rescue chunk {} ({:.3}-{:.3}s): {error}",
+                    interval_index + 1,
+                    segment_start_ms as f64 / 1_000.0,
+                    segment_end_ms as f64 / 1_000.0
+                ));
+            }
+        }
+        interval_index += 1;
+    }
+
+    if structured_segments.is_empty() {
+        return Err(moss_non_retryable_runtime_error(
+            "MOSS segmented rescue returned no positive-duration speaker-aware segments",
+        ));
+    }
+    let text = structured_segments
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let segments = structured_segments
+        .iter()
+        .map(|segment| (segment.start_ms, segment.end_ms, segment.text.clone()))
+        .collect();
+    Ok(crate::handlers::asr_streaming::WholeFileTranscription {
+        text: text.clone(),
+        segments,
+        structured: bifrost_asr::transcription::StructuredTranscription {
+            text,
+            segments: structured_segments,
+            finish_reason: bifrost_asr::transcription::TranscriptionFinishReason::Completed,
+            usage: None,
+        },
+    })
 }

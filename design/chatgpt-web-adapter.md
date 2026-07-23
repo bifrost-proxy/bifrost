@@ -503,6 +503,7 @@ Mock ChatGPT Web server 覆盖 `accounts/check`（logged in / guest / challenge�
 - 写请求依赖浏览器环境，native HTTP replay 已验证会触发风控；写路径强制走 headless browser-context / 真实前端触发。
 - 无 GUI 设备无法自动弹窗，必须提供 WebUI 登录入口和明确错误。
 - headless 执行仍可能遇到 Cloudflare/challenge、composer 缺失、send button disabled；必须 fail-closed 并返回脱敏诊断。
+- ChatGPT 的界面模式开关会随账号语言显示为 `Chat / Work` 或 `聊天 / 工作`，并可能用 `data-state=on` 而不是 `aria-checked=true` 表示选中。适配器必须在同一个 `role=group` 内同时识别这对互斥选项，避免把 Project 的 `聊天 / 来源` 标签页误认为界面模式开关；找不到唯一可验证的模式控件时继续 fail-closed，且不得提交 Prompt。
 - 同一设备多账号切换时必须检测 account fingerprint，避免旧账号登录态误用到新 run。
 - WebSocket 增量输出与轮询等待属于同一个 `chatgpt_web` adapter 能力；即使增量不可用，等待最终结果必须可靠。
 

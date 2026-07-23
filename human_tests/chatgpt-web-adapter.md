@@ -811,8 +811,25 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 - 纯图片的 role-less assistant section 继续使用生成图片完成规则，不被 text-only 临时 shell 门禁误伤。
 - `result.json.response` 和 `last_message.md` 必须是正式 assistant 的完整结果，不是“正在搜索…”或“我先按…筛选…”这类过渡内容。
 
+### TC-CWA-36：中文界面的“聊天 / 工作”模式开关可验证且不会误认 Project 标签页
+
+**前置条件**：共享 ChatGPT 浏览器已登录，账号界面语言为中文；打开一个同时显示顶部 `聊天 / 工作` 模式开关和 Project 内 `聊天 / 来源` 标签页的 Project 页面。
+
+**操作步骤**：
+1. 在 DevTools 中确认顶部两个按钮使用 `role=radio`，文字分别为 `聊天`、`工作`，共同位于一个 `role=group`；记录 `聊天` 当前的 `data-state`。
+2. 用配置 `chatgpt.interfaceMode=chat`、`chatgpt.model=pro` 执行一个只回复固定短文本的真实 ChatGPT Web run。
+3. 若顶部 `聊天` 已选中，确认适配器不点击 Project 内的 `聊天` 标签；若顶部 `工作` 被选中，先切回 `聊天` 并验证状态，再提交 Prompt。
+4. 执行 `bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh`。
+
+**预期结果**：
+- 中英文 `Chat / Work`、`聊天 / 工作` 均可识别。
+- `data-state=on`、`aria-checked=true` 或 `aria-selected=true` 任一明确状态都可验证为已选中。
+- 只有同一 `role=group` 内同时存在 Chat 与 Work 对应选项时才接受该控件，Project 的 `聊天 / 来源` 标签页不会被误认。
+- 模式控件缺失或选中状态无法验证时，run 在发送前 fail-closed，Prompt 不会被提交。
+
 ## 真实执行记录
 
+- 2026-07-24：执行 TC-CWA-36 与大文本附件等待回归通过。中文 ChatGPT 新界面顶部模式控件使用同一 `role=group` 中的 `role=radio`“聊天 / 工作”，选中项以 `data-state=on` 表示；修复后 2026-07-18 的 `research_fanout` 在“日报研究”Project 内连续完成 7 个 Pro conversation，没有误点 Project 的“聊天 / 来源”标签。随后 2026-07-23 的 384KB 合并转写首次因 ChatGPT 把剪贴板转换为“已粘贴的文本”附件且发送按钮仍 disabled 而失败；把首次等待按字符数扩展到 30–600 秒、超过 200k 字符的重试等待设为 180 秒后，`daily_report` run `1784829274278-c7eaf378-09bc-45ef-aca6-cd6e857cb295` 成功，后续 summary、todo、research 全链路完成。`send_button_ready_max_wait_short_and_long`、附件级重试等待定向单测及 `bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh` 均通过。
 - 2026-07-15：按用户要求追加执行 TC-CWA-34 正式 9900 服务验证。先用任务 API 将正在运行的 ASR 任务 `735775510b384fff8903d9c6fc54f1a3` 安全暂停，安装当前 `target/debug/bifrost` 到 `~/.local/bin/bifrost`（安装前后 SHA-256 与构建产物一致），重启正式服务为 PID `61485` 后恢复 ASR；恢复后进度重新进入 `running`，未把后台任务遗留为 paused。随后在正式端口执行 runner `gpt` 新会话，prompt 为“晚上好，给我整理下今日要闻”，并要求联网检索、按国内/国际/科技 AI/财经四板块输出完整结果。正式 run `1784046993864-e65176e7-a1a2-4cf9-9359-fe5b60c88b98`、conversation `6a56659f-9ad4-83ec-a437-39fdc87efe01` 命中 `eventTypes=["patch","resume_conversation_token","stream_handoff","browser_ui"]`；运行约 31 秒时仍保持 running，没有复现旧版的 planning 提前返回。最终 `durationMs=187949`、`status=succeeded`，`conversation_final.json.source=dom_fallback_outcome`、正式 `turnId=3f7270ef-4719-4313-a6d0-c02b356d00c6`，`result.response` 为 13277 个字符 / 19731 字节，`last_message.md` 同为 19731 字节并包含“国内、国际、科技／AI、财经、今日最重要的三条主线”全部章节。
 - 2026-07-15：执行 TC-CWA-34 通过。先检查用户提供的真实失败 run `1784043878390-67b0e366-4edc-476c-b78f-ca52647564e6`：`durationMs=31673`，`result.response` 只有“我先按…四个板块筛选…”的 52 个字符，`conversation_final.json.turnId=request-6a558072-d5c0-83ec-950a-6dd96050b3e1-0`；但同一 conversation 的 WebSocket frame 仍继续到 23:47:29，最终页面出现带 `data-message-id=8e9d3c81-a8af-418e-b83e-3427a29b3548` 的 2919 字正式 assistant message。随后在正式 9900 服务复现了 `stream_handoff` 后 `request-WEB:*` 临时 assistant section 与 `data-testid=stop-button, aria-label=停止回答` 重新出现的时序，证明 selector 未失效，失效的是“单次无 stop 即完成”的充分条件。修复后构建当前源码，在隔离数据目录 `/tmp/bifrost-chatgpt-finality-live` 和端口 `19910` 启动服务，显式复用正式共享 browser profile，执行真实联网检索 run `1784045777481-3666c349-1ae6-4c43-a920-69b3e316670e`。该 run 的 `conversation_handoff.json.eventTypes=["patch","resume_conversation_token","stream_handoff","browser_ui"]`，持续 `122831ms` 后才成功返回；`conversation_final.json.source=dom_fallback_outcome`、`turnId=cb601a5b-553a-46cb-828b-c3c5bff2906a`，`result.response` 为 4985 个字符，`last_message.md` 为 6883 字节，完整包含两条新闻的事件、来源、进展和影响，没有在临时搜索/planning section 阶段提前结束。为不打断正式 9900 服务上正在执行的 ASR 任务，本次未重启正式服务。
 - 2026-07-01：补充执行 TC-CWA-33 真实失败样本回归。全量补跑 Daily Agent 矩阵时，`2026-06-15 daily_report` run `1782928234093-1e821cdd-0c0a-43fa-9f1c-6c477670e1b4` 失败于 `send button not actionable after native clipboard paste upload wait`，diagnostic screenshot `/var/folders/xw/55z6437s54d6pgr93j2ztz2h0000gn/T/bifrost-diagnostic-screenshots/diag-1782928476064.png` 显示上一条 assistant 长回复仍在生成、右下角 stop button 可见，同时 composer 已残留 `上一条回复不是最终日报...` retry prompt。修复后 send 层在 composer 注入前和 send button 不可点击后都以 stop button 为硬 busy gate；stop 可见时清空 composer，等待 stop button 消失后继续同一次 send 流程；只有等待超时才返回不可整轮重试的 `conversation_busy`。代码级哨兵新增 `diagnostic_has_visible_stop_button_is_the_busy_gate`。

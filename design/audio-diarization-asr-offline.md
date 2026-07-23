@@ -838,7 +838,7 @@ CLI 采集要求：
 3. 真实 sherpa-onnx profile：实现 model pack 下载/检查、CPU 线程限制、segmentation + embedding + clustering；失败时 FileRecord 记录明确错误，不静默退回无 speaker ASR。
 4. Runner 接入 diarization-first 流程：`process_pending_files()` 在 ASR 前先运行 sherpa-onnx，按真实 speaker segments 切分 WAV，再逐分片送入 ASR，最终汇总 speaker-aware timeline/text/Daily Docs。
 5. WebUI/API：Task 表单、文件列表、timeline speaker label、speaker rename API、profile prepare 状态。
-6. 后续声纹录入闭环：实现 speaker profile index、enrollment session、WebUI 浏览器麦克风实时朗读录入、CLI voice helper 实时朗读录入、append sample、match/unmatch API；UI 和 CLI 都不能把上传音频作为默认录入入口。
+6. 声纹录入闭环：推荐从已转录历史录音的 speaker-aware timeline 生成候选片段，用户试听并标注本人片段后生成多模板、多原型 profile；浏览器麦克风与 CLI voice helper 实时朗读保留为备选。历史录音必须通过 task/file 引用解析，不接受客户端传入的任意本地路径。
 7. 高质量 sidecar：`pyannote-community-quality` 只做显式安装，token 不落日志，sidecar 通过本地进程或 local HTTP 调用。
 8. Lab profile：只注册 external-command contract，不随默认发行下载权重。
 
