@@ -137,6 +137,34 @@ fn image_only_bot_mention_triggers_agent_instead_of_help() {
 }
 
 #[test]
+fn mention_only_reply_uses_quoted_message_instead_of_help() {
+    let bot = FeishuBotIdentity {
+        open_id: "ou_bot".to_string(),
+        name: Some("Bifrost".to_string()),
+    };
+    let mut event = group_event("reply", "c1", "u1", "@_user_1", vec![bot_mention()], 1);
+    event.message.as_mut().unwrap().parent_id = Some("quoted".to_string());
+
+    assert_eq!(
+        classify_group_message(event.message.as_ref().unwrap(), Some(&bot), false),
+        GroupMessageDisposition::AgentTrigger {
+            kind: GroupTriggerKind::Mention,
+            active_request: String::new(),
+            command_prefix: None,
+        }
+    );
+
+    event.message.as_mut().unwrap().parent_id = None;
+    assert_eq!(
+        classify_group_message(event.message.as_ref().unwrap(), Some(&bot), false),
+        GroupMessageDisposition::SystemCommand {
+            command: "/help".to_string(),
+            reset_context: false,
+        }
+    );
+}
+
+#[test]
 fn mention_rendering_replaces_longer_placeholder_first() {
     let mentions = vec![
         ImMention {
@@ -356,6 +384,138 @@ fn group_store_freezes_non_overlapping_incremental_turns() {
     assert!(next.prompt.contains("<at id=u1></at>：continue"));
     assert!(!next.prompt.contains("群名称："));
     assert!(!next.prompt.contains("群 ID："));
+}
+
+#[test]
+fn quoted_message_before_cursor_is_loaded_as_the_main_input() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let quoted = group_event(
+        "quoted-old",
+        "c1",
+        "u2",
+        "请检查这个发布方案",
+        Vec::new(),
+        1,
+    );
+    let first_trigger = group_event(
+        "first-trigger",
+        "c1",
+        "u1",
+        "@_user_1 first",
+        vec![bot_mention()],
+        2,
+    );
+    store.record_event(&quoted, "event").unwrap();
+    store.record_event(&first_trigger, "event").unwrap();
+    store
+        .prepare_turn(&first_trigger, GroupTriggerKind::Mention, "first")
+        .unwrap();
+
+    let mut reply = group_event(
+        "reply-trigger",
+        "c1",
+        "u1",
+        "@_user_1",
+        vec![bot_mention()],
+        3,
+    );
+    reply.message.as_mut().unwrap().parent_id = Some("quoted-old".to_string());
+    store.record_event(&reply, "event").unwrap();
+    let turn = store
+        .prepare_turn(&reply, GroupTriggerKind::Mention, "")
+        .unwrap();
+
+    assert_eq!(turn.message_count, 1);
+    assert!(turn.prompt.contains("本轮主要处理对象（来自被引用消息）"));
+    assert!(turn.prompt.contains("<at id=u2></at>：请检查这个发布方案"));
+    assert_eq!(turn.prompt.matches("请检查这个发布方案").count(), 1);
+    assert!(turn
+        .prompt
+        .contains("当前用户未附加文字；请直接理解并回应上述被引用消息"));
+    assert!(!turn.prompt.contains("/help"));
+}
+
+#[test]
+fn quoted_message_in_current_range_is_not_duplicated_as_background() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let quoted = group_event("quoted", "c1", "u2", "需要处理的内容", Vec::new(), 1);
+    let background = group_event("background", "c1", "u3", "其他背景", Vec::new(), 2);
+    let mut reply = group_event(
+        "reply",
+        "c1",
+        "u1",
+        "@_user_1 请执行它",
+        vec![bot_mention()],
+        3,
+    );
+    reply.message.as_mut().unwrap().parent_id = Some("quoted".to_string());
+    for event in [&quoted, &background, &reply] {
+        store.record_event(event, "event").unwrap();
+    }
+
+    let turn = store
+        .prepare_turn(&reply, GroupTriggerKind::Mention, "请执行它")
+        .unwrap();
+    assert!(turn.prompt.contains("其他背景"));
+    assert_eq!(turn.prompt.matches("需要处理的内容").count(), 1);
+    assert!(turn
+        .prompt
+        .contains("当前用户指令：\n<at id=u1></at>：请执行它"));
+}
+
+#[test]
+fn quoted_message_uses_immediate_parent_instead_of_thread_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let root = group_event("root", "c1", "u2", "话题根消息", Vec::new(), 1);
+    let parent = group_event("parent", "c1", "u3", "直接引用的上一层消息", Vec::new(), 2);
+    let mut reply = group_event("reply", "c1", "u1", "@_user_1", vec![bot_mention()], 3);
+    let message = reply.message.as_mut().unwrap();
+    message.root_id = Some("root".to_string());
+    message.parent_id = Some("parent".to_string());
+    message.thread_id = Some("thread".to_string());
+    for event in [&root, &parent, &reply] {
+        store.record_event(event, "event").unwrap();
+    }
+
+    let turn = store
+        .prepare_turn(&reply, GroupTriggerKind::Mention, "")
+        .unwrap();
+    assert!(turn
+        .prompt
+        .contains("本轮主要处理对象（来自被引用消息）：\n<at id=u3></at>：直接引用的上一层消息"));
+    assert!(!turn
+        .prompt
+        .contains("本轮主要处理对象（来自被引用消息）：\n<at id=u2></at>：话题根消息"));
+}
+
+#[test]
+fn quoted_message_lookup_never_crosses_chat_boundaries() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let foreign = group_event(
+        "foreign-message",
+        "other-chat",
+        "u2",
+        "另一个群的秘密内容",
+        Vec::new(),
+        1,
+    );
+    let mut reply = group_event("reply", "c1", "u1", "@_user_1", vec![bot_mention()], 2);
+    reply.message.as_mut().unwrap().parent_id = Some("foreign-message".to_string());
+    store.record_event(&foreign, "event").unwrap();
+    store.record_event(&reply, "event").unwrap();
+
+    let turn = store
+        .prepare_turn(&reply, GroupTriggerKind::Mention, "")
+        .unwrap();
+    assert!(!turn.prompt.contains("另一个群的秘密内容"));
+    assert!(turn.prompt.contains("不在当前机器人的本地群消息账本中"));
+    assert!(turn.prompt.contains("请用户重新发送或补充内容"));
+    assert!(!turn.prompt.contains("foreign-message"));
+    assert!(turn.quoted_message_missing);
 }
 
 #[test]

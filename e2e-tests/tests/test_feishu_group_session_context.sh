@@ -191,12 +191,13 @@ inject() {
   local text="$5"
   local mention_bot="${6:-false}"
   local chat_type="${7:-group}"
-  python3 - "$BIFROST_PORT" "$chat_id" "$user_id" "$user_name" "$message_id" "$text" "$mention_bot" "$chat_type" <<'PY'
+  local parent_id="${8:-}"
+  python3 - "$BIFROST_PORT" "$chat_id" "$user_id" "$user_name" "$message_id" "$text" "$mention_bot" "$chat_type" "$parent_id" <<'PY'
 import json
 import sys
 import urllib.request
 
-port, chat_id, user_id, user_name, message_id, text, mention_bot, chat_type = sys.argv[1:9]
+port, chat_id, user_id, user_name, message_id, text, mention_bot, chat_type, parent_id = sys.argv[1:10]
 payload = {
     "providerId": "feishu-group-e2e",
     "chatId": chat_id,
@@ -209,6 +210,8 @@ payload = {
     "text": text,
     "mentionBot": mention_bot == "true",
 }
+if parent_id:
+    payload["parentId"] = parent_id
 req = urllib.request.Request(
     f"http://127.0.0.1:{port}/_bifrost/api/im-gateway/debug/mock-inbound",
     data=json.dumps(payload, ensure_ascii=False).encode(),
@@ -283,6 +286,21 @@ done
 [[ -f "$RUN_LOG" ]]
 [[ "$(wc -l <"$RUN_LOG" | tr -d ' ')" == "16" ]]
 
+# Replying to an older message with only an @ mention is still a valid Agent
+# turn. The quoted message becomes the main input even though it is before the
+# current group cursor, and the trigger must not fall back to /help.
+inject chat-alpha user-alice Alice a13 "@_user_1" true group a1
+wait_prompt_count 9
+wait_run_count 18
+wait_session_idle "im:feishu-group-e2e:group:chat-alpha"
+
+# If the parent message was never visible to the bot, reply deterministically
+# without starting a Runner or pretending that the quoted content was read.
+inject chat-alpha user-alice Alice a14 "@_user_1" true group invisible-parent
+sleep 1
+wait_prompt_count 9
+wait_run_count 18
+
 python3 - "$PROMPT_LOG" "$RUN_LOG" "$TEST_DIR/admin/im_group_context.db" "$REPO_DIR" "$TEST_DIR/admin/im_gateway_message_logs.json" <<'PY'
 import json
 import pathlib
@@ -291,9 +309,10 @@ import sys
 
 prompt_path, run_path, db_path, repo_dir, message_log_path = sys.argv[1:6]
 prompts = [json.loads(line) for line in open(prompt_path, encoding="utf-8") if line.strip()]
-assert len(prompts) == 8, prompts
+assert len(prompts) == 9, prompts
 first, second, slash_fallback, third, queued = prompts[:5]
-concurrent_prompts = prompts[5:]
+concurrent_prompts = prompts[5:8]
+quoted_prompt = prompts[8]
 
 assert "群名称：Alpha 发布群" in first, first
 assert "群 ID：chat-alpha" in first, first
@@ -331,9 +350,15 @@ assert "群名称：" not in queued and "群 ID：" not in queued, queued
 for expected in ("并发检查 Alpha", "并发检查 Beta", "并发检查私聊"):
     assert sum(expected in prompt for prompt in concurrent_prompts) == 1, concurrent_prompts
 
+assert "本轮主要处理对象（来自被引用消息）" in quoted_prompt, quoted_prompt
+assert "<at id=user-alice>Alice</at>：先讨论发布窗口" in quoted_prompt, quoted_prompt
+assert quoted_prompt.count("先讨论发布窗口") == 1, quoted_prompt
+assert "当前用户未附加文字；请直接理解并回应上述被引用消息" in quoted_prompt, quoted_prompt
+assert "/help" not in quoted_prompt, quoted_prompt
+
 runner_events = [json.loads(line) for line in open(run_path, encoding="utf-8") if line.strip()]
-assert len(runner_events) == 16, runner_events
-concurrent_events = runner_events[-6:]
+assert len(runner_events) == 18, runner_events
+concurrent_events = runner_events[10:16]
 assert [event["phase"] for event in concurrent_events[:3]] == ["start"] * 3, concurrent_events
 assert len({event["pid"] for event in concurrent_events[:3]}) == 3, concurrent_events
 assert all(event["phase"] == "finish" for event in concurrent_events[3:]), concurrent_events
@@ -352,7 +377,11 @@ assert bindings[0][5] == "group-mock", bindings
 messages = connection.execute(
     "SELECT chat_id, COUNT(*) FROM im_group_messages GROUP BY chat_id ORDER BY chat_id"
 ).fetchall()
-assert messages == [("chat-alpha", 12), ("chat-beta", 6)], messages
+assert messages == [("chat-alpha", 14), ("chat-beta", 6)], messages
+missing_quote_turns = connection.execute(
+    "SELECT status FROM im_group_turns WHERE trigger_message_id = 'a14'"
+).fetchall()
+assert missing_quote_turns == [("completed",)], missing_quote_turns
 beta_turns = connection.execute(
     "SELECT status FROM im_group_turns WHERE chat_id = 'chat-beta' ORDER BY created_at"
 ).fetchall()
@@ -370,6 +399,12 @@ ambient_logs = [
     if entry.get("direction") == "inbound" and entry.get("message_id") == "a12"
 ]
 assert ambient_logs == [], ambient_logs
+missing_quote_replies = [
+    entry for entry in message_logs
+    if entry.get("direction") == "outbound"
+    and "我无法看到你引用的这条消息内容" in (entry.get("content_preview") or "")
+]
+assert len(missing_quote_replies) == 1, missing_quote_replies
 PY
 
 echo "[feishu-group-session] PASS"

@@ -21,6 +21,12 @@ struct MockInboundRequest {
     message_id: Option<String>,
     #[serde(default)]
     event_id: Option<String>,
+    #[serde(default)]
+    root_id: Option<String>,
+    #[serde(default)]
+    parent_id: Option<String>,
+    #[serde(default)]
+    thread_id: Option<String>,
 }
 
 pub(super) async fn handle_debug(
@@ -132,9 +138,9 @@ async fn inject_mock_inbound(
                 .map(|chat_name| serde_json::json!({"_bifrost_debug_chat_name": chat_name})),
             create_time: Some(now_ms()),
             update_time: None,
-            root_id: None,
-            parent_id: None,
-            thread_id: None,
+            root_id: body.root_id,
+            parent_id: body.parent_id,
+            thread_id: body.thread_id,
         }),
         received_at: now_ms(),
         raw_digest: Some("mock_inbound".to_string()),
@@ -241,6 +247,9 @@ mod tests {
             mention_bot: true,
             message_id: Some(" om_debug ".to_string()),
             event_id: Some(" evt_debug ".to_string()),
+            root_id: Some("om_root".to_string()),
+            parent_id: Some("om_parent".to_string()),
+            thread_id: Some("omt_thread".to_string()),
         }
     }
 

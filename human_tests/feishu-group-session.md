@@ -184,6 +184,16 @@
 
 预期结果：隐式默认 Codex/Traex/Claude Code Runner 使用 live Guide，ChatGPT Web 使用 Queue；延后执行的群 Guide Turn 仍为 `dispatched`，排队项保留相同 `group_turn_id`，只有延后 Runner 成功或失败后才进入终态。event-loop 主测试模块与拆分出的恢复测试模块均不超过 1500 行。
 
+### TC-FGS-22：引用消息并只艾特机器人仍是有效主输入
+
+1. 在 `chat-alpha` 发送一条普通群消息并完成至少一次后续 Agent Turn，使该普通消息早于当前群上下文游标。
+2. 在飞书中回复引用该普通消息，只发送 `@机器人`，不附加任何文字；debug 场景使用相同 `parentId` 和 `text=@_user_1` 注入。
+3. 等待 mock Runner 完成并检查捕获的 Prompt、Runner 调用次数和 SQLite 消息账本。
+4. 构造引用目标位于当前增量区间的场景，确认它不同时作为普通背景重复出现。
+5. 构造 `parentId` 只存在于另一个群或本地账本完全不存在的场景。
+
+预期结果：可见消息的纯引用 + @ 会创建 Agent Turn 并实际启动 Runner，不会被视为空消息或返回 `/help`；同一 Provider、同一群中的被引用消息作为“本轮主要处理对象”进入 Prompt，即使它早于当前游标也能读取，且全文只出现一次。当前用户没有附加文字时，Prompt 明确要求直接理解并回应被引用消息。跨群或缺失引用不泄露消息内容、不隐式扩大权限补拉；网关直接回复“我无法看到你引用的这条消息内容，请重新发送这条消息，或把内容补充到 @ 后面”，不启动 Runner、不让模型猜测，并把该 Turn 标记为 `completed` 以保持游标和重投幂等。
+
 ## 执行方式
 
 TC-FGS-01 至 TC-FGS-05 由以下真实服务脚本逐条执行：
@@ -271,6 +281,14 @@ cargo test -p bifrost-admin busy_default_mode_guides_external_runners_except_cha
 cargo test -p bifrost-admin busy_group_turns_complete_or_release_with_their_queue_outcome --all-features -- --nocapture
 test "$(wc -l < crates/bifrost-admin/src/handlers/im_gateway/event_loop/tests.rs)" -le 1500
 test "$(wc -l < crates/bifrost-admin/src/handlers/im_gateway/event_loop/tests/recovery_tests.rs)" -le 1500
+```
+
+TC-FGS-22 的纯引用触发、旧游标查询、区间去重与跨群隔离执行：
+
+```bash
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin mention_only_reply_uses_quoted_message_instead_of_help --all-features -- --nocapture
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin quoted_message --all-features -- --nocapture
+SKIP_BUILD=true bash e2e-tests/tests/test_feishu_group_session_context.sh
 ```
 
 ## 清理步骤

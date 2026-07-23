@@ -432,10 +432,20 @@ pub(super) async fn run_event_loop_with_options(
                 session_key: build_session_key(&event.provider_id, event.source.user_id.as_deref()),
                 group_turn_id: None,
                 reset_group_context: false,
+                direct_reply: None,
             }
         };
 
         acknowledge_and_log_inbound_event(&client, &provider, &event, &message_log_store).await;
+        if let Some(reply) = inbound_dispatch.direct_reply.as_deref() {
+            send_agent_reply(&client, &provider, &event, reply, &message_log_store).await;
+            if let Some(turn_id) = inbound_dispatch.group_turn_id.as_deref() {
+                if let Err(error) = group_context_store.mark_turn_completed(turn_id, now_ms()) {
+                    warn!(turn_id = %turn_id, error = %error, "failed to complete unavailable quoted-message turn");
+                }
+            }
+            continue;
+        }
 
         // --- Route matching & action execution ---
         let routes = route_store.list();
@@ -923,6 +933,7 @@ pub(super) struct PreparedInboundDispatch {
     pub(super) session_key: String,
     pub(super) group_turn_id: Option<String>,
     pub(super) reset_group_context: bool,
+    pub(super) direct_reply: Option<String>,
 }
 
 pub(super) async fn prepare_group_inbound_dispatch(
@@ -1016,6 +1027,7 @@ pub(super) async fn prepare_group_inbound_dispatch(
             ),
             group_turn_id: None,
             reset_group_context: reset_context,
+            direct_reply: None,
         })),
         GroupMessageDisposition::AgentTrigger {
             kind,
@@ -1040,6 +1052,10 @@ pub(super) async fn prepare_group_inbound_dispatch(
                 session_key: prepared.session_key,
                 group_turn_id: Some(prepared.turn_id),
                 reset_group_context: false,
+                direct_reply: prepared.quoted_message_missing.then(|| {
+                    "我无法看到你引用的这条消息内容，请重新发送这条消息，或把内容补充到 @ 后面。"
+                        .to_string()
+                }),
             }))
         }
     }

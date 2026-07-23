@@ -74,8 +74,10 @@ pub(super) async fn handle_concurrent_event_during_chat(
             session_key: build_session_key(&event.provider_id, event.source.user_id.as_deref()),
             group_turn_id: None,
             reset_group_context: false,
+            direct_reply: None,
         }
     };
+    let direct_reply = dispatch.direct_reply.clone();
     let message_text = dispatch.message_text;
     let session_key = dispatch.session_key;
     let group_turn_id = dispatch.group_turn_id;
@@ -83,6 +85,15 @@ pub(super) async fn handle_concurrent_event_during_chat(
     // acknowledgement and inbound audit side effects as the normal path even
     // though their session mailbox already has a runner in flight.
     acknowledge_and_log_inbound_event(client, &provider, event, message_log_store).await;
+    if let Some(reply) = direct_reply {
+        send_agent_reply(client, &provider, event, &reply, message_log_store).await;
+        if let Some(turn_id) = group_turn_id.as_deref() {
+            if let Err(error) = group_context_store.mark_turn_completed(turn_id, now_ms()) {
+                warn!(turn_id = %turn_id, error = %error, "failed to complete unavailable quoted-message turn");
+            }
+        }
+        return;
+    }
     let agent_config = effective_agent_config_for_provider(&agent_config_store.load(), &provider);
     if session_key == active_session_key {
         if message_text.trim() == "/help" {
