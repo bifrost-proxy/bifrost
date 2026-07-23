@@ -1743,7 +1743,9 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn moss_runtime_process_covers_prompt_success_failure_and_pause() {
+        let _lock = test_data_dir_lock();
         let temp = TempDir::new().unwrap();
         let binary = temp.path().join("moss-transcribe");
         let wav = temp.path().join("audio.wav");
