@@ -117,29 +117,136 @@ pub(super) fn probe_backend_identity(port: u16) -> Option<BackendSystemIdentity>
     response.json().ok()
 }
 
+pub(super) fn external_cli_backend_matches_handoff(
+    marker: &DesktopUpgradeRelaunchMarker,
+    identity: &BackendSystemIdentity,
+) -> bool {
+    let version_matches = marker.target_version.as_deref().is_none_or(|target| {
+        identity.version.trim().trim_start_matches('v') == target.trim().trim_start_matches('v')
+    });
+    let process_restarted = marker
+        .observed_external_core_pid
+        .is_none_or(|old_pid| identity.pid != old_pid);
+    version_matches && (process_restarted || marker.target_version.is_some())
+}
+
 pub(super) fn wait_for_external_cli_backend(
     marker: &DesktopUpgradeRelaunchMarker,
     timeout: Duration,
 ) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(identity) = probe_backend_identity(marker.proxy_port) {
-            let version_matches = marker.target_version.as_deref().is_none_or(|target| {
-                identity.version.trim().trim_start_matches('v')
-                    == target.trim().trim_start_matches('v')
-            });
-            let process_restarted = marker
-                .observed_external_core_pid
-                .is_none_or(|old_pid| identity.pid != old_pid);
-            if version_matches && process_restarted {
-                return true;
-            }
+        if probe_backend_identity(marker.proxy_port)
+            .as_ref()
+            .is_some_and(|identity| external_cli_backend_matches_handoff(marker, identity))
+        {
+            return true;
         }
         if Instant::now() >= deadline {
             return false;
         }
         std::thread::sleep(Duration::from_millis(150));
     }
+}
+
+pub(super) enum ExternalCliBackendHandoff {
+    Reuse(u16),
+    StartManagedFallback,
+}
+
+pub(super) fn failed_cli_handoff_can_retry_immediately(
+    marker: &DesktopUpgradeRelaunchMarker,
+    progress: &UpgradeProgress,
+) -> bool {
+    let target_matches = marker.target_version.as_deref().is_none_or(|target| {
+        progress
+            .target_version
+            .as_deref()
+            .is_some_and(|progress_target| {
+                target.trim().trim_start_matches('v')
+                    == progress_target.trim().trim_start_matches('v')
+            })
+    });
+    progress.phase == UpgradePhase::Failed
+        && target_matches
+        && progress
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("CLI-owned backend did not restart"))
+}
+
+pub(super) fn external_cli_handoff_wait(
+    data_dir: &Path,
+    marker: &DesktopUpgradeRelaunchMarker,
+    normal_wait: Duration,
+) -> Duration {
+    if failed_cli_handoff_can_retry_immediately(marker, &read_progress(data_dir)) {
+        Duration::ZERO
+    } else {
+        normal_wait
+    }
+}
+
+pub(super) fn runtime_marker_matches_backend_identity(
+    data_dir: &Path,
+    port: u16,
+    identity: &BackendSystemIdentity,
+) -> bool {
+    read_desktop_runtime_marker(data_dir)
+        .is_some_and(|runtime| runtime.pid == identity.pid && runtime.port == port)
+}
+
+pub(super) fn resolve_external_cli_backend_handoff(
+    data_dir: &Path,
+    marker: &DesktopUpgradeRelaunchMarker,
+    timeout: Duration,
+) -> tauri::Result<ExternalCliBackendHandoff> {
+    append_desktop_bootstrap_log(
+        data_dir,
+        format!(
+            "desktop upgrade handoff is waiting for the CLI-owned backend; old_external_pid={:?} proxy_port={} target_version={:?}",
+            marker.observed_external_core_pid, marker.proxy_port, marker.target_version
+        ),
+    );
+    if wait_for_external_cli_backend(marker, timeout) {
+        append_desktop_bootstrap_log(
+            data_dir,
+            format!(
+                "reusing restarted CLI-owned backend on port {}",
+                marker.proxy_port
+            ),
+        );
+        return Ok(ExternalCliBackendHandoff::Reuse(marker.proxy_port));
+    }
+    if !is_port_available(marker.proxy_port) {
+        if probe_backend_identity(marker.proxy_port)
+            .as_ref()
+            .is_some_and(|identity| {
+                runtime_marker_matches_backend_identity(data_dir, marker.proxy_port, identity)
+            })
+        {
+            append_desktop_bootstrap_log(
+                data_dir,
+                format!(
+                    "CLI-owned backend on port {} did not reach target version {:?}, but it matches this data directory runtime marker; stopping it before desktop-managed recovery",
+                    marker.proxy_port, marker.target_version
+                ),
+            );
+            return Ok(ExternalCliBackendHandoff::StartManagedFallback);
+        }
+        return Err(anyhow(format!(
+            "CLI-owned backend did not restart on port {} with target version {:?}; port is still occupied, refusing to launch a second desktop-managed core",
+            marker.proxy_port, marker.target_version
+        )));
+    }
+    append_desktop_bootstrap_log(
+        data_dir,
+        format!(
+            "CLI-owned backend did not restart on port {} with target version {:?}; port is free, launching desktop-managed core",
+            marker.proxy_port, marker.target_version
+        ),
+    );
+    Ok(ExternalCliBackendHandoff::StartManagedFallback)
 }
 
 pub(super) fn upgrade_relaunch_uses_external_cli_backend(
@@ -241,6 +348,12 @@ pub(super) fn persist_desktop_upgrade_handoff_failure(data_dir: &Path, message: 
     message
 }
 
+pub(super) fn upgrade_handoff_requires_backend_release(
+    marker: &DesktopUpgradeRelaunchMarker,
+) -> bool {
+    marker.old_core_pid.is_some()
+}
+
 pub(super) fn wait_for_upgrade_handoff_release(
     data_dir: &Path,
     marker: &DesktopUpgradeRelaunchMarker,
@@ -273,15 +386,25 @@ pub(super) fn wait_for_upgrade_handoff_release(
             ),
         );
     }
-    let port_released =
-        wait_for_backend_shutdown(marker.proxy_port, DESKTOP_UPGRADE_RELAUNCH_PORT_WAIT);
-    append_desktop_bootstrap_log(
-        data_dir,
-        format!(
-            "desktop upgrade port wait complete; proxy_port={} released={}",
-            marker.proxy_port, port_released
-        ),
-    );
+    if upgrade_handoff_requires_backend_release(marker) {
+        let port_released =
+            wait_for_backend_shutdown(marker.proxy_port, DESKTOP_UPGRADE_RELAUNCH_PORT_WAIT);
+        append_desktop_bootstrap_log(
+            data_dir,
+            format!(
+                "desktop upgrade port wait complete; proxy_port={} released={}",
+                marker.proxy_port, port_released
+            ),
+        );
+    } else {
+        append_desktop_bootstrap_log(
+            data_dir,
+            format!(
+                "desktop upgrade preserves CLI-owned backend on port {}; skipping backend release wait",
+                marker.proxy_port
+            ),
+        );
+    }
 }
 
 pub(super) fn run_desktop_upgrade_relaunch_helper_from_env() -> bool {

@@ -2,15 +2,16 @@
 
 ## Problem
 
-Desktop App upgrade currently has two independent lifecycles:
+Desktop App upgrade has two ownership models that must not share the same shutdown behavior:
 
-- the old App exits and asynchronously runs `bifrost stop`
-- the new App is launched immediately and reuses any healthy backend on port `9900`
+- an App-owned core is a managed child of the Desktop shell and must stop with that shell
+- a CLI-owned core is restarted by the CLI updater and must survive Desktop shell shutdown
 
-During an App-driven upgrade, the backend that looks healthy to the new App can still be owned by
-the old App shutdown helper. The new App then records the backend as external, the old helper stops
-it, the startup gate asks the user to start core, and CLI install requests can fail with a network
-error while the backend is being restarted.
+The original failure occurred when a CLI updater had already restarted the external core to the
+target version, but the old Desktop shell unconditionally ran `bifrost stop` during exit and killed
+that new core. The relaunched App then waited for another PID change that could never happen. Its
+fresh relaunch marker remained valid for 15 minutes, so startup and every `Start Bifrost Service`
+click repeated the same 30-second wait before returning to the recovery screen.
 
 ## Goals
 
@@ -18,6 +19,9 @@ error while the backend is being restarted.
 - The new App must not reuse a backend that belongs to an in-progress upgrade handoff.
 - CLI install from Desktop must recover from a transient core reconnect instead of showing a
   terminal install failure immediately.
+- A user who already has the failed marker/progress left by an older Desktop version must recover
+  automatically after installing and opening the fixed App, without deleting state files manually.
+- Desktop shutdown must stop only a core whose ownership can be proven.
 - Normal Desktop startup, manual core start, and watchdog recovery behavior must remain unchanged
   outside the upgrade handoff path.
 
@@ -44,7 +48,11 @@ coordinates one App relaunch.
 1. `restart_desktop_after_update` resolves the current App bundle and backend state.
 2. It writes the one-shot marker before requesting App exit.
 3. It starts a detached relaunch helper using the desktop executable in helper mode.
-4. It exits through the existing shutdown path, which still runs `bifrost stop`.
+4. It exits through an ownership-aware shutdown path:
+   - a live managed child is stopped
+   - a `runtime_start_mode=desktop` runtime is stopped only when its PID and port still match the
+     active backend identity
+   - a daemon, unknown, or stale runtime marker is preserved as external CLI-owned state
 
 ### Relaunch Helper
 
@@ -52,8 +60,9 @@ The helper is a small process mode of the desktop executable:
 
 1. Read the marker path and App bundle from environment variables.
 2. Wait for the old App PID to disappear.
-3. Wait for the recorded core PID to disappear when available.
-4. Wait for the recorded proxy port to stop answering health checks.
+3. For an App-owned marker, wait for the recorded core PID and proxy port to be released.
+4. For a CLI-owned marker (`old_core_pid=null`), preserve the external core and do not wait for its
+   PID or port to disappear; the CLI updater owns that restart.
 5. Remove the helper-only `HELPER`, `MARKER`, and `TARGET` environment variables from the relaunch
    command.
 6. Relaunch the App bundle.
@@ -68,18 +77,34 @@ the new App, which would make every new App enter helper mode, exit, and open an
 1. Startup reads a fresh one-shot marker from the data directory.
 2. If the marker is active, backend bootstrap runs in upgrade handoff mode.
 3. In upgrade handoff mode, `ensure_backend_running` skips health-based reuse entirely.
-4. It waits briefly for the recorded port to release, then runs the existing stale-marker cleanup and
-   launches the bundled backend as a managed child.
-5. Readiness for the newly launched child requires both a healthy backend response and a
+4. If the marker represents an App-managed core, it waits briefly for the recorded port to release,
+   then runs the existing stale-marker cleanup and launches the bundled backend as a managed child.
+5. If the marker represents a CLI-owned core, it waits for a backend serving the pinned target
+   version. The target version is authoritative: the PID may differ, or may remain unchanged when
+   the CLI updater has already completed before Desktop relaunch. Legacy markers without a pinned
+   target retain the stricter PID-change requirement.
+6. If no target backend appears:
+   - a free recorded port allows the App to fall back to its bundled managed core
+   - an occupied port whose `/api/system` PID and port match the same data directory's
+     `runtime.json` is a known old-version Bifrost core and may be stopped before managed recovery
+   - any unrelated or unverified port owner remains fail-closed and cannot be killed or shadowed by
+     a second core
+7. A previous `Failed` progress for the same CLI handoff error makes the next fixed-App startup
+   retry recovery with zero additional handoff wait. This also applies to legacy markers that did
+   not contain `target_version`, so already-affected users recover immediately after upgrading.
+8. While a CLI handoff marker remains active, ordinary health polling accepts only a backend that
+   satisfies the marker's target identity. A healthy wrong-version service cannot clear the startup
+   gate or remove the marker. A matching target backend completes progress and clears the marker.
+9. Readiness for the newly launched child requires both a healthy backend response and a
    `runtime.json` marker whose `pid` and `port` match that child. A health response from another
    process on the same port is not enough to complete managed startup.
-6. For a deferred Windows MSI/EXE, the helper keeps the pre-install directory snapshot and pending
+10. For a deferred Windows MSI/EXE, the helper keeps the pre-install directory snapshot and pending
    guard until the relaunched App verifies both its compiled version and its managed core. A version
    mismatch or managed-core startup failure writes `Failed` and asks the App to shut down normally;
    the still-running helper then restores the complete previous install and relaunches it.
-7. After the backend becomes ready, the marker is removed and the Windows helper commits the
+11. After the backend becomes ready, the marker is removed and the Windows helper commits the
    transaction by deleting the snapshot, pending guard, and updater-owned package.
-8. The new App is the final terminal-progress owner: it rewrites progress to `Completed` only after
+12. The new App is the final terminal-progress owner: it rewrites progress to `Completed` only after
    the managed core is ready; helper relaunch failure or managed-core startup failure rewrites it to
    `Failed` while preserving the selected target/source for diagnosis and retry.
 
@@ -92,15 +117,19 @@ stateDiagram-v2
     [*] --> NormalRunning
     NormalRunning --> MarkerWritten: App update completed
     MarkerWritten --> OldAppStopping: App exit requested
-    OldAppStopping --> PortReleased: old core stopped
-    PortReleased --> NewAppOpened: relaunch helper opens App
+    OldAppStopping --> BackendReleased: App-owned core
+    OldAppStopping --> ExternalPreserved: CLI-owned core
+    BackendReleased --> NewAppOpened: helper opens App
+    ExternalPreserved --> NewAppOpened: helper opens App
     NewAppOpened --> HandoffBootstrap: marker is active
     HandoffBootstrap --> NewCoreManaged: launch bundled core
+    HandoffBootstrap --> ExternalTargetReady: target CLI core ready
+    ExternalTargetReady --> MarkerCleared: reuse external core
     NewCoreManaged --> MarkerCleared: backend ready
     MarkerCleared --> NormalRunning
 
     HandoffBootstrap --> NormalBootstrap: marker expired or invalid
-    PortReleased --> HandoffFailed: helper cannot open new App
+    BackendReleased --> HandoffFailed: helper cannot open new App
     NewCoreManaged --> RollbackRequested: version mismatch or managed core fails readiness
     RollbackRequested --> PreviousAppRestored: new App/core release files
     PreviousAppRestored --> HandoffFailed: preserve failure and relaunch previous App
@@ -112,8 +141,17 @@ stateDiagram-v2
 - A stale marker is ignored and deleted.
 - Startup with an active marker for a managed core disables existing backend reuse.
 - A marker with no managed `old_core_pid` records the observed external CLI PID and pinned target.
-  The relaunched App waits for a different PID serving that target version, reuses it as an
-  unmanaged backend, and fails instead of starting a second bundled core when it never appears.
+  The relaunched App reuses any PID serving that pinned target, falls back to the bundled backend
+  when the port is free, safely takes over a wrong-version core only when its PID/port match the same
+  data directory runtime marker, and fails instead of killing or shadowing an unrelated listener.
+- Desktop shutdown stops a live managed child or a verified `runtime_start_mode=desktop` backend,
+  and preserves daemon/unknown/stale external runtimes.
+- The CLI-owned helper waits only for the old App process; it does not wait for the external core
+  or its port to be released.
+- A prior matching CLI handoff `Failed` state, including one paired with a legacy marker lacking
+  `target_version`, retries with zero wait after App upgrade.
+- Runtime polling cannot complete a CLI handoff from a healthy wrong-version backend; a matching
+  target backend publishes `Completed` and clears the relaunch marker.
 - Managed startup does not accept a healthy response from an unrelated process on the same port.
 - Managed startup only accepts readiness when `runtime.json` belongs to the child it just spawned.
 - Successful handoff startup clears the marker.
@@ -123,7 +161,7 @@ stateDiagram-v2
   before it commits cleanup. A crash or progress write failure therefore still leaves rollback
   material available to the helper.
 - Relaunch/open or managed-core startup failures persist `Failed` progress with the original target.
-- Relaunch helper waits for process/port release before opening the App.
+- Relaunch helper waits for process/port release only for App-owned cores.
 - A running Windows desktop process selects App-owned handoff only when the live runtime marker is
   also `Desktop`; a desktop shell that is reusing a CLI-owned core must not change progress ownership
   or cause the relaunched App to start a second bundled core.
