@@ -423,9 +423,7 @@ async fn send_with_browser_once(
             // is in the middle of heavy JS execution or internal navigation.
             // We give it one retry with a short backoff before propagating.
             match current_conversation_id(cdp).await {
-                Ok(actual)
-                    if conversation_page_matches_expected(actual.as_deref(), conversation_id) =>
-                {
+                Ok(actual) if page_matches(actual.as_deref(), conversation_id) => {
                     info!(
                         conversation_id = ?conversation_id,
                         "chatgpt_web send: pooled tab confirmed on expected conversation"
@@ -447,12 +445,7 @@ async fn send_with_browser_once(
                     );
                     sleep(Duration::from_secs(2)).await;
                     match current_conversation_id(cdp).await {
-                        Ok(actual)
-                            if conversation_page_matches_expected(
-                                actual.as_deref(),
-                                conversation_id,
-                            ) =>
-                        {
+                        Ok(actual) if page_matches(actual.as_deref(), conversation_id) => {
                             info!(
                                 conversation_id = ?conversation_id,
                                 "chatgpt_web send: pooled tab confirmed after retry"
@@ -3161,7 +3154,7 @@ fn new_conversation_url(config: &RuntimeConfig) -> String {
     format!("{base}/")
 }
 
-fn conversation_page_matches_expected(
+fn page_matches(
     actual_conversation_id: Option<&str>,
     expected_conversation_id: Option<&str>,
 ) -> bool {
@@ -4452,19 +4445,10 @@ mod coverage_boost {
 
     #[test]
     fn conversation_page_match_treats_homepage_as_expected_for_fresh_run() {
-        assert!(conversation_page_matches_expected(None, None));
-        assert!(conversation_page_matches_expected(
-            Some("conversation"),
-            Some("conversation")
-        ));
-        assert!(!conversation_page_matches_expected(
-            Some("old-conversation"),
-            None
-        ));
-        assert!(!conversation_page_matches_expected(
-            None,
-            Some("conversation")
-        ));
+        assert!(page_matches(None, None));
+        assert!(page_matches(Some("conversation"), Some("conversation")));
+        assert!(!page_matches(Some("old-conversation"), None));
+        assert!(!page_matches(None, Some("conversation")));
     }
 
     #[tokio::test]
