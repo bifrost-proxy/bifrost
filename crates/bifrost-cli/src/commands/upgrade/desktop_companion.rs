@@ -1,5 +1,52 @@
 use super::*;
 
+#[derive(Debug)]
+pub(super) struct ChildProgressWatch {
+    data_dir: PathBuf,
+    target_version: String,
+    source: String,
+    last_updated_at: Option<String>,
+}
+
+impl ChildProgressWatch {
+    pub(super) fn new(data_dir: &Path, target_version: &str, source: &str) -> Self {
+        let mut watch = Self {
+            data_dir: data_dir.to_path_buf(),
+            target_version: target_version.to_string(),
+            source: source.to_string(),
+            last_updated_at: None,
+        };
+        // The parent transaction may already own a matching Checking record.
+        // Seed it without treating that pre-child state as fresh activity.
+        let _ = watch.observe_activity();
+        watch
+    }
+
+    pub(super) fn observe_activity(&mut self) -> bool {
+        let path = bifrost_core::upgrade_progress::progress_file_path(&self.data_dir);
+        let Ok(content) = fs::read_to_string(path) else {
+            return false;
+        };
+        let Ok(progress) =
+            serde_json::from_str::<bifrost_core::upgrade_progress::UpgradeProgress>(&content)
+        else {
+            return false;
+        };
+        if !progress.is_active()
+            || progress.target_version.as_deref() != Some(self.target_version.as_str())
+            || progress.source.as_deref() != Some(self.source.as_str())
+            || progress.updated_at.is_empty()
+        {
+            return false;
+        }
+        if self.last_updated_at.as_deref() == Some(progress.updated_at.as_str()) {
+            return false;
+        }
+        self.last_updated_at = Some(progress.updated_at);
+        true
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DesktopCompanionMode {
     CallerManaged,
@@ -421,13 +468,21 @@ pub(super) fn update_desktop_app_after_upgrade(
             crate::commands::app::restart_desktop_app,
         )
     })?;
+    let progress_watch = (mode == DesktopCompanionMode::DesktopHandoff).then(|| {
+        ChildProgressWatch::new(
+            &parent_lock_data_dir,
+            target_version,
+            mode.progress_source(),
+        )
+    });
     let result = match command_output_with_timeout_and_env_streaming(
         executable,
         &args,
-        Duration::from_secs(POST_UPGRADE_APP_UPDATE_TIMEOUT_SECS),
+        Duration::from_secs(POST_UPGRADE_APP_UPDATE_STALL_TIMEOUT_SECS),
         Duration::from_secs(UPGRADE_CHILD_PROGRESS_HEARTBEAT_SECS),
         &environment,
         Some(&parent_lock_data_dir),
+        progress_watch,
     ) {
         Ok(output) if output.status == TimedCommandStatus::Success => {
             if mode == DesktopCompanionMode::DesktopHandoff
@@ -459,6 +514,96 @@ pub(super) fn update_desktop_app_after_upgrade(
             crate::commands::app::restart_desktop_app,
         )
     })
+}
+
+pub(super) fn finish_already_latest_upgrade(
+    latest_version: &str,
+    behavior: UpgradeBehavior,
+) -> Result<(), BifrostError> {
+    if !behavior.restart_if_already_latest && !behavior.update_desktop_app {
+        return Ok(());
+    }
+    let install_method = detect_install_method();
+    finish_already_latest_upgrade_for_method(latest_version, behavior, &install_method)
+}
+
+pub(super) fn finish_already_latest_upgrade_for_method(
+    latest_version: &str,
+    behavior: UpgradeBehavior,
+    install_method: &InstallMethod,
+) -> Result<(), BifrostError> {
+    let restart_executable = match restart_executable_for_install_method(install_method) {
+        Ok(executable) => executable,
+        Err(error) if behavior.require_desktop_app_update => return Err(error),
+        Err(_) => return Ok(()),
+    };
+    let should_restart_proxy = behavior.restart_if_already_latest && behavior.restart_proxy;
+    if should_restart_proxy {
+        println!(
+            "{}",
+            "  On-disk binary is current; restarting any running proxy so it adopts this version."
+                .bright_cyan()
+        );
+    }
+    finish_already_latest_upgrade_steps(
+        behavior,
+        || update_desktop_companion(&restart_executable, latest_version, behavior),
+        || maybe_restart_running_proxy(&restart_executable),
+    )
+}
+
+pub(super) fn finish_already_latest_upgrade_steps(
+    behavior: UpgradeBehavior,
+    update_desktop: impl FnOnce() -> Result<(), BifrostError>,
+    restart_proxy: impl FnOnce() -> Result<(), BifrostError>,
+) -> Result<(), BifrostError> {
+    finish_upgrade_steps(
+        behavior.restart_if_already_latest && behavior.restart_proxy,
+        update_desktop,
+        restart_proxy,
+    )
+}
+
+pub(super) fn finish_installed_upgrade(
+    restart_executable: &Path,
+    latest_version: &str,
+    behavior: UpgradeBehavior,
+) -> Result<(), BifrostError> {
+    finish_installed_upgrade_steps(
+        behavior,
+        || update_desktop_companion(restart_executable, latest_version, behavior),
+        || maybe_restart_running_proxy(restart_executable),
+    )
+}
+
+pub(super) fn finish_installed_upgrade_steps(
+    behavior: UpgradeBehavior,
+    update_desktop: impl FnOnce() -> Result<(), BifrostError>,
+    restart_proxy: impl FnOnce() -> Result<(), BifrostError>,
+) -> Result<(), BifrostError> {
+    finish_upgrade_steps(behavior.restart_proxy, update_desktop, restart_proxy)
+}
+
+fn finish_upgrade_steps(
+    should_restart_proxy: bool,
+    update_desktop: impl FnOnce() -> Result<(), BifrostError>,
+    restart_proxy: impl FnOnce() -> Result<(), BifrostError>,
+) -> Result<(), BifrostError> {
+    let desktop_result = update_desktop();
+    let restart_result = if should_restart_proxy {
+        restart_proxy()
+    } else {
+        Ok(())
+    };
+
+    match (desktop_result, restart_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(desktop_error), Ok(())) => Err(desktop_error),
+        (Ok(()), Err(restart_error)) => Err(restart_error),
+        (Err(desktop_error), Err(restart_error)) => Err(BifrostError::Config(format!(
+            "{desktop_error}; running proxy restart also failed: {restart_error}"
+        ))),
+    }
 }
 
 pub(super) fn restore_desktop_after_failed_companion(

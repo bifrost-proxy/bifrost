@@ -31,6 +31,19 @@ pub(super) fn mirror_display_name(base_url: &str) -> String {
         .to_string()
 }
 
+pub(super) fn download_source_progress_message(base_url: &str, attempt: usize) -> String {
+    let source_name = mirror_display_name(base_url);
+    if attempt == 0 {
+        format!("Connecting to download source {source_name}…")
+    } else {
+        format!("Trying fallback download source {source_name}…")
+    }
+}
+
+pub(super) fn download_retry_progress_message(attempt: usize, download_tries: usize) -> String {
+    format!("Retrying current download source ({attempt}/{download_tries})…")
+}
+
 pub(super) fn github_path_url(base_url: &str, github_path: &str) -> String {
     format!(
         "{}/{}",
@@ -163,6 +176,9 @@ pub(super) fn download_file_with_progress(
                     attempt, tuning.download_tries
                 )
                 .bright_yellow()
+            );
+            crate::commands::upgrade_background::report_download_status(
+                download_retry_progress_message(attempt, tuning.download_tries),
             );
         }
 

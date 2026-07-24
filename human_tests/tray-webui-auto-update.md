@@ -450,6 +450,58 @@
 - 所有历史 Desktop tag 都具有系统 Quit 与 managed-core 清理路径；支持内部参数的版本走快速路径，不支持的版本走 exact-path fallback。
 - 退出等待和拒绝覆盖门禁保持不变，测试不影响正式 App 与 9900 服务。
 
+### TC-TWA-15：慢速 Desktop 包、409 接管与 CLI 重启独立性回归
+
+**回归目标**：
+
+- 复现首次升级仍在运行时，第二次 POST 返回 409 后页面误报 `Update Failed`，以及 WebView 重载后丢失内存状态、看不到既有下载进度的问题。
+- 复现 Desktop 包下载持续有新进度、但总耗时超过 600 秒时被父进程按绝对超时误杀的问题。
+- 保证 Desktop App 更新失败不会跳过已更新 CLI core 的重启；后台升级失败必须写入诊断日志、持久化 failed progress，并以非零状态退出。
+
+**操作步骤**：
+
+1. 执行 Web 状态机定向单测，验证 409 后接管既有 active transaction、重载恢复 persisted progress、真实错误不被吞掉、CLI 已到 target 时仍保留 Desktop 更新提示：
+   ```bash
+   pnpm --dir web exec vitest run src/stores/useVersionStore.test.ts
+   ```
+2. 使用本机 Google Chrome 执行 Admin Settings 定向浏览器回归；测试只 mock 隔离页面的升级 API，不访问或修改正式 9900 服务：
+   ```bash
+   PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+     pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts \
+     -g "版本升级 409 接管既有任务"
+   ```
+3. 执行 Desktop child progress 与 stall deadline 定向单测，确认 Desktop-owned 模式只有 target/source 匹配且 `updated_at` 前进的 active progress 才延长 deadline，CLI-owned companion 则只用尚未转发过的新 stdout/stderr 延长 deadline：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli \
+     desktop_child_progress --lib -- --nocapture
+   ```
+4. 执行安装收尾与后台失败语义定向单测，确认首次安装与磁盘 CLI already-latest 两种分支中，App 更新失败后都仍调用 proxy restart；双重失败同时保留，restart-disabled 不误重启，background engine 错误写入 failed progress 并向隐藏命令传播：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli \
+     installed_upgrade --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli \
+     already_latest_upgrade --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli \
+     background_upgrade_engine_failure --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli \
+     hidden_self_update_command --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli \
+     download_status_report_covers_source_connection_before_bytes_arrive \
+     --lib -- --nocapture
+   ```
+5. 执行升级 restart E2E，确认恢复/重启静态契约与 1500 行模块门禁覆盖新增 `upgrade_recovery.rs`：
+   ```bash
+   bash e2e-tests/tests/test_upgrade_restart_e2e.sh
+   ```
+6. 测试前后记录正式 9900 listener PID、启动命令、运行版本、磁盘 CLI 版本与 `/Applications/Bifrost.app` 版本；确认测试没有停止、替换或重启正式进程/App。
+
+**预期结果**：
+
+- 首个 POST 返回 409 但 progress 已为 active 时，页面继续显示同一 target、phase 与百分比，不显示 Failed/Retry，也不发送第二个 POST；页面重载后从持久化 progress 恢复并继续轮询。
+- 连接下载源且尚无字节时显示可诊断状态；Desktop child 持续发布结构化进度或 CLI-owned companion 持续输出新下载/安装活动时，600 秒只表示“无进度 stall timeout”，不再表示整个 App 下载的绝对上限。
+- App 更新失败不阻断 CLI core restart；第一次安装后的收尾与磁盘 CLI 已是 target、运行 core 仍旧的重试恢复分支都满足该约束。background failure 同时具有 error log、failed progress 与非零退出语义。
+- 全部测试使用 mock、临时目录或内存 fixture，不影响正式 9900 服务和 `/Applications/Bifrost.app`。
+
 ## 清理步骤
 
 1. 停止测试数据目录中的 Bifrost 服务：
@@ -460,6 +512,10 @@
 3. 不清理、不停止、不重启用户正在运行的 9900 服务。
 
 ## 执行记录
+
+2026-07-24 慢速 Desktop 包、409 接管与 CLI 重启独立性回归已执行：
+
+- TC-TWA-15：通过。Web 状态机为 `9/9`；本机 Google Chrome 自动化回归为 `1/1`，另通过 Chrome 扩展连接隔离 Vite + backend/mock 环境真实点击 Update Now，首个 POST 返回 409 后页面显示 `Updating Bifrost`、fallback 下载源与 `42%`，没有 `Update Failed` 或 Retry；重载后仍为 `Updating Bifrost`、`42%`、failed/retry 均为 0。CLI 的 structured progress + caller-managed streamed output stall deadline 最终为 `3/3`，fresh-output 去重为 `1/1`，首次安装收尾独立重启为 `3/3`，already-latest 恢复/交互 no-restart 为 `2/2`，background failure、隐藏命令传播与首字节前连接状态各为 `1/1`。第 1 轮把三个 Cargo 进程并行执行时，两个仅有 100ms 预算的 deadline 测试因构建锁后的调度延迟首次失败；保持“活动发生在原 deadline 前、命令结束在原 deadline 后”的产品断言不变，将时间裕量扩大并改为单一 Cargo 进程串行复跑后 `3/3`。同轮发现主实现/测试文件超过 1500 行，拆出 companion 编排和 `upgrade_recovery.rs` 后分别为 1484/1479/186 行；upgrade restart E2E 首次因默认 release binary 不存在且脚本联网检查 latest 卡在 PID 98571 被终止，改用隔离 debug binary、固定当前编译版本并让静态断言扫描职责拆分后的 companion/restart 文件，复跑 `21/21`。初始 Chrome/human 回归前后正式 listener 均为 PID `76215`、启动时间 `Thu Jul 23 16:17:34 2026`、运行版本 `0.0.161`，磁盘 CLI `0.0.162`、正式 App `0.0.161` 均未变化；但第 3 轮 restart E2E 的 `run_bifrost upgrade` 虽隔离了 data dir，却遗漏 `BIFROST_APP_INSTALL_DIR`，证据显示它在 `11:47:09` 下载 PID 98616 的完整 0.0.162 DMG，并于 `11:47:10` 把正式 `/Applications/Bifrost.app` 更新到 `0.0.162`。该测试副作用已如实记录，未擅自回滚或启动 App；测试 DMG 已删除。脚本现强制使用 `<TEST_DATA_DIR>/apps`，安全复跑 `21/21`，App ctime 前后均为 `1784864830`、正式 core PID 前后均为 `76215`，18891 无残留监听。
 
 2026-07-22 Desktop 升级拒绝与旧版本兼容回归已执行：
 
