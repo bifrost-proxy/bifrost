@@ -16,7 +16,7 @@ use bifrost_core::Result;
 use crate::im_gateway::provider::{EventSink, ImProvider};
 use crate::im_gateway::types::{
     ConnectionHandle, ConnectionState, ImEvent, ImEventMessage, ImEventSource, ImFileAttachment,
-    ImImageAttachment, ImImageSource, ImProviderConfig, ImProviderType, ImTarget,
+    ImImageAttachment, ImImageSource, ImMention, ImProviderConfig, ImProviderType, ImTarget,
     ProviderValidation, SendOptions, SendResult, UploadedImage,
 };
 
@@ -36,7 +36,6 @@ const WS_PING_INTERVAL_SECS: u64 = 90;
 const WS_SERVER_SILENCE_TIMEOUT_SECS: u64 = 180;
 /// How often the silence watchdog wakes up to re-check `last_server_msg_at`.
 const WS_SILENCE_CHECK_INTERVAL_SECS: u64 = 15;
-const DEFAULT_TEXT_CARD_TITLE: &str = "Bifrost";
 
 // ---------------------------------------------------------------------------
 // Protobuf Frame types for Feishu WebSocket binary protocol
@@ -137,6 +136,12 @@ struct TokenCache {
     expires_at: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FeishuBotIdentity {
+    pub open_id: String,
+    pub name: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct TokenCacheKey {
     base_url: String,
@@ -151,6 +156,7 @@ struct TokenCacheKey {
 pub struct FeishuProvider {
     http: reqwest::Client,
     token_cache: RwLock<HashMap<TokenCacheKey, TokenCache>>,
+    bot_identity_cache: RwLock<HashMap<TokenCacheKey, FeishuBotIdentity>>,
 }
 
 impl Default for FeishuProvider {
@@ -166,6 +172,7 @@ impl FeishuProvider {
         Self {
             http,
             token_cache: RwLock::new(HashMap::new()),
+            bot_identity_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -381,42 +388,93 @@ impl FeishuProvider {
             request_id,
         })
     }
+
+    /// Reply to an existing Feishu message. Feishu renders this relationship as
+    /// a compact native quote above the reply instead of requiring a card title.
+    async fn reply_message_internal(
+        &self,
+        base_url: &str,
+        token: &str,
+        message_id: &str,
+        msg_type: &str,
+        content: &str,
+        uuid: Option<&str>,
+    ) -> Result<SendResult> {
+        let url = format!("{}/im/v1/messages/{}/reply", base_url, message_id);
+
+        #[derive(Serialize)]
+        struct ReplyRequest<'a> {
+            msg_type: &'a str,
+            content: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            uuid: Option<&'a str>,
+        }
+
+        #[derive(Deserialize)]
+        struct ReplyResponse {
+            code: Option<i64>,
+            msg: Option<String>,
+            data: Option<ReplyResponseData>,
+        }
+
+        #[derive(Deserialize)]
+        struct ReplyResponseData {
+            message_id: Option<String>,
+        }
+
+        debug!(message_id, msg_type, "replying to feishu message");
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .json(&ReplyRequest {
+                msg_type,
+                content,
+                uuid,
+            })
+            .send()
+            .await
+            .map_err(|e| {
+                bifrost_core::BifrostError::Network(format!("feishu reply request failed: {}", e))
+            })?;
+
+        let request_id = resp
+            .headers()
+            .get("x-tt-logid")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let body: ReplyResponse = resp.json().await.map_err(|e| {
+            bifrost_core::BifrostError::Network(format!(
+                "feishu reply response parse failed: {}",
+                e
+            ))
+        })?;
+        if body.code.unwrap_or(0) != 0 {
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "feishu reply error: code={}, msg={}",
+                body.code.unwrap_or(0),
+                body.msg.unwrap_or_default()
+            )));
+        }
+
+        Ok(SendResult {
+            message_id: body.data.and_then(|data| data.message_id),
+            request_id,
+        })
+    }
 }
 
 pub(crate) fn build_default_text_card(text: &str) -> serde_json::Value {
-    build_markdown_card(DEFAULT_TEXT_CARD_TITLE, text, "blue")
+    build_markdown_card(text)
 }
 
-pub(crate) fn build_markdown_card(
-    title: &str,
-    markdown: &str,
-    template: &str,
-) -> serde_json::Value {
-    let title = title.trim();
-    let title = if title.is_empty() {
-        DEFAULT_TEXT_CARD_TITLE
-    } else {
-        title
-    };
-    let template = template.trim();
-    let template = if template.is_empty() {
-        "blue"
-    } else {
-        template
-    };
+pub(crate) fn build_markdown_card(markdown: &str) -> serde_json::Value {
     let markdown = crate::im_gateway::markdown_converter::convert_to_feishu_markdown(markdown);
     serde_json::json!({
         "schema": "2.0",
         "config": {
             "width_mode": "fill",
             "update_multi": true
-        },
-        "header": {
-            "template": template,
-            "title": {
-                "tag": "plain_text",
-                "content": title
-            }
         },
         "body": {
             "elements": [{
@@ -426,6 +484,15 @@ pub(crate) fn build_markdown_card(
             }]
         }
     })
+}
+
+/// Enforce Bifrost's compact Feishu card style at the provider boundary so
+/// callers cannot accidentally reintroduce the large root title band.
+fn without_root_card_header(mut card: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = card.as_object_mut() {
+        object.remove("header");
+    }
+    card
 }
 
 // ---------------------------------------------------------------------------
@@ -490,6 +557,7 @@ impl ImProvider for FeishuProvider {
         let app_secret = config.secret_ref.as_deref().unwrap_or_default();
         let token = self.get_tenant_token(config, app_secret).await?;
 
+        let card = without_root_card_header(card);
         let content = serde_json::to_string(&card).map_err(|e| {
             bifrost_core::BifrostError::Parse(format!("failed to serialize card: {}", e))
         })?;
@@ -575,6 +643,24 @@ impl ImProvider for FeishuProvider {
 // ---------------------------------------------------------------------------
 
 impl FeishuProvider {
+    pub async fn reply_card(
+        &self,
+        config: &ImProviderConfig,
+        message_id: &str,
+        card: serde_json::Value,
+        uuid: Option<&str>,
+    ) -> Result<SendResult> {
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+        let card = without_root_card_header(card);
+        let content = serde_json::to_string(&card).map_err(|e| {
+            bifrost_core::BifrostError::Parse(format!("failed to serialize reply card: {}", e))
+        })?;
+        self.reply_message_internal(base_url, &token, message_id, "interactive", &content, uuid)
+            .await
+    }
+
     /// Upload an image and return the Feishu image_key that can be used in
     /// image messages and card image elements.
     pub async fn upload_image(
@@ -786,6 +872,7 @@ impl FeishuProvider {
 
         let url = format!("{}/im/v1/messages/{}", base_url, message_id);
 
+        let card = without_root_card_header(card);
         let content = serde_json::to_string(&card).map_err(|e| {
             bifrost_core::BifrostError::Parse(format!("failed to serialize card: {}", e))
         })?;
@@ -848,6 +935,7 @@ impl FeishuProvider {
         let app_secret = config.secret_ref.as_deref().unwrap_or_default();
         let token = self.get_tenant_token(config, app_secret).await?;
         let url = format!("{}/cardkit/v1/cards", base_url);
+        let card = without_root_card_header(card);
         let data = serde_json::to_string(&card).map_err(|e| {
             bifrost_core::BifrostError::Parse(format!("failed to serialize card entity: {}", e))
         })?;
@@ -938,6 +1026,29 @@ impl FeishuProvider {
         .await
     }
 
+    /// Reply with a previously created CardKit entity so progress cards also
+    /// use Feishu's native compact quote for the triggering message.
+    pub async fn reply_card_entity(
+        &self,
+        config: &ImProviderConfig,
+        message_id: &str,
+        card_id: &str,
+        uuid: Option<&str>,
+    ) -> Result<SendResult> {
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+        let content = serde_json::json!({
+            "type": "card",
+            "data": {
+                "card_id": card_id
+            }
+        })
+        .to_string();
+        self.reply_message_internal(base_url, &token, message_id, "interactive", &content, uuid)
+            .await
+    }
+
     /// Replace the full JSON 2.0 payload of a CardKit card entity.
     pub async fn update_card_entity(
         &self,
@@ -951,6 +1062,7 @@ impl FeishuProvider {
         let app_secret = config.secret_ref.as_deref().unwrap_or_default();
         let token = self.get_tenant_token(config, app_secret).await?;
         let url = format!("{}/cardkit/v1/cards/{}", base_url, card_id);
+        let card = without_root_card_header(card);
         let data = serde_json::to_string(&card).map_err(|e| {
             bifrost_core::BifrostError::Parse(format!("failed to serialize card entity: {}", e))
         })?;
@@ -1336,6 +1448,113 @@ impl FeishuProvider {
         Ok(open_id)
     }
 
+    /// Resolve the current application bot identity used to distinguish an
+    /// explicit @bot mention from mentions of ordinary group members.
+    pub async fn fetch_bot_identity(&self, config: &ImProviderConfig) -> Result<FeishuBotIdentity> {
+        let base_url = Self::base_url(config);
+        let app_id = config.app_id.as_deref().unwrap_or_default();
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let cache_key = Self::token_cache_key(base_url, app_id, app_secret);
+        if let Some(identity) = self.bot_identity_cache.read().get(&cache_key).cloned() {
+            return Ok(identity);
+        }
+
+        let token = self.get_tenant_token(config, app_secret).await?;
+        let url = format!("{base_url}/bot/v3/info");
+        let response = self
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .map_err(|error| {
+                bifrost_core::BifrostError::Network(format!(
+                    "fetch bot identity request failed: {error}"
+                ))
+            })?;
+        let value: serde_json::Value = response.json().await.map_err(|error| {
+            bifrost_core::BifrostError::Network(format!(
+                "fetch bot identity response parse failed: {error}"
+            ))
+        })?;
+        let code = value
+            .get("code")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or_default();
+        if code != 0 {
+            let message = value
+                .get("msg")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "fetch bot identity failed: code={code}, msg={message}"
+            )));
+        }
+        let bot = value
+            .get("bot")
+            .or_else(|| value.get("data").and_then(|data| data.get("bot")))
+            .ok_or_else(|| {
+                bifrost_core::BifrostError::Network("bot identity response missing bot".to_string())
+            })?;
+        let open_id = bot
+            .get("open_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                bifrost_core::BifrostError::Network(
+                    "bot identity response missing bot.open_id".to_string(),
+                )
+            })?
+            .to_string();
+        let name = bot
+            .get("app_name")
+            .or_else(|| bot.get("bot_name"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let identity = FeishuBotIdentity { open_id, name };
+        self.bot_identity_cache
+            .write()
+            .insert(cache_key, identity.clone());
+        Ok(identity)
+    }
+
+    /// Resolve the display name for a group that this provider's bot belongs
+    /// to. Message receive events only contain `chat_id`, so initialization
+    /// must enrich the group session through the chat information API.
+    pub async fn fetch_chat_name(
+        &self,
+        config: &ImProviderConfig,
+        chat_id: &str,
+    ) -> Result<String> {
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+        let url = format!(
+            "{base_url}/im/v1/chats/{}?user_id_type=open_id",
+            chat_id.trim()
+        );
+        let response = self
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .map_err(|error| {
+                bifrost_core::BifrostError::Network(format!(
+                    "fetch Feishu chat information request failed: {error}"
+                ))
+            })?;
+        let value: serde_json::Value = response.json().await.map_err(|error| {
+            bifrost_core::BifrostError::Network(format!(
+                "fetch Feishu chat information response parse failed: {error}"
+            ))
+        })?;
+        parse_feishu_chat_name(&value).map_err(bifrost_core::BifrostError::Network)
+    }
+
     /// Add a reaction emoji to a message.
     ///
     /// `emoji_type` should be a Feishu emoji code, e.g. `"THUMBSUP"`.
@@ -1524,6 +1743,30 @@ impl FeishuProvider {
         })?;
         Ok((mime_type, bytes.to_vec()))
     }
+}
+
+fn parse_feishu_chat_name(value: &serde_json::Value) -> std::result::Result<String, String> {
+    let code = value
+        .get("code")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or_default();
+    if code != 0 {
+        let message = value
+            .get("msg")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        return Err(format!(
+            "fetch Feishu chat information failed: code={code}, msg={message}"
+        ));
+    }
+    value
+        .get("data")
+        .and_then(|data| data.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "fetch Feishu chat information response missing data.name".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1918,6 +2161,19 @@ pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Opt
         .get("message_type")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let chat_type = message
+        .get("chat_type")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let create_time = message
+        .get("create_time")
+        .and_then(json_u64_from_string_or_number);
+    let update_time = message
+        .get("update_time")
+        .and_then(json_u64_from_string_or_number);
+    let root_id = json_non_empty_string(message.get("root_id"));
+    let parent_id = json_non_empty_string(message.get("parent_id"));
+    let thread_id = json_non_empty_string(message.get("thread_id"));
 
     let content_obj = message
         .get("content")
@@ -1925,9 +2181,40 @@ pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Opt
         .and_then(|content_str| serde_json::from_str::<serde_json::Value>(content_str).ok())
         .unwrap_or_else(|| serde_json::json!({}));
 
+    let mentions = message
+        .get("mentions")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|mention| ImMention {
+            key: mention
+                .get("key")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            open_id: mention
+                .get("id")
+                .and_then(|id| id.get("open_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            name: mention
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            tenant_key: mention
+                .get("tenant_key")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            is_bot: false,
+        })
+        .collect::<Vec<_>>();
+
     // Extract text content from message.content. Feishu rich text (`post`)
     // stores plain text in nested `content` arrays rather than top-level text.
-    let text = extract_feishu_message_text(&content_obj);
+    // Its `at` nodes contain display names/IDs instead of the stable mention
+    // placeholders supplied alongside the message, so normalize them back to
+    // those placeholders before group classification and prompt rendering.
+    let text = extract_feishu_message_text(&content_obj, &mentions);
 
     let mut images = Vec::new();
     let mut files = Vec::new();
@@ -2003,6 +2290,10 @@ pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Opt
                 .and_then(|v| v.as_str())
         })
         .map(|s| s.to_string());
+    let sender_type = sender
+        .and_then(|sender| sender.get("sender_type"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
 
     // Compute raw digest (sha256 of the raw JSON)
     let raw_bytes = raw.to_string();
@@ -2018,19 +2309,42 @@ pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Opt
         event_type: normalized_event_type.to_string(),
         source: ImEventSource {
             chat_id,
+            chat_type,
             user_id,
+            user_name: None,
+            sender_type,
             message_id,
         },
         message: Some(ImEventMessage {
             text,
-            mentions: Vec::new(),
+            mentions,
             images,
             files,
             raw_type: message_type,
+            raw_content: Some(content_obj),
+            create_time,
+            update_time,
+            root_id,
+            parent_id,
+            thread_id,
         }),
         received_at: now,
         raw_digest: Some(raw_digest),
     })
+}
+
+fn json_u64_from_string_or_number(value: &serde_json::Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+fn json_non_empty_string(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 // ---------------------------------------------------------------------------
@@ -2239,16 +2553,20 @@ fn collect_rich_text_image_keys(value: &serde_json::Value, images: &mut Vec<ImIm
     }
 }
 
-fn extract_feishu_message_text(value: &serde_json::Value) -> String {
+fn extract_feishu_message_text(value: &serde_json::Value, mentions: &[ImMention]) -> String {
     if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
         return text.to_string();
     }
     let mut parts = Vec::new();
-    collect_feishu_text_nodes(value, &mut parts);
+    collect_feishu_text_nodes(value, mentions, &mut parts);
     parts.join("").trim().to_string()
 }
 
-fn collect_feishu_text_nodes(value: &serde_json::Value, parts: &mut Vec<String>) {
+fn collect_feishu_text_nodes(
+    value: &serde_json::Value,
+    mentions: &[ImMention],
+    parts: &mut Vec<String>,
+) {
     match value {
         serde_json::Value::Object(map) => {
             let tag = map.get("tag").and_then(|v| v.as_str());
@@ -2258,11 +2576,11 @@ fn collect_feishu_text_nodes(value: &serde_json::Value, parts: &mut Vec<String>)
                 }
             }
             if tag == Some("at") {
-                if let Some(text) = map
-                    .get("user_name")
-                    .or_else(|| map.get("user_id"))
-                    .and_then(|v| v.as_str())
-                {
+                if let Some(text) = rich_text_mention_placeholder(map, mentions).or_else(|| {
+                    map.get("user_name")
+                        .or_else(|| map.get("user_id"))
+                        .and_then(|v| v.as_str())
+                }) {
                     parts.push(text.to_string());
                 }
             }
@@ -2270,16 +2588,47 @@ fn collect_feishu_text_nodes(value: &serde_json::Value, parts: &mut Vec<String>)
                 parts.push("\n".to_string());
             }
             for child in map.values() {
-                collect_feishu_text_nodes(child, parts);
+                collect_feishu_text_nodes(child, mentions, parts);
             }
         }
         serde_json::Value::Array(items) => {
             for item in items {
-                collect_feishu_text_nodes(item, parts);
+                collect_feishu_text_nodes(item, mentions, parts);
             }
         }
         _ => {}
     }
+}
+
+fn rich_text_mention_placeholder<'a>(
+    node: &serde_json::Map<String, serde_json::Value>,
+    mentions: &'a [ImMention],
+) -> Option<&'a str> {
+    let user_id = node
+        .get("open_id")
+        .or_else(|| node.get("user_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let user_name = node
+        .get("user_name")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    user_id
+        .and_then(|id| {
+            mentions.iter().find(|mention| {
+                !mention.key.trim().is_empty() && mention.open_id.as_deref() == Some(id)
+            })
+        })
+        .or_else(|| {
+            user_name.and_then(|name| {
+                mentions.iter().find(|mention| {
+                    !mention.key.trim().is_empty() && mention.name.as_deref() == Some(name)
+                })
+            })
+        })
+        .map(|mention| mention.key.as_str())
 }
 
 fn json_object_keys(value: &serde_json::Value) -> Vec<&str> {
@@ -2292,13 +2641,69 @@ fn json_object_keys(value: &serde_json::Value) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use http_body_util::Full;
+    use hyper::body::Incoming;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response, StatusCode};
+    use hyper_util::rt::TokioIo;
+
+    async fn spawn_feishu_api_server(
+        bot_body: &'static str,
+        chat_body: &'static str,
+        reply_body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Feishu API fixture");
+        let address = listener.local_addr().expect("Feishu API fixture address");
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let service = service_fn(move |request: Request<Incoming>| async move {
+                        let path = request.uri().path();
+                        let (status, body) =
+                            if path.ends_with("/auth/v3/tenant_access_token/internal") {
+                                (
+                                    StatusCode::OK,
+                                    r#"{"code":0,"tenant_access_token":"token","expire":7200}"#,
+                                )
+                            } else if path.ends_with("/bot/v3/info") {
+                                (StatusCode::OK, bot_body)
+                            } else if path.contains("/im/v1/chats/") {
+                                (StatusCode::OK, chat_body)
+                            } else if path.contains("/im/v1/messages/") {
+                                (StatusCode::OK, reply_body)
+                            } else {
+                                (StatusCode::NOT_FOUND, r#"{"code":404}"#)
+                            };
+                        Ok::<_, hyper::Error>(
+                            Response::builder()
+                                .status(status)
+                                .header("Content-Type", "application/json")
+                                .body(Full::new(Bytes::from_static(body.as_bytes())))
+                                .unwrap(),
+                        )
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        (format!("http://{address}"), task)
+    }
 
     #[test]
     fn test_default_text_card_wraps_plain_text_as_markdown_card() {
         let card = build_default_text_card("**hello**\n\n- from Bifrost");
 
         assert_eq!(card["schema"], "2.0");
-        assert_eq!(card["header"]["title"]["content"], "Bifrost");
+        assert!(card.get("header").is_none());
         assert_eq!(card["body"]["elements"][0]["tag"], "markdown");
         assert_eq!(
             card["body"]["elements"][0]["content"],
@@ -2332,6 +2737,183 @@ mod tests {
         );
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn test_parse_feishu_chat_name_requires_successful_non_empty_name() {
+        assert_eq!(
+            parse_feishu_chat_name(&serde_json::json!({
+                "code": 0,
+                "msg": "success",
+                "data": {"name": " 我的工作空间。 "}
+            }))
+            .unwrap(),
+            "我的工作空间。"
+        );
+        assert!(parse_feishu_chat_name(&serde_json::json!({
+            "code": 99991672,
+            "msg": "Access denied"
+        }))
+        .unwrap_err()
+        .contains("code=99991672"));
+        assert!(parse_feishu_chat_name(&serde_json::json!({
+            "code": 0,
+            "data": {"name": " "}
+        }))
+        .unwrap_err()
+        .contains("missing data.name"));
+    }
+
+    #[tokio::test]
+    async fn fetch_group_identity_and_chat_name_use_api_and_cache_successfully() {
+        let (base_url, server) = spawn_feishu_api_server(
+            r#"{"code":0,"bot":{"open_id":"ou_bot","app_name":"Bifrost"}}"#,
+            r#"{"code":0,"data":{"name":" Engineering "}}"#,
+            r#"{"code":0,"data":{"message_id":"om_reply"}}"#,
+        )
+        .await;
+        let mut config = provider_with_base_url(Some(&base_url));
+        config.secret_ref = Some("secret".to_string());
+        let provider = FeishuProvider::new();
+
+        let identity = provider.fetch_bot_identity(&config).await.unwrap();
+        assert_eq!(identity.open_id, "ou_bot");
+        assert_eq!(identity.name.as_deref(), Some("Bifrost"));
+        assert_eq!(
+            provider.fetch_bot_identity(&config).await.unwrap(),
+            identity
+        );
+        assert_eq!(
+            provider.fetch_chat_name(&config, "oc_group").await.unwrap(),
+            "Engineering"
+        );
+        let reply = provider
+            .reply_card(
+                &config,
+                "om_source",
+                serde_json::json!({"header":{"title":{"content":"remove"}},"elements":[]}),
+                Some("reply-uuid"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.message_id.as_deref(), Some("om_reply"));
+        provider
+            .patch_card(
+                &config,
+                "om_reply",
+                serde_json::json!({"header":{"title":{"content":"remove"}},"elements":[]}),
+            )
+            .await
+            .unwrap();
+        server.abort();
+
+        let (base_url, server) = spawn_feishu_api_server(
+            r#"{"code":0,"bot":{"open_id":"ou_bot"}}"#,
+            r#"{"code":0,"data":{"name":"Engineering"}}"#,
+            "not-json",
+        )
+        .await;
+        let mut config = provider_with_base_url(Some(&base_url));
+        config.secret_ref = Some("secret".to_string());
+        assert!(FeishuProvider::new()
+            .reply_card(
+                &config,
+                "om_source",
+                serde_json::json!({"elements":[]}),
+                None,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("reply response parse failed"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn fetch_group_identity_reports_api_shape_parse_and_network_errors() {
+        for (bot_body, expected) in [
+            (r#"{"code":999,"msg":"denied"}"#, "code=999"),
+            (r#"{"code":0,"data":{}}"#, "missing bot"),
+            (
+                r#"{"code":0,"bot":{"open_id":" ","bot_name":"Bifrost"}}"#,
+                "missing bot.open_id",
+            ),
+            ("not-json", "response parse failed"),
+        ] {
+            let (base_url, server) = spawn_feishu_api_server(
+                bot_body,
+                r#"{"code":0,"data":{"name":"Group"}}"#,
+                r#"{"code":0}"#,
+            )
+            .await;
+            let mut config = provider_with_base_url(Some(&base_url));
+            config.secret_ref = Some("secret".to_string());
+            let error = FeishuProvider::new()
+                .fetch_bot_identity(&config)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+            server.abort();
+        }
+
+        let (base_url, server) = spawn_feishu_api_server(
+            r#"{"code":0,"bot":{"open_id":"ou_bot","bot_name":"Fallback Name"}}"#,
+            "not-json",
+            r#"{"code":0}"#,
+        )
+        .await;
+        let mut config = provider_with_base_url(Some(&base_url));
+        config.secret_ref = Some("secret".to_string());
+        let provider = FeishuProvider::new();
+        let identity = provider.fetch_bot_identity(&config).await.unwrap();
+        assert_eq!(identity.name.as_deref(), Some("Fallback Name"));
+        assert!(provider
+            .fetch_chat_name(&config, "oc_group")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("response parse failed"));
+        server.abort();
+
+        let mut unreachable = provider_with_base_url(Some("http://127.0.0.1:9"));
+        unreachable.secret_ref = Some("secret".to_string());
+        let provider = FeishuProvider::new();
+        let cache_key = FeishuProvider::token_cache_key(
+            FeishuProvider::base_url(&unreachable),
+            unreachable.app_id.as_deref().unwrap(),
+            "secret",
+        );
+        provider.token_cache.write().insert(
+            cache_key,
+            TokenCache {
+                token: "cached".to_string(),
+                expires_at: u64::MAX,
+            },
+        );
+        assert!(provider
+            .fetch_bot_identity(&unreachable)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("request failed"));
+        assert!(provider
+            .fetch_chat_name(&unreachable, "oc_group")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("request failed"));
+        assert!(provider
+            .reply_card(
+                &unreachable,
+                "om_source",
+                serde_json::json!({"elements":[]}),
+                None,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("reply request failed"));
     }
 
     #[test]
@@ -2372,6 +2954,103 @@ mod tests {
         assert_eq!(msg.text, "/check bifrost");
         assert_eq!(msg.raw_type.as_deref(), Some("text"));
         assert!(event.raw_digest.unwrap().starts_with("sha256:"));
+    }
+
+    #[test]
+    fn test_normalize_feishu_group_message_preserves_mentions_and_thread_metadata() {
+        let raw = serde_json::json!({
+            "header": {
+                "event_id": "evt_group",
+                "event_type": "im.message.receive_v1",
+                "create_time": "1710000000999"
+            },
+            "event": {
+                "message": {
+                    "chat_id": "oc_group",
+                    "chat_type": "group",
+                    "message_id": "om_group",
+                    "message_type": "text",
+                    "create_time": "1710000000111",
+                    "update_time": "1710000000222",
+                    "root_id": "om_root",
+                    "parent_id": "om_parent",
+                    "thread_id": "omt_thread",
+                    "content": "{\"text\":\"@_user_1 inspect this\"}",
+                    "mentions": [{
+                        "key": "@_user_1",
+                        "id": {"open_id": "ou_bot"},
+                        "name": "Bifrost",
+                        "tenant_key": "tenant-a"
+                    }]
+                },
+                "sender": {
+                    "sender_type": "user",
+                    "sender_id": {"open_id": "ou_alice"}
+                }
+            }
+        });
+
+        let event = normalize_feishu_event(&raw, "feishu-main").unwrap();
+        assert_eq!(event.source.chat_type.as_deref(), Some("group"));
+        assert_eq!(event.source.sender_type.as_deref(), Some("user"));
+        let message = event.message.unwrap();
+        assert_eq!(message.create_time, Some(1_710_000_000_111));
+        assert_eq!(message.update_time, Some(1_710_000_000_222));
+        assert_eq!(message.root_id.as_deref(), Some("om_root"));
+        assert_eq!(message.parent_id.as_deref(), Some("om_parent"));
+        assert_eq!(message.thread_id.as_deref(), Some("omt_thread"));
+        assert_eq!(message.mentions.len(), 1);
+        assert_eq!(message.mentions[0].key, "@_user_1");
+        assert_eq!(message.mentions[0].open_id.as_deref(), Some("ou_bot"));
+        assert_eq!(message.mentions[0].name.as_deref(), Some("Bifrost"));
+        assert!(!message.mentions[0].is_bot);
+    }
+
+    #[test]
+    fn test_normalize_feishu_post_restores_stable_mention_placeholders() {
+        let raw = serde_json::json!({
+            "header": {
+                "event_id": "evt_group_post",
+                "event_type": "im.message.receive_v1",
+                "create_time": "1710000000999"
+            },
+            "event": {
+                "message": {
+                    "chat_id": "oc_group",
+                    "chat_type": "group",
+                    "message_id": "om_group_post",
+                    "message_type": "post",
+                    "content": serde_json::json!({
+                        "content": [[
+                            {"tag": "at", "user_id": "ou_bot", "user_name": "Bifrost"},
+                            {"tag": "text", "text": " inspect this"},
+                            {"tag": "at", "user_id": "ou_alice", "user_name": "Alice"}
+                        ]]
+                    }).to_string(),
+                    "mentions": [
+                        {
+                            "key": "@_user_1",
+                            "id": {"open_id": "ou_bot"},
+                            "name": "Bifrost"
+                        },
+                        {
+                            "key": "@_user_2",
+                            "id": {"open_id": "ou_alice"},
+                            "name": "Alice"
+                        }
+                    ]
+                },
+                "sender": {
+                    "sender_type": "user",
+                    "sender_id": {"open_id": "ou_alice"}
+                }
+            }
+        });
+
+        let event = normalize_feishu_event(&raw, "feishu-main").unwrap();
+        let message = event.message.unwrap();
+        assert_eq!(message.text, "@_user_1 inspect this@_user_2");
+        assert_eq!(message.mentions.len(), 2);
     }
 
     #[test]
@@ -2675,11 +3354,39 @@ mod tests {
                 {"tag": "at", "user_name": "Alice"}
             ]]
         });
-        let text = extract_feishu_message_text(&rich);
-        assert_eq!(text, "Hello world\nAlice");
+        let mentions = vec![ImMention {
+            key: "@_user_1".to_string(),
+            open_id: Some("ou_alice".to_string()),
+            name: Some("Alice".to_string()),
+            tenant_key: None,
+            is_bot: false,
+        }];
+        let text = extract_feishu_message_text(&rich, &mentions);
+        assert_eq!(text, "Hello world\n@_user_1");
+
+        let unmatched = extract_feishu_message_text(&rich, &[]);
+        assert_eq!(unmatched, "Hello world\nAlice");
+
+        let duplicate_name_mentions = vec![
+            ImMention {
+                key: "@_wrong_name_match".to_string(),
+                open_id: Some("ou_other".to_string()),
+                name: Some("Alice".to_string()),
+                tenant_key: None,
+                is_bot: false,
+            },
+            mentions[0].clone(),
+        ];
+        let rich_with_id = serde_json::json!({
+            "content": [[{"tag": "at", "user_id": "ou_alice", "user_name": "Alice"}]]
+        });
+        assert_eq!(
+            extract_feishu_message_text(&rich_with_id, &duplicate_name_mentions),
+            "@_user_1"
+        );
 
         let plain = serde_json::json!({"text": "plain text"});
-        assert_eq!(extract_feishu_message_text(&plain), "plain text");
+        assert_eq!(extract_feishu_message_text(&plain, &mentions), "plain text");
     }
 
     #[test]

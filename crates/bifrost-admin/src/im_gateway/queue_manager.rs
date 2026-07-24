@@ -12,6 +12,19 @@ use std::sync::Arc;
 use crate::im_gateway::external_cli::ExternalCliFileInput;
 use bifrost_agent::session::{GuideChannel, GuideMessageChannel};
 
+/// IM reply and group-turn state that must follow a queued message.
+///
+/// This state is intentionally not serialized into progress cards. It only
+/// exists while the in-memory queue owns the message.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueueItemContext {
+    pub event_id: String,
+    pub message_id: Option<String>,
+    pub user_id: Option<String>,
+    pub user_name: Option<String>,
+    pub group_turn_id: Option<String>,
+}
+
 /// A queued message with a sequence number.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct QueueItem {
@@ -21,6 +34,8 @@ pub struct QueueItem {
     pub images: Vec<bifrost_agent::ChatImageInput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<ExternalCliFileInput>,
+    #[serde(skip)]
+    pub context: Option<QueueItemContext>,
 }
 
 /// Per-session queue state.
@@ -50,6 +65,10 @@ pub struct SessionQueueManager {
     /// are still part of the current active turn from the main process view.
     handed_off_guides: DashMap<String, VecDeque<String>>,
 
+    /// Persisted group turn IDs accepted as live guides by the active external
+    /// runner. They remain nonterminal until that runner reports its outcome.
+    live_guide_turns: DashMap<String, VecDeque<String>>,
+
     /// Queue-mode FIFO: processed sequentially after each turn completes.
     queues: DashMap<String, SessionQueue>,
 }
@@ -62,6 +81,7 @@ impl SessionQueueManager {
         Self {
             guide_slots: DashMap::new(),
             handed_off_guides: DashMap::new(),
+            live_guide_turns: DashMap::new(),
             queues: DashMap::new(),
         }
     }
@@ -149,6 +169,26 @@ impl SessionQueueManager {
         unconsumed
     }
 
+    pub fn track_live_guide_turn(&self, session_key: &str, turn_id: String) {
+        if turn_id.trim().is_empty() {
+            return;
+        }
+        let mut entry = self
+            .live_guide_turns
+            .entry(session_key.to_string())
+            .or_default();
+        if !entry.iter().any(|existing| existing == &turn_id) {
+            entry.push_back(turn_id);
+        }
+    }
+
+    pub fn take_live_guide_turns(&self, session_key: &str) -> Vec<String> {
+        self.live_guide_turns
+            .remove(session_key)
+            .map(|(_, turns)| turns.into_iter().collect())
+            .unwrap_or_default()
+    }
+
     // ── Queue mode ───────────────────────────────────────────────────────
 
     /// Push a message into the queue. Returns the current queue snapshot.
@@ -181,6 +221,29 @@ impl SessionQueueManager {
         images: Vec<bifrost_agent::ChatImageInput>,
         files: Vec<ExternalCliFileInput>,
     ) -> Result<Vec<QueueItem>, &'static str> {
+        self.push_queue_with_attachments_and_context(session_key, msg, images, files, None)
+    }
+
+    /// Push a message, image attachments, and the originating IM reply context.
+    pub fn push_queue_with_images_and_context(
+        &self,
+        session_key: &str,
+        msg: String,
+        images: Vec<bifrost_agent::ChatImageInput>,
+        context: Option<QueueItemContext>,
+    ) -> Result<Vec<QueueItem>, &'static str> {
+        self.push_queue_with_attachments_and_context(session_key, msg, images, Vec::new(), context)
+    }
+
+    /// Push a message, attachments, and the originating IM reply context.
+    pub fn push_queue_with_attachments_and_context(
+        &self,
+        session_key: &str,
+        msg: String,
+        images: Vec<bifrost_agent::ChatImageInput>,
+        files: Vec<ExternalCliFileInput>,
+        context: Option<QueueItemContext>,
+    ) -> Result<Vec<QueueItem>, &'static str> {
         let mut entry = self.queues.entry(session_key.to_string()).or_default();
         let queue = entry.value_mut();
 
@@ -195,6 +258,7 @@ impl SessionQueueManager {
             message: msg,
             images,
             files,
+            context,
         });
 
         Ok(queue.items.iter().cloned().collect())
@@ -203,13 +267,17 @@ impl SessionQueueManager {
     /// Remove a queued message by sequence number.
     /// Returns `true` if found and removed.
     pub fn remove_queue(&self, session_key: &str, seq: u64) -> bool {
+        self.remove_queue_item(session_key, seq).is_some()
+    }
+
+    /// Remove and return a queued message by sequence number.
+    pub fn remove_queue_item(&self, session_key: &str, seq: u64) -> Option<QueueItem> {
         if let Some(mut entry) = self.queues.get_mut(session_key) {
             let queue = entry.value_mut();
-            let before = queue.items.len();
-            queue.items.retain(|item| item.seq != seq);
-            return queue.items.len() < before;
+            let position = queue.items.iter().position(|item| item.seq == seq)?;
+            return queue.items.remove(position);
         }
-        false
+        None
     }
 
     /// Pop the next queued message (FIFO).
@@ -233,7 +301,9 @@ impl SessionQueueManager {
             .unwrap_or_default()
     }
 
-    /// Clear all state (guide + queue) for a session.
+    /// Clear user-visible guide and queue state for a session. Live group-turn
+    /// tracking deliberately survives until the active runner reports its
+    /// terminal outcome, including when an API request stops/deletes a session.
     pub fn clear_session(&self, session_key: &str) {
         self.guide_slots.remove(session_key);
         self.handed_off_guides.remove(session_key);
@@ -326,6 +396,20 @@ mod tests {
         let mgr = SessionQueueManager::new();
         let unconsumed = mgr.reconcile_handed_off_guides("s1", &["x".into()]);
         assert!(unconsumed.is_empty());
+    }
+
+    #[test]
+    fn live_guide_turns_are_deduplicated_and_drained_per_session() {
+        let mgr = SessionQueueManager::new();
+        mgr.track_live_guide_turn("s1", "turn-1".into());
+        mgr.track_live_guide_turn("s1", "turn-1".into());
+        mgr.track_live_guide_turn("s1", "turn-2".into());
+        mgr.track_live_guide_turn("s2", "turn-other".into());
+
+        assert_eq!(mgr.take_live_guide_turns("s1"), vec!["turn-1", "turn-2"]);
+        assert!(mgr.take_live_guide_turns("s1").is_empty());
+        mgr.clear_session("s2");
+        assert_eq!(mgr.take_live_guide_turns("s2"), vec!["turn-other"]);
     }
 
     #[test]
@@ -530,6 +614,31 @@ mod tests {
 
         assert!(!mgr.remove_queue("s1", 999));
         assert!(!mgr.remove_queue("nonexistent_session", 1));
+    }
+
+    #[test]
+    fn queued_item_preserves_and_returns_im_context() {
+        let mgr = SessionQueueManager::new();
+        let context = QueueItemContext {
+            event_id: "event-2".to_string(),
+            message_id: Some("message-2".to_string()),
+            user_id: Some("user-2".to_string()),
+            user_name: Some("Bob".to_string()),
+            group_turn_id: Some("turn-2".to_string()),
+        };
+        mgr.push_queue_with_images_and_context(
+            "s1",
+            "second".to_string(),
+            Vec::new(),
+            Some(context.clone()),
+        )
+        .unwrap();
+
+        let queued = mgr.queue_status("s1");
+        assert_eq!(queued[0].context.as_ref(), Some(&context));
+        let removed = mgr.remove_queue_item("s1", queued[0].seq).unwrap();
+        assert_eq!(removed.context, Some(context));
+        assert!(mgr.queue_status("s1").is_empty());
     }
 
     /// Test fix for guide message loss at turn end:

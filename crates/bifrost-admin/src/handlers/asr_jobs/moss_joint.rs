@@ -40,6 +40,131 @@ const MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS: usize = 3;
 const MOSS_RESOURCE_DOWNLOAD_RETRY_DELAY_MS: u64 = 500;
 
 static MOSS_INIT_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static MOSS_INIT_STATE: Lazy<StdMutex<MossInitializationState>> =
+    Lazy::new(|| StdMutex::new(MossInitializationState::default()));
+
+#[derive(Debug, Clone, Default)]
+struct MossInitializationState {
+    generation: u64,
+    active: bool,
+    asr_home: Option<PathBuf>,
+    task_id: Option<String>,
+    progress: Option<crate::resource_download::DownloadProgress>,
+    task_progress_updated_at_ms: u64,
+}
+
+struct MossInitializationGuard {
+    asr_home: PathBuf,
+}
+
+impl Drop for MossInitializationGuard {
+    fn drop(&mut self) {
+        let mut state = MOSS_INIT_STATE.lock().unwrap_or_else(|error| error.into_inner());
+        if state.asr_home.as_deref() == Some(self.asr_home.as_path()) {
+            state.active = false;
+            state.task_id = None;
+        }
+    }
+}
+
+fn begin_moss_initialization(asr_home: &Path, task_id: &str) -> MossInitializationGuard {
+    let mut state = MOSS_INIT_STATE.lock().unwrap_or_else(|error| error.into_inner());
+    let generation = state.generation.wrapping_add(1);
+    *state = MossInitializationState {
+        generation,
+        active: true,
+        asr_home: Some(asr_home.to_path_buf()),
+        task_id: (!task_id.is_empty()).then(|| task_id.to_string()),
+        progress: None,
+        task_progress_updated_at_ms: 0,
+    };
+    MossInitializationGuard {
+        asr_home: asr_home.to_path_buf(),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct MossDownloadProgressStatus {
+    label: String,
+    downloaded_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bytes_per_second: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    eta_seconds: Option<u64>,
+    elapsed_ms: u64,
+    resumed: bool,
+    complete: bool,
+}
+
+impl From<&crate::resource_download::DownloadProgress> for MossDownloadProgressStatus {
+    fn from(progress: &crate::resource_download::DownloadProgress) -> Self {
+        Self {
+            label: progress.label.clone(),
+            downloaded_bytes: progress.downloaded_bytes,
+            total_bytes: progress.total_bytes,
+            percent: progress.percent,
+            bytes_per_second: progress.bytes_per_second,
+            eta_seconds: progress.eta_seconds,
+            elapsed_ms: progress.elapsed_ms,
+            resumed: progress.resumed,
+            complete: progress.complete,
+        }
+    }
+}
+
+fn moss_initialization_state(asr_home: &Path) -> MossInitializationState {
+    let state = MOSS_INIT_STATE.lock().unwrap_or_else(|error| error.into_inner());
+    if state.asr_home.as_deref() == Some(asr_home) {
+        state.clone()
+    } else {
+        MossInitializationState::default()
+    }
+}
+
+fn publish_moss_initialization_progress(
+    asr_home: &Path,
+    progress: crate::resource_download::DownloadProgress,
+) {
+    let task_id = {
+        let mut state = MOSS_INIT_STATE.lock().unwrap_or_else(|error| error.into_inner());
+        if !state.active || state.asr_home.as_deref() != Some(asr_home) {
+            return;
+        }
+        state.progress = Some(progress.clone());
+        let timestamp = now_ms();
+        let should_update_task = progress.complete
+            || timestamp.saturating_sub(state.task_progress_updated_at_ms) >= 1_000;
+        if should_update_task {
+            state.task_progress_updated_at_ms = timestamp;
+            state.task_id.clone()
+        } else {
+            None
+        }
+    };
+    if let Some(task_id) = task_id {
+        let percent = progress.percent.unwrap_or(0);
+        update_run_progress(&task_id, |run| {
+            run.stage = "initializing_moss".to_string();
+            run.stage_message = Some(format!("Downloading {} ({percent}%)", progress.label));
+            run.message = Some(match progress.total_bytes {
+                Some(total) => format!(
+                    "Downloaded {} of {} bytes{}",
+                    progress.downloaded_bytes,
+                    total,
+                    progress
+                        .bytes_per_second
+                        .map(|rate| format!(" at {rate} bytes/s"))
+                        .unwrap_or_default()
+                ),
+                None => format!("Downloaded {} bytes", progress.downloaded_bytes),
+            });
+        });
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct MossJsonSegment {
@@ -140,6 +265,9 @@ pub(crate) struct MossModelManagementStatus {
     model_dir: String,
     expected_model_bytes: u64,
     installed_model_bytes: u64,
+    initializing: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    initialization: Option<MossDownloadProgressStatus>,
     message: String,
 }
 
@@ -632,6 +760,9 @@ fn moss_site_packages_sha256(paths: &MossRuntimePaths) -> Result<BTreeMap<String
             if !file_type.is_file() {
                 continue;
             }
+            if entry.file_name() == ".DS_Store" {
+                continue;
+            }
             let extension = path.extension().and_then(|value| value.to_str());
             if matches!(extension, Some("pyc" | "pyo")) {
                 continue;
@@ -883,19 +1014,32 @@ fn validate_moss_runtime_symlink(relative: &Path, link_target: &Path) -> Result<
 }
 
 async fn download_moss_resource(
+    asr_home: &Path,
     url: String,
     dest: PathBuf,
     label: &str,
     progress_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::resource_download::DownloadProgress>>,
 ) -> Result<(), String> {
-    if let Some(path) = url.strip_prefix("file://") {
-        let bytes = tokio::fs::copy(path, &dest)
-            .await
-            .map_err(|error| format!("copy {label} from {path}: {error}"))?;
-        if let Some(tx) = progress_tx {
-            let _ = tx.send(crate::resource_download::DownloadProgress {
+    let (relay_tx, mut relay_rx) = tokio::sync::mpsc::unbounded_channel::<
+        crate::resource_download::DownloadProgress,
+    >();
+    let relay_home = asr_home.to_path_buf();
+    let relay = tokio::spawn(async move {
+        while let Some(progress) = relay_rx.recv().await {
+            publish_moss_initialization_progress(&relay_home, progress.clone());
+            if let Some(tx) = &progress_tx {
+                let _ = tx.send(progress);
+            }
+        }
+    });
+    let result = async {
+        if let Some(path) = url.strip_prefix("file://") {
+            let bytes = tokio::fs::copy(path, &dest)
+                .await
+                .map_err(|error| format!("copy {label} from {path}: {error}"))?;
+            let _ = relay_tx.send(crate::resource_download::DownloadProgress {
                 label: label.to_string(),
-                url,
+                url: url.clone(),
                 dest: dest.display().to_string(),
                 downloaded_bytes: bytes,
                 total_bytes: Some(bytes),
@@ -906,49 +1050,53 @@ async fn download_moss_resource(
                 resumed: false,
                 complete: true,
             });
+            return Ok(());
         }
-        return Ok(());
-    }
-    let client = bifrost_core::outbound_reqwest_client_builder()
-        .build()
-        .map_err(|error| format!("build MOSS download client: {error}"))?;
-    let request = crate::resource_download::DownloadRequest {
-        url,
-        dest,
-        label: label.to_string(),
-    };
-    let mut last_error = None;
-    for attempt in 1..=MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS {
-        match crate::resource_download::download_with_resume(
-            &client,
-            request.clone(),
-            progress_tx.clone(),
-        )
-        .await
-        {
-            Ok(_) => return Ok(()),
-            Err(error) => {
-                warn!(
-                    label,
-                    attempt,
-                    max_attempts = MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS,
-                    error,
-                    "MOSS resource download attempt failed"
-                );
-                last_error = Some(error);
+        let client = bifrost_core::outbound_reqwest_client_builder()
+            .build()
+            .map_err(|error| format!("build MOSS download client: {error}"))?;
+        let request = crate::resource_download::DownloadRequest {
+            url,
+            dest,
+            label: label.to_string(),
+        };
+        let mut last_error = None;
+        for attempt in 1..=MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS {
+            match crate::resource_download::download_with_resume(
+                &client,
+                request.clone(),
+                Some(relay_tx.clone()),
+            )
+            .await
+            {
+                Ok(_) => return Ok(()),
+                Err(error) => {
+                    warn!(
+                        label,
+                        attempt,
+                        max_attempts = MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS,
+                        error,
+                        "MOSS resource download attempt failed"
+                    );
+                    last_error = Some(error);
+                }
+            }
+            if attempt < MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS {
+                tokio::time::sleep(Duration::from_millis(
+                    MOSS_RESOURCE_DOWNLOAD_RETRY_DELAY_MS * attempt as u64,
+                ))
+                .await;
             }
         }
-        if attempt < MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS {
-            tokio::time::sleep(Duration::from_millis(
-                MOSS_RESOURCE_DOWNLOAD_RETRY_DELAY_MS * attempt as u64,
-            ))
-            .await;
-        }
+        Err(format!(
+            "download {label} failed after {MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS} attempts: {}",
+            last_error.unwrap_or_else(|| "unknown download error".to_string())
+        ))
     }
-    Err(format!(
-        "download {label} failed after {MOSS_RESOURCE_DOWNLOAD_MAX_ATTEMPTS} attempts: {}",
-        last_error.unwrap_or_else(|| "unknown download error".to_string())
-    ))
+    .await;
+    drop(relay_tx);
+    let _ = relay.await;
+    result
 }
 
 fn moss_runtime_help_is_valid(stdout: &[u8], stderr: &[u8]) -> bool {
@@ -1057,6 +1205,7 @@ async fn initialize_moss_joint_runtime(
     model_spec: &MossModelSpec,
     progress_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::resource_download::DownloadProgress>>,
 ) -> Result<(), String> {
+    let _initialization_guard = begin_moss_initialization(asr_home, task_id);
     if !task_id.is_empty() {
         update_run_progress(task_id, |progress| {
             progress.stage = "initializing_moss".to_string();
@@ -1088,6 +1237,7 @@ async fn initialize_moss_joint_runtime(
         }
         let archive = root.join(&runtime_source.asset);
         download_moss_resource(
+            asr_home,
             runtime_source.url.clone(),
             archive.clone(),
             "MOSS runtime",
@@ -1145,6 +1295,7 @@ async fn initialize_moss_joint_runtime(
                 })?;
         }
         download_moss_resource(
+            asr_home,
             model_spec.url.clone(),
             paths.model.clone(),
             "MOSS MLX 8-bit model",
@@ -1224,6 +1375,16 @@ async fn moss_management_status_with_spec(
         .await
         .map(|metadata| metadata.len())
         .unwrap_or(0);
+    let initialization_state = moss_initialization_state(asr_home);
+    let initializing = initialization_state.active;
+    let initialization = initializing
+        .then(|| {
+            initialization_state
+                .progress
+                .as_ref()
+                .map(MossDownloadProgressStatus::from)
+        })
+        .flatten();
     let runtime_asset = match moss_runtime_asset_name_for(os, arch) {
         Ok(asset) => asset,
         Err(reason) => {
@@ -1242,6 +1403,8 @@ async fn moss_management_status_with_spec(
                 model_dir: paths.model_dir.display().to_string(),
                 expected_model_bytes: model_spec.bytes,
                 installed_model_bytes,
+                initializing: false,
+                initialization: None,
                 message: reason,
             };
         }
@@ -1272,6 +1435,8 @@ async fn moss_management_status_with_spec(
         model_dir: paths.model_dir.display().to_string(),
         expected_model_bytes: model_spec.bytes,
         installed_model_bytes,
+        initializing,
+        initialization,
         message: if ready {
             "MOSS joint transcription runtime and verified 8-bit model are ready.".to_string()
         } else if runtime_ready {
@@ -1342,30 +1507,41 @@ async fn stream_moss_model_initialization_with_spec(
     )
     .await;
 
-    let (progress_tx, mut progress_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::resource_download::DownloadProgress>();
+    let initialization_before = moss_initialization_state(&asr_home);
+    let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
     let event_tx = tx.clone();
+    let progress_home = asr_home.clone();
     let forward = tokio::spawn(async move {
-        while let Some(progress) = progress_rx.recv().await {
-            let download_percent = progress.percent.unwrap_or(0);
-            let overall = if progress.label == "MOSS runtime" {
-                10_u8.saturating_add(download_percent.saturating_mul(25) / 100)
-            } else {
-                40_u8.saturating_add(download_percent.saturating_mul(55) / 100)
-            };
-            send_progress(
-                &event_tx,
-                AsrStreamPayload {
-                    phase: "download",
-                    status: "running",
-                    progress: overall,
-                    message: "Downloading verified MOSS assets.",
-                    detail: Some(&progress.label),
-                    file: Some(&progress.label),
-                    server_url: None,
-                },
-            )
-            .await;
+        let mut last_snapshot = None;
+        loop {
+            let state = moss_initialization_state(&progress_home);
+            if let Some(progress) = state.active.then_some(state.progress).flatten() {
+                let snapshot = (progress.label.clone(), progress.downloaded_bytes, progress.complete);
+                if last_snapshot.as_ref() != Some(&snapshot) {
+                    let download_percent = progress.percent.unwrap_or(0);
+                    let overall = if progress.label == "MOSS runtime" {
+                        10_u8.saturating_add(download_percent.saturating_mul(25) / 100)
+                    } else {
+                        40_u8.saturating_add(download_percent.saturating_mul(55) / 100)
+                    };
+                    crate::handlers::asr::send_resource_download_progress(
+                        &event_tx,
+                        &progress,
+                        overall,
+                        "Downloading verified MOSS assets.",
+                    )
+                    .await;
+                    last_snapshot = Some(snapshot);
+                }
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                changed = stop_rx.changed() => {
+                    if changed.is_err() || *stop_rx.borrow() {
+                        break;
+                    }
+                }
+            }
         }
     });
 
@@ -1374,9 +1550,31 @@ async fn stream_moss_model_initialization_with_spec(
         "",
         model_spec,
         runtime_source,
-        Some(progress_tx),
+        None,
     )
     .await;
+    let initialization_after = moss_initialization_state(&asr_home);
+    let observed_initialization = initialization_before.active
+        || initialization_after.generation != initialization_before.generation;
+    if let Some(progress) = observed_initialization
+        .then_some(initialization_after.progress)
+        .flatten()
+    {
+        let download_percent = progress.percent.unwrap_or(0);
+        let overall = if progress.label == "MOSS runtime" {
+            10_u8.saturating_add(download_percent.saturating_mul(25) / 100)
+        } else {
+            40_u8.saturating_add(download_percent.saturating_mul(55) / 100)
+        };
+        crate::handlers::asr::send_resource_download_progress(
+            &tx,
+            &progress,
+            overall,
+            "Downloading verified MOSS assets.",
+        )
+        .await;
+    }
+    let _ = stop_tx.send(true);
     let _ = forward.await;
     match result {
         Ok(_) => {

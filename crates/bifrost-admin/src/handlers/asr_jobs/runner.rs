@@ -197,7 +197,13 @@ fn discover_and_prepare_pending_batch(
     }
     apply_external_import_hashes_to_records(task, &discovered, files);
     apply_content_hash_dedupe(task, &discovered, files)?;
-    save_file_store(&task.id, files)?;
+    preserve_existing_transcript_records(task, files);
+    let pruned_keys = prune_missing_pending_records(task, files);
+    if !pruned_keys.is_empty() {
+        save_file_store_with_removals(&task.id, files, &pruned_keys)?;
+    } else {
+        save_file_store(&task.id, files)?;
+    }
 
     // Only process files that are truly pending or failed outright.
     // PartialSuccess files already have usable text/timeline output and should

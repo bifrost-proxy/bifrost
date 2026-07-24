@@ -948,78 +948,28 @@ pub(super) async fn send_agent_reply(
     send_agent_reply_with_title(client, provider, event, reply_text, message_log_store, None).await;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct AgentReplyTargetRef {
-    pub(super) receive_id_type: String,
-    pub(super) receive_id: String,
-}
-
-pub(super) fn agent_reply_target_ref(
+pub(super) async fn send_agent_reply_from_work_dir(
+    client: &ImProviderClient,
     provider: &ImProviderConfig,
     event: &ImEvent,
-) -> Option<AgentReplyTargetRef> {
-    match provider.provider_type {
-        crate::im_gateway::types::ImProviderType::Weixin
-        | crate::im_gateway::types::ImProviderType::WeChat
-        | crate::im_gateway::types::ImProviderType::Webhook => first_non_empty([
-            event.source.chat_id.as_deref(),
-            event.source.user_id.as_deref(),
-            provider.owner_open_id.as_deref(),
-        ])
-        .map(|receive_id| AgentReplyTargetRef {
-            receive_id_type: "open_id".to_string(),
-            receive_id,
-        }),
-        crate::im_gateway::types::ImProviderType::Feishu => {
-            if let Some(chat_id) = first_non_empty([event.source.chat_id.as_deref()]) {
-                return Some(AgentReplyTargetRef {
-                    receive_id_type: "chat_id".to_string(),
-                    receive_id: chat_id,
-                });
-            }
-            first_non_empty([
-                event.source.user_id.as_deref(),
-                provider.owner_open_id.as_deref(),
-            ])
-            .map(|receive_id| AgentReplyTargetRef {
-                receive_id_type: "open_id".to_string(),
-                receive_id,
-            })
-        }
-    }
+    reply_text: &str,
+    message_log_store: &Arc<ImMessageLogStore>,
+    work_dir: Option<&Path>,
+) {
+    send_agent_reply_with_title_and_base_dir(
+        client,
+        provider,
+        event,
+        reply_text,
+        message_log_store,
+        None,
+        work_dir,
+    )
+    .await;
 }
 
-fn first_non_empty<const N: usize>(values: [Option<&str>; N]) -> Option<String> {
-    values
-        .into_iter()
-        .flatten()
-        .map(str::trim)
-        .find(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
-pub(super) fn build_agent_reply_target(
-    provider: &ImProviderConfig,
-    event: &ImEvent,
-    id: &str,
-    display_name: &str,
-    default_msg_type: &str,
-) -> Option<crate::im_gateway::types::ImTarget> {
-    let target_ref = agent_reply_target_ref(provider, event)?;
-    Some(crate::im_gateway::types::ImTarget {
-        id: id.to_string(),
-        provider_id: provider.id.clone(),
-        display_name: display_name.to_string(),
-        enabled: true,
-        receive_id_type: target_ref.receive_id_type,
-        receive_id: target_ref.receive_id,
-        default_msg_type: default_msg_type.to_string(),
-        created_at: 0,
-        updated_at: 0,
-    })
-}
-
-/// Send an agent reply with a custom card title.
+/// Send an agent reply card. The Feishu provider strips the root title before
+/// delivery, while other providers keep their existing card semantics.
 pub(super) async fn send_agent_reply_with_title(
     client: &ImProviderClient,
     provider: &ImProviderConfig,
@@ -1028,7 +978,37 @@ pub(super) async fn send_agent_reply_with_title(
     message_log_store: &Arc<ImMessageLogStore>,
     title: Option<&str>,
 ) {
-    let image_base_dir = provider_agent_work_dir(provider);
+    send_agent_reply_with_title_and_base_dir(
+        client,
+        provider,
+        event,
+        reply_text,
+        message_log_store,
+        title,
+        None,
+    )
+    .await;
+}
+
+pub(super) fn agent_reply_base_dir(
+    provider: &ImProviderConfig,
+    work_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    work_dir
+        .map(Path::to_path_buf)
+        .or_else(|| provider_agent_work_dir(provider))
+}
+
+async fn send_agent_reply_with_title_and_base_dir(
+    client: &ImProviderClient,
+    provider: &ImProviderConfig,
+    event: &ImEvent,
+    reply_text: &str,
+    message_log_store: &Arc<ImMessageLogStore>,
+    title: Option<&str>,
+    work_dir: Option<&Path>,
+) {
+    let image_base_dir = agent_reply_base_dir(provider, work_dir);
     let (reply_text_for_card, reply_images, reply_attachments) =
         prepare_agent_reply_text_and_images_with_downloads(reply_text, image_base_dir.as_deref())
             .await;
@@ -1044,7 +1024,6 @@ pub(super) async fn send_agent_reply_with_title(
         return;
     };
 
-    let card_title = title.unwrap_or("Bifrost AI");
     let rendered_text = if let Some(feishu) = client.feishu() {
         render_agent_markdown_for_feishu(
             &feishu,
@@ -1058,6 +1037,7 @@ pub(super) async fn send_agent_reply_with_title(
     };
     let converted_text =
         crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&rendered_text);
+    let card_title = title.unwrap_or("Bifrost AI");
     let card = serde_json::json!({
         "schema": "2.0",
         "config": {
@@ -1083,9 +1063,10 @@ pub(super) async fn send_agent_reply_with_title(
     });
 
     let send_result = client
-        .send_card(
+        .send_reply_card(
             provider,
             &reply_target,
+            event.source.message_id.as_deref(),
             card,
             crate::im_gateway::types::SendOptions::default(),
         )
@@ -1328,9 +1309,10 @@ pub(super) async fn send_agent_reply_with_plan(
     });
 
     let send_result = client
-        .send_card(
+        .send_reply_card(
             provider,
             &reply_target,
+            event.source.message_id.as_deref(),
             card,
             crate::im_gateway::types::SendOptions::default(),
         )

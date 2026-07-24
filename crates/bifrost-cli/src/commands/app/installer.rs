@@ -330,6 +330,7 @@ pub(super) fn run_desktop_install_command_output(
         progress_source,
         DESKTOP_INSTALL_COMMAND_TIMEOUT,
         DESKTOP_INSTALL_COMMAND_HEARTBEAT,
+        DESKTOP_INSTALL_TERMINAL_HEARTBEAT,
     )
 }
 
@@ -340,25 +341,28 @@ pub(super) fn run_desktop_install_command_output_with_timeout(
     progress_source: &str,
     timeout: Duration,
     heartbeat: Duration,
+    terminal_heartbeat: Duration,
 ) -> Result<DesktopInstallCommandOutput, BifrostError> {
-    let mut stdout =
-        tempfile::tempfile().map_err(|error| BifrostError::Io(std::io::Error::other(error)))?;
-    let mut stderr =
-        tempfile::tempfile().map_err(|error| BifrostError::Io(std::io::Error::other(error)))?;
+    let mut output_capture =
+        crate::commands::streamed_output::StreamedOutputCapture::new().map_err(BifrostError::Io)?;
     let mut child = command
         .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout.try_clone()?))
-        .stderr(Stdio::from(stderr.try_clone()?))
+        .stdout(output_capture.stdout_stdio().map_err(BifrostError::Io)?)
+        .stderr(output_capture.stderr_stdio().map_err(BifrostError::Io)?)
         .spawn()
         .map_err(BifrostError::Io)?;
     let deadline = Instant::now() + timeout;
     let mut next_heartbeat = Instant::now() + heartbeat;
+    let started = Instant::now();
+    let mut next_terminal_heartbeat = Instant::now() + terminal_heartbeat;
     let status = loop {
+        output_capture.forward_available();
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
+                output_capture.forward_available();
                 return Err(BifrostError::Config(format!(
                     "desktop package installer timed out after {} seconds",
                     timeout.as_secs_f64()
@@ -376,17 +380,20 @@ pub(super) fn run_desktop_install_command_output_with_timeout(
                     );
                     next_heartbeat = Instant::now() + heartbeat;
                 }
+                if Instant::now() >= next_terminal_heartbeat {
+                    println!(
+                        "  Installing desktop app... ({}s elapsed)",
+                        started.elapsed().as_secs()
+                    );
+                    next_terminal_heartbeat = Instant::now() + terminal_heartbeat;
+                }
                 thread::sleep(Duration::from_millis(25));
             }
             Err(error) => return Err(BifrostError::Io(error)),
         }
     };
-    let _ = stdout.seek(SeekFrom::Start(0));
-    let _ = stderr.seek(SeekFrom::Start(0));
-    let mut stdout_text = String::new();
-    let mut stderr_text = String::new();
-    let _ = stdout.read_to_string(&mut stdout_text);
-    let _ = stderr.read_to_string(&mut stderr_text);
+    output_capture.forward_available();
+    let (stdout_text, stderr_text) = output_capture.read_all();
     Ok(DesktopInstallCommandOutput {
         status,
         stdout: stdout_text,

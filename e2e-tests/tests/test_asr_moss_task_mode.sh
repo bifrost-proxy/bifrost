@@ -119,6 +119,7 @@ PY
 FILES_JSON="$DATA_DIR/asr/tasks/$TASK_ID/files.json"
 mkdir -p "$(dirname "$FILES_JSON")"
 printf 'fixture audio' > "$AUDIO_DIR/completed.wav"
+printf 'missing artifact audio' > "$AUDIO_DIR/missing.wav"
 python3 - "$FILES_JSON" "$TASK_ID" "$AUDIO_DIR/completed.wav" "$DATA_DIR" <<'PY'
 import json, sys
 from pathlib import Path
@@ -156,7 +157,36 @@ record = {
     "started_at_ms": 1,
     "finished_at_ms": 2,
 }
-files_json.write_text(json.dumps({"version": 1, "files": {"completed": record}}), encoding="utf-8")
+(data_dir / "old.txt").write_text("old text", encoding="utf-8")
+(data_dir / "old.json").write_text("{}", encoding="utf-8")
+(data_dir / "old.timeline.json").write_text("{}", encoding="utf-8")
+missing = dict(record)
+missing.update({
+    "source_path": str(Path(source).with_name("missing.wav")),
+    "source_size": 22,
+    "output_text_path": str(data_dir / "gone.txt"),
+    "output_metadata_path": str(data_dir / "gone.json"),
+    "output_timeline_path": str(data_dir / "gone.timeline.json"),
+})
+orphaned = dict(record)
+orphaned.update({
+    "source_path": str(Path(source).with_name("removed.wav")),
+    "status": "success",
+    "output_text_path": None,
+    "output_metadata_path": None,
+    "output_timeline_path": None,
+    "text_chars": 0,
+    "chunk_metrics": [],
+    "started_at_ms": None,
+    "finished_at_ms": None,
+})
+files_json.write_text(
+    json.dumps({
+        "version": 1,
+        "files": {"completed": record, "missing": missing, "orphaned": orphaned},
+    }),
+    encoding="utf-8",
+)
 PY
 
 curl -fsS -X PATCH "$api/$TASK_ID" -H 'Content-Type: application/json' \
@@ -169,13 +199,23 @@ assert data["transcription_prompt"] == "", data
 PY
 python3 - "$FILES_JSON" <<'PY'
 import json, sys
-record = json.load(open(sys.argv[1], encoding="utf-8"))["files"]["completed"]
-assert record["status"] == "pending", record
-assert record["output_text_path"] is None, record
-assert record["output_metadata_path"] is None, record
-assert record["output_timeline_path"] is None, record
-assert record.get("chunk_metrics", []) == [], record
-assert record["text_chars"] == 0, record
+records = json.load(open(sys.argv[1], encoding="utf-8"))["files"]
+assert "orphaned" not in records, records["orphaned"]
+completed = records["completed"]
+assert completed["status"] == "success", completed
+assert completed["output_text_path"].endswith("old.txt"), completed
+assert completed["output_metadata_path"].endswith("old.json"), completed
+assert completed["output_timeline_path"].endswith("old.timeline.json"), completed
+assert len(completed.get("chunk_metrics", [])) == 1, completed
+assert completed["text_chars"] == 8, completed
+
+missing = records["missing"]
+assert missing["status"] == "pending", missing
+assert missing["output_text_path"] is None, missing
+assert missing["output_metadata_path"] is None, missing
+assert missing["output_timeline_path"] is None, missing
+assert missing.get("chunk_metrics", []) == [], missing
+assert missing["text_chars"] == 0, missing
 PY
 
 TOO_LONG="$(python3 - <<'PY'

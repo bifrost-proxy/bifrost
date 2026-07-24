@@ -38,7 +38,11 @@ import type {
 } from "../../../api/asr";
 import { getMossModelStatus, listAsrExternalVolumes } from "../../../api/asr";
 import { formatSchedule, formatTime } from "../asrUtils";
-import { directoryTaskModeFields, directoryTaskModeOptions } from "../directoryTaskMode";
+import {
+  DIRECTORY_TASK_MODE_HISTORY_NOTE,
+  directoryTaskModeFields,
+  directoryTaskModeOptions,
+} from "../directoryTaskMode";
 
 const { Text } = Typography;
 
@@ -504,8 +508,8 @@ export default function DirectoryTasksPanel({
               </Form.Item>
               <Text type="secondary" style={{ display: "block", marginTop: -16, marginBottom: 16 }}>
                 {showMossPrompt
-                  ? "MOSS uses one global MLX decode for timestamps and consistent speaker labels. The verified Apple Silicon runtime and 8-bit model initialize automatically; inference is stopped if it exceeds 0.5x the audio duration."
-                  : "Uses the existing Qwen transcription pipeline and optional external speaker diarization."}
+                  ? `MOSS uses one global MLX decode for timestamps and consistent speaker labels. The verified Apple Silicon runtime and 8-bit model initialize automatically; inference is stopped if it exceeds 0.5x the audio duration. ${DIRECTORY_TASK_MODE_HISTORY_NOTE}`
+                  : `Uses the existing Qwen transcription pipeline and optional external speaker diarization. ${DIRECTORY_TASK_MODE_HISTORY_NOTE}`}
               </Text>
               {showMossPrompt && mossPlatformSupported === false ? (
                 <Text type="warning" style={{ display: "block", marginTop: -12, marginBottom: 16 }}>

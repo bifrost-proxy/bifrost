@@ -1,4 +1,42 @@
 use super::*;
+use rusqlite::OptionalExtension;
+
+fn busy_group_event(message_id: &str, text: &str, received_at: u64) -> ImEvent {
+    ImEvent {
+        event_id: format!("event-{message_id}"),
+        provider_id: "feishu-main".to_string(),
+        provider_type: ImProviderType::Feishu,
+        event_type: "message.receive".to_string(),
+        source: crate::im_gateway::types::ImEventSource {
+            chat_id: Some("busy-group".to_string()),
+            chat_type: Some("group".to_string()),
+            user_id: Some("ou_sender".to_string()),
+            user_name: Some("Alice".to_string()),
+            sender_type: Some("user".to_string()),
+            message_id: Some(message_id.to_string()),
+        },
+        message: Some(crate::im_gateway::types::ImEventMessage {
+            text: text.to_string(),
+            raw_type: Some("text".to_string()),
+            create_time: Some(received_at),
+            ..Default::default()
+        }),
+        received_at,
+        raw_digest: None,
+    }
+}
+
+fn persisted_group_turn_status(store: &ImGroupContextStore, turn_id: &str) -> Option<String> {
+    rusqlite::Connection::open(store.file_path())
+        .unwrap()
+        .query_row(
+            "SELECT status FROM im_group_turns WHERE turn_id = ?1",
+            rusqlite::params![turn_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+}
 
 fn runner_config(
     runner_id: &str,
@@ -53,6 +91,35 @@ fn busy_default_mode_guides_external_runners_except_chatgpt_web() {
             Some("feishu-main"),
         ),
         BusyMessageDefaultMode::Queue
+    );
+
+    let mut default_config = runner_config("codex-main", "codex");
+    default_config.default_runner_id = "codex-main".to_string();
+    let implicit_agent_config = bifrost_agent::AgentConfig {
+        runner: None,
+        ..Default::default()
+    };
+    assert_eq!(
+        busy_default_mode_for_agent_config(
+            &implicit_agent_config,
+            &default_config,
+            Some("feishu-main"),
+        ),
+        BusyMessageDefaultMode::ExternalGuide,
+        "an implicit default runner must use the same live-guide semantics as an explicit runner",
+    );
+
+    let mut default_chatgpt =
+        runner_config("chatgpt-web", crate::im_gateway::chatgpt_web::ADAPTER_ID);
+    default_chatgpt.default_runner_id = "chatgpt-web".to_string();
+    assert_eq!(
+        busy_default_mode_for_agent_config(
+            &implicit_agent_config,
+            &default_chatgpt,
+            Some("feishu-main"),
+        ),
+        BusyMessageDefaultMode::Queue,
+        "an implicit ChatGPT Web default must retain queue semantics",
     );
 }
 
@@ -116,6 +183,171 @@ fn apply_busy_message_default_queues_custom_runner_messages() {
     assert_eq!(
         manager.pop_queue("busy-default-queue").as_deref(),
         Some("下一条给 ChatGPT Web")
+    );
+}
+
+#[tokio::test]
+async fn busy_group_turns_complete_or_release_with_their_queue_outcome() {
+    let temp = tempfile::tempdir().unwrap();
+    let service = crate::handlers::im_gateway::ImGatewayService::new(temp.path());
+    let provider = test_provider();
+    let client = ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider()));
+    let agent_config = service.agent_config_store.load();
+    let session_key =
+        crate::im_gateway::group_context::build_group_session_key(&provider.id, "busy-group");
+
+    let completed_event = busy_group_event("complete", "guide", 1);
+    service
+        .group_context_store
+        .record_event(&completed_event, "test")
+        .unwrap();
+    let completed_turn = service
+        .group_context_store
+        .prepare_turn(
+            &completed_event,
+            crate::im_gateway::group_context::GroupTriggerKind::Guide,
+            "guide",
+        )
+        .unwrap();
+    service
+        .group_context_store
+        .mark_turn_dispatched(&completed_turn.turn_id, 1)
+        .unwrap();
+    handle_busy_default_message(
+        "guide",
+        &session_key,
+        &BusyMessageContext {
+            queue_manager: &service.queue_manager,
+            client: &client,
+            provider: &provider,
+            event: &completed_event,
+            message_log_store: &service.message_log_store,
+            agent_session_manager: &service.agent_session_manager,
+            progress_registry: &service.progress_registry,
+            external_cli_config_store: &service.external_cli_config_store,
+            agent_config: &agent_config,
+            group_context_store: &service.group_context_store,
+            group_turn_id: Some(&completed_turn.turn_id),
+            default_mode: BusyMessageDefaultMode::Guide,
+            status_context: Default::default(),
+            default_work_dir: None,
+        },
+    )
+    .await;
+    assert_eq!(
+        persisted_group_turn_status(&service.group_context_store, &completed_turn.turn_id),
+        Some("dispatched".to_string())
+    );
+    let deferred = service
+        .queue_manager
+        .pop_queue_item(&session_key)
+        .expect("busy group guide should retain its turn in the queue");
+    assert_eq!(deferred.message, "guide");
+    assert_eq!(
+        deferred.context.and_then(|context| context.group_turn_id),
+        Some(completed_turn.turn_id.clone())
+    );
+
+    for index in 0..10 {
+        service
+            .queue_manager
+            .push_queue(&session_key, format!("queued-{index}"))
+            .unwrap();
+    }
+    for (message_id, text, guide_command, received_at) in [
+        ("overflow", "overflow", false, 2),
+        ("guide-overflow", "guide overflow", true, 3),
+        ("empty", "empty", false, 4),
+    ] {
+        let event = busy_group_event(message_id, text, received_at);
+        service
+            .group_context_store
+            .record_event(&event, "test")
+            .unwrap();
+        let turn = service
+            .group_context_store
+            .prepare_turn(
+                &event,
+                crate::im_gateway::group_context::GroupTriggerKind::Queue,
+                text,
+            )
+            .unwrap();
+        let context = BusyMessageContext {
+            queue_manager: &service.queue_manager,
+            client: &client,
+            provider: &provider,
+            event: &event,
+            message_log_store: &service.message_log_store,
+            agent_session_manager: &service.agent_session_manager,
+            progress_registry: &service.progress_registry,
+            external_cli_config_store: &service.external_cli_config_store,
+            agent_config: &agent_config,
+            group_context_store: &service.group_context_store,
+            group_turn_id: Some(&turn.turn_id),
+            default_mode: BusyMessageDefaultMode::Queue,
+            status_context: Default::default(),
+            default_work_dir: None,
+        };
+        if guide_command {
+            handle_busy_guide_command(text, &session_key, &context).await;
+        } else if message_id == "empty" {
+            handle_busy_default_message("", &session_key, &context).await;
+        } else {
+            handle_busy_default_message(text, &session_key, &context).await;
+        }
+        assert_eq!(
+            persisted_group_turn_status(&service.group_context_store, &turn.turn_id),
+            None
+        );
+    }
+}
+
+#[test]
+fn live_guide_group_turns_follow_the_external_run_outcome() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let queue_manager = SessionQueueManager::new();
+    let session_key =
+        crate::im_gateway::group_context::build_group_session_key("feishu-main", "busy-group");
+
+    let success_event = busy_group_event("live-guide-success", "/g continue", 1);
+    store.record_event(&success_event, "test").unwrap();
+    let success_turn = store
+        .prepare_turn(
+            &success_event,
+            crate::im_gateway::group_context::GroupTriggerKind::Guide,
+            "continue",
+        )
+        .unwrap();
+    store
+        .mark_turn_dispatched(&success_turn.turn_id, 2)
+        .unwrap();
+    queue_manager.track_live_guide_turn(&session_key, success_turn.turn_id.clone());
+    assert_eq!(
+        persisted_group_turn_status(&store, &success_turn.turn_id).as_deref(),
+        Some("dispatched")
+    );
+    finalize_live_guide_group_turns(&queue_manager, &store, &session_key, Ok(()));
+    assert_eq!(
+        persisted_group_turn_status(&store, &success_turn.turn_id).as_deref(),
+        Some("completed")
+    );
+
+    let failed_event = busy_group_event("live-guide-failed", "/g fail", 3);
+    store.record_event(&failed_event, "test").unwrap();
+    let failed_turn = store
+        .prepare_turn(
+            &failed_event,
+            crate::im_gateway::group_context::GroupTriggerKind::Guide,
+            "fail",
+        )
+        .unwrap();
+    store.mark_turn_dispatched(&failed_turn.turn_id, 4).unwrap();
+    queue_manager.track_live_guide_turn(&session_key, failed_turn.turn_id.clone());
+    finalize_live_guide_group_turns(&queue_manager, &store, &session_key, Err("runner failed"));
+    assert_eq!(
+        persisted_group_turn_status(&store, &failed_turn.turn_id).as_deref(),
+        Some("failed")
     );
 }
 

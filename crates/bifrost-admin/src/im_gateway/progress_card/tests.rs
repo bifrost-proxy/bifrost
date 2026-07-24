@@ -1,4 +1,5 @@
 use super::*;
+use crate::im_gateway::provider::ImProvider;
 use bifrost_agent::PlanStepStatus;
 
 #[test]
@@ -99,6 +100,7 @@ fn progress_snapshot_tracks_tool_plan_queue_and_final_output() {
             message: "next".to_string(),
             images: Vec::new(),
             files: Vec::new(),
+            context: None,
         }],
         true,
         Some("已收到引导：prioritize logs".to_string()),
@@ -538,13 +540,13 @@ fn consecutive_process_tools_are_grouped_by_default() {
 #[test]
 fn process_timeline_keeps_latest_thirty_tool_calls_with_omission_notice() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "long task");
-    snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
-        content: "THINKING_BEFORE_OMITTED_TOOLS".to_string(),
-    });
     for index in 0..35 {
+        snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
+            content: format!("THINKING_ROUND_{index}"),
+        });
         snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
             log: ToolCallLog {
-                tool_name: "exec_command".to_string(),
+                tool_name: format!("tool_{index}"),
                 arguments: format!(r#"{{"cmd":"echo tool-{index}"}}"#),
                 result: format!("result-{index}"),
                 success: true,
@@ -572,19 +574,20 @@ fn process_timeline_keeps_latest_thirty_tool_calls_with_omission_notice() {
         .as_str()
         .unwrap()
         .contains("已省略前面 5 次工具调用，仅显示最新 30 次。"));
-    assert_eq!(process_elements[1]["element_id"], "ap_tg_6");
-
-    let grouped_tools = process_elements[1]["elements"].as_array().unwrap();
-    assert_eq!(grouped_tools.len(), 30);
-    assert_eq!(grouped_tools[0]["element_id"], "ap_t_6");
-    assert_eq!(grouped_tools[29]["element_id"], "ap_t_35");
 
     let serialized = serde_json::to_string(&card).unwrap();
     assert!(!serialized.contains("tool-0"));
     assert!(!serialized.contains("result-4"));
-    assert!(serialized.contains("tool-5"));
+    assert!(!serialized.contains("THINKING_ROUND_0"));
+    assert!(serialized.contains("THINKING_ROUND_5"));
+    assert!(serialized.contains("步骤：`tool_5` · 完成"));
+    assert!(!serialized.contains("result-5"));
+    assert!(serialized.contains("ap_t_61"));
     assert!(serialized.contains("result-34"));
-    assert!(serialized.contains("THINKING_BEFORE_OMITTED_TOOLS"));
+    assert_eq!(
+        oldest_budget_removable_timeline_range(&snapshot.timeline),
+        Some(0..10)
+    );
 }
 
 #[test]
@@ -638,6 +641,11 @@ fn process_tool_detail_caps_input_and_output_previews_at_three_hundred_chars() {
 fn budgeted_card_drops_oldest_process_items_and_keeps_latest() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "budget tool history");
     for index in 0..8 {
+        if index < 3 {
+            snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
+                content: format!("OLD_THINKING_MARKER_{index}\n{}", "t".repeat(600)),
+            });
+        }
         snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
             log: ToolCallLog {
                 tool_name: "exec_command".to_string(),
@@ -653,22 +661,128 @@ fn budgeted_card_drops_oldest_process_items_and_keeps_latest() {
         &snapshot,
         true,
         FeishuCardBudget {
-            max_bytes: 6 * 1024,
+            max_bytes: 5_000,
             max_components: 180,
         },
     );
     let serialized = serde_json::to_string(&rendered.card).unwrap();
     assert!(!rendered.compact);
     assert!(rendered.omitted_timeline_items > 0);
-    assert!(serialized.len() <= 6 * 1024);
+    assert!(serialized.len() <= 5_000);
     assert!(serialized.contains("RESULT_MARKER_7"));
     assert!(!serialized.contains("RESULT_MARKER_0"));
+    assert!(!serialized.contains("OLD_THINKING_MARKER_0"));
     assert!(serialized.contains("已省略前面"));
-    assert!(serialized.contains("优先保留最近思考与工具"));
+    assert!(serialized.contains("保留最近执行脉络"));
 }
 
 #[test]
-fn budgeted_card_removes_old_tools_before_preserving_latest_five_thinking_rounds() {
+fn budget_removal_without_tools_drops_status_before_preserving_five_thinking_items() {
+    let statuses = vec![
+        ProgressTimelineItem::status("old status".to_string()),
+        ProgressTimelineItem::status("latest status".to_string()),
+    ];
+    assert_eq!(
+        oldest_budget_removable_timeline_range(&statuses),
+        Some(0..1)
+    );
+    assert_eq!(
+        oldest_budget_removable_timeline_range(&statuses[1..]),
+        Some(0..1)
+    );
+
+    let thinking = (0..6)
+        .map(|index| ProgressTimelineItem::thinking(format!("thinking-{index}")))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        oldest_budget_removable_timeline_range(&thinking),
+        Some(0..1)
+    );
+    assert_eq!(oldest_budget_removable_timeline_range(&thinking[1..]), None);
+}
+
+#[test]
+fn budget_removal_tool_boundaries_and_step_statuses_cover_all_states() {
+    let running =
+        ProgressTimelineItem::tool_started("running_tool".to_string(), "RUNNING_INPUT".to_string());
+    assert_eq!(
+        format_process_tool_step_line(&running),
+        "步骤：`running_tool` · 执行中"
+    );
+    assert_eq!(
+        oldest_budget_removable_timeline_range(std::slice::from_ref(&running)),
+        None
+    );
+
+    let failed = ProgressTimelineItem::tool_finished(
+        &ToolCallLog {
+            tool_name: "failed_tool".to_string(),
+            arguments: "FAILED_INPUT".to_string(),
+            result: "FAILED_OUTPUT".to_string(),
+            success: false,
+        },
+        12,
+    );
+    assert_eq!(
+        format_process_tool_step_line(&failed),
+        "步骤：`failed_tool` · 失败 · 12ms"
+    );
+
+    let consecutive_tools = (0..7)
+        .map(|index| {
+            ProgressTimelineItem::tool_finished(
+                &ToolCallLog {
+                    tool_name: format!("tool_{index}"),
+                    arguments: String::new(),
+                    result: String::new(),
+                    success: true,
+                },
+                10,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        oldest_budget_removable_timeline_range(&consecutive_tools),
+        Some(0..2)
+    );
+}
+
+#[test]
+fn old_tools_render_as_steps_while_latest_five_keep_expandable_details() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "balanced tool history");
+    for index in 0..8 {
+        snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
+            content: format!("THINKING_ROUND_{index}"),
+        });
+        snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
+            log: ToolCallLog {
+                tool_name: format!("tool_{index}"),
+                arguments: format!("TOOL_INPUT_{index}"),
+                result: format!("TOOL_OUTPUT_{index}"),
+                success: true,
+            },
+            duration_ms: 10 + index,
+        });
+    }
+
+    let serialized = serde_json::to_string(&build_feishu_progress_card(&snapshot, true)).unwrap();
+    for index in 0..3 {
+        assert!(serialized.contains(&format!("步骤：`tool_{index}` · 完成")));
+        assert!(!serialized.contains(&format!("TOOL_INPUT_{index}")));
+        assert!(!serialized.contains(&format!("TOOL_OUTPUT_{index}")));
+    }
+    for index in 3..8 {
+        assert!(serialized.contains(&format!("TOOL_INPUT_{index}")));
+        assert!(serialized.contains(&format!("TOOL_OUTPUT_{index}")));
+    }
+    assert_eq!(
+        serialized.matches(r#""tag":"collapsible_panel""#).count(),
+        7
+    );
+}
+
+#[test]
+fn budgeted_card_removes_old_execution_segments_before_preserving_latest_five_rounds() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "thinking-first budget");
     for index in 0..8 {
         snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
@@ -676,7 +790,7 @@ fn budgeted_card_removes_old_tools_before_preserving_latest_five_thinking_rounds
         });
         snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
             log: ToolCallLog {
-                tool_name: "exec_command".to_string(),
+                tool_name: format!("tool_{index}"),
                 arguments: format!("TOOL_INPUT_{index}_{}", "i".repeat(500)),
                 result: format!("TOOL_OUTPUT_{index}_{}", "o".repeat(500)),
                 success: true,
@@ -704,6 +818,8 @@ fn budgeted_card_removes_old_tools_before_preserving_latest_five_thinking_rounds
         );
     }
     assert!(serialized.contains("TOOL_OUTPUT_7"));
+    assert!(serialized.contains("TOOL_OUTPUT_3"));
+    assert!(!serialized.contains("THINKING_ROUND_0"));
     assert!(!serialized.contains("TOOL_OUTPUT_0"));
 }
 
@@ -884,6 +1000,7 @@ fn external_runner_status_footer_uses_runner_metadata_instead_of_agent_metrics()
         message: "queued message".to_string(),
         images: Vec::new(),
         files: Vec::new(),
+        context: None,
     });
     snapshot.guide_pending = true;
     snapshot.phase = ImProgressPhase::Finished;
@@ -1154,7 +1271,7 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
     ] {
         assert!(!serialized.contains(id), "unexpected empty module id {id}");
     }
-    assert_eq!(card["header"]["title"]["content"], "initial task");
+    assert!(card.get("header").is_none());
 
     let mut populated = snapshot.clone();
     populated.apply_event(AgentTurnProgressEvent::AssistantDelta {
@@ -1189,6 +1306,7 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
             message: "queued".to_string(),
             images: Vec::new(),
             files: Vec::new(),
+            context: None,
         }],
         true,
         Some("已收到引导：rerun failed path".to_string()),
@@ -1218,7 +1336,7 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
             "process timeline should replace legacy module id {id}"
         );
     }
-    assert_eq!(populated_card["header"]["title"]["content"], "Build");
+    assert!(populated_card.get("header").is_none());
     assert_eq!(populated_body[0]["element_id"], STATUS_PANEL_ELEMENT_ID);
     assert_eq!(
         populated_body[1]["header"]["title"]["content"],
@@ -1341,6 +1459,8 @@ struct MockFeishuProgressServer {
     settings_update_counter: Arc<std::sync::atomic::AtomicUsize>,
     card_create_payloads: Arc<std::sync::Mutex<Vec<String>>>,
     card_update_payloads: Arc<std::sync::Mutex<Vec<String>>>,
+    message_paths: Arc<std::sync::Mutex<Vec<String>>>,
+    message_payloads: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
 }
 
 async fn spawn_mock_feishu_progress_server() -> MockFeishuProgressServer {
@@ -1470,6 +1590,8 @@ async fn spawn_mock_feishu_progress_server_with_failures(
     let settings_update_counter = Arc::new(AtomicUsize::new(0));
     let card_create_payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
     let card_update_payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let message_paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let message_payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
     let fail_card_update_codes = Arc::new(
         fail_card_update_codes
             .into_iter()
@@ -1491,6 +1613,8 @@ async fn spawn_mock_feishu_progress_server_with_failures(
     let settings_update_counter_for_server = Arc::clone(&settings_update_counter);
     let card_create_payloads_for_server = Arc::clone(&card_create_payloads);
     let card_update_payloads_for_server = Arc::clone(&card_update_payloads);
+    let message_paths_for_server = Arc::clone(&message_paths);
+    let message_payloads_for_server = Arc::clone(&message_payloads);
     let fail_card_update_codes_for_server = Arc::clone(&fail_card_update_codes);
     let fail_card_create_codes_for_server = Arc::clone(&fail_card_create_codes);
     tokio::spawn(async move {
@@ -1506,6 +1630,8 @@ async fn spawn_mock_feishu_progress_server_with_failures(
             let settings_update_counter = Arc::clone(&settings_update_counter_for_server);
             let card_create_payloads = Arc::clone(&card_create_payloads_for_server);
             let card_update_payloads = Arc::clone(&card_update_payloads_for_server);
+            let message_paths = Arc::clone(&message_paths_for_server);
+            let message_payloads = Arc::clone(&message_payloads_for_server);
             let fail_card_update_codes = Arc::clone(&fail_card_update_codes_for_server);
             let fail_card_create_codes = Arc::clone(&fail_card_create_codes_for_server);
             tokio::spawn(async move {
@@ -1517,6 +1643,8 @@ async fn spawn_mock_feishu_progress_server_with_failures(
                     let settings_update_counter = Arc::clone(&settings_update_counter);
                     let card_create_payloads = Arc::clone(&card_create_payloads);
                     let card_update_payloads = Arc::clone(&card_update_payloads);
+                    let message_paths = Arc::clone(&message_paths);
+                    let message_payloads = Arc::clone(&message_payloads);
                     let fail_card_update_codes = Arc::clone(&fail_card_update_codes);
                     let fail_card_create_codes = Arc::clone(&fail_card_create_codes);
                     async move {
@@ -1624,11 +1752,23 @@ async fn spawn_mock_feishu_progress_server_with_failures(
                                     .unwrap(),
                             );
                         }
-                        if method == Method::POST && path == "/open-apis/im/v1/messages" {
+                        if method == Method::POST
+                            && (path == "/open-apis/im/v1/messages"
+                                || (path.starts_with("/open-apis/im/v1/messages/")
+                                    && path.ends_with("/reply")))
+                        {
                             let body: serde_json::Value =
                                 serde_json::from_slice(&body).expect("send card json");
+                            message_paths
+                                .lock()
+                                .expect("message paths lock")
+                                .push(path.clone());
+                            message_payloads
+                                .lock()
+                                .expect("message payloads lock")
+                                .push(body.clone());
                             let content = body["content"].as_str().unwrap_or_default();
-                            assert!(content.contains("card_"));
+                            assert!(!content.is_empty());
                             let idx = message_counter.fetch_add(1, Ordering::SeqCst) + 1;
                             if fail_message_send_number == Some(idx) {
                                 return Ok::<_, hyper::Error>(
@@ -1692,6 +1832,8 @@ async fn spawn_mock_feishu_progress_server_with_failures(
         settings_update_counter,
         card_create_payloads,
         card_update_payloads,
+        message_paths,
+        message_payloads,
     }
 }
 
@@ -1994,6 +2136,7 @@ async fn queue_state_update_rolls_over_card_and_freezes_previous_snapshot() {
                     message: "follow-up".to_string(),
                     images: Vec::new(),
                     files: Vec::new(),
+                    context: None
                 }],
                 true,
                 Some("已收到引导：follow-up".to_string()),
@@ -2092,6 +2235,11 @@ async fn content_size_limit_retries_same_card_with_less_old_history() {
         for index in 0..30 {
             session
                 .snapshot
+                .apply_event(AgentTurnProgressEvent::AssistantFinal {
+                    content: format!("THINKING_HISTORY_{index}_{}", "思考".repeat(100)),
+                });
+            session
+                .snapshot
                 .apply_event(AgentTurnProgressEvent::ToolFinished {
                     log: ToolCallLog {
                         tool_name: "exec_command".to_string(),
@@ -2140,7 +2288,7 @@ async fn content_size_limit_retries_same_card_with_less_old_history() {
     assert!(payloads[1].contains("已省略前面"));
     assert!(payloads[1].len() < payloads[0].len());
     assert!((0..30).any(|index| {
-        let marker = format!("HISTORY_MARKER_{index}");
+        let marker = format!("THINKING_HISTORY_{index}");
         payloads[0].contains(&marker) && !payloads[1].contains(&marker)
     }));
 }
@@ -2503,6 +2651,7 @@ async fn queue_state_rollover_sends_new_card_without_recall() {
                     message: "queued after rollover".to_string(),
                     images: Vec::new(),
                     files: Vec::new(),
+                    context: None
                 }],
                 false,
                 Some("消息已排队：queued after rollover".to_string()),
@@ -2590,6 +2739,7 @@ async fn queue_state_rollover_send_failure_keeps_previous_running_handle() {
                     message: "queued after send failure".to_string(),
                     images: Vec::new(),
                     files: Vec::new(),
+                    context: None
                 }],
                 false,
                 Some("消息已排队：queued after send failure".to_string()),
@@ -2639,6 +2789,7 @@ async fn finished_card_queue_state_update_does_not_rollover_or_freeze() {
                     message: "late message".to_string(),
                     images: Vec::new(),
                     files: Vec::new(),
+                    context: None
                 }],
                 true,
                 Some("已收到引导：late message".to_string()),
@@ -2840,6 +2991,147 @@ async fn rollover_existing_freezes_old_card_and_sends_new_card() {
     assert_eq!(server.settings_update_counter.load(Ordering::SeqCst), 1);
     assert_eq!(server.recall_counter.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn feishu_message_cards_use_native_reply_paths_and_strip_root_headers() {
+    use std::sync::atomic::Ordering;
+
+    let server = spawn_mock_feishu_progress_server().await;
+    let feishu = Arc::new(FeishuProvider::new());
+    let provider = mock_feishu_provider(&server.base_url);
+    feishu
+        .reply_card(
+            &provider,
+            "om_trigger_plain",
+            serde_json::json!({
+                "schema": "2.0",
+                "header": { "title": { "tag": "plain_text", "content": "remove me" } },
+                "body": { "elements": [{ "tag": "markdown", "content": "hello" }] }
+            }),
+            Some("reply_plain_uuid"),
+        )
+        .await
+        .expect("reply with ordinary card");
+    feishu
+        .send_card(
+            &provider,
+            &mock_progress_target(),
+            serde_json::json!({
+                "schema": "2.0",
+                "header": { "title": { "tag": "plain_text", "content": "remove me too" } },
+                "body": { "elements": [{ "tag": "markdown", "content": "proactive" }] }
+            }),
+            super::super::types::SendOptions::default(),
+        )
+        .await
+        .expect("send proactive ordinary card");
+
+    let registry = ImAgentProgressRegistry::new();
+    registry
+        .start_feishu_replying_to(
+            "s-reply",
+            Arc::clone(&feishu),
+            provider,
+            mock_progress_target(),
+            "first turn",
+            Some("om_trigger_progress_1"),
+        )
+        .await
+        .expect("start replied progress card");
+    assert!(
+        registry
+            .rollover_existing_replying_to("s-reply", "second turn", Some("om_trigger_progress_2"),)
+            .await
+    );
+
+    assert_eq!(server.message_counter.load(Ordering::SeqCst), 4);
+    let paths = server.message_paths.lock().expect("message paths").clone();
+    assert_eq!(
+        paths,
+        vec![
+            "/open-apis/im/v1/messages/om_trigger_plain/reply",
+            "/open-apis/im/v1/messages",
+            "/open-apis/im/v1/messages/om_trigger_progress_1/reply",
+            "/open-apis/im/v1/messages/om_trigger_progress_2/reply",
+        ]
+    );
+
+    let payloads = server
+        .message_payloads
+        .lock()
+        .expect("message payloads")
+        .clone();
+    assert_eq!(payloads[0]["msg_type"], "interactive");
+    assert_eq!(payloads[0]["uuid"], "reply_plain_uuid");
+    assert!(payloads[0].get("receive_id").is_none());
+    let ordinary_card: serde_json::Value = serde_json::from_str(
+        payloads[0]["content"]
+            .as_str()
+            .expect("ordinary card content"),
+    )
+    .expect("ordinary card json");
+    assert!(ordinary_card.get("header").is_none());
+    let proactive_card: serde_json::Value = serde_json::from_str(
+        payloads[1]["content"]
+            .as_str()
+            .expect("proactive card content"),
+    )
+    .expect("proactive card json");
+    assert!(proactive_card.get("header").is_none());
+
+    let created_cards = server
+        .card_create_payloads
+        .lock()
+        .expect("created cards")
+        .clone();
+    assert_eq!(created_cards.len(), 2);
+    for created_card in created_cards {
+        let card: serde_json::Value =
+            serde_json::from_str(&created_card).expect("created progress card json");
+        assert!(card.get("header").is_none());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn progress_card_falls_back_to_direct_send_when_native_reply_fails() {
+    use std::sync::atomic::Ordering;
+
+    let server = spawn_mock_feishu_progress_server_with_send_failure(Some(1)).await;
+    let registry = ImAgentProgressRegistry::new();
+    let session = registry
+        .start_feishu_replying_to(
+            "s-reply-fallback",
+            Arc::new(FeishuProvider::new()),
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
+            "first turn",
+            Some("om_trigger"),
+        )
+        .await
+        .expect("fallback direct progress-card send");
+
+    assert_eq!(server.message_counter.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        server
+            .message_paths
+            .lock()
+            .expect("message paths")
+            .as_slice(),
+        [
+            "/open-apis/im/v1/messages/om_trigger/reply",
+            "/open-apis/im/v1/messages",
+        ]
+    );
+    assert_eq!(
+        session
+            .lock()
+            .await
+            .message_info()
+            .and_then(|info| info.message_id),
+        Some("om_2".to_string())
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn recall_message_sends_delete_with_tenant_token() {
     use bytes::Bytes;

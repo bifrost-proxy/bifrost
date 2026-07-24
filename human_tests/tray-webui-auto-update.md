@@ -390,6 +390,66 @@
 - App-owned 原升级 E2E 全部通过，CLI/App pinned target 和 Tauri handoff 语义未被破坏。
 - desktop Web 构建通过，旧的误导文案不再存在。
 
+### TC-TWA-13：桌面 WebView 升级凭证 CORS 预检回归
+
+**回归目标**：
+
+- 复现 Desktop App 已签发一次性升级凭证，但 WebView 因 CORS 未允许 `X-Bifrost-Desktop-Upgrade-Origin` 而把请求拦在 Admin 之前、弹窗只显示 `Network Error` 的问题。
+- 保证 Tauri WebView 的 OPTIONS 预检允许该专用请求头，随后合法 POST 能消费凭证并进入 desktop orchestrator。
+- 保留普通浏览器的安全边界：没有 Tauri 一次性凭证时，desktop-owned core 仍返回 409，且不修改 App 或 CLI。
+
+**操作步骤**：
+
+1. 执行定向单元测试：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     cors_preflight_allows_desktop_client_header --lib -- --nocapture
+   ```
+2. 构建当前源码二进制后，使用临时数据目录、临时 App/CLI fixture 和随机端口执行 App-owned 升级 E2E：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo build -p bifrost-cli --bin bifrost
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_upgrade_app_owned_core_e2e.sh
+   ```
+3. 检查 E2E 输出，确认 Tauri `Origin: tauri://localhost` 的 OPTIONS 请求返回 204，`Access-Control-Allow-Headers` 包含 `X-Bifrost-Desktop-Upgrade-Origin`；合法 desktop POST 消费 token 文件并进入 `source=desktop/restarting`。
+4. 检查同一 E2E 的 browser 分支，确认无凭证 POST 仍返回 409，响应提示必须从 Bifrost Desktop App 发起，临时 App/CLI 均未被修改。
+5. 测试结束后确认随机端口已释放、临时目录已清理，并确认本机正式 9900 进程未被测试停止或替换。
+
+**预期结果**：
+
+- 单元测试通过，Admin CORS allow-header 常量同时保留既有 `Content-Type`、`Authorization`、`X-Client-Id`、`X-Bifrost-CSRF` 和升级专用 header。
+- E2E 的 WebView preflight、一次性凭证消费、desktop orchestrator、browser 409 四类断言全部通过。
+- 测试只使用隔离目录和随机端口，不操作正式 App 安装目录或 9900 服务。
+
+### TC-TWA-14：旧 Desktop 跨版本关闭兼容回归
+
+**回归目标**：
+
+- 复现 CLI 按 App bundle 前缀发现进程时先命中 packaged core、把 `--bifrost-upgrade-shutdown` 错发给普通 `bifrost` 的问题。
+- 保证支持内部关闭参数的旧 Desktop 精确命中 `<App>/Contents/MacOS/bifrost-desktop`，不受 bundled core 的进程枚举顺序影响。
+- 保证不支持该参数的历史 Desktop 使用完整 App bundle 路径触发 macOS Quit，不被同名源码构建副本截获；覆盖前仍等待 bundle 内所有进程释放。
+
+**操作步骤**：
+
+1. 执行桌面壳进程选择与 macOS 精确路径 Quit 定向单测：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli \
+     desktop_shutdown_targets_shell_instead_of_bundled_core --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli \
+     macos_legacy_shutdown_targets_exact_app_path --lib -- --nocapture
+   ```
+2. 用 `osacompile` 仅编译固定的 argv 驱动 Quit AppleScript，再用无副作用的 `osascript` 参数计数脚本确认包含空格和引号的 App 路径作为单个 argv 原样传递；不得执行实际 Quit。
+3. 遍历全部包含 `desktop/src-tauri/src/main.rs` 的版本 tag，记录首次 Desktop 版本、总数、内部 shutdown 参数分界，并断言每个历史版本都同时包含 `RunEvent::ExitRequested` 与 `complete_desktop_shutdown`。
+4. 执行 `bash e2e-tests/tests/test_upgrade_restart_e2e.sh`，确认升级恢复、旧 App platform fallback、覆盖前进程释放门禁的静态/接口合约仍通过。
+5. 测试后确认没有启动或停止 `/Applications/Bifrost.app`，正式 9900 PID 与命令行保持不变。
+
+**预期结果**：
+
+- bundled core 即使先出现也不会被选为内部 shutdown 参数目标；只有精确 desktop shell executable 会被选择。
+- macOS fallback AppleScript 通过 argv 接收完整 bundle 路径，脚本源码不插值用户路径，也不再使用模糊的应用名。
+- 所有历史 Desktop tag 都具有系统 Quit 与 managed-core 清理路径；支持内部参数的版本走快速路径，不支持的版本走 exact-path fallback。
+- 退出等待和拒绝覆盖门禁保持不变，测试不影响正式 App 与 9900 服务。
+
 ## 清理步骤
 
 1. 停止测试数据目录中的 Bifrost 服务：
@@ -400,6 +460,11 @@
 3. 不清理、不停止、不重启用户正在运行的 9900 服务。
 
 ## 执行记录
+
+2026-07-22 Desktop 升级拒绝与旧版本兼容回归已执行：
+
+- TC-TWA-13：通过。先新增 allow-header 断言并在修复前执行，单测按预期失败；加入 `X-Bifrost-Desktop-Upgrade-Origin` 后定向单测 `1/1`。App-owned E2E 首轮 OPTIONS 两个新增断言通过，但测试 POST 漏带真实 Web 客户端已有的 `X-Bifrost-CSRF`，导致 `14/22`；归因为测试请求形态缺陷后补齐 CSRF token 与 header，复跑 `22/22`。最终真实验证 preflight 204、allow-header、token 原子消费、`source=desktop/restarting`、CLI/App pinned target、普通浏览器 409 且不修改 fixture。
+- TC-TWA-14：通过。桌面壳选择测试先在函数不存在时编译失败，完成实现后 `1/1`；exact-path macOS Quit 测试同样先失败后 `1/1`。第 1 轮 review 发现将路径插值到 AppleScript 仍有控制字符边界，改成固定脚本从 argv 读取完整路径；`osacompile` 编译成功，无副作用 argv 脚本确认含空格和引号的路径只占一个参数，未执行真实 Quit。第 2 轮并行执行 11 个 upgrade review 单测时，既有 CLI restart 测试未持全局环境锁，与 fake `open` 测试竞争 `PATH`，首次为 `9/11` 并使后续锁 poison；给该测试补同一环境锁后按默认并行模式复跑 `11/11`。遍历所有含 Desktop 源码的版本 tag，结果为 `first_desktop_version=v0.0.17-beta`、`desktop_version_count=144`、`first_internal_shutdown_version=v0.0.157`、`missing_quit_contracts=0`；证明早期版本可走系统 Quit + managed-core cleanup，新版本可走精确 shell 参数。升级 restart E2E `21/21`。测试前后正式 9900 listener 都是 PID 98731、命令 `/Users/eden/.local/bin/bifrost start -d`、API 版本 `0.0.160`，没有启动/停止正式 Desktop App 或替换正式 bundle。
 
 2026-07-21 桌面版本检查 runtime-owner 回归已执行：
 

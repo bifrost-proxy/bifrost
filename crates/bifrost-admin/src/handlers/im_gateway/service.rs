@@ -88,6 +88,40 @@ impl ImProviderClient {
         }
     }
 
+    /// Reply to the triggering message when Feishu provides a source message
+    /// id. Other providers keep their existing send-to-target behavior.
+    pub(super) async fn send_reply_card(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        source_message_id: Option<&str>,
+        card: serde_json::Value,
+        opts: crate::im_gateway::types::SendOptions,
+    ) -> bifrost_core::Result<crate::im_gateway::types::SendResult> {
+        match (
+            self,
+            source_message_id.map(str::trim).filter(|id| !id.is_empty()),
+        ) {
+            (Self::Feishu(provider), Some(message_id)) => {
+                match provider
+                    .reply_card(config, message_id, card.clone(), opts.uuid.as_deref())
+                    .await
+                {
+                    Ok(result) => Ok(result),
+                    Err(reply_error) => {
+                        warn!(
+                            message_id,
+                            error = %reply_error,
+                            "Feishu native card reply failed; falling back to direct send"
+                        );
+                        provider.send_card(config, target, card, opts).await
+                    }
+                }
+            }
+            _ => self.send_card(config, target, card, opts).await,
+        }
+    }
+
     pub(super) async fn send_text(
         &self,
         config: &ImProviderConfig,
@@ -237,6 +271,7 @@ pub struct ImGatewayService {
     pub event_store: Arc<ImEventStore>,
     pub run_store: Arc<ImRunStore>,
     pub message_log_store: Arc<ImMessageLogStore>,
+    pub group_context_store: Arc<ImGroupContextStore>,
     pub connection_manager: Arc<ImConnectionManager>,
     pub agent_config_store: Arc<ImAgentConfigStore>,
     pub agent_session_manager: Arc<ImAgentSessionManager>,
@@ -288,6 +323,7 @@ impl ImGatewayService {
             event_store: Arc::new(ImEventStore::new(data_dir)),
             run_store: Arc::new(ImRunStore::new(data_dir)),
             message_log_store: Arc::new(ImMessageLogStore::new(data_dir)),
+            group_context_store: Arc::new(ImGroupContextStore::new(data_dir)),
             connection_manager: Arc::new(ImConnectionManager::new()),
             agent_config_store,
             agent_session_manager: Arc::new(ImAgentSessionManager::new(
@@ -472,6 +508,7 @@ impl ImGatewayService {
             let provider_for_loop = provider.clone();
             let event_store = self.event_store.clone();
             let message_log_store = self.message_log_store.clone();
+            let group_context_store = self.group_context_store.clone();
             let route_store = self.route_store.clone();
             let provider_store = self.provider_store.clone();
             let agent_config_store = self.agent_config_store.clone();
@@ -490,6 +527,7 @@ impl ImGatewayService {
                     provider_for_loop,
                     event_store,
                     message_log_store,
+                    group_context_store,
                     route_store,
                     provider_store,
                     agent_config_store,
@@ -658,6 +696,7 @@ impl ImGatewayService {
                             let provider_for_loop = provider.clone();
                             let event_store = self.event_store.clone();
                             let message_log_store = self.message_log_store.clone();
+                            let group_context_store = self.group_context_store.clone();
                             let route_store = self.route_store.clone();
                             let provider_store = self.provider_store.clone();
                             let agent_config_store = self.agent_config_store.clone();
@@ -676,6 +715,7 @@ impl ImGatewayService {
                                     provider_for_loop,
                                     event_store,
                                     message_log_store,
+                                    group_context_store,
                                     route_store,
                                     provider_store,
                                     agent_config_store,
