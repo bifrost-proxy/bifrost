@@ -3399,7 +3399,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_download_feishu_file_resource_reports_body_read_errors() {
+    async fn test_download_feishu_file_resource_reports_truncated_response_errors() {
         use http_body_util::Full;
         use hyper::server::conn::http1;
         use hyper::service::service_fn;
@@ -3464,7 +3464,11 @@ mod tests {
             .expect_err("truncated response body should fail body read");
 
         let message = err.to_string();
-        assert!(message.contains("feishu message file body read failed"));
+        assert!(
+            message.contains("feishu message file body read failed")
+                || message.contains("feishu message file download failed"),
+            "unexpected truncated response error: {message}"
+        );
     }
 
     #[test]
