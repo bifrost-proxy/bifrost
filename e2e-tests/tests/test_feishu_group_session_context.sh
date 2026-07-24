@@ -133,6 +133,33 @@ PY
   return 1
 }
 
+wait_group_turn_completed() {
+  local trigger_message_id="$1"
+  for _ in $(seq 1 160); do
+    if python3 - "$TEST_DIR/admin/im_group_context.db" "$trigger_message_id" <<'PY'
+import pathlib
+import sqlite3
+import sys
+
+db_path, trigger_message_id = sys.argv[1:3]
+if not pathlib.Path(db_path).exists():
+    raise SystemExit(1)
+connection = sqlite3.connect(db_path)
+status = connection.execute(
+    "SELECT status FROM im_group_turns WHERE trigger_message_id = ? LIMIT 1",
+    (trigger_message_id,),
+).fetchone()
+raise SystemExit(0 if status == ("completed",) else 1)
+PY
+    then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "group turn did not complete: $trigger_message_id" >&2
+  return 1
+}
+
 if [[ "${SKIP_BUILD:-false}" != "true" ]]; then
   SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
 fi
@@ -347,7 +374,7 @@ wait_session_idle "im:feishu-group-e2e:group:chat-alpha"
 # If the parent message was never visible to the bot, reply deterministically
 # without starting a Runner or pretending that the quoted content was read.
 inject chat-alpha user-alice Alice a14 "@_user_1" true group invisible-parent
-sleep 1
+wait_group_turn_completed a14
 wait_prompt_count 9
 wait_run_count 18
 
