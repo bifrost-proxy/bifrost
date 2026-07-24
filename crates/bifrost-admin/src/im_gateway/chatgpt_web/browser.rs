@@ -81,7 +81,8 @@ impl ConversationTab {
 }
 
 /// Per-profile pool of conversation tabs keyed by `(profile_dir, conversation_id)`.
-/// Tabs are NEVER closed automatically — only when:
+/// Tabs are not closed when they are repurposed for a fresh conversation.
+/// They are closed automatically only when:
 ///   1. The pool reaches `CONVERSATION_TAB_POOL_SIZE` and a new conversation
 ///      needs space (LRU eviction); or
 ///   2. `evict_conversation_tab` is called explicitly.
@@ -115,6 +116,48 @@ pub(super) fn get_conversation_tab(
     }
     tab.touch();
     Some(tab)
+}
+
+/// Remove and return the most recently used live tab for a fresh conversation.
+///
+/// The browser target and CDP connection stay open. The caller navigates this
+/// same tab to the homepage, then registers it under the new conversation id
+/// after the first message is submitted. Removing the old pool key prevents a
+/// later request from assuming the repurposed tab still shows the old
+/// conversation.
+pub(super) fn take_reusable_conversation_tab(profile_dir: &Path) -> Option<Arc<ConversationTab>> {
+    let pool = conversation_tabs();
+    loop {
+        let mut candidate_key: Option<(PathBuf, String)> = None;
+        let mut candidate_tick = 0;
+        for entry in pool.iter() {
+            if entry.key().0 != profile_dir {
+                continue;
+            }
+            let tick = entry.value().last_used.load(Ordering::SeqCst);
+            if candidate_key.is_none() || tick > candidate_tick {
+                candidate_tick = tick;
+                candidate_key = Some(entry.key().clone());
+            }
+        }
+        let key = candidate_key?;
+        let (_, tab) = pool.remove(&key)?;
+        if tab.cdp.is_closed() {
+            info!(
+                conversation_id = %key.1,
+                target_id = %tab.target_id,
+                "chatgpt_web tab pool: dropped closed tab while selecting fresh-conversation target"
+            );
+            continue;
+        }
+        tab.touch();
+        info!(
+            previous_conversation_id = %key.1,
+            target_id = %tab.target_id,
+            "chatgpt_web tab pool: reusing existing tab for fresh conversation"
+        );
+        return Some(tab);
+    }
 }
 
 /// Recover a conversation tab from the live browser when the process-local pool
@@ -655,6 +698,30 @@ impl BrowserSession {
         Ok(Some(page))
     }
 
+    /// Find an already-open ChatGPT tab that can be repurposed for a fresh
+    /// conversation. This never creates, closes, or refreshes a target.
+    pub(super) async fn find_chatgpt_page(
+        &self,
+        base_url: &str,
+    ) -> Result<Option<CdpPage>, String> {
+        let base = base_url.trim_end_matches('/');
+        let default_base = DEFAULT_BASE_URL.trim_end_matches('/');
+        let list: Vec<CdpPage> = wait_for_json(
+            &format!("http://127.0.0.1:{}/json/list", self.port),
+            Duration::from_secs(5),
+        )
+        .await?;
+        let page = select_reusable_chatgpt_page(&list, base, default_base);
+        if let Some(ref page) = page {
+            info!(
+                page_id = %page.id,
+                page_url = %page.url,
+                "chatgpt_web browser: found existing tab for fresh conversation"
+            );
+        }
+        Ok(page)
+    }
+
     /// Close chatgpt.com tabs that are "stale" (likely left over from a
     /// previous session or crash).  This should only be called at browser
     /// startup (before any concurrent runs begin) to avoid closing tabs that
@@ -671,50 +738,6 @@ impl BrowserSession {
             Err(_) => return,
         };
         self.close_stale_pages(&list, None).await;
-    }
-
-    pub(super) async fn close_chatgpt_pages_for_fresh_run(&self) {
-        let list: Vec<CdpPage> = match wait_for_json(
-            &format!("http://127.0.0.1:{}/json/list", self.port),
-            Duration::from_secs(5),
-        )
-        .await
-        {
-            Ok(list) => list,
-            Err(error) => {
-                warn!(
-                    error = %error,
-                    "chatgpt_web browser: failed to list pages before fresh run"
-                );
-                return;
-            }
-        };
-        let to_close: Vec<CdpPage> = list
-            .into_iter()
-            .filter(|page| page.url.starts_with(DEFAULT_BASE_URL))
-            .collect();
-        if to_close.is_empty() {
-            return;
-        }
-        info!(
-            close_count = to_close.len(),
-            "chatgpt_web browser: closing existing ChatGPT pages before fresh run"
-        );
-        for page in to_close {
-            debug!(
-                page_id = %page.id,
-                page_url = %page.url,
-                "chatgpt_web browser: closing ChatGPT page before fresh run"
-            );
-            if let Err(error) = self.close_target(&page.id).await {
-                warn!(
-                    page_id = %page.id,
-                    error = %error,
-                    "chatgpt_web browser: failed to close ChatGPT page before fresh run"
-                );
-            }
-        }
-        clear_conversation_tabs_for_profile(&self.profile_dir);
     }
 
     #[allow(dead_code)]
@@ -813,6 +836,34 @@ impl BrowserSession {
     }
 }
 
+fn select_reusable_chatgpt_page(
+    pages: &[CdpPage],
+    base_url: &str,
+    default_base_url: &str,
+) -> Option<CdpPage> {
+    let base = base_url.trim_end_matches('/');
+    let default_base = default_base_url.trim_end_matches('/');
+    let is_matching_origin = |url: &str, candidate: &str| {
+        url.strip_prefix(candidate).is_some_and(|suffix| {
+            suffix.is_empty()
+                || suffix.starts_with('/')
+                || suffix.starts_with('?')
+                || suffix.starts_with('#')
+        })
+    };
+    pages
+        .iter()
+        .filter(|page| !page.web_socket_debugger_url.trim().is_empty())
+        .filter(|page| {
+            is_matching_origin(&page.url, base) || is_matching_origin(&page.url, default_base)
+        })
+        .min_by_key(|page| {
+            let url = page.url.trim_end_matches('/');
+            usize::from(url != base && url != default_base)
+        })
+        .cloned()
+}
+
 fn page_url_matches_conversation(url: &str, base_url: &str, conversation_id: &str) -> bool {
     let base = base_url.trim_end_matches('/');
     let candidates = [
@@ -838,7 +889,8 @@ mod tests {
     use super::{
         browser_process_candidate_from_line, browser_process_pid_from_line, conversation_tabs,
         get_conversation_tab, page_url_matches_conversation, recovered_browser_mode_matches,
-        register_conversation_tab, CdpClient, CONVERSATION_TAB_POOL_SIZE,
+        register_conversation_tab, select_reusable_chatgpt_page, take_reusable_conversation_tab,
+        CdpClient, CdpPage, CONVERSATION_TAB_POOL_SIZE,
     };
     use dashmap::DashMap;
     use serde_json::Value;
@@ -899,6 +951,38 @@ mod tests {
             "https://chatgpt.com",
             "abc-123"
         ));
+    }
+
+    #[test]
+    fn reusable_chatgpt_page_prefers_homepage_and_requires_origin_boundary() {
+        let pages = vec![
+            CdpPage {
+                id: "wrong-origin".to_string(),
+                url: "https://chatgpt.com.evil.example/c/nope".to_string(),
+                web_socket_debugger_url: "ws://wrong".to_string(),
+            },
+            CdpPage {
+                id: "conversation".to_string(),
+                url: "https://chatgpt.com/c/abc".to_string(),
+                web_socket_debugger_url: "ws://conversation".to_string(),
+            },
+            CdpPage {
+                id: "homepage".to_string(),
+                url: "https://chatgpt.com/".to_string(),
+                web_socket_debugger_url: "ws://homepage".to_string(),
+            },
+            CdpPage {
+                id: "no-cdp".to_string(),
+                url: "https://chatgpt.com/".to_string(),
+                web_socket_debugger_url: String::new(),
+            },
+        ];
+
+        let selected =
+            select_reusable_chatgpt_page(&pages, "https://chatgpt.com", "https://chatgpt.com")
+                .expect("reusable ChatGPT page");
+
+        assert_eq!(selected.id, "homepage");
     }
 
     #[test]
@@ -971,6 +1055,27 @@ mod tests {
         let tab = get_conversation_tab(&profile, "c1").expect("tab should exist");
         assert_eq!(Arc::as_ptr(&tab.cdp), Arc::as_ptr(&cdp));
         assert!(tab.last_used.load(Ordering::SeqCst) > 0);
+    }
+
+    #[test]
+    fn fresh_conversation_takes_most_recent_tab_without_closing_it() {
+        let _guard = conversation_tabs_test_lock();
+        conversation_tabs().clear();
+        let profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-fresh-reuse");
+        let (first_closed, first_cdp) = dummy_cdp_client();
+        let (second_closed, second_cdp) = dummy_cdp_client();
+
+        register_conversation_tab(&profile, "c1", "t1".to_string(), first_cdp);
+        register_conversation_tab(&profile, "c2", "t2".to_string(), second_cdp.clone());
+
+        let tab = take_reusable_conversation_tab(&profile).expect("reusable tab");
+
+        assert_eq!(tab.target_id, "t2");
+        assert_eq!(Arc::as_ptr(&tab.cdp), Arc::as_ptr(&second_cdp));
+        assert!(!first_closed.load(Ordering::SeqCst));
+        assert!(!second_closed.load(Ordering::SeqCst));
+        assert!(get_conversation_tab(&profile, "c2").is_none());
+        assert!(get_conversation_tab(&profile, "c1").is_some());
     }
 
     #[test]

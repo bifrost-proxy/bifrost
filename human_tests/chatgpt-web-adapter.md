@@ -356,6 +356,7 @@
 - 按 `(profile_dir, conversation_id)` 维护 `ConversationTab` 长驻池，容量 `CONVERSATION_TAB_POOL_SIZE = 16`；
 - 入口若命中池子直接复用 CDP 与 target_id，跳过 navigate；不命中再走 `create_tab_with_cdp_retry`；
 - 若服务重启导致内存池为空，但受控浏览器仍有同一个 `/c/{conversation_id}` 标签页，发送前先通过 `/json/list` 扫描现有 targets，命中后 attach CDP、重新注册入池并复用该 tab，避免重复打开相同 conversation；
+- 新建会话不再关闭所有 ChatGPT 页面再创建 `about:blank` tab；优先取出最近使用的 live `ConversationTab`，池为空时 attach 浏览器中已存在的 ChatGPT target，并在同一个 target 上切换到纯首页。只有浏览器中确实没有任何 ChatGPT target 时才创建 fallback tab；
 - 成功时 `register_conversation_tab` 把 tab 入池；满了 LRU 淘汰，淘汰条目通过 `EvictedTab::shutdown` 关闭；
 - 失败时仅关闭"刚新建未入池"的 tab；池中 tab 保持开启等待下一次复用；
 - 浏览器进程被 kill / 重启时（mode mismatch 或不响应）调用 `clear_conversation_tabs_for_profile` 同步丢弃池中条目，避免悬挂引用。
@@ -378,9 +379,9 @@
 2. 观察服务日志中 `chatgpt_web send: ` 行。
 
 **预期结果**：
-- 第 1 轮日志包含 `chatgpt_web send: isolated tab created for this run`；
+- 第 1 轮优先命中浏览器启动时已存在的首页 target，日志包含 `attaching existing browser tab for fresh conversation`；若进程内已有 pooled tab，则包含 `reusing pooled tab for fresh conversation`；
 - 第 2、3 轮日志包含 `chatgpt_web send: reusing pooled conversation tab` 且 `target_id=` 与第 1 轮相同；
-- 整个 3 轮过程中没有 `chatgpt_web send: closing isolated tab after run`（旧版每轮都会出现）；
+- 整个 3 轮过程中没有关闭或重开 ChatGPT tab；仅在浏览器确实没有 ChatGPT target 时允许创建一个 fallback tab；
 - 三轮均成功返回 assistant 回复（第 3 轮 response 中包含 markdown 图片链接 `![...](...)`，且本地缓存路径下能找到对应原图）；
 - headed 模式下，能在浏览器中观察到一个 `/c/<conversation_id>` 标签页，从第 1 轮起持续存在不被关闭。
 
@@ -401,18 +402,20 @@
 - 4 个本地路径全部存在且非空（每个 PNG/JPEG > 1KB）；
 - 整个等待过程未出现 `chatgpt_web send: closing isolated tab after run`。
 
-### TC-CWA-19-03：池容量 LRU 淘汰
+### TC-CWA-19-03：多个新 session 复用同一个 tab 切换到首页
 
-**前置条件**：服务以默认数据目录启动；当前 chatgpt_web 池为空（重启服务即可）。
+**前置条件**：服务以默认数据目录启动；headed 浏览器中已有一个 ChatGPT tab。
 
 **操作步骤**：
-1. 用 17 个不同 sessionKey 连续发起 17 轮（每个 sessionKey 触发一个新对话，因此池中将有 17 条候选项）。
-2. 观察日志 `chatgpt_web tab pool: ` 行。
+1. 依次用 3 个不同 sessionKey 发起 3 个新对话。
+2. 每轮记录日志中的 `target_id`、地址栏 URL 与浏览器 tab 数。
+3. 执行 `fresh_conversation_takes_most_recent_tab_without_closing_it` 单元测试。
 
 **预期结果**：
-- 前 16 轮成功 `register` 入池，无 `evicting LRU tab`；
-- 第 17 轮触发 `chatgpt_web tab pool: evicting LRU tab to make room`，紧跟一条 `chatgpt_web tab pool: closing evicted tab`，对应被淘汰的是第 1 轮的 tab；
-- 此后第 1 轮的 conversation_id 再次发起请求时，会命中 `chatgpt_web send: isolated tab created for this run`（不再命中池），其余的 conversation_id 仍命中 `reusing pooled conversation tab`。
+- 第 2、3 个新 session 都出现 `reusing pooled tab for fresh conversation`，并在同一 `target_id` 上从旧 `/c/...` 导航到 `https://chatgpt.com/` 后发送；
+- 浏览器 tab 数不随新 session 增长，过程中无 close/reopen，也无 `bifrost_new_chat` query；
+- 旧 conversation 的 pool key 在 target 被复用时移除，新 conversation handoff 完成后同一 target 注册到新 conversation id；
+- LRU 容量逻辑仍由 `conversation_tab_lru_eviction_for_profile` 单元测试覆盖，不依赖新 session 批量创建 tab。
 
 ### TC-CWA-19-04：浏览器执行模式切换清空池
 
@@ -424,7 +427,7 @@
 
 **预期结果**：
 - 日志出现 `chatgpt_web browser: execution mode changed, killing old browser to relaunch` 后紧跟一条来自 `clear_conversation_tabs_for_profile` 的清空动作；
-- 新一轮请求走 `chatgpt_web send: isolated tab created for this run`（池被清空，无法复用）；
+- 这是用户显式切换 headed/headless 的必要重启例外；新浏览器启动后，本轮请求 attach 它已经打开的首页 target，不再额外新建 isolated tab；
 - 之后再发同一 conversation_id 时命中 `reusing pooled conversation tab`。
 
 ### TC-CWA-19-05：服务重启后复用浏览器中已有 conversation tab
@@ -784,8 +787,47 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 - 纯图片的 role-less assistant section 继续使用生成图片完成规则，不被 text-only 临时 shell 门禁误伤。
 - `result.json.response` 和 `last_message.md` 必须是正式 assistant 的完整结果，不是“正在搜索…”或“我先按…筛选…”这类过渡内容。
 
+### TC-CWA-35：回归 - 新建会话复用同一个 tab 且 URL 不携带 Bifrost 私有参数
+
+**前置条件**：当前源码可编译；不要求真实 ChatGPT 登录态。若执行浏览器观察，使用 headed `chatgpt_web` runner 和共享 browser profile。
+
+**操作步骤**：
+1. 执行 URL 生成单元测试：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin new_conversation_url_ --lib -- --nocapture
+   ```
+2. 执行同 tab 复用单元测试：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin fresh_conversation_ --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin fresh_runs_reuse_existing_chatgpt_tab_without_closing_or_reopening --lib -- --nocapture
+   ```
+3. 执行 ChatGPT Web profile / URL E2E 哨兵：
+   ```bash
+   bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh
+   ```
+4. 检查生产代码不再包含私有参数名和破坏性 fresh-run 关闭逻辑：
+   ```bash
+   if rg -n "bifrost_new_chat" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs; then
+     exit 1
+   fi
+   if rg -n "close_chatgpt_pages_for_fresh_run" \
+     crates/bifrost-admin/src/im_gateway/chatgpt_web/{send,browser}.rs; then
+     exit 1
+   fi
+   ```
+5. 如执行真实浏览器观察，连续使用两个新 session 发起 `chatgpt_web` run，记录两轮 target id、tab 数和地址栏。
+
+**预期结果**：
+- 默认 `baseUrl=https://chatgpt.com` 时，新建会话 URL 精确为 `https://chatgpt.com/`，无 query string。
+- 自定义 `baseUrl` 尾部存在多个 `/` 时，生成 URL 只保留一个结尾 `/`。
+- `send.rs` 不包含 `bifrost_new_chat`，`send.rs` 与 `browser.rs` 都不包含 `close_chatgpt_pages_for_fresh_run`，E2E 哨兵通过。
+- 第二个新 session 优先取出最近使用的 pooled tab，保持 target id 和浏览器 tab 数不变，仅把 URL 从旧 `/c/...` 切换到首页；进程内池为空时 attach 浏览器中已存在的 ChatGPT tab。
+- 只有浏览器中确实没有 ChatGPT target 时才允许创建 fallback tab；失败或未解析出 conversation id 时，复用的 tab 仍保持打开。
+- 续接已有 conversation 仍使用 `/c/{conversation_id}`；新建会话仍通过无 `conversation_id` 的首次发送创建，保持共享 profile 与 handoff 语义。
+
 ## 真实执行记录
 
+- 2026-07-24：执行 TC-CWA-35 通过。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin new_conversation_url_ --lib -- --nocapture` 通过 2 项，确认默认首页精确为 `https://chatgpt.com/`，自定义 `baseUrl` 的多个尾部 `/` 会规范化为单个 `/`；`fresh_conversation_takes_most_recent_tab_without_closing_it` 与 `fresh_runs_reuse_existing_chatgpt_tab_without_closing_or_reopening` 通过，确认新 session 从池中取出最近使用的 live target、移除旧 conversation key，但不关闭 CDP 或 browser target；`reusable_chatgpt_page_prefers_homepage_and_requires_origin_boundary` 通过，确认进程内池为空时只选择正确 ChatGPT origin 且优先选择无需导航的首页 target。`bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh` 源码与测试哨兵全部通过；`rg` 负向检查确认生产代码无 `bifrost_new_chat` 和 `close_chatgpt_pages_for_fresh_run`。真实外部 ChatGPT run 本轮不执行，避免依赖账号、网络和主动改变用户当前共享浏览器会话；URL 生成、同 target 重绑、target 选择、生产调用点、共享 profile 和既有发送/等待链路由单元测试与 E2E 哨兵完成确定性回归。尚未用真实 headed 浏览器连续两个新 session 观察 target id，保留为安装后可选的用户感知复核项。
 - 2026-07-15：按用户要求追加执行 TC-CWA-34 正式 9900 服务验证。先用任务 API 将正在运行的 ASR 任务 `735775510b384fff8903d9c6fc54f1a3` 安全暂停，安装当前 `target/debug/bifrost` 到 `~/.local/bin/bifrost`（安装前后 SHA-256 与构建产物一致），重启正式服务为 PID `61485` 后恢复 ASR；恢复后进度重新进入 `running`，未把后台任务遗留为 paused。随后在正式端口执行 runner `gpt` 新会话，prompt 为“晚上好，给我整理下今日要闻”，并要求联网检索、按国内/国际/科技 AI/财经四板块输出完整结果。正式 run `1784046993864-e65176e7-a1a2-4cf9-9359-fe5b60c88b98`、conversation `6a56659f-9ad4-83ec-a437-39fdc87efe01` 命中 `eventTypes=["patch","resume_conversation_token","stream_handoff","browser_ui"]`；运行约 31 秒时仍保持 running，没有复现旧版的 planning 提前返回。最终 `durationMs=187949`、`status=succeeded`，`conversation_final.json.source=dom_fallback_outcome`、正式 `turnId=3f7270ef-4719-4313-a6d0-c02b356d00c6`，`result.response` 为 13277 个字符 / 19731 字节，`last_message.md` 同为 19731 字节并包含“国内、国际、科技／AI、财经、今日最重要的三条主线”全部章节。
 - 2026-07-15：执行 TC-CWA-34 通过。先检查用户提供的真实失败 run `1784043878390-67b0e366-4edc-476c-b78f-ca52647564e6`：`durationMs=31673`，`result.response` 只有“我先按…四个板块筛选…”的 52 个字符，`conversation_final.json.turnId=request-6a558072-d5c0-83ec-950a-6dd96050b3e1-0`；但同一 conversation 的 WebSocket frame 仍继续到 23:47:29，最终页面出现带 `data-message-id=8e9d3c81-a8af-418e-b83e-3427a29b3548` 的 2919 字正式 assistant message。随后在正式 9900 服务复现了 `stream_handoff` 后 `request-WEB:*` 临时 assistant section 与 `data-testid=stop-button, aria-label=停止回答` 重新出现的时序，证明 selector 未失效，失效的是“单次无 stop 即完成”的充分条件。修复后构建当前源码，在隔离数据目录 `/tmp/bifrost-chatgpt-finality-live` 和端口 `19910` 启动服务，显式复用正式共享 browser profile，执行真实联网检索 run `1784045777481-3666c349-1ae6-4c43-a920-69b3e316670e`。该 run 的 `conversation_handoff.json.eventTypes=["patch","resume_conversation_token","stream_handoff","browser_ui"]`，持续 `122831ms` 后才成功返回；`conversation_final.json.source=dom_fallback_outcome`、`turnId=cb601a5b-553a-46cb-828b-c3c5bff2906a`，`result.response` 为 4985 个字符，`last_message.md` 为 6883 字节，完整包含两条新闻的事件、来源、进展和影响，没有在临时搜索/planning section 阶段提前结束。为不打断正式 9900 服务上正在执行的 ASR 任务，本次未重启正式服务。
 - 2026-07-01：补充执行 TC-CWA-33 真实失败样本回归。全量补跑 Daily Agent 矩阵时，`2026-06-15 daily_report` run `1782928234093-1e821cdd-0c0a-43fa-9f1c-6c477670e1b4` 失败于 `send button not actionable after native clipboard paste upload wait`，diagnostic screenshot `/var/folders/xw/55z6437s54d6pgr93j2ztz2h0000gn/T/bifrost-diagnostic-screenshots/diag-1782928476064.png` 显示上一条 assistant 长回复仍在生成、右下角 stop button 可见，同时 composer 已残留 `上一条回复不是最终日报...` retry prompt。修复后 send 层在 composer 注入前和 send button 不可点击后都以 stop button 为硬 busy gate；stop 可见时清空 composer，等待 stop button 消失后继续同一次 send 流程；只有等待超时才返回不可整轮重试的 `conversation_busy`。代码级哨兵新增 `diagnostic_has_visible_stop_button_is_the_busy_gate`。
