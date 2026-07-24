@@ -317,7 +317,6 @@ async fn send_with_browser_once(
     // tabs that we never registered into the pool MUST be closed to avoid
     // leaks.
     let mut reused_from_pool = false;
-    let mut reused_existing_tab = false;
     let result = async {
         // Try to reuse a long-lived tab from the per-profile pool.  If the
         // conversation already has a tab, navigate is unnecessary — the
@@ -334,7 +333,6 @@ async fn send_with_browser_once(
                 target_id = Some(tab.target_id.clone());
                 client = Some(tab.cdp.clone());
                 reused_from_pool = true;
-                reused_existing_tab = true;
             }
         }
 
@@ -365,38 +363,12 @@ async fn send_with_browser_once(
                     target_id = Some(page.id);
                     client = Some(cdp);
                     reused_from_pool = true;
-                    reused_existing_tab = true;
                 }
             }
         }
 
-        if client.is_none() && conversation_id.is_none() {
-            if let Some(tab) =
-                super::browser::take_reusable_conversation_tab(&config.profile_dir)
-            {
-                info!(
-                    target_id = %tab.target_id,
-                    "chatgpt_web send: reusing pooled tab for fresh conversation"
-                );
-                target_id = Some(tab.target_id.clone());
-                client = Some(tab.cdp.clone());
-                reused_existing_tab = true;
-            } else if let Some(page) = browser
-                .find_chatgpt_page(&config.chatgpt.base_url)
-                .await?
-            {
-                let cdp = CdpClient::connect_with_retry(&page.web_socket_debugger_url, 3).await?;
-                cdp.enable_domains().await?;
-                info!(
-                    target_id = %page.id,
-                    page_url = %page.url,
-                    "chatgpt_web send: attaching existing browser tab for fresh conversation"
-                );
-                target_id = Some(page.id);
-                client = Some(Arc::new(cdp));
-                reused_existing_tab = true;
-            }
-        }
+        let mut fresh_tab_state = (&mut target_id, &mut client, &mut reused_from_pool);
+        reuse_fresh_tab(&browser, config, conversation_id, &mut fresh_tab_state).await?;
 
         if client.is_none() {
             // Create a brand-new tab and connect CDP with retry logic.
@@ -417,7 +389,7 @@ async fn send_with_browser_once(
         let cdp = client.as_ref().unwrap().clone();
         let cdp = cdp.as_ref();
 
-        if !reused_existing_tab {
+        if !reused_from_pool {
             // Enable CDP domains for event-driven navigation/network detection.
             cdp.enable_domains().await?;
             cdp.send("Runtime.enable", json!({})).await?;
@@ -435,7 +407,7 @@ async fn send_with_browser_once(
             cdp.send("Page.bringToFront", json!({})).await?;
         }
 
-        if !reused_existing_tab {
+        if !reused_from_pool {
             // Now navigate the tab to the desired URL (homepage or conversation).
             // Use navigate_and_wait which subscribes to events BEFORE sending
             // Page.navigate, preventing missed load events on fast/cached pages.
@@ -1210,29 +1182,22 @@ async fn send_with_browser_once(
                 ) {
                     evicted.shutdown(&browser).await;
                 }
-            } else {
-                if reused_existing_tab {
-                    info!(
-                        target_id = %tid,
-                        "chatgpt_web send: keeping reused tab open after success without conversation_id"
-                    );
-                } else {
-                    // A newly created tab without a resolved conversation id
-                    // cannot be routed later, so close only this fallback tab.
-                    warn!(
-                        target_id = %tid,
-                        "chatgpt_web send: success without conversation_id, closing fallback tab"
-                    );
-                    if let Some(arc) = client.clone() {
-                        arc.close();
-                    }
-                    if let Err(e) = browser.close_target(tid).await {
-                        warn!(error = %e, "chatgpt_web send: failed to close fallback tab (non-fatal)");
-                    }
+            } else if !reused_from_pool {
+                // A newly created tab without a resolved conversation id
+                // cannot be routed later, so close only this fallback tab.
+                warn!(
+                    target_id = %tid,
+                    "chatgpt_web send: success without conversation_id, closing fallback tab"
+                );
+                if let Some(arc) = client.clone() {
+                    arc.close();
+                }
+                if let Err(e) = browser.close_target(tid).await {
+                    warn!(error = %e, "chatgpt_web send: failed to close fallback tab (non-fatal)");
                 }
             }
         }
-        (Err(_), Some(tid), Some(cdp_arc)) if !reused_existing_tab => {
+        (Err(_), Some(tid), Some(cdp_arc)) if !reused_from_pool => {
             // Fresh tab that never made it into the pool — close to avoid leaks.
             info!(
                 target_id = %tid,
@@ -1293,8 +1258,8 @@ async fn send_with_browser_once(
             // Remaining failure cases:
             //   - Reused tab with non-CDP error → keep it, CDP is still valid.
             //   - Error before tab creation → nothing to close.
-            if reused_existing_tab {
-                info!("chatgpt_web send: keeping reused tab open after non-CDP failure");
+            if reused_from_pool {
+                info!("chatgpt_web send: keeping pooled tab open after non-CDP failure");
             } else {
                 debug!(
                     "chatgpt_web send: no tab to clean up (error before tab creation or already handled)"
@@ -1318,6 +1283,40 @@ async fn send_with_browser_once(
             }
         }
     }
+}
+
+type FreshTabState<'a> = (
+    &'a mut Option<String>,
+    &'a mut Option<Arc<CdpClient>>,
+    &'a mut bool,
+);
+
+async fn reuse_fresh_tab(
+    browser: &BrowserSession,
+    config: &RuntimeConfig,
+    conversation_id: Option<&str>,
+    state: &mut FreshTabState<'_>,
+) -> Result<(), String> {
+    if state.1.is_some() || conversation_id.is_some() {
+        return Ok(());
+    }
+    let Some((target_id, cdp)) = super::browser::take_or_attach_reusable_chatgpt_tab(
+        browser,
+        &config.profile_dir,
+        &config.chatgpt.base_url,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    info!(
+        target_id,
+        "chatgpt_web send: reusing existing tab for fresh conversation"
+    );
+    *state.0 = Some(target_id);
+    *state.1 = Some(cdp);
+    *state.2 = true;
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -4435,6 +4434,48 @@ mod coverage_boost {
         config.chatgpt.base_url = "https://chatgpt.example///".to_string();
 
         assert_eq!(new_conversation_url(&config), "https://chatgpt.example/");
+    }
+
+    #[tokio::test]
+    async fn reuse_fresh_tab_installs_pooled_target_and_skips_existing_selection() {
+        let config = test_runtime_config_with_execution_mode("headed");
+        let cdp = super::super::browser::dummy_cdp_client_for_tests();
+        super::super::browser::register_conversation_tab(
+            &config.profile_dir,
+            "old",
+            "target-1".to_string(),
+            cdp.clone(),
+        );
+        let browser = BrowserSession::for_test(config.profile_dir.clone());
+        let mut target_id = None;
+        let mut client = None;
+        let mut reused = false;
+        let mut state = (&mut target_id, &mut client, &mut reused);
+
+        reuse_fresh_tab(&browser, &config, None, &mut state)
+            .await
+            .expect("reuse succeeds");
+
+        assert_eq!(target_id.as_deref(), Some("target-1"));
+        assert_eq!(
+            Arc::as_ptr(client.as_ref().expect("client")),
+            Arc::as_ptr(&cdp)
+        );
+        assert!(reused);
+
+        let mut existing_target = Some("existing".to_string());
+        let mut existing_client = Some(cdp);
+        let mut existing_reused = true;
+        let mut existing_state = (
+            &mut existing_target,
+            &mut existing_client,
+            &mut existing_reused,
+        );
+        reuse_fresh_tab(&browser, &config, Some("conversation"), &mut existing_state)
+            .await
+            .expect("existing selection is preserved");
+        assert_eq!(existing_target.as_deref(), Some("existing"));
+        super::super::browser::evict_conversation_tab(&config.profile_dir, "old");
     }
 }
 

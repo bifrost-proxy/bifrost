@@ -39,8 +39,9 @@ if rg -n "close_chatgpt_pages_for_fresh_run" \
   echo "Fresh ChatGPT Web runs must not close existing browser tabs" >&2
   exit 1
 fi
-grep -q "take_reusable_conversation_tab" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
-grep -q "find_chatgpt_page" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
+grep -q "take_or_attach_reusable_chatgpt_tab" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
+grep -q "take_reusable_conversation_tab" crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
+grep -q "find_chatgpt_page" crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   ask_runs_use_shared_chatgpt_web_browser_profile_not_run_local_profile \
@@ -52,6 +53,18 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   fresh_conversation_takes_most_recent_tab_without_closing_it \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  fresh_conversation_reuse_helper_ \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  fresh_conversation_reuse_skips_other_profiles_and_closed_tabs \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  reuse_fresh_tab_installs_pooled_target_and_skips_existing_selection \
   --lib -- --nocapture
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \

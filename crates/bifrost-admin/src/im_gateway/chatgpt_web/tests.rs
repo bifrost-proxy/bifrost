@@ -98,9 +98,10 @@ fn fresh_runs_reuse_existing_chatgpt_tab_without_closing_or_reopening() {
         !browser_source.contains("fn close_chatgpt_pages_for_fresh_run"),
         "the destructive fresh-run tab cleanup helper must not return"
     );
-    assert!(send_source.contains("take_reusable_conversation_tab"));
-    assert!(send_source.contains("find_chatgpt_page"));
-    assert!(send_source.contains("reusing pooled tab for fresh conversation"));
+    assert!(send_source.contains("take_or_attach_reusable_chatgpt_tab"));
+    assert!(browser_source.contains("take_reusable_conversation_tab"));
+    assert!(browser_source.contains("find_chatgpt_page"));
+    assert!(send_source.contains("reusing existing tab for fresh conversation"));
 }
 
 #[test]

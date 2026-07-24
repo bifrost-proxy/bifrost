@@ -379,7 +379,7 @@
 2. 观察服务日志中 `chatgpt_web send: ` 行。
 
 **预期结果**：
-- 第 1 轮优先命中浏览器启动时已存在的首页 target，日志包含 `attaching existing browser tab for fresh conversation`；若进程内已有 pooled tab，则包含 `reusing pooled tab for fresh conversation`；
+- 第 1 轮优先命中浏览器启动时已存在的首页 target 或进程内 pooled tab，日志包含 `reusing existing tab for fresh conversation`；
 - 第 2、3 轮日志包含 `chatgpt_web send: reusing pooled conversation tab` 且 `target_id=` 与第 1 轮相同；
 - 整个 3 轮过程中没有关闭或重开 ChatGPT tab；仅在浏览器确实没有 ChatGPT target 时允许创建一个 fallback tab；
 - 三轮均成功返回 assistant 回复（第 3 轮 response 中包含 markdown 图片链接 `![...](...)`，且本地缓存路径下能找到对应原图）；
@@ -412,7 +412,7 @@
 3. 执行 `fresh_conversation_takes_most_recent_tab_without_closing_it` 单元测试。
 
 **预期结果**：
-- 第 2、3 个新 session 都出现 `reusing pooled tab for fresh conversation`，并在同一 `target_id` 上从旧 `/c/...` 导航到 `https://chatgpt.com/` 后发送；
+- 第 2、3 个新 session 都出现 `reusing existing tab for fresh conversation`，并在同一 `target_id` 上从旧 `/c/...` 导航到 `https://chatgpt.com/` 后发送；
 - 浏览器 tab 数不随新 session 增长，过程中无 close/reopen，也无 `bifrost_new_chat` query；
 - 旧 conversation 的 pool key 在 target 被复用时移除，新 conversation handoff 完成后同一 target 注册到新 conversation id；
 - LRU 容量逻辑仍由 `conversation_tab_lru_eviction_for_profile` 单元测试覆盖，不依赖新 session 批量创建 tab。
