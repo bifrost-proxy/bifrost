@@ -2047,7 +2047,13 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
     let active_session = service
         .agent_session_manager
         .take_session(&active_session_key);
-    let active_event = event_for("active", "owner-open-id", "queue active message");
+    let mut active_event = event_for("active", "owner-open-id", "queue active message");
+    let active_message = active_event.message.as_mut().expect("active message");
+    active_message.reply_to = Some(crate::im_gateway::types::ImMessageReference {
+        message_id: Some("quoted-active-message".to_string()),
+        created_at_ms: None,
+        text: Some("quoted active context".to_string()),
+    });
     handle_concurrent_event_during_chat(
         &active_event,
         &provider,
@@ -2065,13 +2071,14 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
         BusyMessageDefaultMode::Queue,
     )
     .await;
-    assert_eq!(
-        service
-            .queue_manager
-            .queue_status(&active_session_key)
-            .len(),
-        1
-    );
+    let active_queue = service.queue_manager.queue_status(&active_session_key);
+    assert_eq!(active_queue.len(), 1);
+    assert!(active_queue[0]
+        .message
+        .contains("【引用消息（仅作为上下文）】\nquoted active context"));
+    assert!(active_queue[0]
+        .message
+        .ends_with("【当前消息】\nqueue active message"));
     service.agent_session_manager.return_session(active_session);
 
     let other_session_key = build_session_key(&provider.id, Some("other-owner"));

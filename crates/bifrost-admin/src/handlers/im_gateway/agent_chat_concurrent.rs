@@ -70,7 +70,13 @@ pub(super) async fn handle_concurrent_event_during_chat(
         }
     } else {
         PreparedInboundDispatch {
-            message_text: agent_message_text(message),
+            message_text: agent_message_text_with_reference(
+                message,
+                &event.provider_id,
+                event.source.user_id.as_deref(),
+                event.source.message_id.as_deref(),
+                message_log_store,
+            ),
             session_key: build_session_key(&event.provider_id, event.source.user_id.as_deref()),
             group_turn_id: None,
             reset_group_context: false,

@@ -119,6 +119,7 @@
 
 **实际执行结果：**
 
+- 2026-07-24：执行 `bash e2e-tests/tests/test_external_runner_live_guide.sh` 通过。先在 Linux 与 macOS CI 稳定复现 Group Session 合并后回退到旧语义：普通 `default-im-queue` 被错误发送为 `turn/steer`，并发引用消息只保留当前问题、丢失引用原文。修复后普通消息只产生后续 `turn/start`，显式 `/g release-default-queue` 是唯一 `turn/steer`；引用问题的下一轮 Prompt 同时包含 `【引用消息（仅作为上下文）】`、原始 URL 与 `【当前消息】`。
 - 2026-07-12：使用动态临时端口和独立数据目录执行 `bash e2e-tests/tests/test_external_runner_live_guide.sh`，PASS。mock Codex 首轮 running 时收到普通消息 `default-im-queue`，记录中没有对应 `turn/steer`；显式 `/g release-default-queue` 产生唯一 steer，随后普通消息作为第二个 `turn/start` 执行。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_help_ --lib -- --nocapture` 同时通过 3 个用例，确认帮助文案说明普通后续消息默认排队。
 
 ### TC-WIP-05：Provider E2E 解析文本和图片事件
