@@ -112,6 +112,7 @@ export function useGlobalDataSync({ trafficEnabled = true }: { trafficEnabled?: 
     };
 
     const initializeGlobalData = async () => {
+      await versionStore.resumeUpgradeProgress();
       await Promise.allSettled([
         proxyStore.fetchSystemProxy(),
         proxyStore.fetchCliProxy(),

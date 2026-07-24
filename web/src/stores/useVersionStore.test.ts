@@ -19,6 +19,8 @@ vi.mock("../api/version", () => ({
 vi.mock("../api/client", () => ({
   isConnectionIssueError: (error: unknown) =>
     error instanceof Error && error.message === "connection",
+  normalizeApiErrorMessage: (error: unknown, fallback: string) =>
+    error instanceof Error ? error.message : fallback,
 }));
 
 vi.mock("../runtime", () => ({
@@ -161,6 +163,117 @@ describe("useVersionStore upgrade polling", () => {
 
     expect(apiMocks.checkVersion).toHaveBeenCalledWith(true, "desktop");
     expect(apiMocks.startUpgrade).toHaveBeenCalledWith("desktop");
+  });
+
+  it("resumes persisted active progress after a WebView reload", async () => {
+    sessionStorage.setItem("bifrost-upgrade-reload-pending", "done");
+    apiMocks.getUpgradeProgress.mockResolvedValue({
+      phase: "downloading",
+      percent: 42,
+      message: "Downloading from fallback source…",
+      target_version: "0.0.105",
+      source: "admin",
+      error: null,
+      updated_at: new Date().toISOString(),
+    });
+    useVersionStore.setState({
+      hasUpdate: false,
+      latestVersion: null,
+      modalVisible: false,
+      upgrading: false,
+      upgradePhase: "idle",
+    });
+
+    const resumed = await useVersionStore.getState().resumeUpgradeProgress();
+
+    expect(resumed).toBe(true);
+    expect(useVersionStore.getState()).toMatchObject({
+      hasUpdate: true,
+      latestVersion: "0.0.105",
+      modalVisible: true,
+      upgrading: true,
+      upgradePhase: "downloading",
+      upgradePercent: 42,
+      upgradeMessage: "Downloading from fallback source…",
+      upgradeError: null,
+    });
+    expect(sessionStorage.getItem("bifrost-upgrade-reload-pending")).toBeNull();
+  });
+
+  it("adopts an existing active upgrade instead of surfacing a 409 as failure", async () => {
+    apiMocks.startUpgrade.mockRejectedValue(
+      new Error("Request failed with status code 409"),
+    );
+    apiMocks.getUpgradeProgress.mockResolvedValue({
+      phase: "downloading",
+      percent: 73,
+      message: "Downloading existing transaction…",
+      target_version: "0.0.105",
+      source: "admin",
+      error: null,
+      updated_at: new Date().toISOString(),
+    });
+
+    await useVersionStore.getState().startUpgrade();
+
+    expect(apiMocks.startUpgrade).toHaveBeenCalledTimes(1);
+    expect(useVersionStore.getState()).toMatchObject({
+      modalVisible: true,
+      upgrading: true,
+      upgradePhase: "downloading",
+      upgradePercent: 73,
+      upgradeMessage: "Downloading existing transaction…",
+      upgradeError: null,
+    });
+  });
+
+  it("keeps the real start error when no active upgrade can be resumed", async () => {
+    apiMocks.startUpgrade.mockRejectedValue(
+      new Error("Desktop upgrade origin is invalid"),
+    );
+    apiMocks.getUpgradeProgress.mockResolvedValue({
+      phase: "idle",
+      percent: null,
+      message: "",
+      target_version: null,
+      source: null,
+      error: null,
+      updated_at: new Date().toISOString(),
+    });
+
+    await useVersionStore.getState().startUpgrade();
+
+    expect(useVersionStore.getState()).toMatchObject({
+      upgrading: false,
+      upgradePhase: "failed",
+      upgradeError: "Desktop upgrade origin is invalid",
+    });
+  });
+
+  it("does not hide active progress when a version check observes the CLI at target", async () => {
+    useVersionStore.setState({
+      hasUpdate: true,
+      latestVersion: "0.0.105",
+      upgrading: true,
+      upgradePhase: "downloading",
+    });
+    apiMocks.checkVersion.mockResolvedValue({
+      has_update: false,
+      current_version: "0.0.105",
+      latest_version: "0.0.105",
+      release_highlights: [],
+      release_url: null,
+      checked_at: new Date().toISOString(),
+    });
+
+    await useVersionStore.getState().checkVersion({ forceRefresh: true });
+
+    expect(useVersionStore.getState()).toMatchObject({
+      hasUpdate: true,
+      latestVersion: "0.0.105",
+      upgrading: true,
+      upgradePhase: "downloading",
+    });
   });
 
   it("does not report success when the desktop restart handoff fails", async () => {

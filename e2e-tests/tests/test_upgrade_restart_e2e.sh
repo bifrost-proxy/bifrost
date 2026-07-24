@@ -29,6 +29,7 @@ BIFROST_BIN="${BIFROST_BIN:-${PROJECT_DIR}/target/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi
+BIFROST_TEST_CURRENT_VERSION="${BIFROST_TEST_CURRENT_VERSION:-$("$BIFROST_BIN" --version 2>/dev/null | awk '{print $2}' | tail -n 1)}"
 
 TEST_DATA_DIR=""
 PROXY_PID=""
@@ -57,7 +58,11 @@ wait_proxy_ready() {
 }
 
 run_bifrost() {
-    BIFROST_DATA_DIR="$TEST_DATA_DIR" "$BIFROST_BIN" "$@" 2>&1 || true
+    BIFROST_DATA_DIR="$TEST_DATA_DIR" \
+        BIFROST_APP_INSTALL_DIR="$TEST_DATA_DIR/apps" \
+        BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES=1 \
+        BIFROST_UPGRADE_TEST_LATEST_VERSION="$BIFROST_TEST_CURRENT_VERSION" \
+        "$BIFROST_BIN" "$@" 2>&1 || true
 }
 
 start_daemon() {
@@ -291,13 +296,14 @@ test_upgrade_restart_port_release_guard_in_source() {
     _log_info "case: upgrade restart path waits for port release before start"
 
     local source_file="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade.rs"
+    local companion_file="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/desktop_companion.rs"
     local restart_file="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/restart.rs"
 
     if grep -q "wait_for_restart_ports_release(&restart_ports)" "$restart_file" \
         && grep -q "fn restart_ports_from_runtime" "$restart_file" \
         && grep -q "info.socks5_port" "$restart_file" \
         && grep -q "restart_executable_for_install_method(&install_method)" "$source_file" \
-        && grep -q "maybe_restart_running_proxy(&restart_executable)" "$source_file" \
+        && grep -q "maybe_restart_running_proxy(&restart_executable)" "$companion_file" \
         && grep -q "Command::new(restart_executable)" "$restart_file" \
         && grep -q "Proxy port .*still occupied after" "$restart_file" \
         && grep -q "find_process_on_port(port)" "$restart_file" \
@@ -306,7 +312,7 @@ test_upgrade_restart_port_release_guard_in_source() {
     else
         _log_fail "upgrade restart port guard" \
             "wait_for_restart_ports_release plus occupied-port diagnostics, socks5 coverage, fixed restart executable, and system proxy recovery" \
-            "guard missing from upgrade.rs"
+            "guard missing from upgrade/restart.rs or desktop_companion.rs"
         return 1
     fi
 }
@@ -426,6 +432,7 @@ test_upgrade_review_feedback_contracts() {
     local upgrade_restart_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/restart.rs"
     local upgrade_tests="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/tests.rs"
     local upgrade_review_tests="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/tests/review_comments.rs"
+    local upgrade_recovery_tests="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade/tests/upgrade_recovery.rs"
     local background_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade_background.rs"
     local upgrade_progress_src="${PROJECT_DIR}/crates/bifrost-core/src/upgrade_progress.rs"
     local admin_src="${PROJECT_DIR}/crates/bifrost-admin/src/handlers/system.rs"
@@ -447,6 +454,7 @@ test_upgrade_review_feedback_contracts() {
         && [ "$(wc -l <"$upgrade_restart_src")" -le 1500 ] \
         && [ "$(wc -l <"$upgrade_tests")" -le 1500 ] \
         && [ "$(wc -l <"$upgrade_review_tests")" -le 1500 ] \
+        && [ "$(wc -l <"$upgrade_recovery_tests")" -le 1500 ] \
         && [ "$(wc -l <"$admin_src")" -le 1500 ] \
         && [ "$(wc -l <"$admin_version_src")" -le 1500 ] \
         && [ "$(wc -l <"$desktop_src")" -le 1500 ] \

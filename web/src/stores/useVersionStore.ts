@@ -7,7 +7,7 @@ import {
   type UpgradeChannel,
 } from "../api/version";
 import type { UpgradePhase, UpgradeProgress, VersionCheckResponse } from "../types";
-import { isConnectionIssueError } from "../api/client";
+import { isConnectionIssueError, normalizeApiErrorMessage } from "../api/client";
 import { isDesktopShell } from "../runtime";
 
 const SEEN_VERSIONS_STORAGE_KEY = "bifrost-seen-versions";
@@ -48,6 +48,7 @@ interface VersionState {
   setModalVisible: (visible: boolean) => void;
   shouldShowAutoModal: () => boolean;
   startUpgrade: () => Promise<void>;
+  resumeUpgradeProgress: () => Promise<boolean>;
   pollUpgradeProgress: () => void;
   stopPollUpgradeProgress: () => void;
 }
@@ -144,10 +145,14 @@ export const useVersionStore = create<VersionState>()(
             forceRefresh,
             currentUpgradeChannel(),
           );
+          const activeUpgrade = isActivePhase(get().upgradePhase);
           set({
-            hasUpdate: response.has_update,
+            hasUpdate: activeUpgrade || response.has_update,
             currentVersion: response.current_version,
-            latestVersion: response.latest_version,
+            latestVersion:
+              activeUpgrade && get().latestVersion
+                ? get().latestVersion
+                : response.latest_version,
             releaseHighlights: response.release_highlights,
             releaseUrl: response.release_url,
             lastChecked: Date.now(),
@@ -226,12 +231,50 @@ export const useVersionStore = create<VersionState>()(
           });
           get().pollUpgradeProgress();
         } catch (error) {
+          if (await get().resumeUpgradeProgress()) {
+            return;
+          }
           set({
             upgrading: false,
             upgradePhase: "failed",
-            upgradeError:
-              error instanceof Error ? error.message : "Failed to start upgrade",
+            upgradeError: normalizeApiErrorMessage(error, "Failed to start upgrade"),
           });
+        }
+      },
+
+      resumeUpgradeProgress: async () => {
+        try {
+          const progress = await getUpgradeProgressApi();
+          if (!isActivePhase(progress.phase)) {
+            return false;
+          }
+
+          sawDisconnect = false;
+          try {
+            // A reload may have consumed an intermediate CLI-core transition.
+            // The still-active transaction needs a fresh reload/handoff budget
+            // for its eventual terminal desktop phase.
+            sessionStorage.removeItem(UPGRADE_RELOAD_PENDING_KEY);
+          } catch {
+            // ignore — sessionStorage may be unavailable.
+          }
+          set({
+            hasUpdate: true,
+            latestVersion: progress.target_version ?? get().latestVersion,
+            modalVisible: true,
+            upgrading: true,
+            upgradePhase: progress.phase,
+            upgradePercent: progress.percent,
+            upgradeMessage: progress.message,
+            upgradeError: progress.error,
+          });
+          get().pollUpgradeProgress();
+          return true;
+        } catch (error) {
+          if (!isConnectionIssueError(error)) {
+            console.error("Failed to resume upgrade progress:", error);
+          }
+          return false;
         }
       },
 

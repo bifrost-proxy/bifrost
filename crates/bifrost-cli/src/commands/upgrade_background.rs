@@ -257,6 +257,11 @@ pub(crate) fn report_download(downloaded: u64, total: Option<u64>, started: Inst
     emit(|sink| base(sink, UpgradePhase::Downloading, message.clone()).with_percent(percent));
 }
 
+/// Report download-source selection or retry work before response bytes arrive.
+pub(crate) fn report_download_status(message: impl Into<String>) {
+    emit(|sink| base(sink, UpgradePhase::Downloading, message));
+}
+
 /// Reported from `upgrade.rs` right before extracting/installing the binary.
 pub(crate) fn report_installing() {
     emit(|sink| base(sink, UpgradePhase::Installing, "Installing new version…"));
@@ -304,7 +309,7 @@ pub fn handle_upgrade_background(
     source: String,
     running_proxy_pid: Option<u32>,
     running_proxy_port: Option<u16>,
-) {
+) -> Result<(), BifrostError> {
     let engine_target = target.clone();
     handle_upgrade_background_with(
         target,
@@ -313,7 +318,7 @@ pub fn handle_upgrade_background(
         running_proxy_port,
         crate::config::get_bifrost_dir(),
         move |restart_hint| handle_background_upgrade(restart_hint, engine_target),
-    );
+    )
 }
 
 pub fn handle_upgrade_background_command(command: Commands) -> Result<(), BifrostError> {
@@ -322,7 +327,7 @@ pub fn handle_upgrade_background_command(command: Commands) -> Result<(), Bifros
 
 fn handle_upgrade_background_command_with(
     command: Commands,
-    handler: impl FnOnce(Option<String>, String, Option<u32>, Option<u16>),
+    handler: impl FnOnce(Option<String>, String, Option<u32>, Option<u16>) -> Result<(), BifrostError>,
 ) -> Result<(), BifrostError> {
     let Commands::SelfUpdate {
         target,
@@ -335,7 +340,7 @@ fn handle_upgrade_background_command_with(
             "Expected hidden self-update command".to_string(),
         ));
     };
-    handler(target, source, running_proxy_pid, running_proxy_port);
+    handler(target, source, running_proxy_pid, running_proxy_port)?;
     Ok(())
 }
 
@@ -346,12 +351,12 @@ fn handle_upgrade_background_with(
     running_proxy_port: Option<u16>,
     data_dir: Result<PathBuf, BifrostError>,
     engine: impl FnOnce(Option<RunningProxyHint>) -> Result<(), BifrostError>,
-) {
+) -> Result<(), BifrostError> {
     let data_dir = match data_dir {
         Ok(dir) => dir,
         Err(error) => {
             tracing::error!(error = %error, "background upgrade: cannot resolve data dir");
-            return;
+            return Err(error);
         }
     };
     let _upgrade_lock = match try_acquire_upgrade_lock_attempt(&data_dir) {
@@ -360,22 +365,25 @@ fn handle_upgrade_background_with(
             tracing::info!(
                 "background upgrade: preserving progress owned by pending desktop handoff"
             );
-            return;
+            return Ok(());
         }
         Ok(UpgradeLockAttempt::Contended) => {
             tracing::warn!("background upgrade: preserving progress owned by another updater");
-            return;
+            return Ok(());
         }
         Err(error) => {
             tracing::error!(error = %error, "background upgrade: cannot acquire upgrade lock");
+            let failure = BifrostError::Config(format!(
+                "Failed to acquire the cross-process upgrade lock: {error}"
+            ));
             write_upgrade_lock_failure(
                 &data_dir,
                 target.clone(),
                 source.clone(),
                 "Upgrade lock could not be acquired",
-                &format!("Failed to acquire the cross-process upgrade lock: {error}"),
+                &failure.to_string(),
             );
-            return;
+            return Err(failure);
         }
     };
 
@@ -414,6 +422,7 @@ fn handle_upgrade_background_with(
         }
         Err(error) => {
             let message = error.to_string();
+            tracing::error!(error = %error, "background upgrade failed");
             write_progress(
                 &data_dir,
                 &UpgradeProgress::new(UpgradePhase::Failed, "Upgrade failed")
@@ -428,6 +437,7 @@ fn handle_upgrade_background_with(
     // terminal record (Completed/Failed) stays on disk for readers (tray/admin)
     // to consume after they refresh; they clear it on acknowledgement.
     let _ = take_sink();
+    result
 }
 
 fn write_upgrade_lock_failure(
@@ -499,6 +509,31 @@ mod tests {
     }
 
     #[test]
+    fn download_status_report_covers_source_connection_before_bytes_arrive() {
+        let _guard = lock_tests();
+        let dir = temp_dir();
+        install_sink(ProgressSink {
+            data_dir: dir.clone(),
+            target_version: Some("0.0.104".to_string()),
+            source: "admin".to_string(),
+        });
+
+        report_download_status("Trying fallback download source github.com…");
+        let progress = read_progress(&dir);
+        assert_eq!(progress.phase, UpgradePhase::Downloading);
+        assert_eq!(progress.percent, None);
+        assert_eq!(
+            progress.message,
+            "Trying fallback download source github.com…"
+        );
+        assert_eq!(progress.target_version, Some("0.0.104".to_string()));
+        assert_eq!(progress.source, Some("admin".to_string()));
+
+        let _ = take_sink();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn installing_and_restarting_report_phases() {
         let _guard = lock_tests();
         let dir = temp_dir();
@@ -553,6 +588,7 @@ mod tests {
         let _ = take_sink();
         // Must not panic and must not write anywhere.
         report_installing();
+        report_download_status("Connecting to download source github.com…");
         report_download(1, Some(2), Instant::now());
         report_restarting();
     }
@@ -721,7 +757,8 @@ mod tests {
                 engine_called.set(true);
                 Ok(())
             },
-        );
+        )
+        .expect("contended updater exits without disturbing the owner");
 
         assert!(!engine_called.get());
         let progress = read_progress(&dir);
@@ -767,7 +804,8 @@ mod tests {
                 engine_called.set(true);
                 Ok(())
             },
-        );
+        )
+        .expect("pending desktop handoff remains authoritative");
 
         assert!(!engine_called.get());
         let progress = read_progress(&dir);
@@ -785,7 +823,7 @@ mod tests {
             .expect("make lock path impossible to open as a file");
         let engine_called = std::cell::Cell::new(false);
 
-        handle_upgrade_background_with(
+        let error = handle_upgrade_background_with(
             Some("0.0.156".to_string()),
             "admin".to_string(),
             None,
@@ -795,9 +833,11 @@ mod tests {
                 engine_called.set(true);
                 Ok(())
             },
-        );
+        )
+        .expect_err("invalid lock path must fail the command");
 
         assert!(!engine_called.get());
+        assert!(error.to_string().contains("Failed to acquire"));
         let progress = read_progress(&dir);
         assert_eq!(progress.phase, UpgradePhase::Failed);
         assert_eq!(progress.target_version.as_deref(), Some("0.0.156"));
@@ -812,7 +852,7 @@ mod tests {
     #[test]
     fn background_upgrade_returns_without_running_when_data_dir_resolution_fails() {
         let engine_called = std::cell::Cell::new(false);
-        handle_upgrade_background_with(
+        let error = handle_upgrade_background_with(
             Some("0.0.156".to_string()),
             "admin".to_string(),
             None,
@@ -822,8 +862,10 @@ mod tests {
                 engine_called.set(true);
                 Ok(())
             },
-        );
+        )
+        .expect_err("data dir resolution must fail the command");
         assert!(!engine_called.get());
+        assert!(error.to_string().contains("data dir unavailable"));
     }
 
     #[test]
@@ -837,6 +879,7 @@ mod tests {
         let forwarded = std::cell::RefCell::new(None);
         handle_upgrade_background_command_with(command, |target, source, pid, port| {
             forwarded.replace(Some((target, source, pid, port)));
+            Ok(())
         })
         .unwrap();
         assert_eq!(
@@ -850,10 +893,27 @@ mod tests {
         );
         assert!(handle_upgrade_background_command_with(
             Commands::VersionCheck,
-            |_, _, _, _| panic!("non-self-update command must not be dispatched"),
+            |_, _, _, _| -> Result<(), BifrostError> {
+                panic!("non-self-update command must not be dispatched")
+            },
         )
         .is_err());
         assert!(handle_upgrade_background_command(Commands::VersionCheck).is_err());
+
+        let command = Commands::SelfUpdate {
+            target: Some("0.0.156".to_string()),
+            source: "admin".to_string(),
+            running_proxy_pid: None,
+            running_proxy_port: None,
+        };
+        assert!(
+            handle_upgrade_background_command_with(command, |_, _, _, _| {
+                Err(BifrostError::Config("engine failed".to_string()))
+            })
+            .expect_err("engine failure must reach the command exit path")
+            .to_string()
+            .contains("engine failed")
+        );
     }
 
     #[test]
@@ -871,7 +931,8 @@ mod tests {
                 seen_hint.replace(hint);
                 Ok(())
             },
-        );
+        )
+        .expect("background engine succeeds");
         assert_eq!(
             seen_hint.into_inner(),
             RunningProxyHint::from_parts(Some(12345), Some(19900))
@@ -879,6 +940,32 @@ mod tests {
         let progress = read_progress(&dir);
         assert_eq!(progress.phase, UpgradePhase::Completed);
         assert_eq!(progress.source.as_deref(), Some("admin"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn background_upgrade_engine_failure_returns_error_and_writes_failed_progress() {
+        let _guard = lock_tests();
+        let dir = temp_dir();
+        let error = handle_upgrade_background_with(
+            Some("0.0.162".to_string()),
+            "admin".to_string(),
+            Some(12345),
+            Some(19900),
+            Ok(dir.clone()),
+            |_| Err(BifrostError::Config("desktop update stalled".to_string())),
+        )
+        .expect_err("engine failure must produce a non-zero command result");
+
+        assert!(error.to_string().contains("desktop update stalled"));
+        let progress = read_progress(&dir);
+        assert_eq!(progress.phase, UpgradePhase::Failed);
+        assert_eq!(progress.target_version.as_deref(), Some("0.0.162"));
+        assert_eq!(progress.source.as_deref(), Some("admin"));
+        assert!(progress
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("desktop update stalled")));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -926,7 +1013,8 @@ mod tests {
             "admin".to_string(),
             None,
             None,
-        );
+        )
+        .expect("public background upgrade succeeds");
 
         let progress = read_progress(&dir);
         assert_eq!(progress.phase, UpgradePhase::Completed);
