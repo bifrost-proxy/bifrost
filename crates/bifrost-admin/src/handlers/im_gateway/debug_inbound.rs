@@ -406,4 +406,59 @@ mod tests {
             StatusCode::OK
         );
     }
+
+    #[tokio::test]
+    async fn mock_inbound_accepts_file_only_payloads() {
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp.path());
+        let service = Arc::new(ImGatewayService::new(temp.path()));
+        service
+            .provider_store
+            .add(provider("debug-file-provider"))
+            .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        service
+            .mock_event_sinks
+            .write()
+            .insert("debug-file-provider".to_string(), tx);
+        let mut body = request("debug-file-provider", "  ");
+        body.files = vec![
+            MockInboundFile {
+                file_key: None,
+                name: Some("report.md".to_string()),
+                mime_type: Some("text/markdown".to_string()),
+                data: Some("  IyBSZXBvcnQ=  ".to_string()),
+            },
+            MockInboundFile {
+                file_key: Some("ignored-empty".to_string()),
+                name: Some("empty.txt".to_string()),
+                mime_type: Some("text/plain".to_string()),
+                data: Some(" ".to_string()),
+            },
+            MockInboundFile {
+                file_key: Some("ignored-missing-data".to_string()),
+                name: Some("missing.txt".to_string()),
+                mime_type: Some("text/plain".to_string()),
+                data: None,
+            },
+        ];
+
+        assert_eq!(
+            inject_mock_inbound(body, &service).await.status(),
+            StatusCode::OK
+        );
+        let event = rx.try_recv().expect("mock file event");
+        let message = event.message.expect("mock message");
+
+        assert_eq!(message.raw_type.as_deref(), Some("file"));
+        assert_eq!(message.files.len(), 1);
+        assert!(message.files[0].file_key.starts_with("mock-file-"));
+        assert_eq!(message.files[0].name.as_deref(), Some("report.md"));
+        assert_eq!(message.files[0].mime_type.as_deref(), Some("text/markdown"));
+        assert_eq!(
+            message.files[0].data_base64.as_deref(),
+            Some("IyBSZXBvcnQ=")
+        );
+        assert!(message.files[0].download_url.is_none());
+    }
 }

@@ -876,6 +876,112 @@ mod provider_event_connection_tests {
         assert!(!should_run_provider_event_connection(&provider));
     }
 
+    #[tokio::test]
+    async fn weixin_client_rejects_inbound_file_resource_downloads() {
+        let client = ImProviderClient::Weixin(Arc::new(WeixinProvider::new()));
+        let provider = provider_with_secret();
+        let file = crate::im_gateway::types::ImFileAttachment {
+            file_key: "file-key".to_string(),
+            name: Some("report.md".to_string()),
+            mime_type: Some("text/markdown".to_string()),
+            size_bytes: Some(12),
+            data_base64: None,
+            download_url: None,
+        };
+
+        let err = client
+            .download_message_file_resource(&provider, "message-id", &file)
+            .await
+            .expect_err("weixin does not support file resource downloads");
+
+        assert!(err
+            .to_string()
+            .contains("weixin provider does not support inbound file resource downloads yet"));
+    }
+
+    #[tokio::test]
+    async fn feishu_client_dispatches_inbound_file_resource_downloads() {
+        use http_body_util::Full;
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper::{Method, Request, Response, StatusCode};
+        use hyper_util::rt::TokioIo;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock feishu file dispatch server");
+        let port = listener.local_addr().expect("mock local addr").port();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                tokio::spawn(async move {
+                    let service = service_fn(
+                        move |req: Request<hyper::body::Incoming>| async move {
+                            let method = req.method().clone();
+                            let path = req.uri().path().to_string();
+                            if method == Method::POST
+                                && path == "/open-apis/auth/v3/tenant_access_token/internal"
+                            {
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Full::new(bytes::Bytes::from_static(
+                                            br#"{"code":0,"tenant_access_token":"tenant-token","expire":7200}"#,
+                                        )))
+                                        .unwrap(),
+                                );
+                            }
+                            if method == Method::GET
+                                && path == "/open-apis/im/v1/messages/om_file/resources/file-key"
+                            {
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .header("content-type", "text/plain")
+                                        .body(Full::new(bytes::Bytes::from_static(b"hello")))
+                                        .unwrap(),
+                                );
+                            }
+                            Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::NOT_FOUND)
+                                    .body(Full::new(bytes::Bytes::from_static(b"not found")))
+                                    .unwrap(),
+                            )
+                        },
+                    );
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        let client =
+            ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+        let mut provider = provider_with_secret();
+        provider.provider_type = crate::im_gateway::types::ImProviderType::Feishu;
+        provider.base_url = Some(format!("http://127.0.0.1:{port}/open-apis"));
+        let file = crate::im_gateway::types::ImFileAttachment {
+            file_key: "file-key".to_string(),
+            name: Some("report.txt".to_string()),
+            mime_type: Some("text/plain".to_string()),
+            size_bytes: Some(5),
+            data_base64: None,
+            download_url: None,
+        };
+
+        let (mime_type, bytes) = client
+            .download_message_file_resource(&provider, "om_file", &file)
+            .await
+            .expect("feishu client downloads file resource");
+
+        assert_eq!(mime_type, "text/plain");
+        assert_eq!(bytes, b"hello");
+    }
+
     #[test]
     fn service_startup_discards_noncanonical_session_history() {
         let temp_dir = tempfile::tempdir().unwrap();

@@ -3117,6 +3117,67 @@ mod tests {
         assert_eq!(msg.files[0].size_bytes, Some(12));
     }
 
+    #[test]
+    fn test_normalize_feishu_file_message_supports_alias_metadata_fields() {
+        let raw = serde_json::json!({
+            "header": {
+                "event_id": "evt_file_alias",
+                "event_type": "im.message.receive_v1",
+                "create_time": "1710000000000"
+            },
+            "event": {
+                "message": {
+                    "chat_id": "oc_xxx",
+                    "message_id": "om_file_alias",
+                    "message_type": "file",
+                    "content": "{\"file_key\":\"file_v3_alias\",\"name\":\"report.txt\",\"mimeType\":\"text/plain\",\"size_bytes\":34}"
+                },
+                "sender": {
+                    "sender_id": {
+                        "open_id": "ou_abc"
+                    }
+                }
+            }
+        });
+
+        let event = normalize_feishu_event(&raw, "feishu-main").unwrap();
+        let msg = event.message.unwrap();
+        assert_eq!(msg.files.len(), 1);
+        assert_eq!(msg.files[0].file_key, "file_v3_alias");
+        assert_eq!(msg.files[0].name.as_deref(), Some("report.txt"));
+        assert_eq!(msg.files[0].mime_type.as_deref(), Some("text/plain"));
+        assert_eq!(msg.files[0].size_bytes, Some(34));
+    }
+
+    #[test]
+    fn test_normalize_feishu_file_message_ignores_missing_file_key() {
+        let raw = serde_json::json!({
+            "header": {
+                "event_id": "evt_file_missing_key",
+                "event_type": "im.message.receive_v1",
+                "create_time": "1710000000000"
+            },
+            "event": {
+                "message": {
+                    "chat_id": "oc_xxx",
+                    "message_id": "om_file_missing_key",
+                    "message_type": "file",
+                    "content": "{\"file_name\":\"report.txt\",\"mime_type\":\"text/plain\",\"size\":34}"
+                },
+                "sender": {
+                    "sender_id": {
+                        "open_id": "ou_abc"
+                    }
+                }
+            }
+        });
+
+        let event = normalize_feishu_event(&raw, "feishu-main").unwrap();
+        let msg = event.message.unwrap();
+        assert_eq!(msg.raw_type.as_deref(), Some("file"));
+        assert!(msg.files.is_empty());
+    }
+
     #[tokio::test]
     async fn test_download_feishu_file_resource_fetches_message_resource() {
         use http_body_util::{BodyExt, Full};
@@ -3212,6 +3273,198 @@ mod tests {
         assert_eq!(mime_type, "text/markdown");
         assert_eq!(bytes, b"# Report\n\nhello\n");
         assert!(saw_file_request.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_download_feishu_file_resource_reports_http_errors() {
+        use http_body_util::Full;
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper::{Method, Request, Response, StatusCode};
+        use hyper_util::rt::TokioIo;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock feishu file error server");
+        let port = listener.local_addr().expect("mock local addr").port();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                tokio::spawn(async move {
+                    let service = service_fn(
+                        move |req: Request<hyper::body::Incoming>| async move {
+                            let method = req.method().clone();
+                            let path = req.uri().path().to_string();
+                            if method == Method::POST
+                                && path == "/open-apis/auth/v3/tenant_access_token/internal"
+                            {
+                                return Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .body(Full::new(bytes::Bytes::from_static(
+                                        br#"{"code":0,"tenant_access_token":"tenant-token","expire":7200}"#,
+                                    )))
+                                    .unwrap(),
+                            );
+                            }
+                            Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::BAD_GATEWAY)
+                                    .header("content-type", "application/json")
+                                    .body(Full::new(bytes::Bytes::from_static(
+                                        br#"{"code":999,"msg":"file unavailable"}"#,
+                                    )))
+                                    .unwrap(),
+                            )
+                        },
+                    );
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        let provider = FeishuProvider::new();
+        let config = provider_with_base_url(Some(&format!("http://127.0.0.1:{port}/open-apis")));
+        let err = provider
+            .download_message_file_resource(&config, "om_file", "file_v3_abc")
+            .await
+            .expect_err("non-success file resource response is an error");
+
+        let message = err.to_string();
+        assert!(message.contains("502 Bad Gateway"));
+        assert!(message.contains("file unavailable"));
+    }
+
+    #[tokio::test]
+    async fn test_download_feishu_file_resource_reports_request_send_errors() {
+        use http_body_util::Full;
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper::{Method, Request, Response, StatusCode};
+        use hyper_util::rt::TokioIo;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock feishu token-only server");
+        let port = listener.local_addr().expect("mock local addr").port();
+
+        tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let io = TokioIo::new(stream);
+            let service = service_fn(move |req: Request<hyper::body::Incoming>| async move {
+                let method = req.method().clone();
+                let path = req.uri().path().to_string();
+                if method == Method::POST
+                    && path == "/open-apis/auth/v3/tenant_access_token/internal"
+                {
+                    return Ok::<_, hyper::Error>(
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header("connection", "close")
+                            .body(Full::new(bytes::Bytes::from_static(
+                                br#"{"code":0,"tenant_access_token":"tenant-token","expire":7200}"#,
+                            )))
+                            .unwrap(),
+                    );
+                }
+                Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .body(Full::new(bytes::Bytes::from_static(b"not found")))
+                        .unwrap(),
+                )
+            });
+            let _ = http1::Builder::new().serve_connection(io, service).await;
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            drop(stream);
+        });
+
+        let provider = FeishuProvider::new();
+        let config = provider_with_base_url(Some(&format!("http://127.0.0.1:{port}/open-apis")));
+        let err = provider
+            .download_message_file_resource(&config, "om_file", "file_v3_abc")
+            .await
+            .expect_err("closed mock server should fail resource request send");
+
+        let message = err.to_string();
+        assert!(message.contains("feishu message file download failed"));
+    }
+
+    #[tokio::test]
+    async fn test_download_feishu_file_resource_reports_body_read_errors() {
+        use http_body_util::Full;
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper::{Method, Request, Response, StatusCode};
+        use hyper_util::rt::TokioIo;
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock feishu truncated file server");
+        let port = listener.local_addr().expect("mock local addr").port();
+
+        tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let io = TokioIo::new(stream);
+            let service = service_fn(move |req: Request<hyper::body::Incoming>| async move {
+                let method = req.method().clone();
+                let path = req.uri().path().to_string();
+                if method == Method::POST
+                    && path == "/open-apis/auth/v3/tenant_access_token/internal"
+                {
+                    return Ok::<_, hyper::Error>(
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header("connection", "close")
+                            .body(Full::new(bytes::Bytes::from_static(
+                                br#"{"code":0,"tenant_access_token":"tenant-token","expire":7200}"#,
+                            )))
+                            .unwrap(),
+                    );
+                }
+                Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(StatusCode::NOT_FOUND)
+                        .body(Full::new(bytes::Bytes::from_static(b"not found")))
+                        .unwrap(),
+                )
+            });
+            let _ = http1::Builder::new().serve_connection(io, service).await;
+
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let response = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: application/pdf\r\n",
+                "Content-Length: 64\r\n",
+                "\r\n",
+                "short"
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        });
+
+        let provider = FeishuProvider::new();
+        let config = provider_with_base_url(Some(&format!("http://127.0.0.1:{port}/open-apis")));
+        let err = provider
+            .download_message_file_resource(&config, "om_file", "file_v3_abc")
+            .await
+            .expect_err("truncated response body should fail body read");
+
+        let message = err.to_string();
+        assert!(message.contains("feishu message file body read failed"));
     }
 
     #[test]

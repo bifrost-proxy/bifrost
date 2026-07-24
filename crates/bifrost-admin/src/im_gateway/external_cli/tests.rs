@@ -2010,6 +2010,155 @@ async fn external_cli_run_writes_attachments_and_injects_prompt_paths() {
 }
 
 #[tokio::test]
+async fn external_cli_file_attachments_cover_limits_base_dir_and_name_edges() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let data_dir = temp_dir.path().join("data");
+    let _data_dir_guard = crate::test_env::BifrostDataDirGuard::set(&data_dir);
+    let runs_root = temp_dir.path().join("runs");
+    let runtime = ExternalCliRuntime::new(&runs_root);
+    let attachment_base = bifrost_agent::config::agent_home_dir()
+        .join("sessions")
+        .join("by-key")
+        .join("attachments")
+        .join("session-edge");
+    let long_name = format!("{}.txt", "a".repeat(220));
+    let mut files = vec![
+        ExternalCliFileInput {
+            mime_type: "text/plain".to_string(),
+            data: "YWxwaGE=".to_string(),
+            name: Some("......".to_string()),
+        },
+        ExternalCliFileInput {
+            mime_type: "text/plain".to_string(),
+            data: "YmV0YQ==".to_string(),
+            name: Some("duplicate.txt".to_string()),
+        },
+        ExternalCliFileInput {
+            mime_type: "text/plain".to_string(),
+            data: "Z2FtbWE=".to_string(),
+            name: Some("duplicate.txt".to_string()),
+        },
+        ExternalCliFileInput {
+            mime_type: "text/plain".to_string(),
+            data: "ZGVsdGE=".to_string(),
+            name: Some(long_name),
+        },
+        ExternalCliFileInput {
+            mime_type: "text/plain".to_string(),
+            data: "ZW1wdHk=".to_string(),
+            name: Some(String::new()),
+        },
+        ExternalCliFileInput {
+            mime_type: "text/plain".to_string(),
+            data: "emV0YQ==".to_string(),
+            name: Some("six.bin".to_string()),
+        },
+    ];
+    files.push(ExternalCliFileInput {
+        mime_type: "text/plain".to_string(),
+        data: "dHJ1bmNhdGVk".to_string(),
+        name: Some("seven.bin".to_string()),
+    });
+    files.push(ExternalCliFileInput {
+        mime_type: "text/plain".to_string(),
+        data: "   ".to_string(),
+        name: Some("blank.bin".to_string()),
+    });
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        files,
+        message: "check attached files".to_string(),
+        operation: default_operation(),
+        params: serde_json::json!({
+            "attachmentBaseDir": attachment_base,
+        }),
+        provider_id: Some("provider-a".to_string()),
+        runner_id: None,
+        session_key: Some("file-edge-session".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: "mock".to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("sh".to_string()),
+            args: vec![
+                "-c".to_string(),
+                "cat >/dev/null; printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"ok\"}'"
+                    .to_string(),
+            ],
+            timeout_secs: Some(10),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let result = runtime.run(request).await.unwrap();
+
+    let saved: Vec<ExternalCliSavedFileAttachment> = serde_json::from_str(
+        result
+            .metadata
+            .get("attachments.files")
+            .expect("file attachment metadata"),
+    )
+    .unwrap();
+    assert_eq!(saved.len(), MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE);
+    assert!(saved
+        .iter()
+        .all(|file| std::path::Path::new(&file.path).starts_with(&attachment_base)));
+    assert_eq!(
+        saved[0].path.as_str(),
+        attachment_base
+            .join(&result.run_id)
+            .join("files")
+            .join("1-attachment.bin")
+            .display()
+            .to_string()
+    );
+    assert_eq!(
+        std::path::Path::new(&saved[4].path)
+            .file_name()
+            .and_then(|value| value.to_str()),
+        Some("5-attachment.bin")
+    );
+    assert!(std::path::Path::new(&saved[3].path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| name.len() <= 162 && name.starts_with("4-")));
+    assert_eq!(
+        result.metadata.get("attachments.fileCount"),
+        Some(&MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE.to_string())
+    );
+}
+
+#[tokio::test]
+async fn external_cli_file_attachment_collision_uses_uuid_fallback_name() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let files_dir = temp_dir.path().join("files");
+    tokio::fs::create_dir_all(&files_dir).await.unwrap();
+    tokio::fs::write(files_dir.join("1-existing.txt"), b"old")
+        .await
+        .unwrap();
+
+    let path = unique_file_attachment_path(&files_dir, 1, "existing.txt").await;
+
+    let file_name = path.file_name().and_then(|value| value.to_str()).unwrap();
+    assert_ne!(file_name, "1-existing.txt");
+    assert!(file_name.starts_with("1-"));
+    assert_eq!(path.parent(), Some(files_dir.as_path()));
+}
+
+#[test]
+fn external_cli_file_input_defaults_mime_type() {
+    let file: ExternalCliFileInput =
+        serde_json::from_value(serde_json::json!({ "data": "YWJj" })).unwrap();
+
+    assert_eq!(file.mime_type, "application/octet-stream");
+    assert_eq!(file.data, "YWJj");
+}
+
+#[tokio::test]
 async fn external_cli_runtime_marks_stopped_run_before_late_stdout() {
     let temp_dir = tempfile::tempdir().unwrap();
     let runs_root = temp_dir.path().to_path_buf();

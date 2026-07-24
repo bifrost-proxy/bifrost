@@ -1882,8 +1882,9 @@ async fn save_file_attachments(
         return Ok(Vec::new());
     }
     if files.len() > MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE {
+        let file_count = files.len();
         tracing::warn!(
-            file_count = files.len(),
+            file_count,
             max_files = MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE,
             "too many external runner files in one request; truncating files"
         );
