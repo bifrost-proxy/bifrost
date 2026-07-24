@@ -587,6 +587,7 @@ pub(super) fn agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt
             encrypted_query_param: None,
             aes_key: None,
         }],
+        files: Vec::new(),
         raw_type: Some("text".to_string()),
     };
     assert_eq!(agent_message_text(&text_message), "请分析这张图");
@@ -603,6 +604,7 @@ pub(super) fn agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt
             encrypted_query_param: None,
             aes_key: None,
         }],
+        files: Vec::new(),
         raw_type: Some("image".to_string()),
     };
     assert_eq!(
@@ -614,9 +616,36 @@ pub(super) fn agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt
         text: "   ".to_string(),
         mentions: Vec::new(),
         images: Vec::new(),
+        files: Vec::new(),
         raw_type: None,
     };
     assert!(agent_message_text(&empty_message).is_empty());
+
+    let file_only_message = crate::im_gateway::types::ImEventMessage {
+        text: "   ".to_string(),
+        mentions: Vec::new(),
+        images: Vec::new(),
+        files: vec![
+            crate::im_gateway::types::ImFileAttachment {
+                file_key: "file-v3-1".to_string(),
+                name: Some("需求.md".to_string()),
+                mime_type: Some("text/markdown".to_string()),
+                size_bytes: Some(12),
+                data_base64: None,
+                download_url: None,
+            },
+            crate::im_gateway::types::ImFileAttachment {
+                file_key: "file-v3-2".to_string(),
+                name: Some("日志.txt".to_string()),
+                mime_type: Some("text/plain".to_string()),
+                size_bytes: Some(20),
+                data_base64: None,
+                download_url: None,
+            },
+        ],
+        raw_type: Some("file".to_string()),
+    };
+    assert_eq!(agent_message_text(&file_only_message), "[附件消息: 2 个]");
 }
 
 #[test]
@@ -644,6 +673,7 @@ pub(super) fn inbound_message_preview_summarizes_image_only_and_truncates_text()
                 aes_key: None,
             },
         ],
+        files: Vec::new(),
         raw_type: Some("image".to_string()),
     };
     assert_eq!(inbound_message_preview(&image_message), "[图片消息: 2 张]");
@@ -653,11 +683,28 @@ pub(super) fn inbound_message_preview_summarizes_image_only_and_truncates_text()
         text: long_text,
         mentions: Vec::new(),
         images: Vec::new(),
+        files: Vec::new(),
         raw_type: Some("text".to_string()),
     };
     let preview = inbound_message_preview(&text_message);
     assert_eq!(preview.chars().count(), 203);
     assert!(preview.ends_with("..."));
+
+    let file_message = crate::im_gateway::types::ImEventMessage {
+        text: String::new(),
+        mentions: Vec::new(),
+        images: Vec::new(),
+        files: vec![crate::im_gateway::types::ImFileAttachment {
+            file_key: "file-v3-1".to_string(),
+            name: Some("需求.md".to_string()),
+            mime_type: Some("text/markdown".to_string()),
+            size_bytes: Some(12),
+            data_base64: None,
+            download_url: None,
+        }],
+        raw_type: Some("file".to_string()),
+    };
+    assert_eq!(inbound_message_preview(&file_message), "[附件消息: 1 个]");
 }
 
 #[test]
@@ -1224,6 +1271,7 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
             text: "run external cli".to_string(),
             mentions: Vec::new(),
             images: Vec::new(),
+            files: Vec::new(),
             raw_type: Some("text".to_string()),
         }),
         received_at: now_ms(),
@@ -1484,6 +1532,7 @@ pub(super) async fn im_event_loop_external_cli_route_processes_image_only_messag
                     aes_key: None,
                 },
             ],
+            files: Vec::new(),
             raw_type: Some("image".to_string()),
         }),
         received_at: now_ms(),
@@ -1601,6 +1650,7 @@ pub(super) async fn im_event_loop_external_cli_session_records_runner_failure() 
             text: "trigger broken external cli".to_string(),
             mentions: Vec::new(),
             images: Vec::new(),
+            files: Vec::new(),
             raw_type: Some("text".to_string()),
         }),
         received_at: now_ms(),
@@ -1755,6 +1805,7 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
             text: text.to_string(),
             mentions: Vec::new(),
             images: Vec::new(),
+            files: Vec::new(),
             raw_type: Some("text".to_string()),
         }),
         received_at: now_ms(),

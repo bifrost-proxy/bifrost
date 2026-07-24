@@ -1015,16 +1015,16 @@ pub(super) async fn resolve_event_images(
     images: &[ImImageAttachment],
 ) -> Vec<bifrost_agent::ChatImageInput> {
     let mut resolved = Vec::new();
-    if images.len() > MAX_AGENT_IMAGES_PER_MESSAGE {
+    if images.len() > MAX_AGENT_ATTACHMENTS_PER_MESSAGE {
         warn!(
             provider_id = %provider.id,
             event_id = %event.event_id,
             image_count = images.len(),
-            max_images = MAX_AGENT_IMAGES_PER_MESSAGE,
+            max_images = MAX_AGENT_ATTACHMENTS_PER_MESSAGE,
             "too many IM images in one message; truncating images for agent multimodal input"
         );
     }
-    for image in images.iter().take(MAX_AGENT_IMAGES_PER_MESSAGE) {
+    for image in images.iter().take(MAX_AGENT_ATTACHMENTS_PER_MESSAGE) {
         if let (Some(mime_type), Some(data)) = (&image.mime_type, &image.data_base64) {
             resolved.push(bifrost_agent::ChatImageInput {
                 mime_type: mime_type.clone(),
@@ -1071,12 +1071,85 @@ pub(super) async fn resolve_event_images(
     resolved
 }
 
+pub(super) async fn resolve_event_files(
+    client: &ImProviderClient,
+    provider: &ImProviderConfig,
+    event: &ImEvent,
+    files: &[ImFileAttachment],
+) -> Vec<crate::im_gateway::external_cli::ExternalCliFileInput> {
+    let mut resolved = Vec::new();
+    if files.len() > MAX_AGENT_ATTACHMENTS_PER_MESSAGE {
+        warn!(
+            provider_id = %provider.id,
+            event_id = %event.event_id,
+            file_count = files.len(),
+            max_files = MAX_AGENT_ATTACHMENTS_PER_MESSAGE,
+            "too many IM file attachments in one message; truncating files for agent input"
+        );
+    }
+    for file in files.iter().take(MAX_AGENT_ATTACHMENTS_PER_MESSAGE) {
+        if let Some(data) = &file.data_base64 {
+            resolved.push(crate::im_gateway::external_cli::ExternalCliFileInput {
+                mime_type: file
+                    .mime_type
+                    .clone()
+                    .unwrap_or_else(|| "application/octet-stream".to_string()),
+                data: data.clone(),
+                name: file.name.clone(),
+            });
+            continue;
+        }
+
+        let Some(message_id) = event.source.message_id.as_deref() else {
+            warn!(
+                provider_id = %provider.id,
+                file_key = %file.file_key,
+                "cannot download IM file because message_id is missing"
+            );
+            continue;
+        };
+        match client
+            .download_message_file_resource(provider, message_id, file)
+            .await
+        {
+            Ok((mime_type, bytes)) => {
+                info!(
+                    provider_id = %provider.id,
+                    message_id = %message_id,
+                    file_key = %file.file_key,
+                    mime_type = %mime_type,
+                    byte_len = bytes.len(),
+                    "downloaded IM file resource for agent attachment input"
+                );
+                let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+                resolved.push(crate::im_gateway::external_cli::ExternalCliFileInput {
+                    mime_type,
+                    data,
+                    name: file.name.clone(),
+                });
+            }
+            Err(error) => {
+                warn!(
+                    provider_id = %provider.id,
+                    message_id = %message_id,
+                    file_key = %file.file_key,
+                    error = %error,
+                    "failed to download IM file resource"
+                );
+            }
+        }
+    }
+    resolved
+}
+
 pub(super) fn agent_message_text(message: &crate::im_gateway::types::ImEventMessage) -> String {
     let text = message.text.trim();
     if !text.is_empty() {
         text.to_string()
     } else if !message.images.is_empty() {
         IMAGE_ONLY_AGENT_PROMPT.to_string()
+    } else if !message.files.is_empty() {
+        format!("[附件消息: {} 个]", message.files.len())
     } else {
         String::new()
     }
@@ -1087,6 +1160,8 @@ pub(super) fn inbound_message_preview(
 ) -> String {
     if message.text.trim().is_empty() && !message.images.is_empty() {
         format!("[图片消息: {} 张]", message.images.len())
+    } else if message.text.trim().is_empty() && !message.files.is_empty() {
+        format!("[附件消息: {} 个]", message.files.len())
     } else {
         truncate_str(&message.text, 200)
     }
@@ -1280,7 +1355,18 @@ pub(super) async fn handle_busy_message(
             }
             _ => Vec::new(),
         };
-        match queue_manager.push_queue_with_images(session_key, queue_text.to_string(), images) {
+        let files = match event.message.as_ref() {
+            Some(event_message) if !event_message.files.is_empty() => {
+                resolve_event_files(client, provider, event, &event_message.files).await
+            }
+            _ => Vec::new(),
+        };
+        match queue_manager.push_queue_with_attachments(
+            session_key,
+            queue_text.to_string(),
+            images,
+            files,
+        ) {
             Ok(items) => {
                 let guide_pending = !queue_manager.guide_status(session_key).is_empty();
                 let updated = progress_registry
@@ -1390,7 +1476,7 @@ pub(super) async fn handle_busy_message(
                 .event
                 .message
                 .as_ref()
-                .is_some_and(|message| !message.images.is_empty())
+                .is_some_and(|message| !message.images.is_empty() || !message.files.is_empty())
         {
             handle_busy_default_message(guide_text, session_key, &ctx).await;
             return;
@@ -1499,7 +1585,13 @@ pub(super) async fn handle_concurrent_event_during_chat(
         error!(error = %error, "failed to store concurrent event");
     }
     let message = match event.message.as_ref() {
-        Some(message) if !message.text.trim().is_empty() || !message.images.is_empty() => message,
+        Some(message)
+            if !message.text.trim().is_empty()
+                || !message.images.is_empty()
+                || !message.files.is_empty() =>
+        {
+            message
+        }
         _ => return,
     };
     let message_text = agent_message_text(message);
@@ -1561,7 +1653,10 @@ pub(super) async fn handle_concurrent_event_during_chat(
         )
         .await;
     } else {
-        let _ = queue_manager.push_queue(&session_key, message_text);
+        let images = resolve_event_images(client, &provider, event, &message.images).await;
+        let files = resolve_event_files(client, &provider, event, &message.files).await;
+        let _ =
+            queue_manager.push_queue_with_attachments(&session_key, message_text, images, files);
         send_agent_reply(
             client,
             &provider,

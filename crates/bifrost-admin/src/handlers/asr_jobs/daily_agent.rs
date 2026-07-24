@@ -1254,6 +1254,7 @@ async fn run_external_daily_agent_prompt_with_params(
 
     let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: prompt,
         operation,
         params,
@@ -1312,6 +1313,7 @@ async fn wait_chatgpt_web_daily_agent_conversation(
     );
     let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: String::new(),
         operation: "wait".to_string(),
         params: serde_json::json!({ "conversationId": conversation_id }),

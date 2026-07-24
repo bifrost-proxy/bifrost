@@ -16,9 +16,9 @@ use crate::im_gateway::event_router::ImEventRouter;
 use crate::im_gateway::progress_card::ImAgentProgressRegistry;
 use crate::im_gateway::provider::ImProvider;
 use crate::im_gateway::types::{
-    normalize_provider_base_url, ImEvent, ImImageAttachment, ImMessageLog, ImProviderAgentConfig,
-    ImProviderConfig, ImProviderType, ImRoute, ImRouteAction, ImSchedule, ImTarget,
-    MessageDirection, MessageStatus,
+    normalize_provider_base_url, ImEvent, ImFileAttachment, ImImageAttachment, ImMessageLog,
+    ImProviderAgentConfig, ImProviderConfig, ImProviderType, ImRoute, ImRouteAction, ImSchedule,
+    ImTarget, MessageDirection, MessageStatus,
 };
 use crate::im_gateway::weixin::WeixinProvider;
 use crate::im_gateway::{
@@ -60,7 +60,8 @@ use schedules::*;
 use service::{
     save_pending_feishu_setups, FeishuSetupBrand, ImProviderClient, PendingFeishuSetup,
     PendingWeixinLogin, AGENT_REPLY_IMAGE_UPLOAD_CACHE, IMAGE_ONLY_AGENT_PROMPT,
-    MAX_AGENT_IMAGES_PER_MESSAGE, MAX_AGENT_REPLY_ATTACHMENT_BYTES, MAX_AGENT_REPLY_IMAGE_BYTES,
+    MAX_AGENT_ATTACHMENTS_PER_MESSAGE, MAX_AGENT_REPLY_ATTACHMENT_BYTES,
+    MAX_AGENT_REPLY_IMAGE_BYTES,
 };
 pub use service::{ImGatewayService, SharedImGatewayService};
 use utils::*;

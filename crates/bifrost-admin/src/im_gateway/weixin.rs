@@ -390,6 +390,7 @@ impl WeixinProvider {
                 text,
                 mentions: Vec::new(),
                 images,
+                files: Vec::new(),
                 raw_type: Some(raw_type),
             }),
             received_at: now_ms(),

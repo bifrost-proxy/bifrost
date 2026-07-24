@@ -15,6 +15,7 @@ BIFROST_LOG="$TEST_DIR/bifrost.log"
 BIFROST_BIN="${BIFROST_BIN:-}"
 RUNNER_ID="mock-image"
 TRAEX_RUNNER_ID="mock-image-traex"
+FILE_RUNNER_ID="mock-file"
 CHAT_SESSION_KEY="web-image-session-e2e"
 TRAEX_SESSION_KEY="web-image-session-traex-e2e"
 CALLER_SESSION_KEY="runner-call-image-parent-e2e"
@@ -79,7 +80,7 @@ BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
 BIFROST_PID=$!
 wait_http "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/proxy/address" "bifrost"
 
-python3 - "$BIFROST_PORT" "$TEST_DIR" "$RUNNER_ID" "$TRAEX_RUNNER_ID" "$FINAL_MARKER" "$CHAT_SESSION_KEY" "$TRAEX_SESSION_KEY" "$CALLER_SESSION_KEY" <<'PY'
+python3 - "$BIFROST_PORT" "$TEST_DIR" "$RUNNER_ID" "$TRAEX_RUNNER_ID" "$FILE_RUNNER_ID" "$FINAL_MARKER" "$CHAT_SESSION_KEY" "$TRAEX_SESSION_KEY" "$CALLER_SESSION_KEY" <<'PY'
 import base64
 import json
 import os
@@ -88,7 +89,7 @@ import sys
 import urllib.parse
 import urllib.request
 
-port, test_dir, runner_id, traex_runner_id, final_marker, chat_session_key, traex_session_key, caller_session_key = sys.argv[1:9]
+port, test_dir, runner_id, traex_runner_id, file_runner_id, final_marker, chat_session_key, traex_session_key, caller_session_key = sys.argv[1:10]
 base_url = f"http://127.0.0.1:{port}/_bifrost/api/im-gateway/chat"
 agent_base_url = f"http://127.0.0.1:{port}/_bifrost/api/im-gateway/agent"
 test_path = pathlib.Path(test_dir)
@@ -145,6 +146,19 @@ def patch_config():
             traex_runner_id: {
                 "enabled": True,
                 "adapter": "traex",
+                "adapterConfig": {
+                    "executable": "/bin/sh",
+                    "args": ["-c", script],
+                    "env": {"BIFROST_CAPTURE_PROMPTS": str(prompt_capture)},
+                    "timeoutSecs": 30,
+                },
+                "injectBifrostTools": False,
+                "skillPaths": [],
+                "deliveryMode": "final_reply",
+            },
+            file_runner_id: {
+                "enabled": True,
+                "adapter": "mock_file",
                 "adapterConfig": {
                     "executable": "/bin/sh",
                     "args": ["-c", script],
@@ -220,6 +234,31 @@ def assert_run_images(run_id, expected_images):
     return paths
 
 
+def assert_run_files(run_id, expected_files):
+    run_dir = test_path / "agent" / "im_gateway" / "chat_runs" / run_id
+    prompt = (run_dir / "prompt.md").read_text(encoding="utf-8")
+    assert "## Attached Files" in prompt, prompt
+    assert "Use these paths" in prompt, prompt
+
+    result = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+    attachments = json.loads(result["metadata"]["attachments.files"])
+    assert len(attachments) == len(expected_files), attachments
+    paths = []
+    for attachment, expected in zip(attachments, expected_files):
+        expected_name, expected_mime, expected_bytes = expected
+        assert attachment["name"] == expected_name, attachment
+        assert attachment["mimeType"] == expected_mime, attachment
+        assert attachment["sizeBytes"] == len(expected_bytes), attachment
+        attachment_path = pathlib.Path(attachment["path"])
+        assert attachment_path.is_absolute(), attachment
+        assert attachment_path.exists(), attachment_path
+        assert attachment_path.parent.name == "files", attachment_path
+        assert attachment_path.read_bytes() == expected_bytes, attachment_path
+        assert str(attachment_path) in prompt, prompt
+        paths.append(attachment_path)
+    return paths
+
+
 def assert_run_image(run_id, expected_name, expected_bytes):
     return assert_run_images(run_id, [(expected_name, "image/png", expected_bytes)])[0]
 
@@ -269,6 +308,71 @@ def assert_runner_metadata(run_id, expected_adapter, expected_attachment_count=1
     assert tool_finished, normalized
     assert any("durationMs" in event.get("raw", {}) for event in tool_finished), tool_finished
     return metadata
+
+
+def create_im_provider(provider_id, owner_id, runner):
+    payload = {
+        "id": provider_id,
+        "provider_type": "feishu",
+        "display_name": "Attachment E2E",
+        "enabled": True,
+        "app_id": "cli_attachment_e2e",
+        "owner_open_id": owner_id,
+        "event_connection_enabled": False,
+        "agent_config": {"runner": runner},
+    }
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/_bifrost/api/im-gateway/providers",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = resp.read().decode("utf-8")
+        assert resp.status == 200, body
+
+
+def send_mock_inbound_file(provider_id, owner_id, chat_id, file_name, mime_type, content):
+    payload = {
+        "providerId": provider_id,
+        "userId": owner_id,
+        "chatId": chat_id,
+        "text": "",
+        "files": [
+            {
+                "fileKey": "mock-file-report",
+                "name": file_name,
+                "mimeType": mime_type,
+                "data": base64.b64encode(content).decode("ascii"),
+            }
+        ],
+    }
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/_bifrost/api/im-gateway/debug/mock-inbound",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = resp.read().decode("utf-8")
+        assert resp.status == 200, body
+
+
+def wait_for_latest_run_after(before):
+    runs_dir = test_path / "agent" / "im_gateway" / "chat_runs"
+    for _ in range(240):
+        if runs_dir.exists():
+            candidates = [
+                path
+                for path in runs_dir.iterdir()
+                if path.is_dir() and path.name not in before and (path / "result.json").exists()
+            ]
+            if candidates:
+                return max(candidates, key=lambda path: path.stat().st_mtime).name
+        import time
+
+        time.sleep(0.1)
+    raise AssertionError("timed out waiting for IM inbound external runner run")
 
 
 def assert_session_detail_metadata(session_key, expected_metadata):
@@ -390,19 +494,50 @@ runner_path = assert_run_image(runner_finished["runId"], "runner.png", b"runner-
 runner_metadata = assert_runner_metadata(runner_finished["runId"], "codex")
 assert_session_detail_metadata(caller_session_key, runner_metadata)
 
+provider_id = "file-inbound-provider"
+owner_id = "file-inbound-owner"
+runs_dir = test_path / "agent" / "im_gateway" / "chat_runs"
+existing_runs = {path.name for path in runs_dir.iterdir()} if runs_dir.exists() else set()
+create_im_provider(provider_id, owner_id, file_runner_id)
+send_mock_inbound_file(
+    provider_id,
+    owner_id,
+    f"chat-{provider_id}",
+    "../report final.md",
+    "text/markdown",
+    b"# Report\n\nhello from file\n",
+)
+file_run_id = wait_for_latest_run_after(existing_runs)
+file_paths = assert_run_files(
+    file_run_id,
+    [("../report final.md", "text/markdown", b"# Report\n\nhello from file\n")],
+)
+file_metadata = json.loads(
+    (test_path / "agent" / "im_gateway" / "chat_runs" / file_run_id / "result.json")
+    .read_text(encoding="utf-8")
+)["metadata"]
+assert file_metadata["runner.adapter"] == "mock_file", file_metadata
+assert file_metadata["attachments.fileCount"] == "1", file_metadata
+assert file_metadata["attachments.imageCount"] == "0", file_metadata
+assert file_metadata["attachments.count"] == "1", file_metadata
+file_path = file_paths[0]
+
 assert chat_path != runner_path, (chat_path, runner_path)
 assert chat_path != traex_path, (chat_path, traex_path)
 capture = prompt_capture.read_text(encoding="utf-8")
 assert capture.count("## Attached Images") >= 4, capture
+assert capture.count("## Attached Files") >= 1, capture
 assert str(chat_path) in capture, capture
 assert str(second_initial_chat_path) in capture, capture
 assert str(second_chat_path) in capture, capture
 assert str(traex_path) in capture, capture
 assert str(runner_path) in capture, capture
+assert str(file_path) in capture, capture
 
 print("[im-gateway-external-runner-image-input] PASS")
 print(f"chat_run={chat_finished['runId']} chat_images={chat_path},{second_initial_chat_path}")
 print(f"second_chat_run={second_chat_finished['runId']} second_chat_image={second_chat_path}")
 print(f"traex_run={traex_finished['runId']} traex_image={traex_path}")
 print(f"runner_call_run={runner_finished['runId']} runner_image={runner_path}")
+print(f"file_inbound_run={file_run_id} file_attachment={file_path}")
 PY

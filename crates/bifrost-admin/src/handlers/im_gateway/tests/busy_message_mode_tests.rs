@@ -123,6 +123,7 @@ fn apply_busy_message_default_queues_custom_runner_messages() {
 fn codex_runner_metadata_resumes_queued_messages_after_current_run() {
     let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "queued continuation".to_string(),
         operation: "chat".to_string(),
         params: serde_json::Value::Null,
@@ -156,6 +157,7 @@ fn codex_runner_metadata_resumes_queued_messages_after_current_run() {
 fn traex_runner_metadata_resumes_queued_messages_after_current_run() {
     let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "queued continuation".to_string(),
         operation: "chat".to_string(),
         params: serde_json::Value::Null,
@@ -189,6 +191,7 @@ fn traex_runner_metadata_resumes_queued_messages_after_current_run() {
 fn claude_code_runner_metadata_resumes_queued_messages_after_current_run() {
     let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "queued continuation".to_string(),
         operation: "chat".to_string(),
         params: serde_json::Value::Null,
@@ -225,6 +228,7 @@ fn claude_code_runner_metadata_resumes_queued_messages_after_current_run() {
 fn codex_runner_metadata_does_not_override_explicit_thread() {
     let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "queued continuation".to_string(),
         operation: "chat".to_string(),
         params: serde_json::json!({ "threadId": "explicit-thread" }),
@@ -258,6 +262,7 @@ fn codex_runner_metadata_does_not_override_explicit_thread() {
 fn chatgpt_web_metadata_resumes_persisted_conversation() {
     let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "continue".to_string(),
         operation: "ask".to_string(),
         params: serde_json::Value::Null,

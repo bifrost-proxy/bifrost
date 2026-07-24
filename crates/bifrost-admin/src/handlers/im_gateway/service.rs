@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) const IMAGE_ONLY_AGENT_PROMPT: &str = "请理解这张图片，并根据图片内容回答。";
-pub(super) const MAX_AGENT_IMAGES_PER_MESSAGE: usize = 6;
+pub(super) const MAX_AGENT_ATTACHMENTS_PER_MESSAGE: usize = 6;
 pub(super) const MAX_AGENT_REPLY_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 pub(super) const MAX_AGENT_REPLY_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -201,6 +201,24 @@ impl ImProviderClient {
                     .download_message_image_resource(config, image)
                     .await
             }
+        }
+    }
+
+    pub(super) async fn download_message_file_resource(
+        &self,
+        config: &ImProviderConfig,
+        message_id: &str,
+        file: &crate::im_gateway::types::ImFileAttachment,
+    ) -> bifrost_core::Result<(String, Vec<u8>)> {
+        match self {
+            Self::Feishu(provider) => {
+                provider
+                    .download_message_file_resource(config, message_id, &file.file_key)
+                    .await
+            }
+            Self::Weixin(_) => Err(bifrost_core::BifrostError::Config(
+                "weixin provider does not support inbound file resource downloads yet".to_string(),
+            )),
         }
     }
 }

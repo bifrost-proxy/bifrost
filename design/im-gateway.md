@@ -122,6 +122,7 @@ pub enum ImProviderType { Feishu, Weixin, WeChat, Webhook }
 - 单应用最多 50 条长连接；启动时按 `secret_configured && enabled && event_connection_enabled` 自动连接；60s reconnect supervisor 保证短暂断线自动恢复。
 - `tenant_access_token` 缓存 `HashMap<TokenCacheKey, TokenCache>`；`TokenCacheKey = SHA256(base_url + app_id + app_secret)`；`app_secret` 只参与摘要，不入日志。
 - send API 请求 `?receive_id_type=<chat_id|open_id|...>`，body 包含 `receive_id / msg_type / content / uuid`；uuid 使用短随机值。
+- inbound `image` 消息继续通过 message resource 下载为图片附件；inbound `file` 消息必须解析 `file_key`、文件名、MIME、大小，并通过 `/im/v1/messages/{message_id}/resources/{file_key}?type=file` 下载为本地文件附件。外部 Runner 请求把通用文件与图片分开传递，文件落盘后在 `prompt.md` 的 `## Attached Files` 段落中列出本地绝对路径，便于 Agent 读取和推理用户发送的文档/附件。
 - Owner 上线通知：`build_online_notification_message(provider)` 输出 `你好，Bifrost 助手上线了` + `设备名称：...` + `工作目录：...`；设备名解析顺序 `BIFROST_DEVICE_NAME → COMPUTERNAME → scutil ComputerName → HOSTNAME → hostname → unknown`。重启上线通知补充当前 Runner 与最近轮次上下文。
 - Add Provider 三步向导中 Feishu 走 device-style app registration：`POST /providers/feishu-setup/start` → 前端展示二维码 → 轮询 `status` → `POST /provider` 合成 provider。App Secret 仅在服务端内存 session 停留，落地时立即 `sanitize_provider`。
 - Feishu Provider 使用的直连 HTTP client 不继承 Bifrost 自身代理与环境代理，避免服务端出站被本机代理回环影响。
@@ -340,6 +341,7 @@ Provider 选择：显式 `--provider` 优先；单 enabled provider 自动选中
 ### E2E 测试
 
 - `test_im_gateway_feishu_e2e.sh`：fake Feishu server（token endpoint、send endpoint、mock WebSocket、event push 控制、request capture）；覆盖 provider 初始化、target 创建、卡片发送、长连接接收 + route 脚本回复、V1 action 拒绝、无边界 route 拒绝、缺 execute_script 拒绝、schedule 手动执行、schedule 超时、secret 防泄露。
+- `test_im_gateway_external_runner_image_input.sh`：覆盖 Web Chat / runner-call 图片附件与 IM debug inbound 文件附件，验证通用文件落盘、`## Attached Files` prompt 注入、metadata `attachments.files/fileCount` 和 session 附件路径隔离。
 - `test_remote_im_gateway_e2e.sh`：pairing + `remote_im_gateway` 授权后覆盖 channel check、send、schedule CRUD、revoke 后拒绝、relay 不留敏感、inbound 脚本仍受 provider policy 限制。
 - `test_weixin_provider_e2e.sh`：mock iLink，删除 provider 后停止 poll；`event_connection_enabled=false` 且有 secret 时重启不 poll。
 - `test_im_cli_provider_selection_send_owner.sh`：`bifrost im send --text ...` 单 provider 自动选择并默认发 owner。
@@ -353,6 +355,7 @@ Provider 选择：显式 `--provider` 优先；单 enabled provider 自动选中
 - TC-IMG-32 Provider 创建 secret 映射回归、TC-IMG-35 多机器人 token 隔离、TC-IMG-37 CLI provider 选择、TC-IMG-61 Provider 默认工作目录展示、TC-IMG-62 owner 上线通知设备名、TC-IMG-66 微信删除后停止 poll、TC-IMG-67 Feishu Agent 回复跟随来源 chat_id。
 - Add Provider 三步向导（Weixin / Feishu 二维码流程）、Edit 表单密度、Provider 列表宽度约束、Schedules Script/Agent 手动新增、Schedule 详情运行历史、Provider 卡片单列 hover 复制。
 - IM 通道 `/help` / `/cwd` / `/runner` 命令；亮色/暗色主题双重验证。
+- `human_tests/im-gateway-external-cli-chat-gateway.md` 的 TC-IEC-48 覆盖 Feishu/IM 文件附件自动下载到本地文件路径并注入 external runner prompt 的真实链路。
 
 ### 覆盖率与项目校验
 

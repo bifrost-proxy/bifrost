@@ -9,7 +9,7 @@ fn message_image_content_parts(
     let normalized: Vec<&crate::im_gateway::external_cli::ExternalCliImageInput> = images
         .iter()
         .filter(|image| !image.data.trim().is_empty())
-        .take(MAX_AGENT_IMAGES_PER_MESSAGE)
+        .take(MAX_AGENT_ATTACHMENTS_PER_MESSAGE)
         .collect();
     if normalized.is_empty() {
         return None;
@@ -43,7 +43,7 @@ fn image_message_preview(
     let count = images
         .iter()
         .filter(|image| !image.data.trim().is_empty())
-        .take(MAX_AGENT_IMAGES_PER_MESSAGE)
+        .take(MAX_AGENT_ATTACHMENTS_PER_MESSAGE)
         .count();
     if count == 1 {
         "Attached 1 image".to_string()
@@ -2819,6 +2819,7 @@ mod tests {
         crate::im_gateway::external_cli::ExternalCliRunRequest {
             message: "timeline".to_string(),
             images: Vec::new(),
+            files: Vec::new(),
             operation: "chat".to_string(),
             params: serde_json::Value::Null,
             provider_id: None,
@@ -2931,6 +2932,7 @@ mod tests {
         let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
         let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: "今天的AI领域相关的新闻。".to_string(),
             operation: "chat".to_string(),
             params: serde_json::Value::Null,
@@ -3020,6 +3022,7 @@ mod tests {
 
         let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: "new Web message".to_string(),
             operation: "chat".to_string(),
             params: serde_json::json!({ "historyPath": history_path }),
@@ -3089,6 +3092,7 @@ mod tests {
 
         let gpt_request = crate::im_gateway::external_cli::ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: "new GPT Web message".to_string(),
             operation: "chat".to_string(),
             params: serde_json::json!({ "historyPath": history_path }),
@@ -3322,6 +3326,7 @@ mod tests {
         let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
         let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: "explain the image".to_string(),
             operation: "chat".to_string(),
             params: serde_json::Value::Null,
@@ -3617,6 +3622,7 @@ mod tests {
         let session_key = "active-gpt-web-history";
         let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: "active GPT Web message".to_string(),
             operation: "chat".to_string(),
             params: serde_json::json!({}),
@@ -3945,6 +3951,7 @@ mod tests {
         .expect("push imported context");
         let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: "continue".to_string(),
             operation: "chat".to_string(),
             params: serde_json::Value::Null,
@@ -4065,6 +4072,7 @@ mod coverage_boost {
         ExternalCliRunRequest {
             message: "hello".to_string(),
             images: Vec::new(),
+            files: Vec::new(),
             operation: "chat".to_string(),
             params: serde_json::Value::Null,
             provider_id: None,
@@ -4799,7 +4807,7 @@ mod coverage_boost {
     #[test]
     fn message_image_content_parts_respects_max_image_limit() {
         let mut images = Vec::new();
-        for i in 0..(MAX_AGENT_IMAGES_PER_MESSAGE + 2) {
+        for i in 0..(MAX_AGENT_ATTACHMENTS_PER_MESSAGE + 2) {
             images.push(crate::im_gateway::external_cli::ExternalCliImageInput {
                 mime_type: "image/png".to_string(),
                 data: format!("A{i}"),
@@ -4808,7 +4816,7 @@ mod coverage_boost {
         }
         let parts = message_image_content_parts("msg", &images).expect("parts");
         let arr = parts.as_array().expect("array");
-        assert_eq!(arr.len(), 1 + MAX_AGENT_IMAGES_PER_MESSAGE);
+        assert_eq!(arr.len(), 1 + MAX_AGENT_ATTACHMENTS_PER_MESSAGE);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4951,7 +4959,7 @@ fn timeline_has_tool_call_detects_existing_call_id() {
 #[test]
 fn message_image_content_parts_respects_max_image_limit() {
     let mut images = Vec::new();
-    for i in 0..(MAX_AGENT_IMAGES_PER_MESSAGE + 2) {
+    for i in 0..(MAX_AGENT_ATTACHMENTS_PER_MESSAGE + 2) {
         images.push(crate::im_gateway::external_cli::ExternalCliImageInput {
             mime_type: "image/png".to_string(),
             data: format!("A{i}"),
@@ -4960,7 +4968,7 @@ fn message_image_content_parts_respects_max_image_limit() {
     }
     let parts = message_image_content_parts("msg", &images).expect("parts");
     let arr = parts.as_array().expect("array");
-    assert_eq!(arr.len(), 1 + MAX_AGENT_IMAGES_PER_MESSAGE);
+    assert_eq!(arr.len(), 1 + MAX_AGENT_ATTACHMENTS_PER_MESSAGE);
 }
 
 #[tokio::test(flavor = "current_thread")]

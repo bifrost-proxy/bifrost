@@ -4,7 +4,10 @@ use super::*;
 #[serde(rename_all = "camelCase")]
 struct MockInboundRequest {
     provider_id: String,
+    #[serde(default)]
     text: String,
+    #[serde(default)]
+    files: Vec<MockInboundFile>,
     #[serde(default)]
     user_id: Option<String>,
     #[serde(default)]
@@ -13,6 +16,19 @@ struct MockInboundRequest {
     message_id: Option<String>,
     #[serde(default)]
     event_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MockInboundFile {
+    #[serde(default)]
+    file_key: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    mime_type: Option<String>,
+    #[serde(default)]
+    data: Option<String>,
 }
 
 pub(super) async fn handle_debug(
@@ -42,8 +58,13 @@ async fn handle_mock_inbound(
     if body.provider_id.trim().is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "providerId is required");
     }
-    if body.text.trim().is_empty() {
-        return error_response(StatusCode::BAD_REQUEST, "text is required");
+    if body.text.trim().is_empty()
+        && body
+            .files
+            .iter()
+            .all(|file| file.data.as_deref().unwrap_or_default().trim().is_empty())
+    {
+        return error_response(StatusCode::BAD_REQUEST, "text or files are required");
     }
 
     let Some(provider) = service.provider_store.get(&body.provider_id) else {
@@ -81,6 +102,16 @@ async fn handle_mock_inbound(
         .unwrap_or_else(|| format!("mock-msg-{}", uuid_short()));
 
     let tx = ensure_mock_event_sink(service, &provider);
+    let has_file = body
+        .files
+        .iter()
+        .any(|file| !file.data.as_deref().unwrap_or_default().trim().is_empty());
+    let raw_type = if body.text.trim().is_empty() && has_file {
+        "file"
+    } else {
+        "text"
+    };
+
     let event = ImEvent {
         event_id: event_id.clone(),
         provider_id: provider.id.clone(),
@@ -95,7 +126,27 @@ async fn handle_mock_inbound(
             text: body.text,
             mentions: Vec::new(),
             images: Vec::new(),
-            raw_type: Some("text".to_string()),
+            files: body
+                .files
+                .into_iter()
+                .filter_map(|file| {
+                    let data = file.data?.trim().to_string();
+                    if data.is_empty() {
+                        return None;
+                    }
+                    Some(crate::im_gateway::types::ImFileAttachment {
+                        file_key: file
+                            .file_key
+                            .unwrap_or_else(|| format!("mock-file-{}", uuid_short())),
+                        name: file.name,
+                        mime_type: file.mime_type,
+                        size_bytes: None,
+                        data_base64: Some(data),
+                        download_url: None,
+                    })
+                })
+                .collect(),
+            raw_type: Some(raw_type.to_string()),
         }),
         received_at: now_ms(),
         raw_digest: Some("mock_inbound".to_string()),

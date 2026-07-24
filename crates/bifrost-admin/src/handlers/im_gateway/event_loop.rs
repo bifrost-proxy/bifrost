@@ -361,7 +361,10 @@ pub(super) async fn run_event_loop_with_options(
             let agent_config = agent_config_store.load();
             if agent_config.enabled {
                 if let Some(ref msg) = event.message {
-                    if !msg.text.trim().is_empty() || !msg.images.is_empty() {
+                    if !msg.text.trim().is_empty()
+                        || !msg.images.is_empty()
+                        || !msg.files.is_empty()
+                    {
                         let session_key =
                             build_session_key(&event.provider_id, event.source.user_id.as_deref());
                         let agent_message = agent_message_text(msg);
@@ -448,6 +451,8 @@ pub(super) async fn run_event_loop_with_options(
                                     resolve_event_images(&client, &provider, &event, &msg.images)
                                         .await,
                                 ),
+                                files: resolve_event_files(&client, &provider, &event, &msg.files)
+                                    .await,
                                 session_key: session_key.clone(),
                                 adapter_override: None,
                                 instructions_override: None,
@@ -479,11 +484,11 @@ pub(super) async fn run_event_loop_with_options(
             }
             ImRouteAction::AgentChat { .. } => {
                 let raw_message_text = route_match.message_text.as_deref().unwrap_or("");
-                let has_images = event
+                let has_attachments = event
                     .message
                     .as_ref()
-                    .is_some_and(|message| !message.images.is_empty());
-                if raw_message_text.trim().is_empty() && !has_images {
+                    .is_some_and(|message| !message.images.is_empty() || !message.files.is_empty());
+                if raw_message_text.trim().is_empty() && !has_attachments {
                     continue;
                 }
                 let message_text = event
@@ -574,6 +579,13 @@ pub(super) async fn run_event_loop_with_options(
                             ),
                             None => Vec::new(),
                         },
+                        files: match event.message.as_ref() {
+                            Some(message) => {
+                                resolve_event_files(&client, &provider, &event, &message.files)
+                                    .await
+                            }
+                            None => Vec::new(),
+                        },
                         session_key: session_key.clone(),
                         adapter_override: None,
                         instructions_override: None,
@@ -592,11 +604,11 @@ pub(super) async fn run_event_loop_with_options(
                 ..
             } => {
                 let raw_message_text = route_match.message_text.as_deref().unwrap_or("");
-                let has_images = event
+                let has_attachments = event
                     .message
                     .as_ref()
-                    .is_some_and(|message| !message.images.is_empty());
-                if raw_message_text.trim().is_empty() && !has_images {
+                    .is_some_and(|message| !message.images.is_empty() || !message.files.is_empty());
+                if raw_message_text.trim().is_empty() && !has_attachments {
                     continue;
                 }
                 let message_text = event
@@ -654,6 +666,13 @@ pub(super) async fn run_event_loop_with_options(
                             ),
                             None => Vec::new(),
                         },
+                        files: match event.message.as_ref() {
+                            Some(message) => {
+                                resolve_event_files(&client, &provider, &event, &message.files)
+                                    .await
+                            }
+                            None => Vec::new(),
+                        },
                         session_key: session_key.clone(),
                         adapter_override: adapter.clone(),
                         instructions_override: instructions.clone(),
@@ -693,6 +712,7 @@ struct ExternalCliChatContext<'a> {
 struct ExternalCliChatInput {
     message_text: String,
     images: Vec<crate::im_gateway::external_cli::ExternalCliImageInput>,
+    files: Vec<crate::im_gateway::external_cli::ExternalCliFileInput>,
     session_key: String,
     adapter_override: Option<String>,
     instructions_override: Option<String>,
@@ -924,6 +944,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
     );
     let mut current_message = input.message_text;
     let mut current_images = input.images;
+    let mut current_files = input.files;
     let mut recorder = session.recorder.take();
     let mut runner_metadata = persisted_state
         .as_ref()
@@ -962,6 +983,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                 Some(next_item) => {
                     current_message = next_item.message;
                     current_images = external_cli_images_from_chat_images(next_item.images);
+                    current_files = next_item.files;
                     continue;
                 }
                 None => break,
@@ -979,6 +1001,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
             persisted_state.as_ref(),
         );
         request.images = std::mem::take(&mut current_images);
+        request.files = std::mem::take(&mut current_files);
         apply_external_cli_resume_metadata(&mut request, &runner_metadata);
         if request.work_dir.is_none() {
             request.work_dir =
@@ -1455,6 +1478,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                 }
                 current_message = next_item.message;
                 current_images = external_cli_images_from_chat_images(next_item.images);
+                current_files = next_item.files;
             }
             None => break,
         };
@@ -2030,6 +2054,7 @@ mod tests {
         crate::im_gateway::external_cli::ExternalCliRunRequest {
             message: "record this turn".to_string(),
             images: Vec::new(),
+            files: Vec::new(),
             operation: "chat".to_string(),
             params: serde_json::Value::Null,
             provider_id: Some("feishu-recorder".to_string()),
@@ -2184,6 +2209,7 @@ mod tests {
         let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
             message: "hello".to_string(),
             images: Vec::new(),
+            files: Vec::new(),
             operation: "chat".to_string(),
             params: serde_json::Value::Null,
             provider_id: Some("feishu-main".to_string()),

@@ -15,9 +15,9 @@ use bifrost_core::Result;
 
 use crate::im_gateway::provider::{EventSink, ImProvider};
 use crate::im_gateway::types::{
-    ConnectionHandle, ConnectionState, ImEvent, ImEventMessage, ImEventSource, ImImageAttachment,
-    ImImageSource, ImProviderConfig, ImProviderType, ImTarget, ProviderValidation, SendOptions,
-    SendResult, UploadedImage,
+    ConnectionHandle, ConnectionState, ImEvent, ImEventMessage, ImEventSource, ImFileAttachment,
+    ImImageAttachment, ImImageSource, ImProviderConfig, ImProviderType, ImTarget,
+    ProviderValidation, SendOptions, SendResult, UploadedImage,
 };
 
 // ---------------------------------------------------------------------------
@@ -1467,6 +1467,63 @@ impl FeishuProvider {
         })?;
         Ok((mime_type, bytes.to_vec()))
     }
+
+    /// Download a generic file resource embedded in a Feishu message.
+    pub async fn download_message_file_resource(
+        &self,
+        config: &ImProviderConfig,
+        message_id: &str,
+        file_key: &str,
+    ) -> Result<(String, Vec<u8>)> {
+        let base_url = Self::base_url(config);
+        let app_secret = config.secret_ref.as_deref().unwrap_or_default();
+        let token = self.get_tenant_token(config, app_secret).await?;
+
+        let url = format!(
+            "{}/im/v1/messages/{}/resources/{}?type=file",
+            base_url, message_id, file_key
+        );
+        debug!(
+            message_id = message_id,
+            file_key = file_key,
+            "downloading feishu message file resource"
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .map_err(|e| {
+                bifrost_core::BifrostError::Network(format!(
+                    "feishu message file download failed: {}",
+                    e
+                ))
+            })?;
+
+        let status = resp.status();
+        let mime_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "feishu message file download error: status={}, body={}",
+                status, body
+            )));
+        }
+        let bytes = resp.bytes().await.map_err(|e| {
+            bifrost_core::BifrostError::Network(format!(
+                "feishu message file body read failed: {}",
+                e
+            ))
+        })?;
+        Ok((mime_type, bytes.to_vec()))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1873,6 +1930,7 @@ pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Opt
     let text = extract_feishu_message_text(&content_obj);
 
     let mut images = Vec::new();
+    let mut files = Vec::new();
     if message_type.as_deref() == Some("image") {
         if let Some(image_key) = content_obj.get("image_key").and_then(|v| v.as_str()) {
             images.push(ImImageAttachment {
@@ -1886,6 +1944,30 @@ pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Opt
             });
         }
     }
+    if message_type.as_deref() == Some("file") {
+        if let Some(file_key) = content_obj.get("file_key").and_then(|v| v.as_str()) {
+            files.push(ImFileAttachment {
+                file_key: file_key.to_string(),
+                name: content_obj
+                    .get("file_name")
+                    .or_else(|| content_obj.get("name"))
+                    .and_then(|value| value.as_str())
+                    .map(ToString::to_string),
+                mime_type: content_obj
+                    .get("mime_type")
+                    .or_else(|| content_obj.get("mimeType"))
+                    .and_then(|value| value.as_str())
+                    .map(ToString::to_string),
+                size_bytes: content_obj
+                    .get("file_size")
+                    .or_else(|| content_obj.get("size"))
+                    .or_else(|| content_obj.get("size_bytes"))
+                    .and_then(|value| value.as_u64()),
+                data_base64: None,
+                download_url: None,
+            });
+        }
+    }
     collect_rich_text_image_keys(&content_obj, &mut images);
 
     info!(
@@ -1895,9 +1977,15 @@ pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Opt
         message_type = ?message_type,
         text_len = text.len(),
         image_count = images.len(),
+        file_count = files.len(),
         image_keys = %images
             .iter()
             .map(|image| image.file_key.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+        file_keys = %files
+            .iter()
+            .map(|file| file.file_key.as_str())
             .collect::<Vec<_>>()
             .join(","),
         content_keys = %json_object_keys(&content_obj).join(","),
@@ -1937,6 +2025,7 @@ pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Opt
             text,
             mentions: Vec::new(),
             images,
+            files,
             raw_type: message_type,
         }),
         received_at: now,
@@ -2314,6 +2403,136 @@ mod tests {
         assert_eq!(msg.images.len(), 1);
         assert_eq!(msg.images[0].file_key, "img_v3_abc");
         assert_eq!(msg.images[0].source, ImImageSource::MessageResource);
+    }
+
+    #[test]
+    fn test_normalize_feishu_file_message_extracts_attachment() {
+        let raw = serde_json::json!({
+            "header": {
+                "event_id": "evt_file",
+                "event_type": "im.message.receive_v1",
+                "create_time": "1710000000000"
+            },
+            "event": {
+                "message": {
+                    "chat_id": "oc_xxx",
+                    "message_id": "om_file",
+                    "message_type": "file",
+                    "content": "{\"file_key\":\"file_v3_abc\",\"file_name\":\"需求.md\",\"file_size\":12}"
+                },
+                "sender": {
+                    "sender_id": {
+                        "open_id": "ou_abc"
+                    }
+                }
+            }
+        });
+
+        let event = normalize_feishu_event(&raw, "feishu-main").unwrap();
+        let msg = event.message.unwrap();
+        assert_eq!(msg.raw_type.as_deref(), Some("file"));
+        assert!(msg.images.is_empty());
+        assert_eq!(msg.files.len(), 1);
+        assert_eq!(msg.files[0].file_key, "file_v3_abc");
+        assert_eq!(msg.files[0].name.as_deref(), Some("需求.md"));
+        assert_eq!(msg.files[0].size_bytes, Some(12));
+    }
+
+    #[tokio::test]
+    async fn test_download_feishu_file_resource_fetches_message_resource() {
+        use http_body_util::{BodyExt, Full};
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper::{Method, Request, Response, StatusCode};
+        use hyper_util::rt::TokioIo;
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock feishu file server");
+        let port = listener.local_addr().expect("mock local addr").port();
+        let saw_file_request = Arc::new(AtomicBool::new(false));
+        let saw_file_request_for_server = Arc::clone(&saw_file_request);
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                let saw_file_request = Arc::clone(&saw_file_request_for_server);
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<hyper::body::Incoming>| {
+                        let saw_file_request = Arc::clone(&saw_file_request);
+                        async move {
+                            let method = req.method().clone();
+                            let path = req.uri().path().to_string();
+                            let query = req.uri().query().unwrap_or_default().to_string();
+                            let auth = req
+                                .headers()
+                                .get("authorization")
+                                .and_then(|value| value.to_str().ok())
+                                .map(str::to_string);
+                            let _body = req
+                                .into_body()
+                                .collect()
+                                .await
+                                .expect("collect request body")
+                                .to_bytes();
+                            if method == Method::POST
+                                && path == "/open-apis/auth/v3/tenant_access_token/internal"
+                            {
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Full::new(bytes::Bytes::from_static(
+                                            br#"{"code":0,"tenant_access_token":"tenant-token","expire":7200}"#,
+                                        )))
+                                        .unwrap(),
+                                );
+                            }
+                            if method == Method::GET
+                                && path == "/open-apis/im/v1/messages/om_file/resources/file_v3_abc"
+                            {
+                                assert_eq!(query, "type=file");
+                                assert_eq!(auth.as_deref(), Some("Bearer tenant-token"));
+                                saw_file_request.store(true, Ordering::SeqCst);
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .header("content-type", "text/markdown; charset=utf-8")
+                                        .body(Full::new(bytes::Bytes::from_static(
+                                            b"# Report\n\nhello\n",
+                                        )))
+                                        .unwrap(),
+                                );
+                            }
+                            Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::NOT_FOUND)
+                                    .body(Full::new(bytes::Bytes::from_static(b"not found")))
+                                    .unwrap(),
+                            )
+                        }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        let provider = FeishuProvider::new();
+        let config = provider_with_base_url(Some(&format!("http://127.0.0.1:{port}/open-apis")));
+        let (mime_type, bytes) = provider
+            .download_message_file_resource(&config, "om_file", "file_v3_abc")
+            .await
+            .expect("download file resource");
+
+        assert_eq!(mime_type, "text/markdown");
+        assert_eq!(bytes, b"# Report\n\nhello\n");
+        assert!(saw_file_request.load(Ordering::SeqCst));
     }
 
     #[test]

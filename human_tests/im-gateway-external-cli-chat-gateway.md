@@ -942,6 +942,38 @@
 4. 后续纯文本消息的 runner prompt 不再包含上一轮图片路径。
 5. 第二条带图消息不会覆盖第一条带图消息的附件文件；第一条 run 的 metadata 路径仍可读取原始图片字节。
 
+### TC-IEC-48: Feishu/IM 文件附件进入外部 Runner prompt
+
+操作步骤：
+1. 使用临时数据目录启动当前源码 Bifrost，必须包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1` 和 `--no-system-proxy`。
+2. 配置一个 Codex-compatible mock external runner，executable 从 stdin 读取 prompt 到捕获文件，并输出 `{"type":"assistant_final","content":"BIFROST_IMAGE_PATH_OK"}`。
+3. 创建一个 Feishu provider，`enabled=true`、`event_connection_enabled=false`，并在 `agent_config.runner` 中绑定该 mock runner。
+4. 调用 `/_bifrost/api/im-gateway/debug/mock-inbound`，向该 provider 注入一条纯文件消息，payload 至少包含：
+   ```json
+   {
+     "providerId": "file-inbound-provider",
+     "userId": "file-inbound-owner",
+     "chatId": "chat-file-inbound-provider",
+     "text": "",
+     "files": [
+       {
+         "fileKey": "mock-file-report",
+         "name": "../report final.md",
+         "mimeType": "text/markdown",
+         "data": "<base64 of # Report\\n\\nhello from file\\n>"
+       }
+     ]
+   }
+   ```
+5. 等待 `agent/im_gateway/chat_runs/<runId>/result.json` 写入，读取同一 run 的 `prompt.md`、`result.json.metadata` 和附件目录。
+
+预期结果：
+1. debug inbound API 返回 `success:true`，纯文件消息不再因正文为空被拒绝。
+2. external runner 成功执行，`prompt.md` 包含 `## Attached Files`，并列出本地绝对文件路径。
+3. 文件落盘在本次 run 的 `attachments/files/` 或 session 附件子目录下，文件名经过安全净化，例如 `1-report_final.md`，且文件字节与注入的 base64 内容一致。
+4. `result.json.metadata["attachments.files"]` 记录 path、mimeType、sizeBytes、name；`attachments.fileCount=1`、`attachments.imageCount=0`、`attachments.count=1`。
+5. 捕获到的 runner stdin prompt 中包含同一个附件路径，说明 Agent 实际能在 prompt 里看到用户发送的文档路径。
+
 ### TC-IEC-46: Codex/Traex Runner diagnostics 采集并在 Web UI 展示
 
 操作步骤：
@@ -1443,6 +1475,7 @@
 
 ## 最近执行记录
 
+- 2026-07-24：PASS — 新增并立即执行 TC-IEC-48。先以 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 构建当前源码二进制，再执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_external_runner_image_input.sh`；脚本使用隔离临时数据目录和 mock external runner 注入纯文件消息，debug inbound 接受空正文文件消息并生成 run `1784873185896-cf83955e-4ac4-4a3e-b95f-9782f807947b`。验证 `prompt.md` 和 runner stdin 均包含 `## Attached Files` 及本地文件路径，附件落盘为 `.bifrost-e2e-runner-image.qLXnna/agent/sessions/by-key/attachments/session-7c3700696145216f4803a299a940daf92873f6b8ad58099d11991c3169bf44d9/1784873185896-cf83955e-4ac4-4a3e-b95f-9782f807947b/files/1-report_final.md`，文件内容与注入的 markdown base64 一致，metadata 记录 `attachments.fileCount=1`、`attachments.imageCount=0`、`attachments.count=1` 和 `attachments.files[0]` 的 path/mimeType/sizeBytes/name。
 - 2026-07-21：PASS — 按更新后的 TC-IEC-43/44 执行 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_external_runner_image_input.sh`；同 key 两轮 Web Chat、Trae 及 runner-call 图片均写入 `agent/sessions/by-key/attachments/session-{sha256}/<runId>/images/`，不同 run 目录隔离且旧图片未被覆盖。
 - 2026-07-15：针对 PR #394 coverage job 的 Linux `Text file busy (os error 26)` 新增并立即执行 TC-IEC-66。注入回归验证 Unix `ETXTBSY` 前两次失败后第三次成功、持续占用恰好尝试 8 次后返回、`NotFound` 仅尝试一次，并验证缺失 executable 的用户错误保留 adapter 与实际路径；本机 macOS 按平台预期过滤 Linux 真实 spawn 用例，原失败用例 `mock_app_server_accepts_live_guide_and_completes_same_turn` 输出 `1 passed`；重新构建当前源码二进制后，`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh` 输出 `[external-runner-live-guide] PASS`。Linux 持有写句柄的真实回归与 95% changed-lines / 90% workspace coverage gate 由 PR CI 在目标平台执行并作为本用例最终门禁。
 - 2026-07-15：新增并立即执行 TC-IEC-65。引用结构单元回归 `6/6` 通过，覆盖双来源、单来源、非法/混合节点、普通图片，以及独立/描述性 favicon 仍可预览；Playwright focused E2E `1/1` 通过，确认双来源 favicon 均为 `14px × 14px`、无图片预览 ID，普通正文图片仍是唯一灯箱图片，暗色主题可见。随后以 `BACKEND_PORT=9900 WEB_PORT=3015 pnpm --dir web exec vite --host 127.0.0.1 --port 3015` 代理现有正式后端，在 Codex 内置浏览器打开用户真实 session/history；当前 canonical Agent Chat 参数下共识别 14 组来源引用、15 个 favicon，首组 `Reuters+2AP News+2` 高度 24px、两个图标均为 `14px × 14px`，页面没有正文预览图片。暗色主题下引用背景为 `rgba(255, 255, 255, 0.04)`、边框为 `rgb(48, 48, 48)`，组件持续可见。未停止或替换 9900 服务，未修改系统代理。
