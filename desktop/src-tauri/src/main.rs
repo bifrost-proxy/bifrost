@@ -3,9 +3,11 @@
 mod backend_runtime;
 mod native_launcher;
 mod open_requests;
+mod runtime_ownership;
 mod upgrade_handoff;
 
 use backend_runtime::*;
+use runtime_ownership::*;
 use upgrade_handoff::*;
 
 use bifrost_core::upgrade_progress::{
@@ -135,6 +137,8 @@ struct DesktopServerConfigResponse {
 struct DesktopRuntimeMarker {
     pid: u32,
     port: u16,
+    #[serde(default, rename = "runtime_start_mode", alias = "start_mode")]
+    start_mode: Option<String>,
 }
 
 enum BackendPortTransition {
@@ -182,6 +186,12 @@ enum BackendWaitFailureKind {
 enum StartupDeadlineDisposition {
     HandoffToWebview,
     ShowNativeError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopShutdownBackendAction {
+    StopOwnedRuntime,
+    PreserveExternalRuntime,
 }
 
 #[derive(Debug)]
@@ -1024,17 +1034,31 @@ fn complete_desktop_shutdown(app: &AppHandle) {
         return;
     };
 
-    match spawn_backend_stop(&state.binary_path, &state.data_dir) {
-        Ok(child) => {
+    match desktop_shutdown_backend_action_for_state(&state) {
+        DesktopShutdownBackendAction::StopOwnedRuntime => {
             append_desktop_bootstrap_log(
                 &state.data_dir,
-                format!("spawned backend stop helper pid={}", child.id()),
+                "desktop shutdown owns the active backend; requesting backend stop",
             );
+            match spawn_backend_stop(&state.binary_path, &state.data_dir) {
+                Ok(child) => {
+                    append_desktop_bootstrap_log(
+                        &state.data_dir,
+                        format!("spawned backend stop helper pid={}", child.id()),
+                    );
+                }
+                Err(error) => {
+                    append_desktop_bootstrap_log(
+                        &state.data_dir,
+                        format!("failed to spawn backend stop helper: {error}"),
+                    );
+                }
+            }
         }
-        Err(error) => {
+        DesktopShutdownBackendAction::PreserveExternalRuntime => {
             append_desktop_bootstrap_log(
                 &state.data_dir,
-                format!("failed to spawn backend stop helper: {error}"),
+                "desktop shutdown is preserving the external CLI-owned backend",
             );
         }
     }

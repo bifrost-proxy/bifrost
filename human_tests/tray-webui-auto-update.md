@@ -302,7 +302,9 @@
    test "$(wc -l < desktop/src-tauri/src/main.rs)" -le 1500
    test "$(wc -l < desktop/src-tauri/src/upgrade_handoff.rs)" -le 1500
    test "$(wc -l < desktop/src-tauri/src/backend_runtime.rs)" -le 1500
+   test "$(wc -l < desktop/src-tauri/src/runtime_ownership.rs)" -le 1500
    test "$(wc -l < desktop/src-tauri/src/tests.rs)" -le 1500
+   test "$(wc -l < desktop/src-tauri/src/tests/cli_handoff_recovery.rs)" -le 1500
    current_user="$(id -un)"
    ! grep -Fq "/Users/$current_user/" human_tests/tray-webui-auto-update.md
    ```
@@ -330,14 +332,26 @@
 - native desktop restart marker/helper 失败会持久化 `Failed`，刷新后不会重新显示旧 `Completed`。
 - 普通浏览器不能启动 desktop-owned 安装；桌面 shell 请求仍把 CLI 与 App 一起升级。
 - App-owned E2E 的合法桌面请求必须携带共享数据目录中真实存在的短时 UUID origin token，不能仅靠 `channel=desktop` 绕过来源认证；请求受理后 token 文件必须已被原子消费。
-- `app.rs`、`app/installer.rs`、`app/tests.rs`、`upgrade.rs`、`upgrade/desktop_companion.rs`、`upgrade/download.rs`、`upgrade/restart.rs`、`upgrade/tests*.rs` 以及 desktop `main.rs`、`upgrade_handoff.rs`、`backend_runtime.rs`、`tests.rs` 均不超过 1500 行，测试文档不包含本机绝对路径。
+- `app.rs`、`app/installer.rs`、`app/tests.rs`、`upgrade.rs`、`upgrade/desktop_companion.rs`、`upgrade/download.rs`、`upgrade/restart.rs`、`upgrade/tests*.rs` 以及 desktop `main.rs`、`upgrade_handoff.rs`、`backend_runtime.rs`、`runtime_ownership.rs`、`tests.rs`、`tests/cli_handoff_recovery.rs` 均不超过 1500 行，测试文档不包含本机绝对路径。
 
 ### TC-TWA-11：Windows durable commit 与 CLI-owned WebView 单 core 回归
 
 **操作步骤**：
 
 1. 执行 `cargo test --manifest-path desktop/src-tauri/Cargo.toml deferred_desktop_completion_preserves_transaction_artifacts_for_helper_commit -- --test-threads=1`。
-2. 执行 `cargo test --manifest-path desktop/src-tauri/Cargo.toml cli_owned_upgrade_relaunch_reuses_only_the_restarted_target_backend -- --test-threads=1`。
+2. 执行以下 CLI-owned 恢复矩阵：
+   ```bash
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml \
+     cli_owned_upgrade_relaunch -- --test-threads=1
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml \
+     desktop_shutdown_stops_only_a_backend_owned_by_the_desktop -- --test-threads=1
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml \
+     healthy_target_backend_completes_and_clears_cli_upgrade_handoff -- --test-threads=1
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml \
+     healthy_wrong_version_backend_does_not_bypass_cli_upgrade_handoff -- --test-threads=1
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml \
+     healthy_target_backend_on_another_port_does_not_complete_cli_upgrade_handoff -- --test-threads=1
+   ```
 3. 执行 `bash e2e-tests/tests/test_desktop_upgrade_handoff_contract.sh`。
 4. 检查测试使用临时目录和随机端口，确认 9900 健康接口仍返回成功且本次测试没有残留进程。
 
@@ -346,8 +360,17 @@
 - 新 App 写入 `Completed` 后，Windows rollback snapshot、pending guard 和 updater-owned package 仍存在；只有等待进度的 helper 观察到 `Completed` 后才提交清理。
 - `Completed` 写盘失败、App 提前退出或 helper 验证超时时，rollback snapshot 仍可用于恢复旧 App。
 - CLI-owned WebView relaunch marker 保持 `old_core_pid=None`，并记录观察到的外部 core PID 与 pinned target。
-- 新 App 只接受 PID 已变化且版本命中 target 的 CLI core；旧 PID 或旧版本均不得被当作升级完成。
-- 等待目标 CLI core 超时时返回失败，不能调用 bundled binary 启动第二个 desktop-managed core。
+- 新 App 以 pinned target version 为成功权威：CLI updater 已经完成时允许复用同 PID target
+  core；legacy marker 没有 target 时仍要求 PID 变化，旧版本始终不得被当作升级完成。
+- 已受影响用户升级到修复版本后，匹配的旧 `Failed` progress 使当前 marker 与无 target 的
+  历史 marker 都零等待恢复，不再在启动和 `Start Service` 点击时反复等待 30 秒。
+- 目标 CLI core 未出现且端口空闲时可启动 bundled core；端口被同 data dir
+  `runtime.json` 精确匹配的旧版本 core 占用时可安全停止后接管；无关 listener 继续
+  fail-closed。
+- Desktop shutdown 只停止 managed child 或身份匹配的 desktop runtime，保留 CLI-owned
+  external core；CLI-owned helper 只等待旧 App 退出，不等待该 core/端口释放。
+- target core 只有在 marker 记录端口恢复健康后才写 `Completed` 并清 marker；错误版本或其它
+  端口上的健康服务不能绕过该门禁。
 
 ### TC-TWA-12：桌面版本检查按 runtime owner 选择 CLI companion
 

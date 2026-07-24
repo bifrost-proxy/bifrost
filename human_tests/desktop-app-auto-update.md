@@ -692,6 +692,58 @@
 - 非 `ETXTBSY` 启动错误只尝试一次；版本命令失败、超时和路径缺失仍返回不可用。
 - 版本解析能从输出读取 `0.0.155` / `v0.0.156`，无关输出返回空；失败、超时使用不同的临时 fixture，连续 20 轮均通过，不再因覆写后立即执行同一路径而产生测试竞争。
 
+### TC-DAU-17 已卡死用户升级到修复版本后自动恢复
+
+操作步骤：
+
+1. 执行完整 Desktop handoff contract；测试只使用临时 data dir 与随机端口：
+   ```bash
+   bash e2e-tests/tests/test_desktop_upgrade_handoff_contract.sh
+   ```
+2. 单独执行旧失败状态恢复回归；fixture 同时覆盖当前 marker 和没有
+   `target_version` 的历史 marker：
+   ```bash
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml \
+     failed_cli_owned_handoff_retries_without_another_thirty_second_wait -- --nocapture
+   ```
+3. 执行 shutdown ownership 回归，确认旧 App 退出不会再次停止 CLI updater 已经启动的
+   external core：
+   ```bash
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml \
+     desktop_shutdown_stops_only_a_backend_owned_by_the_desktop -- --nocapture
+   ```
+4. 执行目标版本恢复与错误版本阻断回归：
+   ```bash
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml \
+     healthy_target_backend_completes_and_clears_cli_upgrade_handoff -- --nocapture
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml \
+     healthy_wrong_version_backend_does_not_bypass_cli_upgrade_handoff -- --nocapture
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml \
+     healthy_target_backend_on_another_port_does_not_complete_cli_upgrade_handoff -- --nocapture
+   ```
+5. 执行同 PID target 复用、空闲端口 fallback、同 data dir 旧 core 安全接管和无关占用拒绝
+   回归：
+   ```bash
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml \
+     cli_owned_upgrade_relaunch -- --nocapture
+   ```
+6. 检查所有 fixture 的 data dir 都来自 `tempfile`，监听端口为随机端口或隔离端口
+   `19900`；测试前后不停止、不替换 `127.0.0.1:9900` 的正式服务。
+
+预期结果：
+
+- 用户已被旧版本留下 fresh CLI-owned marker 与 `Failed` progress 时，安装并打开修复版本
+  后立即进入恢复，不再每次启动或点击 `Start Bifrost Service` 都重复等待 30 秒。
+- 旧 marker 即使没有 `target_version` 也能识别同类历史失败并零等待恢复。
+- CLI updater 已提供目标版本 core 时直接复用；pinned target 命中时不强制要求第三个 PID。
+- 外部 CLI/core 没有恢复且端口已释放时，桌面端自动接管并启动内置 core。
+- 端口上的旧版本 Bifrost core 只有在 `/api/system` PID/port 与同 data dir
+  `runtime.json` 双重匹配时才允许停止后接管；无关占用仍 fail-closed。
+- 旧 Desktop shell 退出时只停止 managed child 或身份匹配的 desktop runtime，不停止
+  daemon/unknown/stale external runtime；CLI-owned helper 也不等待该端口释放。
+- 健康 target core 只有同时位于 marker 记录端口时才会写 `Completed` 并清理 marker；健康但
+  错误版本或位于其它端口的 core 都不能绕过 handoff。
+
 ## 清理步骤
 
 ```bash
@@ -726,3 +778,5 @@ bifrost app uninstall
 | 2026-07-14 | TC-DAU-14 | 构建并 ad-hoc 签名真实 `Bifrost.app`，安装到 `/Applications`；以 one-shot marker 启动修复后的 helper，helper 读取 marker 后删除测试 marker 并释放 hold PID；检查新 App PID、launchd 环境、正式 core PID 与 `desktop-bootstrap.log` | PASS：helper 只打开一次 App；新 PID `75504` 连续 10 秒稳定；三项 `BIFROST_DESKTOP_UPGRADE_RELAUNCH_*` 环境变量均未继承；marker 不残留；正式 core PID `19574` 未变化；WebView handoff 与证书预检完成。首次安装准备因同版本跳过覆盖而失败，改为先卸载旧 bundle、签名并恢复安装后完整重跑通过 |
 | 2026-07-16 | TC-DAU-15 | 现场日志复核 `desktop-bootstrap.log:14374-14410`；`node scripts/prepare-tauri-sidecar.mjs && bash e2e-tests/tests/test_desktop_upgrade_handoff_contract.sh`；`CARGO_TARGET_DIR="$PWD/target/desktop-upgrade-handoff-contract" cargo test --manifest-path desktop/src-tauri/Cargo.toml wait_for_backend -- --nocapture` | PASS：日志确认 App 更新后新进程跳过复用、在 9900 上误读健康响应、随后 managed child 退出并由 watchdog 复用健康后端；handoff 合约 5/5 通过；`wait_for_backend` 3/3 通过，覆盖外部健康服务不能满足 managed child ready 与匹配 runtime marker 正常 ready |
 | 2026-07-20 | TC-DAU-16 | `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin cli_version_probe_ --lib -- --nocapture`；连续 20 轮版本解析与独立失败/超时 fixture | PASS：4 个版本探测回归通过，覆盖 `ETXTBSY` 第三次恢复、持续占用 8 次停止、非瞬态错误不重试、版本输出解析以及独立失败/超时/缺失路径；原 workspace 失败用例连续 20/20 轮通过。 |
+| 2026-07-24 | TC-DAU-17 | 现场日志复核 `~/.bifrost/logs/desktop-bootstrap.log`，确认旧版本在 fresh `desktop-upgrade-relaunch.json` 下反复等待 `CLI-owned backend`，点击 `Start Bifrost Service` 也再次等待 30 秒；删除残留 marker 临时恢复本机；执行 `cargo test --manifest-path desktop/src-tauri/Cargo.toml cli_owned_upgrade_relaunch -- --nocapture` | PASS：3/3 通过。覆盖 CLI-owned core 已以新 PID/目标版本恢复时继续复用；无 CLI/core 重启且端口空闲时进入 `port is free, launching desktop-managed core` fallback，不再返回旧的 refusing 错误；端口仍被 `0.0.0.0` 占用时保留 fail-closed，拒绝启动第二个 desktop-managed core。 |
+| 2026-07-24 | TC-DAU-17 完整恢复矩阵 | `bash e2e-tests/tests/test_desktop_upgrade_handoff_contract.sh`；定向执行旧 Failed/legacy marker 零等待、shutdown ownership、target 完成清 marker、错误版本/错误端口阻断及 `cli_owned_upgrade_relaunch` 4 条恢复测试；测试前后读取 9900 listener 与 `/api/system` | PASS：handoff contract 全部通过；旧 marker 无 target 也不再重复等待 30 秒；同 PID target 可复用，端口空闲 fallback、同 data dir 旧 core 安全接管、无关端口 fail-closed 均通过；target core 仅在 marker 端口完成并清 marker，错误版本或错误端口不能绕过。正式服务前后均为 PID `85734`、版本 `0.0.163`，未被停止或替换。 |

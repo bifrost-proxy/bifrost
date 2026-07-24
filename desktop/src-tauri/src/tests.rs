@@ -1,24 +1,28 @@
 use super::{
     append_desktop_bootstrap_log, begin_backend_recovery, clear_backend_unavailable_if_healthy,
     deferred_desktop_install_version_error, desktop_backend_env, desktop_backend_start_args,
-    desktop_pending_install_path, desktop_sidecar_rust_log, desktop_startup_deadline,
-    desktop_startup_session_id, desktop_test_allows_multiple_instances,
+    desktop_pending_install_path, desktop_shutdown_backend_action, desktop_sidecar_rust_log,
+    desktop_startup_deadline, desktop_startup_session_id, desktop_test_allows_multiple_instances,
     desktop_upgrade_relaunch_marker_path, desktop_upgrade_shutdown_requested,
-    ensure_backend_running, host_window_close_behavior_for_platform, is_server_config_response,
-    is_upgrade_relaunch_marker_active, main_interface_decorations_for_platform,
-    mark_backend_unavailable_for_manual_start, parse_port_update_response,
-    persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit, publish_startup_ready,
-    read_active_upgrade_relaunch_marker, read_pending_desktop_install,
+    ensure_backend_running, ensure_backend_running_with_cli_wait,
+    external_cli_backend_matches_handoff, external_cli_handoff_wait,
+    failed_cli_handoff_can_retry_immediately, host_window_close_behavior_for_platform,
+    is_server_config_response, is_upgrade_relaunch_marker_active,
+    main_interface_decorations_for_platform, mark_backend_unavailable_for_manual_start,
+    parse_port_update_response, persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit,
+    publish_startup_ready, read_active_upgrade_relaunch_marker, read_pending_desktop_install,
     record_startup_deadline_error, relaunch_command_for_target, resolve_bifrost_binary_from_env,
-    resolve_desktop_config_path, resolve_desktop_data_dir,
-    sanitize_desktop_upgrade_relaunch_command, save_desktop_config,
-    should_allow_multiple_instances, should_handoff_to_main, should_retry_backend_candidate,
-    startup_deadline_disposition, stop_backend_before_restart, terminate_managed_backend,
+    resolve_desktop_config_path, resolve_desktop_data_dir, resolve_external_cli_backend_handoff,
+    runtime_marker_matches_active_backend, sanitize_desktop_upgrade_relaunch_command,
+    save_desktop_config, should_allow_multiple_instances, should_handoff_to_main,
+    should_retry_backend_candidate, startup_deadline_disposition, stop_backend_before_restart,
+    terminate_managed_backend, upgrade_handoff_requires_backend_release,
     upgrade_relaunch_uses_external_cli_backend, uses_borderless_desktop_chrome_for_platform,
     wait_for_backend, wait_for_child_exit, wait_for_external_cli_backend,
     windows_desktop_upgrade_handoff_command, write_desktop_upgrade_terminal_progress,
-    write_upgrade_relaunch_marker, BackendState, BackendWaitFailureKind, DesktopConfig,
-    DesktopInstallRollback, DesktopUpgradeRelaunchMarker, HostWindowCloseBehavior,
+    write_upgrade_relaunch_marker, BackendState, BackendSystemIdentity, BackendWaitFailureKind,
+    DesktopConfig, DesktopInstallRollback, DesktopRuntimeMarker, DesktopShutdownBackendAction,
+    DesktopUpgradeRelaunchMarker, ExternalCliBackendHandoff, HostWindowCloseBehavior,
     PendingDesktopInstall, StartupDeadlineDisposition, DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
     DESKTOP_UPGRADE_SHUTDOWN_ARG, WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
 };
@@ -35,6 +39,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+mod cli_handoff_recovery;
 
 fn assert_upgrade_relaunch_environment_removed(command: &Command) {
     for key in [
@@ -96,11 +102,22 @@ fn spawn_one_shot_health_server() -> u16 {
 }
 
 fn spawn_one_shot_system_server(pid: u32, version: &str) -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind system server");
+    spawn_system_server(pid, version, 1)
+}
+
+fn spawn_system_server(pid: u32, version: &str, request_count: usize) -> u16 {
+    spawn_system_server_on("127.0.0.1", pid, version, request_count)
+}
+
+fn spawn_system_server_on(host: &str, pid: u32, version: &str, request_count: usize) -> u16 {
+    let listener = TcpListener::bind((host, 0)).expect("bind system server");
     let port = listener.local_addr().expect("system server addr").port();
     let body = format!(r#"{{"version":"{version}","pid":{pid}}}"#);
     thread::spawn(move || {
-        if let Ok((mut stream, _)) = listener.accept() {
+        for _ in 0..request_count {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
             let mut buffer = [0_u8; 1024];
             let _ = stream.read(&mut buffer);
             let response = format!(
@@ -764,8 +781,11 @@ fn upgrade_relaunch_marker_round_trips_and_stale_marker_is_removed() {
 }
 
 #[test]
-fn cli_owned_upgrade_relaunch_reuses_only_the_restarted_target_backend() {
-    let target_port = spawn_one_shot_system_server(456, "0.0.156");
+fn cli_owned_upgrade_relaunch_falls_back_to_managed_core_when_port_is_free() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("reserve port");
+    let target_port = listener.local_addr().expect("reserved addr").port();
+    drop(listener);
     let marker = DesktopUpgradeRelaunchMarker {
         schema_version: 1,
         created_at_ms: super::current_time_millis(),
@@ -779,48 +799,68 @@ fn cli_owned_upgrade_relaunch_reuses_only_the_restarted_target_backend() {
         rollback: None,
     };
 
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let (child, port) = ensure_backend_running(
-        Path::new("/must-not-launch-a-second-core"),
+    let started_at = Instant::now();
+    let error = ensure_backend_running_with_cli_wait(
+        Path::new("/missing/bundled/bifrost"),
         temp_dir.path(),
-        "hybrid-upgrade-test",
+        "cli-owned-fallback-test",
         target_port,
         Some(&marker),
+        Duration::ZERO,
     )
-    .expect("the relaunched App reuses the restarted CLI-owned core");
-    assert!(child.is_none());
-    assert_eq!(port, target_port);
-    assert!(upgrade_relaunch_uses_external_cli_backend(&marker));
+    .expect_err("missing bundled binary should fail after taking the fallback path");
 
-    let managed_marker = DesktopUpgradeRelaunchMarker {
-        old_core_pid: Some(124),
-        observed_external_core_pid: None,
-        ..marker.clone()
-    };
     assert!(
-        !upgrade_relaunch_uses_external_cli_backend(&managed_marker),
-        "an App-managed core still requires release and a fresh bundled child"
+        started_at.elapsed() < Duration::from_secs(2),
+        "fallback should not wait for the normal upgrade handoff release once the port is free"
     );
+    assert!(
+        error.to_string().contains("failed to start backend"),
+        "expected managed-core launch path, got: {error}"
+    );
+    assert!(
+        !error
+            .to_string()
+            .contains("CLI-owned backend did not restart"),
+        "free port should not keep the App trapped in CLI-owned handoff refusal"
+    );
+    let bootstrap_log =
+        fs::read_to_string(temp_dir.path().join("logs/desktop-bootstrap.log")).expect("log");
+    assert!(bootstrap_log.contains("port is free, launching desktop-managed core"));
+}
 
-    let old_pid_port = spawn_one_shot_system_server(124, "0.0.156");
-    let old_pid_marker = DesktopUpgradeRelaunchMarker {
-        proxy_port: old_pid_port,
-        ..marker.clone()
+#[test]
+fn cli_owned_upgrade_relaunch_keeps_refusing_when_port_is_still_occupied() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let listener = TcpListener::bind((super::BACKEND_BIND_HOST, 0)).expect("occupy port");
+    let target_port = listener.local_addr().expect("occupied addr").port();
+    let marker = DesktopUpgradeRelaunchMarker {
+        schema_version: 1,
+        created_at_ms: super::current_time_millis(),
+        old_app_pid: 123,
+        old_core_pid: None,
+        observed_external_core_pid: Some(124),
+        proxy_port: target_port,
+        app_target: "/tmp/Bifrost.app".to_string(),
+        target_version: Some("0.0.156".to_string()),
+        pending_install: None,
+        rollback: None,
     };
-    assert!(!wait_for_external_cli_backend(
-        &old_pid_marker,
-        Duration::ZERO
-    ));
 
-    let old_version_port = spawn_one_shot_system_server(457, "0.0.155");
-    let old_version_marker = DesktopUpgradeRelaunchMarker {
-        proxy_port: old_version_port,
-        ..marker
-    };
-    assert!(!wait_for_external_cli_backend(
-        &old_version_marker,
-        Duration::ZERO
-    ));
+    let error = ensure_backend_running_with_cli_wait(
+        Path::new("/must-not-launch-a-second-core"),
+        temp_dir.path(),
+        "cli-owned-occupied-test",
+        target_port,
+        Some(&marker),
+        Duration::ZERO,
+    )
+    .expect_err("occupied port should still block a replacement core");
+
+    drop(listener);
+    assert!(error
+        .to_string()
+        .contains("port is still occupied, refusing to launch a second desktop-managed core"));
 }
 
 #[cfg(target_os = "macos")]
@@ -870,6 +910,49 @@ fn backend_recovery_guard_prevents_parallel_recovery() {
 }
 
 #[test]
+fn desktop_shutdown_stops_only_a_backend_owned_by_the_desktop() {
+    assert_eq!(
+        desktop_shutdown_backend_action(false, Some("daemon"), true),
+        DesktopShutdownBackendAction::PreserveExternalRuntime
+    );
+    assert_eq!(
+        desktop_shutdown_backend_action(false, None, false),
+        DesktopShutdownBackendAction::PreserveExternalRuntime
+    );
+    assert_eq!(
+        desktop_shutdown_backend_action(false, Some("desktop"), false),
+        DesktopShutdownBackendAction::PreserveExternalRuntime,
+        "a stale desktop runtime marker must not authorize stopping an unrelated core"
+    );
+    assert_eq!(
+        desktop_shutdown_backend_action(false, Some("desktop"), true),
+        DesktopShutdownBackendAction::StopOwnedRuntime
+    );
+    assert_eq!(
+        desktop_shutdown_backend_action(true, Some("daemon"), false),
+        DesktopShutdownBackendAction::StopOwnedRuntime,
+        "the live managed child remains authoritative even before its runtime marker is visible"
+    );
+
+    let runtime = DesktopRuntimeMarker {
+        pid: 456,
+        port: 19900,
+        start_mode: Some("desktop".to_string()),
+    };
+    let identity = BackendSystemIdentity {
+        version: "0.0.163".to_string(),
+        pid: 456,
+    };
+    assert!(runtime_marker_matches_active_backend(
+        &runtime, 19900, &identity
+    ));
+    assert!(
+        !runtime_marker_matches_active_backend(&runtime, 19901, &identity),
+        "a stale desktop runtime on another port must not authorize a stop"
+    );
+}
+
+#[test]
 fn external_backend_health_failure_requires_manual_start() {
     let temp_dir =
         std::env::temp_dir().join(format!("bifrost-desktop-test-{}", std::process::id()));
@@ -915,6 +998,38 @@ fn healthy_external_backend_clears_manual_start_gate() {
         .lock()
         .expect("startup error lock")
         .is_none());
+}
+
+#[test]
+fn healthy_backend_still_clears_manual_start_gate_during_app_managed_upgrade() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let port = spawn_one_shot_health_server();
+    let marker = DesktopUpgradeRelaunchMarker {
+        schema_version: 1,
+        created_at_ms: super::current_time_millis(),
+        old_app_pid: 123,
+        old_core_pid: Some(456),
+        observed_external_core_pid: None,
+        proxy_port: port,
+        app_target: "/tmp/Bifrost.app".to_string(),
+        target_version: Some("0.0.163".to_string()),
+        pending_install: None,
+        rollback: None,
+    };
+    let state = test_backend_state(
+        temp_dir.path().to_path_buf(),
+        port,
+        false,
+        Some("previous app-managed handoff failed".to_string()),
+    );
+    *state.upgrade_relaunch.lock().expect("marker lock") = Some(marker);
+
+    assert!(clear_backend_unavailable_if_healthy(
+        &state,
+        "test observed app-managed recovered backend",
+    ));
+    assert!(state.startup_ready.load(Ordering::SeqCst));
+    assert!(state.startup_error.lock().expect("error lock").is_none());
 }
 
 #[test]
