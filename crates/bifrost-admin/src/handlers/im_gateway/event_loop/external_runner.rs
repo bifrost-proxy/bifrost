@@ -1308,7 +1308,7 @@ pub(super) fn external_cli_adapter_label(adapter: &str) -> &'static str {
     }
 }
 
-pub(super) fn external_cli_progress_runner_summary(
+pub(in crate::handlers::im_gateway) fn external_cli_progress_runner_summary(
     runner_id: &str,
     adapter: &str,
     request: &crate::im_gateway::external_cli::ExternalCliRunRequest,

@@ -86,6 +86,25 @@ fn ask_runs_use_shared_chatgpt_web_browser_profile_not_run_local_profile() {
 }
 
 #[test]
+fn fresh_runs_reuse_existing_chatgpt_tab_without_closing_or_reopening() {
+    let send_source = include_str!("send.rs");
+    let browser_source = include_str!("browser.rs");
+
+    assert!(
+        !send_source.contains("close_chatgpt_pages_for_fresh_run"),
+        "fresh ChatGPT Web runs must not close existing ChatGPT tabs"
+    );
+    assert!(
+        !browser_source.contains("fn close_chatgpt_pages_for_fresh_run"),
+        "the destructive fresh-run tab cleanup helper must not return"
+    );
+    assert!(send_source.contains("take_or_attach_reusable_chatgpt_tab"));
+    assert!(browser_source.contains("take_reusable_conversation_tab"));
+    assert!(browser_source.contains("find_chatgpt_page"));
+    assert!(send_source.contains("reusing existing tab for fresh conversation"));
+}
+
+#[test]
 fn native_clipboard_paste_scales_send_button_waits_for_large_prompts() {
     assert_eq!(
         send_button_ready_max_wait(&"a".repeat(120)),

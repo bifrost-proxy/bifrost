@@ -42,6 +42,14 @@ Chat Gateway 不是新的 Agent 产品形态，也不是绕过 IM Gateway 的快
 - Chat Gateway 只是构造入站上下文的 `NormalizedInboundMessage`，字段包含 `source_kind` (`im`/`chat_gateway`)、`provider_id`、`provider_type`、`chat_id`、`user_id`、`message_id`、`text`、`images`、`reply_mode` (`none`/`test_stream`/`real_im`)、`target`。
 - 后续 session key、busy 队列、`/status`、`/stop`、`/clear`、progress card snapshot 都不区分消息来源。
 
+### 绑定会话的跨通道一致性
+
+- Session 是对话的唯一边界，WebUI 与 IM 只是同一 Session 的不同输入/展示通道。由飞书群聊或机器人私聊建立的 Session 在 WebUI 中继续发送用户消息时，必须把同一批 canonical progress events 和最终结果同步到原绑定目标。
+- 群聊目标只从 `im_group_bindings.session_key` 反查 `provider_id + chat_id`；机器人私聊只接受当前启用飞书 Provider 的 `provider_id + owner_open_id` canonical session key。不得相信 Web 请求任意声明的接收目标。
+- WebUI 主动发起的进度卡使用直接发送，不携带 `reply_to_message_id`，因为它没有对应的飞书源消息。IM 发起的轮次仍引用其真实源消息。
+- 绑定会话运行期间，IM 新消息继续命中同一个 active `session_key`：支持实时 Guide 的 Runner 直接 steer 当前 WebUI 启动的 turn；不支持或拒绝时进入该 Session 的队列。Guide/Queue 状态更新同一张 IM 进度卡，WebUI 继续从 canonical timeline 观察变化。
+- `admin-chat-*` 等没有持久化 IM 绑定的纯 WebUI Session 只在 WebUI 展示，绝不推断或广播到任意群/私聊。通道显式配置 `deliveryMode=no_im` 时仍尊重禁发策略。
+
 ### 测试流与真实 IM 渲染解耦
 
 - 真实 IM 渲染走 provider `send_text` / `send_card` / `patch_card`。
@@ -222,6 +230,7 @@ $BIFROST_DATA_DIR/im_gateway/chat_runs/<run_id>/
 - Chat Gateway run dir、runtime_snapshot、artifact 不进 Sync。
 - Remote Invoke 只能读安全 summary；`bifrost remote im ...` 不能读 secret/token/完整 provider config。
 - 图片附件目录只允许服务端派生，禁止 request 指定 `attachmentBaseDir`。
+- **跨通道绑定权威**：WebUI 续聊 IM Session 时，接收目标必须来自服务端 Provider/群绑定存储；纯 Web Session 不做 IM 镜像。Web 发起的 IM 卡片不得伪造引用消息。
 
 ## 实现切分
 

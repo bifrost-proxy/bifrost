@@ -229,6 +229,7 @@ for runner_name, adapter, mode, transport in (
     ("codex-web", "codex", "accept", "app_server"),
     ("traex-web", "traex", "accept", "app_server"),
     ("codex-im", "codex", "accept", "app_server"),
+    ("codex-cross-channel", "codex", "accept", "app_server"),
     ("codex-im-queue", "codex", "accept", "app_server"),
     ("codex-im-effort", "codex", "accept", "app_server"),
     ("traex-im-effort", "traex", "accept", "app_server"),
@@ -445,6 +446,40 @@ send_im_inbound "im-guide-provider" "im-guide-owner" "wait for default IM guide"
 wait_for_mock_record '"event":"turn_ready","runner":"codex-im"'
 send_im_inbound "im-guide-provider" "im-guide-owner" "default-im-guide"
 wait_for_mock_record 'default-im-guide'
+
+create_im_provider "cross-channel-provider" "cross-channel-owner" "codex-cross-channel"
+curl -fsS --noproxy '*' -X PATCH \
+  "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/chat/config/channels/cross-channel-provider" \
+  -H 'content-type: application/json' \
+  -d '{"runnerId":"codex-cross-channel","deliveryMode":"no_im"}' \
+  >/dev/null
+cross_channel_stream="$TEST_DIR/cross-channel-web-stream.ndjson"
+curl -sS -N --noproxy '*' \
+  -H 'content-type: application/json' \
+  -d '{"message":"wait for IM guidance on the Web-started turn","runnerId":"codex-cross-channel","sessionKey":"cross-channel-provider:cross-channel-owner","runtime":"external_cli"}' \
+  "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/chat/stream" \
+  >"$cross_channel_stream" &
+cross_channel_pid=$!
+wait_for_mock_record '"event":"turn_ready","runner":"codex-cross-channel"'
+send_im_inbound "cross-channel-provider" "cross-channel-owner" "guide-from-im-to-web"
+wait "$cross_channel_pid"
+python3 - "$cross_channel_stream" "$MOCK_LOG" <<'PY'
+import json
+import sys
+
+events = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+finished = [event for event in events if event.get("eventType") == "run_finished"]
+assert len(finished) == 1, events
+assert finished[0]["response"] == "GUIDED_codex-cross-channel", finished
+records = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if line.strip()]
+steered = [
+    record for record in records
+    if record.get("event") == "turn_steered"
+    and record.get("runner") == "codex-cross-channel"
+]
+assert len(steered) == 1, steered
+assert steered[0]["params"]["input"][0]["text"] == "guide-from-im-to-web", steered
+PY
 
 create_im_provider "im-queue-provider" "im-queue-owner" "codex-im-queue"
 send_im_inbound "im-queue-provider" "im-queue-owner" "wait for explicit IM queue"

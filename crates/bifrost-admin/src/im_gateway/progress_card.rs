@@ -3341,4 +3341,4 @@ fn is_markdown_structural_line(line: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
