@@ -541,6 +541,7 @@ fn script_installs_use_the_target_aware_atomic_upgrade_path() {
 
 mod review_comments;
 mod spawn_retry;
+mod upgrade_recovery;
 
 #[test]
 fn test_glibc_2_38_requires_musl_for_upgrade() {

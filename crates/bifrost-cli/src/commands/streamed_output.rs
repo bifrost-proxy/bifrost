@@ -27,10 +27,14 @@ impl StreamedOutputCapture {
         self.stderr.reopen().map(Stdio::from)
     }
 
-    pub(crate) fn forward_available(&mut self) {
+    /// Forward newly captured bytes and report whether the child produced any
+    /// fresh output since the previous call.
+    pub(crate) fn forward_available(&mut self) -> bool {
+        let before = (self.stdout_forwarded, self.stderr_forwarded);
         let mut stdout = io::stdout().lock();
         let mut stderr = io::stderr().lock();
         let _ = self.forward_available_to(&mut stdout, &mut stderr);
+        before != (self.stdout_forwarded, self.stderr_forwarded)
     }
 
     fn forward_available_to(
@@ -124,6 +128,22 @@ mod tests {
         let (captured_stdout, captured_stderr) = capture.read_all();
         assert_eq!(captured_stdout, "download 10%\rdownload 100%\n");
         assert_eq!(captured_stderr, "installer note\n");
+    }
+
+    #[test]
+    fn forwarding_reports_only_fresh_child_output_as_activity() {
+        let mut capture = StreamedOutputCapture::new().expect("capture");
+        assert!(!capture.forward_available());
+
+        let mut child_stdout = capture.stdout.reopen().expect("stdout writer");
+        child_stdout.write_all(b"download 10%\r").unwrap();
+        child_stdout.flush().unwrap();
+
+        assert!(capture.forward_available());
+        assert!(
+            !capture.forward_available(),
+            "already-forwarded bytes cannot extend a stall deadline again"
+        );
     }
 
     #[test]

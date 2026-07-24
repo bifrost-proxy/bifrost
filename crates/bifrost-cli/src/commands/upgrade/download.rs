@@ -164,6 +164,10 @@ pub(super) fn download_file_with_progress(
                 )
                 .bright_yellow()
             );
+            crate::commands::upgrade_background::report_download_status(format!(
+                "Retrying current download source ({}/{})…",
+                attempt, tuning.download_tries
+            ));
         }
 
         match download_file_once_with_progress(&client, url, output_path) {
