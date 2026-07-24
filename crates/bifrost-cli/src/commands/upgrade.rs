@@ -1052,13 +1052,9 @@ fn download_and_install(
                         mirror_display_name(&base).bright_white()
                     );
                 }
-                let source_name = mirror_display_name(&base);
-                let progress_message = if attempt == 0 {
-                    format!("Connecting to download source {source_name}…")
-                } else {
-                    format!("Trying fallback download source {source_name}…")
-                };
-                crate::commands::upgrade_background::report_download_status(progress_message);
+                crate::commands::upgrade_background::report_download_status(
+                    download_source_progress_message(&base, attempt),
+                );
                 println!("{} {}", "Downloading:".bright_cyan(), download_url.dimmed());
 
                 match download_file_with_progress(&download_url, &archive_path, tuning) {

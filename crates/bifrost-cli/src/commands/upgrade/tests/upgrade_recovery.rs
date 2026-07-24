@@ -10,6 +10,15 @@ fn desktop_child_progress_watch_accepts_only_fresh_matching_activity() {
         !watch.observe_activity(),
         "missing progress is not activity"
     );
+    fs::write(
+        bifrost_core::upgrade_progress::progress_file_path(temp.path()),
+        "{not-json",
+    )
+    .expect("write invalid progress");
+    assert!(
+        !watch.observe_activity(),
+        "invalid progress is not child activity"
+    );
 
     let mut matching = UpgradeProgress::new(UpgradePhase::Downloading, "42%")
         .with_target(Some("0.0.162".to_string()))
@@ -82,6 +91,24 @@ fn desktop_child_progress_extends_the_stall_deadline() {
     )
     .expect("child command result");
     writer.join().expect("progress writer");
+    assert_eq!(output.status, TimedCommandStatus::Success);
+}
+
+#[test]
+#[cfg(unix)]
+fn desktop_child_streaming_wrapper_selects_structured_progress_watch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let output = command_output_with_timeout_and_env_streaming(
+        Path::new("/bin/sh"),
+        &["-c".to_string(), "true".to_string()],
+        Duration::from_secs(1),
+        Duration::from_millis(25),
+        &[],
+        None,
+        Some(ChildProgressWatch::new(temp.path(), "0.0.162", "desktop")),
+    )
+    .expect("structured progress wrapper command");
+
     assert_eq!(output.status, TimedCommandStatus::Success);
 }
 
@@ -174,6 +201,18 @@ fn installed_upgrade_reports_both_desktop_and_proxy_restart_failures() {
 }
 
 #[test]
+fn installed_upgrade_reports_proxy_restart_failure_after_desktop_success() {
+    let error = finish_installed_upgrade_steps(
+        UpgradeBehavior::background(),
+        || Ok(()),
+        || Err(BifrostError::Config("restart failed".to_string())),
+    )
+    .expect_err("proxy restart fails");
+
+    assert!(error.to_string().contains("restart failed"));
+}
+
+#[test]
 fn installed_upgrade_skips_proxy_restart_when_behavior_disables_it() {
     let restart_called = std::cell::Cell::new(false);
     finish_installed_upgrade_steps(
@@ -186,6 +225,22 @@ fn installed_upgrade_skips_proxy_restart_when_behavior_disables_it() {
     )
     .expect("desktop-only completion");
     assert!(!restart_called.get());
+}
+
+#[test]
+fn download_status_messages_cover_primary_fallback_and_retry_sources() {
+    assert_eq!(
+        download_source_progress_message("https://github.com", 0),
+        "Connecting to download source github.com…"
+    );
+    assert_eq!(
+        download_source_progress_message("https://ghfast.top/https://github.com", 1),
+        "Trying fallback download source ghfast.top…"
+    );
+    assert_eq!(
+        download_retry_progress_message(2, 3),
+        "Retrying current download source (2/3)…"
+    );
 }
 
 #[test]
