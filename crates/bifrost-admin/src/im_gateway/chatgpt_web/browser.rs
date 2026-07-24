@@ -392,8 +392,13 @@ pub(super) struct BrowserSession {
 impl BrowserSession {
     #[cfg(test)]
     pub(super) fn for_test(profile_dir: PathBuf) -> Self {
+        Self::for_test_with_port(profile_dir, 1)
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test_with_port(profile_dir: PathBuf, port: u16) -> Self {
         Self {
-            port: 1,
+            port,
             child: None,
             profile_dir,
         }
@@ -914,6 +919,7 @@ mod tests {
         CdpClient, CdpPage, CONVERSATION_TAB_POOL_SIZE,
     };
     use dashmap::DashMap;
+    use futures_util::{SinkExt, StreamExt};
     use serde_json::Value;
     use std::path::PathBuf;
     use std::sync::{
@@ -1181,6 +1187,103 @@ mod tests {
 
         assert!(reused.is_none());
         server.await.expect("fake server finishes");
+    }
+
+    #[tokio::test]
+    async fn fresh_conversation_reuse_helper_attaches_existing_browser_tab() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let websocket_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake CDP WebSocket");
+        let websocket_port = websocket_listener
+            .local_addr()
+            .expect("WebSocket listener address")
+            .port();
+        let websocket_server = tokio::spawn(async move {
+            let (stream, _) = websocket_listener
+                .accept()
+                .await
+                .expect("accept CDP WebSocket");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("upgrade CDP WebSocket");
+            for _ in 0..3 {
+                let request = websocket
+                    .next()
+                    .await
+                    .expect("CDP command")
+                    .expect("valid CDP WebSocket message");
+                let Message::Text(payload) = request else {
+                    panic!("expected text CDP command");
+                };
+                let command: Value =
+                    serde_json::from_str(&payload).expect("parse CDP command payload");
+                let id = command
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .expect("CDP command id");
+                websocket
+                    .send(Message::Text(
+                        serde_json::json!({"id": id, "result": {}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .expect("write CDP response");
+            }
+        });
+
+        let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake DevTools HTTP");
+        let http_port = http_listener
+            .local_addr()
+            .expect("HTTP listener address")
+            .port();
+        let http_server = tokio::spawn(async move {
+            let (mut stream, _) = http_listener
+                .accept()
+                .await
+                .expect("accept DevTools request");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.expect("read request");
+            let body = serde_json::json!([{
+                "id": "existing-target",
+                "url": "https://chatgpt.com/",
+                "webSocketDebuggerUrl": format!("ws://127.0.0.1:{websocket_port}")
+            }])
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+        let profile = PathBuf::from(format!(
+            "/tmp/chatgpt-web-tests-profile-fresh-attach-{http_port}"
+        ));
+        let browser = BrowserSession {
+            port: http_port,
+            child: None,
+            profile_dir: profile.clone(),
+        };
+
+        let (target_id, cdp) =
+            take_or_attach_reusable_chatgpt_tab(&browser, &profile, "https://chatgpt.com")
+                .await
+                .expect("reuse succeeds")
+                .expect("existing browser target");
+
+        assert_eq!(target_id, "existing-target");
+        cdp.close();
+        http_server.await.expect("fake HTTP server finishes");
+        websocket_server
+            .await
+            .expect("fake WebSocket server finishes");
     }
 
     #[test]

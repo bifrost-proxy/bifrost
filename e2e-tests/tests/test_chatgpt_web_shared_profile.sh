@@ -72,6 +72,10 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   --lib -- --nocapture
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  conversation_page_match_treats_homepage_as_expected_for_fresh_run \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   dom_output_in_progress_reason_uses_stop_button_before_text_state \
   --lib -- --nocapture
 

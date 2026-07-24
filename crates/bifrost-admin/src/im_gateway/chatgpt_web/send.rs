@@ -423,7 +423,9 @@ async fn send_with_browser_once(
             // is in the middle of heavy JS execution or internal navigation.
             // We give it one retry with a short backoff before propagating.
             match current_conversation_id(cdp).await {
-                Ok(Some(actual)) if Some(actual.as_str()) == conversation_id => {
+                Ok(actual)
+                    if conversation_page_matches_expected(actual.as_deref(), conversation_id) =>
+                {
                     info!(
                         conversation_id = ?conversation_id,
                         "chatgpt_web send: pooled tab confirmed on expected conversation"
@@ -445,7 +447,12 @@ async fn send_with_browser_once(
                     );
                     sleep(Duration::from_secs(2)).await;
                     match current_conversation_id(cdp).await {
-                        Ok(Some(actual)) if Some(actual.as_str()) == conversation_id => {
+                        Ok(actual)
+                            if conversation_page_matches_expected(
+                                actual.as_deref(),
+                                conversation_id,
+                            ) =>
+                        {
                             info!(
                                 conversation_id = ?conversation_id,
                                 "chatgpt_web send: pooled tab confirmed after retry"
@@ -3154,6 +3161,13 @@ fn new_conversation_url(config: &RuntimeConfig) -> String {
     format!("{base}/")
 }
 
+fn conversation_page_matches_expected(
+    actual_conversation_id: Option<&str>,
+    expected_conversation_id: Option<&str>,
+) -> bool {
+    actual_conversation_id == expected_conversation_id
+}
+
 async fn set_composer_text(cdp: &CdpClient, text: &str) -> Result<Value, String> {
     let locate_expression = r#"(() => {
           const isVisible = (el) => !!(el?.offsetWidth || el?.offsetHeight || el?.getClientRects().length);
@@ -4436,6 +4450,23 @@ mod coverage_boost {
         assert_eq!(new_conversation_url(&config), "https://chatgpt.example/");
     }
 
+    #[test]
+    fn conversation_page_match_treats_homepage_as_expected_for_fresh_run() {
+        assert!(conversation_page_matches_expected(None, None));
+        assert!(conversation_page_matches_expected(
+            Some("conversation"),
+            Some("conversation")
+        ));
+        assert!(!conversation_page_matches_expected(
+            Some("old-conversation"),
+            None
+        ));
+        assert!(!conversation_page_matches_expected(
+            None,
+            Some("conversation")
+        ));
+    }
+
     #[tokio::test]
     async fn reuse_fresh_tab_installs_pooled_target_and_skips_existing_selection() {
         let config = test_runtime_config_with_execution_mode("headed");
@@ -4476,6 +4507,46 @@ mod coverage_boost {
             .expect("existing selection is preserved");
         assert_eq!(existing_target.as_deref(), Some("existing"));
         super::super::browser::evict_conversation_tab(&config.profile_dir, "old");
+    }
+
+    #[tokio::test]
+    async fn reuse_fresh_tab_keeps_empty_state_when_browser_has_no_chatgpt_target() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake DevTools HTTP");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept DevTools request");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.expect("read request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]",
+                )
+                .await
+                .expect("write response");
+        });
+
+        let mut config = test_runtime_config_with_execution_mode("headed");
+        config.profile_dir = PathBuf::from(format!(
+            "/tmp/bifrost-chatgpt-web-send-test-no-target-{port}"
+        ));
+        let browser = BrowserSession::for_test_with_port(config.profile_dir.clone(), port);
+        let mut target_id = None;
+        let mut client = None;
+        let mut reused = false;
+        let mut state = (&mut target_id, &mut client, &mut reused);
+
+        reuse_fresh_tab(&browser, &config, None, &mut state)
+            .await
+            .expect("empty browser target lookup succeeds");
+
+        assert!(target_id.is_none());
+        assert!(client.is_none());
+        assert!(!reused);
+        server.await.expect("fake server finishes");
     }
 }
 
