@@ -1066,8 +1066,8 @@ use external_runner::*;
 mod session_dispatch;
 #[allow(unused_imports)]
 pub(super) use external_runner::{
-    apply_external_cli_resume_metadata, finalize_live_guide_group_turns,
-    resolve_external_cli_delivery_mode,
+    apply_external_cli_resume_metadata, external_cli_progress_runner_summary,
+    finalize_live_guide_group_turns, resolve_external_cli_delivery_mode,
 };
 use session_dispatch::*;
 #[cfg(test)]

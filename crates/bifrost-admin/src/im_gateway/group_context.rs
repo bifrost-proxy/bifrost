@@ -98,6 +98,13 @@ pub struct PreparedGroupTurn {
     pub quoted_message_missing: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupSessionBinding {
+    pub provider_id: String,
+    pub chat_id: String,
+    pub chat_name: Option<String>,
+}
+
 impl PreparedGroupTurn {
     pub fn delivery_message(&self, command_prefix: Option<&str>) -> String {
         command_prefix
@@ -614,6 +621,29 @@ impl ImGroupContextStore {
             .optional()
             .map(|value| value.flatten())
             .map_err(|error| format!("read group runner: {error}"))
+    }
+
+    pub fn binding_by_session(
+        &self,
+        session_key: &str,
+    ) -> Result<Option<GroupSessionBinding>, String> {
+        let connection = self.connection.lock();
+        connection
+            .query_row(
+                "SELECT provider_id, chat_id, chat_name
+                 FROM im_group_bindings
+                 WHERE session_key = ?1",
+                params![session_key],
+                |row| {
+                    Ok(GroupSessionBinding {
+                        provider_id: row.get(0)?,
+                        chat_id: row.get(1)?,
+                        chat_name: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| format!("read group session binding: {error}"))
     }
 
     pub fn message_count(&self, provider_id: &str, chat_id: &str) -> Result<u64, String> {

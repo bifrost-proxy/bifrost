@@ -1441,8 +1441,41 @@
 3. Live Guide 与真实临时服务 E2E 保持通过，运行结束后不残留 active run/session。
 4. coverage job 不再因该 mock app-server 测试的 `ETXTBSY` 瞬态失败而中断，并继续执行 90% gate。
 
+### TC-IEC-67: 绑定 Session 的 WebUI 与飞书双向进展同步
+
+操作步骤：
+
+1. 执行绑定目标与主动卡片发送回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin web_im_progress_target_ --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin group_binding_can_be_resolved --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin proactive_progress_card_ --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     bound_web_turn_sends_direct_progress_card_and_final_output --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+     web_guide_queue_fallback_updates_bound_im_progress_card --lib -- --nocapture
+   ```
+2. 构建当前源码二进制并执行跨通道 Live Guide E2E：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_external_runner_live_guide.sh
+   ```
+3. 检查 focused 测试的 mock Feishu HTTP 请求记录：首个消息路径必须为 `/open-apis/im/v1/messages`，接收目标为绑定的 `chat_id/open_id`，最终 CardKit update payload 包含 WebUI turn 的最终输出。
+4. 检查 Live Guide E2E 的 `codex-cross-channel` 场景：Web stream 先启动 canonical 私聊 Session，随后 mock IM inbound 发送 `guide-from-im-to-web`，同一个 stream 返回 `GUIDED_codex-cross-channel`。
+
+如当前测试账号有不会影响其他成员的专用飞书群，可补充真实飞书观察；这不是自动回归的前置条件，禁止为测试向生产群或真实用户发送未获授权的消息。
+
+预期结果：
+
+1. 群聊 Session 只从持久化 `im_group_bindings` 解析原 `provider_id + chat_id`；机器人私聊只解析启用 Provider 的 canonical `provider_id:owner_open_id`，伪造或无绑定 Session 不产生 IM 目标。
+2. WebUI 启动的绑定 Session 在飞书直接发送一张进度卡，接口路径不是 `/<message_id>/reply`，payload 包含正确 `receive_id`，因没有飞书源消息而不携带引用消息 ID。
+3. WebUI 与飞书看到同一批运行进展和最终回复；飞书在 WebUI 启动的活跃 turn 中继续发送消息时，支持 steer 的 Runner 在同一 thread/turn 接收 Guide，失败或不支持时按原 Session 排队。
+4. 纯 WebUI Session 保持 WebUI-only；`deliveryMode=no_im` 仍禁止跨通道发送。
+
 ## 最近执行记录
 
+- 2026-07-24：PASS — 新增并立即执行 TC-IEC-67。绑定解析 focused 单测 `2/2 + 1/1` 通过，主动卡片、完整 Web→IM bridge、Web Guide 降级排队后刷新绑定卡片三项单测各 `1/1` 通过；mock Feishu 记录首个消息路径为 `/open-apis/im/v1/messages`、`receive_id=ou_owner`，没有 reply message 路径，最终 CardKit update 包含 `final from WebUI`，Guide 降级时卡片包含 `WebUI 引导无法实时注入` 和原引导摘要。重新构建当前源码二进制后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh`，输出 `[external-runner-live-guide] PASS`；新增 `codex-cross-channel` 场景由 Web stream 启动 `cross-channel-provider:cross-channel-owner`，随后 mock IM inbound 的 `guide-from-im-to-web` 在同一 active turn 被 steer，Web stream 最终返回 `GUIDED_codex-cross-channel`。未向真实生产群或用户发送测试消息。
 - 2026-07-21：PASS — 按更新后的 TC-IEC-43/44 执行 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_external_runner_image_input.sh`；同 key 两轮 Web Chat、Trae 及 runner-call 图片均写入 `agent/sessions/by-key/attachments/session-{sha256}/<runId>/images/`，不同 run 目录隔离且旧图片未被覆盖。
 - 2026-07-15：针对 PR #394 coverage job 的 Linux `Text file busy (os error 26)` 新增并立即执行 TC-IEC-66。注入回归验证 Unix `ETXTBSY` 前两次失败后第三次成功、持续占用恰好尝试 8 次后返回、`NotFound` 仅尝试一次，并验证缺失 executable 的用户错误保留 adapter 与实际路径；本机 macOS 按平台预期过滤 Linux 真实 spawn 用例，原失败用例 `mock_app_server_accepts_live_guide_and_completes_same_turn` 输出 `1 passed`；重新构建当前源码二进制后，`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh` 输出 `[external-runner-live-guide] PASS`。Linux 持有写句柄的真实回归与 95% changed-lines / 90% workspace coverage gate 由 PR CI 在目标平台执行并作为本用例最终门禁。
 - 2026-07-15：新增并立即执行 TC-IEC-65。引用结构单元回归 `6/6` 通过，覆盖双来源、单来源、非法/混合节点、普通图片，以及独立/描述性 favicon 仍可预览；Playwright focused E2E `1/1` 通过，确认双来源 favicon 均为 `14px × 14px`、无图片预览 ID，普通正文图片仍是唯一灯箱图片，暗色主题可见。随后以 `BACKEND_PORT=9900 WEB_PORT=3015 pnpm --dir web exec vite --host 127.0.0.1 --port 3015` 代理现有正式后端，在 Codex 内置浏览器打开用户真实 session/history；当前 canonical Agent Chat 参数下共识别 14 组来源引用、15 个 favicon，首组 `Reuters+2AP News+2` 高度 24px、两个图标均为 `14px × 14px`，页面没有正文预览图片。暗色主题下引用背景为 `rgba(255, 255, 255, 0.04)`、边框为 `rgb(48, 48, 48)`，组件持续可见。未停止或替换 9900 服务，未修改系统代理。
