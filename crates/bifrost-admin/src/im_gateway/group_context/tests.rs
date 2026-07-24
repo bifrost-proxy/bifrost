@@ -26,6 +26,7 @@ fn group_event(
             text: text.to_string(),
             mentions,
             images: Vec::new(),
+            files: Vec::new(),
             raw_type: Some("text".to_string()),
             raw_content: Some(serde_json::json!({"text": text})),
             create_time: Some(received_at),

@@ -312,6 +312,7 @@ pub(super) async fn run_external_cli_agent_chat(
     );
     let mut current_message = input.message_text;
     let mut current_images = input.images;
+    let mut current_files = input.files;
     let mut current_event = ctx.event.clone();
     let mut recorder = session.recorder.take();
     let mut runner_metadata = persisted_state
@@ -360,6 +361,7 @@ pub(super) async fn run_external_cli_agent_chat(
                     current_event = event_for_queue_item(ctx.event, next_item.context.as_ref());
                     current_message = next_item.message;
                     current_images = external_cli_images_from_chat_images(next_item.images);
+                    current_files = next_item.files;
                     continue;
                 }
                 None => break,
@@ -377,6 +379,7 @@ pub(super) async fn run_external_cli_agent_chat(
             persisted_state.as_ref(),
         );
         request.images = std::mem::take(&mut current_images);
+        request.files = std::mem::take(&mut current_files);
         apply_external_cli_resume_metadata(&mut request, &runner_metadata);
         apply_session_bound_work_dir(
             &mut request,
@@ -905,6 +908,7 @@ pub(super) async fn run_external_cli_agent_chat(
                 }
                 current_message = next_item.message;
                 current_images = external_cli_images_from_chat_images(next_item.images);
+                current_files = next_item.files;
             }
             None => break,
         };

@@ -318,11 +318,9 @@ pub(super) async fn handle_busy_default_message(
         return;
     }
     if ctx.default_mode == BusyMessageDefaultMode::ExternalGuide
-        && ctx
-            .event
-            .message
-            .as_ref()
-            .is_none_or(|event_message| event_message.images.is_empty())
+        && ctx.event.message.as_ref().is_none_or(|event_message| {
+            event_message.images.is_empty() && event_message.files.is_empty()
+        })
     {
         handle_busy_guide_command(message, session_key, ctx).await;
         return;
@@ -338,10 +336,17 @@ pub(super) async fn handle_busy_default_message(
             }
             _ => Vec::new(),
         };
-        match ctx.queue_manager.push_queue_with_images_and_context(
+        let files = match ctx.event.message.as_ref() {
+            Some(event_message) if !event_message.files.is_empty() => {
+                resolve_event_files(ctx.client, ctx.provider, ctx.event, &event_message.files).await
+            }
+            _ => Vec::new(),
+        };
+        match ctx.queue_manager.push_queue_with_attachments_and_context(
             session_key,
             message.to_string(),
             images,
+            files,
             Some(queue_item_context(ctx)),
         ) {
             Ok(items) => {

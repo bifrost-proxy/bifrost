@@ -36,7 +36,13 @@ pub(super) async fn handle_concurrent_event_during_chat(
         error!(error = %error, "failed to store concurrent event");
     }
     let message = match event.message.as_ref() {
-        Some(message) if !message.text.trim().is_empty() || !message.images.is_empty() => message,
+        Some(message)
+            if !message.text.trim().is_empty()
+                || !message.images.is_empty()
+                || !message.files.is_empty() =>
+        {
+            message
+        }
         _ => return,
     };
     let dispatch = if is_group_event {
@@ -165,7 +171,24 @@ pub(super) async fn handle_concurrent_event_during_chat(
         )
         .await;
     } else {
-        let _ = queue_manager.push_queue(&session_key, message_text);
+        let images = resolve_event_images(client, &provider, event, &message.images).await;
+        let files = resolve_event_files(client, &provider, event, &message.files).await;
+        let context = group_turn_id.clone().map(|group_turn_id| {
+            crate::im_gateway::queue_manager::QueueItemContext {
+                event_id: event.event_id.clone(),
+                message_id: event.source.message_id.clone(),
+                user_id: event.source.user_id.clone(),
+                user_name: event.source.user_name.clone(),
+                group_turn_id: Some(group_turn_id),
+            }
+        });
+        let _ = queue_manager.push_queue_with_attachments_and_context(
+            &session_key,
+            message_text,
+            images,
+            files,
+            context,
+        );
         send_agent_reply(
             client,
             &provider,

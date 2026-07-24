@@ -2418,7 +2418,8 @@ mod coverage_boost {
 
     #[tokio::test]
     async fn get_ip_tls_pending_returns_empty_list_when_manager_missing() {
-        let state = std::sync::Arc::new(AdminState::new(19999));
+        let harness = TestAdminState::builder().port(19999).build();
+        let state = harness.state();
         let resp = get_ip_tls_pending(state).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
@@ -2429,14 +2430,16 @@ mod coverage_boost {
 
     #[tokio::test]
     async fn ip_tls_pending_stream_returns_service_unavailable_without_manager() {
-        let state = std::sync::Arc::new(AdminState::new(19999));
+        let harness = TestAdminState::builder().port(19999).build();
+        let state = harness.state();
         let resp = ip_tls_pending_stream(state).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
     async fn clear_ip_tls_pending_reports_when_manager_missing() {
-        let state = std::sync::Arc::new(AdminState::new(19999));
+        let harness = TestAdminState::builder().port(19999).build();
+        let state = harness.state();
         let resp = clear_ip_tls_pending(state, None).await;
         assert_eq!(resp.status(), StatusCode::OK);
 

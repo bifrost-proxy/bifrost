@@ -691,6 +691,7 @@ pub(super) async fn request_agent_stop_stops_external_runner_by_session_key() {
     let (executable, args) = fake_external_runner_sleep_command();
     let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "stop by shared helper".to_string(),
         operation: "ask".to_string(),
         params: serde_json::Value::Null,

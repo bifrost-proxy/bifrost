@@ -169,7 +169,7 @@ async fn start_bound_web_im_progress(
 ) -> Option<WebImProgressTurn> {
     let context = context?;
     let session_key = request.session_key.as_deref()?;
-    let initial_message = image_message_preview(&request.message, &request.images);
+    let initial_message = image_message_preview(&request.message, &request.images, &request.files);
     let started = if context
         .registry
         .rollover_existing(session_key, &initial_message)
@@ -248,7 +248,7 @@ fn message_image_content_parts(
     let normalized: Vec<&crate::im_gateway::external_cli::ExternalCliImageInput> = images
         .iter()
         .filter(|image| !image.data.trim().is_empty())
-        .take(MAX_AGENT_IMAGES_PER_MESSAGE)
+        .take(MAX_AGENT_ATTACHMENTS_PER_MESSAGE)
         .collect();
     if normalized.is_empty() {
         return None;
@@ -274,6 +274,7 @@ fn message_image_content_parts(
 fn image_message_preview(
     message: &str,
     images: &[crate::im_gateway::external_cli::ExternalCliImageInput],
+    files: &[crate::im_gateway::external_cli::ExternalCliFileInput],
 ) -> String {
     let trimmed = message.trim();
     if !trimmed.is_empty() {
@@ -282,12 +283,25 @@ fn image_message_preview(
     let count = images
         .iter()
         .filter(|image| !image.data.trim().is_empty())
-        .take(MAX_AGENT_IMAGES_PER_MESSAGE)
+        .take(MAX_AGENT_ATTACHMENTS_PER_MESSAGE)
         .count();
-    if count == 1 {
-        "Attached 1 image".to_string()
+    if count > 0 {
+        if count == 1 {
+            return "Attached 1 image".to_string();
+        }
+        return format!("Attached {count} images");
+    }
+    let file_count = files
+        .iter()
+        .filter(|file| !file.data.trim().is_empty())
+        .take(MAX_AGENT_ATTACHMENTS_PER_MESSAGE)
+        .count();
+    if file_count == 1 {
+        "Attached 1 file".to_string()
+    } else if file_count > 1 {
+        format!("Attached {file_count} files")
     } else {
-        format!("Attached {count} images")
+        String::new()
     }
 }
 
@@ -568,6 +582,7 @@ pub(super) async fn handle_chat_gateway(
                             first_message_title_preview(&image_message_preview(
                                 &request.message,
                                 &request.images,
+                                &request.files,
                             )),
                             request
                                 .work_dir
@@ -788,6 +803,7 @@ pub(super) async fn handle_chat_gateway(
                         current_request = request_for_state.clone();
                         current_request.message = next_message;
                         current_request.images.clear();
+                        current_request.files.clear();
                         apply_persisted_external_cli_state(
                             &mut current_request,
                             &runner_id_for_state,
@@ -1168,7 +1184,7 @@ async fn runner_call_stream_response(
     if user_message.is_empty() && !has_images {
         return Err("message or images are required".to_string());
     }
-    let visible_user_message = image_message_preview(&user_message, &body.images);
+    let visible_user_message = image_message_preview(&user_message, &body.images, &[]);
 
     let config = service.external_cli_config_store.load();
     let target = resolve_runner_call_target(&config, &target_runner_id)?;
@@ -2517,6 +2533,7 @@ fn remember_external_cli_started_state(
             state.last_user_message = first_message_title_preview(&image_message_preview(
                 &request.message,
                 &request.images,
+                &request.files,
             ));
             state.title = state
                 .title
@@ -2580,6 +2597,7 @@ fn remember_external_cli_result_state(
             state.last_user_message = first_message_title_preview(&image_message_preview(
                 &request.message,
                 &request.images,
+                &request.files,
             ));
             state.title = state
                 .title
@@ -3089,8 +3107,8 @@ fn append_external_runner_user_message_once(
     request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
     timestamp: u64,
 ) {
-    let user_message = image_message_preview(&request.message, &request.images);
-    if user_message.is_empty() || user_message == "Attached 0 images" {
+    let user_message = image_message_preview(&request.message, &request.images, &request.files);
+    if user_message.is_empty() {
         return;
     }
     let content_parts = message_image_content_parts(&request.message, &request.images);
@@ -3611,6 +3629,7 @@ mod tests {
         crate::im_gateway::external_cli::ExternalCliRunRequest {
             message: "timeline".to_string(),
             images: Vec::new(),
+            files: Vec::new(),
             operation: "chat".to_string(),
             params: serde_json::Value::Null,
             provider_id: None,
@@ -3720,6 +3739,7 @@ mod tests {
         let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
         let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: "今天的AI领域相关的新闻。".to_string(),
             operation: "chat".to_string(),
             params: serde_json::Value::Null,
@@ -3809,6 +3829,7 @@ mod tests {
 
         let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: "new Web message".to_string(),
             operation: "chat".to_string(),
             params: serde_json::json!({ "historyPath": history_path }),
@@ -3878,6 +3899,7 @@ mod tests {
 
         let gpt_request = crate::im_gateway::external_cli::ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: "new GPT Web message".to_string(),
             operation: "chat".to_string(),
             params: serde_json::json!({ "historyPath": history_path }),
@@ -4111,6 +4133,7 @@ mod tests {
         let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
         let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: "explain the image".to_string(),
             operation: "chat".to_string(),
             params: serde_json::Value::Null,
@@ -4406,6 +4429,7 @@ mod tests {
         let session_key = "active-gpt-web-history";
         let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: "active GPT Web message".to_string(),
             operation: "chat".to_string(),
             params: serde_json::json!({}),
@@ -4734,6 +4758,7 @@ mod tests {
         .expect("push imported context");
         let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: "continue".to_string(),
             operation: "chat".to_string(),
             params: serde_json::Value::Null,
@@ -4813,7 +4838,7 @@ mod image_message_tests {
     fn image_message_preview_uses_message_when_non_empty() {
         let images = vec![image("image/png", "AAA")];
         assert_eq!(
-            image_message_preview("  describe image  ", &images),
+            image_message_preview("  describe image  ", &images, &[]),
             "describe image"
         );
     }
@@ -4826,15 +4851,32 @@ mod image_message_tests {
             image("image/png", "   "), // ignored
         ];
         assert_eq!(
-            image_message_preview("   ", &images[..1]),
+            image_message_preview("   ", &images[..1], &[]),
             "Attached 1 image"
         );
-        assert_eq!(image_message_preview("", &images), "Attached 2 images");
+        assert_eq!(image_message_preview("", &images, &[]), "Attached 2 images");
         let empty_images = vec![image("image/png", "   ")];
+        let files = vec![
+            crate::im_gateway::external_cli::ExternalCliFileInput {
+                mime_type: "text/plain".to_string(),
+                data: "Zm9v".to_string(),
+                name: Some("note.txt".to_string()),
+            },
+            crate::im_gateway::external_cli::ExternalCliFileInput {
+                mime_type: "application/pdf".to_string(),
+                data: "YmFy".to_string(),
+                name: Some("report.pdf".to_string()),
+            },
+        ];
         assert_eq!(
-            image_message_preview("", &empty_images),
-            "Attached 0 images"
+            image_message_preview("", &empty_images, &files[..1]),
+            "Attached 1 file"
         );
+        assert_eq!(
+            image_message_preview("", &empty_images, &files),
+            "Attached 2 files"
+        );
+        assert_eq!(image_message_preview("", &empty_images, &[]), "");
     }
 }
 
@@ -4854,6 +4896,7 @@ mod coverage_boost {
         ExternalCliRunRequest {
             message: "hello".to_string(),
             images: Vec::new(),
+            files: Vec::new(),
             operation: "chat".to_string(),
             params: serde_json::Value::Null,
             provider_id: None,
@@ -5589,7 +5632,7 @@ mod coverage_boost {
     #[test]
     fn message_image_content_parts_respects_max_image_limit() {
         let mut images = Vec::new();
-        for i in 0..(MAX_AGENT_IMAGES_PER_MESSAGE + 2) {
+        for i in 0..(MAX_AGENT_ATTACHMENTS_PER_MESSAGE + 2) {
             images.push(crate::im_gateway::external_cli::ExternalCliImageInput {
                 mime_type: "image/png".to_string(),
                 data: format!("A{i}"),
@@ -5598,7 +5641,7 @@ mod coverage_boost {
         }
         let parts = message_image_content_parts("msg", &images).expect("parts");
         let arr = parts.as_array().expect("array");
-        assert_eq!(arr.len(), 1 + MAX_AGENT_IMAGES_PER_MESSAGE);
+        assert_eq!(arr.len(), 1 + MAX_AGENT_ATTACHMENTS_PER_MESSAGE);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5742,7 +5785,7 @@ fn timeline_has_tool_call_detects_existing_call_id() {
 #[test]
 fn message_image_content_parts_respects_max_image_limit() {
     let mut images = Vec::new();
-    for i in 0..(MAX_AGENT_IMAGES_PER_MESSAGE + 2) {
+    for i in 0..(MAX_AGENT_ATTACHMENTS_PER_MESSAGE + 2) {
         images.push(crate::im_gateway::external_cli::ExternalCliImageInput {
             mime_type: "image/png".to_string(),
             data: format!("A{i}"),
@@ -5751,7 +5794,7 @@ fn message_image_content_parts_respects_max_image_limit() {
     }
     let parts = message_image_content_parts("msg", &images).expect("parts");
     let arr = parts.as_array().expect("array");
-    assert_eq!(arr.len(), 1 + MAX_AGENT_IMAGES_PER_MESSAGE);
+    assert_eq!(arr.len(), 1 + MAX_AGENT_ATTACHMENTS_PER_MESSAGE);
 }
 
 #[tokio::test(flavor = "current_thread")]

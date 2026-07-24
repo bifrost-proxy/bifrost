@@ -1446,6 +1446,7 @@ mod tests {
         ExternalCliRunRequest {
             message: "hello".to_string(),
             images: Vec::new(),
+            files: Vec::new(),
             operation: "ask".to_string(),
             params: serde_json::json!({}),
             provider_id: None,

@@ -146,6 +146,7 @@ fn group_test_event(
                 .into_iter()
                 .collect(),
             images: Vec::new(),
+            files: Vec::new(),
             raw_type: Some("text".to_string()),
             raw_content: Some(serde_json::json!({
                 "text": text,
@@ -1201,6 +1202,7 @@ async fn disabled_and_busy_external_runner_paths_preserve_group_queue_state() {
         ExternalCliChatInput {
             message_text: "investigate".to_string(),
             images: Vec::new(),
+            files: Vec::new(),
             session_key: session_key.clone(),
             adapter_override: None,
             instructions_override: None,
@@ -1259,6 +1261,7 @@ async fn disabled_and_busy_external_runner_paths_preserve_group_queue_state() {
         ExternalCliChatInput {
             message_text: "queued while busy".to_string(),
             images: Vec::new(),
+            files: Vec::new(),
             session_key: session_key.clone(),
             adapter_override: None,
             instructions_override: None,
@@ -1299,6 +1302,7 @@ fn recorder_test_request(
     crate::im_gateway::external_cli::ExternalCliRunRequest {
         message: "record this turn".to_string(),
         images: Vec::new(),
+        files: Vec::new(),
         operation: "chat".to_string(),
         params: serde_json::Value::Null,
         provider_id: Some("feishu-recorder".to_string()),
@@ -1408,6 +1412,7 @@ fn external_cli_progress_runner_summary_uses_session_effort_override() {
     let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         message: "hello".to_string(),
         images: Vec::new(),
+        files: Vec::new(),
         operation: "chat".to_string(),
         params: serde_json::Value::Null,
         provider_id: Some("feishu-main".to_string()),

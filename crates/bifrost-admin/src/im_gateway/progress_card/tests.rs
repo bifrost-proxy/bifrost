@@ -99,6 +99,7 @@ fn progress_snapshot_tracks_tool_plan_queue_and_final_output() {
             seq: 1,
             message: "next".to_string(),
             images: Vec::new(),
+            files: Vec::new(),
             context: None,
         }],
         true,
@@ -998,6 +999,7 @@ fn external_runner_status_footer_uses_runner_metadata_instead_of_agent_metrics()
         seq: 1,
         message: "queued message".to_string(),
         images: Vec::new(),
+        files: Vec::new(),
         context: None,
     });
     snapshot.guide_pending = true;
@@ -1303,6 +1305,7 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
             seq: 7,
             message: "queued".to_string(),
             images: Vec::new(),
+            files: Vec::new(),
             context: None,
         }],
         true,
@@ -2160,7 +2163,8 @@ async fn queue_state_update_rolls_over_card_and_freezes_previous_snapshot() {
                     seq: 2,
                     message: "follow-up".to_string(),
                     images: Vec::new(),
-                    context: None,
+                    files: Vec::new(),
+                    context: None
                 }],
                 true,
                 Some("已收到引导：follow-up".to_string()),
@@ -2674,7 +2678,8 @@ async fn queue_state_rollover_sends_new_card_without_recall() {
                     seq: 1,
                     message: "queued after rollover".to_string(),
                     images: Vec::new(),
-                    context: None,
+                    files: Vec::new(),
+                    context: None
                 }],
                 false,
                 Some("消息已排队：queued after rollover".to_string()),
@@ -2761,7 +2766,8 @@ async fn queue_state_rollover_send_failure_keeps_previous_running_handle() {
                     seq: 1,
                     message: "queued after send failure".to_string(),
                     images: Vec::new(),
-                    context: None,
+                    files: Vec::new(),
+                    context: None
                 }],
                 false,
                 Some("消息已排队：queued after send failure".to_string()),
@@ -2810,7 +2816,8 @@ async fn finished_card_queue_state_update_does_not_rollover_or_freeze() {
                     seq: 1,
                     message: "late message".to_string(),
                     images: Vec::new(),
-                    context: None,
+                    files: Vec::new(),
+                    context: None
                 }],
                 true,
                 Some("已收到引导：late message".to_string()),
