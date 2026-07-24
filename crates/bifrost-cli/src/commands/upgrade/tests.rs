@@ -1375,7 +1375,7 @@ fn restart_and_download_helpers_cover_terminal_paths() {
         connect_timeout_secs: 1,
         download_timeout_secs: 1,
         mirror_probe_timeout_secs: 1,
-        download_tries: 1,
+        download_tries: 2,
     };
     assert!(!probe_github_url("http://127.0.0.1:9/not-running", tuning));
     assert!(download_file_with_progress(
