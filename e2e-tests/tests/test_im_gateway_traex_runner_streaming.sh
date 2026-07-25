@@ -74,8 +74,8 @@ else
   SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
 fi
 
-echo "[im-gateway-traex-runner-streaming] starting bifrost on $BIFROST_PORT"
-BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
+echo "[im-gateway-traex-runner-streaming] starting bifrost on $BIFROST_PORT with GUI-style PATH"
+PATH="/usr/bin:/bin" BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
   --host 127.0.0.1 \
   -p "$BIFROST_PORT" \
   --unsafe-ssl \
@@ -85,12 +85,12 @@ BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
 BIFROST_PID=$!
 wait_http "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/proxy/address" "bifrost"
 
-python3 - "$BIFROST_PORT" "$TRAEX_BIN" "$REPO_DIR" <<'PY'
+python3 - "$BIFROST_PORT" "$REPO_DIR" <<'PY'
 import json
 import sys
 import urllib.request
 
-port, traex_bin, repo_dir = sys.argv[1:4]
+port, repo_dir = sys.argv[1:3]
 payload = {
     "version": 1,
     "defaultRunnerId": "traex",
@@ -99,7 +99,6 @@ payload = {
             "enabled": True,
             "adapter": "traex",
             "adapterConfig": {
-                "executable": traex_bin,
                 "sandbox": "read-only",
                 "skipGitRepoCheck": True,
                 "permissionMode": "default",
@@ -193,6 +192,7 @@ with urllib.request.urlopen(
 
 snapshot = detail.get("snapshot") or {}
 assert snapshot.get("adapter") == "traex", detail
+assert snapshot.get("executable") == "traex", snapshot
 assert snapshot.get("timeoutSecs") in (None, 0), snapshot
 args = snapshot.get("args") or []
 joined = " ".join(args)

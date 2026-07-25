@@ -62,6 +62,10 @@ Trae 与 Codex 的关键差异:
 
 `crates/bifrost-admin/src/im_gateway/external_cli/command_spec.rs` 新增 `traex` adapter 分支。默认 args 为空时,运行时生成 Trae exec/resume 命令,并把 `--cd` 放在 `exec` 前面,确保 Trae 以目标工程目录启动。`--output-last-message` 继续使用 External CLI runtime 已有的 final response 文件契约。
 
+Desktop 从 Finder、Dock 或 Windows Explorer 启动时不会读取交互式 shell profile,因此 sidecar 不能假设继承的 `PATH` 包含用户安装 CLI 的目录。Desktop 启动内置 Service 前保留现有 PATH 顺序并去重追加标准用户级可执行目录: Unix/macOS 的 `~/.local/bin`、`~/.cargo/bin`、`~/.bifrost/bin`、`/opt/homebrew/bin`、`/usr/local/bin`,以及 Windows 的 `%LOCALAPPDATA%\bifrost\bin`、`%USERPROFILE%\.local\bin`、`%USERPROFILE%\.cargo\bin`、`%USERPROFILE%\.bifrost\bin`。该流程不执行用户 shell,避免启动延迟、交互输出和任意 profile 副作用。
+
+External runner 的 app-server、exec、stream-json、CLI 版本探测和 `debug models` 共用同一命令环境策略:当 `adapterConfig.env.PATH` 未配置时,防御性使用上述增强 PATH;用户显式配置 PATH 时原样优先,不追加或覆盖。`adapterConfig.executable` 仍保持最高命令选择优先级;默认 Traex runner 可以继续使用裸 `traex`,无需用户把本机绝对路径写入配置。
+
 Codex 与 Trae 的默认配置都面向无人值守 runner: 未显式设置 `dangerFullAccess`、`sandbox` 或 Codex `approvalPolicy` 时,Codex 默认追加 `--dangerously-bypass-approvals-and-sandbox`;显式设置 sandbox/approval 时保留收窄配置。Trae 未显式设置 permission mode 时默认追加 `--dangerously-bypass-approvals-and-sandbox`,并且不同时生成 `--permission-mode`,避免 Trae CLI 报 `sandbox_mode` 与 `permission_mode` override 冲突。
 
 Trae 的 `permissionMode` 与 Codex 的 approval policy 不同,因此单独映射为 `--permission-mode`。WebUI 把 "Headless default" 保存为空值;后端把空字符串和历史 `default` 都视为 headless full access,只输出 `--dangerously-bypass-approvals-and-sandbox`。用户显式选择 `plan`、`auto` 或 `custom` 时保留该选择,不默认启用 full access;显式设置 `dangerFullAccess` 可覆盖该行为,且 full access 优先级高于 permission mode,避免生成互斥 CLI 参数。
@@ -175,6 +179,9 @@ Agent Chat 底部 token HUD 需要从 session detail、history summary 和外部
 - `codex_adapter_respects_explicit_sandbox_without_danger_full_access`: 验证显式 sandbox 不被默认 full access 覆盖。
 - `traex_cli_parser_maps_real_jsonl_events`: 验证 Trae JSONL 事件可归一化。
 - `external_cli_runtime_streams_stdout_before_process_exit`: 验证 stdout 事件在进程退出前已经推送。
+- `executable_path_preserves_existing_order_and_adds_user_bins`: 验证精简 GUI PATH 保序追加标准用户安装目录。
+- `external_cli_command_environment_augments_path_unless_explicitly_overridden`: 验证所有 external runner command 共用增强 PATH,同时显式 `adapterConfig.env.PATH` 原样优先。
+- `desktop_sidecar_clears_inherited_detached_daemon_marker`: 同时验证 Desktop sidecar 清除 daemon marker 并把 `~/.local/bin` 注入 Service PATH。
 - `external_progress_maps_to_agent_turn_progress_events`: 验证 external progress 可转 IM progress card 事件。
 - `external_runner_progress_events_are_recorded_as_visible_timeline_steps`: 验证 status/tool 事件写入可见 timeline。
 - `assistant_final_is_pipeline_content_until_turn_finished`: 验证 Trae/Codex 公开 `agent_message` 在 runner 仍运行时进入过程区域,不提前占用底部最终结论。
@@ -196,7 +203,8 @@ Agent Chat 底部 token HUD 需要从 session detail、history summary 和外部
 
 ### E2E 测试
 
-- `e2e-tests/tests/test_im_gateway_traex_runner_streaming.sh`: 端到端跑 Trae runner,断言实时 stdout 与 progress card。
+- `e2e-tests/tests/test_im_gateway_desktop_path_traex.sh`: 在临时 `HOME/.local/bin` 放置 mock Traex,以 GUI 风格精简 PATH 启动隔离 Service,验证默认裸 executable、版本探测和 app-server JSON-RPC 全链路。
+- `e2e-tests/tests/test_im_gateway_traex_runner_streaming.sh`: 以 GUI 风格精简 PATH 启动隔离 Service,不配置绝对 executable,端到端跑默认裸 `traex` 并断言实时 stdout 与 progress card。
 - `e2e-tests/tests/test_im_gateway_traex_model_slash.sh`: 覆盖 `/models`、`/model <slug>`、`/model clear`。
 - `e2e-tests/tests/test_im_gateway_external_runner_delayed_final_state.sh`: 覆盖延迟 final state 的收敛。
 - `e2e-tests/tests/test_im_gateway_external_runner_image_input.sh`: 覆盖图像输入的 progress 语义。

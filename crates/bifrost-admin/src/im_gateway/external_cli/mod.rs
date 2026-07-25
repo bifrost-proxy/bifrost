@@ -884,6 +884,28 @@ struct CommandOutput {
     events: Vec<ExternalCliProgressEvent>,
 }
 
+fn apply_command_environment(command: &mut Command, env: &BTreeMap<String, String>) {
+    if !has_explicit_path_environment(env) {
+        if let Some(path) = bifrost_core::inherited_executable_path() {
+            command.env("PATH", path);
+        }
+    }
+    for (key, value) in env {
+        command.env(key, value);
+    }
+}
+
+fn has_explicit_path_environment(env: &BTreeMap<String, String>) -> bool {
+    #[cfg(windows)]
+    {
+        env.keys().any(|key| key.eq_ignore_ascii_case("PATH"))
+    }
+    #[cfg(not(windows))]
+    {
+        env.contains_key("PATH")
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ExternalCliRuntime {
     runs_root: PathBuf,
@@ -2412,9 +2434,7 @@ pub async fn load_external_cli_model_catalog(
     if let Some(work_dir) = work_dir {
         command.current_dir(work_dir);
     }
-    for (key, value) in &config.env {
-        command.env(key, value);
-    }
+    apply_command_environment(&mut command, &config.env);
     let output = timeout(Duration::from_secs(10), command.output())
         .await
         .map_err(|_| format!("{adapter} model catalog command timed out"))?
@@ -3398,9 +3418,7 @@ async fn detect_cli_version(adapter: &str, spec: &CommandSpec) -> Option<String>
     if let Some(work_dir) = spec.work_dir.as_ref() {
         command.current_dir(work_dir);
     }
-    for (key, value) in &spec.env {
-        command.env(key, value);
-    }
+    apply_command_environment(&mut command, &spec.env);
     let output = timeout(Duration::from_secs(3), command.output())
         .await
         .ok()?
@@ -3855,9 +3873,7 @@ async fn run_command(
     if let Some(work_dir) = spec.work_dir.as_ref() {
         command.current_dir(work_dir);
     }
-    for (key, value) in &spec.env {
-        command.env(key, value);
-    }
+    apply_command_environment(&mut command, &spec.env);
 
     let mut child = command
         .spawn()

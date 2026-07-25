@@ -55,9 +55,7 @@ pub(super) async fn run_command(
     if let Some(work_dir) = spec.work_dir.as_ref() {
         command.current_dir(work_dir);
     }
-    for (key, value) in &spec.env {
-        command.env(key, value);
-    }
+    apply_command_environment(&mut command, &spec.env);
 
     let mut child = command
         .spawn()

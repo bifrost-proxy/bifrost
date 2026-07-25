@@ -13,7 +13,9 @@ use upgrade_handoff::*;
 use bifrost_core::upgrade_progress::{
     read_progress, write_progress, UpgradePhase, UpgradeProgress,
 };
-use bifrost_core::{cleanup_bifrost_log_dir, direct_blocking_reqwest_client_builder};
+use bifrost_core::{
+    cleanup_bifrost_log_dir, direct_blocking_reqwest_client_builder, inherited_executable_path,
+};
 use bifrost_storage::data_dir as shared_bifrost_data_dir;
 use bifrost_tls::{ensure_valid_ca, generate_root_ca, save_root_ca, CertInstaller, CertStatus};
 use open_requests::{parse_open_url, DesktopOpenRequest, OpenRequestParseError};
@@ -938,9 +940,11 @@ fn configure_desktop_backend_environment(
     data_dir: &Path,
     startup_session_id: &str,
 ) {
-    command
-        .env_remove(DETACHED_DAEMON_CHILD_ENV)
-        .envs(desktop_backend_env(data_dir, startup_session_id));
+    command.env_remove(DETACHED_DAEMON_CHILD_ENV);
+    if let Some(path) = inherited_executable_path() {
+        command.env("PATH", path);
+    }
+    command.envs(desktop_backend_env(data_dir, startup_session_id));
 }
 
 fn desktop_startup_session_id() -> String {
