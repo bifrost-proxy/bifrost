@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证桌面 app 启动的 app-bound core 不注册或升级 macOS system-proxy cleanup LaunchDaemon，避免覆盖 CLI daemon 的系统级注册。CLI daemon 路径仍保留自己的 LaunchDaemon 注册能力，并且 CLI `start` 识别 live Desktop core 后不能为了重启自己的服务而误 stop app-bound core。
+验证桌面 app 启动的 app-bound core 不注册或升级 macOS system-proxy cleanup LaunchDaemon，避免覆盖 CLI daemon 的系统级注册。CLI daemon 路径仍保留自己的 LaunchDaemon 注册能力，并且 CLI `start` 识别 live Desktop core 后不能为了重启自己的服务而误 stop app-bound core。Desktop 创建 sidecar 时还必须清除从父进程继承的 detached-daemon 内部标记，确保 Desktop-owned Service 随 Desktop 退出，而既有 CLI-owned Service 在 Desktop 退出后继续运行。
 
 ## 前置条件
 
@@ -91,6 +91,31 @@
 - 脚本不会安装、卸载或修改 `/Library/LaunchDaemons/com.bifrost.system-proxy-cleanup.plist`。
 - CLI 的 `spawn_system_proxy_launchd_install_task` 仍保留环境变量门禁，说明 CLI 注册路径未被删除。
 
+### TC-DCDR-05（回归）：Desktop-owned Service 随 Desktop 退出且 CLI-owned Service 保留
+
+操作步骤：
+
+1. 在有 macOS WindowServer 会话的机器上准备 debug CLI sidecar 与 Desktop binary：
+   ```bash
+   pnpm --dir web run build:desktop
+   SKIP_FRONTEND_BUILD=1 cargo build -p bifrost-cli --bin bifrost
+   node scripts/prepare-tauri-sidecar.mjs debug
+   SKIP_FRONTEND_BUILD=1 cargo build --manifest-path desktop/src-tauri/Cargo.toml
+   ```
+2. 执行真实进程生命周期脚本：
+   ```bash
+   SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh
+   ```
+3. 检查脚本退出码为 0，且输出包含 `PASS: Desktop-owned Service exits with Desktop while CLI-owned Service is preserved`。
+
+预期结果：
+
+- 脚本仅使用临时数据目录和动态端口，不停止或修改默认数据目录中的正式 Service。
+- 即使 Desktop 父环境带有 `BIFROST_DETACHED_DAEMON_CHILD=1`，Desktop sidecar 的 `runtime.json` 仍记录 `runtime_start_mode=desktop`。
+- 通过 Desktop 单实例 graceful shutdown 通道退出后，Desktop-owned Service PID 在有界时间内退出。
+- CLI `start --daemon` 创建的 Service 记录 `runtime_start_mode=daemon`；Desktop 复用该 Service 后退出，原 CLI Service PID 和健康端点仍保持可用。
+- 脚本最后通过 CLI `stop` 清理临时 daemon，并删除临时数据目录。
+
 ## 清理步骤
 
 ```bash
@@ -106,3 +131,8 @@ rm -rf "$BIFROST_DATA_DIR"
 | 2026-07-09 | TC-DCDR-03 | `cargo test -p bifrost-cli desktop_core --lib -- --nocapture`、`cargo test -p bifrost-cli live_desktop_runtime --lib -- --nocapture`、`cargo test -p bifrost-cli runtime_info_new_desktop_is_app_bound_not_cli_restartable --lib -- --nocapture`。 | 通过：Desktop env 映射为 `RuntimeStartMode::Desktop`；detached daemon 优先级不变；同端口 live Desktop runtime 被复用；不同端口返回包含 `will not stop the app-bound core` 的错误；Desktop runtime 不可被 CLI managed helper 重启。 |
 | 2026-07-09 | TC-DCDR-04 | `bash e2e-tests/tests/test_desktop_sidecar_launchd_env_contract.sh`。 | 通过：脚本串行执行 Desktop sidecar、CLI desktop ownership、live Desktop runtime 和 Desktop restartability focused tests，退出码 0；未安装、卸载或修改 `/Library/LaunchDaemons/com.bifrost.system-proxy-cleanup.plist`。 |
 | 2026-07-09 | TC-DCDR-04 CI 回归 | PR #361 CI run `28995925917` / job `86052744074` 失败样本显示 Linux shell CI 中 `test_desktop_sidecar_launchd_env_contract.sh` 因缺少 `glib-2.0.pc` 触发 `gio-sys v0.18.1` build script 失败；修复后执行 `bash -n e2e-tests/tests/test_desktop_sidecar_launchd_env_contract.sh`、`bash scripts/ci/check-e2e-shell-ci-coverage.sh`、`bash e2e-tests/tests/test_desktop_sidecar_launchd_env_contract.sh`。 | 通过：脚本在 desktop-capable 本机先准备 `web/dist-desktop`、debug CLI sidecar 与 `desktop/src-tauri/resources/bin/*`，再运行 Desktop sidecar focused tests 和 CLI ownership focused tests；Linux 缺 GTK/GObject 开发包时只跳过 desktop crate 部分，CLI Desktop ownership 边界仍会执行。 |
+| 2026-07-25 | TC-DCDR-01 | `cargo test --manifest-path desktop/src-tauri/Cargo.toml desktop_sidecar_disables_launchd_cleanup_registration -- --nocapture`。 | 通过：1 passed；Desktop sidecar 的 LaunchDaemon 注册抑制环境保持有效。 |
+| 2026-07-25 | TC-DCDR-02 | `cargo test --manifest-path desktop/src-tauri/Cargo.toml desktop_sidecar_start_args_keep_system_proxy_policy_separate_from_launchd_registration -- --nocapture`。 | 通过：1 passed；系统代理参数和 LaunchDaemon 注册抑制仍相互独立。 |
+| 2026-07-25 | TC-DCDR-03 | `cargo test -p bifrost-cli desktop_core --lib -- --nocapture`、`cargo test -p bifrost-cli live_desktop_runtime --lib -- --nocapture`、`cargo test -p bifrost-cli runtime_info_new_desktop_is_app_bound_not_cli_restartable --lib -- --nocapture`。 | 通过：分别 2、4、1 passed；detached daemon 优先级保持，CLI 不误 stop Desktop runtime。 |
+| 2026-07-25 | TC-DCDR-04 | `bash e2e-tests/tests/test_desktop_sidecar_launchd_env_contract.sh`。 | 通过：Desktop sidecar 4 passed、CLI ownership 2 passed、live Desktop runtime 4 passed、restartability 1 passed；静态合约确认 Desktop sidecar 清除继承的 daemon marker。 |
+| 2026-07-25 | TC-DCDR-05 回归 | `SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`。 | 通过：污染父环境时 Desktop sidecar 仍记录 `desktop` 并随 Desktop graceful shutdown 退出；CLI daemon 被 Desktop 复用后，Desktop 退出但原 PID 与健康端点保持可用，最后由测试定向清理。 |

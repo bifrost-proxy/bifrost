@@ -1,8 +1,9 @@
 use super::{
     append_desktop_bootstrap_log, begin_backend_recovery, clear_backend_unavailable_if_healthy,
-    deferred_desktop_install_version_error, desktop_backend_env, desktop_backend_start_args,
-    desktop_pending_install_path, desktop_shutdown_backend_action, desktop_sidecar_rust_log,
-    desktop_startup_deadline, desktop_startup_session_id, desktop_test_allows_multiple_instances,
+    configure_desktop_backend_environment, deferred_desktop_install_version_error,
+    desktop_backend_env, desktop_backend_start_args, desktop_pending_install_path,
+    desktop_shutdown_backend_action, desktop_sidecar_rust_log, desktop_startup_deadline,
+    desktop_startup_session_id, desktop_test_allows_multiple_instances,
     desktop_upgrade_relaunch_marker_path, desktop_upgrade_shutdown_requested,
     ensure_backend_running, ensure_backend_running_with_cli_wait,
     external_cli_backend_matches_handoff, external_cli_handoff_wait,
@@ -24,7 +25,8 @@ use super::{
     DesktopConfig, DesktopInstallRollback, DesktopRuntimeMarker, DesktopShutdownBackendAction,
     DesktopUpgradeRelaunchMarker, ExternalCliBackendHandoff, HostWindowCloseBehavior,
     PendingDesktopInstall, StartupDeadlineDisposition, DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
-    DESKTOP_UPGRADE_SHUTDOWN_ARG, WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
+    DESKTOP_UPGRADE_SHUTDOWN_ARG, DETACHED_DAEMON_CHILD_ENV,
+    WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
 };
 use bifrost_storage::data_dir as shared_bifrost_data_dir;
 use std::ffi::OsStr;
@@ -362,6 +364,44 @@ fn desktop_sidecar_disables_launchd_cleanup_registration() {
     assert!(env
         .iter()
         .any(|(key, value)| { *key == "BIFROST_DATA_DIR" && value == &expected_data_dir }));
+}
+
+#[test]
+fn desktop_sidecar_clears_inherited_detached_daemon_marker() {
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let previous_path = std::env::var_os("PATH");
+    let minimal_path = std::env::join_paths([
+        temp_dir.path().join("system-bin"),
+        temp_dir.path().join("fallback-bin"),
+    ])
+    .expect("minimal path");
+    std::env::set_var("PATH", minimal_path);
+    let expected_path = bifrost_core::inherited_executable_path().expect("expected PATH");
+    let mut command = Command::new("bifrost");
+    configure_desktop_backend_environment(&mut command, temp_dir.path(), "session-123");
+
+    let env = command.get_envs().collect::<Vec<_>>();
+    assert!(env
+        .iter()
+        .any(|(key, value)| { *key == OsStr::new(DETACHED_DAEMON_CHILD_ENV) && value.is_none() }));
+    assert!(env.iter().any(|(key, value)| {
+        *key == OsStr::new("BIFROST_DESKTOP_CORE")
+            && value.is_some_and(|value| value == OsStr::new("1"))
+    }));
+    let path = env
+        .iter()
+        .find_map(|(key, value)| {
+            (*key == OsStr::new("PATH"))
+                .then(|| value.map(ToOwned::to_owned))
+                .flatten()
+        })
+        .expect("desktop sidecar PATH");
+    assert_eq!(path, expected_path);
+    match previous_path {
+        Some(value) => std::env::set_var("PATH", value),
+        None => std::env::remove_var("PATH"),
+    }
 }
 
 #[test]

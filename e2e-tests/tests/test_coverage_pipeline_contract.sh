@@ -226,8 +226,9 @@ grep -Fxq 'test_group_sync_e2e.sh' "$partition_dir/shard-2.txt"
 grep -Fxq 'test_cli_online_commands_e2e.sh' "$partition_dir/shard-2.txt"
 grep -Fxq 'test_im_gateway_long_reply_delivery_regression.sh' "$partition_dir/shard-3.txt"
 if grep -Fxq 'test_desktop_open_requests_contract.sh' "$partition_dir/all.txt" ||
-  grep -Fxq 'test_desktop_sidecar_launchd_env_contract.sh' "$partition_dir/all.txt"; then
-  echo "desktop compile-only contract wrappers must stay out of CI shell shards" >&2
+  grep -Fxq 'test_desktop_sidecar_launchd_env_contract.sh' "$partition_dir/all.txt" ||
+  grep -Fxq 'test_desktop_service_ownership_lifecycle.sh' "$partition_dir/all.txt"; then
+  echo "desktop compile/session-dependent wrappers must stay out of CI shell shards" >&2
   exit 1
 fi
 

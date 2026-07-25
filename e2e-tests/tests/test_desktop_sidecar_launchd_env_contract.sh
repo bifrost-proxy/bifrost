@@ -24,6 +24,11 @@ if ! has_pattern 'SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV' crates/bifrost-cli/s
   exit 1
 fi
 
+if ! has_pattern 'env_remove\(DETACHED_DAEMON_CHILD_ENV\)' desktop/src-tauri/src/main.rs; then
+  echo "Desktop sidecar does not clear the inherited detached daemon marker" >&2
+  exit 1
+fi
+
 if [[ "$(uname -s)" == "Linux" ]] && {
   ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists gobject-2.0;
 }; then

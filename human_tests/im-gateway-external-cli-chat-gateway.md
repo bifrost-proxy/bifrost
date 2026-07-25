@@ -1505,8 +1505,40 @@
 3. WebUI 与飞书看到同一批运行进展和最终回复；飞书在 WebUI 启动的活跃 turn 中继续发送消息时，支持 steer 的 Runner 在同一 thread/turn 接收 Guide，失败或不支持时按原 Session 排队。
 4. 纯 WebUI Session 保持 WebUI-only；`deliveryMode=no_im` 仍禁止跨通道发送。
 
+### TC-IEC-68: Desktop Service 精简 PATH 下默认 Traex Runner 可启动
+
+前置条件：
+
+1. 当前源码已构建为 `target/debug/bifrost`。
+2. 不停止、不替换用户当前 9900 Service；测试使用临时数据目录和动态端口。
+
+操作步骤：
+
+1. 执行确定性 Desktop PATH 回归：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_im_gateway_desktop_path_traex.sh
+   ```
+2. 脚本在临时 `HOME/.local/bin/traex` 创建 mock Traex app-server，以 `PATH=/usr/bin:/bin` 启动隔离 Bifrost Service，并配置不含 `adapterConfig.executable` 与 `adapterConfig.env.PATH` 的默认 Traex Runner。
+3. 检查 Chat Gateway stream、run detail 和 mock 进程记录。
+4. 可选真实链路补充：
+   ```bash
+   RUN_REAL_TRAEX_E2E=1 SKIP_BUILD=true \
+     BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_im_gateway_traex_runner_streaming.sh
+   ```
+   若真实模型响应超时，必须检查隔离 Service 是否已成功创建 `traex app-server --listen stdio://` 子进程，并把模型超时与 executable spawn 失败分开归因。
+
+预期结果：
+
+1. 确定性脚本输出 `[im-gateway-desktop-path-traex] PASS`。
+2. run snapshot 的 executable 为裸 `traex`，参数前三项为 `app-server --listen stdio://`，配置 env keys 不含 `PATH`。
+3. mock 进程实际 PATH 包含临时 `HOME/.local/bin`，版本探测返回 `traex 0.0.0-desktop-path-mock`，最终响应为 `BIFROST_DESKTOP_PATH_TRAEX_OK`。
+4. 测试结束后临时 Service、mock 进程和临时目录全部清理，用户现有 CLI-owned 或 Desktop-owned Service 均不受影响。
+
 ## 最近执行记录
 
+- 2026-07-25：PASS — 新增并立即执行 TC-IEC-68。先构建当前源码二进制，再执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_desktop_path_traex.sh`，输出 `[im-gateway-desktop-path-traex] PASS`；隔离 Service 以 `PATH=/usr/bin:/bin`、临时 HOME 和动态端口启动，Runner 配置未设置 executable/PATH，仍从临时 `HOME/.local/bin/traex` 启动 `app-server --listen stdio://`，run snapshot executable 为裸 `traex`，版本为 `traex 0.0.0-desktop-path-mock`，最终响应为 `BIFROST_DESKTOP_PATH_TRAEX_OK`。补充真实 Traex 用例时，隔离 Service 成功创建 `traex app-server --listen stdio://` 子进程 PID `26233`，确认原 `No such file or directory` 不再出现；外部模型在 240 秒内未完成而由 Python HTTP 客户端超时，按外部模型延迟记录，不视为 PATH 回归失败。测试未停止或替换用户 9900 Service。
 - 2026-07-24：PASS — 新增并立即执行 TC-IEC-67。绑定解析 focused 单测 `2/2 + 1/1` 通过，主动卡片、完整 Web→IM bridge、Web Guide 降级排队后刷新绑定卡片三项单测各 `1/1` 通过；mock Feishu 记录首个消息路径为 `/open-apis/im/v1/messages`、`receive_id=ou_owner`，没有 reply message 路径，最终 CardKit update 包含 `final from WebUI`，Guide 降级时卡片包含 `WebUI 引导无法实时注入` 和原引导摘要。重新构建当前源码二进制后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh`，输出 `[external-runner-live-guide] PASS`；新增 `codex-cross-channel` 场景由 Web stream 启动 `cross-channel-provider:cross-channel-owner`，随后 mock IM inbound 的 `guide-from-im-to-web` 在同一 active turn 被 steer，Web stream 最终返回 `GUIDED_codex-cross-channel`。未向真实生产群或用户发送测试消息。
 - 2026-07-24：PASS — 复跑 TC-IEC-48 与同脚本图片/runner-call 回归。先执行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 构建当前源码二进制，再执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_external_runner_image_input.sh`；脚本使用隔离临时数据目录和 mock external runner 注入纯文件消息，debug inbound 接受空正文文件消息并生成 run `1784881047460-3b7fa88e-5eb4-456d-a636-93a1a2c72a87`。验证 `prompt.md` 和 runner stdin 均包含 `## Attached Files` 及本地文件路径，附件落盘为 `.bifrost-e2e-runner-image.Phu6KP/agent/sessions/by-key/attachments/session-7c3700696145216f4803a299a940daf92873f6b8ad58099d11991c3169bf44d9/1784881047460-3b7fa88e-5eb4-456d-a636-93a1a2c72a87/files/1-report_final.md`，文件内容与注入的 markdown base64 一致，metadata 记录 `attachments.fileCount=1`、`attachments.imageCount=0`、`attachments.count=1` 和 `attachments.files[0]` 的 path/mimeType/sizeBytes/name。
 - 2026-07-24：PASS — 新增并立即执行 TC-IEC-48。先以 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 构建当前源码二进制，再执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_external_runner_image_input.sh`；脚本使用隔离临时数据目录和 mock external runner 注入纯文件消息，debug inbound 接受空正文文件消息并生成 run `1784873185896-cf83955e-4ac4-4a3e-b95f-9782f807947b`。验证 `prompt.md` 和 runner stdin 均包含 `## Attached Files` 及本地文件路径，附件落盘为 `.bifrost-e2e-runner-image.qLXnna/agent/sessions/by-key/attachments/session-7c3700696145216f4803a299a940daf92873f6b8ad58099d11991c3169bf44d9/1784873185896-cf83955e-4ac4-4a3e-b95f-9782f807947b/files/1-report_final.md`，文件内容与注入的 markdown base64 一致，metadata 记录 `attachments.fileCount=1`、`attachments.imageCount=0`、`attachments.count=1` 和 `attachments.files[0]` 的 path/mimeType/sizeBytes/name。

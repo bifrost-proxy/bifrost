@@ -1,4 +1,5 @@
 use super::*;
+use std::ffi::OsStr;
 use std::sync::{Mutex, OnceLock};
 
 static EXTERNAL_CLI_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -3603,6 +3604,53 @@ fn external_cli_effort_validation_honors_current_model_supported_levels() {
     assert!(rendered.contains("当前模型 `thinking-model`"));
     assert!(rendered.contains("`low`"));
     assert!(!rendered.contains("`high`"));
+}
+
+#[test]
+fn external_cli_command_environment_augments_path_unless_explicitly_overridden() {
+    let _guard = external_cli_env_guard();
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let system_path = PathBuf::from(
+        std::env::join_paths([
+            temp_dir.path().join("system-bin"),
+            temp_dir.path().join("fallback-bin"),
+        ])
+        .expect("system path"),
+    );
+    let _path_guard = EnvGuard::set("PATH", &system_path);
+
+    let mut command = Command::new("traex");
+    apply_command_environment(&mut command, &BTreeMap::new());
+    let path = command
+        .as_std()
+        .get_envs()
+        .find_map(|(key, value)| (key == OsStr::new("PATH")).then_some(value).flatten())
+        .expect("augmented PATH");
+    let expected_path = bifrost_core::inherited_executable_path().expect("expected PATH");
+    assert_eq!(path, expected_path);
+
+    let configured_path = "/custom/traex/bin";
+    let mut env = BTreeMap::new();
+    env.insert("PATH".to_string(), configured_path.to_string());
+    let mut command = Command::new("traex");
+    apply_command_environment(&mut command, &env);
+    let path = command
+        .as_std()
+        .get_envs()
+        .find_map(|(key, value)| (key == OsStr::new("PATH")).then_some(value).flatten())
+        .expect("configured PATH");
+    assert_eq!(path, OsStr::new(configured_path));
+}
+
+#[test]
+fn external_cli_explicit_path_detection_matches_platform_semantics() {
+    let mut env = BTreeMap::new();
+    env.insert("PATH".to_string(), "/custom/bin".to_string());
+    assert!(has_explicit_path_environment(&env));
+
+    env.clear();
+    env.insert("Path".to_string(), "/custom/bin".to_string());
+    assert_eq!(has_explicit_path_environment(&env), cfg!(windows));
 }
 
 fn has_arg_pair(args: &[String], left: &str, right: &str) -> bool {

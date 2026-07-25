@@ -629,11 +629,13 @@ SKIP_IN_CI_TESTS=(
   # the dedicated unit/integration jobs already covered the Rust paths.
   "test_chatgpt_web_shared_profile.sh"
   "test_utf8_safe_preview_e2e.sh"
-  # These two desktop contract wrappers spend 18-19 minutes compiling the
-  # Tauri graph on macOS. Keep them as explicit local desktop release
-  # validation; the CI desktop bundle still compiles the production path.
+  # These desktop contract/lifecycle wrappers require either a costly Tauri
+  # compile or an interactive macOS WindowServer session. Keep them as explicit
+  # local desktop release validation; CI still compiles the production path and
+  # runs the focused ownership unit tests.
   "test_desktop_open_requests_contract.sh"
   "test_desktop_sidecar_launchd_env_contract.sh"
+  "test_desktop_service_ownership_lifecycle.sh"
   # ASR/voice runtime tests may initialize local models, native audio stacks, or
   # external model downloads. Keep all ASR capability validation local-only so
   # CI never fails because a runtime dependency or model host is unavailable.
