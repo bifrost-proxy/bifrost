@@ -272,7 +272,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bifrost-core"
-version = "0.0.164"
+version = "0.0.165"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -309,11 +309,12 @@ dependencies = [
 
 [[package]]
 name = "bifrost-desktop"
-version = "0.0.164"
+version = "0.0.165"
 dependencies = [
  "bifrost-core",
  "bifrost-storage",
  "bifrost-tls",
+ "libloading 0.8.9",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -331,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-storage"
-version = "0.0.164"
+version = "0.0.165"
 dependencies = [
  "base64 0.22.1",
  "bifrost-core",
@@ -352,7 +353,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-tls"
-version = "0.0.164"
+version = "0.0.165"
 dependencies = [
  "bifrost-core",
  "chrono",
@@ -2272,7 +2273,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e9ec52138abedcc58dc17a7c6c0c00a2bdb4f3427c7f63fa97fd0d859155caf"
 dependencies = [
  "gtk-sys",
- "libloading",
+ "libloading 0.7.4",
  "once_cell",
 ]
 
@@ -2299,6 +2300,16 @@ checksum = "b67380fd3b2fbe7527a606e18729d21c6f3951633d0500574c4dc22d2d638b9f"
 dependencies = [
  "cfg-if",
  "winapi",
+]
+
+[[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link 0.2.1",
 ]
 
 [[package]]

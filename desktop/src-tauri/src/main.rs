@@ -5,6 +5,7 @@ mod native_launcher;
 mod open_requests;
 mod runtime_ownership;
 mod upgrade_handoff;
+mod widget_reload;
 
 use backend_runtime::*;
 use runtime_ownership::*;
@@ -66,6 +67,10 @@ const OVERLAY_FADE_STEP_DELAY: Duration = Duration::from_millis(14);
 const BACKEND_WATCHDOG_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const BACKEND_WATCHDOG_RECOVERY_RETRY_DELAY: Duration = Duration::from_secs(3);
 const BACKEND_WATCHDOG_FAILURE_THRESHOLD: u8 = 2;
+#[cfg(target_os = "macos")]
+const WIDGET_INITIAL_RELOAD_DELAY: Duration = Duration::from_secs(5);
+#[cfg(target_os = "macos")]
+const WIDGET_PERIODIC_RELOAD_INTERVAL: Duration = Duration::from_secs(60);
 const BACKEND_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const BACKEND_KILL_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_DESKTOP_STARTUP_DEADLINE: Duration = Duration::from_secs(30);
@@ -480,6 +485,8 @@ fn main() {
             }
 
             install_open_request_handlers(app.handle());
+            #[cfg(target_os = "macos")]
+            start_periodic_widget_reload(app.handle());
 
             if supports_native_launcher() {
                 if let Some(state) = app.try_state::<BackendState>() {
@@ -555,6 +562,35 @@ fn main() {
                 _ => {}
             }
         });
+}
+
+#[cfg(target_os = "macos")]
+fn start_periodic_widget_reload(app: &AppHandle) {
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(WIDGET_INITIAL_RELOAD_DELAY);
+        loop {
+            let reload_app = app_handle.clone();
+            if app_handle
+                .run_on_main_thread(move || {
+                    let result = widget_reload::reload_status_widget();
+                    if let Some(state) = reload_app.try_state::<BackendState>() {
+                        let message = match result {
+                            Ok(()) => "periodic macOS status widget reload requested".to_string(),
+                            Err(error) => {
+                                format!("periodic macOS status widget reload failed: {error}")
+                            }
+                        };
+                        append_desktop_bootstrap_log(&state.data_dir, message);
+                    }
+                })
+                .is_err()
+            {
+                break;
+            }
+            std::thread::sleep(WIDGET_PERIODIC_RELOAD_INTERVAL);
+        }
+    });
 }
 
 fn should_intercept_exit(app: &AppHandle) -> bool {
@@ -1306,6 +1342,17 @@ fn cli_arg_to_bifrost_file_url(arg: &str, cwd: Option<&Path>) -> Option<tauri::U
 
 fn handle_open_urls(app: &AppHandle, urls: Vec<tauri::Url>) {
     for url in urls {
+        if widget_reload::is_widget_reload_url(&url) {
+            if let Err(error) = widget_reload::reload_status_widget() {
+                if let Some(state) = app.try_state::<BackendState>() {
+                    append_desktop_bootstrap_log(
+                        &state.data_dir,
+                        format!("failed to reload macOS status widget: {error}"),
+                    );
+                }
+            }
+            continue;
+        }
         match parse_open_url(&url) {
             Ok(Some(request)) => dispatch_open_request(app, request),
             Ok(None) => {}

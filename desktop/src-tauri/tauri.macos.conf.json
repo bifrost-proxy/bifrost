@@ -1,0 +1,13 @@
+{
+  "build": {
+    "beforeBundleCommand": "bash scripts/build-macos-widget.sh"
+  },
+  "bundle": {
+    "macOS": {
+      "entitlements": "Entitlements.plist",
+      "files": {
+        "PlugIns/BifrostStatusWidget.appex": "../macos-widget/build/BifrostStatusWidget.appex"
+      }
+    }
+  }
+}

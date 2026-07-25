@@ -22,6 +22,7 @@ log/ndleClearFiltered, clearMenuItems
 target-e2e-*/
 .bifrost_test/
 desktop/src-tauri/resources/bin/
+desktop/macos-widget/build/
 .pnpm-store/
 .codex-target/
 .codex-target*/

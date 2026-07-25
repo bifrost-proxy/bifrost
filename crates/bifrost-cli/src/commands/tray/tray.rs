@@ -36,6 +36,10 @@ use super::menu::{self, MenuEntry, MenuItemAction, MenuItemDef, RuleTarget, Subm
 use super::runtime::{self, RuntimeInfo, ServiceState};
 #[cfg(target_os = "macos")]
 use super::system_stats::{self, SystemStatsSampler};
+#[cfg(target_os = "macos")]
+use super::widget_snapshot::WidgetProxyStatus;
+#[cfg(not(test))]
+use super::widget_snapshot::{WidgetMetrics, WidgetSnapshotPublisher};
 
 #[cfg(target_os = "macos")]
 use image::ImageEncoder;
@@ -638,6 +642,70 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             }
         }
     });
+}
+
+/// Starts the macOS widget data producer inside the long-lived proxy process.
+///
+/// The status item is intentionally allowed to exit independently (for
+/// example through "Quit Tray"). Keeping this worker in the proxy process
+/// prevents the desktop widget from becoming stale merely because the menu-bar
+/// UI is hidden or stopped.
+#[cfg(target_os = "macos")]
+pub(crate) fn start_widget_snapshot_publisher(data_dir: PathBuf, admin_url: String) {
+    #[cfg(test)]
+    {
+        let _ = (data_dir, admin_url);
+    }
+
+    #[cfg(not(test))]
+    if let Err(error) = spawn_tray_thread("bifrost-widget-snapshot", move || {
+        run_widget_snapshot_publisher(&data_dir, &admin_url);
+    }) {
+        tracing::warn!(%error, "failed to start macOS status widget snapshot publisher");
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[cfg(not(test))]
+fn run_widget_snapshot_publisher(data_dir: &Path, admin_url: &str) {
+    let mut sampler = SystemStatsSampler::new(data_dir);
+    let mut publisher = WidgetSnapshotPublisher::new();
+    let items = bifrost_storage::TraySystemStatsItems {
+        cpu: true,
+        memory: true,
+        disk: true,
+        upload: false,
+        download: false,
+    };
+
+    // CPU usage is a delta between two tick samples. Give the sampler a real
+    // observation window before publishing the first snapshot so WidgetKit
+    // cannot cache a synthetic startup value of 0%.
+    thread::sleep(Duration::from_secs(1));
+
+    loop {
+        let now = Instant::now();
+        let snapshot = sampler.sample_for_menu_state(now, &items, false);
+        let proxy_status = widget_proxy_status(
+            load_system_proxy_state(admin_url)
+                .as_ref()
+                .map(|state| &state.state),
+        );
+        if let Err(error) = publisher.publish_if_needed(
+            now,
+            unix_time_millis(),
+            WidgetMetrics {
+                cpu_percent: snapshot.cpu_percent,
+                memory_used_bytes: snapshot.memory_used_bytes,
+                memory_total_bytes: snapshot.memory_total_bytes,
+                disk_used_percent: snapshot.disk_used_percent,
+            },
+            proxy_status,
+        ) {
+            tracing::debug!(%error, "failed to update macOS status widget snapshot");
+        }
+        thread::sleep(Duration::from_secs(3));
+    }
 }
 
 fn init_logging(data_dir: &Path) {
@@ -4685,6 +4753,27 @@ fn poll_system_stats(
 
         sleep_interruptibly(quit_flag, SYSTEM_STATS_POLL_INTERVAL);
     }
+}
+
+#[cfg(target_os = "macos")]
+fn widget_proxy_status(system_proxy: Option<&menu::SystemProxyMenuState>) -> WidgetProxyStatus {
+    match system_proxy {
+        Some(state) if !state.known => WidgetProxyStatus::Checking,
+        Some(state) if !state.supported => WidgetProxyStatus::Unsupported,
+        Some(state) if state.enabled => WidgetProxyStatus::On,
+        Some(_) => WidgetProxyStatus::Off,
+        None => WidgetProxyStatus::Checking,
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[cfg(not(test))]
+fn unix_time_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
 }
 
 #[cfg(target_os = "macos")]

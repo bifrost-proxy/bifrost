@@ -97,6 +97,44 @@
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_widget_proxy_status_preserves_known_supported_and_enabled_states() {
+        assert_eq!(widget_proxy_status(None), WidgetProxyStatus::Checking);
+        assert_eq!(
+            widget_proxy_status(Some(&menu::SystemProxyMenuState {
+                known: false,
+                supported: true,
+                enabled: false,
+            })),
+            WidgetProxyStatus::Checking
+        );
+        assert_eq!(
+            widget_proxy_status(Some(&menu::SystemProxyMenuState {
+                known: true,
+                supported: false,
+                enabled: false,
+            })),
+            WidgetProxyStatus::Unsupported
+        );
+        assert_eq!(
+            widget_proxy_status(Some(&menu::SystemProxyMenuState {
+                known: true,
+                supported: true,
+                enabled: false,
+            })),
+            WidgetProxyStatus::Off
+        );
+        assert_eq!(
+            widget_proxy_status(Some(&menu::SystemProxyMenuState {
+                known: true,
+                supported: true,
+                enabled: true,
+            })),
+            WidgetProxyStatus::On
+        );
+    }
+
     #[test]
     fn test_system_proxy_snapshot_matches_desired_state_only_after_recheck_clears() {
         let rechecking = SystemProxyMenuSnapshot {

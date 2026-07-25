@@ -2623,6 +2623,11 @@ fn should_suppress_startup_tray(no_tray: bool, _detached_daemon_child: bool) -> 
     no_tray
 }
 
+#[cfg(target_os = "macos")]
+fn claim_widget_publisher_start(started: &std::sync::atomic::AtomicBool) -> bool {
+    !started.swap(true, Ordering::AcqRel)
+}
+
 fn build_tray_launch_callback(
     no_tray: bool,
     data_dir: PathBuf,
@@ -2646,8 +2651,18 @@ fn build_tray_launch_callback(
     let port = config.port;
     let tray_start_args = build_tray_start_args(config, log_level, skip_cert_check, yes);
     let bifrost_self_bin = std::env::current_exe().ok();
+    #[cfg(target_os = "macos")]
+    let widget_publisher_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     Arc::new(move || {
+        #[cfg(target_os = "macos")]
+        if claim_widget_publisher_start(&widget_publisher_started) {
+            crate::commands::tray::start_widget_snapshot_publisher(
+                data_dir.clone(),
+                admin_url.clone(),
+            );
+        }
+
         let data_dir = data_dir.clone();
         let runtime_file = runtime_file.clone();
         let admin_url = admin_url.clone();
@@ -5420,6 +5435,15 @@ mod coverage_boost_v2 {
 
         callback();
         assert!(!data_dir.join("tray.pid").exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn widget_publisher_start_is_claimed_only_once() {
+        let started = std::sync::atomic::AtomicBool::new(false);
+
+        assert!(claim_widget_publisher_start(&started));
+        assert!(!claim_widget_publisher_start(&started));
     }
 
     #[test]

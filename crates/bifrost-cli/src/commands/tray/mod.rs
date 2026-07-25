@@ -27,8 +27,14 @@ mod system_stats;
 #[cfg(not(target_os = "linux"))]
 #[allow(clippy::module_inception)]
 mod tray;
+#[cfg(any(target_os = "macos", test))]
+#[cfg_attr(test, allow(dead_code))]
+mod widget_snapshot;
 
 pub use cli::TRAY_SUBCOMMAND;
+
+#[cfg(target_os = "macos")]
+pub(crate) use tray::start_widget_snapshot_publisher;
 
 /// If the process was invoked as the hidden tray subcommand
 /// (`bifrost __tray ...`), run the tray helper and never return.

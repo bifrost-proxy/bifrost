@@ -33,8 +33,24 @@ fi
 app_executable_name="$($plist_buddy -c 'Print :CFBundleExecutable' "$info_plist")"
 app_executable="$app_path/Contents/MacOS/$app_executable_name"
 sidecar="$app_path/Contents/Resources/resources/bin/bifrost"
+widget_path="$app_path/Contents/PlugIns/BifrostStatusWidget.appex"
+widget_info_plist="$widget_path/Contents/Info.plist"
 
-for executable in "$app_executable" "$sidecar"; do
+if [[ ! -f "$widget_info_plist" ]]; then
+  echo "Missing bundled WidgetKit extension Info.plist: $widget_info_plist" >&2
+  exit 1
+fi
+
+widget_extension_point="$($plist_buddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$widget_info_plist")"
+if [[ "$widget_extension_point" != "com.apple.widgetkit-extension" ]]; then
+  echo "Unexpected WidgetKit extension point: $widget_extension_point" >&2
+  exit 1
+fi
+
+widget_executable_name="$($plist_buddy -c 'Print :CFBundleExecutable' "$widget_info_plist")"
+widget_executable="$widget_path/Contents/MacOS/$widget_executable_name"
+
+for executable in "$app_executable" "$sidecar" "$widget_executable"; do
   if [[ ! -f "$executable" ]]; then
     echo "Missing bundled executable: $executable" >&2
     exit 1
