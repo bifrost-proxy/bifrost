@@ -370,18 +370,14 @@ fn desktop_sidecar_disables_launchd_cleanup_registration() {
 fn desktop_sidecar_clears_inherited_detached_daemon_marker() {
     let _guard = ENV_LOCK.lock().expect("env lock");
     let temp_dir = tempfile::tempdir().expect("temp dir");
-    let home_dir = temp_dir.path().join("home");
-    fs::create_dir_all(home_dir.join(".local/bin")).expect("local bin");
-    let home_env = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    let previous_home = std::env::var_os(home_env);
     let previous_path = std::env::var_os("PATH");
     let minimal_path = std::env::join_paths([
         temp_dir.path().join("system-bin"),
         temp_dir.path().join("fallback-bin"),
     ])
     .expect("minimal path");
-    std::env::set_var(home_env, &home_dir);
     std::env::set_var("PATH", minimal_path);
+    let expected_path = bifrost_core::inherited_executable_path().expect("expected PATH");
     let mut command = Command::new("bifrost");
     configure_desktop_backend_environment(&mut command, temp_dir.path(), "session-123");
 
@@ -401,12 +397,7 @@ fn desktop_sidecar_clears_inherited_detached_daemon_marker() {
                 .flatten()
         })
         .expect("desktop sidecar PATH");
-    assert!(std::env::split_paths(&path).any(|entry| entry == home_dir.join(".local/bin")));
-
-    match previous_home {
-        Some(value) => std::env::set_var(home_env, value),
-        None => std::env::remove_var(home_env),
-    }
+    assert_eq!(path, expected_path);
     match previous_path {
         Some(value) => std::env::set_var("PATH", value),
         None => std::env::remove_var("PATH"),

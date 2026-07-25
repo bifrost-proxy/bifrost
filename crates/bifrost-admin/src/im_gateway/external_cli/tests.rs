@@ -3610,10 +3610,6 @@ fn external_cli_effort_validation_honors_current_model_supported_levels() {
 fn external_cli_command_environment_augments_path_unless_explicitly_overridden() {
     let _guard = external_cli_env_guard();
     let temp_dir = tempfile::tempdir().expect("temp dir");
-    let home_dir = temp_dir.path().join("home");
-    std::fs::create_dir_all(home_dir.join(".local/bin")).expect("local bin");
-    let home_env = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    let _home_guard = EnvGuard::set(home_env, &home_dir);
     let system_path = PathBuf::from(
         std::env::join_paths([
             temp_dir.path().join("system-bin"),
@@ -3630,7 +3626,8 @@ fn external_cli_command_environment_augments_path_unless_explicitly_overridden()
         .get_envs()
         .find_map(|(key, value)| (key == OsStr::new("PATH")).then_some(value).flatten())
         .expect("augmented PATH");
-    assert!(std::env::split_paths(path).any(|entry| entry == home_dir.join(".local/bin")));
+    let expected_path = bifrost_core::inherited_executable_path().expect("expected PATH");
+    assert_eq!(path, expected_path);
 
     let configured_path = "/custom/traex/bin";
     let mut env = BTreeMap::new();
