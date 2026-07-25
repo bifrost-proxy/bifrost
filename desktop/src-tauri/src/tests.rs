@@ -1,8 +1,9 @@
 use super::{
     append_desktop_bootstrap_log, begin_backend_recovery, clear_backend_unavailable_if_healthy,
-    deferred_desktop_install_version_error, desktop_backend_env, desktop_backend_start_args,
-    desktop_pending_install_path, desktop_shutdown_backend_action, desktop_sidecar_rust_log,
-    desktop_startup_deadline, desktop_startup_session_id, desktop_test_allows_multiple_instances,
+    configure_desktop_backend_environment, deferred_desktop_install_version_error,
+    desktop_backend_env, desktop_backend_start_args, desktop_pending_install_path,
+    desktop_shutdown_backend_action, desktop_sidecar_rust_log, desktop_startup_deadline,
+    desktop_startup_session_id, desktop_test_allows_multiple_instances,
     desktop_upgrade_relaunch_marker_path, desktop_upgrade_shutdown_requested,
     ensure_backend_running, ensure_backend_running_with_cli_wait,
     external_cli_backend_matches_handoff, external_cli_handoff_wait,
@@ -24,7 +25,8 @@ use super::{
     DesktopConfig, DesktopInstallRollback, DesktopRuntimeMarker, DesktopShutdownBackendAction,
     DesktopUpgradeRelaunchMarker, ExternalCliBackendHandoff, HostWindowCloseBehavior,
     PendingDesktopInstall, StartupDeadlineDisposition, DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
-    DESKTOP_UPGRADE_SHUTDOWN_ARG, WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
+    DESKTOP_UPGRADE_SHUTDOWN_ARG, DETACHED_DAEMON_CHILD_ENV,
+    WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
 };
 use bifrost_storage::data_dir as shared_bifrost_data_dir;
 use std::ffi::OsStr;
@@ -362,6 +364,22 @@ fn desktop_sidecar_disables_launchd_cleanup_registration() {
     assert!(env
         .iter()
         .any(|(key, value)| { *key == "BIFROST_DATA_DIR" && value == &expected_data_dir }));
+}
+
+#[test]
+fn desktop_sidecar_clears_inherited_detached_daemon_marker() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let mut command = Command::new("bifrost");
+    configure_desktop_backend_environment(&mut command, temp_dir.path(), "session-123");
+
+    let env = command.get_envs().collect::<Vec<_>>();
+    assert!(env
+        .iter()
+        .any(|(key, value)| { *key == OsStr::new(DETACHED_DAEMON_CHILD_ENV) && value.is_none() }));
+    assert!(env.iter().any(|(key, value)| {
+        *key == OsStr::new("BIFROST_DESKTOP_CORE")
+            && value.is_some_and(|value| value == OsStr::new("1"))
+    }));
 }
 
 #[test]
