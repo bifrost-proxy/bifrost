@@ -101,9 +101,29 @@ fn running_desktop_process(app_path: &Path) -> Option<(u32, PathBuf)> {
         #[cfg(target_os = "windows")]
         let matches = windows_paths_match(executable, app_path);
         #[cfg(target_os = "macos")]
-        let matches = executable.starts_with(app_path);
+        let matches = path_is_within(executable, app_path);
         matches.then(|| (pid.as_u32(), executable.to_path_buf()))
     })
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn paths_match_after_canonicalization(left: &Path, right: &Path) -> bool {
+    left == right
+        || left
+            .canonicalize()
+            .ok()
+            .zip(right.canonicalize().ok())
+            .is_some_and(|(left, right)| left == right)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn path_is_within(candidate: &Path, root: &Path) -> bool {
+    candidate.starts_with(root)
+        || candidate
+            .canonicalize()
+            .ok()
+            .zip(root.canonicalize().ok())
+            .is_some_and(|(candidate, root)| candidate.starts_with(root))
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -145,23 +165,47 @@ pub(super) fn select_running_desktop_shell_process(
         }
         #[cfg(not(target_os = "windows"))]
         {
-            executable == expected_executable
+            paths_match_after_canonicalization(executable, expected_executable)
         }
     })
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn installed_desktop_app_is_running(app_path: &Path) -> bool {
+pub(crate) fn installed_desktop_app_is_running(app_path: &Path) -> bool {
     running_desktop_process(app_path).is_some()
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn installed_desktop_app_is_running(_app_path: &Path) -> bool {
+pub(crate) fn installed_desktop_app_is_running(_app_path: &Path) -> bool {
     false
 }
 
+pub(crate) fn desktop_app_is_running(app_path: &Path) -> bool {
+    installed_desktop_app_is_running(app_path)
+}
+
+pub(crate) fn shutdown_running_desktop_for_app_upgrade(
+    app_path: &Path,
+) -> Result<(), BifrostError> {
+    request_running_desktop_shutdown(app_path)
+}
+
+pub(crate) fn restore_desktop_after_failed_app_upgrade(
+    app_path: &Path,
+    desktop_was_shut_down: bool,
+    original_error: BifrostError,
+    relaunch: impl FnOnce(&Path) -> Result<(), BifrostError>,
+) -> BifrostError {
+    restore_desktop_after_failed_companion(
+        app_path,
+        desktop_was_shut_down,
+        original_error,
+        relaunch,
+    )
+}
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn request_running_desktop_shutdown(app_path: &Path) -> Result<(), BifrostError> {
+pub(crate) fn request_running_desktop_shutdown(app_path: &Path) -> Result<(), BifrostError> {
     println!(
         "{}",
         "Requesting the running desktop shell to release its installed files...".bright_cyan()
@@ -220,6 +264,11 @@ fn request_running_desktop_shutdown(app_path: &Path) -> Result<(), BifrostError>
         DESKTOP_UPGRADE_SHUTDOWN_TIMEOUT.as_secs(),
         fallback_detail
     )))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub(crate) fn request_running_desktop_shutdown(_app_path: &Path) -> Result<(), BifrostError> {
+    Ok(())
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]

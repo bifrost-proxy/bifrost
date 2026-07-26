@@ -1,5 +1,9 @@
 mod desktop_companion;
 use desktop_companion::*;
+pub(crate) use desktop_companion::{
+    desktop_app_is_running, restore_desktop_after_failed_app_upgrade,
+    shutdown_running_desktop_for_app_upgrade,
+};
 
 use bifrost_core::BifrostError;
 use colored::Colorize;

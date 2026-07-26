@@ -104,6 +104,47 @@ enum AppOperation {
     Upgrade,
 }
 
+fn should_shutdown_running_desktop_before_install(
+    operation: AppOperation,
+    desktop_handoff_managed: bool,
+    desktop_process_running: bool,
+) -> bool {
+    operation == AppOperation::Upgrade && !desktop_handoff_managed && desktop_process_running
+}
+
+fn shutdown_running_desktop_before_install(
+    operation: AppOperation,
+    desktop_handoff_managed: bool,
+    desktop_process_running: bool,
+    shutdown: impl FnOnce() -> Result<(), BifrostError>,
+) -> Result<bool, BifrostError> {
+    let should_shutdown = should_shutdown_running_desktop_before_install(
+        operation,
+        desktop_handoff_managed,
+        desktop_process_running,
+    );
+    if should_shutdown {
+        shutdown()?;
+    }
+    Ok(should_shutdown)
+}
+
+fn restore_desktop_on_install_failure(
+    install_path: &Path,
+    desktop_was_shut_down: bool,
+    install_result: Result<(), BifrostError>,
+    relaunch: impl FnOnce(&Path) -> Result<(), BifrostError>,
+) -> Result<(), BifrostError> {
+    install_result.map_err(|error| {
+        super::upgrade::restore_desktop_after_failed_app_upgrade(
+            install_path,
+            desktop_was_shut_down,
+            error,
+            relaunch,
+        )
+    })
+}
+
 struct AppInstallRequest {
     operation: AppOperation,
     package: Option<PathBuf>,
@@ -257,6 +298,16 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
         }
     };
 
+    let desktop_was_shut_down = shutdown_running_desktop_before_install(
+        operation,
+        desktop_handoff_managed,
+        super::upgrade::desktop_app_is_running(&install_path),
+        || super::upgrade::shutdown_running_desktop_for_app_upgrade(&install_path),
+    )
+    .inspect_err(|error| {
+        write_app_failed_progress(&target_version, &progress_source, error);
+    })?;
+
     write_app_progress(
         UpgradePhase::Installing,
         "Installing desktop app…",
@@ -288,7 +339,7 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
         );
         return Ok(());
     }
-    install_desktop_package_verified(
+    let install_result = install_desktop_package_verified(
         &package_path,
         &install_dir,
         &install_path,
@@ -297,7 +348,13 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
     )
     .inspect_err(|error| {
         write_app_failed_progress(&target_version, &progress_source, error);
-    })?;
+    });
+    restore_desktop_on_install_failure(
+        &install_path,
+        desktop_was_shut_down,
+        install_result,
+        restart_desktop_app,
+    )?;
     println!("{}", "✓ Desktop app installed successfully.".bright_green());
 
     write_app_progress(

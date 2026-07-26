@@ -39,6 +39,18 @@ pub(super) fn runtime_marker_matches_active_backend(
     active_port != 0 && runtime.port == active_port && runtime.pid == identity.pid
 }
 
+pub(super) fn existing_backend_candidate_matches_runtime(
+    runtime: Option<&DesktopRuntimeMarker>,
+    candidate_port: u16,
+    identity: Option<&BackendSystemIdentity>,
+    healthy: bool,
+) -> bool {
+    healthy
+        && runtime.zip(identity).is_some_and(|(marker, identity)| {
+            runtime_marker_matches_active_backend(marker, candidate_port, identity)
+        })
+}
+
 pub(super) fn desktop_shutdown_backend_action_for_state(
     state: &BackendState,
 ) -> DesktopShutdownBackendAction {
@@ -64,16 +76,28 @@ pub(super) fn desktop_shutdown_backend_action_for_state(
 }
 
 pub(super) fn find_existing_backend_port(data_dir: &Path, preferred_port: u16) -> Option<u16> {
+    let runtime = read_desktop_runtime_marker(data_dir);
     for offset in 0..=MAX_PORT_INCREMENT_ATTEMPTS {
         let port = preferred_port.saturating_add(offset);
         if port == 0 {
             continue;
         }
 
-        if probe_backend_health(port) {
+        let Some(marker) = runtime.as_ref().filter(|marker| marker.port == port) else {
+            continue;
+        };
+        let identity = probe_backend_identity(port);
+        if existing_backend_candidate_matches_runtime(
+            Some(marker),
+            port,
+            identity.as_ref(),
+            probe_backend_health(port),
+        ) {
             append_desktop_bootstrap_log(
                 data_dir,
-                format!("detected healthy backend candidate on port {port} before spawning"),
+                format!(
+                    "detected healthy backend candidate owned by the current data directory on port {port} before spawning"
+                ),
             );
             return Some(port);
         }

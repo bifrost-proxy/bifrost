@@ -85,6 +85,8 @@ pub struct RestartOptions {
 }
 
 pub fn run_restart(opts: RestartOptions) -> BifrostResult<()> {
+    super::stop::reject_live_desktop_owned_runtime()?;
+
     #[cfg(not(unix))]
     {
         let RestartOptions {

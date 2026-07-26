@@ -17,6 +17,9 @@ click repeated the same 30-second wait before returning to the recovery screen.
 
 - App-driven upgrades must have an explicit handoff between old App shutdown and new App startup.
 - The new App must not reuse a backend that belongs to an in-progress upgrade handoff.
+- Normal Desktop startup must reuse only a backend whose PID and port match the runtime marker in
+  the same data directory. A healthy Bifrost service from another data directory is not a valid
+  candidate, even when it listens on the preferred port or an adjacent fallback port.
 - CLI install from Desktop must recover from a transient core reconnect instead of showing a
   terminal install failure immediately.
 - A user who already has the failed marker/progress left by an older Desktop version must recover
@@ -24,6 +27,9 @@ click repeated the same 30-second wait before returning to the recovery screen.
 - Desktop shutdown must stop only a core whose ownership can be proven.
 - Normal Desktop startup, manual core start, and watchdog recovery behavior must remain unchanged
   outside the upgrade handoff path.
+- Explicit CLI lifecycle commands must not silently change a live Desktop-owned runtime into a
+  daemon. `bifrost stop` and `bifrost restart` reject a verified live
+  `runtime_start_mode=desktop` runtime and direct the user to quit the Desktop app instead.
 
 ## Handoff Model
 
@@ -110,6 +116,35 @@ the new App, which would make every new App enter helper mode, exit, and open an
 
 Expired or invalid markers are removed and normal startup continues.
 
+### Normal Startup Ownership
+
+Outside an upgrade handoff, Desktop may reuse an already-running backend only when all of these
+conditions hold:
+
+1. the current Desktop data directory contains a valid `runtime.json`
+2. the candidate port equals the marker port
+3. `/_bifrost/api/system` reports the same PID as the marker
+4. the support endpoint is healthy
+
+Desktop does not scan for and reuse an arbitrary healthy Bifrost service without this identity
+proof. If another data directory owns an adjacent candidate port, Desktop skips that port and starts
+its own managed core on a different available port. This keeps configuration, certificates, traffic,
+and update ownership scoped to the selected data directory.
+
+### CLI Lifecycle Boundary
+
+The shared runtime marker is authoritative for explicit CLI lifecycle commands:
+
+- `bifrost stop` may stop foreground, daemon, unknown, or legacy runtimes, but it refuses a live
+  Desktop-owned runtime before changing system proxy state or sending a signal.
+- `bifrost restart` performs the same check before creating its detached orphan. It never converts a
+  Desktop-managed child into a CLI daemon.
+- A stale Desktop marker whose PID is no longer running, or whose recorded process start time
+  mismatches the current process using that PID, is still cleaned through the existing stale marker
+  path. Legacy markers without a start time retain the compatible PID-only check.
+- `--force` does not override Desktop ownership. It remains an override for daemon restart failures,
+  not permission to steal App ownership.
+
 ## State Machine
 
 ```mermaid
@@ -154,6 +189,10 @@ stateDiagram-v2
   target backend publishes `Completed` and clears the relaunch marker.
 - Managed startup does not accept a healthy response from an unrelated process on the same port.
 - Managed startup only accepts readiness when `runtime.json` belongs to the child it just spawned.
+- Normal startup reuses a healthy backend only when the same data directory runtime marker matches
+  the candidate Admin PID and port.
+- CLI stop/restart rejects a live Desktop-owned runtime before cleanup, fork, signal, or daemon
+  spawn; stale Desktop markers remain removable.
 - Successful handoff startup clears the marker.
 - Successful handoff refreshes terminal progress only after the new managed core is ready.
 - The relaunched App never deletes a Windows rollback snapshot, pending guard, or updater-owned

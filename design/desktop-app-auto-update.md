@@ -65,6 +65,19 @@ Bifrost 桌面端基于 Tauri 打包，但桌面 WebView 与普通 Web UI 共享
 
 普通终端执行 `bifrost app upgrade` 时，当前进程就是 CLI 安装本身，因此先复用现有 `bifrost upgrade` 更新当前 CLI，再安装桌面端，并主动打开新的桌面 app。
 
+普通终端或普通浏览器触发的 caller-managed 桌面更新，在覆盖安装包前必须先处理正在
+运行的旧桌面壳：
+
+1. 按精确安装路径发现当前运行的 Desktop 进程。
+2. 优先调用桌面壳内部 `--bifrost-upgrade-shutdown` 请求，让 App 按 ownership 规则退出。
+3. 内部请求失败时使用平台退出机制，并等待进程真正释放安装目录。
+4. 旧 App 未在超时内退出则拒绝覆盖，不能安装后仅用 `open` 激活仍在运行的旧版本。
+5. 安装失败时重新打开已退出的旧 App，避免 caller-managed 更新把用户留在无桌面壳状态。
+
+`source=desktop` 且带内部 handoff 标记的 WebView 更新不走上述提前退出路径；它仍由当前
+Tauri shell 在安装完成后写 marker、退出并让 relaunch helper 接管。Windows deferred
+installer 也继续属于该 handoff，而不是由安装子进程提前终止宿主。
+
 ### 桌面 WebUI 和浏览器 WebUI 必须区分
 
 两者共享同一套 React Web UI 和 Admin API，但运行时语义不同：

@@ -6,12 +6,13 @@ use super::{
     desktop_startup_session_id, desktop_test_allows_multiple_instances,
     desktop_upgrade_relaunch_marker_path, desktop_upgrade_shutdown_requested,
     ensure_backend_running, ensure_backend_running_with_cli_wait,
-    external_cli_backend_matches_handoff, external_cli_handoff_wait,
-    failed_cli_handoff_can_retry_immediately, host_window_close_behavior_for_platform,
-    is_server_config_response, is_upgrade_relaunch_marker_active,
-    main_interface_decorations_for_platform, mark_backend_unavailable_for_manual_start,
-    parse_port_update_response, persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit,
-    publish_startup_ready, read_active_upgrade_relaunch_marker, read_pending_desktop_install,
+    existing_backend_candidate_matches_runtime, external_cli_backend_matches_handoff,
+    external_cli_handoff_wait, failed_cli_handoff_can_retry_immediately,
+    host_window_close_behavior_for_platform, is_server_config_response,
+    is_upgrade_relaunch_marker_active, main_interface_decorations_for_platform,
+    mark_backend_unavailable_for_manual_start, parse_port_update_response,
+    persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit, publish_startup_ready,
+    read_active_upgrade_relaunch_marker, read_pending_desktop_install,
     record_startup_deadline_error, relaunch_command_for_target, resolve_bifrost_binary_from_env,
     resolve_desktop_config_path, resolve_desktop_data_dir, resolve_external_cli_backend_handoff,
     runtime_marker_matches_active_backend, sanitize_desktop_upgrade_relaunch_command,
@@ -42,6 +43,7 @@ use std::time::{Duration, Instant};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+mod backend_wait;
 mod cli_handoff_recovery;
 
 fn assert_upgrade_relaunch_environment_removed(command: &Command) {
@@ -993,6 +995,54 @@ fn desktop_shutdown_stops_only_a_backend_owned_by_the_desktop() {
 }
 
 #[test]
+fn normal_startup_reuses_only_the_current_data_directory_runtime() {
+    let runtime = DesktopRuntimeMarker {
+        pid: 456,
+        port: 19900,
+        start_mode: Some("daemon".to_string()),
+    };
+    let matching_identity = BackendSystemIdentity {
+        version: "0.0.165".to_string(),
+        pid: 456,
+    };
+    let foreign_identity = BackendSystemIdentity {
+        version: "0.0.165".to_string(),
+        pid: 789,
+    };
+
+    assert!(existing_backend_candidate_matches_runtime(
+        Some(&runtime),
+        19900,
+        Some(&matching_identity),
+        true,
+    ));
+    assert!(!existing_backend_candidate_matches_runtime(
+        None,
+        19900,
+        Some(&matching_identity),
+        true,
+    ));
+    assert!(!existing_backend_candidate_matches_runtime(
+        Some(&runtime),
+        19901,
+        Some(&matching_identity),
+        true,
+    ));
+    assert!(!existing_backend_candidate_matches_runtime(
+        Some(&runtime),
+        19900,
+        Some(&foreign_identity),
+        true,
+    ));
+    assert!(!existing_backend_candidate_matches_runtime(
+        Some(&runtime),
+        19900,
+        Some(&matching_identity),
+        false,
+    ));
+}
+
+#[test]
 fn external_backend_health_failure_requires_manual_start() {
     let temp_dir =
         std::env::temp_dir().join(format!("bifrost-desktop-test-{}", std::process::id()));
@@ -1326,129 +1376,4 @@ fn child_wait_timeout_terminates_stuck_process() {
     assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     assert!(started_at.elapsed() < Duration::from_secs(2));
     assert!(child.try_wait().expect("poll killed child").is_some());
-}
-
-#[test]
-fn wait_for_backend_reports_child_exit_without_waiting_for_timeout() {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("reserve port");
-    let port = listener.local_addr().expect("reserved addr").port();
-    drop(listener);
-
-    let mut child = Command::new(std::env::current_exe().expect("current test executable"))
-        .args(["--list", "--format", "terse"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn short-lived child");
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let started_at = Instant::now();
-    let error = wait_for_backend(&mut child, temp_dir.path(), port, Duration::from_secs(5))
-        .expect_err("short-lived child should fail readiness wait");
-
-    assert!(
-        started_at.elapsed() < Duration::from_secs(2),
-        "child exit should short-circuit the readiness timeout"
-    );
-    assert_eq!(error.kind, BackendWaitFailureKind::ChildExited);
-    assert!(error.to_string().contains("exited before becoming ready"));
-}
-
-#[cfg(unix)]
-#[test]
-fn wait_for_backend_ignores_health_from_unrelated_process() {
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let stop = Arc::new(AtomicBool::new(false));
-    let (port, health_server) = spawn_persistent_health_server(stop.clone());
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg("sleep 0.2")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn short-lived child");
-
-    let error = wait_for_backend(&mut child, temp_dir.path(), port, Duration::from_secs(3))
-        .expect_err("external health server must not satisfy managed child readiness");
-
-    stop.store(true, Ordering::SeqCst);
-    health_server.join().expect("health server thread");
-    assert_eq!(error.kind, BackendWaitFailureKind::ChildExited);
-}
-
-#[cfg(unix)]
-#[test]
-fn wait_for_backend_accepts_health_from_matching_runtime_child() {
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let stop = Arc::new(AtomicBool::new(false));
-    let (port, health_server) = spawn_persistent_health_server(stop.clone());
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg("sleep 3")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn long-lived child");
-    fs::write(
-        temp_dir.path().join("runtime.json"),
-        format!(r#"{{"pid":{},"port":{}}}"#, child.id(), port),
-    )
-    .expect("write runtime marker");
-
-    wait_for_backend(&mut child, temp_dir.path(), port, Duration::from_secs(3))
-        .expect("matching runtime marker should satisfy readiness");
-
-    let _ = child.kill();
-    let _ = child.wait();
-    stop.store(true, Ordering::SeqCst);
-    health_server.join().expect("health server thread");
-}
-
-#[test]
-fn poll_managed_backend_exit_reports_exited_child() {
-    let child = Command::new("sh")
-        .arg("-c")
-        .arg("exit 0")
-        .spawn()
-        .expect("spawn test child");
-    let _ = child.wait_with_output();
-
-    let state = BackendState {
-        binary_path: PathBuf::new(),
-        data_dir: PathBuf::new(),
-        config_path: PathBuf::new(),
-        startup_session_id: "test-session".to_string(),
-        launcher_only: false,
-        expected_port: Mutex::new(0),
-        port: Mutex::new(0),
-        child: Mutex::new(Some(
-            Command::new("sh")
-                .arg("-c")
-                .arg("exit 0")
-                .spawn()
-                .expect("spawn managed child"),
-        )),
-        shutdown_started: AtomicBool::new(false),
-        force_exit: AtomicBool::new(false),
-        backend_recovery_in_progress: AtomicBool::new(false),
-        startup_ready: AtomicBool::new(false),
-        startup_error: Mutex::new(None),
-        main_webview_loaded: AtomicBool::new(false),
-        main_window_ready: AtomicBool::new(false),
-        handoff_started: AtomicBool::new(false),
-        handoff_completed: AtomicBool::new(false),
-        launcher_overlay: Mutex::new(None),
-        pending_open_requests: Mutex::new(Vec::new()),
-        upgrade_relaunch: Mutex::new(None),
-    };
-
-    {
-        let mut child_guard = state.child.lock().expect("child lock");
-        let child = child_guard.as_mut().expect("child");
-        let _ = child.wait();
-    }
-
-    let reason = poll_managed_backend_exit(&state).expect("exited child reason");
-    assert!(reason.contains("exited with status"));
-    assert!(state.child.lock().expect("child lock").is_none());
-    assert!(!state.backend_recovery_in_progress.load(Ordering::SeqCst));
 }
