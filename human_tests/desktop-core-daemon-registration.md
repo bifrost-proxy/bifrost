@@ -116,6 +116,59 @@
 - CLI `start --daemon` 创建的 Service 记录 `runtime_start_mode=daemon`；Desktop 复用该 Service 后退出，原 CLI Service PID 和健康端点仍保持可用。
 - 脚本最后通过 CLI `stop` 清理临时 daemon，并删除临时数据目录。
 
+### TC-DCDR-06（回归）：Desktop 不复用其他 data-dir 的相邻端口 Service
+
+操作步骤：
+
+1. 在有 macOS WindowServer 会话的机器上准备 debug CLI sidecar 与 Desktop binary：
+   ```bash
+   pnpm --dir web run build:desktop
+   SKIP_FRONTEND_BUILD=1 cargo build -p bifrost-cli --bin bifrost
+   node scripts/prepare-tauri-sidecar.mjs debug
+   SKIP_FRONTEND_BUILD=1 cargo build --manifest-path desktop/src-tauri/Cargo.toml
+   ```
+2. 执行真实进程生命周期脚本：
+   ```bash
+   SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh
+   ```
+3. 检查脚本退出码为 0，且最终输出包含
+   `PASS: Desktop ownership stays scoped by data-dir and CLI lifecycle commands preserve App ownership`。
+
+预期结果：
+
+- 脚本先在临时 foreign data-dir 的相邻动态端口启动 CLI daemon，再使用另一个临时
+  data-dir 启动 Desktop。
+- Desktop 不把相邻端口的健康 foreign Service 当作自己的 backend，而是在自己的配置端口
+  启动独立 `runtime_start_mode=desktop` Service。
+- Desktop 退出后只停止自己 data-dir 的 Desktop-owned Service，foreign Service PID 仍存活；
+  最后由脚本使用 foreign data-dir 定向停止。
+- 整个用例不读取、停止或替换默认 data-dir 的正式 Service，也不固定使用 `9900/9901`。
+
+### TC-DCDR-07（回归）：用户 CLI stop/restart 不改变 Desktop ownership
+
+操作步骤：
+
+1. 执行真实进程生命周期脚本：
+   ```bash
+   SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh
+   ```
+2. 检查脚本在 Desktop-owned Service 运行期间分别执行用户 CLI `stop` 与 `restart`，两条命令
+   都非零退出且输出包含 `owned by the Desktop app`。
+3. 检查命令执行后的 `runtime.json` PID 与 `runtime_start_mode`，再通过 Desktop 单实例
+   graceful shutdown 通道退出 App。
+
+预期结果：
+
+- 用户 CLI `stop` 和 `restart` 都 fail-closed；即使 `restart` 具备 daemon 重启语义，也不能
+  把 live Desktop-owned Service 静默转换为 CLI daemon。
+- 两条 CLI 命令之后，原 Service PID 继续存活，`runtime_start_mode` 仍为 `desktop`。
+- 如果 Desktop marker 的 PID 已被系统复用且进程启动时间不匹配，则该 marker 视为 stale，
+  不会错误阻断 CLI；没有启动时间字段的历史 marker 继续兼容 PID-only 判断。
+- Desktop 自己的 graceful shutdown 使用内部授权 stop，仍能退出 App 并停止其拥有的
+  Service；日志包含 `desktop shutdown owns the active backend; requesting backend stop`。
+- CLI-owned daemon 被 Desktop 复用并退出 App 时仍保持运行，确保新门禁不破坏既有 owner
+  语义。
+
 ## 清理步骤
 
 ```bash
@@ -136,3 +189,4 @@ rm -rf "$BIFROST_DATA_DIR"
 | 2026-07-25 | TC-DCDR-03 | `cargo test -p bifrost-cli desktop_core --lib -- --nocapture`、`cargo test -p bifrost-cli live_desktop_runtime --lib -- --nocapture`、`cargo test -p bifrost-cli runtime_info_new_desktop_is_app_bound_not_cli_restartable --lib -- --nocapture`。 | 通过：分别 2、4、1 passed；detached daemon 优先级保持，CLI 不误 stop Desktop runtime。 |
 | 2026-07-25 | TC-DCDR-04 | `bash e2e-tests/tests/test_desktop_sidecar_launchd_env_contract.sh`。 | 通过：Desktop sidecar 4 passed、CLI ownership 2 passed、live Desktop runtime 4 passed、restartability 1 passed；静态合约确认 Desktop sidecar 清除继承的 daemon marker。 |
 | 2026-07-25 | TC-DCDR-05 回归 | `SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`。 | 通过：污染父环境时 Desktop sidecar 仍记录 `desktop` 并随 Desktop graceful shutdown 退出；CLI daemon 被 Desktop 复用后，Desktop 退出但原 PID 与健康端点保持可用，最后由测试定向清理。 |
+| 2026-07-25 | TC-DCDR-06 / 07 回归 | `SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`；执行前 `pgrep` 识别到正式 `/Applications/Bifrost.app/Contents/MacOS/bifrost-desktop` PID `58982`。 | 环境阻塞：脚本按安全门禁输出 `SKIP: an existing Bifrost Desktop process is running`，未停止正式 App，也未触碰正式 `9900/9901` Service。新增跨 data-dir 与 CLI `stop/restart` 真实断言尚需在无正式 Desktop 进程的 macOS CI/会话补跑。 |

@@ -907,6 +907,7 @@ pub(super) fn stop_backend_with_binary(binary_path: &Path, data_dir: &Path) -> t
     command
         .arg("stop")
         .env("BIFROST_DATA_DIR", data_dir)
+        .env("BIFROST_DESKTOP_AUTHORIZED_STOP_INTERNAL", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     hide_windows_child_console(&mut command);

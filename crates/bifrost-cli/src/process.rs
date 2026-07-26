@@ -75,6 +75,19 @@ impl RuntimeInfo {
     }
 }
 
+pub fn runtime_is_live_desktop_owned(
+    runtime: &RuntimeInfo,
+    process_running: bool,
+    observed_started_at_ms: Option<u64>,
+) -> bool {
+    runtime.start_mode == RuntimeStartMode::Desktop
+        && process_running
+        && !matches!(
+            bifrost_core::start_times_match(runtime.started_at_ms, observed_started_at_ms),
+            bifrost_core::StartTimeMatch::Mismatch { .. }
+        )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeSystemProxySnapshot {
     pub bypass: String,

@@ -37,6 +37,7 @@ TEST_ROOT="$(mktemp -d "$ROOT_DIR/.bifrost-e2e-desktop-service-ownership.XXXXXX"
 APP_PID=""
 CORE_PID=""
 REQUESTER_PID=""
+FOREIGN_CORE_PID=""
 
 process_is_running() {
   kill -0 "$1" >/dev/null 2>&1
@@ -61,6 +62,32 @@ sock = socket.socket()
 sock.bind(("127.0.0.1", 0))
 print(sock.getsockname()[1])
 sock.close()
+PY
+}
+
+free_consecutive_ports() {
+  /usr/bin/python3 <<'PY'
+import socket
+
+for _ in range(200):
+    first = socket.socket()
+    first.bind(("127.0.0.1", 0))
+    port = first.getsockname()[1]
+    if port >= 65535:
+        first.close()
+        continue
+    second = socket.socket()
+    try:
+        second.bind(("127.0.0.1", port + 1))
+    except OSError:
+        first.close()
+        second.close()
+        continue
+    first.close()
+    second.close()
+    print(port)
+    raise SystemExit(0)
+raise SystemExit("could not allocate consecutive ports")
 PY
 }
 
@@ -131,6 +158,11 @@ cleanup() {
     kill "$CORE_PID" >/dev/null 2>&1 || true
     wait_for_process_exit "$CORE_PID" || kill -9 "$CORE_PID" >/dev/null 2>&1 || true
   fi
+  if [[ -n "$FOREIGN_CORE_PID" ]] && process_is_running "$FOREIGN_CORE_PID"; then
+    kill "$FOREIGN_CORE_PID" >/dev/null 2>&1 || true
+    wait_for_process_exit "$FOREIGN_CORE_PID" ||
+      kill -9 "$FOREIGN_CORE_PID" >/dev/null 2>&1 || true
+  fi
   rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT
@@ -153,6 +185,72 @@ launch_desktop() {
     "$APP_BIN" >"$app_log" 2>&1 &
   APP_PID=$!
 }
+
+foreign_data_dir="$TEST_ROOT/foreign-data-dir"
+isolated_desktop_data_dir="$TEST_ROOT/isolated-desktop"
+isolated_desktop_port="$(free_consecutive_ports)"
+foreign_port="$((isolated_desktop_port + 1))"
+mkdir -p "$foreign_data_dir"
+env -u BIFROST_DETACHED_DAEMON_CHILD \
+  BIFROST_DATA_DIR="$foreign_data_dir" \
+  BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+  BIFROST_DISABLE_TRAY=1 \
+  "$CLI_BIN" start \
+    --host 127.0.0.1 \
+    --port "$foreign_port" \
+    --daemon \
+    --skip-cert-check \
+    --no-system-proxy \
+    --no-intercept >"$TEST_ROOT/foreign-start.log" 2>&1
+if ! wait_for_runtime "$foreign_data_dir" "$foreign_port"; then
+  echo "FAIL: foreign data-dir Service did not become ready"
+  cat "$TEST_ROOT/foreign-start.log" || true
+  exit 1
+fi
+FOREIGN_CORE_PID="$(/usr/bin/python3 -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' \
+  "$foreign_data_dir/runtime.json")"
+
+launch_desktop \
+  "$isolated_desktop_data_dir" \
+  "$isolated_desktop_port" \
+  "$TEST_ROOT/isolated-desktop-app.log" \
+  BIFROST_DETACHED_DAEMON_CHILD=1
+if ! wait_for_desktop_startup "$isolated_desktop_data_dir"; then
+  echo "FAIL: Desktop app did not start beside the foreign data-dir Service"
+  cat "$TEST_ROOT/isolated-desktop-app.log" || true
+  exit 1
+fi
+if ! wait_for_runtime "$isolated_desktop_data_dir" "$isolated_desktop_port"; then
+  echo "FAIL: Desktop did not start its own Service instead of reusing the foreign data-dir"
+  cat "$TEST_ROOT/isolated-desktop-app.log" || true
+  cat "$isolated_desktop_data_dir/logs/desktop-bootstrap.log" || true
+  exit 1
+fi
+CORE_PID="$(/usr/bin/python3 -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' \
+  "$isolated_desktop_data_dir/runtime.json")"
+if [[ "$CORE_PID" == "$FOREIGN_CORE_PID" ]]; then
+  echo "FAIL: Desktop reused the foreign data-dir Service"
+  exit 1
+fi
+if ! request_desktop_shutdown "$isolated_desktop_data_dir" "$APP_PID"; then
+  echo "FAIL: isolated Desktop app did not exit"
+  exit 1
+fi
+APP_PID=""
+if ! wait_for_process_exit "$CORE_PID"; then
+  echo "FAIL: isolated Desktop-owned Service remained running after Desktop quit"
+  exit 1
+fi
+CORE_PID=""
+if ! process_is_running "$FOREIGN_CORE_PID"; then
+  echo "FAIL: isolated Desktop shutdown stopped the foreign data-dir Service"
+  exit 1
+fi
+BIFROST_DATA_DIR="$foreign_data_dir" "$CLI_BIN" stop >/dev/null
+wait_for_process_exit "$FOREIGN_CORE_PID"
+FOREIGN_CORE_PID=""
 
 desktop_data_dir="$TEST_ROOT/desktop-owned"
 desktop_port="$(free_port)"
@@ -181,6 +279,43 @@ CORE_PID="$(/usr/bin/python3 -c \
   "$desktop_data_dir/runtime.json")"
 if [[ "$desktop_mode" != "desktop" ]]; then
   echo "FAIL: inherited daemon marker changed Desktop Service owner to $desktop_mode"
+  cat "$desktop_data_dir/runtime.json"
+  exit 1
+fi
+
+set +e
+desktop_stop_output="$(
+  BIFROST_DATA_DIR="$desktop_data_dir" "$CLI_BIN" stop 2>&1
+)"
+desktop_stop_status=$?
+desktop_restart_output="$(
+  BIFROST_DATA_DIR="$desktop_data_dir" "$CLI_BIN" restart 2>&1
+)"
+desktop_restart_status=$?
+set -e
+if [[ "$desktop_stop_status" -eq 0 ]] ||
+  [[ "$desktop_stop_output" != *"owned by the Desktop app"* ]]; then
+  echo "FAIL: CLI stop did not reject the Desktop-owned Service"
+  printf '%s\n' "$desktop_stop_output"
+  exit 1
+fi
+if [[ "$desktop_restart_status" -eq 0 ]] ||
+  [[ "$desktop_restart_output" != *"owned by the Desktop app"* ]]; then
+  echo "FAIL: CLI restart did not reject the Desktop-owned Service"
+  printf '%s\n' "$desktop_restart_output"
+  exit 1
+fi
+sleep 1
+runtime_pid_after_cli_commands="$(/usr/bin/python3 -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' \
+  "$desktop_data_dir/runtime.json")"
+runtime_mode_after_cli_commands="$(/usr/bin/python3 -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["runtime_start_mode"])' \
+  "$desktop_data_dir/runtime.json")"
+if [[ "$runtime_pid_after_cli_commands" != "$CORE_PID" ]] ||
+  [[ "$runtime_mode_after_cli_commands" != "desktop" ]] ||
+  ! process_is_running "$CORE_PID"; then
+  echo "FAIL: CLI stop/restart changed the Desktop-owned Service"
   cat "$desktop_data_dir/runtime.json"
   exit 1
 fi
@@ -274,4 +409,4 @@ BIFROST_DATA_DIR="$cli_data_dir" "$CLI_BIN" stop >/dev/null
 wait_for_process_exit "$CORE_PID"
 CORE_PID=""
 
-echo "PASS: Desktop-owned Service exits with Desktop while CLI-owned Service is preserved"
+echo "PASS: Desktop ownership stays scoped by data-dir and CLI lifecycle commands preserve App ownership"

@@ -744,6 +744,36 @@
 - 健康 target core 只有同时位于 marker 记录端口时才会写 `Completed` 并清理 marker；健康但
   错误版本或位于其它端口的 core 都不能绕过 handoff。
 
+### TC-DAU-18（回归）：direct app upgrade 先退出旧壳再安装并启动新壳
+
+操作步骤：
+
+1. 构建当前 CLI：
+   ```bash
+   cargo build -p bifrost-cli
+   ```
+2. 在 macOS 桌面会话中执行隔离 App 更新 E2E：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_desktop_app_update_cli.sh
+   ```
+3. 脚本会编译两个临时 `.app` fixture。先安装并直接启动 `0.0.139` 旧壳，再从普通 CLI
+   执行 caller-managed `bifrost app upgrade --package <0.0.140 fixture> --no-cli`。
+4. 检查命令输出包含
+   `Requesting the running desktop shell to release its installed files`，旧 PID 在安装完成前
+   退出，目标 bundle 安装后由 LaunchServices 启动新的 PID。
+
+预期结果：
+
+- direct caller-managed App upgrade 检测到已安装旧 App 正在运行时，先走 Desktop 内部
+  shutdown 通道并等待旧 PID 退出，再替换 bundle，避免旧壳继续占用或执行旧代码。
+- 安装成功后启动的是新 bundle；脚本创建的新版本 marker 存在，marker 中的新 PID 保持
+  运行，且不同于已退出的旧 PID。
+- `source=desktop` 且 handoff 环境有效的 WebView/App-owned 更新仍由当前 Desktop shell
+  管理重启，不在安装前自杀；本回归只验证 direct caller-managed 路径。
+- 所有 `.app`、marker、data-dir 和进程都位于 `mktemp` 测试目录并由 trap 定向清理，不改
+  `/Applications`，不停止正式 `9900/9901` Service。
+
 ## 清理步骤
 
 ```bash
@@ -780,3 +810,4 @@ bifrost app uninstall
 | 2026-07-20 | TC-DAU-16 | `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin cli_version_probe_ --lib -- --nocapture`；连续 20 轮版本解析与独立失败/超时 fixture | PASS：4 个版本探测回归通过，覆盖 `ETXTBSY` 第三次恢复、持续占用 8 次停止、非瞬态错误不重试、版本输出解析以及独立失败/超时/缺失路径；原 workspace 失败用例连续 20/20 轮通过。 |
 | 2026-07-24 | TC-DAU-17 | 现场日志复核 `~/.bifrost/logs/desktop-bootstrap.log`，确认旧版本在 fresh `desktop-upgrade-relaunch.json` 下反复等待 `CLI-owned backend`，点击 `Start Bifrost Service` 也再次等待 30 秒；删除残留 marker 临时恢复本机；执行 `cargo test --manifest-path desktop/src-tauri/Cargo.toml cli_owned_upgrade_relaunch -- --nocapture` | PASS：3/3 通过。覆盖 CLI-owned core 已以新 PID/目标版本恢复时继续复用；无 CLI/core 重启且端口空闲时进入 `port is free, launching desktop-managed core` fallback，不再返回旧的 refusing 错误；端口仍被 `0.0.0.0` 占用时保留 fail-closed，拒绝启动第二个 desktop-managed core。 |
 | 2026-07-24 | TC-DAU-17 完整恢复矩阵 | `bash e2e-tests/tests/test_desktop_upgrade_handoff_contract.sh`；定向执行旧 Failed/legacy marker 零等待、shutdown ownership、target 完成清 marker、错误版本/错误端口阻断及 `cli_owned_upgrade_relaunch` 4 条恢复测试；测试前后读取 9900 listener 与 `/api/system` | PASS：handoff contract 全部通过；旧 marker 无 target 也不再重复等待 30 秒；同 PID target 可复用，端口空闲 fallback、同 data dir 旧 core 安全接管、无关端口 fail-closed 均通过；target core 仅在 marker 端口完成并清 marker，错误版本或错误端口不能绕过。正式服务前后均为 PID `85734`、版本 `0.0.163`，未被停止或替换。 |
+| 2026-07-25 | TC-DAU-18 回归 | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh`；首次运行发现外部 Runner 继承 `BIFROST_DETACHED_DAEMON_CHILD=1` 令临时 daemon 不分离，补 `env -u` 后发现 macOS `/var` 与 `/private/var` 路径别名漏判，修复 canonical path 比较并完整复跑；第 2 轮增加新旧 PID 显式差异断言后再次复跑。 | PASS：39/39 通过。direct caller-managed upgrade 输出内部 shutdown 请求，旧 fixture PID 退出，目标 `.app` 安装后不同的新 PID 运行；临时 Admin Service、fixture 与 data-dir 均清理，正式 Desktop PID `58982` 及 `9900/9901` Service 保持运行。 |
