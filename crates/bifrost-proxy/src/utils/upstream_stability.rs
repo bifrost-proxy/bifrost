@@ -288,6 +288,20 @@ mod tests {
     }
 
     #[test]
+    fn recovery_state_without_retry_deadline_can_start_probe() {
+        let mut state = RecoveryState {
+            resource_failures: 1,
+            retry_at: None,
+            probe_in_flight: false,
+        };
+
+        assert_eq!(
+            state.action(Instant::now()),
+            RecoveryAction::Ready { probe: true }
+        );
+    }
+
+    #[test]
     fn resource_pressure_classification_is_narrow() {
         assert!(is_resource_pressure_error(
             Some(io::ErrorKind::AddrNotAvailable),
@@ -337,6 +351,56 @@ mod tests {
             run(controller, active, Arc::clone(&peak))
         );
         assert_eq!(peak.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn begin_attempt_waits_for_backoff_before_starting_probe() {
+        let controller = Arc::new(UpstreamStability::new(1));
+        {
+            let mut state = controller.recovery_state();
+            state.record_resource_failure(Instant::now(), Duration::ZERO);
+        }
+
+        let started = Instant::now();
+        let probe = controller.begin_attempt().await;
+        assert!(probe.probe);
+        assert!(started.elapsed() >= BACKOFF_BASE);
+        probe.record_success();
+    }
+
+    #[tokio::test]
+    async fn resource_error_enters_backoff_and_non_resource_probe_releases_waiter() {
+        let controller = Arc::new(UpstreamStability::new(1));
+        controller
+            .begin_attempt()
+            .await
+            .record_error(Some(io::ErrorKind::AddrNotAvailable), "resource pressure");
+        {
+            let state = controller.recovery_state();
+            assert_eq!(state.resource_failures, 1);
+            assert!(state.retry_at.is_some());
+            assert!(!state.probe_in_flight);
+        }
+
+        {
+            let mut state = controller.recovery_state();
+            state.retry_at = Some(Instant::now() - Duration::from_millis(1));
+        }
+        let probe = controller.begin_attempt().await;
+        assert!(probe.probe);
+
+        let waiting_controller = Arc::clone(&controller);
+        let waiter = tokio::spawn(async move { waiting_controller.begin_attempt().await });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        probe.record_error(Some(io::ErrorKind::ConnectionRefused), "connection refused");
+        let released = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter should be notified")
+            .expect("waiter task should not panic");
+        assert!(!released.probe);
+        released.record_success();
     }
 
     #[tokio::test]
