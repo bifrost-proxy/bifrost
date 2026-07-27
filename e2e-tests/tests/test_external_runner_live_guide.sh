@@ -181,7 +181,7 @@ if [[ "${SKIP_BUILD:-false}" != "true" ]]; then
   SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
 fi
 
-BIFROST_EXTERNAL_CLI_WORKER=1 BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
+if ! BIFROST_EXTERNAL_CLI_WORKER=1 BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
   --daemon \
   --no-tray \
   --host 127.0.0.1 \
@@ -189,7 +189,11 @@ BIFROST_EXTERNAL_CLI_WORKER=1 BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start 
   --unsafe-ssl \
   --skip-cert-check \
   --no-system-proxy \
-  >"$BIFROST_LOG" 2>&1
+  >"$BIFROST_LOG" 2>&1; then
+  echo "[external-runner-live-guide] detached daemon failed to start" >&2
+  tail -160 "$BIFROST_LOG" >&2 || true
+  exit 1
+fi
 
 for _ in $(seq 1 180); do
   if curl -fsS --noproxy '*' "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/proxy/address" >/dev/null 2>&1; then

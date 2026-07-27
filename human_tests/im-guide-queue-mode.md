@@ -71,7 +71,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
   - 刷新 `view=active` 的 Web Agent Chat 页面时状态标签显示 Ready，不显示 Stop，不追加 `Agent is running...` 占位消息。
 - **执行记录（2026-06-16）**: PARTIAL — 执行 `cargo test -p bifrost-admin session_detail_without_active_status_reports_explicit_idle_state --lib` 通过，验证后端 detail idle 真源。执行 `pnpm test:ui --grep "active detail idle run_state"` 通过，新增 Playwright 用例覆盖 active detail `run_state:"idle"` + stale running history 的页面期望。执行 `pnpm test:unit AgentChatSection.timeline.test.ts` 在 Vitest worker 启动阶段失败，错误为 `ERR_REQUIRE_ESM`（`html-encoding-sniffer` require ESM `@exodus/bytes`），未进入新增断言，待本地 Vitest/jsdom 依赖环境修复后复跑。
 
-### TC-GQ-19: 污染父环境启动 detached daemon 后仍可 live guide（macOS CI 回归）
+### TC-GQ-19: 污染父环境启动 detached daemon 后仍可 live guide（macOS/Linux CI 回归）
 
 - **操作步骤**:
   ```bash

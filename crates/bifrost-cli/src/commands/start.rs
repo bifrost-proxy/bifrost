@@ -2858,6 +2858,11 @@ fn configure_detached_daemon_environment(command: &mut std::process::Command, da
         .env("BIFROST_DATA_DIR", data_dir);
 }
 
+#[cfg(unix)]
+fn clear_external_cli_worker_marker_for_forked_daemon() {
+    std::env::remove_var(EXTERNAL_CLI_WORKER_ENV);
+}
+
 #[cfg(any(unix, windows))]
 fn run_daemon_via_exec(
     config: &ProxyConfig,
@@ -3058,6 +3063,7 @@ pub fn run_daemon(
         }
         Ok(ForkResult::Child) => {
             drop(ready_rx);
+            clear_external_cli_worker_marker_for_forked_daemon();
             setsid().map_err(|e| {
                 bifrost_core::BifrostError::Config(format!("Failed to create new session: {}", e))
             })?;
@@ -4576,6 +4582,17 @@ mod tests {
             *key == std::ffi::OsStr::new("BIFROST_DATA_DIR")
                 && value.is_some_and(|value| value == temp_dir.path().as_os_str())
         }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forked_daemon_child_clears_inherited_external_worker_marker() {
+        let _guard = data_dir_test_lock();
+        let _worker_marker = ScopedEnvVar::set(EXTERNAL_CLI_WORKER_ENV, "leaked-worker-role");
+
+        clear_external_cli_worker_marker_for_forked_daemon();
+
+        assert!(std::env::var_os(EXTERNAL_CLI_WORKER_ENV).is_none());
     }
 
     #[cfg(any(unix, windows))]

@@ -151,7 +151,7 @@ other adapter                          -> existing transport
 
 这项清理只作用于新子进程的环境，不修改当前进程环境，也不清理真实 worker 的标记。旧版本已经启动且受污染的长期进程不会被热修复；安装新版本后需要由用户选择合适窗口完整重启 Desktop、Tray 和 core，避免打断正在进行的连接。
 
-Linux 的传统 daemon 路径使用 `fork` 而不是 `Command`，没有可调用 `env_remove` 的子命令构造器；它依靠生产 dispatch 不再读取 ambient marker 保证正确性。由 Tray 创建 Linux 服务时，Tray 的 command 边界仍会清除该变量。
+Linux 的传统 daemon 路径使用 `fork` 而不是 `Command`，因此在 fork child 进入长期运行前直接 `remove_var` 清除该角色标记；生产 dispatch 同时不再读取 ambient marker，形成进程环境与调度语义两层隔离。由 Tray 创建 Linux 服务时，Tray 的 command 边界仍会清除该变量。
 
 ### Admin API 与 CLI
 
