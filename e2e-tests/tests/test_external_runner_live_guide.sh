@@ -181,14 +181,20 @@ if [[ "${SKIP_BUILD:-false}" != "true" ]]; then
   SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
 fi
 
+START_ARGS=(
+  --daemon
+  --host 127.0.0.1
+  -p "$BIFROST_PORT"
+  --unsafe-ssl
+  --skip-cert-check
+  --no-system-proxy
+)
+if "$BIFROST_BIN" start --help | grep -q -- '--no-tray'; then
+  START_ARGS+=(--no-tray)
+fi
+
 if ! BIFROST_EXTERNAL_CLI_WORKER=1 BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
-  --daemon \
-  --no-tray \
-  --host 127.0.0.1 \
-  -p "$BIFROST_PORT" \
-  --unsafe-ssl \
-  --skip-cert-check \
-  --no-system-proxy \
+  "${START_ARGS[@]}" \
   >"$BIFROST_LOG" 2>&1; then
   echo "[external-runner-live-guide] detached daemon failed to start" >&2
   tail -160 "$BIFROST_LOG" >&2 || true
