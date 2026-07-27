@@ -126,6 +126,8 @@ To make Bifrost available from terminals and AI coding tools after a desktop-fir
 
 For the full desktop installation, update, uninstall, and source build guide, see [`desktop.md`](./desktop.md).
 
+To connect a phone or tablet to Bifrost on this computer, continue with [`mobile-proxy.md`](./mobile-proxy.md).
+
 ## Verify Installation
 
 ```bash
