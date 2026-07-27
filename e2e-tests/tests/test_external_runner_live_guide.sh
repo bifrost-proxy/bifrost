@@ -2,7 +2,6 @@
 set -euo pipefail
 
 unset BIFROST_DETACHED_DAEMON_CHILD
-unset BIFROST_EXTERNAL_CLI_WORKER
 
 : "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
 : "${BIFROST_DISABLE_TRAY:=1}"
@@ -13,7 +12,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_DIR"
 
-TEST_DIR="$(mktemp -d)"
+TEST_DIR="$(mktemp -d "$REPO_DIR/.bifrost-e2e-external-guide.XXXXXX")"
+export BIFROST_DATA_DIR="$TEST_DIR"
+source "$REPO_DIR/e2e-tests/test_utils/process.sh"
+mark_e2e_data_root "$TEST_DIR"
+
 BIFROST_LOG="$TEST_DIR/bifrost.log"
 MOCK_LOG="$TEST_DIR/mock-app-server.ndjson"
 BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
@@ -27,10 +30,10 @@ PY
 )}"
 
 cleanup() {
-  if [[ -n "${BIFROST_PID:-}" ]]; then
-    kill "$BIFROST_PID" >/dev/null 2>&1 || true
-    wait "$BIFROST_PID" >/dev/null 2>&1 || true
+  if [[ -x "${BIFROST_BIN:-}" ]]; then
+    BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" stop >/dev/null 2>&1 || true
   fi
+  kill_bifrost_in_data_root "$TEST_DIR" >/dev/null 2>&1 || true
   if [[ "${KEEP_TEST_DIR:-false}" == "true" ]]; then
     echo "[external-runner-live-guide] keeping test dir: $TEST_DIR" >&2
   else
@@ -178,25 +181,34 @@ if [[ "${SKIP_BUILD:-false}" != "true" ]]; then
   SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
 fi
 
-BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
+BIFROST_EXTERNAL_CLI_WORKER=1 BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
+  --daemon \
+  --no-tray \
   --host 127.0.0.1 \
   -p "$BIFROST_PORT" \
   --unsafe-ssl \
   --skip-cert-check \
   --no-system-proxy \
-  >"$BIFROST_LOG" 2>&1 &
-BIFROST_PID=$!
+  >"$BIFROST_LOG" 2>&1
 
 for _ in $(seq 1 180); do
   if curl -fsS --noproxy '*' "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/proxy/address" >/dev/null 2>&1; then
     break
   fi
-  if ! kill -0 "$BIFROST_PID" >/dev/null 2>&1; then
-    tail -160 "$BIFROST_LOG" >&2 || true
-    exit 1
-  fi
   sleep 0.25
 done
+
+if ! curl -fsS --noproxy '*' "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/proxy/address" >/dev/null; then
+  tail -160 "$BIFROST_LOG" >&2 || true
+  exit 1
+fi
+
+BIFROST_PID="$(pid_from_runtime_file "$TEST_DIR/runtime.json")"
+if [[ ! "$BIFROST_PID" =~ ^[0-9]+$ ]] || ! kill -0 "$BIFROST_PID" >/dev/null 2>&1; then
+  echo "[external-runner-live-guide] detached daemon PID is not running: ${BIFROST_PID:-missing}" >&2
+  tail -160 "$BIFROST_LOG" >&2 || true
+  exit 1
+fi
 
 python3 - "$BIFROST_PORT" "$TEST_DIR/mock-runner" "$MOCK_LOG" "$REPO_DIR" <<'PY'
 import json

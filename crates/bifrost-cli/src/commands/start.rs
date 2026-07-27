@@ -22,7 +22,8 @@ use bifrost_admin::{
     ReplayDbStore, RuntimeConfig, WsPayloadStore,
 };
 use bifrost_core::{
-    expand_rule_references, normalize_rule_content, Rule, UserPassAccountConfig, UserPassAuthConfig,
+    expand_rule_references, normalize_rule_content, Rule, UserPassAccountConfig,
+    UserPassAuthConfig, EXTERNAL_CLI_WORKER_ENV,
 };
 use bifrost_proxy::{AccessMode, ProxyConfig, ProxyServer};
 use bifrost_storage::{
@@ -2850,6 +2851,14 @@ fn wait_for_detached_daemon_ready(
 }
 
 #[cfg(any(unix, windows))]
+fn configure_detached_daemon_environment(command: &mut std::process::Command, data_dir: &Path) {
+    command
+        .env_remove(EXTERNAL_CLI_WORKER_ENV)
+        .env(DETACHED_DAEMON_CHILD_ENV, "1")
+        .env("BIFROST_DATA_DIR", data_dir);
+}
+
+#[cfg(any(unix, windows))]
 fn run_daemon_via_exec(
     config: &ProxyConfig,
     config_manager: &ConfigManager,
@@ -2903,12 +2912,11 @@ fn run_daemon_via_exec(
     let mut command = Command::new(exe);
     command
         .args(std::env::args_os().skip(1))
-        .env(DETACHED_DAEMON_CHILD_ENV, "1")
-        .env("BIFROST_DATA_DIR", &bifrost_dir)
         .current_dir(&bifrost_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
+    configure_detached_daemon_environment(&mut command, &bifrost_dir);
 
     #[cfg(unix)]
     {
@@ -4518,6 +4526,29 @@ mod tests {
         assert!(should_spawn_daemon_parent_process(true, false));
         assert!(!should_spawn_daemon_parent_process(true, true));
         assert!(!should_spawn_daemon_parent_process(false, false));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn detached_daemon_command_clears_inherited_external_worker_marker() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let mut command = std::process::Command::new("bifrost");
+        command.env(EXTERNAL_CLI_WORKER_ENV, "leaked-worker-role");
+
+        configure_detached_daemon_environment(&mut command, temp_dir.path());
+
+        let env = command.get_envs().collect::<Vec<_>>();
+        assert!(env.iter().any(|(key, value)| {
+            *key == std::ffi::OsStr::new(EXTERNAL_CLI_WORKER_ENV) && value.is_none()
+        }));
+        assert!(env.iter().any(|(key, value)| {
+            *key == std::ffi::OsStr::new(DETACHED_DAEMON_CHILD_ENV)
+                && value.is_some_and(|value| value == std::ffi::OsStr::new("1"))
+        }));
+        assert!(env.iter().any(|(key, value)| {
+            *key == std::ffi::OsStr::new("BIFROST_DATA_DIR")
+                && value.is_some_and(|value| value == temp_dir.path().as_os_str())
+        }));
     }
 
     #[test]
