@@ -138,6 +138,8 @@ cargo build --release
 
 更完整的桌面端安装、更新、卸载和源码构建说明见 [`desktop.md`](./desktop.md)。
 
+如果要让手机或平板连接到这台电脑上的 Bifrost，请继续阅读 [`mobile-proxy.md`](./mobile-proxy.md)。
+
 ## 检查安装
 
 ```bash

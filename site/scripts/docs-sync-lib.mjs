@@ -41,6 +41,15 @@ const knownPages = new Map(
       },
     ],
     [
+      "docs/mobile-proxy.md",
+      {
+        target: "getting-started/mobile-proxy.md",
+        title: "移动端连接 Bifrost",
+        description: "让 iPhone、iPad 或 Android 设备连接到 PC、Mac 或 Linux 上运行的 Bifrost 代理。",
+        order: 25,
+      },
+    ],
+    [
       "docs/cli-quick-start.md",
       {
         target: "getting-started/cli-quick-start.md",
@@ -274,6 +283,15 @@ const knownEnglishPages = new Map(
         title: "Installation and Startup",
         description: "Install and start Bifrost using the English documentation path.",
         order: 20,
+      },
+    ],
+    [
+      "docs-en/mobile-proxy.md",
+      {
+        target: "en/getting-started/mobile-proxy.md",
+        title: "Connect a Mobile Device to Bifrost",
+        description: "Connect iPhone, iPad, and Android devices to Bifrost on a PC, Mac, or Linux host.",
+        order: 25,
       },
     ],
     [
