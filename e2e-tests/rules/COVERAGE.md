@@ -141,3 +141,7 @@
 - `pathReplace`: full URL + regex 组合仍需继续回归
 - `reqHeaders`: 复杂 value、引用值和 host target 连写仍是高风险解析点
 - `tlsOptions` / `sniCallback`: 需要结合真实 TLS 证书或插件环境执行
+
+## 9. 非规则代理稳定性回归
+
+- `tests/test_upstream_connection_stability.sh`：通过本地短连接 upstream 验证跨 pool partition 全局背压、CONNECT 突发请求语义、普通 ConnectionRefused 不触发资源恢复退避，以及 cooldown 后不出现 `EADDRNOTAVAIL` / `ENOBUFS` / FD 耗尽错误。

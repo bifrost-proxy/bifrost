@@ -38,6 +38,7 @@ use crate::utils::process_info::{
     ConnectionProcessState,
 };
 use crate::utils::tee::store_request_body;
+use crate::utils::upstream_stability::connect_tcp;
 use bifrost_core::{AccessControlConfig, AccessDecision, AccessMode, ClientAccessControl};
 
 use super::super::http::handle_http_request;
@@ -1111,7 +1112,7 @@ impl SocksHandler {
                     .map_err(|e| (SocksReply::GeneralFailure, e))
             } else {
                 let target_addr = format!("{}:{}", target_host, target_port);
-                TcpStream::connect(&target_addr).await.map_err(|e| {
+                connect_tcp(&target_addr).await.map_err(|e| {
                     let reply = match e.kind() {
                         std::io::ErrorKind::ConnectionRefused => SocksReply::ConnectionRefused,
                         std::io::ErrorKind::AddrNotAvailable => SocksReply::HostUnreachable,
@@ -1969,7 +1970,7 @@ impl SocksHandler {
             }
 
             drop(target_stream);
-            target_stream = TcpStream::connect(format!("{}:{}", new_host, new_port)).await?;
+            target_stream = connect_tcp(format!("{}:{}", new_host, new_port)).await?;
 
             let modified_request = self.rewrite_http_host(request_data, target_host, &new_host)?;
             target_stream.write_all(&modified_request).await?;

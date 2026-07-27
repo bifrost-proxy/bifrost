@@ -65,6 +65,7 @@ use crate::utils::tee::{
     store_request_body, store_response_body, BodyCaptureHandle, TeeBodyCaptureOptions,
 };
 use crate::utils::throttle::wrap_throttled_body;
+use crate::utils::upstream_stability::connect_tcp;
 use crate::utils::url::{
     apply_url_rules, extract_target_path_from_host_rule, find_host_rule_source_path,
     host_rule_uses_exact_target_path, rewrite_path_with_prefix,
@@ -496,7 +497,7 @@ pub(crate) async fn connect_via_upstream_http_proxy_tunnel(
         .host_str()
         .ok_or_else(|| BifrostError::Parse(format!("Missing proxy host in '{}'", proxy_rule)))?;
     let proxy_port = proxy_url.port().unwrap_or(80);
-    let mut stream = TcpStream::connect((proxy_host, proxy_port)).await?;
+    let mut stream = connect_tcp((proxy_host, proxy_port)).await?;
     let request = build_upstream_proxy_connect_request(&proxy_url, target_host, target_port);
     stream.write_all(&request).await?;
 
@@ -625,15 +626,13 @@ async fn send_request_via_upstream_proxy(
         );
     }
 
-    let stream = TcpStream::connect((proxy_host, proxy_port))
-        .await
-        .map_err(|e| {
-            BifrostError::Network(format!(
-                "Failed to connect to upstream proxy {}: {}",
-                proxy_authority(proxy_host, proxy_port),
-                e
-            ))
-        })?;
+    let stream = connect_tcp((proxy_host, proxy_port)).await.map_err(|e| {
+        BifrostError::Network(format!(
+            "Failed to connect to upstream proxy {}: {}",
+            proxy_authority(proxy_host, proxy_port),
+            e
+        ))
+    })?;
     let io = TokioIo::new(stream);
     let (mut sender, conn) = http1::handshake(io)
         .await
@@ -4644,7 +4643,7 @@ async fn handle_http_websocket(
     );
 
     let connect_start = Instant::now();
-    let target_stream = TcpStream::connect(format!("{}:{}", target_host, target_port))
+    let target_stream = connect_tcp(format!("{}:{}", target_host, target_port))
         .await
         .map_err(|e| {
             BifrostError::Network(format!(

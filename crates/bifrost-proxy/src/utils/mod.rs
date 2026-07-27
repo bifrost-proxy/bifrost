@@ -5,6 +5,7 @@ pub mod mock;
 pub mod process_info;
 pub mod tee;
 pub mod throttle;
+pub mod upstream_stability;
 pub mod url;
 
 pub use http_size::{
