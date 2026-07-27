@@ -25,7 +25,7 @@
 ### 必须真实验证
 
 - 单元测试覆盖 LRU 次序、活跃池保护、全局建连并发、资源错误退避、probe 成功与取消恢复。
-- E2E 通过本地 upstream 制造短连接突发，验证所有响应内容一致、无代理级连接错误且 cooldown 后连接回落。
+- E2E 通过本地 upstream 制造短连接突发，验证所有响应内容一致、响应头前处理并发受控、无代理级连接错误且 cooldown 后连接回落。
 - human_tests 逐条验证普通 HTTP、通用 CONNECT 突发和冷却后恢复；现有 HTTPS 压测 smoke 继续兜底 TLS 透传语义。
 - 远端 CI coverage 运行 `bash scripts/ci/coverage-all.sh --json --gate`。
 

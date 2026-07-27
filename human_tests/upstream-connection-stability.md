@@ -67,7 +67,7 @@
 **预期结果**：
 
 - 80 个 HTTP 请求与 40 个 CONNECT 请求全部返回 fixture 的原始 JSON 语义。
-- upstream HTTP 峰值并发位于 2～8，不被 64 路客户端并发放大。
+- 收到响应头前的 upstream HTTP 处理峰值并发位于 2～8，不被 64 路客户端并发放大。
 - HTTP 突发完成后 upstream 活跃请求数回落到 0。
 - 连接到未监听端口返回原有 502，紧接着的健康请求在 3 秒内成功。
 - 代理日志不出现 `EADDRNOTAVAIL`、`ENOBUFS` 或 FD 耗尽。

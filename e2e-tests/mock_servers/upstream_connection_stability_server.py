@@ -76,16 +76,16 @@ class StabilityHandler(http.server.BaseHTTPRequestHandler):
         COUNTERS.begin()
         try:
             time.sleep(max(delay_ms, 0) / 1000)
-            self._send_json(
-                {
-                    "ok": True,
-                    "id": request_id,
-                    "method": self.command,
-                    "path": parsed.path,
-                }
-            )
         finally:
             COUNTERS.end()
+        self._send_json(
+            {
+                "ok": True,
+                "id": request_id,
+                "method": self.command,
+                "path": parsed.path,
+            }
+        )
 
 
 class ThreadedServer(http.server.ThreadingHTTPServer):
