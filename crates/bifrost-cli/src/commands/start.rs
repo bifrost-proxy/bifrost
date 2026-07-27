@@ -2918,6 +2918,11 @@ fn run_daemon_via_exec(
         .stderr(Stdio::from(stderr));
     configure_detached_daemon_environment(&mut command, &bifrost_dir);
 
+    #[cfg(test)]
+    if std::env::var_os("BIFROST_TEST_CONFIGURE_DAEMON_ONLY").is_some() {
+        return Ok(());
+    }
+
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -4324,6 +4329,28 @@ mod tests {
         ScopedDataDir { previous }
     }
 
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     fn allocate_loopback_port() -> u16 {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         listener.local_addr().unwrap().port()
@@ -4549,6 +4576,24 @@ mod tests {
             *key == std::ffi::OsStr::new("BIFROST_DATA_DIR")
                 && value.is_some_and(|value| value == temp_dir.path().as_os_str())
         }));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn detached_daemon_exec_path_configures_child_environment_before_spawn() {
+        let _guard = data_dir_test_lock();
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _scoped_data_dir = scoped_data_dir(&temp_dir);
+        let config_manager =
+            ConfigManager::new(temp_dir.path().to_path_buf()).expect("config manager");
+        let log_dir = temp_dir.path().join("logs");
+        let _configure_only = ScopedEnvVar::set("BIFROST_TEST_CONFIGURE_DAEMON_ONLY", "1");
+
+        let result = run_daemon_via_exec(&ProxyConfig::default(), &config_manager, &log_dir, 7);
+
+        result.expect("configure detached daemon command");
+        assert!(log_dir.join("bifrost.log").is_file());
+        assert!(log_dir.join("bifrost.err").is_file());
     }
 
     #[test]

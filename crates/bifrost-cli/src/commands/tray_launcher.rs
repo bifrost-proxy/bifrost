@@ -451,6 +451,23 @@ mod tests {
         }));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn launch_tray_helper_configures_the_real_spawn_command() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+
+        launch_tray_helper(
+            Path::new("/usr/bin/true"),
+            temp_dir.path(),
+            &temp_dir.path().join("runtime.json"),
+            std::process::id(),
+            None,
+            None,
+            None,
+            &[],
+        );
+    }
+
     #[test]
     fn test_should_launch_tray_enabled_on_non_linux() {
         let _guard = env_lock();
