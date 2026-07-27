@@ -329,6 +329,14 @@ if ! wait_for_process_exit "$CORE_PID"; then
   echo "FAIL: Desktop-owned Service remained running after Desktop quit"
   exit 1
 fi
+sleep 3
+if process_is_running "$CORE_PID" ||
+  curl -fsS --max-time 2 \
+    "http://127.0.0.1:$desktop_port/_bifrost/api/proxy/system/support" >/dev/null 2>&1
+then
+  echo "FAIL: Desktop watchdog restarted the owned Service after Desktop quit"
+  exit 1
+fi
 if ! grep -Fq \
   "desktop shutdown owns the active backend; requesting backend stop" \
   "$desktop_data_dir/logs/desktop-bootstrap.log"; then

@@ -50,6 +50,10 @@ pub enum MenuItemAction {
     },
     StartService,
     StopService,
+    QuitDesktop {
+        service_pid: u32,
+        service_started_at_ms: Option<u64>,
+    },
     StartUpgrade {
         target_version: String,
     },
@@ -308,7 +312,24 @@ pub(crate) fn build_menu_with_pending_and_tls(
         }));
     }
 
-    if is_running {
+    let desktop_runtime = runtime.filter(|runtime| is_running && runtime.is_desktop_owned());
+    if let Some(desktop_runtime) = desktop_runtime {
+        let label = if service_action_busy && status_label == "Bifrost: Quitting..." {
+            "Quitting Bifrost..."
+        } else {
+            "Quit Bifrost"
+        };
+        items.push(item(MenuItemDef {
+            id: "toggle_service".to_string(),
+            label: label.to_string(),
+            enabled: !service_action_busy,
+            checked: false,
+            action: MenuItemAction::QuitDesktop {
+                service_pid: desktop_runtime.pid,
+                service_started_at_ms: desktop_runtime.started_at_ms,
+            },
+        }));
+    } else if is_running {
         let label = if service_action_busy && status_label == "Bifrost: Stopping..." {
             "Stopping Bifrost..."
         } else {
@@ -910,7 +931,15 @@ mod tests {
             socks5_port: Some(1080),
             host: Some("127.0.0.1".to_string()),
             started_at_ms: None,
+            start_mode: super::super::runtime::RuntimeStartMode::Unknown,
             binary_path: None,
+        }
+    }
+
+    fn sample_desktop_runtime() -> RuntimeInfo {
+        RuntimeInfo {
+            start_mode: super::super::runtime::RuntimeStartMode::Desktop,
+            ..sample_runtime()
         }
     }
 
@@ -958,6 +987,99 @@ mod tests {
         }
         assert!(find_item(&menu, "restart_service").is_none());
         assert!(find_item(&menu, "open_data_dir").is_none());
+        let stop = find_item(&menu, "toggle_service").unwrap();
+        assert_eq!(stop.label, "Stop Bifrost");
+        assert!(matches!(stop.action, MenuItemAction::StopService));
+    }
+
+    #[test]
+    fn test_desktop_owned_runtime_shows_quit_instead_of_stop() {
+        let rt = sample_desktop_runtime();
+        let menu = build_menu(
+            Some(&rt),
+            ServiceState::Running,
+            None,
+            false,
+            None,
+            "/tmp/.bifrost",
+            false,
+            &[],
+            &[],
+            None,
+            None,
+            false,
+            None,
+        );
+
+        let quit = find_item(&menu, "toggle_service").unwrap();
+        assert_eq!(quit.label, "Quit Bifrost");
+        assert!(quit.enabled);
+        assert!(matches!(
+            quit.action,
+            MenuItemAction::QuitDesktop {
+                service_pid: 1234,
+                service_started_at_ms: None
+            }
+        ));
+    }
+
+    #[test]
+    fn test_non_desktop_runtime_modes_keep_stop_action() {
+        for start_mode in [
+            super::super::runtime::RuntimeStartMode::Foreground,
+            super::super::runtime::RuntimeStartMode::Daemon,
+            super::super::runtime::RuntimeStartMode::Unknown,
+        ] {
+            let rt = RuntimeInfo {
+                start_mode,
+                ..sample_runtime()
+            };
+            let menu = build_menu(
+                Some(&rt),
+                ServiceState::Running,
+                None,
+                false,
+                None,
+                "/tmp/.bifrost",
+                true,
+                &[],
+                &[],
+                None,
+                None,
+                false,
+                None,
+            );
+
+            let stop = find_item(&menu, "toggle_service").unwrap();
+            assert_eq!(stop.label, "Stop Bifrost");
+            assert!(matches!(stop.action, MenuItemAction::StopService));
+        }
+    }
+
+    #[test]
+    fn test_desktop_quit_in_progress_is_visible_and_disabled() {
+        let rt = sample_desktop_runtime();
+        let menu = build_menu(
+            Some(&rt),
+            ServiceState::Running,
+            Some("Bifrost: Quitting..."),
+            true,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &[],
+            &[],
+            None,
+            None,
+            false,
+            None,
+        );
+
+        let status = find_item(&menu, "_status").unwrap();
+        assert_eq!(status.label, "Bifrost: Quitting...");
+        let quit = find_item(&menu, "toggle_service").unwrap();
+        assert_eq!(quit.label, "Quitting Bifrost...");
+        assert!(!quit.enabled);
     }
 
     #[test]

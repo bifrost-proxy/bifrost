@@ -1,4 +1,6 @@
 mod desktop_companion;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) use desktop_companion::DESKTOP_UPGRADE_SHUTDOWN_ARG;
 use desktop_companion::*;
 pub(crate) use desktop_companion::{
     desktop_app_is_running, restore_desktop_after_failed_app_upgrade,

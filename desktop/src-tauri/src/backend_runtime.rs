@@ -904,12 +904,8 @@ pub(super) fn stop_backend_with_binary(binary_path: &Path, data_dir: &Path) -> t
         ),
     );
     let mut command = Command::new(binary_path);
-    command
-        .arg("stop")
-        .env("BIFROST_DATA_DIR", data_dir)
-        .env("BIFROST_DESKTOP_AUTHORIZED_STOP_INTERNAL", "1")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    configure_backend_stop_command(&mut command, data_dir);
+    command.stdout(Stdio::null()).stderr(Stdio::null());
     hide_windows_child_console(&mut command);
     let mut child = command
         .spawn()
@@ -993,15 +989,21 @@ pub(super) fn spawn_backend_stop(binary_path: &Path, data_dir: &Path) -> tauri::
     let stderr_log = open_sidecar_log_file(data_dir, "desktop-sidecar.err.log")?;
 
     let mut command = Command::new(binary_path);
+    configure_backend_stop_command(&mut command, data_dir);
     command
-        .arg("stop")
-        .env("BIFROST_DATA_DIR", data_dir)
         .stdout(Stdio::from(stdout_log))
         .stderr(Stdio::from(stderr_log));
     hide_windows_child_console(&mut command);
     command
         .spawn()
         .map_err(|error| anyhow(format!("failed to spawn backend stop: {error}")))
+}
+
+pub(super) fn configure_backend_stop_command(command: &mut Command, data_dir: &Path) {
+    command
+        .arg("stop")
+        .env("BIFROST_DATA_DIR", data_dir)
+        .env("BIFROST_DESKTOP_AUTHORIZED_STOP_INTERNAL", "1");
 }
 
 pub(super) fn hide_windows_child_console(command: &mut Command) {

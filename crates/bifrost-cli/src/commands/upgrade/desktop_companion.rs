@@ -54,7 +54,7 @@ pub(super) enum DesktopCompanionMode {
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub(super) const DESKTOP_UPGRADE_SHUTDOWN_ARG: &str = "--bifrost-upgrade-shutdown";
+pub(crate) const DESKTOP_UPGRADE_SHUTDOWN_ARG: &str = "--bifrost-upgrade-shutdown";
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const DESKTOP_UPGRADE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(any(target_os = "macos", target_os = "windows"))]

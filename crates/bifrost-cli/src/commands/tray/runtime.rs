@@ -2,6 +2,16 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeStartMode {
+    Foreground,
+    Daemon,
+    Desktop,
+    #[default]
+    Unknown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeInfo {
     pub pid: u32,
@@ -12,11 +22,17 @@ pub struct RuntimeInfo {
     pub host: Option<String>,
     #[serde(default)]
     pub started_at_ms: Option<u64>,
+    #[serde(rename = "runtime_start_mode", alias = "start_mode", default)]
+    pub start_mode: RuntimeStartMode,
     #[serde(default)]
     pub binary_path: Option<PathBuf>,
 }
 
 impl RuntimeInfo {
+    pub fn is_desktop_owned(&self) -> bool {
+        self.start_mode == RuntimeStartMode::Desktop
+    }
+
     pub fn admin_url(&self) -> String {
         let host = self.url_host();
         format!("http://{}:{}/_bifrost/", host, self.port)
@@ -103,6 +119,7 @@ mod tests {
             "socks5_port": 1080,
             "host": "127.0.0.1",
             "started_at_ms": 1700000000000,
+            "runtime_start_mode": "desktop",
             "binary_path": "/usr/local/bin/bifrost",
             "system_proxy_enabled": true,
             "system_proxy_bypass": "localhost,127.0.0.1"
@@ -111,6 +128,7 @@ mod tests {
         assert_eq!(info.pid, 12345);
         assert_eq!(info.port, 8800);
         assert_eq!(info.socks5_port, Some(1080));
+        assert_eq!(info.start_mode, RuntimeStartMode::Desktop);
         assert_eq!(info.admin_url(), "http://127.0.0.1:8800/_bifrost/");
         assert_eq!(info.http_proxy_url(), "http://127.0.0.1:8800");
         assert_eq!(
@@ -124,6 +142,7 @@ mod tests {
         let json = r#"{"pid": 100, "port": 9900}"#;
         let info: RuntimeInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.socks5_port, None);
+        assert_eq!(info.start_mode, RuntimeStartMode::Unknown);
         assert_eq!(
             info.socks5_proxy_url(),
             Some("socks5://127.0.0.1:9900".to_string())
