@@ -29,6 +29,7 @@ const CONFIG_VERSION: u32 = 1;
 const MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE: usize = 6;
 const MAX_PENDING_EXTERNAL_GUIDES: usize = 32;
 const WORKER_STOP_GRACE_MS: u64 = 1500;
+const CLI_VERSION_DETECTION_TIMEOUT_SECS: u64 = 10;
 const CODEX_WEEKLY_WINDOW_MINUTES: u64 = 7 * 24 * 60;
 #[cfg(unix)]
 const PROCESS_KILL_GRACE_MS: u64 = 250;
@@ -3419,10 +3420,13 @@ async fn detect_cli_version(adapter: &str, spec: &CommandSpec) -> Option<String>
         command.current_dir(work_dir);
     }
     apply_command_environment(&mut command, &spec.env);
-    let output = timeout(Duration::from_secs(3), command.output())
-        .await
-        .ok()?
-        .ok()?;
+    let output = timeout(
+        Duration::from_secs(CLI_VERSION_DETECTION_TIMEOUT_SECS),
+        command.output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let value = stdout
