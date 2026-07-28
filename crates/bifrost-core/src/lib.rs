@@ -55,7 +55,9 @@ pub use matcher::{
 pub use native_cert_cache::{invalidate_native_certificate_cache, native_certificates_der};
 pub use panic_handler::{install_panic_hook, spawn_with_panic_guard};
 pub use process_alias::process_alias_executable;
-pub use process_environment::{augment_executable_path, inherited_executable_path};
+pub use process_environment::{
+    augment_executable_path, inherited_executable_path, EXTERNAL_CLI_WORKER_ENV,
+};
 pub use process_resolver_diagnostics::{
     ProcessResolverDiagnostics, ProcessResolverDiagnosticsSnapshot,
 };

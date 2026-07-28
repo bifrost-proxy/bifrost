@@ -3,6 +3,12 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
+/// Internal process-role marker set only on the explicit external CLI worker.
+///
+/// Long-lived Bifrost processes must remove this variable from child commands so
+/// an inherited worker role cannot become ambient application state.
+pub const EXTERNAL_CLI_WORKER_ENV: &str = "BIFROST_EXTERNAL_CLI_WORKER";
+
 pub fn inherited_executable_path() -> Option<OsString> {
     let current_path = env::var_os("PATH");
     let home_dir = dirs::home_dir();

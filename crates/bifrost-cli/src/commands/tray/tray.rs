@@ -22,6 +22,8 @@ use tray_icon::menu::{
 };
 use tray_icon::{TrayIconBuilder, TrayIconEvent};
 
+use bifrost_core::EXTERNAL_CLI_WORKER_ENV;
+
 use super::cli::TrayArgs;
 use super::config::{self, TrayConfig};
 #[cfg(target_os = "macos")]
@@ -4183,8 +4185,8 @@ fn spawn_start(
     extra_args: &[String],
 ) -> Option<Child> {
     let mut cmd = Command::new(bin);
-    cmd.env("BIFROST_DATA_DIR", data_dir)
-        .env("BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT", "1")
+    configure_service_start_environment(&mut cmd, data_dir);
+    cmd.env("BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT", "1")
         .args(build_service_start_args(port, extra_args));
     configure_service_command(&mut cmd);
     match cmd.spawn() {
@@ -4197,6 +4199,12 @@ fn spawn_start(
             None
         }
     }
+}
+
+fn configure_service_start_environment(command: &mut Command, data_dir: &str) {
+    command
+        .env_remove(EXTERNAL_CLI_WORKER_ENV)
+        .env("BIFROST_DATA_DIR", data_dir);
 }
 
 fn build_service_start_args(port: Option<u16>, extra_args: &[String]) -> Vec<String> {

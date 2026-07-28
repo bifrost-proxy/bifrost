@@ -71,7 +71,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
   - 刷新 `view=active` 的 Web Agent Chat 页面时状态标签显示 Ready，不显示 Stop，不追加 `Agent is running...` 占位消息。
 - **执行记录（2026-06-16）**: PARTIAL — 执行 `cargo test -p bifrost-admin session_detail_without_active_status_reports_explicit_idle_state --lib` 通过，验证后端 detail idle 真源。执行 `pnpm test:ui --grep "active detail idle run_state"` 通过，新增 Playwright 用例覆盖 active detail `run_state:"idle"` + stale running history 的页面期望。执行 `pnpm test:unit AgentChatSection.timeline.test.ts` 在 Vitest worker 启动阶段失败，错误为 `ERR_REQUIRE_ESM`（`html-encoding-sniffer` require ESM `@exodus/bytes`），未进入新增断言，待本地 Vitest/jsdom 依赖环境修复后复跑。
 
-### TC-GQ-19: Claude stream-json 就绪后发送 live guide（macOS CI 回归）
+### TC-GQ-19: 污染父环境启动 detached daemon 后仍可 live guide（macOS/Linux CI 回归）
 
 - **操作步骤**:
   ```bash
@@ -80,10 +80,13 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8801 --unsa
     bash e2e-tests/tests/test_external_runner_live_guide.sh
   ```
 - **预期结果**:
+  - 测试脚本以 `BIFROST_EXTERNAL_CLI_WORKER=1` 的污染父环境执行 `bifrost start --daemon`；detached daemon 清除该内部 worker 标记，且测试只使用动态端口和带 ownership marker 的独立数据目录。
+  - daemon 内 external runner 必须继续派生显式 worker，并在主进程注册 active worker session；Codex/Traex CLI、Web 和 mock Feishu IM 的 busy 消息均返回 `delivery=steered`，不得出现 `no active external runner` 后降级 Queue。
   - mock Claude 输出 `system/init` 和回放首条 user frame 后记录 `stream_ready`；测试以此而非 app-server 专用 `turn_ready` 触发 Claude/Claude-reject guide。
   - 同一 Claude mock PID 接收一次 interrupt 与一次 guide user JSONL 帧，最终唯一 `run_finished` 为成功的 `GUIDED_claude`；interrupt 拒绝则诚实降级 queue。
   - Codex/Traex app-server guide、Web/IM guide 与显式 exec queue fallback 同时通过。
 - **执行记录（2026-07-13）**: PASS — 合并主分支后重新构建并执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh`，输出 `[external-runner-live-guide] PASS`。
+- **回归执行记录（2026-07-27）**: PASS — 先执行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 构建当前分支二进制，再按本用例执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh`。脚本从污染父环境启动 detached daemon，Codex/Traex/Claude 的 CLI、Web 和 mock Feishu IM guide 均通过，输出 `[external-runner-live-guide] PASS`；cleanup 后测试数据目录及所属进程均已回收。
 
 ## 清理步骤
 

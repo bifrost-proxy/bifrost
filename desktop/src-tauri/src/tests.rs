@@ -26,7 +26,7 @@ use super::{
     DesktopConfig, DesktopInstallRollback, DesktopRuntimeMarker, DesktopShutdownBackendAction,
     DesktopUpgradeRelaunchMarker, ExternalCliBackendHandoff, HostWindowCloseBehavior,
     PendingDesktopInstall, StartupDeadlineDisposition, DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
-    DESKTOP_UPGRADE_SHUTDOWN_ARG, DETACHED_DAEMON_CHILD_ENV,
+    DESKTOP_UPGRADE_SHUTDOWN_ARG, DETACHED_DAEMON_CHILD_ENV, EXTERNAL_CLI_WORKER_ENV,
     WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
 };
 use bifrost_storage::data_dir as shared_bifrost_data_dir;
@@ -369,7 +369,7 @@ fn desktop_sidecar_disables_launchd_cleanup_registration() {
 }
 
 #[test]
-fn desktop_sidecar_clears_inherited_detached_daemon_marker() {
+fn desktop_sidecar_clears_inherited_process_role_markers() {
     let _guard = ENV_LOCK.lock().expect("env lock");
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let previous_path = std::env::var_os("PATH");
@@ -381,12 +381,16 @@ fn desktop_sidecar_clears_inherited_detached_daemon_marker() {
     std::env::set_var("PATH", minimal_path);
     let expected_path = bifrost_core::inherited_executable_path().expect("expected PATH");
     let mut command = Command::new("bifrost");
+    command.env(EXTERNAL_CLI_WORKER_ENV, "leaked-worker-role");
     configure_desktop_backend_environment(&mut command, temp_dir.path(), "session-123");
 
     let env = command.get_envs().collect::<Vec<_>>();
     assert!(env
         .iter()
         .any(|(key, value)| { *key == OsStr::new(DETACHED_DAEMON_CHILD_ENV) && value.is_none() }));
+    assert!(env
+        .iter()
+        .any(|(key, value)| { *key == OsStr::new(EXTERNAL_CLI_WORKER_ENV) && value.is_none() }));
     assert!(env.iter().any(|(key, value)| {
         *key == OsStr::new("BIFROST_DESKTOP_CORE")
             && value.is_some_and(|value| value == OsStr::new("1"))

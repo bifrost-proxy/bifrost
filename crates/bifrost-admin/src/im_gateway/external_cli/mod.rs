@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, timeout};
 
 use bifrost_agent::{PlanStep, PlanStepStatus};
+use bifrost_core::EXTERNAL_CLI_WORKER_ENV;
 
 const DEFAULT_RUNTIME: &str = "external_cli";
 const DEFAULT_ADAPTER: &str = "codex";
@@ -1099,13 +1100,7 @@ impl ExternalCliRuntime {
         request: ExternalCliRunRequest,
         progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
     ) -> Result<ExternalCliRunResult, String> {
-        if std::env::var_os("BIFROST_EXTERNAL_CLI_WORKER").is_some() {
-            return self
-                .run_in_current_process_with_progress(request, progress_tx)
-                .await;
-        }
-        #[cfg(test)]
-        if std::env::var_os("BIFROST_FORCE_EXTERNAL_CLI_WORKER").is_none() {
+        if should_run_external_cli_in_current_process() {
             return self
                 .run_in_current_process_with_progress(request, progress_tx)
                 .await;
@@ -1523,6 +1518,17 @@ impl ExternalCliRuntime {
         let result_path = run_dir.join("result.json");
         write_json_pretty(&result_path, &result).await?;
         Ok(result)
+    }
+}
+
+fn should_run_external_cli_in_current_process() -> bool {
+    #[cfg(test)]
+    {
+        std::env::var_os("BIFROST_FORCE_EXTERNAL_CLI_WORKER").is_none()
+    }
+    #[cfg(not(test))]
+    {
+        false
     }
 }
 
@@ -4141,6 +4147,12 @@ fn remove_active_session_if_owned(session_key: &str, run_id: &str) -> bool {
 }
 
 fn spawn_external_cli_worker_process(executable: &Path) -> Result<tokio::process::Child, String> {
+    external_cli_worker_process_command(executable)
+        .spawn()
+        .map_err(|error| format!("spawn external runner worker failed: {error}"))
+}
+
+fn external_cli_worker_process_command(executable: &Path) -> Command {
     let mut command = Command::new(executable);
     command
         .arg("agent")
@@ -4148,13 +4160,11 @@ fn spawn_external_cli_worker_process(executable: &Path) -> Result<tokio::process
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .env("BIFROST_EXTERNAL_CLI_WORKER", "1")
+        .env(EXTERNAL_CLI_WORKER_ENV, "1")
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
     command
-        .spawn()
-        .map_err(|error| format!("spawn external runner worker failed: {error}"))
 }
 
 async fn write_external_cli_worker_command(

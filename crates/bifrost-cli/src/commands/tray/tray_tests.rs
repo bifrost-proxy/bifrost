@@ -730,6 +730,23 @@
     }
 
     #[test]
+    fn test_tray_start_service_clears_inherited_external_worker_marker() {
+        let mut command = Command::new("bifrost");
+        command.env(EXTERNAL_CLI_WORKER_ENV, "leaked-worker-role");
+
+        configure_service_start_environment(&mut command, ".bifrost-e2e-tray");
+
+        let env = command.get_envs().collect::<Vec<_>>();
+        assert!(env.iter().any(|(key, value)| {
+            *key == std::ffi::OsStr::new(EXTERNAL_CLI_WORKER_ENV) && value.is_none()
+        }));
+        assert!(env.iter().any(|(key, value)| {
+            *key == std::ffi::OsStr::new("BIFROST_DATA_DIR")
+                && value.is_some_and(|value| value == std::ffi::OsStr::new(".bifrost-e2e-tray"))
+        }));
+    }
+
+    #[test]
     fn test_recent_tray_interaction_defers_structural_replacement() {
         assert!(!should_replace_native_menu(false, false, true, false, true));
         assert!(should_replace_native_menu(false, false, true, false, false));

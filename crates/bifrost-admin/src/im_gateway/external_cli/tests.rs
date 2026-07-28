@@ -3653,6 +3653,32 @@ fn external_cli_explicit_path_detection_matches_platform_semantics() {
     assert_eq!(has_explicit_path_environment(&env), cfg!(windows));
 }
 
+#[test]
+fn external_cli_worker_command_sets_internal_worker_marker() {
+    let command = external_cli_worker_process_command(Path::new("bifrost"));
+    let command = command.as_std();
+    let args = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let worker_marker = command
+        .get_envs()
+        .find_map(|(key, value)| (key == OsStr::new(EXTERNAL_CLI_WORKER_ENV)).then_some(value))
+        .flatten();
+
+    assert_eq!(args, ["agent", "external-runner-worker"]);
+    assert_eq!(worker_marker, Some(OsStr::new("1")));
+}
+
+#[test]
+fn ambient_worker_marker_does_not_override_forced_worker_delegation() {
+    let _guard = external_cli_env_guard();
+    let _worker_marker = EnvGuard::set(EXTERNAL_CLI_WORKER_ENV, Path::new("1"));
+    let _force_worker = EnvGuard::set("BIFROST_FORCE_EXTERNAL_CLI_WORKER", Path::new("1"));
+
+    assert!(!should_run_external_cli_in_current_process());
+}
+
 fn has_arg_pair(args: &[String], left: &str, right: &str) -> bool {
     args.windows(2)
         .any(|pair| pair[0] == left && pair[1] == right)

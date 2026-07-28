@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use fs2::FileExt;
 
 use super::tray::TRAY_SUBCOMMAND;
+use bifrost_core::EXTERNAL_CLI_WORKER_ENV;
 
 pub fn should_launch_tray(no_tray: bool, data_dir: &Path) -> bool {
     if cfg!(target_os = "linux") {
@@ -91,6 +92,7 @@ pub fn launch_tray_helper(
     }
 
     let mut cmd = Command::new(tray_bin);
+    configure_tray_helper_environment(&mut cmd);
     cmd.arg(TRAY_SUBCOMMAND);
     cmd.arg("--data-dir")
         .arg(data_dir)
@@ -157,6 +159,10 @@ pub fn launch_tray_helper(
             );
         }
     }
+}
+
+fn configure_tray_helper_environment(command: &mut Command) {
+    command.env_remove(EXTERNAL_CLI_WORKER_ENV);
 }
 
 fn existing_tray_helper_pid(data_dir: &Path) -> Option<u32> {
@@ -431,6 +437,35 @@ mod tests {
         let _guard = env_lock();
         let dir = tempfile::tempdir().unwrap();
         assert!(!should_launch_tray(true, dir.path()));
+    }
+
+    #[test]
+    fn tray_helper_command_clears_inherited_external_worker_marker() {
+        let mut command = Command::new("bifrost");
+        command.env(EXTERNAL_CLI_WORKER_ENV, "leaked-worker-role");
+
+        configure_tray_helper_environment(&mut command);
+
+        assert!(command.get_envs().any(|(key, value)| {
+            key == std::ffi::OsStr::new(EXTERNAL_CLI_WORKER_ENV) && value.is_none()
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_tray_helper_configures_the_real_spawn_command() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+
+        launch_tray_helper(
+            Path::new("/usr/bin/true"),
+            temp_dir.path(),
+            &temp_dir.path().join("runtime.json"),
+            std::process::id(),
+            None,
+            None,
+            None,
+            &[],
+        );
     }
 
     #[test]

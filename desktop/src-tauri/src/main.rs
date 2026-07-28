@@ -15,6 +15,7 @@ use bifrost_core::upgrade_progress::{
 };
 use bifrost_core::{
     cleanup_bifrost_log_dir, direct_blocking_reqwest_client_builder, inherited_executable_path,
+    EXTERNAL_CLI_WORKER_ENV,
 };
 use bifrost_storage::data_dir as shared_bifrost_data_dir;
 use bifrost_tls::{ensure_valid_ca, generate_root_ca, save_root_ca, CertInstaller, CertStatus};
@@ -940,7 +941,9 @@ fn configure_desktop_backend_environment(
     data_dir: &Path,
     startup_session_id: &str,
 ) {
-    command.env_remove(DETACHED_DAEMON_CHILD_ENV);
+    command
+        .env_remove(DETACHED_DAEMON_CHILD_ENV)
+        .env_remove(EXTERNAL_CLI_WORKER_ENV);
     if let Some(path) = inherited_executable_path() {
         command.env("PATH", path);
     }
