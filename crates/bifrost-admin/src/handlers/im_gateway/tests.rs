@@ -1504,7 +1504,7 @@ pub(super) async fn idempotent_weixin_send_commits_successful_provider_ack() {
         .expect("bind fake Weixin provider");
     let provider_address = provider_listener.local_addr().unwrap();
     let provider_server = tokio::spawn(async move {
-        for request_index in 0..2 {
+        for request_index in 0..3 {
             let (stream, _) = provider_listener.accept().await.unwrap();
             let io = TokioIo::new(stream);
             let handler = service_fn(move |request: Request<Incoming>| async move {
@@ -1601,10 +1601,28 @@ pub(super) async fn idempotent_weixin_send_commits_successful_provider_ack() {
     let body: serde_json::Value = response.json().await.expect("interactive send response");
     assert_eq!(body["message_id"], "provider-message-2");
     server.await.expect("interactive message server task");
+
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/api/im-gateway/messages/send"))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "provider_id": "weixin-success",
+            "target_id": "__owner__",
+            "msg_type": "text",
+            "content": "non-idempotent text"
+        }))
+        .send()
+        .await
+        .expect("send non-idempotent text message");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.expect("text send response");
+    assert_eq!(body["message_id"], "provider-message-3");
+    server.await.expect("text message server task");
     provider_server.await.expect("provider server task");
 
     let logs = service.message_log_store.list();
-    assert_eq!(logs.len(), 2);
+    assert_eq!(logs.len(), 3);
     assert!(logs.iter().all(|log| log.status == MessageStatus::Success));
     assert!(matches!(
         service
@@ -1706,6 +1724,31 @@ pub(super) async fn provider_status_reports_weixin_send_readiness_and_missing_pr
     assert_eq!(body["send_ready"], true);
     assert!(body.get("send_ready_reason").is_none());
     server.await.expect("provider status server task");
+
+    service.connection_manager.set_status_for_test(
+        "status-without-provider",
+        crate::im_gateway::types::ConnectionStatus {
+            state: crate::im_gateway::types::ConnectionState::Connected,
+            last_connected_at: Some(3),
+            last_event_at: None,
+            reconnect_count: 0,
+            last_error: None,
+        },
+    );
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/im-gateway/providers/status-without-provider/status"
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("query status without provider config");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.expect("status body");
+    assert_eq!(body["state"], "connected");
+    assert!(body.get("send_ready").is_none());
+    server.await.expect("status without provider server task");
 
     let (address, server) = spawn_im_gateway_http(service).await;
     let response = reqwest::Client::new()

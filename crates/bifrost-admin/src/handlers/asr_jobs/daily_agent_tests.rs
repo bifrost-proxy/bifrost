@@ -658,7 +658,6 @@ fn daily_agent_dependency_sync_filters_invalid_entries_and_reports_unknown_depen
     std::fs::write(output.join("bad-date-report.md"), "ignore").unwrap();
     std::fs::write(output.join("2026-07-21-report.md"), "wrong date").unwrap();
     std::fs::write(output.join("2026-07-20-report.txt"), "ignore").unwrap();
-
     assert!(sync_daily_agent_dependency_outputs(
         &task,
         downstream,
@@ -1050,6 +1049,16 @@ fn daily_agent_prompt_injects_same_date_dependency_output_by_runner_capability()
     save_daily_agent_processed_state(&task.id, &processed).unwrap();
     let stale_prompt = build_daily_agent_prompt(&task, &plan, "chatgpt_web", false).unwrap();
     assert!(!stale_prompt.contains("微软正在成为企业数字基础设施"));
+
+    processed
+        .documents
+        .get_mut(&format!("{DEFAULT_DAILY_AGENT_ID}:2026-07-09"))
+        .unwrap()
+        .source_sha256 = compute_sha256(&source_path).unwrap();
+    save_daily_agent_processed_state(&task.id, &processed).unwrap();
+    std::fs::remove_file(upstream_dir.join("2026-07-09-report.md")).unwrap();
+    let missing_prompt = build_daily_agent_prompt(&task, &plan, "chatgpt_web", false).unwrap();
+    assert!(!missing_prompt.contains("微软正在成为企业数字基础设施"));
 }
 
 #[test]
@@ -4159,6 +4168,13 @@ fn daily_agent_artifact_validation_detects_report_and_dependency_changes() {
     ));
     assert!(!daily_agent_processed_artifacts_match(
         None,
+        report_path.to_str().unwrap(),
+        "config-v1",
+        &upstream
+    ));
+    std::fs::remove_file(&report_path).unwrap();
+    assert!(!daily_agent_processed_artifacts_match(
+        Some(&artifact),
         report_path.to_str().unwrap(),
         "config-v1",
         &upstream

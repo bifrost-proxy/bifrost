@@ -1049,6 +1049,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn localhost_weixin_base_url_is_preserved_for_provider_tests() {
+        let mut provider = ImProviderConfig {
+            id: "weixin-local".to_string(),
+            provider_type: ImProviderType::Weixin,
+            display_name: "Weixin Local".to_string(),
+            enabled: true,
+            base_url: Some("http://127.0.0.1:12345".to_string()),
+            app_id: None,
+            secret_ref: None,
+            owner_open_id: None,
+            event_connection_enabled: false,
+            event_types: Vec::new(),
+            agent_config: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        normalize_provider_base_url(&mut provider);
+
+        assert_eq!(provider.base_url.as_deref(), Some("http://127.0.0.1:12345"));
+    }
+
+    #[test]
     fn external_cli_agent_chat_delivery_mode_is_optional_route_override() {
         let action: ImRouteAction = serde_json::from_value(serde_json::json!({
             "type": "external_cli_agent_chat"
