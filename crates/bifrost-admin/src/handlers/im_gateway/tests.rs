@@ -1504,27 +1504,36 @@ pub(super) async fn idempotent_weixin_send_commits_successful_provider_ack() {
         .expect("bind fake Weixin provider");
     let provider_address = provider_listener.local_addr().unwrap();
     let provider_server = tokio::spawn(async move {
-        let (stream, _) = provider_listener.accept().await.unwrap();
-        let io = TokioIo::new(stream);
-        let handler = service_fn(|request: Request<Incoming>| async move {
-            assert_eq!(request.uri().path(), "/ilink/bot/sendmessage");
-            let body = request.into_body().collect().await.unwrap().to_bytes();
-            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(payload["msg"]["client_id"].as_str().unwrap().len(), 45);
-            Ok::<_, std::convert::Infallible>(
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .body(Full::new(Bytes::from_static(
-                        br#"{"ret":0,"message_id":"provider-message-1"}"#,
-                    )))
-                    .unwrap(),
-            )
-        });
-        http1::Builder::new()
-            .keep_alive(false)
-            .serve_connection(io, handler)
-            .await
-            .unwrap();
+        for request_index in 0..2 {
+            let (stream, _) = provider_listener.accept().await.unwrap();
+            let io = TokioIo::new(stream);
+            let handler = service_fn(move |request: Request<Incoming>| async move {
+                assert_eq!(request.uri().path(), "/ilink/bot/sendmessage");
+                let body = request.into_body().collect().await.unwrap().to_bytes();
+                let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let client_id = payload["msg"]["client_id"].as_str().unwrap();
+                if request_index == 0 {
+                    assert_eq!(client_id.len(), 45);
+                } else {
+                    assert!(client_id.starts_with("bifrost-weixin-"));
+                }
+                let response = format!(
+                    r#"{{"ret":0,"message_id":"provider-message-{}"}}"#,
+                    request_index + 1
+                );
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Full::new(Bytes::from(response)))
+                        .unwrap(),
+                )
+            });
+            http1::Builder::new()
+                .keep_alive(false)
+                .serve_connection(io, handler)
+                .await
+                .unwrap();
+        }
     });
 
     let temp_dir = tempfile::tempdir().expect("temp data dir");
@@ -1571,12 +1580,32 @@ pub(super) async fn idempotent_weixin_send_commits_successful_provider_ack() {
     let body: serde_json::Value = serde_json::from_str(&response_text).expect("send response");
     assert_eq!(body["message_id"], "provider-message-1");
     server.await.expect("message server task");
+
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/api/im-gateway/messages/send"))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "provider_id": "weixin-success",
+            "target_id": "__owner__",
+            "msg_type": "interactive",
+            "card": {
+                "header": {"title": {"tag": "plain_text", "content": "Daily"}},
+                "elements": [{"tag": "markdown", "content": "Summary"}]
+            }
+        }))
+        .send()
+        .await
+        .expect("send non-idempotent interactive message");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.expect("interactive send response");
+    assert_eq!(body["message_id"], "provider-message-2");
+    server.await.expect("interactive message server task");
     provider_server.await.expect("provider server task");
 
-    assert_eq!(
-        service.message_log_store.list()[0].status,
-        MessageStatus::Success
-    );
+    let logs = service.message_log_store.list();
+    assert_eq!(logs.len(), 2);
+    assert!(logs.iter().all(|log| log.status == MessageStatus::Success));
     assert!(matches!(
         service
             .outbox_store
@@ -1629,11 +1658,6 @@ pub(super) async fn provider_status_reports_weixin_send_readiness_and_missing_pr
     );
     server.await.expect("provider status server task");
 
-    service
-        .connection_manager
-        .weixin_provider()
-        .store_context_for_test(&provider, "owner-user", "context-token")
-        .expect("context should persist");
     service.connection_manager.set_status_for_test(
         "weixin-status",
         crate::im_gateway::types::ConnectionStatus {
@@ -1644,6 +1668,31 @@ pub(super) async fn provider_status_reports_weixin_send_readiness_and_missing_pr
             last_error: None,
         },
     );
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/im-gateway/providers/weixin-status/status"
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("query connected provider without send context");
+    let body: serde_json::Value = response.json().await.expect("status body");
+    assert_eq!(body["state"], "connected");
+    assert_eq!(body["send_ready"], false);
+    assert_eq!(
+        body["send_ready_reason"],
+        "awaiting an inbound message context token"
+    );
+    server
+        .await
+        .expect("connected not-ready provider status server task");
+
+    service
+        .connection_manager
+        .weixin_provider()
+        .store_context_for_test(&provider, "owner-user", "context-token")
+        .expect("context should persist");
     let (address, server) = spawn_im_gateway_http(service.clone()).await;
     let response = reqwest::Client::new()
         .get(format!(
