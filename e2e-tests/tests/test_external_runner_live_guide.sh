@@ -500,11 +500,10 @@ wait_for_mock_record() {
 }
 
 create_im_provider "im-guide-provider" "im-guide-owner" "codex-im"
-send_im_inbound "im-guide-provider" "im-guide-owner" "wait for default IM queue"
+send_im_inbound "im-guide-provider" "im-guide-owner" "wait for default IM guide"
 wait_for_mock_record '"event":"turn_ready","runner":"codex-im"'
-send_im_inbound "im-guide-provider" "im-guide-owner" "default-im-queue"
-send_im_inbound "im-guide-provider" "im-guide-owner" "/g release-default-queue"
-wait_for_mock_record 'default-im-queue'
+send_im_inbound "im-guide-provider" "im-guide-owner" "default-im-guide"
+wait_for_mock_record 'default-im-guide'
 
 create_im_provider "cross-channel-provider" "cross-channel-owner" "codex-cross-channel"
 curl -fsS --noproxy '*' -X PATCH \
@@ -601,7 +600,6 @@ send_im_inbound_with_reference \
   "QUOTE_CURRENT_QUESTION 这条引用里的链接是什么？" \
   "quote-current-message" \
   "quote-source-message"
-send_im_inbound "im-quote-provider" "im-quote-owner" "/g release-quote-source"
 wait_for_mock_record 'QUOTE_CURRENT_QUESTION'
 
 python3 - "$MOCK_LOG" "$TEST_DIR/agent/im_gateway/session_state.json" <<'PY'
@@ -614,14 +612,7 @@ default_steers = [
     if record.get("event") == "turn_steered" and record.get("runner") == "codex-im"
 ]
 assert len(default_steers) == 1, default_steers
-assert default_steers[0]["params"]["input"][0]["text"] == "release-default-queue", default_steers
-default_queued_turns = [
-    record for record in records
-    if record.get("event") == "turn_started"
-    and record.get("runner") == "codex-im"
-    and "default-im-queue" in record.get("params", {}).get("input", [{}])[0].get("text", "")
-]
-assert len(default_queued_turns) == 1, default_queued_turns
+assert default_steers[0]["params"]["input"][0]["text"] == "default-im-guide", default_steers
 
 queue_steers = [
     record for record in records
@@ -664,23 +655,16 @@ for adapter in ("codex", "traex"):
     assert session["reasoningEffortOverride"] == "high", session
     assert session["reasoningEffortOverrideSource"] == "session slash command", session
 
-quote_turns = [
-    record for record in records
-    if record.get("event") == "turn_started"
-    and record.get("runner") == "codex-im-quote"
-    and "QUOTE_CURRENT_QUESTION" in record.get("params", {}).get("input", [{}])[0].get("text", "")
-]
-assert len(quote_turns) == 1, quote_turns
-quote_prompt = quote_turns[0]["params"]["input"][0]["text"]
-assert "【引用消息（仅作为上下文）】" in quote_prompt, quote_prompt
-assert "QUOTE_SOURCE_REQUEST https://example.com/quoted-article" in quote_prompt, quote_prompt
-assert "【当前消息】" in quote_prompt, quote_prompt
 quote_steers = [
     record for record in records
     if record.get("event") == "turn_steered" and record.get("runner") == "codex-im-quote"
 ]
 assert len(quote_steers) == 1, quote_steers
-assert quote_steers[0]["params"]["input"][0]["text"] == "release-quote-source", quote_steers
+quote_prompt = quote_steers[0]["params"]["input"][0]["text"]
+assert "【引用消息（仅作为上下文）】" in quote_prompt, quote_prompt
+assert "QUOTE_SOURCE_REQUEST https://example.com/quoted-article" in quote_prompt, quote_prompt
+assert "【当前消息】" in quote_prompt, quote_prompt
+assert "QUOTE_CURRENT_QUESTION 这条引用里的链接是什么？" in quote_prompt, quote_prompt
 PY
 
 run_queue_fallback_case() {
