@@ -59,6 +59,11 @@ watchdog 保留原有 2 秒轮询，但把 HTTP 健康失败交给独立状态�
 
 日志不包含请求头、认证信息或响应正文，只记录本地健康 URL 的错误类别与耗时。
 
+### 模块边界
+
+- `backend_runtime/watchdog.rs` 独立承载 watchdog 状态机与轮询编排，`backend_runtime.rs` 保留进程恢复、ownership 和启动生命周期能力。
+- `tests/watchdog.rs` 独立承载状态机与探针单元测试，避免 Desktop 主实现和主测试模块超过仓库 1500 行门禁。
+
 ## 测试方案
 
 ### 单元测试
