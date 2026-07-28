@@ -766,3 +766,43 @@ async fn validate_config_requires_completed_qr_login() {
         .iter()
         .any(|error| error.contains("QR login")));
 }
+
+#[test]
+fn unavailable_context_store_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let blocked_data_dir = temp.path().join("blocked-data-dir");
+    std::fs::write(&blocked_data_dir, b"not a directory").unwrap();
+    let provider = WeixinProvider::new_with_data_dir(&blocked_data_dir);
+    assert!(provider.context_store.is_none());
+    assert!(provider
+        .store_context_for_test(&test_provider(), "owner", "context")
+        .is_err());
+}
+
+#[tokio::test]
+async fn missing_context_blocks_short_and_chunked_text_before_network_send() {
+    let temp = tempfile::tempdir().unwrap();
+    let provider = WeixinProvider::new_with_data_dir(temp.path());
+    let config = test_provider();
+    let target = test_target();
+
+    let short_error = provider
+        .send_text_with_client_id(&config, &target, "hello", "short-client-id")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(short_error.contains("not send-ready"));
+
+    let long_error = provider
+        .send_text_with_client_id(
+            &config,
+            &target,
+            &"long text".repeat(TEXT_RETRY_CHUNK_MAX_CHARS),
+            "chunked-client-id",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(long_error.contains("chunk 1/"));
+    assert!(long_error.contains("not send-ready"));
+}

@@ -384,4 +384,91 @@ mod tests {
             .to_string();
         assert!(error.contains("refusing replay-unsafe sends"));
     }
+
+    #[test]
+    fn missing_record_and_filesystem_failures_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ImOutboxStore::new(dir.path());
+        assert!(store.mark_sent("missing", None).is_err());
+
+        let mut no_parent = ImOutboxStore::new(dir.path());
+        no_parent.path = PathBuf::new();
+        assert!(no_parent
+            .begin("no-parent", "weixin", "owner", "text", "hash")
+            .is_err());
+
+        let blocked_parent = dir.path().join("blocked-parent");
+        std::fs::write(&blocked_parent, b"file").unwrap();
+        let mut blocked = ImOutboxStore::new(dir.path());
+        blocked.path = blocked_parent.join(STORE_FILENAME);
+        assert!(blocked
+            .begin("blocked", "weixin", "owner", "text", "hash")
+            .is_err());
+
+        let open_dir = tempfile::tempdir().unwrap();
+        let open_blocked = ImOutboxStore::new(open_dir.path());
+        let temporary = open_blocked.path.with_extension("json.tmp");
+        std::fs::create_dir_all(&temporary).unwrap();
+        assert!(open_blocked
+            .begin("open-blocked", "weixin", "owner", "text", "hash")
+            .is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let write_dir = tempfile::tempdir().unwrap();
+            let write_blocked = ImOutboxStore::new(write_dir.path());
+            std::fs::create_dir_all(write_blocked.path.parent().unwrap()).unwrap();
+            symlink("/dev/full", write_blocked.path.with_extension("json.tmp")).unwrap();
+            assert!(write_blocked
+                .begin("write-blocked", "weixin", "owner", "text", "hash")
+                .is_err());
+
+            let sync_dir = tempfile::tempdir().unwrap();
+            let sync_blocked = ImOutboxStore::new(sync_dir.path());
+            std::fs::create_dir_all(sync_blocked.path.parent().unwrap()).unwrap();
+            symlink("/dev/null", sync_blocked.path.with_extension("json.tmp")).unwrap();
+            assert!(sync_blocked
+                .begin("sync-blocked", "weixin", "owner", "text", "hash")
+                .is_err());
+
+            assert!(harden_private_file(&dir.path().join("missing-file")).is_err());
+            assert!(sync_directory(&dir.path().join("missing-directory")).is_err());
+        }
+    }
+
+    #[test]
+    fn oversized_store_is_rejected_and_old_sent_records_are_trimmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized.json");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(128 * 1024 * 1024 + 1).unwrap();
+        assert!(ImOutboxStore::load(&path).is_none());
+
+        let mut records = BTreeMap::new();
+        for index in 0..(MAX_RECORDS + 2) {
+            let key = format!("key-{index:05}");
+            records.insert(
+                key.clone(),
+                ImOutboxRecord {
+                    idempotency_key: key,
+                    provider_id: "provider".to_string(),
+                    target_id: "target".to_string(),
+                    msg_type: "text".to_string(),
+                    payload_sha256: "hash".to_string(),
+                    status: "sent".to_string(),
+                    attempt_count: 1,
+                    created_at_ms: index as u64,
+                    updated_at_ms: index as u64,
+                    message_id: None,
+                    last_error: None,
+                },
+            );
+        }
+        trim_records(&mut records);
+        assert_eq!(records.len(), MAX_RECORDS);
+        assert!(!records.contains_key("key-00000"));
+        assert!(!records.contains_key("key-00001"));
+    }
 }

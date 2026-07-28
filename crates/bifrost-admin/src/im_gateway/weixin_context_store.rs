@@ -209,4 +209,58 @@ mod tests {
         assert!(store.put("account", "owner", "context").is_err());
         assert!(store.get("account", "owner").is_none());
     }
+
+    #[test]
+    fn store_filesystem_failures_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = StoreData {
+            version: STORE_VERSION,
+            entries: BTreeMap::new(),
+        };
+
+        let mut no_parent = WeixinContextStore::new(dir.path()).unwrap();
+        no_parent.path = PathBuf::new();
+        assert!(no_parent.save(&data).is_err());
+
+        let blocked_parent = dir.path().join("blocked-parent");
+        std::fs::write(&blocked_parent, b"file").unwrap();
+        let mut blocked = WeixinContextStore::new(dir.path()).unwrap();
+        blocked.path = blocked_parent.join(STORE_FILENAME);
+        assert!(blocked.save(&data).is_err());
+
+        let open_dir = tempfile::tempdir().unwrap();
+        let open_blocked = WeixinContextStore::new(open_dir.path()).unwrap();
+        let temporary = open_blocked.path.with_extension("json.tmp");
+        std::fs::create_dir_all(&temporary).unwrap();
+        assert!(open_blocked.save(&data).is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let write_dir = tempfile::tempdir().unwrap();
+            let write_blocked = WeixinContextStore::new(write_dir.path()).unwrap();
+            std::fs::create_dir_all(write_blocked.path.parent().unwrap()).unwrap();
+            symlink("/dev/full", write_blocked.path.with_extension("json.tmp")).unwrap();
+            assert!(write_blocked.save(&data).is_err());
+
+            let sync_dir = tempfile::tempdir().unwrap();
+            let sync_blocked = WeixinContextStore::new(sync_dir.path()).unwrap();
+            std::fs::create_dir_all(sync_blocked.path.parent().unwrap()).unwrap();
+            symlink("/dev/null", sync_blocked.path.with_extension("json.tmp")).unwrap();
+            assert!(sync_blocked.save(&data).is_err());
+
+            assert!(harden_private_file(&dir.path().join("missing-file")).is_err());
+            assert!(sync_directory(&dir.path().join("missing-directory")).is_err());
+        }
+    }
+
+    #[test]
+    fn oversized_context_store_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized.json");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(16 * 1024 * 1024 + 1).unwrap();
+        assert!(WeixinContextStore::load(&path).is_none());
+    }
 }

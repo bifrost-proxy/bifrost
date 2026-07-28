@@ -52,6 +52,14 @@ pub fn normalize_provider_base_url(provider: &mut ImProviderConfig) {
             provider.base_url = Some(normalize_feishu_base_url(provider.base_url.as_deref()));
         }
         ImProviderType::Weixin | ImProviderType::WeChat => {
+            #[cfg(test)]
+            if provider
+                .base_url
+                .as_deref()
+                .is_some_and(|url| url.starts_with("http://127.0.0.1:"))
+            {
+                return;
+            }
             provider.base_url = Some(normalize_weixin_base_url(provider.base_url.as_deref()));
         }
         ImProviderType::Webhook => {}

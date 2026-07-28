@@ -236,6 +236,19 @@ impl ImConnectionManager {
         conns.get(provider_id).map(|c| c.status.clone())
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_status_for_test(&self, provider_id: &str, status: ConnectionStatus) {
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        self.connections.write().insert(
+            provider_id.to_string(),
+            ManagedConnection {
+                provider_id: provider_id.to_string(),
+                handle: ConnectionHandle { shutdown_tx },
+                status,
+            },
+        );
+    }
+
     /// Get all connection statuses.
     pub fn list_statuses(&self) -> Vec<(String, ConnectionStatus)> {
         let conns = self.connections.read();

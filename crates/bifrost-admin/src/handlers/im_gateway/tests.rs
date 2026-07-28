@@ -1477,7 +1477,8 @@ pub(super) async fn text_message_send_uses_provider_client_and_records_failure()
             "provider_id": "weixin-main",
             "target_id": "weixin-owner",
             "msg_type": "text",
-            "content": "migration smoke test"
+            "content": "migration smoke test",
+            "idempotency_key": "migration-smoke-test"
         }))
         .send()
         .await
@@ -1491,6 +1492,323 @@ pub(super) async fn text_message_send_uses_provider_client_and_records_failure()
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].content.as_deref(), Some("migration smoke test"));
     assert_eq!(logs[0].status, MessageStatus::Failed);
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn idempotent_weixin_send_commits_successful_provider_ack() {
+    use http_body_util::BodyExt;
+    use sha2::Digest;
+
+    let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake Weixin provider");
+    let provider_address = provider_listener.local_addr().unwrap();
+    let provider_server = tokio::spawn(async move {
+        let (stream, _) = provider_listener.accept().await.unwrap();
+        let io = TokioIo::new(stream);
+        let handler = service_fn(|request: Request<Incoming>| async move {
+            assert_eq!(request.uri().path(), "/ilink/bot/sendmessage");
+            let body = request.into_body().collect().await.unwrap().to_bytes();
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["msg"]["client_id"].as_str().unwrap().len(), 45);
+            Ok::<_, std::convert::Infallible>(
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Full::new(Bytes::from_static(
+                        br#"{"ret":0,"message_id":"provider-message-1"}"#,
+                    )))
+                    .unwrap(),
+            )
+        });
+        http1::Builder::new()
+            .keep_alive(false)
+            .serve_connection(io, handler)
+            .await
+            .unwrap();
+    });
+
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = Arc::new(ImGatewayService::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "weixin-success".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    provider.base_url = Some(format!("http://{provider_address}"));
+    provider.app_id = Some("bot@im.bot".to_string());
+    provider.secret_ref = Some("bot-token".to_string());
+    provider.owner_open_id = Some("owner-user".to_string());
+    service
+        .provider_store
+        .add(provider.clone())
+        .expect("provider should be saved");
+    service
+        .connection_manager
+        .weixin_provider()
+        .store_context_for_test(&provider, "owner-user", "context-token")
+        .expect("context should persist");
+
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/api/im-gateway/messages/send"))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "provider_id": "weixin-success",
+            "target_id": "__owner__",
+            "msg_type": "text",
+            "content": "exactly once",
+            "idempotency_key": "successful-send"
+        }))
+        .send()
+        .await
+        .expect("send successful message");
+    let status = response.status();
+    let response_text = response.text().await.expect("send response text");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "unexpected send response: {response_text}"
+    );
+    let body: serde_json::Value = serde_json::from_str(&response_text).expect("send response");
+    assert_eq!(body["message_id"], "provider-message-1");
+    server.await.expect("message server task");
+    provider_server.await.expect("provider server task");
+
+    assert_eq!(
+        service.message_log_store.list()[0].status,
+        MessageStatus::Success
+    );
+    assert!(matches!(
+        service
+            .outbox_store
+            .begin(
+                "successful-send",
+                "weixin-success",
+                "__owner__",
+                "text",
+                &format!(
+                    "{:x}",
+                    sha2::Sha256::digest(
+                        serde_json::to_vec(&serde_json::json!("exactly once")).unwrap()
+                    )
+                )
+            )
+            .unwrap(),
+        crate::im_gateway::ImOutboxBegin::Replay { .. }
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn provider_status_reports_weixin_send_readiness_and_missing_provider() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = Arc::new(ImGatewayService::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "weixin-status".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    provider.owner_open_id = Some("owner-user".to_string());
+    service
+        .provider_store
+        .add(provider.clone())
+        .expect("provider should be saved");
+
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/im-gateway/providers/weixin-status/status"
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("query provider status");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.expect("status body");
+    assert_eq!(body["send_ready"], false);
+    assert_eq!(
+        body["send_ready_reason"],
+        "awaiting an inbound message context token"
+    );
+    server.await.expect("provider status server task");
+
+    service
+        .connection_manager
+        .weixin_provider()
+        .store_context_for_test(&provider, "owner-user", "context-token")
+        .expect("context should persist");
+    service.connection_manager.set_status_for_test(
+        "weixin-status",
+        crate::im_gateway::types::ConnectionStatus {
+            state: crate::im_gateway::types::ConnectionState::Connected,
+            last_connected_at: Some(1),
+            last_event_at: Some(2),
+            reconnect_count: 0,
+            last_error: None,
+        },
+    );
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/im-gateway/providers/weixin-status/status"
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("query send-ready provider status");
+    let body: serde_json::Value = response.json().await.expect("status body");
+    assert_eq!(body["send_ready"], true);
+    assert!(body.get("send_ready_reason").is_none());
+    server.await.expect("provider status server task");
+
+    let (address, server) = spawn_im_gateway_http(service).await;
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/im-gateway/providers/missing/status"
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("query missing provider status");
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    server.await.expect("missing provider status server task");
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn idempotent_message_send_rejects_oversized_key_and_not_ready_weixin() {
+    use sha2::Digest;
+
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = Arc::new(ImGatewayService::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "weixin-not-ready".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    provider.owner_open_id = Some("owner-user".to_string());
+    service
+        .provider_store
+        .add(provider)
+        .expect("provider should be saved");
+
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/api/im-gateway/messages/send"))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "provider_id": "weixin-not-ready",
+            "target_id": "__owner__",
+            "msg_type": "text",
+            "content": "hello",
+            "idempotency_key": "x".repeat(513)
+        }))
+        .send()
+        .await
+        .expect("send oversized idempotency key");
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    server.await.expect("oversized key server task");
+
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/api/im-gateway/messages/send"))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "provider_id": "weixin-not-ready",
+            "target_id": "__owner__",
+            "msg_type": "text",
+            "content": "hello",
+            "idempotency_key": "not-ready-once"
+        }))
+        .send()
+        .await
+        .expect("send before context is ready");
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    server.await.expect("not-ready server task");
+
+    assert!(matches!(
+        service
+            .outbox_store
+            .begin(
+                "not-ready-once",
+                "weixin-not-ready",
+                "__owner__",
+                "text",
+                &format!(
+                    "{:x}",
+                    sha2::Sha256::digest(serde_json::to_vec(&serde_json::json!("hello")).unwrap())
+                )
+            )
+            .unwrap(),
+        crate::im_gateway::ImOutboxBegin::Send { .. }
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn sent_outbox_message_is_replayed_without_contacting_provider() {
+    use sha2::Digest;
+
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = Arc::new(ImGatewayService::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.owner_open_id = Some("owner-user".to_string());
+    service
+        .provider_store
+        .add(provider)
+        .expect("provider should be saved");
+
+    let payload = serde_json::json!("already sent");
+    let payload_sha256 = format!(
+        "{:x}",
+        sha2::Sha256::digest(serde_json::to_vec(&payload).unwrap())
+    );
+    service
+        .outbox_store
+        .begin(
+            "daily-replay",
+            "feishu-main",
+            "__owner__",
+            "text",
+            &payload_sha256,
+        )
+        .unwrap();
+    service
+        .outbox_store
+        .mark_sent("daily-replay", Some("message-already-sent"))
+        .unwrap();
+
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/api/im-gateway/messages/send"))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "provider_id": "feishu-main",
+            "target_id": "__owner__",
+            "msg_type": "text",
+            "content": "different payload",
+            "idempotency_key": "daily-replay"
+        }))
+        .send()
+        .await
+        .expect("reject reused key with different payload");
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    server.await.expect("conflict server task");
+
+    let (address, server) = spawn_im_gateway_http(service).await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/api/im-gateway/messages/send"))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "provider_id": "feishu-main",
+            "target_id": "__owner__",
+            "msg_type": "text",
+            "content": "already sent",
+            "idempotency_key": "daily-replay"
+        }))
+        .send()
+        .await
+        .expect("replay sent message");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.expect("replay body");
+    assert_eq!(body["message_id"], "message-already-sent");
+    assert_eq!(body["request_id"], "idempotent-replay");
+    server.await.expect("replay server task");
 }
 
 #[test]

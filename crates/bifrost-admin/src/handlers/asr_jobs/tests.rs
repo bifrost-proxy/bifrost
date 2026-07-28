@@ -6735,6 +6735,88 @@ mod tests {
     }
 
     #[test]
+    fn external_import_completion_paths_persist_barriers() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+
+        let initial_progress = |run_id: &str| AsrExternalImportRunProgress {
+            run_id: run_id.to_string(),
+            trigger: "test".to_string(),
+            started_at_ms: 1,
+            updated_at_ms: 1,
+            finished_at_ms: None,
+            imported: 0,
+            skipped: 0,
+            processed_record_skipped: 0,
+            failed: 0,
+            status: "importing".to_string(),
+            current_device: None,
+            current_file: None,
+            current_file_size: None,
+            current_file_copied_bytes: 0,
+            total_files_discovered: 0,
+            processed_files: 0,
+            completion_token: None,
+            auto_run_consumed: false,
+            message: "queued".to_string(),
+        };
+
+        let disabled_task = test_directory_task("import-disabled", audio_dir.clone());
+        assert!(sync_external_devices_for_task(&disabled_task, "missing-run", "test").is_err());
+        save_external_import_progress(
+            &disabled_task.id,
+            &initial_progress("disabled-run"),
+        )
+        .unwrap();
+        assert_eq!(
+            sync_external_devices_for_task(&disabled_task, "disabled-run", "test").unwrap(),
+            0
+        );
+        let completed = load_external_import_progress(&disabled_task.id).unwrap();
+        assert_eq!(completed.status, "completed");
+        assert!(completed.finished_at_ms.is_some());
+        assert!(completed.completion_token.is_some());
+
+        let mut disconnected_task =
+            test_directory_task("import-disconnected", audio_dir);
+        disconnected_task.import_policy.enabled = true;
+        disconnected_task.external_devices = vec![AsrExternalDeviceBinding {
+            name: format!("definitely-not-mounted-{}", uuid::Uuid::new_v4()),
+            enabled: true,
+            ..Default::default()
+        }];
+        save_external_import_progress(
+            &disconnected_task.id,
+            &initial_progress("disconnected-run"),
+        )
+        .unwrap();
+        assert_eq!(
+            sync_external_devices_for_task(
+                &disconnected_task,
+                "disconnected-run",
+                "test"
+            )
+            .unwrap(),
+            0
+        );
+        let completed = load_external_import_progress(&disconnected_task.id).unwrap();
+        assert_eq!(completed.status, "completed");
+        assert_eq!(completed.skipped, 0);
+        assert!(completed.completion_token.is_some());
+        assert!(completed.message.contains("External import completed"));
+
+        let mut invalid_barrier = initial_progress("invalid-barrier");
+        invalid_barrier.status = "completed".to_string();
+        invalid_barrier.completion_token = Some("invalid-token".to_string());
+        save_external_import_progress("invalid-barrier-task", &invalid_barrier).unwrap();
+        assert!(consume_external_import_completion("invalid-barrier-task").is_none());
+        release_external_import_completion("missing-barrier-task", "missing-token");
+    }
+
+    #[test]
     fn external_import_copy_reports_byte_progress() {
         let temp = TempDir::new().unwrap();
         let source = temp.path().join("source.wav");
