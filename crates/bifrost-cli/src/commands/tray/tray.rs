@@ -22,6 +22,8 @@ use tray_icon::menu::{
 };
 use tray_icon::{TrayIconBuilder, TrayIconEvent};
 
+use bifrost_core::EXTERNAL_CLI_WORKER_ENV;
+
 use super::cli::TrayArgs;
 use super::config::{self, TrayConfig};
 #[cfg(target_os = "macos")]
@@ -81,6 +83,8 @@ const OP_UPGRADING: u8 = 3;
 const OP_START_FAILED: u8 = 4;
 const OP_STOP_FAILED: u8 = 5;
 const OP_UPGRADE_FAILED: u8 = 6;
+const OP_QUITTING: u8 = 7;
+const OP_QUIT_FAILED: u8 = 8;
 /// Sentinel meaning "no download percent available" for the upgrade percent atomic.
 const UPGRADE_PERCENT_NONE: u8 = u8::MAX;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -1960,15 +1964,20 @@ fn operation_status_label(operation: u8) -> Option<&'static str> {
         OP_STARTING => Some("Bifrost: Starting..."),
         OP_STOPPING => Some("Bifrost: Stopping..."),
         OP_UPGRADING => Some("Bifrost: Updating…"),
+        OP_QUITTING => Some("Bifrost: Quitting..."),
         OP_START_FAILED => Some("Bifrost: Start failed - open logs"),
         OP_STOP_FAILED => Some("Bifrost: Stop failed - open logs"),
         OP_UPGRADE_FAILED => Some("Bifrost: Update failed - open logs"),
+        OP_QUIT_FAILED => Some("Bifrost: Quit failed - open logs"),
         _ => None,
     }
 }
 
 fn operation_busy(operation: u8) -> bool {
-    matches!(operation, OP_STARTING | OP_STOPPING | OP_UPGRADING)
+    matches!(
+        operation,
+        OP_STARTING | OP_STOPPING | OP_UPGRADING | OP_QUITTING
+    )
 }
 
 /// Build a dynamic "Updating… NN%" label while a download is in progress.
@@ -1988,6 +1997,8 @@ fn clear_completed_operation(operation: &AtomicU8, state: u8) {
     let current = operation.load(Ordering::Relaxed);
     let completed = (matches!(current, OP_STARTING | OP_START_FAILED) && state == STATE_RUNNING)
         || (matches!(current, OP_STOPPING | OP_STOP_FAILED)
+            && matches!(state, STATE_STOPPED | STATE_DISCONNECTED))
+        || (matches!(current, OP_QUITTING | OP_QUIT_FAILED)
             && matches!(state, STATE_STOPPED | STATE_DISCONNECTED));
     if completed {
         operation.store(OP_IDLE, Ordering::Relaxed);
@@ -2128,6 +2139,7 @@ fn fallback_runtime_from_args(args: &TrayArgs) -> Option<RuntimeInfo> {
             .as_deref()
             .and_then(parse_host_from_admin_url),
         started_at_ms: None,
+        start_mode: runtime::RuntimeStartMode::Unknown,
         binary_path: args.bifrost_bin.clone(),
     })
 }
@@ -3902,6 +3914,27 @@ fn execute_action(
                 reload_flag.store(true, Ordering::Relaxed);
             });
         }
+        MenuItemAction::QuitDesktop {
+            service_pid,
+            service_started_at_ms,
+        } => {
+            if operation_busy(operation.load(Ordering::Relaxed)) {
+                tracing::warn!("desktop quit ignored while another action is running");
+                return;
+            }
+            let service_pid = *service_pid;
+            let service_started_at_ms = *service_started_at_ms;
+            let operation = operation.clone();
+            let reload_flag = reload_flag.clone();
+            operation.store(OP_QUITTING, Ordering::Relaxed);
+            reload_flag.store(true, Ordering::Relaxed);
+            spawn_tray_task("bifrost-tray-quit-desktop", move || {
+                if !request_desktop_shutdown(service_pid, service_started_at_ms) {
+                    operation.store(OP_QUIT_FAILED, Ordering::Relaxed);
+                    reload_flag.store(true, Ordering::Relaxed);
+                }
+            });
+        }
         MenuItemAction::StartUpgrade { target_version } => {
             if operation_busy(operation.load(Ordering::Relaxed)) {
                 tracing::warn!("upgrade ignored while another action is running");
@@ -4183,8 +4216,8 @@ fn spawn_start(
     extra_args: &[String],
 ) -> Option<Child> {
     let mut cmd = Command::new(bin);
-    cmd.env("BIFROST_DATA_DIR", data_dir)
-        .env("BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT", "1")
+    configure_service_start_environment(&mut cmd, data_dir);
+    cmd.env("BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT", "1")
         .args(build_service_start_args(port, extra_args));
     configure_service_command(&mut cmd);
     match cmd.spawn() {
@@ -4197,6 +4230,12 @@ fn spawn_start(
             None
         }
     }
+}
+
+fn configure_service_start_environment(command: &mut Command, data_dir: &str) {
+    command
+        .env_remove(EXTERNAL_CLI_WORKER_ENV)
+        .env("BIFROST_DATA_DIR", data_dir);
 }
 
 fn build_service_start_args(port: Option<u16>, extra_args: &[String]) -> Vec<String> {
@@ -4337,6 +4376,72 @@ fn spawn_stop(bin: &Path, data_dir: &str) -> bool {
             false
         }
     }
+}
+
+fn request_desktop_shutdown(service_pid: u32, service_started_at_ms: Option<u64>) -> bool {
+    let Some(executable) = desktop_owner_executable(service_pid, service_started_at_ms) else {
+        tracing::error!(
+            service_pid,
+            "cannot locate the bifrost-desktop process that owns the Service"
+        );
+        return false;
+    };
+    let mut command = Command::new(&executable);
+    command.arg(crate::commands::upgrade::DESKTOP_UPGRADE_SHUTDOWN_ARG);
+    configure_service_command(&mut command);
+
+    match command.spawn() {
+        Ok(child) => {
+            tracing::info!(
+                pid = child.id(),
+                service_pid,
+                executable = %executable.display(),
+                "Desktop graceful shutdown requested from tray"
+            );
+            wait_for_child(child, "bifrost desktop shutdown request")
+        }
+        Err(error) => {
+            tracing::error!(
+                service_pid,
+                executable = %executable.display(),
+                error = %error,
+                "failed to request Desktop graceful shutdown"
+            );
+            false
+        }
+    }
+}
+
+fn desktop_owner_executable(
+    service_pid: u32,
+    service_started_at_ms: Option<u64>,
+) -> Option<PathBuf> {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+
+    if matches!(
+        bifrost_core::start_times_match(
+            service_started_at_ms,
+            bifrost_core::get_process_start_time_ms(service_pid),
+        ),
+        bifrost_core::StartTimeMatch::Mismatch { .. }
+    ) {
+        return None;
+    }
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::All);
+    let service = system.process(Pid::from_u32(service_pid))?;
+    let owner_pid = service.parent()?;
+    let executable = system.process(owner_pid)?.exe()?.to_path_buf();
+    is_bifrost_desktop_executable(&executable).then_some(executable)
+}
+
+fn is_bifrost_desktop_executable(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.eq_ignore_ascii_case("bifrost-desktop")
+                || name.eq_ignore_ascii_case("bifrost-desktop.exe")
+        })
 }
 
 /// Spawn a detached `bifrost self-update` subprocess that performs the upgrade

@@ -99,6 +99,7 @@ fn progress_snapshot_tracks_tool_plan_queue_and_final_output() {
             seq: 1,
             message: "next".to_string(),
             images: Vec::new(),
+            files: Vec::new(),
             context: None,
         }],
         true,
@@ -998,6 +999,7 @@ fn external_runner_status_footer_uses_runner_metadata_instead_of_agent_metrics()
         seq: 1,
         message: "queued message".to_string(),
         images: Vec::new(),
+        files: Vec::new(),
         context: None,
     });
     snapshot.guide_pending = true;
@@ -1303,6 +1305,7 @@ fn feishu_progress_card_uses_json_2_streaming_and_stable_elements() {
             seq: 7,
             message: "queued".to_string(),
             images: Vec::new(),
+            files: Vec::new(),
             context: None,
         }],
         true,
@@ -1447,20 +1450,20 @@ fn assert_feishu_element_id_is_valid(element_id: &str) {
     );
 }
 
-struct MockFeishuProgressServer {
-    base_url: String,
+pub(crate) struct MockFeishuProgressServer {
+    pub(crate) base_url: String,
     card_counter: Arc<std::sync::atomic::AtomicUsize>,
     message_counter: Arc<std::sync::atomic::AtomicUsize>,
     recall_counter: Arc<std::sync::atomic::AtomicUsize>,
     card_update_counter: Arc<std::sync::atomic::AtomicUsize>,
     settings_update_counter: Arc<std::sync::atomic::AtomicUsize>,
-    card_create_payloads: Arc<std::sync::Mutex<Vec<String>>>,
-    card_update_payloads: Arc<std::sync::Mutex<Vec<String>>>,
-    message_paths: Arc<std::sync::Mutex<Vec<String>>>,
-    message_payloads: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    pub(crate) card_create_payloads: Arc<std::sync::Mutex<Vec<String>>>,
+    pub(crate) card_update_payloads: Arc<std::sync::Mutex<Vec<String>>>,
+    pub(crate) message_paths: Arc<std::sync::Mutex<Vec<String>>>,
+    pub(crate) message_payloads: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
 }
 
-async fn spawn_mock_feishu_progress_server() -> MockFeishuProgressServer {
+pub(crate) async fn spawn_mock_feishu_progress_server() -> MockFeishuProgressServer {
     spawn_mock_feishu_progress_server_with_failures(None, Vec::new(), Vec::new(), None).await
 }
 
@@ -1834,7 +1837,7 @@ async fn spawn_mock_feishu_progress_server_with_failures(
     }
 }
 
-fn mock_feishu_provider(base_url: &str) -> ImProviderConfig {
+pub(crate) fn mock_feishu_provider(base_url: &str) -> ImProviderConfig {
     ImProviderConfig {
         id: "feishu-main".to_string(),
         provider_type: super::super::types::ImProviderType::Feishu,
@@ -1852,7 +1855,7 @@ fn mock_feishu_provider(base_url: &str) -> ImProviderConfig {
     }
 }
 
-fn mock_progress_target() -> ImTarget {
+pub(crate) fn mock_progress_target() -> ImTarget {
     ImTarget {
         id: "progress".to_string(),
         provider_id: "feishu-main".to_string(),
@@ -2027,6 +2030,34 @@ async fn failed_turn_rollover_restores_previous_card_state() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn proactive_progress_card_uses_direct_send_without_reply_message_id() {
+    let server = spawn_mock_feishu_progress_server().await;
+    let registry = ImAgentProgressRegistry::new();
+    registry
+        .start_feishu(
+            "web-bound-session",
+            Arc::new(FeishuProvider::new()),
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
+            "message from WebUI",
+        )
+        .await
+        .expect("start proactive progress card");
+
+    assert_eq!(
+        server
+            .message_paths
+            .lock()
+            .expect("message paths")
+            .as_slice(),
+        ["/open-apis/im/v1/messages"]
+    );
+    let payloads = server.message_payloads.lock().expect("message payloads");
+    assert_eq!(payloads[0]["receive_id"], "ou_owner");
+    assert_eq!(payloads[0]["msg_type"], "interactive");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn local_budget_can_switch_existing_card_to_compact_mode() {
     let server = spawn_mock_feishu_progress_server().await;
     let registry = ImAgentProgressRegistry::new();
@@ -2132,7 +2163,8 @@ async fn queue_state_update_rolls_over_card_and_freezes_previous_snapshot() {
                     seq: 2,
                     message: "follow-up".to_string(),
                     images: Vec::new(),
-                    context: None,
+                    files: Vec::new(),
+                    context: None
                 }],
                 true,
                 Some("已收到引导：follow-up".to_string()),
@@ -2646,7 +2678,8 @@ async fn queue_state_rollover_sends_new_card_without_recall() {
                     seq: 1,
                     message: "queued after rollover".to_string(),
                     images: Vec::new(),
-                    context: None,
+                    files: Vec::new(),
+                    context: None
                 }],
                 false,
                 Some("消息已排队：queued after rollover".to_string()),
@@ -2733,7 +2766,8 @@ async fn queue_state_rollover_send_failure_keeps_previous_running_handle() {
                     seq: 1,
                     message: "queued after send failure".to_string(),
                     images: Vec::new(),
-                    context: None,
+                    files: Vec::new(),
+                    context: None
                 }],
                 false,
                 Some("消息已排队：queued after send failure".to_string()),
@@ -2782,7 +2816,8 @@ async fn finished_card_queue_state_update_does_not_rollover_or_freeze() {
                     seq: 1,
                     message: "late message".to_string(),
                     images: Vec::new(),
-                    context: None,
+                    files: Vec::new(),
+                    context: None
                 }],
                 true,
                 Some("已收到引导：late message".to_string()),

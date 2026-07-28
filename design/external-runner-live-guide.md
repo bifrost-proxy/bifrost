@@ -23,6 +23,7 @@ Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动
 - 新增 `bifrost agent guide --session <key> <message>`；session 必填，避免向错误的默认 runner session 发送控制消息。
 - 新增 Chat Gateway session guide endpoint；IM 只有显式 `/g` 按 live capability 判断 steer 或 queue，普通 busy message 与 `/q` 都进入队列。
 - busy external runner 必须先拦截 `/models`、`/model`、`/efforts`、`/effort` 等 Bifrost slash 命令，再进入默认 Guide/Queue 路由；控制命令不得作为 `turn/steer` 输入透传给 Runner。
+- `BIFROST_EXTERNAL_CLI_WORKER` 只能标记显式 `external-runner-worker` 子进程，不能再作为生产运行时是否派生 worker 的分支条件。Desktop sidecar、Tray helper、Tray 拉起的服务和 detached daemon 等长期进程命令边界必须删除误继承的同名环境变量，避免内部角色标记继续向无关后代扩散。
 
 ### 必须不破坏
 
@@ -32,7 +33,8 @@ Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动
 - `/stop`、run stop marker、超时、worker process group 清理与服务退出清理继续有效。
 - model、reasoning effort、sandbox/approval、service tier、config override、feature flag、work dir、图片路径和 session resume 语义不因 transport 迁移丢失。
 - 现有 `run_started`、progress、`run_finished` NDJSON 消费方兼容；只允许增加字段与 guide 专用响应。
-- 同一 session 只允许一个 active turn；WebUI 可按运行中模式选择 guide/queue，IM 普通文本默认排队、显式 `/g` 才请求 guide。
+- 同一 session 只允许一个 active turn；除 ChatGPT Web 外，新普通文本消息默认请求 guide，显式 `/q` 才排队。
+- 真正的 external-runner worker 继续显式设置 `BIFROST_EXTERNAL_CLI_WORKER=1`；清理长期进程环境不得造成 worker 递归派生，也不得改变 worker process-group、Stop 或超时回收语义。
 
 ### 必须真实验证
 
@@ -42,6 +44,7 @@ Bifrost 已支持通过 Chat Gateway、IM Gateway 与 `bifrost agent run` 启动
 - 显式 `transport=exec` 与 custom args：guide 返回 queue fallback，原 exec JSONL 仍成功；Claude exec 默认参数必须是 `--input-format text` 且不包含 `--replay-user-messages`。
 - 真实本机 Codex 与 Traex CLI：使用独立 `BIFROST_DATA_DIR` 和临时端口启动最新二进制，分别启动长任务、从第二终端发送 guide、确认同 turn 接收并正常收尾，无残留 app-server/worker 进程。
 - `/stop` 在 app-server turn 运行期间能结束 worker 与子进程，run/session 状态不残留 running。
+- 从带有 `BIFROST_EXTERNAL_CLI_WORKER=1` 的父环境执行 `bifrost start --daemon`，daemon 必须清除该变量；真实 Chat Gateway/IM mock inbound 的第二条 busy 消息仍返回 `delivery=steered`，不能因主进程缺少 `ACTIVE_WORKER_SESSIONS` 而降级 Queue。
 
 ### 必须交付
 
@@ -135,6 +138,21 @@ other adapter                          -> existing transport
 主进程 registry 的 ack 只有在收到 `guide_result` 后完成。worker 退出时所有 pending guide 返回 rejected，调用方随后进入 queue fallback。
 主进程 worker control channel 与单 run 的 pending guide map 都限制为 32 条；饱和时新 Guide 必须快速返回明确错误并走现有 FIFO queue fallback，不能继续无界占用内存。Stop 在 control channel 饱和时直接终止已确认归属该 session 的 worker，关闭/陈旧 channel 则保留 PID reuse 防护，不盲目 kill。
 
+### Worker 标记生命周期
+
+`BIFROST_EXTERNAL_CLI_WORKER` 是进程角色标记，不是用户配置或全局运行模式。唯一合法的注入点是主进程创建隐藏子命令 `agent external-runner-worker` 时；worker 隐藏子命令直接调用私有的 in-process runner transport，避免再次派生 worker。生产 `run_with_progress` 不读取该环境变量，因此污染的前台进程或 Linux fork daemon 也不会绕过 worker registry。
+
+长期进程会成为后续所有 Agent turn 的环境根节点，因此必须在以下命令边界显式 `env_remove`：
+
+- Desktop 创建 backend sidecar；
+- 服务创建 Tray helper；
+- Tray helper 重新启动 detached service；
+- `start --daemon` 创建 detached daemon child。
+
+这项清理只作用于新子进程的环境，不修改当前进程环境，也不清理真实 worker 的标记。旧版本已经启动且受污染的长期进程不会被热修复；安装新版本后需要由用户选择合适窗口完整重启 Desktop、Tray 和 core，避免打断正在进行的连接。
+
+Linux 的传统 daemon 路径使用 `fork` 而不是 `Command`，因此在 fork child 进入长期运行前直接 `remove_var` 清除该角色标记；生产 dispatch 同时不再读取 ambient marker，形成进程环境与调度语义两层隔离。由 Tray 创建 Linux 服务时，Tray 的 command 边界仍会清除该变量。
+
 ### Admin API 与 CLI
 
 ```http
@@ -171,12 +189,13 @@ bifrost agent guide --session cli-Codex "先检查失败日志"
 - app-server spawn：Unix `ETXTBSY` 有界重试后成功，非瞬态错误不重试。
 - notification normalization：agent message、command execution、reasoning、plan、turn completed/failed。
 - worker protocol：Guide serialize/parse、ack correlation、worker exit rejects pending、control channel 饱和快速拒绝与 32 条 pending 上限。
+- worker marker：生产 dispatch 忽略 ambient marker；Desktop backend、Tray helper、Tray service 与 detached daemon command 均删除继承标记；真实 external-runner worker command 仍显式设置标记。
 - guide result：accepted、no active、mismatch、non-steerable、timeout -> queue fallback。
 - CLI：Guide 参数、URL encoding、JSON/人类输出、空 message/session 拒绝。
 
 ### E2E
 
-新增 `e2e-tests/tests/test_external_runner_live_guide.sh`，用 mock app-server/stream-json/exec 可执行文件与独立数据目录启动真实 Bifrost 二进制，覆盖 Codex、Traex、Claude interrupt-and-continue、Codex/Claude reject-to-queue、explicit exec 与 inactive-session reject；既有 worker stop 聚焦测试继续覆盖 stop cleanup。脚本由 CI full-shell 的 `test_*.sh` 自动收录。
+新增 `e2e-tests/tests/test_external_runner_live_guide.sh`，用 mock app-server/stream-json/exec 可执行文件与独立数据目录启动真实 Bifrost 二进制，覆盖 Codex、Traex、Claude interrupt-and-continue、Codex/Claude reject-to-queue、explicit exec 与 inactive-session reject；启动链路显式污染父环境并通过 detached daemon 验证长期进程会清除 worker 标记；既有 worker stop 聚焦测试继续覆盖 stop cleanup。脚本由 CI full-shell 的 `test_*.sh` 自动收录。
 
 所有模拟 Claude Code stream-json 的测试夹具必须读取一条初始 user JSONL frame 后开始输出，不能通过 `cat` 等待 stdin EOF。需要验证 guide 的夹具还必须依次校验 interrupt control request、返回匹配 request id 的 control response、读取 guide user frame，并模拟旧响应的 interrupted result 与 guide 的最终 success result。真实 transport 会保持 stdin 打开；等待 EOF 会让夹具在正确的产品行为下永久阻塞并最终误报 30 秒超时。
 
@@ -184,7 +203,12 @@ Web Playwright 同时覆盖 Codex/Traex/Claude Code 默认 Guide、显式 Queue�
 
 ### Human tests
 
-更新 `human_tests/im-gateway-external-cli-chat-gateway.md` 新增 Codex/Traex 运行中 guide 用例，并同步 `human_tests/readme.md` 对应模块索引；创建/更新后立即逐条执行并记录结果。
+更新 `human_tests/im-guide-queue-mode.md` 新增污染父环境下 detached daemon 仍可实时 Guide 的回归用例，并同步 `human_tests/readme.md` 对应模块索引；创建/更新后立即逐条执行并记录结果。
+
+### Review/Fix/Test
+
+- 第 1 轮：复核 Desktop、Tray helper、Tray service、detached daemon 与真实 worker 五个边界，检查是否存在误删 worker 标记或遗漏长期进程；运行各命令构造器单元测试和 external runner live-guide E2E。
+- 第 2 轮：基于修复后的最新 diff 复查设计、E2E cleanup、human_tests 索引与跨平台命令行为，复跑受影响测试；随后按 `rust-project-validate` 执行项目校验，并由远端 `bash scripts/ci/coverage-all.sh --json --gate` 兜底 90% 棘轮门禁。
 
 ## 风险与回滚
 

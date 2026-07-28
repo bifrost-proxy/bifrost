@@ -1,11 +1,11 @@
 {
-  "version": "0.0.162",
-  "tag": "v0.0.162",
-  "baseUrl": "https://github.com/bifrost-proxy/bifrost/releases/download/v0.0.162/",
+  "version": "0.0.165",
+  "tag": "v0.0.165",
+  "baseUrl": "https://github.com/bifrost-proxy/bifrost/releases/download/v0.0.165/",
   "assets": {
-    "mac-arm": "bifrost-desktop-v0.0.162-aarch64-apple-darwin.dmg",
-    "mac-intel": "bifrost-desktop-v0.0.162-x86_64-apple-darwin.dmg",
-    "win-x64": "bifrost-desktop-v0.0.162-x86_64-pc-windows-msvc.msi",
-    "win-arm": "bifrost-desktop-v0.0.162-aarch64-pc-windows-msvc.msi"
+    "mac-arm": "bifrost-desktop-v0.0.165-aarch64-apple-darwin.dmg",
+    "mac-intel": "bifrost-desktop-v0.0.165-x86_64-apple-darwin.dmg",
+    "win-x64": "bifrost-desktop-v0.0.165-x86_64-pc-windows-msvc.msi",
+    "win-arm": "bifrost-desktop-v0.0.165-aarch64-pc-windows-msvc.msi"
   }
 }

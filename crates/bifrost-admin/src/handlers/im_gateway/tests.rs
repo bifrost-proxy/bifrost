@@ -646,6 +646,7 @@ pub(super) fn agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt
             encrypted_query_param: None,
             aes_key: None,
         }],
+        files: Vec::new(),
         reply_to: None,
         raw_type: Some("text".to_string()),
         ..Default::default()
@@ -664,6 +665,7 @@ pub(super) fn agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt
             encrypted_query_param: None,
             aes_key: None,
         }],
+        files: Vec::new(),
         reply_to: None,
         raw_type: Some("image".to_string()),
         ..Default::default()
@@ -677,11 +679,284 @@ pub(super) fn agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt
         text: "   ".to_string(),
         mentions: Vec::new(),
         images: Vec::new(),
+        files: Vec::new(),
         reply_to: None,
         raw_type: None,
         ..Default::default()
     };
     assert!(agent_message_text(&empty_message).is_empty());
+
+    let file_only_message = crate::im_gateway::types::ImEventMessage {
+        text: "   ".to_string(),
+        mentions: Vec::new(),
+        images: Vec::new(),
+        files: vec![
+            crate::im_gateway::types::ImFileAttachment {
+                file_key: "file-v3-1".to_string(),
+                name: Some("需求.md".to_string()),
+                mime_type: Some("text/markdown".to_string()),
+                size_bytes: Some(12),
+                data_base64: None,
+                download_url: None,
+            },
+            crate::im_gateway::types::ImFileAttachment {
+                file_key: "file-v3-2".to_string(),
+                name: Some("日志.txt".to_string()),
+                mime_type: Some("text/plain".to_string()),
+                size_bytes: Some(20),
+                data_base64: None,
+                download_url: None,
+            },
+        ],
+        raw_type: Some("file".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(agent_message_text(&file_only_message), "[附件消息: 2 个]");
+}
+
+#[tokio::test]
+pub(super) async fn resolve_event_files_handles_inline_limits_and_missing_message_id() {
+    let client = ImProviderClient::Weixin(Arc::new(WeixinProvider::new()));
+    let provider = test_provider();
+    let event = ImEvent {
+        event_id: "evt-files-inline".to_string(),
+        provider_id: provider.id.clone(),
+        provider_type: provider.provider_type,
+        event_type: "message.receive".to_string(),
+        source: crate::im_gateway::types::ImEventSource {
+            chat_id: Some("oc_engineering".to_string()),
+            chat_type: Some("group".to_string()),
+            user_id: Some("ou_sender".to_string()),
+            user_name: Some("Alice".to_string()),
+            sender_type: Some("user".to_string()),
+            message_id: None,
+        },
+        message: None,
+        received_at: 0,
+        raw_digest: None,
+    };
+    let mut files = Vec::new();
+    for index in 0..(MAX_AGENT_ATTACHMENTS_PER_MESSAGE + 1) {
+        files.push(crate::im_gateway::types::ImFileAttachment {
+            file_key: format!("file-{index}"),
+            name: Some(format!("file-{index}.txt")),
+            mime_type: if index == 0 {
+                None
+            } else {
+                Some("text/plain".to_string())
+            },
+            size_bytes: None,
+            data_base64: if index < MAX_AGENT_ATTACHMENTS_PER_MESSAGE - 1 {
+                Some(format!("ZmlsZS0{index}="))
+            } else {
+                None
+            },
+            download_url: None,
+        });
+    }
+
+    let resolved = resolve_event_files(&client, &provider, &event, &files).await;
+
+    assert_eq!(resolved.len(), MAX_AGENT_ATTACHMENTS_PER_MESSAGE - 1);
+    assert_eq!(resolved[0].mime_type, "application/octet-stream");
+    assert_eq!(resolved[0].name.as_deref(), Some("file-0.txt"));
+    assert_eq!(resolved[0].data, "ZmlsZS00="); // inline base64 is preserved until runner save time
+    assert_eq!(resolved[1].mime_type, "text/plain");
+}
+
+#[tokio::test]
+pub(super) async fn resolve_event_files_download_errors_are_not_returned_to_runner() {
+    let client = ImProviderClient::Weixin(Arc::new(WeixinProvider::new()));
+    let provider = test_provider();
+    let event = ImEvent {
+        event_id: "evt-files-download".to_string(),
+        provider_id: provider.id.clone(),
+        provider_type: provider.provider_type,
+        event_type: "message.receive".to_string(),
+        source: crate::im_gateway::types::ImEventSource {
+            chat_id: Some("oc_engineering".to_string()),
+            chat_type: Some("group".to_string()),
+            user_id: Some("ou_sender".to_string()),
+            user_name: Some("Alice".to_string()),
+            sender_type: Some("user".to_string()),
+            message_id: Some("om_file".to_string()),
+        },
+        message: None,
+        received_at: 0,
+        raw_digest: None,
+    };
+    let files = vec![crate::im_gateway::types::ImFileAttachment {
+        file_key: "file-needs-download".to_string(),
+        name: Some("remote.txt".to_string()),
+        mime_type: Some("text/plain".to_string()),
+        size_bytes: Some(5),
+        data_base64: None,
+        download_url: None,
+    }];
+
+    let resolved = resolve_event_files(&client, &provider, &event, &files).await;
+
+    assert!(resolved.is_empty());
+}
+
+#[tokio::test]
+pub(super) async fn resolve_event_files_downloads_message_resources() {
+    use http_body_util::Full;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Method, Request, Response, StatusCode};
+    use hyper_util::rt::TokioIo;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock feishu file server");
+    let port = listener.local_addr().expect("mock local addr").port();
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let io = TokioIo::new(stream);
+            tokio::spawn(async move {
+                let service = service_fn(move |req: Request<hyper::body::Incoming>| async move {
+                    let method = req.method().clone();
+                    let path = req.uri().path().to_string();
+                    if method == Method::POST
+                        && path == "/open-apis/auth/v3/tenant_access_token/internal"
+                    {
+                        return Ok::<_, hyper::Error>(
+                            Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Full::new(bytes::Bytes::from_static(
+                                    br#"{"code":0,"tenant_access_token":"tenant-token","expire":7200}"#,
+                                )))
+                                .unwrap(),
+                        );
+                    }
+                    if method == Method::GET
+                        && path == "/open-apis/im/v1/messages/om_file/resources/file-v3"
+                    {
+                        return Ok::<_, hyper::Error>(
+                            Response::builder()
+                                .status(StatusCode::OK)
+                                .header("content-type", "text/markdown; charset=utf-8")
+                                .body(Full::new(bytes::Bytes::from_static(b"# Report")))
+                                .unwrap(),
+                        );
+                    }
+                    Ok::<_, hyper::Error>(
+                        Response::builder()
+                            .status(StatusCode::NOT_FOUND)
+                            .body(Full::new(bytes::Bytes::from_static(b"not found")))
+                            .unwrap(),
+                    )
+                });
+                let _ = http1::Builder::new().serve_connection(io, service).await;
+            });
+        }
+    });
+
+    let client =
+        ImProviderClient::Feishu(Arc::new(crate::im_gateway::feishu::FeishuProvider::new()));
+    let mut provider = test_provider();
+    provider.base_url = Some(format!("http://127.0.0.1:{port}/open-apis"));
+    let event = ImEvent {
+        event_id: "evt-files-download-success".to_string(),
+        provider_id: provider.id.clone(),
+        provider_type: provider.provider_type,
+        event_type: "message.receive".to_string(),
+        source: crate::im_gateway::types::ImEventSource {
+            message_id: Some("om_file".to_string()),
+            ..Default::default()
+        },
+        message: None,
+        received_at: 0,
+        raw_digest: None,
+    };
+    let files = vec![crate::im_gateway::types::ImFileAttachment {
+        file_key: "file-v3".to_string(),
+        name: Some("report.md".to_string()),
+        mime_type: None,
+        size_bytes: Some(8),
+        data_base64: None,
+        download_url: None,
+    }];
+
+    let resolved = resolve_event_files(&client, &provider, &event, &files).await;
+
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].mime_type, "text/markdown");
+    assert_eq!(resolved[0].data, "IyBSZXBvcnQ=");
+    assert_eq!(resolved[0].name.as_deref(), Some("report.md"));
+}
+
+#[tokio::test]
+pub(super) async fn busy_queue_command_preserves_event_files() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let service = ImGatewayService::new(temp_dir.path());
+    let provider = test_provider();
+    let client = ImProviderClient::Weixin(Arc::new(WeixinProvider::new()));
+    let agent_config = service.agent_config_store.load();
+    let event = ImEvent {
+        event_id: "evt-busy-q-file".to_string(),
+        provider_id: provider.id.clone(),
+        provider_type: provider.provider_type,
+        event_type: "message.receive".to_string(),
+        source: crate::im_gateway::types::ImEventSource {
+            chat_id: Some("chat-id".to_string()),
+            user_id: Some("owner-open-id".to_string()),
+            message_id: Some("om_busy_q_file".to_string()),
+            ..Default::default()
+        },
+        message: Some(crate::im_gateway::types::ImEventMessage {
+            text: "/q please inspect the attachment".to_string(),
+            mentions: Vec::new(),
+            images: Vec::new(),
+            files: vec![crate::im_gateway::types::ImFileAttachment {
+                file_key: "inline-q-file".to_string(),
+                name: Some("queued.md".to_string()),
+                mime_type: Some("text/markdown".to_string()),
+                size_bytes: Some(8),
+                data_base64: Some("IyBRdWV1ZWQ=".to_string()),
+                download_url: None,
+            }],
+            raw_type: Some("file".to_string()),
+            ..Default::default()
+        }),
+        received_at: now_ms(),
+        raw_digest: None,
+    };
+    let session_key = build_session_key(&provider.id, Some("owner-open-id"));
+
+    handle_busy_message(
+        "/q please inspect the attachment",
+        &session_key,
+        BusyMessageContext {
+            queue_manager: &service.queue_manager,
+            client: &client,
+            provider: &provider,
+            event: &event,
+            message_log_store: &service.message_log_store,
+            agent_session_manager: &service.agent_session_manager,
+            progress_registry: &service.progress_registry,
+            external_cli_config_store: &service.external_cli_config_store,
+            agent_config: &agent_config,
+            group_context_store: &service.group_context_store,
+            group_turn_id: None,
+            default_mode: BusyMessageDefaultMode::Queue,
+            status_context: Default::default(),
+            default_work_dir: None,
+        },
+    )
+    .await;
+
+    let queue = service.queue_manager.queue_status(&session_key);
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0].message, "please inspect the attachment");
+    assert_eq!(queue[0].files.len(), 1);
+    assert_eq!(queue[0].files[0].mime_type, "text/markdown");
+    assert_eq!(queue[0].files[0].name.as_deref(), Some("queued.md"));
 }
 
 #[test]
@@ -811,6 +1086,7 @@ pub(super) fn inbound_message_preview_summarizes_image_only_and_truncates_text()
                 aes_key: None,
             },
         ],
+        files: Vec::new(),
         reply_to: None,
         raw_type: Some("image".to_string()),
         ..Default::default()
@@ -822,6 +1098,7 @@ pub(super) fn inbound_message_preview_summarizes_image_only_and_truncates_text()
         text: long_text,
         mentions: Vec::new(),
         images: Vec::new(),
+        files: Vec::new(),
         reply_to: None,
         raw_type: Some("text".to_string()),
         ..Default::default()
@@ -829,6 +1106,23 @@ pub(super) fn inbound_message_preview_summarizes_image_only_and_truncates_text()
     let preview = inbound_message_preview(&text_message);
     assert_eq!(preview.chars().count(), 203);
     assert!(preview.ends_with("..."));
+
+    let file_message = crate::im_gateway::types::ImEventMessage {
+        text: String::new(),
+        mentions: Vec::new(),
+        images: Vec::new(),
+        files: vec![crate::im_gateway::types::ImFileAttachment {
+            file_key: "file-v3-1".to_string(),
+            name: Some("需求.md".to_string()),
+            mime_type: Some("text/markdown".to_string()),
+            size_bytes: Some(12),
+            data_base64: None,
+            download_url: None,
+        }],
+        raw_type: Some("file".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(inbound_message_preview(&file_message), "[附件消息: 1 个]");
 }
 
 #[test]
@@ -1500,6 +1794,7 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
             text: "run external cli".to_string(),
             mentions: Vec::new(),
             images: Vec::new(),
+            files: Vec::new(),
             reply_to: None,
             raw_type: Some("text".to_string()),
             ..Default::default()
@@ -1764,6 +2059,7 @@ pub(super) async fn im_event_loop_external_cli_route_processes_image_only_messag
                     aes_key: None,
                 },
             ],
+            files: Vec::new(),
             reply_to: None,
             raw_type: Some("image".to_string()),
             ..Default::default()
@@ -1885,6 +2181,7 @@ pub(super) async fn im_event_loop_external_cli_session_records_runner_failure() 
             text: "trigger broken external cli".to_string(),
             mentions: Vec::new(),
             images: Vec::new(),
+            files: Vec::new(),
             reply_to: None,
             raw_type: Some("text".to_string()),
             ..Default::default()
@@ -2028,34 +2325,46 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
         .save(external_config)
         .expect("save external config");
     let client = ImProviderClient::Feishu(Arc::clone(service.connection_manager.feishu_provider()));
-    let event_for = |event_id: &str, user_id: &str, text: &str| ImEvent {
-        event_id: event_id.to_string(),
-        provider_id: provider.id.clone(),
-        provider_type: ImProviderType::Feishu,
-        event_type: "message.receive".to_string(),
-        source: crate::im_gateway::types::ImEventSource {
-            chat_id: Some("chat-id".to_string()),
-            user_id: Some(user_id.to_string()),
-            message_id: Some(format!("message-{event_id}")),
-            ..Default::default()
-        },
-        message: Some(crate::im_gateway::types::ImEventMessage {
-            text: text.to_string(),
-            mentions: Vec::new(),
-            images: Vec::new(),
-            reply_to: None,
-            raw_type: Some("text".to_string()),
-            ..Default::default()
-        }),
-        received_at: now_ms(),
-        raw_digest: None,
+    let event_for = |event_id: &str,
+                     user_id: &str,
+                     text: &str,
+                     files: Vec<crate::im_gateway::types::ImFileAttachment>|
+     -> ImEvent {
+        ImEvent {
+            event_id: event_id.to_string(),
+            provider_id: provider.id.clone(),
+            provider_type: ImProviderType::Feishu,
+            event_type: "message.receive".to_string(),
+            source: crate::im_gateway::types::ImEventSource {
+                chat_id: Some("chat-id".to_string()),
+                user_id: Some(user_id.to_string()),
+                message_id: Some(format!("message-{event_id}")),
+                ..Default::default()
+            },
+            message: Some(crate::im_gateway::types::ImEventMessage {
+                text: text.to_string(),
+                mentions: Vec::new(),
+                images: Vec::new(),
+                files,
+                reply_to: None,
+                raw_type: Some("text".to_string()),
+                ..Default::default()
+            }),
+            received_at: now_ms(),
+            raw_digest: None,
+        }
     };
 
     let active_session_key = build_session_key(&provider.id, Some("owner-open-id"));
     let active_session = service
         .agent_session_manager
         .take_session(&active_session_key);
-    let mut active_event = event_for("active", "owner-open-id", "queue active message");
+    let mut active_event = event_for(
+        "active",
+        "owner-open-id",
+        "queue active message",
+        Vec::new(),
+    );
     let active_message = active_event.message.as_mut().expect("active message");
     active_message.reply_to = Some(crate::im_gateway::types::ImMessageReference {
         message_id: Some("quoted-active-message".to_string()),
@@ -2093,7 +2402,12 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
     let other_session = service
         .agent_session_manager
         .take_session(&other_session_key);
-    let other_event = event_for("other-active", "other-owner", "queue other active message");
+    let other_event = event_for(
+        "other-active",
+        "other-owner",
+        "queue other active message",
+        Vec::new(),
+    );
     handle_concurrent_event_during_chat(
         &other_event,
         &provider,
@@ -2117,7 +2431,12 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
     );
     service.agent_session_manager.return_session(other_session);
 
-    let inactive_event = event_for("inactive", "inactive-owner", "queue inactive message");
+    let inactive_event = event_for(
+        "inactive",
+        "inactive-owner",
+        "queue inactive message",
+        Vec::new(),
+    );
     let inactive_session_key = build_session_key(&provider.id, Some("inactive-owner"));
     handle_concurrent_event_during_chat(
         &inactive_event,
@@ -2143,6 +2462,102 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
             .len(),
         1
     );
+    let file_only_event = event_for(
+        "inactive-file",
+        "inactive-file-owner",
+        " ",
+        vec![crate::im_gateway::types::ImFileAttachment {
+            file_key: "inline-file".to_string(),
+            name: Some("inline.md".to_string()),
+            mime_type: Some("text/markdown".to_string()),
+            size_bytes: Some(8),
+            data_base64: Some("IyBSZXBvcnQ=".to_string()),
+            download_url: None,
+        }],
+    );
+    let file_session_key = build_session_key(&provider.id, Some("inactive-file-owner"));
+    handle_concurrent_event_during_chat(
+        &file_only_event,
+        &provider,
+        "some-other-active-session",
+        &service.queue_manager,
+        &client,
+        &service.message_log_store,
+        &service.agent_session_manager,
+        &service.progress_registry,
+        &service.agent_config_store,
+        &service.provider_store,
+        &service.event_store,
+        &service.group_context_store,
+        &service.external_cli_config_store,
+        BusyMessageDefaultMode::Queue,
+    )
+    .await;
+    let file_queue = service.queue_manager.queue_status(&file_session_key);
+    assert_eq!(file_queue.len(), 1);
+    assert_eq!(file_queue[0].message, "[附件消息: 1 个]");
+    assert_eq!(file_queue[0].files.len(), 1);
+    assert_eq!(file_queue[0].files[0].mime_type, "text/markdown");
+
+    let mut group_file_event = event_for(
+        "inactive-group-file",
+        "group-file-owner",
+        "@_user_1 inspect attachment",
+        vec![crate::im_gateway::types::ImFileAttachment {
+            file_key: "group-inline-file".to_string(),
+            name: Some("group.md".to_string()),
+            mime_type: Some("text/markdown".to_string()),
+            size_bytes: Some(8),
+            data_base64: Some("IyBHcm91cA==".to_string()),
+            download_url: None,
+        }],
+    );
+    group_file_event.source.chat_id = Some("chat-group-file".to_string());
+    group_file_event.source.chat_type = Some("group".to_string());
+    let group_message = group_file_event.message.as_mut().unwrap();
+    group_message.raw_type = Some("file".to_string());
+    group_message.mentions = vec![crate::im_gateway::types::ImMention {
+        key: "@_user_1".to_string(),
+        open_id: Some("ou_bot".to_string()),
+        name: Some("Bifrost".to_string()),
+        tenant_key: None,
+        is_bot: true,
+    }];
+    group_message.raw_content = Some(serde_json::json!({
+        "text": "@_user_1 inspect attachment",
+        "_bifrost_debug_chat_name": "Engineering Files"
+    }));
+    let group_file_session_key =
+        crate::im_gateway::group_context::build_group_session_key(&provider.id, "chat-group-file");
+    handle_concurrent_event_during_chat(
+        &group_file_event,
+        &provider,
+        "some-other-active-session",
+        &service.queue_manager,
+        &client,
+        &service.message_log_store,
+        &service.agent_session_manager,
+        &service.progress_registry,
+        &service.agent_config_store,
+        &service.provider_store,
+        &service.event_store,
+        &service.group_context_store,
+        &service.external_cli_config_store,
+        BusyMessageDefaultMode::Queue,
+    )
+    .await;
+    let group_file_queue = service.queue_manager.queue_status(&group_file_session_key);
+    assert_eq!(group_file_queue.len(), 1);
+    assert_eq!(group_file_queue[0].files.len(), 1);
+    assert_eq!(
+        group_file_queue[0].files[0].name.as_deref(),
+        Some("group.md")
+    );
+    let group_turn_id = group_file_queue[0]
+        .context
+        .as_ref()
+        .and_then(|context| context.group_turn_id.as_deref());
+    assert!(group_turn_id.is_some());
 
     let mut restricted_provider = provider.clone();
     restricted_provider.owner_open_id = Some("owner-open-id".to_string());
@@ -2150,7 +2565,7 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
         .provider_store
         .update(restricted_provider.clone())
         .expect("restrict provider owner");
-    let unauthorized = event_for("unauthorized", "not-owner", "ignored");
+    let unauthorized = event_for("unauthorized", "not-owner", "ignored", Vec::new());
     handle_concurrent_event_during_chat(
         &unauthorized,
         &restricted_provider,

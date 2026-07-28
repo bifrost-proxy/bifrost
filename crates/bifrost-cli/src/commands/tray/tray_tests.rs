@@ -37,8 +37,33 @@
             socks5_port: Some(1080),
             host: Some("127.0.0.1".to_string()),
             started_at_ms: None,
+            start_mode: runtime::RuntimeStartMode::Unknown,
             binary_path: None,
         }
+    }
+
+    #[test]
+    fn desktop_shutdown_request_accepts_only_desktop_shell_executables() {
+        assert!(is_bifrost_desktop_executable(Path::new(
+            "/Applications/Bifrost.app/Contents/MacOS/bifrost-desktop"
+        )));
+        assert!(is_bifrost_desktop_executable(Path::new(
+            "bifrost-desktop.exe"
+        )));
+        assert!(!is_bifrost_desktop_executable(Path::new(
+            "/tmp/bifrost"
+        )));
+        assert!(!is_bifrost_desktop_executable(Path::new(
+            "/tmp/not-bifrost-desktop"
+        )));
+    }
+
+    #[test]
+    fn desktop_shutdown_request_rejects_reused_service_pid() {
+        assert_eq!(
+            desktop_owner_executable(std::process::id(), Some(1)),
+            None
+        );
     }
 
     #[test]
@@ -727,6 +752,23 @@
                 "--skip-cert-check",
             ]
         );
+    }
+
+    #[test]
+    fn test_tray_start_service_clears_inherited_external_worker_marker() {
+        let mut command = Command::new("bifrost");
+        command.env(EXTERNAL_CLI_WORKER_ENV, "leaked-worker-role");
+
+        configure_service_start_environment(&mut command, ".bifrost-e2e-tray");
+
+        let env = command.get_envs().collect::<Vec<_>>();
+        assert!(env.iter().any(|(key, value)| {
+            *key == std::ffi::OsStr::new(EXTERNAL_CLI_WORKER_ENV) && value.is_none()
+        }));
+        assert!(env.iter().any(|(key, value)| {
+            *key == std::ffi::OsStr::new("BIFROST_DATA_DIR")
+                && value.is_some_and(|value| value == std::ffi::OsStr::new(".bifrost-e2e-tray"))
+        }));
     }
 
     #[test]
@@ -1621,6 +1663,7 @@
             socks5_port: None,
             host: Some("127.0.0.1".to_string()),
             started_at_ms: None,
+            start_mode: runtime::RuntimeStartMode::Unknown,
             binary_path: None,
         };
         let menu = menu::build_menu(

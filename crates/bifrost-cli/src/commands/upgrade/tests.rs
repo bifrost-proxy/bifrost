@@ -541,6 +541,7 @@ fn script_installs_use_the_target_aware_atomic_upgrade_path() {
 
 mod review_comments;
 mod spawn_retry;
+mod upgrade_recovery;
 
 #[test]
 fn test_glibc_2_38_requires_musl_for_upgrade() {
@@ -1376,7 +1377,7 @@ fn restart_and_download_helpers_cover_terminal_paths() {
         connect_timeout_secs: 1,
         download_timeout_secs: 1,
         mirror_probe_timeout_secs: 1,
-        download_tries: 1,
+        download_tries: 2,
     };
     assert!(!probe_github_url("http://127.0.0.1:9/not-running", tuning));
     assert!(download_file_with_progress(

@@ -217,9 +217,7 @@ fn app_server_command(spec: &CommandSpec) -> Command {
     if let Some(work_dir) = spec.work_dir.as_ref() {
         command.current_dir(work_dir);
     }
-    for (key, value) in &spec.env {
-        command.env(key, value);
-    }
+    apply_command_environment(&mut command, &spec.env);
     command
 }
 
@@ -1464,6 +1462,7 @@ mod tests {
         ExternalCliRunRequest {
             message: "hello".to_string(),
             images: Vec::new(),
+            files: Vec::new(),
             operation: "ask".to_string(),
             params: serde_json::json!({}),
             provider_id: None,

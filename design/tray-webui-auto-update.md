@@ -28,6 +28,9 @@ Bifrost 早期升级只有一条路径:用户在终端里手动跑 `bifrost upgr
 - Admin 端 `POST /api/system/upgrade` 只 spawn 子进程,不在自身进程里执行升级(避免自杀式重启)。
 - Admin 发起 CLI 更新时把当前 Admin 进程 PID 与真实监听端口作为隐藏 hint 交给 `self-update`;即使 `runtime.json` / `bifrost.pid` 丢失,updater 也必须在校验“PID 存活且确实持有该端口”后恢复 marker 并重启旧 daemon。
 - CLI 升级联动桌面 App 时,嵌套 `app upgrade --source cli-upgrade` 不得写共享终态;`completed` 只能由最外层 CLI 更新在 daemon 重启完成后发布。
+- WebView 重载或重新打开后必须先读取跨进程 progress；发现 active phase 时自动恢复进度弹窗和轮询，不能把内存状态丢失误认为升级结束。
+- 启动升级请求与既有任务竞争并收到 409 时，Web UI 必须读取并接管 active progress；只有没有 active 任务时才展示真正的启动失败。
+- 下载源探测、连接和 fallback 尚未收到首批字节时，也必须发布 `Downloading` 阶段的可读消息，避免界面长期停在笼统的 `Checking 0%`。
 
 ### 必须不破坏
 
@@ -77,6 +80,8 @@ Idle → Checking → Downloading → Installing → Restarting → Completed / 
 | CLI-owned core 停止后新 daemon 启动失败 | 进度仍 completed 或端口被双重占用 | 精确 PID/port 所有权校验、等待端口释放、启动失败写 `Failed` |
 | App handoff 无法拉起新 App/新 core | WebView 普通 reload 掩盖失败 | Tauri/helper 写持久化 `Failed`；只有新 managed core ready 且 deferred App 版本等于 pinned target 才写最终 `Completed` |
 | Desktop shell 复用 CLI-owned core | CLI 的 `Restarting` 被误当作 App handoff，两个 owner 相互抢重启 | Web UI 只对 `source=desktop` 的 `Restarting` 调用 Tauri handoff；`source=admin` 保持 CLI restart 轮询 |
+| CLI-owned core 重启导致 WebView reload，或用户在原任务仍 active 时再次点击升级 | 进度弹窗消失；第二次 POST 返回 409 后被误报为整个升级失败 | Web 初始化先读取 progress 并恢复 active 状态；POST 失败后再次读取 progress，active 时接管原任务并继续轮询，不显示 Retry |
+| 首选镜像连接超时且尚未收到响应体 | 弹窗长期显示 `Checking for updates` 和 0%，用户误以为进程卡死 | 每次尝试镜像、同源重试和 fallback 前写 `Downloading` 消息；首批字节到达后继续发布真实 percent/speed |
 | macOS 同时安装系统级与用户级 App | Admin 选择第一个候选目录，更新非当前运行副本 | desktop Admin 不传 `--app-dir`；bundled core 从自身 executable 向上解析当前 `Bifrost.app` |
 | Windows App/sidecar 仍运行时执行 MSI/EXE | 安装器因已加载文件锁失败，或清理用户传入的本地包 | App updater 写含 package ownership 的 pending-install marker；Tauri handoff 等 App/core 退出后再有界运行安装器，仅删除 updater 下载包并拉起新 App |
 | Windows deferred installer 返回成功但装入错误 App/core | 新 App 写 `Failed` 后错误版本留在磁盘，下一次启动仍失败 | helper 安装前在目标目录外保留完整快照，等待新 App 编译版本与 managed core 共同确认；不匹配/启动失败时让新 App 正常退出，恢复旧目录并重启旧 App，成功后才清理 guard/快照/自有安装包 |
@@ -102,7 +107,7 @@ GET version-check 按 Web UI query 选择 CLI 或 App bundle 作为 primary，�
 - macOS desktop-owned core 的 App primary 版本必须先从当前 sidecar executable 向上解析实际 `Bifrost.app` bundle，再回退 `/Applications` 与 `~/Applications` 候选。系统级与用户级副本并存时，不能用第一个全局候选掩盖正在运行的旧 App；`BIFROST_APP_INSTALL_DIR` 显式测试/管理覆盖仍保持最高优先级。
 - **硬边界**:App-owned 编排不传 restart hint，CLI updater 读取到 `RuntimeStartMode::Desktop` 时直接跳过 proxy restart。CLI-owned Web UI 编排必须携带并校验当前 PID/port；验证通过的 foreground runtime 会被规范化为 restartable daemon，验证失败则终止升级。
 - **共同结果**:两种入口都以同一个 pinned target 同时升级 CLI + 已安装 App；直接 `app upgrade --version` 也以 skip-App/skip-restart 行为把该 target 传给 CLI 引擎，不能递归编排或重新观察 `latest` 后发生版本分叉。所有顶层 CLI/App updater 共用 `upgrade.lock`，只有通过 token、真实父 PID、owner sidecar 与 live lock 校验的内部 companion 跳过重复加锁。重启所有权互斥：CLI-owned 由 CLI updater 重启 daemon，App-owned 由 Tauri handoff 重启 App/core；CLI-owned + WebView 混合模式中，CLI 重启 core 时必须保留 companion 已发布的 `Restarting/source=desktop`，避免抹掉 Tauri handoff 触发条件。
-- **发起界面与运行时 owner 解耦**:Admin 不把 caller-controlled `channel=desktop` 当作 WebView 证明；桌面进程通过 Tauri command 在共享数据目录签发 UUID origin token，Web UI 放入专用 header，Admin 原子消费且校验 30 秒有效期后才向 CLI-owned orchestrator 传递私有 origin marker。不能仅凭 `RuntimeStartMode::Desktop` 推断 WebView 正在等待 handoff。已安装桌面 shell 正在运行且请求携带真实、未消费的 WebView token 时，CLI companion 才发布 `source=desktop/Restarting` 交给 Tauri；CLI-owned core 仍由 CLI updater 重启，Tauri marker 的 `old_core_pid` 不包含未托管的 core child，但会记录观察到的外部 PID 与 pinned target。新 App 只等待并复用 PID 已变化且版本命中 target 的 CLI core；等待超时则失败，禁止 fallback 启动第二个 bundled core。终端或普通浏览器发起时不允许留下等待 WebView 的 pending install：macOS/Windows companion 先把 single-instance 内部 shutdown 参数精确发送给目标桌面壳 executable，不能把它误发给同一 bundle 内的普通 CLI core；不支持该参数的旧 App 回退到平台退出，macOS 必须用完整 bundle 路径而不是可能命中其它构建副本的应用名。Git 历史确认 `v0.0.17-beta` 起的 144 个 Desktop 版本都处理系统 Quit 并清理 managed core，`v0.0.157` 起额外支持内部参数。只有确认目标 App bundle 内全部 executable 已释放后才执行 caller-managed 安装并重新拉起；退出超时则拒绝覆盖，不能冒险替换锁定文件。多 App 副本并存时 companion 优先选择实际正在运行的候选。
+- **发起界面与运行时 owner 解耦**:Admin 不把 caller-controlled `channel=desktop` 当作 WebView 证明；桌面进程通过 Tauri command 在共享数据目录签发 UUID origin token，Web UI 放入专用 header，Admin 原子消费且校验 30 秒有效期后才向 CLI-owned orchestrator 传递私有 origin marker。不能仅凭 `RuntimeStartMode::Desktop` 推断 WebView 正在等待 handoff。已安装桌面 shell 正在运行且请求携带真实、未消费的 WebView token 时，CLI companion 才发布 `source=desktop/Restarting` 交给 Tauri；CLI-owned core 仍由 CLI updater 重启，Tauri marker 的 `old_core_pid` 不包含未托管的 core child，但会记录观察到的外部 PID 与 pinned target。Desktop shutdown 对该 marker 保留外部 core，helper 只等待旧 App 退出，不等待外部 PID/端口释放。新 App 以 pinned target version 为成功权威，允许复用 CLI updater 已经完成重启的同 PID target core；只有 legacy marker 缺 target 时才继续要求 PID 变化。等待 target core 超时后，端口空闲则启动 bundled core；端口由同 data dir `runtime.json` 精确匹配的旧版本 Bifrost core 占用时先安全停止再接管；无关端口占用仍 fail-closed。旧 Desktop 已留下同类 Failed progress 时，新版本首次启动零等待重试并在成功后清 marker；健康但错误版本的 core 不能绕过该恢复门禁。终端或普通浏览器发起时不允许留下等待 WebView 的 pending install：macOS/Windows companion 先把 single-instance 内部 shutdown 参数精确发送给目标桌面壳 executable，不能把它误发给同一 bundle 内的普通 CLI core；不支持该参数的旧 App 回退到平台退出，macOS 必须用完整 bundle 路径而不是可能命中其它构建副本的应用名。Git 历史确认 `v0.0.17-beta` 起的 144 个 Desktop 版本都处理系统 Quit 并清理 managed core，`v0.0.157` 起额外支持内部参数。只有确认目标 App bundle 内全部 executable 已释放后才执行 caller-managed 安装并重新拉起；退出超时则拒绝覆盖，不能冒险替换锁定文件。多 App 副本并存时 companion 优先选择实际正在运行的候选。
 - progress 写权限跟随 `upgrade.lock` owner：任何 contended loser 都只记录诊断并退出，不能写共享 `Failed` 覆盖 owner 的 Checking/Downloading/Installing/Restarting；pending desktop handoff 同样由 marker owner 保留状态。只有成功持锁的 updater 或无法打开锁文件的独立启动失败路径可以发布自己的终态。
 
 ### “立即更新” vs “稍后提示”
@@ -148,7 +153,7 @@ pub const DEFAULT_STALE_SECS: i64;
 
 ### 升级引擎旁路进度上报(bifrost-cli)
 
-升级引擎按职责拆分，所有文件保持在 1500 行以内：`upgrade.rs` 负责主编排与安装，`upgrade/download.rs` 负责镜像/下载/Homebrew，`upgrade/restart.rs` 负责 runtime marker、deferred replacement 与重启，`upgrade/tests.rs` 承载回归测试。
+升级引擎按职责拆分，所有文件保持在 1500 行以内：`upgrade.rs` 负责主编排与安装，`upgrade/desktop_companion.rs` 负责 App companion progress 与 CLI/App 收尾聚合，`upgrade/download.rs` 负责镜像/下载/Homebrew，`upgrade/restart.rs` 负责 runtime marker、deferred replacement 与重启，`upgrade/tests/upgrade_recovery.rs` 承载本次恢复回归。
 
 - `download_file_once_with_progress` 的渲染节流点(250ms)直接调用 `super::upgrade_background::report_download(downloaded, total, started)`。
 - 安装/重启阶段调用 `report_installing()` / `report_restarting()`。
@@ -216,6 +221,8 @@ SelfUpdate {
 - `VersionModal`:
   - 未升级:footer 右下角渲染 `稍后提示`(次)+ `立即更新`(主)。
   - 升级中:antd `Progress` 展示 `percent` + 步骤态,禁止手动关闭。
+  - 页面初始化或 WebView reload 后读取 progress；active 时主动打开同一个进度弹窗并继续轮询。
+  - `POST /upgrade` 异常后先读取 progress；如果已有 active transaction，恢复该任务而不是进入 `Failed`。
   - 轮询每 ~1s;`Restarting` 后监听 `pushService.onConnectionChange` 的 disconnected→reconnected;或轮询直接读到 `Completed`。
   - 检测到 reconnected 或 Completed → `window.location.reload()` 一次,`sessionStorage['bifrost-upgrade-reload-pending']` 防止刷新风暴。
 - WebView 在 active 状态读到 `Idle`(其它端已经 clear terminal progress)时,不能卡在 Working:若观察到连接断开→reload;否则强制刷新 version-check 恢复弹窗状态。
@@ -283,6 +290,10 @@ SelfUpdate {
 - `e2e-tests/tests/test_upgrade_cli.sh`:在临时 data dir 拉起 daemon,删除 `runtime.json` / `bifrost.pid` 但保持监听存活,再用 Admin PID/port hint 执行 already-latest `self-update`;断言 marker 被恢复、PID 变化、Admin API 恢复、terminal progress 为 `completed`。
 - `test_cli_tray_startup_ci.sh`:预置新鲜 `version_cache.json`,压首次 check 延迟到 0,断言 tray 启动后从 `tray.log` 读到“缓存新鲜跳过联网”。
 - Web:`web/tests/ui` 补 VersionModal 双按钮 + 进度态 + 双主题快照。
+- Web 状态恢复：单测覆盖启动请求 409 后接管 active progress、没有 active progress 时保留真实错误、页面初始化恢复 active progress；Playwright 覆盖接管后 reload 仍显示同一下载进度且不会出现 `Update Failed`。
+- 慢速桌面包：desktop handoff 子进程持续写入匹配 target/source 的 active progress，或 caller-managed CLI companion 持续产生尚未转发的新 stdout/stderr 时，父升级器刷新 10 分钟“无进展”超时；只有连续 10 分钟没有新进度或新输出才终止子进程。caller-managed 模式仍不取得父事务 terminal progress 所有权。
+- CLI/App 分步失败：首次安装后与“磁盘 CLI 已到 target、运行 core 仍旧”的 already-latest 恢复分支中，桌面 App 更新失败都仍保留整体 Failed 结果，但不能阻止 standalone CLI core 执行 restart；若 App 与 restart 都失败，错误必须同时保留。
+- 后台退出语义：`self-update` 引擎失败除了写入 Failed progress，还必须记录 error 日志并返回非零退出码，Admin 的子进程退出日志不得把失败伪装成 `exit status: 0`。
 
 ### 真实场景测试 human_tests
 
@@ -320,6 +331,9 @@ SelfUpdate {
 - **嵌套 App 更新提前宣告成功**:CLI 联动 App 的子流程不拥有共享 terminal progress;外层 CLI 完成二进制替换、App 必须更新与 daemon 重启后才写 `completed`。
 - **App 与 CLI 相互递归/争抢重启**:App-owned 编排给独立 CLI 注入 skip-app/skip-restart,CLI updater同时拒绝接管 Desktop runtime；desktop-owned core 拒绝普通浏览器 channel，三层边界共同阻断双重安装和无 handoff 安装。
 - **同时点击或 Tray/Web UI 并发升级**:Admin 请求锁只解决同一服务内的并发,`upgrade.lock` 再覆盖不同入口/进程；竞争失败方不安装、不停止服务，并立即把自己预写的 Checking 收敛为 terminal failure。
+- **慢速桌面包超过固定父进程时限**:父进程不能以总耗时判断卡死；desktop handoff 子进程使用匹配 progress，caller-managed CLI companion 使用尚未转发的新 stdout/stderr 作为活动信号，活动时刷新 stall deadline；父 heartbeat 不覆盖 desktop child 的 phase/source，caller-managed child 仍不发布 terminal progress。
+- **App 失败阻断已更新 CLI 的 runtime 收敛**:`finish_installed_upgrade` 与 already-latest 恢复分支都必须分别执行 App companion 与 core restart，再聚合两步结果；不能用 App 步骤的 `?` 提前跳过 restart。
+- **后台失败被 exit 0 与托盘清理掩盖**:`self-update` 在写入 Failed progress 后同步记录错误并向命令入口返回 `Err`；临时 progress 仍供 UI 消费，但不再是唯一失败证据。
 - **Windows progress/marker 并发 replace/read 返回 AccessDenied**:`tempfile::persist` 的 `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`、PowerShell `Move-Item -Force` 以及同时打开最终文件的 reader，在 Rust writer、replacement helper 和新 desktop core 的交接窗口可能返回 Win32 5/32/33；writer 保留唯一 source temp，Rust/WebUI reader 与两个 helper 的 JSON reader 同样仅对 access/sharing/lock violation 做 100 次有界退避重试，永久权限/路径错误立即失败，`finally` 继续清理未发布 temp。缺失/损坏 JSON 仍按原契约降级为 `Idle`，瞬态共享冲突不再伪装成 `Idle`。
 - **latest 在升级中变化**:Admin 选定的 target 是本次事务的一致性边界,CLI 和 App 都必须使用该 target,不得在子流程重新解析新的 latest。
 - **安装渠道绕过 target**:`~/.bifrost/bin` 的 script 安装改走内置 target-aware 原子替换,不再重新执行永远跟随最新版本的在线脚本；Homebrew 命令有心跳/超时,重启与核验使用稳定的 `bin/bifrost` launcher 而不是可能被 reinstall 删除的 Cellar 版本路径。所有非 deferred CLI 安装完成后都执行 `--version == target` 门禁。
@@ -327,6 +341,7 @@ SelfUpdate {
 - **长时间安装被误判 stale**:等待独立 CLI 或 App 安装时持续刷新 Installing 心跳,并保留 600 秒硬超时；超时后杀掉子进程并发布失败,状态不会从 stale failed 反跳 completed。
 - **App 覆盖到一半失败**:macOS bundle 先复制到同目录 staging、核验目标版本,再用 rename 切换；backup 使用跨 PID 稳定路径，旧 App 在 staging 校验通过前保持不动，切换失败或下一进程重试时都可恢复。
 - **App 已安装但 Tauri handoff 启动失败**:native command 在 marker/helper 任一步失败时先把共享 progress 从预完成状态覆写为 `Failed` 并清理无效 marker；Web UI 同时显示真实错误并允许重试，不得 fallback 到普通 reload。
+- **旧 Desktop 已留下 CLI-owned handoff 失败状态**:新 App 读取 fresh relaunch marker 和同类 `Failed` progress 后不得再重复等待 30 秒；同 target marker 立即重试，旧 marker 没有 target 时也按兼容恢复处理。若目标版本 core 已健康则完成并清 marker；端口空闲则启动 bundled core；同 data dir 的旧版本 core 可安全停止后接管；无关 listener 保持 fail-closed。Desktop shutdown 和 relaunch helper 都不得再次停止或等待 CLI updater 已经拉起的 external core。
 - **App 模块失控增长**:`app.rs` 只保留升级编排，平台安装/原子替换位于 `app/installer.rs`，测试位于 `app/tests.rs`；三个文件都受 1500 行门禁约束。
 - **skill 安装失败**:提示手动重试即可,不回滚新二进制,避免让升级变成“成功又不成功”的中间态。
 - **Windows / 无头 CI 上的原生 tray**:tray helper 无法长驻,继续保留“log-only 降级模式”,不把 tray 缺失误判为升级失败。

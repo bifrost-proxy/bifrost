@@ -26,6 +26,7 @@ ChatGPT Web 的正确落点是新增内置 adapter `chatgpt_web`：Runner 只是
 - headless 配置遇到登录页 / Cloudflare / 真人验证时，adapter 必须临时切换到 headed 等待用户处理并刷新登录态；处理完成后自动关闭 headed browser，让当前重试与后续运行都恢复 headless。
 - 登录弹窗、cookie/header 提取、登录状态验证都属于 `chatgpt_web` adapter 能力，不能依赖 Agent 操作浏览器或外部脚本/skill。
 - 与 runner/adapter 抽象对齐：Chat Gateway、IM Provider、IM Route、Schedule、WebUI 都选择 runner；runner 再通过 `adapter = "chatgpt_web"` 进入 ChatGPT Web 执行实现。
+- 新建会话优先复用最近使用或浏览器中已存在的 ChatGPT tab，只在确实没有可用 target 时创建 fallback tab；复用时切换到规范化后的 ChatGPT 首页 URL，不关闭/重开 tab，不刷新已在首页的页面，也不向地址栏附加 `bifrost_new_chat` 或其他 Bifrost 私有 query 参数。
 
 ### 必须不破坏
 
@@ -216,7 +217,7 @@ WebUI 选择 `chatgpt_web` 后：隐藏 executable/args/env/sandbox/approval pol
 
 ### ExecutionBrowserController
 
-执行阶段由 `ExecutionBrowserController` 负责。真实 IM 稳定性验证期默认 headed，便于观察页面输入与发送；稳定后可切回 headless。主流程：headed 启动 Edge/Chromium 与 runner profile；等待可见 composer（非隐藏 textarea）；新会话通过发送无 `conversation_id` 的首条消息创建；续接会话打开 `/c/{conversation_id}`，等待可见 composer 后插入文本并点击发送；捕获 `/backend-api/f/conversation` SSE handoff 获取 `conversation_id` 与 `turn_exchange_id`；轮询 `GET /backend-api/conversation/{conversation_id}` 直到 assistant 状态 `finished_successfully`；每次 native read 使用有界超时，短暂失败按 heartbeat-visible 状态计；长时间不可读按 grace window 收敛为失败，不永久占住 IM 队列。
+执行阶段由 `ExecutionBrowserController` 负责。真实 IM 稳定性验证期默认 headed，便于观察页面输入与发送；稳定后可切回 headless。主流程：headed 启动或复用 Edge/Chromium 与 runner profile；等待可见 composer（非隐藏 textarea）；新会话先从进程内 `ConversationTab` 池取出最近使用的 live target，池为空时从浏览器 `/json/list` attach 已存在的 ChatGPT target，只在两者都不存在时创建 fallback tab。复用 target 若已在首页则直接使用，若位于 `/c/{conversation_id}` 才导航到规范化后的 `base_url + "/"`，不关闭/重开 tab、不做无意义 refresh、不附加 Bifrost 私有 query 参数；随后通过发送无 `conversation_id` 的首条消息创建新对话，并把同一 target 重新注册到新 conversation id。续接会话打开或复用 `/c/{conversation_id}`，等待可见 composer 后插入文本并点击发送；捕获 `/backend-api/f/conversation` SSE handoff 获取 `conversation_id` 与 `turn_exchange_id`；轮询 `GET /backend-api/conversation/{conversation_id}` 直到 assistant 状态 `finished_successfully`；每次 native read 使用有界超时，短暂失败按 heartbeat-visible 状态计；长时间不可读按 grace window 收敛为失败，不永久占住 IM 队列。
 
 心跳与恢复：handoff 等待期间检查浏览器进程、CDP WebSocket、页面 `Runtime.evaluate` probe；任一失败快速返回 `browser_unavailable`。短 SSE handoff 中断不能直接判失败：必须先从页面 URL、session 映射或显式 `conversationId` 恢复，再进入长轮询。
 
@@ -445,6 +446,10 @@ Mock ChatGPT Web server 覆盖 `accounts/check`（logged in / guest / challenge�
 - `send_image_uploads_original_bytes_to_cdn_and_sends_image_item`
 - `chatgpt_web_startup_auth_runners_include_all_web_runners`
 - `chatgpt_web_startup_auth_dry_run_reports_login_prompt` + `test_chatgpt_web_startup_auth_preflight.sh`
+- `new_conversation_url_uses_plain_homepage_without_query_parameters`
+- `new_conversation_url_normalizes_configured_trailing_slashes`
+- `fresh_runs_reuse_existing_chatgpt_tab_without_closing_or_reopening`
+- `fresh_conversation_takes_most_recent_tab_without_closing_it`
 
 ### human_tests
 
@@ -467,6 +472,7 @@ Mock ChatGPT Web server 覆盖 `accounts/check`（logged in / guest / challenge�
 - TC-CWA-17 生成图片原图发送：`image_gen` tool 结果优先解析 `image_asset_pointer: sediment://file_...` 走 `/backend-api/files/{fileId}/download`；缺失字段时降级 `estuary/content`。图片下载缓存后按 IM provider 独立协议发送（Weixin `image_item` 需先加密上传 CDN；Feishu `image` 需 image_key）。
 - TC-CWA-18 失败现场诊断：本轮 `runs/<run_id>/` 必含 `failure_diagnostics.json`；已知 `conversation_id` 必含 `conversation_response.json`；尽力 `page_dom.{html,json}`。
 - TC-CWA-25 服务启动登录态预检：Runners 含 `adapter=chatgpt_web` 时，`bifrost start` 前台与 daemon 都后台执行一次强登录态检查；缺失/失效时自动开登录浏览器。
+- TC-CWA-35 新建会话复用同一个 ChatGPT tab 并切换到纯首页 URL，不关闭/重开 tab，不携带 `bifrost_new_chat` 等 Bifrost 私有 query 参数。
 
 ### 覆盖率与项目校验
 

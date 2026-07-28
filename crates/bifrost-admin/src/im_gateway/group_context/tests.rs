@@ -26,6 +26,7 @@ fn group_event(
             text: text.to_string(),
             mentions,
             images: Vec::new(),
+            files: Vec::new(),
             reply_to: None,
             raw_type: Some("text".to_string()),
             raw_content: Some(serde_json::json!({"text": text})),
@@ -921,4 +922,27 @@ fn group_store_rejects_non_group_and_missing_message_events() {
     let mut event_id_fallback = group_event("fallback", "c1", "u1", "hi", Vec::new(), 3);
     event_id_fallback.source.message_id = None;
     assert_eq!(store.record_event(&event_id_fallback, "event").unwrap(), 1);
+}
+
+#[test]
+fn group_binding_can_be_resolved_from_canonical_session_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ImGroupContextStore::new(temp.path());
+    let event = group_event("binding", "oc_bound", "u1", "hello", Vec::new(), 1);
+    store.record_event(&event, "event").unwrap();
+    assert!(store
+        .set_chat_name("feishu-main", "oc_bound", "Bound Team", 2)
+        .unwrap());
+
+    let binding = store
+        .binding_by_session(&build_group_session_key("feishu-main", "oc_bound"))
+        .unwrap()
+        .expect("binding");
+    assert_eq!(binding.provider_id, "feishu-main");
+    assert_eq!(binding.chat_id, "oc_bound");
+    assert_eq!(binding.chat_name.as_deref(), Some("Bound Team"));
+    assert!(store
+        .binding_by_session("admin-chat-unbound")
+        .unwrap()
+        .is_none());
 }

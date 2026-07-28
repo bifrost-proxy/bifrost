@@ -11,6 +11,7 @@ use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use crate::im_gateway::external_cli::ExternalCliFileInput;
 use bifrost_agent::session::{GuideChannel, GuideMessageChannel};
 
 /// IM reply and group-turn state that must follow a queued message.
@@ -33,6 +34,8 @@ pub struct QueueItem {
     pub message: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<bifrost_agent::ChatImageInput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<ExternalCliFileInput>,
     #[serde(skip)]
     pub context: Option<QueueItemContext>,
 }
@@ -197,7 +200,7 @@ impl SessionQueueManager {
         session_key: &str,
         msg: String,
     ) -> Result<Vec<QueueItem>, &'static str> {
-        self.push_queue_with_images(session_key, msg, Vec::new())
+        self.push_queue_with_attachments(session_key, msg, Vec::new(), Vec::new())
     }
 
     /// Push a message and its image attachments into the queue.
@@ -208,15 +211,39 @@ impl SessionQueueManager {
         msg: String,
         images: Vec<bifrost_agent::ChatImageInput>,
     ) -> Result<Vec<QueueItem>, &'static str> {
-        self.push_queue_with_images_and_context(session_key, msg, images, None)
+        self.push_queue_with_attachments(session_key, msg, images, Vec::new())
     }
 
-    /// Push a message, attachments, and the originating IM reply context.
+    /// Push a message and its attachments into the queue.
+    /// Returns the current queue snapshot. Returns `Err` if the queue is full.
+    pub fn push_queue_with_attachments(
+        &self,
+        session_key: &str,
+        msg: String,
+        images: Vec<bifrost_agent::ChatImageInput>,
+        files: Vec<ExternalCliFileInput>,
+    ) -> Result<Vec<QueueItem>, &'static str> {
+        self.push_queue_with_attachments_and_context(session_key, msg, images, files, None)
+    }
+
+    /// Push a message, image attachments, and the originating IM reply context.
     pub fn push_queue_with_images_and_context(
         &self,
         session_key: &str,
         msg: String,
         images: Vec<bifrost_agent::ChatImageInput>,
+        context: Option<QueueItemContext>,
+    ) -> Result<Vec<QueueItem>, &'static str> {
+        self.push_queue_with_attachments_and_context(session_key, msg, images, Vec::new(), context)
+    }
+
+    /// Push a message, attachments, and the originating IM reply context.
+    pub fn push_queue_with_attachments_and_context(
+        &self,
+        session_key: &str,
+        msg: String,
+        images: Vec<bifrost_agent::ChatImageInput>,
+        files: Vec<ExternalCliFileInput>,
         context: Option<QueueItemContext>,
     ) -> Result<Vec<QueueItem>, &'static str> {
         let mut entry = self.queues.entry(session_key.to_string()).or_default();
@@ -232,6 +259,7 @@ impl SessionQueueManager {
             seq,
             message: msg,
             images,
+            files,
             context,
         });
 
@@ -420,6 +448,30 @@ mod tests {
         assert_eq!(item.images.len(), 1);
         assert_eq!(item.images[0].mime_type, "image/png");
         assert_eq!(item.images[0].data, "aGVsbG8=");
+    }
+
+    #[test]
+    fn test_queue_preserves_file_attachments() {
+        let mgr = SessionQueueManager::new();
+        mgr.push_queue_with_attachments(
+            "s1",
+            "read this file".into(),
+            Vec::new(),
+            vec![ExternalCliFileInput {
+                mime_type: "text/markdown".to_string(),
+                data: "IyBSZXBvcnQ=".to_string(),
+                name: Some("report.md".to_string()),
+            }],
+        )
+        .unwrap();
+
+        let item = mgr.pop_queue_item("s1").expect("queued item");
+        assert_eq!(item.message, "read this file");
+        assert!(item.images.is_empty());
+        assert_eq!(item.files.len(), 1);
+        assert_eq!(item.files[0].mime_type, "text/markdown");
+        assert_eq!(item.files[0].data, "IyBSZXBvcnQ=");
+        assert_eq!(item.files[0].name.as_deref(), Some("report.md"));
     }
 
     #[test]

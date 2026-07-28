@@ -594,12 +594,11 @@ async fn send_with_browser_once(
     let mut browser = BrowserSession::get_or_launch(config, headless).await?;
     info!("chatgpt_web send: browser ready");
 
-    // Each concurrent run gets its own isolated tab.  This allows multiple
-    // channels (Feishu, WeChat, CLI, …) to operate the same browser in
-    // parallel without CDP / page-state collisions, while still sharing the
-    // same user-data-dir (login cookies, profile, etc.). A fresh conversation
-    // must not close older tabs: their server-side research may still be
-    // running during a brief terminal-looking planning gap.
+    // Existing conversations keep their long-lived pooled tab. Fresh
+    // conversations preferentially repurpose the most recently used ChatGPT
+    // tab and navigate it to the homepage. This avoids closing/reopening the
+    // browser target, which can trigger repeated human-verification pages.
+    // A new tab is only a last resort when no ChatGPT target exists.
     let navigate_url = if let Some(cid) = conversation_id {
         format!("{}/c/{}", config.chatgpt.base_url, cid)
     } else {
@@ -665,6 +664,9 @@ async fn send_with_browser_once(
             }
         }
 
+        let mut fresh_tab_state = (&mut target_id, &mut client, &mut reused_from_pool);
+        reuse_fresh_tab(&browser, config, conversation_id, &mut fresh_tab_state).await?;
+
         if client.is_none() {
             // Create a brand-new tab and connect CDP with retry logic.
             // The browser may occasionally return HTTP 500 on the WebSocket
@@ -710,15 +712,15 @@ async fn send_with_browser_once(
             cdp.navigate_and_wait(&navigate_url, Duration::from_secs(15))
                 .await?;
         } else {
-            // Pooled tab is already on the conversation URL.  Verify the
-            // conversation id still matches so we don't accidentally inject
-            // text into the wrong conversation.
+            // A reused tab may already show the expected conversation/homepage.
+            // Verify the URL and navigate only when it differs so a fresh
+            // request can switch the same target to the clean homepage.
             //
             // CDP operations on a pooled tab may transiently fail if the page
             // is in the middle of heavy JS execution or internal navigation.
             // We give it one retry with a short backoff before propagating.
             match current_conversation_id(cdp).await {
-                Ok(Some(actual)) if Some(actual.as_str()) == conversation_id => {
+                Ok(actual) if page_matches(actual.as_deref(), conversation_id) => {
                     info!(
                         conversation_id = ?conversation_id,
                         "chatgpt_web send: pooled tab confirmed on expected conversation"
@@ -740,7 +742,7 @@ async fn send_with_browser_once(
                     );
                     sleep(Duration::from_secs(2)).await;
                     match current_conversation_id(cdp).await {
-                        Ok(Some(actual)) if Some(actual.as_str()) == conversation_id => {
+                        Ok(actual) if page_matches(actual.as_deref(), conversation_id) => {
                             info!(
                                 conversation_id = ?conversation_id,
                                 "chatgpt_web send: pooled tab confirmed after retry"
@@ -1485,19 +1487,18 @@ async fn send_with_browser_once(
                 ) {
                     evicted.shutdown(&browser).await;
                 }
-            } else {
-                // No conversation id yet (new conversation that didn't
-                // resolve) — the tab is unusable for future routing, so
-                // close it to free resources.
+            } else if !reused_from_pool {
+                // A newly created tab without a resolved conversation id
+                // cannot be routed later, so close only this fallback tab.
                 warn!(
                     target_id = %tid,
-                    "chatgpt_web send: success without conversation_id, closing orphan tab"
+                    "chatgpt_web send: success without conversation_id, closing fallback tab"
                 );
                 if let Some(arc) = client.clone() {
                     arc.close();
                 }
                 if let Err(e) = browser.close_target(tid).await {
-                    warn!(error = %e, "chatgpt_web send: failed to close orphan tab (non-fatal)");
+                    warn!(error = %e, "chatgpt_web send: failed to close fallback tab (non-fatal)");
                 }
             }
         }
@@ -1587,6 +1588,40 @@ async fn send_with_browser_once(
             }
         }
     }
+}
+
+type FreshTabState<'a> = (
+    &'a mut Option<String>,
+    &'a mut Option<Arc<CdpClient>>,
+    &'a mut bool,
+);
+
+async fn reuse_fresh_tab(
+    browser: &BrowserSession,
+    config: &RuntimeConfig,
+    conversation_id: Option<&str>,
+    state: &mut FreshTabState<'_>,
+) -> Result<(), String> {
+    if state.1.is_some() || conversation_id.is_some() {
+        return Ok(());
+    }
+    let Some((target_id, cdp)) = super::browser::take_or_attach_reusable_chatgpt_tab(
+        browser,
+        &config.profile_dir,
+        &config.chatgpt.base_url,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    info!(
+        target_id,
+        "chatgpt_web send: reusing existing tab for fresh conversation"
+    );
+    *state.0 = Some(target_id);
+    *state.1 = Some(cdp);
+    *state.2 = true;
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -3430,14 +3465,10 @@ async fn navigate_to_new_conversation(
 }
 
 pub(in crate::im_gateway::chatgpt_web) fn new_conversation_url(config: &RuntimeConfig) -> String {
-    let nonce = now_ms();
     if let Some(project_url) = config.chatgpt.project_url.as_deref() {
-        format!("{project_url}?bifrost_new_chat={nonce}")
+        format!("{}/", project_url.trim_end_matches('/'))
     } else {
-        format!(
-            "{}/?bifrost_new_chat={nonce}",
-            config.chatgpt.base_url.trim_end_matches('/')
-        )
+        format!("{}/", config.chatgpt.base_url.trim_end_matches('/'))
     }
 }
 
@@ -3494,6 +3525,13 @@ async fn ensure_new_conversation_project(
     Err(format!(
         "browser_ui: ChatGPT Project page mismatch before prompt submission: expected={expected_url} actual={current_url}"
     ))
+}
+
+fn page_matches(
+    actual_conversation_id: Option<&str>,
+    expected_conversation_id: Option<&str>,
+) -> bool {
+    actual_conversation_id == expected_conversation_id
 }
 
 async fn set_composer_text(cdp: &CdpClient, text: &str) -> Result<Value, String> {
@@ -4492,7 +4530,7 @@ mod tests {
     async fn configured_project_must_match_current_page() {
         let expected = "https://chatgpt.com/g/g-p-daily-research/project";
         let cdp = mock_cdp(vec![
-            json!({"url": format!("{expected}/?bifrost_new_chat=1")}),
+            json!({"url": format!("{expected}/")}),
             json!({"url": "https://chatgpt.com/"}),
         ])
         .await;
@@ -5104,6 +5142,111 @@ mod coverage_boost {
             sessions_path: root.join("sessions.json"),
             attachments_dir: root.join("attachments"),
         }
+    }
+
+    #[test]
+    fn new_conversation_url_uses_plain_homepage_without_query_parameters() {
+        let config = test_runtime_config_with_execution_mode("headed");
+
+        assert_eq!(new_conversation_url(&config), "https://chatgpt.com/");
+    }
+
+    #[test]
+    fn new_conversation_url_normalizes_configured_trailing_slashes() {
+        let mut config = test_runtime_config_with_execution_mode("headed");
+        config.chatgpt.base_url = "https://chatgpt.example///".to_string();
+
+        assert_eq!(new_conversation_url(&config), "https://chatgpt.example/");
+    }
+
+    #[test]
+    fn conversation_page_match_treats_homepage_as_expected_for_fresh_run() {
+        assert!(page_matches(None, None));
+        assert!(page_matches(Some("conversation"), Some("conversation")));
+        assert!(!page_matches(Some("old-conversation"), None));
+        assert!(!page_matches(None, Some("conversation")));
+    }
+
+    #[tokio::test]
+    async fn reuse_fresh_tab_installs_pooled_target_and_skips_existing_selection() {
+        let config = test_runtime_config_with_execution_mode("headed");
+        let cdp = super::super::browser::dummy_cdp_client_for_tests();
+        super::super::browser::register_conversation_tab(
+            &config.profile_dir,
+            "old",
+            "target-1".to_string(),
+            cdp.clone(),
+        );
+        let browser = BrowserSession::for_test(config.profile_dir.clone());
+        let mut target_id = None;
+        let mut client = None;
+        let mut reused = false;
+        let mut state = (&mut target_id, &mut client, &mut reused);
+
+        reuse_fresh_tab(&browser, &config, None, &mut state)
+            .await
+            .expect("reuse succeeds");
+
+        assert_eq!(target_id.as_deref(), Some("target-1"));
+        assert_eq!(
+            Arc::as_ptr(client.as_ref().expect("client")),
+            Arc::as_ptr(&cdp)
+        );
+        assert!(reused);
+
+        let mut existing_target = Some("existing".to_string());
+        let mut existing_client = Some(cdp);
+        let mut existing_reused = true;
+        let mut existing_state = (
+            &mut existing_target,
+            &mut existing_client,
+            &mut existing_reused,
+        );
+        reuse_fresh_tab(&browser, &config, Some("conversation"), &mut existing_state)
+            .await
+            .expect("existing selection is preserved");
+        assert_eq!(existing_target.as_deref(), Some("existing"));
+        super::super::browser::evict_conversation_tab(&config.profile_dir, "old");
+    }
+
+    #[tokio::test]
+    async fn reuse_fresh_tab_keeps_empty_state_when_browser_has_no_chatgpt_target() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake DevTools HTTP");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept DevTools request");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.expect("read request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]",
+                )
+                .await
+                .expect("write response");
+        });
+
+        let mut config = test_runtime_config_with_execution_mode("headed");
+        config.profile_dir = PathBuf::from(format!(
+            "/tmp/bifrost-chatgpt-web-send-test-no-target-{port}"
+        ));
+        let browser = BrowserSession::for_test_with_port(config.profile_dir.clone(), port);
+        let mut target_id = None;
+        let mut client = None;
+        let mut reused = false;
+        let mut state = (&mut target_id, &mut client, &mut reused);
+
+        reuse_fresh_tab(&browser, &config, None, &mut state)
+            .await
+            .expect("empty browser target lookup succeeds");
+
+        assert!(target_id.is_none());
+        assert!(client.is_none());
+        assert!(!reused);
+        server.await.expect("fake server finishes");
     }
 }
 

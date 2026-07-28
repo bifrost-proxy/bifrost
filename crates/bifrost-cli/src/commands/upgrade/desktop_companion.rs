@@ -1,5 +1,52 @@
 use super::*;
 
+#[derive(Debug)]
+pub(super) struct ChildProgressWatch {
+    data_dir: PathBuf,
+    target_version: String,
+    source: String,
+    last_updated_at: Option<String>,
+}
+
+impl ChildProgressWatch {
+    pub(super) fn new(data_dir: &Path, target_version: &str, source: &str) -> Self {
+        let mut watch = Self {
+            data_dir: data_dir.to_path_buf(),
+            target_version: target_version.to_string(),
+            source: source.to_string(),
+            last_updated_at: None,
+        };
+        // The parent transaction may already own a matching Checking record.
+        // Seed it without treating that pre-child state as fresh activity.
+        let _ = watch.observe_activity();
+        watch
+    }
+
+    pub(super) fn observe_activity(&mut self) -> bool {
+        let path = bifrost_core::upgrade_progress::progress_file_path(&self.data_dir);
+        let Ok(content) = fs::read_to_string(path) else {
+            return false;
+        };
+        let Ok(progress) =
+            serde_json::from_str::<bifrost_core::upgrade_progress::UpgradeProgress>(&content)
+        else {
+            return false;
+        };
+        if !progress.is_active()
+            || progress.target_version.as_deref() != Some(self.target_version.as_str())
+            || progress.source.as_deref() != Some(self.source.as_str())
+            || progress.updated_at.is_empty()
+        {
+            return false;
+        }
+        if self.last_updated_at.as_deref() == Some(progress.updated_at.as_str()) {
+            return false;
+        }
+        self.last_updated_at = Some(progress.updated_at);
+        true
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DesktopCompanionMode {
     CallerManaged,
@@ -7,7 +54,7 @@ pub(super) enum DesktopCompanionMode {
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub(super) const DESKTOP_UPGRADE_SHUTDOWN_ARG: &str = "--bifrost-upgrade-shutdown";
+pub(crate) const DESKTOP_UPGRADE_SHUTDOWN_ARG: &str = "--bifrost-upgrade-shutdown";
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const DESKTOP_UPGRADE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -54,9 +101,29 @@ fn running_desktop_process(app_path: &Path) -> Option<(u32, PathBuf)> {
         #[cfg(target_os = "windows")]
         let matches = windows_paths_match(executable, app_path);
         #[cfg(target_os = "macos")]
-        let matches = executable.starts_with(app_path);
+        let matches = path_is_within(executable, app_path);
         matches.then(|| (pid.as_u32(), executable.to_path_buf()))
     })
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn paths_match_after_canonicalization(left: &Path, right: &Path) -> bool {
+    left == right
+        || left
+            .canonicalize()
+            .ok()
+            .zip(right.canonicalize().ok())
+            .is_some_and(|(left, right)| left == right)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn path_is_within(candidate: &Path, root: &Path) -> bool {
+    candidate.starts_with(root)
+        || candidate
+            .canonicalize()
+            .ok()
+            .zip(root.canonicalize().ok())
+            .is_some_and(|(candidate, root)| candidate.starts_with(root))
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -98,23 +165,47 @@ pub(super) fn select_running_desktop_shell_process(
         }
         #[cfg(not(target_os = "windows"))]
         {
-            executable == expected_executable
+            paths_match_after_canonicalization(executable, expected_executable)
         }
     })
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn installed_desktop_app_is_running(app_path: &Path) -> bool {
+pub(crate) fn installed_desktop_app_is_running(app_path: &Path) -> bool {
     running_desktop_process(app_path).is_some()
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn installed_desktop_app_is_running(_app_path: &Path) -> bool {
+pub(crate) fn installed_desktop_app_is_running(_app_path: &Path) -> bool {
     false
 }
 
+pub(crate) fn desktop_app_is_running(app_path: &Path) -> bool {
+    installed_desktop_app_is_running(app_path)
+}
+
+pub(crate) fn shutdown_running_desktop_for_app_upgrade(
+    app_path: &Path,
+) -> Result<(), BifrostError> {
+    request_running_desktop_shutdown(app_path)
+}
+
+pub(crate) fn restore_desktop_after_failed_app_upgrade(
+    app_path: &Path,
+    desktop_was_shut_down: bool,
+    original_error: BifrostError,
+    relaunch: impl FnOnce(&Path) -> Result<(), BifrostError>,
+) -> BifrostError {
+    restore_desktop_after_failed_companion(
+        app_path,
+        desktop_was_shut_down,
+        original_error,
+        relaunch,
+    )
+}
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn request_running_desktop_shutdown(app_path: &Path) -> Result<(), BifrostError> {
+pub(crate) fn request_running_desktop_shutdown(app_path: &Path) -> Result<(), BifrostError> {
     println!(
         "{}",
         "Requesting the running desktop shell to release its installed files...".bright_cyan()
@@ -173,6 +264,11 @@ fn request_running_desktop_shutdown(app_path: &Path) -> Result<(), BifrostError>
         DESKTOP_UPGRADE_SHUTDOWN_TIMEOUT.as_secs(),
         fallback_detail
     )))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub(crate) fn request_running_desktop_shutdown(_app_path: &Path) -> Result<(), BifrostError> {
+    Ok(())
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -421,13 +517,21 @@ pub(super) fn update_desktop_app_after_upgrade(
             crate::commands::app::restart_desktop_app,
         )
     })?;
+    let progress_watch = (mode == DesktopCompanionMode::DesktopHandoff).then(|| {
+        ChildProgressWatch::new(
+            &parent_lock_data_dir,
+            target_version,
+            mode.progress_source(),
+        )
+    });
     let result = match command_output_with_timeout_and_env_streaming(
         executable,
         &args,
-        Duration::from_secs(POST_UPGRADE_APP_UPDATE_TIMEOUT_SECS),
+        Duration::from_secs(POST_UPGRADE_APP_UPDATE_STALL_TIMEOUT_SECS),
         Duration::from_secs(UPGRADE_CHILD_PROGRESS_HEARTBEAT_SECS),
         &environment,
         Some(&parent_lock_data_dir),
+        progress_watch,
     ) {
         Ok(output) if output.status == TimedCommandStatus::Success => {
             if mode == DesktopCompanionMode::DesktopHandoff
@@ -459,6 +563,96 @@ pub(super) fn update_desktop_app_after_upgrade(
             crate::commands::app::restart_desktop_app,
         )
     })
+}
+
+pub(super) fn finish_already_latest_upgrade(
+    latest_version: &str,
+    behavior: UpgradeBehavior,
+) -> Result<(), BifrostError> {
+    if !behavior.restart_if_already_latest && !behavior.update_desktop_app {
+        return Ok(());
+    }
+    let install_method = detect_install_method();
+    finish_already_latest_upgrade_for_method(latest_version, behavior, &install_method)
+}
+
+pub(super) fn finish_already_latest_upgrade_for_method(
+    latest_version: &str,
+    behavior: UpgradeBehavior,
+    install_method: &InstallMethod,
+) -> Result<(), BifrostError> {
+    let restart_executable = match restart_executable_for_install_method(install_method) {
+        Ok(executable) => executable,
+        Err(error) if behavior.require_desktop_app_update => return Err(error),
+        Err(_) => return Ok(()),
+    };
+    let should_restart_proxy = behavior.restart_if_already_latest && behavior.restart_proxy;
+    if should_restart_proxy {
+        println!(
+            "{}",
+            "  On-disk binary is current; restarting any running proxy so it adopts this version."
+                .bright_cyan()
+        );
+    }
+    finish_already_latest_upgrade_steps(
+        behavior,
+        || update_desktop_companion(&restart_executable, latest_version, behavior),
+        || maybe_restart_running_proxy(&restart_executable),
+    )
+}
+
+pub(super) fn finish_already_latest_upgrade_steps(
+    behavior: UpgradeBehavior,
+    update_desktop: impl FnOnce() -> Result<(), BifrostError>,
+    restart_proxy: impl FnOnce() -> Result<(), BifrostError>,
+) -> Result<(), BifrostError> {
+    finish_upgrade_steps(
+        behavior.restart_if_already_latest && behavior.restart_proxy,
+        update_desktop,
+        restart_proxy,
+    )
+}
+
+pub(super) fn finish_installed_upgrade(
+    restart_executable: &Path,
+    latest_version: &str,
+    behavior: UpgradeBehavior,
+) -> Result<(), BifrostError> {
+    finish_installed_upgrade_steps(
+        behavior,
+        || update_desktop_companion(restart_executable, latest_version, behavior),
+        || maybe_restart_running_proxy(restart_executable),
+    )
+}
+
+pub(super) fn finish_installed_upgrade_steps(
+    behavior: UpgradeBehavior,
+    update_desktop: impl FnOnce() -> Result<(), BifrostError>,
+    restart_proxy: impl FnOnce() -> Result<(), BifrostError>,
+) -> Result<(), BifrostError> {
+    finish_upgrade_steps(behavior.restart_proxy, update_desktop, restart_proxy)
+}
+
+fn finish_upgrade_steps(
+    should_restart_proxy: bool,
+    update_desktop: impl FnOnce() -> Result<(), BifrostError>,
+    restart_proxy: impl FnOnce() -> Result<(), BifrostError>,
+) -> Result<(), BifrostError> {
+    let desktop_result = update_desktop();
+    let restart_result = if should_restart_proxy {
+        restart_proxy()
+    } else {
+        Ok(())
+    };
+
+    match (desktop_result, restart_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(desktop_error), Ok(())) => Err(desktop_error),
+        (Ok(()), Err(restart_error)) => Err(restart_error),
+        (Err(desktop_error), Err(restart_error)) => Err(BifrostError::Config(format!(
+            "{desktop_error}; running proxy restart also failed: {restart_error}"
+        ))),
+    }
 }
 
 pub(super) fn restore_desktop_after_failed_companion(

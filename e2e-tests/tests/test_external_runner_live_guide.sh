@@ -2,7 +2,6 @@
 set -euo pipefail
 
 unset BIFROST_DETACHED_DAEMON_CHILD
-unset BIFROST_EXTERNAL_CLI_WORKER
 
 : "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
 : "${BIFROST_DISABLE_TRAY:=1}"
@@ -13,7 +12,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_DIR"
 
-TEST_DIR="$(mktemp -d)"
+TEST_DIR="$(mktemp -d "$REPO_DIR/.bifrost-e2e-external-guide.XXXXXX")"
+export BIFROST_DATA_DIR="$TEST_DIR"
+source "$REPO_DIR/e2e-tests/test_utils/process.sh"
+mark_e2e_data_root "$TEST_DIR"
+
 BIFROST_LOG="$TEST_DIR/bifrost.log"
 MOCK_LOG="$TEST_DIR/mock-app-server.ndjson"
 BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
@@ -27,10 +30,10 @@ PY
 )}"
 
 cleanup() {
-  if [[ -n "${BIFROST_PID:-}" ]]; then
-    kill "$BIFROST_PID" >/dev/null 2>&1 || true
-    wait "$BIFROST_PID" >/dev/null 2>&1 || true
+  if [[ -x "${BIFROST_BIN:-}" ]]; then
+    BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" stop >/dev/null 2>&1 || true
   fi
+  kill_bifrost_in_data_root "$TEST_DIR" >/dev/null 2>&1 || true
   if [[ "${KEEP_TEST_DIR:-false}" == "true" ]]; then
     echo "[external-runner-live-guide] keeping test dir: $TEST_DIR" >&2
   else
@@ -181,25 +184,44 @@ if [[ "${SKIP_BUILD:-false}" != "true" ]]; then
   SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
 fi
 
-BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
-  --host 127.0.0.1 \
-  -p "$BIFROST_PORT" \
-  --unsafe-ssl \
-  --skip-cert-check \
-  --no-system-proxy \
-  >"$BIFROST_LOG" 2>&1 &
-BIFROST_PID=$!
+START_ARGS=(
+  --daemon
+  --host 127.0.0.1
+  -p "$BIFROST_PORT"
+  --unsafe-ssl
+  --skip-cert-check
+  --no-system-proxy
+)
+if "$BIFROST_BIN" start --help | grep -q -- '--no-tray'; then
+  START_ARGS+=(--no-tray)
+fi
+
+if ! BIFROST_EXTERNAL_CLI_WORKER=1 BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
+  "${START_ARGS[@]}" \
+  >"$BIFROST_LOG" 2>&1; then
+  echo "[external-runner-live-guide] detached daemon failed to start" >&2
+  tail -160 "$BIFROST_LOG" >&2 || true
+  exit 1
+fi
 
 for _ in $(seq 1 180); do
   if curl -fsS --noproxy '*' "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/proxy/address" >/dev/null 2>&1; then
     break
   fi
-  if ! kill -0 "$BIFROST_PID" >/dev/null 2>&1; then
-    tail -160 "$BIFROST_LOG" >&2 || true
-    exit 1
-  fi
   sleep 0.25
 done
+
+if ! curl -fsS --noproxy '*' "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/proxy/address" >/dev/null; then
+  tail -160 "$BIFROST_LOG" >&2 || true
+  exit 1
+fi
+
+BIFROST_PID="$(pid_from_runtime_file "$TEST_DIR/runtime.json")"
+if [[ ! "$BIFROST_PID" =~ ^[0-9]+$ ]] || ! kill -0 "$BIFROST_PID" >/dev/null 2>&1; then
+  echo "[external-runner-live-guide] detached daemon PID is not running: ${BIFROST_PID:-missing}" >&2
+  tail -160 "$BIFROST_LOG" >&2 || true
+  exit 1
+fi
 
 python3 - "$BIFROST_PORT" "$TEST_DIR/mock-runner" "$MOCK_LOG" "$REPO_DIR" <<'PY'
 import json
@@ -232,6 +254,7 @@ for runner_name, adapter, mode, transport in (
     ("codex-web", "codex", "accept", "app_server"),
     ("traex-web", "traex", "accept", "app_server"),
     ("codex-im", "codex", "accept", "app_server"),
+    ("codex-cross-channel", "codex", "accept", "app_server"),
     ("codex-im-queue", "codex", "accept", "app_server"),
     ("codex-im-effort", "codex", "accept", "app_server"),
     ("traex-im-effort", "traex", "accept", "app_server"),
@@ -482,6 +505,40 @@ wait_for_mock_record '"event":"turn_ready","runner":"codex-im"'
 send_im_inbound "im-guide-provider" "im-guide-owner" "default-im-queue"
 send_im_inbound "im-guide-provider" "im-guide-owner" "/g release-default-queue"
 wait_for_mock_record 'default-im-queue'
+
+create_im_provider "cross-channel-provider" "cross-channel-owner" "codex-cross-channel"
+curl -fsS --noproxy '*' -X PATCH \
+  "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/chat/config/channels/cross-channel-provider" \
+  -H 'content-type: application/json' \
+  -d '{"runnerId":"codex-cross-channel","deliveryMode":"no_im"}' \
+  >/dev/null
+cross_channel_stream="$TEST_DIR/cross-channel-web-stream.ndjson"
+curl -sS -N --noproxy '*' \
+  -H 'content-type: application/json' \
+  -d '{"message":"wait for IM guidance on the Web-started turn","runnerId":"codex-cross-channel","sessionKey":"cross-channel-provider:cross-channel-owner","runtime":"external_cli"}' \
+  "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/chat/stream" \
+  >"$cross_channel_stream" &
+cross_channel_pid=$!
+wait_for_mock_record '"event":"turn_ready","runner":"codex-cross-channel"'
+send_im_inbound "cross-channel-provider" "cross-channel-owner" "guide-from-im-to-web"
+wait "$cross_channel_pid"
+python3 - "$cross_channel_stream" "$MOCK_LOG" <<'PY'
+import json
+import sys
+
+events = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+finished = [event for event in events if event.get("eventType") == "run_finished"]
+assert len(finished) == 1, events
+assert finished[0]["response"] == "GUIDED_codex-cross-channel", finished
+records = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if line.strip()]
+steered = [
+    record for record in records
+    if record.get("event") == "turn_steered"
+    and record.get("runner") == "codex-cross-channel"
+]
+assert len(steered) == 1, steered
+assert steered[0]["params"]["input"][0]["text"] == "guide-from-im-to-web", steered
+PY
 
 create_im_provider "im-queue-provider" "im-queue-owner" "codex-im-queue"
 send_im_inbound "im-queue-provider" "im-queue-owner" "wait for explicit IM queue"

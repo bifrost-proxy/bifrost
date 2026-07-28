@@ -81,7 +81,8 @@ impl ConversationTab {
 }
 
 /// Per-profile pool of conversation tabs keyed by `(profile_dir, conversation_id)`.
-/// Tabs are NEVER closed automatically — only when:
+/// Tabs are not closed when they are repurposed for a fresh conversation.
+/// They are closed automatically only when:
 ///   1. The pool reaches `CONVERSATION_TAB_POOL_SIZE` and a new conversation
 ///      needs space (LRU eviction); or
 ///   2. `evict_conversation_tab` is called explicitly.
@@ -115,6 +116,59 @@ pub(super) fn get_conversation_tab(
     }
     tab.touch();
     Some(tab)
+}
+
+/// Remove and return the most recently used live tab for a fresh conversation.
+///
+/// The browser target and CDP connection stay open. The caller navigates this
+/// same tab to the homepage, then registers it under the new conversation id
+/// after the first message is submitted. Removing the old pool key prevents a
+/// later request from assuming the repurposed tab still shows the old
+/// conversation.
+pub(super) fn take_reusable_conversation_tab(profile_dir: &Path) -> Option<Arc<ConversationTab>> {
+    let pool = conversation_tabs();
+    loop {
+        let mut candidate_key: Option<(PathBuf, String)> = None;
+        let mut candidate_tick = 0;
+        for entry in pool.iter() {
+            if entry.key().0 != profile_dir {
+                continue;
+            }
+            let tick = entry.value().last_used.load(Ordering::SeqCst);
+            if candidate_key.is_none() || tick > candidate_tick {
+                candidate_tick = tick;
+                candidate_key = Some(entry.key().clone());
+            }
+        }
+        let key = candidate_key?;
+        let (_, tab) = pool.remove(&key)?;
+        if tab.cdp.is_closed() {
+            continue;
+        }
+        tab.touch();
+        return Some(tab);
+    }
+}
+
+/// Reuse a live ChatGPT tab without creating, closing, or refreshing a target.
+///
+/// Prefer a tab already tracked by the process. If the pool is empty (for
+/// example after a worker restart), attach the browser's existing ChatGPT
+/// target instead.
+pub(super) async fn take_or_attach_reusable_chatgpt_tab(
+    browser: &BrowserSession,
+    profile_dir: &Path,
+    base_url: &str,
+) -> Result<Option<(String, Arc<CdpClient>)>, String> {
+    if let Some(tab) = take_reusable_conversation_tab(profile_dir) {
+        return Ok(Some((tab.target_id.clone(), tab.cdp.clone())));
+    }
+    let Some(page) = browser.find_chatgpt_page(base_url).await? else {
+        return Ok(None);
+    };
+    let cdp = CdpClient::connect_with_retry(&page.web_socket_debugger_url, 3).await?;
+    cdp.enable_domains().await?;
+    Ok(Some((page.id, Arc::new(cdp))))
 }
 
 /// Recover a conversation tab from the live browser when the process-local pool
@@ -336,6 +390,20 @@ pub(super) struct BrowserSession {
 }
 
 impl BrowserSession {
+    #[cfg(test)]
+    pub(super) fn for_test(profile_dir: PathBuf) -> Self {
+        Self::for_test_with_port(profile_dir, 1)
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test_with_port(profile_dir: PathBuf, port: u16) -> Self {
+        Self {
+            port,
+            child: None,
+            profile_dir,
+        }
+    }
+
     pub(super) async fn kill_for_profile(config: &RuntimeConfig) {
         let profile = config.profile_dir.clone();
         if let Some((_, pid)) = browser_pids().remove(&profile) {
@@ -655,6 +723,30 @@ impl BrowserSession {
         Ok(Some(page))
     }
 
+    /// Find an already-open ChatGPT tab that can be repurposed for a fresh
+    /// conversation. This never creates, closes, or refreshes a target.
+    pub(super) async fn find_chatgpt_page(
+        &self,
+        base_url: &str,
+    ) -> Result<Option<CdpPage>, String> {
+        let base = base_url.trim_end_matches('/');
+        let default_base = DEFAULT_BASE_URL.trim_end_matches('/');
+        let list: Vec<CdpPage> = wait_for_json(
+            &format!("http://127.0.0.1:{}/json/list", self.port),
+            Duration::from_secs(5),
+        )
+        .await?;
+        let page = select_reusable_chatgpt_page(&list, base, default_base);
+        if let Some(ref page) = page {
+            info!(
+                page_id = %page.id,
+                page_url = %page.url,
+                "chatgpt_web browser: found existing tab for fresh conversation"
+            );
+        }
+        Ok(page)
+    }
+
     /// Close chatgpt.com tabs that are "stale" (likely left over from a
     /// previous session or crash).  This should only be called at browser
     /// startup (before any concurrent runs begin) to avoid closing tabs that
@@ -769,6 +861,34 @@ impl BrowserSession {
     }
 }
 
+fn select_reusable_chatgpt_page(
+    pages: &[CdpPage],
+    base_url: &str,
+    default_base_url: &str,
+) -> Option<CdpPage> {
+    let base = base_url.trim_end_matches('/');
+    let default_base = default_base_url.trim_end_matches('/');
+    let is_matching_origin = |url: &str, candidate: &str| {
+        url.strip_prefix(candidate).is_some_and(|suffix| {
+            suffix.is_empty()
+                || suffix.starts_with('/')
+                || suffix.starts_with('?')
+                || suffix.starts_with('#')
+        })
+    };
+    pages
+        .iter()
+        .filter(|page| !page.web_socket_debugger_url.trim().is_empty())
+        .filter(|page| {
+            is_matching_origin(&page.url, base) || is_matching_origin(&page.url, default_base)
+        })
+        .min_by_key(|page| {
+            let url = page.url.trim_end_matches('/');
+            usize::from(url != base && url != default_base)
+        })
+        .cloned()
+}
+
 pub(super) fn page_url_matches_conversation(
     url: &str,
     base_url: &str,
@@ -797,9 +917,12 @@ mod tests {
     use super::{
         browser_process_candidate_from_line, browser_process_pid_from_line, conversation_tabs,
         get_conversation_tab, page_url_matches_conversation, recovered_browser_mode_matches,
-        register_conversation_tab, CdpClient, CONVERSATION_TAB_POOL_SIZE,
+        register_conversation_tab, select_reusable_chatgpt_page,
+        take_or_attach_reusable_chatgpt_tab, take_reusable_conversation_tab, BrowserSession,
+        CdpClient, CdpPage, CONVERSATION_TAB_POOL_SIZE,
     };
     use dashmap::DashMap;
+    use futures_util::{SinkExt, StreamExt};
     use serde_json::Value;
     use std::path::PathBuf;
     use std::sync::{
@@ -868,6 +991,38 @@ mod tests {
             "https://chatgpt.com",
             "abc-123"
         ));
+    }
+
+    #[test]
+    fn reusable_chatgpt_page_prefers_homepage_and_requires_origin_boundary() {
+        let pages = vec![
+            CdpPage {
+                id: "wrong-origin".to_string(),
+                url: "https://chatgpt.com.evil.example/c/nope".to_string(),
+                web_socket_debugger_url: "ws://wrong".to_string(),
+            },
+            CdpPage {
+                id: "conversation".to_string(),
+                url: "https://chatgpt.com/c/abc".to_string(),
+                web_socket_debugger_url: "ws://conversation".to_string(),
+            },
+            CdpPage {
+                id: "homepage".to_string(),
+                url: "https://chatgpt.com/".to_string(),
+                web_socket_debugger_url: "ws://homepage".to_string(),
+            },
+            CdpPage {
+                id: "no-cdp".to_string(),
+                url: "https://chatgpt.com/".to_string(),
+                web_socket_debugger_url: String::new(),
+            },
+        ];
+
+        let selected =
+            select_reusable_chatgpt_page(&pages, "https://chatgpt.com", "https://chatgpt.com")
+                .expect("reusable ChatGPT page");
+
+        assert_eq!(selected.id, "homepage");
     }
 
     #[test]
@@ -940,6 +1095,208 @@ mod tests {
         let tab = get_conversation_tab(&profile, "c1").expect("tab should exist");
         assert_eq!(Arc::as_ptr(&tab.cdp), Arc::as_ptr(&cdp));
         assert!(tab.last_used.load(Ordering::SeqCst) > 0);
+    }
+
+    #[test]
+    fn fresh_conversation_takes_most_recent_tab_without_closing_it() {
+        let _guard = conversation_tabs_test_lock();
+        conversation_tabs().clear();
+        let profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-fresh-reuse");
+        let (first_closed, first_cdp) = dummy_cdp_client();
+        let (second_closed, second_cdp) = dummy_cdp_client();
+
+        register_conversation_tab(&profile, "c1", "t1".to_string(), first_cdp);
+        register_conversation_tab(&profile, "c2", "t2".to_string(), second_cdp.clone());
+
+        let tab = take_reusable_conversation_tab(&profile).expect("reusable tab");
+
+        assert_eq!(tab.target_id, "t2");
+        assert_eq!(Arc::as_ptr(&tab.cdp), Arc::as_ptr(&second_cdp));
+        assert!(!first_closed.load(Ordering::SeqCst));
+        assert!(!second_closed.load(Ordering::SeqCst));
+        assert!(get_conversation_tab(&profile, "c2").is_none());
+        assert!(get_conversation_tab(&profile, "c1").is_some());
+    }
+
+    #[test]
+    fn fresh_conversation_reuse_skips_other_profiles_and_closed_tabs() {
+        let _guard = conversation_tabs_test_lock();
+        conversation_tabs().clear();
+        let profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-fresh-filter");
+        let other_profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-fresh-other");
+        let (live_closed, live_cdp) = dummy_cdp_client();
+        let (closed, closed_cdp) = dummy_cdp_client();
+        let (_other_closed, other_cdp) = dummy_cdp_client();
+
+        register_conversation_tab(&profile, "live", "live-target".to_string(), live_cdp);
+        register_conversation_tab(
+            &other_profile,
+            "other",
+            "other-target".to_string(),
+            other_cdp,
+        );
+        register_conversation_tab(&profile, "closed", "closed-target".to_string(), closed_cdp);
+        closed.store(true, Ordering::SeqCst);
+
+        let tab = take_reusable_conversation_tab(&profile).expect("live fallback tab");
+
+        assert_eq!(tab.target_id, "live-target");
+        assert!(!live_closed.load(Ordering::SeqCst));
+        assert!(get_conversation_tab(&profile, "closed").is_none());
+        assert!(get_conversation_tab(&other_profile, "other").is_some());
+    }
+
+    #[tokio::test]
+    async fn fresh_conversation_reuse_helper_returns_pooled_tab_without_browser_io() {
+        let profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-fresh-helper");
+        let (_closed, cdp) = dummy_cdp_client();
+        register_conversation_tab(&profile, "c1", "t1".to_string(), cdp.clone());
+        let browser = BrowserSession {
+            port: 1,
+            child: None,
+            profile_dir: profile.clone(),
+        };
+
+        let (target_id, reused_cdp) =
+            take_or_attach_reusable_chatgpt_tab(&browser, &profile, "https://chatgpt.com")
+                .await
+                .expect("reuse succeeds")
+                .expect("pooled tab");
+
+        assert_eq!(target_id, "t1");
+        assert_eq!(Arc::as_ptr(&reused_cdp), Arc::as_ptr(&cdp));
+        assert!(!reused_cdp.is_closed());
+    }
+
+    #[tokio::test]
+    async fn fresh_conversation_reuse_helper_returns_none_without_matching_browser_tab() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-fresh-browser-empty");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake DevTools HTTP");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept DevTools request");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.expect("read request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]",
+                )
+                .await
+                .expect("write response");
+        });
+        let browser = BrowserSession {
+            port,
+            child: None,
+            profile_dir: profile.clone(),
+        };
+
+        let reused = take_or_attach_reusable_chatgpt_tab(&browser, &profile, "https://chatgpt.com")
+            .await
+            .expect("lookup succeeds");
+
+        assert!(reused.is_none());
+        server.await.expect("fake server finishes");
+    }
+
+    #[tokio::test]
+    async fn fresh_conversation_reuse_helper_attaches_existing_browser_tab() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let websocket_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake CDP WebSocket");
+        let websocket_port = websocket_listener
+            .local_addr()
+            .expect("WebSocket listener address")
+            .port();
+        let websocket_server = tokio::spawn(async move {
+            let (stream, _) = websocket_listener
+                .accept()
+                .await
+                .expect("accept CDP WebSocket");
+            let mut websocket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("upgrade CDP WebSocket");
+            for _ in 0..3 {
+                let request = websocket
+                    .next()
+                    .await
+                    .expect("CDP command")
+                    .expect("valid CDP WebSocket message");
+                let Message::Text(payload) = request else {
+                    panic!("expected text CDP command");
+                };
+                let command: Value =
+                    serde_json::from_str(&payload).expect("parse CDP command payload");
+                let id = command
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .expect("CDP command id");
+                websocket
+                    .send(Message::Text(
+                        serde_json::json!({"id": id, "result": {}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .expect("write CDP response");
+            }
+        });
+
+        let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake DevTools HTTP");
+        let http_port = http_listener
+            .local_addr()
+            .expect("HTTP listener address")
+            .port();
+        let http_server = tokio::spawn(async move {
+            let (mut stream, _) = http_listener
+                .accept()
+                .await
+                .expect("accept DevTools request");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.expect("read request");
+            let body = serde_json::json!([{
+                "id": "existing-target",
+                "url": "https://chatgpt.com/",
+                "webSocketDebuggerUrl": format!("ws://127.0.0.1:{websocket_port}")
+            }])
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+        let profile = PathBuf::from(format!(
+            "/tmp/chatgpt-web-tests-profile-fresh-attach-{http_port}"
+        ));
+        let browser = BrowserSession {
+            port: http_port,
+            child: None,
+            profile_dir: profile.clone(),
+        };
+
+        let (target_id, cdp) =
+            take_or_attach_reusable_chatgpt_tab(&browser, &profile, "https://chatgpt.com")
+                .await
+                .expect("reuse succeeds")
+                .expect("existing browser target");
+
+        assert_eq!(target_id, "existing-target");
+        cdp.close();
+        http_server.await.expect("fake HTTP server finishes");
+        websocket_server
+            .await
+            .expect("fake WebSocket server finishes");
     }
 
     #[test]
@@ -1435,6 +1792,20 @@ pub(super) struct CdpClient {
     pending: Arc<DashMap<u64, oneshot::Sender<Result<Value, String>>>>,
     events: broadcast::Sender<CdpEvent>,
     closed: Arc<AtomicBool>,
+}
+
+#[cfg(test)]
+pub(super) fn dummy_cdp_client_for_tests() -> Arc<CdpClient> {
+    let (sender, _rx) = mpsc::unbounded_channel::<Message>();
+    let pending = Arc::new(DashMap::new());
+    let (events, _ev_rx) = broadcast::channel(1);
+    Arc::new(CdpClient {
+        next_id: AtomicU64::new(1),
+        sender,
+        pending,
+        events,
+        closed: Arc::new(AtomicBool::new(false)),
+    })
 }
 
 impl CdpClient {

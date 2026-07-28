@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, timeout};
 
 use bifrost_agent::{PlanStep, PlanStepStatus};
+use bifrost_core::EXTERNAL_CLI_WORKER_ENV;
 
 const DEFAULT_RUNTIME: &str = "external_cli";
 const DEFAULT_ADAPTER: &str = "codex";
@@ -26,9 +27,10 @@ const LEGACY_CLAUDE_CODE_RUNNER_ID: &str = "Claude Code";
 const LEGACY_TRAEX_RUNNER_ALIAS: &str = concat!("tre", "ex");
 const CONFIG_FILENAME: &str = "im_gateway_external_cli_agent.json";
 const CONFIG_VERSION: u32 = 1;
-const MAX_EXTERNAL_RUNNER_IMAGES_PER_MESSAGE: usize = 6;
+const MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE: usize = 6;
 const MAX_PENDING_EXTERNAL_GUIDES: usize = 32;
 const WORKER_STOP_GRACE_MS: u64 = 1500;
+const CLI_VERSION_DETECTION_TIMEOUT_SECS: u64 = 10;
 const CODEX_WEEKLY_WINDOW_MINUTES: u64 = 7 * 24 * 60;
 #[cfg(unix)]
 const PROCESS_KILL_GRACE_MS: u64 = 250;
@@ -282,6 +284,8 @@ pub struct ExternalCliRunRequest {
     pub message: String,
     #[serde(default)]
     pub images: Vec<ExternalCliImageInput>,
+    #[serde(default)]
+    pub files: Vec<ExternalCliFileInput>,
     #[serde(default = "default_operation")]
     pub operation: String,
     #[serde(default)]
@@ -324,9 +328,33 @@ fn default_image_mime_type() -> String {
     "image/png".to_string()
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalCliFileInput {
+    #[serde(default = "default_file_mime_type", alias = "mime_type")]
+    pub mime_type: String,
+    pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+fn default_file_mime_type() -> String {
+    "application/octet-stream".to_string()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalCliSavedImageAttachment {
+    pub path: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalCliSavedFileAttachment {
     pub path: String,
     pub mime_type: String,
     pub size_bytes: u64,
@@ -858,6 +886,28 @@ struct CommandOutput {
     events: Vec<ExternalCliProgressEvent>,
 }
 
+fn apply_command_environment(command: &mut Command, env: &BTreeMap<String, String>) {
+    if !has_explicit_path_environment(env) {
+        if let Some(path) = bifrost_core::inherited_executable_path() {
+            command.env("PATH", path);
+        }
+    }
+    for (key, value) in env {
+        command.env(key, value);
+    }
+}
+
+fn has_explicit_path_environment(env: &BTreeMap<String, String>) -> bool {
+    #[cfg(windows)]
+    {
+        env.keys().any(|key| key.eq_ignore_ascii_case("PATH"))
+    }
+    #[cfg(not(windows))]
+    {
+        env.contains_key("PATH")
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ExternalCliRuntime {
     runs_root: PathBuf,
@@ -1051,13 +1101,7 @@ impl ExternalCliRuntime {
         request: ExternalCliRunRequest,
         progress_tx: Option<mpsc::UnboundedSender<ExternalCliProgressEvent>>,
     ) -> Result<ExternalCliRunResult, String> {
-        if std::env::var_os("BIFROST_EXTERNAL_CLI_WORKER").is_some() {
-            return self
-                .run_in_current_process_with_progress(request, progress_tx)
-                .await;
-        }
-        #[cfg(test)]
-        if std::env::var_os("BIFROST_FORCE_EXTERNAL_CLI_WORKER").is_none() {
+        if should_run_external_cli_in_current_process() {
             return self
                 .run_in_current_process_with_progress(request, progress_tx)
                 .await;
@@ -1198,8 +1242,9 @@ impl ExternalCliRuntime {
         let events_path = run_dir.join("normalized_events.jsonl");
         let stop_marker_path = run_dir.join("stop_requested");
         let saved_images = save_image_attachments(&run_dir, &request).await?;
+        let saved_files = save_file_attachments(&run_dir, &request).await?;
 
-        let prompt = build_prompt(&request, &saved_images).await?;
+        let prompt = build_prompt(&request, &saved_images, &saved_files).await?;
         tokio::fs::write(&prompt_path, &prompt)
             .await
             .map_err(|error| format!("write prompt failed: {error}"))?;
@@ -1412,6 +1457,7 @@ impl ExternalCliRuntime {
                 spec: &spec,
                 prompt: &prompt,
                 saved_images: &saved_images,
+                saved_files: &saved_files,
                 stdout: &run_output.stdout,
                 stderr: &run_output.stderr,
                 events: &run_output.events,
@@ -1429,6 +1475,12 @@ impl ExternalCliRuntime {
             metadata.insert(
                 "attachments.images".to_string(),
                 serde_json::to_string(&saved_images).unwrap_or_else(|_| "[]".to_string()),
+            );
+        }
+        if !saved_files.is_empty() {
+            metadata.insert(
+                "attachments.files".to_string(),
+                serde_json::to_string(&saved_files).unwrap_or_else(|_| "[]".to_string()),
             );
         }
         tokio::fs::write(&stdout_path, &run_output.stdout)
@@ -1470,6 +1522,17 @@ impl ExternalCliRuntime {
     }
 }
 
+fn should_run_external_cli_in_current_process() -> bool {
+    #[cfg(test)]
+    {
+        std::env::var_os("BIFROST_FORCE_EXTERNAL_CLI_WORKER").is_none()
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
 pub fn default_runs_root() -> PathBuf {
     bifrost_agent::config::agent_home_dir()
         .join("im_gateway")
@@ -1485,6 +1548,7 @@ pub fn run_request_from_settings(
     ExternalCliRunRequest {
         message: message.into(),
         images: Vec::new(),
+        files: Vec::new(),
         operation: default_operation(),
         params: serde_json::Value::Null,
         provider_id,
@@ -1636,7 +1700,11 @@ fn validate_run_request(request: &ExternalCliRunRequest) -> Result<(), String> {
         .images
         .iter()
         .any(|image| !image.data.trim().is_empty());
-    if needs_message && request.message.trim().is_empty() && !has_image {
+    let has_file = request
+        .files
+        .iter()
+        .any(|file| !file.data.trim().is_empty());
+    if needs_message && request.message.trim().is_empty() && !has_image && !has_file {
         return Err("message cannot be empty".to_string());
     }
     Ok(())
@@ -1691,6 +1759,7 @@ fn canonicalize_for_allowlist(path: &Path) -> Result<PathBuf, String> {
 async fn build_prompt(
     request: &ExternalCliRunRequest,
     saved_images: &[ExternalCliSavedImageAttachment],
+    saved_files: &[ExternalCliSavedFileAttachment],
 ) -> Result<String, String> {
     let mut prompt = String::new();
     if let Some(instructions) = request.instructions.as_deref() {
@@ -1749,6 +1818,29 @@ async fn build_prompt(
         }
         prompt.push('\n');
     }
+    if !saved_files.is_empty() {
+        prompt.push_str("## Attached Files\n\n");
+        prompt.push_str(
+            "The user sent the following local files. Use these paths when you need to inspect, read, or reason about the attachments.\n\n",
+        );
+        for (index, file) in saved_files.iter().enumerate() {
+            let name = file
+                .name
+                .as_deref()
+                .map(sanitize_file_attachment_name)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "attachment".to_string());
+            prompt.push_str(&format!(
+                "{}. `{}` (name: {}, mime_type: {}, size_bytes: {})\n",
+                index + 1,
+                file.path,
+                name,
+                file.mime_type,
+                file.size_bytes
+            ));
+        }
+        prompt.push('\n');
+    }
     prompt.push_str(request.message.trim());
     prompt.push('\n');
     Ok(prompt)
@@ -1762,15 +1854,15 @@ async fn save_image_attachments(
     let normalized: Vec<&ExternalCliImageInput> = images
         .iter()
         .filter(|image| !image.data.trim().is_empty())
-        .take(MAX_EXTERNAL_RUNNER_IMAGES_PER_MESSAGE)
+        .take(MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE)
         .collect();
     if normalized.is_empty() {
         return Ok(Vec::new());
     }
-    if images.len() > MAX_EXTERNAL_RUNNER_IMAGES_PER_MESSAGE {
+    if images.len() > MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE {
         tracing::warn!(
             image_count = images.len(),
-            max_images = MAX_EXTERNAL_RUNNER_IMAGES_PER_MESSAGE,
+            max_images = MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE,
             "too many external runner images in one request; truncating images"
         );
     }
@@ -1805,6 +1897,63 @@ async fn save_image_attachments(
     Ok(saved)
 }
 
+async fn save_file_attachments(
+    run_dir: &Path,
+    request: &ExternalCliRunRequest,
+) -> Result<Vec<ExternalCliSavedFileAttachment>, String> {
+    let files = &request.files;
+    let normalized: Vec<&ExternalCliFileInput> = files
+        .iter()
+        .filter(|file| !file.data.trim().is_empty())
+        .take(MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE)
+        .collect();
+    if normalized.is_empty() {
+        return Ok(Vec::new());
+    }
+    if files.len() > MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE {
+        let file_count = files.len();
+        tracing::warn!(
+            file_count,
+            max_files = MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE,
+            "too many external runner files in one request; truncating files"
+        );
+    }
+    let files_dir = trusted_session_attachment_base_dir(request)
+        .map(|value| {
+            value.join(
+                run_dir
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("run")),
+            )
+        })
+        .unwrap_or_else(|| run_dir.join("attachments"))
+        .join("files");
+    tokio::fs::create_dir_all(&files_dir)
+        .await
+        .map_err(|error| format!("create file attachments dir failed: {error}"))?;
+    let mut saved = Vec::with_capacity(normalized.len());
+    for (index, file) in normalized.into_iter().enumerate() {
+        let bytes = decode_attachment_data(&file.data, "file")?;
+        let name = file
+            .name
+            .as_deref()
+            .map(sanitize_file_attachment_name)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| format!("attachment-{}.bin", index + 1));
+        let path = unique_file_attachment_path(&files_dir, index + 1, &name).await;
+        tokio::fs::write(&path, &bytes)
+            .await
+            .map_err(|error| format!("write file attachment failed: {error}"))?;
+        saved.push(ExternalCliSavedFileAttachment {
+            path: path.display().to_string(),
+            mime_type: file.mime_type.clone(),
+            size_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            name: file.name.clone(),
+        });
+    }
+    Ok(saved)
+}
+
 fn trusted_session_attachment_base_dir(request: &ExternalCliRunRequest) -> Option<PathBuf> {
     let value = request
         .params
@@ -1831,6 +1980,10 @@ fn trusted_session_attachment_base_dir(request: &ExternalCliRunRequest) -> Optio
 }
 
 fn decode_image_data(data: &str) -> Result<Vec<u8>, String> {
+    decode_attachment_data(data, "image")
+}
+
+fn decode_attachment_data(data: &str, label: &str) -> Result<Vec<u8>, String> {
     let data = data.trim();
     let payload = data
         .strip_prefix("data:")
@@ -1840,7 +1993,7 @@ fn decode_image_data(data: &str) -> Result<Vec<u8>, String> {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD
         .decode(payload)
-        .map_err(|error| format!("decode image attachment failed: {error}"))
+        .map_err(|error| format!("decode {label} attachment failed: {error}"))
 }
 
 fn image_extension(mime_type: &str) -> &'static str {
@@ -1850,6 +2003,52 @@ fn image_extension(mime_type: &str) -> &'static str {
         "image/gif" => "gif",
         "image/png" => "png",
         _ => "img",
+    }
+}
+
+fn sanitize_file_attachment_name(name: &str) -> String {
+    let name = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("attachment")
+        .trim()
+        .trim_matches('.');
+    let sanitized: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let sanitized = sanitized.trim_matches('.');
+    if sanitized.is_empty() {
+        "attachment.bin".to_string()
+    } else {
+        sanitized.chars().take(160).collect()
+    }
+}
+
+async fn unique_file_attachment_path(dir: &Path, index: usize, name: &str) -> PathBuf {
+    let base = sanitize_file_attachment_name(name);
+    let path = Path::new(&base);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("attachment");
+    let extension = path.extension().and_then(|value| value.to_str());
+    let candidate_name = match extension {
+        Some(extension) if !extension.is_empty() => format!("{index}-{stem}.{extension}"),
+        _ => format!("{index}-{stem}"),
+    };
+    let candidate = dir.join(candidate_name);
+    if tokio::fs::try_exists(&candidate).await.unwrap_or(false) {
+        dir.join(format!("{index}-{}", uuid::Uuid::new_v4()))
+    } else {
+        candidate
     }
 }
 
@@ -2242,9 +2441,7 @@ pub async fn load_external_cli_model_catalog(
     if let Some(work_dir) = work_dir {
         command.current_dir(work_dir);
     }
-    for (key, value) in &config.env {
-        command.env(key, value);
-    }
+    apply_command_environment(&mut command, &config.env);
     let output = timeout(Duration::from_secs(10), command.output())
         .await
         .map_err(|_| format!("{adapter} model catalog command timed out"))?
@@ -3228,13 +3425,14 @@ async fn detect_cli_version(adapter: &str, spec: &CommandSpec) -> Option<String>
     if let Some(work_dir) = spec.work_dir.as_ref() {
         command.current_dir(work_dir);
     }
-    for (key, value) in &spec.env {
-        command.env(key, value);
-    }
-    let output = timeout(Duration::from_secs(3), command.output())
-        .await
-        .ok()?
-        .ok()?;
+    apply_command_environment(&mut command, &spec.env);
+    let output = timeout(
+        Duration::from_secs(CLI_VERSION_DETECTION_TIMEOUT_SECS),
+        command.output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let value = stdout
@@ -3250,6 +3448,7 @@ struct ExternalCliObservabilityInput<'a> {
     spec: &'a CommandSpec,
     prompt: &'a str,
     saved_images: &'a [ExternalCliSavedImageAttachment],
+    saved_files: &'a [ExternalCliSavedFileAttachment],
     stdout: &'a [u8],
     stderr: &'a [u8],
     events: &'a [ExternalCliProgressEvent],
@@ -3273,6 +3472,7 @@ fn append_external_cli_observability_metadata(
     let spec = input.spec;
     let prompt = input.prompt;
     let saved_images = input.saved_images;
+    let saved_files = input.saved_files;
     let stdout = input.stdout;
     let stderr = input.stderr;
     let events = input.events;
@@ -3342,14 +3542,28 @@ fn append_external_cli_observability_metadata(
     insert_metadata_u64(
         metadata,
         "prompt.attachmentPathCount",
-        saved_images.len() as u64,
+        (saved_images.len() + saved_files.len()) as u64,
     );
-    insert_metadata_u64(metadata, "attachments.count", saved_images.len() as u64);
+    insert_metadata_u64(
+        metadata,
+        "attachments.count",
+        (saved_images.len() + saved_files.len()) as u64,
+    );
     insert_metadata_u64(
         metadata,
         "attachments.totalBytes",
-        saved_images.iter().map(|image| image.size_bytes).sum(),
+        saved_images
+            .iter()
+            .map(|image| image.size_bytes)
+            .sum::<u64>()
+            + saved_files.iter().map(|file| file.size_bytes).sum::<u64>(),
     );
+    insert_metadata_u64(
+        metadata,
+        "attachments.imageCount",
+        saved_images.len() as u64,
+    );
+    insert_metadata_u64(metadata, "attachments.fileCount", saved_files.len() as u64);
     insert_metadata_json(
         metadata,
         "attachments.summary",
@@ -3357,12 +3571,22 @@ fn append_external_cli_observability_metadata(
             .iter()
             .map(|image| {
                 serde_json::json!({
+                    "kind": "image",
                     "mimeType": image.mime_type,
                     "name": image.name,
                     "sizeBytes": image.size_bytes,
                     "path": image.path,
                 })
             })
+            .chain(saved_files.iter().map(|file| {
+                serde_json::json!({
+                    "kind": "file",
+                    "mimeType": file.mime_type,
+                    "name": file.name,
+                    "sizeBytes": file.size_bytes,
+                    "path": file.path,
+                })
+            }))
             .collect::<Vec<_>>(),
     );
 
@@ -3659,9 +3883,7 @@ async fn run_command(
     if let Some(work_dir) = spec.work_dir.as_ref() {
         command.current_dir(work_dir);
     }
-    for (key, value) in &spec.env {
-        command.env(key, value);
-    }
+    apply_command_environment(&mut command, &spec.env);
 
     let mut child = command
         .spawn()
@@ -3929,6 +4151,12 @@ fn remove_active_session_if_owned(session_key: &str, run_id: &str) -> bool {
 }
 
 fn spawn_external_cli_worker_process(executable: &Path) -> Result<tokio::process::Child, String> {
+    external_cli_worker_process_command(executable)
+        .spawn()
+        .map_err(|error| format!("spawn external runner worker failed: {error}"))
+}
+
+fn external_cli_worker_process_command(executable: &Path) -> Command {
     let mut command = Command::new(executable);
     command
         .arg("agent")
@@ -3936,13 +4164,11 @@ fn spawn_external_cli_worker_process(executable: &Path) -> Result<tokio::process
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .env("BIFROST_EXTERNAL_CLI_WORKER", "1")
+        .env(EXTERNAL_CLI_WORKER_ENV, "1")
         .kill_on_drop(true);
     #[cfg(unix)]
     command.process_group(0);
     command
-        .spawn()
-        .map_err(|error| format!("spawn external runner worker failed: {error}"))
 }
 
 async fn write_external_cli_worker_command(

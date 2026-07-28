@@ -33,14 +33,32 @@ CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
 CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
   cargo test --manifest-path desktop/src-tauri/Cargo.toml deferred_desktop_completion_preserves_transaction_artifacts_for_helper_commit -- --nocapture
 CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
-  cargo test --manifest-path desktop/src-tauri/Cargo.toml cli_owned_upgrade_relaunch_reuses_only_the_restarted_target_backend -- --nocapture
+  cargo test --manifest-path desktop/src-tauri/Cargo.toml cli_owned_upgrade_relaunch_reuses_the_target_backend_even_when_pid_is_unchanged -- --nocapture
+CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
+  cargo test --manifest-path desktop/src-tauri/Cargo.toml cli_owned_upgrade_relaunch_falls_back_to_managed_core_when_port_is_free -- --nocapture
+CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
+  cargo test --manifest-path desktop/src-tauri/Cargo.toml cli_owned_upgrade_relaunch_keeps_refusing_when_port_is_still_occupied -- --nocapture
+CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
+  cargo test --manifest-path desktop/src-tauri/Cargo.toml failed_cli_owned_handoff_retries_without_another_thirty_second_wait -- --nocapture
+CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
+  cargo test --manifest-path desktop/src-tauri/Cargo.toml healthy_target_backend_completes_and_clears_cli_upgrade_handoff -- --nocapture
+CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
+  cargo test --manifest-path desktop/src-tauri/Cargo.toml healthy_wrong_version_backend_does_not_bypass_cli_upgrade_handoff -- --nocapture
+CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
+  cargo test --manifest-path desktop/src-tauri/Cargo.toml healthy_target_backend_on_another_port_does_not_complete_cli_upgrade_handoff -- --nocapture
+CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
+  cargo test --manifest-path desktop/src-tauri/Cargo.toml desktop_shutdown_stops_only_a_backend_owned_by_the_desktop -- --nocapture
+CARGO_TARGET_DIR="$REPO_ROOT/target/desktop-upgrade-handoff-contract" \
+  cargo test --manifest-path desktop/src-tauri/Cargo.toml cli_owned_upgrade_relaunch_takes_over_wrong_version_core_owned_by_same_data_dir -- --nocapture
 
 DESKTOP_MAIN="$REPO_ROOT/desktop/src-tauri/src/main.rs"
 DESKTOP_HANDOFF="$REPO_ROOT/desktop/src-tauri/src/upgrade_handoff.rs"
 DESKTOP_BACKEND="$REPO_ROOT/desktop/src-tauri/src/backend_runtime.rs"
+DESKTOP_RUNTIME="$REPO_ROOT/desktop/src-tauri/src/runtime_ownership.rs"
 DESKTOP_TESTS="$REPO_ROOT/desktop/src-tauri/src/tests.rs"
+DESKTOP_RECOVERY_TESTS="$REPO_ROOT/desktop/src-tauri/src/tests/cli_handoff_recovery.rs"
 
-for module in "$DESKTOP_MAIN" "$DESKTOP_HANDOFF" "$DESKTOP_BACKEND" "$DESKTOP_TESTS"; do
+for module in "$DESKTOP_MAIN" "$DESKTOP_HANDOFF" "$DESKTOP_BACKEND" "$DESKTOP_RUNTIME" "$DESKTOP_TESTS" "$DESKTOP_RECOVERY_TESTS"; do
   if [[ "$(wc -l <"$module")" -gt 1500 ]]; then
     echo "[desktop-upgrade-handoff] FAIL: desktop module exceeds 1500 lines: $module"
     exit 1
@@ -86,10 +104,23 @@ if grep -Fq 'commit_deferred_desktop_install_artifacts' "$DESKTOP_BACKEND" ||
   exit 1
 fi
 
-if ! grep -Fq 'wait_for_external_cli_backend(marker, DESKTOP_UPGRADE_RELAUNCH_PORT_WAIT)' "$DESKTOP_BACKEND" ||
-  ! grep -Fq 'refusing to launch a second desktop-managed core' "$DESKTOP_BACKEND" ||
-  ! grep -Fq 'observed_external_core_pid' "$DESKTOP_HANDOFF"; then
-  echo "[desktop-upgrade-handoff] FAIL: CLI-owned WebView relaunch can start a second bundled core"
+if ! grep -Fq 'resolve_external_cli_backend_handoff(data_dir, marker, effective_wait)' "$DESKTOP_BACKEND" ||
+  ! grep -Fq 'wait_for_external_cli_backend(marker, timeout)' "$DESKTOP_HANDOFF" ||
+  ! grep -Fq 'port is free, launching desktop-managed core' "$DESKTOP_HANDOFF" ||
+  ! grep -Fq 'port is still occupied, refusing to launch a second desktop-managed core' "$DESKTOP_HANDOFF" ||
+  ! grep -Fq 'observed_external_core_pid' "$DESKTOP_HANDOFF" ||
+  ! grep -Fq 'runtime_marker_matches_backend_identity(data_dir, marker.proxy_port, identity)' "$DESKTOP_HANDOFF" ||
+  ! grep -Fq 'fn is_port_available(port: u16) -> bool' "$DESKTOP_RUNTIME" ||
+  ! grep -Fq 'TcpListener::bind((BACKEND_BIND_HOST, port)).is_ok()' "$DESKTOP_RUNTIME"; then
+  echo "[desktop-upgrade-handoff] FAIL: CLI-owned WebView relaunch fallback/fail-closed contract is missing"
+  exit 1
+fi
+
+if ! grep -Fq 'desktop_shutdown_backend_action(' "$DESKTOP_RUNTIME" ||
+  ! grep -Fq 'DesktopShutdownBackendAction::PreserveExternalRuntime' "$DESKTOP_RUNTIME" ||
+  ! grep -Fq 'desktop_shutdown_backend_action_for_state(&state)' "$DESKTOP_MAIN" ||
+  ! grep -Fq 'upgrade_handoff_requires_backend_release(marker)' "$DESKTOP_HANDOFF"; then
+  echo "[desktop-upgrade-handoff] FAIL: desktop shutdown/runtime ownership contract is missing"
   exit 1
 fi
 

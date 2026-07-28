@@ -1,26 +1,33 @@
 use super::{
     append_desktop_bootstrap_log, begin_backend_recovery, clear_backend_unavailable_if_healthy,
+    configure_backend_stop_command, configure_desktop_backend_environment,
     deferred_desktop_install_version_error, desktop_backend_env, desktop_backend_start_args,
-    desktop_pending_install_path, desktop_sidecar_rust_log, desktop_startup_deadline,
-    desktop_startup_session_id, desktop_test_allows_multiple_instances,
+    desktop_pending_install_path, desktop_shutdown_backend_action, desktop_sidecar_rust_log,
+    desktop_startup_deadline, desktop_startup_session_id, desktop_test_allows_multiple_instances,
     desktop_upgrade_relaunch_marker_path, desktop_upgrade_shutdown_requested,
-    ensure_backend_running, host_window_close_behavior_for_platform, is_server_config_response,
+    ensure_backend_running, ensure_backend_running_with_cli_wait,
+    existing_backend_candidate_matches_runtime, external_cli_backend_matches_handoff,
+    external_cli_handoff_wait, failed_cli_handoff_can_retry_immediately,
+    host_window_close_behavior_for_platform, is_server_config_response,
     is_upgrade_relaunch_marker_active, main_interface_decorations_for_platform,
     mark_backend_unavailable_for_manual_start, parse_port_update_response,
     persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit, publish_startup_ready,
     read_active_upgrade_relaunch_marker, read_pending_desktop_install,
     record_startup_deadline_error, relaunch_command_for_target, resolve_bifrost_binary_from_env,
-    resolve_desktop_config_path, resolve_desktop_data_dir,
-    sanitize_desktop_upgrade_relaunch_command, save_desktop_config,
-    should_allow_multiple_instances, should_handoff_to_main, should_retry_backend_candidate,
-    startup_deadline_disposition, stop_backend_before_restart, terminate_managed_backend,
+    resolve_desktop_config_path, resolve_desktop_data_dir, resolve_external_cli_backend_handoff,
+    runtime_marker_matches_active_backend, sanitize_desktop_upgrade_relaunch_command,
+    save_desktop_config, should_allow_multiple_instances, should_handoff_to_main,
+    should_retry_backend_candidate, startup_deadline_disposition, stop_backend_before_restart,
+    terminate_managed_backend, upgrade_handoff_requires_backend_release,
     upgrade_relaunch_uses_external_cli_backend, uses_borderless_desktop_chrome_for_platform,
     wait_for_backend, wait_for_child_exit, wait_for_external_cli_backend,
     windows_desktop_upgrade_handoff_command, write_desktop_upgrade_terminal_progress,
-    write_upgrade_relaunch_marker, BackendState, BackendWaitFailureKind, DesktopConfig,
-    DesktopInstallRollback, DesktopUpgradeRelaunchMarker, HostWindowCloseBehavior,
+    write_upgrade_relaunch_marker, BackendState, BackendSystemIdentity, BackendWaitFailureKind,
+    DesktopConfig, DesktopInstallRollback, DesktopRuntimeMarker, DesktopShutdownBackendAction,
+    DesktopUpgradeRelaunchMarker, ExternalCliBackendHandoff, HostWindowCloseBehavior,
     PendingDesktopInstall, StartupDeadlineDisposition, DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
-    DESKTOP_UPGRADE_SHUTDOWN_ARG, WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
+    DESKTOP_UPGRADE_SHUTDOWN_ARG, DETACHED_DAEMON_CHILD_ENV, EXTERNAL_CLI_WORKER_ENV,
+    WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
 };
 use bifrost_storage::data_dir as shared_bifrost_data_dir;
 use std::ffi::OsStr;
@@ -36,6 +43,9 @@ use std::time::{Duration, Instant};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+mod backend_wait;
+mod cli_handoff_recovery;
+
 fn assert_upgrade_relaunch_environment_removed(command: &Command) {
     for key in [
         super::DESKTOP_UPGRADE_RELAUNCH_HELPER_ENV,
@@ -49,6 +59,27 @@ fn assert_upgrade_relaunch_environment_removed(command: &Command) {
             "relaunch command must remove {key} before it opens the new App"
         );
     }
+}
+
+#[test]
+fn desktop_backend_stop_command_is_authorized_for_owned_runtime() {
+    let data_dir = Path::new("/tmp/bifrost-desktop-owned");
+    let mut command = Command::new("bifrost");
+    configure_backend_stop_command(&mut command, data_dir);
+
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        vec![OsStr::new("stop")]
+    );
+    let env = command.get_envs().collect::<Vec<_>>();
+    assert!(env.iter().any(|(name, value)| {
+        *name == OsStr::new("BIFROST_DATA_DIR")
+            && *value == Some(OsStr::new("/tmp/bifrost-desktop-owned"))
+    }));
+    assert!(env.iter().any(|(name, value)| {
+        *name == OsStr::new("BIFROST_DESKTOP_AUTHORIZED_STOP_INTERNAL")
+            && *value == Some(OsStr::new("1"))
+    }));
 }
 
 fn test_backend_state(
@@ -96,11 +127,22 @@ fn spawn_one_shot_health_server() -> u16 {
 }
 
 fn spawn_one_shot_system_server(pid: u32, version: &str) -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind system server");
+    spawn_system_server(pid, version, 1)
+}
+
+fn spawn_system_server(pid: u32, version: &str, request_count: usize) -> u16 {
+    spawn_system_server_on("127.0.0.1", pid, version, request_count)
+}
+
+fn spawn_system_server_on(host: &str, pid: u32, version: &str, request_count: usize) -> u16 {
+    let listener = TcpListener::bind((host, 0)).expect("bind system server");
     let port = listener.local_addr().expect("system server addr").port();
     let body = format!(r#"{{"version":"{version}","pid":{pid}}}"#);
     thread::spawn(move || {
-        if let Ok((mut stream, _)) = listener.accept() {
+        for _ in 0..request_count {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
             let mut buffer = [0_u8; 1024];
             let _ = stream.read(&mut buffer);
             let response = format!(
@@ -345,6 +387,48 @@ fn desktop_sidecar_disables_launchd_cleanup_registration() {
     assert!(env
         .iter()
         .any(|(key, value)| { *key == "BIFROST_DATA_DIR" && value == &expected_data_dir }));
+}
+
+#[test]
+fn desktop_sidecar_clears_inherited_process_role_markers() {
+    let _guard = ENV_LOCK.lock().expect("env lock");
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let previous_path = std::env::var_os("PATH");
+    let minimal_path = std::env::join_paths([
+        temp_dir.path().join("system-bin"),
+        temp_dir.path().join("fallback-bin"),
+    ])
+    .expect("minimal path");
+    std::env::set_var("PATH", minimal_path);
+    let expected_path = bifrost_core::inherited_executable_path().expect("expected PATH");
+    let mut command = Command::new("bifrost");
+    command.env(EXTERNAL_CLI_WORKER_ENV, "leaked-worker-role");
+    configure_desktop_backend_environment(&mut command, temp_dir.path(), "session-123");
+
+    let env = command.get_envs().collect::<Vec<_>>();
+    assert!(env
+        .iter()
+        .any(|(key, value)| { *key == OsStr::new(DETACHED_DAEMON_CHILD_ENV) && value.is_none() }));
+    assert!(env
+        .iter()
+        .any(|(key, value)| { *key == OsStr::new(EXTERNAL_CLI_WORKER_ENV) && value.is_none() }));
+    assert!(env.iter().any(|(key, value)| {
+        *key == OsStr::new("BIFROST_DESKTOP_CORE")
+            && value.is_some_and(|value| value == OsStr::new("1"))
+    }));
+    let path = env
+        .iter()
+        .find_map(|(key, value)| {
+            (*key == OsStr::new("PATH"))
+                .then(|| value.map(ToOwned::to_owned))
+                .flatten()
+        })
+        .expect("desktop sidecar PATH");
+    assert_eq!(path, expected_path);
+    match previous_path {
+        Some(value) => std::env::set_var("PATH", value),
+        None => std::env::remove_var("PATH"),
+    }
 }
 
 #[test]
@@ -764,8 +848,11 @@ fn upgrade_relaunch_marker_round_trips_and_stale_marker_is_removed() {
 }
 
 #[test]
-fn cli_owned_upgrade_relaunch_reuses_only_the_restarted_target_backend() {
-    let target_port = spawn_one_shot_system_server(456, "0.0.156");
+fn cli_owned_upgrade_relaunch_falls_back_to_managed_core_when_port_is_free() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("reserve port");
+    let target_port = listener.local_addr().expect("reserved addr").port();
+    drop(listener);
     let marker = DesktopUpgradeRelaunchMarker {
         schema_version: 1,
         created_at_ms: super::current_time_millis(),
@@ -779,48 +866,68 @@ fn cli_owned_upgrade_relaunch_reuses_only_the_restarted_target_backend() {
         rollback: None,
     };
 
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let (child, port) = ensure_backend_running(
-        Path::new("/must-not-launch-a-second-core"),
+    let started_at = Instant::now();
+    let error = ensure_backend_running_with_cli_wait(
+        Path::new("/missing/bundled/bifrost"),
         temp_dir.path(),
-        "hybrid-upgrade-test",
+        "cli-owned-fallback-test",
         target_port,
         Some(&marker),
+        Duration::ZERO,
     )
-    .expect("the relaunched App reuses the restarted CLI-owned core");
-    assert!(child.is_none());
-    assert_eq!(port, target_port);
-    assert!(upgrade_relaunch_uses_external_cli_backend(&marker));
+    .expect_err("missing bundled binary should fail after taking the fallback path");
 
-    let managed_marker = DesktopUpgradeRelaunchMarker {
-        old_core_pid: Some(124),
-        observed_external_core_pid: None,
-        ..marker.clone()
-    };
     assert!(
-        !upgrade_relaunch_uses_external_cli_backend(&managed_marker),
-        "an App-managed core still requires release and a fresh bundled child"
+        started_at.elapsed() < Duration::from_secs(2),
+        "fallback should not wait for the normal upgrade handoff release once the port is free"
     );
+    assert!(
+        error.to_string().contains("failed to start backend"),
+        "expected managed-core launch path, got: {error}"
+    );
+    assert!(
+        !error
+            .to_string()
+            .contains("CLI-owned backend did not restart"),
+        "free port should not keep the App trapped in CLI-owned handoff refusal"
+    );
+    let bootstrap_log =
+        fs::read_to_string(temp_dir.path().join("logs/desktop-bootstrap.log")).expect("log");
+    assert!(bootstrap_log.contains("port is free, launching desktop-managed core"));
+}
 
-    let old_pid_port = spawn_one_shot_system_server(124, "0.0.156");
-    let old_pid_marker = DesktopUpgradeRelaunchMarker {
-        proxy_port: old_pid_port,
-        ..marker.clone()
+#[test]
+fn cli_owned_upgrade_relaunch_keeps_refusing_when_port_is_still_occupied() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let listener = TcpListener::bind((super::BACKEND_BIND_HOST, 0)).expect("occupy port");
+    let target_port = listener.local_addr().expect("occupied addr").port();
+    let marker = DesktopUpgradeRelaunchMarker {
+        schema_version: 1,
+        created_at_ms: super::current_time_millis(),
+        old_app_pid: 123,
+        old_core_pid: None,
+        observed_external_core_pid: Some(124),
+        proxy_port: target_port,
+        app_target: "/tmp/Bifrost.app".to_string(),
+        target_version: Some("0.0.156".to_string()),
+        pending_install: None,
+        rollback: None,
     };
-    assert!(!wait_for_external_cli_backend(
-        &old_pid_marker,
-        Duration::ZERO
-    ));
 
-    let old_version_port = spawn_one_shot_system_server(457, "0.0.155");
-    let old_version_marker = DesktopUpgradeRelaunchMarker {
-        proxy_port: old_version_port,
-        ..marker
-    };
-    assert!(!wait_for_external_cli_backend(
-        &old_version_marker,
-        Duration::ZERO
-    ));
+    let error = ensure_backend_running_with_cli_wait(
+        Path::new("/must-not-launch-a-second-core"),
+        temp_dir.path(),
+        "cli-owned-occupied-test",
+        target_port,
+        Some(&marker),
+        Duration::ZERO,
+    )
+    .expect_err("occupied port should still block a replacement core");
+
+    drop(listener);
+    assert!(error
+        .to_string()
+        .contains("port is still occupied, refusing to launch a second desktop-managed core"));
 }
 
 #[cfg(target_os = "macos")]
@@ -870,6 +977,97 @@ fn backend_recovery_guard_prevents_parallel_recovery() {
 }
 
 #[test]
+fn desktop_shutdown_stops_only_a_backend_owned_by_the_desktop() {
+    assert_eq!(
+        desktop_shutdown_backend_action(false, Some("daemon"), true),
+        DesktopShutdownBackendAction::PreserveExternalRuntime
+    );
+    assert_eq!(
+        desktop_shutdown_backend_action(false, None, false),
+        DesktopShutdownBackendAction::PreserveExternalRuntime
+    );
+    assert_eq!(
+        desktop_shutdown_backend_action(false, Some("desktop"), false),
+        DesktopShutdownBackendAction::PreserveExternalRuntime,
+        "a stale desktop runtime marker must not authorize stopping an unrelated core"
+    );
+    assert_eq!(
+        desktop_shutdown_backend_action(false, Some("desktop"), true),
+        DesktopShutdownBackendAction::StopOwnedRuntime
+    );
+    assert_eq!(
+        desktop_shutdown_backend_action(true, Some("daemon"), false),
+        DesktopShutdownBackendAction::StopOwnedRuntime,
+        "the live managed child remains authoritative even before its runtime marker is visible"
+    );
+
+    let runtime = DesktopRuntimeMarker {
+        pid: 456,
+        port: 19900,
+        start_mode: Some("desktop".to_string()),
+    };
+    let identity = BackendSystemIdentity {
+        version: "0.0.163".to_string(),
+        pid: 456,
+    };
+    assert!(runtime_marker_matches_active_backend(
+        &runtime, 19900, &identity
+    ));
+    assert!(
+        !runtime_marker_matches_active_backend(&runtime, 19901, &identity),
+        "a stale desktop runtime on another port must not authorize a stop"
+    );
+}
+
+#[test]
+fn normal_startup_reuses_only_the_current_data_directory_runtime() {
+    let runtime = DesktopRuntimeMarker {
+        pid: 456,
+        port: 19900,
+        start_mode: Some("daemon".to_string()),
+    };
+    let matching_identity = BackendSystemIdentity {
+        version: "0.0.165".to_string(),
+        pid: 456,
+    };
+    let foreign_identity = BackendSystemIdentity {
+        version: "0.0.165".to_string(),
+        pid: 789,
+    };
+
+    assert!(existing_backend_candidate_matches_runtime(
+        Some(&runtime),
+        19900,
+        Some(&matching_identity),
+        true,
+    ));
+    assert!(!existing_backend_candidate_matches_runtime(
+        None,
+        19900,
+        Some(&matching_identity),
+        true,
+    ));
+    assert!(!existing_backend_candidate_matches_runtime(
+        Some(&runtime),
+        19901,
+        Some(&matching_identity),
+        true,
+    ));
+    assert!(!existing_backend_candidate_matches_runtime(
+        Some(&runtime),
+        19900,
+        Some(&foreign_identity),
+        true,
+    ));
+    assert!(!existing_backend_candidate_matches_runtime(
+        Some(&runtime),
+        19900,
+        Some(&matching_identity),
+        false,
+    ));
+}
+
+#[test]
 fn external_backend_health_failure_requires_manual_start() {
     let temp_dir =
         std::env::temp_dir().join(format!("bifrost-desktop-test-{}", std::process::id()));
@@ -915,6 +1113,38 @@ fn healthy_external_backend_clears_manual_start_gate() {
         .lock()
         .expect("startup error lock")
         .is_none());
+}
+
+#[test]
+fn healthy_backend_still_clears_manual_start_gate_during_app_managed_upgrade() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let port = spawn_one_shot_health_server();
+    let marker = DesktopUpgradeRelaunchMarker {
+        schema_version: 1,
+        created_at_ms: super::current_time_millis(),
+        old_app_pid: 123,
+        old_core_pid: Some(456),
+        observed_external_core_pid: None,
+        proxy_port: port,
+        app_target: "/tmp/Bifrost.app".to_string(),
+        target_version: Some("0.0.163".to_string()),
+        pending_install: None,
+        rollback: None,
+    };
+    let state = test_backend_state(
+        temp_dir.path().to_path_buf(),
+        port,
+        false,
+        Some("previous app-managed handoff failed".to_string()),
+    );
+    *state.upgrade_relaunch.lock().expect("marker lock") = Some(marker);
+
+    assert!(clear_backend_unavailable_if_healthy(
+        &state,
+        "test observed app-managed recovered backend",
+    ));
+    assert!(state.startup_ready.load(Ordering::SeqCst));
+    assert!(state.startup_error.lock().expect("error lock").is_none());
 }
 
 #[test]
@@ -1171,129 +1401,4 @@ fn child_wait_timeout_terminates_stuck_process() {
     assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     assert!(started_at.elapsed() < Duration::from_secs(2));
     assert!(child.try_wait().expect("poll killed child").is_some());
-}
-
-#[test]
-fn wait_for_backend_reports_child_exit_without_waiting_for_timeout() {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("reserve port");
-    let port = listener.local_addr().expect("reserved addr").port();
-    drop(listener);
-
-    let mut child = Command::new(std::env::current_exe().expect("current test executable"))
-        .args(["--list", "--format", "terse"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn short-lived child");
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let started_at = Instant::now();
-    let error = wait_for_backend(&mut child, temp_dir.path(), port, Duration::from_secs(5))
-        .expect_err("short-lived child should fail readiness wait");
-
-    assert!(
-        started_at.elapsed() < Duration::from_secs(2),
-        "child exit should short-circuit the readiness timeout"
-    );
-    assert_eq!(error.kind, BackendWaitFailureKind::ChildExited);
-    assert!(error.to_string().contains("exited before becoming ready"));
-}
-
-#[cfg(unix)]
-#[test]
-fn wait_for_backend_ignores_health_from_unrelated_process() {
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let stop = Arc::new(AtomicBool::new(false));
-    let (port, health_server) = spawn_persistent_health_server(stop.clone());
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg("sleep 0.2")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn short-lived child");
-
-    let error = wait_for_backend(&mut child, temp_dir.path(), port, Duration::from_secs(3))
-        .expect_err("external health server must not satisfy managed child readiness");
-
-    stop.store(true, Ordering::SeqCst);
-    health_server.join().expect("health server thread");
-    assert_eq!(error.kind, BackendWaitFailureKind::ChildExited);
-}
-
-#[cfg(unix)]
-#[test]
-fn wait_for_backend_accepts_health_from_matching_runtime_child() {
-    let temp_dir = tempfile::tempdir().expect("temp dir");
-    let stop = Arc::new(AtomicBool::new(false));
-    let (port, health_server) = spawn_persistent_health_server(stop.clone());
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg("sleep 3")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn long-lived child");
-    fs::write(
-        temp_dir.path().join("runtime.json"),
-        format!(r#"{{"pid":{},"port":{}}}"#, child.id(), port),
-    )
-    .expect("write runtime marker");
-
-    wait_for_backend(&mut child, temp_dir.path(), port, Duration::from_secs(3))
-        .expect("matching runtime marker should satisfy readiness");
-
-    let _ = child.kill();
-    let _ = child.wait();
-    stop.store(true, Ordering::SeqCst);
-    health_server.join().expect("health server thread");
-}
-
-#[test]
-fn poll_managed_backend_exit_reports_exited_child() {
-    let child = Command::new("sh")
-        .arg("-c")
-        .arg("exit 0")
-        .spawn()
-        .expect("spawn test child");
-    let _ = child.wait_with_output();
-
-    let state = BackendState {
-        binary_path: PathBuf::new(),
-        data_dir: PathBuf::new(),
-        config_path: PathBuf::new(),
-        startup_session_id: "test-session".to_string(),
-        launcher_only: false,
-        expected_port: Mutex::new(0),
-        port: Mutex::new(0),
-        child: Mutex::new(Some(
-            Command::new("sh")
-                .arg("-c")
-                .arg("exit 0")
-                .spawn()
-                .expect("spawn managed child"),
-        )),
-        shutdown_started: AtomicBool::new(false),
-        force_exit: AtomicBool::new(false),
-        backend_recovery_in_progress: AtomicBool::new(false),
-        startup_ready: AtomicBool::new(false),
-        startup_error: Mutex::new(None),
-        main_webview_loaded: AtomicBool::new(false),
-        main_window_ready: AtomicBool::new(false),
-        handoff_started: AtomicBool::new(false),
-        handoff_completed: AtomicBool::new(false),
-        launcher_overlay: Mutex::new(None),
-        pending_open_requests: Mutex::new(Vec::new()),
-        upgrade_relaunch: Mutex::new(None),
-    };
-
-    {
-        let mut child_guard = state.child.lock().expect("child lock");
-        let child = child_guard.as_mut().expect("child");
-        let _ = child.wait();
-    }
-
-    let reason = poll_managed_backend_exit(&state).expect("exited child reason");
-    assert!(reason.contains("exited with status"));
-    assert!(state.child.lock().expect("child lock").is_none());
-    assert!(!state.backend_recovery_in_progress.load(Ordering::SeqCst));
 }

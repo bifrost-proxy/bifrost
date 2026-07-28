@@ -1,5 +1,11 @@
 mod desktop_companion;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) use desktop_companion::DESKTOP_UPGRADE_SHUTDOWN_ARG;
 use desktop_companion::*;
+pub(crate) use desktop_companion::{
+    desktop_app_is_running, restore_desktop_after_failed_app_upgrade,
+    shutdown_running_desktop_for_app_upgrade,
+};
 
 use bifrost_core::BifrostError;
 use colored::Colorize;
@@ -45,7 +51,10 @@ const UPGRADE_COMMAND_SPAWN_RETRY_BASE_DELAY_MS: u64 = 5;
 const TEXT_FILE_BUSY_RAW_OS_ERROR: i32 = 26;
 const POST_UPGRADE_SKILL_INSTALL_TIMEOUT_SECS: u64 = 120;
 const POST_UPGRADE_SKILL_INSTALL_ARGS: &[&str] = &["install-skill", "--tool", "all", "-y"];
-const POST_UPGRADE_APP_UPDATE_TIMEOUT_SECS: u64 = 600;
+/// Maximum time without a fresh child-owned progress record before the
+/// desktop companion is considered stalled. The full download is allowed to
+/// take longer as long as it continues publishing progress.
+const POST_UPGRADE_APP_UPDATE_STALL_TIMEOUT_SECS: u64 = 600;
 const UPGRADE_CHILD_PROGRESS_HEARTBEAT_SECS: u64 = 30;
 const HOMEBREW_COMMAND_TIMEOUT_SECS: u64 = 600;
 const HOMEBREW_METADATA_TIMEOUT_SECS: u64 = 60;
@@ -565,7 +574,12 @@ fn command_output_with_timeout_and_env_streaming(
     heartbeat: Duration,
     environment: &[(&str, &str)],
     parent_upgrade_lock_data_dir: Option<&Path>,
+    progress_watch: Option<ChildProgressWatch>,
 ) -> Result<TimedCommandOutput, BifrostError> {
+    let activity_watch = match progress_watch {
+        Some(watch) => ChildActivityWatch::StructuredProgress(watch),
+        None => ChildActivityWatch::StreamedOutput,
+    };
     command_output_with_timeout_and_env_inner(
         program,
         args,
@@ -573,7 +587,7 @@ fn command_output_with_timeout_and_env_streaming(
         heartbeat,
         environment,
         parent_upgrade_lock_data_dir,
-        true,
+        activity_watch,
     )
 }
 
@@ -592,8 +606,14 @@ fn command_output_with_timeout_and_env(
         heartbeat,
         environment,
         parent_upgrade_lock_data_dir,
-        false,
+        ChildActivityWatch::None,
     )
+}
+
+enum ChildActivityWatch {
+    None,
+    StreamedOutput,
+    StructuredProgress(ChildProgressWatch),
 }
 
 fn command_output_with_timeout_and_env_inner(
@@ -603,7 +623,7 @@ fn command_output_with_timeout_and_env_inner(
     heartbeat: Duration,
     environment: &[(&str, &str)],
     parent_upgrade_lock_data_dir: Option<&Path>,
-    stream_output: bool,
+    mut activity_watch: ChildActivityWatch,
 ) -> Result<TimedCommandOutput, BifrostError> {
     let parent_lock_environment = parent_upgrade_lock_data_dir
         .map(super::upgrade_background::parent_upgrade_lock_child_environment)
@@ -619,14 +639,21 @@ fn command_output_with_timeout_and_env_inner(
         .stderr(output_capture.stderr_stdio().map_err(BifrostError::Io)?);
     let mut child =
         spawn_upgrade_command_with_retry(|| command.spawn()).map_err(BifrostError::Io)?;
-    let deadline = Instant::now() + timeout;
+    let mut deadline = Instant::now() + timeout;
     let mut next_heartbeat = Instant::now() + heartbeat;
+    let mut next_progress_check = Instant::now();
+    let progress_check_interval = heartbeat
+        .min(Duration::from_millis(250))
+        .max(Duration::from_millis(1));
     let status;
+    let stream_output = !matches!(&activity_watch, ChildActivityWatch::None);
 
     loop {
-        if stream_output {
-            output_capture.forward_available();
-        }
+        let fresh_child_output = stream_output && output_capture.forward_available();
+        // Desktop handoff owns a structured progress stream. Its stdout is
+        // diagnostic only and must not keep a stalled installer alive.
+        let child_output_activity =
+            matches!(&activity_watch, ChildActivityWatch::StreamedOutput) && fresh_child_output;
         match child.try_wait() {
             Ok(Some(exit_status)) => {
                 status = if exit_status.success() {
@@ -636,16 +663,32 @@ fn command_output_with_timeout_and_env_inner(
                 };
                 break;
             }
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                status = TimedCommandStatus::TimedOut;
-                break;
-            }
             Ok(None) => {
-                if Instant::now() >= next_heartbeat {
+                let now = Instant::now();
+                let mut child_progress_activity = false;
+                if now >= next_progress_check {
+                    if let ChildActivityWatch::StructuredProgress(watch) = &mut activity_watch {
+                        child_progress_activity = watch.observe_activity();
+                    }
+                    next_progress_check = now + progress_check_interval;
+                }
+                if child_output_activity || child_progress_activity {
+                    deadline = now + timeout;
+                }
+                if now >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    status = TimedCommandStatus::TimedOut;
+                    break;
+                }
+                // A child-owned progress stream is authoritative. The generic
+                // parent heartbeat would overwrite its phase/source and can
+                // hide real download activity from the WebView.
+                if !matches!(&activity_watch, ChildActivityWatch::StructuredProgress(_))
+                    && now >= next_heartbeat
+                {
                     super::upgrade_background::report_installing();
-                    next_heartbeat = Instant::now() + heartbeat;
+                    next_heartbeat = now + heartbeat;
                 }
                 thread::sleep(Duration::from_millis(25));
             }
@@ -1015,6 +1058,9 @@ fn download_and_install(
                         mirror_display_name(&base).bright_white()
                     );
                 }
+                crate::commands::upgrade_background::report_download_status(
+                    download_source_progress_message(&base, attempt),
+                );
                 println!("{} {}", "Downloading:".bright_cyan(), download_url.dimmed());
 
                 match download_file_with_progress(&download_url, &archive_path, tuning) {
@@ -1444,51 +1490,6 @@ fn handle_upgrade_inner(
         }
     }
 
-    Ok(())
-}
-
-fn finish_already_latest_upgrade(
-    latest_version: &str,
-    behavior: UpgradeBehavior,
-) -> Result<(), BifrostError> {
-    if !behavior.restart_if_already_latest && !behavior.update_desktop_app {
-        return Ok(());
-    }
-    let install_method = detect_install_method();
-    finish_already_latest_upgrade_for_method(latest_version, behavior, &install_method)
-}
-
-fn finish_already_latest_upgrade_for_method(
-    latest_version: &str,
-    behavior: UpgradeBehavior,
-    install_method: &InstallMethod,
-) -> Result<(), BifrostError> {
-    let restart_executable = match restart_executable_for_install_method(install_method) {
-        Ok(executable) => executable,
-        Err(error) if behavior.require_desktop_app_update => return Err(error),
-        Err(_) => return Ok(()),
-    };
-    update_desktop_companion(&restart_executable, latest_version, behavior)?;
-    if behavior.restart_if_already_latest && behavior.restart_proxy {
-        println!(
-            "{}",
-            "  On-disk binary is current; restarting any running proxy so it adopts this version."
-                .bright_cyan()
-        );
-        maybe_restart_running_proxy(&restart_executable)?;
-    }
-    Ok(())
-}
-
-fn finish_installed_upgrade(
-    restart_executable: &Path,
-    latest_version: &str,
-    behavior: UpgradeBehavior,
-) -> Result<(), BifrostError> {
-    update_desktop_companion(restart_executable, latest_version, behavior)?;
-    if behavior.restart_proxy {
-        maybe_restart_running_proxy(restart_executable)?;
-    }
     Ok(())
 }
 

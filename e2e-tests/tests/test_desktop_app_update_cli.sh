@@ -26,6 +26,8 @@ TEST_ROOT="$(mktemp -d)"
 API_DATA_DIR=""
 API_PORT=""
 API_PID=""
+RUNNING_APP_PID=""
+RELAUNCHED_APP_PID=""
 cleanup() {
     if [[ -n "$API_DATA_DIR" && -n "$API_PORT" ]]; then
         BIFROST_DATA_DIR="$API_DATA_DIR" "$BIFROST_BIN" stop >/dev/null 2>&1 || true
@@ -33,6 +35,14 @@ cleanup() {
     if [[ -n "$API_PID" ]]; then
         kill "$API_PID" >/dev/null 2>&1 || true
         wait "$API_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$RUNNING_APP_PID" ]]; then
+        kill "$RUNNING_APP_PID" >/dev/null 2>&1 || true
+        wait "$RUNNING_APP_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$RELAUNCHED_APP_PID" ]]; then
+        kill "$RELAUNCHED_APP_PID" >/dev/null 2>&1 || true
+        wait "$RELAUNCHED_APP_PID" 2>/dev/null || true
     fi
     rm -rf "$TEST_ROOT"
 }
@@ -142,10 +152,11 @@ API_INSTALL_DIR="${TEST_ROOT}/api-cli-bin"
 API_SKILL_DIR="${TEST_ROOT}/api-skills/bifrost"
 API_PORT="$(allocate_free_port)"
 _log_info "app-to-CLI HTTP install endpoint"
-BIFROST_DATA_DIR="$API_DATA_DIR" \
-BIFROST_INSTALL_SKILL_DIR="$API_SKILL_DIR" \
-BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
-BIFROST_DISABLE_TRAY=1 \
+env -u BIFROST_DETACHED_DAEMON_CHILD \
+    BIFROST_DATA_DIR="$API_DATA_DIR" \
+    BIFROST_INSTALL_SKILL_DIR="$API_SKILL_DIR" \
+    BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+    BIFROST_DISABLE_TRAY=1 \
     "$BIFROST_BIN" start $([[ "${BIFROST_COVERAGE_E2E:-0}" == "1" ]] || printf '%s' '--daemon') \
     --host 127.0.0.1 -p "$API_PORT" --no-system-proxy --skip-cert-check \
     --unsafe-ssl --access-mode allow_all --yes >/tmp/bifrost-desktop-app-api-start.log 2>&1 &
@@ -232,6 +243,93 @@ PY
 }
 
 if [[ "$HOST_OS" == "Darwin" ]]; then
+    compile_running_app_fixture() {
+        local bundle="$1"
+        local version="$2"
+        local started_marker="$3"
+        local pid_file="$4"
+        local source_file="${bundle}.c"
+        mkdir -p "$bundle/Contents/MacOS"
+        python3 - "$source_file" "$started_marker" "$pid_file" <<'PY'
+import json
+import sys
+
+source_file, marker, pid_file = sys.argv[1:]
+source = r'''
+#include <errno.h>
+#include <signal.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+static const char *marker_path = MARKER_PATH;
+static const char *pid_path = PID_PATH;
+
+static int read_pid(void) {
+    FILE *file = fopen(pid_path, "r");
+    int pid = 0;
+    if (file != NULL) {
+        fscanf(file, "%d", &pid);
+        fclose(file);
+    }
+    return pid;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--bifrost-upgrade-shutdown") == 0) {
+        int pid = read_pid();
+        if (pid > 0) {
+            kill(pid, SIGTERM);
+            for (int attempt = 0; attempt < 100; ++attempt) {
+                if (kill(pid, 0) != 0 && errno == ESRCH) {
+                    return 0;
+                }
+                usleep(50000);
+            }
+            return 2;
+        }
+        return 0;
+    }
+
+    FILE *pid_file = fopen(pid_path, "w");
+    if (pid_file == NULL) {
+        return 3;
+    }
+    fprintf(pid_file, "%d\n", getpid());
+    fclose(pid_file);
+    FILE *marker = fopen(marker_path, "w");
+    if (marker == NULL) {
+        return 4;
+    }
+    fprintf(marker, "%d\n", getpid());
+    fclose(marker);
+    for (;;) {
+        pause();
+    }
+}
+'''
+source = source.replace("MARKER_PATH", json.dumps(marker))
+source = source.replace("PID_PATH", json.dumps(pid_file))
+with open(source_file, "w") as file:
+    file.write(source)
+PY
+        clang "$source_file" -o "$bundle/Contents/MacOS/bifrost-desktop"
+        cat >"$bundle/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key><string>bifrost-desktop</string>
+  <key>CFBundleIdentifier</key><string>dev.bifrost.running-upgrade-test</string>
+  <key>CFBundleName</key><string>Bifrost</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>${version}</string>
+  <key>CFBundleVersion</key><string>${version}</string>
+</dict>
+</plist>
+PLIST
+    }
+
     FAKE_APP="${TEST_ROOT}/fixtures/Bifrost.app"
     mkdir -p "$FAKE_APP/Contents/MacOS"
     cat >"$FAKE_APP/Contents/Info.plist" <<'PLIST'
@@ -327,6 +425,92 @@ SH
     [[ "$progress_phase" == "failed" ]] \
         && _log_pass "stale desktop upgrade writes failed progress" \
         || { _log_fail "stale desktop upgrade writes failed progress" "failed" "$progress_phase"; exit 1; }
+
+    RUNNING_OLD_APP="${TEST_ROOT}/running-old/Bifrost.app"
+    RUNNING_NEW_APP="${TEST_ROOT}/running-new/Bifrost.app"
+    OLD_STARTED_MARKER="${TEST_ROOT}/old-started.pid"
+    OLD_PID_FILE="${TEST_ROOT}/old-runtime.pid"
+    NEW_STARTED_MARKER="${TEST_ROOT}/new-started.pid"
+    NEW_PID_FILE="${TEST_ROOT}/new-runtime.pid"
+    compile_running_app_fixture \
+        "$RUNNING_OLD_APP" \
+        "0.0.139" \
+        "$OLD_STARTED_MARKER" \
+        "$OLD_PID_FILE"
+    compile_running_app_fixture \
+        "$RUNNING_NEW_APP" \
+        "0.0.140" \
+        "$NEW_STARTED_MARKER" \
+        "$NEW_PID_FILE"
+    rm -rf "$APP_DIR" "$DATA_DIR"
+    mkdir -p "$DATA_DIR"
+    BIFROST_APP_SKIP_RESTART=1 "$BIFROST_BIN" app install \
+        --package "$RUNNING_OLD_APP" \
+        --app-dir "$APP_DIR" \
+        --version 0.0.139 \
+        -y >/dev/null
+    "$APP_DIR/Bifrost.app/Contents/MacOS/bifrost-desktop" \
+        >"$TEST_ROOT/running-old.log" 2>&1 &
+    RUNNING_APP_PID=$!
+    for _ in $(seq 1 100); do
+        [[ -f "$OLD_STARTED_MARKER" ]] && break
+        sleep 0.05
+    done
+    if [[ ! -f "$OLD_STARTED_MARKER" ]]; then
+        _log_fail "old desktop fixture starts before direct upgrade" "marker exists" "missing"
+        exit 1
+    fi
+    OLD_APP_PID="$(cat "$OLD_PID_FILE")"
+    if [[ "$OLD_APP_PID" != "$RUNNING_APP_PID" ]]; then
+        _log_fail "old desktop fixture records its running PID" "$RUNNING_APP_PID" "$OLD_APP_PID"
+        exit 1
+    fi
+    running_upgrade_output="$("$BIFROST_BIN" app upgrade \
+        --package "$RUNNING_NEW_APP" \
+        --app-dir "$APP_DIR" \
+        --no-cli \
+        --version 0.0.140 \
+        -y 2>&1)"
+    assert_contains_text \
+        "$running_upgrade_output" \
+        "Requesting the running desktop shell to release its installed files" \
+        "direct app upgrade requests old desktop shutdown before install"
+    for _ in $(seq 1 100); do
+        if ! kill -0 "$RUNNING_APP_PID" >/dev/null 2>&1; then
+            break
+        fi
+        sleep 0.05
+    done
+    if kill -0 "$RUNNING_APP_PID" >/dev/null 2>&1; then
+        _log_fail "direct app upgrade exits the old desktop process" "old PID exited" "$RUNNING_APP_PID still running"
+        exit 1
+    fi
+    wait "$RUNNING_APP_PID" 2>/dev/null || true
+    RUNNING_APP_PID=""
+    for _ in $(seq 1 200); do
+        [[ -f "$NEW_STARTED_MARKER" ]] && break
+        sleep 0.05
+    done
+    if [[ ! -f "$NEW_STARTED_MARKER" ]]; then
+        _log_fail "direct app upgrade launches the installed target app" "new marker exists" "missing"
+        printf '%s\n' "$running_upgrade_output"
+        exit 1
+    fi
+    RELAUNCHED_APP_PID="$(cat "$NEW_PID_FILE")"
+    if [[ "$RELAUNCHED_APP_PID" == "$OLD_APP_PID" ]]; then
+        _log_fail "direct app upgrade starts a distinct target process" "new PID differs from $OLD_APP_PID" "$RELAUNCHED_APP_PID"
+        exit 1
+    fi
+    _log_pass "direct app upgrade starts a distinct target process"
+    if kill -0 "$RELAUNCHED_APP_PID" >/dev/null 2>&1; then
+        _log_pass "direct app upgrade runs the new desktop process after install"
+    else
+        _log_fail "direct app upgrade runs the new desktop process after install" "new PID running" "$RELAUNCHED_APP_PID"
+        exit 1
+    fi
+    kill "$RELAUNCHED_APP_PID" >/dev/null 2>&1 || true
+    wait "$RELAUNCHED_APP_PID" 2>/dev/null || true
+    RELAUNCHED_APP_PID=""
 
     uninstall_real_output="$("$BIFROST_BIN" app uninstall --app-dir "$APP_DIR" -y 2>&1)"
     assert_contains_text "$uninstall_real_output" "Desktop app path:" "real uninstall prints target path"

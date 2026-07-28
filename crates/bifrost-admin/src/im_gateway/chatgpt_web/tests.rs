@@ -137,12 +137,14 @@ fn chatgpt_web_new_conversation_url_uses_project_without_changing_homepage_fallb
         attachments_dir: temp.path().join("attachments"),
     };
 
-    assert!(new_conversation_url(&config).starts_with("https://chatgpt.com/?bifrost_new_chat="));
+    assert_eq!(new_conversation_url(&config), "https://chatgpt.com/");
 
     config.chatgpt.project_url =
         Some("https://chatgpt.com/g/g-p-daily-research/project".to_string());
-    assert!(new_conversation_url(&config)
-        .starts_with("https://chatgpt.com/g/g-p-daily-research/project?bifrost_new_chat="));
+    assert_eq!(
+        new_conversation_url(&config),
+        "https://chatgpt.com/g/g-p-daily-research/project/"
+    );
 }
 
 #[test]
@@ -377,6 +379,25 @@ fn ask_runs_use_shared_chatgpt_web_browser_profile_not_run_local_profile() {
 }
 
 #[test]
+fn fresh_runs_reuse_existing_chatgpt_tab_without_closing_or_reopening() {
+    let send_source = include_str!("send.rs");
+    let browser_source = include_str!("browser.rs");
+
+    assert!(
+        !send_source.contains("close_chatgpt_pages_for_fresh_run"),
+        "fresh ChatGPT Web runs must not close existing ChatGPT tabs"
+    );
+    assert!(
+        !browser_source.contains("fn close_chatgpt_pages_for_fresh_run"),
+        "the destructive fresh-run tab cleanup helper must not return"
+    );
+    assert!(send_source.contains("take_or_attach_reusable_chatgpt_tab"));
+    assert!(browser_source.contains("take_reusable_conversation_tab"));
+    assert!(browser_source.contains("find_chatgpt_page"));
+    assert!(send_source.contains("reusing existing tab for fresh conversation"));
+}
+
+#[test]
 fn native_clipboard_paste_scales_send_button_waits_for_large_prompts() {
     assert_eq!(
         send_button_ready_max_wait(&"a".repeat(120)),
@@ -397,6 +418,7 @@ fn native_clipboard_paste_scales_send_button_waits_for_large_prompts() {
 fn failure_diagnostics_conversation_hint_accepts_known_param_names() {
     let mut request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: "ask".to_string(),
         params: json!({"conversationId": " c1 "}),
@@ -479,6 +501,7 @@ async fn run_adapter_writes_failure_diagnostics_on_authenticated_error() {
         .expect("write auth state");
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: "bad-op".to_string(),
         params: Value::Null,
@@ -543,6 +566,7 @@ async fn run_adapter_blocks_live_chatgpt_during_e2e_without_explicit_opt_in() {
     let temp = tempfile::tempdir().expect("tempdir");
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: "ask".to_string(),
         params: Value::Null,
@@ -1772,6 +1796,7 @@ fn make_run_request_with_params(params: Value, session_key: Option<&str>) -> Ext
     ExternalCliRunRequest {
         message: "hello".to_string(),
         images: Vec::new(),
+        files: Vec::new(),
         operation: "ask".to_string(),
         params,
         provider_id: None,

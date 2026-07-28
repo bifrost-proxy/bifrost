@@ -7,6 +7,24 @@ pub(super) fn ensure_backend_running(
     preferred_port: u16,
     upgrade_relaunch: Option<&DesktopUpgradeRelaunchMarker>,
 ) -> tauri::Result<(Option<Child>, u16)> {
+    ensure_backend_running_with_cli_wait(
+        binary_path,
+        data_dir,
+        startup_session_id,
+        preferred_port,
+        upgrade_relaunch,
+        DESKTOP_UPGRADE_RELAUNCH_PORT_WAIT,
+    )
+}
+
+pub(super) fn ensure_backend_running_with_cli_wait(
+    binary_path: &Path,
+    data_dir: &Path,
+    startup_session_id: &str,
+    preferred_port: u16,
+    upgrade_relaunch: Option<&DesktopUpgradeRelaunchMarker>,
+    external_cli_wait: Duration,
+) -> tauri::Result<(Option<Child>, u16)> {
     append_desktop_bootstrap_log(
         data_dir,
         format!(
@@ -16,30 +34,23 @@ pub(super) fn ensure_backend_running(
         ),
     );
 
+    let mut fallback_from_external_cli_handoff = false;
     if let Some(marker) =
         upgrade_relaunch.filter(|marker| upgrade_relaunch_uses_external_cli_backend(marker))
     {
-        append_desktop_bootstrap_log(
-            data_dir,
-            format!(
-                "desktop upgrade handoff is waiting for the CLI-owned backend; old_external_pid={:?} proxy_port={} target_version={:?}",
-                marker.observed_external_core_pid, marker.proxy_port, marker.target_version
-            ),
-        );
-        if wait_for_external_cli_backend(marker, DESKTOP_UPGRADE_RELAUNCH_PORT_WAIT) {
+        let effective_wait = external_cli_handoff_wait(data_dir, marker, external_cli_wait);
+        if effective_wait.is_zero() && !external_cli_wait.is_zero() {
             append_desktop_bootstrap_log(
                 data_dir,
-                format!(
-                    "reusing restarted CLI-owned backend on port {}",
-                    marker.proxy_port
-                ),
+                "previous CLI-owned handoff already failed; retrying recovery without another wait",
             );
-            return Ok((None, marker.proxy_port));
         }
-        return Err(anyhow(format!(
-            "CLI-owned backend did not restart on port {} with target version {:?}; refusing to launch a second desktop-managed core",
-            marker.proxy_port, marker.target_version
-        )));
+        match resolve_external_cli_backend_handoff(data_dir, marker, effective_wait)? {
+            ExternalCliBackendHandoff::Reuse(port) => return Ok((None, port)),
+            ExternalCliBackendHandoff::StartManagedFallback => {
+                fallback_from_external_cli_handoff = true;
+            }
+        }
     }
 
     if upgrade_relaunch.is_none() {
@@ -51,6 +62,15 @@ pub(super) fn ensure_backend_running(
             return Ok((None, port));
         }
     } else if let Some(marker) = upgrade_relaunch {
+        if fallback_from_external_cli_handoff {
+            append_desktop_bootstrap_log(
+                data_dir,
+                format!(
+                    "desktop upgrade handoff fallback will start a managed backend on port {}",
+                    marker.proxy_port
+                ),
+            );
+        }
         append_desktop_bootstrap_log(
             data_dir,
             format!(
@@ -58,7 +78,9 @@ pub(super) fn ensure_backend_running(
                 marker.proxy_port
             ),
         );
-        wait_for_upgrade_handoff_release(data_dir, marker);
+        if !fallback_from_external_cli_handoff {
+            wait_for_upgrade_handoff_release(data_dir, marker);
+        }
     }
 
     cleanup_existing_backend(binary_path, data_dir)?;
@@ -546,7 +568,46 @@ pub(super) fn clear_backend_unavailable_if_healthy(state: &BackendState, reason:
         return false;
     };
 
-    if current_port == 0 || !probe_backend_health(current_port) {
+    if current_port == 0 {
+        return false;
+    }
+
+    let upgrade_relaunch = state
+        .upgrade_relaunch
+        .lock()
+        .ok()
+        .and_then(|marker| marker.clone());
+    if let Some(marker) = upgrade_relaunch
+        .as_ref()
+        .filter(|marker| upgrade_relaunch_uses_external_cli_backend(marker))
+    {
+        if current_port != marker.proxy_port {
+            return false;
+        }
+        let Some(identity) = probe_backend_identity(current_port) else {
+            return false;
+        };
+        if !external_cli_backend_matches_handoff(marker, &identity) {
+            return false;
+        }
+        write_desktop_upgrade_terminal_progress(
+            &state.data_dir,
+            UpgradePhase::Completed,
+            "Desktop app and core update complete",
+            None,
+        );
+        clear_upgrade_relaunch_marker(&state.data_dir);
+        if let Ok(mut marker_guard) = state.upgrade_relaunch.lock() {
+            *marker_guard = None;
+        }
+        append_desktop_bootstrap_log(
+            &state.data_dir,
+            format!(
+                "recovered CLI-owned upgrade handoff from healthy target backend pid={} port={current_port}",
+                identity.pid
+            ),
+        );
+    } else if !probe_backend_health(current_port) {
         return false;
     }
 
@@ -784,102 +845,6 @@ pub(super) fn wait_for_backend(
     })
 }
 
-pub(super) fn is_backend_ready(port: u16) -> bool {
-    probe_backend_health(port)
-}
-
-pub(super) fn runtime_marker_matches_child(data_dir: &Path, child_pid: u32, port: u16) -> bool {
-    let runtime_file = data_dir.join("runtime.json");
-    let Ok(content) = fs::read_to_string(runtime_file) else {
-        return false;
-    };
-    let Ok(marker) = serde_json::from_str::<DesktopRuntimeMarker>(&content) else {
-        return false;
-    };
-
-    marker.pid == child_pid && marker.port == port
-}
-
-pub(super) fn find_existing_backend_port(data_dir: &Path, preferred_port: u16) -> Option<u16> {
-    for offset in 0..=MAX_PORT_INCREMENT_ATTEMPTS {
-        let port = preferred_port.saturating_add(offset);
-        if port == 0 {
-            continue;
-        }
-
-        if probe_backend_health(port) {
-            append_desktop_bootstrap_log(
-                data_dir,
-                format!("detected healthy backend candidate on port {port} before spawning"),
-            );
-            return Some(port);
-        }
-    }
-
-    None
-}
-
-pub(super) fn probe_backend_health(port: u16) -> bool {
-    let Ok(client) = direct_blocking_reqwest_client_builder()
-        .timeout(Duration::from_millis(450))
-        .build()
-    else {
-        return false;
-    };
-
-    let url = format!("http://{BACKEND_ADMIN_HOST}:{port}/_bifrost/api/proxy/system/support");
-    let Ok(response) = client.get(url).send() else {
-        return false;
-    };
-
-    response.status().is_success()
-}
-
-pub(super) fn wait_for_backend_shutdown(port: u16, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if !probe_backend_health(port) {
-            return true;
-        }
-
-        std::thread::sleep(Duration::from_millis(150));
-    }
-
-    !probe_backend_health(port)
-}
-
-pub(super) fn is_port_available(port: u16) -> bool {
-    TcpListener::bind((BACKEND_BIND_HOST, port)).is_ok()
-}
-
-pub(super) fn has_runtime_marker(data_dir: &Path) -> bool {
-    data_dir.join("bifrost.pid").exists() || data_dir.join("runtime.json").exists()
-}
-
-pub(super) fn cleanup_existing_backend(binary_path: &Path, data_dir: &Path) -> tauri::Result<()> {
-    if has_runtime_marker(data_dir) {
-        append_desktop_bootstrap_log(
-            data_dir,
-            format!(
-                "found existing backend runtime markers under {}; stopping stale backend",
-                data_dir.display()
-            ),
-        );
-        if let Err(error) = stop_backend_with_binary(binary_path, data_dir) {
-            append_desktop_bootstrap_log(
-                data_dir,
-                format!(
-                    "stale backend stop failed; refusing to start a second backend for the same data directory: {error}"
-                ),
-            );
-            return Err(anyhow(format!(
-                "failed to stop the stale Bifrost service safely: {error}. Refusing to start another service with the same data directory"
-            )));
-        }
-    }
-    Ok(())
-}
-
 pub(super) fn terminate_managed_backend(state: &BackendState, context: &str) -> tauri::Result<()> {
     let child = state
         .child
@@ -939,11 +904,8 @@ pub(super) fn stop_backend_with_binary(binary_path: &Path, data_dir: &Path) -> t
         ),
     );
     let mut command = Command::new(binary_path);
-    command
-        .arg("stop")
-        .env("BIFROST_DATA_DIR", data_dir)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    configure_backend_stop_command(&mut command, data_dir);
+    command.stdout(Stdio::null()).stderr(Stdio::null());
     hide_windows_child_console(&mut command);
     let mut child = command
         .spawn()
@@ -1027,15 +989,21 @@ pub(super) fn spawn_backend_stop(binary_path: &Path, data_dir: &Path) -> tauri::
     let stderr_log = open_sidecar_log_file(data_dir, "desktop-sidecar.err.log")?;
 
     let mut command = Command::new(binary_path);
+    configure_backend_stop_command(&mut command, data_dir);
     command
-        .arg("stop")
-        .env("BIFROST_DATA_DIR", data_dir)
         .stdout(Stdio::from(stdout_log))
         .stderr(Stdio::from(stderr_log));
     hide_windows_child_console(&mut command);
     command
         .spawn()
         .map_err(|error| anyhow(format!("failed to spawn backend stop: {error}")))
+}
+
+pub(super) fn configure_backend_stop_command(command: &mut Command, data_dir: &Path) {
+    command
+        .arg("stop")
+        .env("BIFROST_DATA_DIR", data_dir)
+        .env("BIFROST_DESKTOP_AUTHORIZED_STOP_INTERNAL", "1");
 }
 
 pub(super) fn hide_windows_child_console(command: &mut Command) {

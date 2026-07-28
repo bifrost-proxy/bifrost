@@ -4,6 +4,7 @@ use crate::config::get_bifrost_dir;
 use crate::process::{is_process_running, read_pid, read_runtime_info, remove_pid};
 
 const STOP_INVOKED_BY_TRAY_ENV: &str = "BIFROST_TRAY_INVOKED_STOP";
+const DESKTOP_AUTHORIZED_STOP_ENV: &str = "BIFROST_DESKTOP_AUTHORIZED_STOP_INTERNAL";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StopSystemProxyMode {
@@ -166,6 +167,40 @@ fn cleanup_tray_helper_after_cli_stop(bifrost_dir: &std::path::Path) {
     }
 }
 
+pub(super) fn reject_live_desktop_owned_runtime() -> bifrost_core::Result<()> {
+    let Some(runtime) = read_runtime_info() else {
+        return Ok(());
+    };
+    let desktop_authorized = std::env::var(DESKTOP_AUTHORIZED_STOP_ENV).as_deref() == Ok("1");
+    if !should_reject_desktop_owned_runtime(
+        &runtime,
+        is_process_running(runtime.pid),
+        bifrost_core::get_process_start_time_ms(runtime.pid),
+        desktop_authorized,
+    ) {
+        return Ok(());
+    }
+
+    Err(bifrost_core::BifrostError::Config(format!(
+        "Bifrost Service is owned by the Desktop app (PID: {}, port {}). Quit Bifrost Desktop to stop it; the CLI will not terminate an app-bound Service.",
+        runtime.pid, runtime.port
+    )))
+}
+
+fn should_reject_desktop_owned_runtime(
+    runtime: &crate::process::RuntimeInfo,
+    process_running: bool,
+    observed_started_at_ms: Option<u64>,
+    desktop_authorized: bool,
+) -> bool {
+    !desktop_authorized
+        && crate::process::runtime_is_live_desktop_owned(
+            runtime,
+            process_running,
+            observed_started_at_ms,
+        )
+}
+
 pub fn run_stop() -> bifrost_core::Result<()> {
     run_stop_with_system_proxy_mode(StopSystemProxyMode::ForegroundCleanupBeforeStop)
 }
@@ -179,6 +214,7 @@ fn run_stop_with_system_proxy_mode(
 ) -> bifrost_core::Result<()> {
     let bifrost_dir = get_bifrost_dir()?;
     set_data_dir(bifrost_dir.clone());
+    reject_live_desktop_owned_runtime()?;
 
     let pid = read_pid().ok_or_else(|| {
         bifrost_core::BifrostError::NotFound("No PID file found. Is the proxy running?".to_string())
@@ -306,6 +342,9 @@ fn run_stop_with_system_proxy_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::{
+        runtime_is_live_desktop_owned, write_runtime_info, RuntimeInfo, RuntimeStartMode,
+    };
 
     #[test]
     fn host_matching_accepts_loopback_aliases() {
@@ -321,5 +360,126 @@ mod tests {
             runtime_system_proxy_host(Some("192.168.1.2")),
             "192.168.1.2"
         );
+    }
+
+    #[test]
+    fn desktop_runtime_ownership_requires_a_live_matching_process_identity() {
+        let desktop = RuntimeInfo::new(
+            std::process::id(),
+            9900,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Desktop,
+        );
+        let daemon = RuntimeInfo::new(
+            std::process::id(),
+            9900,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Daemon,
+        );
+
+        let desktop_started_at = desktop.started_at_ms;
+        assert!(runtime_is_live_desktop_owned(
+            &desktop,
+            true,
+            desktop_started_at
+        ));
+        assert!(!runtime_is_live_desktop_owned(
+            &desktop,
+            false,
+            desktop_started_at
+        ));
+        assert!(!runtime_is_live_desktop_owned(
+            &daemon,
+            true,
+            daemon.started_at_ms
+        ));
+        assert!(!runtime_is_live_desktop_owned(
+            &desktop,
+            true,
+            desktop_started_at.map(|started_at| started_at.saturating_add(10_000)),
+        ));
+        assert!(should_reject_desktop_owned_runtime(
+            &desktop,
+            true,
+            desktop_started_at,
+            false,
+        ));
+        assert!(!should_reject_desktop_owned_runtime(
+            &desktop,
+            true,
+            desktop_started_at,
+            true,
+        ));
+        assert!(!should_reject_desktop_owned_runtime(
+            &desktop,
+            false,
+            desktop_started_at,
+            false,
+        ));
+        assert!(!should_reject_desktop_owned_runtime(
+            &daemon,
+            true,
+            daemon.started_at_ms,
+            false,
+        ));
+        assert!(should_reject_desktop_owned_runtime(
+            &RuntimeInfo {
+                started_at_ms: None,
+                ..desktop
+            },
+            true,
+            desktop_started_at,
+            false,
+        ));
+    }
+
+    #[test]
+    fn live_desktop_runtime_rejects_user_stop_and_restart_but_allows_internal_stop() {
+        let _guard = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+        const CHILD_ENV: &str = "BIFROST_TEST_DESKTOP_OWNERSHIP_STOP_CHILD";
+        const TEST_NAME: &str = "commands::stop::tests::live_desktop_runtime_rejects_user_stop_and_restart_but_allows_internal_stop";
+        if std::env::var(CHILD_ENV).ok().as_deref() != Some("1") {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("current test executable"),
+            )
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_ENV, "1")
+            .env("BIFROST_DATA_DIR", temp.path())
+            .env_remove(DESKTOP_AUTHORIZED_STOP_ENV)
+            .status()
+            .expect("spawn isolated ownership stop test");
+            assert!(status.success(), "isolated ownership stop test failed");
+            return;
+        }
+
+        assert!(reject_live_desktop_owned_runtime().is_ok());
+
+        let runtime = RuntimeInfo::new(
+            std::process::id(),
+            9900,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Desktop,
+        );
+        write_runtime_info(&runtime).expect("write desktop runtime");
+
+        let stop_error =
+            reject_live_desktop_owned_runtime().expect_err("user stop must be rejected");
+        assert!(stop_error.to_string().contains("owned by the Desktop app"));
+
+        let restart_error = crate::commands::run_restart(crate::commands::RestartOptions {
+            force: true,
+            ..Default::default()
+        })
+        .expect_err("force restart must not take over a Desktop runtime");
+        assert!(restart_error
+            .to_string()
+            .contains("owned by the Desktop app"));
+
+        std::env::set_var(DESKTOP_AUTHORIZED_STOP_ENV, "1");
+        assert!(reject_live_desktop_owned_runtime().is_ok());
     }
 }

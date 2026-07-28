@@ -1147,6 +1147,82 @@ fn app_upgrade_lock_errors_and_restart_override_are_reported() {
     }
 }
 
+#[test]
+fn caller_managed_upgrade_shuts_down_only_a_running_desktop() {
+    assert!(should_shutdown_running_desktop_before_install(
+        AppOperation::Upgrade,
+        false,
+        true,
+    ));
+    assert!(!should_shutdown_running_desktop_before_install(
+        AppOperation::Upgrade,
+        true,
+        true,
+    ));
+    assert!(!should_shutdown_running_desktop_before_install(
+        AppOperation::Upgrade,
+        false,
+        false,
+    ));
+    assert!(!should_shutdown_running_desktop_before_install(
+        AppOperation::Install,
+        false,
+        true,
+    ));
+}
+
+#[test]
+fn desktop_shutdown_and_install_failure_orchestration_covers_all_outcomes() {
+    let shutdowns = std::cell::Cell::new(0);
+    let skipped =
+        shutdown_running_desktop_before_install(AppOperation::Install, false, true, || {
+            shutdowns.set(shutdowns.get() + 1);
+            Ok(())
+        })
+        .expect("install does not stop an existing desktop");
+    assert!(!skipped);
+    assert_eq!(shutdowns.get(), 0);
+
+    let stopped =
+        shutdown_running_desktop_before_install(AppOperation::Upgrade, false, true, || {
+            shutdowns.set(shutdowns.get() + 1);
+            Ok(())
+        })
+        .expect("direct upgrade stops the existing desktop");
+    assert!(stopped);
+    assert_eq!(shutdowns.get(), 1);
+
+    let shutdown_error =
+        shutdown_running_desktop_before_install(AppOperation::Upgrade, false, true, || {
+            Err(BifrostError::Config("shutdown failed".to_string()))
+        })
+        .expect_err("shutdown failure aborts the install");
+    assert!(shutdown_error.to_string().contains("shutdown failed"));
+
+    let app = Path::new("/tmp/Bifrost.app");
+    let relaunches = std::cell::Cell::new(0);
+    restore_desktop_on_install_failure(app, true, Ok(()), |_| {
+        relaunches.set(relaunches.get() + 1);
+        Ok(())
+    })
+    .expect("successful install does not need recovery");
+    assert_eq!(relaunches.get(), 0);
+
+    let install_error = restore_desktop_on_install_failure(
+        app,
+        true,
+        Err(BifrostError::Config("install failed".to_string())),
+        |path| {
+            assert_eq!(path, app);
+            relaunches.set(relaunches.get() + 1);
+            Ok(())
+        },
+    )
+    .expect_err("failed install returns the original error after recovery");
+    assert!(install_error.to_string().contains("install failed"));
+    assert_eq!(relaunches.get(), 1);
+}
+
 #[cfg(unix)]
 #[test]
 fn app_cli_version_probe_reports_nonzero_exit() {

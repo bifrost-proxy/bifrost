@@ -4243,6 +4243,7 @@ mod coverage_boost_v3 {
     fn planning_first_mock_covers_initial_wait_retry_and_project_fallbacks() {
         let mut request = ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: String::new(),
             operation: "send".to_string(),
             params: json!({"conversationId": "coverage-conversation"}),

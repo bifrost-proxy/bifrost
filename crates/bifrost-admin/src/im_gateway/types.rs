@@ -714,6 +714,8 @@ pub struct ImEventMessage {
     pub mentions: Vec<ImMention>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImImageAttachment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<ImFileAttachment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<ImMessageReference>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -765,6 +767,21 @@ pub enum ImImageSource {
     #[default]
     MessageResource,
     UploadedImage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImFileAttachment {
+    pub file_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_base64: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

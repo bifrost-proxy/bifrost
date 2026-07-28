@@ -1,16 +1,18 @@
 use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::future::Future;
+use std::hash::Hash;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use crate::dns::DnsResolver;
 use crate::ensure_crypto_provider;
 use crate::server::BoxBody;
+use crate::utils::upstream_stability::begin_network_attempt;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::body::{Body, Frame};
@@ -73,42 +75,135 @@ pub(super) struct ProxyDnsResolver {
 type ResolveAddrs = std::vec::IntoIter<SocketAddr>;
 type ResolveFuture = Pin<Box<dyn Future<Output = io::Result<ResolveAddrs>> + Send>>;
 
-static HTTPS_CLIENTS: LazyLock<RwLock<HashMap<ClientCacheKey, Arc<HttpsPooledClient>>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
+static HTTPS_CLIENTS: LazyLock<Mutex<IdleAwareCache<ClientCacheKey, HttpsPooledClient>>> =
+    LazyLock::new(|| {
+        Mutex::new(IdleAwareCache::new(
+            MAX_CACHED_HTTPS_CLIENTS,
+            HTTPS_CLIENT_EVICTION_BATCH,
+        ))
+    });
 static HTTP1_FALLBACKS: LazyLock<RwLock<HashMap<Http1FallbackKey, std::time::Instant>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 static HTTP1_FALLBACK_LAST_CLEANUP: LazyLock<RwLock<Option<std::time::Instant>>> =
     LazyLock::new(|| RwLock::new(None));
 static UPSTREAM_LIMITERS: LazyLock<RwLock<HashMap<UpstreamConcurrencyKey, Arc<Semaphore>>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
+static GLOBAL_UPSTREAM_LIMITER: LazyLock<Arc<Semaphore>> = LazyLock::new(|| {
+    Arc::new(Semaphore::new(positive_env_or_default(
+        "BIFROST_UPSTREAM_MAX_INFLIGHT_GLOBAL",
+        256,
+    )))
+});
 const HTTP1_FALLBACK_TTL: Duration = Duration::from_secs(120);
 const HTTP1_FALLBACK_CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Maximum number of cached HTTPS client pools before eviction is triggered.
 const MAX_CACHED_HTTPS_CLIENTS: usize = 256;
+/// Evict a small oldest-idle batch instead of dropping every idle pool at the cache limit.
+const HTTPS_CLIENT_EVICTION_BATCH: usize = 8;
 /// Maximum number of upstream limiter entries before eviction is triggered.
 const MAX_CACHED_UPSTREAM_LIMITERS: usize = 512;
-static MAX_UPSTREAM_INFLIGHT_PER_PARTITION: LazyLock<usize> = LazyLock::new(|| {
-    std::env::var("BIFROST_UPSTREAM_MAX_INFLIGHT_PER_PARTITION")
+static MAX_UPSTREAM_INFLIGHT_PER_PARTITION: LazyLock<usize> =
+    LazyLock::new(|| positive_env_or_default("BIFROST_UPSTREAM_MAX_INFLIGHT_PER_PARTITION", 64));
+
+struct CacheEntry<V> {
+    value: Arc<V>,
+    last_used: u64,
+}
+
+struct IdleAwareCache<K, V> {
+    entries: HashMap<K, CacheEntry<V>>,
+    access_clock: u64,
+    max_entries: usize,
+    eviction_batch: usize,
+}
+
+impl<K, V> IdleAwareCache<K, V>
+where
+    K: Clone + Eq + Hash,
+{
+    fn new(max_entries: usize, eviction_batch: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            access_clock: 0,
+            max_entries: max_entries.max(1),
+            eviction_batch: eviction_batch.max(1),
+        }
+    }
+
+    fn next_access(&mut self) -> u64 {
+        self.access_clock = self.access_clock.wrapping_add(1);
+        self.access_clock
+    }
+
+    fn get(&mut self, key: &K) -> Option<Arc<V>> {
+        let access = self.next_access();
+        let entry = self.entries.get_mut(key)?;
+        entry.last_used = access;
+        Some(Arc::clone(&entry.value))
+    }
+
+    fn insert_or_get(&mut self, key: K, value: Arc<V>) -> Arc<V> {
+        if let Some(existing) = self.get(&key) {
+            return existing;
+        }
+
+        self.evict_oldest_idle();
+        let access = self.next_access();
+        self.entries.insert(
+            key,
+            CacheEntry {
+                value: Arc::clone(&value),
+                last_used: access,
+            },
+        );
+        value
+    }
+
+    fn evict_oldest_idle(&mut self) -> usize {
+        if self.entries.len() < self.max_entries {
+            return 0;
+        }
+
+        let mut idle: Vec<(K, u64)> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| Arc::strong_count(&entry.value) == 1)
+            .map(|(key, entry)| (key.clone(), entry.last_used))
+            .collect();
+        idle.sort_unstable_by_key(|(_, last_used)| *last_used);
+
+        let remove_count = idle.len().min(self.eviction_batch);
+        for (key, _) in idle.into_iter().take(remove_count) {
+            self.entries.remove(&key);
+        }
+        remove_count
+    }
+}
+
+fn positive_env_or_default(name: &str, default: usize) -> usize {
+    std::env::var(name)
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(64)
-});
+        .unwrap_or(default)
+}
 
 pin_project! {
     struct UpstreamPermitBody<B> {
         #[pin]
         inner: B,
         permit: Option<OwnedSemaphorePermit>,
+        client_lease: Option<Arc<HttpsPooledClient>>,
     }
 }
 
 impl<B> UpstreamPermitBody<B> {
-    fn new(inner: B, permit: OwnedSemaphorePermit) -> Self {
+    fn new(inner: B, permit: OwnedSemaphorePermit, client_lease: Arc<HttpsPooledClient>) -> Self {
         Self {
             inner,
             permit: Some(permit),
+            client_lease: Some(client_lease),
         }
     }
 }
@@ -128,6 +223,7 @@ where
         match this.inner.as_mut().poll_frame(cx) {
             Poll::Ready(None) => {
                 this.permit.take();
+                this.client_lease.take();
                 Poll::Ready(None)
             }
             other => other,
@@ -313,9 +409,9 @@ fn get_https_client(
         protocol,
     };
 
-    if let Ok(clients) = HTTPS_CLIENTS.read() {
+    if let Ok(mut clients) = HTTPS_CLIENTS.lock() {
         if let Some(client) = clients.get(&key) {
-            return Arc::clone(client);
+            return client;
         }
     }
 
@@ -324,14 +420,8 @@ fn get_https_client(
         &key.dns_servers,
         key.protocol,
     ));
-    if let Ok(mut clients) = HTTPS_CLIENTS.write() {
-        // Evict idle pools when cache grows too large.
-        // An entry with strong_count == 1 means only the cache holds it (no active requests).
-        if clients.len() >= MAX_CACHED_HTTPS_CLIENTS {
-            clients.retain(|_, v| Arc::strong_count(v) > 1);
-        }
-        let entry = clients.entry(key).or_insert_with(|| Arc::clone(&client));
-        return Arc::clone(entry);
+    if let Ok(mut clients) = HTTPS_CLIENTS.lock() {
+        return clients.insert_or_get(key, client);
     }
     client
 }
@@ -458,15 +548,31 @@ async fn send_pooled_request_with_protocol(
     pool_partition: &str,
     protocol: ClientProtocolPreference,
 ) -> Result<hyper::Response<BoxBody>, ClientError> {
+    let network_attempt = begin_network_attempt().await;
     let permit = get_upstream_limiter(unsafe_ssl, dns_servers, pool_partition)
         .acquire_owned()
         .await
         .expect("upstream limiter should not be closed");
+    let global_permit = Arc::clone(&GLOBAL_UPSTREAM_LIMITER)
+        .acquire_owned()
+        .await
+        .expect("global upstream limiter should not be closed");
 
-    let response = get_https_client(unsafe_ssl, dns_servers, pool_partition, protocol)
-        .request(request)
-        .await?;
-    Ok(response.map(|body| UpstreamPermitBody::new(body, permit).boxed()))
+    let client = get_https_client(unsafe_ssl, dns_servers, pool_partition, protocol);
+    let response = client.request(request).await;
+    drop(global_permit);
+
+    match response {
+        Ok(response) => {
+            network_attempt.record_success();
+            Ok(response.map(|body| UpstreamPermitBody::new(body, permit, client).boxed()))
+        }
+        Err(error) => {
+            let source_text = collect_error_source_chain(&error).join(" | ");
+            network_attempt.record_error(find_io_error_kind(&error), &source_text);
+            Err(error)
+        }
+    }
 }
 
 pub(super) async fn send_pooled_request(
@@ -706,6 +812,15 @@ pub(super) fn sanitize_upstream_headers(headers: &mut hyper::HeaderMap) {
 mod tests {
     use super::*;
 
+    fn test_cache_key(partition: &str) -> ClientCacheKey {
+        ClientCacheKey {
+            unsafe_ssl: false,
+            dns_servers: Vec::new(),
+            pool_partition: partition.to_string(),
+            protocol: ClientProtocolPreference::Auto,
+        }
+    }
+
     #[test]
     fn classifies_dns_failure_before_generic_connect() {
         assert_eq!(
@@ -819,10 +934,66 @@ mod tests {
     async fn releases_upstream_permit_when_body_drops() {
         let semaphore = Arc::new(Semaphore::new(1));
         let permit = semaphore.clone().acquire_owned().await.unwrap();
-        let body = UpstreamPermitBody::new(http_body_util::Empty::<Bytes>::new(), permit);
+        let client = Arc::new(build_https_client(
+            false,
+            &[],
+            ClientProtocolPreference::Auto,
+        ));
+        let body = UpstreamPermitBody::new(
+            http_body_util::Empty::<Bytes>::new(),
+            permit,
+            Arc::clone(&client),
+        );
 
         assert!(semaphore.try_acquire().is_err());
+        assert_eq!(Arc::strong_count(&client), 2);
         drop(body);
         assert!(semaphore.try_acquire().is_ok());
+        assert_eq!(Arc::strong_count(&client), 1);
+    }
+
+    #[test]
+    fn client_cache_evicts_only_the_oldest_idle_batch() {
+        let mut cache = IdleAwareCache::new(4, 2);
+        for name in ["a", "b", "c", "d"] {
+            cache.insert_or_get(test_cache_key(name), Arc::new(name.to_string()));
+        }
+        assert!(cache.get(&test_cache_key("a")).is_some());
+
+        cache.insert_or_get(test_cache_key("e"), Arc::new("e".to_string()));
+
+        assert_eq!(cache.entries.len(), 3);
+        assert!(cache.get(&test_cache_key("a")).is_some());
+        assert!(cache.get(&test_cache_key("d")).is_some());
+        assert!(cache.get(&test_cache_key("e")).is_some());
+        assert!(cache.get(&test_cache_key("b")).is_none());
+        assert!(cache.get(&test_cache_key("c")).is_none());
+    }
+
+    #[test]
+    fn client_cache_preserves_active_entries_during_eviction() {
+        let mut cache = IdleAwareCache::new(2, 1);
+        let active = Arc::new("active".to_string());
+        cache.insert_or_get(test_cache_key("active"), Arc::clone(&active));
+        cache.insert_or_get(test_cache_key("idle"), Arc::new("idle".to_string()));
+
+        cache.insert_or_get(test_cache_key("new"), Arc::new("new".to_string()));
+
+        assert!(cache.get(&test_cache_key("active")).is_some());
+        assert!(cache.get(&test_cache_key("idle")).is_none());
+        assert!(cache.get(&test_cache_key("new")).is_some());
+    }
+
+    #[test]
+    fn client_cache_returns_existing_value_without_growing() {
+        let mut cache = IdleAwareCache::new(2, 1);
+        let original = Arc::new("original".to_string());
+        cache.insert_or_get(test_cache_key("same"), Arc::clone(&original));
+
+        let returned =
+            cache.insert_or_get(test_cache_key("same"), Arc::new("replacement".to_string()));
+
+        assert!(Arc::ptr_eq(&returned, &original));
+        assert_eq!(cache.entries.len(), 1);
     }
 }

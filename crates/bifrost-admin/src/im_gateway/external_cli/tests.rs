@@ -1,4 +1,5 @@
 use super::*;
+use std::ffi::OsStr;
 use std::sync::{Mutex, OnceLock};
 
 static EXTERNAL_CLI_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -686,6 +687,7 @@ fn claude_code_parser_maps_tool_use_and_tool_result() {
 fn codex_adapter_builds_exec_command_with_prompt_stdin() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -735,6 +737,7 @@ fn codex_adapter_builds_exec_command_with_prompt_stdin() {
 fn codex_adapter_defaults_to_danger_full_access_for_headless_runs() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -767,6 +770,7 @@ fn codex_adapter_defaults_to_danger_full_access_for_headless_runs() {
 fn codex_adapter_respects_explicit_sandbox_without_danger_full_access() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -800,6 +804,7 @@ fn codex_adapter_respects_explicit_sandbox_without_danger_full_access() {
 fn traex_adapter_builds_exec_command_with_prompt_stdin() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -864,6 +869,7 @@ fn traex_adapter_builds_exec_command_with_prompt_stdin() {
 fn traex_adapter_defaults_to_headless_full_access_for_exec() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -899,6 +905,7 @@ fn traex_adapter_defaults_to_headless_full_access_for_exec() {
 fn traex_adapter_maps_default_permission_mode_to_headless_full_access() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -937,6 +944,7 @@ fn traex_adapter_maps_default_permission_mode_to_headless_full_access() {
 fn traex_adapter_respects_explicit_non_bypass_permission_mode() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -973,6 +981,7 @@ fn traex_adapter_respects_explicit_non_bypass_permission_mode() {
 fn traex_adapter_builds_resume_command_from_thread_id() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello again".to_string(),
         operation: default_operation(),
         params: serde_json::json!({ "threadId": "thread-existing" }),
@@ -1024,6 +1033,7 @@ fn traex_adapter_builds_resume_command_from_thread_id() {
 fn codex_adapter_builds_current_cli_config_flags() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -1110,6 +1120,7 @@ fn codex_adapter_builds_current_cli_config_flags() {
 fn codex_adapter_respects_configured_service_tier_override() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -1148,6 +1159,7 @@ fn codex_adapter_respects_configured_service_tier_override() {
 fn codex_adapter_maps_legacy_search_to_web_search_feature() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -1178,6 +1190,7 @@ fn codex_adapter_maps_legacy_search_to_web_search_feature() {
 fn codex_adapter_danger_full_access_suppresses_sandbox() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -1211,6 +1224,7 @@ fn codex_adapter_danger_full_access_suppresses_sandbox() {
 fn codex_adapter_builds_resume_command_from_thread_id() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello again".to_string(),
         operation: default_operation(),
         params: serde_json::json!({ "threadId": "thread-existing" }),
@@ -1258,6 +1272,7 @@ fn codex_adapter_builds_resume_command_from_thread_id() {
 fn codex_adapter_injects_work_dir_with_custom_args() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -1294,6 +1309,7 @@ fn codex_adapter_injects_work_dir_with_custom_args() {
 fn codex_adapter_applies_config_flags_to_custom_args() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -1353,6 +1369,7 @@ fn codex_adapter_applies_config_flags_to_custom_args() {
 fn claude_code_adapter_applies_session_model_to_command_spec() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -1393,6 +1410,7 @@ fn claude_code_adapter_applies_session_model_to_command_spec() {
 fn claude_code_explicit_exec_transport_keeps_text_stdin() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -1423,6 +1441,7 @@ fn claude_code_explicit_exec_transport_keeps_text_stdin() {
 fn claude_code_adapter_applies_session_effort_to_command_spec() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -1452,6 +1471,7 @@ fn claude_code_adapter_applies_session_effort_to_command_spec() {
 fn traex_adapter_applies_session_effort_to_command_spec() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -1533,6 +1553,7 @@ async fn external_cli_runtime_runs_mock_command_and_writes_artifacts() {
     let runtime = ExternalCliRuntime::new(temp_dir.path());
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+            files: Vec::new(),
         message: "hello from api".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -1599,6 +1620,7 @@ print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":
     let runtime = ExternalCliRuntime::new(temp_dir.path().join("runs"));
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello stream runtime".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -1639,6 +1661,7 @@ async fn external_cli_runtime_persists_chatgpt_web_adapter_errors() {
     let runtime = ExternalCliRuntime::new(temp_dir.path());
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello from daily agent".to_string(),
         operation: "unsupported-test-operation".to_string(),
         params: serde_json::Value::Null,
@@ -1695,6 +1718,7 @@ async fn external_cli_runtime_streams_stdout_before_process_exit() {
     let runtime = ExternalCliRuntime::new(temp_dir.path());
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+            files: Vec::new(),
         message: "hello stream".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -1849,7 +1873,7 @@ fn external_progress_maps_to_agent_turn_progress_events() {
 }
 
 #[tokio::test]
-async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
+async fn external_cli_run_writes_attachments_and_injects_prompt_paths() {
     let temp_dir = tempfile::tempdir().unwrap();
     let _data_dir_guard = crate::test_env::BifrostDataDirGuard::set(temp_dir.path());
     let runs_root = temp_dir.path().join("runs");
@@ -1867,6 +1891,7 @@ async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
                 name: Some("second.jpg".to_string()),
             },
         ],
+        files: Vec::new(),
         message: String::new(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -1890,6 +1915,13 @@ async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
         inject_bifrost_tools: false,
         skill_paths: Vec::new(),
     };
+    let mut file_request = request.clone();
+    file_request.images = Vec::new();
+    file_request.files = vec![ExternalCliFileInput {
+        mime_type: "text/plain".to_string(),
+        data: "cmVwb3J0IGJvZHk=".to_string(),
+        name: Some("../report final.md".to_string()),
+    }];
     let mut second_request = request.clone();
     second_request.images = vec![ExternalCliImageInput {
         mime_type: "image/png".to_string(),
@@ -1938,6 +1970,48 @@ async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
     assert_eq!(tokio::fs::read(&images[0].path).await.unwrap(), b"hello");
     assert_eq!(tokio::fs::read(&images[1].path).await.unwrap(), b"two");
 
+    let file_result = runtime.run(file_request).await.unwrap();
+    let file_prompt = tokio::fs::read_to_string(&file_result.artifacts.prompt)
+        .await
+        .unwrap();
+    assert!(file_prompt.contains("## Attached Files"));
+    assert!(file_prompt.contains("1-report_final.md"));
+    assert!(file_prompt.contains("name: report_final.md"));
+    assert!(!file_prompt.contains("name: ../report final.md"));
+    let files: Vec<ExternalCliSavedFileAttachment> = serde_json::from_str(
+        file_result
+            .metadata
+            .get("attachments.files")
+            .expect("file attachments metadata"),
+    )
+    .unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].mime_type, "text/plain");
+    assert_eq!(files[0].name.as_deref(), Some("../report final.md"));
+    let file_path = std::path::PathBuf::from(&files[0].path);
+    assert_eq!(
+        file_path.parent(),
+        Some(
+            runs_root
+                .join(&file_result.run_id)
+                .join("attachments")
+                .join("files")
+                .as_path()
+        )
+    );
+    assert_eq!(
+        file_path.file_name().and_then(|v| v.to_str()),
+        Some("1-report_final.md")
+    );
+    assert_eq!(
+        tokio::fs::read(&files[0].path).await.unwrap(),
+        b"report body"
+    );
+    assert_eq!(
+        file_result.metadata.get("attachments.fileCount"),
+        Some(&"1".to_string())
+    );
+
     let second_result = runtime.run(second_request).await.unwrap();
     let second_images: Vec<ExternalCliSavedImageAttachment> = serde_json::from_str(
         second_result
@@ -1968,6 +2042,155 @@ async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
 }
 
 #[tokio::test]
+async fn external_cli_file_attachments_cover_limits_base_dir_and_name_edges() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let data_dir = temp_dir.path().join("data");
+    let _data_dir_guard = crate::test_env::BifrostDataDirGuard::set(&data_dir);
+    let runs_root = temp_dir.path().join("runs");
+    let runtime = ExternalCliRuntime::new(&runs_root);
+    let attachment_base = bifrost_agent::config::agent_home_dir()
+        .join("sessions")
+        .join("by-key")
+        .join("attachments")
+        .join("session-edge");
+    let long_name = format!("{}.txt", "a".repeat(220));
+    let mut files = vec![
+        ExternalCliFileInput {
+            mime_type: "text/plain".to_string(),
+            data: "YWxwaGE=".to_string(),
+            name: Some("......".to_string()),
+        },
+        ExternalCliFileInput {
+            mime_type: "text/plain".to_string(),
+            data: "YmV0YQ==".to_string(),
+            name: Some("duplicate.txt".to_string()),
+        },
+        ExternalCliFileInput {
+            mime_type: "text/plain".to_string(),
+            data: "Z2FtbWE=".to_string(),
+            name: Some("duplicate.txt".to_string()),
+        },
+        ExternalCliFileInput {
+            mime_type: "text/plain".to_string(),
+            data: "ZGVsdGE=".to_string(),
+            name: Some(long_name),
+        },
+        ExternalCliFileInput {
+            mime_type: "text/plain".to_string(),
+            data: "ZW1wdHk=".to_string(),
+            name: Some(String::new()),
+        },
+        ExternalCliFileInput {
+            mime_type: "text/plain".to_string(),
+            data: "emV0YQ==".to_string(),
+            name: Some("six.bin".to_string()),
+        },
+    ];
+    files.push(ExternalCliFileInput {
+        mime_type: "text/plain".to_string(),
+        data: "dHJ1bmNhdGVk".to_string(),
+        name: Some("seven.bin".to_string()),
+    });
+    files.push(ExternalCliFileInput {
+        mime_type: "text/plain".to_string(),
+        data: "   ".to_string(),
+        name: Some("blank.bin".to_string()),
+    });
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        files,
+        message: "check attached files".to_string(),
+        operation: default_operation(),
+        params: serde_json::json!({
+            "attachmentBaseDir": attachment_base,
+        }),
+        provider_id: Some("provider-a".to_string()),
+        runner_id: None,
+        session_key: Some("file-edge-session".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: "mock".to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("sh".to_string()),
+            args: vec![
+                "-c".to_string(),
+                "cat >/dev/null; printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"ok\"}'"
+                    .to_string(),
+            ],
+            timeout_secs: Some(10),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let result = runtime.run(request).await.unwrap();
+
+    let saved: Vec<ExternalCliSavedFileAttachment> = serde_json::from_str(
+        result
+            .metadata
+            .get("attachments.files")
+            .expect("file attachment metadata"),
+    )
+    .unwrap();
+    assert_eq!(saved.len(), MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE);
+    assert!(saved
+        .iter()
+        .all(|file| std::path::Path::new(&file.path).starts_with(&attachment_base)));
+    assert_eq!(
+        saved[0].path.as_str(),
+        attachment_base
+            .join(&result.run_id)
+            .join("files")
+            .join("1-attachment.bin")
+            .display()
+            .to_string()
+    );
+    assert_eq!(
+        std::path::Path::new(&saved[4].path)
+            .file_name()
+            .and_then(|value| value.to_str()),
+        Some("5-attachment.bin")
+    );
+    assert!(std::path::Path::new(&saved[3].path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| name.len() <= 162 && name.starts_with("4-")));
+    assert_eq!(
+        result.metadata.get("attachments.fileCount"),
+        Some(&MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE.to_string())
+    );
+}
+
+#[tokio::test]
+async fn external_cli_file_attachment_collision_uses_uuid_fallback_name() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let files_dir = temp_dir.path().join("files");
+    tokio::fs::create_dir_all(&files_dir).await.unwrap();
+    tokio::fs::write(files_dir.join("1-existing.txt"), b"old")
+        .await
+        .unwrap();
+
+    let path = unique_file_attachment_path(&files_dir, 1, "existing.txt").await;
+
+    let file_name = path.file_name().and_then(|value| value.to_str()).unwrap();
+    assert_ne!(file_name, "1-existing.txt");
+    assert!(file_name.starts_with("1-"));
+    assert_eq!(path.parent(), Some(files_dir.as_path()));
+}
+
+#[test]
+fn external_cli_file_input_defaults_mime_type() {
+    let file: ExternalCliFileInput =
+        serde_json::from_value(serde_json::json!({ "data": "YWJj" })).unwrap();
+
+    assert_eq!(file.mime_type, "application/octet-stream");
+    assert_eq!(file.data, "YWJj");
+}
+
+#[tokio::test]
 async fn external_cli_runtime_marks_stopped_run_before_late_stdout() {
     let temp_dir = tempfile::tempdir().unwrap();
     let runs_root = temp_dir.path().to_path_buf();
@@ -1975,6 +2198,7 @@ async fn external_cli_runtime_marks_stopped_run_before_late_stdout() {
     let (executable, args) = delayed_final_command("too late");
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "stop me".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -2101,6 +2325,7 @@ async fn external_cli_runtime_stops_active_run_by_session_key() {
     let (executable, args) = delayed_final_command("too late");
     let request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "stop by session".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -2520,6 +2745,7 @@ fn codex_request_metadata_includes_configured_or_default_model_label() {
     let _trae_home = EnvGuard::set("TRAE_HOME", trae_home.path());
     let configured_request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -2557,6 +2783,7 @@ fn codex_request_metadata_includes_configured_or_default_model_label() {
 
     let default_request = ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: "hello".to_string(),
         operation: default_operation(),
         params: serde_json::Value::Null,
@@ -2955,6 +3182,7 @@ fn codex_and_traex_metadata_include_runner_observability() {
     for adapter in [DEFAULT_ADAPTER, TRAEX_ADAPTER] {
         let request = ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: "inspect image".to_string(),
             operation: default_operation(),
             params: serde_json::json!({"threadId": "thread-existing"}),
@@ -3028,6 +3256,7 @@ fn codex_and_traex_metadata_include_runner_observability() {
             size_bytes: 42,
             name: Some("image.png".to_string()),
         }];
+        let saved_files = Vec::new();
         let mut metadata = std::collections::BTreeMap::new();
 
         append_external_cli_observability_metadata(
@@ -3036,6 +3265,7 @@ fn codex_and_traex_metadata_include_runner_observability() {
                 spec: &spec,
                 prompt: "## Attached Images\n- /tmp/session/run/images/image-1.png\n",
                 saved_images: &saved_images,
+                saved_files: &saved_files,
                 stdout: b"{\"type\":\"assistant_final\"}\n",
                 stderr: b"warning\n",
                 events: &events,
@@ -3405,6 +3635,79 @@ fn external_cli_effort_validation_honors_current_model_supported_levels() {
     assert!(rendered.contains("当前模型 `thinking-model`"));
     assert!(rendered.contains("`low`"));
     assert!(!rendered.contains("`high`"));
+}
+
+#[test]
+fn external_cli_command_environment_augments_path_unless_explicitly_overridden() {
+    let _guard = external_cli_env_guard();
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let system_path = PathBuf::from(
+        std::env::join_paths([
+            temp_dir.path().join("system-bin"),
+            temp_dir.path().join("fallback-bin"),
+        ])
+        .expect("system path"),
+    );
+    let _path_guard = EnvGuard::set("PATH", &system_path);
+
+    let mut command = Command::new("traex");
+    apply_command_environment(&mut command, &BTreeMap::new());
+    let path = command
+        .as_std()
+        .get_envs()
+        .find_map(|(key, value)| (key == OsStr::new("PATH")).then_some(value).flatten())
+        .expect("augmented PATH");
+    let expected_path = bifrost_core::inherited_executable_path().expect("expected PATH");
+    assert_eq!(path, expected_path);
+
+    let configured_path = "/custom/traex/bin";
+    let mut env = BTreeMap::new();
+    env.insert("PATH".to_string(), configured_path.to_string());
+    let mut command = Command::new("traex");
+    apply_command_environment(&mut command, &env);
+    let path = command
+        .as_std()
+        .get_envs()
+        .find_map(|(key, value)| (key == OsStr::new("PATH")).then_some(value).flatten())
+        .expect("configured PATH");
+    assert_eq!(path, OsStr::new(configured_path));
+}
+
+#[test]
+fn external_cli_explicit_path_detection_matches_platform_semantics() {
+    let mut env = BTreeMap::new();
+    env.insert("PATH".to_string(), "/custom/bin".to_string());
+    assert!(has_explicit_path_environment(&env));
+
+    env.clear();
+    env.insert("Path".to_string(), "/custom/bin".to_string());
+    assert_eq!(has_explicit_path_environment(&env), cfg!(windows));
+}
+
+#[test]
+fn external_cli_worker_command_sets_internal_worker_marker() {
+    let command = external_cli_worker_process_command(Path::new("bifrost"));
+    let command = command.as_std();
+    let args = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let worker_marker = command
+        .get_envs()
+        .find_map(|(key, value)| (key == OsStr::new(EXTERNAL_CLI_WORKER_ENV)).then_some(value))
+        .flatten();
+
+    assert_eq!(args, ["agent", "external-runner-worker"]);
+    assert_eq!(worker_marker, Some(OsStr::new("1")));
+}
+
+#[test]
+fn ambient_worker_marker_does_not_override_forced_worker_delegation() {
+    let _guard = external_cli_env_guard();
+    let _worker_marker = EnvGuard::set(EXTERNAL_CLI_WORKER_ENV, Path::new("1"));
+    let _force_worker = EnvGuard::set("BIFROST_FORCE_EXTERNAL_CLI_WORKER", Path::new("1"));
+
+    assert!(!should_run_external_cli_in_current_process());
 }
 
 fn has_arg_pair(args: &[String], left: &str, right: &str) -> bool {

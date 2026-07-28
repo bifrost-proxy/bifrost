@@ -3,15 +3,20 @@
 mod backend_runtime;
 mod native_launcher;
 mod open_requests;
+mod runtime_ownership;
 mod upgrade_handoff;
 
 use backend_runtime::*;
+use runtime_ownership::*;
 use upgrade_handoff::*;
 
 use bifrost_core::upgrade_progress::{
     read_progress, write_progress, UpgradePhase, UpgradeProgress,
 };
-use bifrost_core::{cleanup_bifrost_log_dir, direct_blocking_reqwest_client_builder};
+use bifrost_core::{
+    cleanup_bifrost_log_dir, direct_blocking_reqwest_client_builder, inherited_executable_path,
+    EXTERNAL_CLI_WORKER_ENV,
+};
 use bifrost_storage::data_dir as shared_bifrost_data_dir;
 use bifrost_tls::{ensure_valid_ca, generate_root_ca, save_root_ca, CertInstaller, CertStatus};
 use open_requests::{parse_open_url, DesktopOpenRequest, OpenRequestParseError};
@@ -70,6 +75,7 @@ const WEBVIEW_REVEAL_SETTLE_DELAY: Duration = Duration::from_millis(90);
 const HANDOFF_COMPLETE_EVENT: &str = "desktop://handoff-complete";
 const OPEN_REQUEST_EVENT: &str = "desktop://open-request";
 const DESKTOP_CORE_ENV: &str = "BIFROST_DESKTOP_CORE";
+const DETACHED_DAEMON_CHILD_ENV: &str = "BIFROST_DETACHED_DAEMON_CHILD";
 const DESKTOP_UPGRADE_RELAUNCH_HELPER_ENV: &str = "BIFROST_DESKTOP_UPGRADE_RELAUNCH_HELPER";
 const DESKTOP_UPGRADE_RELAUNCH_MARKER_ENV: &str = "BIFROST_DESKTOP_UPGRADE_RELAUNCH_MARKER";
 const DESKTOP_UPGRADE_RELAUNCH_TARGET_ENV: &str = "BIFROST_DESKTOP_UPGRADE_RELAUNCH_TARGET";
@@ -135,6 +141,8 @@ struct DesktopServerConfigResponse {
 struct DesktopRuntimeMarker {
     pid: u32,
     port: u16,
+    #[serde(default, rename = "runtime_start_mode", alias = "start_mode")]
+    start_mode: Option<String>,
 }
 
 enum BackendPortTransition {
@@ -182,6 +190,12 @@ enum BackendWaitFailureKind {
 enum StartupDeadlineDisposition {
     HandoffToWebview,
     ShowNativeError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopShutdownBackendAction {
+    StopOwnedRuntime,
+    PreserveExternalRuntime,
 }
 
 #[derive(Debug)]
@@ -888,9 +902,9 @@ fn start_backend(
     let mut command = Command::new(binary_path);
     command
         .args(desktop_backend_start_args(port))
-        .envs(desktop_backend_env(data_dir, startup_session_id))
         .stdout(Stdio::from(stdout_log))
         .stderr(Stdio::from(stderr_log));
+    configure_desktop_backend_environment(&mut command, data_dir, startup_session_id);
     hide_windows_child_console(&mut command);
     let child = command
         .spawn()
@@ -920,6 +934,20 @@ fn desktop_backend_start_args(port: u16) -> Vec<String> {
         args.push("--no-system-proxy".to_string());
     }
     args
+}
+
+fn configure_desktop_backend_environment(
+    command: &mut Command,
+    data_dir: &Path,
+    startup_session_id: &str,
+) {
+    command
+        .env_remove(DETACHED_DAEMON_CHILD_ENV)
+        .env_remove(EXTERNAL_CLI_WORKER_ENV);
+    if let Some(path) = inherited_executable_path() {
+        command.env("PATH", path);
+    }
+    command.envs(desktop_backend_env(data_dir, startup_session_id));
 }
 
 fn desktop_startup_session_id() -> String {
@@ -1024,17 +1052,31 @@ fn complete_desktop_shutdown(app: &AppHandle) {
         return;
     };
 
-    match spawn_backend_stop(&state.binary_path, &state.data_dir) {
-        Ok(child) => {
+    match desktop_shutdown_backend_action_for_state(&state) {
+        DesktopShutdownBackendAction::StopOwnedRuntime => {
             append_desktop_bootstrap_log(
                 &state.data_dir,
-                format!("spawned backend stop helper pid={}", child.id()),
+                "desktop shutdown owns the active backend; requesting backend stop",
             );
+            match spawn_backend_stop(&state.binary_path, &state.data_dir) {
+                Ok(child) => {
+                    append_desktop_bootstrap_log(
+                        &state.data_dir,
+                        format!("spawned backend stop helper pid={}", child.id()),
+                    );
+                }
+                Err(error) => {
+                    append_desktop_bootstrap_log(
+                        &state.data_dir,
+                        format!("failed to spawn backend stop helper: {error}"),
+                    );
+                }
+            }
         }
-        Err(error) => {
+        DesktopShutdownBackendAction::PreserveExternalRuntime => {
             append_desktop_bootstrap_log(
                 &state.data_dir,
-                format!("failed to spawn backend stop helper: {error}"),
+                "desktop shutdown is preserving the external CLI-owned backend",
             );
         }
     }

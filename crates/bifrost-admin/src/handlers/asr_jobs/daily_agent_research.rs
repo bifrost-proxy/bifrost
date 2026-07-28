@@ -599,6 +599,7 @@ async fn run_daily_research_child_request(
     allow_work_dirs.dedup();
     let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         images: Vec::new(),
+        files: Vec::new(),
         message: prompt,
         operation: operation.to_string(),
         params,

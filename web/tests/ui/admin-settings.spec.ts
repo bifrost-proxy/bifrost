@@ -77,6 +77,86 @@ test("版本更新弹窗 Upgrade Command Copy 写入剪贴板", async ({
   expect(clipboardText).toBe("bifrost upgrade");
 });
 
+test("版本升级 409 接管既有任务，页面重载后继续显示真实进度", async ({
+  page,
+}) => {
+  let upgradeActive = false;
+  let startRequests = 0;
+  await page.route("**/_bifrost/api/system/version-check**", async (route) => {
+    await route.fulfill({
+      json: {
+        has_update: true,
+        current_version: "0.0.161",
+        latest_version: "0.0.162",
+        release_highlights: ["fix: recover desktop upgrade progress"],
+        release_url: "https://github.com/bifrost-proxy/bifrost/releases/tag/v0.0.162",
+      },
+    });
+  });
+  await page.route("**/_bifrost/api/system/upgrade**", async (route) => {
+    const request = route.request();
+    const pathname = new URL(request.url()).pathname;
+    if (pathname.endsWith("/progress")) {
+      await route.fulfill({
+        json: upgradeActive
+          ? {
+              phase: "downloading",
+              percent: 42,
+              message: "Trying fallback download source github.com…",
+              target_version: "0.0.162",
+              source: "admin",
+              error: null,
+              updated_at: new Date().toISOString(),
+            }
+          : {
+              phase: "idle",
+              percent: null,
+              message: "",
+              target_version: null,
+              source: null,
+              error: null,
+              updated_at: new Date().toISOString(),
+            },
+      });
+      return;
+    }
+    if (request.method() === "POST") {
+      startRequests += 1;
+      upgradeActive = true;
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: "An upgrade is already in progress",
+          status: 409,
+        }),
+      });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await openPage(page, "traffic");
+  await page.getByTestId("statusbar-version-button").click();
+  await expect(page.getByText("New Version Available")).toBeVisible();
+  await page.getByTestId("version-update-now-button").click();
+
+  await expect(page.getByText("Updating Bifrost")).toBeVisible();
+  await expect(page.getByText("Trying fallback download source github.com…")).toBeVisible();
+  await expect(page.getByTestId("version-download-progress")).toContainText("42%");
+  await expect(page.getByText("Update Failed")).toHaveCount(0);
+  await expect(page.getByTestId("version-retry-button")).toHaveCount(0);
+  expect(startRequests).toBe(1);
+
+  await page.reload();
+
+  await expect(page.getByText("Updating Bifrost")).toBeVisible();
+  await expect(page.getByText("Trying fallback download source github.com…")).toBeVisible();
+  await expect(page.getByTestId("version-download-progress")).toContainText("42%");
+  await expect(page.getByText("Update Failed")).toHaveCount(0);
+  expect(startRequests).toBe(1);
+});
+
 test("底部 Sync 状态栏点击后跳转到 Settings Sync", async ({ page }) => {
   await openPage(page, "traffic");
 

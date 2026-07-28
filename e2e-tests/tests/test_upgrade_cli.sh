@@ -812,11 +812,11 @@ test_admin_self_update_converts_cli_foreground_to_restarted_daemon() {
     fi
 }
 
-test_admin_self_update_requires_companion_app_before_restart() {
-    header "测试 CLI-owned 后台升级在 App 伴随更新失败时禁止重启和假完成"
+test_admin_self_update_restarts_core_after_companion_app_failure() {
+    header "测试 CLI-owned 后台升级在 App 伴随更新失败时仍重启 core 且不假完成"
 
     if [[ "$(uname -s)" != "Darwin" ]]; then
-        skip "App bundle 严格完成门禁回归当前仅在 macOS 临时 .app 上执行"
+        skip "App 失败后的 core 重启回归当前仅在 macOS 临时 .app 上执行"
         return
     fi
 
@@ -840,7 +840,7 @@ test_admin_self_update_requires_companion_app_before_restart() {
         --host 127.0.0.1 --access-mode allow_all --no-system-proxy --no-intercept 2>&1)
     if ! wait_for_admin_ready "$port"; then
         rm -rf "$root"
-        fail "严格 App 门禁测试 daemon 未 ready: $start_output"
+        fail "App 失败后的 core 重启测试 daemon 未 ready: $start_output"
         return
     fi
     old_pid=$(read_runtime_pid "$data_dir/runtime.json")
@@ -858,13 +858,15 @@ test_admin_self_update_requires_companion_app_before_restart() {
         "$BIFROST_BIN" self-update --target "$current_version" --source admin \
         --running-proxy-pid "$old_pid" --running-proxy-port "$port" 2>&1)
     update_status=$?
-    set +e
+    set -e
 
     runtime_pid=$(read_runtime_pid "$data_dir/runtime.json")
     progress_phase=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["phase"])' "$data_dir/upgrade-progress.json" 2>/dev/null || true)
     progress_error=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("error", ""))' "$data_dir/upgrade-progress.json" 2>/dev/null || true)
     local still_ready="false"
-    if kill -0 "$old_pid" 2>/dev/null && wait_for_admin_ready "$port" 5; then
+    if [[ -n "$runtime_pid" && "$runtime_pid" != "$old_pid" ]] \
+        && kill -0 "$runtime_pid" 2>/dev/null \
+        && wait_for_admin_ready "$port" 5; then
         still_ready="true"
     fi
     BIFROST_DATA_DIR="$data_dir" "$BIFROST_BIN" stop >/dev/null 2>&1 || true
@@ -874,14 +876,16 @@ test_admin_self_update_requires_companion_app_before_restart() {
     TEST_PROXY_PID=""
     rm -rf "$root"
 
-    if [[ $update_status -eq 0 \
-        && "$runtime_pid" == "$old_pid" \
+    if [[ $update_status -ne 0 \
+        && -n "$runtime_pid" \
+        && "$runtime_pid" != "$old_pid" \
         && "$still_ready" == "true" \
         && "$progress_phase" == "failed" \
-        && "$progress_error" == *"desktop app update command failed"* ]]; then
-        pass "App 伴随更新失败会阻止 CLI daemon 重启并向 Web UI 写入 failed"
+        && "$progress_error" == *"desktop app update command failed"* \
+        && "$update_output" == *"Proxy restarted successfully with the new version"* ]]; then
+        pass "App 伴随更新失败仍会重启 CLI daemon，并向 Web UI 写入 failed 而不假完成"
     else
-        fail "App 严格完成门禁失败: status=$update_status old=$old_pid runtime=$runtime_pid ready=$still_ready phase=$progress_phase error=$progress_error output=$update_output"
+        fail "App 失败后的 core 重启契约失败: status=$update_status old=$old_pid runtime=$runtime_pid ready=$still_ready phase=$progress_phase error=$progress_error output=$update_output"
     fi
 }
 
@@ -1082,7 +1086,7 @@ main() {
     if [[ "$ONLY_RUNTIME_OWNERSHIP" == "true" ]]; then
         test_admin_self_update_recovers_missing_runtime_markers
         test_admin_self_update_converts_cli_foreground_to_restarted_daemon
-        test_admin_self_update_requires_companion_app_before_restart
+        test_admin_self_update_restarts_core_after_companion_app_failure
         test_self_update_does_not_take_over_app_owned_core
         print_summary
         return
@@ -1108,7 +1112,7 @@ main() {
     test_upgrade_streams_desktop_installer_progress
     test_admin_self_update_recovers_missing_runtime_markers
     test_admin_self_update_converts_cli_foreground_to_restarted_daemon
-    test_admin_self_update_requires_companion_app_before_restart
+    test_admin_self_update_restarts_core_after_companion_app_failure
     test_self_update_does_not_take_over_app_owned_core
 
     print_summary

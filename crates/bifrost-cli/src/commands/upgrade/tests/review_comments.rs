@@ -63,6 +63,32 @@ fn desktop_shutdown_targets_shell_instead_of_bundled_core() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn desktop_process_paths_accept_canonical_aliases() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let canonical_root = temp.path().join("private");
+    let canonical_app = canonical_root.join("Bifrost.app");
+    let canonical_shell = canonical_app.join("Contents/MacOS/bifrost-desktop");
+    std::fs::create_dir_all(canonical_shell.parent().expect("shell parent"))
+        .expect("create canonical App");
+    std::fs::write(&canonical_shell, b"fixture").expect("write canonical shell");
+
+    let alias_root = temp.path().join("var");
+    symlink(&canonical_root, &alias_root).expect("create App path alias");
+    let alias_app = alias_root.join("Bifrost.app");
+    let alias_shell = alias_app.join("Contents/MacOS/bifrost-desktop");
+
+    assert!(path_is_within(&canonical_shell, &alias_app));
+    assert_eq!(
+        select_running_desktop_shell_process(&alias_shell, [(79402, canonical_shell.clone())],),
+        Some((79402, canonical_shell)),
+        "macOS process discovery must tolerate /var and /private/var aliases"
+    );
+}
+
 #[test]
 fn macos_legacy_shutdown_targets_exact_app_path() {
     use std::ffi::OsString;
@@ -118,7 +144,7 @@ fn desktop_handoff_flag_requires_matching_restarting_progress() {
 fn failed_companion_restores_only_a_shell_that_was_shut_down() {
     let app = Path::new("/tmp/Bifrost.app");
     let relaunches = std::cell::Cell::new(0);
-    let untouched = restore_desktop_after_failed_companion(
+    let untouched = restore_desktop_after_failed_app_upgrade(
         app,
         false,
         BifrostError::Config("companion failed".to_string()),
@@ -130,7 +156,7 @@ fn failed_companion_restores_only_a_shell_that_was_shut_down() {
     assert_eq!(untouched.to_string(), "Config error: companion failed");
     assert_eq!(relaunches.get(), 0);
 
-    let restored = restore_desktop_after_failed_companion(
+    let restored = restore_desktop_after_failed_app_upgrade(
         app,
         true,
         BifrostError::Config("companion failed".to_string()),
@@ -143,7 +169,7 @@ fn failed_companion_restores_only_a_shell_that_was_shut_down() {
     assert_eq!(restored.to_string(), "Config error: companion failed");
     assert_eq!(relaunches.get(), 1);
 
-    let combined = restore_desktop_after_failed_companion(
+    let combined = restore_desktop_after_failed_app_upgrade(
         app,
         true,
         BifrostError::Config("companion failed".to_string()),
@@ -158,6 +184,16 @@ fn failed_companion_restores_only_a_shell_that_was_shut_down() {
         .to_string()
         .contains("previous desktop shell relaunch also failed"));
     assert!(combined.to_string().contains("open failed"));
+}
+
+#[test]
+fn desktop_app_upgrade_wrappers_handle_an_absent_shell() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let app = temp.path().join("Missing-Bifrost.app");
+
+    assert!(!desktop_app_is_running(&app));
+    shutdown_running_desktop_for_app_upgrade(&app)
+        .expect("an absent desktop shell already has released its files");
 }
 
 #[cfg(target_os = "macos")]

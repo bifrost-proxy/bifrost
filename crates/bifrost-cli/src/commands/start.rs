@@ -22,7 +22,8 @@ use bifrost_admin::{
     ReplayDbStore, RuntimeConfig, WsPayloadStore,
 };
 use bifrost_core::{
-    expand_rule_references, normalize_rule_content, Rule, UserPassAccountConfig, UserPassAuthConfig,
+    expand_rule_references, normalize_rule_content, Rule, UserPassAccountConfig,
+    UserPassAuthConfig, EXTERNAL_CLI_WORKER_ENV,
 };
 use bifrost_proxy::{AccessMode, ProxyConfig, ProxyServer};
 use bifrost_storage::{
@@ -2850,6 +2851,19 @@ fn wait_for_detached_daemon_ready(
 }
 
 #[cfg(any(unix, windows))]
+fn configure_detached_daemon_environment(command: &mut std::process::Command, data_dir: &Path) {
+    command
+        .env_remove(EXTERNAL_CLI_WORKER_ENV)
+        .env(DETACHED_DAEMON_CHILD_ENV, "1")
+        .env("BIFROST_DATA_DIR", data_dir);
+}
+
+#[cfg(unix)]
+fn clear_external_cli_worker_marker_for_forked_daemon() {
+    std::env::remove_var(EXTERNAL_CLI_WORKER_ENV);
+}
+
+#[cfg(any(unix, windows))]
 fn run_daemon_via_exec(
     config: &ProxyConfig,
     config_manager: &ConfigManager,
@@ -2903,12 +2917,16 @@ fn run_daemon_via_exec(
     let mut command = Command::new(exe);
     command
         .args(std::env::args_os().skip(1))
-        .env(DETACHED_DAEMON_CHILD_ENV, "1")
-        .env("BIFROST_DATA_DIR", &bifrost_dir)
         .current_dir(&bifrost_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
+    configure_detached_daemon_environment(&mut command, &bifrost_dir);
+
+    #[cfg(test)]
+    if std::env::var_os("BIFROST_TEST_CONFIGURE_DAEMON_ONLY").is_some() {
+        return Ok(());
+    }
 
     #[cfg(unix)]
     {
@@ -3045,6 +3063,7 @@ pub fn run_daemon(
         }
         Ok(ForkResult::Child) => {
             drop(ready_rx);
+            clear_external_cli_worker_marker_for_forked_daemon();
             setsid().map_err(|e| {
                 bifrost_core::BifrostError::Config(format!("Failed to create new session: {}", e))
             })?;
@@ -4316,6 +4335,28 @@ mod tests {
         ScopedDataDir { previous }
     }
 
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     fn allocate_loopback_port() -> u16 {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         listener.local_addr().unwrap().port()
@@ -4518,6 +4559,58 @@ mod tests {
         assert!(should_spawn_daemon_parent_process(true, false));
         assert!(!should_spawn_daemon_parent_process(true, true));
         assert!(!should_spawn_daemon_parent_process(false, false));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn detached_daemon_command_clears_inherited_external_worker_marker() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let mut command = std::process::Command::new("bifrost");
+        command.env(EXTERNAL_CLI_WORKER_ENV, "leaked-worker-role");
+
+        configure_detached_daemon_environment(&mut command, temp_dir.path());
+
+        let env = command.get_envs().collect::<Vec<_>>();
+        assert!(env.iter().any(|(key, value)| {
+            *key == std::ffi::OsStr::new(EXTERNAL_CLI_WORKER_ENV) && value.is_none()
+        }));
+        assert!(env.iter().any(|(key, value)| {
+            *key == std::ffi::OsStr::new(DETACHED_DAEMON_CHILD_ENV)
+                && value.is_some_and(|value| value == std::ffi::OsStr::new("1"))
+        }));
+        assert!(env.iter().any(|(key, value)| {
+            *key == std::ffi::OsStr::new("BIFROST_DATA_DIR")
+                && value.is_some_and(|value| value == temp_dir.path().as_os_str())
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forked_daemon_child_clears_inherited_external_worker_marker() {
+        let _guard = data_dir_test_lock();
+        let _worker_marker = ScopedEnvVar::set(EXTERNAL_CLI_WORKER_ENV, "leaked-worker-role");
+
+        clear_external_cli_worker_marker_for_forked_daemon();
+
+        assert!(std::env::var_os(EXTERNAL_CLI_WORKER_ENV).is_none());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn detached_daemon_exec_path_configures_child_environment_before_spawn() {
+        let _guard = data_dir_test_lock();
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _scoped_data_dir = scoped_data_dir(&temp_dir);
+        let config_manager =
+            ConfigManager::new(temp_dir.path().to_path_buf()).expect("config manager");
+        let log_dir = temp_dir.path().join("logs");
+        let _configure_only = ScopedEnvVar::set("BIFROST_TEST_CONFIGURE_DAEMON_ONLY", "1");
+
+        let result = run_daemon_via_exec(&ProxyConfig::default(), &config_manager, &log_dir, 7);
+
+        result.expect("configure detached daemon command");
+        assert!(log_dir.join("bifrost.log").is_file());
+        assert!(log_dir.join("bifrost.err").is_file());
     }
 
     #[test]

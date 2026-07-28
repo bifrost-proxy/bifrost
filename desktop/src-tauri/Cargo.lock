@@ -272,7 +272,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bifrost-core"
-version = "0.0.156"
+version = "0.0.165"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-desktop"
-version = "0.0.158"
+version = "0.0.165"
 dependencies = [
  "bifrost-core",
  "bifrost-storage",
@@ -331,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-storage"
-version = "0.0.156"
+version = "0.0.165"
 dependencies = [
  "base64 0.22.1",
  "bifrost-core",
@@ -352,7 +352,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-tls"
-version = "0.0.156"
+version = "0.0.165"
 dependencies = [
  "bifrost-core",
  "chrono",

@@ -27,7 +27,7 @@ trap 'admin_cleanup_bifrost; kill "$server_pid" 2>/dev/null || true; rm -f "$MOC
 admin_ensure_bifrost || { echo "ERROR: Could not start Bifrost" >&2; exit 1; }
 
 MOCK_LOG="$(mktemp)"
-python3 "$SCRIPT_DIR/../mock_servers/http_echo_server.py" --port "$HTTP_PORT" --retries 5 >"$MOCK_LOG" 2>&1 &
+python3 -u "$SCRIPT_DIR/../mock_servers/http_echo_server.py" --port "$HTTP_PORT" --retries 5 >"$MOCK_LOG" 2>&1 &
 server_pid=$!
 
 waited=0

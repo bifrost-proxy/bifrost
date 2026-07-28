@@ -2,6 +2,245 @@ use super::*;
 use crate::handlers::json_response_with_status;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone)]
+struct BoundWebImProgressTarget {
+    provider: ImProviderConfig,
+    target: ImTarget,
+}
+
+#[derive(Clone)]
+struct WebImProgressContext {
+    binding: BoundWebImProgressTarget,
+    registry: Arc<ImAgentProgressRegistry>,
+    feishu: Arc<crate::im_gateway::feishu::FeishuProvider>,
+}
+
+#[derive(Clone)]
+struct WebImProgressForwarder {
+    tx: tokio::sync::mpsc::UnboundedSender<bifrost_agent::AgentTurnProgressEvent>,
+    session_key: String,
+    runner_id: String,
+    adapter: String,
+    model: Option<String>,
+    model_provider: Option<String>,
+    reasoning_effort: Option<String>,
+    reasoning_summary: Option<String>,
+    work_dir: Option<PathBuf>,
+}
+
+impl WebImProgressForwarder {
+    fn forward(&self, event: &crate::im_gateway::external_cli::ExternalCliProgressEvent) {
+        let Some(event) = crate::im_gateway::external_cli::external_progress_to_agent_turn_event(
+            &self.session_key,
+            &self.adapter,
+            crate::im_gateway::external_cli::ExternalCliProgressStatusContext::new(
+                Some(&self.runner_id),
+                self.model.as_deref(),
+                self.model_provider.as_deref(),
+                self.reasoning_effort.as_deref(),
+                self.reasoning_summary.as_deref(),
+                self.work_dir.as_deref(),
+            ),
+            event,
+        ) else {
+            return;
+        };
+        let _ = self.tx.send(event);
+    }
+}
+
+struct WebImProgressTurn {
+    registry: Arc<ImAgentProgressRegistry>,
+    session_key: String,
+    forwarder: WebImProgressForwarder,
+    coalescer: tokio::task::JoinHandle<()>,
+    runner_id: String,
+    request: crate::im_gateway::external_cli::ExternalCliRunRequest,
+}
+
+impl WebImProgressTurn {
+    async fn finish(
+        self,
+        output: String,
+        failed: bool,
+        metadata: Option<&std::collections::BTreeMap<String, String>>,
+    ) {
+        let runner_summary = external_cli_progress_runner_summary(
+            &self.runner_id,
+            &self.request.adapter,
+            &self.request,
+            metadata,
+        );
+        let _ = self
+            .registry
+            .update_runner_summary(&self.session_key, runner_summary)
+            .await;
+        let terminal_event = if failed {
+            bifrost_agent::AgentTurnProgressEvent::TurnFailed {
+                error: output.clone(),
+            }
+        } else {
+            bifrost_agent::AgentTurnProgressEvent::TurnFinished {
+                content: output.clone(),
+            }
+        };
+        let _ = self.forwarder.tx.send(terminal_event);
+        drop(self.forwarder);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.coalescer).await;
+        let _ = self
+            .registry
+            .finish(&self.session_key, Some(output), failed)
+            .await;
+    }
+}
+
+fn bound_web_im_progress_target(
+    service: &ImGatewayService,
+    session_key: Option<&str>,
+) -> Option<BoundWebImProgressTarget> {
+    let session_key = session_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    if let Some(binding) = service
+        .group_context_store
+        .binding_by_session(session_key)
+        .ok()
+        .flatten()
+    {
+        let provider = service.provider_store.get(&binding.provider_id)?;
+        if !provider.enabled || provider.provider_type != ImProviderType::Feishu {
+            return None;
+        }
+        return Some(BoundWebImProgressTarget {
+            target: ImTarget {
+                id: "__web_agent_progress__".to_string(),
+                provider_id: provider.id.clone(),
+                display_name: binding
+                    .chat_name
+                    .unwrap_or_else(|| "Bound group".to_string()),
+                receive_id_type: "chat_id".to_string(),
+                receive_id: binding.chat_id,
+                default_msg_type: "interactive".to_string(),
+                enabled: true,
+                created_at: 0,
+                updated_at: 0,
+            },
+            provider,
+        });
+    }
+
+    service
+        .provider_store
+        .list()
+        .into_iter()
+        .find_map(|provider| {
+            if !provider.enabled || provider.provider_type != ImProviderType::Feishu {
+                return None;
+            }
+            let owner_open_id = provider
+                .owner_open_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?;
+            if build_session_key(&provider.id, Some(owner_open_id)) != session_key {
+                return None;
+            }
+            Some(BoundWebImProgressTarget {
+                target: ImTarget {
+                    id: "__web_agent_progress__".to_string(),
+                    provider_id: provider.id.clone(),
+                    display_name: "Bound private chat".to_string(),
+                    receive_id_type: "open_id".to_string(),
+                    receive_id: owner_open_id.to_string(),
+                    default_msg_type: "interactive".to_string(),
+                    enabled: true,
+                    created_at: 0,
+                    updated_at: 0,
+                },
+                provider,
+            })
+        })
+}
+
+async fn start_bound_web_im_progress(
+    context: Option<&WebImProgressContext>,
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+) -> Option<WebImProgressTurn> {
+    let context = context?;
+    let session_key = request.session_key.as_deref()?;
+    let initial_message = image_message_preview(&request.message, &request.images, &request.files);
+    let started = if context
+        .registry
+        .rollover_existing(session_key, &initial_message)
+        .await
+    {
+        Ok(())
+    } else {
+        context
+            .registry
+            .start_feishu(
+                session_key,
+                Arc::clone(&context.feishu),
+                context.binding.provider.clone(),
+                context.binding.target.clone(),
+                &initial_message,
+            )
+            .await
+            .map(|_| ())
+    };
+    if let Err(error) = started {
+        warn!(
+            session_key,
+            error = %error,
+            "failed to mirror Web Agent turn to bound IM progress card"
+        );
+        return None;
+    }
+
+    let runner_summary =
+        external_cli_progress_runner_summary(runner_id, &request.adapter, request, None);
+    let _ = context
+        .registry
+        .update_runner_summary(session_key, runner_summary)
+        .await;
+    let resolved_model_config = crate::im_gateway::external_cli::resolve_external_cli_model_config(
+        &request.adapter,
+        &request.adapter_config,
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let registry = Arc::clone(&context.registry);
+    let progress_session_key = session_key.to_string();
+    let coalescer = tokio::spawn(async move {
+        super::agent_chat_progress::run_progress_event_coalescer(
+            registry,
+            progress_session_key,
+            &mut rx,
+        )
+        .await;
+    });
+    Some(WebImProgressTurn {
+        registry: Arc::clone(&context.registry),
+        session_key: session_key.to_string(),
+        forwarder: WebImProgressForwarder {
+            tx,
+            session_key: session_key.to_string(),
+            runner_id: runner_id.to_string(),
+            adapter: request.adapter.clone(),
+            model: resolved_model_config.model,
+            model_provider: resolved_model_config
+                .model_provider
+                .or(resolved_model_config.model_source),
+            reasoning_effort: resolved_model_config.reasoning_effort,
+            reasoning_summary: resolved_model_config.reasoning_summary,
+            work_dir: request.work_dir.clone(),
+        },
+        coalescer,
+        runner_id: runner_id.to_string(),
+        request: request.clone(),
+    })
+}
+
 fn message_image_content_parts(
     message: &str,
     images: &[crate::im_gateway::external_cli::ExternalCliImageInput],
@@ -9,7 +248,7 @@ fn message_image_content_parts(
     let normalized: Vec<&crate::im_gateway::external_cli::ExternalCliImageInput> = images
         .iter()
         .filter(|image| !image.data.trim().is_empty())
-        .take(MAX_AGENT_IMAGES_PER_MESSAGE)
+        .take(MAX_AGENT_ATTACHMENTS_PER_MESSAGE)
         .collect();
     if normalized.is_empty() {
         return None;
@@ -35,6 +274,7 @@ fn message_image_content_parts(
 fn image_message_preview(
     message: &str,
     images: &[crate::im_gateway::external_cli::ExternalCliImageInput],
+    files: &[crate::im_gateway::external_cli::ExternalCliFileInput],
 ) -> String {
     let trimmed = message.trim();
     if !trimmed.is_empty() {
@@ -43,12 +283,25 @@ fn image_message_preview(
     let count = images
         .iter()
         .filter(|image| !image.data.trim().is_empty())
-        .take(MAX_AGENT_IMAGES_PER_MESSAGE)
+        .take(MAX_AGENT_ATTACHMENTS_PER_MESSAGE)
         .count();
-    if count == 1 {
-        "Attached 1 image".to_string()
+    if count > 0 {
+        if count == 1 {
+            return "Attached 1 image".to_string();
+        }
+        return format!("Attached {count} images");
+    }
+    let file_count = files
+        .iter()
+        .filter(|file| !file.data.trim().is_empty())
+        .take(MAX_AGENT_ATTACHMENTS_PER_MESSAGE)
+        .count();
+    if file_count == 1 {
+        "Attached 1 file".to_string()
+    } else if file_count > 1 {
+        format!("Attached {file_count} files")
     } else {
-        format!("Attached {count} images")
+        String::new()
     }
 }
 
@@ -278,6 +531,11 @@ pub(super) async fn handle_chat_gateway(
                         Ok(value) => value,
                         Err(response) => return response,
                     };
+                let bound_im_target =
+                    bound_web_im_progress_target(_service, request.session_key.as_deref());
+                if let Some(binding) = bound_im_target.as_ref() {
+                    request.provider_id = Some(binding.provider.id.clone());
+                }
                 let config = _service.external_cli_config_store.load();
                 let effective =
                     crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
@@ -324,6 +582,7 @@ pub(super) async fn handle_chat_gateway(
                             first_message_title_preview(&image_message_preview(
                                 &request.message,
                                 &request.images,
+                                &request.files,
                             )),
                             request
                                 .work_dir
@@ -354,7 +613,8 @@ pub(super) async fn handle_chat_gateway(
                             _service,
                             session_key,
                             &request.message,
-                        );
+                        )
+                        .await;
                     }
                 }
                 prepare_external_cli_session_attachment_params(&mut request, &effective.runner_id);
@@ -369,9 +629,25 @@ pub(super) async fn handle_chat_gateway(
                 let agent_session_manager = _service.agent_session_manager.clone();
                 let queue_manager = _service.queue_manager.clone();
                 let session_key_for_preview = request.session_key.clone();
+                let web_im_progress_context = bound_im_target
+                    .filter(|_| {
+                        effective.settings.delivery_mode
+                            != crate::im_gateway::external_cli::ExternalCliDeliveryMode::NoIm
+                    })
+                    .map(|binding| WebImProgressContext {
+                        binding,
+                        registry: Arc::clone(&_service.progress_registry),
+                        feishu: Arc::clone(_service.connection_manager.feishu_provider()),
+                    });
                 tokio::spawn(async move {
                     let mut current_request = request;
                     loop {
+                        let web_im_progress = start_bound_web_im_progress(
+                            web_im_progress_context.as_ref(),
+                            &current_request,
+                            &runner_id_for_state,
+                        )
+                        .await;
                         remember_external_cli_started_state(&current_request, &runner_id_for_state);
                         emit_external_cli_timeline_changed_from_request(
                             &agent_session_manager,
@@ -397,12 +673,18 @@ pub(super) async fn handle_chat_gateway(
                         let progress_request = request_snapshot.clone();
                         let progress_runner_id = runner_id_for_state.clone();
                         let progress_agent_session_manager = agent_session_manager.clone();
+                        let web_im_progress_forwarder = web_im_progress
+                            .as_ref()
+                            .map(|progress| progress.forwarder.clone());
                         let progress_task = tokio::spawn(async move {
                             let mut recorder = external_cli_timeline_recorder(
                                 &progress_request,
                                 &progress_runner_id,
                             );
                             while let Some(event) = progress_rx.recv().await {
+                                if let Some(progress) = web_im_progress_forwarder.as_ref() {
+                                    progress.forward(&event);
+                                }
                                 if let Some(end_index) = record_external_cli_web_progress_event(
                                     recorder.as_mut(),
                                     &progress_request,
@@ -457,6 +739,9 @@ pub(super) async fn handle_chat_gateway(
                                 );
                                 if !streams_progress {
                                     for event in &result.events {
+                                        if let Some(progress) = web_im_progress.as_ref() {
+                                            progress.forwarder.forward(event);
+                                        }
                                         if matches!(
                                             event.event_type,
                                             crate::im_gateway::external_cli::ExternalCliProgressEventType::RunStarted
@@ -481,6 +766,19 @@ pub(super) async fn handle_chat_gateway(
                                         format!("{}\n", finished),
                                     ))))
                                     .await;
+                                if let Some(progress) = web_im_progress {
+                                    let failed = !matches!(
+                                        result.status,
+                                        crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded
+                                    );
+                                    progress
+                                        .finish(
+                                            result.response.clone(),
+                                            failed,
+                                            Some(&result.metadata),
+                                        )
+                                        .await;
+                                }
                             }
                             Err(error) => {
                                 let failed =
@@ -490,6 +788,9 @@ pub(super) async fn handle_chat_gateway(
                                         format!("{}\n", failed),
                                     ))))
                                     .await;
+                                if let Some(progress) = web_im_progress {
+                                    progress.finish(error, true, None).await;
+                                }
                                 break;
                             }
                         }
@@ -502,6 +803,7 @@ pub(super) async fn handle_chat_gateway(
                         current_request = request_for_state.clone();
                         current_request.message = next_message;
                         current_request.images.clear();
+                        current_request.files.clear();
                         apply_persisted_external_cli_state(
                             &mut current_request,
                             &runner_id_for_state,
@@ -682,6 +984,64 @@ pub(super) async fn handle_chat_gateway(
     error_response(StatusCode::NOT_FOUND, "Chat Gateway endpoint not found")
 }
 
+async fn update_web_guide_progress(
+    service: &ImGatewayService,
+    session_key: &str,
+    message: &str,
+    queue_items: Vec<crate::im_gateway::queue_manager::QueueItem>,
+    queued: bool,
+) -> bool {
+    let notice = if queued {
+        format!(
+            "WebUI 引导无法实时注入，已排队：{}",
+            truncate_str(message, 48)
+        )
+    } else {
+        format!("已从 WebUI 收到引导：{}", truncate_str(message, 48))
+    };
+    service
+        .progress_registry
+        .update_queue_state(session_key, queue_items, false, Some(notice))
+        .await
+}
+
+async fn accepted_web_guide_payload(
+    service: &ImGatewayService,
+    session_key: &str,
+    message: &str,
+    result: &crate::im_gateway::external_cli::ExternalCliGuideResult,
+    stream_response: bool,
+) -> serde_json::Value {
+    update_web_guide_progress(
+        service,
+        session_key,
+        message,
+        service.queue_manager.queue_status(session_key),
+        false,
+    )
+    .await;
+    if stream_response {
+        serde_json::json!({
+            "eventType": "run_finished",
+            "sessionKey": session_key,
+            "response": "🔀 已发送到当前 Runner session，将按 Runner 的实时引导语义生效",
+            "guide": true,
+            "guideId": result.guide_id,
+            "delivery": "steered",
+            "threadId": result.thread_id,
+            "turnId": result.turn_id,
+        })
+    } else {
+        serde_json::json!({
+            "guideId": result.guide_id,
+            "sessionKey": session_key,
+            "delivery": "steered",
+            "threadId": result.thread_id,
+            "turnId": result.turn_id,
+        })
+    }
+}
+
 async fn guide_external_cli_session(
     service: &ImGatewayService,
     session_key: &str,
@@ -695,13 +1055,9 @@ async fn guide_external_cli_session(
     )
     .await
     {
-        Ok(result) if result.accepted => json_response(&serde_json::json!({
-            "guideId": result.guide_id,
-            "sessionKey": session_key,
-            "delivery": "steered",
-            "threadId": result.thread_id,
-            "turnId": result.turn_id,
-        })),
+        Ok(result) if result.accepted => json_response(
+            &accepted_web_guide_payload(service, session_key, &message, &result, false).await,
+        ),
         outcome => {
             let reason = match outcome {
                 Ok(result) => result
@@ -724,13 +1080,17 @@ async fn guide_external_cli_session(
                 .queue_manager
                 .push_queue(session_key, message.to_string())
             {
-                Ok(items) => json_response(&serde_json::json!({
-                    "guideId": guide_id,
-                    "sessionKey": session_key,
-                    "delivery": "queued",
-                    "queueLength": items.len(),
-                    "reason": reason,
-                })),
+                Ok(items) => {
+                    update_web_guide_progress(service, session_key, &message, items.clone(), true)
+                        .await;
+                    json_response(&serde_json::json!({
+                        "guideId": guide_id,
+                        "sessionKey": session_key,
+                        "delivery": "queued",
+                        "queueLength": items.len(),
+                        "reason": reason,
+                    }))
+                }
                 Err(error) => error_response(
                     StatusCode::CONFLICT,
                     &format!("guide was not accepted and queue fallback failed: {error}"),
@@ -824,7 +1184,7 @@ async fn runner_call_stream_response(
     if user_message.is_empty() && !has_images {
         return Err("message or images are required".to_string());
     }
-    let visible_user_message = image_message_preview(&user_message, &body.images);
+    let visible_user_message = image_message_preview(&user_message, &body.images, &[]);
 
     let config = service.external_cli_config_store.load();
     let target = resolve_runner_call_target(&config, &target_runner_id)?;
@@ -1412,7 +1772,7 @@ fn remember_runner_call_result_for_caller(
     }
 }
 
-fn queue_external_cli_stream_response(
+async fn queue_external_cli_stream_response(
     service: &ImGatewayService,
     session_key: &str,
     message: &str,
@@ -1422,6 +1782,15 @@ fn queue_external_cli_stream_response(
         match rest.trim().parse::<u64>() {
             Ok(seq) if service.queue_manager.remove_queue(session_key, seq) => {
                 let items = service.queue_manager.queue_status(session_key);
+                let _ = service
+                    .progress_registry
+                    .update_queue_state(
+                        session_key,
+                        items.clone(),
+                        !service.queue_manager.guide_status(session_key).is_empty(),
+                        Some(format!("WebUI 已删除排队消息 #{seq}")),
+                    )
+                    .await;
                 serde_json::json!({
                     "eventType": "run_finished",
                     "sessionKey": session_key,
@@ -1451,14 +1820,28 @@ fn queue_external_cli_stream_response(
             .queue_manager
             .push_queue(session_key, queue_message.to_string())
         {
-            Ok(items) => serde_json::json!({
-                "eventType": "run_finished",
-                "sessionKey": session_key,
-                "response": format!("✅ 消息已收到，将在当前任务完成后处理（排队 {} 条）", items.len()),
-                "queued": true,
-                "queueLength": items.len(),
-                "queueItems": items,
-            }),
+            Ok(items) => {
+                let _ = service
+                    .progress_registry
+                    .update_queue_state(
+                        session_key,
+                        items.clone(),
+                        !service.queue_manager.guide_status(session_key).is_empty(),
+                        Some(format!(
+                            "已从 WebUI 收到排队消息：{}",
+                            truncate_str(queue_message, 48)
+                        )),
+                    )
+                    .await;
+                serde_json::json!({
+                    "eventType": "run_finished",
+                    "sessionKey": session_key,
+                    "response": format!("✅ 消息已收到，将在当前任务完成后处理（排队 {} 条）", items.len()),
+                    "queued": true,
+                    "queueLength": items.len(),
+                    "queueItems": items,
+                })
+            }
             Err(error) => serde_json::json!({
                 "eventType": "run_failed",
                 "sessionKey": session_key,
@@ -1490,16 +1873,9 @@ async fn guide_external_cli_stream_response(
     )
     .await;
     let payload = match outcome {
-        Ok(result) if result.accepted => serde_json::json!({
-            "eventType": "run_finished",
-            "sessionKey": session_key,
-            "response": "🔀 已发送到当前 Runner session，将按 Runner 的实时引导语义生效",
-            "guide": true,
-            "guideId": result.guide_id,
-            "delivery": "steered",
-            "threadId": result.thread_id,
-            "turnId": result.turn_id,
-        }),
+        Ok(result) if result.accepted => {
+            accepted_web_guide_payload(service, session_key, message, &result, true).await
+        }
         outcome => {
             let reason = match outcome {
                 Ok(result) => result
@@ -1511,21 +1887,25 @@ async fn guide_external_cli_stream_response(
                 .queue_manager
                 .push_queue(session_key, message.to_string())
             {
-                Ok(items) => serde_json::json!({
-                    "eventType": "run_finished",
-                    "sessionKey": session_key,
-                    "response": format!(
-                        "⚠️ 当前 Runner 无法实时接收引导，已作为排队消息处理（排队 {} 条）",
-                        items.len()
-                    ),
-                    "guide": true,
-                    "queued": true,
-                    "guideId": guide_id,
-                    "delivery": "queued",
-                    "queueLength": items.len(),
-                    "queueItems": items,
-                    "reason": reason,
-                }),
+                Ok(items) => {
+                    update_web_guide_progress(service, session_key, message, items.clone(), true)
+                        .await;
+                    serde_json::json!({
+                        "eventType": "run_finished",
+                        "sessionKey": session_key,
+                        "response": format!(
+                            "⚠️ 当前 Runner 无法实时接收引导，已作为排队消息处理（排队 {} 条）",
+                            items.len()
+                        ),
+                        "guide": true,
+                        "queued": true,
+                        "guideId": guide_id,
+                        "delivery": "queued",
+                        "queueLength": items.len(),
+                        "queueItems": items,
+                        "reason": reason,
+                    })
+                }
                 Err(error) => serde_json::json!({
                     "eventType": "run_failed",
                     "sessionKey": session_key,
@@ -2153,6 +2533,7 @@ fn remember_external_cli_started_state(
             state.last_user_message = first_message_title_preview(&image_message_preview(
                 &request.message,
                 &request.images,
+                &request.files,
             ));
             state.title = state
                 .title
@@ -2216,6 +2597,7 @@ fn remember_external_cli_result_state(
             state.last_user_message = first_message_title_preview(&image_message_preview(
                 &request.message,
                 &request.images,
+                &request.files,
             ));
             state.title = state
                 .title
@@ -2725,8 +3107,8 @@ fn append_external_runner_user_message_once(
     request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
     timestamp: u64,
 ) {
-    let user_message = image_message_preview(&request.message, &request.images);
-    if user_message.is_empty() || user_message == "Attached 0 images" {
+    let user_message = image_message_preview(&request.message, &request.images, &request.files);
+    if user_message.is_empty() {
         return;
     }
     let content_parts = message_image_content_parts(&request.message, &request.images);
@@ -2813,12 +3195,441 @@ mod tests {
     use super::*;
     use http_body_util::BodyExt;
 
+    async fn spawn_chat_gateway_test_server(
+        service: crate::SharedImGatewayService,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind chat gateway test server");
+        let address = listener.local_addr().expect("chat gateway address");
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let service = Arc::clone(&service);
+                tokio::spawn(async move {
+                    let handler = service_fn(move |request: Request<Incoming>| {
+                        let service = Arc::clone(&service);
+                        async move {
+                            Ok::<_, hyper::Error>(
+                                handle_chat_gateway(request, &service, "/stream").await,
+                            )
+                        }
+                    });
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), handler)
+                        .await;
+                });
+            }
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn configure_mock_web_runner(
+        service: &ImGatewayService,
+        executable: &str,
+        args: Vec<String>,
+        delivery_mode: crate::im_gateway::external_cli::ExternalCliDeliveryMode,
+    ) {
+        let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+        let runner = config
+            .runners
+            .get_mut(crate::im_gateway::external_cli::DEFAULT_CODEX_RUNNER_ID)
+            .expect("default runner");
+        runner.enabled = true;
+        runner.adapter = "mock".to_string();
+        runner.inject_bifrost_tools = false;
+        runner.delivery_mode = delivery_mode;
+        runner.adapter_config = crate::im_gateway::external_cli::ExternalCliAdapterConfig {
+            executable: Some(executable.to_string()),
+            args,
+            timeout_secs: Some(10),
+            ..Default::default()
+        };
+        service
+            .external_cli_config_store
+            .save(config)
+            .expect("save mock runner");
+    }
+
+    fn bound_progress_provider(id: &str, owner_open_id: Option<&str>) -> ImProviderConfig {
+        ImProviderConfig {
+            id: id.to_string(),
+            provider_type: ImProviderType::Feishu,
+            display_name: id.to_string(),
+            enabled: true,
+            base_url: None,
+            app_id: None,
+            secret_ref: None,
+            owner_open_id: owner_open_id.map(str::to_string),
+            event_connection_enabled: false,
+            event_types: Vec::new(),
+            agent_config: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    fn bound_group_event(provider_id: &str, chat_id: &str) -> ImEvent {
+        ImEvent {
+            event_id: "event-bound-group".to_string(),
+            provider_id: provider_id.to_string(),
+            provider_type: ImProviderType::Feishu,
+            event_type: "message.receive".to_string(),
+            source: crate::im_gateway::types::ImEventSource {
+                chat_id: Some(chat_id.to_string()),
+                chat_type: Some("group".to_string()),
+                user_id: Some("ou_member".to_string()),
+                user_name: Some("Member".to_string()),
+                sender_type: Some("user".to_string()),
+                message_id: Some("om-bound-group".to_string()),
+            },
+            message: Some(crate::im_gateway::types::ImEventMessage {
+                text: "bind group".to_string(),
+                raw_type: Some("text".to_string()),
+                create_time: Some(1),
+                ..Default::default()
+            }),
+            received_at: 1,
+            raw_digest: None,
+        }
+    }
+
+    #[test]
+    fn web_im_progress_target_resolves_bound_private_chat_only() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let service = ImGatewayService::new(temp_dir.path());
+        let provider = bound_progress_provider("feishu-private", Some("ou_owner"));
+        service.provider_store.add(provider).unwrap();
+
+        let resolved =
+            bound_web_im_progress_target(&service, Some("feishu-private:ou_owner")).unwrap();
+        assert_eq!(resolved.provider.id, "feishu-private");
+        assert_eq!(resolved.target.receive_id_type, "open_id");
+        assert_eq!(resolved.target.receive_id, "ou_owner");
+        assert!(bound_web_im_progress_target(&service, Some("admin-chat-1")).is_none());
+        assert!(
+            bound_web_im_progress_target(&service, Some("feishu-private:ou_someone_else"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn web_im_progress_target_uses_persisted_group_binding() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let service = ImGatewayService::new(temp_dir.path());
+        let provider = bound_progress_provider("feishu-group", Some("ou_owner"));
+        service.provider_store.add(provider).unwrap();
+        let event = bound_group_event("feishu-group", "oc_team");
+        service
+            .group_context_store
+            .record_event(&event, "test")
+            .unwrap();
+        service
+            .group_context_store
+            .set_chat_name("feishu-group", "oc_team", "Team Chat", 2)
+            .unwrap();
+
+        let resolved = bound_web_im_progress_target(
+            &service,
+            Some(&crate::im_gateway::group_context::build_group_session_key(
+                "feishu-group",
+                "oc_team",
+            )),
+        )
+        .unwrap();
+        assert_eq!(resolved.provider.id, "feishu-group");
+        assert_eq!(resolved.target.receive_id_type, "chat_id");
+        assert_eq!(resolved.target.receive_id, "oc_team");
+        assert_eq!(resolved.target.display_name, "Team Chat");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bound_web_turn_sends_direct_progress_card_and_final_output() {
+        let server =
+            crate::im_gateway::progress_card::tests::spawn_mock_feishu_progress_server().await;
+        let registry = Arc::new(ImAgentProgressRegistry::new());
+        let provider =
+            crate::im_gateway::progress_card::tests::mock_feishu_provider(&server.base_url);
+        let target = crate::im_gateway::progress_card::tests::mock_progress_target();
+        let context = WebImProgressContext {
+            binding: BoundWebImProgressTarget { provider, target },
+            registry,
+            feishu: Arc::new(crate::im_gateway::feishu::FeishuProvider::new()),
+        };
+        let mut request = timeline_test_request("feishu-main:ou_owner");
+        request.message = "message from WebUI".to_string();
+        let progress = start_bound_web_im_progress(Some(&context), &request, "codex")
+            .await
+            .expect("bound progress");
+        progress
+            .forwarder
+            .forward(&crate::im_gateway::external_cli::ExternalCliProgressEvent {
+                event_type:
+                    crate::im_gateway::external_cli::ExternalCliProgressEventType::AssistantDelta,
+                content: "working from shared session".to_string(),
+                title: None,
+                raw: serde_json::Value::Null,
+            });
+        progress
+            .finish("final from WebUI".to_string(), false, None)
+            .await;
+
+        assert_eq!(
+            server
+                .message_paths
+                .lock()
+                .expect("message paths")
+                .as_slice(),
+            ["/open-apis/im/v1/messages"]
+        );
+        let payloads = server.message_payloads.lock().expect("message payloads");
+        assert_eq!(payloads[0]["receive_id"], "ou_owner");
+        drop(payloads);
+        assert!(server
+            .card_update_payloads
+            .lock()
+            .expect("card update payloads")
+            .iter()
+            .any(|payload| payload.contains("final from WebUI")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn bound_web_stream_handler_mirrors_existing_bound_progress_card() {
+        let server =
+            crate::im_gateway::progress_card::tests::spawn_mock_feishu_progress_server().await;
+        let harness = crate::test_support::TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+        let mut provider = bound_progress_provider("feishu-main", Some("ou_owner"));
+        provider.owner_open_id = Some("ou_owner".to_string());
+        service.provider_store.add(provider).expect("add provider");
+        assert!(
+            bound_web_im_progress_target(&service, Some("feishu-main:ou_owner")).is_some(),
+            "canonical private session must resolve before HTTP dispatch"
+        );
+        configure_mock_web_runner(
+            &service,
+            "sh",
+            vec![
+                "-c".to_string(),
+                concat!(
+                    "cat >/dev/null; ",
+                    "printf '%s\\n' ",
+                    "'{\"type\":\"assistant_delta\",\"delta\":\"working from handler\"}' ",
+                    "'{\"type\":\"assistant_final\",\"content\":\"final from handler\"}'"
+                )
+                .to_string(),
+            ],
+            crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard,
+        );
+        service
+            .progress_registry
+            .start_feishu(
+                "feishu-main:ou_owner",
+                Arc::clone(service.connection_manager.feishu_provider()),
+                crate::im_gateway::progress_card::tests::mock_feishu_provider(&server.base_url),
+                crate::im_gateway::progress_card::tests::mock_progress_target(),
+                "seed bound card",
+            )
+            .await
+            .expect("seed bound progress card");
+        let (base_url, gateway) = spawn_chat_gateway_test_server(Arc::clone(&service)).await;
+
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build local test client")
+            .post(base_url)
+            .json(&serde_json::json!({
+                "message": "message from WebUI handler",
+                "runnerId": crate::im_gateway::external_cli::DEFAULT_CODEX_RUNNER_ID,
+                "providerId": "untrusted-provider",
+                "sessionKey": "feishu-main:ou_owner",
+                "runtime": "external_cli"
+            }))
+            .send()
+            .await
+            .expect("send Web stream request");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.text().await.expect("Web stream body");
+        assert!(body.contains("working from handler"), "{body}");
+        assert!(body.contains("final from handler"), "{body}");
+        assert!(server
+            .card_update_payloads
+            .lock()
+            .expect("card updates")
+            .iter()
+            .any(|payload| payload.contains("final from handler")));
+        gateway.abort();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn bound_web_stream_handler_finishes_existing_im_card_on_runner_failure() {
+        let server =
+            crate::im_gateway::progress_card::tests::spawn_mock_feishu_progress_server().await;
+        let harness = crate::test_support::TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+        let mut provider = bound_progress_provider("feishu-main", Some("ou_owner"));
+        provider.owner_open_id = Some("ou_owner".to_string());
+        service.provider_store.add(provider).expect("add provider");
+        assert!(
+            bound_web_im_progress_target(&service, Some("feishu-main:ou_owner")).is_some(),
+            "canonical private session must resolve before HTTP dispatch"
+        );
+        configure_mock_web_runner(
+            &service,
+            "/definitely/missing/bifrost-cross-channel-runner",
+            Vec::new(),
+            crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard,
+        );
+        service
+            .progress_registry
+            .start_feishu(
+                "feishu-main:ou_owner",
+                Arc::clone(service.connection_manager.feishu_provider()),
+                crate::im_gateway::progress_card::tests::mock_feishu_provider(&server.base_url),
+                crate::im_gateway::progress_card::tests::mock_progress_target(),
+                "seed failing bound card",
+            )
+            .await
+            .expect("seed bound progress card");
+        let (base_url, gateway) = spawn_chat_gateway_test_server(Arc::clone(&service)).await;
+
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build local test client")
+            .post(base_url)
+            .json(&serde_json::json!({
+                "message": "fail this bound WebUI turn",
+                "sessionKey": "feishu-main:ou_owner",
+                "runtime": "external_cli"
+            }))
+            .send()
+            .await
+            .expect("send failing Web stream request");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.text().await.expect("failing Web stream body");
+        assert!(body.contains("run_failed"), "{body}");
+        assert!(server
+            .card_update_payloads
+            .lock()
+            .expect("card updates")
+            .iter()
+            .any(|payload| payload.contains("Agent 执行失败")));
+        gateway.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn web_guide_queue_fallback_updates_bound_im_progress_card() {
+        let server =
+            crate::im_gateway::progress_card::tests::spawn_mock_feishu_progress_server().await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let service = ImGatewayService::new(temp_dir.path());
+        let provider =
+            crate::im_gateway::progress_card::tests::mock_feishu_provider(&server.base_url);
+        let target = crate::im_gateway::progress_card::tests::mock_progress_target();
+        let context = WebImProgressContext {
+            binding: BoundWebImProgressTarget { provider, target },
+            registry: Arc::clone(&service.progress_registry),
+            feishu: Arc::clone(service.connection_manager.feishu_provider()),
+        };
+        let mut request = timeline_test_request("feishu-main:ou_owner");
+        request.message = "message from WebUI".to_string();
+        let progress = start_bound_web_im_progress(Some(&context), &request, "codex")
+            .await
+            .expect("bound progress");
+        assert!(service
+            .agent_session_manager
+            .try_start_external_session_preview(
+                "feishu-main:ou_owner",
+                Some("active".to_string()),
+                None,
+                Some("admin-api".to_string()),
+                Some("codex".to_string()),
+                Some("codex".to_string()),
+            ));
+
+        let payload = response_json(
+            guide_external_cli_session(
+                &service,
+                "feishu-main:ou_owner",
+                "guide-web".to_string(),
+                "focus from WebUI".to_string(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(payload["delivery"], "queued");
+        assert_eq!(payload["queueLength"], 1);
+        let card_payloads = server
+            .card_create_payloads
+            .lock()
+            .expect("card create payloads")
+            .iter()
+            .cloned()
+            .chain(
+                server
+                    .card_update_payloads
+                    .lock()
+                    .expect("card update payloads")
+                    .iter()
+                    .cloned(),
+            )
+            .collect::<Vec<_>>();
+        assert!(card_payloads.iter().any(|payload| {
+            payload.contains("WebUI 引导无法实时注入") && payload.contains("focus from WebUI")
+        }));
+        let accepted_result = crate::im_gateway::external_cli::ExternalCliGuideResult {
+            guide_id: "guide-accepted".to_string(),
+            accepted: true,
+            thread_id: Some("thread-accepted".to_string()),
+            turn_id: Some("turn-accepted".to_string()),
+            reason: None,
+        };
+        let api_payload = accepted_web_guide_payload(
+            &service,
+            "feishu-main:ou_owner",
+            "live focus from WebUI",
+            &accepted_result,
+            false,
+        )
+        .await;
+        assert_eq!(api_payload["delivery"], "steered");
+        assert!(api_payload.get("eventType").is_none());
+        let stream_payload = accepted_web_guide_payload(
+            &service,
+            "feishu-main:ou_owner",
+            "second live focus from WebUI",
+            &accepted_result,
+            true,
+        )
+        .await;
+        assert_eq!(stream_payload["eventType"], "run_finished");
+        assert_eq!(stream_payload["guideId"], "guide-accepted");
+
+        service
+            .agent_session_manager
+            .clear_active_session_preview("feishu-main:ou_owner");
+        progress
+            .finish("final after queued guide".to_string(), false, None)
+            .await;
+    }
+
     fn timeline_test_request(
         session_key: &str,
     ) -> crate::im_gateway::external_cli::ExternalCliRunRequest {
         crate::im_gateway::external_cli::ExternalCliRunRequest {
             message: "timeline".to_string(),
             images: Vec::new(),
+            files: Vec::new(),
             operation: "chat".to_string(),
             params: serde_json::Value::Null,
             provider_id: None,
@@ -2890,11 +3701,10 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let service = ImGatewayService::new(temp_dir.path());
 
-        let queued = response_json(queue_external_cli_stream_response(
-            &service,
-            "web-queue-delete",
-            "/q queued follow up",
-        ))
+        let queued = response_json(
+            queue_external_cli_stream_response(&service, "web-queue-delete", "/q queued follow up")
+                .await,
+        )
         .await;
         assert_eq!(queued["queued"], true);
         assert_eq!(queued["queueLength"], 1);
@@ -2903,11 +3713,9 @@ mod tests {
             "queued follow up"
         );
 
-        let removed = response_json(queue_external_cli_stream_response(
-            &service,
-            "web-queue-delete",
-            "/rq 1",
-        ))
+        let removed = response_json(
+            queue_external_cli_stream_response(&service, "web-queue-delete", "/rq 1").await,
+        )
         .await;
         assert_eq!(removed["queued"], true);
         assert_eq!(removed["queueLength"], 0);
@@ -2931,6 +3739,7 @@ mod tests {
         let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
         let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: "今天的AI领域相关的新闻。".to_string(),
             operation: "chat".to_string(),
             params: serde_json::Value::Null,
@@ -3020,6 +3829,7 @@ mod tests {
 
         let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: "new Web message".to_string(),
             operation: "chat".to_string(),
             params: serde_json::json!({ "historyPath": history_path }),
@@ -3089,6 +3899,7 @@ mod tests {
 
         let gpt_request = crate::im_gateway::external_cli::ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: "new GPT Web message".to_string(),
             operation: "chat".to_string(),
             params: serde_json::json!({ "historyPath": history_path }),
@@ -3322,6 +4133,7 @@ mod tests {
         let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
         let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: "explain the image".to_string(),
             operation: "chat".to_string(),
             params: serde_json::Value::Null,
@@ -3617,6 +4429,7 @@ mod tests {
         let session_key = "active-gpt-web-history";
         let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: "active GPT Web message".to_string(),
             operation: "chat".to_string(),
             params: serde_json::json!({}),
@@ -3945,6 +4758,7 @@ mod tests {
         .expect("push imported context");
         let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
             images: Vec::new(),
+            files: Vec::new(),
             message: "continue".to_string(),
             operation: "chat".to_string(),
             params: serde_json::Value::Null,
@@ -4024,7 +4838,7 @@ mod image_message_tests {
     fn image_message_preview_uses_message_when_non_empty() {
         let images = vec![image("image/png", "AAA")];
         assert_eq!(
-            image_message_preview("  describe image  ", &images),
+            image_message_preview("  describe image  ", &images, &[]),
             "describe image"
         );
     }
@@ -4037,15 +4851,32 @@ mod image_message_tests {
             image("image/png", "   "), // ignored
         ];
         assert_eq!(
-            image_message_preview("   ", &images[..1]),
+            image_message_preview("   ", &images[..1], &[]),
             "Attached 1 image"
         );
-        assert_eq!(image_message_preview("", &images), "Attached 2 images");
+        assert_eq!(image_message_preview("", &images, &[]), "Attached 2 images");
         let empty_images = vec![image("image/png", "   ")];
+        let files = vec![
+            crate::im_gateway::external_cli::ExternalCliFileInput {
+                mime_type: "text/plain".to_string(),
+                data: "Zm9v".to_string(),
+                name: Some("note.txt".to_string()),
+            },
+            crate::im_gateway::external_cli::ExternalCliFileInput {
+                mime_type: "application/pdf".to_string(),
+                data: "YmFy".to_string(),
+                name: Some("report.pdf".to_string()),
+            },
+        ];
         assert_eq!(
-            image_message_preview("", &empty_images),
-            "Attached 0 images"
+            image_message_preview("", &empty_images, &files[..1]),
+            "Attached 1 file"
         );
+        assert_eq!(
+            image_message_preview("", &empty_images, &files),
+            "Attached 2 files"
+        );
+        assert_eq!(image_message_preview("", &empty_images, &[]), "");
     }
 }
 
@@ -4065,6 +4896,7 @@ mod coverage_boost {
         ExternalCliRunRequest {
             message: "hello".to_string(),
             images: Vec::new(),
+            files: Vec::new(),
             operation: "chat".to_string(),
             params: serde_json::Value::Null,
             provider_id: None,
@@ -4369,7 +5201,8 @@ mod coverage_boost {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let service = ImGatewayService::new(temp_dir.path());
 
-        let not_found_response = queue_external_cli_stream_response(&service, "session-1", "/rq 5");
+        let not_found_response =
+            queue_external_cli_stream_response(&service, "session-1", "/rq 5").await;
         let not_found_body = not_found_response
             .into_body()
             .collect()
@@ -4383,7 +5216,7 @@ mod coverage_boost {
         assert_eq!(not_found["response"].as_str(), Some("❌ 未找到排队消息 #5"));
 
         let parse_response =
-            queue_external_cli_stream_response(&service, "session-1", "/rq not-a-number");
+            queue_external_cli_stream_response(&service, "session-1", "/rq not-a-number").await;
         let parse_body = parse_response
             .into_body()
             .collect()
@@ -4799,7 +5632,7 @@ mod coverage_boost {
     #[test]
     fn message_image_content_parts_respects_max_image_limit() {
         let mut images = Vec::new();
-        for i in 0..(MAX_AGENT_IMAGES_PER_MESSAGE + 2) {
+        for i in 0..(MAX_AGENT_ATTACHMENTS_PER_MESSAGE + 2) {
             images.push(crate::im_gateway::external_cli::ExternalCliImageInput {
                 mime_type: "image/png".to_string(),
                 data: format!("A{i}"),
@@ -4808,7 +5641,7 @@ mod coverage_boost {
         }
         let parts = message_image_content_parts("msg", &images).expect("parts");
         let arr = parts.as_array().expect("array");
-        assert_eq!(arr.len(), 1 + MAX_AGENT_IMAGES_PER_MESSAGE);
+        assert_eq!(arr.len(), 1 + MAX_AGENT_ATTACHMENTS_PER_MESSAGE);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4820,7 +5653,8 @@ mod coverage_boost {
             &service,
             "session-queue",
             "  plain queued message  ",
-        );
+        )
+        .await;
         let body = response
             .into_body()
             .collect()
@@ -4951,7 +5785,7 @@ fn timeline_has_tool_call_detects_existing_call_id() {
 #[test]
 fn message_image_content_parts_respects_max_image_limit() {
     let mut images = Vec::new();
-    for i in 0..(MAX_AGENT_IMAGES_PER_MESSAGE + 2) {
+    for i in 0..(MAX_AGENT_ATTACHMENTS_PER_MESSAGE + 2) {
         images.push(crate::im_gateway::external_cli::ExternalCliImageInput {
             mime_type: "image/png".to_string(),
             data: format!("A{i}"),
@@ -4960,7 +5794,7 @@ fn message_image_content_parts_respects_max_image_limit() {
     }
     let parts = message_image_content_parts("msg", &images).expect("parts");
     let arr = parts.as_array().expect("array");
-    assert_eq!(arr.len(), 1 + MAX_AGENT_IMAGES_PER_MESSAGE);
+    assert_eq!(arr.len(), 1 + MAX_AGENT_ATTACHMENTS_PER_MESSAGE);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -4969,7 +5803,8 @@ async fn queue_stream_push_without_prefix_uses_trimmed_message() {
     let service = ImGatewayService::new(temp_dir.path());
 
     let response =
-        queue_external_cli_stream_response(&service, "session-queue", "  plain queued message  ");
+        queue_external_cli_stream_response(&service, "session-queue", "  plain queued message  ")
+            .await;
     let body = response
         .into_body()
         .collect()

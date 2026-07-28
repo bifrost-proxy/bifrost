@@ -16,6 +16,11 @@ Bifrost 桌面端内嵌 backend sidecar，如果关闭按钮就把 backend 一�
 
 ### 必须实现
 
+- Desktop 启动 app-bound backend sidecar 时必须清除父环境中可能继承的
+  `BIFROST_DETACHED_DAEMON_CHILD`，再设置 `BIFROST_DESKTOP_CORE=1`：
+  - sidecar 的 `runtime.json` 必须记录 `runtime_start_mode=desktop`；
+  - Desktop Quit 必须停止该 app-bound Service；
+  - 不能因 Desktop 自身由 CLI daemon 环境或升级 helper 拉起，就把 sidecar 错记为 daemon。
 - macOS：点击 host 窗口关闭按钮 / File → Close Window / `Cmd+W`：
   - 桌面进程仍存活；
   - backend sidecar 仍在运行；
@@ -26,6 +31,13 @@ Bifrost 桌面端内嵌 backend sidecar，如果关闭按钮就把 backend 一�
   - 触发 `RunEvent::ExitRequested`；
   - 走 `request_desktop_shutdown`；
   - 隐藏 host 窗口 → 异步发出 `bifrost stop` helper → 释放 managed child → `app.exit(0)`。
+- Tray：
+  - Service 的 `runtime_start_mode=desktop` 时，主操作显示 `Quit Bifrost`，不显示会被
+    watchdog 恢复的 `Stop Bifrost`；
+  - `Quit Bifrost` 通过 Desktop 单实例参数 `--bifrost-upgrade-shutdown` 复用
+    `request_desktop_shutdown`，先关闭 watchdog，再停止 Desktop 持有的 child Service；
+  - Service 由 CLI 启动（`daemon` / `foreground` / `unknown`）时，Tray 继续显示
+    `Stop Bifrost`，停止后显示 `Start Bifrost`，不退出 Desktop。
 - macOS：无可见窗口时点 Dock 图标（`RunEvent::Reopen` with `has_visible_windows = false`）：
   - 恢复 host 窗口（show + unminimize + set_focus）；
   - 不重新启动 backend；
@@ -38,6 +50,8 @@ Bifrost 桌面端内嵌 backend sidecar，如果关闭按钮就把 backend 一�
 - `set_document_edited` 逻辑（macOS 关闭按钮上的“未保存修改”标记）仍能通过 `NSWindow.setDocumentEdited` 生效。
 - Menu 中的 `PredefinedMenuItem::quit` 仍触发 `RunEvent::ExitRequested`。
 - Launcher-only 模式（`BIFROST_DESKTOP_LAUNCHER_ONLY=1`）关闭时立即 `app.exit(0)`，不走 sidecar stop（无 sidecar）。
+- 真正由 CLI `start --daemon` 启动且记录 `runtime_start_mode=daemon` 的 Service
+  在 Desktop 复用后仍归 CLI 所有；Desktop Quit 不得停止它。
 
 ### 必须真实验证
 
@@ -56,6 +70,8 @@ Bifrost 桌面端内嵌 backend sidecar，如果关闭按钮就把 backend 一�
 | Close 按钮 / File → Close Window / `Cmd+W`（macOS） | `WindowEvent::CloseRequested` | 只隐藏窗口 | `handle_host_window_close_request` → `HideWindow` → `window.hide()` |
 | Close 按钮（非 macOS） | `WindowEvent::CloseRequested` | 关闭并退出应用 | `handle_host_window_close_request` → `ShutdownApp` → `request_desktop_shutdown` |
 | Quit（App 菜单 / `Cmd+Q` / Dock 菜单 Quit） | `RunEvent::ExitRequested` | 停 backend 后退出 | `should_intercept_exit` + `api.prevent_exit()` + `request_desktop_shutdown` |
+| Tray `Quit Bifrost`（Desktop-owned Service） | `bifrost-desktop --bifrost-upgrade-shutdown` 的单实例回调 | 先停 watchdog，再停 owned backend 并退出 | Tray `QuitDesktop` → Desktop `request_desktop_shutdown` |
+| Tray `Stop Bifrost`（CLI-owned Service） | CLI `bifrost stop` | 只停止 CLI Service | Tray `StopService` → CLI stop |
 | Dock 图标点击（无窗口） | `RunEvent::Reopen { has_visible_windows: false }` | 恢复 host 窗口 | `restore_host_window` |
 
 ### “隐藏”不是“最小化”
@@ -71,6 +87,8 @@ Bifrost 桌面端内嵌 backend sidecar，如果关闭按钮就把 backend 一�
 ## 关键代码入口
 
 - `desktop/src-tauri/src/main.rs`
+  - `configure_desktop_backend_environment(command, data_dir, startup_session_id)`：
+    清除 daemon-only child marker 后注入 Desktop sidecar ownership 环境。
   - `handle_host_window_close_request(window)`：分流 CloseRequested。
   - `host_window_close_behavior() -> HostWindowCloseBehavior`：仅根据 `cfg!(target_os = "macos")` 决定。
   - `host_window_close_behavior_for_platform(is_macos: bool)`：纯函数，便于单元测试。
@@ -80,6 +98,15 @@ Bifrost 桌面端内嵌 backend sidecar，如果关闭按钮就把 backend 一�
   - `on_window_event(|window, event|)`：仅处理 host label 的 CloseRequested，调用 `api.prevent_close()` 后走分流。
   - `run(|app_handle, event|)`：`RunEvent::ExitRequested` + `RunEvent::Reopen`（macOS）分流。
 - Menu 中 `PredefinedMenuItem::quit` / `PredefinedMenuItem::close_window` 是与用户交互的入口。
+- `crates/bifrost-cli/src/commands/tray/runtime.rs`
+  - 兼容解析 `runtime_start_mode` / `start_mode`，供 Tray 判断 Service ownership。
+- `crates/bifrost-cli/src/commands/tray/menu.rs`
+  - Desktop owner 映射为 `Quit Bifrost` / `QuitDesktop`；CLI owner 保持
+    `Stop Bifrost` / `StopService`。
+- `crates/bifrost-cli/src/commands/tray/tray.rs`
+  - 从 Service PID 的直系父进程解析可信的 `bifrost-desktop(.exe)`，只向该可执行文件发送
+    `--bifrost-upgrade-shutdown`；执行前同时校验 runtime 记录的 Service 启动时间，
+    防止陈旧菜单 PID 被复用；不直接向 Desktop 或 Service 发 kill signal。
 
 ## Close / Quit / Reopen 状态机
 
@@ -113,6 +140,25 @@ request_desktop_shutdown(app)
 │       └── app.exit(0)  → 触发 ExitRequested → should_intercept_exit == false → 放行
 ```
 
+Desktop 的同步 restart-stop 与异步 quit-stop 共用
+`configure_backend_stop_command`。该 helper 同时注入 `BIFROST_DATA_DIR` 与私有
+`BIFROST_DESKTOP_AUTHORIZED_STOP_INTERNAL=1`；后者只授权 Desktop 自己的 shutdown
+helper 越过 CLI 对 live Desktop-owned runtime 的 fail-closed 保护。普通用户 CLI
+`stop/restart` 不设置该变量，仍会被拒绝。
+
+### Sidecar ownership 环境边界
+
+Desktop shell 可能由 CLI daemon、升级 helper 或其他继承了
+`BIFROST_DETACHED_DAEMON_CHILD=1` 的进程启动。CLI core 内部有意规定 detached daemon
+标记优先于 Desktop 标记，因此 Desktop 不能只追加 `BIFROST_DESKTOP_CORE=1`；必须在
+创建 sidecar `Command` 时显式 `env_remove(BIFROST_DETACHED_DAEMON_CHILD)`。
+
+该清理只作用于 Desktop 创建的 child command，不修改父进程环境，也不改变 CLI
+`start --daemon` 创建真正 daemon child 时的优先级。由此保证：
+
+- Desktop 新建 sidecar → `runtime_start_mode=desktop` → Quit 时 stop。
+- Desktop 复用既有 CLI daemon → `runtime_start_mode=daemon` → Quit 时 preserve。
+
 ## 依赖项
 
 - Tauri 2 runtime：`WindowEvent::CloseRequested { api }`、`RunEvent::ExitRequested { api }`、`RunEvent::Reopen { has_visible_windows }`（macOS）。
@@ -126,6 +172,8 @@ request_desktop_shutdown(app)
 
 - `BIFROST_DESKTOP_LAUNCHER_ONLY=1`：关闭时直接 `app.exit(0)`，跳过 sidecar stop。
 - `BIFROST_DATA_DIR`：影响 `bifrost stop` 找到的 daemon 数据目录。
+- `BIFROST_DESKTOP_AUTHORIZED_STOP_INTERNAL=1`：Desktop 内部 stop helper 私有授权；
+  不作为用户 CLI 表面公开。
 
 ## Web / Admin API 表面
 
@@ -168,9 +216,13 @@ request_desktop_shutdown(app)
 
 - `macos_close_request_hides_window`：`host_window_close_behavior_for_platform(true) == HideWindow`。
 - `non_macos_close_request_shuts_down_app`：`host_window_close_behavior_for_platform(false) == ShutdownApp`。
+- `desktop_sidecar_clears_inherited_detached_daemon_marker`：直接检查 child `Command`
+  同时包含 daemon marker 的 `env_remove` 与 Desktop marker 的 `env=1`。
+- `desktop_backend_stop_command_is_authorized_for_owned_runtime`：同步/异步 stop 共用的
+  command helper 同时带 data dir 与 Desktop 私有 stop 授权。
 - 现有 `backend_recovery_guard_prevents_parallel_recovery` / `poll_managed_backend_exit_reports_exited_child` 与 shutdown 路径耦合，间接保护 `request_desktop_shutdown` 的 child detach。
 
-### E2E / 真实场景（`human_tests/desktop-macos-close-behavior.md`）
+### E2E / 真实场景（`e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`、`human_tests/desktop-core-daemon-registration.md`）
 
 - TC-DMC-01：macOS 冷启动 → 关闭 host 窗口 → `pgrep -af bifrost` 仍能看到桌面与 sidecar；`curl` admin API 仍 200。
 - TC-DMC-02：TC-DMC-01 后点 Dock 图标 → host 窗口恢复；`get_desktop_runtime` 返回相同 pid（通过 log 佐证）。
@@ -179,6 +231,14 @@ request_desktop_shutdown(app)
 - TC-DMC-05：Cmd+W 与 Close 按钮语义一致：只隐藏窗口。
 - TC-DMC-06：非 macOS（Windows/Linux）关闭窗口 → 进程与 sidecar 都退出。
 - TC-DMC-07：`BIFROST_DESKTOP_LAUNCHER_ONLY=1` 场景 Cmd+Q 立即退出，无 sidecar 停止流程。
+- TC-DMC-08：在父环境显式设置 `BIFROST_DETACHED_DAEMON_CHILD=1` 后启动 Desktop，
+  断言 runtime owner 仍为 `desktop`，触发 graceful shutdown 后 App 与 Service 都退出。
+- TC-DMC-09：先用 CLI `start --daemon` 启动 Service，再打开 Desktop 复用，
+  触发 graceful shutdown 后 App 退出但 CLI Service 保持健康。
+- TC-DMC-10：Desktop-owned Service 运行时 Tray 主操作为 `Quit Bifrost`；点击后 Desktop
+  与 Service 都退出，等待超过一次 watchdog poll 后 Service 仍未恢复。
+- TC-DMC-11：CLI-owned daemon 运行时 Tray 主操作仍为 `Stop Bifrost`；点击后只停止
+  Service，Tray 随后提供 `Start Bifrost`。
 
 启动使用临时 `BIFROST_DATA_DIR`、非 9900 端口、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`。
 

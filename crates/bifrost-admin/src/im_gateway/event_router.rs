@@ -163,6 +163,7 @@ mod tests {
                 text: text.to_string(),
                 mentions: vec![],
                 images: vec![],
+                files: vec![],
                 reply_to: None,
                 raw_type: None,
                 raw_content: None,
