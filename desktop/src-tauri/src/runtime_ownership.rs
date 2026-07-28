@@ -1,5 +1,12 @@
 use super::*;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BackendHealthProbeResult {
+    pub(super) healthy: bool,
+    pub(super) elapsed: Duration,
+    pub(super) failure: Option<String>,
+}
+
 pub(super) fn is_backend_ready(port: u16) -> bool {
     probe_backend_health(port)
 }
@@ -107,19 +114,46 @@ pub(super) fn find_existing_backend_port(data_dir: &Path, preferred_port: u16) -
 }
 
 pub(super) fn probe_backend_health(port: u16) -> bool {
-    let Ok(client) = direct_blocking_reqwest_client_builder()
-        .timeout(Duration::from_millis(450))
+    probe_backend_health_with_timeout(port, BACKEND_HEALTH_PROBE_TIMEOUT).healthy
+}
+
+pub(super) fn probe_backend_health_with_timeout(
+    port: u16,
+    timeout: Duration,
+) -> BackendHealthProbeResult {
+    let started = Instant::now();
+    let client = match direct_blocking_reqwest_client_builder()
+        .timeout(timeout)
         .build()
-    else {
-        return false;
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return BackendHealthProbeResult {
+                healthy: false,
+                elapsed: started.elapsed(),
+                failure: Some(format!("HTTP client build failed: {error}")),
+            };
+        }
     };
 
     let url = format!("http://{BACKEND_ADMIN_HOST}:{port}/_bifrost/api/proxy/system/support");
-    let Ok(response) = client.get(url).send() else {
-        return false;
+    let response = match client.get(url).send() {
+        Ok(response) => response,
+        Err(error) => {
+            return BackendHealthProbeResult {
+                healthy: false,
+                elapsed: started.elapsed(),
+                failure: Some(format!("request failed: {error}")),
+            };
+        }
     };
 
-    response.status().is_success()
+    let status = response.status();
+    BackendHealthProbeResult {
+        healthy: status.is_success(),
+        elapsed: started.elapsed(),
+        failure: (!status.is_success()).then(|| format!("HTTP status {}", status.as_u16())),
+    }
 }
 
 pub(super) fn wait_for_backend_shutdown(port: u16, timeout: Duration) -> bool {

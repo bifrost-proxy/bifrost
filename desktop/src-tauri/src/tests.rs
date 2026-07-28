@@ -11,23 +11,24 @@ use super::{
     host_window_close_behavior_for_platform, is_server_config_response,
     is_upgrade_relaunch_marker_active, main_interface_decorations_for_platform,
     mark_backend_unavailable_for_manual_start, parse_port_update_response,
-    persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit, publish_startup_ready,
-    read_active_upgrade_relaunch_marker, read_pending_desktop_install,
-    record_startup_deadline_error, relaunch_command_for_target, resolve_bifrost_binary_from_env,
-    resolve_desktop_config_path, resolve_desktop_data_dir, resolve_external_cli_backend_handoff,
-    runtime_marker_matches_active_backend, sanitize_desktop_upgrade_relaunch_command,
-    save_desktop_config, should_allow_multiple_instances, should_handoff_to_main,
-    should_retry_backend_candidate, startup_deadline_disposition, stop_backend_before_restart,
-    terminate_managed_backend, upgrade_handoff_requires_backend_release,
-    upgrade_relaunch_uses_external_cli_backend, uses_borderless_desktop_chrome_for_platform,
-    wait_for_backend, wait_for_child_exit, wait_for_external_cli_backend,
-    windows_desktop_upgrade_handoff_command, write_desktop_upgrade_terminal_progress,
-    write_upgrade_relaunch_marker, BackendState, BackendSystemIdentity, BackendWaitFailureKind,
-    DesktopConfig, DesktopInstallRollback, DesktopRuntimeMarker, DesktopShutdownBackendAction,
+    persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit,
+    probe_backend_health_with_timeout, publish_startup_ready, read_active_upgrade_relaunch_marker,
+    read_pending_desktop_install, record_startup_deadline_error, relaunch_command_for_target,
+    resolve_bifrost_binary_from_env, resolve_desktop_config_path, resolve_desktop_data_dir,
+    resolve_external_cli_backend_handoff, runtime_marker_matches_active_backend,
+    sanitize_desktop_upgrade_relaunch_command, save_desktop_config,
+    should_allow_multiple_instances, should_handoff_to_main, should_retry_backend_candidate,
+    startup_deadline_disposition, stop_backend_before_restart, terminate_managed_backend,
+    upgrade_handoff_requires_backend_release, upgrade_relaunch_uses_external_cli_backend,
+    uses_borderless_desktop_chrome_for_platform, wait_for_backend, wait_for_child_exit,
+    wait_for_external_cli_backend, windows_desktop_upgrade_handoff_command,
+    write_desktop_upgrade_terminal_progress, write_upgrade_relaunch_marker, BackendState,
+    BackendSystemIdentity, BackendWaitFailureKind, BackendWatchdogHealth, DesktopConfig,
+    DesktopInstallRollback, DesktopRuntimeMarker, DesktopShutdownBackendAction,
     DesktopUpgradeRelaunchMarker, ExternalCliBackendHandoff, HostWindowCloseBehavior,
-    PendingDesktopInstall, StartupDeadlineDisposition, DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
-    DESKTOP_UPGRADE_SHUTDOWN_ARG, DETACHED_DAEMON_CHILD_ENV, EXTERNAL_CLI_WORKER_ENV,
-    WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
+    PendingDesktopInstall, StartupDeadlineDisposition, WatchdogProbeDisposition,
+    DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV, DESKTOP_UPGRADE_SHUTDOWN_ARG,
+    DETACHED_DAEMON_CHILD_ENV, EXTERNAL_CLI_WORKER_ENV, WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
 };
 use bifrost_storage::data_dir as shared_bifrost_data_dir;
 use std::ffi::OsStr;
@@ -124,6 +125,26 @@ fn spawn_one_shot_health_server() -> u16 {
         }
     });
     port
+}
+
+fn spawn_delayed_health_server(delay: Duration, status: u16) -> (u16, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind delayed health server");
+    let port = listener
+        .local_addr()
+        .expect("delayed health server addr")
+        .port();
+    let handle = thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buffer = [0_u8; 1024];
+            let _ = stream.read(&mut buffer);
+            thread::sleep(delay);
+            let response = format!(
+                "HTTP/1.1 {status} Test\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    (port, handle)
 }
 
 fn spawn_one_shot_system_server(pid: u32, version: &str) -> u16 {
@@ -974,6 +995,111 @@ fn backend_recovery_guard_prevents_parallel_recovery() {
         begin_backend_recovery(&state).is_some(),
         "recovery flag should be released after guard drop"
     );
+}
+
+#[test]
+fn desktop_watchdog_short_health_failures_stay_degraded_and_recover() {
+    let started = Instant::now();
+    let mut health = BackendWatchdogHealth::default();
+
+    assert_eq!(
+        health.observe_failure(started),
+        WatchdogProbeDisposition::Degraded {
+            failures: 1,
+            degraded_for: Duration::ZERO,
+        }
+    );
+    assert_eq!(
+        health.observe_failure(started + Duration::from_secs(2)),
+        WatchdogProbeDisposition::Degraded {
+            failures: 2,
+            degraded_for: Duration::from_secs(2),
+        }
+    );
+    assert_eq!(
+        health.observe_success(started + Duration::from_secs(3)),
+        WatchdogProbeDisposition::Recovered {
+            failures: 2,
+            degraded_for: Duration::from_secs(3),
+        }
+    );
+    assert_eq!(
+        health.observe_success(started + Duration::from_secs(4)),
+        WatchdogProbeDisposition::Healthy
+    );
+}
+
+#[test]
+fn desktop_watchdog_requires_failure_count_and_grace_window() {
+    let started = Instant::now();
+
+    let mut too_few_failures = BackendWatchdogHealth::default();
+    assert!(matches!(
+        too_few_failures.observe_failure(started),
+        WatchdogProbeDisposition::Degraded { .. }
+    ));
+    assert_eq!(
+        too_few_failures.observe_failure(started + Duration::from_secs(30)),
+        WatchdogProbeDisposition::Degraded {
+            failures: 2,
+            degraded_for: Duration::from_secs(30),
+        }
+    );
+
+    let mut too_little_time = BackendWatchdogHealth::default();
+    for offset in 0..3 {
+        assert!(matches!(
+            too_little_time.observe_failure(started + Duration::from_secs(offset)),
+            WatchdogProbeDisposition::Degraded { .. }
+        ));
+    }
+    assert_eq!(
+        too_little_time.observe_failure(started + Duration::from_secs(3)),
+        WatchdogProbeDisposition::Degraded {
+            failures: 4,
+            degraded_for: Duration::from_secs(3),
+        }
+    );
+
+    let mut sustained = BackendWatchdogHealth::default();
+    for offset in [0, 5, 10] {
+        assert!(matches!(
+            sustained.observe_failure(started + Duration::from_secs(offset)),
+            WatchdogProbeDisposition::Degraded { .. }
+        ));
+    }
+    assert_eq!(
+        sustained.observe_failure(started + Duration::from_secs(15)),
+        WatchdogProbeDisposition::ConfirmRecovery {
+            failures: 4,
+            degraded_for: Duration::from_secs(15),
+        }
+    );
+}
+
+#[test]
+fn desktop_watchdog_health_probe_reports_timeout_details() {
+    let (port, server) = spawn_delayed_health_server(Duration::from_millis(150), 200);
+    let result = probe_backend_health_with_timeout(port, Duration::from_millis(30));
+
+    assert!(!result.healthy);
+    assert!(result.elapsed >= Duration::from_millis(20));
+    assert!(result
+        .failure
+        .as_deref()
+        .expect("timeout failure")
+        .contains("request failed"));
+    server.join().expect("delayed health server join");
+}
+
+#[test]
+fn desktop_watchdog_health_probe_rejects_non_success_status() {
+    let (port, server) = spawn_delayed_health_server(Duration::ZERO, 503);
+    let result = probe_backend_health_with_timeout(port, Duration::from_secs(1));
+
+    assert!(!result.healthy);
+    assert_eq!(result.failure.as_deref(), Some("HTTP status 503"));
+    server.join().expect("health server join");
 }
 
 #[test]

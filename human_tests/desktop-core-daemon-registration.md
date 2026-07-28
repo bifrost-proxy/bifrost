@@ -106,7 +106,7 @@
    ```bash
    SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh
    ```
-3. 检查脚本退出码为 0，且输出包含 `PASS: Desktop-owned Service exits with Desktop while CLI-owned Service is preserved`。
+3. 检查脚本退出码为 0，且输出包含 `PASS: Desktop ownership stays scoped by data-dir, transient stalls preserve PID, real exits recover, and CLI lifecycle commands preserve App ownership`。
 
 预期结果：
 
@@ -132,7 +132,7 @@
    SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh
    ```
 3. 检查脚本退出码为 0，且最终输出包含
-   `PASS: Desktop ownership stays scoped by data-dir and CLI lifecycle commands preserve App ownership`。
+   `PASS: Desktop ownership stays scoped by data-dir, transient stalls preserve PID, real exits recover, and CLI lifecycle commands preserve App ownership`。
 
 预期结果：
 
@@ -209,6 +209,40 @@
 - CLI-owned daemon 被 Desktop 复用后，Desktop 退出但 Service 保持健康，最后仍可由
   CLI `stop` 正常停止。
 
+### TC-DCDR-09（回归）：短时健康探针失败不重启，真实子进程退出快速恢复
+
+操作步骤：
+
+1. 准备当前 debug CLI sidecar 与 Desktop binary：
+   ```bash
+   pnpm --dir web run build:desktop
+   SKIP_FRONTEND_BUILD=1 cargo build -p bifrost-cli --bin bifrost
+   node scripts/prepare-tauri-sidecar.mjs debug
+   SKIP_FRONTEND_BUILD=1 cargo build --manifest-path desktop/src-tauri/Cargo.toml
+   ```
+2. 执行 watchdog focused 单元测试：
+   ```bash
+   cargo test --manifest-path desktop/src-tauri/Cargo.toml desktop_watchdog_ -- --nocapture
+   ```
+3. 执行真实 ownership 生命周期脚本：
+   ```bash
+   SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh
+   ```
+4. 检查脚本退出码为 0，且最终输出包含
+   `transient stalls preserve PID, real exits recover`。
+
+预期结果：
+
+- 测试仅使用临时 data-dir、动态端口、`BIFROST_DESKTOP_NO_SYSTEM_PROXY=1` 和
+  `BIFROST_DESKTOP_SKIP_CERT_PREFLIGHT=1`，不读取或修改正式 `9900` Service、系统代理或证书。
+- 对 Desktop-owned Service 发送 `SIGSTOP` 并保持 12 秒后再 `SIGCONT`，健康日志记录
+  `desktop backend health degraded` 和 `desktop backend health recovered without restart`，
+  `runtime.json` 中 PID 始终不变。
+- 随后使用 `SIGKILL` 真实终止该子进程；Desktop watchdog 在下一轮 2 秒存活检查中记录
+  `managed backend child pid=... exited`，拉起不同 PID，并恢复健康端点。
+- 后续用户 CLI `stop/restart` 仍拒绝操作 Desktop-owned Service，Desktop graceful shutdown
+  仍停止当前 owned PID；CLI-owned Service 在 Desktop 退出后仍保持运行。
+
 ## 清理步骤
 
 ```bash
@@ -231,3 +265,4 @@ rm -rf "$BIFROST_DATA_DIR"
 | 2026-07-25 | TC-DCDR-05 回归 | `SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`。 | 通过：污染父环境时 Desktop sidecar 仍记录 `desktop` 并随 Desktop graceful shutdown 退出；CLI daemon 被 Desktop 复用后，Desktop 退出但原 PID 与健康端点保持可用，最后由测试定向清理。 |
 | 2026-07-25 | TC-DCDR-06 / 07 回归 | `SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`；执行前 `pgrep` 识别到正式 `/Applications/Bifrost.app/Contents/MacOS/bifrost-desktop` PID `58982`。 | 环境阻塞：脚本按安全门禁输出 `SKIP: an existing Bifrost Desktop process is running`，未停止正式 App，也未触碰正式 `9900/9901` Service。新增跨 data-dir 与 CLI `stop/restart` 真实断言尚需在无正式 Desktop 进程的 macOS CI/会话补跑。 |
 | 2026-07-27 | TC-DCDR-08 回归 | 先执行 Tray runtime `6/6`、menu `27/27`、Desktop shell path `1/1`、Desktop stop command `1/1` focused tests；再构建当前 CLI/Desktop 并执行 `SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`。首次用旧 `0.0.164` Desktop binary 被相邻端口旧行为阻断；重编 `0.0.165` 后又真实发现异步 `spawn_backend_stop` 漏传 Desktop 私有授权，stop helper 输出 `owned by the Desktop app`。将同步/异步 stop 收敛到 `configure_backend_stop_command` 后按本用例立即全量复跑；第 1 轮 review 继续补上 Service 启动时间校验和 `foreground/daemon/unknown` 菜单矩阵并再次复跑；第 2 轮复查执行 Tray 模块 `155/155`、Desktop crate `65/65`，随后 `cargo fmt --all -- --check`、全目标全 feature clippy/build、`cargo test --workspace --all-features` 均通过。远端 CI 的 macOS agent-extensions shard 连续两次表现为 App Server 成功而 3 秒 `traex --version` 探针未生成 `cli.version`，同一 head 本地精确脚本通过；将非关键版本探针预算提高到 10 秒并保留严格 metadata 断言后再次复跑。后续 proxy-core shard 的 mock server 实际打印 `READY`，但重定向文件因 Python stdout buffering 直到退出才可见；改为 `python3 -u` 后精确复跑 cleanup E2E，`1 passed, 0 failed`。 | 通过：Desktop runtime 显示 `Quit Bifrost` 并请求 Desktop graceful shutdown，CLI runtime 保持 `Stop/Start`；异步 owned stop 获得内部授权，普通 CLI stop/restart 保护不变；陈旧菜单 PID 复用会被拒绝；Desktop-owned App/Service 均退出且 3 秒后未被 watchdog 恢复，CLI-owned daemon 在 Desktop 退出后保持健康并由 CLI 定向清理。 |
+| 2026-07-28 | TC-DCDR-09 回归 | 生成当前 debug CLI sidecar 与 Desktop binary；执行 `cargo test --manifest-path desktop/src-tauri/Cargo.toml desktop_watchdog_ -- --nocapture` 和 `SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`。E2E 初版在 startup recovery gate 结束前暂停 core，未进入运行期 watchdog；增加 `desktop backend start succeeded` 门禁后重跑。 | 通过：focused 单测 `4/4`；真实 Desktop-owned core 暂停 12 秒后恢复且 PID 不变，随后真实退出被拉起为新 PID；CLI stop/restart、Desktop graceful shutdown 与 CLI-owned Service 保留回归均通过。测试只使用临时 data-dir、动态端口并禁用系统代理。 |

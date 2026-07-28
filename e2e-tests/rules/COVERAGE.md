@@ -145,3 +145,4 @@
 ## 9. 非规则代理稳定性回归
 
 - `tests/test_upstream_connection_stability.sh`：通过本地短连接 upstream 验证跨 pool partition 全局背压、CONNECT 突发请求语义、普通 ConnectionRefused 不触发资源恢复退避，以及 cooldown 后不出现 `EADDRNOTAVAIL` / `ENOBUFS` / FD 耗尽错误。
+- `tests/test_desktop_service_ownership_lifecycle.sh`：在 macOS 临时 data-dir 和动态端口中暂停 Desktop-owned Service 模拟短时高负载卡顿，断言健康探针降级但 PID 不变；随后真实终止子进程，断言 watchdog 在下一轮存活检查中拉起新 PID，同时保留 Desktop/CLI ownership 边界。
