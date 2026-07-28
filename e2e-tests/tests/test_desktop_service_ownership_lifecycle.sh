@@ -155,6 +155,7 @@ cleanup() {
     wait_for_process_exit "$APP_PID" || kill -9 "$APP_PID" >/dev/null 2>&1 || true
   fi
   if [[ -n "$CORE_PID" ]] && process_is_running "$CORE_PID"; then
+    kill -CONT "$CORE_PID" >/dev/null 2>&1 || true
     kill "$CORE_PID" >/dev/null 2>&1 || true
     wait_for_process_exit "$CORE_PID" || kill -9 "$CORE_PID" >/dev/null 2>&1 || true
   fi
@@ -166,6 +167,49 @@ cleanup() {
   rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT
+
+runtime_pid() {
+  /usr/bin/python3 -c \
+    'import json,sys; print(json.load(open(sys.argv[1]))["pid"])' \
+    "$1/runtime.json"
+}
+
+wait_for_runtime_pid_change() {
+  local data_dir="$1"
+  local port="$2"
+  local old_pid="$3"
+  for _ in $(seq 1 200); do
+    if [[ -f "$data_dir/runtime.json" ]]; then
+      local new_pid
+      new_pid="$(runtime_pid "$data_dir" 2>/dev/null || true)"
+      if [[ -n "$new_pid" ]] && [[ "$new_pid" != "$old_pid" ]] &&
+        process_is_running "$new_pid" &&
+        curl -fsS --max-time 1 \
+          "http://127.0.0.1:$port/_bifrost/api/proxy/system/support" >/dev/null 2>&1
+      then
+        printf '%s\n' "$new_pid"
+        return 0
+      fi
+    fi
+    if [[ -n "$APP_PID" ]] && ! process_is_running "$APP_PID"; then
+      return 1
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+wait_for_log_line() {
+  local log_file="$1"
+  local pattern="$2"
+  for _ in $(seq 1 300); do
+    if [[ -f "$log_file" ]] && grep -Fq "$pattern" "$log_file"; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
 
 launch_desktop() {
   local data_dir="$1"
@@ -280,6 +324,66 @@ CORE_PID="$(/usr/bin/python3 -c \
 if [[ "$desktop_mode" != "desktop" ]]; then
   echo "FAIL: inherited daemon marker changed Desktop Service owner to $desktop_mode"
   cat "$desktop_data_dir/runtime.json"
+  exit 1
+fi
+
+desktop_bootstrap_log="$desktop_data_dir/logs/desktop-bootstrap.log"
+if ! wait_for_log_line \
+  "$desktop_bootstrap_log" \
+  "desktop backend start succeeded"; then
+  echo "FAIL: Desktop-owned Service startup did not leave the recovery gate"
+  cat "$desktop_bootstrap_log" || true
+  exit 1
+fi
+kill -STOP "$CORE_PID"
+sleep 12
+if ! process_is_running "$CORE_PID"; then
+  echo "FAIL: short backend stall terminated the Desktop-owned Service"
+  exit 1
+fi
+if ! grep -Fq "desktop backend health degraded" "$desktop_bootstrap_log"; then
+  kill -CONT "$CORE_PID" >/dev/null 2>&1 || true
+  echo "FAIL: short backend stall did not exercise the degraded watchdog path"
+  cat "$desktop_bootstrap_log" || true
+  exit 1
+fi
+kill -CONT "$CORE_PID"
+if ! wait_for_runtime "$desktop_data_dir" "$desktop_port"; then
+  echo "FAIL: Desktop-owned Service did not recover after a short stall"
+  cat "$desktop_bootstrap_log" || true
+  exit 1
+fi
+runtime_pid_after_stall="$(runtime_pid "$desktop_data_dir")"
+if [[ "$runtime_pid_after_stall" != "$CORE_PID" ]]; then
+  echo "FAIL: Desktop watchdog restarted Service after a short stall"
+  cat "$desktop_bootstrap_log" || true
+  exit 1
+fi
+if ! wait_for_log_line \
+  "$desktop_bootstrap_log" \
+  "desktop backend health recovered without restart"; then
+  echo "FAIL: Desktop watchdog did not record non-restarting health recovery"
+  cat "$desktop_bootstrap_log" || true
+  exit 1
+fi
+
+exited_core_pid="$CORE_PID"
+kill -9 "$exited_core_pid"
+if ! wait_for_process_exit "$exited_core_pid"; then
+  echo "FAIL: could not terminate Desktop-owned Service for watchdog recovery test"
+  exit 1
+fi
+if ! CORE_PID="$(wait_for_runtime_pid_change \
+  "$desktop_data_dir" "$desktop_port" "$exited_core_pid")"; then
+  echo "FAIL: Desktop watchdog did not replace an exited owned Service"
+  cat "$desktop_bootstrap_log" || true
+  exit 1
+fi
+if ! grep -Fq \
+  "managed backend child pid=$exited_core_pid exited" \
+  "$desktop_bootstrap_log"; then
+  echo "FAIL: Desktop watchdog did not record the real child exit"
+  cat "$desktop_bootstrap_log" || true
   exit 1
 fi
 
@@ -417,4 +521,4 @@ BIFROST_DATA_DIR="$cli_data_dir" "$CLI_BIN" stop >/dev/null
 wait_for_process_exit "$CORE_PID"
 CORE_PID=""
 
-echo "PASS: Desktop ownership stays scoped by data-dir and CLI lifecycle commands preserve App ownership"
+echo "PASS: Desktop ownership stays scoped by data-dir, transient stalls preserve PID, real exits recover, and CLI lifecycle commands preserve App ownership"

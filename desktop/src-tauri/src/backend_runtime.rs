@@ -1,5 +1,11 @@
 use super::*;
 
+mod watchdog;
+
+pub(super) use watchdog::monitor_desktop_backend;
+#[cfg(test)]
+pub(super) use watchdog::{BackendWatchdogHealth, WatchdogProbeDisposition};
+
 pub(super) fn ensure_backend_running(
     binary_path: &Path,
     data_dir: &Path,
@@ -332,86 +338,6 @@ pub(super) fn begin_backend_recovery(state: &BackendState) -> Option<BackendReco
     Some(BackendRecoveryGuard {
         flag: &state.backend_recovery_in_progress,
     })
-}
-
-pub(super) fn monitor_desktop_backend(app: &AppHandle) {
-    let Some(state) = app.try_state::<BackendState>() else {
-        return;
-    };
-
-    append_desktop_bootstrap_log(&state.data_dir, "desktop backend watchdog started");
-
-    let mut consecutive_health_failures = 0u8;
-    loop {
-        std::thread::sleep(BACKEND_WATCHDOG_POLL_INTERVAL);
-
-        let Some(state) = app.try_state::<BackendState>() else {
-            return;
-        };
-
-        if state.shutdown_started.load(Ordering::SeqCst) || state.force_exit.load(Ordering::SeqCst)
-        {
-            append_desktop_bootstrap_log(
-                &state.data_dir,
-                "desktop backend watchdog stopped because desktop shutdown is in progress",
-            );
-            return;
-        }
-
-        if state.backend_recovery_in_progress.load(Ordering::SeqCst) {
-            consecutive_health_failures = 0;
-            continue;
-        }
-
-        if let Some(reason) = poll_managed_backend_exit(&state) {
-            consecutive_health_failures = 0;
-            attempt_backend_recovery(app, &reason);
-            continue;
-        }
-
-        let current_port = match state.port.lock() {
-            Ok(port) => *port,
-            Err(_) => continue,
-        };
-
-        if current_port == 0 {
-            consecutive_health_failures = 0;
-            continue;
-        }
-
-        if probe_backend_health(current_port) {
-            clear_backend_unavailable_after_healthy_probe(
-                &state,
-                current_port,
-                "desktop backend watchdog observed healthy backend",
-            );
-            consecutive_health_failures = 0;
-            continue;
-        }
-
-        consecutive_health_failures = consecutive_health_failures.saturating_add(1);
-        if consecutive_health_failures < BACKEND_WATCHDOG_FAILURE_THRESHOLD {
-            append_desktop_bootstrap_log(
-                &state.data_dir,
-                format!(
-                    "desktop backend health probe failed on port {current_port}; waiting for confirmation ({consecutive_health_failures}/{BACKEND_WATCHDOG_FAILURE_THRESHOLD})"
-                ),
-            );
-            continue;
-        }
-        consecutive_health_failures = 0;
-        let managed_backend = state
-            .child
-            .lock()
-            .map(|child| child.is_some())
-            .unwrap_or(false);
-        let reason = format!("backend health probe failed on port {current_port}");
-        if managed_backend {
-            attempt_backend_recovery(app, &reason);
-        } else {
-            mark_backend_unavailable_for_manual_start(&state, &reason);
-        }
-    }
 }
 
 pub(super) fn poll_managed_backend_exit(state: &BackendState) -> Option<String> {

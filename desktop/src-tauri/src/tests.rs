@@ -11,23 +11,24 @@ use super::{
     host_window_close_behavior_for_platform, is_server_config_response,
     is_upgrade_relaunch_marker_active, main_interface_decorations_for_platform,
     mark_backend_unavailable_for_manual_start, parse_port_update_response,
-    persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit, publish_startup_ready,
-    read_active_upgrade_relaunch_marker, read_pending_desktop_install,
-    record_startup_deadline_error, relaunch_command_for_target, resolve_bifrost_binary_from_env,
-    resolve_desktop_config_path, resolve_desktop_data_dir, resolve_external_cli_backend_handoff,
-    runtime_marker_matches_active_backend, sanitize_desktop_upgrade_relaunch_command,
-    save_desktop_config, should_allow_multiple_instances, should_handoff_to_main,
-    should_retry_backend_candidate, startup_deadline_disposition, stop_backend_before_restart,
-    terminate_managed_backend, upgrade_handoff_requires_backend_release,
-    upgrade_relaunch_uses_external_cli_backend, uses_borderless_desktop_chrome_for_platform,
-    wait_for_backend, wait_for_child_exit, wait_for_external_cli_backend,
-    windows_desktop_upgrade_handoff_command, write_desktop_upgrade_terminal_progress,
-    write_upgrade_relaunch_marker, BackendState, BackendSystemIdentity, BackendWaitFailureKind,
-    DesktopConfig, DesktopInstallRollback, DesktopRuntimeMarker, DesktopShutdownBackendAction,
+    persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit,
+    probe_backend_health_with_timeout, publish_startup_ready, read_active_upgrade_relaunch_marker,
+    read_pending_desktop_install, record_startup_deadline_error, relaunch_command_for_target,
+    resolve_bifrost_binary_from_env, resolve_desktop_config_path, resolve_desktop_data_dir,
+    resolve_external_cli_backend_handoff, runtime_marker_matches_active_backend,
+    sanitize_desktop_upgrade_relaunch_command, save_desktop_config,
+    should_allow_multiple_instances, should_handoff_to_main, should_retry_backend_candidate,
+    startup_deadline_disposition, stop_backend_before_restart, terminate_managed_backend,
+    upgrade_handoff_requires_backend_release, upgrade_relaunch_uses_external_cli_backend,
+    uses_borderless_desktop_chrome_for_platform, wait_for_backend, wait_for_child_exit,
+    wait_for_external_cli_backend, windows_desktop_upgrade_handoff_command,
+    write_desktop_upgrade_terminal_progress, write_upgrade_relaunch_marker, BackendState,
+    BackendSystemIdentity, BackendWaitFailureKind, BackendWatchdogHealth, DesktopConfig,
+    DesktopInstallRollback, DesktopRuntimeMarker, DesktopShutdownBackendAction,
     DesktopUpgradeRelaunchMarker, ExternalCliBackendHandoff, HostWindowCloseBehavior,
-    PendingDesktopInstall, StartupDeadlineDisposition, DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV,
-    DESKTOP_UPGRADE_SHUTDOWN_ARG, DETACHED_DAEMON_CHILD_ENV, EXTERNAL_CLI_WORKER_ENV,
-    WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
+    PendingDesktopInstall, StartupDeadlineDisposition, WatchdogProbeDisposition,
+    DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV, DESKTOP_UPGRADE_SHUTDOWN_ARG,
+    DETACHED_DAEMON_CHILD_ENV, EXTERNAL_CLI_WORKER_ENV, WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
 };
 use bifrost_storage::data_dir as shared_bifrost_data_dir;
 use std::ffi::OsStr;
@@ -45,6 +46,7 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 mod backend_wait;
 mod cli_handoff_recovery;
+mod watchdog;
 
 fn assert_upgrade_relaunch_environment_removed(command: &Command) {
     for key in [
@@ -124,6 +126,26 @@ fn spawn_one_shot_health_server() -> u16 {
         }
     });
     port
+}
+
+fn spawn_delayed_health_server(delay: Duration, status: u16) -> (u16, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind delayed health server");
+    let port = listener
+        .local_addr()
+        .expect("delayed health server addr")
+        .port();
+    let handle = thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buffer = [0_u8; 1024];
+            let _ = stream.read(&mut buffer);
+            thread::sleep(delay);
+            let response = format!(
+                "HTTP/1.1 {status} Test\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    (port, handle)
 }
 
 fn spawn_one_shot_system_server(pid: u32, version: &str) -> u16 {
