@@ -1379,8 +1379,11 @@ impl ProxyInstance {
         let ca_key_path = temp_dir.join("certs").join("ca.key");
         save_root_ca(&ca_cert_path, &ca_key_path, ca.as_ref())
             .map_err(|e| format!("Failed to save E2E CA files: {}", e))?;
+        // Match the production layout: the body store owns a dedicated directory.
+        // Keeping it at the data-dir root makes unrelated durable state (for
+        // example the encrypted IM context key) look like captured body files.
         let body_store = Arc::new(parking_lot::RwLock::new(BodyStore::new(
-            temp_dir.clone(),
+            temp_dir.join("body_cache"),
             2 * 1024 * 1024,
             7,
             64 * 1024,
@@ -1572,7 +1575,7 @@ impl ProxyInstance {
         let temp_dir = std::env::temp_dir().join(format!("bifrost_e2e_test_sync_{}", port));
         clean_stale_e2e_data_dir(&temp_dir)?;
         let body_store = Arc::new(parking_lot::RwLock::new(BodyStore::new(
-            temp_dir.clone(),
+            temp_dir.join("body_cache"),
             2 * 1024 * 1024,
             7,
             64 * 1024,
