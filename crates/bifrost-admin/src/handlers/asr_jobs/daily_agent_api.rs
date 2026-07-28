@@ -375,7 +375,7 @@ async fn post_daily_agent_send_response(task_id: &str, req: Request<Incoming>) -
     }
 
     let content = build_im_content_for_reports(&task, &recent_reports);
-    match send_daily_agent_im_message(&task, &content, "manual_send", recent_reports.len()).await {
+    match send_daily_agent_im_message(&task, &content, "manual_send", &recent_reports).await {
         Ok(()) => json_response(&serde_json::json!({
             "ok": true,
             "sent_reports": recent_reports,

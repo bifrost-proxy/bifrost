@@ -253,6 +253,7 @@ pub struct ImGatewayService {
     pub event_store: Arc<ImEventStore>,
     pub run_store: Arc<ImRunStore>,
     pub message_log_store: Arc<ImMessageLogStore>,
+    pub outbox_store: Arc<crate::im_gateway::ImOutboxStore>,
     pub group_context_store: Arc<ImGroupContextStore>,
     pub connection_manager: Arc<ImConnectionManager>,
     pub agent_config_store: Arc<ImAgentConfigStore>,
@@ -305,8 +306,9 @@ impl ImGatewayService {
             event_store: Arc::new(ImEventStore::new(data_dir)),
             run_store: Arc::new(ImRunStore::new(data_dir)),
             message_log_store: Arc::new(ImMessageLogStore::new(data_dir)),
+            outbox_store: Arc::new(crate::im_gateway::ImOutboxStore::new(data_dir)),
             group_context_store: Arc::new(ImGroupContextStore::new(data_dir)),
-            connection_manager: Arc::new(ImConnectionManager::new()),
+            connection_manager: Arc::new(ImConnectionManager::new_with_data_dir(data_dir)),
             agent_config_store,
             agent_session_manager: Arc::new(ImAgentSessionManager::new(
                 agent_config.get_session_ttl_secs(),

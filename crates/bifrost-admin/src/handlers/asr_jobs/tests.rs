@@ -6682,6 +6682,8 @@ mod tests {
             current_file_copied_bytes: 0,
             total_files_discovered: 0,
             processed_files: 0,
+            completion_token: None,
+            auto_run_consumed: false,
             message: "running".to_string(),
         };
         save_external_import_progress("task1", &progress).unwrap();
@@ -6690,6 +6692,46 @@ mod tests {
         assert_eq!(normalized.status, "failed");
         assert!(normalized.finished_at_ms.is_some());
         assert!(normalized.message.contains("interrupted"));
+    }
+
+    #[test]
+    fn external_import_completion_barrier_is_consumed_once() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let mut progress = AsrExternalImportRunProgress {
+            run_id: "barrier-run".to_string(),
+            trigger: "test".to_string(),
+            started_at_ms: 1,
+            updated_at_ms: 2,
+            finished_at_ms: Some(2),
+            imported: 3,
+            skipped: 4,
+            processed_record_skipped: 1,
+            failed: 0,
+            status: "completed".to_string(),
+            current_device: None,
+            current_file: None,
+            current_file_size: None,
+            current_file_copied_bytes: 0,
+            total_files_discovered: 7,
+            processed_files: 7,
+            completion_token: None,
+            auto_run_consumed: false,
+            message: "completed".to_string(),
+        };
+        progress.completion_token = Some(external_import_completion_token(&progress));
+        save_external_import_progress("barrier-task", &progress).unwrap();
+
+        let token = consume_external_import_completion("barrier-task").unwrap();
+        assert!(consume_external_import_completion("barrier-task").is_none());
+        release_external_import_completion("barrier-task", "other-run-token");
+        assert!(consume_external_import_completion("barrier-task").is_none());
+        release_external_import_completion("barrier-task", &token);
+        assert_eq!(
+            consume_external_import_completion("barrier-task").as_deref(),
+            Some(token.as_str())
+        );
     }
 
     #[test]

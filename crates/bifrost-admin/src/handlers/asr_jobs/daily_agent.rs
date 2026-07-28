@@ -1,30 +1,3 @@
-// ─── Processed State ──────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct AsrDailyAgentProcessedState {
-    #[serde(default)]
-    pub version: u32,
-    #[serde(default)]
-    pub documents: DailyAgentBTreeMap<String, AsrDailyAgentProcessedDocument>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AsrDailyAgentProcessedDocument {
-    #[serde(default = "default_daily_agent_id")]
-    pub agent_id: String,
-    #[serde(default = "default_daily_agent_name")]
-    pub agent_name: String,
-    #[serde(default = "default_daily_agent_output_dir")]
-    pub output_dir: String,
-    pub date: String,
-    pub source_sha256: String,
-    pub source_len_bytes: u64,
-    pub processed_at_ms: u64,
-    pub runner: String,
-    pub report_path: Option<String>,
-    pub last_run_id: String,
-}
-
 #[derive(Debug, Clone, Serialize)]
 struct AsrDailyAgentReportIndexStatus {
     report_files: usize,
@@ -76,6 +49,8 @@ struct DailyAgentChangePlanEntry {
     /// For appended: the byte offset where new content starts
     #[serde(skip_serializing_if = "Option::is_none")]
     append_offset: Option<u64>,
+    agent_config_sha256: String,
+    upstream_sha256: DailyAgentBTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -145,29 +120,6 @@ struct DailyAgentInnerResult {
 }
 
 // ─── Core Functions ───────────────────────────────────────────────────────────
-
-fn daily_agent_processed_state_path(task_id: &str) -> PathBuf {
-    bifrost_storage::data_dir()
-        .join("asr/tasks")
-        .join(task_id)
-        .join("daily_agent_processed.json")
-}
-
-fn load_daily_agent_processed_state(task_id: &str) -> AsrDailyAgentProcessedState {
-    let path = daily_agent_processed_state_path(task_id);
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default()
-}
-
-fn save_daily_agent_processed_state(
-    task_id: &str,
-    state: &AsrDailyAgentProcessedState,
-) -> Result<(), String> {
-    let path = daily_agent_processed_state_path(task_id);
-    atomic_json_write(&path, state)
-}
 
 fn daily_agent_conversation_state_path(task_id: &str) -> PathBuf {
     bifrost_storage::data_dir()
@@ -239,19 +191,6 @@ fn is_valid_date_format(date: &str) -> bool {
         && bytes[8..10].iter().all(|b| b.is_ascii_digit())
 }
 
-fn compute_sha256(path: &Path) -> Result<String, String> {
-    use sha2::{Digest as Sha2Digest, Sha256};
-    let content = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let hash = Sha256::digest(&content);
-    Ok(format!("{:x}", hash))
-}
-
-fn compute_sha256_of_bytes(data: &[u8]) -> String {
-    use sha2::{Digest as Sha2Digest, Sha256};
-    let hash = Sha256::digest(data);
-    format!("{:x}", hash)
-}
-
 fn build_daily_agent_change_plan(
     task: &AsrDirectoryTask,
     _trigger_source: &str,
@@ -261,6 +200,7 @@ fn build_daily_agent_change_plan(
     let daily_dir = daily_dir_for_task(&task.id);
     let report_dir = daily_agent_output_dir(task);
     let processed = load_daily_agent_processed_state(&task.id);
+    let agent_config_sha256 = daily_agent_config_sha256(task);
 
     // Scan daily/*.md files (exclude AGENTS.md, hidden files, report/)
     let mut entries = Vec::new();
@@ -310,17 +250,28 @@ fn build_daily_agent_change_plan(
             .join(format!("{}-report.md", date))
             .to_string_lossy()
             .to_string();
+        let upstream_sha256 = daily_agent_upstream_sha256(task, date);
 
         // Determine change kind
+        let processed_key = daily_agent_processed_key(task, date);
         let (change_kind, append_offset) = if force {
             (DailyAgentChangeKind::Force, None)
         } else if let Some(prev) = processed
             .documents
-            .get(&daily_agent_processed_key(task, date))
+            .get(&processed_key)
             .or_else(|| processed.documents.get(date))
         {
-            if prev.source_sha256 == source_sha256 {
+            if prev.source_sha256 == source_sha256
+                && daily_agent_processed_artifacts_match(
+                    processed.artifacts.get(&processed_key),
+                    &report_target,
+                    &agent_config_sha256,
+                    &upstream_sha256,
+                )
+            {
                 (DailyAgentChangeKind::Unchanged, None)
+            } else if prev.source_sha256 == source_sha256 {
+                (DailyAgentChangeKind::Rewritten, None)
             } else if source_len_bytes > prev.source_len_bytes {
                 // Verify it's truly appended: read the first prev.source_len_bytes,
                 // hash them, and compare with the previous hash.
@@ -357,11 +308,40 @@ fn build_daily_agent_change_plan(
             source_len_bytes,
             report_target,
             append_offset,
+            agent_config_sha256: agent_config_sha256.clone(),
+            upstream_sha256,
         });
     }
 
     // Sort by date
     entries.sort_by(|a, b| a.date.cmp(&b.date));
+
+    if requested_date.is_none() && !force {
+        let agent_id = task.daily_agent.agent_id.as_str();
+        let effective_watermark = processed
+            .date_watermarks
+            .get(agent_id)
+            .cloned()
+            .or_else(|| {
+                processed
+                    .documents
+                    .values()
+                    .filter(|document| document.agent_id == agent_id)
+                    .map(|document| document.date.clone())
+                    .max()
+            });
+        if let Some(watermark) = effective_watermark {
+            entries.retain(|entry| {
+                entry.date > watermark
+                    || processed
+                        .documents
+                        .contains_key(&daily_agent_processed_key(task, &entry.date))
+                    || processed.documents.contains_key(&entry.date)
+            });
+        } else if let Some(latest) = entries.last().map(|entry| entry.date.clone()) {
+            entries.retain(|entry| entry.date == latest);
+        }
+    }
 
     // Short-circuit: all unchanged and not force
     let all_unchanged = entries
@@ -386,7 +366,11 @@ fn build_daily_agent_change_plan(
             task_id: task.id.clone(),
             entries,
             skipped: true,
-            skip_reason: Some("no daily markdown files found".to_string()),
+            skip_reason: Some(if requested_date.is_none() && !force {
+                "no daily markdown changes eligible after date watermark".to_string()
+            } else {
+                "no daily markdown files found".to_string()
+            }),
         });
     }
 
@@ -1037,7 +1021,7 @@ async fn run_daily_agent_locked(
         };
 
         if let Err(e) =
-            send_daily_agent_im_message(task, &im_content, &run_id, reports_generated.len()).await
+            send_daily_agent_im_message(task, &im_content, &run_id, &reports_generated).await
         {
             tracing::warn!(
                 task_id = %task.id,
@@ -2160,8 +2144,14 @@ async fn run_daily_agent_inner(
                 && generated_report_targets.contains(&entry.report_target)
         })
     {
+        let report_path = Path::new(&entry.report_target);
+        let report_sha256 = compute_sha256(report_path)?;
+        let report_len_bytes = std::fs::metadata(report_path)
+            .map(|metadata| metadata.len())
+            .map_err(|error| format!("stat generated report {}: {error}", report_path.display()))?;
+        let processed_key = daily_agent_processed_key(task, &entry.date);
         processed.documents.insert(
-            daily_agent_processed_key(task, &entry.date),
+            processed_key.clone(),
             AsrDailyAgentProcessedDocument {
                 agent_id: task.daily_agent.agent_id.clone(),
                 agent_name: task.daily_agent.name.clone(),
@@ -2175,6 +2165,25 @@ async fn run_daily_agent_inner(
                 last_run_id: run_id.to_string(),
             },
         );
+        processed.artifacts.insert(
+            processed_key,
+            AsrDailyAgentArtifactState {
+                report_sha256: Some(report_sha256),
+                report_len_bytes: Some(report_len_bytes),
+                generator_contract_version: Some(DAILY_AGENT_GENERATOR_CONTRACT_VERSION),
+                agent_config_sha256: Some(entry.agent_config_sha256.clone()),
+                upstream_sha256: entry.upstream_sha256.clone(),
+            },
+        );
+        processed
+            .date_watermarks
+            .entry(task.daily_agent.agent_id.clone())
+            .and_modify(|watermark| {
+                if entry.date > *watermark {
+                    *watermark = entry.date.clone();
+                }
+            })
+            .or_insert_with(|| entry.date.clone());
     }
 
     processed.version = PROCESSED_STATE_VERSION;

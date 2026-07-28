@@ -98,6 +98,8 @@ pub(super) struct SendMessageRequest {
     pub(super) image: Option<SendImageRequest>,
     #[serde(default)]
     pub(super) rich_card: Option<SendRichCardRequest>,
+    #[serde(default)]
+    pub(super) idempotency_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
@@ -176,6 +178,68 @@ pub(super) async fn handle_messages_send(
             .unwrap_or_else(|| serde_json::to_string(&prepared).unwrap_or_default())
     });
     let log_msg_type = outbound_log_msg_type(&resolved.provider, &body.msg_type);
+    let idempotency_key = body
+        .idempotency_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if idempotency_key.is_some_and(|value| value.len() > 512) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "idempotency_key must be at most 512 bytes",
+        );
+    }
+    let outbox_send = if let Some(key) = idempotency_key {
+        use sha2::{Digest, Sha256};
+        let payload = serde_json::to_vec(&prepared).unwrap_or_default();
+        let payload_sha256 = format!("{:x}", Sha256::digest(payload));
+        match service.outbox_store.begin(
+            key,
+            &resolved.provider.id,
+            &resolved.log_target_id,
+            &body.msg_type,
+            &payload_sha256,
+        ) {
+            Ok(crate::im_gateway::ImOutboxBegin::Replay { message_id }) => {
+                return json_response(&crate::im_gateway::types::SendResult {
+                    message_id,
+                    request_id: Some("idempotent-replay".to_string()),
+                });
+            }
+            Ok(crate::im_gateway::ImOutboxBegin::Send { stable_client_id }) => {
+                Some((key.to_string(), stable_client_id))
+            }
+            Err(error) => {
+                return error_response(StatusCode::CONFLICT, &error.to_string());
+            }
+        }
+    } else {
+        None
+    };
+
+    if resolved.provider.provider_type == crate::im_gateway::types::ImProviderType::Weixin
+        && !service
+            .connection_manager
+            .weixin_provider()
+            .send_ready(&resolved.provider, &resolved.target)
+    {
+        if let Some((key, _)) = outbox_send.as_ref() {
+            if let Err(error) = service
+                .outbox_store
+                .mark_pending(key, "Weixin provider is not send-ready")
+            {
+                error!(
+                    error = %error,
+                    idempotency_key = %key,
+                    "failed to return send-not-ready IM outbox record to pending"
+                );
+            }
+        }
+        return error_response(
+            StatusCode::CONFLICT,
+            "Weixin provider is connected but not send-ready; send the bot an inbound message first",
+        );
+    }
 
     // Send via the configured provider implementation.
     let client = service.provider_client(&resolved.provider);
@@ -184,9 +248,24 @@ pub(super) async fn handle_messages_send(
             .as_str()
             .map(str::to_string)
             .unwrap_or_else(|| serde_json::to_string(&prepared).unwrap_or_default());
-        client
-            .send_text(&resolved.provider, &resolved.target, &text)
-            .await
+        if let Some((_, stable_client_id)) = outbox_send.as_ref().filter(|_| {
+            resolved.provider.provider_type == crate::im_gateway::types::ImProviderType::Weixin
+        }) {
+            service
+                .connection_manager
+                .weixin_provider()
+                .send_text_with_client_id(
+                    &resolved.provider,
+                    &resolved.target,
+                    &text,
+                    stable_client_id,
+                )
+                .await
+        } else {
+            client
+                .send_text(&resolved.provider, &resolved.target, &text)
+                .await
+        }
     } else if body.msg_type == "image" {
         let image_key = prepared
             .get("image_key")
@@ -205,6 +284,34 @@ pub(super) async fn handle_messages_send(
             )
             .await
     };
+
+    if let Some((key, _)) = outbox_send.as_ref() {
+        match &result {
+            Ok(send_result) => {
+                if let Err(error) = service
+                    .outbox_store
+                    .mark_sent(key, send_result.message_id.as_deref())
+                {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!(
+                            "provider acknowledged the message but the durable outbox commit failed: {error}"
+                        ),
+                    );
+                }
+            }
+            Err(error) => {
+                if let Err(store_error) = service.outbox_store.mark_pending(key, &error.to_string())
+                {
+                    error!(
+                        error = %store_error,
+                        idempotency_key = %key,
+                        "failed to return IM outbox record to pending"
+                    );
+                }
+            }
+        }
+    }
 
     // Record outbound message log
     let (status, message_id, error_msg) = match &result {

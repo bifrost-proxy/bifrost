@@ -20,6 +20,7 @@ use crate::im_gateway::types::{
     ImMessageReference, ImProviderConfig, ImProviderType, ImTarget, ProviderValidation,
     SendOptions, SendResult, UploadedImage,
 };
+use crate::im_gateway::weixin_context_store::WeixinContextStore;
 
 const DEFAULT_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
 const DEFAULT_CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
@@ -65,6 +66,7 @@ pub struct WeixinProvider {
     http: reqwest::Client,
     login_http: reqwest::Client,
     runtime: Arc<RwLock<HashMap<String, AccountRuntime>>>,
+    context_store: Option<Arc<WeixinContextStore>>,
     outbound_images: Arc<RwLock<HashMap<String, OutboundImage>>>,
 }
 
@@ -76,10 +78,27 @@ impl Default for WeixinProvider {
 
 impl WeixinProvider {
     pub fn new() -> Self {
-        Self::with_http_timeouts(DEFAULT_HTTP_TIMEOUT, LOGIN_HTTP_TIMEOUT)
+        Self::new_with_data_dir(&bifrost_storage::data_dir())
     }
 
+    pub fn new_with_data_dir(data_dir: &std::path::Path) -> Self {
+        Self::with_http_timeouts_and_data_dir(DEFAULT_HTTP_TIMEOUT, LOGIN_HTTP_TIMEOUT, data_dir)
+    }
+
+    #[cfg(test)]
     fn with_http_timeouts(default_timeout: Duration, login_timeout: Duration) -> Self {
+        Self::with_http_timeouts_and_data_dir(
+            default_timeout,
+            login_timeout,
+            &bifrost_storage::data_dir(),
+        )
+    }
+
+    fn with_http_timeouts_and_data_dir(
+        default_timeout: Duration,
+        login_timeout: Duration,
+        data_dir: &std::path::Path,
+    ) -> Self {
         let http = bifrost_core::outbound_reqwest_client_builder()
             .timeout(default_timeout)
             .build()
@@ -92,6 +111,13 @@ impl WeixinProvider {
             http,
             login_http,
             runtime: Arc::new(RwLock::new(HashMap::new())),
+            context_store: match WeixinContextStore::new(data_dir) {
+                Ok(store) => Some(Arc::new(store)),
+                Err(error) => {
+                    warn!(%error, "failed to initialize encrypted Weixin context store");
+                    None
+                }
+            },
             outbound_images: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -114,6 +140,44 @@ impl WeixinProvider {
                 "weixin provider requires bot token; complete QR login first".to_string(),
             )
         })
+    }
+
+    fn context_token(&self, account_id: &str, user_id: &str) -> Option<String> {
+        self.runtime
+            .read()
+            .get(account_id)
+            .and_then(|runtime| runtime.context_tokens.get(user_id).cloned())
+            .or_else(|| {
+                self.context_store
+                    .as_ref()
+                    .and_then(|store| store.get(account_id, user_id))
+            })
+    }
+
+    pub fn send_ready(&self, config: &ImProviderConfig, target: &ImTarget) -> bool {
+        self.send_ready_for_user(config, &target.receive_id)
+    }
+
+    pub fn send_ready_for_user(&self, config: &ImProviderConfig, user_id: &str) -> bool {
+        self.context_token(Self::account_id(config), user_id)
+            .is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn store_context_for_test(
+        &self,
+        config: &ImProviderConfig,
+        user_id: &str,
+        token: &str,
+    ) -> Result<()> {
+        self.context_store
+            .as_ref()
+            .ok_or_else(|| {
+                bifrost_core::BifrostError::Config(
+                    "weixin context store is unavailable".to_string(),
+                )
+            })?
+            .put(Self::account_id(config), user_id, token)
     }
 
     fn with_common_headers(
@@ -341,6 +405,14 @@ impl WeixinProvider {
                 .and_then(|v| v.as_str())
             {
                 if let Some(from) = Self::sender_field(&update) {
+                    self.context_store
+                        .as_ref()
+                        .ok_or_else(|| {
+                            bifrost_core::BifrostError::Config(
+                                "encrypted Weixin context store is unavailable".to_string(),
+                            )
+                        })?
+                        .put(&account_id, &from, context_token)?;
                     self.runtime
                         .write()
                         .entry(account_id.clone())
@@ -760,14 +832,15 @@ impl WeixinProvider {
                 }
             }],
         });
-        if let Some(context_token) = self
-            .runtime
-            .read()
-            .get(account_id)
-            .and_then(|runtime| runtime.context_tokens.get(&target.receive_id).cloned())
-        {
-            msg["context_token"] = serde_json::Value::String(context_token);
-        }
+        let context_token = self
+            .context_token(account_id, &target.receive_id)
+            .ok_or_else(|| {
+                bifrost_core::BifrostError::Config(
+                    "weixin provider is connected but not send-ready; send the bot an inbound message first"
+                        .to_string(),
+                )
+            })?;
+        msg["context_token"] = serde_json::Value::String(context_token);
         let payload = serde_json::json!({
             "msg": msg,
             "base_info": {
@@ -802,6 +875,47 @@ impl WeixinProvider {
                 .get("request_id")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
+        })
+    }
+
+    pub async fn send_text_with_client_id(
+        &self,
+        config: &ImProviderConfig,
+        target: &ImTarget,
+        text: &str,
+        client_msg_id: &str,
+    ) -> Result<SendResult> {
+        let chunks = Self::split_text_messages_for_retry(text);
+        if chunks.len() <= 1 {
+            return self
+                .send_text_once(config, target, text, client_msg_id.to_string())
+                .await;
+        }
+
+        let mut first_message_id = None;
+        let mut first_request_id = None;
+        for (idx, chunk) in chunks.iter().enumerate() {
+            let chunk_msg_id = format!("{client_msg_id}-part-{}", idx + 1);
+            let result = self
+                .send_text_once(config, target, chunk, chunk_msg_id)
+                .await
+                .map_err(|error| {
+                    bifrost_core::BifrostError::Network(format!(
+                        "weixin sendmessage chunk {}/{} failed: {error}",
+                        idx + 1,
+                        chunks.len()
+                    ))
+                })?;
+            if first_message_id.is_none() {
+                first_message_id = result.message_id;
+            }
+            if first_request_id.is_none() {
+                first_request_id = result.request_id;
+            }
+        }
+        Ok(SendResult {
+            message_id: first_message_id,
+            request_id: first_request_id,
         })
     }
 
@@ -1140,6 +1254,7 @@ impl ImProvider for WeixinProvider {
             http: self.http.clone(),
             login_http: self.login_http.clone(),
             runtime: Arc::clone(&self.runtime),
+            context_store: self.context_store.clone(),
             outbound_images: Arc::clone(&self.outbound_images),
         };
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
@@ -1190,62 +1305,8 @@ impl ImProvider for WeixinProvider {
         text: &str,
     ) -> Result<SendResult> {
         let client_msg_id = format!("bifrost-weixin-{}-{}", now_ms(), uuid::Uuid::new_v4());
-        match self
-            .send_text_once(config, target, text, client_msg_id)
+        self.send_text_with_client_id(config, target, text, &client_msg_id)
             .await
-        {
-            Ok(result) => Ok(result),
-            Err(original_error) => {
-                let chunks = Self::split_text_messages_for_retry(text);
-                if chunks.len() <= 1 {
-                    return Err(original_error);
-                }
-
-                let original_error_text = original_error.to_string();
-                warn!(
-                    provider_id = %config.id,
-                    target = %target.receive_id,
-                    text_chars = text.chars().count(),
-                    text_bytes = text.len(),
-                    chunk_count = chunks.len(),
-                    error = %original_error_text,
-                    "weixin sendmessage failed; retrying as split text messages"
-                );
-                let mut first_message_id = None;
-                let mut first_request_id = None;
-                let fallback_run_id = uuid::Uuid::new_v4();
-                for (idx, chunk) in chunks.iter().enumerate() {
-                    let chunk_msg_id = format!(
-                        "bifrost-weixin-{}-{}-part-{}",
-                        now_ms(),
-                        fallback_run_id,
-                        idx + 1
-                    );
-                    let result = self
-                        .send_text_once(config, target, chunk, chunk_msg_id)
-                        .await
-                        .map_err(|chunk_error| {
-                            bifrost_core::BifrostError::Network(format!(
-                                "weixin sendmessage split fallback failed at chunk {}/{}: {}; original error: {}",
-                                idx + 1,
-                                chunks.len(),
-                                chunk_error,
-                                original_error_text
-                            ))
-                        })?;
-                    if first_message_id.is_none() {
-                        first_message_id = result.message_id;
-                    }
-                    if first_request_id.is_none() {
-                        first_request_id = result.request_id;
-                    }
-                }
-                Ok(SendResult {
-                    message_id: first_message_id,
-                    request_id: first_request_id,
-                })
-            }
-        }
     }
 
     async fn upload_image(
@@ -1307,14 +1368,15 @@ impl ImProvider for WeixinProvider {
                 "image_item": image_item
             }],
         });
-        if let Some(context_token) = self
-            .runtime
-            .read()
-            .get(account_id)
-            .and_then(|runtime| runtime.context_tokens.get(&target.receive_id).cloned())
-        {
-            msg["context_token"] = serde_json::Value::String(context_token);
-        }
+        let context_token = self
+            .context_token(account_id, &target.receive_id)
+            .ok_or_else(|| {
+                bifrost_core::BifrostError::Config(
+                    "weixin provider is connected but not send-ready; send the bot an inbound message first"
+                        .to_string(),
+                )
+            })?;
+        msg["context_token"] = serde_json::Value::String(context_token);
         let payload = serde_json::json!({
             "msg": msg,
             "base_info": {

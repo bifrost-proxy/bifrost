@@ -33,6 +33,28 @@ fn test_target() -> ImTarget {
 }
 
 #[test]
+fn send_ready_survives_provider_restart_with_encrypted_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = test_provider();
+    let target = test_target();
+    let provider = WeixinProvider::new_with_data_dir(temp.path());
+    assert!(!provider.send_ready(&config, &target));
+    provider
+        .context_store
+        .as_ref()
+        .unwrap()
+        .put(
+            WeixinProvider::account_id(&config),
+            &target.receive_id,
+            "context-token",
+        )
+        .unwrap();
+
+    let restarted = WeixinProvider::new_with_data_dir(temp.path());
+    assert!(restarted.send_ready(&config, &target));
+}
+
+#[test]
 fn normalize_login_account_uses_ilink_fields_and_redirected_base_url() {
     let account = WeixinProvider::normalize_login_account(
         serde_json::json!({
@@ -332,7 +354,8 @@ async fn download_message_image_resource_fetches_plain_full_url() {
         let _ = http1::Builder::new().serve_connection(io, service).await;
     });
 
-    let provider = WeixinProvider::new();
+    let data_dir = tempfile::tempdir().unwrap();
+    let provider = WeixinProvider::new_with_data_dir(data_dir.path());
     let image = ImImageAttachment {
         file_key: "img-full-url".to_string(),
         source: ImImageSource::MessageResource,
@@ -452,7 +475,8 @@ async fn send_image_uploads_original_bytes_to_cdn_and_sends_image_item() {
         }
     });
 
-    let provider = WeixinProvider::new();
+    let data_dir = tempfile::tempdir().unwrap();
+    let provider = WeixinProvider::new_with_data_dir(data_dir.path());
     let mut config = test_provider();
     config.base_url = Some(format!("http://127.0.0.1:{port}"));
     let target = ImTarget {
@@ -466,6 +490,16 @@ async fn send_image_uploads_original_bytes_to_cdn_and_sends_image_item() {
         created_at: 0,
         updated_at: 0,
     };
+    provider
+        .context_store
+        .as_ref()
+        .unwrap()
+        .put(
+            WeixinProvider::account_id(&config),
+            &target.receive_id,
+            "image-context",
+        )
+        .unwrap();
     let uploaded = provider
         .upload_image(
             &config,
@@ -587,7 +621,7 @@ fn split_text_for_retry_preserves_multibyte_content() {
 }
 
 #[tokio::test]
-async fn im_long_reply_delivery_send_text_retries_failed_long_message_as_split_messages() {
+async fn im_long_reply_delivery_splits_before_send_with_stable_child_ids() {
     use bytes::Bytes;
     use http_body_util::{BodyExt, Full};
     use hyper::body::Incoming;
@@ -630,11 +664,8 @@ async fn im_long_reply_delivery_send_text_retries_failed_long_message_as_split_m
                                 bodies.push(json);
                                 bodies.len()
                             };
-                            let response = if call_count == 1 {
-                                r#"{"ret":-2,"errmsg":"unknown error"}"#.to_string()
-                            } else {
-                                format!(r#"{{"ret":0,"message_id":"chunk-{call_count}"}}"#)
-                            };
+                            let response =
+                                format!(r#"{{"ret":0,"message_id":"chunk-{call_count}"}}"#);
                             return Ok::<_, hyper::Error>(
                                 Response::builder()
                                     .status(200)
@@ -655,9 +686,21 @@ async fn im_long_reply_delivery_send_text_retries_failed_long_message_as_split_m
         }
     });
 
-    let provider = WeixinProvider::new();
+    let data_dir = tempfile::tempdir().unwrap();
+    let provider = WeixinProvider::new_with_data_dir(data_dir.path());
     let mut config = test_provider();
     config.base_url = Some(format!("http://127.0.0.1:{port}"));
+    let target = test_target();
+    provider
+        .context_store
+        .as_ref()
+        .unwrap()
+        .put(
+            WeixinProvider::account_id(&config),
+            &target.receive_id,
+            "text-context",
+        )
+        .unwrap();
     let long_text = format!(
         "{}\n{}",
         "最近一周大模型训练进展".repeat(260),
@@ -665,30 +708,28 @@ async fn im_long_reply_delivery_send_text_retries_failed_long_message_as_split_m
     );
 
     let result = provider
-        .send_text(&config, &test_target(), &long_text)
+        .send_text_with_client_id(&config, &target, &long_text, "stable-long-1")
         .await
-        .expect("split retry should recover long sendmessage failure");
+        .expect("proactive split send");
 
-    assert_eq!(result.message_id.as_deref(), Some("chunk-2"));
+    assert_eq!(result.message_id.as_deref(), Some("chunk-1"));
     let bodies = sendmessage_bodies.lock().expect("lock bodies").clone();
-    assert!(
-        bodies.len() > 2,
-        "expected original send plus split retries"
-    );
-    assert_eq!(
-        bodies[0]["msg"]["item_list"][0]["text_item"]["text"],
-        long_text
-    );
+    assert!(bodies.len() > 1, "expected proactive split messages");
 
     let mut recovered = String::new();
-    let split_total = bodies.len() - 1;
-    for (idx, body) in bodies.iter().skip(1).enumerate() {
+    let split_total = bodies.len();
+    for (idx, body) in bodies.iter().enumerate() {
         let text = body["msg"]["item_list"][0]["text_item"]["text"]
             .as_str()
             .expect("chunk text");
         let prefix = format!("[{}/{}]\n", idx + 1, split_total);
         assert!(text.starts_with(&prefix), "chunk must include order prefix");
         assert!(text.len() <= TEXT_RETRY_CHUNK_MAX_BYTES + 64);
+        assert_eq!(
+            body["msg"]["client_id"],
+            format!("stable-long-1-part-{}", idx + 1)
+        );
+        assert_eq!(body["msg"]["context_token"], "text-context");
         recovered.push_str(&text[prefix.len()..]);
     }
     assert_eq!(recovered, long_text);

@@ -1153,8 +1153,13 @@ pub(super) async fn text_message_send_uses_provider_client_and_records_failure()
     provider.display_name = "Weixin Main".to_string();
     service
         .provider_store
-        .add(provider)
+        .add(provider.clone())
         .expect("provider should be saved");
+    service
+        .connection_manager
+        .weixin_provider()
+        .store_context_for_test(&provider, "weixin-user", "test-context-token")
+        .expect("context token should be persisted");
     service
         .target_store
         .add(ImTarget {
@@ -1267,6 +1272,7 @@ pub(super) fn send_message_request_resolves_owner_target_from_provider() {
         card: None,
         image: None,
         rich_card: None,
+        idempotency_key: None,
     };
 
     let resolved =
@@ -1294,6 +1300,7 @@ pub(super) fn send_message_request_rejects_owner_without_provider() {
         card: None,
         image: None,
         rich_card: None,
+        idempotency_key: None,
     };
 
     let error = resolve_send_message_request(&service, &body)
@@ -1320,6 +1327,7 @@ pub(super) fn send_message_request_accepts_image_key_payload() {
             image_type: default_feishu_image_type(),
         }),
         rich_card: None,
+        idempotency_key: None,
     };
 
     let content = normalized_send_content(&body).expect("image content");

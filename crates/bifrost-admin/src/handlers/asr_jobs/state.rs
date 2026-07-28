@@ -670,6 +670,10 @@ struct AsrExternalImportRunProgress {
     total_files_discovered: usize,
     #[serde(default)]
     processed_files: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completion_token: Option<String>,
+    #[serde(default)]
+    auto_run_consumed: bool,
     message: String,
 }
 

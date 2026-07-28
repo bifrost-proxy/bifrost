@@ -13,6 +13,7 @@ pub use config_manager::{
     ConfigChangeEvent, ConfigManager, RulesChangeOrigin, SharedConfigManager,
 };
 pub use data_dir::{data_dir, set_data_dir};
+pub use local_secrets::LocalSecretKey;
 pub use remote_shell::{
     ensure_default_ssh_key_shell_policy, RemoteShellPolicy, RemoteShellProfile, RemoteShellSet,
     RemoteShellStore, DEFAULT_SSH_KEY_SHELL_POLICY_ID,

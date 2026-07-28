@@ -301,6 +301,8 @@ fn start_external_import_background(
         current_file_copied_bytes: 0,
         total_files_discovered: 0,
         processed_files: 0,
+        completion_token: None,
+        auto_run_consumed: false,
         message: "External import queued in background.".to_string(),
     };
     save_external_import_progress(&task.id, &progress)?;
@@ -320,12 +322,20 @@ fn start_external_import_background(
                     trigger = %trigger,
                     "ASR external import completed in background"
                 );
-                if *imported > 0
+                let completion_token = (*imported > 0
                     && task_for_followup.import_policy.auto_run_after_import
                     && !task_for_followup.paused
-                {
+                    && !task_is_running(&task_for_followup.id))
+                    .then(|| consume_external_import_completion(&task_for_followup.id))
+                    .flatten();
+                if let Some(completion_token) = completion_token {
                     handle.spawn(async move {
-                        let _ = spawn_directory_task_run(task_for_followup);
+                        if spawn_directory_task_run(task_for_followup.clone()).is_err() {
+                            release_external_import_completion(
+                                &task_for_followup.id,
+                                &completion_token,
+                            );
+                        }
                     });
                 }
             }
@@ -348,18 +358,77 @@ fn start_external_import_background(
     Ok(progress)
 }
 
+fn external_import_completion_token(progress: &AsrExternalImportRunProgress) -> String {
+    use sha2::{Digest, Sha256};
+    let payload = format!(
+        "{}:{}:{}:{}:{}:{}",
+        progress.run_id,
+        progress.imported,
+        progress.skipped,
+        progress.processed_record_skipped,
+        progress.failed,
+        progress.processed_files
+    );
+    format!("{:x}", Sha256::digest(payload.as_bytes()))
+}
+
+fn consume_external_import_completion(task_id: &str) -> Option<String> {
+    let _guard = EXTERNAL_IMPORT_LOCK.lock().ok()?;
+    let mut progress = load_external_import_progress(task_id)?;
+    if progress.status != "completed" || progress.auto_run_consumed {
+        return None;
+    }
+    let token = progress.completion_token.clone()?;
+    if token != external_import_completion_token(&progress) {
+        return None;
+    }
+    progress.auto_run_consumed = true;
+    progress.updated_at_ms = now_ms();
+    if save_external_import_progress(task_id, &progress).is_err() {
+        return None;
+    }
+    if load_external_import_progress(task_id).is_some_and(|saved| {
+        saved.auto_run_consumed && saved.completion_token.as_deref() == Some(token.as_str())
+    }) {
+        Some(token)
+    } else {
+        progress.auto_run_consumed = false;
+        progress.updated_at_ms = now_ms();
+        let _ = save_external_import_progress(task_id, &progress);
+        None
+    }
+}
+
+fn release_external_import_completion(task_id: &str, expected_token: &str) {
+    let Ok(_guard) = EXTERNAL_IMPORT_LOCK.lock() else {
+        return;
+    };
+    let Some(mut progress) = load_external_import_progress(task_id) else {
+        return;
+    };
+    if progress.completion_token.as_deref() != Some(expected_token) {
+        return;
+    }
+    progress.auto_run_consumed = false;
+    progress.updated_at_ms = now_ms();
+    let _ = save_external_import_progress(task_id, &progress);
+}
+
 fn sync_external_devices_for_task(
     task: &AsrDirectoryTask,
     run_id: &str,
     trigger: &str,
 ) -> Result<usize, String> {
     if !task.import_policy.enabled || task.external_devices.is_empty() {
-        update_external_import_progress(&task.id, |progress| {
-            progress.status = "completed".to_string();
-            progress.finished_at_ms = Some(now_ms());
-            progress.message = "External import skipped because no device import is enabled."
-                .to_string();
-        });
+        let mut progress = load_external_import_progress(&task.id)
+            .ok_or_else(|| "external import progress disappeared".to_string())?;
+        progress.status = "completed".to_string();
+        progress.finished_at_ms = Some(now_ms());
+        progress.updated_at_ms = now_ms();
+        progress.message =
+            "External import skipped because no device import is enabled.".to_string();
+        progress.completion_token = Some(external_import_completion_token(&progress));
+        save_external_import_progress(&task.id, &progress)?;
         return Ok(0);
     }
     let _guard = EXTERNAL_IMPORT_LOCK
@@ -489,25 +558,35 @@ fn sync_external_devices_for_task(
         store.runs.drain(0..drain);
     }
     save_external_import_store(&task.id, &store)?;
-    update_external_import_progress(&task.id, |progress| {
-        progress.status = if failed_total > 0 {
-            "completed_with_errors".to_string()
-        } else {
-            "completed".to_string()
-        };
-        progress.finished_at_ms = Some(now_ms());
-        progress.current_device = None;
-        progress.current_file = None;
-        progress.current_file_size = None;
-        progress.current_file_copied_bytes = 0;
-        progress.imported = imported_total;
-        progress.skipped = skipped_total;
-        progress.failed = failed_total;
-        progress.message = format!(
-            "External import completed; imported {imported_total} file(s), skipped {skipped_total} total ({} already processed), failed {failed_total}.",
-            progress.processed_record_skipped
-        );
-    });
+    let mut progress = load_external_import_progress(&task.id)
+        .ok_or_else(|| "external import progress disappeared".to_string())?;
+    progress.status = if failed_total > 0 {
+        "completed_with_errors".to_string()
+    } else {
+        "completed".to_string()
+    };
+    progress.finished_at_ms = Some(now_ms());
+    progress.updated_at_ms = now_ms();
+    progress.current_device = None;
+    progress.current_file = None;
+    progress.current_file_size = None;
+    progress.current_file_copied_bytes = 0;
+    progress.imported = imported_total;
+    progress.skipped = skipped_total;
+    progress.failed = failed_total;
+    progress.message = format!(
+        "External import completed; imported {imported_total} file(s), skipped {skipped_total} total ({} already processed), failed {failed_total}.",
+        progress.processed_record_skipped
+    );
+    progress.completion_token = (failed_total == 0)
+        .then(|| external_import_completion_token(&progress));
+    save_external_import_progress(&task.id, &progress)?;
+    let persisted = load_external_import_progress(&task.id)
+        .ok_or_else(|| "external import completion barrier read-back failed".to_string())?;
+    if persisted.status != progress.status || persisted.completion_token != progress.completion_token
+    {
+        return Err("external import completion barrier did not persist".to_string());
+    }
     Ok(imported_total)
 }
 

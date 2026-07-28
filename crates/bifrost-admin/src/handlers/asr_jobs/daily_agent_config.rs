@@ -12,7 +12,8 @@ const DEFAULT_ASR_RESEARCH_SEED_AGENT_MD: &str =
     include_str!("daily_agent_research_seed_template.md");
 const DEFAULT_ASR_RESEARCH_DISPATCHER_AGENT_MD: &str =
     include_str!("daily_agent_research_dispatcher_template.md");
-const PROCESSED_STATE_VERSION: u32 = 1;
+const PROCESSED_STATE_VERSION: u32 = 2;
+const DAILY_AGENT_GENERATOR_CONTRACT_VERSION: u32 = 2;
 const CONVERSATION_STATE_VERSION: u32 = 1;
 const DEFAULT_DAILY_AGENT_ID: &str = "daily_report";
 const DEFAULT_DAILY_AGENT_NAME: &str = "daily_report";

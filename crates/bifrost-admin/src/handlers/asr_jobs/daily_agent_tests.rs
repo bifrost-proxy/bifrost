@@ -1690,7 +1690,9 @@ fn daily_agent_report_gate_excludes_known_failed_entries_from_missing_reports() 
     std::fs::write(daily_dir.join("2026-05-19.md"), "text one").unwrap();
     std::fs::write(daily_dir.join("2026-05-20.md"), "text two").unwrap();
 
-    let plan = build_daily_agent_change_plan(&task, "test", None, false).unwrap();
+    // Force is an explicit multi-date backfill and therefore bypasses the
+    // automatic first-run watermark guard.
+    let plan = build_daily_agent_change_plan(&task, "test", None, true).unwrap();
     let success_target = plan
         .entries
         .iter()
@@ -1783,6 +1785,8 @@ fn daily_agent_entry_failure_recorder_preserves_retry_target() {
             .to_string_lossy()
             .to_string(),
         append_offset: None,
+        agent_config_sha256: "config-hash".to_string(),
+        upstream_sha256: DailyAgentBTreeMap::new(),
     };
     let mut failures = Vec::new();
 
@@ -1842,6 +1846,11 @@ async fn daily_agent_chatgpt_web_entry_failure_continues_and_keeps_failed_date_r
     let daily_dir = daily_dir_for_task(&task.id);
     std::fs::write(daily_dir.join("2026-06-24.md"), "# 2026-06-24 转写\n\n失败日期").unwrap();
     std::fs::write(daily_dir.join("2026-06-25.md"), "# 2026-06-25 转写\n\n成功日期").unwrap();
+    let mut processed = AsrDailyAgentProcessedState::default();
+    processed
+        .date_watermarks
+        .insert(task.daily_agent.agent_id.clone(), "2026-06-23".to_string());
+    save_daily_agent_processed_state(&task.id, &processed).unwrap();
 
     let result = run_daily_agent_inner(&task, "manual", None, false, "run-partial")
         .await
@@ -1922,6 +1931,11 @@ async fn daily_agent_locked_partial_success_persists_status_and_error_summary() 
     let daily_dir = daily_dir_for_task(&task.id);
     std::fs::write(daily_dir.join("2026-06-24.md"), "# 2026-06-24 转写\n\n失败日期").unwrap();
     std::fs::write(daily_dir.join("2026-06-25.md"), "# 2026-06-25 转写\n\n成功日期").unwrap();
+    let mut processed = AsrDailyAgentProcessedState::default();
+    processed
+        .date_watermarks
+        .insert(task.daily_agent.agent_id.clone(), "2026-06-23".to_string());
+    save_daily_agent_processed_state(&task.id, &processed).unwrap();
     save_tasks(&TaskStore {
         version: TASK_STORE_VERSION,
         tasks: vec![task.clone()],
@@ -3292,8 +3306,13 @@ fn daily_agent_after_asr_run_requires_changed_daily_markdown() {
     let mut processed = AsrDailyAgentProcessedState::default();
     for agent in &agents {
         let agent_task = task_for_daily_agent(&task, agent);
+        let report_path =
+            daily_agent_output_dir(&agent_task).join("2026-06-03-report.md");
+        std::fs::create_dir_all(report_path.parent().unwrap()).unwrap();
+        std::fs::write(&report_path, "# processed report").unwrap();
+        let processed_key = daily_agent_processed_key(&agent_task, "2026-06-03");
         processed.documents.insert(
-            daily_agent_processed_key(&agent_task, "2026-06-03"),
+            processed_key.clone(),
             AsrDailyAgentProcessedDocument {
                 agent_id: agent.id.clone(),
                 agent_name: agent.name.clone(),
@@ -3303,11 +3322,22 @@ fn daily_agent_after_asr_run_requires_changed_daily_markdown() {
                 source_len_bytes,
                 processed_at_ms: 1,
                 runner: agent.runner.clone(),
-                report_path: None,
+                report_path: Some(report_path.to_string_lossy().to_string()),
                 last_run_id: "previous-run".to_string(),
             },
         );
+        processed.artifacts.insert(
+            processed_key,
+            AsrDailyAgentArtifactState {
+                report_sha256: Some(compute_sha256(&report_path).unwrap()),
+                report_len_bytes: Some(std::fs::metadata(&report_path).unwrap().len()),
+                generator_contract_version: Some(DAILY_AGENT_GENERATOR_CONTRACT_VERSION),
+                agent_config_sha256: Some(daily_agent_config_sha256(&agent_task)),
+                upstream_sha256: daily_agent_upstream_sha256(&agent_task, "2026-06-03"),
+            },
+        );
     }
+    processed.version = PROCESSED_STATE_VERSION;
     save_daily_agent_processed_state(&task.id, &processed).unwrap();
     assert!(!daily_agent_has_changed_daily_markdown(&task, &agents, None).unwrap());
 
@@ -3972,6 +4002,8 @@ fn daily_agent_research_index_keeps_original_question_and_chatgpt_link() {
         result_path: None,
         context_path: None,
         error: None,
+        fingerprint_sha256: None,
+        result_sha256: None,
     };
 
     let report = render_daily_research_index("2026-07-12", &[result]);
@@ -4003,11 +4035,204 @@ fn daily_agent_research_index_does_not_expose_local_result_paths() {
         result_path: Some("/Users/private/research/2026-07-13/q1.md".to_string()),
         context_path: None,
         error: None,
+        fingerprint_sha256: None,
+        result_sha256: None,
     };
 
     let report = render_daily_research_index("2026-07-13", &[result]);
     assert!(report.contains("完整研究文件：`q1.md`"));
     assert!(!report.contains("/Users/private"));
+}
+
+#[test]
+fn daily_agent_research_reuses_only_matching_untampered_child() {
+    let temp = TempDir::new().unwrap();
+    let result_path = temp.path().join("q1.md");
+    let metadata_path = temp.path().join("q1.json");
+    std::fs::write(&result_path, "verified result").unwrap();
+    let result_sha256 = compute_sha256(&result_path).unwrap();
+    let result = AsrDailyResearchChildResult {
+        question_id: "q1".to_string(),
+        original_question: "原始问题".to_string(),
+        runner: "chatgpt-web".to_string(),
+        github_repositories: Vec::new(),
+        github_connector_status: None,
+        context_profile: None,
+        status: "success".to_string(),
+        run_id: Some("run-1".to_string()),
+        conversation_id: Some("conversation-1".to_string()),
+        full_report_link: None,
+        result_path: Some(result_path.to_string_lossy().to_string()),
+        context_path: None,
+        error: None,
+        fingerprint_sha256: Some("fingerprint".to_string()),
+        result_sha256: Some(result_sha256),
+    };
+    atomic_json_write(&metadata_path, &result).unwrap();
+
+    assert!(reusable_daily_research_child(
+        &metadata_path,
+        &result_path,
+        "fingerprint"
+    )
+    .is_some());
+    assert!(reusable_daily_research_child(&metadata_path, &result_path, "changed").is_none());
+
+    std::fs::write(&result_path, "tampered result").unwrap();
+    assert!(reusable_daily_research_child(
+        &metadata_path,
+        &result_path,
+        "fingerprint"
+    )
+    .is_none());
+}
+
+#[test]
+fn daily_agent_research_fingerprint_changes_with_context_profile_contract() {
+    let question = AsrDailyResearchQuestion {
+        id: "q1".to_string(),
+        original_question: "核验问题".to_string(),
+        source_excerpt: "原始片段".to_string(),
+        background: "背景".to_string(),
+        runner: Some("chatgpt-web".to_string()),
+        github_repositories: Vec::new(),
+        context_profile: Some("portfolio".to_string()),
+        research_prompt: Some("使用一手来源".to_string()),
+    };
+    let mut fanout = AsrDailyAgentResearchFanoutConfig::default();
+    fanout.context_profiles.insert(
+        "portfolio".to_string(),
+        AsrDailyAgentResearchContextProfile {
+            runner: "codex".to_string(),
+            work_dir: "workspace-a".to_string(),
+            instructions: Some("读取真实数据".to_string()),
+        },
+    );
+    let first = daily_research_question_fingerprint(&question, "chatgpt-web", &fanout);
+    fanout
+        .context_profiles
+        .get_mut("portfolio")
+        .unwrap()
+        .instructions = Some("读取真实数据并核对日期".to_string());
+    let changed = daily_research_question_fingerprint(&question, "chatgpt-web", &fanout);
+    assert_ne!(first, changed);
+}
+
+#[test]
+fn daily_agent_artifact_validation_detects_report_and_dependency_changes() {
+    let temp = TempDir::new().unwrap();
+    let report_path = temp.path().join("2026-07-27-report.md");
+    std::fs::write(&report_path, "report-v1").unwrap();
+    let mut upstream = DailyAgentBTreeMap::new();
+    upstream.insert("daily_report".to_string(), "upstream-v1".to_string());
+    let mut artifact = AsrDailyAgentArtifactState {
+        report_sha256: Some(compute_sha256(&report_path).unwrap()),
+        report_len_bytes: Some(std::fs::metadata(&report_path).unwrap().len()),
+        generator_contract_version: Some(DAILY_AGENT_GENERATOR_CONTRACT_VERSION),
+        agent_config_sha256: Some("config-v1".to_string()),
+        upstream_sha256: upstream.clone(),
+    };
+
+    assert!(daily_agent_processed_artifacts_match(
+        Some(&artifact),
+        report_path.to_str().unwrap(),
+        "config-v1",
+        &upstream
+    ));
+    std::fs::write(&report_path, "report-v2").unwrap();
+    assert!(!daily_agent_processed_artifacts_match(
+        Some(&artifact),
+        report_path.to_str().unwrap(),
+        "config-v1",
+        &upstream
+    ));
+
+    artifact.report_sha256 = Some(compute_sha256(&report_path).unwrap());
+    artifact.report_len_bytes = Some(std::fs::metadata(&report_path).unwrap().len());
+    let mut changed_upstream = upstream.clone();
+    changed_upstream.insert("daily_report".to_string(), "upstream-v2".to_string());
+    assert!(!daily_agent_processed_artifacts_match(
+        Some(&artifact),
+        report_path.to_str().unwrap(),
+        "config-v1",
+        &changed_upstream
+    ));
+    assert!(!daily_agent_processed_artifacts_match(
+        None,
+        report_path.to_str().unwrap(),
+        "config-v1",
+        &upstream
+    ));
+}
+
+#[test]
+fn daily_agent_im_idempotency_key_is_stable_and_report_scoped() {
+    let temp = TempDir::new().unwrap();
+    let task = test_directory_task("daily-agent-im-idempotency", temp.path().join("audio"));
+    let first = daily_agent_im_idempotency_key(
+        &task,
+        "__owner__",
+        &["2026-07-27-report.md".to_string()],
+        "report",
+        1,
+    );
+    let replay = daily_agent_im_idempotency_key(
+        &task,
+        "__owner__",
+        &["2026-07-27-report.md".to_string()],
+        "report",
+        1,
+    );
+    let other_date = daily_agent_im_idempotency_key(
+        &task,
+        "__owner__",
+        &["2026-07-28-report.md".to_string()],
+        "report",
+        1,
+    );
+    assert_eq!(first, replay);
+    assert_ne!(first, other_date);
+}
+
+#[test]
+fn daily_agent_unscoped_first_run_uses_latest_date_and_explicit_backfill_bypasses_guard() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let task = test_directory_task(
+        "daily-agent-watermark-task",
+        temp.path().join("audio"),
+    );
+    let daily_dir = daily_dir_for_task(&task.id);
+    std::fs::create_dir_all(&daily_dir).unwrap();
+    std::fs::write(daily_dir.join("2026-07-26.md"), "old").unwrap();
+    std::fs::write(daily_dir.join("2026-07-27.md"), "new").unwrap();
+
+    let automatic = build_daily_agent_change_plan(&task, "automatic", None, false).unwrap();
+    assert_eq!(
+        automatic
+            .entries
+            .iter()
+            .map(|entry| entry.date.as_str())
+            .collect::<Vec<_>>(),
+        vec!["2026-07-27"]
+    );
+
+    let mut processed = AsrDailyAgentProcessedState::default();
+    processed
+        .date_watermarks
+        .insert(task.daily_agent.agent_id.clone(), "2026-07-27".to_string());
+    save_daily_agent_processed_state(&task.id, &processed).unwrap();
+    let guarded = build_daily_agent_change_plan(&task, "automatic", None, false).unwrap();
+    assert!(
+        guarded.entries.is_empty(),
+        "untracked dates at or before the watermark must not be swept"
+    );
+
+    let backfill =
+        build_daily_agent_change_plan(&task, "manual", Some("2026-07-26"), false).unwrap();
+    assert_eq!(backfill.entries.len(), 1);
+    assert_eq!(backfill.entries[0].date, "2026-07-26");
 }
 
 fn daily_agent_mock_runner_settings(
@@ -4141,6 +4366,8 @@ fn daily_agent_research_plan(
             source_len_bytes: 10,
             report_target,
             append_offset: None,
+            agent_config_sha256: "config-hash".to_string(),
+            upstream_sha256: DailyAgentBTreeMap::new(),
         }],
         skipped: false,
         skip_reason: None,

@@ -47,6 +47,61 @@ struct AsrDailyResearchChildResult {
     context_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fingerprint_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    result_sha256: Option<String>,
+}
+
+fn daily_research_question_fingerprint(
+    question: &AsrDailyResearchQuestion,
+    runner: &str,
+    fanout: &AsrDailyAgentResearchFanoutConfig,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let context_profile_config = question
+        .context_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|key| fanout.context_profiles.get(key));
+    let payload = serde_json::json!({
+        "contract_version": 1,
+        "question": question,
+        "runner": runner,
+        "context_profile_config": context_profile_config,
+        "chatgpt_interface_mode": fanout.chatgpt_interface_mode,
+        "chatgpt_model": fanout.chatgpt_model,
+        "chatgpt_project_url": fanout.chatgpt_project_url,
+    });
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&payload).unwrap_or_default())
+    )
+}
+
+fn reusable_daily_research_child(
+    metadata_path: &Path,
+    result_path: &Path,
+    expected_fingerprint: &str,
+) -> Option<AsrDailyResearchChildResult> {
+    use sha2::{Digest, Sha256};
+    let metadata = std::fs::read(metadata_path).ok()?;
+    let mut result: AsrDailyResearchChildResult = serde_json::from_slice(&metadata).ok()?;
+    if !matches!(
+        result.status.as_str(),
+        "success" | "success_with_local_context"
+    ) || result.fingerprint_sha256.as_deref() != Some(expected_fingerprint)
+    {
+        return None;
+    }
+    let bytes = std::fs::read(result_path).ok()?;
+    let actual = format!("{:x}", Sha256::digest(&bytes));
+    if result.result_sha256.as_deref() != Some(actual.as_str()) {
+        return None;
+    }
+    result.result_path = Some(result_path.to_string_lossy().to_string());
+    Some(result)
 }
 
 struct AsrDailyResearchExecution {
@@ -787,6 +842,8 @@ async fn run_daily_agent_research_fanout(
             let result_path = child_dir.join(format!("{question_id}.md"));
             let context_path = child_dir.join(format!("{question_id}-context.md"));
             let metadata_path = child_dir.join(format!("{question_id}.json"));
+            let question_fingerprint =
+                daily_research_question_fingerprint(question, &final_runner, fanout);
             let context_profile = question
                 .context_profile
                 .as_deref()
@@ -805,6 +862,16 @@ async fn run_daily_agent_research_fanout(
             } else {
                 agent_work_dir.clone()
             };
+
+            if let Some(reused) = reusable_daily_research_child(
+                &metadata_path,
+                &result_path,
+                &question_fingerprint,
+            ) {
+                success_count += 1;
+                results.push(reused);
+                continue;
+            }
 
             let execution = async {
                 if !final_work_dir.is_dir() {
@@ -883,6 +950,12 @@ async fn run_daily_agent_research_fanout(
                 Ok(execution) => {
                     std::fs::write(&result_path, execution.response.trim())
                         .map_err(|error| format!("write research result failed: {error}"))?;
+                    let result_sha256 = {
+                        use sha2::{Digest, Sha256};
+                        let bytes = std::fs::read(&result_path)
+                            .map_err(|error| format!("read research result failed: {error}"))?;
+                        format!("{:x}", Sha256::digest(bytes))
+                    };
                     let (conversation_id, full_report_link) =
                         daily_research_conversation_link(&execution);
                     let connector_status =
@@ -912,6 +985,8 @@ async fn run_daily_agent_research_fanout(
                             .is_file()
                             .then(|| context_path.to_string_lossy().to_string()),
                         error: None,
+                        fingerprint_sha256: Some(question_fingerprint.clone()),
+                        result_sha256: Some(result_sha256),
                     }
                 }
                 Err(error) => AsrDailyResearchChildResult {
@@ -930,6 +1005,8 @@ async fn run_daily_agent_research_fanout(
                         .is_file()
                         .then(|| context_path.to_string_lossy().to_string()),
                     error: Some(error),
+                    fingerprint_sha256: Some(question_fingerprint.clone()),
+                    result_sha256: None,
                 },
             };
             atomic_json_write(&metadata_path, &child_result)?;

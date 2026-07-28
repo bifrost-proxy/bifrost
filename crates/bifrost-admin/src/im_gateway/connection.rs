@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -49,10 +50,14 @@ impl Default for ImConnectionManager {
 
 impl ImConnectionManager {
     pub fn new() -> Self {
+        Self::new_with_data_dir(&bifrost_storage::data_dir())
+    }
+
+    pub fn new_with_data_dir(data_dir: &Path) -> Self {
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
             feishu_provider: Arc::new(FeishuProvider::new()),
-            weixin_provider: Arc::new(WeixinProvider::new()),
+            weixin_provider: Arc::new(WeixinProvider::new_with_data_dir(data_dir)),
         }
     }
 
