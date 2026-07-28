@@ -173,7 +173,9 @@ snapshot = detail["snapshot"]
 assert snapshot["executable"] == "traex", snapshot
 assert snapshot["args"][:3] == ["app-server", "--listen", "stdio://"], snapshot
 assert "PATH" not in snapshot["envKeys"], snapshot
-assert detail["metadata"]["cli.version"] == "traex 0.0.0-desktop-path-mock", detail["metadata"]
+assert (
+    detail["metadata"].get("cli.version") == "traex 0.0.0-desktop-path-mock"
+), detail["metadata"]
 PY
 
 python3 - "$MOCK_LOG" "$MOCK_BIN_DIR" <<'PY'

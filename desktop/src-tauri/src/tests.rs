@@ -1,9 +1,9 @@
 use super::{
     append_desktop_bootstrap_log, begin_backend_recovery, clear_backend_unavailable_if_healthy,
-    configure_desktop_backend_environment, deferred_desktop_install_version_error,
-    desktop_backend_env, desktop_backend_start_args, desktop_pending_install_path,
-    desktop_shutdown_backend_action, desktop_sidecar_rust_log, desktop_startup_deadline,
-    desktop_startup_session_id, desktop_test_allows_multiple_instances,
+    configure_backend_stop_command, configure_desktop_backend_environment,
+    deferred_desktop_install_version_error, desktop_backend_env, desktop_backend_start_args,
+    desktop_pending_install_path, desktop_shutdown_backend_action, desktop_sidecar_rust_log,
+    desktop_startup_deadline, desktop_startup_session_id, desktop_test_allows_multiple_instances,
     desktop_upgrade_relaunch_marker_path, desktop_upgrade_shutdown_requested,
     ensure_backend_running, ensure_backend_running_with_cli_wait,
     existing_backend_candidate_matches_runtime, external_cli_backend_matches_handoff,
@@ -59,6 +59,27 @@ fn assert_upgrade_relaunch_environment_removed(command: &Command) {
             "relaunch command must remove {key} before it opens the new App"
         );
     }
+}
+
+#[test]
+fn desktop_backend_stop_command_is_authorized_for_owned_runtime() {
+    let data_dir = Path::new("/tmp/bifrost-desktop-owned");
+    let mut command = Command::new("bifrost");
+    configure_backend_stop_command(&mut command, data_dir);
+
+    assert_eq!(
+        command.get_args().collect::<Vec<_>>(),
+        vec![OsStr::new("stop")]
+    );
+    let env = command.get_envs().collect::<Vec<_>>();
+    assert!(env.iter().any(|(name, value)| {
+        *name == OsStr::new("BIFROST_DATA_DIR")
+            && *value == Some(OsStr::new("/tmp/bifrost-desktop-owned"))
+    }));
+    assert!(env.iter().any(|(name, value)| {
+        *name == OsStr::new("BIFROST_DESKTOP_AUTHORIZED_STOP_INTERNAL")
+            && *value == Some(OsStr::new("1"))
+    }));
 }
 
 fn test_backend_state(

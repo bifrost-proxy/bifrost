@@ -37,8 +37,33 @@
             socks5_port: Some(1080),
             host: Some("127.0.0.1".to_string()),
             started_at_ms: None,
+            start_mode: runtime::RuntimeStartMode::Unknown,
             binary_path: None,
         }
+    }
+
+    #[test]
+    fn desktop_shutdown_request_accepts_only_desktop_shell_executables() {
+        assert!(is_bifrost_desktop_executable(Path::new(
+            "/Applications/Bifrost.app/Contents/MacOS/bifrost-desktop"
+        )));
+        assert!(is_bifrost_desktop_executable(Path::new(
+            "bifrost-desktop.exe"
+        )));
+        assert!(!is_bifrost_desktop_executable(Path::new(
+            "/tmp/bifrost"
+        )));
+        assert!(!is_bifrost_desktop_executable(Path::new(
+            "/tmp/not-bifrost-desktop"
+        )));
+    }
+
+    #[test]
+    fn desktop_shutdown_request_rejects_reused_service_pid() {
+        assert_eq!(
+            desktop_owner_executable(std::process::id(), Some(1)),
+            None
+        );
     }
 
     #[test]
@@ -1638,6 +1663,7 @@
             socks5_port: None,
             host: Some("127.0.0.1".to_string()),
             started_at_ms: None,
+            start_mode: runtime::RuntimeStartMode::Unknown,
             binary_path: None,
         };
         let menu = menu::build_menu(
