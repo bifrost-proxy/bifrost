@@ -5339,6 +5339,92 @@ async fn daily_agent_orchestrator_skips_when_source_breaks_after_upstream_succes
         .is_some_and(|reason| reason.contains("dependency outputs were not available")));
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn daily_agent_orchestrator_skips_when_dependency_sync_fails() {
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let event = r#"{"type":"assistant_final","content":"upstream complete"}"#;
+    let corrupting_runner = crate::im_gateway::external_cli::ExternalCliAgentSettings {
+        enabled: true,
+        adapter: "mock".to_string(),
+        adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
+            executable: Some("sh".to_string()),
+            args: vec![
+                "-c".to_string(),
+                format!(
+                    "mkdir -p output/upstream; printf '# report\\n' > output/upstream/2026-07-18-report.md; rm -rf ../skipped_child/input; printf 'not a directory\\n' > ../skipped_child/input; cat >/dev/null; printf '%s\\n' '{}'",
+                    event.replace('\'', "'\\''")
+                ),
+            ],
+            timeout_secs: Some(10),
+            ..Default::default()
+        },
+        inject_bifrost_tools: false,
+        ..Default::default()
+    };
+    save_daily_agent_mock_runners(
+        temp.path(),
+        [
+            ("mock-corrupt-input", corrupting_runner),
+            (
+                "mock-skipped-child",
+                daily_agent_mock_file_runner_settings(
+                    "must not run",
+                    Some("output/skipped/2026-07-18-report.md"),
+                ),
+            ),
+        ],
+    );
+
+    let mut upstream = AsrDailyAgentItem::daily_report();
+    upstream.id = "upstream".to_string();
+    upstream.name = upstream.id.clone();
+    upstream.runner = "mock-corrupt-input".to_string();
+    upstream.output_dir = upstream.id.clone();
+    upstream.im_delivery.enabled = false;
+
+    let mut child = AsrDailyAgentItem::daily_report();
+    child.id = "skipped_child".to_string();
+    child.name = child.id.clone();
+    child.runner = "mock-skipped-child".to_string();
+    child.output_dir = "skipped".to_string();
+    child.dependencies = vec![AsrDailyAgentDependency {
+        agent_id: upstream.id.clone(),
+        include_output: true,
+    }];
+    child.dependency_failure_policy = AsrDailyAgentDependencyFailurePolicy::Skip;
+    child.im_delivery.enabled = false;
+
+    let mut task = test_directory_task(
+        "daily-agent-orchestrator-sync-failure",
+        temp.path().join("audio"),
+    );
+    task.daily_agent.enabled = true;
+    task.daily_agent.agents = vec![upstream, child];
+    ensure_asr_daily_workspace(&task).unwrap();
+    std::fs::write(
+        daily_dir_for_task(&task.id).join("2026-07-18.md"),
+        "source for dependency sync failure",
+    )
+    .unwrap();
+
+    let results = run_daily_agents(&task, "manual", Some("2026-07-18"), false).await;
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.status.as_str())
+            .collect::<Vec<_>>(),
+        vec!["success", "skipped_dependency_failed"],
+        "{results:?}"
+    );
+    assert!(results[1]
+        .skipped_reason
+        .as_deref()
+        .is_some_and(|reason| reason.contains("create Daily Agent upstream input dir")));
+    assert_eq!(results[1].dependency_run_ids, vec![results[0].run_id.clone()]);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn daily_agent_orchestrator_handles_a_dependency_that_was_not_run() {
     let temp = TempDir::new().unwrap();
