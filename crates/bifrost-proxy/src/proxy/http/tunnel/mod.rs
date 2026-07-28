@@ -27,7 +27,6 @@ use hyper::{Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as AutoServerBuilder;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, ServerConfig};
@@ -100,6 +99,7 @@ use crate::utils::tee::{
     store_request_body, store_response_body, BodyCaptureHandle, TeeBodyCaptureOptions,
 };
 use crate::utils::throttle::wrap_throttled_body;
+use crate::utils::upstream_stability::connect_tcp;
 use crate::utils::url::apply_url_rules;
 
 fn apply_listener_context(
@@ -997,7 +997,7 @@ pub(crate) async fn handle_connect_with_process_state(
     let target_stream = if let Some(ref proxy_rule) = upstream_proxy_rule {
         connect_via_upstream_http_proxy_tunnel(proxy_rule, &target_host, target_port).await?
     } else {
-        TcpStream::connect(format!("{}:{}", connect_host, target_port))
+        connect_tcp(format!("{}:{}", connect_host, target_port))
             .await
             .map_err(|e| {
                 BifrostError::Network(format!(
@@ -1513,7 +1513,7 @@ where
         );
     }
 
-    let target_stream = TcpStream::connect(format!("{}:{}", original_host, original_port))
+    let target_stream = connect_tcp(format!("{}:{}", original_host, original_port))
         .await
         .map_err(|e| {
             BifrostError::Network(format!(
@@ -5165,7 +5165,7 @@ async fn handle_intercepted_websocket(
     apply_websocket_request_header_rules(req.headers_mut(), &resolved_rules);
 
     let connect_start = Instant::now();
-    let target_stream = match TcpStream::connect(format!("{}:{}", target_host, target_port)).await {
+    let target_stream = match connect_tcp(format!("{}:{}", target_host, target_port)).await {
         Ok(s) => s,
         Err(e) => {
             error!(
