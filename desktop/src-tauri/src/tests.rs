@@ -20,8 +20,8 @@ use super::{
     should_allow_multiple_instances, should_handoff_to_main, should_retry_backend_candidate,
     startup_deadline_disposition, stop_backend_before_restart, terminate_managed_backend,
     upgrade_handoff_requires_backend_release, upgrade_relaunch_uses_external_cli_backend,
-    uses_borderless_desktop_chrome_for_platform, wait_for_backend, wait_for_child_exit,
-    wait_for_external_cli_backend, windows_desktop_upgrade_handoff_command,
+    uses_borderless_desktop_chrome_for_platform, wait_for_backend, wait_for_backend_stop_helper,
+    wait_for_child_exit, wait_for_external_cli_backend, windows_desktop_upgrade_handoff_command,
     write_desktop_upgrade_terminal_progress, write_upgrade_relaunch_marker, BackendState,
     BackendSystemIdentity, BackendWaitFailureKind, BackendWatchdogHealth, DesktopConfig,
     DesktopInstallRollback, DesktopRuntimeMarker, DesktopShutdownBackendAction,
@@ -30,6 +30,8 @@ use super::{
     DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV, DESKTOP_UPGRADE_SHUTDOWN_ARG,
     DETACHED_DAEMON_CHILD_ENV, EXTERNAL_CLI_WORKER_ENV, WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
 };
+#[cfg(target_os = "macos")]
+use super::{macos_menu_action, MacosMenuAction, MACOS_APP_QUIT_MENU_ID};
 use bifrost_storage::data_dir as shared_bifrost_data_dir;
 use std::ffi::OsStr;
 use std::fs;
@@ -47,6 +49,33 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 mod backend_wait;
 mod cli_handoff_recovery;
 mod watchdog;
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_app_quit_menu_enters_desktop_shutdown_coordinator() {
+    assert_eq!(
+        macos_menu_action(MACOS_APP_QUIT_MENU_ID),
+        MacosMenuAction::Quit
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_edit_and_unknown_menu_actions_keep_their_existing_routing() {
+    assert_eq!(
+        macos_menu_action("edit-undo"),
+        MacosMenuAction::Edit("undo")
+    );
+    assert_eq!(
+        macos_menu_action("edit-redo"),
+        MacosMenuAction::Edit("redo")
+    );
+    assert_eq!(
+        macos_menu_action("edit-select-all"),
+        MacosMenuAction::Edit("editor.action.selectAll")
+    );
+    assert_eq!(macos_menu_action("unknown"), MacosMenuAction::Ignore);
+}
 
 fn assert_upgrade_relaunch_environment_removed(command: &Command) {
     for key in [
@@ -81,6 +110,9 @@ fn desktop_backend_stop_command_is_authorized_for_owned_runtime() {
     assert!(env.iter().any(|(name, value)| {
         *name == OsStr::new("BIFROST_DESKTOP_AUTHORIZED_STOP_INTERNAL")
             && *value == Some(OsStr::new("1"))
+    }));
+    assert!(env.iter().any(|(name, value)| {
+        *name == OsStr::new("BIFROST_TRAY_INVOKED_STOP") && value.is_none()
     }));
 }
 
@@ -1423,4 +1455,29 @@ fn child_wait_timeout_terminates_stuck_process() {
     assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     assert!(started_at.elapsed() < Duration::from_secs(2));
     assert!(child.try_wait().expect("poll killed child").is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn desktop_quit_waits_for_successful_backend_stop_helper() {
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "sleep 0.05; exit 0"])
+        .spawn()
+        .expect("spawn successful stop helper");
+
+    wait_for_backend_stop_helper(&mut child, Duration::from_secs(1))
+        .expect("successful stop helper must allow Desktop exit");
+}
+
+#[cfg(unix)]
+#[test]
+fn desktop_quit_rejects_failed_backend_stop_helper() {
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "exit 23"])
+        .spawn()
+        .expect("spawn failed stop helper");
+
+    let error = wait_for_backend_stop_helper(&mut child, Duration::from_secs(1))
+        .expect_err("failed stop helper must keep Desktop alive");
+    assert!(error.to_string().contains("status"));
 }

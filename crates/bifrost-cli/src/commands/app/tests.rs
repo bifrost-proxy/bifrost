@@ -457,19 +457,24 @@ fn desktop_managed_cli_upgrade_cannot_reenter_app_or_restart_its_core() {
             .expect("write old deferred cli");
         std::fs::set_permissions(&deferred_cli, std::fs::Permissions::from_mode(0o755))
             .expect("chmod deferred cli");
-        let replacement = deferred_cli.clone();
+        let replacement_target = deferred_cli.clone();
+        let replacement_source = deferred_cli.with_extension("replacement");
         let replacer = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(100));
-            std::fs::write(replacement, "#!/bin/sh\necho 'bifrost 0.0.156'\n")
-                .expect("replace deferred cli");
+            std::fs::write(&replacement_source, "#!/bin/sh\necho 'bifrost 0.0.156'\n")
+                .expect("write deferred CLI replacement");
+            std::fs::set_permissions(&replacement_source, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod deferred CLI replacement");
+            std::fs::rename(replacement_source, replacement_target)
+                .expect("atomically replace deferred CLI");
         });
-        verify_installed_cli_target_version_with_timeout(
+        let verification = verify_installed_cli_target_version_with_timeout(
             &deferred_cli,
             "0.0.156",
-            Duration::from_secs(2),
-        )
-        .expect("version probe waits for deferred replacement");
+            Duration::from_secs(10),
+        );
         replacer.join().expect("deferred replacer");
+        verification.expect("version probe waits for deferred replacement");
         let slow_cli = dir.path().join("slow-bifrost");
         std::fs::write(&slow_cli, "#!/bin/sh\nexec sleep 2\n").expect("write slow fake cli");
         std::fs::set_permissions(&slow_cli, std::fs::Permissions::from_mode(0o755))

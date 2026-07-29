@@ -549,12 +549,18 @@
    done
    ```
 2. 确认 `download_selection_success_and_free_restart_port_are_exercised` 每轮均通过，且未出现 mutex poison 连锁失败。
+3. 确认 `desktop_managed_cli_upgrade_cannot_reenter_app_or_restart_its_core`
+   使用同目录临时文件加原子 rename 模拟延迟替换，并为 16 线程 CI 调度保留
+   10 秒总预算；成功路径仍在观察到目标版本后立即返回。
 
 **预期结果**：
 - `BIFROST_GITHUB_MIRROR` 指向随机端口 fixture 时，`ordered_download_bases` 的首项始终是该显式地址，不受内置 GitHub 探测线程调度影响。
 - 5 轮 upgrade 回归全部通过；fixture 使用系统分配的随机端口，不与并发用例碰撞，环境变量在互斥区内恢复。
+- 延迟 CLI 替换 fixture 与生产升级一样走原子替换，并发版本探测不会观察到被截断的脚本或触发 executable overwrite 竞态；测试调度预算不改变生产超时或目标版本断言。
 
 **2026-07-20 执行结果**：5 轮均为 61/61 通过；显式 mirror 每轮保持首项，随机端口 fixture 无碰撞，未出现环境变量断言失败或 mutex poison 连锁失败。
+
+**2026-07-29 执行结果**：5 轮均为 80/80 通过。CI 端口复用防抖回归时，本地 16 线程复测暴露延迟 CLI fixture 原地覆盖和调度预算竞态；改为同目录临时文件原子替换并隔离测试调度预算后，目标版本断言、显式 mirror 优先级与共享环境锁均稳定通过，无 mutex poison 连锁失败。
 
 ---
 

@@ -3671,7 +3671,7 @@ fn menu_item_shape(item: &MenuItemDef) -> NativeMenuShape {
 fn execute_action(
     action: &MenuItemAction,
     args: &TrayArgs,
-    quit_flag: &AtomicBool,
+    quit_flag: &Arc<AtomicBool>,
     reload_flag: &Arc<AtomicBool>,
     operation: &Arc<AtomicU8>,
     state: &Arc<AtomicU8>,
@@ -3924,12 +3924,26 @@ fn execute_action(
             }
             let service_pid = *service_pid;
             let service_started_at_ms = *service_started_at_ms;
+            let runtime_file = args.runtime_file.clone();
+            let bifrost_bin = resolve_bifrost_binary(args);
+            let data_dir = args.data_dir.to_string_lossy().into_owned();
+            let data_dir_path = args.data_dir.clone();
+            let quit_flag = quit_flag.clone();
             let operation = operation.clone();
             let reload_flag = reload_flag.clone();
             operation.store(OP_QUITTING, Ordering::Relaxed);
             reload_flag.store(true, Ordering::Relaxed);
             spawn_tray_task("bifrost-tray-quit-desktop", move || {
-                if !request_desktop_shutdown(service_pid, service_started_at_ms) {
+                if request_desktop_shutdown(
+                    service_pid,
+                    service_started_at_ms,
+                    &runtime_file,
+                    bifrost_bin.as_deref(),
+                    &data_dir,
+                ) {
+                    remove_own_tray_pid(&data_dir_path);
+                    quit_flag.store(true, Ordering::Relaxed);
+                } else {
                     operation.store(OP_QUIT_FAILED, Ordering::Relaxed);
                     reload_flag.store(true, Ordering::Relaxed);
                 }
@@ -4361,9 +4375,7 @@ fn runtime_file_points_to_running_service(runtime_file: &Path) -> bool {
 
 fn spawn_stop(bin: &Path, data_dir: &str) -> bool {
     let mut cmd = Command::new(bin);
-    cmd.env("BIFROST_DATA_DIR", data_dir)
-        .env("BIFROST_TRAY_INVOKED_STOP", "1")
-        .arg("stop");
+    configure_tray_stop_command(&mut cmd, data_dir, false);
     configure_service_command(&mut cmd);
 
     match cmd.spawn() {
@@ -4378,38 +4390,125 @@ fn spawn_stop(bin: &Path, data_dir: &str) -> bool {
     }
 }
 
-fn request_desktop_shutdown(service_pid: u32, service_started_at_ms: Option<u64>) -> bool {
-    let Some(executable) = desktop_owner_executable(service_pid, service_started_at_ms) else {
+fn configure_tray_stop_command(command: &mut Command, data_dir: &str, desktop_authorized: bool) {
+    command
+        .env("BIFROST_DATA_DIR", data_dir)
+        .env(crate::commands::stop::STOP_INVOKED_BY_TRAY_ENV, "1")
+        .arg("stop");
+    if desktop_authorized {
+        command.env(crate::commands::stop::DESKTOP_AUTHORIZED_STOP_ENV, "1");
+    } else {
+        command.env_remove(crate::commands::stop::DESKTOP_AUTHORIZED_STOP_ENV);
+    }
+}
+
+fn request_desktop_shutdown(
+    service_pid: u32,
+    service_started_at_ms: Option<u64>,
+    runtime_file: &Path,
+    bifrost_bin: Option<&Path>,
+    data_dir: &str,
+) -> bool {
+    if let Some(executable) = desktop_owner_executable(service_pid, service_started_at_ms) {
+        let mut command = Command::new(&executable);
+        command.arg(crate::commands::upgrade::DESKTOP_UPGRADE_SHUTDOWN_ARG);
+        configure_service_command(&mut command);
+
+        return match command.spawn() {
+            Ok(child) => {
+                tracing::info!(
+                    pid = child.id(),
+                    service_pid,
+                    executable = %executable.display(),
+                    "Desktop graceful shutdown requested from tray"
+                );
+                wait_for_child(child, "bifrost desktop shutdown request")
+            }
+            Err(error) => {
+                tracing::error!(
+                    service_pid,
+                    executable = %executable.display(),
+                    error = %error,
+                    "failed to request Desktop graceful shutdown"
+                );
+                false
+            }
+        };
+    }
+
+    let runtime = runtime::read_runtime(runtime_file);
+    let process_running = runtime::is_process_running(service_pid);
+    let observed_started_at_ms = bifrost_core::get_process_start_time_ms(service_pid);
+    if !runtime_authorizes_orphan_desktop_stop(
+        runtime.as_ref(),
+        service_pid,
+        service_started_at_ms,
+        process_running,
+        observed_started_at_ms,
+    ) {
         tracing::error!(
             service_pid,
-            "cannot locate the bifrost-desktop process that owns the Service"
+            runtime_file = %runtime_file.display(),
+            "cannot authorize orphaned Desktop-owned Service shutdown from tray"
+        );
+        return false;
+    }
+
+    let Some(bin) = bifrost_bin else {
+        tracing::error!(
+            service_pid,
+            "cannot find trusted bifrost binary for orphaned Desktop-owned Service shutdown"
         );
         return false;
     };
-    let mut command = Command::new(&executable);
-    command.arg(crate::commands::upgrade::DESKTOP_UPGRADE_SHUTDOWN_ARG);
-    configure_service_command(&mut command);
 
+    tracing::warn!(
+        service_pid,
+        runtime_file = %runtime_file.display(),
+        "Desktop owner is absent; tray is stopping the exactly matched orphaned App runtime"
+    );
+    let mut command = Command::new(bin);
+    configure_tray_stop_command(&mut command, data_dir, true);
+    configure_service_command(&mut command);
     match command.spawn() {
         Ok(child) => {
             tracing::info!(
                 pid = child.id(),
                 service_pid,
-                executable = %executable.display(),
-                "Desktop graceful shutdown requested from tray"
+                binary = %bin.display(),
+                "authorized orphaned Desktop-owned Service stop invoked from tray"
             );
-            wait_for_child(child, "bifrost desktop shutdown request")
+            wait_for_child(child, "orphaned desktop-owned bifrost stop")
         }
         Err(error) => {
             tracing::error!(
                 service_pid,
-                executable = %executable.display(),
+                binary = %bin.display(),
                 error = %error,
-                "failed to request Desktop graceful shutdown"
+                "failed to stop orphaned Desktop-owned Service from tray"
             );
             false
         }
     }
+}
+
+fn runtime_authorizes_orphan_desktop_stop(
+    runtime: Option<&RuntimeInfo>,
+    service_pid: u32,
+    service_started_at_ms: Option<u64>,
+    process_running: bool,
+    observed_started_at_ms: Option<u64>,
+) -> bool {
+    let Some(runtime) = runtime else {
+        return false;
+    };
+    runtime.start_mode == runtime::RuntimeStartMode::Desktop
+        && runtime.pid == service_pid
+        && runtime.started_at_ms == service_started_at_ms
+        && service_started_at_ms.is_some()
+        && process_running
+        && bifrost_core::start_times_match(service_started_at_ms, observed_started_at_ms)
+            == bifrost_core::StartTimeMatch::Match
 }
 
 fn desktop_owner_executable(

@@ -1,12 +1,16 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod backend_runtime;
+#[cfg(target_os = "macos")]
+mod macos_menu;
 mod native_launcher;
 mod open_requests;
 mod runtime_ownership;
 mod upgrade_handoff;
 
 use backend_runtime::*;
+#[cfg(target_os = "macos")]
+use macos_menu::*;
 use runtime_ownership::*;
 use upgrade_handoff::*;
 
@@ -71,6 +75,7 @@ const BACKEND_HEALTH_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(3);
 const BACKEND_WATCHDOG_MIN_FAILURES: u32 = 4;
 const BACKEND_WATCHDOG_UNHEALTHY_GRACE: Duration = Duration::from_secs(15);
 const BACKEND_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const DESKTOP_QUIT_STOP_TIMEOUT: Duration = Duration::from_secs(35);
 const BACKEND_KILL_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_DESKTOP_STARTUP_DEADLINE: Duration = Duration::from_secs(30);
 const WEBVIEW_PARK_OFFSET: f64 = 2000.0;
@@ -98,6 +103,8 @@ const DESKTOP_STARTUP_SESSION_ENV: &str = "BIFROST_DESKTOP_STARTUP_SESSION_ID";
 const DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV: &str =
     "BIFROST_DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES";
 const DESKTOP_UPGRADE_SHUTDOWN_ARG: &str = "--bifrost-upgrade-shutdown";
+#[cfg(target_os = "macos")]
+const MACOS_APP_QUIT_MENU_ID: &str = "app-quit";
 static DESKTOP_BOOTSTRAP_LOG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,6 +268,16 @@ fn main() {
     let builder = builder
         .menu(|app| {
             // App menu (macOS displays first submenu as app name)
+            // A predefined Quit item calls AppKit terminate: directly and can
+            // bypass Tauri's ExitRequested callback. Keep Quit custom so both
+            // the menu click and Cmd+Q enter the owned lifecycle coordinator.
+            let quit = MenuItem::with_id(
+                app,
+                MACOS_APP_QUIT_MENU_ID,
+                "Quit Bifrost",
+                true,
+                Some("CmdOrCtrl+Q"),
+            )?;
             let app_menu = Submenu::with_items(
                 app,
                 "Bifrost",
@@ -274,7 +291,7 @@ fn main() {
                     &PredefinedMenuItem::hide_others(app, None)?,
                     &PredefinedMenuItem::show_all(app, None)?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::quit(app, None)?,
+                    &quit,
                 ],
             )?;
             let file_menu = Submenu::with_items(
@@ -340,17 +357,17 @@ fn main() {
             )
         })
         .on_menu_event(|app, event| {
+            let action = macos_menu_action(event.id().as_ref());
+            if action == MacosMenuAction::Quit {
+                request_desktop_shutdown(app);
+                return;
+            }
+
             // Forward custom Edit menu actions directly to the WebView via eval().
             // We bypass the Tauri event system because emit_to target routing
             // may not match JS-side listen() calls. Instead we dispatch a DOM
             // CustomEvent that the JS layer picks up reliably.
-            let action = match event.id().as_ref() {
-                "edit-undo" => Some("undo"),
-                "edit-redo" => Some("redo"),
-                "edit-select-all" => Some("editor.action.selectAll"),
-                _ => None,
-            };
-            if let Some(action) = action {
+            if let MacosMenuAction::Edit(action) = action {
                 if let Some(webview) = app.get_webview(MAIN_WINDOW_LABEL) {
                     let js = format!(
                         r#"window.dispatchEvent(new CustomEvent("bifrost-edit-command",{{detail:"{action}"}}))"#
@@ -1032,7 +1049,7 @@ fn request_desktop_shutdown(app: &AppHandle) {
 
     append_desktop_bootstrap_log(
         &state.data_dir,
-        "desktop shutdown requested; hiding window and stopping backend asynchronously",
+        "desktop shutdown requested; hiding window and waiting for owned backend and tray to stop",
     );
     if let Some(window) = app.get_window(HOST_WINDOW_LABEL) {
         let _ = window.hide();
@@ -1061,20 +1078,33 @@ fn complete_desktop_shutdown(app: &AppHandle) {
                 &state.data_dir,
                 "desktop shutdown owns the active backend; requesting backend stop",
             );
-            match spawn_backend_stop(&state.binary_path, &state.data_dir) {
-                Ok(child) => {
+            let stop_result = match spawn_backend_stop(&state.binary_path, &state.data_dir) {
+                Ok(mut child) => {
+                    let helper_pid = child.id();
                     append_desktop_bootstrap_log(
                         &state.data_dir,
-                        format!("spawned backend stop helper pid={}", child.id()),
+                        format!(
+                            "spawned backend stop helper pid={helper_pid}; waiting for owned backend and tray shutdown"
+                        ),
                     );
+                    wait_for_backend_stop_helper(&mut child, DESKTOP_QUIT_STOP_TIMEOUT).map_err(
+                        |error| {
+                            format!(
+                                "backend stop helper pid={helper_pid} did not complete successfully: {error}"
+                            )
+                        },
+                    )
                 }
-                Err(error) => {
-                    append_desktop_bootstrap_log(
-                        &state.data_dir,
-                        format!("failed to spawn backend stop helper: {error}"),
-                    );
-                }
+                Err(error) => Err(format!("failed to spawn backend stop helper: {error}")),
+            };
+            if let Err(error) = stop_result {
+                cancel_desktop_shutdown(app, &state, &error);
+                return;
             }
+            append_desktop_bootstrap_log(
+                &state.data_dir,
+                "backend stop helper completed successfully; owned backend and tray are stopped",
+            );
         }
         DesktopShutdownBackendAction::PreserveExternalRuntime => {
             append_desktop_bootstrap_log(
@@ -1084,28 +1114,46 @@ fn complete_desktop_shutdown(app: &AppHandle) {
         }
     }
 
-    let Ok(mut child_guard) = state.child.lock() else {
-        state.force_exit.store(true, Ordering::SeqCst);
-        app.exit(0);
-        return;
-    };
-
-    if let Some(child) = child_guard.take() {
+    if let Ok(mut child_guard) = state.child.lock() {
+        if let Some(mut child) = child_guard.take() {
+            let child_pid = child.id();
+            match wait_for_child_exit(&mut child, BACKEND_KILL_WAIT_TIMEOUT) {
+                Ok(status) => append_desktop_bootstrap_log(
+                    &state.data_dir,
+                    format!("reaped stopped backend child pid={child_pid}; status={status}"),
+                ),
+                Err(error) => append_desktop_bootstrap_log(
+                    &state.data_dir,
+                    format!("failed to reap stopped backend child pid={child_pid}: {error}"),
+                ),
+            }
+        }
+    } else {
         append_desktop_bootstrap_log(
             &state.data_dir,
-            format!(
-                "detached backend child pid={} so desktop UI can exit immediately",
-                child.id()
-            ),
+            "failed to lock managed backend child after successful stop; continuing final Desktop exit",
         );
     }
 
     state.force_exit.store(true, Ordering::SeqCst);
     append_desktop_bootstrap_log(
         &state.data_dir,
-        "desktop shutdown handoff complete; requesting final app exit",
+        "desktop lifecycle group shutdown complete; requesting final app exit",
     );
     app.exit(0);
+}
+
+fn cancel_desktop_shutdown(app: &AppHandle, state: &BackendState, error: &str) {
+    append_desktop_bootstrap_log(
+        &state.data_dir,
+        format!(
+            "desktop shutdown cancelled because owned backend/tray stop failed; keeping Desktop alive: {error}"
+        ),
+    );
+    state.shutdown_started.store(false, Ordering::SeqCst);
+    if let Some(window) = app.get_window(HOST_WINDOW_LABEL) {
+        reveal_host_window(&window);
+    }
 }
 
 fn start_main_window_handoff(app: &AppHandle, reason: &str) -> tauri::Result<()> {

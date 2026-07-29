@@ -19,6 +19,24 @@ if pgrep -f '[b]ifrost-desktop([[:space:]]|$)' >/dev/null 2>&1; then
   exit 0
 fi
 
+DESKTOP_MAIN_RS="$ROOT_DIR/desktop/src-tauri/src/main.rs"
+if grep -Fq 'PredefinedMenuItem::quit' "$DESKTOP_MAIN_RS"; then
+  echo "FAIL: macOS App Quit still uses the native predefined item that bypasses lifecycle shutdown"
+  exit 1
+fi
+for contract in \
+  'const MACOS_APP_QUIT_MENU_ID: &str = "app-quit";' \
+  '"Quit Bifrost"' \
+  'Some("CmdOrCtrl+Q")' \
+  'if action == MacosMenuAction::Quit' \
+  'request_desktop_shutdown(app);'
+do
+  if ! grep -Fq "$contract" "$DESKTOP_MAIN_RS"; then
+    echo "FAIL: macOS App Quit lifecycle contract is missing: $contract"
+    exit 1
+  fi
+done
+
 if [[ "${SKIP_BUILD:-}" != "true" ]]; then
   pnpm --dir web run build:desktop
   SKIP_FRONTEND_BUILD=1 cargo build -p bifrost-cli --bin bifrost
@@ -209,6 +227,28 @@ wait_for_log_line() {
     sleep 0.1
   done
   return 1
+}
+
+assert_owned_shutdown_log_order() {
+  local log_file="$1"
+  /usr/bin/python3 - "$log_file" <<'PY'
+import pathlib
+import sys
+
+lines = pathlib.Path(sys.argv[1]).read_text().splitlines()
+stop_index = next(
+    i
+    for i, line in enumerate(lines)
+    if "backend stop helper completed successfully; owned backend and tray are stopped" in line
+)
+exit_index = next(
+    i
+    for i, line in enumerate(lines)
+    if "desktop lifecycle group shutdown complete; requesting final app exit" in line
+)
+if stop_index >= exit_index:
+    raise SystemExit("Desktop final exit was logged before owned backend/tray shutdown")
+PY
 }
 
 launch_desktop() {
@@ -429,6 +469,11 @@ if ! request_desktop_shutdown "$desktop_data_dir" "$APP_PID"; then
   exit 1
 fi
 APP_PID=""
+if ! assert_owned_shutdown_log_order "$desktop_bootstrap_log"; then
+  echo "FAIL: Desktop did not stop its owned lifecycle group before final App exit"
+  cat "$desktop_bootstrap_log" || true
+  exit 1
+fi
 if ! wait_for_process_exit "$CORE_PID"; then
   echo "FAIL: Desktop-owned Service remained running after Desktop quit"
   exit 1

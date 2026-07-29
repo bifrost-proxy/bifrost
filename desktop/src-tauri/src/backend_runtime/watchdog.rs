@@ -75,6 +75,7 @@ pub(crate) fn monitor_desktop_backend(app: &AppHandle) {
     append_desktop_bootstrap_log(&state.data_dir, "desktop backend watchdog started");
 
     let mut watchdog_health = BackendWatchdogHealth::default();
+    let mut shutdown_paused = false;
     loop {
         std::thread::sleep(BACKEND_WATCHDOG_POLL_INTERVAL);
 
@@ -82,13 +83,29 @@ pub(crate) fn monitor_desktop_backend(app: &AppHandle) {
             return;
         };
 
-        if state.shutdown_started.load(Ordering::SeqCst) || state.force_exit.load(Ordering::SeqCst)
-        {
+        if state.force_exit.load(Ordering::SeqCst) {
             append_desktop_bootstrap_log(
                 &state.data_dir,
-                "desktop backend watchdog stopped because desktop shutdown is in progress",
+                "desktop backend watchdog stopped because final Desktop exit is in progress",
             );
             return;
+        }
+        if state.shutdown_started.load(Ordering::SeqCst) {
+            if !shutdown_paused {
+                append_desktop_bootstrap_log(
+                    &state.data_dir,
+                    "desktop backend watchdog paused while lifecycle group shutdown is in progress",
+                );
+                shutdown_paused = true;
+            }
+            continue;
+        }
+        if shutdown_paused {
+            append_desktop_bootstrap_log(
+                &state.data_dir,
+                "desktop backend watchdog resumed after lifecycle group shutdown was cancelled",
+            );
+            shutdown_paused = false;
         }
 
         if state.backend_recovery_in_progress.load(Ordering::SeqCst) {

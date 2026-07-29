@@ -3,8 +3,8 @@ use bifrost_storage::set_data_dir;
 use crate::config::get_bifrost_dir;
 use crate::process::{is_process_running, read_pid, read_runtime_info, remove_pid};
 
-const STOP_INVOKED_BY_TRAY_ENV: &str = "BIFROST_TRAY_INVOKED_STOP";
-const DESKTOP_AUTHORIZED_STOP_ENV: &str = "BIFROST_DESKTOP_AUTHORIZED_STOP_INTERNAL";
+pub(crate) const STOP_INVOKED_BY_TRAY_ENV: &str = "BIFROST_TRAY_INVOKED_STOP";
+pub(crate) const DESKTOP_AUTHORIZED_STOP_ENV: &str = "BIFROST_DESKTOP_AUTHORIZED_STOP_INTERNAL";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StopSystemProxyMode {

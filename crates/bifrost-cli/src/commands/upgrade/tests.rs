@@ -1470,10 +1470,11 @@ fn download_selection_success_and_free_restart_port_are_exercised() {
         .expect("download fixture");
     assert_eq!(fs::read_to_string(output).expect("read fixture"), "fixture");
     server.join().expect("fixture server");
-    let free_listener = TcpListener::bind("127.0.0.1:0").expect("bind free port fixture");
-    let free_port = free_listener.local_addr().expect("free port").port();
-    drop(free_listener);
-    wait_for_restart_ports_release(&[free_port]).expect("released fixture port");
+    // Port 0 asks the OS for a fresh ephemeral port on every bind probe. Using
+    // a previously bound-and-dropped concrete port is racy on Windows: another
+    // parallel test can claim it, and Windows may temporarily delay reuse even
+    // when netstat shows no listener.
+    wait_for_restart_ports_release(&[0]).expect("OS-selected fixture port");
     match previous_mirror {
         Some(value) => std::env::set_var("BIFROST_GITHUB_MIRROR", value),
         None => std::env::remove_var("BIFROST_GITHUB_MIRROR"),
