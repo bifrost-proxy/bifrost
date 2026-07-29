@@ -277,6 +277,8 @@
   Desktop 先退出，窗口恢复且允许重试。
 - macOS App 菜单 `Quit Bifrost` 和 `Cmd+Q` 由同一个自定义 `app-quit` 菜单事件接管，
   不直接调用 AppKit `terminate:`，因此不会绕过 Desktop shutdown coordinator。
+- `desktop/src-tauri/src/main.rs` 保持在 1500 行以内；菜单动作纯映射拆入
+  `macos_menu.rs` 后，完整 upgrade restart E2E 的 bounded-modules 门禁必须通过。
 - Tray 的 `Quit Bifrost` 在 Desktop 正常时请求 Desktop graceful shutdown 并退出自身；
   Desktop 已异常消失时，只对 `runtime_start_mode=desktop`、PID、菜单快照启动时间和系统
   观察启动时间全部精确匹配的同一实例执行内部授权 stop。缺失启动时间、PID 复用、
@@ -315,3 +317,4 @@ rm -rf "$BIFROST_DATA_DIR"
 | 2026-07-29 | TC-DCDR-10 回归（本地首轮） | 创建/更新用例后立即执行两组 Tray focused tests、两组 Desktop focused tests及 ownership E2E。 | 部分通过：Tray orphan `2/2`、普通 Tray stop 授权隔离 `1/1`、Desktop Quit helper `2/2`、Desktop stop command `1/1` 均通过；真实 E2E 检测到正式 `/Applications/Bifrost.app` 的 Desktop PID `10981` 后按安全门禁跳过，未向正式 App 投递退出请求。完整真实链路待无正式 Desktop 的 macOS CI 补跑。 |
 | 2026-07-29 | TC-DCDR-10 回归（本地完整复跑） | 正式 Desktop 退出后确认系统中无 `bifrost-desktop` 进程，执行 `bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`；脚本重新构建当前 WebUI、CLI sidecar 和 Desktop，并检查 `desktop-bootstrap.log` 中 owned stop helper 完成早于 Desktop 最终退出。 | 通过：真实 Desktop-owned App/Core/Tray 按组退出且未被 watchdog 恢复，普通 CLI stop/restart 继续拒绝 App-owned Service；CLI-owned daemon 在 Desktop 退出后 PID 与健康端点保持可用。脚本退出码 0，全部使用临时 data-dir、动态端口并禁用系统代理，未触碰正式 9900 Service。 |
 | 2026-07-29 | TC-DCDR-10 原生 App Quit 回归 | 用户在已安装 App 点击原生 Quit 后真实复现 Desktop 消失但 Core/Tray 残留；统一日志证明 `PredefinedMenuItem::quit` 直接进入 AppKit `terminate:`，且没有 `desktop shutdown requested`。改为自定义 `app-quit` 后，立即执行 Tray owner tests、macOS menu action tests、Desktop Quit helper/授权 tests 和 `SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`；随后重建 release bundle 并安装到 `/Applications/Bifrost.app`，确认 build bundle、release binary 与安装 App 主程序哈希相同且均包含 `app-quit`。 | 通过：Tray `3/3`、macOS menu mapping `2/2`、Desktop Quit helper/授权 `3/3`；E2E 静态门禁拒绝原生 predefined Quit，并以真实临时 Desktop/Core 进程验证 stop helper 完成早于 Desktop 最终退出、CLI/App owner 隔离不变。用户从新 release App 复测菜单退出/`Cmd+Q` 后确认体验无问题；本轮未由 Agent 主动停止正式 9900 Service。 |
+| 2026-07-29 | TC-DCDR-10 bounded-modules 回归 | CI run `30444924113` 的 `test_upgrade_restart_e2e.sh` 发现 `desktop/src-tauri/src/main.rs` 为 1503 行，超过 1500 行静态门禁；将 macOS 菜单动作纯映射拆入 `macos_menu.rs` 后，立即执行 `SKIP_BUILD=true bash e2e-tests/tests/test_upgrade_restart_e2e.sh` 与 `SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`。 | 通过：upgrade restart `21/21`（含 bounded modules）通过；真实临时 Desktop/Core ownership lifecycle 再次通过，菜单 Quit 路由和 CLI/App owner 隔离不变。 |

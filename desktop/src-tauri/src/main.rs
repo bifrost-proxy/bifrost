@@ -1,12 +1,16 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod backend_runtime;
+#[cfg(target_os = "macos")]
+mod macos_menu;
 mod native_launcher;
 mod open_requests;
 mod runtime_ownership;
 mod upgrade_handoff;
 
 use backend_runtime::*;
+#[cfg(target_os = "macos")]
+use macos_menu::*;
 use runtime_ownership::*;
 use upgrade_handoff::*;
 
@@ -202,14 +206,6 @@ enum StartupDeadlineDisposition {
 enum DesktopShutdownBackendAction {
     StopOwnedRuntime,
     PreserveExternalRuntime,
-}
-
-#[cfg(target_os = "macos")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MacosMenuAction {
-    Quit,
-    Edit(&'static str),
-    Ignore,
 }
 
 #[derive(Debug)]
@@ -580,17 +576,6 @@ fn main() {
                 _ => {}
             }
         });
-}
-
-#[cfg(target_os = "macos")]
-fn macos_menu_action(menu_id: &str) -> MacosMenuAction {
-    match menu_id {
-        MACOS_APP_QUIT_MENU_ID => MacosMenuAction::Quit,
-        "edit-undo" => MacosMenuAction::Edit("undo"),
-        "edit-redo" => MacosMenuAction::Edit("redo"),
-        "edit-select-all" => MacosMenuAction::Edit("editor.action.selectAll"),
-        _ => MacosMenuAction::Ignore,
-    }
 }
 
 fn should_intercept_exit(app: &AppHandle) -> bool {

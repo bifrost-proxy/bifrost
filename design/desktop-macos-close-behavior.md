@@ -61,6 +61,9 @@ Bifrost 桌面端内嵌 backend sidecar，如果关闭按钮就把 backend 一�
   菜单点击和 `Cmd+Q` 可能绕过 Tauri `RunEvent::ExitRequested`。使用带
   `app-quit` ID 与 `CmdOrCtrl+Q` accelerator 的自定义 `MenuItem`，由
   `on_menu_event` 显式调用 `request_desktop_shutdown`。
+- macOS 菜单 ID 到动作的纯映射位于 `desktop/src-tauri/src/macos_menu.rs`；
+  `main.rs` 只保留菜单构建和 shutdown coordinator 接线，并保持在 1500 行 CI
+  模块门禁以内。
 - Launcher-only 模式（`BIFROST_DESKTOP_LAUNCHER_ONLY=1`）关闭时立即 `app.exit(0)`，不走 sidecar stop（无 sidecar）。
 - 真正由 CLI `start --daemon` 启动且记录 `runtime_start_mode=daemon` 的 Service
   在 Desktop 复用后仍归 CLI 所有；Desktop Quit 不得停止它。
@@ -112,7 +115,7 @@ Bifrost 桌面端内嵌 backend sidecar，如果关闭按钮就把 backend 一�
   - `restore_host_window(app)` / `reveal_host_window(window)`：Reopen 恢复入口。
   - `on_window_event(|window, event|)`：仅处理 host label 的 CloseRequested，调用 `api.prevent_close()` 后走分流。
   - `run(|app_handle, event|)`：`RunEvent::ExitRequested` + `RunEvent::Reopen`（macOS）分流。
-- Menu 中 `PredefinedMenuItem::quit` / `PredefinedMenuItem::close_window` 是与用户交互的入口。
+- Menu 中自定义 `app-quit` / `PredefinedMenuItem::close_window` 是与用户交互的入口。
 - `crates/bifrost-cli/src/commands/tray/runtime.rs`
   - 兼容解析 `runtime_start_mode` / `start_mode`，供 Tray 判断 Service ownership。
 - `crates/bifrost-cli/src/commands/tray/menu.rs`
