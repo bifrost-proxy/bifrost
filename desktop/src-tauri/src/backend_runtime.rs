@@ -925,10 +925,30 @@ pub(super) fn spawn_backend_stop(binary_path: &Path, data_dir: &Path) -> tauri::
         .map_err(|error| anyhow(format!("failed to spawn backend stop: {error}")))
 }
 
+pub(super) fn wait_for_backend_stop_helper(
+    child: &mut Child,
+    timeout: Duration,
+) -> tauri::Result<()> {
+    let status = wait_for_child_exit(child, timeout).map_err(|error| {
+        anyhow(format!(
+            "backend stop command did not complete within {}ms: {error}",
+            timeout.as_millis()
+        ))
+    })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow(format!(
+            "backend stop command exited with status {status}"
+        )))
+    }
+}
+
 pub(super) fn configure_backend_stop_command(command: &mut Command, data_dir: &Path) {
     command
         .arg("stop")
         .env("BIFROST_DATA_DIR", data_dir)
+        .env_remove("BIFROST_TRAY_INVOKED_STOP")
         .env("BIFROST_DESKTOP_AUTHORIZED_STOP_INTERNAL", "1");
 }
 

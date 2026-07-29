@@ -243,6 +243,45 @@
 - 后续用户 CLI `stop/restart` 仍拒绝操作 Desktop-owned Service，Desktop graceful shutdown
   仍停止当前 owned PID；CLI-owned Service 在 Desktop 退出后仍保持运行。
 
+### TC-DCDR-10（回归）：App/Tray 整组退出顺序与 orphan Tray 恢复
+
+操作步骤：
+
+1. 执行 Tray orphan owner focused tests：
+   ```bash
+   cargo test -p bifrost-cli orphan_desktop_stop --lib -- --nocapture
+   cargo test -p bifrost-cli ordinary_tray_stop_command_does_not_gain_desktop_authorization --lib -- --nocapture
+   ```
+2. 执行 Desktop Quit focused tests：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test --manifest-path desktop/src-tauri/Cargo.toml desktop_quit_ -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test --manifest-path desktop/src-tauri/Cargo.toml desktop_backend_stop_command_is_authorized_for_owned_runtime -- --nocapture
+   ```
+3. 在没有正式 `bifrost-desktop` 进程的 macOS 会话执行真实 ownership 生命周期：
+   ```bash
+   SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh
+   ```
+4. 检查临时 data-dir 的 `desktop-bootstrap.log`：必须先出现
+   `backend stop helper completed successfully; owned backend and tray are stopped`，后出现
+   `desktop lifecycle group shutdown complete; requesting final app exit`。
+
+预期结果：
+
+- Desktop 自己退出 App-owned 模式时，在后台等待内部 stop helper 成功；该 helper 停止
+  core 和 Tray 后 Desktop 才执行最终 `app.exit(0)`。stop helper 失败或超时不会让
+  Desktop 先退出，窗口恢复且允许重试。
+- Tray 的 `Quit Bifrost` 在 Desktop 正常时请求 Desktop graceful shutdown 并退出自身；
+  Desktop 已异常消失时，只对 `runtime_start_mode=desktop`、PID、菜单快照启动时间和系统
+  观察启动时间全部精确匹配的同一实例执行内部授权 stop。缺失启动时间、PID 复用、
+  daemon/foreground/unknown owner 或 runtime 缺失都 fail-closed。
+- orphan fallback 命令同时携带 `BIFROST_TRAY_INVOKED_STOP=1` 与
+  `BIFROST_DESKTOP_AUTHORIZED_STOP_INTERNAL=1`；普通 Tray stop 显式移除 Desktop
+  授权，Desktop 自己的 stop 显式移除 Tray-preserve 标记，确保 App Quit 会停止 Tray。
+- 用户直接运行 CLI `stop/restart` 仍拒绝 live Desktop-owned Service；Desktop 复用
+  CLI-owned daemon 后退出时仍保留该 Service。
+- 测试仅使用临时 data-dir 和动态端口；如果检测到正式 Desktop 进程则安全跳过真实
+  单实例 E2E，禁止向正式 App 投递退出请求。
+
 ## 清理步骤
 
 ```bash
@@ -266,3 +305,5 @@ rm -rf "$BIFROST_DATA_DIR"
 | 2026-07-25 | TC-DCDR-06 / 07 回归 | `SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`；执行前 `pgrep` 识别到正式 `/Applications/Bifrost.app/Contents/MacOS/bifrost-desktop` PID `58982`。 | 环境阻塞：脚本按安全门禁输出 `SKIP: an existing Bifrost Desktop process is running`，未停止正式 App，也未触碰正式 `9900/9901` Service。新增跨 data-dir 与 CLI `stop/restart` 真实断言尚需在无正式 Desktop 进程的 macOS CI/会话补跑。 |
 | 2026-07-27 | TC-DCDR-08 回归 | 先执行 Tray runtime `6/6`、menu `27/27`、Desktop shell path `1/1`、Desktop stop command `1/1` focused tests；再构建当前 CLI/Desktop 并执行 `SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`。首次用旧 `0.0.164` Desktop binary 被相邻端口旧行为阻断；重编 `0.0.165` 后又真实发现异步 `spawn_backend_stop` 漏传 Desktop 私有授权，stop helper 输出 `owned by the Desktop app`。将同步/异步 stop 收敛到 `configure_backend_stop_command` 后按本用例立即全量复跑；第 1 轮 review 继续补上 Service 启动时间校验和 `foreground/daemon/unknown` 菜单矩阵并再次复跑；第 2 轮复查执行 Tray 模块 `155/155`、Desktop crate `65/65`，随后 `cargo fmt --all -- --check`、全目标全 feature clippy/build、`cargo test --workspace --all-features` 均通过。远端 CI 的 macOS agent-extensions shard 连续两次表现为 App Server 成功而 3 秒 `traex --version` 探针未生成 `cli.version`，同一 head 本地精确脚本通过；将非关键版本探针预算提高到 10 秒并保留严格 metadata 断言后再次复跑。后续 proxy-core shard 的 mock server 实际打印 `READY`，但重定向文件因 Python stdout buffering 直到退出才可见；改为 `python3 -u` 后精确复跑 cleanup E2E，`1 passed, 0 failed`。 | 通过：Desktop runtime 显示 `Quit Bifrost` 并请求 Desktop graceful shutdown，CLI runtime 保持 `Stop/Start`；异步 owned stop 获得内部授权，普通 CLI stop/restart 保护不变；陈旧菜单 PID 复用会被拒绝；Desktop-owned App/Service 均退出且 3 秒后未被 watchdog 恢复，CLI-owned daemon 在 Desktop 退出后保持健康并由 CLI 定向清理。 |
 | 2026-07-28 | TC-DCDR-09 回归 | 生成当前 debug CLI sidecar 与 Desktop binary；执行 `cargo test --manifest-path desktop/src-tauri/Cargo.toml desktop_watchdog_ -- --nocapture` 和 `SKIP_BUILD=true bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`。E2E 初版在 startup recovery gate 结束前暂停 core，未进入运行期 watchdog；增加 `desktop backend start succeeded` 门禁后重跑。 | 通过：focused 单测 `4/4`；真实 Desktop-owned core 暂停 12 秒后恢复且 PID 不变，随后真实退出被拉起为新 PID；CLI stop/restart、Desktop graceful shutdown 与 CLI-owned Service 保留回归均通过。测试只使用临时 data-dir、动态端口并禁用系统代理。 |
+| 2026-07-29 | TC-DCDR-10 回归（本地首轮） | 创建/更新用例后立即执行两组 Tray focused tests、两组 Desktop focused tests及 ownership E2E。 | 部分通过：Tray orphan `2/2`、普通 Tray stop 授权隔离 `1/1`、Desktop Quit helper `2/2`、Desktop stop command `1/1` 均通过；真实 E2E 检测到正式 `/Applications/Bifrost.app` 的 Desktop PID `10981` 后按安全门禁跳过，未向正式 App 投递退出请求。完整真实链路待无正式 Desktop 的 macOS CI 补跑。 |
+| 2026-07-29 | TC-DCDR-10 回归（本地完整复跑） | 正式 Desktop 退出后确认系统中无 `bifrost-desktop` 进程，执行 `bash e2e-tests/tests/test_desktop_service_ownership_lifecycle.sh`；脚本重新构建当前 WebUI、CLI sidecar 和 Desktop，并检查 `desktop-bootstrap.log` 中 owned stop helper 完成早于 Desktop 最终退出。 | 通过：真实 Desktop-owned App/Core/Tray 按组退出且未被 watchdog 恢复，普通 CLI stop/restart 继续拒绝 App-owned Service；CLI-owned daemon 在 Desktop 退出后 PID 与健康端点保持可用。脚本退出码 0，全部使用临时 data-dir、动态端口并禁用系统代理，未触碰正式 9900 Service。 |

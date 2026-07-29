@@ -17,8 +17,10 @@ The reverse boundary is just as important: CLI start/daemon maintenance must rec
 - Desktop may still use system proxy according to user/runtime configuration, but Desktop must not install or upgrade the system-proxy cleanup LaunchDaemon.
 - CLI `start` must not stop a live Desktop-owned core. If the requested port matches the Desktop runtime, CLI reuses the existing service. If the requested port differs, CLI fails with a clear message and leaves Desktop running.
 - CLI managed-runtime restart helpers must not restart Desktop-owned cores after a crash or cleanup path; Desktop owns that lifecycle.
-- Tray 对 Desktop-owned runtime 不提供孤立的 Service Stop。它显示 `Quit Bifrost` 并走
-  Desktop graceful shutdown；只有 CLI-owned runtime 继续显示 Start/Stop Service。
+- Tray 对 Desktop-owned runtime 不提供普通的 Service Stop。它显示 `Quit Bifrost` 并走
+  Desktop graceful shutdown；如果 Desktop 已异常消失，仅允许 Tray 在 owner mode、PID
+  和进程启动时间精确匹配时，以同一 data-dir 完成内部授权 stop。只有 CLI-owned runtime
+  继续显示 Start/Stop Service，普通 CLI 仍不能停止 live Desktop-owned runtime。
 - `BIFROST_DESKTOP_NO_SYSTEM_PROXY=1` remains a separate switch. It disables system proxy use for Desktop; it is not the mechanism for preventing LaunchDaemon registration.
 
 ## Implementation

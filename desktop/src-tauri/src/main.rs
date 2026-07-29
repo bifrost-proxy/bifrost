@@ -71,6 +71,7 @@ const BACKEND_HEALTH_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(3);
 const BACKEND_WATCHDOG_MIN_FAILURES: u32 = 4;
 const BACKEND_WATCHDOG_UNHEALTHY_GRACE: Duration = Duration::from_secs(15);
 const BACKEND_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const DESKTOP_QUIT_STOP_TIMEOUT: Duration = Duration::from_secs(35);
 const BACKEND_KILL_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_DESKTOP_STARTUP_DEADLINE: Duration = Duration::from_secs(30);
 const WEBVIEW_PARK_OFFSET: f64 = 2000.0;
@@ -1032,7 +1033,7 @@ fn request_desktop_shutdown(app: &AppHandle) {
 
     append_desktop_bootstrap_log(
         &state.data_dir,
-        "desktop shutdown requested; hiding window and stopping backend asynchronously",
+        "desktop shutdown requested; hiding window and waiting for owned backend and tray to stop",
     );
     if let Some(window) = app.get_window(HOST_WINDOW_LABEL) {
         let _ = window.hide();
@@ -1061,20 +1062,33 @@ fn complete_desktop_shutdown(app: &AppHandle) {
                 &state.data_dir,
                 "desktop shutdown owns the active backend; requesting backend stop",
             );
-            match spawn_backend_stop(&state.binary_path, &state.data_dir) {
-                Ok(child) => {
+            let stop_result = match spawn_backend_stop(&state.binary_path, &state.data_dir) {
+                Ok(mut child) => {
+                    let helper_pid = child.id();
                     append_desktop_bootstrap_log(
                         &state.data_dir,
-                        format!("spawned backend stop helper pid={}", child.id()),
+                        format!(
+                            "spawned backend stop helper pid={helper_pid}; waiting for owned backend and tray shutdown"
+                        ),
                     );
+                    wait_for_backend_stop_helper(&mut child, DESKTOP_QUIT_STOP_TIMEOUT).map_err(
+                        |error| {
+                            format!(
+                                "backend stop helper pid={helper_pid} did not complete successfully: {error}"
+                            )
+                        },
+                    )
                 }
-                Err(error) => {
-                    append_desktop_bootstrap_log(
-                        &state.data_dir,
-                        format!("failed to spawn backend stop helper: {error}"),
-                    );
-                }
+                Err(error) => Err(format!("failed to spawn backend stop helper: {error}")),
+            };
+            if let Err(error) = stop_result {
+                cancel_desktop_shutdown(app, &state, &error);
+                return;
             }
+            append_desktop_bootstrap_log(
+                &state.data_dir,
+                "backend stop helper completed successfully; owned backend and tray are stopped",
+            );
         }
         DesktopShutdownBackendAction::PreserveExternalRuntime => {
             append_desktop_bootstrap_log(
@@ -1084,28 +1098,46 @@ fn complete_desktop_shutdown(app: &AppHandle) {
         }
     }
 
-    let Ok(mut child_guard) = state.child.lock() else {
-        state.force_exit.store(true, Ordering::SeqCst);
-        app.exit(0);
-        return;
-    };
-
-    if let Some(child) = child_guard.take() {
+    if let Ok(mut child_guard) = state.child.lock() {
+        if let Some(mut child) = child_guard.take() {
+            let child_pid = child.id();
+            match wait_for_child_exit(&mut child, BACKEND_KILL_WAIT_TIMEOUT) {
+                Ok(status) => append_desktop_bootstrap_log(
+                    &state.data_dir,
+                    format!("reaped stopped backend child pid={child_pid}; status={status}"),
+                ),
+                Err(error) => append_desktop_bootstrap_log(
+                    &state.data_dir,
+                    format!("failed to reap stopped backend child pid={child_pid}: {error}"),
+                ),
+            }
+        }
+    } else {
         append_desktop_bootstrap_log(
             &state.data_dir,
-            format!(
-                "detached backend child pid={} so desktop UI can exit immediately",
-                child.id()
-            ),
+            "failed to lock managed backend child after successful stop; continuing final Desktop exit",
         );
     }
 
     state.force_exit.store(true, Ordering::SeqCst);
     append_desktop_bootstrap_log(
         &state.data_dir,
-        "desktop shutdown handoff complete; requesting final app exit",
+        "desktop lifecycle group shutdown complete; requesting final app exit",
     );
     app.exit(0);
+}
+
+fn cancel_desktop_shutdown(app: &AppHandle, state: &BackendState, error: &str) {
+    append_desktop_bootstrap_log(
+        &state.data_dir,
+        format!(
+            "desktop shutdown cancelled because owned backend/tray stop failed; keeping Desktop alive: {error}"
+        ),
+    );
+    state.shutdown_started.store(false, Ordering::SeqCst);
+    if let Some(window) = app.get_window(HOST_WINDOW_LABEL) {
+        reveal_host_window(&window);
+    }
 }
 
 fn start_main_window_handoff(app: &AppHandle, reason: &str) -> tauri::Result<()> {

@@ -211,6 +211,28 @@ wait_for_log_line() {
   return 1
 }
 
+assert_owned_shutdown_log_order() {
+  local log_file="$1"
+  /usr/bin/python3 - "$log_file" <<'PY'
+import pathlib
+import sys
+
+lines = pathlib.Path(sys.argv[1]).read_text().splitlines()
+stop_index = next(
+    i
+    for i, line in enumerate(lines)
+    if "backend stop helper completed successfully; owned backend and tray are stopped" in line
+)
+exit_index = next(
+    i
+    for i, line in enumerate(lines)
+    if "desktop lifecycle group shutdown complete; requesting final app exit" in line
+)
+if stop_index >= exit_index:
+    raise SystemExit("Desktop final exit was logged before owned backend/tray shutdown")
+PY
+}
+
 launch_desktop() {
   local data_dir="$1"
   local port="$2"
@@ -429,6 +451,11 @@ if ! request_desktop_shutdown "$desktop_data_dir" "$APP_PID"; then
   exit 1
 fi
 APP_PID=""
+if ! assert_owned_shutdown_log_order "$desktop_bootstrap_log"; then
+  echo "FAIL: Desktop did not stop its owned lifecycle group before final App exit"
+  cat "$desktop_bootstrap_log" || true
+  exit 1
+fi
 if ! wait_for_process_exit "$CORE_PID"; then
   echo "FAIL: Desktop-owned Service remained running after Desktop quit"
   exit 1

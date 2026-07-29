@@ -67,6 +67,116 @@
     }
 
     #[test]
+    fn orphan_desktop_stop_requires_exact_live_runtime_identity() {
+        let mut runtime = sample_runtime();
+        runtime.pid = 4242;
+        runtime.started_at_ms = Some(1_700_000_000_000);
+        runtime.start_mode = runtime::RuntimeStartMode::Desktop;
+
+        assert!(runtime_authorizes_orphan_desktop_stop(
+            Some(&runtime),
+            4242,
+            runtime.started_at_ms,
+            true,
+            Some(1_700_000_000_500),
+        ));
+
+        for authorized in [
+            runtime_authorizes_orphan_desktop_stop(
+                Some(&runtime),
+                4243,
+                runtime.started_at_ms,
+                true,
+                Some(1_700_000_000_500),
+            ),
+            runtime_authorizes_orphan_desktop_stop(
+                Some(&runtime),
+                4242,
+                Some(1_700_000_010_000),
+                true,
+                Some(1_700_000_000_500),
+            ),
+            runtime_authorizes_orphan_desktop_stop(
+                Some(&runtime),
+                4242,
+                runtime.started_at_ms,
+                false,
+                Some(1_700_000_000_500),
+            ),
+            runtime_authorizes_orphan_desktop_stop(
+                Some(&runtime),
+                4242,
+                runtime.started_at_ms,
+                true,
+                Some(1_700_000_010_000),
+            ),
+            runtime_authorizes_orphan_desktop_stop(
+                None,
+                4242,
+                runtime.started_at_ms,
+                true,
+                Some(1_700_000_000_500),
+            ),
+        ] {
+            assert!(!authorized);
+        }
+
+        runtime.start_mode = runtime::RuntimeStartMode::Daemon;
+        assert!(!runtime_authorizes_orphan_desktop_stop(
+            Some(&runtime),
+            4242,
+            runtime.started_at_ms,
+            true,
+            Some(1_700_000_000_500),
+        ));
+
+        runtime.start_mode = runtime::RuntimeStartMode::Desktop;
+        runtime.started_at_ms = None;
+        assert!(!runtime_authorizes_orphan_desktop_stop(
+            Some(&runtime),
+            4242,
+            None,
+            true,
+            None,
+        ));
+    }
+
+    #[test]
+    fn orphan_desktop_stop_command_is_tray_scoped_and_desktop_authorized() {
+        let mut command = Command::new("bifrost");
+        configure_tray_stop_command(&mut command, "/tmp/bifrost-app-owned", true);
+
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("stop")]
+        );
+        let env = command.get_envs().collect::<Vec<_>>();
+        assert!(env.iter().any(|(name, value)| {
+            *name == std::ffi::OsStr::new("BIFROST_DATA_DIR")
+                && *value == Some(std::ffi::OsStr::new("/tmp/bifrost-app-owned"))
+        }));
+        assert!(env.iter().any(|(name, value)| {
+            *name == std::ffi::OsStr::new("BIFROST_TRAY_INVOKED_STOP")
+                && *value == Some(std::ffi::OsStr::new("1"))
+        }));
+        assert!(env.iter().any(|(name, value)| {
+            *name == std::ffi::OsStr::new("BIFROST_DESKTOP_AUTHORIZED_STOP_INTERNAL")
+                && *value == Some(std::ffi::OsStr::new("1"))
+        }));
+    }
+
+    #[test]
+    fn ordinary_tray_stop_command_does_not_gain_desktop_authorization() {
+        let mut command = Command::new("bifrost");
+        configure_tray_stop_command(&mut command, "/tmp/bifrost-cli-owned", false);
+
+        assert!(command.get_envs().any(|(name, value)| {
+            name == std::ffi::OsStr::new("BIFROST_DESKTOP_AUTHORIZED_STOP_INTERNAL")
+                && value.is_none()
+        }));
+    }
+
+    #[test]
     fn test_app_deep_link_for_route_uses_open_namespace() {
         assert_eq!(app_deep_link_for_route("/traffic"), "bifrost://open/traffic");
         assert_eq!(app_deep_link_for_route("rules"), "bifrost://open/rules");
