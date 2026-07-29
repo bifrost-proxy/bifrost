@@ -147,6 +147,7 @@ fn group_test_event(
                 .collect(),
             images: Vec::new(),
             files: Vec::new(),
+            reply_to: None,
             raw_type: Some("text".to_string()),
             raw_content: Some(serde_json::json!({
                 "text": text,

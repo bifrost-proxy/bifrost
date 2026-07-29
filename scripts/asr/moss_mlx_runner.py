@@ -24,7 +24,9 @@ TRANSCRIPT_SEGMENT_RE = re.compile(
     r"(?P<text>.*?)\[(?P<end>\d+(?:\.\d+)?)\]",
     re.DOTALL,
 )
+TRANSCRIPT_SEGMENT_START_RE = re.compile(r"\[\d+(?:\.\d+)?\]\[S\d+\]")
 EARLY_PROTOCOL_TOKEN_LIMIT = 256
+STARTED_SEGMENT_TOKEN_LIMIT = 1024
 
 
 def compose_prompt(user_prompt: str) -> str:
@@ -105,6 +107,13 @@ def protocol_output_has_complete_segment(text: str) -> bool:
     return bool(parse_protocol_segments(text))
 
 
+def protocol_guard_token_limit(text: str) -> int:
+    """Allow a longer first turn only after the required protocol has started."""
+    if TRANSCRIPT_SEGMENT_START_RE.search(text):
+        return STARTED_SEGMENT_TOKEN_LIMIT
+    return EARLY_PROTOCOL_TOKEN_LIMIT
+
+
 def generate_protocol_segments(
     model: Any,
     audio: Path,
@@ -137,17 +146,18 @@ def generate_protocol_segments(
         if first_segment_complete:
             continue
         token_count = len(generated_tokens)
-        if token_count % 16 != 0 and token_count < EARLY_PROTOCOL_TOKEN_LIMIT:
+        if token_count % 16 != 0:
             continue
         tokenizer = getattr(model, "_tokenizer", None)
         if tokenizer is None:
             raise RuntimeError("MOSS MLX tokenizer is unavailable during generation")
         prefix = tokenizer.decode(generated_tokens, skip_special_tokens=True)
         first_segment_complete = protocol_output_has_complete_segment(prefix)
-        if token_count >= EARLY_PROTOCOL_TOKEN_LIMIT and not first_segment_complete:
+        guard_limit = protocol_guard_token_limit(prefix)
+        if token_count >= guard_limit and not first_segment_complete:
             raise RuntimeError(
                 "MOSS output has no complete speaker-aware segment before "
-                f"{EARLY_PROTOCOL_TOKEN_LIMIT} generated tokens"
+                f"{guard_limit} generated tokens"
             )
 
     tokenizer = getattr(model, "_tokenizer", None)
@@ -194,6 +204,8 @@ def self_test() -> int:
     assert protocol_output_has_complete_segment("[0.10][S01]测试[1.20]")
     assert not protocol_output_has_complete_segment("[0.10][S01]尚未结束")
     assert not protocol_output_has_complete_segment("[S01] 测试")
+    assert protocol_guard_token_limit("unstructured output") == 256
+    assert protocol_guard_token_limit("[0.10][S01]尚未结束") == 1024
     assert parse_protocol_segments("[0.10][S01]测试[1.20]") == [
         {"start": 0.1, "end": 1.2, "speaker": "S01", "text": "测试"}
     ]

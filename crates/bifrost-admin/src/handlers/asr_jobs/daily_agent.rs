@@ -1,30 +1,3 @@
-// ─── Processed State ──────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct AsrDailyAgentProcessedState {
-    #[serde(default)]
-    pub version: u32,
-    #[serde(default)]
-    pub documents: DailyAgentBTreeMap<String, AsrDailyAgentProcessedDocument>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AsrDailyAgentProcessedDocument {
-    #[serde(default = "default_daily_agent_id")]
-    pub agent_id: String,
-    #[serde(default = "default_daily_agent_name")]
-    pub agent_name: String,
-    #[serde(default = "default_daily_agent_output_dir")]
-    pub output_dir: String,
-    pub date: String,
-    pub source_sha256: String,
-    pub source_len_bytes: u64,
-    pub processed_at_ms: u64,
-    pub runner: String,
-    pub report_path: Option<String>,
-    pub last_run_id: String,
-}
-
 #[derive(Debug, Clone, Serialize)]
 struct AsrDailyAgentReportIndexStatus {
     report_files: usize,
@@ -76,6 +49,8 @@ struct DailyAgentChangePlanEntry {
     /// For appended: the byte offset where new content starts
     #[serde(skip_serializing_if = "Option::is_none")]
     append_offset: Option<u64>,
+    agent_config_sha256: String,
+    upstream_sha256: DailyAgentBTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,6 +100,10 @@ struct DailyAgentRunResult {
     finished_at_ms: u64,
     error: Option<String>,
     reports_generated: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    dependency_run_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -141,29 +120,6 @@ struct DailyAgentInnerResult {
 }
 
 // ─── Core Functions ───────────────────────────────────────────────────────────
-
-fn daily_agent_processed_state_path(task_id: &str) -> PathBuf {
-    bifrost_storage::data_dir()
-        .join("asr/tasks")
-        .join(task_id)
-        .join("daily_agent_processed.json")
-}
-
-fn load_daily_agent_processed_state(task_id: &str) -> AsrDailyAgentProcessedState {
-    let path = daily_agent_processed_state_path(task_id);
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default()
-}
-
-fn save_daily_agent_processed_state(
-    task_id: &str,
-    state: &AsrDailyAgentProcessedState,
-) -> Result<(), String> {
-    let path = daily_agent_processed_state_path(task_id);
-    atomic_json_write(&path, state)
-}
 
 fn daily_agent_conversation_state_path(task_id: &str) -> PathBuf {
     bifrost_storage::data_dir()
@@ -235,19 +191,6 @@ fn is_valid_date_format(date: &str) -> bool {
         && bytes[8..10].iter().all(|b| b.is_ascii_digit())
 }
 
-fn compute_sha256(path: &Path) -> Result<String, String> {
-    use sha2::{Digest as Sha2Digest, Sha256};
-    let content = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let hash = Sha256::digest(&content);
-    Ok(format!("{:x}", hash))
-}
-
-fn compute_sha256_of_bytes(data: &[u8]) -> String {
-    use sha2::{Digest as Sha2Digest, Sha256};
-    let hash = Sha256::digest(data);
-    format!("{:x}", hash)
-}
-
 fn build_daily_agent_change_plan(
     task: &AsrDirectoryTask,
     _trigger_source: &str,
@@ -257,6 +200,7 @@ fn build_daily_agent_change_plan(
     let daily_dir = daily_dir_for_task(&task.id);
     let report_dir = daily_agent_output_dir(task);
     let processed = load_daily_agent_processed_state(&task.id);
+    let agent_config_sha256 = daily_agent_config_sha256(task);
 
     // Scan daily/*.md files (exclude AGENTS.md, hidden files, report/)
     let mut entries = Vec::new();
@@ -306,17 +250,28 @@ fn build_daily_agent_change_plan(
             .join(format!("{}-report.md", date))
             .to_string_lossy()
             .to_string();
+        let upstream_sha256 = daily_agent_upstream_sha256(task, date);
 
         // Determine change kind
+        let processed_key = daily_agent_processed_key(task, date);
         let (change_kind, append_offset) = if force {
             (DailyAgentChangeKind::Force, None)
         } else if let Some(prev) = processed
             .documents
-            .get(&daily_agent_processed_key(task, date))
+            .get(&processed_key)
             .or_else(|| processed.documents.get(date))
         {
-            if prev.source_sha256 == source_sha256 {
+            if prev.source_sha256 == source_sha256
+                && daily_agent_processed_artifacts_match(
+                    processed.artifacts.get(&processed_key),
+                    &report_target,
+                    &agent_config_sha256,
+                    &upstream_sha256,
+                )
+            {
                 (DailyAgentChangeKind::Unchanged, None)
+            } else if prev.source_sha256 == source_sha256 {
+                (DailyAgentChangeKind::Rewritten, None)
             } else if source_len_bytes > prev.source_len_bytes {
                 // Verify it's truly appended: read the first prev.source_len_bytes,
                 // hash them, and compare with the previous hash.
@@ -353,11 +308,40 @@ fn build_daily_agent_change_plan(
             source_len_bytes,
             report_target,
             append_offset,
+            agent_config_sha256: agent_config_sha256.clone(),
+            upstream_sha256,
         });
     }
 
     // Sort by date
     entries.sort_by(|a, b| a.date.cmp(&b.date));
+
+    if requested_date.is_none() && !force {
+        let agent_id = task.daily_agent.agent_id.as_str();
+        let effective_watermark = processed
+            .date_watermarks
+            .get(agent_id)
+            .cloned()
+            .or_else(|| {
+                processed
+                    .documents
+                    .values()
+                    .filter(|document| document.agent_id == agent_id)
+                    .map(|document| document.date.clone())
+                    .max()
+            });
+        if let Some(watermark) = effective_watermark {
+            entries.retain(|entry| {
+                entry.date > watermark
+                    || processed
+                        .documents
+                        .contains_key(&daily_agent_processed_key(task, &entry.date))
+                    || processed.documents.contains_key(&entry.date)
+            });
+        } else if let Some(latest) = entries.last().map(|entry| entry.date.clone()) {
+            entries.retain(|entry| entry.date == latest);
+        }
+    }
 
     // Short-circuit: all unchanged and not force
     let all_unchanged = entries
@@ -382,7 +366,11 @@ fn build_daily_agent_change_plan(
             task_id: task.id.clone(),
             entries,
             skipped: true,
-            skip_reason: Some("no daily markdown files found".to_string()),
+            skip_reason: Some(if requested_date.is_none() && !force {
+                "no daily markdown changes eligible after date watermark".to_string()
+            } else {
+                "no daily markdown files found".to_string()
+            }),
         });
     }
 
@@ -407,8 +395,26 @@ fn build_daily_agent_change_plan(
     })
 }
 
-async fn maybe_enqueue_daily_agent_after_asr_run(task: &AsrDirectoryTask) {
+async fn maybe_enqueue_daily_agent_after_asr_run(
+    task: &AsrDirectoryTask,
+    requested_dates: &[String],
+) {
     if !task.daily_agent.enabled {
+        return;
+    }
+    let mut requested_dates = requested_dates
+        .iter()
+        .filter(|date| is_valid_date_format(date))
+        .cloned()
+        .collect::<Vec<_>>();
+    requested_dates.sort();
+    requested_dates.dedup();
+    if requested_dates.is_empty() {
+        tracing::info!(
+            task_id = %task.id,
+            trigger_source = "asr_completion",
+            "skipped daily agent: ASR run produced no dated transcript changes"
+        );
         return;
     }
     let agents = normalized_daily_agents(&task.daily_agent);
@@ -427,7 +433,10 @@ async fn maybe_enqueue_daily_agent_after_asr_run(task: &AsrDirectoryTask) {
         return;
     }
 
-    match daily_agent_has_changed_daily_markdown(task, &runnable_agents) {
+    match requested_dates.iter().try_fold(false, |changed, date| {
+        daily_agent_has_changed_daily_markdown(task, &runnable_agents, Some(date))
+            .map(|date_changed| changed || date_changed)
+    }) {
         Ok(true) => {}
         Ok(false) => {
             tracing::info!(
@@ -464,16 +473,20 @@ async fn maybe_enqueue_daily_agent_after_asr_run(task: &AsrDirectoryTask) {
 
     let task_id = task.id.clone();
     let task_clone = task.clone();
+    let queued_dates = requested_dates.clone();
 
     // Spawn the daily agent run in background
     tokio::spawn(async move {
-        run_daily_agents(&task_clone, "asr_completion", None, false).await;
+        for date in queued_dates {
+            run_daily_agents(&task_clone, "asr_completion", Some(&date), false).await;
+        }
     });
 
     tracing::info!(
         task_id = %task_id,
         trigger_source = "asr_completion",
         agents = runnable_agents.len(),
+        requested_dates = ?requested_dates,
         "queued ASR daily agent run"
     );
 }
@@ -481,10 +494,16 @@ async fn maybe_enqueue_daily_agent_after_asr_run(task: &AsrDirectoryTask) {
 fn daily_agent_has_changed_daily_markdown(
     task: &AsrDirectoryTask,
     agents: &[AsrDailyAgentItem],
+    requested_date: Option<&str>,
 ) -> Result<bool, String> {
     for agent in agents {
         let agent_task = task_for_daily_agent(task, agent);
-        let plan = build_daily_agent_change_plan(&agent_task, "asr_completion", None, false)?;
+        let plan = build_daily_agent_change_plan(
+            &agent_task,
+            "asr_completion",
+            requested_date,
+            false,
+        )?;
         if plan
             .entries
             .iter()
@@ -502,15 +521,32 @@ async fn run_daily_agents(
     requested_date: Option<&str>,
     force: bool,
 ) -> Vec<DailyAgentRunResult> {
-    let agents = normalized_daily_agents(&task.daily_agent);
-    let runnable_agents: Vec<_> = agents
-        .into_iter()
+    let agents = match ordered_daily_agents(&task.daily_agent) {
+        Ok(agents) => agents,
+        Err(error) => {
+            tracing::error!(
+                task_id = %task.id,
+                trigger_source,
+                error = %error,
+                "failed to order ASR Daily Agent dependency graph"
+            );
+            return Vec::new();
+        }
+    };
+    let agents_by_id = agents
+        .iter()
+        .cloned()
+        .map(|agent| (agent.id.clone(), agent))
+        .collect::<HashMap<_, _>>();
+    let runnable_ids = agents
+        .iter()
         .filter(|agent| agent.enabled && daily_agent_runner_ready_for_agent(agent))
         .filter(|agent| {
             trigger_source == "manual"
                 || agent.trigger_policy == AsrDailyAgentTriggerPolicy::AfterAsrRun
         })
-        .collect();
+        .map(|agent| agent.id.clone())
+        .collect::<HashSet<_>>();
 
     let task_id = task.id.clone();
     {
@@ -524,11 +560,124 @@ async fn run_daily_agents(
     let _lock = task_lock.lock().await;
 
     let mut results = Vec::new();
-    for agent in runnable_agents {
+    let mut results_by_agent = HashMap::<String, DailyAgentRunResult>::new();
+    for agent in agents {
+        if !runnable_ids.contains(&agent.id) {
+            continue;
+        }
         let agent_task = task_for_daily_agent(task, &agent);
-        results.push(
-            run_daily_agent_locked(&agent_task, trigger_source, requested_date, force).await,
-        );
+        let dependency_run_ids = agent
+            .dependencies
+            .iter()
+            .filter_map(|dependency| {
+                results_by_agent
+                    .get(&dependency.agent_id)
+                    .map(|result| result.run_id.clone())
+            })
+            .collect::<Vec<_>>();
+        let dependency_issues = agent
+            .dependencies
+            .iter()
+            .filter_map(|dependency| match results_by_agent.get(&dependency.agent_id) {
+                Some(result) if result.status == "success" => None,
+                Some(result) => Some(format!(
+                    "{}={}",
+                    dependency.agent_id, result.status
+                )),
+                None => Some(format!("{}=not_run", dependency.agent_id)),
+            })
+            .collect::<Vec<_>>();
+
+        if daily_agent_should_skip_for_dependency_issues(&agent, &dependency_issues) {
+            let reason = format!(
+                "dependency requirements were not satisfied: {}",
+                dependency_issues.join(", ")
+            );
+            let result = skipped_daily_agent_dependency_result(
+                &agent_task,
+                trigger_source,
+                reason,
+                dependency_run_ids,
+            );
+            results_by_agent.insert(agent.id.clone(), result.clone());
+            results.push(result);
+            continue;
+        }
+
+        if !dependency_issues.is_empty() {
+            tracing::warn!(
+                task_id = %task.id,
+                agent_id = %agent.id,
+                dependency_issues = ?dependency_issues,
+                "continuing ASR Daily Agent despite dependency failures"
+            );
+        }
+
+        if let Err(error) = sync_daily_agent_dependency_outputs(
+            task,
+            &agent,
+            &agents_by_id,
+            requested_date,
+        ) {
+            if agent.dependency_failure_policy == AsrDailyAgentDependencyFailurePolicy::Skip {
+                let result = skipped_daily_agent_dependency_result(
+                    &agent_task,
+                    trigger_source,
+                    error,
+                    dependency_run_ids,
+                );
+                results_by_agent.insert(agent.id.clone(), result.clone());
+                results.push(result);
+                continue;
+            }
+            tracing::warn!(
+                task_id = %task.id,
+                agent_id = %agent.id,
+                error = %error,
+                "continuing ASR Daily Agent without all dependency outputs"
+            );
+        }
+
+        let artifact_issues = match missing_daily_agent_dependency_outputs(
+            task,
+            &agent,
+            &agents_by_id,
+            trigger_source,
+            requested_date,
+            force,
+        ) {
+            Ok(issues) => issues,
+            Err(error) => vec![error],
+        };
+        if daily_agent_should_skip_for_dependency_issues(&agent, &artifact_issues) {
+            let reason = format!(
+                "dependency outputs were not available: {}",
+                artifact_issues.join(", ")
+            );
+            let result = skipped_daily_agent_dependency_result(
+                &agent_task,
+                trigger_source,
+                reason,
+                dependency_run_ids,
+            );
+            results_by_agent.insert(agent.id.clone(), result.clone());
+            results.push(result);
+            continue;
+        }
+        if !artifact_issues.is_empty() {
+            tracing::warn!(
+                task_id = %task.id,
+                agent_id = %agent.id,
+                artifact_issues = ?artifact_issues,
+                "continuing ASR Daily Agent without all dependency outputs"
+            );
+        }
+
+        let mut result =
+            run_daily_agent_locked(&agent_task, trigger_source, requested_date, force).await;
+        result.dependency_run_ids = dependency_run_ids;
+        results_by_agent.insert(agent.id.clone(), result.clone());
+        results.push(result);
     }
 
     {
@@ -539,6 +688,200 @@ async fn run_daily_agents(
     }
 
     results
+}
+
+fn skipped_daily_agent_dependency_result(
+    task: &AsrDirectoryTask,
+    trigger_source: &str,
+    reason: String,
+    dependency_run_ids: Vec<String>,
+) -> DailyAgentRunResult {
+    let started_at_ms = now_ms();
+    let run_id = format!("{}-{}", started_at_ms, uuid::Uuid::new_v4());
+    let status = "skipped_dependency_failed";
+    let _ = update_daily_agent_status(task, status, Some(&reason), &run_id);
+    tracing::warn!(
+        task_id = %task.id,
+        agent_id = %task.daily_agent.agent_id,
+        trigger_source,
+        reason = %reason,
+        "skipped ASR Daily Agent because dependency requirements were not satisfied"
+    );
+    DailyAgentRunResult {
+        agent_id: task.daily_agent.agent_id.clone(),
+        agent_name: task.daily_agent.name.clone(),
+        run_id,
+        status: status.to_string(),
+        trigger_source: trigger_source.to_string(),
+        started_at_ms,
+        finished_at_ms: now_ms(),
+        error: Some(reason.clone()),
+        reports_generated: Vec::new(),
+        dependency_run_ids,
+        skipped_reason: Some(reason),
+    }
+}
+
+fn daily_agent_should_skip_for_dependency_issues(
+    agent: &AsrDailyAgentItem,
+    dependency_issues: &[String],
+) -> bool {
+    !dependency_issues.is_empty()
+        && agent.dependency_failure_policy == AsrDailyAgentDependencyFailurePolicy::Skip
+}
+
+fn missing_daily_agent_dependency_outputs(
+    task: &AsrDirectoryTask,
+    agent: &AsrDailyAgentItem,
+    agents_by_id: &HashMap<String, AsrDailyAgentItem>,
+    trigger_source: &str,
+    requested_date: Option<&str>,
+    force: bool,
+) -> Result<Vec<String>, String> {
+    if agent
+        .dependencies
+        .iter()
+        .all(|dependency| !dependency.include_output)
+    {
+        return Ok(Vec::new());
+    }
+    let agent_task = task_for_daily_agent(task, agent);
+    let plan = build_daily_agent_change_plan(&agent_task, trigger_source, requested_date, force)?;
+    let processed = load_daily_agent_processed_state(&task.id);
+    let mut missing = Vec::new();
+    for dependency in agent
+        .dependencies
+        .iter()
+        .filter(|dependency| dependency.include_output)
+    {
+        let Some(upstream_agent) = agents_by_id.get(&dependency.agent_id) else {
+            missing.push(format!("{}=not_configured", dependency.agent_id));
+            continue;
+        };
+        let upstream_task = task_for_daily_agent(task, upstream_agent);
+        for entry in plan
+            .entries
+            .iter()
+            .filter(|entry| entry.change_kind != DailyAgentChangeKind::Unchanged)
+        {
+            let path = daily_agent_upstream_input_dir(&agent_task, &dependency.agent_id)
+                .join(format!("{}-report.md", entry.date));
+            if !path.is_file() {
+                missing.push(format!("{}:{}", dependency.agent_id, entry.date));
+                continue;
+            }
+            let processed_key = daily_agent_processed_key(&upstream_task, &entry.date);
+            let upstream_document = processed.documents.get(&processed_key).or_else(|| {
+                (upstream_agent.id == DEFAULT_DAILY_AGENT_ID)
+                    .then(|| processed.documents.get(&entry.date))
+                    .flatten()
+            });
+            if upstream_document
+                .is_none_or(|document| document.source_sha256 != entry.source_sha256)
+            {
+                missing.push(format!(
+                    "{}:{}=stale",
+                    dependency.agent_id, entry.date
+                ));
+            }
+        }
+    }
+    Ok(missing)
+}
+
+async fn run_selected_daily_agent_with_dependencies(
+    task: &AsrDirectoryTask,
+    agent: &AsrDailyAgentItem,
+    trigger_source: &str,
+    requested_date: Option<&str>,
+    force: bool,
+) -> DailyAgentRunResult {
+    let agent_task = task_for_daily_agent(task, agent);
+    let agents = normalized_daily_agents(&task.daily_agent);
+    let agents_by_id = agents
+        .iter()
+        .cloned()
+        .map(|agent| (agent.id.clone(), agent))
+        .collect::<HashMap<_, _>>();
+    let dependency_run_ids = agent
+        .dependencies
+        .iter()
+        .filter_map(|dependency| {
+            agents_by_id
+                .get(&dependency.agent_id)
+                .and_then(|upstream| upstream.last_run_id.clone())
+        })
+        .collect::<Vec<_>>();
+    let dependency_issues = agent
+        .dependencies
+        .iter()
+        .filter_map(|dependency| {
+            let status = agents_by_id
+                .get(&dependency.agent_id)
+                .and_then(|upstream| upstream.last_status.as_deref())
+                .unwrap_or("not_run");
+            (status != "success").then(|| format!("{}={status}", dependency.agent_id))
+        })
+        .collect::<Vec<_>>();
+
+    if daily_agent_should_skip_for_dependency_issues(agent, &dependency_issues) {
+        return skipped_daily_agent_dependency_result(
+            &agent_task,
+            trigger_source,
+            format!(
+                "dependency requirements were not satisfied: {}",
+                dependency_issues.join(", ")
+            ),
+            dependency_run_ids,
+        );
+    }
+
+    if let Err(error) =
+        sync_daily_agent_dependency_outputs(task, agent, &agents_by_id, requested_date)
+    {
+        if agent.dependency_failure_policy == AsrDailyAgentDependencyFailurePolicy::Skip {
+            return skipped_daily_agent_dependency_result(
+                &agent_task,
+                trigger_source,
+                error,
+                dependency_run_ids,
+            );
+        }
+        tracing::warn!(
+            task_id = %task.id,
+            agent_id = %agent.id,
+            error = %error,
+            "continuing manually selected ASR Daily Agent without all dependency outputs"
+        );
+    }
+
+    let artifact_issues = match missing_daily_agent_dependency_outputs(
+        task,
+        agent,
+        &agents_by_id,
+        trigger_source,
+        requested_date,
+        force,
+    ) {
+        Ok(issues) => issues,
+        Err(error) => vec![error],
+    };
+    if daily_agent_should_skip_for_dependency_issues(agent, &artifact_issues) {
+        return skipped_daily_agent_dependency_result(
+            &agent_task,
+            trigger_source,
+            format!(
+                "dependency outputs were not available: {}",
+                artifact_issues.join(", ")
+            ),
+            dependency_run_ids,
+        );
+    }
+
+    let mut result =
+        run_daily_agent(&agent_task, trigger_source, requested_date, force).await;
+    result.dependency_run_ids = dependency_run_ids;
+    result
 }
 
 fn daily_agent_effective_last_status(task: &AsrDirectoryTask) -> Option<String> {
@@ -678,7 +1021,7 @@ async fn run_daily_agent_locked(
         };
 
         if let Err(e) =
-            send_daily_agent_im_message(task, &im_content, &run_id, reports_generated.len()).await
+            send_daily_agent_im_message(task, &im_content, &run_id, &reports_generated).await
         {
             tracing::warn!(
                 task_id = %task.id,
@@ -712,6 +1055,8 @@ async fn run_daily_agent_locked(
         finished_at_ms,
         error,
         reports_generated,
+        dependency_run_ids: Vec::new(),
+        skipped_reason: None,
     }
 }
 
@@ -1483,7 +1828,10 @@ async fn run_daily_agent_inner(
     let conversation_success: Option<(String, Option<DailyAgentBTreeMap<String, String>>)>;
     let mut failed_entries = Vec::new();
 
-    if let Some(runner_id) = daily_agent_external_runner_id(task) {
+    if task.daily_agent.research_fanout.is_some() {
+        run_daily_agent_research_fanout(task, &plan).await?;
+        conversation_success = None;
+    } else if let Some(runner_id) = daily_agent_external_runner_id(task) {
             let runner_id = runner_id.to_string();
             // Read runner config to get adapter and other settings
             let config_store = crate::im_gateway::external_cli::ExternalCliConfigStore::new(
@@ -1798,8 +2146,14 @@ async fn run_daily_agent_inner(
                 && generated_report_targets.contains(&entry.report_target)
         })
     {
+        let report_path = Path::new(&entry.report_target);
+        let report_sha256 = compute_sha256(report_path)?;
+        let report_len_bytes = std::fs::metadata(report_path)
+            .map(|metadata| metadata.len())
+            .map_err(|error| format!("stat generated report {}: {error}", report_path.display()))?;
+        let processed_key = daily_agent_processed_key(task, &entry.date);
         processed.documents.insert(
-            daily_agent_processed_key(task, &entry.date),
+            processed_key.clone(),
             AsrDailyAgentProcessedDocument {
                 agent_id: task.daily_agent.agent_id.clone(),
                 agent_name: task.daily_agent.name.clone(),
@@ -1813,6 +2167,25 @@ async fn run_daily_agent_inner(
                 last_run_id: run_id.to_string(),
             },
         );
+        processed.artifacts.insert(
+            processed_key,
+            AsrDailyAgentArtifactState {
+                report_sha256: Some(report_sha256),
+                report_len_bytes: Some(report_len_bytes),
+                generator_contract_version: Some(DAILY_AGENT_GENERATOR_CONTRACT_VERSION),
+                agent_config_sha256: Some(entry.agent_config_sha256.clone()),
+                upstream_sha256: entry.upstream_sha256.clone(),
+            },
+        );
+        processed
+            .date_watermarks
+            .entry(task.daily_agent.agent_id.clone())
+            .and_modify(|watermark| {
+                if entry.date > *watermark {
+                    *watermark = entry.date.clone();
+                }
+            })
+            .or_insert_with(|| entry.date.clone());
     }
 
     processed.version = PROCESSED_STATE_VERSION;

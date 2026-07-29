@@ -2320,6 +2320,7 @@ pub fn normalize_feishu_event(raw: &serde_json::Value, provider_id: &str) -> Opt
             mentions,
             images,
             files,
+            reply_to: None,
             raw_type: message_type,
             raw_content: Some(content_obj),
             create_time,

@@ -676,9 +676,10 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 
 **预期结果**：
 - 如果 ChatGPT Web 页面先出现 `我会按...筛选/搜索/整理...` 这类短 planning 段，adapter 不得在 stop button 仍可见时直接返回。
+- 即使 stop button 在 planning 段后短暂消失，以“我会 / 我将 / I'll / I will / Let me”等开头且不足 512 字节的候选也必须继续观察至少 15 秒；期间 busy 控件恢复时回到生成中状态。
 - DOM ready 判定以页面生成控件为核心：stop button 必须消失，composer 必须可见、可输入且为空，并且该终态需要连续稳定一段时间；文本内容变化不能作为主要完成条件。
 - `result.json.response`、`last_message.md` 和 IM 最终回写包含真正完成后的答案正文，而不是只包含第一段 planning 说明。
-- 如果页面最终只生成 planning 段且 stop button 已消失、composer 已连续稳定回到空闲，adapter 可返回该文本，并在 artifacts 中保留 DOM fallback 证据，便于人工判断 ChatGPT 是否确实停止。
+- 如果页面最终只生成 planning 段且 stop button 已消失、composer 已连续稳定回到空闲并经过 15 秒观察窗，adapter 可返回该文本，并在 artifacts 中保留 DOM fallback 证据，便于人工判断 ChatGPT 是否确实停止。
 
 ### TC-CWA-30：回归 - stream_handoff 后 ChatGPT 仍在处理时不能按输入框空闲提前回写
 
@@ -765,7 +766,33 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 - 只有等待 stop button 消失超时才返回 `conversation_busy`；该错误不进入整轮 send retry，不会连续多次粘贴同一 retry prompt。
 - diagnostic screenshot 不应再出现 stop button 可见且 composer 中残留 `上一条回复不是最终日报...` / `上一条回复不是最终明日待办...` 的状态。
 
-### TC-CWA-34：回归 - stream_handoff 按钮瞬时窗口不得把临时 assistant shell 当成最终结果
+### TC-CWA-34：回归 - 账号选择弹窗未完成时不得提前判定登录成功
+
+**前置条件**：共享 profile 已保存一个可识别账号，但打开 `chatgpt.com` 后仍显示“欢迎回来 / 选择一个帐户以继续”弹窗。
+
+**操作步骤**：
+1. 点击 `Open Login Browser`，暂不选择弹窗中的账号卡片。
+2. 确认登录请求继续等待，不返回 `logged_in`。
+3. 点击账号卡片，直到正常新对话输入框可见、可编辑且账号选择弹窗消失。
+4. 执行：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin login_page_readiness_rejects_account_chooser_and_disabled_composer --lib -- --nocapture
+   ```
+
+**预期结果**：
+- 仅捕获 Authorization 和 `accounts/check` 成功证明不足以结束登录流程。
+- 账号选择弹窗可见、composer 不可见或 disabled 时，登录请求持续等待。
+- 只有 composer 可见且可编辑、账号选择弹窗消失后，才保存登录态并返回 `logged_in`。
+- 普通首页正文出现“欢迎回来”，但没有账号选择文案且 composer 已可用时，不得继续误判为账号选择页。
+- 运行阶段不再因弹窗遮挡而报 `send button not actionable: not_found`。
+
+### TC-CWA-34 执行记录
+
+- 2026-07-15：补充执行日报研究真实长任务回归。`2026-07-09` 四个研究问题在 Project“日报研究”中以 Chat + Pro 启动独立会话；首个信贷问题先返回“我会先……”短 planning 段，随后页面继续处于 busy 并最终生成 31808 字节完整结果。通过同 conversation 的 Chat Gateway `get` 恢复最终回答，页面和产物均确认五个契约标题完整且有正文。四个 conversation id 分别为 `6a565a7b-9cac-83ea-8a50-e5f4bf1abe4a`、`6a565857-eeb4-83ea-820e-8431fcb24b27`、`6a56588d-9630-83ea-96f9-a7831578fbe7`、`6a5658b7-0384-83ea-b2e0-89f8c07687e3`。回归同时确认：新建下一题不能关闭仍在生成的前一题 tab；短 planning 回复需要额外等待；恢复 DOM 时只能读取精确 conversation URL；研究输出必须逐段满足独立标题、原问题和非空正文契约，不能把 Prompt 脚手架回显误判为完成。
+- 2026-07-12：使用真实 `2026-06-26` 日报做流水线演示时补充执行 TC-CWA-34 边界回归。隔离 Chrome 页面已无账号选择器、composer 可见可编辑，但首页正文仍包含普通“欢迎回来”，原整页 marker 判断导致登录请求持续等待。修复为“欢迎回来仅在可见 dialog 中算账号选择信号；整页正文只识别选择/切换账号文案”，并新增源码级回归测试。
+- 2026-07-12：执行 TC-CWA-34 通过。隔离服务首次登录在 `accounts/check` 已证明账号存在时提前返回 `logged_in`，随后真实 Daily Agent diagnostic screenshot 显示“欢迎回来 / 选择一个帐户以继续”弹窗遮挡 composer，run 失败为 `send button not actionable: not_found`，下游依赖正确跳过。修复后登录循环同时要求 composer 可见、可编辑且账号选择弹窗消失；`login_page_readiness_rejects_account_chooser_and_disabled_composer` 单测通过。使用同一隔离 profile 重新执行 `Open Login Browser` 返回 `loggedIn=true / identityComplete=true / accountCheckOk=true`，随后 ChatGPT Web 真实 `daily_report -> research_agent` 两段运行均为 `success`，并产出同日上游报告和研究报告。
+
+### TC-CWA-35：回归 - stream_handoff 按钮瞬时窗口不得把临时 assistant shell 当成最终结果
 
 **前置条件**：已登录的 `chatgpt_web` runner 可用；使用 headed 模式和共享 browser profile；使用会触发联网检索、`stream_handoff` 和多阶段生成的 prompt。
 
@@ -786,6 +813,26 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 - stop button 消失后，按最终文本、message/turn id、图片和 artifacts 的内容签名进行稳定确认；同长度替换也必须重置稳定窗口。
 - 纯图片的 role-less assistant section 继续使用生成图片完成规则，不被 text-only 临时 shell 门禁误伤。
 - `result.json.response` 和 `last_message.md` 必须是正式 assistant 的完整结果，不是“正在搜索…”或“我先按…筛选…”这类过渡内容。
+
+### TC-CWA-36：中文界面的“聊天 / 工作”模式开关可验证且不会误认 Project 标签页
+
+**前置条件**：共享 ChatGPT 浏览器已登录，账号界面语言为中文；打开一个同时显示顶部 `聊天 / 工作` 模式开关和 Project 内 `聊天 / 来源` 标签页的 Project 页面。
+
+**操作步骤**：
+1. 在 DevTools 中确认顶部两个按钮使用 `role=radio`，文字分别为 `聊天`、`工作`，共同位于一个 `role=group`；记录 `聊天` 当前的 `data-state`。
+2. 用配置 `chatgpt.interfaceMode=chat`、`chatgpt.model=pro` 执行一个只回复固定短文本的真实 ChatGPT Web run。
+3. 若顶部 `聊天` 已选中，确认适配器不点击 Project 内的 `聊天` 标签；若顶部 `工作` 被选中，先切回 `聊天` 并验证状态，再提交 Prompt。
+4. 执行 `bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh`。
+
+**预期结果**：
+- 中英文 `Chat / Work`、`聊天 / 工作` 均可识别。
+- `data-state=on`、`aria-checked=true` 或 `aria-selected=true` 任一明确状态都可验证为已选中。
+- 只有同一 `role=group` 内同时存在 Chat 与 Work 对应选项时才接受该控件，Project 的 `聊天 / 来源` 标签页不会被误认。
+- 模式控件缺失或选中状态无法验证时，run 在发送前 fail-closed，Prompt 不会被提交。
+
+## 真实执行记录
+
+- 2026-07-24：执行 TC-CWA-36 与大文本附件等待回归通过。中文 ChatGPT 新界面顶部模式控件使用同一 `role=group` 中的 `role=radio`“聊天 / 工作”，选中项以 `data-state=on` 表示；修复后 2026-07-18 的 `research_fanout` 在“日报研究”Project 内连续完成 7 个 Pro conversation，没有误点 Project 的“聊天 / 来源”标签。随后 2026-07-23 的 384KB 合并转写首次因 ChatGPT 把剪贴板转换为“已粘贴的文本”附件且发送按钮仍 disabled 而失败；把首次等待按字符数扩展到 30–600 秒、超过 200k 字符的重试等待设为 180 秒后，`daily_report` run `1784829274278-c7eaf378-09bc-45ef-aca6-cd6e857cb295` 成功，后续 summary、todo、research 全链路完成。`send_button_ready_max_wait_short_and_long`、附件级重试等待定向单测及 `bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh` 均通过。
 
 ### TC-CWA-35：回归 - 新建会话复用同一个 tab 且 URL 不携带 Bifrost 私有参数
 

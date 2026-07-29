@@ -52,6 +52,14 @@ pub fn normalize_provider_base_url(provider: &mut ImProviderConfig) {
             provider.base_url = Some(normalize_feishu_base_url(provider.base_url.as_deref()));
         }
         ImProviderType::Weixin | ImProviderType::WeChat => {
+            #[cfg(test)]
+            if provider
+                .base_url
+                .as_deref()
+                .is_some_and(|url| url.starts_with("http://127.0.0.1:"))
+            {
+                return;
+            }
             provider.base_url = Some(normalize_weixin_base_url(provider.base_url.as_deref()));
         }
         ImProviderType::Webhook => {}
@@ -717,6 +725,8 @@ pub struct ImEventMessage {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<ImFileAttachment>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<ImMessageReference>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_content: Option<serde_json::Value>,
@@ -730,6 +740,16 @@ pub struct ImEventMessage {
     pub parent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImMessageReference {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -826,6 +846,9 @@ pub struct ImMessageLog {
     /// Text preview (truncated for large messages)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_preview: Option<String>,
+    /// Text content retained for resolving later message replies/quotes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
     /// How the message was triggered
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trigger: Option<String>,
@@ -1024,6 +1047,29 @@ pub struct ImTaskExecutionRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn localhost_weixin_base_url_is_preserved_for_provider_tests() {
+        let mut provider = ImProviderConfig {
+            id: "weixin-local".to_string(),
+            provider_type: ImProviderType::Weixin,
+            display_name: "Weixin Local".to_string(),
+            enabled: true,
+            base_url: Some("http://127.0.0.1:12345".to_string()),
+            app_id: None,
+            secret_ref: None,
+            owner_open_id: None,
+            event_connection_enabled: false,
+            event_types: Vec::new(),
+            agent_config: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        normalize_provider_base_url(&mut provider);
+
+        assert_eq!(provider.base_url.as_deref(), Some("http://127.0.0.1:12345"));
+    }
 
     #[test]
     fn external_cli_agent_chat_delivery_mode_is_optional_route_override() {

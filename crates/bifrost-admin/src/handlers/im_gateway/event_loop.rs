@@ -209,6 +209,7 @@ pub(super) async fn run_event_loop_with_options(
                 message_id,
                 msg_type: Some(outbound_log_msg_type(&provider, "text")),
                 content_preview: Some(online_msg.to_string()),
+                content: Some(online_msg.to_string()),
                 trigger: Some("online".to_string()),
                 error: error_msg,
                 sender_open_id: None,
@@ -336,6 +337,7 @@ pub(super) async fn run_event_loop_with_options(
                         message_id: event.source.message_id.clone(),
                         msg_type: event.message.as_ref().and_then(|m| m.raw_type.clone()),
                         content_preview: event.message.as_ref().map(inbound_message_preview),
+                        content: event.message.as_ref().map(|message| message.text.clone()),
                         trigger: Some("websocket".to_string()),
                         error: Some(format!("rejected: sender {} is not owner", sender_id)),
                         sender_open_id: Some(sender_id.to_string()),
@@ -395,6 +397,7 @@ pub(super) async fn run_event_loop_with_options(
                         message_id: event.source.message_id.clone(),
                         msg_type: event.message.as_ref().and_then(|m| m.raw_type.clone()),
                         content_preview: event.message.as_ref().map(inbound_message_preview),
+                        content: event.message.as_ref().map(|message| message.text.clone()),
                         trigger: Some("group_context".to_string()),
                         error: None,
                         sender_open_id: event.source.user_id.clone(),
@@ -427,7 +430,15 @@ pub(super) async fn run_event_loop_with_options(
                 message_text: event
                     .message
                     .as_ref()
-                    .map(agent_message_text)
+                    .map(|message| {
+                        agent_message_text_with_reference(
+                            message,
+                            &event.provider_id,
+                            event.source.user_id.as_deref(),
+                            event.source.message_id.as_deref(),
+                            &message_log_store,
+                        )
+                    })
                     .unwrap_or_default(),
                 session_key: build_session_key(&event.provider_id, event.source.user_id.as_deref()),
                 group_turn_id: None,
@@ -905,6 +916,7 @@ pub(super) async fn acknowledge_and_log_inbound_event(
             .as_ref()
             .and_then(|message| message.raw_type.clone()),
         content_preview: event.message.as_ref().map(inbound_message_preview),
+        content: event.message.as_ref().map(|message| message.text.clone()),
         trigger: Some("websocket".to_string()),
         error: None,
         sender_open_id: event.source.user_id.clone(),

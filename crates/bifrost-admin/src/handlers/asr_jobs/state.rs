@@ -670,6 +670,10 @@ struct AsrExternalImportRunProgress {
     total_files_discovered: usize,
     #[serde(default)]
     processed_files: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completion_token: Option<String>,
+    #[serde(default)]
+    auto_run_consumed: bool,
     message: String,
 }
 
@@ -1181,6 +1185,7 @@ struct UpdateTaskRequest {
     model: Option<String>,
     transcription_mode: Option<AsrTranscriptionMode>,
     transcription_prompt: Option<String>,
+    requeue_existing_files: Option<bool>,
     runtime_strategy: Option<AsrRuntimeStrategy>,
     max_concurrent_files: Option<u8>,
     diarization: Option<AsrDiarizationConfig>,

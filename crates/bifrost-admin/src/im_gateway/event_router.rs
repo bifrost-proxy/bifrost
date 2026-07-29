@@ -164,6 +164,7 @@ mod tests {
                 mentions: vec![],
                 images: vec![],
                 files: vec![],
+                reply_to: None,
                 raw_type: None,
                 raw_content: None,
                 create_time: None,

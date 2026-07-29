@@ -1772,6 +1772,9 @@ export interface AsrDailyAgentConfig {
   instructions_source: "default" | "custom";
   im_delivery: AsrDailyAgentImDeliveryConfig;
   output_dir: string;
+  dependencies?: AsrDailyAgentDependency[];
+  dependency_failure_policy?: "skip" | "continue";
+  research_fanout?: AsrDailyAgentResearchFanoutConfig;
   agents?: AsrDailyAgentItem[];
   terminology?: string;
   report_sync_dir?: string;
@@ -1795,12 +1798,35 @@ export interface AsrDailyAgentItem {
   instructions?: string;
   im_delivery: AsrDailyAgentImDeliveryConfig;
   output_dir: string;
+  dependencies?: AsrDailyAgentDependency[];
+  dependency_failure_policy?: "skip" | "continue";
+  research_fanout?: AsrDailyAgentResearchFanoutConfig;
   report_sync_dir?: string;
   last_report_sync?: AsrDailyAgentReportSyncResult;
   last_run_at_ms?: number;
   last_status?: string;
   last_error?: string;
   last_run_id?: string;
+}
+
+export interface AsrDailyAgentDependency {
+  agent_id: string;
+  include_output: boolean;
+}
+
+export interface AsrDailyAgentResearchFanoutConfig {
+  max_questions: number;
+  chatgpt_interface_mode: "chat";
+  chatgpt_model: "pro";
+  chatgpt_project_url?: string;
+  allowed_runners: string[];
+  context_profiles: Record<string, AsrDailyAgentResearchContextProfile>;
+}
+
+export interface AsrDailyAgentResearchContextProfile {
+  runner: string;
+  work_dir: string;
+  instructions?: string;
 }
 
 export interface AsrDailyAgentImDeliveryConfig {

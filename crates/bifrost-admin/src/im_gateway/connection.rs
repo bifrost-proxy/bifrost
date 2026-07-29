@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -49,10 +50,14 @@ impl Default for ImConnectionManager {
 
 impl ImConnectionManager {
     pub fn new() -> Self {
+        Self::new_with_data_dir(&bifrost_storage::data_dir())
+    }
+
+    pub fn new_with_data_dir(data_dir: &Path) -> Self {
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
             feishu_provider: Arc::new(FeishuProvider::new()),
-            weixin_provider: Arc::new(WeixinProvider::new()),
+            weixin_provider: Arc::new(WeixinProvider::new_with_data_dir(data_dir)),
         }
     }
 
@@ -229,6 +234,19 @@ impl ImConnectionManager {
     pub fn get_status(&self, provider_id: &str) -> Option<ConnectionStatus> {
         let conns = self.connections.read();
         conns.get(provider_id).map(|c| c.status.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_status_for_test(&self, provider_id: &str, status: ConnectionStatus) {
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        self.connections.write().insert(
+            provider_id.to_string(),
+            ManagedConnection {
+                provider_id: provider_id.to_string(),
+                handle: ConnectionHandle { shutdown_tx },
+                status,
+            },
+        );
     }
 
     /// Get all connection statuses.

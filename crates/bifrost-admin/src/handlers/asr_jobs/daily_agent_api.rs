@@ -314,8 +314,14 @@ async fn post_daily_agent_run_response(
     tokio::spawn(async move {
         if let Some(agent_id) = agent_id_clone.as_deref() {
             if let Some(agent) = selected_daily_agent(&task_clone, Some(agent_id)) {
-                let agent_task = task_for_daily_agent(&task_clone, &agent);
-                run_daily_agent(&agent_task, "manual", date_clone.as_deref(), force).await;
+                run_selected_daily_agent_with_dependencies(
+                    &task_clone,
+                    &agent,
+                    "manual",
+                    date_clone.as_deref(),
+                    force,
+                )
+                .await;
             }
         } else {
             run_daily_agents(&task_clone, "manual", date_clone.as_deref(), force).await;
@@ -369,7 +375,7 @@ async fn post_daily_agent_send_response(task_id: &str, req: Request<Incoming>) -
     }
 
     let content = build_im_content_for_reports(&task, &recent_reports);
-    match send_daily_agent_im_message(&task, &content, "manual_send", recent_reports.len()).await {
+    match send_daily_agent_im_message(&task, &content, "manual_send", &recent_reports).await {
         Ok(()) => json_response(&serde_json::json!({
             "ok": true,
             "sent_reports": recent_reports,

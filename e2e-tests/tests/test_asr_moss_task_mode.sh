@@ -218,6 +218,43 @@ assert missing.get("chunk_metrics", []) == [], missing
 assert missing["text_chars"] == 0, missing
 PY
 
+python3 - "$FILES_JSON" "$DATA_DIR" <<'PY'
+import json, sys
+from pathlib import Path
+
+files_json = Path(sys.argv[1])
+data_dir = Path(sys.argv[2])
+data = json.loads(files_json.read_text(encoding="utf-8"))
+record = data["files"]["completed"]
+record.update({
+    "status": "success",
+    "output_text_path": str(data_dir / "preserved.txt"),
+    "output_metadata_path": str(data_dir / "preserved.json"),
+    "output_timeline_path": str(data_dir / "preserved.timeline.json"),
+    "text_chars": 9,
+    "started_at_ms": 3,
+    "finished_at_ms": 4,
+})
+files_json.write_text(json.dumps(data), encoding="utf-8")
+PY
+
+curl -fsS -X PATCH "$api/$TASK_ID" -H 'Content-Type: application/json' \
+  --data '{"transcription_mode":"standard","requeue_existing_files":false}' \
+  >"$DATA_DIR/preserved-standard.json"
+curl -fsS -X PATCH "$api/$TASK_ID" -H 'Content-Type: application/json' \
+  --data '{"transcription_mode":"moss_joint","requeue_existing_files":false}' \
+  >"$DATA_DIR/preserved-moss.json"
+python3 - "$DATA_DIR/preserved-moss.json" "$FILES_JSON" <<'PY'
+import json, sys
+task = json.load(open(sys.argv[1], encoding="utf-8"))
+record = json.load(open(sys.argv[2], encoding="utf-8"))["files"]["completed"]
+assert task["transcription_mode"] == "moss_joint", task
+assert "requeue_existing_files" not in task, task
+assert record["status"] == "success", record
+assert record["output_text_path"].endswith("preserved.txt"), record
+assert record["text_chars"] == 9, record
+PY
+
 TOO_LONG="$(python3 - <<'PY'
 import json
 print(json.dumps({"transcription_prompt": "x" * 4001}))

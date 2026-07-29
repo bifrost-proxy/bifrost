@@ -1165,20 +1165,38 @@ fn progress_event_from_app_server_frame(
         "item/started" | "item/completed" => {
             progress_event_from_app_server_item(method, &params, raw)
         }
-        "error" => Some(ExternalCliProgressEvent {
-            event_type: ExternalCliProgressEventType::RunFailed,
-            content: params
-                .get("error")
-                .and_then(|error| error.get("message"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("app-server error")
-                .to_string(),
-            title: Some("Codex error".to_string()),
-            raw,
-        }),
+        "error" => {
+            let will_retry = params
+                .get("willRetry")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            Some(ExternalCliProgressEvent {
+                event_type: if will_retry {
+                    ExternalCliProgressEventType::Status
+                } else {
+                    ExternalCliProgressEventType::RunFailed
+                },
+                content: params
+                    .get("error")
+                    .and_then(|error| error.get("message"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("app-server error")
+                    .to_string(),
+                title: Some(if will_retry {
+                    "Codex reconnecting".to_string()
+                } else {
+                    "Codex error".to_string()
+                }),
+                raw,
+            })
+        }
         _ => None,
     }
 }
+
+#[cfg(test)]
+#[path = "app_server_retry_tests.rs"]
+mod retry_tests;
 
 fn account_rate_limits_event(response: serde_json::Value) -> ExternalCliProgressEvent {
     let weekly = codex_weekly_rate_limit_window(&response)

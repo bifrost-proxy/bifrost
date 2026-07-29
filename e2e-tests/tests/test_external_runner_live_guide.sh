@@ -157,6 +157,9 @@ for line in sys.stdin:
         if "queue-explicit" in prompt:
             send({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":thread_id,"turnId":turn_id,"item":{"id":"message-queued-explicit","type":"agentMessage","text":f"QUEUED_EXPLICIT_{runner}"}}})
             send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":thread_id,"turn":{"id":turn_id,"status":"completed"}}})
+        if "QUOTE_CURRENT_QUESTION" in prompt:
+            send({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":thread_id,"turnId":turn_id,"item":{"id":"message-quote-current","type":"agentMessage","text":"QUOTE_CONTEXT_COMPLETE"}}})
+            send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":thread_id,"turn":{"id":turn_id,"status":"completed"}}})
         if mode == "reject" and "queue-after-reject" in prompt:
             send({"jsonrpc":"2.0","method":"item/completed","params":{"threadId":thread_id,"turnId":turn_id,"item":{"id":"message-queued","type":"agentMessage","text":f"QUEUED_{runner}"}}})
             send({"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":thread_id,"turn":{"id":turn_id,"status":"completed"}}})
@@ -255,6 +258,7 @@ for runner_name, adapter, mode, transport in (
     ("codex-im-queue", "codex", "accept", "app_server"),
     ("codex-im-effort", "codex", "accept", "app_server"),
     ("traex-im-effort", "traex", "accept", "app_server"),
+    ("codex-im-quote", "codex", "accept", "app_server"),
     ("codex-reject", "codex", "reject", "app_server"),
     ("claude-reject", "claude_code", "reject", None),
     ("codex-exec", "codex", "accept", "exec"),
@@ -449,6 +453,38 @@ send_im_inbound() {
     >/dev/null
 }
 
+send_im_inbound_with_reference() {
+  local provider_id="$1"
+  local owner_id="$2"
+  local text="$3"
+  local message_id="$4"
+  local reply_message_id="${5:-}"
+  python3 - "$BIFROST_PORT" "$provider_id" "$owner_id" "$text" "$message_id" "$reply_message_id" <<'PY'
+import json
+import sys
+import urllib.request
+
+port, provider_id, owner_id, text, message_id, reply_message_id = sys.argv[1:7]
+payload = {
+    "providerId": provider_id,
+    "userId": owner_id,
+    "chatId": f"chat-{provider_id}",
+    "text": text,
+    "messageId": message_id,
+}
+if reply_message_id:
+    payload["replyTo"] = {"messageId": reply_message_id}
+request = urllib.request.Request(
+    f"http://127.0.0.1:{port}/_bifrost/api/im-gateway/debug/mock-inbound",
+    data=json.dumps(payload).encode(),
+    headers={"content-type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(request, timeout=30) as response:
+    assert response.status == 200, response.read().decode()
+PY
+}
+
 wait_for_mock_record() {
   local pattern="$1"
   for _ in $(seq 1 240); do
@@ -544,12 +580,27 @@ else:
     raise AssertionError(f"missing high effort override for {runner}")
 PY
 
-  send_im_inbound "$provider" "$owner" "release-$adapter-after-effort"
+  send_im_inbound "$provider" "$owner" "/g release-$adapter-after-effort"
   wait_for_mock_record "release-$adapter-after-effort"
 }
 
 run_im_effort_case codex
 run_im_effort_case traex
+
+create_im_provider "im-quote-provider" "im-quote-owner" "codex-im-quote"
+send_im_inbound_with_reference \
+  "im-quote-provider" \
+  "im-quote-owner" \
+  "QUOTE_SOURCE_REQUEST https://example.com/quoted-article" \
+  "quote-source-message"
+wait_for_mock_record 'QUOTE_SOURCE_REQUEST'
+send_im_inbound_with_reference \
+  "im-quote-provider" \
+  "im-quote-owner" \
+  "QUOTE_CURRENT_QUESTION 这条引用里的链接是什么？" \
+  "quote-current-message" \
+  "quote-source-message"
+wait_for_mock_record 'QUOTE_CURRENT_QUESTION'
 
 python3 - "$MOCK_LOG" "$TEST_DIR/agent/im_gateway/session_state.json" <<'PY'
 import json
@@ -603,6 +654,17 @@ for adapter in ("codex", "traex"):
     )
     assert session["reasoningEffortOverride"] == "high", session
     assert session["reasoningEffortOverrideSource"] == "session slash command", session
+
+quote_steers = [
+    record for record in records
+    if record.get("event") == "turn_steered" and record.get("runner") == "codex-im-quote"
+]
+assert len(quote_steers) == 1, quote_steers
+quote_prompt = quote_steers[0]["params"]["input"][0]["text"]
+assert "【引用消息（仅作为上下文）】" in quote_prompt, quote_prompt
+assert "QUOTE_SOURCE_REQUEST https://example.com/quoted-article" in quote_prompt, quote_prompt
+assert "【当前消息】" in quote_prompt, quote_prompt
+assert "QUOTE_CURRENT_QUESTION 这条引用里的链接是什么？" in quote_prompt, quote_prompt
 PY
 
 run_queue_fallback_case() {

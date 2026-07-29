@@ -540,6 +540,60 @@ test("ASR Daily Agent uses simple Runner and IM Channel dropdowns", async ({ pag
   await waitForToast(page, "Synced 2 copied, 0 skipped");
 });
 
+test("ASR Daily Agent saves a ChatGPT Project for independent research", async ({
+  page,
+}) => {
+  const { updates } = await installDailyAgentMocks(page);
+  const projectUrl =
+    "https://chatgpt.com/g/g-p-daily-research/project";
+
+  await openPage(page, `ai?aiSection=tools-asr&asrTask=${taskId}`);
+  await page.getByRole("tab", { name: "Daily Agent", exact: true }).click();
+  await page.getByTestId("asr-daily-agent-edit-daily_report").click();
+
+  await page.getByTestId("asr-daily-agent-research-fanout-switch").click();
+  await waitForToast(page, "Configuration saved");
+  const projectInput = page.getByTestId(
+    "asr-daily-agent-research-project-url",
+  );
+  await expect(projectInput).toBeVisible();
+  await expect(projectInput).toHaveAttribute(
+    "placeholder",
+    "https://chatgpt.com/g/g-p-.../project",
+  );
+  await projectInput.fill(projectUrl);
+  expect(updates.at(-1)).not.toMatchObject({
+    agents: expect.arrayContaining([
+      expect.objectContaining({
+        research_fanout: expect.objectContaining({
+          chatgpt_project_url: projectUrl,
+        }),
+      }),
+    ]),
+  });
+  await projectInput.press("Enter");
+  await waitForToast(page, "Configuration saved");
+
+  await expect(
+    page.getByText(
+      "When a Project URL is configured, every new research conversation is created inside that ChatGPT Project.",
+      { exact: false },
+    ),
+  ).toBeVisible();
+  expect(updates.at(-1)).toMatchObject({
+    agents: expect.arrayContaining([
+      expect.objectContaining({
+        id: "daily_report",
+        research_fanout: expect.objectContaining({
+          chatgpt_interface_mode: "chat",
+          chatgpt_model: "pro",
+          chatgpt_project_url: projectUrl,
+        }),
+      }),
+    ]),
+  });
+});
+
 test("ASR Daily Agent opens processed reports as full-page Markdown details", async ({
   page,
 }) => {

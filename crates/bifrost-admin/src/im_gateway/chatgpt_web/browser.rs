@@ -889,23 +889,26 @@ fn select_reusable_chatgpt_page(
         .cloned()
 }
 
-fn page_url_matches_conversation(url: &str, base_url: &str, conversation_id: &str) -> bool {
-    let base = base_url.trim_end_matches('/');
-    let candidates = [
-        format!("{base}/c/{conversation_id}"),
-        format!(
-            "{}/c/{conversation_id}",
-            DEFAULT_BASE_URL.trim_end_matches('/')
-        ),
-    ];
-    candidates.iter().any(|candidate| {
-        if !url.starts_with(candidate) {
+pub(super) fn page_url_matches_conversation(
+    url: &str,
+    base_url: &str,
+    conversation_id: &str,
+) -> bool {
+    [base_url, DEFAULT_BASE_URL].iter().any(|candidate_base| {
+        let Some(rest) = url.strip_prefix(candidate_base.trim_end_matches('/')) else {
+            return false;
+        };
+        if !rest.starts_with('/') {
             return false;
         }
-        matches!(
-            url.as_bytes().get(candidate.len()).copied(),
-            None | Some(b'?') | Some(b'#') | Some(b'/')
-        )
+        let path = rest.split(['?', '#']).next().unwrap_or(rest);
+        let segments = path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        segments
+            .windows(2)
+            .any(|pair| pair[0] == "c" && pair[1] == conversation_id)
     })
 }
 
@@ -968,8 +971,18 @@ mod tests {
             "https://chatgpt.com/",
             "abc-123"
         ));
+        assert!(page_url_matches_conversation(
+            "https://chatgpt.com/g/g-p-daily-research/c/abc-123?model=pro",
+            "https://chatgpt.com",
+            "abc-123"
+        ));
         assert!(!page_url_matches_conversation(
             "https://chatgpt.com/c/abc-1234",
+            "https://chatgpt.com",
+            "abc-123"
+        ));
+        assert!(!page_url_matches_conversation(
+            "https://chatgpt.com.evil.example/c/abc-123",
             "https://chatgpt.com",
             "abc-123"
         ));

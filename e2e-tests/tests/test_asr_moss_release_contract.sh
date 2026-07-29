@@ -115,6 +115,7 @@ require('EXTRACTED_RUNTIME_ROOT/runtime/moss_mlx_runner.py" --self-test' in pack
 require("PYTHONNOUSERSITE=1" in packager and "HF_HUB_OFFLINE" in runner, "packaged runtime is not isolated from user/network state")
 require("stream_generate(" in runner, "runner does not inspect generation before spending the full token budget")
 require("EARLY_PROTOCOL_TOKEN_LIMIT = 256" in runner, "runner early protocol guard drifted")
+require("STARTED_SEGMENT_TOKEN_LIMIT = 1024" in runner, "runner started-segment guard drifted")
 require("moss_remaining_runtime_budget" in runtime, "runtime no longer applies the end-to-end 0.5x budget")
 require("validate_moss_audio_input" in runtime, "runtime no longer rejects wasteful audio before MLX startup")
 require("moss_failure_is_non_retryable_for_unchanged_source" in runtime, "deterministic MOSS failures will be retried forever")
@@ -138,6 +139,14 @@ require(
         [{"start": 0.0, "end": 1.0, "speaker": "S01", "text": "嗯" * 100}]
     ),
     "runner accepts an obvious repetitive decoding loop",
+)
+require(
+    runner_module.protocol_guard_token_limit("unstructured output") == 256,
+    "malformed protocol no longer uses the short guard",
+)
+require(
+    runner_module.protocol_guard_token_limit("[0.10][S01]long first turn") == 1024,
+    "valid started protocol is still killed by the short guard",
 )
 
 sample_utils = types.ModuleType("mlx_lm.sample_utils")
@@ -190,6 +199,18 @@ except RuntimeError as error:
     require("before 256 generated tokens" in str(error), "invalid protocol did not use bounded early abort")
 else:
     require(False, "invalid protocol consumed the unbounded generation path")
+
+try:
+    runner_module.generate_protocol_segments(
+        FakeModel("[0.10][S01]long first turn", 2048),
+        Path("fixture.wav"),
+        max_tokens=2048,
+        prompt="protocol",
+    )
+except RuntimeError as error:
+    require("before 1024 generated tokens" in str(error), "started protocol did not use the bounded extended guard")
+else:
+    require(False, "incomplete started protocol consumed the unbounded generation path")
 
 require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", runtime_version) is not None, "independent runtime version is not stable semver")
 require('tags:\n      - "moss-runtime-v*"' in runtime_release, "independent runtime tag trigger is missing")

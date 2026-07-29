@@ -68,12 +68,37 @@ fn decorate_daily_agent_im_chunk(chunk: &str, index: usize, total: usize) -> Str
     format!("ASR Daily Agent Report {}/{}\n\n{}", index + 1, total, chunk)
 }
 
+fn daily_agent_im_idempotency_key(
+    task: &AsrDirectoryTask,
+    target_id: &str,
+    reports: &[String],
+    content: &str,
+    chunk_index: usize,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let content_sha256 = format!("{:x}", Sha256::digest(content.as_bytes()));
+    let report_scope_sha256 = {
+        let mut normalized = reports.to_vec();
+        normalized.sort();
+        format!("{:x}", Sha256::digest(normalized.join("\n").as_bytes()))
+    };
+    format!(
+        "asr-daily-agent:{}:{}:{}:{}:{}:{}",
+        task.id,
+        task.daily_agent.agent_id,
+        target_id,
+        report_scope_sha256,
+        content_sha256,
+        chunk_index
+    )
+}
+
 /// Send an IM message via the local IM gateway API.
 async fn send_daily_agent_im_message(
     task: &AsrDirectoryTask,
     content: &str,
     _run_id: &str,
-    report_count: usize,
+    reports: &[String],
 ) -> Result<(), String> {
     let channel = daily_agent_im_channel(task).ok_or("IM channel not configured")?;
 
@@ -88,12 +113,21 @@ async fn send_daily_agent_im_message(
 
     let chunks = split_daily_agent_im_content(content);
     let chunk_count = chunks.len();
+    let report_count = reports.len();
     for (index, chunk) in chunks.iter().enumerate() {
         let text = decorate_daily_agent_im_chunk(chunk, index, chunk_count);
+        let idempotency_key = daily_agent_im_idempotency_key(
+            task,
+            target_id,
+            reports,
+            content,
+            index + 1,
+        );
         let mut body = serde_json::json!({
             "target_id": target_id,
             "msg_type": "text",
             "text": text,
+            "idempotency_key": idempotency_key,
         });
         if let Some(provider_id) = channel.provider_id {
             body["provider_id"] = serde_json::Value::String(provider_id.to_string());

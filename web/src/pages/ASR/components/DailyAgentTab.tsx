@@ -105,6 +105,12 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
   const [reportSyncDirDirty, setReportSyncDirDirty] = useState(false);
   const [terminology, setTerminology] = useState("");
   const [terminologyDirty, setTerminologyDirty] = useState(false);
+  const [contextProfileDraft, setContextProfileDraft] = useState<{
+    id: string;
+    runner: string;
+    work_dir: string;
+    instructions: string;
+  } | null>(null);
 
   const fetchAll = useCallback(async () => {
     setLoading(true);
@@ -269,6 +275,8 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
         send_policy: "on_success_with_report",
       },
       output_dir: id,
+      dependencies: [],
+      dependency_failure_policy: "skip",
     };
     setSelectedAgentId(id);
     void saveAgents([...agents, nextAgent]);
@@ -549,10 +557,418 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                 }
               />
             </Descriptions.Item>
+            <Descriptions.Item label="Dependencies" span={2}>
+              <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                <Select
+                  data-testid="asr-daily-agent-dependencies-select"
+                  mode="multiple"
+                  allowClear
+                  value={(selectedAgent.dependencies || []).map(
+                    (dependency) => dependency.agent_id
+                  )}
+                  placeholder="Select upstream agents..."
+                  options={agents
+                    .filter((agent) => agent.id !== selectedAgent.id)
+                    .map((agent) => ({ label: agent.name, value: agent.id }))}
+                  onChange={(dependencyIds: string[]) => {
+                    const existing = new Map(
+                      (selectedAgent.dependencies || []).map((dependency) => [
+                        dependency.agent_id,
+                        dependency,
+                      ])
+                    );
+                    updateAgent(selectedAgent.id, {
+                      dependencies: dependencyIds.map(
+                        (agent_id) =>
+                          existing.get(agent_id) || {
+                            agent_id,
+                            include_output: true,
+                          }
+                      ),
+                    });
+                  }}
+                  style={{ width: "100%" }}
+                />
+                {(selectedAgent.dependencies || []).map((dependency) => (
+                  <Space key={dependency.agent_id}>
+                    <Text code>{dependency.agent_id}</Text>
+                    <Text type="secondary">Include output</Text>
+                    <Switch
+                      size="small"
+                      checked={dependency.include_output !== false}
+                      onChange={(include_output) =>
+                        updateAgent(selectedAgent.id, {
+                          dependencies: (selectedAgent.dependencies || []).map(
+                            (item) =>
+                              item.agent_id === dependency.agent_id
+                                ? { ...item, include_output }
+                                : item
+                          ),
+                        })
+                      }
+                    />
+                  </Space>
+                ))}
+              </Space>
+            </Descriptions.Item>
+            <Descriptions.Item label="Dependency Failure">
+              <Select
+                data-testid="asr-daily-agent-dependency-failure-policy"
+                size="small"
+                value={selectedAgent.dependency_failure_policy || "skip"}
+                onChange={(dependency_failure_policy) =>
+                  updateAgent(selectedAgent.id, {
+                    dependency_failure_policy,
+                  })
+                }
+                style={{ width: 180 }}
+                options={[
+                  { label: "Skip this agent", value: "skip" },
+                  { label: "Continue", value: "continue" },
+                ]}
+              />
+            </Descriptions.Item>
+            <Descriptions.Item label="Independent Research">
+              <Switch
+                data-testid="asr-daily-agent-research-fanout-switch"
+                checked={Boolean(selectedAgent.research_fanout)}
+                onChange={(enabled) =>
+                  updateAgent(selectedAgent.id, {
+                    research_fanout: enabled
+                      ? {
+                          max_questions: 8,
+                          chatgpt_interface_mode: "chat",
+                          chatgpt_model: "pro",
+                          chatgpt_project_url: undefined,
+                          allowed_runners: selectedAgent.runner
+                            ? [selectedAgent.runner]
+                            : [],
+                          context_profiles: {},
+                        }
+                      : undefined,
+                  })
+                }
+              />
+            </Descriptions.Item>
+            {selectedAgent.research_fanout ? (
+              <>
+                <Descriptions.Item label="Max Questions">
+                  <InputNumber
+                    data-testid="asr-daily-agent-research-max-questions"
+                    size="small"
+                    min={1}
+                    max={50}
+                    value={selectedAgent.research_fanout.max_questions}
+                    onChange={(maxQuestions) =>
+                      updateAgent(selectedAgent.id, {
+                        research_fanout: {
+                          ...selectedAgent.research_fanout!,
+                          max_questions: Number(maxQuestions || 1),
+                        },
+                      })
+                    }
+                  />
+                </Descriptions.Item>
+                <Descriptions.Item label="ChatGPT Project URL" span={2}>
+                  <Input
+                    key={`${selectedAgent.id}-project-url-${
+                      selectedAgent.research_fanout.chatgpt_project_url || ""
+                    }`}
+                    data-testid="asr-daily-agent-research-project-url"
+                    size="small"
+                    defaultValue={
+                      selectedAgent.research_fanout.chatgpt_project_url || ""
+                    }
+                    placeholder="https://chatgpt.com/g/g-p-.../project"
+                    onBlur={(event) => {
+                      const chatgptProjectUrl = event.target.value.trim();
+                      if (
+                        chatgptProjectUrl ===
+                        (selectedAgent.research_fanout!
+                          .chatgpt_project_url || "")
+                      ) {
+                        return;
+                      }
+                      updateAgent(selectedAgent.id, {
+                        research_fanout: {
+                          ...selectedAgent.research_fanout!,
+                          chatgpt_project_url:
+                            chatgptProjectUrl || undefined,
+                        },
+                      });
+                    }}
+                    onPressEnter={(event) => event.currentTarget.blur()}
+                  />
+                </Descriptions.Item>
+                <Descriptions.Item label="Allowed Research Runners" span={2}>
+                  <Select
+                    data-testid="asr-daily-agent-research-runners"
+                    mode="multiple"
+                    allowClear
+                    value={selectedAgent.research_fanout.allowed_runners}
+                    options={runnerOptions}
+                    onChange={(allowedRunners: string[]) =>
+                      updateAgent(selectedAgent.id, {
+                        research_fanout: {
+                          ...selectedAgent.research_fanout!,
+                          allowed_runners: allowedRunners,
+                        },
+                      })
+                    }
+                    style={{ width: "100%" }}
+                  />
+                </Descriptions.Item>
+                <Descriptions.Item label="Runtime Data Fallbacks" span={2}>
+                  <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                    {Object.entries(
+                      selectedAgent.research_fanout.context_profiles || {},
+                    ).map(([profileId, profile]) => (
+                      <Space key={profileId} wrap style={{ width: "100%" }}>
+                        <Text code>{profileId}</Text>
+                        <Select
+                          aria-label={`${profileId} fallback runner`}
+                          size="small"
+                          value={profile.runner || undefined}
+                          placeholder="Runner"
+                          options={runnerOptions}
+                          onChange={(runner) =>
+                            updateAgent(selectedAgent.id, {
+                              research_fanout: {
+                                ...selectedAgent.research_fanout!,
+                                context_profiles: {
+                                  ...selectedAgent.research_fanout!
+                                    .context_profiles,
+                                  [profileId]: { ...profile, runner },
+                                },
+                              },
+                            })
+                          }
+                          style={{ width: 180 }}
+                        />
+                        <Input
+                          key={`${profileId}-work-dir-${profile.work_dir}`}
+                          aria-label={`${profileId} fallback working folder`}
+                          size="small"
+                          defaultValue={profile.work_dir}
+                          placeholder="Local working folder"
+                          onBlur={(event) => {
+                            const workDir = event.target.value.trim();
+                            if (workDir === profile.work_dir) {
+                              return;
+                            }
+                            updateAgent(selectedAgent.id, {
+                              research_fanout: {
+                                ...selectedAgent.research_fanout!,
+                                context_profiles: {
+                                  ...selectedAgent.research_fanout!
+                                    .context_profiles,
+                                  [profileId]: {
+                                    ...profile,
+                                    work_dir: workDir,
+                                  },
+                                },
+                              },
+                            });
+                          }}
+                          onPressEnter={(event) => event.currentTarget.blur()}
+                          style={{ width: 260 }}
+                        />
+                        <Input
+                          key={`${profileId}-instructions-${
+                            profile.instructions || ""
+                          }`}
+                          aria-label={`${profileId} fallback instructions`}
+                          size="small"
+                          defaultValue={profile.instructions || ""}
+                          placeholder="What facts should be collected?"
+                          onBlur={(event) => {
+                            const instructions = event.target.value.trim();
+                            if (instructions === (profile.instructions || "")) {
+                              return;
+                            }
+                            updateAgent(selectedAgent.id, {
+                              research_fanout: {
+                                ...selectedAgent.research_fanout!,
+                                context_profiles: {
+                                  ...selectedAgent.research_fanout!
+                                    .context_profiles,
+                                  [profileId]: {
+                                    ...profile,
+                                    instructions:
+                                      instructions || undefined,
+                                  },
+                                },
+                              },
+                            });
+                          }}
+                          onPressEnter={(event) => event.currentTarget.blur()}
+                          style={{ width: 260 }}
+                        />
+                        <Button
+                          size="small"
+                          danger
+                          onClick={() => {
+                            const nextProfiles = {
+                              ...selectedAgent.research_fanout!
+                                .context_profiles,
+                            };
+                            delete nextProfiles[profileId];
+                            updateAgent(selectedAgent.id, {
+                              research_fanout: {
+                                ...selectedAgent.research_fanout!,
+                                context_profiles: nextProfiles,
+                              },
+                            });
+                          }}
+                        >
+                          Remove
+                        </Button>
+                      </Space>
+                    ))}
+                    {contextProfileDraft ? (
+                      <Space wrap style={{ width: "100%" }}>
+                        <Input
+                          aria-label="New fallback name"
+                          size="small"
+                          value={contextProfileDraft.id}
+                          placeholder="Fallback name"
+                          onChange={(event) =>
+                            setContextProfileDraft({
+                              ...contextProfileDraft,
+                              id: normalizeAgentToken(event.target.value),
+                            })
+                          }
+                          style={{ width: 160 }}
+                        />
+                        <Select
+                          aria-label="New fallback runner"
+                          size="small"
+                          value={contextProfileDraft.runner || undefined}
+                          placeholder="Runner"
+                          options={runnerOptions}
+                          onChange={(runner) =>
+                            setContextProfileDraft({
+                              ...contextProfileDraft,
+                              runner,
+                            })
+                          }
+                          style={{ width: 180 }}
+                        />
+                        <Input
+                          aria-label="New fallback working folder"
+                          size="small"
+                          value={contextProfileDraft.work_dir}
+                          placeholder="Local working folder"
+                          onChange={(event) =>
+                            setContextProfileDraft({
+                              ...contextProfileDraft,
+                              work_dir: event.target.value,
+                            })
+                          }
+                          style={{ width: 260 }}
+                        />
+                        <Input
+                          aria-label="New fallback instructions"
+                          size="small"
+                          value={contextProfileDraft.instructions}
+                          placeholder="What facts should be collected?"
+                          onChange={(event) =>
+                            setContextProfileDraft({
+                              ...contextProfileDraft,
+                              instructions: event.target.value,
+                            })
+                          }
+                          style={{ width: 260 }}
+                        />
+                        <Button
+                          size="small"
+                          type="primary"
+                          onClick={() => {
+                            const profileId = contextProfileDraft.id.trim();
+                            const runner = contextProfileDraft.runner.trim();
+                            const workDir = contextProfileDraft.work_dir.trim();
+                            if (
+                              !DAILY_AGENT_TOKEN_RE.test(profileId) ||
+                              !runner ||
+                              !workDir
+                            ) {
+                              message.warning(
+                                "Fallback name, runner, and local working folder are required",
+                              );
+                              return;
+                            }
+                            updateAgent(selectedAgent.id, {
+                              research_fanout: {
+                                ...selectedAgent.research_fanout!,
+                                context_profiles: {
+                                  ...selectedAgent.research_fanout!
+                                    .context_profiles,
+                                  [profileId]: {
+                                    runner,
+                                    work_dir: workDir,
+                                    instructions:
+                                      contextProfileDraft.instructions.trim() ||
+                                      undefined,
+                                  },
+                                },
+                              },
+                            });
+                            setContextProfileDraft(null);
+                          }}
+                        >
+                          Save fallback
+                        </Button>
+                        <Button
+                          size="small"
+                          onClick={() => setContextProfileDraft(null)}
+                        >
+                          Cancel
+                        </Button>
+                      </Space>
+                    ) : null}
+                    <Button
+                      data-testid="asr-daily-agent-add-context-profile"
+                      size="small"
+                      icon={<PlusOutlined />}
+                      onClick={() => {
+                        const profiles =
+                          selectedAgent.research_fanout!.context_profiles || {};
+                        let index = Object.keys(profiles).length + 1;
+                        let profileId = `context_${index}`;
+                        while (profiles[profileId]) {
+                          index += 1;
+                          profileId = `context_${index}`;
+                        }
+                        setContextProfileDraft({
+                          id: profileId,
+                          runner:
+                            selectedAgent.research_fanout!.allowed_runners[0] ||
+                            selectedAgent.runner,
+                          work_dir: "",
+                          instructions: "",
+                        });
+                      }}
+                      disabled={Boolean(contextProfileDraft)}
+                    >
+                      Add runtime fallback
+                    </Button>
+                  </Space>
+                </Descriptions.Item>
+              </>
+            ) : null}
             <Descriptions.Item label="Instructions Source">
               <Tag>{instructions?.source || selectedAgent.instructions_source}</Tag>
             </Descriptions.Item>
           </Descriptions>
+          {selectedAgent.research_fanout ? (
+            <Alert
+              style={{ marginTop: 12 }}
+              type="info"
+              showIcon
+              message="Each research question runs in its own conversation"
+              description="The upstream dispatcher must output a research manifest. ChatGPT Web research runs are forced to Chat mode with the Pro model before a question is sent. When a Project URL is configured, every new research conversation is created inside that ChatGPT Project."
+            />
+          ) : null}
         </Card>
 
         <Card size="small" title="IM Delivery" loading={loading && !config}>
@@ -649,6 +1065,8 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                     ? "green"
                     : selectedAgent.last_status === "failed"
                       ? "red"
+                      : selectedAgent.last_status === "skipped_dependency_failed"
+                        ? "orange"
                       : "default"
                 }
               >
@@ -918,7 +1336,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
           type="info"
           showIcon
           style={{ marginBottom: 12 }}
-          message="Each ASR daily markdown is processed by enabled agents in order. Open an agent to edit runner, IM delivery, output directory, and instructions."
+          message="Enabled agents run in dependency order. Without dependencies, the configured list order is preserved."
         />
         <Table<AsrDailyAgentItem>
           data-testid="asr-daily-agents-table"
@@ -926,7 +1344,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
           rowKey="id"
           dataSource={agents}
           pagination={false}
-          scroll={{ x: 1180 }}
+          scroll={{ x: 1370 }}
           columns={[
             {
               title: <span style={{ whiteSpace: "nowrap" }}>Enabled</span>,
@@ -980,6 +1398,24 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
               ),
             },
             {
+              title: <span style={{ whiteSpace: "nowrap" }}>Dependencies</span>,
+              dataIndex: "dependencies",
+              width: 190,
+              render: (_, record) =>
+                record.dependencies?.length ? (
+                  <Space size={[4, 4]} wrap>
+                    {record.dependencies.map((dependency) => (
+                      <Tag key={dependency.agent_id}>
+                        {dependency.agent_id}
+                        {dependency.include_output === false ? " / order" : ""}
+                      </Tag>
+                    ))}
+                  </Space>
+                ) : (
+                  <Text type="secondary">None</Text>
+                ),
+            },
+            {
               title: <span style={{ whiteSpace: "nowrap" }}>IM Delivery</span>,
               dataIndex: ["im_delivery", "enabled"],
               width: 190,
@@ -1008,6 +1444,8 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                           ? "green"
                           : record.last_status === "failed"
                             ? "red"
+                            : record.last_status === "skipped_dependency_failed"
+                              ? "orange"
                             : "default"
                       }
                     >

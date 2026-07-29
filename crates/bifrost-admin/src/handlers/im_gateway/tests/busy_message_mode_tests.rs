@@ -352,6 +352,25 @@ fn live_guide_group_turns_follow_the_external_run_outcome() {
 }
 
 #[test]
+fn ordinary_busy_messages_always_queue_without_creating_guides() {
+    let manager = SessionQueueManager::new();
+
+    assert_eq!(
+        enqueue_busy_default_message(&manager, "empty", "   ", Vec::new()),
+        Err("消息内容不能为空")
+    );
+
+    for session in ["builtin-busy", "external-busy", "web-busy"] {
+        let items =
+            enqueue_busy_default_message(&manager, session, "  下一条独立问题  ", Vec::new())
+                .expect("ordinary busy message should queue");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].message, "下一条独立问题");
+        assert!(manager.guide_status(session).is_empty());
+    }
+}
+
+#[test]
 fn codex_runner_metadata_resumes_queued_messages_after_current_run() {
     let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         images: Vec::new(),

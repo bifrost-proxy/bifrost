@@ -33,6 +33,28 @@ fn test_target() -> ImTarget {
 }
 
 #[test]
+fn send_ready_survives_provider_restart_with_encrypted_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = test_provider();
+    let target = test_target();
+    let provider = WeixinProvider::new_with_data_dir(temp.path());
+    assert!(!provider.send_ready(&config, &target));
+    provider
+        .context_store
+        .as_ref()
+        .unwrap()
+        .put(
+            WeixinProvider::account_id(&config),
+            &target.receive_id,
+            "context-token",
+        )
+        .unwrap();
+
+    let restarted = WeixinProvider::new_with_data_dir(temp.path());
+    assert!(restarted.send_ready(&config, &target));
+}
+
+#[test]
 fn normalize_login_account_uses_ilink_fields_and_redirected_base_url() {
     let account = WeixinProvider::normalize_login_account(
         serde_json::json!({
@@ -49,6 +71,96 @@ fn normalize_login_account_uses_ilink_fields_and_redirected_base_url() {
     assert_eq!(account.user_id, "user-1@im.wechat");
     assert_eq!(account.base_url, "https://ilink.example.com");
     assert_eq!(account.bot_token, "token-1");
+}
+
+#[tokio::test]
+async fn complete_login_uses_the_long_login_http_timeout() {
+    use bytes::Bytes;
+    use http_body_util::Full;
+    use hyper::body::Incoming;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response};
+    use hyper_util::rt::TokioIo;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind delayed login server");
+    let port = listener.local_addr().expect("mock local addr").port();
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let io = TokioIo::new(stream);
+        let service = service_fn(|_req: Request<Incoming>| async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok::<_, hyper::Error>(
+                Response::builder()
+                    .status(200)
+                    .body(Full::new(Bytes::from_static(
+                        br#"{"status":"confirmed","bot_token":"token-1","ilink_bot_id":"bot-1@im.bot","ilink_user_id":"user-1@im.wechat"}"#,
+                    )))
+                    .unwrap(),
+            )
+        });
+        let _ = http1::Builder::new().serve_connection(io, service).await;
+    });
+
+    let provider =
+        WeixinProvider::with_http_timeouts(Duration::from_millis(50), Duration::from_millis(250));
+    let account = provider
+        .complete_login(
+            "poll-key",
+            Some(&format!("http://127.0.0.1:{port}")),
+            1,
+            Duration::ZERO,
+        )
+        .await
+        .expect("login status request must outlive the default request timeout");
+
+    assert_eq!(account.account_id, "bot-1@im.bot");
+    assert_eq!(account.user_id, "user-1@im.wechat");
+}
+
+#[tokio::test]
+async fn start_login_accepts_qrcode_image_content_url() {
+    use bytes::Bytes;
+    use http_body_util::Full;
+    use hyper::body::Incoming;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response};
+    use hyper_util::rt::TokioIo;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind qr server");
+    let port = listener.local_addr().expect("mock local addr").port();
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let io = TokioIo::new(stream);
+        let service = service_fn(|_req: Request<Incoming>| async move {
+            Ok::<_, hyper::Error>(
+                Response::builder()
+                    .status(200)
+                    .body(Full::new(Bytes::from_static(
+                        br#"{"qrcode":"poll-key","qrcode_img_content":"https://example.com/qr.png"}"#,
+                    )))
+                    .unwrap(),
+            )
+        });
+        let _ = http1::Builder::new().serve_connection(io, service).await;
+    });
+
+    let login = WeixinProvider::new()
+        .start_login(Some(&format!("http://127.0.0.1:{port}")))
+        .await
+        .expect("start login");
+    assert_eq!(login.poll_key, "poll-key");
+    assert_eq!(login.scan_url, "https://example.com/qr.png");
+    assert_eq!(login.expires_in_seconds, LOGIN_QR_EXPIRES_IN_SECONDS);
 }
 
 #[test]
@@ -102,6 +214,49 @@ fn normalize_update_extracts_ilink_item_list_text_and_numeric_message_id() {
     assert_eq!(
         event.message.as_ref().unwrap().raw_type.as_deref(),
         Some("1")
+    );
+}
+
+#[test]
+fn normalize_update_extracts_weixin_reply_reference() {
+    let provider = test_provider();
+    let event = WeixinProvider::normalize_update(
+        &provider,
+        "mock-bot@im.bot",
+        serde_json::json!({
+            "message_id": 7481921678546968584u64,
+            "from_user_id": "user-reply@im.wechat",
+            "message_type": 1,
+            "item_list": [
+                {
+                    "type": 1,
+                    "text_item": {
+                        "text": "这个链接对应哪篇文章？"
+                    },
+                    "ref_msg": {
+                        "message_item": {
+                            "type": 1,
+                            "msg_id": 7481920452618855176u64,
+                            "create_time_ms": 1783828843000u64,
+                            "text_item": {
+                                "text": "原回复 https://example.com/article"
+                            }
+                        }
+                    }
+                }
+            ]
+        }),
+    );
+
+    let message = event.message.expect("normalized message");
+    assert_eq!(message.text, "这个链接对应哪篇文章？");
+    assert_eq!(
+        message.reply_to,
+        Some(ImMessageReference {
+            message_id: Some("7481920452618855176".to_string()),
+            created_at_ms: Some(1783828843000),
+            text: Some("原回复 https://example.com/article".to_string()),
+        })
     );
 }
 
@@ -199,7 +354,8 @@ async fn download_message_image_resource_fetches_plain_full_url() {
         let _ = http1::Builder::new().serve_connection(io, service).await;
     });
 
-    let provider = WeixinProvider::new();
+    let data_dir = tempfile::tempdir().unwrap();
+    let provider = WeixinProvider::new_with_data_dir(data_dir.path());
     let image = ImImageAttachment {
         file_key: "img-full-url".to_string(),
         source: ImImageSource::MessageResource,
@@ -319,7 +475,8 @@ async fn send_image_uploads_original_bytes_to_cdn_and_sends_image_item() {
         }
     });
 
-    let provider = WeixinProvider::new();
+    let data_dir = tempfile::tempdir().unwrap();
+    let provider = WeixinProvider::new_with_data_dir(data_dir.path());
     let mut config = test_provider();
     config.base_url = Some(format!("http://127.0.0.1:{port}"));
     let target = ImTarget {
@@ -333,6 +490,16 @@ async fn send_image_uploads_original_bytes_to_cdn_and_sends_image_item() {
         created_at: 0,
         updated_at: 0,
     };
+    provider
+        .context_store
+        .as_ref()
+        .unwrap()
+        .put(
+            WeixinProvider::account_id(&config),
+            &target.receive_id,
+            "image-context",
+        )
+        .unwrap();
     let uploaded = provider
         .upload_image(
             &config,
@@ -454,7 +621,7 @@ fn split_text_for_retry_preserves_multibyte_content() {
 }
 
 #[tokio::test]
-async fn im_long_reply_delivery_send_text_retries_failed_long_message_as_split_messages() {
+async fn im_long_reply_delivery_splits_before_send_with_stable_child_ids() {
     use bytes::Bytes;
     use http_body_util::{BodyExt, Full};
     use hyper::body::Incoming;
@@ -497,11 +664,8 @@ async fn im_long_reply_delivery_send_text_retries_failed_long_message_as_split_m
                                 bodies.push(json);
                                 bodies.len()
                             };
-                            let response = if call_count == 1 {
-                                r#"{"ret":-2,"errmsg":"unknown error"}"#.to_string()
-                            } else {
-                                format!(r#"{{"ret":0,"message_id":"chunk-{call_count}"}}"#)
-                            };
+                            let response =
+                                format!(r#"{{"ret":0,"message_id":"chunk-{call_count}"}}"#);
                             return Ok::<_, hyper::Error>(
                                 Response::builder()
                                     .status(200)
@@ -522,9 +686,21 @@ async fn im_long_reply_delivery_send_text_retries_failed_long_message_as_split_m
         }
     });
 
-    let provider = WeixinProvider::new();
+    let data_dir = tempfile::tempdir().unwrap();
+    let provider = WeixinProvider::new_with_data_dir(data_dir.path());
     let mut config = test_provider();
     config.base_url = Some(format!("http://127.0.0.1:{port}"));
+    let target = test_target();
+    provider
+        .context_store
+        .as_ref()
+        .unwrap()
+        .put(
+            WeixinProvider::account_id(&config),
+            &target.receive_id,
+            "text-context",
+        )
+        .unwrap();
     let long_text = format!(
         "{}\n{}",
         "最近一周大模型训练进展".repeat(260),
@@ -532,30 +708,28 @@ async fn im_long_reply_delivery_send_text_retries_failed_long_message_as_split_m
     );
 
     let result = provider
-        .send_text(&config, &test_target(), &long_text)
+        .send_text_with_client_id(&config, &target, &long_text, "stable-long-1")
         .await
-        .expect("split retry should recover long sendmessage failure");
+        .expect("proactive split send");
 
-    assert_eq!(result.message_id.as_deref(), Some("chunk-2"));
+    assert_eq!(result.message_id.as_deref(), Some("chunk-1"));
     let bodies = sendmessage_bodies.lock().expect("lock bodies").clone();
-    assert!(
-        bodies.len() > 2,
-        "expected original send plus split retries"
-    );
-    assert_eq!(
-        bodies[0]["msg"]["item_list"][0]["text_item"]["text"],
-        long_text
-    );
+    assert!(bodies.len() > 1, "expected proactive split messages");
 
     let mut recovered = String::new();
-    let split_total = bodies.len() - 1;
-    for (idx, body) in bodies.iter().skip(1).enumerate() {
+    let split_total = bodies.len();
+    for (idx, body) in bodies.iter().enumerate() {
         let text = body["msg"]["item_list"][0]["text_item"]["text"]
             .as_str()
             .expect("chunk text");
         let prefix = format!("[{}/{}]\n", idx + 1, split_total);
         assert!(text.starts_with(&prefix), "chunk must include order prefix");
         assert!(text.len() <= TEXT_RETRY_CHUNK_MAX_BYTES + 64);
+        assert_eq!(
+            body["msg"]["client_id"],
+            format!("stable-long-1-part-{}", idx + 1)
+        );
+        assert_eq!(body["msg"]["context_token"], "text-context");
         recovered.push_str(&text[prefix.len()..]);
     }
     assert_eq!(recovered, long_text);
@@ -591,4 +765,44 @@ async fn validate_config_requires_completed_qr_login() {
         .errors
         .iter()
         .any(|error| error.contains("QR login")));
+}
+
+#[test]
+fn unavailable_context_store_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let blocked_data_dir = temp.path().join("blocked-data-dir");
+    std::fs::write(&blocked_data_dir, b"not a directory").unwrap();
+    let provider = WeixinProvider::new_with_data_dir(&blocked_data_dir);
+    assert!(provider.context_store.is_none());
+    assert!(provider
+        .store_context_for_test(&test_provider(), "owner", "context")
+        .is_err());
+}
+
+#[tokio::test]
+async fn missing_context_blocks_short_and_chunked_text_before_network_send() {
+    let temp = tempfile::tempdir().unwrap();
+    let provider = WeixinProvider::new_with_data_dir(temp.path());
+    let config = test_provider();
+    let target = test_target();
+
+    let short_error = provider
+        .send_text_with_client_id(&config, &target, "hello", "short-client-id")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(short_error.contains("not send-ready"));
+
+    let long_error = provider
+        .send_text_with_client_id(
+            &config,
+            &target,
+            &"long text".repeat(TEXT_RETRY_CHUNK_MAX_CHARS),
+            "chunked-client-id",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(long_error.contains("chunk 1/"));
+    assert!(long_error.contains("not send-ready"));
 }

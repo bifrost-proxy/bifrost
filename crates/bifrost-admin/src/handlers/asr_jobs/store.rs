@@ -1209,6 +1209,34 @@ fn existing_artifact_path(recorded: Option<&PathBuf>, canonical: &Path) -> Optio
         .or_else(|| canonical.is_file().then(|| canonical.to_path_buf()))
 }
 
+fn suppress_pre_migration_failed_records(task_id: &str) -> Result<usize, String> {
+    let mut files = load_file_store(task_id);
+    let marker = moss_non_retryable_marker_prefix();
+    let mut suppressed_count = 0usize;
+    for record in files.files.values_mut() {
+        if record.status != FileStatus::Failed {
+            continue;
+        }
+        let previous_error = record.error.as_deref().unwrap_or("unknown pre-migration failure");
+        if previous_error.starts_with(&marker) {
+            continue;
+        }
+        record.error = Some(moss_non_retryable_runtime_error(&format!(
+            "preserved pre-migration failure: {previous_error}"
+        )));
+        suppressed_count += 1;
+    }
+    if suppressed_count > 0 {
+        save_file_store(task_id, &files)?;
+        tracing::info!(
+            task_id = %task_id,
+            suppressed_count,
+            "preserved and suppressed pre-migration ASR failures for MOSS mode"
+        );
+    }
+    Ok(suppressed_count)
+}
+
 fn is_retryable_asr_server_acquire_error(error: &str) -> bool {
     error.trim() == "ASR diarization worker failed:"
         || error.contains("managed ASR server start failed")

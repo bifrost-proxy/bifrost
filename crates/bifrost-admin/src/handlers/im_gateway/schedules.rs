@@ -1034,6 +1034,7 @@ pub(super) async fn send_schedule_run_notification(
         message_id,
         msg_type: Some(outbound_log_msg_type(&provider, "text")),
         content_preview: Some(truncate_str(&msg, 200)),
+        content: Some(msg.clone()),
         trigger: Some(format!("schedule:{}", schedule.id)),
         error: error_msg,
         sender_open_id: None,

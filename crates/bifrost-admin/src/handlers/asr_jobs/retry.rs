@@ -15,7 +15,13 @@ async fn retry_failed_chunks_response(task_id: &str, file_key: &str) -> Response
             if !outcome.daily_documents_refreshed.is_empty() {
                 if let Some(task) = find_task(task_id) {
                     spawn_daily_agent_original_files_after_refresh(&task);
-                    maybe_enqueue_daily_agent_after_asr_run(&task).await;
+                    let dates = load_file_store(task_id)
+                        .files
+                        .get(file_key)
+                        .and_then(file_record_local_date)
+                        .map(|date| vec![date.format("%Y-%m-%d").to_string()])
+                        .unwrap_or_default();
+                    maybe_enqueue_daily_agent_after_asr_run(&task, &dates).await;
                 }
             }
             retry_file_chunks_success_response(outcome)
@@ -514,6 +520,7 @@ async fn run_bulk_failed_chunk_retry(task: AsrDirectoryTask) {
     );
 
     let mut refreshed_daily_documents = false;
+    let mut refreshed_dates = Vec::new();
     for target in targets {
         let file_start = Instant::now();
         update_bulk_chunk_retry_state(&task.id, |state| {
@@ -544,6 +551,13 @@ async fn run_bulk_failed_chunk_retry(task: AsrDirectoryTask) {
                 let still_failed = outcome.still_failed_chunks.len();
                 if !outcome.daily_documents_refreshed.is_empty() {
                     refreshed_daily_documents = true;
+                    if let Some(date) = load_file_store(&task.id)
+                        .files
+                        .get(&target.file_key)
+                        .and_then(file_record_local_date)
+                    {
+                        refreshed_dates.push(date.format("%Y-%m-%d").to_string());
+                    }
                 }
                 let file_result = BulkChunkRetryFileResult {
                     file_key: target.file_key.clone(),
@@ -641,7 +655,7 @@ async fn run_bulk_failed_chunk_retry(task: AsrDirectoryTask) {
 
     if refreshed_daily_documents {
         spawn_daily_agent_original_files_after_refresh(&task);
-        maybe_enqueue_daily_agent_after_asr_run(&task).await;
+        maybe_enqueue_daily_agent_after_asr_run(&task, &refreshed_dates).await;
     }
 }
 

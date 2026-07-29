@@ -239,6 +239,297 @@ fn normalize_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+async fn prepare_new_chat_surface(cdp: &CdpClient, config: &RuntimeConfig) -> Result<(), String> {
+    let interface_mode = config.chatgpt.interface_mode.trim().to_ascii_lowercase();
+    match interface_mode.as_str() {
+        "" | "auto" => {}
+        "chat" => ensure_chat_mode(cdp).await?,
+        other => {
+            return Err(format!(
+                "browser_ui: unsupported ChatGPT interface mode '{other}'"
+            ));
+        }
+    }
+
+    let model = config.chatgpt.model.trim().to_ascii_lowercase();
+    match model.as_str() {
+        "" | "auto" => {}
+        "pro" => ensure_pro_model(cdp).await?,
+        other => {
+            return Err(format!(
+                "browser_ui: unsupported ChatGPT model preference '{other}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn wait_chat_surface_value(
+    cdp: &CdpClient,
+    expression: &str,
+    timeout_duration: Duration,
+    is_ready: impl Fn(&Value) -> bool,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + timeout_duration;
+    loop {
+        let value = evaluate_value(cdp, expression).await?;
+        if is_ready(&value) {
+            return Ok(value);
+        }
+        if Instant::now() >= deadline {
+            return Ok(value);
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn ensure_chat_mode(cdp: &CdpClient) -> Result<(), String> {
+    let locate = r#"(() => {
+      const visible = (el) => {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const label = (el) => (el.textContent || '').replace(/\s+/g, ' ').trim();
+      const chatLabels = new Set(['Chat', '聊天']);
+      const workLabels = new Set(['Work', '工作']);
+      const radios = Array.from(document.querySelectorAll('[role="radio"]')).filter(visible);
+      const item = radios.find((el) => {
+        if (!chatLabels.has(label(el))) return false;
+        const group = el.closest('[role="group"]');
+        return !!group && radios.some((peer) =>
+          peer !== el && group.contains(peer) && workLabels.has(label(peer))
+        );
+      });
+      if (!item) return { ok: false, error: 'chat_mode_control_not_found', url: location.href };
+      const rect = item.getBoundingClientRect();
+      const dataState = (item.getAttribute('data-state') || '').toLowerCase();
+      return {
+        ok: true,
+        checked:
+          item.getAttribute('aria-checked') === 'true' ||
+          item.getAttribute('aria-selected') === 'true' ||
+          ['on', 'checked', 'active'].includes(dataState),
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2
+      };
+    })()"#;
+    let state = wait_chat_surface_value(cdp, locate, Duration::from_secs(5), |value| {
+        value.get("ok").and_then(Value::as_bool) == Some(true)
+    })
+    .await?;
+    if !state.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(format!("browser_ui: cannot enforce Chat mode: {state}"));
+    }
+    if !state
+        .get("checked")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let x = state.get("x").and_then(Value::as_f64).unwrap_or(0.0);
+        let y = state.get("y").and_then(Value::as_f64).unwrap_or(0.0);
+        cdp_click(cdp, x, y).await?;
+    }
+    let verified = wait_chat_surface_value(cdp, locate, Duration::from_secs(5), |value| {
+        value.get("checked").and_then(Value::as_bool) == Some(true)
+    })
+    .await?;
+    if verified.get("checked").and_then(Value::as_bool) != Some(true) {
+        return Err(format!(
+            "browser_ui: Chat mode selection could not be verified: {verified}"
+        ));
+    }
+    info!("chatgpt_web send: verified Chat interface mode");
+    Ok(())
+}
+
+async fn ensure_pro_model(cdp: &CdpClient) -> Result<(), String> {
+    let picker_expression = r#"(() => {
+      const visible = (el) => {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      const candidates = Array.from(document.querySelectorAll('main button[aria-haspopup="menu"]'))
+        .filter(visible)
+        .map((el) => {
+          const rect = el.getBoundingClientRect();
+          return {
+            text: (el.textContent || '').replace(/\s+/g, ' ').trim(),
+            ariaLabel: el.getAttribute('aria-label') || '',
+            testId: el.getAttribute('data-testid') || '',
+            title: el.getAttribute('title') || '',
+            x: rect.left + rect.width / 2,
+            y: rect.top + rect.height / 2
+          };
+        });
+      return { candidates };
+    })()"#;
+    let picker = wait_chat_surface_value(cdp, picker_expression, Duration::from_secs(5), |value| {
+        select_pro_model_picker(value).is_ok()
+    })
+    .await?;
+    let picker = select_pro_model_picker(&picker)
+        .map_err(|error| format!("browser_ui: cannot locate ChatGPT model picker: {error}"))?;
+    if picker.selected {
+        info!("chatgpt_web send: verified Pro model");
+        return Ok(());
+    }
+
+    cdp_click(cdp, picker.x, picker.y).await?;
+    let option_expression = r#"(() => {
+          const visible = (el) => {
+            if (!el) return false;
+            const rect = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
+            return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+          };
+          const items = Array.from(document.querySelectorAll('[role="menuitemradio"]'))
+            .filter(visible)
+            .filter((el) => (el.textContent || '').replace(/\s+/g, ' ').trim() === 'Pro');
+          if (items.length !== 1) return { ok: false, error: 'pro_model_option_not_unique', count: items.length };
+          const rect = items[0].getBoundingClientRect();
+          return { ok: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        })()"#;
+    let option = wait_chat_surface_value(cdp, option_expression, Duration::from_secs(5), |value| {
+        value.get("ok").and_then(Value::as_bool) == Some(true)
+    })
+    .await?;
+    if !option.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        return Err(format!("browser_ui: cannot select Pro model: {option}"));
+    }
+    cdp_click(
+        cdp,
+        option.get("x").and_then(Value::as_f64).unwrap_or(0.0),
+        option.get("y").and_then(Value::as_f64).unwrap_or(0.0),
+    )
+    .await?;
+    let verified =
+        wait_chat_surface_value(cdp, picker_expression, Duration::from_secs(5), |value| {
+            select_pro_model_picker(value)
+                .map(|picker| picker.selected)
+                .unwrap_or(false)
+        })
+        .await?;
+    let verified = select_pro_model_picker(&verified).map_err(|error| {
+        format!("browser_ui: Pro model selection could not be verified: {error}")
+    })?;
+    if !verified.selected {
+        return Err(format!(
+            "browser_ui: Pro model selection could not be verified: {verified:?}"
+        ));
+    }
+    info!("chatgpt_web send: selected and verified Pro model");
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ProModelPicker {
+    selected: bool,
+    x: f64,
+    y: f64,
+}
+
+fn select_pro_model_picker(value: &Value) -> Result<ProModelPicker, String> {
+    let candidates = value
+        .get("candidates")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("model_picker_candidates_missing value={value}"))?;
+
+    let pro_candidates = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| {
+                    text.split_whitespace()
+                        .any(|token| token.eq_ignore_ascii_case("pro"))
+                })
+        })
+        .collect::<Vec<_>>();
+    if pro_candidates.len() == 1 {
+        return pro_model_picker_from_candidate(pro_candidates[0], true);
+    }
+    if pro_candidates.len() > 1 {
+        return Err(format!(
+            "pro_model_picker_not_unique count={} labels={}",
+            pro_candidates.len(),
+            model_picker_labels(&pro_candidates)
+        ));
+    }
+
+    let hinted_candidates = candidates
+        .iter()
+        .filter(|candidate| model_picker_candidate_has_hint(candidate))
+        .collect::<Vec<_>>();
+    if hinted_candidates.len() == 1 {
+        return pro_model_picker_from_candidate(hinted_candidates[0], false);
+    }
+
+    Err(format!(
+        "model_picker_not_unique count={} hinted_count={} labels={}",
+        candidates.len(),
+        hinted_candidates.len(),
+        model_picker_labels(&candidates.iter().collect::<Vec<_>>())
+    ))
+}
+
+fn model_picker_candidate_has_hint(candidate: &Value) -> bool {
+    for field in ["ariaLabel", "testId", "title"] {
+        if candidate
+            .get(field)
+            .and_then(Value::as_str)
+            .is_some_and(|value| {
+                let value = value.to_ascii_lowercase();
+                value.contains("model") || value.contains("模型")
+            })
+        {
+            return true;
+        }
+    }
+
+    candidate
+        .get("text")
+        .and_then(Value::as_str)
+        .is_some_and(|text| {
+            let text = text.trim().to_ascii_lowercase();
+            matches!(text.as_str(), "auto" | "instant" | "thinking") || text.starts_with("gpt-")
+        })
+}
+
+fn pro_model_picker_from_candidate(
+    candidate: &Value,
+    selected: bool,
+) -> Result<ProModelPicker, String> {
+    let x = candidate
+        .get("x")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| format!("model_picker_x_missing candidate={candidate}"))?;
+    let y = candidate
+        .get("y")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| format!("model_picker_y_missing candidate={candidate}"))?;
+    Ok(ProModelPicker { selected, x, y })
+}
+
+fn model_picker_labels(candidates: &[&Value]) -> String {
+    serde_json::to_string(
+        &candidates
+            .iter()
+            .map(|candidate| {
+                candidate
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap_or_else(|_| "[]".to_string())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::im_gateway::chatgpt_web) enum ComposerTextInjectionMode {
     InsertText,
@@ -258,7 +549,12 @@ pub(in crate::im_gateway::chatgpt_web) fn composer_text_injection_mode(
 pub(in crate::im_gateway::chatgpt_web) fn send_button_ready_max_wait(text: &str) -> Duration {
     if composer_text_injection_mode(text) == ComposerTextInjectionMode::NativeClipboardPaste {
         let chars = text.chars().count() as u64;
-        Duration::from_secs((30 + chars / 10_000).clamp(30, 180))
+        // ChatGPT converts very large clipboard pastes into an uploaded text
+        // attachment. The upload itself is small, but server-side parsing can
+        // keep the send button disabled for several minutes. Scale in roughly
+        // one-second-per-1k-character steps and keep a hard upper bound so a
+        // genuinely stuck upload still fails closed.
+        Duration::from_secs((30 + chars / 1_000).clamp(30, 600))
     } else {
         Duration::from_secs(10)
     }
@@ -266,7 +562,8 @@ pub(in crate::im_gateway::chatgpt_web) fn send_button_ready_max_wait(text: &str)
 
 pub(in crate::im_gateway::chatgpt_web) fn send_button_ready_retry_max_wait(text: &str) -> Duration {
     if composer_text_injection_mode(text) == ComposerTextInjectionMode::NativeClipboardPaste {
-        Duration::from_secs(60)
+        let chars = text.chars().count();
+        Duration::from_secs(if chars > 200_000 { 180 } else { 60 })
     } else {
         Duration::from_secs(15)
     }
@@ -650,16 +947,17 @@ async fn send_with_browser_once(
                             "chatgpt_web send [strong]: page redirected but no conversation_id to navigate back to"
                         );
                         expected_conversation_id = None;
+                        recover_to_new_conversation(cdp, config, &error).await?;
                     }
                 } else {
                     // ── Weak consistency mode ──
                     // Accept whatever page we're on. Dismiss modals and proceed.
                     warn!(
                         %error,
-                        "chatgpt_web send [weak]: conversation not reachable, using current page as-is (no navigation)"
+                        "chatgpt_web send [weak]: conversation not reachable, recovering a clean new conversation target"
                     );
-                    dismiss_modal_and_wait(cdp).await;
                     expected_conversation_id = None;
+                    recover_to_new_conversation(cdp, config, &error).await?;
                 }
             } else {
                 return Err(error);
@@ -792,14 +1090,22 @@ async fn send_with_browser_once(
                         conversation_id.unwrap_or("unknown")
                     ));
                 }
-                // Weak consistency: accept current page.
-                info!("chatgpt_web send [weak]: fallback — dismissing modals and using current page (no navigation)");
-                dismiss_modal_and_wait(cdp).await;
+                info!("chatgpt_web send [weak]: fallback — recovering a clean new conversation target");
                 expected_conversation_id = None;
-                wait_composer(cdp, None, Duration::from_secs(60)).await?;
+                recover_to_new_conversation(
+                    cdp,
+                    config,
+                    "weak consistency composer recovery",
+                )
+                .await?;
             }
         } else {
             composer_result?;
+        }
+        if expected_conversation_id.is_none() {
+            ensure_new_conversation_project(cdp, config).await?;
+            prepare_new_chat_surface(cdp, config).await?;
+            wait_composer(cdp, None, Duration::from_secs(30)).await?;
         }
         let mut retry_as_new_available = expected_conversation_id.is_some();
         let send = loop {
@@ -809,10 +1115,8 @@ async fn send_with_browser_once(
             {
                 if retry_as_new_available && should_retry_as_new_conversation(&error) {
                     retry_as_new_available = false;
-                    // Don't navigate — dismiss modals and use current page.
-                    dismiss_modal_and_wait(cdp).await;
                     expected_conversation_id = None;
-                    wait_composer(cdp, None, Duration::from_secs(60)).await?;
+                    recover_to_new_conversation(cdp, config, &error).await?;
                     continue;
                 }
                 return Err(error);
@@ -822,6 +1126,9 @@ async fn send_with_browser_once(
             // One more check for rate-limit modals that may have appeared
             // after the composer became visible but before we type.
             dismiss_modal_and_wait(cdp).await;
+            if expected_conversation_id.is_none() {
+                ensure_new_conversation_project(cdp, config).await?;
+            }
             assert_target_page(cdp, expected_conversation_id, true).await?;
             wait_until_conversation_not_busy(
                 cdp,
@@ -1127,10 +1434,8 @@ async fn send_with_browser_once(
                         && should_retry_as_new_conversation(&error) =>
                 {
                     retry_as_new_available = false;
-                    // Don't navigate — dismiss modals and use current page.
-                    dismiss_modal_and_wait(cdp).await;
                     expected_conversation_id = None;
-                    wait_composer(cdp, None, Duration::from_secs(60)).await?;
+                    recover_to_new_conversation(cdp, config, &error).await?;
                 }
                 Err(error) => return Err(error),
             }
@@ -3124,9 +3429,19 @@ async fn navigate_to_new_conversation(
         .and_then(Value::as_str)
         .unwrap_or_default();
     let current_url_conversation_id = current.get("urlConversationId").and_then(Value::as_str);
+    let current_url = current
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let on_expected_project = config
+        .chatgpt
+        .project_url
+        .as_deref()
+        .is_none_or(|expected| same_project_page(current_url, expected));
     let needs_navigate = current_kind != "new_conversation"
         || current_url_conversation_id.is_some()
-        || page_body_has_fatal_error(&current);
+        || page_body_has_fatal_error(&current)
+        || !on_expected_project;
 
     if needs_navigate {
         let new_url = new_conversation_url(config);
@@ -3149,9 +3464,67 @@ async fn navigate_to_new_conversation(
     }
 }
 
-fn new_conversation_url(config: &RuntimeConfig) -> String {
-    let base = config.chatgpt.base_url.trim_end_matches('/');
-    format!("{base}/")
+pub(in crate::im_gateway::chatgpt_web) fn new_conversation_url(config: &RuntimeConfig) -> String {
+    if let Some(project_url) = config.chatgpt.project_url.as_deref() {
+        format!("{}/", project_url.trim_end_matches('/'))
+    } else {
+        format!("{}/", config.chatgpt.base_url.trim_end_matches('/'))
+    }
+}
+
+async fn recover_to_new_conversation(
+    cdp: &CdpClient,
+    config: &RuntimeConfig,
+    reason: &str,
+) -> Result<(), String> {
+    dismiss_modal_and_wait(cdp).await;
+    navigate_to_new_conversation(cdp, config, reason).await?;
+    wait_composer(cdp, None, Duration::from_secs(60)).await?;
+    ensure_new_conversation_project(cdp, config).await?;
+    prepare_new_chat_surface(cdp, config).await?;
+    wait_composer(cdp, None, Duration::from_secs(30)).await
+}
+
+pub(in crate::im_gateway::chatgpt_web) fn same_project_page(
+    current_url: &str,
+    expected_url: &str,
+) -> bool {
+    let Ok(current) = url::Url::parse(current_url) else {
+        return false;
+    };
+    let Ok(expected) = url::Url::parse(expected_url) else {
+        return false;
+    };
+    if current.scheme() != expected.scheme()
+        || current.host_str() != expected.host_str()
+        || current.port_or_known_default() != expected.port_or_known_default()
+    {
+        return false;
+    }
+    match (
+        super::chatgpt_project_identity(&current),
+        super::chatgpt_project_identity(&expected),
+    ) {
+        (Some(current), Some(expected)) => current == expected,
+        _ => false,
+    }
+}
+
+async fn ensure_new_conversation_project(
+    cdp: &CdpClient,
+    config: &RuntimeConfig,
+) -> Result<(), String> {
+    let Some(expected_url) = config.chatgpt.project_url.as_deref() else {
+        return Ok(());
+    };
+    let state = inspect_page(cdp).await?;
+    let current_url = state.get("url").and_then(Value::as_str).unwrap_or_default();
+    if same_project_page(current_url, expected_url) {
+        return Ok(());
+    }
+    Err(format!(
+        "browser_ui: ChatGPT Project page mismatch before prompt submission: expected={expected_url} actual={current_url}"
+    ))
 }
 
 fn page_matches(
@@ -3724,7 +4097,63 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{SinkExt, StreamExt};
     use serde_json::{json, Value};
+    use std::collections::VecDeque;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::Message;
+
+    async fn mock_cdp(values: Vec<Value>) -> CdpClient {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut values = VecDeque::from(values);
+            while let Some(Ok(message)) = socket.next().await {
+                let Message::Text(text) = message else {
+                    continue;
+                };
+                let request: Value = serde_json::from_str(&text).unwrap();
+                let id = request.get("id").and_then(Value::as_u64).unwrap();
+                let method = request
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let result = if method == "Runtime.evaluate" {
+                    json!({
+                        "result": {
+                            "value": values.pop_front().unwrap_or(Value::Null)
+                        }
+                    })
+                } else {
+                    json!({})
+                };
+                socket
+                    .send(Message::Text(
+                        json!({"id": id, "result": result}).to_string().into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+        CdpClient::connect(&format!("ws://{address}"))
+            .await
+            .unwrap()
+    }
+
+    fn model_picker_value(text: &str, x: f64, y: f64) -> Value {
+        json!({
+            "candidates": [{
+                "text": text,
+                "ariaLabel": "",
+                "testId": "",
+                "title": "",
+                "x": x,
+                "y": y
+            }]
+        })
+    }
 
     #[test]
     fn normalize_whitespace_collapses_runs_and_trims() {
@@ -3778,14 +4207,14 @@ mod tests {
         assert_eq!(send_button_ready_max_wait(&short), Duration::from_secs(10));
 
         let long = "a".repeat(121);
-        // chars / 10_000 = 0 here, but mode switches to paste path with min 30s
+        // chars / 1_000 = 0 here, but mode switches to paste path with min 30s
         assert_eq!(send_button_ready_max_wait(&long), Duration::from_secs(30),);
 
         let very_long = "a".repeat(2_000_000);
-        // 30 + 2000000/10000 = 230, clamped to 180
+        // 30 + 2000000/1000 exceeds the bounded upload wait.
         assert_eq!(
             send_button_ready_max_wait(&very_long),
-            Duration::from_secs(180),
+            Duration::from_secs(600),
         );
     }
 
@@ -3816,6 +4245,11 @@ mod tests {
         assert_eq!(
             send_button_ready_retry_max_wait(&long),
             Duration::from_secs(60),
+        );
+        let attachment_sized = "x".repeat(200_001);
+        assert_eq!(
+            send_button_ready_retry_max_wait(&attachment_sized),
+            Duration::from_secs(180),
         );
     }
 
@@ -3905,6 +4339,288 @@ mod tests {
             extract_conversation_id_from_url("https://chatgpt.com/"),
             None,
         );
+    }
+
+    #[tokio::test]
+    async fn wait_chat_surface_value_polls_until_ready() {
+        let cdp = mock_cdp(vec![json!({"ready": false}), json!({"ready": true})]).await;
+        let value = wait_chat_surface_value(&cdp, "surface", Duration::from_secs(1), |value| {
+            value.get("ready").and_then(Value::as_bool) == Some(true)
+        })
+        .await
+        .unwrap();
+        assert_eq!(value, json!({"ready": true}));
+        cdp.close();
+    }
+
+    #[tokio::test]
+    async fn wait_chat_surface_value_returns_last_value_at_deadline() {
+        let cdp = mock_cdp(vec![json!({"ready": false})]).await;
+        let value = wait_chat_surface_value(&cdp, "surface", Duration::ZERO, |_| false)
+            .await
+            .unwrap();
+        assert_eq!(value, json!({"ready": false}));
+        cdp.close();
+    }
+
+    #[tokio::test]
+    async fn prepare_new_chat_surface_accepts_auto_and_rejects_unknown_preferences() {
+        let cdp = mock_cdp(Vec::new()).await;
+        let mut config = test_runtime_config_with_execution_mode("headed");
+        prepare_new_chat_surface(&cdp, &config).await.unwrap();
+
+        config.chatgpt.interface_mode = "canvas".to_string();
+        assert!(prepare_new_chat_surface(&cdp, &config)
+            .await
+            .unwrap_err()
+            .contains("unsupported ChatGPT interface mode 'canvas'"));
+
+        config.chatgpt.interface_mode = "auto".to_string();
+        config.chatgpt.model = "enterprise".to_string();
+        assert!(prepare_new_chat_surface(&cdp, &config)
+            .await
+            .unwrap_err()
+            .contains("unsupported ChatGPT model preference 'enterprise'"));
+        cdp.close();
+    }
+
+    #[tokio::test]
+    async fn prepare_new_chat_surface_verifies_already_selected_chat_and_pro() {
+        let chat = json!({"ok": true, "checked": true, "x": 10.0, "y": 20.0});
+        let pro = model_picker_value("Pro", 30.0, 40.0);
+        let cdp = mock_cdp(vec![chat.clone(), chat, pro]).await;
+        let mut config = test_runtime_config_with_execution_mode("headed");
+        config.chatgpt.interface_mode = " Chat ".to_string();
+        config.chatgpt.model = " Pro ".to_string();
+        prepare_new_chat_surface(&cdp, &config).await.unwrap();
+        cdp.close();
+    }
+
+    #[tokio::test]
+    async fn chat_and_pro_controls_are_clicked_and_verified_when_unselected() {
+        let cdp = mock_cdp(vec![
+            json!({"ok": true, "checked": false, "x": 10.0, "y": 20.0}),
+            json!({"ok": true, "checked": true, "x": 10.0, "y": 20.0}),
+            model_picker_value("Auto", 30.0, 40.0),
+            json!({"ok": true, "x": 50.0, "y": 60.0}),
+            model_picker_value("Pro", 30.0, 40.0),
+        ])
+        .await;
+        ensure_chat_mode(&cdp).await.unwrap();
+        ensure_pro_model(&cdp).await.unwrap();
+        cdp.close();
+    }
+
+    #[tokio::test]
+    async fn chat_and_pro_control_failures_are_actionable() {
+        let chat_missing = mock_cdp(vec![json!({"ok": false})]).await;
+        let chat_unverified = mock_cdp(vec![
+            json!({"ok": true, "checked": false}),
+            json!({"ok": true, "checked": false}),
+        ])
+        .await;
+        let pro_missing = mock_cdp(vec![json!({"candidates": []})]).await;
+        let pro_option_missing = mock_cdp(vec![
+            model_picker_value("Auto", 30.0, 40.0),
+            json!({"ok": false}),
+        ])
+        .await;
+        let pro_unverified = mock_cdp(vec![
+            model_picker_value("Auto", 30.0, 40.0),
+            json!({"ok": true}),
+            model_picker_value("Auto", 30.0, 40.0),
+        ])
+        .await;
+
+        let (
+            chat_missing_error,
+            chat_verify_error,
+            pro_missing_error,
+            pro_option_error,
+            pro_verify_error,
+        ) = tokio::join!(
+            ensure_chat_mode(&chat_missing),
+            ensure_chat_mode(&chat_unverified),
+            ensure_pro_model(&pro_missing),
+            ensure_pro_model(&pro_option_missing),
+            ensure_pro_model(&pro_unverified),
+        );
+        assert!(chat_missing_error
+            .unwrap_err()
+            .contains("cannot enforce Chat mode"));
+        assert!(chat_verify_error
+            .unwrap_err()
+            .contains("Chat mode selection could not be verified"));
+        assert!(pro_missing_error
+            .unwrap_err()
+            .contains("cannot locate ChatGPT model picker"));
+        assert!(pro_option_error
+            .unwrap_err()
+            .contains("cannot select Pro model"));
+        assert!(pro_verify_error
+            .unwrap_err()
+            .contains("Pro model selection could not be verified"));
+        for cdp in [
+            &chat_missing,
+            &chat_unverified,
+            &pro_missing,
+            &pro_option_missing,
+            &pro_unverified,
+        ] {
+            cdp.close();
+        }
+    }
+
+    #[test]
+    fn pro_model_picker_prefers_unique_pro_label_among_unrelated_menu_buttons() {
+        let mut candidates = (0..14)
+            .map(|index| {
+                json!({
+                    "text": "",
+                    "ariaLabel": format!("menu-{index}"),
+                    "testId": "",
+                    "title": "",
+                    "x": index as f64,
+                    "y": index as f64
+                })
+            })
+            .collect::<Vec<_>>();
+        candidates.push(json!({
+            "text": "Pro",
+            "ariaLabel": "",
+            "testId": "model-switcher-dropdown-button",
+            "title": "",
+            "x": 30.0,
+            "y": 40.0
+        }));
+
+        let picker = select_pro_model_picker(&json!({"candidates": candidates})).unwrap();
+        assert!(picker.selected);
+        assert_eq!(picker.x, 30.0);
+        assert_eq!(picker.y, 40.0);
+    }
+
+    #[test]
+    fn pro_model_picker_uses_unique_model_hint_when_pro_is_not_selected() {
+        let picker = select_pro_model_picker(&json!({
+            "candidates": [
+                {"text": "", "ariaLabel": "More", "testId": "", "title": "", "x": 1.0, "y": 2.0},
+                {"text": "Auto", "ariaLabel": "", "testId": "model-switcher-dropdown-button", "title": "", "x": 3.0, "y": 4.0}
+            ]
+        }))
+        .unwrap();
+        assert!(!picker.selected);
+        assert_eq!(picker.x, 3.0);
+        assert_eq!(picker.y, 4.0);
+    }
+
+    #[test]
+    fn pro_model_picker_rejects_multiple_pro_candidates() {
+        let error = select_pro_model_picker(&json!({
+            "candidates": [
+                {"text": "Pro", "ariaLabel": "", "testId": "model-a", "title": "", "x": 1.0, "y": 2.0},
+                {"text": "GPT-5 Pro", "ariaLabel": "", "testId": "model-b", "title": "", "x": 3.0, "y": 4.0}
+            ]
+        }))
+        .unwrap_err();
+        assert!(error.contains("pro_model_picker_not_unique count=2"));
+    }
+
+    #[tokio::test]
+    async fn configured_project_must_match_current_page() {
+        let expected = "https://chatgpt.com/g/g-p-daily-research/project";
+        let cdp = mock_cdp(vec![
+            json!({"url": format!("{expected}/")}),
+            json!({"url": "https://chatgpt.com/"}),
+        ])
+        .await;
+        let mut config = test_runtime_config_with_execution_mode("headed");
+        ensure_new_conversation_project(&cdp, &config)
+            .await
+            .unwrap();
+        config.chatgpt.project_url = Some(expected.to_string());
+        ensure_new_conversation_project(&cdp, &config)
+            .await
+            .unwrap();
+        assert!(ensure_new_conversation_project(&cdp, &config)
+            .await
+            .unwrap_err()
+            .contains("Project page mismatch"));
+        cdp.close();
+    }
+
+    #[tokio::test]
+    async fn new_conversation_navigation_reuses_clean_homepage() {
+        let cdp = mock_cdp(vec![json!({
+            "pageKind": "new_conversation",
+            "urlConversationId": null,
+            "url": "https://chatgpt.com/",
+            "bodyText": "ready"
+        })])
+        .await;
+        let config = test_runtime_config_with_execution_mode("headed");
+        navigate_to_new_conversation(&cdp, &config, "test clean homepage")
+            .await
+            .unwrap();
+        cdp.close();
+    }
+
+    #[tokio::test]
+    async fn recover_to_new_conversation_rechecks_clean_surface() {
+        let page = json!({
+            "readyState": "complete",
+            "pageKind": "new_conversation",
+            "conversationId": null,
+            "urlConversationId": null,
+            "url": "https://chatgpt.com/",
+            "bodyText": "ready",
+            "visibleComposerCount": 1,
+            "busyCount": 0
+        });
+        let actionable = json!({"actionable": true});
+        let cdp = mock_cdp(vec![
+            Value::String(r#"{"dismissed":false}"#.to_string()),
+            page.clone(),
+            actionable.clone(),
+            page.clone(),
+            actionable,
+            page,
+        ])
+        .await;
+        let config = test_runtime_config_with_execution_mode("headed");
+        recover_to_new_conversation(&cdp, &config, "test recovery")
+            .await
+            .unwrap();
+        cdp.close();
+    }
+
+    #[test]
+    fn project_page_match_rejects_invalid_and_cross_origin_urls() {
+        let expected = "https://chatgpt.com/g/g-p-research/project";
+        assert!(!same_project_page("not a url", expected));
+        assert!(!same_project_page("https://chatgpt.com/", "not a url"));
+        assert!(!same_project_page(
+            "https://example.com/g/g-p-research/project",
+            expected
+        ));
+    }
+
+    fn test_runtime_config_with_execution_mode(execution_mode: &str) -> RuntimeConfig {
+        let browser = super::super::BrowserConfig {
+            execution_mode: execution_mode.to_string(),
+            ..Default::default()
+        };
+        let root = PathBuf::from(format!(
+            "/tmp/bifrost-chatgpt-web-send-surface-test-{execution_mode}"
+        ));
+        RuntimeConfig {
+            browser,
+            chatgpt: super::super::ChatGptConfig::default(),
+            profile_dir: root.join("profile"),
+            state_path: root.join("auth_state.json"),
+            sessions_path: root.join("sessions.json"),
+            attachments_dir: root.join("attachments"),
+        }
     }
 }
 
@@ -4762,7 +5478,7 @@ mod coverage_boost_v2 {
     #[test]
     fn send_button_ready_max_wait_clamps_very_large_prompts() {
         let text = "x".repeat(5_000_000);
-        assert_eq!(send_button_ready_max_wait(&text), Duration::from_secs(180));
+        assert_eq!(send_button_ready_max_wait(&text), Duration::from_secs(600));
     }
 
     #[test]
@@ -4784,6 +5500,11 @@ mod coverage_boost_v2 {
         assert_eq!(
             send_button_ready_retry_max_wait(long),
             Duration::from_secs(60)
+        );
+        let attachment_sized = "x".repeat(200_001);
+        assert_eq!(
+            send_button_ready_retry_max_wait(&attachment_sized),
+            Duration::from_secs(180)
         );
     }
 

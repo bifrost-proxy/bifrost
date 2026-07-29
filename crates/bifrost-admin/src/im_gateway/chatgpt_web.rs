@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
+use url::Url;
 
 use super::external_cli::{
     ExternalCliAdapterConfig, ExternalCliAgentSettings, ExternalCliProgressEvent,
@@ -52,9 +53,10 @@ use send::send_with_browser;
 use send::{
     composer_text_injection_mode, extract_conversation_id_from_url, handoff_heartbeat_error,
     handoff_page_heartbeat_error, native_clipboard_paste_followup_instruction,
-    page_state_is_auth_flow_page, parse_send_sse, paste_modifier, send_button_ready_max_wait,
-    send_button_ready_retry_max_wait, should_retry_as_new_conversation, target_page_error,
-    target_page_is_terminal_mismatch, target_page_matches, ComposerTextInjectionMode,
+    new_conversation_url, page_state_is_auth_flow_page, parse_send_sse, paste_modifier,
+    same_project_page, send_button_ready_max_wait, send_button_ready_retry_max_wait,
+    should_retry_as_new_conversation, target_page_error, target_page_is_terminal_mismatch,
+    target_page_matches, ComposerTextInjectionMode,
 };
 use storage::{read_auth_state, write_auth_state, write_redacted_json};
 
@@ -67,7 +69,12 @@ const CONVERSATIONS_PATH: &str =
     "/backend-api/conversations?offset=0&limit=20&order=updated&is_archived=false&is_starred=false";
 const F_CONVERSATION_URL: &str = "https://chatgpt.com/backend-api/f/conversation";
 const AUTH_EXPIRY_SKEW_SECS: i64 = 60;
-const BROWSER_ACCOUNT_CHECK_PROOF_MAX_AGE_SECS: i64 = 15 * 60;
+// Browser proof is a fallback for native probes that can be rejected by
+// anti-bot controls even while the same persistent browser session is valid.
+// Keep it long enough for unattended daily runs; the captured bearer identity
+// still has an independent expiry check and the browser send path revalidates
+// the actual logged-in UI before submitting anything.
+const BROWSER_ACCOUNT_CHECK_PROOF_MAX_AGE_SECS: i64 = 24 * 60 * 60;
 const BROWSER_ACCOUNT_CHECK_PROOF_FUTURE_SKEW_SECS: i64 = 60;
 static LOGIN_SESSION_SEQ: AtomicU64 = AtomicU64::new(1);
 static LOGIN_SESSIONS: OnceLock<DashMap<String, ActiveLoginSession>> = OnceLock::new();
@@ -491,6 +498,17 @@ struct ChatGptConfig {
     poll_interval_ms: u64,
     #[serde(default = "default_timeout_secs")]
     timeout_secs: u64,
+    /// Preferred ChatGPT surface for new conversations.
+    /// Supported values: `auto` (leave unchanged) and `chat`.
+    #[serde(default = "default_interface_mode")]
+    interface_mode: String,
+    /// Preferred model label for new conversations.
+    /// Supported values: `auto` (leave unchanged) and `pro`.
+    #[serde(default = "default_chatgpt_model")]
+    model: String,
+    /// Optional ChatGPT Project home used only when creating a new conversation.
+    #[serde(default)]
+    project_url: Option<String>,
     /// Session consistency mode when hitting 429 rate limits.
     ///
     /// - `"strong"` (default): wait and retry the **same** conversation on the
@@ -516,11 +534,71 @@ impl Default for ChatGptConfig {
             base_url: default_base_url(),
             poll_interval_ms: default_poll_interval_ms(),
             timeout_secs: default_timeout_secs(),
+            interface_mode: default_interface_mode(),
+            model: default_chatgpt_model(),
+            project_url: None,
             session_consistency: default_session_consistency(),
             rate_limit_retry_secs: default_rate_limit_retry_secs(),
             rate_limit_max_retries: default_rate_limit_max_retries(),
         }
     }
+}
+
+fn default_interface_mode() -> String {
+    "auto".to_string()
+}
+
+fn default_chatgpt_model() -> String {
+    "auto".to_string()
+}
+
+pub(crate) fn normalize_project_url(value: Option<&str>) -> Result<Option<String>, String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let parsed = Url::parse(value)
+        .map_err(|error| format!("must be an absolute ChatGPT Project URL: {error}"))?;
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("chatgpt.com")
+        || parsed.port_or_known_default() != Some(443)
+    {
+        return Err("must use the https://chatgpt.com origin".to_string());
+    }
+    let Some(project_segment) = chatgpt_project_segment(&parsed) else {
+        return Err("path must match /g/g-p-<project-id>/project".to_string());
+    };
+    Ok(Some(format!(
+        "https://chatgpt.com/g/{}/project",
+        project_segment
+    )))
+}
+
+fn chatgpt_project_segment(url: &Url) -> Option<&str> {
+    let path = url.path().trim_end_matches('/');
+    let mut segments = path.strip_prefix('/')?.split('/');
+    let root = segments.next()?;
+    let project = segments.next()?;
+    let leaf = segments.next()?;
+    if root == "g"
+        && project.starts_with("g-p-")
+        && project.len() > "g-p-".len()
+        && leaf == "project"
+        && segments.next().is_none()
+    {
+        Some(project)
+    } else {
+        None
+    }
+}
+
+pub(in crate::im_gateway::chatgpt_web) fn chatgpt_project_identity(url: &Url) -> Option<String> {
+    let segment = chatgpt_project_segment(url)?;
+    let raw = segment.strip_prefix("g-p-")?;
+    let stable_id = raw.get(..32).filter(|candidate| {
+        candidate.chars().all(|ch| ch.is_ascii_hexdigit())
+            && (raw.len() == 32 || raw.as_bytes().get(32) == Some(&b'-'))
+    });
+    Some(stable_id.unwrap_or(raw).to_ascii_lowercase())
 }
 
 impl ChatGptConfig {
@@ -624,6 +702,19 @@ pub async fn run_adapter(
     prompt: &str,
     run_dir: &Path,
 ) -> Result<ChatGptWebRunOutput, String> {
+    let config = match runtime_config(&request.adapter_config) {
+        Ok(config) => config,
+        Err(error) => {
+            write_run_failure_manifest(run_dir, "configure", None, &error, Vec::new()).await;
+            return Err(error);
+        }
+    };
+    let operation = request.operation.trim();
+    let operation = if operation.is_empty() {
+        "ask"
+    } else {
+        operation
+    };
     let e2e_mock_requested = std::env::var("BIFROST_CHATGPT_WEB_E2E_MOCK")
         .ok()
         .as_deref()
@@ -633,21 +724,20 @@ pub async fn run_adapter(
     if e2e_mock_requested && explicit_e2e {
         return Ok(mock_run_adapter_for_e2e(request, prompt));
     }
+    let live_e2e_requested = std::env::var("BIFROST_CHATGPT_WEB_LIVE_E2E")
+        .ok()
+        .as_deref()
+        == Some("1");
+    if chatgpt_web_operation_can_access_live_service(operation)
+        && live_adapter_forbidden_in_e2e(explicit_e2e, e2e_mock_requested, live_e2e_requested)
+    {
+        return Err(
+            "live ChatGPT Web is disabled during tests; set BIFROST_CHATGPT_WEB_E2E_MOCK=1, or explicitly opt in with BIFROST_CHATGPT_WEB_LIVE_E2E=1"
+                .to_string(),
+        );
+    }
 
-    let config = match runtime_config(&request.adapter_config) {
-        Ok(config) => config,
-        Err(error) => {
-            write_run_failure_manifest(run_dir, "configure", None, &error, Vec::new()).await;
-            return Err(error);
-        }
-    };
     let _profile_permit = acquire_profile_lock(&config.profile_dir).await;
-    let operation = request.operation.trim();
-    let operation = if operation.is_empty() {
-        "ask"
-    } else {
-        operation
-    };
     let stop_marker_path = run_dir.join("stop_requested");
 
     let mut events = vec![event(
@@ -751,6 +841,21 @@ pub async fn run_adapter(
     })
 }
 
+fn live_adapter_forbidden_in_e2e(
+    explicit_e2e: bool,
+    e2e_mock_requested: bool,
+    live_e2e_requested: bool,
+) -> bool {
+    explicit_e2e && !e2e_mock_requested && !live_e2e_requested
+}
+
+fn chatgpt_web_operation_can_access_live_service(operation: &str) -> bool {
+    matches!(
+        operation,
+        "list" | "get" | "wait" | "create" | "send" | "ask"
+    )
+}
+
 async fn wait_for_stop_marker(path: PathBuf) {
     loop {
         if stop_requested(&path).await {
@@ -761,9 +866,63 @@ async fn wait_for_stop_marker(path: PathBuf) {
 }
 
 fn mock_run_adapter_for_e2e(request: &ExternalCliRunRequest, prompt: &str) -> ChatGptWebRunOutput {
+    let planning_first = std::env::var("BIFROST_CHATGPT_WEB_E2E_MOCK_PLANNING_FIRST")
+        .ok()
+        .as_deref()
+        == Some("1");
+    mock_run_adapter_for_e2e_with_planning(request, prompt, planning_first)
+}
+
+fn mock_run_adapter_for_e2e_with_planning(
+    request: &ExternalCliRunRequest,
+    prompt: &str,
+    planning_first: bool,
+) -> ChatGptWebRunOutput {
     let conversation_id = conversation_id_hint_from_request(request)
         .unwrap_or_else(|| format!("mock-conversation-{}", uuid::Uuid::new_v4()));
-    let response = mock_chatgpt_web_response_for_e2e(prompt);
+    let project_url = request
+        .adapter_config
+        .extra
+        .get("chatgpt")
+        .and_then(Value::as_object)
+        .and_then(|chatgpt| chatgpt.get("projectUrl"))
+        .and_then(Value::as_str);
+    let initial_research_turn = planning_first
+        && request.operation != "wait"
+        && prompt.contains("你正在独立研究一个问题")
+        && !prompt.contains("上一条回复不是最终研究报告");
+    let final_research_retry = planning_first
+        && prompt.contains("上一条回复不是最终研究报告")
+        && prompt.contains("原始问题：\n");
+    let response = if initial_research_turn {
+        "我会先检索和核验资料，再输出完整研究报告。".to_string()
+    } else if final_research_retry {
+        let original_question = prompt
+            .split_once("原始问题：\n")
+            .map(|(_, remainder)| remainder)
+            .and_then(|remainder| remainder.split_once("\n\n必须逐字保留原始问题"))
+            .map(|(question, _)| question.trim())
+            .unwrap_or("E2E 原始研究问题");
+        format!(
+            "## 原始问题\n{original_question}\n\n## 核心结论\n{}\n\n## 事实与证据\n{}\n\n## 推断与不确定性\n{}\n\n## 对原始问题的直接回答\n{}",
+            "E2E 已通过同一会话重试生成最终研究结论。".repeat(20),
+            "E2E 可复查事实证据。".repeat(20),
+            "E2E 中仍需标注的推断与不确定性。".repeat(20),
+            "E2E 对原始问题的直接回答。".repeat(20),
+        )
+    } else {
+        let response = mock_chatgpt_web_response_for_e2e(prompt);
+        if mock_daily_report_date_for_e2e(prompt).is_none() {
+            match project_url {
+                Some(project_url) => {
+                    format!("{response}\nCHATGPT_PROJECT_URL: {project_url}")
+                }
+                None => response,
+            }
+        } else {
+            response
+        }
+    };
     let mut metadata = BTreeMap::new();
     metadata.insert("conversationId".to_string(), conversation_id.clone());
     ChatGptWebRunOutput {
@@ -1988,7 +2147,12 @@ async fn open_login_and_capture(config: &RuntimeConfig) -> Result<AuthState, Str
         cdp.enable_domains().await?;
         cdp.send("Page.bringToFront", json!({})).await?;
         let mut events = cdp.subscribe();
-        cdp.send("Page.navigate", json!({"url": config.chatgpt.base_url}))
+        let login_refresh_url = format!(
+            "{}/?bifrost_login_refresh={}",
+            config.chatgpt.base_url.trim_end_matches('/'),
+            uuid::Uuid::new_v4()
+        );
+        cdp.send("Page.navigate", json!({"url": login_refresh_url}))
             .await?;
 
         let mut captured_headers = BTreeMap::new();
@@ -2019,11 +2183,27 @@ async fn open_login_and_capture(config: &RuntimeConfig) -> Result<AuthState, Str
                     .as_ref()
                     .is_some_and(|proof: &BrowserAccountCheckProof| proof.logged_in)
             {
-                info!(
-                    header_count = captured_headers.len(),
-                    "chatgpt_web login: auth headers captured successfully"
-                );
-                break;
+                match inspect_login_page_state(&cdp).await {
+                    Ok(page_state) if login_page_state_is_ready(&page_state) => {
+                        info!(
+                            header_count = captured_headers.len(),
+                            "chatgpt_web login: auth headers captured and composer is ready"
+                        );
+                        break;
+                    }
+                    Ok(page_state) => {
+                        debug!(
+                            page_state = %page_state,
+                            "chatgpt_web login: waiting for account chooser or blocking dialog to be completed"
+                        );
+                    }
+                    Err(error) => {
+                        debug!(
+                            error = %error,
+                            "chatgpt_web login: could not inspect composer readiness yet"
+                        );
+                    }
+                }
             }
             if browser.has_exited()? {
                 if let Some(state) = read_logged_in_auth_state(config).await? {
@@ -2098,6 +2278,67 @@ async fn open_login_and_capture(config: &RuntimeConfig) -> Result<AuthState, Str
         cdp.close();
     }
     result
+}
+
+async fn inspect_login_page_state(cdp: &CdpClient) -> Result<Value, String> {
+    evaluate_value(
+        cdp,
+        r#"(() => {
+          const isVisible = (el) => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+          const composer = document.querySelector('#prompt-textarea') ||
+            document.querySelector('[data-testid="composer-text-input"]') ||
+            document.querySelector('[contenteditable="true"]') ||
+            document.querySelector('textarea');
+          const composerVisible = isVisible(composer);
+          const composerDisabled = composer ? Boolean(
+            composer.disabled || composer.readOnly || composer.getAttribute('aria-disabled') === 'true'
+          ) : true;
+          const visibleDialogTexts = Array.from(document.querySelectorAll('[role="dialog"]'))
+            .filter(isVisible)
+            .map((dialog) => (dialog.innerText || '').trim().toLowerCase());
+          const bodyText = (document.body?.innerText || '').toLowerCase();
+          const dialogAccountChooserMarkers = [
+            'welcome back',
+            'choose an account',
+            'select an account',
+            'sign in to another account',
+            '欢迎回来',
+            '选择一个帐户',
+            '选择一个账户',
+            '登录至另一个帐户',
+            '登录至另一个账户'
+          ];
+          const bodyAccountChooserMarkers = [
+            'choose an account',
+            'select an account',
+            'sign in to another account',
+            '选择一个帐户',
+            '选择一个账户',
+            '登录至另一个帐户',
+            '登录至另一个账户'
+          ];
+          const accountChooserVisible = visibleDialogTexts.some((text) =>
+            dialogAccountChooserMarkers.some((marker) => text.includes(marker))
+          ) || bodyAccountChooserMarkers.some((marker) => bodyText.includes(marker));
+          return { composerVisible, composerDisabled, accountChooserVisible };
+        })()"#,
+    )
+    .await
+}
+
+fn login_page_state_is_ready(page_state: &Value) -> bool {
+    page_state
+        .get("composerVisible")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && !page_state
+            .get("composerDisabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+        && !page_state
+            .get("accountChooserVisible")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
 }
 
 fn has_handoff_submission_evidence(event_types: &[String]) -> bool {
@@ -2633,6 +2874,7 @@ fn runtime_config(config: &ExternalCliAdapterConfig) -> Result<RuntimeConfig, St
     if let Some(timeout_secs) = config.timeout_secs {
         parsed.chatgpt.timeout_secs = timeout_secs;
     }
+    parsed.chatgpt.project_url = normalize_project_url(parsed.chatgpt.project_url.as_deref())?;
     let base = bifrost_agent::config::agent_home_dir()
         .join("im_gateway")
         .join("chatgpt_web");
@@ -3397,7 +3639,7 @@ mod coverage_boost {
     #[test]
     fn browser_account_check_proof_is_stale_for_old_timestamp() {
         let proof = BrowserAccountCheckProof {
-            captured_at: (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339(),
+            captured_at: (chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339(),
             status: 200,
             logged_in: true,
         };
@@ -3811,6 +4053,17 @@ mod coverage_boost_v2 {
     }
 
     #[test]
+    fn browser_account_check_proof_remains_valid_for_daily_automation() {
+        let ts = (chrono::Utc::now() - chrono::Duration::hours(12)).to_rfc3339();
+        let proof = BrowserAccountCheckProof {
+            captured_at: ts,
+            status: 200,
+            logged_in: true,
+        };
+        assert!(browser_account_check_proof_is_fresh(&proof));
+    }
+
+    #[test]
     fn browser_account_check_proof_is_stale_when_too_old() {
         let ts = (chrono::Utc::now()
             - chrono::Duration::seconds(BROWSER_ACCOUNT_CHECK_PROOF_MAX_AGE_SECS + 300))
@@ -3971,6 +4224,80 @@ mod coverage_boost_v3 {
     use super::*;
     use serde_json::json;
     use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn live_chatgpt_web_is_fail_closed_during_e2e_without_explicit_opt_in() {
+        assert!(live_adapter_forbidden_in_e2e(true, false, false));
+        assert!(!live_adapter_forbidden_in_e2e(true, true, false));
+        assert!(!live_adapter_forbidden_in_e2e(true, false, true));
+        assert!(!live_adapter_forbidden_in_e2e(false, false, false));
+        for operation in ["list", "get", "wait", "create", "send", "ask"] {
+            assert!(chatgpt_web_operation_can_access_live_service(operation));
+        }
+        assert!(!chatgpt_web_operation_can_access_live_service(
+            "unsupported-test-operation"
+        ));
+    }
+
+    #[test]
+    fn planning_first_mock_covers_initial_wait_retry_and_project_fallbacks() {
+        let mut request = ExternalCliRunRequest {
+            images: Vec::new(),
+            files: Vec::new(),
+            message: String::new(),
+            operation: "send".to_string(),
+            params: json!({"conversationId": "coverage-conversation"}),
+            provider_id: None,
+            runner_id: None,
+            session_key: None,
+            runtime: "external_cli".to_string(),
+            adapter: ADAPTER_ID.to_string(),
+            work_dir: None,
+            instructions: None,
+            adapter_config: ExternalCliAdapterConfig {
+                extra: BTreeMap::from([(
+                    "chatgpt".to_string(),
+                    json!({"projectUrl": "https://chatgpt.com/g/g-p-coverage/project"}),
+                )]),
+                ..ExternalCliAdapterConfig::default()
+            },
+            allow_work_dirs: Vec::new(),
+            inject_bifrost_tools: false,
+            skill_paths: Vec::new(),
+        };
+        let initial = mock_run_adapter_for_e2e_with_planning(
+            &request,
+            "你正在独立研究一个问题\n原始问题",
+            true,
+        );
+        assert!(initial.response.contains("先检索和核验资料"));
+        assert_eq!(
+            initial.metadata.get("conversationId").map(String::as_str),
+            Some("coverage-conversation")
+        );
+
+        request.operation = "wait".to_string();
+        let waited = mock_run_adapter_for_e2e_with_planning(
+            &request,
+            "你正在独立研究一个问题\n原始问题",
+            true,
+        );
+        assert!(!waited.response.contains("先检索和核验资料"));
+
+        request.operation = "send".to_string();
+        let retry = mock_run_adapter_for_e2e_with_planning(
+            &request,
+            "上一条回复不是最终研究报告\n原始问题：\n覆盖率研究问题\n\n必须逐字保留原始问题",
+            true,
+        );
+        assert!(retry.response.contains("## 原始问题\n覆盖率研究问题"));
+        assert!(retry.response.contains("## 对原始问题的直接回答"));
+
+        let fallback = mock_run_adapter_for_e2e_with_planning(&request, "普通问题", false);
+        assert!(fallback
+            .response
+            .contains("CHATGPT_PROJECT_URL: https://chatgpt.com/g/g-p-coverage/project"));
+    }
 
     #[test]
     fn decode_cdp_response_body_invalid_base64_returns_none() {

@@ -289,7 +289,20 @@ source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib command
 - Group CLI 测试 mock server 必须循环读取到 `\r\n\r\n` 后声明的 `content-length` 完整 body，再把请求写入 logs。
 - 新增 helper 单测覆盖 header 已到、body 分段稍后到达时 `http_request_is_complete()` 先返回 false，追加完整 body 后返回 true。
 
-### TC-CWUT-21 无效 host fallback 端口探测不依赖释放端口
+### TC-CWUT-21 Daily Agent dependency paths use portable separators
+
+操作步骤：
+
+```bash
+gh run view 29272338885 --repo bifrost-proxy/bifrost
+```
+
+预期结果：
+- Windows `daily_agent_dependency_outputs_are_isolated_per_agent` 返回的相对路径统一使用 `/`，不泄漏平台原生 `\`。
+- `Windows Unit Tests (x86_64)` 完整通过；Linux/macOS 仍保持相同 API 文本契约。
+- 文件复制本身继续使用原生 `PathBuf`，只在 API/Prompt 可观察字符串边界归一化分隔符。
+
+### TC-CWUT-22 无效 host fallback 端口探测不依赖释放端口
 
 操作步骤：
 
@@ -308,7 +321,7 @@ done
 - 连续 50 次执行全部退出码 0；不因并行进程抢占刚释放的临时端口产生假阴性。
 - `is_port_in_use()` 生产逻辑不变。
 
-### TC-CWUT-22 Claude stream-json mock 进程测试保留调度余量
+### TC-CWUT-23 Claude stream-json mock 进程测试保留调度余量
 
 操作步骤：
 
@@ -361,3 +374,4 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin --lib \
 | 2026-06-12 | TC-CWUT-18 | 跟进 GitHub Actions run `27404962469`，定位 `Windows Unit Tests (x86_64)` 的测试主体后失败点为 `Post Run Swatinem/rust-cache` 保存 cache；更新 workflow 后重新检查 PR checks。 | 待复验，预期 Windows Unit Tests 不再因 cache post-step 保存失败变红 |
 | 2026-06-12 | TC-CWUT-19 | 在 Parallels `Windows 11` VM 的 `C:\Users\eden\github\bifrost` 同步远端分支并 rebase 到最新 `origin/main` 后，执行 `cargo +stable clippy -p bifrost-device --all-targets --all-features -j1 -- -D warnings` 与 `cargo +stable test -p bifrost-device --all-features -j1`。 | 通过，clippy 无 warning；`bifrost-device` 49 个单元测试与 doc-tests 全部通过，覆盖 iOS cfgutil macOS-only helper 和 Android CA status Unix-only module 的 Windows 编译回归 |
 | 2026-06-13 | TC-CWUT-20 | 跟进 GitHub Actions run `27468695678` 的 `Unit & Integration Tests`，定位 `commands::group::tests::test_group_rule_add_passes_allow_invalid` 在 CI 中 mock server 单次 read 只读到 header，导致 logs 中缺少 `"allow_invalid":true`；本地执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib commands::group::tests -- --nocapture`。 | 通过，本地 group tests 35 个用例全部通过；mock server 改为按 `content-length` 等待完整 body 后记录请求，避免 CI TCP 分段假阴性 |
+| 2026-07-14 | TC-CWUT-21 | 跟进 GitHub Actions run `29270569537` 定位 Windows 分隔符失败，修复 API 字符串归一化后检查 run `29272338885`。 | 通过，`Windows Unit Tests (x86_64)` 成功；Daily Agent 依赖输出在 Windows/Linux/macOS 统一使用 `/`。 |

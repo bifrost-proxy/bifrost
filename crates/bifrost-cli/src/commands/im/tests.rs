@@ -439,7 +439,7 @@ fn resolve_runner_choice_requires_runner_when_stdin_is_not_interactive() {
         enabled: true,
     }];
 
-    let error = resolve_runner_choice(None, &runners)
+    let error = resolve_runner_choice_with_terminal(None, &runners, false)
         .expect_err("non-interactive provider setup must require --runner");
 
     assert!(error.to_string().contains("--runner is required"));

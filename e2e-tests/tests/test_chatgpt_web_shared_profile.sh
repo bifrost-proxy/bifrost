@@ -17,6 +17,9 @@ grep -q "hasGeneratedImageAfterLastUser" crates/bifrost-admin/src/im_gateway/cha
 grep -q "conversation_busy" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
 grep -q "conversation_busy_if_stop_button_visible" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
 grep -q "diagnostic_has_visible_stop_button" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
+grep -q "const chatLabels = new Set(\\['Chat', '聊天'\\])" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
+grep -q "const workLabels = new Set(\\['Work', '工作'\\])" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
+grep -q "\\['on', 'checked', 'active'\\].includes(dataState)" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
 grep -q "recover_conversation_tab_from_browser" crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
 grep -q "wait_chatgpt_web_daily_agent_conversation" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
 grep -q "daily_agent_chatgpt_web_same_conversation_wait_timeout_ms" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs

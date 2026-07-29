@@ -696,17 +696,17 @@
 5. 连续多个工具调用默认合并为“已执行 N 个步骤”的一级折叠组；展开该组后，单条工具仍保持折叠，用户可继续展开查看输入/输出。
 6. 模型公开 content 直接按时间顺序展示，不额外添加 `1.`、`2.`、`3.` 这类编号前缀。
 
-### TC-IEC-35: 外部 Runner 运行中默认 Guide，显式 Queue 续接原生 thread
+### TC-IEC-35: IM 默认 Queue、Web 默认 Guide，并续接原生 thread
 
 操作步骤：
 1. 启动一个长时间运行的 Codex 或 Trae external runner session，确保同一 `sessionKey` 处于 active 状态。
-2. 在该 session 运行期间，从同一 IM 会话发送一条普通用户消息，并从 Web Chat Guide 模式发送一条消息。
-3. 确认 app-server 收到当前 `threadId` / `turnId` 对应的 `turn/steer`；再发送 `/q <消息>` 或在 WebUI 选择 Queue。
+2. 在该 session 运行期间，从同一 IM 会话发送一条普通用户消息和一条 `/g <引导>`，并从 Web Chat Guide 模式发送一条消息。
+3. 确认普通 IM 消息未触发 steer，而两条显式 Guide 路径让 app-server 收到当前 `threadId` / `turnId` 对应的 `turn/steer`；再发送 `/q <消息>` 或在 WebUI 选择 Queue。
 4. 读取即时响应或 progress card 队列状态；当前 run 完成后，读取显式排队消息下一轮 run 的 `runtime_snapshot.json`。
 5. 分别对 Codex 和 Trae runner 执行上述检查。
 
 预期结果：
-1. Codex 和 Trae 这类 app-server runner 的普通 busy 文本默认注入当前 turn；只有 `/q` 或 WebUI Queue 明确进入排队队列。
+1. Codex 和 Trae 这类 app-server runner 的普通 IM busy 文本默认进入排队队列；显式 `/g` 和 WebUI Guide 才注入当前 turn。
 2. `/stop` 仍作为控制命令立即尝试停止当前外部 runner，不作为普通排队消息。
 3. 当前 run 完成后只自动处理显式排队或 Guide 失败降级的消息，成功注入的 Guide 不得重复执行下一轮。
 4. Codex/Traex 排队下一轮复用已保存的 `threadId`；app-server transport 使用 `thread/resume` 后再 `turn/start`，不能退化为新建 thread。
@@ -1249,8 +1249,8 @@
 
 预期结果：
 
-1. 飞书 IM 的 Codex、Traex、Claude Code 与其他非 ChatGPT Web runner 在 session 忙碌时，普通消息默认按 Guide 处理；只有 `/q <消息>` 明确加入下一轮队列。
-2. Codex/Traex app-server 收到 `turn/steer`，引导文本只进入当前 turn，不会因等待 steer ACK 阻塞 runner 控制循环，也不会在成功 steer 后再次作为下一轮执行。
+1. 飞书/微信 IM 的 Codex、Traex、Claude Code 与其他 runner 在 session 忙碌时，普通消息默认加入下一轮 FIFO 队列；只有 `/g <消息>` 明确请求当前 turn 引导。
+2. 显式 `/g` 时 Codex/Traex app-server 收到 `turn/steer`，引导文本只进入当前 turn，不会因等待 steer ACK 阻塞 runner 控制循环，也不会在成功 steer 后再次作为下一轮执行。
 3. `/q queue-explicit` 不进入 `turn/steer`；当前 turn 结束后只执行一次排队消息，文本和顺序保持不变。
 4. runner 拒绝 Guide、控制通道失败或不支持 live guide 时，原消息明确降级排队，队列中仍保留完整文本。
 5. Agent Chat WebUI 在 Codex/Traex/Claude Code 与自定义 runner 运行中默认选中 Guide，发送 `/g <消息>`；切换 Queue 后发送 `/q <消息>`，控制回执不会错误结束主 turn 或被陈旧 thread summary 覆盖。
@@ -1409,7 +1409,30 @@
 2. mock 两次都能从 stdin 读取完整原始 prompt 文本并返回 `EXEC_claude-exec`，不会进入 stream-json 解析分支或因非 JSON 输入失败。
 3. guide 响应为 `delivery=queued` 且 reason 包含 `exec transport`；两轮 `run_finished` 都成功，排队消息没有丢失或重复。
 
-### TC-IEC-65: GPT Web 搜索来源 favicon 紧凑引用渲染回归
+### TC-IEC-65: Codex 可重试断流不提前终止且失败回复不泄露协议
+
+操作步骤：
+
+1. 从仓库根目录执行确定性的 mock app-server 回归：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost \
+     e2e-tests/tests/test_im_gateway_codex_retryable_error.sh
+   ```
+2. 脚本使用动态非正式端口和临时数据目录启动当前源码构建的 Bifrost，不连接真实 IM Provider。
+3. 第一轮 mock Codex 依次发送 `error(willRetry=true)`、assistant final、`turn/completed`；第二轮发送 `error(willRetry=false)`。
+
+预期结果：
+
+1. 第一轮状态为 `succeeded`，回复为 `BIFROST_RETRY_RECOVERED`；重连提示归一化为 `status`，不存在 `run_failed`。
+2. 第二轮状态为 `failed`，用户可见回复精确为 `permanent request failure`。
+3. 两轮回复都不以 app-server 初始化 JSON（如 `{"id":1`）开头；原始 JSON-RPC stdout 只保存在 run artifact 中。
+4. 脚本输出 `[im-gateway-codex-retryable-error] PASS` 并清理其临时进程和数据。
+
+## 最近执行记录
+
+- 2026-07-13：合并微信默认排队/引用与 Daily Research 功能线后执行 TC-IEC-65。先以 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 构建当前源码，再以隔离临时数据目录和动态端口运行 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_codex_retryable_error.sh`，输出 `[im-gateway-codex-retryable-error] PASS`。可重试 error 继续同一 turn 至 `BIFROST_RETRY_RECOVERED`，不可重试 error 收敛为 `permanent request failure`，两条用户回复均未泄露 JSON-RPC 握手 stdout。
+
+### TC-IEC-66: GPT Web 搜索来源 favicon 紧凑引用渲染回归
 
 操作步骤：
 
@@ -1438,7 +1461,7 @@
 3. 普通 Markdown 图片、图片附件、普通外链和带描述文字的链接图片维持原有渲染与灯箱行为。
 4. 亮色和暗色主题均使用 Ant Design token，边框、背景、文字和 focus/hover 状态可读。
 
-### TC-IEC-66: Linux app-server `ETXTBSY` 有界重试
+### TC-IEC-67: Linux app-server `ETXTBSY` 有界重试
 
 操作步骤：
 
@@ -1544,7 +1567,7 @@
 - 2026-07-24：PASS — 新增并立即执行 TC-IEC-48。先以 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 构建当前源码二进制，再执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_external_runner_image_input.sh`；脚本使用隔离临时数据目录和 mock external runner 注入纯文件消息，debug inbound 接受空正文文件消息并生成 run `1784873185896-cf83955e-4ac4-4a3e-b95f-9782f807947b`。验证 `prompt.md` 和 runner stdin 均包含 `## Attached Files` 及本地文件路径，附件落盘为 `.bifrost-e2e-runner-image.qLXnna/agent/sessions/by-key/attachments/session-7c3700696145216f4803a299a940daf92873f6b8ad58099d11991c3169bf44d9/1784873185896-cf83955e-4ac4-4a3e-b95f-9782f807947b/files/1-report_final.md`，文件内容与注入的 markdown base64 一致，metadata 记录 `attachments.fileCount=1`、`attachments.imageCount=0`、`attachments.count=1` 和 `attachments.files[0]` 的 path/mimeType/sizeBytes/name。
 - 2026-07-21：PASS — 按更新后的 TC-IEC-43/44 执行 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_external_runner_image_input.sh`；同 key 两轮 Web Chat、Trae 及 runner-call 图片均写入 `agent/sessions/by-key/attachments/session-{sha256}/<runId>/images/`，不同 run 目录隔离且旧图片未被覆盖。
 - 2026-07-15：针对 PR #394 coverage job 的 Linux `Text file busy (os error 26)` 新增并立即执行 TC-IEC-66。注入回归验证 Unix `ETXTBSY` 前两次失败后第三次成功、持续占用恰好尝试 8 次后返回、`NotFound` 仅尝试一次，并验证缺失 executable 的用户错误保留 adapter 与实际路径；本机 macOS 按平台预期过滤 Linux 真实 spawn 用例，原失败用例 `mock_app_server_accepts_live_guide_and_completes_same_turn` 输出 `1 passed`；重新构建当前源码二进制后，`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh` 输出 `[external-runner-live-guide] PASS`。Linux 持有写句柄的真实回归与 95% changed-lines / 90% workspace coverage gate 由 PR CI 在目标平台执行并作为本用例最终门禁。
-- 2026-07-15：新增并立即执行 TC-IEC-65。引用结构单元回归 `6/6` 通过，覆盖双来源、单来源、非法/混合节点、普通图片，以及独立/描述性 favicon 仍可预览；Playwright focused E2E `1/1` 通过，确认双来源 favicon 均为 `14px × 14px`、无图片预览 ID，普通正文图片仍是唯一灯箱图片，暗色主题可见。随后以 `BACKEND_PORT=9900 WEB_PORT=3015 pnpm --dir web exec vite --host 127.0.0.1 --port 3015` 代理现有正式后端，在 Codex 内置浏览器打开用户真实 session/history；当前 canonical Agent Chat 参数下共识别 14 组来源引用、15 个 favicon，首组 `Reuters+2AP News+2` 高度 24px、两个图标均为 `14px × 14px`，页面没有正文预览图片。暗色主题下引用背景为 `rgba(255, 255, 255, 0.04)`、边框为 `rgb(48, 48, 48)`，组件持续可见。未停止或替换 9900 服务，未修改系统代理。
+- 2026-07-15：新增并立即执行 TC-IEC-66。引用结构单元回归 `6/6` 通过，覆盖双来源、单来源、非法/混合节点、普通图片，以及独立/描述性 favicon 仍可预览；Playwright focused E2E `1/1` 通过，确认双来源 favicon 均为 `14px × 14px`、无图片预览 ID，普通正文图片仍是唯一灯箱图片，暗色主题可见。随后以 `BACKEND_PORT=9900 WEB_PORT=3015 pnpm --dir web exec vite --host 127.0.0.1 --port 3015` 代理现有正式后端，在 Codex 内置浏览器打开用户真实 session/history；当前 canonical Agent Chat 参数下共识别 14 组来源引用、15 个 favicon，首组 `Reuters+2AP News+2` 高度 24px、两个图标均为 `14px × 14px`，页面没有正文预览图片。暗色主题下引用背景为 `rgba(255, 255, 255, 0.04)`、边框为 `rgb(48, 48, 48)`，组件持续可见。未停止或替换 9900 服务，未修改系统代理。
 - 2026-07-13：针对 PR #377 自动 Review 的 Claude 显式 exec stdin 兼容问题新增并立即执行 TC-IEC-64。单元回归输出 `1 passed`；真实临时 Bifrost E2E 输出 `[external-runner-live-guide] PASS`。mock 记录两次 `claude-exec` 均带 `--input-format text` 且不含 `--replay-user-messages`，首轮 guide 返回 `delivery=queued`，两轮均返回 `EXEC_claude-exec`。
 - 2026-07-13：针对 PR #377 Linux `E2E Shell` 失败新增并立即执行 TC-IEC-63。修复前同一命令稳定在 Python 第 246 行收到 `stream-json runner timed out after 30 seconds`；修复 mock Claude 从等待 stdin EOF 改为消费一条初始 user JSONL frame 后，`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_traex_model_slash.sh` 输出 `[im-gateway-model-slash] PASS`。Codex、Traex、Claude Code 的 model 与 effort 六次真实临时服务运行全部通过，Claude run 为 `1783925191553-f1ad8e07-13b0-44c3-b237-c05cedac9305`、effort run 为 `1783925198233-c9920e47-70ea-4976-bbae-d38932762e75`，无 30 秒超时。
 - 2026-07-12：新增并立即执行 TC-IEC-61。两个 focused Rust 单测分别输出 `1 passed`；`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_im_gateway_codex_capacity_retry.sh` 输出 `[codex-capacity-retry] PASS`。隔离 mock app-server 验证首次 `serverOverloaded` 后在同一 thread 第二次成功、持续容量错误 3 次重试后失败、普通错误不重试、已有 assistant delta 后不重试；成功 run 未输出中间 `run_failed`，并持久化 `runner.capacityRetryCount=1`。

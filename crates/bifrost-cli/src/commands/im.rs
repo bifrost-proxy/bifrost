@@ -534,6 +534,14 @@ fn resolve_runner_choice(
     requested_runner: Option<&str>,
     runners: &[RunnerChoice],
 ) -> Result<String> {
+    resolve_runner_choice_with_terminal(requested_runner, runners, io::stdin().is_terminal())
+}
+
+fn resolve_runner_choice_with_terminal(
+    requested_runner: Option<&str>,
+    runners: &[RunnerChoice],
+    stdin_is_terminal: bool,
+) -> Result<String> {
     let enabled: Vec<_> = runners.iter().filter(|runner| runner.enabled).collect();
     if enabled.is_empty() {
         return Err(bifrost_core::BifrostError::Config(format!(
@@ -556,7 +564,7 @@ fn resolve_runner_choice(
         )));
     }
 
-    if !io::stdin().is_terminal() {
+    if !stdin_is_terminal {
         return Err(bifrost_core::BifrostError::Config(format!(
             "--runner is required when stdin is not interactive. Available runners: {}. Default built-in runners include: {}",
             format_runner_choices(&enabled),

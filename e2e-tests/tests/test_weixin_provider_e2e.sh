@@ -108,8 +108,10 @@ curl -fsS --noproxy '*' -X POST "$IM_BASE/providers" \
     "provider_type": "weixin",
     "display_name": "Weixin Admin",
     "enabled": true,
+    "app_id": "admin-bot@im.bot",
     "base_url": "http://127.0.0.1:12345",
     "app_secret": "admin-token",
+    "owner_open_id": "owner@im.wechat",
     "event_connection_enabled": false,
     "agent_config": {"runner": "traex"}
   }' >/dev/null
@@ -128,6 +130,56 @@ assert provider["base_url"] == "https://ilinkai.weixin.qq.com", provider
 assert provider["secret_configured"] is True, provider
 assert "secret_ref" not in provider, provider
 assert provider["event_connection_enabled"] is False, provider
+PY
+
+SEND_READY_JSON="$(curl -fsS --noproxy '*' "$IM_BASE/providers/weixin-admin/status")"
+python3 - "$SEND_READY_JSON" <<'PY'
+import json
+import sys
+
+status = json.loads(sys.argv[1])
+assert status.get("state") == "disconnected", status
+assert status.get("send_ready") is False, status
+assert "context token" in status.get("send_ready_reason", ""), status
+assert "context_token" not in status, status
+PY
+
+for attempt in 1 2; do
+  SEND_BODY="$(curl -sS --noproxy '*' -w '\n%{http_code}' -X POST "$IM_BASE/messages/send" \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "provider_id": "weixin-admin",
+      "target_id": "__owner__",
+      "msg_type": "text",
+      "text": "idempotent readiness probe",
+      "idempotency_key": "weixin-e2e-send-ready"
+    }' || true)"
+  SEND_CODE="$(tail -n 1 <<<"$SEND_BODY")"
+  SEND_JSON="$(sed '$d' <<<"$SEND_BODY")"
+  [[ "$SEND_CODE" == "409" ]]
+  python3 - "$SEND_JSON" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+message = payload.get("error") or payload.get("message") or ""
+assert "not send-ready" in message, payload
+PY
+done
+
+python3 - "$TEST_DIR/admin/im_gateway_outbox.json" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+payload = json.loads(path.read_text())
+record = payload["records"]["weixin-e2e-send-ready"]
+assert record["status"] == "pending", record
+assert record["attempt_count"] == 2, record
+assert record["provider_id"] == "weixin-admin", record
+assert record["target_id"] == "__owner__", record
+assert "idempotent readiness probe" not in path.read_text(), payload
 PY
 
 curl -fsS --noproxy '*' -X POST "$IM_BASE/providers" \

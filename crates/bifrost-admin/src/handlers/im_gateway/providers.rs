@@ -234,15 +234,67 @@ pub(super) fn handle_provider_status(
     if req.method() != Method::GET {
         return method_not_allowed();
     }
+    let provider = service.provider_store.get(id);
     let status = service.connection_manager.get_status(id);
     match status {
-        Some(s) => json_response(&s),
-        None => {
-            if service.provider_store.get(id).is_some() {
-                json_response(&crate::im_gateway::types::ConnectionStatus::default())
-            } else {
-                error_response(StatusCode::NOT_FOUND, "Provider not found")
+        Some(s) => {
+            let mut value = serde_json::to_value(&s).unwrap_or_default();
+            if let Some(provider) = provider.as_ref() {
+                if provider.provider_type == crate::im_gateway::types::ImProviderType::Weixin {
+                    let owner_id = provider.owner_open_id.as_deref().unwrap_or_default();
+                    let send_ready = !owner_id.is_empty()
+                        && service
+                            .connection_manager
+                            .weixin_provider()
+                            .send_ready_for_user(provider, owner_id);
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert(
+                            "send_ready".to_string(),
+                            serde_json::Value::Bool(send_ready),
+                        );
+                        if !send_ready {
+                            object.insert(
+                                "send_ready_reason".to_string(),
+                                serde_json::Value::String(
+                                    "awaiting an inbound message context token".to_string(),
+                                ),
+                            );
+                        }
+                    }
+                }
             }
+            json_response(&value)
+        }
+        None => {
+            let Some(provider) = provider else {
+                return error_response(StatusCode::NOT_FOUND, "Provider not found");
+            };
+            let mut value =
+                serde_json::to_value(crate::im_gateway::types::ConnectionStatus::default())
+                    .unwrap_or_default();
+            if provider.provider_type == crate::im_gateway::types::ImProviderType::Weixin {
+                let owner_id = provider.owner_open_id.as_deref().unwrap_or_default();
+                let send_ready = !owner_id.is_empty()
+                    && service
+                        .connection_manager
+                        .weixin_provider()
+                        .send_ready_for_user(&provider, owner_id);
+                if let Some(object) = value.as_object_mut() {
+                    object.insert(
+                        "send_ready".to_string(),
+                        serde_json::Value::Bool(send_ready),
+                    );
+                    if !send_ready {
+                        object.insert(
+                            "send_ready_reason".to_string(),
+                            serde_json::Value::String(
+                                "awaiting an inbound message context token".to_string(),
+                            ),
+                        );
+                    }
+                }
+            }
+            json_response(&value)
         }
     }
 }

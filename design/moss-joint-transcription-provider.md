@@ -81,7 +81,7 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 - 独立 runtime tag release 才执行完整 Python/MLX 安装、runner self-test、host-path 动态依赖检查、真实 runtime 打包、checksum 和 asset 上传。PR 的轻量门禁不能替代该真实 tag 演练，但保证 workflow 语法引用和确定性打包结果不会到正式 runtime 发布时才首次执行。
 - 核心 Bifrost beta tag 必须单独验证 CLI/App Release 在完全不构建 MOSS runtime 的情况下全绿；Runtime beta tag 必须验证独立资产可发布、可复算 checksum，并在稳定 runtime 发布前完成。
 6. 用户 Prompt 通过仅当前进程可读的临时文件传入。runtime 始终先使用官方时间戳/说话人协议 Prompt，再追加用户上下文，避免自定义 Prompt 破坏结构化输出协议。
-7. 整段推理采用端到端硬 watchdog：预算从文件进入 Processing 时开始，包含媒体探测和 WAV 规范化；启动 MLX 子进程前先扣除已经消耗的时间，只把剩余预算交给推理。总耗时达到音频时长的 `0.5x` 时杀死子进程并返回 `moss_rtf_exceeded`，不会继续消耗资源或悄悄回退到不同模型。
+7. 整段推理采用端到端硬 watchdog：预算从文件进入 Processing 时开始，包含媒体探测和 WAV 规范化；启动 MLX 子进程前先扣除已经消耗的时间，只把剩余预算交给推理。默认总耗时达到音频时长的 `0.5x` 时杀死子进程并返回 `moss_rtf_exceeded`，不会继续消耗资源或悄悄回退到不同模型。已经真实命中该错误的单文件可在人工监控的定向补救运行中使用 `BIFROST_MOSS_MAX_RUNTIME_RTF=1.0`；若同一文件继续超时，才允许依次升级为 `2.0`、`3.0`。只接受精确的 `1.0`、`2.0` 或 `3.0`，其他值回退 `0.5`。若文件在默认每秒 20 个输出 token 下触顶，可在已有 `finish_reason=length` 证据后额外设置 `BIFROST_MOSS_OUTPUT_TOKENS_PER_SECOND=30`；只接受精确的 `30`，其他值回退 `20`。只有整文件补救仍出现确定性退化输出时，才允许对该单文件设置 `BIFROST_MOSS_SEGMENT_SECONDS=600/300/60`，并按 `60 → 30 → 10` 秒自适应细分失败区间；默认路径仍保持整文件联合解码。分段后 speaker 标签仅在片段内有效，不能宣称具备跨片段全局说话人一致性。`BIFROST_MOSS_ALLOW_GAP_MARKERS=1` 仅允许最多 60 秒确定性失败区间以显式 `UNRESOLVED` 标记保留，超过上限继续失败，不得静默漏字。确定性失败缓存包含非默认补救配置签名，使配置升级能重试同一文件，同时不扩大为历史队列重跑；固定的短音频、静音、无时长等输入错误在任何补救配置下仍不重试；补救后必须去掉全部环境变量。
 8. release 打包禁用 macOS resource fork，并扫描拒绝 `._*`、`.DS_Store`、`__MACOSX`；安装器也跳过这些元数据，避免 Python 模型加载器误读 AppleDouble 文件。
 9. 在启动约 2 GiB MLX 进程前执行廉价保护：无法取得时长时返回 `moss_duration_unavailable`；短于 10 秒的音频在严格 `0.5x` SLA 下返回 `moss_audio_too_short`；规范化 WAV 为数字静音/近零信号时返回 `moss_audio_silent`。RMS 以流式扫描计算，不把长 WAV 整体读入内存。阈值约为 -60 dBFS，只过滤数字静音，不用激进 VAD 剪掉低音量说话。
 10. MLX 仍按官方建议对 55 分钟以内会议执行一次全局联合解码，不切成独立短块。runner 改用固定版本模型提供的 `stream_generate` 收集同一批 token；若前 256 个生成 token 内始终没有形成一条完整的 `[start][Sxx]text[end]` 协议片段，立即停止该稀疏/无语音输入。只出现未闭合的时间戳/说话人前缀不能绕过保护。合法输出继续完成原始全局解码和同一解析规则，因此正常多人录音的模型输入、采样温度、token 预算和 speaker 一致性不变。
@@ -273,8 +273,8 @@ MOSS-Transcribe-Diarize 能在一次推理中同时返回转录、时间戳与�
 - 自动初始化下载中断：使用可续传临时文件，哈希不匹配时拒绝安装并保留明确错误；失败隔离件保留到后续一次完整成功并落盘 marker 后再自动回收，不会回退成 Qwen 后悄悄产出不同语义的结果。
 - Prompt 泄露或协议破坏：Prompt 不放入命令行参数，临时文件随单次推理销毁；runtime 追加而非替换协议 Prompt。
 - 长音频 token 截断：按音频时长计算输出 token budget，并保留完整性信息；超过 55 分钟在没有跨块 speaker 归并前拒绝处理。
-- 说话人标签跨块漂移：正式路径使用一次全局解码，不采用独立短块；未来若切块，必须先具备跨块 voiceprint/聚类归并和 DER 回归门禁。
-- 资源占用：MOSS 仅离线串行启用，Qwen 实时默认链路不变；短音频/静音前置拒绝、完整片段早停、退化输出拒绝、确定性失败去重和端到端 0.5 RTF watchdog 是硬失败门禁。单次有效联合解码仍需约 2 GiB MLX 工作集，这是当前 8-bit 模型本身的运行要求，不通过降低模型精度规避。
+- 说话人标签跨块漂移：正式路径使用一次全局解码，不采用独立短块；受控单文件救援分段只用于恢复文本与片段内 speaker，必须明确不保证跨片段 speaker 一致性。若把切块升级为正式路径，必须先具备跨块 voiceprint/聚类归并和 DER 回归门禁。
+- 资源占用：MOSS 仅离线串行启用，Qwen 实时默认链路不变；短音频/静音前置拒绝、完整片段早停、退化输出拒绝、确定性失败去重和默认端到端 0.5 RTF/20 token 每秒门禁是硬默认。受控的 1.0/2.0/3.0 RTF 与 30 token 每秒单文件分级补救只是运维逃生口，不改变产品默认值，并且必须逐级具备同一文件的超时或长度触顶证据。单次有效联合解码仍需约 2 GiB MLX 工作集，这是当前 8-bit 模型本身的运行要求，不通过降低模型精度规避。
 - 回退：Provider 不可用或能力不匹配时继续使用现有 Qwen + diarization 流程。
 
 ## 9. Review/Fix/Test 门禁

@@ -23,6 +23,33 @@ impl EnvGuard {
     }
 }
 
+async fn spawn_im_gateway_http(
+    service: SharedImGatewayService,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind IM Gateway test server");
+    let address = listener.local_addr().expect("IM Gateway server address");
+    let handle = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept IM Gateway request");
+        let io = TokioIo::new(stream);
+        let handler = service_fn(move |request: Request<Incoming>| {
+            let service = service.clone();
+            async move {
+                let path = request.uri().path().to_string();
+                Ok::<_, std::convert::Infallible>(
+                    handle_im_gateway(request, Some(service), &path).await,
+                )
+            }
+        });
+        let _ = http1::Builder::new()
+            .keep_alive(false)
+            .serve_connection(io, handler)
+            .await;
+    });
+    (address, handle)
+}
+
 struct EnvVarGuard {
     key: &'static str,
     old_value: Option<String>,
@@ -620,6 +647,7 @@ pub(super) fn agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt
             aes_key: None,
         }],
         files: Vec::new(),
+        reply_to: None,
         raw_type: Some("text".to_string()),
         ..Default::default()
     };
@@ -638,6 +666,7 @@ pub(super) fn agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt
             aes_key: None,
         }],
         files: Vec::new(),
+        reply_to: None,
         raw_type: Some("image".to_string()),
         ..Default::default()
     };
@@ -651,6 +680,7 @@ pub(super) fn agent_chat_message_text_prefers_trimmed_text_and_uses_image_prompt
         mentions: Vec::new(),
         images: Vec::new(),
         files: Vec::new(),
+        reply_to: None,
         raw_type: None,
         ..Default::default()
     };
@@ -930,6 +960,108 @@ pub(super) async fn busy_queue_command_preserves_event_files() {
 }
 
 #[test]
+pub(super) fn agent_chat_message_text_includes_resolved_reply_context_and_preserves_commands() {
+    let temp = tempfile::tempdir().expect("temp message store");
+    let store = ImMessageLogStore::new(temp.path());
+    store
+        .add(ImMessageLog {
+            id: "quoted-log".to_string(),
+            provider_id: "weixin-main".to_string(),
+            direction: MessageDirection::Outbound,
+            status: MessageStatus::Success,
+            timestamp: 1_000,
+            target_id: Some("peer-a".to_string()),
+            target_name: None,
+            message_id: Some("quoted-message-id".to_string()),
+            msg_type: Some("text".to_string()),
+            content_preview: Some("原回复".to_string()),
+            content: Some("原回复 https://example.com/article".to_string()),
+            trigger: Some("agent".to_string()),
+            error: None,
+            sender_open_id: None,
+            event_id: None,
+            reaction_added: None,
+        })
+        .expect("add quoted message");
+    let reply_to = Some(crate::im_gateway::types::ImMessageReference {
+        message_id: Some("quoted-message-id".to_string()),
+        created_at_ms: Some(1_000),
+        text: None,
+    });
+    let message = crate::im_gateway::types::ImEventMessage {
+        text: "这个链接对应哪篇文章？".to_string(),
+        mentions: Vec::new(),
+        images: Vec::new(),
+        reply_to: reply_to.clone(),
+        raw_type: Some("text".to_string()),
+        ..Default::default()
+    };
+
+    let prompt =
+        agent_message_text_with_reference(&message, "weixin-main", Some("peer-a"), None, &store);
+    assert!(prompt.contains("【引用消息（仅作为上下文）】"));
+    assert!(prompt.contains("原回复 https://example.com/article"));
+    assert!(prompt.ends_with("【当前消息】\n这个链接对应哪篇文章？"));
+
+    let command = crate::im_gateway::types::ImEventMessage {
+        text: "/g 只处理当前回合".to_string(),
+        mentions: Vec::new(),
+        images: Vec::new(),
+        reply_to,
+        raw_type: Some("text".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        agent_message_text_with_reference(&command, "weixin-main", Some("peer-a"), None, &store),
+        "/g 只处理当前回合"
+    );
+}
+
+#[test]
+pub(super) fn agent_chat_message_text_limits_reply_context_and_ignores_missing_reference() {
+    let temp = tempfile::tempdir().expect("temp message store");
+    let store = ImMessageLogStore::new(temp.path());
+    let long_quote = "引".repeat(MAX_QUOTED_AGENT_CONTEXT_CHARS + 200);
+    let message = crate::im_gateway::types::ImEventMessage {
+        text: "继续解释".to_string(),
+        mentions: Vec::new(),
+        images: Vec::new(),
+        reply_to: Some(crate::im_gateway::types::ImMessageReference {
+            message_id: None,
+            created_at_ms: None,
+            text: Some(long_quote),
+        }),
+        raw_type: Some("text".to_string()),
+        ..Default::default()
+    };
+    let prompt =
+        agent_message_text_with_reference(&message, "weixin-main", Some("peer-a"), None, &store);
+    let quoted = prompt
+        .split("\n\n【当前消息】")
+        .next()
+        .expect("quoted section");
+    assert!(quoted.ends_with("..."));
+    assert!(quoted.chars().count() <= MAX_QUOTED_AGENT_CONTEXT_CHARS + 32);
+
+    let missing = crate::im_gateway::types::ImEventMessage {
+        text: "仍然处理当前消息".to_string(),
+        mentions: Vec::new(),
+        images: Vec::new(),
+        reply_to: Some(crate::im_gateway::types::ImMessageReference {
+            message_id: Some("missing".to_string()),
+            created_at_ms: None,
+            text: None,
+        }),
+        raw_type: Some("text".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        agent_message_text_with_reference(&missing, "weixin-main", Some("peer-a"), None, &store),
+        "仍然处理当前消息"
+    );
+}
+
+#[test]
 pub(super) fn inbound_message_preview_summarizes_image_only_and_truncates_text() {
     let image_message = crate::im_gateway::types::ImEventMessage {
         text: String::new(),
@@ -955,6 +1087,7 @@ pub(super) fn inbound_message_preview_summarizes_image_only_and_truncates_text()
             },
         ],
         files: Vec::new(),
+        reply_to: None,
         raw_type: Some("image".to_string()),
         ..Default::default()
     };
@@ -966,6 +1099,7 @@ pub(super) fn inbound_message_preview_summarizes_image_only_and_truncates_text()
         mentions: Vec::new(),
         images: Vec::new(),
         files: Vec::new(),
+        reply_to: None,
         raw_type: Some("text".to_string()),
         ..Default::default()
     };
@@ -1261,6 +1395,514 @@ pub(super) fn test_provider() -> ImProviderConfig {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn debug_mock_inbound_maps_reply_reference_into_event() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = Arc::new(ImGatewayService::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.owner_open_id = Some("owner-open-id".to_string());
+    service
+        .provider_store
+        .add(provider)
+        .expect("provider should be saved");
+    let (address, server) = spawn_im_gateway_http(service).await;
+
+    let response = reqwest::Client::new()
+        .post(format!(
+            "http://{address}/api/im-gateway/debug/mock-inbound"
+        ))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "providerId": "feishu-main",
+            "text": "quoted follow-up",
+            "userId": "sender-open-id",
+            "chatId": "chat-id",
+            "messageId": "message-id",
+            "eventId": "event-id",
+            "replyTo": {
+                "messageId": "quoted-message-id",
+                "createdAtMs": 1234,
+                "text": "quoted original"
+            }
+        }))
+        .send()
+        .await
+        .expect("send mock inbound request");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.expect("mock inbound response");
+    assert_eq!(body["eventId"], "event-id");
+    assert_eq!(body["messageId"], "message-id");
+    server.await.expect("mock inbound server task");
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn text_message_send_uses_provider_client_and_records_failure() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = Arc::new(ImGatewayService::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "weixin-main".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    provider.display_name = "Weixin Main".to_string();
+    service
+        .provider_store
+        .add(provider.clone())
+        .expect("provider should be saved");
+    service
+        .connection_manager
+        .weixin_provider()
+        .store_context_for_test(&provider, "weixin-user", "test-context-token")
+        .expect("context token should be persisted");
+    service
+        .target_store
+        .add(ImTarget {
+            id: "weixin-owner".to_string(),
+            provider_id: "weixin-main".to_string(),
+            display_name: "Weixin Owner".to_string(),
+            receive_id_type: "open_id".to_string(),
+            receive_id: "weixin-user".to_string(),
+            default_msg_type: "text".to_string(),
+            enabled: true,
+            created_at: 1,
+            updated_at: 1,
+        })
+        .expect("target should be saved");
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/api/im-gateway/messages/send"))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "provider_id": "weixin-main",
+            "target_id": "weixin-owner",
+            "msg_type": "text",
+            "content": "migration smoke test",
+            "idempotency_key": "migration-smoke-test"
+        }))
+        .send()
+        .await
+        .expect("send outbound message request");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    server.await.expect("message send server task");
+    let logs = service.message_log_store.list();
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].content.as_deref(), Some("migration smoke test"));
+    assert_eq!(logs[0].status, MessageStatus::Failed);
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn idempotent_weixin_send_commits_successful_provider_ack() {
+    use http_body_util::BodyExt;
+    use sha2::Digest;
+
+    let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind fake Weixin provider");
+    let provider_address = provider_listener.local_addr().unwrap();
+    let provider_server = tokio::spawn(async move {
+        for request_index in 0..3 {
+            let (stream, _) = provider_listener.accept().await.unwrap();
+            let io = TokioIo::new(stream);
+            let handler = service_fn(move |request: Request<Incoming>| async move {
+                assert_eq!(request.uri().path(), "/ilink/bot/sendmessage");
+                let body = request.into_body().collect().await.unwrap().to_bytes();
+                let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let client_id = payload["msg"]["client_id"].as_str().unwrap();
+                if request_index == 0 {
+                    assert_eq!(client_id.len(), 45);
+                } else {
+                    assert!(client_id.starts_with("bifrost-weixin-"));
+                }
+                let response = format!(
+                    r#"{{"ret":0,"message_id":"provider-message-{}"}}"#,
+                    request_index + 1
+                );
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Full::new(Bytes::from(response)))
+                        .unwrap(),
+                )
+            });
+            http1::Builder::new()
+                .keep_alive(false)
+                .serve_connection(io, handler)
+                .await
+                .unwrap();
+        }
+    });
+
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = Arc::new(ImGatewayService::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "weixin-success".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    provider.base_url = Some(format!("http://{provider_address}"));
+    provider.app_id = Some("bot@im.bot".to_string());
+    provider.secret_ref = Some("bot-token".to_string());
+    provider.owner_open_id = Some("owner-user".to_string());
+    service
+        .provider_store
+        .add(provider.clone())
+        .expect("provider should be saved");
+    service
+        .connection_manager
+        .weixin_provider()
+        .store_context_for_test(&provider, "owner-user", "context-token")
+        .expect("context should persist");
+
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/api/im-gateway/messages/send"))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "provider_id": "weixin-success",
+            "target_id": "__owner__",
+            "msg_type": "text",
+            "content": "exactly once",
+            "idempotency_key": "successful-send"
+        }))
+        .send()
+        .await
+        .expect("send successful message");
+    let status = response.status();
+    let response_text = response.text().await.expect("send response text");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "unexpected send response: {response_text}"
+    );
+    let body: serde_json::Value = serde_json::from_str(&response_text).expect("send response");
+    assert_eq!(body["message_id"], "provider-message-1");
+    server.await.expect("message server task");
+
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/api/im-gateway/messages/send"))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "provider_id": "weixin-success",
+            "target_id": "__owner__",
+            "msg_type": "interactive",
+            "card": {
+                "header": {"title": {"tag": "plain_text", "content": "Daily"}},
+                "elements": [{"tag": "markdown", "content": "Summary"}]
+            }
+        }))
+        .send()
+        .await
+        .expect("send non-idempotent interactive message");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.expect("interactive send response");
+    assert_eq!(body["message_id"], "provider-message-2");
+    server.await.expect("interactive message server task");
+
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/api/im-gateway/messages/send"))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "provider_id": "weixin-success",
+            "target_id": "__owner__",
+            "msg_type": "text",
+            "content": "non-idempotent text"
+        }))
+        .send()
+        .await
+        .expect("send non-idempotent text message");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.expect("text send response");
+    assert_eq!(body["message_id"], "provider-message-3");
+    server.await.expect("text message server task");
+    provider_server.await.expect("provider server task");
+
+    let logs = service.message_log_store.list();
+    assert_eq!(logs.len(), 3);
+    assert!(logs.iter().all(|log| log.status == MessageStatus::Success));
+    assert!(matches!(
+        service
+            .outbox_store
+            .begin(
+                "successful-send",
+                "weixin-success",
+                "__owner__",
+                "text",
+                &format!(
+                    "{:x}",
+                    sha2::Sha256::digest(
+                        serde_json::to_vec(&serde_json::json!("exactly once")).unwrap()
+                    )
+                )
+            )
+            .unwrap(),
+        crate::im_gateway::ImOutboxBegin::Replay { .. }
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn provider_status_reports_weixin_send_readiness_and_missing_provider() {
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = Arc::new(ImGatewayService::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "weixin-status".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    provider.owner_open_id = Some("owner-user".to_string());
+    service
+        .provider_store
+        .add(provider.clone())
+        .expect("provider should be saved");
+
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/im-gateway/providers/weixin-status/status"
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("query provider status");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.expect("status body");
+    assert_eq!(body["send_ready"], false);
+    assert_eq!(
+        body["send_ready_reason"],
+        "awaiting an inbound message context token"
+    );
+    server.await.expect("provider status server task");
+
+    service.connection_manager.set_status_for_test(
+        "weixin-status",
+        crate::im_gateway::types::ConnectionStatus {
+            state: crate::im_gateway::types::ConnectionState::Connected,
+            last_connected_at: Some(1),
+            last_event_at: Some(2),
+            reconnect_count: 0,
+            last_error: None,
+        },
+    );
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/im-gateway/providers/weixin-status/status"
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("query connected provider without send context");
+    let body: serde_json::Value = response.json().await.expect("status body");
+    assert_eq!(body["state"], "connected");
+    assert_eq!(body["send_ready"], false);
+    assert_eq!(
+        body["send_ready_reason"],
+        "awaiting an inbound message context token"
+    );
+    server
+        .await
+        .expect("connected not-ready provider status server task");
+
+    service
+        .connection_manager
+        .weixin_provider()
+        .store_context_for_test(&provider, "owner-user", "context-token")
+        .expect("context should persist");
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/im-gateway/providers/weixin-status/status"
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("query send-ready provider status");
+    let body: serde_json::Value = response.json().await.expect("status body");
+    assert_eq!(body["send_ready"], true);
+    assert!(body.get("send_ready_reason").is_none());
+    server.await.expect("provider status server task");
+
+    service.connection_manager.set_status_for_test(
+        "status-without-provider",
+        crate::im_gateway::types::ConnectionStatus {
+            state: crate::im_gateway::types::ConnectionState::Connected,
+            last_connected_at: Some(3),
+            last_event_at: None,
+            reconnect_count: 0,
+            last_error: None,
+        },
+    );
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/im-gateway/providers/status-without-provider/status"
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("query status without provider config");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.expect("status body");
+    assert_eq!(body["state"], "connected");
+    assert!(body.get("send_ready").is_none());
+    server.await.expect("status without provider server task");
+
+    let (address, server) = spawn_im_gateway_http(service).await;
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/im-gateway/providers/missing/status"
+        ))
+        .header("connection", "close")
+        .send()
+        .await
+        .expect("query missing provider status");
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    server.await.expect("missing provider status server task");
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn idempotent_message_send_rejects_oversized_key_and_not_ready_weixin() {
+    use sha2::Digest;
+
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = Arc::new(ImGatewayService::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.id = "weixin-not-ready".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    provider.owner_open_id = Some("owner-user".to_string());
+    service
+        .provider_store
+        .add(provider)
+        .expect("provider should be saved");
+
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/api/im-gateway/messages/send"))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "provider_id": "weixin-not-ready",
+            "target_id": "__owner__",
+            "msg_type": "text",
+            "content": "hello",
+            "idempotency_key": "x".repeat(513)
+        }))
+        .send()
+        .await
+        .expect("send oversized idempotency key");
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    server.await.expect("oversized key server task");
+
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/api/im-gateway/messages/send"))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "provider_id": "weixin-not-ready",
+            "target_id": "__owner__",
+            "msg_type": "text",
+            "content": "hello",
+            "idempotency_key": "not-ready-once"
+        }))
+        .send()
+        .await
+        .expect("send before context is ready");
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    server.await.expect("not-ready server task");
+
+    assert!(matches!(
+        service
+            .outbox_store
+            .begin(
+                "not-ready-once",
+                "weixin-not-ready",
+                "__owner__",
+                "text",
+                &format!(
+                    "{:x}",
+                    sha2::Sha256::digest(serde_json::to_vec(&serde_json::json!("hello")).unwrap())
+                )
+            )
+            .unwrap(),
+        crate::im_gateway::ImOutboxBegin::Send { .. }
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+pub(super) async fn sent_outbox_message_is_replayed_without_contacting_provider() {
+    use sha2::Digest;
+
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = Arc::new(ImGatewayService::new(temp_dir.path()));
+    let mut provider = test_provider();
+    provider.owner_open_id = Some("owner-user".to_string());
+    service
+        .provider_store
+        .add(provider)
+        .expect("provider should be saved");
+
+    let payload = serde_json::json!("already sent");
+    let payload_sha256 = format!(
+        "{:x}",
+        sha2::Sha256::digest(serde_json::to_vec(&payload).unwrap())
+    );
+    service
+        .outbox_store
+        .begin(
+            "daily-replay",
+            "feishu-main",
+            "__owner__",
+            "text",
+            &payload_sha256,
+        )
+        .unwrap();
+    service
+        .outbox_store
+        .mark_sent("daily-replay", Some("message-already-sent"))
+        .unwrap();
+
+    let (address, server) = spawn_im_gateway_http(service.clone()).await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/api/im-gateway/messages/send"))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "provider_id": "feishu-main",
+            "target_id": "__owner__",
+            "msg_type": "text",
+            "content": "different payload",
+            "idempotency_key": "daily-replay"
+        }))
+        .send()
+        .await
+        .expect("reject reused key with different payload");
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    server.await.expect("conflict server task");
+
+    let (address, server) = spawn_im_gateway_http(service).await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{address}/api/im-gateway/messages/send"))
+        .header("connection", "close")
+        .json(&serde_json::json!({
+            "provider_id": "feishu-main",
+            "target_id": "__owner__",
+            "msg_type": "text",
+            "content": "already sent",
+            "idempotency_key": "daily-replay"
+        }))
+        .send()
+        .await
+        .expect("replay sent message");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.expect("replay body");
+    assert_eq!(body["message_id"], "message-already-sent");
+    assert_eq!(body["request_id"], "idempotent-replay");
+    server.await.expect("replay server task");
+}
+
 #[test]
 pub(super) fn feishu_codex_like_external_runner_defaults_to_progress_card_without_channel_override()
 {
@@ -1334,6 +1976,7 @@ pub(super) fn send_message_request_resolves_owner_target_from_provider() {
         card: None,
         image: None,
         rich_card: None,
+        idempotency_key: None,
     };
 
     let resolved =
@@ -1361,6 +2004,7 @@ pub(super) fn send_message_request_rejects_owner_without_provider() {
         card: None,
         image: None,
         rich_card: None,
+        idempotency_key: None,
     };
 
     let error = resolve_send_message_request(&service, &body)
@@ -1387,6 +2031,7 @@ pub(super) fn send_message_request_accepts_image_key_payload() {
             image_type: default_feishu_image_type(),
         }),
         rich_card: None,
+        idempotency_key: None,
     };
 
     let content = normalized_send_content(&body).expect("image content");
@@ -1560,6 +2205,7 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
             mentions: Vec::new(),
             images: Vec::new(),
             files: Vec::new(),
+            reply_to: None,
             raw_type: Some("text".to_string()),
             ..Default::default()
         }),
@@ -1824,6 +2470,7 @@ pub(super) async fn im_event_loop_external_cli_route_processes_image_only_messag
                 },
             ],
             files: Vec::new(),
+            reply_to: None,
             raw_type: Some("image".to_string()),
             ..Default::default()
         }),
@@ -1945,6 +2592,7 @@ pub(super) async fn im_event_loop_external_cli_session_records_runner_failure() 
             mentions: Vec::new(),
             images: Vec::new(),
             files: Vec::new(),
+            reply_to: None,
             raw_type: Some("text".to_string()),
             ..Default::default()
         }),
@@ -2108,6 +2756,7 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
                 mentions: Vec::new(),
                 images: Vec::new(),
                 files,
+                reply_to: None,
                 raw_type: Some("text".to_string()),
                 ..Default::default()
             }),
@@ -2120,12 +2769,18 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
     let active_session = service
         .agent_session_manager
         .take_session(&active_session_key);
-    let active_event = event_for(
+    let mut active_event = event_for(
         "active",
         "owner-open-id",
         "queue active message",
         Vec::new(),
     );
+    let active_message = active_event.message.as_mut().expect("active message");
+    active_message.reply_to = Some(crate::im_gateway::types::ImMessageReference {
+        message_id: Some("quoted-active-message".to_string()),
+        created_at_ms: None,
+        text: Some("quoted active context".to_string()),
+    });
     handle_concurrent_event_during_chat(
         &active_event,
         &provider,
@@ -2143,13 +2798,14 @@ pub(super) async fn concurrent_external_events_cover_active_and_queued_sessions(
         BusyMessageDefaultMode::Queue,
     )
     .await;
-    assert_eq!(
-        service
-            .queue_manager
-            .queue_status(&active_session_key)
-            .len(),
-        1
-    );
+    let active_queue = service.queue_manager.queue_status(&active_session_key);
+    assert_eq!(active_queue.len(), 1);
+    assert!(active_queue[0]
+        .message
+        .contains("【引用消息（仅作为上下文）】\nquoted active context"));
+    assert!(active_queue[0]
+        .message
+        .ends_with("【当前消息】\nqueue active message"));
     service.agent_session_manager.return_session(active_session);
 
     let other_session_key = build_session_key(&provider.id, Some("other-owner"));

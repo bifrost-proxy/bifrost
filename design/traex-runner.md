@@ -103,7 +103,7 @@ Web timeline 会按 `call_id` 合并工具 start/result,并跳过重复 start。
 
 运行中的 Web Chat 不使用前端定时轮询作为状态源。后端每次向 conversation timeline 写入外部 runner 事件后,通过已有 `sessions/events` SSE 推送轻量 `timeline_changed`,payload 只包含 `sessionKey`、`historyPath` 和可用的 `endIndex`。前端只接受当前打开的 `historyPath/sessionKey` 对应事件,多个线程同时运行时不会互相写入消息区;收到事件后按本地 `endIndex` 调用 history `since` 增量接口补齐。EventSource 连接不跟随普通 thread summary 刷新重建,而是通过 ref 读取当前线程和运行状态,避免多线程同时推送时发生连接抖动或旧响应覆盖。只有 SSE lagged、重连或返回的 `start_index` 与本地 `endIndex` 不连续时,才触发一次 tail/history 或 sessions/all 校准,避免运行页把 `/sessions/all` 变成高频心跳并拖高主进程 CPU。
 
-外部 runner (Codex/Trae) 使用 app-server transport 时支持 `turn/steer`: 同 session 的普通 busy 文本默认请求 Guide,Web Chat 展示 Guide/Queue 且默认选中 Guide;只有 `/q` 或 UI 选择 Queue 才直接进入 `SessionQueueManager`。不支持 live guide、runner 拒绝、控制通道失败或图片输入时必须明确降级排队并保留原消息/附件;成功 steer 的消息不得重复排队。`/stop` 仍作为单独控制命令立即尝试停止当前外部进程。当前 run 结束后,IM/Web Chat runner loop 只弹出显式排队或降级排队的消息启动下一轮,Codex 和 Trae 都复用上一轮保存的 `threadId` 续接 runner 原生会话上下文。ChatGPT Web 保持只支持 Queue。
+外部 runner (Codex/Trae) 使用 app-server transport 时支持 `turn/steer`: Web Chat 展示 Guide/Queue 且默认选中 Guide；IM 普通 busy 文本默认直接进入 `SessionQueueManager`，只有显式 `/g` 才请求 Guide。不支持 live guide、runner 拒绝或控制通道失败时，显式 Guide 必须明确降级排队并保留原消息；普通文本和图片按默认队列保留完整消息/附件。成功 steer 的消息不得重复排队。`/stop` 仍作为单独控制命令立即尝试停止当前外部进程。当前 run 结束后，IM/Web Chat runner loop 弹出排队消息启动下一轮，Codex 和 Trae 都复用上一轮保存的 `threadId` 续接 runner 原生会话上下文。ChatGPT Web 保持只支持 Queue。
 
 
 Runners 配置页的 Adapter 下拉只展示产品化入口: Codex CLI、Trae CLI、ChatGPT Web。后端仍接受历史或测试用途的 `custom`/`mock` adapter,保证已有配置和自动化测试不被破坏,但新建/编辑弹窗不再把这些未来扩展项暴露给普通用户。

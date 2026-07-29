@@ -1226,15 +1226,9 @@ fn desktop_shutdown_and_install_failure_orchestration_covers_all_outcomes() {
 #[cfg(unix)]
 #[test]
 fn app_cli_version_probe_reports_nonzero_exit() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let temp = tempfile::tempdir().expect("tempdir");
-    let cli = temp.path().join("bifrost");
-    fs::write(&cli, "#!/bin/sh\nexit 7\n").expect("write failing CLI");
-    fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).expect("chmod failing CLI");
-
-    let error = read_installed_cli_version_with_timeout(&cli, Duration::from_secs(10))
-        .expect_err("non-zero CLI version probe must fail");
+    let error =
+        read_installed_cli_version_with_timeout(Path::new("false"), Duration::from_secs(10))
+            .expect_err("non-zero CLI version probe must fail");
     let message = error.to_string();
     assert!(
         message.contains("status"),

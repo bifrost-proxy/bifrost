@@ -186,6 +186,7 @@ fn discover_and_prepare_pending_batch(
     task: &AsrDirectoryTask,
     files: &mut FileStore,
     attempted_keys: &HashSet<String>,
+    recording_date: Option<NaiveDate>,
 ) -> Result<PendingBatchScan, String> {
     let discovered = discover_audio_files(&task.audio_dir, task.recursive)?;
     for path in &discovered {
@@ -217,14 +218,17 @@ fn discover_and_prepare_pending_batch(
                     .files
                     .get(&key)
                     .map(|record| {
-                        matches!(
-                            record.status,
-                            FileStatus::Pending | FileStatus::Processing
-                        )
-                            || (record.status == FileStatus::Failed
-                                && !moss_failure_is_non_retryable_for_unchanged_source(
-                                    task, path, record,
-                                ))
+                        recording_date.is_none_or(|date| {
+                            file_record_local_date(record).is_some_and(|candidate| candidate == date)
+                        })
+                            && (matches!(
+                                record.status,
+                                FileStatus::Pending | FileStatus::Processing
+                            ) || (record.status == FileStatus::Failed
+                                && (recording_date.is_some()
+                                    || !moss_failure_is_non_retryable_for_unchanged_source(
+                                        task, path, record,
+                                    ))))
                     })
                     .unwrap_or(true)
         })
@@ -232,6 +236,14 @@ fn discover_and_prepare_pending_batch(
         .collect::<Vec<_>>();
     sort_pending_paths_by_source_time(files, &mut pending);
     Ok(PendingBatchScan { pending })
+}
+
+fn file_record_local_date(record: &FileRecord) -> Option<NaiveDate> {
+    let timestamp_ms = i64::try_from(record.source_created_at_ms?).ok()?;
+    Local
+        .timestamp_millis_opt(timestamp_ms)
+        .earliest()
+        .map(|timestamp| timestamp.date_naive())
 }
 
 fn sort_pending_paths_by_source_time(files: &FileStore, pending: &mut [PathBuf]) {
@@ -259,8 +271,9 @@ fn pending_modified_time_ms(record: Option<&FileRecord>) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-async fn run_directory_task(
+async fn run_directory_task_for_date(
     task: AsrDirectoryTask,
+    recording_date: Option<NaiveDate>,
 ) -> Result<(AsrDirectoryTask, usize, usize), String> {
     let _guard = ASR_JOB_RUN_LOCK.lock().await;
     let _task_lock = TaskRunFileLock::acquire(&task.id)?;
@@ -283,8 +296,12 @@ async fn run_directory_task(
         );
     }
     let mut attempted_keys = HashSet::new();
-    let mut pending_scan =
-        discover_and_prepare_pending_batch(&task, &mut files, &attempted_keys)?;
+    let mut pending_scan = discover_and_prepare_pending_batch(
+        &task,
+        &mut files,
+        &attempted_keys,
+        recording_date,
+    )?;
     update_run_progress(&task.id, |progress| {
         progress.current_file_total = pending_scan.pending.len();
         progress.current_file_index = 0;
@@ -439,11 +456,15 @@ async fn run_directory_task(
         failed_now += batch_failed;
 
         files = load_file_store(&task.id);
-        pending_scan =
-            match discover_and_prepare_pending_batch(&task, &mut files, &attempted_keys) {
-                Ok(scan) => scan,
-                Err(error) => break Err(error),
-            };
+        pending_scan = match discover_and_prepare_pending_batch(
+            &task,
+            &mut files,
+            &attempted_keys,
+            recording_date,
+        ) {
+            Ok(scan) => scan,
+            Err(error) => break Err(error),
+        };
         update_run_progress(&task.id, |progress| {
             progress.current_file_index = 0;
             progress.current_file_total = pending_scan.pending.len();
@@ -484,6 +505,7 @@ async fn run_directory_task(
     if let Err(error) = refresh_task_daily_summaries(&task) {
         warn!(task_id = %task.id, error = %error, "failed to generate daily summaries");
     }
+    let daily_agent_dates = completed_recording_dates_for_attempted_files(&files, &attempted_keys);
 
     // update_task_after_run persists scheduling metadata (next_run_at_ms,
     // last_error).  If it fails, the per-file results in FileStore are
@@ -504,9 +526,28 @@ async fn run_directory_task(
     };
     spawn_daily_agent_original_files_after_refresh(&updated);
     // Hook: trigger Daily Agent if configured
-    maybe_enqueue_daily_agent_after_asr_run(&updated).await;
+    maybe_enqueue_daily_agent_after_asr_run(&updated, &daily_agent_dates).await;
 
     Ok((updated, processed_now, failed_now))
+}
+
+fn completed_recording_dates_for_attempted_files(
+    files: &FileStore,
+    attempted_keys: &HashSet<String>,
+) -> Vec<String> {
+    let mut dates = attempted_keys
+        .iter()
+        .filter_map(|key| files.files.get(key))
+        .filter(|record| {
+            matches!(record.status, FileStatus::Success | FileStatus::PartialSuccess)
+                && record.output_text_path.as_ref().is_some_and(|path| path.is_file())
+        })
+        .filter_map(file_record_local_date)
+        .map(|date| date.format("%Y-%m-%d").to_string())
+        .collect::<Vec<_>>();
+    dates.sort();
+    dates.dedup();
+    dates
 }
 
 struct SpeechResourceLeaseGuard {
@@ -520,6 +561,13 @@ impl Drop for SpeechResourceLeaseGuard {
 }
 
 fn spawn_directory_task_run_background(task: AsrDirectoryTask) -> Result<(), String> {
+    spawn_directory_task_run_background_for_date(task, None)
+}
+
+fn spawn_directory_task_run_background_for_date(
+    task: AsrDirectoryTask,
+    recording_date: Option<NaiveDate>,
+) -> Result<(), String> {
     FORCE_PAUSED_TASKS.lock().unwrap().remove(&task.id);
     let running_guard = RunningTaskGuard::acquire(&task.id)
         .map_err(|_| "ASR task is already running".to_string())?;
@@ -528,7 +576,7 @@ fn spawn_directory_task_run_background(task: AsrDirectoryTask) -> Result<(), Str
     let task_clone = task.clone();
     tokio::spawn(async move {
         let running_guard = running_guard;
-        let result = run_directory_task(task_clone.clone()).await;
+        let result = run_directory_task_for_date(task_clone.clone(), recording_date).await;
         match &result {
             Ok((_updated, processed, failed)) => {
                 finish_run_progress(
@@ -1493,15 +1541,29 @@ async fn transcribe_file_for_task_with_wav(
             .as_ref()
             .map(|context| context.started_at_ms);
         let moss_started = Instant::now();
-        let result = run_moss_joint_transcription(
-            runtime,
-            wav,
-            duration_ms,
-            &task.transcription_prompt,
-            hooks.pause_check,
-            file_started_at_ms,
-        )
-        .await;
+        let result = if let Some(segment_seconds) = moss_segment_seconds_from_env()
+            .filter(|seconds| duration_secs > *seconds)
+        {
+            run_segmented_moss_joint_transcription(
+                runtime,
+                wav,
+                duration_ms,
+                &task.transcription_prompt,
+                hooks.pause_check,
+                segment_seconds,
+            )
+            .await
+        } else {
+            run_moss_joint_transcription(
+                runtime,
+                wav,
+                duration_ms,
+                &task.transcription_prompt,
+                hooks.pause_check,
+                file_started_at_ms,
+            )
+            .await
+        };
         let elapsed_ms = moss_started
             .elapsed()
             .as_millis()

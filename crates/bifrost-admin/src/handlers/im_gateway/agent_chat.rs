@@ -1208,6 +1208,47 @@ pub(super) fn agent_message_text(message: &crate::im_gateway::types::ImEventMess
     }
 }
 
+pub(super) const MAX_QUOTED_AGENT_CONTEXT_CHARS: usize = 8_000;
+
+pub(super) fn agent_message_text_with_reference(
+    message: &crate::im_gateway::types::ImEventMessage,
+    provider_id: &str,
+    peer_id: Option<&str>,
+    current_message_id: Option<&str>,
+    message_log_store: &ImMessageLogStore,
+) -> String {
+    let current = agent_message_text(message);
+    if current.trim_start().starts_with('/') {
+        return current;
+    }
+    let Some(reference) = message.reply_to.as_ref() else {
+        return current;
+    };
+    let Some(quoted) = message_log_store.resolve_reference_text(
+        provider_id,
+        peer_id,
+        current_message_id,
+        reference,
+    ) else {
+        debug!(
+            provider_id,
+            peer_id,
+            reference_message_id = ?reference.message_id,
+            reference_created_at_ms = ?reference.created_at_ms,
+            "quoted IM message could not be resolved; continuing with current message"
+        );
+        return current;
+    };
+    let quoted = bifrost_core::text::truncate_chars_with_ellipsis(
+        quoted.trim(),
+        MAX_QUOTED_AGENT_CONTEXT_CHARS,
+    );
+    format!(
+        "【引用消息（仅作为上下文）】\n{quoted}\n\n【当前消息】\n{}",
+        current.trim()
+    )
+}
+
 pub(super) fn inbound_message_preview(
     message: &crate::im_gateway::types::ImEventMessage,
 ) -> String {

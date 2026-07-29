@@ -60,6 +60,8 @@ POST /api/im-gateway/providers/:id/weixin-login/complete
 
 Modal 每 2 秒 poll 一次；二维码临近过期或已过期时 WebUI 自动重新调用 `start` 刷新，用户无需手动"已扫码"。
 
+iLink 的 `get_qrcode_status` 本身是长轮询，请求在未扫码时可能约 35 秒才返回 `wait`。登录 API 使用独立的 75 秒 HTTP timeout，必须长于二维码 60 秒生命周期；普通发消息、下载等请求仍保留 30 秒 timeout，避免登录长轮询扩大其他接口的故障等待时间。
+
 ### 事件连接
 
 `ImConnectionManager` 持有 `WeixinProvider`。`connect_events` 以固定 `DEFAULT_POLL_INTERVAL_MS = 3_000` ms 间隔调用 `POST /ilink/bot/getupdates`，认证头为：
@@ -71,6 +73,8 @@ Authorization:     Bearer <bot_token>
 
 返回消息归一化为 `ImEvent`：`provider_type = weixin`、`event_type = message.receive`、`source.user_id/source.chat_id = from_user_id`、`source.message_id = message_id`、`message.text` 优先读取 `text/content/msg/message`，并兼容真实 iLink `msgs` + `sync_buf` + `item_list[].text_item.text` 结构。数字型 `message_id` 会转为字符串；缺失 ID 时使用 raw JSON 稳定 hash，避免 timestamp 造成重复事件不可去重。
 
+引用消息从 `item_list[].ref_msg.message_item` 归一化到 `message.reply_to`，保留被引用消息的 `msg_id/message_id`、`create_time_ms` 和上游可能内联返回的 `text_item.text`。如果 iLink 只返回 ID 和时间，Agent 入口会先按同 provider 的真实消息 ID 查找本地消息记录，再按同一聊天对象与最近发送时间回退匹配；找到后把引用原文/链接与当前问题分区传给 Runner。引用内容按字符限制长度，找不到原文时仍继续处理当前消息。
+
 Feishu 入站继续按 `owner_open_id` 过滤非 owner 消息；Weixin 入站不做 owner 过滤，避免把普通微信发送方误拦截。
 
 ### 回复回写
@@ -81,7 +85,7 @@ Feishu 入站继续按 `owner_open_id` 过滤非 owner 消息；Weixin 入站不
 
 Agent 回复目标按 provider 区分：Weixin 优先回写本次入站事件的 `source.chat_id/source.user_id`，不会优先发给 `owner_open_id`；Feishu 继续优先发给 owner。消息日志记录真实目标 ID，避免只显示内部 `__agent_reply__` 占位符。
 
-Weixin 没有 Feishu CardKit 进度卡能力，因此默认 Agent chat 进入真实 turn loop 前会先向消息发送方发送一条纯文本即时反馈；运行中再次收到同一会话消息时沿用 guide/queue 逻辑并立即回执"已注入引导消息"或排队状态。`/status`、`/stop`、session-free 命令以及其余 Agent slash 命令都走和 Feishu 相同的 IM 事件入口。
+Weixin 没有 Feishu CardKit 进度卡能力，因此默认 Agent chat 进入真实 turn loop 前会先向消息发送方发送一条纯文本即时反馈。运行中再次收到同一会话的普通消息时默认进入 FIFO queue，并立即回执排队状态；只有显式 `/g` 才尝试注入当前 turn。`/status`、`/stop`、session-free 命令以及其余 Agent slash 命令都走和 Feishu 相同的 IM 事件入口。
 
 ### 入站图片
 
@@ -101,6 +105,9 @@ Weixin 没有 Feishu CardKit 进度卡能力，因此默认 Agent chat 进入真
 DEFAULT_BASE_URL                = "https://ilinkai.weixin.qq.com"
 DEFAULT_CDN_BASE_URL            = "https://novac2c.cdn.weixin.qq.com/c2c"
 DEFAULT_POLL_INTERVAL_MS        = 3_000
+DEFAULT_HTTP_TIMEOUT            = 30s
+LOGIN_HTTP_TIMEOUT              = 75s
+LOGIN_QR_EXPIRES_IN_SECONDS     = 60
 TEXT_RETRY_CHUNK_MAX_CHARS      = 1_000
 TEXT_RETRY_CHUNK_MAX_BYTES      = 3_000
 ```

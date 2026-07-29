@@ -25,11 +25,24 @@ struct MockInboundRequest {
     #[serde(default)]
     event_id: Option<String>,
     #[serde(default)]
+    reply_to: Option<MockInboundReplyReference>,
+    #[serde(default)]
     root_id: Option<String>,
     #[serde(default)]
     parent_id: Option<String>,
     #[serde(default)]
     thread_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MockInboundReplyReference {
+    #[serde(default)]
+    message_id: Option<String>,
+    #[serde(default)]
+    created_at_ms: Option<u64>,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,6 +193,13 @@ async fn inject_mock_inbound(
                     })
                 })
                 .collect(),
+            reply_to: body
+                .reply_to
+                .map(|reply| crate::im_gateway::types::ImMessageReference {
+                    message_id: reply.message_id,
+                    created_at_ms: reply.created_at_ms,
+                    text: reply.text,
+                }),
             raw_type: Some(raw_type.to_string()),
             raw_content: body
                 .chat_name
@@ -301,6 +321,7 @@ mod tests {
             root_id: Some("om_root".to_string()),
             parent_id: Some("om_parent".to_string()),
             thread_id: Some("omt_thread".to_string()),
+            reply_to: None,
             files: Vec::new(),
         }
     }

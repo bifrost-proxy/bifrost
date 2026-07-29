@@ -8,7 +8,12 @@ use std::sync::Arc;
 const DEFAULT_DAILY_AGENT_TIMEOUT_MS: u64 = 3_600_000; // 1 hour
 const DEFAULT_ASR_DAILY_AGENTS_MD: &str = include_str!("daily_agent_template.md");
 const DEFAULT_ASR_TOMORROW_TODO_AGENT_MD: &str = include_str!("daily_agent_tomorrow_todo_template.md");
-const PROCESSED_STATE_VERSION: u32 = 1;
+const DEFAULT_ASR_RESEARCH_SEED_AGENT_MD: &str =
+    include_str!("daily_agent_research_seed_template.md");
+const DEFAULT_ASR_RESEARCH_DISPATCHER_AGENT_MD: &str =
+    include_str!("daily_agent_research_dispatcher_template.md");
+const PROCESSED_STATE_VERSION: u32 = 2;
+const DAILY_AGENT_GENERATOR_CONTRACT_VERSION: u32 = 2;
 const CONVERSATION_STATE_VERSION: u32 = 1;
 const DEFAULT_DAILY_AGENT_ID: &str = "daily_report";
 const DEFAULT_DAILY_AGENT_NAME: &str = "daily_report";
@@ -16,6 +21,8 @@ const DEFAULT_DAILY_AGENT_OUTPUT_DIR: &str = "report";
 const DEFAULT_TOMORROW_TODO_AGENT_ID: &str = "tomorrow_todo";
 const DEFAULT_TOMORROW_TODO_AGENT_NAME: &str = "tomorrow_todo";
 const DEFAULT_TOMORROW_TODO_OUTPUT_DIR: &str = "tomorrow_todo";
+const DEFAULT_RESEARCH_SEED_AGENT_ID: &str = "research_seed";
+const DEFAULT_RESEARCH_DISPATCHER_AGENT_ID: &str = "research_dispatcher";
 const DEFAULT_DAILY_AGENT_IM_CHANNEL: &str = "owner:feishu-main";
 const DAILY_AGENT_TERMS_FILENAME: &str = "TERMS.md";
 
@@ -93,6 +100,12 @@ pub(crate) struct AsrDailyAgentConfig {
     #[serde(default = "default_daily_agent_output_dir")]
     pub output_dir: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<AsrDailyAgentDependency>,
+    #[serde(default)]
+    pub dependency_failure_policy: AsrDailyAgentDependencyFailurePolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research_fanout: Option<AsrDailyAgentResearchFanoutConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<AsrDailyAgentItem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminology: Option<String>,
@@ -126,6 +139,9 @@ impl Default for AsrDailyAgentConfig {
             instructions: None,
             im_delivery: AsrDailyAgentImDeliveryConfig::default(),
             output_dir: default_daily_agent_output_dir(),
+            dependencies: Vec::new(),
+            dependency_failure_policy: AsrDailyAgentDependencyFailurePolicy::default(),
+            research_fanout: None,
             agents: default_daily_agent_items(),
             terminology: None,
             report_sync_dir: None,
@@ -163,6 +179,12 @@ pub(crate) struct AsrDailyAgentItem {
     pub im_delivery: AsrDailyAgentImDeliveryConfig,
     #[serde(default = "default_daily_agent_output_dir")]
     pub output_dir: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<AsrDailyAgentDependency>,
+    #[serde(default)]
+    pub dependency_failure_policy: AsrDailyAgentDependencyFailurePolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research_fanout: Option<AsrDailyAgentResearchFanoutConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_sync_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -191,6 +213,9 @@ impl AsrDailyAgentItem {
             instructions: None,
             im_delivery: AsrDailyAgentImDeliveryConfig::default(),
             output_dir: DEFAULT_DAILY_AGENT_OUTPUT_DIR.to_string(),
+            dependencies: Vec::new(),
+            dependency_failure_policy: AsrDailyAgentDependencyFailurePolicy::default(),
+            research_fanout: None,
             report_sync_dir: None,
             last_report_sync: None,
             last_run_at_ms: None,
@@ -220,6 +245,9 @@ impl AsrDailyAgentItem {
                 last_send_error: None,
             },
             output_dir: DEFAULT_TOMORROW_TODO_OUTPUT_DIR.to_string(),
+            dependencies: Vec::new(),
+            dependency_failure_policy: AsrDailyAgentDependencyFailurePolicy::default(),
+            research_fanout: None,
             report_sync_dir: None,
             last_report_sync: None,
             last_run_at_ms: None,
@@ -242,7 +270,9 @@ fn daily_agent_item_from_legacy(config: &AsrDailyAgentConfig) -> AsrDailyAgentIt
         && config.agent_id == DEFAULT_DAILY_AGENT_ID
         && config.name == DEFAULT_DAILY_AGENT_NAME
         && config.runner == default_daily_agent_runner()
-        && config.output_dir == DEFAULT_DAILY_AGENT_OUTPUT_DIR;
+        && config.output_dir == DEFAULT_DAILY_AGENT_OUTPUT_DIR
+        && config.dependencies.is_empty()
+        && config.dependency_failure_policy == AsrDailyAgentDependencyFailurePolicy::Skip;
     if primary_defaults {
         return config.agents[0].clone();
     }
@@ -270,6 +300,9 @@ fn daily_agent_item_from_legacy(config: &AsrDailyAgentConfig) -> AsrDailyAgentIt
         } else {
             config.output_dir.trim().to_string()
         },
+        dependencies: config.dependencies.clone(),
+        dependency_failure_policy: config.dependency_failure_policy.clone(),
+        research_fanout: config.research_fanout.clone(),
         report_sync_dir: config.report_sync_dir.clone(),
         last_report_sync: config.last_report_sync.clone(),
         last_run_at_ms: config.last_run_at_ms,
@@ -292,6 +325,9 @@ fn daily_agent_config_from_item(item: &AsrDailyAgentItem) -> AsrDailyAgentConfig
         instructions: item.instructions.clone(),
         im_delivery: item.im_delivery.clone(),
         output_dir: item.output_dir.clone(),
+        dependencies: item.dependencies.clone(),
+        dependency_failure_policy: item.dependency_failure_policy.clone(),
+        research_fanout: item.research_fanout.clone(),
         agents: Vec::new(),
         terminology: None,
         report_sync_dir: item.report_sync_dir.clone(),
@@ -352,6 +388,53 @@ fn normalize_daily_agent_item(mut item: AsrDailyAgentItem) -> AsrDailyAgentItem 
         .report_sync_dir
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    item.dependencies = item
+        .dependencies
+        .into_iter()
+        .map(|mut dependency| {
+            dependency.agent_id = dependency.agent_id.trim().to_string();
+            dependency
+        })
+        .collect();
+    if let Some(mut fanout) = item.research_fanout.take() {
+        fanout.chatgpt_interface_mode = fanout
+            .chatgpt_interface_mode
+            .trim()
+            .to_ascii_lowercase();
+        fanout.chatgpt_model = fanout.chatgpt_model.trim().to_ascii_lowercase();
+        let trimmed_project_url = fanout
+            .chatgpt_project_url
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        fanout.chatgpt_project_url = trimmed_project_url.as_deref().map(|value| {
+            crate::im_gateway::chatgpt_web::normalize_project_url(Some(value))
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| value.to_string())
+        });
+        fanout.allowed_runners = fanout
+            .allowed_runners
+            .into_iter()
+            .map(|runner| runner.trim().to_string())
+            .filter(|runner| !runner.is_empty())
+            .collect();
+        fanout.allowed_runners.sort();
+        fanout.allowed_runners.dedup();
+        fanout.context_profiles = fanout
+            .context_profiles
+            .into_iter()
+            .map(|(key, mut profile)| {
+                profile.runner = profile.runner.trim().to_string();
+                profile.work_dir = profile.work_dir.trim().to_string();
+                profile.instructions = profile
+                    .instructions
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+                (key.trim().to_string(), profile)
+            })
+            .collect();
+        item.research_fanout = Some(fanout);
+    }
     item
 }
 
@@ -417,6 +500,52 @@ fn validate_daily_agent_item(item: &AsrDailyAgentItem) -> Result<(), String> {
     if item.im_delivery.enabled && daily_agent_im_channel_for_config(&item.im_delivery).is_none() {
         return Err(format!("Daily Agent '{}' must select an IM channel", item.name));
     }
+    if let Some(fanout) = &item.research_fanout {
+        if fanout.max_questions == 0 || fanout.max_questions > 50 {
+            return Err(format!(
+                "Daily Agent '{}' research_fanout.max_questions must be between 1 and 50",
+                item.name
+            ));
+        }
+        if fanout.chatgpt_interface_mode != "chat" || fanout.chatgpt_model != "pro" {
+            return Err(format!(
+                "Daily Agent '{}' research fan-out requires ChatGPT interface_mode='chat' and model='pro'",
+                item.name
+            ));
+        }
+        if let Some(project_url) = fanout.chatgpt_project_url.as_deref() {
+            crate::im_gateway::chatgpt_web::normalize_project_url(Some(project_url)).map_err(
+                |error| {
+                    format!(
+                        "Daily Agent '{}' research_fanout.chatgpt_project_url is invalid: {error}",
+                        item.name
+                    )
+                },
+            )?;
+        }
+        for runner in &fanout.allowed_runners {
+            if runner.trim().is_empty() {
+                return Err(format!(
+                    "Daily Agent '{}' research_fanout.allowed_runners cannot contain an empty runner",
+                    item.name
+                ));
+            }
+        }
+        for (key, profile) in &fanout.context_profiles {
+            if !is_valid_daily_agent_token(key) {
+                return Err(format!(
+                    "Daily Agent '{}' context profile '{}' must use English letters, numbers, '_' or '-'",
+                    item.name, key
+                ));
+            }
+            if profile.runner.trim().is_empty() || profile.work_dir.trim().is_empty() {
+                return Err(format!(
+                    "Daily Agent '{}' context profile '{}' requires runner and work_dir",
+                    item.name, key
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -436,7 +565,87 @@ fn validate_daily_agent_config(config: &AsrDailyAgentConfig) -> Result<(), Strin
             ));
         }
     }
+    let known_ids = agents
+        .iter()
+        .map(|agent| agent.id.as_str())
+        .collect::<HashSet<_>>();
+    for agent in &agents {
+        let mut seen_dependencies = HashSet::new();
+        for dependency in &agent.dependencies {
+            if dependency.agent_id.is_empty() {
+                return Err(format!(
+                    "Daily Agent '{}' dependency agent_id cannot be empty",
+                    agent.id
+                ));
+            }
+            if dependency.agent_id == agent.id {
+                return Err(format!(
+                    "Daily Agent '{}' cannot depend on itself",
+                    agent.id
+                ));
+            }
+            if !known_ids.contains(dependency.agent_id.as_str()) {
+                return Err(format!(
+                    "Daily Agent '{}' depends on unknown agent '{}'",
+                    agent.id, dependency.agent_id
+                ));
+            }
+            if !seen_dependencies.insert(dependency.agent_id.as_str()) {
+                return Err(format!(
+                    "Daily Agent '{}' has duplicate dependency '{}'",
+                    agent.id, dependency.agent_id
+                ));
+            }
+        }
+    }
+    stable_topological_daily_agents(&agents)?;
     Ok(())
+}
+
+fn stable_topological_daily_agents(
+    agents: &[AsrDailyAgentItem],
+) -> Result<Vec<AsrDailyAgentItem>, String> {
+    let mut ordered = Vec::with_capacity(agents.len());
+    let mut emitted = HashSet::new();
+
+    while ordered.len() < agents.len() {
+        let mut progressed = false;
+        for agent in agents {
+            if emitted.contains(agent.id.as_str()) {
+                continue;
+            }
+            if agent
+                .dependencies
+                .iter()
+                .all(|dependency| emitted.contains(dependency.agent_id.as_str()))
+            {
+                emitted.insert(agent.id.clone());
+                ordered.push(agent.clone());
+                progressed = true;
+            }
+        }
+        if !progressed {
+            let blocked = agents
+                .iter()
+                .filter(|agent| !emitted.contains(agent.id.as_str()))
+                .map(|agent| agent.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "Daily Agent dependency cycle detected among: {blocked}"
+            ));
+        }
+    }
+
+    Ok(ordered)
+}
+
+fn ordered_daily_agents(
+    config: &AsrDailyAgentConfig,
+) -> Result<Vec<AsrDailyAgentItem>, String> {
+    let agents = normalized_daily_agents(config);
+    validate_daily_agent_config(config)?;
+    stable_topological_daily_agents(&agents)
 }
 
 fn task_for_daily_agent(task: &AsrDirectoryTask, agent: &AsrDailyAgentItem) -> AsrDirectoryTask {
@@ -451,24 +660,92 @@ fn task_for_daily_agent(task: &AsrDirectoryTask, agent: &AsrDailyAgentItem) -> A
     task
 }
 
-fn daily_agent_instruction_content(task: &AsrDirectoryTask) -> String {
-    if task.daily_agent.agent_id == DEFAULT_TOMORROW_TODO_AGENT_ID {
-        DEFAULT_ASR_TOMORROW_TODO_AGENT_MD
-            .replace("{{task_name}}", &task.name)
-            .replace("{{daily_dir}}", "./input")
-            .replace(
-                "{{report_dir}}",
-                &format!("./output/{}/", task.daily_agent.output_dir),
-            )
-    } else {
-        DEFAULT_ASR_DAILY_AGENTS_MD
-            .replace("{{task_name}}", &task.name)
-            .replace("{{daily_dir}}", "./input")
-            .replace(
-                "{{report_dir}}",
-                &format!("./output/{}/", task.daily_agent.output_dir),
-            )
+fn daily_agent_dependency_includes_output() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct AsrDailyAgentDependency {
+    pub agent_id: String,
+    #[serde(default = "daily_agent_dependency_includes_output")]
+    pub include_output: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AsrDailyAgentDependencyFailurePolicy {
+    #[default]
+    Skip,
+    Continue,
+}
+
+fn default_research_fanout_max_questions() -> usize {
+    8
+}
+
+fn default_research_chatgpt_interface_mode() -> String {
+    "chat".to_string()
+}
+
+fn default_research_chatgpt_model() -> String {
+    "pro".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct AsrDailyAgentResearchFanoutConfig {
+    #[serde(default = "default_research_fanout_max_questions")]
+    pub max_questions: usize,
+    #[serde(default = "default_research_chatgpt_interface_mode")]
+    pub chatgpt_interface_mode: String,
+    #[serde(default = "default_research_chatgpt_model")]
+    pub chatgpt_model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chatgpt_project_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_runners: Vec<String>,
+    #[serde(default, skip_serializing_if = "DailyAgentBTreeMap::is_empty")]
+    pub context_profiles:
+        DailyAgentBTreeMap<String, AsrDailyAgentResearchContextProfile>,
+}
+
+impl Default for AsrDailyAgentResearchFanoutConfig {
+    fn default() -> Self {
+        Self {
+            max_questions: default_research_fanout_max_questions(),
+            chatgpt_interface_mode: default_research_chatgpt_interface_mode(),
+            chatgpt_model: default_research_chatgpt_model(),
+            chatgpt_project_url: None,
+            allowed_runners: Vec::new(),
+            context_profiles: DailyAgentBTreeMap::new(),
+        }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct AsrDailyAgentResearchContextProfile {
+    pub runner: String,
+    pub work_dir: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+}
+
+fn daily_agent_instruction_template(agent_id: &str) -> &'static str {
+    match agent_id {
+        DEFAULT_TOMORROW_TODO_AGENT_ID => DEFAULT_ASR_TOMORROW_TODO_AGENT_MD,
+        DEFAULT_RESEARCH_SEED_AGENT_ID => DEFAULT_ASR_RESEARCH_SEED_AGENT_MD,
+        DEFAULT_RESEARCH_DISPATCHER_AGENT_ID => DEFAULT_ASR_RESEARCH_DISPATCHER_AGENT_MD,
+        _ => DEFAULT_ASR_DAILY_AGENTS_MD,
+    }
+}
+
+fn daily_agent_instruction_content(task: &AsrDirectoryTask) -> String {
+    daily_agent_instruction_template(&task.daily_agent.agent_id)
+        .replace("{{task_name}}", &task.name)
+        .replace("{{daily_dir}}", "./input")
+        .replace(
+            "{{report_dir}}",
+            &format!("./output/{}/", task.daily_agent.output_dir),
+        )
 }
 
 fn daily_agent_instructions_dir(task_id: &str) -> PathBuf {
@@ -489,6 +766,10 @@ fn daily_agent_terms_path(task: &AsrDirectoryTask) -> PathBuf {
 
 fn daily_agent_input_dir(task: &AsrDirectoryTask) -> PathBuf {
     daily_agent_work_dir(task).join("input")
+}
+
+fn daily_agent_upstream_input_dir(task: &AsrDirectoryTask, agent_id: &str) -> PathBuf {
+    daily_agent_input_dir(task).join("upstream").join(agent_id)
 }
 
 fn daily_agent_output_root_dir(task: &AsrDirectoryTask) -> PathBuf {

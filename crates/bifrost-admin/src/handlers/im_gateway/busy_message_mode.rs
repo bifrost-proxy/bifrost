@@ -118,6 +118,20 @@ fn apply_busy_message_default_with_context(
     }
 }
 
+#[cfg(test)]
+pub(super) fn enqueue_busy_default_message(
+    queue_manager: &SessionQueueManager,
+    session_key: &str,
+    message: &str,
+    images: Vec<bifrost_agent::ChatImageInput>,
+) -> Result<Vec<crate::im_gateway::queue_manager::QueueItem>, &'static str> {
+    let message = message.trim();
+    if message.is_empty() {
+        return Err("消息内容不能为空");
+    }
+    queue_manager.push_queue_with_images(session_key, message.to_string(), images)
+}
+
 pub(super) fn queue_item_context(
     ctx: &BusyMessageContext<'_>,
 ) -> crate::im_gateway::queue_manager::QueueItemContext {

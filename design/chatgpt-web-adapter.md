@@ -22,6 +22,7 @@ ChatGPT Web 的正确落点是新增内置 adapter `chatgpt_web`：Runner 只是
 - 新增 `chatgpt_web` adapter，支持创建对话、发起对话、列出对话、获取消息、等待输出结果、展示最终结果。
 - 一个设备只登录一次；登录态存储在运行 Bifrost 的本机数据目录，后续 run 自动复用。
 - 每次 run 开始前自动检查登录态；登录失效时给出明确反馈，并由 Bifrost 后端自动弹出 Edge/Chromium 浏览器让用户完成登录。
+- 登录完成不能只依赖 `Authorization` 或 `accounts/check` 流量证明；登录页必须同时出现可见且可用的 composer，并且不再显示账号选择器，否则继续等待用户选定账号。“欢迎回来”只有出现在可见 dialog 中才视为阻塞信号，普通首页正文的欢迎语不能单独阻塞登录完成。
 - headless 配置遇到登录页 / Cloudflare / 真人验证时，adapter 必须临时切换到 headed 等待用户处理并刷新登录态；处理完成后自动关闭 headed browser，让当前重试与后续运行都恢复 headless。
 - 登录弹窗、cookie/header 提取、登录状态验证都属于 `chatgpt_web` adapter 能力，不能依赖 Agent 操作浏览器或外部脚本/skill。
 - 与 runner/adapter 抽象对齐：Chat Gateway、IM Provider、IM Route、Schedule、WebUI 都选择 runner；runner 再通过 `adapter = "chatgpt_web"` 进入 ChatGPT Web 执行实现。
@@ -42,6 +43,7 @@ ChatGPT Web 的正确落点是新增内置 adapter `chatgpt_web`：Runner 只是
 - 用 Bifrost Traffic 确认 Edge/Chromium 中 `chatgpt.com` 的真实接口契约。
 - 用本机真实浏览器 profile 完成首次登录，随后关闭浏览器再用 `chatgpt_web` adapter 执行 `list/get/ask`。
 - 手动使登录态失效或使用空 profile，验证 adapter 自动弹出浏览器并给出可理解反馈。
+- 使用停留在“欢迎回来 / 选择一个账户”的 profile，验证 adapter 不会误报 `LoggedIn`；选定账号、composer 可用后才结束登录等待。
 - 验证最终结果来自 `GET /backend-api/conversation/{conversation_id}` 的 `current_node` assistant text，而不是提交请求的短 SSE handoff。
 
 ## 产品语义
@@ -74,9 +76,10 @@ ChatGPT Web 页面可能把一次回答渲染成多条 assistant message：前�
 - IM 通道：只投递过程批次与最终答案，不投递工具调用事件，避免 IM 出现调试噪音。
 - 图片结果：ChatGPT 生成图先缓存到本机附件目录；IM 文本卡片移除本地图片 Markdown 后按顺序逐张发送图片消息；CLI JSON 保留最终文本中的本地图片 Markdown，便于调用方读取附件路径。
 - DOM fallback 不能只凭文本判断最终态。文本只作为候选内容；允许重新提取最新消息并返回前必须确认页面控制态已恢复：stop/cancel 按钮消失、composer 可见且可用；composer 中仍有待发送文本时提交按钮必须可见。空 composer 下发送位切回语音/提交控制不表示仍在输出。
-- DOM fallback 候选稳定性基于内容签名（turn/message id、最终文本、自然批次数、图片数、附件数），而非文本长度。签名变化即重置稳定窗口。硬 busy 信号：`data-testid="stop-button"` 与中英文 Stop/Cancel aria-label。页面空闲后按签名短稳定确认：图片/短文本 2s、中等文本 3s、超长文本 5s。发送按钮 selector 禁止使用 `composer-submit-btn` 这类 stop 也带的非语义 class；发送前必须重新检查 stop button，可见则清空 composer 草稿并等待 stop 消失后再发送；超时才返回 `conversation_busy`。
+- DOM fallback 候选稳定性基于内容签名（turn/message id、最终文本、自然批次数、图片数、附件数），而非文本长度。签名变化即重置稳定窗口。硬 busy 信号：`data-testid="stop-button"` 与中英文 Stop/Cancel aria-label。页面空闲后按签名短稳定确认；以“我会 / 我将 / I'll / I will / Let me”等开头的短规划句至少观察 15s，以覆盖 Web 深度研究在规划句结束后延迟恢复 busy 控件的间隙。发送按钮 selector 禁止使用 `composer-submit-btn` 这类 stop 也带的非语义 class；发送前必须重新检查 stop button，可见则清空 composer 草稿并等待 stop 消失后再发送；超时才返回 `conversation_busy`。
 - `stream_handoff` 的异步推理/检索阶段可能暂时移除 stop button，并把 planning 文案渲染到 `request-*`（当前页面常见为 `request-WEB:*`）临时 assistant shell；composer 此时也可能已恢复可用。只要页面已经存在带 `data-message-id` 的 user 节点、但该 user 之后尚未出现带 `data-message-author-role="assistant"` + `data-message-id` 的正式 assistant message，text-only 临时 shell 必须继续返回 `Streaming(assistant_message_not_committed)`。role-less 图片 section 仍按图片完成规则处理，避免破坏生成图片结果。
 - `wait` operation 不能只依赖进程内 `ConversationTab` 池。send 结束后浏览器 tab 仍打开，但内存池会随进程退出而消失。DOM fallback 找不到 tab 时，必须通过共享 browser session 的 DevTools target 列表重新发现 `/c/{conversationId}`，attach CDP 后再提取；只有浏览器也找不到会话页时才返回 `NotFound`。
+- 新会话必须创建自己的隔离 tab，不能先关闭共享 profile 中的其他 ChatGPT tab；其他 tab 可能仍有深度研究在后台继续，关闭它们会使后续 `wait` 无法重新 attach 到原会话。
 - 图片消息可能渲染为后续 `section[data-testid^="conversation-turn-"]`（正文只有 `ChatGPT 说：`），图片在 section 内的 `estuary/content` URL。DOM fallback 必须把最后一个 user turn 之后的这类 image-only section 当作 assistant 结果；空壳文本且图片数为 0 必须继续等待。
 - DOM 提取和 `allMarkdownTexts` 自然批次必须保存完整文本，不允许固定字符数截断；`response`、`last_message.md`、`result.json` 必须保留长任务最终输出全文。
 
@@ -93,6 +96,11 @@ ChatGPT Web 页面可能把一次回答渲染成多条 assistant message：前�
 - WebUI 根据 adapter capabilities 展示字段。
 - ChatGPT Web Runner 的浏览器用户数据只能来自共享 profile：默认路径 `BIFROST_DATA_DIR/agent/im_gateway/chatgpt_web/browser_profile`；send 与 wait 复用同一 `profileDir`。
 - `BIFROST_DATA_DIR/im_gateway/runs/<run_id>/` 只允许保存 run artifact，禁止创建 run-local 完整 Chromium 用户数据目录，避免孤儿浏览器进程与缓存膨胀。
+- ChatGPT 页面可能在 `main` 内同时渲染多个 `aria-haspopup="menu"` 按钮。Pro 硬校验必须优先从全部可见候选中识别唯一带 `Pro` token 的已选模型按钮；未选中 Pro 时再使用 `data-testid`、`aria-label`、`title` 或已知模型标签定位唯一模型选择器。不得因无关菜单按钮增多而失败，也不得在存在多个 Pro/模型候选时猜测点击。
+- DOM fallback 在读取回答前必须验证当前 tab URL 的 `/c/<conversation-id>` 与本次 handoff 返回的 conversation id 完全一致；普通 `/c/...` 和 Project `/g/g-p-.../c/...` 都应支持。tab 尚未导航完成或落在其他历史会话时只允许继续等待，禁止把旧会话的计划前缀或答案冒充为本次研究结果。
+- 独立研究 fan-out 不能把 adapter 的 `Succeeded` 直接等同于研究完成。最终正文必须达到最小长度、逐字保留原始问题并包含约定的五个 Markdown 章节；短规划句或缺章回复先对同一 conversation id 执行纯等待并重新提取，仍不完整时才补发一次明确的最终输出指令，重试仍不满足契约则该 child 标记失败，不进入研究摘要。
+- 单题研究 Prompt 只携带原始问题、必要背景/片段、单题要求、显式仓库和已核验上下文，不再嵌入整份日报 `AGENTS.md`；各上下文字段有长度上限，避免把与研究无关的日报说明发送给 Pro。
+- 测试环境默认禁止调用真实 ChatGPT Web。`BIFROST_E2E=1` / `BIFROST_COVERAGE_E2E=1` 下必须使用 `BIFROST_CHATGPT_WEB_E2E_MOCK=1`；只有显式设置 `BIFROST_CHATGPT_WEB_LIVE_E2E=1` 才允许真实研究会话。
 
 Runner 配置样例：
 
@@ -201,7 +209,7 @@ WebUI 选择 `chatgpt_web` 后：隐藏 executable/args/env/sandbox/approval pol
 4. 返回 guest account / anonymous / JWT 缺少字段 / JWT 过期 / 401/403 / Cloudflare / HTML 登录页 / sentinel 错误 / 账号 fingerprint 不匹配时，进入 `AuthRequired`。
 5. runner `browser.openOnAuthRequired=true` 时由 `BrowserLoginBroker::open_login()` 弹出浏览器。
 6. Broker 通过 CDP 打开 `https://chatgpt.com/`，监听真实 `accounts/check` 请求捕获可复用认证 header。
-7. 捕获后导出 `chatgpt.com` cookies + header 写回 `auth_state.json`（权限 `0600`）。
+7. 捕获后还要确认账号选择器已消失、composer 可见且可用，再导出 `chatgpt.com` cookies + header 写回 `auth_state.json`（权限 `0600`）；若页面仍停留在账号选择器则继续等待。
 8. 立即再执行一次 native HTTP probe。native 通过则继续 run；native 因本机网络/代理/TLS 失败但当次浏览器 `accounts/check` 响应证明可用账号存在时，短期兜底为 `LoggedIn` 并保留失败原因；不能在后续 run 中替代当前 native `accounts/check`。
 9. 登录等待无固定超时：用户完成 / 关闭登录窗口 / WebUI stop login 时才结束。关闭窗口或主动停止都返回 `auth_required`，错误文本区分 `login window was closed` 与 `login was stopped by request`。
 
@@ -501,6 +509,7 @@ Mock ChatGPT Web server 覆盖 `accounts/check`（logged in / guest / challenge�
 - 写请求依赖浏览器环境，native HTTP replay 已验证会触发风控；写路径强制走 headless browser-context / 真实前端触发。
 - 无 GUI 设备无法自动弹窗，必须提供 WebUI 登录入口和明确错误。
 - headless 执行仍可能遇到 Cloudflare/challenge、composer 缺失、send button disabled；必须 fail-closed 并返回脱敏诊断。
+- ChatGPT 的界面模式开关会随账号语言显示为 `Chat / Work` 或 `聊天 / 工作`，并可能用 `data-state=on` 而不是 `aria-checked=true` 表示选中。适配器必须在同一个 `role=group` 内同时识别这对互斥选项，避免把 Project 的 `聊天 / 来源` 标签页误认为界面模式开关；找不到唯一可验证的模式控件时继续 fail-closed，且不得提交 Prompt。
 - 同一设备多账号切换时必须检测 account fingerprint，避免旧账号登录态误用到新 run。
 - WebSocket 增量输出与轮询等待属于同一个 `chatgpt_web` adapter 能力；即使增量不可用，等待最终结果必须可靠。
 

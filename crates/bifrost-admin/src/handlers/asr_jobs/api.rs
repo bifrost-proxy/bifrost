@@ -433,6 +433,7 @@ fn update_task_config(
     id: &str,
     update: UpdateTaskRequest,
 ) -> Result<AsrDirectoryTask, (StatusCode, String)> {
+    let requeue_existing_files = update.requeue_existing_files.unwrap_or(true);
     let running = RUNNING_TASKS.lock().unwrap().contains(id);
     let high_risk = update.audio_dir.is_some()
         || update.recursive.is_some()
@@ -534,7 +535,14 @@ fn update_task_config(
         || transcription_prompt_changed
             && updated.transcription_mode == AsrTranscriptionMode::MossJoint;
     if transcription_output_changed {
-        if let Err(error) = reconcile_files_for_transcription_config_change(&updated) {
+        let file_update = if requeue_existing_files {
+            reconcile_files_for_transcription_config_change(&updated)
+        } else if updated.transcription_mode == AsrTranscriptionMode::MossJoint {
+            suppress_pre_migration_failed_records(id)
+        } else {
+            Ok(0)
+        };
+        if let Err(error) = file_update {
             let rollback = save_tasks(&original_store);
             let message = match rollback {
                 Ok(()) => format!(
@@ -692,6 +700,7 @@ async fn put_external_import_response(id: &str, req: Request<Incoming>) -> Respo
         model: None,
         transcription_mode: None,
         transcription_prompt: None,
+        requeue_existing_files: None,
         runtime_strategy: None,
         max_concurrent_files: None,
         diarization: None,

@@ -1743,7 +1743,9 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn moss_runtime_process_covers_prompt_success_failure_and_pause() {
+        let _lock = test_data_dir_lock();
         let temp = TempDir::new().unwrap();
         let binary = temp.path().join("moss-transcribe");
         let wav = temp.path().join("audio.wav");
@@ -1921,6 +1923,123 @@ mod tests {
         assert!(!marker.exists(), "exhausted budget must not spawn MOSS");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn segmented_moss_rescue_covers_success_adaptive_split_gap_and_failures() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let wav = temp.path().join("audio.wav");
+        let silent_wav = temp.path().join("silent.wav");
+        let samples = vec![500_i16; 70 * 16_000];
+        std::fs::write(&wav, make_wav(&samples)).unwrap();
+        std::fs::write(&silent_wav, make_wav(&vec![0_i16; 70 * 16_000])).unwrap();
+
+        let fake_bin = temp.path().join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        let fake_ffmpeg = fake_bin.join("ffmpeg");
+        write_executable(
+            &fake_ffmpeg,
+            "#!/bin/sh\ninput=''\noutput=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '-i' ]; then\n    shift\n    input=\"$1\"\n  fi\n  output=\"$1\"\n  shift\ndone\ncp \"$input\" \"$output\"\n",
+        );
+        let mut path_entries = vec![fake_bin];
+        if let Some(path) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&path));
+        }
+        let fake_path = std::env::join_paths(path_entries).unwrap();
+        let _path_guard = EnvVarGuard::set("PATH", &fake_path);
+
+        let binary = temp.path().join("moss-transcribe");
+        let runtime = moss_process_test_paths(temp.path(), binary.clone());
+        write_executable(
+            &binary,
+            "#!/bin/sh\nprintf '[{\"start\":0.1,\"end\":0.5,\"speaker\":\"S01\",\"text\":\"segment\"}]'\n",
+        );
+
+        let direct =
+            run_segmented_moss_joint_transcription(&runtime, &wav, 10_000, "", None, 60)
+                .await
+                .unwrap();
+        assert_eq!(direct.text, "segment");
+
+        let segmented =
+            run_segmented_moss_joint_transcription(&runtime, &wav, 70_000, "", None, 60)
+                .await
+                .unwrap();
+        assert_eq!(segmented.structured.segments.len(), 2);
+        assert_eq!(segmented.structured.segments[0].start_ms, 100);
+        assert_eq!(segmented.structured.segments[1].start_ms, 60_100);
+        assert_eq!(segmented.text, "segment\nsegment");
+
+        let pause = || true;
+        assert_eq!(
+            run_segmented_moss_joint_transcription(
+                &runtime,
+                &wav,
+                70_000,
+                "",
+                Some(&pause),
+                60,
+            )
+            .await
+            .unwrap_err(),
+            ASR_TASK_PAUSED_MESSAGE
+        );
+
+        let silent_error =
+            run_segmented_moss_joint_transcription(&runtime, &silent_wav, 70_000, "", None, 60)
+                .await
+                .unwrap_err();
+        assert!(silent_error.contains("returned no positive-duration"));
+
+        write_executable(&binary, "#!/bin/sh\necho 'runtime transport failed' >&2\nexit 7\n");
+        let runtime_error =
+            run_segmented_moss_joint_transcription(&runtime, &wav, 70_000, "", None, 60)
+                .await
+                .unwrap_err();
+        assert!(runtime_error.contains("MOSS segmented rescue chunk 1"));
+        assert!(runtime_error.contains("runtime transport failed"));
+
+        let state = temp.path().join("adaptive-count");
+        write_executable(
+            &binary,
+            &format!(
+                "#!/bin/sh\nstate='{}'\ncount=$(cat \"$state\" 2>/dev/null || echo 0)\ncount=$((count + 1))\nprintf '%s' \"$count\" > \"$state\"\nif [ \"$count\" -le 3 ]; then\n  echo 'MOSS output has no complete speaker-aware segment before 256 generated tokens' >&2\n  exit 7\nfi\nprintf '[{{\"start\":0.1,\"end\":0.5,\"speaker\":\"S01\",\"text\":\"recovered\"}}]'\n",
+                state.display()
+            ),
+        );
+        let _gap_guard = EnvVarGuard::set(
+            "BIFROST_MOSS_ALLOW_GAP_MARKERS",
+            std::ffi::OsStr::new("1"),
+        );
+        let recovered =
+            run_segmented_moss_joint_transcription(&runtime, &wav, 70_000, "", None, 60)
+                .await
+                .unwrap();
+        assert!(recovered.text.contains("[MOSS 无法可靠转录："));
+        assert!(recovered.text.contains("recovered"));
+        assert_eq!(
+            recovered.structured.segments[0].speaker.as_deref(),
+            Some("UNRESOLVED")
+        );
+        assert!(recovered
+            .structured
+            .segments
+            .windows(2)
+            .all(|segments| segments[0].start_ms <= segments[1].start_ms));
+
+        drop(_gap_guard);
+        write_executable(
+            &binary,
+            "#!/bin/sh\necho 'MOSS output has no complete speaker-aware segment before 256 generated tokens' >&2\nexit 7\n",
+        );
+        let minimum_interval_error =
+            run_segmented_moss_joint_transcription(&runtime, &wav, 70_000, "", None, 60)
+                .await
+                .unwrap_err();
+        assert!(minimum_interval_error.contains("MOSS adaptive rescue minimum interval"));
+    }
+
     #[test]
     fn moss_input_guard_rejects_unknown_short_silent_and_invalid_audio() {
         let temp = TempDir::new().unwrap();
@@ -2062,6 +2181,51 @@ mod tests {
         assert!(!std::fs::read_to_string(&output.metadata_path)
             .unwrap()
             .contains("private prompt"));
+
+        let fake_bin = temp.path().join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        write_executable(
+            &fake_bin.join("ffmpeg"),
+            "#!/bin/sh\ninput=''\noutput=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = '-i' ]; then\n    shift\n    input=\"$1\"\n  fi\n  output=\"$1\"\n  shift\ndone\ncp \"$input\" \"$output\"\n",
+        );
+        let mut path_entries = vec![fake_bin];
+        if let Some(path) = std::env::var_os("PATH") {
+            path_entries.extend(std::env::split_paths(&path));
+        }
+        let fake_path = std::env::join_paths(path_entries).unwrap();
+        let _path_guard = EnvVarGuard::set("PATH", &fake_path);
+        let _segment_guard = EnvVarGuard::set(
+            "BIFROST_MOSS_SEGMENT_SECONDS",
+            std::ffi::OsStr::new("60"),
+        );
+        let segmented_output = transcribe_file_for_task_with_wav(
+            &task,
+            Path::new("/unused/asr"),
+            Path::new("/unused/model"),
+            &source,
+            &source,
+            &source_info,
+            TaskTranscribeHooks {
+                on_chunk_progress: None,
+                on_chunk_metric: None,
+                pause_check: None,
+                force_pause_task_id: None,
+                memory_limit_hints: &[],
+                server_url: None,
+                startup_fallback_reason: None,
+                server_state: None,
+                managed_server_restart: None,
+                partial_artifacts: None,
+                moss_runtime: Some(&runtime),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(segmented_output.text.contains("hello"));
+        assert!(segmented_output.text.contains("abcdefghijklmnopqrstuvwxyz"));
+        assert_eq!(segmented_output.chunk_metrics.len(), 1);
+        drop(_segment_guard);
+        drop(_path_guard);
 
         let default_runtime_result = transcribe_file_for_task_with_wav(
             &task,
@@ -2374,6 +2538,7 @@ mod tests {
         let update = UpdateTaskRequest {
             transcription_mode: None,
             transcription_prompt: None,
+            requeue_existing_files: None,
             name: None,
             audio_dir: None,
             recursive: None,
@@ -2395,6 +2560,7 @@ mod tests {
         let risky_update = UpdateTaskRequest {
             transcription_mode: None,
             transcription_prompt: None,
+            requeue_existing_files: None,
             name: None,
             audio_dir: None,
             recursive: None,
@@ -2418,6 +2584,7 @@ mod tests {
         let prompt_update = UpdateTaskRequest {
             transcription_mode: Some(AsrTranscriptionMode::MossJoint),
             transcription_prompt: Some("  Bifrost 专有词  ".to_string()),
+            requeue_existing_files: None,
             name: None,
             audio_dir: None,
             recursive: None,
@@ -2473,6 +2640,7 @@ mod tests {
         let idempotent_update = UpdateTaskRequest {
             transcription_mode: Some(AsrTranscriptionMode::MossJoint),
             transcription_prompt: Some("Bifrost 专有词".to_string()),
+            requeue_existing_files: None,
             name: None,
             audio_dir: None,
             recursive: None,
@@ -2501,6 +2669,7 @@ mod tests {
         let prompt_only_update = UpdateTaskRequest {
             transcription_mode: None,
             transcription_prompt: Some("Bifrost 新专有词".to_string()),
+            requeue_existing_files: None,
             name: None,
             audio_dir: None,
             recursive: None,
@@ -2597,6 +2766,7 @@ mod tests {
         let update = UpdateTaskRequest {
             transcription_mode: Some(AsrTranscriptionMode::MossJoint),
             transcription_prompt: Some("new mode".to_string()),
+            requeue_existing_files: None,
             name: None,
             audio_dir: None,
             recursive: None,
@@ -2634,6 +2804,7 @@ mod tests {
             "orphaned record was retained: {:?}",
             files.files.get("orphaned-pending")
         );
+
     }
 
     #[tokio::test]
@@ -3619,6 +3790,24 @@ mod tests {
         assert_eq!(detail.summary.pending, 0);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn get_task_response_returns_detail_and_not_found() {
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        add_task(test_directory_task("task-response", audio_dir)).unwrap();
+
+        assert_eq!(
+            get_task_response("task-response").status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            get_task_response("missing-task").status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
     #[test]
     fn task_watch_snapshot_marks_eta_confidence_without_duration() {
         let _guard = test_data_dir_lock();
@@ -3696,7 +3885,7 @@ mod tests {
         let mut attempted = HashSet::new();
 
         let initial =
-            discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+            discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
         assert_eq!(initial.pending, vec![first.clone()]);
 
         let first_key = source_key(&first);
@@ -3707,12 +3896,12 @@ mod tests {
         std::fs::write(&appended, b"audio").unwrap();
 
         let after_append =
-            discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+            discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
         assert_eq!(after_append.pending, vec![appended.clone()]);
 
         attempted.insert(source_key(&appended));
         let final_scan =
-            discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+            discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
         assert!(final_scan.pending.is_empty());
     }
 
@@ -3747,7 +3936,7 @@ mod tests {
         save_file_store(&task.id, &files).unwrap();
 
         let scan =
-            discover_and_prepare_pending_batch(&task, &mut files, &HashSet::new()).unwrap();
+            discover_and_prepare_pending_batch(&task, &mut files, &HashSet::new(), None).unwrap();
         assert!(scan.pending.is_empty());
         let preserved = files.files.get(&preserved_key).unwrap();
         assert_eq!(preserved.status, FileStatus::PartialSuccess);
@@ -3776,7 +3965,7 @@ mod tests {
             version: TASK_STORE_VERSION,
             files: BTreeMap::new(),
         };
-        let initial = discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+        let initial = discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
         assert_eq!(initial.pending, vec![source.clone()]);
 
         let key = source_key(&source);
@@ -3792,16 +3981,207 @@ mod tests {
             "moss_non_retryable_v{}: MOSS output has no complete speaker-aware segment before 256 generated tokens",
             env!("CARGO_PKG_VERSION")
         ));
-        let unchanged = discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+        let unchanged = discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
         assert!(unchanged.pending.is_empty());
 
         std::fs::write(&source, b"audio changed").unwrap();
-        let changed = discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+        let changed = discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
         assert_eq!(changed.pending, vec![source.clone()]);
 
         task.transcription_mode = AsrTranscriptionMode::Standard;
-        let standard = discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+        let standard = discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
         assert_eq!(standard.pending, vec![source]);
+    }
+
+    #[test]
+    fn moss_default_profile_does_not_retry_unchanged_rescue_failure() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("rescue-failed.wav");
+        std::fs::write(&source, b"audio").unwrap();
+
+        let mut task = test_directory_task("moss-rescue-terminal", audio_dir);
+        task.transcription_mode = AsrTranscriptionMode::MossJoint;
+        let attempted = HashSet::new();
+        let mut files = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+
+        let record = files.files.get_mut(&source_key(&source)).unwrap();
+        record.status = FileStatus::Failed;
+        record.error = Some(format!(
+            "moss_non_retryable_v{}_rtf3.0_tps30: MOSS adaptive rescue failed",
+            env!("CARGO_PKG_VERSION")
+        ));
+
+        let default_scan =
+            discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+        assert!(default_scan.pending.is_empty());
+    }
+
+    #[test]
+    fn moss_rescue_profile_retries_default_dynamic_failure_but_not_fixed_input_failure() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let _rtf_guard =
+            EnvVarGuard::set("BIFROST_MOSS_MAX_RUNTIME_RTF", std::ffi::OsStr::new("1.0"));
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let dynamic_source = audio_dir.join("length-limited.wav");
+        let fixed_source = audio_dir.join("too-short.wav");
+        std::fs::write(&dynamic_source, b"dynamic").unwrap();
+        std::fs::write(&fixed_source, b"fixed").unwrap();
+
+        let mut task = test_directory_task("moss-rescue-escalation", audio_dir);
+        task.transcription_mode = AsrTranscriptionMode::MossJoint;
+        let attempted = HashSet::new();
+        let mut files = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+
+        let dynamic_record = files.files.get_mut(&source_key(&dynamic_source)).unwrap();
+        dynamic_record.status = FileStatus::Failed;
+        dynamic_record.error = Some(format!(
+            "{} MOSS generation reached the max-new token limit before completion",
+            moss_base_non_retryable_marker_prefix()
+        ));
+        let fixed_record = files.files.get_mut(&source_key(&fixed_source)).unwrap();
+        fixed_record.status = FileStatus::Failed;
+        fixed_record.error = Some(format!(
+            "{} moss_audio_too_short: audio_ms=5000",
+            moss_base_non_retryable_marker_prefix()
+        ));
+
+        let rescue_scan =
+            discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+        assert_eq!(rescue_scan.pending, vec![dynamic_source]);
+        assert_eq!(
+            files.files.get(&source_key(&fixed_source)).unwrap().status,
+            FileStatus::Failed
+        );
+    }
+
+    #[test]
+    fn moss_runtime_rtf_override_only_accepts_bounded_rescue_values() {
+        assert_eq!(moss_max_runtime_rtf(None), MOSS_MAX_RUNTIME_RTF);
+        assert_eq!(moss_max_runtime_rtf(Some("")), MOSS_MAX_RUNTIME_RTF);
+        assert_eq!(moss_max_runtime_rtf(Some("0.75")), MOSS_MAX_RUNTIME_RTF);
+        assert_eq!(moss_max_runtime_rtf(Some("1.0")), 1.0);
+        assert_eq!(moss_max_runtime_rtf(Some("2.0")), 2.0);
+        assert_eq!(moss_max_runtime_rtf(Some("3.0")), 3.0);
+        assert_eq!(moss_max_runtime_rtf(Some("1.5")), MOSS_MAX_RUNTIME_RTF);
+        assert_eq!(moss_max_runtime_rtf(Some("4.0")), MOSS_MAX_RUNTIME_RTF);
+        assert_eq!(moss_max_runtime_rtf(Some("invalid")), MOSS_MAX_RUNTIME_RTF);
+    }
+
+    #[test]
+    fn moss_output_tps_override_and_failure_marker_are_bounded_and_profiled() {
+        assert_eq!(
+            moss_output_tokens_per_second(None),
+            MOSS_OUTPUT_TOKENS_PER_SECOND
+        );
+        assert_eq!(
+            moss_output_tokens_per_second(Some("20")),
+            MOSS_OUTPUT_TOKENS_PER_SECOND
+        );
+        assert_eq!(
+            moss_output_tokens_per_second(Some("30")),
+            MOSS_RESCUE_OUTPUT_TOKENS_PER_SECOND
+        );
+        assert_eq!(
+            moss_output_tokens_per_second(Some("40")),
+            MOSS_OUTPUT_TOKENS_PER_SECOND
+        );
+        assert_eq!(
+            moss_non_retryable_marker_prefix_for(0.5, 20, None, false),
+            format!("moss_non_retryable_v{}:", env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(
+            moss_non_retryable_marker_prefix_for(3.0, 30, None, false),
+            format!(
+                "moss_non_retryable_v{}_rtf3.0_tps30:",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        assert_eq!(moss_segment_seconds(None), None);
+        assert_eq!(moss_segment_seconds(Some("60")), Some(60));
+        assert_eq!(moss_segment_seconds(Some("300")), Some(300));
+        assert_eq!(moss_segment_seconds(Some("600")), Some(600));
+        assert_eq!(moss_segment_seconds(Some("900")), None);
+        assert_eq!(moss_segment_seconds(Some("invalid")), None);
+        assert_eq!(
+            moss_non_retryable_marker_prefix_for(3.0, 30, Some(300), false),
+            format!(
+                "moss_non_retryable_v{}_rtf3.0_tps30_seg300adaptive60to30to10:",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        assert!(!moss_allow_gap_markers(None));
+        assert!(!moss_allow_gap_markers(Some("true")));
+        assert!(moss_allow_gap_markers(Some("1")));
+        assert_eq!(
+            moss_non_retryable_marker_prefix_for(3.0, 30, Some(300), true),
+            format!(
+                "moss_non_retryable_v{}_rtf3.0_tps30_seg300adaptive60to30to10_gaps60:",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+    }
+
+    #[test]
+    fn pre_migration_moss_failures_are_suppressed_once_without_touching_other_records() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let task_id = "suppress-pre-migration";
+        let source = temp.path().join("legacy.wav");
+        std::fs::write(&source, b"audio").unwrap();
+
+        let mut legacy = pending_record(task_id, &source);
+        legacy.status = FileStatus::Failed;
+        legacy.error = Some("legacy runtime failure".to_string());
+        let mut already_suppressed = pending_record(task_id, &source);
+        already_suppressed.status = FileStatus::Failed;
+        already_suppressed.error = Some(format!(
+            "{} already suppressed",
+            moss_non_retryable_marker_prefix()
+        ));
+        let mut success = pending_record(task_id, &source);
+        success.status = FileStatus::Success;
+        success.error = Some("historical warning".to_string());
+        let files = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::from([
+                ("legacy".to_string(), legacy),
+                ("suppressed".to_string(), already_suppressed),
+                ("success".to_string(), success),
+            ]),
+        };
+        save_file_store(task_id, &files).unwrap();
+
+        assert_eq!(suppress_pre_migration_failed_records(task_id).unwrap(), 1);
+        let persisted = load_file_store(task_id);
+        assert!(persisted.files["legacy"]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("preserved pre-migration failure")));
+        assert!(persisted.files["suppressed"]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("already suppressed")));
+        assert_eq!(
+            persisted.files["success"].error.as_deref(),
+            Some("historical warning")
+        );
+        assert_eq!(suppress_pre_migration_failed_records(task_id).unwrap(), 0);
     }
 
     #[test]
@@ -3823,8 +4203,44 @@ mod tests {
         };
         let attempted = HashSet::new();
 
-        let scan = discover_and_prepare_pending_batch(&task, &mut files, &attempted).unwrap();
+        let scan = discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
         assert_eq!(scan.pending, vec![earlier, later]);
+    }
+
+    #[test]
+    fn pending_batch_can_filter_failed_files_by_recording_date() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let thursday = audio_dir.join("TX02_MIC001_20260709_235900_orig.wav");
+        let friday = audio_dir.join("TX02_MIC002_20260710_001500_orig.wav");
+        std::fs::write(&thursday, b"audio").unwrap();
+        std::fs::write(&friday, b"audio").unwrap();
+
+        let task = test_directory_task("filter-pending-date", audio_dir);
+        let mut files = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        let attempted = HashSet::new();
+        let date = NaiveDate::from_ymd_opt(2026, 7, 10).unwrap();
+
+        discover_and_prepare_pending_batch(&task, &mut files, &attempted, None).unwrap();
+        for record in files.files.values_mut() {
+            record.status = FileStatus::Failed;
+            record.error = Some(format!(
+                "moss_non_retryable_v{}: preserved pre-migration failure",
+                env!("CARGO_PKG_VERSION")
+            ));
+        }
+
+        let scan =
+            discover_and_prepare_pending_batch(&task, &mut files, &attempted, Some(date)).unwrap();
+
+        assert_eq!(scan.pending, vec![friday]);
+        assert!(files.files.contains_key(&source_key(&thursday)));
     }
 
     #[test]
@@ -5093,7 +5509,8 @@ mod tests {
         store.files.insert(key, record);
         save_file_store(&task.id, &store).unwrap();
 
-        let (_updated, processed_now, failed_now) = run_directory_task(task).await.unwrap();
+        let (_updated, processed_now, failed_now) =
+            run_directory_task_for_date(task, None).await.unwrap();
 
         assert_eq!(processed_now, 0);
         assert_eq!(failed_now, 0);
@@ -6265,6 +6682,8 @@ mod tests {
             current_file_copied_bytes: 0,
             total_files_discovered: 0,
             processed_files: 0,
+            completion_token: None,
+            auto_run_consumed: false,
             message: "running".to_string(),
         };
         save_external_import_progress("task1", &progress).unwrap();
@@ -6273,6 +6692,128 @@ mod tests {
         assert_eq!(normalized.status, "failed");
         assert!(normalized.finished_at_ms.is_some());
         assert!(normalized.message.contains("interrupted"));
+    }
+
+    #[test]
+    fn external_import_completion_barrier_is_consumed_once() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let mut progress = AsrExternalImportRunProgress {
+            run_id: "barrier-run".to_string(),
+            trigger: "test".to_string(),
+            started_at_ms: 1,
+            updated_at_ms: 2,
+            finished_at_ms: Some(2),
+            imported: 3,
+            skipped: 4,
+            processed_record_skipped: 1,
+            failed: 0,
+            status: "completed".to_string(),
+            current_device: None,
+            current_file: None,
+            current_file_size: None,
+            current_file_copied_bytes: 0,
+            total_files_discovered: 7,
+            processed_files: 7,
+            completion_token: None,
+            auto_run_consumed: false,
+            message: "completed".to_string(),
+        };
+        progress.completion_token = Some(external_import_completion_token(&progress));
+        save_external_import_progress("barrier-task", &progress).unwrap();
+
+        let token = consume_external_import_completion("barrier-task").unwrap();
+        assert!(consume_external_import_completion("barrier-task").is_none());
+        release_external_import_completion("barrier-task", "other-run-token");
+        assert!(consume_external_import_completion("barrier-task").is_none());
+        release_external_import_completion("barrier-task", &token);
+        assert_eq!(
+            consume_external_import_completion("barrier-task").as_deref(),
+            Some(token.as_str())
+        );
+    }
+
+    #[test]
+    fn external_import_completion_paths_persist_barriers() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+
+        let initial_progress = |run_id: &str| AsrExternalImportRunProgress {
+            run_id: run_id.to_string(),
+            trigger: "test".to_string(),
+            started_at_ms: 1,
+            updated_at_ms: 1,
+            finished_at_ms: None,
+            imported: 0,
+            skipped: 0,
+            processed_record_skipped: 0,
+            failed: 0,
+            status: "importing".to_string(),
+            current_device: None,
+            current_file: None,
+            current_file_size: None,
+            current_file_copied_bytes: 0,
+            total_files_discovered: 0,
+            processed_files: 0,
+            completion_token: None,
+            auto_run_consumed: false,
+            message: "queued".to_string(),
+        };
+
+        let disabled_task = test_directory_task("import-disabled", audio_dir.clone());
+        assert!(sync_external_devices_for_task(&disabled_task, "missing-run", "test").is_err());
+        save_external_import_progress(
+            &disabled_task.id,
+            &initial_progress("disabled-run"),
+        )
+        .unwrap();
+        assert_eq!(
+            sync_external_devices_for_task(&disabled_task, "disabled-run", "test").unwrap(),
+            0
+        );
+        let completed = load_external_import_progress(&disabled_task.id).unwrap();
+        assert_eq!(completed.status, "completed");
+        assert!(completed.finished_at_ms.is_some());
+        assert!(completed.completion_token.is_some());
+
+        let mut disconnected_task =
+            test_directory_task("import-disconnected", audio_dir);
+        disconnected_task.import_policy.enabled = true;
+        disconnected_task.external_devices = vec![AsrExternalDeviceBinding {
+            name: format!("definitely-not-mounted-{}", uuid::Uuid::new_v4()),
+            enabled: true,
+            ..Default::default()
+        }];
+        save_external_import_progress(
+            &disconnected_task.id,
+            &initial_progress("disconnected-run"),
+        )
+        .unwrap();
+        assert_eq!(
+            sync_external_devices_for_task(
+                &disconnected_task,
+                "disconnected-run",
+                "test"
+            )
+            .unwrap(),
+            0
+        );
+        let completed = load_external_import_progress(&disconnected_task.id).unwrap();
+        assert_eq!(completed.status, "completed");
+        assert_eq!(completed.skipped, 0);
+        assert!(completed.completion_token.is_some());
+        assert!(completed.message.contains("External import completed"));
+
+        let mut invalid_barrier = initial_progress("invalid-barrier");
+        invalid_barrier.status = "completed".to_string();
+        invalid_barrier.completion_token = Some("invalid-token".to_string());
+        save_external_import_progress("invalid-barrier-task", &invalid_barrier).unwrap();
+        assert!(consume_external_import_completion("invalid-barrier-task").is_none());
+        release_external_import_completion("missing-barrier-task", "missing-token");
     }
 
     #[test]

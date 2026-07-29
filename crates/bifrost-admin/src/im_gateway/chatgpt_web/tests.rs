@@ -1,10 +1,303 @@
 use super::*;
-use std::collections::BTreeMap;
+use futures_util::{SinkExt, StreamExt};
+use std::collections::{BTreeMap, VecDeque};
+use std::ffi::{OsStr, OsString};
+use std::sync::{Mutex, OnceLock};
+use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite::Message;
+
+static CHATGPT_WEB_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &OsStr) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe { std::env::set_var(key, value) };
+        Self { key, previous }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe { std::env::remove_var(key) };
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = &self.previous {
+            unsafe { std::env::set_var(self.key, previous) };
+        } else {
+            unsafe { std::env::remove_var(self.key) };
+        }
+    }
+}
+
+async fn test_cdp(values: Vec<Value>) -> CdpClient {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let mut values = VecDeque::from(values);
+        while let Some(Ok(message)) = socket.next().await {
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let request: Value = serde_json::from_str(&text).unwrap();
+            let id = request.get("id").and_then(Value::as_u64).unwrap();
+            let method = request
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let result = if method == "Runtime.evaluate" {
+                json!({"result": {"value": values.pop_front().unwrap_or(Value::Null)}})
+            } else {
+                json!({})
+            };
+            socket
+                .send(Message::Text(
+                    json!({"id": id, "result": result}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+        }
+    });
+    CdpClient::connect(&format!("ws://{address}"))
+        .await
+        .unwrap()
+}
 
 #[test]
 fn chatgpt_web_browser_defaults_to_headed_mode() {
     let config = BrowserConfig::default();
     assert_eq!(config.execution_mode, "headed");
+}
+
+#[test]
+fn chatgpt_web_surface_preferences_default_to_auto() {
+    let config = ChatGptConfig::default();
+    assert_eq!(config.interface_mode, "auto");
+    assert_eq!(config.model, "auto");
+    assert!(config.project_url.is_none());
+}
+
+#[test]
+fn chatgpt_web_surface_preferences_parse_chat_and_pro() {
+    let parsed: ChatGptWebAdapterConfig = serde_json::from_value(serde_json::json!({
+        "chatgpt": {
+            "interfaceMode": "chat",
+            "model": "pro"
+        }
+    }))
+    .unwrap();
+
+    assert_eq!(parsed.chatgpt.interface_mode, "chat");
+    assert_eq!(parsed.chatgpt.model, "pro");
+}
+
+#[test]
+fn chatgpt_web_project_url_normalizes_to_canonical_project_home() {
+    assert_eq!(
+        normalize_project_url(Some(
+            " https://chatgpt.com/g/g-p-daily-research/project/?utm_source=test#new "
+        ))
+        .unwrap()
+        .as_deref(),
+        Some("https://chatgpt.com/g/g-p-daily-research/project")
+    );
+    assert_eq!(normalize_project_url(Some("  ")).unwrap(), None);
+}
+
+#[test]
+fn chatgpt_web_project_url_rejects_non_project_or_untrusted_origins() {
+    for value in [
+        "http://chatgpt.com/g/g-p-daily-research/project",
+        "https://example.com/g/g-p-daily-research/project",
+        "https://chatgpt.com/c/conversation-id",
+        "https://chatgpt.com/g/not-a-project/project",
+    ] {
+        assert!(normalize_project_url(Some(value)).is_err(), "{value}");
+    }
+}
+
+#[test]
+fn chatgpt_web_new_conversation_url_uses_project_without_changing_homepage_fallback() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = RuntimeConfig {
+        browser: BrowserConfig::default(),
+        chatgpt: ChatGptConfig::default(),
+        profile_dir: temp.path().join("profile"),
+        state_path: temp.path().join("auth_state.json"),
+        sessions_path: temp.path().join("sessions.json"),
+        attachments_dir: temp.path().join("attachments"),
+    };
+
+    assert_eq!(new_conversation_url(&config), "https://chatgpt.com/");
+
+    config.chatgpt.project_url =
+        Some("https://chatgpt.com/g/g-p-daily-research/project".to_string());
+    assert_eq!(
+        new_conversation_url(&config),
+        "https://chatgpt.com/g/g-p-daily-research/project/"
+    );
+}
+
+#[test]
+fn chatgpt_web_project_page_match_ignores_query_and_trailing_slash_only() {
+    let expected = "https://chatgpt.com/g/g-p-daily-research/project";
+    assert!(same_project_page(
+        "https://chatgpt.com/g/g-p-daily-research/project/?bifrost_new_chat=123",
+        expected
+    ));
+    assert!(!same_project_page("https://chatgpt.com/", expected));
+    assert!(!same_project_page(
+        "https://chatgpt.com/g/g-p-other/project",
+        expected
+    ));
+
+    let stable_project = "https://chatgpt.com/g/g-p-6a548942f5048191b11b08f623e9be34/project";
+    assert!(same_project_page(
+        "https://chatgpt.com/g/g-p-6a548942f5048191b11b08f623e9be34-ri-bao-yan-jiu/project?bifrost_new_chat=123",
+        stable_project
+    ));
+}
+
+#[test]
+fn chatgpt_web_runtime_config_rejects_invalid_project_url() {
+    let mut adapter = ExternalCliAdapterConfig::default();
+    adapter.extra.insert(
+        "chatgpt".to_string(),
+        serde_json::json!({"projectUrl": "https://example.com/project"}),
+    );
+
+    let error = runtime_config(&adapter).unwrap_err();
+    assert!(error.contains("https://chatgpt.com origin"), "{error}");
+}
+
+#[test]
+fn chatgpt_web_send_enforces_surface_before_composer_injection() {
+    let source = include_str!("send.rs");
+    let ensure_project = source
+        .find("ensure_new_conversation_project(cdp, config).await?")
+        .expect("new ChatGPT conversations must enforce the configured Project");
+    let prepare = source
+        .find("prepare_new_chat_surface(cdp, config).await?")
+        .expect("new ChatGPT conversations must enforce configured surface preferences");
+    let inject = source
+        .find("set_composer_text(cdp, text).await")
+        .expect("send path must inject the composer text");
+
+    assert!(ensure_project < prepare);
+    assert!(prepare < inject);
+    assert!(source.contains("'[role=\"radio\"]'"));
+    assert!(source.contains("'[role=\"menuitemradio\"]'"));
+}
+
+#[test]
+fn chatgpt_web_stale_conversation_fallback_reenters_configured_project() {
+    let source = include_str!("send.rs");
+    let fallback = source
+        .split("if retry_as_new_available && should_retry_as_new_conversation(&error)")
+        .nth(1)
+        .and_then(|value| value.split("return Err(error)").next())
+        .expect("stale conversation fallback branch must exist");
+    let recovery = source
+        .split("async fn recover_to_new_conversation")
+        .nth(1)
+        .and_then(|value| {
+            value
+                .split("pub(in crate::im_gateway::chatgpt_web) fn same_project_page")
+                .next()
+        })
+        .expect("new conversation recovery helper must exist");
+
+    assert!(fallback.contains("recover_to_new_conversation(cdp, config, &error).await?"));
+    assert!(
+        source
+            .matches("recover_to_new_conversation(cdp, config")
+            .count()
+            >= 4
+    );
+    assert!(recovery.contains("navigate_to_new_conversation(cdp, config, reason).await?"));
+    assert!(recovery.contains("ensure_new_conversation_project(cdp, config).await?"));
+    assert!(recovery.contains("prepare_new_chat_surface(cdp, config).await?"));
+}
+
+#[test]
+fn login_page_readiness_rejects_account_chooser_and_disabled_composer() {
+    assert!(login_page_state_is_ready(&serde_json::json!({
+        "composerVisible": true,
+        "composerDisabled": false,
+        "accountChooserVisible": false
+    })));
+    assert!(!login_page_state_is_ready(&serde_json::json!({
+        "composerVisible": true,
+        "composerDisabled": false,
+        "accountChooserVisible": true
+    })));
+    assert!(!login_page_state_is_ready(&serde_json::json!({
+        "composerVisible": true,
+        "composerDisabled": true,
+        "accountChooserVisible": false
+    })));
+    assert!(!login_page_state_is_ready(&serde_json::json!({})));
+}
+
+#[tokio::test]
+async fn login_page_inspection_returns_browser_composer_state() {
+    let expected = json!({
+        "composerVisible": true,
+        "composerDisabled": false,
+        "accountChooserVisible": false
+    });
+    let cdp = test_cdp(vec![expected.clone()]).await;
+    assert_eq!(inspect_login_page_state(&cdp).await.unwrap(), expected);
+    cdp.close();
+}
+
+#[test]
+fn chatgpt_web_e2e_mock_includes_project_and_reuses_conversation_hint() {
+    let mut request =
+        make_run_request_with_params(json!({"conversationId": "existing-conversation"}), None);
+    request.adapter_config.extra.insert(
+        "chatgpt".to_string(),
+        json!({"projectUrl": "https://chatgpt.com/g/g-p-research/project"}),
+    );
+    let output = mock_run_adapter_for_e2e(&request, "  research prompt  ");
+    assert_eq!(
+        output.metadata.get("conversationId").map(String::as_str),
+        Some("existing-conversation")
+    );
+    assert!(output.response.contains("research prompt"));
+    assert!(output
+        .response
+        .contains("CHATGPT_PROJECT_URL: https://chatgpt.com/g/g-p-research/project"));
+
+    request.params = Value::Null;
+    request.adapter_config.extra.clear();
+    let output = mock_run_adapter_for_e2e(&request, "plain");
+    assert!(output.response.starts_with("chatgpt_web_e2e_mock: plain"));
+    assert!(output
+        .metadata
+        .get("conversationId")
+        .is_some_and(|value| value.starts_with("mock-conversation-")));
+}
+
+#[test]
+fn login_page_inspection_only_treats_welcome_back_as_a_dialog_marker() {
+    let source = include_str!("../chatgpt_web.rs");
+    let body_markers = source
+        .split("const bodyAccountChooserMarkers = [")
+        .nth(1)
+        .and_then(|value| value.split("];").next())
+        .expect("body account chooser marker list should exist");
+    assert!(!body_markers.contains("welcome back"));
+    assert!(!body_markers.contains("欢迎回来"));
 }
 
 #[test]
@@ -115,7 +408,7 @@ fn native_clipboard_paste_scales_send_button_waits_for_large_prompts() {
     assert!(send_button_ready_max_wait(&large_prompt) > Duration::from_secs(30));
     assert_eq!(
         send_button_ready_retry_max_wait(&large_prompt),
-        Duration::from_secs(60)
+        Duration::from_secs(180)
     );
     assert!(native_clipboard_paste_followup_instruction().contains("刚刚粘贴或上传"));
     assert!(native_clipboard_paste_followup_instruction().contains("最终结果正文"));
@@ -258,6 +551,51 @@ async fn run_adapter_writes_failure_diagnostics_on_authenticated_error() {
     assert_eq!(manifest["artifacts"][0]["status"], "skipped");
     assert_eq!(manifest["artifacts"][1]["name"], "page_dom");
     assert_eq!(manifest["artifacts"][1]["status"], "capture_failed");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn run_adapter_blocks_live_chatgpt_during_e2e_without_explicit_opt_in() {
+    let _lock = CHATGPT_WEB_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap();
+    let _e2e = EnvVarGuard::set("BIFROST_E2E", OsStr::new("1"));
+    let _mock = EnvVarGuard::remove("BIFROST_CHATGPT_WEB_E2E_MOCK");
+    let _live = EnvVarGuard::remove("BIFROST_CHATGPT_WEB_LIVE_E2E");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        files: Vec::new(),
+        message: "hello".to_string(),
+        operation: "ask".to_string(),
+        params: Value::Null,
+        provider_id: None,
+        runner_id: None,
+        session_key: None,
+        runtime: "external_cli".to_string(),
+        adapter: ADAPTER_ID.to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig::default(),
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let error = run_adapter(&request, "hello", temp.path())
+        .await
+        .expect_err("live ChatGPT must be blocked during E2E");
+    assert!(error.contains("live ChatGPT Web is disabled during tests"));
+}
+
+#[test]
+fn conversation_url_falls_back_from_custom_base_to_default_base() {
+    assert!(browser::page_url_matches_conversation(
+        "https://chatgpt.com/c/conversation-42",
+        "https://custom.example.com",
+        "conversation-42",
+    ));
 }
 
 #[test]
@@ -922,6 +1260,9 @@ async fn auth_status_accepts_recent_browser_account_check_when_native_probe_fail
             base_url: "http://[::1".to_string(),
             poll_interval_ms: 1,
             timeout_secs: 1,
+            interface_mode: "auto".to_string(),
+            model: "auto".to_string(),
+            project_url: None,
             session_consistency: "strong".to_string(),
             rate_limit_retry_secs: 180,
             rate_limit_max_retries: 5,
@@ -991,6 +1332,9 @@ async fn read_logged_in_auth_state_recovers_valid_captured_login() {
             base_url: "http://[::1".to_string(),
             poll_interval_ms: 1,
             timeout_secs: 1,
+            interface_mode: "auto".to_string(),
+            model: "auto".to_string(),
+            project_url: None,
             session_consistency: "strong".to_string(),
             rate_limit_retry_secs: 180,
             rate_limit_max_retries: 5,
@@ -1043,6 +1387,9 @@ async fn read_logged_in_auth_state_rejects_expired_captured_login() {
             base_url: "http://[::1".to_string(),
             poll_interval_ms: 1,
             timeout_secs: 1,
+            interface_mode: "auto".to_string(),
+            model: "auto".to_string(),
+            project_url: None,
             session_consistency: "strong".to_string(),
             rate_limit_retry_secs: 180,
             rate_limit_max_retries: 5,
@@ -1108,6 +1455,9 @@ async fn auth_status_accepts_browser_account_check_when_native_probe_is_forbidde
             base_url: format!("http://127.0.0.1:{port}"),
             poll_interval_ms: 1,
             timeout_secs: 1,
+            interface_mode: "auto".to_string(),
+            model: "auto".to_string(),
+            project_url: None,
             session_consistency: "strong".to_string(),
             rate_limit_retry_secs: 180,
             rate_limit_max_retries: 5,
@@ -1164,6 +1514,9 @@ async fn auth_status_rejects_expired_authorization_identity() {
             base_url: "http://[::1".to_string(),
             poll_interval_ms: 1,
             timeout_secs: 1,
+            interface_mode: "auto".to_string(),
+            model: "auto".to_string(),
+            project_url: None,
             session_consistency: "strong".to_string(),
             rate_limit_retry_secs: 180,
             rate_limit_max_retries: 5,
@@ -1205,7 +1558,9 @@ async fn auth_status_rejects_stale_browser_account_check_when_native_forbidden()
 
     let mut headers = BTreeMap::new();
     headers.insert("authorization".to_string(), "Bearer captured".to_string());
-    let stale_captured_at = (chrono::Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
+    let stale_captured_at = (chrono::Utc::now()
+        - chrono::Duration::seconds(BROWSER_ACCOUNT_CHECK_PROOF_MAX_AGE_SECS + 300))
+    .to_rfc3339();
     let state = AuthState {
         captured_at: iso_now(),
         base_url: DEFAULT_BASE_URL.to_string(),
@@ -1234,6 +1589,9 @@ async fn auth_status_rejects_stale_browser_account_check_when_native_forbidden()
             base_url: format!("http://127.0.0.1:{port}"),
             poll_interval_ms: 1,
             timeout_secs: 1,
+            interface_mode: "auto".to_string(),
+            model: "auto".to_string(),
+            project_url: None,
             session_consistency: "strong".to_string(),
             rate_limit_retry_secs: 180,
             rate_limit_max_retries: 5,
