@@ -1038,6 +1038,75 @@ PY
 
 ---
 
+### TC-CSS-36：runtime marker 缺失时 status 发现存活实例且 start 不重启（回归）
+
+**前置条件**：使用当前源码构建的 CLI、临时 `BIFROST_DATA_DIR` 和动态端口；不操作正式
+9900 实例，不修改系统代理。
+
+**操作步骤**：
+1. 启动隔离 daemon 并等待 Admin API ready：
+   ```bash
+   TEST_DATA_DIR="$(mktemp -d)"
+   PORT="$(python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)"
+   export BIFROST_DATA_DIR="$TEST_DATA_DIR"
+   export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
+   export BIFROST_DISABLE_TRAY=1
+   target/debug/bifrost -p "$PORT" start --daemon \
+     --skip-cert-check --unsafe-ssl --no-system-proxy
+   curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/system/overview"
+   ```
+2. 记录 overview 中的 PID，然后模拟终端与服务 runtime marker 不同步：
+   ```bash
+   ORIGINAL_PID="$(python3 -c \
+     'import json,sys; print(json.load(sys.stdin)["system"]["pid"])' \
+     < <(curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/system/overview"))"
+   mv "$TEST_DATA_DIR/runtime.json" "$TEST_DATA_DIR/runtime.json.saved"
+   mv "$TEST_DATA_DIR/bifrost.pid" "$TEST_DATA_DIR/bifrost.pid.saved"
+   ```
+3. 分别执行 text 与 JSON status：
+   ```bash
+   target/debug/bifrost -p "$PORT" status
+   target/debug/bifrost -p "$PORT" status --format json
+   ```
+4. 执行会被 Bifrost skill 使用的非交互启动路径，并再次读取 Admin PID：
+   ```bash
+   target/debug/bifrost -p "$PORT" start --daemon --yes \
+     --skip-cert-check --unsafe-ssl --no-system-proxy
+   curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/system/overview"
+   ```
+5. 在另一个动态端口启动普通 HTTP server，并对该端口执行 JSON status。
+6. 恢复 marker，停止隔离 daemon 与普通 HTTP server，删除临时目录。
+
+**预期结果**：
+- text status 显示 `Status: Running`、原 PID/端口和
+  `Source: Admin API fallback (runtime metadata unavailable or stale)`。
+- JSON status 显示 `running=true`、`runtime_source="admin_api"`，PID 和 listener port
+  与真实 Admin overview 一致。
+- `start --daemon --yes` 输出 `Reusing the live service`；命令前后 Admin PID 均等于
+  `ORIGINAL_PID`，没有停止或替换原实例。
+- 普通 HTTP server 不会被识别为 Bifrost，其 JSON status 显示 `running=false`。
+- 全流程仅使用临时数据目录和动态端口，不修改系统代理或正式 9900 实例。
+
+**执行记录**：
+- 2026-07-29 按当前 debug 源码真实执行通过。使用临时
+  `BIFROST_DATA_DIR=/tmp/bifrost-human-status.ByGNkx` 和动态端口 `51965` 启动隔离
+  daemon，移走 `runtime.json` 与 `bifrost.pid` 后，text status 显示
+  `Status: Running`、`PID: 14471`、`Port: 51965` 和 Admin API fallback 来源；JSON
+  status 显示 `running=true`、`runtime_source=admin_api`、PID `14471`、port `51965`。
+  随后执行 `start --daemon --yes`，输出 `Reusing the live service`，overview PID 前后
+  都是 `14471`。动态端口 `51966` 上的普通 Python HTTP server 返回
+  `running=false`、`runtime_source=none`。最后恢复 marker、停止隔离 daemon/HTTP
+  server 并删除临时目录；未触碰正式 9900 实例，未修改系统代理。
+
+---
+
 
 ## 清理
 

@@ -42,6 +42,24 @@ pub struct RuntimeInfo {
     pub system_proxy_bypass: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AdminRuntimeOverview {
+    server: AdminRuntimeServer,
+    system: AdminRuntimeSystem,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminRuntimeServer {
+    port: u16,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminRuntimeSystem {
+    pid: u32,
+    uptime_secs: u64,
+    version: String,
+}
+
 impl RuntimeInfo {
     pub fn new(
         pid: u32,
@@ -154,6 +172,64 @@ pub fn read_runtime_info() -> Option<RuntimeInfo> {
 
 pub fn read_runtime_port() -> Option<u16> {
     read_runtime_info().map(|info| info.port)
+}
+
+fn runtime_info_from_admin_overview(
+    requested_port: u16,
+    overview: AdminRuntimeOverview,
+    listener_pid: Option<u32>,
+) -> Option<RuntimeInfo> {
+    if overview.server.port != requested_port
+        || overview.system.pid == 0
+        || overview.system.version.trim().is_empty()
+        || listener_pid.is_some_and(|pid| pid != overview.system.pid)
+    {
+        return None;
+    }
+
+    let started_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| {
+            (duration.as_millis() as u64)
+                .saturating_sub(overview.system.uptime_secs.saturating_mul(1000))
+        });
+
+    Some(RuntimeInfo {
+        pid: overview.system.pid,
+        port: requested_port,
+        socks5_port: None,
+        host: Some("127.0.0.1".to_string()),
+        started_at_ms,
+        start_mode: RuntimeStartMode::Unknown,
+        restartable_runtime: false,
+        binary_path: None,
+        system_proxy_enabled: None,
+        system_proxy_bypass: None,
+    })
+}
+
+/// Discover a live Bifrost listener when local runtime metadata is missing or
+/// stale.
+///
+/// The probe is deliberately fail-closed: the Admin overview must identify the
+/// requested port and a non-zero PID, and when the platform can resolve the
+/// listening process its PID must match the Admin response. A successful
+/// loopback response is itself the liveness proof when the caller cannot query
+/// the service process because of OS permissions or PID namespaces. This prevents
+/// `start --yes` from treating an already-running Bifrost as an arbitrary port
+/// owner and terminating it.
+pub fn discover_bifrost_runtime(port: u16) -> Option<RuntimeInfo> {
+    let url = format!("http://127.0.0.1:{port}/_bifrost/api/system/overview");
+    let response = bifrost_core::direct_ureq_agent_builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .get(&url)
+        .call()
+        .ok()?;
+    let overview = response.into_json::<AdminRuntimeOverview>().ok()?;
+    let listener_pid = find_process_on_port(port).map(|process| process.pid);
+    runtime_info_from_admin_overview(port, overview, listener_pid)
 }
 
 pub fn write_pid(pid: u32) -> bifrost_core::Result<()> {
@@ -443,6 +519,82 @@ mod tests {
             runtime_system_proxy_host(Some("192.168.1.20")),
             "192.168.1.20"
         );
+    }
+
+    #[test]
+    fn admin_runtime_overview_requires_matching_port_pid_and_version() {
+        let current_pid = std::process::id();
+        let overview = AdminRuntimeOverview {
+            server: AdminRuntimeServer { port: 18888 },
+            system: AdminRuntimeSystem {
+                pid: current_pid,
+                uptime_secs: 12,
+                version: "0.0.test".to_string(),
+            },
+        };
+
+        let runtime = runtime_info_from_admin_overview(18888, overview, Some(current_pid))
+            .expect("matching Bifrost overview should be accepted");
+
+        assert_eq!(runtime.pid, current_pid);
+        assert_eq!(runtime.port, 18888);
+        assert_eq!(runtime.host.as_deref(), Some("127.0.0.1"));
+        assert_eq!(runtime.start_mode, RuntimeStartMode::Unknown);
+        assert!(!runtime.restartable_runtime);
+    }
+
+    #[test]
+    fn admin_runtime_overview_rejects_listener_pid_mismatch() {
+        let current_pid = std::process::id();
+        let overview = AdminRuntimeOverview {
+            server: AdminRuntimeServer { port: 18888 },
+            system: AdminRuntimeSystem {
+                pid: current_pid,
+                uptime_secs: 12,
+                version: "0.0.test".to_string(),
+            },
+        };
+
+        assert!(runtime_info_from_admin_overview(
+            18888,
+            overview,
+            Some(current_pid.saturating_add(1))
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn admin_runtime_overview_rejects_wrong_port_or_empty_version() {
+        let current_pid = std::process::id();
+        let wrong_port = AdminRuntimeOverview {
+            server: AdminRuntimeServer { port: 18889 },
+            system: AdminRuntimeSystem {
+                pid: current_pid,
+                uptime_secs: 12,
+                version: "0.0.test".to_string(),
+            },
+        };
+        assert!(runtime_info_from_admin_overview(18888, wrong_port, None).is_none());
+
+        let empty_version = AdminRuntimeOverview {
+            server: AdminRuntimeServer { port: 18888 },
+            system: AdminRuntimeSystem {
+                pid: current_pid,
+                uptime_secs: 12,
+                version: " ".to_string(),
+            },
+        };
+        assert!(runtime_info_from_admin_overview(18888, empty_version, None).is_none());
+
+        let zero_pid = AdminRuntimeOverview {
+            server: AdminRuntimeServer { port: 18888 },
+            system: AdminRuntimeSystem {
+                pid: 0,
+                uptime_secs: 12,
+                version: "0.0.test".to_string(),
+            },
+        };
+        assert!(runtime_info_from_admin_overview(18888, zero_pid, None).is_none());
     }
 
     #[test]

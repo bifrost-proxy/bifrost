@@ -27,7 +27,7 @@
 预期结果：
 
 - 单行 JSON 与 pretty JSON 内容等价（仅缩进不同）。
-- `schema_version == 1`、`running == true`、`pid` 与 `runtime.json` 内 pid 一致、`listener.port == 28800`。
+- `schema_version == 1`、`running == true`、`runtime_source == "runtime_file"`、`pid` 与 `runtime.json` 内 pid 一致、`listener.port == 28800`。
 - `system_proxy.supported == true`、`system_proxy.enabled == false`（启动时带 `--no-system-proxy`）。
 - `tls`、`active_rules`、`ports` 均不是 `null`，`errors == []`。
 - `data_dir` 指向 `./.bifrost-test-status-json` 的绝对路径。
@@ -41,10 +41,11 @@
 
 预期结果：
 
-- `running == false`、`pid == null`、`uptime_sec == null`、`listener == null`。
+- `running == false`、`runtime_source == "none"`、`pid == null`、`uptime_sec == null`、`listener == null`。
 - `tls == null`、`active_rules == null`、`ports == null`。
 - `system_proxy` 字段仍存在（不影响 OS 当前代理读取）。
-- `errors == []`（stopped 不会主动调用 admin API，因此不算失败）。
+- `errors == []`（stopped 可能执行只读 runtime identity fallback probe，但不会继续调用
+  TLS/rules/ports 等字段 API；identity 未命中不算字段错误）。
 
 ### TC-SJ-03 admin API 部分失败
 
@@ -79,3 +80,15 @@
 
 - `target/debug/bifrost stop`
 - `rm -rf ./.bifrost-test-status-json new.txt old.txt`
+
+## 本次执行记录
+
+- 2026-07-29 按当前 debug 源码复跑 TC-SJ-01 与 TC-SJ-02 通过。使用临时
+  `BIFROST_DATA_DIR=/tmp/bifrost-status-json.1rbfcR` 和动态端口 `53219`；running
+  单行/pretty JSON 内容等价，`runtime_source=runtime_file` 且 PID 与 marker 一致；
+  stop 后 JSON 显示 `running=false`、`runtime_source=none`，runtime/Admin 字段按契约
+  降级为 null。隔离 daemon 已停止，临时目录已清理，未修改系统代理。
+- 2026-07-29 第二轮文档复核把 stopped 的 Admin 行为表述收敛为“允许 identity fallback
+  probe，但不继续读取字段 API”。随后再次执行 TC-SJ-02 通过：
+  `running=false`、`runtime_source=none`、PID/listener 为 null、`errors=[]`；临时目录
+  已清理。
