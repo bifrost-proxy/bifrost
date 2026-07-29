@@ -35,12 +35,17 @@ stdout/stderr，而不是等子进程退出后一次性显示。
    ```
 
 2. 观察输出中的 `Downloading…` 行。
+3. 确认 restart-port 成功路径使用端口 `0` 的 OS-selected bind probe，不再先分配一个
+   具体随机端口再释放；后者会在 Windows 并行测试中被其它用例抢占，或短暂处于
+   `netstat` 无 listener 但仍不可重绑的状态。
 
 预期结果：
 
 - 本地 fixture 下载成功，测试返回 `ok`。
 - `Downloading…` 行包含百分比、已下载/总字节和 `/s` 速度，例如
   `100.0% (7 B/7 B, .../s)`。
+- restart-port 成功路径不依赖可被并行用例抢占的具体端口；生产代码对真实非零端口的
+  fail-closed 等待和 listener 诊断保持不变。
 - 不访问真实 release，不替换任何已安装 CLI。
 
 ### TC-CUP-02 Desktop 子安装进度在父 upgrade 退出前可见
@@ -110,3 +115,4 @@ stdout/stderr，而不是等子进程退出后一次性显示。
 | 2026-07-22 | TC-CUP-01 | PASS | 本地 7-byte HTTP fixture 输出 `Downloading… 100.0% (7 B/7 B, 6.8 KiB/s)`，测试 1 passed；未访问 release、未替换 CLI。 |
 | 2026-07-22 | TC-CUP-02 | PASS | 本地 HTTP 分块下载真实 528.5 KiB DMG；响应未结束时父终端已显示下载进度，最终为 `Downloading… 100.0% (528.5 KiB/528.5 KiB, 145.7 KiB/s)`；安装未结束时已显示 installer marker，临时 App 从 0.0.1 更新到 0.0.161；E2E 汇总 1 passed、0 failed、0 skipped。 |
 | 2026-07-22 | TC-CUP-03 | PASS | 控制台实时出现 `app-failed`，父 warning 保留 `desktop app update command failed: app-failed`；目标测试 1 passed。 |
+| 2026-07-29 | TC-CUP-01 Windows CI 防抖回归 | PASS | CI run `30442816436` 的 Windows 并行单测在释放具体随机端口后仍持续 30 秒不可重绑，且 `netstat` 无 listener；改用 OS-selected port 0 probe 后目标用例连续 6 次通过，生产非零端口等待逻辑未修改。 |
