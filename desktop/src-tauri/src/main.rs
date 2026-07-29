@@ -99,6 +99,8 @@ const DESKTOP_STARTUP_SESSION_ENV: &str = "BIFROST_DESKTOP_STARTUP_SESSION_ID";
 const DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV: &str =
     "BIFROST_DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES";
 const DESKTOP_UPGRADE_SHUTDOWN_ARG: &str = "--bifrost-upgrade-shutdown";
+#[cfg(target_os = "macos")]
+const MACOS_APP_QUIT_MENU_ID: &str = "app-quit";
 static DESKTOP_BOOTSTRAP_LOG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,6 +204,14 @@ enum DesktopShutdownBackendAction {
     PreserveExternalRuntime,
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MacosMenuAction {
+    Quit,
+    Edit(&'static str),
+    Ignore,
+}
+
 #[derive(Debug)]
 struct BackendWaitFailure {
     kind: BackendWaitFailureKind,
@@ -262,6 +272,16 @@ fn main() {
     let builder = builder
         .menu(|app| {
             // App menu (macOS displays first submenu as app name)
+            // A predefined Quit item calls AppKit terminate: directly and can
+            // bypass Tauri's ExitRequested callback. Keep Quit custom so both
+            // the menu click and Cmd+Q enter the owned lifecycle coordinator.
+            let quit = MenuItem::with_id(
+                app,
+                MACOS_APP_QUIT_MENU_ID,
+                "Quit Bifrost",
+                true,
+                Some("CmdOrCtrl+Q"),
+            )?;
             let app_menu = Submenu::with_items(
                 app,
                 "Bifrost",
@@ -275,7 +295,7 @@ fn main() {
                     &PredefinedMenuItem::hide_others(app, None)?,
                     &PredefinedMenuItem::show_all(app, None)?,
                     &PredefinedMenuItem::separator(app)?,
-                    &PredefinedMenuItem::quit(app, None)?,
+                    &quit,
                 ],
             )?;
             let file_menu = Submenu::with_items(
@@ -341,17 +361,17 @@ fn main() {
             )
         })
         .on_menu_event(|app, event| {
+            let action = macos_menu_action(event.id().as_ref());
+            if action == MacosMenuAction::Quit {
+                request_desktop_shutdown(app);
+                return;
+            }
+
             // Forward custom Edit menu actions directly to the WebView via eval().
             // We bypass the Tauri event system because emit_to target routing
             // may not match JS-side listen() calls. Instead we dispatch a DOM
             // CustomEvent that the JS layer picks up reliably.
-            let action = match event.id().as_ref() {
-                "edit-undo" => Some("undo"),
-                "edit-redo" => Some("redo"),
-                "edit-select-all" => Some("editor.action.selectAll"),
-                _ => None,
-            };
-            if let Some(action) = action {
+            if let MacosMenuAction::Edit(action) = action {
                 if let Some(webview) = app.get_webview(MAIN_WINDOW_LABEL) {
                     let js = format!(
                         r#"window.dispatchEvent(new CustomEvent("bifrost-edit-command",{{detail:"{action}"}}))"#
@@ -560,6 +580,17 @@ fn main() {
                 _ => {}
             }
         });
+}
+
+#[cfg(target_os = "macos")]
+fn macos_menu_action(menu_id: &str) -> MacosMenuAction {
+    match menu_id {
+        MACOS_APP_QUIT_MENU_ID => MacosMenuAction::Quit,
+        "edit-undo" => MacosMenuAction::Edit("undo"),
+        "edit-redo" => MacosMenuAction::Edit("redo"),
+        "edit-select-all" => MacosMenuAction::Edit("editor.action.selectAll"),
+        _ => MacosMenuAction::Ignore,
+    }
 }
 
 fn should_intercept_exit(app: &AppHandle) -> bool {

@@ -30,6 +30,8 @@ use super::{
     DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES_ENV, DESKTOP_UPGRADE_SHUTDOWN_ARG,
     DETACHED_DAEMON_CHILD_ENV, EXTERNAL_CLI_WORKER_ENV, WINDOWS_DESKTOP_UPGRADE_HANDOFF_SCRIPT,
 };
+#[cfg(target_os = "macos")]
+use super::{macos_menu_action, MacosMenuAction, MACOS_APP_QUIT_MENU_ID};
 use bifrost_storage::data_dir as shared_bifrost_data_dir;
 use std::ffi::OsStr;
 use std::fs;
@@ -47,6 +49,33 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 mod backend_wait;
 mod cli_handoff_recovery;
 mod watchdog;
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_app_quit_menu_enters_desktop_shutdown_coordinator() {
+    assert_eq!(
+        macos_menu_action(MACOS_APP_QUIT_MENU_ID),
+        MacosMenuAction::Quit
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_edit_and_unknown_menu_actions_keep_their_existing_routing() {
+    assert_eq!(
+        macos_menu_action("edit-undo"),
+        MacosMenuAction::Edit("undo")
+    );
+    assert_eq!(
+        macos_menu_action("edit-redo"),
+        MacosMenuAction::Edit("redo")
+    );
+    assert_eq!(
+        macos_menu_action("edit-select-all"),
+        MacosMenuAction::Edit("editor.action.selectAll")
+    );
+    assert_eq!(macos_menu_action("unknown"), MacosMenuAction::Ignore);
+}
 
 fn assert_upgrade_relaunch_environment_removed(command: &Command) {
     for key in [

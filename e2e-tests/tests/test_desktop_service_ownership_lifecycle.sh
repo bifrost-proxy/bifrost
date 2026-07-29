@@ -19,6 +19,24 @@ if pgrep -f '[b]ifrost-desktop([[:space:]]|$)' >/dev/null 2>&1; then
   exit 0
 fi
 
+DESKTOP_MAIN_RS="$ROOT_DIR/desktop/src-tauri/src/main.rs"
+if grep -Fq 'PredefinedMenuItem::quit' "$DESKTOP_MAIN_RS"; then
+  echo "FAIL: macOS App Quit still uses the native predefined item that bypasses lifecycle shutdown"
+  exit 1
+fi
+for contract in \
+  'const MACOS_APP_QUIT_MENU_ID: &str = "app-quit";' \
+  '"Quit Bifrost"' \
+  'Some("CmdOrCtrl+Q")' \
+  'if action == MacosMenuAction::Quit' \
+  'request_desktop_shutdown(app);'
+do
+  if ! grep -Fq "$contract" "$DESKTOP_MAIN_RS"; then
+    echo "FAIL: macOS App Quit lifecycle contract is missing: $contract"
+    exit 1
+  fi
+done
+
 if [[ "${SKIP_BUILD:-}" != "true" ]]; then
   pnpm --dir web run build:desktop
   SKIP_FRONTEND_BUILD=1 cargo build -p bifrost-cli --bin bifrost
