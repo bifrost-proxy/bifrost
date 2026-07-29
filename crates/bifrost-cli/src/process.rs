@@ -598,6 +598,40 @@ mod tests {
     }
 
     #[test]
+    fn discover_bifrost_runtime_reads_live_admin_overview() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let pid = std::process::id();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept overview request");
+            let mut request = [0_u8; 2048];
+            let read = stream.read(&mut request).expect("read overview request");
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("GET /_bifrost/api/system/overview "));
+
+            let body = format!(
+                r#"{{"server":{{"port":{port}}},"system":{{"pid":{pid},"uptime_secs":12,"version":"0.0.test"}}}}"#
+            );
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .expect("write overview response");
+        });
+
+        let runtime = discover_bifrost_runtime(port).expect("discover live overview");
+        server.join().expect("overview server");
+
+        assert_eq!(runtime.pid, pid);
+        assert_eq!(runtime.port, port);
+        assert_eq!(runtime.host.as_deref(), Some("127.0.0.1"));
+    }
+
+    #[test]
     fn test_find_process_on_port_returns_some_for_listening_port() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();

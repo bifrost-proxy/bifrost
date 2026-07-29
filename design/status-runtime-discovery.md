@@ -94,6 +94,8 @@ Bifrost listener 仍继续执行既有冲突处理。
 ## 测试计划
 
 - 单元测试：overview 的正确端口/PID/version；listener PID 不匹配；错误端口与空版本。
+- CLI 集成测试：真实执行二进制的 JSON status、text status 与 `start --yes`，覆盖
+  `main -> run_status -> gather_status`、fallback 文本渲染和安全复用调用链。
 - E2E：新增 `e2e-tests/tests/test_status_runtime_discovery_e2e.sh`，覆盖 marker 删除后
   status fallback、start 复用、非 Bifrost listener 三条路径。
 - human_tests：在 `human_tests/cli-start-stop-status.md` 增加回归用例，并立即按文档执行。

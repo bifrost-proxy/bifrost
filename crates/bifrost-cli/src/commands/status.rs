@@ -543,7 +543,21 @@ struct GatheredStatus {
 }
 
 fn gather_status(requested_port: u16) -> GatheredStatus {
-    let recorded_runtime = read_runtime_info();
+    gather_status_with_runtime(
+        read_runtime_info(),
+        requested_port,
+        discover_bifrost_runtime,
+    )
+}
+
+fn gather_status_with_runtime<F>(
+    recorded_runtime: Option<RuntimeInfo>,
+    requested_port: u16,
+    discover_runtime: F,
+) -> GatheredStatus
+where
+    F: FnMut(u16) -> Option<RuntimeInfo>,
+{
     let recorded_runtime_is_live = recorded_runtime
         .as_ref()
         .is_some_and(|info| is_process_running(info.pid));
@@ -558,9 +572,7 @@ fn gather_status(requested_port: u16) -> GatheredStatus {
         if !candidate_ports.contains(&requested_port) {
             candidate_ports.push(requested_port);
         }
-        let discovered = candidate_ports
-            .into_iter()
-            .find_map(discover_bifrost_runtime);
+        let discovered = candidate_ports.into_iter().find_map(discover_runtime);
         runtime_discovered = discovered.is_some();
         discovered.or(recorded_runtime)
     };
@@ -962,8 +974,8 @@ fn build_status_json(g: &GatheredStatus) -> StatusJson {
 mod tests {
     use super::{
         build_status_json, format_active_summary_status_block, format_service_overview_lines,
-        format_temporary_port_bindings_block, GatheredStatus, ProxyAddress, ProxyAddressInfo,
-        RuleGroup, SystemProxyStatus, TlsConfig,
+        format_temporary_port_bindings_block, gather_status_with_runtime, GatheredStatus,
+        ProxyAddress, ProxyAddressInfo, RuleGroup, SystemProxyStatus, TlsConfig,
     };
     use crate::commands::rule::{ActiveRuleItem, ActiveSummaryResponse};
     use crate::process::RuntimeInfo;
@@ -1245,6 +1257,44 @@ mod tests {
             bypass: "localhost".to_string(),
             error: None,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gather_status_uses_discovered_runtime_when_marker_is_missing() {
+        let server = wiremock::MockServer::start().await;
+        let port = server.address().port();
+        let mut discovered_runtime = sample_runtime();
+        discovered_runtime.port = port;
+        discovered_runtime.socks5_port = None;
+
+        let gathered = gather_status_with_runtime(None, port, move |candidate_port| {
+            (candidate_port == port).then(|| discovered_runtime.clone())
+        });
+
+        assert!(gathered.is_running);
+        assert!(gathered.runtime_discovered);
+        assert_eq!(gathered.runtime_port, port);
+        assert_eq!(
+            gathered.runtime_info.as_ref().map(|runtime| runtime.pid),
+            Some(4242)
+        );
+    }
+
+    #[test]
+    fn gather_status_preserves_stale_marker_when_discovery_misses() {
+        let mut stale_runtime = sample_runtime();
+        stale_runtime.pid = 2_147_483_647;
+        stale_runtime.port = 18888;
+
+        let gathered = gather_status_with_runtime(Some(stale_runtime), 18888, |_| None);
+
+        assert!(!gathered.is_running);
+        assert!(!gathered.runtime_discovered);
+        assert_eq!(gathered.runtime_port, 18888);
+        assert_eq!(
+            gathered.runtime_info.as_ref().map(|runtime| runtime.pid),
+            Some(2_147_483_647)
+        );
     }
 
     #[test]
