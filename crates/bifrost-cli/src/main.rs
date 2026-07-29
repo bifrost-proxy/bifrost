@@ -317,7 +317,7 @@ fn run_cli_main() {
             if tui {
                 run_status_tui()
             } else {
-                run_status(format)
+                run_status(format, cli.port)
             }
         }
         Some(Commands::Rule { action }) => handle_rule_command(action),

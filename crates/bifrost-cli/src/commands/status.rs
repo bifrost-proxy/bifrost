@@ -5,7 +5,9 @@ use bifrost_admin::{RuleSetRef, TemporaryPortBinding, TemporaryPortStatus};
 use super::rule::{
     fetch_active_summary_from_api, format_active_summary_lines, ActiveSummaryResponse,
 };
-use crate::process::{is_process_running, read_runtime_info, RuntimeInfo};
+use crate::process::{
+    discover_bifrost_runtime, is_process_running, read_runtime_info, RuntimeInfo,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 struct TlsConfig {
@@ -513,8 +515,11 @@ fn format_active_summary_status_block(
     lines
 }
 
-pub fn run_status(format: crate::cli::StatusFormat) -> bifrost_core::Result<()> {
-    let gathered = gather_status();
+pub fn run_status(
+    format: crate::cli::StatusFormat,
+    requested_port: u16,
+) -> bifrost_core::Result<()> {
+    let gathered = gather_status(requested_port);
     match format {
         crate::cli::StatusFormat::Text => render_status_text(&gathered),
         crate::cli::StatusFormat::Json => render_status_json(&gathered, false),
@@ -526,6 +531,7 @@ pub fn run_status(format: crate::cli::StatusFormat) -> bifrost_core::Result<()> 
 struct GatheredStatus {
     runtime_info: Option<RuntimeInfo>,
     is_running: bool,
+    runtime_discovered: bool,
     runtime_port: u16,
     system_proxy: SystemProxyStatus,
     tls_config: Result<TlsConfig, String>,
@@ -536,12 +542,47 @@ struct GatheredStatus {
     data_dir: Option<std::path::PathBuf>,
 }
 
-fn gather_status() -> GatheredStatus {
-    let runtime_info = read_runtime_info();
-    let is_running = runtime_info
+fn gather_status(requested_port: u16) -> GatheredStatus {
+    gather_status_with_runtime(
+        read_runtime_info(),
+        requested_port,
+        discover_bifrost_runtime,
+    )
+}
+
+fn gather_status_with_runtime<F>(
+    recorded_runtime: Option<RuntimeInfo>,
+    requested_port: u16,
+    discover_runtime: F,
+) -> GatheredStatus
+where
+    F: FnMut(u16) -> Option<RuntimeInfo>,
+{
+    let recorded_runtime_is_live = recorded_runtime
         .as_ref()
         .is_some_and(|info| is_process_running(info.pid));
-    let runtime_port = runtime_info.as_ref().map(|info| info.port).unwrap_or(9900);
+    let mut runtime_discovered = false;
+    let runtime_info = if recorded_runtime_is_live {
+        recorded_runtime
+    } else {
+        let mut candidate_ports = recorded_runtime
+            .as_ref()
+            .map(|info| vec![info.port])
+            .unwrap_or_default();
+        if !candidate_ports.contains(&requested_port) {
+            candidate_ports.push(requested_port);
+        }
+        let discovered = candidate_ports.into_iter().find_map(discover_runtime);
+        runtime_discovered = discovered.is_some();
+        discovered.or(recorded_runtime)
+    };
+    let is_running = runtime_info
+        .as_ref()
+        .is_some_and(|info| runtime_discovered || is_process_running(info.pid));
+    let runtime_port = runtime_info
+        .as_ref()
+        .map(|info| info.port)
+        .unwrap_or(requested_port);
     let system_proxy = read_system_proxy_status();
     let tls_config = if is_running {
         fetch_tls_config_from_api(runtime_port)
@@ -576,6 +617,7 @@ fn gather_status() -> GatheredStatus {
     GatheredStatus {
         runtime_info,
         is_running,
+        runtime_discovered,
         runtime_port,
         system_proxy,
         tls_config,
@@ -608,10 +650,13 @@ fn render_status_text(g: &GatheredStatus) {
 
     let is_running = match &g.runtime_info {
         Some(info) => {
-            if is_process_running(info.pid) {
+            if g.is_running {
                 println!("Status: Running");
                 println!("PID: {}", info.pid);
                 println!("Port: {}", info.port);
+                if g.runtime_discovered {
+                    println!("Source: Admin API fallback (runtime metadata unavailable or stale)");
+                }
                 if let Some(ref host) = info.host {
                     println!("Host: {}", host);
                 }
@@ -709,6 +754,7 @@ struct StatusJson {
     schema_version: u32,
     version: &'static str,
     running: bool,
+    runtime_source: &'static str,
     pid: Option<u32>,
     uptime_sec: Option<u64>,
     listener: Option<ListenerJson>,
@@ -904,6 +950,15 @@ fn build_status_json(g: &GatheredStatus) -> StatusJson {
         schema_version: 1,
         version: env!("CARGO_PKG_VERSION"),
         running: g.is_running,
+        runtime_source: if g.runtime_discovered {
+            "admin_api"
+        } else if g.is_running {
+            "runtime_file"
+        } else if g.runtime_info.is_some() {
+            "stale_runtime_file"
+        } else {
+            "none"
+        },
         pid,
         uptime_sec,
         listener,
@@ -919,8 +974,8 @@ fn build_status_json(g: &GatheredStatus) -> StatusJson {
 mod tests {
     use super::{
         build_status_json, format_active_summary_status_block, format_service_overview_lines,
-        format_temporary_port_bindings_block, GatheredStatus, ProxyAddress, ProxyAddressInfo,
-        RuleGroup, SystemProxyStatus, TlsConfig,
+        format_temporary_port_bindings_block, gather_status_with_runtime, GatheredStatus,
+        ProxyAddress, ProxyAddressInfo, RuleGroup, SystemProxyStatus, TlsConfig,
     };
     use crate::commands::rule::{ActiveRuleItem, ActiveSummaryResponse};
     use crate::process::RuntimeInfo;
@@ -1204,6 +1259,44 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gather_status_uses_discovered_runtime_when_marker_is_missing() {
+        let server = wiremock::MockServer::start().await;
+        let port = server.address().port();
+        let mut discovered_runtime = sample_runtime();
+        discovered_runtime.port = port;
+        discovered_runtime.socks5_port = None;
+
+        let gathered = gather_status_with_runtime(None, port, move |candidate_port| {
+            (candidate_port == port).then(|| discovered_runtime.clone())
+        });
+
+        assert!(gathered.is_running);
+        assert!(gathered.runtime_discovered);
+        assert_eq!(gathered.runtime_port, port);
+        assert_eq!(
+            gathered.runtime_info.as_ref().map(|runtime| runtime.pid),
+            Some(4242)
+        );
+    }
+
+    #[test]
+    fn gather_status_preserves_stale_marker_when_discovery_misses() {
+        let mut stale_runtime = sample_runtime();
+        stale_runtime.pid = 2_147_483_647;
+        stale_runtime.port = 18888;
+
+        let gathered = gather_status_with_runtime(Some(stale_runtime), 18888, |_| None);
+
+        assert!(!gathered.is_running);
+        assert!(!gathered.runtime_discovered);
+        assert_eq!(gathered.runtime_port, 18888);
+        assert_eq!(
+            gathered.runtime_info.as_ref().map(|runtime| runtime.pid),
+            Some(2_147_483_647)
+        );
+    }
+
     #[test]
     fn build_status_json_running_serializes_schema_v1() {
         let runtime = sample_runtime();
@@ -1241,6 +1334,7 @@ mod tests {
         let gathered = GatheredStatus {
             runtime_info: Some(runtime),
             is_running: true,
+            runtime_discovered: false,
             runtime_port: 9900,
             system_proxy,
             tls_config: Ok(tls),
@@ -1261,6 +1355,7 @@ mod tests {
 
         assert_eq!(v["schema_version"], 1);
         assert_eq!(v["running"], true);
+        assert_eq!(v["runtime_source"], "runtime_file");
         assert_eq!(v["pid"], 4242);
         assert_eq!(v["listener"]["host"], "127.0.0.1");
         assert_eq!(v["listener"]["port"], 9900);
@@ -1303,6 +1398,7 @@ mod tests {
         let gathered = GatheredStatus {
             runtime_info: None,
             is_running: false,
+            runtime_discovered: false,
             runtime_port: 9900,
             system_proxy,
             tls_config: Err("server not running".to_string()),
@@ -1318,6 +1414,7 @@ mod tests {
 
         assert_eq!(v["schema_version"], 1);
         assert_eq!(v["running"], false);
+        assert_eq!(v["runtime_source"], "none");
         assert!(v["pid"].is_null());
         assert!(v["listener"].is_null());
         assert!(v["tls"].is_null());
@@ -1336,6 +1433,7 @@ mod tests {
         let gathered = GatheredStatus {
             runtime_info: Some(runtime),
             is_running: true,
+            runtime_discovered: false,
             runtime_port: 9900,
             system_proxy,
             tls_config: Err("tls api timeout".to_string()),
@@ -1362,5 +1460,55 @@ mod tests {
         assert!(sources.contains(&"rules"));
         assert!(sources.contains(&"ports"));
         assert!(sources.contains(&"active_summary"));
+    }
+
+    #[test]
+    fn build_status_json_marks_admin_api_runtime_source() {
+        let gathered = GatheredStatus {
+            runtime_info: Some(sample_runtime()),
+            is_running: true,
+            runtime_discovered: true,
+            runtime_port: 9900,
+            system_proxy: sample_system_proxy(),
+            tls_config: Err("tls api timeout".to_string()),
+            proxy_address_info: None,
+            temporary_port_bindings: Err("ports api timeout".to_string()),
+            rule_groups: Err("rules api timeout".to_string()),
+            active_summary: Some(Err("active summary timeout".to_string())),
+            data_dir: None,
+        };
+
+        let value = serde_json::to_value(build_status_json(&gathered))
+            .expect("serialize discovered status");
+
+        assert_eq!(value["running"], true);
+        assert_eq!(value["runtime_source"], "admin_api");
+        assert_eq!(value["pid"], 4242);
+        assert_eq!(value["listener"]["port"], 9900);
+    }
+
+    #[test]
+    fn build_status_json_marks_stale_runtime_file_source() {
+        let gathered = GatheredStatus {
+            runtime_info: Some(sample_runtime()),
+            is_running: false,
+            runtime_discovered: false,
+            runtime_port: 9900,
+            system_proxy: sample_system_proxy(),
+            tls_config: Err("server not running".to_string()),
+            proxy_address_info: None,
+            temporary_port_bindings: Err("server not running".to_string()),
+            rule_groups: Err("server not running".to_string()),
+            active_summary: None,
+            data_dir: None,
+        };
+
+        let value =
+            serde_json::to_value(build_status_json(&gathered)).expect("serialize stale status");
+
+        assert_eq!(value["running"], false);
+        assert_eq!(value["runtime_source"], "stale_runtime_file");
+        assert!(value["pid"].is_null());
+        assert!(value["listener"].is_null());
     }
 }

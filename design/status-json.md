@@ -17,7 +17,7 @@
 - 新增 `bifrost status --format <text|json|json-pretty>`，默认 `text`。
 - 文本路径输出与旧 `bifrost status` 逐字节一致（含既有 6 个 `format_*` 单测覆盖的字段顺序）。
 - `--format json` 输出单行 JSON；`--format json-pretty` 输出 2 空格缩进 JSON。
-- JSON 顶层字段包含：`schema_version`, `version`, `running`, `pid`, `uptime_sec`, `listener`, `system_proxy`, `tls`, `active_rules`, `data_dir`, `ports`, `errors`。
+- JSON 顶层字段包含：`schema_version`, `version`, `running`, `runtime_source`, `pid`, `uptime_sec`, `listener`, `system_proxy`, `tls`, `active_rules`, `data_dir`, `ports`, `errors`。
 - 进程未运行时仍能返回 `running=false` 的完整 JSON，不 panic 不阻塞。
 - Admin API 子调用失败时对应字段为 `null`，`errors` 记录来源。
 
@@ -66,6 +66,7 @@ Status {
   "schema_version": 1,
   "version": "0.0.x",
   "running": true,
+  "runtime_source": "runtime_file",
   "pid": 12345,
   "uptime_sec": 3600,
   "listener": {
@@ -106,7 +107,8 @@ Status {
 | --- | --- | --- |
 | `schema_version` | u32 | 固定 `1`；不兼容变更递增。 |
 | `version` | string | `env!("CARGO_PKG_VERSION")`。 |
-| `running` | bool | `runtime.json` 存在且 PID 进程存活。 |
+| `running` | bool | runtime marker 的 PID 存活，或目标端口通过 Bifrost Admin API fallback 身份校验。 |
+| `runtime_source` | string | `runtime_file`、`admin_api`、`stale_runtime_file` 或 `none`；用于区分状态证据来源。该字段是 schema v1 的向后兼容增量。 |
 | `pid` | u32 \| null | 仅 running 时填充。 |
 | `uptime_sec` | u64 \| null | `(now_ms - started_at_ms) / 1000`；缺失时 null。 |
 | `listener` | object \| null | 仅 running 时填充；含 host/port 与可选 `socks5_port`。 |
@@ -119,9 +121,10 @@ Status {
 
 ### 进程未运行
 
-- `running=false, pid=null, listener=null, tls=null, active_rules=null, ports=null`。
+- `running=false, runtime_source="none", pid=null, listener=null, tls=null, active_rules=null, ports=null`；若存在陈旧 marker，则 `runtime_source="stale_runtime_file"`。
 - `system_proxy` 仍按平台真实状态返回（不会被压成 null），因为它由 OS 拿而非 admin API。
-- `errors` 为空 —— 没有尝试调用 admin API，就不算失败。
+- `errors` 为空 —— status 可能执行只读的 runtime identity fallback probe，但 stopped
+  状态不会继续调用 TLS/rules/ports 等字段 API，identity 未命中也不是字段错误。
 
 ### 部分失败
 

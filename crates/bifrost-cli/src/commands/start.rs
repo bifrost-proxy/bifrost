@@ -43,8 +43,8 @@ use crate::config::get_bifrost_dir;
 use crate::help::print_startup_help;
 use crate::parsing::{parse_cli_rules, DynamicRulesResolver, SharedDynamicRulesResolver};
 use crate::process::{
-    find_process_on_port, is_process_running, kill_process_by_pid, read_pid, read_runtime_info,
-    remove_pid, write_runtime_info, RuntimeInfo, RuntimeStartMode,
+    discover_bifrost_runtime, find_process_on_port, is_process_running, kill_process_by_pid,
+    read_pid, read_runtime_info, remove_pid, write_runtime_info, RuntimeInfo, RuntimeStartMode,
 };
 
 const ASYNC_TRAFFIC_BUFFER_SIZE: usize = MAX_TRAFFIC_MAX_RECORDS * 3;
@@ -1436,6 +1436,18 @@ pub fn run_start(
         } else {
             remove_pid()?;
         }
+    }
+
+    // Probe the Bifrost Admin API directly instead of gating the probe on a
+    // bind-based port check. The proxy listener enables socket reuse on some
+    // platforms, so a second bind probe can appear to succeed even while the
+    // live Bifrost listener is serving requests.
+    if let Some(runtime) = discover_bifrost_runtime(port) {
+        println!(
+            "Bifrost proxy is already running (PID: {}, port {}). Reusing the live service; CLI start will not stop it.",
+            runtime.pid, runtime.port
+        );
+        return Ok(());
     }
 
     let phase_started_at = begin_startup_phase("certificate.preflight");
