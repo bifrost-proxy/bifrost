@@ -407,7 +407,7 @@ fn append_codex_default_service_tier(
         return;
     }
     generated.push("--config".to_string());
-    generated.push("service_tier=\"fast\"".to_string());
+    generated.push(format!("service_tier=\"{CODEX_FAST_SERVICE_TIER}\""));
 }
 
 fn config_override_key(value: &str) -> Option<&str> {

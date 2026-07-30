@@ -382,9 +382,14 @@ pub(super) async fn run_external_cli_agent_chat(
                 provider_agent_config.user_instructions.as_deref(),
                 settings.instructions.as_deref(),
             );
+        let latest_persisted_state = crate::im_gateway::session_state::load_session_state(
+            &input.session_key,
+            &settings.adapter,
+            Some(&effective.runner_id),
+        );
         crate::im_gateway::external_cli::apply_external_cli_session_overrides_to_run_request(
             &mut request,
-            persisted_state.as_ref(),
+            latest_persisted_state.as_ref(),
         );
         request.images = std::mem::take(&mut current_images);
         request.files = std::mem::take(&mut current_files);

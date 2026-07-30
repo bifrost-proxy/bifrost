@@ -720,7 +720,7 @@ pub(super) fn build_command_spec(request: &ExternalCliRunRequest) -> CommandSpec
             .iter()
             .any(|value| config_override_key(value) == Some("service_tier"))
     {
-        overrides.push("service_tier=\"fast\"".to_string());
+        overrides.push(format!("service_tier=\"{CODEX_FAST_SERVICE_TIER}\""));
     }
     if config.search == Some(true)
         && !config
@@ -897,20 +897,7 @@ fn config_override_key(value: &str) -> Option<&str> {
 }
 
 fn resolved_service_tier(request: &ExternalCliRunRequest) -> Option<String> {
-    request
-        .adapter_config
-        .config_overrides
-        .iter()
-        .find_map(|value| {
-            (config_override_key(value) == Some("service_tier")).then(|| {
-                value
-                    .split_once('=')
-                    .map(|(_, value)| value.trim().trim_matches(['\'', '"']).to_string())
-                    .unwrap_or_default()
-            })
-        })
-        .filter(|value| !value.is_empty())
-        .or_else(|| (request.adapter == DEFAULT_ADAPTER).then(|| "fast".to_string()))
+    resolve_external_cli_service_tier(&request.adapter, &request.adapter_config).0
 }
 
 async fn send_jsonrpc_request(
@@ -1501,6 +1488,27 @@ mod tests {
             build_command_spec(&request(TRAEX_ADAPTER)).args[..3],
             ["app-server", "--listen", "stdio://"]
         );
+    }
+
+    #[test]
+    fn codex_app_server_thread_and_turn_use_session_service_tier_override() {
+        let mut request = request(DEFAULT_ADAPTER);
+        request.adapter_config.config_overrides = vec![
+            "service_tier=\"fast\"".to_string(),
+            "service_tier=\"default\"".to_string(),
+        ];
+
+        let (start_method, start_params) = build_thread_request(&request, None);
+        let (resume_method, resume_params) =
+            build_thread_request(&request, Some("thread-fast-mode"));
+        let turn_params =
+            build_turn_start_request(&request, "thread-fast-mode", "hello".to_string(), "msg-1");
+
+        assert_eq!(start_method, "thread/start");
+        assert_eq!(resume_method, "thread/resume");
+        assert_eq!(start_params["serviceTier"], "default");
+        assert_eq!(resume_params["serviceTier"], "default");
+        assert_eq!(turn_params["serviceTier"], "default");
     }
 
     #[test]

@@ -562,6 +562,16 @@ pub(super) fn im_help_for_external_cli_runner_only_lists_supported_commands() {
 }
 
 #[test]
+pub(super) fn im_help_for_codex_runner_lists_fast_command() {
+    let help = build_im_startup_help_for_runner(&ImHelpRunnerKind::External {
+        adapter: "codex".to_string(),
+    });
+
+    assert!(help.contains("Codex Runner 命令:"));
+    assert!(help.contains("/fast [on|off|status]"));
+}
+
+#[test]
 pub(super) fn im_help_for_unsupported_external_runner_omits_unsupported_commands() {
     let help = build_im_startup_help_for_runner(&ImHelpRunnerKind::External {
         adapter: "chatgpt_web".to_string(),
@@ -572,6 +582,7 @@ pub(super) fn im_help_for_unsupported_external_runner_omits_unsupported_commands
     assert!(!help.contains("/model [模型]"));
     assert!(!help.contains("/efforts"));
     assert!(!help.contains("/effort [级别]"));
+    assert!(!help.contains("/fast [on|off|status]"));
     assert!(!help.contains("/remember"));
     assert!(!help.contains("/goal"));
     assert!(!help.contains("/g <引导内容>"));

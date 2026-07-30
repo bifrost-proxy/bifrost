@@ -1156,6 +1156,89 @@ fn codex_adapter_respects_configured_service_tier_override() {
 }
 
 #[test]
+fn codex_session_fast_override_replaces_runner_service_tier() {
+    let mut request = ExternalCliRunRequest {
+        images: Vec::new(),
+        files: Vec::new(),
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: Some("Codex".to_string()),
+        session_key: Some("schedule:one".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: DEFAULT_ADAPTER.to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("codex".to_string()),
+            config_overrides: vec![
+                "service_tier=\"flex\"".to_string(),
+                "model_reasoning_effort=\"high\"".to_string(),
+            ],
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+    let state = crate::im_gateway::session_state::ImAgentSessionState {
+        service_tier_override: Some(CODEX_STANDARD_SERVICE_TIER.to_string()),
+        service_tier_override_source: Some("session slash command".to_string()),
+        ..Default::default()
+    };
+
+    apply_external_cli_session_overrides_to_run_request(&mut request, Some(&state));
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert!(has_arg_pair(
+        &spec.args,
+        "--config",
+        "service_tier=\"default\""
+    ));
+    assert!(!has_arg_pair(
+        &spec.args,
+        "--config",
+        "service_tier=\"flex\""
+    ));
+    assert!(has_arg_pair(
+        &spec.args,
+        "--config",
+        "model_reasoning_effort=\"high\""
+    ));
+}
+
+#[test]
+fn service_tier_resolution_uses_last_runner_override_then_codex_default() {
+    let configured = ExternalCliAdapterConfig {
+        config_overrides: vec![
+            "service_tier=\"flex\"".to_string(),
+            "service_tier=\"default\"".to_string(),
+        ],
+        ..Default::default()
+    };
+
+    assert_eq!(
+        resolve_external_cli_service_tier(DEFAULT_ADAPTER, &configured),
+        (
+            Some(CODEX_STANDARD_SERVICE_TIER.to_string()),
+            Some("runner config".to_string())
+        )
+    );
+    assert_eq!(
+        resolve_external_cli_service_tier(DEFAULT_ADAPTER, &ExternalCliAdapterConfig::default()),
+        (
+            Some(CODEX_FAST_SERVICE_TIER.to_string()),
+            Some("Bifrost Codex default".to_string())
+        )
+    );
+    assert_eq!(
+        resolve_external_cli_service_tier(TRAEX_ADAPTER, &ExternalCliAdapterConfig::default()),
+        (None, None)
+    );
+}
+
+#[test]
 fn codex_adapter_maps_legacy_search_to_web_search_feature() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
@@ -3512,6 +3595,31 @@ fn external_cli_effort_slash_command_parser_handles_list_show_set_and_clear() {
         Some(Err(_))
     ));
     assert_eq!(parse_external_cli_effort_slash_command("/effortish"), None);
+}
+
+#[test]
+fn codex_fast_slash_command_parser_handles_toggle_on_off_status_and_errors() {
+    assert_eq!(
+        parse_external_cli_fast_slash_command(" /fast "),
+        Some(Ok(ExternalCliFastSlashCommand::Toggle))
+    );
+    assert_eq!(
+        parse_external_cli_fast_slash_command("/FAST ON"),
+        Some(Ok(ExternalCliFastSlashCommand::On))
+    );
+    assert_eq!(
+        parse_external_cli_fast_slash_command("/fast off"),
+        Some(Ok(ExternalCliFastSlashCommand::Off))
+    );
+    assert_eq!(
+        parse_external_cli_fast_slash_command("/fast status"),
+        Some(Ok(ExternalCliFastSlashCommand::Status))
+    );
+    assert!(matches!(
+        parse_external_cli_fast_slash_command("/fast maybe"),
+        Some(Err(_))
+    ));
+    assert_eq!(parse_external_cli_fast_slash_command("/fastish"), None);
 }
 
 #[test]

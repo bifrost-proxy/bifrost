@@ -18,6 +18,8 @@ use bifrost_core::EXTERNAL_CLI_WORKER_ENV;
 
 const DEFAULT_RUNTIME: &str = "external_cli";
 const DEFAULT_ADAPTER: &str = "codex";
+pub const CODEX_FAST_SERVICE_TIER: &str = "fast";
+pub const CODEX_STANDARD_SERVICE_TIER: &str = "default";
 pub const TRAEX_ADAPTER: &str = "traex";
 pub const DEFAULT_CODEX_RUNNER_ID: &str = "Codex";
 pub const DEFAULT_TRAEX_RUNNER_ID: &str = "Traex";
@@ -477,6 +479,14 @@ pub enum ExternalCliEffortSlashCommand {
     Show,
     Clear,
     Set(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalCliFastSlashCommand {
+    Toggle,
+    On,
+    Off,
+    Status,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -2310,6 +2320,54 @@ pub fn resolve_external_cli_status_model_config(
     resolved
 }
 
+pub fn resolve_external_cli_service_tier(
+    adapter: &str,
+    config: &ExternalCliAdapterConfig,
+) -> (Option<String>, Option<String>) {
+    if let Some(service_tier) = config.config_overrides.iter().rev().find_map(|value| {
+        let (key, raw_value) = value.split_once('=')?;
+        (key.trim() == "service_tier")
+            .then(|| parse_config_override_string(raw_value))
+            .flatten()
+    }) {
+        return (Some(service_tier), Some("runner config".to_string()));
+    }
+    if supports_external_cli_fast_slash(adapter) {
+        return (
+            Some(CODEX_FAST_SERVICE_TIER.to_string()),
+            Some("Bifrost Codex default".to_string()),
+        );
+    }
+    (None, None)
+}
+
+pub fn format_external_cli_fast_status(
+    service_tier: Option<&str>,
+    source: Option<&str>,
+    runner_id: &str,
+) -> String {
+    match service_tier
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(CODEX_FAST_SERVICE_TIER) => format!(
+            "当前 Codex Runner `{runner_id}` 使用快速模式（service tier: `fast`）。\n来源: {}",
+            source.unwrap_or("配置")
+        ),
+        Some(CODEX_STANDARD_SERVICE_TIER) => format!(
+            "当前 Codex Runner `{runner_id}` 使用标准模式（service tier: `default`）。\n来源: {}",
+            source.unwrap_or("配置")
+        ),
+        Some(service_tier) => format!(
+            "当前 Codex Runner `{runner_id}` 使用 service tier: `{service_tier}`。\n来源: {}",
+            source.unwrap_or("配置")
+        ),
+        None => format!(
+            "当前 Codex Runner `{runner_id}` 未解析到 service tier，将使用 Codex 默认模式。"
+        ),
+    }
+}
+
 pub fn apply_external_cli_session_overrides_to_model_config(
     adapter: &str,
     state: Option<&crate::im_gateway::session_state::ImAgentSessionState>,
@@ -2354,6 +2412,15 @@ pub fn apply_external_cli_session_overrides_to_run_request(
     }
     if let Some(effort) = clean_optional_string(state.reasoning_effort_override.as_deref()) {
         request.adapter_config.reasoning_effort = Some(effort);
+    }
+    if supports_external_cli_fast_slash(&request.adapter) {
+        if let Some(service_tier) = clean_optional_string(state.service_tier_override.as_deref()) {
+            set_config_override(
+                &mut request.adapter_config.config_overrides,
+                "service_tier",
+                &format!("{service_tier:?}"),
+            );
+        }
     }
 }
 
@@ -2419,6 +2486,30 @@ pub fn parse_external_cli_effort_slash_command(
     Some(Ok(ExternalCliEffortSlashCommand::Set(
         rest.to_ascii_lowercase(),
     )))
+}
+
+pub fn parse_external_cli_fast_slash_command(
+    message: &str,
+) -> Option<Result<ExternalCliFastSlashCommand, String>> {
+    let trimmed = message.trim();
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let command = parts.next()?;
+    if !command.eq_ignore_ascii_case("/fast") {
+        return None;
+    }
+    let rest = parts.next().unwrap_or("").trim();
+    let command = match rest.to_ascii_lowercase().as_str() {
+        "" => ExternalCliFastSlashCommand::Toggle,
+        "on" => ExternalCliFastSlashCommand::On,
+        "off" => ExternalCliFastSlashCommand::Off,
+        "status" => ExternalCliFastSlashCommand::Status,
+        _ => {
+            return Some(Err(
+                "用法: /fast [on|off|status]；直接发送 /fast 可切换模式。".to_string(),
+            ));
+        }
+    };
+    Some(Ok(command))
 }
 
 pub async fn load_external_cli_model_catalog(
@@ -2923,6 +3014,10 @@ pub fn supports_external_cli_model_slash(adapter: &str) -> bool {
     )
 }
 
+pub fn supports_external_cli_fast_slash(adapter: &str) -> bool {
+    adapter.trim() == DEFAULT_ADAPTER
+}
+
 fn default_claude_code_model_catalog() -> Vec<ExternalCliModelInfo> {
     const MODELS: &[(&str, &str, &str, i64)] = &[
         (
@@ -3340,6 +3435,15 @@ fn apply_config_overrides_to_model_config(
             _ => {}
         }
     }
+}
+
+fn set_config_override(overrides: &mut Vec<String>, key: &str, raw_value: &str) {
+    overrides.retain(|value| {
+        value
+            .split_once('=')
+            .is_none_or(|(existing_key, _)| existing_key.trim() != key)
+    });
+    overrides.push(format!("{key}={raw_value}"));
 }
 
 fn parse_config_override_string(raw_value: &str) -> Option<String> {
