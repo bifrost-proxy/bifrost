@@ -83,7 +83,7 @@ xcrun --sdk macosx swiftc \
   -target "${SWIFT_ARCH}-apple-macos14.0" \
   -parse-as-library \
   -O \
-  -framework AppKit \
+  -framework WidgetKit \
   "${RELOADER_SOURCE}" \
   -o "${RELOADER_PATH}"
 

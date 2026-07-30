@@ -1342,17 +1342,6 @@ fn cli_arg_to_bifrost_file_url(arg: &str, cwd: Option<&Path>) -> Option<tauri::U
 
 fn handle_open_urls(app: &AppHandle, urls: Vec<tauri::Url>) {
     for url in urls {
-        if widget_reload::is_widget_reload_url(&url) {
-            if let Err(error) = widget_reload::reload_status_widget() {
-                if let Some(state) = app.try_state::<BackendState>() {
-                    append_desktop_bootstrap_log(
-                        &state.data_dir,
-                        format!("failed to reload macOS status widget: {error}"),
-                    );
-                }
-            }
-            continue;
-        }
         match parse_open_url(&url) {
             Ok(Some(request)) => dispatch_open_request(app, request),
             Ok(None) => {}

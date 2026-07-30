@@ -2,17 +2,8 @@
 use libloading::{Library, Symbol};
 use std::path::{Path, PathBuf};
 
-const WIDGET_RELOAD_HOST: &str = "widget-reload";
 #[cfg(target_os = "macos")]
 const WIDGET_BRIDGE_LIBRARY: &str = "libBifrostWidgetBridge.dylib";
-
-pub fn is_widget_reload_url(url: &tauri::Url) -> bool {
-    url.scheme() == "bifrost"
-        && url
-            .host_str()
-            .is_some_and(|host| host.eq_ignore_ascii_case(WIDGET_RELOAD_HOST))
-        && url.path().trim_matches('/').is_empty()
-}
 
 #[cfg(target_os = "macos")]
 pub fn reload_status_widget() -> Result<(), String> {
@@ -79,19 +70,6 @@ fn installed_widget_bridge_path(executable: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn recognizes_only_the_internal_widget_reload_url() {
-        let reload = "bifrost://widget-reload".parse::<tauri::Url>().unwrap();
-        let settings = "bifrost://settings".parse::<tauri::Url>().unwrap();
-        let nested = "bifrost://widget-reload/unexpected"
-            .parse::<tauri::Url>()
-            .unwrap();
-
-        assert!(is_widget_reload_url(&reload));
-        assert!(!is_widget_reload_url(&settings));
-        assert!(!is_widget_reload_url(&nested));
-    }
 
     #[cfg(target_os = "macos")]
     #[test]

@@ -63,7 +63,14 @@ assert_contains "${SNAPSHOT_SOURCE}" "bifrostWidgetReloadInterval: TimeInterval 
 assert_contains "${SNAPSHOT_SOURCE}" "bifrostWidgetStaleInterval: TimeInterval = 30 * 60"
 assert_contains "${SNAPSHOT_SOURCE}" 'bifrostWidgetTimelineDiagnosticFileName = "timeline.log"'
 assert_contains "${SWIFT_SOURCE}" 'WidgetTimelineDiagnostics.record(event: "getTimeline"'
-assert_contains "${RELOADER_SOURCE}" 'let bifrostWidgetReloadURL = URL(string: "bifrost://widget-reload")!'
+assert_contains "${RELOADER_SOURCE}" "import WidgetKit"
+assert_contains "${RELOADER_SOURCE}" 'WidgetCenter.shared.reloadTimelines(ofKind: "com.bifrost.desktop.status")'
+if rg -q --fixed-strings -- "NSWorkspace.shared.open" "${RELOADER_SOURCE}"; then
+  fail "${RELOADER_SOURCE} must reload WidgetKit directly without activating Bifrost through LaunchServices"
+fi
+if rg -q --fixed-strings -- "bifrost://widget-reload" "${RELOADER_SOURCE}"; then
+  fail "${RELOADER_SOURCE} must not use the focus-stealing widget reload URL scheme"
+fi
 assert_contains "${BRIDGE_SOURCE}" '@_cdecl("bifrost_reload_status_widget")'
 assert_contains "${BRIDGE_SOURCE}" 'WidgetCenter.shared.reloadTimelines(ofKind: "com.bifrost.desktop.status")'
 assert_contains "${REPO_ROOT}/desktop/src-tauri/src/main.rs" \

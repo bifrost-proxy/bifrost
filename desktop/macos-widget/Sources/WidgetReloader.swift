@@ -1,16 +1,14 @@
-import AppKit
 import Foundation
-
-let bifrostWidgetReloadURL = URL(string: "bifrost://widget-reload")!
+import WidgetKit
 
 @main
 enum BifrostWidgetReloader {
     static func main() {
-        if !NSWorkspace.shared.open(bifrostWidgetReloadURL) {
-            FileHandle.standardError.write(
-                Data("failed to dispatch Bifrost widget reload URL\n".utf8)
-            )
-            Foundation.exit(EXIT_FAILURE)
-        }
+        WidgetCenter.shared.reloadTimelines(ofKind: "com.bifrost.desktop.status")
+
+        // Give WidgetCenter's XPC request a brief opportunity to leave this
+        // short-lived helper before the process exits. This does not activate
+        // Bifrost or open a URL through LaunchServices.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.25))
     }
 }
