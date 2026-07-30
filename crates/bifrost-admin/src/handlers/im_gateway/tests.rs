@@ -959,6 +959,246 @@ pub(super) async fn busy_queue_command_preserves_event_files() {
     assert_eq!(queue[0].files[0].name.as_deref(), Some("queued.md"));
 }
 
+#[tokio::test]
+pub(super) async fn codex_fast_commands_cover_busy_idle_modes_and_rejections() {
+    async fn invoke_busy_fast_command(
+        service: &ImGatewayService,
+        client: &ImProviderClient,
+        provider: &ImProviderConfig,
+        agent_config: &crate::im_gateway::agent::ImAgentConfig,
+        session_key: &str,
+        command: &str,
+    ) {
+        let event = ImEvent {
+            event_id: format!("evt-{}", uuid_short()),
+            provider_id: provider.id.clone(),
+            provider_type: provider.provider_type,
+            event_type: "message.receive".to_string(),
+            source: crate::im_gateway::types::ImEventSource {
+                chat_id: Some("fast-chat".to_string()),
+                user_id: Some("fast-user".to_string()),
+                message_id: Some(format!("om-{}", uuid_short())),
+                ..Default::default()
+            },
+            message: Some(crate::im_gateway::types::ImEventMessage {
+                text: command.to_string(),
+                ..Default::default()
+            }),
+            received_at: now_ms(),
+            raw_digest: None,
+        };
+        handle_busy_message(
+            command,
+            session_key,
+            BusyMessageContext {
+                queue_manager: &service.queue_manager,
+                client,
+                provider,
+                event: &event,
+                message_log_store: &service.message_log_store,
+                agent_session_manager: &service.agent_session_manager,
+                progress_registry: &service.progress_registry,
+                external_cli_config_store: &service.external_cli_config_store,
+                agent_config,
+                group_context_store: &service.group_context_store,
+                group_turn_id: None,
+                default_mode: BusyMessageDefaultMode::Queue,
+                status_context: Default::default(),
+                default_work_dir: None,
+            },
+        )
+        .await;
+    }
+
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let service = ImGatewayService::new(temp_dir.path());
+    let mut provider = test_provider();
+    provider.id = "weixin-fast".to_string();
+    provider.provider_type = ImProviderType::Weixin;
+    provider.secret_ref = None;
+    let client = ImProviderClient::Weixin(Arc::new(WeixinProvider::new()));
+    let codex_agent_config = service.agent_config_store.load();
+    let session_key = build_session_key(&provider.id, Some("fast-user"));
+
+    invoke_busy_fast_command(
+        &service,
+        &client,
+        &provider,
+        &codex_agent_config,
+        &session_key,
+        "/fast status",
+    )
+    .await;
+    invoke_busy_fast_command(
+        &service,
+        &client,
+        &provider,
+        &codex_agent_config,
+        &session_key,
+        "/fast off",
+    )
+    .await;
+    let state =
+        crate::im_gateway::session_state::load_session_state(&session_key, "codex", Some("Codex"))
+            .expect("fast off should persist session state");
+    assert_eq!(
+        state.service_tier_override.as_deref(),
+        Some(crate::im_gateway::external_cli::CODEX_STANDARD_SERVICE_TIER)
+    );
+
+    invoke_busy_fast_command(
+        &service,
+        &client,
+        &provider,
+        &codex_agent_config,
+        &session_key,
+        "/fast",
+    )
+    .await;
+    let state =
+        crate::im_gateway::session_state::load_session_state(&session_key, "codex", Some("Codex"))
+            .expect("fast toggle should persist session state");
+    assert_eq!(
+        state.service_tier_override.as_deref(),
+        Some(crate::im_gateway::external_cli::CODEX_FAST_SERVICE_TIER)
+    );
+
+    invoke_busy_fast_command(
+        &service,
+        &client,
+        &provider,
+        &codex_agent_config,
+        &session_key,
+        "/fast on",
+    )
+    .await;
+    invoke_busy_fast_command(
+        &service,
+        &client,
+        &provider,
+        &codex_agent_config,
+        &session_key,
+        "/fast",
+    )
+    .await;
+    let state =
+        crate::im_gateway::session_state::load_session_state(&session_key, "codex", Some("Codex"))
+            .expect("second fast toggle should persist session state");
+    assert_eq!(
+        state.service_tier_override.as_deref(),
+        Some(crate::im_gateway::external_cli::CODEX_STANDARD_SERVICE_TIER)
+    );
+    invoke_busy_fast_command(
+        &service,
+        &client,
+        &provider,
+        &codex_agent_config,
+        &session_key,
+        "/fast unsupported",
+    )
+    .await;
+
+    crate::im_gateway::session_state::upsert_session_state(
+        &session_key,
+        "codex",
+        Some("Codex"),
+        |state| {
+            state.service_tier_override = Some("fast".to_string());
+            state.service_tier_override_source = None;
+        },
+    )
+    .expect("seed source-free service tier");
+    invoke_busy_fast_command(
+        &service,
+        &client,
+        &provider,
+        &codex_agent_config,
+        &session_key,
+        "/fast status",
+    )
+    .await;
+
+    let no_runner_config = crate::im_gateway::agent::ImAgentConfig {
+        runner: None,
+        ..codex_agent_config.clone()
+    };
+    invoke_busy_fast_command(
+        &service,
+        &client,
+        &provider,
+        &no_runner_config,
+        "no-runner-session",
+        "/fast on",
+    )
+    .await;
+
+    let traex_config = crate::im_gateway::agent::ImAgentConfig {
+        runner: Some(bifrost_agent::AgentRunnerMode::Custom("Traex".to_string())),
+        ..codex_agent_config.clone()
+    };
+    invoke_busy_fast_command(
+        &service,
+        &client,
+        &provider,
+        &traex_config,
+        "traex-session",
+        "/fast on",
+    )
+    .await;
+
+    let idle_event = ImEvent {
+        event_id: "evt-fast-idle".to_string(),
+        provider_id: provider.id.clone(),
+        provider_type: provider.provider_type,
+        event_type: "message.receive".to_string(),
+        source: crate::im_gateway::types::ImEventSource {
+            chat_id: Some("fast-chat".to_string()),
+            user_id: Some("fast-user".to_string()),
+            message_id: Some("om-fast-idle".to_string()),
+            ..Default::default()
+        },
+        message: None,
+        received_at: now_ms(),
+        raw_digest: None,
+    };
+    assert!(
+        handle_idle_im_command(
+            "/fast off",
+            "idle-fast-session",
+            &codex_agent_config,
+            IdleImCommandContext {
+                client: &client,
+                provider: &provider,
+                provider_store: &service.provider_store,
+                group_context_store: &service.group_context_store,
+                external_cli_config_store: &service.external_cli_config_store,
+                event: &idle_event,
+                message_log_store: &service.message_log_store,
+                agent_session_manager: &service.agent_session_manager,
+            },
+        )
+        .await
+    );
+
+    let replies = service.message_log_store.list();
+    assert!(replies.iter().any(|log| {
+        log.content
+            .as_deref()
+            .is_some_and(|content| content.contains("使用快速模式"))
+    }));
+    assert!(replies.iter().any(|log| {
+        log.content
+            .as_deref()
+            .is_some_and(|content| content.contains("用法: /fast"))
+    }));
+    assert!(replies.iter().any(|log| {
+        log.content
+            .as_deref()
+            .is_some_and(|content| content.contains("仅支持 Codex Runner"))
+    }));
+}
+
 #[test]
 pub(super) fn agent_chat_message_text_includes_resolved_reply_context_and_preserves_commands() {
     let temp = tempfile::tempdir().expect("temp message store");
