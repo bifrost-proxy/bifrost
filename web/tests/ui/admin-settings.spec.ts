@@ -2103,9 +2103,13 @@ test("Settings Agent 三层 instructions 使用大窗口编辑", async ({ page }
   await expect(page.getByTestId("settings-agent-base-instructions-button")).toBeVisible();
   await expect(page.getByTestId("settings-agent-developer-instructions-button")).toBeVisible();
   await expect(page.getByTestId("settings-agent-user-instructions-button")).toBeVisible();
+  await expect(page.getByText(/Sent only with the first message of a new external-runner session/))
+    .toBeVisible();
+  await expect(page.getByText(/Sent with every external-runner message after developer instructions/))
+    .toBeVisible();
   await expect(page.locator("body")).not.toContainText("Default Base Instructions (read-only)");
   await expect(page.getByTestId("settings-agent-base-instructions-preview")).toContainText(
-    "Default base prompt",
+    "Optional instructions for external runners",
   );
   await expect(
     page.getByTestId("settings-agent-base-instructions").locator("textarea"),
@@ -2114,21 +2118,23 @@ test("Settings Agent 三层 instructions 使用大窗口编辑", async ({ page }
   await page.getByTestId("settings-agent-base-instructions-button").click();
   const editor = page.getByRole("dialog", { name: "Base Instructions / System Prompt" });
   await expect(editor).toBeVisible();
-  await editor.getByTestId("settings-agent-base-instructions-copy-placeholder").click();
+  await expect(editor.getByTestId("settings-agent-base-instructions-copy-placeholder")).toHaveCount(
+    0,
+  );
   await expect(editor.getByTestId("settings-agent-base-instructions-modal-textarea")).toHaveValue(
-    "Default base prompt\nwith multiple lines",
+    "",
   );
   await editor.getByTestId("settings-agent-base-instructions-modal-textarea").fill(
-    "Default base prompt\nwith multiple lines\nEdited base prompt from large modal",
+    "Explicit base prompt from large modal",
   );
   await editor.getByRole("button", { name: "OK" }).click();
 
   await expect(page.getByTestId("settings-agent-base-instructions-preview")).toContainText(
-    "Default base prompt",
+    "Explicit base prompt",
   );
   await expect
     .poll(() => patchPayload?.base_instructions)
-    .toBe("Default base prompt\nwith multiple lines\nEdited base prompt from large modal");
+    .toBe("Explicit base prompt from large modal");
 });
 
 test("Agent Runners 新增弹窗只展示当前支持的 Adapter", async ({ page }) => {
@@ -2182,6 +2188,10 @@ test("Agent Runners 新增弹窗只展示当前支持的 Adapter", async ({ page
   await expect(adapterDropdown).toContainText("ChatGPT Web");
   await expect(adapterDropdown).not.toContainText("Custom");
   await expect(adapterDropdown).not.toContainText("Mock");
+  await page.keyboard.press("Escape");
+  await expect(dialog.getByText("Inject Bifrost Tools")).toHaveCount(0);
+  await expect(dialog.getByText(/When empty, Bifrost adds nothing before the channel message/))
+    .toBeVisible();
 });
 
 test("AI Agent Chat section 展示聊天工作台并支持真实流式发送", async ({ page }) => {

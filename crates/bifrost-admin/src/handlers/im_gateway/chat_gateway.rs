@@ -563,6 +563,11 @@ pub(super) async fn handle_chat_gateway(
                 }
                 apply_provider_work_dir_to_external_cli_request(_service, &mut request);
                 apply_persisted_external_cli_state(&mut request, &effective.runner_id);
+                apply_agent_instructions_to_external_cli_request(
+                    _service,
+                    &mut request,
+                    &effective.runner_id,
+                );
                 if let Some(response) =
                     maybe_external_cli_slash_response(&request, &effective, true).await
                 {
@@ -904,6 +909,11 @@ pub(super) async fn handle_chat_gateway(
                 }
                 apply_provider_work_dir_to_external_cli_request(_service, &mut request);
                 apply_persisted_external_cli_state(&mut request, &effective.runner_id);
+                apply_agent_instructions_to_external_cli_request(
+                    _service,
+                    &mut request,
+                    &effective.runner_id,
+                );
                 if let Some(response) =
                     maybe_external_cli_slash_response(&request, &effective, false).await
                 {
@@ -1212,6 +1222,7 @@ async fn runner_call_stream_response(
     request.work_dir = body.work_dir.clone();
     apply_provider_work_dir_to_external_cli_request(service, &mut request);
     apply_persisted_external_cli_state(&mut request, &effective.runner_id);
+    apply_agent_instructions_to_external_cli_request(service, &mut request, &effective.runner_id);
     prepare_external_cli_session_attachment_params(&mut request, &effective.runner_id);
 
     let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(
@@ -3159,6 +3170,42 @@ fn apply_provider_work_dir_to_external_cli_request(
     }
 }
 
+fn apply_agent_instructions_to_external_cli_request(
+    service: &ImGatewayService,
+    request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+) {
+    let base_agent_config = service.agent_config_store.load();
+    let agent_config = request
+        .provider_id
+        .as_deref()
+        .and_then(|provider_id| service.provider_store.get(provider_id))
+        .map(|provider| effective_agent_config_for_provider(&base_agent_config, &provider))
+        .unwrap_or(base_agent_config);
+    let include_base_instructions = request
+        .session_key
+        .as_deref()
+        .and_then(|session_key| {
+            crate::im_gateway::session_state::load_session_state(
+                session_key,
+                &request.adapter,
+                Some(runner_id),
+            )
+        })
+        .is_none_or(|state| {
+            state.last_user_message.is_none()
+                && !state.messages.iter().any(|message| message.role == "user")
+        });
+    request.instructions =
+        crate::im_gateway::external_cli::compose_external_cli_message_instructions(
+            include_base_instructions,
+            agent_config.base_instructions.as_deref(),
+            agent_config.developer_instructions.as_deref(),
+            agent_config.user_instructions.as_deref(),
+            request.instructions.as_deref(),
+        );
+}
+
 fn chatgpt_web_settings(
     service: &ImGatewayService,
     runner_id: Option<&str>,
@@ -3644,6 +3691,39 @@ mod tests {
             inject_bifrost_tools: false,
             skill_paths: Vec::new(),
         }
+    }
+
+    #[test]
+    fn chat_gateway_agent_instructions_include_base_only_on_first_message() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let service = ImGatewayService::new(temp_dir.path());
+        let mut agent_config = service.agent_config_store.load();
+        agent_config.base_instructions = Some("base".to_string());
+        agent_config.developer_instructions = Some("developer".to_string());
+        agent_config.user_instructions = Some("user".to_string());
+        service
+            .agent_config_store
+            .save(&agent_config)
+            .expect("save agent config");
+
+        let mut first = timeline_test_request("web-instruction-lifecycle");
+        first.instructions = Some("runner".to_string());
+        apply_agent_instructions_to_external_cli_request(&service, &mut first, "codex");
+        assert_eq!(
+            first.instructions.as_deref(),
+            Some("base\n\ndeveloper\n\nuser\n\nrunner")
+        );
+        remember_external_cli_started_state(&first, "codex");
+
+        let mut second = timeline_test_request("web-instruction-lifecycle");
+        second.message = "second".to_string();
+        second.instructions = Some("runner".to_string());
+        apply_agent_instructions_to_external_cli_request(&service, &mut second, "codex");
+        assert_eq!(
+            second.instructions.as_deref(),
+            Some("developer\n\nuser\n\nrunner")
+        );
     }
 
     #[test]

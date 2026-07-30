@@ -374,6 +374,14 @@ pub(super) async fn run_external_cli_agent_chat(
             Some(input.session_key.clone()),
             &settings,
         );
+        request.instructions =
+            crate::im_gateway::external_cli::compose_external_cli_message_instructions(
+                session.user_turn_count() == 0,
+                provider_agent_config.base_instructions.as_deref(),
+                provider_agent_config.developer_instructions.as_deref(),
+                provider_agent_config.user_instructions.as_deref(),
+                settings.instructions.as_deref(),
+            );
         crate::im_gateway::external_cli::apply_external_cli_session_overrides_to_run_request(
             &mut request,
             persisted_state.as_ref(),

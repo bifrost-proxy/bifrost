@@ -1559,8 +1559,48 @@
 3. mock 进程实际 PATH 包含临时 `HOME/.local/bin`，版本探测返回 `traex 0.0.0-desktop-path-mock`，最终响应为 `BIFROST_DESKTOP_PATH_TRAEX_OK`。
 4. 测试结束后临时 Service、mock 进程和临时目录全部清理，用户现有 CLI-owned 或 Desktop-owned Service 均不受影响。
 
+### TC-IEC-69: 空指令原样透传与 Base 首条生命周期
+
+前置条件：
+
+1. 当前源码已构建为 `target/debug/bifrost`。
+2. 测试只使用临时数据目录、动态端口、mock Feishu Provider 和捕获 stdin 的 mock Runner，不停止或替换用户当前 Bifrost Service。
+
+操作步骤：
+
+1. 执行真实隔离链路：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_im_gateway_prompt_passthrough.sh
+   ```
+2. 脚本先把 Agent Base / Developer / User Instructions 与 Runner Instructions 全部保存为空，同时故意保留旧配置 `injectBifrostTools:true`，再通过 mock IM inbound 发送 `原样透传消息`。
+3. 脚本随后配置 `BASE_INSTRUCTION`、`DEVELOPER_INSTRUCTION`、`USER_INSTRUCTION`、`RUNNER_INSTRUCTION`，发送 `/clear` 后连续发送 `首条分层消息` 与 `后续分层消息`。
+4. 检查 mock Runner 捕获的三条 stdin JSONL，逐字比较 prompt。
+5. 执行 focused 单元回归：
+   ```bash
+   cargo test -p bifrost-admin compose_message_instructions
+   cargo test -p bifrost-admin build_prompt_does_not_inject_legacy_bifrost_tool_context
+   cargo test -p bifrost-admin chat_gateway_agent_instructions_include_base_only_on_first_message
+   ```
+6. 执行 Settings focused UI 回归：
+   ```bash
+   pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts \
+     -g "Settings Agent 三层 instructions|Agent Runners 新增弹窗" \
+     --reporter=line
+   ```
+
+预期结果：
+
+1. 隔离脚本输出 `[im-prompt-passthrough] PASS`，并清理临时 Service 与数据目录。
+2. 第一条 stdin 精确等于 `原样透传消息\n`，不存在 `Bifrost Tool Context` 或其他 Bifrost 自动前缀。
+3. `/clear` 后首条 stdin 精确按 `Base -> Developer -> User -> Runner -> 原消息` 排列。
+4. 同会话第二条 stdin 不再包含 Base，但 Developer / User / Runner 仍按消息传入。
+5. Settings 不再展示 `Inject Bifrost Tools`，并明确说明 Base 只用于新会话首条、其他三层是消息级；空值不增加内容。
+6. focused Rust 与 Playwright 回归全部通过。
+
 ## 最近执行记录
 
+- 2026-07-30：PASS — 新增并立即执行 TC-IEC-69。`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_prompt_passthrough.sh` 输出 `[im-prompt-passthrough] PASS`；mock IM + mock Runner 捕获的三条 stdin 分别精确为原始消息、首条 `Base -> Developer -> User -> Runner -> 消息`、后续 `Developer -> User -> Runner -> 消息`，遗留 `injectBifrostTools:true` 未生成 `Bifrost Tool Context`。三组 focused Rust 回归分别通过 `2/2`、`1/1`、`1/1`。首次 Settings Playwright 暴露旧用例仍把只读 `default_base_instructions` 当成已配置 Base，已按“空值不注入”语义修正为显式填写后才保存；完整重跑 `Settings Agent 三层 instructions|Agent Runners 新增弹窗` 通过 `2/2`，确认遗留开关不再显示且生命周期说明可见。
 - 2026-07-25：PASS — 新增并立即执行 TC-IEC-68。先构建当前源码二进制，再执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_desktop_path_traex.sh`，输出 `[im-gateway-desktop-path-traex] PASS`；隔离 Service 以 `PATH=/usr/bin:/bin`、临时 HOME 和动态端口启动，Runner 配置未设置 executable/PATH，仍从临时 `HOME/.local/bin/traex` 启动 `app-server --listen stdio://`，run snapshot executable 为裸 `traex`，版本为 `traex 0.0.0-desktop-path-mock`，最终响应为 `BIFROST_DESKTOP_PATH_TRAEX_OK`。补充真实 Traex 用例时，隔离 Service 成功创建 `traex app-server --listen stdio://` 子进程 PID `26233`，确认原 `No such file or directory` 不再出现；外部模型在 240 秒内未完成而由 Python HTTP 客户端超时，按外部模型延迟记录，不视为 PATH 回归失败。测试未停止或替换用户 9900 Service。
 - 2026-07-24：PASS — 新增并立即执行 TC-IEC-67。绑定解析 focused 单测 `2/2 + 1/1` 通过，主动卡片、完整 Web→IM bridge、Web Guide 降级排队后刷新绑定卡片三项单测各 `1/1` 通过；mock Feishu 记录首个消息路径为 `/open-apis/im/v1/messages`、`receive_id=ou_owner`，没有 reply message 路径，最终 CardKit update 包含 `final from WebUI`，Guide 降级时卡片包含 `WebUI 引导无法实时注入` 和原引导摘要。重新构建当前源码二进制后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_external_runner_live_guide.sh`，输出 `[external-runner-live-guide] PASS`；新增 `codex-cross-channel` 场景由 Web stream 启动 `cross-channel-provider:cross-channel-owner`，随后 mock IM inbound 的 `guide-from-im-to-web` 在同一 active turn 被 steer，Web stream 最终返回 `GUIDED_codex-cross-channel`。未向真实生产群或用户发送测试消息。
 - 2026-07-24：PASS — 复跑 TC-IEC-48 与同脚本图片/runner-call 回归。先执行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 构建当前源码二进制，再执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_external_runner_image_input.sh`；脚本使用隔离临时数据目录和 mock external runner 注入纯文件消息，debug inbound 接受空正文文件消息并生成 run `1784881047460-3b7fa88e-5eb4-456d-a636-93a1a2c72a87`。验证 `prompt.md` 和 runner stdin 均包含 `## Attached Files` 及本地文件路径，附件落盘为 `.bifrost-e2e-runner-image.Phu6KP/agent/sessions/by-key/attachments/session-7c3700696145216f4803a299a940daf92873f6b8ad58099d11991c3169bf44d9/1784881047460-3b7fa88e-5eb4-456d-a636-93a1a2c72a87/files/1-report_final.md`，文件内容与注入的 markdown base64 一致，metadata 记录 `attachments.fileCount=1`、`attachments.imageCount=0`、`attachments.count=1` 和 `attachments.files[0]` 的 path/mimeType/sizeBytes/name。

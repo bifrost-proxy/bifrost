@@ -1751,7 +1751,8 @@ function ConnectionsPanel({
             name={["agent_config", "base_instructions"]}
             extra={
               <Text type="secondary">
-                Inherits the global base instructions when empty. Enter text to override for this provider.
+                Inherits the global value when empty. Sent only with the first message of a new
+                external-runner session.
               </Text>
             }
           >
@@ -1766,7 +1767,8 @@ function ConnectionsPanel({
             name={["agent_config", "developer_instructions"]}
             extra={
               <Text type="secondary">
-                Inherits: {inheritedDeveloperInstructions}. Enter text to override for this provider.
+                Inherits: {inheritedDeveloperInstructions}. Sent with every external-runner
+                message.
               </Text>
             }
           >
@@ -1780,7 +1782,7 @@ function ConnectionsPanel({
             name={["agent_config", "user_instructions"]}
             extra={
               <Text type="secondary">
-                Inherits: {inheritedUserInstructions}. Enter text to override for this provider.
+                Inherits: {inheritedUserInstructions}. Sent with every external-runner message.
               </Text>
             }
           >

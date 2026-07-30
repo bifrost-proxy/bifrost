@@ -26,7 +26,8 @@ pub const DEFAULT_CLAUDE_CODE_RUNNER_ID: &str = "Claude-Code";
 const LEGACY_CLAUDE_CODE_RUNNER_ID: &str = "Claude Code";
 const LEGACY_TRAEX_RUNNER_ALIAS: &str = concat!("tre", "ex");
 const CONFIG_FILENAME: &str = "im_gateway_external_cli_agent.json";
-const CONFIG_VERSION: u32 = 1;
+const CONFIG_VERSION: u32 = 2;
+const WORKER_PROTOCOL_VERSION: u32 = 1;
 const MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE: usize = 6;
 const MAX_PENDING_EXTERNAL_GUIDES: usize = 32;
 const WORKER_STOP_GRACE_MS: u64 = 1500;
@@ -179,7 +180,7 @@ async fn run_worker_stdio_async() -> Result<(), String> {
     else {
         return Err("external runner worker first command must be run".to_string());
     };
-    if request.protocol_version != CONFIG_VERSION {
+    if request.protocol_version != WORKER_PROTOCOL_VERSION {
         return Err(format!(
             "unsupported external runner worker protocol version {}",
             request.protocol_version
@@ -542,7 +543,7 @@ pub struct ExternalCliAgentSettings {
     pub instructions: Option<String>,
     #[serde(default)]
     pub adapter_config: ExternalCliAdapterConfig,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub inject_bifrost_tools: bool,
     #[serde(default)]
     pub skill_paths: Vec<String>,
@@ -557,7 +558,7 @@ impl Default for ExternalCliAgentSettings {
             adapter: DEFAULT_ADAPTER.to_string(),
             instructions: None,
             adapter_config: ExternalCliAdapterConfig::default(),
-            inject_bifrost_tools: true,
+            inject_bifrost_tools: false,
             skill_paths: Vec::new(),
             delivery_mode: ExternalCliDeliveryMode::FinalReply,
         }
@@ -992,7 +993,7 @@ impl ExternalCliWorkerClient {
             &mut stdin,
             &ExternalCliWorkerCommand::Run {
                 request: Box::new(ExternalCliWorkerRunRequest {
-                    protocol_version: CONFIG_VERSION,
+                    protocol_version: WORKER_PROTOCOL_VERSION,
                     runs_root: runs_root.display().to_string(),
                     request,
                 }),
@@ -1560,7 +1561,7 @@ pub fn run_request_from_settings(
         instructions: settings.instructions.clone(),
         adapter_config: settings.adapter_config.clone(),
         allow_work_dirs: Vec::new(),
-        inject_bifrost_tools: settings.inject_bifrost_tools,
+        inject_bifrost_tools: false,
         skill_paths: settings.skill_paths.clone(),
     }
 }
@@ -1578,16 +1579,37 @@ pub fn merge_run_request_with_settings(
     if request.adapter_config == ExternalCliAdapterConfig::default() {
         request.adapter_config = settings.adapter_config.clone();
     }
-    // NOTE: inject_bifrost_tools defaults to false via serde, so we can't distinguish
-    // "not provided" from "explicitly set to false". Runner settings always win when
-    // the request value is false. This is acceptable: runner config is authoritative.
-    if !request.inject_bifrost_tools {
-        request.inject_bifrost_tools = settings.inject_bifrost_tools;
-    }
+    // Kept in the wire shape for backward compatibility. Bifrost no longer
+    // synthesizes prompt text from this legacy flag.
+    request.inject_bifrost_tools = false;
     if request.skill_paths.is_empty() {
         request.skill_paths = settings.skill_paths.clone();
     }
     request
+}
+
+pub fn compose_external_cli_message_instructions(
+    include_base_instructions: bool,
+    base_instructions: Option<&str>,
+    developer_instructions: Option<&str>,
+    user_instructions: Option<&str>,
+    runner_instructions: Option<&str>,
+) -> Option<String> {
+    let instructions = [
+        include_base_instructions
+            .then_some(base_instructions)
+            .flatten(),
+        developer_instructions,
+        user_instructions,
+        runner_instructions,
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .collect::<Vec<_>>();
+
+    (!instructions.is_empty()).then(|| instructions.join("\n\n"))
 }
 
 #[derive(Clone, Debug)]
@@ -1767,15 +1789,6 @@ async fn build_prompt(
             prompt.push_str(instructions.trim());
             prompt.push_str("\n\n");
         }
-    }
-    if request.inject_bifrost_tools && request.adapter != crate::im_gateway::chatgpt_web::ADAPTER_ID
-    {
-        prompt.push_str("## Bifrost Tool Context\n\n");
-        prompt.push_str(
-            "- You are being invoked by Bifrost IM Gateway through an external CLI adapter.\n",
-        );
-        prompt.push_str("- Prefer the local `bifrost` CLI for Bifrost proxy, traffic, rule, IM, and remote-invoke operations when the requested task needs those capabilities.\n");
-        prompt.push_str("- Keep filesystem work inside the configured working directory and allowed extra directories.\n\n");
     }
     for skill_path in &request.skill_paths {
         let path = Path::new(skill_path);
@@ -5606,6 +5619,9 @@ fn normalized_gateway_config(mut config: ExternalCliGatewayConfig) -> ExternalCl
     migrate_legacy_traex_runner_id(&mut config);
     migrate_legacy_claude_code_runner_id(&mut config);
     ensure_default_external_cli_runners(&mut config.runners);
+    for settings in config.runners.values_mut() {
+        settings.inject_bifrost_tools = false;
+    }
     if !config.runners.contains_key(&config.default_runner_id) {
         let canonical_default_runner_id =
             canonical_external_cli_runner_id(&config, &config.default_runner_id);
@@ -5825,10 +5841,6 @@ fn default_operation() -> String {
 
 fn default_runner_id() -> String {
     DEFAULT_CODEX_RUNNER_ID.to_string()
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[cfg(test)]
