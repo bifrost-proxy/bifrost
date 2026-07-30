@@ -93,19 +93,37 @@ fn handle_online_value_command(
     Ok(())
 }
 
-pub fn handle_value_command(action: ValueCommands) -> bifrost_core::Result<()> {
-    let mutates = matches!(
-        &action,
+fn routes_value_mutation_to_api(action: &ValueCommands) -> bool {
+    matches!(
+        action,
         ValueCommands::Add { .. }
             | ValueCommands::Update { .. }
             | ValueCommands::Delete { .. }
             | ValueCommands::Import { .. }
-    );
-    if mutates {
-        if let Some(client) = super::config::runtime::live_config_api_client()? {
-            return handle_online_value_command(action, &client);
+    )
+}
+
+fn route_online_value_command(
+    action: ValueCommands,
+    client: Option<&ConfigApiClient>,
+) -> bifrost_core::Result<Option<ValueCommands>> {
+    if routes_value_mutation_to_api(&action) {
+        if let Some(client) = client {
+            handle_online_value_command(action, client)?;
+            return Ok(None);
         }
     }
+    Ok(Some(action))
+}
+
+pub fn handle_value_command(action: ValueCommands) -> bifrost_core::Result<()> {
+    let client = routes_value_mutation_to_api(&action)
+        .then(super::config::runtime::live_config_api_client)
+        .transpose()?
+        .flatten();
+    let Some(action) = route_online_value_command(action, client.as_ref())? else {
+        return Ok(());
+    };
 
     let values_dir = bifrost_storage::data_dir().join("values");
     let mut storage = ValuesStorage::with_dir(values_dir.clone())?;
@@ -176,6 +194,132 @@ pub fn handle_value_command(action: ValueCommands) -> bifrost_core::Result<()> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn client_for(server: &MockServer) -> ConfigApiClient {
+        ConfigApiClient::new("127.0.0.1", server.address().port())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn online_value_commands_use_admin_api_for_all_mutations() {
+        let server = MockServer::start().await;
+        let client = client_for(&server);
+
+        Mock::given(method("PUT"))
+            .and(path("/_bifrost/api/values"))
+            .and(body_json(serde_json::json!({"values": {"CLI_ADD": "one"}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        handle_online_value_command(
+            ValueCommands::Add {
+                name: "CLI_ADD".to_string(),
+                value: "one".to_string(),
+            },
+            &client,
+        )
+        .unwrap();
+
+        Mock::given(method("PUT"))
+            .and(path("/_bifrost/api/values/CLI_UPDATE"))
+            .and(body_json(serde_json::json!({"value": "two"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        handle_online_value_command(
+            ValueCommands::Update {
+                name: "CLI_UPDATE".to_string(),
+                value: "two".to_string(),
+            },
+            &client,
+        )
+        .unwrap();
+
+        Mock::given(method("DELETE"))
+            .and(path("/_bifrost/api/values/CLI_DELETE"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        handle_online_value_command(
+            ValueCommands::Delete {
+                name: "CLI_DELETE".to_string(),
+            },
+            &client,
+        )
+        .unwrap();
+
+        let dir = tempdir().unwrap();
+        let import_path = dir.path().join("import.json");
+        std::fs::write(&import_path, r#"{"CLI_IMPORT":"three"}"#).unwrap();
+        Mock::given(method("PUT"))
+            .and(path("/_bifrost/api/values"))
+            .and(body_json(
+                serde_json::json!({"values": {"CLI_IMPORT": "three"}}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        handle_online_value_command(ValueCommands::Import { file: import_path }, &client).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn online_value_command_rejects_missing_import_and_read_only_routing() {
+        let server = MockServer::start().await;
+        let client = client_for(&server);
+        let missing = tempdir().unwrap().path().join("missing.json");
+
+        let missing_error =
+            handle_online_value_command(ValueCommands::Import { file: missing }, &client)
+                .unwrap_err();
+        assert!(missing_error.to_string().contains("File not found"));
+
+        let routing_error = handle_online_value_command(ValueCommands::List, &client).unwrap_err();
+        assert!(routing_error
+            .to_string()
+            .contains("read-only value command"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn value_routing_uses_api_only_for_mutations() {
+        let server = MockServer::start().await;
+        let client = client_for(&server);
+        assert!(!routes_value_mutation_to_api(&ValueCommands::List));
+        assert!(
+            route_online_value_command(ValueCommands::List, Some(&client))
+                .unwrap()
+                .is_some()
+        );
+
+        Mock::given(method("DELETE"))
+            .and(path("/_bifrost/api/values/ROUTED"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert!(route_online_value_command(
+            ValueCommands::Delete {
+                name: "ROUTED".to_string(),
+            },
+            Some(&client),
+        )
+        .unwrap()
+        .is_none());
+
+        assert!(route_online_value_command(
+            ValueCommands::Update {
+                name: "OFFLINE".to_string(),
+                value: "value".to_string(),
+            },
+            None,
+        )
+        .unwrap()
+        .is_some());
+    }
 
     #[test]
     fn parse_values_file_supports_json() {
@@ -193,7 +337,7 @@ mod tests {
     fn parse_values_file_supports_env_and_preserves_last_duplicate() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("values.env");
-        std::fs::write(&path, "# comment\nA=first\n\nB = two\nA=last\n").unwrap();
+        std::fs::write(&path, "# comment\nA=first\n\n=ignored\nB = two\nA=last\n").unwrap();
 
         let (values, count) = parse_values_file(&path).unwrap();
         assert_eq!(count, 3);

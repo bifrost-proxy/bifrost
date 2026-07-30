@@ -47,14 +47,27 @@ fn classify_runtime_api_state(
 /// process identity is confirmed alive, however, API verification becomes
 /// mandatory so callers never silently create daemon/file split-brain state.
 pub(crate) fn live_config_api_client() -> Result<Option<ConfigApiClient>> {
-    let recorded = read_runtime_info();
+    live_config_api_client_with(
+        read_runtime_info(),
+        is_process_running,
+        bifrost_core::get_process_start_time_ms,
+        discover_bifrost_runtime,
+    )
+}
+
+fn live_config_api_client_with(
+    recorded: Option<RuntimeInfo>,
+    process_is_running: impl FnOnce(u32) -> bool,
+    process_start_time_ms: impl FnOnce(u32) -> Option<u64>,
+    discover_runtime: impl FnOnce(u16) -> Option<RuntimeInfo>,
+) -> Result<Option<ConfigApiClient>> {
     let Some(runtime) = recorded.as_ref() else {
         return Ok(None);
     };
 
-    let process_running = is_process_running(runtime.pid);
+    let process_running = process_is_running(runtime.pid);
     let observed_started_at_ms = if process_running {
-        bifrost_core::get_process_start_time_ms(runtime.pid)
+        process_start_time_ms(runtime.pid)
     } else {
         None
     };
@@ -62,7 +75,7 @@ pub(crate) fn live_config_api_client() -> Result<Option<ConfigApiClient>> {
         bifrost_core::start_times_match(runtime.started_at_ms, observed_started_at_ms);
     let discovered =
         if process_running && !matches!(start_time_match, StartTimeMatch::Mismatch { .. }) {
-            discover_bifrost_runtime(runtime.port)
+            discover_runtime(runtime.port)
         } else {
             None
         };
@@ -166,5 +179,47 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("identity mismatch"));
+    }
+
+    #[test]
+    fn live_client_probe_handles_missing_stale_and_matching_runtime() {
+        assert!(
+            live_config_api_client_with(None, |_| true, |_| Some(1_000), |_| None)
+                .unwrap()
+                .is_none()
+        );
+
+        let stale = runtime(10, 9900);
+        assert!(
+            live_config_api_client_with(Some(stale), |_| false, |_| Some(1_000), |_| None)
+                .unwrap()
+                .is_none()
+        );
+
+        let matching = runtime(10, 18883);
+        assert!(live_config_api_client_with(
+            Some(matching.clone()),
+            |pid| pid == 10,
+            |_| Some(1_000),
+            |_| Some(matching),
+        )
+        .unwrap()
+        .is_some());
+    }
+
+    #[test]
+    fn live_client_probe_fails_closed_when_active_runtime_cannot_be_verified() {
+        let recorded = runtime(10, 9900);
+        let error = match live_config_api_client_with(
+            Some(recorded),
+            |_| true,
+            |_| Some(1_000),
+            |_| None,
+        ) {
+            Ok(_) => panic!("active but unverifiable runtime must fail closed"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("refusing direct file writes"));
     }
 }

@@ -299,19 +299,37 @@ fn handle_online_script_command(
     Ok(())
 }
 
-pub fn handle_script_command(action: ScriptCommands) -> bifrost_core::Result<()> {
-    let mutates = matches!(
-        &action,
+fn routes_script_mutation_to_api(action: &ScriptCommands) -> bool {
+    matches!(
+        action,
         ScriptCommands::Add { .. }
             | ScriptCommands::Update { .. }
             | ScriptCommands::Delete { .. }
             | ScriptCommands::Rename { .. }
-    );
-    if mutates {
-        if let Some(client) = super::config::runtime::live_config_api_client()? {
-            return handle_online_script_command(action, &client);
+    )
+}
+
+fn route_online_script_command(
+    action: ScriptCommands,
+    client: Option<&ConfigApiClient>,
+) -> bifrost_core::Result<Option<ScriptCommands>> {
+    if routes_script_mutation_to_api(&action) {
+        if let Some(client) = client {
+            handle_online_script_command(action, client)?;
+            return Ok(None);
         }
     }
+    Ok(Some(action))
+}
+
+pub fn handle_script_command(action: ScriptCommands) -> bifrost_core::Result<()> {
+    let client = routes_script_mutation_to_api(&action)
+        .then(super::config::runtime::live_config_api_client)
+        .transpose()?
+        .flatten();
+    let Some(action) = route_online_script_command(action, client.as_ref())? else {
+        return Ok(());
+    };
 
     let data_dir = bifrost_storage::data_dir();
     let scripts_dir = data_dir.join("scripts");
@@ -522,6 +540,146 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
     use tempfile::NamedTempFile;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn client_for(server: &MockServer) -> ConfigApiClient {
+        ConfigApiClient::new("127.0.0.1", server.address().port())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn online_script_commands_use_admin_api_for_all_mutations() {
+        let server = MockServer::start().await;
+        let client = client_for(&server);
+
+        Mock::given(method("PUT"))
+            .and(path("/_bifrost/api/scripts/request/add-script"))
+            .and(body_json(json!({"content": "function onRequest() {}"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        handle_online_script_command(
+            ScriptCommands::Add {
+                r#type: "request".to_string(),
+                name: "add-script".to_string(),
+                content: Some("function onRequest() {}".to_string()),
+                file: None,
+            },
+            &client,
+        )
+        .unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/scripts/response/update-script"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"content": "function onResponse() {}"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/_bifrost/api/scripts/response/update-script"))
+            .and(body_json(
+                json!({"content": "function onResponse(response) { return response; }"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        handle_online_script_command(
+            ScriptCommands::Update {
+                r#type: "response".to_string(),
+                name: "update-script".to_string(),
+                content: Some("function onResponse(response) { return response; }".to_string()),
+                file: None,
+            },
+            &client,
+        )
+        .unwrap();
+
+        Mock::given(method("DELETE"))
+            .and(path("/_bifrost/api/scripts/decode/delete-script"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        handle_online_script_command(
+            ScriptCommands::Delete {
+                r#type: "decode".to_string(),
+                name: "delete-script".to_string(),
+            },
+            &client,
+        )
+        .unwrap();
+
+        Mock::given(method("POST"))
+            .and(path("/_bifrost/api/scripts/rename/request/old-script"))
+            .and(body_json(json!({"new_name": "new-script"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        handle_online_script_command(
+            ScriptCommands::Rename {
+                r#type: "request".to_string(),
+                name: "old-script".to_string(),
+                new_name: "new-script".to_string(),
+            },
+            &client,
+        )
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn online_script_command_rejects_read_only_routing() {
+        let server = MockServer::start().await;
+        let error = handle_online_script_command(
+            ScriptCommands::List { r#type: None },
+            &client_for(&server),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("read-only script command"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn script_routing_uses_api_only_for_mutations() {
+        let server = MockServer::start().await;
+        let client = client_for(&server);
+        let list = ScriptCommands::List { r#type: None };
+        assert!(!routes_script_mutation_to_api(&list));
+        assert!(route_online_script_command(list, Some(&client))
+            .unwrap()
+            .is_some());
+
+        Mock::given(method("DELETE"))
+            .and(path("/_bifrost/api/scripts/request/routed-script"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let routed = route_online_script_command(
+            ScriptCommands::Delete {
+                r#type: "request".to_string(),
+                name: "routed-script".to_string(),
+            },
+            Some(&client),
+        )
+        .unwrap();
+        assert!(routed.is_none());
+
+        let offline = route_online_script_command(
+            ScriptCommands::Rename {
+                r#type: "request".to_string(),
+                name: "old".to_string(),
+                new_name: "new".to_string(),
+            },
+            None,
+        )
+        .unwrap();
+        assert!(offline.is_some());
+    }
 
     #[test]
     fn parse_lookup_args_supports_name_only() {

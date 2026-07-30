@@ -11,7 +11,7 @@ use tracing::{debug, error, warn};
 
 use super::{error_response, BoxBody};
 use crate::push::{
-    ClientSubscription, ConnectedData, PushMessage, SharedPushManager, MAX_ID_LEN,
+    ClientSubscription, ConnectedData, PushClient, PushMessage, SharedPushManager, MAX_ID_LEN,
     MAX_SETTINGS_SCOPES, MAX_SUBSCRIBED_IDS, METRICS_INTERVAL_MAX_MS, METRICS_INTERVAL_MIN_MS,
 };
 
@@ -36,6 +36,37 @@ fn initial_subscription_needs(
         traffic: next.need_traffic && !previous.need_traffic,
         values: next.need_values && !previous.need_values,
         scripts: next.need_scripts && !previous.need_scripts,
+    }
+}
+
+async fn apply_subscription_update(
+    client: &std::sync::Arc<PushClient>,
+    push_manager: &SharedPushManager,
+    subscription: ClientSubscription,
+) {
+    let subscription = sanitize_subscription(subscription);
+    let previous = client.get_subscription();
+    let initial_needs = initial_subscription_needs(&previous, &subscription);
+    let new_settings_scopes: Vec<String> = subscription
+        .settings_scopes
+        .iter()
+        .filter(|scope| !previous.settings_scopes.contains(*scope))
+        .cloned()
+        .collect();
+    client.update_subscription(subscription);
+    if initial_needs.traffic {
+        push_manager.send_initial_traffic(client);
+    }
+    if initial_needs.values {
+        push_manager.send_values_snapshot_to_client(client);
+    }
+    if initial_needs.scripts {
+        push_manager.send_scripts_snapshot_to_client(client).await;
+    }
+    for scope in new_settings_scopes {
+        push_manager
+            .send_settings_scope_to_client(client, &scope)
+            .await;
     }
 }
 
@@ -271,33 +302,12 @@ async fn handle_websocket_connection<S>(
                         }
                         if let Ok(subscription) = serde_json::from_str::<ClientSubscription>(&text)
                         {
-                            let subscription = sanitize_subscription(subscription);
-                            let previous = client_clone.get_subscription();
-                            let initial_needs =
-                                initial_subscription_needs(&previous, &subscription);
-                            let new_settings_scopes: Vec<String> = subscription
-                                .settings_scopes
-                                .iter()
-                                .filter(|scope| !previous.settings_scopes.contains(*scope))
-                                .cloned()
-                                .collect();
-                            client_clone.update_subscription(subscription);
-                            if initial_needs.traffic {
-                                push_manager_receiver.send_initial_traffic(&client_clone);
-                            }
-                            if initial_needs.values {
-                                push_manager_receiver.send_values_snapshot_to_client(&client_clone);
-                            }
-                            if initial_needs.scripts {
-                                push_manager_receiver
-                                    .send_scripts_snapshot_to_client(&client_clone)
-                                    .await;
-                            }
-                            for scope in new_settings_scopes {
-                                push_manager_receiver
-                                    .send_settings_scope_to_client(&client_clone, &scope)
-                                    .await;
-                            }
+                            apply_subscription_update(
+                                &client_clone,
+                                &push_manager_receiver,
+                                subscription,
+                            )
+                            .await;
                         }
                         last_pong_ms_receiver.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
                     }
@@ -371,6 +381,7 @@ fn sanitize_subscription(mut sub: ClientSubscription) -> ClientSubscription {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestAdminState;
 
     #[test]
     fn initial_snapshot_is_requested_only_on_false_to_true_transition() {
@@ -417,5 +428,43 @@ mod tests {
                 scripts: false,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn applying_subscription_update_sends_new_resource_snapshots_once() {
+        let harness = TestAdminState::builder().build();
+        harness
+            .values_storage
+            .write()
+            .set_value("subscription-value", "ready")
+            .unwrap();
+        let manager = harness.push_manager();
+        let (client, mut rx) =
+            manager.register_client("subscription-update".to_string(), Default::default());
+
+        apply_subscription_update(
+            &client,
+            &manager,
+            ClientSubscription {
+                need_traffic: true,
+                need_values: true,
+                need_scripts: true,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let current = client.get_subscription();
+        assert!(current.need_traffic);
+        assert!(current.need_values);
+        assert!(current.need_scripts);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(PushMessage::TrafficDelta(_)) | Ok(PushMessage::ValuesUpdate(_))
+        ));
+
+        while rx.try_recv().is_ok() {}
+        apply_subscription_update(&client, &manager, current).await;
+        assert!(rx.try_recv().is_err());
     }
 }

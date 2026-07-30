@@ -2884,6 +2884,18 @@ mod coverage_boost {
     }
 
     #[tokio::test]
+    async fn targeted_resource_snapshots_ignore_unsubscribed_client() {
+        let manager = make_minimal_manager();
+        let (client, mut rx) =
+            manager.register_client("resource-unsubscribed".to_string(), Default::default());
+
+        manager.send_values_snapshot_to_client(&client);
+        manager.send_scripts_snapshot_to_client(&client).await;
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn build_replay_saved_requests_data_works_with_empty_store() {
         let harness = TestAdminState::builder().build();
         let manager = harness.push_manager();
@@ -3027,6 +3039,60 @@ mod coverage_boost {
         assert!(got_overview);
         assert!(got_metrics);
         assert!(got_history);
+    }
+
+    #[tokio::test]
+    async fn send_initial_data_includes_requested_values_and_scripts() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let script_manager =
+            crate::handlers::scripts::ScriptManager::new(temp_dir.path().join("scripts"));
+        script_manager.init().await.unwrap();
+        script_manager
+            .engine()
+            .save_script(
+                ScriptType::Request,
+                "initial-script",
+                "function onRequest() {}",
+            )
+            .await
+            .unwrap();
+
+        let values_storage =
+            bifrost_storage::ValuesStorage::with_dir(temp_dir.path().join("values")).unwrap();
+        let state = Arc::new(
+            AdminState::new(0)
+                .with_values_storage(values_storage)
+                .with_script_manager(script_manager),
+        );
+        state
+            .values_storage
+            .as_ref()
+            .expect("values storage")
+            .write()
+            .set_value("initial-value", "ready")
+            .unwrap();
+        let manager = Arc::new(PushManager::new(state));
+        let (client, mut rx) = manager.register_client(
+            "initial-resources".to_string(),
+            ClientSubscription {
+                need_values: true,
+                need_scripts: true,
+                ..Default::default()
+            },
+        );
+
+        manager.send_initial_data(&client).await;
+
+        let first = rx.recv().await.expect("expected first resource snapshot");
+        let second = rx.recv().await.expect("expected second resource snapshot");
+        assert!(
+            matches!(&first, PushMessage::ValuesUpdate(_))
+                || matches!(&second, PushMessage::ValuesUpdate(_))
+        );
+        assert!(
+            matches!(&first, PushMessage::ScriptsUpdate(_))
+                || matches!(&second, PushMessage::ScriptsUpdate(_))
+        );
     }
 
     #[test]
