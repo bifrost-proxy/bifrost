@@ -1,6 +1,7 @@
 use bifrost_storage::ConfigChangeEvent;
 use hyper::{Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use super::{
     cors_preflight, error_response, json_response, method_not_allowed, success_response, BoxBody,
@@ -32,6 +33,11 @@ pub struct UpdateValueRequest {
     pub value: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UpsertValuesRequest {
+    pub values: BTreeMap<String, String>,
+}
+
 pub async fn handle_values<B>(
     req: Request<B>,
     state: SharedAdminState,
@@ -60,6 +66,7 @@ where
         match *req.method() {
             Method::GET => list_values(storage),
             Method::POST => create_value(req, storage, &state).await,
+            Method::PUT => upsert_values(req, storage, &state).await,
             _ => method_not_allowed(),
         }
     } else {
@@ -74,6 +81,57 @@ where
             _ => method_not_allowed(),
         }
     }
+}
+
+async fn upsert_values<B>(
+    req: Request<B>,
+    storage: &crate::state::SharedValuesStorage,
+    state: &SharedAdminState,
+) -> Response<BoxBody>
+where
+    B: hyper::body::Body + Send + 'static,
+    B::Data: Send,
+    B::Error: std::error::Error + Send + Sync,
+{
+    let body = match http_body_util::BodyExt::collect(req.into_body()).await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "Failed to read request body"),
+    };
+
+    let request: UpsertValuesRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)),
+    };
+
+    if request.values.keys().any(|name| name.is_empty()) {
+        return error_response(StatusCode::BAD_REQUEST, "Value name cannot be empty");
+    }
+
+    let count = request.values.len();
+    let mut guard = storage.write();
+    let mut changed = false;
+    for (name, value) in request.values {
+        if let Err(e) = guard.set_value(&name, &value) {
+            drop(guard);
+            if changed {
+                notify_values_changed(state, "*");
+            }
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to upsert value '{}': {}", name, e),
+            );
+        }
+        changed = true;
+    }
+    drop(guard);
+
+    if count > 0 {
+        notify_values_changed(state, "*");
+    }
+    json_response(&serde_json::json!({
+        "success": true,
+        "count": count,
+    }))
 }
 
 fn list_values(storage: &crate::state::SharedValuesStorage) -> Response<BoxBody> {
@@ -262,8 +320,11 @@ fn notify_values_changed(state: &SharedAdminState, name: &str) {
 mod tests {
     use super::*;
     use crate::state::AdminState;
+    use crate::test_support::TestAdminState;
     use bytes::Bytes;
-    use http_body_util::{BodyExt, Empty};
+    use futures_util::stream;
+    use http_body_util::{BodyExt, Empty, Full, StreamBody};
+    use hyper::body::Frame;
     use hyper::{Method, Request};
 
     #[tokio::test]
@@ -281,5 +342,112 @@ mod tests {
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let msg = String::from_utf8_lossy(&body);
         assert!(msg.contains("Values storage not configured"));
+    }
+
+    #[tokio::test]
+    async fn root_put_upserts_multiple_values() {
+        let harness = TestAdminState::builder().build();
+        let mut changes = harness.config_manager.subscribe();
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/api/values")
+            .body(Full::new(Bytes::from_static(
+                br#"{"values":{"A":"one","B":"two"}}"#,
+            )))
+            .unwrap();
+
+        let resp = handle_values(req, harness.state(), "").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], true);
+        assert_eq!(json["count"], 2);
+
+        let storage = harness.values_storage.read();
+        assert_eq!(storage.get_value("A").as_deref(), Some("one"));
+        assert_eq!(storage.get_value("B").as_deref(), Some("two"));
+        drop(storage);
+
+        assert!(matches!(
+            changes.try_recv(),
+            Ok(ConfigChangeEvent::ValuesChanged(name)) if name == "*"
+        ));
+        assert!(changes.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn root_put_rejects_empty_name_without_writing() {
+        let harness = TestAdminState::builder().build();
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/api/values")
+            .body(Full::new(Bytes::from_static(
+                br#"{"values":{"":"invalid","B":"two"}}"#,
+            )))
+            .unwrap();
+
+        let resp = handle_values(req, harness.state(), "").await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(harness
+            .values_storage
+            .read()
+            .list_keys()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn root_put_rejects_invalid_or_unreadable_body() {
+        let harness = TestAdminState::builder().build();
+        let invalid = Request::builder()
+            .method(Method::PUT)
+            .uri("/api/values")
+            .body(Full::new(Bytes::from_static(b"{not-json}")))
+            .unwrap();
+        assert_eq!(
+            handle_values(invalid, harness.state(), "").await.status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let failed_body = StreamBody::new(stream::once(async {
+            Err::<Frame<Bytes>, std::io::Error>(std::io::Error::other("body failed"))
+        }));
+        let unreadable = Request::builder()
+            .method(Method::PUT)
+            .uri("/api/values")
+            .body(failed_body)
+            .unwrap();
+        assert_eq!(
+            handle_values(unreadable, harness.state(), "")
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn root_put_notifies_after_partial_write_failure() {
+        let harness = TestAdminState::builder().build();
+        let mut changes = harness.config_manager.subscribe();
+        std::fs::create_dir(harness.data_dir().join("values/z_bad.txt")).unwrap();
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/api/values")
+            .body(Full::new(Bytes::from_static(
+                br#"{"values":{"a_good":"written","z_bad":"fails"}}"#,
+            )))
+            .unwrap();
+
+        let resp = handle_values(req, harness.state(), "").await;
+
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            harness.values_storage.read().get_value("a_good").as_deref(),
+            Some("written")
+        );
+        assert!(matches!(
+            changes.try_recv(),
+            Ok(ConfigChangeEvent::ValuesChanged(name)) if name == "*"
+        ));
     }
 }

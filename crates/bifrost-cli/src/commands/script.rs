@@ -8,6 +8,7 @@ use bifrost_script::{
 use bifrost_storage::{ConfigManager, ValuesStorage};
 
 use crate::cli::ScriptCommands;
+use crate::commands::config::client::ConfigApiClient;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ScriptSelection {
@@ -237,7 +238,123 @@ fn print_run_result(result: &ScriptExecutionResult) -> bifrost_core::Result<()> 
     Ok(())
 }
 
+fn handle_online_script_command(
+    action: ScriptCommands,
+    client: &ConfigApiClient,
+) -> bifrost_core::Result<()> {
+    match action {
+        ScriptCommands::Add {
+            r#type,
+            name,
+            content,
+            file,
+        } => {
+            let script_type = parse_script_type(&r#type)?;
+            let script_content = read_script_content(content, file)?;
+            client
+                .save_script(&r#type, &name, &script_content)
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!("Script '{}' ({}) saved successfully.", name, script_type);
+        }
+        ScriptCommands::Update {
+            r#type,
+            name,
+            content,
+            file,
+        } => {
+            let script_type = parse_script_type(&r#type)?;
+            let script_content = read_script_content(content, file)?;
+            client
+                .get_script(&r#type, &name)
+                .map_err(bifrost_core::BifrostError::Config)?;
+            client
+                .save_script(&r#type, &name, &script_content)
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!("Script '{}' ({}) updated successfully.", name, script_type);
+        }
+        ScriptCommands::Delete { r#type, name } => {
+            let script_type = parse_script_type(&r#type)?;
+            client
+                .delete_script(&r#type, &name)
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!("Script '{}' ({}) deleted successfully.", name, script_type);
+        }
+        ScriptCommands::Rename {
+            r#type,
+            name,
+            new_name,
+        } => {
+            parse_script_type(&r#type)?;
+            client
+                .rename_script(&r#type, &name, &new_name)
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!("Script '{}/{}' renamed to '{}'.", r#type, name, new_name);
+        }
+        ScriptCommands::List { .. } | ScriptCommands::Show { .. } | ScriptCommands::Run { .. } => {
+            return Err(bifrost_core::BifrostError::Config(
+                "internal error: read-only script command routed as an online mutation".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn routes_script_mutation_to_api(action: &ScriptCommands) -> bool {
+    matches!(
+        action,
+        ScriptCommands::Add { .. }
+            | ScriptCommands::Update { .. }
+            | ScriptCommands::Delete { .. }
+            | ScriptCommands::Rename { .. }
+    )
+}
+
+fn route_online_script_command(
+    action: ScriptCommands,
+    client: Option<&ConfigApiClient>,
+) -> bifrost_core::Result<Option<ScriptCommands>> {
+    if routes_script_mutation_to_api(&action) {
+        if let Some(client) = client {
+            handle_online_script_command(action, client)?;
+            return Ok(None);
+        }
+    }
+    Ok(Some(action))
+}
+
+fn rename_offline_script(
+    engine: &ScriptEngine,
+    rt: &tokio::runtime::Runtime,
+    r#type: &str,
+    name: &str,
+    new_name: &str,
+) -> bifrost_core::Result<()> {
+    let script_type = parse_script_type(r#type)?;
+    rt.block_on(engine.rename_script(script_type, name, new_name))
+        .map_err(|e| {
+            bifrost_core::BifrostError::Config(format!(
+                "failed to rename {} script '{}' to '{}': {e}",
+                script_type, name, new_name
+            ))
+        })
+}
+
 pub fn handle_script_command(action: ScriptCommands) -> bifrost_core::Result<()> {
+    handle_script_command_with_runtime(action, super::config::runtime::live_config_api_client)
+}
+
+fn handle_script_command_with_runtime(
+    action: ScriptCommands,
+    resolve_live_client: impl FnOnce() -> bifrost_core::Result<Option<ConfigApiClient>>,
+) -> bifrost_core::Result<()> {
+    let client = routes_script_mutation_to_api(&action)
+        .then(resolve_live_client)
+        .transpose()?
+        .flatten();
+    let Some(action) = route_online_script_command(action, client.as_ref())? else {
+        return Ok(());
+    };
+
     let data_dir = bifrost_storage::data_dir();
     let scripts_dir = data_dir.join("scripts");
     let engine = ScriptEngine::new(ScriptEngineConfig {
@@ -425,13 +542,7 @@ pub fn handle_script_command(action: ScriptCommands) -> bifrost_core::Result<()>
             name,
             new_name,
         } => {
-            let port = crate::process::read_runtime_port().unwrap_or(9900);
-            let client = super::config::client::ConfigApiClient::new("127.0.0.1", port);
-
-            client
-                .rename_script(&r#type, &name, &new_name)
-                .map_err(bifrost_core::BifrostError::Config)?;
-
+            rename_offline_script(&engine, &rt, &r#type, &name, &new_name)?;
             println!("Script '{}/{}' renamed to '{}'.", r#type, name, new_name);
         }
     }
@@ -445,6 +556,189 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
     use tempfile::NamedTempFile;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn client_for(server: &MockServer) -> ConfigApiClient {
+        ConfigApiClient::new("127.0.0.1", server.address().port())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn online_script_commands_use_admin_api_for_all_mutations() {
+        let server = MockServer::start().await;
+        let client = client_for(&server);
+
+        Mock::given(method("PUT"))
+            .and(path("/_bifrost/api/scripts/request/add-script"))
+            .and(body_json(json!({"content": "function onRequest() {}"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        handle_online_script_command(
+            ScriptCommands::Add {
+                r#type: "request".to_string(),
+                name: "add-script".to_string(),
+                content: Some("function onRequest() {}".to_string()),
+                file: None,
+            },
+            &client,
+        )
+        .unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/scripts/response/update-script"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"content": "function onResponse() {}"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/_bifrost/api/scripts/response/update-script"))
+            .and(body_json(
+                json!({"content": "function onResponse(response) { return response; }"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        handle_online_script_command(
+            ScriptCommands::Update {
+                r#type: "response".to_string(),
+                name: "update-script".to_string(),
+                content: Some("function onResponse(response) { return response; }".to_string()),
+                file: None,
+            },
+            &client,
+        )
+        .unwrap();
+
+        Mock::given(method("DELETE"))
+            .and(path("/_bifrost/api/scripts/decode/delete-script"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        handle_online_script_command(
+            ScriptCommands::Delete {
+                r#type: "decode".to_string(),
+                name: "delete-script".to_string(),
+            },
+            &client,
+        )
+        .unwrap();
+
+        Mock::given(method("POST"))
+            .and(path("/_bifrost/api/scripts/rename/request/old-script"))
+            .and(body_json(json!({"new_name": "new-script"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        handle_online_script_command(
+            ScriptCommands::Rename {
+                r#type: "request".to_string(),
+                name: "old-script".to_string(),
+                new_name: "new-script".to_string(),
+            },
+            &client,
+        )
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn online_script_command_rejects_read_only_routing() {
+        let server = MockServer::start().await;
+        let error = handle_online_script_command(
+            ScriptCommands::List { r#type: None },
+            &client_for(&server),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("read-only script command"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn script_routing_uses_api_only_for_mutations() {
+        let server = MockServer::start().await;
+        let client = client_for(&server);
+        let list = ScriptCommands::List { r#type: None };
+        assert!(!routes_script_mutation_to_api(&list));
+        assert!(route_online_script_command(list, Some(&client))
+            .unwrap()
+            .is_some());
+
+        Mock::given(method("DELETE"))
+            .and(path("/_bifrost/api/scripts/request/routed-script"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let routed = route_online_script_command(
+            ScriptCommands::Delete {
+                r#type: "request".to_string(),
+                name: "routed-script".to_string(),
+            },
+            Some(&client),
+        )
+        .unwrap();
+        assert!(routed.is_none());
+
+        let offline = route_online_script_command(
+            ScriptCommands::Rename {
+                r#type: "request".to_string(),
+                name: "old".to_string(),
+                new_name: "new".to_string(),
+            },
+            None,
+        )
+        .unwrap();
+        assert!(offline.is_some());
+
+        Mock::given(method("DELETE"))
+            .and(path("/_bifrost/api/scripts/request/wrapper-script"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        handle_script_command_with_runtime(
+            ScriptCommands::Delete {
+                r#type: "request".to_string(),
+                name: "wrapper-script".to_string(),
+            },
+            || Ok(Some(client_for(&server))),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn offline_script_rename_uses_the_local_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ScriptEngine::new(ScriptEngineConfig {
+            scripts_dir: dir.path().join("scripts"),
+            ..Default::default()
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(engine.init()).unwrap();
+        rt.block_on(engine.save_script(ScriptType::Request, "old-name", "function onRequest() {}"))
+            .unwrap();
+
+        rename_offline_script(&engine, &rt, "request", "old-name", "new-name").unwrap();
+
+        assert!(rt
+            .block_on(engine.load_script(ScriptType::Request, "new-name"))
+            .is_ok());
+        assert!(rt
+            .block_on(engine.load_script(ScriptType::Request, "old-name"))
+            .is_err());
+
+        let error =
+            rename_offline_script(&engine, &rt, "request", "missing-name", "unused").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("failed to rename request script 'missing-name' to 'unused'"));
+    }
 
     #[test]
     fn parse_lookup_args_supports_name_only() {

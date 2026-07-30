@@ -282,9 +282,53 @@
 
 ---
 
+### TC-AVA-16：批量 upsert Values
+
+**操作步骤**：
+1. 执行批量 PUT：
+   ```bash
+   curl -s -X PUT http://127.0.0.1:8800/_bifrost/api/values \
+     -H "Content-Type: application/json" \
+     -d '{"values":{"batch-a":"one","batch-b":"two"}}' | jq .
+   ```
+2. GET Values 列表确认两个条目均存在。
+
+**预期结果**：
+- HTTP 状态码 200。
+- 响应包含 `"success": true` 和 `"count": 2`。
+- `batch-a` / `batch-b` 在同一次请求后均可读，运行中客户端收到一次
+  `ValuesChanged("*")` 对应的 `values_update`，不会按条广播。
+
+---
+
+### TC-AVA-17：批量 upsert 空名称时整批拒绝
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   curl -s -o /tmp/bifrost-invalid-values-batch.json -w "%{http_code}" \
+     -X PUT http://127.0.0.1:8800/_bifrost/api/values \
+     -H "Content-Type: application/json" \
+     -d '{"values":{"":"invalid","should-not-exist":"blocked"}}'
+   ```
+2. GET `/_bifrost/api/values/should-not-exist`。
+
+**预期结果**：
+- 批量 PUT 返回 HTTP 400，响应包含 `Value name cannot be empty`。
+- `should-not-exist` 返回 404，验证参数校验发生在任何写入之前。
+
+---
+
+## 本次执行记录
+
+| 日期 | 用例 | 结果 | 实际结果 |
+| --- | --- | --- | --- |
+| 2026-07-30 | TC-AVA-16..17 | 通过 | `test_cli_resource_api_live_sync.sh` 使用真实隔离 daemon 执行 CLI JSON import 对应的批量 PUT，API 列表立即出现两个值；空名称批次返回 400 且 `CLI_SHOULD_NOT_EXIST` GET 为 404。 |
+
 ## 清理
 
 测试完成后清理临时数据：
 ```bash
 rm -rf .bifrost-test
+rm -f /tmp/bifrost-invalid-values-batch.json
 ```

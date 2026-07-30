@@ -218,6 +218,35 @@ Push WebSocket API 提供实时数据推送能力。客户端通过 WebSocket �
 
 ---
 
+### TC-APU-12：Values / Scripts 热订阅补发最新快照
+
+**操作步骤**：
+1. 执行专项真实链路脚本：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=1 \
+     bash e2e-tests/tests/test_cli_resource_api_live_sync.sh
+   ```
+2. 脚本中的 Node WebSocket probe 建连时不订阅资源，随后发送
+   `{"need_values":true}` 或 `{"need_scripts":true}` 获取初始快照。
+3. probe 发送对应 `false` 关闭订阅；另一个 CLI 进程创建资源后，probe 再发送
+   对应 `true`。
+
+**预期结果**：
+- 每个资源的首次 `false -> true` 都收到一次 `values_update` 或
+  `scripts_update`。
+- 关闭订阅期间不依赖广播；重新开启后收到的快照包含关闭期间由 CLI 创建的资源。
+- active 订阅期间的 CLI 写入仍会正常触发 push。
+- 快照仅定向发送给当前客户端，不要求断开或重建 WebSocket。
+- 专项脚本最终输出 `[cli-resource-live-sync] PASS`。
+
+---
+
+## 本次执行记录
+
+| 日期 | 用例 | 结果 | 实际结果 |
+| --- | --- | --- | --- |
+| 2026-07-30 | TC-APU-12 | 通过 | Node WebSocket probe 对 Values / Scripts 分别完成 active push 与 `true -> false -> true` 重订阅；CLI 在关闭期间创建资源后，重新开启订阅立即收到包含新资源的定向快照，专项脚本输出 `PASS`。 |
+
 ## 清理
 
 测试完成后清理临时数据：

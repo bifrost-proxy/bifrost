@@ -1,6 +1,7 @@
 pub(crate) mod client;
 mod display;
 mod keys;
+pub(crate) mod runtime;
 
 use std::io::Write;
 use std::path::PathBuf;

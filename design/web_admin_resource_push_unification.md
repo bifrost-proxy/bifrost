@@ -12,7 +12,8 @@ Bifrost Web 管理端历史上每个「非流量」资源都各自轮询：Value
 
 - 一个 push 连接可以同时订阅 `traffic` / `overview` / `metrics` / `values` / `scripts` / `replay saved requests` / `replay groups` / `settings scopes`。
 - 客户端可以在同一 WebSocket 上通过发送 JSON 订阅片段动态开关任意一路能力，无需重建连接。
-- 服务端首次收到 `need_*` 时下发一份全量快照（initial snapshot），随后按事件推送增量。
+- 服务端首次建连或运行中订阅从 `false` 切换为 `true` 时下发一份全量快照
+  （initial snapshot），随后按事件推送增量。
 - 客户端断线重连后能拿回最新快照，不丢事件。
 - 单个客户端由 `x_client_id` 参数标识，可以做去重与淘汰。
 
@@ -55,7 +56,8 @@ Bifrost Web 管理端历史上每个「非流量」资源都各自轮询：Value
 - 建连 URL：`ws://host/_bifrost/api/push?x_client_id=<id>&need_overview=true&need_values=true&need_scripts=true&settings_scopes=performance,agent&metrics_interval_ms=500`。
 - 建连后仍可通过 text frame 发送 JSON `{ "need_values": true }` 或 `{ "settings_scopes": ["performance"] }` 追加订阅，服务端会：
   - 更新 `PushSubscription` 字段。
-  - 对新增的 `need_*` 或新增的 `settings_scopes` 立即下发对应快照（`send_initial_traffic_delta` / `build_settings_update` / `build_values_update` 等）。
+  - 对 `false -> true` 的 `need_*` 或新增的 `settings_scopes` 立即向当前客户端下发对应快照（`send_initial_traffic_delta` / `send_values_snapshot_to_client` / `send_scripts_snapshot_to_client` / `build_settings_update` 等）。
+  - 已为 `true` 的订阅重复发送 `true` 不会重复构造快照。
 - 前端 `web/src/services/pushService.ts` 使用同一 client 处理所有资源事件（`case 'values_update'` / `case 'scripts_update'` / `case 'settings_update'` / `case 'replay_saved_requests_update'` / `case 'replay_groups_update'` / `case 'breakpoint_settings_updated'`）。
 - 每个 client 由 `x_client_id` 做桶级淘汰，防止同一浏览器多刷时无限堆积连接。
 
@@ -72,6 +74,7 @@ Bifrost Web 管理端历史上每个「非流量」资源都各自轮询：Value
 - 文件：`crates/bifrost-admin/src/handlers/websocket.rs`
   - 建连处理 query string 中的 `need_*` / `settings_scopes` / `x_client_id`。
   - 支持热订阅：`match key { "need_values" => ..., "need_scripts" => ..., "need_replay_saved_requests" => ..., "need_replay_groups" => ..., "settings_scopes" if !value.is_empty() => ... }`。
+  - 覆盖订阅前比较 previous / next，补发新开启的 traffic / values / scripts 快照。
   - `settings_scopes` 超过 `MAX_SETTINGS_SCOPES` 时截断并 dedup。
   - `sub.pending_ids.len() > MAX_SUBSCRIBED_IDS` 时截断保护。
 
