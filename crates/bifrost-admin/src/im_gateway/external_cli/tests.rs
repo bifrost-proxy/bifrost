@@ -1239,6 +1239,35 @@ fn service_tier_resolution_uses_last_runner_override_then_codex_default() {
 }
 
 #[test]
+fn codex_fast_status_formats_fast_standard_custom_and_default_modes() {
+    let fast = format_external_cli_fast_status(
+        Some(CODEX_FAST_SERVICE_TIER),
+        Some("session slash command"),
+        "Codex",
+    );
+    assert!(fast.contains("使用快速模式"));
+    assert!(fast.contains("service tier: `fast`"));
+    assert!(fast.contains("来源: session slash command"));
+
+    let standard = format_external_cli_fast_status(
+        Some(CODEX_STANDARD_SERVICE_TIER),
+        Some("runner config"),
+        "Codex",
+    );
+    assert!(standard.contains("使用标准模式"));
+    assert!(standard.contains("service tier: `default`"));
+    assert!(standard.contains("来源: runner config"));
+
+    let custom = format_external_cli_fast_status(Some("flex"), None, "Codex");
+    assert!(custom.contains("service tier: `flex`"));
+    assert!(custom.contains("来源: 配置"));
+
+    let unresolved = format_external_cli_fast_status(Some("  "), None, "Codex");
+    assert!(unresolved.contains("未解析到 service tier"));
+    assert!(unresolved.contains("Codex"));
+}
+
+#[test]
 fn codex_adapter_maps_legacy_search_to_web_search_feature() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),

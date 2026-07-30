@@ -625,6 +625,26 @@ mod tests {
     }
 
     #[test]
+    fn metadata_includes_service_tier_override_and_source() {
+        let metadata = metadata_from_state(&ImAgentSessionState {
+            service_tier_override: Some(" fast ".to_string()),
+            service_tier_override_source: Some(" session slash command ".to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            metadata.get("serviceTierOverride").map(String::as_str),
+            Some("fast")
+        );
+        assert_eq!(
+            metadata
+                .get("serviceTierOverrideSource")
+                .map(String::as_str),
+            Some("session slash command")
+        );
+    }
+
+    #[test]
     fn list_session_states_includes_external_runner_result_fields() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = EnvGuard::new(dir.path());
