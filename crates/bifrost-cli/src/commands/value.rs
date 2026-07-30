@@ -27,14 +27,16 @@ fn parse_values_file(path: &Path) -> bifrost_core::Result<(HashMap<String, Strin
                 if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
-                if let Some(eq_pos) = line.find('=') {
-                    let key = line[..eq_pos].trim();
-                    let value = line[eq_pos + 1..].trim();
-                    if !key.is_empty() {
-                        values.insert(key.to_string(), value.to_string());
-                        count += 1;
-                    }
+                let Some(eq_pos) = line.find('=') else {
+                    continue;
+                };
+                let key = line[..eq_pos].trim();
+                if key.is_empty() {
+                    continue;
                 }
+                let value = line[eq_pos + 1..].trim();
+                values.insert(key.to_string(), value.to_string());
+                count += 1;
             }
         }
         _ => {
@@ -117,8 +119,15 @@ fn route_online_value_command(
 }
 
 pub fn handle_value_command(action: ValueCommands) -> bifrost_core::Result<()> {
+    handle_value_command_with_runtime(action, super::config::runtime::live_config_api_client)
+}
+
+fn handle_value_command_with_runtime(
+    action: ValueCommands,
+    resolve_live_client: impl FnOnce() -> bifrost_core::Result<Option<ConfigApiClient>>,
+) -> bifrost_core::Result<()> {
     let client = routes_value_mutation_to_api(&action)
-        .then(super::config::runtime::live_config_api_client)
+        .then(resolve_live_client)
         .transpose()?
         .flatten();
     let Some(action) = route_online_value_command(action, client.as_ref())? else {
@@ -319,6 +328,20 @@ mod tests {
         )
         .unwrap()
         .is_some());
+
+        Mock::given(method("DELETE"))
+            .and(path("/_bifrost/api/values/WRAPPER"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        handle_value_command_with_runtime(
+            ValueCommands::Delete {
+                name: "WRAPPER".to_string(),
+            },
+            || Ok(Some(client_for(&server))),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -337,7 +360,11 @@ mod tests {
     fn parse_values_file_supports_env_and_preserves_last_duplicate() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("values.env");
-        std::fs::write(&path, "# comment\nA=first\n\n=ignored\nB = two\nA=last\n").unwrap();
+        std::fs::write(
+            &path,
+            "# comment\nA=first\ninvalid\n\n=ignored\nB = two\nA=last\n",
+        )
+        .unwrap();
 
         let (values, count) = parse_values_file(&path).unwrap();
         assert_eq!(count, 3);

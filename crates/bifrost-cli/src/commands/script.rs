@@ -322,9 +322,33 @@ fn route_online_script_command(
     Ok(Some(action))
 }
 
+fn rename_offline_script(
+    engine: &ScriptEngine,
+    rt: &tokio::runtime::Runtime,
+    r#type: &str,
+    name: &str,
+    new_name: &str,
+) -> bifrost_core::Result<()> {
+    let script_type = parse_script_type(r#type)?;
+    rt.block_on(engine.rename_script(script_type, name, new_name))
+        .map_err(|e| {
+            bifrost_core::BifrostError::Config(format!(
+                "failed to rename {} script '{}' to '{}': {e}",
+                script_type, name, new_name
+            ))
+        })
+}
+
 pub fn handle_script_command(action: ScriptCommands) -> bifrost_core::Result<()> {
+    handle_script_command_with_runtime(action, super::config::runtime::live_config_api_client)
+}
+
+fn handle_script_command_with_runtime(
+    action: ScriptCommands,
+    resolve_live_client: impl FnOnce() -> bifrost_core::Result<Option<ConfigApiClient>>,
+) -> bifrost_core::Result<()> {
     let client = routes_script_mutation_to_api(&action)
-        .then(super::config::runtime::live_config_api_client)
+        .then(resolve_live_client)
         .transpose()?
         .flatten();
     let Some(action) = route_online_script_command(action, client.as_ref())? else {
@@ -518,15 +542,7 @@ pub fn handle_script_command(action: ScriptCommands) -> bifrost_core::Result<()>
             name,
             new_name,
         } => {
-            let script_type = parse_script_type(&r#type)?;
-            rt.block_on(engine.rename_script(script_type, &name, &new_name))
-                .map_err(|e| {
-                    bifrost_core::BifrostError::Config(format!(
-                        "failed to rename {} script '{}' to '{}': {e}",
-                        script_type, name, new_name
-                    ))
-                })?;
-
+            rename_offline_script(&engine, &rt, &r#type, &name, &new_name)?;
             println!("Script '{}/{}' renamed to '{}'.", r#type, name, new_name);
         }
     }
@@ -679,6 +695,43 @@ mod tests {
         )
         .unwrap();
         assert!(offline.is_some());
+
+        Mock::given(method("DELETE"))
+            .and(path("/_bifrost/api/scripts/request/wrapper-script"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        handle_script_command_with_runtime(
+            ScriptCommands::Delete {
+                r#type: "request".to_string(),
+                name: "wrapper-script".to_string(),
+            },
+            || Ok(Some(client_for(&server))),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn offline_script_rename_uses_the_local_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ScriptEngine::new(ScriptEngineConfig {
+            scripts_dir: dir.path().join("scripts"),
+            ..Default::default()
+        });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(engine.init()).unwrap();
+        rt.block_on(engine.save_script(ScriptType::Request, "old-name", "function onRequest() {}"))
+            .unwrap();
+
+        rename_offline_script(&engine, &rt, "request", "old-name", "new-name").unwrap();
+
+        assert!(rt
+            .block_on(engine.load_script(ScriptType::Request, "new-name"))
+            .is_ok());
+        assert!(rt
+            .block_on(engine.load_script(ScriptType::Request, "old-name"))
+            .is_err());
     }
 
     #[test]
