@@ -732,6 +732,12 @@ mod tests {
         assert!(rt
             .block_on(engine.load_script(ScriptType::Request, "old-name"))
             .is_err());
+
+        let error =
+            rename_offline_script(&engine, &rt, "request", "missing-name", "unused").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("failed to rename request script 'missing-name' to 'unused'"));
     }
 
     #[test]
