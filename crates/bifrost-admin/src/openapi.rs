@@ -747,6 +747,42 @@ fn generate_paths() -> serde_json::Value {
                 "responses": {
                     "200": {"description": "Values list (key-value)"}
                 }
+            },
+            "post": {
+                "tags": ["Values"],
+                "summary": "Create a value",
+                "operationId": "createValue",
+                "requestBody": {
+                    "required": true,
+                    "content": {"application/json": {"schema": {
+                        "type": "object",
+                        "required": ["name", "value"],
+                        "properties": {
+                            "name": {"type": "string"},
+                            "value": {"type": "string"}
+                        }
+                    }}}
+                },
+                "responses": {"200": {"description": "Created"}}
+            },
+            "put": {
+                "tags": ["Values"],
+                "summary": "Batch upsert values",
+                "operationId": "upsertValues",
+                "requestBody": {
+                    "required": true,
+                    "content": {"application/json": {"schema": {
+                        "type": "object",
+                        "required": ["values"],
+                        "properties": {
+                            "values": {
+                                "type": "object",
+                                "additionalProperties": {"type": "string"}
+                            }
+                        }
+                    }}}
+                },
+                "responses": {"200": {"description": "Values upserted"}}
             }
         },
         "/api/values/{name}": {

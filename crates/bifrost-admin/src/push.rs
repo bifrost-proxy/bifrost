@@ -1312,6 +1312,15 @@ impl PushManager {
         }
     }
 
+    pub fn send_values_snapshot_to_client(&self, client: &Arc<PushClient>) {
+        if !client.get_subscription().need_values {
+            return;
+        }
+        if let Some(values_data) = self.build_values_data() {
+            client.send(PushMessage::ValuesUpdate(values_data));
+        }
+    }
+
     pub async fn broadcast_scripts_snapshot(&self) {
         let Some(scripts_data) = self.build_scripts_data().await else {
             return;
@@ -1327,6 +1336,15 @@ impl PushManager {
         }
         for client_id in clients_to_remove {
             self.unregister_client(client_id);
+        }
+    }
+
+    pub async fn send_scripts_snapshot_to_client(&self, client: &Arc<PushClient>) {
+        if !client.get_subscription().need_scripts {
+            return;
+        }
+        if let Some(scripts_data) = self.build_scripts_data().await {
+            client.send(PushMessage::ScriptsUpdate(scripts_data));
         }
     }
 
@@ -1444,15 +1462,11 @@ impl PushManager {
         }
 
         if subscription.need_values {
-            if let Some(values_data) = self.build_values_data() {
-                client.send(PushMessage::ValuesUpdate(values_data));
-            }
+            self.send_values_snapshot_to_client(client);
         }
 
         if subscription.need_scripts {
-            if let Some(scripts_data) = self.build_scripts_data().await {
-                client.send(PushMessage::ScriptsUpdate(scripts_data));
-            }
+            self.send_scripts_snapshot_to_client(client).await;
         }
 
         if subscription.need_replay_saved_requests {
@@ -2796,6 +2810,77 @@ mod coverage_boost {
             }
             other => panic!("expected ValuesUpdate, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn send_values_snapshot_targets_only_requested_client() {
+        let harness = TestAdminState::builder().build();
+        {
+            let mut storage = harness.values_storage.write();
+            storage.set_value("k", "v").unwrap();
+        }
+        let manager = harness.push_manager();
+        let (subscribed, mut subscribed_rx) = manager.register_client(
+            "values-target".to_string(),
+            ClientSubscription {
+                need_values: true,
+                ..Default::default()
+            },
+        );
+        let (_other, mut other_rx) = manager.register_client(
+            "values-other".to_string(),
+            ClientSubscription {
+                need_values: true,
+                ..Default::default()
+            },
+        );
+
+        manager.send_values_snapshot_to_client(&subscribed);
+
+        assert!(matches!(
+            subscribed_rx.try_recv(),
+            Ok(PushMessage::ValuesUpdate(_))
+        ));
+        assert!(other_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn send_scripts_snapshot_targets_only_requested_client() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let script_manager =
+            crate::handlers::scripts::ScriptManager::new(temp_dir.path().join("scripts"));
+        script_manager.init().await.unwrap();
+        script_manager
+            .engine()
+            .save_script(ScriptType::Request, "cli-live", "function onRequest() {}")
+            .await
+            .unwrap();
+        let state = Arc::new(AdminState::new(0).with_script_manager(script_manager));
+        let manager = Arc::new(PushManager::new(state));
+        let (subscribed, mut subscribed_rx) = manager.register_client(
+            "scripts-target".to_string(),
+            ClientSubscription {
+                need_scripts: true,
+                ..Default::default()
+            },
+        );
+        let (_other, mut other_rx) = manager.register_client(
+            "scripts-other".to_string(),
+            ClientSubscription {
+                need_scripts: true,
+                ..Default::default()
+            },
+        );
+
+        manager.send_scripts_snapshot_to_client(&subscribed).await;
+
+        match subscribed_rx.try_recv() {
+            Ok(PushMessage::ScriptsUpdate(data)) => {
+                assert!(data.request.iter().any(|script| script.name == "cli-live"));
+            }
+            other => panic!("expected targeted ScriptsUpdate, got {:?}", other),
+        }
+        assert!(other_rx.try_recv().is_err());
     }
 
     #[tokio::test]

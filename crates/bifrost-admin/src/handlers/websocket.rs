@@ -21,6 +21,24 @@ const WS_PONG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const WS_TEXT_MAX_BYTES: usize = 64 * 1024;
 const HISTORY_LIMIT_MAX: usize = 500;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InitialSubscriptionNeeds {
+    traffic: bool,
+    values: bool,
+    scripts: bool,
+}
+
+fn initial_subscription_needs(
+    previous: &ClientSubscription,
+    next: &ClientSubscription,
+) -> InitialSubscriptionNeeds {
+    InitialSubscriptionNeeds {
+        traffic: next.need_traffic && !previous.need_traffic,
+        values: next.need_values && !previous.need_values,
+        scripts: next.need_scripts && !previous.need_scripts,
+    }
+}
+
 pub async fn handle_websocket_upgrade(
     req: Request<Incoming>,
     push_manager: SharedPushManager,
@@ -255,8 +273,8 @@ async fn handle_websocket_connection<S>(
                         {
                             let subscription = sanitize_subscription(subscription);
                             let previous = client_clone.get_subscription();
-                            let needs_initial_traffic =
-                                subscription.need_traffic && !previous.need_traffic;
+                            let initial_needs =
+                                initial_subscription_needs(&previous, &subscription);
                             let new_settings_scopes: Vec<String> = subscription
                                 .settings_scopes
                                 .iter()
@@ -264,8 +282,16 @@ async fn handle_websocket_connection<S>(
                                 .cloned()
                                 .collect();
                             client_clone.update_subscription(subscription);
-                            if needs_initial_traffic {
+                            if initial_needs.traffic {
                                 push_manager_receiver.send_initial_traffic(&client_clone);
+                            }
+                            if initial_needs.values {
+                                push_manager_receiver.send_values_snapshot_to_client(&client_clone);
+                            }
+                            if initial_needs.scripts {
+                                push_manager_receiver
+                                    .send_scripts_snapshot_to_client(&client_clone)
+                                    .await;
                             }
                             for scope in new_settings_scopes {
                                 push_manager_receiver
@@ -340,4 +366,56 @@ fn sanitize_subscription(mut sub: ClientSubscription) -> ClientSubscription {
     sub.settings_scopes.sort();
     sub.settings_scopes.dedup();
     sub
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_snapshot_is_requested_only_on_false_to_true_transition() {
+        let previous = ClientSubscription::default();
+        let next = ClientSubscription {
+            need_traffic: true,
+            need_values: true,
+            need_scripts: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            initial_subscription_needs(&previous, &next),
+            InitialSubscriptionNeeds {
+                traffic: true,
+                values: true,
+                scripts: true,
+            }
+        );
+        assert_eq!(
+            initial_subscription_needs(&next, &next),
+            InitialSubscriptionNeeds {
+                traffic: false,
+                values: false,
+                scripts: false,
+            }
+        );
+    }
+
+    #[test]
+    fn disabling_subscription_does_not_request_snapshot() {
+        let previous = ClientSubscription {
+            need_values: true,
+            need_scripts: true,
+            ..Default::default()
+        };
+        let next = ClientSubscription::default();
+
+        assert_eq!(
+            initial_subscription_needs(&previous, &next),
+            InitialSubscriptionNeeds {
+                traffic: false,
+                values: false,
+                scripts: false,
+            }
+        );
+    }
 }

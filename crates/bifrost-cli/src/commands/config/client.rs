@@ -163,6 +163,47 @@ impl ConfigApiClient {
         self.post(&path, &serde_json::json!({ "new_name": new_name }))
     }
 
+    pub fn get_script(&self, script_type: &str, name: &str) -> Result<serde_json::Value, String> {
+        let path = format!("/scripts/{}/{}", script_type, urlencoding::encode(name));
+        self.get(&path)
+    }
+
+    pub fn save_script(
+        &self,
+        script_type: &str,
+        name: &str,
+        content: &str,
+    ) -> Result<serde_json::Value, String> {
+        let path = format!("/scripts/{}/{}", script_type, urlencoding::encode(name));
+        self.put(&path, &serde_json::json!({ "content": content }))
+    }
+
+    pub fn delete_script(
+        &self,
+        script_type: &str,
+        name: &str,
+    ) -> Result<serde_json::Value, String> {
+        let path = format!("/scripts/{}/{}", script_type, urlencoding::encode(name));
+        self.delete(&path)
+    }
+
+    pub fn upsert_values(
+        &self,
+        values: &std::collections::HashMap<String, String>,
+    ) -> Result<serde_json::Value, String> {
+        self.put("/values", &serde_json::json!({ "values": values }))
+    }
+
+    pub fn update_value(&self, name: &str, value: &str) -> Result<serde_json::Value, String> {
+        let path = format!("/values/{}", urlencoding::encode(name));
+        self.put(&path, &serde_json::json!({ "value": value }))
+    }
+
+    pub fn delete_value(&self, name: &str) -> Result<serde_json::Value, String> {
+        let path = format!("/values/{}", urlencoding::encode(name));
+        self.delete(&path)
+    }
+
     pub fn get_access_mode(&self) -> Result<serde_json::Value, String> {
         self.get("/whitelist/mode")
     }

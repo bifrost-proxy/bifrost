@@ -33,7 +33,7 @@
 | [search-include-body.md](./search-include-body.md) | Search Include Body/Headers 与 Traffic Batch Get | 6 | `bifrost search --include` 在 JSON/NDJSON 输出中保留 body/header payload，`traffic get --ids` 批量获取 body/header 并处理缺失 id 与上限错误 |
 | [traffic-replay.md](./traffic-replay.md) | Traffic Export 与 Replay | 6 | `traffic export` 导出 curl/HAR，`traffic replay` 支持 JSON Patch、refresh-auth、旧字段兼容，并验证 admin `success:false` 时 CLI 非 0 退出 |
 | [cli-ca-cert.md](./cli-ca-cert.md) | CLI CA 证书管理 | 12 | ca generate/export/info/install 命令，含强制重新生成、指定路径导出、证书格式验证 |
-| [cli-values-scripts.md](./cli-values-scripts.md) | CLI Values 与 Scripts | 30 | value list/add/show/set/update/delete/import 和 script list/add/show/get/update/run/rename/delete |
+| [cli-values-scripts.md](./cli-values-scripts.md) | CLI Values 与 Scripts | 32 | value/script 完整生命周期、运行态 CLI→Admin API 即时同步、异常 fail-closed、离线兼容和资源消耗回归 |
 | [cli-whitelist.md](./cli-whitelist.md) | CLI 白名单管理 | 31 | whitelist 全子命令：list/add/remove/allow-lan/status/mode/pending/approve/reject/clear-pending/add-temporary/remove-temporary |
 | [cli-admin.md](./cli-admin.md) | CLI Admin 管理 | 14 | admin remote status/enable/disable、admin passwd、admin revoke-all、admin audit |
 | [cli-config.md](./cli-config.md) | CLI 配置管理 | 22 | config show/get/set/add/remove/reset/clear-cache/disconnect/export/connections/memory |
@@ -135,7 +135,7 @@
 |------|---------|-----------|------|
 | [api-rules.md](./api-rules.md) | Rules API | 17 | 规则 CRUD、启用/禁用、特殊字符名称、重复创建、rule_count 验证，以及保存前语法检查报告、422 不落盘、更新失败保留旧内容和 allow_invalid 显式保存 |
 | [api-traffic.md](./api-traffic.md) | Traffic API | 26 | 流量列表/详情/Body、增量更新、多维度过滤、WebSocket 帧、SSE 流、live SSE 详情流不依赖连接 EOF 回归 |
-| [api-values.md](./api-values.md) | Values API | 15 | Values CRUD、列表查询、边界条件、错误处理 |
+| [api-values.md](./api-values.md) | Values API | 17 | Values CRUD、列表查询、批量 upsert、边界条件、错误处理 |
 | [api-whitelist.md](./api-whitelist.md) | Whitelist API | 27 | 白名单增删、模式切换、allow-lan、临时白名单、待授权管理、SSE 事件流 |
 | [api-cert.md](./api-cert.md) | Cert API | 8 | 证书信息、CA 下载、QR 码生成 |
 | [mobile-device-trust.md](./mobile-device-trust.md) | Mobile Device Trust Wizard | 25 | fake cfgutil 脚本关闭文件句柄后再执行，避免 Linux coverage 下 iOS Configurator 测试因 Text file busy 与锁 poisoned 失败；普通手机证书安装向导、Availability Check 固定公开 URL、`trust_probe`/`mobile_devices` WebSocket push 状态更新、顶部直接展示已连接待检查移动设备、设备公开页高亮目标代理 IP/端口并在多 IP 环境优先推荐当前页面 URL host、浏览器 localStorage 设备 ID、多设备并发状态列表、浏览器 HTTPS probe 边界和代理授权检查、桌面端 Availability QR 不破图、代理配置成功无需刷新显示在管理端、关闭手机代理后状态自动回落、手机页轮询结果不变时不闪烁抖动、HTTP netcheck 经代理 absolute-form 不计为直连通过但 HTTPS trust probe 可经真实 TLS 路径转绿、公开页脚本启动、设备上报、复制按钮和 origin-form 代理配置探针回归、代理交互式授权弹窗简化为 Allow/Deny 授权操作、本机 CA WebUI 一键安装和状态自动刷新、macOS 管理员授权 fallback、Android ADB 检测与 guided install 边界、Android 当前 CA 状态检测、iOS USB 检测、iOS mobileconfig/QR、实验性 iOS Wi-Fi Proxy Profile 移除回归、LAN 公开下载免授权、公开 proxy QR 免授权、Settings Certificate UI 左侧固定导航与单列章节、iOS 统一图文安装与信任流程、Apple Configurator 与扫码/文件 profile 送达方式、cfgutil 缺失时的按钮禁用原因和 Mac App Store 入口、手机端交互回归、全局设备连接提示、目标设备自动滚动/高亮/安装按钮动画、CLI `ca install --mobile` / `ca install --ios` 和浅色/暗色主题验证 |
@@ -146,7 +146,7 @@
 | [trustworthy-traffic-metrics.md](./trustworthy-traffic-metrics.md) | Trustworthy Traffic Metrics | 10 | 真实 HTTP、Mock、SSE、临时端口、WebSocket、SOCKS5、HTTPS CONNECT、QPS、上下行速率、固定容量实时统计、Traffic detail 与 host/app 分布均使用可信 upload/download 字段 |
 | [api-system.md](./api-system.md) | System API | 16 | 系统信息、概览、内存诊断 |
 | [api-scripts.md](./api-scripts.md) | Scripts API | 30 | 脚本 CRUD、重命名、运行测试、名称校验、内置脚本保护 |
-| [api-push.md](./api-push.md) | Push WebSocket API | 11 | WebSocket 推送连接、订阅参数、流量/指标/概览实时推送、经代理访问管理端回归 |
+| [api-push.md](./api-push.md) | Push WebSocket API | 12 | WebSocket 推送连接、订阅参数、流量/指标/概览实时推送、经代理访问管理端与 Values/Scripts 热订阅快照回归 |
 | [api-replay.md](./api-replay.md) | Replay API | 23 | 重放集合管理、请求 CRUD、执行重放、历史查看、路径前缀转发回归、响应 Body 规则 resMerge 回归、Replay request/response 规则覆盖回归、Replay 规则 Shell E2E 回归、Replay Request/Response Script 与 BPDecode 回归、Replay SSE timeout 边界与 CI 早断重试回归 |
 | [api-group.md](./api-group.md) | Group API | 13 | 团队组列表/详情、团队规则 CRUD、权限校验 |
 | [api-search.md](./api-search.md) | Search API | 16 | 全文搜索、搜索范围、过滤条件、分页、流式搜索 |

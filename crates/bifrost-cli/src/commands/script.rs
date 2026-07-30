@@ -8,6 +8,7 @@ use bifrost_script::{
 use bifrost_storage::{ConfigManager, ValuesStorage};
 
 use crate::cli::ScriptCommands;
+use crate::commands::config::client::ConfigApiClient;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ScriptSelection {
@@ -237,7 +238,81 @@ fn print_run_result(result: &ScriptExecutionResult) -> bifrost_core::Result<()> 
     Ok(())
 }
 
+fn handle_online_script_command(
+    action: ScriptCommands,
+    client: &ConfigApiClient,
+) -> bifrost_core::Result<()> {
+    match action {
+        ScriptCommands::Add {
+            r#type,
+            name,
+            content,
+            file,
+        } => {
+            let script_type = parse_script_type(&r#type)?;
+            let script_content = read_script_content(content, file)?;
+            client
+                .save_script(&r#type, &name, &script_content)
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!("Script '{}' ({}) saved successfully.", name, script_type);
+        }
+        ScriptCommands::Update {
+            r#type,
+            name,
+            content,
+            file,
+        } => {
+            let script_type = parse_script_type(&r#type)?;
+            let script_content = read_script_content(content, file)?;
+            client
+                .get_script(&r#type, &name)
+                .map_err(bifrost_core::BifrostError::Config)?;
+            client
+                .save_script(&r#type, &name, &script_content)
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!("Script '{}' ({}) updated successfully.", name, script_type);
+        }
+        ScriptCommands::Delete { r#type, name } => {
+            let script_type = parse_script_type(&r#type)?;
+            client
+                .delete_script(&r#type, &name)
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!("Script '{}' ({}) deleted successfully.", name, script_type);
+        }
+        ScriptCommands::Rename {
+            r#type,
+            name,
+            new_name,
+        } => {
+            parse_script_type(&r#type)?;
+            client
+                .rename_script(&r#type, &name, &new_name)
+                .map_err(bifrost_core::BifrostError::Config)?;
+            println!("Script '{}/{}' renamed to '{}'.", r#type, name, new_name);
+        }
+        ScriptCommands::List { .. } | ScriptCommands::Show { .. } | ScriptCommands::Run { .. } => {
+            return Err(bifrost_core::BifrostError::Config(
+                "internal error: read-only script command routed as an online mutation".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn handle_script_command(action: ScriptCommands) -> bifrost_core::Result<()> {
+    let mutates = matches!(
+        &action,
+        ScriptCommands::Add { .. }
+            | ScriptCommands::Update { .. }
+            | ScriptCommands::Delete { .. }
+            | ScriptCommands::Rename { .. }
+    );
+    if mutates {
+        if let Some(client) = super::config::runtime::live_config_api_client()? {
+            return handle_online_script_command(action, &client);
+        }
+    }
+
     let data_dir = bifrost_storage::data_dir();
     let scripts_dir = data_dir.join("scripts");
     let engine = ScriptEngine::new(ScriptEngineConfig {
@@ -425,12 +500,14 @@ pub fn handle_script_command(action: ScriptCommands) -> bifrost_core::Result<()>
             name,
             new_name,
         } => {
-            let port = crate::process::read_runtime_port().unwrap_or(9900);
-            let client = super::config::client::ConfigApiClient::new("127.0.0.1", port);
-
-            client
-                .rename_script(&r#type, &name, &new_name)
-                .map_err(bifrost_core::BifrostError::Config)?;
+            let script_type = parse_script_type(&r#type)?;
+            rt.block_on(engine.rename_script(script_type, &name, &new_name))
+                .map_err(|e| {
+                    bifrost_core::BifrostError::Config(format!(
+                        "failed to rename {} script '{}' to '{}': {e}",
+                        script_type, name, new_name
+                    ))
+                })?;
 
             println!("Script '{}/{}' renamed to '{}'.", r#type, name, new_name);
         }

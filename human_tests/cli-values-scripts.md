@@ -523,6 +523,52 @@
 
 ---
 
+### TC-CVS-31：运行中 daemon 的 CLI 写入通过 API 即时同步
+
+**操作步骤**：
+1. 在仓库根目录执行专项真实链路脚本：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=1 \
+     bash e2e-tests/tests/test_cli_resource_api_live_sync.sh
+   ```
+2. 观察脚本依次验证 Values / Scripts 的 active push、tab 重订阅快照、
+   update/delete/rename/import、runtime 异常和离线回退。
+
+**预期结果**：
+- 真实隔离 daemon 启动，PID、监听端口和 `/_bifrost/api/system/overview` 三层就绪。
+- `value add/update/delete/import` 与 `script add/update/rename/delete` 执行后，
+  Admin API 无等待即可读到最新结果。
+- 已订阅客户端收到 CLI 写入触发的 `values_update` / `scripts_update`。
+- 客户端先关闭订阅、CLI 写入、再开启订阅时立即收到包含新资源的全量快照。
+- runtime PID 仍存活但 Admin API 无法验证时，CLI 返回非零并包含
+  `refusing direct file writes`，`SHOULD_NOT_WRITE.txt` 不存在。
+- daemon 停止后，CLI Values / Scripts 仍可离线写入当前测试数据目录。
+- 脚本最终输出 `[cli-resource-live-sync] PASS`。
+
+---
+
+### TC-CVS-32：在线同步无明显常驻资源回归
+
+**操作步骤**：
+1. 执行 TC-CVS-31 的专项脚本。
+2. 查看脚本输出中的 `RSS before=... after=... delta=...`。
+3. 检查本次 diff 不包含新增后台轮询、文件 watcher、timer 或无界 channel。
+
+**预期结果**：
+- 完成 CLI 写入、active push 和 tab 重订阅后，daemon RSS 增量不超过
+  `32768 KiB`。
+- 实现只增加按用户动作触发的 loopback API 请求和 `false -> true` 时的单次快照；
+  空闲态没有新增 CPU 工作。
+
+---
+
+## 本次执行记录
+
+| 日期 | 用例 | 结果 | 实际结果 |
+| --- | --- | --- | --- |
+| 2026-07-30 | TC-CVS-31 | 通过 | 使用当前分支 `target/debug/bifrost` 在动态端口和 `mktemp` 数据目录执行专项脚本；Values / Scripts 的 active push、热订阅快照、CRUD、批量 import、fail-closed 与离线写入全部通过，脚本输出 `PASS`。 |
+| 2026-07-30 | TC-CVS-32 | 通过 | 同一真实链路观测 daemon RSS 从 `94064 KiB` 到 `100704 KiB`，增量 `6640 KiB`，低于 `32768 KiB` 门禁；代码检查确认无新增 timer、watcher 或轮询。 |
+
 ## 清理
 
 测试完成后清理临时数据和文件：
