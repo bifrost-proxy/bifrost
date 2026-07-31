@@ -813,7 +813,7 @@ fn build_active_summary_snapshot(state: &SharedAdminState) -> (ActiveSummaryResp
         })
         .collect();
 
-    let reverse_cache = reverse_group_cache_for_dirs(&state, &group_dirs);
+    let reverse_cache = reverse_group_cache_for_dirs(state, &group_dirs);
 
     let uncached_dirs: Vec<String> = group_dirs
         .iter()

@@ -57,25 +57,13 @@ pub type SharedTrayLaunchCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 const GROUP_CACHE_RETRY_BASE_SECS: u64 = 5;
 const GROUP_CACHE_RETRY_MAX_SECS: u64 = 300;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct GroupCacheResolutionState {
     generation: u64,
     in_flight_generation: Option<u64>,
     resolved_generation: Option<u64>,
     consecutive_failures: u32,
     retry_not_before: Option<std::time::Instant>,
-}
-
-impl Default for GroupCacheResolutionState {
-    fn default() -> Self {
-        Self {
-            generation: 0,
-            in_flight_generation: None,
-            resolved_generation: None,
-            consecutive_failures: 0,
-            retry_not_before: None,
-        }
-    }
 }
 
 impl GroupCacheResolutionState {
