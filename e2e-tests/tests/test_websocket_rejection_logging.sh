@@ -58,7 +58,7 @@ if [[ ! -x "$BIFROST_BIN" ]]; then
 fi
 
 render_rule_fixture_to_file \
-    "$ROOT_DIR/e2e-tests/rules/regression/websocket_upstream_rejection.txt" \
+    "$ROOT_DIR/e2e-tests/test_data/websocket_upstream_rejection.txt" \
     "$RULE_FILE" \
     "UPSTREAM_PORT=$UPSTREAM_PORT"
 
