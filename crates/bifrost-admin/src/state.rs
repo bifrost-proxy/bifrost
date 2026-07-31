@@ -1954,6 +1954,27 @@ mod tests {
         assert_eq!(state.in_flight_generation, Some(current_generation));
     }
 
+    #[test]
+    fn public_group_cache_resolved_setter_clears_retry_state() {
+        let dir = create_test_dir();
+        let state = isolated_test_state(&dir);
+        let generation = state
+            .try_begin_group_cache_resolution()
+            .expect("resolution should start");
+        assert!(state
+            .finish_group_cache_resolution(generation, false)
+            .is_some());
+
+        state.set_group_cache_resolved();
+        assert!(state.is_group_cache_resolved());
+        assert_eq!(state.try_begin_group_cache_resolution(), None);
+
+        state.clear_group_cache_resolved();
+        assert!(!state.is_group_cache_resolved());
+        assert!(state.try_begin_group_cache_resolution().is_some());
+        cleanup_test_dir(&dir);
+    }
+
     fn create_test_dir() -> PathBuf {
         let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         let dir = env::temp_dir().join(format!(

@@ -866,23 +866,12 @@ async fn active_summary(state: SharedAdminState) -> Response<BoxBody> {
     }
 
     let snapshot_state = state.clone();
-    let (response, uncached_dirs) =
-        match tokio::task::spawn_blocking(move || build_active_summary_snapshot(&snapshot_state))
-            .await
-        {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                tracing::error!(
-                    target: "bifrost_admin::rules",
-                    error = %error,
-                    "active summary snapshot task failed"
-                );
-                return error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to build active rules summary",
-                );
-            }
-        };
+    let snapshot =
+        run_active_summary_worker(move || build_active_summary_snapshot(&snapshot_state)).await;
+    let (response, uncached_dirs) = match active_summary_worker_result(snapshot) {
+        Ok(snapshot) => snapshot,
+        Err(response) => return *response,
+    };
 
     if !uncached_dirs.is_empty() {
         tracing::debug!(
@@ -947,6 +936,30 @@ async fn active_summary(state: SharedAdminState) -> Response<BoxBody> {
     }
 
     json_response(&response)
+}
+
+async fn run_active_summary_worker<T, F>(worker: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(worker)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn active_summary_worker_result<T>(result: Result<T, String>) -> Result<T, Box<Response<BoxBody>>> {
+    result.map_err(|error| {
+        tracing::error!(
+            target: "bifrost_admin::rules",
+            error = %error,
+            "active summary snapshot task failed"
+        );
+        Box::new(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to build active rules summary",
+        ))
+    })
 }
 
 fn truncate_preview(value: &str, max_len: usize) -> String {
@@ -1848,6 +1861,18 @@ mod tests {
         assert!(summary
             .merged_content
             .contains("group.example.com statusCode://203"));
+    }
+
+    #[tokio::test]
+    async fn active_summary_worker_maps_panics_to_stable_error_response() {
+        assert_eq!(run_active_summary_worker(|| 42).await.unwrap(), 42);
+        let error = run_active_summary_worker(|| -> usize { panic!("snapshot panic") })
+            .await
+            .unwrap_err();
+        let response = active_summary_worker_result::<usize>(Err(error)).unwrap_err();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = (*response).into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("Failed to build active rules summary"));
     }
 
     #[test]

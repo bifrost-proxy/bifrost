@@ -7,7 +7,7 @@ use tokio::time::sleep;
 use super::{
     error_response, json_response, json_response_with_status, method_not_allowed, BoxBody,
 };
-use crate::state::SharedAdminState;
+use crate::state::{SharedAdminState, SharedSystemProxyManager};
 use bifrost_core::ShellProxyManager;
 use bifrost_core::SystemProxyManager;
 use bifrost_storage::{NewSystemProxyConfig as SystemProxyConfig, SystemProxyConfigUpdate};
@@ -206,32 +206,114 @@ async fn get_system_proxy_status(state: SharedAdminState) -> Response<BoxBody> {
         return json_response(&SystemProxyStatus::unsupported(&config));
     }
 
-    let manager = state.system_proxy_manager.clone();
-    let status_result = tokio::task::spawn_blocking(move || {
-        let proxy = SystemProxyManager::get_current().map_err(|error| error.to_string())?;
-        let managed_by_bifrost = manager
-            .as_ref()
-            .map(|manager| manager.blocking_read().is_current_managed(&proxy))
-            .unwrap_or(false);
-        Ok::<_, String>((proxy, managed_by_bifrost))
-    })
-    .await;
+    get_supported_system_proxy_status(state.system_proxy_manager.clone(), config).await
+}
 
-    match status_result {
-        Ok(Ok((proxy, managed_by_bifrost))) => {
+async fn get_supported_system_proxy_status(
+    manager: Option<SharedSystemProxyManager>,
+    config: SystemProxyConfig,
+) -> Response<BoxBody> {
+    let result =
+        run_system_proxy_worker("status", move || load_current_system_proxy_status(manager)).await;
+    system_proxy_status_response(result, &config)
+}
+
+async fn run_system_proxy_worker<T, F>(operation: &'static str, worker: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(worker)
+        .await
+        .map_err(|error| format!("System proxy {operation} worker failed: {error}"))?
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn load_current_system_proxy_status(
+    manager: Option<SharedSystemProxyManager>,
+) -> Result<(bifrost_core::ProxyBackup, bool), String> {
+    let proxy = SystemProxyManager::get_current()
+        .map_err(|error| format!("Failed to get system proxy: {error}"))?;
+    let managed_by_bifrost = manager
+        .as_ref()
+        .map(|manager| manager.blocking_read().is_current_managed(&proxy))
+        .unwrap_or(false);
+    Ok((proxy, managed_by_bifrost))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn load_current_system_proxy_status(
+    _manager: Option<SharedSystemProxyManager>,
+) -> Result<(bifrost_core::ProxyBackup, bool), String> {
+    Err("Failed to get system proxy: unsupported platform".to_string())
+}
+
+fn system_proxy_status_response(
+    result: Result<(bifrost_core::ProxyBackup, bool), String>,
+    config: &SystemProxyConfig,
+) -> Response<BoxBody> {
+    match result {
+        Ok((proxy, managed_by_bifrost)) => {
             let mut status = SystemProxyStatus::from_proxy(proxy, managed_by_bifrost);
-            status.apply_config(&config);
+            status.apply_config(config);
             json_response(&status)
         }
-        Ok(Err(error)) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to get system proxy: {}", error),
-        ),
-        Err(error) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("System proxy status worker failed: {}", error),
-        ),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn apply_system_proxy_blocking(
+    manager: SharedSystemProxyManager,
+    enabled: bool,
+    host: &'static str,
+    target_port: u16,
+    bypass: String,
+) -> Result<(), String> {
+    let mut manager = manager.blocking_write();
+    let result = if enabled {
+        manager.enable(host, target_port, Some(&bypass))
+    } else {
+        manager
+            .disable_if_matches_explicit(host, target_port)
+            .map(|_| ())
+    };
+
+    match &result {
+        Ok(()) => result.map_err(|error| error.to_string()),
+        Err(error) if error.to_string().contains("RequiresAdmin") => {
+            tracing::info!("Permission denied, trying GUI authorization...");
+            #[cfg(target_os = "macos")]
+            {
+                if enabled {
+                    manager
+                        .enable_with_gui_auth(host, target_port, Some(&bypass))
+                        .map_err(|error| error.to_string())
+                } else {
+                    manager
+                        .disable_if_matches_explicit_with_gui_auth(host, target_port)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                result.map_err(|error| error.to_string())
+            }
+        }
+        Err(_) => result.map_err(|error| error.to_string()),
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn apply_system_proxy_blocking(
+    _manager: SharedSystemProxyManager,
+    _enabled: bool,
+    _host: &'static str,
+    _target_port: u16,
+    _bypass: String,
+) -> Result<(), String> {
+    Err("System proxy is not supported on this platform".to_string())
 }
 
 fn read_system_proxy_status_blocking(
@@ -342,45 +424,10 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
 
         let manager = manager.clone();
         let enabled = request.enabled;
-        let bypass_for_worker = bypass.clone();
-        let final_result = tokio::task::spawn_blocking(move || {
-            let mut manager = manager.blocking_write();
-            let result = if enabled {
-                manager.enable(host, target_port, Some(&bypass_for_worker))
-            } else {
-                manager
-                    .disable_if_matches_explicit(host, target_port)
-                    .map(|_| ())
-            };
-
-            match &result {
-                Ok(()) => result.map_err(|error| error.to_string()),
-                Err(error) if error.to_string().contains("RequiresAdmin") => {
-                    tracing::info!("Permission denied, trying GUI authorization...");
-                    #[cfg(target_os = "macos")]
-                    {
-                        if enabled {
-                            manager
-                                .enable_with_gui_auth(host, target_port, Some(&bypass_for_worker))
-                                .map_err(|error| error.to_string())
-                        } else {
-                            manager
-                                .disable_if_matches_explicit_with_gui_auth(host, target_port)
-                                .map(|_| ())
-                                .map_err(|error| error.to_string())
-                        }
-                    }
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        result.map_err(|error| error.to_string())
-                    }
-                }
-                Err(_) => result.map_err(|error| error.to_string()),
-            }
+        let final_result = run_system_proxy_worker("operation", move || {
+            apply_system_proxy_blocking(manager, enabled, host, target_port, bypass)
         })
-        .await
-        .map_err(|error| format!("System proxy operation worker failed: {error}"))
-        .and_then(|result| result);
+        .await;
 
         match final_result {
             Ok(()) => {
@@ -825,6 +872,7 @@ async fn get_proxy_address_info(state: SharedAdminState) -> Response<BoxBody> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body_util::BodyExt;
 
     #[test]
     fn disable_verification_accepts_external_proxy_left_enabled() {
@@ -895,5 +943,89 @@ mod tests {
         assert_eq!(status.port, 0);
         assert!(status.configured_enabled);
         assert_eq!(status.configured_bypass, "example.com");
+    }
+
+    #[tokio::test]
+    async fn system_proxy_worker_preserves_results_and_reports_panics() {
+        assert_eq!(
+            run_system_proxy_worker("test", || Ok::<_, String>(42))
+                .await
+                .unwrap(),
+            42
+        );
+        assert_eq!(
+            run_system_proxy_worker("test", || Err::<(), _>("worker error".to_string()))
+                .await
+                .unwrap_err(),
+            "worker error"
+        );
+        let panic_error =
+            run_system_proxy_worker("test", || -> Result<(), String> { panic!("worker panic") })
+                .await
+                .unwrap_err();
+        assert!(panic_error.starts_with("System proxy test worker failed:"));
+    }
+
+    #[tokio::test]
+    async fn system_proxy_status_response_preserves_success_and_error_contracts() {
+        let config = SystemProxyConfig {
+            enabled: true,
+            bypass: "configured.example".to_string(),
+            auto_enable: false,
+        };
+        let success = system_proxy_status_response(
+            Ok((
+                bifrost_core::ProxyBackup {
+                    enable: true,
+                    host: "127.0.0.1".to_string(),
+                    port: 9900,
+                    bypass: "localhost".to_string(),
+                },
+                true,
+            )),
+            &config,
+        );
+        assert_eq!(success.status(), StatusCode::OK);
+        let body = success.into_body().collect().await.unwrap().to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["enabled"], true);
+        assert_eq!(value["managed_by_bifrost"], true);
+        assert_eq!(value["configured_enabled"], true);
+        assert_eq!(value["configured_bypass"], "configured.example");
+
+        let failure = system_proxy_status_response(Err("status failed".to_string()), &config);
+        assert_eq!(failure.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = failure.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("status failed"));
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[tokio::test]
+    async fn unsupported_platform_workers_return_errors_without_os_calls() {
+        assert!(load_current_system_proxy_status(None)
+            .unwrap_err()
+            .contains("unsupported platform"));
+        let manager = std::sync::Arc::new(tokio::sync::RwLock::new(SystemProxyManager::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+        )));
+        assert!(apply_system_proxy_blocking(
+            manager,
+            true,
+            "127.0.0.1",
+            9900,
+            "localhost".to_string(),
+        )
+        .unwrap_err()
+        .contains("not supported"));
+
+        let response = get_supported_system_proxy_status(None, SystemProxyConfig::default()).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let status = read_system_proxy_status("127.0.0.1", 9900).await.unwrap();
+        assert!(!status.supported);
+        let verified = wait_for_system_proxy_status(false, "127.0.0.1", 9900)
+            .await
+            .unwrap();
+        assert!(!verified.supported);
     }
 }

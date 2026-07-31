@@ -170,6 +170,25 @@ mod tests {
         }
     }
 
+    struct BacktraceBrokenPipeWriter;
+
+    impl Write for BacktraceBrokenPipeWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if buf
+                .windows("Backtrace".len())
+                .any(|part| part == b"Backtrace")
+            {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed pipe"))
+            } else {
+                Ok(buf.len())
+            }
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn panic_diagnostic_propagates_broken_pipe_without_panicking() {
         let result = write_panic_diagnostic(
@@ -196,6 +215,19 @@ mod tests {
         .unwrap();
         let rendered = String::from_utf8(output).unwrap();
         assert!(rendered.contains("Backtrace:"));
+    }
+
+    #[test]
+    fn panic_diagnostic_propagates_broken_pipe_while_writing_backtrace() {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let result = write_panic_diagnostic(
+            &mut BacktraceBrokenPipeWriter,
+            "worker",
+            "source.rs:1:1",
+            "boom",
+            Some(&backtrace),
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
     }
 
     #[tokio::test]

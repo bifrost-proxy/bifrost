@@ -506,6 +506,22 @@ fn wait_for_reconcile(stop_flag: &AtomicBool, bifrost_dir: &Path, interval: Dura
     false
 }
 
+fn wait_after_converged_system_proxy(
+    stop_flag: &AtomicBool,
+    bifrost_dir: &Path,
+    interval: Duration,
+    proxy_host: &str,
+    proxy_port: u16,
+) -> bool {
+    tracing::debug!(
+        target: "bifrost_cli::startup",
+        host = %proxy_host,
+        port = proxy_port,
+        "system proxy remains converged; full reconcile skipped"
+    );
+    wait_for_reconcile(stop_flag, bifrost_dir, interval)
+}
+
 fn inspect_system_proxy_ownership(proxy_host: &str, proxy_port: u16) -> SystemProxyOwnership {
     match bifrost_core::SystemProxyManager::get_current() {
         Ok(current) if !current.enable => SystemProxyOwnership::Disabled,
@@ -619,14 +635,14 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
                         applied_by_this_runtime = true;
                         enabled_flag.store(true, Ordering::Release);
                         if skip_full_reconcile {
-                            tracing::debug!(
-                                target: "bifrost_cli::startup",
-                                host = %proxy_host,
-                                port = proxy_port,
-                                "system proxy remains converged; full reconcile skipped"
-                            );
                             let interval = system_proxy_reconcile_interval();
-                            if wait_for_reconcile(&stop_flag, &bifrost_dir, interval) {
+                            if wait_after_converged_system_proxy(
+                                &stop_flag,
+                                &bifrost_dir,
+                                interval,
+                                &proxy_host,
+                                proxy_port,
+                            ) {
                                 return;
                             }
                             continue;
@@ -5284,6 +5300,39 @@ mod coverage_boost {
             Duration::from_secs(1),
         ));
         assert!(stop_flag.load(Ordering::Acquire));
+
+        let stop_flag = AtomicBool::new(false);
+        assert!(!wait_for_reconcile(
+            &stop_flag,
+            temp_dir.path(),
+            Duration::from_millis(1),
+        ));
+
+        let stop_flag = AtomicBool::new(false);
+        bifrost_core::write_system_proxy_shutdown_mode(
+            temp_dir.path(),
+            bifrost_core::SystemProxyShutdownMode::ForegroundCleanup,
+        )
+        .unwrap();
+        assert!(wait_for_reconcile(
+            &stop_flag,
+            temp_dir.path(),
+            Duration::from_secs(1),
+        ));
+        assert!(stop_flag.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn converged_system_proxy_wait_preserves_stop_result() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let stop_flag = AtomicBool::new(false);
+        assert!(!wait_after_converged_system_proxy(
+            &stop_flag,
+            temp_dir.path(),
+            Duration::ZERO,
+            "127.0.0.1",
+            9900,
+        ));
     }
 
     #[test]
