@@ -1000,6 +1000,13 @@ impl SystemProxyManager {
         let enable = http_enable || https_enable || socks_enable;
         let bypass = bypass_list.join(",");
 
+        if !enable && (host.is_empty() || port == 0) {
+            if let Some((stored_host, stored_port)) = macos_stored_proxy_endpoint() {
+                host = stored_host;
+                port = stored_port;
+            }
+        }
+
         Some(Sysproxy {
             enable,
             host,
@@ -1738,25 +1745,52 @@ fn macos_service_proxy_matches(service: &str, getter: &str, host: &str, port: u1
         )));
     }
 
-    let text = String::from_utf8_lossy(&output.stdout);
+    let (enabled, actual_host, actual_port) =
+        parse_macos_networksetup_proxy(&String::from_utf8_lossy(&output.stdout));
+
+    Ok(enabled && actual_port == port && proxy_hosts_match(&actual_host, host))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_macos_networksetup_proxy(output: &str) -> (bool, String, u16) {
     let mut enabled = false;
-    let mut actual_host = String::new();
-    let mut actual_port = 0_u16;
-    for line in text.lines() {
+    let mut host = String::new();
+    let mut port = 0_u16;
+    for line in output.lines() {
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
-        let key = key.trim();
-        let value = value.trim();
-        match key {
-            "Enabled" => enabled = value.eq_ignore_ascii_case("yes"),
-            "Server" => actual_host = value.to_string(),
-            "Port" => actual_port = value.parse().unwrap_or(0),
+        match key.trim() {
+            "Enabled" => enabled = value.trim().eq_ignore_ascii_case("yes"),
+            "Server" => host = value.trim().to_string(),
+            "Port" => port = value.trim().parse().unwrap_or(0),
             _ => {}
         }
     }
+    (enabled, host, port)
+}
 
-    Ok(enabled && actual_port == port && proxy_hosts_match(&actual_host, host))
+#[cfg(target_os = "macos")]
+fn macos_stored_proxy_endpoint() -> Option<(String, u16)> {
+    use std::process::Command;
+
+    for service in list_macos_services().ok()? {
+        for getter in ["-getwebproxy", "-getsecurewebproxy"] {
+            let output = Command::new("networksetup")
+                .args([getter, &service])
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                continue;
+            }
+            let (_, host, port) =
+                parse_macos_networksetup_proxy(&String::from_utf8_lossy(&output.stdout));
+            if !host.is_empty() && port > 0 {
+                return Some((host, port));
+            }
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "macos")]
@@ -1938,8 +1972,11 @@ fn set_macos_services_proxy(
         run_networksetup("networksetup", &["-setsecurewebproxy", svc, host, &port])?;
         run_networksetup("networksetup", &["-setsecurewebproxystate", svc, "on"])?;
         // Bypass
-        if !bypass_domains.is_empty() {
+        {
             let mut args = vec!["-setproxybypassdomains".to_string(), svc.to_string()];
+            if bypass_domains.is_empty() {
+                args.push("Empty".to_string());
+            }
             args.extend(bypass_domains.iter().cloned());
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             run_networksetup("networksetup", &str_args)?;
@@ -2008,11 +2045,11 @@ fn apply_macos_proxy_backup(proxy: &ProxyBackup, target: Option<&ProxyBackup>) -
         return Ok(());
     }
 
-    if proxy.enable {
-        set_macos_services_proxy(&services, &proxy.host, proxy.port, &proxy.bypass)
-    } else {
-        disable_macos_services_proxy(&services)
+    set_macos_services_proxy(&services, &proxy.host, proxy.port, &proxy.bypass)?;
+    if !proxy.enable {
+        disable_macos_services_proxy(&services)?;
     }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -2038,11 +2075,11 @@ fn apply_macos_proxy_backup_with_gui_auth(
         return Ok(());
     }
 
-    if proxy.enable {
-        set_macos_services_proxy_with_gui_auth(&services, &proxy.host, proxy.port, &proxy.bypass)
-    } else {
-        disable_macos_services_proxy_with_gui_auth(&services)
+    set_macos_services_proxy_with_gui_auth(&services, &proxy.host, proxy.port, &proxy.bypass)?;
+    if !proxy.enable {
+        disable_macos_services_proxy_with_gui_auth(&services)?;
     }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -2064,8 +2101,11 @@ fn set_macos_services_proxy_with_gui_auth(
         run_networksetup_with_gui_auth(&["-setwebproxystate", svc, "on"])?;
         run_networksetup_with_gui_auth(&["-setsecurewebproxy", svc, host, &port.to_string()])?;
         run_networksetup_with_gui_auth(&["-setsecurewebproxystate", svc, "on"])?;
-        if !bypass_domains.is_empty() {
+        {
             let mut args = vec!["-setproxybypassdomains".to_string(), svc.clone()];
+            if bypass_domains.is_empty() {
+                args.push("Empty".to_string());
+            }
             args.extend(bypass_domains.iter().cloned());
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             run_networksetup_with_gui_auth(&str_args)?;
@@ -2232,8 +2272,11 @@ pub fn set_macos_all_services_proxy_with_sudo(host: &str, port: u16, bypass: &st
         run_networksetup_with_sudo(&["-setsecurewebproxy", svc, host, &port])?;
         run_networksetup_with_sudo(&["-setsecurewebproxystate", svc, "on"])?;
         // Bypass
-        if !bypass_domains.is_empty() {
+        {
             let mut args = vec!["-setproxybypassdomains".to_string(), svc.to_string()];
+            if bypass_domains.is_empty() {
+                args.push("Empty".to_string());
+            }
             args.extend(bypass_domains.iter().cloned());
             let str_args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
             run_networksetup_with_sudo(&str_args)?;
@@ -3043,6 +3086,22 @@ mod tests {
             "localhost,127.0.0.1",
             "localhost,127.0.0.1,corp.example"
         ));
+    }
+
+    #[test]
+    fn macos_networksetup_proxy_parser_preserves_disabled_endpoint() {
+        assert_eq!(
+            parse_macos_networksetup_proxy(
+                "Enabled: No\nServer: dormant.proxy\nPort: 8080\nAuthenticated Proxy Enabled: 0\n"
+            ),
+            (false, "dormant.proxy".to_string(), 8080)
+        );
+        assert_eq!(
+            parse_macos_networksetup_proxy(
+                "Enabled: Yes\nServer: 127.0.0.1\nPort: invalid\nnoise\n"
+            ),
+            (true, "127.0.0.1".to_string(), 0)
+        );
     }
 
     #[test]

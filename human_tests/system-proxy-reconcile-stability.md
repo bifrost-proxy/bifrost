@@ -46,6 +46,24 @@ e2e-tests/tests/test_system_proxy_reconcile_stability.sh
 - 隔离代理成功启用系统代理，Admin API 报告 `managed_by_bifrost=true`。
 - 已收敛系统代理跨两个 3 秒 reconcile 周期只出现一次 `system proxy full reconcile completed`。
 - 脚本成功或失败退出都恢复执行前系统代理状态。
+- 每个 network service 的 disabled server/port 也必须与执行前逐字段一致，不能只验证 `Enabled: No`。
+
+### TC-SPRS-04：disabled dormant endpoint 精确恢复回归
+
+**操作步骤**：
+
+```bash
+cargo test -p bifrost-core --all-features \
+  macos_networksetup_proxy_parser_preserves_disabled_endpoint
+```
+
+随后在 macOS CI 的隔离端口执行 `e2e-tests/tests/test_system_proxy_reconcile_stability.sh`，比较脚本记录的 `macos-proxy-before.tsv` 与 `macos-proxy-after.tsv`。
+
+**预期结果**：
+
+- 解析器在 `Enabled: No` 时仍保留 `Server` 与 `Port`，用于恢复 dormant 配置。
+- 原 server/port 为空时，停止隔离代理后不能残留 `127.0.0.1:<PROXY_PORT>`。
+- 原 server/port 非空但 disabled 时，恢复后值不变且仍为 disabled。
 
 ### TC-SPRS-03：正式服务与 OS 状态不受测试残留影响
 
@@ -74,3 +92,4 @@ lsof -nP -iTCP:18889 -sTCP:LISTEN || true
 - `TC-SPRS-02`：通过，focused macOS E2E 最新复测 24.4s 完成，两个 3 秒周期内 full reconcile 计数为 1，ownership 保持 `managed_by_bifrost=true`，执行前后逐服务快照一致。
 - `TC-SPRS-03`：通过，HTTP/HTTPS/SOCKS 均恢复为 off，18889 无监听残留，共享 9900 仍为 PID 5988。
 - 额外诊断：历史全生命周期脚本执行 21 项时 15 项通过、6 项失败，暴露出脚本内部 Desktop ownership 环境泄漏和失败退出恢复不完整；已立即按执行前快照恢复 OS 状态。本次性能门禁使用独立 focused E2E，不削弱 Desktop ownership 保护。
+- `TC-SPRS-04`：本地纯解析回归 1/1 PASS；真实空 dormant endpoint 场景由 macOS CI focused E2E 执行，首次运行准确捕获 `Enabled: No` 但 server/port 残留隔离端口的缺陷，修复后结果以同 MR 最新 CI 为准。

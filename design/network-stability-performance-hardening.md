@@ -22,6 +22,7 @@
 - 本地规则、Group 规则内容、排序、启停和本地目录降级语义保持不变。
 - Group name/id 的历史反向映射和 Badge 跳转字段保持不变。
 - 系统代理 enable/disable、bypass、外部代理 ownership、crash recovery、restart handoff 和 wake reconcile 保持不变。
+- macOS 恢复 disabled 系统代理时，执行前已保存但未启用的 server/port/bypass 必须精确写回，不得残留 Bifrost 的隔离端口。
 - HTTP、CONNECT、WebSocket/WSS 的返回状态、代理规则匹配和 Traffic 记录语义保持不变。
 - Desktop watchdog 的 liveness/readiness 判定和恢复阈值保持不变。
 - 不停止或重启共享的 9900 服务；测试使用隔离端口和数据目录。
@@ -55,6 +56,7 @@ active-summary 始终先使用本地目录名生成响应。远端补全是旁�
 - 完整检查保留在首次 enable、配置变化、系统唤醒、ownership 漂移和低频审计路径。
 - 外部代理被识别为 owner 时只更新本地 managed flag，不写系统设置。
 - 重复 Admin toggle 仍由同一 manager 写锁串行，API 响应格式不变。
+- `scutil --proxy` 在代理 disabled 时可能省略 dormant endpoint；备份路径会从 `networksetup -getwebproxy/-getsecurewebproxy` 补读 server/port。恢复 disabled 状态时先写回保存的 endpoint/bypass，再关闭 enable 开关，避免 macOS 保留 Bifrost 写入值。
 
 ### 错误分类与 panic 防护
 
@@ -67,6 +69,7 @@ active-summary 始终先使用本地目录名生成响应。远端补全是旁�
 - 三个风险域拆成独立提交，但位于同一功能分支和同一 MR。
 - 不包含数据格式或 API schema 迁移；回滚任一提交不会要求清理用户数据。
 - system proxy 真实验证前记录原始 OS 状态，并用 trap 在成功或失败时恢复。
+- macOS focused E2E 对每个 network service 比较执行前后 Web/Secure Web 的 enable/server/port/auth 快照，disabled 不等于允许忽略 dormant 配置。
 - 若 Group 退避出现兼容问题，可保留本地响应并只关闭远端自动补全；用户规则仍然生效。
 
 ## 性能和稳定性门槛
