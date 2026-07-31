@@ -50,6 +50,7 @@ use crate::process::{
 const ASYNC_TRAFFIC_BUFFER_SIZE: usize = MAX_TRAFFIC_MAX_RECORDS * 3;
 const MAX_PORT_INCREMENT_ATTEMPTS: u16 = 64;
 const PORT_REBIND_OLD_LISTENER_GRACE_PERIOD: Duration = Duration::from_millis(250);
+const SYSTEM_PROXY_FULL_RECONCILE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 // Reconcile interval for the system-proxy watcher. Defaults to 30s in production;
 // overridable via BIFROST_SYSTEM_PROXY_RECONCILE_SECS so E2E tests can shorten the
 // wait (the dirty-backup reconcile case otherwise forces a >30s sleep per run).
@@ -478,6 +479,19 @@ enum SystemProxyOwnership {
     Other,
 }
 
+fn should_skip_system_proxy_full_reconcile(
+    ownership: SystemProxyOwnership,
+    should_enable: bool,
+    applied_by_this_runtime: bool,
+    since_last_full_reconcile: Option<Duration>,
+) -> bool {
+    ownership == SystemProxyOwnership::ThisBifrost
+        && should_enable
+        && applied_by_this_runtime
+        && since_last_full_reconcile
+            .is_some_and(|elapsed| elapsed < SYSTEM_PROXY_FULL_RECONCILE_INTERVAL)
+}
+
 fn inspect_system_proxy_ownership(proxy_host: &str, proxy_port: u16) -> SystemProxyOwnership {
     match bifrost_core::SystemProxyManager::get_current() {
         Ok(current) if !current.enable => SystemProxyOwnership::Disabled,
@@ -537,6 +551,7 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
             }
 
             let mut applied_by_this_runtime = false;
+            let mut last_full_reconcile_at: Option<Instant> = None;
             let mut startup_external_owner_logged = false;
             let mut idle_logged = false;
             while !stop_flag.load(Ordering::Acquire) {
@@ -545,7 +560,16 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
                     return;
                 }
                 let should_enable = desired_enabled.load(Ordering::Acquire);
-                match inspect_system_proxy_ownership(&proxy_host, proxy_port) {
+                let ownership = inspect_system_proxy_ownership(&proxy_host, proxy_port);
+                let since_last_full_reconcile =
+                    last_full_reconcile_at.map(|instant| instant.elapsed());
+                let skip_full_reconcile = should_skip_system_proxy_full_reconcile(
+                    ownership,
+                    should_enable,
+                    applied_by_this_runtime,
+                    since_last_full_reconcile,
+                );
+                match ownership {
                     SystemProxyOwnership::Other => {
                         if applied_by_this_runtime || enabled_flag.load(Ordering::Acquire) {
                             applied_by_this_runtime = false;
@@ -580,6 +604,26 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
                     SystemProxyOwnership::ThisBifrost => {
                         applied_by_this_runtime = true;
                         enabled_flag.store(true, Ordering::Release);
+                        if skip_full_reconcile {
+                            tracing::debug!(
+                                target: "bifrost_cli::startup",
+                                host = %proxy_host,
+                                port = proxy_port,
+                                "system proxy remains converged; full reconcile skipped"
+                            );
+                            let sleep_until =
+                                Instant::now() + system_proxy_reconcile_interval();
+                            while Instant::now() < sleep_until {
+                                if stop_flag.load(Ordering::Acquire)
+                                    || should_stop_system_proxy_reconcile_for_shutdown(&bifrost_dir)
+                                {
+                                    stop_flag.store(true, Ordering::Release);
+                                    return;
+                                }
+                                std::thread::sleep(Duration::from_secs(1));
+                            }
+                            continue;
+                        }
                     }
                     SystemProxyOwnership::Disabled => {
                         if !should_enable && !enabled_flag.load(Ordering::Acquire) {
@@ -664,13 +708,14 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
                 match final_result {
                     Ok(()) => {
                         applied_by_this_runtime = true;
+                        last_full_reconcile_at = Some(Instant::now());
                         enabled_flag.store(true, Ordering::Release);
                         tracing::info!(
                             target: "bifrost_cli::startup",
                             elapsed_ms = started_at.elapsed().as_millis() as u64,
                             host = %proxy_host,
                             port = proxy_port,
-                            "system proxy applied or reconciled"
+                            "system proxy full reconcile completed"
                         );
                     }
                     Err(error) => {
@@ -5179,6 +5224,40 @@ mod coverage_boost {
         F: FnOnce() + std::panic::UnwindSafe,
     {
         with_system_proxy_reconcile_env_for_test(value, f);
+    }
+
+    #[test]
+    fn converged_system_proxy_skips_only_high_frequency_full_reconcile() {
+        assert!(should_skip_system_proxy_full_reconcile(
+            SystemProxyOwnership::ThisBifrost,
+            true,
+            true,
+            Some(Duration::from_secs(30)),
+        ));
+        assert!(!should_skip_system_proxy_full_reconcile(
+            SystemProxyOwnership::ThisBifrost,
+            true,
+            true,
+            Some(SYSTEM_PROXY_FULL_RECONCILE_INTERVAL),
+        ));
+        assert!(!should_skip_system_proxy_full_reconcile(
+            SystemProxyOwnership::Other,
+            true,
+            true,
+            Some(Duration::from_secs(1)),
+        ));
+        assert!(!should_skip_system_proxy_full_reconcile(
+            SystemProxyOwnership::ThisBifrost,
+            false,
+            true,
+            Some(Duration::from_secs(1)),
+        ));
+        assert!(!should_skip_system_proxy_full_reconcile(
+            SystemProxyOwnership::ThisBifrost,
+            true,
+            false,
+            Some(Duration::from_secs(1)),
+        ));
     }
 
     #[test]

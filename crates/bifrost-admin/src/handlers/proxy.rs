@@ -206,25 +206,35 @@ async fn get_system_proxy_status(state: SharedAdminState) -> Response<BoxBody> {
         return json_response(&SystemProxyStatus::unsupported(&config));
     }
 
-    match SystemProxyManager::get_current() {
-        Ok(proxy) => {
-            let managed_by_bifrost = if let Some(manager) = &state.system_proxy_manager {
-                manager.read().await.is_current_managed(&proxy)
-            } else {
-                false
-            };
+    let manager = state.system_proxy_manager.clone();
+    let status_result = tokio::task::spawn_blocking(move || {
+        let proxy = SystemProxyManager::get_current().map_err(|error| error.to_string())?;
+        let managed_by_bifrost = manager
+            .as_ref()
+            .map(|manager| manager.blocking_read().is_current_managed(&proxy))
+            .unwrap_or(false);
+        Ok::<_, String>((proxy, managed_by_bifrost))
+    })
+    .await;
+
+    match status_result {
+        Ok(Ok((proxy, managed_by_bifrost))) => {
             let mut status = SystemProxyStatus::from_proxy(proxy, managed_by_bifrost);
             status.apply_config(&config);
             json_response(&status)
         }
-        Err(e) => error_response(
+        Ok(Err(error)) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("Failed to get system proxy: {}", e),
+            &format!("Failed to get system proxy: {}", error),
+        ),
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("System proxy status worker failed: {}", error),
         ),
     }
 }
 
-fn read_system_proxy_status(
+fn read_system_proxy_status_blocking(
     expected_host: &str,
     expected_port: u16,
 ) -> Result<SystemProxyStatus, String> {
@@ -249,19 +259,31 @@ fn read_system_proxy_status(
     Ok(SystemProxyStatus::from_proxy(proxy, managed_by_bifrost))
 }
 
+async fn read_system_proxy_status(
+    expected_host: &str,
+    expected_port: u16,
+) -> Result<SystemProxyStatus, String> {
+    let expected_host = expected_host.to_string();
+    tokio::task::spawn_blocking(move || {
+        read_system_proxy_status_blocking(&expected_host, expected_port)
+    })
+    .await
+    .map_err(|error| format!("System proxy verification worker failed: {error}"))?
+}
+
 async fn wait_for_system_proxy_status(
     expected_enabled: bool,
     expected_host: &str,
     expected_port: u16,
 ) -> Result<SystemProxyStatus, String> {
-    let mut latest = read_system_proxy_status(expected_host, expected_port)?;
+    let mut latest = read_system_proxy_status(expected_host, expected_port).await?;
     if matches_expected_system_proxy(&latest, expected_enabled, expected_host, expected_port) {
         return Ok(latest);
     }
 
     for delay_ms in SYSTEM_PROXY_VERIFY_DELAYS_MS {
         sleep(Duration::from_millis(delay_ms)).await;
-        latest = read_system_proxy_status(expected_host, expected_port)?;
+        latest = read_system_proxy_status(expected_host, expected_port).await?;
         if matches_expected_system_proxy(&latest, expected_enabled, expected_host, expected_port) {
             return Ok(latest);
         }
@@ -318,43 +340,47 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
         let previous_desired_enabled =
             state.set_system_proxy_runtime_desired_enabled(request.enabled);
 
-        let final_result = {
-            let mut manager = manager.write().await;
-
-            let result = if request.enabled {
-                manager.enable(host, state.port(), Some(&bypass))
+        let manager = manager.clone();
+        let enabled = request.enabled;
+        let bypass_for_worker = bypass.clone();
+        let final_result = tokio::task::spawn_blocking(move || {
+            let mut manager = manager.blocking_write();
+            let result = if enabled {
+                manager.enable(host, target_port, Some(&bypass_for_worker))
             } else {
                 manager
-                    .disable_if_matches_explicit(host, state.port())
+                    .disable_if_matches_explicit(host, target_port)
                     .map(|_| ())
             };
 
             match &result {
-                Ok(()) => result,
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("RequiresAdmin") {
-                        tracing::info!("Permission denied, trying GUI authorization...");
-                        #[cfg(target_os = "macos")]
-                        {
-                            if request.enabled {
-                                manager.enable_with_gui_auth(host, state.port(), Some(&bypass))
-                            } else {
-                                manager
-                                    .disable_if_matches_explicit_with_gui_auth(host, state.port())
-                                    .map(|_| ())
-                            }
+                Ok(()) => result.map_err(|error| error.to_string()),
+                Err(error) if error.to_string().contains("RequiresAdmin") => {
+                    tracing::info!("Permission denied, trying GUI authorization...");
+                    #[cfg(target_os = "macos")]
+                    {
+                        if enabled {
+                            manager
+                                .enable_with_gui_auth(host, target_port, Some(&bypass_for_worker))
+                                .map_err(|error| error.to_string())
+                        } else {
+                            manager
+                                .disable_if_matches_explicit_with_gui_auth(host, target_port)
+                                .map(|_| ())
+                                .map_err(|error| error.to_string())
                         }
-                        #[cfg(not(target_os = "macos"))]
-                        {
-                            result
-                        }
-                    } else {
-                        result
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        result.map_err(|error| error.to_string())
                     }
                 }
+                Err(_) => result.map_err(|error| error.to_string()),
             }
-        };
+        })
+        .await
+        .map_err(|error| format!("System proxy operation worker failed: {error}"))
+        .and_then(|result| result);
 
         match final_result {
             Ok(()) => {
@@ -416,11 +442,10 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
 
                 json_response(&status)
             }
-            Err(e) => {
+            Err(msg) => {
                 if let Some(previous) = previous_desired_enabled {
                     state.store_system_proxy_runtime_desired_enabled(previous);
                 }
-                let msg = e.to_string();
                 if msg.contains("UserCancelled") {
                     #[derive(Serialize)]
                     struct UserCancelledError {
@@ -446,7 +471,7 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
                 } else {
                     error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!("Failed to set system proxy: {}", e),
+                        &format!("Failed to set system proxy: {}", msg),
                     )
                 }
             }

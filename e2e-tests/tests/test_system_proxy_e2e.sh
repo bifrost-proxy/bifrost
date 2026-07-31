@@ -592,6 +592,16 @@ test_enable_on_startup() {
             if macos_wait_proxy_enabled "127.0.0.1" "$PROXY_PORT" 45; then
                 _log_pass "macOS: 系统代理设置正确"
                 passed=$((passed + 1))
+                sleep "$(( ${BIFROST_SYSTEM_PROXY_RECONCILE_SECS:-30} * 2 + 2 ))"
+                local full_reconcile_count
+                full_reconcile_count="$(grep -c "system proxy full reconcile completed" "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
+                if [[ "$full_reconcile_count" -eq 1 ]]; then
+                    _log_pass "macOS: 已收敛系统代理跨两个高频周期只执行一次完整 reconcile"
+                    passed=$((passed + 1))
+                else
+                    _log_fail "macOS: 已收敛系统代理重复执行完整 reconcile" "full_reconcile_count=1" "count=${full_reconcile_count}; log=$(tail -n 120 "${TEST_DATA_DIR}/proxy.log" 2>/dev/null || true)"
+                    failed=$((failed + 1))
+                fi
             elif echo "$(macos_system_proxy_status_json)" | grep -q '"managed_by_bifrost":false'; then
                 _log_pass "macOS: 启动时检测到外部系统代理，未自动抢占"
                 passed=$((passed + 1))

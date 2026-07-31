@@ -37,6 +37,19 @@ impl ProxyBackup {
     }
 }
 
+fn proxy_bypass_lists_match(actual: &str, expected: &str) -> bool {
+    fn normalized(value: &str) -> std::collections::BTreeSet<String> {
+        value
+            .split([',', ';'])
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| entry.to_ascii_lowercase())
+            .collect()
+    }
+
+    normalized(actual) == normalized(expected)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemProxyDisableOutcome {
     Disabled,
@@ -388,6 +401,7 @@ impl SystemProxyManager {
             "System proxy enable requested"
         );
 
+        let bypass_str = bypass.unwrap_or(DEFAULT_BYPASS);
         let mut preserved_original: Option<Sysproxy> = None;
         if self.is_set {
             #[cfg(target_os = "macos")]
@@ -407,10 +421,14 @@ impl SystemProxyManager {
 
             if let Ok(actual) = Self::get_current() {
                 if cfg!(target_os = "macos") {
-                    if all_services_match {
+                    if all_services_match && proxy_bypass_lists_match(&actual.bypass, bypass_str) {
                         return Ok(());
                     }
-                } else if actual.enable && actual.host == host && actual.port == port {
+                } else if actual.enable
+                    && actual.host == host
+                    && actual.port == port
+                    && proxy_bypass_lists_match(&actual.bypass, bypass_str)
+                {
                     return Ok(());
                 }
                 tracing::info!(
@@ -523,7 +541,6 @@ impl SystemProxyManager {
         self.original_proxy = Some(current.clone());
         self.save_backup(&current)?;
 
-        let bypass_str = bypass.unwrap_or(DEFAULT_BYPASS);
         self.save_managed_state(
             &current,
             &Sysproxy {
@@ -3006,6 +3023,18 @@ mod tests {
         };
 
         assert!(!backup.target_matches("127.0.0.1", 8800));
+    }
+
+    #[test]
+    fn proxy_bypass_match_ignores_order_case_and_empty_entries() {
+        assert!(proxy_bypass_lists_match(
+            " localhost;*.LOCAL,127.0.0.1,,",
+            "127.0.0.1,localhost,*.local"
+        ));
+        assert!(!proxy_bypass_lists_match(
+            "localhost,127.0.0.1",
+            "localhost,127.0.0.1,corp.example"
+        ));
     }
 
     #[test]
