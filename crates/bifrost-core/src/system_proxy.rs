@@ -37,7 +37,6 @@ impl ProxyBackup {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn proxy_bypass_lists_match(actual: &str, expected: &str) -> bool {
     fn normalized(value: &str) -> std::collections::BTreeSet<String> {
         value
@@ -51,7 +50,6 @@ fn proxy_bypass_lists_match(actual: &str, expected: &str) -> bool {
     normalized(actual) == normalized(expected)
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn proxy_state_matches_expected(
     actual: &ProxyBackup,
     host: &str,
@@ -420,9 +418,7 @@ impl SystemProxyManager {
 
         let mut preserved_original: Option<Sysproxy> = None;
         if self.is_set {
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            {
-                #[cfg(target_os = "macos")]
+            #[cfg(target_os = "macos")]
             let all_services_match = Some(
                 macos_all_services_proxy_match(host, port).unwrap_or_else(|error| {
                     tracing::warn!(
@@ -435,37 +431,31 @@ impl SystemProxyManager {
                 }),
             );
 
-                #[cfg(not(target_os = "macos"))]
-                let all_services_match = None;
+            #[cfg(not(target_os = "macos"))]
+            let all_services_match = None;
 
-                if let Ok(actual) = Self::get_current() {
-                    if proxy_state_matches_expected(
-                        &actual,
-                        host,
-                        port,
-                        bypass_str,
-                        all_services_match,
-                    ) {
-                        return Ok(());
-                    }
-                    tracing::info!(
-                        actual_enabled = actual.enable,
-                        actual_host = %actual.host,
-                        actual_port = actual.port,
-                        expected_host = %host,
-                        expected_port = port,
-                        "System proxy was externally changed, re-applying"
-                    );
-                    preserved_original = self
-                        .original_proxy
-                        .clone()
-                        .or_else(|| {
-                            self.load_managed_state()
-                                .ok()
-                                .map(|state| state.original.into())
-                        })
-                        .or_else(|| Some(actual.into()));
+            if let Ok(actual) = Self::get_current() {
+                if proxy_state_matches_expected(&actual, host, port, bypass_str, all_services_match)
+                {
+                    return Ok(());
                 }
+                tracing::info!(
+                    actual_enabled = actual.enable,
+                    actual_host = %actual.host,
+                    actual_port = actual.port,
+                    expected_host = %host,
+                    expected_port = port,
+                    "System proxy was externally changed, re-applying"
+                );
+                preserved_original = self
+                    .original_proxy
+                    .clone()
+                    .or_else(|| {
+                        self.load_managed_state()
+                            .ok()
+                            .map(|state| state.original.into())
+                    })
+                    .or_else(|| Some(actual.into()));
             }
         } else if let Ok(existing_state) = self.load_managed_state() {
             // Restart / re-adoption handoff: a fresh manager is asked to enable
@@ -3043,7 +3033,6 @@ mod tests {
         assert!(!backup.target_matches("127.0.0.1", 8800));
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn proxy_bypass_match_ignores_order_case_and_empty_entries() {
         assert!(proxy_bypass_lists_match(
@@ -3056,7 +3045,6 @@ mod tests {
         ));
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
     fn proxy_state_match_supports_platform_and_all_service_checks() {
         let actual = ProxyBackup {

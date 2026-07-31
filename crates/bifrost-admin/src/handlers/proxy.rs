@@ -228,6 +228,17 @@ where
         .map_err(|error| format!("System proxy {operation} worker failed: {error}"))?
 }
 
+type SystemProxyOperation = (SharedSystemProxyManager, bool, u16, String);
+
+async fn run_system_proxy_operation(
+    (manager, enabled, target_port, bypass): SystemProxyOperation,
+) -> Result<(), String> {
+    run_system_proxy_worker("operation", move || {
+        apply_system_proxy_blocking(manager, enabled, "127.0.0.1", target_port, bypass)
+    })
+    .await
+}
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn load_current_system_proxy_status(
     manager: Option<SharedSystemProxyManager>,
@@ -422,12 +433,8 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
         let previous_desired_enabled =
             state.set_system_proxy_runtime_desired_enabled(request.enabled);
 
-        let manager = manager.clone();
-        let enabled = request.enabled;
-        let final_result = run_system_proxy_worker("operation", move || {
-            apply_system_proxy_blocking(manager, enabled, host, target_port, bypass)
-        })
-        .await;
+        let operation = (manager.clone(), request.enabled, target_port, bypass);
+        let final_result = run_system_proxy_operation(operation).await;
 
         match final_result {
             Ok(()) => {
@@ -493,40 +500,44 @@ async fn set_system_proxy(req: Request<Incoming>, state: SharedAdminState) -> Re
                 if let Some(previous) = previous_desired_enabled {
                     state.store_system_proxy_runtime_desired_enabled(previous);
                 }
-                if msg.contains("UserCancelled") {
-                    #[derive(Serialize)]
-                    struct UserCancelledError {
-                        error: &'static str,
-                        message: &'static str,
-                    }
-                    let body = UserCancelledError {
-                        error: "user_cancelled",
-                        message: "Authorization was cancelled by user.",
-                    };
-                    json_response_with_status(StatusCode::FORBIDDEN, &body)
-                } else if msg.contains("RequiresAdmin") {
-                    #[derive(Serialize)]
-                    struct AdminError {
-                        error: &'static str,
-                        message: &'static str,
-                    }
-                    let body = AdminError {
-                        error: "requires_admin",
-                        message: "System proxy requires administrator privileges. Please run the CLI with sudo or grant permission.",
-                    };
-                    json_response_with_status(StatusCode::FORBIDDEN, &body)
-                } else {
-                    error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        &format!("Failed to set system proxy: {}", msg),
-                    )
-                }
+                system_proxy_operation_error_response(&msg)
             }
         }
     } else {
         error_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "System proxy manager not initialized",
+        )
+    }
+}
+
+fn system_proxy_operation_error_response(message: &str) -> Response<BoxBody> {
+    if message.contains("UserCancelled") {
+        #[derive(Serialize)]
+        struct UserCancelledError {
+            error: &'static str,
+            message: &'static str,
+        }
+        let body = UserCancelledError {
+            error: "user_cancelled",
+            message: "Authorization was cancelled by user.",
+        };
+        json_response_with_status(StatusCode::FORBIDDEN, &body)
+    } else if message.contains("RequiresAdmin") {
+        #[derive(Serialize)]
+        struct AdminError {
+            error: &'static str,
+            message: &'static str,
+        }
+        let body = AdminError {
+            error: "requires_admin",
+            message: "System proxy requires administrator privileges. Please run the CLI with sudo or grant permission.",
+        };
+        json_response_with_status(StatusCode::FORBIDDEN, &body)
+    } else {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to set system proxy: {message}"),
         )
     }
 }
@@ -999,6 +1010,24 @@ mod tests {
         assert!(String::from_utf8_lossy(&body).contains("status failed"));
     }
 
+    #[tokio::test]
+    async fn system_proxy_operation_errors_preserve_api_contracts() {
+        for (message, status, marker) in [
+            ("UserCancelled", StatusCode::FORBIDDEN, "user_cancelled"),
+            ("RequiresAdmin", StatusCode::FORBIDDEN, "requires_admin"),
+            (
+                "operation failed",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to set system proxy: operation failed",
+            ),
+        ] {
+            let response = system_proxy_operation_error_response(message);
+            assert_eq!(response.status(), status);
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert!(String::from_utf8_lossy(&body).contains(marker));
+        }
+    }
+
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     #[tokio::test]
     async fn unsupported_platform_workers_return_errors_without_os_calls() {
@@ -1009,7 +1038,7 @@ mod tests {
             tempfile::tempdir().unwrap().path().to_path_buf(),
         )));
         assert!(apply_system_proxy_blocking(
-            manager,
+            manager.clone(),
             true,
             "127.0.0.1",
             9900,
@@ -1017,6 +1046,12 @@ mod tests {
         )
         .unwrap_err()
         .contains("not supported"));
+        assert!(
+            run_system_proxy_operation((manager, true, 9900, "localhost".to_string(),))
+                .await
+                .unwrap_err()
+                .contains("not supported")
+        );
 
         let response = get_supported_system_proxy_status(None, SystemProxyConfig::default()).await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -1027,5 +1062,9 @@ mod tests {
             .await
             .unwrap();
         assert!(!verified.supported);
+        let retried = wait_for_system_proxy_status(true, "127.0.0.1", 9900)
+            .await
+            .unwrap();
+        assert!(!retried.supported);
     }
 }

@@ -20,10 +20,10 @@ fn write_panic_diagnostic(
         writer,
         "\n[PANIC] Thread '{thread_name}' panicked at {location}:\n  {message}"
     )?;
-    if let Some(backtrace) = backtrace {
-        writeln!(writer, "\nBacktrace:\n{backtrace}")?;
+    match backtrace {
+        Some(backtrace) => writeln!(writer, "\nBacktrace:\n{backtrace}"),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 pub fn install_panic_hook() {
@@ -199,6 +199,10 @@ mod tests {
             None,
         );
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+
+        let mut output = Vec::new();
+        write_panic_diagnostic(&mut output, "worker", "source.rs:1:1", "boom", None).unwrap();
+        assert!(!output.is_empty());
     }
 
     #[test]

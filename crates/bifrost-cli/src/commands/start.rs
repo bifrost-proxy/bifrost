@@ -506,20 +506,12 @@ fn wait_for_reconcile(stop_flag: &AtomicBool, bifrost_dir: &Path, interval: Dura
     false
 }
 
-fn wait_after_converged_system_proxy(
-    stop_flag: &AtomicBool,
-    bifrost_dir: &Path,
-    interval: Duration,
-    proxy_host: &str,
-    proxy_port: u16,
-) -> bool {
+fn wait_after_converged_system_proxy(stop_flag: &AtomicBool, bifrost_dir: &Path) -> bool {
     tracing::debug!(
         target: "bifrost_cli::startup",
-        host = %proxy_host,
-        port = proxy_port,
         "system proxy remains converged; full reconcile skipped"
     );
-    wait_for_reconcile(stop_flag, bifrost_dir, interval)
+    wait_for_reconcile(stop_flag, bifrost_dir, system_proxy_reconcile_interval())
 }
 
 fn inspect_system_proxy_ownership(proxy_host: &str, proxy_port: u16) -> SystemProxyOwnership {
@@ -635,14 +627,7 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
                         applied_by_this_runtime = true;
                         enabled_flag.store(true, Ordering::Release);
                         if skip_full_reconcile {
-                            let interval = system_proxy_reconcile_interval();
-                            if wait_after_converged_system_proxy(
-                                &stop_flag,
-                                &bifrost_dir,
-                                interval,
-                                &proxy_host,
-                                proxy_port,
-                            ) {
+                            if wait_after_converged_system_proxy(&stop_flag, &bifrost_dir) {
                                 return;
                             }
                             continue;
@@ -5325,13 +5310,10 @@ mod coverage_boost {
     #[test]
     fn converged_system_proxy_wait_preserves_stop_result() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let stop_flag = AtomicBool::new(false);
-        assert!(!wait_after_converged_system_proxy(
+        let stop_flag = AtomicBool::new(true);
+        assert!(wait_after_converged_system_proxy(
             &stop_flag,
             temp_dir.path(),
-            Duration::ZERO,
-            "127.0.0.1",
-            9900,
         ));
     }
 
