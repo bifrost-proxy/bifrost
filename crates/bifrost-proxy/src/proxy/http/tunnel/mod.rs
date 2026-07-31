@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::ensure_crypto_provider;
 #[cfg(feature = "http3")]
@@ -101,6 +101,86 @@ use crate::utils::tee::{
 use crate::utils::throttle::wrap_throttled_body;
 use crate::utils::upstream_stability::connect_tcp;
 use crate::utils::url::apply_url_rules;
+
+fn websocket_handshake_rejection_category(status_code: u16) -> Option<&'static str> {
+    (status_code != 101).then_some("upstream_handshake_rejected")
+}
+
+const WEBSOCKET_REJECTION_LOG_WINDOW: Duration = Duration::from_secs(30);
+const WEBSOCKET_REJECTION_LOG_MAX_KEYS: usize = 128;
+
+#[derive(Debug)]
+struct WebSocketRejectionLogEntry {
+    last_logged_at: Instant,
+    suppressed: u64,
+}
+
+#[derive(Debug, Default)]
+struct WebSocketRejectionLogLimiter {
+    entries: HashMap<(String, u16), WebSocketRejectionLogEntry>,
+}
+
+impl WebSocketRejectionLogLimiter {
+    fn record(&mut self, host: &str, status_code: u16, now: Instant) -> Option<u64> {
+        let key = (host.to_ascii_lowercase(), status_code);
+        if let Some(entry) = self.entries.get_mut(&key) {
+            if now.duration_since(entry.last_logged_at) < WEBSOCKET_REJECTION_LOG_WINDOW {
+                entry.suppressed = entry.suppressed.saturating_add(1);
+                return None;
+            }
+            let suppressed = entry.suppressed;
+            entry.last_logged_at = now;
+            entry.suppressed = 0;
+            return Some(suppressed);
+        }
+
+        if self.entries.len() >= WEBSOCKET_REJECTION_LOG_MAX_KEYS {
+            if let Some(oldest_key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_logged_at)
+                .map(|(key, _)| key.clone())
+            {
+                self.entries.remove(&oldest_key);
+            }
+        }
+        self.entries.insert(
+            key,
+            WebSocketRejectionLogEntry {
+                last_logged_at: now,
+                suppressed: 0,
+            },
+        );
+        Some(0)
+    }
+}
+
+static WEBSOCKET_REJECTION_LOG_LIMITER: LazyLock<Mutex<WebSocketRejectionLogLimiter>> =
+    LazyLock::new(|| Mutex::new(WebSocketRejectionLogLimiter::default()));
+
+fn log_upstream_websocket_rejection(
+    req_id: &str,
+    target_host: &str,
+    status_code: u16,
+    status_text: &str,
+) {
+    let suppressed = WEBSOCKET_REJECTION_LOG_LIMITER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .record(target_host, status_code, Instant::now());
+    if let Some(suppressed) = suppressed {
+        warn!(
+            target: "bifrost_proxy::websocket",
+            request_id = %req_id,
+            target_host = %target_host,
+            error_category = "upstream_handshake_rejected",
+            upstream_status = status_code,
+            upstream_status_text = %status_text,
+            suppressed_since_last_log = suppressed,
+            "upstream rejected WebSocket handshake"
+        );
+    }
+}
 
 fn apply_listener_context(
     record: &mut TrafficRecord,
@@ -5226,10 +5306,13 @@ async fn handle_intercepted_websocket(
             }
         };
 
-        if upstream_resp.status_code != 101 {
-            error!(
-                "[{}] WebSocket handshake failed: {} {}",
-                req_id, upstream_resp.status_code, upstream_resp.status_text
+        if let Some(category) = websocket_handshake_rejection_category(upstream_resp.status_code) {
+            debug_assert_eq!(category, "upstream_handshake_rejected");
+            log_upstream_websocket_rejection(
+                req_id,
+                &target_host,
+                upstream_resp.status_code,
+                &upstream_resp.status_text,
             );
             return Ok(Response::builder()
                 .status(502)
@@ -5310,10 +5393,13 @@ async fn handle_intercepted_websocket(
             }
         };
 
-        if upstream_resp.status_code != 101 {
-            error!(
-                "[{}] WebSocket handshake failed: {} {}",
-                req_id, upstream_resp.status_code, upstream_resp.status_text
+        if let Some(category) = websocket_handshake_rejection_category(upstream_resp.status_code) {
+            debug_assert_eq!(category, "upstream_handshake_rejected");
+            log_upstream_websocket_rejection(
+                req_id,
+                &target_host,
+                upstream_resp.status_code,
+                &upstream_resp.status_text,
             );
             return Ok(Response::builder()
                 .status(502)
@@ -6275,6 +6361,45 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn websocket_handshake_status_classifies_upstream_rejection_without_transport_error() {
+        assert_eq!(websocket_handshake_rejection_category(101), None);
+        assert_eq!(
+            websocket_handshake_rejection_category(200),
+            Some("upstream_handshake_rejected")
+        );
+        assert_eq!(
+            websocket_handshake_rejection_category(401),
+            Some("upstream_handshake_rejected")
+        );
+    }
+
+    #[test]
+    fn websocket_handshake_rejection_logs_are_rate_limited_and_bounded() {
+        let started = Instant::now();
+        let mut limiter = WebSocketRejectionLogLimiter::default();
+
+        assert_eq!(limiter.record("example.com", 401, started), Some(0));
+        assert_eq!(
+            limiter.record("example.com", 401, started + Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(
+            limiter.record("example.com", 401, started + Duration::from_secs(2)),
+            None
+        );
+        assert_eq!(
+            limiter.record("EXAMPLE.COM", 401, started + WEBSOCKET_REJECTION_LOG_WINDOW),
+            Some(2)
+        );
+
+        for index in 0..(WEBSOCKET_REJECTION_LOG_MAX_KEYS + 10) {
+            let host = format!("host-{index}.example.com");
+            assert_eq!(limiter.record(&host, 400, started), Some(0));
+        }
+        assert_eq!(limiter.entries.len(), WEBSOCKET_REJECTION_LOG_MAX_KEYS);
+    }
 
     fn create_test_dir() -> PathBuf {
         let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
