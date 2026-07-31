@@ -909,7 +909,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
         ),
         TestCase::standalone(
             "group_rules_active_summary_survives_remote_cache_resolution_failure",
-            "Active summary keeps local group rules when remote cache resolution cannot complete",
+            "Active summary keeps local group rules, protects Admin readiness, and backs off remote cache failures",
             "group_rules",
             || async move {
                 let port = pick_unused_port()?;
@@ -942,6 +942,29 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     Some("status://218"),
                 )?;
 
+                let support_started = Instant::now();
+                let support_response = tokio::time::timeout(
+                    Duration::from_millis(450),
+                    client
+                        .get(format!(
+                            "http://127.0.0.1:{port}/_bifrost/api/proxy/system/support"
+                        ))
+                        .send(),
+                )
+                .await
+                .map_err(|_| {
+                    "Admin support endpoint exceeded 450ms during group cache resolution"
+                        .to_string()
+                })?
+                .map_err(|error| format!("Admin support request failed: {error}"))?;
+                assert_status(&support_response, 200)?;
+                if support_started.elapsed() > Duration::from_millis(450) {
+                    return Err(format!(
+                        "Admin support endpoint took {:?} during group cache resolution",
+                        support_started.elapsed()
+                    ));
+                }
+
                 let deadline = Instant::now() + Duration::from_secs(2);
                 while admin_state.is_group_cache_resolved() && Instant::now() < deadline {
                     tokio::time::sleep(Duration::from_millis(25)).await;
@@ -961,6 +984,11 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     Some(group_name),
                     Some("status://218"),
                 )?;
+                if admin_state.try_begin_group_cache_resolution().is_some() {
+                    return Err(
+                        "group cache failure backoff allowed an immediate retry".to_string(),
+                    );
+                }
                 if !admin_state
                     .rules_storage
                     .base_dir()

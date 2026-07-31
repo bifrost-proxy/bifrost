@@ -54,6 +54,86 @@ pub type SharedSystemProxyRuntimeFlag = Arc<AtomicBool>;
 pub type SharedRuntimeConfig = Arc<RwLock<RuntimeConfig>>;
 pub type SharedTrayLaunchCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 
+const GROUP_CACHE_RETRY_BASE_SECS: u64 = 5;
+const GROUP_CACHE_RETRY_MAX_SECS: u64 = 300;
+
+#[derive(Debug)]
+struct GroupCacheResolutionState {
+    generation: u64,
+    in_flight_generation: Option<u64>,
+    resolved_generation: Option<u64>,
+    consecutive_failures: u32,
+    retry_not_before: Option<std::time::Instant>,
+}
+
+impl Default for GroupCacheResolutionState {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            in_flight_generation: None,
+            resolved_generation: None,
+            consecutive_failures: 0,
+            retry_not_before: None,
+        }
+    }
+}
+
+impl GroupCacheResolutionState {
+    fn try_begin(&mut self, now: std::time::Instant) -> Option<u64> {
+        if self.resolved_generation == Some(self.generation)
+            || self.in_flight_generation == Some(self.generation)
+            || self.retry_not_before.is_some_and(|deadline| now < deadline)
+        {
+            return None;
+        }
+
+        self.in_flight_generation = Some(self.generation);
+        Some(self.generation)
+    }
+
+    fn finish(
+        &mut self,
+        generation: u64,
+        all_resolved: bool,
+        now: std::time::Instant,
+    ) -> Option<std::time::Duration> {
+        if generation != self.generation || self.in_flight_generation != Some(generation) {
+            return None;
+        }
+
+        self.in_flight_generation = None;
+        if all_resolved {
+            self.resolved_generation = Some(generation);
+            self.consecutive_failures = 0;
+            self.retry_not_before = None;
+            return None;
+        }
+
+        self.resolved_generation = None;
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        let exponent = self.consecutive_failures.saturating_sub(1).min(6);
+        let delay_secs = GROUP_CACHE_RETRY_BASE_SECS
+            .saturating_mul(1_u64 << exponent)
+            .min(GROUP_CACHE_RETRY_MAX_SECS);
+        let delay = std::time::Duration::from_secs(delay_secs);
+        self.retry_not_before = Some(now + delay);
+        Some(delay)
+    }
+
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.in_flight_generation = None;
+        self.resolved_generation = None;
+        self.consecutive_failures = 0;
+        self.retry_not_before = None;
+    }
+
+    fn is_resolved_or_in_flight(&self) -> bool {
+        self.resolved_generation == Some(self.generation)
+            || self.in_flight_generation == Some(self.generation)
+    }
+}
+
 const SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER_ENV: &str =
     "BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER";
 const SYSTEM_PROXY_LIFECYCLE_HELPER_PROGRAM_ENV: &str =
@@ -431,7 +511,7 @@ pub struct AdminState {
     im_gateway_service:
         parking_lot::RwLock<Option<crate::handlers::im_gateway::SharedImGatewayService>>,
     group_name_cache: parking_lot::Mutex<HashMap<String, String>>,
-    group_cache_resolved: AtomicBool,
+    group_cache_resolution: parking_lot::Mutex<GroupCacheResolutionState>,
     badge_rules_cache: parking_lot::RwLock<String>,
     csrf_token: String,
 }
@@ -497,7 +577,7 @@ impl AdminState {
             remote_invoke_admin_endpoint: parking_lot::RwLock::new(None),
             im_gateway_service: parking_lot::RwLock::new(None),
             group_name_cache: parking_lot::Mutex::new(HashMap::new()),
-            group_cache_resolved: AtomicBool::new(false),
+            group_cache_resolution: parking_lot::Mutex::new(GroupCacheResolutionState::default()),
             badge_rules_cache: parking_lot::RwLock::new(
                 r#"{"rules":[],"merged_content":"","share_env":{"active":false}}"#.to_string(),
             ),
@@ -1429,15 +1509,39 @@ impl AdminState {
     }
 
     pub fn is_group_cache_resolved(&self) -> bool {
-        self.group_cache_resolved.load(Ordering::Relaxed)
+        self.group_cache_resolution
+            .lock()
+            .is_resolved_or_in_flight()
     }
 
     pub fn set_group_cache_resolved(&self) {
-        self.group_cache_resolved.store(true, Ordering::Relaxed);
+        let mut state = self.group_cache_resolution.lock();
+        state.in_flight_generation = None;
+        state.resolved_generation = Some(state.generation);
+        state.consecutive_failures = 0;
+        state.retry_not_before = None;
     }
 
     pub fn clear_group_cache_resolved(&self) {
-        self.group_cache_resolved.store(false, Ordering::Relaxed);
+        self.group_cache_resolution.lock().invalidate();
+    }
+
+    pub fn try_begin_group_cache_resolution(&self) -> Option<u64> {
+        self.group_cache_resolution
+            .lock()
+            .try_begin(std::time::Instant::now())
+    }
+
+    pub fn finish_group_cache_resolution(
+        &self,
+        generation: u64,
+        all_resolved: bool,
+    ) -> Option<std::time::Duration> {
+        self.group_cache_resolution.lock().finish(
+            generation,
+            all_resolved,
+            std::time::Instant::now(),
+        )
     }
 
     fn group_cache_path(&self) -> PathBuf {
@@ -1649,6 +1753,21 @@ impl AdminState {
                 .to_string()
         });
     }
+
+    pub async fn refresh_badge_rules_cache_async(self: &Arc<Self>) {
+        let state = Arc::clone(self);
+        if let Err(error) = tokio::task::spawn_blocking(move || {
+            state.refresh_badge_rules_cache();
+        })
+        .await
+        {
+            tracing::warn!(
+                target: "bifrost_admin::state",
+                error = %error,
+                "badge rules cache refresh task failed"
+            );
+        }
+    }
     pub fn with_keepawake_manager(mut self, mgr: bifrost_power::SharedKeepAwakeManager) -> Self {
         self.keepawake_manager = Some(mgr);
         self
@@ -1781,6 +1900,65 @@ mod tests {
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn group_cache_resolution_is_single_flight_and_backs_off_failures() {
+        let now = std::time::Instant::now();
+        let mut state = GroupCacheResolutionState::default();
+
+        let generation = state.try_begin(now).expect("first attempt should start");
+        assert_eq!(state.try_begin(now), None, "second attempt must coalesce");
+
+        let retry_after = state
+            .finish(generation, false, now)
+            .expect("failure should schedule retry");
+        assert_eq!(retry_after, std::time::Duration::from_secs(5));
+        assert_eq!(
+            state.try_begin(now + std::time::Duration::from_secs(4)),
+            None
+        );
+        assert_eq!(
+            state.try_begin(now + std::time::Duration::from_secs(5)),
+            Some(generation)
+        );
+
+        let retry_after = state
+            .finish(generation, false, now + std::time::Duration::from_secs(5))
+            .expect("second failure should extend retry");
+        assert_eq!(retry_after, std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn group_cache_resolution_success_stays_resolved_until_invalidated() {
+        let now = std::time::Instant::now();
+        let mut state = GroupCacheResolutionState::default();
+        let generation = state.try_begin(now).expect("attempt should start");
+
+        assert_eq!(state.finish(generation, true, now), None);
+        assert!(state.is_resolved_or_in_flight());
+        assert_eq!(
+            state.try_begin(now + std::time::Duration::from_secs(600)),
+            None
+        );
+
+        state.invalidate();
+        assert!(!state.is_resolved_or_in_flight());
+        assert_ne!(state.try_begin(now), Some(generation));
+    }
+
+    #[test]
+    fn stale_group_cache_completion_cannot_change_new_generation() {
+        let now = std::time::Instant::now();
+        let mut state = GroupCacheResolutionState::default();
+        let stale_generation = state.try_begin(now).expect("attempt should start");
+
+        state.invalidate();
+        let current_generation = state.try_begin(now).expect("new attempt should start");
+        assert_ne!(current_generation, stale_generation);
+        assert_eq!(state.finish(stale_generation, true, now), None);
+        assert!(state.is_resolved_or_in_flight());
+        assert_eq!(state.in_flight_generation, Some(current_generation));
+    }
 
     fn create_test_dir() -> PathBuf {
         let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
