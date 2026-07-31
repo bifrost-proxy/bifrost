@@ -1156,6 +1156,118 @@ fn codex_adapter_respects_configured_service_tier_override() {
 }
 
 #[test]
+fn codex_session_fast_override_replaces_runner_service_tier() {
+    let mut request = ExternalCliRunRequest {
+        images: Vec::new(),
+        files: Vec::new(),
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: Some("Codex".to_string()),
+        session_key: Some("schedule:one".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: DEFAULT_ADAPTER.to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            executable: Some("codex".to_string()),
+            config_overrides: vec![
+                "service_tier=\"flex\"".to_string(),
+                "model_reasoning_effort=\"high\"".to_string(),
+            ],
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+    let state = crate::im_gateway::session_state::ImAgentSessionState {
+        service_tier_override: Some(CODEX_STANDARD_SERVICE_TIER.to_string()),
+        service_tier_override_source: Some("session slash command".to_string()),
+        ..Default::default()
+    };
+
+    apply_external_cli_session_overrides_to_run_request(&mut request, Some(&state));
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert!(has_arg_pair(
+        &spec.args,
+        "--config",
+        "service_tier=\"default\""
+    ));
+    assert!(!has_arg_pair(
+        &spec.args,
+        "--config",
+        "service_tier=\"flex\""
+    ));
+    assert!(has_arg_pair(
+        &spec.args,
+        "--config",
+        "model_reasoning_effort=\"high\""
+    ));
+}
+
+#[test]
+fn service_tier_resolution_uses_last_runner_override_then_codex_default() {
+    let configured = ExternalCliAdapterConfig {
+        config_overrides: vec![
+            "service_tier=\"flex\"".to_string(),
+            "service_tier=\"default\"".to_string(),
+        ],
+        ..Default::default()
+    };
+
+    assert_eq!(
+        resolve_external_cli_service_tier(DEFAULT_ADAPTER, &configured),
+        (
+            Some(CODEX_STANDARD_SERVICE_TIER.to_string()),
+            Some("runner config".to_string())
+        )
+    );
+    assert_eq!(
+        resolve_external_cli_service_tier(DEFAULT_ADAPTER, &ExternalCliAdapterConfig::default()),
+        (
+            Some(CODEX_FAST_SERVICE_TIER.to_string()),
+            Some("Bifrost Codex default".to_string())
+        )
+    );
+    assert_eq!(
+        resolve_external_cli_service_tier(TRAEX_ADAPTER, &ExternalCliAdapterConfig::default()),
+        (None, None)
+    );
+}
+
+#[test]
+fn codex_fast_status_formats_fast_standard_custom_and_default_modes() {
+    let fast = format_external_cli_fast_status(
+        Some(CODEX_FAST_SERVICE_TIER),
+        Some("session slash command"),
+        "Codex",
+    );
+    assert!(fast.contains("使用快速模式"));
+    assert!(fast.contains("service tier: `fast`"));
+    assert!(fast.contains("来源: session slash command"));
+
+    let standard = format_external_cli_fast_status(
+        Some(CODEX_STANDARD_SERVICE_TIER),
+        Some("runner config"),
+        "Codex",
+    );
+    assert!(standard.contains("使用标准模式"));
+    assert!(standard.contains("service tier: `default`"));
+    assert!(standard.contains("来源: runner config"));
+
+    let custom = format_external_cli_fast_status(Some("flex"), None, "Codex");
+    assert!(custom.contains("service tier: `flex`"));
+    assert!(custom.contains("来源: 配置"));
+
+    let unresolved = format_external_cli_fast_status(Some("  "), None, "Codex");
+    assert!(unresolved.contains("未解析到 service tier"));
+    assert!(unresolved.contains("Codex"));
+}
+
+#[test]
 fn codex_adapter_maps_legacy_search_to_web_search_feature() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
@@ -2492,6 +2604,54 @@ fn effective_config_marks_channel_overrides() {
     assert_eq!(effective.runner_id, "mock-runner");
 }
 
+#[tokio::test]
+async fn build_prompt_does_not_inject_legacy_bifrost_tool_context() {
+    let settings = ExternalCliAgentSettings {
+        enabled: true,
+        inject_bifrost_tools: true,
+        ..Default::default()
+    };
+    let request = run_request_from_settings("channel message", None, None, &settings);
+
+    assert!(!request.inject_bifrost_tools);
+    let prompt = build_prompt(&request, &[], &[]).await.unwrap();
+
+    assert_eq!(prompt, "channel message\n");
+    assert!(!prompt.contains("Bifrost Tool Context"));
+}
+
+#[test]
+fn compose_message_instructions_uses_base_only_for_new_session() {
+    let first_turn = compose_external_cli_message_instructions(
+        true,
+        Some(" base "),
+        Some("developer"),
+        Some("user"),
+        Some("runner"),
+    );
+    let resumed_turn = compose_external_cli_message_instructions(
+        false,
+        Some("base"),
+        Some("developer"),
+        Some("user"),
+        Some("runner"),
+    );
+
+    assert_eq!(
+        first_turn.as_deref(),
+        Some("base\n\ndeveloper\n\nuser\n\nrunner")
+    );
+    assert_eq!(resumed_turn.as_deref(), Some("developer\n\nuser\n\nrunner"));
+}
+
+#[test]
+fn compose_message_instructions_ignores_empty_values() {
+    let instructions =
+        compose_external_cli_message_instructions(true, Some(" \n "), None, Some(""), Some("\t"));
+
+    assert_eq!(instructions, None);
+}
+
 #[test]
 fn default_gateway_config_contains_enabled_codex_and_traex_runners() {
     let config = ExternalCliGatewayConfig::default();
@@ -2503,18 +2663,42 @@ fn default_gateway_config_contains_enabled_codex_and_traex_runners() {
         .expect("Codex default runner");
     assert!(codex.enabled);
     assert_eq!(codex.adapter, DEFAULT_ADAPTER);
+    assert!(!codex.inject_bifrost_tools);
     let traex_runner = config
         .runners
         .get(DEFAULT_TRAEX_RUNNER_ID)
         .expect("Traex default runner");
     assert!(traex_runner.enabled);
     assert_eq!(traex_runner.adapter, TRAEX_ADAPTER);
+    assert!(!traex_runner.inject_bifrost_tools);
     let claude_code = config
         .runners
         .get(DEFAULT_CLAUDE_CODE_RUNNER_ID)
         .expect("Claude Code default runner");
     assert!(claude_code.enabled);
     assert_eq!(claude_code.adapter, CLAUDE_CODE_ADAPTER);
+    assert!(!claude_code.inject_bifrost_tools);
+}
+
+#[test]
+fn normalized_gateway_config_disables_retired_bifrost_tool_injection() {
+    let normalized = normalized_gateway_config(ExternalCliGatewayConfig {
+        version: CONFIG_VERSION,
+        default_runner_id: "legacy".to_string(),
+        runners: BTreeMap::from([(
+            "legacy".to_string(),
+            ExternalCliAgentSettings {
+                enabled: true,
+                adapter: "mock".to_string(),
+                inject_bifrost_tools: true,
+                ..Default::default()
+            },
+        )]),
+        channels: BTreeMap::new(),
+    });
+
+    assert_eq!(normalized.version, CONFIG_VERSION);
+    assert!(!normalized.runners["legacy"].inject_bifrost_tools);
 }
 
 #[test]
@@ -3440,6 +3624,31 @@ fn external_cli_effort_slash_command_parser_handles_list_show_set_and_clear() {
         Some(Err(_))
     ));
     assert_eq!(parse_external_cli_effort_slash_command("/effortish"), None);
+}
+
+#[test]
+fn codex_fast_slash_command_parser_handles_toggle_on_off_status_and_errors() {
+    assert_eq!(
+        parse_external_cli_fast_slash_command(" /fast "),
+        Some(Ok(ExternalCliFastSlashCommand::Toggle))
+    );
+    assert_eq!(
+        parse_external_cli_fast_slash_command("/FAST ON"),
+        Some(Ok(ExternalCliFastSlashCommand::On))
+    );
+    assert_eq!(
+        parse_external_cli_fast_slash_command("/fast off"),
+        Some(Ok(ExternalCliFastSlashCommand::Off))
+    );
+    assert_eq!(
+        parse_external_cli_fast_slash_command("/fast status"),
+        Some(Ok(ExternalCliFastSlashCommand::Status))
+    );
+    assert!(matches!(
+        parse_external_cli_fast_slash_command("/fast maybe"),
+        Some(Err(_))
+    ));
+    assert_eq!(parse_external_cli_fast_slash_command("/fastish"), None);
 }
 
 #[test]

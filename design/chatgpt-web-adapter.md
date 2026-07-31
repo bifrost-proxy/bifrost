@@ -50,7 +50,7 @@ ChatGPT Web 的正确落点是新增内置 adapter `chatgpt_web`：Runner 只是
 
 ### Runner 与 Adapter
 
-- Runner 是可命名配置：`id / enabled / adapter / adapterConfig / instructions / skillPaths / injectBifrostTools / deliveryMode`。
+- Runner 是可命名配置：`id / enabled / adapter / adapterConfig / instructions / skillPaths / deliveryMode`。旧 `injectBifrostTools` 只保留反序列化兼容，运行时固定为 `false`，不再生成 prompt。
 - Adapter 是执行实现：`codex / custom / mock / chatgpt_web`。ChatGPT Web 与 Codex 的差异应被 adapter 吸收，而不是泄漏到 IM event loop、Provider 配置或 Chat Gateway API。
 
 架构最终形态：

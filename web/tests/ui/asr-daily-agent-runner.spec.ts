@@ -367,14 +367,14 @@ async function installDailyAgentMocks(page: Page) {
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        version: 1,
+        version: 2,
         defaultRunnerId: "codex",
         runners: {
           codex: {
             enabled: true,
             adapter: "codex",
             adapterConfig: {},
-            injectBifrostTools: true,
+            injectBifrostTools: false,
             skillPaths: [],
             deliveryMode: "final_reply",
           },

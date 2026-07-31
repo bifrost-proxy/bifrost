@@ -34,6 +34,10 @@ pub struct ImAgentSessionState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort_override_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier_override: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier_override_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -275,6 +279,22 @@ pub fn metadata_from_state(state: &ImAgentSessionState) -> BTreeMap<String, Stri
             source.to_string(),
         );
     }
+    if let Some(service_tier) = state
+        .service_tier_override
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        metadata.insert("serviceTierOverride".to_string(), service_tier.to_string());
+    }
+    if let Some(source) = state
+        .service_tier_override_source
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        metadata.insert("serviceTierOverrideSource".to_string(), source.to_string());
+    }
     metadata
 }
 
@@ -469,6 +489,9 @@ fn normalize_state(state: &mut ImAgentSessionState) -> Result<(), String> {
     state.reasoning_effort_override = normalize_optional(state.reasoning_effort_override.take());
     state.reasoning_effort_override_source =
         normalize_optional(state.reasoning_effort_override_source.take());
+    state.service_tier_override = normalize_optional(state.service_tier_override.take());
+    state.service_tier_override_source =
+        normalize_optional(state.service_tier_override_source.take());
     state.latest_run_id = normalize_optional(state.latest_run_id.take());
     state.title = normalize_optional(state.title.take());
     state.last_user_message = normalize_optional(state.last_user_message.take());
@@ -598,6 +621,26 @@ mod tests {
                 .get("threadId")
                 .map(String::as_str),
             Some("thread-1")
+        );
+    }
+
+    #[test]
+    fn metadata_includes_service_tier_override_and_source() {
+        let metadata = metadata_from_state(&ImAgentSessionState {
+            service_tier_override: Some(" fast ".to_string()),
+            service_tier_override_source: Some(" session slash command ".to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            metadata.get("serviceTierOverride").map(String::as_str),
+            Some("fast")
+        );
+        assert_eq!(
+            metadata
+                .get("serviceTierOverrideSource")
+                .map(String::as_str),
+            Some("session slash command")
         );
     }
 

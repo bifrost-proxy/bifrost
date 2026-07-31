@@ -42,7 +42,7 @@ const DEFAULT_RUNNER: ExternalCliAgentSettings = {
   enabled: true,
   adapter: "codex",
   adapterConfig: {},
-  injectBifrostTools: true,
+  injectBifrostTools: false,
   skillPaths: [],
   deliveryMode: "final_reply",
 };
@@ -103,7 +103,6 @@ function runnerToFormValues(runner: ExternalCliAgentSettings) {
         : undefined,
     instructions: runner.instructions,
     skillPaths: runner.skillPaths?.join("\n"),
-    injectBifrostTools: runner.injectBifrostTools,
     deliveryMode: runner.deliveryMode,
   };
 }
@@ -150,7 +149,7 @@ function formToRunner(values: Record<string, unknown>): ExternalCliAgentSettings
         ? { permissionMode: String(values.permissionMode).trim() }
         : {}),
     },
-    injectBifrostTools: values.injectBifrostTools !== false,
+    injectBifrostTools: false,
     skillPaths: lines(values.skillPaths),
     deliveryMode:
       (values.deliveryMode as ExternalCliAgentSettings["deliveryMode"]) || "final_reply",
@@ -751,13 +750,6 @@ export default function ExternalCliPanel({
                   <Form.Item name="skillPaths" label="Skill Paths">
                     <Input.TextArea rows={3} placeholder="Skill folder or SKILL.md path per line" />
                   </Form.Item>
-                  <Form.Item
-                    name="injectBifrostTools"
-                    label="Inject Bifrost Tools"
-                    valuePropName="checked"
-                  >
-                    <Switch />
-                  </Form.Item>
                 </>
               )
             }
@@ -768,7 +760,8 @@ export default function ExternalCliPanel({
           <Form.Item name="instructions">
             <LongTextModalField
               label="Runner Instructions"
-              placeholder="Instructions injected before the IM message"
+              placeholder="Optional instructions sent with every message"
+              description="Sent with every message. When empty, Bifrost adds nothing before the channel message."
               testId="settings-im-external-cli-instructions"
             />
           </Form.Item>

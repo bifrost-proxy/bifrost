@@ -812,7 +812,7 @@ Runner 选择规则：交互式终端中未传 `--runner` 时会展示启用 Run
 
 需要 provider 的 IM 命令都支持 `--provider <id>` 显式指定。未提供 `--provider` 时，CLI 会复用统一选择逻辑：只有一个 enabled provider 时自动选择；多个 enabled provider 且处于交互式终端时展示列表让用户选择；多个 provider 且 stdin 非交互时会要求显式传 `--provider`。`bifrost im send` 未传 `--target` 时默认发送给所选 provider 的 owner，因此 provider 需要配置 `owner_open_id`（可在创建时用 `--owner-open-id`，或由后端连接飞书后自动检测）。
 
-IM 通道建立后，Bifrost 会先推送上线通知和可用命令帮助。所有外部 Runner 都显示 `/help`、`/status`、`/cwd`、`/runner`、`/q`、`/rq`、`/stop` 等 IM 通道命令；Codex / Traex / Claude Code 等 Runner 只在适配器支持时显示 `/models`、`/model`、`/efforts`、`/effort`。
+IM 通道建立后，Bifrost 会先推送上线通知和可用命令帮助。所有外部 Runner 都显示 `/help`、`/status`、`/cwd`、`/runner`、`/q`、`/rq`、`/stop` 等 IM 通道命令；Codex / Traex / Claude Code 等 Runner 只在适配器支持时显示 `/models`、`/model`、`/efforts`、`/effort`。Codex Runner 额外支持 `/fast`、`/fast on`、`/fast off`、`/fast status`，用于按当前 IM session 切换或查询快速模式；其他 Runner 收到 `/fast` 会明确返回不支持。
 
 `bifrost im schedule add/update` 创建 Agent schedule 时可用 `--agent-runner-id` 选择 Runner，并通过 `--agent-model`、`--agent-profile`、`--agent-profile-v2`、`--agent-sandbox`、`--agent-reasoning-effort`、`--agent-reasoning-summary`、`--agent-approval-policy`、`--agent-danger-full-access`、`--agent-bypass-hook-trust`、`--agent-skip-git-repo-check`、`--agent-ignore-user-config`、`--agent-ignore-rules`、`--agent-add-dir`、`--agent-config`、`--agent-enable`、`--agent-disable` 等参数写入 `agent.adapter_config`。这些 schedule 级参数会在运行时覆盖 Runner 默认 Codex adapter 配置；历史 `--agent-search` 仅作为兼容入口映射为 `--enable web_search`，不再生成当前 Codex CLI 不支持的 `--search`。
 

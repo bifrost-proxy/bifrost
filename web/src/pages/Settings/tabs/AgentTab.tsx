@@ -454,9 +454,8 @@ export default function AgentTab({ hideSectionNav = false, visibleSections }: Ag
                 value={config.base_instructions ?? ""}
                 onChange={(value) => handleStringChange("base_instructions", value)}
                 placeholder="Optional instructions for external runners"
-                description="Optional base instructions forwarded to runners that support instruction overrides."
+                description="Sent only with the first message of a new external-runner session. When empty, Bifrost adds nothing."
                 testId="settings-agent-base-instructions"
-                copyPlaceholderLabel="Copy default into editor"
               />
 
               <Divider style={{ margin: "12px 0" }} />
@@ -465,8 +464,8 @@ export default function AgentTab({ hideSectionNav = false, visibleSections }: Ag
                 label="Developer Instructions"
                 value={config.developer_instructions || ""}
                 onChange={(value) => handleStringChange("developer_instructions", value)}
-                placeholder="Developer-level policy appended after the base prompt..."
-                description="Appended as a developer instructions section without replacing the base prompt."
+                placeholder="Optional developer-level instructions"
+                description="Sent with every external-runner message after the optional base instructions. Empty values add nothing."
                 testId="settings-agent-developer-instructions"
               />
 
@@ -476,8 +475,8 @@ export default function AgentTab({ hideSectionNav = false, visibleSections }: Ag
                 label="User Instructions"
                 value={config.user_instructions || ""}
                 onChange={(value) => handleStringChange("user_instructions", value)}
-                placeholder="User/AGENTS-style instructions combined with AGENTS.md..."
-                description="Combined with AGENTS.md and injected as user instructions."
+                placeholder="Optional user-level instructions"
+                description="Sent with every external-runner message after developer instructions. Empty values add nothing."
                 testId="settings-agent-user-instructions"
               />
             </Space>

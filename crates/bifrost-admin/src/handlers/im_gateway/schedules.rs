@@ -473,8 +473,23 @@ async fn execute_external_runner_schedule_once(
         initialized,
         &agent_task.prompt,
     );
+    let base_agent_config = service.agent_config_store.load();
+    let schedule_agent_config = run
+        .provider_id
+        .as_deref()
+        .and_then(|provider_id| service.provider_store.get(provider_id))
+        .map(|provider| effective_agent_config_for_provider(&base_agent_config, &provider))
+        .unwrap_or(base_agent_config);
+    let preview_instructions =
+        crate::im_gateway::external_cli::compose_external_cli_message_instructions(
+            !initialized,
+            schedule_agent_config.base_instructions.as_deref(),
+            schedule_agent_config.developer_instructions.as_deref(),
+            schedule_agent_config.user_instructions.as_deref(),
+            settings.instructions.as_deref(),
+        );
     run.input_preview = Some(external_schedule_input_preview(
-        settings.instructions.as_deref(),
+        preview_instructions.as_deref(),
         &messages,
     ));
     let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(
@@ -482,7 +497,7 @@ async fn execute_external_runner_schedule_once(
     );
     let mut final_result = None;
     for (idx, message) in messages.iter().enumerate() {
-        let request = external_schedule_run_request(ExternalScheduleRunRequestParams {
+        let mut request = external_schedule_run_request(ExternalScheduleRunRequestParams {
             message: message.clone(),
             provider_id: run.provider_id.clone(),
             session_key: Some(session_key.clone()),
@@ -492,6 +507,14 @@ async fn execute_external_runner_schedule_once(
             schedule_id: &schedule.id,
             conversation_ref: schedule_conversation_ref,
         });
+        request.instructions =
+            crate::im_gateway::external_cli::compose_external_cli_message_instructions(
+                !initialized && idx == 0,
+                schedule_agent_config.base_instructions.as_deref(),
+                schedule_agent_config.developer_instructions.as_deref(),
+                schedule_agent_config.user_instructions.as_deref(),
+                settings.instructions.as_deref(),
+            );
         let run_future = Box::pin(runtime.run(request));
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(schedule.timeout_ms),

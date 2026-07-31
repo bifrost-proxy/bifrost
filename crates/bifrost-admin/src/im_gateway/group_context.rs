@@ -809,7 +809,9 @@ fn classify_slash(message: &str, session_busy: bool) -> GroupMessageDisposition 
             || crate::im_gateway::external_cli::parse_external_cli_effort_slash_command(
                 message,
             )
-            .is_some() =>
+            .is_some()
+            || crate::im_gateway::external_cli::parse_external_cli_fast_slash_command(message)
+                .is_some() =>
         {
             GroupMessageDisposition::SystemCommand {
                 command: message.to_string(),

@@ -18,6 +18,8 @@ use bifrost_core::EXTERNAL_CLI_WORKER_ENV;
 
 const DEFAULT_RUNTIME: &str = "external_cli";
 const DEFAULT_ADAPTER: &str = "codex";
+pub const CODEX_FAST_SERVICE_TIER: &str = "fast";
+pub const CODEX_STANDARD_SERVICE_TIER: &str = "default";
 pub const TRAEX_ADAPTER: &str = "traex";
 pub const DEFAULT_CODEX_RUNNER_ID: &str = "Codex";
 pub const DEFAULT_TRAEX_RUNNER_ID: &str = "Traex";
@@ -26,7 +28,8 @@ pub const DEFAULT_CLAUDE_CODE_RUNNER_ID: &str = "Claude-Code";
 const LEGACY_CLAUDE_CODE_RUNNER_ID: &str = "Claude Code";
 const LEGACY_TRAEX_RUNNER_ALIAS: &str = concat!("tre", "ex");
 const CONFIG_FILENAME: &str = "im_gateway_external_cli_agent.json";
-const CONFIG_VERSION: u32 = 1;
+const CONFIG_VERSION: u32 = 2;
+const WORKER_PROTOCOL_VERSION: u32 = 1;
 const MAX_EXTERNAL_RUNNER_ATTACHMENTS_PER_MESSAGE: usize = 6;
 const MAX_PENDING_EXTERNAL_GUIDES: usize = 32;
 const WORKER_STOP_GRACE_MS: u64 = 1500;
@@ -179,7 +182,7 @@ async fn run_worker_stdio_async() -> Result<(), String> {
     else {
         return Err("external runner worker first command must be run".to_string());
     };
-    if request.protocol_version != CONFIG_VERSION {
+    if request.protocol_version != WORKER_PROTOCOL_VERSION {
         return Err(format!(
             "unsupported external runner worker protocol version {}",
             request.protocol_version
@@ -478,6 +481,14 @@ pub enum ExternalCliEffortSlashCommand {
     Set(String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalCliFastSlashCommand {
+    Toggle,
+    On,
+    Off,
+    Status,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalCliModelInfo {
@@ -542,7 +553,7 @@ pub struct ExternalCliAgentSettings {
     pub instructions: Option<String>,
     #[serde(default)]
     pub adapter_config: ExternalCliAdapterConfig,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub inject_bifrost_tools: bool,
     #[serde(default)]
     pub skill_paths: Vec<String>,
@@ -557,7 +568,7 @@ impl Default for ExternalCliAgentSettings {
             adapter: DEFAULT_ADAPTER.to_string(),
             instructions: None,
             adapter_config: ExternalCliAdapterConfig::default(),
-            inject_bifrost_tools: true,
+            inject_bifrost_tools: false,
             skill_paths: Vec::new(),
             delivery_mode: ExternalCliDeliveryMode::FinalReply,
         }
@@ -992,7 +1003,7 @@ impl ExternalCliWorkerClient {
             &mut stdin,
             &ExternalCliWorkerCommand::Run {
                 request: Box::new(ExternalCliWorkerRunRequest {
-                    protocol_version: CONFIG_VERSION,
+                    protocol_version: WORKER_PROTOCOL_VERSION,
                     runs_root: runs_root.display().to_string(),
                     request,
                 }),
@@ -1560,7 +1571,7 @@ pub fn run_request_from_settings(
         instructions: settings.instructions.clone(),
         adapter_config: settings.adapter_config.clone(),
         allow_work_dirs: Vec::new(),
-        inject_bifrost_tools: settings.inject_bifrost_tools,
+        inject_bifrost_tools: false,
         skill_paths: settings.skill_paths.clone(),
     }
 }
@@ -1578,16 +1589,37 @@ pub fn merge_run_request_with_settings(
     if request.adapter_config == ExternalCliAdapterConfig::default() {
         request.adapter_config = settings.adapter_config.clone();
     }
-    // NOTE: inject_bifrost_tools defaults to false via serde, so we can't distinguish
-    // "not provided" from "explicitly set to false". Runner settings always win when
-    // the request value is false. This is acceptable: runner config is authoritative.
-    if !request.inject_bifrost_tools {
-        request.inject_bifrost_tools = settings.inject_bifrost_tools;
-    }
+    // Kept in the wire shape for backward compatibility. Bifrost no longer
+    // synthesizes prompt text from this legacy flag.
+    request.inject_bifrost_tools = false;
     if request.skill_paths.is_empty() {
         request.skill_paths = settings.skill_paths.clone();
     }
     request
+}
+
+pub fn compose_external_cli_message_instructions(
+    include_base_instructions: bool,
+    base_instructions: Option<&str>,
+    developer_instructions: Option<&str>,
+    user_instructions: Option<&str>,
+    runner_instructions: Option<&str>,
+) -> Option<String> {
+    let instructions = [
+        include_base_instructions
+            .then_some(base_instructions)
+            .flatten(),
+        developer_instructions,
+        user_instructions,
+        runner_instructions,
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .collect::<Vec<_>>();
+
+    (!instructions.is_empty()).then(|| instructions.join("\n\n"))
 }
 
 #[derive(Clone, Debug)]
@@ -1767,15 +1799,6 @@ async fn build_prompt(
             prompt.push_str(instructions.trim());
             prompt.push_str("\n\n");
         }
-    }
-    if request.inject_bifrost_tools && request.adapter != crate::im_gateway::chatgpt_web::ADAPTER_ID
-    {
-        prompt.push_str("## Bifrost Tool Context\n\n");
-        prompt.push_str(
-            "- You are being invoked by Bifrost IM Gateway through an external CLI adapter.\n",
-        );
-        prompt.push_str("- Prefer the local `bifrost` CLI for Bifrost proxy, traffic, rule, IM, and remote-invoke operations when the requested task needs those capabilities.\n");
-        prompt.push_str("- Keep filesystem work inside the configured working directory and allowed extra directories.\n\n");
     }
     for skill_path in &request.skill_paths {
         let path = Path::new(skill_path);
@@ -2297,6 +2320,54 @@ pub fn resolve_external_cli_status_model_config(
     resolved
 }
 
+pub fn resolve_external_cli_service_tier(
+    adapter: &str,
+    config: &ExternalCliAdapterConfig,
+) -> (Option<String>, Option<String>) {
+    if let Some(service_tier) = config.config_overrides.iter().rev().find_map(|value| {
+        let (key, raw_value) = value.split_once('=')?;
+        (key.trim() == "service_tier")
+            .then(|| parse_config_override_string(raw_value))
+            .flatten()
+    }) {
+        return (Some(service_tier), Some("runner config".to_string()));
+    }
+    if supports_external_cli_fast_slash(adapter) {
+        return (
+            Some(CODEX_FAST_SERVICE_TIER.to_string()),
+            Some("Bifrost Codex default".to_string()),
+        );
+    }
+    (None, None)
+}
+
+pub fn format_external_cli_fast_status(
+    service_tier: Option<&str>,
+    source: Option<&str>,
+    runner_id: &str,
+) -> String {
+    match service_tier
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(CODEX_FAST_SERVICE_TIER) => format!(
+            "当前 Codex Runner `{runner_id}` 使用快速模式（service tier: `fast`）。\n来源: {}",
+            source.unwrap_or("配置")
+        ),
+        Some(CODEX_STANDARD_SERVICE_TIER) => format!(
+            "当前 Codex Runner `{runner_id}` 使用标准模式（service tier: `default`）。\n来源: {}",
+            source.unwrap_or("配置")
+        ),
+        Some(service_tier) => format!(
+            "当前 Codex Runner `{runner_id}` 使用 service tier: `{service_tier}`。\n来源: {}",
+            source.unwrap_or("配置")
+        ),
+        None => format!(
+            "当前 Codex Runner `{runner_id}` 未解析到 service tier，将使用 Codex 默认模式。"
+        ),
+    }
+}
+
 pub fn apply_external_cli_session_overrides_to_model_config(
     adapter: &str,
     state: Option<&crate::im_gateway::session_state::ImAgentSessionState>,
@@ -2341,6 +2412,15 @@ pub fn apply_external_cli_session_overrides_to_run_request(
     }
     if let Some(effort) = clean_optional_string(state.reasoning_effort_override.as_deref()) {
         request.adapter_config.reasoning_effort = Some(effort);
+    }
+    if supports_external_cli_fast_slash(&request.adapter) {
+        if let Some(service_tier) = clean_optional_string(state.service_tier_override.as_deref()) {
+            set_config_override(
+                &mut request.adapter_config.config_overrides,
+                "service_tier",
+                &format!("{service_tier:?}"),
+            );
+        }
     }
 }
 
@@ -2406,6 +2486,30 @@ pub fn parse_external_cli_effort_slash_command(
     Some(Ok(ExternalCliEffortSlashCommand::Set(
         rest.to_ascii_lowercase(),
     )))
+}
+
+pub fn parse_external_cli_fast_slash_command(
+    message: &str,
+) -> Option<Result<ExternalCliFastSlashCommand, String>> {
+    let trimmed = message.trim();
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let command = parts.next()?;
+    if !command.eq_ignore_ascii_case("/fast") {
+        return None;
+    }
+    let rest = parts.next().unwrap_or("").trim();
+    let command = match rest.to_ascii_lowercase().as_str() {
+        "" => ExternalCliFastSlashCommand::Toggle,
+        "on" => ExternalCliFastSlashCommand::On,
+        "off" => ExternalCliFastSlashCommand::Off,
+        "status" => ExternalCliFastSlashCommand::Status,
+        _ => {
+            return Some(Err(
+                "用法: /fast [on|off|status]；直接发送 /fast 可切换模式。".to_string(),
+            ));
+        }
+    };
+    Some(Ok(command))
 }
 
 pub async fn load_external_cli_model_catalog(
@@ -2910,6 +3014,10 @@ pub fn supports_external_cli_model_slash(adapter: &str) -> bool {
     )
 }
 
+pub fn supports_external_cli_fast_slash(adapter: &str) -> bool {
+    adapter.trim() == DEFAULT_ADAPTER
+}
+
 fn default_claude_code_model_catalog() -> Vec<ExternalCliModelInfo> {
     const MODELS: &[(&str, &str, &str, i64)] = &[
         (
@@ -3327,6 +3435,15 @@ fn apply_config_overrides_to_model_config(
             _ => {}
         }
     }
+}
+
+fn set_config_override(overrides: &mut Vec<String>, key: &str, raw_value: &str) {
+    overrides.retain(|value| {
+        value
+            .split_once('=')
+            .is_none_or(|(existing_key, _)| existing_key.trim() != key)
+    });
+    overrides.push(format!("{key}={raw_value}"));
 }
 
 fn parse_config_override_string(raw_value: &str) -> Option<String> {
@@ -5606,6 +5723,9 @@ fn normalized_gateway_config(mut config: ExternalCliGatewayConfig) -> ExternalCl
     migrate_legacy_traex_runner_id(&mut config);
     migrate_legacy_claude_code_runner_id(&mut config);
     ensure_default_external_cli_runners(&mut config.runners);
+    for settings in config.runners.values_mut() {
+        settings.inject_bifrost_tools = false;
+    }
     if !config.runners.contains_key(&config.default_runner_id) {
         let canonical_default_runner_id =
             canonical_external_cli_runner_id(&config, &config.default_runner_id);
@@ -5825,10 +5945,6 @@ fn default_operation() -> String {
 
 fn default_runner_id() -> String {
     DEFAULT_CODEX_RUNNER_ID.to_string()
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[cfg(test)]

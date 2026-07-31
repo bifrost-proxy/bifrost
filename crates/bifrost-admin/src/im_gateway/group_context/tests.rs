@@ -245,7 +245,14 @@ fn slash_classification_matches_direct_message_command_boundaries() {
         }
     );
 
-    for text in ["/Runner Codex", "/models extra", "/effort invalid"] {
+    for text in [
+        "/Runner Codex",
+        "/models extra",
+        "/effort invalid",
+        "/fast",
+        "/fast off",
+        "/fast invalid",
+    ] {
         let event = group_event(text, "c1", "u1", text, Vec::new(), 10);
         assert_eq!(
             classify_group_message(event.message.as_ref().unwrap(), None, false),

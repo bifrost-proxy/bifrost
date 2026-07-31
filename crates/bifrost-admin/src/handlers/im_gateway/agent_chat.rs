@@ -200,6 +200,24 @@ pub(super) async fn handle_idle_im_command(
         return true;
     }
 
+    if handle_im_fast_command(
+        trimmed,
+        session_key,
+        agent_config,
+        ImModelCommandContext {
+            client: ctx.client,
+            provider: ctx.provider,
+            external_cli_config_store: ctx.external_cli_config_store,
+            group_context_store: ctx.group_context_store,
+            event: ctx.event,
+            message_log_store: ctx.message_log_store,
+        },
+    )
+    .await
+    {
+        return true;
+    }
+
     false
 }
 
@@ -290,6 +308,11 @@ pub(super) fn build_im_channel_help_sections(runner_kind: &ImHelpRunnerKind) -> 
                 );
                 runner_lines.push(
                     "/effort [级别]  查看或切换当前 Codex/Traex/Claude Code Runner 的 Reasoning Effort；/effort clear 清除",
+                );
+            }
+            if crate::im_gateway::external_cli::supports_external_cli_fast_slash(adapter) {
+                runner_lines.push(
+                    "/fast [on|off|status]  切换或查看当前 Codex session 的快速模式；直接发送 /fast 可切换",
                 );
             }
             if !runner_lines.is_empty() {
@@ -877,6 +900,155 @@ async fn handle_im_effort_command(
     true
 }
 
+async fn handle_im_fast_command(
+    message: &str,
+    session_key: &str,
+    agent_config: &crate::im_gateway::agent::ImAgentConfig,
+    ctx: ImModelCommandContext<'_>,
+) -> bool {
+    let Some(parsed_command) =
+        crate::im_gateway::external_cli::parse_external_cli_fast_slash_command(message)
+    else {
+        return false;
+    };
+    let config = ctx.external_cli_config_store.load();
+    let Some(configured_runner_id) =
+        configured_runner_id_for_im_session(ctx.group_context_store, session_key, agent_config)
+    else {
+        send_agent_reply(
+            ctx.client,
+            ctx.provider,
+            ctx.event,
+            "当前 Runner 不支持 `/fast` 命令；该命令仅支持 Codex Runner。请先用 `/runner Codex` 切换。",
+            ctx.message_log_store,
+        )
+        .await;
+        return true;
+    };
+    let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
+        &config,
+        Some(ctx.provider.id.as_str()),
+        Some(configured_runner_id.as_str()),
+    );
+    if !crate::im_gateway::external_cli::supports_external_cli_fast_slash(
+        &effective.settings.adapter,
+    ) {
+        send_agent_reply(
+            ctx.client,
+            ctx.provider,
+            ctx.event,
+            "当前 Runner 不支持 `/fast` 命令；该命令仅支持 Codex Runner。",
+            ctx.message_log_store,
+        )
+        .await;
+        return true;
+    }
+    let command = match parsed_command {
+        Ok(command) => command,
+        Err(reason) => {
+            send_agent_reply(
+                ctx.client,
+                ctx.provider,
+                ctx.event,
+                &format!("❌ {reason}"),
+                ctx.message_log_store,
+            )
+            .await;
+            return true;
+        }
+    };
+    let state = crate::im_gateway::session_state::load_session_state(
+        session_key,
+        &effective.settings.adapter,
+        Some(&effective.runner_id),
+    );
+    let (current_tier, current_source) = state
+        .as_ref()
+        .and_then(|state| {
+            state.service_tier_override.as_ref().map(|tier| {
+                (
+                    Some(tier.clone()),
+                    state
+                        .service_tier_override_source
+                        .clone()
+                        .or_else(|| Some("session slash command".to_string())),
+                )
+            })
+        })
+        .unwrap_or_else(|| {
+            crate::im_gateway::external_cli::resolve_external_cli_service_tier(
+                &effective.settings.adapter,
+                &effective.settings.adapter_config,
+            )
+        });
+    let target_tier = match command {
+        crate::im_gateway::external_cli::ExternalCliFastSlashCommand::Status => None,
+        crate::im_gateway::external_cli::ExternalCliFastSlashCommand::On => {
+            Some(crate::im_gateway::external_cli::CODEX_FAST_SERVICE_TIER)
+        }
+        crate::im_gateway::external_cli::ExternalCliFastSlashCommand::Off => {
+            Some(crate::im_gateway::external_cli::CODEX_STANDARD_SERVICE_TIER)
+        }
+        crate::im_gateway::external_cli::ExternalCliFastSlashCommand::Toggle => {
+            if current_tier.as_deref()
+                == Some(crate::im_gateway::external_cli::CODEX_FAST_SERVICE_TIER)
+            {
+                Some(crate::im_gateway::external_cli::CODEX_STANDARD_SERVICE_TIER)
+            } else {
+                Some(crate::im_gateway::external_cli::CODEX_FAST_SERVICE_TIER)
+            }
+        }
+    };
+    let reply = if let Some(target_tier) = target_tier {
+        if let Err(reason) = persist_im_service_tier_override(
+            session_key,
+            &effective.settings.adapter,
+            &effective.runner_id,
+            target_tier.to_string(),
+        ) {
+            send_agent_reply(
+                ctx.client,
+                ctx.provider,
+                ctx.event,
+                &format!("❌ 无法切换 Codex Fast 模式：{reason}"),
+                ctx.message_log_store,
+            )
+            .await;
+            return true;
+        }
+        let mode = if target_tier == crate::im_gateway::external_cli::CODEX_FAST_SERVICE_TIER {
+            "快速模式"
+        } else {
+            "标准模式"
+        };
+        persist_im_model_system_message(
+            session_key,
+            &effective.settings.adapter,
+            &effective.runner_id,
+            &format!("切换 Codex 为{mode}"),
+        );
+        format!(
+            "已将 Codex Runner `{}` 切换到{mode}（service tier: `{target_tier}`）。下一条消息生效。",
+            effective.runner_id
+        )
+    } else {
+        crate::im_gateway::external_cli::format_external_cli_fast_status(
+            current_tier.as_deref(),
+            current_source.as_deref(),
+            &effective.runner_id,
+        )
+    };
+    send_agent_reply(
+        ctx.client,
+        ctx.provider,
+        ctx.event,
+        &reply,
+        ctx.message_log_store,
+    )
+    .await;
+    true
+}
+
 fn persist_im_model_system_message(
     session_key: &str,
     adapter: &str,
@@ -973,6 +1145,24 @@ fn persist_im_reasoning_effort_override(
             "failed to persist IM external CLI reasoning effort override"
         );
     }
+}
+
+fn persist_im_service_tier_override(
+    session_key: &str,
+    adapter: &str,
+    runner_id: &str,
+    service_tier: String,
+) -> Result<(), String> {
+    crate::im_gateway::session_state::upsert_session_state(
+        session_key,
+        adapter,
+        Some(runner_id),
+        |state| {
+            state.service_tier_override = Some(service_tier);
+            state.service_tier_override_source = Some("session slash command".to_string());
+        },
+    )
+    .map(|_| ())
 }
 
 pub(super) fn apply_im_cwd_switch_to_session(
@@ -1363,6 +1553,24 @@ pub(super) async fn handle_busy_message(
     }
 
     if handle_im_effort_command(
+        trimmed,
+        session_key,
+        ctx.agent_config,
+        ImModelCommandContext {
+            client,
+            provider,
+            external_cli_config_store: ctx.external_cli_config_store,
+            group_context_store: ctx.group_context_store,
+            event,
+            message_log_store,
+        },
+    )
+    .await
+    {
+        return;
+    }
+
+    if handle_im_fast_command(
         trimmed,
         session_key,
         ctx.agent_config,

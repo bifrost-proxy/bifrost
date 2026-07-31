@@ -84,6 +84,7 @@ export interface ExternalCliAgentSettings {
   adapter: string;
   instructions?: string;
   adapterConfig: ExternalCliAdapterConfig;
+  /** @deprecated Retained for config compatibility; Bifrost no longer injects tool context. */
   injectBifrostTools: boolean;
   skillPaths: string[];
   deliveryMode: "no_im" | "final_reply" | "progress_card";
