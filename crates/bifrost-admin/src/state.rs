@@ -128,6 +128,11 @@ impl GroupCacheResolutionState {
         self.retry_not_before = None;
     }
 
+    fn is_resolved(&self) -> bool {
+        self.resolved_generation == Some(self.generation)
+    }
+
+    #[cfg(test)]
     fn is_resolved_or_in_flight(&self) -> bool {
         self.resolved_generation == Some(self.generation)
             || self.in_flight_generation == Some(self.generation)
@@ -1509,9 +1514,7 @@ impl AdminState {
     }
 
     pub fn is_group_cache_resolved(&self) -> bool {
-        self.group_cache_resolution
-            .lock()
-            .is_resolved_or_in_flight()
+        self.group_cache_resolution.lock().is_resolved()
     }
 
     pub fn set_group_cache_resolved(&self) {
@@ -1907,6 +1910,7 @@ mod tests {
         let mut state = GroupCacheResolutionState::default();
 
         let generation = state.try_begin(now).expect("first attempt should start");
+        assert!(!state.is_resolved());
         assert_eq!(state.try_begin(now), None, "second attempt must coalesce");
 
         let retry_after = state
@@ -1935,6 +1939,7 @@ mod tests {
         let generation = state.try_begin(now).expect("attempt should start");
 
         assert_eq!(state.finish(generation, true, now), None);
+        assert!(state.is_resolved());
         assert!(state.is_resolved_or_in_flight());
         assert_eq!(
             state.try_begin(now + std::time::Duration::from_secs(600)),
@@ -1956,6 +1961,7 @@ mod tests {
         let current_generation = state.try_begin(now).expect("new attempt should start");
         assert_ne!(current_generation, stale_generation);
         assert_eq!(state.finish(stale_generation, true, now), None);
+        assert!(!state.is_resolved());
         assert!(state.is_resolved_or_in_flight());
         assert_eq!(state.in_flight_generation, Some(current_generation));
     }
