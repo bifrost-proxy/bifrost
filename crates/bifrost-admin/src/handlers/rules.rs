@@ -756,9 +756,7 @@ fn reverse_group_cache_for_dirs(
     map
 }
 
-fn build_active_summary_snapshot(
-    state: &SharedAdminState,
-) -> (ActiveSummaryResponse, Vec<String>) {
+fn build_active_summary_snapshot(state: &SharedAdminState) -> (ActiveSummaryResponse, Vec<String>) {
     let mut all_rules = Vec::new();
     let mut var_map: HashMap<String, Vec<InlineVarEntry>> = HashMap::new();
     let mut content_parts: Vec<String> = Vec::new();
@@ -868,24 +866,23 @@ async fn active_summary(state: SharedAdminState) -> Response<BoxBody> {
     }
 
     let snapshot_state = state.clone();
-    let (response, uncached_dirs) = match tokio::task::spawn_blocking(move || {
-        build_active_summary_snapshot(&snapshot_state)
-    })
-    .await
-    {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            tracing::error!(
-                target: "bifrost_admin::rules",
-                error = %error,
-                "active summary snapshot task failed"
-            );
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to build active rules summary",
-            );
-        }
-    };
+    let (response, uncached_dirs) =
+        match tokio::task::spawn_blocking(move || build_active_summary_snapshot(&snapshot_state))
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::error!(
+                    target: "bifrost_admin::rules",
+                    error = %error,
+                    "active summary snapshot task failed"
+                );
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to build active rules summary",
+                );
+            }
+        };
 
     if !uncached_dirs.is_empty() {
         tracing::debug!(

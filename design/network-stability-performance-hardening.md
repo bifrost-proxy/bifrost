@@ -51,7 +51,7 @@ active-summary 始终先使用本地目录名生成响应。远端补全是旁�
 ### 系统代理 reconcile
 
 - Admin API 的 `get_current`、enable/disable、全服务 ownership 验证均移入 `spawn_blocking`。
-- 周期任务先执行轻量 ownership 检查。已经由当前 Bifrost 持有且配置 generation 未变化时跳过完整 apply。
+- 周期任务先执行轻量 ownership 检查。已经由当前 Bifrost 持有，且距离上次完整检查不足 5 分钟时跳过完整 apply。
 - 完整检查保留在首次 enable、配置变化、系统唤醒、ownership 漂移和低频审计路径。
 - 外部代理被识别为 owner 时只更新本地 managed flag，不写系统设置。
 - 重复 Admin toggle 仍由同一 manager 写锁串行，API 响应格式不变。
@@ -76,4 +76,3 @@ active-summary 始终先使用本地目录名生成响应。远端补全是旁�
 - Admin system proxy API 的 OS 命令不占用 Tokio worker。
 - 同一代理回放下响应状态、规则命中和 Traffic 结果不变；吞吐回退不超过 3%，p99 延迟回退不超过 5%。
 - CI 通过 `bash scripts/ci/coverage-all.sh --json --gate` 的 crate 与 workspace coverage 门禁。
-
