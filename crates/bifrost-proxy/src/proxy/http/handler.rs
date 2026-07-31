@@ -35,8 +35,8 @@ use crate::protocol::ProtocolDetector;
 
 use super::tunnel::{
     classify_request_error, is_retryable_http2_error as is_retryable_http2_upstream_error,
-    mark_http1_fallback as mark_http1_upstream_fallback, sanitize_upstream_headers,
-    send_pooled_request, send_pooled_request_http1_only,
+    log_upstream_websocket_rejection, mark_http1_fallback as mark_http1_upstream_fallback,
+    sanitize_upstream_headers, send_pooled_request, send_pooled_request_http1_only,
 };
 use super::ws_handshake::{
     header_values, negotiate_extensions, negotiate_protocol, read_http1_response_with_leftover,
@@ -4706,10 +4706,16 @@ async fn handle_http_websocket(
         read_http1_response_with_leftover(&mut target_stream, websocket_handshake_max_header_size)
             .await?;
     if upstream_resp.status_code != 101 {
-        return Err(BifrostError::Network(format!(
-            "WebSocket handshake failed: {} {}",
-            upstream_resp.status_code, upstream_resp.status_text
-        )));
+        log_upstream_websocket_rejection(
+            ctx.id_str(),
+            &target_host,
+            upstream_resp.status_code,
+            &upstream_resp.status_text,
+        );
+        return Ok(Response::builder()
+            .status(StatusCode::BAD_GATEWAY)
+            .body(full_body(Bytes::from_static(b"Bad Gateway")))
+            .expect("static WebSocket rejection response must be valid"));
     }
 
     let response_headers = upstream_resp.headers.clone();

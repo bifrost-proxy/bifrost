@@ -1,0 +1,2 @@
+# 验证 WebSocket 上游非 101 响应保持既有 502 代理语义，同时日志按 host/status 限流。
+ws-reject.test ws://127.0.0.1:__UPSTREAM_PORT__

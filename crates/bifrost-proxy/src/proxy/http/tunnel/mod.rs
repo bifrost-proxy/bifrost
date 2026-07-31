@@ -158,7 +158,7 @@ impl WebSocketRejectionLogLimiter {
 static WEBSOCKET_REJECTION_LOG_LIMITER: LazyLock<Mutex<WebSocketRejectionLogLimiter>> =
     LazyLock::new(|| Mutex::new(WebSocketRejectionLogLimiter::default()));
 
-fn log_upstream_websocket_rejection(
+pub(in crate::proxy::http) fn log_upstream_websocket_rejection(
     req_id: &str,
     target_host: &str,
     status_code: u16,
