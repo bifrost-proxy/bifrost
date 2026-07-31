@@ -50,6 +50,20 @@ fn proxy_bypass_lists_match(actual: &str, expected: &str) -> bool {
     normalized(actual) == normalized(expected)
 }
 
+fn proxy_state_matches_expected(
+    actual: &ProxyBackup,
+    host: &str,
+    port: u16,
+    bypass: &str,
+    all_services_match: Option<bool>,
+) -> bool {
+    let target_matches = match all_services_match {
+        Some(matches) => matches,
+        None => actual.enable && actual.host == host && actual.port == port,
+    };
+    target_matches && proxy_bypass_lists_match(&actual.bypass, bypass)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemProxyDisableOutcome {
     Disabled,
@@ -386,6 +400,7 @@ impl SystemProxyManager {
     }
 
     pub fn enable(&mut self, host: &str, port: u16, bypass: Option<&str>) -> Result<()> {
+        let bypass_str = bypass.unwrap_or(DEFAULT_BYPASS);
         if !Self::is_supported() {
             return Err(BifrostError::Config(
                 "System proxy is not supported on this platform".to_string(),
@@ -401,11 +416,10 @@ impl SystemProxyManager {
             "System proxy enable requested"
         );
 
-        let bypass_str = bypass.unwrap_or(DEFAULT_BYPASS);
         let mut preserved_original: Option<Sysproxy> = None;
         if self.is_set {
             #[cfg(target_os = "macos")]
-            let all_services_match =
+            let all_services_match = Some(
                 macos_all_services_proxy_match(host, port).unwrap_or_else(|error| {
                     tracing::warn!(
                         error = %error,
@@ -414,20 +428,14 @@ impl SystemProxyManager {
                         "Failed to inspect all macOS network services before system proxy re-apply"
                     );
                     false
-                });
+                }),
+            );
 
             #[cfg(not(target_os = "macos"))]
-            let all_services_match = false;
+            let all_services_match = None;
 
             if let Ok(actual) = Self::get_current() {
-                if cfg!(target_os = "macos") {
-                    if all_services_match && proxy_bypass_lists_match(&actual.bypass, bypass_str) {
-                        return Ok(());
-                    }
-                } else if actual.enable
-                    && actual.host == host
-                    && actual.port == port
-                    && proxy_bypass_lists_match(&actual.bypass, bypass_str)
+                if proxy_state_matches_expected(&actual, host, port, bypass_str, all_services_match)
                 {
                     return Ok(());
                 }
@@ -3034,6 +3042,44 @@ mod tests {
         assert!(!proxy_bypass_lists_match(
             "localhost,127.0.0.1",
             "localhost,127.0.0.1,corp.example"
+        ));
+    }
+
+    #[test]
+    fn proxy_state_match_supports_platform_and_all_service_checks() {
+        let actual = ProxyBackup {
+            enable: true,
+            host: "127.0.0.1".to_string(),
+            port: 9900,
+            bypass: "localhost;127.0.0.1".to_string(),
+        };
+        assert!(proxy_state_matches_expected(
+            &actual,
+            "127.0.0.1",
+            9900,
+            "127.0.0.1,localhost",
+            None,
+        ));
+        assert!(!proxy_state_matches_expected(
+            &actual,
+            "127.0.0.1",
+            8800,
+            "127.0.0.1,localhost",
+            None,
+        ));
+        assert!(proxy_state_matches_expected(
+            &actual,
+            "ignored-by-service-audit",
+            1,
+            "localhost,127.0.0.1",
+            Some(true),
+        ));
+        assert!(!proxy_state_matches_expected(
+            &actual,
+            "127.0.0.1",
+            9900,
+            "localhost,127.0.0.1",
+            Some(false),
         ));
     }
 

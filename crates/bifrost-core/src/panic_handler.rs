@@ -149,6 +149,15 @@ mod tests {
         assert!(caught.is_err());
     }
 
+    #[test]
+    fn panic_hook_reentrant_path_returns_without_recursing() {
+        install_panic_hook();
+        PANIC_HOOK_ACTIVE.with(|active| active.set(true));
+        let caught = std::panic::catch_unwind(|| panic!("nested panic"));
+        PANIC_HOOK_ACTIVE.with(|active| active.set(false));
+        assert!(caught.is_err());
+    }
+
     struct BrokenPipeWriter;
 
     impl Write for BrokenPipeWriter {
@@ -171,6 +180,22 @@ mod tests {
             None,
         );
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn panic_diagnostic_includes_an_available_backtrace() {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let mut output = Vec::new();
+        write_panic_diagnostic(
+            &mut output,
+            "worker",
+            "source.rs:1:1",
+            "boom",
+            Some(&backtrace),
+        )
+        .unwrap();
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.contains("Backtrace:"));
     }
 
     #[tokio::test]

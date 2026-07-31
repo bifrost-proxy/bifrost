@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crate::ensure_crypto_provider;
 #[cfg(feature = "http3")]
 use crate::http3::Http3Client;
-use crate::protocol::{ProtocolDetector, TransportProtocol};
+use crate::protocol::{HttpResponse, ProtocolDetector, TransportProtocol};
 use bifrost_admin::{
     AdminRouter, AdminState, ConnectionInfo, RequestTiming, SharedPushManager, TrafficRecord,
     TrafficType, ADMIN_PATH_PREFIX,
@@ -180,6 +180,26 @@ pub(in crate::proxy::http) fn log_upstream_websocket_rejection(
             "upstream rejected WebSocket handshake"
         );
     }
+}
+
+fn websocket_rejection_response(
+    req_id: &str,
+    target_host: &str,
+    upstream_response: &HttpResponse,
+) -> Option<Response<BoxBody>> {
+    websocket_handshake_rejection_category(upstream_response.status_code)?;
+    log_upstream_websocket_rejection(
+        req_id,
+        target_host,
+        upstream_response.status_code,
+        &upstream_response.status_text,
+    );
+    Some(
+        Response::builder()
+            .status(502)
+            .body(full_body(b"WebSocket handshake failed".to_vec()))
+            .unwrap(),
+    )
 }
 
 fn apply_listener_context(
@@ -5306,18 +5326,8 @@ async fn handle_intercepted_websocket(
             }
         };
 
-        if let Some(category) = websocket_handshake_rejection_category(upstream_resp.status_code) {
-            debug_assert_eq!(category, "upstream_handshake_rejected");
-            log_upstream_websocket_rejection(
-                req_id,
-                &target_host,
-                upstream_resp.status_code,
-                &upstream_resp.status_text,
-            );
-            return Ok(Response::builder()
-                .status(502)
-                .body(full_body(b"WebSocket handshake failed".to_vec()))
-                .unwrap());
+        if let Some(response) = websocket_rejection_response(req_id, &target_host, &upstream_resp) {
+            return Ok(response);
         }
 
         UpstreamWebSocketHandshake {
@@ -5393,18 +5403,8 @@ async fn handle_intercepted_websocket(
             }
         };
 
-        if let Some(category) = websocket_handshake_rejection_category(upstream_resp.status_code) {
-            debug_assert_eq!(category, "upstream_handshake_rejected");
-            log_upstream_websocket_rejection(
-                req_id,
-                &target_host,
-                upstream_resp.status_code,
-                &upstream_resp.status_text,
-            );
-            return Ok(Response::builder()
-                .status(502)
-                .body(full_body(b"WebSocket handshake failed".to_vec()))
-                .unwrap());
+        if let Some(response) = websocket_rejection_response(req_id, &target_host, &upstream_resp) {
+            return Ok(response);
         }
 
         UpstreamWebSocketHandshake {
@@ -6399,6 +6399,26 @@ mod tests {
             assert_eq!(limiter.record(&host, 400, started), Some(0));
         }
         assert_eq!(limiter.entries.len(), WEBSOCKET_REJECTION_LOG_MAX_KEYS);
+    }
+
+    #[tokio::test]
+    async fn websocket_rejection_response_preserves_compatibility_status_and_body() {
+        assert!(websocket_rejection_response(
+            "req-accepted",
+            "accepted.example",
+            &HttpResponse::new(101, "Switching Protocols"),
+        )
+        .is_none());
+
+        let response = websocket_rejection_response(
+            "req-rejected",
+            "rejected.example",
+            &HttpResponse::new(401, "Unauthorized"),
+        )
+        .unwrap();
+        assert_eq!(response.status(), 502);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(body.as_ref(), b"WebSocket handshake failed");
     }
 
     fn create_test_dir() -> PathBuf {

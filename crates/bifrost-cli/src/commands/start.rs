@@ -492,6 +492,20 @@ fn should_skip_system_proxy_full_reconcile(
             .is_some_and(|elapsed| elapsed < SYSTEM_PROXY_FULL_RECONCILE_INTERVAL)
 }
 
+fn wait_for_reconcile(stop_flag: &AtomicBool, bifrost_dir: &Path, interval: Duration) -> bool {
+    let sleep_until = Instant::now() + interval;
+    while Instant::now() < sleep_until {
+        if stop_flag.load(Ordering::Acquire)
+            || should_stop_system_proxy_reconcile_for_shutdown(bifrost_dir)
+        {
+            stop_flag.store(true, Ordering::Release);
+            return true;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    false
+}
+
 fn inspect_system_proxy_ownership(proxy_host: &str, proxy_port: u16) -> SystemProxyOwnership {
     match bifrost_core::SystemProxyManager::get_current() {
         Ok(current) if !current.enable => SystemProxyOwnership::Disabled,
@@ -611,16 +625,9 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
                                 port = proxy_port,
                                 "system proxy remains converged; full reconcile skipped"
                             );
-                            let sleep_until =
-                                Instant::now() + system_proxy_reconcile_interval();
-                            while Instant::now() < sleep_until {
-                                if stop_flag.load(Ordering::Acquire)
-                                    || should_stop_system_proxy_reconcile_for_shutdown(&bifrost_dir)
-                                {
-                                    stop_flag.store(true, Ordering::Release);
-                                    return;
-                                }
-                                std::thread::sleep(Duration::from_secs(1));
+                            let interval = system_proxy_reconcile_interval();
+                            if wait_for_reconcile(&stop_flag, &bifrost_dir, interval) {
+                                return;
                             }
                             continue;
                         }
@@ -5258,6 +5265,25 @@ mod coverage_boost {
             false,
             Some(Duration::from_secs(1)),
         ));
+    }
+
+    #[test]
+    fn reconcile_wait_finishes_immediately_or_stops_on_request() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let stop_flag = AtomicBool::new(false);
+        assert!(!wait_for_reconcile(
+            &stop_flag,
+            temp_dir.path(),
+            Duration::ZERO,
+        ));
+
+        stop_flag.store(true, Ordering::Release);
+        assert!(wait_for_reconcile(
+            &stop_flag,
+            temp_dir.path(),
+            Duration::from_secs(1),
+        ));
+        assert!(stop_flag.load(Ordering::Acquire));
     }
 
     #[test]
