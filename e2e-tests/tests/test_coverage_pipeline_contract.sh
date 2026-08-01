@@ -181,6 +181,12 @@ grep -Fq 'capability: remote' "$ci_workflow"
 grep -Fq 'capability: agent-extensions' "$ci_workflow"
 grep -Fq 'BIFROST_E2E_SHARD_TOTAL: "3"' "$ci_workflow"
 grep -Fq 'BIFROST_E2E_CAPABILITY_SHARDS: "1"' "$ci_workflow"
+grep -Fq 'BIFROST_E2E_SHELL_TEST_TIMEOUT: "600"' "$ci_workflow"
+grep -Fq 'BIFROST_E2E_SUITE_TIMEOUT: "600"' "$ci_workflow"
+grep -Fq 'local suite_timeout="${BIFROST_E2E_SUITE_TIMEOUT:-${BIFROST_E2E_SHELL_TEST_TIMEOUT:-900}}"' "$runner"
+grep -Fq 'terminate_process_tree "$command_pid" 1' "$runner"
+grep -Fq 'if [[ -f "$timeout_marker" || "${command_status:-0}" -eq 143' "$runner"
+grep -Fq 'if: failure() || cancelled()' "$ci_workflow"
 if grep -Fq 'save-if: always()' "$ci_workflow" ||
   grep -Fq 'save-if: ${{ always() }}' "$ci_workflow"; then
   echo "rust-cache save-if must use a valid constant boolean expression" >&2
@@ -200,6 +206,11 @@ for startup_sensitive_test in \
   test_super_performance_mode.sh \
   test_upgrade_tls_trust_e2e.sh; do
   grep -Fq "\"$startup_sensitive_test\"" "$runner"
+done
+for lifecycle_sensitive_test in \
+  test_cli_start_interactive_restart_e2e.sh \
+  test_stop_restart_shutdown_marker.sh; do
+  grep -Fq "\"$lifecycle_sensitive_test\"" "$runner"
 done
 grep -Fq 'local STARTUP_SENSITIVE_TESTS=(' "$runner"
 grep -Fq '"$is_startup_sensitive" -eq 1' "$runner"

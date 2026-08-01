@@ -58,6 +58,7 @@ STABLE_SHELL_TESTS=(
 # trap. They must run outside the parallel batch and receive a sandbox-scoped
 # cleanup after execution, regardless of the configured shell job count.
 ISOLATED_AFTER_TESTS=(
+  "test_cli_start_interactive_restart_e2e.sh"
   "test_remote_connect_overload_retry_e2e.sh"
   "test_remote_invoke_e2e.sh"
   "test_remote_file_relay_e2e.sh"
@@ -73,6 +74,7 @@ ISOLATED_AFTER_TESTS=(
   "test_remote_shell_exec_streaming_e2e.sh"
   "test_traffic_db_e2e.sh"
   "test_openai_like_sse_search_e2e.sh"
+  "test_stop_restart_shutdown_marker.sh"
   "test_e2e_process_cleanup_isolation.sh"
 )
 
@@ -470,12 +472,14 @@ run_and_capture() {
   local stream_pid=""
   local heartbeat_pid=""
   local watchdog_pid=""
+  local timeout_marker="$REPORT_DIR/${log_slug}.timed-out"
   local command_status
   local pipe_path="$REPORT_DIR/${log_slug}.pipe"
-  local suite_timeout="${BIFROST_E2E_SUITE_TIMEOUT:-900}"
+  local suite_timeout="${BIFROST_E2E_SUITE_TIMEOUT:-${BIFROST_E2E_SHELL_TEST_TIMEOUT:-900}}"
 
   start_ts="$(date +%s)"
   rm -f "$pipe_path"
+  rm -f "$timeout_marker"
   print_section "Starting ${name}"
   echo "Command : $(format_command "$@")"
   echo "Log file: $log_file"
@@ -498,11 +502,8 @@ run_and_capture() {
       sleep "$suite_timeout"
       if kill -0 "$command_pid" 2>/dev/null; then
         echo "[TIMEOUT] ${name} exceeded ${suite_timeout}s limit, killing pid ${command_pid}" >&2
-        kill_process_tree "$command_pid"
-        kill -TERM "$command_pid" 2>/dev/null || true
-        sleep 5
-        kill_process_tree "$command_pid"
-        kill -9 "$command_pid" 2>/dev/null || true
+        : >"$timeout_marker"
+        terminate_process_tree "$command_pid" 1
         kill_all_bifrost
       fi
     ) &
@@ -512,7 +513,7 @@ run_and_capture() {
       status="passed"
     else
       command_status=$?
-      if [[ "${command_status:-0}" -eq 143 || "${command_status:-0}" -eq 137 ]]; then
+      if [[ -f "$timeout_marker" || "${command_status:-0}" -eq 143 || "${command_status:-0}" -eq 137 ]]; then
         status="failed"
         reason="timed out after ${suite_timeout}s"
       else
@@ -538,9 +539,8 @@ run_and_capture() {
       sleep "$suite_timeout"
       if kill -0 "$command_pid" 2>/dev/null; then
         echo "[TIMEOUT] ${name} exceeded ${suite_timeout}s limit, killing pid ${command_pid}" >&2
-        kill -TERM "$command_pid" 2>/dev/null || true
-        sleep 5
-        kill -9 "$command_pid" 2>/dev/null || true
+        : >"$timeout_marker"
+        terminate_process_tree "$command_pid" 1
       fi
     ) &
     watchdog_pid=$!
@@ -549,7 +549,7 @@ run_and_capture() {
       status="passed"
     else
       command_status=$?
-      if [[ "${command_status:-0}" -eq 143 || "${command_status:-0}" -eq 137 ]]; then
+      if [[ -f "$timeout_marker" || "${command_status:-0}" -eq 143 || "${command_status:-0}" -eq 137 ]]; then
         status="failed"
         reason="timed out after ${suite_timeout}s"
       else
@@ -560,16 +560,29 @@ run_and_capture() {
     fi
   fi
 
-  kill "$watchdog_pid" 2>/dev/null || true
-  wait "$watchdog_pid" 2>/dev/null || true
+  if [[ -f "$timeout_marker" ]]; then
+    wait "$watchdog_pid" 2>/dev/null || true
+  else
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+  fi
 
-  if is_windows && [[ -n "$stream_pid" ]]; then
-    kill_process_tree "$stream_pid"
-    kill "$stream_pid" 2>/dev/null || true
+  if [[ -f "$timeout_marker" && -n "$stream_pid" ]]; then
+    # A timed-out descendant may have inherited the FIFO writer. Do not let a
+    # diagnostic stream outlive the per-suite budget and hang the whole job.
+    sleep 1
+    if kill -0 "$stream_pid" 2>/dev/null; then
+      kill_process_tree "$stream_pid"
+    fi
+  elif is_windows && [[ -n "$stream_pid" ]]; then
+    if kill -0 "$stream_pid" 2>/dev/null; then
+      kill_process_tree "$stream_pid"
+    fi
   fi
 
   wait "$stream_pid" 2>/dev/null || true
   rm -f "$pipe_path"
+  rm -f "$timeout_marker"
 
   if [[ -n "$heartbeat_pid" ]]; then
     kill "$heartbeat_pid" 2>/dev/null || true
@@ -721,6 +734,7 @@ shell_test_runs_serial_in_parallel_shell_job() {
   case "$1" in
     test_memory_pressure_e2e.sh|\
     test_large_body_protection.sh|\
+    test_cli_start_interactive_restart_e2e.sh|\
     test_body_cache_sync_cleanup_admin_api.sh|\
     test_process_resolution_performance.sh|\
     test_super_performance_mode.sh|\
@@ -732,6 +746,7 @@ shell_test_runs_serial_in_parallel_shell_job() {
     test_remote_shell_exec_streaming_e2e.sh|\
     test_traffic_db_e2e.sh|\
     test_openai_like_sse_search_e2e.sh|\
+    test_stop_restart_shutdown_marker.sh|\
     test_asr_model_autonomy.sh|\
     test_asr_task_pause_resume.sh|\
     test_chatgpt_web_behavior_artifacts.sh|\

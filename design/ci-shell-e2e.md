@@ -54,6 +54,9 @@ Bifrost 的 shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_a
 
 - Linux shell shard `BIFROST_E2E_SHELL_JOBS: "4"`；macOS shard `BIFROST_E2E_SHELL_JOBS: "2"`。历史 8 路 / 16 路会触发 hosted runner OOM，让 Bifrost 子进程被系统 `Killed`。
 - Linux 与 macOS `E2E Shell` job `timeout-minutes: 60`，与 rules/runner 对齐。
+- macOS capability shard 的串行和并行 shell 用例统一使用 600 秒内层预算。`run_and_capture` 在没有显式 `BIFROST_E2E_SUITE_TIMEOUT` 时继承 `BIFROST_E2E_SHELL_TEST_TIMEOUT`，避免串行用例悄悄回退到另一套 900 秒预算。
+- macOS 非交互 bash 不保证后台命令拥有独立 process group；suite 超时时按父子关系递归发送 TERM/KILL，并主动结束仍持有日志 FIFO 的 stream。这样单个 fixture 遗留后代时会在 600 秒内得到 `timed out` 失败，而不是一直等到 60 分钟 job 被外层取消。
+- macOS failed/cancelled job 都尝试 dump/upload E2E 日志。内层 watchdog 必须先于外层预算完成，确保普通挂起场景仍有 suite 日志 artifact；GitHub 强制终止 runner 本身时不承诺 post step 一定执行。
 - Workflow 顶层 `concurrency: { group: ${{ github.workflow }}-${{ github.ref }}, cancel-in-progress: true }`，避免旧 push 长尾阻塞新 commit。
 
 **Cargo-heavy 用例串行**
@@ -66,6 +69,7 @@ Bifrost 的 shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_a
 - `test_body_cache_sync_cleanup_admin_api.sh`、`test_process_resolution_performance.sh`、`test_super_performance_mode.sh`、`test_upgrade_tls_trust_e2e.sh` 都会启动长生命周期 Python fixture。macOS hosted runner 在并行代理压力下曾出现子进程仍存活、但 5–20 秒内未完成 import/bind/readiness 的稳定失败；这些脚本登记到 `STARTUP_SENSITIVE_TESTS`，进入 serial lane。
 - 串行化只改变测试调度，不减少任何断言或产品覆盖。分片估算中的 `shell_test_runs_serial_in_parallel_shell_job` 必须与实际 `STARTUP_SENSITIVE_TESTS` 保持一致。
 - readiness 不依赖固定 sleep：HTTP fixture 必须实际请求健康端点，HTTPS mirror 必须用测试 CA 发起 TLS 请求；等待期间持续检查 PID，子进程提前退出或超时必须输出 fixture 日志。
+- CLI start/restart 与 shutdown-marker 用例会创建可脱离测试 shell 的 daemon，并读取运行时发现状态，因此进入 isolated-after 串行队列；旧进程成为 zombie 时先由父测试 `wait` 回收，stop 后的 status 显式查询本用例动态端口，不能误发现开发机上仍运行的 9900 Service。
 
 **macOS 双分片负载均衡**
 

@@ -20,6 +20,28 @@ FAKE_PROXY_BIN=""
 FAKE_PROXY_STATE=""
 FAKE_PROXY_COMMAND_LOG=""
 
+ensure_pid_stopped() {
+    local pid="${1:-}"
+    [[ "${pid}" =~ ^[0-9]+$ ]] || return 0
+    for _ in $(seq 1 50); do
+        if ! kill -0 "${pid}" 2>/dev/null; then
+            break
+        fi
+        sleep 0.1
+    done
+    if kill -0 "${pid}" 2>/dev/null; then
+        kill -TERM "${pid}" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            if ! kill -0 "${pid}" 2>/dev/null; then
+                break
+            fi
+            sleep 0.1
+        done
+        kill -KILL "${pid}" 2>/dev/null || true
+    fi
+
+}
+
 if [[ "${BIFROST_COVERAGE_E2E:-0}" == "1" ]]; then
     echo "SKIP: daemon detachment cannot provide a bounded LLVM profile lifecycle"
     exit 0
@@ -42,6 +64,8 @@ remove_test_data_dir() {
 cleanup() {
     set +e
     if [[ -n "${TEST_DATA_DIR}" && -d "${TEST_DATA_DIR}" ]]; then
+        local runtime_pid
+        runtime_pid="$(read_runtime_pid)"
         if [[ -n "${FAKE_PROXY_BIN:-}" && -d "${FAKE_PROXY_BIN:-}" ]]; then
             PATH="${FAKE_PROXY_BIN}:$PATH" \
             BIFROST_FAKE_SYSTEM_PROXY_STATE="${FAKE_PROXY_STATE:-}" \
@@ -50,6 +74,7 @@ cleanup() {
         else
             BIFROST_DATA_DIR="${TEST_DATA_DIR}" "${BIFROST_BIN}" stop >/dev/null 2>&1 || true
         fi
+        ensure_pid_stopped "${runtime_pid}"
         remove_test_data_dir "${TEST_DATA_DIR}"
     fi
     return 0
@@ -352,6 +377,7 @@ test_restart_handoff_with_fake_system_proxy() {
     BIFROST_FAKE_SYSTEM_PROXY_STATE="${FAKE_PROXY_STATE}" \
     BIFROST_FAKE_SYSTEM_PROXY_COMMAND_LOG="${FAKE_PROXY_COMMAND_LOG}" \
     "${BIFROST_BIN}" stop >/dev/null 2>&1 || true
+    ensure_pid_stopped "${new_pid}"
 }
 
 test_restart_without_system_proxy_cross_platform() {
@@ -421,6 +447,7 @@ test_restart_without_system_proxy_cross_platform() {
     fi
 
     "${BIFROST_BIN}" stop >/dev/null 2>&1 || true
+    ensure_pid_stopped "${new_pid}"
 }
 
 main() {
@@ -448,9 +475,11 @@ main() {
         _log_fail "startup should clear stale restart shutdown marker" "marker removed" "marker still exists"
     fi
 
-    local started stopped elapsed stop_output
+    local started stopped elapsed stop_output stopped_pid
+    stopped_pid="$(read_runtime_pid)"
     started="$(now_ms)"
     stop_output="$("${BIFROST_BIN}" stop 2>&1)"
+    ensure_pid_stopped "${stopped_pid}"
     stopped="$(now_ms)"
     elapsed=$((stopped - started))
     printf '%s\n' "${stop_output}"
@@ -467,7 +496,7 @@ main() {
     fi
 
     local status_output
-    status_output="$("${BIFROST_BIN}" status 2>&1)"
+    status_output="$("${BIFROST_BIN}" -p "${PROXY_PORT}" status 2>&1)"
     assert_body_contains "Status: Stopped" "${status_output}" "status should report stopped after stop"
 
     test_restart_without_system_proxy_cross_platform

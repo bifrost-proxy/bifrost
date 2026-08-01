@@ -845,7 +845,10 @@ jobs:
       BIFROST_E2E_CAPABILITY_SHARDS: "1"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "2"
-      BIFROST_E2E_SHELL_TEST_TIMEOUT: "1260"
+      # Fail a stuck suite early enough to emit its report and upload logs
+      # before the 60-minute job budget expires.
+      BIFROST_E2E_SHELL_TEST_TIMEOUT: "600"
+      BIFROST_E2E_SUITE_TIMEOUT: "600"
       # Unit/Integration and Coverage already compile and execute the HTTP/3
       # Rust integration test. macOS still runs the real proxy scenarios without
       # spending 10+ minutes rebuilding test-only dependencies.
@@ -894,7 +897,7 @@ jobs:
         shell: bash
         run: bash scripts/ci/run-e2e-shell.sh
       - name: Dump failed suite logs
-        if: failure()
+        if: failure() || cancelled()
         shell: bash
         run: |
           echo "=== E2E Report Directory ==="
@@ -908,7 +911,7 @@ jobs:
           echo "=== E2E Data Directory ==="
           find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
       - name: Upload E2E logs
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: e2e-shell-logs-aarch64-apple-darwin-${{ matrix.capability }}

@@ -111,16 +111,73 @@ kill_pid_force() {
     fi
 }
 
-kill_process_tree() {
+signal_process_tree() {
     local pid=$1
+    local signal=${2:-TERM}
     if [ -z "$pid" ]; then
         return 0
     fi
     if is_windows; then
         taskkill.exe /F /T /PID "$pid" >/dev/null 2>&1 || true
     else
-        kill -- -"$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
+        local child_pid
+        while IFS= read -r child_pid; do
+            [ -n "$child_pid" ] || continue
+            signal_process_tree "$child_pid" "$signal"
+        done < <(ps -eo pid=,ppid= 2>/dev/null | awk -v parent="$pid" '$2 == parent { print $1 }')
+
+        # A non-interactive bash background job is not guaranteed to own a
+        # process group on macOS. Walk descendants explicitly before signalling
+        # the parent so a child cannot keep a log FIFO open after its test shell
+        # has timed out.
+        kill -"$signal" "$pid" 2>/dev/null || true
     fi
+}
+
+terminate_process_tree() {
+    local pid=$1
+    local grace_seconds=${2:-1}
+    if [ -z "$pid" ]; then
+        return 0
+    fi
+    if is_windows; then
+        taskkill.exe /F /T /PID "$pid" >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    local process_pid
+    local process_pids=()
+    while IFS= read -r process_pid; do
+        [ -n "$process_pid" ] && process_pids+=("$process_pid")
+    done < <(
+        {
+            signal_process_tree_list() {
+                local parent_pid=$1
+                local descendant_pid
+                while IFS= read -r descendant_pid; do
+                    [ -n "$descendant_pid" ] || continue
+                    signal_process_tree_list "$descendant_pid"
+                    printf '%s\n' "$descendant_pid"
+                done < <(ps -eo pid=,ppid= 2>/dev/null | awk -v parent="$parent_pid" '$2 == parent { print $1 }')
+            }
+            signal_process_tree_list "$pid"
+            printf '%s\n' "$pid"
+        }
+    )
+
+    # Snapshot descendants before TERM. Once the parent exits, surviving
+    # children are reparented and can no longer be discovered from its PID.
+    for process_pid in "${process_pids[@]}"; do
+        kill -TERM "$process_pid" 2>/dev/null || true
+    done
+    sleep "$grace_seconds"
+    for process_pid in "${process_pids[@]}"; do
+        kill -KILL "$process_pid" 2>/dev/null || true
+    done
+}
+
+kill_process_tree() {
+    signal_process_tree "$1" KILL
 }
 
 kill_bifrost_on_port() {
