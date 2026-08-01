@@ -76,7 +76,8 @@ Bifrost 的 shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_a
 
 - 每个并行和串行 shell test 退出后，都必须在删除临时目录前调用 `kill_bifrost_in_data_root`，只回收该测试 ownership marker 下 runtime/pid 文件指向的 Bifrost 进程。
 - `scripts/run_all_e2e.sh` 顶层 EXIT trap 再扫描一次本次 `E2E_SANDBOX_DIR`，覆盖测试被中断、局部 trap 未执行等边界；生产 `~/.bifrost` 和受保护端口继续由 helper 明确拒绝。
-- 业务测试与 action post steps 已成功但 GitHub `Complete job` 长时间不结束时，应优先检查 detached test daemon，而不是只提高 job timeout。
+- GitHub Actions shell E2E 入口在执行前记录 hosted runner 当前用户的 PID 基线，EXIT trap 最后只回收基线后新增的同 UID Python/Node/browser/daemon 子进程；保护当前 cleanup shell 的完整祖先链，非 GitHub 环境或缺少基线时直接 no-op。macOS `ps` 不可靠暴露其它进程环境，因此不能只依赖 `RUNNER_TRACKING_ID`。
+- 业务测试与 action post steps 已成功但 GitHub `Complete job` 长时间不结束时，应优先检查 detached test processes，而不是只提高 job timeout。
 
 **macOS 双分片负载均衡**
 
