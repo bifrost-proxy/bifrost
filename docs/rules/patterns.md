@@ -254,6 +254,18 @@ www.example.com/api/* host://api-server.local
 example.com/api/*/details host://api-server.local
 ```
 
+host 通配符也可以直接连接不含通配符的 URL 片段路径：
+
+```bash
+# 单星 host 不跨越点；匹配路径本身、query 与子路径，但不匹配 /get_domains/v50
+*/get_domains/v5 reqHeaders://X-Debug=1
+
+# 双星 host 可匹配 api.example.com 等含点 host
+**/get_domains/v5 reqHeaders://X-Debug=1
+```
+
+因此 `*/get_domains/v5` 是普通 URL 片段前缀，不会因为 host 的 `*/` 边界被误判成路径通配模式。
+
 ### 捕获组
 
 每个 `*` 和 `**` 都会产生一个捕获组，可通过 `$1`、`$2` 等在操作中引用：
@@ -309,6 +321,9 @@ http*://api.example.com host://backend.local
 | 域名通配 | `$*.example.com` | `http://www.example.com/path` | ✅ |
 | 域名通配 | `$*.example.com` | `http://a.b.example.com/path` | ❌ |
 | 域名通配 | `$**.example.com` | `http://a.b.example.com/path` | ✅ |
+| host 通配 + URL 片段 | `*/get_domains/v5` | `http://api/get_domains/v5?region=cn` | ✅ |
+| host 通配 + URL 片段边界 | `*/get_domains/v5` | `http://api/get_domains/v50` | ❌ |
+| 多级 host + URL 片段 | `**/get_domains/v5` | `http://api.example.com/get_domains/v5` | ✅ |
 | 路径通配 | `example.com/api/*` | `http://example.com/api/users` | ✅ |
 | 嵌套路径通配 | `example.com/api/*/details` | `http://example.com/api/users/details` | ✅ |
 | 协议+通配（过度匹配） | `http://*.example.com` | `http://www.example.com/` | ✅（但 `*` 跨越 `.`，等价 `**`，会误命中 `http://a.b.example.com/`，不推荐写协议前缀） |

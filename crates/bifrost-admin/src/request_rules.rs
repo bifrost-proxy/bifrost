@@ -913,6 +913,16 @@ fn parse_replace_value(value: &str) -> ParsedReplaceRules {
     let mut string_rules = Vec::new();
     let mut regex_rules = Vec::new();
 
+    if let Some(pairs) = bifrost_core::parse_json_replace_pairs(value) {
+        for (from, to) in pairs {
+            push_replace_pair(&mut string_rules, &mut regex_rules, from, to);
+        }
+        return ParsedReplaceRules {
+            string_rules,
+            regex_rules,
+        };
+    }
+
     for pair in value.split('&') {
         let pair = pair.trim();
         if pair.is_empty() {
@@ -925,20 +935,29 @@ fn parse_replace_value(value: &str) -> ParsedReplaceRules {
             .unwrap_or((pair, ""));
         let from = url_decode(from);
         let to = url_decode(to);
-        if let Some((pattern, global)) = parse_regex_pattern(&from) {
-            regex_rules.push(ReplayRegexReplace {
-                pattern,
-                replacement: to,
-                global,
-            });
-        } else {
-            string_rules.push((from, to));
-        }
+        push_replace_pair(&mut string_rules, &mut regex_rules, from, to);
     }
 
     ParsedReplaceRules {
         string_rules,
         regex_rules,
+    }
+}
+
+fn push_replace_pair(
+    string_rules: &mut Vec<(String, String)>,
+    regex_rules: &mut Vec<ReplayRegexReplace>,
+    from: String,
+    to: String,
+) {
+    if let Some((pattern, global)) = parse_regex_pattern(&from) {
+        regex_rules.push(ReplayRegexReplace {
+            pattern,
+            replacement: to,
+            global,
+        });
+    } else {
+        string_rules.push((from, to));
     }
 }
 
@@ -1458,6 +1477,17 @@ qianchuan.jinritemai.com https://10.37.102.138:8080
         assert!(result
             .iter()
             .any(|(key, value)| key == "x-tt-env-fe" && value == "dev"));
+    }
+
+    #[test]
+    fn test_request_replace_parser_supports_json_object() {
+        let parsed = parse_replace_value(r#"{"old":"new","/item\\d+/g":"entry"}"#);
+
+        assert_eq!(parsed.string_rules, vec![("old".into(), "new".into())]);
+        assert_eq!(parsed.regex_rules.len(), 1);
+        assert!(parsed.regex_rules[0].global);
+        assert_eq!(parsed.regex_rules[0].replacement, "entry");
+        assert!(parsed.regex_rules[0].pattern.is_match("item42"));
     }
 
     #[test]

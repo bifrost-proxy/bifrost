@@ -67,7 +67,7 @@
 | `resBody`       | ✅   | `response_modify/body.txt`, `response_modify/res_body_large.txt`, `advanced/body_size_strategy.txt` | 已覆盖                                   |
 | `resPrepend`    | ✅   | `response_modify/body.txt`, `advanced/body_size_strategy.txt`                                       | 已覆盖                                   |
 | `resAppend`     | ✅   | `response_modify/body.txt`, `advanced/body_size_strategy.txt`                                       | 已覆盖                                   |
-| `resReplace`    | ✅   | `response_modify/body.txt`, `advanced/body_size_strategy.txt`                                       | 已覆盖                                   |
+| `resReplace`    | ✅   | `response_modify/body.txt`, `response_modify/res_replace_json_object.txt`, `advanced/body_size_strategy.txt` | 已覆盖传统语法、Values JSON 对象与 `*/path` 匹配 |
 | `resCookies`    | ⚠️   | `response_modify/cookies.txt`                                                                       | 基础覆盖已有，组合断言仍偏少             |
 | `resCors`       | ⚠️   | `response_modify/cors.txt`                                                                          | 已有基础夹具，详细字段与预检场景仍可加强 |
 | `resDelay`      | ✅   | `response_modify/delay.txt`                                                                         | 已覆盖                                   |

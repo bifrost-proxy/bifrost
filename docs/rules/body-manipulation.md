@@ -223,7 +223,10 @@ hello world
 pattern reqReplace://old=new
 pattern reqReplace://(/regex/=replacement)
 pattern reqReplace://(/regex/g=replacement)  # 全局替换
+pattern reqReplace://{replaceMap}             # replaceMap 可为严格 JSON 对象
 ```
+
+`reqReplace` 的 JSON 对象格式、转义和正则 key 语义与下文 `resReplace` 相同。
 
 ### 示例
 
@@ -257,6 +260,7 @@ www.example.com reqReplace://(/password/g=******)
 pattern resReplace://old=new
 pattern resReplace://(/regex/=replacement)
 pattern resReplace://(/regex/g=replacement)
+pattern resReplace://{replaceMap}  # replaceMap 可为严格 JSON 对象
 ```
 
 ### 示例
@@ -272,12 +276,28 @@ www.example.com resReplace://(/https:\/\//g=http://)
 www.example.com resReplace://(/\d{4}-\d{4}-\d{4}-\d{4}/g=****-****-****-****)
 ```
 
+也可以在当前规则文件或全局 Values 中保存一个严格 JSON 对象。对象的 key 是待替换文本，value 是替换结果；JSON 字符串转义会在解析后参与匹配，正则形式的 key（如 `"/foo/g"`）仍按正则替换处理：
+
+````txt
+```replace
+{
+  ".doupay.com\"": ".nodoupay.com\"",
+  "\"inf.baohuaxia.com\"": "\"inf.nobaohuaxia.com\""
+}
+```
+
+*/get_domains/v5 resReplace://{replace}
+````
+
+这里的 JSON 必须使用双引号并且语法完整；单引号对象、YAML 风格对象不属于该兼容模式。传统的 `old=new&foo=bar` 语法保持不变。
+
 ### 测试用例
 
 | 测试场景 | 规则                             | 原始 Body  | 预期 Body  |
 | -------- | -------------------------------- | ---------- | ---------- |
 | 简单替换 | `test.com resReplace://old=new`  | `old text` | `new text` |
 | 全局替换 | `test.com resReplace://(/a/g=b)` | `aaa`      | `bbb`      |
+| JSON 对象 | `test.com resReplace://{replace}` | Values 中各 key | 按对象定义顺序替换 |
 
 ---
 

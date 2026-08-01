@@ -16,6 +16,7 @@ export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 # | BR-04 | HTTP  | 响应   | 简单字符串替换                    |
 # | BR-05 | HTTP  | 响应   | 多个替换规则                      |
 # | BR-06 | HTTP  | 双向   | 请求和响应同时替换                |
+# | BR-12 | HTTP  | 兼容   | Values JSON 对象 + */path 匹配    |
 #
 
 set -uo pipefail
@@ -47,7 +48,7 @@ passed=0
 failed=0
 skipped=0
 
-TEST_DATA_DIR="$PROJECT_DIR/.bifrost-test-body-replace"
+TEST_DATA_DIR="${BIFROST_DATA_DIR:-$PROJECT_DIR/.bifrost-test-body-replace}"
 PROXY_LOG_FILE="$TEST_DATA_DIR/proxy.log"
 MOCK_LOG_FILE="$TEST_DATA_DIR/mock.log"
 PROXY_PID=""
@@ -108,7 +109,7 @@ start_mock_servers() {
     
     mkdir -p "$TEST_DATA_DIR"
     
-    MOCK_SERVERS=http HTTP_PORT="$ECHO_HTTP_PORT" \
+    PYTHONUNBUFFERED=1 MOCK_SERVERS=http HTTP_PORT="$ECHO_HTTP_PORT" \
     "$E2E_DIR/mock_servers/start_servers.sh" start > "$MOCK_LOG_FILE" 2>&1 &
     
     local count=0
@@ -167,6 +168,9 @@ test-res-regex-global.local http://127.0.0.1:${ECHO_HTTP_PORT} resReplace:///OLD
 # BR-11: 复杂正则模式 (数字匹配)
 test-req-regex-digits.local http://127.0.0.1:${ECHO_HTTP_PORT} reqReplace:///\d+/g=NUM
 EOF
+
+    sed "s/__ECHO_HTTP_PORT__/${ECHO_HTTP_PORT}/g" \
+        "$E2E_DIR/rules/response_modify/res_replace_json_object.txt" >> "$rules_file"
     
     log_debug "规则文件: $rules_file"
     log_debug "代理端口: $PROXY_PORT"
@@ -532,6 +536,47 @@ test_br11_req_regex_digits() {
     fi
 }
 
+test_br12_json_object_values_and_url_fragment_pattern() {
+    local test_name="BR-12: Values JSON 对象与 */path 兼容"
+    log_info "测试: $test_name"
+
+    TEST_ID="br-12-$(date +%s)"
+    http_get "http://api/get_domains/v5?region=cn"
+
+    log_debug "响应状态: $HTTP_STATUS"
+    log_debug "响应 body: ${HTTP_BODY:0:300}..."
+
+    if [[ "$HTTP_STATUS" != "200" ]]; then
+        log_fail "$test_name - 状态码错误: $HTTP_STATUS"
+        return 1
+    fi
+
+    local expected='x.nodoupay.com" "inf.nobaohuaxia.com" "pf.nobaohuaxia.com"'
+    if [[ "$HTTP_BODY" == *"$expected"* ]] \
+       && [[ "$HTTP_BODY" != *'.doupay.com"'* ]] \
+       && [[ "$HTTP_BODY" != *'"inf.baohuaxia.com"'* ]] \
+       && [[ "$HTTP_BODY" != *'"pf.baohuaxia.com"'* ]]; then
+        log_pass "$test_name - 三组响应替换全部生效"
+    else
+        log_fail "$test_name - JSON 对象响应替换未达到预期"
+        log_debug "预期包含: $expected"
+    fi
+
+    local attempts=0
+    while [[ $attempts -lt 20 ]] \
+        && ! grep -Eiq 'x-tt-tnc-summary:[[:space:]]*none' "$MOCK_LOG_FILE"; do
+        sleep 0.1
+        attempts=$((attempts + 1))
+    done
+
+    if grep -Eiq 'x-tt-tnc-summary:[[:space:]]*none' "$MOCK_LOG_FILE" \
+       && grep -Eiq 'local-etag:[[:space:]]*none' "$MOCK_LOG_FILE"; then
+        log_pass "$test_name - noEtag 请求头已到达上游"
+    else
+        log_fail "$test_name - noEtag 请求头未完整到达上游"
+    fi
+}
+
 
 main() {
     header "Body 替换规则 E2E 测试"
@@ -569,6 +614,10 @@ main() {
     test_br09_req_regex_case || true
     test_br10_res_regex_global || true
     test_br11_req_regex_digits || true
+
+    header "Whistle Values JSON 对象兼容测试"
+
+    test_br12_json_object_values_and_url_fragment_pattern || true
     
     header "测试结果汇总"
     

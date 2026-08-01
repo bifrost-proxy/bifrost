@@ -24,6 +24,17 @@ example.com/api
 - Use regex only when the simpler forms are not expressive enough.
 - HTTPS path matching usually requires TLS interception because CONNECT tunnels do not expose inner paths.
 
+## Wildcard host with a URL-fragment path
+
+A wildcard host may be followed by a normal path fragment. When the path itself has no wildcard, it is a boundary-aware prefix: it matches the exact path, its query string, and child paths, but not a longer lookalike path.
+
+```txt
+*/get_domains/v5   # matches host `api`; does not match /get_domains/v50
+**/get_domains/v5  # also matches dotted hosts such as api.example.com
+```
+
+A single `*` in the host does not span `.`, while `**` does. Path wildcards such as `example.com/api/*` retain their existing behavior; use the leading `^` form for strict path-segment wildcard semantics.
+
 > ⚠️ **Negated (`!`) patterns do not work at runtime (verified, 0.0.96).** A `!X` pattern parses, but `matches_host()` always returns `false`, so a standalone `!`-prefixed pattern matches nothing — neither `X` nor non-`X` (verified: `!keep.test statusCode://249` returns no `249` for either `keep.test` or `other.test`, while the non-negated `pos.test statusCode://248` works). Don't use `!` as a router. To exclude a subset, use `excludeFilter://` instead (request-phase method/path/standard-header excludes work).
 
 ## Caveat: do not prefix wildcard patterns with a scheme

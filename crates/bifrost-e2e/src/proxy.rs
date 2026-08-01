@@ -992,6 +992,16 @@ fn parse_replace_value(value: &str) -> ParsedReplaceRules {
     let mut string_rules = Vec::new();
     let mut regex_rules = Vec::new();
 
+    if let Some(pairs) = bifrost_core::parse_json_replace_pairs(value) {
+        for (from, to) in pairs {
+            push_replace_pair(&mut string_rules, &mut regex_rules, from, to);
+        }
+        return ParsedReplaceRules {
+            string_rules,
+            regex_rules,
+        };
+    }
+
     for pair in value.split('&') {
         let pair = pair.trim();
         if pair.is_empty() {
@@ -1002,32 +1012,33 @@ fn parse_replace_value(value: &str) -> ParsedReplaceRules {
             let from = url_decode(from);
             let to = url_decode(to);
 
-            if let Some((regex, global)) = parse_regex_pattern(&from) {
-                regex_rules.push(bifrost_proxy::RegexReplace {
-                    pattern: regex,
-                    replacement: to,
-                    global,
-                });
-            } else {
-                string_rules.push((from, to));
-            }
+            push_replace_pair(&mut string_rules, &mut regex_rules, from, to);
         } else {
             let from = url_decode(pair);
-            if let Some((regex, global)) = parse_regex_pattern(&from) {
-                regex_rules.push(bifrost_proxy::RegexReplace {
-                    pattern: regex,
-                    replacement: String::new(),
-                    global,
-                });
-            } else {
-                string_rules.push((from, String::new()));
-            }
+            push_replace_pair(&mut string_rules, &mut regex_rules, from, String::new());
         }
     }
 
     ParsedReplaceRules {
         string_rules,
         regex_rules,
+    }
+}
+
+fn push_replace_pair(
+    string_rules: &mut Vec<(String, String)>,
+    regex_rules: &mut Vec<bifrost_proxy::RegexReplace>,
+    from: String,
+    to: String,
+) {
+    if let Some((regex, global)) = parse_regex_pattern(&from) {
+        regex_rules.push(bifrost_proxy::RegexReplace {
+            pattern: regex,
+            replacement: to,
+            global,
+        });
+    } else {
+        string_rules.push((from, to));
     }
 }
 

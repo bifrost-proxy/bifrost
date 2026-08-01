@@ -3,6 +3,7 @@ pub mod filter;
 mod group;
 mod parser;
 mod references;
+mod replace;
 mod resolver;
 mod syntax_report;
 mod template;
@@ -22,6 +23,7 @@ pub use references::{
     expand_rule_references, expand_rule_references_strict, expand_rule_references_to_result,
     rule_reference_name, RuleReferenceError,
 };
+pub use replace::parse_json_replace_pairs;
 pub use resolver::{ResolvedRule, ResolvedRules, RulesResolver};
 pub use syntax_report::{validate_rule_syntax_report, RuleSyntaxGuidance, RuleSyntaxReport};
 pub use template::TemplateEngine;

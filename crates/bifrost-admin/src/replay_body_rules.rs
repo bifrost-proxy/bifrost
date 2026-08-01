@@ -185,6 +185,16 @@ fn parse_replace_value(value: &str) -> ParsedReplaceRules {
     let mut string_rules = Vec::new();
     let mut regex_rules = Vec::new();
 
+    if let Some(pairs) = bifrost_core::parse_json_replace_pairs(value) {
+        for (from, to) in pairs {
+            push_replace_pair(&mut string_rules, &mut regex_rules, from, to);
+        }
+        return ParsedReplaceRules {
+            string_rules,
+            regex_rules,
+        };
+    }
+
     for pair in value.split('&') {
         let pair = pair.trim();
         if pair.is_empty() {
@@ -194,20 +204,29 @@ fn parse_replace_value(value: &str) -> ParsedReplaceRules {
         let (from, to) = pair.split_once('=').unwrap_or((pair, ""));
         let from = url_decode(from);
         let to = url_decode(to);
-        if let Some((pattern, global)) = parse_regex_pattern(&from) {
-            regex_rules.push(ReplayRegexReplace {
-                pattern,
-                replacement: to,
-                global,
-            });
-        } else {
-            string_rules.push((from, to));
-        }
+        push_replace_pair(&mut string_rules, &mut regex_rules, from, to);
     }
 
     ParsedReplaceRules {
         string_rules,
         regex_rules,
+    }
+}
+
+fn push_replace_pair(
+    string_rules: &mut Vec<(String, String)>,
+    regex_rules: &mut Vec<ReplayRegexReplace>,
+    from: String,
+    to: String,
+) {
+    if let Some((pattern, global)) = parse_regex_pattern(&from) {
+        regex_rules.push(ReplayRegexReplace {
+            pattern,
+            replacement: to,
+            global,
+        });
+    } else {
+        string_rules.push((from, to));
     }
 }
 
@@ -256,7 +275,7 @@ fn parse_regex_pattern(value: &str) -> Option<(regex::Regex, bool)> {
 
 #[cfg(test)]
 mod tests {
-    use super::apply_response_body_rules;
+    use super::{apply_response_body_rules, parse_replace_value};
     use bifrost_core::{RequestContext, RuleParser, RulesResolver};
 
     fn resolve(rule_text: &str) -> bifrost_core::ResolvedRules {
@@ -295,6 +314,25 @@ mod tests {
             apply_response_body_rules(&rules, &[], Some("hello world".to_string())).unwrap();
 
         assert_eq!(result, "pre-hello relay-post");
+    }
+
+    #[test]
+    fn replay_response_replace_parser_supports_json_object() {
+        let parsed = parse_replace_value(
+            r#"{".doupay.com\"":".nodoupay.com\"","\"inf.baohuaxia.com\"":"\"inf.nobaohuaxia.com\""}"#,
+        );
+
+        assert_eq!(
+            parsed.string_rules,
+            vec![
+                (r#".doupay.com""#.into(), r#".nodoupay.com""#.into()),
+                (
+                    r#""inf.baohuaxia.com""#.into(),
+                    r#""inf.nobaohuaxia.com""#.into(),
+                ),
+            ]
+        );
+        assert!(parsed.regex_rules.is_empty());
     }
 
     #[test]

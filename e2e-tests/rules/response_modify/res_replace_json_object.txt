@@ -1,0 +1,17 @@
+# 测试目标: 验证 Whistle 风格 Values JSON 对象可供 resReplace 使用
+# 场景说明: 原样覆盖 reqHeaders://{noEtag}、resReplace://{replace} 和 */path URL 片段匹配
+
+```noEtag
+x-tt-tnc-summary: none
+Local-Etag: none
+```
+
+```replace
+{
+".doupay.com\"": ".nodoupay.com\"",
+"\"inf.baohuaxia.com\"": "\"inf.nobaohuaxia.com\"",
+"\"pf.baohuaxia.com\"": "\"pf.nobaohuaxia.com\""
+}
+```
+
+*/get_domains/v5 http://127.0.0.1:__ECHO_HTTP_PORT__/large-response?size=256&marker=x.doupay.com%22%20%22inf.baohuaxia.com%22%20%22pf.baohuaxia.com%22 reqHeaders://{noEtag} resReplace://{replace}
