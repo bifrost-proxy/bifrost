@@ -5591,7 +5591,11 @@ async fn after_asr_daily_agent_enqueue_filters_dates_readiness_changes_and_runni
         ],
     )
     .await;
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    // The Windows full-suite job can take several seconds to schedule the
+    // spawned PowerShell mock under load. Keep this wait above the mock
+    // runner's 10-second timeout, then also wait for the task marker to clear
+    // so the temp data root cannot be dropped while bookkeeping is in flight.
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         while !report.is_file() {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
@@ -5599,6 +5603,17 @@ async fn after_asr_daily_agent_enqueue_filters_dates_readiness_changes_and_runni
     .await
     .expect("after-ASR daily agent did not produce its report");
     assert!(!std::fs::read_to_string(report).unwrap().trim().is_empty());
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while DAILY_AGENT_RUNNING_TASKS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains(&task.id)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("after-ASR daily agent did not release its running marker");
 }
 
 #[tokio::test(flavor = "current_thread")]
