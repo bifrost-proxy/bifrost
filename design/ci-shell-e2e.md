@@ -72,6 +72,12 @@ Bifrost 的 shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_a
 - readiness 不依赖固定 sleep：HTTP fixture 必须实际请求健康端点，HTTPS mirror 必须用测试 CA 发起 TLS 请求；等待期间持续检查 PID，子进程提前退出或超时必须输出 fixture 日志。
 - CLI start/restart 与 shutdown-marker 用例会创建可脱离测试 shell 的 daemon，并读取运行时发现状态，因此进入 isolated-after 串行队列；旧进程成为 zombie 时先由父测试 `wait` 回收，stop 后的 status 显式查询本用例动态端口，不能误发现开发机上仍运行的 9900 Service。
 
+**sandbox 进程收尾**
+
+- 每个并行和串行 shell test 退出后，都必须在删除临时目录前调用 `kill_bifrost_in_data_root`，只回收该测试 ownership marker 下 runtime/pid 文件指向的 Bifrost 进程。
+- `scripts/run_all_e2e.sh` 顶层 EXIT trap 再扫描一次本次 `E2E_SANDBOX_DIR`，覆盖测试被中断、局部 trap 未执行等边界；生产 `~/.bifrost` 和受保护端口继续由 helper 明确拒绝。
+- 业务测试与 action post steps 已成功但 GitHub `Complete job` 长时间不结束时，应优先检查 detached test daemon，而不是只提高 job timeout。
+
 **macOS 双分片负载均衡**
 
 - macOS `E2E Shell (aarch64-apple-darwin, shard N/2)` 使用 `shell_test_weight` 的实测秒级权重分片。权重来自近期 GitHub Actions job 日志里的 `[PASS] shell:<script> (<seconds>s)` 记录，而不是脚本数量。

@@ -215,6 +215,8 @@ for lifecycle_sensitive_test in \
 done
 grep -Fq 'local STARTUP_SENSITIVE_TESTS=(' "$runner"
 grep -Fq '"$is_startup_sensitive" -eq 1' "$runner"
+grep -Fq 'kill_bifrost_in_data_root "$shell_data_dir"' "$runner"
+grep -Fq 'kill_bifrost_in_data_root "$E2E_SANDBOX_DIR"' "$runner"
 BIFROST_E2E_CAPABILITY_SHARDS=1 BIFROST_E2E_SHELL_JOBS=2 bash "$runner" \
   --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build \
   --shard 1/3 --check-shell-shard-balance
