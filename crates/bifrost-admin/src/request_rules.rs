@@ -1491,6 +1491,20 @@ qianchuan.jinritemai.com https://10.37.102.138:8080
     }
 
     #[test]
+    fn test_request_replace_parser_keeps_legacy_fallback() {
+        let parsed = parse_replace_value("old%20value=new%20value&remove");
+
+        assert_eq!(
+            parsed.string_rules,
+            vec![
+                ("old value".into(), "new value".into()),
+                ("remove".into(), String::new()),
+            ]
+        );
+        assert!(parsed.regex_rules.is_empty());
+    }
+
+    #[test]
     fn test_replay_request_rules_apply_extended_request_protocols() {
         let rules = parse_rules(
             r#"https://example.test/api reqHeaders://(X-Trace: old) reqCookies://(sid=abc,theme=dark) delete://reqHeaders.X-Remove|urlParams.drop urlParams://(keep=2&drop=) reqType://json reqCharset://utf-8 forwardedFor://1.2.3.4 headerReplace://req.X-Trace:old=new reqCors://(origin=https://app.example.test&methods=POST&headers=X-Test) reqMerge://({"b":2,"c":3})"#,

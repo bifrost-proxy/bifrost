@@ -1738,7 +1738,37 @@ impl Drop for ProxyInstance {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_stale_e2e_data_dir, parse_cors_config};
+    use super::{clean_stale_e2e_data_dir, parse_cors_config, parse_replace_value};
+
+    #[test]
+    fn parse_replace_value_supports_json_object_and_regex_keys() {
+        let parsed = parse_replace_value(
+            r#"{".doupay.com\"":".nodoupay.com\"","/baohuaxia\\.com/g":"nobaohuaxia.com"}"#,
+        );
+
+        assert_eq!(
+            parsed.string_rules,
+            vec![(r#".doupay.com""#.into(), r#".nodoupay.com""#.into())]
+        );
+        assert_eq!(parsed.regex_rules.len(), 1);
+        assert!(parsed.regex_rules[0].global);
+        assert_eq!(parsed.regex_rules[0].replacement, "nobaohuaxia.com");
+        assert!(parsed.regex_rules[0].pattern.is_match("baohuaxia.com"));
+    }
+
+    #[test]
+    fn parse_replace_value_keeps_legacy_delete_fallback() {
+        let parsed = parse_replace_value("old%20value=new%20value&remove");
+
+        assert_eq!(
+            parsed.string_rules,
+            vec![
+                ("old value".into(), "new value".into()),
+                ("remove".into(), String::new()),
+            ]
+        );
+        assert!(parsed.regex_rules.is_empty());
+    }
 
     #[test]
     fn parse_cors_config_supports_multiline_legacy_format() {
