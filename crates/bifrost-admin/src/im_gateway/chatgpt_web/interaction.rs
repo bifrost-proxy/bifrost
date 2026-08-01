@@ -891,6 +891,11 @@ pub(super) async fn get_conversation_detail(
     auth: &AuthState,
     conversation_id: &str,
 ) -> Result<Value, String> {
+    #[cfg(test)]
+    if let Some(detail) = take_test_backend_detail(conversation_id) {
+        return detail;
+    }
+
     chatgpt_json(
         config,
         auth,
@@ -1464,6 +1469,36 @@ fn take_test_dom_outcome(conversation_id: &str) -> Option<DomExtractOutcome> {
     let queue = outcomes.get_mut(conversation_id)?;
     if queue.is_empty() {
         outcomes.remove(conversation_id);
+        return None;
+    }
+    Some(queue.remove(0))
+}
+
+#[cfg(test)]
+type TestBackendDetails = std::sync::Mutex<BTreeMap<String, Vec<Result<Value, String>>>>;
+
+#[cfg(test)]
+fn test_backend_details() -> &'static TestBackendDetails {
+    static DETAILS: std::sync::OnceLock<TestBackendDetails> = std::sync::OnceLock::new();
+    DETAILS.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(test)]
+fn set_test_backend_details(conversation_id: &str, details: Vec<Result<Value, String>>) {
+    test_backend_details()
+        .lock()
+        .expect("test backend details lock")
+        .insert(conversation_id.to_string(), details);
+}
+
+#[cfg(test)]
+fn take_test_backend_detail(conversation_id: &str) -> Option<Result<Value, String>> {
+    let mut details = test_backend_details()
+        .lock()
+        .expect("test backend details lock");
+    let queue = details.get_mut(conversation_id)?;
+    if queue.is_empty() {
+        details.remove(conversation_id);
         return None;
     }
     Some(queue.remove(0))
@@ -3445,6 +3480,255 @@ mod tests {
         assert_eq!(
             backend_terminal_content_settle_for(&long),
             std::time::Duration::from_secs(2)
+        );
+
+        let detail_a = json!({"current_node": "a"});
+        let detail_b = json!({"current_node": "b"});
+        assert_ne!(
+            backend_ready_signature(&detail_a, &short),
+            backend_ready_signature(&detail_b, &short)
+        );
+    }
+
+    fn backend_text_detail(text: &str, status: &str, end_turn: bool) -> Value {
+        json!({
+            "current_node": "answer",
+            "mapping": {
+                "answer": {
+                    "parent": null,
+                    "message": {
+                        "id": "answer",
+                        "author": {"role": "assistant"},
+                        "create_time": 20.0,
+                        "status": status,
+                        "end_turn": end_turn,
+                        "metadata": {"model_slug": "gpt-test"},
+                        "content": {"parts": [text]}
+                    }
+                }
+            }
+        })
+    }
+
+    fn backend_wait_runtime(temp: &tempfile::TempDir) -> (RuntimeConfig, AuthState) {
+        (
+            RuntimeConfig {
+                browser: super::super::BrowserConfig::default(),
+                chatgpt: super::super::ChatGptConfig::default(),
+                profile_dir: temp.path().join("profile"),
+                state_path: temp.path().join("auth-state.json"),
+                sessions_path: temp.path().join("sessions.json"),
+                attachments_dir: temp.path().join("attachments"),
+            },
+            AuthState {
+                captured_at: String::new(),
+                base_url: String::new(),
+                user_agent: String::new(),
+                captured_auth_headers: BTreeMap::new(),
+                captured_auth_identity: super::super::AuthorizationIdentity::default(),
+                captured_account_check: None,
+                cookies: Vec::new(),
+            },
+        )
+    }
+
+    fn dom_ready(text: &str) -> DomExtractOutcome {
+        DomExtractOutcome::Ready(WaitedFinal {
+            final_message: json!({
+                "text": text,
+                "turnId": "dom-answer",
+                "source": "dom_fallback",
+                "imageCount": 0,
+            }),
+            summary: json!({"source": "dom_fallback_outcome"}),
+            all_texts: vec![text.to_string()],
+            had_429_or_fallback: true,
+        })
+    }
+
+    #[tokio::test]
+    async fn wait_final_backend_candidate_change_resets_timer_then_returns_stable_answer() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (config, auth) = backend_wait_runtime(&temp);
+        let conversation_id = "test-backend-stable-final";
+        let first = format!("first {}", "a".repeat(600));
+        let final_text = format!("final {}", "b".repeat(600));
+        set_test_backend_details(
+            conversation_id,
+            vec![
+                Ok(backend_text_detail(&first, "finished_successfully", true)),
+                Ok(backend_text_detail(
+                    &final_text,
+                    "finished_successfully",
+                    true,
+                )),
+                Ok(backend_text_detail(
+                    &final_text,
+                    "finished_successfully",
+                    true,
+                )),
+            ],
+        );
+        set_test_dom_outcomes(
+            conversation_id,
+            vec![
+                dom_ready("temporary DOM text"),
+                DomExtractOutcome::Streaming {
+                    text_len: 7,
+                    image_count: 0,
+                    reason: "stop_button_visible",
+                },
+                DomExtractOutcome::NotFound,
+                dom_ready("temporary DOM text"),
+                DomExtractOutcome::NotFound,
+                DomExtractOutcome::Streaming {
+                    text_len: 600,
+                    image_count: 0,
+                    reason: "assistant_message_not_committed",
+                },
+                dom_ready("temporary DOM text"),
+                DomExtractOutcome::NotFound,
+            ],
+        );
+
+        let waited = wait_final(
+            &config,
+            &auth,
+            conversation_id,
+            Some(10.0),
+            WaitFinalOptions {
+                duration: std::time::Duration::from_secs(10),
+                stop_marker_path: &temp.path().join("stop"),
+                profile_dir: Some(&config.profile_dir),
+                terminal_idle_stable_for: std::time::Duration::ZERO,
+                require_backend_finality: true,
+            },
+        )
+        .await
+        .expect("stable backend final");
+
+        assert_eq!(waited.final_message["text"], final_text);
+        assert!(!waited.had_429_or_fallback);
+    }
+
+    #[tokio::test]
+    async fn wait_final_backend_transient_errors_retry_until_bounded_timeout() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (config, auth) = backend_wait_runtime(&temp);
+        let conversation_id = "test-backend-transient-timeout";
+        set_test_backend_details(
+            conversation_id,
+            vec![
+                Ok(backend_text_detail("still working", "in_progress", false)),
+                Err("ChatGPT browser-context HTTP 429".to_string()),
+                Err("ChatGPT native HTTP 503".to_string()),
+            ],
+        );
+        set_test_dom_outcomes(
+            conversation_id,
+            (0..9).map(|_| DomExtractOutcome::NotFound).collect(),
+        );
+
+        let error = match wait_final(
+            &config,
+            &auth,
+            conversation_id,
+            Some(10.0),
+            WaitFinalOptions {
+                duration: std::time::Duration::from_secs(8),
+                stop_marker_path: &temp.path().join("stop"),
+                profile_dir: Some(&config.profile_dir),
+                terminal_idle_stable_for: std::time::Duration::ZERO,
+                require_backend_finality: true,
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("backend finality should have timed out"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("backend did not confirm"), "{error}");
+        assert!(error.contains("HTTP 503"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn wait_final_backend_permanent_error_fails_without_dom_fallback() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (config, auth) = backend_wait_runtime(&temp);
+        let conversation_id = "test-backend-permanent-error";
+        set_test_backend_details(
+            conversation_id,
+            vec![Err("ChatGPT browser-context HTTP 401".to_string())],
+        );
+        set_test_dom_outcomes(conversation_id, vec![dom_ready("must not be returned")]);
+
+        let error = match wait_final(
+            &config,
+            &auth,
+            conversation_id,
+            Some(10.0),
+            WaitFinalOptions {
+                duration: std::time::Duration::from_secs(3),
+                stop_marker_path: &temp.path().join("stop"),
+                profile_dir: Some(&config.profile_dir),
+                terminal_idle_stable_for: std::time::Duration::ZERO,
+                require_backend_finality: true,
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("permanent backend error should fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error, "ChatGPT browser-context HTTP 401");
+    }
+
+    #[test]
+    fn conversation_detail_rejects_incomplete_edges_and_accepts_current_branch_image() {
+        assert!(try_waited_final_from_conversation_detail(&json!({}), None).is_none());
+        assert!(try_waited_final_from_conversation_detail(
+            &json!({"current_node": "missing", "mapping": {}}),
+            None,
+        )
+        .is_none());
+        assert!(try_waited_final_from_conversation_detail(
+            &backend_text_detail("   ", "finished_successfully", true),
+            None,
+        )
+        .is_none());
+        assert!(try_waited_final_from_conversation_detail(
+            &backend_text_detail("not final", "finished_successfully", false),
+            None,
+        )
+        .is_none());
+
+        let image_detail = json!({
+            "current_node": "image",
+            "mapping": {
+                "image": {
+                    "parent": null,
+                    "message": {
+                        "id": "image",
+                        "author": {"role": "tool"},
+                        "create_time": 20.0,
+                        "status": "finished_successfully",
+                        "content": {"parts": [{
+                            "content_type": "image_asset_pointer",
+                            "asset_pointer": "sediment://file_current_image",
+                            "width": 1024,
+                            "height": 1024
+                        }]}
+                    }
+                }
+            }
+        });
+        let waited = try_waited_final_from_conversation_detail(&image_detail, Some(10.0))
+            .expect("current branch image final");
+        assert_eq!(
+            waited.final_message["generatedImages"][0]["fileId"],
+            "file_current_image"
         );
     }
 

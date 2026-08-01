@@ -115,6 +115,10 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   --lib -- --nocapture
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  wait_final_backend_ \
+  --lib -- --nocapture --test-threads=1
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   is_retryable_send_error_matches_known_prefixes \
   --lib -- --nocapture
 
