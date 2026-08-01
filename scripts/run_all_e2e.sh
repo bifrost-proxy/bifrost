@@ -573,10 +573,15 @@ run_and_capture() {
     sleep 1
     if kill -0 "$stream_pid" 2>/dev/null; then
       kill_process_tree "$stream_pid"
+      kill "$stream_pid" 2>/dev/null || true
     fi
   elif is_windows && [[ -n "$stream_pid" ]]; then
     if kill -0 "$stream_pid" 2>/dev/null; then
       kill_process_tree "$stream_pid"
+      # MSYS bash job PIDs are not always Windows process IDs. Keep the shell
+      # kill fallback after taskkill so a completed command cannot leave the
+      # diagnostic tail alive and block wait below until the outer job timeout.
+      kill "$stream_pid" 2>/dev/null || true
     fi
   fi
 

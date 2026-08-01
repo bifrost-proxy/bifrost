@@ -1133,6 +1133,7 @@
 - 语法检查和 coverage contract 退出码均为 0。
 - 专项回归通过真实 `run_and_capture` 创建一个忽略 TERM 的父 shell、后台子进程和共享 FIFO；内层 1 秒 watchdog 触发后，`terminate_process_tree` 在 30 秒测试门槛内回收父子进程，stream 有界退出，失败摘要明确为 `timed out after 1s`，外层专项脚本输出 `E2E runner timeout cleanup: PASS`。
 - workflow 同时设置 `BIFROST_E2E_SHELL_TEST_TIMEOUT=600` 与 `BIFROST_E2E_SUITE_TIMEOUT=600`，串行/并行用例统一先于 60 分钟 job budget 失败；failed/cancelled 均尝试 dump/upload 日志。
+- Windows stream 收尾必须同时保留 process-tree `taskkill` 与 shell builtin `kill "$stream_pid"` fallback；MSYS PID 无法映射为 Windows PID 时，业务命令完成后也不能卡在日志 `tail` 的 `wait`。
 - CI runner 入口汇总两个 suite 全部通过；测试只使用临时目录和动态非 9900 端口，不修改真实服务或系统代理。
 
 ### TC-CS-54: macOS CLI lifecycle 用例隔离 Desktop ownership 与真实 9900 回归

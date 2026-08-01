@@ -56,6 +56,7 @@ Bifrost 的 shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_a
 - Linux 与 macOS `E2E Shell` job `timeout-minutes: 60`，与 rules/runner 对齐。
 - macOS capability shard 的串行和并行 shell 用例统一使用 600 秒内层预算。`run_and_capture` 在没有显式 `BIFROST_E2E_SUITE_TIMEOUT` 时继承 `BIFROST_E2E_SHELL_TEST_TIMEOUT`，避免串行用例悄悄回退到另一套 900 秒预算。
 - macOS 非交互 bash 不保证后台命令拥有独立 process group；suite 超时时按父子关系递归发送 TERM/KILL，并主动结束仍持有日志 FIFO 的 stream。这样单个 fixture 遗留后代时会在 600 秒内得到 `timed out` 失败，而不是一直等到 60 分钟 job 被外层取消。
+- Windows 上 MSYS bash 的后台 job PID 不一定能被 `taskkill.exe /PID` 识别；runner 在 process-tree taskkill 后保留 shell builtin `kill` fallback，确保已完成 command 对应的日志 `tail` 能退出，`wait` 不会把 rules/runner job 拖到 60 分钟外层取消。
 - macOS failed/cancelled job 都尝试 dump/upload E2E 日志。内层 watchdog 必须先于外层预算完成，确保普通挂起场景仍有 suite 日志 artifact；GitHub 强制终止 runner 本身时不承诺 post step 一定执行。
 - Workflow 顶层 `concurrency: { group: ${{ github.workflow }}-${{ github.ref }}, cancel-in-progress: true }`，避免旧 push 长尾阻塞新 commit。
 

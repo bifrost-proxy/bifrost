@@ -186,6 +186,7 @@ grep -Fq 'BIFROST_E2E_SUITE_TIMEOUT: "600"' "$ci_workflow"
 grep -Fq 'local suite_timeout="${BIFROST_E2E_SUITE_TIMEOUT:-${BIFROST_E2E_SHELL_TEST_TIMEOUT:-900}}"' "$runner"
 grep -Fq 'terminate_process_tree "$command_pid" 1' "$runner"
 grep -Fq 'if [[ -f "$timeout_marker" || "${command_status:-0}" -eq 143' "$runner"
+grep -Fq 'kill "$stream_pid" 2>/dev/null || true' "$runner"
 grep -Fq 'if: failure() || cancelled()' "$ci_workflow"
 if grep -Fq 'save-if: always()' "$ci_workflow" ||
   grep -Fq 'save-if: ${{ always() }}' "$ci_workflow"; then
