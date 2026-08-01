@@ -228,6 +228,8 @@ pattern reqReplace://{replaceMap}             # replaceMap 可为严格 JSON 对
 
 `reqReplace` 的 JSON 对象格式、转义和正则 key 语义与下文 `resReplace` 相同。
 
+这也适用于 Values 引用，例如 `reqReplace://{replaceMap}`。请求头 Values 使用 `reqHeaders://{headers}`；若要替换某个请求头中的局部文本，则使用独立的 `headerReplace://{headerRules}`，其中 Value 保持 `req.header-name:old=new` 语法，而不是本节的 JSON body 映射。
+
 ### 示例
 
 ```bash

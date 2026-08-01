@@ -17,6 +17,8 @@ export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 # | BR-05 | HTTP  | 响应   | 多个替换规则                      |
 # | BR-06 | HTTP  | 双向   | 请求和响应同时替换                |
 # | BR-12 | HTTP  | 兼容   | Values JSON 对象 + */path 匹配    |
+# | BR-13 | HTTP  | 请求   | reqReplace Values JSON 对象       |
+# | BR-14 | HTTP  | 请求头 | headerReplace Values 引用         |
 #
 
 set -uo pipefail
@@ -167,6 +169,23 @@ test-res-regex-global.local http://127.0.0.1:${ECHO_HTTP_PORT} resReplace:///OLD
 
 # BR-11: 复杂正则模式 (数字匹配)
 test-req-regex-digits.local http://127.0.0.1:${ECHO_HTTP_PORT} reqReplace:///\d+/g=NUM
+
+\`\`\`reqReplaceJson
+{
+"REQ_JSON_OLD": "REQ_JSON_NEW",
+"/item-[0-9]+/g": "item-redacted"
+}
+\`\`\`
+
+# BR-13: reqReplace 引用 Values JSON 对象
+test-req-json.local http://127.0.0.1:${ECHO_HTTP_PORT} reqReplace://{reqReplaceJson}
+
+\`\`\`headerReqReplace
+req.x-trace:abc=xyz
+\`\`\`
+
+# BR-14: headerReplace 请求侧引用 Values 文本
+test-header-req-values.local http://127.0.0.1:${ECHO_HTTP_PORT} headerReplace://{headerReqReplace}
 EOF
 
     sed "s/__ECHO_HTTP_PORT__/${ECHO_HTTP_PORT}/g" \
@@ -577,6 +596,45 @@ test_br12_json_object_values_and_url_fragment_pattern() {
     fi
 }
 
+test_br13_req_replace_json_object_values() {
+    local test_name="BR-13: reqReplace Values JSON 对象"
+    log_info "测试: $test_name"
+
+    TEST_ID="br-13-$(date +%s)"
+    http_post "http://test-req-json.local/echo" \
+        "REQ_JSON_OLD item-123 and item-456"
+
+    local echoed
+    echoed=$(get_json_field '.request.body')
+    if [[ "$HTTP_STATUS" == "200" ]] \
+       && [[ "$echoed" == "REQ_JSON_NEW item-redacted and item-redacted" ]]; then
+        log_pass "$test_name - 字符串与正则 key 均已替换"
+    else
+        log_fail "$test_name - 请求体替换未达到预期"
+        log_debug "预期: REQ_JSON_NEW item-redacted and item-redacted"
+        log_debug "实际: $echoed"
+    fi
+}
+
+test_br14_header_replace_req_values() {
+    local test_name="BR-14: headerReplace 请求侧 Values 引用"
+    log_info "测试: $test_name"
+
+    TEST_ID="br-14-$(date +%s)"
+    http_get "http://test-header-req-values.local/echo" "x-trace: prefix-abc-suffix"
+
+    local echoed
+    echoed=$(get_json_field '.request.headers["x-trace"]')
+    if [[ "$HTTP_STATUS" == "200" ]] \
+       && [[ "$echoed" == "prefix-xyz-suffix" ]]; then
+        log_pass "$test_name - req.x-trace 子串替换已生效"
+    else
+        log_fail "$test_name - 请求头替换未达到预期"
+        log_debug "预期: prefix-xyz-suffix"
+        log_debug "实际: $echoed"
+    fi
+}
+
 
 main() {
     header "Body 替换规则 E2E 测试"
@@ -618,6 +676,8 @@ main() {
     header "Whistle Values JSON 对象兼容测试"
 
     test_br12_json_object_values_and_url_fragment_pattern || true
+    test_br13_req_replace_json_object_values || true
+    test_br14_header_replace_req_values || true
     
     header "测试结果汇总"
     

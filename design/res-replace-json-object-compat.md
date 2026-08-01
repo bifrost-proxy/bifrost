@@ -75,6 +75,7 @@ JSON value 转换：
 
 - 新增 `bifrost-core::parse_json_replace_pairs`，所有 replace parser 共用 JSON object 分派。
 - CLI、E2E、Admin replay 保留各自现有 regex 输出类型，仅复用 JSON pair 解析，避免 crate 依赖环。
+- `reqHeaders://{value}` 继续接受 JSON/行格式 Values；`headerReplace://{value}` 继续接受 Whistle 的 `req.header:old=new` / `res.header:old=new` 文本语法。`headerReplace` 的 Value 不是 body replace JSON 映射，不能混用两种对象结构。
 - 调整 `WildcardMatcher::detect_type` 与普通 path fragment 的 regex 尾部边界。
 - 本轮不支持 Whistle 文档里的单引号 object 或 `key: value` 宽松格式；用户给出的严格 JSON 模式是交付边界。
 

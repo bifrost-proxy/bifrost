@@ -510,12 +510,14 @@
    rm -rf "$data_dir"
    test "$test_status" -eq 0
    ```
-4. 检查输出中的 `BR-12` 两条断言、通用 fixture 的请求 URL 和两套总结果。
+4. 检查输出中的 `BR-12` 两条断言、`BR-13` 的 `reqReplace://{reqReplaceJson}` 请求体断言、`BR-14` 的 `headerReplace://{headerReqReplace}` 请求头断言、通用 fixture 的请求 URL 和两套总结果。
 
 **预期结果**：
 - 对 `http://api/get_domains/v5?region=cn` 的真实代理请求返回 `200`，证明 `*/get_domains/v5` 命中路径本身及 query。
 - 响应体包含 `x.nodoupay.com" "inf.nobaohuaxia.com" "pf.nobaohuaxia.com"`，且不再包含三组旧域名文本。
 - 上游 mock 日志同时收到 `x-tt-tnc-summary: none` 与 `Local-Etag: none`，证明同一行的 `reqHeaders://{noEtag}` 未被兼容改造破坏。
+- `reqReplace://{reqReplaceJson}` 同时完成普通字符串 key 和 `/regex/g` key 替换，请求体变为 `REQ_JSON_NEW item-redacted and item-redacted`。
+- `headerReplace://{headerReqReplace}` 将请求头 `x-trace: prefix-abc-suffix` 改为 `prefix-xyz-suffix`；该 Value 使用 Whistle 的 `req.header:old=new` 文本语法，不与 body replace JSON 映射混用。
 - BR-01 至 BR-11 的传统 `old=new&...`、删除和正则替换回归继续通过；汇总失败数为 `0`、跳过数为 `0`。
 - 通用 Rules fixture runner 请求 `https://test/get_domains/v5`，断言 2/2 通过，不再生成非法的 `https://*/get_domains/v5/test`。
 - 测试不使用正式 `9900` 端口，代理以 `--no-system-proxy` 启动，结束后测试代理和 mock server 均停止。
@@ -535,6 +537,8 @@
    ```
 
 ## 执行记录
+
+- 2026-08-01：通过。根据追加兼容范围补充 BR-13 / BR-14，并立即重跑 TC-REF-17 Body E2E；使用 release 二进制、独立临时数据目录、代理端口 `19087` 和 HTTP echo 端口 `13087`。`reqReplace://{reqReplaceJson}` 的字符串与正则 key 均生效，`headerReplace://{headerReqReplace}` 的 `req.x-trace` 子串替换生效；连同 `reqHeaders://{noEtag}` 与 `resReplace://{replace}` 原始场景共 15 项通过、0 失败、0 跳过。测试结束后代理和 mock server 均停止，临时目录移入系统废纸篓，相关端口无残留监听。
 
 - 2026-08-01：CI 回归补测通过。首次 CI 暴露通用 Rules fixture runner 把 `*/get_domains/v5` 拼成非法 URL `https://*/get_domains/v5/test`，curl exit 3；修复 `build_test_url` 仅将 origin wildcard 具体化后，使用独立数据目录、代理端口 `19084` 和 HTTP echo 端口 `13084` 重新执行 `e2e-tests/test_rules.sh --use-binary rules/response_modify/res_replace_json_object.txt`，实际请求为 `https://test/get_domains/v5`，2/2 断言通过。随后用端口 `19085` / `13085` 复跑 Body E2E，BR-01 至 BR-12 共 13 项继续全部通过；两个临时目录均移入系统废纸篓，相关端口无残留监听。
 
