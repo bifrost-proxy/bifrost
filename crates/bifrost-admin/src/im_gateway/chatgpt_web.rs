@@ -1154,6 +1154,7 @@ async fn run_authenticated_operation(
                     stop_marker_path,
                     profile_dir: Some(&config.profile_dir),
                     terminal_idle_stable_for: required_dom_terminal_idle_for(false),
+                    require_backend_finality: true,
                 },
             )
             .await?;
@@ -1341,6 +1342,7 @@ async fn run_authenticated_operation(
                             stop_marker_path,
                             profile_dir: Some(&config.profile_dir),
                             terminal_idle_stable_for: required_dom_terminal_idle_for(false),
+                            require_backend_finality: true,
                         },
                     )
                     .await?;
@@ -1857,6 +1859,7 @@ async fn ask_send_and_wait(
                     .iter()
                     .any(|event_type| event_type == "stream_handoff"),
             ),
+            require_backend_finality: true,
         },
     )
     .await

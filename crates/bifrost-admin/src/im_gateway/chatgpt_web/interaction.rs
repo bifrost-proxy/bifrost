@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
@@ -206,12 +206,23 @@ struct TerminalReadyCandidate {
     stable_since: tokio::time::Instant,
 }
 
+struct BackendReadyCandidate {
+    waited: WaitedFinal,
+    signature: u64,
+    stable_since: tokio::time::Instant,
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct WaitFinalOptions<'a> {
     pub(super) duration: std::time::Duration,
     pub(super) stop_marker_path: &'a Path,
     pub(super) profile_dir: Option<&'a Path>,
     pub(super) terminal_idle_stable_for: std::time::Duration,
+    /// When SSE did not contain a complete final response, require the
+    /// conversation backend to confirm the current branch reached a finished
+    /// assistant message. DOM state is still useful progress telemetry, but is
+    /// not authoritative enough to complete a run.
+    pub(super) require_backend_finality: bool,
 }
 
 /// Try to construct a `WaitedFinal` directly from the SSE stream detail.
@@ -270,20 +281,21 @@ pub(super) fn try_waited_final_from_sse(
         return None;
     }
 
-    // Use find_all_assistant_texts to handle multi-message responses
-    let (merged_message, all_texts) = find_all_assistant_texts(sse_detail, after_time)
+    // Keep earlier assistant batches for per-message progress delivery, but the
+    // primary response must remain the latest completed assistant answer. A
+    // planning prelude prepended to strict Markdown output breaks downstream
+    // contracts such as Daily Agent report headings.
+    let all_texts = find_all_assistant_texts(sse_detail, after_time)
+        .map(|(_, all_texts)| all_texts)
         .unwrap_or_else(|| {
-            (
-                final_message.clone(),
-                vec![final_message
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string()],
-            )
+            vec![final_message
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()]
         });
 
-    let text_len = merged_message
+    let text_len = final_message
         .get("text")
         .and_then(Value::as_str)
         .map(|s| s.len())
@@ -296,23 +308,175 @@ pub(super) fn try_waited_final_from_sse(
     );
 
     Some(WaitedFinal {
-        final_message: merged_message,
+        final_message,
         summary: summarize_conversation_detail(sse_detail),
         all_texts,
         had_429_or_fallback: false,
     })
 }
 
+/// Build a final result from a full conversation-detail response.
+///
+/// Unlike the synthetic SSE representation, conversation detail contains the
+/// active branch through `current_node`. Only that branch is authoritative:
+/// stale sibling branches and earlier planning messages must not replace or be
+/// prepended to the latest completed assistant answer.
+pub(super) fn try_waited_final_from_conversation_detail(
+    detail: &Value,
+    after_time: Option<f64>,
+) -> Option<WaitedFinal> {
+    let branch_messages = current_branch_messages(detail);
+    // Explicit `wait` calls do not carry the send timestamp. Scope them to the
+    // latest user turn so all_texts cannot replay the entire conversation.
+    // Send/ask callers still provide their precise handoff timestamp.
+    let effective_after_time = after_time.or_else(|| {
+        branch_messages.iter().rev().find_map(|message| {
+            (message
+                .get("author")
+                .and_then(|author| author.get("role"))
+                .and_then(Value::as_str)
+                == Some("user"))
+            .then(|| message_create_time(message))
+        })
+    });
+    if branch_messages.iter().any(|message| {
+        message_is_after(message, effective_after_time)
+            && message.get("status").and_then(Value::as_str) == Some("in_progress")
+    }) {
+        return None;
+    }
+
+    if let Some(final_message) = find_generated_images_tool_message_in_messages(
+        branch_messages.iter().copied(),
+        effective_after_time,
+    ) {
+        return Some(WaitedFinal {
+            final_message: final_message.clone(),
+            summary: summarize_conversation_detail(detail),
+            all_texts: vec![final_message
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()],
+            had_429_or_fallback: false,
+        });
+    }
+
+    let mut assistant_messages = branch_messages
+        .into_iter()
+        .filter(|message| message_is_after(message, effective_after_time))
+        .filter(|message| {
+            message
+                .get("author")
+                .and_then(|author| author.get("role"))
+                .and_then(Value::as_str)
+                == Some("assistant")
+        })
+        .filter(|message| {
+            message.get("status").and_then(Value::as_str) == Some("finished_successfully")
+        })
+        .filter_map(|message| {
+            let text = extract_text_parts(message);
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some((message_create_time(message), text, message))
+            }
+        })
+        .collect::<Vec<_>>();
+    assistant_messages.sort_by(|left, right| {
+        left.0
+            .partial_cmp(&right.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let (_, final_text, final_raw) = assistant_messages.last()?;
+    if !final_raw
+        .get("end_turn")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
+    let final_message = json!({
+        "id": final_raw.get("id").and_then(Value::as_str).unwrap_or_default(),
+        "createTime": message_create_time(final_raw),
+        "status": "finished_successfully",
+        "endTurn": true,
+        "model": final_raw.get("metadata")
+            .and_then(|metadata| metadata.get("model_slug").or_else(|| metadata.get("default_model_slug")))
+            .and_then(Value::as_str),
+        "text": final_text,
+    });
+    let all_texts = assistant_messages
+        .into_iter()
+        .map(|(_, text, _)| text)
+        .collect::<Vec<_>>();
+
+    Some(WaitedFinal {
+        final_message,
+        summary: summarize_conversation_detail(detail),
+        all_texts,
+        had_429_or_fallback: false,
+    })
+}
+
+fn message_create_time(message: &Value) -> f64 {
+    message
+        .get("create_time")
+        .and_then(Value::as_f64)
+        .unwrap_or_default()
+}
+
+fn message_is_after(message: &Value, after_time: Option<f64>) -> bool {
+    after_time.is_none_or(|after| message_create_time(message) >= after)
+}
+
+fn current_branch_messages(conversation: &Value) -> Vec<&Value> {
+    let Some(mapping) = conversation.get("mapping").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let Some(mut node_id) = conversation
+        .get("current_node")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+    else {
+        // Without current_node there is no authoritative branch. Scanning the
+        // whole mapping could select a newer sibling or an abandoned retry,
+        // so fail closed and let the caller poll again.
+        return Vec::new();
+    };
+
+    let mut seen = BTreeSet::new();
+    let mut messages = Vec::new();
+    while seen.insert(node_id.clone()) {
+        let Some(node) = mapping.get(&node_id) else {
+            break;
+        };
+        if let Some(message) = node.get("message") {
+            messages.push(message);
+        }
+        let Some(parent) = node
+            .get("parent")
+            .and_then(Value::as_str)
+            .filter(|parent| !parent.is_empty())
+        else {
+            break;
+        };
+        node_id = parent.to_string();
+    }
+    messages.reverse();
+    messages
+}
+
 pub(super) async fn wait_final(
-    _config: &RuntimeConfig,
-    _auth: &AuthState,
+    config: &RuntimeConfig,
+    auth: &AuthState,
     conversation_id: &str,
-    _after_time: Option<f64>,
+    after_time: Option<f64>,
     options: WaitFinalOptions<'_>,
 ) -> Result<WaitedFinal, String> {
-    // NOTE: This function no longer makes active API requests to ChatGPT.
-    // All data should be captured via CDP network interception in wait_send_handoff.
-    // This function only serves as a DOM-based fallback when CDP interception fails.
     let wait_started = tokio::time::Instant::now();
     let deadline = wait_started + options.duration;
     let Some(pdir) = options.profile_dir else {
@@ -322,13 +486,17 @@ pub(super) async fn wait_final(
     tracing::info!(
         conversation_id,
         timeout_secs = options.duration.as_secs(),
-        "chatgpt_web wait_final: DOM-only mode (no API polling)"
+        require_backend_finality = options.require_backend_finality,
+        "chatgpt_web wait_final: backend-confirmed finality with DOM progress telemetry"
     );
 
     // Brief initial wait for content to appear on page
     sleep(std::time::Duration::from_secs(1)).await;
     let mut terminal_idle_since: Option<tokio::time::Instant> = None;
     let mut terminal_ready_candidate: Option<TerminalReadyCandidate> = None;
+    let mut backend_ready_candidate: Option<BackendReadyCandidate> = None;
+    let mut last_backend_poll_at: Option<tokio::time::Instant> = None;
+    let mut last_backend_error: Option<String> = None;
 
     while tokio::time::Instant::now() < deadline {
         if stop_requested(options.stop_marker_path).await {
@@ -338,7 +506,7 @@ pub(super) async fn wait_final(
         // Timeout CDP calls to prevent indefinite hangs
         let dom_outcome = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            try_extract_dom_outcome(_config, pdir, conversation_id),
+            try_extract_dom_outcome(config, pdir, conversation_id),
         )
         .await;
 
@@ -347,12 +515,142 @@ pub(super) async fn wait_final(
             Err(_timeout) => {
                 tracing::warn!(
                     conversation_id,
-                    "chatgpt_web wait_final: DOM extraction timed out (10s), retrying"
+                    "chatgpt_web wait_final: DOM extraction timed out (10s); backend polling continues"
                 );
-                sleep(std::time::Duration::from_secs(1)).await;
-                continue;
+                DomExtractOutcome::NotFound
             }
         };
+
+        let dom_busy = matches!(dom_outcome, DomExtractOutcome::Streaming { .. });
+        let backend_poll_interval = backend_poll_interval(
+            config.chatgpt.poll_interval_ms,
+            dom_busy,
+            backend_ready_candidate.is_some(),
+        );
+        let now = tokio::time::Instant::now();
+        let backend_poll_due = options.require_backend_finality
+            && last_backend_poll_at
+                .is_none_or(|last_poll| now.duration_since(last_poll) >= backend_poll_interval);
+
+        if backend_poll_due {
+            last_backend_poll_at = Some(now);
+            match get_conversation_detail(config, auth, conversation_id).await {
+                Ok(detail) => {
+                    last_backend_error = None;
+                    match try_waited_final_from_conversation_detail(&detail, after_time) {
+                        Some(waited) => {
+                            let signature = backend_ready_signature(&detail, &waited);
+                            let settle_for = backend_terminal_content_settle_for(&waited);
+                            let ready_candidate = BackendReadyCandidate {
+                                waited,
+                                signature,
+                                stable_since: tokio::time::Instant::now(),
+                            };
+                            match backend_ready_candidate.as_mut() {
+                                None => {
+                                    let text_len = ready_candidate
+                                        .waited
+                                        .final_message
+                                        .get("text")
+                                        .and_then(Value::as_str)
+                                        .map(str::len)
+                                        .unwrap_or_default();
+                                    tracing::info!(
+                                        conversation_id,
+                                        text_len,
+                                        required_stable_ms = settle_for.as_millis(),
+                                        "chatgpt_web wait_final: backend final candidate observed"
+                                    );
+                                    backend_ready_candidate = Some(ready_candidate);
+                                }
+                                Some(candidate) if candidate.signature != signature => {
+                                    tracing::info!(
+                                        conversation_id,
+                                        required_stable_ms = settle_for.as_millis(),
+                                        "chatgpt_web wait_final: backend current branch changed; resetting finality timer"
+                                    );
+                                    backend_ready_candidate = Some(ready_candidate);
+                                }
+                                Some(candidate) => {
+                                    let stable_for = tokio::time::Instant::now()
+                                        .duration_since(candidate.stable_since);
+                                    if stable_for >= settle_for {
+                                        let candidate = backend_ready_candidate
+                                            .take()
+                                            .expect("backend final candidate should exist");
+                                        tracing::info!(
+                                            conversation_id,
+                                            stable_for_ms = stable_for.as_millis(),
+                                            "chatgpt_web wait_final: backend confirmed finished assistant on current branch"
+                                        );
+                                        return Ok(candidate.waited);
+                                    }
+                                }
+                            }
+                        }
+                        None => {
+                            backend_ready_candidate = None;
+                            tracing::info!(
+                                conversation_id,
+                                current_node = detail
+                                    .get("current_node")
+                                    .and_then(|value| value.as_str())
+                                    .unwrap_or_default(),
+                                "chatgpt_web wait_final: backend current branch is not final yet"
+                            );
+                        }
+                    }
+                }
+                Err(error) if is_transient_conversation_read_error(&error) => {
+                    backend_ready_candidate = None;
+                    last_backend_error = Some(error.clone());
+                    tracing::warn!(
+                        conversation_id,
+                        error = %error,
+                        "chatgpt_web wait_final: transient backend read failure; retrying without accepting DOM as final"
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        if options.require_backend_finality {
+            match &dom_outcome {
+                DomExtractOutcome::Ready(waited) => {
+                    tracing::info!(
+                        conversation_id,
+                        dom_text_len = waited
+                            .final_message
+                            .get("text")
+                            .and_then(|value| value.as_str())
+                            .map(str::len)
+                            .unwrap_or_default(),
+                        "chatgpt_web wait_final: DOM looks idle but backend finality is still required"
+                    );
+                }
+                DomExtractOutcome::Streaming {
+                    text_len,
+                    image_count,
+                    reason,
+                } => {
+                    tracing::info!(
+                        conversation_id,
+                        text_len,
+                        image_count,
+                        reason,
+                        "chatgpt_web wait_final: DOM reports generation still in progress"
+                    );
+                }
+                DomExtractOutcome::NotFound => {
+                    tracing::debug!(
+                        conversation_id,
+                        "chatgpt_web wait_final: DOM content unavailable; waiting on backend current branch"
+                    );
+                }
+            }
+            sleep(std::time::Duration::from_secs(1)).await;
+            continue;
+        }
 
         match dom_outcome {
             DomExtractOutcome::Ready(waited) => {
@@ -490,16 +788,62 @@ pub(super) async fn wait_final(
         sleep(std::time::Duration::from_secs(1)).await;
     }
 
-    // Deadline exceeded — final forced extraction attempt
+    if options.require_backend_finality {
+        return Err(format!(
+            "timed_out: conversation backend did not confirm a finished assistant response{}",
+            last_backend_error
+                .map(|error| format!("; last read error: {error}"))
+                .unwrap_or_default()
+        ));
+    }
+
+    // Deadline exceeded — legacy DOM-only callers may still use a forced
+    // extraction, but stream_handoff and explicit wait operations never do.
     tracing::warn!(
         conversation_id,
         "chatgpt_web wait_final: deadline exceeded, final forced extraction"
     );
-    if let Some(waited) = try_extract_latest_from_dom_force(_config, pdir, conversation_id).await {
+    if let Some(waited) = try_extract_latest_from_dom_force(config, pdir, conversation_id).await {
         return Ok(waited);
     }
 
     Err("timed_out: DOM extraction could not capture final content".to_string())
+}
+
+fn backend_poll_interval(
+    configured_poll_ms: u64,
+    dom_busy: bool,
+    has_final_candidate: bool,
+) -> std::time::Duration {
+    if dom_busy && !has_final_candidate {
+        return std::time::Duration::from_secs(30);
+    }
+    std::time::Duration::from_millis(configured_poll_ms.max(3_000))
+}
+
+fn backend_terminal_content_settle_for(waited: &WaitedFinal) -> std::time::Duration {
+    let text_len = waited
+        .final_message
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::len)
+        .unwrap_or_default();
+    if text_len < 512 {
+        std::time::Duration::from_secs(15)
+    } else {
+        std::time::Duration::from_secs(2)
+    }
+}
+
+fn backend_ready_signature(detail: &Value, waited: &WaitedFinal) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    detail
+        .get("current_node")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    dom_ready_signature(waited).hash(&mut hasher);
+    hasher.finish()
 }
 
 pub(super) fn extract_conversation_messages(conversation: &Value) -> Vec<Value> {
@@ -744,12 +1088,19 @@ pub(super) fn find_generated_images_tool_message(
     conversation: &Value,
     after_time: Option<f64>,
 ) -> Option<Value> {
-    let mut candidates = Vec::new();
     let mapping = conversation.get("mapping")?.as_object()?;
-    for node in mapping.values() {
-        let Some(message) = node.get("message") else {
-            continue;
-        };
+    find_generated_images_tool_message_in_messages(
+        mapping.values().filter_map(|node| node.get("message")),
+        after_time,
+    )
+}
+
+fn find_generated_images_tool_message_in_messages<'a>(
+    messages: impl IntoIterator<Item = &'a Value>,
+    after_time: Option<f64>,
+) -> Option<Value> {
+    let mut candidates = Vec::new();
+    for message in messages {
         if message
             .get("author")
             .and_then(|author| author.get("role"))
@@ -2760,6 +3111,7 @@ mod tests {
                 stop_marker_path: &stop_marker,
                 profile_dir: Some(&config.profile_dir),
                 terminal_idle_stable_for: std::time::Duration::ZERO,
+                require_backend_finality: false,
             },
         )
         .await
@@ -2786,6 +3138,314 @@ mod tests {
         assert!(has_in_progress_messages(&conversation, None));
         assert!(!has_in_progress_messages(&conversation, Some(15.0)));
         assert!(!has_in_progress_messages(&json!({}), None));
+    }
+
+    #[test]
+    fn conversation_detail_waits_for_in_progress_current_branch_after_finished_planning() {
+        let detail = json!({
+            "current_node": "report",
+            "mapping": {
+                "user": {
+                    "parent": null,
+                    "message": {
+                        "id": "user",
+                        "author": {"role": "user"},
+                        "create_time": 10.0,
+                        "status": "finished_successfully",
+                        "content": {"parts": ["生成日报"]}
+                    }
+                },
+                "planning": {
+                    "parent": "user",
+                    "message": {
+                        "id": "planning",
+                        "author": {"role": "assistant"},
+                        "create_time": 11.0,
+                        "status": "finished_successfully",
+                        "end_turn": true,
+                        "content": {"parts": ["我先整理资料。"]}
+                    }
+                },
+                "report": {
+                    "parent": "planning",
+                    "message": {
+                        "id": "report",
+                        "author": {"role": "assistant"},
+                        "create_time": 12.0,
+                        "status": "in_progress",
+                        "end_turn": false,
+                        "content": {"parts": ["# 2026-07-31 日报\n\n生成中"]}
+                    }
+                }
+            }
+        });
+
+        assert!(
+            try_waited_final_from_conversation_detail(&detail, Some(10.5)).is_none(),
+            "a finished planning message must not hide the in-progress report on current_node"
+        );
+    }
+
+    #[test]
+    fn conversation_detail_returns_latest_current_branch_answer_without_planning_prefix() {
+        let report = "# 2026-07-31 日报\n\n## 今日概览\n完整正文\n\n## 证据与不确定性\n已核验";
+        let detail = json!({
+            "current_node": "report",
+            "mapping": {
+                "user": {
+                    "parent": null,
+                    "message": {
+                        "id": "user",
+                        "author": {"role": "user"},
+                        "create_time": 10.0,
+                        "status": "finished_successfully",
+                        "content": {"parts": ["生成日报"]}
+                    }
+                },
+                "planning": {
+                    "parent": "user",
+                    "message": {
+                        "id": "planning",
+                        "author": {"role": "assistant"},
+                        "create_time": 11.0,
+                        "status": "finished_successfully",
+                        "end_turn": true,
+                        "content": {"parts": ["我先整理资料。"]}
+                    }
+                },
+                "report": {
+                    "parent": "planning",
+                    "message": {
+                        "id": "report",
+                        "author": {"role": "assistant"},
+                        "create_time": 12.0,
+                        "status": "finished_successfully",
+                        "end_turn": true,
+                        "content": {"parts": [report]}
+                    }
+                }
+            }
+        });
+
+        let waited = try_waited_final_from_conversation_detail(&detail, Some(10.5))
+            .expect("finished current branch report");
+        assert_eq!(waited.final_message["text"], report);
+        assert_eq!(
+            waited.all_texts,
+            vec!["我先整理资料。".to_string(), report.to_string()]
+        );
+    }
+
+    #[test]
+    fn conversation_detail_ignores_newer_finished_sibling_branch() {
+        let detail = json!({
+            "current_node": "selected",
+            "mapping": {
+                "user": {
+                    "parent": null,
+                    "message": {
+                        "id": "user",
+                        "author": {"role": "user"},
+                        "create_time": 10.0,
+                        "status": "finished_successfully",
+                        "content": {"parts": ["question"]}
+                    }
+                },
+                "selected": {
+                    "parent": "user",
+                    "message": {
+                        "id": "selected",
+                        "author": {"role": "assistant"},
+                        "create_time": 11.0,
+                        "status": "finished_successfully",
+                        "end_turn": true,
+                        "content": {"parts": ["selected answer"]}
+                    }
+                },
+                "orphan": {
+                    "parent": "user",
+                    "message": {
+                        "id": "orphan",
+                        "author": {"role": "assistant"},
+                        "create_time": 20.0,
+                        "status": "finished_successfully",
+                        "end_turn": true,
+                        "content": {"parts": ["newer sibling answer"]}
+                    }
+                }
+            }
+        });
+
+        let waited = try_waited_final_from_conversation_detail(&detail, Some(10.5))
+            .expect("selected branch answer");
+        assert_eq!(waited.final_message["text"], "selected answer");
+    }
+
+    #[test]
+    fn conversation_detail_ignores_generated_images_on_sibling_branch() {
+        let detail = json!({
+            "current_node": "selected",
+            "mapping": {
+                "user": {
+                    "parent": null,
+                    "message": {
+                        "id": "user",
+                        "author": {"role": "user"},
+                        "create_time": 10.0,
+                        "status": "finished_successfully",
+                        "content": {"parts": ["question"]}
+                    }
+                },
+                "selected": {
+                    "parent": "user",
+                    "message": {
+                        "id": "selected",
+                        "author": {"role": "assistant"},
+                        "create_time": 11.0,
+                        "status": "finished_successfully",
+                        "end_turn": true,
+                        "content": {"parts": ["selected text answer"]}
+                    }
+                },
+                "orphan-image": {
+                    "parent": "user",
+                    "message": {
+                        "id": "orphan-image",
+                        "author": {"role": "tool"},
+                        "create_time": 20.0,
+                        "status": "finished_successfully",
+                        "content": {
+                            "parts": [{
+                                "content_type": "image_asset_pointer",
+                                "asset_pointer": "sediment://file_orphan"
+                            }]
+                        }
+                    }
+                }
+            }
+        });
+
+        let waited = try_waited_final_from_conversation_detail(&detail, Some(10.5))
+            .expect("selected branch text answer");
+        assert_eq!(waited.final_message["text"], "selected text answer");
+        assert!(waited.final_message.get("generatedImages").is_none());
+    }
+
+    #[test]
+    fn conversation_detail_requires_current_node_instead_of_guessing_a_branch() {
+        let detail = json!({
+            "mapping": {
+                "candidate": {
+                    "parent": null,
+                    "message": {
+                        "id": "candidate",
+                        "author": {"role": "assistant"},
+                        "create_time": 11.0,
+                        "status": "finished_successfully",
+                        "end_turn": true,
+                        "content": {"parts": ["unscoped answer"]}
+                    }
+                }
+            }
+        });
+
+        assert!(
+            try_waited_final_from_conversation_detail(&detail, Some(10.5)).is_none(),
+            "missing current_node must wait instead of guessing across mapping branches"
+        );
+    }
+
+    #[test]
+    fn conversation_detail_wait_without_after_time_scopes_texts_to_latest_user_turn() {
+        let detail = json!({
+            "current_node": "latest-answer",
+            "mapping": {
+                "old-user": {
+                    "parent": null,
+                    "message": {
+                        "id": "old-user",
+                        "author": {"role": "user"},
+                        "create_time": 10.0,
+                        "status": "finished_successfully",
+                        "content": {"parts": ["old question"]}
+                    }
+                },
+                "old-answer": {
+                    "parent": "old-user",
+                    "message": {
+                        "id": "old-answer",
+                        "author": {"role": "assistant"},
+                        "create_time": 11.0,
+                        "status": "finished_successfully",
+                        "end_turn": true,
+                        "content": {"parts": ["old answer"]}
+                    }
+                },
+                "latest-user": {
+                    "parent": "old-answer",
+                    "message": {
+                        "id": "latest-user",
+                        "author": {"role": "user"},
+                        "create_time": 20.0,
+                        "status": "finished_successfully",
+                        "content": {"parts": ["latest question"]}
+                    }
+                },
+                "latest-answer": {
+                    "parent": "latest-user",
+                    "message": {
+                        "id": "latest-answer",
+                        "author": {"role": "assistant"},
+                        "create_time": 21.0,
+                        "status": "finished_successfully",
+                        "end_turn": true,
+                        "content": {"parts": ["latest answer"]}
+                    }
+                }
+            }
+        });
+
+        let waited = try_waited_final_from_conversation_detail(&detail, None)
+            .expect("latest user turn should have a finished answer");
+        assert_eq!(waited.final_message["text"], "latest answer");
+        assert_eq!(waited.all_texts, vec!["latest answer".to_string()]);
+    }
+
+    #[test]
+    fn backend_finality_polling_is_sparse_while_dom_busy_and_fast_near_completion() {
+        assert_eq!(
+            backend_poll_interval(1_000, true, false),
+            std::time::Duration::from_secs(30)
+        );
+        assert_eq!(
+            backend_poll_interval(1_000, false, false),
+            std::time::Duration::from_secs(3)
+        );
+        assert_eq!(
+            backend_poll_interval(1_000, true, true),
+            std::time::Duration::from_secs(3)
+        );
+
+        let short = WaitedFinal {
+            final_message: json!({"text": "OK"}),
+            summary: Value::Null,
+            all_texts: vec!["OK".to_string()],
+            had_429_or_fallback: false,
+        };
+        let long = WaitedFinal {
+            final_message: json!({"text": "x".repeat(512)}),
+            summary: Value::Null,
+            all_texts: vec!["x".repeat(512)],
+            had_429_or_fallback: false,
+        };
+        assert_eq!(
+            backend_terminal_content_settle_for(&short),
+            std::time::Duration::from_secs(15)
+        );
+        assert_eq!(
+            backend_terminal_content_settle_for(&long),
+            std::time::Duration::from_secs(2)
+        );
     }
 
     #[test]

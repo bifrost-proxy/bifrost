@@ -872,7 +872,34 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 - 只有浏览器中确实没有 ChatGPT target 时才允许创建 fallback tab；失败或未解析出 conversation id 时，复用的 tab 仍保持打开。
 - 续接已有 conversation 仍使用 `/c/{conversation_id}`；新建会话仍通过无 `conversation_id` 的首次发送创建，保持共享 profile 与 handoff 语义。
 
+### TC-CWA-37：回归 - Daily Report 只能采用会话后端确认完成的最终节点
+
+**前置条件**：当前源码已构建；正式 9900 服务保持运行且不重启；使用独立临时数据目录和端口启动当前源码服务，runner 的 `browser.profileDir` 与 `auth.statePath` 显式指向已登录的共享 ChatGPT Web profile；准备包含历史完整日报与后续 continuation 的真实 conversation id。
+
+**操作步骤**：
+1. 执行定向单元测试，覆盖当前分支仍有 `in_progress` 节点、完成节点、旁支节点、旁支图片和自适应稳定窗口：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin conversation_detail_ --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin backend_finality_polling_ --lib -- --nocapture
+   ```
+2. 在隔离端口通过 Chat Gateway `operation=get` 读取真实 conversation，不发送新 Prompt；检查消息列表中完整日报节点的 `status`、`endTurn`、标题、章节和长度。
+3. 对同一 conversation 执行 `operation=wait`；记录耗时、返回节点和隔离服务日志，确认日志包含 `require_backend_finality=true` 与 `backend confirmed finished assistant on current branch`。
+4. 从 `get` 结果中选择最新一条以 `# 2026-07-31 日报` 开头、同时包含 `## 今日概览` 与 `## 证据与不确定性`、且 `status=finished_successfully/endTurn=true` 的 assistant 消息；校验后只恢复缺失的 `2026-07-31-report.md`，不得修改原始 `2026-07-31.md`。
+5. 执行 ChatGPT Web E2E 哨兵：
+   ```bash
+   bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh
+   ```
+
+**预期结果**：
+- DOM 的 stop button、composer 和临时 assistant 文本只作为进度遥测，不能单独触发成功返回。
+- 当前分支存在 `in_progress` assistant 时继续等待；只有最新当前分支 assistant 同时为 `finished_successfully` 和 `end_turn=true`，并通过内容稳定窗口后才返回。
+- `stream_handoff` 缺失完整 SSE final 时会轮询 conversation detail；暂时性 429/5xx 或 DOM 空闲不会降级接受 1 字节、7 字节、planning 或截断正文。
+- `response` 只包含当前分支最后一条最终 assistant；较早 planning 只保留在 `all_texts`，旁支文字和图片不会串入结果。
+- 历史 conversation 的完整日报可从已完成节点恢复，源 Markdown 的哈希与修改时间保持不变，不需要再次调用 GPT runner。
+
 ## 真实执行记录
+
+- 2026-08-01：执行 TC-CWA-37 通过。当前源码以 `SKIP_FRONTEND_BUILD=1` 构建，在临时数据目录 `/tmp/bifrost-chatgpt-finality.EoIX3K`、隔离端口 `19910` 启动，显式复用已登录共享 profile；正式 `9900` 服务保持 PID `80969`，未重启。对真实 conversation `6a6cc469-f9b4-83ec-a7e4-4b0b73f03bc3` 执行只读 `get`（run `1785549290288-c670e6e3-ec75-42f5-a0ef-a25bf01af475`），确认存在 14549 和 18594 字符两条完整 `# 2026-07-31 日报`，均为 `finished_successfully/endTurn=true`；执行 `wait`（run `1785549341665-e0ebd72e-6e89-46cd-9d4f-aa33d30fc8a7`）约 6 秒后返回当前分支最终 continuation 1218 字符，日志包含 `require_backend_finality=true`、候选稳定窗口和 `backend confirmed finished assistant on current branch`，证明没有采用 DOM-only 完成判定。定向单测 `conversation_detail_` 6 项与 `backend_finality_polling_` 1 项通过；`bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh` 通过。随后从较新的 18594 字符完整节点恢复缺失文件 `2026-07-31-report.md`，落盘 44695 字节、SHA-256 为 `fb01a5294ed6e08397353f15dae888d4c8f27c66e24fe4ed59228981a4bec2bd`；原始 `2026-07-31.md` 的 SHA-256 `6cc6060d4b8251f038b943da1eda5b6d646a948a389d6473907457d56b098d1d` 和 mtime `1785505692` 前后不变，未再次发送 Prompt。 第二轮 review 发现显式 `wait` 的 `all_texts` 会回放最后一个 user 之前的历史消息；修复为自动限定到最后一个 user turn 后，以新构建再次执行真实 `wait`（run `1785549893241-7feca529-b3a6-482a-a24e-08450517303d`），结果仍为当前节点 1218 字符，NDJSON 仅 3 行、1 条 `assistant_final`，总大小从第一轮约 3.1 MB 降为 431999 字节，未重复投递旧日报或旧 planning。
 
 - 2026-07-24：执行 TC-CWA-35 通过。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin new_conversation_url_ --lib -- --nocapture` 通过 2 项，确认默认首页精确为 `https://chatgpt.com/`，自定义 `baseUrl` 的多个尾部 `/` 会规范化为单个 `/`；`conversation_page_match_treats_homepage_as_expected_for_fresh_run` 通过，确认 fresh run 复用的 target 已在首页时直接使用，不再导航同一个首页或产生无意义 refresh；`fresh_conversation_takes_most_recent_tab_without_closing_it` 与 `fresh_runs_reuse_existing_chatgpt_tab_without_closing_or_reopening` 通过，确认新 session 从池中取出最近使用的 live target、移除旧 conversation key，但不关闭 CDP 或 browser target；`reusable_chatgpt_page_prefers_homepage_and_requires_origin_boundary` 通过，确认进程内池为空时只选择正确 ChatGPT origin 且优先选择无需导航的首页 target。`bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh` 源码与测试哨兵全部通过；`rg` 负向检查确认生产代码无 `bifrost_new_chat` 和 `close_chatgpt_pages_for_fresh_run`。真实外部 ChatGPT run 本轮不执行，避免依赖账号、网络和主动改变用户当前共享浏览器会话；URL 生成、同 target 重绑、target 选择、生产调用点、共享 profile 和既有发送/等待链路由单元测试与 E2E 哨兵完成确定性回归。尚未用真实 headed 浏览器连续两个新 session 观察 target id，保留为安装后可选的用户感知复核项。
 - 2026-07-15：按用户要求追加执行 TC-CWA-34 正式 9900 服务验证。先用任务 API 将正在运行的 ASR 任务 `735775510b384fff8903d9c6fc54f1a3` 安全暂停，安装当前 `target/debug/bifrost` 到 `~/.local/bin/bifrost`（安装前后 SHA-256 与构建产物一致），重启正式服务为 PID `61485` 后恢复 ASR；恢复后进度重新进入 `running`，未把后台任务遗留为 paused。随后在正式端口执行 runner `gpt` 新会话，prompt 为“晚上好，给我整理下今日要闻”，并要求联网检索、按国内/国际/科技 AI/财经四板块输出完整结果。正式 run `1784046993864-e65176e7-a1a2-4cf9-9359-fe5b60c88b98`、conversation `6a56659f-9ad4-83ec-a437-39fdc87efe01` 命中 `eventTypes=["patch","resume_conversation_token","stream_handoff","browser_ui"]`；运行约 31 秒时仍保持 running，没有复现旧版的 planning 提前返回。最终 `durationMs=187949`、`status=succeeded`，`conversation_final.json.source=dom_fallback_outcome`、正式 `turnId=3f7270ef-4719-4313-a6d0-c02b356d00c6`，`result.response` 为 13277 个字符 / 19731 字节，`last_message.md` 同为 19731 字节并包含“国内、国际、科技／AI、财经、今日最重要的三条主线”全部章节。
