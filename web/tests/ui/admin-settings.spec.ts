@@ -584,8 +584,34 @@ test("Settings TLS 与证书页支持开关、模式和只读展示", async ({
 
   try {
     await openPage(page, "settings");
-    await page.getByRole("tab", { name: /Proxy/ }).click();
+    const mobileTrustDialog = page.getByRole("dialog", {
+      name: /Install Bifrost CA/,
+    });
+    await mobileTrustDialog
+      .waitFor({ state: "visible", timeout: 5000 })
+      .catch(() => undefined);
+    if (await mobileTrustDialog.isVisible()) {
+      await mobileTrustDialog.getByRole("button", { name: "Not now" }).click();
+      await expect(mobileTrustDialog).toBeHidden();
+    }
+    await expect(page.getByRole("tab", { name: /Proxy/ })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
     await expect(page.locator("body")).toContainText("HTTPS Interception");
+    const tlsPriority = page.getByTestId("settings-tls-priority");
+    await expect(tlsPriority).toContainText(
+      "Priority: Rules > Domain > App > Client IP > Global.",
+    );
+    await expect(tlsPriority).toContainText(
+      "Within each scope, Passthrough takes priority over Force Intercept.",
+    );
+
+    await page.getByTestId("theme-toggle").click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await expect(tlsPriority).toBeVisible();
+    await page.getByTestId("theme-toggle").click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
 
     await page.getByTestId("settings-tls-enable-switch").click();
     await expect

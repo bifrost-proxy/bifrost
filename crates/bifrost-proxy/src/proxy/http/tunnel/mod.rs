@@ -6001,46 +6001,38 @@ pub fn should_intercept_tls_for_client(
         return true;
     }
 
-    if is_local_client
-        && requires_client_app_for_tls_decision(tls_intercept_config)
-        && !matches!(client_app, Some(app) if !app.is_empty())
-    {
-        if is_domain_included(host, &tls_intercept_config.intercept_include) {
-            return true;
-        }
-
-        if is_domain_excluded(host, &tls_intercept_config.intercept_exclude) {
-            return false;
-        }
-
+    if is_domain_excluded(host, &tls_intercept_config.intercept_exclude) {
         return false;
-    }
-
-    if is_local_client {
-        if is_app_included(client_app, &tls_intercept_config.app_intercept_include) {
-            return true;
-        }
-
-        if is_app_excluded(client_app, &tls_intercept_config.app_intercept_exclude) {
-            return false;
-        }
     }
 
     if is_domain_included(host, &tls_intercept_config.intercept_include) {
         return true;
     }
 
-    if is_domain_excluded(host, &tls_intercept_config.intercept_exclude) {
+    if is_local_client
+        && requires_client_app_for_tls_decision(tls_intercept_config)
+        && !matches!(client_app, Some(app) if !app.is_empty())
+    {
         return false;
     }
 
-    if let Some(ip) = client_ip {
-        if is_ip_included(ip, &tls_intercept_config.ip_intercept_include) {
-            return true;
+    if is_local_client {
+        if is_app_excluded(client_app, &tls_intercept_config.app_intercept_exclude) {
+            return false;
         }
 
+        if is_app_included(client_app, &tls_intercept_config.app_intercept_include) {
+            return true;
+        }
+    }
+
+    if let Some(ip) = client_ip {
         if is_ip_excluded(ip, &tls_intercept_config.ip_intercept_exclude) {
             return false;
+        }
+
+        if is_ip_included(ip, &tls_intercept_config.ip_intercept_include) {
+            return true;
         }
     }
 
@@ -7001,7 +6993,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_intercept_include_has_highest_priority() {
+    fn test_should_passthrough_domain_exclude_before_domain_include() {
         let tls_intercept_config = make_tls_intercept_config(
             true,
             vec!["secure.local".to_string()],
@@ -7018,10 +7010,10 @@ mod tests {
             &resolved_rules,
         );
         assert!(
-            result,
-            "Include list should have higher priority than exclude list"
+            !result,
+            "Domain passthrough should have higher priority than force intercept"
         );
-        println!("✓ Include > Exclude priority: intercept={}", result);
+        println!("✓ Domain passthrough > force intercept: intercept={result}");
     }
 
     #[test]
@@ -7344,7 +7336,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_intercept_app_include_has_higher_priority_than_app_exclude() {
+    fn test_should_passthrough_app_exclude_before_app_include() {
         let mut tls_intercept_config = make_tls_intercept_config(true, vec![], vec![]);
         tls_intercept_config.app_intercept_exclude = vec!["Safari".to_string()];
         tls_intercept_config.app_intercept_include = vec!["Safari".to_string()];
@@ -7359,13 +7351,13 @@ mod tests {
             &resolved_rules,
         );
         assert!(
-            result,
-            "App include should have higher priority than app exclude"
+            !result,
+            "App passthrough should have higher priority than app force intercept"
         );
     }
 
     #[test]
-    fn test_should_intercept_app_has_higher_priority_than_domain() {
+    fn test_should_intercept_domain_include_before_app_exclude() {
         let mut tls_intercept_config = make_tls_intercept_config(true, vec![], vec![]);
         tls_intercept_config.app_intercept_exclude = vec!["Safari".to_string()];
         tls_intercept_config.intercept_include = vec!["example.com".to_string()];
@@ -7380,8 +7372,99 @@ mod tests {
             &resolved_rules,
         );
         assert!(
+            result,
+            "Domain force intercept should have higher priority than app passthrough"
+        );
+    }
+
+    #[test]
+    fn test_should_passthrough_domain_exclude_before_app_include() {
+        let mut tls_intercept_config =
+            make_tls_intercept_config(true, vec!["chatgpt.com".to_string()], vec![]);
+        tls_intercept_config.app_intercept_include = vec!["Microsoft Edge*".to_string()];
+        let tls_config = make_tls_config_with_ca();
+        let resolved_rules = ResolvedRules::default();
+
+        let result = should_intercept_tls(
+            "chatgpt.com",
+            Some("Microsoft Edge Helper"),
+            &tls_intercept_config,
+            &tls_config,
+            &resolved_rules,
+        );
+        assert!(
             !result,
-            "App exclude should have higher priority than domain include"
+            "Domain passthrough should have higher priority than app force intercept"
+        );
+    }
+
+    #[test]
+    fn test_should_intercept_rule_override_before_domain_and_app_passthrough() {
+        let mut tls_intercept_config =
+            make_tls_intercept_config(false, vec!["example.com".to_string()], vec![]);
+        tls_intercept_config.app_intercept_exclude = vec!["Safari".to_string()];
+        let tls_config = make_tls_config_with_ca();
+        let resolved_rules = ResolvedRules {
+            tls_intercept: Some(true),
+            ..Default::default()
+        };
+
+        let result = should_intercept_tls(
+            "example.com",
+            Some("Safari"),
+            &tls_intercept_config,
+            &tls_config,
+            &resolved_rules,
+        );
+        assert!(
+            result,
+            "Rule force intercept should have higher priority than domain and app passthrough"
+        );
+    }
+
+    #[test]
+    fn test_should_passthrough_app_exclude_before_ip_include() {
+        let mut config = make_tls_intercept_config(false, vec![], vec![]);
+        config.app_intercept_exclude = vec!["Safari".to_string()];
+        config.ip_intercept_include = vec!["127.0.0.1".to_string()];
+        let tls_config = make_tls_config_with_ca();
+        let resolved_rules = ResolvedRules::default();
+
+        let result = should_intercept_tls_for_client(
+            "example.com",
+            Some("Safari"),
+            true,
+            Some("127.0.0.1"),
+            &config,
+            &tls_config,
+            &resolved_rules,
+        );
+        assert!(
+            !result,
+            "App passthrough should have higher priority than IP force intercept"
+        );
+    }
+
+    #[test]
+    fn test_should_intercept_app_include_before_ip_exclude() {
+        let mut config = make_tls_intercept_config(false, vec![], vec![]);
+        config.app_intercept_include = vec!["Safari".to_string()];
+        config.ip_intercept_exclude = vec!["127.0.0.1".to_string()];
+        let tls_config = make_tls_config_with_ca();
+        let resolved_rules = ResolvedRules::default();
+
+        let result = should_intercept_tls_for_client(
+            "example.com",
+            Some("Safari"),
+            true,
+            Some("127.0.0.1"),
+            &config,
+            &tls_config,
+            &resolved_rules,
+        );
+        assert!(
+            result,
+            "App force intercept should have higher priority than IP passthrough"
         );
     }
 
@@ -7504,7 +7587,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ip_include_priority_above_ip_exclude() {
+    fn test_ip_exclude_priority_above_ip_include() {
         let mut config = make_tls_intercept_config(false, vec![], vec![]);
         config.ip_intercept_include = vec!["192.168.1.100".to_string()];
         config.ip_intercept_exclude = vec!["192.168.1.100".to_string()];
@@ -7521,8 +7604,8 @@ mod tests {
             &resolved_rules,
         );
         assert!(
-            result,
-            "IP include should have higher priority than IP exclude"
+            !result,
+            "IP passthrough should have higher priority than IP force intercept"
         );
     }
 

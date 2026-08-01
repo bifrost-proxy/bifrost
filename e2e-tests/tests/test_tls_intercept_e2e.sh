@@ -158,19 +158,23 @@ class LoggingHandler(http.server.SimpleHTTPRequestHandler):
         print(f"  X-Intercepted header: {intercepted}", flush=True)
         
         self.send_response(200)
-        self.send_header("Content-type", "application/json")
         self.send_header("X-Mock-Server", "https")
-        self.end_headers()
-        
-        response = {
-            "server": "mock-https",
-            "path": self.path,
-            "method": "GET",
-            "tls": True,
-            "headers_received": headers_dict,
-            "intercepted_header": intercepted
-        }
-        self.wfile.write(json.dumps(response, indent=2).encode())
+        if self.path == "/test/domain-priority":
+            self.send_header("Content-type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"<!doctype html><html><body>domain-priority-original</body></html>")
+        else:
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            response = {
+                "server": "mock-https",
+                "path": self.path,
+                "method": "GET",
+                "tls": True,
+                "headers_received": headers_dict,
+                "intercepted_header": intercepted
+            }
+            self.wfile.write(json.dumps(response, indent=2).encode())
     
     def log_message(self, format, *args):
         pass
@@ -223,17 +227,30 @@ start_proxy() {
     done
 
     # --yes: auto-resolve port conflicts in non-interactive CI. Must come after the `start` subcommand.
-    local cmd="$BIFROST_BIN --port $PROXY_PORT --log-level debug start --yes --skip-cert-check --unsafe-ssl --no-system-proxy"
-    
+    # Keep the binary as the direct background child so PROXY_PID identifies the
+    # listener process and cleanup cannot strand it behind an eval wrapper.
+    local -a cmd=(
+        "$BIFROST_BIN"
+        --port "$PROXY_PORT"
+        --log-level debug
+        start
+        --yes
+        --skip-cert-check
+        --unsafe-ssl
+        --no-system-proxy
+    )
+
     if [[ -n "$rules" ]]; then
-        cmd="$cmd --rules \"$rules\""
+        cmd+=(--rules "$rules")
     fi
-    
+
     if [[ -n "$extra_args" ]]; then
-        cmd="$cmd $extra_args"
+        local -a extra_parts=()
+        read -r -a extra_parts <<< "$extra_args"
+        cmd+=("${extra_parts[@]}")
     fi
-    
-    eval "RUST_LOG=bifrost_proxy=debug $cmd" > /tmp/proxy_server.log 2>&1 &
+
+    RUST_LOG=bifrost_proxy=debug "${cmd[@]}" > /tmp/proxy_server.log 2>&1 &
     PROXY_PID=$!
     
     local max_ready=20
@@ -492,8 +509,94 @@ test_intercept_mode_whitelist() {
     return 0
 }
 
+test_domain_passthrough_over_app_force_intercept() {
+    log_section "Test 7: Domain Passthrough Overrides App Force Intercept"
+
+    stop_proxy
+    start_proxy "" "--enable-badge-injection"
+
+    log_info "Configuring 127.0.0.1 domain passthrough with curl app force intercept..."
+    local update_response
+    update_response=$(env NO_PROXY="*" no_proxy="*" curl -sS "${CURL_COMMON_ARGS[@]}" -X PUT \
+        -H "Content-Type: application/json" \
+        -d '{
+            "enable_tls_interception": false,
+            "intercept_exclude": ["127.0.0.1"],
+            "intercept_include": [],
+            "app_intercept_exclude": [],
+            "app_intercept_include": ["*curl*"]
+        }' \
+        "http://127.0.0.1:$ADMIN_PORT/_bifrost/api/config/tls")
+
+    if ! echo "$update_response" | jq -e '
+        (.intercept_exclude | index("127.0.0.1") != null) and
+        (.app_intercept_include | index("*curl*") != null)
+    ' >/dev/null; then
+        log_fail "TLS priority configuration was not applied"
+        echo "$update_response"
+        return 1
+    fi
+
+    local response
+    response=$(env NO_PROXY="" no_proxy="" curl -sS -k "${CURL_COMMON_ARGS[@]}" \
+        -x "http://127.0.0.1:$PROXY_PORT" \
+        "https://127.0.0.1:$MOCK_HTTPS_PORT/test/domain-priority")
+
+    if ! echo "$response" | grep -q "domain-priority-original"; then
+        log_fail "Domain passthrough did not return the original HTTPS response"
+        echo "$response"
+        return 1
+    fi
+    if echo "$response" | grep -q "__bifrost_badge__"; then
+        log_fail "Bifrost Badge was injected even though domain passthrough should prevent TLS unpacking"
+        return 1
+    fi
+
+    local traffic
+    local tunnel_record
+    for _ in $(seq 1 30); do
+        traffic=$(env NO_PROXY="*" no_proxy="*" curl -sS "${CURL_COMMON_ARGS[@]}" \
+            "http://127.0.0.1:$ADMIN_PORT/_bifrost/api/traffic?limit=100")
+        tunnel_record=$(echo "$traffic" | jq -c '
+            [.records[]? |
+                select((.h // .host // "") == "127.0.0.1") |
+                select((.m // .method // "") == "CONNECT")
+            ] | sort_by(.seq // 0) | last // empty
+        ')
+        [[ -n "$tunnel_record" ]] && break
+        sleep 0.2
+    done
+
+    if [[ -z "$tunnel_record" ]]; then
+        log_fail "No CONNECT tunnel record was captured for domain passthrough"
+        echo "$traffic" | jq '.records' >&2 || true
+        return 1
+    fi
+
+    local client_app
+    client_app=$(echo "$tunnel_record" | jq -r '.capp // .client_app // ""')
+    local client_app_lower
+    client_app_lower=$(printf '%s' "$client_app" | tr '[:upper:]' '[:lower:]')
+    if [[ "$client_app_lower" != *curl* ]]; then
+        log_fail "E2E request did not prove the App Force Intercept match; client_app=$client_app"
+        echo "$tunnel_record" | jq . >&2 || true
+        return 1
+    fi
+
+    local inner_count
+    inner_count=$(echo "$traffic" | jq '[.records[]? | select(((.p // .path // "") | contains("/test/domain-priority")))] | length')
+    if [[ "$inner_count" != "0" ]]; then
+        log_fail "Domain passthrough exposed an inner HTTPS traffic record"
+        echo "$traffic" | jq '.records' >&2 || true
+        return 1
+    fi
+
+    log_pass "Domain passthrough kept a curl App Force Intercept request as a CONNECT tunnel without Badge injection"
+    return 0
+}
+
 test_api_update_tls_config() {
-    log_section "Test 7: API Update TLS Config"
+    log_section "Test 8: API Update TLS Config"
     
     log_info "Updating TLS config via API..."
     
@@ -555,6 +658,13 @@ main() {
                     TESTS_FAILED=$((TESTS_FAILED + 1))
                 fi
                 ;;
+            domain_app_priority)
+                if test_domain_passthrough_over_app_force_intercept; then
+                    TESTS_PASSED=$((TESTS_PASSED + 1))
+                else
+                    TESTS_FAILED=$((TESTS_FAILED + 1))
+                fi
+                ;;
             *)
                 log_fail "Unknown ONLY_TEST: $ONLY_TEST"
                 exit 1
@@ -577,6 +687,7 @@ main() {
     if test_external_google_https; then TESTS_PASSED=$((TESTS_PASSED + 1)); else TESTS_FAILED=$((TESTS_FAILED + 1)); fi
     if test_intercept_mode_blacklist; then TESTS_PASSED=$((TESTS_PASSED + 1)); else TESTS_FAILED=$((TESTS_FAILED + 1)); fi
     if test_intercept_mode_whitelist; then TESTS_PASSED=$((TESTS_PASSED + 1)); else TESTS_FAILED=$((TESTS_FAILED + 1)); fi
+    if test_domain_passthrough_over_app_force_intercept; then TESTS_PASSED=$((TESTS_PASSED + 1)); else TESTS_FAILED=$((TESTS_FAILED + 1)); fi
     if test_api_update_tls_config; then TESTS_PASSED=$((TESTS_PASSED + 1)); else TESTS_FAILED=$((TESTS_FAILED + 1)); fi
     
     show_all_logs

@@ -133,9 +133,9 @@ bifrost start [OPTIONS]
       --intercept                     启用 TLS/HTTPS 拦截
       --no-intercept                  禁用 TLS/HTTPS 拦截（默认）
       --intercept-exclude <DOMAINS>   排除域名不拦截（逗号分隔，支持通配符）
-      --intercept-include <DOMAINS>   强制拦截域名（最高优先级，即使全局关闭也生效）
+      --intercept-include <DOMAINS>   强制拦截域名（低于规则，高于应用/IP/全局）
       --app-intercept-exclude <APPS>  排除应用不拦截（逗号分隔，支持通配符）
-      --app-intercept-include <APPS>  强制拦截应用（最高优先级）
+      --app-intercept-include <APPS>  强制拦截应用（低于规则和域名，高于 IP/全局）
       --unsafe-ssl                    跳过上游 TLS 证书校验（危险，仅测试用）
       --enable-badge-injection        启用 HTML 页面注入 Bifrost 徽章
       --disable-badge-injection       禁用 HTML 页面注入 Bifrost 徽章
@@ -152,9 +152,10 @@ bifrost start [OPTIONS]
 TLS 拦截优先级（从高到低）：
 
 1. 规则级别（`tlsIntercept://`、`tlsPassthrough://`）
-2. `--intercept-include` / `--app-intercept-include`：**域名/应用白名单强制拦截（推荐方式）**
-3. `--intercept-exclude` / `--app-intercept-exclude`：强制不拦截
-4. `--intercept` / `--no-intercept`：全局开关（**默认关闭，不推荐全局开启**）
+2. 域名：`--intercept-exclude`（Passthrough）优先于 `--intercept-include`（Force Intercept）
+3. 应用：`--app-intercept-exclude`（Passthrough）优先于 `--app-intercept-include`（Force Intercept）
+4. 客户端 IP：Passthrough 优先于 Force Intercept
+5. `--intercept` / `--no-intercept`：全局开关（**默认关闭，不推荐全局开启**）
 
 ### 3. TLS / CA
 
@@ -182,7 +183,8 @@ bifrost start --intercept-include '*.api.local' --app-intercept-include '*Chrome
 bifrost start --intercept --intercept-exclude '*.apple.com,*.microsoft.com'
 ```
 
-- `--intercept-include` / `--app-intercept-include` 为最高优先级，即使全局 TLS 关闭也会对匹配的域名/应用生效
+- 总体顺序固定为 `Rules > Domain > App > Client IP > Global`；同一层内 Passthrough 优先于 Force Intercept
+- 因此域名命中 `--intercept-exclude` 后，即使命中浏览器的 `--app-intercept-include`，也保持 CONNECT 隧道，不进行 TLS 解包
 - 需要解密 HTTPS 时，先处理 `ca`（生成 + 安装），再配置白名单
 - 若只是转发 HTTPS 而非查看明文，保持默认即可（`--no-intercept`）
 - 应用级别白名单支持通配符匹配进程名

@@ -142,9 +142,12 @@ bifrost start --intercept-exclude "*.apple.com,*.microsoft.com"
 TLS 抓包优先级从高到低：
 
 1. 规则级 `tlsIntercept://` / `tlsPassthrough://`
-2. `--intercept-include` / `--app-intercept-include`
-3. `--intercept-exclude` / `--app-intercept-exclude`
-4. `--intercept` / `--no-intercept`
+2. 域名：`--intercept-exclude` / `--intercept-include`
+3. 应用：`--app-intercept-exclude` / `--app-intercept-include`
+4. 客户端 IP：passthrough / force intercept
+5. `--intercept` / `--no-intercept`
+
+同一层内 passthrough 优先于 force intercept。例如域名已加入 `--intercept-exclude` 时，即使浏览器命中 `--app-intercept-include`，该域名仍保持 CONNECT 隧道，不做 TLS 解包。
 
 域名或应用白名单示例：
 
