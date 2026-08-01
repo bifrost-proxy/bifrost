@@ -75,6 +75,10 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   --lib -- --nocapture
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  conversation_tab_pool_capacity_is_scoped_per_profile \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   reuse_fresh_tab_installs_pooled_target_and_skips_existing_selection \
   --lib -- --nocapture
 

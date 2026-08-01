@@ -353,7 +353,7 @@
 
 新版改为：
 
-- 按 `(profile_dir, conversation_id)` 维护 `ConversationTab` 长驻池，容量 `CONVERSATION_TAB_POOL_SIZE = 16`；
+- 按 `(profile_dir, conversation_id)` 维护 `ConversationTab` 长驻池；`CONVERSATION_TAB_POOL_SIZE = 16` 是每个 `profile_dir` 的独立容量，其他 runner/profile 不占用当前 profile 配额，也不能触发它的 LRU 淘汰；
 - 入口若命中池子直接复用 CDP 与 target_id，跳过 navigate；不命中再走 `create_tab_with_cdp_retry`；
 - 若服务重启导致内存池为空，但受控浏览器仍有同一个 `/c/{conversation_id}` 标签页，发送前先通过 `/json/list` 扫描现有 targets，命中后 attach CDP、重新注册入池并复用该 tab，避免重复打开相同 conversation；
 - 新建会话不再关闭所有 ChatGPT 页面再创建 `about:blank` tab；优先取出最近使用的 live `ConversationTab`，池为空时 attach 浏览器中已存在的 ChatGPT target，并在同一个 target 上切换到纯首页。只有浏览器中确实没有任何 ChatGPT target 时才创建 fallback tab；
@@ -448,9 +448,12 @@
 
 ```bash
 cargo test -p bifrost-admin --lib chatgpt_web -- --nocapture
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  cargo test -p bifrost-admin --lib im_gateway::chatgpt_web::browser::tests -- --nocapture
+done
 ```
 
-**预期结果**：22 项均通过；clippy 全 workspace 零警告：
+**预期结果**：ChatGPT Web 全部用例通过；浏览器池用例连续并行执行 10 轮均通过，`conversation_tab_pool_capacity_is_scoped_per_profile` 证明另一 profile 已满时当前 profile 的首个 tab 不会被提前淘汰；clippy 全 workspace 零警告：
 
 ```bash
 cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
@@ -899,6 +902,8 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 - 历史 conversation 的完整日报可从已完成节点恢复，源 Markdown 的哈希与修改时间保持不变，不需要再次调用 GPT runner。
 
 ## 真实执行记录
+
+- 2026-08-01：补充执行 TC-CWA-19-06 通过。第三轮 CI 的 Windows 全量单测暴露共享 `ConversationTab` 池并行竞态：其他 profile 的测试清空全局池后，`fresh_conversation_reuse_helper_returns_pooled_tab_without_browser_io` 错误回退到 `127.0.0.1:1/json/list`。修复为测试只清理自己的 profile，并将生产池容量从错误的全局 `pool.len()` 改为按 `profile_dir` 独立计数。新增 `conversation_tab_pool_capacity_is_scoped_per_profile`，在另一 profile 已占满 16 个 tab 时确认当前 profile 的首个 tab 不会被提前淘汰；浏览器池 14 项并行单测连续执行 10 轮全部通过，`clippy --all-targets --all-features -D warnings` 与 `bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh` 通过。
 
 - 2026-08-01：执行 TC-CWA-37 通过。当前源码以 `SKIP_FRONTEND_BUILD=1` 构建，在临时数据目录 `/tmp/bifrost-chatgpt-finality.EoIX3K`、隔离端口 `19910` 启动，显式复用已登录共享 profile；正式 `9900` 服务保持 PID `80969`，未重启。对真实 conversation `6a6cc469-f9b4-83ec-a7e4-4b0b73f03bc3` 执行只读 `get`（run `1785549290288-c670e6e3-ec75-42f5-a0ef-a25bf01af475`），确认存在 14549 和 18594 字符两条完整 `# 2026-07-31 日报`，均为 `finished_successfully/endTurn=true`；执行 `wait`（run `1785549341665-e0ebd72e-6e89-46cd-9d4f-aa33d30fc8a7`）约 6 秒后返回当前分支最终 continuation 1218 字符，日志包含 `require_backend_finality=true`、候选稳定窗口和 `backend confirmed finished assistant on current branch`，证明没有采用 DOM-only 完成判定。定向单测 `conversation_detail_` 7 项、`backend_finality_polling_` 1 项，以及直接执行后端候选稳定/暂时性错误超时/永久错误失败分支的 `wait_final_backend_` 3 项通过；`bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh` 通过。随后从较新的 18594 字符完整节点恢复缺失文件 `2026-07-31-report.md`，落盘 44695 字节、SHA-256 为 `fb01a5294ed6e08397353f15dae888d4c8f27c66e24fe4ed59228981a4bec2bd`；原始 `2026-07-31.md` 的 SHA-256 `6cc6060d4b8251f038b943da1eda5b6d646a948a389d6473907457d56b098d1d` 和 mtime `1785505692` 前后不变，未再次发送 Prompt。 第二轮 review 发现显式 `wait` 的 `all_texts` 会回放最后一个 user 之前的历史消息；修复为自动限定到最后一个 user turn 后，以新构建再次执行真实 `wait`（run `1785549893241-7feca529-b3a6-482a-a24e-08450517303d`），结果仍为当前节点 1218 字符，NDJSON 仅 3 行、1 条 `assistant_final`，总大小从第一轮约 3.1 MB 降为 431999 字节，未重复投递旧日报或旧 planning。
 

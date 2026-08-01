@@ -81,6 +81,7 @@ ChatGPT Web 页面可能把一次回答渲染成多条 assistant message：前�
 - `stream_handoff` 没有携带可解析 SSE final 时，DOM 只能提供 busy/progress 信号，不能独立确认最终态。即使 stop button 暂时消失、composer 恢复可用、页面已经出现正式 `data-message-id`，也必须读取同一 conversation 的 backend detail，并沿 `current_node` 当前分支确认本轮 assistant 消息同时满足 `status=finished_successfully`、`end_turn=true`、正文非空且不存在仍为 `in_progress` 的后继消息。短文本 final candidate 需要额外稳定观察，候选 `current_node` 或正文变化即重新计时；backend detail 暂时 429/5xx 时继续有界重试，禁止降级为未经 backend 确认的 DOM 成功结果。
 - Backend detail 的最终正文只取当前分支中最新的已完成 assistant message；同一分支较早的 planning/thinking 消息可以保留在 `all_texts` 供过程投递，但不得拼到 `result.response` 开头，避免 Daily Agent 等严格 Markdown 契约把完整正文误判为格式错误。
 - `wait` operation 不能只依赖进程内 `ConversationTab` 池。send 结束后浏览器 tab 仍打开，但内存池会随进程退出而消失。DOM fallback 找不到 tab 时，必须通过共享 browser session 的 DevTools target 列表重新发现 `/c/{conversationId}`，attach CDP 后再提取；只有浏览器也找不到会话页时才返回 `NotFound`。
+- `ConversationTab` 容量按 `profile_dir` 独立计算，每个 browser profile 最多保留 16 个 conversation tab；其他 runner/profile 的 tab 不能占用当前 profile 的配额或触发它的 LRU 淘汰。测试清理也只能清理自己的 profile，禁止清空进程全局池，以免并行用例或并行 runner 相互破坏。
 - 新会话必须创建自己的隔离 tab，不能先关闭共享 profile 中的其他 ChatGPT tab；其他 tab 可能仍有深度研究在后台继续，关闭它们会使后续 `wait` 无法重新 attach 到原会话。
 - 图片消息可能渲染为后续 `section[data-testid^="conversation-turn-"]`（正文只有 `ChatGPT 说：`），图片在 section 内的 `estuary/content` URL。DOM fallback 必须把最后一个 user turn 之后的这类 image-only section 当作 assistant 结果；空壳文本且图片数为 0 必须继续等待。
 - DOM 提取和 `allMarkdownTexts` 自然批次必须保存完整文本，不允许固定字符数截断；`response`、`last_message.md`、`result.json` 必须保留长任务最终输出全文。
