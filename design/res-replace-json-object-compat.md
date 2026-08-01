@@ -83,7 +83,8 @@ JSON value 转换：
 - 单元：`bifrost-core` JSON pair parser、Wildcard matcher；`bifrost-cli` replace parser；
   `bifrost-admin` request/replay body rules。
 - E2E：`e2e-tests/rules/response_modify/res_replace_json_object.txt` +
-  `e2e-tests/tests/test_body_replace.sh` 的 BR-12。
+  `e2e-tests/tests/test_body_replace.sh` 的 BR-12；通用 Rules fixture runner 将 host wildcard
+  具体化为合法测试 host，并保留 pattern 自带 path。
 - human_tests：`human_tests/rules-e2e-fixtures.md` 新增 Whistle JSON object 回归并逐条执行。
 - 项目门禁：E2E 后执行 `rust-project-validate`；本地不运行 coverage，远端 CI 执行
   `bash scripts/ci/coverage-all.sh --json --gate`。
