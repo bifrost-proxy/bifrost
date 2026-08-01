@@ -146,3 +146,5 @@
 
 - `tests/test_upstream_connection_stability.sh`：通过本地短连接 upstream 验证跨 pool partition 全局背压、CONNECT 突发请求语义、普通 ConnectionRefused 不触发资源恢复退避，以及 cooldown 后不出现 `EADDRNOTAVAIL` / `ENOBUFS` / FD 耗尽错误。
 - `tests/test_desktop_service_ownership_lifecycle.sh`：在 macOS 临时 data-dir 和动态端口中暂停 Desktop-owned Service 模拟短时高负载卡顿，断言健康探针降级但 PID 不变；随后真实终止子进程，断言 watchdog 在下一轮存活检查中拉起新 PID，同时保留 Desktop/CLI ownership 边界。
+- `tests/test_system_proxy_reconcile_stability.sh`：在 macOS 快照并恢复逐服务代理状态，验证已收敛代理跨两个高频周期只执行一次 full reconcile，且 ownership 与退出恢复不变。
+- `tests/test_websocket_rejection_logging.sh`：本地 upstream 连续 6 次拒绝 WebSocket 握手，验证客户端仍收到 502、同 host/status 只记录一条结构化 warning，并保留正常 WebSocket 回归。

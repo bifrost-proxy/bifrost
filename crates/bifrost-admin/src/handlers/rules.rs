@@ -148,7 +148,7 @@ fn storage_error_status(error: &bifrost_core::BifrostError) -> StatusCode {
     }
 }
 
-const GROUP_CACHE_RESOLUTION_TIMEOUT: Duration = Duration::from_millis(1_000);
+const GROUP_CACHE_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Deserialize)]
 struct CreateRuleRequest {
@@ -756,10 +756,7 @@ fn reverse_group_cache_for_dirs(
     map
 }
 
-async fn active_summary(state: SharedAdminState) -> Response<BoxBody> {
-    if let Some(response) = ensure_default_rule_response(&state) {
-        return response;
-    }
+fn build_active_summary_snapshot(state: &SharedAdminState) -> (ActiveSummaryResponse, Vec<String>) {
     let mut all_rules = Vec::new();
     let mut var_map: HashMap<String, Vec<InlineVarEntry>> = HashMap::new();
     let mut content_parts: Vec<String> = Vec::new();
@@ -816,68 +813,13 @@ async fn active_summary(state: SharedAdminState) -> Response<BoxBody> {
         })
         .collect();
 
-    let reverse_cache = reverse_group_cache_for_dirs(&state, &group_dirs);
+    let reverse_cache = reverse_group_cache_for_dirs(state, &group_dirs);
 
     let uncached_dirs: Vec<String> = group_dirs
         .iter()
         .filter(|(d, _)| !reverse_cache.contains_key(d))
         .map(|(d, _)| d.clone())
         .collect();
-
-    if !uncached_dirs.is_empty() {
-        tracing::debug!(
-            target: "bifrost_admin::rules",
-            dirs = ?uncached_dirs,
-            "active summary using local group directory names for uncached groups"
-        );
-        if !state.is_group_cache_resolved() {
-            if let Some(sm) = state.sync_manager.clone() {
-                if sm.has_session() {
-                    state.set_group_cache_resolved();
-                    let state_for_task = state.clone();
-                    let dirs_for_task = uncached_dirs.clone();
-                    tokio::spawn(async move {
-                        let resolved =
-                            tokio::time::timeout(GROUP_CACHE_RESOLUTION_TIMEOUT, async {
-                                super::group_rules::resolve_missing_group_caches(
-                                    &sm,
-                                    &state_for_task,
-                                    &dirs_for_task,
-                                )
-                                .await;
-                                let cache = state_for_task.group_name_cache();
-                                dirs_for_task
-                                    .iter()
-                                    .all(|dir| cache.reverse_lookup(dir).is_some())
-                            })
-                            .await;
-                        let all_resolved = match resolved {
-                            Ok(all_resolved) => all_resolved,
-                            Err(_) => {
-                                tracing::warn!(
-                                    target: "bifrost_admin::rules",
-                                    dirs = ?dirs_for_task,
-                                    timeout_ms = GROUP_CACHE_RESOLUTION_TIMEOUT.as_millis(),
-                                    "group cache resolution timed out; clearing retry gate"
-                                );
-                                false
-                            }
-                        };
-                        if !all_resolved {
-                            state_for_task.clear_group_cache_resolved();
-                        }
-                        state_for_task.refresh_badge_rules_cache();
-                    });
-                } else {
-                    tracing::debug!(
-                        target: "bifrost_admin::rules",
-                        dirs = ?uncached_dirs,
-                        "active summary skipped group id resolution without active sync session"
-                    );
-                }
-            }
-        }
-    }
 
     for (dir_name, dir_path) in &group_dirs {
         let group_storage = match RulesStorage::with_dir(dir_path.clone()) {
@@ -908,16 +850,116 @@ async fn active_summary(state: SharedAdminState) -> Response<BoxBody> {
     }
 
     let variable_conflicts = build_variable_conflicts(var_map);
-
     let merged_content = content_parts.join("\n");
-
-    let resp = ActiveSummaryResponse {
+    let response = ActiveSummaryResponse {
         total: all_rules.len(),
         rules: all_rules,
         variable_conflicts,
         merged_content,
     };
-    json_response(&resp)
+    (response, uncached_dirs)
+}
+
+async fn active_summary(state: SharedAdminState) -> Response<BoxBody> {
+    if let Some(response) = ensure_default_rule_response(&state) {
+        return response;
+    }
+
+    let snapshot_state = state.clone();
+    let snapshot =
+        run_active_summary_worker(move || build_active_summary_snapshot(&snapshot_state)).await;
+    let (response, uncached_dirs) = match active_summary_worker_result(snapshot) {
+        Ok(snapshot) => snapshot,
+        Err(response) => return *response,
+    };
+
+    if !uncached_dirs.is_empty() {
+        tracing::debug!(
+            target: "bifrost_admin::rules",
+            dirs = ?uncached_dirs,
+            "active summary using local group directory names for uncached groups"
+        );
+        if let Some(sm) = state.sync_manager.clone() {
+            if sm.has_session() {
+                if let Some(generation) = state.try_begin_group_cache_resolution() {
+                    let state_for_task = state.clone();
+                    let dirs_for_task = uncached_dirs.clone();
+                    tokio::spawn(async move {
+                        let resolved =
+                            tokio::time::timeout(GROUP_CACHE_RESOLUTION_TIMEOUT, async {
+                                super::group_rules::resolve_missing_group_caches(
+                                    &sm,
+                                    &state_for_task,
+                                    &dirs_for_task,
+                                )
+                                .await;
+                                let cache = state_for_task.group_name_cache();
+                                dirs_for_task
+                                    .iter()
+                                    .all(|dir| cache.reverse_lookup(dir).is_some())
+                            })
+                            .await;
+                        let all_resolved = match resolved {
+                            Ok(all_resolved) => all_resolved,
+                            Err(_) => {
+                                tracing::warn!(
+                                    target: "bifrost_admin::rules",
+                                    dirs = ?dirs_for_task,
+                                    timeout_ms = GROUP_CACHE_RESOLUTION_TIMEOUT.as_millis(),
+                                    "group cache resolution timed out"
+                                );
+                                false
+                            }
+                        };
+                        if let Some(retry_after) =
+                            state_for_task.finish_group_cache_resolution(generation, all_resolved)
+                        {
+                            tracing::warn!(
+                                target: "bifrost_admin::rules",
+                                dirs = ?dirs_for_task,
+                                generation,
+                                retry_after_ms = retry_after.as_millis(),
+                                "group cache resolution incomplete; retry is backed off"
+                            );
+                        }
+                        state_for_task.refresh_badge_rules_cache_async().await;
+                    });
+                }
+            } else {
+                tracing::debug!(
+                    target: "bifrost_admin::rules",
+                    dirs = ?uncached_dirs,
+                    "active summary skipped group id resolution without active sync session"
+                );
+            }
+        }
+    }
+
+    json_response(&response)
+}
+
+async fn run_active_summary_worker<T, F>(worker: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(worker)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn active_summary_worker_result<T>(result: Result<T, String>) -> Result<T, Box<Response<BoxBody>>> {
+    result.map_err(|error| {
+        tracing::error!(
+            target: "bifrost_admin::rules",
+            error = %error,
+            "active summary snapshot task failed"
+        );
+        Box::new(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to build active rules summary",
+        ))
+    })
 }
 
 fn truncate_preview(value: &str, max_len: usize) -> String {
@@ -1819,6 +1861,18 @@ mod tests {
         assert!(summary
             .merged_content
             .contains("group.example.com statusCode://203"));
+    }
+
+    #[tokio::test]
+    async fn active_summary_worker_maps_panics_to_stable_error_response() {
+        assert_eq!(run_active_summary_worker(|| 42).await.unwrap(), 42);
+        let error = run_active_summary_worker(|| -> usize { panic!("snapshot panic") })
+            .await
+            .unwrap_err();
+        let response = active_summary_worker_result::<usize>(Err(error)).unwrap_err();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = (*response).into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("Failed to build active rules summary"));
     }
 
     #[test]
