@@ -558,7 +558,6 @@ pub(super) async fn wait_final(
                                     tracing::info!(
                                         conversation_id,
                                         text_len,
-                                        required_stable_ms = settle_for.as_millis(),
                                         "chatgpt_web wait_final: backend final candidate observed"
                                     );
                                     backend_ready_candidate = Some(ready_candidate);
@@ -566,7 +565,6 @@ pub(super) async fn wait_final(
                                 Some(candidate) if candidate.signature != signature => {
                                     tracing::info!(
                                         conversation_id,
-                                        required_stable_ms = settle_for.as_millis(),
                                         "chatgpt_web wait_final: backend current branch changed; resetting finality timer"
                                     );
                                     backend_ready_candidate = Some(ready_candidate);
@@ -580,7 +578,6 @@ pub(super) async fn wait_final(
                                             .expect("backend final candidate should exist");
                                         tracing::info!(
                                             conversation_id,
-                                            stable_for_ms = stable_for.as_millis(),
                                             "chatgpt_web wait_final: backend confirmed finished assistant on current branch"
                                         );
                                         return Ok(candidate.waited);
@@ -592,10 +589,6 @@ pub(super) async fn wait_final(
                             backend_ready_candidate = None;
                             tracing::info!(
                                 conversation_id,
-                                current_node = detail
-                                    .get("current_node")
-                                    .and_then(|value| value.as_str())
-                                    .unwrap_or_default(),
                                 "chatgpt_web wait_final: backend current branch is not final yet"
                             );
                         }
@@ -616,15 +609,9 @@ pub(super) async fn wait_final(
 
         if options.require_backend_finality {
             match &dom_outcome {
-                DomExtractOutcome::Ready(waited) => {
+                DomExtractOutcome::Ready(_) => {
                     tracing::info!(
                         conversation_id,
-                        dom_text_len = waited
-                            .final_message
-                            .get("text")
-                            .and_then(|value| value.as_str())
-                            .map(str::len)
-                            .unwrap_or_default(),
                         "chatgpt_web wait_final: DOM looks idle but backend finality is still required"
                     );
                 }
@@ -3609,6 +3596,7 @@ mod tests {
 
         assert_eq!(waited.final_message["text"], final_text);
         assert!(!waited.had_429_or_fallback);
+        assert!(take_test_backend_detail(conversation_id).is_none());
     }
 
     #[tokio::test]
