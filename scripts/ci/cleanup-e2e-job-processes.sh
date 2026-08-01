@@ -13,7 +13,7 @@ if [[ "${GITHUB_ACTIONS:-}" != "true" || -z "$baseline_file" || ! -f "$baseline_
 fi
 
 case "$(uname -s 2>/dev/null)" in
-  Darwin|Linux) ;;
+  Darwin | Linux) ;;
   *) exit 0 ;;
 esac
 

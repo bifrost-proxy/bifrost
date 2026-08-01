@@ -12,9 +12,9 @@ snapshot_e2e_job_processes() {
   local baseline_file="$baseline_dir/bifrost-e2e-process-baseline-${GITHUB_RUN_ID:-local}-${GITHUB_JOB:-shell}-$$.txt"
   local current_uid
   current_uid="$(id -u)"
-  ps -axo uid=,pid= 2>/dev/null \
-    | awk -v uid="$current_uid" '$1 == uid { print $2 }' \
-    >"$baseline_file"
+  ps -axo uid=,pid= 2>/dev/null |
+    awk -v uid="$current_uid" '$1 == uid { print $2 }' \
+      >"$baseline_file"
   export BIFROST_E2E_JOB_PROCESS_BASELINE="$baseline_file"
 }
 
