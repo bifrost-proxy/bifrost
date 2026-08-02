@@ -13,13 +13,15 @@ pattern resBody://{mock-response.json}    # {key} = an embedded block in this ru
 pattern urlParams://t=${now}&id=${randomUUID}
 ```
 
+`reqReplace` and `resReplace` additionally accept a referenced strict JSON object, for example `pattern resReplace://{replaceMap}` where the Value is `{ "old": "new" }`. Legacy `old=new&foo=bar` values remain supported.
+
 Template variables (`${...}`) expand unconditionally inside any value — backticks do not enable template parsing and are not special syntax (they pass through into the output literally). Backticks are only useful to protect a value that contains spaces from the rule-line tokenizer. Note: request-context vars (`${host}`, `${reqHeaders.x}`, …) work, but response-phase vars `${statusCode}` / `${resHeaders.x}` / `${resCookies.x}` and `${realHost}` / `${realPort}` / `${realUrl}` currently expand to an empty string (verified).
 
 ## Categories
 
 - Routing: `host`, `xhost`, `proxy`, `http`, `https`, `ws`, `wss`, `pac` (Proxy Auto-Config via inline scripts, embedded/global Values, local files, or remote URLs).
-- Request modification: `reqHeaders`, `reqCookies`, `urlParams`, `reqBody`, `method`, `auth`.
-- Response modification: `resHeaders`, `resCookies`, `statusCode`, `replaceStatus`, `resBody`, `file`, `tpl`.
+- Request modification: `reqHeaders`, `reqCookies`, `urlParams`, `reqBody`, `reqReplace`, `method`, `auth`.
+- Response modification: `resHeaders`, `resCookies`, `statusCode`, `replaceStatus`, `resBody`, `resReplace`, `file`, `tpl`.
 - Timing and throttling: `reqDelay`, `resDelay`, `reqSpeed`, `resSpeed`.
 - Scripts: `reqScript`, `resScript`, `decode`, `bp`.
 - TLS and upstream behavior: `tlsIntercept`, `tlsPassthrough`, `upstreamUnsafeSsl`.

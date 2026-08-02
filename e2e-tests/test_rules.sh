@@ -691,6 +691,11 @@ build_test_url() {
         local origin="${BASH_REMATCH[1]}"
         local path="${BASH_REMATCH[2]}"
 
+        # A rule pattern may use Whistle-style host wildcards (for example
+        # */api or **/api). Convert only the origin wildcard into a concrete
+        # test host while preserving the path fragment below.
+        origin=$(pattern_to_test_host "$origin")
+
         if [[ -z "$path" ]]; then
             echo "${origin}${default_path}"
             return
@@ -1400,7 +1405,8 @@ test_res_append() {
 test_res_replace() {
     local pattern="$1"
     local replace_pattern="$2"
-    local test_url="https://${pattern}/test"
+    local test_url
+    test_url=$(build_test_url "https" "$pattern")
 
     echo ""
     echo -e "  ${CYAN}【测试】响应体内容替换 (resReplace)${NC}"

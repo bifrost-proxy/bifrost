@@ -94,7 +94,10 @@ id: ${randomUUID}
 ```
 pattern urlReplace://old=new
 pattern urlReplace://(/regex/=replacement)
+pattern urlReplace://{replaceMap}  # replaceMap 可为严格 JSON 对象
 ```
+
+引用的 Value 是严格 JSON 对象时，对象 key 是待替换文本、value 是替换结果；字符串转义和 `/regex/g` key 与 `reqReplace` / `resReplace` 保持一致。传统 `old=new&foo=bar` 格式不变。
 
 ### 基础示例
 

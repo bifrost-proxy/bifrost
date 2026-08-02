@@ -85,7 +85,9 @@ impl WildcardMatcher {
 
         let has_prefix_star = pattern.starts_with('*');
         let has_suffix_star = pattern.ends_with('*');
-        let has_path_wildcard = pattern.contains("/*") || pattern.contains("*/");
+        let has_path_wildcard = pattern
+            .split_once('/')
+            .is_some_and(|(_, path)| path.contains('*'));
 
         let inner_stars = pattern
             .trim_start_matches('*')
@@ -120,6 +122,8 @@ impl WildcardMatcher {
                 format!("^{}{}(?:/.*)?$", scheme, host)
             } else if has_explicit_path && escaped.ends_with('/') {
                 format!("^{}{}.*$", scheme, escaped)
+            } else if has_explicit_path {
+                format!("^{}{}(?:/.*|\\?.*)?$", scheme, escaped)
             } else {
                 format!("^{}{}(/.*)?$", scheme, escaped)
             }
@@ -388,6 +392,66 @@ mod tests {
 
         let result = matcher.matches("http://example.com/other", "example.com", "/other");
         assert!(!result.matched);
+    }
+
+    #[test]
+    fn test_whistle_host_wildcard_with_url_fragment_path() {
+        let matcher = WildcardMatcher::new("*/get_domains/v5").unwrap();
+        assert_eq!(matcher.wildcard_type(), &WildcardType::Prefix);
+
+        assert!(
+            matcher
+                .matches("http://api/get_domains/v5", "api", "/get_domains/v5")
+                .matched
+        );
+        assert!(
+            matcher
+                .matches(
+                    "https://api/get_domains/v5?region=cn",
+                    "api",
+                    "/get_domains/v5?region=cn",
+                )
+                .matched
+        );
+        assert!(
+            matcher
+                .matches(
+                    "http://api/get_domains/v5/detail",
+                    "api",
+                    "/get_domains/v5/detail",
+                )
+                .matched
+        );
+        assert!(
+            !matcher
+                .matches("http://api/get_domains/v50", "api", "/get_domains/v50")
+                .matched
+        );
+        assert!(
+            !matcher
+                .matches(
+                    "http://api.example.com/get_domains/v5",
+                    "api.example.com",
+                    "/get_domains/v5",
+                )
+                .matched
+        );
+    }
+
+    #[test]
+    fn test_whistle_double_star_host_with_url_fragment_path() {
+        let matcher = WildcardMatcher::new("**/get_domains/v5").unwrap();
+        assert_eq!(matcher.wildcard_type(), &WildcardType::Prefix);
+
+        assert!(
+            matcher
+                .matches(
+                    "http://api.example.com/get_domains/v5?region=cn",
+                    "api.example.com",
+                    "/get_domains/v5?region=cn",
+                )
+                .matched
+        );
     }
 
     #[test]

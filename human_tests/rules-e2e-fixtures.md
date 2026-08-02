@@ -477,6 +477,51 @@
 - Windows shard 不能再出现 `forwarded_for.txt` 已通过后长期无进度且内层 runner timeout 也不触发的状态。
 - 本静态验证不启动正式 `9900` 服务、不修改系统代理；完整 Windows runtime 由 PR GitHub Actions `CI` run 验证。
 
+### TC-REF-17：Whistle Values JSON 对象 resReplace 兼容回归
+
+**操作步骤**：
+1. 检查规则夹具保留用户给出的 `noEtag`、`replace` Values 和 `*/get_domains/v5` 组合：
+   ```bash
+   sed -n '1,40p' e2e-tests/rules/response_modify/res_replace_json_object.txt
+   ```
+2. 执行 Body 替换真实代理测试，使用非 `9900` 端口和独立数据目录：
+   ```bash
+   data_dir="$(mktemp -d ./.bifrost-e2e-res-replace-json-human.XXXXXX)"
+   BIFROST_DATA_DIR="$data_dir" \
+   BIFROST_BIN="$PWD/target/release/bifrost" \
+   PROXY_PORT=19082 \
+   ECHO_HTTP_PORT=13082 \
+   VERBOSE=true \
+   bash e2e-tests/tests/test_body_replace.sh
+   test_status=$?
+   rm -rf "$data_dir"
+   test "$test_status" -eq 0
+   ```
+3. 使用通用 Rules fixture runner 执行同一夹具，确认 wildcard pattern 会被转换为合法测试 URL，而不是拼成 curl 无法解析的 `https://*/...`：
+   ```bash
+   data_dir="$(mktemp -d ./.bifrost-e2e-res-replace-json-fixture.XXXXXX)"
+   BIFROST_DATA_DIR="$data_dir" \
+   BIFROST_BIN="$PWD/target/release/bifrost" \
+   PROXY_PORT=19084 \
+   ECHO_HTTP_PORT=13084 \
+   bash e2e-tests/test_rules.sh --use-binary \
+     rules/response_modify/res_replace_json_object.txt
+   test_status=$?
+   rm -rf "$data_dir"
+   test "$test_status" -eq 0
+   ```
+4. 检查输出中的 `BR-12` 两条断言、`BR-13` 的 `reqReplace://{reqReplaceJson}` 请求体断言、`BR-14` 的 `headerReplace://{headerReqReplace}` 请求头断言、通用 fixture 的请求 URL 和两套总结果。
+
+**预期结果**：
+- 对 `http://api/get_domains/v5?region=cn` 的真实代理请求返回 `200`，证明 `*/get_domains/v5` 命中路径本身及 query。
+- 响应体包含 `x.nodoupay.com" "inf.nobaohuaxia.com" "pf.nobaohuaxia.com"`，且不再包含三组旧域名文本。
+- 上游 mock 日志同时收到 `x-tt-tnc-summary: none` 与 `Local-Etag: none`，证明同一行的 `reqHeaders://{noEtag}` 未被兼容改造破坏。
+- `reqReplace://{reqReplaceJson}` 同时完成普通字符串 key 和 `/regex/g` key 替换，请求体变为 `REQ_JSON_NEW item-redacted and item-redacted`。
+- `headerReplace://{headerReqReplace}` 将请求头 `x-trace: prefix-abc-suffix` 改为 `prefix-xyz-suffix`；该 Value 使用 Whistle 的 `req.header:old=new` 文本语法，不与 body replace JSON 映射混用。
+- BR-01 至 BR-11 的传统 `old=new&...`、删除和正则替换回归继续通过；汇总失败数为 `0`、跳过数为 `0`。
+- 通用 Rules fixture runner 请求 `https://test/get_domains/v5`，断言 2/2 通过，不再生成非法的 `https://*/get_domains/v5/test`。
+- 测试不使用正式 `9900` 端口，代理以 `--no-system-proxy` 启动，结束后测试代理和 mock server 均停止。
+
 ## 清理步骤
 
 1. 删除本测试创建的临时数据目录：
@@ -487,9 +532,17 @@
    ```bash
    lsof -nP -iTCP:18880 -sTCP:LISTEN || true
    lsof -nP -iTCP:18881 -sTCP:LISTEN || true
+   lsof -nP -iTCP:19082 -sTCP:LISTEN || true
+   lsof -nP -iTCP:13082 -sTCP:LISTEN || true
    ```
 
 ## 执行记录
+
+- 2026-08-01：通过。根据追加兼容范围补充 BR-13 / BR-14，并立即重跑 TC-REF-17 Body E2E；使用 release 二进制、独立临时数据目录、代理端口 `19087` 和 HTTP echo 端口 `13087`。`reqReplace://{reqReplaceJson}` 的字符串与正则 key 均生效，`headerReplace://{headerReqReplace}` 的 `req.x-trace` 子串替换生效；连同 `reqHeaders://{noEtag}` 与 `resReplace://{replace}` 原始场景共 15 项通过、0 失败、0 跳过。测试结束后代理和 mock server 均停止，临时目录移入系统废纸篓，相关端口无残留监听。
+
+- 2026-08-01：CI 回归补测通过。首次 CI 暴露通用 Rules fixture runner 把 `*/get_domains/v5` 拼成非法 URL `https://*/get_domains/v5/test`，curl exit 3；修复 `build_test_url` 仅将 origin wildcard 具体化后，使用独立数据目录、代理端口 `19084` 和 HTTP echo 端口 `13084` 重新执行 `e2e-tests/test_rules.sh --use-binary rules/response_modify/res_replace_json_object.txt`，实际请求为 `https://test/get_domains/v5`，2/2 断言通过。随后用端口 `19085` / `13085` 复跑 Body E2E，BR-01 至 BR-12 共 13 项继续全部通过；两个临时目录均移入系统废纸篓，相关端口无残留监听。
+
+- 2026-08-01：通过。补充并执行 TC-REF-17；使用 release 二进制、独立临时数据目录、代理端口 `19082` 和 HTTP echo 端口 `13082` 运行 `e2e-tests/tests/test_body_replace.sh`。BR-12 对 `http://api/get_domains/v5?region=cn` 返回 `200`，响应体两处 marker 均完成 `.doupay.com"`、`"inf.baohuaxia.com"`、`"pf.baohuaxia.com"` 三组替换，上游日志同时收到 `x-tt-tnc-summary: none` 与 `Local-Etag: none`；BR-01 至 BR-11 传统字符串、删除和正则替换也全部通过。汇总 13 项通过、0 失败、0 跳过，脚本停止测试代理与 mock server；临时数据目录随后移入系统废纸篓，正式 `9900` 服务与系统代理未触碰。
 
 - 2026-06-15：通过。补充并执行 TC-REF-16；执行 `bash -n e2e-tests/run_all_tests_parallel.sh scripts/run_all_e2e.sh e2e-tests/test_rules.sh` 通过。执行 `rg -n 'wait_for_pid_exit_bounded|watchdog_start|sleep_seconds 1|fixture watchdog cleanup exceeded|if ! is_windows; then' e2e-tests/run_all_tests_parallel.sh` 命中新 helper、短轮询 watchdog、cleanup 超时诊断和 Windows 无界 `wait` 规避；执行 `! rg -n 'sleep "\$fixture_timeout" &' e2e-tests/run_all_tests_parallel.sh` 通过，确认不再创建长时间后台 sleep watchdog；执行 `rg -n 'if result_has_status "\$rf"; then|清理超过 5s|kill_process_tree "\$\{pids\[\$i\]\}"|kill_pid_force "\$\{pids\[\$i\]\}"' e2e-tests/run_all_tests_parallel.sh` 命中 result-file 优先回收与有界 cleanup 强杀逻辑。完整 Windows shard runtime 由推送后的 GitHub Actions `CI` run 验证。
 

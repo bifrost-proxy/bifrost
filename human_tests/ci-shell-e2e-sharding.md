@@ -1104,6 +1104,67 @@
 - 四个 shell suite 全部通过，最终汇总 `Total suites : 4 / Passed : 4 / Failed : 0`。
 - 测试使用动态非 9900 端口和临时数据目录，不修改真实安装、真实 `~/.bifrost` 或系统代理。
 
+### TC-CS-53: macOS suite 超时回收进程树与日志 FIFO 回归
+
+**背景**：PR #438 的 `E2E Shell (aarch64-apple-darwin, proxy-core)` 连续两次在外层 60 分钟预算处被取消，本地同 capability shard 能在正常预算内完成。旧 `run_and_capture` 在 macOS 上只终止测试父 PID，忽略 TERM 的后代仍可持有日志 FIFO，随后 `wait "$stream_pid"` 没有上限，导致 suite watchdog 已触发但 job 永远不能生成 final report。
+
+**操作步骤**：
+1. 检查 runner、共享进程 helper 和专项回归脚本语法：
+   ```bash
+   bash -n scripts/run_all_e2e.sh e2e-tests/test_utils/process.sh e2e-tests/tests/test_e2e_runner_timeout_cleanup.sh
+   ```
+2. 执行真实父子进程 + FIFO 超时清理回归：
+   ```bash
+   bash e2e-tests/tests/test_e2e_runner_timeout_cleanup.sh
+   ```
+3. 执行 CI/E2E coverage contract：
+   ```bash
+   bash e2e-tests/tests/test_coverage_pipeline_contract.sh
+   ```
+4. 使用 CI 同一 runner 入口执行超时清理回归和历史 fixture 用例：
+   ```bash
+   BIFROST_BIN="$PWD/target/release/bifrost" \
+   BIFROST_E2E_SHELL_TESTS='test_e2e_runner_timeout_cleanup.sh,test_total_size_cleanup_admin_api.sh' \
+   BIFROST_E2E_SHELL_JOBS=2 BIFROST_E2E_SHELL_TEST_TIMEOUT=600 BIFROST_E2E_SUITE_TIMEOUT=600 \
+     bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build
+   ```
+
+**预期结果**：
+- 语法检查和 coverage contract 退出码均为 0。
+- 专项回归通过真实 `run_and_capture` 创建一个忽略 TERM 的父 shell、后台子进程和共享 FIFO；内层 1 秒 watchdog 触发后，`terminate_process_tree` 在 30 秒测试门槛内回收父子进程，stream 有界退出，失败摘要明确为 `timed out after 1s`，外层专项脚本输出 `E2E runner timeout cleanup: PASS`。
+- workflow 同时设置 `BIFROST_E2E_SHELL_TEST_TIMEOUT=600` 与 `BIFROST_E2E_SUITE_TIMEOUT=600`，串行/并行用例统一先于 60 分钟 job budget 失败；failed/cancelled 均尝试 dump/upload 日志。
+- Windows stream 收尾必须同时保留 process-tree `taskkill` 与 shell builtin `kill "$stream_pid"` fallback；MSYS PID 无法映射为 Windows PID 时，业务命令完成后也不能卡在日志 `tail` 的 `wait`。
+- CI runner 入口汇总两个 suite 全部通过；测试只使用临时目录和动态非 9900 端口，不修改真实服务或系统代理。
+
+### TC-CS-54: macOS CLI lifecycle 用例隔离 Desktop ownership 与真实 9900 回归
+
+**背景**：完整 proxy-core 本地复跑时，开发机真实 9900 Service 仍在运行，当前 Codex 会话还继承了 Desktop core ownership 环境。旧 shutdown-marker 用例在停止动态端口 fixture 后执行默认 `bifrost status`，会自动发现 9900 并误判 fixture 仍运行；interactive restart 继承 `BIFROST_DESKTOP_CORE=1` 后会把临时前台代理标成 app-bound core，并按保护策略拒绝 stop/restart。这两个 lifecycle 用例同时含可脱离测试 shell 的进程，不应进入普通并行 lane。
+
+**操作步骤**：
+1. 执行两个脚本与调度器语法检查：
+   ```bash
+   bash -n scripts/run_all_e2e.sh e2e-tests/tests/test_cli_start_interactive_restart_e2e.sh e2e-tests/tests/test_stop_restart_shutdown_marker.sh
+   ```
+2. 确认两个脚本登记在 `ISOLATED_AFTER_TESTS` 和预计墙钟串行分类：
+   ```bash
+   rg -n 'ISOLATED_AFTER_TESTS|test_cli_start_interactive_restart_e2e\.sh|test_stop_restart_shutdown_marker\.sh|shell_test_runs_serial_in_parallel_shell_job' scripts/run_all_e2e.sh
+   ```
+3. 保持真实 9900 Service 不变，通过 CI 同一 runner 入口执行两个 lifecycle 用例：
+   ```bash
+   BIFROST_BIN="$PWD/target/release/bifrost" \
+   BIFROST_UI_TEST_RUNNER_PORT=18080 \
+   BIFROST_E2E_SHELL_TESTS='test_cli_start_interactive_restart_e2e.sh,test_stop_restart_shutdown_marker.sh' \
+   BIFROST_E2E_SHELL_JOBS=2 BIFROST_E2E_SUITE_TIMEOUT=600 \
+     bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build
+   ```
+
+**预期结果**：
+- 语法检查通过，runner 输出 `Running 2 lock-sensitive shell tests serially`。
+- interactive restart 显式清除从 Desktop/Codex 会话继承的 `BIFROST_DESKTOP_CORE` 与 startup session，避免把临时前台代理标成 app-bound core；三组 y / `-y` / n 行为断言通过。
+- shutdown-marker 的 stop 后 status 显式使用当前动态 `PROXY_PORT`，输出 `Status: Stopped`，不自动发现真实 9900 Service；fake system proxy restart handoff 仍通过。
+- shutdown-marker 在每次 stop 后对本测试 runtime PID 做有界退出确认，超时只回收该精确 PID；lifecycle helper 允许延迟启动并按自身 2 秒父进程轮询退出，15 秒稳定观察后不能遗留动态端口 daemon/helper。
+- 两个 suite 全部通过并执行 sandbox-scoped cleanup；15 秒稳定观察后的进程审计不出现新增的 worktree release daemon/helper；不停止、不重启、不修改真实 9900 Service 或真实系统代理。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -1147,6 +1208,8 @@
 | TC-CS-50 | 通过 | 2026-07-08 本轮执行：GitHub Actions `CI` run `28925523375` 的 `E2E Shell (Linux)` 失败套件为 `shell:test_cli_offline_commands_e2e.sh`，失败原因为 `CLI 快速开始缺少场景化说明: 场景 12：和 Agent 协作开发业务 Skill`。复核 `docs/cli-quick-start.md` 后确认新增 IM Gateway 快速开始后，`场景 12` 已变为 `添加飞书或微信 IM 通道`，Agent Skill 场景顺延为 `场景 13`，因此修复为同步 E2E 文档断言，并新增 IM provider 关键文案断言。执行 `bash -n e2e-tests/tests/test_cli_offline_commands_e2e.sh` 通过；执行 `rg -n '场景 12：添加飞书或微信 IM 通道|场景 13：和 Agent 协作开发业务 Skill|bifrost im provider add feishu-main --type feishu --runner traex|Feishu 会在终端显示授权 URL 和二维码' e2e-tests/tests/test_cli_offline_commands_e2e.sh docs/cli-quick-start.md` 均命中；随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_cli_offline_commands_e2e.sh`，确认 CLI offline help 与 quick-start 文档同步回归通过。该回归不启动 Bifrost，不使用 9900，不修改系统代理。 |
 | TC-CS-51 | 通过 | 2026-07-08 本轮执行：GitHub Actions main push `CI` run `28931733950` 的 `Windows Unit Tests (x86_64)` 失败，失败测试为 `schedule_agent_adapter_config_overrides_runner_without_dropping_command`，日志显示 `timeout after 10000ms`，`TaskRunStatus` 实际为 `Timeout`。第一版修复后 PR `CI` run `28933280470` 确认 timeout 消失，但 Windows `cmd.exe echo` 输出转义 JSON，导致 `agent_final_response` 为原始 JSON 字符串而不是 `OVERRIDE_OK`。第二版修复改为 PowerShell 不读取 stdin，直接用 `[char]34` 拼接合法 JSON 行。本机执行 `cargo test -p bifrost-admin schedule_agent_adapter_config_overrides_runner_without_dropping_command -- --nocapture` 多次通过，测试输出 `1 passed; 0 failed`。Windows 真实 job 由推送后的 GitHub Actions `CI` run 继续验证。该本地回归不启动 Bifrost，不使用 9900，不修改系统代理。 |
 | TC-CS-52 | 通过 | 2026-07-18 本轮执行：`bash -n` 对调度器和四个 fixture 脚本检查通过；`rg` 确认 `STARTUP_SENSITIVE_TESTS` 与 `is_startup_sensitive` 实际调度分支包含 body-cache、process-resolution、super-performance、upgrade TLS 四个脚本。随后以 `BIFROST_BIN=target/release/bifrost`、`BIFROST_E2E_SHELL_JOBS=2` 和 `BIFROST_E2E_SHELL_TESTS=<四脚本>` 运行 CI 同入口，调度器明确输出 `Running 4 lock-sensitive shell tests serially`；upgrade TLS 3/3、body-cache 2/2、super-performance 8/8、process-resolution 真实代理链路均通过，最终 `Total suites : 4 / Passed : 4 / Failed : 0`。`bash e2e-tests/tests/test_coverage_pipeline_contract.sh` 通过 24 个 coverage helper 测试、capability contract 和 3-shard balance 门禁（9.7% <= 15%）。全程使用动态非 9900 端口与临时 sandbox，未修改真实服务、真实安装或系统代理。 |
+| TC-CS-53 | 通过 | 2026-08-01 本轮执行：`bash -n` 检查 runner、process helper 与专项脚本通过；`bash e2e-tests/tests/test_e2e_runner_timeout_cleanup.sh` 通过真实嵌套 runner 触发 1 秒 watchdog，父 shell 与后台子进程均忽略 TERM 并共享日志 FIFO，最终输出 `reason: timed out after 1s` 与 `E2E runner timeout cleanup: PASS (6s)`，父子进程和 stream 均在门槛内回收。`bash e2e-tests/tests/test_coverage_pipeline_contract.sh` 通过 32 个 helper 单测、265 个 shell 语法检查、capability contract 与 3-shard balance（6.4% <= 15%）。CI 同入口 focused timeout cleanup + total-size 两项通过；最终以 600 秒内层预算完整复跑 macOS proxy-core capability，`Total suites: 80 / Passed: 80 / Failed: 0`，约 7 分钟结束，无 watchdog 误杀或 FIFO 卡住；全程未使用/修改真实 9900 与系统代理。 |
+| TC-CS-54 | 通过 | 2026-08-01 本轮执行：语法与串行登记检查通过；首次 focused runner 复现确认 shutdown-marker 修复后 14/14 通过，同时 interactive restart 日志定位到父会话继承 `BIFROST_DESKTOP_CORE=1`，导致临时前台进程被标成 app-bound core。清除 Desktop ownership 环境后再次通过 CI 同入口串行执行，interactive restart 9/9（y / `-y` / n）与 shutdown-marker 14/14 均通过，汇总 `Total suites: 2 / Passed: 2 / Failed: 0`，耗时 5s/4s。随后单独复跑 shutdown-marker 14/14，并对运行前后 worktree release daemon/helper 进程集合进行 15 秒稳定观察，结果无新增残留。动态端口为 15209/17150；真实 9900 Service 保持运行且未被 stop/restart，fake system proxy 断言通过，未修改真实系统代理。 |
 
 ## 清理步骤
 
