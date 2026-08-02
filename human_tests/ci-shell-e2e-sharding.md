@@ -1273,6 +1273,8 @@
 | TC-CS-54 | 通过 | 2026-08-01 本轮执行：语法与串行登记检查通过；首次 focused runner 复现确认 shutdown-marker 修复后 14/14 通过，同时 interactive restart 日志定位到父会话继承 `BIFROST_DESKTOP_CORE=1`，导致临时前台进程被标成 app-bound core。清除 Desktop ownership 环境后再次通过 CI 同入口串行执行，interactive restart 9/9（y / `-y` / n）与 shutdown-marker 14/14 均通过，汇总 `Total suites: 2 / Passed: 2 / Failed: 0`，耗时 5s/4s。随后单独复跑 shutdown-marker 14/14，并对运行前后 worktree release daemon/helper 进程集合进行 15 秒稳定观察，结果无新增残留。动态端口为 15209/17150；真实 9900 Service 保持运行且未被 stop/restart，fake system proxy 断言通过，未修改真实系统代理。 |
 | TC-CS-55 | 通过 | 2026-08-01 本轮执行：`bash -n` 覆盖调度器、进程 helper、CI shell 入口和 tracked cleanup 脚本并通过；静态检查确认并行 test trap、串行 test 尾部和顶层 EXIT trap 均在删除 sandbox 前调用 ownership-scoped `kill_bifrost_in_data_root`，CI shell EXIT 另按同 UID PID 基线有界回收 job-owned 残留。首次指定不存在的 release binary 时前置失败，改用已构建 debug binary 后，进程隔离用例 10/10、umbrella serial lane 1/1、parallel lane 1/1 均通过且无 worktree binary 残留；首次真实 CI 入口复测发现 macOS Bash 3.2 空数组 `set -u` 兼容问题，修复后同入口再次 1/1 通过并输出 `[CLEANUP] no tracked E2E child processes remain`。临时 PID 基线探针确认新增 `sleep` 被终止、基线内 protected `sleep` 保持存活。CI contract 与 ShellCheck error 门禁同步通过。全程使用动态非 9900 端口和临时目录，未修改真实服务、真实安装或系统代理。 |
 
+- 2026-08-02：PR #437 rebase 到 `origin/main@485a4c05` 时保留主干的 600 秒 suite watchdog、递归 process-tree/FIFO 回收与 Windows stream fallback，删除已被主干取代的 90 分钟 timeout 提交；将本分支的 detached-process 回归从冲突编号 `TC-CS-53` 顺延为 `TC-CS-55`。rebase 后 `bash e2e-tests/tests/test_coverage_pipeline_contract.sh` 通过 267 个 shell 语法检查、32 个 helper 单测、capability contract 与 shard balance；当前 debug binary 下进程隔离用例 10/10、umbrella serial lane 1/1 通过，正式 9900 服务未被使用或终止。
+
 ## 清理步骤
 
 - 删除测试中创建的临时目录（如 `/tmp/bifrost-large-body-human.*`）。

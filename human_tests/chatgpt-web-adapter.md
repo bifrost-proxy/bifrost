@@ -938,6 +938,8 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 - 2026-05-20：执行 TC-CWA-22 通过。代码级命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin chatgpt_web::tests::composer_text_injection --lib` 通过 2 项，确认 120 字符以内走 `Input.insertText`、121 字符及以上走 paste，并按字符数而非字节数判断中文。默认目录真实 ASR Daily Agent live E2E 使用当前源码服务 `18896` 触发 `runner=web`，日志显示 `injected composer text via paste path`、`expectedLength=767`、`pasteDispatched=true`、`pasteDefaultPrevented=true`、`ok=true`，随后成功点击发送、捕获 `f/conversation`、等待 ChatGPT 最终输出并写入 `/Users/eden/.bifrost/asr/data/text/159f0fa758334ab1b3f1191c7921b322/daily/report/2026-05-20-report.md`；报告包含 `ASR Daily Agent Live Runner Result`、`runner validation passed` 和 marker `ASR_LIVE_RUNNER_web_1779212771614`。同一 live E2E 还验证 IM send 使用 `mode=full_report`，outbound `sentPreview` 以 `# ASR Daily Agent Live Runner Result` 开头，确认发送的是报告原文而不是任务摘要。
 - 2026-05-20：执行 TC-CWA-23 通过。默认目录任务 `76612de33e9740bc92440ce64a98a4cb` 使用 `runner=web` 强制运行后生成四个 ChatGPT Web run：`1779216503662-*`、`1779216632038-*`、`1779216764881-*`、`1779216872746-*`。四个 prompt 分别只包含 `2026-05-14.md`、`2026-05-15.md`、`2026-05-16.md`、`2026-05-17.md`，大小约 217KB、262KB、267KB、149KB；四个 `result.json.status=succeeded`，没有复现 CDP 输入卡死，也没有把正文变成 ChatGPT paste attachment；最终写入四个 report。代码级 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin 'chatgpt_web::' --lib` 55 项通过。
 
+- 2026-08-02：PR #437 rebase 到 `origin/main@485a4c05` 后复跑 TC-CWA-37 的确定性链路。`bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh` 通过 shared profile、fresh tab 复用、profile pool 隔离、`current_node` 分支选择、后端 finality 稳定窗口、暂时性错误有界重试与永久错误 fail-closed 等用例；全程使用测试构建与隔离路径，没有再次向真实 GPT conversation 发送 Prompt，也没有重启正式 9900 服务。
+
 ## 清理步骤
 
 1. 停止测试 Bifrost 服务。
