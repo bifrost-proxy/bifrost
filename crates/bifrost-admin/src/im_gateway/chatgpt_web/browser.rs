@@ -258,8 +258,14 @@ pub(super) fn register_conversation_tab(
         });
     }
 
-    // New entry — check pool size and evict LRU if full.
-    let evicted = if pool.len() >= CONVERSATION_TAB_POOL_SIZE {
+    // New entry — enforce the capacity independently per browser profile.
+    // A busy runner profile must not evict or reduce capacity for another
+    // runner that happens to share this process.
+    let profile_entry_count = pool
+        .iter()
+        .filter(|entry| entry.key().0 == profile_dir)
+        .count();
+    let evicted = if profile_entry_count >= CONVERSATION_TAB_POOL_SIZE {
         evict_lru_for_profile(profile_dir)
     } else {
         None
@@ -915,11 +921,12 @@ pub(super) fn page_url_matches_conversation(
 #[cfg(test)]
 mod tests {
     use super::{
-        browser_process_candidate_from_line, browser_process_pid_from_line, conversation_tabs,
-        get_conversation_tab, page_url_matches_conversation, recovered_browser_mode_matches,
-        register_conversation_tab, select_reusable_chatgpt_page,
-        take_or_attach_reusable_chatgpt_tab, take_reusable_conversation_tab, BrowserSession,
-        CdpClient, CdpPage, CONVERSATION_TAB_POOL_SIZE,
+        browser_process_candidate_from_line, browser_process_pid_from_line,
+        clear_conversation_tabs_for_profile, conversation_tabs, get_conversation_tab,
+        page_url_matches_conversation, recovered_browser_mode_matches, register_conversation_tab,
+        select_reusable_chatgpt_page, take_or_attach_reusable_chatgpt_tab,
+        take_reusable_conversation_tab, BrowserSession, CdpClient, CdpPage,
+        CONVERSATION_TAB_POOL_SIZE,
     };
     use dashmap::DashMap;
     use futures_util::{SinkExt, StreamExt};
@@ -956,7 +963,7 @@ mod tests {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
-            .expect("conversation tab test lock poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[test]
@@ -1085,8 +1092,8 @@ mod tests {
     #[test]
     fn conversation_tab_register_and_get_roundtrip() {
         let _guard = conversation_tabs_test_lock();
-        conversation_tabs().clear();
         let profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-roundtrip");
+        clear_conversation_tabs_for_profile(&profile);
         let (_closed, cdp) = dummy_cdp_client();
 
         let evicted = register_conversation_tab(&profile, "c1", "t1".to_string(), cdp.clone());
@@ -1100,8 +1107,8 @@ mod tests {
     #[test]
     fn fresh_conversation_takes_most_recent_tab_without_closing_it() {
         let _guard = conversation_tabs_test_lock();
-        conversation_tabs().clear();
         let profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-fresh-reuse");
+        clear_conversation_tabs_for_profile(&profile);
         let (first_closed, first_cdp) = dummy_cdp_client();
         let (second_closed, second_cdp) = dummy_cdp_client();
 
@@ -1121,9 +1128,10 @@ mod tests {
     #[test]
     fn fresh_conversation_reuse_skips_other_profiles_and_closed_tabs() {
         let _guard = conversation_tabs_test_lock();
-        conversation_tabs().clear();
         let profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-fresh-filter");
         let other_profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-fresh-other");
+        clear_conversation_tabs_for_profile(&profile);
+        clear_conversation_tabs_for_profile(&other_profile);
         let (live_closed, live_cdp) = dummy_cdp_client();
         let (closed, closed_cdp) = dummy_cdp_client();
         let (_other_closed, other_cdp) = dummy_cdp_client();
@@ -1149,6 +1157,7 @@ mod tests {
     #[tokio::test]
     async fn fresh_conversation_reuse_helper_returns_pooled_tab_without_browser_io() {
         let profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-fresh-helper");
+        clear_conversation_tabs_for_profile(&profile);
         let (_closed, cdp) = dummy_cdp_client();
         register_conversation_tab(&profile, "c1", "t1".to_string(), cdp.clone());
         let browser = BrowserSession {
@@ -1302,8 +1311,8 @@ mod tests {
     #[test]
     fn conversation_tab_lru_eviction_for_profile() {
         let _guard = conversation_tabs_test_lock();
-        conversation_tabs().clear();
         let profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-lru");
+        clear_conversation_tabs_for_profile(&profile);
         let (_closed, cdp) = dummy_cdp_client();
 
         for i in 0..CONVERSATION_TAB_POOL_SIZE {
@@ -1329,10 +1338,36 @@ mod tests {
     }
 
     #[test]
+    fn conversation_tab_pool_capacity_is_scoped_per_profile() {
+        let _guard = conversation_tabs_test_lock();
+        let profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-capacity-primary");
+        let other_profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-capacity-other");
+        clear_conversation_tabs_for_profile(&profile);
+        clear_conversation_tabs_for_profile(&other_profile);
+        let (_closed, cdp) = dummy_cdp_client();
+
+        for i in 0..CONVERSATION_TAB_POOL_SIZE {
+            assert!(register_conversation_tab(
+                &other_profile,
+                &format!("other-{i}"),
+                format!("other-target-{i}"),
+                cdp.clone(),
+            )
+            .is_none());
+        }
+
+        assert!(
+            register_conversation_tab(&profile, "primary", "primary-target".to_string(), cdp,)
+                .is_none()
+        );
+        assert!(get_conversation_tab(&profile, "primary").is_some());
+    }
+
+    #[test]
     fn get_conversation_tab_removes_closed_entries() {
         let _guard = conversation_tabs_test_lock();
-        conversation_tabs().clear();
         let profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-closed");
+        clear_conversation_tabs_for_profile(&profile);
         let (closed, cdp) = dummy_cdp_client();
 
         register_conversation_tab(&profile, "c1", "t1".to_string(), cdp);

@@ -1987,7 +1987,7 @@ fn try_waited_final_from_sse_builds_waited_final_for_finished_assistant() {
         .expect("waited final from sse");
     assert_eq!(
         waited.final_message.get("text").and_then(Value::as_str),
-        Some("thinking\n\nfinal answer")
+        Some("final answer")
     );
     assert_eq!(
         waited.all_texts,

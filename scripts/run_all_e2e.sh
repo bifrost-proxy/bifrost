@@ -1367,14 +1367,6 @@ run_shell_tests_parallel() {
 
 run_shell_test_isolated() {
   local script_name="$1"
-  local cleanup_after=0
-  local isolated_test
-  for isolated_test in "${ISOLATED_AFTER_TESTS[@]}"; do
-    if [[ "$script_name" == "$isolated_test" ]]; then
-      cleanup_after=1
-      break
-    fi
-  done
 
   # Allocate a small contiguous span and derive service ports from it.
   local base
@@ -1428,12 +1420,12 @@ run_shell_test_isolated() {
       SKIP_BUILD=true \
     bash "$E2E_DIR/tests/$script_name" || test_status=$?
 
-  if [[ "$cleanup_after" -eq 1 ]]; then
-    # The directory and its ownership marker are local to this function, so
-    # cleanup cannot accidentally target another checkout or the live service.
-    echo "[CLEANUP] post ${script_name}: killing sandbox-owned bifrost processes"
-    kill_bifrost_in_data_root "$shell_data_dir" 2>/dev/null || true
-  fi
+  # Every shell test receives a uniquely marked data root. Clean detached
+  # Bifrost children for all tests, not only the known isolation-sensitive
+  # list: otherwise a successful script can leave the hosted runner stuck in
+  # GitHub's Complete job phase while it tries to reap an escaped daemon.
+  echo "[CLEANUP] post ${script_name}: killing sandbox-owned bifrost processes"
+  kill_bifrost_in_data_root "$shell_data_dir" 2>/dev/null || true
 
   return "$test_status"
 }
@@ -1471,7 +1463,7 @@ run_shell_batch_parallel() {
       (
         shell_data_dir="$(mktemp -d "$E2E_SANDBOX_DIR/shell-${log_slug}-XXXXXX")"
         mark_e2e_data_root "$shell_data_dir"
-        trap 'kill $(jobs -p) 2>/dev/null || true; rm -rf "$shell_data_dir" 2>/dev/null || true' EXIT
+        trap 'kill $(jobs -p) 2>/dev/null || true; kill_bifrost_in_data_root "$shell_data_dir" 2>/dev/null || true; rm -rf "$shell_data_dir" 2>/dev/null || true' EXIT
         if command -v setsid >/dev/null 2>&1; then
           setsid -w env \
             BIFROST_BIN="${BIFROST_BIN:-$ROOT_DIR/target/release/bifrost}" \
@@ -1636,6 +1628,14 @@ e2e_cleanup() {
   set +e
   # Best-effort cleanup: background jobs + sandbox dir.
   kill $(jobs -p) 2>/dev/null || true
+
+  # Per-test cleanup is the primary guard. Repeat the ownership-scoped scan at
+  # the umbrella boundary so an interrupted test cannot leak a detached daemon
+  # into the GitHub runner's post-job process cleanup.
+  if declare -F kill_bifrost_in_data_root >/dev/null 2>&1 \
+    && [[ -n "${E2E_SANDBOX_DIR:-}" ]]; then
+    kill_bifrost_in_data_root "$E2E_SANDBOX_DIR" 2>/dev/null || true
+  fi
 
   if [[ "${E2E_SANDBOX_AUTO:-false}" == "true" ]] && [[ -n "${E2E_SANDBOX_DIR:-}" ]]; then
     rm -rf "$E2E_SANDBOX_DIR" 2>/dev/null || true

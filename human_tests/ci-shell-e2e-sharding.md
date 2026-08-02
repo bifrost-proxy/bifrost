@@ -1164,6 +1164,67 @@
 - shutdown-marker 的 stop 后 status 显式使用当前动态 `PROXY_PORT`，输出 `Status: Stopped`，不自动发现真实 9900 Service；fake system proxy restart handoff 仍通过。
 - shutdown-marker 在每次 stop 后对本测试 runtime PID 做有界退出确认，超时只回收该精确 PID；lifecycle helper 允许延迟启动并按自身 2 秒父进程轮询退出，15 秒稳定观察后不能遗留动态端口 daemon/helper。
 - 两个 suite 全部通过并执行 sandbox-scoped cleanup；15 秒稳定观察后的进程审计不出现新增的 worktree release daemon/helper；不停止、不重启、不修改真实 9900 Service 或真实系统代理。
+### TC-CS-55: shell E2E 成功后不遗留 detached Bifrost 进程
+
+**背景**：GitHub Actions run `30686796066` 与 `30690498324` 的 macOS `proxy-core` 都在全部业务测试和 action post steps 成功后长时间停留于 `Complete job`。调度器原先只对少量 `ISOLATED_AFTER_TESTS` 调用 sandbox 进程回收；并行 test trap 甚至先删除带 ownership marker 的目录，使 escaped daemon 无法再被安全定位。
+
+**操作步骤**：
+1. 检查调度器与进程 helper 语法：
+   ```bash
+   bash -n scripts/run_all_e2e.sh e2e-tests/test_utils/process.sh
+   ```
+2. 确认并行、串行和顶层 EXIT 三层都在删除 sandbox 前调用 ownership-scoped cleanup：
+   ```bash
+   rg -n 'kill_bifrost_in_data_root "\$shell_data_dir"|kill_bifrost_in_data_root "\$E2E_SANDBOX_DIR"|rm -rf "\$shell_data_dir"' scripts/run_all_e2e.sh
+   ```
+3. 使用预构建 debug binary 执行现有的真实进程隔离回归：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_e2e_process_cleanup_isolation.sh
+   ```
+4. 执行 CI contract：
+   ```bash
+   bash e2e-tests/tests/test_coverage_pipeline_contract.sh
+   ```
+5. 用 CI umbrella runner 复跑同一隔离用例并检查残留：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+   BIFROST_E2E_SHELL_TESTS='test_e2e_process_cleanup_isolation.sh' \
+   BIFROST_E2E_SHELL_JOBS=2 \
+     bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build
+   ps -axo pid=,command= | rg "$PWD/target/(debug|release)/bifrost" || true
+   ```
+6. 通过 parallel lane 运行一个真实 admin API 用例并再次检查残留：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+   BIFROST_E2E_SHELL_TESTS='test_values_admin_api.sh' \
+   BIFROST_E2E_SHELL_JOBS=2 \
+     bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build
+   ps -axo pid=,command= | rg "$PWD/target/(debug|release)/bifrost" || true
+   ```
+7. 用临时 PID 基线验证 GitHub job 进程回收只终止基线后新增的同 UID 子进程：
+   ```bash
+   sleep 300 & protected_pid=$!
+   baseline_file="$(mktemp /tmp/bifrost-e2e-process-baseline.XXXXXX)"
+   ps -axo uid=,pid= | awk -v uid="$(id -u)" '$1 == uid { print $2 }' >"$baseline_file"
+   sleep 300 & tracked_pid=$!
+   GITHUB_ACTIONS=true BIFROST_E2E_JOB_PROCESS_BASELINE="$baseline_file" \
+     bash scripts/ci/cleanup-e2e-job-processes.sh
+   wait "$tracked_pid" 2>/dev/null || true
+   ! ps -p "$tracked_pid" -o state= 2>/dev/null | rg -qv '^\s*Z'
+   kill -0 "$protected_pid" 2>/dev/null
+   kill "$protected_pid"
+   ```
+
+**预期结果**：
+- 语法检查与 contract 均退出 0。
+- 静态检查显示并行和串行 test 都先回收自己的 marked sandbox，顶层 EXIT 再对本次总 sandbox 做兜底扫描。
+- 真实隔离回归停止 sandbox-owned Bifrost，同时保持 sandbox 外的受保护 Bifrost 健康且配置 hash 不变。
+- umbrella runner 输出 `[CLEANUP] post test_e2e_process_cleanup_isolation.sh`、汇总 `1/1` 通过，命令结束后没有该 worktree binary 的残留进程。
+- parallel lane 输出 `Running 1 safe shell tests in parallel` 与 `test_values_admin_api.sh` PASS，退出后同样没有该 worktree binary 的残留进程。
+- tracked cleanup 在 5 秒有界预算内终止 PID 基线后新增的 sleep，同时不终止已存在于基线的 protected sleep；非 GitHub 环境或缺少基线时 no-op。
+- 推送后的 macOS `proxy-core` 业务测试、post-action 与 `Complete job` 全部成功；不再依赖 job timeout 取消残留进程。
+- 全程不使用或终止 9900，不修改真实 `~/.bifrost`、真实安装或系统代理。
 
 ## 本轮执行记录
 
@@ -1210,6 +1271,9 @@
 | TC-CS-52 | 通过 | 2026-07-18 本轮执行：`bash -n` 对调度器和四个 fixture 脚本检查通过；`rg` 确认 `STARTUP_SENSITIVE_TESTS` 与 `is_startup_sensitive` 实际调度分支包含 body-cache、process-resolution、super-performance、upgrade TLS 四个脚本。随后以 `BIFROST_BIN=target/release/bifrost`、`BIFROST_E2E_SHELL_JOBS=2` 和 `BIFROST_E2E_SHELL_TESTS=<四脚本>` 运行 CI 同入口，调度器明确输出 `Running 4 lock-sensitive shell tests serially`；upgrade TLS 3/3、body-cache 2/2、super-performance 8/8、process-resolution 真实代理链路均通过，最终 `Total suites : 4 / Passed : 4 / Failed : 0`。`bash e2e-tests/tests/test_coverage_pipeline_contract.sh` 通过 24 个 coverage helper 测试、capability contract 和 3-shard balance 门禁（9.7% <= 15%）。全程使用动态非 9900 端口与临时 sandbox，未修改真实服务、真实安装或系统代理。 |
 | TC-CS-53 | 通过 | 2026-08-01 本轮执行：`bash -n` 检查 runner、process helper 与专项脚本通过；`bash e2e-tests/tests/test_e2e_runner_timeout_cleanup.sh` 通过真实嵌套 runner 触发 1 秒 watchdog，父 shell 与后台子进程均忽略 TERM 并共享日志 FIFO，最终输出 `reason: timed out after 1s` 与 `E2E runner timeout cleanup: PASS (6s)`，父子进程和 stream 均在门槛内回收。`bash e2e-tests/tests/test_coverage_pipeline_contract.sh` 通过 32 个 helper 单测、265 个 shell 语法检查、capability contract 与 3-shard balance（6.4% <= 15%）。CI 同入口 focused timeout cleanup + total-size 两项通过；最终以 600 秒内层预算完整复跑 macOS proxy-core capability，`Total suites: 80 / Passed: 80 / Failed: 0`，约 7 分钟结束，无 watchdog 误杀或 FIFO 卡住；全程未使用/修改真实 9900 与系统代理。 |
 | TC-CS-54 | 通过 | 2026-08-01 本轮执行：语法与串行登记检查通过；首次 focused runner 复现确认 shutdown-marker 修复后 14/14 通过，同时 interactive restart 日志定位到父会话继承 `BIFROST_DESKTOP_CORE=1`，导致临时前台进程被标成 app-bound core。清除 Desktop ownership 环境后再次通过 CI 同入口串行执行，interactive restart 9/9（y / `-y` / n）与 shutdown-marker 14/14 均通过，汇总 `Total suites: 2 / Passed: 2 / Failed: 0`，耗时 5s/4s。随后单独复跑 shutdown-marker 14/14，并对运行前后 worktree release daemon/helper 进程集合进行 15 秒稳定观察，结果无新增残留。动态端口为 15209/17150；真实 9900 Service 保持运行且未被 stop/restart，fake system proxy 断言通过，未修改真实系统代理。 |
+| TC-CS-55 | 通过 | 2026-08-01 本轮执行：`bash -n` 覆盖调度器、进程 helper、CI shell 入口和 tracked cleanup 脚本并通过；静态检查确认并行 test trap、串行 test 尾部和顶层 EXIT trap 均在删除 sandbox 前调用 ownership-scoped `kill_bifrost_in_data_root`，CI shell EXIT 另按同 UID PID 基线有界回收 job-owned 残留。首次指定不存在的 release binary 时前置失败，改用已构建 debug binary 后，进程隔离用例 10/10、umbrella serial lane 1/1、parallel lane 1/1 均通过且无 worktree binary 残留；首次真实 CI 入口复测发现 macOS Bash 3.2 空数组 `set -u` 兼容问题，修复后同入口再次 1/1 通过并输出 `[CLEANUP] no tracked E2E child processes remain`。临时 PID 基线探针确认新增 `sleep` 被终止、基线内 protected `sleep` 保持存活。CI contract 与 ShellCheck error 门禁同步通过。全程使用动态非 9900 端口和临时目录，未修改真实服务、真实安装或系统代理。 |
+
+- 2026-08-02：PR #437 rebase 到 `origin/main@485a4c05` 时保留主干的 600 秒 suite watchdog、递归 process-tree/FIFO 回收与 Windows stream fallback，删除已被主干取代的 90 分钟 timeout 提交；将本分支的 detached-process 回归从冲突编号 `TC-CS-53` 顺延为 `TC-CS-55`。rebase 后 `bash e2e-tests/tests/test_coverage_pipeline_contract.sh` 通过 267 个 shell 语法检查、32 个 helper 单测、capability contract 与 shard balance；当前 debug binary 下进程隔离用例 10/10、umbrella serial lane 1/1 通过，正式 9900 服务未被使用或终止。
 
 ## 清理步骤
 

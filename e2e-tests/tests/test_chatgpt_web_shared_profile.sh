@@ -14,6 +14,14 @@ grep -q "stop_button_visible" crates/bifrost-admin/src/im_gateway/chatgpt_web/in
 grep -q "assistant_message_not_committed" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
 grep -q "provisionalAssistantShell" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
 grep -q "hasGeneratedImageAfterLastUser" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
+grep -q "require_backend_finality" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
+grep -q "try_waited_final_from_conversation_detail" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
+grep -q "backend confirmed finished assistant on current branch" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
+if grep -q "DOM-only mode (no API polling)" \
+  crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs; then
+  echo "ChatGPT Web final wait must not regress to DOM-only finality" >&2
+  exit 1
+fi
 grep -q "conversation_busy" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
 grep -q "conversation_busy_if_stop_button_visible" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
 grep -q "diagnostic_has_visible_stop_button" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
@@ -67,6 +75,10 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   --lib -- --nocapture
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  conversation_tab_pool_capacity_is_scoped_per_profile \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   reuse_fresh_tab_installs_pooled_target_and_skips_existing_selection \
   --lib -- --nocapture
 
@@ -97,6 +109,18 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   wait_final_resets_settle_for_equal_length_content_replacement \
   --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  conversation_detail_ \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  backend_finality_polling_ \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  wait_final_backend_ \
+  --lib -- --nocapture --test-threads=1
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   is_retryable_send_error_matches_known_prefixes \

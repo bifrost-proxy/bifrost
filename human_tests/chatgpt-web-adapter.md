@@ -353,7 +353,7 @@
 
 新版改为：
 
-- 按 `(profile_dir, conversation_id)` 维护 `ConversationTab` 长驻池，容量 `CONVERSATION_TAB_POOL_SIZE = 16`；
+- 按 `(profile_dir, conversation_id)` 维护 `ConversationTab` 长驻池；`CONVERSATION_TAB_POOL_SIZE = 16` 是每个 `profile_dir` 的独立容量，其他 runner/profile 不占用当前 profile 配额，也不能触发它的 LRU 淘汰；
 - 入口若命中池子直接复用 CDP 与 target_id，跳过 navigate；不命中再走 `create_tab_with_cdp_retry`；
 - 若服务重启导致内存池为空，但受控浏览器仍有同一个 `/c/{conversation_id}` 标签页，发送前先通过 `/json/list` 扫描现有 targets，命中后 attach CDP、重新注册入池并复用该 tab，避免重复打开相同 conversation；
 - 新建会话不再关闭所有 ChatGPT 页面再创建 `about:blank` tab；优先取出最近使用的 live `ConversationTab`，池为空时 attach 浏览器中已存在的 ChatGPT target，并在同一个 target 上切换到纯首页。只有浏览器中确实没有任何 ChatGPT target 时才创建 fallback tab；
@@ -448,9 +448,12 @@
 
 ```bash
 cargo test -p bifrost-admin --lib chatgpt_web -- --nocapture
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  cargo test -p bifrost-admin --lib im_gateway::chatgpt_web::browser::tests -- --nocapture
+done
 ```
 
-**预期结果**：22 项均通过；clippy 全 workspace 零警告：
+**预期结果**：ChatGPT Web 全部用例通过；浏览器池用例连续并行执行 10 轮均通过，`conversation_tab_pool_capacity_is_scoped_per_profile` 证明另一 profile 已满时当前 profile 的首个 tab 不会被提前淘汰；clippy 全 workspace 零警告：
 
 ```bash
 cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
@@ -872,7 +875,37 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 - 只有浏览器中确实没有 ChatGPT target 时才允许创建 fallback tab；失败或未解析出 conversation id 时，复用的 tab 仍保持打开。
 - 续接已有 conversation 仍使用 `/c/{conversation_id}`；新建会话仍通过无 `conversation_id` 的首次发送创建，保持共享 profile 与 handoff 语义。
 
+### TC-CWA-37：回归 - Daily Report 只能采用会话后端确认完成的最终节点
+
+**前置条件**：当前源码已构建；正式 9900 服务保持运行且不重启；使用独立临时数据目录和端口启动当前源码服务，runner 的 `browser.profileDir` 与 `auth.statePath` 显式指向已登录的共享 ChatGPT Web profile；准备包含历史完整日报与后续 continuation 的真实 conversation id。
+
+**操作步骤**：
+1. 执行定向单元测试，覆盖当前分支仍有 `in_progress` 节点、完成节点、旁支节点、旁支图片和自适应稳定窗口：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin conversation_detail_ --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin backend_finality_polling_ --lib -- --nocapture
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin wait_final_backend_ --lib -- --nocapture --test-threads=1
+   ```
+2. 在隔离端口通过 Chat Gateway `operation=get` 读取真实 conversation，不发送新 Prompt；检查消息列表中完整日报节点的 `status`、`endTurn`、标题、章节和长度。
+3. 对同一 conversation 执行 `operation=wait`；记录耗时、返回节点和隔离服务日志，确认日志包含 `require_backend_finality=true` 与 `backend confirmed finished assistant on current branch`。
+4. 从 `get` 结果中选择最新一条以 `# 2026-07-31 日报` 开头、同时包含 `## 今日概览` 与 `## 证据与不确定性`、且 `status=finished_successfully/endTurn=true` 的 assistant 消息；校验后只恢复缺失的 `2026-07-31-report.md`，不得修改原始 `2026-07-31.md`。
+5. 执行 ChatGPT Web E2E 哨兵：
+   ```bash
+   bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh
+   ```
+
+**预期结果**：
+- DOM 的 stop button、composer 和临时 assistant 文本只作为进度遥测，不能单独触发成功返回。
+- 当前分支存在 `in_progress` assistant 时继续等待；只有最新当前分支 assistant 同时为 `finished_successfully` 和 `end_turn=true`，并通过内容稳定窗口后才返回。
+- `stream_handoff` 缺失完整 SSE final 时会轮询 conversation detail；暂时性 429/5xx 或 DOM 空闲不会降级接受 1 字节、7 字节、planning 或截断正文。
+- `response` 只包含当前分支最后一条最终 assistant；较早 planning 只保留在 `all_texts`，旁支文字和图片不会串入结果。
+- 历史 conversation 的完整日报可从已完成节点恢复，源 Markdown 的哈希与修改时间保持不变，不需要再次调用 GPT runner。
+
 ## 真实执行记录
+
+- 2026-08-01：补充执行 TC-CWA-19-06 通过。第三轮 CI 的 Windows 全量单测暴露共享 `ConversationTab` 池并行竞态：其他 profile 的测试清空全局池后，`fresh_conversation_reuse_helper_returns_pooled_tab_without_browser_io` 错误回退到 `127.0.0.1:1/json/list`。修复为测试只清理自己的 profile，并将生产池容量从错误的全局 `pool.len()` 改为按 `profile_dir` 独立计数。新增 `conversation_tab_pool_capacity_is_scoped_per_profile`，在另一 profile 已占满 16 个 tab 时确认当前 profile 的首个 tab 不会被提前淘汰；浏览器池 14 项并行单测连续执行 10 轮全部通过，`clippy --all-targets --all-features -D warnings` 与 `bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh` 通过。本轮 CI 的 macOS proxy-core shard 连续两次出现无关的 `test_total_size_cleanup_admin_api.sh` mock readiness 失败，artifact 均显示脚本报 30 秒超时后 Python 才写出 `READY`，且两次都是其余 79/80 用例通过；将该用例改为可配置的 90 秒窗口并增加真实 `/health` 探测后，单独真实复跑通过。
+
+- 2026-08-01：执行 TC-CWA-37 通过。当前源码以 `SKIP_FRONTEND_BUILD=1` 构建，在临时数据目录 `/tmp/bifrost-chatgpt-finality.EoIX3K`、隔离端口 `19910` 启动，显式复用已登录共享 profile；正式 `9900` 服务保持 PID `80969`，未重启。对真实 conversation `6a6cc469-f9b4-83ec-a7e4-4b0b73f03bc3` 执行只读 `get`（run `1785549290288-c670e6e3-ec75-42f5-a0ef-a25bf01af475`），确认存在 14549 和 18594 字符两条完整 `# 2026-07-31 日报`，均为 `finished_successfully/endTurn=true`；执行 `wait`（run `1785549341665-e0ebd72e-6e89-46cd-9d4f-aa33d30fc8a7`）约 6 秒后返回当前分支最终 continuation 1218 字符，日志包含 `require_backend_finality=true`、候选稳定窗口和 `backend confirmed finished assistant on current branch`，证明没有采用 DOM-only 完成判定。定向单测 `conversation_detail_` 7 项、`backend_finality_polling_` 1 项，以及直接执行后端候选稳定/暂时性错误超时/永久错误失败分支的 `wait_final_backend_` 3 项通过；`bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh` 通过。随后从较新的 18594 字符完整节点恢复缺失文件 `2026-07-31-report.md`，落盘 44695 字节、SHA-256 为 `fb01a5294ed6e08397353f15dae888d4c8f27c66e24fe4ed59228981a4bec2bd`；原始 `2026-07-31.md` 的 SHA-256 `6cc6060d4b8251f038b943da1eda5b6d646a948a389d6473907457d56b098d1d` 和 mtime `1785505692` 前后不变，未再次发送 Prompt。 第二轮 review 发现显式 `wait` 的 `all_texts` 会回放最后一个 user 之前的历史消息；修复为自动限定到最后一个 user turn 后，以新构建再次执行真实 `wait`（run `1785549893241-7feca529-b3a6-482a-a24e-08450517303d`），结果仍为当前节点 1218 字符，NDJSON 仅 3 行、1 条 `assistant_final`，总大小从第一轮约 3.1 MB 降为 431999 字节，未重复投递旧日报或旧 planning。Windows full-suite CI 随后暴露 after-ASR mock 在 5 秒固定等待内未被调度；回归等待改为 30 秒（高于 mock runner 的 10 秒自身 timeout），并在 report 生成后继续确认 `DAILY_AGENT_RUNNING_TASKS` marker 已释放，避免 temp workspace 在后台 bookkeeping 完成前被删除；原 report 非空断言保持不变。首次定向命令因缺少 `web/node_modules` 在 build.rs 前置失败，改用 `SKIP_FRONTEND_BUILD=1` 后去掉误用的 `--exact`，确认实际 `running 1 test` 且连续 10/10 通过，每次约 0.24–0.27 秒。
 
 - 2026-07-24：执行 TC-CWA-35 通过。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin new_conversation_url_ --lib -- --nocapture` 通过 2 项，确认默认首页精确为 `https://chatgpt.com/`，自定义 `baseUrl` 的多个尾部 `/` 会规范化为单个 `/`；`conversation_page_match_treats_homepage_as_expected_for_fresh_run` 通过，确认 fresh run 复用的 target 已在首页时直接使用，不再导航同一个首页或产生无意义 refresh；`fresh_conversation_takes_most_recent_tab_without_closing_it` 与 `fresh_runs_reuse_existing_chatgpt_tab_without_closing_or_reopening` 通过，确认新 session 从池中取出最近使用的 live target、移除旧 conversation key，但不关闭 CDP 或 browser target；`reusable_chatgpt_page_prefers_homepage_and_requires_origin_boundary` 通过，确认进程内池为空时只选择正确 ChatGPT origin 且优先选择无需导航的首页 target。`bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh` 源码与测试哨兵全部通过；`rg` 负向检查确认生产代码无 `bifrost_new_chat` 和 `close_chatgpt_pages_for_fresh_run`。真实外部 ChatGPT run 本轮不执行，避免依赖账号、网络和主动改变用户当前共享浏览器会话；URL 生成、同 target 重绑、target 选择、生产调用点、共享 profile 和既有发送/等待链路由单元测试与 E2E 哨兵完成确定性回归。尚未用真实 headed 浏览器连续两个新 session 观察 target id，保留为安装后可选的用户感知复核项。
 - 2026-07-15：按用户要求追加执行 TC-CWA-34 正式 9900 服务验证。先用任务 API 将正在运行的 ASR 任务 `735775510b384fff8903d9c6fc54f1a3` 安全暂停，安装当前 `target/debug/bifrost` 到 `~/.local/bin/bifrost`（安装前后 SHA-256 与构建产物一致），重启正式服务为 PID `61485` 后恢复 ASR；恢复后进度重新进入 `running`，未把后台任务遗留为 paused。随后在正式端口执行 runner `gpt` 新会话，prompt 为“晚上好，给我整理下今日要闻”，并要求联网检索、按国内/国际/科技 AI/财经四板块输出完整结果。正式 run `1784046993864-e65176e7-a1a2-4cf9-9359-fe5b60c88b98`、conversation `6a56659f-9ad4-83ec-a437-39fdc87efe01` 命中 `eventTypes=["patch","resume_conversation_token","stream_handoff","browser_ui"]`；运行约 31 秒时仍保持 running，没有复现旧版的 planning 提前返回。最终 `durationMs=187949`、`status=succeeded`，`conversation_final.json.source=dom_fallback_outcome`、正式 `turnId=3f7270ef-4719-4313-a6d0-c02b356d00c6`，`result.response` 为 13277 个字符 / 19731 字节，`last_message.md` 同为 19731 字节并包含“国内、国际、科技／AI、财经、今日最重要的三条主线”全部章节。
@@ -904,6 +937,8 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 - 2026-05-19：执行 TC-CWA-19-05 服务重启后复用已有 conversation tab 通过。测试 session 为 `cli-chatgpt-tab-reuse-restart-20260519`。第一轮命令通过 9900 发送 `请只回复 TAB_REUSE_FIRST_OK，不要解释。`，run id `1779124077160-9e8739f3-3cb2-4846-847b-01cf6395624d`，返回 `TAB_REUSE_FIRST_OK`，conversationId 为 `6a0b4778-3224-83ec-8086-bdfcbd525047`。第一轮结束后 CDP `/json/list` 中该 conversation 的 tab 数为 `count=1`，target id 为 `58CB389DB8D5665FB1D017B8E8412025`。随后执行 `./target/debug/bifrost -p 9900 stop` 停止服务，再用 `./target/debug/bifrost start -p 9900 --no-system-proxy --daemon` 重启服务，PID `21351`，System Proxy 保持 disabled；重启后、第二轮发送前，CDP `/json/list` 中同一 conversation 仍为 `count=1` 且 target id 仍为 `58CB389DB8D5665FB1D017B8E8412025`。第二轮同 session 发送 `请只回复 TAB_REUSE_SECOND_OK，不要解释。`，run id `1779124121796-044389de-d24b-4933-975c-38111f3d2f50`，返回 `TAB_REUSE_SECOND_OK`，conversationId 仍为 `6a0b4778-3224-83ec-8086-bdfcbd525047`。第二轮结束后 CDP `/json/list` 中该 conversation 仍为 `count=1`，target id 仍为 `58CB389DB8D5665FB1D017B8E8412025`，确认服务重启后复用原有 conversation tab，没有新开重复 tab。
 - 2026-05-20：执行 TC-CWA-22 通过。代码级命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin chatgpt_web::tests::composer_text_injection --lib` 通过 2 项，确认 120 字符以内走 `Input.insertText`、121 字符及以上走 paste，并按字符数而非字节数判断中文。默认目录真实 ASR Daily Agent live E2E 使用当前源码服务 `18896` 触发 `runner=web`，日志显示 `injected composer text via paste path`、`expectedLength=767`、`pasteDispatched=true`、`pasteDefaultPrevented=true`、`ok=true`，随后成功点击发送、捕获 `f/conversation`、等待 ChatGPT 最终输出并写入 `/Users/eden/.bifrost/asr/data/text/159f0fa758334ab1b3f1191c7921b322/daily/report/2026-05-20-report.md`；报告包含 `ASR Daily Agent Live Runner Result`、`runner validation passed` 和 marker `ASR_LIVE_RUNNER_web_1779212771614`。同一 live E2E 还验证 IM send 使用 `mode=full_report`，outbound `sentPreview` 以 `# ASR Daily Agent Live Runner Result` 开头，确认发送的是报告原文而不是任务摘要。
 - 2026-05-20：执行 TC-CWA-23 通过。默认目录任务 `76612de33e9740bc92440ce64a98a4cb` 使用 `runner=web` 强制运行后生成四个 ChatGPT Web run：`1779216503662-*`、`1779216632038-*`、`1779216764881-*`、`1779216872746-*`。四个 prompt 分别只包含 `2026-05-14.md`、`2026-05-15.md`、`2026-05-16.md`、`2026-05-17.md`，大小约 217KB、262KB、267KB、149KB；四个 `result.json.status=succeeded`，没有复现 CDP 输入卡死，也没有把正文变成 ChatGPT paste attachment；最终写入四个 report。代码级 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin 'chatgpt_web::' --lib` 55 项通过。
+
+- 2026-08-02：PR #437 rebase 到 `origin/main@485a4c05` 后复跑 TC-CWA-37 的确定性链路。`bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh` 通过 shared profile、fresh tab 复用、profile pool 隔离、`current_node` 分支选择、后端 finality 稳定窗口、暂时性错误有界重试与永久错误 fail-closed 等用例；全程使用测试构建与隔离路径，没有再次向真实 GPT conversation 发送 Prompt，也没有重启正式 9900 服务。
 
 ## 清理步骤
 

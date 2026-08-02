@@ -30,23 +30,31 @@ MOCK_LOG="$(mktemp)"
 python3 -u "$SCRIPT_DIR/../mock_servers/http_echo_server.py" --port "$HTTP_PORT" --retries 5 >"$MOCK_LOG" 2>&1 &
 server_pid=$!
 
-waited=0
+MOCK_READY_TIMEOUT_SECONDS="${MOCK_READY_TIMEOUT_SECONDS:-90}"
+mock_ready_deadline=$((SECONDS + MOCK_READY_TIMEOUT_SECONDS))
 mock_ready=0
-while [ $waited -lt 60 ]; do
+while [ "$SECONDS" -lt "$mock_ready_deadline" ]; do
   if grep -q "READY" "$MOCK_LOG" 2>/dev/null; then
-    mock_ready=1
-    break
+    ready_port="$HTTP_PORT"
+    bound_line=$(grep -o "bound to [0-9]*" "$MOCK_LOG" 2>/dev/null | head -1 || true)
+    if [[ -n "$bound_line" ]]; then
+      ready_port="${bound_line##*bound to }"
+    fi
+    if env NO_PROXY="*" no_proxy="*" curl -fsS --connect-timeout 1 --max-time 3 \
+      "http://127.0.0.1:${ready_port}/health" >/dev/null 2>&1; then
+      mock_ready=1
+      break
+    fi
   fi
   if ! kill -0 "$server_pid" 2>/dev/null; then
     echo "ERROR: Mock server process exited unexpectedly" >&2
     cat "$MOCK_LOG" >&2
     exit 1
   fi
-  sleep 0.5
-  waited=$((waited + 1))
+  sleep 0.25
 done
 if [ "$mock_ready" -eq 0 ]; then
-  echo "ERROR: Mock server on port $HTTP_PORT not ready after 30s" >&2
+  echo "ERROR: Mock server on port $HTTP_PORT not ready after ${MOCK_READY_TIMEOUT_SECONDS}s" >&2
   cat "$MOCK_LOG" >&2
   exit 1
 fi
