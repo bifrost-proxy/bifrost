@@ -260,22 +260,22 @@ pub enum Commands {
         no_intercept: bool,
         #[arg(
             long,
-            help = "Domains to exclude from TLS interception (comma-separated, supports wildcards like *.example.com). Has higher priority than global switch."
+            help = "Domains to exclude from TLS interception (comma-separated, supports wildcards like *.example.com). Lower priority than rules; higher priority than domain force-intercept and all app/IP/global policies."
         )]
         intercept_exclude: Option<String>,
         #[arg(
             long,
-            help = "Domains to force TLS interception (comma-separated, supports wildcards). Has highest priority, works even when interception is disabled."
+            help = "Domains to force TLS interception (comma-separated, supports wildcards). Lower priority than rules and domain passthrough; higher priority than app/IP/global policies."
         )]
         intercept_include: Option<String>,
         #[arg(
             long,
-            help = "Applications to exclude from TLS interception (comma-separated, supports wildcards like *Safari). Traffic from these apps will not be intercepted."
+            help = "Applications to exclude from TLS interception (comma-separated, supports wildcards like *Safari). Lower priority than rules/domain; higher priority than app force-intercept and IP/global policies."
         )]
         app_intercept_exclude: Option<String>,
         #[arg(
             long,
-            help = "Applications to force TLS interception (comma-separated, supports wildcards). Traffic from these apps will always be intercepted."
+            help = "Applications to force TLS interception (comma-separated, supports wildcards). Lower priority than rules, domain policies, and app passthrough; higher priority than IP/global policies."
         )]
         app_intercept_include: Option<String>,
         #[arg(

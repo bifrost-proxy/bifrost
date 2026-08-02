@@ -16,6 +16,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
+| [tls-interception-priority.md](./tls-interception-priority.md) | TLS 解包优先级 | 4 | `Rules > Domain > App > Client IP > Global` 决策顺序、同层 Passthrough 优先、Domain Passthrough 覆盖 App Force Intercept、真实 HTTPS CONNECT 不解包且不注入 Badge，以及 Settings 浅色/暗色主题提示 |
 | [default-tls-app-whitelist.md](./default-tls-app-whitelist.md) | 默认 TLS 应用白名单 | 3 | 持久化配置默认值、代理运行时默认值和真实临时服务 Admin API 返回值均只包含常见浏览器模式，默认不包含 Codex |
 | [cli-start-stop-status.md](./cli-start-stop-status.md) | CLI 服务管理 | 36 | start/stop/status 命令，含守护进程、自定义端口、TLS 选项、规则加载、SOCKS5、LAN 访问、代理认证、status 顶部代理能力/TLS 边界概览、默认端口规则摘要分区、status 活跃规则摘要、status TUI Remote Invoke 远程调用状态面板，以及 listener 失败退出、daemon readiness、daemon readiness timeout、daemon CA 检查、daemon stop zombie 状态回归、stop 前置清理系统代理与 restart 保留系统代理回归、Remote Invoke 历史 JSONL 按需分页且不阻塞代理监听回归、macOS daemon exec child 避免 fork 后 ObjC 崩溃与 stop 后 tray helper 残留回归、Windows `start -d` detached child 回归、runtime marker 缺失时 status Admin API fallback 与 start 不重启回归 |
 | [status-json.md](./status-json.md) | CLI status JSON 输出 | 4 | `bifrost status --format json|json-pretty` schema v1 输出，覆盖 running 全字段、`runtime_source` 状态证据来源、stopped 字段降级、admin API 部分失败 errors 记录、默认 text 输出向后兼容回归 |

@@ -191,9 +191,9 @@ bifrost start --enable-badge-injection
 | `--intercept` | 启用全局 TLS 抓包；不要作为默认启动参数，优先使用域名/应用白名单或规则级 `tlsIntercept://` |
 | `--no-intercept` | 禁用 TLS 拦截 |
 | `--intercept-exclude <DOMAINS>` | TLS 拦截排除域名 |
-| `--intercept-include <DOMAINS>` | TLS 拦截白名单（最高优先级，即使全局关闭也生效） |
+| `--intercept-include <DOMAINS>` | TLS 拦截域名白名单（低于规则、高于应用和客户端 IP；全局关闭时仍生效） |
 | `--app-intercept-exclude <APPS>` | TLS 拦截排除应用（进程名通配） |
-| `--app-intercept-include <APPS>` | TLS 拦截应用白名单（最高优先级） |
+| `--app-intercept-include <APPS>` | TLS 拦截应用白名单（低于规则和域名、高于客户端 IP） |
 | `--unsafe-ssl` | 跳过上游证书校验，仅用于证书异常诊断或隔离测试；普通 HTTPS 调试应让启动流程自动处理 CA 并保持证书校验 |
 | `--enable-badge-injection` | 强制启用 HTML 页面注入 Bifrost 小圆点（会持久化到配置） |
 | `--disable-badge-injection` | 禁用 HTML 页面注入 Bifrost 小圆点（会持久化到配置） |

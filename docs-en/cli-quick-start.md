@@ -60,7 +60,7 @@ bifrost rule active
 bifrost rule add https-path -c "api.example.com/v1/users tlsIntercept:// host://127.0.0.1:3000"
 ```
 
-TLS interception priority: rule-level `tlsIntercept://` or `tlsPassthrough://`, include lists, exclude lists, then global `--intercept` / `--no-intercept`.
+TLS interception priority is `Rules > Domain > App > Client IP > Global`. Within each scope, passthrough takes priority over force intercept. For example, a domain in `--intercept-exclude` remains a CONNECT tunnel even when its browser matches `--app-intercept-include`.
 
 ## Inspect Traffic
 

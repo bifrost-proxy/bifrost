@@ -422,10 +422,11 @@ function TlsInterceptionPatternsCard({
       <Text
         type="secondary"
         style={{ display: "block", marginBottom: 16, fontSize: 12 }}
+        data-testid="settings-tls-priority"
       >
         Configure TLS interception behavior by domain, application, or IP.
-        Priority: Rules &gt; App Include &gt; App Exclude &gt; Domain Include
-        &gt; Domain Exclude &gt; IP Include &gt; IP Exclude &gt; Global.
+        Priority: Rules &gt; Domain &gt; App &gt; Client IP &gt; Global. Within
+        each scope, Passthrough takes priority over Force Intercept.
       </Text>
 
       <Divider titlePlacement="left" style={{ margin: "0 0 16px 0" }}>
