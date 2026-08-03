@@ -5,26 +5,19 @@ struct RunningSourceCompressionGuard {
 struct RemoveFileOnDrop(PathBuf);
 
 #[cfg(test)]
-#[derive(Clone, Copy)]
-enum TestCompressionFfmpegMode {
-    LosslessSmaller,
-    NoSpaceSaving,
-    PcmMismatch,
-}
+static TEST_COMPRESSION_FFMPEG_PATH: Lazy<StdMutex<Option<PathBuf>>> =
+    Lazy::new(|| StdMutex::new(None));
 
 #[cfg(test)]
-thread_local! {
-    static TEST_COMPRESSION_FFMPEG_MODE: std::cell::Cell<Option<TestCompressionFfmpegMode>> =
-        const { std::cell::Cell::new(None) };
-}
-
-#[cfg(test)]
-struct TestCompressionFfmpegGuard(Option<TestCompressionFfmpegMode>);
+struct TestCompressionFfmpegGuard(Option<PathBuf>);
 
 #[cfg(test)]
 impl TestCompressionFfmpegGuard {
-    fn set(mode: TestCompressionFfmpegMode) -> Self {
-        let previous = TEST_COMPRESSION_FFMPEG_MODE.replace(Some(mode));
+    fn set(path: PathBuf) -> Self {
+        let previous = TEST_COMPRESSION_FFMPEG_PATH
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .replace(path);
         Self(previous)
     }
 }
@@ -32,7 +25,9 @@ impl TestCompressionFfmpegGuard {
 #[cfg(test)]
 impl Drop for TestCompressionFfmpegGuard {
     fn drop(&mut self) {
-        TEST_COMPRESSION_FFMPEG_MODE.set(self.0);
+        *TEST_COMPRESSION_FFMPEG_PATH
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.0.take();
     }
 }
 
@@ -436,21 +431,7 @@ fn encode_source_to_flac(
     part_path: &Path,
     media_duration_ms: Option<u64>,
 ) -> Result<(), String> {
-    #[cfg(test)]
-    if let Some(mode) = TEST_COMPRESSION_FFMPEG_MODE.get() {
-        return match mode {
-            TestCompressionFfmpegMode::LosslessSmaller
-            | TestCompressionFfmpegMode::PcmMismatch => {
-                std::fs::write(part_path, b"fLaC")
-                    .map_err(|error| format!("write fake compressed output: {error}"))
-            }
-            TestCompressionFfmpegMode::NoSpaceSaving => std::fs::copy(source, part_path)
-                .map(|_| ())
-                .map_err(|error| format!("write fake no-saving output: {error}")),
-        };
-    }
-
-    let mut encode = std::process::Command::new("ffmpeg");
+    let mut encode = source_compression_ffmpeg_command();
     encode
         .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"])
         .arg(source)
@@ -480,22 +461,7 @@ fn encode_source_to_flac(
 }
 
 fn decoded_pcm_sha256(path: &Path, media_duration_ms: Option<u64>) -> Result<String, String> {
-    #[cfg(test)]
-    if let Some(mode) = TEST_COMPRESSION_FFMPEG_MODE.get() {
-        let mismatched_part = matches!(mode, TestCompressionFfmpegMode::PcmMismatch)
-            && path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(".bifrost-compress.part"));
-        return Ok(if mismatched_part {
-            "test-pcm-sha256-mismatch"
-        } else {
-            "test-pcm-sha256"
-        }
-        .to_string());
-    }
-
-    let mut command = std::process::Command::new("ffmpeg");
+    let mut command = source_compression_ffmpeg_command();
     command
         .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
         .arg(path)
@@ -526,6 +492,18 @@ fn decoded_pcm_sha256(path: &Path, media_duration_ms: Option<u64>) -> Result<Str
         .strip_prefix("SHA256=")
         .map(str::to_ascii_lowercase)
         .ok_or_else(|| "ffmpeg did not return a SHA-256 PCM hash".to_string())
+}
+
+fn source_compression_ffmpeg_command() -> std::process::Command {
+    #[cfg(test)]
+    if let Some(path) = TEST_COMPRESSION_FFMPEG_PATH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+    {
+        return std::process::Command::new(path);
+    }
+    std::process::Command::new("ffmpeg")
 }
 
 fn run_process_with_timeout(
