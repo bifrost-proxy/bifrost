@@ -154,6 +154,16 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
                 .trim_end_matches('/');
             get_task_watch_response(id)
         }
+        (&Method::GET, _)
+            if path.starts_with("/api/asr/tasks/")
+                && path.ends_with("/compress-source-audio") =>
+        {
+            let id = path
+                .trim_start_matches("/api/asr/tasks/")
+                .trim_end_matches("/compress-source-audio")
+                .trim_end_matches('/');
+            get_source_compression_response(id)
+        }
         (&Method::GET, _) if path.starts_with("/api/asr/tasks/") => {
             let Some(id) = path
                 .strip_prefix("/api/asr/tasks/")
@@ -162,6 +172,16 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
                 return error_response(StatusCode::NOT_FOUND, "ASR task endpoint not found");
             };
             get_task_response(id)
+        }
+        (&Method::DELETE, _)
+            if path.starts_with("/api/asr/tasks/")
+                && path.ends_with("/compress-source-audio") =>
+        {
+            let id = path
+                .trim_start_matches("/api/asr/tasks/")
+                .trim_end_matches("/compress-source-audio")
+                .trim_end_matches('/');
+            cancel_source_compression_response(id)
         }
         (&Method::DELETE, _) if path.starts_with("/api/asr/tasks/") => {
             let Some(id) = path
@@ -180,6 +200,16 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
                 .trim_end_matches("/cleanup-source-audio")
                 .trim_end_matches('/');
             cleanup_task_source_audio_response(id)
+        }
+        (&Method::POST, _)
+            if path.starts_with("/api/asr/tasks/")
+                && path.ends_with("/compress-source-audio") =>
+        {
+            let id = path
+                .trim_start_matches("/api/asr/tasks/")
+                .trim_end_matches("/compress-source-audio")
+                .trim_end_matches('/');
+            start_source_compression_response(id)
         }
         (&Method::POST, _) if path.starts_with("/api/asr/tasks/") && path.ends_with("/run") => {
             let id = path
@@ -433,6 +463,9 @@ fn update_task_config(
     id: &str,
     update: UpdateTaskRequest,
 ) -> Result<AsrDirectoryTask, (StatusCode, String)> {
+    let _lifecycle = SOURCE_AUDIO_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let requeue_existing_files = update.requeue_existing_files.unwrap_or(true);
     let running = RUNNING_TASKS.lock().unwrap().contains(id);
     let high_risk = update.audio_dir.is_some()
@@ -445,10 +478,10 @@ fn update_task_config(
         || update.diarization.is_some()
         || update.external_devices.is_some()
         || update.import_policy.is_some();
-    if running && high_risk {
+    if (running || source_compression_is_running(id)) && high_risk {
         return Err((
             StatusCode::CONFLICT,
-            "task_running: pause or wait for the ASR task before changing data source, model, runtime, or external import configuration".to_string(),
+            "task_running: wait for ASR transcription or source compression before changing data source, model, runtime, or external import configuration".to_string(),
         ));
     }
     let mut store = load_tasks();
@@ -897,12 +930,18 @@ fn get_task_file_source_response(
 }
 
 fn delete_task_response(id: &str, query: Option<&str>) -> Response<BoxBody> {
+    let _lifecycle = SOURCE_AUDIO_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut store = load_tasks();
     let Some(index) = store.tasks.iter().position(|task| task.id == id) else {
         return error_response(StatusCode::NOT_FOUND, "ASR task not found");
     };
     if RUNNING_TASKS.lock().unwrap().contains(id) {
         return error_response(StatusCode::CONFLICT, "task_running");
+    }
+    if source_compression_is_running(id) {
+        return error_response(StatusCode::CONFLICT, "source_compression_running");
     }
     let confirm_name = query
         .and_then(|query| {
@@ -924,6 +963,9 @@ fn delete_task_response(id: &str, query: Option<&str>) -> Response<BoxBody> {
 }
 
 fn cleanup_task_source_audio_response(id: &str) -> Response<BoxBody> {
+    let _lifecycle = SOURCE_AUDIO_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(task) = find_task(id) else {
         return error_response(StatusCode::NOT_FOUND, "ASR task not found");
     };
@@ -932,6 +974,15 @@ fn cleanup_task_source_audio_response(id: &str) -> Response<BoxBody> {
             StatusCode::CONFLICT,
             &serde_json::json!({
                 "message": "ASR task is running; pause or wait for it to finish before cleaning source audio",
+                "running": true,
+            }),
+        );
+    }
+    if source_compression_is_running(id) {
+        return json_response_with_status(
+            StatusCode::CONFLICT,
+            &serde_json::json!({
+                "message": "Source-audio compression is running; wait for it to finish before cleaning source audio",
                 "running": true,
             }),
         );
@@ -952,6 +1003,45 @@ fn cleanup_task_source_audio_response(id: &str) -> Response<BoxBody> {
     json_response(&cleanup_task_source_audio(&task))
 }
 
+fn get_source_compression_response(id: &str) -> Response<BoxBody> {
+    if find_task(id).is_none() {
+        return error_response(StatusCode::NOT_FOUND, "ASR task not found");
+    }
+    json_response(&serde_json::json!({
+        "compression": normalized_source_compression_state(id),
+    }))
+}
+
+fn start_source_compression_response(id: &str) -> Response<BoxBody> {
+    let Some(task) = find_task(id) else {
+        return error_response(StatusCode::NOT_FOUND, "ASR task not found");
+    };
+    match start_source_compression_background(task) {
+        Ok(state) => json_response_with_status(
+            if matches!(state.status, SourceAudioCompressionStatus::Completed) {
+                StatusCode::OK
+            } else {
+                StatusCode::ACCEPTED
+            },
+            &serde_json::json!({ "compression": state }),
+        ),
+        Err(message) => json_response_with_status(
+            StatusCode::CONFLICT,
+            &serde_json::json!({ "message": message }),
+        ),
+    }
+}
+
+fn cancel_source_compression_response(id: &str) -> Response<BoxBody> {
+    if find_task(id).is_none() {
+        return error_response(StatusCode::NOT_FOUND, "ASR task not found");
+    }
+    match cancel_source_compression(id) {
+        Some(state) => json_response(&serde_json::json!({ "compression": state })),
+        None => error_response(StatusCode::NOT_FOUND, "No source-audio compression run found"),
+    }
+}
+
 async fn run_task_response(id: &str) -> Response<BoxBody> {
     let task = match load_tasks().tasks.into_iter().find(|task| task.id == id) {
         Some(task) => task,
@@ -964,6 +1054,14 @@ async fn run_task_response(id: &str) -> Response<BoxBody> {
                 "message": "ASR task is paused; resume it before starting a run",
                 "paused": true,
                 "task": task_with_summary(task),
+            }),
+        );
+    }
+    if source_compression_is_running(id) {
+        return json_response_with_status(
+            StatusCode::CONFLICT,
+            &serde_json::json!({
+                "message": "Source-audio compression is running; wait for it to finish before starting transcription",
             }),
         );
     }
@@ -1050,6 +1148,15 @@ fn spawn_directory_task_run(task: AsrDirectoryTask) -> Result<(), Box<Response<B
                 StatusCode::CONFLICT,
                 &serde_json::json!({
                     "message": "ASR task is already running",
+                    "running": true,
+                }),
+            )))
+        }
+        Err(error) if error == "ASR source-audio compression is running" => {
+            Err(Box::new(json_response_with_status(
+                StatusCode::CONFLICT,
+                &serde_json::json!({
+                    "message": error,
                     "running": true,
                 }),
             )))

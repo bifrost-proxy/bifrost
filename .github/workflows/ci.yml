@@ -358,6 +358,13 @@ jobs:
           path: target/release
       - name: Make binary executable
         run: chmod +x target/release/bifrost
+      - name: Install FFmpeg for ASR source compression E2E
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends ffmpeg
+          fi
+          ffmpeg -version
       - name: E2E shell tests
         shell: bash
         run: bash scripts/ci/run-e2e-shell.sh
@@ -893,6 +900,13 @@ jobs:
           path: target/release
       - name: Make binary executable
         run: chmod +x target/release/bifrost
+      - name: Ensure FFmpeg for ASR source compression E2E
+        if: matrix.shard == 3
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            brew install ffmpeg
+          fi
+          ffmpeg -version
       - name: E2E shell tests
         shell: bash
         run: bash scripts/ci/run-e2e-shell.sh

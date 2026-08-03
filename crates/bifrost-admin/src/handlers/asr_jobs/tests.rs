@@ -3584,6 +3584,7 @@ mod tests {
                     content_hash_algorithm: None,
                     duplicate_of_source_key: None,
                     transcript_alias: None,
+                    source_compression: None,
                     media_duration_ms: Some(10_000),
                     status: FileStatus::Processing,
                     output_text_path: None,
@@ -7861,6 +7862,1622 @@ mod tests {
             .await
             .unwrap_err()
             .contains("ffmpeg voiceprint"));
+    }
+
+    fn write_test_pcm_wav(path: &Path, seconds: u32) {
+        let sample_rate = 16_000u32;
+        let channels = 1u16;
+        let bits_per_sample = 16u16;
+        let sample_count = sample_rate * seconds;
+        let data_bytes = sample_count * u32::from(bits_per_sample / 8);
+        let mut wav = Vec::with_capacity((44 + data_bytes) as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&channels.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&bits_per_sample.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_bytes.to_le_bytes());
+        for index in 0..sample_count {
+            let sample = if index % 4_000 < 2_000 { 1_200i16 } else { -1_200i16 };
+            wav.extend_from_slice(&sample.to_le_bytes());
+        }
+        std::fs::write(path, wav).unwrap();
+    }
+
+    fn completed_test_record(task_id: &str, source: &Path, output_dir: &Path) -> FileRecord {
+        let mut record = pending_record(task_id, source);
+        let text = output_dir.join("transcript.txt");
+        let metadata = output_dir.join("metadata.json");
+        let timeline = output_dir.join("timeline.json");
+        std::fs::create_dir_all(output_dir).unwrap();
+        std::fs::write(&text, "test transcript").unwrap();
+        std::fs::write(&metadata, "{}").unwrap();
+        std::fs::write(&timeline, "{}").unwrap();
+        record.status = FileStatus::Success;
+        record.output_text_path = Some(text);
+        record.output_metadata_path = Some(metadata);
+        record.output_timeline_path = Some(timeline);
+        record.text_chars = 15;
+        record.finished_at_ms = Some(now_ms());
+        record
+    }
+
+    #[cfg(unix)]
+    fn compression_ffmpeg_guard(temp: &Path) -> TestCompressionFfmpegGuard {
+        let fake_ffmpeg = temp.join("compression-ffmpeg");
+        write_executable(
+            &fake_ffmpeg,
+            r#"#!/bin/sh
+input=''
+output=''
+expect_input=0
+hash_mode=0
+for arg in "$@"; do
+  if [ "$expect_input" = 1 ]; then
+    input="$arg"
+    expect_input=0
+  elif [ "$arg" = '-i' ]; then
+    expect_input=1
+  fi
+  if [ "$arg" = 'hash' ]; then
+    hash_mode=1
+  fi
+  output="$arg"
+done
+if [ "$hash_mode" = 1 ]; then
+  case "$input" in
+    *mismatch.wav.bifrost-compress.part) printf 'SHA256=mismatch\n' ;;
+    *) printf 'SHA256=stable-pcm\n' ;;
+  esac
+  exit 0
+fi
+case "$input" in
+  *empty.wav) cp "$input" "$output" ;;
+  *changed-during.wav) printf 'fLaC' > "$output"; printf 'changed' >> "$input" ;;
+  *install-fail.wav) mkdir "${input%.wav}.flac"; printf 'fLaC' > "$output" ;;
+  *) printf 'fLaC' > "$output" ;;
+esac
+"#,
+        );
+        TestCompressionFfmpegGuard::set(fake_ffmpeg)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_compression_replaces_only_completed_wav_and_migrates_record_key() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _ffmpeg = compression_ffmpeg_guard(temp.path());
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("meeting.wav");
+        write_test_pcm_wav(&source, 4);
+        let original_hash = decoded_pcm_sha256(&source, Some(4_000)).unwrap();
+        let task = test_directory_task("compression-success", audio_dir.clone());
+        let old_key = source_key(&source);
+        let record = completed_test_record(&task.id, &source, &temp.path().join("outputs"));
+        let mut duplicate = record.clone();
+        duplicate.source_path = audio_dir.join("duplicate.wav");
+        duplicate.duplicate_of_source_key = Some(old_key.clone());
+        duplicate.transcript_alias = Some(source.display().to_string());
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([
+                    (old_key.clone(), record.clone()),
+                    ("duplicate-key".to_string(), duplicate),
+                ]),
+            },
+        )
+        .unwrap();
+        save_external_import_store(
+            &task.id,
+            &AsrExternalImportStore {
+                version: TASK_STORE_VERSION,
+                devices: BTreeMap::from([(
+                    "recorder".to_string(),
+                    AsrExternalDeviceState {
+                        binding_name: "recorder".to_string(),
+                        last_seen_mount_path: None,
+                        last_scan_at_ms: None,
+                        last_import_at_ms: None,
+                        last_status: None,
+                        last_error: None,
+                        files: BTreeMap::from([(
+                            "meeting.wav".to_string(),
+                            AsrImportedFileRecord {
+                                relative_path: PathBuf::from("meeting.wav"),
+                                source_size: record.source_size.unwrap(),
+                                source_modified_ms: record.source_modified_ms,
+                                source_hashes: BTreeMap::new(),
+                                sample_fingerprint: None,
+                                target_path: source.clone(),
+                                target_size: record.source_size.unwrap(),
+                                first_seen_at_ms: None,
+                                imported_at_ms: 1,
+                                status: "imported".to_string(),
+                                error: None,
+                            },
+                        )]),
+                    },
+                )]),
+                runs: Vec::new(),
+            },
+        )
+        .unwrap();
+        save_content_hash_index(
+            &task.id,
+            &AsrContentHashIndex {
+                version: TASK_STORE_VERSION,
+                hashes: BTreeMap::from([(
+                    "sha256:test".to_string(),
+                    AsrContentHashRecord {
+                        algorithm: "sha256".to_string(),
+                        hash: "test".to_string(),
+                        canonical_audio_hash: None,
+                        size: record.source_size.unwrap(),
+                        canonical_source_key: old_key.clone(),
+                        canonical_source_path: source.clone(),
+                        transcript_artifacts: AsrTranscriptArtifacts {
+                            text_path: record.output_text_path.clone().unwrap(),
+                            metadata_path: record.output_metadata_path.clone().unwrap(),
+                            timeline_path: record.output_timeline_path.clone(),
+                        },
+                        model: task.model.clone(),
+                        language: task.language.clone(),
+                        runtime_strategy: task.runtime_strategy,
+                        completed_at_ms: 1,
+                        duplicate_count: 1,
+                    },
+                )]),
+            },
+        )
+        .unwrap();
+
+        assert!(is_compressible_source_audio_record(&task, &record));
+        let result = compress_source_record(&task, &old_key, &record);
+
+        assert_eq!(result.status, "compressed", "{}", result.message);
+        assert!(!source.exists());
+        let flac = audio_dir.join("meeting.flac");
+        assert!(flac.is_file());
+        assert_eq!(decoded_pcm_sha256(&flac, Some(4_000)).unwrap(), original_hash);
+        assert!(result.saved_bytes > 0);
+        let stored = load_file_store(&task.id);
+        assert!(!stored.files.contains_key(&old_key));
+        let migrated = stored.files.get(&source_key(&flac)).unwrap();
+        assert_eq!(migrated.status, FileStatus::Success);
+        assert_eq!(migrated.source_path, flac);
+        assert_eq!(
+            migrated
+                .source_compression
+                .as_ref()
+                .map(|compression| compression.original_source_path.as_path()),
+            Some(source.as_path())
+        );
+        let duplicate = stored.files.get("duplicate-key").unwrap();
+        assert_eq!(
+            duplicate.duplicate_of_source_key.as_deref(),
+            Some(source_key(&flac).as_str())
+        );
+        assert_eq!(duplicate.transcript_alias.as_deref(), Some(flac.to_string_lossy().as_ref()));
+        let imported = &load_external_import_store(&task.id).devices["recorder"].files
+            ["meeting.wav"];
+        assert_eq!(imported.target_path, flac);
+        assert_eq!(imported.target_size, result.compressed_bytes);
+        let hash_record = &load_content_hash_index(&task.id).hashes["sha256:test"];
+        assert_eq!(hash_record.canonical_source_key, source_key(&flac));
+        assert_eq!(hash_record.canonical_source_path, flac);
+        let summary = summarize_task(&task);
+        assert_eq!(summary.pending, 0);
+        assert_eq!(summary.compressed_source_file_count, 1);
+        assert_eq!(summary.compressible_source_file_count, 0);
+    }
+
+    #[test]
+    fn source_compression_preserves_wav_and_store_on_destination_conflict() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("conflict.wav");
+        write_test_pcm_wav(&source, 1);
+        let destination = audio_dir.join("conflict.flac");
+        std::fs::write(&destination, b"pre-existing destination").unwrap();
+        let task = test_directory_task("compression-rollback", audio_dir.clone());
+        let key = source_key(&source);
+        let record = completed_test_record(&task.id, &source, &temp.path().join("outputs"));
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(key.clone(), record.clone())]),
+            },
+        )
+        .unwrap();
+
+        let result = compress_source_record(&task, &key, &record);
+
+        assert_eq!(result.status, "failed");
+        assert!(source.is_file());
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"pre-existing destination"
+        );
+        assert!(load_file_store(&task.id).files.contains_key(&key));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_compression_skips_flac_that_would_not_save_space() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _ffmpeg = compression_ffmpeg_guard(temp.path());
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("empty.wav");
+        write_test_pcm_wav(&source, 0);
+        let task = test_directory_task("compression-no-space-saving", audio_dir.clone());
+        let key = source_key(&source);
+        let record = completed_test_record(&task.id, &source, &temp.path().join("outputs"));
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(key.clone(), record.clone())]),
+            },
+        )
+        .unwrap();
+
+        let result = compress_source_record(&task, &key, &record);
+
+        assert_eq!(result.status, "skipped", "{}", result.message);
+        assert!(source.is_file());
+        assert!(!audio_dir.join("empty.flac").exists());
+        assert!(load_file_store(&task.id).files.contains_key(&key));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_compression_preserves_wav_when_decoded_pcm_does_not_match() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _ffmpeg = compression_ffmpeg_guard(temp.path());
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("mismatch.wav");
+        write_test_pcm_wav(&source, 1);
+        let task = test_directory_task("compression-pcm-mismatch", audio_dir.clone());
+        let key = source_key(&source);
+        let record = completed_test_record(&task.id, &source, &temp.path().join("outputs"));
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(key.clone(), record.clone())]),
+            },
+        )
+        .unwrap();
+
+        let result = compress_source_record(&task, &key, &record);
+
+        assert_eq!(result.status, "failed");
+        assert!(result.message.contains("decoded PCM verification failed"));
+        assert!(source.is_file());
+        assert!(!audio_dir.join("mismatch.flac").exists());
+        assert!(load_file_store(&task.id).files.contains_key(&key));
+    }
+
+    #[test]
+    fn source_compression_eligibility_rejects_partial_and_missing_artifacts() {
+        let temp = TempDir::new().unwrap();
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("meeting.wav");
+        write_test_pcm_wav(&source, 1);
+        let task = test_directory_task("compression-eligibility", audio_dir);
+        let mut record = completed_test_record(&task.id, &source, &temp.path().join("outputs"));
+        record.status = FileStatus::PartialSuccess;
+        assert!(!is_compressible_source_audio_record(&task, &record));
+        let rejected = compress_source_record(&task, &source_key(&source), &record);
+        assert_eq!(rejected.status, "failed");
+        assert!(rejected.message.contains("no longer eligible"));
+        record.status = FileStatus::Success;
+        std::fs::remove_file(record.output_timeline_path.as_ref().unwrap()).unwrap();
+        assert!(!is_compressible_source_audio_record(&task, &record));
+    }
+
+    #[test]
+    fn source_compression_eligibility_rejects_changed_non_wav_and_outside_sources() {
+        use std::io::Write;
+
+        let temp = TempDir::new().unwrap();
+        let audio_dir = temp.path().join("audio");
+        let outside_dir = temp.path().join("outside");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let task = test_directory_task("compression-boundaries", audio_dir.clone());
+
+        let changed = audio_dir.join("changed.wav");
+        write_test_pcm_wav(&changed, 1);
+        let changed_record =
+            completed_test_record(&task.id, &changed, &temp.path().join("changed-output"));
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&changed)
+            .unwrap()
+            .write_all(b"changed after transcription")
+            .unwrap();
+        assert!(!is_compressible_source_audio_record(&task, &changed_record));
+
+        let non_wav = audio_dir.join("already.flac");
+        std::fs::write(&non_wav, b"flac").unwrap();
+        let non_wav_record =
+            completed_test_record(&task.id, &non_wav, &temp.path().join("flac-output"));
+        assert!(!is_compressible_source_audio_record(&task, &non_wav_record));
+
+        let outside = outside_dir.join("outside.wav");
+        write_test_pcm_wav(&outside, 1);
+        let outside_record =
+            completed_test_record(&task.id, &outside, &temp.path().join("outside-output"));
+        assert!(!is_compressible_source_audio_record(&task, &outside_record));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_compression_eligibility_rejects_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let target = audio_dir.join("target.wav");
+        let link = audio_dir.join("linked.wav");
+        write_test_pcm_wav(&target, 1);
+        symlink(&target, &link).unwrap();
+        let task = test_directory_task("compression-symlink", audio_dir);
+        let record = completed_test_record(&task.id, &link, &temp.path().join("outputs"));
+
+        assert!(!is_compressible_source_audio_record(&task, &record));
+    }
+
+    #[test]
+    fn source_compression_recovery_restores_pre_migration_backup() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("interrupted.wav");
+        write_test_pcm_wav(&source, 1);
+        let task = test_directory_task("compression-pre-migration-recovery", audio_dir.clone());
+        let key = source_key(&source);
+        let record = completed_test_record(&task.id, &source, &temp.path().join("outputs"));
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(key.clone(), record)]),
+            },
+        )
+        .unwrap();
+        let backup = audio_dir.join(".interrupted.wav.bifrost-compress-backup");
+        let part = audio_dir.join(".interrupted.wav.bifrost-compress.part");
+        let final_path = audio_dir.join("interrupted.flac");
+        std::fs::rename(&source, &backup).unwrap();
+        std::fs::write(&part, b"partial flac").unwrap();
+        std::fs::write(&final_path, b"installed before metadata migration").unwrap();
+
+        recover_source_compression_backups(&task).unwrap();
+
+        assert!(source.is_file());
+        assert!(!backup.exists());
+        assert!(!part.exists());
+        assert!(!final_path.exists());
+        let restored = load_file_store(&task.id);
+        assert_eq!(restored.files[&key].source_path, source);
+        assert!(restored.files[&key].source_compression.is_none());
+    }
+
+    #[test]
+    fn source_compression_recovery_preserves_conflicting_source_and_backup() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("conflict.wav");
+        write_test_pcm_wav(&source, 1);
+        let task = test_directory_task("compression-conflict-recovery", audio_dir.clone());
+        let key = source_key(&source);
+        let record = completed_test_record(&task.id, &source, &temp.path().join("outputs"));
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(key.clone(), record)]),
+            },
+        )
+        .unwrap();
+        let backup = audio_dir.join(".conflict.wav.bifrost-compress-backup");
+        let final_path = audio_dir.join("conflict.flac");
+        std::fs::rename(&source, &backup).unwrap();
+        write_test_pcm_wav(&source, 2);
+        std::fs::write(&final_path, b"uncommitted flac").unwrap();
+
+        let error = recover_source_compression_backups(&task).unwrap_err();
+
+        assert!(error.contains("conflicting identity"), "{error}");
+        assert!(source.is_file());
+        assert!(backup.is_file());
+        assert!(final_path.is_file());
+        assert!(load_file_store(&task.id).files.contains_key(&key));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_compression_recovery_rolls_back_migrated_record_when_flac_is_missing() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _ffmpeg = compression_ffmpeg_guard(temp.path());
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("rollback.wav");
+        write_test_pcm_wav(&source, 1);
+        let task = test_directory_task("compression-migrated-recovery", audio_dir.clone());
+        let original_size = source_size(&source).unwrap();
+        let original_modified_ms = source_modified_ms(&source);
+        let original_hash = decoded_pcm_sha256(&source, Some(1_000)).unwrap();
+        let backup = audio_dir.join(".rollback.wav.bifrost-compress-backup");
+        std::fs::rename(&source, &backup).unwrap();
+        let final_path = audio_dir.join("rollback.flac");
+        let compressed_key = "compressed-key".to_string();
+        let mut migrated =
+            completed_test_record(&task.id, &final_path, &temp.path().join("outputs"));
+        migrated.source_size = Some(123);
+        migrated.source_modified_ms = original_modified_ms;
+        migrated.source_compression = Some(SourceAudioCompressionRecord {
+            codec: "flac".to_string(),
+            original_source_path: source.clone(),
+            original_size_bytes: original_size,
+            original_modified_ms,
+            compressed_size_bytes: 123,
+            saved_bytes: original_size - 123,
+            pcm_sha256: original_hash,
+            compressed_at_ms: now_ms(),
+        });
+        let mut duplicate = migrated.clone();
+        duplicate.source_path = audio_dir.join("duplicate.wav");
+        duplicate.source_compression = None;
+        duplicate.duplicate_of_source_key = Some(compressed_key.clone());
+        duplicate.transcript_alias = Some(final_path.display().to_string());
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([
+                    (compressed_key.clone(), migrated),
+                    ("duplicate-key".to_string(), duplicate),
+                ]),
+            },
+        )
+        .unwrap();
+
+        recover_source_compression_backups(&task).unwrap();
+
+        let restored_key = source_key(&source);
+        let restored = load_file_store(&task.id);
+        assert!(source.is_file());
+        assert!(!backup.exists());
+        assert!(!restored.files.contains_key(&compressed_key));
+        let record = &restored.files[&restored_key];
+        assert_eq!(record.source_path, source);
+        assert_eq!(record.source_size, Some(original_size));
+        assert!(record.source_compression.is_none());
+        assert_eq!(
+            restored.files["duplicate-key"]
+                .duplicate_of_source_key
+                .as_deref(),
+            Some(restored_key.as_str())
+        );
+        assert_eq!(
+            restored.files["duplicate-key"].transcript_alias.as_deref(),
+            Some(source.to_string_lossy().as_ref())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_compression_job_tracks_all_outcomes_and_cancellation() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let _ffmpeg = compression_ffmpeg_guard(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let task = test_directory_task("compression-job-outcomes", audio_dir.clone());
+        let mut files = BTreeMap::new();
+        let mut targets = Vec::new();
+        for (name, seconds) in [("success.wav", 1), ("empty.wav", 0), ("mismatch.wav", 1)] {
+            let source = audio_dir.join(name);
+            write_test_pcm_wav(&source, seconds);
+            let key = source_key(&source);
+            let record = completed_test_record(
+                &task.id,
+                &source,
+                &temp.path().join(format!("outputs-{name}")),
+            );
+            files.insert(key.clone(), record.clone());
+            targets.push((key, record));
+        }
+        let recovery_conflict = audio_dir.join("recovery-conflict.wav");
+        write_test_pcm_wav(&recovery_conflict, 1);
+        let recovery_key = source_key(&recovery_conflict);
+        let recovery_record = completed_test_record(
+            &task.id,
+            &recovery_conflict,
+            &temp.path().join("recovery-conflict-output"),
+        );
+        std::fs::copy(
+            &recovery_conflict,
+            audio_dir.join(".recovery-conflict.wav.bifrost-compress-backup"),
+        )
+        .unwrap();
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&recovery_conflict)
+            .unwrap()
+            .write_all(b"changed")
+            .unwrap();
+        files.insert(recovery_key, recovery_record);
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files,
+            },
+        )
+        .unwrap();
+        let now = now_ms();
+        save_source_compression_state(&SourceAudioCompressionState {
+            task_id: task.id.clone(),
+            status: SourceAudioCompressionStatus::Queued,
+            queued_files: targets.len(),
+            processed_files: 0,
+            compressed_files: 0,
+            skipped_files: 0,
+            failed_files: 0,
+            original_bytes: targets
+                .iter()
+                .map(|(_, record)| source_size(&record.source_path).unwrap())
+                .sum(),
+            compressed_bytes: 0,
+            saved_bytes: 0,
+            started_at_ms: None,
+            updated_at_ms: now,
+            finished_at_ms: None,
+            current_source_path: None,
+            message: "queued".to_string(),
+            results: Vec::new(),
+        })
+        .unwrap();
+
+        let guard = RunningSourceCompressionGuard::acquire(&task.id).unwrap();
+        run_source_compression_job(task.clone(), targets, guard);
+
+        let state = load_source_compression_state(&task.id).unwrap();
+        assert_eq!(state.status, SourceAudioCompressionStatus::CompletedWithErrors);
+        assert_eq!(state.processed_files, 3);
+        assert_eq!(state.compressed_files, 1);
+        assert_eq!(state.skipped_files, 1);
+        assert_eq!(state.failed_files, 1);
+        assert!(state.saved_bytes > 0);
+        assert_eq!(state.results.len(), 3);
+
+        let cancelled_task = test_directory_task("compression-job-cancelled", audio_dir.clone());
+        let cancelled_source = audio_dir.join("cancelled.wav");
+        write_test_pcm_wav(&cancelled_source, 1);
+        let cancelled_record = completed_test_record(
+            &cancelled_task.id,
+            &cancelled_source,
+            &temp.path().join("cancelled-output"),
+        );
+        save_source_compression_state(&SourceAudioCompressionState {
+            task_id: cancelled_task.id.clone(),
+            status: SourceAudioCompressionStatus::Queued,
+            queued_files: 1,
+            processed_files: 0,
+            compressed_files: 0,
+            skipped_files: 0,
+            failed_files: 0,
+            original_bytes: source_size(&cancelled_source).unwrap(),
+            compressed_bytes: 0,
+            saved_bytes: 0,
+            started_at_ms: None,
+            updated_at_ms: now,
+            finished_at_ms: None,
+            current_source_path: None,
+            message: "queued".to_string(),
+            results: Vec::new(),
+        })
+        .unwrap();
+        let guard = RunningSourceCompressionGuard::acquire(&cancelled_task.id).unwrap();
+        SOURCE_COMPRESSION_CANCEL_REQUESTS
+            .lock()
+            .unwrap()
+            .insert(cancelled_task.id.clone());
+        run_source_compression_job(
+            cancelled_task.clone(),
+            vec![(source_key(&cancelled_source), cancelled_record)],
+            guard,
+        );
+        let cancelled = load_source_compression_state(&cancelled_task.id).unwrap();
+        assert_eq!(cancelled.status, SourceAudioCompressionStatus::Cancelled);
+        assert_eq!(cancelled.processed_files, 0);
+        assert!(cancelled.message.contains("cancelled after 0 of 1"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn source_compression_background_run_completes_nonempty_queue() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let _ffmpeg = compression_ffmpeg_guard(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("background.wav");
+        write_test_pcm_wav(&source, 1);
+        let task = test_directory_task("compression-background", audio_dir);
+        let key = source_key(&source);
+        let record = completed_test_record(&task.id, &source, &temp.path().join("outputs"));
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(key, record)]),
+            },
+        )
+        .unwrap();
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task.clone()],
+        })
+        .unwrap();
+
+        let response = start_source_compression_response(&task.id);
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let mut terminal = None;
+        for _ in 0..100 {
+            let state = normalized_source_compression_state(&task.id).unwrap();
+            if matches!(
+                state.status,
+                SourceAudioCompressionStatus::Completed
+                    | SourceAudioCompressionStatus::CompletedWithErrors
+            ) {
+                terminal = Some(state);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let terminal = terminal.expect("background compression should finish");
+        assert_eq!(terminal.status, SourceAudioCompressionStatus::Completed);
+        assert_eq!(terminal.compressed_files, 1);
+        assert!(task.audio_dir.join("background.flac").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_compression_preserves_source_on_midflight_and_install_failures() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let _ffmpeg = compression_ffmpeg_guard(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let task = test_directory_task("compression-failure-edges", audio_dir.clone());
+
+        for name in ["changed-during.wav", "install-fail.wav", "missing-record.wav"] {
+            let source = audio_dir.join(name);
+            write_test_pcm_wav(&source, 1);
+            let key = source_key(&source);
+            let record = completed_test_record(
+                &task.id,
+                &source,
+                &temp.path().join(format!("output-{name}")),
+            );
+            let files = if name == "missing-record.wav" {
+                BTreeMap::new()
+            } else {
+                BTreeMap::from([(key.clone(), record.clone())])
+            };
+            save_file_store(
+                &task.id,
+                &FileStore {
+                    version: TASK_STORE_VERSION,
+                    files,
+                },
+            )
+            .unwrap();
+
+            let result = compress_source_record(&task, &key, &record);
+
+            assert_eq!(result.status, "failed", "{name}: {}", result.message);
+            assert!(source.is_file(), "{name} must preserve the source");
+            if name == "install-fail.wav" {
+                assert!(result.message.contains("install compressed audio"));
+                std::fs::remove_dir(audio_dir.join("install-fail.flac")).unwrap();
+            } else if name == "missing-record.wav" {
+                assert!(result.message.contains("record changed"));
+                assert!(!audio_dir.join("missing-record.flac").exists());
+            } else {
+                assert!(result.message.contains("changed after transcription"));
+            }
+        }
+
+        let backup_source = audio_dir.join("backup-exists.wav");
+        write_test_pcm_wav(&backup_source, 1);
+        let backup_key = source_key(&backup_source);
+        let backup_record = completed_test_record(
+            &task.id,
+            &backup_source,
+            &temp.path().join("backup-output"),
+        );
+        std::fs::write(
+            audio_dir.join(".backup-exists.wav.bifrost-compress-backup"),
+            b"existing",
+        )
+        .unwrap();
+        let result = compress_source_record(&task, &backup_key, &backup_record);
+        assert!(result.message.contains("recovery backup already exists"));
+    }
+
+    #[test]
+    fn source_compression_state_helpers_cover_empty_interrupted_and_cancel_paths() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let empty_task = test_directory_task("compression-empty", audio_dir.clone());
+        save_file_store(
+            &empty_task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+
+        let completed = start_source_compression_background(empty_task.clone()).unwrap();
+        assert_eq!(completed.status, SourceAudioCompressionStatus::Completed);
+        assert_eq!(completed.queued_files, 0);
+        assert!(completed.message.contains("No completed WAV"));
+
+        let mut interrupted = completed.clone();
+        interrupted.status = SourceAudioCompressionStatus::Running;
+        interrupted.finished_at_ms = None;
+        interrupted.current_source_path = Some("stale.wav".to_string());
+        save_source_compression_state(&interrupted).unwrap();
+        let normalized = normalized_source_compression_state(&empty_task.id).unwrap();
+        assert_eq!(normalized.status, SourceAudioCompressionStatus::Interrupted);
+        assert!(normalized.finished_at_ms.is_some());
+        assert!(normalized.current_source_path.is_none());
+
+        assert!(cancel_source_compression("missing-compression-state").is_none());
+        update_source_compression_state("missing-compression-state", |_| {
+            panic!("missing state must not invoke updater")
+        });
+
+        let guard = RunningSourceCompressionGuard::acquire(&empty_task.id).unwrap();
+        interrupted.status = SourceAudioCompressionStatus::Running;
+        save_source_compression_state(&interrupted).unwrap();
+        let cancelling = cancel_source_compression(&empty_task.id).unwrap();
+        assert_eq!(cancelling.status, SourceAudioCompressionStatus::Cancelling);
+        assert!(source_compression_cancel_requested(&empty_task.id));
+        drop(guard);
+        assert!(!source_compression_cancel_requested(&empty_task.id));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_compression_process_and_ffmpeg_errors_are_bounded() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let mut missing = std::process::Command::new(temp.path().join("missing-command"));
+        assert!(run_process_with_timeout(&mut missing, Duration::from_millis(1))
+            .unwrap_err()
+            .contains("start process"));
+
+        let mut slow = std::process::Command::new("/bin/sh");
+        slow.args(["-c", "sleep 1"]);
+        assert!(run_process_with_timeout(&mut slow, Duration::from_millis(1))
+            .unwrap_err()
+            .contains("timed out"));
+
+        let failing = temp.path().join("failing-ffmpeg");
+        write_executable(&failing, "#!/bin/sh\nprintf 'encode failed' >&2\nexit 7\n");
+        let _guard = TestCompressionFfmpegGuard::set(failing);
+        let source = temp.path().join("input.wav");
+        let output = temp.path().join("output.part");
+        write_test_pcm_wav(&source, 1);
+        assert!(encode_source_to_flac(&source, &output, Some(1_000))
+            .unwrap_err()
+            .contains("encode failed"));
+        assert!(decoded_pcm_sha256(&source, Some(1_000))
+            .unwrap_err()
+            .contains("decode PCM for verification"));
+        drop(_guard);
+
+        let invalid_hash = temp.path().join("invalid-hash-ffmpeg");
+        write_executable(&invalid_hash, "#!/bin/sh\nprintf 'not-a-hash\\n'\n");
+        let _guard = TestCompressionFfmpegGuard::set(invalid_hash);
+        assert!(decoded_pcm_sha256(&source, Some(1_000))
+            .unwrap_err()
+            .contains("did not return a SHA-256"));
+        drop(_guard);
+
+        assert!(format!("{:?}", source_compression_ffmpeg_command()).contains("ffmpeg"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_compression_recovery_finalizes_and_rolls_back_additional_states() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let _ffmpeg = compression_ffmpeg_guard(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+
+        let source = audio_dir.join("already-restored.wav");
+        write_test_pcm_wav(&source, 1);
+        let task = test_directory_task("compression-recovery-extra", audio_dir.clone());
+        let key = source_key(&source);
+        let record = completed_test_record(&task.id, &source, &temp.path().join("outputs"));
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(key.clone(), record.clone())]),
+            },
+        )
+        .unwrap();
+        let backup = audio_dir.join(".already-restored.wav.bifrost-compress-backup");
+        let part = audio_dir.join(".already-restored.wav.bifrost-compress.part");
+        let final_path = audio_dir.join("already-restored.flac");
+        std::fs::copy(&source, &backup).unwrap();
+        std::fs::write(&part, b"partial").unwrap();
+        std::fs::write(&final_path, b"uncommitted").unwrap();
+        recover_source_compression_backups(&task).unwrap();
+        assert!(source.is_file());
+        assert!(!backup.exists());
+        assert!(!part.exists());
+        assert!(!final_path.exists());
+
+        let orphan_part = audio_dir.join(".already-restored.wav.bifrost-compress.part");
+        std::fs::write(&orphan_part, b"orphan").unwrap();
+        recover_source_compression_backups(&task).unwrap();
+        assert!(!orphan_part.exists());
+
+        let original = audio_dir.join("finalized.wav");
+        write_test_pcm_wav(&original, 1);
+        let original_size = source_size(&original).unwrap();
+        let original_modified_ms = source_modified_ms(&original);
+        let flac = audio_dir.join("finalized.flac");
+        std::fs::write(&flac, b"fLaC").unwrap();
+        let flac_key = source_key(&flac);
+        let mut finalized = completed_test_record(
+            &task.id,
+            &flac,
+            &temp.path().join("finalized-output"),
+        );
+        finalized.source_size = Some(4);
+        finalized.source_modified_ms = original_modified_ms;
+        finalized.source_compression = Some(SourceAudioCompressionRecord {
+            codec: "flac".to_string(),
+            original_source_path: original.clone(),
+            original_size_bytes: original_size,
+            original_modified_ms,
+            compressed_size_bytes: 4,
+            saved_bytes: original_size - 4,
+            pcm_sha256: "stable-pcm".to_string(),
+            compressed_at_ms: now_ms(),
+        });
+        let finalized_backup = audio_dir.join(".finalized.wav.bifrost-compress-backup");
+        let finalized_part = audio_dir.join(".finalized.wav.bifrost-compress.part");
+        std::fs::rename(&original, &finalized_backup).unwrap();
+        std::fs::write(&finalized_part, b"part").unwrap();
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(flac_key, finalized)]),
+            },
+        )
+        .unwrap();
+        recover_source_compression_backups(&task).unwrap();
+        assert!(flac.is_file());
+        assert!(!finalized_backup.exists());
+        assert!(!finalized_part.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_compression_recovery_rejects_tampering_and_restores_without_backup() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let _ffmpeg = compression_ffmpeg_guard(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+
+        let tampered_task = test_directory_task("compression-tampered-final", audio_dir.clone());
+        let tampered_original = audio_dir.join("tampered.wav");
+        write_test_pcm_wav(&tampered_original, 1);
+        let original_size = source_size(&tampered_original).unwrap();
+        let original_modified_ms = source_modified_ms(&tampered_original);
+        let tampered_flac = audio_dir.join("tampered.flac");
+        std::fs::write(&tampered_flac, b"bad").unwrap();
+        let mut tampered = completed_test_record(
+            &tampered_task.id,
+            &tampered_flac,
+            &temp.path().join("tampered-output"),
+        );
+        tampered.source_compression = Some(SourceAudioCompressionRecord {
+            codec: "flac".to_string(),
+            original_source_path: tampered_original.clone(),
+            original_size_bytes: original_size,
+            original_modified_ms,
+            compressed_size_bytes: 4,
+            saved_bytes: original_size - 4,
+            pcm_sha256: "stable-pcm".to_string(),
+            compressed_at_ms: now_ms(),
+        });
+        std::fs::write(
+            audio_dir.join(".tampered.wav.bifrost-compress-backup"),
+            b"backup",
+        )
+        .unwrap();
+        save_file_store(
+            &tampered_task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(source_key(&tampered_flac), tampered)]),
+            },
+        )
+        .unwrap();
+        assert!(recover_source_compression_backups(&tampered_task)
+            .unwrap_err()
+            .contains("failed recovery verification"));
+
+        let restore_task = test_directory_task("compression-no-backup-restore", audio_dir.clone());
+        let restored_wav = audio_dir.join("restored.wav");
+        write_test_pcm_wav(&restored_wav, 1);
+        let restored_size = source_size(&restored_wav).unwrap();
+        let restored_modified_ms = source_modified_ms(&restored_wav);
+        let missing_flac = audio_dir.join("restored.flac");
+        let missing_key = source_key(&missing_flac);
+        let mut restored = completed_test_record(
+            &restore_task.id,
+            &missing_flac,
+            &temp.path().join("restore-output"),
+        );
+        restored.source_compression = Some(SourceAudioCompressionRecord {
+            codec: "flac".to_string(),
+            original_source_path: restored_wav.clone(),
+            original_size_bytes: restored_size,
+            original_modified_ms: restored_modified_ms,
+            compressed_size_bytes: 4,
+            saved_bytes: restored_size - 4,
+            pcm_sha256: "stable-pcm".to_string(),
+            compressed_at_ms: now_ms(),
+        });
+        std::fs::write(
+            audio_dir.join(".restored.wav.bifrost-compress.part"),
+            b"partial",
+        )
+        .unwrap();
+        save_file_store(
+            &restore_task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(missing_key.clone(), restored)]),
+            },
+        )
+        .unwrap();
+        recover_source_compression_backups(&restore_task).unwrap();
+        let restored_store = load_file_store(&restore_task.id);
+        assert!(!restored_store.files.contains_key(&missing_key));
+        assert!(restored_store.files.contains_key(&source_key(&restored_wav)));
+
+        let directory = temp.path().join("not-a-file");
+        std::fs::create_dir(&directory).unwrap();
+        assert!(remove_file_if_exists(&directory).unwrap_err().contains("remove"));
+        assert!(!source_path_is_within_task_audio_dir_for_recovery(
+            &temp.path().join("missing-root"),
+            &restored_wav
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_compression_recovery_covers_remaining_validation_branches() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let _ffmpeg = compression_ffmpeg_guard(temp.path());
+        let audio_dir = temp.path().join("audio");
+        let outside_dir = temp.path().join("outside");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        std::fs::create_dir_all(&outside_dir).unwrap();
+
+        let invalid_backup_task =
+            test_directory_task("compression-invalid-pre-migration-backup", audio_dir.clone());
+        let invalid_source = audio_dir.join("invalid-backup.wav");
+        write_test_pcm_wav(&invalid_source, 1);
+        let invalid_key = source_key(&invalid_source);
+        let invalid_record = completed_test_record(
+            &invalid_backup_task.id,
+            &invalid_source,
+            &temp.path().join("invalid-backup-output"),
+        );
+        std::fs::rename(
+            &invalid_source,
+            audio_dir.join(".invalid-backup.wav.bifrost-compress-backup"),
+        )
+        .unwrap();
+        std::fs::write(
+            audio_dir.join(".invalid-backup.wav.bifrost-compress-backup"),
+            b"tampered",
+        )
+        .unwrap();
+        save_file_store(
+            &invalid_backup_task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(invalid_key, invalid_record)]),
+            },
+        )
+        .unwrap();
+        assert!(recover_source_compression_backups(&invalid_backup_task)
+            .unwrap_err()
+            .contains("no longer matches"));
+
+        let outside_task = test_directory_task("compression-old-path-outside", audio_dir.clone());
+        let outside_original = outside_dir.join("outside.wav");
+        write_test_pcm_wav(&outside_original, 1);
+        let outside_flac = audio_dir.join("outside.flac");
+        let mut outside_record = completed_test_record(
+            &outside_task.id,
+            &outside_flac,
+            &temp.path().join("outside-output"),
+        );
+        outside_record.source_compression = Some(SourceAudioCompressionRecord {
+            codec: "flac".to_string(),
+            original_source_path: outside_original,
+            original_size_bytes: 1,
+            original_modified_ms: None,
+            compressed_size_bytes: 1,
+            saved_bytes: 0,
+            pcm_sha256: "stable-pcm".to_string(),
+            compressed_at_ms: now_ms(),
+        });
+        save_file_store(
+            &outside_task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(source_key(&outside_flac), outside_record)]),
+            },
+        )
+        .unwrap();
+        recover_source_compression_backups(&outside_task).unwrap();
+
+        let no_artifacts_task = test_directory_task("compression-no-artifacts", audio_dir.clone());
+        let no_artifacts_original = audio_dir.join("no-artifacts.wav");
+        let no_artifacts_flac = audio_dir.join("no-artifacts.flac");
+        let mut no_artifacts_record = completed_test_record(
+            &no_artifacts_task.id,
+            &no_artifacts_flac,
+            &temp.path().join("no-artifacts-output"),
+        );
+        no_artifacts_record.source_compression = Some(SourceAudioCompressionRecord {
+            codec: "flac".to_string(),
+            original_source_path: no_artifacts_original,
+            original_size_bytes: 10,
+            original_modified_ms: None,
+            compressed_size_bytes: 4,
+            saved_bytes: 6,
+            pcm_sha256: "stable-pcm".to_string(),
+            compressed_at_ms: now_ms(),
+        });
+        save_file_store(
+            &no_artifacts_task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(
+                    source_key(&no_artifacts_flac),
+                    no_artifacts_record,
+                )]),
+            },
+        )
+        .unwrap();
+        recover_source_compression_backups(&no_artifacts_task).unwrap();
+
+        let old_and_backup_task =
+            test_directory_task("compression-old-and-backup", audio_dir.clone());
+        let old_path = audio_dir.join("old-and-backup.wav");
+        write_test_pcm_wav(&old_path, 1);
+        let old_size = source_size(&old_path).unwrap();
+        let old_modified = source_modified_ms(&old_path);
+        let missing_flac = audio_dir.join("old-and-backup.flac");
+        let missing_key = source_key(&missing_flac);
+        let mut old_and_backup = completed_test_record(
+            &old_and_backup_task.id,
+            &missing_flac,
+            &temp.path().join("old-and-backup-output"),
+        );
+        old_and_backup.source_compression = Some(SourceAudioCompressionRecord {
+            codec: "flac".to_string(),
+            original_source_path: old_path.clone(),
+            original_size_bytes: old_size,
+            original_modified_ms: old_modified,
+            compressed_size_bytes: 4,
+            saved_bytes: old_size - 4,
+            pcm_sha256: "stable-pcm".to_string(),
+            compressed_at_ms: now_ms(),
+        });
+        std::fs::copy(
+            &old_path,
+            audio_dir.join(".old-and-backup.wav.bifrost-compress-backup"),
+        )
+        .unwrap();
+        save_file_store(
+            &old_and_backup_task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(missing_key, old_and_backup)]),
+            },
+        )
+        .unwrap();
+        recover_source_compression_backups(&old_and_backup_task).unwrap();
+        assert!(!audio_dir
+            .join(".old-and-backup.wav.bifrost-compress-backup")
+            .exists());
+
+        let invalid_rollback_task =
+            test_directory_task("compression-invalid-rollback", audio_dir.clone());
+        let rollback_old = audio_dir.join("invalid-rollback.wav");
+        let rollback_flac = audio_dir.join("invalid-rollback.flac");
+        let mut rollback_record = completed_test_record(
+            &invalid_rollback_task.id,
+            &rollback_flac,
+            &temp.path().join("invalid-rollback-output"),
+        );
+        rollback_record.source_compression = Some(SourceAudioCompressionRecord {
+            codec: "flac".to_string(),
+            original_source_path: rollback_old,
+            original_size_bytes: 100,
+            original_modified_ms: None,
+            compressed_size_bytes: 4,
+            saved_bytes: 96,
+            pcm_sha256: "stable-pcm".to_string(),
+            compressed_at_ms: now_ms(),
+        });
+        std::fs::write(
+            audio_dir.join(".invalid-rollback.wav.bifrost-compress-backup"),
+            b"bad",
+        )
+        .unwrap();
+        save_file_store(
+            &invalid_rollback_task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(
+                    source_key(&rollback_flac),
+                    rollback_record,
+                )]),
+            },
+        )
+        .unwrap();
+        assert!(recover_source_compression_backups(&invalid_rollback_task)
+            .unwrap_err()
+            .contains("rollback backup no longer matches"));
+
+        let outside_source_task =
+            test_directory_task("compression-source-outside-recovery", audio_dir.clone());
+        let outside_source = outside_dir.join("source-outside.wav");
+        write_test_pcm_wav(&outside_source, 1);
+        let outside_source_record = completed_test_record(
+            &outside_source_task.id,
+            &outside_source,
+            &temp.path().join("source-outside-output"),
+        );
+        save_file_store(
+            &outside_source_task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(
+                    source_key(&outside_source),
+                    outside_source_record,
+                )]),
+            },
+        )
+        .unwrap();
+        recover_source_compression_backups(&outside_source_task).unwrap();
+
+        let missing_both_task =
+            test_directory_task("compression-missing-both", audio_dir.clone());
+        let missing_both_old = audio_dir.join("missing-both.wav");
+        let missing_both_flac = audio_dir.join("missing-both.flac");
+        let mut missing_both_record = completed_test_record(
+            &missing_both_task.id,
+            &missing_both_flac,
+            &temp.path().join("missing-both-output"),
+        );
+        missing_both_record.source_compression = Some(SourceAudioCompressionRecord {
+            codec: "flac".to_string(),
+            original_source_path: missing_both_old.clone(),
+            original_size_bytes: 100,
+            original_modified_ms: None,
+            compressed_size_bytes: 4,
+            saved_bytes: 96,
+            pcm_sha256: "stable-pcm".to_string(),
+            compressed_at_ms: now_ms(),
+        });
+        std::fs::write(
+            audio_dir.join(".missing-both.wav.bifrost-compress.part"),
+            b"part",
+        )
+        .unwrap();
+        save_file_store(
+            &missing_both_task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(
+                    source_key(&missing_both_flac),
+                    missing_both_record,
+                )]),
+            },
+        )
+        .unwrap();
+        recover_source_compression_backups(&missing_both_task).unwrap();
+
+        let invalid_restored_task =
+            test_directory_task("compression-invalid-restored", audio_dir.clone());
+        let invalid_restored_old = audio_dir.join("invalid-restored.wav");
+        std::fs::write(&invalid_restored_old, b"wrong").unwrap();
+        let invalid_restored_flac = audio_dir.join("invalid-restored.flac");
+        let mut invalid_restored_record = completed_test_record(
+            &invalid_restored_task.id,
+            &invalid_restored_flac,
+            &temp.path().join("invalid-restored-output"),
+        );
+        invalid_restored_record.source_compression = Some(SourceAudioCompressionRecord {
+            codec: "flac".to_string(),
+            original_source_path: invalid_restored_old,
+            original_size_bytes: 100,
+            original_modified_ms: None,
+            compressed_size_bytes: 4,
+            saved_bytes: 96,
+            pcm_sha256: "stable-pcm".to_string(),
+            compressed_at_ms: now_ms(),
+        });
+        std::fs::write(
+            audio_dir.join(".invalid-restored.wav.bifrost-compress.part"),
+            b"part",
+        )
+        .unwrap();
+        save_file_store(
+            &invalid_restored_task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(
+                    source_key(&invalid_restored_flac),
+                    invalid_restored_record,
+                )]),
+            },
+        )
+        .unwrap();
+        assert!(recover_source_compression_backups(&invalid_restored_task)
+            .unwrap_err()
+            .contains("restored WAV no longer matches"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn source_compression_http_routes_cover_get_post_and_delete() {
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+        use tokio::net::TcpListener;
+
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let task = test_directory_task("compression-http-routes", audio_dir);
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task.clone()],
+        })
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let service = service_fn(|request: Request<Incoming>| async move {
+                    let path = request.uri().path().to_string();
+                    Ok::<_, hyper::Error>(handle_asr_tasks(request, &path).await)
+                });
+                http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await
+                    .unwrap();
+            }
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!(
+            "http://{address}/api/asr/tasks/{}/compress-source-audio",
+            task.id
+        );
+        assert_eq!(
+            client
+                .post(&url)
+                .header(reqwest::header::CONNECTION, "close")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        assert_eq!(
+            client
+                .get(&url)
+                .header(reqwest::header::CONNECTION, "close")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        assert_eq!(
+            client
+                .delete(&url)
+                .header(reqwest::header::CONNECTION, "close")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::OK
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn source_compression_api_and_adjacent_operations_cover_status_matrix() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let task = test_directory_task("compression-api-matrix", audio_dir);
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task.clone()],
+        })
+        .unwrap();
+
+        assert_eq!(get_source_compression_response("missing").status(), StatusCode::NOT_FOUND);
+        assert_eq!(start_source_compression_response("missing").status(), StatusCode::NOT_FOUND);
+        assert_eq!(cancel_source_compression_response("missing").status(), StatusCode::NOT_FOUND);
+        assert_eq!(get_source_compression_response(&task.id).status(), StatusCode::OK);
+        assert_eq!(cancel_source_compression_response(&task.id).status(), StatusCode::NOT_FOUND);
+        assert_eq!(start_source_compression_response(&task.id).status(), StatusCode::OK);
+        assert_eq!(cancel_source_compression_response(&task.id).status(), StatusCode::OK);
+
+        let guard = RunningSourceCompressionGuard::acquire(&task.id).unwrap();
+        assert_eq!(start_source_compression_response(&task.id).status(), StatusCode::CONFLICT);
+        assert_eq!(cancel_source_compression_response(&task.id).status(), StatusCode::OK);
+        assert_eq!(run_task_response(&task.id).await.status(), StatusCode::CONFLICT);
+        assert_eq!(retry_failed_chunks_response(&task.id, "missing").await.status(), StatusCode::CONFLICT);
+        assert_eq!(retry_all_failed_chunks_response(&task.id).await.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            spawn_directory_task_run(task.clone()).unwrap_err().status(),
+            StatusCode::CONFLICT
+        );
+        assert!(start_external_import_background(task, "manual")
+            .unwrap_err()
+            .contains("compression"));
+        drop(guard);
+        assert_ne!(
+            retry_failed_chunks_response("compression-api-matrix", "missing")
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[test]
+    fn source_compression_is_mutually_exclusive_with_run_import_and_chunk_retry() {
+        let _lock = test_data_dir_lock();
+        let task_id = "compression-lifecycle-mutual-exclusion";
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let task = test_directory_task(task_id, audio_dir);
+
+        let compression = RunningSourceCompressionGuard::acquire(task_id).unwrap();
+        assert!(RunningTaskGuard::acquire(task_id).is_err());
+        assert!(RunningExternalImportGuard::acquire(task_id).is_err());
+        assert!(RunningChunkRetryGuard::acquire(task_id).is_err());
+        drop(compression);
+
+        let task_run = RunningTaskGuard::acquire(task_id).unwrap();
+        assert!(start_source_compression_background(task.clone())
+            .unwrap_err()
+            .contains("task is running"));
+        assert!(RunningSourceCompressionGuard::acquire(task_id)
+            .err()
+            .unwrap()
+            .contains("task is running"));
+        drop(task_run);
+        let import = RunningExternalImportGuard::acquire(task_id).unwrap();
+        assert!(start_source_compression_background(task.clone())
+            .unwrap_err()
+            .contains("external import"));
+        assert!(RunningSourceCompressionGuard::acquire(task_id)
+            .err()
+            .unwrap()
+            .contains("external import"));
+        drop(import);
+        let retry = RunningChunkRetryGuard::acquire(task_id).unwrap();
+        assert!(RunningChunkRetryGuard::acquire(task_id).is_err());
+        assert!(RunningSourceCompressionGuard::acquire(task_id)
+            .err()
+            .unwrap()
+            .contains("chunk retry"));
+        drop(retry);
+        let compression = RunningSourceCompressionGuard::acquire(task_id).unwrap();
+        assert!(RunningSourceCompressionGuard::acquire("another-task")
+            .err()
+            .unwrap()
+            .contains("another ASR"));
+        drop(compression);
+
+        set_bulk_chunk_retry_state(BulkChunkRetryState {
+            task_id: task_id.to_string(),
+            status: BulkChunkRetryStatus::Queued,
+            queued_files: 1,
+            processed_files: 0,
+            total_failed_chunks: 1,
+            recovered_chunks: 0,
+            still_failed_chunks: 0,
+            started_at_ms: None,
+            updated_at_ms: now_ms(),
+            finished_at_ms: None,
+            current_file_key: None,
+            current_source_path: None,
+            message: "queued".to_string(),
+            results: Vec::new(),
+        });
+        assert!(start_source_compression_background(task)
+            .unwrap_err()
+            .contains("chunk retry"));
+        assert!(RunningSourceCompressionGuard::acquire(task_id)
+            .err()
+            .unwrap()
+            .contains("chunk retry"));
+        BULK_CHUNK_RETRY_JOBS.lock().unwrap().remove(task_id);
+    }
+
+    #[test]
+    fn compressed_source_matches_original_import_target_identity() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let original = temp.path().join("recording.wav");
+        let compressed = temp.path().join("recording.flac");
+        let size = 12_345;
+        let mut record = pending_record("compressed-import-match", &compressed);
+        record.status = FileStatus::Success;
+        record.source_compression = Some(SourceAudioCompressionRecord {
+            codec: "flac".to_string(),
+            original_source_path: original.clone(),
+            original_size_bytes: size,
+            original_modified_ms: None,
+            compressed_size_bytes: 4_000,
+            saved_bytes: size - 4_000,
+            pcm_sha256: "pcm".to_string(),
+            compressed_at_ms: now_ms(),
+        });
+        save_file_store(
+            "compressed-import-match",
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([("compressed".to_string(), record)]),
+            },
+        )
+        .unwrap();
+
+        assert!(has_completed_processing_record_for_import_target(
+            "compressed-import-match",
+            &original,
+            size
+        ));
+        assert!(!has_completed_processing_record_for_import_target(
+            "compressed-import-match",
+            &original,
+            size + 1
+        ));
+    }
+
+    #[test]
+    fn source_compression_blocks_cleanup_delete_and_high_risk_config_changes() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let task = test_directory_task("compression-api-exclusion", audio_dir);
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task.clone()],
+        })
+        .unwrap();
+        let _compression = RunningSourceCompressionGuard::acquire(&task.id).unwrap();
+
+        assert_eq!(
+            cleanup_task_source_audio_response(&task.id).status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            delete_task_response(&task.id, Some("confirm_name=compression-api-exclusion"))
+                .status(),
+            StatusCode::CONFLICT
+        );
+        let update = UpdateTaskRequest {
+            transcription_mode: None,
+            transcription_prompt: None,
+            requeue_existing_files: None,
+            name: None,
+            audio_dir: None,
+            recursive: None,
+            enabled: None,
+            paused: None,
+            schedule: None,
+            language: None,
+            model: Some("Qwen3-ASR-0.6B".to_string()),
+            runtime_strategy: None,
+            max_concurrent_files: None,
+            diarization: None,
+            daily_agent: None,
+            external_devices: None,
+            import_policy: None,
+        };
+        assert_eq!(
+            update_task_config(&task.id, update).unwrap_err().0,
+            StatusCode::CONFLICT
+        );
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

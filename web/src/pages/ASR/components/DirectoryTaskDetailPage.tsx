@@ -21,6 +21,7 @@ import {
 import {
   ArrowLeftOutlined,
   DeleteOutlined,
+  FileZipOutlined,
   LoadingOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
@@ -39,8 +40,10 @@ import type {
 } from "../../../api/asr";
 import {
   cleanupAsrSourceAudio,
+  cancelAsrSourceAudioCompression,
   retryAllFailedChunks,
   retryFailedChunks,
+  startAsrSourceAudioCompression,
   triggerDailyAgentRun,
 } from "../../../api/asr";
 import {
@@ -193,6 +196,7 @@ export default function DirectoryTaskDetailPage({
   const [retryingFileKey, setRetryingFileKey] = useState<string | null>(null);
   const [startingBulkRetry, setStartingBulkRetry] = useState(false);
   const [cleaningSourceAudio, setCleaningSourceAudio] = useState(false);
+  const [changingSourceCompression, setChangingSourceCompression] = useState(false);
   const [dailyAgentRunDate, setDailyAgentRunDate] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [fileStatusFilter, setFileStatusFilter] = useState<FileStatusFilter>("all");
@@ -318,6 +322,34 @@ export default function DirectoryTaskDetailPage({
       );
     } finally {
       setCleaningSourceAudio(false);
+    }
+  }, [taskDetail, onRefreshTask]);
+
+  const handleStartSourceCompression = useCallback(async () => {
+    if (!taskDetail) return;
+    setChangingSourceCompression(true);
+    try {
+      const result = await startAsrSourceAudioCompression(taskDetail.id);
+      message.info(result.compression?.message || "Source-audio compression started");
+      onRefreshTask(taskDetail.id);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "Failed to start compression");
+    } finally {
+      setChangingSourceCompression(false);
+    }
+  }, [taskDetail, onRefreshTask]);
+
+  const handleCancelSourceCompression = useCallback(async () => {
+    if (!taskDetail) return;
+    setChangingSourceCompression(true);
+    try {
+      const result = await cancelAsrSourceAudioCompression(taskDetail.id);
+      message.info(result.compression?.message || "Compression cancellation requested");
+      onRefreshTask(taskDetail.id);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "Failed to cancel compression");
+    } finally {
+      setChangingSourceCompression(false);
     }
   }, [taskDetail, onRefreshTask]);
 
@@ -551,6 +583,19 @@ export default function DirectoryTaskDetailPage({
   const bulkRetry = taskDetail?.bulk_retry;
   const bulkRetryActive =
     bulkRetry?.status === "queued" || bulkRetry?.status === "running";
+  const sourceCompression = taskDetail?.source_compression;
+  const sourceCompressionActive =
+    sourceCompression?.status === "queued" ||
+    sourceCompression?.status === "running" ||
+    sourceCompression?.status === "cancelling";
+  const compressibleSourceFileCount = summary?.compressible_source_file_count ?? 0;
+  const compressibleSourceBytes = summary?.compressible_source_bytes ?? 0;
+  const sourceCompressionPercent =
+    sourceCompression && sourceCompression.queued_files > 0
+      ? Math.round(
+          (sourceCompression.processed_files / sourceCompression.queued_files) * 100,
+        )
+      : 0;
   const failedChunkCount = summary?.failed_chunk_count ?? 0;
   const cleanableSourceFileCount = summary?.cleanable_source_file_count ?? 0;
   const cleanableSourceBytes = summary?.cleanable_source_bytes ?? 0;
@@ -628,6 +673,22 @@ export default function DirectoryTaskDetailPage({
             <Text>{formatBytes(cleanableSourceBytes)}</Text>
             <Text type="secondary" style={{ fontSize: 12 }}>
               ({cleanableSourceFileCount} files)
+            </Text>
+          </Space>
+        </Descriptions.Item>
+        <Descriptions.Item label="Compressible WAV">
+          <Space>
+            <Text>{formatBytes(compressibleSourceBytes)}</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              ({compressibleSourceFileCount} files)
+            </Text>
+          </Space>
+        </Descriptions.Item>
+        <Descriptions.Item label="Compression Saved">
+          <Space>
+            <Text>{formatBytes(summary?.compression_saved_bytes ?? 0)}</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              ({summary?.compressed_source_file_count ?? 0} files)
             </Text>
           </Space>
         </Descriptions.Item>
@@ -713,6 +774,46 @@ export default function DirectoryTaskDetailPage({
           }
         />
       ) : null}
+      {sourceCompression ? (
+        <Alert
+          data-testid="asr-source-compression-status"
+          type={
+            sourceCompression.status === "completed"
+              ? "success"
+              : sourceCompression.status === "completed_with_errors" ||
+                  sourceCompression.status === "failed" ||
+                  sourceCompression.status === "interrupted"
+                ? "warning"
+                : "info"
+          }
+          showIcon
+          message={
+            <Space wrap>
+              <Text strong>Lossless source compression</Text>
+              <Tag color={sourceCompression.status === "completed" ? "success" : "processing"}>
+                {sourceCompression.status}
+              </Tag>
+              <Text>
+                {sourceCompression.processed_files}/{sourceCompression.queued_files} files
+              </Text>
+              <Text>Saved {formatBytes(sourceCompression.saved_bytes)}</Text>
+            </Space>
+          }
+          description={
+            <Space direction="vertical" size={6} style={{ width: "100%" }}>
+              <Text type="secondary">{sourceCompression.message}</Text>
+              {sourceCompression.current_source_path ? (
+                <Text ellipsis={{ tooltip: sourceCompression.current_source_path }}>
+                  Current: {sourceCompression.current_source_path}
+                </Text>
+              ) : null}
+              {sourceCompressionActive ? (
+                <Progress percent={sourceCompressionPercent} size="small" status="active" />
+              ) : null}
+            </Space>
+          }
+        />
+      ) : null}
     </Space>
   ) : null;
 
@@ -736,6 +837,45 @@ export default function DirectoryTaskDetailPage({
               <Button size="small" onClick={() => onRefreshTask(taskDetail.id)}>
                 Refresh
               </Button>
+              {sourceCompressionActive ? (
+                <Button
+                  size="small"
+                  danger
+                  icon={<StopOutlined />}
+                  loading={changingSourceCompression}
+                  disabled={sourceCompression?.status === "cancelling"}
+                  onClick={handleCancelSourceCompression}
+                >
+                  {sourceCompression?.status === "cancelling"
+                    ? "Cancelling compression..."
+                    : "Cancel compression"}
+                </Button>
+              ) : (
+                <Popconfirm
+                  title={`Losslessly compress ${compressibleSourceFileCount} completed WAV file${compressibleSourceFileCount === 1 ? "" : "s"}?`}
+                  description="Each WAV is replaced with FLAC only after decoded PCM verification succeeds. Transcripts are kept and partial/failed files are skipped."
+                  disabled={
+                    compressibleSourceFileCount === 0 ||
+                    changingSourceCompression ||
+                    taskDetail.summary.running ||
+                    bulkRetryActive
+                  }
+                  onConfirm={handleStartSourceCompression}
+                >
+                  <Button
+                    size="small"
+                    icon={<FileZipOutlined />}
+                    loading={changingSourceCompression}
+                    disabled={
+                      compressibleSourceFileCount === 0 ||
+                      taskDetail.summary.running ||
+                      bulkRetryActive
+                    }
+                  >
+                    Compress WAVs
+                  </Button>
+                </Popconfirm>
+              )}
               <Popconfirm
                 title={`Delete ${cleanableSourceFileCount} completed source audio file${cleanableSourceFileCount === 1 ? "" : "s"}?`}
                 description="Transcript and timeline outputs are kept. Partial-success files are not deleted so failed chunks can still be retried."
@@ -743,7 +883,8 @@ export default function DirectoryTaskDetailPage({
                   cleanableSourceFileCount === 0 ||
                   cleaningSourceAudio ||
                   taskDetail.summary.running ||
-                  bulkRetryActive
+                  bulkRetryActive ||
+                  sourceCompressionActive
                 }
                 onConfirm={handleCleanupSourceAudio}
               >
@@ -755,7 +896,8 @@ export default function DirectoryTaskDetailPage({
                     cleanableSourceFileCount === 0 ||
                     cleaningSourceAudio ||
                     taskDetail.summary.running ||
-                    bulkRetryActive
+                    bulkRetryActive ||
+                    sourceCompressionActive
                   }
                 >
                   Clean originals
@@ -764,7 +906,12 @@ export default function DirectoryTaskDetailPage({
               <Popconfirm
                 title={`Retry all ${failedChunkCount} failed chunk${failedChunkCount > 1 ? "s" : ""}?`}
                 description="Files are queued and retried one at a time."
-                disabled={failedChunkCount === 0 || bulkRetryActive || startingBulkRetry}
+                disabled={
+                  failedChunkCount === 0 ||
+                  bulkRetryActive ||
+                  startingBulkRetry ||
+                  sourceCompressionActive
+                }
                 onConfirm={handleRetryAllFailedChunks}
               >
                 <Button
@@ -776,7 +923,12 @@ export default function DirectoryTaskDetailPage({
                       <ReloadOutlined />
                     )
                   }
-                  disabled={failedChunkCount === 0 || bulkRetryActive || startingBulkRetry}
+                  disabled={
+                    failedChunkCount === 0 ||
+                    bulkRetryActive ||
+                    startingBulkRetry ||
+                    sourceCompressionActive
+                  }
                 >
                   {bulkRetryActive ? "Retrying..." : "Retry all failed chunks"}
                 </Button>
@@ -784,7 +936,11 @@ export default function DirectoryTaskDetailPage({
               <Button
                 size="small"
                 type="primary"
-                disabled={taskDetail.summary.running || Boolean(taskDetail.paused)}
+                disabled={
+                  taskDetail.summary.running ||
+                  Boolean(taskDetail.paused) ||
+                  sourceCompressionActive
+                }
                 icon={taskDetail.summary.running ? <LoadingOutlined /> : undefined}
                 onClick={() => onRunTask(taskDetail.id)}
               >

@@ -10,6 +10,13 @@ static BULK_CHUNK_RETRY_JOBS: Lazy<StdMutex<BTreeMap<String, BulkChunkRetryState
 static EXTERNAL_IMPORT_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
 static RUNNING_EXTERNAL_IMPORT_TASKS: Lazy<StdMutex<HashSet<String>>> =
     Lazy::new(|| StdMutex::new(HashSet::new()));
+static RUNNING_SOURCE_COMPRESSION_TASKS: Lazy<StdMutex<HashSet<String>>> =
+    Lazy::new(|| StdMutex::new(HashSet::new()));
+static SOURCE_AUDIO_LIFECYCLE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
+static SOURCE_COMPRESSION_CANCEL_REQUESTS: Lazy<StdMutex<HashSet<String>>> =
+    Lazy::new(|| StdMutex::new(HashSet::new()));
+static RUNNING_CHUNK_RETRY_TASKS: Lazy<StdMutex<HashSet<String>>> =
+    Lazy::new(|| StdMutex::new(HashSet::new()));
 static CONTENT_HASH_QUEUE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
 static FILE_STORE_WRITE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
 static RUN_PROGRESS_UPDATE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
@@ -37,6 +44,12 @@ struct RunningTaskGuard {
 
 impl RunningTaskGuard {
     fn acquire(task_id: &str) -> Result<Self, ()> {
+        let _lifecycle = SOURCE_AUDIO_LIFECYCLE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if source_compression_is_running(task_id) {
+            return Err(());
+        }
         let mut running = RUNNING_TASKS.lock().unwrap();
         if running.contains(task_id) {
             return Err(());
@@ -64,6 +77,12 @@ struct RunningExternalImportGuard {
 
 impl RunningExternalImportGuard {
     fn acquire(task_id: &str) -> Result<Self, ()> {
+        let _lifecycle = SOURCE_AUDIO_LIFECYCLE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if source_compression_is_running(task_id) {
+            return Err(());
+        }
         let mut running = RUNNING_EXTERNAL_IMPORT_TASKS.lock().unwrap();
         if running.contains(task_id) {
             return Err(());
@@ -72,6 +91,40 @@ impl RunningExternalImportGuard {
         Ok(Self {
             task_id: task_id.to_string(),
         })
+    }
+}
+
+struct RunningChunkRetryGuard {
+    task_id: String,
+}
+
+impl RunningChunkRetryGuard {
+    fn acquire(task_id: &str) -> Result<Self, ()> {
+        let _lifecycle = SOURCE_AUDIO_LIFECYCLE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if source_compression_is_running(task_id) {
+            return Err(());
+        }
+        let mut running = RUNNING_CHUNK_RETRY_TASKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if running.contains(task_id) {
+            return Err(());
+        }
+        running.insert(task_id.to_string());
+        Ok(Self {
+            task_id: task_id.to_string(),
+        })
+    }
+}
+
+impl Drop for RunningChunkRetryGuard {
+    fn drop(&mut self) {
+        RUNNING_CHUNK_RETRY_TASKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.task_id);
     }
 }
 
@@ -492,6 +545,8 @@ struct FileRecord {
     duplicate_of_source_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     transcript_alias: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_compression: Option<SourceAudioCompressionRecord>,
     media_duration_ms: Option<u64>,
     status: FileStatus,
     output_text_path: Option<PathBuf>,
@@ -522,6 +577,67 @@ struct FileRecord {
     /// retrying the full 30-second chunk that previously blew up Metal memory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     memory_limit_hints: Vec<AsrChunkMemoryHint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SourceAudioCompressionRecord {
+    codec: String,
+    original_source_path: PathBuf,
+    original_size_bytes: u64,
+    original_modified_ms: Option<u64>,
+    compressed_size_bytes: u64,
+    saved_bytes: u64,
+    pcm_sha256: String,
+    compressed_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum SourceAudioCompressionStatus {
+    Queued,
+    Running,
+    Completed,
+    CompletedWithErrors,
+    Cancelling,
+    Cancelled,
+    Interrupted,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SourceAudioCompressionFileResult {
+    source_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compressed_path: Option<String>,
+    status: String,
+    original_bytes: u64,
+    compressed_bytes: u64,
+    saved_bytes: u64,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SourceAudioCompressionState {
+    task_id: String,
+    status: SourceAudioCompressionStatus,
+    queued_files: usize,
+    processed_files: usize,
+    compressed_files: usize,
+    skipped_files: usize,
+    failed_files: usize,
+    original_bytes: u64,
+    compressed_bytes: u64,
+    saved_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    started_at_ms: Option<u64>,
+    updated_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    finished_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    current_source_path: Option<String>,
+    message: String,
+    #[serde(default)]
+    results: Vec<SourceAudioCompressionFileResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -725,6 +841,10 @@ struct TaskSummary {
     /// Subset of source audio files that are safe to delete because ASR outputs exist.
     cleanable_source_bytes: u64,
     cleanable_source_file_count: usize,
+    compressible_source_bytes: u64,
+    compressible_source_file_count: usize,
+    compressed_source_file_count: usize,
+    compression_saved_bytes: u64,
     running: bool,
     max_concurrent_files: u8,
     effective_max_concurrent_files: u8,
@@ -742,6 +862,8 @@ struct TaskWithSummary {
     summary: TaskSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     bulk_retry: Option<BulkChunkRetryState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_compression: Option<SourceAudioCompressionState>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -793,6 +915,8 @@ struct TaskDetail {
     summary: TaskSummary,
     #[serde(skip_serializing_if = "Option::is_none")]
     bulk_retry: Option<BulkChunkRetryState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_compression: Option<SourceAudioCompressionState>,
     files: Vec<FileRecordWithKey>,
     daily_documents: Vec<AsrDailyDocumentSummary>,
 }
