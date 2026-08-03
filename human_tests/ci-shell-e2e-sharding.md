@@ -1226,6 +1226,31 @@
 - 推送后的 macOS `proxy-core` 业务测试、post-action 与 `Complete job` 全部成功；不再依赖 job timeout 取消残留进程。
 - 全程不使用或终止 9900，不修改真实 `~/.bifrost`、真实安装或系统代理。
 
+### TC-CS-56: macOS shell E2E 复用预构建 binary 避免冷编译超时
+
+**背景**：PR #440 的首轮 CI 中，`test_sync_github_gist_expired_status_e2e.sh` 与 `test_traffic_db_schema_reset_e2e.sh` 都在 macOS runner 冷编译阶段触发 600 秒 suite watchdog，业务断言尚未开始。CI 已下载 `target/release/bifrost` 并通过 shell runner 注入 `SKIP_BUILD=true` 与 `BIFROST_BIN`，但前者覆盖了 binary 路径，后者仍无条件执行 `cargo build`。
+
+**操作步骤**：
+1. 检查两个 suite 的 shell 语法：
+   ```bash
+   bash -n e2e-tests/tests/test_sync_github_gist_expired_status_e2e.sh e2e-tests/tests/test_traffic_db_schema_reset_e2e.sh
+   ```
+2. 使用本地已有的预构建 debug binary 分别执行两个真实 suite（远端 CI 使用下载的 release artifact，同走 `SKIP_BUILD/BIFROST_BIN` 分支）：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_sync_github_gist_expired_status_e2e.sh
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_traffic_db_schema_reset_e2e.sh
+   ```
+3. 确认输出包含 `Using prebuilt Bifrost binary`，且不包含 `Building current`。
+4. 推送后确认 macOS `remote` 与 `proxy-core` capability 分片在 600 秒单 suite 预算内通过。
+
+**预期结果**：
+- 两个脚本在 `SKIP_BUILD=true` 时保留 runner 注入的 `BIFROST_BIN`，并在 binary 不可执行时立即给出明确错误。
+- 两个真实 suite 均使用预构建 binary，直接进入 GitHub Gist 过期状态和 legacy traffic DB schema reset 断言并通过；远端 CI 使用 workflow 下载的 release artifact。
+- 测试使用动态端口与临时数据目录，不使用或停止共享 9900，不修改系统代理。
+- 远端 macOS shell E2E 不再因重复 debug 编译触发 600 秒 watchdog。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -1272,6 +1297,7 @@
 | TC-CS-53 | 通过 | 2026-08-01 本轮执行：`bash -n` 检查 runner、process helper 与专项脚本通过；`bash e2e-tests/tests/test_e2e_runner_timeout_cleanup.sh` 通过真实嵌套 runner 触发 1 秒 watchdog，父 shell 与后台子进程均忽略 TERM 并共享日志 FIFO，最终输出 `reason: timed out after 1s` 与 `E2E runner timeout cleanup: PASS (6s)`，父子进程和 stream 均在门槛内回收。`bash e2e-tests/tests/test_coverage_pipeline_contract.sh` 通过 32 个 helper 单测、265 个 shell 语法检查、capability contract 与 3-shard balance（6.4% <= 15%）。CI 同入口 focused timeout cleanup + total-size 两项通过；最终以 600 秒内层预算完整复跑 macOS proxy-core capability，`Total suites: 80 / Passed: 80 / Failed: 0`，约 7 分钟结束，无 watchdog 误杀或 FIFO 卡住；全程未使用/修改真实 9900 与系统代理。 |
 | TC-CS-54 | 通过 | 2026-08-01 本轮执行：语法与串行登记检查通过；首次 focused runner 复现确认 shutdown-marker 修复后 14/14 通过，同时 interactive restart 日志定位到父会话继承 `BIFROST_DESKTOP_CORE=1`，导致临时前台进程被标成 app-bound core。清除 Desktop ownership 环境后再次通过 CI 同入口串行执行，interactive restart 9/9（y / `-y` / n）与 shutdown-marker 14/14 均通过，汇总 `Total suites: 2 / Passed: 2 / Failed: 0`，耗时 5s/4s。随后单独复跑 shutdown-marker 14/14，并对运行前后 worktree release daemon/helper 进程集合进行 15 秒稳定观察，结果无新增残留。动态端口为 15209/17150；真实 9900 Service 保持运行且未被 stop/restart，fake system proxy 断言通过，未修改真实系统代理。 |
 | TC-CS-55 | 通过 | 2026-08-01 本轮执行：`bash -n` 覆盖调度器、进程 helper、CI shell 入口和 tracked cleanup 脚本并通过；静态检查确认并行 test trap、串行 test 尾部和顶层 EXIT trap 均在删除 sandbox 前调用 ownership-scoped `kill_bifrost_in_data_root`，CI shell EXIT 另按同 UID PID 基线有界回收 job-owned 残留。首次指定不存在的 release binary 时前置失败，改用已构建 debug binary 后，进程隔离用例 10/10、umbrella serial lane 1/1、parallel lane 1/1 均通过且无 worktree binary 残留；首次真实 CI 入口复测发现 macOS Bash 3.2 空数组 `set -u` 兼容问题，修复后同入口再次 1/1 通过并输出 `[CLEANUP] no tracked E2E child processes remain`。临时 PID 基线探针确认新增 `sleep` 被终止、基线内 protected `sleep` 保持存活。CI contract 与 ShellCheck error 门禁同步通过。全程使用动态非 9900 端口和临时目录，未修改真实服务、真实安装或系统代理。 |
+| TC-CS-56 | 通过 | 2026-08-03 本轮执行：首条命令因本地 release 产物已在磁盘清理中移除而以前置退出码 2 失败，随即把 human test 修正为使用已有 `target/debug/bifrost` 验证相同的 `SKIP_BUILD/BIFROST_BIN` 分支。`bash -n` 检查两个 suite 通过；随后分别执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost"`，两个脚本均输出 `Using prebuilt Bifrost binary` 且未进入 cargo build。GitHub Gist expired provider 的 4 项状态断言全部通过，legacy traffic DB schema reset 通过；实际使用动态端口 50570/50615 与临时目录，未使用或停止共享 9900，未修改系统代理。远端 release artifact 复用由 PR CI 继续验证。 |
 
 - 2026-08-02：PR #437 rebase 到 `origin/main@485a4c05` 时保留主干的 600 秒 suite watchdog、递归 process-tree/FIFO 回收与 Windows stream fallback，删除已被主干取代的 90 分钟 timeout 提交；将本分支的 detached-process 回归从冲突编号 `TC-CS-53` 顺延为 `TC-CS-55`。rebase 后 `bash e2e-tests/tests/test_coverage_pipeline_contract.sh` 通过 267 个 shell 语法检查、32 个 helper 单测、capability contract 与 shard balance；当前 debug binary 下进程隔离用例 10/10、umbrella serial lane 1/1 通过，正式 9900 服务未被使用或终止。
 

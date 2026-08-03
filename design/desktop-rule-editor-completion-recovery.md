@@ -99,3 +99,4 @@ Bifrost Desktop 的 Rules 编辑器仍能正常显示 Monaco 语法高亮，但�
 - 本地执行定向前端单元测试和 E2E，不默认执行高成本全量 coverage。
 - 推送后由远端 CI 的 `bash scripts/ci/coverage-all.sh --json --gate` 执行 90% 棘轮门禁。
 - CI 失败时按日志进入 fix → push → watch，直到全绿或确认外部阻塞。
+- 若 macOS shell E2E 已下载 release artifact 并设置 `SKIP_BUILD=true`，相关 suite 必须复用注入的 `BIFROST_BIN`；禁止覆盖为 debug 路径或再次执行 `cargo build`，避免冷 runner 在 600 秒 suite watchdog 前尚未进入业务断言。

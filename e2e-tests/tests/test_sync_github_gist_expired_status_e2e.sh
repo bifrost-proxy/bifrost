@@ -36,7 +36,7 @@ require_cmd python3
 TEST_ROOT="$(mktemp -d)"
 export ADMIN_PORT="$(pick_free_port)"
 export BIFROST_DATA_DIR="${TEST_ROOT}/bifrost-data"
-export BIFROST_BIN="${ROOT_DIR}/target/debug/bifrost"
+export BIFROST_BIN="${BIFROST_BIN:-${ROOT_DIR}/target/debug/bifrost}"
 
 cleanup() {
     admin_cleanup_bifrost
@@ -71,8 +71,16 @@ cat >"${BIFROST_DATA_DIR}/sync-state.json" <<'JSON'
 }
 JSON
 
-log "Building current debug bifrost binary"
-(cd "$ROOT_DIR" && cargo build --bin bifrost)
+if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
+    if [[ ! -x "$BIFROST_BIN" ]]; then
+        echo "SKIP_BUILD=true but BIFROST_BIN is not executable: $BIFROST_BIN" >&2
+        exit 1
+    fi
+    log "Using prebuilt Bifrost binary: $BIFROST_BIN"
+else
+    log "Building current debug bifrost binary"
+    (cd "$ROOT_DIR" && cargo build --bin bifrost)
+fi
 
 log "Starting Bifrost admin with an expired GitHub Gist provider session"
 admin_start_bifrost

@@ -26,8 +26,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-log_info "Building current bifrost binary..."
-cargo build --bin bifrost
+if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
+    if [[ ! -x "$BIFROST_BIN" ]]; then
+        log_fail "SKIP_BUILD=true but BIFROST_BIN is not executable: $BIFROST_BIN"
+        exit 1
+    fi
+    log_info "Using prebuilt Bifrost binary: $BIFROST_BIN"
+else
+    log_info "Building current bifrost binary..."
+    cargo build --bin bifrost
+fi
 
 mkdir -p "$TEST_DATA_DIR/traffic"
 
