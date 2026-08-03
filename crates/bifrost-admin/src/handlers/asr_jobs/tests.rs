@@ -9097,6 +9097,105 @@ esac
         assert!(recover_source_compression_backups(&invalid_rollback_task)
             .unwrap_err()
             .contains("rollback backup no longer matches"));
+
+        let outside_source_task =
+            test_directory_task("compression-source-outside-recovery", audio_dir.clone());
+        let outside_source = outside_dir.join("source-outside.wav");
+        write_test_pcm_wav(&outside_source, 1);
+        let outside_source_record = completed_test_record(
+            &outside_source_task.id,
+            &outside_source,
+            &temp.path().join("source-outside-output"),
+        );
+        save_file_store(
+            &outside_source_task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(
+                    source_key(&outside_source),
+                    outside_source_record,
+                )]),
+            },
+        )
+        .unwrap();
+        recover_source_compression_backups(&outside_source_task).unwrap();
+
+        let missing_both_task =
+            test_directory_task("compression-missing-both", audio_dir.clone());
+        let missing_both_old = audio_dir.join("missing-both.wav");
+        let missing_both_flac = audio_dir.join("missing-both.flac");
+        let mut missing_both_record = completed_test_record(
+            &missing_both_task.id,
+            &missing_both_flac,
+            &temp.path().join("missing-both-output"),
+        );
+        missing_both_record.source_compression = Some(SourceAudioCompressionRecord {
+            codec: "flac".to_string(),
+            original_source_path: missing_both_old.clone(),
+            original_size_bytes: 100,
+            original_modified_ms: None,
+            compressed_size_bytes: 4,
+            saved_bytes: 96,
+            pcm_sha256: "stable-pcm".to_string(),
+            compressed_at_ms: now_ms(),
+        });
+        std::fs::write(
+            audio_dir.join(".missing-both.wav.bifrost-compress.part"),
+            b"part",
+        )
+        .unwrap();
+        save_file_store(
+            &missing_both_task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(
+                    source_key(&missing_both_flac),
+                    missing_both_record,
+                )]),
+            },
+        )
+        .unwrap();
+        recover_source_compression_backups(&missing_both_task).unwrap();
+
+        let invalid_restored_task =
+            test_directory_task("compression-invalid-restored", audio_dir.clone());
+        let invalid_restored_old = audio_dir.join("invalid-restored.wav");
+        std::fs::write(&invalid_restored_old, b"wrong").unwrap();
+        let invalid_restored_flac = audio_dir.join("invalid-restored.flac");
+        let mut invalid_restored_record = completed_test_record(
+            &invalid_restored_task.id,
+            &invalid_restored_flac,
+            &temp.path().join("invalid-restored-output"),
+        );
+        invalid_restored_record.source_compression = Some(SourceAudioCompressionRecord {
+            codec: "flac".to_string(),
+            original_source_path: invalid_restored_old,
+            original_size_bytes: 100,
+            original_modified_ms: None,
+            compressed_size_bytes: 4,
+            saved_bytes: 96,
+            pcm_sha256: "stable-pcm".to_string(),
+            compressed_at_ms: now_ms(),
+        });
+        std::fs::write(
+            audio_dir.join(".invalid-restored.wav.bifrost-compress.part"),
+            b"part",
+        )
+        .unwrap();
+        save_file_store(
+            &invalid_restored_task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(
+                    source_key(&invalid_restored_flac),
+                    invalid_restored_record,
+                )]),
+            },
+        )
+        .unwrap();
+        assert!(recover_source_compression_backups(&invalid_restored_task)
+            .unwrap_err()
+            .contains("restored WAV no longer matches"));
     }
 
     #[tokio::test]
@@ -9209,6 +9308,12 @@ esac
             .unwrap_err()
             .contains("compression"));
         drop(guard);
+        assert_ne!(
+            retry_failed_chunks_response("compression-api-matrix", "missing")
+                .await
+                .status(),
+            StatusCode::CONFLICT
+        );
     }
 
     #[test]
@@ -9246,6 +9351,7 @@ esac
             .contains("external import"));
         drop(import);
         let retry = RunningChunkRetryGuard::acquire(task_id).unwrap();
+        assert!(RunningChunkRetryGuard::acquire(task_id).is_err());
         assert!(RunningSourceCompressionGuard::acquire(task_id)
             .err()
             .unwrap()
@@ -9282,6 +9388,47 @@ esac
             .unwrap()
             .contains("chunk retry"));
         BULK_CHUNK_RETRY_JOBS.lock().unwrap().remove(task_id);
+    }
+
+    #[test]
+    fn compressed_source_matches_original_import_target_identity() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let original = temp.path().join("recording.wav");
+        let compressed = temp.path().join("recording.flac");
+        let size = 12_345;
+        let mut record = pending_record("compressed-import-match", &compressed);
+        record.status = FileStatus::Success;
+        record.source_compression = Some(SourceAudioCompressionRecord {
+            codec: "flac".to_string(),
+            original_source_path: original.clone(),
+            original_size_bytes: size,
+            original_modified_ms: None,
+            compressed_size_bytes: 4_000,
+            saved_bytes: size - 4_000,
+            pcm_sha256: "pcm".to_string(),
+            compressed_at_ms: now_ms(),
+        });
+        save_file_store(
+            "compressed-import-match",
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([("compressed".to_string(), record)]),
+            },
+        )
+        .unwrap();
+
+        assert!(has_completed_processing_record_for_import_target(
+            "compressed-import-match",
+            &original,
+            size
+        ));
+        assert!(!has_completed_processing_record_for_import_target(
+            "compressed-import-match",
+            &original,
+            size + 1
+        ));
     }
 
     #[test]
