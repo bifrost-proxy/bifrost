@@ -349,6 +349,7 @@ fn task_with_summary(task: AsrDirectoryTask) -> TaskWithSummary {
     let summary = summarize_task(&task);
     let bulk_retry = bulk_chunk_retry_state(&task.id);
     TaskWithSummary {
+        source_compression: normalized_source_compression_state(&task.id),
         task,
         summary,
         bulk_retry,
@@ -359,6 +360,7 @@ fn task_with_control_summary(task: AsrDirectoryTask) -> TaskWithSummary {
     let summary = summarize_task_from_store(&task);
     let bulk_retry = bulk_chunk_retry_state(&task.id);
     TaskWithSummary {
+        source_compression: normalized_source_compression_state(&task.id),
         task,
         summary,
         bulk_retry,
@@ -398,6 +400,7 @@ fn task_detail(task: AsrDirectoryTask) -> TaskDetail {
     });
     TaskDetail {
         bulk_retry: bulk_chunk_retry_state(&task.id),
+        source_compression: normalized_source_compression_state(&task.id),
         task,
         summary,
         files,
@@ -1339,6 +1342,10 @@ fn summarize_task(task: &AsrDirectoryTask) -> TaskSummary {
         .sum::<u64>();
     let (cleanable_source_file_count, cleanable_source_bytes) =
         cleanable_source_audio_totals(task, &file_store);
+    let (compressible_source_file_count, compressible_source_bytes) =
+        compressible_source_audio_totals(task, &file_store);
+    let (compressed_source_file_count, compression_saved_bytes) =
+        compressed_source_audio_totals(&file_store);
     let processed = file_store
         .files
         .values()
@@ -1390,6 +1397,10 @@ fn summarize_task(task: &AsrDirectoryTask) -> TaskSummary {
         audio_source_file_count,
         cleanable_source_bytes,
         cleanable_source_file_count,
+        compressible_source_bytes,
+        compressible_source_file_count,
+        compressed_source_file_count,
+        compression_saved_bytes,
         running: RUNNING_TASKS.lock().unwrap().contains(&task.id),
         max_concurrent_files: normalize_max_concurrent_files(task.max_concurrent_files),
         effective_max_concurrent_files: effective_max_concurrent_files(task),
@@ -1542,6 +1553,10 @@ fn summarize_task_records(
     } else {
         (0, 0)
     };
+    let (compressible_source_file_count, compressible_source_bytes) =
+        compressible_source_audio_totals(task, file_store);
+    let (compressed_source_file_count, compression_saved_bytes) =
+        compressed_source_audio_totals(file_store);
     TaskSummary {
         discovered: discovered.map(|paths| paths.len()).unwrap_or(file_store.files.len()),
         processed,
@@ -1556,6 +1571,10 @@ fn summarize_task_records(
         audio_source_file_count: discovered.map(|paths| paths.len()).unwrap_or(0),
         cleanable_source_bytes,
         cleanable_source_file_count,
+        compressible_source_bytes,
+        compressible_source_file_count,
+        compressed_source_file_count,
+        compression_saved_bytes,
         running: RUNNING_TASKS.lock().unwrap().contains(&task.id),
         max_concurrent_files: normalize_max_concurrent_files(task.max_concurrent_files),
         effective_max_concurrent_files: effective_max_concurrent_files(task),
@@ -1577,6 +1596,69 @@ fn cleanable_source_audio_totals(task: &AsrDirectoryTask, store: &FileStore) -> 
                 count + 1,
                 bytes + source_size(&record.source_path).or(record.source_size).unwrap_or(0),
             )
+        })
+}
+
+fn compressible_source_audio_totals(task: &AsrDirectoryTask, store: &FileStore) -> (usize, u64) {
+    store
+        .files
+        .values()
+        .filter(|record| is_compressible_source_audio_record(task, record))
+        .fold((0usize, 0u64), |(count, bytes), record| {
+            (count + 1, bytes + source_size(&record.source_path).unwrap_or(0))
+        })
+}
+
+fn compressed_source_audio_totals(store: &FileStore) -> (usize, u64) {
+    store.files.values().fold((0usize, 0u64), |(count, bytes), record| {
+        match &record.source_compression {
+            Some(compression) => (count + 1, bytes + compression.saved_bytes),
+            None => (count, bytes),
+        }
+    })
+}
+
+fn is_compressible_source_audio_record(task: &AsrDirectoryTask, record: &FileRecord) -> bool {
+    record.status == FileStatus::Success
+        && record.source_compression.is_none()
+        && source_path_is_regular_non_symlink_file(&record.source_path)
+        && source_matches_recorded_identity(record)
+        && record
+            .source_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("wav"))
+        && source_path_is_under_audio_dir(&task.audio_dir, &record.source_path)
+        && record.output_text_path.as_ref().is_some_and(|path| path.is_file())
+        && record
+            .output_timeline_path
+            .as_ref()
+            .is_some_and(|path| path.is_file())
+}
+
+fn source_path_is_regular_non_symlink_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_file() && !metadata.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+fn source_matches_recorded_identity(record: &FileRecord) -> bool {
+    path_matches_recorded_identity(
+        &record.source_path,
+        record.source_size,
+        record.source_modified_ms,
+    )
+}
+
+fn path_matches_recorded_identity(
+    path: &Path,
+    recorded_size: Option<u64>,
+    recorded_modified_ms: Option<u64>,
+) -> bool {
+    source_size(path)
+        .is_some_and(|current| recorded_size.is_none_or(|recorded| recorded == current))
+        && source_modified_ms(path).is_some_and(|current| {
+            recorded_modified_ms.is_none_or(|recorded| recorded == current)
         })
 }
 
@@ -1744,6 +1826,7 @@ fn file_record_from_info(task_id: &str, path: &Path, source_info: &SourceAudioIn
         content_hash_algorithm: None,
         duplicate_of_source_key: None,
         transcript_alias: None,
+        source_compression: None,
         media_duration_ms: source_info.media_duration_ms,
         status: FileStatus::Pending,
         output_text_path: None,

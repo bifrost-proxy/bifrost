@@ -6,6 +6,15 @@
 /// placeholder markers in the text file. When all chunks succeed, the file
 /// status is promoted to `success`.
 async fn retry_failed_chunks_response(task_id: &str, file_key: &str) -> Response<BoxBody> {
+    let _retry_guard = match RunningChunkRetryGuard::acquire(task_id) {
+        Ok(guard) => guard,
+        Err(()) => return json_response_with_status(
+            StatusCode::CONFLICT,
+            &serde_json::json!({
+                "message": "Source-audio compression or another chunk retry is running; wait for it to finish",
+            }),
+        ),
+    };
     // Acquire the global ASR job lock so we don't compete with a scheduled
     // task for GPU resources. This serialises manual retry vs scheduled runs.
     let _gpu_guard = ASR_JOB_RUN_LOCK.lock().await;
@@ -400,6 +409,14 @@ async fn retry_all_failed_chunks_response(task_id: &str) -> Response<BoxBody> {
         Some(task) => task,
         None => return error_response(StatusCode::NOT_FOUND, "ASR task not found"),
     };
+    if source_compression_is_running(task_id) {
+        return json_response_with_status(
+            StatusCode::CONFLICT,
+            &serde_json::json!({
+                "message": "Source-audio compression is running; wait for it to finish before retrying failed chunks",
+            }),
+        );
+    }
     let targets = retryable_failed_chunk_files(&load_file_store(task_id));
     if targets.is_empty() {
         let now = now_ms();
@@ -441,6 +458,17 @@ async fn retry_all_failed_chunks_response(task_id: &str) -> Response<BoxBody> {
         }
     }
 
+    let _lifecycle = SOURCE_AUDIO_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if source_compression_is_running(task_id) {
+        return json_response_with_status(
+            StatusCode::CONFLICT,
+            &serde_json::json!({
+                "message": "Source-audio compression is running; wait for it to finish before retrying failed chunks",
+            }),
+        );
+    }
     let now = now_ms();
     let state = BulkChunkRetryState {
         task_id: task_id.to_string(),
@@ -466,6 +494,7 @@ async fn retry_all_failed_chunks_response(task_id: &str) -> Response<BoxBody> {
         results: Vec::new(),
     };
     set_bulk_chunk_retry_state(state.clone());
+    drop(_lifecycle);
 
     tracing::info!(
         task_id = %task_id,

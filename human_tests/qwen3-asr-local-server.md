@@ -680,6 +680,32 @@
 - 页面出现 `Daily Agent run queued` 成功提示。
 - `Open document` 仍进入 `asrDay=<YYYY-MM-DD>` 文档详情，Daily Docs tab URL 恢复行为不受影响。
 
+### TC-QASR-26 转录完成后无损压缩源 WAV
+
+操作步骤：
+
+1. 确认不使用真实 `~/audio` 和当前 9900 服务；执行隔离的真实后端场景：
+   ```bash
+   bash e2e-tests/tests/test_asr_source_compression.sh
+   ```
+2. 脚本在临时 `BIFROST_DATA_DIR`、临时音频目录和临时端口中创建一个 Directory Task，注入三条已有转录记录：可解码的 `success` WAV、损坏的 `success` WAV、可解码的 `partial_success` WAV。
+3. 通过真实 Admin API 调用 `POST /api/asr/tasks/<task_id>/compress-source-audio`，轮询 GET 同路径直到终态。
+4. 比较正常 WAV 与生成 FLAC 解码为 `pcm_s32le` 后的 SHA-256；检查 `files.json` 对应记录主键、`source_path`、`source_compression`，并确认任务 summary 的 `pending`、节省空间和可压缩数量。
+5. 执行聚焦浏览器验证：
+   ```bash
+   pnpm --dir web exec playwright test --grep "ASR task detail starts lossless source compression"
+   ```
+
+预期结果：
+
+- 只有 `status=success` 且 transcript/timeline 都存在的普通 WAV 会进入队列；`partial_success`、failed、缺少产物、目录外文件和非 WAV 文件不会被压缩。
+- 正常 WAV 仅在 FLAC 编码成功且解码 PCM SHA-256 完全一致后被替换；FLAC 不节省空间时保留 WAV。
+- 损坏 WAV 或 ffmpeg/校验/落盘失败时原文件和原文件记录保持可用，不遗留 `.part`；原记录迁移失败时回滚，不出现半迁移状态。
+- 压缩后的文件仍为原 ASR `success` 记录，transcript/timeline 保持不变，任务 `pending=0`，不会把 FLAC 当成新录音重新转录；重复文件引用、内容哈希索引和外接设备导入目标同步迁移。
+- 状态 API 展示 processed/compressed/skipped/failed/saved bytes；WebUI 展示 Compressible WAV、Compression Saved、确认启动、进度/结果和取消入口。
+- 压缩与 ASR run、failed-chunk retry、external import、清理和高风险任务配置互斥；取消在当前单文件安全结束后生效；重启遇到活动状态时显示 interrupted，并可再次启动恢复遗留备份。
+- 测试只清理自身创建的临时目录和临时服务，不触碰 `~/audio`、默认数据目录或系统代理。
+
 ## 清理步骤
 
 - 停止测试启动的 `asr-server` 进程。
@@ -740,3 +766,4 @@
 | 2026-05-22 | TC-QASR-22 / 默认目录真实重启恢复 | `cargo build --bin bifrost`；`./target/debug/bifrost stop`；`BIFROST_DATA_DIR="$HOME/.bifrost" ./target/debug/bifrost start -p 9900 --host 0.0.0.0 --no-system-proxy --daemon`；查询 `/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb` 与 `files.json` | PASS：重启前任务有 71 条 `managed ASR server start failed: Qwen3-ASR service is busy`；重启后自动恢复为 `pending=71 failed=0 running=true`，首个文件进入 `processing`，`chunk_metrics` 最近记录均为 `runner=reuse_server status=ok`，`files.json` 当前 `error_count=0 busy_errors=0`；补充单测验证恢复可重试失败时 task 顶层 `last_error` 会同步清空，非可重试失败仍保留错误。 |
 | 2026-05-22 | TC-QASR-23 / Daily Agent incomplete ASR gate 与未索引 report runner 展示 | `cargo test -p bifrost-admin daily_agent --lib`；默认 9900 查询 `/daily-agent` 和 `/daily-agent/runs` | PASS：单测覆盖 ASR summary 存在 pending/failed/partial/failed chunks 时不允许 after_asr_run 自动触发、stale running 对外转 interrupted、未索引 report 使用任务绑定 runner；重启最新二进制后默认 9900 显示 `last_run.status=interrupted`，2026-05-18/19 `last_run_id=filesystem-scan` 且 `runner=web`。 |
 | 2026-05-26 | TC-QASR-24 / Daily Agent 大 prompt 原生剪贴板投递 | `cargo build --bin bifrost`；`BIFROST_DATA_DIR=$HOME/.bifrost ./target/debug/bifrost start -p 9900 --host 0.0.0.0 --no-system-proxy --daemon`；`./target/debug/bifrost -p 9900 agent run --runner web --session chatgpt-web-native-clipboard-no-sample-20260526 --json "$(cat /Users/eden/.bifrost/asr/data/text/76612de33e9740bc92440ce64a98a4cb/.daily/2026-05-19.md)"`；`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin composer_text_injection --lib`；`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin native_clipboard_paste_uses_platform_modifier --lib` | PASS：阈值保持 120 字符，120 以内走 `Input.insertText`，121 及以上走 `NativeClipboardPaste`；macOS 粘贴 modifier 为 Meta。真实默认目录 ChatGPT Web live run 使用 2026-05-19 daily Markdown 生成 457840 字节 prompt，run `1779727870753-c7feafc8-3173-43c8-8462-014e2b7409b1` 成功，日志 `/tmp/bifrost-chatgpt-web-no-sample-20260526005110.log` 返回 `收到文件《粘贴的文本 (1)(3).txt》`；这验证了粘贴完成后 ChatGPT 文件化且 composer 无正文时不再采样文本，adapter 通过轮询发送按钮可用状态完成发送与最终回复。 |
+| 2026-08-04 | TC-QASR-26 / 转录完成后无损压缩源 WAV | `bash e2e-tests/tests/test_asr_source_compression.sh`；`pnpm --dir web exec playwright test --grep "ASR task detail starts lossless source compression"` | PASS：隔离后端真实 API 场景中正常 success WAV 转为更小 FLAC，前后解码 PCM SHA-256 一致；坏 WAV 保留并记失败，partial_success 不入队，无 `.part`/backup 残留；记录主键迁移后仍 success 且 `pending=0`。聚焦 Playwright 验证 Compress WAVs 确认操作、完成状态和 Saved 2.44 KB 展示。 |

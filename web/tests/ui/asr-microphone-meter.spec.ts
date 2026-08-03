@@ -1132,6 +1132,107 @@ test("ASR task detail can queue bulk retry for all failed chunks", async ({ page
   );
 });
 
+test("ASR task detail starts lossless source compression and shows saved space", async ({
+  page,
+}) => {
+  await installAsrMicrophoneMocks(page);
+  let compressionStarted = false;
+  const compressionState = () =>
+    compressionStarted
+      ? {
+          task_id: "task-compression",
+          status: "completed",
+          queued_files: 1,
+          processed_files: 1,
+          compressed_files: 1,
+          skipped_files: 0,
+          failed_files: 0,
+          original_bytes: 5000,
+          compressed_bytes: 2500,
+          saved_bytes: 2500,
+          updated_at_ms: Date.now(),
+          finished_at_ms: Date.now(),
+          message: "Compressed 1 file; saved 2500 bytes.",
+          results: [],
+        }
+      : undefined;
+  const taskResponse = () => ({
+    id: "task-compression",
+    name: "Compression task",
+    audio_dir: "/tmp/asr-audio",
+    recursive: true,
+    enabled: true,
+    schedule: { kind: "daily", hour: 2, minute: 0 },
+    language: "chinese",
+    model: "Qwen3-ASR-1.7B",
+    runtime_strategy: "reuse_per_file",
+    created_at_ms: Date.now(),
+    updated_at_ms: Date.now(),
+    summary: {
+      discovered: 1,
+      processed: 1,
+      pending: 0,
+      failed: 0,
+      partial_success: 0,
+      failed_chunk_count: 0,
+      deleted_after_processing: 0,
+      audio_source_bytes: compressionStarted ? 2500 : 5000,
+      audio_source_file_count: 1,
+      cleanable_source_bytes: compressionStarted ? 2500 : 5000,
+      cleanable_source_file_count: 1,
+      compressible_source_bytes: compressionStarted ? 0 : 5000,
+      compressible_source_file_count: compressionStarted ? 0 : 1,
+      compressed_source_file_count: compressionStarted ? 1 : 0,
+      compression_saved_bytes: compressionStarted ? 2500 : 0,
+      running: false,
+    },
+    source_compression: compressionState(),
+    daily_documents: [],
+    files: [],
+  });
+
+  await page.route("**/_bifrost/api/asr/tasks", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ tasks: [taskResponse()] }),
+    });
+  });
+  await page.route(
+    "**/_bifrost/api/asr/tasks/task-compression/compress-source-audio",
+    async (route) => {
+      compressionStarted = true;
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({ compression: compressionState() }),
+      });
+    },
+  );
+  await page.route("**/_bifrost/api/asr/tasks/task-compression", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(taskResponse()),
+    });
+  });
+
+  await openPage(page, "ai?aiSection=tools-asr&asrTask=task-compression");
+  const taskPage = page.getByTestId("asr-task-detail-page");
+  await expect(taskPage.getByText("Directory Task: Compression task")).toBeVisible();
+  await expect(taskPage.getByText("Compressible WAV")).toBeVisible();
+  await expect(taskPage.getByText("4.88 KB").first()).toBeVisible();
+
+  await taskPage.getByRole("button", { name: "Compress WAVs" }).click();
+  await page.getByRole("button", { name: "OK" }).click();
+
+  await expect.poll(() => compressionStarted).toBe(true);
+  const status = taskPage.getByTestId("asr-source-compression-status");
+  await expect(status).toContainText("completed");
+  await expect(status).toContainText("Saved 2.44 KB");
+  await expect(taskPage.getByRole("button", { name: "Compress WAVs" })).toBeDisabled();
+});
+
 test("ASR task detail tolerates older responses without daily documents", async ({ page }) => {
   await installAsrMicrophoneMocks(page);
   await page.route("**/_bifrost/api/asr/tasks", async (route) => {

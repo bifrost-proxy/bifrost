@@ -568,6 +568,9 @@ fn spawn_directory_task_run_background_for_date(
     task: AsrDirectoryTask,
     recording_date: Option<NaiveDate>,
 ) -> Result<(), String> {
+    if source_compression_is_running(&task.id) {
+        return Err("ASR source-audio compression is running".to_string());
+    }
     FORCE_PAUSED_TASKS.lock().unwrap().remove(&task.id);
     let running_guard = RunningTaskGuard::acquire(&task.id)
         .map_err(|_| "ASR task is already running".to_string())?;
@@ -1216,6 +1219,7 @@ async fn process_pending_files_sequential(
                         content_hash_algorithm: None,
                         duplicate_of_source_key: None,
                         transcript_alias: None,
+                        source_compression: None,
                         media_duration_ms: None,
                         status: FileStatus::Processing,
                         output_text_path: None,
@@ -2251,6 +2255,7 @@ mod runner_tests {
             content_hash_algorithm: None,
             duplicate_of_source_key: None,
             transcript_alias: None,
+            source_compression: None,
             media_duration_ms: None,
             status: FileStatus::Pending,
             output_text_path: None,
@@ -2334,6 +2339,7 @@ mod coverage_boost {
             content_hash_algorithm: None,
             duplicate_of_source_key: None,
             transcript_alias: None,
+            source_compression: None,
             media_duration_ms: None,
             status: FileStatus::Pending,
             output_text_path: None,
@@ -3287,6 +3293,7 @@ mod coverage_boost_v2 {
             content_hash_algorithm: None,
             duplicate_of_source_key: None,
             transcript_alias: None,
+            source_compression: None,
             media_duration_ms: None,
             status: FileStatus::Pending,
             output_text_path: None,

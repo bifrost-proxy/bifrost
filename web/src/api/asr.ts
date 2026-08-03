@@ -473,6 +473,10 @@ export interface AsrTaskSummary {
   audio_source_file_count: number;
   cleanable_source_bytes: number;
   cleanable_source_file_count: number;
+  compressible_source_bytes: number;
+  compressible_source_file_count: number;
+  compressed_source_file_count: number;
+  compression_saved_bytes: number;
   running: boolean;
   max_concurrent_files?: number;
   effective_max_concurrent_files?: number;
@@ -508,6 +512,7 @@ export interface AsrTaskFileRecord {
   source_path: string;
   source_size?: number;
   source_modified_ms?: number;
+  source_compression?: AsrSourceAudioCompressionRecord;
   source_created_at_ms?: number;
   source_created_at_source?: string;
   media_duration_ms?: number;
@@ -640,6 +645,59 @@ export interface AsrDirectoryTask {
   daily_agent?: AsrDailyAgentConfig;
   summary: AsrTaskSummary;
   bulk_retry?: AsrBulkRetryState;
+  source_compression?: AsrSourceAudioCompressionState;
+}
+
+export interface AsrSourceAudioCompressionRecord {
+  codec: "flac";
+  original_source_path: string;
+  original_size_bytes: number;
+  original_modified_ms?: number;
+  compressed_size_bytes: number;
+  saved_bytes: number;
+  pcm_sha256: string;
+  compressed_at_ms: number;
+}
+
+export interface AsrSourceAudioCompressionFileResult {
+  source_path: string;
+  compressed_path?: string;
+  status: "compressed" | "skipped" | "failed";
+  original_bytes: number;
+  compressed_bytes: number;
+  saved_bytes: number;
+  message: string;
+}
+
+export interface AsrSourceAudioCompressionState {
+  task_id: string;
+  status:
+    | "queued"
+    | "running"
+    | "completed"
+    | "completed_with_errors"
+    | "cancelling"
+    | "cancelled"
+    | "interrupted"
+    | "failed";
+  queued_files: number;
+  processed_files: number;
+  compressed_files: number;
+  skipped_files: number;
+  failed_files: number;
+  original_bytes: number;
+  compressed_bytes: number;
+  saved_bytes: number;
+  started_at_ms?: number;
+  updated_at_ms: number;
+  finished_at_ms?: number;
+  current_source_path?: string;
+  message: string;
+  results: AsrSourceAudioCompressionFileResult[];
+}
+
+export interface AsrSourceAudioCompressionResult {
+  compression: AsrSourceAudioCompressionState | null;
 }
 
 export type AsrPauseMode = "temporary" | "long_term";
@@ -1508,6 +1566,26 @@ export async function cleanupAsrSourceAudio(
     },
   );
   return readJsonResponse<CleanupAsrSourceAudioResult>(response);
+}
+
+export async function startAsrSourceAudioCompression(
+  taskId: string,
+): Promise<AsrSourceAudioCompressionResult> {
+  const response = await asrFetch(
+    `/asr/tasks/${encodeURIComponent(taskId)}/compress-source-audio`,
+    { method: "POST", headers: buildStreamHeaders() },
+  );
+  return readJsonResponse<AsrSourceAudioCompressionResult>(response);
+}
+
+export async function cancelAsrSourceAudioCompression(
+  taskId: string,
+): Promise<AsrSourceAudioCompressionResult> {
+  const response = await asrFetch(
+    `/asr/tasks/${encodeURIComponent(taskId)}/compress-source-audio`,
+    { method: "DELETE", headers: buildStreamHeaders() },
+  );
+  return readJsonResponse<AsrSourceAudioCompressionResult>(response);
 }
 
 export async function streamAsrInitialization(

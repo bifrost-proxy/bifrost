@@ -280,6 +280,9 @@ fn start_external_import_background(
     task: AsrDirectoryTask,
     trigger: &str,
 ) -> Result<AsrExternalImportRunProgress, String> {
+    if source_compression_is_running(&task.id) {
+        return Err("ASR source-audio compression is running".to_string());
+    }
     let running_guard = RunningExternalImportGuard::acquire(&task.id)
         .map_err(|_| "ASR external import is already running".to_string())?;
     let run_id = uuid::Uuid::new_v4().as_simple().to_string();
@@ -747,7 +750,7 @@ fn import_one_file(
         if record.status == "imported"
             && record.source_size == metadata.len()
             && record.source_modified_ms == source_modified
-            && target.is_file()
+            && record.target_path.is_file()
         {
             return Ok("skipped");
         }
@@ -886,10 +889,13 @@ fn has_completed_processing_record_for_import_target(
     source_size: u64,
 ) -> bool {
     load_file_store(task_id).files.values().any(|record| {
-        let source_size_matches =
-            record.source_size.is_none() || record.source_size == Some(source_size);
-        record.source_path == target
-            && source_size_matches
+        let current_source_matches = record.source_path == target
+            && (record.source_size.is_none() || record.source_size == Some(source_size));
+        let compressed_source_matches = record.source_compression.as_ref().is_some_and(|compression| {
+            compression.original_source_path == target
+                && compression.original_size_bytes == source_size
+        });
+        (current_source_matches || compressed_source_matches)
             && matches!(
                 record.status,
                 FileStatus::Success | FileStatus::PartialSuccess

@@ -1300,14 +1300,20 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
   }, [asrSupported, loadDailyAgentReport, selectedDailyAgentReportAgentId, selectedDailyAgentReportDate, selectedTaskId]);
 
   // Auto-refresh task detail every 3 seconds while the task, bulk chunk retry,
-  // or a Daily Agent child run is running.
+  // source compression, or a Daily Agent child run is running.
   useEffect(() => {
     const bulkRetryActive =
       taskDetail?.bulk_retry?.status === "queued" ||
       taskDetail?.bulk_retry?.status === "running";
     const dailyAgentActive = hasRunningDailyAgent(taskDetail?.daily_agent);
+    const sourceCompressionActive = ["queued", "running", "cancelling"].includes(
+      taskDetail?.source_compression?.status || "",
+    );
     if (
-      (!taskDetail?.summary?.running && !bulkRetryActive && !dailyAgentActive) ||
+      (!taskDetail?.summary?.running &&
+        !bulkRetryActive &&
+        !sourceCompressionActive &&
+        !dailyAgentActive) ||
       !taskDetail?.id
     ) return;
     const timer = setInterval(() => {
@@ -1319,7 +1325,15 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
             updated.bulk_retry?.status === "queued" ||
             updated.bulk_retry?.status === "running";
           const updatedDailyAgentActive = hasRunningDailyAgent(updated.daily_agent);
-          if (!updated.summary.running && !updatedBulkRetryActive && !updatedDailyAgentActive) {
+          const updatedSourceCompressionActive = ["queued", "running", "cancelling"].includes(
+            updated.source_compression?.status || "",
+          );
+          if (
+            !updated.summary.running &&
+            !updatedBulkRetryActive &&
+            !updatedSourceCompressionActive &&
+            !updatedDailyAgentActive
+          ) {
             // Task finished — also refresh the task list.
             void refreshTasks();
           }
@@ -1332,6 +1346,7 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
   }, [
     taskDetail?.summary?.running,
     taskDetail?.bulk_retry?.status,
+    taskDetail?.source_compression?.status,
     taskDetail?.daily_agent?.last_status,
     taskDetail?.daily_agent?.agents,
     taskDetail?.id,

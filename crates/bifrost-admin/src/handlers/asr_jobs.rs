@@ -73,6 +73,7 @@ include!("asr_jobs/state.rs");
 include!("asr_jobs/diarization.rs");
 include!("asr_jobs/voiceprint.rs");
 include!("asr_jobs/external_import.rs");
+include!("asr_jobs/compression.rs");
 include!("asr_jobs/api.rs");
 include!("asr_jobs/retry.rs");
 include!("asr_jobs/moss_joint.rs");
