@@ -949,6 +949,38 @@
 **执行结果（2026-07-07，本地纯前端 smoke）**：
 - ✅ PASS：执行 `WEB_PORT=3107 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' pnpm --dir web exec playwright test tests/ui/rules-dynamic-island-global.spec.ts --config=playwright.frontend.config.ts`。测试使用 Vite 纯前端服务和 mock Admin API；验证 Rules 胶囊全局可见、拖拽后刷新回默认位置、详情跳转保持，并在 Merged Rules 中断言 active / partial / covered 行，hover covered `reqHeaders` 行出现被后续同优先级规则覆盖的解释，hover partial `reqHeaders` 行出现范围外仍生效解释，断言可见行号和长 header 不产生横向溢出。
 
+### TC-WRU-49-回归：桌面端启动早期 syntax 失败后恢复规则智能提示
+
+**前置条件**：
+1. 构建当前分支的 Desktop 调试包。
+2. 使用独立临时 `BIFROST_DATA_DIR` 和动态端口启动调试包，设置 `BIFROST_DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES=1`、`BIFROST_DESKTOP_NO_SYSTEM_PROXY=1`、`BIFROST_DESKTOP_SKIP_CERT_PREFLIGHT=1`，不得停止或复用正在运行的共享 9900 实例。
+3. 打开调试包的 Rules 页面并选中 `Default`；不保存测试输入。
+
+**操作步骤**：
+1. 在 Core 启动稳定前打开 Desktop，等待 Rules 页面可编辑。
+2. 在暗色主题的编辑器输入 `a.com reqh`。
+3. 确认候选列表出现后选择第一条 `reqHeaders://(key1=value1&key2=value2)`。
+4. 切换为亮色主题，清空未保存输入，再次输入 `a.com reqh`。
+5. 对隔离 Core 的 `/_bifrost/api/syntax` 执行 `Origin: tauri://localhost` 的 OPTIONS 预检和 GET 请求。
+6. 运行 Playwright 回归，用路由拦截主动中断首次 syntax 请求，放行后续请求，并验证自动提示与 `Ctrl+Space` 手动提示。
+
+**预期结果**：
+- 即使 Desktop 启动早期的首次 syntax 请求失败，后续真实按键仍会重试并自动显示 Monaco Suggest。
+- 暗色与亮色主题下均可看到 `reqHeaders` 候选，候选文字和选中态清晰可读。
+- 按 Enter 后插入完整 `reqHeaders://(key1=value1&key2=value2)` snippet，并选中第一个占位符。
+- syntax 预检允许 `tauri://localhost` 与 `X-Client-Id`，GET 响应包含 `reqHeaders` 协议。
+- Playwright 中首次失败后至少产生第二次 syntax 请求，自动提示和 `Ctrl+Space` 均可见。
+- 全程不保存 `Default` 测试内容，不修改系统代理，不停止或重启共享 9900 实例。
+
+**回归目的**：防止 Desktop 在 Core ready 前只预加载一次动态语法，失败后整次会话永久没有协议智能提示；同时锁定真实 Tauri CORS 头，区分“启动时连接尚未建立”与“服务端未允许 Desktop Origin”。
+
+**执行结果（2026-08-03，隔离 Desktop + 真实 Core）**：
+- ✅ PASS：执行 `pnpm --dir web run build:desktop`、`cargo build --manifest-path desktop/src-tauri/Cargo.toml` 和 `pnpm exec tauri build --debug --config desktop/src-tauri/tauri.conf.json --bundles app`，得到当前分支调试包。
+- ✅ PASS：调试包使用临时数据目录与端口 `52834` 启动，并显式禁用系统代理。通过真实 macOS Desktop WebView 在暗色、亮色下分别输入 `a.com reqh`，两次均自动出现 `reqHeaders://(key1=value1&key2=value2)`；暗色场景按 Enter 后插入完整 snippet 并选中 `key1` 占位符。未点击 Save。
+- ✅ PASS：执行 `e2e-tests/tests/test_admin_cross_site_security.sh`，真实 syntax OPTIONS/GET 的 Tauri Origin、`X-Client-Id` 与 `reqHeaders` 断言通过。
+- ✅ PASS：执行 `pnpm --dir web exec playwright test tests/ui/admin-rules-values.spec.ts --grep '首次 syntax 请求失败后恢复协议智能提示' --workers=1`，首次请求强制失败后自动重试、自动建议、`Ctrl+Space` 和 snippet 插入全部通过（1 passed）。
+- ✅ 边界确认：共享 `/Applications/Bifrost.app` 与 9900 Core 未停止、未重启；所有修改仅发生在隔离临时目录，测试输入未持久化。
+
 ---
 
 ## 清理

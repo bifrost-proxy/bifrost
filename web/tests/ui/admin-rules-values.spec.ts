@@ -78,6 +78,62 @@ test.beforeEach(async ({ request }) => {
   await clearValues(request);
 });
 
+test("Rules 编辑器在首次 syntax 请求失败后恢复协议智能提示", async ({ page }) => {
+  let syntaxRequestCount = 0;
+  await page.route("**/_bifrost/api/syntax", async (route) => {
+    syntaxRequestCount += 1;
+    if (syntaxRequestCount === 1) {
+      await route.abort("connectionfailed");
+      return;
+    }
+    await route.continue();
+  });
+
+  await openPage(page, "rules?rule=Default");
+  await expect(page.getByTestId("rule-editor")).toBeVisible();
+  await expect.poll(() => syntaxRequestCount).toBeGreaterThanOrEqual(1);
+  const recoveredSyntaxResponse = page.waitForResponse(
+    (response) => response.url().includes("/_bifrost/api/syntax") && response.ok(),
+  );
+
+  const editorContainer = page.getByTestId("rule-editor-container");
+  await expect(editorContainer.locator(".monaco-editor")).toBeVisible();
+  const editorInput = editorContainer.getByRole("textbox", { name: "Editor content" });
+  await editorInput.click({ force: true });
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
+  await page.keyboard.press("Backspace");
+  await page.keyboard.insertText("a.com ");
+
+  await page.keyboard.type("r");
+  await recoveredSyntaxResponse;
+  await page.keyboard.type("eq");
+  await expect(page.locator(".view-line").filter({ hasText: "a.com req" }).first()).toBeVisible();
+  await expect.poll(() => syntaxRequestCount).toBeGreaterThanOrEqual(2);
+
+  const suggestWidget = page.locator(".suggest-widget.visible");
+  await expect(suggestWidget).toBeVisible();
+  await expect(suggestWidget.locator(".monaco-list-row").first()).toBeVisible();
+
+  // Narrow the virtualized list so the exact dynamic protocol is rendered.
+  await page.keyboard.type("H");
+
+  const reqHeadersSuggestion = suggestWidget
+    .locator(".monaco-list-row")
+    .filter({ hasText: "reqHeaders://" })
+    .first();
+  await expect(reqHeadersSuggestion).toBeVisible();
+  expect(syntaxRequestCount).toBeGreaterThanOrEqual(2);
+
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Control+Space");
+  await expect(reqHeadersSuggestion).toBeVisible();
+
+  await reqHeadersSuggestion.click();
+  await expect(
+    page.locator(".view-line").filter({ hasText: "a.com reqHeaders://" }).first(),
+  ).toBeVisible();
+});
+
 test("Rules 页面置顶并保护全局 Default 规则，同时允许编辑内容", async ({
   page,
   request,

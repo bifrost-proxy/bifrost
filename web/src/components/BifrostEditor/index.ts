@@ -69,6 +69,13 @@ editor.create = (
       automaticLayout: true,
       smoothScrolling: true,
       links: false,
+      quickSuggestions: {
+        other: true,
+        comments: false,
+        strings: false,
+      },
+      suggestOnTriggerCharacters: true,
+      wordBasedSuggestions: 'off',
       tabSize: 2,
       fontSize: 14,
       lineHeight: 22,

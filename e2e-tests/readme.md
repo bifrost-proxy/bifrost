@@ -18,6 +18,7 @@ tests/                      # E2E / Admin API / 回归测试脚本
 │   ├── test_proxy_admin_api.sh     # Proxy API 测试 (6 tests)
 │   ├── test_system_admin_api.sh    # System API 测试 (10 tests)
 │   ├── test_scripts_admin_api.sh   # Scripts API 测试 (12 tests)
+│   ├── test_admin_cross_site_security.sh # Desktop/Tauri Admin CORS 与 CSRF 回归
 │   ├── test_replay_rules.sh        # Replay custom rules 回归测试
 │   ├── test_tls_logic_simple.sh    # TLS 逻辑测试脚本
 │   └── test_tls_intercept_e2e.sh   # TLS 拦截 E2E 测试脚本
@@ -106,6 +107,10 @@ cargo run -p bifrost-e2e -- --list
 
 # 运行 Web Playwright E2E
 pnpm --dir ../web run test:ui
+
+# 运行 Desktop Rules syntax 启动失败恢复与智能提示回归
+pnpm --dir ../web exec playwright test tests/ui/admin-rules-values.spec.ts \
+  --grep '首次 syntax 请求失败后恢复协议智能提示' --workers=1
 ```
 
 ## test_rules.sh - 单文件测试

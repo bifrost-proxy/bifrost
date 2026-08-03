@@ -144,6 +144,8 @@
 
 ## 9. 非规则代理稳定性回归
 
+- `tests/test_admin_cross_site_security.sh`：对 `/_bifrost/api/syntax` 执行可信 `tauri://localhost` Origin 的 GET 与 `X-Client-Id` 预检，断言桌面 Rules 补全接口保留允许 Origin/Headers，并验证响应协议包含 `reqHeaders`。
+- `web/tests/ui/admin-rules-values.spec.ts`：中断 Rules 编辑器首次 syntax 请求，随后模拟继续输入，断言请求重试、建议框自动出现、`Ctrl+Space` 仍可触发，并可选中 `reqHeaders://`。
 - `tests/test_tls_intercept_e2e.sh`：配置 Domain Passthrough 与 curl App Force Intercept 的冲突场景，验证 `Rules > Domain > App` 中的域名优先级；HTTPS HTML 保持原始响应、不含 `__bifrost_badge__`，流量仅有 CONNECT 外层记录而没有解包后的内层请求。
 - `tests/test_upstream_connection_stability.sh`：通过本地短连接 upstream 验证跨 pool partition 全局背压、CONNECT 突发请求语义、普通 ConnectionRefused 不触发资源恢复退避，以及 cooldown 后不出现 `EADDRNOTAVAIL` / `ENOBUFS` / FD 耗尽错误。
 - `tests/test_desktop_service_ownership_lifecycle.sh`：在 macOS 临时 data-dir 和动态端口中暂停 Desktop-owned Service 模拟短时高负载卡顿，断言健康探针降级但 PID 不变；随后真实终止子进程，断言 watchdog 在下一轮存活检查中拉起新 PID，同时保留 Desktop/CLI ownership 边界。

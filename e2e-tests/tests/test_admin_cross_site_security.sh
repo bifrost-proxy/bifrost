@@ -96,6 +96,44 @@ assert_header_matches /tmp/bifrost-admin-security-index.headers "^content-securi
 
 TOKEN="$(csrf_token)"
 
+# Rules completion loads syntax during Desktop startup. Keep a route-specific
+# guard here so a future router refactor cannot make the endpoint work in the
+# same-origin Web UI while silently dropping Tauri CORS headers.
+curl -sS -o /dev/null \
+  -D "$DATA_DIR/desktop-syntax-preflight.headers" \
+  -X OPTIONS \
+  "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/syntax" \
+  -H 'Origin: tauri://localhost' \
+  -H 'Access-Control-Request-Method: GET' \
+  -H 'Access-Control-Request-Headers: x-client-id'
+assert_header_matches \
+  "$DATA_DIR/desktop-syntax-preflight.headers" \
+  '^access-control-allow-origin: tauri://localhost$' \
+  "desktop Rules syntax preflight allows the trusted Tauri origin"
+assert_header_matches \
+  "$DATA_DIR/desktop-syntax-preflight.headers" \
+  '^access-control-allow-headers:.*X-Client-Id' \
+  "desktop Rules syntax preflight allows the client header"
+
+curl -sS -o "$DATA_DIR/desktop-syntax.json" \
+  -D "$DATA_DIR/desktop-syntax.headers" \
+  "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/syntax" \
+  -H 'Origin: tauri://localhost' \
+  -H 'X-Client-Id: desktop-rules-completion-e2e'
+assert_header_matches \
+  "$DATA_DIR/desktop-syntax.headers" \
+  '^access-control-allow-origin: tauri://localhost$' \
+  "desktop Rules syntax response allows the trusted Tauri origin"
+python3 - "$DATA_DIR/desktop-syntax.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    payload = json.load(source)
+
+assert any(item.get("name") == "reqHeaders" for item in payload.get("protocols", []))
+PY
+
 # Desktop WebView runner saves use PATCH and carry X-Bifrost-CSRF, so the
 # browser performs a CORS preflight before sending the configuration update.
 curl -sS -o /dev/null \
