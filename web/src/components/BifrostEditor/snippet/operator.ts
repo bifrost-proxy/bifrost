@@ -664,6 +664,16 @@ const provider: languages.CompletionItemProvider = {
     if (model.isDisposed()) {
       return { suggestions };
     }
+
+    // Desktop imports this module before the Tauri runtime has necessarily
+    // finished starting the local core. If that eager request fails, keep the
+    // editor recoverable by retrying when the user actually asks for
+    // completions. fetchSyntaxInfo deduplicates concurrent requests, and a
+    // failed load leaves dynamicOperators null so a later keystroke can retry.
+    if (dynamicOperators === null) {
+      await loadDynamicData();
+    }
+
     const text = model.getLineContent(position.lineNumber);
     const textBeforeCursor = text.substring(0, position.column - 1);
 
