@@ -4,6 +4,38 @@ struct RunningSourceCompressionGuard {
 
 struct RemoveFileOnDrop(PathBuf);
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum TestCompressionFfmpegMode {
+    LosslessSmaller,
+    NoSpaceSaving,
+    PcmMismatch,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_COMPRESSION_FFMPEG_MODE: std::cell::Cell<Option<TestCompressionFfmpegMode>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+struct TestCompressionFfmpegGuard(Option<TestCompressionFfmpegMode>);
+
+#[cfg(test)]
+impl TestCompressionFfmpegGuard {
+    fn set(mode: TestCompressionFfmpegMode) -> Self {
+        let previous = TEST_COMPRESSION_FFMPEG_MODE.replace(Some(mode));
+        Self(previous)
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestCompressionFfmpegGuard {
+    fn drop(&mut self) {
+        TEST_COMPRESSION_FFMPEG_MODE.set(self.0);
+    }
+}
+
 impl Drop for RemoveFileOnDrop {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
@@ -288,34 +320,7 @@ fn compress_source_record(
         let _ = std::fs::remove_file(&part_path);
         let _part_cleanup = RemoveFileOnDrop(part_path.clone());
 
-        let mut encode = std::process::Command::new("ffmpeg");
-        encode
-            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"])
-            .arg(source)
-            .args([
-                "-map",
-                "0:a:0",
-                "-map_metadata",
-                "0",
-                "-c:a",
-                "flac",
-                "-compression_level",
-                "8",
-                "-f",
-                "flac",
-            ])
-            .arg(&part_path);
-        let output = run_process_with_timeout(
-            &mut encode,
-            ffmpeg_normalize_timeout(record.media_duration_ms),
-        )?;
-        if !output.status.success() {
-            let _ = std::fs::remove_file(&part_path);
-            return Err(format!(
-                "ffmpeg failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
+        encode_source_to_flac(source, &part_path, record.media_duration_ms)?;
         let compressed_bytes = source_size(&part_path)
             .ok_or_else(|| "compressed output is missing".to_string())?;
         if compressed_bytes >= original_bytes {
@@ -426,7 +431,70 @@ fn compress_source_record(
     }
 }
 
+fn encode_source_to_flac(
+    source: &Path,
+    part_path: &Path,
+    media_duration_ms: Option<u64>,
+) -> Result<(), String> {
+    #[cfg(test)]
+    if let Some(mode) = TEST_COMPRESSION_FFMPEG_MODE.get() {
+        return match mode {
+            TestCompressionFfmpegMode::LosslessSmaller
+            | TestCompressionFfmpegMode::PcmMismatch => {
+                std::fs::write(part_path, b"fLaC")
+                    .map_err(|error| format!("write fake compressed output: {error}"))
+            }
+            TestCompressionFfmpegMode::NoSpaceSaving => std::fs::copy(source, part_path)
+                .map(|_| ())
+                .map_err(|error| format!("write fake no-saving output: {error}")),
+        };
+    }
+
+    let mut encode = std::process::Command::new("ffmpeg");
+    encode
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"])
+        .arg(source)
+        .args([
+            "-map",
+            "0:a:0",
+            "-map_metadata",
+            "0",
+            "-c:a",
+            "flac",
+            "-compression_level",
+            "8",
+            "-f",
+            "flac",
+        ])
+        .arg(part_path);
+    let output = run_process_with_timeout(&mut encode, ffmpeg_normalize_timeout(media_duration_ms))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let _ = std::fs::remove_file(part_path);
+        Err(format!(
+            "ffmpeg failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
 fn decoded_pcm_sha256(path: &Path, media_duration_ms: Option<u64>) -> Result<String, String> {
+    #[cfg(test)]
+    if let Some(mode) = TEST_COMPRESSION_FFMPEG_MODE.get() {
+        let mismatched_part = matches!(mode, TestCompressionFfmpegMode::PcmMismatch)
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".bifrost-compress.part"));
+        return Ok(if mismatched_part {
+            "test-pcm-sha256-mismatch"
+        } else {
+            "test-pcm-sha256"
+        }
+        .to_string());
+    }
+
     let mut command = std::process::Command::new("ffmpeg");
     command
         .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])

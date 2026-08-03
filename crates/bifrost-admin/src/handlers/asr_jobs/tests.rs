@@ -7911,6 +7911,8 @@ mod tests {
     #[test]
     fn source_compression_replaces_only_completed_wav_and_migrates_record_key() {
         let _lock = test_data_dir_lock();
+        let _ffmpeg =
+            TestCompressionFfmpegGuard::set(TestCompressionFfmpegMode::LosslessSmaller);
         let temp = TempDir::new().unwrap();
         let _env = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -8077,6 +8079,8 @@ mod tests {
     #[test]
     fn source_compression_skips_flac_that_would_not_save_space() {
         let _lock = test_data_dir_lock();
+        let _ffmpeg =
+            TestCompressionFfmpegGuard::set(TestCompressionFfmpegMode::NoSpaceSaving);
         let temp = TempDir::new().unwrap();
         let _env = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
@@ -8100,6 +8104,37 @@ mod tests {
         assert_eq!(result.status, "skipped", "{}", result.message);
         assert!(source.is_file());
         assert!(!audio_dir.join("empty.flac").exists());
+        assert!(load_file_store(&task.id).files.contains_key(&key));
+    }
+
+    #[test]
+    fn source_compression_preserves_wav_when_decoded_pcm_does_not_match() {
+        let _lock = test_data_dir_lock();
+        let _ffmpeg = TestCompressionFfmpegGuard::set(TestCompressionFfmpegMode::PcmMismatch);
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let source = audio_dir.join("mismatch.wav");
+        write_test_pcm_wav(&source, 1);
+        let task = test_directory_task("compression-pcm-mismatch", audio_dir.clone());
+        let key = source_key(&source);
+        let record = completed_test_record(&task.id, &source, &temp.path().join("outputs"));
+        save_file_store(
+            &task.id,
+            &FileStore {
+                version: TASK_STORE_VERSION,
+                files: BTreeMap::from([(key.clone(), record.clone())]),
+            },
+        )
+        .unwrap();
+
+        let result = compress_source_record(&task, &key, &record);
+
+        assert_eq!(result.status, "failed");
+        assert!(result.message.contains("decoded PCM verification failed"));
+        assert!(source.is_file());
+        assert!(!audio_dir.join("mismatch.flac").exists());
         assert!(load_file_store(&task.id).files.contains_key(&key));
     }
 
@@ -8249,6 +8284,8 @@ mod tests {
     #[test]
     fn source_compression_recovery_rolls_back_migrated_record_when_flac_is_missing() {
         let _lock = test_data_dir_lock();
+        let _ffmpeg =
+            TestCompressionFfmpegGuard::set(TestCompressionFfmpegMode::LosslessSmaller);
         let temp = TempDir::new().unwrap();
         let _env = EnvGuard::set_data_dir(temp.path());
         let audio_dir = temp.path().join("audio");
