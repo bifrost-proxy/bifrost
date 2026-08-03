@@ -684,7 +684,7 @@
 
 操作步骤：
 
-1. 确认不使用真实 `~/audio` 和当前 9900 服务；执行隔离的真实后端场景：
+1. 确认 `ffmpeg` 可执行，且不使用真实 `~/audio` 和当前 9900 服务；执行隔离的真实后端场景：
    ```bash
    bash e2e-tests/tests/test_asr_source_compression.sh
    ```

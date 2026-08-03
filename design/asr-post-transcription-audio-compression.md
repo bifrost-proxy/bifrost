@@ -35,6 +35,7 @@ text/timeline 产物存在的 WAV，将其转为 FLAC，再原子迁移任务记
 ### 必须真实验证
 
 - 真实 FFmpeg 生成 WAV，构造成功/失败/partial/缺产物记录后通过 Admin API 启动压缩。
+- Linux CI 与 macOS agent-extensions 分片显式准备 FFmpeg，确保真实编解码用例不会因 runner 镜像差异而被跳过或误报。
 - 轮询独立压缩状态到 terminal，断言 PCM hash 相同、WAV 已回收、FLAC 可播放且支持 Range。
 - 复跑压缩得到零候选，普通 Run 在压缩期间返回冲突，失败或取消不删除 WAV。
 - WebUI 亮色/暗色均显示紧凑的统计、确认文案和进度，不新增硬编码颜色。
