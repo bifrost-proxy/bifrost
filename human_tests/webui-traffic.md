@@ -1109,15 +1109,15 @@ wait
 4. 确认仍然只有一个 `Bifrost Traffic Detail` 窗口，且 Request ID 更新为第二条记录。
 5. 在详情窗口点击 `Attach Back`。
 6. 确认原生详情窗口关闭，主窗口内嵌详情恢复且未出现 `Failed to open detail window`。
-7. 再次打开原生详情窗口，然后使用操作系统关闭按钮手动关闭。
-8. 确认主窗口再次恢复内嵌详情，之后仍可重新打开原生窗口。
+7. 再次打开原生详情窗口，然后在 macOS 按 `Command+W`（其他平台使用系统关闭按钮）关闭。
+8. 确认主窗口立即恢复内嵌详情；直接选择第三条请求时详情正常展示，无需点击右上角挂回按钮，之后仍可重新打开原生窗口。
 9. 在普通浏览器运行 Traffic popup E2E，点击 `Attach Back` 后 popup 关闭且 SSE 详情消息未丢失。
 
 **预期结果**：
 
 - Desktop 使用真实原生窗口展示详情，不显示失败 Toast，也不创建浏览器空白页。
 - 重复打开复用固定窗口，不累计多个详情窗口；详情记录随当前选择更新。
-- `Attach Back` 和系统手动关闭都能清理 detached 状态并恢复主窗口内嵌详情。
+- `Attach Back`、`Command+W` 和系统手动关闭都能清理 detached 状态并恢复主窗口内嵌详情；关闭后直接选择其他请求即可显示详情。
 - 浏览器继续使用 popup，原有打开、关闭、挂回和详情数据保持行为不变。
 - 含特殊字符、空值或超长参数由聚焦 Rust/Web 单元测试覆盖，不产生可注入的应用路由。
 
@@ -1133,7 +1133,11 @@ rm -f /tmp/bifrost-mock-test.json
 
 ## 执行记录
 
-2026-08-04 桌面原生 Traffic 独立详情窗口执行记录（待补 GUI 点击确认）：
+2026-08-04 桌面原生 Traffic 独立详情窗口执行记录（已完成功能验证，`Command+W` 回归待修复后复测）：
+
+- 用户真实 GUI 验证：当前源码构建可以正常打开独立详情窗口；按 `Command+W` 关闭后，主窗口仍停留在 detached 状态，选择其他请求不展示详情，必须点击右上角挂回按钮。该结果确认了 TC-WTR-回归-04 步骤 1-6 通过、步骤 7-8 复现关闭状态同步缺陷，并提供了主窗口截图证据。
+- 根因证据：详情窗口 `Destroyed` 回调错误调用 `get_webview(HOST_WINDOW_LABEL)`；`host` 是原生顶层壳，React 页面实际位于 `MAIN_WINDOW_LABEL`（`main`）WebView，因此关闭 DOM 事件从未送达主页面。
+- 修复后复测要求：基于包含 `MAIN_WINDOW_LABEL` 修复的最终构建重新执行步骤 7-8，确认 `Command+W` 后详情面板立即恢复且直接选择下一请求可展示详情，再将本记录更新为通过。
 
 - 已执行用例：`TC-WTR-回归-04` 的隔离桌面启动、真实流量准备、原生窗口契约、浏览器 popup 与参数边界部分。
 - 真实源码桌面：以 `BIFROST_DATA_DIR=/tmp/bifrost-desktop-detail-human.Nb2KeO`、`BIFROST_DESKTOP_BIN=<worktree>/target/debug/bifrost`、`BIFROST_DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES=1` 启动当前源码构建，代理端口为 `19876`；`/_bifrost/api/system/overview` 返回 HTTP 200，未使用正式 `9900`。

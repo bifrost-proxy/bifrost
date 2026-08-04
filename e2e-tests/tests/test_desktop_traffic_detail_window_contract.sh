@@ -21,7 +21,13 @@ PY
 grep -Fq 'async fn open_traffic_detail_window' desktop/src-tauri/src/traffic_detail_window.rs
 grep -Fq 'async fn close_traffic_detail_window' desktop/src-tauri/src/traffic_detail_window.rs
 grep -Fq 'WebviewWindowBuilder::new(' desktop/src-tauri/src/traffic_detail_window.rs
-grep -Fq 'get_webview(HOST_WINDOW_LABEL)' desktop/src-tauri/src/traffic_detail_window.rs
+grep -Fq 'get_webview(MAIN_WINDOW_LABEL)' desktop/src-tauri/src/traffic_detail_window.rs
+grep -Fq 'tauri::WindowEvent::Destroyed' desktop/src-tauri/src/traffic_detail_window.rs
+grep -Fq 'traffic detail window closed but main UI notification failed' desktop/src-tauri/src/traffic_detail_window.rs
+if grep -Fq 'get_webview(HOST_WINDOW_LABEL)' desktop/src-tauri/src/traffic_detail_window.rs; then
+  echo "[desktop-traffic-detail] FAIL: close events must target the main WebView, not the host shell"
+  exit 1
+fi
 grep -Fq 'DESKTOP_TRAFFIC_DETAIL_CLOSED_EVENT' web/src/pages/Traffic/index.tsx
 
 pnpm --dir web test:unit \

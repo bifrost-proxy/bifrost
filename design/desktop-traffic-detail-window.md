@@ -33,10 +33,15 @@ Traffic 页面右上角的 “Open in new window” 目前统一调用浏览器
 调用现有 core invoke。命令必须是异步命令，避免 Windows 上在同步 command 中创建 WebView
 可能产生的事件循环死锁。
 
-窗口被操作系统关闭时，Rust 向主 WebView 派发
+窗口被操作系统关闭（包括 macOS `Command+W`）时，Rust 在 `Destroyed` 生命周期事件中向标签为
+`main` 的主 WebView 派发
 `desktop://traffic-detail-closed` DOM `CustomEvent`。主页面收到事件后清除 detached 状态，恢复
 内嵌详情。主动 `Attach Back` 同样先恢复 store，再调用关闭命令；关闭命令幂等，因此两个路径
 发生竞态也不会留下错误状态。
+
+原生顶层壳窗口标签是 `host`，其自身不承载 React DOM；关闭通知不得向 `host` 查找 WebView，
+否则窗口虽已销毁，主页面仍会停留在 detached 状态，后续选择记录也不会展示内嵌详情。
+通知失败会写入 `desktop-bootstrap.log`，但不阻止操作系统完成窗口销毁。
 
 ### Web 兼容分支
 
@@ -65,7 +70,7 @@ Traffic 页面根据 `isDesktopShell()` 分流：
 - Rust 单元测试：正常路由、特殊字符编码、空 ID、超长 ID。
 - Web 单元测试：Tauri open/close invoke 参数；桌面打开策略不调用 `window.open`；浏览器 popup
   正常与被阻止两条路径。
-- E2E：执行桌面详情窗口契约脚本；复跑 Traffic 浏览器 popup 的 Playwright 用例，验证新窗口、
+- E2E：执行桌面详情窗口契约脚本，静态阻止关闭通知误投到 `host`；复跑 Traffic 浏览器 popup 的 Playwright 用例，验证新窗口、
   `Attach Back` 与关闭行为。
 - human test：在真实桌面应用中打开详情窗口、切换记录复用、点击 `Attach Back`、手动关闭；在
   浏览器中复测 popup 兼容路径。
