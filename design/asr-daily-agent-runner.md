@@ -22,6 +22,7 @@ Daily Agent Runner 是 ASR 定时任务的后处理阶段:ASR 音频转写成功
 - ChatGPT Web 契约输出:`daily_report` 必须含 `# YYYY-MM-DD 日报` / `## 今日概览` / `## 证据与不确定性`;`tomorrow_todo` 必须含 `# 明日 To Do List - YYYY-MM-DD` / `## 明天必须完成` / `## 可选推进` / `## 需要确认`;重试续写按 Agent 契约分流。
 - ChatGPT Web browser 恢复只恢复与当前 `execution_mode` 一致的 orphan;headed 不复用 headless,反之亦然。
 - Admin API 与 CLI 提供列表、增改、run、send、sync、reports 详情等入口;WebUI 提供 Daily Agent 管理列表页 + 单 Agent 详情页 + Daily Docs 行级 Run(All / 单 Agent) + report 全屏详情。
+- Daily Docs 行级 Run 是用户显式重跑语义:请求固定携带 `date` 与 `force=1`;选择单个 Agent 时额外携带 `agent_id`。只要该 task 当前没有 Daily Agent 运行,无论目标日期历史上成功、失败或 processed hash 未变化,都必须创建新的 run。task 已占用时保持 task-level 串行并返回 `already_running`,WebUI 必须显示 warning,不得误报 queued/success。
 - `report_sync_dir` 自动同步:Runner 成功生成 report 后复制到 Agent 子目录;ASR daily markdown 刷新后复制到目标根目录的 `original_text/`;`last_report_sync` 与 `last_original_sync` 分别记录 copied/skipped/failed;外部目录超时不影响 ASR 或 report 成功状态。
 - Daily Agent Records 数据源:`daily_agent_processed.json` + 磁盘 `.daily/agents/<agent_id>/output/<output_dir>/`;兼容旧路径 `daily/<output_dir>/`、`.daily/agents/<agent_id>/<output_dir>/`、`daily/Report/`;processed state 缺失时仍展示磁盘已有报告。
 - IM delivery 单字段 `channel = owner:<provider_id> | target:<target_id>`;`mode=summary|full_report`;超长 full_report 按固定大小拆分为多条,不降级 summary。
@@ -39,7 +40,7 @@ Daily Agent Runner 是 ASR 定时任务的后处理阶段:ASR 音频转写成功
 
 - ASR task 创建时 daily workspace 自动初始化:`.daily/.gitignore`、`agents/<agent_id>/AGENTS.md` 都存在;git 不可用时 `git_available=false` 但不阻塞。
 - ASR 音频处理完成后自动触发 Daily Agent 生成 report;git commit best-effort 出现。
-- Daily Docs 行级 `Run All Agents` 按行 date 串行运行所有 enabled Agent;单 Agent 下拉只运行指定 agent_id。
+- Daily Docs 行级 `Run All Agents` 按行 date 强制串行重跑所有 enabled Agent;单 Agent 下拉强制重跑指定 agent_id;历史成功、失败和 unchanged 均不能阻止显式重跑。
 - 多 Agent 共用同一 ChatGPT Web runner 时按 task-level 锁串行;单 Agent 失败只写自身 `last_status/last_error/last_run_id`,不阻断队列。
 - 手动 Run Now + IM 绑定通道 → 成功发送 summary 或 full_report;超长 full_report 分多条。
 - `report_sync_dir` 设置后 report 复制到 Agent 子目录,原始 daily markdown 复制到 `original_text/`;iCloud 卡住时同步失败但 ASR 与 report 生成成功。
@@ -177,7 +178,7 @@ ChatGPT Web plan 不包含 `unchanged`;文件型外部 runner 的 plan 不塞 da
 
 - `GET /_bifrost/api/asr/tasks/{id}/daily-agent`:配置 + last run 状态 + processed 概览。
 - `GET/PUT /_bifrost/api/asr/tasks/{id}/daily-agent/agents`:agent 列表增改。
-- `POST /_bifrost/api/asr/tasks/{id}/daily-agent/run`:body `{date?, agent_id?, force?}`;省略 `agent_id` = 全部;省略 `date` = 最新 daily。
+- `POST /_bifrost/api/asr/tasks/{id}/daily-agent/run`:query `{date?, agent_id?, force?}`;省略 `agent_id` = 全部;省略 `date` = 最新 daily。Daily Docs 行级入口固定发送 `date=<row>&force=1`,单 Agent 入口再发送 `agent_id=<id>`。
 - `POST /_bifrost/api/asr/tasks/{id}/daily-agent/send`:重新触发 IM 发送。
 - `POST /_bifrost/api/asr/tasks/{id}/daily-agent/sync`:手动同步全部现有 report 与原始 daily markdown 到 `report_sync_dir`。
 - `GET /_bifrost/api/asr/tasks/{id}/daily-agent/reports/{date}`:返回 report Markdown 全文;非法日期拒绝,缺失 404。
@@ -187,7 +188,7 @@ ChatGPT Web plan 不包含 `unchanged`;文件型外部 runner 的 plan 不塞 da
 
 - ASR 创建/编辑页:Daily Agent 开关 + Runner 单字段下拉(复用 AI → Agent → Runners)+ IM Channel 单字段下拉(owner + target 列表)+ terminology + report_sync_dir。
 - Task Detail → Daily Agent tab:Agent 管理列表(任务级启用 / Report Sync / Refresh / Add / Run / Edit / Delete),单 Agent 详情页承载 Runner / Trigger / Timeout / Session Key / Output Dir / IM Delivery / Last Run Status / Instructions。
-- Task Detail → Daily Docs tab:每行 `Run All Agents` 主按钮 + 单 Agent 下拉;URL 参数 `asrTaskTab` / `asrDailyReport` 恢复;窄窗口横向滚动限制在表格内。
+- Task Detail → Daily Docs tab:每行 `Run All Agents` 主按钮 + 单 Agent 下拉;两者均为显式 force rerun;后端返回 `already_running` 时显示 warning 而非成功提示;URL 参数 `asrTaskTab` / `asrDailyReport` 恢复;窄窗口横向滚动限制在表格内。
 - Report 全屏详情:Markdown 渲染,不嵌套纵向滚动。
 - ASR 顶层 tab 英文文案:`Scheduled Tasks` / `ASR Management` / `Voiceprint & Wake`。
 
@@ -250,7 +251,7 @@ ChatGPT Web plan 不包含 `unchanged`;文件型外部 runner 的 plan 不塞 da
 - ASR run 完成 → 音频处理完再看到 Daily Agent queued;仍在 processing 时不启动。
 - daily markdown unchanged → skipped;追加内容后 ChatGPT Web 只收新增 tail。
 - 手动 Run Now → `report/` 生成文件。
-- Daily Docs 行级 `Run All Agents` → 请求只带 `date`,后端串行运行全部 enabled Agent;单 Agent 下拉 → 带 `agent_id` 只运行指定 Agent。
+- Daily Docs 行级 `Run All Agents` → 请求带 `date&force=1`,后端串行强制重跑全部 enabled Agent;单 Agent 下拉 → 额外带 `agent_id` 只强制重跑指定 Agent;mock `already_running` 时页面显示 warning 且不宣称已入队。
 - `report_sync_dir` 自动同步 + 手动同步;`original_text/` 只接收合法的 `YYYY-MM-DD.md`;iCloud 卡住时同步失败但 ASR 与 report 成功;`last_report_sync` 和 `last_original_sync` 记录 copied/skipped/failed。
 - CLI `daily set-sync-dir` / `daily sync` 输出 target/total/copied/skipped/failed。
 - `/daily-agent/reports/{date}` 返回 report Markdown 全文;非法日期拒绝;缺失 404。
