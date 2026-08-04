@@ -513,6 +513,7 @@ export interface AsrTaskFileRecord {
   source_size?: number;
   source_modified_ms?: number;
   source_compression?: AsrSourceAudioCompressionRecord;
+  source_compression_eligible?: boolean;
   source_created_at_ms?: number;
   source_created_at_source?: string;
   media_duration_ms?: number;
@@ -1557,9 +1558,11 @@ export async function retryAllFailedChunks(
 
 export async function cleanupAsrSourceAudio(
   taskId: string,
+  confirmName: string,
 ): Promise<CleanupAsrSourceAudioResult> {
+  const query = new URLSearchParams({ confirm_name: confirmName });
   const response = await asrFetch(
-    `/asr/tasks/${encodeURIComponent(taskId)}/cleanup-source-audio`,
+    `/asr/tasks/${encodeURIComponent(taskId)}/cleanup-source-audio?${query}`,
     {
       method: "POST",
       headers: buildStreamHeaders(),

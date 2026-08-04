@@ -21,6 +21,10 @@ text/timeline 产物存在的 WAV，将其转为 FLAC，再原子迁移任务记
   duplicate 引用保持一致。
 - 压缩异步执行并持久化进度；重复启动幂等，进程中断后可重新启动恢复。
 - 管理端展示可压缩文件/空间、累计已释放空间、当前进度、失败结果，并提供启动和取消操作。
+- Files 页始终展示已压缩数、当前仍可压缩数、当前批次整体进度，并在每个文件行展示
+  `Uncompressed/Compressing/Compressed/Skipped/Failed/Not eligible` 状态。
+- `Clean originals` 使用按钮确认、任务名输入确认两级保护，且 Admin API 必须校验任务名，
+  不能通过绕过 WebUI 的无确认请求删除源音频。
 
 ### 必须不破坏
 
@@ -39,6 +43,8 @@ text/timeline 产物存在的 WAV，将其转为 FLAC，再原子迁移任务记
 - 轮询独立压缩状态到 terminal，断言 PCM hash 相同、WAV 已回收、FLAC 可播放且支持 Range。
 - 复跑压缩得到零候选，普通 Run 在压缩期间返回冲突，失败或取消不删除 WAV。
 - WebUI 亮色/暗色均显示紧凑的统计、确认文案和进度，不新增硬编码颜色。
+- WebUI 验证 Files 页总体/逐文件压缩状态，以及清理操作两次确认、错误任务名禁用和
+  正确任务名随 API 请求提交。
 
 ## 状态与数据模型
 
@@ -84,6 +90,8 @@ Task summary 增加：
 - `GET /api/asr/tasks/{id}/compress-source-audio`：读取最近状态。
 - `POST /api/asr/tasks/{id}/compress-source-audio`：创建异步压缩任务。
 - `DELETE /api/asr/tasks/{id}/compress-source-audio`：请求取消；当前 FFmpeg 结束后在文件边界停止。
+- `POST /api/asr/tasks/{id}/cleanup-source-audio?confirm_name=<task_name>`：只有任务名精确匹配
+  才清理完整成功记录的源音频；缺失或错误确认返回 400。
 
 同一时间全局只运行一个压缩 job，降低磁盘争用。普通 run、bulk retry、external import、
 cleanup originals 与 compression 双向互斥。
@@ -95,7 +103,12 @@ cleanup originals 与 compression 双向互斥。
 - `Compressible WAV` 展示候选空间和数量。
 - `Compression Saved` 展示累计释放空间和文件数。
 - `Compress WAVs` 使用非危险操作按钮，确认文案明确 FLAC、PCM 校验和执行前提。
-- 活跃 job 显示当前文件、文件数进度、已释放空间和 Cancel。
+- Overview 与 Files 页都展示已压缩/未压缩候选数；活跃 job 显示当前文件、当前批次
+  `processed/queued` 进度、已释放空间和 Cancel。
+- Files 表格增加 `Compression` 列；可压缩资格由后端 `source_compression_eligible` 给出，
+  保证 `Not eligible` 文件不会因为前端推断错误而被展示为待压缩。
+- `Clean originals` 第一层 Popconfirm 只进入最终确认；第二层危险 Modal 展示文件数和空间，
+  只有输入完整任务名后才允许提交，提交时把 `confirm_name` 传给后端再次校验。
 - 失败使用 warning，不用新增自定义颜色，保证亮暗主题一致。
 
 ## 测试方案

@@ -258,7 +258,15 @@ assert summary["cleanable_source_file_count"] == 1, summary
 assert summary["cleanable_source_bytes"] == len(b"done-audio"), summary
 PY
 
-curl -fsS -X POST "http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/asr/tasks/${TASK_ID}/cleanup-source-audio" \
+cleanup_without_confirmation_status="$(curl -sS -o "$ADMIN_DATA_DIR/task-cleanup-unconfirmed.json" -w '%{http_code}' -X POST \
+  "http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/asr/tasks/${TASK_ID}/cleanup-source-audio")"
+[[ "$cleanup_without_confirmation_status" == "400" ]] || \
+  fail "cleanup without exact task-name confirmation should return 400, got $cleanup_without_confirmation_status"
+[[ -f "$AUDIO_DIR/done.wav" ]] || fail "unconfirmed cleanup must preserve source audio"
+
+curl -fsS -G -X POST \
+  --data-urlencode "confirm_name=ASR CLI E2E task" \
+  "http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/asr/tasks/${TASK_ID}/cleanup-source-audio" \
   >"$ADMIN_DATA_DIR/task-cleanup.json"
 python3 - "$ADMIN_DATA_DIR/task-cleanup.json" "$AUDIO_DIR" "$ADMIN_DATA_DIR" "$TASK_ID" <<'PY'
 import json
@@ -280,7 +288,9 @@ assert result["summary"]["audio_source_file_count"] == 1, result["summary"]
 assert result["summary"]["cleanable_source_file_count"] == 0, result["summary"]
 PY
 
-curl -fsS -X POST "http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/asr/tasks/${TASK_ID}/cleanup-source-audio" \
+curl -fsS -G -X POST \
+  --data-urlencode "confirm_name=ASR CLI E2E task" \
+  "http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/asr/tasks/${TASK_ID}/cleanup-source-audio" \
   >"$ADMIN_DATA_DIR/task-cleanup-second.json"
 python3 - "$ADMIN_DATA_DIR/task-cleanup-second.json" <<'PY'
 import json

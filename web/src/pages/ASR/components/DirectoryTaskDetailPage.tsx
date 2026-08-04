@@ -6,7 +6,9 @@ import {
   Descriptions,
   Dropdown,
   Empty,
+  Input,
   message,
+  Modal,
   Popconfirm,
   Progress,
   Segmented,
@@ -33,6 +35,7 @@ import type {
   AsrDirectoryTaskDetail,
   AsrDailyAgentReportDetail,
   AsrPauseMode,
+  AsrSourceAudioCompressionState,
   AsrTaskDailyDocument,
   AsrTaskDailyDocumentDetail,
   AsrTaskFileRecord,
@@ -64,7 +67,7 @@ import {
 const { Text } = Typography;
 const DEFAULT_TASK_FILE_PAGE_SIZE = 8;
 const TASK_FILE_PAGE_SIZE_OPTIONS = ["8", "10", "20", "50", "100"];
-const TASK_FILE_TABLE_SCROLL_X = 1750;
+const TASK_FILE_TABLE_SCROLL_X = 1920;
 const DAILY_DOCUMENT_PAGE_SIZE = 8;
 const DAILY_DOCUMENT_TABLE_SCROLL_X = 900;
 
@@ -138,6 +141,43 @@ function matchesFileStatusFilter(
   return record.status === filter;
 }
 
+function compressionDisplayForFile(
+  record: AsrTaskFileRecord,
+  compression?: AsrSourceAudioCompressionState,
+): { label: string; color?: string; detail?: string } {
+  if (record.source_compression) {
+    return {
+      label: "Compressed",
+      color: "success",
+      detail: `FLAC · saved ${formatBytes(record.source_compression.saved_bytes)}`,
+    };
+  }
+  if (compression?.current_source_path === record.source_path) {
+    return { label: "Compressing", color: "processing", detail: "Current file" };
+  }
+  const result = compression?.results.find(
+    (candidate) =>
+      candidate.source_path === record.source_path ||
+      candidate.compressed_path === record.source_path,
+  );
+  if (result?.status === "failed") {
+    return { label: "Failed", color: "error", detail: result.message };
+  }
+  if (result?.status === "skipped") {
+    return { label: "Skipped", color: "warning", detail: result.message };
+  }
+  if (record.source_compression_eligible) {
+    return { label: "Uncompressed", color: "blue", detail: "Ready to compress" };
+  }
+  if (record.status !== "success") {
+    return { label: "Not eligible", detail: "Transcription is not complete" };
+  }
+  return {
+    label: "Not eligible",
+    detail: "Source or transcript artifacts are incomplete",
+  };
+}
+
 interface DirectoryTaskDetailPageProps {
   token: ReturnType<typeof theme.useToken>["token"];
   taskDetail: AsrDirectoryTaskDetail | null;
@@ -196,6 +236,8 @@ export default function DirectoryTaskDetailPage({
   const [retryingFileKey, setRetryingFileKey] = useState<string | null>(null);
   const [startingBulkRetry, setStartingBulkRetry] = useState(false);
   const [cleaningSourceAudio, setCleaningSourceAudio] = useState(false);
+  const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false);
+  const [cleanupConfirmName, setCleanupConfirmName] = useState("");
   const [changingSourceCompression, setChangingSourceCompression] = useState(false);
   const [dailyAgentRunDate, setDailyAgentRunDate] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -210,6 +252,11 @@ export default function DirectoryTaskDetailPage({
       current: 1,
       pageSize: DEFAULT_TASK_FILE_PAGE_SIZE,
     });
+  }, [taskDetail?.id]);
+
+  useEffect(() => {
+    setCleanupConfirmOpen(false);
+    setCleanupConfirmName("");
   }, [taskDetail?.id]);
 
   useEffect(() => {
@@ -300,10 +347,10 @@ export default function DirectoryTaskDetailPage({
   }, [taskDetail, onRefreshTask]);
 
   const handleCleanupSourceAudio = useCallback(async () => {
-    if (!taskDetail) return;
+    if (!taskDetail || cleanupConfirmName !== taskDetail.name) return;
     setCleaningSourceAudio(true);
     try {
-      const result = await cleanupAsrSourceAudio(taskDetail.id);
+      const result = await cleanupAsrSourceAudio(taskDetail.id, cleanupConfirmName);
       if (result.failed_files.length > 0) {
         message.warning(
           `Deleted ${result.deleted_files} source file(s), ${result.failed_files.length} failed`,
@@ -315,6 +362,8 @@ export default function DirectoryTaskDetailPage({
           )}`,
         );
       }
+      setCleanupConfirmOpen(false);
+      setCleanupConfirmName("");
       onRefreshTask(taskDetail.id);
     } catch (error) {
       message.error(
@@ -323,7 +372,7 @@ export default function DirectoryTaskDetailPage({
     } finally {
       setCleaningSourceAudio(false);
     }
-  }, [taskDetail, onRefreshTask]);
+  }, [cleanupConfirmName, taskDetail, onRefreshTask]);
 
   const handleStartSourceCompression = useCallback(async () => {
     if (!taskDetail) return;
@@ -590,11 +639,12 @@ export default function DirectoryTaskDetailPage({
     sourceCompression?.status === "cancelling";
   const compressibleSourceFileCount = summary?.compressible_source_file_count ?? 0;
   const compressibleSourceBytes = summary?.compressible_source_bytes ?? 0;
-  const sourceCompressionPercent =
-    sourceCompression && sourceCompression.queued_files > 0
-      ? Math.round(
-          (sourceCompression.processed_files / sourceCompression.queued_files) * 100,
-        )
+  const compressedSourceFileCount = summary?.compressed_source_file_count ?? 0;
+  const compressionTrackedFileCount =
+    compressedSourceFileCount + compressibleSourceFileCount;
+  const overallCompressionPercent =
+    compressionTrackedFileCount > 0
+      ? Math.round((compressedSourceFileCount / compressionTrackedFileCount) * 100)
       : 0;
   const failedChunkCount = summary?.failed_chunk_count ?? 0;
   const cleanableSourceFileCount = summary?.cleanable_source_file_count ?? 0;
@@ -603,6 +653,69 @@ export default function DirectoryTaskDetailPage({
     bulkRetry && bulkRetry.queued_files > 0
       ? Math.round((bulkRetry.processed_files / bulkRetry.queued_files) * 100)
       : 0;
+  const sourceCompressionPanel = taskDetail ? (
+    <Alert
+      data-testid="asr-source-compression-status"
+      type={
+        sourceCompression?.status === "completed"
+          ? "success"
+          : sourceCompression?.status === "completed_with_errors" ||
+              sourceCompression?.status === "failed" ||
+              sourceCompression?.status === "interrupted"
+            ? "warning"
+            : "info"
+      }
+      showIcon
+      message={
+        <Space wrap>
+          <Text strong>Lossless source compression</Text>
+          <Tag
+            color={
+              sourceCompression?.status === "completed"
+                ? "success"
+                : sourceCompressionActive
+                  ? "processing"
+                  : "default"
+            }
+          >
+            {sourceCompression?.status ?? "ready"}
+          </Tag>
+          <Text>Compressed {compressedSourceFileCount}</Text>
+          <Text>Uncompressed eligible {compressibleSourceFileCount}</Text>
+          <Text>
+            {compressedSourceFileCount}/{compressionTrackedFileCount} compressed
+          </Text>
+          <Text>Saved {formatBytes(summary?.compression_saved_bytes ?? 0)}</Text>
+        </Space>
+      }
+      description={
+        <Space direction="vertical" size={6} style={{ width: "100%" }}>
+          <Text type="secondary">
+            {sourceCompression?.message ??
+              "Only successfully transcribed WAV files with complete artifacts can be compressed."}
+          </Text>
+          {sourceCompression?.current_source_path ? (
+            <Text ellipsis={{ tooltip: sourceCompression.current_source_path }}>
+              Current: {sourceCompression.current_source_path}
+            </Text>
+          ) : null}
+          {sourceCompression ? (
+            <Text type="secondary">
+              {sourceCompression.processed_files}/{sourceCompression.queued_files} this run
+            </Text>
+          ) : null}
+          <Progress
+            percent={overallCompressionPercent}
+            size="small"
+            status={sourceCompressionActive ? "active" : "normal"}
+            format={() =>
+              `${compressedSourceFileCount}/${compressionTrackedFileCount}`
+            }
+          />
+        </Space>
+      }
+    />
+  ) : null;
   const overviewTabContent = taskDetail ? (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
       <Descriptions size="small" bordered column={2}>
@@ -774,46 +887,7 @@ export default function DirectoryTaskDetailPage({
           }
         />
       ) : null}
-      {sourceCompression ? (
-        <Alert
-          data-testid="asr-source-compression-status"
-          type={
-            sourceCompression.status === "completed"
-              ? "success"
-              : sourceCompression.status === "completed_with_errors" ||
-                  sourceCompression.status === "failed" ||
-                  sourceCompression.status === "interrupted"
-                ? "warning"
-                : "info"
-          }
-          showIcon
-          message={
-            <Space wrap>
-              <Text strong>Lossless source compression</Text>
-              <Tag color={sourceCompression.status === "completed" ? "success" : "processing"}>
-                {sourceCompression.status}
-              </Tag>
-              <Text>
-                {sourceCompression.processed_files}/{sourceCompression.queued_files} files
-              </Text>
-              <Text>Saved {formatBytes(sourceCompression.saved_bytes)}</Text>
-            </Space>
-          }
-          description={
-            <Space direction="vertical" size={6} style={{ width: "100%" }}>
-              <Text type="secondary">{sourceCompression.message}</Text>
-              {sourceCompression.current_source_path ? (
-                <Text ellipsis={{ tooltip: sourceCompression.current_source_path }}>
-                  Current: {sourceCompression.current_source_path}
-                </Text>
-              ) : null}
-              {sourceCompressionActive ? (
-                <Progress percent={sourceCompressionPercent} size="small" status="active" />
-              ) : null}
-            </Space>
-          }
-        />
-      ) : null}
+      {sourceCompressionPanel}
     </Space>
   ) : null;
 
@@ -877,8 +951,9 @@ export default function DirectoryTaskDetailPage({
                 </Popconfirm>
               )}
               <Popconfirm
-                title={`Delete ${cleanableSourceFileCount} completed source audio file${cleanableSourceFileCount === 1 ? "" : "s"}?`}
-                description="Transcript and timeline outputs are kept. Partial-success files are not deleted so failed chunks can still be retried."
+                title={`First confirmation: clean ${cleanableSourceFileCount} original audio file${cleanableSourceFileCount === 1 ? "" : "s"}?`}
+                description="You will need to type the task name in a final confirmation. Transcript and timeline outputs are kept."
+                okText="Continue"
                 disabled={
                   cleanableSourceFileCount === 0 ||
                   cleaningSourceAudio ||
@@ -886,7 +961,7 @@ export default function DirectoryTaskDetailPage({
                   bulkRetryActive ||
                   sourceCompressionActive
                 }
-                onConfirm={handleCleanupSourceAudio}
+                onConfirm={() => setCleanupConfirmOpen(true)}
               >
                 <Button
                   size="small"
@@ -1019,6 +1094,7 @@ export default function DirectoryTaskDetailPage({
                   label: `Files (${taskDetail.files.length})`,
                   children: (
                     <div data-testid="asr-task-files-table">
+                      <div style={{ marginBottom: 12 }}>{sourceCompressionPanel}</div>
                       <Space
                         style={{
                           width: "100%",
@@ -1169,6 +1245,27 @@ export default function DirectoryTaskDetailPage({
                         );
                       }
                       return tag;
+                    },
+                  },
+                  {
+                    title: "Compression",
+                    width: 170,
+                    render: (_value, record) => {
+                      const display = compressionDisplayForFile(record, sourceCompression);
+                      return (
+                        <Space direction="vertical" size={2} style={{ width: "100%" }}>
+                          <Tag color={display.color}>{display.label}</Tag>
+                          {display.detail ? (
+                            <Text
+                              type="secondary"
+                              style={{ width: 150, fontSize: 11 }}
+                              ellipsis={{ tooltip: display.detail }}
+                            >
+                              {display.detail}
+                            </Text>
+                          ) : null}
+                        </Space>
+                      );
                     },
                   },
                   {
@@ -1425,6 +1522,43 @@ export default function DirectoryTaskDetailPage({
           </Text>
         )}
       </Card>
+      <Modal
+        title="Final confirmation: clean originals"
+        open={cleanupConfirmOpen}
+        okText="Clean originals"
+        cancelText="Cancel"
+        confirmLoading={cleaningSourceAudio}
+        okButtonProps={{
+          danger: true,
+          disabled: cleanupConfirmName !== taskDetail?.name,
+        }}
+        onOk={() => void handleCleanupSourceAudio()}
+        onCancel={() => {
+          if (!cleaningSourceAudio) {
+            setCleanupConfirmOpen(false);
+            setCleanupConfirmName("");
+          }
+        }}
+      >
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Alert
+            type="error"
+            showIcon
+            message={`Permanently delete ${cleanableSourceFileCount} source audio file${cleanableSourceFileCount === 1 ? "" : "s"} (${formatBytes(cleanableSourceBytes)})`}
+            description="This cannot be undone. Successful transcript and timeline outputs are kept; the original audio resources are deleted."
+          />
+          <Text>
+            Type the task name <Text code>{taskDetail?.name ?? ""}</Text> to continue.
+          </Text>
+          <Input
+            autoFocus
+            placeholder="Type task name"
+            value={cleanupConfirmName}
+            disabled={cleaningSourceAudio}
+            onChange={(event) => setCleanupConfirmName(event.target.value)}
+          />
+        </Space>
+      </Modal>
     </div>
   );
 }

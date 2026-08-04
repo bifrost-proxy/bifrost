@@ -435,6 +435,14 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   let created = false;
   let createPayload: Record<string, unknown> | null = null;
   let cleanedSourceAudio = false;
+  let cleanupConfirmName: string | null = null;
+  await page.route("**/_bifrost/api/asr/external-volumes", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ volumes: [] }),
+    });
+  });
   await page.route("**/_bifrost/api/asr/tasks", async (route) => {
     if (route.request().method() === "POST") {
       created = true;
@@ -548,9 +556,12 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
       }),
     });
   });
-  await page.route("**/_bifrost/api/asr/tasks/task-1/cleanup-source-audio", async (route) => {
-    cleanedSourceAudio = true;
-    await route.fulfill({
+  await page.route(
+    /\/_bifrost\/api\/asr\/tasks\/task-1\/cleanup-source-audio(?:\?.*)?$/,
+    async (route) => {
+      cleanupConfirmName = new URL(route.request().url()).searchParams.get("confirm_name");
+      cleanedSourceAudio = true;
+      await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
@@ -576,8 +587,9 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
           running: false,
         },
       }),
-    });
-  });
+      });
+    },
+  );
   await page.route("**/_bifrost/api/asr/tasks/task-1", async (route) => {
     if (route.request().method() !== "GET") {
       await route.fallback();
@@ -835,7 +847,10 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   await expect(page.getByTestId("asr-diarization-setup-card")).toHaveCount(0);
   await expect(page.getByTestId("voice-wake-actions-card")).toHaveCount(0);
   await expect(page.getByPlaceholder("Meeting audio watcher")).toHaveCount(0);
-  await page.getByRole("button", { name: "New" }).click();
+  await page
+    .getByTestId("asr-home-tab-scheduled")
+    .getByRole("button", { name: "New" })
+    .click();
   const createDialog = page.getByRole("dialog", { name: "New Directory Task" });
   await expect(createDialog).toBeVisible();
   await createDialog.getByTestId("asr-runtime-strategy-select").click({ force: true });
@@ -854,7 +869,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   await expect(runtimeDropdown).toBeHidden();
   await createDialog.getByPlaceholder("Meeting audio watcher").fill("Recordings");
   await createDialog.getByPlaceholder("~/Recordings").fill("/tmp/asr-audio");
-  await createDialog.getByRole("button", { name: "Create" }).click({ force: true });
+  await createDialog.getByRole("button", { name: "Create" }).click();
   await expect.poll(() => created).toBe(true);
   expect(createPayload?.interval_seconds).toBeUndefined();
   expect(createPayload?.schedule).toEqual({
@@ -886,7 +901,23 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   await expect(taskPage.getByText("Cleanable Originals")).toBeVisible();
   await expect(taskPage.getByText(/1\.21 KB/).first()).toBeVisible();
   await taskPage.getByRole("button", { name: "Clean originals" }).click();
-  await page.getByRole("button", { name: "OK" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  const cleanupDialog = page.getByRole("dialog", {
+    name: "Final confirmation: clean originals",
+  });
+  await expect(cleanupDialog).toBeVisible();
+  await expect(cleanupDialog).toContainText("Permanently delete 1 source audio file");
+  await expect(cleanupDialog).toContainText("1.21 KB");
+  const finalCleanupButton = cleanupDialog.getByRole("button", {
+    name: "Clean originals",
+  });
+  await expect(finalCleanupButton).toBeDisabled();
+  await cleanupDialog.getByPlaceholder("Type task name").fill("wrong");
+  await expect(finalCleanupButton).toBeDisabled();
+  await cleanupDialog.getByPlaceholder("Type task name").fill("Recordings");
+  await expect(finalCleanupButton).toBeEnabled();
+  await finalCleanupButton.click();
+  await expect.poll(() => cleanupConfirmName).toBe("Recordings");
   await expect(page.getByText(/Deleted 1 source file/)).toBeVisible();
   await expect(taskPage.getByText(/22\.9 KB/)).toBeVisible();
   await taskPage.getByRole("tab", { name: /Files/ }).click();
@@ -1132,7 +1163,7 @@ test("ASR task detail can queue bulk retry for all failed chunks", async ({ page
   );
 });
 
-test("ASR task detail starts lossless source compression and shows saved space", async ({
+test("ASR task files start sequential compression and show overall and per-file progress", async ({
   page,
 }) => {
   await installAsrMicrophoneMocks(page);
@@ -1153,9 +1184,45 @@ test("ASR task detail starts lossless source compression and shows saved space",
           updated_at_ms: Date.now(),
           finished_at_ms: Date.now(),
           message: "Compressed 1 file; saved 2500 bytes.",
-          results: [],
+          results: [
+            {
+              source_path: "/tmp/asr-audio/to-compress.wav",
+              compressed_path: "/tmp/asr-audio/to-compress.flac",
+              status: "compressed",
+              original_bytes: 5000,
+              compressed_bytes: 2500,
+              saved_bytes: 2500,
+              message: "Compressed and verified decoded PCM.",
+            },
+          ],
         }
       : undefined;
+  const compressedRecord = (
+    key: string,
+    sourcePath: string,
+    originalSourcePath: string,
+    originalBytes: number,
+    compressedBytes: number,
+  ) => ({
+    key,
+    task_id: "task-compression",
+    source_path: sourcePath,
+    source_size: compressedBytes,
+    source_compression_eligible: false,
+    source_compression: {
+      codec: "flac",
+      original_source_path: originalSourcePath,
+      original_size_bytes: originalBytes,
+      compressed_size_bytes: compressedBytes,
+      saved_bytes: originalBytes - compressedBytes,
+      pcm_sha256: "pcm-sha256",
+      compressed_at_ms: Date.now(),
+    },
+    status: "success",
+    output_text_path: `/tmp/asr-output/${key}.txt`,
+    output_timeline_path: `/tmp/asr-output/${key}.timeline.json`,
+    text_chars: 120,
+  });
   const taskResponse = () => ({
     id: "task-compression",
     name: "Compression task",
@@ -1169,26 +1236,67 @@ test("ASR task detail starts lossless source compression and shows saved space",
     created_at_ms: Date.now(),
     updated_at_ms: Date.now(),
     summary: {
-      discovered: 1,
-      processed: 1,
+      discovered: 3,
+      processed: 2,
       pending: 0,
-      failed: 0,
+      failed: 1,
       partial_success: 0,
       failed_chunk_count: 0,
       deleted_after_processing: 0,
-      audio_source_bytes: compressionStarted ? 2500 : 5000,
-      audio_source_file_count: 1,
-      cleanable_source_bytes: compressionStarted ? 2500 : 5000,
-      cleanable_source_file_count: 1,
+      audio_source_bytes: compressionStarted ? 4500 : 7000,
+      audio_source_file_count: 3,
+      cleanable_source_bytes: compressionStarted ? 3500 : 6000,
+      cleanable_source_file_count: 2,
       compressible_source_bytes: compressionStarted ? 0 : 5000,
       compressible_source_file_count: compressionStarted ? 0 : 1,
-      compressed_source_file_count: compressionStarted ? 1 : 0,
-      compression_saved_bytes: compressionStarted ? 2500 : 0,
+      compressed_source_file_count: compressionStarted ? 2 : 1,
+      compression_saved_bytes: compressionStarted ? 3500 : 1000,
       running: false,
     },
     source_compression: compressionState(),
     daily_documents: [],
-    files: [],
+    files: [
+      ...(compressionStarted
+        ? [
+            compressedRecord(
+              "newly-compressed",
+              "/tmp/asr-audio/to-compress.flac",
+              "/tmp/asr-audio/to-compress.wav",
+              5000,
+              2500,
+            ),
+          ]
+        : [
+            {
+              key: "ready",
+              task_id: "task-compression",
+              source_path: "/tmp/asr-audio/to-compress.wav",
+              source_size: 5000,
+              source_compression_eligible: true,
+              status: "success",
+              output_text_path: "/tmp/asr-output/ready.txt",
+              output_timeline_path: "/tmp/asr-output/ready.timeline.json",
+              text_chars: 120,
+            },
+          ]),
+      compressedRecord(
+        "already-compressed",
+        "/tmp/asr-audio/already.flac",
+        "/tmp/asr-audio/already.wav",
+        2000,
+        1000,
+      ),
+      {
+        key: "failed-transcription",
+        task_id: "task-compression",
+        source_path: "/tmp/asr-audio/failed.wav",
+        source_size: 1000,
+        source_compression_eligible: false,
+        status: "failed",
+        text_chars: 0,
+        error: "transcription failed",
+      },
+    ],
   });
 
   await page.route("**/_bifrost/api/asr/tasks", async (route) => {
@@ -1220,16 +1328,36 @@ test("ASR task detail starts lossless source compression and shows saved space",
   await openPage(page, "ai?aiSection=tools-asr&asrTask=task-compression");
   const taskPage = page.getByTestId("asr-task-detail-page");
   await expect(taskPage.getByText("Directory Task: Compression task")).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await expect(taskPage.getByText("Compressible WAV")).toBeVisible();
   await expect(taskPage.getByText("4.88 KB").first()).toBeVisible();
+  await taskPage.getByRole("tab", { name: /Files/ }).click();
+  const filesTable = taskPage.getByTestId("asr-task-files-table");
+  const compressionSummary = filesTable.getByTestId("asr-source-compression-status");
+  await expect(compressionSummary).toContainText("Compressed 1");
+  await expect(compressionSummary).toContainText("Uncompressed eligible 1");
+  await expect(compressionSummary).toContainText("1/2 compressed");
+  await expect(filesTable.getByText("Uncompressed", { exact: true })).toBeVisible();
+  await expect(filesTable.getByText("Ready to compress", { exact: true })).toBeVisible();
+  await expect(filesTable.getByText("Compressed", { exact: true })).toBeVisible();
+  await expect(filesTable.getByText("Not eligible", { exact: true })).toBeVisible();
+  await expect(
+    filesTable.getByText("Transcription is not complete", { exact: true }),
+  ).toBeVisible();
 
   await taskPage.getByRole("button", { name: "Compress WAVs" }).click();
   await page.getByRole("button", { name: "OK" }).click();
 
   await expect.poll(() => compressionStarted).toBe(true);
-  const status = taskPage.getByTestId("asr-source-compression-status");
-  await expect(status).toContainText("completed");
-  await expect(status).toContainText("Saved 2.44 KB");
+  await expect(compressionSummary).toContainText("completed");
+  await expect(compressionSummary).toContainText("Compressed 2");
+  await expect(compressionSummary).toContainText("Uncompressed eligible 0");
+  await expect(compressionSummary).toContainText("1/1 this run");
+  await expect(compressionSummary).toContainText("Saved 3.42 KB");
+  await expect(filesTable.getByText("Compressed", { exact: true })).toHaveCount(2);
+  await expect(filesTable.getByText("Uncompressed", { exact: true })).toHaveCount(0);
   await expect(taskPage.getByRole("button", { name: "Compress WAVs" })).toBeDisabled();
 });
 
