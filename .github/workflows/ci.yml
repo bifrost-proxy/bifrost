@@ -852,10 +852,10 @@ jobs:
       BIFROST_E2E_CAPABILITY_SHARDS: "1"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "2"
-      # Fail a stuck suite early enough to emit its report and upload logs
-      # before the 60-minute job budget expires.
-      BIFROST_E2E_SHELL_TEST_TIMEOUT: "600"
-      BIFROST_E2E_SUITE_TIMEOUT: "600"
+      # Allow cold macOS Rust/Desktop test builds to finish while still failing
+      # a stuck suite with 39 minutes left for the shard and artifact cleanup.
+      BIFROST_E2E_SHELL_TEST_TIMEOUT: "1260"
+      BIFROST_E2E_SUITE_TIMEOUT: "1260"
       # Unit/Integration and Coverage already compile and execute the HTTP/3
       # Rust integration test. macOS still runs the real proxy scenarios without
       # spending 10+ minutes rebuilding test-only dependencies.
