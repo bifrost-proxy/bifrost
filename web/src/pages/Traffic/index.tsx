@@ -36,7 +36,17 @@ import {
   decodeJsonFromQueryParam,
   encodeJsonForQueryParam,
 } from "../../utils/urlState";
-import { buildAppRouteUrl, isMacDesktopShell } from "../../runtime";
+import {
+  buildAppRouteUrl,
+  isDesktopShell,
+  isMacDesktopShell,
+} from "../../runtime";
+import {
+  closeDesktopTrafficDetailWindow,
+  DESKTOP_TRAFFIC_DETAIL_CLOSED_EVENT,
+  openDesktopTrafficDetailWindow,
+} from "../../desktop/tauri";
+import { openTrafficDetailWindow } from "./detailWindow";
 import pushService from "../../services/pushService";
 import { usePerformanceModeStore } from "../../stores/usePerformanceModeStore";
 import type {
@@ -116,6 +126,7 @@ export default function Traffic() {
     (state) => state.setSuperPerformanceMode,
   );
   const detachedPopupRef = useRef<Window | null>(null);
+  const nativeDetachedWindowRef = useRef(false);
 
   const records = useTrafficStore((state) => state.records);
   const recordsMutation = useTrafficStore((state) => state.recordsMutation);
@@ -568,6 +579,9 @@ export default function Traffic() {
     }
 
     const timer = window.setInterval(() => {
+      if (nativeDetachedWindowRef.current) {
+        return;
+      }
       const popup = detachedPopupRef.current;
       if (!popup || popup.closed) {
         detachedPopupRef.current = null;
@@ -579,6 +593,27 @@ export default function Traffic() {
       window.clearInterval(timer);
     };
   }, [attachDetailWindow, detailDetached]);
+
+  useEffect(() => {
+    if (!isDesktopShell()) {
+      return;
+    }
+
+    const handleNativeDetailWindowClosed = () => {
+      nativeDetachedWindowRef.current = false;
+      attachDetailWindow();
+    };
+    window.addEventListener(
+      DESKTOP_TRAFFIC_DETAIL_CLOSED_EVENT,
+      handleNativeDetailWindowClosed,
+    );
+    return () => {
+      window.removeEventListener(
+        DESKTOP_TRAFFIC_DETAIL_CLOSED_EVENT,
+        handleNativeDetailWindowClosed,
+      );
+    };
+  }, [attachDetailWindow]);
 
   const handleSelect = useCallback(
     (record: TrafficSummary) => {
@@ -620,42 +655,74 @@ export default function Traffic() {
     [detailPanelCollapsed, setDetailPanelCollapsed, setSelectedId],
   );
 
-  const handleOpenDetailInNewWindow = useCallback((record: TrafficSummary) => {
-    setSelectedId(record.id);
+  const handleOpenDetailInNewWindow = useCallback(
+    async (record: TrafficSummary) => {
+      setSelectedId(record.id);
 
-    const popupId =
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? crypto.randomUUID()
-        : `traffic-detail-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-    const url = buildAppRouteUrl(
-      `/traffic/detail?detached=1&popupId=${encodeURIComponent(popupId)}&id=${encodeURIComponent(record.id)}`,
-    );
+      const popupId =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `traffic-detail-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+      const url = buildAppRouteUrl(
+        `/traffic/detail?detached=1&popupId=${encodeURIComponent(popupId)}&id=${encodeURIComponent(record.id)}`,
+      );
+      const desktop = isDesktopShell();
+      const existingPopup = detachedPopupRef.current;
+      const reusingBrowserPopup =
+        !desktop && !!existingPopup && !existingPopup.closed;
 
-    const existingPopup = detachedPopupRef.current;
-    if (existingPopup && !existingPopup.closed) {
-      detachDetailWindow(popupId);
-      existingPopup.location.href = url;
-      existingPopup.focus();
-      return;
-    }
+      if (desktop) {
+        nativeDetachedWindowRef.current = true;
+        detachDetailWindow(popupId);
+      } else if (reusingBrowserPopup) {
+        detachDetailWindow(popupId);
+      }
 
-    const popup = window.open(
-      url,
-      "_blank",
-      "popup=yes,width=1440,height=900",
-    );
-    if (!popup) {
-      message.error("Failed to open detail window");
-      return;
-    }
+      try {
+        const result = await openTrafficDetailWindow({
+          desktop,
+          recordId: record.id,
+          popupId,
+          url,
+          existingPopup,
+          openDesktop: openDesktopTrafficDetailWindow,
+          openBrowser: (popupUrl) =>
+            window.open(
+              popupUrl,
+              "_blank",
+              "popup=yes,width=1440,height=900",
+            ),
+        });
 
-    detachedPopupRef.current = popup;
-    detachDetailWindow(popupId);
-    popup.focus();
-  }, [detachDetailWindow, setSelectedId]);
+        if (result.kind === "browser") {
+          if (!result.popup) {
+            message.error("Failed to open detail window");
+            return;
+          }
+          detachedPopupRef.current = result.popup;
+          if (!reusingBrowserPopup) {
+            detachDetailWindow(popupId);
+          }
+        }
+      } catch (error) {
+        nativeDetachedWindowRef.current = false;
+        attachDetailWindow();
+        console.error("Failed to open native traffic detail window", error);
+        message.error("Failed to open detail window");
+      }
+    },
+    [attachDetailWindow, detachDetailWindow, setSelectedId],
+  );
 
   const handleAttachDetailWindow = useCallback(() => {
+    const nativeWindow = nativeDetachedWindowRef.current;
     attachDetailWindow();
+    nativeDetachedWindowRef.current = false;
+    if (nativeWindow) {
+      void closeDesktopTrafficDetailWindow().catch((error) => {
+        console.error("Failed to close native traffic detail window", error);
+      });
+    }
     detachedPopupRef.current?.close();
     detachedPopupRef.current = null;
   }, [attachDetailWindow]);

@@ -15,6 +15,8 @@ import type { TrafficRecord } from "../../types";
 import type { TrafficBodyContent } from "../../api/traffic";
 import { useTrafficStore } from "../../stores/useTrafficStore";
 import { useTrafficDetailWindowStore } from "../../stores/useTrafficDetailWindowStore";
+import { isDesktopShell } from "../../runtime";
+import { closeDesktopTrafficDetailWindow } from "../../desktop/tauri";
 
 export default function TrafficDetailPage() {
   const navigate = useNavigate();
@@ -38,10 +40,20 @@ export default function TrafficDetailPage() {
     ? selectedId?.trim() || urlId
     : urlId;
 
+  const closeDetachedWindow = useCallback(() => {
+    if (isDesktopShell()) {
+      void closeDesktopTrafficDetailWindow().catch((closeError) => {
+        console.error("Failed to close native traffic detail window", closeError);
+      });
+      return;
+    }
+    window.close();
+  }, []);
+
   const handleAttachBack = useCallback(() => {
     attachDetailWindow();
-    window.close();
-  }, [attachDetailWindow]);
+    closeDetachedWindow();
+  }, [attachDetailWindow, closeDetachedWindow]);
 
   useEffect(() => {
     if (!detachedMode || !recordId) {
@@ -60,8 +72,8 @@ export default function TrafficDetailPage() {
     if (!detachedMode || detailDetached) {
       return;
     }
-    window.close();
-  }, [detachedMode, detailDetached]);
+    closeDetachedWindow();
+  }, [closeDetachedWindow, detachedMode, detailDetached]);
 
   useEffect(() => {
     if (!detachedMode || !popupId) {

@@ -6,12 +6,14 @@ mod macos_menu;
 mod native_launcher;
 mod open_requests;
 mod runtime_ownership;
+mod traffic_detail_window;
 mod upgrade_handoff;
 
 use backend_runtime::*;
 #[cfg(target_os = "macos")]
 use macos_menu::*;
 use runtime_ownership::*;
+use traffic_detail_window::*;
 use upgrade_handoff::*;
 
 use bifrost_core::upgrade_progress::{
@@ -404,6 +406,8 @@ fn main() {
             notify_main_window_ready,
             get_pending_desktop_open_requests,
             set_document_edited,
+            open_traffic_detail_window,
+            close_traffic_detail_window,
             open_external_url,
             write_clipboard
         ])

@@ -48,6 +48,7 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 mod backend_wait;
 mod cli_handoff_recovery;
+mod traffic_detail_window;
 mod watchdog;
 
 #[cfg(target_os = "macos")]
