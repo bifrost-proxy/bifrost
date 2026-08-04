@@ -1,18 +1,17 @@
 use super::{
     append_desktop_bootstrap_log, begin_backend_recovery, clear_backend_unavailable_if_healthy,
-    close_traffic_detail_window_impl, configure_backend_stop_command,
-    configure_desktop_backend_environment, deferred_desktop_install_version_error,
-    desktop_backend_env, desktop_backend_start_args, desktop_pending_install_path,
-    desktop_shutdown_backend_action, desktop_sidecar_rust_log, desktop_startup_deadline,
-    desktop_startup_session_id, desktop_test_allows_multiple_instances,
+    configure_backend_stop_command, configure_desktop_backend_environment,
+    deferred_desktop_install_version_error, desktop_backend_env, desktop_backend_start_args,
+    desktop_pending_install_path, desktop_shutdown_backend_action, desktop_sidecar_rust_log,
+    desktop_startup_deadline, desktop_startup_session_id, desktop_test_allows_multiple_instances,
     desktop_upgrade_relaunch_marker_path, desktop_upgrade_shutdown_requested,
     ensure_backend_running, ensure_backend_running_with_cli_wait,
     existing_backend_candidate_matches_runtime, external_cli_backend_matches_handoff,
     external_cli_handoff_wait, failed_cli_handoff_can_retry_immediately,
     host_window_close_behavior_for_platform, is_server_config_response,
     is_upgrade_relaunch_marker_active, main_interface_decorations_for_platform,
-    mark_backend_unavailable_for_manual_start, open_traffic_detail_window_impl,
-    parse_port_update_response, persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit,
+    mark_backend_unavailable_for_manual_start, parse_port_update_response,
+    persist_desktop_upgrade_handoff_failure, poll_managed_backend_exit,
     probe_backend_health_with_timeout, publish_startup_ready, read_active_upgrade_relaunch_marker,
     read_pending_desktop_install, record_startup_deadline_error, relaunch_command_for_target,
     resolve_bifrost_binary_from_env, resolve_desktop_config_path, resolve_desktop_data_dir,
@@ -20,10 +19,9 @@ use super::{
     sanitize_desktop_upgrade_relaunch_command, save_desktop_config,
     should_allow_multiple_instances, should_handoff_to_main, should_retry_backend_candidate,
     startup_deadline_disposition, stop_backend_before_restart, terminate_managed_backend,
-    traffic_detail_app_path, upgrade_handoff_requires_backend_release,
-    upgrade_relaunch_uses_external_cli_backend, uses_borderless_desktop_chrome_for_platform,
-    wait_for_backend, wait_for_backend_stop_helper, wait_for_child_exit,
-    wait_for_external_cli_backend, windows_desktop_upgrade_handoff_command,
+    upgrade_handoff_requires_backend_release, upgrade_relaunch_uses_external_cli_backend,
+    uses_borderless_desktop_chrome_for_platform, wait_for_backend, wait_for_backend_stop_helper,
+    wait_for_child_exit, wait_for_external_cli_backend, windows_desktop_upgrade_handoff_command,
     write_desktop_upgrade_terminal_progress, write_upgrade_relaunch_marker, BackendState,
     BackendSystemIdentity, BackendWaitFailureKind, BackendWatchdogHealth, DesktopConfig,
     DesktopInstallRollback, DesktopRuntimeMarker, DesktopShutdownBackendAction,
@@ -45,81 +43,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::Manager;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-#[test]
-fn traffic_detail_path_encodes_query_values() {
-    assert_eq!(
-        traffic_detail_app_path(" REQ /?#%中文 ", " popup&=1 ").unwrap(),
-        "index.html#/traffic/detail?detached=1&popupId=popup%26%3D1&id=REQ%20%2F%3F%23%25%E4%B8%AD%E6%96%87"
-    );
-}
-
-#[test]
-fn traffic_detail_path_rejects_empty_values() {
-    assert_eq!(
-        traffic_detail_app_path("   ", "popup-1").unwrap_err(),
-        "traffic record id must not be empty"
-    );
-    assert_eq!(
-        traffic_detail_app_path("REQ-1", "  ").unwrap_err(),
-        "traffic detail popup id must not be empty"
-    );
-}
-
-#[test]
-fn traffic_detail_path_rejects_overlong_values() {
-    assert_eq!(
-        traffic_detail_app_path(&"r".repeat(513), "popup-1").unwrap_err(),
-        "traffic record id exceeds 512 characters"
-    );
-    assert_eq!(
-        traffic_detail_app_path("REQ-1", &"p".repeat(129)).unwrap_err(),
-        "traffic detail popup id exceeds 128 characters"
-    );
-}
-
-#[test]
-fn native_traffic_detail_window_is_created_reused_and_close_is_idempotent() {
-    let app = tauri::test::mock_builder()
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .expect("build mock desktop app");
-
-    tauri::async_runtime::block_on(open_traffic_detail_window_impl(
-        app.handle().clone(),
-        "REQ-1".to_string(),
-        "popup-1".to_string(),
-    ))
-    .expect("open native detail window");
-    assert!(app.get_webview_window("traffic-detail").is_some());
-    assert_eq!(app.webview_windows().len(), 1);
-
-    tauri::async_runtime::block_on(open_traffic_detail_window_impl(
-        app.handle().clone(),
-        "REQ-2".to_string(),
-        "popup-2".to_string(),
-    ))
-    .expect("reuse native detail window");
-    assert_eq!(app.webview_windows().len(), 1);
-    assert_eq!(
-        app.get_webview_window("traffic-detail")
-            .expect("reused traffic detail window")
-            .url()
-            .expect("read reused traffic detail URL")
-            .fragment(),
-        Some("/traffic/detail?detached=1&popupId=popup-2&id=REQ-2")
-    );
-
-    tauri::async_runtime::block_on(close_traffic_detail_window_impl(app.handle().clone()))
-        .expect("close native detail window");
-    tauri::async_runtime::block_on(close_traffic_detail_window_impl(app.handle().clone()))
-        .expect("repeated close remains safe in mock runtime");
-}
-
 mod backend_wait;
 mod cli_handoff_recovery;
+mod traffic_detail_window;
 mod watchdog;
 
 #[cfg(target_os = "macos")]
