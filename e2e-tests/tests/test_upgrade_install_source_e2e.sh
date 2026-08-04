@@ -83,8 +83,23 @@ chmod +x "$FAKE_BIN/pnpm"
 
 export FAKE_GLOBAL_ROOT FAKE_NEW_BINARY FAKE_PM_LOG
 
+assert_update_alias_help() {
+    local upgrade_help update_help top_level_help
+    upgrade_help="$($BIFROST_BIN upgrade --help)"
+    update_help="$($BIFROST_BIN update --help)"
+    top_level_help="$($BIFROST_BIN --help)"
+
+    if [[ "$update_help" != "$upgrade_help" || "$top_level_help" != *"alias: update"* ]]; then
+        echo "FAIL update alias help does not match or is not discoverable" >&2
+        diff -u <(printf '%s\n' "$upgrade_help") <(printf '%s\n' "$update_help") >&2 || true
+        exit 1
+    fi
+    echo "PASS update alias exposes the same help and parameters as upgrade"
+}
+
 run_source_case() {
     local manager="$1"
+    local command="$2"
     local install_binary="$TEST_ROOT/$manager/node_modules/@bifrost-proxy/bifrost-darwin-arm64/bin/bifrost"
     local data_dir="$TEST_ROOT/data-$manager"
     local output status expected_command
@@ -103,7 +118,7 @@ run_source_case() {
         BIFROST_DESKTOP_MANAGED_UPGRADE_SKIP_RESTART=1 \
         BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES=1 \
         BIFROST_UPGRADE_TEST_LATEST_VERSION="$TARGET_VERSION" \
-        "$install_binary" upgrade 2>&1)
+        "$install_binary" "$command" 2>&1)
     status=$?
     set -e
 
@@ -125,11 +140,12 @@ run_source_case() {
         cat "$FAKE_PM_LOG" >&2
         exit 1
     fi
-    echo "PASS $manager install source uses pinned global package-manager upgrade without direct package-file cleanup"
+    echo "PASS $manager install source uses $command and pinned global package-manager upgrade without direct package-file cleanup"
 }
 
-run_source_case npm
-run_source_case pnpm
+assert_update_alias_help
+run_source_case npm update
+run_source_case pnpm upgrade
 
 FAIL_INSTALL_BINARY="$TEST_ROOT/npm-failure/node_modules/@bifrost-proxy/bifrost-darwin-arm64/bin/bifrost"
 mkdir -p "$(dirname "$FAIL_INSTALL_BINARY")" "$TEST_ROOT/data-failure"

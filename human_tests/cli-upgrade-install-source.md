@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 `bifrost upgrade` 自动识别 Homebrew、npm、pnpm、官方安装脚本与手动二进制；npm/pnpm 必须沿原包管理器升级固定目标版本，并在升级后解析新平台二进制。所有动态测试使用临时目录、fake package-manager/global root 和当前 debug binary，不访问 registry、不修改用户全局包、不停止或替换正式 Bifrost 服务。
+验证 `bifrost update` 与 `bifrost upgrade` 等价，并自动识别 Homebrew、npm、pnpm、官方安装脚本与手动二进制；npm/pnpm 必须沿原包管理器升级固定目标版本，并在升级后解析新平台二进制。所有动态测试使用临时目录、fake package-manager/global root 和当前 debug binary，不访问 registry、不修改用户全局包、不停止或替换正式 Bifrost 服务。
 
 ## 前置条件
 
@@ -102,6 +102,23 @@ node --check npm/bifrost/lib/install-source.js
 - pnpm global/content-addressed 路径返回 `pnpm`，普通 Node global package 路径返回 `npm`。
 - 包装器与来源模块语法检查通过。
 
+### TC-CUIS-06 `update` 等价别名
+
+操作步骤：
+
+```bash
+target/debug/bifrost --help | grep -F 'alias: update'
+diff -u <(target/debug/bifrost upgrade --help) <(target/debug/bifrost update --help)
+BIFROST_BIN="$PWD/target/debug/bifrost" \
+  bash e2e-tests/tests/test_upgrade_install_source_e2e.sh
+```
+
+预期结果：
+
+- 顶层帮助在 `upgrade` 条目展示 `alias: update`。
+- `update --help` 与 `upgrade --help` 完全一致，证明参数集合一致。
+- 黑盒 npm 场景使用 `update` 后仍显示 `Install method: npm`，调用固定版本 npm 全局升级且不回退直接覆盖；pnpm 继续用 canonical `upgrade` 作为对照。
+
 ## 清理步骤
 
 - 所有 shell/PowerShell 用例由 trap/finally 删除 `mktemp` / system temp 目录。
@@ -117,5 +134,6 @@ node --check npm/bifrost/lib/install-source.js
 | 2026-08-04 | TC-CUIS-03 | 第 1 次 Bash installer suite 12 项通过；第 1 轮 review 补齐源码安装与卸载 marker 生命周期后复跑 13 项全部通过 | PASS |
 | 2026-08-04 | TC-CUIS-04 | 初次尝试 `pwsh` 因本机未安装而停止，归因为环境依赖；随后按更新后的本机契约用例执行，marker 临时写入、原子 Move 和 Windows 动态测试断言均存在。真正 PowerShell 执行保留给 Windows CI | PASS（本机契约） |
 | 2026-08-04 | TC-CUIS-05 | 初次 Node test 2/2 通过；第 1 轮 review 增加 child env 覆盖后复跑 3/3 通过；`bin/bifrost` 与 `lib/install-source.js` 的 `node --check` 均退出 0 | PASS |
+| 2026-08-04 | TC-CUIS-06 | 首次执行发现测试误写为 Clap 多别名格式 `aliases: update`，实际单别名格式为 `alias: update`；修正断言后，顶层帮助可发现别名、两种拼写的 help 完全一致，npm 通过 `update` 和 pnpm 通过 `upgrade` 的黑盒来源升级均通过 | PASS |
 
 清理确认：黑盒脚本 trap 已删除 fake global roots/package managers/data dirs；未启动测试 daemon，未触碰正式 Bifrost listener、全局 npm/pnpm 包或 `/Applications/Bifrost.app`。

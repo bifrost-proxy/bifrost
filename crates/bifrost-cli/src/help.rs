@@ -109,7 +109,7 @@ HELP & DISCOVERY
   bifrost config --help              Config management
   bifrost traffic --help             Traffic capture & inspection
   bifrost search --help              Search captured traffic (advanced)
-  bifrost upgrade --help             Self-upgrade
+  bifrost upgrade --help             Self-upgrade (alias: update)
 Tip: Use 'bifrost <command> --help' to see all flags and examples."#,
         port = port
     );

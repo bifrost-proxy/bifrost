@@ -42,7 +42,7 @@ bifrost <command> <subcommand> --help
 | `system-proxy` | 启用、禁用、查看操作系统代理 | [系统代理管理](#系统代理管理) |
 | `value` | 管理 `{VALUE_NAME}` 规则变量 | [Values 管理](#values-管理) |
 | `script` | 管理请求、响应、decode 脚本 | [Scripts 管理](#scripts-管理) |
-| `upgrade` / `version-check` | 检查新版本、升级二进制 | [升级与版本检查](#升级与版本检查upgrade--version-check) |
+| `upgrade` / `update` / `version-check` | 检查新版本、升级二进制；`update` 是 `upgrade` 的别名 | [升级与版本检查](#升级与版本检查upgrade--update--version-check) |
 | `config` | 查看和修改运行时配置、连接、缓存、性能状态 | [配置项管理](#配置项管理) |
 | `admin` | 管理 Admin 远程访问、密码、会话、审计日志 | [管理端远程访问与鉴权](#管理端远程访问与鉴权admin) |
 | `capture` | 等待下一条匹配条件的流量记录，适合浏览器/桌面应用联调和 Agent 采证 | [等待捕获](#等待捕获capture-wait) |
@@ -630,14 +630,15 @@ bifrost search "keyword" --host example.com --req-header
 bifrost search --interactive
 ```
 
-### 升级与版本检查（upgrade / version-check）
+### 升级与版本检查（upgrade / update / version-check）
 
 ```bash
 bifrost version-check
 bifrost upgrade
+bifrost update
 ```
 
-`upgrade` 默认无交互执行升级。它会自动识别 Homebrew、npm、pnpm、官方安装脚本或手动二进制来源；Homebrew/npm/pnpm 会沿原包管理器升级，脚本与手动安装使用 Bifrost 固定版本 release 的原子替换路径。如果检测到当前有代理在运行，会在升级成功后停止并重新拉起代理，让运行中的服务切换到新二进制。Windows 手动安装路径下，CLI 会先 stage 新的 `bifrost.exe`，等待当前 upgrade 进程退出后再替换自身，并用新的 exe 启动 daemon。
+`update` 是 `upgrade` 的等价别名，两者接受相同参数并进入同一升级流程。升级默认无交互执行，会自动识别 Homebrew、npm、pnpm、官方安装脚本或手动二进制来源；Homebrew/npm/pnpm 会沿原包管理器升级，脚本与手动安装使用 Bifrost 固定版本 release 的原子替换路径。如果检测到当前有代理在运行，会在升级成功后停止并重新拉起代理，让运行中的服务切换到新二进制。Windows 手动安装路径下，CLI 会先 stage 新的 `bifrost.exe`，等待当前 upgrade 进程退出后再替换自身，并用新的 exe 启动 daemon。
 
 ### 同步（sync）
 

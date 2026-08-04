@@ -144,8 +144,13 @@ fn test_cli_upgrade_rejects_restart_flag() {
     use crate::cli::Cli;
     use clap::Parser;
 
-    let result = Cli::try_parse_from(["bifrost", "upgrade", "--restart"]);
-    assert!(result.is_err(), "--restart should be removed from upgrade");
+    for command in ["upgrade", "update"] {
+        let result = Cli::try_parse_from(["bifrost", command, "--restart"]);
+        assert!(
+            result.is_err(),
+            "--restart should be removed from {command}"
+        );
+    }
 }
 
 #[test]
@@ -153,12 +158,14 @@ fn test_cli_upgrade_hidden_yes_flag_is_accepted() {
     use crate::cli::{Cli, Commands};
     use clap::Parser;
 
-    let cli = Cli::parse_from(["bifrost", "upgrade", "-y"]);
-    match cli.command {
-        Some(Commands::Upgrade { yes }) => {
-            assert!(yes);
+    for command in ["upgrade", "update"] {
+        let cli = Cli::parse_from(["bifrost", command, "-y"]);
+        match cli.command {
+            Some(Commands::Upgrade { yes }) => {
+                assert!(yes, "{command} should preserve the hidden yes flag");
+            }
+            _ => panic!("Expected {command} to parse as Upgrade command"),
         }
-        _ => panic!("Expected Upgrade command"),
     }
 }
 
@@ -167,13 +174,27 @@ fn test_cli_upgrade_no_flags() {
     use crate::cli::{Cli, Commands};
     use clap::Parser;
 
-    let cli = Cli::parse_from(["bifrost", "upgrade"]);
-    match cli.command {
-        Some(Commands::Upgrade { yes }) => {
-            assert!(!yes);
+    for command in ["upgrade", "update"] {
+        let cli = Cli::parse_from(["bifrost", command]);
+        match cli.command {
+            Some(Commands::Upgrade { yes }) => {
+                assert!(!yes, "{command} should use the same default flags");
+            }
+            _ => panic!("Expected {command} to parse as Upgrade command"),
         }
-        _ => panic!("Expected Upgrade command"),
     }
+}
+
+#[test]
+fn test_cli_upgrade_help_advertises_update_alias() {
+    use crate::cli::Cli;
+    use clap::CommandFactory;
+
+    let help = Cli::command().render_help().to_string();
+    assert!(
+        help.contains("alias: update"),
+        "top-level help should make the update alias discoverable: {help}"
+    );
 }
 
 #[cfg(unix)]

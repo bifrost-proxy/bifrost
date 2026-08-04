@@ -8,6 +8,7 @@
 
 ### 必须实现
 
+- `bifrost update` 作为 `bifrost upgrade` 的可见别名，复用相同参数解析和唯一升级执行路径。
 - 自动识别 Homebrew、npm、pnpm、官方安装脚本和手动二进制来源。
 - Homebrew、npm、pnpm 分别沿原包管理器升级，并把目标版本固定为本次 version-check 的版本。
 - npm/pnpm 升级后重新解析全局包中的平台二进制，再执行版本校验、skills 安装、Desktop companion 更新和 proxy restart。
@@ -22,6 +23,11 @@
 - 既有运行时 ownership、Desktop companion、skills 安装和 restart 流程保持单一实现。
 
 ## 设计
+
+### CLI 别名
+
+- `update` 通过 Clap `visible_alias` 直接绑定到 `Commands::Upgrade`；不新增 command variant、handler 或升级分支。
+- `bifrost update` 与 `bifrost upgrade` 接受相同参数并输出相同帮助，顶层 `--help` 显示该别名。
 
 ### 来源识别优先级
 
@@ -47,9 +53,9 @@
 
 ## 验证
 
-- Rust 单元测试：来源矩阵、Homebrew Node 路径冲突、伪造环境变量、脚本 marker、固定版本命令、global root 二进制解析。
+- Rust 单元测试：`update`/`upgrade` 解析等价、别名可发现性、来源矩阵、Homebrew Node 路径冲突、伪造环境变量、脚本 marker、固定版本命令、global root 二进制解析。
 - Node 单元测试：npm 与 pnpm 包装器路径识别。
-- E2E：`test_upgrade_install_source_e2e.sh` 用隔离全局目录和 fake npm/pnpm 真实运行 `bifrost upgrade`，断言来源输出、固定参数、升级后新二进制校验和失败不回退。
+- E2E：`test_upgrade_install_source_e2e.sh` 断言 `update`/`upgrade` help 一致，并用隔离全局目录和 fake npm/pnpm 分别真实运行两个拼写，断言来源输出、固定参数、升级后新二进制校验和失败不回退。
 - Installer E2E：Bash/PowerShell 原子安装函数必须生成来源 marker。
 - Human test：`human_tests/cli-upgrade-install-source.md`。
 - 覆盖率：本地不执行全量 coverage；由 CI `scripts/ci/coverage-all.sh --json --gate` 和 changed-lines 门禁兜底。
