@@ -303,12 +303,16 @@ install_binary_atomically() {
     local source_path="$1"
     local dest_path="$2"
     local tmp_path="${dest_path}.tmp.$$"
+    local marker_path="${dest_path}.install-source"
+    local marker_tmp_path="${marker_path}.tmp.$$"
 
     rm -f "$tmp_path"
     cp "$source_path" "$tmp_path"
     chmod +x "$tmp_path"
     clear_xattr "$tmp_path"
     mv -f "$tmp_path" "$dest_path"
+    printf '%s\n' script > "$marker_tmp_path"
+    mv -f "$marker_tmp_path" "$marker_path"
 }
 
 build_mirror_url_list() {

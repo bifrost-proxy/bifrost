@@ -647,6 +647,7 @@ SKIP_IN_CI_TESTS=(
   # the dedicated unit/integration jobs already covered the Rust paths.
   "test_chatgpt_web_shared_profile.sh"
   "test_utf8_safe_preview_e2e.sh"
+  "test_im_online_notification_runner_context.sh"
   # These desktop contract/lifecycle wrappers require either a costly Tauri
   # compile or an interactive macOS WindowServer session. Keep them as explicit
   # local desktop release validation; CI still compiles the production path and

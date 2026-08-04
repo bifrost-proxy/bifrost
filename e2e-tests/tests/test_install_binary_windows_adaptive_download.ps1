@@ -192,6 +192,20 @@ Run-Case "archive binary path helper is compatible with Windows PowerShell 5.1" 
     Assert-Eq $joined "C:\Temp\extract\bifrost-v1-target\bifrost.exe" "Join-Path3 builds nested archive binary path"
 }
 
+Run-Case "atomic installer records script provenance" {
+    $tmpDir = New-Item -ItemType Directory -Path (Join-Path ([System.IO.Path]::GetTempPath()) "bifrost-ps-marker-$([guid]::NewGuid())")
+    try {
+        $source = Join-Path $tmpDir "source.exe"
+        $destination = Join-Path $tmpDir "bifrost.exe"
+        Set-Content -Path $source -Value "fixture" -NoNewline
+        Install-BinaryAtomically -SourcePath $source -DestPath $destination
+        Assert-Eq (Get-Content "$destination.install-source" -Raw) "script" "PowerShell installer writes script source marker"
+    }
+    finally {
+        Remove-Item -Path $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Run-Case "Windows User PATH helper is case-insensitive and slash-tolerant" {
     $pathList = "C:\Tools;C:\Users\eden_studio\.local\bin\;C:\Other"
     $contains = Test-PathListContains -PathList $pathList -Directory "c:\users\EDEN_STUDIO\.local\bin"

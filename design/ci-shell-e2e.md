@@ -41,6 +41,8 @@ Bifrost 的 shell E2E 通过 `scripts/ci/run-e2e-shell.sh` 调用 `scripts/run_a
   - `test_system_proxy_e2e.sh`（修改宿主机代理，hosted runner 不稳）。
   - ASR/voice runtime 类：`test_asr_*.sh`、`test_qwen3_asr_*.sh`、`test_voice_input_runtime.sh`、`test_voice_wake_actions.sh`。
   - 重型低频专项：`test_asr_admin_csrf.sh`（~583s wall time）、`test_chatgpt_web_shared_profile.sh`（~879s）、`test_security_hardening.sh`（聚合 wrapper）。
+  - 纯 Rust 包装器：`test_im_online_notification_runner_context.sh`。其中的 focused `bifrost-admin` tests 已由 Unit/Integration 的 `cargo test --workspace --all-features` 与 Coverage job 覆盖，因此只留在本地 full-shell/release-gate。
+- `test_desktop_traffic_detail_window_contract.sh` 仍在 CI shell capability shard 执行静态检查、Web unit tests 与 desktop frontend build；workflow 注入 `SKIP_CARGO_TEST=true` 时不在 600 秒 shell suite 内冷编译 Tauri。focused `traffic_detail` Rust test 迁到 aarch64 macOS Desktop bundle job，在 30 分钟 job 预算内执行并复用 desktop cache。
 - 本地 `bash scripts/run_all_e2e.sh --full-shell ...`（`MODE=local`）不应用 skip 列表，可手动跑系统代理与 ASR 用例。
 - `--list-shell-tests` 只打印当前 mode/shard 下会被收集的 shell 脚本并退出，不启动 Bifrost。
 
@@ -242,6 +244,7 @@ Bash 调度逻辑，无 Rust 公共函数变更。
 - `SKIP_BUILD=true BIFROST_BIN=<release> bash e2e-tests/tests/test_remote_relay_url_fallback_e2e.sh`：输出 `Using existing bifrost binary`，三段 relay fallback 全过。
 - `BIFROST_BIN=<release> SKIP_BUILD=true SKIP_CARGO_TEST=true PROXY_PORT=<free> ECHO_HTTP_PORT=<free> ECHO_HTTPS_PORT=<free> bash e2e-tests/tests/test_http3_e2e.sh`：全部命中本地 mock，`Failed: 0`。
 - Linux 与 macOS Shell capability matrix 显式设置 `SKIP_CARGO_TEST=true`：HTTP/3 Rust integration test 由 Unit/Integration 与 Coverage 两个独立 job 双重执行；Shell 保留全部真实代理场景，避免冷缓存下 test-only 依赖编译超过 job 预算。
+- 所有仍保留的专项包装器直接调用 Cargo 时必须设置 `SKIP_FRONTEND_BUILD=1`；即使维护者在本地 full-shell/release-gate 手动执行，也不应因为 focused Rust test 重建无关的管理端前端。
 - Layered Coverage 的 Shell 阶段同样设置 `SKIP_CARGO_TEST=true`：前置 Unit/Integration coverage 已执行并采集 HTTP/3 integration test，后续 Shell 只运行可贡献 E2E profile 的真实代理场景，禁止额外构建未插桩 release test。
 - Layered Coverage 在插桩构建前生成 Web 资产，并把历史 Shell 用例使用的 `target/release/{bifrost,bifrost-e2e}` 兼容路径链接到同一份 debug 插桩二进制；既保证管理端资源与旧用例路径可用，也不混入未插桩进程。
 - PR 不再触发完整 Layered Coverage；主 Coverage 使用 `--e2e-suite proxy`，通过 `BIFROST_E2E_SHELL_TESTS` 精确选择 13 个 SOCKS/CONNECT/HTTP/WebSocket 核心场景并合并 Rules、Runner profile。完整 167 个 Shell 的分层报告只在每周和手动审计生成。
@@ -287,6 +290,8 @@ Bash 调度逻辑，无 Rust 公共函数变更。
 - 决策：Linux 不再横向分 shard，改为单 shard 内部 4 并发；`CI run 25469654203` / `25470391707` 的 shard 2/3 显示 shard 数越多反而放大 OOM。
 - 决策：Windows shell 只跑 upgrade restart，其它 Windows shell 用例交给 rules matrix；Windows MSYS 上完整 shell 集合稳定性低。
 - 风险：新加 shell 用例若忘记登记 `CARGO_HEAVY_TESTS` / `SKIP_IN_CI_TESTS`，会把 shard 拖到 900s per-test timeout。缓解：`--list-shell-tests` 可在合入前 dry-run 分片。
+- 2026-08-04 的 PR #443 连续三次在 macOS `remote` capability 上让 `test_desktop_traffic_detail_window_contract.sh` 超过 600 秒；同一 run 首轮的 `agent-extensions` 也曾让 `test_im_online_notification_runner_context.sh` 超过 600 秒。两者均停留在 Cargo 下载/编译、业务断言尚未失败。修复不延长 suite timeout、不削弱断言：IM wrapper 由现有 workspace job 覆盖；Desktop wrapper 的 Web 路径仍留在 shell，Rust test 迁到 Desktop bundle job。
+- 同一 PR 的后续 Linux Shell run `30894017140` 暴露 `test_im_gateway_codex_fast_slash.sh` 的忙碌队列测试依赖固定 `sleep 2`：hosted runner 高负载时，测试线程可能在 mock Runner 已结束后才发送 `/q`。测试必须通过 ready/release 文件显式控制 Runner 生命周期，先确认 busy、再断言消息已入队、最后释放并验证下一轮 prompt，禁止用固定休眠推断并发状态。
 
 ## 依赖项
 

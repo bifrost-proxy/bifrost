@@ -35,7 +35,7 @@ The top-level help intentionally stays short. Exact flag parsing is defined by e
 | `system-proxy` | Enable, disable, or inspect the OS system proxy. |
 | `value` | Manage `{VALUE_NAME}` rule variables. |
 | `script` | Manage request, response, decode, and parser scripts. |
-| `upgrade`, `version-check` | Check for new versions and upgrade the binary. |
+| `upgrade`, `update`, `version-check` | Check for new versions and upgrade the binary; `update` is an alias for `upgrade`. |
 | `config` | Inspect and modify runtime config, connections, cache, and performance status. |
 | `admin` | Manage Admin remote access, passwords, sessions, and audit logs. |
 | `capture` | Wait for the next matching traffic record, useful for browser/app debugging and agent evidence collection. |

@@ -25,6 +25,8 @@ proxy_coverage_shell_manifest="scripts/ci/proxy-coverage-shell-tests.txt"
 shell_quality="scripts/ci/check-shell-quality.sh"
 e2e_summary="scripts/ci/e2e-summary.py"
 ui_critical="scripts/ci/run-ui-critical.sh"
+desktop_traffic_detail="e2e-tests/tests/test_desktop_traffic_detail_window_contract.sh"
+im_online_notification="e2e-tests/tests/test_im_online_notification_runner_context.sh"
 
 bash -n "$coverage_all"
 bash -n "$coverage_e2e"
@@ -33,6 +35,8 @@ bash -n "$shell_runner"
 bash -n "$shell_job_cleanup"
 bash -n "$shell_quality"
 bash -n "$ui_critical"
+bash -n "$desktop_traffic_detail"
+bash -n "$im_online_notification"
 bash scripts/ci/check-shell-syntax.sh
 python3 -m unittest discover -s scripts/ci/tests -p 'test_*.py' -v
 
@@ -198,6 +202,18 @@ if grep -Fq 'save-if: always()' "$ci_workflow" ||
   exit 1
 fi
 grep -Fq 'save-if: ${{ true }}' "$ci_workflow"
+grep -Fq 'SKIP_FRONTEND_BUILD=1 cargo build -p bifrost-cli --bin bifrost' \
+  "$desktop_traffic_detail"
+grep -Fq 'SKIP_FRONTEND_BUILD=1 cargo test --manifest-path desktop/src-tauri/Cargo.toml traffic_detail' \
+  "$desktop_traffic_detail"
+grep -Fq 'if [[ "${SKIP_CARGO_TEST:-false}" == "true" ]]' "$desktop_traffic_detail"
+grep -Fq 'Test desktop traffic detail window' "$ci_workflow"
+grep -Fq -- '--target ${{ matrix.target }} traffic_detail -- --nocapture' "$ci_workflow"
+grep -Fq 'cargo test --workspace --all-features' "$ci_workflow"
+grep -Fq 'SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin online_notification_ --lib' \
+  "$im_online_notification"
+grep -Fq 'SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_help_ --lib' \
+  "$im_online_notification"
 proxy_filter='test_trustworthy_traffic_metrics.sh,test_socks5_tls_rules.sh'
 filtered_shell_tests="$(
   BIFROST_E2E_SHELL_TESTS="$proxy_filter" bash "$runner" \
@@ -246,10 +262,12 @@ grep -Fxq 'test_remote_invoke_e2e.sh' "$partition_dir/shard-2.txt"
 grep -Fxq 'test_group_sync_e2e.sh' "$partition_dir/shard-2.txt"
 grep -Fxq 'test_cli_online_commands_e2e.sh' "$partition_dir/shard-2.txt"
 grep -Fxq 'test_im_gateway_long_reply_delivery_regression.sh' "$partition_dir/shard-3.txt"
+grep -Fxq 'test_desktop_traffic_detail_window_contract.sh' "$partition_dir/all.txt"
 if grep -Fxq 'test_desktop_open_requests_contract.sh' "$partition_dir/all.txt" ||
   grep -Fxq 'test_desktop_sidecar_launchd_env_contract.sh' "$partition_dir/all.txt" ||
-  grep -Fxq 'test_desktop_service_ownership_lifecycle.sh' "$partition_dir/all.txt"; then
-  echo "desktop compile/session-dependent wrappers must stay out of CI shell shards" >&2
+  grep -Fxq 'test_desktop_service_ownership_lifecycle.sh' "$partition_dir/all.txt" ||
+  grep -Fxq 'test_im_online_notification_runner_context.sh' "$partition_dir/all.txt"; then
+  echo "redundant Rust/desktop compile wrappers must stay out of CI shell shards" >&2
   exit 1
 fi
 

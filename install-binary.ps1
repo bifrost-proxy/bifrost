@@ -150,6 +150,10 @@ function Install-BinaryAtomically {
     }
     Copy-Item -Path $SourcePath -Destination $tempPath -Force
     Move-Item -Path $tempPath -Destination $DestPath -Force
+    $markerPath = "$DestPath.install-source"
+    $markerTempPath = "$markerPath.tmp.$PID"
+    Set-Content -Path $markerTempPath -Value "script" -NoNewline
+    Move-Item -Path $markerTempPath -Destination $markerPath -Force
 }
 
 function Split-PathList {

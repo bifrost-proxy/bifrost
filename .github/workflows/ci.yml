@@ -1088,6 +1088,12 @@ jobs:
         run: pnpm --dir web run build:desktop
       - name: Prepare desktop sidecar
         run: node scripts/prepare-tauri-sidecar.mjs release ${{ matrix.target }}
+      - name: Test desktop traffic detail window
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: >-
+          SKIP_FRONTEND_BUILD=1 cargo test
+          --manifest-path desktop/src-tauri/Cargo.toml
+          --target ${{ matrix.target }} traffic_detail -- --nocapture
       - name: Resolve macOS signing mode
         shell: bash
         run: |

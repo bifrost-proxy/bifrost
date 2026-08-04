@@ -12,6 +12,8 @@ TEST_DIR="$(mktemp -d "$REPO_DIR/.bifrost-e2e-codex-fast.XXXXXX")"
 BIFROST_LOG="$TEST_DIR/bifrost.log"
 CODEX_ARGV_LOG="$TEST_DIR/codex-argv.log"
 CODEX_STDIN_LOG="$TEST_DIR/codex-stdin.log"
+CODEX_BUSY_READY="$TEST_DIR/codex-busy.ready"
+CODEX_BUSY_RELEASE="$TEST_DIR/codex-busy.release"
 TRAEX_ARGV_LOG="$TEST_DIR/traex-argv.log"
 BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
 BIFROST_PORT="${BIFROST_PORT:-$(python3 - <<'PY'
@@ -137,7 +139,18 @@ printf '%s\n' "$*" >>"$BIFROST_CODEX_ARGV_LOG"
 prompt="$(cat)"
 printf '%s\n' "$prompt" >>"$BIFROST_CODEX_STDIN_LOG"
 case "$prompt" in
-  *"hold for busy fast switch"*) sleep 2 ;;
+  *"hold for busy fast switch"*)
+    printf '%s\n' ready >"$BIFROST_CODEX_BUSY_READY"
+    attempts=0
+    while [ ! -f "$BIFROST_CODEX_BUSY_RELEASE" ]; do
+      attempts=$((attempts + 1))
+      if [ "$attempts" -ge 600 ]; then
+        echo "timed out waiting for busy release" >&2
+        exit 1
+      fi
+      sleep 0.05
+    done
+    ;;
 esac
 printf '%s\n' '{"type":"thread.started","thread_id":"thread-codex-fast"}'
 printf '%s\n' '{"type":"assistant_final","content":"CODEX_FAST_E2E_OK"}'
@@ -168,12 +181,21 @@ BIFROST_DATA_DIR="$TEST_DIR" "$BIFROST_BIN" start \
 BIFROST_PID=$!
 wait_http
 
-python3 - "$BIFROST_PORT" "$MOCK_CODEX" "$CODEX_ARGV_LOG" "$CODEX_STDIN_LOG" "$MOCK_TRAEX" "$TRAEX_ARGV_LOG" <<'PY'
+python3 - "$BIFROST_PORT" "$MOCK_CODEX" "$CODEX_ARGV_LOG" "$CODEX_STDIN_LOG" "$CODEX_BUSY_READY" "$CODEX_BUSY_RELEASE" "$MOCK_TRAEX" "$TRAEX_ARGV_LOG" <<'PY'
 import json
 import sys
 import urllib.request
 
-port, mock_codex, codex_log, codex_stdin_log, mock_traex, traex_log = sys.argv[1:7]
+(
+    port,
+    mock_codex,
+    codex_log,
+    codex_stdin_log,
+    codex_busy_ready,
+    codex_busy_release,
+    mock_traex,
+    traex_log,
+) = sys.argv[1:9]
 api = f"http://127.0.0.1:{port}/_bifrost/api/im-gateway"
 
 def request(path, payload, method):
@@ -198,6 +220,8 @@ request("/chat/config", {
                 "env": {
                     "BIFROST_CODEX_ARGV_LOG": codex_log,
                     "BIFROST_CODEX_STDIN_LOG": codex_stdin_log,
+                    "BIFROST_CODEX_BUSY_READY": codex_busy_ready,
+                    "BIFROST_CODEX_BUSY_RELEASE": codex_busy_release,
                 },
                 "timeoutSecs": 30,
             },
@@ -256,10 +280,12 @@ inject "codex-fast-provider" "codex-fast-owner" "codex-fast-turn" "run in fast m
 wait_for_file_pattern "$CODEX_ARGV_LOG" 'service_tier="fast"'
 
 inject "codex-fast-provider" "codex-fast-owner" "codex-busy-turn" "hold for busy fast switch"
-wait_for_file_pattern "$CODEX_STDIN_LOG" 'hold for busy fast switch'
+wait_for_file_pattern "$CODEX_BUSY_READY" 'ready'
 inject "codex-fast-provider" "codex-fast-owner" "codex-busy-off" "/fast off"
 wait_for_file_pattern "$TEST_DIR/agent/im_gateway/session_state.json" '"serviceTierOverride": "default"'
 inject "codex-fast-provider" "codex-fast-owner" "codex-busy-queue" "/q queued after busy switch"
+wait_for_file_pattern "$TEST_DIR/admin/im_gateway_message_logs.json" '已加入排队'
+: >"$CODEX_BUSY_RELEASE"
 wait_for_file_pattern "$CODEX_STDIN_LOG" 'queued after busy switch'
 
 inject "traex-fast-provider" "traex-fast-owner" "traex-fast-reject" "/fast off"
