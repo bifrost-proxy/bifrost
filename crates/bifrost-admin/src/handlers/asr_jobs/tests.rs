@@ -9239,7 +9239,7 @@ esac
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn source_compression_http_routes_cover_get_post_and_delete() {
+    async fn source_compression_http_routes_cover_get_post_delete_and_cleanup() {
         use hyper::server::conn::http1;
         use hyper::service::service_fn;
         use hyper_util::rt::TokioIo;
@@ -9260,7 +9260,7 @@ esac
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for _ in 0..3 {
+            for _ in 0..4 {
                 let (stream, _) = listener.accept().await.unwrap();
                 let service = service_fn(|request: Request<Incoming>| async move {
                     let path = request.uri().path().to_string();
@@ -9306,6 +9306,20 @@ esac
                 .unwrap()
                 .status(),
             reqwest::StatusCode::OK
+        );
+        let cleanup_url = format!(
+            "http://{address}/api/asr/tasks/{}/cleanup-source-audio",
+            task.id
+        );
+        assert_eq!(
+            client
+                .post(&cleanup_url)
+                .header(reqwest::header::CONNECTION, "close")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::BAD_REQUEST
         );
         server.await.unwrap();
     }
