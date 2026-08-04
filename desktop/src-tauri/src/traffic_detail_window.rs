@@ -1,10 +1,25 @@
-use super::HOST_WINDOW_LABEL;
+use super::{append_desktop_bootstrap_log, BackendState, MAIN_WINDOW_LABEL};
 use tauri::{webview::WebviewWindowBuilder, AppHandle, Manager, WebviewUrl};
 
 const TRAFFIC_DETAIL_WINDOW_LABEL: &str = "traffic-detail";
 const TRAFFIC_DETAIL_CLOSED_EVENT: &str = "desktop://traffic-detail-closed";
 const MAX_TRAFFIC_RECORD_ID_LENGTH: usize = 512;
 const MAX_TRAFFIC_POPUP_ID_LENGTH: usize = 128;
+
+pub(super) fn dispatch_traffic_detail_closed<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<(), String> {
+    let webview = app
+        .get_webview(MAIN_WINDOW_LABEL)
+        .ok_or_else(|| "main traffic webview is unavailable".to_string())?;
+    let script = format!(
+        r#"window.dispatchEvent(new CustomEvent({:?}))"#,
+        TRAFFIC_DETAIL_CLOSED_EVENT
+    );
+    webview
+        .eval(&script)
+        .map_err(|error| format!("failed to notify traffic detail window close: {error}"))
+}
 
 fn percent_encode_query_value(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
@@ -98,12 +113,15 @@ pub(super) async fn open_traffic_detail_window_impl<R: tauri::Runtime>(
     let app_for_close = app.clone();
     window.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
-            if let Some(webview) = app_for_close.get_webview(HOST_WINDOW_LABEL) {
-                let script = format!(
-                    r#"window.dispatchEvent(new CustomEvent({:?}))"#,
-                    TRAFFIC_DETAIL_CLOSED_EVENT
-                );
-                let _ = webview.eval(&script);
+            if let Err(error) = dispatch_traffic_detail_closed(&app_for_close) {
+                if let Some(state) = app_for_close.try_state::<BackendState>() {
+                    append_desktop_bootstrap_log(
+                        &state.data_dir,
+                        format!(
+                            "traffic detail window closed but main UI notification failed: {error}"
+                        ),
+                    );
+                }
             }
         }
     });

@@ -1,5 +1,6 @@
 use crate::{
-    close_traffic_detail_window_impl, open_traffic_detail_window_impl, traffic_detail_app_path,
+    close_traffic_detail_window_impl, dispatch_traffic_detail_closed,
+    open_traffic_detail_window_impl, traffic_detail_app_path,
 };
 use tauri::Manager;
 
@@ -33,6 +34,35 @@ fn traffic_detail_path_rejects_overlong_values() {
         traffic_detail_app_path("REQ-1", &"p".repeat(129)).unwrap_err(),
         "traffic detail popup id exceeds 128 characters"
     );
+}
+
+#[test]
+fn traffic_detail_close_event_targets_main_webview_not_host_shell() {
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("build mock desktop app");
+
+    tauri::webview::WebviewWindowBuilder::new(
+        &app,
+        "host",
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .build()
+    .expect("build host-labeled mock webview");
+    assert_eq!(
+        dispatch_traffic_detail_closed(app.handle()).unwrap_err(),
+        "main traffic webview is unavailable"
+    );
+
+    tauri::webview::WebviewWindowBuilder::new(
+        &app,
+        "main",
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .build()
+    .expect("build main mock webview");
+    dispatch_traffic_detail_closed(app.handle())
+        .expect("dispatch close event to the main traffic webview");
 }
 
 #[test]

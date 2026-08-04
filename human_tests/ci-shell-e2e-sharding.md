@@ -1125,14 +1125,14 @@
    ```bash
    BIFROST_BIN="$PWD/target/release/bifrost" \
    BIFROST_E2E_SHELL_TESTS='test_e2e_runner_timeout_cleanup.sh,test_total_size_cleanup_admin_api.sh' \
-   BIFROST_E2E_SHELL_JOBS=2 BIFROST_E2E_SHELL_TEST_TIMEOUT=600 BIFROST_E2E_SUITE_TIMEOUT=600 \
+   BIFROST_E2E_SHELL_JOBS=2 BIFROST_E2E_SHELL_TEST_TIMEOUT=1260 BIFROST_E2E_SUITE_TIMEOUT=1260 \
      bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build
    ```
 
 **预期结果**：
 - 语法检查和 coverage contract 退出码均为 0。
 - 专项回归通过真实 `run_and_capture` 创建一个忽略 TERM 的父 shell、后台子进程和共享 FIFO；内层 1 秒 watchdog 触发后，`terminate_process_tree` 在 30 秒测试门槛内回收父子进程，stream 有界退出，失败摘要明确为 `timed out after 1s`，外层专项脚本输出 `E2E runner timeout cleanup: PASS`。
-- workflow 同时设置 `BIFROST_E2E_SHELL_TEST_TIMEOUT=600` 与 `BIFROST_E2E_SUITE_TIMEOUT=600`，串行/并行用例统一先于 60 分钟 job budget 失败；failed/cancelled 均尝试 dump/upload 日志。
+- workflow 同时设置 `BIFROST_E2E_SHELL_TEST_TIMEOUT=1260` 与 `BIFROST_E2E_SUITE_TIMEOUT=1260`，串行/并行用例统一先于 60 分钟 job budget 失败；failed/cancelled 均尝试 dump/upload 日志。
 - Windows stream 收尾必须同时保留 process-tree `taskkill` 与 shell builtin `kill "$stream_pid"` fallback；MSYS PID 无法映射为 Windows PID 时，业务命令完成后也不能卡在日志 `tail` 的 `wait`。
 - CI runner 入口汇总两个 suite 全部通过；测试只使用临时目录和动态非 9900 端口，不修改真实服务或系统代理。
 
@@ -1251,6 +1251,38 @@
 - 测试使用动态端口与临时数据目录，不使用或停止共享 9900，不修改系统代理。
 - 远端 macOS shell E2E 不再因重复 debug 编译触发 600 秒 watchdog。
 
+### TC-CS-57: macOS 冷编译不被 600 秒 watchdog 误杀
+
+**背景**：PR #445 的 CI run `30880225313` 连续两个 attempt 都只有 macOS capability shell job 失败。`test_desktop_traffic_detail_window_contract.sh`、`test_im_online_notification_runner_context.sh` 与 `test_skill_creator_flow.sh` 都在 600 秒被 watchdog 终止；失败日志随后显示 Rust 测试断言全部通过，但冷编译实际耗时约 11–12 分钟。原 1260 秒预算被 PR #438 降为 600 秒后，与真实冷编译耗时不再匹配。
+
+**操作步骤**：
+1. 检查 workflow、runner 和 coverage contract 语法：
+   ```bash
+   ruby -e 'require "yaml"; YAML.load_file(".github/workflows/ci.yml"); puts "workflow yaml ok"'
+   bash -n scripts/run_all_e2e.sh e2e-tests/tests/test_coverage_pipeline_contract.sh e2e-tests/tests/test_e2e_runner_timeout_cleanup.sh
+   ```
+2. 确认 macOS per-test 与 serial suite 预算均为 1260 秒，且旧 600 秒 contract 已移除：
+   ```bash
+   rg -n 'BIFROST_E2E_(SHELL_TEST|SUITE)_TIMEOUT: "1260"' .github/workflows/ci.yml e2e-tests/tests/test_coverage_pipeline_contract.sh
+   ! rg -n 'BIFROST_E2E_(SHELL_TEST|SUITE)_TIMEOUT: "600"' .github/workflows/ci.yml e2e-tests/tests/test_coverage_pipeline_contract.sh
+   ```
+3. 执行真实进程树/FIFO 超时回收回归，确认延长业务预算没有删除有界回收能力：
+   ```bash
+   bash e2e-tests/tests/test_e2e_runner_timeout_cleanup.sh
+   ```
+4. 执行 CI/E2E coverage contract：
+   ```bash
+   bash e2e-tests/tests/test_coverage_pipeline_contract.sh
+   ```
+5. 推送后看护 PR #445 的新 CI run，确认三个 macOS capability job 与 coverage 90% gate 全部成功。
+
+**预期结果**：
+- workflow YAML、shell syntax、timeout cleanup 与 coverage contract 均退出 0。
+- macOS shell job 同时使用 `BIFROST_E2E_SHELL_TEST_TIMEOUT=1260` 和 `BIFROST_E2E_SUITE_TIMEOUT=1260`；21 分钟 watchdog 仍在 60 分钟外层预算前预留 39 分钟用于 final report、进程回收与 artifact 上传。
+- `terminate_process_tree`、日志 FIFO stream 有界退出以及 failed/cancelled artifact 上传 contract 保持不变，不能通过删除 watchdog 或削弱断言换绿。
+- 新 CI run 中 Desktop、IM online notification 与 Skill Creator 的 Rust 断言实际执行完成，不再在冷编译阶段被 600 秒误杀；coverage 90% 远端门禁通过。
+- 本地验证不启动共享 9900、不修改真实 `~/.bifrost`、真实安装或系统代理。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -1298,6 +1330,7 @@
 | TC-CS-54 | 通过 | 2026-08-01 本轮执行：语法与串行登记检查通过；首次 focused runner 复现确认 shutdown-marker 修复后 14/14 通过，同时 interactive restart 日志定位到父会话继承 `BIFROST_DESKTOP_CORE=1`，导致临时前台进程被标成 app-bound core。清除 Desktop ownership 环境后再次通过 CI 同入口串行执行，interactive restart 9/9（y / `-y` / n）与 shutdown-marker 14/14 均通过，汇总 `Total suites: 2 / Passed: 2 / Failed: 0`，耗时 5s/4s。随后单独复跑 shutdown-marker 14/14，并对运行前后 worktree release daemon/helper 进程集合进行 15 秒稳定观察，结果无新增残留。动态端口为 15209/17150；真实 9900 Service 保持运行且未被 stop/restart，fake system proxy 断言通过，未修改真实系统代理。 |
 | TC-CS-55 | 通过 | 2026-08-01 本轮执行：`bash -n` 覆盖调度器、进程 helper、CI shell 入口和 tracked cleanup 脚本并通过；静态检查确认并行 test trap、串行 test 尾部和顶层 EXIT trap 均在删除 sandbox 前调用 ownership-scoped `kill_bifrost_in_data_root`，CI shell EXIT 另按同 UID PID 基线有界回收 job-owned 残留。首次指定不存在的 release binary 时前置失败，改用已构建 debug binary 后，进程隔离用例 10/10、umbrella serial lane 1/1、parallel lane 1/1 均通过且无 worktree binary 残留；首次真实 CI 入口复测发现 macOS Bash 3.2 空数组 `set -u` 兼容问题，修复后同入口再次 1/1 通过并输出 `[CLEANUP] no tracked E2E child processes remain`。临时 PID 基线探针确认新增 `sleep` 被终止、基线内 protected `sleep` 保持存活。CI contract 与 ShellCheck error 门禁同步通过。全程使用动态非 9900 端口和临时目录，未修改真实服务、真实安装或系统代理。 |
 | TC-CS-56 | 通过 | 2026-08-03 本轮执行：首条命令因本地 release 产物已在磁盘清理中移除而以前置退出码 2 失败，随即把 human test 修正为使用已有 `target/debug/bifrost` 验证相同的 `SKIP_BUILD/BIFROST_BIN` 分支。`bash -n` 检查两个 suite 通过；随后分别执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost"`，两个脚本均输出 `Using prebuilt Bifrost binary` 且未进入 cargo build。GitHub Gist expired provider 的 4 项状态断言全部通过，legacy traffic DB schema reset 通过；实际使用动态端口 50570/50615 与临时目录，未使用或停止共享 9900，未修改系统代理。远端 release artifact 复用由 PR CI 继续验证。 |
+| TC-CS-57 | 本地通过，待远端闭环 | 2026-08-04 本轮执行：PR #445 run `30880225313` attempt 1 的 `remote` / `agent-extensions` 分片分别在 Desktop 合约、IM online notification 与 Skill Creator 冷编译处超过 600 秒；attempt 2 再次稳定复现 Desktop 与 IM online notification 超时，后者日志显示 5/5 Rust 断言通过且冷编译耗时 11m29s。已恢复 workflow 与 contract 的 1260 秒预算。首次本地验证发现系统 Ruby 2.6 的 `YAML.load_file` 不接受 `aliases:` 参数，归因为 human test 命令缺陷并改为兼容调用；修正后以 `set -e` 从头复跑，workflow YAML、shell syntax、1260/无旧 600 静态断言全部通过，timeout cleanup 输出 `PASS (7s)`，coverage contract 通过 269 个 shell 语法检查、32 个 helper 单测、capability contract 与 3-shard balance（6.5%）。本地步骤均未启动共享 9900 或修改系统代理；远端三项 macOS capability 与 coverage 90% gate 等待新 run 验证。 |
 
 - 2026-08-02：PR #437 rebase 到 `origin/main@485a4c05` 时保留主干的 600 秒 suite watchdog、递归 process-tree/FIFO 回收与 Windows stream fallback，删除已被主干取代的 90 分钟 timeout 提交；将本分支的 detached-process 回归从冲突编号 `TC-CS-53` 顺延为 `TC-CS-55`。rebase 后 `bash e2e-tests/tests/test_coverage_pipeline_contract.sh` 通过 267 个 shell 语法检查、32 个 helper 单测、capability contract 与 shard balance；当前 debug binary 下进程隔离用例 10/10、umbrella serial lane 1/1 通过，正式 9900 服务未被使用或终止。
 
