@@ -56,4 +56,21 @@ describe("desktop tauri window bridge", () => {
     await expect(issueDesktopUpgradeOriginToken()).resolves.toBe("desktop-token");
     expect(invoke).toHaveBeenCalledWith("issue_desktop_upgrade_origin_token", undefined);
   });
+
+  it("opens and closes the native traffic detail window through Tauri commands", async () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    window.__TAURI__ = { core: { invoke } };
+
+    const { closeDesktopTrafficDetailWindow, openDesktopTrafficDetailWindow } =
+      await import("./tauri");
+
+    await openDesktopTrafficDetailWindow("REQ-special/1", "popup-1");
+    await closeDesktopTrafficDetailWindow();
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "open_traffic_detail_window", {
+      recordId: "REQ-special/1",
+      popupId: "popup-1",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "close_traffic_detail_window", undefined);
+  });
 });

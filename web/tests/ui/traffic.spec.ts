@@ -1750,6 +1750,15 @@ test("SSE 详情切到弹窗再附回右侧面板后消息列表不应丢失", a
 
     const sseRow = page.getByTestId("traffic-row").filter({ hasText: ssePath }).first();
     await expect(sseRow).toBeVisible();
+    const mobileTrustDismissButton = page.getByRole("button", { name: "Not now" });
+    const mobileTrustPromptVisible = await mobileTrustDismissButton
+      .waitFor({ state: "visible", timeout: 15_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (mobileTrustPromptVisible) {
+      await mobileTrustDismissButton.click();
+      await expect(mobileTrustDismissButton).toBeHidden();
+    }
     await sseRow.click();
     await page.getByTestId("response-tab-messages").click();
 

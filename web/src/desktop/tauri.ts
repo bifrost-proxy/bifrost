@@ -9,6 +9,8 @@ export interface DesktopRuntimeInfo {
 
 export const DESKTOP_HANDOFF_COMPLETE_EVENT = "desktop://handoff-complete";
 export const DESKTOP_OPEN_REQUEST_EVENT = "desktop://open-request";
+export const DESKTOP_TRAFFIC_DETAIL_CLOSED_EVENT =
+  "desktop://traffic-detail-closed";
 
 export type DesktopOpenSource = "deepLink" | "fileAssociation";
 
@@ -132,6 +134,20 @@ export async function restartDesktopAfterUpdate(): Promise<void> {
 
 export async function openExternalUrl(url: string): Promise<void> {
   await invokeDesktop<void>("open_external_url", { url });
+}
+
+export async function openDesktopTrafficDetailWindow(
+  recordId: string,
+  popupId: string,
+): Promise<void> {
+  await invokeDesktop<void>("open_traffic_detail_window", {
+    recordId,
+    popupId,
+  });
+}
+
+export async function closeDesktopTrafficDetailWindow(): Promise<void> {
+  await invokeDesktop<void>("close_traffic_detail_window");
 }
 
 export async function setDesktopDocumentEdited(edited: boolean): Promise<void> {

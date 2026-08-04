@@ -1094,6 +1094,35 @@ wait
 
 ---
 
+### TC-WTR-回归-04：桌面端可打开、复用并挂回原生 Traffic 详情窗口
+
+**前置条件**：
+
+- 使用隔离 `BIFROST_DATA_DIR` 和动态代理端口启动当前源码构建的 Bifrost Desktop，不复用已安装 App 或正式 `9900` 实例。
+- 通过隔离代理生成至少两条可区分的 HTTP 流量。
+
+**操作步骤**：
+
+1. 在 Desktop 的 Network 页面选择第一条流量，点击详情面板右上角 `Open in new window`。
+2. 观察操作系统窗口列表与详情窗口内容。
+3. 回到主窗口选择第二条流量，再次点击 `Open in new window`。
+4. 确认仍然只有一个 `Bifrost Traffic Detail` 窗口，且 Request ID 更新为第二条记录。
+5. 在详情窗口点击 `Attach Back`。
+6. 确认原生详情窗口关闭，主窗口内嵌详情恢复且未出现 `Failed to open detail window`。
+7. 再次打开原生详情窗口，然后使用操作系统关闭按钮手动关闭。
+8. 确认主窗口再次恢复内嵌详情，之后仍可重新打开原生窗口。
+9. 在普通浏览器运行 Traffic popup E2E，点击 `Attach Back` 后 popup 关闭且 SSE 详情消息未丢失。
+
+**预期结果**：
+
+- Desktop 使用真实原生窗口展示详情，不显示失败 Toast，也不创建浏览器空白页。
+- 重复打开复用固定窗口，不累计多个详情窗口；详情记录随当前选择更新。
+- `Attach Back` 和系统手动关闭都能清理 detached 状态并恢复主窗口内嵌详情。
+- 浏览器继续使用 popup，原有打开、关闭、挂回和详情数据保持行为不变。
+- 含特殊字符、空值或超长参数由聚焦 Rust/Web 单元测试覆盖，不产生可注入的应用路由。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：
@@ -1103,6 +1132,16 @@ rm -f /tmp/bifrost-mock-test.json
 ```
 
 ## 执行记录
+
+2026-08-04 桌面原生 Traffic 独立详情窗口执行记录（待补 GUI 点击确认）：
+
+- 已执行用例：`TC-WTR-回归-04` 的隔离桌面启动、真实流量准备、原生窗口契约、浏览器 popup 与参数边界部分。
+- 真实源码桌面：以 `BIFROST_DATA_DIR=/tmp/bifrost-desktop-detail-human.Nb2KeO`、`BIFROST_DESKTOP_BIN=<worktree>/target/debug/bifrost`、`BIFROST_DESKTOP_TEST_ALLOW_MULTIPLE_INSTANCES=1` 启动当前源码构建，代理端口为 `19876`；`/_bifrost/api/system/overview` 返回 HTTP 200，未使用正式 `9900`。
+- 真实流量：本地 `python3 -m http.server 19877 --bind 127.0.0.1` 作为 upstream，经隔离代理生成 `/first-detail`、`/second-detail`；Traffic API 返回 `REQ-6a713d16-000102` 与 `REQ-6a713d16-000103` 等记录。
+- 原生 Tauri 窗口自动化：`cargo test --manifest-path desktop/src-tauri/Cargo.toml traffic_detail -- --nocapture` 通过 `4/4`，覆盖 Tauri mock runtime 创建固定标签窗口、二次打开保持单窗口并更新 Request ID、close 幂等、特殊字符编码、空值和超长值拒绝。
+- 桌面构建契约：`bash e2e-tests/tests/test_desktop_traffic_detail_window_contract.sh` 通过；`pnpm --dir web run build:desktop` 通过；Tauri capability 包含 `host` 与 `traffic-detail`。
+- 浏览器 popup：`pnpm --dir web test:ui traffic.spec.ts -g "SSE 详情切到弹窗再附回右侧面板后消息列表不应丢失"` 最终 `1 passed`；popup 可打开，点击 `Attach Back` 后关闭，主页面 SSE 详情恢复且消息未丢失。本机连接 iPad 时全局证书提示会异步遮挡行点击，测试已显式等待并点击 `Not now` 后再验证目标链路。
+- GUI 工具阻塞：按 `computer-use` skill 三次连接本机 Bifrost UI 均返回 `Sky Computer Use native pipe startup failed`，因此本轮尚未由 Agent 实际点击源码桌面中的打开/复用/`Attach Back`/系统关闭按钮。此项不得标记通过，需在 Computer Use 恢复或人工执行步骤 1-8 后补齐记录。
 
 2026-05-20 Network `.bifrost` 空包导入/导出防误报执行记录：
 
