@@ -1282,6 +1282,51 @@
 - `terminate_process_tree`、日志 FIFO stream 有界退出以及 failed/cancelled artifact 上传 contract 保持不变，不能通过删除 watchdog 或削弱断言换绿。
 - 新 CI run 中 Desktop、IM online notification 与 Skill Creator 的 Rust 断言实际执行完成，不再在冷编译阶段被 600 秒误杀；coverage 90% 远端门禁通过。
 - 本地验证不启动共享 9900、不修改真实 `~/.bifrost`、真实安装或系统代理。
+### TC-CS-58: macOS shell 分片不重复执行 Rust/Desktop 编译包装器
+
+**背景**：PR #443 的 `CI` run `30879531999` 连续三次在 macOS `remote` capability 的 `test_desktop_traffic_detail_window_contract.sh` 冷编译阶段超过 600 秒；首轮 `agent-extensions` 的 `test_im_online_notification_runner_context.sh` 也在 Cargo 编译阶段超过相同门限。IM focused tests 已由 workspace jobs 覆盖；Desktop 静态/Web 路径需要留在 shell，原本缺少独立 job 的 focused Rust test 则需要迁入 macOS Desktop bundle job。
+
+**操作步骤**：
+1. 检查 runner 与两个包装器的 shell 语法：
+   ```bash
+   bash -n scripts/run_all_e2e.sh \
+     e2e-tests/tests/test_desktop_traffic_detail_window_contract.sh \
+     e2e-tests/tests/test_im_online_notification_runner_context.sh
+   ```
+2. 确认 CI full-shell 继续收集 Desktop Web/静态包装器，但不重复收集纯 Rust IM 包装器：
+   ```bash
+   ci_tests="$(bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests)"
+   grep -Fxq 'test_desktop_traffic_detail_window_contract.sh' <<<"$ci_tests"
+   ! grep -Fxq 'test_im_online_notification_runner_context.sh' <<<"$ci_tests"
+   ```
+3. 确认本地 full-shell/release-gate 仍保留两个包装器：
+   ```bash
+   local_tests="$(bash scripts/run_all_e2e.sh --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests)"
+   grep -Fxq 'test_desktop_traffic_detail_window_contract.sh' <<<"$local_tests"
+   grep -Fxq 'test_im_online_notification_runner_context.sh' <<<"$local_tests"
+   ```
+4. 确认 Desktop 包装器尊重 `SKIP_CARGO_TEST`，所有直接 Cargo 命令关闭无关前端构建，且 focused Rust test 已迁入 macOS Desktop bundle job；随后执行 CI contract：
+   ```bash
+   rg -n 'SKIP_CARGO_TEST|SKIP_FRONTEND_BUILD=1 cargo (build|test)' \
+     e2e-tests/tests/test_desktop_traffic_detail_window_contract.sh \
+     e2e-tests/tests/test_im_online_notification_runner_context.sh
+   rg -n 'Test desktop traffic detail window|traffic_detail -- --nocapture|cargo test --workspace --all-features' \
+     .github/workflows/ci.yml
+   ruby -e 'require "yaml"; YAML.load_file(".github/workflows/ci.yml"); puts "workflow yaml: PASS"'
+   bash e2e-tests/tests/test_coverage_pipeline_contract.sh
+   ```
+5. 使用 shell workflow 同样的环境真实执行 Desktop 包装器：
+   ```bash
+   SKIP_CARGO_TEST=true bash e2e-tests/tests/test_desktop_traffic_detail_window_contract.sh
+   ```
+
+**预期结果**：
+- shell 语法与 CI contract 全部通过。
+- CI full-shell 列表继续包含 Desktop 包装器并执行静态/Web 路径，但不包含纯 Rust IM 包装器；本地 full-shell 列表同时保留二者。
+- 两个包装器内所有 Cargo build/test 都带 `SKIP_FRONTEND_BUILD=1`，本地专项执行不会重建无关管理端前端。
+- Desktop 包装器在 shell workflow 的 `SKIP_CARGO_TEST=true` 下跳过 Rust/Tauri 冷编译，focused `traffic_detail` test 在 aarch64 macOS Desktop bundle job 的 30 分钟预算内执行；IM focused tests 继续由 workspace Unit/Integration 与 Coverage 覆盖。
+- Desktop 包装器真实执行两项 Web unit tests 和 `build:desktop` 并通过，随后输出 `SKIP Rust/Tauri: covered by the desktop bundle job`，没有启动 Cargo。
+- 推送后的 macOS `remote` 与 `agent-extensions` capability 不再在这两个包装器上触发 600 秒 watchdog，且没有删除实际测试断言。
 
 ## 本轮执行记录
 
@@ -1331,6 +1376,7 @@
 | TC-CS-55 | 通过 | 2026-08-01 本轮执行：`bash -n` 覆盖调度器、进程 helper、CI shell 入口和 tracked cleanup 脚本并通过；静态检查确认并行 test trap、串行 test 尾部和顶层 EXIT trap 均在删除 sandbox 前调用 ownership-scoped `kill_bifrost_in_data_root`，CI shell EXIT 另按同 UID PID 基线有界回收 job-owned 残留。首次指定不存在的 release binary 时前置失败，改用已构建 debug binary 后，进程隔离用例 10/10、umbrella serial lane 1/1、parallel lane 1/1 均通过且无 worktree binary 残留；首次真实 CI 入口复测发现 macOS Bash 3.2 空数组 `set -u` 兼容问题，修复后同入口再次 1/1 通过并输出 `[CLEANUP] no tracked E2E child processes remain`。临时 PID 基线探针确认新增 `sleep` 被终止、基线内 protected `sleep` 保持存活。CI contract 与 ShellCheck error 门禁同步通过。全程使用动态非 9900 端口和临时目录，未修改真实服务、真实安装或系统代理。 |
 | TC-CS-56 | 通过 | 2026-08-03 本轮执行：首条命令因本地 release 产物已在磁盘清理中移除而以前置退出码 2 失败，随即把 human test 修正为使用已有 `target/debug/bifrost` 验证相同的 `SKIP_BUILD/BIFROST_BIN` 分支。`bash -n` 检查两个 suite 通过；随后分别执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost"`，两个脚本均输出 `Using prebuilt Bifrost binary` 且未进入 cargo build。GitHub Gist expired provider 的 4 项状态断言全部通过，legacy traffic DB schema reset 通过；实际使用动态端口 50570/50615 与临时目录，未使用或停止共享 9900，未修改系统代理。远端 release artifact 复用由 PR CI 继续验证。 |
 | TC-CS-57 | 本地通过，待远端闭环 | 2026-08-04 本轮执行：PR #445 run `30880225313` attempt 1 的 `remote` / `agent-extensions` 分片分别在 Desktop 合约、IM online notification 与 Skill Creator 冷编译处超过 600 秒；attempt 2 再次稳定复现 Desktop 与 IM online notification 超时，后者日志显示 5/5 Rust 断言通过且冷编译耗时 11m29s。已恢复 workflow 与 contract 的 1260 秒预算。首次本地验证发现系统 Ruby 2.6 的 `YAML.load_file` 不接受 `aliases:` 参数，归因为 human test 命令缺陷并改为兼容调用；修正后以 `set -e` 从头复跑，workflow YAML、shell syntax、1260/无旧 600 静态断言全部通过，timeout cleanup 输出 `PASS (7s)`，coverage contract 通过 269 个 shell 语法检查、32 个 helper 单测、capability contract 与 3-shard balance（6.5%）。本地步骤均未启动共享 9900 或修改系统代理；远端三项 macOS capability 与 coverage 90% gate 等待新 run 验证。 |
+| TC-CS-58 | 通过 | 2026-08-04 本轮执行：第一次 workflow 解析因本机 Ruby 2.6 Psych 不支持 `aliases:` 关键字而失败，归因为测试命令兼容性缺陷；改用 `YAML.load_file(path)` 后从头复跑通过。`bash -n` 检查 runner 与两个包装器通过；CI full-shell 继续包含 Desktop Web/静态包装器但不包含纯 Rust IM 包装器，本地 full-shell 同时保留二者；`rg` 确认 Desktop shell 路径尊重 `SKIP_CARGO_TEST`、所有直接 Cargo 命令均设置 `SKIP_FRONTEND_BUILD=1`，workflow YAML 解析通过且 aarch64 macOS bundle job 包含 focused `traffic_detail` test。`bash e2e-tests/tests/test_coverage_pipeline_contract.sh` 通过 270 个 shell 语法检查、32 个 helper 单测、capability contract 与 3-shard balance（7.8% <= 15%）。最后以 `SKIP_CARGO_TEST=true` 真实执行 Desktop 包装器，Web 2 个测试文件共 7 项单测通过，`build:desktop` 通过，随后明确输出 `SKIP Rust/Tauri: covered by the desktop bundle job`，未进入 Cargo。全程未启动 Bifrost、未使用 9900、未修改系统代理。远端 macOS capability 与 bundle test 由推送后的 PR CI 继续验证。 |
 
 - 2026-08-02：PR #437 rebase 到 `origin/main@485a4c05` 时保留主干的 600 秒 suite watchdog、递归 process-tree/FIFO 回收与 Windows stream fallback，删除已被主干取代的 90 分钟 timeout 提交；将本分支的 detached-process 回归从冲突编号 `TC-CS-53` 顺延为 `TC-CS-55`。rebase 后 `bash e2e-tests/tests/test_coverage_pipeline_contract.sh` 通过 267 个 shell 语法检查、32 个 helper 单测、capability contract 与 shard balance；当前 debug binary 下进程隔离用例 10/10、umbrella serial lane 1/1 通过，正式 9900 服务未被使用或终止。
 

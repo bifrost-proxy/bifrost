@@ -35,6 +35,11 @@ pnpm --dir web test:unit \
   src/desktop/tauri.test.ts
 pnpm --dir web run build:desktop
 
+if [[ "${SKIP_CARGO_TEST:-false}" == "true" ]]; then
+  echo "[desktop-traffic-detail] SKIP Rust/Tauri: covered by the desktop bundle job"
+  exit 0
+fi
+
 if [[ "$(uname -s)" == "Linux" ]] && {
   ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists glib-2.0 >/dev/null 2>&1;
 }; then
@@ -43,10 +48,10 @@ if [[ "$(uname -s)" == "Linux" ]] && {
 fi
 
 if ! compgen -G "$REPO_ROOT/desktop/src-tauri/resources/bin/*" >/dev/null; then
-  cargo build -p bifrost-cli --bin bifrost
+  SKIP_FRONTEND_BUILD=1 cargo build -p bifrost-cli --bin bifrost
   node scripts/prepare-tauri-sidecar.mjs debug
 fi
 
-cargo test --manifest-path desktop/src-tauri/Cargo.toml traffic_detail -- --nocapture
+SKIP_FRONTEND_BUILD=1 cargo test --manifest-path desktop/src-tauri/Cargo.toml traffic_detail -- --nocapture
 
 echo "[desktop-traffic-detail] PASS"
