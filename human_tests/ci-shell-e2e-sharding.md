@@ -1282,6 +1282,7 @@
 - `terminate_process_tree`、日志 FIFO stream 有界退出以及 failed/cancelled artifact 上传 contract 保持不变，不能通过删除 watchdog 或削弱断言换绿。
 - 新 CI run 中 Desktop、IM online notification 与 Skill Creator 的 Rust 断言实际执行完成，不再在冷编译阶段被 600 秒误杀；coverage 90% 远端门禁通过。
 - 本地验证不启动共享 9900、不修改真实 `~/.bifrost`、真实安装或系统代理。
+
 ### TC-CS-58: macOS shell 分片不重复执行 Rust/Desktop 编译包装器
 
 **背景**：PR #443 的 `CI` run `30879531999` 连续三次在 macOS `remote` capability 的 `test_desktop_traffic_detail_window_contract.sh` 冷编译阶段超过 600 秒；首轮 `agent-extensions` 的 `test_im_online_notification_runner_context.sh` 也在 Cargo 编译阶段超过相同门限。IM focused tests 已由 workspace jobs 覆盖；Desktop 静态/Web 路径需要留在 shell，原本缺少独立 job 的 focused Rust test 则需要迁入 macOS Desktop bundle job。
@@ -1327,6 +1328,28 @@
 - Desktop 包装器在 shell workflow 的 `SKIP_CARGO_TEST=true` 下跳过 Rust/Tauri 冷编译，focused `traffic_detail` test 在 aarch64 macOS Desktop bundle job 的 30 分钟预算内执行；IM focused tests 继续由 workspace Unit/Integration 与 Coverage 覆盖。
 - Desktop 包装器真实执行两项 Web unit tests 和 `build:desktop` 并通过，随后输出 `SKIP Rust/Tauri: covered by the desktop bundle job`，没有启动 Cargo。
 - 推送后的 macOS `remote` 与 `agent-extensions` capability 不再在这两个包装器上触发 600 秒 watchdog，且没有删除实际测试断言。
+
+### TC-CS-59: busy queue E2E 使用显式 ready/release 同步
+
+**背景**：PR #443 的 CI run `30894017140` 在高负载 Linux runner 上执行 `test_im_gateway_codex_fast_slash.sh` 时，固定等待 2 秒后 mock Runner 已经退出，导致 `/q` 没有进入 busy queue。回归用例必须显式证明 Runner 正处于 busy 状态，再发送切换与排队命令，不能用固定休眠推断并发状态。
+
+**操作步骤**：
+1. 检查脚本语法与 ready/release 协议：
+   ```bash
+   bash -n e2e-tests/tests/test_im_gateway_codex_fast_slash.sh
+   rg -n 'codex-busy\.(ready|release)|已加入排队|queued after busy switch' \
+     e2e-tests/tests/test_im_gateway_codex_fast_slash.sh
+   ```
+2. 使用当前预构建 CLI 执行真实 E2E：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
+     bash e2e-tests/tests/test_im_gateway_codex_fast_slash.sh
+   ```
+
+**预期结果**：
+- shell 语法检查通过；mock Runner 写入 `codex-busy.ready` 后阻塞等待 `codex-busy.release`。
+- 测试只在 ready 文件出现后发送 `/fast off` 和 `/q`，并在消息日志出现 `已加入排队` 后才释放 mock Runner。
+- E2E 输出 `[im-codex-fast] PASS` 并退出 0；测试使用临时数据目录和动态非 9900 端口，不修改真实安装、正式服务或系统代理。
 
 ## 本轮执行记录
 
