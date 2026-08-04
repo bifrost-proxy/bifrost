@@ -139,64 +139,6 @@ fn test_install_method_display() {
     assert_eq!(InstallMethod::Unknown.to_string(), "Unknown");
 }
 
-#[test]
-fn test_cli_upgrade_rejects_restart_flag() {
-    use crate::cli::Cli;
-    use clap::Parser;
-
-    for command in ["upgrade", "update"] {
-        let result = Cli::try_parse_from(["bifrost", command, "--restart"]);
-        assert!(
-            result.is_err(),
-            "--restart should be removed from {command}"
-        );
-    }
-}
-
-#[test]
-fn test_cli_upgrade_hidden_yes_flag_is_accepted() {
-    use crate::cli::{Cli, Commands};
-    use clap::Parser;
-
-    for command in ["upgrade", "update"] {
-        let cli = Cli::parse_from(["bifrost", command, "-y"]);
-        match cli.command {
-            Some(Commands::Upgrade { yes }) => {
-                assert!(yes, "{command} should preserve the hidden yes flag");
-            }
-            _ => panic!("Expected {command} to parse as Upgrade command"),
-        }
-    }
-}
-
-#[test]
-fn test_cli_upgrade_no_flags() {
-    use crate::cli::{Cli, Commands};
-    use clap::Parser;
-
-    for command in ["upgrade", "update"] {
-        let cli = Cli::parse_from(["bifrost", command]);
-        match cli.command {
-            Some(Commands::Upgrade { yes }) => {
-                assert!(!yes, "{command} should use the same default flags");
-            }
-            _ => panic!("Expected {command} to parse as Upgrade command"),
-        }
-    }
-}
-
-#[test]
-fn test_cli_upgrade_help_advertises_update_alias() {
-    use crate::cli::Cli;
-    use clap::CommandFactory;
-
-    let help = Cli::command().render_help().to_string();
-    assert!(
-        help.contains("alias: update"),
-        "top-level help should make the update alias discoverable: {help}"
-    );
-}
-
 #[cfg(unix)]
 #[test]
 fn upgrade_behavior_executes_companion_and_runtime_ownership_branches() {
@@ -564,6 +506,7 @@ fn script_installs_use_the_target_aware_atomic_upgrade_path() {
     ));
 }
 
+mod cli_alias;
 mod review_comments;
 mod spawn_retry;
 mod upgrade_recovery;

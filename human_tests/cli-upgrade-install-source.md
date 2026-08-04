@@ -134,6 +134,6 @@ BIFROST_BIN="$PWD/target/debug/bifrost" \
 | 2026-08-04 | TC-CUIS-03 | 第 1 次 Bash installer suite 12 项通过；第 1 轮 review 补齐源码安装与卸载 marker 生命周期后复跑 13 项全部通过 | PASS |
 | 2026-08-04 | TC-CUIS-04 | 初次尝试 `pwsh` 因本机未安装而停止，归因为环境依赖；随后按更新后的本机契约用例执行，marker 临时写入、原子 Move 和 Windows 动态测试断言均存在。真正 PowerShell 执行保留给 Windows CI | PASS（本机契约） |
 | 2026-08-04 | TC-CUIS-05 | 初次 Node test 2/2 通过；第 1 轮 review 增加 child env 覆盖后复跑 3/3 通过；`bin/bifrost` 与 `lib/install-source.js` 的 `node --check` 均退出 0 | PASS |
-| 2026-08-04 | TC-CUIS-06 | 首次执行发现测试误写为 Clap 多别名格式 `aliases: update`，实际单别名格式为 `alias: update`；修正断言后，顶层帮助可发现别名、两种拼写的 help 完全一致，npm 通过 `update` 和 pnpm 通过 `upgrade` 的黑盒来源升级均通过 | PASS |
+| 2026-08-04 | TC-CUIS-06 | 首次执行发现测试误写为 Clap 多别名格式 `aliases: update`，实际单别名格式为 `alias: update`；修正断言后，顶层帮助可发现别名、两种拼写的 help 完全一致，npm 通过 `update` 和 pnpm 通过 `upgrade` 的黑盒来源升级均通过。首轮远端 CI 进一步发现新增测试令 `upgrade/tests.rs` 超过 1500 行模块门禁；将别名测试拆入 `tests/cli_alias.rs` 后，本机别名单测 4/4、升级 restart 契约 21/21 和本用例黑盒复测均通过 | PASS |
 
 清理确认：黑盒脚本 trap 已删除 fake global roots/package managers/data dirs；未启动测试 daemon，未触碰正式 Bifrost listener、全局 npm/pnpm 包或 `/Applications/Bifrost.app`。
