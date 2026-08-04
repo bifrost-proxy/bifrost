@@ -644,7 +644,7 @@ bifrost version-check
 bifrost upgrade
 ```
 
-`upgrade` 默认无交互执行升级；如果检测到当前有代理在运行，会在升级成功后停止并重新拉起代理，让运行中的服务切换到新二进制。Windows 手动安装路径下，CLI 会先 stage 新的 `bifrost.exe`，等待当前 upgrade 进程退出后再替换自身，并用新的 exe 启动 daemon。
+`upgrade` 默认无交互执行升级。它会自动识别 Homebrew、npm、pnpm、官方安装脚本或手动二进制来源；Homebrew/npm/pnpm 会沿原包管理器升级，脚本与手动安装使用 Bifrost 固定版本 release 的原子替换路径。如果检测到当前有代理在运行，会在升级成功后停止并重新拉起代理，让运行中的服务切换到新二进制。Windows 手动安装路径下，CLI 会先 stage 新的 `bifrost.exe`，等待当前 upgrade 进程退出后再替换自身，并用新的 exe 启动 daemon。
 
 ### 同步（sync）
 

@@ -26,7 +26,7 @@ Bifrost CLI 通过多种渠道分发（`install.sh`、Homebrew、GitHub Release 
 - `install.sh` / Homebrew / GitHub Release DMG / MSI 渠道继续独立可用，npm 渠道不改动其它渠道产物。
 - CI 的 `release.yml` 生成的 9 个 CLI target artifact（每个非 Windows 至少 `.tar.gz` + `.tar.xz`，Windows 需 `.zip`）保持齐全。
 - CLI 二进制 outbound HTTP 不读取系统代理或 `HTTP_PROXY` / `HTTPS_PROXY`，npm 渠道下载不改变这一不变量。
-- `bifrost upgrade` 与既有升级路径不受 npm 包发布顺序影响。
+- `bifrost upgrade` 识别 npm/pnpm 来源后沿原包管理器升级固定目标版本，不直接覆盖平台包内二进制。
 
 ### 必须真实验证
 

@@ -201,6 +201,8 @@ install_cli() {
     cargo install --locked --path crates/bifrost-cli --root "$INSTALL_DIR" --force
     clear_xattr "$INSTALL_DIR/bin/bifrost"
     mv "$INSTALL_DIR/bin/bifrost" "$INSTALL_DIR/bifrost"
+    printf '%s\n' script > "$INSTALL_DIR/bifrost.install-source.tmp.$$"
+    mv -f "$INSTALL_DIR/bifrost.install-source.tmp.$$" "$INSTALL_DIR/bifrost.install-source"
     rmdir "$INSTALL_DIR/bin" 2>/dev/null || true
     rm -f "$INSTALL_DIR/.crates.toml" "$INSTALL_DIR/.crates2.json" 2>/dev/null || true
     print_success "bifrost CLI installed successfully"

@@ -1,4 +1,5 @@
 mod desktop_companion;
+mod install_method;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) use desktop_companion::DESKTOP_UPGRADE_SHUTDOWN_ARG;
 use desktop_companion::*;
@@ -6,6 +7,7 @@ pub(crate) use desktop_companion::{
     desktop_app_is_running, restore_desktop_after_failed_app_upgrade,
     shutdown_running_desktop_for_app_upgrade,
 };
+use install_method::*;
 
 use bifrost_core::BifrostError;
 use colored::Colorize;
@@ -230,83 +232,6 @@ fn positive_env_u64(name: &str, default: u64) -> u64 {
 
 fn positive_env_usize(name: &str, default: usize) -> usize {
     parse_positive_usize(env::var(name).ok().as_deref(), default)
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum InstallMethod {
-    Homebrew,
-    Script,
-    Manual(PathBuf),
-    Unknown,
-}
-
-impl std::fmt::Display for InstallMethod {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            InstallMethod::Homebrew => write!(f, "Homebrew"),
-            InstallMethod::Script => write!(f, "Install script"),
-            InstallMethod::Manual(path) => write!(f, "Manual ({})", path.display()),
-            InstallMethod::Unknown => write!(f, "Unknown"),
-        }
-    }
-}
-
-fn detect_install_method() -> InstallMethod {
-    if upgrade_test_overrides_enabled() {
-        if let Some(path) = env::var_os(UPGRADE_TEST_INSTALL_TARGET_ENV) {
-            return InstallMethod::Manual(PathBuf::from(path));
-        }
-    }
-
-    let exe_path = match env::current_exe() {
-        Ok(path) => path,
-        Err(_) => return InstallMethod::Unknown,
-    };
-
-    let exe_path_str = exe_path.to_string_lossy();
-
-    if exe_path_str.contains("/opt/homebrew/")
-        || exe_path_str.contains("/usr/local/Cellar/")
-        || exe_path_str.contains("/home/linuxbrew/")
-    {
-        return InstallMethod::Homebrew;
-    }
-
-    if exe_path_str.contains("/.bifrost/bin/") {
-        return InstallMethod::Script;
-    }
-
-    InstallMethod::Manual(exe_path)
-}
-
-fn restart_executable_for_install_method(method: &InstallMethod) -> Result<PathBuf, BifrostError> {
-    match method {
-        InstallMethod::Homebrew => env::current_exe()
-            .map(|current| homebrew_launcher_for_executable(&current))
-            .map_err(BifrostError::Io),
-        InstallMethod::Script => env::current_exe().map_err(BifrostError::Io),
-        InstallMethod::Manual(path) => Ok(path.clone()),
-        InstallMethod::Unknown => Err(BifrostError::Config(
-            "Cannot determine restart executable for unknown install method".to_string(),
-        )),
-    }
-}
-
-fn homebrew_launcher_for_executable(current: &Path) -> PathBuf {
-    let current_text = current.to_string_lossy();
-    if current_text.starts_with("/opt/homebrew/") {
-        PathBuf::from("/opt/homebrew/bin/bifrost")
-    } else if current_text.starts_with("/usr/local/") {
-        PathBuf::from("/usr/local/bin/bifrost")
-    } else if current_text.starts_with("/home/linuxbrew/") {
-        PathBuf::from("/home/linuxbrew/.linuxbrew/bin/bifrost")
-    } else {
-        // InstallMethod::Homebrew means the newly installed binary must be
-        // resolved through Homebrew's stable launcher. Reusing an arbitrary
-        // current executable here can restart the old, versioned binary (and
-        // is also wrong for wrappers/tests that explicitly select Homebrew).
-        PathBuf::from("bifrost")
-    }
 }
 
 fn get_target_triple() -> Option<&'static str> {
@@ -1429,16 +1354,20 @@ fn handle_upgrade_inner(
     );
     println!();
 
-    let restart_executable = restart_executable_for_install_method(&install_method)?;
+    let mut restart_executable = restart_executable_for_install_method(&install_method)?;
 
-    let upgrade_result = match install_method {
+    let upgrade_result = match &install_method {
         InstallMethod::Homebrew => {
             upgrade_via_homebrew(&cache.latest_version).map(|()| UpgradeInstallOutcome::Installed)
+        }
+        InstallMethod::Npm | InstallMethod::Pnpm => {
+            upgrade_via_node_package_manager(&install_method, &cache.latest_version)
+                .map(|()| UpgradeInstallOutcome::Installed)
         }
         // Keep script installs on the selected target instead of re-running an
         // online installer that can drift to a newer release mid-transaction.
         InstallMethod::Script => upgrade_manual(&restart_executable, &cache.latest_version),
-        InstallMethod::Manual(path) => upgrade_manual(&path, &cache.latest_version),
+        InstallMethod::Manual(path) => upgrade_manual(path, &cache.latest_version),
         InstallMethod::Unknown => {
             if behavior.require_desktop_app_update {
                 return Err(BifrostError::Config(
@@ -1466,12 +1395,27 @@ fn handle_upgrade_inner(
 
     let upgrade_outcome = upgrade_result?;
 
+    if install_method.is_node_package_manager() {
+        // pnpm stores packages in versioned content-addressed paths, and npm
+        // may replace the platform package directory. Resolve again after the
+        // package-manager transaction so all post-upgrade work uses the new
+        // binary rather than the still-running old executable.
+        restart_executable = restart_executable_for_install_method(&install_method)?;
+    }
+
     match upgrade_outcome {
         UpgradeInstallOutcome::Installed => {
-            verify_installed_cli_target_version_or_restore(
-                &restart_executable,
-                &cache.latest_version,
-            )?;
+            if install_method.is_node_package_manager() {
+                // Package-manager installs own their files and rollback. Do
+                // not inspect or clean the manual-upgrade backup path inside
+                // node_modules; only validate the resolved new executable.
+                verify_installed_cli_target_version(&restart_executable, &cache.latest_version)?;
+            } else {
+                verify_installed_cli_target_version_or_restore(
+                    &restart_executable,
+                    &cache.latest_version,
+                )?;
+            }
             install_skills_after_upgrade_best_effort(&restart_executable);
             finish_installed_upgrade(&restart_executable, &cache.latest_version, behavior)?;
         }

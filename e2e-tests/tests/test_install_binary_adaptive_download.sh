@@ -289,6 +289,35 @@ install_binary_for_target "test-target" "v1.0.0" "linux" "$INSTALL_TMP" "$DOWNLO
     pass "checksum mismatch aborts install"
 }
 
+test_atomic_install_records_script_source() {
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    trap 'rm -rf "$tmpdir"' RETURN
+    printf '#!/bin/sh\nexit 0\n' > "$tmpdir/source"
+
+    install_binary_atomically "$tmpdir/source" "$tmpdir/bifrost"
+
+    assert_eq "$(cat "$tmpdir/bifrost.install-source")" "script" \
+        "atomic installer records script provenance"
+}
+
+test_source_installer_and_uninstaller_manage_provenance() {
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    trap 'rm -rf "$tmpdir"' RETURN
+
+    if ! grep -Fq 'bifrost.install-source.tmp.$$' "$PROJECT_DIR/install.sh"; then
+        fail "source installer records provenance" "install.sh is missing the atomic marker"
+    fi
+    printf '#!/bin/sh\nexit 0\n' > "$tmpdir/bifrost"
+    printf '%s\n' script > "$tmpdir/bifrost.install-source"
+    bash "$PROJECT_DIR/uninstall.sh" --dir "$tmpdir" --cli-only --yes >/dev/null
+    if [[ -e "$tmpdir/bifrost" || -e "$tmpdir/bifrost.install-source" ]]; then
+        fail "uninstaller removes provenance" "binary or marker remains in $tmpdir"
+    fi
+    pass "source installer records and uninstaller removes provenance"
+}
+
 run_case "preferred mirror ordering" test_preferred_mirror_is_first_without_duplicates
 run_case "third-party mirrors opt-in" test_default_mirrors_exclude_third_party_hosts
 run_case "fastest mirror probe selection" test_select_fastest_github_base_skips_unavailable_default
@@ -299,6 +328,8 @@ run_case "visible curl progress" test_download_file_enables_visible_progress_by_
 run_case "quiet race candidate progress" test_race_download_suppresses_candidate_progress
 run_case "optional archive fast fallback" test_optional_archive_skips_full_race_when_probe_fails
 run_case "checksum mismatch fail-close" test_checksum_mismatch_aborts_install
+run_case "script install provenance marker" test_atomic_install_records_script_source
+run_case "source install/uninstall provenance lifecycle" test_source_installer_and_uninstaller_manage_provenance
 
 help_output=$(bash "$PROJECT_DIR/install-binary.sh" --help)
 if [[ "$help_output" != *"BIFROST_MIRROR_PROBE_TIMEOUT"* ]]; then

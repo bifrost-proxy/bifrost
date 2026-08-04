@@ -2,12 +2,13 @@
 
 const { execFileSync } = require("child_process");
 const { getBinaryPath } = require("../lib/index.js");
+const { buildChildEnvironment } = require("../lib/install-source.js");
 
 try {
   const binaryPath = getBinaryPath();
   execFileSync(binaryPath, process.argv.slice(2), {
     stdio: "inherit",
-    env: process.env,
+    env: buildChildEnvironment(__filename, process.env),
   });
 } catch (error) {
   if (typeof error.status === "number") {

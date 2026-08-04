@@ -5,6 +5,8 @@ fn test_detect_install_method_returns_valid_variant() {
     let method = detect_install_method();
     match method {
         InstallMethod::Homebrew
+        | InstallMethod::Npm
+        | InstallMethod::Pnpm
         | InstallMethod::Script
         | InstallMethod::Manual(_)
         | InstallMethod::Unknown => {}
@@ -127,6 +129,8 @@ fn homebrew_upgrade_fallback_and_verification_failures_are_bounded() {
 #[test]
 fn test_install_method_display() {
     assert_eq!(InstallMethod::Homebrew.to_string(), "Homebrew");
+    assert_eq!(InstallMethod::Npm.to_string(), "npm");
+    assert_eq!(InstallMethod::Pnpm.to_string(), "pnpm");
     assert_eq!(InstallMethod::Script.to_string(), "Install script");
     assert_eq!(
         InstallMethod::Manual(PathBuf::from("/usr/local/bin/bifrost")).to_string(),

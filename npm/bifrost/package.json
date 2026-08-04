@@ -30,11 +30,13 @@
   },
   "main": "lib/index.js",
   "scripts": {
-    "postinstall": "node install.js"
+    "postinstall": "node install.js",
+    "test": "node --test lib/*.test.js"
   },
   "files": [
     "bin/bifrost",
     "lib/index.js",
+    "lib/install-source.js",
     "lib/platform.js",
     "install.js",
     "README.md"

@@ -146,13 +146,14 @@ confirm() {
 main() {
     print_banner
 
-    local os binary_path app_path
+    local os binary_path source_marker_path app_path
     os=$(detect_os)
 
     local binary_name="$BINARY_NAME"
     [[ "$os" == "windows" ]] && binary_name="$BINARY_NAME.exe"
 
     binary_path="$INSTALL_DIR/$binary_name"
+    source_marker_path="${binary_path}.install-source"
     app_path="$APP_INSTALL_DIR/$APP_NAME"
 
     print_step "Checking installation..."
@@ -166,9 +167,11 @@ main() {
     local found_mac_prefs=false
     local found_mac_saved_state=false
 
-    if [[ "$REMOVE_CLI" == "true" && -f "$binary_path" ]]; then
+    if [[ "$REMOVE_CLI" == "true" \
+       && ( -f "$binary_path" || -f "$source_marker_path" ) ]]; then
         found_binary=true
         echo "  Binary:  $binary_path"
+        [[ -f "$source_marker_path" ]] && echo "  Source:  $source_marker_path"
     fi
 
     if [[ "$REMOVE_DESKTOP" == "true" && -d "$app_path" ]]; then
@@ -239,7 +242,7 @@ main() {
 
     if [[ "$found_binary" == "true" ]]; then
         print_step "Removing CLI binary..."
-        rm -f "$binary_path"
+        rm -f "$binary_path" "$source_marker_path"
         print_success "Removed: $binary_path"
     fi
 
