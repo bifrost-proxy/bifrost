@@ -373,6 +373,16 @@ mod tests {
         assert_eq!(
             detect_install_method_from(
                 Some(Path::new(
+                    "/usr/local/lib/node_modules/@bifrost-proxy/bifrost/downloaded-bifrost-proxy-bifrost-linux-x64-bifrost"
+                )),
+                None,
+                None
+            ),
+            InstallMethod::Npm
+        );
+        assert_eq!(
+            detect_install_method_from(
+                Some(Path::new(
                     "/Users/test/Library/pnpm/global/5/.pnpm/@bifrost-proxy+bifrost-darwin-arm64@1.2.3/node_modules/@bifrost-proxy/bifrost-darwin-arm64/bin/bifrost"
                 )),
                 None,
@@ -380,6 +390,16 @@ mod tests {
             ),
             InstallMethod::Pnpm
         );
+        for path in [
+            "/tmp/pnpm/global/node_modules/@bifrost-proxy/bifrost-linux-x64/bin/bifrost",
+            "/Users/test/Library/pnpm/node_modules/@bifrost-proxy/bifrost-darwin-arm64/bin/bifrost",
+            "C:/Users/test/AppData/Local/pnpm/node_modules/@bifrost-proxy/bifrost-win32-x64/bin/bifrost.exe",
+        ] {
+            assert_eq!(
+                detect_install_method_from(Some(Path::new(path)), None, None),
+                InstallMethod::Pnpm
+            );
+        }
         assert_eq!(
             detect_install_method_from(
                 Some(Path::new("/Users/test/.bifrost/bin/bifrost")),
@@ -457,6 +477,11 @@ mod tests {
         assert_eq!(
             InstallMethod::Pnpm.program_for_platform(true),
             Some("pnpm.cmd")
+        );
+        assert_eq!(InstallMethod::Npm.program_for_platform(false), Some("npm"));
+        assert_eq!(
+            InstallMethod::Pnpm.program_for_platform(false),
+            Some("pnpm")
         );
     }
 
@@ -587,6 +612,10 @@ mod tests {
             .contains("could not run Node.js"));
 
         assert!(restart_executable_for_install_method(&InstallMethod::Unknown).is_err());
+        assert!(resolve_node_managed_binary(&InstallMethod::Script)
+            .unwrap_err()
+            .to_string()
+            .contains("requires npm or pnpm"));
         assert!(
             node_package_manager_upgrade_args(&InstallMethod::Script, "1.2.3")
                 .unwrap()
