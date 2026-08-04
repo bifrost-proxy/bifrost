@@ -291,6 +291,7 @@ Bash 调度逻辑，无 Rust 公共函数变更。
 - 决策：Windows shell 只跑 upgrade restart，其它 Windows shell 用例交给 rules matrix；Windows MSYS 上完整 shell 集合稳定性低。
 - 风险：新加 shell 用例若忘记登记 `CARGO_HEAVY_TESTS` / `SKIP_IN_CI_TESTS`，会把 shard 拖到 900s per-test timeout。缓解：`--list-shell-tests` 可在合入前 dry-run 分片。
 - 2026-08-04 的 PR #443 连续三次在 macOS `remote` capability 上让 `test_desktop_traffic_detail_window_contract.sh` 超过 600 秒；同一 run 首轮的 `agent-extensions` 也曾让 `test_im_online_notification_runner_context.sh` 超过 600 秒。两者均停留在 Cargo 下载/编译、业务断言尚未失败。修复不延长 suite timeout、不削弱断言：IM wrapper 由现有 workspace job 覆盖；Desktop wrapper 的 Web 路径仍留在 shell，Rust test 迁到 Desktop bundle job。
+- 同一 PR 的后续 Linux Shell run `30894017140` 暴露 `test_im_gateway_codex_fast_slash.sh` 的忙碌队列测试依赖固定 `sleep 2`：hosted runner 高负载时，测试线程可能在 mock Runner 已结束后才发送 `/q`。测试必须通过 ready/release 文件显式控制 Runner 生命周期，先确认 busy、再断言消息已入队、最后释放并验证下一轮 prompt，禁止用固定休眠推断并发状态。
 
 ## 依赖项
 
