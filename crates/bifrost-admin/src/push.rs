@@ -2249,6 +2249,134 @@ mod tests {
         assert!(client.reserve_traffic_statistics_push(start + Duration::from_millis(1_000)));
     }
 
+    #[test]
+    fn traffic_statistics_helpers_cover_missing_store_throttling_and_closed_clients() {
+        let state_without_store = Arc::new(AdminState::new(9910));
+        let manager_without_store = PushManager::new(state_without_store);
+        let (client_without_store, _receiver) = manager_without_store.register_client(
+            "statistics-no-store".to_string(),
+            ClientSubscription {
+                need_traffic: true,
+                ..Default::default()
+            },
+        );
+        assert!(manager_without_store.send_traffic_statistics_to_client(&client_without_store));
+        assert!(!manager_without_store.broadcast_traffic_statistics());
+
+        let dir = create_test_dir();
+        let store = Arc::new(TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap());
+        let state = Arc::new(AdminState::new(9911).with_traffic_db_store_shared(store));
+        let manager = PushManager::new(state);
+        let (_unsubscribed, _unsubscribed_receiver) =
+            manager.register_client("statistics-unsubscribed".to_string(), Default::default());
+        let (throttled, _throttled_receiver) = manager.register_client(
+            "statistics-throttled".to_string(),
+            ClientSubscription {
+                need_traffic: true,
+                ..Default::default()
+            },
+        );
+        let (_closed, closed_receiver) = manager.register_client(
+            "statistics-closed".to_string(),
+            ClientSubscription {
+                need_traffic: true,
+                ..Default::default()
+            },
+        );
+        drop(closed_receiver);
+
+        assert!(manager.send_traffic_statistics_to_client(&throttled));
+        assert!(manager.send_traffic_statistics_to_client(&throttled));
+        assert!(manager.take_traffic_statistics_dirty());
+        assert!(manager.broadcast_traffic_statistics());
+        assert_eq!(manager.client_count(), 2);
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn send_initial_data_includes_traffic_statistics() {
+        let dir = create_test_dir();
+        let store = Arc::new(TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap());
+        let mut record = TrafficRecord::new(
+            "statistics-initial-data".to_string(),
+            "GET".to_string(),
+            "http://example.test/initial".to_string(),
+        );
+        record.status = 200;
+        store.record(record);
+        let state = Arc::new(AdminState::new(9912).with_traffic_db_store_shared(store));
+        let manager = PushManager::new(state);
+        let (client, mut receiver) = manager.register_client(
+            "statistics-initial-data".to_string(),
+            ClientSubscription {
+                need_traffic: true,
+                ..Default::default()
+            },
+        );
+
+        manager.send_initial_data(&client).await;
+
+        let messages: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
+        assert!(messages
+            .iter()
+            .any(|message| matches!(message, PushMessage::TrafficDelta(_))));
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            PushMessage::TrafficStatistics(statistics) if statistics.total_requests == 1
+        )));
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn cleanup_notifier_broadcasts_deleted_ids() {
+        let dir = create_test_dir();
+        let store = Arc::new(TrafficDbStore::new(dir.clone(), 1_000, 0, None).unwrap());
+        let state = Arc::new(AdminState::new(9913).with_traffic_db_store_shared(store.clone()));
+        let manager = Arc::new(PushManager::new(state));
+        let (_client, mut receiver) = manager.register_client(
+            "statistics-cleanup".to_string(),
+            ClientSubscription {
+                need_traffic: true,
+                ..Default::default()
+            },
+        );
+        let handles = start_push_tasks(manager);
+
+        let records = (0..1_151)
+            .map(|index| {
+                let mut record = TrafficRecord::new(
+                    format!("statistics-cleanup-{index}"),
+                    "GET".to_string(),
+                    format!("http://example.test/cleanup/{index}"),
+                );
+                record.status = 200;
+                record
+            })
+            .collect();
+        store.record_batch(records);
+
+        let deleted_ids = timeout(Duration::from_secs(2), async {
+            loop {
+                match receiver.recv().await {
+                    Some(PushMessage::TrafficDeleted(TrafficDeletedData { ids })) => break ids,
+                    Some(_) => continue,
+                    None => panic!("client channel closed before cleanup push"),
+                }
+            }
+        })
+        .await
+        .expect("expected cleanup push");
+        assert!(!deleted_ids.is_empty());
+        assert_eq!(store.count(), 800);
+
+        for handle in handles {
+            handle.abort();
+        }
+        cleanup_test_dir(&dir);
+    }
+
     #[tokio::test]
     async fn traffic_push_uses_in_memory_events_without_querying_db_for_new_records() {
         let dir = create_test_dir();

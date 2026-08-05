@@ -199,6 +199,8 @@ fn non_empty(value: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::Connection;
+
     use super::{TrafficStatistics, TrafficStatisticsDimensions};
 
     fn dimensions(
@@ -247,8 +249,16 @@ mod tests {
     #[test]
     fn statistics_ignore_empty_dimensions_and_saturate_unknown_removals() {
         let empty = dimensions("", "", None, None, "");
+        let unknown = dimensions(
+            "10.0.0.1",
+            "9900",
+            Some("unknown"),
+            Some("nobody"),
+            "none.test",
+        );
         let mut statistics = TrafficStatistics::default();
 
+        statistics.remove(&unknown);
         statistics.remove(&empty);
         statistics.insert(&empty);
         let snapshot = statistics.snapshot(1);
@@ -259,5 +269,15 @@ mod tests {
         assert!(snapshot.applications.is_empty());
         assert!(snapshot.account_names.is_empty());
         assert!(snapshot.domains.is_empty());
+    }
+
+    #[test]
+    fn statistics_load_returns_empty_when_schema_is_unavailable() {
+        let connection = Connection::open_in_memory().expect("open sqlite");
+
+        let snapshot = TrafficStatistics::load(&connection).snapshot(0);
+
+        assert_eq!(snapshot.total_requests, 0);
+        assert!(snapshot.client_ips.is_empty());
     }
 }
