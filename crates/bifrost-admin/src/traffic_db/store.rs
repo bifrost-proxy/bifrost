@@ -2576,6 +2576,8 @@ mod tests {
         let dir = create_test_dir();
         {
             let store = TrafficDbStore::new(dir.clone(), 1_000, 0, None).unwrap();
+            assert!(!store.update_by_id("stats-missing", |_| {}));
+
             let mut first = TrafficRecord::new(
                 "stats-1".to_string(),
                 "GET".to_string(),

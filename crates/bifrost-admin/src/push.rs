@@ -579,6 +579,15 @@ impl PushManager {
         deferred
     }
 
+    fn flush_dirty_traffic_statistics(&self) {
+        if self.has_traffic_subscribers()
+            && self.take_traffic_statistics_dirty()
+            && self.broadcast_traffic_statistics()
+        {
+            self.mark_traffic_statistics_dirty();
+        }
+    }
+
     async fn build_full_overview(&self) -> OverviewData {
         let system_info = crate::metrics::SystemInfo::new(self.state.start_time);
         let metrics = self.state.metrics_collector.get_current();
@@ -1958,12 +1967,7 @@ pub fn start_push_tasks(manager: SharedPushManager) -> Vec<tokio::task::JoinHand
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
-                if manager_statistics.has_traffic_subscribers()
-                    && manager_statistics.take_traffic_statistics_dirty()
-                    && manager_statistics.broadcast_traffic_statistics()
-                {
-                    manager_statistics.mark_traffic_statistics_dirty();
-                }
+                manager_statistics.flush_dirty_traffic_statistics();
             }
         }));
     }
@@ -2530,6 +2534,77 @@ mod tests {
         .expect("expected statistics after clear-all notification");
         assert_eq!(cleared_statistics.total_requests, 0);
         assert!(cleared_statistics.applications.is_empty());
+
+        for handle in handles {
+            handle.abort();
+        }
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn traffic_statistics_dirty_flush_is_retained_after_client_rate_limit() {
+        let dir = create_test_dir();
+        let store = Arc::new(TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap());
+        let state = Arc::new(AdminState::new(9915).with_traffic_db_store_shared(store));
+        let manager = PushManager::new(state);
+        let (client, _receiver) = manager.register_client(
+            "statistics-deferred-client".to_string(),
+            ClientSubscription {
+                need_traffic: true,
+                ..Default::default()
+            },
+        );
+
+        assert!(manager.send_traffic_statistics_to_client(&client));
+        manager.notify_traffic_statistics_changed();
+        manager.flush_dirty_traffic_statistics();
+        assert!(manager.take_traffic_statistics_dirty());
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn lagged_traffic_receiver_marks_statistics_dirty() {
+        let dir = create_test_dir();
+        let store = Arc::new(TrafficDbStore::new(dir.clone(), 2_000, 0, None).unwrap());
+        let state = Arc::new(AdminState::new(9916).with_traffic_db_store_shared(store.clone()));
+        let manager = Arc::new(PushManager::new(state));
+        let (_client, _receiver) = manager.register_client(
+            "statistics-lagged-client".to_string(),
+            ClientSubscription {
+                need_traffic: true,
+                ..Default::default()
+            },
+        );
+        let handles = start_push_tasks(manager.clone());
+        timeout(Duration::from_secs(1), async {
+            while !store.has_traffic_event_subscribers() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("traffic receiver should subscribe");
+
+        let records = (0..1_025)
+            .map(|index| {
+                let mut record = TrafficRecord::new(
+                    format!("statistics-lagged-{index}"),
+                    "GET".to_string(),
+                    format!("http://example.test/lagged/{index}"),
+                );
+                record.status = 200;
+                record
+            })
+            .collect();
+        store.record_batch(records);
+
+        timeout(Duration::from_secs(1), async {
+            while !manager.take_traffic_statistics_dirty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("lagged receiver should mark statistics dirty");
 
         for handle in handles {
             handle.abort();
