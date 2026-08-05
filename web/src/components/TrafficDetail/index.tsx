@@ -412,6 +412,7 @@ export default function TrafficDetail({
           <HeaderView
             headers={record.request_headers}
             originalHeaders={record.original_request_headers}
+            flow="request"
             testIdPrefix="request-header-view"
             searchValue={requestSearch}
             onSearch={setRequestSearch}
@@ -594,9 +595,7 @@ export default function TrafficDetail({
       ? record.socket_status?.is_open ?? !record.end_time
       : false;
 
-    const effectiveResponseHeaders = (record.response_headers && record.response_headers.length > 0)
-      ? record.response_headers
-      : record.original_response_headers ?? null;
+    const effectiveResponseHeaders = record.response_headers ?? record.original_response_headers ?? null;
 
     return [
       {
@@ -606,6 +605,7 @@ export default function TrafficDetail({
           <HeaderView
             headers={record.response_headers}
             originalHeaders={record.original_response_headers}
+            flow="response"
             testIdPrefix="response-header-view"
             searchValue={responseSearch}
             onSearch={setResponseSearch}

@@ -138,6 +138,7 @@
 |------|---------|-----------|------|
 | [api-rules.md](./api-rules.md) | Rules API | 17 | 规则 CRUD、启用/禁用、特殊字符名称、重复创建、rule_count 验证，以及保存前语法检查报告、422 不落盘、更新失败保留旧内容和 allow_invalid 显式保存 |
 | [api-traffic.md](./api-traffic.md) | Traffic API | 26 | 流量列表/详情/Body、增量更新、多维度过滤、WebSocket 帧、SSE 流、live SSE 详情流不依赖连接 EOF 回归 |
+| [response-header-change-display.md](./response-header-change-display.md) | 响应头变化来源展示 | 4 | Traffic Response Header 区分配置修改与 HTTP 协议处理、方向明确的双快照页签、network `.bifrost` 双快照导出导入兼容和亮暗主题回归 |
 | [api-values.md](./api-values.md) | Values API | 17 | Values CRUD、列表查询、批量 upsert、边界条件、错误处理 |
 | [api-whitelist.md](./api-whitelist.md) | Whitelist API | 27 | 白名单增删、模式切换、allow-lan、临时白名单、待授权管理、SSE 事件流 |
 | [api-cert.md](./api-cert.md) | Cert API | 8 | 证书信息、CA 下载、QR 码生成 |

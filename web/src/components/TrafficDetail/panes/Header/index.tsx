@@ -1,15 +1,19 @@
 import { useMemo, useRef, useState } from "react";
-import { Table, Typography, theme, ConfigProvider, Space, Radio } from "antd";
+import { Table, Typography, theme, ConfigProvider, Space, Radio, Tag, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { SessionTargetSearchState } from "../../../../types";
+import { useThemeStore } from "../../../../stores/useThemeStore";
 import { useMarkSearch } from "../../hooks/useMarkSearch";
 import { TunnelInterceptActions } from "../../TunnelInterceptActions";
+import { areHeadersEqual, buildHeaderDiff } from "./diff";
+import type { HeaderDiffItem } from "./diff";
 
 const { Text } = Typography;
 
 interface HeaderViewProps {
   headers: [string, string][] | null;
   originalHeaders?: [string, string][] | null;
+  flow?: "request" | "response";
   testIdPrefix?: string;
   searchValue: SessionTargetSearchState;
   onSearch: (v: Partial<SessionTargetSearchState>) => void;
@@ -19,38 +23,10 @@ interface HeaderViewProps {
   clientIp?: string;
 }
 
-type DiffType = 'added' | 'modified' | 'deleted' | 'unchanged';
-
-interface HeaderItem {
-  key: string;
-  name: string;
-  value: string;
-  diffType?: DiffType;
-  originalValue?: string;
-}
-
-const areHeadersEqual = (
-  left: [string, string][] | null | undefined,
-  right: [string, string][] | null | undefined,
-): boolean => {
-  if (left === right) {
-    return true;
-  }
-  if (!left || !right) {
-    return !left && !right;
-  }
-  if (left.length !== right.length) {
-    return false;
-  }
-  return left.every(([leftName, leftValue], index) => {
-    const [rightName, rightValue] = right[index] ?? [];
-    return leftName === rightName && leftValue === rightValue;
-  });
-};
-
 export const HeaderView = ({
   headers,
   originalHeaders,
+  flow = "response",
   testIdPrefix = "header-view",
   searchValue,
   onSearch,
@@ -60,12 +36,13 @@ export const HeaderView = ({
   clientIp,
 }: HeaderViewProps) => {
   const { token } = theme.useToken();
+  const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const tableRef = useRef<HTMLDivElement>(null);
   const [viewMode, setViewMode] = useState<'current' | 'original'>('current');
 
-  const showOriginalTab = !!headers && headers.length > 0 && !!originalHeaders && !areHeadersEqual(headers, originalHeaders);
+  const showOriginalTab = headers != null && !!originalHeaders && !areHeadersEqual(headers, originalHeaders);
   const hasModifications = showOriginalTab;
-  const effectiveHeaders = (headers && headers.length > 0) ? headers : originalHeaders ?? null;
+  const effectiveHeaders = headers ?? originalHeaders ?? null;
   const resolvedViewMode = useMemo(() => {
     if (viewMode === 'original' && !showOriginalTab) {
       return 'current';
@@ -80,77 +57,27 @@ export const HeaderView = ({
     return effectiveHeaders;
   }, [resolvedViewMode, effectiveHeaders, originalHeaders]);
 
-  const dataSource = useMemo<HeaderItem[]>(() => {
+  const diffResult = useMemo(() => {
+    if (!showOriginalTab || !headers || !originalHeaders) return null;
+    return buildHeaderDiff(headers, originalHeaders);
+  }, [headers, originalHeaders, showOriginalTab]);
+
+  const dataSource = useMemo<HeaderDiffItem[]>(() => {
     if (!displayHeaders) return [];
 
-    const sorted = [...displayHeaders]
+    if (resolvedViewMode === 'current' && diffResult) {
+      return diffResult.items;
+    }
+
+    return [...displayHeaders]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([name, value], index) => ({
         key: String(index),
         name,
         value,
+        diffType: 'unchanged' as const,
       }));
-
-    const baseHeaders = showOriginalTab ? originalHeaders : null;
-    if (resolvedViewMode !== 'current' || !baseHeaders) {
-      return sorted;
-    }
-
-    const origMap = new Map<string, string[]>();
-    for (const [k, v] of baseHeaders) {
-      const lower = k.toLowerCase();
-      const arr = origMap.get(lower);
-      if (arr) {
-        arr.push(v);
-      } else {
-        origMap.set(lower, [v]);
-      }
-    }
-
-    const currentKeyCount = new Map<string, number>();
-    for (const [k] of displayHeaders) {
-      const lower = k.toLowerCase();
-      currentKeyCount.set(lower, (currentKeyCount.get(lower) ?? 0) + 1);
-    }
-
-    const usedOrigIndex = new Map<string, number>();
-
-    const active: HeaderItem[] = sorted.map((item) => {
-      const lowerName = item.name.toLowerCase();
-      const origValues = origMap.get(lowerName);
-      if (!origValues || origValues.length === 0) {
-        return { ...item, diffType: 'added' as DiffType };
-      }
-      const idx = usedOrigIndex.get(lowerName) ?? 0;
-      usedOrigIndex.set(lowerName, idx + 1);
-      if (idx < origValues.length) {
-        const origVal = origValues[idx];
-        if (origVal !== item.value) {
-          return { ...item, diffType: 'modified' as DiffType, originalValue: origVal };
-        }
-        return { ...item, diffType: 'unchanged' as DiffType };
-      }
-      return { ...item, diffType: 'added' as DiffType };
-    });
-
-    const deleted: HeaderItem[] = [];
-    for (const [k, values] of origMap) {
-      const currentCount = currentKeyCount.get(k) ?? 0;
-      if (currentCount < values.length) {
-        for (let i = currentCount; i < values.length; i++) {
-          deleted.push({
-            key: `deleted-${deleted.length}`,
-            name: baseHeaders.find(([n]) => n.toLowerCase() === k)?.[0] ?? k,
-            value: values[i],
-            diffType: 'deleted',
-          });
-        }
-      }
-    }
-    deleted.sort((a, b) => a.name.localeCompare(b.name));
-
-    return [...active, ...deleted];
-  }, [displayHeaders, resolvedViewMode, showOriginalTab, originalHeaders]);
+  }, [diffResult, displayHeaders, resolvedViewMode]);
 
   const filteredData = useMemo(() => {
     if (!searchValue.value) return dataSource;
@@ -164,27 +91,38 @@ export const HeaderView = ({
 
   useMarkSearch(searchValue, () => tableRef.current, onSearch);
 
+  const protocolToken = useMemo(() => theme.getDesignToken({
+    algorithm: resolvedTheme === "dark" ? theme.darkAlgorithm : theme.defaultAlgorithm,
+  }), [resolvedTheme]);
   const diffColors = useMemo(() => ({
     added: { bg: token.colorSuccessBg, text: token.colorSuccess },
     modified: { bg: token.colorWarningBg, text: token.colorWarningText },
     deleted: { bg: token.colorErrorBg, text: token.colorError },
-  }), [token]);
+    protocol: { bg: protocolToken.colorInfoBg, text: protocolToken.colorInfo },
+  }), [protocolToken, token]);
 
-  const columns: ColumnsType<HeaderItem> = [
+  const configuredChange = (record: HeaderDiffItem) =>
+    !!record.changeSource && record.changeSource === "configured";
+  const protocolChange = (record: HeaderDiffItem) =>
+    record.changeSource === "protocol";
+  const rowColors = (record: HeaderDiffItem) =>
+    protocolChange(record) ? diffColors.protocol : diffColors[record.diffType as keyof typeof diffColors];
+
+  const columns: ColumnsType<HeaderDiffItem> = [
     {
       title: "Name",
       dataIndex: "name",
       key: "name",
       width: 180,
-      render: (text: string, record: HeaderItem) => (
+      render: (text: string, record: HeaderDiffItem) => (
         <Text
           strong
           style={{
             fontFamily: "monospace",
             fontSize: 12,
-            textDecoration: record.diffType === 'deleted' ? 'line-through' : undefined,
+            textDecoration: record.diffType === 'deleted' && configuredChange(record) ? 'line-through' : undefined,
             color: record.diffType && record.diffType !== 'unchanged'
-              ? diffColors[record.diffType].text
+              ? rowColors(record).text
               : undefined,
           }}
         >
@@ -196,18 +134,18 @@ export const HeaderView = ({
       title: "Value",
       dataIndex: "value",
       key: "value",
-      render: (text: string, record: HeaderItem) => (
+      render: (text: string, record: HeaderDiffItem) => (
         <div>
           <Text
             style={{
               fontFamily: "monospace",
               fontSize: 12,
-              textDecoration: record.diffType === 'deleted' ? 'line-through' : undefined,
+              textDecoration: record.diffType === 'deleted' && configuredChange(record) ? 'line-through' : undefined,
               color: record.diffType && record.diffType !== 'unchanged'
-                ? diffColors[record.diffType].text
+                ? rowColors(record).text
                 : undefined,
             }}
-            copyable={record.diffType !== 'deleted' ? { text } : undefined}
+            copyable={record.diffType !== 'deleted' || protocolChange(record) ? { text } : undefined}
           >
             {text}
           </Text>
@@ -226,12 +164,19 @@ export const HeaderView = ({
               </Text>
             </div>
           )}
+          {protocolChange(record) && (
+            <Tooltip title="Bifrost removes hop-by-hop headers while forwarding for protocol compatibility. No rule, script, or breakpoint change is implied.">
+              <Tag color="blue" style={{ marginLeft: 8 }} data-testid={`${testIdPrefix}-protocol-badge`}>
+                Protocol handling
+              </Tag>
+            </Tooltip>
+          )}
         </div>
       ),
     },
   ];
 
-  if (!effectiveHeaders || effectiveHeaders.length === 0) {
+  if ((!effectiveHeaders || effectiveHeaders.length === 0) && !hasModifications) {
     if (isTunnel) {
       return (
         <div
@@ -263,11 +208,14 @@ export const HeaderView = ({
     );
   }
 
+  const currentLabel = flow === "response" ? "Sent to client" : "Sent upstream";
+  const originalLabel = flow === "response" ? "Upstream original" : "Client original";
+
   return (
     <div ref={tableRef}>
       {hasModifications && (
         <div style={{ marginBottom: 8 }}>
-          <Space>
+          <Space wrap>
             <Radio.Group
               value={resolvedViewMode}
               onChange={(e) => setViewMode(e.target.value)}
@@ -275,14 +223,24 @@ export const HeaderView = ({
               data-testid={`${testIdPrefix}-mode-tabs`}
             >
               <Radio.Button value="current" data-testid={`${testIdPrefix}-tab-current`}>
-                Current
+                {currentLabel}
               </Radio.Button>
               {showOriginalTab && (
                 <Radio.Button value="original" data-testid={`${testIdPrefix}-tab-original`}>
-                  Original
+                  {originalLabel}
                 </Radio.Button>
               )}
             </Radio.Group>
+            {diffResult && (
+              <>
+                <Tag color={diffResult.summary.configured > 0 ? "red" : undefined} data-testid={`${testIdPrefix}-configured-summary`}>
+                  Configured changes: {diffResult.summary.configured}
+                </Tag>
+                <Tag color={diffResult.summary.protocol > 0 ? "blue" : undefined} data-testid={`${testIdPrefix}-protocol-summary`}>
+                  Protocol handling: {diffResult.summary.protocol}
+                </Tag>
+              </>
+            )}
           </Space>
         </div>
       )}
@@ -301,11 +259,11 @@ export const HeaderView = ({
           columns={columns}
           pagination={false}
           size="small"
-          onRow={(record: HeaderItem) => {
+          onRow={(record: HeaderDiffItem) => {
             if (!record.diffType || record.diffType === 'unchanged') return {};
             return {
               style: {
-                backgroundColor: diffColors[record.diffType].bg,
+                backgroundColor: rowColors(record).bg,
               },
             };
           }}

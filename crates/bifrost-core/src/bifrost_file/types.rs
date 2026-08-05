@@ -197,6 +197,12 @@ pub struct NetworkRecord {
     pub request_headers: Option<Vec<(String, String)>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_headers: Option<Vec<(String, String)>>,
+    /// Upstream response headers before Bifrost rules and protocol normalization.
+    ///
+    /// Older network exports omit this field and store the upstream snapshot in
+    /// `response_headers`; importers must retain that legacy interpretation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_response_headers: Option<Vec<(String, String)>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_body: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

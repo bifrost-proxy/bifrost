@@ -262,6 +262,7 @@ mod tests {
             client_path: Some("/Applications/Google Chrome.app".to_string()),
             request_headers: None,
             response_headers: None,
+            original_response_headers: None,
             request_body: None,
             response_body: None,
             duration_ms: 78,
@@ -282,6 +283,48 @@ mod tests {
         assert!(output.contains("\"has_rule_hit\": true"));
         assert!(output.contains("\"error_message\": \"Request Failed\""));
         assert!(output.contains("\"listener_port\": 9900"));
+    }
+
+    #[test]
+    fn test_write_network_preserves_both_response_header_snapshots() {
+        let record_json = r#"{
+            "id":"REQ-headers",
+            "method":"GET",
+            "url":"https://example.test/",
+            "status":200,
+            "response_headers":[["content-type","application/json"]],
+            "original_response_headers":[["content-type","application/json"],["connection","keep-alive"]],
+            "duration_ms":1,
+            "timestamp":1
+        }"#;
+        let record: NetworkRecord = serde_json::from_str(record_json).unwrap();
+
+        let output = BifrostFileWriter::write_network("headers", None, &[record]).unwrap();
+
+        assert!(output.contains("\"response_headers\""));
+        assert!(output.contains("\"original_response_headers\""));
+        assert!(output.contains("\"connection\""));
+    }
+
+    #[test]
+    fn test_legacy_network_record_omits_original_response_headers() {
+        let record_json = r#"{
+            "id":"REQ-legacy",
+            "method":"GET",
+            "url":"https://example.test/",
+            "status":200,
+            "response_headers":[["connection","keep-alive"]],
+            "duration_ms":1,
+            "timestamp":1
+        }"#;
+
+        let record: NetworkRecord = serde_json::from_str(record_json).unwrap();
+
+        assert!(record.original_response_headers.is_none());
+        assert_eq!(
+            record.response_headers,
+            Some(vec![("connection".to_string(), "keep-alive".to_string())])
+        );
     }
 
     #[test]
