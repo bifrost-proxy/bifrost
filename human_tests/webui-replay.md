@@ -278,6 +278,7 @@ Replay 页面是 Bifrost 管理端的 HTTP 请求重放工具（类似 Postman�
 - Replay 返回给客户端的 `101 Switching Protocols` 握手响应包含 `X-Replay-WS-Response: injected`。
 - Traffic 详情中的 `request_headers` 包含 `X-Replay-WS-Request: injected`。
 - Traffic 详情中的 `response_headers` 包含 `X-Replay-WS-Response: injected`。
+- Replay WebSocket 握手响应头在返回 `101 Switching Protocols` 前写入权威 Traffic 详情；测试仍在 5 秒边界内轮询详情，以容忍 SQLite 只读连接可见性和其他异步流字段协调，不能依赖固定等待后的一次读取。
 - 脚本最终输出 `Replay WebSocket E2E Results: PASSED=10 FAILED=0`。
 
 **本轮执行记录（2026-06-03）**：
@@ -285,6 +286,12 @@ Replay 页面是 Bifrost 管理端的 HTTP 请求重放工具（类似 Postman�
 - 执行 `RUST_LOG=bifrost_admin::handlers::replay=debug BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_replay_websocket_frames.sh`。
 - 脚本启动本地 mock：`Starting replay WS server on 127.0.0.1:20259`、`Starting replay WSS server on 127.0.0.1:20260`，并启动隔离数据目录下的 Bifrost 测试代理 `127.0.0.1:19259`，未修改系统代理。
 - `Replay WebSocket request/response header rules` 场景通过；脚本最终输出 `Replay WebSocket E2E Results: PASSED=10 FAILED=0`。
+
+**本轮执行记录（2026-08-06）**：
+- 执行 `cargo build --bin bifrost` 生成当前源码对应的 `target/debug/bifrost`。
+- 执行 `BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_replay_websocket_frames.sh`；测试代理、WS/WSS mock 均使用隔离随机端口和临时数据目录，未修改系统代理。
+- 验证 Replay WebSocket 握手响应头在返回 `101 Switching Protocols` 前直接写入 Traffic 权威详情；详情读取同时保留最多 5 秒的有界轮询，用于等待其他异步流字段，不再依赖固定睡眠。
+- echo、frames capture、request/response header rules、ping/pong、长连接、压缩分片、非法控制帧、超长 payload、WSS 与子协议共 10 项全部通过；最终输出 `Replay WebSocket E2E Results: PASSED=10 FAILED=0`。
 
 ---
 
