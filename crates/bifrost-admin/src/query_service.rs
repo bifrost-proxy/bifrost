@@ -540,6 +540,10 @@ mod tests {
     use bifrost_command::{
         SearchFilters as CommandSearchFilters, SearchScope as CommandSearchScope,
     };
+    use tokio::time::{timeout, Duration};
+
+    use crate::push::{start_push_tasks, ClientSubscription, PushMessage};
+    use crate::test_support::TestAdminState;
 
     #[test]
     fn test_search_request_from_command_preserves_filters() {
@@ -591,5 +595,46 @@ mod tests {
         assert_eq!(params.direction, Direction::Forward);
         assert_eq!(params.host_contains.as_deref(), Some("example.com"));
         assert_eq!(params.listener_port, Some(50831));
+    }
+
+    #[tokio::test]
+    async fn clear_all_notifies_authoritative_traffic_statistics() {
+        let harness = TestAdminState::builder().build();
+        let mut record = TrafficRecord::new(
+            "query-service-clear".to_string(),
+            "GET".to_string(),
+            "http://example.test/query-service-clear".to_string(),
+        );
+        record.status = 200;
+        harness.traffic_db.record(record);
+        let manager = harness.push_manager();
+        let (_client, mut receiver) = manager.register_client(
+            "query-service-clear".to_string(),
+            ClientSubscription {
+                need_traffic: true,
+                ..Default::default()
+            },
+        );
+        let handles = start_push_tasks(manager.clone());
+        let service = AdminQueryService::with_push_manager(harness.state(), Some(manager));
+
+        let result = service.clear_all_traffic().await.expect("clear traffic");
+
+        assert_eq!(result, "All traffic data cleared successfully");
+        assert_eq!(harness.traffic_db.count(), 0);
+        let statistics = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(PushMessage::TrafficStatistics(statistics)) = receiver.recv().await {
+                    break statistics;
+                }
+            }
+        })
+        .await
+        .expect("expected clear-all statistics push");
+        assert_eq!(statistics.total_requests, 0);
+
+        for handle in handles {
+            handle.abort();
+        }
     }
 }

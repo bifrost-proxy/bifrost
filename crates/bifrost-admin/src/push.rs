@@ -2265,7 +2265,7 @@ mod tests {
 
         let dir = create_test_dir();
         let store = Arc::new(TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap());
-        let state = Arc::new(AdminState::new(9911).with_traffic_db_store_shared(store));
+        let state = Arc::new(AdminState::new(9911).with_traffic_db_store_shared(store.clone()));
         let manager = PushManager::new(state);
         let (_unsubscribed, _unsubscribed_receiver) =
             manager.register_client("statistics-unsubscribed".to_string(), Default::default());
@@ -2290,6 +2290,23 @@ mod tests {
         assert!(manager.take_traffic_statistics_dirty());
         assert!(manager.broadcast_traffic_statistics());
         assert_eq!(manager.client_count(), 2);
+
+        let mut record = TrafficRecord::new(
+            "statistics-closed-initial".to_string(),
+            "GET".to_string(),
+            "http://example.test/closed-initial".to_string(),
+        );
+        record.status = 200;
+        store.record(record);
+        let (closed_initial, closed_initial_receiver) = manager.register_client(
+            "statistics-closed-initial".to_string(),
+            ClientSubscription {
+                need_traffic: true,
+                ..Default::default()
+            },
+        );
+        drop(closed_initial_receiver);
+        manager.send_initial_traffic(&closed_initial);
 
         cleanup_test_dir(&dir);
     }

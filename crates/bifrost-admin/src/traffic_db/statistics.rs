@@ -86,7 +86,7 @@ impl TrafficStatistics {
             }
         };
 
-        let rows = match statement.query_map([], |row| {
+        let Ok(rows) = statement.query_map([], |row| {
             let client_ip: String = row.get(0)?;
             let listener_port = row.get::<_, i64>(1)? as u16;
             let application: Option<String> = row.get(2)?;
@@ -99,15 +99,8 @@ impl TrafficStatistics {
                 account_name: account_name.and_then(non_empty),
                 domain: non_empty(domain),
             })
-        }) {
-            Ok(rows) => rows,
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    "[TRAFFIC_DB] Failed to read initial traffic statistics rows"
-                );
-                return statistics;
-            }
+        }) else {
+            return statistics;
         };
 
         for dimensions in rows.flatten() {
