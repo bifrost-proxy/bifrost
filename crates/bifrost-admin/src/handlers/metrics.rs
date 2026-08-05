@@ -24,11 +24,11 @@ pub async fn handle_metrics(
             _ => method_not_allowed(),
         },
         "/api/metrics/apps" => match method {
-            Method::GET => get_app_metrics(state).await,
+            Method::GET => get_app_metrics(state, include_summary(req.uri().query())).await,
             _ => method_not_allowed(),
         },
         "/api/metrics/hosts" => match method {
-            Method::GET => get_host_metrics(state).await,
+            Method::GET => get_host_metrics(state, include_summary(req.uri().query())).await,
             _ => method_not_allowed(),
         },
         _ => error_response(StatusCode::NOT_FOUND, "Not Found"),
@@ -64,14 +64,53 @@ pub struct AppMetrics {
     pub socks5_requests: u64,
 }
 
-async fn get_app_metrics(state: SharedAdminState) -> Response<BoxBody> {
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct MetricsAggregateSummary {
+    pub total: usize,
+    pub requests: u64,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub total_traffic_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsAggregateResponse<T> {
+    pub items: Vec<T>,
+    pub summary: MetricsAggregateSummary,
+}
+
+fn summarize_metrics<T>(
+    items: &[T],
+    fields: impl Fn(&T) -> (u64, u64, u64),
+) -> MetricsAggregateSummary {
+    let mut summary = MetricsAggregateSummary {
+        total: items.len(),
+        ..Default::default()
+    };
+    for item in items {
+        let (requests, bytes_sent, bytes_received) = fields(item);
+        summary.requests = summary.requests.saturating_add(requests);
+        summary.bytes_sent = summary.bytes_sent.saturating_add(bytes_sent);
+        summary.bytes_received = summary.bytes_received.saturating_add(bytes_received);
+    }
+    summary.total_traffic_bytes = summary.bytes_sent.saturating_add(summary.bytes_received);
+    summary
+}
+
+fn include_summary(query: Option<&str>) -> bool {
+    query.is_some_and(|query| {
+        query.split('&').any(|pair| {
+            pair.split_once('=')
+                .is_some_and(|(key, value)| key == "include_summary" && value == "true")
+        })
+    })
+}
+
+async fn get_app_metrics(state: SharedAdminState, with_summary: bool) -> Response<BoxBody> {
     let mut app_stats: HashMap<String, AppMetrics> = HashMap::new();
 
     if let Some(ref db_store) = state.traffic_db_store {
-        let db_store = db_store.clone();
-        let aggregates = tokio::task::spawn_blocking(move || db_store.aggregate_app_metrics())
-            .await
-            .unwrap_or_default();
+        let aggregates = db_store.aggregate_app_metrics();
         for aggregate in aggregates {
             let AppMetricsAggregate {
                 app_name,
@@ -122,7 +161,17 @@ async fn get_app_metrics(state: SharedAdminState) -> Response<BoxBody> {
     let mut result: Vec<AppMetrics> = app_stats.into_values().collect();
     result.sort_by_key(|a| std::cmp::Reverse(a.requests));
 
-    json_response(&result)
+    if with_summary {
+        let summary = summarize_metrics(&result, |item| {
+            (item.requests, item.bytes_sent, item.bytes_received)
+        });
+        json_response(&MetricsAggregateResponse {
+            items: result,
+            summary,
+        })
+    } else {
+        json_response(&result)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -141,14 +190,11 @@ pub struct HostMetrics {
     pub socks5_requests: u64,
 }
 
-async fn get_host_metrics(state: SharedAdminState) -> Response<BoxBody> {
+async fn get_host_metrics(state: SharedAdminState, with_summary: bool) -> Response<BoxBody> {
     let mut host_stats: HashMap<String, HostMetrics> = HashMap::new();
 
     if let Some(ref db_store) = state.traffic_db_store {
-        let db_store = db_store.clone();
-        let aggregates = tokio::task::spawn_blocking(move || db_store.aggregate_host_metrics())
-            .await
-            .unwrap_or_default();
+        let aggregates = db_store.aggregate_host_metrics();
         for aggregate in aggregates {
             let HostMetricsAggregate {
                 host,
@@ -203,7 +249,17 @@ async fn get_host_metrics(state: SharedAdminState) -> Response<BoxBody> {
     let mut result: Vec<HostMetrics> = host_stats.into_values().collect();
     result.sort_by_key(|a| std::cmp::Reverse(a.requests));
 
-    json_response(&result)
+    if with_summary {
+        let summary = summarize_metrics(&result, |item| {
+            (item.requests, item.bytes_sent, item.bytes_received)
+        });
+        json_response(&MetricsAggregateResponse {
+            items: result,
+            summary,
+        })
+    } else {
+        json_response(&result)
+    }
 }
 
 fn parse_limit(query: &str) -> Option<usize> {
@@ -251,7 +307,7 @@ mod tests {
         record.response_size = 20;
         state.record_traffic(record);
 
-        let resp = super::get_host_metrics(state).await;
+        let resp = super::get_host_metrics(state, false).await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let metrics: Vec<HostMetrics> = serde_json::from_slice(&body).unwrap();
 
@@ -282,7 +338,7 @@ mod tests {
         record.client_app = Some("TestApp".to_string());
         state.record_traffic(record);
 
-        let resp = super::get_app_metrics(state).await;
+        let resp = super::get_app_metrics(state, false).await;
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let metrics: Vec<AppMetrics> = serde_json::from_slice(&body).unwrap();
 
@@ -293,5 +349,47 @@ mod tests {
         assert_eq!(m.https_requests, 1);
 
         std::fs::remove_dir_all(&db_dir).ok();
+    }
+
+    #[tokio::test]
+    async fn app_metrics_summary_is_calculated_by_server() {
+        let db_dir = temp_dir("metrics-apps-summary");
+        let db_store = TrafficDbStore::new(db_dir.clone(), 5000, 0, None).unwrap();
+        let state = Arc::new(AdminState::new(0).with_traffic_db_store(db_store));
+
+        for (id, app, upload, download) in [
+            ("summary-1", "First App", 11, 13),
+            ("summary-2", "Second App", 17, 19),
+        ] {
+            let mut record = TrafficRecord::new(
+                id.to_string(),
+                "GET".to_string(),
+                format!("https://{id}.test/"),
+            );
+            record.client_app = Some(app.to_string());
+            record.upload_bytes = upload;
+            record.download_bytes = download;
+            state.record_traffic(record);
+        }
+
+        let resp = super::get_app_metrics(state, true).await;
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let response: MetricsAggregateResponse<AppMetrics> = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(response.summary.total, 2);
+        assert_eq!(response.summary.requests, 2);
+        assert_eq!(response.summary.bytes_sent, 28);
+        assert_eq!(response.summary.bytes_received, 32);
+        assert_eq!(response.summary.total_traffic_bytes, 60);
+
+        std::fs::remove_dir_all(&db_dir).ok();
+    }
+
+    #[test]
+    fn include_summary_requires_explicit_true_value() {
+        assert!(include_summary(Some("include_summary=true")));
+        assert!(include_summary(Some("other=1&include_summary=true")));
+        assert!(!include_summary(Some("include_summary=false")));
+        assert!(!include_summary(None));
     }
 }

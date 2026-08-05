@@ -171,20 +171,32 @@ export const useMetricsStore = create<MetricsState>((set, get) => ({
 
   handleMetricsPush: (data: MetricsData) => {
     set((state) => {
+      const overview = state.overview
+        ? {
+            ...state.overview,
+            metrics: data.metrics,
+            traffic: {
+              ...state.overview.traffic,
+              recorded: data.recorded_traffic,
+            },
+          }
+        : null;
       if (state.history.length === 0) {
-        return { current: data.metrics };
+        return { current: data.metrics, overview };
       }
 
       const last = state.history[state.history.length - 1];
       if (last?.timestamp === data.metrics.timestamp) {
         return {
           current: data.metrics,
+          overview,
           history: [...state.history.slice(0, -1), data.metrics],
         };
       }
 
       return {
         current: data.metrics,
+        overview,
         history: [...state.history.slice(1), data.metrics],
       };
     });

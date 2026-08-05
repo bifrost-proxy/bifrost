@@ -1254,6 +1254,30 @@ wait
 
 ---
 
+### TC-WTR-回归-10：Metrics 页面与底部状态栏展示服务端权威字段
+
+**前置条件**：
+
+1. 使用隔离数据目录、动态端口和 `--no-system-proxy` 启动当前源码构建。
+2. 服务端 Overview / Metrics 数据分别准备可区分的 `recorded`、`total_requests`、`total_traffic_bytes` 和 `memory_usage_percent`。
+
+**操作步骤**：
+
+1. 打开 `/_bifrost/settings?tab=metrics`。
+2. 检查 Overview 中的 Total Requests、Recorded Traffic、累计上下行和 Memory Usage。
+3. 检查底部状态栏 Total、Conn、Req、Mem、CPU。
+4. 运行真实 `/api/push` 探针，确认同一字段通过 `metrics_update` 下发。
+5. 点击 Applications / Hosts，确认汇总卡显示服务端 `summary`，并可正常刷新列表。
+
+**预期结果**：
+
+- Metrics 页面与状态栏直接展示服务端字段，不读取 Network 的 1000 条窗口，也不在前端计算累计总流量或内存占比。
+- `total_requests` 保持进程生命周期指标语义；`Recorded Traffic` 保持当前落库保留条数语义，两者允许不同且不会互相覆盖。
+- `metrics_update` 更新后，Settings Overview 与底部状态栏同步更新；最快每秒一帧。
+- Applications / Hosts 的汇总卡与明细来自同一服务端内存快照，前端不执行统计 `reduce`。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：
@@ -1263,6 +1287,17 @@ rm -f /tmp/bifrost-mock-test.json
 ```
 
 ## 执行记录
+
+2026-08-06 Metrics 页面与底部状态栏服务端权威字段执行记录：
+
+- 已执行用例：`TC-WTR-回归-10`。
+- 浏览器命令：`pnpm exec playwright test tests/ui/activity-tab.spec.ts --grep "Metrics and status bar consume authoritative server fields"`，实际 `1 passed (6.9s)`。
+- 页面结果：Metrics Overview 直接显示服务端准备的 `Recorded Traffic=5,028`、`Total Requests=4,321`；底部状态栏直接显示服务端 `total_traffic_bytes=2048` 为 `Total: 2.0 KB`、`Req: 4321`，没有从 Network 窗口或 `bytes_sent + bytes_received` 重新计算。
+- API/Push 联合结果：Applications / Hosts 真实进程 E2E 通过；Node WebSocket 探针在 3.2 秒收到 3 帧，每帧携带落库记录数与服务端派生字段。实时进程请求数和落库记录数保持不同语义。
+- 隔离边界：Playwright 全局 setup 使用动态端口、独立数据目录和 `--no-system-proxy`；真实 Push/API 使用 `18991`、`19924`，均未触碰正式 `9900`。
+- 结论：`TC-WTR-回归-10` 通过；Metrics 页面、Applications/Hosts 汇总卡和底部状态栏均消费服务端权威数据。
+
+---
 
 2026-08-06 服务端增量内存统计、1000 条窗口与 WebSocket 限频推送执行记录：
 

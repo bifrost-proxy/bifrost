@@ -22,6 +22,8 @@ Network 页当前首屏加载最新 500 条后，会在 `backfillHistory()` 中�
 - 筛选仍覆盖数据库完整历史，而不是只匹配当前 1,000 条窗口；筛选结果最多常驻 1,000 条，并可继续加载更老命中项。
 - Network 左侧 Client IP、Proxy port、Applications、Accounts、Domains 计数来自服务端内存统计快照，不受当前 1,000 条窗口影响。
 - Activity 的 Requests、应用数与 Traffic Distribution 复用同一服务端快照；实时速率、活动连接、规则与系统代理继续使用各自既有服务端来源。
+- Settings / Metrics 与全局底部状态栏只展示服务端下发字段：进程生命周期请求数、连接数、速率、累计上下行、CPU/内存仍保持原有实时指标口径；`Recorded Traffic` 保持当前落库记录数口径，不能把两者混为同一个计数。
+- Metrics 的 Applications / Hosts 汇总卡与列表都由服务端统计；前端不再对返回列表执行 `length` / `reduce` 形成业务统计。
 - Search 保持现有服务端搜索、50 条分页和最多 1,000 条结果的有界语义。
 - 实时更新在最新窗口中正常追加；用户停留在历史窗口时不强行改变可见位置，并显示新流量提示。
 - 服务端达到 `traffic.max_records` 并批量淘汰旧记录后，Push 携带当前最老可用 `sequence` 水位；普通窗口和筛选结果移除水位之前的失效记录。
@@ -137,6 +139,22 @@ Network 页当前首屏加载最新 500 条后，会在 `backfillHistory()` 中�
 - 前端首次进入时可由 HTTP 接口并行获取兜底快照；WebSocket 建连或重新订阅 Traffic 时立即下发一份 `traffic_statistics` 快照。
 - 运行期新增、更新、删除或清理先按受影响维度增量更新内存计数，再设置统计脏标记；服务端以 1 秒周期合并变化，只有脏标记存在且有 Traffic 订阅者时才读取内存快照并推送。因此突发流量最多每秒产生一帧统计消息，空闲期不推送，也不轮询数据库。
 - WebSocket 重连会重新下发当前完整快照；瞬时断连时前端保留上一份权威数据，不退回使用 1,000 条窗口样本计算。
+
+### Metrics 与底部状态栏的服务端指标
+
+Metrics 页和底部状态栏包含两类刻意不同的统计口径，改造时必须分别保留：
+
+| 字段 | 服务端来源 | 语义 |
+| --- | --- | --- |
+| `total_requests`、`active_connections`、QPS、速率、累计上下行、协议指标 | `MetricsCollector` 原子计数与 1 秒滑动速率窗口 | 当前进程生命周期实时指标，服务重启后重新累计 |
+| `recorded_traffic` / `overview.traffic.recorded` | `TrafficDbStore` 内存统计总数 | 当前 SQLite 中实际保留的记录数，受清空、retention 和滚动淘汰影响 |
+| `total_traffic_bytes`、`memory_usage_percent` | 服务端基于同一指标快照派生 | 供状态栏与 Metrics 直接展示，前端不得再次求和或相除 |
+
+WebSocket 的 `metrics_update` 同时携带实时指标和 `recorded_traffic`。客户端订阅间隔下限保持 1 秒；服务端内部可用更细粒度 tick 合并不同客户端间隔，但同一客户端最快每秒收到一次。Metrics store 收到该帧后同时更新 `current`、`overview.metrics` 与 `overview.traffic.recorded`，确保 Settings 页不会只依赖 5 秒 overview 帧，底部状态栏也不会因为前端流量窗口裁剪而失真。
+
+Applications / Hosts 的持久化统计在 `TrafficStatistics` 中按桶维护请求数、上下行字节和协议计数：启动时随既有统计初始化扫描构建一次，之后在记录插入、完成更新、应用归因更新、删除、清空和滚动淘汰时按旧值/新值做增减。API 读取内存快照并附带服务端汇总，不再执行请求时全表 `GROUP BY`；活动连接仍按原有 `connection_registry` 叠加，因此保留“落库历史 + 当前活动连接”的既有语义。
+
+这套 Metrics 推送不替代 Network / Activity 的 `traffic_statistics` 变化驱动推送：后者仍只在维度统计变脏时最多每秒推送一次；实时速率和资源使用必须周期采样，所以仅在存在 Metrics 订阅者时按客户端间隔推送，空闲时不序列化或广播。
 
 ## 数据不变量
 

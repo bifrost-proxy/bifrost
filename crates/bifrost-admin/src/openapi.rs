@@ -1234,6 +1234,9 @@ fn generate_paths() -> serde_json::Value {
                 "tags": ["Metrics"],
                 "summary": "Metrics by app",
                 "operationId": "getMetricsByApp",
+                "parameters": [
+                    {"name": "include_summary", "in": "query", "schema": {"type": "boolean", "default": false}, "description": "Return server-computed summary with items"}
+                ],
                 "responses": {"200": {"description": "Per-app metrics"}}
             }
         },
@@ -1242,6 +1245,9 @@ fn generate_paths() -> serde_json::Value {
                 "tags": ["Metrics"],
                 "summary": "Metrics by host",
                 "operationId": "getMetricsByHost",
+                "parameters": [
+                    {"name": "include_summary", "in": "query", "schema": {"type": "boolean", "default": false}, "description": "Return server-computed summary with items"}
+                ],
                 "responses": {"200": {"description": "Per-host metrics"}}
             }
         },

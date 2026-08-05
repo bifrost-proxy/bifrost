@@ -2,7 +2,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 use bifrost_storage::{MAX_TRAFFIC_MAX_RECORDS, MIN_TRAFFIC_MAX_RECORDS};
 use lru::LruCache;
@@ -16,7 +18,8 @@ use super::schema::{
     init_database, InitError,
 };
 use super::statistics::{
-    TrafficStatistics, TrafficStatisticsDimensions, TrafficStatisticsSnapshot,
+    AppMetricsAggregate, HostMetricsAggregate, TrafficStatistics, TrafficStatisticsDimensions,
+    TrafficStatisticsSnapshot,
 };
 use super::types::{
     build_socket_status_summary, encode_flags, summarize_matched_rules, TrafficDbStats,
@@ -30,7 +33,6 @@ const CLEANUP_CHECK_INTERVAL: u64 = 100;
 const CLEANUP_TRIGGER_OVERFLOW_PERCENT: usize = 15;
 const CLEANUP_TRIGGER_OVERFLOW_MAX: usize = 2000;
 const CLEANUP_TARGET_PERCENT: usize = 80;
-const METRICS_CACHE_TTL: Duration = Duration::from_secs(5);
 const READ_POOL_SIZE: usize = 2;
 
 fn encode_detail_blob<T: serde::Serialize>(value: &T) -> postcard::Result<Vec<u8>> {
@@ -131,12 +133,6 @@ struct SerializedDetailFields {
     decode_res_results_blob: SerializedBlob,
 }
 
-#[derive(Clone)]
-struct CachedValue<T> {
-    value: T,
-    expires_at: Instant,
-}
-
 #[derive(Clone, Copy)]
 enum QueryTotalMode {
     None,
@@ -160,8 +156,6 @@ pub struct TrafficDbStore {
     write_count: AtomicU64,
     cleanup_notifier: RwLock<Option<CleanupNotifier>>,
     traffic_statistics: RwLock<TrafficStatistics>,
-    host_metrics_cache: Mutex<Option<CachedValue<Vec<HostMetricsAggregate>>>>,
-    app_metrics_cache: Mutex<Option<CachedValue<Vec<AppMetricsAggregate>>>>,
     #[cfg(test)]
     query_calls: AtomicUsize,
     #[cfg(test)]
@@ -183,36 +177,6 @@ pub struct TrafficSearchFields {
     pub request_body_ref: Option<BodyRef>,
     pub response_body_ref: Option<BodyRef>,
     pub derived_response_body_ref: Option<BodyRef>,
-}
-
-#[derive(Debug, Clone)]
-pub struct HostMetricsAggregate {
-    pub host: String,
-    pub requests: u64,
-    pub bytes_sent: u64,
-    pub bytes_received: u64,
-    pub http_requests: u64,
-    pub https_requests: u64,
-    pub tunnel_requests: u64,
-    pub ws_requests: u64,
-    pub wss_requests: u64,
-    pub h3_requests: u64,
-    pub socks5_requests: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct AppMetricsAggregate {
-    pub app_name: String,
-    pub requests: u64,
-    pub bytes_sent: u64,
-    pub bytes_received: u64,
-    pub http_requests: u64,
-    pub https_requests: u64,
-    pub tunnel_requests: u64,
-    pub ws_requests: u64,
-    pub wss_requests: u64,
-    pub h3_requests: u64,
-    pub socks5_requests: u64,
 }
 
 impl TrafficDbStore {
@@ -279,8 +243,6 @@ impl TrafficDbStore {
             write_count: AtomicU64::new(0),
             cleanup_notifier: RwLock::new(None),
             traffic_statistics: RwLock::new(traffic_statistics),
-            host_metrics_cache: Mutex::new(None),
-            app_metrics_cache: Mutex::new(None),
             #[cfg(test)]
             query_calls: AtomicUsize::new(0),
             #[cfg(test)]
@@ -298,11 +260,6 @@ impl TrafficDbStore {
             len: cache.len(),
             cap: cache.cap().get(),
         }
-    }
-
-    fn invalidate_metrics_cache(&self) {
-        *self.host_metrics_cache.lock() = None;
-        *self.app_metrics_cache.lock() = None;
     }
 
     fn increase_record_count(&self, count: usize) {
@@ -326,6 +283,14 @@ impl TrafficDbStore {
         self.traffic_statistics
             .read()
             .snapshot(self.current_sequence.load(Ordering::Relaxed))
+    }
+
+    pub fn aggregate_host_metrics(&self) -> Vec<HostMetricsAggregate> {
+        self.traffic_statistics.read().host_metrics()
+    }
+
+    pub fn aggregate_app_metrics(&self) -> Vec<AppMetricsAggregate> {
+        self.traffic_statistics.read().app_metrics()
     }
 
     fn open_or_reset_database(db_path: &PathBuf) -> Result<Connection, rusqlite::Error> {
@@ -619,7 +584,6 @@ impl TrafficDbStore {
                         self.increase_record_count(1);
                         self.traffic_statistics.write().insert(&next);
                     }
-                    self.invalidate_metrics_cache();
                     if Self::should_keep_in_cache(&record) {
                         self.recent_cache.write().put(
                             record.id.clone(),
@@ -699,8 +663,6 @@ impl TrafficDbStore {
             }
         }
         drop(cache);
-
-        self.invalidate_metrics_cache();
 
         if self.tx.receiver_count() > 0 {
             for (_, record) in &records_with_seq {
@@ -866,11 +828,13 @@ impl TrafficDbStore {
             }
             Ok(None) => false,
             Ok(Some(previous_dimensions)) => {
-                let next_dimensions = TrafficStatisticsDimensions::from_record(record);
+                let next_dimensions = TrafficStatisticsDimensions::from_persisted_update(
+                    record,
+                    &previous_dimensions,
+                );
                 self.traffic_statistics
                     .write()
                     .replace(&previous_dimensions, &next_dimensions);
-                self.invalidate_metrics_cache();
                 true
             }
         }
@@ -1491,7 +1455,6 @@ impl TrafficDbStore {
             } else {
                 self.record_count.store(0, Ordering::Relaxed);
                 *self.traffic_statistics.write() = TrafficStatistics::default();
-                self.invalidate_metrics_cache();
             }
         } else {
             let placeholders: String = active_connection_ids
@@ -1515,7 +1478,6 @@ impl TrafficDbStore {
                 self.record_count
                     .store(statistics.total_requests(), Ordering::Relaxed);
                 *self.traffic_statistics.write() = statistics;
-                self.invalidate_metrics_cache();
             }
         }
 
@@ -1624,7 +1586,6 @@ impl TrafficDbStore {
                 let deleted = self.delete_oldest_by_limit(&conn, delete_count);
                 if deleted > 0 {
                     self.decrease_record_count(deleted);
-                    self.invalidate_metrics_cache();
                     did_record_cleanup = true;
                     tracing::info!(
                         deleted = deleted,
@@ -1663,7 +1624,6 @@ impl TrafficDbStore {
                 let deleted = self.delete_oldest_by_limit(&conn, to_remove);
                 if deleted > 0 {
                     self.decrease_record_count(deleted);
-                    self.invalidate_metrics_cache();
                     tracing::info!(
                         deleted = deleted,
                         estimated = estimated_remove,
@@ -1689,7 +1649,6 @@ impl TrafficDbStore {
         let deleted = self.delete_expired_by_cutoff(&conn, cutoff);
         if deleted > 0 {
             self.decrease_record_count(deleted);
-            self.invalidate_metrics_cache();
             tracing::info!(
                 deleted = deleted,
                 retention_hours = retention_hours,
@@ -1734,120 +1693,6 @@ impl TrafficDbStore {
             oldest_timestamp: oldest,
             newest_timestamp: newest,
         }
-    }
-
-    pub fn aggregate_host_metrics(&self) -> Vec<HostMetricsAggregate> {
-        if let Some(cached) = self.host_metrics_cache.lock().clone() {
-            if cached.expires_at > Instant::now() {
-                return cached.value;
-            }
-        }
-
-        let conn = self.read_pool.acquire();
-        let sql = "SELECT COALESCE(NULLIF(host, ''), 'Unknown') AS host, \
-                   COUNT(*) AS requests, \
-                   COALESCE(SUM(upload_bytes), 0) AS bytes_sent, \
-                   COALESCE(SUM(download_bytes), 0) AS bytes_received, \
-                   SUM(CASE WHEN protocol = 'http' THEN 1 ELSE 0 END) AS http_requests, \
-                   SUM(CASE WHEN protocol = 'https' THEN 1 ELSE 0 END) AS https_requests, \
-                   SUM(CASE WHEN protocol = 'tunnel' THEN 1 ELSE 0 END) AS tunnel_requests, \
-                   SUM(CASE WHEN protocol = 'ws' THEN 1 ELSE 0 END) AS ws_requests, \
-                   SUM(CASE WHEN protocol = 'wss' THEN 1 ELSE 0 END) AS wss_requests, \
-                   SUM(CASE WHEN protocol = 'h3' THEN 1 ELSE 0 END) AS h3_requests, \
-                   SUM(CASE WHEN protocol = 'socks5' THEN 1 ELSE 0 END) AS socks5_requests \
-                   FROM traffic_records \
-                   GROUP BY host \
-                   ORDER BY requests DESC";
-
-        let mut stmt = match conn.prepare(sql) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(error = %e, "[TRAFFIC_DB] Failed to prepare host metrics aggregate query");
-                return vec![];
-            }
-        };
-
-        let out: Vec<HostMetricsAggregate> = stmt
-            .query_map([], |row| {
-                Ok(HostMetricsAggregate {
-                    host: row.get(0)?,
-                    requests: row.get::<_, i64>(1)? as u64,
-                    bytes_sent: row.get::<_, i64>(2)? as u64,
-                    bytes_received: row.get::<_, i64>(3)? as u64,
-                    http_requests: row.get::<_, i64>(4)? as u64,
-                    https_requests: row.get::<_, i64>(5)? as u64,
-                    tunnel_requests: row.get::<_, i64>(6)? as u64,
-                    ws_requests: row.get::<_, i64>(7)? as u64,
-                    wss_requests: row.get::<_, i64>(8)? as u64,
-                    h3_requests: row.get::<_, i64>(9)? as u64,
-                    socks5_requests: row.get::<_, i64>(10)? as u64,
-                })
-            })
-            .map(|r| r.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default();
-
-        *self.host_metrics_cache.lock() = Some(CachedValue {
-            value: out.clone(),
-            expires_at: Instant::now() + METRICS_CACHE_TTL,
-        });
-        out
-    }
-
-    pub fn aggregate_app_metrics(&self) -> Vec<AppMetricsAggregate> {
-        if let Some(cached) = self.app_metrics_cache.lock().clone() {
-            if cached.expires_at > Instant::now() {
-                return cached.value;
-            }
-        }
-
-        let conn = self.read_pool.acquire();
-        let sql = "SELECT COALESCE(NULLIF(client_app, ''), 'Unknown') AS app_name, \
-                   COUNT(*) AS requests, \
-                   COALESCE(SUM(upload_bytes), 0) AS bytes_sent, \
-                   COALESCE(SUM(download_bytes), 0) AS bytes_received, \
-                   SUM(CASE WHEN protocol = 'http' THEN 1 ELSE 0 END) AS http_requests, \
-                   SUM(CASE WHEN protocol = 'https' THEN 1 ELSE 0 END) AS https_requests, \
-                   SUM(CASE WHEN protocol = 'tunnel' THEN 1 ELSE 0 END) AS tunnel_requests, \
-                   SUM(CASE WHEN protocol = 'ws' THEN 1 ELSE 0 END) AS ws_requests, \
-                   SUM(CASE WHEN protocol = 'wss' THEN 1 ELSE 0 END) AS wss_requests, \
-                   SUM(CASE WHEN protocol = 'h3' THEN 1 ELSE 0 END) AS h3_requests, \
-                   SUM(CASE WHEN protocol = 'socks5' THEN 1 ELSE 0 END) AS socks5_requests \
-                   FROM traffic_records \
-                   GROUP BY app_name \
-                   ORDER BY requests DESC";
-
-        let mut stmt = match conn.prepare(sql) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(error = %e, "[TRAFFIC_DB] Failed to prepare app metrics aggregate query");
-                return vec![];
-            }
-        };
-
-        let out: Vec<AppMetricsAggregate> = stmt
-            .query_map([], |row| {
-                Ok(AppMetricsAggregate {
-                    app_name: row.get(0)?,
-                    requests: row.get::<_, i64>(1)? as u64,
-                    bytes_sent: row.get::<_, i64>(2)? as u64,
-                    bytes_received: row.get::<_, i64>(3)? as u64,
-                    http_requests: row.get::<_, i64>(4)? as u64,
-                    https_requests: row.get::<_, i64>(5)? as u64,
-                    tunnel_requests: row.get::<_, i64>(6)? as u64,
-                    ws_requests: row.get::<_, i64>(7)? as u64,
-                    wss_requests: row.get::<_, i64>(8)? as u64,
-                    h3_requests: row.get::<_, i64>(9)? as u64,
-                    socks5_requests: row.get::<_, i64>(10)? as u64,
-                })
-            })
-            .map(|r| r.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default();
-
-        *self.app_metrics_cache.lock() = Some(CachedValue {
-            value: out.clone(),
-            expires_at: Instant::now() + METRICS_CACHE_TTL,
-        });
-        out
     }
 
     pub fn current_sequence(&self) -> u64 {
@@ -1962,9 +1807,6 @@ impl TrafficDbStore {
                     }
                 }
             }
-        }
-        if deleted > 0 {
-            self.invalidate_metrics_cache();
         }
         self.remove_from_cache(ids);
         deleted
@@ -2873,6 +2715,37 @@ mod tests {
         assert_eq!(summary.res_sz, 8_888);
         assert_eq!(summary.up, 37);
         assert_eq!(summary.down, 73);
+
+        assert!(store.update_by_id("metric-1", |record| {
+            record.client_app = Some("Resolved Metric App".to_string());
+            record.upload_bytes = 41;
+            record.download_bytes = 79;
+        }));
+        assert!(store
+            .aggregate_app_metrics()
+            .iter()
+            .all(|metrics| metrics.app_name != "Metric Test App"));
+        let resolved = store
+            .aggregate_app_metrics()
+            .into_iter()
+            .find(|metrics| metrics.app_name == "Resolved Metric App")
+            .expect("resolved app aggregate should exist");
+        assert_eq!(resolved.bytes_sent, 41);
+        assert_eq!(resolved.bytes_received, 79);
+
+        drop(store);
+        let store = TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap();
+        let reloaded = store
+            .aggregate_app_metrics()
+            .into_iter()
+            .find(|metrics| metrics.app_name == "Resolved Metric App")
+            .expect("app aggregate should initialize from persisted records");
+        assert_eq!(reloaded.bytes_sent, 41);
+        assert_eq!(reloaded.bytes_received, 79);
+
+        store.delete_by_ids(&["metric-1".to_string()]);
+        assert!(store.aggregate_app_metrics().is_empty());
+        assert!(store.aggregate_host_metrics().is_empty());
 
         cleanup_test_dir(&dir);
     }

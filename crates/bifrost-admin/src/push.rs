@@ -206,6 +206,7 @@ pub struct ServerInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricsData {
     pub metrics: serde_json::Value,
+    pub recorded_traffic: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -357,7 +358,7 @@ fn default_metrics_interval_ms() -> u64 {
     1000
 }
 
-pub const METRICS_INTERVAL_MIN_MS: u64 = 200;
+pub const METRICS_INTERVAL_MIN_MS: u64 = 1000;
 pub const METRICS_INTERVAL_MAX_MS: u64 = 5000;
 
 impl Default for ClientSubscription {
@@ -387,6 +388,7 @@ pub struct PushClient {
     pub sender: mpsc::Sender<PushMessage>,
     pub subscription: RwLock<ClientSubscription>,
     traffic_statistics_last_sent: Mutex<Option<Instant>>,
+    metrics_last_sent: Mutex<Option<Instant>>,
 }
 
 impl PushClient {
@@ -401,6 +403,7 @@ impl PushClient {
             sender,
             subscription: RwLock::new(subscription),
             traffic_statistics_last_sent: Mutex::new(None),
+            metrics_last_sent: Mutex::new(None),
         };
         (client, receiver)
     }
@@ -429,6 +432,18 @@ impl PushClient {
         if last_sent.is_some_and(|last| {
             now.saturating_duration_since(last)
                 < Duration::from_millis(TRAFFIC_STATISTICS_PUSH_INTERVAL_MS)
+        }) {
+            return false;
+        }
+        *last_sent = Some(now);
+        true
+    }
+
+    fn reserve_metrics_push(&self, now: Instant, interval_ms: u64) -> bool {
+        let interval_ms = interval_ms.clamp(METRICS_INTERVAL_MIN_MS, METRICS_INTERVAL_MAX_MS);
+        let mut last_sent = self.metrics_last_sent.lock();
+        if last_sent.is_some_and(|last| {
+            now.saturating_duration_since(last) < Duration::from_millis(interval_ms)
         }) {
             return false;
         }
@@ -595,7 +610,7 @@ impl PushManager {
             .state
             .traffic_db_store
             .as_ref()
-            .map(|db| db.stats().record_count)
+            .map(|db| db.count())
             .unwrap_or(0);
 
         let (rules_total, rules_enabled) = match self.state.rules_storage.load_all() {
@@ -666,7 +681,26 @@ impl PushManager {
                 .unwrap_or_default();
         overview.metrics =
             serde_json::to_value(self.state.metrics_collector.get_current()).unwrap_or_default();
+        overview.traffic.recorded = self
+            .state
+            .traffic_db_store
+            .as_ref()
+            .map(|db| db.count())
+            .unwrap_or(0);
         overview
+    }
+
+    fn build_metrics_data(&self) -> MetricsData {
+        let metrics = self.state.metrics_collector.get_current();
+        MetricsData {
+            metrics: serde_json::to_value(&metrics).unwrap_or_default(),
+            recorded_traffic: self
+                .state
+                .traffic_db_store
+                .as_ref()
+                .map(|db| db.count())
+                .unwrap_or(0),
+        }
     }
 
     fn ensure_bucket_capacity(&self, client_key: &str) -> Vec<u64> {
@@ -1033,31 +1067,38 @@ impl PushManager {
         self.broadcast_metrics_with_interval(0).await;
     }
 
-    pub async fn broadcast_metrics_with_interval(&self, elapsed_ms: u64) {
+    pub async fn broadcast_metrics_with_interval(&self, _elapsed_ms: u64) {
         let mut clients_to_remove = Vec::new();
+        let now = Instant::now();
+        let clients: Vec<_> = self
+            .clients
+            .iter()
+            .filter_map(|client_ref| {
+                let client = client_ref.value();
+                let subscription = client.get_subscription();
 
-        let metrics = self.state.metrics_collector.get_current();
-        let metrics_data = MetricsData {
-            metrics: serde_json::to_value(&metrics).unwrap_or_default(),
-        };
-
-        for client_ref in self.clients.iter() {
-            let client = client_ref.value();
-            let subscription = client.get_subscription();
-
-            if subscription.need_metrics {
-                let client_interval = subscription
-                    .metrics_interval_ms
-                    .clamp(METRICS_INTERVAL_MIN_MS, METRICS_INTERVAL_MAX_MS);
-
-                let should_send = elapsed_ms == 0 || elapsed_ms % client_interval < 500;
-
-                if should_send {
-                    let msg = PushMessage::MetricsUpdate(metrics_data.clone());
-                    if !client.send(msg) {
-                        clients_to_remove.push(client.id);
-                    }
+                if !subscription.need_metrics {
+                    return None;
                 }
+
+                client
+                    .reserve_metrics_push(now, subscription.metrics_interval_ms)
+                    .then(|| client.clone())
+            })
+            .collect();
+
+        if clients.is_empty() {
+            return;
+        }
+
+        let metrics_data = self.build_metrics_data();
+
+        for client in clients {
+            let subscription = client.get_subscription();
+            if subscription.need_metrics
+                && !client.send(PushMessage::MetricsUpdate(metrics_data.clone()))
+            {
+                clients_to_remove.push(client.id);
             }
         }
 
@@ -1589,10 +1630,9 @@ impl PushManager {
         }
 
         if subscription.need_metrics {
-            let metrics = self.state.metrics_collector.get_current();
-            client.send(PushMessage::MetricsUpdate(MetricsData {
-                metrics: serde_json::to_value(&metrics).unwrap_or_default(),
-            }));
+            if client.reserve_metrics_push(Instant::now(), subscription.metrics_interval_ms) {
+                client.send(PushMessage::MetricsUpdate(self.build_metrics_data()));
+            }
         }
 
         if subscription.need_values {
@@ -3175,6 +3215,71 @@ mod tests {
         let PushMessage::MetricsUpdate(_) = message else {
             panic!("expected MetricsUpdate message");
         };
+    }
+
+    #[test]
+    fn metrics_push_reservation_clamps_fast_clients_to_one_second() {
+        let subscription = ClientSubscription {
+            need_metrics: true,
+            metrics_interval_ms: 1,
+            ..Default::default()
+        };
+        let (client, _receiver) = PushClient::new("metrics-fast-client".to_string(), subscription);
+        let start = Instant::now();
+
+        assert!(client.reserve_metrics_push(start, 1));
+        assert!(!client.reserve_metrics_push(start + Duration::from_millis(999), 1));
+        assert!(client.reserve_metrics_push(start + Duration::from_millis(1_000), 1));
+    }
+
+    #[tokio::test]
+    async fn initial_metrics_snapshot_shares_periodic_rate_limit() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+        let subscription = ClientSubscription {
+            need_metrics: true,
+            metrics_interval_ms: 1,
+            ..Default::default()
+        };
+        let (client, mut receiver) =
+            manager.register_client("initial-metrics-rate-limit".to_string(), subscription);
+
+        manager.send_initial_data(&client).await;
+
+        let initial = receiver
+            .try_recv()
+            .expect("expected initial metrics snapshot");
+        assert!(matches!(initial, PushMessage::MetricsUpdate(_)));
+
+        manager.broadcast_metrics().await;
+        assert!(
+            receiver.try_recv().is_err(),
+            "periodic metrics push must not bypass the initial snapshot rate limit"
+        );
+    }
+
+    #[test]
+    fn metrics_push_data_includes_authoritative_recorded_count() {
+        let harness = TestAdminState::builder().build();
+        let mut record = TrafficRecord::new(
+            "metrics-push-record".to_string(),
+            "GET".to_string(),
+            "https://push.test/".to_string(),
+        );
+        record.upload_bytes = 5;
+        record.download_bytes = 7;
+        harness.traffic_db.record(record);
+        let manager = harness.push_manager();
+
+        let data = manager.build_metrics_data();
+        let metrics: crate::MetricsSnapshot =
+            serde_json::from_value(data.metrics).expect("metrics snapshot");
+
+        assert_eq!(data.recorded_traffic, 1);
+        assert_eq!(
+            metrics.total_traffic_bytes,
+            metrics.bytes_sent + metrics.bytes_received
+        );
     }
 }
 

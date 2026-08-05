@@ -18,6 +18,7 @@ import type {
   TrafficTypeMetrics,
   SystemOverview,
   MetricsSnapshot,
+  MetricsAggregateSummary,
 } from "../../../types";
 
 const { Text } = Typography;
@@ -27,8 +28,10 @@ export interface MetricsTabProps {
   history: MetricsSnapshot[];
   memoryPercent: number;
   appMetrics: AppMetrics[];
+  appMetricsSummary: MetricsAggregateSummary;
   appMetricsLoading: boolean;
   hostMetrics: HostMetrics[];
+  hostMetricsSummary: MetricsAggregateSummary;
   hostMetricsLoading: boolean;
   formatBytes: (bytes: number) => string;
   formatBytesRate: (bytesPerSec: number) => string;
@@ -269,6 +272,7 @@ function TrafficTypeContent({ metrics, formatBytes }: TrafficTypeContentProps) {
 
 interface AppMetricsContentProps {
   appMetrics: AppMetrics[];
+  summary: MetricsAggregateSummary;
   loading: boolean;
   formatBytes: (bytes: number) => string;
   onRefresh: () => void;
@@ -276,6 +280,7 @@ interface AppMetricsContentProps {
 
 function AppMetricsContent({
   appMetrics,
+  summary,
   loading,
   formatBytes,
   onRefresh,
@@ -379,15 +384,6 @@ function AppMetricsContent({
     },
   ];
 
-  const totalStats = appMetrics.reduce(
-    (acc, app) => ({
-      requests: acc.requests + app.requests,
-      bytes_sent: acc.bytes_sent + app.bytes_sent,
-      bytes_received: acc.bytes_received + app.bytes_received,
-    }),
-    { requests: 0, bytes_sent: 0, bytes_received: 0 },
-  );
-
   return (
     <div>
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
@@ -399,7 +395,7 @@ function AppMetricsContent({
           >
             <Statistic
               title="Total Applications"
-              value={appMetrics.length}
+              value={summary.total}
               prefix={<LaptopOutlined />}
             />
           </Card>
@@ -412,7 +408,7 @@ function AppMetricsContent({
           >
             <Statistic
               title="Total Requests"
-              value={totalStats.requests.toLocaleString()}
+              value={summary.requests.toLocaleString()}
               prefix={<ApiOutlined />}
             />
           </Card>
@@ -425,7 +421,7 @@ function AppMetricsContent({
           >
             <Statistic
               title="Total Traffic"
-              value={formatBytes(totalStats.bytes_sent + totalStats.bytes_received)}
+              value={formatBytes(summary.total_traffic_bytes)}
               prefix={<SwapOutlined />}
             />
           </Card>
@@ -463,6 +459,7 @@ function AppMetricsContent({
 
 interface HostMetricsContentProps {
   hostMetrics: HostMetrics[];
+  summary: MetricsAggregateSummary;
   loading: boolean;
   formatBytes: (bytes: number) => string;
   onRefresh: () => void;
@@ -470,6 +467,7 @@ interface HostMetricsContentProps {
 
 function HostMetricsContent({
   hostMetrics,
+  summary,
   loading,
   formatBytes,
   onRefresh,
@@ -573,15 +571,6 @@ function HostMetricsContent({
     },
   ];
 
-  const totalStats = hostMetrics.reduce(
-    (acc, host) => ({
-      requests: acc.requests + host.requests,
-      bytes_sent: acc.bytes_sent + host.bytes_sent,
-      bytes_received: acc.bytes_received + host.bytes_received,
-    }),
-    { requests: 0, bytes_sent: 0, bytes_received: 0 },
-  );
-
   return (
     <div>
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
@@ -593,7 +582,7 @@ function HostMetricsContent({
           >
             <Statistic
               title="Total Hosts"
-              value={hostMetrics.length}
+              value={summary.total}
               prefix={<GlobalOutlined />}
             />
           </Card>
@@ -606,7 +595,7 @@ function HostMetricsContent({
           >
             <Statistic
               title="Total Requests"
-              value={totalStats.requests.toLocaleString()}
+              value={summary.requests.toLocaleString()}
               prefix={<ApiOutlined />}
             />
           </Card>
@@ -619,7 +608,7 @@ function HostMetricsContent({
           >
             <Statistic
               title="Total Traffic"
-              value={formatBytes(totalStats.bytes_sent + totalStats.bytes_received)}
+              value={formatBytes(summary.total_traffic_bytes)}
               prefix={<SwapOutlined />}
             />
           </Card>
@@ -660,8 +649,10 @@ export default function MetricsTab({
   history,
   memoryPercent,
   appMetrics,
+  appMetricsSummary,
   appMetricsLoading,
   hostMetrics,
+  hostMetricsSummary,
   hostMetricsLoading,
   formatBytes,
   formatBytesRate,
@@ -774,6 +765,7 @@ export default function MetricsTab({
               children: (
                 <AppMetricsContent
                   appMetrics={appMetrics}
+                  summary={appMetricsSummary}
                   loading={appMetricsLoading}
                   formatBytes={formatBytes}
                   onRefresh={onRefreshAppMetrics}
@@ -786,6 +778,7 @@ export default function MetricsTab({
               children: (
                 <HostMetricsContent
                   hostMetrics={hostMetrics}
+                  summary={hostMetricsSummary}
                   loading={hostMetricsLoading}
                   formatBytes={formatBytes}
                   onRefresh={onRefreshHostMetrics}

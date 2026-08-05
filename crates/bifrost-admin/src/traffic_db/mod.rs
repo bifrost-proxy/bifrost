@@ -5,10 +5,7 @@ mod store;
 mod types;
 
 pub use query::{Direction, QueryParams, QueryResult, TextMatchMode};
-pub use statistics::TrafficStatisticsSnapshot;
+pub use statistics::{AppMetricsAggregate, HostMetricsAggregate, TrafficStatisticsSnapshot};
 pub use store::TrafficSearchFields;
-pub use store::{
-    start_db_cleanup_task, AppMetricsAggregate, HostMetricsAggregate, SharedTrafficDbStore,
-    TrafficDbStore, TrafficStoreEvent,
-};
+pub use store::{start_db_cleanup_task, SharedTrafficDbStore, TrafficDbStore, TrafficStoreEvent};
 pub use types::{TrafficDbStats, TrafficFlags, TrafficSummaryCompact};

@@ -60,7 +60,7 @@ import {
   getCertQRCodeUrl,
   type CertInfo,
 } from "../../api/cert";
-import type { AppMetrics, HostMetrics } from "../../types";
+import type { AppMetrics, HostMetrics, MetricsAggregateSummary } from "../../types";
 import { useWhitelistStore } from "../../stores/useWhitelistStore";
 import ProxyTab from "./tabs/ProxyTab";
 import CertificateTab from "./tabs/CertificateTab";
@@ -179,8 +179,22 @@ export default function Settings() {
     useState<BreakpointPerformanceConfig | null>(null);
   const perfUpdateTimers = useRef<Record<string, number>>({});
   const [appMetrics, setAppMetrics] = useState<AppMetrics[]>([]);
+  const [appMetricsSummary, setAppMetricsSummary] = useState<MetricsAggregateSummary>({
+    total: 0,
+    requests: 0,
+    bytes_sent: 0,
+    bytes_received: 0,
+    total_traffic_bytes: 0,
+  });
   const [appMetricsLoading, setAppMetricsLoading] = useState(false);
   const [hostMetrics, setHostMetrics] = useState<HostMetrics[]>([]);
+  const [hostMetricsSummary, setHostMetricsSummary] = useState<MetricsAggregateSummary>({
+    total: 0,
+    requests: 0,
+    bytes_sent: 0,
+    bytes_received: 0,
+    total_traffic_bytes: 0,
+  });
   const [hostMetricsLoading, setHostMetricsLoading] = useState(false);
   const [proxyAddressInfo, setProxyAddressInfo] =
     useState<ProxyAddressInfo | null>(null);
@@ -305,8 +319,9 @@ export default function Settings() {
   const fetchAppMetricsData = useCallback(async () => {
     setAppMetricsLoading(true);
     try {
-      const metrics = await getAppMetrics();
-      setAppMetrics(metrics);
+      const response = await getAppMetrics();
+      setAppMetrics(response.items);
+      setAppMetricsSummary(response.summary);
     } catch (error) {
       if (!suppressRestartErrors && !isConnectionIssueError(error)) {
         console.error("Failed to fetch app metrics");
@@ -319,8 +334,9 @@ export default function Settings() {
   const fetchHostMetricsData = useCallback(async () => {
     setHostMetricsLoading(true);
     try {
-      const metrics = await getHostMetrics();
-      setHostMetrics(metrics);
+      const response = await getHostMetrics();
+      setHostMetrics(response.items);
+      setHostMetricsSummary(response.summary);
     } catch (error) {
       if (!suppressRestartErrors && !isConnectionIssueError(error)) {
         console.error("Failed to fetch host metrics");
@@ -1188,9 +1204,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     return marks;
   };
 
-  const memoryPercent = overview
-    ? (overview.metrics.memory_used / overview.metrics.memory_total) * 100
-    : 0;
+  const memoryPercent = overview?.metrics.memory_usage_percent ?? 0;
 
   const trafficDraft = perfDraft ?? performanceConfig?.traffic;
   const breakpointDraft = breakpointPerfDraft ?? performanceConfig?.breakpoint;
@@ -1330,8 +1344,10 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
           history={history}
           memoryPercent={memoryPercent}
           appMetrics={appMetrics}
+          appMetricsSummary={appMetricsSummary}
           appMetricsLoading={appMetricsLoading}
           hostMetrics={hostMetrics}
+          hostMetricsSummary={hostMetricsSummary}
           hostMetricsLoading={hostMetricsLoading}
           formatBytes={formatBytes}
           formatBytesRate={formatBytesRate}

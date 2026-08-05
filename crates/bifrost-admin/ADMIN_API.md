@@ -640,6 +640,10 @@ GET /api/metrics/history
 GET /api/metrics/apps
 ```
 
+**查询参数**:
+
+- `include_summary=true`: 返回 `{ items, summary }`，其中 `summary` 的应用数、请求数和流量字节均由服务端内存统计计算。省略时为兼容旧客户端，仍返回数组。
+
 **响应**:
 
 ```json
@@ -663,11 +667,17 @@ GET /api/metrics/apps
 
 **应用场景**: 按客户端应用统计流量数据。
 
+应用与主机的持久化指标在服务启动时初始化一次，之后随流量插入、更新和删除增量维护；读取接口不执行全表聚合。
+
 ### 3.4 获取主机指标统计
 
 ```
 GET /api/metrics/hosts
 ```
+
+**查询参数**:
+
+- `include_summary=true`: 返回 `{ items, summary }`，其中 `summary` 的主机数、请求数和流量字节均由服务端内存统计计算。省略时为兼容旧客户端，仍返回数组。
 
 **响应**:
 
@@ -1803,11 +1813,13 @@ WebSocket/SSE 连接状态。
 | timestamp              | number             | 时间戳（毫秒）       |
 | memory_used            | number             | 内存使用量（字节）   |
 | memory_total           | number             | 系统总内存（字节）   |
+| memory_usage_percent   | number             | 服务端计算的内存使用率（%） |
 | cpu_usage              | number             | CPU 使用率（%）      |
 | total_requests         | number             | 总请求数             |
 | active_connections     | number             | 活跃连接数           |
 | bytes_sent             | number             | 发送字节数           |
 | bytes_received         | number             | 接收字节数           |
+| total_traffic_bytes    | number             | 服务端计算的累计收发字节数 |
 | bytes_sent_rate        | number             | 发送速率（字节/秒）  |
 | bytes_received_rate    | number             | 接收速率（字节/秒）  |
 | qps                    | number             | 每秒请求数           |

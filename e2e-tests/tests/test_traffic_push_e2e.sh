@@ -342,7 +342,25 @@ test_ws_metrics_push() {
         local metrics_count
         metrics_count=$(echo "$messages" | grep -c '"type":"metrics_update"' || echo "0")
         log_info "Received $metrics_count metrics updates"
-        
+
+        if [[ "$metrics_count" -gt 4 ]]; then
+            log_fail "Metrics push exceeded one update per second after the initial snapshot: $metrics_count"
+            return 1
+        fi
+
+        if ! echo "$messages" | jq -s -e '
+            [.[] | select(.type == "metrics_update") | .data] as $updates |
+            ($updates | length) > 0 and
+            ([$updates[] |
+                (.recorded_traffic | type == "number") and
+                (.metrics.total_traffic_bytes == (.metrics.bytes_sent + .metrics.bytes_received)) and
+                (.metrics.memory_usage_percent | type == "number")
+            ] | all)
+        ' >/dev/null; then
+            log_fail "Metrics push is missing authoritative server-derived fields"
+            return 1
+        fi
+
         return 0
     elif echo "$messages" | grep -q '"type":"connected"'; then
         log_info "WebSocket connected"
@@ -351,6 +369,48 @@ test_ws_metrics_push() {
         log_warn "No metrics message received"
         return 0
     fi
+}
+
+test_ws_metrics_push_node() {
+    log_info "Testing WebSocket metrics push with Node fallback..."
+
+    local result
+    if ! result=$(node "$SCRIPT_DIR/../test_utils/metrics_push_probe.js" \
+        "${WS_PUSH_URL}?x_client_id=e2e_metrics_node_$$_$RANDOM" 3200); then
+        log_fail "Node metrics push probe failed: $result"
+        return 1
+    fi
+
+    local metrics_count
+    metrics_count=$(echo "$result" | jq -r '.count')
+    if [[ "$metrics_count" -lt 1 || "$metrics_count" -gt 4 ]]; then
+        log_fail "Metrics push frequency is outside the initial-plus-one-per-second bound: $metrics_count"
+        return 1
+    fi
+
+    if ! echo "$result" | jq -e '
+        [.updates[] |
+            (.recorded_traffic | type == "number") and
+            (.metrics.total_traffic_bytes == (.metrics.bytes_sent + .metrics.bytes_received)) and
+            (.metrics.memory_usage_percent | type == "number")
+        ] | all
+    ' >/dev/null; then
+        log_fail "Node metrics push probe found missing authoritative fields: $result"
+        return 1
+    fi
+
+    if ! echo "$result" | jq -e '
+        [.updates[].metrics.timestamp] as $timestamps |
+        [range(1; $timestamps | length) as $index |
+            ($timestamps[$index] - $timestamps[$index - 1]) >= 900
+        ] | all
+    ' >/dev/null; then
+        log_fail "Metrics updates arrived less than one second apart: $result"
+        return 1
+    fi
+
+    log_info "Node probe received $metrics_count bounded metrics updates"
+    return 0
 }
 
 test_polling_fallback() {
@@ -491,6 +551,7 @@ main() {
         run_test "WebSocket Max Channels" test_ws_max_channels
     else
         log_warn "Skipping WebSocket tests (websocat not available)"
+        run_test "WebSocket Metrics Push (Node fallback)" test_ws_metrics_push_node
     fi
 
     run_test "HTTP Polling Fallback" test_polling_fallback

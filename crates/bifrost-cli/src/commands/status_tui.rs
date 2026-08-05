@@ -2156,6 +2156,7 @@ mod tests {
                 "wss": {"requests": 0, "bytes_sent": 0, "bytes_received": 0, "active_connections": 0},
                 "socks5": {"requests": 0, "bytes_sent": 0, "bytes_received": 0, "active_connections": 0}
             }),
+            recorded_traffic: 6,
         }))
         .expect("serialize push message");
 

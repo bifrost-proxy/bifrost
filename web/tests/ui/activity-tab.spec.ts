@@ -52,11 +52,13 @@ function activityMetricsSnapshot() {
     timestamp: Date.now(),
     memory_used: 1,
     memory_total: 1,
+    memory_usage_percent: 100,
     cpu_usage: 1,
     total_requests: 1777,
     active_connections: 18,
     bytes_sent: 952107008,
     bytes_received: 33344717,
+    total_traffic_bytes: 985451725,
     bytes_sent_rate: 113,
     bytes_received_rate: 57,
     qps: 0,
@@ -74,7 +76,10 @@ function activityMetricsSnapshot() {
   };
 }
 
-async function mockActivityApi(page: Page) {
+async function mockActivityApi(
+  page: Page,
+  pushedOverview?: { metrics: ReturnType<typeof activityMetricsSnapshot>; recorded: number },
+) {
   const longHeaderValue = "ppe_old_" + "x".repeat(160);
   await page.route("**/_bifrost/api/**", async (route) => {
     const url = new URL(route.request().url());
@@ -123,7 +128,20 @@ async function mockActivityApi(page: Page) {
       return;
     }
     if (apiPath === "/metrics") {
-      await fulfillJson(route, activityMetricsSnapshot());
+      await fulfillJson(route, pushedOverview?.metrics ?? activityMetricsSnapshot());
+      return;
+    }
+    if (apiPath === "/metrics/apps" || apiPath === "/metrics/hosts") {
+      await fulfillJson(route, {
+        items: [],
+        summary: {
+          total: 0,
+          requests: 0,
+          bytes_sent: 0,
+          bytes_received: 0,
+          total_traffic_bytes: 0,
+        },
+      });
       return;
     }
     if (apiPath === "/system/overview") {
@@ -139,9 +157,9 @@ async function mockActivityApi(page: Page) {
           uptime_secs: 1,
           pid: 123,
         },
-        metrics: activityMetricsSnapshot(),
+        metrics: pushedOverview?.metrics ?? activityMetricsSnapshot(),
         rules: { total: 30, enabled: 1 },
-        traffic: { recorded: 1777 },
+        traffic: { recorded: pushedOverview?.recorded ?? 1777 },
         server: { port: 9900, admin_url: "http://127.0.0.1:9900/_bifrost/" },
         pending_authorizations: 0,
       });
@@ -404,6 +422,33 @@ async function mockActivityStatisticsWebSocket(page: Page) {
     window.WebSocket = ActivityMockWebSocket as unknown as typeof WebSocket;
   });
 }
+
+test("Metrics and status bar consume authoritative server fields", async ({
+  page,
+}) => {
+  const metrics = {
+    ...activityMetricsSnapshot(),
+    timestamp: Date.now() + 1,
+    memory_used: 50,
+    memory_total: 100,
+    memory_usage_percent: 50,
+    total_requests: 4321,
+    bytes_sent: 1024,
+    bytes_received: 1024,
+    total_traffic_bytes: 2048,
+  };
+  await mockActivityApi(page, { metrics, recorded: 5028 });
+  await mockActivityStatisticsWebSocket(page);
+
+  await page.goto("/_bifrost/settings?tab=metrics");
+  await expect(page.getByText("Performance Metrics", { exact: true })).toBeVisible();
+  await expect(page.getByText("5,028", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("4,321", { exact: true }).first()).toBeVisible();
+
+  const statusBar = page.getByTestId("status-bar");
+  await expect(statusBar).toContainText("Total:2.0 KB");
+  await expect(statusBar).toContainText("Req:4321");
+});
 
 test("Activity tab is first, default, data-rich, and animated on hover", async ({
   page,

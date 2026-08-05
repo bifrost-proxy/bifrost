@@ -500,11 +500,13 @@ export interface MetricsSnapshot {
   timestamp: number;
   memory_used: number;
   memory_total: number;
+  memory_usage_percent: number;
   cpu_usage: number;
   total_requests: number;
   active_connections: number;
   bytes_sent: number;
   bytes_received: number;
+  total_traffic_bytes: number;
   bytes_sent_rate: number;
   bytes_received_rate: number;
   qps: number;
@@ -551,6 +553,24 @@ export interface HostMetrics {
   h3_requests: number;
   h3s_requests: number;
   socks5_requests: number;
+}
+
+export interface MetricsAggregateSummary {
+  total: number;
+  requests: number;
+  bytes_sent: number;
+  bytes_received: number;
+  total_traffic_bytes: number;
+}
+
+export interface AppMetricsResponse {
+  items: AppMetrics[];
+  summary: MetricsAggregateSummary;
+}
+
+export interface HostMetricsResponse {
+  items: HostMetrics[];
+  summary: MetricsAggregateSummary;
 }
 
 export interface SystemInfo {

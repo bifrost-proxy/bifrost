@@ -63,6 +63,7 @@ export interface OverviewData {
 
 export interface MetricsData {
   metrics: MetricsSnapshot;
+  recorded_traffic: number;
 }
 
 export interface HistoryData {
@@ -245,9 +246,9 @@ export interface ClientSubscription {
   metrics_interval_ms?: number;
 }
 
-export const METRICS_INTERVAL_MIN_MS = 200;
+export const METRICS_INTERVAL_MIN_MS = 1000;
 export const METRICS_INTERVAL_MAX_MS = 5000;
-export const METRICS_INTERVAL_DEFAULT_MS = 2000;
+export const METRICS_INTERVAL_DEFAULT_MS = 1000;
 export const METRICS_INTERVAL_FAST_MS = 250;
 
 type MessageHandler<T> = (data: T) => void;

@@ -34,11 +34,13 @@ pub struct MetricsSnapshot {
     pub timestamp: u64,
     pub memory_used: u64,
     pub memory_total: u64,
+    pub memory_usage_percent: f32,
     pub cpu_usage: f32,
     pub total_requests: u64,
     pub active_connections: u64,
     pub bytes_sent: u64,
     pub bytes_received: u64,
+    pub total_traffic_bytes: u64,
     pub bytes_sent_rate: f32,
     pub bytes_received_rate: f32,
     pub qps: f32,
@@ -456,11 +458,17 @@ impl MetricsCollector {
             timestamp: now,
             memory_used,
             memory_total,
+            memory_usage_percent: if memory_total == 0 {
+                0.0
+            } else {
+                (memory_used as f64 / memory_total as f64 * 100.0) as f32
+            },
             cpu_usage,
             total_requests,
             active_connections: self.active_connections.load(Ordering::Relaxed),
             bytes_sent,
             bytes_received,
+            total_traffic_bytes: bytes_sent.saturating_add(bytes_received),
             bytes_sent_rate,
             bytes_received_rate,
             qps,
@@ -702,6 +710,25 @@ mod tests {
         assert_eq!(snapshot.total_requests, 1);
         assert_eq!(snapshot.bytes_sent, 100);
         assert_eq!(snapshot.bytes_received, 200);
+        assert_eq!(snapshot.total_traffic_bytes, 300);
+        assert_eq!(snapshot.memory_usage_percent, 0.0);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_derives_memory_percent_on_server() {
+        let collector = MetricsCollector::new(10);
+        collector
+            .cached_cpu
+            .memory_used
+            .store(256, Ordering::Relaxed);
+        collector
+            .cached_cpu
+            .memory_total
+            .store(1024, Ordering::Relaxed);
+
+        let snapshot = collector.get_current();
+
+        assert_eq!(snapshot.memory_usage_percent, 25.0);
     }
 
     #[test]
