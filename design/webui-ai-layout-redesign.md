@@ -2,7 +2,7 @@
 
 ## 背景
 
-当前 WebUI AI 页面把 Agent、ASR、Videos 和 IM Gateway 的多个配置 section 平铺在一级左侧导航中。用户进入 `/ai` 后默认落在 Agent General 配置，而不是开始一次 AI 任务；真正的 Agent Chat 又在内部维护一套独立的对话区、右侧线程 rail、`New Chat` 弹窗和 `Status` 弹窗。
+当前 WebUI AI 页面把 Agent、ASR 和 IM Gateway 的多个配置 section 平铺在一级左侧导航中。用户进入 `/ai` 后默认落在 Agent General 配置，而不是开始一次 AI 任务；真正的 Agent Chat 又在内部维护一套独立的对话区、右侧线程 rail、`New Chat` 弹窗和 `Status` 弹窗。
 
 这个结构对配置管理友好，但对“使用 AI 完成任务”的主路径不够直接：
 
@@ -21,7 +21,7 @@
 - 新建对话面板在右侧主内容区垂直居中展示输入框，用户输入消息并发送后才创建新线程。
 - 新建对话输入面板底部工具栏展示 Runner 下拉选择，位置对应截图中“高级”操作区，默认使用 Codex Runner。
 - Runner 下拉必须包含后端已启用的外部 runner，至少能展示 Codex、Claude Code、Trae X 这几类可用 runner。
-- 左侧顶部区域包含 `New Chat`、`ASR`、`Videos`、`IM` 四个工作入口。
+- 左侧顶部区域包含 `New Chat`、`ASR`、`IM` 三个工作入口。
 - 左侧中间区域展示所有 Agent threads，支持选中、运行状态、加载更多、右键删除或等效删除入口。
 - 左侧底部只有一个 Settings 入口，点击后在 Settings 内容页中操作原 AI 左侧菜单里的配置项。Settings 顶部只保留 `Agent`、`Runner`、`IM` 三个分组 tab；每个 tab 内把归属该分组的配置项以卡片方式向下平铺。
 - Settings 不承载某个对话的状态信息；`Back`、`Session Detail`、`Messages`、workspace、runner、context、diagnostics 等会话级信息只能出现在具体对话的头部操作或弹窗中。
@@ -39,11 +39,10 @@
 - 已有线程深链仍可打开对应对话，例如 `session` / `historyPath` / `view` 参数不丢失。
 - ASR 内部深链参数继续工作，例如 `asrTab`、`asrTask`、`asrTaskTab`、`asrDay`。
 - IM Gateway 内部 section 深链继续工作，例如 `imGatewaySection=connections|targets|routes|schedules|history`。
-- 现有 Videos Tool 能力不能被删除。它作为左侧主入口之一保留，并继续支持旧深链。
 - 旧 URL 兼容：
   - `aiSection=agent-chat&agentSection=chat` 进入 Chat。
   - `aiSection=tools-asr` 进入 ASR。
-  - `aiSection=tools-videos` 进入 Videos Tool。
+  - 已下线的 `aiSection=tools-videos` 和 `view=videos` 安全回退到 New Chat。
   - `aiSection=im-gateway-*` 进入 IM 或 Settings 中对应 IM section。
   - `agentSection=*` 在 Settings 二级内容页中仍定位到对应 Agent 配置 section。
 - 小屏幕布局不能出现文字溢出、按钮重叠、线程列表挤压输入框或 Settings 二级内容页不可滚动/不可切回主入口。
@@ -71,7 +70,6 @@ AI Shell
 │   ├── Primary Actions
 │   │   ├── New Chat
 │   │   ├── ASR
-│   │   ├── Videos
 │   │   └── IM
 │   ├── Threads
 │   │   ├── active / idle / failed status
@@ -83,7 +81,6 @@ AI Shell
     ├── New Chat Compose
     ├── Chat Conversation
     ├── ASR Workspace
-    ├── Videos Tool
     ├── IM Workspace
     └── Settings Content
 ```
@@ -102,7 +99,6 @@ AI Shell
 | `/ai?view=chat&historyPath=<path>` | 打开历史 JSONL 会话 |
 | `/ai?view=asr&asrTab=scheduled` | 打开 ASR 工作台 |
 | `/ai?view=im&imGatewaySection=connections` | 打开 IM 工作台 |
-| `/ai?view=videos` | 打开 Videos Tool 兼容入口 |
 | `/ai?settings=agent&agentSection=model` | 打开 Settings 二级内容页的 Agent 分组，Agent 配置卡片平铺展示并包含 Model |
 | `/ai?settings=agent&agentSection=runners` | 打开 Settings 二级内容页的 Runner 分组 |
 | `/ai?settings=im&imGatewaySection=targets` | 打开 Settings 二级内容页的 IM 分组，IM 配置卡片平铺展示并从 Targets 开始 |
@@ -112,7 +108,7 @@ AI Shell
 - `aiSection=agent-chat` -> `view=chat`。
 - `aiSection=agent-general|agent-model|...` -> `view=settings&settings=agent&agentSection=<section>`。
 - `aiSection=tools-asr` -> `view=asr`。
-- `aiSection=tools-videos` -> `view=videos`。
+- `aiSection=tools-videos` / `view=videos` -> New Chat（Videos Tool 已下线）。
 - `aiSection=im-gateway-routes` -> `view=im&imGatewaySection=routes`；IM Provider Connections 只通过主入口 `view=im` 展示，Settings 的 IM 分组从 Targets 开始。
 
 ## 默认新建对话交互
@@ -237,9 +233,9 @@ Runner 下拉必须展示不可用状态：
 
 第一版主入口 `IM` 直接复用 `ImGatewayTab`，并承载 Connections、Targets、Routes、Schedules、History 全量 IM 配置能力。Settings 二级内容页中的 `IM` 分组只保留 Targets、Routes、Schedules、History，避免 Provider Connections 在两个入口重复出现。
 
-## Videos Tool
+## 已下线的 Videos Tool
 
-Videos Tool 作为左侧主入口之一保留，避免用户认为能力消失。旧 `aiSection=tools-videos` 映射到 `view=videos`，右侧渲染 `<VideosTool />`。必须保留 YouTube 下载入口、默认目录、自定义目录、下载进度和非 YouTube URL 拒绝行为。
+Videos Tool 已从 AI 左侧入口、route state、前端页面和后端 `/api/videos` handler 中移除。旧 `aiSection=tools-videos` 与 `view=videos` 回退到 New Chat，避免出现空白工作台；详细退场边界见 `design/videos-tool.md`。
 
 ## Settings 二级内容页
 
@@ -368,15 +364,15 @@ Settings URL 语义：
   - 点击 Settings，断言右侧 Settings 内容页打开；顶部只显示 `Agent`、`Runner`、`IM`；Agent 分组平铺 General、Model、Runtime、MCP Servers 等卡片，Runner 分组只展示 runners 卡片，IM 分组平铺 Targets、Routes、Schedules、History 等卡片且不展示 Connections；切回其它主入口后对应主内容恢复。
   - 断言 Settings 内容轨道宽度不超过约 1120px，并在右侧主内容区内水平居中，不把配置卡片撑满全宽。
   - 打开带 `session` 和 `agentSection=chat` 的 Settings 脏链接，断言 URL 清理会话参数，Settings 顶部只显示 `Agent`、`Runner`、`IM`，不显示 Chat、Back、Session Detail 或 Messages。
-- `ai-layout-videos-compat.spec.ts`
-  - 打开旧 `aiSection=tools-videos` 链接。
-  - 断言 Videos Tool 仍可访问。
-  - 断言 YouTube URL、下载目录和进度展示入口仍存在。
+- `ai-layout-redesign.spec.ts`（Videos 下线用例）
+  - 打开旧 `aiSection=tools-videos` 和 `view=videos` 链接。
+  - 断言 Videos 入口和页面不存在，且安全回退到 New Chat。
+  - 亮色与暗色主题下分别验证，且断言旧 Videos 页面、YouTube URL、下载目录和进度入口均不存在。
 - `ai-layout-legacy-links.spec.ts`
   - 打开旧 Agent Chat 链接。
   - 打开旧 Agent Model 链接。
   - 打开旧 ASR 链接。
-  - 打开旧 Videos Tool 链接。
+  - 打开旧 Videos Tool 链接并确认回退到 New Chat。
   - 打开旧 IM Gateway Routes 链接。
   - 断言全部被映射到新 shell。
 - `ai-layout-responsive.spec.ts`
@@ -407,7 +403,7 @@ Settings URL 语义：
 
 - 用户进入 `/ai` 可以不进入任何配置页，直接输入任务并启动新对话。
 - 默认 Runner 是 Codex Runner；不可用时 UI 明确展示实际 fallback runner。
-- 左侧导航只表达工作路径：New Chat、ASR、Videos、IM、Threads、Settings。
+- 左侧导航只表达工作路径：New Chat、ASR、IM、Threads、Settings。
 - 左侧线程列表宽度和选中态稳定，不因点击选中产生列表抖动；右侧对话区域没有未使用的内部 thread rail 空白。
 - 运行中对话的排队消息区域应保持紧凑：输入框上方最多展示两行队列消息高度，更多消息在该区域内部滚动；每条消息右侧必须预留操作按钮空间，删除按钮不能被长文本挤到下一行。
 - 打开历史线程时完整历史必须立即展示；默认请求不带 `tail` / `limit`，实时推送使用增量追加和全量恢复去重，不能再用最后一页覆盖当前消息。
@@ -415,7 +411,7 @@ Settings URL 语义：
 - 配置项不再占据 AI 页面一级导航。
 - Settings 只展示配置项，且顶层只合并为 `Agent`、`Runner`、`IM` 三个 tab，配置项在对应 tab 内以卡片向下平铺；Chat 和会话状态信息不进入 Settings；Connections Provider 配置不在 Settings > IM 中重复展示。
 - IM 工作入口使用响应式卡片网格展示连接通道，桌面下自动多列，窄屏下收敛为单列；Settings > IM 保留 Targets、Routes、Schedules、History 等表格型配置，整体仍在同一内容轨道内。
-- ASR、IM、Videos、历史消息线程和 Settings 各分组共享 AI 右侧内容区的居中规则；ASR/IM/Videos 工作台页桌面最大宽度约 920px，Settings 配置页最大宽度约 1120px，顶部留白统一为约 24px，避免内容吸顶。
+- ASR、IM、历史消息线程和 Settings 各分组共享 AI 右侧内容区的居中规则；ASR/IM 工作台页桌面最大宽度约 920px，Settings 配置页最大宽度约 1120px，顶部留白统一为约 24px，避免内容吸顶。
 - 旧深链不失效。
 - Playwright、human_tests 和必要单元测试全部通过。
 

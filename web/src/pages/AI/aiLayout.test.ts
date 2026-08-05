@@ -71,9 +71,9 @@ describe("resolveAiRouteState", () => {
       view: "asr",
     });
     expect(
-      resolveAiRouteState(params("view=videos&settings=im&imGatewaySection=routes")),
+      resolveAiRouteState(params("view=im&settings=agent&agentSection=model")),
     ).toMatchObject({
-      view: "videos",
+      view: "im",
     });
     expect(
       resolveAiRouteState(params("view=chat&settings=agent&agentSection=runners&mode=new")),
@@ -83,14 +83,24 @@ describe("resolveAiRouteState", () => {
     });
   });
 
-  it("maps legacy ASR, Videos, and IM sections", () => {
+  it("maps legacy ASR and IM sections", () => {
     expect(resolveAiRouteState(params("aiSection=tools-asr")).view).toBe("asr");
-    expect(resolveAiRouteState(params("aiSection=tools-videos")).view).toBe("videos");
     expect(
       resolveAiRouteState(params("aiSection=im-gateway-routes")),
     ).toMatchObject({
       view: "im",
       imGatewaySection: "routes",
+    });
+  });
+
+  it("falls removed Videos routes back to new chat", () => {
+    expect(resolveAiRouteState(params("view=videos"))).toMatchObject({
+      view: "chat",
+      chatMode: "new",
+    });
+    expect(resolveAiRouteState(params("aiSection=tools-videos"))).toMatchObject({
+      view: "chat",
+      chatMode: "new",
     });
   });
 

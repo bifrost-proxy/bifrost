@@ -243,6 +243,9 @@ test("AI layout defaults to new chat with centered composer and runner picker", 
 test("AI left rail switches ASR, IM, Settings, and history threads", async ({ page }) => {
   await openPage(page, "ai");
 
+  await expect(page.getByTestId("ai-nav-tools-videos")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Videos", exact: true })).toHaveCount(0);
+
   const existingThread = page.getByTestId("agent-chat-thread-item").filter({ hasText: "Existing thread" });
   const beforeSelectBox = await existingThread.boundingBox();
   expect(beforeSelectBox).not.toBeNull();
@@ -287,11 +290,6 @@ test("AI left rail switches ASR, IM, Settings, and history threads", async ({ pa
     return window.getComputedStyle(element).display;
   });
   expect(imGridDisplay).toBe("grid");
-
-  await page.getByTestId("ai-nav-tools-videos").click();
-  await expect(page).toHaveURL(/view=videos/);
-  await expect(page.getByTestId("ai-nav-tools-videos")).toHaveAttribute("aria-current", "true");
-  await expectWorkbenchTrack(page, "ai-videos-content", "ai-videos-track");
 
   await page.getByTestId("ai-nav-settings").click();
   await expect(page).toHaveURL(/view=settings/);
@@ -350,6 +348,32 @@ test("AI layout maps legacy links into the new shell", async ({ page }) => {
   await expect(page).toHaveURL(/imGatewaySection=targets/);
   await expect(page.getByTestId("im-gateway-section-connections")).toHaveCount(0);
   await expect(page.getByTestId("im-gateway-section-targets")).toBeVisible();
+});
+
+test("AI removes Videos navigation and retires old Videos routes in both themes", async ({
+  page,
+}) => {
+  for (const mode of ["light", "dark"] as const) {
+    await page.addInitScript((themeMode) => {
+      localStorage.setItem(
+        "bifrost-theme",
+        JSON.stringify({ state: { mode: themeMode }, version: 0 }),
+      );
+    }, mode);
+    await openPage(page, "ai?view=videos");
+
+    await expect(page.locator("html")).toHaveAttribute("data-theme", mode);
+    await expect(page.getByTestId("ai-nav-tools-videos")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Videos", exact: true })).toHaveCount(0);
+    await expect(page.getByTestId("videos-tool-page")).toHaveCount(0);
+    await expect(page.getByTestId("ai-nav-new-chat")).toHaveAttribute("aria-current", "true");
+    await expect(page.getByTestId("ai-new-chat-landing")).toBeVisible();
+  }
+
+  await openPage(page, "ai?aiSection=tools-videos");
+  await expect(page.getByTestId("ai-nav-new-chat")).toHaveAttribute("aria-current", "true");
+  await expect(page.getByTestId("ai-new-chat-landing")).toBeVisible();
+  await expect(page.getByTestId("ai-videos-content")).toHaveCount(0);
 });
 
 test("AI Settings clears conversation route state and only shows configuration tabs", async ({ page }) => {
@@ -415,15 +439,6 @@ test("AI Settings does not trap left rail navigation", async ({ page }) => {
   await expect(page).not.toHaveURL(/settings=/);
   await expect(page.getByTestId("ai-settings-content")).toHaveCount(0);
   await expect(page.getByTestId("ai-nav-im")).toHaveAttribute("aria-current", "true");
-
-  await page.getByTestId("ai-nav-settings").click();
-  await expect(page.getByTestId("ai-settings-content")).toBeVisible();
-
-  await page.getByTestId("ai-nav-tools-videos").click();
-  await expect(page).toHaveURL(/view=videos/);
-  await expect(page).not.toHaveURL(/settings=/);
-  await expect(page.getByTestId("ai-settings-content")).toHaveCount(0);
-  await expect(page.getByTestId("ai-nav-tools-videos")).toHaveAttribute("aria-current", "true");
 
   await page.getByTestId("ai-nav-settings").click();
   await expect(page.getByTestId("ai-settings-content")).toBeVisible();
