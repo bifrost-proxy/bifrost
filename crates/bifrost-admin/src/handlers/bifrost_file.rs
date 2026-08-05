@@ -522,6 +522,19 @@ fn network_record_to_traffic_record(record: &NetworkRecord) -> TrafficRecord {
 
     let request_size = record.request_body.as_ref().map_or(0, |b| b.len());
     let response_size = record.response_body.as_ref().map_or(0, |b| b.len());
+    let (original_response_headers, response_headers) =
+        if let Some(original) = &record.original_response_headers {
+            let delivered = record
+                .response_headers
+                .clone()
+                .unwrap_or_else(|| original.clone());
+            let changed = (delivered != *original).then_some(delivered);
+            (Some(original.clone()), changed)
+        } else {
+            // Backward compatibility: network exports created before the two-snapshot
+            // format stored the upstream snapshot in `response_headers`.
+            (record.response_headers.clone(), None)
+        };
 
     TrafficRecord {
         id: imported_id,
@@ -539,7 +552,7 @@ fn network_record_to_traffic_record(record: &NetworkRecord) -> TrafficRecord {
         listener_port: record.listener_port.unwrap_or(0),
         timing: None,
         request_headers: record.request_headers.clone(),
-        original_response_headers: record.response_headers.clone(),
+        original_response_headers,
         request_body_ref: None,
         response_body_ref: None,
         derived_response_body_ref: None,
@@ -559,7 +572,7 @@ fn network_record_to_traffic_record(record: &NetworkRecord) -> TrafficRecord {
         actual_url: record.actual_url.clone(),
         actual_host: record.actual_host.clone(),
         original_request_headers: None,
-        response_headers: None,
+        response_headers,
         is_tunnel: false,
         has_rule_hit: record.has_rule_hit.unwrap_or(has_rule_hit),
         matched_rules,
@@ -1037,7 +1050,11 @@ async fn traffic_to_network_record(
         client_app: traffic.client_app.clone(),
         client_path: traffic.client_path.clone(),
         request_headers: traffic.request_headers.clone(),
-        response_headers: traffic.original_response_headers.clone(),
+        response_headers: traffic
+            .response_headers
+            .clone()
+            .or_else(|| traffic.original_response_headers.clone()),
+        original_response_headers: traffic.original_response_headers.clone(),
         request_body,
         response_body,
         duration_ms: traffic.duration_ms,
@@ -1643,6 +1660,7 @@ mod tests {
             client_path: Some("/Applications/Google Chrome.app".to_string()),
             request_headers: None,
             response_headers: None,
+            original_response_headers: None,
             request_body: None,
             response_body: None,
             duration_ms: 78,
@@ -1740,6 +1758,7 @@ example.com proxy://127.0.0.1:8080
                 "content-type".to_string(),
                 "application/json".to_string(),
             )]),
+            original_response_headers: None,
             request_body: Some(r#"{"name":"preview"}"#.to_string()),
             response_body: Some(r#"{"ok":true}"#.to_string()),
             duration_ms: 42,
@@ -1762,6 +1781,14 @@ example.com proxy://127.0.0.1:8080
         let detail = network.single_record.expect("single record detail");
         assert_eq!(detail.record.id, "OUT-REQ-preview");
         assert_eq!(detail.record.host, "api.example.test");
+        assert_eq!(
+            detail.record.original_response_headers,
+            Some(vec![(
+                "content-type".to_string(),
+                "application/json".to_string(),
+            )])
+        );
+        assert!(detail.record.response_headers.is_none());
         assert_eq!(
             detail.request_body.as_deref(),
             Some(r#"{"name":"preview"}"#)
@@ -1791,6 +1818,70 @@ example.com proxy://127.0.0.1:8080
         let requested = vec!["A".to_string()];
 
         validate_network_export_records(&requested, &[], 1).unwrap();
+    }
+
+    #[test]
+    fn network_import_preserves_original_and_delivered_response_headers() {
+        let original = vec![
+            ("content-type".to_string(), "application/json".to_string()),
+            ("connection".to_string(), "keep-alive".to_string()),
+        ];
+        let delivered = vec![("content-type".to_string(), "application/json".to_string())];
+        let record = NetworkRecord {
+            id: "REQ-header-snapshots".to_string(),
+            method: "GET".to_string(),
+            url: "https://example.test/headers".to_string(),
+            status: 200,
+            host: None,
+            path: None,
+            protocol: None,
+            actual_url: None,
+            actual_host: None,
+            listener_port: None,
+            has_rule_hit: Some(false),
+            error_message: None,
+            client_app: None,
+            client_path: None,
+            request_headers: None,
+            response_headers: Some(delivered.clone()),
+            original_response_headers: Some(original.clone()),
+            request_body: None,
+            response_body: None,
+            duration_ms: 1,
+            timestamp: 1,
+            matched_rules: None,
+            active_rules: None,
+        };
+
+        let traffic = network_record_to_traffic_record(&record);
+
+        assert_eq!(traffic.original_response_headers, Some(original));
+        assert_eq!(traffic.response_headers, Some(delivered));
+        assert!(!traffic.has_rule_hit);
+    }
+
+    #[tokio::test]
+    async fn network_export_writes_original_and_delivered_response_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RulesStorage::with_dir(dir.path().to_path_buf()).unwrap();
+        let state = Arc::new(crate::state::AdminState::new_for_test(9900, storage));
+        let original = vec![
+            ("content-type".to_string(), "application/json".to_string()),
+            ("connection".to_string(), "keep-alive".to_string()),
+        ];
+        let delivered = vec![("content-type".to_string(), "application/json".to_string())];
+        let mut traffic = TrafficRecord::new(
+            "REQ-header-export".to_string(),
+            "GET".to_string(),
+            "https://example.test/headers".to_string(),
+        );
+        traffic.original_response_headers = Some(original.clone());
+        traffic.response_headers = Some(delivered.clone());
+
+        let record = traffic_to_network_record(&traffic, false, &state).await;
+
+        assert_eq!(record.original_response_headers, Some(original));
+        assert_eq!(record.response_headers, Some(delivered));
     }
 
     #[tokio::test]
@@ -2167,6 +2258,7 @@ example.com proxy://127.0.0.1:8080
             client_path: None,
             request_headers: None,
             response_headers: None,
+            original_response_headers: None,
             request_body: None,
             response_body: None,
             duration_ms: 0,
@@ -2201,6 +2293,7 @@ example.com proxy://127.0.0.1:8080
             client_path: None,
             request_headers: None,
             response_headers: None,
+            original_response_headers: None,
             request_body: None,
             response_body: None,
             duration_ms: 0,

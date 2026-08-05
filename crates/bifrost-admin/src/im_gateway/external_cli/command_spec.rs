@@ -324,7 +324,6 @@ fn append_codex_config_args(
             generated.push(profile_v2.to_string());
         }
     }
-    append_codex_default_service_tier(&mut generated, config);
     append_repeatable_codex_pairs(&mut generated, "--config", &config.config_overrides);
     append_repeatable_codex_pairs(&mut generated, "--enable", &config.enable_features);
     append_repeatable_codex_pairs(&mut generated, "--disable", &config.disable_features);
@@ -393,21 +392,6 @@ fn effective_codex_danger_full_access(config: &ExternalCliAdapterConfig) -> bool
     config
         .danger_full_access
         .unwrap_or_else(|| config.sandbox.is_none() && config.approval_policy.is_none())
-}
-
-fn append_codex_default_service_tier(
-    generated: &mut Vec<String>,
-    config: &ExternalCliAdapterConfig,
-) {
-    let has_service_tier = config
-        .config_overrides
-        .iter()
-        .any(|value| config_override_key(value) == Some("service_tier"));
-    if has_service_tier {
-        return;
-    }
-    generated.push("--config".to_string());
-    generated.push(format!("service_tier=\"{CODEX_FAST_SERVICE_TIER}\""));
 }
 
 fn config_override_key(value: &str) -> Option<&str> {

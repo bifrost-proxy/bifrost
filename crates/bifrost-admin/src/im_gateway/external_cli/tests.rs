@@ -730,6 +730,9 @@ fn codex_adapter_builds_exec_command_with_prompt_stdin() {
         "--output-last-message",
         "/tmp/last.md"
     ));
+    assert!(!spec.args.windows(2).any(|pair| {
+        pair[0] == "--config" && pair[1].trim_start().starts_with("service_tier=")
+    }));
     assert_eq!(spec.args.last().map(String::as_str), Some("-"));
 }
 
@@ -1209,7 +1212,7 @@ fn codex_session_fast_override_replaces_runner_service_tier() {
 }
 
 #[test]
-fn service_tier_resolution_uses_last_runner_override_then_codex_default() {
+fn service_tier_resolution_uses_last_runner_override_without_bifrost_default() {
     let configured = ExternalCliAdapterConfig {
         config_overrides: vec![
             "service_tier=\"flex\"".to_string(),
@@ -1227,10 +1230,7 @@ fn service_tier_resolution_uses_last_runner_override_then_codex_default() {
     );
     assert_eq!(
         resolve_external_cli_service_tier(DEFAULT_ADAPTER, &ExternalCliAdapterConfig::default()),
-        (
-            Some(CODEX_FAST_SERVICE_TIER.to_string()),
-            Some("Bifrost Codex default".to_string())
-        )
+        (None, None)
     );
     assert_eq!(
         resolve_external_cli_service_tier(TRAEX_ADAPTER, &ExternalCliAdapterConfig::default()),
@@ -1263,8 +1263,8 @@ fn codex_fast_status_formats_fast_standard_custom_and_default_modes() {
     assert!(custom.contains("来源: 配置"));
 
     let unresolved = format_external_cli_fast_status(Some("  "), None, "Codex");
-    assert!(unresolved.contains("未解析到 service tier"));
-    assert!(unresolved.contains("Codex"));
+    assert!(unresolved.contains("未显式设置 service tier"));
+    assert!(unresolved.contains("Codex 自身默认模式"));
 }
 
 #[test]

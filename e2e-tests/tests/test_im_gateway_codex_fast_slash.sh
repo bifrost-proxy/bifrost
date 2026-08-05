@@ -131,6 +131,21 @@ PY
   return 1
 }
 
+assert_codex_exec_count() {
+  local expected="$1"
+  local actual
+  if [[ -f "$CODEX_ARGV_LOG" ]]; then
+    actual="$(grep -c '^exec ' "$CODEX_ARGV_LOG" || true)"
+  else
+    actual=0
+  fi
+  if [[ "$actual" != "$expected" ]]; then
+    echo "[im-codex-fast] expected $expected Codex exec invocation(s), got $actual" >&2
+    [[ -f "$CODEX_ARGV_LOG" ]] && sed -n '1,120p' "$CODEX_ARGV_LOG" >&2 || true
+    return 1
+  fi
+}
+
 MOCK_CODEX="$TEST_DIR/mock-codex"
 MOCK_TRAEX="$TEST_DIR/mock-traex"
 cat >"$MOCK_CODEX" <<'SH'
@@ -263,10 +278,20 @@ for provider_id, owner_id, runner in (
     }, "POST")
 PY
 
+inject "codex-fast-provider" "codex-fast-owner" "codex-default-status" "/fast status"
+wait_for_file_pattern \
+  "$TEST_DIR/admin/im_gateway_message_logs.json" \
+  '未显式设置 service tier'
+assert_codex_exec_count 0
+
+inject "codex-fast-provider" "codex-fast-owner" "codex-default-turn" "run with Codex default tier"
+wait_for_file_pattern "$CODEX_STDIN_LOG" 'run with Codex default tier'
+assert_codex_exec_count 1
+
 inject "codex-fast-provider" "codex-fast-owner" "codex-fast-off" "/fast off"
 wait_for_file_pattern "$TEST_DIR/agent/im_gateway/session_state.json" '"serviceTierOverride": "default"'
 wait_for_file_pattern "$TEST_DIR/admin/im_gateway_message_logs.json" '切换到标准模式'
-[[ ! -e "$CODEX_ARGV_LOG" ]] || [[ ! -s "$CODEX_ARGV_LOG" ]]
+assert_codex_exec_count 1
 
 inject "codex-fast-provider" "codex-fast-owner" "codex-normal-turn" "run in standard mode"
 wait_for_file_pattern "$CODEX_ARGV_LOG" 'service_tier="default"'
@@ -306,11 +331,12 @@ test_dir = pathlib.Path(sys.argv[1])
 all_codex_argv = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()
 codex_stdin = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
 codex_argv = [line for line in all_codex_argv if line.startswith("exec ")]
-assert len(codex_argv) == 4, all_codex_argv
-assert 'service_tier="default"' in codex_argv[0], codex_argv
-assert 'service_tier="fast"' in codex_argv[1], codex_argv
+assert len(codex_argv) == 5, all_codex_argv
+assert "service_tier=" not in codex_argv[0], codex_argv
+assert 'service_tier="default"' in codex_argv[1], codex_argv
 assert 'service_tier="fast"' in codex_argv[2], codex_argv
-assert 'service_tier="default"' in codex_argv[3], codex_argv
+assert 'service_tier="fast"' in codex_argv[3], codex_argv
+assert 'service_tier="default"' in codex_argv[4], codex_argv
 assert "/fast" not in codex_stdin, codex_stdin
 
 state = json.loads(
@@ -335,6 +361,10 @@ outbound = [
 assert any("切换到标准模式" in content for content in outbound), outbound
 assert any("切换到快速模式" in content for content in outbound), outbound
 assert any("使用快速模式" in content for content in outbound), outbound
+assert any(
+    "未显式设置 service tier" in content and "Codex 自身默认模式" in content
+    for content in outbound
+), outbound
 unsupported = [
     content for content in outbound
     if "当前 Runner 不支持 `/fast` 命令" in content

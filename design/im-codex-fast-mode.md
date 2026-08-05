@@ -1,14 +1,13 @@
 # IM Codex Fast 模式切换
 
 > 状态：已实现
-> 目标分支：`codex/im-runner-prompt-passthrough`
 
 ## 背景
 
-Bifrost 的 Codex adapter 当前会为 Exec 与 App Server 请求默认注入
-`service_tier="fast"`，Runner 静态配置也可以通过 `configOverrides`
-覆盖该值。但是 IM 通道没有对应的 session 命令：用户发送 `/fast` 时，
-消息会被当作普通 prompt；Runner 忙碌时还可能被当作实时 guide 注入当前 turn。
+Bifrost 不应替用户决定 Codex 的 service tier。未显式配置或执行 session 命令时，
+Exec 与 App Server 请求都必须省略 `service_tier`，让 Codex 使用自身默认模式。
+Runner 静态配置仍可通过 `configOverrides` 显式设置该值；IM 通道也提供 `/fast`
+session 命令，让用户主动开启、关闭或查询快速模式。
 
 Codex CLI 的交互语义支持 Fast 模式开启、关闭和状态查询。IM Gateway 需要在
 Bifrost 侧实现等价的命令状态机，不能依赖外部 Runner 把 prompt 文本解释成
@@ -23,6 +22,8 @@ CLI slash command。
 - `on` 写入 `service_tier="fast"`；`off` 写入 `service_tier="default"`。
 - session override 在下一轮 Codex Exec 和 App Server 请求中优先于 Runner 静态配置。
 - `/fast status` 展示当前有效模式、service tier 和来源。
+- 未显式配置时 `/fast status` 明确说明 Bifrost 没有设置 tier、将使用 Codex 自身默认模式。
+- 未显式配置时普通 turn 的 Exec 参数和 App Server thread/turn 请求均不携带 service tier。
 - 运行中发送 `/fast ...` 作为系统命令处理，不进入实时 guide 或消息队列。
 
 ### 必须不破坏
@@ -69,7 +70,7 @@ CLI slash command。
 
 1. 当前 session slash command override；
 2. Runner `adapterConfig.configOverrides` 中的 `service_tier`；
-3. Bifrost Codex adapter 默认值 `fast`。
+3. 未显式配置时不传 `service_tier`，使用 Codex 自身默认模式。
 
 应用 session override 时先移除请求中已有的 `service_tier` config override，再写入
 session 值，避免 App Server 与 Exec 使用列表中较早的 Runner 值。
@@ -80,8 +81,8 @@ session 值，避免 App Server 与 Exec 使用列表中较早的 Runner 值。
 
 - parser：toggle/on/off/status、大小写、非法参数和 `/fastish` 边界。
 - session override：静态 `fast` 被 session `default` 覆盖，来源正确。
-- command spec：Exec 使用 session tier。
-- App Server：thread/start、thread/resume、turn/start 使用 session tier。
+- command spec：默认 Exec 不注入 tier；显式 session tier 正确生效。
+- App Server：默认启动参数、thread/start、thread/resume、turn/start 均省略 tier；显式 session tier 正确生效。
 - group classification：`/fast` 合法与非法形式均走系统命令路径。
 - help：仅 Codex Runner 展示 `/fast`。
 
@@ -89,13 +90,14 @@ session 值，避免 App Server 与 Exec 使用列表中较早的 Runner 值。
 
 扩展 IM Gateway 外部 Runner shell E2E：
 
-1. 配置 mock Codex adapter，发送 `/fast status`，确认命令不执行 Runner。
-2. 发送 `/fast off` 后发送普通消息，从 mock Runner argv 确认
+1. 配置 mock Codex adapter，发送 `/fast status`，确认提示“未显式设置”且命令不执行 Runner。
+2. 发送普通消息，从 mock Runner argv 确认没有 `service_tier`。
+3. 发送 `/fast off` 后发送普通消息，从 mock Runner argv 确认
    `service_tier="default"`。
-3. 发送 `/fast on` 后再次运行，确认 `service_tier="fast"`。
-4. 在任务运行中发送 `/fast off` 并用 `/q` 排队下一轮，确认命令不进入 guide，
+4. 发送 `/fast on` 后再次运行，确认 `service_tier="fast"`。
+5. 在任务运行中发送 `/fast off` 并用 `/q` 排队下一轮，确认命令不进入 guide，
    且排队轮读取最新 session 状态并使用 `service_tier="default"`。
-5. 切换非 Codex mock Runner，确认 `/fast` 返回不支持且 Runner 不执行。
+6. 切换非 Codex mock Runner，确认 `/fast` 返回不支持且 Runner 不执行。
 
 ### human_tests
 

@@ -676,7 +676,51 @@ test("切换页面后保留已加载流量并持续接收 push", async ({ page, 
   }
 });
 
-test("Header 仅在存在差异时显示切换", async ({ page, request }) => {
+test("无规则时把 hop-by-hop 响应头标为协议处理", async ({ page, request }) => {
+  await clearTraffic(request);
+  const token = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const path = `/header-protocol-${token}`;
+  const networkFile = `01 network
+
+[meta]
+name = "header-protocol-${token}"
+version = "1.0.0"
+created_at = "2026-08-05T00:00:00Z"
+
+---
+[{"id":"REQ-${token}","method":"GET","url":"https://example.test${path}","status":200,"has_rule_hit":false,"response_headers":[["content-type","application/json"]],"original_response_headers":[["content-type","application/json"],["connection","keep-alive"]],"duration_ms":1,"timestamp":1785900000000}]
+`;
+  const importResponse = await request.post(`${apiBase}/bifrost-file/import`, {
+    data: networkFile,
+    headers: { "Content-Type": "text/plain" },
+  });
+  expect(importResponse.ok()).toBeTruthy();
+
+  await page.goto("/_bifrost/traffic");
+  const row = page.getByTestId("traffic-row").filter({ hasText: path }).first();
+  await expect(row).toBeVisible();
+  await row.click();
+  await page.getByTestId("response-tab-header").click();
+
+  await expect(page.getByTestId("response-header-view-tab-current").locator("xpath=ancestor::label")).toHaveText("Sent to client");
+  await expect(page.getByTestId("response-header-view-tab-original").locator("xpath=ancestor::label")).toHaveText("Upstream original");
+  await expect(page.getByTestId("response-header-view-configured-summary")).toHaveText("Configured changes: 0");
+  await expect(page.getByTestId("response-header-view-protocol-summary")).toHaveText("Protocol handling: 1");
+
+  const protocolBadge = page.getByTestId("response-header-view-protocol-badge");
+  await expect(protocolBadge).toHaveText("Protocol handling");
+  const connectionRow = page.locator("tr", { hasText: "connection" });
+  await expect(connectionRow).toBeVisible();
+  expect(await connectionRow.locator("td").first().evaluate((element) => getComputedStyle(element).textDecorationLine)).not.toContain("line-through");
+  await protocolBadge.hover();
+  await expect(page.getByRole("tooltip")).toContainText("No rule, script, or breakpoint change is implied.");
+
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(protocolBadge).toBeVisible();
+});
+
+test("Header 仅在存在差异时显示方向与来源", async ({ page, request }) => {
   await clearTraffic(request);
   const server = await startMockServer();
   const token = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
@@ -708,8 +752,9 @@ test("Header 仅在存在差异时显示切换", async ({ page, request }) => {
 
     await page.getByTestId("response-tab-header").click();
     await expect(page.getByTestId("response-header-view-mode-tabs")).toBeVisible();
-    await expect(page.getByTestId("response-header-view-tab-current")).toHaveCount(1);
-    await expect(page.getByTestId("response-header-view-tab-original")).toHaveCount(1);
+    await expect(page.getByTestId("response-header-view-tab-current").locator("xpath=ancestor::label")).toHaveText("Sent to client");
+    await expect(page.getByTestId("response-header-view-tab-original").locator("xpath=ancestor::label")).toHaveText("Upstream original");
+    await expect(page.getByTestId("response-header-view-configured-summary")).toContainText("Configured changes: 1");
   } finally {
     await request.delete(`${apiBase}/rules/${encodeURIComponent(ruleName)}`);
     await server.close();
