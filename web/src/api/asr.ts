@@ -2068,7 +2068,7 @@ export async function updateDailyAgentInstructions(
 export async function triggerDailyAgentRun(
   taskId: string,
   options?: { force?: boolean; date?: string; agentId?: string },
-): Promise<{ status: string; message: string }> {
+): Promise<{ status: "queued" | "already_running"; message: string }> {
   const params = new URLSearchParams();
   if (options?.force) params.set("force", "1");
   if (options?.date) params.set("date", options.date);

@@ -423,9 +423,14 @@ export default function DirectoryTaskDetailPage({
       setDailyAgentRunDate(date);
       try {
         const result = await triggerDailyAgentRun(taskDetail.id, {
+          force: true,
           date,
           agentId,
         });
+        if (result.status === "already_running") {
+          message.warning(result.message || "A Daily Agent run is already in progress");
+          return;
+        }
         message.success(
           result.message ||
             (agentId

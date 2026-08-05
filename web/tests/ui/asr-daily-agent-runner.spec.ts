@@ -50,6 +50,13 @@ function taskDetail() {
       running: false,
     },
     files: [],
+    daily_agent: {
+      enabled: true,
+      agents: [
+        { id: "daily_report", name: "daily_report", enabled: true },
+        { id: "tomorrow_todo", name: "tomorrow_todo", enabled: true },
+      ],
+    },
     daily_documents: [
       {
         date: reportDate,
@@ -70,6 +77,15 @@ function taskDetail() {
 }
 
 async function installDailyAgentMocks(page: Page) {
+  await page.addLocatorHandler(
+    page.getByRole("dialog").filter({
+      hasText: "Install Bifrost CA profile on connected iPhone?",
+    }),
+    async (dialog) => {
+      await dialog.getByRole("button", { name: "Not now" }).click();
+    },
+  );
+
   let dailyAgentConfig = {
     enabled: false,
     runner: "codex",
@@ -120,6 +136,32 @@ async function installDailyAgentMocks(page: Page) {
   };
   const updates: Array<Record<string, unknown>> = [];
   const runRequests: string[] = [];
+  let runResponse: { status: "queued" | "already_running"; message: string } = {
+    status: "queued",
+    message: "Daily Agent run queued",
+  };
+
+  await page.route("**/_bifrost/api/mobile-devices", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        android: { adb_available: false, devices: [], message: "mocked" },
+        ios: {
+          supported: false,
+          devices: [],
+          configurator: {
+            supported: false,
+            cfgutil_available: false,
+            message: "mocked",
+          },
+          message: "mocked",
+        },
+        ios_profile_url: "",
+        ios_profile_qrcode_url: "",
+      }),
+    });
+  });
 
   await page.route("**/_bifrost/api/asr/status**", async (route) => {
     await route.fulfill({
@@ -169,10 +211,7 @@ async function installDailyAgentMocks(page: Page) {
     await route.fulfill({
       status: 202,
       contentType: "application/json",
-      body: JSON.stringify({
-        status: "queued",
-        message: "Daily Agent run queued",
-      }),
+      body: JSON.stringify(runResponse),
     });
   });
 
@@ -432,7 +471,13 @@ async function installDailyAgentMocks(page: Page) {
     });
   });
 
-  return { updates, runRequests };
+  return {
+    updates,
+    runRequests,
+    setRunResponse(response: typeof runResponse) {
+      runResponse = response;
+    },
+  };
 }
 
 function waitForDailyAgentConfigReload(page: Page) {
@@ -666,8 +711,10 @@ test("ASR Daily Agent opens processed reports as full-page Markdown details", as
   ).toHaveAttribute("aria-selected", "true");
 });
 
-test("ASR Daily Docs row can run Daily Agent for one document", async ({ page }) => {
-  const { runRequests } = await installDailyAgentMocks(page);
+test("ASR Daily Docs row force reruns all or one Agent and warns when busy", async ({
+  page,
+}) => {
+  const { runRequests, setRunResponse } = await installDailyAgentMocks(page);
 
   await openPage(page, `ai?aiSection=tools-asr&asrTask=${taskId}&asrTaskTab=daily`);
   await expect(page.getByRole("tab", { name: /Daily Docs/ })).toHaveAttribute(
@@ -675,14 +722,38 @@ test("ASR Daily Docs row can run Daily Agent for one document", async ({ page })
     "true",
   );
 
-  await page.getByTestId(`asr-daily-doc-run-agent-${reportDate}`).click();
+  const runButton = page.getByTestId(`asr-daily-doc-run-agent-${reportDate}`);
+  await runButton.locator("button").first().click();
   await waitForToast(page, "Daily Agent run queued");
 
   expect(runRequests).toHaveLength(1);
   const runUrl = new URL(runRequests[0]);
   expect(runUrl.pathname).toBe(`/_bifrost/api/asr/tasks/${taskId}/daily-agent/run`);
   expect(runUrl.searchParams.get("date")).toBe(reportDate);
-  expect(runUrl.searchParams.has("force")).toBe(false);
+  expect(runUrl.searchParams.get("force")).toBe("1");
+  expect(runUrl.searchParams.has("agent_id")).toBe(false);
+
+  await runButton.locator("button").last().click();
+  await page.getByRole("menuitem", { name: "Run daily_report", exact: true }).click();
+  await waitForToast(page, "Daily Agent run queued");
+
+  expect(runRequests).toHaveLength(2);
+  const selectedAgentRunUrl = new URL(runRequests[1]);
+  expect(selectedAgentRunUrl.searchParams.get("date")).toBe(reportDate);
+  expect(selectedAgentRunUrl.searchParams.get("agent_id")).toBe("daily_report");
+  expect(selectedAgentRunUrl.searchParams.get("force")).toBe("1");
+
+  setRunResponse({
+    status: "already_running",
+    message: "Daily Agent run is already in progress",
+  });
+  await runButton.locator("button").first().click();
+  await waitForToast(page, "Daily Agent run is already in progress");
+  await expect(
+    page.locator(".ant-message-warning").filter({
+      hasText: "Daily Agent run is already in progress",
+    }),
+  ).toBeVisible();
 
   await page.getByRole("button", { name: "Open document" }).first().click();
   await expect(page).toHaveURL(new RegExp(`asrDay=${reportDate}`));
