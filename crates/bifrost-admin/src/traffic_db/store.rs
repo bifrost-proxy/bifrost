@@ -2576,8 +2576,6 @@ mod tests {
         let dir = create_test_dir();
         {
             let store = TrafficDbStore::new(dir.clone(), 1_000, 0, None).unwrap();
-            assert!(!store.update_by_id("stats-missing", |_| {}));
-
             let mut first = TrafficRecord::new(
                 "stats-1".to_string(),
                 "GET".to_string(),
@@ -2632,6 +2630,75 @@ mod tests {
         assert!(snapshot.applications.is_empty());
         assert!(snapshot.client_ips.is_empty());
         assert!(snapshot.domains.is_empty());
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn test_statistics_stay_unchanged_when_single_insert_fails() {
+        let dir = create_test_dir();
+        let store = TrafficDbStore::new(dir.clone(), 1_000, 0, None).unwrap();
+        store
+            .write_conn
+            .lock()
+            .execute_batch("DROP TABLE traffic_records")
+            .unwrap();
+
+        let record = TrafficRecord::new(
+            "stats-failed-insert".to_string(),
+            "GET".to_string(),
+            "https://failed.test/single".to_string(),
+        );
+        store.record(record);
+
+        assert_eq!(store.count(), 0);
+        assert_eq!(store.traffic_statistics().total_requests, 0);
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn test_statistics_stay_unchanged_when_batch_insert_fails() {
+        let dir = create_test_dir();
+        let store = TrafficDbStore::new(dir.clone(), 1_000, 0, None).unwrap();
+        store
+            .write_conn
+            .lock()
+            .execute_batch("DROP TABLE traffic_records")
+            .unwrap();
+
+        let record = TrafficRecord::new(
+            "stats-failed-batch".to_string(),
+            "GET".to_string(),
+            "https://failed.test/batch".to_string(),
+        );
+        store.record_batch(vec![record]);
+
+        assert_eq!(store.count(), 0);
+        assert_eq!(store.traffic_statistics().total_requests, 0);
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn test_statistics_stay_unchanged_when_record_disappears_before_update() {
+        let dir = create_test_dir();
+        let store = TrafficDbStore::new(dir.clone(), 1_000, 0, None).unwrap();
+        let record = TrafficRecord::new(
+            "stats-disappearing-update".to_string(),
+            "GET".to_string(),
+            "https://failed.test/update".to_string(),
+        );
+        store.record(record);
+
+        assert!(!store.update_by_id("stats-disappearing-update", |_| {
+            store
+                .write_conn
+                .lock()
+                .execute(
+                    "DELETE FROM traffic_records WHERE id = ?1",
+                    ["stats-disappearing-update"],
+                )
+                .unwrap();
+        }));
 
         cleanup_test_dir(&dir);
     }
