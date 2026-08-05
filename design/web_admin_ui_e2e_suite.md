@@ -14,7 +14,7 @@ Bifrost Web Admin 早期 E2E 只覆盖少量 JSON 场景，浏览器侧几乎没
   - `admin-settings.spec.ts`
   - `pending-auth-modal.spec.ts`
   - `rules-dynamic-island-global.spec.ts`
-  - `notifications.spec.ts` / `breakpoint-ui.spec.ts` / `curl-parse.spec.ts` / `file-access-roots.spec.ts` / `im-gateway-provider.spec.ts` / `videos-tool.spec.ts` / `voice-wake-actions.spec.ts` / `asr-*.spec.ts` / `agent-*.spec.ts` / `ai-skill-assistant.spec.ts`
+  - `notifications.spec.ts` / `breakpoint-ui.spec.ts` / `curl-parse.spec.ts` / `file-access-roots.spec.ts` / `im-gateway-provider.spec.ts` / `voice-wake-actions.spec.ts` / `asr-*.spec.ts` / `agent-*.spec.ts` / `ai-skill-assistant.spec.ts`
 - 运行器：`web/playwright.config.ts` 通过 `tests/ui/helpers/test-env.ts` 的 `allocateUiTestEnv()` 自动分配 backend/web 端口、临时 `BIFROST_DATA_DIR`、运行目录与 PID 文件；前端由 Playwright `webServer` 拉起 `pnpm exec vite --host 127.0.0.1 --port <WEB_PORT>`。
 - 入口脚本：`web/package.json` 暴露 `pnpm test:ui` / `pnpm test:ui:headed`。
 - CI：`.github/workflows/ci.yml` 的 `e2e-shell` / `e2e-macos-shell` / `e2e-windows-shell` 等 job 通过 `scripts/ci/run-e2e-shell.sh` 拉起 Playwright，缓存 `~/.cache/ms-playwright`。
@@ -260,7 +260,7 @@ E2E 主要通过 Admin API 直接写入 / 断言状态，不新增 API/CLI 语�
 - `web/tests/ui/admin-settings.spec.ts`（含 TLS 白名单重连提示用例）
 - `web/tests/ui/pending-auth-modal.spec.ts`
 - `web/tests/ui/rules-dynamic-island-global.spec.ts`
-- `web/tests/ui/breakpoint-ui.spec.ts` / `curl-parse.spec.ts` / `file-access-roots.spec.ts` / `im-gateway-provider.spec.ts` / `notifications.spec.ts` / `videos-tool.spec.ts` / `voice-wake-actions.spec.ts` / `asr-*.spec.ts` / `agent-*.spec.ts` / `ai-skill-assistant.spec.ts`
+- `web/tests/ui/breakpoint-ui.spec.ts` / `curl-parse.spec.ts` / `file-access-roots.spec.ts` / `im-gateway-provider.spec.ts` / `notifications.spec.ts` / `voice-wake-actions.spec.ts` / `asr-*.spec.ts` / `agent-*.spec.ts` / `ai-skill-assistant.spec.ts`
 
 ### 环境约束
 

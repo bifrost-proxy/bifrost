@@ -1,6 +1,6 @@
 import { formatRunnerOptionLabel, type RunnerConfigPayload, type RunnerOption } from "./AgentChatSection.helpers";
 
-export type AiMainView = "chat" | "asr" | "im" | "videos" | "settings";
+export type AiMainView = "chat" | "asr" | "im" | "settings";
 export type AiChatMode = "new" | "thread";
 export type AiSettingsTarget = "agent" | "im" | "chat" | null;
 
@@ -12,7 +12,7 @@ export type AiRouteState = {
   imGatewaySection?: string;
 };
 
-const MAIN_VIEWS = new Set<AiMainView>(["chat", "asr", "im", "videos", "settings"]);
+const MAIN_VIEWS = new Set<AiMainView>(["chat", "asr", "im", "settings"]);
 
 export function resolveAiRouteState(params: URLSearchParams): AiRouteState {
   const legacyAiSection = params.get("aiSection");
@@ -28,8 +28,6 @@ export function resolveAiRouteState(params: URLSearchParams): AiRouteState {
   if (legacyAiSection) {
     if (legacyAiSection === "tools-asr") {
       view = "asr";
-    } else if (legacyAiSection === "tools-videos") {
-      view = "videos";
     } else if (legacyAiSection.startsWith("im-gateway-")) {
       view = "im";
       imGatewaySection ||= legacyAiSection.slice("im-gateway-".length);

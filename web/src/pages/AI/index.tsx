@@ -8,12 +8,10 @@ import {
   SendOutlined,
   SettingOutlined,
   SoundOutlined,
-  VideoCameraOutlined,
 } from "@ant-design/icons";
 import AgentTab from "../Settings/tabs/AgentTab";
 import ImGatewayTab from "../Settings/tabs/ImGatewayTab";
 import ASR from "../ASR";
-import VideosTool from "./VideosTool";
 import { getAsrCapabilities } from "../../api/asr";
 import AgentChatSection, {
   type AgentChatSectionHandle,
@@ -579,14 +577,6 @@ export default function AI() {
               () => setMainView("im"),
               "ai-nav-im",
             )}
-            {navButton(
-              "videos",
-              "Videos",
-              <VideoCameraOutlined />,
-              routeState.view === "videos",
-              () => setMainView("videos"),
-              "ai-nav-tools-videos",
-            )}
           </div>
           <div
             style={{
@@ -825,13 +815,6 @@ export default function AI() {
             <div data-testid="ai-im-content" style={contentTrackStyle}>
               <div data-testid="ai-im-track" style={workbenchTrackInnerStyle}>
                 <ImGatewayTab hideSectionNav cardGrid />
-              </div>
-            </div>
-          ) : null}
-          {routeState.view === "videos" ? (
-            <div data-testid="ai-videos-content" style={contentTrackStyle}>
-              <div data-testid="ai-videos-track" style={workbenchTrackInnerStyle}>
-                <VideosTool embedded />
               </div>
             </div>
           ) : null}

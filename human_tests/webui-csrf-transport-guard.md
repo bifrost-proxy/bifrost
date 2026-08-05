@@ -38,17 +38,17 @@ Web UI 所有浏览器来源的写接口（POST/PUT/PATCH/DELETE）必须携带 
 
 **操作步骤**：
 
-1. 在任意非白名单文件（如 `web/src/api/videos.ts`）临时首行插入 `import axios from 'axios';`。
+1. 在任意非白名单文件（如 `web/src/api/asr.ts`）临时首行插入 `import axios from 'axios';`。
 2. 执行：
    ```bash
-   source ~/.zshrc && cd web && npx eslint src/api/videos.ts
+   source ~/.zshrc && cd web && npx eslint src/api/asr.ts
    ```
-3. 还原该文件（`git checkout -- src/api/videos.ts`）。
+3. 还原该文件（`git checkout -- src/api/asr.ts`）。
 
 **预期结果**：
 
 - 报 `no-restricted-imports` error，提示信息包含 `Use apiFetch ... or the shared client ... so X-Bifrost-CSRF is injected`。
-- 还原后 `git status --short src/api/videos.ts` 为空。
+- 还原后 `git status --short src/api/asr.ts` 为空。
 
 ### TC-CSRF-GUARD-03：白名单文件 `client.ts` 不被误伤
 
@@ -97,7 +97,7 @@ Web UI 所有浏览器来源的写接口（POST/PUT/PATCH/DELETE）必须携带 
 
 ## 清理步骤
 
-- TC-CSRF-GUARD-02 修改的文件必须还原（`git checkout -- web/src/api/videos.ts`）。
+- TC-CSRF-GUARD-02 修改的文件必须还原（`git checkout -- web/src/api/asr.ts`）。
 - 本用例不启动服务，无需清理数据目录。
 
 ## 本次执行结果

@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 WebUI AI 页面改造后的真实用户路径：进入 `/ai` 默认展示新建对话输入态，左侧提供 `New Chat`、`ASR`、`Videos`、`IM`、线程列表和底部 Settings，右侧根据入口展示新对话、历史对话、ASR 工作台、Videos Tool、IM 工作台或 Settings 二级内容页。Runner 选择必须位于新对话输入面板底部工具栏的“高级/Runner”位置，默认使用 Codex Runner，并能切换到后端已启用的其它 runner。Settings 只能承载原 AI 左侧菜单中的配置项，顶部只合并为 `Agent`、`Runner`、`IM` 三个 tab，配置项在各自 tab 内以卡片方式向下平铺；对话状态、`Back`、`Session Detail`、`Messages` 等会话级信息必须留在具体对话页的头部操作或弹窗中。
+验证 WebUI AI 页面改造后的真实用户路径：进入 `/ai` 默认展示新建对话输入态，左侧提供 `New Chat`、`ASR`、`IM`、线程列表和底部 Settings，右侧根据入口展示新对话、历史对话、ASR 工作台、IM 工作台或 Settings 二级内容页。已下线的 Videos Tool 不再出现在导航中，旧 `view=videos` / `aiSection=tools-videos` 深链安全回退到 New Chat。Runner 选择必须位于新对话输入面板底部工具栏的“高级/Runner”位置，默认使用 Codex Runner，并能切换到后端已启用的其它 runner。Settings 只能承载原 AI 左侧菜单中的配置项，顶部只合并为 `Agent`、`Runner`、`IM` 三个 tab，配置项在各自 tab 内以卡片方式向下平铺；对话状态、`Back`、`Session Detail`、`Messages` 等会话级信息必须留在具体对话页的头部操作或弹窗中。
 
 ## 前置条件
 
@@ -130,7 +130,7 @@
 - `imGatewaySection=connections|targets|routes|schedules|history` 深链继续生效。
 - IM Connections 以响应式卡片网格展示 Provider，不再是过窄单列；桌面下至少可以多列排布，窄屏下收敛为单列。
 - IM 内容区使用比 Settings 更窄的工作台阅读轨道，桌面宽屏下宽度上限约 920px，并在 AI 右侧主内容区水平居中，不能铺满右侧区域。
-- IM 内容顶部与 ASR、Videos、历史消息线程、Settings 保持一致留白，不能贴住 AI 右侧顶部。
+- IM 内容顶部与 ASR、历史消息线程、Settings 保持一致留白，不能贴住 AI 右侧顶部。
 - 刷新后仍停留在对应 IM section。
 - 左侧线程列表仍保留，不被 IM 内容挤出或覆盖。
 
@@ -157,7 +157,7 @@
 - `IM` tab 下以卡片方式纵向平铺 Targets、Routes、Schedules、History 等 IM Gateway 配置。
 - `IM` tab 下不展示 Connections Provider 卡片网格；Provider 连接配置统一由左侧主入口 `IM` 工作台承载。
 - Settings 内容轨道不应撑满整个右侧主内容区；桌面宽屏下宽度上限约 1120px，并在右侧主内容区水平居中。
-- Settings 顶部留白与 ASR、IM、Videos、历史消息线程一致，不能贴住 AI 右侧顶部。
+- Settings 顶部留白与 ASR、IM、历史消息线程一致，不能贴住 AI 右侧顶部。
 - Settings 顶部不能显示 Chat tab。
 - Settings 不能显示 `Back` 按钮、`Session Detail`、`Messages` 等会话详情内容。
 - 从历史对话进入 Settings 后，URL 中的 `session`、`historyPath`、`mode` 会话状态被清理，不会污染 Settings 内容。
@@ -173,6 +173,7 @@
 2. 打开旧 Agent Model 链接：`/_bifrost/ai?aiSection=agent-model&agentSection=model`。
 3. 打开旧 ASR 链接：`/_bifrost/ai?aiSection=tools-asr`。
 4. 打开旧 IM Routes 链接：`/_bifrost/ai?aiSection=im-gateway-routes&imGatewaySection=routes`。
+5. 打开已下线的 Videos 链接：`/_bifrost/ai?view=videos` 与 `/_bifrost/ai?aiSection=tools-videos`。
 
 预期结果：
 
@@ -210,15 +211,12 @@
 3. 再次点击左侧 Settings。
 4. 点击左侧 `IM`。
 5. 再次点击左侧 Settings。
-6. 点击左侧 `Videos`。
-7. 再次点击左侧 Settings。
-8. 点击左侧 `New Chat`。
+6. 点击左侧 `New Chat`。
 
 预期结果：
 
 - 从 Settings 点击 `ASR` 后，URL 切到 `view=asr`，删除 `settings` 参数，右侧显示 ASR 工作台。
 - 从 Settings 点击 `IM` 后，URL 切到 `view=im`，删除 `settings` 参数，右侧显示 IM 工作台。
-- 从 Settings 点击 `Videos` 后，URL 切到 `view=videos`，删除 `settings` 参数，右侧显示 Videos Tool。
 - 从 Settings 点击 `New Chat` 后，URL 切到 `view=chat&mode=new`，删除 `settings` 参数，右侧显示新建对话输入态。
 - 任一主入口点击后都不能继续显示 `ai-settings-content`，也不能被旧的 `agentSection` / `imGatewaySection` 参数拉回 Settings。
 
@@ -230,16 +228,15 @@
 2. 记录历史消息线程内容区顶部与 AI 右侧主内容区顶部的距离。
 3. 点击左侧 `ASR`，记录 ASR 内容轨道顶部距离与宽度。
 4. 点击左侧 `IM`，记录 IM 内容轨道顶部距离、宽度和 Provider 卡片网格。
-5. 点击左侧 `Videos`，记录 Videos 内容轨道顶部距离与宽度。
-6. 点击左侧 `Settings`，分别切换 `Agent`、`Runner`、`IM`，记录内容轨道顶部距离与宽度。
+5. 点击左侧 `Settings`，分别切换 `Agent`、`Runner`、`IM`，记录内容轨道顶部距离与宽度。
 
 预期结果：
 
 - 历史消息线程顶部不贴住 AI 右侧顶部，conversation header 从统一留白后开始。
-- ASR、IM、Videos、Settings 内容轨道顶部留白一致，桌面下约 24px。
-- ASR、IM、Videos 使用工作台阅读轨道，桌面宽屏下最大宽度约 920px；Settings 配置页保留较宽配置轨道，最大宽度约 1120px；这些轨道都必须在右侧主内容区水平居中。
+- ASR、IM、Settings 内容轨道顶部留白一致，桌面下约 24px。
+- ASR、IM 使用工作台阅读轨道，桌面宽屏下最大宽度约 920px；Settings 配置页保留较宽配置轨道，最大宽度约 1120px；这些轨道都必须在右侧主内容区水平居中。
 - IM 工作入口的 Connections Provider 区域使用 CSS grid 布局；桌面宽度下多个 Provider 可以并排展示，窄屏下自动变为单列。Settings 的 IM 分组不再重复展示 Connections Provider 卡片。
-- Videos 工具不再额外叠加一圈导致顶部或左右间距明显大于其它页面。
+- Videos 导航按钮和内容轨道均不存在。
 
 ### TC-AILR-12 运行中队列消息紧凑展示
 
@@ -351,6 +348,8 @@
 
 执行明细：
 
+- 2026-08-05：下线 Videos Tool 后执行 `pnpm --dir web exec playwright test tests/ui/ai-layout-redesign.spec.ts --grep "removes Videos|left rail switches|Settings does not trap" --workers=1`，结果 `3 passed`。亮色/暗色主题均无 Videos 导航和页面，`view=videos` / `aiSection=tools-videos` 回退到 New Chat；ASR、IM、Settings、New Chat 与历史线程切换继续通过。
+
 | 用例 | 实际结果 |
 | --- | --- |
 | TC-AILR-01 | 通过。打开 `/ai` 后左侧 `New Chat` 为 `aria-current=true`，线程列表可见且没有选中线程，右侧 AI Shell 显示 `How can Bifrost help?` 与居中输入面板；Playwright 断言侧栏宽度在 `210-230px`、输入面板高度在 `110-140px`、圆角大于等于 `16px`，并验证 textarea 位于底部工具栏上方，Runner 与发送按钮都在同一工具栏内，未进入 Agent General/Model 配置页。 |
@@ -360,10 +359,10 @@
 | TC-AILR-05 | 通过。ASR capability mock 为可用，左侧展示 `ASR`；点击后 URL 包含 `view=asr`，右侧渲染 ASR 工作台，不打开 Settings 二级内容页。 |
 | TC-AILR-06 | 通过。点击 `IM` 后 URL 包含 `view=im`，右侧渲染 IM Gateway 工作台；旧 `imGatewaySection=routes` 深链可直接显示 Routes section；Connections Provider 使用 CSS grid 响应式卡片网格，mock 的 `feishu-main` 与 `weixin-main` Provider 卡片可见；工作台内容轨道最大宽度不超过约 920px、水平居中且顶部留白与 ASR 一致。 |
 | TC-AILR-07 | 通过。点击底部 Settings 后 URL 包含 `view=settings`，右侧显示 `ai-settings-content`；顶部配置 tabs 只有 `Agent`、`Runner`、`IM` 三个入口。默认 Agent 分组可见并平铺 General、Model、Runtime、MCP Servers 等配置卡片；Settings 内容轨道宽度不超过约 1120px、在右侧主内容区居中且顶部留白一致；Runner 分组仅展示 Runners 配置卡片且不再显示 Agent General；IM 分组平铺 Targets、Routes、Schedules、History 等配置卡片，不再展示 Connections Provider 卡片网格，Provider 连接配置由左侧主入口 IM 工作台承载。Chat tab 不存在，`Back`、`Session Detail`、`Messages` 不存在。从历史对话点击 Settings 后 URL 清理 `session=history-thread-1`；切换 Runner 后 URL 包含 `settings=agent&agentSection=runners`，切换 IM 后 URL 包含 `settings=im&imGatewaySection=targets`。 |
-| TC-AILR-08 | 通过。旧 `agent-chat`、`agent-model`、`tools-asr`、`im-gateway-routes` 链接均进入新 AI Shell 对应视图或 Settings 二级内容页，无空白页和无限跳转；旧 Agent Model 链接进入 Agent 分组并展示 Model 配置卡片；`settings=agent&agentSection=chat&session=...` 被归一化为 Settings Agent General，不展示 Chat 或会话详情。 |
+| TC-AILR-08 | 通过。旧 `agent-chat`、`agent-model`、`tools-asr`、`im-gateway-routes` 链接均进入新 AI Shell 对应视图或 Settings 二级内容页；已下线的 `view=videos` 与 `aiSection=tools-videos` 均安全回退到 New Chat，无空白页和无限跳转；旧 Agent Model 链接进入 Agent 分组并展示 Model 配置卡片；`settings=agent&agentSection=chat&session=...` 被归一化为 Settings Agent General，不展示 Chat 或会话详情。 |
 | TC-AILR-09 | 通过。分别在 `768x900` 与 `390x844` viewport 打开 `/ai`，New Chat、Runner 下拉和 Settings 二级内容页均可操作；`document.documentElement.scrollWidth <= window.innerWidth + 1`，未发现非预期横向滚动。 |
-| TC-AILR-10 | 通过。从 `view=settings&settings=agent&agentSection=model` 进入 Settings 后，依次点击左侧 ASR、IM、Videos、New Chat 和历史线程，Playwright 断言 URL 分别切到 `view=asr`、`view=im`、`view=videos`、`view=chat&mode=new`、`view=chat&session=history-thread-1`，均删除 `settings` 参数，不再显示 `ai-settings-content`，并展示对应主内容。 |
-| TC-AILR-11 | 通过。Playwright 断言 ASR、IM、Videos 的工作台内容轨道顶部距离为约 `24px`、宽度不超过约 `920px` 且明显窄于右侧主内容区；Settings 配置轨道宽度不超过约 `1120px`；所有轨道都在 AI 右侧主内容区内水平居中。历史消息线程顶部不吸顶，Chat header 和消息区从统一留白后开始；IM 工作入口 Connections 使用 `settings-im-card-grid` CSS grid，Settings IM 不再重复展示 Connections；Videos 嵌入 AI Shell 时不再叠加自身额外 padding。 |
+| TC-AILR-10 | 通过。从 `view=settings&settings=agent&agentSection=model` 进入 Settings 后，依次点击左侧 ASR、IM、New Chat 和历史线程，Playwright 断言 URL 分别切到 `view=asr`、`view=im`、`view=chat&mode=new`、`view=chat&session=history-thread-1`，均删除 `settings` 参数，不再显示 `ai-settings-content`，并展示对应主内容。 |
+| TC-AILR-11 | 通过。Playwright 断言 ASR、IM 的工作台内容轨道顶部距离为约 `24px`、宽度不超过约 `920px` 且明显窄于右侧主内容区；Settings 配置轨道宽度不超过约 `1120px`；所有轨道都在 AI 右侧主内容区内水平居中。历史消息线程顶部不吸顶，Chat header 和消息区从统一留白后开始；IM 工作入口 Connections 使用 `settings-im-card-grid` CSS grid，Settings IM 不再重复展示 Connections；Videos 导航和内容轨道不存在。 |
 | TC-AILR-12 | 通过。Playwright 在运行中对话里 mock 4 条队列消息，断言 `agent-chat-queue-list` 高度不超过两条消息空间、`scrollHeight > clientHeight` 且 `overflowY=auto`；第一条长消息右侧删除按钮位于同一队列行内并在文本之后，没有换行；删除第一条后按钮消失，其余队列消息仍保留在紧凑滚动区域。 |
 | TC-AILR-13 | 通过。Playwright mock `/agent/sessions/history/<path>` 完整返回 old/middle/latest 事件，断言首次请求不包含 `tail`、`cursor`、`limit`，页面立即展示 `Oldest question`、`Middle answer`、`Newest answer`，且 `agent-chat-load-older` 不出现；运行中 timeline 回归同时断言增量追加后 `Previous question`、`Previous answer` 仍保留。 |
 | TC-AILR-14 | 通过。Playwright mock 包含 assistant delta、tool_call、tool_result、final assistant message 的 timeline，断言完成轮次折叠时显示 `IM timeline answer` 且不显示中间过程；展开后过程文本按顺序出现，process block 不再显示额外的外层全局执行摘要或 `Expand execution process`，命令组摘要直接以 `已运行 1 条命令` 的轻量单行展示；展开命令组后可见 `exec_command`、`pnpm test` 和 `ok`。3000 端口真实线程复查同样确认运行中长过程按正文 + 命令摘要穿插展示，页面内不再出现 `条执行中`。 |
