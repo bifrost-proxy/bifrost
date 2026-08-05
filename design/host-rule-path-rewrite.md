@@ -25,6 +25,7 @@ https://internal.example.test/labor_cost/static/__webpack_hmr http://localhost:9
 - Query string 保留原样。
 - 源 pattern path 必须来自“真正生效的 host 规则”，不是倒序扫的最后一条。
 - HTTP forwarding、HTTPS TLS intercept、WebSocket 握手三条链路都用统一 helper。
+- 正则 pattern 只负责选中请求；当普通 `http://` / `https://` / `ws://` / `wss://` 转发目标带非根路径时，该目标 path/query 是权威资源地址，不能沿用原请求路径。
 
 ### 必须不破坏
 
@@ -32,6 +33,9 @@ https://internal.example.test/labor_cost/static/__webpack_hmr http://localhost:9
 - host rule 与其他协议（`resHeaders://`、`resScript://` 等）叠加时行为一致。
 - 大小写敏感度、编码后的路径（`%20` 等）、trailing slash 判定与原语义一致。
 - WebSocket 握手请求头 `Host`、`Origin` 改写不受影响。
+- 域名、IP 和普通 `*` 通配符规则继续使用既有 path 前缀裁剪/拼接语义。
+- 正则规则只写目标 origin、不写资源路径时，仍只替换 origin 并保留原请求 path/query。
+- `redirect://` 仍然是向客户端返回 3xx；普通转发规则的精确资源映射只在代理内部改写上游请求，不产生浏览器重定向。
 
 ### 必须真实验证
 
@@ -40,6 +44,28 @@ https://internal.example.test/labor_cost/static/__webpack_hmr http://localhost:9
 - HTTPS + TLS 拦截 + 静态资源路径前缀保留通过本地 mitm echo server 验证。
 
 ## 产品语义
+
+### 匹配器决定目标 path 语义
+
+转发规则的左侧 pattern 同时承担“是否命中”和“能否安全提取字面 source path”两项职责：
+
+- `Domain`、`IP`、普通 `Wildcard`：左侧包含可解释的字面 path，继续按 source → target 前缀映射，并保留未匹配后缀。
+- `PathWildcard`：沿用现有兼容语义，目标非根 path 是精确目标。
+- `Regex`：正则表达式不是字面路径，不能交给 `strip_prefix`。目标带非根 path 时直接使用目标 path/query；目标只有 origin 时保留原 path/query。
+
+例如：
+
+```text
+/\/component-custom-mix-eu-fest-track-load-comp-index\.[^\/]*\.js/ http://127.0.0.1:9798/component-custom-mix-eu-fest-track-load-comp-index.js
+```
+
+请求中任意目录下的 hash 文件命中后，上游固定请求：
+
+```text
+http://127.0.0.1:9798/component-custom-mix-eu-fest-track-load-comp-index.js
+```
+
+这属于代理内部的 upstream URL 重写，不是 HTTP redirect。
 
 ### 源 pattern 与目标 path
 
@@ -74,6 +100,8 @@ https://internal.example.test/labor_cost/static/__webpack_hmr http://localhost:9
 
 ### 修改点
 
+- `crates/bifrost-core/src/matcher/factory.rs`
+  - 提供统一的“pattern 是否使用精确转发目标 path”判定，避免 Proxy、Replay、PAC 各自猜测。
 - `crates/bifrost-proxy/src/utils/url.rs`
   - 新增 `rewrite_host_path(source_path: &str, target_path: &str, request_path: &str) -> String`。
   - 新增 `find_host_rule_source_path(resolved: &ResolvedRules) -> Option<String>`。
@@ -85,6 +113,10 @@ https://internal.example.test/labor_cost/static/__webpack_hmr http://localhost:9
   - WS 握手 URL 组装调用同一 helper，保证 handshake path 一致。
 - `crates/bifrost-proxy/src/traffic/record.rs`
   - Traffic detail 展示 host 重写命中的 source path 与 target path，便于排查。
+- `crates/bifrost-admin/src/request_rules.rs`
+  - Replay 使用同一 matcher 判定，保证重放与实时请求一致。
+- `crates/bifrost-cli/src/parsing/rules.rs`
+  - PAC 计算 Final URL 时使用同一 matcher 判定；精确目标的 query 以目标为准。
 
 ### helper 签名与语义
 
@@ -163,6 +195,9 @@ pub fn find_host_rule_source_path(resolved: &ResolvedRules) -> Option<String> {
   - `test_rewrite_path_percent_encoded_preserved`
   - `test_find_host_rule_source_path_uses_selected_rule_not_later_host_rule`
   - `test_find_host_rule_source_path_returns_none_when_no_host_rule`
+  - 正则目标带 path 时使用精确目标；目标只有 origin 时保留原 path。
+  - 同 value 的其它规则不得改变真正生效 pattern 的 path 语义。
+  - Replay 与 PAC Final URL 对正则精确资源映射保持一致。
 
 ### E2E 脚本
 

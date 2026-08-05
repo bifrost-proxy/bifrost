@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 
 use base64::Engine;
-use bifrost_core::{Protocol, ResolvedRules as CoreResolvedRules};
+use bifrost_core::{
+    matcher::factory::pattern_uses_exact_forward_target_path, Protocol,
+    ResolvedRules as CoreResolvedRules,
+};
 use bytes::Bytes;
 use serde_json::Value;
 use tracing::info;
@@ -97,7 +100,7 @@ pub fn build_applied_rules(core_rules: &CoreResolvedRules) -> AppliedRules {
                 };
                 applied.forward_source_path = extract_path_from_pattern(&rule.rule.pattern);
                 applied.forward_target_path_exact =
-                    rule.rule.pattern.trim_start_matches('!').starts_with('^');
+                    pattern_uses_exact_forward_target_path(&rule.rule.pattern);
                 applied.forward_url = Some(forward_url);
             }
             Protocol::Host | Protocol::XHost
@@ -1329,6 +1332,29 @@ mod tests {
             apply_all_request_rules(&ctx.url, "GET", &[], None, &applied_rules, false).unwrap();
 
         assert_eq!(result.url, "http://127.0.0.1:8999/approvals");
+    }
+
+    #[test]
+    fn test_apply_forward_rule_from_regex_uses_exact_target_resource() {
+        let rules = parse_rules(
+            r"/\/component-custom-mix-eu-fest-track-load-comp-index\.[^\/]*\.js/ http://127.0.0.1:9798/component-custom-mix-eu-fest-track-load-comp-index.js",
+        )
+        .unwrap();
+        let resolver = RulesResolver::new(rules);
+        let ctx = RequestContext::from_url(
+            "https://sf16-website-login.neutral.ttwstatic.com/obj/tiktok_web_login_static/ies/resource/falcon/fusion_standard_component/component-custom-mix-eu-fest-track-load-comp-index.9230df8f.1.0.1.6642.js?source=cdn",
+        )
+        .with_method("GET");
+        let resolved_rules = resolver.resolve(&ctx);
+        let applied_rules = build_applied_rules(&resolved_rules);
+
+        let result =
+            apply_all_request_rules(&ctx.url, "GET", &[], None, &applied_rules, false).unwrap();
+
+        assert_eq!(
+            result.url,
+            "http://127.0.0.1:9798/component-custom-mix-eu-fest-track-load-comp-index.js"
+        );
     }
 
     #[test]

@@ -179,23 +179,21 @@ pub fn find_host_rule_source_path(
     host_rule: &str,
 ) -> Option<String> {
     use bifrost_core::Protocol;
-    rules.iter().find_map(|rule| {
-        if matches!(
-            rule.protocol,
-            Protocol::Host
-                | Protocol::XHost
-                | Protocol::Http
-                | Protocol::Https
-                | Protocol::Ws
-                | Protocol::Wss
-        ) && rule.protocol == host_protocol
-            && rule.value == host_rule
-        {
-            extract_path_from_pattern(&rule.pattern)
-        } else {
-            None
-        }
-    })
+    rules
+        .iter()
+        .find(|rule| {
+            matches!(
+                rule.protocol,
+                Protocol::Host
+                    | Protocol::XHost
+                    | Protocol::Http
+                    | Protocol::Https
+                    | Protocol::Ws
+                    | Protocol::Wss
+            ) && rule.protocol == host_protocol
+                && rule.value == host_rule
+        })
+        .and_then(|rule| extract_path_from_pattern(&rule.pattern))
 }
 
 pub fn host_rule_uses_exact_target_path(
@@ -204,19 +202,23 @@ pub fn host_rule_uses_exact_target_path(
     host_rule: &str,
 ) -> bool {
     use bifrost_core::Protocol;
-    rules.iter().any(|rule| {
-        matches!(
-            rule.protocol,
-            Protocol::Host
-                | Protocol::XHost
-                | Protocol::Http
-                | Protocol::Https
-                | Protocol::Ws
-                | Protocol::Wss
-        ) && rule.protocol == host_protocol
-            && rule.value == host_rule
-            && rule.pattern.trim_start_matches('!').starts_with('^')
-    })
+    rules
+        .iter()
+        .find(|rule| {
+            matches!(
+                rule.protocol,
+                Protocol::Host
+                    | Protocol::XHost
+                    | Protocol::Http
+                    | Protocol::Https
+                    | Protocol::Ws
+                    | Protocol::Wss
+            ) && rule.protocol == host_protocol
+                && rule.value == host_rule
+        })
+        .is_some_and(|rule| {
+            bifrost_core::matcher::factory::pattern_uses_exact_forward_target_path(&rule.pattern)
+        })
 }
 
 pub fn rewrite_path_with_prefix(
@@ -601,6 +603,53 @@ mod tests {
             &rules,
             Protocol::Http,
             "127.0.0.1:8999/approvals",
+        ));
+    }
+
+    #[test]
+    fn test_host_rule_uses_exact_target_path_for_regex() {
+        let target = "127.0.0.1:9798/component-custom-mix-eu-fest-track-load-comp-index.js";
+        let rules = vec![crate::server::RuleValue {
+            protocol: Protocol::Http,
+            value: target.to_string(),
+            pattern: r"/\/component-custom-mix-eu-fest-track-load-comp-index\.[^\/]*\.js/"
+                .to_string(),
+            options: std::collections::HashMap::new(),
+            line: Some(1),
+            raw: None,
+            rule_name: None,
+            auto_tls_intercept: false,
+        }];
+
+        assert!(host_rule_uses_exact_target_path(
+            &rules,
+            Protocol::Http,
+            target,
+        ));
+    }
+
+    #[test]
+    fn test_host_rule_exact_path_uses_first_selected_rule_not_same_value_collision() {
+        let target = "127.0.0.1:9798/local.js";
+        let make_rule = |pattern: &str, line| crate::server::RuleValue {
+            protocol: Protocol::Http,
+            value: target.to_string(),
+            pattern: pattern.to_string(),
+            options: std::collections::HashMap::new(),
+            line: Some(line),
+            raw: None,
+            rule_name: None,
+            auto_tls_intercept: false,
+        };
+        let rules = vec![
+            make_rule("example.com/assets/", 1),
+            make_rule("^https://example.com/assets/*", 2),
+        ];
+
+        assert!(!host_rule_uses_exact_target_path(
+            &rules,
+            Protocol::Http,
+            target,
         ));
     }
 

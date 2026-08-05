@@ -167,7 +167,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
-| [proxy-http-https.md](./proxy-http-https.md) | HTTP/HTTPS 代理 | 27 | HTTP 转发、HTTPS CONNECT、TLS 拦截、各类规则协议、模式匹配、host 路径前缀回归、host 精确路径不补尾斜杠回归、旧版 `^https://` path wildcard 兼容回归 |
+| [proxy-http-https.md](./proxy-http-https.md) | HTTP/HTTPS 代理 | 29 | HTTP 转发、HTTPS CONNECT、TLS 拦截、各类规则协议、模式匹配、host 路径前缀回归、host 精确路径不补尾斜杠回归、旧版 `^https://` path wildcard 兼容回归、正则精确资源映射及正则 origin-only 保留 path/query 回归 |
 | [proxy-performance-stress-test.md](./proxy-performance-stress-test.md) | 代理性能压力测试方案 | 15 | 压测方案覆盖代理转发、流量录制、转发策略和 macOS 应用识别四类性能目标，验证测试方法、采集器职责、评估阈值、分析路径、持续提升闭环、功能不变门禁、启动保护、既有代理隔离、binary fast path monitor 残留回归、10 万条流量存储读写、列表、批量详情、URL 搜索、response body 搜索压测、response body 搜索 ASCII fast path 与 BodyStore 文件读取优化，以及现有 loadtest 脚本语法和后续 `scripts/perf/` 报告结构 |
 | [upstream-connection-stability.md](./upstream-connection-stability.md) | 上游连接稳定性治理 | 4 | 渐进式 idle-aware client cache 淘汰、跨 partition 全局响应头背压、TCP 建连并发阀门、EADDRNOTAVAIL/ENOBUFS/FD 压力有界退避与 single-probe 恢复，以及真实 HTTP/CONNECT 突发和普通拒绝连接后的健康恢复 |
 | [status-code-direct-response.md](./status-code-direct-response.md) | statusCode 直接响应 | 3 | `statusCode://code` 命中后直接返回且不请求 upstream，`replaceStatus://code` 保持请求 upstream 后替换状态码语义，`statusCode` 不短路同条规则中的请求/响应改写流水线 |

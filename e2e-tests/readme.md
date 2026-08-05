@@ -197,6 +197,7 @@ Admin API 测试脚本位于 `tests/` 目录，用于测试 Bifrost 的管理 AP
 | `test_process_resolution_performance.sh` | 8 | 管理请求跳过进程识别、外部 Admin-like path 防误伤、诊断计数、主指标隔离、普通代理回归、并发连接共享 snapshot generation、有界缓存诊断与可选 18k 高基数真实连接压力 |
 | `test_scripts_admin_api.sh`   | 12     | 脚本 CRUD、列表、内置脚本            |
 | `test_replay_rules.sh`        | 28     | Replay custom rules、请求/响应修改矩阵 |
+| `test_host_rule_path_rewrite.sh` | 4 | Host path 前缀、精确 path、正则精确资源与正则 origin-only 转发回归 |
 | `test_site_docs_sync.sh`      | 1      | 文档站点同步完整性、未来新增 docs 文档自动生成、真实 VitePress 构建与静态首页覆盖 |
 
 ### 运行 Admin API 测试

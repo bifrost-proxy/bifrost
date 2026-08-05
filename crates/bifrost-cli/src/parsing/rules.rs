@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use bifrost_core::{Protocol, RequestContext, Rule, RulesResolver as CoreRulesResolver};
+use bifrost_core::{
+    matcher::factory::pattern_uses_exact_forward_target_path, Protocol, RequestContext, Rule,
+    RulesResolver as CoreRulesResolver,
+};
 use bifrost_proxy::{
     DevtoolsInjectMode, DevtoolsMode, DevtoolsRule, ResolvedRules as ProxyResolvedRules, RuleValue,
     RulesResolver as ProxyRulesResolverTrait,
@@ -893,6 +896,9 @@ fn build_final_url_for_pac(ctx: &RequestContext, result: &ProxyResolvedRules) ->
     };
 
     let target_path = target_url.path();
+    if target_path != "/" && forward_target_path_is_exact(result) {
+        return Some(target_url.to_string());
+    }
     let source_path = source_path_from_rules(result);
     let final_path = if (target_path.is_empty() || target_path == "/") && source_path.is_none() {
         original.path().to_string()
@@ -925,13 +931,25 @@ fn split_route_target(
 fn source_path_from_rules(result: &ProxyResolvedRules) -> Option<&str> {
     let host = result.host.as_ref()?;
     let protocol = result.host_protocol?;
-    result.rules.iter().find_map(|rule| {
-        if rule.protocol == protocol && rule.value == *host {
-            extract_path_from_pattern_for_pac(&rule.pattern)
-        } else {
-            None
-        }
-    })
+    result
+        .rules
+        .iter()
+        .find(|rule| rule.protocol == protocol && rule.value == *host)
+        .and_then(|rule| extract_path_from_pattern_for_pac(&rule.pattern))
+}
+
+fn forward_target_path_is_exact(result: &ProxyResolvedRules) -> bool {
+    let Some(host) = result.host.as_ref() else {
+        return false;
+    };
+    let Some(protocol) = result.host_protocol else {
+        return false;
+    };
+    result
+        .rules
+        .iter()
+        .find(|rule| rule.protocol == protocol && rule.value == *host)
+        .is_some_and(|rule| pattern_uses_exact_forward_target_path(&rule.pattern))
 }
 
 fn extract_path_from_pattern_for_pac(pattern: &str) -> Option<&str> {
@@ -1255,6 +1273,35 @@ www.example.com/path pac://{pac}
         let resolved = resolve_rules_impl(
             &resolver,
             "https://www.example.com/api/path",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(resolved.proxy.as_deref(), Some("http://proxy.example:8080"));
+    }
+
+    #[test]
+    fn test_pac_uses_regex_exact_target_resource_as_final_url() {
+        let rules_text = r#"
+```pac
+function FindProxyForURL(url, host) {
+  if (url === "http://127.0.0.1:9798/component-custom-mix-eu-fest-track-load-comp-index.js?local=1") {
+    return "PROXY proxy.example:8080";
+  }
+  return "DIRECT";
+}
+```
+/\/component-custom-mix-eu-fest-track-load-comp-index\.[^\/]*\.js/ http://127.0.0.1:9798/component-custom-mix-eu-fest-track-load-comp-index.js?local=1
+127.0.0.1:9798/component-custom-mix-eu-fest-track-load-comp-index.js pac://{pac}
+"#;
+        let parser = bifrost_core::RuleParser::new();
+        let (rules, values) = parser.parse_rules_with_inline_values(rules_text).unwrap();
+        let resolver = CoreRulesResolver::new(rules).with_values(values);
+
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "https://sf16-website-login.neutral.ttwstatic.com/obj/tiktok_web_login_static/ies/resource/falcon/fusion_standard_component/component-custom-mix-eu-fest-track-load-comp-index.9230df8f.1.0.1.6642.js?source=cdn",
             "GET",
             &HashMap::new(),
             &HashMap::new(),

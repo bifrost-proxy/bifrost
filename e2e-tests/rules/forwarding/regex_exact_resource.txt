@@ -1,0 +1,11 @@
+# Host path prefix regressions retained alongside the regex resource mapping.
+https://internal.example.test/labor_cost/static/__webpack_hmr http://127.0.0.1:__ECHO_HTTP_PORT__/__webpack_hmr
+https://internal.example.test/labor_cost/static/ http://127.0.0.1:__ECHO_HTTP_PORT__/labor_cost/static/
+
+# Regex selects the hashed request; the explicit target path is authoritative.
+sf16-website-login.neutral.ttwstatic.com tlsIntercept://
+/\/component-custom-mix-eu-fest-track-load-comp-index\.[^\/]*\.js/ http://127.0.0.1:__ECHO_HTTP_PORT__/component-custom-mix-eu-fest-track-load-comp-index.js
+
+# Origin-only regex targets retain the original request path and query.
+cdn.example.com tlsIntercept://
+/\/origin-only\.[^\/]*\.js/ http://127.0.0.1:__ECHO_HTTP_PORT__

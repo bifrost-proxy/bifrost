@@ -682,6 +682,66 @@ HTTPServer(("127.0.0.1", 8999), H).serve_forever()'
 
 ---
 
+### TC-PHT-28：正则命中后精确转发到指定资源（原 Bug 回归）
+
+**前置条件**：
+1. 使用当前工作区源码构建 Bifrost，或指定当前源码构建出的 debug 二进制。
+2. 测试脚本使用临时 `BIFROST_DATA_DIR`、非 `9900` 端口、`--no-system-proxy`，并对测试域名显式启用 `tlsIntercept://`。
+3. 规则夹具包含用户反馈的等价规则：
+   ```text
+   /\/component-custom-mix-eu-fest-track-load-comp-index\.[^\/]*\.js/ http://127.0.0.1:<echo_port>/component-custom-mix-eu-fest-track-load-comp-index.js
+   ```
+
+**操作步骤**：
+1. 执行真实 HTTP/HTTPS 代理脚本：
+   ```bash
+   BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_host_rule_path_rewrite.sh
+   ```
+2. 检查 `Regex match forwards to exact target resource` 小节。
+3. 确认请求 URL 为带多级目录和 hash 的原始 HTTPS JS URL，并检查本地 echo 收到的 path/query。
+
+**预期结果**：
+- 请求返回 `200`，且是代理内部转发，不返回 3xx。
+- 上游 `request.parsed_path` 精确等于：
+  ```text
+  /component-custom-mix-eu-fest-track-load-comp-index.js
+  ```
+- 上游 path 不包含原始 `/obj/tiktok_web_login_static/...` 目录，也不包含 hash 文件名。
+- 目标规则未指定 query 时，原请求的 `source=cdn` 不泄漏到指定资源。
+
+**执行记录**：
+- 2026-08-05：PASS。使用当前源码的 `target/debug/bifrost` 执行真实 HTTPS + TLS intercept 脚本；请求返回 200，上游 path 精确为 `/component-custom-mix-eu-fest-track-load-comp-index.js`，原目录、hash 和 `source=cdn` query 均未带入目标资源。
+
+---
+
+### TC-PHT-29：正则只替换 origin 时保留原 path/query（兼容回归）
+
+**前置条件**：
+1. 与 TC-PHT-28 使用同一临时代理、echo 服务和规则夹具。
+2. 规则夹具包含不带目标 path 的正则规则：
+   ```text
+   /\/origin-only\.[^\/]*\.js/ http://127.0.0.1:<echo_port>
+   ```
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   BIFROST_BIN=target/debug/bifrost bash e2e-tests/tests/test_host_rule_path_rewrite.sh
+   ```
+2. 检查 `Regex origin-only target preserves path and query` 小节。
+3. 同时确认脚本中的 path 前缀规则、无尾斜杠精确规则仍全部通过。
+
+**预期结果**：
+- 请求返回 `200`。
+- 上游 `request.parsed_path` 仍为 `/assets/origin-only.123.js`。
+- 上游 `request.query_string` 仍为 `source=cdn`。
+- TC-PHT-25、TC-PHT-27 的存量前缀/精确 path 行为不受正则修复影响。
+
+**执行记录**：
+- 2026-08-05：PASS。同一次真实脚本中，origin-only 正则规则保留 `/assets/origin-only.123.js?source=cdn`；path 前缀与 HMR 无尾斜杠存量用例也全部通过。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：
