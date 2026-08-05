@@ -871,6 +871,7 @@ struct FileRecordWithKey {
     key: String,
     #[serde(flatten)]
     record: FileRecord,
+    source_compression_eligible: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     diarization_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

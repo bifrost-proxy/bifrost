@@ -493,7 +493,7 @@
 3. 在 `BIFROST_DATA_DIR/asr/tasks/<task_id>/files.json` 写入对应 file records，并给 success/partial-success 都写入 transcript 与 timeline 产物。
 4. 打开 `http://127.0.0.1:18886/_bifrost/ai?aiSection=tools-asr&asrTask=<task_id>`，查看任务详情页。
 5. 确认页面展示 `Audio Files` 当前原音频总占用和 `Cleanable Originals` 可清理占用。
-6. 点击 `Clean originals`，确认弹窗文案说明 transcript/timeline 会保留，且 partial-success 文件不会删除。
+6. 点击 `Clean originals`，完成第一层确认；在最终危险弹窗中输入完整任务名后再清理，确认文案说明 transcript/timeline 会保留，且 partial-success 文件不会删除。
 7. 确认清理后刷新任务详情，并检查磁盘文件：
    ```bash
    test ! -f "$AUDIO_DIR/done.wav"
@@ -503,14 +503,16 @@
    ```
 8. 再次点击或调用清理接口：
    ```bash
-   curl -fsS -X POST http://127.0.0.1:18886/_bifrost/api/asr/tasks/<task_id>/cleanup-source-audio
+   curl -fsS -G -X POST \
+     --data-urlencode "confirm_name=<task_name>" \
+     http://127.0.0.1:18886/_bifrost/api/asr/tasks/<task_id>/cleanup-source-audio
    ```
 
 预期结果：
 
 - 任务详情 summary 返回并展示 `audio_source_bytes/audio_source_file_count` 和 `cleanable_source_bytes/cleanable_source_file_count`。
 - 清理前 `Audio Files` 包含两个仍存在的原音频，`Cleanable Originals` 只包含 success 文件。
-- 清理接口只删除 `success + transcript/timeline 已存在 + audio_dir 内` 的源音频；`partial_success` 文件保留，避免破坏 failed chunk retry。
+- 缺少或错误任务名确认时清理接口返回 400；精确匹配后只删除 `success + transcript/timeline 已存在 + audio_dir 内` 的源音频，`partial_success` 文件保留，避免破坏 failed chunk retry。
 - transcript、timeline、metadata、daily docs 和 file store 记录都不被删除。
 - 清理后 `Audio Files` 占用下降，`Cleanable Originals` 变为 0，`deleted_after_processing` 增加。
 - 第二次清理幂等返回 `deleted_files=0`，不报错。
@@ -706,6 +708,36 @@
 - 压缩与 ASR run、failed-chunk retry、external import、清理和高风险任务配置互斥；取消在当前单文件安全结束后生效；重启遇到活动状态时显示 interrupted，并可再次启动恢复遗留备份。
 - 测试只清理自身创建的临时目录和临时服务，不触碰 `~/audio`、默认数据目录或系统代理。
 
+### TC-QASR-27 文件页逐个压缩进度与原文件清理二次确认
+
+操作步骤：
+
+1. 执行后端资格与清理确认门禁回归：
+   ```bash
+   cargo test -p bifrost-admin source_compression_eligibility --lib
+   cargo test -p bifrost-admin cleanup_source_audio --lib
+   ```
+2. 执行隔离的真实 FFmpeg 压缩与 ASR task API/CLI 场景：
+   ```bash
+   bash e2e-tests/tests/test_asr_source_compression.sh
+   bash e2e-tests/tests/test_asr_task_cli.sh
+   ```
+3. 执行聚焦浏览器场景：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 pnpm --dir web exec playwright test tests/ui/asr-microphone-meter.spec.ts --grep "ASR task files start sequential compression|ASR directory tasks can be created" --workers=1
+   ```
+4. 在压缩场景的 Files tab 检查整体进度卡片和 Compression 列，确认已压缩、未压缩且符合资格、转录未完成三类文件状态；切换一次亮/暗主题。
+5. 在目录任务详情点击 `Clean originals`，完成第一次确认后检查最终确认弹窗；分别输入错误名称和完整任务名称，再检查实际请求的 `confirm_name`。
+
+预期结果：
+
+- 压缩任务保持单文件顺序处理；Files tab 同时显示压缩状态、已压缩数量、仍可压缩数量、整体进度、当前文件、节省空间和逐文件结果。
+- 只有后端判定 `status=success`、转录文本与 timeline 产物完整、源文件仍是合法普通 WAV 的记录显示 `Ready to compress`；failed、partial success、产物缺失或已压缩文件不能再次进入队列。
+- 压缩完成后对应行从 `Uncompressed` 变为 `Compressed`，整体未压缩且符合资格的数量归零，按钮自动禁用；亮色和暗色主题下信息均可读。
+- `Clean originals` 必须先通过第一次确认，再输入完整任务名称才能启用最终危险按钮；取消、空名称和错误名称都不发起删除。
+- 后端不信任前端确认状态：缺少或错误 `confirm_name` 的清理 API 返回 HTTP 400 且源文件保留，只有 URL 编码后的精确任务名称匹配才执行清理。
+- 所有真实场景只使用临时数据目录、临时音频目录和临时服务，不触碰默认 `~/audio`、运行中的 9900 服务或系统代理。
+
 ## 清理步骤
 
 - 停止测试启动的 `asr-server` 进程。
@@ -767,3 +799,4 @@
 | 2026-05-22 | TC-QASR-23 / Daily Agent incomplete ASR gate 与未索引 report runner 展示 | `cargo test -p bifrost-admin daily_agent --lib`；默认 9900 查询 `/daily-agent` 和 `/daily-agent/runs` | PASS：单测覆盖 ASR summary 存在 pending/failed/partial/failed chunks 时不允许 after_asr_run 自动触发、stale running 对外转 interrupted、未索引 report 使用任务绑定 runner；重启最新二进制后默认 9900 显示 `last_run.status=interrupted`，2026-05-18/19 `last_run_id=filesystem-scan` 且 `runner=web`。 |
 | 2026-05-26 | TC-QASR-24 / Daily Agent 大 prompt 原生剪贴板投递 | `cargo build --bin bifrost`；`BIFROST_DATA_DIR=$HOME/.bifrost ./target/debug/bifrost start -p 9900 --host 0.0.0.0 --no-system-proxy --daemon`；`./target/debug/bifrost -p 9900 agent run --runner web --session chatgpt-web-native-clipboard-no-sample-20260526 --json "$(cat /Users/eden/.bifrost/asr/data/text/76612de33e9740bc92440ce64a98a4cb/.daily/2026-05-19.md)"`；`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin composer_text_injection --lib`；`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin native_clipboard_paste_uses_platform_modifier --lib` | PASS：阈值保持 120 字符，120 以内走 `Input.insertText`，121 及以上走 `NativeClipboardPaste`；macOS 粘贴 modifier 为 Meta。真实默认目录 ChatGPT Web live run 使用 2026-05-19 daily Markdown 生成 457840 字节 prompt，run `1779727870753-c7feafc8-3173-43c8-8462-014e2b7409b1` 成功，日志 `/tmp/bifrost-chatgpt-web-no-sample-20260526005110.log` 返回 `收到文件《粘贴的文本 (1)(3).txt》`；这验证了粘贴完成后 ChatGPT 文件化且 composer 无正文时不再采样文本，adapter 通过轮询发送按钮可用状态完成发送与最终回复。 |
 | 2026-08-04 | TC-QASR-26 / 转录完成后无损压缩源 WAV | `bash e2e-tests/tests/test_asr_source_compression.sh`；`pnpm --dir web exec playwright test --grep "ASR task detail starts lossless source compression"` | PASS：隔离后端真实 API 场景中正常 success WAV 转为更小 FLAC，前后解码 PCM SHA-256 一致；坏 WAV 保留并记失败，partial_success 不入队，无 `.part`/backup 残留；记录主键迁移后仍 success 且 `pending=0`。聚焦 Playwright 验证 Compress WAVs 确认操作、完成状态和 Saved 2.44 KB 展示。 |
+| 2026-08-05 | TC-QASR-27 / 文件页逐个压缩进度与原文件清理二次确认 | `cargo test -p bifrost-admin source_compression_eligibility --lib`；`cargo test -p bifrost-admin cleanup_source_audio --lib`；`bash e2e-tests/tests/test_asr_source_compression.sh`；`bash e2e-tests/tests/test_asr_task_cli.sh`；聚焦 Playwright 两场景 | PASS：后端仅将成功且产物完整的普通 WAV 标记为可压缩；真实 FFmpeg 顺序压缩与 PCM 校验通过。Files tab 在亮/暗主题下展示已压缩、未压缩且符合资格、不可压缩逐文件状态及整体进度。Clean originals 先确认、再输入完整任务名称，缺失或错误 `confirm_name` 返回 400 且不删除，精确匹配后才执行清理。 |

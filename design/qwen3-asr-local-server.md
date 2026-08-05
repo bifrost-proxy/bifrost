@@ -132,7 +132,8 @@ WebUI Runtime 下拉展开时每个策略下方展示简短说明；选中后输
 - `POST /api/asr/tasks`：CRUD 目录任务；state 落 `BIFROST_DATA_DIR/asr/tasks.json` 与 `asr/tasks/<task_id>/files.json`。
 - `POST /api/asr/tasks/<id>/run`：手动运行；paused 时 409。
 - `POST /api/asr/tasks/<id>/pause` / `POST /api/asr/tasks/<id>/resume`：见 pause/resume 语义。
-- `POST /api/asr/tasks/<id>/cleanup-source-audio`：只删可清理集合；运行中或 failed-chunk 批量重试中返回 409。
+- `POST /api/asr/tasks/<id>/cleanup-source-audio?confirm_name=<task_name>`：任务名精确匹配后
+  只删可清理集合；缺失/错误确认返回 400，运行中或 failed-chunk 批量重试中返回 409。
 - `GET /api/asr/tasks/<id>/daily` / `/daily/<YYYY-MM-DD>`：读前从 timeline 刷新 `BIFROST_DATA_DIR/asr/data/text/<task_id>/daily/<date>.md`；日期只接受 `YYYY-MM-DD`，防路径穿越。
 - `GET /api/asr/tasks/<id>/files/<file_key>/source`：源音频回放；用于 WebUI 单文件详情。
 

@@ -5128,6 +5128,39 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_source_audio_response_requires_exact_task_name_confirmation() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let mut task = test_directory_task("cleanup-confirmation", audio_dir);
+        task.name = "Daily recordings".to_string();
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task.clone()],
+        })
+        .unwrap();
+
+        assert_eq!(
+            cleanup_task_source_audio_response(&task.id, None).status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            cleanup_task_source_audio_response(&task.id, Some("confirm_name=wrong")).status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            cleanup_task_source_audio_response(
+                &task.id,
+                Some("confirm_name=Daily+recordings"),
+            )
+            .status(),
+            StatusCode::OK
+        );
+    }
+
+    #[test]
     fn summary_counts_failed_files_separately_from_pending() {
         let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp = TempDir::new().unwrap();
@@ -8190,12 +8223,18 @@ esac
         let mut record = completed_test_record(&task.id, &source, &temp.path().join("outputs"));
         record.status = FileStatus::PartialSuccess;
         assert!(!is_compressible_source_audio_record(&task, &record));
+        assert!(!file_record_with_key(&task, source_key(&source), record.clone())
+            .source_compression_eligible);
         let rejected = compress_source_record(&task, &source_key(&source), &record);
         assert_eq!(rejected.status, "failed");
         assert!(rejected.message.contains("no longer eligible"));
         record.status = FileStatus::Success;
+        assert!(file_record_with_key(&task, source_key(&source), record.clone())
+            .source_compression_eligible);
         std::fs::remove_file(record.output_timeline_path.as_ref().unwrap()).unwrap();
         assert!(!is_compressible_source_audio_record(&task, &record));
+        assert!(!file_record_with_key(&task, source_key(&source), record)
+            .source_compression_eligible);
     }
 
     #[test]
@@ -9200,7 +9239,7 @@ esac
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn source_compression_http_routes_cover_get_post_and_delete() {
+    async fn source_compression_http_routes_cover_get_post_delete_and_cleanup() {
         use hyper::server::conn::http1;
         use hyper::service::service_fn;
         use hyper_util::rt::TokioIo;
@@ -9221,7 +9260,7 @@ esac
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            for _ in 0..3 {
+            for _ in 0..4 {
                 let (stream, _) = listener.accept().await.unwrap();
                 let service = service_fn(|request: Request<Incoming>| async move {
                     let path = request.uri().path().to_string();
@@ -9267,6 +9306,20 @@ esac
                 .unwrap()
                 .status(),
             reqwest::StatusCode::OK
+        );
+        let cleanup_url = format!(
+            "http://{address}/api/asr/tasks/{}/cleanup-source-audio",
+            task.id
+        );
+        assert_eq!(
+            client
+                .post(&cleanup_url)
+                .header(reqwest::header::CONNECTION, "close")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::BAD_REQUEST
         );
         server.await.unwrap();
     }
@@ -9447,7 +9500,11 @@ esac
         let _compression = RunningSourceCompressionGuard::acquire(&task.id).unwrap();
 
         assert_eq!(
-            cleanup_task_source_audio_response(&task.id).status(),
+            cleanup_task_source_audio_response(
+                &task.id,
+                Some("confirm_name=compression-api-exclusion"),
+            )
+            .status(),
             StatusCode::CONFLICT
         );
         assert_eq!(

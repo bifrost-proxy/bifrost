@@ -199,7 +199,7 @@ pub async fn handle_asr_tasks(req: Request<Incoming>, path: &str) -> Response<Bo
                 .trim_start_matches("/api/asr/tasks/")
                 .trim_end_matches("/cleanup-source-audio")
                 .trim_end_matches('/');
-            cleanup_task_source_audio_response(id)
+            cleanup_task_source_audio_response(id, req.uri().query())
         }
         (&Method::POST, _)
             if path.starts_with("/api/asr/tasks/")
@@ -962,13 +962,25 @@ fn delete_task_response(id: &str, query: Option<&str>) -> Response<BoxBody> {
     }
 }
 
-fn cleanup_task_source_audio_response(id: &str) -> Response<BoxBody> {
+fn cleanup_task_source_audio_response(id: &str, query: Option<&str>) -> Response<BoxBody> {
     let _lifecycle = SOURCE_AUDIO_LIFECYCLE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(task) = find_task(id) else {
         return error_response(StatusCode::NOT_FOUND, "ASR task not found");
     };
+    let confirm_name = query
+        .and_then(|query| {
+            url::form_urlencoded::parse(query.as_bytes())
+                .find_map(|(key, value)| (key == "confirm_name").then(|| value.into_owned()))
+        })
+        .unwrap_or_default();
+    if confirm_name != task.name {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "source_audio_cleanup_confirmation_required",
+        );
+    }
     if RUNNING_TASKS.lock().unwrap().contains(id) {
         return json_response_with_status(
             StatusCode::CONFLICT,

@@ -414,6 +414,7 @@ fn file_record_with_key(
     record: FileRecord,
 ) -> FileRecordWithKey {
     let (diarization_status, speaker_count) = diarization_file_state(task, &record);
+    let source_compression_eligible = is_compressible_source_audio_record(task, &record);
     let diarization_manifest_path = task
         .diarization
         .enabled
@@ -421,6 +422,7 @@ fn file_record_with_key(
     FileRecordWithKey {
         key,
         record,
+        source_compression_eligible,
         diarization_status,
         diarization_manifest_path,
         speaker_count,
