@@ -65,6 +65,18 @@ pub fn detect_pattern_type(pattern: &str) -> PatternType {
     PatternType::Domain
 }
 
+/// Returns whether a matched forwarding rule treats a non-root target path as
+/// the complete upstream resource instead of a prefix-rewrite destination.
+///
+/// Regex patterns cannot provide a literal source path for prefix stripping,
+/// while path-wildcard rules have historically used exact target paths.
+pub fn pattern_uses_exact_forward_target_path(pattern: &str) -> bool {
+    matches!(
+        detect_pattern_type(pattern),
+        PatternType::Regex | PatternType::PathWildcard
+    )
+}
+
 fn is_regex_pattern(pattern: &str) -> bool {
     if pattern.starts_with('/')
         && pattern.len() > 1
@@ -218,6 +230,24 @@ mod tests {
         assert_eq!(detect_pattern_type("/test/i"), PatternType::Regex);
         assert_eq!(detect_pattern_type("!/pattern/"), PatternType::Regex);
         assert_eq!(detect_pattern_type("!/pattern/i"), PatternType::Regex);
+    }
+
+    #[test]
+    fn test_exact_forward_target_path_matcher_classification() {
+        assert!(pattern_uses_exact_forward_target_path(
+            r"/\/component-custom-mix-eu-fest-track-load-comp-index\.[^\/]*\.js/"
+        ));
+        assert!(pattern_uses_exact_forward_target_path(
+            "^https://cdn.example.com/assets/1.0.0.*/index.js"
+        ));
+
+        assert!(!pattern_uses_exact_forward_target_path(
+            "https://example.com/assets/"
+        ));
+        assert!(!pattern_uses_exact_forward_target_path(
+            "*.example.com/assets/*"
+        ));
+        assert!(!pattern_uses_exact_forward_target_path("127.0.0.1"));
     }
 
     #[test]

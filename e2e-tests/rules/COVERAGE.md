@@ -20,8 +20,8 @@
 
 | `old_doc` 条目          | 状态 | 规则夹具                       | 说明                                                 |
 | ----------------------- | ---- | ------------------------------ | ---------------------------------------------------- |
-| `host`                  | ✅   | `forwarding/http_to_http.txt`  | 基础 host 转发已覆盖                                 |
-| `http`                  | ✅   | `forwarding/http_to_http.txt`  | HTTP 转发已覆盖                                      |
+| `host`                  | ✅   | `forwarding/http_to_http.txt`, `forwarding/regex_exact_resource.txt` | 基础 host、path 前缀和正则精确资源转发已覆盖 |
+| `http`                  | ✅   | `forwarding/http_to_http.txt`, `forwarding/regex_exact_resource.txt` | HTTP 转发及显式目标资源 path 已覆盖 |
 | `https`                 | ✅   | `forwarding/http_to_https.txt` | HTTP 到 HTTPS 已覆盖                                 |
 | `ws`                    | ✅   | `forwarding/ws_forward.txt`    | WebSocket 已覆盖                                     |
 | `wss`                   | ✅   | `forwarding/ws_forward.txt`    | WSS 已覆盖                                           |

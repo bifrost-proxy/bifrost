@@ -84,6 +84,18 @@ pub fn get_all_tests() -> Vec<TestCase> {
             "matchers",
             test_matcher_scheme_qualified_path_wildcard,
         ),
+        TestCase::standalone(
+            "matcher_regex_exact_forward_resource",
+            "Regex matcher: target path is an exact upstream resource",
+            "matchers",
+            test_matcher_regex_exact_forward_resource,
+        ),
+        TestCase::standalone(
+            "matcher_regex_origin_only_preserves_path",
+            "Regex matcher: origin-only target preserves request path and query",
+            "matchers",
+            test_matcher_regex_origin_only_preserves_path,
+        ),
     ]
 }
 
@@ -534,6 +546,86 @@ async fn test_matcher_scheme_qualified_path_wildcard() -> Result<(), String> {
     result.assert_success()?;
     result.assert_body_contains("scheme_qualified_path_wildcard")?;
     mock.assert_path("/approvals")?;
+
+    Ok(())
+}
+
+async fn test_matcher_regex_exact_forward_resource() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+    mock.set_response(200, "regex_exact_forward_resource");
+
+    let port = portpicker::pick_unused_port().unwrap();
+    let _proxy = ProxyInstance::start(
+        port,
+        vec![&format!(
+            r"/\/component-custom-mix-eu-fest-track-load-comp-index\.[^\/]*\.js/ http://127.0.0.1:{}/component-custom-mix-eu-fest-track-load-comp-index.js",
+            mock.port
+        )],
+    )
+    .await
+    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://sf16-website-login.neutral.ttwstatic.com/obj/tiktok_web_login_static/ies/resource/falcon/fusion_standard_component/component-custom-mix-eu-fest-track-load-comp-index.9230df8f.1.0.1.6642.js?source=cdn",
+    )
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+    result.assert_body_contains("regex_exact_forward_resource")?;
+    let request = mock.last_request().ok_or("No request received")?;
+    if request.path != "/component-custom-mix-eu-fest-track-load-comp-index.js" {
+        return Err(format!("Unexpected exact target path: {}", request.path));
+    }
+    if request.query.is_some() {
+        return Err(format!(
+            "Original query leaked into exact target: {:?}",
+            request.query
+        ));
+    }
+
+    Ok(())
+}
+
+async fn test_matcher_regex_origin_only_preserves_path() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+    mock.set_response(200, "regex_origin_only");
+
+    let port = portpicker::pick_unused_port().unwrap();
+    let _proxy = ProxyInstance::start(
+        port,
+        vec![&format!(
+            r"/\/origin-only\.[^\/]*\.js/ http://127.0.0.1:{}",
+            mock.port
+        )],
+    )
+    .await
+    .map_err(|e| format!("Failed to start proxy: {}", e))?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://cdn.example.com/assets/origin-only.123.js?source=cdn",
+    )
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+    let request = mock.last_request().ok_or("No request received")?;
+    if request.path != "/assets/origin-only.123.js"
+        || request.query.as_deref() != Some("source=cdn")
+    {
+        return Err(format!(
+            "Origin-only regex target changed path/query: path={}, query={:?}",
+            request.path, request.query
+        ));
+    }
 
     Ok(())
 }

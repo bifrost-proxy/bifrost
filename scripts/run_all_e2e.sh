@@ -49,6 +49,7 @@ STABLE_SHELL_TESTS=(
   "test_ssh_key_file_policy_migration.sh"
   "test_multiline_rule_filter_e2e.sh"
   "test_replay_rules.sh"
+  "test_host_rule_path_rewrite.sh"
   "test_remote_file_api_e2e.sh"
   "test_remote_file_relay_e2e.sh"
   "test_remote_invoke_v5_session_refresh_e2e.sh"

@@ -1,6 +1,8 @@
 #!/bin/bash
 : "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+: "${BIFROST_DISABLE_TRAY:=1}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+export BIFROST_DISABLE_TRAY
 
 
 set -euo pipefail
@@ -10,6 +12,7 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 source "$ROOT_DIR/e2e-tests/test_utils/assert.sh"
 source "$ROOT_DIR/e2e-tests/test_utils/process.sh"
+source "$ROOT_DIR/e2e-tests/test_utils/rule_fixture.sh"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-18881}"
@@ -27,6 +30,7 @@ fi
 
 TEST_DATA_DIR="$ROOT_DIR/.bifrost-e2e-host-path-${PROXY_PORT}-$$"
 RULES_FILE="$TEST_DATA_DIR/rules.txt"
+RULES_TEMPLATE="$ROOT_DIR/e2e-tests/rules/forwarding/regex_exact_resource.txt"
 PROXY_PID=""
 
 TARGET_HOST="internal.example.test"
@@ -122,10 +126,66 @@ build_bifrost_if_needed() {
 
 write_rules() {
     mkdir -p "$TEST_DATA_DIR"
-    cat > "$RULES_FILE" <<EOF
-https://${TARGET_HOST}${HMR_SOURCE_PATH} http://127.0.0.1:${ECHO_HTTP_PORT}${HMR_TARGET_PATH}
-https://${TARGET_HOST}${TARGET_PREFIX} http://127.0.0.1:${ECHO_HTTP_PORT}${TARGET_PREFIX}
-EOF
+    render_rule_fixture_to_file \
+        "$RULES_TEMPLATE" \
+        "$RULES_FILE" \
+        "ECHO_HTTP_PORT=$ECHO_HTTP_PORT"
+}
+
+test_regex_exact_resource_forward() {
+    log_section "Regex match forwards to exact target resource"
+    local url="https://sf16-website-login.neutral.ttwstatic.com/obj/tiktok_web_login_static/ies/resource/falcon/fusion_standard_component/component-custom-mix-eu-fest-track-load-comp-index.9230df8f.1.0.1.6642.js?source=cdn"
+    perform_request "$url"
+
+    assert_status_2xx "$HTTP_STATUS" "regex exact resource request should succeed" || return 1
+    local actual_path
+    local response_json
+    response_json=$(printf '%s\n' "$HTTP_BODY" | sed -n '2s/^var echoData = //; 2s/;$//; 2p')
+    actual_path=$(printf '%s\n' "$response_json" | jq -r '.request.parsed_path' 2>/dev/null) || {
+        _log_fail "regex target should reach local JSON echo server" "JSON echo response" "${HTTP_BODY:0:200}"
+        return 1
+    }
+    [[ "$actual_path" == "/component-custom-mix-eu-fest-track-load-comp-index.js" ]] || {
+        _log_fail "regex target path should replace the complete source path" "/component-custom-mix-eu-fest-track-load-comp-index.js" "$actual_path"
+        return 1
+    }
+    _log_pass "regex target path replaces the complete source path"
+
+    local actual_query
+    actual_query=$(printf '%s\n' "$response_json" | jq -r '.request.query_string')
+    [[ -z "$actual_query" || "$actual_query" == "null" ]] || {
+        _log_fail "source query should not leak into exact target resource" "empty" "$actual_query"
+        return 1
+    }
+    _log_pass "source query does not leak into exact target resource"
+}
+
+test_regex_origin_only_preserves_path() {
+    log_section "Regex origin-only target preserves path and query"
+    local url="https://cdn.example.com/assets/origin-only.123.js?source=cdn"
+    perform_request "$url"
+
+    assert_status_2xx "$HTTP_STATUS" "regex origin-only request should succeed" || return 1
+    local actual_path
+    local response_json
+    response_json=$(printf '%s\n' "$HTTP_BODY" | sed -n '2s/^var echoData = //; 2s/;$//; 2p')
+    actual_path=$(printf '%s\n' "$response_json" | jq -r '.request.parsed_path' 2>/dev/null) || {
+        _log_fail "origin-only regex should reach local JSON echo server" "JSON echo response" "${HTTP_BODY:0:200}"
+        return 1
+    }
+    [[ "$actual_path" == "/assets/origin-only.123.js" ]] || {
+        _log_fail "origin-only target should retain source path" "/assets/origin-only.123.js" "$actual_path"
+        return 1
+    }
+    _log_pass "origin-only target retains source path"
+
+    local actual_query
+    actual_query=$(printf '%s\n' "$response_json" | jq -r '.request.query_string')
+    [[ "$actual_query" == "source=cdn" ]] || {
+        _log_fail "origin-only target should retain source query" "source=cdn" "$actual_query"
+        return 1
+    }
+    _log_pass "origin-only target retains source query"
 }
 
 start_proxy() {
@@ -225,6 +285,8 @@ main() {
     start_proxy
     test_https_host_rule_path_rewrite
     test_https_host_rule_exact_path_without_trailing_slash
+    test_regex_exact_resource_forward
+    test_regex_origin_only_preserves_path
 }
 
 main "$@"

@@ -206,6 +206,7 @@ FIXTURE_ONLY_RULES=(
     "forwarding/pac.txt"
     "forwarding/proxy_chain_entry_auth.txt"
     "forwarding/proxy_chain_upstream_host.txt"
+    "forwarding/regex_exact_resource.txt"
     "hot_reload/status_201.txt"
     "hot_reload/status_202.txt"
     "http3/http3_e2e.txt"

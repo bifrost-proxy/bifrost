@@ -117,6 +117,35 @@ api.example.com https://backend.example.com
 api.example.com/v1 https://10.0.0.10:8443
 ```
 
+### 正则 / 路径通配命中后精确转发到指定资源
+
+当 pattern 是正则（`/.../`）或以 `^` 开头的路径通配符，并且 `http://` / `https://` 目标 URL 明确包含非根路径时，该目标路径表示**完整的目标资源**。Bifrost 会把命中的请求内部转发到这个资源，不再拼接原请求的目录、文件名、hash 或 query。
+
+```txt
+/\/component-custom-mix-eu-fest-track-load-comp-index\.[^\/]*\.js/ http://127.0.0.1:9798/component-custom-mix-eu-fest-track-load-comp-index.js
+```
+
+例如下面的请求：
+
+```txt
+https://sf16-website-login.neutral.ttwstatic.com/obj/.../component-custom-mix-eu-fest-track-load-comp-index.9230df8f.1.0.1.6642.js?source=cdn
+```
+
+会直接请求：
+
+```txt
+http://127.0.0.1:9798/component-custom-mix-eu-fest-track-load-comp-index.js
+```
+
+这里是代理内部的上游目标改写，客户端会直接收到目标资源的响应，**不会返回 HTTP 301/302**。需要让客户端发生 3xx 跳转时，请使用 `redirect://`。
+
+兼容边界：
+
+- 正则或 `^` 路径通配规则只指定目标 origin（例如 `http://127.0.0.1:9798`）时，仍保留原请求 path 和 query。
+- 普通域名、IP 和普通 wildcard 的路径转发继续使用原有前缀替换语义，不会因这项能力变成精确资源替换。
+- 精确目标 URL 自己携带的 query 会被保留；原请求 query 不会追加到该精确目标。
+- 多条路由同时匹配时，仍按既有优先级和 first-win 选择目标。
+
 若目标是 WebSocket，请优先使用 [WebSocket 规则](./websocket.md) 中的 `ws://` / `wss://`。
 
 ### HTTPS CONNECT 行为
