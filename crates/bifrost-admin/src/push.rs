@@ -24,6 +24,8 @@ pub const MAX_CLIENT_CHANNELS: usize = 3;
 pub const MAX_ID_LEN: usize = 256;
 pub const MAX_SETTINGS_SCOPES: usize = 16;
 const TRAFFIC_PENDING_REFRESH_INTERVAL_MS: u64 = 2_000;
+const TRAFFIC_DELTA_BATCH_LIMIT: usize = 500;
+const TRAFFIC_RECONNECT_WINDOW_LIMIT: usize = 2_000;
 
 pub const SETTINGS_SCOPE_PROXY_SETTINGS: &str = "proxy_settings";
 pub const SETTINGS_SCOPE_TLS_CONFIG: &str = "tls_config";
@@ -149,6 +151,15 @@ pub struct TrafficDeltaData {
     pub has_more: bool,
     pub server_total: usize,
     pub server_sequence: u64,
+    pub oldest_sequence: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TrafficDeltaMetadata {
+    has_more: bool,
+    server_total: usize,
+    server_sequence: u64,
+    oldest_sequence: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -633,14 +644,12 @@ impl PushManager {
         client: &Arc<PushClient>,
         inserts: Vec<TrafficSummaryCompact>,
         updates: Vec<TrafficSummaryCompact>,
-        has_more: bool,
-        server_total: usize,
-        server_sequence: u64,
+        metadata: TrafficDeltaMetadata,
     ) -> bool {
         let inserts = dedupe_compact_records_keep_latest(inserts);
         let updates = dedupe_compact_records_keep_latest(updates);
 
-        if inserts.is_empty() && updates.is_empty() {
+        if inserts.is_empty() && updates.is_empty() && metadata.oldest_sequence.is_none() {
             return true;
         }
 
@@ -653,9 +662,10 @@ impl PushManager {
         let msg = PushMessage::TrafficDelta(TrafficDeltaData {
             inserts,
             updates,
-            has_more,
-            server_total,
-            server_sequence,
+            has_more: metadata.has_more,
+            server_total: metadata.server_total,
+            server_sequence: metadata.server_sequence,
+            oldest_sequence: metadata.oldest_sequence,
         });
 
         if !client.send(msg) {
@@ -676,6 +686,7 @@ impl PushManager {
         updates: Vec<TrafficSummaryCompact>,
         server_total: usize,
         server_sequence: u64,
+        oldest_sequence: Option<u64>,
     ) {
         if inserts.is_empty() && updates.is_empty() {
             return;
@@ -704,9 +715,12 @@ impl PushManager {
                 client,
                 filtered_inserts,
                 updates.clone(),
-                false,
-                server_total,
-                server_sequence,
+                TrafficDeltaMetadata {
+                    has_more: false,
+                    server_total,
+                    server_sequence,
+                    oldest_sequence,
+                },
             ) {
                 clients_to_remove.push(client.id);
             }
@@ -727,6 +741,7 @@ impl PushManager {
     async fn broadcast_traffic_delta(&self, db_store: &crate::traffic_db::SharedTrafficDbStore) {
         let mut clients_to_remove = Vec::new();
         let current_sequence = db_store.current_sequence();
+        let oldest_sequence = db_store.oldest_sequence();
 
         for client_ref in self.clients.iter() {
             let client = client_ref.value();
@@ -778,9 +793,12 @@ impl PushManager {
                 client,
                 new_records,
                 updated_records,
-                result.has_more,
-                result.total,
-                result.server_sequence,
+                TrafficDeltaMetadata {
+                    has_more: result.has_more,
+                    server_total: result.total,
+                    server_sequence: result.server_sequence,
+                    oldest_sequence,
+                },
             ) {
                 clients_to_remove.push(client.id);
             }
@@ -802,15 +820,14 @@ impl PushManager {
         }
 
         let result = if let Some(cursor) = subscription.last_sequence {
-            let query_params = QueryParams {
-                cursor: Some(cursor),
-                limit: Some(500),
-                direction: Direction::Forward,
-                ..Default::default()
-            };
-            db_store.query(&query_params)
+            // A sleeping page can reconnect thousands of records behind. Send
+            // only the newest bounded UI window, split into small messages, so
+            // recovery reaches the current tail without one giant allocation.
+            let mut result = db_store.query_latest_window(TRAFFIC_RECONNECT_WINDOW_LIMIT);
+            result.records.retain(|record| record.seq > cursor);
+            result
         } else {
-            db_store.query_latest_window(500)
+            db_store.query_latest_window(TRAFFIC_DELTA_BATCH_LIMIT)
         };
         let new_records: Vec<_> = result
             .records
@@ -832,15 +849,45 @@ impl PushManager {
         } else {
             Vec::new()
         };
+        let oldest_sequence = db_store.oldest_sequence();
 
-        let _ = self.send_traffic_delta_to_client(
-            client,
-            new_records,
-            updated_records,
-            result.has_more,
-            result.total,
-            result.server_sequence,
-        );
+        if new_records.is_empty() {
+            let _ = self.send_traffic_delta_to_client(
+                client,
+                Vec::new(),
+                updated_records,
+                TrafficDeltaMetadata {
+                    has_more: result.has_more,
+                    server_total: result.total,
+                    server_sequence: result.server_sequence,
+                    oldest_sequence,
+                },
+            );
+            return;
+        }
+
+        let chunk_count = new_records.len().div_ceil(TRAFFIC_DELTA_BATCH_LIMIT);
+        for (index, chunk) in new_records.chunks(TRAFFIC_DELTA_BATCH_LIMIT).enumerate() {
+            let updates = if index == 0 {
+                updated_records.clone()
+            } else {
+                Vec::new()
+            };
+            let has_more = result.has_more || index + 1 < chunk_count;
+            if !self.send_traffic_delta_to_client(
+                client,
+                chunk.to_vec(),
+                updates,
+                TrafficDeltaMetadata {
+                    has_more,
+                    server_total: result.total,
+                    server_sequence: result.server_sequence,
+                    oldest_sequence,
+                },
+            ) {
+                break;
+            }
+        }
     }
 
     pub fn send_initial_traffic(&self, client: &Arc<PushClient>) {
@@ -1769,7 +1816,7 @@ pub fn start_push_tasks(manager: SharedPushManager) -> Vec<tokio::task::JoinHand
 
                 push_event(first_event);
 
-                loop {
+                for _ in 1..TRAFFIC_DELTA_BATCH_LIMIT {
                     match receiver.try_recv() {
                         Ok(event) => push_event(event),
                         Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
@@ -1796,6 +1843,7 @@ pub fn start_push_tasks(manager: SharedPushManager) -> Vec<tokio::task::JoinHand
                             updates,
                             db_store.count(),
                             db_store.current_sequence(),
+                            db_store.oldest_sequence(),
                         )
                         .await;
                 }
@@ -2325,6 +2373,66 @@ mod tests {
         cleanup_test_dir(&dir);
     }
 
+    #[tokio::test]
+    async fn send_initial_traffic_reconnects_with_bounded_latest_chunks() {
+        let dir = create_test_dir();
+        let store = Arc::new(TrafficDbStore::new(dir.clone(), 10_000, 0, None).unwrap());
+        let rules_storage = bifrost_storage::RulesStorage::with_dir(dir.join("rules")).unwrap();
+        let state = Arc::new(
+            AdminState::new_for_test(9915, rules_storage)
+                .with_traffic_db_store_shared(store.clone()),
+        );
+        let manager = Arc::new(PushManager::new(state));
+
+        for i in 0..2_500 {
+            let mut record = TrafficRecord::new(
+                format!("reconnect-{i}"),
+                "GET".to_string(),
+                format!("http://example.test/reconnect-{i}"),
+            );
+            record.status = 200;
+            store.record(record);
+        }
+
+        let (client, mut receiver) = manager.register_client(
+            "push-reconnect-window".to_string(),
+            ClientSubscription {
+                need_traffic: true,
+                last_sequence: Some(100),
+                ..Default::default()
+            },
+        );
+
+        manager.send_initial_traffic(&client);
+
+        let mut inserts = Vec::new();
+        for _ in 0..4 {
+            let message = receiver.try_recv().expect("expected reconnect chunk");
+            let PushMessage::TrafficDelta(data) = message else {
+                panic!("expected traffic delta");
+            };
+            assert!(data.inserts.len() <= TRAFFIC_DELTA_BATCH_LIMIT);
+            inserts.extend(data.inserts);
+        }
+
+        assert!(
+            receiver.try_recv().is_err(),
+            "reconnect must remain bounded"
+        );
+        assert_eq!(inserts.len(), TRAFFIC_RECONNECT_WINDOW_LIMIT);
+        assert_eq!(
+            inserts.first().map(|item| item.id.as_str()),
+            Some("reconnect-500")
+        );
+        assert_eq!(
+            inserts.last().map(|item| item.id.as_str()),
+            Some("reconnect-2499")
+        );
+        assert_eq!(client.get_subscription().last_sequence, Some(2_500));
+
+        cleanup_test_dir(&dir);
+    }
+
     #[test]
     fn client_subscription_update_keeps_last_sequence_monotonic() {
         let (client, _receiver) = PushClient::new(
@@ -2369,9 +2477,12 @@ mod tests {
             &client,
             vec![compact(100, "older-batch")],
             vec![],
-            false,
-            1,
-            200,
+            TrafficDeltaMetadata {
+                has_more: false,
+                server_total: 1,
+                server_sequence: 200,
+                oldest_sequence: Some(50),
+            },
         ));
 
         assert_eq!(client.get_subscription().last_sequence, Some(200));
@@ -2406,9 +2517,12 @@ mod tests {
             &client,
             vec![],
             vec![stale, latest.clone()],
-            false,
-            1,
-            10,
+            TrafficDeltaMetadata {
+                has_more: false,
+                server_total: 1,
+                server_sequence: 10,
+                oldest_sequence: Some(7),
+            },
         ));
 
         let message = receiver.try_recv().expect("expected traffic delta");
@@ -2420,6 +2534,43 @@ mod tests {
         assert_eq!(data.updates[0].id, "same-id");
         assert_eq!(data.updates[0].res_sz, latest.res_sz);
         assert_eq!(data.updates[0].fc, latest.fc);
+        assert_eq!(data.oldest_sequence, Some(7));
+    }
+
+    #[test]
+    fn send_traffic_delta_forwards_floor_without_records() {
+        let state = Arc::new(AdminState::new(9917));
+        let manager = PushManager::new(state);
+        let (client, mut receiver) = PushClient::new(
+            "push-client-floor-only".to_string(),
+            ClientSubscription {
+                need_traffic: true,
+                last_sequence: Some(100),
+                ..Default::default()
+            },
+        );
+        let client = Arc::new(client);
+
+        assert!(manager.send_traffic_delta_to_client(
+            &client,
+            vec![],
+            vec![],
+            TrafficDeltaMetadata {
+                has_more: false,
+                server_total: 80,
+                server_sequence: 101,
+                oldest_sequence: Some(21),
+            },
+        ));
+
+        let message = receiver.try_recv().expect("expected floor-only delta");
+        let PushMessage::TrafficDelta(data) = message else {
+            panic!("expected traffic delta");
+        };
+        assert!(data.inserts.is_empty());
+        assert!(data.updates.is_empty());
+        assert_eq!(data.oldest_sequence, Some(21));
+        assert_eq!(client.get_subscription().last_sequence, Some(100));
     }
 
     #[test]

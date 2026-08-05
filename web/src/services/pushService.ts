@@ -30,6 +30,8 @@ export interface TrafficUpdatesData {
   updated_records: TrafficSummary[];
   has_more: boolean;
   server_total: number;
+  server_sequence?: number;
+  oldest_sequence?: number | null;
 }
 
 export interface TrafficUpdatesDataCompact {

@@ -14,9 +14,15 @@ import { useShallow } from "zustand/react/shallow";
 import {
   useTrafficStore,
   applyTrafficRecordsMutationToFilteredRecords,
-  filterRecords,
+  hasAnyTrafficFilters,
   type PanelFilters,
 } from "../../stores/useTrafficStore";
+import {
+  scanBoundedTrafficMatches,
+  TRAFFIC_FILTER_INITIAL_MATCHES,
+} from "../../stores/boundedTrafficFilter";
+import { mergeBoundedTrafficWindow } from "../../stores/trafficWindow";
+import { getTrafficPage } from "../../api/traffic";
 import {
   isSystemProxyLiveEnabledByBifrost,
   useProxyStore,
@@ -131,6 +137,8 @@ export default function Traffic() {
   const records = useTrafficStore((state) => state.records);
   const recordsMutation = useTrafficStore((state) => state.recordsMutation);
   const hasMore = useTrafficStore((state) => state.hasMore);
+  const hasNewer = useTrafficStore((state) => state.hasNewer);
+  const historyLoading = useTrafficStore((state) => state.historyLoading);
   const toolbarFilters = useTrafficStore((state) => state.toolbarFilters);
   const filterConditions = useTrafficStore((state) => state.filterConditions);
   const autoScroll = useTrafficStore((state) => state.autoScroll);
@@ -167,6 +175,9 @@ export default function Traffic() {
   const {
     fetchTrafficDetail,
     clearTraffic,
+    backfillHistory,
+    loadNewer,
+    reloadRecords,
     setToolbarFilters,
     setFilterConditions,
     setAutoScroll,
@@ -178,6 +189,9 @@ export default function Traffic() {
     useShallow((state) => ({
       fetchTrafficDetail: state.fetchTrafficDetail,
       clearTraffic: state.clearTraffic,
+      backfillHistory: state.backfillHistory,
+      loadNewer: state.loadNewer,
+      reloadRecords: state.reloadRecords,
       setToolbarFilters: state.setToolbarFilters,
       setFilterConditions: state.setFilterConditions,
       setAutoScroll: state.setAutoScroll,
@@ -736,7 +750,10 @@ export default function Traffic() {
 
   const handleScrollToBottom = useCallback(() => {
     clearNewRecordsCount();
-  }, [clearNewRecordsCount]);
+    if (hasNewer) {
+      void reloadRecords();
+    }
+  }, [clearNewRecordsCount, hasNewer, reloadRecords]);
 
   const handleScrollTopChange = useCallback(
     (newScrollTop: number) => {
@@ -767,53 +784,181 @@ export default function Traffic() {
   const deferredToolbarFilters = useDeferredValue(toolbarFilters);
   const deferredFilterConditions = useDeferredValue(filterConditions);
   const deferredPanelFilters = useDeferredValue(panelFilters);
+  const filtersActive = useMemo(
+    () => hasAnyTrafficFilters(
+      deferredToolbarFilters,
+      deferredFilterConditions,
+      deferredPanelFilters,
+    ),
+    [deferredFilterConditions, deferredPanelFilters, deferredToolbarFilters],
+  );
   const [filteredRecords, setFilteredRecords] = useState<TrafficSummary[]>([]);
-  const appliedMutationVersionRef = useRef(-1);
+  const [filteredCursor, setFilteredCursor] = useState<number | null>(null);
+  const [filteredHasMore, setFilteredHasMore] = useState(false);
+  const [filterLoading, setFilterLoading] = useState(false);
+  const [filterLoadingMore, setFilterLoadingMore] = useState(false);
+  const filterGenerationRef = useRef(0);
+  const appliedMutationVersionRef = useRef(recordsMutation.version);
 
   useEffect(() => {
-    const needsFullRefilter =
-      recordsMutation.reset ||
-      recordsMutation.version < appliedMutationVersionRef.current;
-
-    if (needsFullRefilter) {
-      appliedMutationVersionRef.current = recordsMutation.version;
-      setFilteredRecords(
-        filterRecords(
-          records,
-          deferredToolbarFilters,
-          deferredFilterConditions,
-          deferredPanelFilters,
-        ),
-      );
+    const generation = ++filterGenerationRef.current;
+    if (!filtersActive) {
+      setFilteredRecords([]);
+      setFilteredCursor(null);
+      setFilteredHasMore(false);
+      setFilterLoading(false);
+      setFilterLoadingMore(false);
       return;
     }
 
-    if (recordsMutation.version === appliedMutationVersionRef.current) {
+    setFilteredRecords([]);
+    setFilteredCursor(null);
+    setFilteredHasMore(false);
+    setFilterLoading(true);
+    setFilterLoadingMore(false);
+
+    void scanBoundedTrafficMatches({
+      fetchPage: getTrafficPage,
+      toolbar: deferredToolbarFilters,
+      conditions: deferredFilterConditions,
+      panel: deferredPanelFilters,
+      isCurrent: () => generation === filterGenerationRef.current,
+    }).then((result) => {
+      if (result.cancelled || generation !== filterGenerationRef.current) {
+        return;
+      }
+      const latestTrafficState = useTrafficStore.getState();
+      const serverOldestSequence = latestTrafficState.serverOldestSequence;
+      appliedMutationVersionRef.current = latestTrafficState.recordsMutation.version;
+      setFilteredRecords(
+        serverOldestSequence === null
+          ? result.records
+          : result.records.filter(
+            (record) => record.sequence >= serverOldestSequence,
+          ),
+      );
+      setFilteredCursor(result.cursor);
+      setFilteredHasMore(result.hasMore);
+      setFilterLoading(false);
+    }).catch((error) => {
+      if (generation === filterGenerationRef.current) {
+        console.error("Failed to scan filtered traffic", error);
+        setFilterLoading(false);
+      }
+    });
+
+    return () => {
+      if (generation === filterGenerationRef.current) {
+        filterGenerationRef.current += 1;
+      }
+    };
+  }, [
+    deferredFilterConditions,
+    deferredPanelFilters,
+    deferredToolbarFilters,
+    filtersActive,
+  ]);
+
+  useEffect(() => {
+    if (filtersActive && recordsMutation.reset && records.length === 0) {
+      filterGenerationRef.current += 1;
+      appliedMutationVersionRef.current = recordsMutation.version;
+      setFilteredRecords([]);
+      setFilteredCursor(null);
+      setFilteredHasMore(false);
+      setFilterLoading(false);
+      setFilterLoadingMore(false);
+      return;
+    }
+
+    if (
+      !filtersActive ||
+      filterLoading ||
+      recordsMutation.reset ||
+      recordsMutation.version === appliedMutationVersionRef.current
+    ) {
       return;
     }
 
     appliedMutationVersionRef.current = recordsMutation.version;
-    setFilteredRecords((current) =>
-      applyTrafficRecordsMutationToFilteredRecords(
+    setFilteredRecords((current) => {
+      const updated = applyTrafficRecordsMutationToFilteredRecords(
         current,
         recordsMutation,
         deferredToolbarFilters,
         deferredFilterConditions,
         deferredPanelFilters,
-      ),
-    );
-  }, [recordsMutation]); // eslint-disable-line react-hooks/exhaustive-deps
+      );
+      return mergeBoundedTrafficWindow([], updated, "newer").records;
+    });
+  }, [
+    deferredFilterConditions,
+    deferredPanelFilters,
+    deferredToolbarFilters,
+    filterLoading,
+    filtersActive,
+    records.length,
+    recordsMutation,
+  ]);
 
-  useEffect(() => {
-    setFilteredRecords(
-      filterRecords(
-        records,
-        deferredToolbarFilters,
-        deferredFilterConditions,
-        deferredPanelFilters,
-      ),
-    );
-  }, [deferredFilterConditions, deferredPanelFilters, deferredToolbarFilters, records]);
+  const handleLoadOlderFiltered = useCallback(async () => {
+    if (
+      !filtersActive ||
+      filterLoading ||
+      filterLoadingMore ||
+      !filteredHasMore ||
+      filteredCursor === null
+    ) {
+      return;
+    }
+
+    const generation = filterGenerationRef.current;
+    setFilterLoadingMore(true);
+    try {
+      const result = await scanBoundedTrafficMatches({
+        fetchPage: getTrafficPage,
+        toolbar: deferredToolbarFilters,
+        conditions: deferredFilterConditions,
+        panel: deferredPanelFilters,
+        initialRecords: filteredRecords,
+        cursor: filteredCursor,
+        targetMatches: TRAFFIC_FILTER_INITIAL_MATCHES,
+        isCurrent: () => generation === filterGenerationRef.current,
+      });
+      if (!result.cancelled && generation === filterGenerationRef.current) {
+        const serverOldestSequence = useTrafficStore.getState().serverOldestSequence;
+        setFilteredRecords(
+          serverOldestSequence === null
+            ? result.records
+            : result.records.filter(
+              (record) => record.sequence >= serverOldestSequence,
+            ),
+        );
+        setFilteredCursor(result.cursor);
+        setFilteredHasMore(result.hasMore);
+      }
+    } catch (error) {
+      if (generation === filterGenerationRef.current) {
+        console.error("Failed to load older filtered traffic", error);
+      }
+    } finally {
+      if (generation === filterGenerationRef.current) {
+        setFilterLoadingMore(false);
+      }
+    }
+  }, [
+    deferredFilterConditions,
+    deferredPanelFilters,
+    deferredToolbarFilters,
+    filterLoading,
+    filterLoadingMore,
+    filteredCursor,
+    filteredHasMore,
+    filteredRecords,
+    filtersActive,
+  ]);
+
+  const displayedRecords = filtersActive ? filteredRecords : records;
 
   const styles = useMemo<Record<string, CSSProperties>>(
     () => {
@@ -939,13 +1084,17 @@ export default function Traffic() {
           />
         ) : (
           <VirtualTrafficTable
-            data={filteredRecords}
+            data={displayedRecords}
             onSelect={handleSelect}
             onDoubleClick={handleDoubleClick}
             selectedId={selectedId}
             selectedIds={selectedIds}
             onSelectedIdsChange={setSelectedIds}
-            hasMore={hasMore}
+            onLoadOlder={filtersActive ? handleLoadOlderFiltered : backfillHistory}
+            hasOlder={filtersActive ? filteredHasMore : hasMore}
+            onLoadNewer={filtersActive ? undefined : loadNewer}
+            hasNewer={filtersActive ? false : hasNewer}
+            loadingMore={filtersActive ? filterLoadingMore : historyLoading}
             autoScroll={autoScroll}
             onScrollPositionChange={handleScrollPositionChange}
             newRecordsCount={newRecordsCount}
@@ -953,6 +1102,22 @@ export default function Traffic() {
             initialScrollTop={scrollTop}
             onScrollTopChange={handleScrollTopChange}
           />
+        )}
+        {searchMode === "normal" && filterLoading && (
+          <div
+            data-testid="traffic-filter-loading"
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              pointerEvents: "none",
+              background: token.colorBgContainer,
+            }}
+          >
+            <Spin size="small" tip="Filtering history..." />
+          </div>
         )}
       </div>
     </div>

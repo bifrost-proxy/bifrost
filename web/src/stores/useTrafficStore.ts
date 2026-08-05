@@ -4,6 +4,12 @@ import type { TrafficSummary, TrafficRecord, ToolbarFilters, FilterCondition, Tr
 import * as api from '../api';
 import type { TrafficBodyContent } from '../api';
 import pushService, { type TrafficUpdatesData } from '../services/pushService';
+import {
+  buildTrafficRecordsMap,
+  getTrafficWindowBoundaries,
+  MAX_TRAFFIC_WINDOW_RECORDS,
+  mergeBoundedTrafficWindow,
+} from './trafficWindow';
 
 export interface TrafficRecordsMutation {
   version: number;
@@ -11,6 +17,7 @@ export interface TrafficRecordsMutation {
   inserted: TrafficSummary[];
   updated: TrafficSummary[];
   deletedIds: string[];
+  oldestSequenceFloor?: number | null;
 }
 
 interface TrafficState {
@@ -23,7 +30,9 @@ interface TrafficState {
   responseRawBody: TrafficBodyContent | null;
   serverTotal: number;
   serverSequence: number;
+  serverOldestSequence: number | null;
   hasMore: boolean;
+  hasNewer: boolean;
   oldestSequence: number | null;
   lastId: string | null;
   lastSequence: number | null;
@@ -67,6 +76,7 @@ interface TrafficState {
   fetchUpdates: () => Promise<void>;
   fetchInitialData: () => Promise<void>;
   backfillHistory: () => Promise<void>;
+  loadNewer: () => Promise<void>;
   catchUpUpdates: () => Promise<void>;
   reloadRecords: () => Promise<void>;
   fetchTrafficDetail: (id: string) => Promise<void>;
@@ -104,16 +114,18 @@ interface BatchedUpdate {
   newRecords: TrafficSummary[];
   updatedRecords: TrafficSummary[];
   serverTotal: number;
+  serverSequence: number;
+  oldestSequence: number | null;
+  sourceNewRecordCount: number;
   hasMore: boolean;
 }
 
 let pendingBatch: BatchedUpdate | null = null;
 let rafId: number | null = null;
+let updateTimerId: number | null = null;
 let lastUpdateTime = 0;
 let hasMoreBurst = 0;
 let historyBackfillGeneration = 0;
-let historyRetryTimerId: number | null = null;
-let historyRetryDelayMs = 1000;
 let recordsMutationVersion = 0;
 const TRAFFIC_SELECTION_SYNC_CHANNEL = 'bifrost-traffic-selection-sync';
 const trafficSelectionSyncChannel =
@@ -126,6 +138,18 @@ function capPendingIds(ids: Set<string>) {
     const first = ids.values().next().value as string | undefined;
     if (!first) break;
     ids.delete(first);
+  }
+}
+
+function clearPendingTrafficBatch() {
+  pendingBatch = null;
+  if (rafId !== null) {
+    window.cancelAnimationFrame(rafId);
+    rafId = null;
+  }
+  if (updateTimerId !== null) {
+    window.clearTimeout(updateTimerId);
+    updateTimerId = null;
   }
 }
 
@@ -258,10 +282,10 @@ const mergeIncrementalRecord = (
     account_name: next.account_name ?? existing.account_name,
   };
 
-  return preprocessRecord(merged);
+  return preprocessTrafficRecord(merged);
 };
 
-const preprocessRecord = (record: TrafficSummary): TrafficSummary => {
+export const preprocessTrafficRecord = (record: TrafficSummary): TrafficSummary => {
   const isH3 = record.is_h3 || record.protocol === 'h3' || record.protocol === 'h3s';
   const displayProtocol = isH3
     ? 'H3'
@@ -296,9 +320,9 @@ const preprocessRecord = (record: TrafficSummary): TrafficSummary => {
   return record;
 };
 
-const preprocessRecords = (records: TrafficSummary[]): TrafficSummary[] => {
+export const preprocessTrafficRecords = (records: TrafficSummary[]): TrafficSummary[] => {
   for (let i = 0; i < records.length; i++) {
-    preprocessRecord(records[i]);
+    preprocessTrafficRecord(records[i]);
   }
   return records;
 };
@@ -452,18 +476,6 @@ const createEmptyRecordsMutation = (): TrafficRecordsMutation => ({
   deletedIds: [],
 });
 
-const clearHistoryRetryTimer = () => {
-  if (historyRetryTimerId !== null) {
-    window.clearTimeout(historyRetryTimerId);
-    historyRetryTimerId = null;
-  }
-};
-
-const resetHistoryRetryState = () => {
-  clearHistoryRetryTimer();
-  historyRetryDelayMs = 1000;
-};
-
 const incrementCount = (counts: Map<string, number>, value: string | null | undefined) => {
   if (!value) {
     return;
@@ -544,17 +556,6 @@ const snapshotClientCatalog = (
   availableDomains: buildSortedKeys(catalog.domainCounts),
 });
 
-const addRecordToClientCatalog = (
-  catalog: ReturnType<typeof cloneClientCatalog>,
-  record: TrafficSummary,
-) => {
-  incrementCount(catalog.clientAppCounts, record.client_app || null);
-  incrementCount(catalog.accountNameCounts, record.account_name || null);
-  incrementCount(catalog.clientIpCounts, record.client_ip || null);
-  incrementCount(catalog.proxyPortCounts, record.listener_port ? String(record.listener_port) : null);
-  incrementCount(catalog.domainCounts, record.host || null);
-};
-
 const removeRecordFromClientCatalog = (
   catalog: ReturnType<typeof cloneClientCatalog>,
   record: TrafficSummary,
@@ -566,16 +567,6 @@ const removeRecordFromClientCatalog = (
   decrementCount(catalog.domainCounts, record.host || null);
 };
 
-const replaceRecordInClientCatalog = (
-  catalog: ReturnType<typeof cloneClientCatalog>,
-  previous: TrafficSummary | undefined,
-  next: TrafficSummary,
-) => {
-  if (previous) {
-    removeRecordFromClientCatalog(catalog, previous);
-  }
-  addRecordToClientCatalog(catalog, next);
-};
 export const isFilterConditionApplicable = (
   condition: FilterCondition,
 ): boolean => {
@@ -766,6 +757,12 @@ const hasPanelFilters = (panel: PanelFilters): boolean => {
   );
 };
 
+export const hasAnyTrafficFilters = (
+  toolbar: ToolbarFilters,
+  conditions: FilterCondition[],
+  panel: PanelFilters,
+): boolean => hasActiveFilters(toolbar, conditions) || hasPanelFilters(panel);
+
 const matchPanelFilters = (record: TrafficSummary, panel: PanelFilters): boolean => {
   const clientIpMatch = panel.clientIps.length === 0
     || panel.clientIps.includes(record.client_ip || '');
@@ -850,9 +847,14 @@ export const applyTrafficRecordsMutationToFilteredRecords = (
     return current;
   }
 
-  let next = mutation.deletedIds.length > 0
-    ? current.filter((record) => !mutation.deletedIds.includes(record.id))
+  const oldestSequenceFloor = mutation.oldestSequenceFloor;
+  let next = oldestSequenceFloor !== undefined && oldestSequenceFloor !== null
+    ? current.filter((record) => record.sequence >= oldestSequenceFloor)
     : current;
+
+  next = mutation.deletedIds.length > 0
+    ? next.filter((record) => !mutation.deletedIds.includes(record.id))
+    : next;
 
   if (mutation.updated.length > 0) {
     const updatedById = new Map(mutation.updated.map((record) => [record.id, record]));
@@ -898,7 +900,7 @@ export const applyTrafficRecordsMutationToFilteredRecords = (
   return mergeSortedTrafficRecords(next, matchingInserted);
 };
 
-const compactToSummary = (c: TrafficSummaryCompact): TrafficSummary => {
+export const compactTrafficSummaryToTrafficSummary = (c: TrafficSummaryCompact): TrafficSummary => {
   const FLAGS = { IS_TUNNEL: 1, IS_WEBSOCKET: 2, IS_SSE: 4, IS_H3: 8, HAS_RULE_HIT: 16 };
   return {
     id: c.id,
@@ -948,7 +950,9 @@ export const useTrafficStore = create<TrafficState>()(
       responseRawBody: null,
       serverTotal: 0,
       serverSequence: 0,
+      serverOldestSequence: null,
       hasMore: false,
+      hasNewer: false,
       oldestSequence: null,
       lastId: null,
       lastSequence: null,
@@ -1068,21 +1072,51 @@ export const useTrafficStore = create<TrafficState>()(
       handleTrafficPush: (data: TrafficUpdatesData) => {
         const state = get();
         if (state.paused) return;
-        if (data.new_records.length === 0 && data.updated_records.length === 0) return;
+        const hasRecordChanges =
+          data.new_records.length > 0 || data.updated_records.length > 0;
+        const hasMetadataChanges =
+          data.server_total !== state.serverTotal ||
+          (data.server_sequence !== undefined && data.server_sequence !== state.serverSequence) ||
+          (data.oldest_sequence !== undefined &&
+            data.oldest_sequence !== null &&
+            data.oldest_sequence > (state.serverOldestSequence ?? 0));
+        if (!hasRecordChanges && !hasMetadataChanges) return;
 
-        const preprocessedNew = preprocessRecords(data.new_records);
-        const preprocessedUpdated = preprocessRecords(data.updated_records);
+        const preprocessedNew = preprocessTrafficRecords(data.new_records);
+        const preprocessedUpdated = preprocessTrafficRecords(data.updated_records);
 
         if (pendingBatch) {
-          pendingBatch.newRecords.push(...preprocessedNew);
-          pendingBatch.updatedRecords.push(...preprocessedUpdated);
+          pendingBatch.newRecords = mergeBoundedTrafficWindow(
+            pendingBatch.newRecords,
+            preprocessedNew,
+            'newer',
+          ).records;
+          pendingBatch.updatedRecords = mergeBoundedTrafficWindow(
+            pendingBatch.updatedRecords,
+            preprocessedUpdated,
+            'newer',
+          ).records;
           pendingBatch.serverTotal = data.server_total;
+          pendingBatch.serverSequence = Math.max(
+            pendingBatch.serverSequence,
+            data.server_sequence ?? 0,
+          );
+          if (data.oldest_sequence !== undefined && data.oldest_sequence !== null) {
+            pendingBatch.oldestSequence = Math.max(
+              pendingBatch.oldestSequence ?? 0,
+              data.oldest_sequence,
+            );
+          }
+          pendingBatch.sourceNewRecordCount += preprocessedNew.length;
           pendingBatch.hasMore = data.has_more;
         } else {
           pendingBatch = {
-            newRecords: [...preprocessedNew],
-            updatedRecords: [...preprocessedUpdated],
+            newRecords: mergeBoundedTrafficWindow([], preprocessedNew, 'newer').records,
+            updatedRecords: mergeBoundedTrafficWindow([], preprocessedUpdated, 'newer').records,
             serverTotal: data.server_total,
+            serverSequence: data.server_sequence ?? state.serverSequence,
+            oldestSequence: data.oldest_sequence ?? state.serverOldestSequence,
+            sourceNewRecordCount: preprocessedNew.length,
             hasMore: data.has_more,
           };
         }
@@ -1090,11 +1124,12 @@ export const useTrafficStore = create<TrafficState>()(
         const now = performance.now();
         const timeSinceLastUpdate = now - lastUpdateTime;
 
-        if (rafId !== null) {
+        if (rafId !== null || updateTimerId !== null) {
           return;
         }
 
         const scheduleUpdate = () => {
+          updateTimerId = null;
           rafId = requestAnimationFrame(() => {
             rafId = null;
             const batch = pendingBatch;
@@ -1103,8 +1138,7 @@ export const useTrafficStore = create<TrafficState>()(
             lastUpdateTime = performance.now();
 
             set((prevState) => {
-              const recordsMap = prevState.recordsMap;
-              const clientCatalog = cloneClientCatalog(prevState);
+              const recordsMap = new Map(prevState.recordsMap);
               let hasChanges = false;
               const uniqueNewRecords: TrafficSummary[] = [];
               const replacedRecords: TrafficSummary[] = [];
@@ -1115,7 +1149,6 @@ export const useTrafficStore = create<TrafficState>()(
                 const mergedRecord = mergeIncrementalRecord(existing, r);
                 if (shouldReplaceRecord(existing, mergedRecord)) {
                   recordsMap.set(r.id, mergedRecord);
-                  replaceRecordInClientCatalog(clientCatalog, existing, mergedRecord);
                   hasChanges = true;
                   if (hasRecordInList(prevState.records, r.id)) {
                     replacedRecords.push(mergedRecord);
@@ -1130,14 +1163,13 @@ export const useTrafficStore = create<TrafficState>()(
               for (const r of batch.newRecords) {
                 if (!recordsMap.has(r.id)) {
                   recordsMap.set(r.id, r);
-                  addRecordToClientCatalog(clientCatalog, r);
                   hasChanges = true;
                   actualNewCount++;
                   uniqueNewRecords.push(r);
                 }
               }
 
-              const newPendingIds = prevState.pendingIds;
+              const newPendingIds = new Set(prevState.pendingIds);
 
               for (const r of batch.updatedRecords) {
                 const isPending = isPendingRecord(r);
@@ -1157,19 +1189,62 @@ export const useTrafficStore = create<TrafficState>()(
               let allRecords: TrafficSummary[];
               if (hasChanges) {
                 allRecords = replaceUpdatedTrafficRecordsInList(prevState.records, replacedRecords);
-                allRecords = mergeNewRecordsIntoList(allRecords, uniqueNewRecords);
+                if (!prevState.hasNewer) {
+                  allRecords = mergeNewRecordsIntoList(allRecords, uniqueNewRecords);
+                }
               } else {
                 allRecords = prevState.records;
               }
+              const serverOldestSequence = batch.oldestSequence === null
+                ? prevState.serverOldestSequence
+                : Math.max(
+                  prevState.serverOldestSequence ?? 0,
+                  batch.oldestSequence,
+                );
+              if (serverOldestSequence !== null) {
+                allRecords = allRecords.filter(
+                  (record) => record.sequence >= serverOldestSequence,
+                );
+              }
+              const latestWindowLimit = prevState.hasNewer
+                ? MAX_TRAFFIC_WINDOW_RECORDS
+                : Math.min(MAX_TRAFFIC_WINDOW_RECORDS, batch.serverTotal);
+              const bounded = mergeBoundedTrafficWindow(
+                allRecords,
+                [],
+                'newer',
+                latestWindowLimit,
+              );
+              allRecords = bounded.records;
               const boundaries = getBoundaryState(allRecords);
+              const visibleRecordsMap = buildTrafficRecordsMap(allRecords);
+              const visibleClientCatalog = buildClientCatalog(allRecords);
+              for (const pendingId of newPendingIds) {
+                if (!visibleRecordsMap.has(pendingId)) {
+                  newPendingIds.delete(pendingId);
+                }
+              }
+              const sourceLatest = [...batch.updatedRecords, ...batch.newRecords]
+                .reduce<TrafficSummary | null>((latest, record) => (
+                  !latest || record.sequence > latest.sequence ? record : latest
+                ), null);
+              const sourceLastSequence = Math.max(
+                prevState.lastSequence ?? 0,
+                sourceLatest?.sequence ?? 0,
+              ) || null;
+              const sourceLastId = sourceLatest && sourceLatest.sequence >= (prevState.lastSequence ?? 0)
+                ? sourceLatest.id
+                : prevState.lastId;
 
-              const updatedNewRecordsCount = prevState.autoScroll
+              const updatedNewRecordsCount = prevState.autoScroll && !prevState.hasNewer
                 ? 0
-                : prevState.newRecordsCount + actualNewCount + promotedUpdateCount;
+                : prevState.newRecordsCount
+                  + Math.max(actualNewCount, batch.sourceNewRecordCount)
+                  + promotedUpdateCount;
 
               pushService.updateSubscription({
-                last_traffic_id: boundaries.lastId || undefined,
-                last_sequence: boundaries.lastSequence || undefined,
+                last_traffic_id: sourceLastId || undefined,
+                last_sequence: sourceLastSequence || undefined,
                 pending_ids: Array.from(newPendingIds),
               });
 
@@ -1189,24 +1264,27 @@ export const useTrafficStore = create<TrafficState>()(
 
               return {
                 records: allRecords,
-                recordsMap,
+                recordsMap: visibleRecordsMap,
                 serverTotal: batch.serverTotal,
-                hasMore: prevState.hasMore,
+                serverSequence: Math.max(prevState.serverSequence, batch.serverSequence),
+                serverOldestSequence,
+                hasMore: prevState.hasMore || bounded.trimmedSide === 'older',
                 oldestSequence: boundaries.oldestSequence,
-                lastId: boundaries.lastId,
-                lastSequence: boundaries.lastSequence,
+                lastId: sourceLastId,
+                lastSequence: sourceLastSequence,
                 pendingIds: newPendingIds,
                 newRecordsCount: updatedNewRecordsCount,
                 currentRecord: updatedCurrentRecord,
-                recordsMutation: hasChanges
+                recordsMutation: hasChanges || serverOldestSequence !== prevState.serverOldestSequence
                   ? createRecordsMutation({
                     reset: false,
                     inserted: uniqueNewRecords,
                     updated: replacedRecords,
                     deletedIds: [],
+                    oldestSequenceFloor: serverOldestSequence,
                   })
                   : prevState.recordsMutation,
-                ...snapshotClientCatalog(clientCatalog),
+                ...visibleClientCatalog,
               };
             });
           });
@@ -1215,124 +1293,21 @@ export const useTrafficStore = create<TrafficState>()(
         if (timeSinceLastUpdate >= UPDATE_THROTTLE_MS) {
           scheduleUpdate();
         } else {
-          setTimeout(scheduleUpdate, UPDATE_THROTTLE_MS - timeSinceLastUpdate);
+          updateTimerId = window.setTimeout(
+            scheduleUpdate,
+            UPDATE_THROTTLE_MS - timeSinceLastUpdate,
+          );
         }
       },
 
       handleTrafficDelta: (data: TrafficDeltaData) => {
-        const state = get();
-        if (state.paused) return;
-        if (data.inserts.length === 0 && data.updates.length === 0) return;
-
-        const newRecords = data.inserts.map(c => preprocessRecord(compactToSummary(c)));
-        const updatedRecords = data.updates.map(c => preprocessRecord(compactToSummary(c)));
-
-        set((prevState) => {
-          const recordsMap = prevState.recordsMap;
-          const clientCatalog = cloneClientCatalog(prevState);
-          let hasChanges = false;
-          const uniqueNewRecords: TrafficSummary[] = [];
-          const replacedRecords: TrafficSummary[] = [];
-          let promotedUpdateCount = 0;
-
-          for (const r of updatedRecords) {
-            const existing = recordsMap.get(r.id);
-            const mergedRecord = mergeIncrementalRecord(existing, r);
-            if (shouldReplaceRecord(existing, mergedRecord)) {
-              recordsMap.set(r.id, mergedRecord);
-              replaceRecordInClientCatalog(clientCatalog, existing, mergedRecord);
-              hasChanges = true;
-              if (hasRecordInList(prevState.records, r.id)) {
-                replacedRecords.push(mergedRecord);
-              } else {
-                uniqueNewRecords.push(mergedRecord);
-                promotedUpdateCount += 1;
-              }
-            }
-          }
-
-          let actualNewCount = 0;
-          for (const r of newRecords) {
-            if (!recordsMap.has(r.id)) {
-              recordsMap.set(r.id, r);
-              addRecordToClientCatalog(clientCatalog, r);
-              hasChanges = true;
-              actualNewCount++;
-              uniqueNewRecords.push(r);
-            }
-          }
-
-          const newPendingIds = prevState.pendingIds;
-
-          for (const r of updatedRecords) {
-            const isPending = isPendingRecord(r);
-            if (!isPending) {
-              newPendingIds.delete(r.id);
-            }
-          }
-
-          for (const r of newRecords) {
-            const isPending = isPendingRecord(r);
-            if (isPending) {
-              newPendingIds.add(r.id);
-            }
-          }
-          capPendingIds(newPendingIds);
-
-          let allRecords: TrafficSummary[];
-          if (hasChanges) {
-            allRecords = replaceUpdatedTrafficRecordsInList(prevState.records, replacedRecords);
-            allRecords = mergeNewRecordsIntoList(allRecords, uniqueNewRecords);
-          } else {
-            allRecords = prevState.records;
-          }
-          const boundaries = getBoundaryState(allRecords);
-
-          const updatedNewRecordsCount = prevState.autoScroll
-            ? 0
-            : prevState.newRecordsCount + actualNewCount + promotedUpdateCount;
-
-          pushService.updateSubscription({
-            last_sequence: boundaries.lastSequence || undefined,
-            pending_ids: Array.from(newPendingIds),
-          });
-
-          let updatedCurrentRecord = prevState.currentRecord;
-          if (updatedCurrentRecord) {
-            const updatedSummary = findLastRecordById(
-              updatedRecords,
-              updatedCurrentRecord.id,
-            );
-            if (updatedSummary) {
-              updatedCurrentRecord = mergeDetailWithSummary(
-                updatedCurrentRecord,
-                updatedSummary,
-              );
-            }
-          }
-
-          return {
-            records: allRecords,
-            recordsMap,
-            serverTotal: data.server_total,
-            serverSequence: data.server_sequence,
-            hasMore: prevState.hasMore,
-            oldestSequence: boundaries.oldestSequence,
-            lastId: boundaries.lastId,
-            lastSequence: boundaries.lastSequence,
-            pendingIds: newPendingIds,
-            newRecordsCount: updatedNewRecordsCount,
-            currentRecord: updatedCurrentRecord,
-            recordsMutation: hasChanges
-              ? createRecordsMutation({
-                reset: false,
-                inserted: uniqueNewRecords,
-                updated: replacedRecords,
-                deletedIds: [],
-              })
-              : prevState.recordsMutation,
-            ...snapshotClientCatalog(clientCatalog),
-          };
+        get().handleTrafficPush({
+          new_records: data.inserts.map(compactTrafficSummaryToTrafficSummary),
+          updated_records: data.updates.map(compactTrafficSummaryToTrafficSummary),
+          has_more: data.has_more,
+          server_total: data.server_total,
+          server_sequence: data.server_sequence,
+          oldest_sequence: data.oldest_sequence,
         });
       },
 
@@ -1376,8 +1351,8 @@ export const useTrafficStore = create<TrafficState>()(
             pendingIds,
             serverTotal: Math.max(prevState.serverTotal - removedCount, 0),
             oldestSequence: boundaries.oldestSequence,
-            lastId: boundaries.lastId,
-            lastSequence: boundaries.lastSequence,
+            lastId: prevState.lastId,
+            lastSequence: prevState.lastSequence,
             currentRecord: detailRemoved ? null : prevState.currentRecord,
             requestBody: detailRemoved ? null : prevState.requestBody,
             responseBody: detailRemoved ? null : prevState.responseBody,
@@ -1405,7 +1380,6 @@ export const useTrafficStore = create<TrafficState>()(
         }
 
         const generation = ++historyBackfillGeneration;
-        resetHistoryRetryState();
         set({ loading: true, error: null });
         try {
           const filter: TrafficUpdatesFilter = {
@@ -1416,8 +1390,8 @@ export const useTrafficStore = create<TrafficState>()(
             return;
           }
 
-          const convertedRecords = response.new_records.map(compactToSummary);
-          const preprocessedRecords = preprocessRecords(convertedRecords);
+          const convertedRecords = response.new_records.map(compactTrafficSummaryToTrafficSummary);
+          const preprocessedRecords = preprocessTrafficRecords(convertedRecords);
 
 
           const newPendingIds = new Set<string>();
@@ -1439,6 +1413,7 @@ export const useTrafficStore = create<TrafficState>()(
             serverTotal: response.server_total,
             serverSequence: response.server_sequence,
             hasMore: response.has_more,
+            hasNewer: false,
             oldestSequence: boundaries.oldestSequence,
             lastId: boundaries.lastId,
             lastSequence: boundaries.lastSequence,
@@ -1455,9 +1430,6 @@ export const useTrafficStore = create<TrafficState>()(
             }),
             ...clientCatalog,
           });
-          if (response.has_more) {
-            void get().backfillHistory();
-          }
         } catch (e) {
           if (generation === historyBackfillGeneration) {
             set({ error: (e as Error).message, loading: false });
@@ -1472,119 +1444,132 @@ export const useTrafficStore = create<TrafficState>()(
         }
 
         const generation = historyBackfillGeneration;
-        clearHistoryRetryTimer();
         set({ historyLoading: true });
 
         try {
-          while (true) {
-            const currentState = get();
-            if (
-              generation !== historyBackfillGeneration ||
-              !currentState.hasMore ||
-              currentState.oldestSequence === null
-            ) {
-              break;
-            }
+          const response = await api.getTrafficPage({
+            cursor: state.oldestSequence,
+            limit: HISTORY_BATCH_LIMIT,
+            direction: 'backward',
+          });
 
-            const response = await api.getTrafficPage({
-              cursor: currentState.oldestSequence,
-              limit: HISTORY_BATCH_LIMIT,
-              direction: 'backward',
-            });
-            historyRetryDelayMs = 1000;
-
-            if (generation !== historyBackfillGeneration) {
-              return;
-            }
-
-            const olderRecords = preprocessRecords(
-              response.records.map(compactToSummary).reverse(),
-            );
-
-            set((prevState) => {
-              if (generation !== historyBackfillGeneration) {
-                return {};
-              }
-
-              const recordsMap = new Map(prevState.recordsMap);
-              const clientCatalog = cloneClientCatalog(prevState);
-              const uniqueOlderRecords: TrafficSummary[] = [];
-              const replacedRecords: TrafficSummary[] = [];
-
-              for (const record of olderRecords) {
-                const existing = recordsMap.get(record.id);
-                if (!existing) {
-                  recordsMap.set(record.id, record);
-                  addRecordToClientCatalog(clientCatalog, record);
-                  uniqueOlderRecords.push(record);
-                  continue;
-                }
-
-                const mergedRecord = mergeIncrementalRecord(existing, record);
-                if (shouldReplaceRecord(existing, mergedRecord)) {
-                  recordsMap.set(record.id, mergedRecord);
-                  replaceRecordInClientCatalog(clientCatalog, existing, mergedRecord);
-                  if (hasRecordInList(prevState.records, record.id)) {
-                    replacedRecords.push(mergedRecord);
-                  } else {
-                    uniqueOlderRecords.push(mergedRecord);
-                  }
-                }
-              }
-
-              let records = replaceUpdatedTrafficRecordsInList(prevState.records, replacedRecords);
-              records = uniqueOlderRecords.length > 0
-                ? mergeNewRecordsIntoList(records, uniqueOlderRecords)
-                : records;
-              const boundaries = getBoundaryState(records);
-
-              return {
-                records,
-                recordsMap,
-                serverTotal: response.total,
-                serverSequence: response.server_sequence,
-                hasMore: response.has_more,
-                oldestSequence: boundaries.oldestSequence,
-                lastId: boundaries.lastId,
-                lastSequence: boundaries.lastSequence,
-                recordsMutation: (uniqueOlderRecords.length > 0 || replacedRecords.length > 0)
-                  ? createRecordsMutation({
-                    reset: false,
-                    inserted: uniqueOlderRecords,
-                    updated: replacedRecords,
-                    deletedIds: [],
-                  })
-                  : prevState.recordsMutation,
-                ...snapshotClientCatalog(clientCatalog),
-              };
-            });
-
-            const afterMerge = get();
-            if (!afterMerge.hasMore || olderRecords.length === 0) {
-              break;
-            }
-
-            await new Promise<void>((resolve) => {
-              window.setTimeout(resolve, 0);
-            });
+          if (generation !== historyBackfillGeneration) {
+            return;
           }
+
+          const olderRecords = preprocessTrafficRecords(
+            response.records.map(compactTrafficSummaryToTrafficSummary).reverse(),
+          );
+
+          set((prevState) => {
+            if (generation !== historyBackfillGeneration) {
+              return {};
+            }
+
+            const merged = mergeBoundedTrafficWindow(
+              prevState.records,
+              olderRecords,
+              'older',
+            );
+            const records = merged.records;
+            const boundaries = getTrafficWindowBoundaries(records);
+            const pendingIds = new Set(
+              records.filter(isPendingRecord).map((record) => record.id),
+            );
+            capPendingIds(pendingIds);
+
+            return {
+              records,
+              recordsMap: buildTrafficRecordsMap(records),
+              serverTotal: response.total,
+              serverSequence: Math.max(prevState.serverSequence, response.server_sequence),
+              hasMore: response.has_more && olderRecords.length > 0,
+              hasNewer: prevState.hasNewer || merged.trimmedSide === 'newer',
+              oldestSequence: boundaries.oldestSequence,
+              pendingIds,
+              recordsMutation: createRecordsMutation({
+                reset: true,
+                inserted: records,
+                updated: [],
+                deletedIds: [],
+              }),
+              ...buildClientCatalog(records),
+            };
+          });
         } catch (e) {
           if (generation === historyBackfillGeneration) {
             set({ error: (e as Error).message });
-            const retryGeneration = generation;
-            const retryDelay = historyRetryDelayMs;
-            historyRetryDelayMs = Math.min(historyRetryDelayMs * 2, 10_000);
-            clearHistoryRetryTimer();
-            historyRetryTimerId = window.setTimeout(() => {
-              historyRetryTimerId = null;
-              if (retryGeneration !== historyBackfillGeneration) {
-                return;
-              }
-              const nextState = get();
-              if (nextState.hasMore && nextState.oldestSequence !== null) {
-                void nextState.backfillHistory();
-              }
-            }, retryDelay);
+          }
+        } finally {
+          if (generation === historyBackfillGeneration) {
+            set({ historyLoading: false });
+          }
+        }
+      },
+
+      loadNewer: async () => {
+        const state = get();
+        const newestSequence = state.records.at(-1)?.sequence ?? null;
+        if (state.historyLoading || !state.hasNewer || newestSequence === null) {
+          return;
+        }
+
+        const generation = historyBackfillGeneration;
+        set({ historyLoading: true });
+
+        try {
+          const response = await api.getTrafficPage({
+            cursor: newestSequence,
+            limit: HISTORY_BATCH_LIMIT,
+            direction: 'forward',
+          });
+
+          if (generation !== historyBackfillGeneration) {
+            return;
+          }
+
+          const newerRecords = preprocessTrafficRecords(
+            response.records.map(compactTrafficSummaryToTrafficSummary),
+          );
+
+          set((prevState) => {
+            if (generation !== historyBackfillGeneration) {
+              return {};
+            }
+
+            const merged = mergeBoundedTrafficWindow(
+              prevState.records,
+              newerRecords,
+              'newer',
+            );
+            const records = merged.records;
+            const boundaries = getTrafficWindowBoundaries(records);
+            const pendingIds = new Set(
+              records.filter(isPendingRecord).map((record) => record.id),
+            );
+            capPendingIds(pendingIds);
+
+            return {
+              records,
+              recordsMap: buildTrafficRecordsMap(records),
+              serverTotal: response.total,
+              serverSequence: Math.max(prevState.serverSequence, response.server_sequence),
+              hasMore: prevState.hasMore || merged.trimmedSide === 'older',
+              hasNewer: response.has_more && newerRecords.length > 0,
+              oldestSequence: boundaries.oldestSequence,
+              pendingIds,
+              recordsMutation: createRecordsMutation({
+                reset: true,
+                inserted: records,
+                updated: [],
+                deletedIds: [],
+              }),
+              ...buildClientCatalog(records),
+            };
+          });
+        } catch (e) {
+          if (generation === historyBackfillGeneration) {
+            set({ error: (e as Error).message });
           }
         } finally {
           if (generation === historyBackfillGeneration) {
@@ -1610,97 +1595,12 @@ export const useTrafficStore = create<TrafficState>()(
           const response = await api.getTrafficUpdates(filter);
 
           if (response.new_records.length > 0 || response.updated_records.length > 0) {
-            const convertedNew = response.new_records.map(compactToSummary);
-            const convertedUpdated = response.updated_records.map(compactToSummary);
-            const preprocessedNew = preprocessRecords(convertedNew);
-            const preprocessedUpdated = preprocessRecords(convertedUpdated);
-
-            set((prevState) => {
-              const recordsMap = prevState.recordsMap;
-              const clientCatalog = cloneClientCatalog(prevState);
-              let hasChanges = false;
-              const uniqueNewRecords: TrafficSummary[] = [];
-              const replacedRecords: TrafficSummary[] = [];
-              let promotedUpdateCount = 0;
-
-              for (const r of preprocessedUpdated) {
-                const existing = recordsMap.get(r.id);
-                const mergedRecord = mergeIncrementalRecord(existing, r);
-                if (shouldReplaceRecord(existing, mergedRecord)) {
-                  recordsMap.set(r.id, mergedRecord);
-                  replaceRecordInClientCatalog(clientCatalog, existing, mergedRecord);
-                  hasChanges = true;
-                  if (hasRecordInList(prevState.records, r.id)) {
-                    replacedRecords.push(mergedRecord);
-                  } else {
-                    uniqueNewRecords.push(mergedRecord);
-                    promotedUpdateCount += 1;
-                  }
-                }
-              }
-
-              let actualNewCount = 0;
-              for (const r of preprocessedNew) {
-                if (!recordsMap.has(r.id)) {
-                  recordsMap.set(r.id, r);
-                  addRecordToClientCatalog(clientCatalog, r);
-                  hasChanges = true;
-                  actualNewCount++;
-                  uniqueNewRecords.push(r);
-                }
-              }
-
-              const newPendingIds = prevState.pendingIds;
-
-              for (const r of preprocessedUpdated) {
-                const isPending = isPendingRecord(r);
-                if (!isPending) {
-                  newPendingIds.delete(r.id);
-                }
-              }
-
-              for (const r of preprocessedNew) {
-                const isPending = isPendingRecord(r);
-                if (isPending) {
-                  newPendingIds.add(r.id);
-                }
-              }
-              capPendingIds(newPendingIds);
-
-              let allRecords: TrafficSummary[];
-              if (hasChanges) {
-                allRecords = replaceUpdatedTrafficRecordsInList(prevState.records, replacedRecords);
-                allRecords = mergeNewRecordsIntoList(allRecords, uniqueNewRecords);
-              } else {
-                allRecords = prevState.records;
-              }
-              const boundaries = getBoundaryState(allRecords);
-
-              const updatedNewRecordsCount = prevState.autoScroll
-                ? 0
-                : prevState.newRecordsCount + actualNewCount + promotedUpdateCount;
-
-              return {
-                records: allRecords,
-                recordsMap,
-                serverTotal: response.server_total,
-                serverSequence: response.server_sequence,
-                hasMore: prevState.hasMore,
-                oldestSequence: boundaries.oldestSequence,
-                lastId: boundaries.lastId,
-                lastSequence: boundaries.lastSequence,
-                pendingIds: newPendingIds,
-                newRecordsCount: updatedNewRecordsCount,
-                recordsMutation: hasChanges
-                  ? createRecordsMutation({
-                    reset: false,
-                    inserted: uniqueNewRecords,
-                    updated: replacedRecords,
-                    deletedIds: [],
-                  })
-                  : prevState.recordsMutation,
-                ...snapshotClientCatalog(clientCatalog),
-              };
+            get().handleTrafficDelta({
+              inserts: response.new_records,
+              updates: response.updated_records,
+              has_more: response.has_more,
+              server_total: response.server_total,
+              server_sequence: response.server_sequence,
             });
           }
 
@@ -1753,88 +1653,12 @@ export const useTrafficStore = create<TrafficState>()(
           }));
 
           if (response.new_records.length > 0 || response.updated_records.length > 0) {
-            const convertedNew = response.new_records.map(compactToSummary);
-            const convertedUpdated = response.updated_records.map(compactToSummary);
-            const preprocessedNew = preprocessRecords(convertedNew);
-            const preprocessedUpdated = preprocessRecords(convertedUpdated);
-
-            set((prevState) => {
-              const recordsMap = prevState.recordsMap;
-              const clientCatalog = cloneClientCatalog(prevState);
-              let hasChanges = false;
-              const uniqueNewRecords: TrafficSummary[] = [];
-              const replacedRecords: TrafficSummary[] = [];
-
-              for (const r of preprocessedUpdated) {
-                const existing = recordsMap.get(r.id);
-                const mergedRecord = mergeIncrementalRecord(existing, r);
-                if (shouldReplaceRecord(existing, mergedRecord)) {
-                  recordsMap.set(r.id, mergedRecord);
-                  replaceRecordInClientCatalog(clientCatalog, existing, mergedRecord);
-                  hasChanges = true;
-                  if (hasRecordInList(prevState.records, r.id)) {
-                    replacedRecords.push(mergedRecord);
-                  } else {
-                    uniqueNewRecords.push(mergedRecord);
-                  }
-                }
-              }
-
-              for (const r of preprocessedNew) {
-                if (!recordsMap.has(r.id)) {
-                  recordsMap.set(r.id, r);
-                  addRecordToClientCatalog(clientCatalog, r);
-                  hasChanges = true;
-                  uniqueNewRecords.push(r);
-                }
-              }
-
-              const newPendingIds = new Set(prevState.pendingIds);
-              for (const r of preprocessedUpdated) {
-                if (!isPendingRecord(r)) {
-                  newPendingIds.delete(r.id);
-                }
-              }
-              for (const r of preprocessedNew) {
-                if (isPendingRecord(r)) {
-                  newPendingIds.add(r.id);
-                }
-              }
-              capPendingIds(newPendingIds);
-
-              let allRecords = prevState.records;
-              if (hasChanges) {
-                allRecords = replaceUpdatedTrafficRecordsInList(allRecords, replacedRecords);
-                allRecords = mergeNewRecordsIntoList(allRecords, uniqueNewRecords);
-              }
-              const boundaries = getBoundaryState(allRecords);
-
-              pushService.updateSubscription({
-                last_traffic_id: boundaries.lastId || undefined,
-                last_sequence: boundaries.lastSequence || undefined,
-                pending_ids: Array.from(newPendingIds),
-              });
-
-              return {
-                records: allRecords,
-                recordsMap,
-                serverTotal: response.server_total,
-                serverSequence: response.server_sequence,
-                hasMore: prevState.hasMore,
-                oldestSequence: boundaries.oldestSequence,
-                lastId: boundaries.lastId,
-                lastSequence: boundaries.lastSequence,
-                pendingIds: newPendingIds,
-                recordsMutation: hasChanges
-                  ? createRecordsMutation({
-                    reset: false,
-                    inserted: uniqueNewRecords,
-                    updated: replacedRecords,
-                    deletedIds: [],
-                  })
-                  : prevState.recordsMutation,
-                ...snapshotClientCatalog(clientCatalog),
-              };
+            get().handleTrafficDelta({
+              inserts: response.new_records,
+              updates: response.updated_records,
+              has_more: response.has_more,
+              server_total: response.server_total,
+              server_sequence: response.server_sequence,
             });
           }
         } catch (e) {
@@ -1855,8 +1679,8 @@ export const useTrafficStore = create<TrafficState>()(
             limit: INITIAL_WINDOW_LIMIT,
           };
           const response = await api.getTrafficUpdates(filter);
-          const convertedRecords = response.new_records.map(compactToSummary);
-          const preprocessedRecords = preprocessRecords(convertedRecords);
+          const convertedRecords = response.new_records.map(compactTrafficSummaryToTrafficSummary);
+          const preprocessedRecords = preprocessTrafficRecords(convertedRecords);
 
           const newPendingIds = new Set<string>();
           const newRecordsMap = new Map<string, TrafficSummary>();
@@ -1877,10 +1701,12 @@ export const useTrafficStore = create<TrafficState>()(
             serverTotal: response.server_total,
             serverSequence: response.server_sequence,
             hasMore: response.has_more,
+            hasNewer: false,
             oldestSequence: boundaries.oldestSequence,
             lastId: boundaries.lastId,
             lastSequence: boundaries.lastSequence,
             pendingIds: newPendingIds,
+            newRecordsCount: 0,
             filterVersion: get().filterVersion + 1,
             recordsMutation: createRecordsMutation({
               reset: true,
@@ -1897,9 +1723,6 @@ export const useTrafficStore = create<TrafficState>()(
             pending_ids: Array.from(newPendingIds),
           });
 
-          if (response.has_more) {
-            void get().backfillHistory();
-          }
         } catch {
           // reload is best-effort; errors are non-fatal
         }
@@ -2019,8 +1842,8 @@ export const useTrafficStore = create<TrafficState>()(
               pendingIds: newPendingIds,
               serverTotal: Math.max(state.serverTotal - removedCount, 0),
               oldestSequence: boundaries.oldestSequence,
-              lastId: boundaries.lastId,
-              lastSequence: boundaries.lastSequence,
+              lastId: state.lastId,
+              lastSequence: state.lastSequence,
               currentRecord: detailRemoved ? null : state.currentRecord,
               requestBody: detailRemoved ? null : state.requestBody,
               responseBody: detailRemoved ? null : state.responseBody,
@@ -2053,13 +1876,15 @@ export const useTrafficStore = create<TrafficState>()(
         }
 
         historyBackfillGeneration += 1;
-        resetHistoryRetryState();
+        clearPendingTrafficBatch();
         set({
           records: [],
           recordsMap: new Map(),
           serverTotal: 0,
           serverSequence: 0,
+          serverOldestSequence: null,
           hasMore: false,
+          hasNewer: false,
           oldestSequence: null,
           lastId: null,
           lastSequence: null,

@@ -396,6 +396,7 @@ export interface TrafficDeltaData {
   has_more: boolean;
   server_total: number;
   server_sequence: number;
+  oldest_sequence?: number | null;
 }
 
 export interface TrafficQueryRequest {

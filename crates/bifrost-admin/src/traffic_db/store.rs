@@ -1573,7 +1573,12 @@ impl TrafficDbStore {
                         CLEANUP_TRIGGER_OVERFLOW_PERCENT,
                         CLEANUP_TARGET_PERCENT,
                     );
-                    Self::compact_with_conn(&conn, false);
+                    // Count-based rolling retention is a hot write path. A
+                    // TRUNCATE checkpoint here holds the write lock while all
+                    // readers release the WAL and turns a burst into repeated
+                    // multi-second stalls. SQLite's normal auto-checkpoint is
+                    // sufficient because this cleanup is about record count,
+                    // not an immediate on-disk byte limit.
                 }
             }
         }
@@ -1784,6 +1789,16 @@ impl TrafficDbStore {
 
     pub fn current_sequence(&self) -> u64 {
         self.current_sequence.load(Ordering::Relaxed)
+    }
+
+    pub fn oldest_sequence(&self) -> Option<u64> {
+        let conn = self.read_pool.acquire();
+        conn.query_row("SELECT MIN(sequence) FROM traffic_records", [], |row| {
+            row.get::<_, Option<i64>>(0)
+        })
+        .ok()
+        .flatten()
+        .map(|sequence| sequence as u64)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<TrafficStoreEvent> {
@@ -2492,9 +2507,11 @@ mod tests {
         );
         store.record(record);
         assert_eq!(store.count(), 1);
+        assert_eq!(store.oldest_sequence(), Some(1));
 
         store.clear_with_active_ids(&[]);
         assert_eq!(store.count(), 0);
+        assert_eq!(store.oldest_sequence(), None);
 
         cleanup_test_dir(&dir);
     }
@@ -2527,6 +2544,10 @@ mod tests {
             CLEANUP_TARGET_PERCENT,
             expected_count,
             store.count()
+        );
+        assert_eq!(
+            store.oldest_sequence(),
+            Some((total - expected_count + 1) as u64),
         );
 
         cleanup_test_dir(&dir);

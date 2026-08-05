@@ -10,13 +10,15 @@ Bifrost WebUI Traffic 页在“刷新页面”或“首次进入”时，历史�
 
 同时 store 侧因 `records` 数量放大到万级，`clientApps / clientIps / domains` 派生每次 `records` 变化都全表 rebuild 会导致主线程卡顿。
 
-本方案统一以下能力：
+本方案统一以下能力。前端历史持有策略已由
+[`traffic-bounded-window.md`](./traffic-bounded-window.md) 替代：不再自动把完整历史回填到 WebView，
+而是使用 2,000 条双向滑动窗口和有界全历史筛选扫描；本文件继续描述首屏、Push 与 catch-up 的基础语义。
 
 - 首屏窗口固定“最新 500 条”（HTTP `updates` 与 Push `send_initial_traffic` 两路对齐）。
 - 前端维护 `lastSequence` / `oldestSequence` 两条边界游标：
   - `lastSequence` → forward 拉实时增量。
   - `oldestSequence` → backward 后台历史回填直至封底。
-- 历史回填独立 GET 分页 + retry / backoff，不阻塞主流。
+- 历史记录由用户滚动按需 GET 分页，不再后台无限回填。
 - 前端列表按 sequence 升序不变量、线性归并、原位替换。
 - 窗口 hidden 恢复 / WebSocket 重连触发一次 catch-up。
 - 派生 `clientApps / clientIps / domains` 三张 map 改为增量维护，不再遍历 `records` 重建。
@@ -32,7 +34,7 @@ Bifrost WebUI Traffic 页在“刷新页面”或“首次进入”时，历史�
 ### 必须实现
 
 - Traffic 页首屏或刷新后立刻加载“最新 500 条”，用户能看到最近流量而不是空列表。
-- 后台自动 backward backfill 直到数据库最老一条被拉回；用户可以看到完整历史。
+- backward/forward 双向分页允许用户滚动浏览完整历史，WebView 同时只保留有界窗口。
 - 实时 push delta 保持单调 forward，`last_sequence` 不回退。
 - 窗口 hidden 恢复或 WS 重连时主动 catch-up，弥补 backlog。
 - 前端列表始终按 `sequence` 升序，不做全表重排。
@@ -72,7 +74,7 @@ Bifrost WebUI Traffic 页在“刷新页面”或“首次进入”时，历史�
 - 历史批次先转成升序，然后与当前数组做“前插 / 线性归并”，不做全表 sort。
 - 实时增量批次做“后插 / 线性归并”。
 - 状态更新的记录（例如响应完成）原位替换，不改变位置。
-- `records.length` 达到内存上限（例如 20 000）时，从最老侧丢弃并同步更新 `oldestSequence`。
+- `records.length` 达到 2,000 条硬上限时，按分页方向从窗口另一侧淘汰，并同步更新显示边界。
 
 ### Push 与 HTTP 共用最新窗口语义
 
