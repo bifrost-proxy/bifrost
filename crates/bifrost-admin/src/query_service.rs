@@ -442,6 +442,7 @@ impl AdminQueryService {
 
         if let Some(pm) = &self.push_manager {
             pm.invalidate_overview_cache();
+            pm.notify_traffic_statistics_changed();
         }
 
         Ok("All traffic data cleared successfully".to_string())

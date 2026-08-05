@@ -1,6 +1,6 @@
 import type { TrafficSummary } from "../types";
 
-export const MAX_TRAFFIC_WINDOW_RECORDS = 2_000;
+export const MAX_TRAFFIC_WINDOW_RECORDS = 1_000;
 
 export type TrafficWindowMergeDirection = "older" | "newer";
 

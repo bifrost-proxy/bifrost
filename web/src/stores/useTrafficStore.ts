@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { TrafficSummary, TrafficRecord, ToolbarFilters, FilterCondition, TrafficUpdatesFilter, TrafficSummaryCompact, TrafficDeltaData } from '../types';
+import type { TrafficSummary, TrafficRecord, ToolbarFilters, FilterCondition, TrafficUpdatesFilter, TrafficSummaryCompact, TrafficDeltaData, TrafficStatistics } from '../types';
 import * as api from '../api';
 import type { TrafficBodyContent } from '../api';
 import pushService, { type TrafficUpdatesData } from '../services/pushService';
@@ -53,6 +53,7 @@ interface TrafficState {
   pushUnsubscribe: (() => void) | null;
   pushDeltaUnsubscribe: (() => void) | null;
   pushDeletedUnsubscribe: (() => void) | null;
+  pushStatisticsUnsubscribe: (() => void) | null;
   filterVersion: number;
   initialized: boolean;
   selectedId: string | undefined;
@@ -69,12 +70,16 @@ interface TrafficState {
   clientIpCounts: Map<string, number>;
   proxyPortCounts: Map<string, number>;
   domainCounts: Map<string, number>;
+  trafficStatisticsTotal: number;
+  trafficStatisticsSequence: number;
+  trafficStatisticsLoaded: boolean;
   recordsMutation: TrafficRecordsMutation;
 
   startPolling: () => void;
   stopPolling: () => void;
   fetchUpdates: () => Promise<void>;
   fetchInitialData: () => Promise<void>;
+  fetchTrafficStatistics: () => Promise<void>;
   backfillHistory: () => Promise<void>;
   loadNewer: () => Promise<void>;
   catchUpUpdates: () => Promise<void>;
@@ -96,6 +101,7 @@ interface TrafficState {
   handleTrafficPush: (data: TrafficUpdatesData) => void;
   handleTrafficDelta: (data: TrafficDeltaData) => void;
   handleTrafficDeleted: (ids: string[]) => void;
+  handleTrafficStatistics: (statistics: TrafficStatistics) => void;
   enablePush: () => void;
   disablePush: () => void;
 }
@@ -127,6 +133,7 @@ let lastUpdateTime = 0;
 let hasMoreBurst = 0;
 let historyBackfillGeneration = 0;
 let recordsMutationVersion = 0;
+let statisticsRequest: Promise<void> | null = null;
 const TRAFFIC_SELECTION_SYNC_CHANNEL = 'bifrost-traffic-selection-sync';
 const trafficSelectionSyncChannel =
   typeof BroadcastChannel !== 'undefined'
@@ -476,95 +483,32 @@ const createEmptyRecordsMutation = (): TrafficRecordsMutation => ({
   deletedIds: [],
 });
 
-const incrementCount = (counts: Map<string, number>, value: string | null | undefined) => {
-  if (!value) {
-    return;
-  }
-  counts.set(value, (counts.get(value) || 0) + 1);
-};
-
-const decrementCount = (counts: Map<string, number>, value: string | null | undefined) => {
-  if (!value) {
-    return;
-  }
-  const next = (counts.get(value) || 0) - 1;
-  if (next > 0) {
-    counts.set(value, next);
-  } else {
-    counts.delete(value);
-  }
-};
-
 const buildSortedKeys = (counts: Map<string, number>): string[] => (
   Array.from(counts.keys()).sort()
 );
 
-const buildClientCatalog = (records: TrafficSummary[]) => {
-  const clientAppCounts = new Map<string, number>();
-  const clientIpCounts = new Map<string, number>();
-  const proxyPortCounts = new Map<string, number>();
-  const domainCounts = new Map<string, number>();
-  const accountNameCounts = new Map<string, number>();
-
-  for (const record of records) {
-    incrementCount(clientAppCounts, record.client_app || null);
-    incrementCount(accountNameCounts, record.account_name || null);
-    incrementCount(clientIpCounts, record.client_ip || null);
-    incrementCount(proxyPortCounts, record.listener_port ? String(record.listener_port) : null);
-    incrementCount(domainCounts, record.host || null);
-  }
+const snapshotServerStatistics = (statistics: TrafficStatistics) => {
+  const clientIpCounts = new Map(Object.entries(statistics.client_ips));
+  const proxyPortCounts = new Map(Object.entries(statistics.proxy_ports));
+  const clientAppCounts = new Map(Object.entries(statistics.applications));
+  const accountNameCounts = new Map(Object.entries(statistics.account_names));
+  const domainCounts = new Map(Object.entries(statistics.domains));
 
   return {
-    clientAppCounts,
     clientIpCounts,
     proxyPortCounts,
-    domainCounts,
+    clientAppCounts,
     accountNameCounts,
-    availableClientApps: buildSortedKeys(clientAppCounts),
-    availableAccountNames: buildSortedKeys(accountNameCounts),
+    domainCounts,
     availableClientIps: buildSortedKeys(clientIpCounts),
     availableProxyPorts: buildSortedKeys(proxyPortCounts),
+    availableClientApps: buildSortedKeys(clientAppCounts),
+    availableAccountNames: buildSortedKeys(accountNameCounts),
     availableDomains: buildSortedKeys(domainCounts),
+    trafficStatisticsTotal: statistics.total_requests,
+    trafficStatisticsSequence: statistics.server_sequence,
+    trafficStatisticsLoaded: true,
   };
-};
-
-const cloneClientCatalog = (
-  state: Pick<
-    TrafficState,
-    'clientAppCounts' | 'accountNameCounts' | 'clientIpCounts' | 'proxyPortCounts' | 'domainCounts'
-  >,
-) => ({
-  clientAppCounts: new Map(state.clientAppCounts),
-  accountNameCounts: new Map(state.accountNameCounts),
-  clientIpCounts: new Map(state.clientIpCounts),
-  proxyPortCounts: new Map(state.proxyPortCounts),
-  domainCounts: new Map(state.domainCounts),
-});
-
-const snapshotClientCatalog = (
-  catalog: ReturnType<typeof cloneClientCatalog>,
-) => ({
-  clientAppCounts: catalog.clientAppCounts,
-  accountNameCounts: catalog.accountNameCounts,
-  clientIpCounts: catalog.clientIpCounts,
-  proxyPortCounts: catalog.proxyPortCounts,
-  domainCounts: catalog.domainCounts,
-  availableClientApps: buildSortedKeys(catalog.clientAppCounts),
-  availableAccountNames: buildSortedKeys(catalog.accountNameCounts),
-  availableClientIps: buildSortedKeys(catalog.clientIpCounts),
-  availableProxyPorts: buildSortedKeys(catalog.proxyPortCounts),
-  availableDomains: buildSortedKeys(catalog.domainCounts),
-});
-
-const removeRecordFromClientCatalog = (
-  catalog: ReturnType<typeof cloneClientCatalog>,
-  record: TrafficSummary,
-) => {
-  decrementCount(catalog.clientAppCounts, record.client_app || null);
-  decrementCount(catalog.accountNameCounts, record.account_name || null);
-  decrementCount(catalog.clientIpCounts, record.client_ip || null);
-  decrementCount(catalog.proxyPortCounts, record.listener_port ? String(record.listener_port) : null);
-  decrementCount(catalog.domainCounts, record.host || null);
 };
 
 export const isFilterConditionApplicable = (
@@ -973,6 +917,7 @@ export const useTrafficStore = create<TrafficState>()(
       pushUnsubscribe: null,
       pushDeltaUnsubscribe: null,
       pushDeletedUnsubscribe: null,
+      pushStatisticsUnsubscribe: null,
       filterVersion: 0,
       initialized: false,
       selectedId: undefined,
@@ -989,7 +934,27 @@ export const useTrafficStore = create<TrafficState>()(
       clientIpCounts: new Map(),
       proxyPortCounts: new Map(),
       domainCounts: new Map(),
+      trafficStatisticsTotal: 0,
+      trafficStatisticsSequence: 0,
+      trafficStatisticsLoaded: false,
       recordsMutation: createEmptyRecordsMutation(),
+
+      fetchTrafficStatistics: async () => {
+        if (!statisticsRequest) {
+          statisticsRequest = api.getTrafficStatistics()
+            .then((statistics) => {
+              set(snapshotServerStatistics(statistics));
+            })
+            .catch(() => {
+              // Statistics are refreshed independently from the traffic window.
+              // Keep the last authoritative snapshot if a transient request fails.
+            })
+            .finally(() => {
+              statisticsRequest = null;
+            });
+        }
+        await statisticsRequest;
+      },
 
       startPolling: () => {
         const state = get();
@@ -1018,7 +983,12 @@ export const useTrafficStore = create<TrafficState>()(
 
       enablePush: () => {
         const state = get();
-        if (state.pushUnsubscribe || state.pushDeltaUnsubscribe || state.pushDeletedUnsubscribe) return;
+        if (
+          state.pushUnsubscribe ||
+          state.pushDeltaUnsubscribe ||
+          state.pushDeletedUnsubscribe ||
+          state.pushStatisticsUnsubscribe
+        ) return;
 
         const unsubscribe = pushService.onTrafficUpdates((data) => {
           get().handleTrafficPush(data);
@@ -1032,10 +1002,15 @@ export const useTrafficStore = create<TrafficState>()(
           get().handleTrafficDeleted(data.ids);
         });
 
+        const unsubscribeStatistics = pushService.onTrafficStatistics((statistics) => {
+          get().handleTrafficStatistics(statistics);
+        });
+
         set({
           pushUnsubscribe: unsubscribe,
           pushDeltaUnsubscribe: unsubscribeDelta,
           pushDeletedUnsubscribe: unsubscribeDeleted,
+          pushStatisticsUnsubscribe: unsubscribeStatistics,
         });
 
         const subscription = {
@@ -1059,7 +1034,15 @@ export const useTrafficStore = create<TrafficState>()(
         if (state.pushDeletedUnsubscribe) {
           state.pushDeletedUnsubscribe();
         }
-        set({ pushUnsubscribe: null, pushDeltaUnsubscribe: null, pushDeletedUnsubscribe: null });
+        if (state.pushStatisticsUnsubscribe) {
+          state.pushStatisticsUnsubscribe();
+        }
+        set({
+          pushUnsubscribe: null,
+          pushDeltaUnsubscribe: null,
+          pushDeletedUnsubscribe: null,
+          pushStatisticsUnsubscribe: null,
+        });
         pushService.updateSubscription({
           need_traffic: false,
           last_traffic_id: undefined,
@@ -1218,7 +1201,6 @@ export const useTrafficStore = create<TrafficState>()(
               allRecords = bounded.records;
               const boundaries = getBoundaryState(allRecords);
               const visibleRecordsMap = buildTrafficRecordsMap(allRecords);
-              const visibleClientCatalog = buildClientCatalog(allRecords);
               for (const pendingId of newPendingIds) {
                 if (!visibleRecordsMap.has(pendingId)) {
                   newPendingIds.delete(pendingId);
@@ -1284,7 +1266,6 @@ export const useTrafficStore = create<TrafficState>()(
                     oldestSequenceFloor: serverOldestSequence,
                   })
                   : prevState.recordsMutation,
-                ...visibleClientCatalog,
               };
             });
           });
@@ -1317,15 +1298,10 @@ export const useTrafficStore = create<TrafficState>()(
         set((prevState) => {
           const recordsMap = new Map(prevState.recordsMap);
           const pendingIds = new Set(prevState.pendingIds);
-          const clientCatalog = cloneClientCatalog(prevState);
           let removedCount = 0;
 
           for (const id of idsSet) {
-            const existing = recordsMap.get(id);
             if (recordsMap.delete(id)) {
-              if (existing) {
-                removeRecordFromClientCatalog(clientCatalog, existing);
-              }
               removedCount += 1;
             }
             pendingIds.delete(id);
@@ -1368,9 +1344,12 @@ export const useTrafficStore = create<TrafficState>()(
                 deletedIds: Array.from(idsSet),
               })
               : prevState.recordsMutation,
-            ...snapshotClientCatalog(clientCatalog),
           };
         });
+      },
+
+      handleTrafficStatistics: (statistics: TrafficStatistics) => {
+        set(snapshotServerStatistics(statistics));
       },
 
       fetchInitialData: async () => {
@@ -1405,8 +1384,6 @@ export const useTrafficStore = create<TrafficState>()(
           capPendingIds(newPendingIds);
 
           const boundaries = getBoundaryState(preprocessedRecords);
-          const clientCatalog = buildClientCatalog(preprocessedRecords);
-
           set({
             records: preprocessedRecords,
             recordsMap: newRecordsMap,
@@ -1428,8 +1405,8 @@ export const useTrafficStore = create<TrafficState>()(
               updated: [],
               deletedIds: [],
             }),
-            ...clientCatalog,
           });
+          await get().fetchTrafficStatistics();
         } catch (e) {
           if (generation === historyBackfillGeneration) {
             set({ error: (e as Error).message, loading: false });
@@ -1493,7 +1470,6 @@ export const useTrafficStore = create<TrafficState>()(
                 updated: [],
                 deletedIds: [],
               }),
-              ...buildClientCatalog(records),
             };
           });
         } catch (e) {
@@ -1564,7 +1540,6 @@ export const useTrafficStore = create<TrafficState>()(
                 updated: [],
                 deletedIds: [],
               }),
-              ...buildClientCatalog(records),
             };
           });
         } catch (e) {
@@ -1693,8 +1668,6 @@ export const useTrafficStore = create<TrafficState>()(
           capPendingIds(newPendingIds);
 
           const boundaries = getBoundaryState(preprocessedRecords);
-          const clientCatalog = buildClientCatalog(preprocessedRecords);
-
           set({
             records: preprocessedRecords,
             recordsMap: newRecordsMap,
@@ -1714,9 +1687,7 @@ export const useTrafficStore = create<TrafficState>()(
               updated: [],
               deletedIds: [],
             }),
-            ...clientCatalog,
           });
-
           pushService.updateSubscription({
             last_traffic_id: boundaries.lastId || undefined,
             last_sequence: boundaries.lastSequence || undefined,
@@ -1813,16 +1784,11 @@ export const useTrafficStore = create<TrafficState>()(
           set((state) => {
             const newRecordsMap = new Map(state.recordsMap);
             const newPendingIds = new Set(state.pendingIds);
-            const clientCatalog = cloneClientCatalog(state);
             const currentDeleted = state.currentRecord && idsToRemove.has(state.currentRecord.id);
             const selectedDeleted = state.selectedId && idsToRemove.has(state.selectedId);
 
             for (const id of idsToRemove) {
-              const existing = newRecordsMap.get(id);
               if (newRecordsMap.delete(id)) {
-                if (existing) {
-                  removeRecordFromClientCatalog(clientCatalog, existing);
-                }
                 removedCount += 1;
               }
               newPendingIds.delete(id);
@@ -1859,7 +1825,6 @@ export const useTrafficStore = create<TrafficState>()(
                   deletedIds: Array.from(idsToRemove),
                 })
                 : state.recordsMutation,
-              ...snapshotClientCatalog(clientCatalog),
             };
           });
 
@@ -1867,10 +1832,11 @@ export const useTrafficStore = create<TrafficState>()(
             pushService.updateSubscription({ pending_ids: nextPendingIds });
           }
 
-          api.clearTraffic(ids).catch((e) => {
-            const err = e as Error;
-            set({ error: err.message });
-          });
+          api.clearTraffic(ids)
+            .catch((e) => {
+              const err = e as Error;
+              set({ error: err.message });
+            });
 
           return true;
         }
@@ -1901,16 +1867,6 @@ export const useTrafficStore = create<TrafficState>()(
           selectedId: undefined,
           historyLoading: false,
           catchingUp: false,
-          availableClientApps: [],
-          availableAccountNames: [],
-          availableClientIps: [],
-          availableProxyPorts: [],
-          availableDomains: [],
-          clientAppCounts: new Map(),
-          accountNameCounts: new Map(),
-          clientIpCounts: new Map(),
-          proxyPortCounts: new Map(),
-          domainCounts: new Map(),
           recordsMutation: createRecordsMutation({
             reset: true,
             inserted: [],
@@ -1921,10 +1877,11 @@ export const useTrafficStore = create<TrafficState>()(
 
         pushService.updateSubscription({ pending_ids: [] });
 
-        api.clearTraffic().catch((e) => {
-          const err = e as Error;
-          set({ error: err.message });
-        });
+        api.clearTraffic()
+          .catch((e) => {
+            const err = e as Error;
+            set({ error: err.message });
+          });
 
         return true;
       },

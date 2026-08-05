@@ -35,27 +35,27 @@ const makeRange = (start: number, end: number): TrafficSummary[] =>
 
 describe("bounded traffic window", () => {
   it("keeps the oldest side when older pages exceed the hard limit", () => {
-    const current = makeRange(1001, 3000);
+    const current = makeRange(1001, 2000);
     const older = makeRange(501, 1000);
 
     const result = mergeBoundedTrafficWindow(current, older, "older");
 
     expect(result.records).toHaveLength(MAX_TRAFFIC_WINDOW_RECORDS);
     expect(result.records[0]?.sequence).toBe(501);
-    expect(result.records.at(-1)?.sequence).toBe(2500);
+    expect(result.records.at(-1)?.sequence).toBe(1500);
     expect(result.trimmed).toBe(500);
     expect(result.trimmedSide).toBe("newer");
   });
 
   it("keeps the newest side when forward pages exceed the hard limit", () => {
-    const current = makeRange(501, 2500);
-    const newer = makeRange(2501, 3000);
+    const current = makeRange(501, 1500);
+    const newer = makeRange(1501, 2000);
 
     const result = mergeBoundedTrafficWindow(current, newer, "newer");
 
     expect(result.records).toHaveLength(MAX_TRAFFIC_WINDOW_RECORDS);
     expect(result.records[0]?.sequence).toBe(1001);
-    expect(result.records.at(-1)?.sequence).toBe(3000);
+    expect(result.records.at(-1)?.sequence).toBe(2000);
     expect(result.trimmed).toBe(500);
     expect(result.trimmedSide).toBe("older");
   });

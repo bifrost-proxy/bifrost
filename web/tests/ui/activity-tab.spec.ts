@@ -183,6 +183,18 @@ async function mockActivityApi(page: Page) {
       });
       return;
     }
+    if (apiPath === "/traffic/statistics") {
+      await fulfillJson(route, {
+        total_requests: 2500,
+        server_sequence: 2501,
+        client_ips: { "127.0.0.1": 2500 },
+        proxy_ports: { "9900": 2500 },
+        applications: { codex: 1750, "Microsoft Edge Helper": 750 },
+        account_names: {},
+        domains: { "example.test": 2500 },
+      });
+      return;
+    }
     if (apiPath === "/rules/active-summary") {
       await fulfillJson(route, {
         total: 1,
@@ -333,12 +345,73 @@ async function mockActivityApi(page: Page) {
   });
 }
 
+async function mockActivityStatisticsWebSocket(page: Page) {
+  await page.addInitScript(() => {
+    const statisticsMessage = JSON.stringify({
+      type: "traffic_statistics",
+      data: {
+        total_requests: 2501,
+        server_sequence: 2502,
+        client_ips: { "127.0.0.1": 2501 },
+        proxy_ports: { "9900": 2501 },
+        applications: { codex: 1751, "Microsoft Edge Helper": 750 },
+        account_names: {},
+        domains: { "example.test": 2501 },
+      },
+    });
+
+    class ActivityMockWebSocket extends EventTarget {
+      static readonly CONNECTING = 0;
+      static readonly OPEN = 1;
+      static readonly CLOSING = 2;
+      static readonly CLOSED = 3;
+
+      readonly CONNECTING = 0;
+      readonly OPEN = 1;
+      readonly CLOSING = 2;
+      readonly CLOSED = 3;
+      readyState = ActivityMockWebSocket.CONNECTING;
+      bufferedAmount = 0;
+      extensions = "";
+      protocol = "";
+      binaryType: BinaryType = "blob";
+      url: string;
+      onopen: ((event: Event) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      onclose: ((event: CloseEvent) => void) | null = null;
+
+      constructor(url: string | URL) {
+        super();
+        this.url = String(url);
+        window.setTimeout(() => {
+          this.readyState = ActivityMockWebSocket.OPEN;
+          this.onopen?.(new Event("open"));
+          window.setTimeout(() => {
+            this.onmessage?.(new MessageEvent("message", { data: statisticsMessage }));
+          }, 1_000);
+        }, 0);
+      }
+
+      send() {}
+
+      close() {
+        this.readyState = ActivityMockWebSocket.CLOSED;
+        this.onclose?.(new CloseEvent("close", { code: 1000 }));
+      }
+    }
+
+    window.WebSocket = ActivityMockWebSocket as unknown as typeof WebSocket;
+  });
+}
+
 test("Activity tab is first, default, data-rich, and animated on hover", async ({
   page,
   context,
 }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await mockActivityApi(page);
+  await mockActivityStatisticsWebSocket(page);
 
   await page.goto("/_bifrost/");
   await expect(page).toHaveURL(/\/_bifrost\/activity$/);
@@ -350,7 +423,9 @@ test("Activity tab is first, default, data-rich, and animated on hover", async (
   await expect(firstNav).toHaveAttribute("data-nav-key", "/activity");
 
   await expect(page.getByTestId("activity-stat-card").filter({ hasText: "Active Connections" })).toContainText("18");
+  await expect(page.getByTestId("activity-stat-card").filter({ hasText: "Active Connections" })).toContainText("2 apps");
   await expect(page.getByTestId("activity-stat-card").filter({ hasText: "Upload" })).toContainText("113 B/s");
+  await expect(page.getByTestId("activity-stat-card").filter({ hasText: "Requests" })).toContainText("2,501");
   await expect(page.getByTestId("activity-stat-card").filter({ hasText: "System Proxy" })).toContainText("Disabled");
   await expect(page.getByTestId("activity-stat-card").filter({ hasText: "System Proxy" })).toContainText("http://127.0.0.1:9900");
   await expect(page.getByTestId("activity-rule-pill").filter({ hasText: "Default" })).toContainText("1 entries");
@@ -401,7 +476,7 @@ test("Activity tab is first, default, data-rich, and animated on hover", async (
     }));
   expect(temporaryMergedMetrics.scrollHeight).toBeLessThanOrEqual(temporaryMergedMetrics.clientHeight + 1);
   expect(temporaryMergedMetrics.scrollWidth).toBeLessThanOrEqual(temporaryMergedMetrics.clientWidth + 1);
-  await expect(page.getByTestId("activity-app-row").filter({ hasText: "codex" }).first()).toContainText(/codex/i);
+  await expect(page.getByTestId("activity-app-row").filter({ hasText: "codex" }).first()).toContainText("1,751");
 
   const mergedMetrics = await page.getByTestId("activity-merged-rules").evaluate((element) => {
     const parent = element.parentElement;

@@ -207,6 +207,16 @@ export interface TrafficUpdatesResponseCompact {
   server_sequence: number;
 }
 
+export interface TrafficStatistics {
+  total_requests: number;
+  server_sequence: number;
+  client_ips: Record<string, number>;
+  proxy_ports: Record<string, number>;
+  applications: Record<string, number>;
+  account_names: Record<string, number>;
+  domains: Record<string, number>;
+}
+
 export interface TrafficSummaryCompact {
   id: string;
   seq: number;

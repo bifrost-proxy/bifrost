@@ -458,12 +458,18 @@ mod tests {
         assert!(current.need_traffic);
         assert!(current.need_values);
         assert!(current.need_scripts);
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(PushMessage::TrafficDelta(_)) | Ok(PushMessage::ValuesUpdate(_))
-        ));
+        let mut saw_traffic_statistics = false;
+        let mut saw_values = false;
+        while let Ok(message) = rx.try_recv() {
+            match message {
+                PushMessage::TrafficStatistics(_) => saw_traffic_statistics = true,
+                PushMessage::ValuesUpdate(_) => saw_values = true,
+                _ => {}
+            }
+        }
+        assert!(saw_traffic_statistics);
+        assert!(saw_values);
 
-        while rx.try_recv().is_ok() {}
         apply_subscription_update(&client, &manager, current).await;
         assert!(rx.try_recv().is_err());
     }

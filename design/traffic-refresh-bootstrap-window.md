@@ -12,7 +12,7 @@ Bifrost WebUI Traffic 页在“刷新页面”或“首次进入”时，历史�
 
 本方案统一以下能力。前端历史持有策略已由
 [`traffic-bounded-window.md`](./traffic-bounded-window.md) 替代：不再自动把完整历史回填到 WebView，
-而是使用 2,000 条双向滑动窗口和有界全历史筛选扫描；本文件继续描述首屏、Push 与 catch-up 的基础语义。
+而是使用 1,000 条双向滑动窗口和有界全历史筛选扫描；本文件继续描述首屏、Push 与 catch-up 的基础语义。
 
 - 首屏窗口固定“最新 500 条”（HTTP `updates` 与 Push `send_initial_traffic` 两路对齐）。
 - 前端维护 `lastSequence` / `oldestSequence` 两条边界游标：
@@ -74,7 +74,7 @@ Bifrost WebUI Traffic 页在“刷新页面”或“首次进入”时，历史�
 - 历史批次先转成升序，然后与当前数组做“前插 / 线性归并”，不做全表 sort。
 - 实时增量批次做“后插 / 线性归并”。
 - 状态更新的记录（例如响应完成）原位替换，不改变位置。
-- `records.length` 达到 2,000 条硬上限时，按分页方向从窗口另一侧淘汰，并同步更新显示边界。
+- `records.length` 达到 1,000 条硬上限时，按分页方向从窗口另一侧淘汰，并同步更新显示边界。
 
 ### Push 与 HTTP 共用最新窗口语义
 

@@ -9,6 +9,16 @@ import type {
 
 const apiMocks = vi.hoisted(() => ({
   getTrafficPage: vi.fn(),
+  clearTraffic: vi.fn().mockResolvedValue(undefined),
+  getTrafficStatistics: vi.fn().mockResolvedValue({
+    total_requests: 0,
+    server_sequence: 0,
+    client_ips: {},
+    proxy_ports: {},
+    applications: {},
+    account_names: {},
+    domains: {},
+  }),
 }));
 
 vi.mock("../api", () => apiMocks);
@@ -18,6 +28,7 @@ vi.mock("../services/pushService", () => ({
     onTrafficUpdates: vi.fn(),
     onTrafficDelta: vi.fn(),
     onTrafficDeleted: vi.fn(),
+    onTrafficStatistics: vi.fn(),
     updateSubscription: vi.fn(),
     connect: vi.fn(),
     disconnectIfIdle: vi.fn(),
@@ -200,8 +211,75 @@ const flushTrafficBatch = () =>
   new Promise<void>((resolve) => window.setTimeout(resolve, 180));
 
 describe("Traffic store bounded history paging", () => {
+  it("uses the authoritative server snapshot for filter and Activity counts", async () => {
+    apiMocks.getTrafficStatistics.mockResolvedValueOnce({
+      total_requests: 2_500,
+      server_sequence: 2_501,
+      client_ips: { "127.0.0.1": 2_400, "10.0.0.2": 100 },
+      proxy_ports: { "9900": 2_500 },
+      applications: { Codex: 1_750, "Lark Helper": 750 },
+      account_names: { eden: 2_500 },
+      domains: { "api.example.test": 2_000, "other.test": 500 },
+    });
+
+    await useTrafficStore.getState().fetchTrafficStatistics();
+
+    const state = useTrafficStore.getState();
+    expect(state.trafficStatisticsLoaded).toBe(true);
+    expect(state.trafficStatisticsTotal).toBe(2_500);
+    expect(state.trafficStatisticsSequence).toBe(2_501);
+    expect(state.clientAppCounts.get("Codex")).toBe(1_750);
+    expect(state.clientIpCounts.get("10.0.0.2")).toBe(100);
+    expect(state.proxyPortCounts.get("9900")).toBe(2_500);
+    expect(state.accountNameCounts.get("eden")).toBe(2_500);
+    expect(state.domainCounts.get("api.example.test")).toBe(2_000);
+
+    useTrafficStore.getState().handleTrafficStatistics({
+      total_requests: 2_501,
+      server_sequence: 2_502,
+      client_ips: { "127.0.0.1": 2_401, "10.0.0.2": 100 },
+      proxy_ports: { "9900": 2_501 },
+      applications: { Codex: 1_751, "Lark Helper": 750 },
+      account_names: { eden: 2_501 },
+      domains: { "api.example.test": 2_001, "other.test": 500 },
+    });
+
+    const pushedState = useTrafficStore.getState();
+    expect(pushedState.trafficStatisticsTotal).toBe(2_501);
+    expect(pushedState.trafficStatisticsSequence).toBe(2_502);
+    expect(pushedState.clientAppCounts.get("Codex")).toBe(1_751);
+    expect(pushedState.domainCounts.get("api.example.test")).toBe(2_001);
+  });
+
+  it("does not synthesize statistics while an authoritative clear update is pending", async () => {
+    const records = makeRecordRange(1, 2);
+    useTrafficStore.setState({
+      records,
+      recordsMap: new Map(records.map((record) => [record.id, record])),
+    });
+    useTrafficStore.getState().handleTrafficStatistics({
+      total_requests: 2,
+      server_sequence: 2,
+      client_ips: { "127.0.0.1": 2 },
+      proxy_ports: { "9900": 2 },
+      applications: { Codex: 2 },
+      account_names: {},
+      domains: { "api.example.test": 2 },
+    });
+
+    await useTrafficStore.getState().clearTraffic();
+
+    const state = useTrafficStore.getState();
+    expect(state.records).toEqual([]);
+    expect(state.trafficStatisticsTotal).toBe(2);
+    expect(state.trafficStatisticsSequence).toBe(2);
+    expect(state.clientAppCounts.get("Codex")).toBe(2);
+    expect(state.domainCounts.get("api.example.test")).toBe(2);
+    expect(apiMocks.clearTraffic).toHaveBeenCalled();
+  });
+
   it("loads one older page, trims the newer side, and keeps the live cursor monotonic", async () => {
-    const current = makeRecordRange(1001, 3000);
+    const current = makeRecordRange(1001, 2000);
     apiMocks.getTrafficPage.mockResolvedValueOnce(
       makePage(makeRecordRange(501, 1000), true, "backward"),
     );
@@ -211,8 +289,8 @@ describe("Traffic store bounded history paging", () => {
       hasMore: true,
       hasNewer: false,
       oldestSequence: 1001,
-      lastSequence: 3000,
-      lastId: "3000",
+      lastSequence: 2000,
+      lastId: "2000",
       historyLoading: false,
     });
 
@@ -221,17 +299,17 @@ describe("Traffic store bounded history paging", () => {
     const state = useTrafficStore.getState();
     expect(state.records).toHaveLength(MAX_TRAFFIC_WINDOW_RECORDS);
     expect(state.records[0]?.sequence).toBe(501);
-    expect(state.records.at(-1)?.sequence).toBe(2500);
+    expect(state.records.at(-1)?.sequence).toBe(1500);
     expect(state.recordsMap.size).toBe(MAX_TRAFFIC_WINDOW_RECORDS);
     expect(state.hasNewer).toBe(true);
-    expect(state.lastSequence).toBe(3000);
-    expect(state.lastId).toBe("3000");
+    expect(state.lastSequence).toBe(2000);
+    expect(state.lastId).toBe("2000");
   });
 
   it("loads forward from a historical window and trims the older side", async () => {
-    const current = makeRecordRange(501, 2500);
+    const current = makeRecordRange(501, 1500);
     apiMocks.getTrafficPage.mockResolvedValueOnce(
-      makePage(makeRecordRange(2501, 3000), false, "forward"),
+      makePage(makeRecordRange(1501, 2000), false, "forward"),
     );
     useTrafficStore.setState({
       records: current,
@@ -239,8 +317,8 @@ describe("Traffic store bounded history paging", () => {
       hasMore: false,
       hasNewer: true,
       oldestSequence: 501,
-      lastSequence: 3000,
-      lastId: "3000",
+      lastSequence: 2000,
+      lastId: "2000",
       historyLoading: false,
     });
 
@@ -249,10 +327,10 @@ describe("Traffic store bounded history paging", () => {
     const state = useTrafficStore.getState();
     expect(state.records).toHaveLength(MAX_TRAFFIC_WINDOW_RECORDS);
     expect(state.records[0]?.sequence).toBe(1001);
-    expect(state.records.at(-1)?.sequence).toBe(3000);
+    expect(state.records.at(-1)?.sequence).toBe(2000);
     expect(state.hasMore).toBe(true);
     expect(state.hasNewer).toBe(false);
-    expect(state.lastSequence).toBe(3000);
+    expect(state.lastSequence).toBe(2000);
   });
 });
 

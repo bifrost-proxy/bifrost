@@ -1,7 +1,7 @@
 use std::collections::{HashSet, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bifrost_script::{ScriptInfo, ScriptType};
 use dashmap::DashMap;
@@ -15,7 +15,9 @@ use crate::replay_db::{ReplayGroup, ReplayRequestSummary, MAX_REQUESTS};
 use crate::resource_alerts::build_resource_alerts;
 use crate::state::SharedAdminState;
 use crate::traffic::TrafficSummary;
-use crate::traffic_db::{Direction, QueryParams, TrafficStoreEvent, TrafficSummaryCompact};
+use crate::traffic_db::{
+    Direction, QueryParams, TrafficStatisticsSnapshot, TrafficStoreEvent, TrafficSummaryCompact,
+};
 
 static CLIENT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 const PUSH_CHANNEL_CAPACITY: usize = 64;
@@ -24,8 +26,9 @@ pub const MAX_CLIENT_CHANNELS: usize = 3;
 pub const MAX_ID_LEN: usize = 256;
 pub const MAX_SETTINGS_SCOPES: usize = 16;
 const TRAFFIC_PENDING_REFRESH_INTERVAL_MS: u64 = 2_000;
+const TRAFFIC_STATISTICS_PUSH_INTERVAL_MS: u64 = 1_000;
 const TRAFFIC_DELTA_BATCH_LIMIT: usize = 500;
-const TRAFFIC_RECONNECT_WINDOW_LIMIT: usize = 2_000;
+const TRAFFIC_RECONNECT_WINDOW_LIMIT: usize = 1_000;
 
 pub const SETTINGS_SCOPE_PROXY_SETTINGS: &str = "proxy_settings";
 pub const SETTINGS_SCOPE_TLS_CONFIG: &str = "tls_config";
@@ -83,6 +86,9 @@ pub enum PushMessage {
 
     #[serde(rename = "traffic_deleted")]
     TrafficDeleted(TrafficDeletedData),
+
+    #[serde(rename = "traffic_statistics")]
+    TrafficStatistics(TrafficStatisticsSnapshot),
 
     #[serde(rename = "overview_update")]
     OverviewUpdate(OverviewData),
@@ -380,6 +386,7 @@ pub struct PushClient {
     pub client_key: String,
     pub sender: mpsc::Sender<PushMessage>,
     pub subscription: RwLock<ClientSubscription>,
+    traffic_statistics_last_sent: Mutex<Option<Instant>>,
 }
 
 impl PushClient {
@@ -393,6 +400,7 @@ impl PushClient {
             client_key,
             sender,
             subscription: RwLock::new(subscription),
+            traffic_statistics_last_sent: Mutex::new(None),
         };
         (client, receiver)
     }
@@ -415,6 +423,18 @@ impl PushClient {
     pub fn get_subscription(&self) -> ClientSubscription {
         self.subscription.read().clone()
     }
+
+    fn reserve_traffic_statistics_push(&self, now: Instant) -> bool {
+        let mut last_sent = self.traffic_statistics_last_sent.lock();
+        if last_sent.is_some_and(|last| {
+            now.saturating_duration_since(last)
+                < Duration::from_millis(TRAFFIC_STATISTICS_PUSH_INTERVAL_MS)
+        }) {
+            return false;
+        }
+        *last_sent = Some(now);
+        true
+    }
 }
 
 pub struct PushManager {
@@ -422,6 +442,7 @@ pub struct PushManager {
     buckets: DashMap<String, Vec<u64>>,
     bucket_order: Mutex<VecDeque<String>>,
     overview_cache: RwLock<Option<OverviewData>>,
+    traffic_statistics_dirty: AtomicBool,
     state: SharedAdminState,
 }
 
@@ -432,6 +453,7 @@ impl PushManager {
             buckets: DashMap::new(),
             bucket_order: Mutex::new(VecDeque::new()),
             overview_cache: RwLock::new(None),
+            traffic_statistics_dirty: AtomicBool::new(false),
             state,
         }
     }
@@ -501,6 +523,60 @@ impl PushManager {
 
     pub fn invalidate_overview_cache(&self) {
         *self.overview_cache.write() = None;
+    }
+
+    fn mark_traffic_statistics_dirty(&self) {
+        self.traffic_statistics_dirty.store(true, Ordering::Release);
+    }
+
+    pub fn notify_traffic_statistics_changed(&self) {
+        self.mark_traffic_statistics_dirty();
+    }
+
+    fn take_traffic_statistics_dirty(&self) -> bool {
+        self.traffic_statistics_dirty.swap(false, Ordering::AcqRel)
+    }
+
+    fn send_traffic_statistics_to_client(&self, client: &Arc<PushClient>) -> bool {
+        let Some(ref db_store) = self.state.traffic_db_store else {
+            return true;
+        };
+        if !client.reserve_traffic_statistics_push(Instant::now()) {
+            self.mark_traffic_statistics_dirty();
+            return true;
+        }
+        client.send(PushMessage::TrafficStatistics(
+            db_store.traffic_statistics(),
+        ))
+    }
+
+    fn broadcast_traffic_statistics(&self) -> bool {
+        let Some(ref db_store) = self.state.traffic_db_store else {
+            return false;
+        };
+        let snapshot = db_store.traffic_statistics();
+        let mut clients_to_remove = Vec::new();
+        let mut deferred = false;
+        let now = Instant::now();
+
+        for client_ref in self.clients.iter() {
+            let client = client_ref.value();
+            if !client.get_subscription().need_traffic {
+                continue;
+            }
+            if !client.reserve_traffic_statistics_push(now) {
+                deferred = true;
+                continue;
+            }
+            if !client.send(PushMessage::TrafficStatistics(snapshot.clone())) {
+                clients_to_remove.push(client.id);
+            }
+        }
+
+        for client_id in clients_to_remove {
+            self.unregister_client(client_id);
+        }
+        deferred
     }
 
     async fn build_full_overview(&self) -> OverviewData {
@@ -898,6 +974,7 @@ impl PushManager {
 
         if let Some(ref db_store) = self.state.traffic_db_store {
             self.send_initial_traffic_delta(client, db_store, &subscription);
+            self.send_traffic_statistics_to_client(client);
         }
     }
 
@@ -1477,6 +1554,7 @@ impl PushManager {
         if subscription.need_traffic {
             if let Some(ref db_store) = self.state.traffic_db_store {
                 self.send_initial_traffic_delta(client, db_store, &subscription);
+                self.send_traffic_statistics_to_client(client);
             }
         }
 
@@ -1564,6 +1642,7 @@ impl PushManager {
         if ids.is_empty() {
             return;
         }
+        self.mark_traffic_statistics_dirty();
         let msg = PushMessage::TrafficDeleted(TrafficDeletedData { ids });
         let mut clients_to_remove = Vec::new();
         for client_ref in self.clients.iter() {
@@ -1782,6 +1861,13 @@ pub fn start_push_tasks(manager: SharedPushManager) -> Vec<tokio::task::JoinHand
     let mut handles = Vec::new();
 
     if let Some(db_store) = manager.state.traffic_db_store.clone() {
+        let weak_manager = Arc::downgrade(&manager);
+        db_store.set_cleanup_notifier(Arc::new(move |ids| {
+            if let Some(manager) = weak_manager.upgrade() {
+                manager.broadcast_traffic_deleted(ids.to_vec());
+            }
+        }));
+
         let manager_traffic = manager.clone();
         handles.push(tokio::spawn(async move {
             let mut receiver = db_store.subscribe();
@@ -1789,6 +1875,7 @@ pub fn start_push_tasks(manager: SharedPushManager) -> Vec<tokio::task::JoinHand
                 let first_event = match receiver.recv().await {
                     Ok(event) => event,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        manager_traffic.mark_traffic_statistics_dirty();
                         if manager_traffic.has_traffic_subscribers() {
                             manager_traffic.broadcast_traffic_updates().await;
                         }
@@ -1815,6 +1902,7 @@ pub fn start_push_tasks(manager: SharedPushManager) -> Vec<tokio::task::JoinHand
                     };
 
                 push_event(first_event);
+                manager_traffic.mark_traffic_statistics_dirty();
 
                 for _ in 1..TRAFFIC_DELTA_BATCH_LIMIT {
                     match receiver.try_recv() {
@@ -1858,6 +1946,23 @@ pub fn start_push_tasks(manager: SharedPushManager) -> Vec<tokio::task::JoinHand
                 interval.tick().await;
                 if manager_pending.has_traffic_subscribers() {
                     manager_pending.broadcast_traffic_updates().await;
+                }
+            }
+        }));
+
+        let manager_statistics = manager.clone();
+        handles.push(tokio::spawn(async move {
+            let period = Duration::from_millis(TRAFFIC_STATISTICS_PUSH_INTERVAL_MS);
+            let start = tokio::time::Instant::now() + period;
+            let mut interval = tokio::time::interval_at(start, period);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if manager_statistics.has_traffic_subscribers()
+                    && manager_statistics.take_traffic_statistics_dirty()
+                    && manager_statistics.broadcast_traffic_statistics()
+                {
+                    manager_statistics.mark_traffic_statistics_dirty();
                 }
             }
         }));
@@ -2131,6 +2236,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn traffic_statistics_client_gate_enforces_one_second_spacing() {
+        let (client, _receiver) = PushClient::new(
+            "statistics-rate-gate".to_string(),
+            ClientSubscription::default(),
+        );
+        let start = Instant::now();
+
+        assert!(client.reserve_traffic_statistics_push(start));
+        assert!(!client.reserve_traffic_statistics_push(start + Duration::from_millis(999)));
+        assert!(client.reserve_traffic_statistics_push(start + Duration::from_millis(1_000)));
+    }
+
     #[tokio::test]
     async fn traffic_push_uses_in_memory_events_without_querying_db_for_new_records() {
         let dir = create_test_dir();
@@ -2178,6 +2296,95 @@ mod tests {
             get_by_ids_calls, 0,
             "new records without pending ids should not require get_by_ids()"
         );
+
+        for handle in handles {
+            handle.abort();
+        }
+        cleanup_test_dir(&dir);
+    }
+
+    #[tokio::test]
+    async fn traffic_statistics_push_is_change_driven_and_coalesced_to_one_second() {
+        let dir = create_test_dir();
+        let store = Arc::new(TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap());
+        let state = Arc::new(AdminState::new(9914).with_traffic_db_store_shared(store.clone()));
+        let manager = Arc::new(PushManager::new(state));
+        let (_client, mut receiver) = manager.register_client(
+            "statistics-push-client".to_string(),
+            ClientSubscription {
+                need_traffic: true,
+                ..Default::default()
+            },
+        );
+        let handles = start_push_tasks(manager.clone());
+        sleep(Duration::from_millis(100)).await;
+
+        for index in 0..3 {
+            let mut record = TrafficRecord::new(
+                format!("statistics-push-{index}"),
+                "GET".to_string(),
+                format!("http://example.test/{index}"),
+            );
+            record.status = 200;
+            record.client_app = Some("codex".to_string());
+            store.record(record);
+        }
+
+        let first_statistics = timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(PushMessage::TrafficStatistics(statistics)) = receiver.recv().await {
+                    break statistics;
+                }
+            }
+        })
+        .await
+        .expect("expected a coalesced statistics push");
+        assert_eq!(first_statistics.total_requests, 3);
+        assert_eq!(first_statistics.applications.get("codex"), Some(&3));
+
+        sleep(Duration::from_millis(1_100)).await;
+        let idle_statistics_pushes = std::iter::from_fn(|| receiver.try_recv().ok())
+            .filter(|message| matches!(message, PushMessage::TrafficStatistics(_)))
+            .count();
+        assert_eq!(
+            idle_statistics_pushes, 0,
+            "idle periods must not push statistics"
+        );
+
+        for index in 3..5 {
+            let mut record = TrafficRecord::new(
+                format!("statistics-push-{index}"),
+                "GET".to_string(),
+                format!("http://example.test/{index}"),
+            );
+            record.status = 200;
+            record.client_app = Some("codex".to_string());
+            store.record(record);
+        }
+
+        sleep(Duration::from_millis(1_100)).await;
+        let statistics_pushes: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok())
+            .filter_map(|message| match message {
+                PushMessage::TrafficStatistics(statistics) => Some(statistics),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(statistics_pushes.len(), 1, "a burst must be coalesced");
+        assert_eq!(statistics_pushes[0].total_requests, 5);
+
+        store.clear();
+        manager.notify_traffic_statistics_changed();
+        let cleared_statistics = timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(PushMessage::TrafficStatistics(statistics)) = receiver.recv().await {
+                    break statistics;
+                }
+            }
+        })
+        .await
+        .expect("expected statistics after clear-all notification");
+        assert_eq!(cleared_statistics.total_requests, 0);
+        assert!(cleared_statistics.applications.is_empty());
 
         for handle in handles {
             handle.abort();
@@ -2322,6 +2529,16 @@ mod tests {
         assert_eq!(data.inserts.len(), 1);
         assert_eq!(data.inserts[0].id, "late-subscription-1");
 
+        let statistics_message = timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("expected initial statistics message")
+            .expect("channel should stay open");
+        let PushMessage::TrafficStatistics(statistics) = statistics_message else {
+            panic!("expected traffic statistics");
+        };
+        assert_eq!(statistics.total_requests, 1);
+        assert_eq!(statistics.domains.get("example.test"), Some(&1));
+
         cleanup_test_dir(&dir);
     }
 
@@ -2406,23 +2623,23 @@ mod tests {
         manager.send_initial_traffic(&client);
 
         let mut inserts = Vec::new();
-        for _ in 0..4 {
-            let message = receiver.try_recv().expect("expected reconnect chunk");
-            let PushMessage::TrafficDelta(data) = message else {
-                panic!("expected traffic delta");
-            };
-            assert!(data.inserts.len() <= TRAFFIC_DELTA_BATCH_LIMIT);
-            inserts.extend(data.inserts);
+        let mut statistics_count = 0;
+        while let Ok(message) = receiver.try_recv() {
+            match message {
+                PushMessage::TrafficDelta(data) => {
+                    assert!(data.inserts.len() <= TRAFFIC_DELTA_BATCH_LIMIT);
+                    inserts.extend(data.inserts);
+                }
+                PushMessage::TrafficStatistics(_) => statistics_count += 1,
+                other => panic!("unexpected reconnect message: {other:?}"),
+            }
         }
 
-        assert!(
-            receiver.try_recv().is_err(),
-            "reconnect must remain bounded"
-        );
+        assert_eq!(statistics_count, 1);
         assert_eq!(inserts.len(), TRAFFIC_RECONNECT_WINDOW_LIMIT);
         assert_eq!(
             inserts.first().map(|item| item.id.as_str()),
-            Some("reconnect-500")
+            Some("reconnect-1500")
         );
         assert_eq!(
             inserts.last().map(|item| item.id.as_str()),
