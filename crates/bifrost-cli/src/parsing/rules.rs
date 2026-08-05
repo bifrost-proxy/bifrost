@@ -1311,6 +1311,18 @@ function FindProxyForURL(url, host) {
     }
 
     #[test]
+    fn test_forward_target_path_is_not_exact_without_selected_host_route() {
+        let no_host = ProxyResolvedRules::default();
+        assert!(!forward_target_path_is_exact(&no_host));
+
+        let host_without_protocol = ProxyResolvedRules {
+            host: Some("127.0.0.1:9798/local.js".to_string()),
+            ..ProxyResolvedRules::default()
+        };
+        assert!(!forward_target_path_is_exact(&host_without_protocol));
+    }
+
+    #[test]
     fn test_pac_local_file_script_maps_to_proxy() {
         let temp_dir = tempfile::tempdir().unwrap();
         let pac_path = temp_dir.path().join("proxy.pac");

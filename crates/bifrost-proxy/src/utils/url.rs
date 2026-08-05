@@ -654,6 +654,35 @@ mod tests {
     }
 
     #[test]
+    fn test_host_route_helpers_skip_non_forwarding_protocols() {
+        let target = "127.0.0.1:9798/local.js";
+        let make_rule = |protocol, pattern: &str, value: &str, line| crate::server::RuleValue {
+            protocol,
+            value: value.to_string(),
+            pattern: pattern.to_string(),
+            options: std::collections::HashMap::new(),
+            line: Some(line),
+            raw: None,
+            rule_name: None,
+            auto_tls_intercept: false,
+        };
+        let rules = vec![
+            make_rule(Protocol::ReqHeaders, "example.com", target, 1),
+            make_rule(Protocol::Http, "example.com/assets/", target, 2),
+        ];
+
+        assert_eq!(
+            find_host_rule_source_path(&rules, Protocol::Http, target),
+            Some("/assets/".to_string())
+        );
+        assert!(!host_rule_uses_exact_target_path(
+            &rules,
+            Protocol::Http,
+            target,
+        ));
+    }
+
+    #[test]
     fn test_rewrite_path_exact_match() {
         let result = rewrite_path_with_prefix(
             "/labor_cost/static/",
