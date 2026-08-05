@@ -1612,14 +1612,15 @@
    SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" \
      bash e2e-tests/tests/test_im_gateway_codex_fast_slash.sh
    ```
-2. mock IM 对 Codex Runner 依次发送 `/fast off`、普通消息、裸 `/fast`、`/fast status` 和第二条普通消息；随后启动慢任务，在任务运行中发送 `/fast off` 并用 `/q` 排队下一条消息。
+2. mock IM 先对未配置 tier 的 Codex Runner 发送 `/fast status` 与普通消息；再依次发送 `/fast off`、普通消息、裸 `/fast`、`/fast status` 和第二条普通消息；随后启动慢任务，在任务运行中发送 `/fast off` 并用 `/q` 排队下一条消息。
 3. 检查 `session_state.json`、mock Codex argv 和 IM outbound message log。
 4. mock IM 对 Traex Runner 发送 `/fast off` 与 `/fast invalid`，检查两条 outbound message log 和 Traex argv。
 5. 执行 focused 单元回归：
    ```bash
    cargo test -p bifrost-admin fast_slash -- --nocapture
    cargo test -p bifrost-admin codex_session_fast_override_replaces_runner_service_tier -- --nocapture
-   cargo test -p bifrost-admin service_tier_resolution_uses_last_runner_override_then_codex_default -- --nocapture
+   cargo test -p bifrost-admin service_tier_resolution_uses_last_runner_override_without_bifrost_default -- --nocapture
+   cargo test -p bifrost-admin codex_app_server_omits_service_tier_without_explicit_configuration -- --nocapture
    cargo test -p bifrost-admin im_help_for_codex_runner_lists_fast_command -- --nocapture
    cargo test -p bifrost-admin slash_classification_matches_direct_message_command_boundaries -- --nocapture
    ```
@@ -1627,13 +1628,15 @@
 预期结果：
 
 1. 隔离脚本输出 `[im-codex-fast] PASS`，并清理临时 Service 与数据目录。
-2. `/fast off` 和裸 `/fast` 本身不执行 Codex；随后两条普通消息的 Runner argv 分别只包含一个 `service_tier="default"` 和 `service_tier="fast"`。
-3. `/fast status` 回复当前使用快速模式；运行中 `/fast off` 不进入 live guide，排队消息读取最新 session 状态并使用 `service_tier="default"`；session 最终持久化 `serviceTierOverride:"default"` 与 `serviceTierOverrideSource:"session slash command"`。
-4. Traex 收到合法 `/fast off` 或非法参数 `/fast invalid` 后都优先明确回复“当前 Runner 不支持 `/fast` 命令”，且 Traex Runner 不执行。
-5. 合法和非法 `/fast` 在群聊与忙碌链路均作为系统命令分类，不进入普通 prompt 或 live guide。
+2. 初始 `/fast status` 明确回复“未显式设置 service tier，将使用 Codex 自身默认模式”，命令本身不执行 Codex；随后普通消息的 Runner argv 不包含任何 `service_tier=`。
+3. `/fast off` 和裸 `/fast` 本身不执行 Codex；后续两条普通消息的 Runner argv 分别只包含一个 `service_tier="default"` 和 `service_tier="fast"`。
+4. 显式切换后的 `/fast status` 回复当前使用快速模式；运行中 `/fast off` 不进入 live guide，排队消息读取最新 session 状态并使用 `service_tier="default"`；session 最终持久化 `serviceTierOverride:"default"` 与 `serviceTierOverrideSource:"session slash command"`。
+5. Traex 收到合法 `/fast off` 或非法参数 `/fast invalid` 后都优先明确回复“当前 Runner 不支持 `/fast` 命令”，且 Traex Runner 不执行。
+6. 合法和非法 `/fast` 在群聊与忙碌链路均作为系统命令分类，不进入普通 prompt 或 live guide。
 
 ## 最近执行记录
 
+- 2026-08-05：PASS — 修复 Codex Runner 被 Bifrost 隐式设为 Fast 的回归并立即执行 TC-IEC-70。`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_codex_fast_slash.sh` 输出 `[im-codex-fast] PASS`；隔离 IM mock-inbound 链路先发送 `/fast status`，回复明确为“未显式设置 service tier，将使用 Codex 自身默认模式”且不执行 Runner，随后首个普通 Codex `exec` argv 不含任何 `service_tier=`。用户显式执行 `/fast off` 与裸 `/fast` 后，后续 argv 才分别包含 `service_tier="default"` 与 `service_tier="fast"`；忙碌切换、排队读取最新 session、Traex 拒绝路径均继续通过。六条 focused Rust 回归逐条通过，覆盖 parser、session 覆盖静态配置、默认 tier 解析为空、App Server 默认 thread/turn 省略 `serviceTier`、帮助文案与群聊 slash 分类。
 - 2026-07-31：PASS — 新增并立即执行 TC-IEC-70。`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_codex_fast_slash.sh` 输出 `[im-codex-fast] PASS`；真实隔离 IM mock-inbound 链路确认 `/fast off` 与裸 `/fast` 不执行 Runner，随后两次 Codex `exec` 分别只携带 `service_tier="default"` 与 `service_tier="fast"`，`/fast status` 回复当前快速模式；扩展忙碌链路后，当前任务仍使用切换前的 `fast`，运行中 `/fast off` 不进入 stdin/live guide，`/q` 排队的下一轮读取最新 session 并只携带 `service_tier="default"`，session 最终持久化 `serviceTierOverride:"default"` 和来源 `session slash command`；Traex 收到合法 `/fast off` 与非法参数 `/fast invalid` 都优先明确返回不支持且未执行。五条 focused Rust 回归逐条通过，覆盖 parser、session 覆盖 Runner 静态配置、Codex 默认 tier、帮助文案和群聊 slash 系统命令分类。E2E 首轮仅因断言把 mock Runner 的 `--version` 探测计作业务运行而失败，修正为只统计 `exec`；扩展非支持 Runner 双消息后又发现最终断言早于第二条异步 outbound log，改为等待计数达到 2 后完整复跑通过。
 - 2026-07-30：PASS — 新增并立即执行 TC-IEC-69。`SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_prompt_passthrough.sh` 输出 `[im-prompt-passthrough] PASS`；mock IM + mock Runner 捕获的三条 stdin 分别精确为原始消息、首条 `Base -> Developer -> User -> Runner -> 消息`、后续 `Developer -> User -> Runner -> 消息`，遗留 `injectBifrostTools:true` 未生成 `Bifrost Tool Context`。三组 focused Rust 回归分别通过 `2/2`、`1/1`、`1/1`。首次 Settings Playwright 暴露旧用例仍把只读 `default_base_instructions` 当成已配置 Base，已按“空值不注入”语义修正为显式填写后才保存；完整重跑 `Settings Agent 三层 instructions|Agent Runners 新增弹窗` 通过 `2/2`，确认遗留开关不再显示且生命周期说明可见。
 - 2026-07-25：PASS — 新增并立即执行 TC-IEC-68。先构建当前源码二进制，再执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_im_gateway_desktop_path_traex.sh`，输出 `[im-gateway-desktop-path-traex] PASS`；隔离 Service 以 `PATH=/usr/bin:/bin`、临时 HOME 和动态端口启动，Runner 配置未设置 executable/PATH，仍从临时 `HOME/.local/bin/traex` 启动 `app-server --listen stdio://`，run snapshot executable 为裸 `traex`，版本为 `traex 0.0.0-desktop-path-mock`，最终响应为 `BIFROST_DESKTOP_PATH_TRAEX_OK`。补充真实 Traex 用例时，隔离 Service 成功创建 `traex app-server --listen stdio://` 子进程 PID `26233`，确认原 `No such file or directory` 不再出现；外部模型在 240 秒内未完成而由 Python HTTP 客户端超时，按外部模型延迟记录，不视为 PATH 回归失败。测试未停止或替换用户 9900 Service。

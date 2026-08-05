@@ -714,14 +714,7 @@ pub(super) fn build_command_spec(request: &ExternalCliRunRequest) -> CommandSpec
     if request.adapter == DEFAULT_ADAPTER && config.strict_config.unwrap_or(false) {
         args.push("--strict-config".to_string());
     }
-    let mut overrides = config.config_overrides.clone();
-    if request.adapter == DEFAULT_ADAPTER
-        && !overrides
-            .iter()
-            .any(|value| config_override_key(value) == Some("service_tier"))
-    {
-        overrides.push(format!("service_tier=\"{CODEX_FAST_SERVICE_TIER}\""));
-    }
+    let overrides = config.config_overrides.clone();
     if config.search == Some(true)
         && !config
             .enable_features
@@ -890,10 +883,6 @@ fn effective_danger_full_access(request: &ExternalCliRunRequest) -> bool {
                     && request.adapter_config.approval_policy.is_none()
             }
         })
-}
-
-fn config_override_key(value: &str) -> Option<&str> {
-    value.split_once('=').map(|(key, _)| key.trim())
 }
 
 fn resolved_service_tier(request: &ExternalCliRunRequest) -> Option<String> {
@@ -1488,6 +1477,30 @@ mod tests {
             build_command_spec(&request(TRAEX_ADAPTER)).args[..3],
             ["app-server", "--listen", "stdio://"]
         );
+    }
+
+    #[test]
+    fn codex_app_server_omits_service_tier_without_explicit_configuration() {
+        let request = request(DEFAULT_ADAPTER);
+        let command = build_command_spec(&request);
+        let (_, start_params) = build_thread_request(&request, None);
+        let (_, resume_params) = build_thread_request(&request, Some("thread-default-mode"));
+        let turn_params = build_turn_start_request(
+            &request,
+            "thread-default-mode",
+            "hello".to_string(),
+            "msg-default",
+        );
+
+        assert!(!command.args.windows(2).any(|pair| {
+            pair[0] == "--config" && pair[1].trim_start().starts_with("service_tier=")
+        }));
+        assert!(start_params.get("serviceTier").is_none(), "{start_params}");
+        assert!(
+            resume_params.get("serviceTier").is_none(),
+            "{resume_params}"
+        );
+        assert!(turn_params.get("serviceTier").is_none(), "{turn_params}");
     }
 
     #[test]

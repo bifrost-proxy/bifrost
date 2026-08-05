@@ -1183,6 +1183,11 @@ pub(super) async fn codex_fast_commands_cover_busy_idle_modes_and_rejections() {
 
     let replies = service.message_log_store.list();
     assert!(replies.iter().any(|log| {
+        log.content.as_deref().is_some_and(|content| {
+            content.contains("未显式设置 service tier") && content.contains("Codex 自身默认模式")
+        })
+    }));
+    assert!(replies.iter().any(|log| {
         log.content
             .as_deref()
             .is_some_and(|content| content.contains("使用快速模式"))

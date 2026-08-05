@@ -2321,7 +2321,7 @@ pub fn resolve_external_cli_status_model_config(
 }
 
 pub fn resolve_external_cli_service_tier(
-    adapter: &str,
+    _adapter: &str,
     config: &ExternalCliAdapterConfig,
 ) -> (Option<String>, Option<String>) {
     if let Some(service_tier) = config.config_overrides.iter().rev().find_map(|value| {
@@ -2331,12 +2331,6 @@ pub fn resolve_external_cli_service_tier(
             .flatten()
     }) {
         return (Some(service_tier), Some("runner config".to_string()));
-    }
-    if supports_external_cli_fast_slash(adapter) {
-        return (
-            Some(CODEX_FAST_SERVICE_TIER.to_string()),
-            Some("Bifrost Codex default".to_string()),
-        );
     }
     (None, None)
 }
@@ -2363,7 +2357,7 @@ pub fn format_external_cli_fast_status(
             source.unwrap_or("配置")
         ),
         None => format!(
-            "当前 Codex Runner `{runner_id}` 未解析到 service tier，将使用 Codex 默认模式。"
+            "当前 Codex Runner `{runner_id}` 未显式设置 service tier，将使用 Codex 自身默认模式。"
         ),
     }
 }
