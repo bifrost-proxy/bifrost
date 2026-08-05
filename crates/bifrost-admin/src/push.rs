@@ -1629,10 +1629,10 @@ impl PushManager {
             }));
         }
 
-        if subscription.need_metrics {
-            if client.reserve_metrics_push(Instant::now(), subscription.metrics_interval_ms) {
-                client.send(PushMessage::MetricsUpdate(self.build_metrics_data()));
-            }
+        if subscription.need_metrics
+            && client.reserve_metrics_push(Instant::now(), subscription.metrics_interval_ms)
+        {
+            client.send(PushMessage::MetricsUpdate(self.build_metrics_data()));
         }
 
         if subscription.need_values {
