@@ -5,6 +5,7 @@ test_socks5_udp.sh
 test_socks5_udp_rules.sh
 test_tls_intercept_e2e.sh
 test_tls_intercept_mode_api.sh
+test_cli_proxy_environment_e2e.sh
 test_breakpoint_performance_guard.sh
 test_body_replace.sh
 test_header_replace.sh

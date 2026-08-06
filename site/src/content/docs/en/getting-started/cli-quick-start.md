@@ -17,6 +17,7 @@ This guide is organized by tasks instead of listing every flag. For the full com
 | --- | --- | --- |
 | Local debugging without polluting default rules | `bifrost port bind ...` | Reuse the main service and isolate rules by port. |
 | Route browser or app traffic through Bifrost | `bifrost start -d` or `curl -x ...` | The background service enables the system proxy by default; use explicit proxy only for a single command. |
+| Route terminal tools and install CA variables | `bifrost cli-proxy enable` | Detects Bash, Zsh, Fish, or PowerShell and manages a removable profile block. |
 | Redirect an online domain to a local service | `bifrost rule add ... host://...` | HTTP can route directly; HTTPS path matching usually needs TLS interception. |
 | Modify headers, status, or body | `reqHeaders://`, `resHeaders://`, `statusCode://`, `file://` | Inline values are preferred for small content. |
 | Understand why a request missed rules | `bifrost traffic list/get/search` | Check matched rules, entry port, URL, and protocol. |
@@ -50,6 +51,17 @@ bifrost port destroy 18888
 curl -x http://127.0.0.1:9900 http://httpbin.org/headers
 curl -x http://127.0.0.1:9900 https://httpbin.org/headers
 ```
+
+For terminal-only proxying with CA trust variables, use the dedicated profile command:
+
+```bash
+bifrost cli-proxy enable
+bifrost cli-proxy enable --shell zsh --no-proxy "localhost,127.0.0.1,::1,*.local"
+# Open a new shell or reload the profiles printed above.
+bifrost cli-proxy disable
+```
+
+It supports Bash, Zsh, Fish, and PowerShell and prints complete manual setup or removal instructions if profile editing fails. Normal exit or crash cleanup removes managed blocks; restart handoff preserves them for the replacement process. `start --cli-proxy` remains a compatibility path, while new setup should use `cli-proxy enable`.
 
 For TLS inspection, use the Bifrost CA. Prefer system trust stores for browsers and desktop apps. Export the CA only for tools that do not read system trust.
 

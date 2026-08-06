@@ -1044,7 +1044,10 @@ async fn group_event_loop_routes_concurrent_context_to_the_active_external_sessi
     duplicate_direct_follow_up.event_id = "redelivery-direct-a-guide-during-run".to_string();
     tx.send(duplicate_direct_follow_up).unwrap();
 
-    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+    // Full-workspace LLVM coverage instrumentation can make the four independent
+    // runner processes take longer than the normal test build. Keep the final
+    // state assertions unchanged, but allow enough time for an instrumented run.
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
             let any_active = [
                 &group_a_session,
@@ -1063,7 +1066,7 @@ async fn group_event_loop_routes_concurrent_context_to_the_active_external_sessi
     .await
     .expect("independent runners did not finish");
     drop(tx);
-    tokio::time::timeout(std::time::Duration::from_secs(20), handle)
+    tokio::time::timeout(std::time::Duration::from_secs(60), handle)
         .await
         .expect("group runner event loop timed out")
         .expect("group runner event loop panicked");

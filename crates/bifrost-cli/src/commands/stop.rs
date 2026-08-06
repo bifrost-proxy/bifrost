@@ -79,6 +79,10 @@ fn cleanup_proxy_state(bifrost_dir: &std::path::Path) -> bool {
     }
     let mut shell_manager = bifrost_core::ShellProxyManager::new(bifrost_dir.to_path_buf());
     let _ = shell_manager.disable_persistent();
+    if let Err(e) = bifrost_core::CliProxyEnvironmentManager::disable_all_managed() {
+        eprintln!("Failed to disable standalone CLI proxy environment: {}", e);
+        success = false;
+    }
     success
 }
 
@@ -86,10 +90,6 @@ fn write_shutdown_marker_for_stop(
     bifrost_dir: &std::path::Path,
     mode: StopSystemProxyMode,
 ) -> bifrost_core::Result<()> {
-    if !bifrost_core::SystemProxyManager::is_supported() {
-        return Ok(());
-    }
-
     let marker_result =
         bifrost_core::write_system_proxy_shutdown_mode(bifrost_dir, mode.shutdown_mode());
     if marker_result.is_ok() || mode.marker_write_must_succeed() {
@@ -260,11 +260,11 @@ fn run_stop_with_system_proxy_mode(
     }
 
     if system_proxy_mode.should_cleanup_in_stop_process() {
-        println!("Cleaning system proxy before stopping Bifrost proxy...");
+        println!("Cleaning managed proxy settings before stopping Bifrost proxy...");
         if !cleanup_proxy_state(&bifrost_dir) {
             let _ = bifrost_core::consume_system_proxy_shutdown_mode(&bifrost_dir);
             return Err(bifrost_core::BifrostError::Config(
-                "System proxy cleanup failed before stopping Bifrost; service is still running to avoid breaking network connectivity.".to_string(),
+                "Managed proxy cleanup failed before stopping Bifrost; service is still running to avoid breaking network connectivity.".to_string(),
             ));
         }
     }

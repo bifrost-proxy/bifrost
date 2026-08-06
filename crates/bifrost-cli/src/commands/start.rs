@@ -1152,6 +1152,17 @@ impl Drop for RestartHandoffStartupGuard {
                 "restart handoff startup recovery failed"
             );
         }
+        if let Err(error) = bifrost_core::CliProxyEnvironmentManager::disable_all_managed() {
+            eprintln!(
+                "Failed to disable standalone CLI proxy environment after aborted restart handoff: {error}"
+            );
+            tracing::warn!(
+                target: "bifrost_cli::startup",
+                error = %error,
+                data_dir = %self.bifrost_dir.display(),
+                "restart handoff CLI proxy environment cleanup failed"
+            );
+        }
         let _ = bifrost_core::consume_system_proxy_shutdown_mode(&self.bifrost_dir);
     }
 }
@@ -1347,6 +1358,40 @@ fn should_stop_system_proxy_reconcile_for_shutdown(bifrost_dir: &Path) -> bool {
         bifrost_core::read_system_proxy_shutdown_mode(bifrost_dir),
         Some(bifrost_core::SystemProxyShutdownMode::ForegroundCleanup)
     )
+}
+
+fn should_cleanup_standalone_cli_proxy_on_shutdown(bifrost_dir: &Path) -> bool {
+    !matches!(
+        bifrost_core::read_system_proxy_shutdown_mode(bifrost_dir),
+        Some(bifrost_core::SystemProxyShutdownMode::PreserveForRestart)
+    )
+}
+
+fn cleanup_standalone_cli_proxy_on_shutdown(bifrost_dir: &Path) {
+    if !should_cleanup_standalone_cli_proxy_on_shutdown(bifrost_dir) {
+        tracing::info!(
+            target: "bifrost_cli::shutdown",
+            "standalone CLI proxy environment cleanup skipped for restart"
+        );
+        return;
+    }
+
+    match bifrost_core::CliProxyEnvironmentManager::disable_all_managed() {
+        Ok(changed_paths) if !changed_paths.is_empty() => tracing::info!(
+            target: "bifrost_cli::shutdown",
+            changed_profiles = changed_paths.len(),
+            "standalone CLI proxy environment disabled during shutdown"
+        ),
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("Failed to disable standalone CLI proxy environment: {error}");
+            tracing::warn!(
+                target: "bifrost_cli::shutdown",
+                error = %error,
+                "standalone CLI proxy environment cleanup failed during shutdown"
+            );
+        }
+    }
 }
 
 async fn restore_system_proxy_on_shutdown(
@@ -1741,12 +1786,15 @@ pub fn run_start(
 
     let defer_startup_recovery_for_restart_handoff =
         should_defer_startup_proxy_recovery_for_restart_handoff(&bifrost_dir, enable_system_proxy);
-    let mut restart_handoff_guard = if defer_startup_recovery_for_restart_handoff {
-        Some(RestartHandoffStartupGuard::new(bifrost_dir.clone()))
-    } else {
+    let restart_handoff_requested = matches!(
+        bifrost_core::read_system_proxy_shutdown_mode(&bifrost_dir),
+        Some(bifrost_core::SystemProxyShutdownMode::PreserveForRestart)
+    );
+    let mut restart_handoff_guard =
+        restart_handoff_requested.then(|| RestartHandoffStartupGuard::new(bifrost_dir.clone()));
+    if !defer_startup_recovery_for_restart_handoff {
         recover_proxy_state_before_start(&bifrost_dir);
-        None
-    };
+    }
     let disconnect_on_config_change = if no_disconnect_on_config_change {
         false
     } else {
@@ -2430,9 +2478,7 @@ pub fn run_foreground(
             } else {
                 base_config.host.clone()
             };
-            if enable_system_proxy {
-                system_proxy_lifecycle_helper_state.ensure_started_after_startup_enable();
-            }
+            system_proxy_lifecycle_helper_state.ensure_started_after_startup();
             #[cfg(target_os = "macos")]
             spawn_system_proxy_wake_reconcile_task(SystemProxyReconcileConfig {
                 bifrost_dir: bifrost_dir.clone(),
@@ -2643,6 +2689,7 @@ pub fn run_foreground(
             eprintln!("Failed to restore CLI proxy: {}", e);
         }
     }
+    cleanup_standalone_cli_proxy_on_shutdown(&bifrost_dir);
     system_proxy_reconcile_stop.store(true, Ordering::Release);
     remove_pid()?;
     println!("Bifrost proxy stopped.");
@@ -3582,9 +3629,7 @@ pub fn run_daemon(
                         admin_state_arc.rules_storage.clone(),
                     );
 
-                    if enable_system_proxy {
-                        system_proxy_lifecycle_helper_state.ensure_started_after_startup_enable();
-                    }
+                    system_proxy_lifecycle_helper_state.ensure_started_after_startup();
                     #[cfg(target_os = "macos")]
                     spawn_system_proxy_wake_reconcile_task(SystemProxyReconcileConfig {
                         bifrost_dir: bifrost_dir.clone(),
@@ -3669,6 +3714,7 @@ pub fn run_daemon(
                     eprintln!("Failed to restore CLI proxy: {}", e);
                 }
             }
+            cleanup_standalone_cli_proxy_on_shutdown(&bifrost_dir);
             system_proxy_reconcile_stop.store(true, Ordering::Release);
             if should_skip_system_proxy_restore(&bifrost_dir, "daemon fork fallback") {
                 system_proxy_manager.blocking_write().detach_in_place();
@@ -5205,6 +5251,109 @@ mod tests {
         )
         .unwrap();
         assert!(should_stop_system_proxy_reconcile_for_shutdown(dir));
+    }
+
+    #[test]
+    fn standalone_cli_proxy_cleanup_runs_for_normal_and_stop_shutdowns() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir = temp_dir.path();
+
+        assert!(should_cleanup_standalone_cli_proxy_on_shutdown(dir));
+
+        bifrost_core::write_system_proxy_shutdown_mode(
+            dir,
+            bifrost_core::SystemProxyShutdownMode::ForegroundCleanup,
+        )
+        .unwrap();
+        assert!(should_cleanup_standalone_cli_proxy_on_shutdown(dir));
+
+        bifrost_core::write_system_proxy_shutdown_mode(
+            dir,
+            bifrost_core::SystemProxyShutdownMode::BackgroundCleanup,
+        )
+        .unwrap();
+        assert!(should_cleanup_standalone_cli_proxy_on_shutdown(dir));
+    }
+
+    #[test]
+    fn standalone_cli_proxy_cleanup_is_preserved_during_restart_handoff() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        bifrost_core::write_system_proxy_shutdown_mode(
+            temp_dir.path(),
+            bifrost_core::SystemProxyShutdownMode::PreserveForRestart,
+        )
+        .unwrap();
+
+        assert!(!should_cleanup_standalone_cli_proxy_on_shutdown(
+            temp_dir.path()
+        ));
+    }
+
+    #[test]
+    fn standalone_cli_proxy_cleanup_executes_normal_preserve_and_error_branches() {
+        let _lock = data_dir_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let home_value = home.to_string_lossy().into_owned();
+        let _home = ScopedEnvVar::set("HOME", &home_value);
+        let profile = home.join(".zshrc");
+        let managed = "# >>> Bifrost CLI proxy environment start >>>\nmanaged\n# <<< Bifrost CLI proxy environment end <<<\n";
+
+        std::fs::write(&profile, managed).unwrap();
+        cleanup_standalone_cli_proxy_on_shutdown(temp_dir.path());
+        assert_eq!(std::fs::read_to_string(&profile).unwrap(), "");
+
+        std::fs::write(&profile, managed).unwrap();
+        bifrost_core::write_system_proxy_shutdown_mode(
+            temp_dir.path(),
+            bifrost_core::SystemProxyShutdownMode::PreserveForRestart,
+        )
+        .unwrap();
+        cleanup_standalone_cli_proxy_on_shutdown(temp_dir.path());
+        assert_eq!(std::fs::read_to_string(&profile).unwrap(), managed);
+
+        bifrost_core::consume_system_proxy_shutdown_mode(temp_dir.path()).unwrap();
+        std::fs::remove_file(&profile).unwrap();
+        let invalid_profile = bifrost_core::CliProxyShell::PowerShell
+            .config_paths_for_home(&home)
+            .into_iter()
+            .next()
+            .unwrap();
+        std::fs::create_dir_all(&invalid_profile).unwrap();
+        cleanup_standalone_cli_proxy_on_shutdown(temp_dir.path());
+        assert!(invalid_profile.is_dir());
+    }
+
+    #[test]
+    fn restart_handoff_guard_cleans_cli_proxy_when_adoption_aborts() {
+        let _lock = data_dir_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let home = temp_dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let home_value = home.to_string_lossy().into_owned();
+        let _home = ScopedEnvVar::set("HOME", &home_value);
+        let invalid_profile = bifrost_core::CliProxyShell::PowerShell
+            .config_paths_for_home(&home)
+            .into_iter()
+            .next()
+            .unwrap();
+        std::fs::create_dir_all(&invalid_profile).unwrap();
+        bifrost_core::write_system_proxy_shutdown_mode(
+            temp_dir.path(),
+            bifrost_core::SystemProxyShutdownMode::PreserveForRestart,
+        )
+        .unwrap();
+
+        drop(RestartHandoffStartupGuard::new(
+            temp_dir.path().to_path_buf(),
+        ));
+
+        assert_eq!(
+            bifrost_core::read_system_proxy_shutdown_mode(temp_dir.path()),
+            None
+        );
+        assert!(invalid_profile.is_dir());
     }
 }
 

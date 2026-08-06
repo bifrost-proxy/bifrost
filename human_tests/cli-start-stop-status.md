@@ -785,7 +785,7 @@ PY
 
 **预期结果**：
 - `stop` 写入 `foreground_cleanup` marker，先在前台清理系统代理/CLI proxy，再发送 SIGTERM；无系统代理场景也不应输出 `Sending SIGKILL`。
-- `stop` 输出 `Cleaning system proxy before stopping Bifrost proxy...`，且不输出 `System proxy cleanup continues in background if needed.`。
+- `stop` 输出 `Cleaning managed proxy settings before stopping Bifrost proxy...`，明确覆盖系统代理与 CLI proxy profile，且不输出 `System proxy cleanup continues in background if needed.`。
 - restart 专用 stop 使用 preserve marker，旧 daemon 和旧 lifecycle helper 不清理系统代理，fresh daemon 继续接管同一 host/port。
 - 无系统代理 restart 是跨平台一致能力：Linux/macOS CI 均应完成 daemon handoff，fresh start argv 不应包含 `--system-proxy`，并且不残留 `.system_proxy_shutdown_mode`。
 - `stop` 返回后 status 显示服务未运行，端口不再监听，临时数据目录可删除。
@@ -796,6 +796,7 @@ PY
 - 2026-06-10 跨平台补强：针对 review 指出的 Linux 不支持完整系统代理配置但其他 restart 能力应对齐，`test_stop_restart_shutdown_marker.sh` 新增无系统代理 restart 子用例。执行真实 `bifrost restart` 后确认 fresh daemon ready、runtime PID 已变化、restart argv 不含 `--system-proxy`、`.system_proxy_shutdown_mode` 不残留；该子用例不依赖 macOS fake `networksetup`，会在 Linux/macOS shell CI 中执行。
 - 2026-06-10 本轮复测：`source ~/.zshrc && cargo fmt --all -- --check && cargo test -p bifrost-core test_is_supported -- --nocapture && cargo test -p bifrost-cli restart_handoff_recovery -- --nocapture && cargo build --bin bifrost && SKIP_BUILD=true e2e-tests/tests/test_stop_restart_shutdown_marker.sh` 通过。脚本结果 14/14 PASS，新增无系统代理 restart 子用例通过，macOS fake system proxy handoff 仍保持无 cleanup gap。
 - 2026-06-10 CI shell 覆盖确认：执行 `source ~/.zshrc && for shard in 1 2 3; do BIFROST_E2E_SHARD_INDEX="$shard" BIFROST_E2E_SHARD_TOTAL=3 bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg 'test_stop_restart_shutdown_marker|test_system_proxy_e2e' || true; done`，确认 `test_stop_restart_shutdown_marker.sh` 被 Linux/macOS shell CI 的 shard 1/3 收集，且未被 CI skip 列表过滤；`test_system_proxy_e2e.sh` 仍按既有策略跳过 Linux，避免在 Linux 写半成品系统代理。
+- 2026-08-06 CLI proxy 退出清理语义回归：执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_stop_restart_shutdown_marker.sh`，验证 stop 先输出 `Cleaning managed proxy settings before stopping Bifrost proxy...`，再停止主进程；该文案表示同一前台阶段同时清理系统代理和 CLI proxy profile，不再仅表述系统代理。
 
 ---
 

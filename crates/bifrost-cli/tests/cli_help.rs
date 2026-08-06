@@ -145,6 +145,28 @@ fn start_all_options_parse() {
 }
 
 #[test]
+fn cli_proxy_help_exposes_enable_disable_shell_and_ca_options() {
+    let help = run_help(&["cli-proxy"]);
+    assert!(help.contains("enable"));
+    assert!(help.contains("disable"));
+
+    let enable_help = run_help(&["cli-proxy", "enable"]);
+    for option in [
+        "--host",
+        "--port",
+        "--no-proxy",
+        "--shell",
+        "--ca-file",
+        "--ca-dir",
+    ] {
+        assert!(enable_help.contains(option), "missing {option}");
+    }
+    for shell in ["bash", "zsh", "fish", "powershell"] {
+        assert!(enable_help.contains(shell), "missing shell {shell}");
+    }
+}
+
+#[test]
 fn search_all_options_parse() {
     let help = run_help(&["search"]);
     for opt in &[

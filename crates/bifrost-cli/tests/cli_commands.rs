@@ -3,7 +3,8 @@ use std::fs;
 use bifrost_cli::cli::{
     AiAsrCommands, AiAsrTaskCommands, AiAsrTaskDailyCommands, AiCommands, AiVoiceCommands,
     AiVoiceWakeBindingCommands, AiVoiceWakeCommands, AiVoiceWakeListenerCommands, CaCommands, Cli,
-    Commands, RemoteCommands, RemoteFileCommands, SettingCommands, SyncCommands,
+    CliProxyCommands, CliProxyShellArg, Commands, RemoteCommands, RemoteFileCommands,
+    SettingCommands, SyncCommands,
 };
 use bifrost_cli::commands::handle_install_skill;
 use bifrost_storage::DEFAULT_REMOTE_BASE_URL;
@@ -1404,6 +1405,60 @@ fn alias_sp_works_as_system_proxy() {
         combined.contains("enable") && combined.contains("disable"),
         "sp alias should work as system-proxy command"
     );
+}
+
+#[test]
+fn cli_proxy_enable_parses_shell_proxy_and_ca_options() {
+    let cli = Cli::parse_from([
+        "bifrost",
+        "cli-proxy",
+        "enable",
+        "--shell",
+        "fish",
+        "--host",
+        "::1",
+        "--port",
+        "18888",
+        "--no-proxy",
+        "localhost,*.local",
+        "--ca-file",
+        "/tmp/bifrost ca.pem",
+        "--ca-dir",
+        "/tmp/certs",
+    ]);
+
+    match cli.command.expect("command") {
+        Commands::CliProxy {
+            action:
+                CliProxyCommands::Enable {
+                    host,
+                    port,
+                    no_proxy,
+                    shell,
+                    ca_file,
+                    ca_dir,
+                },
+        } => {
+            assert_eq!(host.as_deref(), Some("::1"));
+            assert_eq!(port, Some(18888));
+            assert_eq!(no_proxy.as_deref(), Some("localhost,*.local"));
+            assert!(matches!(shell, Some(CliProxyShellArg::Fish)));
+            assert_eq!(ca_file.unwrap().to_string_lossy(), "/tmp/bifrost ca.pem");
+            assert_eq!(ca_dir.unwrap().to_string_lossy(), "/tmp/certs");
+        }
+        _ => panic!("expected cli-proxy enable"),
+    }
+}
+
+#[test]
+fn cli_proxy_disable_parses_shell_override() {
+    let cli = Cli::parse_from(["bifrost", "cli-proxy", "disable", "--shell", "powershell"]);
+    match cli.command.expect("command") {
+        Commands::CliProxy {
+            action: CliProxyCommands::Disable { shell },
+        } => assert!(matches!(shell, Some(CliProxyShellArg::PowerShell))),
+        _ => panic!("expected cli-proxy disable"),
+    }
 }
 
 #[test]

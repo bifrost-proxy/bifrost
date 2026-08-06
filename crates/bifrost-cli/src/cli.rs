@@ -441,6 +441,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: AccountCommands,
     },
+    #[command(about = "Install or uninstall CLI proxy and CA environment variables")]
+    CliProxy {
+        #[command(subcommand)]
+        action: CliProxyCommands,
+    },
     #[command(
         visible_alias = "sp",
         about = "Toggle system proxy (enable/disable/status)"
@@ -2387,6 +2392,57 @@ pub enum SystemProxyCommands {
         data_dir: PathBuf,
         #[arg(long)]
         installed_version: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum CliProxyShellArg {
+    Bash,
+    Zsh,
+    Fish,
+    #[value(name = "powershell", alias = "pwsh")]
+    PowerShell,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum CliProxyCommands {
+    #[command(about = "Install proxy and CA environment variables into the current shell profile")]
+    Enable {
+        #[arg(long, value_hint = ValueHint::Hostname, help = "Proxy host (default: 127.0.0.1)")]
+        host: Option<String>,
+        #[arg(long, help = "Proxy port (default: running Bifrost port or global -p)")]
+        port: Option<u16>,
+        #[arg(long, help = "No-proxy list (default: localhost,127.0.0.1,::1)")]
+        no_proxy: Option<String>,
+        #[arg(
+            long,
+            value_enum,
+            help = "Shell override; otherwise detect the current shell"
+        )]
+        shell: Option<CliProxyShellArg>,
+        #[arg(
+            long,
+            value_hint = ValueHint::FilePath,
+            help = "CA PEM file (default: Bifrost CA)"
+        )]
+        ca_file: Option<PathBuf>,
+        #[arg(
+            long,
+            value_hint = ValueHint::DirPath,
+            help = "CA directory (default: directory containing the CA file)"
+        )]
+        ca_dir: Option<PathBuf>,
+    },
+    #[command(
+        about = "Uninstall Bifrost-managed proxy and CA variables from the current shell profile"
+    )]
+    Disable {
+        #[arg(
+            long,
+            value_enum,
+            help = "Shell override; otherwise detect the current shell"
+        )]
+        shell: Option<CliProxyShellArg>,
     },
 }
 

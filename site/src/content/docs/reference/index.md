@@ -15,6 +15,7 @@ editLink: false
 
 - [项目概览](../getting-started/overview)
 - [安装与启动](../getting-started/installation)
+- [移动端连接 PC、Mac 或 Linux 上的 Bifrost](../getting-started/mobile-proxy)
 - [CLI 快速开始](../getting-started/cli-quick-start)
 - [CLI 详细命令](./cli)
 - [桌面版安装与构建](../getting-started/desktop)

@@ -107,6 +107,18 @@ $*.example.com               # 域名通配符，匹配单级子域名的所有�
 $**.example.com              # 域名通配符，匹配多级子域名的所有路径
 ```
 
+### 通配 host + URL 片段路径
+
+host 通配符后可以直接跟普通 URL 片段路径。路径本身不含通配符时，它按带边界的前缀匹配：命中该路径本身、query 和子路径，但不会命中仅仅字符串前缀相同的其他路径。
+
+```txt
+*/get_domains/v5   # 匹配 http://api/get_domains/v5、?query 和 /detail
+                   # 不匹配 http://api/get_domains/v50
+**/get_domains/v5  # 与上面相同，但 host 可包含点，例如 api.example.com
+```
+
+单个 `*` 的 host 部分不跨越 `.`；需要匹配常见的多级域名时使用 `**/path`。如果路径本身也需要通配符，继续使用 `example.com/api/*`，或用 `^` 前缀获得严格的路径段语义。
+
 > ⚠️ **不要在 Wildcard 模式前加协议前缀**。协议前缀（`http://`、`https://`、`http*://`、`ws*://`、`//`）只对 Domain 和 PathWildcard（`^` 前缀）模式可靠；与 Wildcard 模式组合会出现以下错误行为：
 >
 > | 写法 | 实际行为 |

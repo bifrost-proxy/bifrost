@@ -26,6 +26,7 @@ The top-level help intentionally stays short. Exact flag parsing is defined by e
 | `ca` | Generate, install, export, and inspect the Bifrost CA. |
 | `whitelist` | Manage local access control, pending approvals, and temporary allow rules. |
 | `system-proxy` | Enable, disable, or inspect the OS system proxy. |
+| `cli-proxy` | Install or remove proxy and CA environment variables in shell profiles. |
 | `value` | Manage `{VALUE_NAME}` rule variables. |
 | `script` | Manage request, response, decode, and parser scripts. |
 | `upgrade`, `update`, `version-check` | Check for new versions and upgrade the binary; `update` is an alias for `upgrade`. |
@@ -67,6 +68,24 @@ bifrost im provider add weixin-main --type weixin --runner codex
 ```
 
 Use the command-specific `--help` output as the source of truth for every flag. This release does not redact Authorization, Cookie, JWT token, or other sensitive values from traffic detail, export, or `search --include` output; a complete redaction design will be handled separately. Treat those outputs as sensitive and manually remove secrets before publishing reusable skills or sharing evidence with lower-trust channels.
+
+## CLI Proxy and CA Environment
+
+Use `cli-proxy` when terminal programs should use Bifrost without changing the OS proxy. It installs proxy variables plus CA variables for Node.js, Python, Go/cURL, Git, Cargo, Deno, AWS SDKs, gRPC, Composer, and related tools:
+
+```bash
+bifrost cli-proxy enable
+bifrost cli-proxy enable --shell zsh --host 127.0.0.1 --port 9900
+bifrost cli-proxy enable --no-proxy "localhost,127.0.0.1,::1,*.local"
+bifrost cli-proxy enable --ca-file /path/to/custom.pem --ca-dir /path/to/certs
+bifrost cli-proxy disable
+```
+
+Without `--shell`, Bifrost detects Bash, Zsh, Fish, or PowerShell. Bash updates `~/.bashrc` and the first existing login profile in Bash precedence order (`.bash_profile`, `.bash_login`, `.profile`), creating `.bash_profile` only when none exists. Zsh updates `.zshrc` and `.zprofile`; Fish updates `~/.config/fish/config.fish`; PowerShell updates its platform profile paths.
+
+Managed values include upper- and lower-case proxy variables and CA variables such as `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `PIP_CERT`, `NPM_CONFIG_CAFILE`, `GIT_SSL_CAINFO`, `AWS_CA_BUNDLE`, `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`, `CARGO_HTTP_CAINFO`, `COMPOSER_CAFILE`, and `DENO_CERT`. Override-style variables point to a combined system-roots-plus-Bifrost bundle; the command does not disable TLS verification.
+
+Open a new shell or reload the profiles printed by the command. `disable` removes only complete Bifrost marker blocks and cannot mutate the environment of an already-running parent shell. If automatic editing fails, the CLI prints the target profiles, a complete copyable block, or exact marker removal instructions. Normal stop, foreground exit, and crash cleanup remove all managed shell blocks; restart handoff preserves them for the replacement process.
 
 ## IM Gateway
 

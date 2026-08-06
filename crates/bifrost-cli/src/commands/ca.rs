@@ -618,7 +618,10 @@ pub fn check_and_install_certificate(options: CertificateCheckOptions) -> bifros
     }
 }
 
-fn ensure_ca_exists(ca_cert_path: &Path, ca_key_path: &Path) -> bifrost_core::Result<()> {
+pub(crate) fn ensure_ca_exists(
+    ca_cert_path: &Path,
+    ca_key_path: &Path,
+) -> bifrost_core::Result<()> {
     let ca_valid = ensure_valid_ca(ca_cert_path, ca_key_path)?;
     if !ca_valid {
         println!("Valid CA certificate not found. Generating...");
