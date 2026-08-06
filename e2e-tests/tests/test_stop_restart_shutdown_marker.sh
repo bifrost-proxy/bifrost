@@ -486,7 +486,7 @@ main() {
 
     assert_body_contains "Bifrost proxy stopped" "${stop_output}" "stop should report stopped"
     assert_body_not_contains "Sending SIGKILL" "${stop_output}" "stop should not escalate to SIGKILL"
-    assert_body_contains "Cleaning system proxy before stopping Bifrost proxy..." "${stop_output}" "stop should clean system proxy before SIGTERM"
+    assert_body_contains "Cleaning managed proxy settings before stopping Bifrost proxy..." "${stop_output}" "stop should clean system and CLI proxy settings before SIGTERM"
     assert_body_not_contains "System proxy cleanup continues in background if needed." "${stop_output}" "stop should not defer system proxy cleanup to background"
 
     if [[ "${elapsed}" -lt 5000 ]]; then
