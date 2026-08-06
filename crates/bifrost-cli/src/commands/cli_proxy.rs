@@ -373,6 +373,29 @@ fn manual_shell_candidates(requested_shell: Option<CliProxyShellArg>) -> Vec<Cli
 mod tests {
     use super::*;
 
+    struct ScopedEnv {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
     #[test]
     fn proxy_url_formats_ipv4_hostname_and_ipv6() {
         assert_eq!(
@@ -412,5 +435,71 @@ mod tests {
         assert!(is_known_unsupported_shell("/usr/bin/nu"));
         assert!(is_known_unsupported_shell(r"C:\tools\dash.exe"));
         assert!(!is_known_unsupported_shell("cargo"));
+    }
+
+    #[test]
+    fn canonical_path_helpers_cover_files_directories_and_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("ca.pem");
+        let directory = temp.path().join("certs");
+        std::fs::write(&file, "ca").unwrap();
+        std::fs::create_dir(&directory).unwrap();
+
+        assert!(canonical_file(&file, "CA").unwrap().is_absolute());
+        assert!(canonical_directory(&directory, "certs")
+            .unwrap()
+            .is_absolute());
+        assert!(canonical_file(&directory, "CA").is_err());
+        assert!(canonical_directory(&file, "certs").is_err());
+    }
+
+    #[test]
+    fn explicit_shell_enable_disable_covers_custom_ca_and_already_disabled_path() {
+        let _lock = crate::commands::UPGRADE_ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let data = temp.path().join("data");
+        let custom_certs = temp.path().join("custom-certs");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&custom_certs).unwrap();
+        let _home = ScopedEnv::set("HOME", &home);
+        let _data = ScopedEnv::set("BIFROST_DATA_DIR", &data);
+        let ca_file = custom_certs.join("ca.crt");
+        ensure_ca_exists(&ca_file, &custom_certs.join("ca.key")).unwrap();
+
+        enable_cli_proxy_environment(
+            Some(CliProxyShellArg::Bash),
+            "127.0.0.1",
+            19990,
+            "localhost",
+            Some(ca_file),
+            Some(custom_certs),
+        )
+        .unwrap();
+        disable_cli_proxy_environment(Some(CliProxyShellArg::Bash)).unwrap();
+        disable_cli_proxy_environment(Some(CliProxyShellArg::Bash)).unwrap();
+    }
+
+    #[test]
+    fn manual_enable_fallback_covers_invalid_options_and_unsafe_rendering() {
+        let error = BifrostError::Config("automatic write failed".into());
+        print_manual_enable_fallback(
+            Some(CliProxyShellArg::Bash),
+            "http://bad-host",
+            9900,
+            "localhost",
+            None,
+            None,
+            &error,
+        );
+        print_manual_enable_fallback(
+            Some(CliProxyShellArg::Bash),
+            "127.0.0.1",
+            9900,
+            "localhost\nunsafe",
+            Some(PathBuf::from("/missing/bifrost-ca.pem")),
+            Some(PathBuf::from("/missing/certs")),
+            &error,
+        );
     }
 }

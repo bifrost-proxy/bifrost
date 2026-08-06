@@ -53,29 +53,42 @@ impl CliProxyShell {
     }
 
     pub fn detect() -> Result<Self> {
-        if let Ok(shell) = std::env::var("SHELL") {
-            let shell = shell.to_ascii_lowercase();
-            if shell.contains("zsh") {
-                return Ok(Self::Zsh);
-            }
-            if shell.contains("bash") {
-                return Ok(Self::Bash);
-            }
-            if shell.contains("fish") {
-                return Ok(Self::Fish);
-            }
-        }
+        let shell = std::env::var("SHELL").ok();
+        detect_shell_environment(
+            shell.as_deref(),
+            std::env::var_os("POWERSHELL_DISTRIBUTION_CHANNEL").is_some(),
+        )
+    }
+}
 
-        if std::env::var_os("POWERSHELL_DISTRIBUTION_CHANNEL").is_some() {
-            return Ok(Self::PowerShell);
+fn detect_shell_environment(
+    shell: Option<&str>,
+    powershell_channel: bool,
+) -> Result<CliProxyShell> {
+    if let Some(shell) = shell {
+        let shell = shell.to_ascii_lowercase();
+        if shell.contains("zsh") {
+            return Ok(CliProxyShell::Zsh);
         }
-
-        Err(BifrostError::Config(
-            "Could not detect a supported current shell. Use --shell bash|zsh|fish|powershell"
-                .to_string(),
-        ))
+        if shell.contains("bash") {
+            return Ok(CliProxyShell::Bash);
+        }
+        if shell.contains("fish") {
+            return Ok(CliProxyShell::Fish);
+        }
     }
 
+    if powershell_channel {
+        return Ok(CliProxyShell::PowerShell);
+    }
+
+    Err(BifrostError::Config(
+        "Could not detect a supported current shell. Use --shell bash|zsh|fish|powershell"
+            .to_string(),
+    ))
+}
+
+impl CliProxyShell {
     pub fn config_paths(self) -> Result<Vec<PathBuf>> {
         let home = std::env::var_os("HOME")
             .filter(|value| !value.is_empty())
@@ -487,6 +500,31 @@ fn marker_bounds(content: &str) -> Result<(Option<usize>, Option<usize>)> {
 mod tests {
     use super::*;
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct ScopedEnv {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
     fn test_config(temp: &tempfile::TempDir) -> CliProxyEnvironmentConfig {
         let ca_file = temp.path().join("certs/ca.crt");
         let ca_bundle = temp.path().join("certs/cli-proxy-ca-bundle.pem");
@@ -528,6 +566,36 @@ mod tests {
         assert!(!CliProxyShell::PowerShell
             .config_paths_for_home(home)
             .is_empty());
+    }
+
+    #[test]
+    fn shell_environment_detection_covers_every_supported_shell_and_failure() {
+        assert_eq!(
+            detect_shell_environment(Some("/BIN/ZSH"), false).unwrap(),
+            CliProxyShell::Zsh
+        );
+        assert_eq!(
+            detect_shell_environment(Some("/bin/bash"), false).unwrap(),
+            CliProxyShell::Bash
+        );
+        assert_eq!(
+            detect_shell_environment(Some("/usr/bin/fish"), false).unwrap(),
+            CliProxyShell::Fish
+        );
+        assert_eq!(
+            detect_shell_environment(Some("unknown"), true).unwrap(),
+            CliProxyShell::PowerShell
+        );
+        assert!(detect_shell_environment(None, false).is_err());
+    }
+
+    #[test]
+    fn shell_detect_reads_the_process_environment() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _shell = ScopedEnv::set("SHELL", "/bin/zsh");
+        let _powershell = ScopedEnv::set("POWERSHELL_DISTRIBUTION_CHANNEL", "test");
+
+        assert_eq!(CliProxyShell::detect().unwrap(), CliProxyShell::Zsh);
     }
 
     #[test]
@@ -662,6 +730,31 @@ mod tests {
     }
 
     #[test]
+    fn disable_noop_and_block_position_matrix_preserve_unmanaged_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".bashrc");
+        let manager =
+            CliProxyEnvironmentManager::with_paths(CliProxyShell::Bash, vec![path.clone()]);
+        assert!(manager.disable().unwrap().changed_paths.is_empty());
+
+        let block = format!("{START_MARKER}\nmanaged\n{END_MARKER}");
+        assert_eq!(remove_marked_block(&block).unwrap(), "");
+        assert_eq!(
+            remove_marked_block(&format!("{block}\nafter")).unwrap(),
+            "after"
+        );
+        assert_eq!(
+            remove_marked_block(&format!("before\n{block}")).unwrap(),
+            "before"
+        );
+        assert_eq!(
+            remove_marked_block(&format!("before\n{block}\nafter")).unwrap(),
+            "before\nafter"
+        );
+        assert_eq!(remove_marked_block("unmanaged").unwrap(), "unmanaged");
+    }
+
+    #[test]
     fn enable_rolls_back_earlier_profile_when_a_later_write_fails() {
         let temp = tempfile::tempdir().unwrap();
         let first = temp.path().join(".bashrc");
@@ -676,6 +769,22 @@ mod tests {
 
         assert!(manager.enable(&test_config(&temp)).is_err());
         assert_eq!(std::fs::read_to_string(first).unwrap(), "original\n");
+    }
+
+    #[test]
+    fn write_failure_reports_when_rollback_also_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocker = temp.path().join("not-a-directory");
+        std::fs::write(&blocker, "blocker\n").unwrap();
+        let error = write_prepared_updates(vec![PreparedProfileUpdate {
+            path: blocker.join("profile"),
+            original: Some("original\n".into()),
+            updated: "updated\n".into(),
+        }])
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("rollback also failed"));
     }
 
     #[test]
@@ -694,5 +803,63 @@ mod tests {
         let duplicate = format!("{START_MARKER}\na\n{END_MARKER}\n{START_MARKER}\nb\n{END_MARKER}");
         let error = remove_marked_block(&duplicate).unwrap_err().to_string();
         assert!(error.contains("duplicate"));
+    }
+
+    #[test]
+    fn certificate_bundle_and_config_validation_cover_error_boundaries() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing.pem");
+        assert!(create_combined_ca_bundle(&missing, &temp.path().join("out.pem")).is_err());
+
+        let invalid_ca = temp.path().join("invalid.pem");
+        std::fs::write(&invalid_ca, "not a certificate").unwrap();
+        assert!(write_combined_ca_bundle(
+            &invalid_ca,
+            &temp.path().join("invalid-out.pem"),
+            &[b"root"]
+        )
+        .is_err());
+
+        let valid_ca = temp.path().join("valid.pem");
+        std::fs::write(
+            &valid_ca,
+            "-----BEGIN CERTIFICATE-----\nY2E=\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let no_roots = temp.path().join("nested/no-roots.pem");
+        write_combined_ca_bundle(&valid_ca, &no_roots, &[]).unwrap();
+        assert!(std::fs::read_to_string(no_roots).unwrap().starts_with('\n'));
+
+        let manager = CliProxyEnvironmentManager::with_paths(
+            CliProxyShell::Bash,
+            vec![temp.path().join(".bashrc")],
+        );
+        let mut config = test_config(&temp);
+        std::fs::remove_file(&config.ca_file).unwrap();
+        assert!(manager
+            .enable(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("CA file"));
+
+        config = test_config(&temp);
+        std::fs::remove_file(&config.ca_bundle).unwrap();
+        assert!(manager
+            .enable(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("Combined CA bundle"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_ca_path_is_rejected_before_shell_rendering() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = PathBuf::from(std::ffi::OsString::from_vec(vec![b'c', b'a', 0xff]));
+        let error = path_environment_value("CA file", &path)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not valid UTF-8"));
     }
 }
