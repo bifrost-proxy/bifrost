@@ -240,6 +240,18 @@
 - 文档包含 Bash/Zsh/Fish/PowerShell、常见代理/CA 环境变量、合并 CA bundle、reload、手工回退和退出/重启清理语义。
 - `SKILL.md` 能指导本机 Agent 在获得授权后安装/卸载，且失败时保留 CLI 给出的完整手工信息。
 
+### TC-SP-18: CLI 详细文档静态契约跟随专用命令语义
+
+**操作步骤：**
+1. 检查 `docs/cli.md` 的“容易混淆的边界”，确认分别说明 `--system-proxy`、`cli-proxy enable/disable`、兼容路径 `start --cli-proxy` 和当前进程代理环境变量。
+2. 执行 `bash -n e2e-tests/tests/test_cli_offline_commands_e2e.sh`，确认回归脚本语法有效。
+3. 构建当前分支 release binary 后，执行 `SKIP_BUILD=true bash e2e-tests/tests/test_cli_offline_commands_e2e.sh`。
+
+**预期结果：**
+- 静态契约不再要求已经被专用 `cli-proxy enable/disable` 取代的旧 `--cli-proxy` 单句说明。
+- E2E 分别断言四条稳定语义边界，任一边界缺失都会失败。
+- 完整 CLI 离线命令 E2E 全部通过，且测试仅使用临时 `BIFROST_DATA_DIR`，不修改正式服务或真实 shell profile。
+
 ## 执行记录
 
 | 日期 | 用例 | 执行记录 | 结果 |
@@ -250,6 +262,7 @@
 | 2026-08-06 | TC-SP-15 | 执行 `cargo test -p bifrost-core bash_ -- --nocapture`，使用临时 HOME 验证 `.profile` 回归和三种 Bash 登录 profile 的优先级。 | 通过。3/3 Bash 相关用例通过；仅存在 `.profile` 时没有创建 `.bash_profile`，Enable/Disable 后原有登录配置保留。 |
 | 2026-08-06 | TC-SP-16 | 执行 marker 完整行与生成块换行的两个 `bifrost-core` 精准单元回归。 | 通过。普通行 marker 文本保持不变，真实管理块可独立启停；空文件与替换路径都以单个换行结束。 |
 | 2026-08-06 | TC-SP-17 | 执行 `node site/scripts/verify-docs-sync.mjs`、`bash e2e-tests/tests/test_site_docs_sync.sh` 和中英文/`SKILL.md` 关键词契约；脚本会动态生成中英文 probe、构建 VitePress 站点并检查链接，最后自动清理 probe。 | 通过。61/61 官方文档目标同步验证通过，动态 probe 阶段 63/63 通过，VitePress 构建、首页与链接校验全部通过；四份中英文 CLI 文档和根 `SKILL.md` 都包含专用 Enable/Disable、四种 shell、CA 与失败回退/生命周期说明，probe 文件无残留。 |
+| 2026-08-06 | TC-SP-18 | 检查 `docs/cli.md` 的四条代理边界；执行 `bash -n e2e-tests/tests/test_cli_offline_commands_e2e.sh`；构建当前分支 release binary 后执行 `SKIP_BUILD=true bash e2e-tests/tests/test_cli_offline_commands_e2e.sh`。 | 通过。E2E 分别命中 `--system-proxy`、`cli-proxy enable/disable`、兼容 `start --cli-proxy` 和当前进程 `HTTP_PROXY` / `HTTPS_PROXY` 四条文档契约；完整离线 CLI 回归 169/169 通过、0 失败，临时数据目录已由脚本清理，未修改正式服务或真实 shell profile。 |
 
 ## 清理步骤
 

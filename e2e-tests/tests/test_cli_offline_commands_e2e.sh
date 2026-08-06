@@ -303,7 +303,10 @@ test_root_help_links_docs_instead_of_subcommand_reference() {
         "默认优先写内联 value 或规则文件内嵌值"
         "默认不要把普通 host、token 片段、短 header 或小 mock body 拆到全局 Values"
         "\`setting\` 始终管理本机数据目录；\`remote\` 才会操作已连接的远端 Bifrost"
-        "\`--system-proxy\` 修改操作系统代理配置；\`--cli-proxy\` 写入 shell rc 文件中的代理环境变量"
+        "\`--system-proxy\` 修改操作系统代理配置"
+        "\`cli-proxy enable/disable\` 持久管理 shell profile 中的代理和 CA 环境变量"
+        "\`start --cli-proxy\` 是兼容旧路径"
+        "\`HTTP_PROXY\` / \`HTTPS_PROXY\` 是当前进程继承到的环境变量"
     )
     for expected in "${cli_doc_checks[@]}"; do
         if grep -qF "$expected" "$PROJECT_DIR/docs/cli.md"; then
